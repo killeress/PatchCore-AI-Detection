@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+bin/
+build/
+develop-eggs/
+dist/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Machine Learning Models (Exclude large weights)
+*.pt
+*.pth
+*.weights
+*.h5
+*.onnx
+*.pb
+
+# Databases
+*.db
+*.sqlite3
+
+# Logs and Temporary files
+*.log
+test_heatmaps/
+static/heatmaps/
+temp/
+tmp/
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Agent Metadata
+.agent/
+brain/
+.agents/
+_agents/
+_agent/

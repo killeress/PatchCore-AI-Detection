@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+
+{% block title %}記錄 #{{ detail.id }}{% endblock %}
+
+{% block extra_css %}
+<style>
+    .detail-section {
+        margin-top: 32px;
+    }
+
+    .detail-section h3 {
+        margin-bottom: 16px;
+        color: var(--text);
+        font-family: 'Fira Code', monospace;
+    }
+
+    .tag {
+        display: inline-block;
+        margin: 2px 4px;
+        padding: 2px 8px;
+        background: var(--bg);
+        border-radius: 6px;
+        font-size: 0.8rem;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .img-grid {
+        display: flex;
+        gap: 20px;
+        overflow-x: auto;
+        padding-bottom: 12px;
+    }
+
+    .image-box {
+        flex: 0 0 auto;
+        min-width: 300px;
+        max-width: 45%;
+    }
+
+    .img-grid img {
+        width: 100%;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        cursor: pointer;
+        transition: transform .2s, border-color .2s;
+        object-fit: contain;
+    }
+
+    .img-grid img:hover {
+        transform: translateY(-2px);
+        border-color: var(--accent);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2 style="margin-bottom:16px">推論記錄 #{{ detail.id }}
+        <span class="badge {{ detail.ai_judgment | ai_badge }}" style="font-size:1rem;margin-left:8px">{{
+            detail.ai_judgment }}</span>
+    </h2>
+    <table style="max-width:700px">
+        <tr>
+            <th style="width:160px">玻璃編號</th>
+            <td>{{ detail.glass_id }}</td>
+        </tr>
+        <tr>
+            <th>機種 ID</th>
+            <td>{{ detail.model_id }}</td>
+        </tr>
+        <tr>
+            <th>機台編號</th>
+            <td>{{ detail.machine_no }}</td>
+        </tr>
+        <tr>
+            <th>解析度</th>
+            <td>{{ detail.resolution_x }} x {{ detail.resolution_y }}</td>
+        </tr>
+        <tr>
+            <th>機檢判定</th>
+            <td>{{ detail.machine_judgment }}</td>
+        </tr>
+        <tr>
+            <th>AI 判定</th>
+            <td><strong>{{ detail.ai_judgment }}</strong></td>
+        </tr>
+        <tr>
+            <th>圖片路徑</th>
+            <td style="word-break:break-all">{{ detail.image_dir }}</td>
+        </tr>
+        <tr>
+            <th>圖片總數</th>
+            <td>{{ detail.total_images }}</td>
+        </tr>
+        <tr>
+            <th>NG 圖片數</th>
+            <td>{{ detail.ng_images }}</td>
+        </tr>
+        <tr>
+            <th>處理時間</th>
+            <td>{{ detail.processing_seconds | round(2) }}s</td>
+        </tr>
+        <tr>
+            <th>請求時間</th>
+            <td>{{ detail.request_time }}</td>
+        </tr>
+        <tr>
+            <th>回覆時間</th>
+            <td>{{ detail.response_time }}</td>
+        </tr>
+        <tr>
+            <th>建立時間</th>
+            <td>{{ detail.created_at }}</td>
+        </tr>
+    </table>
+</div>
+
+{% if detail.ng_details %}
+<div class="card">
+    <h3>NG 詳細資訊</h3>
+    <pre style="margin-top:8px;color:var(--text-muted);white-space:pre-wrap">{{ detail.ng_details }}</pre>
+</div>
+{% endif %}
+
+{% if detail.error_message %}
+<div class="card" style="border-color:var(--err)">
+    <h3 style="color:var(--err)">錯誤訊息</h3>
+    <p style="margin-top:8px">{{ detail.error_message }}</p>
+</div>
+{% endif %}
+
+{% if detail.images %}
+<div class="detail-section">
+    <h3>圖片檢測結果詳情</h3>
+
+    {% for img in detail.images %}
+    {% set img_status, img_badge = img | img_status_info %}
+    <div class="card">
+        <h3>{{ img | get_img_stem }} <span class="badge {{ img_badge }}">{{ img_status }}</span></h3>
+        <p style="color:var(--text-muted);font-size:0.85rem;margin:8px 0;font-family:'Fira Code',monospace;">
+            尺寸: {{ img.image_width }}x{{ img.image_height }} |
+            區域數: {{ img.tile_count }} |
+            排除數: {{ img.excluded_tiles }} |
+            異常數: {{ img.anomaly_count }} |
+            最高分: {{ img.max_score | round(3) }} |
+            耗時: {{ img.inference_time_ms | round(0) }}ms
+        </p>
+
+        {% if img.tiles %}
+        <table>
+            <thead>
+                <tr>
+                    <th>區域</th>
+                    <th>位置</th>
+                    <th>大小</th>
+                    <th>分數</th>
+                    <th>備註</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in img.tiles %}
+                {% set t_badge, t_info = t | tile_info %}
+                <tr>
+                    <td>#{{ t.tile_id }}</td>
+                    <td>({{ t.x }}, {{ t.y }})</td>
+                    <td>{{ t.width }}x{{ t.height }}</td>
+                    <td><span class="badge {{ t_badge }}">{{ t.score | round(3) }}</span></td>
+                    <td>{{ t_info }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+
+        <div class="img-grid" style="margin-top:16px; border-top: 1px solid var(--border); padding-top: 16px;">
+            {# --- 1. 異常標記總覽圖 --- #}
+            {% if img.heatmap_path and heatmap_base_dir %}
+            {% set hm_url = hm_relative(img.heatmap_path, heatmap_base_dir) %}
+            {% if hm_url %}
+            <div class="image-box">
+                <h4
+                    style="margin-bottom:8px;color:var(--text-muted);font-size:0.85rem;font-family:'Fira Code',monospace;">
+                    異常標記總覽圖 Overview</h4>
+                <img src="/heatmaps/{{ hm_url }}" alt="overview" onclick="openLightbox(this.src)">
+            </div>
+            {% endif %}
+            {% endif %}
+
+            {# --- 3. 各 Tile 疊加圖 --- #}
+            {% for t in img.tiles %}
+            {% if t.heatmap_path and heatmap_base_dir %}
+            {% set thm_url = hm_relative(t.heatmap_path, heatmap_base_dir) %}
+            {% if thm_url %}
+            <div class="image-box">
+                <h4
+                    style="margin-bottom:8px;color:var(--text-muted);font-size:0.85rem;font-family:'Fira Code',monospace;">
+                    區域 #{{ t.tile_id }} 熱力圖</h4>
+                <img src="/heatmaps/{{ thm_url }}" alt="tile{{ t.tile_id }} heatmap" onclick="openLightbox(this.src)">
+            </div>
+            {% endif %}
+            {% endif %}
+            {% endfor %}
+        </div>
+
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

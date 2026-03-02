@@ -1,0 +1,570 @@
+{% extends "base.html" %}
+
+{% block title %}即時監控儀表板 - CAPI AI{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* High-Tech Dashboard Styling */
+    :root {
+        --dashboard-bg: #090e17;
+        --panel-bg: rgba(30, 41, 59, 0.7);
+        --panel-border: rgba(59, 130, 246, 0.3);
+        --glow-primary: rgba(59, 130, 246, 0.6);
+        --glow-ok: rgba(34, 197, 94, 0.6);
+        --glow-err: rgba(239, 68, 68, 0.6);
+        --tech-font: 'Fira Code', monospace;
+    }
+
+    body {
+        background-color: var(--dashboard-bg);
+        background-image:
+            radial-gradient(circle at 15% 50%, rgba(59, 130, 246, 0.08), transparent 25%),
+            radial-gradient(circle at 85% 30%, rgba(34, 197, 94, 0.05), transparent 25%);
+    }
+
+    .dashboard-container {
+        display: grid;
+        grid-template-columns: repeat(12, 1fr);
+        gap: 24px;
+        margin-top: 10px;
+    }
+
+    .glass-panel {
+        background: var(--panel-bg);
+        backdrop-filter: blur(12px);
+        border: 1px solid var(--panel-border);
+        border-radius: 16px;
+        padding: 24px;
+        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+        position: relative;
+        overflow: hidden;
+        transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .glass-panel::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, var(--accent), transparent);
+        opacity: 0.5;
+    }
+
+    .glass-panel:hover {
+        box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 0 15px var(--glow-primary);
+        transform: translateY(-2px);
+    }
+
+    .panel-title {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        margin-bottom: 16px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+    }
+
+    /* Status Indicator */
+    .status-indicator {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background-color: var(--text-muted);
+        box-shadow: 0 0 8px var(--text-muted);
+    }
+
+    .status-indicator.online {
+        background-color: var(--ok);
+        box-shadow: 0 0 12px var(--glow-ok);
+        animation: pulse-green 2s infinite;
+    }
+
+    .status-indicator.offline {
+        background-color: var(--ng);
+        box-shadow: 0 0 12px var(--glow-err);
+    }
+
+    @keyframes pulse-green {
+        0% {
+            box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);
+        }
+
+        70% {
+            box-shadow: 0 0 0 10px rgba(34, 197, 94, 0);
+        }
+
+        100% {
+            box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
+        }
+    }
+
+    @keyframes pulse-blue {
+        0% {
+            box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);
+        }
+
+        70% {
+            box-shadow: 0 0 0 15px rgba(59, 130, 246, 0);
+        }
+
+        100% {
+            box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+        }
+    }
+
+    /* Server Info Panel (Span 4) */
+    .col-4 {
+        grid-column: span 4;
+    }
+
+    .col-8 {
+        grid-column: span 8;
+    }
+
+    .col-12 {
+        grid-column: span 12;
+    }
+
+    @media (max-width: 1024px) {
+
+        .col-4,
+        .col-8 {
+            grid-column: span 12;
+        }
+    }
+
+    .info-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 12px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .info-row:last-child {
+        border-bottom: none;
+    }
+
+    .info-label {
+        color: var(--text-muted);
+    }
+
+    .info-value {
+        font-family: var(--tech-font);
+        font-weight: 600;
+        color: #e2e8f0;
+    }
+
+    .info-value.highlight {
+        color: var(--accent);
+        text-shadow: 0 0 8px var(--glow-primary);
+    }
+
+    /* Big Number Display */
+    .big-number-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 20px 0;
+    }
+
+    .big-number {
+        font-size: 4.5rem;
+        font-family: var(--tech-font);
+        font-weight: 700;
+        line-height: 1;
+        background: linear-gradient(180deg, #ffffff, #94a3b8);
+        background-clip: text;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.2));
+    }
+
+    .computing-badge {
+        margin-top: 10px;
+        padding: 6px 16px;
+        background: rgba(59, 130, 246, 0.15);
+        border: 1px solid var(--accent);
+        color: var(--accent);
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        opacity: 0;
+        transition: opacity 0.3s;
+    }
+
+    .computing-badge.active {
+        opacity: 1;
+        animation: active-glow 1.5s infinite alternate;
+    }
+
+    @keyframes active-glow {
+        from {
+            box-shadow: 0 0 5px var(--glow-primary);
+        }
+
+        to {
+            box-shadow: 0 0 20px var(--glow-primary);
+        }
+    }
+
+    /* Machine List */
+    .machine-list {
+        list-style: none;
+        max-height: 250px;
+        overflow-y: auto;
+    }
+
+    .machine-item {
+        padding: 12px 16px;
+        background: rgba(15, 23, 42, 0.6);
+        border: 1px solid rgba(59, 130, 246, 0.2);
+        border-radius: 8px;
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-family: var(--tech-font);
+        font-size: 0.95rem;
+    }
+
+    .machine-item::before {
+        content: '';
+        display: block;
+        width: 8px;
+        height: 8px;
+        background: var(--ok);
+        border-radius: 50%;
+        box-shadow: 0 0 8px var(--glow-ok);
+    }
+
+    /* Scrollbar customization */
+    ::-webkit-scrollbar {
+        width: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background: rgba(59, 130, 246, 0.5);
+        border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        background: var(--accent);
+    }
+
+    /* Latest Result Banner */
+    .latest-result-box {
+        margin-top: 24px;
+        padding: 24px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: rgba(15, 23, 42, 0.8);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        transition: all 0.5s ease;
+    }
+
+    .latest-result-box.res-ok {
+        border-color: rgba(34, 197, 94, 0.4);
+        box-shadow: inset 0 0 20px rgba(34, 197, 94, 0.05);
+    }
+
+    .latest-result-box.res-ng {
+        border-color: rgba(239, 68, 68, 0.4);
+        box-shadow: inset 0 0 20px rgba(239, 68, 68, 0.05);
+    }
+
+    .lr-glassid {
+        font-size: 1.5rem;
+        font-family: var(--tech-font);
+        font-weight: 700;
+        color: #fff;
+        letter-spacing: 1px;
+    }
+
+    .lr-meta {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        margin-top: 4px;
+    }
+
+    .lr-judgment {
+        font-size: 2.5rem;
+        font-weight: 800;
+        font-family: var(--tech-font);
+        text-shadow: 0 0 20px currentColor;
+    }
+
+    .lr-judgment.ok {
+        color: var(--ok);
+    }
+
+    .lr-judgment.ng {
+        color: var(--ng);
+    }
+
+    .lr-judgment.err {
+        color: var(--err);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="dashboard-container">
+
+    <!-- System Status Panel -->
+    <div class="glass-panel col-4">
+        <div class="panel-title">
+            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01">
+                </path>
+            </svg>
+            系統核心 (System Core)
+        </div>
+
+        <div class="info-row">
+            <span class="info-label">伺服器狀態</span>
+            <span class="info-value" style="display:flex;align-items:center;gap:8px;">
+                <span id="ui-sys-status" class="status-indicator"></span>
+                <span id="ui-sys-text">連線中...</span>
+            </span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">運行時間</span>
+            <span class="info-value highlight" id="ui-uptime">0h 0m 0s</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">模型版本</span>
+            <span class="info-value" id="ui-model">載入中...</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">運算裝置</span>
+            <span class="info-value" id="ui-device">CPU</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">判定門檻</span>
+            <span class="info-value" id="ui-threshold">0.00</span>
+        </div>
+    </div>
+
+    <!-- Active Inference Tracker -->
+    <div class="glass-panel col-8" style="display:flex;flex-direction:column;justify-content:center;">
+        <div class="panel-title" style="position:absolute;top:24px;left:24px;">
+            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z">
+                </path>
+            </svg>
+            推論引擎 (Inference Engine)
+        </div>
+
+        <div class="big-number-container">
+            <video id="ai-checking-video-v1" src="/imgs/ai-checking.mp4"
+                style="display: none; width: 360px; height: 360px; object-fit: contain; margin-bottom: 20px;" loop muted
+                playsinline></video>
+            <div class="big-number" id="ui-tasks">0</div>
+            <div style="color:var(--text-muted);letter-spacing:2px;margin-top:8px;font-weight:600;font-size:0.9rem;">
+                佇列處理數 (ACTIVE TASKS)</div>
+
+            <div class="computing-badge" id="ui-computing">
+                <span class="status-indicator online"
+                    style="width:8px;height:8px;animation:none;background:var(--accent);"></span>
+                GPU 運算進行中
+            </div>
+        </div>
+    </div>
+
+    <!-- Current Session Stats -->
+    <div class="glass-panel col-12">
+        <div class="panel-title">
+            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z">
+                </path>
+            </svg>
+            <span id="ui-shift-title">當班統計數據 (Session Stats)</span>
+        </div>
+
+        <div style="display:flex;justify-content:space-around;text-align:center;padding:10px 0;">
+            <div>
+                <div style="font-size:2rem;font-weight:700;font-family:var(--tech-font);" id="ui-stat-total">0</div>
+                <div
+                    style="color:var(--text-muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:1px;font-weight:600;">
+                    總數 (Total)</div>
+            </div>
+            <div>
+                <div style="font-size:2rem;font-weight:700;font-family:var(--tech-font);color:var(--ok);"
+                    id="ui-stat-ok">0</div>
+                <div
+                    style="color:var(--text-muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:1px;font-weight:600;">
+                    正常 (OK)</div>
+            </div>
+            <div>
+                <div style="font-size:2rem;font-weight:700;font-family:var(--tech-font);color:var(--ng);"
+                    id="ui-stat-ng">0</div>
+                <div
+                    style="color:var(--text-muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:1px;font-weight:600;">
+                    異常 (NG)</div>
+            </div>
+            <div>
+                <div style="font-size:2rem;font-weight:700;font-family:var(--tech-font);color:var(--err);"
+                    id="ui-stat-err">0</div>
+                <div
+                    style="color:var(--text-muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:1px;font-weight:600;">
+                    錯誤 (ERR)</div>
+            </div>
+        </div>
+
+        <div class="latest-result-box" id="ui-lr-box">
+            <div>
+                <div
+                    style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:2px;font-weight:700;margin-bottom:8px;">
+                    最新推論結果 (Latest Output)</div>
+                <div class="lr-glassid" id="ui-lr-id">等待中...</div>
+                <div class="lr-meta" id="ui-lr-meta">時間: --:--:-- | 耗時: --s</div>
+            </div>
+            <div>
+                <div class="lr-judgment" id="ui-lr-judg">--</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Connected Machines -->
+    <div class="glass-panel col-12">
+        <div class="panel-title">
+            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10">
+                </path>
+            </svg>
+            已連接的客戶端 (<span id="ui-conn-count">0</span>)
+        </div>
+        <ul class="machine-list" id="ui-machine-list">
+            <li class="machine-item" style="color:var(--text-muted);background:transparent;border:none;">目前無活躍連線。</li>
+        </ul>
+    </div>
+
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Real-time Polling Logic
+    async function fetchStatus() {
+        try {
+            const response = await fetch('/api/status');
+            if (!response.ok) throw new Error('Network error');
+            const data = await response.json();
+            updateDashboard(data);
+        } catch (e) {
+            console.error("Polling failed:", e);
+            document.getElementById('ui-sys-status').className = 'status-indicator offline';
+            document.getElementById('ui-sys-text').textContent = '無法連線伺服器';
+            document.getElementById('ui-sys-text').style.color = 'var(--ng)';
+        }
+    }
+
+    function updateDashboard(data) {
+        // 1. System Status
+        const ind = document.getElementById('ui-sys-status');
+        const txt = document.getElementById('ui-sys-text');
+        if (data.server.running) {
+            ind.className = 'status-indicator online';
+            txt.textContent = '連線正常';
+            txt.style.color = 'var(--ok)';
+        } else {
+            ind.className = 'status-indicator offline';
+            txt.textContent = '離線';
+            txt.style.color = 'var(--ng)';
+        }
+        document.getElementById('ui-uptime').textContent = data.server.uptime;
+        document.getElementById('ui-model').textContent = data.server.model_version;
+        document.getElementById('ui-device').textContent = data.server.device;
+        document.getElementById('ui-threshold').textContent = data.server.threshold;
+
+        // 2. Active Inferences
+        const tasks = data.traffic.active_inferences;
+        document.getElementById('ui-tasks').textContent = tasks;
+        const computeBadge = document.getElementById('ui-computing');
+        const aiCheckingVideo = document.getElementById('ai-checking-video-v1');
+
+        if (tasks > 0) {
+            computeBadge.classList.add('active');
+            if (aiCheckingVideo.style.display === 'none') {
+                aiCheckingVideo.style.display = 'block';
+                aiCheckingVideo.play().catch(e => console.warn(e));
+            }
+        } else {
+            computeBadge.classList.remove('active');
+            if (aiCheckingVideo.style.display !== 'none') {
+                aiCheckingVideo.style.display = 'none';
+                aiCheckingVideo.pause();
+            }
+        }
+
+        // 3. Stats
+        if (data.stats.shift_name) {
+            document.getElementById('ui-shift-title').textContent = `當班統計數據 (${data.stats.shift_name} ${data.stats.time_range})`;
+        }
+        document.getElementById('ui-stat-total').textContent = data.stats.total_requests;
+        document.getElementById('ui-stat-ok').textContent = data.stats.total_ok;
+        document.getElementById('ui-stat-ng').textContent = data.stats.total_ng;
+        document.getElementById('ui-stat-err').textContent = data.stats.total_err;
+
+        // Connected Machines List
+        const mList = document.getElementById('ui-machine-list');
+        const machines = data.traffic.connected_machines;
+        document.getElementById('ui-conn-count').textContent = machines.length;
+
+        if (machines.length === 0) {
+            mList.innerHTML = '<li class="machine-item" style="color:var(--text-muted);background:transparent;border:none;justify-content:center;">目前無活躍連線。</li>';
+        } else {
+            mList.innerHTML = '';
+            machines.forEach(m => {
+                const li = document.createElement('li');
+                li.className = 'machine-item';
+                li.textContent = m;
+                mList.appendChild(li);
+            });
+        }
+
+        // 4. Latest Output
+        if (data.latest_event && data.latest_event.glass_id) {
+            const ev = data.latest_event;
+            document.getElementById('ui-lr-id').textContent = ev.glass_id;
+            document.getElementById('ui-lr-meta').textContent = `機台: ${ev.machine_no} | 時間: ${ev.time} | 耗時: ${ev.duration}`;
+
+            const jud = document.getElementById('ui-lr-judg');
+            jud.textContent = ev.judgment;
+            jud.className = 'lr-judgment ' + ev.judgment.toLowerCase();
+
+            const box = document.getElementById('ui-lr-box');
+            box.className = 'latest-result-box'; // Reset
+            //        if (ev.judgment === 'OK') box.classList.add('res-ok');
+            //        else if (ev.judgment === 'NG') box.classList.add('res-ng');
+        }
+    }
+
+    // Start polling every second
+    setInterval(fetchStatus, 1000);
+    // Initial fetch
+    fetchStatus();
+</script>
+{% endblock %}

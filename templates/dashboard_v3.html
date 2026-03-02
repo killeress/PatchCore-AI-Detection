@@ -1,0 +1,1021 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MOD2 CAPI AD - 即時監控儀表板</title>
+    <meta name="description" content="CAPI AI Vision - 即時 AI 缺陷偵測監控看板">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="/static/js/tailwindcss.js"></script>
+    <style>
+        /* ========================================================
+         *  light.qss → HTML/CSS 完整轉換
+         *  Main bg     : #F4F6FB
+         *  Panels      : #FFFFFF,  border: #E2E8F0
+         *  Header      : #FFFFFF,  border: #E2E8F0
+         *  Text        : #1F2937 / #0F172A
+         *  Muted text  : #64748B
+         *  Accent      : #2563EB
+         *  OK          : #16A34A
+         *  NG          : #DC2626
+         * ======================================================== */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: #F4F6FB;
+            color: #1F2937;
+            font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+            font-size: 14px;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* ── Header (#headerFrame) ── */
+        #headerFrame {
+            background-color: #FFFFFF;
+            border-radius: 14px;
+            border: 1px solid #E2E8F0;
+            margin: 10px 10px 0 10px;
+            padding: 8px 16px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex-shrink: 0;
+        }
+
+        #brandingBlock {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        #logoLabel img {
+            height: 40px;
+            width: auto;
+            display: block;
+        }
+
+        #titleBlock {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        #titleLabel {
+            font-size: 22px;
+            font-weight: 600;
+            color: #0F172A;
+            line-height: 1.2;
+        }
+
+        #subtitleLabel {
+            font-size: 13px;
+            color: #64748B;
+        }
+
+        #headerStretch {
+            flex: 1;
+        }
+
+        /* Nav links */
+        #navLinks {
+            display: flex;
+            gap: 4px;
+            align-items: center;
+        }
+
+        #navLinks a {
+            color: #64748B;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 500;
+            padding: 5px 12px;
+            border-radius: 8px;
+            transition: background 0.15s, color 0.15s;
+        }
+
+        #navLinks a:hover {
+            background: #F1F5F9;
+            color: #0F172A;
+        }
+
+        #navLinks a.active {
+            background: rgba(37, 99, 235, 0.08);
+            color: #2563EB;
+            font-weight: 600;
+        }
+
+        /* Status block */
+        #statusBlock {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 4px;
+        }
+
+        #statusLabel {
+            font-size: 13px;
+            color: #64748B;
+        }
+
+        #statusValue {
+            font-size: 16px;
+            font-weight: 600;
+            color: #2563EB;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        #statusValue.online {
+            color: #16A34A;
+        }
+
+        #statusValue.offline {
+            color: #DC2626;
+        }
+
+        /* ── Main Content ── */
+        #mainContent {
+            display: flex;
+            gap: 8px;
+            margin: 8px 10px 0 10px;
+            flex: 1;
+            min-height: 0;
+        }
+
+        /* ── Preview Frame (ratio 9) ── */
+        #previewFrame {
+            background-color: #FFFFFF;
+            border-radius: 16px;
+            border: 1px solid #E2E8F0;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            flex: 9;
+            min-width: 0;
+        }
+
+        #previewHeader {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            flex-shrink: 0;
+        }
+
+        #feedTitleLabel {
+            font-size: 18px;
+            font-weight: 700;
+            color: #0F172A;
+        }
+
+        #feedSubtitleLabel {
+            font-size: 13px;
+            color: #64748B;
+        }
+
+        /* ── Heatmap Grid ── */
+        #previewHolder {
+            flex: 1;
+            min-height: 0;
+            background-color: #F1F5FF;
+            border: 1px solid #D4DCF7;
+            border-radius: 12px;
+            overflow: hidden;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #heatmapGrid {
+            flex: 1;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            grid-template-rows: repeat(3, 1fr);
+            gap: 5px;
+            padding: 5px;
+            min-height: 0;
+        }
+
+        .hm-cell {
+            background: #1E293B;
+            border-radius: 6px;
+            overflow: hidden;
+            position: relative;
+            cursor: pointer;
+            border: 2px solid transparent;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .hm-cell:hover {
+            opacity: 0.85;
+            transform: translateY(-2px);
+        }
+
+        .hm-cell.ok {
+            border-color: #16A34A;
+        }
+
+        .hm-cell.ng {
+            border-color: #DC2626;
+        }
+
+        .hm-cell.dust {
+            border-color: #D97706;
+        }
+
+        .hm-cell.hm-empty {
+            border: 1px dashed #334155;
+            opacity: 0.5;
+            cursor: default;
+        }
+
+        .hm-cell.hm-empty:hover {
+            transform: none;
+            opacity: 0.5;
+        }
+
+        .hm-cell img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .ng-badge {
+            position: absolute;
+            top: 6px;
+            left: 6px;
+            background: #DC2626;
+            color: #FFF;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+            letter-spacing: 0.5px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+            z-index: 10;
+        }
+
+        .dust-badge {
+            position: absolute;
+            top: 6px;
+            left: 6px;
+            background: #D97706;
+            color: #FFF;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+            letter-spacing: 0.5px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+            z-index: 10;
+        }
+
+        .hm-caption {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: rgba(15, 23, 42, 0.85);
+            padding: 6px 8px;
+            font-size: 11px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(2px);
+        }
+
+        .hm-judgment {
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+
+        .hm-judgment.ok {
+            color: #16A34A;
+        }
+
+        .hm-judgment.ng {
+            color: #DC2626;
+        }
+
+        .hm-judgment.dust {
+            color: #D97706;
+        }
+
+        .hm-name {
+            flex-grow: 1;
+            text-align: center;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            padding: 0 8px;
+        }
+
+        .hm-empty {
+            background: #F1F5FF;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #CBD5F5;
+            font-size: 11px;
+        }
+
+        #noHeatmapPlaceholder {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            flex: 1;
+            gap: 12px;
+            color: #94A3B8;
+        }
+
+        #noHeatmapPlaceholder svg {
+            opacity: 0.35;
+        }
+
+        #noHeatmapPlaceholder p {
+            font-size: 14px;
+            margin: 0;
+        }
+
+        #computingBadge {
+            display: none;
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            background: rgba(37, 99, 235, 0.9);
+            border-radius: 20px;
+            color: #FFFFFF;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            z-index: 5;
+        }
+
+        #computingBadge.active {
+            display: flex;
+        }
+
+        .dot-pulse {
+            display: inline-block;
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #2563EB;
+            animation: pulse-dot 1.4s infinite;
+        }
+
+        @keyframes pulse-dot {
+
+            0%,
+            100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+
+            50% {
+                opacity: 0.35;
+                transform: scale(0.65);
+            }
+        }
+
+        /* ── Sidebar (ratio 3) ── */
+        #sidebarFrame {
+            background-color: #FFFFFF;
+            border-radius: 16px;
+            border: 1px solid #E2E8F0;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            flex: 3;
+            min-width: 240px;
+            max-width: 340px;
+            overflow-y: auto;
+        }
+
+        /* Overall verdict card */
+        #overallVerdictFrame {
+            background-color: rgba(59, 130, 246, 0.06);
+            border-radius: 16px;
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            align-items: stretch;
+            flex-shrink: 0;
+        }
+
+        #summaryTitle {
+            font-size: 13px;
+            font-weight: 600;
+            color: #475569;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        #summaryTotalValue {
+            font-size: 3rem;
+            font-weight: 700;
+            text-align: center;
+            padding: 10px 0;
+            letter-spacing: 4px;
+            color: #94A3B8;
+            transition: color 0.3s;
+        }
+
+        #summaryTotalValue.ok {
+            color: #16A34A;
+        }
+
+        #summaryTotalValue.ng {
+            color: #DC2626;
+        }
+
+        #summaryTotalValue.err {
+            color: #D97706;
+        }
+
+        /* System info card */
+        #sysInfoFrame {
+            background-color: #FFFFFF;
+            border-radius: 14px;
+            border: 1px solid #E2E8F0;
+            padding: 0 12px;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+
+        .infoRow {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 9px 0;
+            border-bottom: 1px solid #F1F5F9;
+            font-size: 13px;
+        }
+
+        .infoRow:last-child {
+            border-bottom: none;
+        }
+
+        .infoLabel {
+            color: #64748B;
+        }
+
+        .infoValue {
+            font-weight: 600;
+            color: #0F172A;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .infoValue.accent {
+            color: #2563EB;
+        }
+
+        /* Stats section */
+        #statsSection {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+
+        #sectionTitle {
+            font-size: 15px;
+            font-weight: 600;
+            color: #0F172A;
+        }
+
+        #sectionCaption {
+            font-size: 12px;
+            color: #64748B;
+            letter-spacing: 0.4px;
+        }
+
+        /* Daily metric rows */
+        .dailyMetricRow {
+            background-color: #F8FAFF;
+            border: 1px solid #CBD5F5;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 10px;
+            transition: border-color 0.15s;
+        }
+
+        .dailyMetricRow:hover {
+            border-color: #94A3B8;
+        }
+
+        .dailyMetricAccent {
+            width: 4px;
+            min-height: 34px;
+            border-radius: 2px;
+            flex-shrink: 0;
+        }
+
+        .accent-total {
+            background-color: #2563EB;
+        }
+
+        .accent-ok {
+            background-color: #16A34A;
+        }
+
+        .accent-ng {
+            background-color: #DC2626;
+        }
+
+        .accent-rate {
+            background-color: #0EA5E9;
+        }
+
+        .accent-err {
+            background-color: #D97706;
+        }
+
+        .dailyMetricLeft {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .metricTitle {
+            font-size: 13px;
+            color: #1F2937;
+            font-weight: 500;
+        }
+
+        .dailyMetricHint {
+            font-size: 11px;
+            color: #64748B;
+        }
+
+        .metricValue {
+            font-size: 20px;
+            font-weight: 600;
+            color: #0F172A;
+            text-align: right;
+            min-width: 52px;
+        }
+
+        .metricValue.tone-total {
+            color: #2563EB;
+        }
+
+        .metricValue.tone-ok {
+            color: #16A34A;
+        }
+
+        .metricValue.tone-ng {
+            color: #DC2626;
+        }
+
+        .metricValue.tone-rate {
+            color: #0EA5E9;
+        }
+
+        .metricValue.tone-err {
+            color: #D97706;
+        }
+
+        /* ── Footer ── */
+        #footerFrame {
+            background-color: #FFFFFF;
+            border-radius: 16px;
+            border: 1px solid #E2E8F0;
+            margin: 8px 10px 10px 10px;
+            padding: 4px 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-shrink: 0;
+            min-height: 42px;
+        }
+
+        #connLabel {
+            font-size: 12px;
+            color: #64748B;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        #connectedMachines {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            flex-wrap: wrap;
+            flex: 1;
+        }
+
+        .machineTag {
+            font-size: 12px;
+            color: #2563EB;
+            background: rgba(37, 99, 235, 0.08);
+            border: 1px solid rgba(37, 99, 235, 0.25);
+            border-radius: 6px;
+            padding: 2px 10px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .machineTag::before {
+            content: '';
+            display: block;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #16A34A;
+            flex-shrink: 0;
+        }
+
+        #copyright {
+            font-size: 11px;
+            color: #94A3B8;
+            white-space: nowrap;
+        }
+
+        /* ── Scrollbar ── */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #EDF2FF;
+            border-radius: 6px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #CBD5F5;
+            border-radius: 6px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #A5B4FC;
+        }
+
+        /* ── Status dot ── */
+        .statusDot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #94A3B8;
+            flex-shrink: 0;
+        }
+
+        .statusDot.online {
+            background: #16A34A;
+            animation: pulse-green 2s infinite;
+        }
+
+        .statusDot.offline {
+            background: #DC2626;
+        }
+
+        @keyframes pulse-green {
+            0% {
+                box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.5);
+            }
+
+            70% {
+                box-shadow: 0 0 0 7px rgba(22, 163, 74, 0);
+            }
+
+            100% {
+                box-shadow: 0 0 0 0 rgba(22, 163, 74, 0);
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- ═══════════════════ HEADER ═══════════════════ -->
+    <div id="headerFrame">
+        <div id="brandingBlock">
+            <div id="logoLabel">
+                <img src="/imgs/logo.png" alt="CAPI Logo" onerror="this.style.display='none'">
+            </div>
+            <div id="titleBlock">
+                <div id="titleLabel">CAPI AI Vision</div>
+                <div id="subtitleLabel">MOD2 即時 AI 缺陷偵測監控平台</div>
+            </div>
+        </div>
+
+        <div id="headerStretch"></div>
+
+        <!-- <div id="navLinks">
+            <a href="/v3/dashboard" class="active">即時看板</a>
+            <a href="/">推論記錄</a>
+            <a href="/search">記錄搜尋</a>
+        </div> -->
+
+        <div id="statusBlock">
+            <div id="statusLabel">系統狀態：</div>
+            <div id="statusValue">
+                <span class="statusDot" id="sysDot"></span>
+                <span id="sysText">連線中...</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════ MAIN ═══════════════════ -->
+    <div id="mainContent">
+
+        <!-- Left: Live Inference Preview (ratio 9) -->
+        <div id="previewFrame">
+            <div id="previewHeader">
+                <div id="feedTitleLabel">即時推論監控</div>
+                <div id="feedSubtitleLabel">AI 缺陷偵測看板</div>
+            </div>
+
+            <div id="previewHolder">
+                <!-- 3×3 heatmap grid -->
+                <div id="heatmapGrid"></div>
+
+                <!-- Placeholder when no heatmaps exist -->
+                <div id="noHeatmapPlaceholder">
+                    <svg width="52" height="52" fill="none" stroke="#94A3B8" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                            d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                    <p>尚無熱力圖記錄</p>
+                </div>
+
+                <!-- Computing badge -->
+                <div id="computingBadge">
+                    <span class="dot-pulse"></span>
+                    運算進行中
+                </div>
+            </div>
+        </div>
+
+        <!-- Right: Verdict + Stats (ratio 3) -->
+        <div id="sidebarFrame">
+
+            <!-- Current verdict -->
+            <div id="overallVerdictFrame">
+                <div id="summaryTitle">當前檢測結果</div>
+                <div id="summaryTotalValue">READY</div>
+            </div>
+
+            <!-- System core info -->
+            <div id="sysInfoFrame">
+                <div class="infoRow">
+                    <div class="infoLabel">運行時間</div>
+                    <div class="infoValue accent" id="ui-uptime">-</div>
+                </div>
+                <div class="infoRow">
+                    <div class="infoLabel">模型版本</div>
+                    <div class="infoValue" id="ui-model">-</div>
+                </div>
+                <div class="infoRow">
+                    <div class="infoLabel">運算裝置</div>
+                    <div class="infoValue" id="ui-device">-</div>
+                </div>
+                <div class="infoRow">
+                    <div class="infoLabel">判定門檻</div>
+                    <div class="infoValue" id="ui-threshold">-</div>
+                </div>
+            </div>
+
+            <!-- Daily stats -->
+            <div id="statsSection">
+                <div id="sectionTitle">今日數據 Summary</div>
+                <div id="sectionCaption">今日：-</div>
+
+                <div class="dailyMetricRow">
+                    <div class="dailyMetricAccent accent-total"></div>
+                    <div class="dailyMetricLeft">
+                        <div class="metricTitle">總數</div>
+                        <div class="dailyMetricHint">當班累計檢測數量</div>
+                    </div>
+                    <div class="metricValue tone-total" id="ui-stat-total">0</div>
+                </div>
+
+                <div class="dailyMetricRow">
+                    <div class="dailyMetricAccent accent-ok"></div>
+                    <div class="dailyMetricLeft">
+                        <div class="metricTitle">OK</div>
+                        <div class="dailyMetricHint">判定為 OK 的數量</div>
+                    </div>
+                    <div class="metricValue tone-ok" id="ui-stat-ok">0</div>
+                </div>
+
+                <div class="dailyMetricRow">
+                    <div class="dailyMetricAccent accent-ng"></div>
+                    <div class="dailyMetricLeft">
+                        <div class="metricTitle">NG</div>
+                        <div class="dailyMetricHint">判定為 NG 的數量</div>
+                    </div>
+                    <div class="metricValue tone-ng" id="ui-stat-ng">0</div>
+                </div>
+
+                <div class="dailyMetricRow">
+                    <div class="dailyMetricAccent accent-err"></div>
+                    <div class="dailyMetricLeft">
+                        <div class="metricTitle">ERR</div>
+                        <div class="dailyMetricHint">系統異常次數</div>
+                    </div>
+                    <div class="metricValue tone-err" id="ui-stat-err">0</div>
+                </div>
+
+                <div class="dailyMetricRow">
+                    <div class="dailyMetricAccent accent-rate"></div>
+                    <div class="dailyMetricLeft">
+                        <div class="metricTitle">良品率</div>
+                        <div class="dailyMetricHint">OK / 總數</div>
+                    </div>
+                    <div class="metricValue tone-rate" id="ui-stat-rate">--%</div>
+                </div>
+            </div>
+
+        </div><!-- /sidebarFrame -->
+    </div><!-- /mainContent -->
+
+    <!-- ═══════════════════ FOOTER ═══════════════════ -->
+    <div id="footerFrame">
+        <div id="connectedMachines">
+            <span id="connLabel">已連接客戶端 (<span id="ui-conn-count">0</span>)：</span>
+            <span id="ui-machine-list"></span>
+        </div>
+        <div id="copyright">© 2026 CAPI AI Vision Intelligence System</div>
+    </div>
+
+    <script>
+        let _lastOkData = null;
+
+        async function fetchStatus() {
+            try {
+                const res = await fetch('/api/status');
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                _lastOkData = data;
+                updateDashboard(data);
+                // 成功後清除錯誤狀態
+                document.getElementById('sysDot').className = 'statusDot online';
+            } catch (e) {
+                console.error('Polling failed:', e);
+                // 僅更新頭部狀態點，不清空已顯示的數據（和舊版 dashboard.html 行為一致）
+                document.getElementById('sysDot').className = 'statusDot offline';
+                document.getElementById('sysText').textContent = '連線中斷';
+                document.getElementById('statusValue').className = 'offline';
+            }
+        }
+
+        function updateDashboard(data) {
+            // ── System Status ──
+            const dot = document.getElementById('sysDot');
+            const txt = document.getElementById('sysText');
+            const sv = document.getElementById('statusValue');
+            if (data.server.running) {
+                dot.className = 'statusDot online';
+                txt.textContent = '連線正常';
+                sv.className = 'online';
+            } else {
+                dot.className = 'statusDot offline';
+                txt.textContent = '離線';
+                sv.className = 'offline';
+            }
+            document.getElementById('ui-uptime').textContent = data.server.uptime || '-';
+            document.getElementById('ui-model').textContent = data.server.model_version || '-';
+            document.getElementById('ui-device').textContent = data.server.device || '-';
+            document.getElementById('ui-threshold').textContent = data.server.threshold || '-';
+
+            // ── Active Tasks (badge only, no counter element) ──
+            const tasks = data.traffic.active_inferences || 0;
+            const badge = document.getElementById('computingBadge');
+            if (badge) {
+                if (tasks > 0) badge.classList.add('active');
+                else badge.classList.remove('active');
+            }
+
+            // ── Session Stats ──
+            const s = data.stats;
+            const total = s.total_requests || 0;
+            const ok = s.total_ok || 0;
+            const ng = s.total_ng || 0;
+            const err = s.total_err || 0;
+            const rate = total > 0 ? ((ok / total) * 100).toFixed(1) + '%' : '--%';
+
+            if (s.shift_name) {
+                document.getElementById('sectionCaption').textContent =
+                    `${s.shift_name} ${s.time_range || ''}`;
+            }
+            document.getElementById('ui-stat-total').textContent = total;
+            document.getElementById('ui-stat-ok').textContent = ok;
+            document.getElementById('ui-stat-ng').textContent = ng;
+            document.getElementById('ui-stat-err').textContent = err;
+            document.getElementById('ui-stat-rate').textContent = rate;
+
+            // ── Latest Output (sidebar only) ──
+            if (data.latest_event && data.latest_event.glass_id) {
+                const ev = data.latest_event;
+                const j = (ev.judgment || '').toUpperCase();
+                const bigV = document.getElementById('summaryTotalValue');
+                bigV.textContent = j || 'READY';
+                bigV.className = j === 'OK' ? 'ok' : j.startsWith('NG') ? 'ng' : j === 'ERR' ? 'err' : '';
+            }
+
+            // ── Heatmap Grid (NG 優先) ──
+            const grid = document.getElementById('heatmapGrid');
+            const placeholder = document.getElementById('noHeatmapPlaceholder');
+            const items = (data.recent_heatmaps || []).slice(0, 9);
+
+            if (items.length === 0) {
+                grid.style.display = 'none';
+                placeholder.style.display = 'flex';
+            } else {
+                grid.style.display = 'grid';
+                placeholder.style.display = 'none';
+
+                // 填滿 9 個格子（不足補空格）
+                const cells = [];
+                for (let i = 0; i < 9; i++) cells.push(items[i] || null);
+
+                grid.innerHTML = cells.map(item => {
+                    if (!item) return '<div class="hm-cell hm-empty"></div>';
+
+                    const status = item.status || (item.is_ng ? 'NG' : 'OK');
+                    let cls = 'ok';
+                    let jCls = 'ok';
+                    let badgeHtml = '';
+
+                    if (status === 'NG') {
+                        cls = 'ng';
+                        jCls = 'ng';
+                        badgeHtml = '<span class="ng-badge">NG</span>';
+                    } else if (status === 'DUST') {
+                        cls = 'dust';
+                        jCls = 'dust';
+                        badgeHtml = '<span class="dust-badge">DUST</span>';
+                    } else if (status === 'BOMB') {
+                        cls = 'ng';
+                        jCls = 'ng';
+                        badgeHtml = '<span class="ng-badge" style="background:#991B1B">BOMB</span>';
+                    }
+
+                    // 優先顯示 python API 回傳的 label ('Overview' 或 'Tile #...')
+                    let name = item.label;
+                    if (!name) {
+                        name = (item.image_name || '').replace(/\.[^.]+$/, '').slice(-14);
+                    }
+
+                    const time = (item.created_at || '').slice(11, 16);
+                    return `<div class="hm-cell ${cls}"
+                        onclick="location.href='/v3/record/${item.record_id}'"
+                        title="${item.glass_id} | ${item.created_at}">
+                        <img src="${item.url}" alt="${name}" loading="lazy">
+                        ${badgeHtml}
+                        <div class="hm-caption">
+                            <span class="hm-judgment ${jCls}">${status}</span>
+                            <span class="hm-name">${name}</span>
+                            <span style="flex-shrink:0;opacity:.7;">${time}</span>
+                        </div>
+                    </div>`;
+                }).join('');
+            }
+
+            // ── Connected Machines ──
+            const machines = data.traffic.connected_machines || [];
+            document.getElementById('ui-conn-count').textContent = machines.length;
+            const ml = document.getElementById('ui-machine-list');
+            if (machines.length === 0) {
+                ml.innerHTML = '<span style="color:#94A3B8;font-size:12px;">無活躍連線</span>';
+            } else {
+                ml.innerHTML = machines.map(m =>
+                    `<span class="machineTag">${m}</span>`
+                ).join('');
+            }
+        }
+
+        setInterval(fetchStatus, 1000);
+        fetchStatus();
+    </script>
+</body>
+
+</html>

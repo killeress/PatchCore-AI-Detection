@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+
+{% block title %}CAPI AI 推論記錄{% endblock %}
+
+{% block extra_css %}
+<style>
+    .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 16px;
+        margin-bottom: 24px;
+    }
+
+    .stat-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 24px 20px;
+        text-align: center;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    }
+
+    .stat-card .value {
+        font-size: 2.25rem;
+        font-weight: 700;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .stat-card .label {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        margin-top: 8px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-weight: 600;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="value">{{ stats.total or 0 }}</div>
+        <div class="label">當班投入 ({{ stats.shift_name }})<br><span style="font-size:0.7rem;letter-spacing:0">{{
+                stats.time_range }}</span></div>
+    </div>
+    <div class="stat-card">
+        <div class="value" style="color:var(--ok)">{{ stats.ok_count or 0 }}</div>
+        <div class="label">OK 數量<br><span style="font-size:1.1rem;font-weight:700;color:var(--ok)">{{ ok_rate | round(1)
+                }}%</span></div>
+    </div>
+    <div class="stat-card">
+        <div class="value" style="color:var(--ng)">{{ stats.ng_count or 0 }}</div>
+        <div class="label">NG 數量<br><span style="font-size:1.1rem;font-weight:700;color:var(--ng)">{{ ng_rate | round(1)
+                }}%</span></div>
+    </div>
+    <div class="stat-card">
+        <div class="value" style="color:var(--err)">{{ stats.err_count or 0 }}</div>
+        <div class="label">異常數量</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ (stats.avg_time or 0) | round(1) }}s</div>
+        <div class="label">平均耗時</div>
+    </div>
+</div>
+
+<div class="card">
+    <div
+        style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+        <h3>最近推論記錄
+            <span style="font-size:0.85rem;font-weight:400;color:var(--text-muted);margin-left:8px;">
+                共 {{ total_count }} 筆，第 {{ page }}/{{ total_pages }} 頁
+            </span>
+        </h3>
+        <form method="GET" action="/" style="display:flex;align-items:center;gap:8px;">
+            <label style="font-size:0.85rem;color:var(--text-muted);">每頁</label>
+            <select name="limit" onchange="this.form.submit()"
+                style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:0.9rem;cursor:pointer;">
+                <option value="20" {% if limit==20 %}selected{% endif %}>20 筆</option>
+                <option value="50" {% if limit==50 %}selected{% endif %}>50 筆</option>
+                <option value="100" {% if limit==100 %}selected{% endif %}>100 筆</option>
+                <option value="200" {% if limit==200 %}selected{% endif %}>200 筆</option>
+            </select>
+            <input type="hidden" name="page" value="1">
+        </form>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>玻璃編號</th>
+                <th>機種</th>
+                <th>機台</th>
+                <th>機檢判定</th>
+                <th>AI 判定</th>
+                <th>耗時</th>
+                <th>建立時間</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in records %}
+            <tr>
+                <td><a href="/record/{{ r.id }}">{{ r.id }}</a></td>
+                <td>{{ r.glass_id }}</td>
+                <td>{{ r.model_id }}</td>
+                <td>{{ r.machine_no }}</td>
+                <td><span class="badge {{ r.machine_judgment | mj_badge }}">{{ r.machine_judgment }}</span></td>
+                <td><span class="badge {{ r.ai_judgment | ai_badge }}">{{ r.ai_judgment | ai_simple }}</span></td>
+                <td>{{ r.processing_seconds | round(1) }}s</td>
+                <td>{{ r.created_at }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="8" style="text-align:center;color:var(--text-muted)">尚無記錄</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- 分頁導覽 -->
+    {% if total_pages > 1 %}
+    <div style="display:flex;justify-content:center;align-items:center;gap:8px;margin-top:20px;flex-wrap:wrap;">
+        {% if page > 1 %}
+        <a href="/?page={{ page - 1 }}&limit={{ limit }}"
+            style="padding:6px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);text-decoration:none;font-size:0.9rem;">
+            ← 上一頁
+        </a>
+        {% endif %}
+
+        {% for p in range(1, total_pages + 1) %}
+        {% if p == page %}
+        <span
+            style="padding:6px 14px;background:var(--accent);border-radius:6px;color:#fff;font-size:0.9rem;font-weight:700;">{{
+            p }}</span>
+        {% elif p == 1 or p == total_pages or (p >= page - 2 and p <= page + 2) %} <a
+            href="/?page={{ p }}&limit={{ limit }}"
+            style="padding:6px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);text-decoration:none;font-size:0.9rem;">
+            {{ p }}
+            </a>
+            {% elif p == page - 3 or p == page + 3 %}
+            <span style="color:var(--text-muted);">…</span>
+            {% endif %}
+            {% endfor %}
+
+            {% if page < total_pages %} <a href="/?page={{ page + 1 }}&limit={{ limit }}"
+                style="padding:6px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);text-decoration:none;font-size:0.9rem;">
+                下一頁 →
+                </a>
+                {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

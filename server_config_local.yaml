@@ -1,0 +1,51 @@
+# ============================================================
+# CAPI AI 推論伺服器設定 — Windows 本地測試用
+# ============================================================
+# 複製此檔案並重命名為 server_config.yaml 之後修改路徑
+# 或者直接指定: python capi_server.py --config server_config_local.yaml
+
+# TCP Socket Server
+server:
+  host: "0.0.0.0"
+  port: 7891
+  max_connections: 10
+  recv_timeout: 600           # 空閒超時 (秒), 長連線模式: 0=永不超時
+  recv_buffer_size: 4096
+
+# 路徑映射 — Windows 本地測試不需要 UNC 轉換
+# 若測試用的圖片在本機，可以直接填寫路徑不用映射
+path_mapping: {}
+  # 如需測試 UNC 映射，取消註解以下行:
+  # "\\\\192.168.2.101\\d": "D:"
+
+# 推論設定
+inference:
+  config_path: "configs/capi_3f.yaml"
+  model_path: "./model.pt"
+  device: "auto"              # auto 會自動選 cuda (如有GPU) 或 cpu
+  threshold: 0.6
+  cpu_workers: 4
+
+# SQLite 資料庫 — Windows 路徑
+database:
+  path: "./test_results.db"
+
+# 熱力圖儲存 — Windows 路徑
+heatmap:
+  base_dir: "./test_heatmaps"
+  save_format: "png"
+  save_overview: true
+  save_tile_detail: true
+
+# Web 查閱服務
+web:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+
+# 日誌
+logging:
+  level: "DEBUG"              # 本地測試用 DEBUG
+  file: ""                    # 空值 = 只輸出到 console
+  max_bytes: 10485760
+  backup_count: 5

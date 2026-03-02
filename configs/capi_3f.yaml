@@ -1,0 +1,120 @@
+# CAPI_3F 配置檔
+# 用於 CAPI 3F 產線的推論設定
+
+# 機種識別
+machine_id: "CAPI_3F"
+product_name: "CAPI 面板"
+
+# MARK 模板設定
+mark_template_path: "capi_mark.png"
+mark_match_threshold: 0.45
+mark_min_y_ratio: 0.6  # MARK 必須在圖片下方 60% 區域
+
+# MARK 預設位置 (當整個 Panel 模板匹配全部失敗時的保底)
+# 座標基於原始圖片 (6576x4384)
+mark_fallback_position:
+  x: 650
+  y: 3100
+  width: 300
+  height: 300
+
+# Otsu 裁剪設定
+otsu_offset: 20  # 四周偏移 px
+otsu_bottom_crop: 0  # Otsu 後裁切底部像素 (若設置 > 0，則自動禁用排除區域)
+
+# 排除區域 (推論時跳過這些區域)
+exclusion_zones:
+  - name: "mark_area"
+    type: "template_match"
+    description: "MARK 二維碼區域"
+    enabled: false  # 關閉模板掃描，直接使用 mark_fallback_position (省 ~8s)
+    
+  - name: "bottom_right_mechanism"
+    type: "relative_bottom_right"
+    description: "右下角機構區域"
+    width: 460
+    height: 135
+    enabled: true
+
+# 切塊設定
+tile_size: 512
+tile_stride: 512  # 非重疊切塊
+
+# 推論設定
+anomaly_threshold: 0.6  # 異常分數閾值
+model_path: "./model.pt"
+
+# 灰塵偵測設定 (OMIT 圖片分析)
+dust_brightness_threshold: 40    # 備用亮度閾值 (優先使用 Otsu 自適應)
+dust_area_min: 5               # 灰塵顆粒最小面積 (px)
+dust_area_max: 50000             # 灰塵顆粒最大面積 (px)
+dust_extension: 2                # 灰塵區域膨脹像素
+dust_heatmap_iou_threshold: 0.05 # Heatmap vs Dust IOU 閾值 (大於此值判定為灰塵)
+dust_heatmap_top_percent: 5.0    # Heatmap 熱區取前 X% 最紅像素 (Percentile 二值化, 建議 3~8)
+
+# OMIT 過曝偵測設定 (曝光過高的 OMIT 圖無法檢測灰塵，需記錄供工程追蹤)
+omit_overexposure_mean_threshold: 200   # 平均亮度閾值 (正常OMIT約30~80，過曝>200)
+omit_overexposure_ratio_threshold: 0.5  # 高亮像素(>230)佔比閾值 (過曝通常>60%)
+
+# 底部邊緣衰減設定 (過濾光影假陽性)
+edge_margin_px: 256              # 底部邊緣衰減高度 (px)，0=停用
+edge_margin_bottom_only: true     # 是否只對底排 tile 生效
+
+# 跳過檔案 (使用檔名前綴比對，支援帶時間戳的 TIF 檔案)
+# 例如 "B0F00000" 會匹配 "B0F00000.png" 和 "B0F00000_031447.tif"
+skip_files:
+  - "B0F00000"
+
+# 側拍圖前綴列表 (以這些前綴開頭的檔案自動跳過，不進行推論)
+# 生產環境中 S+正面圖名稱 為側拍圖 (例如 SG0F00000, SWGF50500)，不在模型訓練資料中
+side_shot_prefixes:
+  - "SG0F00000"
+  - "SR0F00000"
+  - "SW0F00000"
+  - "SB0F00000"
+  - "SWGF50500"
+  - "SSTANDARD"
+  - "SPINIGBI "
+
+# 重複投片檢查 (Panel 資料夾內圖片數超過此值則跳過判定)
+max_images_per_panel: 20
+
+# 炸彈系統 (機台模擬缺陷定義，用來檢驗 AD 檢出能力)
+# defect_type: "line" = 豎線 (兩點定義起終點), "point" = 點 (多個座標位置)
+# coordinates: 產品座標系 (1920x1080)
+bomb_match_tolerance: 100  # 座標匹配容忍度 (產品座標系像素)
+bomb_defects:
+  - image_prefix: "G0F00000"
+    defect_code: "PCLV6GA0"
+    defect_type: "line"
+    coordinates: [[960, 1], [960, 1080]]
+
+  - image_prefix: "WGF50500"
+    defect_code: "PCM175A0"
+    defect_type: "point"
+    coordinates: [[353, 134], [1565, 323], [1011, 565], [286, 550], [1677, 720]]
+
+  - image_prefix: "W0F00000"
+    defect_code: "MARK0WA0"
+    defect_type: "point"
+    coordinates: [[90, 90], [115, 115], [140, 140], [90, 140], [140, 90]]
+
+  - image_prefix: "W0F00000"
+    defect_code: "PCU12WA0"
+    defect_type: "point"
+    coordinates: [[363, 124], [1555, 333], [1000, 555], [283, 550], [1777, 720]]
+
+  - image_prefix: "WGF50500"
+    defect_code: "PCLV55A0"
+    defect_type: "line"
+    coordinates: [[960, 1], [960, 1080]]
+
+  - image_prefix: "STANDARD"
+    defect_code: "PCDCUUA0"
+    defect_type: "point"
+    coordinates: [[350, 231], [1475, 343], [1071, 565], [356, 530], [1798, 700]]
+
+  - image_prefix: "R0F00000"
+    defect_code: "PCDCURA0"
+    defect_type: "point"
+    coordinates: [[350, 174], [1465, 363], [1171, 465], [256, 540], [1857, 710]]

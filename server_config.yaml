@@ -1,0 +1,49 @@
+# ============================================================
+# CAPI AI 推論伺服器設定
+# ============================================================
+
+# TCP Socket Server
+server:
+  host: "0.0.0.0"
+  port: 7890
+  max_connections: 10       # 最大同時連線數
+  recv_timeout: 0             # 空閒超時 (秒), 長連線模式: 0=永不超時, >0=idle 超過此秒數斷開
+  recv_buffer_size: 4096    # 接收緩衝區大小 (bytes)
+
+# UNC 路徑 → Linux 路徑映射
+# 格式: "\\\\IP\\share" → "/linux/mount/point"
+# 注意: 客戶端傳送的是 Windows UNC 路徑，需轉換為 Linux 掛載路徑
+path_mapping:
+  "\\\\192.168.2.101\\d": "/capi01"
+
+# 推論設定 (引用 CAPI 配置)
+inference:
+  config_path: "configs/capi_3f.yaml"    # CAPI 推論配置檔
+  model_path: "./model.pt"               # PatchCore 模型路徑
+  device: "auto"                         # auto / cpu / cuda
+  threshold: 0.6                         # 異常判斷閾值
+  cpu_workers: 4                         # 預處理/後處理 CPU 執行緒數
+
+# SQLite 資料庫
+database:
+  path: "/data/capi_ai/capi_results.db"
+
+# 熱力圖儲存
+heatmap:
+  base_dir: "/data/capi_ai/heatmaps"
+  save_format: "png"           # png 或 jpg
+  save_overview: true          # 儲存全圖異常總覽
+  save_tile_detail: true       # 儲存單一 tile 熱力圖
+
+# Web 查閱服務
+web:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+
+# 日誌設定
+logging:
+  level: "INFO"                          # DEBUG / INFO / WARNING / ERROR
+  file: "/data/capi_ai/logs/server.log"
+  max_bytes: 10485760                    # 單檔上限 10MB
+  backup_count: 5                        # 保留 5 個備份

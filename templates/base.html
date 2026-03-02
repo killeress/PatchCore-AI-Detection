@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}CAPI AI 推論伺服器{% endblock %}</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+    <script src="/static/js/tailwindcss.js"></script>
+    <script>
+        tailwind.config = {
+            corePlugins: { preflight: false }, // Disable reset to avoid breaking legacy styles
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        slate: {
+                            50: '#F8FAFC',
+                            300: '#cbd5e1',
+                            400: '#94A3B8',
+                            500: '#64748b',
+                            600: '#475569',
+                            700: '#334155',
+                            800: '#1E293B',
+                            900: '#0F172A',
+                            950: '#020617',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <script type="module">
+        import mermaid from '/static/js/node_modules/mermaid/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+    </script>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --border: #334155;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #3b82f6;
+            --ok: #22c55e;
+            --ng: #ef4444;
+            --err: #f59e0b;
+            --dust: #f97316;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Fira Sans', 'Segoe UI', system-ui, sans-serif;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background: linear-gradient(135deg, #1e293b, #0f172a);
+            padding: 20px 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 24px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        header .container {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        header h1 {
+            font-size: 1.5rem;
+            color: #e2e8f0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-family: 'Fira Code', monospace;
+        }
+
+        header h1 svg {
+            width: 28px;
+            height: 28px;
+            color: var(--accent);
+        }
+
+        nav a {
+            color: var(--text-muted);
+            text-decoration: none;
+            margin-left: 24px;
+            transition: color 0.2s;
+            font-weight: 500;
+        }
+
+        nav a:hover,
+        nav a.active {
+            color: var(--text);
+        }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.95rem;
+            font-family: 'Fira Code', monospace;
+        }
+
+        th {
+            background: #2a3a52;
+            padding: 12px 14px;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-muted);
+            border-bottom: 2px solid var(--border);
+        }
+
+        td {
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--border);
+            transition: background-color 0.15s;
+        }
+
+        tr:hover {
+            background: rgba(59, 130, 246, 0.08);
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 4px 10px;
+            border-radius: 16px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            font-family: 'Fira Sans', sans-serif;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .badge-ok {
+            background: rgba(34, 197, 94, 0.15);
+            color: var(--ok);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+
+        .badge-ng {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--ng);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .badge-err {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--err);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+
+        a {
+            color: var(--accent);
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+
+        a:hover {
+            color: #60a5fa;
+            text-decoration: underline;
+        }
+
+        /* Lightbox Styles */
+        #lightbox {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(5px);
+            justify-content: center;
+            align-items: center;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        #lightbox.show {
+            display: flex;
+            opacity: 1;
+        }
+
+        #lightbox img {
+            max-width: 90%;
+            max-height: 90%;
+            border-radius: 4px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            object-fit: contain;
+        }
+
+        #lightbox-close {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            color: #94a3b8;
+            font-size: 40px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+
+        #lightbox-close:hover {
+            color: #f8fafc;
+        }
+
+        /* Modal specific overrides for when preflight is disabled */
+        #about-modal h2,
+        #about-modal h3 {
+            margin: 0;
+            padding: 0;
+            line-height: 1.2;
+        }
+
+        #about-modal p {
+            margin: 0;
+        }
+
+        #about-modal ul {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        #about-modal .pulse-dot {
+            animation: pulse-ring 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: scale(0.95) translateY(-10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: scale(1) translateY(0);
+            }
+        }
+
+        @keyframes pulse-ring {
+            0% {
+                box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4);
+            }
+
+            70% {
+                box-shadow: 0 0 0 6px rgba(34, 197, 94, 0);
+            }
+
+            100% {
+                box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
+            }
+        }
+
+        /* Custom scrollbar for modal */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.02);
+            border-radius: 4px;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+        }
+    </style>
+    <!-- Custom Head Styles -->
+    {% block extra_css %}{% endblock %}
+    <script>
+        function openLightbox(src) {
+            if (!src) return;
+            const lb = document.getElementById('lightbox');
+            const img = document.getElementById('lightbox-img');
+            img.src = src;
+            lb.classList.add('show');
+        }
+        function closeLightbox() {
+            const lb = document.getElementById('lightbox');
+            lb.classList.remove('show');
+            setTimeout(() => { document.getElementById('lightbox-img').src = ''; }, 300);
+        }
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLightbox(); });
+    </script>
+    {% block extra_head %}{% endblock %}
+</head>
+
+<body>
+    <div id="lightbox" onclick="if(event.target === this) closeLightbox()">
+        <span id="lightbox-close" onclick="closeLightbox()">&times;</span>
+        <img id="lightbox-img" src="">
+    </div>
+
+    <header>
+        <div class="container">
+            <h1>
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
+                    stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                        d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm.75-12h9v9h-9v-9z" />
+                </svg>
+                MOD2 CAPI AD-AI智能檢測
+            </h1>
+            <nav>
+                <a href="/dashboard" {% if request_path=='/dashboard' %}class="active" {% endif %}>即時儀表板</a>
+                <a href="/" {% if request_path=='/' %}class="active" {% endif %}>推論記錄</a>
+                <a href="/search" {% if request_path=='/search' %}class="active" {% endif %}>記錄搜尋</a>
+                <a href="/api/stats">統計 API</a>
+                <a href="#" onclick="document.getElementById('about-modal').classList.remove('hidden'); return false;"
+                    style="display:inline-flex; align-items:center; gap:4px; color:var(--text); background:rgba(34,197,94,0.15); padding:6px 12px; border-radius:6px; border:1px solid rgba(34,197,94,0.3); margin-left:16px;">
+                    <svg class="w-4 h-4" style="width:16px;height:16px;" fill="none" stroke="currentColor"
+                        viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    關於檢測邏輯
+                </a>
+            </nav>
+        </div>
+    </header>
+
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+
+    <!-- About Logic Modal -->
+    <div id="about-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center p-4 sm:p-6"
+        style="background-color: rgba(2, 6, 23, 0.8); backdrop-filter: blur(10px);"
+        onclick="if(event.target === this) this.classList.add('hidden')">
+        <div class="w-full max-w-5xl max-h-[90vh] flex flex-col relative shadow-2xl animate-[fadeIn_0.3s_ease-out] border border-white/10 bg-slate-900/80 rounded-2xl"
+            style="font-family: 'Fira Sans', sans-serif;">
+            <!-- Close button -->
+            <button onclick="document.getElementById('about-modal').classList.add('hidden')"
+                class="absolute top-4 right-4 text-slate-400 hover:text-white transition-colors p-2 bg-slate-800/50 hover:bg-red-500/20 rounded-full border border-slate-700 hover:border-red-500/50 z-10 focus:outline-none cursor-pointer">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12">
+                    </path>
+                </svg>
+            </button>
+
+            <!-- Modal Header -->
+            <div
+                class="flex items-center gap-3 border-b border-white/10 p-6 flex-shrink-0 bg-slate-800/50 rounded-t-2xl">
+                <div
+                    class="text-green-500 bg-green-500/10 p-2 rounded-lg border border-green-500/20 flex flex-col items-center justify-center">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z">
+                        </path>
+                    </svg>
+                </div>
+                <div>
+                    <h2 class="text-xl md:text-2xl font-semibold text-slate-100 font-sans tracking-wide m-0">CAPI
+                        檢測系統原理與流程</h2>
+                    <p class="text-sm text-slate-400 mt-1" style="font-family: 'Fira Code', monospace;">Detection Logic
+                        & Workflow Architecture</p>
+                </div>
+            </div>
+
+            <!-- Modal Body (Scrollable) -->
+            <div class="p-6 overflow-y-auto custom-scrollbar flex-1 flex flex-col gap-6">
+                <!-- Info text cards -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div
+                        class="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5 hover:border-slate-600 transition-colors">
+                        <h3 class="text-green-400 mb-3 flex items-center gap-2 text-sm uppercase tracking-wider font-semibold"
+                            style="font-family: 'Fira Code', monospace;">
+                            <span class="w-2 h-2 rounded-full bg-green-500 pulse-dot inline-block block"></span>
+                            預處理與遮罩階段
+                        </h3>
+                        <ul class="text-slate-300 text-sm flex flex-col gap-2 leading-relaxed m-0 p-0">
+                            <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
+                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>使用 Otsu
+                                    二值化自動裁切前景並執行底部裁切 (Bottom Crop) 以過濾邊緣干擾。</span></li>
+                            <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
+                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>透過 Template Matching
+                                    識別排除區域 (例如 MARK 二維碼與機構位置)。</span></li>
+                            <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
+                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>將面板影像切分為 512x512
+                                    的非重疊圖塊 (Tiles) 並套用計算好的排除區域遮罩。</span></li>
+                        </ul>
+                    </div>
+
+                    <div
+                        class="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5 hover:border-slate-600 transition-colors">
+                        <h3 class="text-blue-400 mb-3 flex items-center gap-2 text-sm uppercase tracking-wider font-semibold"
+                            style="font-family: 'Fira Code', monospace;">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                            </svg>
+                            AI 推論與表面膜過濾
+                        </h3>
+                        <ul class="text-slate-300 text-sm flex flex-col gap-2 leading-relaxed m-0 p-0">
+                            <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
+                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span><strong
+                                        class="text-slate-100">PatchCore 模型</strong> 對每個 Tile 進行推論以產生異常分數與熱圖。</span>
+                            </li>
+                            <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
+                                    style="font-family: 'Fira Code', monospace;">&gt;</span>
+                                <span>分數若大於閾值，系統會進行異常特徵檢查，並執行 OMIT 影像的灰塵交叉驗證。</span>
+                            </li>
+                            <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
+                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>只要包含 <span
+                                        class="text-red-400 font-bold border-b border-red-500/30">真實缺陷</span> 即判定面板為
+                                    <strong class="text-red-500 text-base">🔴 NG</strong>。</span></li>
+                            <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
+                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>無異常或所有異常皆為 <em
+                                        class="text-slate-400">表面膜灰塵</em> 時，判定面板為 <strong
+                                        class="text-green-500 text-base">🟢 OK</strong>。</span></li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div
+                    class="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5 hover:border-slate-600 transition-colors">
+                    <h3 class="text-orange-400 mb-3 flex items-center gap-2 text-sm uppercase tracking-wider font-semibold"
+                        style="font-family: 'Fira Code', monospace;">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z">
+                            </path>
+                        </svg>
+                        OMIT 灰塵交叉驗證與濾除邏輯 (IoU)
+                    </h3>
+                    <div class="text-slate-300 text-sm leading-relaxed mb-4">
+                        當 AD 模型偵測到異常（給出大於閾值的異常分數）時，系統會進行進階的交叉驗證，以確認該異常是否僅為表面膜上的灰塵或刮痕：
+                    </div>
+                    <ul class="text-slate-300 text-sm flex flex-col gap-3 m-0 p-0">
+                        <li class="flex items-start gap-2">
+                            <span class="text-slate-500 mt-0.5" style="font-family: 'Fira Code', monospace;">1.</span>
+                            <div>
+                                <strong class="text-slate-100">灰塵特徵提取：</strong>在 OMIT 影像的對應位置上，使用 CLAHE 局部對比增強與 Otsu
+                                自適應二值化，精準捕捉微小顆粒 (P) 與細長刮痕 (S)，生成灰塵遮罩。
+                            </div>
+                        </li>
+                        <li class="flex items-start gap-2">
+                            <span class="text-slate-500 mt-0.5" style="font-family: 'Fira Code', monospace;">2.</span>
+                            <div>
+                                <strong class="text-slate-100">IoU 交叉驗證：</strong>將 AD 模型的「異常熱圖亮區」與 OMIT
+                                的「灰塵遮罩」進行對比，計算出兩者的 <strong
+                                    class="text-orange-400 bg-orange-400/10 px-1 py-0.5 rounded">IoU (Intersection over
+                                    Union，重疊比例)</strong>。
+                            </div>
+                        </li>
+                        <li class="flex items-start gap-2">
+                            <span class="text-slate-500 mt-0.5" style="font-family: 'Fira Code', monospace;">3.</span>
+                            <div>
+                                <strong class="text-slate-100">判定與過濾：</strong>若計算出的 IoU 達標 (<code
+                                    style="font-family: 'Fira Code', monospace;">>=IOU_THR</code>)，則系統判定該處為表面膜灰塵造成的假陽性，並標記為
+                                <code class="text-yellow-500 text-xs bg-yellow-500/10 px-1 py-0.5 rounded"
+                                    style="font-family: 'Fira Code', monospace;">DUST (Filtered as OK)</code>。
+                            </div>
+                        </li>
+                    </ul>
+                    <div
+                        class="mt-4 p-3 bg-slate-900/60 rounded-lg border border-slate-700/50 text-xs font-mono text-slate-400">
+                        <span class="text-slate-500 mb-1 inline-block">// 判定數據標籤釋義</span><br>
+                        <span class="text-yellow-500">Thr:</span> <span class="text-slate-400">二值化閾值</span>
+                        &nbsp;|&nbsp;
+                        <span class="text-yellow-500">P:</span> <span class="text-slate-400">顆粒數量</span> &nbsp;|&nbsp;
+                        <span class="text-yellow-500">S:</span> <span class="text-slate-400">刮痕數量</span> &nbsp;|&nbsp;
+                        <span class="text-yellow-500">Area:</span> <span class="text-slate-400">灰塵總面積</span>
+                        &nbsp;|&nbsp;
+                        <span class="text-yellow-500">Ratio:</span> <span class="text-slate-400">灰塵佔比</span>
+                        &nbsp;|&nbsp;
+                        <span class="text-yellow-500">IOU:</span> <span class="text-slate-400">重疊率</span>
+                    </div>
+                </div>
+
+                {% block extra_js %}{% endblock %}
+</body>
+
+</html>

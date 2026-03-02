@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}搜尋記錄{% endblock %}
+
+{% block extra_css %}
+<style>
+    .search-box {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+
+    .search-box input,
+    .search-box select {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-size: 0.95rem;
+        font-family: 'Fira Sans', sans-serif;
+    }
+
+    .search-box input:focus,
+    .search-box select:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+    }
+
+    .search-box button {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        padding: 10px 24px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 0.95rem;
+        font-weight: 600;
+        transition: all 0.2s;
+    }
+
+    .search-box button:hover {
+        background: #2563eb;
+        transform: translateY(-1px);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h3 style="margin-bottom:12px">搜尋推論記錄</h3>
+    <form method="GET" action="/search" class="search-box">
+        <input name="glass_id" placeholder="玻璃編號 Glass ID" value="{{ glass_id }}">
+        <input name="machine_no" placeholder="機台編號 Machine No" value="{{ machine_no }}">
+        <select name="ai_judgment">
+            <option value="">全部狀態</option>
+            <option value="OK" {% if ai_judgment=="OK" %}selected{% endif %}>正常 OK</option>
+            <option value="NG" {% if ai_judgment=="NG" %}selected{% endif %}>異常 NG</option>
+            <option value="ERR" {% if ai_judgment=="ERR" %}selected{% endif %}>錯誤 ERR</option>
+        </select>
+        <label style="color:var(--text-muted);font-size:0.88rem;white-space:nowrap;">開始日期</label>
+        <input type="date" name="start_date" value="{{ start_date }}" style="padding:9px 10px;min-width:140px;">
+        <label style="color:var(--text-muted);font-size:0.88rem;white-space:nowrap;">結束日期</label>
+        <input type="date" name="end_date" value="{{ end_date }}" style="padding:9px 10px;min-width:140px;">
+        <button type="submit">立即搜尋</button>
+    </form>
+</div>
+
+
+{% if has_search %}
+<div class="card">
+    <div
+        style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+        <h3>搜尋結果 (共 {{ records|length }} 筆)</h3>
+        {% if records %}
+        <a href="/search/export?glass_id={{ glass_id }}&machine_no={{ machine_no }}&ai_judgment={{ ai_judgment }}&start_date={{ start_date }}&end_date={{ end_date }}"
+            style="padding:8px 18px;background:rgba(34,197,94,0.15);border:1px solid rgba(34,197,94,0.5);border-radius:8px;color:#22c55e;text-decoration:none;font-size:0.9rem;font-weight:600;display:flex;align-items:center;gap:6px;transition:all 0.2s;"
+            onmouseover="this.style.background='rgba(34,197,94,0.25)'"
+            onmouseout="this.style.background='rgba(34,197,94,0.15)'">
+            ↓ 匯出 CSV
+        </a>
+        {% endif %}
+    </div>
+    <table>
+
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>玻璃編號</th>
+                <th>機台</th>
+                <th>AI 判定</th>
+                <th>耗時</th>
+                <th>建立時間</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in records %}
+            <tr>
+                <td><a href="/record/{{ r.id }}">{{ r.id }}</a></td>
+                <td>{{ r.glass_id }}</td>
+                <td>{{ r.machine_no }}</td>
+                <td><span class="badge {{ r.ai_judgment | ai_badge }}">{{ r.ai_judgment | ai_simple }}</span></td>
+                <td>{{ r.processing_seconds | round(1) }}s</td>
+                <td>{{ r.created_at }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="6" style="text-align:center;color:var(--text-muted)">無搜尋結果</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}
