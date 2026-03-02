@@ -12,6 +12,7 @@ CAPI AI Web 查閱介面
 """
 
 import os
+import tempfile
 import json
 import urllib.parse
 import mimetypes
@@ -77,6 +78,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     db = None
     # Jinja2 環境
     jinja_env = None
+    # Debug 推論用 (可選)
+    inferencer = None
+    heatmap_manager = None
+    _debug_heatmap_dir = None  # Debug 推論暫存目錄
 
     @classmethod
     def init_jinja(cls):
@@ -120,12 +125,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_search(query, path)
             elif path == "/search/export":
                 self._handle_search_export(query)
+            elif path == "/debug":
+                self._handle_debug_page(path)
             elif path == "/api/stats":
                 self._handle_api_stats(query)
             elif path == "/api/status":
                 self._handle_api_status()
             elif path.startswith("/heatmaps/"):
                 self._handle_static_file(path)
+            elif path.startswith("/debug/heatmaps/"):
+                self._handle_debug_heatmap_file(path)
             elif path.startswith("/images/"):
                 self._handle_source_image(path)
             elif path.startswith("/imgs/"):
@@ -143,6 +152,25 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.error(f"Error handling {path}: {e}", exc_info=True)
             try:
                 self._send_error(500, str(e))
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+
+    def do_POST(self):
+        """處理 POST 請求"""
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        try:
+            if path == "/api/debug/inference":
+                self._handle_debug_inference_run()
+            else:
+                self._send_404(path)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        except Exception as e:
+            logger.error(f"Error handling POST {path}: {e}", exc_info=True)
+            try:
+                self._send_json({"error": str(e)})
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
@@ -627,13 +655,196 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         else:
             self._send_404()
 
+    # ── Debug 推論功能 ─────────────────────────────────
+
+    def _handle_debug_page(self, path: str):
+        """Debug 推論頁面"""
+        template = self.jinja_env.get_template("debug_inference.html")
+        html = template.render(request_path=path)
+        self._send_response(200, html)
+
+    def _handle_debug_inference_run(self):
+        """API: 執行 Debug 單圖推論"""
+        import time as _time
+        import cv2
+        import numpy as np
+
+        # 讀取 POST body
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except Exception:
+            self._send_json({"error": "Invalid JSON body"})
+            return
+
+        image_path_str = data.get("image_path", "").strip()
+        if not image_path_str:
+            self._send_json({"error": "請提供圖片路徑 (image_path)"})
+            return
+
+        image_path = Path(image_path_str)
+        if not image_path.exists():
+            self._send_json({"error": f"檔案不存在: {image_path}"})
+            return
+        if not image_path.is_file():
+            self._send_json({"error": f"不是檔案: {image_path}"})
+            return
+
+        if self.inferencer is None:
+            self._send_json({"error": "推論器尚未載入 (inferencer is None)"})
+            return
+
+        try:
+            total_start = _time.time()
+
+            # 1. 預處理
+            result = self.inferencer.preprocess_image(image_path)
+            if result is None:
+                self._send_json({"error": f"無法載入或預處理圖片: {image_path}"})
+                return
+
+            # 2. 推論 (需要 GPU lock)
+            if hasattr(self, '_gpu_lock') and self._gpu_lock:
+                with self._gpu_lock:
+                    result = self.inferencer.run_inference(result)
+            else:
+                result = self.inferencer.run_inference(result)
+
+            total_time = _time.time() - total_start
+
+            # 3. 建立 Debug heatmap 暫存目錄
+            if self._debug_heatmap_dir is None:
+                self._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
+            debug_dir = self._debug_heatmap_dir
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            image_name = image_path.stem
+
+            # 4. 產生 Overview 圖
+            overview_img = self.inferencer.visualize_inference_result(image_path, result)
+            overview_filename = f"debug_overview_{image_name}.png"
+            overview_path = debug_dir / overview_filename
+            # 縮小存檔
+            max_dim = 2000
+            h, w = overview_img.shape[:2]
+            if max(h, w) > max_dim:
+                scale = max_dim / max(h, w)
+                overview_img = cv2.resize(overview_img, (int(w * scale), int(h * scale)))
+            cv2.imwrite(str(overview_path), overview_img)
+            overview_url = f"/debug/heatmaps/{overview_filename}"
+
+            # 5. 產生各 Tile 熱力圖
+            tiles_data = []
+            for tile, score, anomaly_map in result.anomaly_tiles:
+                # 產生 heatmap overlay
+                tile_filename = f"debug_tile_{image_name}_t{tile.tile_id}.png"
+                tile_hm_path = debug_dir / tile_filename
+
+                # 使用 HeatmapManager 的 overlay 方法
+                if self.heatmap_manager:
+                    overlay = self.heatmap_manager.generate_heatmap_overlay(
+                        tile.image, anomaly_map, alpha=0.5
+                    )
+                else:
+                    # Fallback: 簡易 heatmap
+                    tile_img = tile.image.copy()
+                    if len(tile_img.shape) == 2:
+                        tile_img = cv2.cvtColor(tile_img, cv2.COLOR_GRAY2BGR)
+                    norm_map = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                    heatmap_color = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
+                    if heatmap_color.shape[:2] != tile_img.shape[:2]:
+                        heatmap_color = cv2.resize(heatmap_color, (tile_img.shape[1], tile_img.shape[0]))
+                    overlay = cv2.addWeighted(tile_img, 0.5, heatmap_color, 0.5, 0)
+
+                cv2.imwrite(str(tile_hm_path), overlay)
+                tile_url = f"/debug/heatmaps/{tile_filename}"
+
+                tile_status = "NG"
+                if tile.is_bomb:
+                    tile_status = "BOMB"
+                elif tile.is_suspected_dust_or_scratch:
+                    tile_status = "DUST"
+
+                tiles_data.append({
+                    "tile_id": tile.tile_id,
+                    "x": tile.x,
+                    "y": tile.y,
+                    "width": tile.width,
+                    "height": tile.height,
+                    "score": round(score, 4),
+                    "status": tile_status,
+                    "is_dust": tile.is_suspected_dust_or_scratch,
+                    "dust_iou": round(tile.dust_heatmap_iou, 4),
+                    "is_bomb": tile.is_bomb,
+                    "bomb_code": tile.bomb_defect_code,
+                    "heatmap_url": tile_url,
+                })
+
+            # 6. 判定結果
+            has_real_ng = any(
+                not t.is_suspected_dust_or_scratch and not t.is_bomb
+                for t, s, m in result.anomaly_tiles
+            )
+            all_dust = (
+                len(result.anomaly_tiles) > 0 and
+                all(t.is_suspected_dust_or_scratch for t, s, m in result.anomaly_tiles)
+            )
+
+            if has_real_ng:
+                judgment = "NG"
+            elif all_dust:
+                judgment = "OK (DUST Filtered)"
+            elif len(result.anomaly_tiles) > 0:
+                judgment = "NG"
+            else:
+                judgment = "OK"
+
+            response_data = {
+                "success": True,
+                "image_path": str(image_path),
+                "image_name": image_path.name,
+                "image_size": list(result.image_size),
+                "judgment": judgment,
+                "total_tiles": result.processed_tile_count,
+                "excluded_tiles": result.excluded_tile_count,
+                "anomaly_count": len(result.anomaly_tiles),
+                "processing_time": round(total_time, 3),
+                "threshold": self.inferencer.threshold,
+                "overview_url": overview_url,
+                "tiles": tiles_data,
+            }
+
+            self._send_json(response_data)
+            logger.info(f"[DEBUG] Inference {image_path.name}: {judgment} ({total_time:.2f}s, {len(result.anomaly_tiles)} anomalies)")
+
+        except Exception as e:
+            logger.error(f"[DEBUG] Inference error: {e}", exc_info=True)
+            self._send_json({"error": f"推論失敗: {str(e)}"})
+
+    def _handle_debug_heatmap_file(self, path: str):
+        """靜態檔案服務 (Debug 推論熱力圖)"""
+        if self._debug_heatmap_dir is None:
+            self._send_404()
+            return
+        rel_path = path[len("/debug/heatmaps/"):]
+        rel_path = rel_path.replace("..", "").lstrip("/")
+        full_path = self._debug_heatmap_dir / rel_path
+        if full_path.exists() and full_path.is_file():
+            self._send_binary(str(full_path))
+        else:
+            self._send_404()
+
 
 def create_web_server(
     host: str,
     port: int,
     db,
     heatmap_base_dir: str,
-    status_tracker=None
+    status_tracker=None,
+    inferencer=None,
+    heatmap_manager=None,
+    gpu_lock=None,
 ) -> HTTPServer:
     """
     建立 Web 伺服器
@@ -644,10 +855,16 @@ def create_web_server(
         db: CAPIDatabase 實例
         heatmap_base_dir: 熱力圖儲存根目錄
         status_tracker: 伺服器狀態追蹤物件
+        inferencer: CAPIInferencer 實例 (Optional, for debug inference)
+        heatmap_manager: HeatmapManager 實例 (Optional, for debug inference)
+        gpu_lock: GPU 排隊鎖 (Optional, for debug inference)
     """
     CAPIWebHandler.db = db
     CAPIWebHandler.heatmap_base_dir = heatmap_base_dir
     CAPIWebHandler.status_tracker = status_tracker
+    CAPIWebHandler.inferencer = inferencer
+    CAPIWebHandler.heatmap_manager = heatmap_manager
+    CAPIWebHandler._gpu_lock = gpu_lock
     CAPIWebHandler.init_jinja()
 
     server = HTTPServer((host, port), CAPIWebHandler)
@@ -659,7 +876,10 @@ def start_web_server_thread(
     port: int,
     db,
     heatmap_base_dir: str,
-    status_tracker=None
+    status_tracker=None,
+    inferencer=None,
+    heatmap_manager=None,
+    gpu_lock=None,
 ) -> threading.Thread:
     """
     在背景執行緒啟動 Web 伺服器
@@ -667,7 +887,12 @@ def start_web_server_thread(
     Returns:
         Web 伺服器執行緒
     """
-    server = create_web_server(host, port, db, heatmap_base_dir, status_tracker)
+    server = create_web_server(
+        host, port, db, heatmap_base_dir, status_tracker,
+        inferencer=inferencer,
+        heatmap_manager=heatmap_manager,
+        gpu_lock=gpu_lock,
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True, name="web-server")
     thread.start()
     logger.info(f"Web server started on http://{host}:{port}")

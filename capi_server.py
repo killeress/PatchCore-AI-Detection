@@ -451,10 +451,12 @@ class CAPIServer:
         config_path = inf_cfg.get("config_path", "configs/capi_3f.yaml")
         model_path = inf_cfg.get("model_path", "./model.pt")
         device = inf_cfg.get("device", "auto")
-        threshold = inf_cfg.get("threshold", 0.6)
 
         logger.info(f"Loading inference config: {config_path}")
         capi_config = CAPIConfig.from_yaml(config_path)
+
+        # 判定門檻優先順序: 1. server_config.yaml (核心覆蓋) -> 2. capi_3f.yaml (模型預設) -> 3. 0.6 (保底)
+        threshold = inf_cfg.get("threshold", capi_config.anomaly_threshold)
 
         logger.info(f"Loading model: {model_path} (device={device}, threshold={threshold})")
         self.inferencer = CAPIInferencer(
@@ -515,7 +517,10 @@ class CAPIServer:
                 start_web_server_thread(
                     web_host, web_port, self.db,
                     str(self.heatmap_manager.base_dir),
-                    server_status
+                    server_status,
+                    inferencer=self.inferencer,
+                    heatmap_manager=self.heatmap_manager,
+                    gpu_lock=self._gpu_lock,
                 )
                 print(f"[SERVER] Web server: http://{web_host}:{web_port}", flush=True)
                 logger.info(f"Web server: http://{web_host}:{web_port}")

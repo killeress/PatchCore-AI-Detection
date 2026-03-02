@@ -1,0 +1,485 @@
+{% extends "base.html" %}
+{% block title %}Debug 推論 — CAPI AI{% endblock %}
+
+{% block extra_css %}
+<style>
+    .debug-container {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+
+    .input-section {
+        display: flex;
+        gap: 12px;
+        align-items: stretch;
+    }
+
+    .input-section input[type="text"] {
+        flex: 1;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 16px;
+        color: var(--text);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.95rem;
+        outline: none;
+        transition: border-color 0.2s;
+    }
+
+    .input-section input[type="text"]:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+    }
+
+    .input-section input[type="text"]::placeholder {
+        color: var(--text-muted);
+        opacity: 0.6;
+    }
+
+    .btn-run {
+        background: linear-gradient(135deg, #3b82f6, #2563eb);
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 12px 28px;
+        font-size: 0.95rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .btn-run:hover:not(:disabled) {
+        background: linear-gradient(135deg, #2563eb, #1d4ed8);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+    }
+
+    .btn-run:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        transform: none;
+    }
+
+    /* Loading spinner */
+    .spinner {
+        display: none;
+        width: 18px;
+        height: 18px;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+    }
+
+    .spinner.active {
+        display: inline-block;
+    }
+
+    @keyframes spin {
+        to {
+            transform: rotate(360deg);
+        }
+    }
+
+    /* Result summary cards */
+    .result-summary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 16px;
+        margin-top: 24px;
+    }
+
+    .summary-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px 20px;
+        text-align: center;
+        transition: border-color 0.2s;
+    }
+
+    .summary-card .label {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 6px;
+    }
+
+    .summary-card .value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .judgment-ok {
+        color: var(--ok);
+        border-color: rgba(34, 197, 94, 0.3);
+    }
+
+    .judgment-ng {
+        color: var(--ng);
+        border-color: rgba(239, 68, 68, 0.3);
+    }
+
+    .judgment-dust {
+        color: var(--dust);
+        border-color: rgba(249, 115, 22, 0.3);
+    }
+
+    /* Overview section */
+    .overview-section {
+        margin-top: 24px;
+    }
+
+    .overview-section h3 {
+        font-size: 1.1rem;
+        color: var(--text-muted);
+        margin-bottom: 12px;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .overview-img-wrapper {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+        text-align: center;
+        overflow: hidden;
+    }
+
+    .overview-img-wrapper img {
+        max-width: 100%;
+        max-height: 600px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: transform 0.2s;
+    }
+
+    .overview-img-wrapper img:hover {
+        transform: scale(1.01);
+    }
+
+    /* Tiles grid */
+    .tiles-section {
+        margin-top: 24px;
+    }
+
+    .tiles-section h3 {
+        font-size: 1.1rem;
+        color: var(--text-muted);
+        margin-bottom: 12px;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .tiles-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 16px;
+    }
+
+    .tile-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+        transition: border-color 0.2s, transform 0.15s;
+    }
+
+    .tile-card:hover {
+        border-color: rgba(59, 130, 246, 0.4);
+        transform: translateY(-2px);
+    }
+
+    .tile-card img {
+        width: 100%;
+        height: 220px;
+        object-fit: contain;
+        background: #0a0f1a;
+        cursor: pointer;
+    }
+
+    .tile-card .tile-info {
+        padding: 12px 14px;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.82rem;
+    }
+
+    .tile-card .tile-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 6px;
+    }
+
+    .tile-card .tile-score {
+        font-weight: 700;
+        font-size: 1rem;
+    }
+
+    .tile-card .tile-meta {
+        color: var(--text-muted);
+        font-size: 0.78rem;
+        line-height: 1.5;
+    }
+
+    /* Error message */
+    .error-box {
+        background: rgba(239, 68, 68, 0.1);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        border-radius: 10px;
+        padding: 16px 20px;
+        margin-top: 20px;
+        color: var(--ng);
+        font-family: 'Fira Code', monospace;
+    }
+
+    /* No anomaly message */
+    .ok-message {
+        background: rgba(34, 197, 94, 0.08);
+        border: 1px solid rgba(34, 197, 94, 0.2);
+        border-radius: 10px;
+        padding: 20px;
+        text-align: center;
+        color: var(--ok);
+        font-size: 1.1rem;
+        margin-top: 20px;
+    }
+
+    /* Debug badge */
+    .debug-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(245, 158, 11, 0.12);
+        border: 1px solid rgba(245, 158, 11, 0.3);
+        color: var(--err);
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+    }
+
+    /* Hidden class */
+    .hidden {
+        display: none !important;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="debug-container">
+    <!-- Header -->
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+        <div>
+            <h2
+                style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
+                🔧 Debug 單圖推論
+                <span class="debug-badge">DEBUG ONLY</span>
+            </h2>
+            <p style="color:var(--text-muted); font-size:0.9rem; margin-top:4px;">
+                輸入圖片絕對路徑，對單張圖片執行 AI 推論，即時查看熱力圖結果
+            </p>
+        </div>
+    </div>
+
+    <!-- Input -->
+    <div class="card" style="padding:20px;">
+        <div class="input-section">
+            <input type="text" id="image-path-input" placeholder="輸入圖片絕對路徑，例如: /data/images/G0F00000_143133.tif"
+                autocomplete="off" spellcheck="false">
+            <button class="btn-run" id="btn-run" onclick="runInference()">
+                <span class="spinner" id="spinner"></span>
+                <span id="btn-text">▶ 推論</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Error -->
+    <div id="error-box" class="error-box hidden"></div>
+
+    <!-- Result Summary -->
+    <div id="result-section" class="hidden">
+        <div class="result-summary" id="result-summary"></div>
+
+        <!-- Overview -->
+        <div class="overview-section" id="overview-section">
+            <h3>📊 Overview 全圖標記</h3>
+            <div class="overview-img-wrapper">
+                <img id="overview-img" src="" alt="Overview" onclick="openLightbox(this.src)">
+            </div>
+        </div>
+
+        <!-- Anomaly Tiles -->
+        <div class="tiles-section" id="tiles-section">
+            <h3 id="tiles-header">🔍 異常 Tiles</h3>
+            <div class="tiles-grid" id="tiles-grid"></div>
+        </div>
+
+        <!-- OK message -->
+        <div id="ok-message" class="ok-message hidden">
+            ✅ 此圖片未偵測到異常，判定為 OK
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    const input = document.getElementById('image-path-input');
+    const btn = document.getElementById('btn-run');
+    const btnText = document.getElementById('btn-text');
+    const spinner = document.getElementById('spinner');
+
+    // Enter key to submit
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') runInference();
+    });
+
+    async function runInference() {
+        const imagePath = input.value.trim();
+        if (!imagePath) {
+            showError('請輸入圖片路徑');
+            return;
+        }
+
+        // UI: Loading state
+        btn.disabled = true;
+        btnText.textContent = '推論中...';
+        spinner.classList.add('active');
+        hideError();
+        document.getElementById('result-section').classList.add('hidden');
+
+        try {
+            const resp = await fetch('/api/debug/inference', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image_path: imagePath }),
+            });
+
+            const data = await resp.json();
+
+            if (data.error) {
+                showError(data.error);
+                return;
+            }
+
+            renderResults(data);
+        } catch (err) {
+            showError('請求失敗: ' + err.message);
+        } finally {
+            btn.disabled = false;
+            btnText.textContent = '▶ 推論';
+            spinner.classList.remove('active');
+        }
+    }
+
+    function showError(msg) {
+        const box = document.getElementById('error-box');
+        box.textContent = '❌ ' + msg;
+        box.classList.remove('hidden');
+    }
+
+    function hideError() {
+        document.getElementById('error-box').classList.add('hidden');
+    }
+
+    function renderResults(data) {
+        const section = document.getElementById('result-section');
+        section.classList.remove('hidden');
+
+        // Judgment style
+        let jClass = 'judgment-ok';
+        let jIcon = '🟢';
+        if (data.judgment === 'NG') { jClass = 'judgment-ng'; jIcon = '🔴'; }
+        else if (data.judgment.includes('DUST')) { jClass = 'judgment-dust'; jIcon = '🟠'; }
+
+        // Summary cards
+        const summary = document.getElementById('result-summary');
+        summary.innerHTML = `
+        <div class="summary-card ${jClass}">
+            <div class="label">AI 判定</div>
+            <div class="value">${jIcon} ${data.judgment}</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">處理時間</div>
+            <div class="value" style="color:var(--accent)">${data.processing_time}s</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">總 Tiles</div>
+            <div class="value" style="color:var(--text)">${data.total_tiles}</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">異常 Tiles</div>
+            <div class="value" style="color:${data.anomaly_count > 0 ? 'var(--ng)' : 'var(--ok)'}">${data.anomaly_count}</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">判定門檻</div>
+            <div class="value" style="color:var(--text-muted)">${data.threshold}</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">圖片尺寸</div>
+            <div class="value" style="color:var(--text-muted);font-size:1rem;">${data.image_size[0]}×${data.image_size[1]}</div>
+        </div>
+    `;
+
+        // Overview image
+        const overviewImg = document.getElementById('overview-img');
+        overviewImg.src = data.overview_url + '?t=' + Date.now();
+        document.getElementById('overview-section').classList.remove('hidden');
+
+        // Tiles
+        const tilesGrid = document.getElementById('tiles-grid');
+        const tilesSection = document.getElementById('tiles-section');
+        const okMessage = document.getElementById('ok-message');
+
+        if (data.tiles && data.tiles.length > 0) {
+            tilesSection.classList.remove('hidden');
+            okMessage.classList.add('hidden');
+            document.getElementById('tiles-header').textContent = `🔍 異常 Tiles (${data.tiles.length})`;
+
+            tilesGrid.innerHTML = data.tiles.map(tile => {
+                let statusBadge = '';
+                let scoreColor = 'var(--ng)';
+                if (tile.status === 'DUST') {
+                    statusBadge = '<span class="badge badge-err">DUST</span>';
+                    scoreColor = 'var(--dust)';
+                } else if (tile.status === 'BOMB') {
+                    statusBadge = '<span class="badge badge-err">BOMB</span>';
+                    scoreColor = 'var(--err)';
+                } else {
+                    statusBadge = '<span class="badge badge-ng">NG</span>';
+                }
+
+                let metaLines = `位置: (${tile.x}, ${tile.y}) ${tile.width}×${tile.height}`;
+                if (tile.is_dust) metaLines += `<br>IOU: ${tile.dust_iou}`;
+                if (tile.is_bomb) metaLines += `<br>Bomb: ${tile.bomb_code}`;
+
+                return `
+                <div class="tile-card">
+                    <img src="${tile.heatmap_url}?t=${Date.now()}" alt="Tile ${tile.tile_id}"
+                         onclick="openLightbox(this.src)">
+                    <div class="tile-info">
+                        <div class="tile-header">
+                            <span>Tile #${tile.tile_id} ${statusBadge}</span>
+                            <span class="tile-score" style="color:${scoreColor}">${tile.score.toFixed(4)}</span>
+                        </div>
+                        <div class="tile-meta">${metaLines}</div>
+                    </div>
+                </div>
+            `;
+            }).join('');
+        } else {
+            tilesSection.classList.add('hidden');
+            okMessage.classList.remove('hidden');
+        }
+    }
+</script>
+{% endblock %}
