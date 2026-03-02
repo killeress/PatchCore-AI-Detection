@@ -699,8 +699,12 @@ class CAPIServer:
 
                     # 執行推論（不含 Heatmap 儲存，快速回覆）
                     start_time = time.time()
-                    ai_judgment, ng_details, inference_results = self._process_request(parsed)
+                    ai_judgment, ng_details, inference_results, is_duplicate = self._process_request(parsed)
                     processing_seconds = time.time() - start_time
+
+                    # 重複投片時在 LOG 標記
+                    if is_duplicate:
+                        logger.warning(f"[{client_addr}] [DUPLICATE_PANEL] 重複投片，已選取最新圖片推論，判定={ai_judgment}")
 
                     # 組裝回覆
                     response = build_response(
@@ -713,7 +717,8 @@ class CAPIServer:
 
                     response_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
-                    logger.info(f"[{client_addr}] >> {response} ({processing_seconds:.2f}s)")
+                    dup_tag = " [DUPLICATE]" if is_duplicate else ""
+                    logger.info(f"[{client_addr}] >> {response} ({processing_seconds:.2f}s){dup_tag}")
                     
                     # 更新全域狀態 - 判定結果與推論結束
                     j_simple = "OK" if ai_judgment == "OK" else ("NG" if ai_judgment.startswith("NG") else "ERR")
@@ -743,6 +748,7 @@ class CAPIServer:
                         client_addr, parsed, inference_results,
                         ai_judgment, ng_details,
                         request_time, response_time, processing_seconds,
+                        is_duplicate,
                     )
 
                 except ProtocolError as e:
@@ -841,19 +847,23 @@ class CAPIServer:
                 is_duplicate = panel_result[4]
 
                 if is_duplicate:
-                    return "ERR:DUPLICATE_PANEL", "[]", []
+                    logger.warning(
+                        f"重複投片 (DUPLICATE_PANEL): {panel_dir} — "
+                        f"已依建立時間選出最新圖片繼續推論，結果將標記 [DUPLICATE]"
+                    )
 
                 if not results:
-                    return "ERR:NO_IMAGES_FOUND", "[]", []
+                    return "ERR:NO_IMAGES_FOUND", "[]", [], False
 
                 # 彙總判定
                 ai_judgment, ng_details = aggregate_judgment(results)
 
-                return ai_judgment, ng_details, results
+                return ai_judgment, ng_details, results, is_duplicate
 
             except Exception as e:
                 logger.error(f"Inference error: {e}", exc_info=True)
-                return f"ERR:INFERENCE_FAILED ({type(e).__name__}: {str(e)[:100]})", "[]", []
+                return f"ERR:INFERENCE_FAILED ({type(e).__name__}: {str(e)[:100]})", "[]", [], False
+
 
     def _save_results_async(
         self,
@@ -865,6 +875,7 @@ class CAPIServer:
         request_time: str,
         response_time: str,
         processing_seconds: float,
+        is_duplicate: bool = False,
     ):
         """
         非同步儲存 Heatmap 和 DB 記錄（在背景執行緒中執行）
@@ -893,7 +904,14 @@ class CAPIServer:
             # 儲存到資料庫
             total_images = len(image_results_data)
             ng_images = sum(1 for d in image_results_data if d.get("is_ng"))
-            error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
+
+            # 組合 error_message：重複投片加上標記
+            if is_duplicate:
+                dup_note = "[DUPLICATE_PANEL] 重複投片，已依建立時間選取最新圖片推論"
+                err_suffix = ai_judgment if ai_judgment.startswith("ERR") else ""
+                error_message = f"{dup_note}\n{err_suffix}".strip()
+            else:
+                error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
 
             self.db.save_inference_record(
                 glass_id=parsed["glass_id"],
@@ -914,11 +932,13 @@ class CAPIServer:
                 image_results_data=image_results_data,
             )
 
+            dup_tag = " [DUPLICATE]" if is_duplicate else ""
             save_time = time.time() - save_start
-            logger.info(f"[{client_addr}] Async save completed: heatmap+DB in {save_time:.2f}s")
+            logger.info(f"[{client_addr}] Async save completed: heatmap+DB in {save_time:.2f}s{dup_tag}")
 
         except Exception as e:
             logger.error(f"[{client_addr}] Async save failed: {e}", exc_info=True)
+
 
     def _save_error_record(self, request_time: str, parsed: Optional[Dict], raw_data: Optional[str], error: str):
         """儲存錯誤記錄到資料庫"""

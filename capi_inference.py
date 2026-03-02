@@ -1090,8 +1090,52 @@ class CAPIInferencer:
         
         return debug_img
 
+    @staticmethod
+    def _select_latest_panel_images(image_files: List[Path]) -> List[Path]:
+        """
+        當面版資料夾存在重複投片（圖片數量超過上限）時，
+        依每個圖片前綴（去除時間戳尾碼後）只保留「最新」的一張。
+
+        命名規則假設: {前綴}_{HHMMSS}.{副檔名}
+        例如: G0F00000_104441.tif → 前綴 G0F00000，時間戳 104441。
+
+        排序優先順序：
+          1. 【優先】檔名中的 HHMMSS 時間戳（跨 Windows/Linux 完全一致，
+                     不受 rsync/cp 複製時 mtime 被保留的影響）
+          2. 【Fallback】st_mtime（當檔名格式不符時使用）
+        """
+        from collections import defaultdict
+
+        def _sort_key(f: Path):
+            """回傳排序鍵：優先取檔名時間戳，否則用 st_mtime"""
+            parts = f.stem.rsplit("_", 1)
+            if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 6:
+                # 檔名時間戳 (HHMMSS) 轉整數，數值越大越新
+                return (1, int(parts[1]), 0.0)
+            # fallback: mtime (跨平台一致，但可能受複製影響)
+            return (0, 0, f.stat().st_mtime)
+
+        prefix_map: Dict[str, List[Path]] = defaultdict(list)
+        for f in image_files:
+            stem = f.stem  # e.g. "G0F00000_104441" 或 "PINIGBI _104432"
+            parts = stem.rsplit("_", 1)
+            if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 6:
+                prefix = parts[0]
+            else:
+                prefix = stem
+            prefix_map[prefix].append(f)
+
+        selected = []
+        for prefix, files in prefix_map.items():
+            latest = max(files, key=_sort_key)
+            selected.append(latest)
+
+        return sorted(selected)
+
+
     def _parse_defect_txt(self, defect_file: Path) -> Dict[str, List[Dict]]:
         """解析 Defect.txt"""
+
         defects_map = {}
         if not defect_file.exists():
             return defects_map
@@ -1243,9 +1287,17 @@ class CAPIInferencer:
         
         # === 重複投片檢查 ===
         max_imgs = self.config.max_images_per_panel
+        is_duplicate = False
         if len(image_files) > max_imgs:
-            print(f"⚠️ 重複投片偵測: {panel_dir.name} 有 {len(image_files)} 張圖片 (上限 {max_imgs})")
-            return results, None, False, "", True  # is_duplicate = True
+            is_duplicate = True
+            original_count = len(image_files)
+            image_files = self._select_latest_panel_images(image_files)
+            print(
+                f"⚠️ 重複投片偵測: {panel_dir.name} 共 {original_count} 張圖片 (上限 {max_imgs})，"
+                f"依建立時間選出最新 {len(image_files)} 張繼續推論"
+            )
+            for f in image_files:
+                print(f"   ✅ 選用: {f.name}")
         
         # 如果有的話，解析 Defect.txt
         defect_map = self._parse_defect_txt(panel_dir / "Defect.txt")
@@ -1575,7 +1627,7 @@ class CAPIInferencer:
         total_panel_time = preprocess_time + inference_time + postprocess_time
         print(f"📊 Panel {panel_dir.name} 總計: 預處理 {preprocess_time:.2f}s + 推論 {inference_time:.2f}s + 後處理 {postprocess_time:.2f}s = {total_panel_time:.2f}s")
         
-        return results, omit_vis, omit_overexposed, omit_overexposure_info, False  # is_duplicate = False
+        return results, omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate
 
     def visualize_inference_result(self, image_path: Path, result: ImageResult) -> np.ndarray:
         """視覺化推論結果（含異常標記 與 AOI 標記）"""
