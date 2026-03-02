@@ -14,6 +14,41 @@
         align-items: stretch;
     }
 
+    .threshold-group {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-width: 130px;
+    }
+
+    .threshold-group label {
+        color: var(--text-muted);
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .threshold-group input[type="number"] {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        color: var(--err);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.95rem;
+        font-weight: 600;
+        outline: none;
+        width: 100%;
+        transition: border-color 0.2s;
+        text-align: center;
+    }
+
+    .threshold-group input[type="number"]:focus {
+        border-color: var(--err);
+        box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15);
+    }
+
     .input-section input[type="text"] {
         flex: 1;
         background: var(--surface);
@@ -295,6 +330,10 @@
         <div class="input-section">
             <input type="text" id="image-path-input" placeholder="輸入圖片絕對路徑，例如: /data/images/G0F00000_143133.tif"
                 autocomplete="off" spellcheck="false">
+            <div class="threshold-group">
+                <label for="threshold-input">判定門檻</label>
+                <input type="number" id="threshold-input" value="0.5" min="0" max="1" step="0.01">
+            </div>
             <button class="btn-run" id="btn-run" onclick="runInference()">
                 <span class="spinner" id="spinner"></span>
                 <span id="btn-text">▶ 推論</span>
@@ -361,7 +400,10 @@
             const resp = await fetch('/api/debug/inference', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ image_path: imagePath }),
+                body: JSON.stringify({
+                    image_path: imagePath,
+                    threshold: parseFloat(document.getElementById('threshold-input').value) || 0.5,
+                }),
             });
 
             const data = await resp.json();

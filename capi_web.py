@@ -695,28 +695,38 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "推論器尚未載入 (inferencer is None)"})
             return
 
+        # Debug 門檻：預設 0.5（比正式環境低，用於漏檢排查）
+        debug_threshold = float(data.get("threshold", 0.5))
+        original_threshold = self.inferencer.threshold
+
         try:
             total_start = _time.time()
 
-            # 1. 預處理
+            # 1. 預處理（不需要 GPU，也不用 threshold）
             result = self.inferencer.preprocess_image(image_path)
             if result is None:
                 self._send_json({"error": f"無法載入或預處理圖片: {image_path}"})
                 return
 
-            # 2. 推論 (需要 GPU lock)
+            # 2. 推論 — 門檻修改必須在 GPU lock 內，避免影響生產推論
+            #    生產推論 (CAPIServer._process_request) 也用同一把 _gpu_lock，
+            #    所以在 lock 內修改 threshold 是安全的。
             if hasattr(self, '_gpu_lock') and self._gpu_lock:
                 with self._gpu_lock:
+                    self.inferencer.threshold = debug_threshold
                     result = self.inferencer.run_inference(result)
+                    self.inferencer.threshold = original_threshold
             else:
+                self.inferencer.threshold = debug_threshold
                 result = self.inferencer.run_inference(result)
+                self.inferencer.threshold = original_threshold
 
             total_time = _time.time() - total_start
 
             # 3. 建立 Debug heatmap 暫存目錄
-            if self._debug_heatmap_dir is None:
-                self._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
-            debug_dir = self._debug_heatmap_dir
+            if CAPIWebHandler._debug_heatmap_dir is None:
+                CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
+            debug_dir = CAPIWebHandler._debug_heatmap_dir
             debug_dir.mkdir(parents=True, exist_ok=True)
 
             image_name = image_path.stem
@@ -819,6 +829,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.info(f"[DEBUG] Inference {image_path.name}: {judgment} ({total_time:.2f}s, {len(result.anomaly_tiles)} anomalies)")
 
         except Exception as e:
+            self.inferencer.threshold = original_threshold
             logger.error(f"[DEBUG] Inference error: {e}", exc_info=True)
             self._send_json({"error": f"推論失敗: {str(e)}"})
 

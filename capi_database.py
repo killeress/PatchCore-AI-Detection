@@ -325,11 +325,19 @@ class CAPIDatabase:
             result["images"] = []
             for img in images:
                 img_dict = dict(img)
-                # 取得 tile 結果
+                # 取得 tile 結果 (NG優先、然後依分數降冪)
                 tiles = conn.execute(
                     """SELECT * FROM tile_results
                        WHERE image_result_id = ?
-                       ORDER BY tile_id""",
+                       ORDER BY 
+                           CASE 
+                               WHEN is_dust = 0 AND is_bomb = 0 THEN 1
+                               WHEN is_bomb = 1 THEN 2
+                               WHEN is_dust = 1 THEN 3
+                               ELSE 4
+                           END ASC,
+                           score DESC,
+                           tile_id ASC""",
                     (img_dict["id"],)
                 ).fetchall()
                 img_dict["tiles"] = [dict(t) for t in tiles]

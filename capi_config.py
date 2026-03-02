@@ -135,6 +135,7 @@ class CAPIConfig:
     # 炸彈系統設定 (機台模擬缺陷)
     bomb_defects: List[BombDefect] = field(default_factory=list)
     bomb_match_tolerance: int = 100  # 座標匹配容忍度 (產品座標系像素)
+    bomb_line_min_aspect_ratio: float = 3.0  # Line 型炸彈 heatmap 最小長寬比
     
     # 配置檔路徑（載入後記錄）
     config_path: Optional[Path] = None
@@ -183,6 +184,7 @@ class CAPIConfig:
             max_images_per_panel=data.get("max_images_per_panel", 7),
             bomb_defects=[BombDefect.from_dict(b) for b in data.get("bomb_defects", [])],
             bomb_match_tolerance=data.get("bomb_match_tolerance", 100),
+            bomb_line_min_aspect_ratio=data.get("bomb_line_min_aspect_ratio", 3.0),
             config_path=path,
         )
         
@@ -217,6 +219,7 @@ class CAPIConfig:
             "max_images_per_panel": self.max_images_per_panel,
             "bomb_defects": [b.to_dict() for b in self.bomb_defects],
             "bomb_match_tolerance": self.bomb_match_tolerance,
+            "bomb_line_min_aspect_ratio": self.bomb_line_min_aspect_ratio,
         }
         
         with open(yaml_path, "w", encoding="utf-8") as f:

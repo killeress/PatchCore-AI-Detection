@@ -210,12 +210,12 @@ class HeatmapManager:
         header_h = 60
         header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
 
-        if is_dust:
+        if is_bomb:
+            verdict = f"BOMB: {bomb_code} (Filtered as OK)"
+            verdict_color = (255, 0, 255)  # 洋紅色
+        elif is_dust:
             verdict = "DUST (Filtered as OK)"
             verdict_color = (0, 200, 255)
-        elif is_bomb:
-            verdict = f"BOMB: {bomb_code} (Filtered as OK)"
-            verdict_color = (0, 100, 255)
         elif score >= score_threshold:
             verdict = "NG (Detected)"
             verdict_color = (0, 0, 255)

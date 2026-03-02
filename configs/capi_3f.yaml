@@ -83,6 +83,7 @@ max_images_per_panel: 20
 # defect_type: "line" = 豎線 (兩點定義起終點), "point" = 點 (多個座標位置)
 # coordinates: 產品座標系 (1920x1080)
 bomb_match_tolerance: 100  # 座標匹配容忍度 (產品座標系像素)
+bomb_line_min_aspect_ratio: 3.0  # Line 型炸彈 heatmap 最小長寬比 (建議 2.5~4.0)
 bomb_defects:
   - image_prefix: "G0F00000"
     defect_code: "PCLV6GA0"

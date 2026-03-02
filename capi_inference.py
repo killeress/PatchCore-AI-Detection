@@ -1189,12 +1189,65 @@ class CAPIInferencer:
         
         return img_x, img_y
 
+    def _check_heatmap_line_shape(
+        self,
+        anomaly_map: np.ndarray,
+        min_aspect_ratio: float = 3.0,
+        top_percent: float = 10.0,
+    ) -> Tuple[bool, float]:
+        """
+        檢查 anomaly_map 的熱區形態是否為線狀 (高長寬比)
+        
+        Args:
+            anomaly_map: Heatmap 異常圖 (float)
+            min_aspect_ratio: 最小長寬比閾值 (>= 此值判定為線狀)
+            top_percent: 取前 X% 最熱像素進行形態分析
+            
+        Returns:
+            (is_line, aspect_ratio) - 是否為線狀, 實際長寬比
+        """
+        if anomaly_map is None or anomaly_map.size == 0:
+            return False, 0.0
+        
+        amap = np.asarray(anomaly_map, dtype=np.float32)
+        amap = np.maximum(amap, 0.0)
+        
+        positive_values = amap[amap > 0]
+        if len(positive_values) == 0:
+            return False, 0.0
+        
+        # Percentile 二值化
+        threshold = np.percentile(positive_values, 100 - top_percent)
+        binary = (amap >= threshold).astype(np.uint8) * 255
+        
+        # 找輪廓
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return False, 0.0
+        
+        # 取最大輪廓
+        largest = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest) < 10:
+            return False, 0.0
+        
+        # 最小外接矩形 → 計算長寬比
+        rect = cv2.minAreaRect(largest)
+        w, h = rect[1]
+        if min(w, h) <= 0:
+            return False, 0.0
+        
+        aspect_ratio = max(w, h) / min(w, h)
+        is_line = aspect_ratio >= min_aspect_ratio
+        
+        return is_line, aspect_ratio
+
     def check_bomb_match(
         self,
         image_prefix: str,
         tile_center_x: int,
         tile_center_y: int,
         raw_bounds: Tuple[int, int, int, int],
+        anomaly_map: Optional[np.ndarray] = None,
     ) -> Tuple[bool, str]:
         """
         檢查異常 tile 是否匹配炸彈系統的已知座標
@@ -1204,6 +1257,7 @@ class CAPIInferencer:
             tile_center_x: 異常 tile 中心 x (圖片座標)
             tile_center_y: 異常 tile 中心 y (圖片座標)
             raw_bounds: 原始 Otsu 邊界 (用於座標轉換)
+            anomaly_map: 該 tile 的 anomaly map (用於 line 型形態驗證)
             
         Returns:
             (is_bomb, defect_code) - 是否為炸彈, 對應的 Defect Code
@@ -1235,6 +1289,16 @@ class CAPIInferencer:
                 max_y = max(img_y1, img_y2)
                 
                 if min_x <= tile_center_x <= max_x and min_y <= tile_center_y <= max_y:
+                    # 額外驗證：heatmap 是否呈現線狀形態
+                    if anomaly_map is not None:
+                        is_line, aspect_ratio = self._check_heatmap_line_shape(
+                            anomaly_map,
+                            min_aspect_ratio=self.config.bomb_line_min_aspect_ratio,
+                        )
+                        if not is_line:
+                            print(f"⚠️ BOMB line 位置匹配但熱力圖非線狀 (aspect_ratio={aspect_ratio:.2f} < {self.config.bomb_line_min_aspect_ratio})，跳過 {bomb.defect_code}")
+                            continue
+                        print(f"✅ BOMB line 形態驗證通過 (aspect_ratio={aspect_ratio:.2f})")
                     return True, bomb.defect_code
                     
             elif bomb.defect_type == "point":
@@ -1617,7 +1681,8 @@ class CAPIInferencer:
                         
                         # 用熱力圖峰值座標來比對炸彈
                         is_bomb, bomb_code = self.check_bomb_match(
-                            img_prefix, tile.anomaly_peak_x, tile.anomaly_peak_y, result.raw_bounds
+                            img_prefix, tile.anomaly_peak_x, tile.anomaly_peak_y, result.raw_bounds,
+                            anomaly_map=anomaly_map
                         )
                         if is_bomb:
                             tile.is_bomb = True
@@ -1735,8 +1800,8 @@ class CAPIInferencer:
         all_dust = False
         all_bomb = False
         if result.anomaly_tiles:
-            non_dust = [t for t in result.anomaly_tiles if not t[0].is_suspected_dust_or_scratch]
-            all_dust = all(t[0].is_suspected_dust_or_scratch for t in result.anomaly_tiles)
+            non_dust = [t for t in result.anomaly_tiles if not t[0].is_suspected_dust_or_scratch or t[0].is_bomb]
+            all_dust = all(t[0].is_suspected_dust_or_scratch and not t[0].is_bomb for t in result.anomaly_tiles)
             all_bomb = non_dust and all(t[0].is_bomb for t in non_dust)
             if all_dust:
                 status = "NG (Dust?)"
