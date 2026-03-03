@@ -44,6 +44,9 @@ class TileInfo:
     mask: Optional[np.ndarray] = field(default=None, repr=False)  # 遮罩: 255=有效, 0=排除
     has_exclusion: bool = False  # 是否包含排除區域
     is_bottom_edge: bool = False # 是否為底部邊緣切塊
+    is_top_edge: bool = False    # 是否為頂部邊緣切塊
+    is_left_edge: bool = False   # 是否為左側邊緣切塊
+    is_right_edge: bool = False  # 是否為右側邊緣切塊
     is_suspected_dust_or_scratch: bool = False  # 是否疑似灰塵或刮痕 (透過 OMIT0000 檢查)
     omit_crop_image: Optional[np.ndarray] = field(default=None, repr=False)  # OMIT 圖片的對應裁切 (用於灰塵檢查)
     dust_mask: Optional[np.ndarray] = field(default=None, repr=False)
@@ -484,8 +487,9 @@ class CAPIInferencer:
         x_positions = generate_tile_positions(otsu_x1, otsu_x2, tile_size, stride)
         y_positions = generate_tile_positions(otsu_y1, otsu_y2, tile_size, stride)
         
-        # 判斷底排 y 座標 (tile 底部邊緣接近 otsu_y2)
+        # 判斷邊緣 tile 座標門檻
         bottom_y_threshold = otsu_y2 - tile_size  # 底排 tile 的起始 y 門檻
+        right_x_threshold = otsu_x2 - tile_size   # 右排 tile 的起始 x 門檻
         
         tiles = []
         excluded_count = 0
@@ -508,8 +512,11 @@ class CAPIInferencer:
                     excluded_count += 1
                     continue  # 完全跳過此 tile
                 
-                # 判斷是否為底排 tile
+                # 判斷是否為邊緣 tile
                 is_bottom = (y >= bottom_y_threshold)
+                is_top = (y <= otsu_y1)
+                is_left = (x <= otsu_x1)
+                is_right = (x >= right_x_threshold)
                 
                 # 擷取 tile 圖片
                 tile_img = image[y:tile_y2, x:tile_x2].copy()
@@ -524,6 +531,9 @@ class CAPIInferencer:
                     mask=None,  # 不再使用遮罩
                     has_exclusion=False,  # 保留此欄位以免影響其他程式碼
                     is_bottom_edge=is_bottom,
+                    is_top_edge=is_top,
+                    is_left_edge=is_left,
+                    is_right_edge=is_right,
                 ))
                 tile_id += 1
         
@@ -583,28 +593,43 @@ class CAPIInferencer:
             raw_bounds=raw_bounds,
         )
     
-    def _apply_edge_margin(self, anomaly_map: np.ndarray, margin_px: int) -> np.ndarray:
+    def _apply_edge_margin(self, anomaly_map: np.ndarray, margin_px: int,
+                           sides: list = None) -> np.ndarray:
         """
-        對 anomaly_map 底部 margin_px 像素做線性漸層衰減 (1→0)
-        用於過濾底部邊緣光影造成的假陽性
+        對 anomaly_map 指定邊做線性漸層衰減 (1→0)
+        用於過濾邊緣光影造成的假陽性
         
         Args:
             anomaly_map: 異常熱圖 (H, W)
-            margin_px: 衰減區域高度 (像素)
+            margin_px: 衰減區域寬度 (像素)
+            sides: 要衰減的方向列表, 如 ['top', 'bottom', 'right']
             
         Returns:
             衰減後的 anomaly_map
         """
-        h = anomaly_map.shape[0]
-        if margin_px <= 0 or margin_px >= h:
+        h, w = anomaly_map.shape[:2]
+        if margin_px <= 0:
             return anomaly_map
+        if sides is None:
+            sides = ['bottom']
         
         result = anomaly_map.copy()
-        # 線性漸層：從 1.0 (margin 頂端) 衰減到 0.0 (底部邊緣)
-        # 改用平方衰減 (Quadric Decay)，讓抑制效果更強 (數值下降更快)
+        # 平方衰減 (Quadric Decay)，讓抑制效果更強
         linear = np.linspace(1.0, 0.0, margin_px).astype(np.float32)
         gradient = np.power(linear, 2)
-        result[-margin_px:, :] *= gradient[:, None]
+        
+        if 'bottom' in sides and margin_px < h:
+            result[-margin_px:, :] *= gradient[:, None]
+        
+        if 'top' in sides and margin_px < h:
+            result[:margin_px, :] *= gradient[::-1, None]  # 反向：頂部邊緣 0 → 1
+        
+        if 'right' in sides and margin_px < w:
+            result[:, -margin_px:] *= gradient[None, :]
+        
+        if 'left' in sides and margin_px < w:
+            result[:, :margin_px] *= gradient[None, ::-1]  # 反向：左側邊緣 0 → 1
+        
         return result
     
     def predict_tile(self, tile: TileInfo) -> Tuple[float, Optional[np.ndarray]]:
@@ -649,18 +674,35 @@ class CAPIInferencer:
                 # 將排除區域設為 0
                 anomaly_map = anomaly_map * (mask_resized / 255.0)
             
-            # 底部邊緣衰減：過濾光影假陽性
+            # 邊緣衰減：過濾光影假陽性
             edge_margin = self.config.edge_margin_px
             if edge_margin > 0:
-                should_apply = tile.is_bottom_edge or (not self.config.edge_margin_bottom_only)
-                if should_apply:
+                # 收集此 tile 需要衰減的方向
+                cfg_sides = self.config.edge_margin_sides
+                sides = []
+                if tile.is_top_edge and cfg_sides.get('top', False):
+                    sides.append('top')
+                if tile.is_bottom_edge and cfg_sides.get('bottom', False):
+                    sides.append('bottom')
+                if tile.is_left_edge and cfg_sides.get('left', False):
+                    sides.append('left')
+                if tile.is_right_edge and cfg_sides.get('right', False):
+                    sides.append('right')
+                
+                if sides:
                     # 將 margin_px 按 anomaly_map 實際尺寸縮放
                     scale = anomaly_map.shape[0] / tile.height
                     scaled_margin = int(edge_margin * scale)
-                    anomaly_map = self._apply_edge_margin(anomaly_map, scaled_margin)
+                    anomaly_map = self._apply_edge_margin(anomaly_map, scaled_margin, sides=sides)
         
-        # 如果有遮罩或底部衰減，重新計算分數
-        need_recalc = (tile.mask is not None) or (tile.is_bottom_edge and self.config.edge_margin_px > 0)
+        # 如果有遮罩或邊緣衰減，重新計算分數
+        has_edge_margin = self.config.edge_margin_px > 0 and any([
+            tile.is_top_edge and self.config.edge_margin_sides.get('top', False),
+            tile.is_bottom_edge and self.config.edge_margin_sides.get('bottom', False),
+            tile.is_left_edge and self.config.edge_margin_sides.get('left', False),
+            tile.is_right_edge and self.config.edge_margin_sides.get('right', False),
+        ])
+        need_recalc = (tile.mask is not None) or has_edge_margin
         if need_recalc and anomaly_map is not None:
             if tile.mask is not None:
                 valid_mask = tile.mask > 0
@@ -1055,7 +1097,7 @@ class CAPIInferencer:
         if heatmap_binary is not None:
             hb = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
             panel_bl[hb > 0] = (255, 255, 255)  # 白色 = 熱區
-        cv2.putText(panel_bl, f"Top {top_percent:.0f}%", (5, 20), 
+        cv2.putText(panel_bl, f"Top {top_percent:g}%", (5, 20), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1)
         
         # --- 右下: 重疊分析 ---
@@ -1670,8 +1712,10 @@ class CAPIInferencer:
                         if anomaly_map is not None and anomaly_map.size > 0:
                             try:
                                 peak_local = np.unravel_index(np.argmax(anomaly_map), anomaly_map.shape)
-                                tile.anomaly_peak_y = tile.y + int(peak_local[0])
-                                tile.anomaly_peak_x = tile.x + int(peak_local[1])
+                                # anomaly_map 尺寸可能和 tile 不同，需要縮放
+                                amap_h, amap_w = anomaly_map.shape[:2]
+                                tile.anomaly_peak_y = tile.y + int(peak_local[0] * tile.height / amap_h)
+                                tile.anomaly_peak_x = tile.x + int(peak_local[1] * tile.width / amap_w)
                             except Exception:
                                 tile.anomaly_peak_x = tile.x + tile.width // 2
                                 tile.anomaly_peak_y = tile.y + tile.height // 2

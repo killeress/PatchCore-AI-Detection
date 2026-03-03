@@ -119,9 +119,11 @@ class CAPIConfig:
     omit_overexposure_mean_threshold: int = 200    # 平均亮度超過此值視為過曝
     omit_overexposure_ratio_threshold: float = 0.5 # 高亮像素(>230)佔比超過此值視為過曝
     
-    # 底部邊緣衰減設定 (過濾光影假陽性)
-    edge_margin_px: int = 80                  # 底部邊緣衰減高度 (px)，0=停用
-    edge_margin_bottom_only: bool = True       # 是否只對底排 tile 生效
+    # 邊緣衰減設定 (過濾光影假陽性)
+    edge_margin_px: int = 80                  # 邊緣衰減寬度 (px)，0=停用
+    edge_margin_sides: Dict[str, bool] = field(default_factory=lambda: {
+        'top': False, 'bottom': True, 'left': False, 'right': False
+    })  # 各邊是否啟用衰減
     
     # 跳過檔案設定 (不進行推論的檔案名稱)
     skip_files: List[str] = field(default_factory=list)
@@ -178,7 +180,7 @@ class CAPIConfig:
             omit_overexposure_mean_threshold=data.get("omit_overexposure_mean_threshold", 200),
             omit_overexposure_ratio_threshold=data.get("omit_overexposure_ratio_threshold", 0.5),
             edge_margin_px=data.get("edge_margin_px", 80),
-            edge_margin_bottom_only=data.get("edge_margin_bottom_only", True),
+            edge_margin_sides=data.get("edge_margin_sides", cls._migrate_edge_margin(data)),
             skip_files=data.get("skip_files", []),
             side_shot_prefixes=data.get("side_shot_prefixes", []),
             max_images_per_panel=data.get("max_images_per_panel", 7),
@@ -214,7 +216,7 @@ class CAPIConfig:
             "omit_overexposure_mean_threshold": self.omit_overexposure_mean_threshold,
             "omit_overexposure_ratio_threshold": self.omit_overexposure_ratio_threshold,
             "edge_margin_px": self.edge_margin_px,
-            "edge_margin_bottom_only": self.edge_margin_bottom_only,
+            "edge_margin_sides": self.edge_margin_sides,
             "skip_files": self.skip_files,
             "max_images_per_panel": self.max_images_per_panel,
             "bomb_defects": [b.to_dict() for b in self.bomb_defects],
@@ -246,6 +248,15 @@ class CAPIConfig:
                 ),
             ]
         )
+    
+    @classmethod
+    def _migrate_edge_margin(cls, data: Dict[str, Any]) -> Dict[str, bool]:
+        """向後相容：將舊版 edge_margin_bottom_only 轉換為新版 edge_margin_sides"""
+        bottom_only = data.get("edge_margin_bottom_only", True)
+        if bottom_only:
+            return {'top': False, 'bottom': True, 'left': False, 'right': False}
+        else:
+            return {'top': True, 'bottom': True, 'left': True, 'right': True}
     
     def get_enabled_exclusion_zones(self) -> List[ExclusionZone]:
         """取得已啟用的排除區域"""

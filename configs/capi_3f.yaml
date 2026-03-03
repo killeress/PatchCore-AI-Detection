@@ -41,7 +41,7 @@ tile_size: 512
 tile_stride: 512  # 非重疊切塊
 
 # 推論設定
-anomaly_threshold: 0.6  # 異常分數閾值
+anomaly_threshold: 0.56  # 異常分數閾值
 model_path: "./model.pt"
 
 # 灰塵偵測設定 (OMIT 圖片分析)
@@ -56,9 +56,13 @@ dust_heatmap_top_percent: 5.0    # Heatmap 熱區取前 X% 最紅像素 (Percent
 omit_overexposure_mean_threshold: 200   # 平均亮度閾值 (正常OMIT約30~80，過曝>200)
 omit_overexposure_ratio_threshold: 0.5  # 高亮像素(>230)佔比閾值 (過曝通常>60%)
 
-# 底部邊緣衰減設定 (過濾光影假陽性)
-edge_margin_px: 256              # 底部邊緣衰減高度 (px)，0=停用
-edge_margin_bottom_only: true     # 是否只對底排 tile 生效
+# 邊緣衰減設定 (過濾光影假陽性)
+edge_margin_px: 256              # 邊緣衰減寬度 (px)，0=停用
+edge_margin_sides:               # 各邊是否啟用衰減
+  top: true
+  bottom: true
+  left: false
+  right: true
 
 # 跳過檔案 (使用檔名前綴比對，支援帶時間戳的 TIF 檔案)
 # 例如 "B0F00000" 會匹配 "B0F00000.png" 和 "B0F00000_031447.tif"
