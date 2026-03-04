@@ -1,84 +1,220 @@
-# CAPI AI 推論系統
+# CAPI AI — Automated Optical Inspection Intelligence System
 
-CAPI 面板異常檢測推論系統，包含批量推論引擎與 TCP/IP AI 推論伺服器。
+> **An industrial-grade AI inference platform for panel defect detection, built on PatchCore anomaly detection with real-time TCP/IP communication, heatmap visualization, and human-inspection cross-validation.**
 
-## 檔案結構
+[![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python)](https://python.org)
+[![PatchCore](https://img.shields.io/badge/AI-PatchCore-orange)](https://github.com/amazon-science/patchcore-inspection)
+[![OpenVINO](https://img.shields.io/badge/Runtime-OpenVINO%20%7C%20PyTorch-lightblue)](https://openvino.ai)
+[![SQLite](https://img.shields.io/badge/Database-SQLite-green)](https://sqlite.org)
+
+🇹🇼 [繁體中文版說明 → README.zh-TW.md](./README.zh-TW.md)
+
+---
+
+## Overview
+
+CAPI AI integrates seamlessly into existing AOI (Automated Optical Inspection) production lines, acting as a second-layer AI judge that validates machine judgment using deep learning anomaly detection. It supports real-time inference via TCP/IP, persists all results to a SQLite database, and provides a built-in web dashboard for traceability and analytics — including comparison with RIC (human re-inspection) records.
+
+```
+AOI Machine  ──TCP/IP──▶  CAPI AI Server  ──▶  SQLite DB
+                                │                    │
+                                ▼                    ▼
+                          Heatmap Files         Web Dashboard
+                                                     │
+                                            RIC Comparison Report
+```
+
+---
+
+## Key Features
+
+| Feature | Description |
+|---------|-------------|
+| 🔬 **PatchCore Inference** | Tile-based anomaly detection (512×512 patches) with configurable thresholds |
+| 🌐 **TCP/IP Server** | Multi-client socket server for real-time AOI integration |
+| 🗺️ **Heatmap Visualization** | Per-tile anomaly heatmaps with overlay rendering |
+| 🧹 **Smart Filtering** | Dust/scratch suppression via OMIT image cross-validation & Heatmap IOU |
+| 💣 **Bomb Defect Detection** | YAML-configurable coordinate-based bomb defect classification |
+| 📊 **Web Dashboard** | Real-time monitoring, searchable record history, per-shift statistics |
+| 🔎 **RIC Cross-Validation** | Import human inspection (RIC) data and compare against AI/AOI results |
+| 🗃️ **3-Layer Traceability** | Record → Image → Tile level persistence with full audit trail |
+| ⚡ **Dual Runtime** | Supports both OpenVINO (`.xml`) and PyTorch (`.pt`) model formats |
+| 🏭 **Multi-Line Support** | Port-per-line architecture (Line N → Port 79NN) |
+
+---
+
+## Project Structure
 
 ```
 CAPI01_AD/
+│
 ├── configs/
-│   └── capi_3f.yaml                  # CAPI_3F 推論配置
+│   └── capi_3f.yaml              # Inference configuration (thresholds, exclusion zones, bomb coords)
 │
-│── 核心模組 ──
-├── capi_config.py                    # 配置管理模組
-├── capi_inference.py                 # 推論核心引擎 (PatchCore)
-├── capi_mark.png                     # MARK 模板圖
-├── model.pt                          # AI 模型 (PatchCore)
+├── ── Core Modules ──
+├── capi_config.py                # YAML config loader & validator
+├── capi_inference.py             # PatchCore inference engine (tiling, scoring, filtering)
+├── capi_heatmap.py               # Heatmap generation & file management
+├── capi_database.py              # SQLite persistence (records / images / tiles)
 │
-│── AI 推論伺服器 ──
-├── capi_server.py                    # TCP Socket Server (port 可配置)
-├── capi_database.py                  # SQLite 推論記錄持久化
-├── capi_heatmap.py                   # 熱力圖生成與儲存
-├── capi_web.py                       # Web 查閱介面 (HTTP)
-├── server_config.yaml                # Linux 伺服器設定
-├── server_config_local.yaml          # Windows 本地測試設定
-├── start_server.sh                   # Linux 啟動腳本
-├── test_client.py                    # 測試客戶端
+├── ── Server ──
+├── capi_server.py                # TCP Socket Server (production entry point)
+├── capi_web.py                   # Web interface (HTTP server + REST API)
+├── server_config.yaml            # Linux production config
+├── server_config_local.yaml      # Windows local testing config
+├── start_server.sh               # Linux startup script
 │
-│── 分析工具 ──
-├── capi_missed_detection_analyzer.py # 漏檢分析工具
-├── CAPI_FLOW.md                      # 檢測流程圖
-├── requirements.txt                  # Python 依賴
-└── README.md                         # 本文件
+├── ── Templates & Static ──
+├── templates/                    # Jinja2 HTML templates
+│   ├── base.html                 # Layout & navigation
+│   ├── dashboard_v3.html         # Real-time monitoring dashboard
+│   ├── record_detail_v3.html     # Per-record drill-down with heatmaps
+│   ├── ric_report.html           # RIC human inspection comparison report
+│   └── ...
+├── static/                       # CSS, JS, assets
+│
+├── ── Tooling ──
+├── capi_missed_detection_analyzer.py  # Missed detection batch analyzer
+├── diagnose_bomb.py                   # Bomb defect diagnostics & visualizer
+├── auto_sender.py                     # Automated test request sender
+├── test_client.py                     # TCP client for manual testing
+├── check_db.py                        # Database inspection utility
+│
+├── model.pt                      # Trained PatchCore model
+├── capi_mark.png                 # MARK template for exclusion detection
+├── requirements.txt
+└── README.md
 ```
 
-## 使用方式
+---
 
-### 啟動 AI 推論伺服器 (Linux)
+## Getting Started
+
+### Prerequisites
 
 ```bash
-# 安裝依賴
 pip install -r requirements.txt
+```
 
-# 調整設定
+> **GPU Note**: OpenVINO inference is recommended for production. PyTorch (`.pt`) is supported for local testing without Intel hardware.
+
+### Linux Production Server
+
+```bash
+# 1. Edit configuration
 vim server_config.yaml
 
-# 啟動
+# 2. Launch (background + web dashboard)
 chmod +x start_server.sh
 ./start_server.sh
 ```
 
-### Windows 本地測試
+### Windows Local Testing
 
 ```bash
-# 終端 A：啟動 Server
+# Terminal A — Start the inference server
 python capi_server.py --config server_config_local.yaml
 
-# 終端 B：基本測試
+# Terminal B — Run a test request
 python test_client.py
 
-# 終端 B：真實推論測試
+# Terminal B — Test with a real panel folder
 python test_client.py --real "D:\path\to\panel_folder"
 
-# 瀏覽器：查看結果
+# Browser — View the web dashboard
 # http://localhost:8080
 ```
 
-### 通訊協議
+---
+
+## Communication Protocol
+
+CAPI AI uses a simple semicolon-delimited TCP text protocol:
 
 ```
-[Request]  AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片目錄路徑
-[Response] AOI@玻璃ID;機種ID;機台編號;機檢判定;AI判定
+[Request]   AOI@<GlassID>;<ModelID>;<MachineNo>;<ResX>,<ResY>;<MachineJudgment>;<ImageDir>
+[Response]  AOI@<GlassID>;<ModelID>;<MachineNo>;<MachineJudgment>;<AIJudgment>
 ```
 
-AI 判定: `OK` / `NG@圖片名(X,Y)` / `ERR:描述`
+**AI Judgment values:**
 
-## 功能特點
+| Value | Meaning |
+|-------|---------|
+| `OK` | No defect detected |
+| `NG@ImageName(X,Y)` | Defect found at tile coordinates (X, Y) |
+| `ERR:description` | Processing error |
 
-- **TCP/IP Socket 通訊**：Testing ↔ AI Server，支援多客戶端
-- **PatchCore 異常檢測**：512×512 切塊推論
-- **可配置排除區域**：MARK 二維碼、機構區域
-- **灰塵/刮痕過濾**：OMIT 圖片交叉驗證 + Heatmap IOU
-- **SQLite 追溯**：三層記錄 (推論 → 圖片 → Tile)
-- **Web 查閱**：熱力圖瀏覽 + 搜尋 + 統計
-- **多格式模型**：支援 OpenVINO (.xml) 和 PyTorch (.pt)
+---
+
+## Web Dashboard
+
+Access the dashboard at `http://<server>:<port>/` after starting the server.
+
+| Route | Description |
+|-------|-------------|
+| `/` | Real-time monitoring dashboard |
+| `/records` | Searchable inference history |
+| `/record/<id>` | Per-record heatmap drill-down |
+| `/ric` | RIC human inspection comparison report |
+| `/debug` | Single-image debug inference |
+| `/stats` | Historical statistics & trends |
+
+### RIC Comparison Report
+
+Import human re-inspection (RIC) `.xls` export files to automatically compare:
+- **AOI Accuracy** — Agreement rate between AOI judgment and RIC result
+- **AI Accuracy** — Agreement rate between AI judgment and RIC result
+- **Over-inspection Rate** — Cases where AOI/AI judged NG but RIC judged OK
+- **Miss-detection Rate** — Cases where AOI/AI judged OK but RIC judged NG
+
+Click any stat card to instantly filter the detail table. Export filtered results as CSV.
+
+---
+
+## Configuration
+
+Key parameters in `configs/capi_3f.yaml`:
+
+```yaml
+threshold: 0.65                    # Anomaly score threshold (0.0 ~ 1.0)
+tile_size: 512                     # Inference tile size (px)
+dust_heatmap_top_percent: 0.4      # Dust/scratch IOU top-percentile
+excluded_edge_margin: 0.03         # Edge exclusion ratio
+bomb_defects:                      # Coordinate-based bomb defect rules
+  - image_prefix: "STANDARD"
+    coordinates: [[x1,y1], ...]
+```
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    AOI Machine (Client)                  │
+└──────────────────────────┬──────────────────────────────┘
+                           │ TCP/IP Request
+┌──────────────────────────▼──────────────────────────────┐
+│                   CAPIServer (capi_server.py)            │
+│  ┌──────────────┐   ┌───────────────┐   ┌────────────┐  │
+│  │ Config Loader│   │ CAPIInferencer│   │HeatmapMgr  │  │
+│  │(capi_config) │   │(PatchCore)    │   │(capi_heatm)│  │
+│  └──────────────┘   └───────┬───────┘   └────────────┘  │
+│                             │                            │
+│  ┌──────────────────────────▼──────────────────────────┐ │
+│  │              CAPIDatabase (SQLite)                  │ │
+│  │  inference_records → image_results → tile_results   │ │
+│  └──────────────────────────┬──────────────────────────┘ │
+└──────────────────────────── │ ──────────────────────────-┘
+                              │
+┌─────────────────────────────▼───────────────────────────┐
+│                 CAPIWebHandler (capi_web.py)             │
+│         HTTP Dashboard + REST API + RIC Reports          │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## License
+
+Internal use only. © CAPI AI Team.
