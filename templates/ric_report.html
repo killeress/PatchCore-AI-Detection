@@ -357,7 +357,8 @@
 {% endblock %}
 
 {% block extra_head %}
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<!-- 改為使用本地端的 Chart.js，避免生產環境無法連外網導致套件下載失敗 -->
+<script src="/static/js/chart.umd.min.js"></script>
 {% endblock %}
 
 {% block content %}
@@ -644,9 +645,10 @@
                     return;
                 }
                 content.style.display = 'block';
-                renderStats(data);
-                renderCharts(data);
-                renderDetails(data.details || []);
+
+                try { renderStats(data); } catch (e) { console.error('Stats render error:', e); }
+                try { renderCharts(data); } catch (e) { console.error('Charts render error:', e); }
+                try { renderDetails(data.details || []); } catch (e) { console.error('Details render error:', e); }
             })
             .catch(err => {
                 loading.style.display = 'none';
@@ -676,6 +678,11 @@
     }
 
     function renderCharts(data) {
+        if (typeof Chart === 'undefined') {
+            console.warn('Chart.js 尚未加載，停止渲染圖表');
+            return;
+        }
+
         // Daily chart
         const dailyCtx = document.getElementById('dailyChart').getContext('2d');
         if (dailyChart) dailyChart.destroy();
