@@ -127,6 +127,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_search_export(query)
             elif path == "/debug":
                 self._handle_debug_page(path)
+            elif path == "/ric":
+                self._handle_ric_page(query, path)
+            elif path == "/api/ric/report":
+                self._handle_ric_report_api(query)
             elif path == "/api/stats":
                 self._handle_api_stats(query)
             elif path == "/api/status":
@@ -163,6 +167,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/debug/inference":
                 self._handle_debug_inference_run()
+            elif path == "/api/ric/upload":
+                self._handle_ric_upload()
+            elif path == "/api/ric/delete":
+                self._handle_ric_delete()
             else:
                 self._send_404(path)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -663,6 +671,226 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         html = template.render(request_path=path)
         self._send_response(200, html)
 
+    # ── RIC 人工檢驗報表功能 ─────────────────────────
+
+    def _handle_ric_page(self, query: dict, path: str):
+        """人工檢驗 (RIC) 比對報表頁面"""
+        batches = self.db.get_ric_batches() if self.db else []
+        template = self.jinja_env.get_template("ric_report.html")
+        html = template.render(request_path=path, batches=batches)
+        self._send_response(200, html)
+
+    def _handle_ric_upload(self):
+        """上傳 XLS 檔案並匯入 RIC 資料"""
+        import cgi
+        import io
+
+        content_type = self.headers.get('Content-Type', '')
+        if 'multipart/form-data' not in content_type:
+            self._send_json({"error": "請使用 multipart/form-data 上傳檔案"})
+            return
+
+        # 解析 multipart form data
+        try:
+            boundary = content_type.split('boundary=')[1]
+        except IndexError:
+            self._send_json({"error": "無法解析 boundary"})
+            return
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+
+        # 用 cgi 解析 multipart
+        environ = {
+            'REQUEST_METHOD': 'POST',
+            'CONTENT_TYPE': content_type,
+            'CONTENT_LENGTH': str(content_length),
+        }
+        fs = cgi.FieldStorage(
+            fp=io.BytesIO(body),
+            environ=environ,
+            keep_blank_values=True
+        )
+
+        if 'file' not in fs:
+            self._send_json({"error": "請提供檔案 (field name: file)"})
+            return
+
+        file_item = fs['file']
+        filename = file_item.filename or 'unknown.xlsx'
+        file_data = file_item.file.read()
+
+        if not file_data:
+            self._send_json({"error": "檔案為空"})
+            return
+
+        try:
+            # 先偵測是否為 HTML 格式 (很多舊系統匯出的 .xls 其實是 HTML)
+            is_html = file_data[:100].strip().startswith(b'<')
+
+            if is_html:
+                # HTML Table 格式 → 用 html.parser
+                from html.parser import HTMLParser
+                import html as html_module
+
+                class TableParser(HTMLParser):
+                    def __init__(self):
+                        super().__init__()
+                        self.in_th = False
+                        self.in_td = False
+                        self.headers = []
+                        self.rows = []
+                        self.current_row = []
+                        self.current_data = ''
+
+                    def handle_starttag(self, tag, attrs):
+                        if tag == 'th':
+                            self.in_th = True
+                            self.current_data = ''
+                        elif tag == 'td':
+                            self.in_td = True
+                            self.current_data = ''
+                        elif tag == 'tr':
+                            self.current_row = []
+
+                    def handle_endtag(self, tag):
+                        if tag == 'th':
+                            self.in_th = False
+                            self.headers.append(self.current_data.strip())
+                        elif tag == 'td':
+                            self.in_td = False
+                            val = self.current_data.strip()
+                            if val == '\xa0' or val == '&nbsp;':
+                                val = ''
+                            self.current_row.append(val)
+                        elif tag == 'tr':
+                            if self.current_row:
+                                self.rows.append(self.current_row)
+
+                    def handle_data(self, data):
+                        if self.in_th or self.in_td:
+                            self.current_data += data
+
+                    def handle_entityref(self, name):
+                        if self.in_th or self.in_td:
+                            ch = html_module.unescape(f'&{name};')
+                            self.current_data += ch
+
+                # 嘗試多種編碼
+                text = ''
+                for enc in ['utf-8', 'gb2312', 'gbk', 'big5', 'latin-1']:
+                    try:
+                        text = file_data.decode(enc)
+                        break
+                    except (UnicodeDecodeError, LookupError):
+                        continue
+
+                parser = TableParser()
+                parser.feed(text)
+
+                headers = parser.headers
+                records_data = []
+                for row in parser.rows:
+                    if not any(row):
+                        continue
+                    rec = {}
+                    for i, header in enumerate(headers):
+                        if i < len(row):
+                            rec[header] = row[i]
+                        else:
+                            rec[header] = ''
+                    if rec.get('PNL_ID'):
+                        records_data.append(rec)
+
+            elif filename.lower().endswith('.xls') and not filename.lower().endswith('.xlsx'):
+                # .xls 格式 (Excel 97-2003) → 用 xlrd
+                import xlrd
+                wb = xlrd.open_workbook(file_contents=file_data)
+                ws = wb.sheet_by_index(0)
+
+                if ws.nrows == 0:
+                    self._send_json({"error": "檔案無資料"})
+                    return
+
+                headers = [str(ws.cell_value(0, c)).strip() for c in range(ws.ncols)]
+
+                records_data = []
+                for r in range(1, ws.nrows):
+                    row_vals = [ws.cell_value(r, c) for c in range(ws.ncols)]
+                    if not any(row_vals):
+                        continue
+                    rec = {}
+                    for i, header in enumerate(headers):
+                        if i < len(row_vals):
+                            val = row_vals[i]
+                            rec[header] = str(val) if val is not None else ''
+                        else:
+                            rec[header] = ''
+                    if rec.get('PNL_ID'):
+                        records_data.append(rec)
+
+            else:
+                self._send_json({"error": "不支援的檔案格式，請上傳 .xls 檔案"})
+                return
+
+            if not records_data:
+                self._send_json({"error": "檔案中無有效 RIC 記錄 (缺少 PNL_ID)"})
+                return
+
+            batch_id = self.db.save_ric_batch(filename, records_data)
+
+            self._send_json({
+                "success": True,
+                "batch_id": batch_id,
+                "filename": filename,
+                "total_records": len(records_data),
+                "message": f"成功匯入 {len(records_data)} 筆 RIC 記錄"
+            })
+
+        except ImportError as ie:
+            self._send_json({"error": f"缺少套件，請執行: pip install xlrd ({ie})"})
+        except Exception as e:
+            logger.error(f"RIC upload error: {e}", exc_info=True)
+            self._send_json({"error": f"解析檔案失敗: {str(e)}"})
+
+    def _handle_ric_delete(self):
+        """API: 刪除 RIC 匯入批次"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+            batch_id = data.get('batch_id')
+
+            if not batch_id:
+                self._send_json({"error": "缺少 batch_id 參數"})
+                return
+
+            batch_id = int(batch_id)
+            deleted_count = self.db.delete_ric_batch(batch_id) if self.db else 0
+
+            self._send_json({
+                "success": True,
+                "batch_id": batch_id,
+                "deleted_records": deleted_count,
+                "message": f"已刪除批次 #{batch_id}，共 {deleted_count} 筆記錄"
+            })
+        except (ValueError, TypeError) as e:
+            self._send_json({"error": f"參數錯誤: {e}"})
+        except Exception as e:
+            logger.error(f"RIC delete error: {e}", exc_info=True)
+            self._send_json({"error": f"刪除失敗: {str(e)}"})
+
+    def _handle_ric_report_api(self, query: dict):
+        """API: 取得 RIC 比對報表資料"""
+        try:
+            batch_id_str = query.get('batch_id', [''])[0]
+            batch_id = int(batch_id_str) if batch_id_str else None
+        except (ValueError, TypeError):
+            batch_id = None
+
+        stats = self.db.get_ric_accuracy_stats(batch_id) if self.db else {}
+        self._send_json(stats)
+
     def _handle_debug_inference_run(self):
         """API: 執行 Debug 單圖推論"""
         import time as _time
@@ -917,9 +1145,8 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO)
 
-    # 用暫存 DB 測試
-    import tempfile
-    db_path = os.path.join(tempfile.gettempdir(), "capi_web_test.db")
+    # 使用 test_results.db 測試 (含真實推論資料)
+    db_path = os.path.join(str(Path(__file__).parent), "test_results.db")
     db = CAPIDatabase(db_path)
 
     # 熱力圖目錄
@@ -934,6 +1161,5 @@ if __name__ == "__main__":
         server.serve_forever()
     except KeyboardInterrupt:
         server.shutdown()
-        os.remove(db_path)
         print("\nStopped.")
 

@@ -107,6 +107,32 @@ class CAPIDatabase:
                     FOREIGN KEY (image_result_id) REFERENCES image_results(id) ON DELETE CASCADE
                 );
 
+                -- RIC 匯入批次追蹤
+                CREATE TABLE IF NOT EXISTS ric_import_batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT NOT NULL,
+                    total_records INTEGER DEFAULT 0,
+                    import_time TEXT NOT NULL,
+                    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+                );
+
+                -- RIC 人工檢驗原始資料
+                CREATE TABLE IF NOT EXISTS ric_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id INTEGER NOT NULL,
+                    timestamp TEXT,
+                    ric_id TEXT,
+                    pnl_id TEXT NOT NULL,
+                    prod_id TEXT,
+                    mach_id TEXT,
+                    station TEXT,
+                    ipaddress TEXT,
+                    keytime TEXT,
+                    datastr TEXT,
+                    ric_judgment TEXT,
+                    FOREIGN KEY (batch_id) REFERENCES ric_import_batches(id)
+                );
+
                 -- 索引
                 CREATE INDEX IF NOT EXISTS idx_records_glass_id ON inference_records(glass_id);
                 CREATE INDEX IF NOT EXISTS idx_records_created_at ON inference_records(created_at);
@@ -114,6 +140,9 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_records_ai_judgment ON inference_records(ai_judgment);
                 CREATE INDEX IF NOT EXISTS idx_image_results_record_id ON image_results(record_id);
                 CREATE INDEX IF NOT EXISTS idx_tile_results_image_id ON tile_results(image_result_id);
+                CREATE INDEX IF NOT EXISTS idx_ric_pnl_id ON ric_records(pnl_id);
+                CREATE INDEX IF NOT EXISTS idx_ric_mach_id ON ric_records(mach_id);
+                CREATE INDEX IF NOT EXISTS idx_ric_batch ON ric_records(batch_id);
             """)
             conn.commit()
         finally:
@@ -482,6 +511,377 @@ class CAPIDatabase:
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+    # ── RIC 人工檢驗相關方法 ─────────────────────────────────
+
+    @staticmethod
+    def parse_ric_judgment(datastr: str) -> str:
+        """
+        解析 DATASTR 欄位判定 RIC 結果
+        例: "WGF50500,OK;STANDARD,NG;R0F00000,NG;W0F00000,OK;4;"
+        任一項含 NG → 回傳 "NG"，否則 "OK"
+        """
+        if not datastr:
+            return "OK"
+        parts = datastr.strip().rstrip(";").split(";")
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            # 最後一項可能純數字 (計數)，跳過
+            if part.isdigit():
+                continue
+            if "," in part:
+                _, result = part.rsplit(",", 1)
+                if result.strip().upper() == "NG":
+                    return "NG"
+        return "OK"
+
+    def save_ric_batch(self, filename: str, records_data: List[Dict]) -> int:
+        """
+        儲存一批 RIC 匯入資料
+
+        Args:
+            filename: 匯入的檔案名稱
+            records_data: RIC 記錄列表，每筆含 TIMESTAMP, ID, PNL_ID, ... 欄位
+
+        Returns:
+            batch_id
+        """
+        import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                cursor = conn.execute(
+                    """INSERT INTO ric_import_batches (filename, total_records, import_time)
+                       VALUES (?, ?, ?)""",
+                    (filename, len(records_data), import_time)
+                )
+                batch_id = cursor.lastrowid
+
+                for rec in records_data:
+                    datastr = rec.get("DATASTR", "")
+                    ric_judgment = self.parse_ric_judgment(datastr)
+                    conn.execute(
+                        """INSERT INTO ric_records
+                           (batch_id, timestamp, ric_id, pnl_id, prod_id,
+                            mach_id, station, ipaddress, keytime, datastr, ric_judgment)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (batch_id,
+                         rec.get("TIMESTAMP", ""),
+                         rec.get("ID", ""),
+                         rec.get("PNL_ID", ""),
+                         rec.get("PROD_ID", ""),
+                         rec.get("MACH_ID", ""),
+                         rec.get("STATION", ""),
+                         rec.get("IPADDRESS", ""),
+                         rec.get("KEYTIME", ""),
+                         datastr,
+                         ric_judgment)
+                    )
+
+                conn.commit()
+                return batch_id
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+
+    def get_ric_batches(self) -> List[Dict]:
+        """列出所有 RIC 匯入批次"""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM ric_import_batches
+                   ORDER BY created_at DESC"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def delete_ric_batch(self, batch_id: int) -> int:
+        """
+        刪除指定的 RIC 匯入批次及其所有記錄
+
+        Args:
+            batch_id: 要刪除的批次 ID
+
+        Returns:
+            被刪除的 ric_records 筆數
+        """
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                # 先計算要刪除的記錄數
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM ric_records WHERE batch_id = ?",
+                    (batch_id,)
+                ).fetchone()
+                deleted_count = row["cnt"] if row else 0
+
+                # 刪除該批次的所有記錄
+                conn.execute(
+                    "DELETE FROM ric_records WHERE batch_id = ?",
+                    (batch_id,)
+                )
+                # 刪除批次本身
+                conn.execute(
+                    "DELETE FROM ric_import_batches WHERE id = ?",
+                    (batch_id,)
+                )
+                conn.commit()
+                return deleted_count
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+
+    def get_ric_comparison(self, batch_id: int = None) -> List[Dict]:
+        """
+        取得 RIC 比對結果
+
+        邏輯:
+        1. 取 AOI 判 NG 的 inference_records (machine_judgment != 'OK')
+        2. 用 glass_id = pnl_id JOIN ric_records
+        3. 找不到 RIC 對應 → RIC 當 OK
+        4. MACH_ID 前6碼比對 machine_no
+        """
+        conn = self._get_conn()
+        try:
+            # 取所有 AOI NG 的記錄
+            aoi_ng_rows = conn.execute(
+                """SELECT id, glass_id, machine_no, machine_judgment, ai_judgment, created_at
+                   FROM inference_records
+                   WHERE machine_judgment != 'OK' AND machine_judgment != ''
+                   ORDER BY created_at DESC"""
+            ).fetchall()
+
+            # 取 RIC 資料 (指定批次或全部)
+            if batch_id:
+                ric_rows = conn.execute(
+                    "SELECT pnl_id, mach_id, ric_judgment, datastr, timestamp FROM ric_records WHERE batch_id = ?",
+                    (batch_id,)
+                ).fetchall()
+            else:
+                ric_rows = conn.execute(
+                    "SELECT pnl_id, mach_id, ric_judgment, datastr, timestamp FROM ric_records"
+                ).fetchall()
+
+            # 建立 RIC lookup: pnl_id → ric record
+            ric_lookup = {}
+            for r in ric_rows:
+                ric_lookup[r["pnl_id"]] = dict(r)
+
+            results = []
+            for row in aoi_ng_rows:
+                rec = dict(row)
+                pnl_id = rec["glass_id"]
+                machine_no = rec["machine_no"]
+
+                # 查找 RIC 對應
+                ric_rec = ric_lookup.get(pnl_id)
+
+                if ric_rec:
+                    # MACH_ID 前6碼比對
+                    ric_mach = ric_rec.get("mach_id", "")[:6]
+                    sys_mach = machine_no[:6] if machine_no else ""
+                    if ric_mach and sys_mach and ric_mach != sys_mach:
+                        # 機台不匹配，跳過此筆 (或可依需求保留)
+                        pass
+                    rec["ric_judgment"] = ric_rec["ric_judgment"]
+                    rec["ric_datastr"] = ric_rec.get("datastr", "")
+                    rec["ric_timestamp"] = ric_rec.get("timestamp", "")
+                    rec["ric_found"] = True
+                else:
+                    # 找不到 RIC → 當 OK
+                    rec["ric_judgment"] = "OK"
+                    rec["ric_datastr"] = ""
+                    rec["ric_timestamp"] = ""
+                    rec["ric_found"] = False
+
+                results.append(rec)
+
+            return results
+        finally:
+            conn.close()
+
+    def get_ric_accuracy_stats(self, batch_id: int = None) -> Dict:
+        """
+        計算 AOI 及 AI 的準確率、過檢率、漏檢率統計
+
+        Returns:
+            {
+                "total": 總比對數 (AOI NG),
+                "aoi_accuracy": AOI 準確率,
+                "ai_accuracy": AI 準確率,
+                "aoi_over_rate": AOI 過檢率 (AOI NG, RIC OK),
+                "aoi_miss_rate": AOI 漏檢率 (AOI OK, RIC NG),
+                "ai_over_rate": AI 過檢率 (AI NG, RIC OK),
+                "ai_miss_rate": AI 漏檢率 (AI OK, RIC NG),
+                ...
+            }
+        """
+        comparisons = self.get_ric_comparison(batch_id)
+
+        empty_result = {
+            "total": 0,
+            "aoi_accuracy": 0, "ai_accuracy": 0,
+            "aoi_ng_correct": 0, "ai_correct": 0,
+            "aoi_over": 0, "aoi_over_rate": 0,
+            "aoi_miss": 0, "aoi_miss_rate": 0,
+            "ai_over": 0, "ai_over_rate": 0, "ai_ng_count": 0,
+            "ai_miss": 0, "ai_miss_rate": 0,
+            "by_day": [], "by_machine": [], "details": [],
+        }
+
+        if not comparisons:
+            return empty_result
+
+        total = len(comparisons)
+        aoi_ng_correct = 0  # AOI NG 且 RIC 也 NG
+        ai_correct = 0      # AI 判定與 RIC 一致
+        ai_ng_count = 0     # AI 判 NG 的總數
+        ai_over = 0         # AI 判 NG 但 RIC 判 OK (過檢)
+        ai_miss = 0         # AI 判 OK 但 RIC 判 NG (漏檢)
+
+        # 按日、按機台分組
+        day_stats = {}   # date_str → {total, aoi_correct, ai_correct}
+        mach_stats = {}  # machine → {total, aoi_correct, ai_correct}
+
+        for rec in comparisons:
+            ric_j = rec["ric_judgment"]
+            ai_j = "OK" if rec["ai_judgment"] == "OK" else "NG"
+
+            # AOI 準確率: AOI NG 中 RIC 也是 NG
+            if ric_j == "NG":
+                aoi_ng_correct += 1
+
+            # AI 準確率: AI 判定與 RIC 一致
+            if ai_j == ric_j:
+                ai_correct += 1
+
+            # AI 過檢/漏檢
+            if ai_j == "NG":
+                ai_ng_count += 1
+                if ric_j == "OK":
+                    ai_over += 1
+            else:  # AI OK
+                if ric_j == "NG":
+                    ai_miss += 1
+
+            # 按日統計
+            date_str = rec["created_at"][:10] if rec.get("created_at") else "unknown"
+            if date_str not in day_stats:
+                day_stats[date_str] = {"total": 0, "aoi_correct": 0, "ai_correct": 0}
+            day_stats[date_str]["total"] += 1
+            if ric_j == "NG":
+                day_stats[date_str]["aoi_correct"] += 1
+            if ai_j == ric_j:
+                day_stats[date_str]["ai_correct"] += 1
+
+            # 按機台統計
+            machine = rec.get("machine_no", "unknown")
+            if machine not in mach_stats:
+                mach_stats[machine] = {"total": 0, "aoi_correct": 0, "ai_correct": 0}
+            mach_stats[machine]["total"] += 1
+            if ric_j == "NG":
+                mach_stats[machine]["aoi_correct"] += 1
+            if ai_j == ric_j:
+                mach_stats[machine]["ai_correct"] += 1
+
+        aoi_accuracy = (aoi_ng_correct / total * 100) if total > 0 else 0
+        ai_accuracy = (ai_correct / total * 100) if total > 0 else 0
+
+        # AOI 過檢: AOI 判 NG 但 RIC 判 OK
+        aoi_over = total - aoi_ng_correct
+        aoi_over_rate = round(aoi_over / total * 100, 1) if total > 0 else 0
+
+        # AOI 漏檢: AOI 判 OK 但 RIC 判 NG (需額外查詢)
+        aoi_miss = 0
+        aoi_miss_rate = 0
+        try:
+            conn = self._get_conn()
+            try:
+                # 找出 RIC 判 NG 但 AOI 判 OK 的面板
+                if batch_id:
+                    ric_ng_pnls = conn.execute(
+                        """SELECT DISTINCT pnl_id FROM ric_records
+                           WHERE batch_id = ? AND ric_judgment = 'NG'""",
+                        (batch_id,)
+                    ).fetchall()
+                else:
+                    ric_ng_pnls = conn.execute(
+                        """SELECT DISTINCT pnl_id FROM ric_records
+                           WHERE ric_judgment = 'NG'"""
+                    ).fetchall()
+
+                ric_ng_total = len(ric_ng_pnls)
+                for pnl_row in ric_ng_pnls:
+                    pnl_id = pnl_row["pnl_id"]
+                    # 檢查此面板是否在 inference_records 中被 AOI 判 OK
+                    aoi_ok_row = conn.execute(
+                        """SELECT id FROM inference_records
+                           WHERE glass_id = ? AND (machine_judgment = 'OK' OR machine_judgment = '')
+                           LIMIT 1""",
+                        (pnl_id,)
+                    ).fetchone()
+                    if aoi_ok_row:
+                        aoi_miss += 1
+
+                aoi_miss_rate = round(aoi_miss / ric_ng_total * 100, 1) if ric_ng_total > 0 else 0
+            finally:
+                conn.close()
+        except Exception:
+            pass  # 若查詢失敗，漏檢率維持 0
+
+        # AI 過檢率 / 漏檢率
+        ai_over_rate = round(ai_over / ai_ng_count * 100, 1) if ai_ng_count > 0 else 0
+        ric_ng_in_set = aoi_ng_correct  # AOI NG 中 RIC 也判 NG 的總數
+        ai_miss_rate = round(ai_miss / ric_ng_in_set * 100, 1) if ric_ng_in_set > 0 else 0
+
+        by_day = []
+        for date_str in sorted(day_stats.keys()):
+            s = day_stats[date_str]
+            by_day.append({
+                "date": date_str,
+                "total": s["total"],
+                "aoi_acc": round(s["aoi_correct"] / s["total"] * 100, 1) if s["total"] > 0 else 0,
+                "ai_acc": round(s["ai_correct"] / s["total"] * 100, 1) if s["total"] > 0 else 0,
+            })
+
+        by_machine = []
+        for machine in sorted(mach_stats.keys()):
+            s = mach_stats[machine]
+            by_machine.append({
+                "machine": machine,
+                "total": s["total"],
+                "aoi_acc": round(s["aoi_correct"] / s["total"] * 100, 1) if s["total"] > 0 else 0,
+                "ai_acc": round(s["ai_correct"] / s["total"] * 100, 1) if s["total"] > 0 else 0,
+            })
+
+        return {
+            "total": total,
+            "aoi_accuracy": round(aoi_accuracy, 1),
+            "ai_accuracy": round(ai_accuracy, 1),
+            "aoi_ng_correct": aoi_ng_correct,
+            "ai_correct": ai_correct,
+            # 過檢/漏檢
+            "aoi_over": aoi_over,
+            "aoi_over_rate": aoi_over_rate,
+            "aoi_miss": aoi_miss,
+            "aoi_miss_rate": aoi_miss_rate,
+            "ai_ng_count": ai_ng_count,
+            "ai_over": ai_over,
+            "ai_over_rate": ai_over_rate,
+            "ai_miss": ai_miss,
+            "ai_miss_rate": ai_miss_rate,
+            "by_day": by_day,
+            "by_machine": by_machine,
+            "details": comparisons,
+        }
 
 
 if __name__ == "__main__":

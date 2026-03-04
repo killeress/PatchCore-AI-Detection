@@ -336,6 +336,10 @@
                 <a href="/dashboard" {% if request_path=='/dashboard' %}class="active" {% endif %}>即時儀表板</a>
                 <a href="/" {% if request_path=='/' %}class="active" {% endif %}>推論記錄</a>
                 <a href="/search" {% if request_path=='/search' %}class="active" {% endif %}>記錄搜尋</a>
+                <a href="/ric" {% if request_path=='/ric' %}class="active" {% endif %}
+                    style="display:inline-flex; align-items:center; gap:4px;">
+                    📊 RIC 比對
+                </a>
                 <a href="/api/stats">統計 API</a>
                 <a href="/debug" {% if request_path=='/debug' %}class="active" {% endif %}
                     style="display:inline-flex; align-items:center; gap:4px; color:var(--err); border-bottom: 1px dashed rgba(245,158,11,0.4);">

@@ -1,0 +1,833 @@
+{% extends "base.html" %}
+{% block title %}RIC 人工檢驗比對報表 — CAPI AI{% endblock %}
+
+{% block extra_css %}
+<style>
+    .ric-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 24px;
+    }
+
+    .ric-header h2 {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #e2e8f0;
+        margin: 0;
+    }
+
+    .ric-header .subtitle {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+    }
+
+    /* Upload Zone */
+    .upload-zone {
+        border: 2px dashed var(--border);
+        border-radius: 16px;
+        padding: 40px 24px;
+        text-align: center;
+        transition: all 0.3s;
+        cursor: pointer;
+        background: rgba(59, 130, 246, 0.03);
+    }
+
+    .upload-zone:hover,
+    .upload-zone.drag-over {
+        border-color: var(--accent);
+        background: rgba(59, 130, 246, 0.08);
+        box-shadow: 0 0 24px rgba(59, 130, 246, 0.1);
+    }
+
+    .upload-zone .icon {
+        font-size: 3rem;
+        margin-bottom: 12px;
+    }
+
+    .upload-zone .hint {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+        margin-top: 8px;
+    }
+
+    .upload-zone input[type="file"] {
+        display: none;
+    }
+
+    .upload-progress {
+        display: none;
+        margin-top: 16px;
+    }
+
+    .upload-progress .bar-track {
+        height: 6px;
+        background: var(--border);
+        border-radius: 3px;
+        overflow: hidden;
+    }
+
+    .upload-progress .bar-fill {
+        height: 100%;
+        background: linear-gradient(90deg, var(--accent), #818cf8);
+        border-radius: 3px;
+        transition: width 0.3s;
+        width: 0%;
+    }
+
+    .upload-msg {
+        margin-top: 12px;
+        padding: 12px 16px;
+        border-radius: 10px;
+        font-size: 0.9rem;
+        display: none;
+    }
+
+    .upload-msg.success {
+        background: rgba(34, 197, 94, 0.12);
+        color: var(--ok);
+        border: 1px solid rgba(34, 197, 94, 0.3);
+    }
+
+    .upload-msg.error {
+        background: rgba(239, 68, 68, 0.12);
+        color: var(--ng);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    /* Controls */
+    .controls-bar {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        flex-wrap: wrap;
+        margin-bottom: 20px;
+    }
+
+    .controls-bar select,
+    .controls-bar button {
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 16px;
+        font-size: 0.9rem;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .controls-bar select:hover,
+    .controls-bar button:hover {
+        border-color: var(--accent);
+    }
+
+    .controls-bar button {
+        background: linear-gradient(135deg, var(--accent), #6366f1);
+        border: none;
+        font-weight: 600;
+        color: white;
+    }
+
+    .controls-bar button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+    }
+
+    .controls-bar button.btn-danger {
+        background: linear-gradient(135deg, #ef4444, #dc2626);
+    }
+
+    .controls-bar button.btn-danger:hover {
+        box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+    }
+
+    .controls-bar button.btn-danger:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+    }
+
+    /* Stats Cards */
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 16px;
+        margin-bottom: 24px;
+    }
+
+    .stat-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 20px;
+        text-align: center;
+        position: relative;
+        overflow: hidden;
+    }
+
+    .stat-card::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 3px;
+    }
+
+    .stat-card.aoi::before {
+        background: linear-gradient(90deg, #f59e0b, #f97316);
+    }
+
+    .stat-card.ai::before {
+        background: linear-gradient(90deg, #3b82f6, #6366f1);
+    }
+
+    .stat-card.total::before {
+        background: linear-gradient(90deg, #8b5cf6, #a855f7);
+    }
+
+    .stat-card.match::before {
+        background: linear-gradient(90deg, #22c55e, #10b981);
+    }
+
+    .stat-card.over::before {
+        background: linear-gradient(90deg, #f59e0b, #eab308);
+    }
+
+    .stat-card.miss::before {
+        background: linear-gradient(90deg, #ef4444, #f87171);
+    }
+
+    .stat-card.over .value {
+        color: #fbbf24;
+    }
+
+    .stat-card.miss .value {
+        color: #f87171;
+    }
+
+    .stat-card .label {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        margin-bottom: 8px;
+    }
+
+    .stat-card .value {
+        font-size: 2.2rem;
+        font-weight: 700;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .stat-card.aoi .value {
+        color: #f59e0b;
+    }
+
+    .stat-card.ai .value {
+        color: #818cf8;
+    }
+
+    .stat-card.total .value {
+        color: #a855f7;
+    }
+
+    .stat-card.match .value {
+        color: #22c55e;
+    }
+
+    .stat-card .detail {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        margin-top: 4px;
+    }
+
+    /* Charts */
+    .charts-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+        margin-bottom: 24px;
+    }
+
+    @media (max-width: 900px) {
+        .charts-row {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .chart-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 20px;
+    }
+
+    .chart-card h3 {
+        color: var(--text);
+        font-size: 1rem;
+        font-weight: 600;
+        margin: 0 0 16px 0;
+    }
+
+    .chart-container {
+        position: relative;
+        height: 300px;
+    }
+
+    /* Detail Table */
+    .detail-section h3 {
+        color: var(--text);
+        font-size: 1.1rem;
+        font-weight: 600;
+        margin: 0 0 16px 0;
+    }
+
+    .detail-table-wrap {
+        max-height: 500px;
+        overflow-y: auto;
+        border-radius: 10px;
+    }
+
+    .detail-table-wrap::-webkit-scrollbar {
+        width: 6px;
+    }
+
+    .detail-table-wrap::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 3px;
+    }
+
+    /* Loading */
+    .loading-overlay {
+        display: none;
+        text-align: center;
+        padding: 60px 20px;
+        color: var(--text-muted);
+    }
+
+    .loading-overlay .spinner {
+        width: 36px;
+        height: 36px;
+        border: 3px solid var(--border);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        margin: 0 auto 16px auto;
+    }
+
+    @keyframes spin {
+        to {
+            transform: rotate(360deg);
+        }
+    }
+
+    /* Empty state */
+    .empty-state {
+        text-align: center;
+        padding: 60px 20px;
+        color: var(--text-muted);
+    }
+
+    .empty-state .icon {
+        font-size: 3rem;
+        margin-bottom: 12px;
+    }
+
+    .badge-sm {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-size: 0.7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+    }
+
+    .badge-sm.found {
+        background: rgba(34, 197, 94, 0.15);
+        color: var(--ok);
+    }
+
+    .badge-sm.not-found {
+        background: rgba(245, 158, 11, 0.15);
+        color: var(--err);
+    }
+</style>
+{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="ric-header">
+    <div>
+        <h2>📊 RIC 人工檢驗比對報表</h2>
+        <div class="subtitle">匯入 RIC (人工檢驗) 資料，與 AOI / AI 結果進行比對分析</div>
+    </div>
+</div>
+
+<!-- Upload Section -->
+<div class="card" style="margin-bottom: 20px;">
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:16px;">
+        <span style="font-size:1.2rem;">📤</span>
+        <h3 style="margin:0; font-size:1rem; color:var(--text);">匯入 RIC 資料</h3>
+        <span style="color:var(--text-muted); font-size:0.8rem; margin-left:auto;">支援 .xlsx / .xls 格式</span>
+    </div>
+    <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+        <div class="icon">📁</div>
+        <div style="color:var(--text); font-weight:600; font-size:1.05rem;">拖放 XLS 檔案至此處</div>
+        <div class="hint">或點擊選擇檔案上傳</div>
+        <input type="file" id="fileInput" accept=".xlsx,.xls">
+    </div>
+    <div class="upload-progress" id="uploadProgress">
+        <div class="bar-track">
+            <div class="bar-fill" id="progressBar"></div>
+        </div>
+        <div style="text-align:center; color:var(--text-muted); margin-top:8px; font-size:0.85rem;" id="progressText">
+            上傳中...</div>
+    </div>
+    <div class="upload-msg" id="uploadMsg"></div>
+</div>
+
+<!-- Controls -->
+<div class="controls-bar">
+    <select id="batchSelect">
+        <option value="">全部批次</option>
+        {% for batch in batches %}
+        <option value="{{ batch.id }}">
+            #{{ batch.id }} — {{ batch.filename }} ({{ batch.total_records }}筆, {{ batch.import_time }})
+        </option>
+        {% endfor %}
+    </select>
+    <button onclick="loadReport()">🔍 載入比對報表</button>
+    <button class="btn-danger" id="btnDeleteBatch" onclick="deleteBatch()" disabled>🗑 刪除批次</button>
+</div>
+
+<!-- Loading -->
+<div class="loading-overlay" id="loadingOverlay">
+    <div class="spinner"></div>
+    <div>正在載入比對資料...</div>
+</div>
+
+<!-- Report Content (hidden until loaded) -->
+<div id="reportContent" style="display:none;">
+    <!-- Stats Cards -->
+    <div class="stats-grid">
+        <div class="stat-card total">
+            <div class="label">比對總數 (AOI NG)</div>
+            <div class="value" id="statTotal">—</div>
+            <div class="detail">AOI 判定 NG 之面板數</div>
+        </div>
+        <div class="stat-card aoi">
+            <div class="label">AOI 準確率</div>
+            <div class="value" id="statAoi">—</div>
+            <div class="detail" id="statAoiDetail">—</div>
+        </div>
+        <div class="stat-card ai">
+            <div class="label">AI 準確率</div>
+            <div class="value" id="statAi">—</div>
+            <div class="detail" id="statAiDetail">—</div>
+        </div>
+        <div class="stat-card match">
+            <div class="label">AI 正確判定</div>
+            <div class="value" id="statMatch">—</div>
+            <div class="detail" id="statMatchDetail">—</div>
+        </div>
+    </div>
+
+    <!-- 過檢/漏檢 Stats Cards -->
+    <div class="stats-grid">
+        <div class="stat-card over">
+            <div class="label">AOI 過檢率</div>
+            <div class="value" id="statAoiOver">—</div>
+            <div class="detail" id="statAoiOverDetail">AOI 判 NG 但 RIC 判 OK</div>
+        </div>
+        <div class="stat-card miss">
+            <div class="label">AOI 漏檢率</div>
+            <div class="value" id="statAoiMiss">—</div>
+            <div class="detail" id="statAoiMissDetail">AOI 判 OK 但 RIC 判 NG</div>
+        </div>
+        <div class="stat-card over">
+            <div class="label">AI 過檢率</div>
+            <div class="value" id="statAiOver">—</div>
+            <div class="detail" id="statAiOverDetail">AI 判 NG 但 RIC 判 OK</div>
+        </div>
+        <div class="stat-card miss">
+            <div class="label">AI 漏檢率</div>
+            <div class="value" id="statAiMiss">—</div>
+            <div class="detail" id="statAiMissDetail">AI 判 OK 但 RIC 判 NG</div>
+        </div>
+    </div>
+
+    <!-- Charts -->
+    <div class="charts-row">
+        <div class="chart-card">
+            <h3>📈 每日準確率趨勢</h3>
+            <div class="chart-container">
+                <canvas id="dailyChart"></canvas>
+            </div>
+        </div>
+        <div class="chart-card">
+            <h3>🏭 各機台準確率</h3>
+            <div class="chart-container">
+                <canvas id="machineChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detail Table -->
+    <div class="card detail-section">
+        <h3>📋 逐筆比對明細</h3>
+        <div class="detail-table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Panel ID</th>
+                        <th>機台</th>
+                        <th>AOI 判定</th>
+                        <th>AI 判定</th>
+                        <th>RIC 判定</th>
+                        <th>RIC 來源</th>
+                        <th>檢測時間</th>
+                    </tr>
+                </thead>
+                <tbody id="detailBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Empty state -->
+<div class="empty-state" id="emptyState">
+    <div class="icon">📊</div>
+    <div style="font-size:1.1rem; color:var(--text); margin-bottom:8px;">尚未載入報表</div>
+    <div>請先匯入 RIC 資料，然後點擊「載入比對報表」查看結果</div>
+</div>
+
+<script>
+    // ── Upload Logic ──
+    const uploadZone = document.getElementById('uploadZone');
+    const fileInput = document.getElementById('fileInput');
+
+    ['dragenter', 'dragover'].forEach(ev => {
+        uploadZone.addEventListener(ev, e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
+    });
+    ['dragleave', 'drop'].forEach(ev => {
+        uploadZone.addEventListener(ev, e => { e.preventDefault(); uploadZone.classList.remove('drag-over'); });
+    });
+    uploadZone.addEventListener('drop', e => {
+        const files = e.dataTransfer.files;
+        if (files.length > 0) uploadFile(files[0]);
+    });
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files.length > 0) uploadFile(fileInput.files[0]);
+    });
+
+    function uploadFile(file) {
+        const msgEl = document.getElementById('uploadMsg');
+        const progressEl = document.getElementById('uploadProgress');
+        const barEl = document.getElementById('progressBar');
+        const textEl = document.getElementById('progressText');
+
+        msgEl.style.display = 'none';
+        progressEl.style.display = 'block';
+        barEl.style.width = '30%';
+        textEl.textContent = `正在上傳: ${file.name} ...`;
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/ric/upload');
+
+        xhr.upload.onprogress = e => {
+            if (e.lengthComputable) {
+                const pct = Math.round(e.loaded / e.total * 100);
+                barEl.style.width = pct + '%';
+                textEl.textContent = `上傳中 ${pct}%...`;
+            }
+        };
+
+        xhr.onload = () => {
+            barEl.style.width = '100%';
+            try {
+                const data = JSON.parse(xhr.responseText);
+                if (data.success) {
+                    msgEl.className = 'upload-msg success';
+                    msgEl.innerHTML = `✅ ${data.message} (批次 #${data.batch_id})`;
+                    msgEl.style.display = 'block';
+                    // Refresh batch select
+                    setTimeout(() => location.reload(), 1200);
+                } else {
+                    msgEl.className = 'upload-msg error';
+                    msgEl.textContent = '❌ ' + (data.error || '上傳失敗');
+                    msgEl.style.display = 'block';
+                }
+            } catch (e) {
+                msgEl.className = 'upload-msg error';
+                msgEl.textContent = '❌ 伺服器回應格式錯誤';
+                msgEl.style.display = 'block';
+            }
+            setTimeout(() => { progressEl.style.display = 'none'; }, 2000);
+        };
+
+        xhr.onerror = () => {
+            msgEl.className = 'upload-msg error';
+            msgEl.textContent = '❌ 網路錯誤，請稍後重試';
+            msgEl.style.display = 'block';
+            progressEl.style.display = 'none';
+        };
+
+        xhr.send(formData);
+    }
+
+    // ── Batch Select → 控制刪除按鈕狀態 ──
+    document.getElementById('batchSelect').addEventListener('change', function () {
+        document.getElementById('btnDeleteBatch').disabled = !this.value;
+    });
+
+    // ── Delete Logic ──
+    function deleteBatch() {
+        const sel = document.getElementById('batchSelect');
+        const batchId = sel.value;
+        if (!batchId) return;
+
+        const batchText = sel.options[sel.selectedIndex].text;
+        if (!confirm(`確定要刪除此批次嗎？\n\n${batchText}\n\n此操作無法復原！`)) return;
+
+        fetch('/api/ric/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ batch_id: parseInt(batchId) })
+        })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    const msgEl = document.getElementById('uploadMsg');
+                    msgEl.className = 'upload-msg success';
+                    msgEl.innerHTML = `✅ ${data.message}`;
+                    msgEl.style.display = 'block';
+                    setTimeout(() => location.reload(), 1200);
+                } else {
+                    alert('❌ ' + (data.error || '刪除失敗'));
+                }
+            })
+            .catch(err => alert('❌ 網路錯誤: ' + err.message));
+    }
+
+    // ── Report Logic ──
+    let dailyChart = null;
+    let machineChart = null;
+
+    function loadReport() {
+        const batchId = document.getElementById('batchSelect').value;
+        const loading = document.getElementById('loadingOverlay');
+        const content = document.getElementById('reportContent');
+        const empty = document.getElementById('emptyState');
+
+        loading.style.display = 'block';
+        content.style.display = 'none';
+        empty.style.display = 'none';
+
+        let url = '/api/ric/report';
+        if (batchId) url += `?batch_id=${batchId}`;
+
+        fetch(url)
+            .then(r => r.json())
+            .then(data => {
+                loading.style.display = 'none';
+                if (!data.total || data.total === 0) {
+                    empty.style.display = 'block';
+                    empty.querySelector('div:last-child').textContent = '目前無 AOI NG 的比對資料，或 RIC 資料未匯入';
+                    return;
+                }
+                content.style.display = 'block';
+                renderStats(data);
+                renderCharts(data);
+                renderDetails(data.details || []);
+            })
+            .catch(err => {
+                loading.style.display = 'none';
+                empty.style.display = 'block';
+                empty.querySelector('div:last-child').textContent = '載入失敗: ' + err.message;
+            });
+    }
+
+    function renderStats(data) {
+        document.getElementById('statTotal').textContent = data.total;
+        document.getElementById('statAoi').textContent = data.aoi_accuracy + '%';
+        document.getElementById('statAoiDetail').textContent = `${data.aoi_ng_correct} / ${data.total} 筆 AOI NG 確實為 NG`;
+        document.getElementById('statAi').textContent = data.ai_accuracy + '%';
+        document.getElementById('statAiDetail').textContent = `${data.ai_correct} / ${data.total} 筆 AI 判定與 RIC 一致`;
+        document.getElementById('statMatch').textContent = data.ai_correct;
+        document.getElementById('statMatchDetail').textContent = `共 ${data.total} 筆中 AI 正確 ${data.ai_correct} 筆`;
+
+        // 過檢/漏檢
+        document.getElementById('statAoiOver').textContent = data.aoi_over_rate + '%';
+        document.getElementById('statAoiOverDetail').textContent = `${data.aoi_over || 0} 筆 AOI 判 NG 但 RIC 判 OK`;
+        document.getElementById('statAoiMiss').textContent = data.aoi_miss_rate + '%';
+        document.getElementById('statAoiMissDetail').textContent = `${data.aoi_miss || 0} 筆 AOI 判 OK 但 RIC 判 NG`;
+        document.getElementById('statAiOver').textContent = data.ai_over_rate + '%';
+        document.getElementById('statAiOverDetail').textContent = `${data.ai_over || 0} / ${data.ai_ng_count || 0} 筆 AI 判 NG 中為過檢`;
+        document.getElementById('statAiMiss').textContent = data.ai_miss_rate + '%';
+        document.getElementById('statAiMissDetail').textContent = `${data.ai_miss || 0} / ${data.aoi_ng_correct || 0} 筆真實 NG 中被 AI 漏檢`;
+    }
+
+    function renderCharts(data) {
+        // Daily chart
+        const dailyCtx = document.getElementById('dailyChart').getContext('2d');
+        if (dailyChart) dailyChart.destroy();
+
+        const byDay = data.by_day || [];
+        dailyChart = new Chart(dailyCtx, {
+            type: 'line',
+            data: {
+                labels: byDay.map(d => d.date),
+                datasets: [
+                    {
+                        label: 'AOI 準確率 (%)',
+                        data: byDay.map(d => d.aoi_acc),
+                        borderColor: '#f59e0b',
+                        backgroundColor: 'rgba(245,158,11,0.1)',
+                        tension: 0.3,
+                        fill: true,
+                        pointRadius: 4,
+                        pointBackgroundColor: '#f59e0b',
+                    },
+                    {
+                        label: 'AI 準確率 (%)',
+                        data: byDay.map(d => d.ai_acc),
+                        borderColor: '#818cf8',
+                        backgroundColor: 'rgba(129,140,248,0.1)',
+                        tension: 0.3,
+                        fill: true,
+                        pointRadius: 4,
+                        pointBackgroundColor: '#818cf8',
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { labels: { color: '#94a3b8', font: { family: "'Fira Sans'" } } },
+                    tooltip: {
+                        backgroundColor: '#1e293b',
+                        borderColor: '#334155',
+                        borderWidth: 1,
+                        callbacks: {
+                            afterLabel: function (ctx) {
+                                const d = byDay[ctx.dataIndex];
+                                return `(共 ${d.total} 筆)`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.5)' } },
+                    y: {
+                        min: 0, max: 100,
+                        ticks: { color: '#64748b', callback: v => v + '%' },
+                        grid: { color: 'rgba(51,65,85,0.5)' }
+                    }
+                }
+            }
+        });
+
+        // Machine chart
+        const machCtx = document.getElementById('machineChart').getContext('2d');
+        if (machineChart) machineChart.destroy();
+
+        const byMach = data.by_machine || [];
+        machineChart = new Chart(machCtx, {
+            type: 'bar',
+            data: {
+                labels: byMach.map(m => m.machine),
+                datasets: [
+                    {
+                        label: 'AOI 準確率 (%)',
+                        data: byMach.map(m => m.aoi_acc),
+                        backgroundColor: 'rgba(245,158,11,0.6)',
+                        borderColor: '#f59e0b',
+                        borderWidth: 1,
+                        borderRadius: 4,
+                    },
+                    {
+                        label: 'AI 準確率 (%)',
+                        data: byMach.map(m => m.ai_acc),
+                        backgroundColor: 'rgba(129,140,248,0.6)',
+                        borderColor: '#818cf8',
+                        borderWidth: 1,
+                        borderRadius: 4,
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { labels: { color: '#94a3b8', font: { family: "'Fira Sans'" } } },
+                    tooltip: {
+                        backgroundColor: '#1e293b',
+                        borderColor: '#334155',
+                        borderWidth: 1,
+                        callbacks: {
+                            afterLabel: function (ctx) {
+                                const m = byMach[ctx.dataIndex];
+                                return `(共 ${m.total} 筆)`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
+                    y: {
+                        min: 0, max: 100,
+                        ticks: { color: '#64748b', callback: v => v + '%' },
+                        grid: { color: 'rgba(51,65,85,0.5)' }
+                    }
+                }
+            }
+        });
+    }
+
+    function renderDetails(details) {
+        const tbody = document.getElementById('detailBody');
+        tbody.innerHTML = '';
+
+        details.forEach(rec => {
+            const aiSimple = (!rec.ai_judgment || rec.ai_judgment === 'OK') ? 'OK' : 'NG';
+            const aoiBadge = `<span class="badge badge-ng">NG</span>`;
+            const aiBadge = aiSimple === 'OK'
+                ? `<span class="badge badge-ok">OK</span>`
+                : `<span class="badge badge-ng">NG</span>`;
+            const ricBadge = rec.ric_judgment === 'OK'
+                ? `<span class="badge badge-ok">OK</span>`
+                : `<span class="badge badge-ng">NG</span>`;
+            const foundBadge = rec.ric_found
+                ? `<span class="badge-sm found">已匹配</span>`
+                : `<span class="badge-sm not-found">未找到 (預設OK)</span>`;
+
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+            <td style="font-family:'Fira Code',monospace; font-size:0.85rem;">${rec.glass_id || ''}</td>
+            <td>${rec.machine_no || ''}</td>
+            <td>${aoiBadge}</td>
+            <td>${aiBadge}</td>
+            <td>${ricBadge}</td>
+            <td>${foundBadge}</td>
+            <td style="color:var(--text-muted); font-size:0.85rem;">${rec.created_at || ''}</td>
+        `;
+
+            // Highlight mismatch rows
+            if (aiSimple !== rec.ric_judgment) {
+                tr.style.background = 'rgba(239, 68, 68, 0.06)';
+            }
+
+            tbody.appendChild(tr);
+        });
+    }
+</script>
+{% endblock %}

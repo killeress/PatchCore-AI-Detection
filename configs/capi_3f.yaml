@@ -50,7 +50,7 @@ dust_area_min: 5               # 灰塵顆粒最小面積 (px)
 dust_area_max: 50000             # 灰塵顆粒最大面積 (px)
 dust_extension: 2                # 灰塵區域膨脹像素
 dust_heatmap_iou_threshold: 0.05 # Heatmap vs Dust IOU 閾值 (大於此值判定為灰塵)
-dust_heatmap_top_percent: 5.0    # Heatmap 熱區取前 X% 最紅像素 (Percentile 二值化, 建議 3~8)
+dust_heatmap_top_percent: 0.4    # Heatmap 熱區取前 X% 最紅像素 (Percentile 二值化, 建議 3~8)
 
 # OMIT 過曝偵測設定 (曝光過高的 OMIT 圖無法檢測灰塵，需記錄供工程追蹤)
 omit_overexposure_mean_threshold: 200   # 平均亮度閾值 (正常OMIT約30~80，過曝>200)
@@ -93,6 +93,11 @@ bomb_defects:
     defect_code: "PCLV6GA0"
     defect_type: "line"
     coordinates: [[960, 1], [960, 1080]]
+
+  - image_prefix: "G0F00000"
+    defect_code: "PCDBCGA0"
+    defect_type: "point"
+    coordinates: [[350, 231], [1475, 343], [1071, 565], [356, 530], [1798, 700]]
 
   - image_prefix: "WGF50500"
     defect_code: "PCM175A0"
