@@ -644,18 +644,17 @@ class CAPIDatabase:
         取得 RIC 比對結果
 
         邏輯:
-        1. 取 AOI 判 NG 的 inference_records (machine_judgment != 'OK')
+        1. 取所有 inference_records
         2. 用 glass_id = pnl_id JOIN ric_records
         3. 找不到 RIC 對應 → RIC 當 OK
         4. MACH_ID 前6碼比對 machine_no
         """
         conn = self._get_conn()
         try:
-            # 取所有 AOI NG 的記錄
-            aoi_ng_rows = conn.execute(
+            # 取所有的記錄，不再限制 machine_judgment != 'OK'
+            all_rows = conn.execute(
                 """SELECT id, glass_id, machine_no, machine_judgment, ai_judgment, created_at
                    FROM inference_records
-                   WHERE machine_judgment != 'OK' AND machine_judgment != ''
                    ORDER BY created_at DESC"""
             ).fetchall()
 
@@ -676,7 +675,7 @@ class CAPIDatabase:
                 ric_lookup[r["pnl_id"]] = dict(r)
 
             results = []
-            for row in aoi_ng_rows:
+            for row in all_rows:
                 rec = dict(row)
                 pnl_id = rec["glass_id"]
                 machine_no = rec["machine_no"]
@@ -714,13 +713,14 @@ class CAPIDatabase:
 
         Returns:
             {
-                "total": 總比對數 (AOI NG),
-                "aoi_accuracy": AOI 準確率,
-                "ai_accuracy": AI 準確率,
+                "total": 總比對數,
+                "aoi_accuracy": AOI 準確率 (AOI 與 RIC 一致比率),
+                "ai_accuracy": AI 準確率 (AI 與 RIC 一致比率),
                 "aoi_over_rate": AOI 過檢率 (AOI NG, RIC OK),
                 "aoi_miss_rate": AOI 漏檢率 (AOI OK, RIC NG),
                 "ai_over_rate": AI 過檢率 (AI NG, RIC OK),
                 "ai_miss_rate": AI 漏檢率 (AI OK, RIC NG),
+                "ric_ng_total": RIC NG 總數,
                 ...
             }
         """
@@ -741,27 +741,27 @@ class CAPIDatabase:
             return empty_result
 
         total = len(comparisons)
-        aoi_ng_correct = 0  # AOI NG 且 RIC 也 NG
-        ai_correct = 0      # AI 判定與 RIC 一致
-        ai_ng_count = 0     # AI 判 NG 的總數
-        ai_over = 0         # AI 判 NG 但 RIC 判 OK (過檢)
-        ai_miss = 0         # AI 判 OK 但 RIC 判 NG (漏檢)
+        aoi_correct_count = 0
+        ai_correct_count = 0
+        ai_ng_count = 0     
+        ai_over = 0         
+        ai_miss = 0         
 
-        # 按日、按機台分組
-        day_stats = {}   # date_str → {total, aoi_correct, ai_correct}
-        mach_stats = {}  # machine → {total, aoi_correct, ai_correct}
+        day_stats = {}   
+        mach_stats = {}  
 
         for rec in comparisons:
             ric_j = rec["ric_judgment"]
             ai_j = "OK" if rec["ai_judgment"] == "OK" else "NG"
+            aoi_j = "OK" if rec["machine_judgment"] == "OK" else "NG"
 
-            # AOI 準確率: AOI NG 中 RIC 也是 NG
-            if ric_j == "NG":
-                aoi_ng_correct += 1
-
+            # AOI 準確率: AOI 判定與 RIC 一致
+            if aoi_j == ric_j:
+                aoi_correct_count += 1
+            
             # AI 準確率: AI 判定與 RIC 一致
             if ai_j == ric_j:
-                ai_correct += 1
+                ai_correct_count += 1
 
             # AI 過檢/漏檢
             if ai_j == "NG":
@@ -777,7 +777,7 @@ class CAPIDatabase:
             if date_str not in day_stats:
                 day_stats[date_str] = {"total": 0, "aoi_correct": 0, "ai_correct": 0}
             day_stats[date_str]["total"] += 1
-            if ric_j == "NG":
+            if aoi_j == ric_j:
                 day_stats[date_str]["aoi_correct"] += 1
             if ai_j == ric_j:
                 day_stats[date_str]["ai_correct"] += 1
@@ -787,60 +787,41 @@ class CAPIDatabase:
             if machine not in mach_stats:
                 mach_stats[machine] = {"total": 0, "aoi_correct": 0, "ai_correct": 0}
             mach_stats[machine]["total"] += 1
-            if ric_j == "NG":
+            if aoi_j == ric_j:
                 mach_stats[machine]["aoi_correct"] += 1
             if ai_j == ric_j:
                 mach_stats[machine]["ai_correct"] += 1
 
-        aoi_accuracy = (aoi_ng_correct / total * 100) if total > 0 else 0
-        ai_accuracy = (ai_correct / total * 100) if total > 0 else 0
+        aoi_accuracy = (aoi_correct_count / total * 100) if total > 0 else 0
+        ai_accuracy = (ai_correct_count / total * 100) if total > 0 else 0
 
-        # AOI 過檢: AOI 判 NG 但 RIC 判 OK
-        aoi_over = total - aoi_ng_correct
-        aoi_over_rate = round(aoi_over / total * 100, 1) if total > 0 else 0
-
-        # AOI 漏檢: AOI 判 OK 但 RIC 判 NG (需額外查詢)
+        # AOI 過檢與漏檢
+        aoi_ng_count = 0
+        aoi_over = 0
         aoi_miss = 0
-        aoi_miss_rate = 0
-        try:
-            conn = self._get_conn()
-            try:
-                # 找出 RIC 判 NG 但 AOI 判 OK 的面板
-                if batch_id:
-                    ric_ng_pnls = conn.execute(
-                        """SELECT DISTINCT pnl_id FROM ric_records
-                           WHERE batch_id = ? AND ric_judgment = 'NG'""",
-                        (batch_id,)
-                    ).fetchall()
-                else:
-                    ric_ng_pnls = conn.execute(
-                        """SELECT DISTINCT pnl_id FROM ric_records
-                           WHERE ric_judgment = 'NG'"""
-                    ).fetchall()
+        ric_ng_total = 0
 
-                ric_ng_total = len(ric_ng_pnls)
-                for pnl_row in ric_ng_pnls:
-                    pnl_id = pnl_row["pnl_id"]
-                    # 檢查此面板是否在 inference_records 中被 AOI 判 OK
-                    aoi_ok_row = conn.execute(
-                        """SELECT id FROM inference_records
-                           WHERE glass_id = ? AND (machine_judgment = 'OK' OR machine_judgment = '')
-                           LIMIT 1""",
-                        (pnl_id,)
-                    ).fetchone()
-                    if aoi_ok_row:
-                        aoi_miss += 1
-
-                aoi_miss_rate = round(aoi_miss / ric_ng_total * 100, 1) if ric_ng_total > 0 else 0
-            finally:
-                conn.close()
-        except Exception:
-            pass  # 若查詢失敗，漏檢率維持 0
+        for rec in comparisons:
+            ric_j = rec["ric_judgment"]
+            aoi_j = "OK" if rec["machine_judgment"] == "OK" else "NG"
+            
+            if aoi_j == "NG":
+                aoi_ng_count += 1
+                if ric_j == "OK":
+                    aoi_over += 1
+            else:
+                if ric_j == "NG":
+                    aoi_miss += 1
+                    
+            if ric_j == "NG":
+                ric_ng_total += 1
+                
+        aoi_over_rate = round((aoi_over / aoi_ng_count * 100), 1) if aoi_ng_count > 0 else 0
+        aoi_miss_rate = round((aoi_miss / ric_ng_total * 100), 1) if ric_ng_total > 0 else 0
 
         # AI 過檢率 / 漏檢率
         ai_over_rate = round(ai_over / ai_ng_count * 100, 1) if ai_ng_count > 0 else 0
-        ric_ng_in_set = aoi_ng_correct  # AOI NG 中 RIC 也判 NG 的總數
-        ai_miss_rate = round(ai_miss / ric_ng_in_set * 100, 1) if ric_ng_in_set > 0 else 0
+        ai_miss_rate = round(ai_miss / ric_ng_total * 100, 1) if ric_ng_total > 0 else 0
 
         by_day = []
         for date_str in sorted(day_stats.keys()):
@@ -866,18 +847,20 @@ class CAPIDatabase:
             "total": total,
             "aoi_accuracy": round(aoi_accuracy, 1),
             "ai_accuracy": round(ai_accuracy, 1),
-            "aoi_ng_correct": aoi_ng_correct,
-            "ai_correct": ai_correct,
+            "aoi_ng_correct": aoi_correct_count,
+            "ai_correct": ai_correct_count,
             # 過檢/漏檢
             "aoi_over": aoi_over,
             "aoi_over_rate": aoi_over_rate,
             "aoi_miss": aoi_miss,
             "aoi_miss_rate": aoi_miss_rate,
+            "aoi_ng_count": aoi_ng_count,
             "ai_ng_count": ai_ng_count,
             "ai_over": ai_over,
             "ai_over_rate": ai_over_rate,
             "ai_miss": ai_miss,
             "ai_miss_rate": ai_miss_rate,
+            "ric_ng_total": ric_ng_total,
             "by_day": by_day,
             "by_machine": by_machine,
             "details": comparisons,

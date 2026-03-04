@@ -73,7 +73,7 @@
             background: linear-gradient(135deg, #1e293b, #0f172a);
             padding: 20px 0;
             border-bottom: 1px solid var(--border);
-            margin-bottom: 24px;
+            margin-bottom: 30px;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
         }
 
@@ -101,7 +101,7 @@
         nav a {
             color: var(--text-muted);
             text-decoration: none;
-            margin-left: 24px;
+            margin-left: 30px;
             transition: color 0.2s;
             font-weight: 500;
         }
@@ -333,26 +333,32 @@
                 MOD2 CAPI AD-AI智能檢測
             </h1>
             <nav>
-                <a href="/dashboard" {% if request_path=='/dashboard' %}class="active" {% endif %}>即時儀表板</a>
-                <a href="/" {% if request_path=='/' %}class="active" {% endif %}>推論記錄</a>
-                <a href="/search" {% if request_path=='/search' %}class="active" {% endif %}>記錄搜尋</a>
+                <a href="/dashboard" {% if request_path=='/dashboard' %}class="active" {% endif %}
+                    style="display:inline-flex; align-items:center; gap:6px;"><img src="/imgs/nav_dashboard.png"
+                        style="width: 30px; height: 30px; object-fit: contain; border-radius: 4px;"> 即時儀表板</a>
+                <a href="/" {% if request_path=='/' %}class="active" {% endif %}
+                    style="display:inline-flex; align-items:center; gap:6px;"><img src="/imgs/nav_records.png"
+                        style="width: 30px; height: 30px; object-fit: contain; border-radius: 4px;"> 推論記錄</a>
+                <a href="/search" {% if request_path=='/search' %}class="active" {% endif %}
+                    style="display:inline-flex; align-items:center; gap:6px;"><img src="/imgs/nav_search.png"
+                        style="width: 30px; height: 30px; object-fit: contain; border-radius: 4px;"> 記錄搜尋</a>
                 <a href="/ric" {% if request_path=='/ric' %}class="active" {% endif %}
-                    style="display:inline-flex; align-items:center; gap:4px;">
-                    📊 RIC 比對
+                    style="display:inline-flex; align-items:center; gap:6px;">
+                    <img src="/imgs/nav_ric.png"
+                        style="width: 30px; height: 30px; object-fit: contain; border-radius: 4px;"> RIC 比對
                 </a>
-                <a href="/api/stats">統計 API</a>
+                <a href="/api/stats" style="display:inline-flex; align-items:center; gap:6px;"><img
+                        src="/imgs/nav_stats.png"
+                        style="width: 30px; height: 30px; object-fit: contain; border-radius: 4px;"> 統計 API</a>
                 <a href="/debug" {% if request_path=='/debug' %}class="active" {% endif %}
-                    style="display:inline-flex; align-items:center; gap:4px; color:var(--err); border-bottom: 1px dashed rgba(245,158,11,0.4);">
-                    🔧 Debug 推論
+                    style="display:inline-flex; align-items:center; gap:6px; color:var(--err); border-bottom: 1px dashed rgba(245,158,11,0.4);">
+                    <img src="/imgs/nav_debug.png"
+                        style="width: 30px; height: 30px; object-fit: contain; border-radius: 4px;"> Debug 推論
                 </a>
                 <a href="#" onclick="document.getElementById('about-modal').classList.remove('hidden'); return false;"
-                    style="display:inline-flex; align-items:center; gap:4px; color:var(--text); background:rgba(34,197,94,0.15); padding:6px 12px; border-radius:6px; border:1px solid rgba(34,197,94,0.3); margin-left:16px;">
-                    <svg class="w-4 h-4" style="width:16px;height:16px;" fill="none" stroke="currentColor"
-                        viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                    </svg>
-                    關於檢測邏輯
+                    style="display:inline-flex; align-items:center; gap:6px; color:var(--text); background:rgba(34,197,94,0.15); padding:6px 12px; border-radius:8px; border:1px solid rgba(34,197,94,0.3); margin-left:16px; transition: all 0.2s; box-shadow: 0 0 10px rgba(34,197,94,0.1);">
+                    <img src="/imgs/nav_about.png"
+                        style="width: 30px; height: 30px; object-fit: contain; border-radius: 4px;"> 關於檢測邏輯
                 </a>
             </nav>
         </div>
