@@ -168,8 +168,7 @@ class HeatmapManager:
                 dust_resized = cv2.resize(dust_mask, (tile_size, tile_size))
                 dust_colored[dust_resized > 0] = (0, 255, 255)
                 dust_panel = cv2.addWeighted(dust_panel, 0.6, dust_colored, 0.4, 0)
-                cv2.putText(dust_panel, f"IOU: {dust_iou:.3f}", (10, 490),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
             else:
                 dust_panel = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
                 cv2.putText(dust_panel, "No Dust Data", (140, 260),
@@ -189,22 +188,25 @@ class HeatmapManager:
             dust_detail = ''
             dust_iou = 0.0
 
-        # --- 底部標籤 ---
+        # --- 底部獨立標籤列（不蓋到面板內容）---
         if has_omit:
-            labels = ["Original", "Heatmap", "OMIT Crop", "Dust Mask", "IOU Debug"]
+            labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask (IOU:{dust_iou:.3f})", "IOU Debug (G=Overlap R=Heat B=Dust)"]
             panels = [orig, heatmap_panel, omit_panel, dust_panel, iou_debug_panel]
         else:
             labels = ["Original", "Heatmap"]
             panels = [orig, heatmap_panel]
 
-        for lbl, p in zip(labels, panels):
-            cv2.rectangle(p, (0, tile_size - 35), (tile_size, tile_size), (0, 0, 0), -1)
-            cv2.putText(p, lbl, (10, tile_size - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
-
         # --- 橫向拼接 ---
         composite = np.hstack(panels)
         comp_h, comp_w = composite.shape[:2]
+
+        # --- 標籤列（獨立一行）---
+        label_h = 40
+        label_bar = np.zeros((label_h, comp_w, 3), dtype=np.uint8)
+        for i, lbl in enumerate(labels):
+            lx = i * tile_size + 10
+            cv2.putText(label_bar, lbl, (lx, 28),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
 
         # --- 頂部 Header ---
         header_h = 60
@@ -237,7 +239,7 @@ class HeatmapManager:
         cv2.putText(header, detail_line, (10, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
 
-        final = np.vstack([header, composite])
+        final = np.vstack([header, composite, label_bar])
 
         filename = f"heatmap_{image_name}_tile{tile_id}.{self.save_format}"
         filepath = save_dir / filename

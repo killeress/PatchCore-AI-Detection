@@ -759,6 +759,9 @@ class CAPIInferencer:
         if hasattr(predictions, 'anomaly_map') and predictions.anomaly_map is not None:
             anomaly_map = predictions.anomaly_map.squeeze().cpu().numpy() if hasattr(predictions.anomaly_map, 'cpu') else predictions.anomaly_map.squeeze()
             
+            # 記錄衰減/遮罩處理前的 anomaly_map max (用於後續比率計算)
+            pre_process_max = float(np.max(anomaly_map))
+            
             # 如果有遮罩，將排除區域的熱圖值設為 0
             if tile.mask is not None:
                 # 確保遮罩尺寸匹配
@@ -790,7 +793,7 @@ class CAPIInferencer:
                     scaled_margin = int(edge_margin * scale)
                     anomaly_map = self._apply_edge_margin(anomaly_map, scaled_margin, sides=sides)
         
-        # 如果有遮罩或邊緣衰減，重新計算分數
+        # 如果有遮罩或邊緣衰減，使用衰減比率調整分數（保持與 anomalib pred_score 相同尺度）
         has_edge_margin = self.config.edge_margin_px > 0 and any([
             tile.is_top_edge and self.config.edge_margin_sides.get('top', False),
             tile.is_bottom_edge and self.config.edge_margin_sides.get('bottom', False),
@@ -799,12 +802,14 @@ class CAPIInferencer:
         ])
         need_recalc = (tile.mask is not None) or has_edge_margin
         if need_recalc and anomaly_map is not None:
-            if tile.mask is not None:
-                valid_mask = tile.mask > 0
-                if np.any(valid_mask):
-                    pred_score = float(np.max(anomaly_map))
+            post_process_max = float(np.max(anomaly_map))
+            
+            if pre_process_max > 0:
+                # 用比率調整原始 pred_score，保持在 anomalib 正規化的同一尺度
+                decay_ratio = post_process_max / pre_process_max
+                pred_score = pred_score * decay_ratio
             else:
-                pred_score = float(np.max(anomaly_map))
+                pred_score = 0.0
         
         return pred_score, anomaly_map
     
@@ -1222,9 +1227,7 @@ class CAPIInferencer:
         verdict_text = "DUST" if is_dust else "REAL_NG"
         cv2.putText(panel_br, f"IOU:{iou:.3f} {verdict_text}", (5, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, verdict_color, 1)
-        # 圖例
-        cv2.putText(panel_br, "Green=Overlap", (5, sz - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-        cv2.putText(panel_br, "Red=Heat Blue=Dust", (5, sz - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        # 圖例已移至外層標籤列
         
         # --- 組合 2x2 ---
         top_row = np.hstack([panel_tl, panel_tr])
