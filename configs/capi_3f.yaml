@@ -41,8 +41,26 @@ tile_size: 512
 tile_stride: 512  # 非重疊切塊
 
 # 推論設定
-anomaly_threshold: 0.56  # 異常分數閾值
-model_path: "./model.pt"
+anomaly_threshold: 0.56  # 異常分數閾值 (fallback，當 threshold_mapping 無對應時使用)
+model_path: "./model.pt"  # fallback 模型路徑 (當 model_mapping 無對應前綴時使用)
+
+# 多模型映射 — 依圖片前綴自動選用對應模型
+# 每種點燈色獨立模型，提升各光源的檢出靈敏度
+model_mapping:
+  "G0F00000": "model/CAPI03-20260305/G0F00000-model.pt"    # 綠光
+  "R0F00000": "model/CAPI03-20260305/R0F00000-model.pt"    # 紅光
+  "W0F00000": "model/CAPI03-20260305/W0F00000-model.pt"    # 白光
+  "WGF50500": "model/CAPI03-20260305/WGF50500-model.pt"    # 50度灰
+  "STANDARD": "model/CAPI03-20260305/STANDARD-model.pt"    # 標準
+
+# 每個前綴的獨立閾值 (可依實際 miss/overkill 數據個別微調)
+threshold_mapping:
+  "G0F00000": 0.56
+  "R0F00000": 0.56
+  "W0F00000": 0.56
+  "WGF50500": 0.56
+  "STANDARD": 0.56
+
 
 # 灰塵偵測設定 (OMIT 圖片分析)
 dust_brightness_threshold: 40    # 備用亮度閾值 (優先使用 Otsu 自適應)

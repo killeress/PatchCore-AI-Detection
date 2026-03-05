@@ -458,7 +458,15 @@ class CAPIServer:
         # 判定門檻優先順序: 1. server_config.yaml (核心覆蓋) -> 2. capi_3f.yaml (模型預設) -> 3. 0.6 (保底)
         threshold = inf_cfg.get("threshold", capi_config.anomaly_threshold)
 
-        logger.info(f"Loading model: {model_path} (device={device}, threshold={threshold})")
+        # 多模型模式: 當 capi_config 有 model_mapping 時，model_path 僅作為 fallback
+        if capi_config.model_mapping:
+            logger.info(f"Multi-model mode: {len(capi_config.model_mapping)} prefix mappings detected")
+            for prefix, mpath in capi_config.model_mapping.items():
+                logger.info(f"  {prefix} → {mpath}")
+        else:
+            logger.info(f"Single-model mode: {model_path}")
+
+        logger.info(f"Loading model(s) (device={device}, default_threshold={threshold})")
         self.inferencer = CAPIInferencer(
             config=capi_config,
             model_path=model_path,
@@ -468,13 +476,19 @@ class CAPIServer:
         
         # 更新全域狀態的模型資訊
         with server_status.lock:
-            # 抽出檔名並附上建置時間 (修改時間)
-            try:
-                mtime = os.path.getmtime(model_path)
-                mtime_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
-                server_status.model_version = f"{Path(model_path).name} ({mtime_str})"
-            except Exception:
-                server_status.model_version = Path(model_path).name
+            if capi_config.model_mapping:
+                # 多模型模式：顯示已載入數量
+                loaded_count = len(self.inferencer._inferencers)
+                total_count = len(capi_config.model_mapping)
+                server_status.model_version = f"Multi-Model ({loaded_count}/{total_count} loaded)"
+            else:
+                # 單一模型模式：顯示檔名和修改時間
+                try:
+                    mtime = os.path.getmtime(model_path)
+                    mtime_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
+                    server_status.model_version = f"{Path(model_path).name} ({mtime_str})"
+                except Exception:
+                    server_status.model_version = Path(model_path).name
                 
             # 判斷是否為 GPU 並取得型號
             display_device = device.upper()

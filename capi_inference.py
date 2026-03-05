@@ -172,9 +172,9 @@ class CAPIInferencer:
         
         Args:
             config: CAPI 配置
-            model_path: PatchCore 模型路徑 (.xml 或 .pt)
+            model_path: PatchCore 模型路徑 (.xml 或 .pt)，作為 fallback
             device: 運算裝置 ("auto", "cpu", "cuda")
-            threshold: 異常判斷閾值
+            threshold: 異常判斷閾值 (fallback，當 threshold_mapping 無對應時使用)
             base_dir: 基礎目錄（用於解析相對路徑）
         """
         self.config = config
@@ -182,7 +182,21 @@ class CAPIInferencer:
         self.mark_template = None
         self.model_path = Path(model_path) if model_path else None
         self.threshold = threshold
-        self.inferencer = None
+        self.inferencer = None  # 保留向後相容 (fallback 單一模型)
+        
+        # 多模型快取: {model_path_str: inferencer_object}
+        self._inferencers: Dict[str, Any] = {}
+        
+        # 前綴 → 模型路徑映射 (從 config 讀取)
+        self._model_mapping: Dict[str, Path] = {}
+        for prefix, mpath in config.model_mapping.items():
+            p = Path(mpath)
+            if not p.is_absolute():
+                p = self.base_dir / p
+            self._model_mapping[prefix] = p
+        
+        # 前綴 → 閾值映射
+        self._threshold_mapping: Dict[str, float] = dict(config.threshold_mapping)
         
         # 決定運算裝置
         self.device = self._get_device(device)
@@ -190,8 +204,24 @@ class CAPIInferencer:
         # 載入 MARK 模板
         self._load_mark_template()
         
-        # 載入模型（如果有指定）
-        if self.model_path:
+        # 載入模型
+        if self._model_mapping:
+            # 多模型模式：預載所有映射的模型
+            print(f"🔀 多模型模式: 偵測到 {len(self._model_mapping)} 個前綴映射")
+            for prefix, mpath in self._model_mapping.items():
+                print(f"   {prefix} → {mpath}")
+                try:
+                    inf = self._load_model_from_path(mpath)
+                    if inf:
+                        self._inferencers[str(mpath)] = inf
+                except Exception as e:
+                    print(f"   ⚠️ 載入失敗: {e}")
+            print(f"✅ 已載入 {len(self._inferencers)}/{len(self._model_mapping)} 個模型")
+            # 設定 self.inferencer 為第一個載入成功的模型 (向後相容)
+            if self._inferencers:
+                self.inferencer = next(iter(self._inferencers.values()))
+        elif self.model_path:
+            # 單一模型模式 (向後相容)
             self._load_model()
     
     def _get_device(self, device: str) -> str:
@@ -204,23 +234,31 @@ class CAPIInferencer:
                 return "cpu"
         return device
     
-    def _load_model(self) -> None:
-        """載入 PatchCore 模型 (支援 OpenVINO 和 PyTorch)"""
-        if self.model_path is None or not self.model_path.exists():
-            print(f"⚠️ 模型路徑無效: {self.model_path}")
-            return
+    def _load_model_from_path(self, model_path: Path) -> Optional[Any]:
+        """載入 PatchCore 模型並回傳 inferencer 物件 (支援 OpenVINO 和 PyTorch)
         
-        print(f"載入模型: {self.model_path}")
+        Args:
+            model_path: 模型檔案路徑
+            
+        Returns:
+            inferencer 物件，載入失敗回傳 None
+        """
+        if model_path is None or not model_path.exists():
+            print(f"⚠️ 模型路徑無效: {model_path}")
+            return None
+        
+        print(f"載入模型: {model_path}")
         print(f"使用裝置: {self.device}")
         
-        model_ext = self.model_path.suffix.lower()
+        model_ext = model_path.suffix.lower()
+        inferencer_obj = None
         
         if model_ext == ".xml":
             # OpenVINO 格式
             from anomalib.deploy import OpenVINOInferencer
             print("📦 偵測到 OpenVINO 格式模型")
-            self.inferencer = OpenVINOInferencer(
-                path=str(self.model_path),
+            inferencer_obj = OpenVINOInferencer(
+                path=str(model_path),
                 device="CPU",  # OpenVINO 使用 CPU
             )
         elif model_ext in (".pt", ".pth", ".ckpt"):
@@ -237,8 +275,8 @@ class CAPIInferencer:
                 pathlib.WindowsPath = pathlib.PosixPath
                 
             try:
-                self.inferencer = TorchInferencer(
-                    path=str(self.model_path),
+                inferencer_obj = TorchInferencer(
+                    path=str(model_path),
                     device=self.device,
                 )
             finally:
@@ -246,19 +284,74 @@ class CAPIInferencer:
                     pathlib.WindowsPath = original_windows_path
         else:
             print(f"⚠️ 未知模型格式: {model_ext}")
-            return
+            return None
         
-        print("✅ 模型載入完成")
+        print(f"✅ 模型載入完成: {model_path.name}")
         
         # GPU Warm-up: 預先編譯 CUDA kernels，避免首次推論延遲
-        if self.device != "cpu" and self.inferencer is not None:
+        if self.device != "cpu" and inferencer_obj is not None:
             try:
                 print("🔥 GPU Warm-up 中...")
                 dummy = np.zeros((self.config.tile_size, self.config.tile_size, 3), dtype=np.uint8)
-                self.inferencer.predict(dummy)
+                inferencer_obj.predict(dummy)
                 print("✅ GPU Warm-up 完成")
             except Exception as e:
                 print(f"⚠️ GPU Warm-up 失敗 (不影響推論): {e}")
+        
+        return inferencer_obj
+    
+    def _load_model(self) -> None:
+        """載入 fallback 單一模型 (向後相容)"""
+        result = self._load_model_from_path(self.model_path)
+        if result is not None:
+            self.inferencer = result
+            self._inferencers[str(self.model_path)] = result
+    
+    def _get_image_prefix(self, filename: str) -> str:
+        """從檔名中取得圖片前綴 (去除時間戳尾碼)
+        
+        例如: 'G0F00000_114438.tif' → 'G0F00000'
+              'STANDARD.png' → 'STANDARD'
+        """
+        stem = Path(filename).stem
+        # 如果含有底線，嘗試去掉時間戳部分
+        if '_' in stem:
+            prefix = stem.rsplit('_', 1)[0]
+        else:
+            prefix = stem
+        return prefix
+    
+    def _get_inferencer_for_prefix(self, prefix: str) -> Optional[Any]:
+        """根據圖片前綴取得對應的 inferencer (含 lazy loading)
+        
+        查找順序:
+        1. model_mapping 中的對應模型
+        2. fallback 到 self.inferencer (單一模型)
+        """
+        # 查找映射
+        if prefix in self._model_mapping:
+            model_path = self._model_mapping[prefix]
+            path_key = str(model_path)
+            
+            # 快取命中
+            if path_key in self._inferencers:
+                return self._inferencers[path_key]
+            
+            # Lazy loading
+            print(f"🔄 Lazy loading 模型: {prefix} → {model_path}")
+            inf = self._load_model_from_path(model_path)
+            if inf is not None:
+                self._inferencers[path_key] = inf
+                return inf
+            else:
+                print(f"⚠️ {prefix} 模型載入失敗，fallback 到預設模型")
+        
+        # Fallback: 使用預設模型
+        return self.inferencer
+    
+    def _get_threshold_for_prefix(self, prefix: str) -> float:
+        """根據圖片前綴取得對應的閾值"""
+        return self._threshold_mapping.get(prefix, self.threshold)
     
     def _load_mark_template(self) -> None:
         """載入 MARK 模板"""
@@ -632,17 +725,19 @@ class CAPIInferencer:
         
         return result
     
-    def predict_tile(self, tile: TileInfo) -> Tuple[float, Optional[np.ndarray]]:
+    def predict_tile(self, tile: TileInfo, inferencer=None) -> Tuple[float, Optional[np.ndarray]]:
         """
         對單一 tile 進行推論
         
         Args:
             tile: TileInfo 物件
+            inferencer: 指定的 inferencer 物件，若為 None 使用 self.inferencer
             
         Returns:
             (異常分數, 異常熱圖) - 如果有遮罩，會過濾排除區域的異常
         """
-        if self.inferencer is None:
+        active_inferencer = inferencer or self.inferencer
+        if active_inferencer is None:
             raise RuntimeError("模型尚未載入")
         
         # 使用 numpy array 進行推論
@@ -654,7 +749,7 @@ class CAPIInferencer:
              else:
                  input_image = cv2.cvtColor(input_image, cv2.COLOR_GRAY2BGR)
 
-        predictions = self.inferencer.predict(input_image)
+        predictions = active_inferencer.predict(input_image)
         
         # 取得分數
         pred_score = float(predictions.pred_score.item()) if hasattr(predictions.pred_score, 'item') else float(predictions.pred_score)
@@ -713,19 +808,25 @@ class CAPIInferencer:
         
         return pred_score, anomaly_map
     
-    def run_inference(self, result: ImageResult, progress_callback=None) -> ImageResult:
+    def run_inference(self, result: ImageResult, progress_callback=None,
+                      inferencer=None, threshold: Optional[float] = None) -> ImageResult:
         """
         對預處理結果執行推論
         
         Args:
             result: preprocess_image 的結果
             progress_callback: 進度回呼函數 (current, total)
+            inferencer: 指定的 inferencer 物件，若為 None 使用 self.inferencer
+            threshold: 指定的閾值，若為 None 使用 self.threshold
             
         Returns:
             更新後的 ImageResult（包含異常 tile 資訊）
         """
-        if self.inferencer is None:
+        active_inferencer = inferencer or self.inferencer
+        if active_inferencer is None:
             raise RuntimeError("模型尚未載入，請在初始化時指定 model_path")
+        
+        active_threshold = threshold if threshold is not None else self.threshold
         
         inference_start = time.time()
         anomaly_tiles = []
@@ -735,9 +836,9 @@ class CAPIInferencer:
             if progress_callback:
                 progress_callback(i + 1, total)
             
-            score, anomaly_map = self.predict_tile(tile)
+            score, anomaly_map = self.predict_tile(tile, inferencer=active_inferencer)
             
-            if score >= self.threshold:
+            if score >= active_threshold:
                 anomaly_tiles.append((tile, score, anomaly_map))
         
         # 更新結果
@@ -1581,7 +1682,27 @@ class CAPIInferencer:
         # ================================================================
         inference_start = time.time()
         for i, result in enumerate(preprocessed_results):
-            result = self.run_inference(result)
+            # 多模型路由：依圖片前綴選擇對應的 inferencer 和 threshold
+            img_prefix = self._get_image_prefix(result.image_path.name)
+            target_inferencer = self._get_inferencer_for_prefix(img_prefix)
+            target_threshold = self._get_threshold_for_prefix(img_prefix)
+            
+            if target_inferencer is None:
+                print(f"⚠️ {result.image_path.name} 無可用模型，跳過推論")
+                continue
+            
+            # 模型路由 log (僅在多模型模式下顯示)
+            if self._model_mapping:
+                model_name = "fallback"
+                if img_prefix in self._model_mapping:
+                    model_name = self._model_mapping[img_prefix].name
+                print(f"🎯 {result.image_path.name} → 模型: {model_name}, 閾值: {target_threshold}")
+            
+            result = self.run_inference(
+                result,
+                inferencer=target_inferencer,
+                threshold=target_threshold,
+            )
             preprocessed_results[i] = result
             
             if progress_callback:

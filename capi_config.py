@@ -105,7 +105,13 @@ class CAPIConfig:
     
     # 推論設定
     anomaly_threshold: float = 0.5
-    model_path: str = ""  # 預設模型路徑
+    model_path: str = ""  # 預設模型路徑 (fallback，當 model_mapping 無對應時使用)
+    
+    # 多模型映射 {image_prefix: model_path} — 依圖片前綴自動選用對應模型
+    model_mapping: Dict[str, str] = field(default_factory=dict)
+    
+    # 每個前綴的獨立閾值 {image_prefix: threshold}，未指定則使用 anomaly_threshold
+    threshold_mapping: Dict[str, float] = field(default_factory=dict)
     
     # 灰塵偵測設定 (OMIT 圖片分析)
     dust_brightness_threshold: int = 80       # OMIT 亮度閾值 (自適應 Otsu 時此為備用)
@@ -171,6 +177,8 @@ class CAPIConfig:
             tile_stride=data.get("tile_stride", 512),
             anomaly_threshold=data.get("anomaly_threshold", 0.5),
             model_path=data.get("model_path", ""),
+            model_mapping=data.get("model_mapping", {}),
+            threshold_mapping={k: float(v) for k, v in data.get("threshold_mapping", {}).items()},
             dust_brightness_threshold=data.get("dust_brightness_threshold", 80),
             dust_area_min=data.get("dust_area_min", 10),
             dust_area_max=data.get("dust_area_max", 50000),
@@ -207,6 +215,8 @@ class CAPIConfig:
             "tile_size": self.tile_size,
             "tile_stride": self.tile_stride,
             "anomaly_threshold": self.anomaly_threshold,
+            "model_mapping": self.model_mapping,
+            "threshold_mapping": self.threshold_mapping,
             "dust_brightness_threshold": self.dust_brightness_threshold,
             "dust_area_min": self.dust_area_min,
             "dust_area_max": self.dust_area_max,
