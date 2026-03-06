@@ -136,7 +136,15 @@
     {% for img in detail.images %}
     {% set img_status, img_badge = img | img_status_info %}
     <div class="card">
-        <h3>{{ img | get_img_stem }} <span class="badge {{ img_badge }}">{{ img_status }}</span></h3>
+        <h3 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            {{ img | get_img_stem }} <span class="badge {{ img_badge }}">{{ img_status }}</span>
+            {% if detail.image_dir and img.image_name %}
+            <a href="/debug?path={{ (detail.image_dir ~ '/' ~ img.image_name) | urlencode }}"
+                style="font-size:0.75rem;padding:4px 10px;background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.3);border-radius:6px;color:var(--accent);text-decoration:none;font-weight:600;white-space:nowrap;transition:all 0.2s;"
+                onmouseover="this.style.background='rgba(59,130,246,0.3)'"
+                onmouseout="this.style.background='rgba(59,130,246,0.15)'" title="在 Debug 頁面對此圖片執行單圖推論">🔧 Debug 推論</a>
+            {% endif %}
+        </h3>
         <p style="color:var(--text-muted);font-size:0.85rem;margin:8px 0;font-family:'Fira Code',monospace;">
             尺寸: {{ img.image_width }}x{{ img.image_height }} |
             區域數: {{ img.tile_count }} |

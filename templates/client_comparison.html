@@ -533,6 +533,50 @@
         #reportContent {
             display: none;
         }
+
+        /* AOI no-reference-value overlay */
+        .stat-card.no-ref {
+            opacity: 0.5;
+            position: relative;
+        }
+
+        .stat-card.no-ref::after {
+            content: '⚠ 無參考價值';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%) rotate(-15deg);
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: #f59e0b;
+            background: rgba(15, 23, 42, 0.85);
+            padding: 4px 12px;
+            border-radius: 6px;
+            border: 1px solid #f59e0b;
+            pointer-events: none;
+            z-index: 2;
+            white-space: nowrap;
+        }
+
+        .no-ref-banner {
+            background: rgba(245, 158, 11, 0.1);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+            border-radius: 10px;
+            padding: 12px 18px;
+            margin-bottom: 16px;
+            font-size: 0.88rem;
+            color: #fbbf24;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            line-height: 1.6;
+        }
+
+        .no-ref-banner .icon {
+            font-size: 1.2rem;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
     </style>
 </head>
 
@@ -575,6 +619,16 @@
 
         <!-- Tab 1: Analysis -->
         <div class="tab-panel active" id="panel-analysis">
+            <!-- RESULT_EQP warning banner -->
+            <div class="no-ref-banner">
+                <span class="icon">⚠️</span>
+                <div>
+                    <strong>RESULT_EQP=OK 無參考價值：</strong>
+                    RESULT_EQP=OK 表示外觀檢 (AOI) 判成 NG 後，由人員 (RIC) 目視複檢外觀覆判為 OK（非看 AI 畫面）。
+                    因此 <strong>AOI=OK 的資料不代表 AOI 真正判 OK</strong>，AOI 漏檢率無參考價值。
+                    但 <strong>AOI=NG 的 case 有參考價值</strong>，AOI 過檢率仍可做為參考指標。
+                </div>
+            </div>
             <!-- Row 1: Basic Stats -->
             <div class="stats-grid" id="statsGrid1"></div>
             <!-- Row 2: Over/Miss Stats -->
@@ -586,17 +640,17 @@
                     <div class="chart-container"><canvas id="resultChart"></canvas></div>
                 </div>
                 <div class="chart-card">
-                    <h3>🏭 各判定組合分析</h3>
+                    <h3>🧩 判定組合分佈 (AOI/AI/RIC)</h3>
                     <div class="chart-container"><canvas id="comboChart"></canvas></div>
                 </div>
             </div>
             <div class="charts-row">
                 <div class="chart-card">
-                    <h3>📈 時間軸趨勢 (每小時)</h3>
-                    <div class="chart-container"><canvas id="hourlyChart"></canvas></div>
+                    <h3>📈 時間軸趨勢 (每日)</h3>
+                    <div class="chart-container"><canvas id="trendChart"></canvas></div>
                 </div>
                 <div class="chart-card">
-                    <h3>🎯 AOI vs AI 混淆矩陣 (以RIC為真值)</h3>
+                    <h3>🧮 混淆矩陣 (AOI/AI vs 實際)</h3>
                     <div class="chart-container"><canvas id="confusionChart"></canvas></div>
                 </div>
             </div>
@@ -621,7 +675,7 @@
                                 <th>AOI (RESULT_EQP)</th>
                                 <th>AI (RESULT_AI)</th>
                                 <th>RIC (RESULT_RIC)</th>
-                                <th>AOI vs RIC</th>
+                                <th>AOI vs RIC <span style="color:#f59e0b;font-size:0.65rem;">⚠OK無參考</span></th>
                                 <th>AI vs RIC</th>
                             </tr>
                         </thead>
@@ -714,7 +768,7 @@
         // ── Global State ──
         let rawData = [];        // parsed rows
         let currentFilter = null;
-        let resultChart = null, comboChart = null, hourlyChart = null, confusionChart = null;
+        let resultChart = null, comboChart = null, trendChart = null, confusionChart = null;
 
         // ── Upload Logic ──
         const uploadZone = document.getElementById('uploadZone');
@@ -818,8 +872,8 @@
 
             // Combo counts
             const combos = {};
-            // Hourly breakdown
-            const hourly = {};
+            // Daily breakdown
+            const daily = {};
 
             data.forEach(row => {
                 const eqp = row.result_eqp;
@@ -850,12 +904,12 @@
                 const combo = `${eqp}/${ai}/${ric}`;
                 combos[combo] = (combos[combo] || 0) + 1;
 
-                // Hourly
-                const hour = row.systime.substring(0, 13); // "2026-03-04 16"
-                if (!hourly[hour]) hourly[hour] = { total: 0, aoiCorrect: 0, aiCorrect: 0 };
-                hourly[hour].total++;
-                if (eqp === ric) hourly[hour].aoiCorrect++;
-                if (ai === ric) hourly[hour].aiCorrect++;
+                // Daily
+                const day = row.systime.substring(0, 10); // "2026-03-04"
+                if (!daily[day]) daily[day] = { total: 0, aoiCorrect: 0, aiCorrect: 0 };
+                daily[day].total++;
+                if (eqp === ric) daily[day].aoiCorrect++;
+                if (ai === ric) daily[day].aiCorrect++;
             });
 
             const aoiAccuracy = total > 0 ? (aoiCorrect / total * 100).toFixed(1) : 0;
@@ -875,7 +929,7 @@
                 aoiAccuracy, aiAccuracy,
                 aoiOver, aoiMiss, aiOver, aiMiss,
                 aoiOverRate, aoiMissRate, aiOverRate, aiMissRate,
-                combos, hourly,
+                combos, daily,
                 bothNGRicOK, bothOKRicNG,
             };
         }
@@ -918,10 +972,10 @@
                 <div class="detail">${s.aoiOver} / ${s.aoiNG} 筆 AOI判NG中為過檢</div>
                 <div class="filter-hint">🔍 AOI=NG, RIC=OK</div>
             </div>
-            <div class="stat-card miss" data-filter="aoi_miss" onclick="filterByCard('aoi_miss')">
+            <div class="stat-card miss no-ref" data-filter="aoi_miss" onclick="filterByCard('aoi_miss')">
                 <div class="label">AOI 漏檢率</div>
                 <div class="value">${s.aoiMissRate}%</div>
-                <div class="detail">${s.aoiMiss} / ${s.ricNGTotal} 筆真實NG被AOI漏檢</div>
+                <div class="detail">${s.aoiMiss} / ${s.ricNGTotal} 筆 (⚠ AOI=OK為RIC覆判)</div>
                 <div class="filter-hint">🔍 AOI=OK, RIC=NG</div>
             </div>
             <div class="stat-card over" data-filter="ai_over" onclick="filterByCard('ai_over')">
@@ -936,13 +990,7 @@
                 <div class="detail">${s.aiMiss} / ${s.ricNGTotal} 筆真實NG被AI漏檢</div>
                 <div class="filter-hint">🔍 AI=OK, RIC=NG</div>
             </div>
-            ${s.errCount > 0 ? `
-            <div class="stat-card err-card" data-filter="err" onclick="filterByCard('err')">
-                <div class="label">原始 ERR 筆數</div>
-                <div class="value">${s.errCount}</div>
-                <div class="detail">RIC 原始回傳 ERR，已視為 OK 計算</div>
-                <div class="filter-hint">🔍 篩選原始 ERR</div>
-            </div>` : ''}
+
         `;
         }
 
@@ -978,8 +1026,8 @@
             }) : rawData;
 
             const labels = {
-                total: '全部', aoi_correct: 'AOI 與 RIC 一致', ai_correct: 'AI 與 RIC 一致',
-                ai_ng: 'AI 判 NG', aoi_over: 'AOI 過檢', aoi_miss: 'AOI 漏檢',
+                total: '全部', aoi_correct: 'AOI 與 RIC 一致 (⚠含RIC覆判)', ai_correct: 'AI 與 RIC 一致',
+                ai_ng: 'AI 判 NG', aoi_over: 'AOI 過檢 (AOI=NG有參考)', aoi_miss: 'AOI 漏檢 (⚠無參考)',
                 ai_over: 'AI 過檢', ai_miss: 'AI 漏檢', err: '原始 ERR (視為OK)',
             };
 
@@ -1064,7 +1112,7 @@
             resultChart = new Chart(ctx1, {
                 type: 'bar',
                 data: {
-                    labels: ['AOI (EQP)', 'AI', 'RIC'],
+                    labels: ['AOI (RESULT_EQP)', 'AI', 'RIC'],
                     datasets: [
                         { label: 'OK', data: [eqpOK, aiOK, ricOK], backgroundColor: 'rgba(34,197,94,0.7)', borderRadius: 4 },
                         { label: 'NG', data: [eqpNG, aiNG, ricNG], backgroundColor: 'rgba(239,68,68,0.7)', borderRadius: 4 },
@@ -1097,7 +1145,7 @@
             comboChart = new Chart(ctx2, {
                 type: 'bar',
                 data: {
-                    labels: comboLabels.map(k => `EQP/AI/RIC: ${k}`),
+                    labels: comboLabels.map(k => `AOI/AI/RIC: ${k}`),
                     datasets: [{
                         label: '筆數',
                         data: comboValues,
@@ -1116,39 +1164,39 @@
                 }
             });
 
-            // 3. Hourly Trend
-            const ctx3 = document.getElementById('hourlyChart').getContext('2d');
-            if (hourlyChart) hourlyChart.destroy();
+            // 3. Daily Trend
+            const ctx3 = document.getElementById('trendChart').getContext('2d');
+            if (trendChart) trendChart.destroy();
 
-            const hourKeys = Object.keys(stats.hourly).sort();
-            const hourLabels = hourKeys.map(k => k.substring(11) + ':00');
+            const dateKeys = Object.keys(stats.daily).sort();
+            const dateLabels = dateKeys;
 
-            hourlyChart = new Chart(ctx3, {
+            trendChart = new Chart(ctx3, {
                 type: 'line',
                 data: {
-                    labels: hourLabels,
+                    labels: dateLabels,
                     datasets: [
                         {
                             label: 'AOI 準確率 (%)',
-                            data: hourKeys.map(k => {
-                                const h = stats.hourly[k];
-                                return h.total > 0 ? (h.aoiCorrect / h.total * 100).toFixed(1) : null;
+                            data: dateKeys.map(k => {
+                                const d = stats.daily[k];
+                                return d.total > 0 ? (d.aoiCorrect / d.total * 100).toFixed(1) : null;
                             }),
                             borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)',
                             tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: '#f59e0b',
                         },
                         {
                             label: 'AI 準確率 (%)',
-                            data: hourKeys.map(k => {
-                                const h = stats.hourly[k];
-                                return h.total > 0 ? (h.aiCorrect / h.total * 100).toFixed(1) : null;
+                            data: dateKeys.map(k => {
+                                const d = stats.daily[k];
+                                return d.total > 0 ? (d.aiCorrect / d.total * 100).toFixed(1) : null;
                             }),
                             borderColor: '#818cf8', backgroundColor: 'rgba(129,140,248,0.1)',
                             tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: '#818cf8',
                         },
                         {
                             label: '筆數',
-                            data: hourKeys.map(k => stats.hourly[k].total),
+                            data: dateKeys.map(k => stats.daily[k].total),
                             type: 'bar',
                             backgroundColor: 'rgba(148,163,184,0.15)',
                             borderRadius: 4, yAxisID: 'y1',
@@ -1217,7 +1265,7 @@
                 ['AOI 準確率', s.aoiAccuracy + '%'],
                 ['AI 準確率', s.aiAccuracy + '%'],
                 ['AOI 過檢率', s.aoiOverRate + '%'],
-                ['AOI 漏檢率', s.aoiMissRate + '%'],
+                ['AOI 漏檢率 ⚠無參考', s.aoiMissRate + '%'],
                 ['AI 過檢率', s.aiOverRate + '%'],
                 ['AI 漏檢率', s.aiMissRate + '%'],
             ];
@@ -1236,7 +1284,7 @@
                 ['AOI 準確率', '<code>aoi_ng_correct / total</code>'],
                 ['AI 準確率', '<code>ai_correct / total</code>'],
                 ['AOI 過檢率', '<code>aoi_over / aoi_ng_count</code>'],
-                ['AOI 漏檢率', '<code>aoi_miss / ric_ng_total</code>'],
+                ['AOI 漏檢率 ⚠無參考', '<code>aoi_miss / ric_ng_total</code>'],
                 ['AI 過檢率', '<code>ai_over / ai_ng_count</code>'],
                 ['AI 漏檢率', '<code>ai_miss / ric_ng_total</code>'],
             ];
@@ -1259,6 +1307,14 @@
             }
 
             diffs.push({
+                type: 'warning',
+                title: 'RESULT_EQP=OK 無參考價值',
+                desc: `<strong>RESULT_EQP=OK</strong> 表示 AOI 外觀檢判成 NG 後，由人員 (RIC) 目視複檢外觀覆判為 OK（非看 AI 畫面），因此 AOI=OK 不代表 AOI 真正判 OK。<br>
+                   <strong>AOI=NG 的 case 有參考價值</strong>：AOI 判 NG 數和過檢率可供參考。<br>
+                   <strong>AOI=OK 的 case 無參考價值</strong>：AOI 漏檢率標記為「⚠無參考」。`
+            });
+
+            diffs.push({
                 type: 'info',
                 title: '資料來源差異',
                 desc: `<strong>Client XLS</strong>: 直接由客戶端系統匯出，包含 RESULT_EQP / RESULT_AI / RESULT_RIC 三個欄位。<br>
@@ -1270,16 +1326,17 @@
                 type: 'info',
                 title: '欄位名稱對應',
                 desc: `兩份資料的核心欄位對應一致：<br>
-                   <code>RESULT_EQP</code> ↔ <code>machine_judgment</code> (AOI判定)<br>
+                   <code>RESULT_EQP</code> ↔ <code>machine_judgment</code> (AOI判定，⚠ OK值為RIC覆判結果)<br>
                    <code>RESULT_AI</code> ↔ <code>ai_judgment</code> (AI判定)<br>
                    <code>RESULT_RIC</code> ↔ <code>ric_judgment</code> (RIC人工判定)`
             });
 
             diffs.push({
-                type: s.aoiMiss > 0 || s.aiMiss > 0 ? 'warning' : 'success',
+                type: s.aiMiss > 0 ? 'warning' : 'success',
                 title: '漏檢分析',
-                desc: `AOI 漏檢 ${s.aoiMiss} 筆 (${s.aoiMissRate}%), AI 漏檢 ${s.aiMiss} 筆 (${s.aiMissRate}%)。<br>
-                   ${s.bothOKRicNG > 0 ? `<strong style="color:var(--ng);">⚠ 有 ${s.bothOKRicNG} 筆面板 AOI 和 AI 都判 OK 但 RIC 判 NG（雙漏檢）</strong>` : '✅ 無雙漏檢情況'}。`
+                desc: `AI 漏檢 ${s.aiMiss} 筆 (${s.aiMissRate}%)。<br>
+                   <span style="opacity:0.6;">（AOI 漏檢 ${s.aoiMiss} 筆 (${s.aoiMissRate}%) — ⚠ AOI=OK為RIC覆判，此數據無參考價值）</span><br>
+                   ${s.bothOKRicNG > 0 ? `<strong style="color:var(--ng);">⚠ 有 ${s.bothOKRicNG} 筆面板 AOI 和 AI 都判 OK 但 RIC 判 NG</strong>` : '✅ AI 無漏檢情況'}。`
             });
 
             diffs.push({

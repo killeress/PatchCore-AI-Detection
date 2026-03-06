@@ -760,7 +760,7 @@ class CAPIInferencer:
         
         return result
     
-    def predict_tile(self, tile: TileInfo, inferencer=None) -> Tuple[float, Optional[np.ndarray]]:
+    def predict_tile(self, tile: TileInfo, inferencer=None, edge_margin_override: Optional[int] = None) -> Tuple[float, Optional[np.ndarray]]:
         """
         對單一 tile 進行推論
         
@@ -807,8 +807,8 @@ class CAPIInferencer:
                 # 將排除區域設為 0
                 anomaly_map = anomaly_map * (mask_resized / 255.0)
             
-            # 邊緣衰減：過濾光影假陽性
-            edge_margin = self.config.edge_margin_px
+            # 邊緣衰減：過濾光影假陽性 (debug 模式可覆寫數值)
+            edge_margin = self.config.edge_margin_px if edge_margin_override is None else edge_margin_override
             if edge_margin > 0:
                 # 收集此 tile 需要衰減的方向
                 cfg_sides = self.config.edge_margin_sides
@@ -829,7 +829,8 @@ class CAPIInferencer:
                     anomaly_map = self._apply_edge_margin(anomaly_map, scaled_margin, sides=sides)
         
         # 如果有遮罩或邊緣衰減，使用衰減比率調整分數（保持與 anomalib pred_score 相同尺度）
-        has_edge_margin = self.config.edge_margin_px > 0 and any([
+        actual_edge_margin = self.config.edge_margin_px if edge_margin_override is None else edge_margin_override
+        has_edge_margin = actual_edge_margin > 0 and any([
             tile.is_top_edge and self.config.edge_margin_sides.get('top', False),
             tile.is_bottom_edge and self.config.edge_margin_sides.get('bottom', False),
             tile.is_left_edge and self.config.edge_margin_sides.get('left', False),
@@ -849,7 +850,8 @@ class CAPIInferencer:
         return pred_score, anomaly_map
     
     def run_inference(self, result: ImageResult, progress_callback=None,
-                      inferencer=None, threshold: Optional[float] = None) -> ImageResult:
+                      inferencer=None, threshold: Optional[float] = None,
+                      edge_margin_override: Optional[int] = None) -> ImageResult:
         """
         對預處理結果執行推論
         
@@ -876,7 +878,7 @@ class CAPIInferencer:
             if progress_callback:
                 progress_callback(i + 1, total)
             
-            score, anomaly_map = self.predict_tile(tile, inferencer=active_inferencer)
+            score, anomaly_map = self.predict_tile(tile, inferencer=active_inferencer, edge_margin_override=edge_margin_override)
             
             if score >= active_threshold:
                 anomaly_tiles.append((tile, score, anomaly_map))
@@ -1999,6 +2001,14 @@ class CAPIInferencer:
                 text_y = max(50, min(y1_clip + 50, h - 10))
                 cv2.putText(vis, label, (text_x, text_y), 
                             cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
+                
+                # 右下角標上區域編號 (e.g. #64)
+                id_label = f"#{tile.tile_id}"
+                (tw_text, th_text), _ = cv2.getTextSize(id_label, cv2.FONT_HERSHEY_SIMPLEX, 2, 3)
+                id_x = max(0, min(x2_clip - tw_text - 10, w - tw_text))
+                id_y = max(th_text, min(y2_clip - 10, h - 5))
+                cv2.putText(vis, id_label, (id_x, id_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
             except Exception as e:
                 print(f"❌ 繪製 Tile {tile.tile_id} 失敗: {e}, 座標: ({x1_clip},{y1_clip})->({x2_clip},{y2_clip})")
         

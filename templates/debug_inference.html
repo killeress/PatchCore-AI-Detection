@@ -302,6 +302,43 @@
         text-transform: uppercase;
     }
 
+    /* Toggle switch */
+    .toggle-group {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-width: 130px;
+        justify-content: center;
+    }
+
+    .toggle-group label {
+        color: var(--text-muted);
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .toggle-group input[type="number"] {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        color: var(--err);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.95rem;
+        font-weight: 600;
+        outline: none;
+        width: 100%;
+        transition: border-color 0.2s;
+        text-align: center;
+    }
+
+    .toggle-group input[type="number"]:focus {
+        border-color: var(--err);
+        box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15);
+    }
+
     /* Hidden class */
     .hidden {
         display: none !important;
@@ -332,7 +369,12 @@
                 autocomplete="off" spellcheck="false">
             <div class="threshold-group">
                 <label for="threshold-input">判定門檻</label>
-                <input type="number" id="threshold-input" value="0.5" min="0" max="1" step="0.01">
+                <input type="number" id="threshold-input" value="{{ default_threshold }}" min="0" max="1" step="0.01">
+            </div>
+            <div class="toggle-group">
+                <label for="edge-margin-input">邊緣衰減 (px)</label>
+                <input type="number" id="edge-margin-input" value="{{ default_edge_margin }}" min="0" max="512"
+                    step="16">
             </div>
             <button class="btn-run" id="btn-run" onclick="runInference()">
                 <span class="spinner" id="spinner"></span>
@@ -382,6 +424,15 @@
         if (e.key === 'Enter') runInference();
     });
 
+    // 自動帶入 URL 的 ?path= 參數
+    (function () {
+        const params = new URLSearchParams(window.location.search);
+        const pathParam = params.get('path');
+        if (pathParam) {
+            input.value = pathParam;
+        }
+    })();
+
     async function runInference() {
         const imagePath = input.value.trim();
         if (!imagePath) {
@@ -403,6 +454,7 @@
                 body: JSON.stringify({
                     image_path: imagePath,
                     threshold: parseFloat(document.getElementById('threshold-input').value) || 0.5,
+                    edge_margin_px: parseInt(document.getElementById('edge-margin-input').value) || 0,
                 }),
             });
 
@@ -454,6 +506,10 @@
             <div class="label">處理時間</div>
             <div class="value" style="color:var(--accent)">${data.processing_time}s</div>
         </div>
+        <div class="summary-card" style="grid-column: span 2;">
+            <div class="label">使用模型 (${data.image_prefix || '未知'})</div>
+            <div class="value" style="color:var(--text);font-size:1.1rem;word-break:break-all;" title="${data.model_name || '預設'}">${data.model_name || '預設模型'}</div>
+        </div>
         <div class="summary-card">
             <div class="label">總 Tiles</div>
             <div class="value" style="color:var(--text)">${data.total_tiles}</div>
@@ -465,6 +521,12 @@
         <div class="summary-card">
             <div class="label">判定門檻</div>
             <div class="value" style="color:var(--text-muted)">${data.threshold}</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">邊緣衰減</div>
+            <div class="value" style="color:${data.edge_margin_px > 0 ? 'var(--text)' : 'var(--err)'}; font-size:1rem;">
+                ${data.edge_margin_px > 0 ? data.edge_margin_px + 'px' : '⚠️ 已停用'}
+            </div>
         </div>
         <div class="summary-card">
             <div class="label">圖片尺寸</div>

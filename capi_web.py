@@ -16,7 +16,7 @@ import tempfile
 import json
 import urllib.parse
 import mimetypes
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Optional
 import threading
@@ -667,8 +667,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _handle_debug_page(self, path: str):
         """Debug 推論頁面"""
+        # 從正在運行的推論器讀取 config 預設值
+        default_threshold = 0.5
+        default_edge_margin = 256
+        if self.inferencer and hasattr(self.inferencer, 'config'):
+            default_threshold = self.inferencer.config.anomaly_threshold
+            default_edge_margin = self.inferencer.config.edge_margin_px
+        
         template = self.jinja_env.get_template("debug_inference.html")
-        html = template.render(request_path=path)
+        html = template.render(
+            request_path=path,
+            default_threshold=default_threshold,
+            default_edge_margin=default_edge_margin,
+        )
         self._send_response(200, html)
 
     # ── RIC 人工檢驗報表功能 ─────────────────────────
@@ -925,7 +936,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         # Debug 門檻：預設 0.5（比正式環境低，用於漏檢排查）
         debug_threshold = float(data.get("threshold", 0.5))
-        original_threshold = self.inferencer.threshold
+        # 邊緣衰減覆寫：None = 使用 config 預設值，0 = 停用，>0 = 自訂寬度
+        edge_margin_raw = data.get("edge_margin_px")
+        edge_margin_override = int(edge_margin_raw) if edge_margin_raw is not None else None
 
         try:
             total_start = _time.time()
@@ -936,18 +949,34 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": f"無法載入或預處理圖片: {image_path}"})
                 return
 
-            # 2. 推論 — 門檻修改必須在 GPU lock 內，避免影響生產推論
-            #    生產推論 (CAPIServer._process_request) 也用同一把 _gpu_lock，
-            #    所以在 lock 內修改 threshold 是安全的。
+            # 2. 多模型路由：依圖片前綴選擇對應的 inferencer
+            img_prefix = self.inferencer._get_image_prefix(image_path.name)
+            target_inferencer = self.inferencer._get_inferencer_for_prefix(img_prefix)
+            
+            model_name = "預設模型"
+            if img_prefix in self.inferencer._model_mapping:
+                model_name = self.inferencer._model_mapping[img_prefix].name
+
+            if target_inferencer is None:
+                self._send_json({"error": f"找不到 {image_path.name} 對應的模型"})
+                return
+
+            # 3. 推論 — 若有 GPU lock 則排隊
             if hasattr(self, '_gpu_lock') and self._gpu_lock:
                 with self._gpu_lock:
-                    self.inferencer.threshold = debug_threshold
-                    result = self.inferencer.run_inference(result)
-                    self.inferencer.threshold = original_threshold
+                    result = self.inferencer.run_inference(
+                        result,
+                        inferencer=target_inferencer,
+                        threshold=debug_threshold,
+                        edge_margin_override=edge_margin_override,
+                    )
             else:
-                self.inferencer.threshold = debug_threshold
-                result = self.inferencer.run_inference(result)
-                self.inferencer.threshold = original_threshold
+                result = self.inferencer.run_inference(
+                    result,
+                    inferencer=target_inferencer,
+                    threshold=debug_threshold,
+                    edge_margin_override=edge_margin_override,
+                )
 
             total_time = _time.time() - total_start
 
@@ -1048,16 +1077,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "excluded_tiles": result.excluded_tile_count,
                 "anomaly_count": len(result.anomaly_tiles),
                 "processing_time": round(total_time, 3),
-                "threshold": self.inferencer.threshold,
+                "threshold": debug_threshold,
+                "edge_margin_px": edge_margin_override if edge_margin_override is not None else self.inferencer.config.edge_margin_px,
                 "overview_url": overview_url,
                 "tiles": tiles_data,
+                "image_prefix": img_prefix,
+                "model_name": model_name,
             }
 
             self._send_json(response_data)
             logger.info(f"[DEBUG] Inference {image_path.name}: {judgment} ({total_time:.2f}s, {len(result.anomaly_tiles)} anomalies)")
 
         except Exception as e:
-            self.inferencer.threshold = original_threshold
             logger.error(f"[DEBUG] Inference error: {e}", exc_info=True)
             self._send_json({"error": f"推論失敗: {str(e)}"})
 
@@ -1084,7 +1115,7 @@ def create_web_server(
     inferencer=None,
     heatmap_manager=None,
     gpu_lock=None,
-) -> HTTPServer:
+) -> ThreadingHTTPServer:
     """
     建立 Web 伺服器
 
@@ -1106,7 +1137,7 @@ def create_web_server(
     CAPIWebHandler._gpu_lock = gpu_lock
     CAPIWebHandler.init_jinja()
 
-    server = HTTPServer((host, port), CAPIWebHandler)
+    server = ThreadingHTTPServer((host, port), CAPIWebHandler)
     return server
 
 
