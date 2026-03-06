@@ -10,6 +10,8 @@ STANDARD 炸彈診斷工具
 
 使用方式:
     python diagnose_bomb.py <image_path>
+    python diagnose_bomb.py <image_path> --model-id GN140JCAL010S
+    python diagnose_bomb.py <image_path> --resolution 1920x1200
 """
 
 import os
@@ -20,42 +22,70 @@ import cv2
 import numpy as np
 from pathlib import Path
 from datetime import datetime
+import argparse
 
 # 確保模組路徑
 sys.path.insert(0, str(Path(__file__).parent))
 
 from capi_config import CAPIConfig
-from capi_inference import CAPIInferencer
+from capi_inference import CAPIInferencer, resolve_product_resolution, DEFAULT_PRODUCT_RESOLUTION
 
 
 # ── 設定 ──────────────────────────────────────────
 CONFIG_PATH = "configs/capi_3f.yaml"
 MODEL_PATH = "./model.pt"
 THRESHOLD = 0.56   # Debug 用低門檻
-PRODUCT_W = 1920
-PRODUCT_H = 1080
+
+
+def parse_resolution_arg(resolution_str: str):
+    """解析 WxH 或 W,H 格式的解析度字串"""
+    for sep in ['x', 'X', ',']:
+        if sep in resolution_str:
+            parts = resolution_str.split(sep)
+            if len(parts) == 2:
+                return (int(parts[0]), int(parts[1]))
+    raise ValueError(f"無法解析解析度: {resolution_str} (格式應為 WxH 或 W,H)")
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python diagnose_bomb.py <image_path>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="STANDARD 炸彈診斷工具")
+    parser.add_argument("image_path", help="圖片檔案路徑")
+    parser.add_argument("--model-id", default="", help="機種 ID (第六碼判定解析度，例如 GN140JCAL010S)")
+    parser.add_argument("--resolution", default="", help="手動指定解析度 WxH (例如 1920x1200)")
+    parser.add_argument("--config", default=CONFIG_PATH, help=f"設定檔路徑 (default: {CONFIG_PATH})")
+    parser.add_argument("--model", default=MODEL_PATH, help=f"模型路徑 (default: {MODEL_PATH})")
+    parser.add_argument("--threshold", type=float, default=THRESHOLD, help=f"異常門檻 (default: {THRESHOLD})")
+    args = parser.parse_args()
 
-    image_path = Path(sys.argv[1])
+    image_path = Path(args.image_path)
     if not image_path.exists():
         print(f"❌ 檔案不存在: {image_path}")
         sys.exit(1)
 
+    # ── 1. 載入設定 & 模型 ──
+    print("\n[1/5] 載入設定與模型...")
+    config = CAPIConfig.from_yaml(args.config)
+
+    # 決定產品解析度 (優先順序: --resolution > --model-id > 預設值)
+    if args.resolution:
+        product_resolution = parse_resolution_arg(args.resolution)
+    elif args.model_id:
+        product_resolution = resolve_product_resolution(args.model_id, config.model_resolution_map)
+    else:
+        product_resolution = DEFAULT_PRODUCT_RESOLUTION
+    
+    PRODUCT_W, PRODUCT_H = product_resolution
+
     print("=" * 70)
     print(f"🔍 STANDARD 炸彈診斷工具")
     print(f"   圖片: {image_path}")
+    print(f"   產品解析度: {PRODUCT_W}x{PRODUCT_H}")
+    if args.model_id:
+        print(f"   機種 ID: {args.model_id} (第六碼 '{args.model_id[5] if len(args.model_id) >= 6 else '?'}')")
     print("=" * 70)
 
-    # ── 1. 載入設定 & 模型 ──
-    print("\n[1/5] 載入設定與模型...")
-    config = CAPIConfig.from_yaml(CONFIG_PATH)
-    inferencer = CAPIInferencer(config, model_path=MODEL_PATH, threshold=THRESHOLD)
-    print(f"  ✅ 模型已載入: {MODEL_PATH} (threshold={THRESHOLD})")
+    inferencer = CAPIInferencer(config, model_path=args.model, threshold=args.threshold)
+    print(f"  ✅ 模型已載入: {args.model} (threshold={args.threshold})")
     print(f"  ✅ 炸彈數量: {len(config.bomb_defects)} 組設定")
 
     # ── 2. 預處理 & 推論 ──
@@ -126,7 +156,8 @@ def main():
         # 嘗試炸彈匹配 (不做灰塵判定，直接座標比對)
         img_prefix = image_path.stem
         is_bomb, bomb_code = inferencer.check_bomb_match(
-            img_prefix, peak_x, peak_y, raw_bounds, anomaly_map=anomaly_map
+            img_prefix, peak_x, peak_y, raw_bounds,
+            anomaly_map=anomaly_map, product_resolution=product_resolution
         )
 
         # 反推產品座標
@@ -239,7 +270,7 @@ def main():
     title = f"BOMB Diagnosis: {image_path.name}"
     cv2.putText(vis, title, (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.8, (255, 255, 255), 4)
 
-    info1 = f"Size: {vis.shape[1]}x{vis.shape[0]} | RawBounds: {raw_bounds} | Threshold: {THRESHOLD}"
+    info1 = f"Size: {vis.shape[1]}x{vis.shape[0]} | RawBounds: {raw_bounds} | Threshold: {args.threshold} | Resolution: {PRODUCT_W}x{PRODUCT_H}"
     cv2.putText(vis, info1, (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
 
     matched = sum(1 for a in ad_tiles_info if a["is_bomb"])
@@ -331,7 +362,7 @@ def main():
         print(f"   部分炸彈未被匹配，可能原因:")
         print(f"   1. YAML 座標與實際炸彈位置不符 → 更新 capi_3f.yaml 中的 coordinates")
         print(f"   2. bomb_match_tolerance ({tolerance}) 太小 → 可嘗試增加到 150~200")
-        print(f"   3. 炸彈未被 AD 模型偵測到 (Score < {THRESHOLD})")
+        print(f"   3. 炸彈未被 AD 模型偵測到 (Score < {args.threshold})")
 
     # ── 5.5 儲存每個異常 tile 的熱力圖 ──
     print(f"\n[5.5] 儲存異常 tile 熱力圖...")

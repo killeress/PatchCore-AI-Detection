@@ -32,6 +32,41 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
 
 
+# ── 產品解析度映射 ─────────────────────────────────────
+# 機種名稱第六碼 → 產品解析度 (寬, 高)
+# 此為程式碼級預設值，正式使用時由 capi_config.yaml 中的 model_resolution_map 覆蓋
+MODEL_RESOLUTION_MAP = {
+    'B': (1366, 768),
+    'H': (1920, 1080),
+    'J': (1920, 1200),
+    'K': (2560, 1440),
+    'G': (2560, 1600),
+}
+
+DEFAULT_PRODUCT_RESOLUTION = (1920, 1080)
+
+
+def resolve_product_resolution(model_id: str, resolution_map: Optional[Dict] = None) -> Tuple[int, int]:
+    """
+    依機種名稱第六碼推導產品解析度
+
+    例如 "GN140JCAL010S" 第六碼 'J' → (1920, 1200)
+
+    Args:
+        model_id: 機種 ID (例如 "GN140JCAL010S")
+        resolution_map: 可選的映射表 (來自 config.model_resolution_map)，
+                        若為 None 則使用模組級預設 MODEL_RESOLUTION_MAP
+    """
+    if resolution_map is None:
+        resolution_map = MODEL_RESOLUTION_MAP
+    if model_id and len(model_id) >= 6:
+        code = model_id[5].upper()
+        res = resolution_map.get(code, None)
+        if res is not None:
+            return (int(res[0]), int(res[1])) if isinstance(res, (list, tuple)) else DEFAULT_PRODUCT_RESOLUTION
+    return DEFAULT_PRODUCT_RESOLUTION
+
+
 @dataclass
 class TileInfo:
     """切塊資訊"""
@@ -1314,10 +1349,12 @@ class CAPIInferencer:
             
         return defects_map
 
-    def _map_aoi_coords(self, px: int, py: int, raw_bounds: Tuple[int, int, int, int]) -> Tuple[int, int]:
-        """將產品座標 (1920x1080) 映射到圖片座標"""
-        PRODUCT_WIDTH = 1920
-        PRODUCT_HEIGHT = 1080
+    def _map_aoi_coords(self, px: int, py: int, raw_bounds: Tuple[int, int, int, int],
+                         product_resolution: Optional[Tuple[int, int]] = None) -> Tuple[int, int]:
+        """將產品座標映射到圖片座標"""
+        if product_resolution is None:
+            product_resolution = DEFAULT_PRODUCT_RESOLUTION
+        PRODUCT_WIDTH, PRODUCT_HEIGHT = product_resolution
         
         x_start, y_start, x_end, y_end = raw_bounds
         
@@ -1394,6 +1431,7 @@ class CAPIInferencer:
         tile_center_y: int,
         raw_bounds: Tuple[int, int, int, int],
         anomaly_map: Optional[np.ndarray] = None,
+        product_resolution: Optional[Tuple[int, int]] = None,
     ) -> Tuple[bool, str]:
         """
         檢查異常 tile 是否匹配炸彈系統的已知座標
@@ -1408,6 +1446,8 @@ class CAPIInferencer:
         Returns:
             (is_bomb, defect_code) - 是否為炸彈, 對應的 Defect Code
         """
+        if product_resolution is None:
+            product_resolution = DEFAULT_PRODUCT_RESOLUTION
         tolerance = self.config.bomb_match_tolerance
         
         for bomb in self.config.bomb_defects:
@@ -1420,11 +1460,11 @@ class CAPIInferencer:
                 # 豎線型: 將兩端座標轉換，判斷 tile 是否在緩衝帶內
                 pt1 = bomb.coordinates[0]
                 pt2 = bomb.coordinates[1]
-                img_x1, img_y1 = self._map_aoi_coords(pt1[0], pt1[1], raw_bounds)
-                img_x2, img_y2 = self._map_aoi_coords(pt2[0], pt2[1], raw_bounds)
+                img_x1, img_y1 = self._map_aoi_coords(pt1[0], pt1[1], raw_bounds, product_resolution)
+                img_x2, img_y2 = self._map_aoi_coords(pt2[0], pt2[1], raw_bounds, product_resolution)
                 
                 # 線段 x 範圍 ± tolerance (轉換到圖片座標的 tolerance)
-                PRODUCT_WIDTH = 1920
+                PRODUCT_WIDTH = product_resolution[0]
                 x_start, _, x_end, _ = raw_bounds
                 scale_x = (x_end - x_start) / PRODUCT_WIDTH
                 img_tolerance_x = int(tolerance * scale_x)
@@ -1449,8 +1489,7 @@ class CAPIInferencer:
                     
             elif bomb.defect_type == "point":
                 # 點型: 判斷 tile 中心是否在任一炸彈點座標 ± tolerance 範圍內
-                PRODUCT_WIDTH = 1920
-                PRODUCT_HEIGHT = 1080
+                PRODUCT_WIDTH, PRODUCT_HEIGHT = product_resolution
                 x_start, y_start, x_end, y_end = raw_bounds
                 scale_x = (x_end - x_start) / PRODUCT_WIDTH
                 scale_y = (y_end - y_start) / PRODUCT_HEIGHT
@@ -1458,7 +1497,7 @@ class CAPIInferencer:
                 img_tolerance_y = int(tolerance * scale_y)
                 
                 for coord in bomb.coordinates:
-                    img_bx, img_by = self._map_aoi_coords(coord[0], coord[1], raw_bounds)
+                    img_bx, img_by = self._map_aoi_coords(coord[0], coord[1], raw_bounds, product_resolution)
                     if (abs(tile_center_x - img_bx) <= img_tolerance_x and
                         abs(tile_center_y - img_by) <= img_tolerance_y):
                         return True, bomb.defect_code
@@ -1469,7 +1508,8 @@ class CAPIInferencer:
         self, 
         panel_dir: Path, 
         progress_callback=None,
-        cpu_workers: int = 4
+        cpu_workers: int = 4,
+        product_resolution: Optional[Tuple[int, int]] = None
     ) -> List[ImageResult]:
         """
         處理整個面板的圖片 (包含 PINIGBI 灰塵檢查 和 AOI Defect 整合)
@@ -1630,7 +1670,7 @@ class CAPIInferencer:
                 img_w, img_h = result.image_size
                 
                 for d in defect_map[stem]:
-                    img_x, img_y = self._map_aoi_coords(d['x'], d['y'], raw_bounds)
+                    img_x, img_y = self._map_aoi_coords(d['x'], d['y'], raw_bounds, product_resolution)
                     
                     # 定義 AOI 標記框 (約 50x50)
                     size = 50
@@ -1850,7 +1890,7 @@ class CAPIInferencer:
                         # 用熱力圖峰值座標來比對炸彈
                         is_bomb, bomb_code = self.check_bomb_match(
                             img_prefix, tile.anomaly_peak_x, tile.anomaly_peak_y, result.raw_bounds,
-                            anomaly_map=anomaly_map
+                            anomaly_map=anomaly_map, product_resolution=product_resolution
                         )
                         if is_bomb:
                             tile.is_bomb = True
@@ -1990,7 +2030,8 @@ class CAPIInferencer:
         
         return vis
     
-    def generate_bomb_diagram(self, image_path: Path, result: ImageResult) -> np.ndarray:
+    def generate_bomb_diagram(self, image_path: Path, result: ImageResult,
+                              product_resolution: Optional[Tuple[int, int]] = None) -> np.ndarray:
         """
         生成炸彈座標位置示意圖
         在原始圖片上疊加：
@@ -1998,9 +2039,11 @@ class CAPIInferencer:
         2. AD 偵測到的異常 tile 位置 (青色方框)
         3. 匹配連線 + 距離標示
         """
+        if product_resolution is None:
+            product_resolution = DEFAULT_PRODUCT_RESOLUTION
         image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
         if image is None:
-            image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+            image = np.zeros((product_resolution[1], product_resolution[0], 3), dtype=np.uint8)
         
         vis = image.copy()
         if len(vis.shape) == 2:
@@ -2021,8 +2064,7 @@ class CAPIInferencer:
         
         # 計算 tolerance (與 check_bomb_match 一致)
         tolerance = self.config.bomb_match_tolerance
-        PRODUCT_WIDTH = 1920
-        PRODUCT_HEIGHT = 1080
+        PRODUCT_WIDTH, PRODUCT_HEIGHT = product_resolution
         x_start, y_start, x_end, y_end = raw_bounds
         scale_x = (x_end - x_start) / PRODUCT_WIDTH
         scale_y = (y_end - y_start) / PRODUCT_HEIGHT

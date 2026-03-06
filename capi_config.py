@@ -145,6 +145,16 @@ class CAPIConfig:
     bomb_match_tolerance: int = 100  # 座標匹配容忍度 (產品座標系像素)
     bomb_line_min_aspect_ratio: float = 3.0  # Line 型炸彈 heatmap 最小長寬比
     
+    # 機種第六碼 → 產品解析度映射表 (寬, 高)
+    # 例: {'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200], 'K': [2560, 1440], 'G': [2560, 1600]}
+    model_resolution_map: Dict[str, List[int]] = field(default_factory=lambda: {
+        'B': [1366, 768],
+        'H': [1920, 1080],
+        'J': [1920, 1200],
+        'K': [2560, 1440],
+        'G': [2560, 1600],
+    })
+    
     # 配置檔路徑（載入後記錄）
     config_path: Optional[Path] = None
     
@@ -195,6 +205,10 @@ class CAPIConfig:
             bomb_defects=[BombDefect.from_dict(b) for b in data.get("bomb_defects", [])],
             bomb_match_tolerance=data.get("bomb_match_tolerance", 100),
             bomb_line_min_aspect_ratio=data.get("bomb_line_min_aspect_ratio", 3.0),
+            model_resolution_map=data.get("model_resolution_map", {
+                'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200],
+                'K': [2560, 1440], 'G': [2560, 1600],
+            }),
             config_path=path,
         )
         
@@ -232,6 +246,7 @@ class CAPIConfig:
             "bomb_defects": [b.to_dict() for b in self.bomb_defects],
             "bomb_match_tolerance": self.bomb_match_tolerance,
             "bomb_line_min_aspect_ratio": self.bomb_line_min_aspect_ratio,
+            "model_resolution_map": self.model_resolution_map,
         }
         
         with open(yaml_path, "w", encoding="utf-8") as f:

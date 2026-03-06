@@ -1,10 +1,6 @@
 # CAPI_3F 配置檔
 # 用於 CAPI 3F 產線的推論設定
 
-# 機種識別
-machine_id: "CAPI_3F"
-product_name: "CAPI 面板"
-
 # MARK 模板設定
 mark_template_path: "capi_mark.png"
 mark_match_threshold: 0.45
@@ -27,7 +23,7 @@ exclusion_zones:
   - name: "mark_area"
     type: "template_match"
     description: "MARK 二維碼區域"
-    enabled: false  # 關閉模板掃描，直接使用 mark_fallback_position (省 ~8s)
+    enabled: false
     
   - name: "bottom_right_mechanism"
     type: "relative_bottom_right"
@@ -41,7 +37,7 @@ tile_size: 512
 tile_stride: 512  # 非重疊切塊
 
 # 推論設定
-anomaly_threshold: 0.56  # 異常分數閾值 (fallback，當 threshold_mapping 無對應時使用)
+anomaly_threshold: 0.7  # 異常分數閾值 (fallback，當 threshold_mapping 無對應時使用)
 model_path: "./model.pt"  # fallback 模型路徑 (當 model_mapping 無對應前綴時使用)
 
 # 多模型映射 — 依圖片前綴自動選用對應模型
@@ -52,23 +48,22 @@ model_mapping:
   "W0F00000": "model/CAPI03-20260305/W0F00000-model.pt"    # 白光
   "WGF50500": "model/CAPI03-20260305/WGF50500-model.pt"    # 50度灰
   "STANDARD": "model/CAPI03-20260305/STANDARD-model.pt"    # 標準
-
 # 每個前綴的獨立閾值 (可依實際 miss/overkill 數據個別微調)
 threshold_mapping:
-  "G0F00000": 0.56
-  "R0F00000": 0.56
-  "W0F00000": 0.56
-  "WGF50500": 0.56
-  "STANDARD": 0.56
+  "G0F00000": 0.70
+  "R0F00000": 0.70
+  "W0F00000": 0.70
+  "WGF50500": 0.70
+  "STANDARD": 0.70
 
 
 # 灰塵偵測設定 (OMIT 圖片分析)
 dust_brightness_threshold: 40    # 備用亮度閾值 (優先使用 Otsu 自適應)
 dust_area_min: 5               # 灰塵顆粒最小面積 (px)
 dust_area_max: 50000             # 灰塵顆粒最大面積 (px)
-dust_extension: 2                # 灰塵區域膨脹像素
-dust_heatmap_iou_threshold: 0.05 # Heatmap vs Dust IOU 閾值 (大於此值判定為灰塵)
-dust_heatmap_top_percent: 0.4    # Heatmap 熱區取前 X% 最紅像素 (Percentile 二值化, 建議 3~8)
+dust_extension: 3                # 灰塵區域膨脹像素
+dust_heatmap_iou_threshold: 0.01 # Heatmap vs Dust IOU 閾值 (大於此值判定為灰塵)
+dust_heatmap_top_percent: 0.4    # Heatmap 熱區取前 X% 最紅像素
 
 # OMIT 過曝偵測設定 (曝光過高的 OMIT 圖無法檢測灰塵，需記錄供工程追蹤)
 omit_overexposure_mean_threshold: 200   # 平均亮度閾值 (正常OMIT約30~80，過曝>200)
@@ -104,7 +99,7 @@ max_images_per_panel: 20
 # 炸彈系統 (機台模擬缺陷定義，用來檢驗 AD 檢出能力)
 # defect_type: "line" = 豎線 (兩點定義起終點), "point" = 點 (多個座標位置)
 # coordinates: 產品座標系 (1920x1080)
-bomb_match_tolerance: 100  # 座標匹配容忍度 (產品座標系像素)
+bomb_match_tolerance: 50  # 座標匹配容忍度 (產品座標系像素)
 bomb_line_min_aspect_ratio: 3.0  # Line 型炸彈 heatmap 最小長寬比 (建議 2.5~4.0)
 bomb_defects:
   - image_prefix: "G0F00000"
@@ -146,3 +141,13 @@ bomb_defects:
     defect_code: "PCDCURA0"
     defect_type: "point"
     coordinates: [[350, 174], [1465, 363], [1171, 465], [256, 540], [1857, 710]]
+
+# 機種名稱第六碼 → 產品解析度映射表 (寬, 高)
+# 用於座標轉換: 將產品座標系映射到圖片座標
+# 若 Client 端已傳入解析度則以 Client 為準，此表作為本地工具 (diagnose_bomb 等) 的備選方案
+model_resolution_map:
+  B: [1366, 768]
+  H: [1920, 1080]
+  J: [1920, 1200]
+  K: [2560, 1440]
+  G: [2560, 1600]

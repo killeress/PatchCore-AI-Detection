@@ -359,9 +359,9 @@
             <span class="info-label">運算裝置</span>
             <span class="info-value" id="ui-device">CPU</span>
         </div>
-        <div class="info-row">
+        <div class="info-row" style="flex-direction:column;gap:10px;">
             <span class="info-label">判定門檻</span>
-            <span class="info-value" id="ui-threshold">0.00</span>
+            <div id="ui-threshold-container" style="display:flex;flex-wrap:wrap;gap:6px;width:100%;"></div>
         </div>
     </div>
 
@@ -497,7 +497,31 @@
         document.getElementById('ui-uptime').textContent = data.server.uptime;
         document.getElementById('ui-model').textContent = data.server.model_version;
         document.getElementById('ui-device').textContent = data.server.device;
-        document.getElementById('ui-threshold').textContent = data.server.threshold;
+        // Threshold mapping (per-prefix display)
+        const thContainer = document.getElementById('ui-threshold-container');
+        const thMapping = data.server.threshold_mapping || {};
+        const prefixKeys = Object.keys(thMapping);
+
+        if (prefixKeys.length > 0) {
+            // 多模型模式：顯示各前綴閥值
+            const prefixColors = {
+                'G0F00000': '#22c55e', 'R0F00000': '#ef4444', 'W0F00000': '#e2e8f0',
+                'WGF50500': '#9ca3af', 'STANDARD': '#3b82f6',
+            };
+            thContainer.innerHTML = prefixKeys.map(prefix => {
+                const val = thMapping[prefix];
+                const color = prefixColors[prefix] || 'var(--accent)';
+                const shortName = prefix.length > 5 ? prefix.substring(0, 5) : prefix;
+                return `<div style="display:flex;align-items:center;gap:5px;background:rgba(15,23,42,0.8);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:4px 10px;">
+                    <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block;box-shadow:0 0 6px ${color};"></span>
+                    <span style="font-size:0.75rem;color:var(--text-muted);letter-spacing:0.5px;">${shortName}</span>
+                    <span style="font-family:var(--tech-font);font-weight:600;color:#e2e8f0;font-size:0.85rem;">${val}</span>
+                </div>`;
+            }).join('');
+        } else {
+            // 單一模型模式：顯示全局門檻
+            thContainer.innerHTML = `<span style="font-family:var(--tech-font);font-weight:600;color:#e2e8f0;">${data.server.threshold}</span>`;
+        }
 
         // 2. Active Inferences
         const tasks = data.traffic.active_inferences;

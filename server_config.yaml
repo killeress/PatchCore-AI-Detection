@@ -17,11 +17,10 @@ path_mapping:
   "\\\\192.168.2.101\\d": "/capi01"
 
 # 推論設定 (引用 CAPI 配置)
+# 模型路徑 (model_path) 與閾值 (anomaly_threshold) 統一在 capi_3f.yaml 中管理
 inference:
-  config_path: "configs/capi_3f.yaml"    # CAPI 推論配置檔
-  model_path: "./model.pt"               # PatchCore 模型路徑
+  config_path: "configs/capi_3f.yaml"    # CAPI 推論配置檔 (模型、閾值等皆在此檔)
   device: "auto"                         # auto / cpu / cuda
-  threshold: 0.6                         # 異常判斷閾值
   cpu_workers: 4                         # 預處理/後處理 CPU 執行緒數
 
 # SQLite 資料庫

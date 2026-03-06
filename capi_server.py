@@ -58,6 +58,7 @@ class ServerStatusTracker:
         self.start_time = None
         self.model_version = "Unknown"
         self.threshold = 0.6
+        self.threshold_mapping = {}  # {prefix: threshold}
         self.device = "CPU"
         
         # 連線與推論狀態
@@ -91,6 +92,7 @@ class ServerStatusTracker:
                     "model_version": self.model_version,
                     "device": self.device,
                     "threshold": self.threshold,
+                    "threshold_mapping": dict(self.threshold_mapping),
                 },
                 "traffic": {
                     "active_connections": self.active_connections,
@@ -449,14 +451,14 @@ class CAPIServer:
         """載入 AI 推論模型"""
         inf_cfg = self.inference_config
         config_path = inf_cfg.get("config_path", "configs/capi_3f.yaml")
-        model_path = inf_cfg.get("model_path", "./model.pt")
         device = inf_cfg.get("device", "auto")
 
         logger.info(f"Loading inference config: {config_path}")
         capi_config = CAPIConfig.from_yaml(config_path)
 
-        # 判定門檻優先順序: 1. server_config.yaml (核心覆蓋) -> 2. capi_3f.yaml (模型預設) -> 3. 0.6 (保底)
-        threshold = inf_cfg.get("threshold", capi_config.anomaly_threshold)
+        # model_path 和 threshold 統一由 capi_3f.yaml 管理
+        model_path = capi_config.model_path or "./model.pt"
+        threshold = capi_config.anomaly_threshold
 
         # 多模型模式: 當 capi_config 有 model_mapping 時，model_path 僅作為 fallback
         if capi_config.model_mapping:
@@ -502,6 +504,7 @@ class CAPIServer:
                 
             server_status.device = display_device
             server_status.threshold = threshold
+            server_status.threshold_mapping = dict(capi_config.threshold_mapping)
             
         logger.info("Model loaded successfully")
 
@@ -837,17 +840,17 @@ class CAPIServer:
         """
         # 檢查推論器
         if self.inferencer is None:
-            return "ERR:MODEL_NOT_LOADED", "[]", []
+            return "ERR:MODEL_NOT_LOADED", "[]", [], False
 
         # 轉換路徑
         image_dir = resolve_unc_path(parsed["image_dir"], self.path_mapping)
         panel_dir = Path(image_dir)
 
         if not panel_dir.exists():
-            return f"ERR:DIR_NOT_FOUND ({image_dir})", "[]", []
+            return f"ERR:DIR_NOT_FOUND ({image_dir})", "[]", [], False
 
         if not panel_dir.is_dir():
-            return f"ERR:NOT_A_DIR ({image_dir})", "[]", []
+            return f"ERR:NOT_A_DIR ({image_dir})", "[]", [], False
 
         logger.info(f"Inference directory: {panel_dir}")
 
@@ -859,6 +862,7 @@ class CAPIServer:
                 panel_result = self.inferencer.process_panel(
                     panel_dir,
                     cpu_workers=self.cpu_workers,
+                    product_resolution=parsed["resolution"],
                 )
 
                 # process_panel 回傳: (results, omit_vis, omit_overexposed, omit_info, is_duplicate)
