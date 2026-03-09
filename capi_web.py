@@ -1152,10 +1152,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             img_h, img_w = image.shape[:2]
 
-            # 2. 計算 raw_bounds (面板在圖片中的實際邊界)
+            # 2. 計算 raw_bounds (面板在圖片中的實際邊界) 與 otsu_bounds
             raw_bounds = self.inferencer._find_raw_object_bounds(image)
             if raw_bounds is None:
                 raw_bounds = (0, 0, img_w, img_h)
+            
+            otsu_bounds, _ = self.inferencer.calculate_otsu_bounds(image)
+            if otsu_bounds is None:
+                otsu_bounds = raw_bounds
 
             x_start, y_start, x_end, y_end = raw_bounds
 
@@ -1266,9 +1270,23 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             overlay_bg = overview_img.copy()
             cv2.rectangle(overlay_bg, (crop_x1, crop_y1), (crop_x2, crop_y2), (0, 0, 255), -1)
             cv2.addWeighted(overlay_bg, 0.3, overview_img, 0.7, 0, overview_img)
+            # 畫 Otsu 範圍 (黃色框)
+            ox1, oy1, ox2, oy2 = otsu_bounds
+            cv2.rectangle(overview_img, (ox1, oy1), (ox2, oy2), (0, 255, 255), 4)
             # 畫紅框 + 中心點
             cv2.rectangle(overview_img, (crop_x1, crop_y1), (crop_x2, crop_y2), (0, 0, 255), 6)
             cv2.circle(overview_img, (img_cx, img_cy), 10, (0, 255, 0), -1)
+
+            # 在前景有效區域 (Otsu bounds 黃框) 左上與右下標上圖片座標
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 1.5
+            font_thickness = 3
+            # 左上座標 (置於黃框上方或內部)
+            tl_text = f"({ox1}, {oy1})"
+            cv2.putText(overview_img, tl_text, (ox1, max(30, oy1 - 10)), font, font_scale, (0, 255, 255), font_thickness)
+            # 右下座標 (置於黃框下方或內部)
+            br_text = f"({ox2}, {oy2})"
+            cv2.putText(overview_img, br_text, (max(0, ox2 - 300), min(img_h - 10, oy2 + 40)), font, font_scale, (0, 255, 255), font_thickness)
 
             # 縮小 Overview 存檔 (最多 2000px)
             max_dim = 2000
@@ -1302,6 +1320,69 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     except Exception as e:
                         logger.warning(f"OMIT crop failed: {e}")
 
+            # 9.5 產生組合圖 (Coordinate 推論專屬)
+            composite_url = ""
+            if self.heatmap_manager:
+                try:
+                    # 如果有 omit_crop 則放進 tile_info
+                    if 'omit_crop' in locals() and omit_crop is not None:
+                        tile_info.omit_crop_image = omit_crop
+                        
+                        # Step A: 進行灰塵偵測
+                        is_dust, dust_mask, bright_ratio, detail_text = self.inferencer.check_dust_or_scratch_feature(omit_crop)
+                        tile_info.dust_mask = dust_mask
+                        tile_info.dust_bright_ratio = bright_ratio
+                        
+                        # Step B: 計算 IOU
+                        iou = 0.0
+                        heatmap_binary = None
+                        top_pct = self.inferencer.config.dust_heatmap_top_percent
+                        if is_dust and anomaly_map is not None:
+                            iou, heatmap_binary = self.inferencer.compute_dust_heatmap_iou(
+                                dust_mask, anomaly_map, top_percent=top_pct
+                            )
+                            tile_info.dust_heatmap_iou = iou
+                            if iou >= self.inferencer.config.dust_heatmap_iou_threshold:
+                                tile_info.is_suspected_dust_or_scratch = True
+                                detail_text += f" IOU:{iou:.3f}>=IOU_THR -> DUST"
+                            else:
+                                tile_info.is_suspected_dust_or_scratch = False
+                                detail_text += f" IOU:{iou:.3f}<IOU_THR -> REAL_NG"
+                            
+                            # 產生 Debug 可視化圖
+                            try:
+                                tile_info.dust_iou_debug_image = self.inferencer.generate_dust_iou_debug_image(
+                                    tile_image, anomaly_map, dust_mask,
+                                    heatmap_binary, iou, top_pct,
+                                    tile_info.is_suspected_dust_or_scratch,
+                                )
+                            except Exception as dbg_err:
+                                logger.warning(f"Debug image generation failed: {dbg_err}")
+                        elif is_dust:
+                            tile_info.is_suspected_dust_or_scratch = True
+                            detail_text += " (no heatmap, marked as dust)"
+                        else:
+                            tile_info.is_suspected_dust_or_scratch = False
+                            detail_text += " NO_DUST"
+
+                        tile_info.dust_detail_text = detail_text
+                    
+                    composite_path = self.heatmap_manager.save_tile_heatmap(
+                        save_dir=debug_dir,
+                        image_name=f"coord_{image_name}_{ts}",
+                        tile_id=0,
+                        tile_image=tile_image,
+                        anomaly_map=anomaly_map,
+                        score=score,
+                        tile_info=tile_info,
+                        score_threshold=debug_threshold,
+                        iou_threshold=getattr(self.inferencer.config, 'dust_heatmap_iou_threshold', 0.01),
+                    )
+                    composite_filename = Path(composite_path).name
+                    composite_url = f"/debug/heatmaps/{composite_filename}"
+                except Exception as comp_err:
+                    logger.warning(f"[DEBUG-COORD] 組合圖產生失敗: {comp_err}")
+
             # 10. 判定結果
             actual_threshold = debug_threshold
             judgment = "NG" if score >= actual_threshold else "OK"
@@ -1323,6 +1404,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "heatmap_url": heatmap_url,
                 "overview_url": overview_url,
                 "omit_url": omit_url,
+                "composite_url": composite_url,
                 "image_prefix": img_prefix,
                 "model_name": model_name,
                 "edge_margin_px": edge_margin_override if edge_margin_override is not None else self.inferencer.config.edge_margin_px,

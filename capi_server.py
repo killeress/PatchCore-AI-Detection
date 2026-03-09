@@ -5,7 +5,8 @@ TCP/IP Socket Server，接收 Testing 客戶端的推論請求，
 呼叫 CAPIInferencer 進行 AI 推論，並回覆判定結果。
 
 通訊協議:
-    [Request]  AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片目錄路徑
+    [Request]  無炸彈: AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片目錄路徑
+               有炸彈: AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片前綴;(座標);圖片目錄路徑
     [Response] AOI@玻璃ID;機種ID;機台編號;機檢判定;AI判定
 
 AI 判定:
@@ -158,11 +159,98 @@ class ProtocolError(Exception):
     pass
 
 
+def _parse_bomb_coordinates(image_prefix: str, coords_raw: str) -> Optional[Dict[str, Any]]:
+    """
+    解析炸彈座標字串
+
+    格式:
+        點型: (x1/y1;x2/y2;x3/y3;...)   — 多組 x/y 用分號分隔
+        線型: (x1/y1/x2/y2)             — 一組含 4 個值
+
+    區分邏輯:
+        括號內只有一組且含 4 個值 → 線型 (line)
+        其他 → 點型 (point)
+
+    Returns:
+        {
+            "image_prefix": str,
+            "defect_type": "point" | "line",
+            "coordinates": [(x, y), ...]
+        }
+        若解析失敗返回 None
+    """
+    # 去除首尾括號和空白
+    coords_str = coords_raw.strip()
+    if coords_str.startswith("(") and coords_str.endswith(")"):
+        coords_str = coords_str[1:-1]
+
+    if not coords_str:
+        return None
+
+    # 用分號分隔各組座標
+    groups = [g.strip() for g in coords_str.split(";") if g.strip()]
+
+    if len(groups) == 1:
+        # 只有一組 — 檢查是否為線型 (4 個值: x1/y1/x2/y2)
+        values = groups[0].split("/")
+        if len(values) == 4:
+            try:
+                x1, y1, x2, y2 = int(values[0]), int(values[1]), int(values[2]), int(values[3])
+                return {
+                    "image_prefix": image_prefix,
+                    "defect_type": "line",
+                    "coordinates": [(x1, y1), (x2, y2)],
+                }
+            except ValueError:
+                logger.warning(f"炸彈座標解析失敗 (line): {coords_raw}")
+                return None
+        elif len(values) == 2:
+            # 單一點
+            try:
+                x, y = int(values[0]), int(values[1])
+                return {
+                    "image_prefix": image_prefix,
+                    "defect_type": "point",
+                    "coordinates": [(x, y)],
+                }
+            except ValueError:
+                logger.warning(f"炸彈座標解析失敗 (single point): {coords_raw}")
+                return None
+        else:
+            logger.warning(f"炸彈座標格式不明: {coords_raw}")
+            return None
+    else:
+        # 多組 — 點型 (每組 x/y)
+        coordinates = []
+        for g in groups:
+            values = g.split("/")
+            if len(values) == 2:
+                try:
+                    coordinates.append((int(values[0]), int(values[1])))
+                except ValueError:
+                    logger.warning(f"炸彈座標解析失敗 (point group): {g}")
+                    continue
+            else:
+                logger.warning(f"炸彈座標格式不明 (group): {g}")
+                continue
+
+        if not coordinates:
+            return None
+
+        return {
+            "image_prefix": image_prefix,
+            "defect_type": "point",
+            "coordinates": coordinates,
+        }
+
+
 def parse_request(data: str) -> Dict[str, Any]:
     """
     解析客戶端請求
 
-    格式: AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片目錄路徑
+    格式:
+        無炸彈 (6 欄位): AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片目錄路徑
+        有炸彈 (8 欄位): AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片前綴;(座標);圖片目錄路徑
 
     Returns:
         {
@@ -172,6 +260,7 @@ def parse_request(data: str) -> Dict[str, Any]:
             "resolution": (int, int),
             "machine_judgment": str,
             "image_dir": str,
+            "bomb_info": Optional[Dict],  # None 或 {image_prefix, defect_type, coordinates}
         }
     """
     data = data.strip()
@@ -183,7 +272,7 @@ def parse_request(data: str) -> Dict[str, Any]:
 
     if len(parts) < 6:
         raise ProtocolError(
-            f"Invalid format, expected 6 fields separated by ';', got {len(parts)}: {data[:100]}"
+            f"Invalid format, expected >=6 fields separated by ';', got {len(parts)}: {data[:100]}"
         )
 
     # 解析解析度
@@ -193,13 +282,36 @@ def parse_request(data: str) -> Dict[str, Any]:
     except (ValueError, IndexError):
         raise ProtocolError(f"Invalid resolution format: {parts[3]}")
 
+    bomb_info = None
+    image_dir = ""
+
+    # 判斷是否包含炸彈資訊 (8 欄位)
+    # 由於炸彈座標內部也包含 ';' (例如 `(350/174;1465/363)`), split(";") 會把座標切碎。
+    # 特徵：parts[6] 開頭是 "(", 且倒數第二個 parts[-2] 結尾是 ")"
+    if len(parts) >= 8 and parts[6].strip().startswith("(") and parts[-2].strip().endswith(")"):
+        bomb_image_prefix = parts[5].strip()
+        bomb_coords_raw = ";".join(parts[6:-1]).strip()
+        image_dir = parts[-1].strip()
+
+        bomb_info = _parse_bomb_coordinates(bomb_image_prefix, bomb_coords_raw)
+        if bomb_info:
+            logger.info(
+                f"💣 協議炸彈資料: prefix={bomb_info['image_prefix']} "
+                f"type={bomb_info['defect_type']} "
+                f"coords={bomb_info['coordinates']}"
+            )
+    else:
+        # 6 欄位模式，或單純的 fallback (路徑可能包含 ';' 所以重新 join)
+        image_dir = ";".join(parts[5:]).strip()
+
     return {
         "glass_id": parts[0],
         "model_id": parts[1],
         "machine_no": parts[2],
         "resolution": resolution,
         "machine_judgment": parts[4],
-        "image_dir": parts[5],
+        "image_dir": image_dir,
+        "bomb_info": bomb_info,
     }
 
 
@@ -863,6 +975,7 @@ class CAPIServer:
                     panel_dir,
                     cpu_workers=self.cpu_workers,
                     product_resolution=parsed["resolution"],
+                    bomb_info=parsed.get("bomb_info"),
                 )
 
                 # process_panel 回傳: (results, omit_vis, omit_overexposed, omit_info, is_duplicate)

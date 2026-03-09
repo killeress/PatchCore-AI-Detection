@@ -777,8 +777,36 @@
         const pathParam = params.get('path');
         if (pathParam) {
             coordPathInput.value = pathParam;
+            autoSelectResolution(pathParam);
         }
     })();
+
+    // 當座標推論的路徑改變時，嘗試自動選擇解析度
+    coordPathInput.addEventListener('input', () => {
+        autoSelectResolution(coordPathInput.value);
+    });
+
+    function autoSelectResolution(pathStr) {
+        if (!pathStr) return;
+        const normalized = pathStr.replace(/\\/g, '/');
+        const parts = normalized.split('/');
+        const selectEl = document.getElementById('coord-resolution');
+
+        // 從路徑後方往前找 (因為 model_id 通常在倒數幾層資料夾，例如 GN140JCAL010S)
+        for (let p = parts.length - 1; p >= 0; p--) {
+            const part = parts[p];
+            if (part && part.length >= 6) {
+                const code = part[5].toUpperCase(); // 第六碼
+                for (let i = 0; i < selectEl.options.length; i++) {
+                    if (selectEl.options[i].text.startsWith(code + ':')) {
+                        selectEl.selectedIndex = i;
+                        console.log(`[Coord] Auto-selected resolution for code: ${code} from path part: ${part}`);
+                        return; // 找到即結束
+                    }
+                }
+            }
+        }
+    }
 
     async function runCoordInference() {
         const imgPath = coordPathInput.value.trim() || input.value.trim();
@@ -929,6 +957,20 @@
                 <div class="img-card" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding: 40px 20px; text-align:center; color:var(--text-muted);">
                     <div style="font-size:3rem; margin-bottom:12px; opacity:0.5;">🧹</div>
                     <div style="font-family:'Fira Code', monospace; line-height:1.5;">無 OMIT 圖片<br>無法排除灰塵干擾</div>
+                </div>
+            `;
+        }
+
+        // 5. Composite Image
+        if (data.composite_url) {
+            imagesHtml += `
+                <div style="grid-column: 1 / -1; margin-top:16px; background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden;">
+                    <div style="padding:8px 14px; font-family:'Fira Code',monospace; font-size:0.78rem; color:var(--text-muted); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:6px;">
+                        🖼️ 組合圖 (Original | Heatmap | OMIT | Dust | IOU)
+                    </div>
+                    <img src="${data.composite_url}?t=${t}" alt="Composite Coordinate Inference"
+                         style="width:100%; display:block; cursor:pointer; background:#0a0f1a;"
+                         onclick="openLightbox(this.src)">
                 </div>
             `;
         }

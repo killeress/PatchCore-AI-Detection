@@ -10,7 +10,7 @@ CAPI 推論核心模組
 
 使用方式:
     from capi_inference import CAPIInferencer
-    from capi_config import CAPIConfig
+    from capi_config import CAPIConfig, BombDefect
     
     config = CAPIConfig.from_yaml("configs/capi_3f.yaml")
     inferencer = CAPIInferencer(config, model_path="path/to/model")
@@ -1426,6 +1426,30 @@ class CAPIInferencer:
         
         return is_line, aspect_ratio
 
+    def _match_bomb_defect_code(self, bomb_info: Dict[str, Any]) -> str:
+        """
+        從 config 的 bomb_defects 中查找匹配的 defect_code
+        
+        匹配策略:
+            1. 比對 image_prefix
+            2. 比對 defect_type
+            3. 找到 → 返回 defect_code；找不到 → 返回 "UNKNOWN"
+        """
+        target_prefix = bomb_info["image_prefix"]
+        target_type = bomb_info["defect_type"]
+        
+        for bomb in self.config.bomb_defects:
+            if (bomb.image_prefix == target_prefix and 
+                bomb.defect_type == target_type):
+                return bomb.defect_code
+        
+        # 若只有 prefix 匹配 (不分 type)，也可以 fallback
+        for bomb in self.config.bomb_defects:
+            if bomb.image_prefix == target_prefix:
+                return bomb.defect_code
+        
+        return "UNKNOWN"
+
     def check_bomb_match(
         self,
         image_prefix: str,
@@ -1434,6 +1458,7 @@ class CAPIInferencer:
         raw_bounds: Tuple[int, int, int, int],
         anomaly_map: Optional[np.ndarray] = None,
         product_resolution: Optional[Tuple[int, int]] = None,
+        bomb_list: Optional[List] = None,
     ) -> Tuple[bool, str]:
         """
         檢查異常 tile 是否匹配炸彈系統的已知座標
@@ -1451,8 +1476,11 @@ class CAPIInferencer:
         if product_resolution is None:
             product_resolution = DEFAULT_PRODUCT_RESOLUTION
         tolerance = self.config.bomb_match_tolerance
-        
-        for bomb in self.config.bomb_defects:
+    
+        # 使用傳入的 bomb_list 或 config 預設值
+        bombs = bomb_list if bomb_list is not None else self.config.bomb_defects
+    
+        for bomb in bombs:
             # 比對前綴 (支援帶時間戳的檔名, e.g. "G0F00000" 匹配 "G0F00000_031447")
             if not (image_prefix == bomb.image_prefix or 
                     image_prefix.startswith(bomb.image_prefix + "_")):
@@ -1511,7 +1539,8 @@ class CAPIInferencer:
         panel_dir: Path, 
         progress_callback=None,
         cpu_workers: int = 4,
-        product_resolution: Optional[Tuple[int, int]] = None
+        product_resolution: Optional[Tuple[int, int]] = None,
+        bomb_info: Optional[Dict[str, Any]] = None,
     ) -> List[ImageResult]:
         """
         處理整個面板的圖片 (包含 PINIGBI 灰塵檢查 和 AOI Defect 整合)
@@ -1869,7 +1898,25 @@ class CAPIInferencer:
         results = preprocessed_results
                 
         # === 炸彈系統比對 ===
-        if self.config.bomb_defects:
+        # 決定炸彈來源：優先使用 Client 端傳入的 runtime 資料
+        active_bombs = []
+        if bomb_info is not None:
+            # 從協議取得炸彈座標，defect_code 從 config 匹配
+            defect_code = self._match_bomb_defect_code(bomb_info)
+            active_bombs = [BombDefect(
+                image_prefix=bomb_info["image_prefix"],
+                defect_code=defect_code,
+                defect_type=bomb_info["defect_type"],
+                coordinates=bomb_info["coordinates"],
+            )]
+            print(f"💣 使用協議炸彈資料: prefix={bomb_info['image_prefix']} "
+                  f"type={bomb_info['defect_type']} defect_code={defect_code} "
+                  f"coords={bomb_info['coordinates']}")
+        elif self.config.bomb_defects:
+            active_bombs = self.config.bomb_defects
+            print(f"💣 使用 Config 炸彈資料: {len(active_bombs)} 組設定")
+
+        if active_bombs:
             for result in results:
                 if result.anomaly_tiles and result.raw_bounds is not None:
                     img_prefix = result.image_path.stem
@@ -1892,7 +1939,8 @@ class CAPIInferencer:
                         # 用熱力圖峰值座標來比對炸彈
                         is_bomb, bomb_code = self.check_bomb_match(
                             img_prefix, tile.anomaly_peak_x, tile.anomaly_peak_y, result.raw_bounds,
-                            anomaly_map=anomaly_map, product_resolution=product_resolution
+                            anomaly_map=anomaly_map, product_resolution=product_resolution,
+                            bomb_list=active_bombs,
                         )
                         if is_bomb:
                             tile.is_bomb = True
