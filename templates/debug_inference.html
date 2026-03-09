@@ -343,6 +343,120 @@
     .hidden {
         display: none !important;
     }
+
+    /* ── Coord Inference Section ── */
+    .section-divider {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin: 36px 0 20px;
+        color: var(--text-muted);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+
+    .section-divider::before,
+    .section-divider::after {
+        content: '';
+        flex: 1;
+        height: 1px;
+        background: var(--border);
+    }
+
+    .coord-input-row {
+        display: flex;
+        gap: 12px;
+        align-items: stretch;
+        flex-wrap: wrap;
+    }
+
+    .coord-group {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-width: 100px;
+    }
+
+    .coord-group label {
+        color: var(--text-muted);
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .coord-group input[type="number"],
+    .coord-group select {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        color: var(--text);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.95rem;
+        font-weight: 600;
+        outline: none;
+        width: 100%;
+        transition: border-color 0.2s;
+        text-align: center;
+    }
+
+    .coord-group input[type="number"]:focus,
+    .coord-group select:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+    }
+
+    .coord-result-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 16px;
+        margin-top: 16px;
+    }
+
+    @media (max-width: 1024px) {
+        .coord-result-grid {
+            grid-template-columns: 1fr 1fr;
+        }
+    }
+
+    @media (max-width: 600px) {
+        .coord-result-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .coord-result-grid .img-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+    }
+
+    .coord-result-grid .img-card h4 {
+        padding: 10px 14px;
+        margin: 0;
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        font-family: 'Fira Code', monospace;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .coord-result-grid .img-card img {
+        width: 100%;
+        display: block;
+        cursor: pointer;
+        background: #0a0f1a;
+    }
+
+    .coord-info-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+        margin-top: 16px;
+    }
 </style>
 {% endblock %}
 
@@ -409,6 +523,66 @@
             ✅ 此圖片未偵測到異常，判定為 OK
         </div>
     </div>
+
+    <!-- ═══ 座標推論區塊 ═══ -->
+    <div class="section-divider">📍 座標推論</div>
+
+    <div class="card" style="padding:20px;">
+        <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:14px;">
+            輸入產品座標，以該點為中心裁切 512×512 區塊做推論（用於排查閥值未檢出的真實 Defect）
+        </p>
+        <div class="coord-input-row">
+            <input type="text" id="coord-image-path" placeholder="圖片絕對路徑" autocomplete="off" spellcheck="false"
+                style="flex:1; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.95rem; outline:none;">
+            <div class="coord-group">
+                <label for="coord-x">Product X</label>
+                <input type="number" id="coord-x" value="960" min="0" step="1">
+            </div>
+            <div class="coord-group">
+                <label for="coord-y">Product Y</label>
+                <input type="number" id="coord-y" value="540" min="0" step="1">
+            </div>
+            <div class="coord-group">
+                <label for="coord-resolution">產品解析度</label>
+                <select id="coord-resolution">
+                    {% for code, res in model_resolution_map.items() %}
+                    <option value="{{ res[0] }},{{ res[1] }}" {% if res[0]==1920 and res[1]==1080 %} selected{% endif
+                        %}>
+                        {{ code }}: {{ res[0] }}×{{ res[1] }}
+                    </option>
+                    {% endfor %}
+                    {% if not model_resolution_map %}
+                    <option value="1920,1080" selected>1920×1080</option>
+                    {% endif %}
+                </select>
+            </div>
+            <div class="coord-group">
+                <label for="coord-threshold">門檻</label>
+                <input type="number" id="coord-threshold" value="{{ default_threshold }}" min="0" max="1" step="0.01"
+                    style="color:var(--err);">
+            </div>
+            <div class="coord-group">
+                <label for="coord-edge-margin">邊緣衰減</label>
+                <input type="number" id="coord-edge-margin" value="{{ default_edge_margin }}" min="0" max="512"
+                    step="16" style="color:var(--err);">
+            </div>
+            <button class="btn-run" id="btn-coord-run" onclick="runCoordInference()"
+                style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);">
+                <span class="spinner" id="coord-spinner"></span>
+                <span id="coord-btn-text">📍 座標推論</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Coord Error -->
+    <div id="coord-error-box" class="error-box hidden"></div>
+
+    <!-- Coord Result -->
+    <div id="coord-result-section" class="hidden">
+        <div class="coord-info-cards" id="coord-info-cards"></div>
+        <div class="coord-result-grid" id="coord-result-grid"></div>
+    </div>
+
 </div>
 {% endblock %}
 
@@ -584,6 +758,182 @@
             tilesSection.classList.add('hidden');
             okMessage.classList.remove('hidden');
         }
+    }
+
+    // ═══ 座標推論 ═══════════════════════════════
+    const coordPathInput = document.getElementById('coord-image-path');
+
+    // 同步圖片路徑: 全圖推論 → 座標推論
+    input.addEventListener('input', () => {
+        if (!coordPathInput.value) coordPathInput.value = input.value;
+    });
+    coordPathInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') runCoordInference();
+    });
+
+    // 自動帶入 URL 的 ?path= 參數
+    (function () {
+        const params = new URLSearchParams(window.location.search);
+        const pathParam = params.get('path');
+        if (pathParam) {
+            coordPathInput.value = pathParam;
+        }
+    })();
+
+    async function runCoordInference() {
+        const imgPath = coordPathInput.value.trim() || input.value.trim();
+        if (!imgPath) {
+            showCoordError('請輸入圖片路徑');
+            return;
+        }
+
+        const resSel = document.getElementById('coord-resolution').value.split(',');
+        const productW = parseInt(resSel[0]) || 1920;
+        const productH = parseInt(resSel[1]) || 1080;
+
+        const btnRun = document.getElementById('btn-coord-run');
+        const btnText = document.getElementById('coord-btn-text');
+        const spn = document.getElementById('coord-spinner');
+
+        btnRun.disabled = true;
+        btnText.textContent = '推論中...';
+        spn.classList.add('active');
+        hideCoordError();
+        document.getElementById('coord-result-section').classList.add('hidden');
+
+        try {
+            const resp = await fetch('/api/debug/coord-inference', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    image_path: imgPath,
+                    product_x: parseInt(document.getElementById('coord-x').value) || 0,
+                    product_y: parseInt(document.getElementById('coord-y').value) || 0,
+                    product_w: productW,
+                    product_h: productH,
+                    threshold: parseFloat(document.getElementById('coord-threshold').value) || 0.5,
+                    edge_margin_px: parseInt(document.getElementById('coord-edge-margin').value),
+                }),
+            });
+
+            const data = await resp.json();
+            if (data.error) {
+                showCoordError(data.error);
+                return;
+            }
+            renderCoordResults(data);
+        } catch (err) {
+            showCoordError('請求失敗: ' + err.message);
+        } finally {
+            btnRun.disabled = false;
+            btnText.textContent = '📍 座標推論';
+            spn.classList.remove('active');
+        }
+    }
+
+    function showCoordError(msg) {
+        const box = document.getElementById('coord-error-box');
+        box.textContent = '❌ ' + msg;
+        box.classList.remove('hidden');
+    }
+    function hideCoordError() {
+        document.getElementById('coord-error-box').classList.add('hidden');
+    }
+
+    function renderCoordResults(data) {
+        const section = document.getElementById('coord-result-section');
+        section.classList.remove('hidden');
+
+        const isNG = data.judgment === 'NG';
+        const jColor = isNG ? 'var(--ng)' : 'var(--ok)';
+        const jIcon = isNG ? '🔴' : '🟢';
+
+        // Info cards
+        const cards = document.getElementById('coord-info-cards');
+        cards.innerHTML = `
+            <div class="summary-card" style="border-color:${isNG ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}">
+                <div class="label">判定</div>
+                <div class="value" style="color:${jColor}">${jIcon} ${data.judgment}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">異常分數</div>
+                <div class="value" style="color:${isNG ? 'var(--ng)' : 'var(--ok)'}">${data.score}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">門檻</div>
+                <div class="value" style="color:var(--text-muted)">${data.threshold}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">耗時</div>
+                <div class="value" style="color:var(--accent)">${data.processing_time}s</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">產品座標</div>
+                <div class="value" style="color:var(--text);font-size:1rem;">(${data.product_coord[0]}, ${data.product_coord[1]})</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">圖片座標</div>
+                <div class="value" style="color:var(--text);font-size:1rem;">(${data.image_coord[0]}, ${data.image_coord[1]})</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">裁切區域</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.85rem;">(${data.crop_region[0]},${data.crop_region[1]}) → (${data.crop_region[2]},${data.crop_region[3]})</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">使用模型</div>
+                <div class="value" style="color:var(--text);font-size:0.85rem;" title="${data.model_name}">${data.image_prefix || '?'}</div>
+            </div>
+        `;
+
+        // Images
+        const grid = document.getElementById('coord-result-grid');
+        const t = Date.now();
+        let imagesHtml = '';
+
+        // 1. Overview Image
+        if (data.overview_url) {
+            imagesHtml += `
+                <div class="img-card">
+                    <h4>🗺️ 全圖定位 (Overview)</h4>
+                    <img src="${data.overview_url}?t=${t}" alt="Overview" onclick="openLightbox(this.src)">
+                </div>
+            `;
+        }
+
+        // 2. Original Crop
+        imagesHtml += `
+            <div class="img-card">
+                <h4>🖼️ 原圖點燈影像 (512×512)</h4>
+                <img src="${data.crop_url}?t=${t}" alt="Original Crop" onclick="openLightbox(this.src)">
+            </div>
+        `;
+
+        // 3. Heatmap
+        imagesHtml += `
+            <div class="img-card">
+                <h4>🔥 異常熱力圖</h4>
+                <img src="${data.heatmap_url}?t=${t}" alt="Heatmap" onclick="openLightbox(this.src)">
+            </div>
+        `;
+
+        // 4. OMIT Image (if available)
+        if (data.omit_url) {
+            imagesHtml += `
+                <div class="img-card">
+                    <h4>🧹 灰塵檢查圖 (OMIT)</h4>
+                    <img src="${data.omit_url}?t=${t}" alt="OMIT Image" onclick="openLightbox(this.src)">
+                </div>
+            `;
+        } else {
+            imagesHtml += `
+                <div class="img-card" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding: 40px 20px; text-align:center; color:var(--text-muted);">
+                    <div style="font-size:3rem; margin-bottom:12px; opacity:0.5;">🧹</div>
+                    <div style="font-family:'Fira Code', monospace; line-height:1.5;">無 OMIT 圖片<br>無法排除灰塵干擾</div>
+                </div>
+            `;
+        }
+
+        grid.innerHTML = imagesHtml;
     }
 </script>
 {% endblock %}

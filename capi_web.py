@@ -167,6 +167,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/debug/inference":
                 self._handle_debug_inference_run()
+            elif path == "/api/debug/coord-inference":
+                self._handle_debug_coord_inference()
             elif path == "/api/ric/upload":
                 self._handle_ric_upload()
             elif path == "/api/ric/delete":
@@ -670,15 +672,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         # 從正在運行的推論器讀取 config 預設值
         default_threshold = 0.5
         default_edge_margin = 256
+        model_resolution_map = {}
         if self.inferencer and hasattr(self.inferencer, 'config'):
             default_threshold = self.inferencer.config.anomaly_threshold
             default_edge_margin = self.inferencer.config.edge_margin_px
+            model_resolution_map = self.inferencer.config.model_resolution_map or {}
         
         template = self.jinja_env.get_template("debug_inference.html")
         html = template.render(
             request_path=path,
             default_threshold=default_threshold,
             default_edge_margin=default_edge_margin,
+            model_resolution_map=model_resolution_map,
         )
         self._send_response(200, html)
 
@@ -1091,6 +1096,245 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"[DEBUG] Inference error: {e}", exc_info=True)
             self._send_json({"error": f"推論失敗: {str(e)}"})
+
+    def _handle_debug_coord_inference(self):
+        """API: 人工座標推論 — 以指定產品座標為中心裁切 512x512 做推論"""
+        import time as _time
+        import cv2
+        import numpy as np
+        from capi_inference import TileInfo
+
+        # 讀取 POST body
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except Exception:
+            self._send_json({"error": "Invalid JSON body"})
+            return
+
+        image_path_str = data.get("image_path", "").strip()
+        if not image_path_str:
+            self._send_json({"error": "請提供圖片路徑 (image_path)"})
+            return
+
+        image_path = Path(image_path_str)
+        if not image_path.exists():
+            self._send_json({"error": f"檔案不存在: {image_path}"})
+            return
+
+        if self.inferencer is None:
+            self._send_json({"error": "推論器尚未載入 (inferencer is None)"})
+            return
+
+        # 解析參數
+        try:
+            product_x = int(data.get("product_x", 0))
+            product_y = int(data.get("product_y", 0))
+            product_w = int(data.get("product_w", 1920))
+            product_h = int(data.get("product_h", 1080))
+        except (ValueError, TypeError) as e:
+            self._send_json({"error": f"座標或解析度參數無效: {e}"})
+            return
+
+        debug_threshold = float(data.get("threshold", 0.5))
+        edge_margin_raw = data.get("edge_margin_px")
+        edge_margin_override = int(edge_margin_raw) if edge_margin_raw is not None else None
+
+        try:
+            total_start = _time.time()
+
+            # 1. 載入圖片
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            if image is None:
+                self._send_json({"error": f"無法載入圖片: {image_path}"})
+                return
+
+            img_h, img_w = image.shape[:2]
+
+            # 2. 計算 raw_bounds (面板在圖片中的實際邊界)
+            raw_bounds = self.inferencer._find_raw_object_bounds(image)
+            if raw_bounds is None:
+                raw_bounds = (0, 0, img_w, img_h)
+
+            x_start, y_start, x_end, y_end = raw_bounds
+
+            # 3. 產品座標 → 圖片座標
+            scale_x = (x_end - x_start) / product_w if product_w > 0 else 1.0
+            scale_y = (y_end - y_start) / product_h if product_h > 0 else 1.0
+            img_cx = int(product_x * scale_x + x_start)
+            img_cy = int(product_y * scale_y + y_start)
+
+            # 4. 以 (img_cx, img_cy) 為中心裁切 512x512，邊界 clamp
+            tile_size = 512
+            half = tile_size // 2
+            crop_x1 = max(0, img_cx - half)
+            crop_y1 = max(0, img_cy - half)
+            crop_x2 = crop_x1 + tile_size
+            crop_y2 = crop_y1 + tile_size
+
+            # 如果超出右/下邊界，向前推
+            if crop_x2 > img_w:
+                crop_x2 = img_w
+                crop_x1 = max(0, crop_x2 - tile_size)
+            if crop_y2 > img_h:
+                crop_y2 = img_h
+                crop_y1 = max(0, crop_y2 - tile_size)
+
+            crop_w = crop_x2 - crop_x1
+            crop_h = crop_y2 - crop_y1
+            tile_image = image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+
+            # 5. 建立 TileInfo + 推論
+            tile_info = TileInfo(
+                tile_id=0,
+                x=crop_x1, y=crop_y1,
+                width=crop_w, height=crop_h,
+                image=tile_image,
+            )
+
+            # 多模型路由
+            img_prefix = self.inferencer._get_image_prefix(image_path.name)
+            target_inferencer = self.inferencer._get_inferencer_for_prefix(img_prefix)
+            model_name = "預設模型"
+            if img_prefix in self.inferencer._model_mapping:
+                model_name = self.inferencer._model_mapping[img_prefix].name
+
+            if target_inferencer is None:
+                self._send_json({"error": f"找不到 {image_path.name} 對應的模型"})
+                return
+
+            # 推論 (含 GPU lock)
+            if hasattr(self, '_gpu_lock') and self._gpu_lock:
+                with self._gpu_lock:
+                    score, anomaly_map = self.inferencer.predict_tile(
+                        tile_info, inferencer=target_inferencer,
+                        edge_margin_override=edge_margin_override,
+                    )
+            else:
+                score, anomaly_map = self.inferencer.predict_tile(
+                    tile_info, inferencer=target_inferencer,
+                    edge_margin_override=edge_margin_override,
+                )
+
+            total_time = _time.time() - total_start
+
+            # 6. 建立 Debug heatmap 暫存目錄
+            if CAPIWebHandler._debug_heatmap_dir is None:
+                CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
+            debug_dir = CAPIWebHandler._debug_heatmap_dir
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            image_name = image_path.stem
+            ts = int(_time.time() * 1000) % 100000  # 避免快取
+
+            # 7. 儲存原始裁切圖
+            crop_bgr = tile_image.copy()
+            if len(crop_bgr.shape) == 2:
+                crop_bgr = cv2.cvtColor(crop_bgr, cv2.COLOR_GRAY2BGR)
+            elif len(crop_bgr.shape) == 3 and crop_bgr.shape[2] == 1:
+                crop_bgr = cv2.cvtColor(crop_bgr, cv2.COLOR_GRAY2BGR)
+            crop_filename = f"debug_coord_crop_{image_name}_{ts}.png"
+            cv2.imwrite(str(debug_dir / crop_filename), crop_bgr)
+            crop_url = f"/debug/heatmaps/{crop_filename}"
+
+            # 8. 儲存熱力圖
+            heatmap_url = ""
+            if anomaly_map is not None:
+                if self.heatmap_manager:
+                    overlay = self.heatmap_manager.generate_heatmap_overlay(
+                        tile_image, anomaly_map, alpha=0.5
+                    )
+                else:
+                    norm_map = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                    heatmap_color = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
+                    if heatmap_color.shape[:2] != crop_bgr.shape[:2]:
+                        heatmap_color = cv2.resize(heatmap_color, (crop_bgr.shape[1], crop_bgr.shape[0]))
+                    overlay = cv2.addWeighted(crop_bgr, 0.5, heatmap_color, 0.5, 0)
+                hm_filename = f"debug_coord_hm_{image_name}_{ts}.png"
+                cv2.imwrite(str(debug_dir / hm_filename), overlay)
+                heatmap_url = f"/debug/heatmaps/{hm_filename}"
+
+            # 8. 產生 Overview 圖 (加上裁切框)
+            overview_img = image.copy()
+            if len(overview_img.shape) == 2:
+                overview_img = cv2.cvtColor(overview_img, cv2.COLOR_GRAY2BGR)
+            elif len(overview_img.shape) == 3 and overview_img.shape[2] == 1:
+                overview_img = cv2.cvtColor(overview_img, cv2.COLOR_GRAY2BGR)
+            
+            # 使用半透明遮罩凸顯區域
+            overlay_bg = overview_img.copy()
+            cv2.rectangle(overlay_bg, (crop_x1, crop_y1), (crop_x2, crop_y2), (0, 0, 255), -1)
+            cv2.addWeighted(overlay_bg, 0.3, overview_img, 0.7, 0, overview_img)
+            # 畫紅框 + 中心點
+            cv2.rectangle(overview_img, (crop_x1, crop_y1), (crop_x2, crop_y2), (0, 0, 255), 6)
+            cv2.circle(overview_img, (img_cx, img_cy), 10, (0, 255, 0), -1)
+
+            # 縮小 Overview 存檔 (最多 2000px)
+            max_dim = 2000
+            oh, ow = overview_img.shape[:2]
+            if max(oh, ow) > max_dim:
+                scale_o = max_dim / max(oh, ow)
+                overview_img = cv2.resize(overview_img, (int(ow * scale_o), int(oh * scale_o)))
+            ov_filename = f"debug_coord_overview_{image_name}_{ts}.png"
+            cv2.imwrite(str(debug_dir / ov_filename), overview_img)
+            overview_url = f"/debug/heatmaps/{ov_filename}"
+
+            # 9. 嘗試尋找並裁切 OMIT 圖片
+            omit_url = ""
+            image_dir = image_path.parent
+            omit_candidates = []
+            for pattern in ["PINIGBI*.*", "OMIT0000*.*"]:
+                omit_candidates.extend(list(image_dir.glob(pattern)))
+            if omit_candidates:
+                omit_path = omit_candidates[0]
+                omit_full = cv2.imread(str(omit_path), cv2.IMREAD_UNCHANGED)
+                if omit_full is not None:
+                    try:
+                        omit_crop = omit_full[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+                        if len(omit_crop.shape) == 2:
+                            omit_crop = cv2.cvtColor(omit_crop, cv2.COLOR_GRAY2BGR)
+                        elif len(omit_crop.shape) == 3 and omit_crop.shape[2] == 1:
+                            omit_crop = cv2.cvtColor(omit_crop, cv2.COLOR_GRAY2BGR)
+                        omit_filename = f"debug_coord_omit_{image_name}_{ts}.png"
+                        cv2.imwrite(str(debug_dir / omit_filename), omit_crop)
+                        omit_url = f"/debug/heatmaps/{omit_filename}"
+                    except Exception as e:
+                        logger.warning(f"OMIT crop failed: {e}")
+
+            # 10. 判定結果
+            actual_threshold = debug_threshold
+            judgment = "NG" if score >= actual_threshold else "OK"
+
+            response_data = {
+                "success": True,
+                "product_coord": [product_x, product_y],
+                "product_resolution": [product_w, product_h],
+                "image_coord": [img_cx, img_cy],
+                "crop_region": [crop_x1, crop_y1, crop_x2, crop_y2],
+                "raw_bounds": list(raw_bounds),
+                "scale": [round(scale_x, 4), round(scale_y, 4)],
+                "image_size": [img_w, img_h],
+                "score": round(score, 4),
+                "threshold": actual_threshold,
+                "judgment": judgment,
+                "processing_time": round(total_time, 3),
+                "crop_url": crop_url,
+                "heatmap_url": heatmap_url,
+                "overview_url": overview_url,
+                "omit_url": omit_url,
+                "image_prefix": img_prefix,
+                "model_name": model_name,
+                "edge_margin_px": edge_margin_override if edge_margin_override is not None else self.inferencer.config.edge_margin_px,
+            }
+
+            self._send_json(response_data)
+            logger.info(f"[DEBUG-COORD] ({product_x},{product_y})→({img_cx},{img_cy}) "
+                        f"Score={score:.4f} {judgment} ({total_time:.2f}s)")
+
+        except Exception as e:
+            logger.error(f"[DEBUG-COORD] Error: {e}", exc_info=True)
+            self._send_json({"error": f"座標推論失敗: {str(e)}"})
 
     def _handle_debug_heatmap_file(self, path: str):
         """靜態檔案服務 (Debug 推論熱力圖)"""

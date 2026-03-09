@@ -9,6 +9,12 @@
         href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap"
         rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
     <style>
         :root {
             --bg: #0f172a;
@@ -654,6 +660,17 @@
                     <div class="chart-container"><canvas id="confusionChart"></canvas></div>
                 </div>
             </div>
+            <!-- Newly added row for Daily Metrics Tracking -->
+            <div class="charts-row">
+                <div class="chart-card" style="grid-column: 1 / -1;">
+                    <h3>📅 每日過漏檢率追蹤 (分母為當日總數量)</h3>
+                    <div class="chart-container"><canvas id="dailyMetricsChart"></canvas></div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 8px;">
+                        📌 備註：此圖表之漏檢與過檢率分母皆為「當日影像總數量」，以此呈現出整體佔比走勢。<br>
+                        (由於「AI判成OK，但RIC OK」為一致判定，這裡假設漏檢率是指「AI判成OK，但RIC為NG」，特此說明)
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Tab 2: Detail -->
@@ -906,10 +923,18 @@
 
                 // Daily
                 const day = row.systime.substring(0, 10); // "2026-03-04"
-                if (!daily[day]) daily[day] = { total: 0, aoiCorrect: 0, aiCorrect: 0 };
+                if (!daily[day]) daily[day] = {
+                    total: 0, aoiCorrect: 0, aiCorrect: 0,
+                    aiMiss: 0, aiOver: 0, aoiOver: 0
+                };
                 daily[day].total++;
                 if (eqp === ric) daily[day].aoiCorrect++;
                 if (ai === ric) daily[day].aiCorrect++;
+
+                // Track daily miss and overkill
+                if (ai === 'OK' && ric === 'NG') daily[day].aiMiss++;
+                if (ai === 'NG' && ric === 'OK') daily[day].aiOver++;
+                if (eqp === 'NG' && ric === 'OK') daily[day].aoiOver++;
             });
 
             const aoiAccuracy = total > 0 ? (aoiCorrect / total * 100).toFixed(1) : 0;
@@ -1111,6 +1136,7 @@
 
             resultChart = new Chart(ctx1, {
                 type: 'bar',
+                plugins: [window.ChartDataLabels],
                 data: {
                     labels: ['AOI (RESULT_EQP)', 'AI', 'RIC'],
                     datasets: [
@@ -1120,7 +1146,16 @@
                 },
                 options: {
                     responsive: true, maintainAspectRatio: false,
-                    plugins: { legend: { labels: { color: '#94a3b8' } } },
+                    plugins: {
+                        datalabels: {
+                            color: '#e2e8f0',
+                            font: { size: 11, weight: 600 },
+                            anchor: 'center',
+                            align: 'center',
+                            formatter: (v) => v === 0 ? '' : v
+                        },
+                        legend: { labels: { color: '#94a3b8' } }
+                    },
                     scales: {
                         x: { stacked: true, ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
                         y: { stacked: true, ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.5)' } }
@@ -1144,6 +1179,7 @@
 
             comboChart = new Chart(ctx2, {
                 type: 'bar',
+                plugins: [window.ChartDataLabels],
                 data: {
                     labels: comboLabels.map(k => `AOI/AI/RIC: ${k}`),
                     datasets: [{
@@ -1156,7 +1192,16 @@
                 options: {
                     indexAxis: 'y',
                     responsive: true, maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
+                    plugins: {
+                        datalabels: {
+                            color: '#e2e8f0',
+                            font: { size: 10, weight: 600 },
+                            anchor: 'end',
+                            align: 'left',
+                            formatter: (v) => v === 0 ? '' : v
+                        },
+                        legend: { display: false }
+                    },
                     scales: {
                         x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
                         y: { ticks: { color: '#94a3b8', font: { family: "'Fira Code'" } }, grid: { display: false } }
@@ -1173,6 +1218,7 @@
 
             trendChart = new Chart(ctx3, {
                 type: 'line',
+                plugins: [window.ChartDataLabels],
                 data: {
                     labels: dateLabels,
                     datasets: [
@@ -1205,7 +1251,23 @@
                 },
                 options: {
                     responsive: true, maintainAspectRatio: false,
-                    plugins: { legend: { labels: { color: '#94a3b8' } } },
+                    plugins: {
+                        datalabels: {
+                            color: function (context) {
+                                const colors = ['#f59e0b', '#818cf8', '#94a3b8'];
+                                return colors[context.datasetIndex];
+                            },
+                            font: { size: 10, weight: 600 },
+                            align: function (context) { return context.dataset.type === 'bar' ? 'end' : 'top'; },
+                            anchor: function (context) { return context.dataset.type === 'bar' ? 'end' : 'center'; },
+                            formatter: function (value, context) {
+                                if (value === null || value === '0.0' || value === 0) return '';
+                                if (context.dataset.type === 'bar') return value;
+                                return value + '%';
+                            }
+                        },
+                        legend: { labels: { color: '#94a3b8' } }
+                    },
                     scales: {
                         x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
                         y: { min: 0, max: 100, ticks: { color: '#64748b', callback: v => v + '%' }, grid: { color: 'rgba(51,65,85,0.5)' } },
@@ -1232,6 +1294,7 @@
 
             confusionChart = new Chart(ctx4, {
                 type: 'bar',
+                plugins: [window.ChartDataLabels],
                 data: {
                     labels: ['TP (判NG 實NG)', 'FP (過檢)', 'FN (漏檢)', 'TN (判OK 實OK)'],
                     datasets: [
@@ -1241,13 +1304,154 @@
                 },
                 options: {
                     responsive: true, maintainAspectRatio: false,
-                    plugins: { legend: { labels: { color: '#94a3b8' } } },
+                    plugins: {
+                        datalabels: {
+                            color: '#e2e8f0',
+                            font: { size: 11, weight: 600 },
+                            anchor: 'center',
+                            align: 'center',
+                            formatter: (v) => v === 0 ? '' : v
+                        },
+                        legend: { labels: { color: '#94a3b8' } }
+                    },
                     scales: {
                         x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
                         y: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.5)' } }
                     }
                 }
             });
+
+            // 5. Daily Metrics Chart (Miss & Overkill rates over Total)
+            const ctx5 = document.getElementById('dailyMetricsChart').getContext('2d');
+            if (window.dailyMetricsChartInstance) window.dailyMetricsChartInstance.destroy();
+
+            // 定義修改紀錄
+            const modificationLogs = [
+                { date: '2026-03-02', label: '加嚴 threshold\n(0.6 -> 0.56)' },
+                { date: '2026-03-03', label: '縮小 dust area\n(3 -> 0.4)' },
+                { date: '2026-03-04', label: '使用07線圖片重新訓練' },
+                { date: '2026-03-05', label: '新增5畫面\n獨立模型' },
+                { date: '2026-03-06', label: '調高 threshold\n(0.56 -> 0.7)' }
+            ];
+
+            const annotations = {};
+            modificationLogs.forEach((log, index) => {
+                // 只有當該日期存在於 X 軸 (dateLabels) 時才標註
+                if (dateLabels.includes(log.date)) {
+                    annotations[`line${index}`] = {
+                        type: 'line',
+                        scaleID: 'x',
+                        value: log.date,
+                        borderColor: 'rgba(234, 88, 12, 0.7)', // orange-600
+                        borderWidth: 2,
+                        borderDash: [5, 5],
+                        label: {
+                            display: true,
+                            content: log.label.split('\n'),
+                            position: 'start',
+                            backgroundColor: 'rgba(234, 88, 12, 0.9)',
+                            color: 'white',
+                            font: { size: 12, weight: 'bold' },
+                            yAdjust: index % 2 === 0 ? 0 : 40 // 交錯顯示避免重疊 (調大間距配合大字體)
+                        }
+                    };
+                }
+            });
+
+            window.dailyMetricsChartInstance = new Chart(ctx5, {
+                type: 'line',
+                plugins: [window.ChartDataLabels],
+                data: {
+                    labels: dateLabels,
+                    datasets: [
+                        {
+                            label: 'AI 漏檢率 (%)',
+                            data: dateKeys.map(k => {
+                                const d = stats.daily[k];
+                                return d.total > 0 ? (d.aiMiss / d.total * 100).toFixed(1) : null;
+                            }),
+                            borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)',
+                            borderDash: [5, 5], tension: 0.3, fill: false, pointRadius: 4, pointBackgroundColor: '#ef4444',
+                        },
+                        {
+                            label: 'AI 過檢率 (%)',
+                            data: dateKeys.map(k => {
+                                const d = stats.daily[k];
+                                return d.total > 0 ? (d.aiOver / d.total * 100).toFixed(1) : null;
+                            }),
+                            borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)',
+                            tension: 0.3, fill: false, pointRadius: 4, pointBackgroundColor: '#3b82f6',
+                        },
+                        {
+                            label: 'AOI 過檢率 (%)',
+                            data: dateKeys.map(k => {
+                                const d = stats.daily[k];
+                                return d.total > 0 ? (d.aoiOver / d.total * 100).toFixed(1) : null;
+                            }),
+                            borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)',
+                            tension: 0.3, fill: false, pointRadius: 4, pointBackgroundColor: '#f59e0b',
+                        },
+                        {
+                            label: '當日總數量',
+                            data: dateKeys.map(k => stats.daily[k].total),
+                            type: 'bar',
+                            backgroundColor: 'rgba(148,163,184,0.15)',
+                            borderRadius: 4, yAxisID: 'y1',
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: {
+                        datalabels: {
+                            color: function (context) {
+                                const colors = ['#ef4444', '#3b82f6', '#f59e0b', '#94a3b8'];
+                                return colors[context.datasetIndex];
+                            },
+                            font: { size: 10, weight: 600 },
+                            align: function (context) { return context.dataset.type === 'bar' ? 'end' : 'top'; },
+                            anchor: function (context) { return context.dataset.type === 'bar' ? 'end' : 'center'; },
+                            formatter: function (value, context) {
+                                if (value === null || value === '0.0' || value === 0) return '';
+                                if (context.dataset.type === 'bar') return value;
+                                return value + '%';
+                            }
+                        },
+                        legend: { labels: { color: '#94a3b8' } },
+                        tooltip: {
+                            callbacks: {
+                                label: function (context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) label += ': ';
+                                    if (context.parsed.y !== null) {
+                                        label += context.parsed.y;
+                                        if (context.dataset.yAxisID !== 'y1') label += '%';
+                                    }
+                                    const day = context.chart.data.labels[context.dataIndex];
+                                    const d = stats.daily[day];
+                                    if (context.datasetIndex === 0) label += ` (${d.aiMiss} / ${d.total})`;
+                                    if (context.datasetIndex === 1) label += ` (${d.aiOver} / ${d.total})`;
+                                    if (context.datasetIndex === 2) label += ` (${d.aoiOver} / ${d.total})`;
+                                    return label;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
+                        y: { min: 0, title: { display: true, text: '百分比 (%)', color: '#64748b' }, ticks: { color: '#64748b', callback: v => v + '%' }, grid: { color: 'rgba(51,65,85,0.5)' } },
+                        y1: { position: 'right', min: 0, title: { display: true, text: '數量', color: '#64748b' }, ticks: { color: '#475569' }, grid: { display: false } },
+                    }
+                }
+            });
+
+            // Register Annotation plugin for dailyMetricsChart only if it exists
+            if (Object.keys(annotations).length > 0) {
+                window.dailyMetricsChartInstance.options.plugins.annotation = {
+                    annotations: annotations
+                };
+                window.dailyMetricsChartInstance.update();
+            }
         }
 
         // ── Render Comparison ──
