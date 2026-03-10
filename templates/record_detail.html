@@ -100,6 +100,15 @@
             <th>處理時間</th>
             <td>{{ detail.processing_seconds | round(2) }}s</td>
         </tr>
+        {% if detail.client_bomb_info %}
+        <tr>
+            <th>客戶端炸彈資訊</th>
+            <td>
+                <pre
+                    style="margin:0;font-size:0.85rem;color:var(--text-muted);white-space:pre-wrap;word-break:break-all;">{{ detail.client_bomb_info }}</pre>
+            </td>
+        </tr>
+        {% endif %}
         <tr>
             <th>請求時間</th>
             <td>{{ detail.request_time }}</td>

@@ -1049,6 +1049,8 @@ class CAPIServer:
             else:
                 error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
 
+            client_bomb_info_str = json.dumps(parsed["bomb_info"], ensure_ascii=False) if parsed.get("bomb_info") else ""
+
             self.db.save_inference_record(
                 glass_id=parsed["glass_id"],
                 model_id=parsed["model_id"],
@@ -1065,6 +1067,7 @@ class CAPIServer:
                 processing_seconds=processing_seconds,
                 heatmap_dir=heatmap_info.get("dir", ""),
                 error_message=error_message,
+                client_bomb_info=client_bomb_info_str,
                 image_results_data=image_results_data,
             )
 

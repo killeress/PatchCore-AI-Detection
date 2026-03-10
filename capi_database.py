@@ -64,6 +64,7 @@ class CAPIDatabase:
                     processing_seconds REAL DEFAULT 0.0,
                     heatmap_dir TEXT DEFAULT '',
                     error_message TEXT DEFAULT '',
+                    client_bomb_info TEXT DEFAULT '',
                     created_at TEXT DEFAULT (datetime('now', 'localtime'))
                 );
 
@@ -165,6 +166,7 @@ class CAPIDatabase:
         processing_seconds: float,
         heatmap_dir: str = "",
         error_message: str = "",
+        client_bomb_info: str = "",
         image_results_data: Optional[List[Dict]] = None,
     ) -> int:
         """
@@ -186,6 +188,7 @@ class CAPIDatabase:
             processing_seconds: 處理耗時 (秒)
             heatmap_dir: 熱力圖儲存目錄
             error_message: 錯誤訊息
+            client_bomb_info: 客戶端傳來的炸彈座標資訊 (JSON 字串)
             image_results_data: 圖片級結果列表
 
         Returns:
@@ -199,12 +202,12 @@ class CAPIDatabase:
                        (glass_id, model_id, machine_no, resolution_x, resolution_y,
                         machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                         ng_details, request_time, response_time, processing_seconds,
-                        heatmap_dir, error_message)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        heatmap_dir, error_message, client_bomb_info)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (glass_id, model_id, machine_no, resolution[0], resolution[1],
                      machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                      ng_details, request_time, response_time, processing_seconds,
-                     heatmap_dir, error_message)
+                     heatmap_dir, error_message, client_bomb_info)
                 )
                 record_id = cursor.lastrowid
 

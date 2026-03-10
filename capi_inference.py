@@ -186,6 +186,9 @@ class ImageResult:
     # 推論耗時 (秒)
     inference_time: float = 0.0
     
+    # 客戶端傳送的炸彈資訊 (供繪圖使用)
+    client_bomb_info: Optional[Dict[str, Any]] = None
+    
     @property
     def total_tiles(self) -> int:
         return len(self.tiles)
@@ -1494,9 +1497,9 @@ class CAPIInferencer:
                 img_x2, img_y2 = self._map_aoi_coords(pt2[0], pt2[1], raw_bounds, product_resolution)
                 
                 # 線段 x 範圍 ± tolerance (轉換到圖片座標的 tolerance)
-                PRODUCT_WIDTH = product_resolution[0]
+                product_width = product_resolution[0]
                 x_start, _, x_end, _ = raw_bounds
-                scale_x = (x_end - x_start) / PRODUCT_WIDTH
+                scale_x = (x_end - x_start) / product_width
                 img_tolerance_x = int(tolerance * scale_x)
                 
                 min_x = min(img_x1, img_x2) - img_tolerance_x
@@ -1519,10 +1522,10 @@ class CAPIInferencer:
                     
             elif bomb.defect_type == "point":
                 # 點型: 判斷 tile 中心是否在任一炸彈點座標 ± tolerance 範圍內
-                PRODUCT_WIDTH, PRODUCT_HEIGHT = product_resolution
+                product_width, product_height = product_resolution
                 x_start, y_start, x_end, y_end = raw_bounds
-                scale_x = (x_end - x_start) / PRODUCT_WIDTH
-                scale_y = (y_end - y_start) / PRODUCT_HEIGHT
+                scale_x = (x_end - x_start) / product_width
+                scale_y = (y_end - y_start) / product_height
                 img_tolerance_x = int(tolerance * scale_x)
                 img_tolerance_y = int(tolerance * scale_y)
                 
@@ -1950,6 +1953,10 @@ class CAPIInferencer:
         total_panel_time = preprocess_time + inference_time + postprocess_time
         print(f"📊 Panel {panel_dir.name} 總計: 預處理 {preprocess_time:.2f}s + 推論 {inference_time:.2f}s + 後處理 {postprocess_time:.2f}s = {total_panel_time:.2f}s")
         
+        if bomb_info is not None:
+            for result in results:
+                result.client_bomb_info = bomb_info
+                
         return results, omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate
 
     def visualize_inference_result(self, image_path: Path, result: ImageResult) -> np.ndarray:
@@ -2163,7 +2170,20 @@ class CAPIInferencer:
         bomb_count = 0
         matched_count = 0
         
-        for bomb in self.config.bomb_defects:
+        active_bombs = []
+        if result.client_bomb_info:
+            bomb_info = result.client_bomb_info
+            defect_code = self._match_bomb_defect_code(bomb_info)
+            active_bombs = [BombDefect(
+                image_prefix=bomb_info["image_prefix"],
+                defect_code=defect_code,
+                defect_type=bomb_info["defect_type"],
+                coordinates=bomb_info["coordinates"],
+            )]
+        elif self.config.bomb_defects:
+            active_bombs = self.config.bomb_defects
+            
+        for bomb in active_bombs:
             if not (img_prefix == bomb.image_prefix or
                     img_prefix.startswith(bomb.image_prefix + "_")):
                 continue

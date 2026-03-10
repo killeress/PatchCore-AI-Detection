@@ -461,6 +461,17 @@
                                 <td class="label">處理時間</td>
                                 <td class="value">{{ detail.processing_seconds | round(2) }}s</td>
                             </tr>
+                            {% if detail.client_bomb_info %}
+                            <tr>
+                                <td class="label">客戶端炸彈資訊</td>
+                                <td class="value">
+                                    <div
+                                        style="font-family: monospace; font-size: 11px; color: #475569; background: #F8FAFC; padding: 6px; border: 1px solid #E2E8F0; border-radius: 4px; word-break: break-all; text-align: left; margin-top: 4px;">
+                                        {{ detail.client_bomb_info }}
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endif %}
                             <tr>
                                 <td class="label">請求時間</td>
                                 <td class="value">{{ detail.request_time }}</td>

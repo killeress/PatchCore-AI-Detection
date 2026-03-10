@@ -162,7 +162,7 @@ class HeatmapManager:
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)
                 has_omit = True  # 仍然顯示多面板
 
-            if dust_mask is not None and omit_crop is not None:
+            if dust_mask is not None:
                 dust_panel = omit_panel.copy()
                 dust_colored = np.zeros_like(dust_panel)
                 dust_resized = cv2.resize(dust_mask, (tile_size, tile_size))
@@ -230,7 +230,7 @@ class HeatmapManager:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, verdict_color, 2)
 
         if dust_detail:
-            detail_line = dust_detail[:120].replace('\u2192', '->').replace('\u2190', '<-')
+            detail_line = str(dust_detail)[:120].replace('\u2192', '->').replace('\u2190', '<-')
             # 取代舊的字串格式
             detail_line = detail_line.replace('>=IOU_THR', f'>={iou_threshold:.3f}')
             detail_line = detail_line.replace('<IOU_THR', f'<{iou_threshold:.3f}')
