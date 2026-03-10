@@ -145,6 +145,22 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_ric_mach_id ON ric_records(mach_id);
                 CREATE INDEX IF NOT EXISTS idx_ric_batch ON ric_records(batch_id);
             """)
+            
+            # Migration for adding missing columns to existing database
+            def add_column_if_not_exists(table, column, def_type):
+                cursor = conn.execute(f"PRAGMA table_info({table})")
+                columns = [row[1] for row in cursor.fetchall()]
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {def_type}")
+
+            add_column_if_not_exists("inference_records", "error_message", "TEXT DEFAULT ''")
+            add_column_if_not_exists("inference_records", "client_bomb_info", "TEXT DEFAULT ''")
+            add_column_if_not_exists("image_results", "is_bomb", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("tile_results", "is_bomb", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("tile_results", "bomb_code", "TEXT DEFAULT ''")
+            add_column_if_not_exists("tile_results", "peak_x", "INTEGER DEFAULT -1")
+            add_column_if_not_exists("tile_results", "peak_y", "INTEGER DEFAULT -1")
+
             conn.commit()
         finally:
             conn.close()

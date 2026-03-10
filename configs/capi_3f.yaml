@@ -74,7 +74,7 @@ edge_margin_px: 256              # 邊緣衰減寬度 (px)，0=停用
 edge_margin_sides:               # 各邊是否啟用衰減
   top: true
   bottom: true
-  left: false
+  left: true
   right: true
 
 # 跳過檔案 (使用檔名前綴比對，支援帶時間戳的 TIF 檔案)
