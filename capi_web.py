@@ -82,6 +82,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     inferencer = None
     heatmap_manager = None
     _debug_heatmap_dir = None  # Debug 推論暫存目錄
+    _capi_server_instance = None  # CAPIServer 實例 (用於 hot-reload)
 
     @classmethod
     def init_jinja(cls):
@@ -135,6 +136,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_stats(query)
             elif path == "/api/status":
                 self._handle_api_status()
+            elif path == "/settings":
+                self._handle_settings_page(path)
+            elif path == "/api/settings":
+                self._handle_api_settings()
+            elif path == "/api/settings/history":
+                self._handle_api_settings_history(query)
             elif path.startswith("/heatmaps/"):
                 self._handle_static_file(path)
             elif path.startswith("/debug/heatmaps/"):
@@ -173,6 +180,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_ric_upload()
             elif path == "/api/ric/delete":
                 self._handle_ric_delete()
+            elif path == "/api/settings/update":
+                self._handle_api_settings_update()
+            elif path == "/api/settings/reload":
+                self._handle_api_settings_reload()
             else:
                 self._send_404(path)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -1431,6 +1442,93 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         else:
             self._send_404()
 
+    # ── 設定管理功能 ─────────────────────────────────────
+
+    def _handle_settings_page(self, path: str):
+        """設定管理頁面"""
+        template = self.jinja_env.get_template("settings.html")
+        html = template.render(request_path=path)
+        self._send_response(200, html)
+
+    def _handle_api_settings(self):
+        """API: 取得所有設定參數"""
+        try:
+            params = self.db.get_all_config_params() if self.db else []
+            self._send_json({"params": params})
+        except Exception as e:
+            self._send_json({"error": str(e)})
+
+    def _handle_api_settings_update(self):
+        """API: 更新設定參數"""
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+            data = json.loads(body)
+
+            param_name = data.get("param_name", "")
+            new_value = data.get("new_value")
+            reason = data.get("reason", "")
+
+            if not param_name:
+                self._send_json({"error": "缺少 param_name"})
+                return
+            if new_value is None:
+                self._send_json({"error": "缺少 new_value"})
+                return
+            if not reason.strip():
+                self._send_json({"error": "請填寫修改原因"})
+                return
+
+            success = self.db.update_config_param(param_name, new_value, reason)
+            if success:
+                self._send_json({"success": True, "message": f"已更新 {param_name}"})
+            else:
+                self._send_json({"error": f"找不到參數: {param_name}"})
+        except json.JSONDecodeError:
+            self._send_json({"error": "無效的 JSON 格式"})
+        except Exception as e:
+            self._send_json({"error": str(e)})
+
+    def _handle_api_settings_history(self, query: dict):
+        """API: 取得設定修改紀錄"""
+        try:
+            param_name = query.get("param_name", [""])[0]
+            limit = int(query.get("limit", [50])[0])
+            history = self.db.get_config_change_history(param_name, limit) if self.db else []
+            self._send_json({"history": history})
+        except Exception as e:
+            self._send_json({"error": str(e)})
+
+    def _handle_api_settings_reload(self):
+        """API: 重新載入設定 (Hot-reload inferencer)"""
+        try:
+            if not self._capi_server_instance:
+                self._send_json({"error": "Server 實例未設定，無法重載"})
+                return
+
+            server_inst = self._capi_server_instance
+            gpu_lock = self._gpu_lock
+
+            logger.info("Settings reload: re-initializing inferencer from DB config...")
+
+            # 使用 GPU lock 阻止推論期間重建
+            if gpu_lock:
+                gpu_lock.acquire()
+
+            try:
+                server_inst._load_inferencer()
+                # 更新 Web handler 的 inferencer 參照
+                CAPIWebHandler.inferencer = server_inst.inferencer
+                logger.info("Settings reload: inferencer re-initialized successfully")
+                self._send_json({"success": True, "message": "設定已重新載入，推論器已重建"})
+            finally:
+                if gpu_lock:
+                    gpu_lock.release()
+
+        except Exception as e:
+            logger.error(f"Settings reload failed: {e}", exc_info=True)
+            self._send_json({"error": f"重載失敗: {str(e)}"})
+
 
 def create_web_server(
     host: str,
@@ -1441,6 +1539,7 @@ def create_web_server(
     inferencer=None,
     heatmap_manager=None,
     gpu_lock=None,
+    capi_server_instance=None,
 ) -> ThreadingHTTPServer:
     """
     建立 Web 伺服器
@@ -1454,6 +1553,7 @@ def create_web_server(
         inferencer: CAPIInferencer 實例 (Optional, for debug inference)
         heatmap_manager: HeatmapManager 實例 (Optional, for debug inference)
         gpu_lock: GPU 排隊鎖 (Optional, for debug inference)
+        capi_server_instance: CAPIServer 實例 (Optional, for config hot-reload)
     """
     CAPIWebHandler.db = db
     CAPIWebHandler.heatmap_base_dir = heatmap_base_dir
@@ -1461,6 +1561,7 @@ def create_web_server(
     CAPIWebHandler.inferencer = inferencer
     CAPIWebHandler.heatmap_manager = heatmap_manager
     CAPIWebHandler._gpu_lock = gpu_lock
+    CAPIWebHandler._capi_server_instance = capi_server_instance
     CAPIWebHandler.init_jinja()
 
     server = ThreadingHTTPServer((host, port), CAPIWebHandler)
@@ -1476,6 +1577,7 @@ def start_web_server_thread(
     inferencer=None,
     heatmap_manager=None,
     gpu_lock=None,
+    capi_server_instance=None,
 ) -> threading.Thread:
     """
     在背景執行緒啟動 Web 伺服器
@@ -1488,6 +1590,7 @@ def start_web_server_thread(
         inferencer=inferencer,
         heatmap_manager=heatmap_manager,
         gpu_lock=gpu_lock,
+        capi_server_instance=capi_server_instance,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True, name="web-server")
     thread.start()

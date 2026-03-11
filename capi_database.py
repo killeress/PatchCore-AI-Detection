@@ -144,6 +144,30 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_ric_pnl_id ON ric_records(pnl_id);
                 CREATE INDEX IF NOT EXISTS idx_ric_mach_id ON ric_records(mach_id);
                 CREATE INDEX IF NOT EXISTS idx_ric_batch ON ric_records(batch_id);
+
+                -- 設定參數表 (存放可調整的推論參數)
+                CREATE TABLE IF NOT EXISTS config_params (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    param_name TEXT NOT NULL UNIQUE,
+                    param_value TEXT NOT NULL DEFAULT '',
+                    param_type TEXT NOT NULL DEFAULT 'str',
+                    description TEXT DEFAULT '',
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+                );
+
+                -- 設定修改歷史紀錄
+                CREATE TABLE IF NOT EXISTS config_change_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    param_name TEXT NOT NULL,
+                    old_value TEXT DEFAULT '',
+                    new_value TEXT DEFAULT '',
+                    change_reason TEXT DEFAULT '',
+                    changed_at TEXT DEFAULT (datetime('now', 'localtime'))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_config_param_name ON config_params(param_name);
+                CREATE INDEX IF NOT EXISTS idx_config_history_param ON config_change_history(param_name);
+                CREATE INDEX IF NOT EXISTS idx_config_history_time ON config_change_history(changed_at);
             """)
             
             # Migration for adding missing columns to existing database
@@ -884,6 +908,189 @@ class CAPIDatabase:
             "by_machine": by_machine,
             "details": comparisons,
         }
+
+    # ── 設定參數管理方法 ─────────────────────────────────
+
+    def get_config_param(self, param_name: str) -> Optional[Dict]:
+        """取得單一設定參數"""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM config_params WHERE param_name = ?",
+                (param_name,)
+            ).fetchone()
+            if row:
+                result = dict(row)
+                result["decoded_value"] = self._decode_config_value(
+                    result["param_value"], result["param_type"]
+                )
+                return result
+            return None
+        finally:
+            conn.close()
+
+    def get_all_config_params(self) -> List[Dict]:
+        """取得所有設定參數"""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM config_params ORDER BY id"
+            ).fetchall()
+            results = []
+            for row in rows:
+                r = dict(row)
+                r["decoded_value"] = self._decode_config_value(
+                    r["param_value"], r["param_type"]
+                )
+                results.append(r)
+            return results
+        finally:
+            conn.close()
+
+    def update_config_param(
+        self, param_name: str, new_value: Any, reason: str = ""
+    ) -> bool:
+        """
+        更新設定參數並記錄修改歷史
+
+        Args:
+            param_name: 參數名稱
+            new_value: 新值 (Python 原生型別)
+            reason: 修改原因
+
+        Returns:
+            是否更新成功
+        """
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                # 取得舊值
+                old_row = conn.execute(
+                    "SELECT param_value, param_type FROM config_params WHERE param_name = ?",
+                    (param_name,)
+                ).fetchone()
+
+                if not old_row:
+                    return False
+
+                old_value = old_row["param_value"]
+                param_type = old_row["param_type"]
+                new_value_json = json.dumps(new_value, ensure_ascii=False)
+
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                # 更新設定值
+                conn.execute(
+                    "UPDATE config_params SET param_value = ?, updated_at = ? WHERE param_name = ?",
+                    (new_value_json, now, param_name)
+                )
+
+                # 記錄修改歷史
+                conn.execute(
+                    """INSERT INTO config_change_history
+                       (param_name, old_value, new_value, change_reason, changed_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (param_name, old_value, new_value_json, reason, now)
+                )
+
+                conn.commit()
+                return True
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+
+    def get_config_change_history(
+        self, param_name: str = "", limit: int = 50
+    ) -> List[Dict]:
+        """查詢設定修改歷史紀錄"""
+        conn = self._get_conn()
+        try:
+            if param_name:
+                rows = conn.execute(
+                    """SELECT * FROM config_change_history
+                       WHERE param_name = ?
+                       ORDER BY changed_at DESC
+                       LIMIT ?""",
+                    (param_name, limit)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM config_change_history
+                       ORDER BY changed_at DESC
+                       LIMIT ?""",
+                    (limit,)
+                ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def init_config_from_yaml(self, config) -> int:
+        """
+        從 CAPIConfig 物件初始化 DB 設定 (僅在 DB 無設定時執行)
+
+        Args:
+            config: CAPIConfig 物件
+
+        Returns:
+            新增的參數數量
+        """
+        # 定義要遷移的參數
+        params_def = [
+            ("anomaly_threshold", config.anomaly_threshold, "float", "異常分數閾值 (fallback)"),
+            ("model_mapping", config.model_mapping, "dict", "前綴 → 模型路徑映射"),
+            ("threshold_mapping", config.threshold_mapping, "dict", "前綴 → 獨立閾值映射"),
+            ("dust_brightness_threshold", config.dust_brightness_threshold, "int", "灰塵亮度閾值 (備用)"),
+            ("dust_area_min", config.dust_area_min, "int", "灰塵顆粒最小面積 (px)"),
+            ("dust_area_max", config.dust_area_max, "int", "灰塵顆粒最大面積 (px)"),
+            ("dust_extension", config.dust_extension, "int", "灰塵區域膨脹像素"),
+            ("dust_heatmap_iou_threshold", config.dust_heatmap_iou_threshold, "float", "Heatmap-Dust IOU 閾值"),
+            ("dust_heatmap_top_percent", config.dust_heatmap_top_percent, "float", "Heatmap 熱區取前 X%"),
+        ]
+
+        count = 0
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                for name, value, ptype, desc in params_def:
+                    # 只在 DB 中尚無此參數時才新增
+                    existing = conn.execute(
+                        "SELECT id FROM config_params WHERE param_name = ?",
+                        (name,)
+                    ).fetchone()
+                    if not existing:
+                        value_json = json.dumps(value, ensure_ascii=False)
+                        conn.execute(
+                            """INSERT INTO config_params
+                               (param_name, param_value, param_type, description, updated_at)
+                               VALUES (?, ?, ?, ?, ?)""",
+                            (name, value_json, ptype, desc, now)
+                        )
+                        count += 1
+                conn.commit()
+                return count
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _decode_config_value(value_json: str, param_type: str) -> Any:
+        """將 JSON 字串解碼為 Python 原生型別"""
+        try:
+            value = json.loads(value_json)
+            if param_type == "float":
+                return float(value)
+            elif param_type == "int":
+                return int(value)
+            elif param_type == "dict":
+                return dict(value) if value else {}
+            return value
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return value_json
 
 
 if __name__ == "__main__":

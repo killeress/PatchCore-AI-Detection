@@ -1,0 +1,861 @@
+{% extends "base.html" %}
+
+{% block title %}參數設定 — CAPI AI{% endblock %}
+
+{% block extra_css %}
+<style>
+    .settings-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 24px;
+        margin-bottom: 30px;
+    }
+
+    @media (max-width: 900px) {
+        .settings-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .settings-section {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+    }
+
+    .settings-section-header {
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 600;
+        font-size: 0.95rem;
+    }
+
+    .settings-section-header .icon {
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.1rem;
+    }
+
+    .section-inference .icon {
+        background: rgba(59, 130, 246, 0.15);
+        color: #60a5fa;
+    }
+
+    .section-dust .icon {
+        background: rgba(249, 115, 22, 0.15);
+        color: #fb923c;
+    }
+
+    .param-row {
+        padding: 14px 20px;
+        border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        transition: background 0.15s;
+    }
+
+    .param-row:hover {
+        background: rgba(59, 130, 246, 0.04);
+    }
+
+    .param-row:last-child {
+        border-bottom: none;
+    }
+
+    .param-info {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .param-name {
+        font-family: 'Fira Code', monospace;
+        font-size: 0.85rem;
+        color: #93c5fd;
+        margin-bottom: 2px;
+    }
+
+    .param-desc {
+        font-size: 0.78rem;
+        color: var(--text-muted);
+    }
+
+    .param-value {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
+    }
+
+    .param-value-display {
+        font-family: 'Fira Code', monospace;
+        font-size: 0.9rem;
+        color: var(--text);
+        background: rgba(15, 23, 42, 0.6);
+        padding: 6px 12px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        max-width: 260px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .param-value-display.is-dict {
+        max-width: 320px;
+        font-size: 0.8rem;
+        cursor: pointer;
+    }
+
+    .btn-edit {
+        background: rgba(59, 130, 246, 0.12);
+        color: #60a5fa;
+        border: 1px solid rgba(59, 130, 246, 0.25);
+        padding: 6px 14px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.8rem;
+        font-weight: 500;
+        transition: all 0.2s;
+        white-space: nowrap;
+    }
+
+    .btn-edit:hover {
+        background: rgba(59, 130, 246, 0.25);
+        border-color: rgba(59, 130, 246, 0.5);
+    }
+
+    /* Reload button */
+    .reload-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px 24px;
+        margin-bottom: 24px;
+    }
+
+    .reload-bar .info {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--text-muted);
+        font-size: 0.88rem;
+    }
+
+    .reload-bar .info svg {
+        width: 20px;
+        height: 20px;
+        color: #f59e0b;
+    }
+
+    .btn-reload {
+        background: linear-gradient(135deg, #3b82f6, #2563eb);
+        color: #fff;
+        border: none;
+        padding: 10px 24px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        font-weight: 600;
+        transition: all 0.2s;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .btn-reload:hover {
+        background: linear-gradient(135deg, #2563eb, #1d4ed8);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(37, 99, 235, 0.4);
+    }
+
+    .btn-reload:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+    }
+
+    .btn-reload .spinner {
+        display: none;
+        width: 16px;
+        height: 16px;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+    }
+
+    .btn-reload.loading .spinner {
+        display: block;
+    }
+
+    .btn-reload.loading .btn-text {
+        display: none;
+    }
+
+    @keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+
+    /* Edit Modal */
+    .modal-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        background: rgba(2, 6, 23, 0.8);
+        backdrop-filter: blur(8px);
+        justify-content: center;
+        align-items: center;
+    }
+
+    .modal-overlay.show {
+        display: flex;
+    }
+
+    .modal-box {
+        background: #1e293b;
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        width: 95%;
+        max-width: 600px;
+        box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
+        animation: fadeIn 0.2s ease-out;
+    }
+
+    .modal-header {
+        padding: 20px 24px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .modal-header h3 {
+        font-size: 1.1rem;
+        margin: 0;
+    }
+
+    .modal-close {
+        background: none;
+        border: none;
+        color: var(--text-muted);
+        font-size: 24px;
+        cursor: pointer;
+        padding: 4px 8px;
+        border-radius: 6px;
+    }
+
+    .modal-close:hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.05);
+    }
+
+    .modal-body {
+        padding: 24px;
+    }
+
+    .modal-body label {
+        display: block;
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        margin-bottom: 6px;
+        font-weight: 500;
+    }
+
+    .modal-body input,
+    .modal-body textarea {
+        width: 100%;
+        background: #0f172a;
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.88rem;
+        margin-bottom: 16px;
+        box-sizing: border-box;
+        outline: none;
+        transition: border-color 0.2s;
+    }
+
+    .modal-body input:focus,
+    .modal-body textarea:focus {
+        border-color: var(--accent);
+    }
+
+    .modal-body textarea {
+        resize: vertical;
+        min-height: 70px;
+        font-family: 'Fira Sans', sans-serif;
+    }
+
+    .modal-body .old-value {
+        background: rgba(239, 68, 68, 0.08);
+        border: 1px solid rgba(239, 68, 68, 0.2);
+        border-radius: 6px;
+        padding: 8px 14px;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.85rem;
+        color: #fca5a5;
+        margin-bottom: 16px;
+        word-break: break-all;
+    }
+
+    .modal-footer {
+        padding: 16px 24px;
+        border-top: 1px solid var(--border);
+        display: flex;
+        justify-content: flex-end;
+        gap: 12px;
+    }
+
+    .btn-cancel {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        padding: 8px 20px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 0.88rem;
+    }
+
+    .btn-cancel:hover {
+        border-color: #64748b;
+        color: var(--text);
+    }
+
+    .btn-save {
+        background: linear-gradient(135deg, #22c55e, #16a34a);
+        color: #fff;
+        border: none;
+        padding: 8px 24px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 0.88rem;
+        font-weight: 600;
+        transition: all 0.2s;
+    }
+
+    .btn-save:hover {
+        background: linear-gradient(135deg, #16a34a, #15803d);
+    }
+
+    .btn-save:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    /* Toast */
+    .toast {
+        position: fixed;
+        top: 24px;
+        right: 24px;
+        z-index: 200;
+        padding: 14px 24px;
+        border-radius: 10px;
+        font-size: 0.9rem;
+        font-weight: 500;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+        transform: translateX(120%);
+        transition: transform 0.3s ease;
+    }
+
+    .toast.show {
+        transform: translateX(0);
+    }
+
+    .toast.success {
+        background: rgba(34, 197, 94, 0.15);
+        color: #22c55e;
+        border: 1px solid rgba(34, 197, 94, 0.3);
+    }
+
+    .toast.error {
+        background: rgba(239, 68, 68, 0.15);
+        color: #ef4444;
+        border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    /* History Section */
+    .history-section {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+    }
+
+    .history-header {
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+
+    .history-header h2 {
+        font-size: 1rem;
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .history-list {
+        max-height: 500px;
+        overflow-y: auto;
+    }
+
+    .history-item {
+        padding: 14px 20px;
+        border-bottom: 1px solid rgba(51, 65, 85, 0.4);
+        display: flex;
+        gap: 14px;
+        transition: background 0.15s;
+    }
+
+    .history-item:hover {
+        background: rgba(59, 130, 246, 0.04);
+    }
+
+    .history-item:last-child {
+        border-bottom: none;
+    }
+
+    .history-dot {
+        width: 10px;
+        height: 10px;
+        background: var(--accent);
+        border-radius: 50%;
+        margin-top: 6px;
+        flex-shrink: 0;
+    }
+
+    .history-content {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .history-meta {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 4px;
+        flex-wrap: wrap;
+    }
+
+    .history-time {
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        font-family: 'Fira Code', monospace;
+    }
+
+    .history-param {
+        font-family: 'Fira Code', monospace;
+        font-size: 0.78rem;
+        color: #93c5fd;
+        background: rgba(59, 130, 246, 0.1);
+        padding: 2px 8px;
+        border-radius: 4px;
+    }
+
+    .history-reason {
+        font-size: 0.82rem;
+        color: var(--text);
+        margin-bottom: 6px;
+    }
+
+    .history-diff {
+        font-family: 'Fira Code', monospace;
+        font-size: 0.78rem;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
+    .diff-old {
+        color: #fca5a5;
+        background: rgba(239, 68, 68, 0.08);
+        padding: 2px 8px;
+        border-radius: 4px;
+        max-width: 300px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .diff-arrow {
+        color: var(--text-muted);
+    }
+
+    .diff-new {
+        color: #86efac;
+        background: rgba(34, 197, 94, 0.08);
+        padding: 2px 8px;
+        border-radius: 4px;
+        max-width: 300px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .history-empty {
+        padding: 40px 20px;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 0.9rem;
+    }
+
+    .page-title {
+        font-size: 1.5rem;
+        font-weight: 700;
+        margin-bottom: 24px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1 class="page-title">⚙ 參數設定管理</h1>
+
+<!-- Reload Bar -->
+<div class="reload-bar">
+    <div class="info">
+        <svg fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round"
+                d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+        </svg>
+        <span>修改設定後，需點擊右方按鈕重新載入才會生效（重載期間推論暫停）</span>
+    </div>
+    <button class="btn-reload" id="btn-reload" onclick="reloadConfig()">
+        <span class="spinner"></span>
+        <span class="btn-text">🔄 重新載入設定</span>
+    </button>
+</div>
+
+<!-- Config Cards -->
+<div class="settings-grid" id="settings-grid">
+    <!-- Will be populated by JS -->
+    <div style="text-align:center; color:var(--text-muted); padding:40px; grid-column: 1/-1;">載入中...</div>
+</div>
+
+<!-- Change History -->
+<div class="history-section">
+    <div class="history-header">
+        <h2>📋 修改紀錄</h2>
+        <select id="history-filter"
+            style="background:#0f172a; border:1px solid var(--border); color:var(--text); padding:6px 12px; border-radius:6px; font-size:0.82rem;"
+            onchange="loadHistory()">
+            <option value="">全部參數</option>
+        </select>
+    </div>
+    <div class="history-list" id="history-list">
+        <div class="history-empty">載入中...</div>
+    </div>
+</div>
+
+<!-- Edit Modal -->
+<div class="modal-overlay" id="edit-modal" onclick="if(event.target===this) closeModal()">
+    <div class="modal-box">
+        <div class="modal-header">
+            <h3 id="modal-title">修改設定</h3>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <label>參數名稱</label>
+            <input type="text" id="modal-param-name" readonly
+                style="color:var(--text-muted); cursor:default; opacity:0.8;">
+
+            <label>修改前的值</label>
+            <div class="old-value" id="modal-old-value"></div>
+
+            <label>新的值 <span style="color:var(--text-muted); font-weight:normal;">(JSON 格式，數值直接輸入)</span></label>
+            <input type="text" id="modal-new-value" placeholder="輸入新值...">
+
+            <label>修改原因 <span style="color:#ef4444;">*必填</span></label>
+            <textarea id="modal-reason" placeholder="請說明修改原因，例如：調整閾值以降低過檢率..."></textarea>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-cancel" onclick="closeModal()">取消</button>
+            <button class="btn-save" id="btn-save" onclick="saveParam()">確認修改</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+    // ── State ──
+    let allParams = [];
+    const INFERENCE_PARAMS = ['anomaly_threshold', 'model_mapping', 'threshold_mapping'];
+    const DUST_PARAMS = [
+        'dust_brightness_threshold', 'dust_area_min', 'dust_area_max',
+        'dust_extension', 'dust_heatmap_iou_threshold', 'dust_heatmap_top_percent'
+    ];
+
+    // ── Init ──
+    document.addEventListener('DOMContentLoaded', () => {
+        loadSettings();
+        loadHistory();
+    });
+
+    // ── Load Settings ──
+    async function loadSettings() {
+        try {
+            const res = await fetch('/api/settings');
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+
+            allParams = data.params || [];
+            renderSettings();
+            populateFilter();
+        } catch (e) {
+            document.getElementById('settings-grid').innerHTML =
+                `<div style="color:#ef4444; padding:20px; grid-column:1/-1;">載入失敗: ${e.message}</div>`;
+        }
+    }
+
+    // ── Render ──
+    function renderSettings() {
+        const grid = document.getElementById('settings-grid');
+        const inferenceParams = allParams.filter(p => INFERENCE_PARAMS.includes(p.param_name));
+        const dustParams = allParams.filter(p => DUST_PARAMS.includes(p.param_name));
+
+        grid.innerHTML = `
+            <div class="settings-section section-inference">
+                <div class="settings-section-header">
+                    <div class="icon">⚡</div>
+                    <span>推論設定</span>
+                </div>
+                ${inferenceParams.map(p => paramRow(p)).join('')}
+            </div>
+            <div class="settings-section section-dust">
+                <div class="settings-section-header">
+                    <div class="icon">🧹</div>
+                    <span>灰塵偵測設定</span>
+                </div>
+                ${dustParams.map(p => paramRow(p)).join('')}
+            </div>
+        `;
+    }
+
+    function paramRow(p) {
+        const isDict = p.param_type === 'dict';
+        let displayVal = '';
+        try {
+            const parsed = JSON.parse(p.param_value);
+            if (isDict && typeof parsed === 'object') {
+                const entries = Object.entries(parsed);
+                displayVal = entries.map(([k, v]) => `${k}: ${v}`).join(', ');
+            } else {
+                displayVal = String(parsed);
+            }
+        } catch { displayVal = p.param_value; }
+
+        return `
+            <div class="param-row">
+                <div class="param-info">
+                    <div class="param-name">${p.param_name}</div>
+                    <div class="param-desc">${p.description || ''}</div>
+                </div>
+                <div class="param-value">
+                    <span class="param-value-display ${isDict ? 'is-dict' : ''}"
+                          title="${displayVal}">${displayVal}</span>
+                    <button class="btn-edit" onclick='openEdit(${JSON.stringify(p.param_name)})'>✏️ 修改</button>
+                </div>
+            </div>
+        `;
+    }
+
+    // ── Filter ──
+    function populateFilter() {
+        const sel = document.getElementById('history-filter');
+        const existingNames = new Set(Array.from(sel.options).map(o => o.value));
+        allParams.forEach(p => {
+            if (!existingNames.has(p.param_name)) {
+                const opt = document.createElement('option');
+                opt.value = p.param_name;
+                opt.textContent = p.param_name;
+                sel.appendChild(opt);
+            }
+        });
+    }
+
+    // ── Load History ──
+    async function loadHistory() {
+        const filter = document.getElementById('history-filter').value;
+        try {
+            let url = '/api/settings/history?limit=50';
+            if (filter) url += '&param_name=' + encodeURIComponent(filter);
+            const res = await fetch(url);
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            renderHistory(data.history || []);
+        } catch (e) {
+            document.getElementById('history-list').innerHTML =
+                `<div class="history-empty" style="color:#ef4444;">載入失敗: ${e.message}</div>`;
+        }
+    }
+
+    function renderHistory(list) {
+        const el = document.getElementById('history-list');
+        if (!list.length) {
+            el.innerHTML = '<div class="history-empty">尚無修改紀錄</div>';
+            return;
+        }
+        el.innerHTML = list.map(h => {
+            let oldDisp = h.old_value, newDisp = h.new_value;
+            try { oldDisp = JSON.stringify(JSON.parse(h.old_value)); } catch {}
+            try { newDisp = JSON.stringify(JSON.parse(h.new_value)); } catch {}
+            return `
+                <div class="history-item">
+                    <div class="history-dot"></div>
+                    <div class="history-content">
+                        <div class="history-meta">
+                            <span class="history-time">${h.changed_at}</span>
+                            <span class="history-param">${h.param_name}</span>
+                        </div>
+                        <div class="history-reason">${h.change_reason || '（未填寫原因）'}</div>
+                        <div class="history-diff">
+                            <span class="diff-old" title="${oldDisp}">− ${oldDisp}</span>
+                            <span class="diff-arrow">→</span>
+                            <span class="diff-new" title="${newDisp}">+ ${newDisp}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    // ── Edit Modal ──
+    function openEdit(paramName) {
+        const p = allParams.find(x => x.param_name === paramName);
+        if (!p) return;
+
+        document.getElementById('modal-param-name').value = p.param_name;
+        document.getElementById('modal-title').textContent = `修改 ${p.param_name}`;
+
+        let displayOld = p.param_value;
+        try {
+            displayOld = JSON.stringify(JSON.parse(p.param_value), null, 2);
+        } catch {}
+        document.getElementById('modal-old-value').textContent = displayOld;
+
+        // Pre-fill new value with current
+        let prefill = p.param_value;
+        try {
+            const parsed = JSON.parse(p.param_value);
+            if (typeof parsed === 'object') {
+                prefill = JSON.stringify(parsed, null, 2);
+            } else {
+                prefill = String(parsed);
+            }
+        } catch {}
+        document.getElementById('modal-new-value').value = prefill;
+        document.getElementById('modal-reason').value = '';
+
+        document.getElementById('edit-modal').classList.add('show');
+        setTimeout(() => document.getElementById('modal-reason').focus(), 200);
+    }
+
+    function closeModal() {
+        document.getElementById('edit-modal').classList.remove('show');
+    }
+
+    // ── Save ──
+    async function saveParam() {
+        const paramName = document.getElementById('modal-param-name').value;
+        const newValueRaw = document.getElementById('modal-new-value').value.trim();
+        const reason = document.getElementById('modal-reason').value.trim();
+
+        if (!reason) {
+            showToast('請填寫修改原因', 'error');
+            document.getElementById('modal-reason').focus();
+            return;
+        }
+
+        // Parse value
+        let newValue;
+        try {
+            newValue = JSON.parse(newValueRaw);
+        } catch {
+            // Treat as raw string if not valid JSON
+            newValue = newValueRaw;
+        }
+
+        const btn = document.getElementById('btn-save');
+        btn.disabled = true;
+        btn.textContent = '儲存中...';
+
+        try {
+            const res = await fetch('/api/settings/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ param_name: paramName, new_value: newValue, reason })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+
+            showToast(`✅ ${paramName} 已更新`, 'success');
+            closeModal();
+            loadSettings();
+            loadHistory();
+        } catch (e) {
+            showToast(`❌ ${e.message}`, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '確認修改';
+        }
+    }
+
+    // ── Reload ──
+    async function reloadConfig() {
+        if (!confirm('確定要重新載入設定嗎？\n\n重載期間推論服務會暫時中斷。')) return;
+
+        const btn = document.getElementById('btn-reload');
+        btn.classList.add('loading');
+        btn.disabled = true;
+
+        try {
+            const res = await fetch('/api/settings/reload', { method: 'POST' });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            showToast('✅ ' + data.message, 'success');
+        } catch (e) {
+            showToast('❌ 重載失敗: ' + e.message, 'error');
+        } finally {
+            btn.classList.remove('loading');
+            btn.disabled = false;
+        }
+    }
+
+    // ── Toast ──
+    function showToast(msg, type) {
+        const t = document.getElementById('toast');
+        t.textContent = msg;
+        t.className = 'toast ' + type + ' show';
+        setTimeout(() => t.classList.remove('show'), 3500);
+    }
+
+    // Close modal on Escape
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') closeModal();
+    });
+</script>
+{% endblock %}

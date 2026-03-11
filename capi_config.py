@@ -283,6 +283,34 @@ class CAPIConfig:
         else:
             return {'top': True, 'bottom': True, 'left': True, 'right': True}
     
+    def apply_db_overrides(self, db_params: list) -> None:
+        """
+        將 DB 設定覆蓋至 config 屬性 (DB 優先原則)
+
+        Args:
+            db_params: get_all_config_params() 回傳的列表
+        """
+        param_map = {p["param_name"]: p["decoded_value"] for p in db_params}
+
+        if "anomaly_threshold" in param_map:
+            self.anomaly_threshold = float(param_map["anomaly_threshold"])
+        if "model_mapping" in param_map and isinstance(param_map["model_mapping"], dict):
+            self.model_mapping = param_map["model_mapping"]
+        if "threshold_mapping" in param_map and isinstance(param_map["threshold_mapping"], dict):
+            self.threshold_mapping = {k: float(v) for k, v in param_map["threshold_mapping"].items()}
+        if "dust_brightness_threshold" in param_map:
+            self.dust_brightness_threshold = int(param_map["dust_brightness_threshold"])
+        if "dust_area_min" in param_map:
+            self.dust_area_min = int(param_map["dust_area_min"])
+        if "dust_area_max" in param_map:
+            self.dust_area_max = int(param_map["dust_area_max"])
+        if "dust_extension" in param_map:
+            self.dust_extension = int(param_map["dust_extension"])
+        if "dust_heatmap_iou_threshold" in param_map:
+            self.dust_heatmap_iou_threshold = float(param_map["dust_heatmap_iou_threshold"])
+        if "dust_heatmap_top_percent" in param_map:
+            self.dust_heatmap_top_percent = float(param_map["dust_heatmap_top_percent"])
+
     def get_enabled_exclusion_zones(self) -> List[ExclusionZone]:
         """取得已啟用的排除區域"""
         return [zone for zone in self.exclusion_zones if zone.enabled]

@@ -568,7 +568,21 @@ class CAPIServer:
         logger.info(f"Loading inference config: {config_path}")
         capi_config = CAPIConfig.from_yaml(config_path)
 
-        # model_path 和 threshold 統一由 capi_3f.yaml 管理
+        # DB 設定覆蓋: 首次啟動自動從 YAML 匯入, 後續以 DB 為主
+        try:
+            db_params = self.db.get_all_config_params()
+            if not db_params:
+                # 首次部署: 從 YAML 匯入至 DB
+                count = self.db.init_config_from_yaml(capi_config)
+                logger.info(f"First run: seeded {count} config params from YAML to DB")
+                db_params = self.db.get_all_config_params()
+            if db_params:
+                capi_config.apply_db_overrides(db_params)
+                logger.info(f"Applied {len(db_params)} config overrides from DB")
+        except Exception as e:
+            logger.warning(f"Failed to load DB config, using YAML values: {e}")
+
+        # model_path 和 threshold 統一由 config 管理 (DB 優先, YAML fallback)
         model_path = capi_config.model_path or "./model.pt"
         threshold = capi_config.anomaly_threshold
 
@@ -650,6 +664,7 @@ class CAPIServer:
                     inferencer=self.inferencer,
                     heatmap_manager=self.heatmap_manager,
                     gpu_lock=self._gpu_lock,
+                    capi_server_instance=self,
                 )
                 print(f"[SERVER] Web server: http://{web_host}:{web_port}", flush=True)
                 logger.info(f"Web server: http://{web_host}:{web_port}")
