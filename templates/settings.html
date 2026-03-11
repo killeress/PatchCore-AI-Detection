@@ -207,7 +207,9 @@
     }
 
     @keyframes spin {
-        to { transform: rotate(360deg); }
+        to {
+            transform: rotate(360deg);
+        }
     }
 
     /* Edit Modal */
@@ -603,7 +605,7 @@
 <script>
     // ── State ──
     let allParams = [];
-    const INFERENCE_PARAMS = ['anomaly_threshold', 'model_mapping', 'threshold_mapping'];
+    const INFERENCE_PARAMS = ['threshold_mapping', 'model_mapping', 'anomaly_threshold'];
     const DUST_PARAMS = [
         'dust_brightness_threshold', 'dust_area_min', 'dust_area_max',
         'dust_extension', 'dust_heatmap_iou_threshold', 'dust_heatmap_top_percent'
@@ -631,11 +633,10 @@
         }
     }
 
-    // ── Render ──
     function renderSettings() {
         const grid = document.getElementById('settings-grid');
-        const inferenceParams = allParams.filter(p => INFERENCE_PARAMS.includes(p.param_name));
-        const dustParams = allParams.filter(p => DUST_PARAMS.includes(p.param_name));
+        const inferenceParams = INFERENCE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
+        const dustParams = DUST_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
 
         grid.innerHTML = `
             <div class="settings-section section-inference">
@@ -657,15 +658,42 @@
 
     function paramRow(p) {
         const isDict = p.param_type === 'dict';
+        const isModelMapping = p.param_name === 'model_mapping';
+
+        if (isDict) {
+            try {
+                const parsed = JSON.parse(p.param_value);
+                if (typeof parsed === 'object' && parsed !== null) {
+                    const entries = Object.entries(parsed);
+                    return entries.map(([k, v]) => {
+                        const displayVal = String(v);
+                        const editBtnHtml = isModelMapping
+                            ? `<button class="btn-edit" style="opacity:0.5; cursor:not-allowed;" disabled title="目前暫不開放修改路徑">🔒 唯讀</button>`
+                            : `<button class="btn-edit" onclick='openEdit(${JSON.stringify(p.param_name)}, ${JSON.stringify(k)})'>✏️ 修改</button>`;
+
+                        return `
+                            <div class="param-row">
+                                <div class="param-info">
+                                    <div class="param-name">${p.param_name} <span style="color:#fb923c;">[${k}]</span></div>
+                                    <div class="param-desc">${p.description || ''} (子項目: ${k})</div>
+                                </div>
+                                <div class="param-value">
+                                    <span class="param-value-display" title="${displayVal}">${displayVal}</span>
+                                    ${editBtnHtml}
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                }
+            } catch (e) {
+                console.error("Failed to parse dict param:", p.param_name);
+            }
+        }
+
         let displayVal = '';
         try {
             const parsed = JSON.parse(p.param_value);
-            if (isDict && typeof parsed === 'object') {
-                const entries = Object.entries(parsed);
-                displayVal = entries.map(([k, v]) => `${k}: ${v}`).join(', ');
-            } else {
-                displayVal = String(parsed);
-            }
+            displayVal = String(parsed);
         } catch { displayVal = p.param_value; }
 
         return `
@@ -675,8 +703,7 @@
                     <div class="param-desc">${p.description || ''}</div>
                 </div>
                 <div class="param-value">
-                    <span class="param-value-display ${isDict ? 'is-dict' : ''}"
-                          title="${displayVal}">${displayVal}</span>
+                    <span class="param-value-display" title="${displayVal}">${displayVal}</span>
                     <button class="btn-edit" onclick='openEdit(${JSON.stringify(p.param_name)})'>✏️ 修改</button>
                 </div>
             </div>
@@ -721,8 +748,8 @@
         }
         el.innerHTML = list.map(h => {
             let oldDisp = h.old_value, newDisp = h.new_value;
-            try { oldDisp = JSON.stringify(JSON.parse(h.old_value)); } catch {}
-            try { newDisp = JSON.stringify(JSON.parse(h.new_value)); } catch {}
+            try { oldDisp = JSON.stringify(JSON.parse(h.old_value)); } catch { }
+            try { newDisp = JSON.stringify(JSON.parse(h.new_value)); } catch { }
             return `
                 <div class="history-item">
                     <div class="history-dot"></div>
@@ -744,43 +771,64 @@
     }
 
     // ── Edit Modal ──
-    function openEdit(paramName) {
+    let currentEditDictKey = null;
+
+    function openEdit(paramName, dictKey = null) {
         const p = allParams.find(x => x.param_name === paramName);
         if (!p) return;
 
-        document.getElementById('modal-param-name').value = p.param_name;
-        document.getElementById('modal-title').textContent = `修改 ${p.param_name}`;
+        currentEditDictKey = dictKey;
 
-        let displayOld = p.param_value;
-        try {
-            displayOld = JSON.stringify(JSON.parse(p.param_value), null, 2);
-        } catch {}
-        document.getElementById('modal-old-value').textContent = displayOld;
+        if (dictKey) {
+            document.getElementById('modal-param-name').value = `${p.param_name} [${dictKey}]`;
+            document.getElementById('modal-title').textContent = `修改 ${p.param_name} [${dictKey}]`;
 
-        // Pre-fill new value with current
-        let prefill = p.param_value;
-        try {
-            const parsed = JSON.parse(p.param_value);
-            if (typeof parsed === 'object') {
-                prefill = JSON.stringify(parsed, null, 2);
-            } else {
-                prefill = String(parsed);
-            }
-        } catch {}
-        document.getElementById('modal-new-value').value = prefill;
+            let parsed = {};
+            try { parsed = JSON.parse(p.param_value); } catch { }
+
+            let val = parsed[dictKey];
+            document.getElementById('modal-old-value').textContent = String(val);
+            document.getElementById('modal-new-value').value = String(val);
+        } else {
+            document.getElementById('modal-param-name').value = p.param_name;
+            document.getElementById('modal-title').textContent = `修改 ${p.param_name}`;
+
+            let displayOld = p.param_value;
+            try {
+                displayOld = JSON.stringify(JSON.parse(p.param_value), null, 2);
+            } catch { }
+            document.getElementById('modal-old-value').textContent = displayOld;
+
+            // Pre-fill new value with current
+            let prefill = p.param_value;
+            try {
+                const parsed = JSON.parse(p.param_value);
+                if (typeof parsed === 'object') {
+                    prefill = JSON.stringify(parsed, null, 2);
+                } else {
+                    prefill = String(parsed);
+                }
+            } catch { }
+            document.getElementById('modal-new-value').value = prefill;
+        }
+
         document.getElementById('modal-reason').value = '';
-
         document.getElementById('edit-modal').classList.add('show');
         setTimeout(() => document.getElementById('modal-reason').focus(), 200);
     }
 
     function closeModal() {
         document.getElementById('edit-modal').classList.remove('show');
+        currentEditDictKey = null;
     }
 
     // ── Save ──
     async function saveParam() {
-        const paramName = document.getElementById('modal-param-name').value;
+        let paramName = document.getElementById('modal-param-name').value;
+        if (currentEditDictKey) {
+            paramName = paramName.split(' ')[0]; // 移除 [dictKey] 綴詞取得原本的 param_name
+        }
+
         const newValueRaw = document.getElementById('modal-new-value').value.trim();
         const reason = document.getElementById('modal-reason').value.trim();
 
@@ -790,13 +838,23 @@
             return;
         }
 
-        // Parse value
-        let newValue;
-        try {
-            newValue = JSON.parse(newValueRaw);
-        } catch {
-            // Treat as raw string if not valid JSON
-            newValue = newValueRaw;
+        let payloadValue;
+
+        if (currentEditDictKey) {
+            const p = allParams.find(x => x.param_name === paramName);
+            let parsed = {};
+            try { parsed = JSON.parse(p.param_value); } catch { }
+
+            let innerValue;
+            try { innerValue = JSON.parse(newValueRaw); } catch { innerValue = newValueRaw; }
+            parsed[currentEditDictKey] = innerValue;
+            payloadValue = parsed;
+        } else {
+            try {
+                payloadValue = JSON.parse(newValueRaw);
+            } catch {
+                payloadValue = newValueRaw;
+            }
         }
 
         const btn = document.getElementById('btn-save');
@@ -807,7 +865,7 @@
             const res = await fetch('/api/settings/update', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ param_name: paramName, new_value: newValue, reason })
+                body: JSON.stringify({ param_name: paramName, new_value: payloadValue, reason })
             });
             const data = await res.json();
             if (data.error) throw new Error(data.error);

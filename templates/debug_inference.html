@@ -457,130 +457,229 @@
         gap: 12px;
         margin-top: 16px;
     }
+
+    /* Tabs */
+    .tabs-nav {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 24px;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 2px;
+    }
+
+    .tab-btn {
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        padding: 12px 20px;
+        font-family: 'Fira Code', monospace;
+        font-size: 1rem;
+        font-weight: 600;
+        cursor: pointer;
+        border-bottom: 3px solid transparent;
+        transition: all 0.2s;
+        border-radius: 8px 8px 0 0;
+    }
+
+    .tab-btn:hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.05);
+    }
+
+    .tab-btn.active {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+        background: rgba(59, 130, 246, 0.1);
+    }
+
+    .tab-content {
+        display: none;
+        animation: fadeIn 0.3s ease-out;
+    }
+
+    .tab-content.active {
+        display: block;
+    }
+
+    @keyframes fadeIn {
+        from {
+            opacity: 0;
+            transform: translateY(5px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="debug-container">
-    <!-- Header -->
-    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
-        <div>
-            <h2
-                style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
-                🔧 Debug 單圖推論
-                <span class="debug-badge">DEBUG ONLY</span>
-            </h2>
-            <p style="color:var(--text-muted); font-size:0.9rem; margin-top:4px;">
-                輸入圖片絕對路徑，對單張圖片執行 AI 推論，即時查看熱力圖結果
-            </p>
+    <!-- Tabs Navigation -->
+    <div class="tabs-nav">
+        <button class="tab-btn active" onclick="switchTab('tab-single', this)">📸 單圖推論</button>
+        <button class="tab-btn" onclick="switchTab('tab-coord', this)">📍 座標推論</button>
+        <button class="tab-btn" onclick="switchTab('tab-edge', this)">📐 邊緣檢測 (測試)</button>
+    </div>
+
+    <!-- ═══ 單圖推論頁籤 ═══ -->
+    <div id="tab-single" class="tab-content active">
+        <!-- Header -->
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+            <div>
+                <h2
+                    style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
+                    🔧 Debug 單圖推論
+                    <span class="debug-badge">DEBUG ONLY</span>
+                </h2>
+                <p style="color:var(--text-muted); font-size:0.9rem; margin-top:4px;">
+                    輸入圖片絕對路徑，對單張圖片執行 AI 推論，即時查看熱力圖結果
+                </p>
+            </div>
+        </div>
+
+        <!-- Input -->
+        <div class="card" style="padding:20px;">
+            <div class="input-section">
+                <input type="text" id="image-path-input" placeholder="輸入圖片絕對路徑，例如: /data/images/G0F00000_143133.tif"
+                    autocomplete="off" spellcheck="false">
+                <div class="threshold-group">
+                    <label for="threshold-input">判定門檻</label>
+                    <input type="number" id="threshold-input" value="{{ default_threshold }}" min="0" max="1"
+                        step="0.01">
+                </div>
+                <div class="toggle-group">
+                    <label for="edge-margin-input">邊緣衰減 (px)</label>
+                    <input type="number" id="edge-margin-input" value="{{ default_edge_margin }}" min="0" max="512"
+                        step="16">
+                </div>
+                <button class="btn-run" id="btn-run" onclick="runInference()">
+                    <span class="spinner" id="spinner"></span>
+                    <span id="btn-text">▶ 推論</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Error -->
+        <div id="error-box" class="error-box hidden"></div>
+
+        <!-- Result Summary -->
+        <div id="result-section" class="hidden">
+            <div class="result-summary" id="result-summary"></div>
+
+            <!-- Overview -->
+            <div class="overview-section" id="overview-section">
+                <h3>📊 Overview 全圖標記</h3>
+                <div class="overview-img-wrapper">
+                    <img id="overview-img" src="" alt="Overview" onclick="openLightbox(this.src)">
+                </div>
+            </div>
+
+            <!-- Anomaly Tiles -->
+            <div class="tiles-section" id="tiles-section">
+                <h3 id="tiles-header">🔍 異常 Tiles</h3>
+                <div class="tiles-grid" id="tiles-grid"></div>
+            </div>
+
+            <!-- OK message -->
+            <div id="ok-message" class="ok-message hidden">
+                ✅ 此圖片未偵測到異常，判定為 OK
+            </div>
         </div>
     </div>
 
-    <!-- Input -->
-    <div class="card" style="padding:20px;">
-        <div class="input-section">
-            <input type="text" id="image-path-input" placeholder="輸入圖片絕對路徑，例如: /data/images/G0F00000_143133.tif"
-                autocomplete="off" spellcheck="false">
-            <div class="threshold-group">
-                <label for="threshold-input">判定門檻</label>
-                <input type="number" id="threshold-input" value="{{ default_threshold }}" min="0" max="1" step="0.01">
+    <!-- ═══ 座標推論頁籤 ═══ -->
+    <div id="tab-coord" class="tab-content">
+        <!-- Header -->
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+            <div>
+                <h2
+                    style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
+                    📍 座標推論
+                </h2>
+                <p style="color:var(--text-muted); font-size:0.85rem; margin-top:4px;">
+                    輸入產品座標，以該點為中心裁切 512×512 區塊做推論（用於排查閥值未檢出的真實 Defect）
+                </p>
             </div>
-            <div class="toggle-group">
-                <label for="edge-margin-input">邊緣衰減 (px)</label>
-                <input type="number" id="edge-margin-input" value="{{ default_edge_margin }}" min="0" max="512"
-                    step="16">
+        </div>
+
+        <div class="card" style="padding:20px;">
+            <div class="coord-input-row">
+                <input type="text" id="coord-image-path" placeholder="圖片絕對路徑" autocomplete="off" spellcheck="false"
+                    style="flex:1; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.95rem; outline:none;">
+                <div class="coord-group">
+                    <label for="coord-x">Product X</label>
+                    <input type="number" id="coord-x" value="960" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="coord-y">Product Y</label>
+                    <input type="number" id="coord-y" value="540" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="coord-resolution">產品解析度</label>
+                    <select id="coord-resolution">
+                        {% for code, res in model_resolution_map.items() %}
+                        <option value="{{ res[0] }},{{ res[1] }}" {% if res[0]==1920 and res[1]==1080 %} selected{%
+                            endif %}>
+                            {{ code }}: {{ res[0] }}×{{ res[1] }}
+                        </option>
+                        {% endfor %}
+                        {% if not model_resolution_map %}
+                        <option value="1920,1080" selected>1920×1080</option>
+                        {% endif %}
+                    </select>
+                </div>
+                <div class="coord-group">
+                    <label for="coord-threshold">門檻</label>
+                    <input type="number" id="coord-threshold" value="{{ default_threshold }}" min="0" max="1"
+                        step="0.01" style="color:var(--err);">
+                </div>
+                <div class="coord-group">
+                    <label for="coord-edge-margin">邊緣衰減</label>
+                    <input type="number" id="coord-edge-margin" value="{{ default_edge_margin }}" min="0" max="512"
+                        step="16" style="color:var(--err);">
+                </div>
+                <button class="btn-run" id="btn-coord-run" onclick="runCoordInference()"
+                    style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);">
+                    <span class="spinner" id="coord-spinner"></span>
+                    <span id="coord-btn-text">📍 座標推論</span>
+                </button>
             </div>
-            <button class="btn-run" id="btn-run" onclick="runInference()">
-                <span class="spinner" id="spinner"></span>
-                <span id="btn-text">▶ 推論</span>
-            </button>
+        </div>
+
+        <!-- Coord Error -->
+        <div id="coord-error-box" class="error-box hidden"></div>
+
+        <!-- Coord Result -->
+        <div id="coord-result-section" class="hidden">
+            <div class="coord-info-cards" id="coord-info-cards"></div>
+            <div class="coord-result-grid" id="coord-result-grid"></div>
         </div>
     </div>
 
-    <!-- Error -->
-    <div id="error-box" class="error-box hidden"></div>
-
-    <!-- Result Summary -->
-    <div id="result-section" class="hidden">
-        <div class="result-summary" id="result-summary"></div>
-
-        <!-- Overview -->
-        <div class="overview-section" id="overview-section">
-            <h3>📊 Overview 全圖標記</h3>
-            <div class="overview-img-wrapper">
-                <img id="overview-img" src="" alt="Overview" onclick="openLightbox(this.src)">
+    <!-- ═══ 邊緣檢測頁籤 (測試) ═══ -->
+    <div id="tab-edge" class="tab-content">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+            <div>
+                <h2
+                    style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
+                    📐 邊緣檢測 (測試)
+                    <span class="debug-badge"
+                        style="background:rgba(59,130,246,0.12); border-color:rgba(59,130,246,0.3); color:var(--accent);">WIP</span>
+                </h2>
+                <p style="color:var(--text-muted); font-size:0.9rem; margin-top:4px;">
+                    這項功能目前正在開發中，將提供基於電腦視覺 (CV) 的邊緣瑕疵檢測測試工具。
+                </p>
             </div>
         </div>
 
-        <!-- Anomaly Tiles -->
-        <div class="tiles-section" id="tiles-section">
-            <h3 id="tiles-header">🔍 異常 Tiles</h3>
-            <div class="tiles-grid" id="tiles-grid"></div>
+        <div class="card" style="padding:40px 20px; text-align:center;">
+            <div style="font-size:3rem; margin-bottom:16px;">🚧</div>
+            <h3 style="color:var(--text); margin-bottom:8px;">功能開發中</h3>
+            <p style="color:var(--text-muted);">邊緣檢測測試介面即將推出，敬請期待。</p>
         </div>
-
-        <!-- OK message -->
-        <div id="ok-message" class="ok-message hidden">
-            ✅ 此圖片未偵測到異常，判定為 OK
-        </div>
-    </div>
-
-    <!-- ═══ 座標推論區塊 ═══ -->
-    <div class="section-divider">📍 座標推論</div>
-
-    <div class="card" style="padding:20px;">
-        <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:14px;">
-            輸入產品座標，以該點為中心裁切 512×512 區塊做推論（用於排查閥值未檢出的真實 Defect）
-        </p>
-        <div class="coord-input-row">
-            <input type="text" id="coord-image-path" placeholder="圖片絕對路徑" autocomplete="off" spellcheck="false"
-                style="flex:1; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.95rem; outline:none;">
-            <div class="coord-group">
-                <label for="coord-x">Product X</label>
-                <input type="number" id="coord-x" value="960" min="0" step="1">
-            </div>
-            <div class="coord-group">
-                <label for="coord-y">Product Y</label>
-                <input type="number" id="coord-y" value="540" min="0" step="1">
-            </div>
-            <div class="coord-group">
-                <label for="coord-resolution">產品解析度</label>
-                <select id="coord-resolution">
-                    {% for code, res in model_resolution_map.items() %}
-                    <option value="{{ res[0] }},{{ res[1] }}" {% if res[0]==1920 and res[1]==1080 %} selected{% endif
-                        %}>
-                        {{ code }}: {{ res[0] }}×{{ res[1] }}
-                    </option>
-                    {% endfor %}
-                    {% if not model_resolution_map %}
-                    <option value="1920,1080" selected>1920×1080</option>
-                    {% endif %}
-                </select>
-            </div>
-            <div class="coord-group">
-                <label for="coord-threshold">門檻</label>
-                <input type="number" id="coord-threshold" value="{{ default_threshold }}" min="0" max="1" step="0.01"
-                    style="color:var(--err);">
-            </div>
-            <div class="coord-group">
-                <label for="coord-edge-margin">邊緣衰減</label>
-                <input type="number" id="coord-edge-margin" value="{{ default_edge_margin }}" min="0" max="512"
-                    step="16" style="color:var(--err);">
-            </div>
-            <button class="btn-run" id="btn-coord-run" onclick="runCoordInference()"
-                style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);">
-                <span class="spinner" id="coord-spinner"></span>
-                <span id="coord-btn-text">📍 座標推論</span>
-            </button>
-        </div>
-    </div>
-
-    <!-- Coord Error -->
-    <div id="coord-error-box" class="error-box hidden"></div>
-
-    <!-- Coord Result -->
-    <div id="coord-result-section" class="hidden">
-        <div class="coord-info-cards" id="coord-info-cards"></div>
-        <div class="coord-result-grid" id="coord-result-grid"></div>
     </div>
 
 </div>
@@ -588,6 +687,23 @@
 
 {% block extra_js %}
 <script>
+    // Tab switching logic
+    function switchTab(tabId, btn) {
+        // Hide all tab contents
+        document.querySelectorAll('.tab-content').forEach(el => {
+            el.classList.remove('active');
+        });
+
+        // Remove active class from all buttons
+        document.querySelectorAll('.tab-btn').forEach(el => {
+            el.classList.remove('active');
+        });
+
+        // Show target tab and activate button
+        document.getElementById(tabId).classList.add('active');
+        btn.classList.add('active');
+    }
+
     const input = document.getElementById('image-path-input');
     const btn = document.getElementById('btn-run');
     const btnText = document.getElementById('btn-text');
