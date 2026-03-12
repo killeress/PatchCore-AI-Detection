@@ -190,7 +190,7 @@ class HeatmapManager:
 
         # --- 底部獨立標籤列（不蓋到面板內容）---
         if has_omit:
-            labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask (IOU:{dust_iou:.3f})", "IOU Debug (G=Overlap R=Heat B=Dust)"]
+            labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask ({metric_name}:{dust_iou:.3f})", f"{metric_name} Debug (G=Overlap R=Heat B=Dust)"]
             panels = [orig, heatmap_panel, omit_panel, dust_panel, iou_debug_panel]
         else:
             labels = ["Original", "Heatmap"]
@@ -231,9 +231,8 @@ class HeatmapManager:
 
         if dust_detail:
             detail_line = str(dust_detail)[:120].replace('\u2192', '->').replace('\u2190', '<-')
-            # 取代舊的字串格式
-            detail_line = detail_line.replace('>=IOU_THR', f'>={iou_threshold:.3f}')
-            detail_line = detail_line.replace('<IOU_THR', f'<{iou_threshold:.3f}')
+            detail_line = detail_line.replace(f'>={metric_name}_THR', f'>={iou_threshold:.3f}')
+            detail_line = detail_line.replace(f'<{metric_name}_THR', f'<{iou_threshold:.3f}')
         else:
             detail_line = f"Tile#{tile_id} | {image_name}"
         cv2.putText(header, detail_line, (10, 50),

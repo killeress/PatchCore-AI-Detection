@@ -1344,21 +1344,24 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         tile_info.dust_mask = dust_mask
                         tile_info.dust_bright_ratio = bright_ratio
                         
-                        # Step B: 計算 IOU
+                        # Step B: 計算重疊指標 (Coverage 或 IOU)
                         iou = 0.0
                         heatmap_binary = None
                         top_pct = self.inferencer.config.dust_heatmap_top_percent
+                        metric_mode = self.inferencer.config.dust_heatmap_metric
+                        metric_name = "COV" if metric_mode == "coverage" else "IOU"
+                        
                         if is_dust and anomaly_map is not None:
                             iou, heatmap_binary = self.inferencer.compute_dust_heatmap_iou(
-                                dust_mask, anomaly_map, top_percent=top_pct
+                                dust_mask, anomaly_map, top_percent=top_pct, metric=metric_mode
                             )
                             tile_info.dust_heatmap_iou = iou
                             if iou >= self.inferencer.config.dust_heatmap_iou_threshold:
                                 tile_info.is_suspected_dust_or_scratch = True
-                                detail_text += f" IOU:{iou:.3f}>=IOU_THR -> DUST"
+                                detail_text += f" {metric_name}:{iou:.3f}>={metric_name}_THR -> DUST"
                             else:
                                 tile_info.is_suspected_dust_or_scratch = False
-                                detail_text += f" IOU:{iou:.3f}<IOU_THR -> REAL_NG"
+                                detail_text += f" {metric_name}:{iou:.3f}<{metric_name}_THR -> REAL_NG"
                             
                             # 產生 Debug 可視化圖
                             try:

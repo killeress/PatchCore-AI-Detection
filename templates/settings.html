@@ -586,8 +586,26 @@
             <label>修改前的值</label>
             <div class="old-value" id="modal-old-value"></div>
 
-            <label>新的值 <span style="color:var(--text-muted); font-weight:normal;">(JSON 格式，數值直接輸入)</span></label>
+            <label id="modal-new-value-label">新的值 <span style="color:var(--text-muted); font-weight:normal;">(JSON
+                    格式，數值直接輸入)</span></label>
             <input type="text" id="modal-new-value" placeholder="輸入新值...">
+            <div id="modal-metric-help"
+                style="display:none; background: rgba(30, 41, 59, 0.5); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 16px; font-size: 0.82rem; line-height: 1.5;">
+                <div style="color: #60a5fa; font-weight: 600; margin-bottom: 6px;">💡 指標差異說明：</div>
+                <div style="margin-bottom: 8px;">
+                    <b style="color: #fb923c;">• Coverage (預設):</b> <code>交集 / 灰塵面積</code><br>
+                    <span style="color: var(--text-muted);">只需判斷熱區是否蓋住灰塵，不受熱區面積過大影響。推薦用於灰塵情境。</span>
+                </div>
+                <div>
+                    <b style="color: #fb923c;">• IoU:</b> <code>交集 / (灰塵 + 熱區)</code><br>
+                    <span style="color: var(--text-muted);">標準重疊指標。若熱區範圍過大，分數會被稀釋變低，可能導致漏檢。</span>
+                </div>
+            </div>
+            <select id="modal-new-value-select"
+                style="display:none; width: 100%; background: #0f172a; border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-family: 'Fira Code', monospace; font-size: 0.88rem; margin-bottom: 16px; outline: none;">
+                <option value="coverage">coverage (覆蓋率 - 推薦)</option>
+                <option value="iou">iou (正式 IOU)</option>
+            </select>
 
             <label>修改原因 <span style="color:#ef4444;">*必填</span></label>
             <textarea id="modal-reason" placeholder="請說明修改原因，例如：調整閾值以降低過檢率..."></textarea>
@@ -608,7 +626,8 @@
     const INFERENCE_PARAMS = ['threshold_mapping', 'model_mapping', 'anomaly_threshold'];
     const DUST_PARAMS = [
         'dust_brightness_threshold', 'dust_area_min', 'dust_area_max',
-        'dust_extension', 'dust_heatmap_iou_threshold', 'dust_heatmap_top_percent'
+        'dust_extension', 'dust_heatmap_iou_threshold', 'dust_heatmap_top_percent',
+        'dust_heatmap_metric'
     ];
 
     // ── Init ──
@@ -809,7 +828,25 @@
                     prefill = String(parsed);
                 }
             } catch { }
-            document.getElementById('modal-new-value').value = prefill;
+
+            const inputEl = document.getElementById('modal-new-value');
+            const selectEl = document.getElementById('modal-new-value-select');
+            const labelEl = document.getElementById('modal-new-value-label');
+            const helpEl = document.getElementById('modal-metric-help');
+
+            if (paramName === 'dust_heatmap_metric') {
+                inputEl.style.display = 'none';
+                selectEl.style.display = 'block';
+                helpEl.style.display = 'block';
+                labelEl.innerHTML = '判定指標選擇';
+                selectEl.value = prefill.replace(/"/g, ''); // 移除可能的引號
+            } else {
+                inputEl.style.display = 'block';
+                selectEl.style.display = 'none';
+                helpEl.style.display = 'none';
+                labelEl.innerHTML = '新的值 <span style="color:var(--text-muted); font-weight:normal;">(JSON 格式，數值直接輸入)</span>';
+                inputEl.value = prefill;
+            }
         }
 
         document.getElementById('modal-reason').value = '';
@@ -829,7 +866,16 @@
             paramName = paramName.split(' ')[0]; // 移除 [dictKey] 綴詞取得原本的 param_name
         }
 
-        const newValueRaw = document.getElementById('modal-new-value').value.trim();
+        const inputEl = document.getElementById('modal-new-value');
+        const selectEl = document.getElementById('modal-new-value-select');
+
+        let newValueRaw = "";
+        if (selectEl.style.display === 'block') {
+            newValueRaw = JSON.stringify(selectEl.value);
+        } else {
+            newValueRaw = inputEl.value.trim();
+        }
+
         const reason = document.getElementById('modal-reason').value.trim();
 
         if (!reason) {

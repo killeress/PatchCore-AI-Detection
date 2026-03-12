@@ -118,8 +118,9 @@ class CAPIConfig:
     dust_area_min: int = 10                   # 灰塵顆粒最小面積 (px)
     dust_area_max: int = 50000                # 灰塵顆粒最大面積 (px)
     dust_extension: int = 5                   # 灰塵區域膨脹像素
-    dust_heatmap_iou_threshold: float = 0.02  # Heatmap-Dust IOU 閾值
+    dust_heatmap_iou_threshold: float = 0.02  # Heatmap-Dust IOU/Coverage 閾值
     dust_heatmap_top_percent: float = 5.0     # Heatmap 熱區取前 X% (Percentile 二值化)
+    dust_heatmap_metric: str = "coverage"     # Heatmap 判定指標: "coverage" (灰塵覆蓋率) 或是 "iou" (交集/聯集)
     
     # OMIT 過曝偵測設定 (曝光過高的 OMIT 圖無法檢測灰塵，需記錄供工程追蹤)
     omit_overexposure_mean_threshold: int = 200    # 平均亮度超過此值視為過曝
@@ -195,6 +196,7 @@ class CAPIConfig:
             dust_extension=data.get("dust_extension", 5),
             dust_heatmap_iou_threshold=data.get("dust_heatmap_iou_threshold", 0.02),
             dust_heatmap_top_percent=data.get("dust_heatmap_top_percent", 5.0),
+            dust_heatmap_metric=data.get("dust_heatmap_metric", "coverage"),
             omit_overexposure_mean_threshold=data.get("omit_overexposure_mean_threshold", 200),
             omit_overexposure_ratio_threshold=data.get("omit_overexposure_ratio_threshold", 0.5),
             edge_margin_px=data.get("edge_margin_px", 80),
@@ -237,6 +239,7 @@ class CAPIConfig:
             "dust_extension": self.dust_extension,
             "dust_heatmap_iou_threshold": self.dust_heatmap_iou_threshold,
             "dust_heatmap_top_percent": self.dust_heatmap_top_percent,
+            "dust_heatmap_metric": self.dust_heatmap_metric,
             "omit_overexposure_mean_threshold": self.omit_overexposure_mean_threshold,
             "omit_overexposure_ratio_threshold": self.omit_overexposure_ratio_threshold,
             "edge_margin_px": self.edge_margin_px,
@@ -310,6 +313,8 @@ class CAPIConfig:
             self.dust_heatmap_iou_threshold = float(param_map["dust_heatmap_iou_threshold"])
         if "dust_heatmap_top_percent" in param_map:
             self.dust_heatmap_top_percent = float(param_map["dust_heatmap_top_percent"])
+        if "dust_heatmap_metric" in param_map:
+            self.dust_heatmap_metric = str(param_map["dust_heatmap_metric"]).lower()
 
     def get_enabled_exclusion_zones(self) -> List[ExclusionZone]:
         """取得已啟用的排除區域"""

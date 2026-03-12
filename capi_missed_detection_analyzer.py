@@ -666,7 +666,9 @@ def analyze_panel(
                     # 替換可能殘留的 Unicode 字元
                     detail_line = tile.dust_detail_text[:120].replace('\u2192', '->').replace('\u2190', '<-')
                 else:
-                    detail_line = f"Tile@({tile.x},{tile.y}) BrightRatio:{tile.dust_bright_ratio:.3f} IOU:{tile.dust_heatmap_iou:.3f}"
+                    metric_mode = getattr(self.config, 'dust_heatmap_metric', 'coverage')
+                    metric_name = "COV" if metric_mode == "coverage" else "IOU"
+                    detail_line = f"Tile@({tile.x},{tile.y}) BrightRatio:{tile.dust_bright_ratio:.3f} {metric_name}:{tile.dust_heatmap_iou:.3f}"
                 cv2.putText(header, detail_line, (10, 50),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
 

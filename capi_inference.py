@@ -1116,9 +1116,13 @@ class CAPIInferencer:
     
     def compute_dust_heatmap_iou(self, dust_mask: np.ndarray, 
                                   anomaly_map: np.ndarray,
-                                  top_percent: float = 5.0) -> tuple:
+                                  top_percent: float = 5.0,
+                                  metric: str = "coverage") -> tuple:
         """
-        計算灰塵遮罩與 Heatmap「最紅區域」的 IOU (Intersection over Union)
+        計算灰塵遮罩與 Heatmap「最紅區域」的重疊指標 (Coverage 或 IOU)
+        
+        Coverage = 交集 / 灰塵面積 (適合熱區遠大於灰塵的場景)
+        IOU = 交集 / (灰塵面積 + 熱區面積 - 交集)
         
         使用 Percentile 方式：取 anomaly_map 中數值最高的前 X% 像素作為熱區，
         比舊的 max*ratio 更穩定、不受單一極端值影響。
@@ -1127,9 +1131,10 @@ class CAPIInferencer:
             dust_mask: 灰塵遮罩 (uint8, 255=灰塵)
             anomaly_map: Heatmap 異常圖 (float, 可含負值)
             top_percent: 取最高的前百分之幾作為「最紅區域」(建議 3~8)
+            metric: "coverage" 或 "iou"
             
         Returns:
-            (iou, heatmap_binary) - IOU 值 (0.0~1.0), 二值化後的熱區遮罩
+            (metric_value, heatmap_binary) - 指標值 (0.0~1.0), 二值化後的熱區遮罩
         """
         if dust_mask is None or anomaly_map is None:
             return 0.0, None
@@ -1167,12 +1172,16 @@ class CAPIInferencer:
         
         dust_bool = dust_resized > 0
         
-        # IOU 計算
         intersection = np.count_nonzero(dust_bool & heat_bool)
-        union = np.count_nonzero(dust_bool | heat_bool)
         
-        iou = float(intersection / union) if union > 0 else 0.0
-        return iou, heatmap_binary
+        if metric == "coverage":
+            dust_area = np.count_nonzero(dust_bool)
+            metric_val = float(intersection / dust_area) if dust_area > 0 else 0.0
+        else:
+            union = np.count_nonzero(dust_bool | heat_bool)
+            metric_val = float(intersection / union) if union > 0 else 0.0
+            
+        return metric_val, heatmap_binary
     
     def generate_dust_iou_debug_image(
         self,
@@ -1263,9 +1272,10 @@ class CAPIInferencer:
             panel_br[dust_only] = (255, 100, 0)   # 藍色 = 僅灰塵
             panel_br[overlap]   = (0, 255, 0)     # 綠色 = 交集
         
+        metric_name = "COV" if self.config.dust_heatmap_metric == "coverage" else "IOU"
         verdict_color = (0, 200, 255) if is_dust else (0, 0, 255)
         verdict_text = "DUST" if is_dust else "REAL_NG"
-        cv2.putText(panel_br, f"IOU:{iou:.3f} {verdict_text}", (5, 20),
+        cv2.putText(panel_br, f"{metric_name}:{iou:.3f} {verdict_text}", (5, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, verdict_color, 1)
         # 圖例已移至外層標籤列
         
@@ -1819,22 +1829,25 @@ class CAPIInferencer:
                         tile.dust_mask = dust_mask
                         tile.dust_bright_ratio = bright_ratio
                         
-                        # Step B: Heatmap IOU 交叉驗證 (Percentile-based)
+                        # Step B: Heatmap 灰塵指標交叉驗證 (Percentile-based)
                         iou = 0.0
                         heatmap_binary = None
                         top_pct = self.config.dust_heatmap_top_percent
+                        metric_mode = self.config.dust_heatmap_metric
+                        metric_name = "COV" if metric_mode == "coverage" else "IOU"
+                        
                         if is_dust and anomaly_map is not None:
                             iou, heatmap_binary = self.compute_dust_heatmap_iou(
-                                dust_mask, anomaly_map, top_percent=top_pct
+                                dust_mask, anomaly_map, top_percent=top_pct, metric=metric_mode
                             )
                             tile.dust_heatmap_iou = iou
                             
-                            # 判定：灰塵偵測到 且 IOU > 閾值 → 灰塵造成的偽陽性
+                            # 判定：灰塵偵測到 且 指標 > 閾值 → 灰塵造成的偽陽性
                             if iou >= self.config.dust_heatmap_iou_threshold:
                                 tile.is_suspected_dust_or_scratch = True
-                                detail_text += f" IOU:{iou:.3f}>=IOU_THR -> DUST"
+                                detail_text += f" {metric_name}:{iou:.3f}>={metric_name}_THR -> DUST"
                             else:
-                                detail_text += f" IOU:{iou:.3f}<IOU_THR -> REAL_NG"
+                                detail_text += f" {metric_name}:{iou:.3f}<{metric_name}_THR -> REAL_NG"
                             
                             # 產生 Debug 可視化圖
                             try:
@@ -1885,12 +1898,13 @@ class CAPIInferencer:
                             x2 = min(tx + tw, ow)
                             y2 = min(ty + th, oh)
                             iou = tile.dust_heatmap_iou
+                            metric_name = "COV" if self.config.dust_heatmap_metric == "coverage" else "IOU"
                             if tile.is_suspected_dust_or_scratch:
                                 box_color = (0, 165, 255)
-                                label = f"DUST IOU:{iou:.2f}"
+                                label = f"DUST {metric_name}:{iou:.2f}"
                             else:
                                 box_color = (0, 0, 255)
-                                label = f"REAL_NG IOU:{iou:.2f}"
+                                label = f"REAL_NG {metric_name}:{iou:.2f}"
                             cv2.rectangle(omit_vis, (tx, ty), (x2, y2), box_color, 5)
                             cv2.putText(omit_vis, f"{result.image_path.name}", (tx, ty - 50), cv2.FONT_HERSHEY_SIMPLEX, 2.0, box_color, 4)
                             cv2.putText(omit_vis, label, (tx, ty - 10), cv2.FONT_HERSHEY_SIMPLEX, 2.0, box_color, 4)
@@ -2031,10 +2045,12 @@ class CAPIInferencer:
             # 如果是疑似灰塵/刮痕，改為橘色
             elif tile.is_suspected_dust_or_scratch:
                 color = (0, 165, 255)  # 橘色 (BGR: 0, 165, 255)
-                label = f"{score:.2f} DUST(IOU:{tile.dust_heatmap_iou:.2f})"
+                metric_name = "COV" if self.config.dust_heatmap_metric == "coverage" else "IOU"
+                label = f"{score:.2f} DUST({metric_name}:{tile.dust_heatmap_iou:.2f})"
             elif tile.dust_heatmap_iou > 0:
-                # 有 OMIT 分析結果但非灰塵，顯示 IOU
-                label = f"{score:.2f} NG(IOU:{tile.dust_heatmap_iou:.2f})"
+                # 有 OMIT 分析結果但非灰塵，顯示 IOU 或 COV
+                metric_name = "COV" if self.config.dust_heatmap_metric == "coverage" else "IOU"
+                label = f"{score:.2f} NG({metric_name}:{tile.dust_heatmap_iou:.2f})"
             
             # 座標邊界檢查
             h, w = vis.shape[:2]

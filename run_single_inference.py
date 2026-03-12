@@ -100,22 +100,24 @@ def generate_tile_combined_image(
     if omit_crop is not None:
         is_dust, dust_mask, bright_ratio, detail_text = inferencer.check_dust_or_scratch_feature(omit_crop)
         
-        # heatmap IOU cross-validation
+        # heatmap coverage/iou cross-validation
         top_pct = inferencer.config.dust_heatmap_top_percent
+        metric_mode = inferencer.config.dust_heatmap_metric
+        metric_name = "COV" if metric_mode == "coverage" else "IOU"
         heatmap_binary = None
 
         if is_dust and anomaly_map is not None:
             iou, heatmap_binary = inferencer.compute_dust_heatmap_iou(
-                dust_mask, anomaly_map, top_percent=top_pct
+                dust_mask, anomaly_map, top_percent=top_pct, metric=metric_mode
             )
             tile.dust_heatmap_iou = iou
             
             if iou >= inferencer.config.dust_heatmap_iou_threshold:
                 is_dust_final = True
                 tile.is_suspected_dust_or_scratch = True
-                detail_text += f" IOU:{iou:.3f}>=IOU_THR -> DUST"
+                detail_text += f" {metric_name}:{iou:.3f}>={metric_name}_THR -> DUST"
             else:
-                detail_text += f" IOU:{iou:.3f}<IOU_THR -> REAL_NG"
+                detail_text += f" {metric_name}:{iou:.3f}<{metric_name}_THR -> REAL_NG"
             
             try:
                 dust_iou_debug = inferencer.generate_dust_iou_debug_image(
@@ -165,7 +167,7 @@ def generate_tile_combined_image(
     # --- 底部獨立標籤列（不蓋到面板內容）---
     label_h = 40
     label_bar = np.zeros((label_h, comp_w, 3), dtype=np.uint8)
-    labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask (IOU:{iou:.3f})", "IOU Debug (G=Overlap R=Heat B=Dust)"]
+    labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask ({metric_name}:{iou:.3f})", f"{metric_name} Debug (G=Overlap R=Heat B=Dust)"]
     for i, lbl in enumerate(labels):
         lx = i * tile_size + 10
         cv2.putText(label_bar, lbl, (lx, 28),
@@ -197,8 +199,8 @@ def generate_tile_combined_image(
 
     if detail_text:
         detail_line = detail_text[:120].replace('\u2192', '->').replace('\u2190', '<-')
-        detail_line = detail_line.replace('>=IOU_THR', f'>={iou_threshold:.3f}')
-        detail_line = detail_line.replace('<IOU_THR', f'<{iou_threshold:.3f}')
+        detail_line = detail_line.replace(f'>={metric_name}_THR', f'>={iou_threshold:.3f}')
+        detail_line = detail_line.replace(f'<{metric_name}_THR', f'<{iou_threshold:.3f}')
     else:
         detail_line = f"Tile#{tile_index} | Unknown"
         
