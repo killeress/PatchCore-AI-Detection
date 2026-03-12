@@ -188,6 +188,11 @@ class HeatmapManager:
             dust_detail = ''
             dust_iou = 0.0
 
+        # --- 決定 Metric Name ---
+        metric_name = "COV"
+        if dust_detail and "IOU:" in dust_detail:
+            metric_name = "IOU"
+
         # --- 底部獨立標籤列（不蓋到面板內容）---
         if has_omit:
             labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask ({metric_name}:{dust_iou:.3f})", f"{metric_name} Debug (G=Overlap R=Heat B=Dust)"]
