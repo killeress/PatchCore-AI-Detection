@@ -552,7 +552,8 @@
                     style="flex: 1; font-size: 1rem; padding: 14px 18px; background: rgba(0,0,0,0.3); border-color: rgba(59, 130, 246, 0.3);">
             </div>
 
-            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; margin-bottom: 24px;">
+            <div
+                style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px; margin-bottom: 24px;">
                 <!-- Group 1: 基礎推論設定 -->
                 <div
                     style="background: rgba(59, 130, 246, 0.03); border: 1px solid rgba(59, 130, 246, 0.15); border-radius: 12px; padding: 18px;">
@@ -606,6 +607,68 @@
                             <label for="dust-top-pct-input">Heatmap 熱區取前 X%</label>
                             <input type="number" id="dust-top-pct-input" placeholder="預設 ({{ default_dust_top_pct }})"
                                 value="{{ default_dust_top_pct }}" min="0.1" max="100" step="0.1">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Group 3: PatchCore 前處理過濾 -->
+                <div
+                    style="background: rgba(139, 92, 246, 0.03); border: 1px solid rgba(139, 92, 246, 0.15); border-radius: 12px; padding: 18px;">
+                    <div
+                        style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px; color: #c4b5fd; font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">
+                        <span>🔍 PatchCore 前處理</span>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; row-gap: 12px;">
+                        <div class="toggle-group"
+                            style="grid-column: span 2; flex-direction: row; align-items: center; justify-content: space-between; border-bottom: 1px dashed rgba(255,255,255,0.1); padding-bottom: 8px;">
+                            <label for="patchcore-filter-enabled" style="margin-bottom: 0;">啟用過濾</label>
+                            <select id="patchcore-filter-enabled"
+                                style="width: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; font-weight: 600; color: var(--text); outline: none;">
+                                <option value="true" {% if default_patchcore_filter_enabled %}selected{% endif %}>開啟
+                                </option>
+                                <option value="false" {% if not default_patchcore_filter_enabled %}selected{% endif %}>
+                                    關閉</option>
+                            </select>
+                        </div>
+                        <div class="toggle-group">
+                            <label for="patchcore-blur-sigma">平滑強度 (Sigma)</label>
+                            <input type="number" id="patchcore-blur-sigma"
+                                placeholder="預設 ({{ default_patchcore_blur_sigma }})"
+                                value="{{ default_patchcore_blur_sigma }}" min="0" max="10" step="0.1">
+                        </div>
+                        <div class="toggle-group">
+                            <label for="patchcore-min-area">最小異常面積</label>
+                            <input type="number" id="patchcore-min-area"
+                                placeholder="預設 ({{ default_patchcore_min_area }})"
+                                value="{{ default_patchcore_min_area }}" min="0" max="1000" step="1">
+                        </div>
+                        <div class="toggle-group" style="grid-column: span 2;">
+                            <label for="patchcore-score-metric">計分方式</label>
+                            <div id="patchcore-metric-help"
+                                style="background: rgba(139, 92, 246, 0.05); border: 1px solid rgba(139, 92, 246, 0.2); border-radius: 8px; padding: 12px; margin-bottom: 12px; font-size: 0.82rem; line-height: 1.5;">
+                                <div style="color: #c4b5fd; font-weight: 600; margin-bottom: 6px;">💡 計分方式說明：</div>
+                                <div style="margin-bottom: 8px;">
+                                    <b style="color: #c4b5fd;">• Max (預設):</b> <code>單點最高分</code><br>
+                                    <span style="color: var(--text-muted);">取熱圖中最強的一個像素值。最靈敏，但易受孤立噪點影響。</span>
+                                </div>
+                                <div style="margin-bottom: 8px;">
+                                    <b style="color: #c4b5fd;">• Top-K Avg:</b> <code>前 10 名平均</code><br>
+                                    <span style="color: var(--text-muted);">取前 10 個最高像素值的平均。能有效抑制單點噪點，分數更穩定。</span>
+                                </div>
+                                <div>
+                                    <b style="color: #c4b5fd;">• Percentile 99:</b> <code>第 99 百分位</code><br>
+                                    <span style="color: var(--text-muted);">取排序後第 99% 位置的值。代表整體異常強度，不受極端單點干擾。</span>
+                                </div>
+                            </div>
+                            <select id="patchcore-score-metric"
+                                style="background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; color: var(--text); font-family: 'Fira Code', monospace; font-size: 0.95rem; outline: none; width: 100%; text-align: center;">
+                                <option value="max" {% if default_patchcore_score_metric=='max' %}selected{% endif %}>
+                                    Max</option>
+                                <option value="top_k_avg" {% if default_patchcore_score_metric=='top_k_avg' %}selected{%
+                                    endif %}>Top-K Avg</option>
+                                <option value="percentile_99" {% if default_patchcore_score_metric=='percentile_99'
+                                    %}selected{% endif %}>99th Percentile</option>
+                            </select>
                         </div>
                     </div>
                 </div>
@@ -882,7 +945,10 @@
         const params = new URLSearchParams(window.location.search);
         const pathParam = params.get('path');
         if (pathParam) {
-            input.value = pathParam;
+            if (input) input.value = pathParam;
+
+            const edgePathInput = document.getElementById('edge-image-path');
+            if (edgePathInput) edgePathInput.value = pathParam;
         }
     })();
 
@@ -916,6 +982,16 @@
             if (dustMetric !== "") requestBody.dust_heatmap_metric = dustMetric;
             if (dustIouThr !== "") requestBody.dust_heatmap_iou_threshold = parseFloat(dustIouThr);
             if (dustTopPct !== "") requestBody.dust_heatmap_top_percent = parseFloat(dustTopPct);
+
+            const p_enabled = document.getElementById('patchcore-filter-enabled').value;
+            const p_sigma = document.getElementById('patchcore-blur-sigma').value;
+            const p_area = document.getElementById('patchcore-min-area').value;
+            const p_metric = document.getElementById('patchcore-score-metric').value;
+
+            if (p_enabled !== "") requestBody.patchcore_filter_enabled = p_enabled === 'true';
+            if (p_sigma !== "") requestBody.patchcore_blur_sigma = parseFloat(p_sigma);
+            if (p_area !== "") requestBody.patchcore_min_area = parseInt(p_area);
+            if (p_metric !== "") requestBody.patchcore_score_metric = p_metric;
 
             const resp = await fetch('/api/debug/inference', {
                 method: 'POST',
@@ -1059,9 +1135,11 @@
     // ═══ 座標推論 ═══════════════════════════════
     const coordPathInput = document.getElementById('coord-image-path');
 
-    // 同步圖片路徑: 全圖推論 → 座標推論
+    // 同步圖片路徑: 全圖推論 → 座標推論/邊緣檢測
     input.addEventListener('input', () => {
         if (!coordPathInput.value) coordPathInput.value = input.value;
+        const edgePathInput = document.getElementById('edge-image-path');
+        if (edgePathInput && !edgePathInput.value) edgePathInput.value = input.value;
     });
     coordPathInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') runCoordInference();
@@ -1275,6 +1353,11 @@
     }
 
     // ── Edge Inspection Sync ──
+    const edgePathInput = document.getElementById('edge-image-path');
+    edgePathInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') runEdgeInspect();
+    });
+
     let edgeSettings = {};
     async function fetchEdgeSettings() {
         try {
@@ -1300,12 +1383,20 @@
         const width = edgeSettings[`cv_edge_${side}_width`];
         const threshold = edgeSettings[`cv_edge_${side}_threshold`];
         const minArea = edgeSettings[`cv_edge_${side}_min_area`];
+        const exTop = edgeSettings[`cv_edge_${side}_exclude_top`];
+        const exBottom = edgeSettings[`cv_edge_${side}_exclude_bottom`];
+        const exLeft = edgeSettings[`cv_edge_${side}_exclude_left`];
+        const exRight = edgeSettings[`cv_edge_${side}_exclude_right`];
 
         if (width !== undefined) document.getElementById('edge-width').value = width;
         if (threshold !== undefined) document.getElementById('edge-threshold').value = threshold;
         if (minArea !== undefined) document.getElementById('edge-min-area').value = minArea;
+        if (exTop !== undefined) document.getElementById('edge-ex-top').value = exTop;
+        if (exBottom !== undefined) document.getElementById('edge-ex-bottom').value = exBottom;
+        if (exLeft !== undefined) document.getElementById('edge-ex-left').value = exLeft;
+        if (exRight !== undefined) document.getElementById('edge-ex-right').value = exRight;
 
-        console.log(`[Edge] Synced inputs for ${side}: ${width}, ${threshold}, ${minArea}`);
+        console.log(`[Edge] Synced inputs for ${side}`);
     }
 
     document.getElementById('edge-side').addEventListener('change', syncEdgeInputs);

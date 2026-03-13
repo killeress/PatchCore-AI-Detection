@@ -138,6 +138,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_status()
             elif path == "/settings":
                 self._handle_settings_page(path)
+            elif path == "/settings_v2":
+                self._handle_settings_v2_page(path)
             elif path == "/api/settings":
                 self._handle_api_settings()
             elif path == "/api/settings/history":
@@ -682,26 +684,36 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _handle_debug_page(self, path: str):
         """Debug 推論頁面"""
-        # 從正在運行的推論器讀取 config 預設值
-        default_threshold = 0.5
-        default_edge_margin = 256
-        model_resolution_map = {}
-        if self.inferencer and hasattr(self.inferencer, 'config'):
-            default_threshold = self.inferencer.config.anomaly_threshold
-            # default_threshold = self.inferencer.config.anomaly_threshold # This is now handled directly in the render call
-            # default_edge_margin = self.inferencer.config.edge_margin_px # This is now handled directly in the render call
-            model_res_map = self.inferencer.config.model_resolution_map or {}
+        # 從 DB 讀取最新設定，若無則 fallback 到推論器的 config
+        db_params = {}
+        if self.db:
+            try:
+                for p in self.db.get_all_config_params():
+                    db_params[p["param_name"]] = p["decoded_value"]
+            except Exception as e:
+                logger.error(f"無法讀取 DB 設定: {e}")
+
+        def get_val(name, default_val):
+            if name in db_params:
+                return db_params[name]
+            if self.inferencer and hasattr(self.inferencer.config, name):
+                return getattr(self.inferencer.config, name)
+            return default_val
         
         template = self.jinja_env.get_template("debug_inference.html")
         html = template.render(
             request_path=path,
-            default_threshold=self.inferencer.config.anomaly_threshold if self.inferencer else 0.5,
-            default_edge_margin=self.inferencer.config.edge_margin_px if self.inferencer else 0,
-            default_dust_extension=self.inferencer.config.dust_extension if self.inferencer else 0,
-            default_dust_metric=self.inferencer.config.dust_heatmap_metric if self.inferencer else 'iou',
-            default_dust_iou_thr=self.inferencer.config.dust_heatmap_iou_threshold if self.inferencer else 0.01,
-            default_dust_top_pct=self.inferencer.config.dust_heatmap_top_percent if self.inferencer else 5.0,
-            model_resolution_map=model_res_map
+            default_threshold=get_val('anomaly_threshold', 0.5),
+            default_edge_margin=get_val('edge_margin_px', 0),
+            default_dust_extension=get_val('dust_extension', 0),
+            default_dust_metric=get_val('dust_heatmap_metric', 'iou'),
+            default_dust_iou_thr=get_val('dust_heatmap_iou_threshold', 0.01),
+            default_dust_top_pct=get_val('dust_heatmap_top_percent', 5.0),
+            model_resolution_map=get_val('model_resolution_map', {}),
+            default_patchcore_filter_enabled=get_val('patchcore_filter_enabled', False),
+            default_patchcore_blur_sigma=get_val('patchcore_blur_sigma', 1.5),
+            default_patchcore_min_area=get_val('patchcore_min_area', 10),
+            default_patchcore_score_metric=get_val('patchcore_score_metric', 'max')
         )
         self._send_response(200, html)
 
@@ -974,6 +986,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         dust_top_pct_override = float(dust_top_pct_raw) if dust_top_pct_raw is not None and str(dust_top_pct_raw).strip() != "" else None
         
         dust_metric_override = data.get("dust_heatmap_metric")
+        
+        patchcore_overrides = {}
+        if "patchcore_filter_enabled" in data:
+            patchcore_overrides["patchcore_filter_enabled"] = bool(data["patchcore_filter_enabled"])
+        if "patchcore_blur_sigma" in data and str(data["patchcore_blur_sigma"]).strip() != "":
+            patchcore_overrides["patchcore_blur_sigma"] = float(data["patchcore_blur_sigma"])
+        if "patchcore_min_area" in data and str(data["patchcore_min_area"]).strip() != "":
+            patchcore_overrides["patchcore_min_area"] = int(data["patchcore_min_area"])
+        if "patchcore_score_metric" in data and str(data["patchcore_score_metric"]).strip() != "":
+            patchcore_overrides["patchcore_score_metric"] = str(data["patchcore_score_metric"])
 
         try:
             total_start = _time.time()
@@ -1004,6 +1026,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         inferencer=target_inferencer,
                         threshold=debug_threshold,
                         edge_margin_override=edge_margin_override,
+                        patchcore_overrides=patchcore_overrides if patchcore_overrides else None,
                     )
             else:
                 result = self.inferencer.run_inference(
@@ -1011,6 +1034,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     inferencer=target_inferencer,
                     threshold=debug_threshold,
                     edge_margin_override=edge_margin_override,
+                    patchcore_overrides=patchcore_overrides if patchcore_overrides else None,
                 )
 
             total_time = _time.time() - total_start
@@ -1642,8 +1666,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     # ── 設定管理功能 ─────────────────────────────────────
 
     def _handle_settings_page(self, path: str):
-        """設定管理頁面"""
+        """設定管理頁面 (舊版)"""
         template = self.jinja_env.get_template("settings.html")
+        html = template.render(request_path=path)
+        self._send_response(200, html)
+
+    def _handle_settings_v2_page(self, path: str):
+        """設定管理頁面 (新版 V2)"""
+        template = self.jinja_env.get_template("settings_v2.html")
         html = template.render(request_path=path)
         self._send_response(200, html)
 
@@ -1819,4 +1849,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         server.shutdown()
         print("\nStopped.")
+
 

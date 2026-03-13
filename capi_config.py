@@ -113,6 +113,12 @@ class CAPIConfig:
     # 每個前綴的獨立閾值 {image_prefix: threshold}，未指定則使用 anomaly_threshold
     threshold_mapping: Dict[str, float] = field(default_factory=dict)
     
+    # PatchCore 後處理進階過濾
+    patchcore_filter_enabled: bool = False             # 是否啟用後處理過濾
+    patchcore_blur_sigma: float = 1.5                # 異常圖高斯平滑強度
+    patchcore_min_area: int = 10                     # 判定為真異常的最小連通面積(像素)
+    patchcore_score_metric: str = "max"              # 計分方式: "max", "top_k_avg", "percentile_99"
+    
     # 灰塵偵測設定 (OMIT 圖片分析)
     dust_brightness_threshold: int = 80       # OMIT 亮度閾值 (自適應 Otsu 時此為備用)
     dust_area_min: int = 10                   # 灰塵顆粒最小面積 (px)
@@ -190,6 +196,10 @@ class CAPIConfig:
             model_path=data.get("model_path", ""),
             model_mapping=data.get("model_mapping", {}),
             threshold_mapping={k: float(v) for k, v in data.get("threshold_mapping", {}).items()},
+            patchcore_filter_enabled=data.get("patchcore_filter_enabled", False),
+            patchcore_blur_sigma=data.get("patchcore_blur_sigma", 1.5),
+            patchcore_min_area=data.get("patchcore_min_area", 10),
+            patchcore_score_metric=data.get("patchcore_score_metric", "max"),
             dust_brightness_threshold=data.get("dust_brightness_threshold", 80),
             dust_area_min=data.get("dust_area_min", 10),
             dust_area_max=data.get("dust_area_max", 50000),
@@ -233,6 +243,10 @@ class CAPIConfig:
             "anomaly_threshold": self.anomaly_threshold,
             "model_mapping": self.model_mapping,
             "threshold_mapping": self.threshold_mapping,
+            "patchcore_filter_enabled": self.patchcore_filter_enabled,
+            "patchcore_blur_sigma": self.patchcore_blur_sigma,
+            "patchcore_min_area": self.patchcore_min_area,
+            "patchcore_score_metric": self.patchcore_score_metric,
             "dust_brightness_threshold": self.dust_brightness_threshold,
             "dust_area_min": self.dust_area_min,
             "dust_area_max": self.dust_area_max,
@@ -301,6 +315,15 @@ class CAPIConfig:
             self.model_mapping = param_map["model_mapping"]
         if "threshold_mapping" in param_map and isinstance(param_map["threshold_mapping"], dict):
             self.threshold_mapping = {k: float(v) for k, v in param_map["threshold_mapping"].items()}
+        if "patchcore_filter_enabled" in param_map:
+            val = param_map["patchcore_filter_enabled"]
+            self.patchcore_filter_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "patchcore_blur_sigma" in param_map:
+            self.patchcore_blur_sigma = float(param_map["patchcore_blur_sigma"])
+        if "patchcore_min_area" in param_map:
+            self.patchcore_min_area = int(param_map["patchcore_min_area"])
+        if "patchcore_score_metric" in param_map:
+            self.patchcore_score_metric = str(param_map["patchcore_score_metric"])
         if "dust_brightness_threshold" in param_map:
             self.dust_brightness_threshold = int(param_map["dust_brightness_threshold"])
         if "dust_area_min" in param_map:

@@ -787,7 +787,7 @@ class CAPIInferencer:
         
         return result
     
-    def predict_tile(self, tile: TileInfo, inferencer=None, edge_margin_override: Optional[int] = None) -> Tuple[float, Optional[np.ndarray]]:
+    def predict_tile(self, tile: TileInfo, inferencer=None, edge_margin_override: Optional[int] = None, patchcore_overrides: Optional[Dict[str, Any]] = None) -> Tuple[float, Optional[np.ndarray]]:
         """
         對單一 tile 進行推論
         
@@ -824,6 +824,68 @@ class CAPIInferencer:
             # 記錄衰減/遮罩處理前的 anomaly_map max (用於後續比率計算)
             pre_process_max = float(np.max(anomaly_map))
             
+            # --- 新增：PatchCore 後處理過濾 ---
+            patchcore_enabled = getattr(self.config, 'patchcore_filter_enabled', False)
+            if patchcore_overrides is not None and 'patchcore_filter_enabled' in patchcore_overrides:
+                patchcore_enabled = patchcore_overrides['patchcore_filter_enabled']
+                
+            if patchcore_enabled:
+                # 1. 高斯平滑
+                sigma = getattr(self.config, 'patchcore_blur_sigma', 1.5)
+                if patchcore_overrides is not None and 'patchcore_blur_sigma' in patchcore_overrides:
+                    sigma = patchcore_overrides['patchcore_blur_sigma']
+                    
+                if sigma > 0:
+                    ksize = int(2 * round(3 * sigma) + 1)
+                    anomaly_map = cv2.GaussianBlur(anomaly_map, (ksize, ksize), sigmaX=sigma, sigmaY=sigma)
+
+                # 2. 特徵值計算模式
+                metric = getattr(self.config, 'patchcore_score_metric', 'max')
+                if patchcore_overrides is not None and 'patchcore_score_metric' in patchcore_overrides:
+                    metric = patchcore_overrides['patchcore_score_metric']
+                    
+                if metric == 'top_k_avg':
+                    # 取前 10 個最高值的平均 (k=10)
+                    k = 10
+                    flat = anomaly_map.flatten()
+                    if len(flat) >= k:
+                        idx = np.argpartition(flat, -k)[-k:]
+                        top_k_val = np.mean(flat[idx])
+                    else:
+                        top_k_val = np.max(anomaly_map)
+                    pre_process_max = float(top_k_val)
+                elif metric == 'percentile_99':
+                    pre_process_max = float(np.percentile(anomaly_map, 99))
+                else: # 'max' 或其他
+                    pre_process_max = float(np.max(anomaly_map))
+                
+                # 更新基礎預測分數 (覆寫原本直接從 anomalib 拿的 score)
+                # 這裡假設 anomaly_map 的尺度與 pred_score 一致，直接取代
+                # 如果尺度不一致，這裡會成為新的基準
+                pred_score = pre_process_max
+
+                # 3. 面積過濾 (只在分數超過閾值時檢查，節省效能)
+                min_area = getattr(self.config, 'patchcore_min_area', 10)
+                if patchcore_overrides is not None and 'patchcore_min_area' in patchcore_overrides:
+                    min_area = patchcore_overrides['patchcore_min_area']
+                    
+                if min_area > 0 and pred_score >= self.threshold:
+                    # 使用 OTSU 或固定比例閾值將熱圖二值化
+                    # 這裡抓目前最大值的一半作為該 cluster 的邊界
+                    binary = (anomaly_map > (pre_process_max * 0.5)).astype(np.uint8) * 255
+                    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
+                    
+                    max_cluster_area = 0
+                    for i in range(1, num_labels): # 0 is background
+                        area = stats[i, cv2.CC_STAT_AREA]
+                        if area > max_cluster_area:
+                            max_cluster_area = area
+                            
+                    if max_cluster_area < min_area:
+                        # 面積不足，大幅降權
+                        pred_score = pred_score * 0.5
+                        print(f"    ℹ️ Tile 異常面積過小 ({max_cluster_area} < {min_area})，降權懲罰")
+
             # 如果有遮罩，將排除區域的熱圖值設為 0
             if tile.mask is not None:
                 # 確保遮罩尺寸匹配
@@ -878,7 +940,8 @@ class CAPIInferencer:
     
     def run_inference(self, result: ImageResult, progress_callback=None,
                       inferencer=None, threshold: Optional[float] = None,
-                      edge_margin_override: Optional[int] = None) -> ImageResult:
+                      edge_margin_override: Optional[int] = None,
+                      patchcore_overrides: Optional[Dict[str, Any]] = None) -> ImageResult:
         """
         對預處理結果執行推論
         
@@ -905,7 +968,7 @@ class CAPIInferencer:
             if progress_callback:
                 progress_callback(i + 1, total)
             
-            score, anomaly_map = self.predict_tile(tile, inferencer=active_inferencer, edge_margin_override=edge_margin_override)
+            score, anomaly_map = self.predict_tile(tile, inferencer=active_inferencer, edge_margin_override=edge_margin_override, patchcore_overrides=patchcore_overrides)
             
             if score >= active_threshold:
                 anomaly_tiles.append((tile, score, anomaly_map))
