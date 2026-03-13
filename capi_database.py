@@ -1137,6 +1137,7 @@ class CAPIDatabase:
             ("cv_edge_exclude_y", 0, "int", "排除區域起始 Y (px)"),
             ("cv_edge_exclude_w", 100, "int", "排除區域寬度 (px)"),
             ("cv_edge_exclude_h", 100, "int", "排除區域高度 (px)"),
+            ("cv_edge_exclude_zones", [], "dict", "邊緣不檢測區域列表 (JSON List)"),
         ]
 
         count = 0

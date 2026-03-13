@@ -15,6 +15,7 @@ CAPI AI — CV 邊緣缺陷檢測模組
 
 import cv2
 import numpy as np
+import json
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any
 
@@ -73,7 +74,7 @@ class EdgeInspectionConfig:
         width=360, threshold=4, min_area=65,
         exclude_top=10, exclude_bottom=10, exclude_left=80, exclude_right=80
     ))
-    exclude_zone: EdgeExclusionZoneConfig = field(default_factory=EdgeExclusionZoneConfig)
+    exclude_zones: List[EdgeExclusionZoneConfig] = field(default_factory=list)
 
     @classmethod
     def from_db_params(cls, params: Dict[str, Any]) -> "EdgeInspectionConfig":
@@ -122,12 +123,38 @@ class EdgeInspectionConfig:
         cfg.bottom.exclude_left = int(get("cv_edge_bottom_exclude_left", 80))
         cfg.bottom.exclude_right = int(get("cv_edge_bottom_exclude_right", 80))
         
-        # 排除區域
-        cfg.exclude_zone.enabled = bool(get("cv_edge_exclude_enabled", False))
-        cfg.exclude_zone.x = int(get("cv_edge_exclude_x", 0))
-        cfg.exclude_zone.y = int(get("cv_edge_exclude_y", 0))
-        cfg.exclude_zone.w = int(get("cv_edge_exclude_w", 100))
-        cfg.exclude_zone.h = int(get("cv_edge_exclude_h", 100))
+        
+        # 排除區域 (支援多組區域列表)
+        zones_json = get("cv_edge_exclude_zones", None)
+        if zones_json and isinstance(zones_json, str):
+            try:
+                zones_data = json.loads(zones_json)
+                if isinstance(zones_data, list):
+                    cfg.exclude_zones = [
+                        EdgeExclusionZoneConfig(
+                            enabled=z.get("enabled", True),
+                            x=int(z.get("x", 0)),
+                            y=int(z.get("y", 0)),
+                            w=int(z.get("w", 100)),
+                            h=int(z.get("h", 100))
+                        ) for z in zones_data
+                    ]
+            except:
+                pass
+        
+        # 向後相容：若無多組區域列表，嘗試讀取舊版單一區域設定
+        if not cfg.exclude_zones:
+            old_enabled = bool(get("cv_edge_exclude_enabled", False))
+            if old_enabled or get("cv_edge_exclude_x", None) is not None:
+                cfg.exclude_zones = [
+                    EdgeExclusionZoneConfig(
+                        enabled=old_enabled,
+                        x=int(get("cv_edge_exclude_x", 0)),
+                        y=int(get("cv_edge_exclude_y", 0)),
+                        w=int(get("cv_edge_exclude_w", 100)),
+                        h=int(get("cv_edge_exclude_h", 100))
+                    )
+                ]
         
         return cfg
 
@@ -186,27 +213,28 @@ class CVEdgeInspector:
 
             defects = self._inspect_side(roi, side_name, side_cfg, offset_x, offset_y)
             
-            # 排除區域過濾
-            if self.config.exclude_zone.enabled:
+            # 排除區域過濾 (支援多組)
+            active_zones = [z for z in self.config.exclude_zones if z.enabled]
+            if active_zones:
                 filtered_defects = []
-                ex_x = self.config.exclude_zone.x
-                ex_y = self.config.exclude_zone.y
-                ex_w = self.config.exclude_zone.w
-                ex_h = self.config.exclude_zone.h
-                
                 for d in defects:
                     dx, dy, dw, dh = d.bbox
-                    # 檢查是否與排除區域重疊 (Intersection check)
-                    overlap = not (
-                        dx + dw <= ex_x or
-                        dx >= ex_x + ex_w or
-                        dy + dh <= ex_y or
-                        dy >= ex_y + ex_h
-                    )
-                    if not overlap:
+                    is_excluded = False
+                    for zone in active_zones:
+                        # 檢查是否與排除區域重疊 (Intersection check)
+                        overlap = not (
+                            dx + dw <= zone.x or
+                            dx >= zone.x + zone.w or
+                            dy + dh <= zone.y or
+                            dy >= zone.y + zone.h
+                        )
+                        if overlap:
+                            is_excluded = True
+                            print(f"⚠️ 邊緣缺陷 (Side:{d.side}, Area:{d.area}) 落入排除區域 (x:{zone.x}, y:{zone.y}), 已被忽略")
+                            break
+                    
+                    if not is_excluded:
                         filtered_defects.append(d)
-                    else:
-                        print(f"⚠️ 邊緣缺陷 (Side:{d.side}, Area:{d.area}) 落入排除區域，已被忽略")
                 defects = filtered_defects
 
             all_defects.extend(defects)

@@ -749,6 +749,15 @@
         animation: fadeIn 0.3s ease-out;
     }
 
+    .vis-bg-img {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        opacity: 0.6;
+        pointer-events: none;
+    }
+
     .settings-tab-pane.active {
         display: grid;
     }
@@ -828,6 +837,68 @@
             opacity: 1;
             transform: translateY(0);
         }
+    }
+
+    /* Exclusion Zone List Styles */
+    .ex-zone-item {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 8px;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 12px;
+        align-items: center;
+        transition: all 0.2s;
+    }
+
+    .ex-zone-item:hover {
+        background: rgba(255, 255, 255, 0.05);
+        border-color: #f43f5e;
+    }
+
+    .ex-zone-inputs {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+    }
+
+    .ex-zone-input-group {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .ex-zone-input-group label {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        min-width: 15px;
+    }
+
+    .ex-zone-input-group input {
+        width: 100%;
+        background: rgba(0, 0, 0, 0.2);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        color: #fff;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        font-family: 'Fira Code';
+    }
+
+    .btn-delete-zone {
+        background: none;
+        border: none;
+        color: #ef4444;
+        cursor: pointer;
+        padding: 4px;
+        opacity: 0.6;
+        transition: opacity 0.2s;
+    }
+
+    .btn-delete-zone:hover {
+        opacity: 1;
     }
 </style>
 {% endblock %}
@@ -1172,36 +1243,23 @@
                         
                         <div style="padding: 16px; display: grid; grid-template-columns: 3fr 2fr; gap: 24px; align-items: start;">
                             <!-- 可視化區域 -->
-                            <div style="background: #0f172a; border: 1px dashed #64748b; border-radius: 8px; position: relative; width: 100%; aspect-ratio: 4/3; overflow: hidden; display: flex; align-items: center; justify-content: center;">
-                                <span style="position: absolute; color: #334155; font-weight: bold; font-size: 2rem; user-select: none;">PANEL / IMAGE</span>
-                                <span style="position: absolute; bottom: 8px; right: 8px; color: #475569; font-size: 0.65rem; font-family: 'Fira Code';">Ref: 6576x4384</span>
-                                <div id="ex-zone-box" style="position: absolute; border: 2px solid #f43f5e; background: rgba(244, 63, 94, 0.3); pointer-events: none; transition: all 0.2s;">
-                                    <div style="position: absolute; top: -20px; left: 0; color: #f43f5e; font-size: 10px; font-weight: bold; white-space: nowrap;">排除不檢測</div>
-                                </div>
+                            <div id="ex-vis-container" style="background: #0f172a; border: 1px dashed #64748b; border-radius: 8px; position: relative; width: 100%; aspect-ratio: 4/3; overflow: hidden; display: flex; align-items: center; justify-content: center;">
+                                <img src="/imgs/Sample.jpg" class="vis-bg-img" alt="Panel Background">
+                                <span style="position: absolute; color: rgba(255,255,255,0.1); font-weight: bold; font-size: 2rem; user-select: none; z-index: 1;">PANEL / IMAGE</span>
+                                <span style="position: absolute; bottom: 8px; right: 8px; color: #475569; font-size: 0.65rem; font-family: 'Fira Code'; z-index: 2;">Ref: 6576x4384</span>
+                                <!-- Zones will be rendered here by JS -->
                             </div>
                             
-                            <!-- 控制面板 -->
-                            <div style="display: flex; flex-direction: column; gap: 12px;">
-                                <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0;">設定起始座標 (X, Y) 與區域大小 (寬, 高)，單位為 pixel。<br>邊緣檢測若與此區域重疊，則不計入缺點。</p>
+                            <div style="display: flex; flex-direction: column; gap: 12px; max-height: 450px; overflow-y: auto; padding-right: 4px;">
+                                <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0;">設定多個排除區域 (X, Y, W, H)，單位為 pixel。<br>邊緣檢測若與任何區域重疊，則不計入缺點。</p>
                                 
-                                <div style="display: grid; grid-template-columns: 80px 1fr; align-items: center; gap: 8px;">
-                                    <label style="font-size: 0.85rem; color: #cbd5e1;">起始 X</label>
-                                    <input type="number" id="inp-ex-x" class="ex-input" onchange="updateExZoneBox()" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); color: #fff; padding: 6px 10px; border-radius: 4px; font-family: 'Fira Code';">
+                                <div id="ex-zones-list">
+                                    <!-- Rendered by JS -->
                                 </div>
-                                <div style="display: grid; grid-template-columns: 80px 1fr; align-items: center; gap: 8px;">
-                                    <label style="font-size: 0.85rem; color: #cbd5e1;">起始 Y</label>
-                                    <input type="number" id="inp-ex-y" class="ex-input" onchange="updateExZoneBox()" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); color: #fff; padding: 6px 10px; border-radius: 4px; font-family: 'Fira Code';">
-                                </div>
-                                <div style="display: grid; grid-template-columns: 80px 1fr; align-items: center; gap: 8px;">
-                                    <label style="font-size: 0.85rem; color: #cbd5e1;">區域寬</label>
-                                    <input type="number" id="inp-ex-w" class="ex-input" onchange="updateExZoneBox()" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); color: #fff; padding: 6px 10px; border-radius: 4px; font-family: 'Fira Code';">
-                                </div>
-                                <div style="display: grid; grid-template-columns: 80px 1fr; align-items: center; gap: 8px;">
-                                    <label style="font-size: 0.85rem; color: #cbd5e1;">區域高</label>
-                                    <input type="number" id="inp-ex-h" class="ex-input" onchange="updateExZoneBox()" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); color: #fff; padding: 6px 10px; border-radius: 4px; font-family: 'Fira Code';">
-                                </div>
+
+                                <button class="btn-edit" style="justify-content: center; gap: 4px; border: 1px dashed rgba(255,255,255,0.2); background: rgba(255,255,255,0.02);" onclick="addExZone()">➕ 新增排除區域</button>
                                 
-                                <button class="btn-save" style="margin-top: 10px; background: linear-gradient(135deg, #f43f5e, #e11d48);" onclick="saveExZone()">💾 儲存排除區域設定</button>
+                                <button class="btn-save" style="margin-top: 10px; background: linear-gradient(135deg, #f43f5e, #e11d48);" onclick="saveExZone()">💾 儲存所有排除區域設定</button>
                             </div>
                         </div>
                     </div>
@@ -1561,6 +1619,8 @@
     }
 
     // ── Edge Exclusion Zone Logic ──
+    let currentExZones = [];
+
     function getParamValue(name, def) {
         const p = allParams.find(x => x.param_name === name);
         if (!p) return def;
@@ -1574,39 +1634,175 @@
             checkEl.checked = enabled;
         }
 
-        const inputX = document.getElementById('inp-ex-x');
-        if (inputX) {
-            inputX.value = getParamValue('cv_edge_exclude_x', 0);
-            document.getElementById('inp-ex-y').value = getParamValue('cv_edge_exclude_y', 0);
-            document.getElementById('inp-ex-w').value = getParamValue('cv_edge_exclude_w', 100);
-            document.getElementById('inp-ex-h').value = getParamValue('cv_edge_exclude_h', 100);
-            updateExZoneBox();
+        // 讀取多組區域列表
+        const p = allParams.find(x => x.param_name === 'cv_edge_exclude_zones');
+        if (p && p.param_value) {
+            try {
+                let parsed = JSON.parse(p.param_value);
+                // 處理可能的雙重編碼或非陣列情況
+                if (typeof parsed === 'string') {
+                    try { parsed = JSON.parse(parsed); } catch { }
+                }
+                currentExZones = Array.isArray(parsed) ? parsed : [];
+            } catch (e) {
+                console.error("Failed to parse exclusion zones:", e);
+                currentExZones = [];
+            }
         }
+
+        // 向後相容：若無多組區域列表，嘗試從舊有的單一設定中提取
+        if (!currentExZones || currentExZones.length === 0) {
+            const oldEnabled = getParamValue('cv_edge_exclude_enabled', false);
+            const x = getParamValue('cv_edge_exclude_x', 0);
+            const y = getParamValue('cv_edge_exclude_y', 0);
+            const w = getParamValue('cv_edge_exclude_w', 100);
+            const h = getParamValue('cv_edge_exclude_h', 100);
+
+            // 只有當至少寬或高不為 0 時才加入（避免預設空的）
+            if (w > 0 && h > 0) {
+                currentExZones = [{ enabled: oldEnabled, x, y, w, h }];
+            }
+        }
+
+        renderExZones();
     }
 
-    function updateExZoneBox() {
-        // 使用實際影像解析度作為參考 (6576x4384)
+    function renderExZones() {
+        const listContainer = document.getElementById('ex-zones-list');
+        if (!listContainer) return;
+
+        listContainer.innerHTML = '';
+        currentExZones.forEach((zone, idx) => {
+            const item = document.createElement('div');
+            item.className = 'ex-zone-item';
+            item.innerHTML = `
+                <div class="ex-zone-inputs">
+                    <div class="ex-zone-input-group">
+                        <label>X</label>
+                        <input type="number" value="${zone.x}" onchange="updateExZoneValue(${idx}, 'x', this.value)">
+                    </div>
+                    <div class="ex-zone-input-group">
+                        <label>Y</label>
+                        <input type="number" value="${zone.y}" onchange="updateExZoneValue(${idx}, 'y', this.value)">
+                    </div>
+                    <div class="ex-zone-input-group">
+                        <label>W</label>
+                        <input type="number" value="${zone.w}" onchange="updateExZoneValue(${idx}, 'w', this.value)">
+                    </div>
+                    <div class="ex-zone-input-group">
+                        <label>H</label>
+                        <input type="number" value="${zone.h}" onchange="updateExZoneValue(${idx}, 'h', this.value)">
+                    </div>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 8px; align-items: center;">
+                    <label class="switch" style="transform: scale(0.7);">
+                        <input type="checkbox" ${zone.enabled ? 'checked' : ''} onchange="updateExZoneValue(${idx}, 'enabled', this.checked)">
+                        <span class="slider"></span>
+                    </label>
+                    <button class="btn-delete-zone" onclick="removeExZone(${idx})" title="刪除此區域">🗑️</button>
+                </div>
+            `;
+            listContainer.appendChild(item);
+        });
+
+        updateExVis();
+    }
+
+    function addExZone() {
+        currentExZones.push({ enabled: true, x: 0, y: 0, w: 100, h: 100 });
+        renderExZones();
+    }
+
+    function removeExZone(idx) {
+        if (!confirm('確定要刪除此排除區域嗎？')) return;
+        currentExZones.splice(idx, 1);
+        renderExZones();
+    }
+
+    function updateExZoneValue(idx, key, value) {
+        if (key === 'enabled') {
+            currentExZones[idx][key] = value;
+        } else {
+            currentExZones[idx][key] = parseInt(value) || 0;
+        }
+        updateExVis();
+    }
+
+    function updateExVis() {
         const VIRTUAL_W = 6576;
         const VIRTUAL_H = 4384;
+        const container = document.getElementById('ex-vis-container');
+        if (!container) return;
 
-        const x = parseInt(document.getElementById('inp-ex-x').value) || 0;
-        const y = parseInt(document.getElementById('inp-ex-y').value) || 0;
-        const w = parseInt(document.getElementById('inp-ex-w').value) || 100;
-        const h = parseInt(document.getElementById('inp-ex-h').value) || 100;
+        // 移除所有現有的 box (保留背景圖與文字)
+        container.querySelectorAll('.ex-zone-box').forEach(el => el.remove());
 
-        const box = document.getElementById('ex-zone-box');
-        if (box) {
-            // 計算百分比以便在容器中呈現
-            const pctX = Math.max(0, Math.min(100, (x / VIRTUAL_W) * 100));
-            const pctY = Math.max(0, Math.min(100, (y / VIRTUAL_H) * 100));
-            const pctW = Math.min(100 - pctX, (w / VIRTUAL_W) * 100);
-            const pctH = Math.min(100 - pctY, (h / VIRTUAL_H) * 100);
+        currentExZones.forEach((zone, idx) => {
+            if (!zone.enabled) return;
+
+            const box = document.createElement('div');
+            box.className = 'ex-zone-box';
+            box.style.position = 'absolute';
+            box.style.border = '2px solid #f43f5e';
+            box.style.background = 'rgba(244, 63, 94, 0.3)';
+            box.style.pointerEvents = 'none';
+            box.style.transition = 'all 0.2s';
+            box.style.zIndex = '3';
+
+            const pctX = Math.max(0, Math.min(100, (zone.x / VIRTUAL_W) * 100));
+            const pctY = Math.max(0, Math.min(100, (zone.y / VIRTUAL_H) * 100));
+            const pctW = Math.min(100 - pctX, (zone.w / VIRTUAL_W) * 100);
+            const pctH = Math.min(100 - pctY, (zone.h / VIRTUAL_H) * 100);
 
             box.style.left = `${pctX}%`;
             box.style.top = `${pctY}%`;
             box.style.width = `${pctW}%`;
             box.style.height = `${pctH}%`;
+
+            const label = document.createElement('div');
+            label.style.position = 'absolute';
+            label.style.top = '-18px';
+            label.style.left = '0';
+            label.style.color = '#f43f5e';
+            label.style.fontSize = '9px';
+            label.style.fontWeight = 'bold';
+            label.style.whiteSpace = 'nowrap';
+            label.textContent = `Zone ${idx + 1}`;
+            box.appendChild(label);
+
+            container.appendChild(box);
+        });
+    }
+
+    async function saveExZone() {
+        const reason = "[系統] 修改多組排除區域位置設定";
+        try {
+            const res = await fetch('/api/settings/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    param_name: 'cv_edge_exclude_zones',
+                    new_value: currentExZones,
+                    reason
+                })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            showToast('✅ 排除區域設定已儲存', 'success');
+            loadSettings();
+            loadHistory();
+        } catch (e) {
+            showToast('❌ 儲存失敗: ' + e.message, 'error');
         }
+    }
+
+    function updateExZoneBox() {
+        // This function is deprecated and replaced by updateExVis.
+        // It's kept for now to avoid breaking existing calls if any,
+        // but its content is no longer relevant for the new multi-zone logic.
+        // The new logic is handled by renderExZones and updateExVis.
+        console.warn("updateExZoneBox is deprecated. Use renderExZones/updateExVis instead.");
+        updateExVis(); // Redirect to the new visualization function
     }
 
     function updateEdgeVisualizer() {
@@ -1675,40 +1871,6 @@
     async function toggleExZoneSwitch(isChecked) {
         // 直接調用通用的 toggleBoolParam
         await toggleBoolParam('cv_edge_exclude_enabled', isChecked);
-        // 額外顯示一個更精確的訊息 (可選)
-    }
-
-    async function saveExZone() {
-        const x = parseInt(document.getElementById('inp-ex-x').value) || 0;
-        const y = parseInt(document.getElementById('inp-ex-y').value) || 0;
-        const w = parseInt(document.getElementById('inp-ex-w').value) || 100;
-        const h = parseInt(document.getElementById('inp-ex-h').value) || 100;
-        const reason = "更新邊緣排除區域範圍參數";
-
-        const updates = [
-            { param_name: 'cv_edge_exclude_x', new_value: x },
-            { param_name: 'cv_edge_exclude_y', new_value: y },
-            { param_name: 'cv_edge_exclude_w', new_value: w },
-            { param_name: 'cv_edge_exclude_h', new_value: h }
-        ];
-
-        try {
-            // Sequential updates to avoid race conditions with sqlite lock
-            for (const u of updates) {
-                const res = await fetch('/api/settings/update', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ param_name: u.param_name, new_value: u.new_value, reason })
-                });
-                const data = await res.json();
-                if (data.error) throw new Error(`[${u.param_name}] ` + data.error);
-            }
-            showToast(`✅ 排出區域範圍已成功儲存`, 'success');
-            loadSettings();
-            loadHistory();
-        } catch (e) {
-            showToast(`❌ 儲存失敗: ${e.message}`, 'error');
-        }
     }
 
     // Close modal on Escape
@@ -1719,13 +1881,7 @@
     // Initialize exclusion zone data and event listeners on load
     document.addEventListener('DOMContentLoaded', () => {
         initExZoneData();
-        const inputs = ['inp-ex-x', 'inp-ex-y', 'inp-ex-w', 'inp-ex-h'];
-        inputs.forEach(id => {
-            const el = document.getElementById(id);
-            if (el) {
-                el.addEventListener('input', updateExZoneBox);
-            }
-        });
+        updateEdgeVisualizer(); // Ensure edges are rendered on load
     });
 </script>
 {% endblock %}
