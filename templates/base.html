@@ -443,17 +443,52 @@
                             </li>
                             <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
                                     style="font-family: 'Fira Code', monospace;">&gt;</span>
-                                <span>分數若大於閾值，系統會進行異常特徵檢查，並執行 OMIT 影像的灰塵交叉驗證。</span>
+                                <span>分數若大於閾值，系統會進行進階的交叉驗證。</span>
                             </li>
                             <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
-                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>只要包含 <span
-                                        class="text-red-400 font-bold border-b border-red-500/30">真實缺陷</span> 即判定面板為
-                                    <strong class="text-red-500 text-base">🔴 NG</strong>。</span></li>
-                            <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
-                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>無異常或所有異常皆為 <em
-                                        class="text-slate-400">表面膜灰塵</em> 時，判定面板為 <strong
+                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>包含真實缺陷即判定為
+                                    <strong class="text-red-500 text-base">🔴 NG</strong>，無異常則判定為 <strong
                                         class="text-green-500 text-base">🟢 OK</strong>。</span></li>
                         </ul>
+                    </div>
+
+                    <div
+                        class="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5 hover:border-slate-600 transition-colors md:col-span-2">
+                        <h3 class="text-teal-400 mb-3 flex items-center gap-2 text-sm uppercase tracking-wider font-semibold"
+                            style="font-family: 'Fira Code', monospace;">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z">
+                                </path>
+                            </svg>
+                            CV 傳統邊緣檢測與排除邏輯
+                        </h3>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <ul class="text-slate-300 text-sm flex flex-col gap-2 leading-relaxed m-0 p-0">
+                                <li class="flex items-start gap-2"><span class="text-teal-600 mt-0.5"
+                                        style="font-family: 'Fira Code', monospace;">1.</span>
+                                    <span>對邊緣 ROI 執行中值濾波以預估背景層，計算原始圖與背景的 <strong class="text-slate-100">絕對差值圖
+                                            (AbsDiff)</strong>。</span>
+                                </li>
+                                <li class="flex items-start gap-2"><span class="text-teal-600 mt-0.5"
+                                        style="font-family: 'Fira Code', monospace;">2.</span>
+                                    <span>透過連通區域分析 (CCA) 提取特徵，並根據 <strong class="text-slate-100">亮度閾值</strong> 與 <strong
+                                            class="text-slate-100">面積大小</strong> 過濾微小噪點。</span>
+                                </li>
+                            </ul>
+                            <ul class="text-slate-300 text-sm flex flex-col gap-2 leading-relaxed m-0 p-0">
+                                <li class="flex items-start gap-2"><span class="text-teal-600 mt-0.5"
+                                        style="font-family: 'Fira Code', monospace;">3.</span>
+                                    <span>取區域內最高對比像素作為 <strong class="text-teal-400">「差異值
+                                            (Diff)」</strong>，數值越大代表缺陷越顯著。</span>
+                                </li>
+                                <li class="flex items-start gap-2"><span class="text-teal-600 mt-0.5"
+                                        style="font-family: 'Fira Code', monospace;">4.</span>
+                                    <span>最終比對配置的 <strong
+                                            class="text-orange-400">邊緣不檢測區域</strong>，若缺陷位置落在排除框內則主動屏蔽。</span>
+                                </li>
+                            </ul>
+                        </div>
                     </div>
                 </div>
 

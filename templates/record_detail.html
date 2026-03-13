@@ -176,7 +176,9 @@
             尺寸: {{ img.image_width }}x{{ img.image_height }} |
             區域數: {{ img.tile_count }} |
             排除數: {{ img.excluded_tiles }} |
-            異常數: {{ img.anomaly_count }} |
+            異常數: {{ img.anomaly_count }}
+            {% if img.edge_defects %} | <strong style="color: #0891B2;">邊緣缺陷: {{ img.edge_defects | length }}</strong>{%
+            endif %} |
             最高分: {{ img.max_score | round(3) }} |
             耗時: {{ img.inference_time_ms | round(0) }}ms
         </p>
@@ -236,6 +238,52 @@
             {% endif %}
             {% endfor %}
         </div>
+
+        {% if img.edge_defects %}
+        <div style="margin-top: 16px; padding-top: 12px; border-top: 2px solid #0891B2;">
+            <h4 style="color: #0891B2; margin-bottom: 8px; font-family: 'Fira Code', monospace; font-size: 0.9rem;">CV
+                邊緣檢測 <span style="font-size: 0.75rem; color: var(--text-muted);">(傳統 CV — 非 PatchCore)</span></h4>
+            <table>
+                <thead>
+                    <tr>
+                        <th>邊</th>
+                        <th>位置</th>
+                        <th>大小</th>
+                        <th>面積</th>
+                        <th>差異值</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for ed in img.edge_defects %}
+                    <tr>
+                        <td><span
+                                style="padding: 2px 8px; border-radius: 4px; background: #CFFAFE; color: #0E7490; font-weight: 600;">{{
+                                ed.side }}</span></td>
+                        <td>({{ ed.bbox_x }}, {{ ed.bbox_y }})</td>
+                        <td>{{ ed.bbox_w }}x{{ ed.bbox_h }}</td>
+                        <td>{{ ed.area }}px</td>
+                        <td><span class="badge badge-ng">{{ ed.max_diff | round(1) }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <div class="img-grid" style="margin-top: 12px;">
+                {% for ed in img.edge_defects %}
+                {% if ed.heatmap_path and heatmap_base_dir %}
+                {% set ehm_url = hm_relative(ed.heatmap_path, heatmap_base_dir) %}
+                {% if ehm_url %}
+                <div class="image-box">
+                    <h4 style="margin-bottom:8px;color:#0891B2;font-size:0.85rem;font-family:'Fira Code',monospace;">
+                        Edge: {{ ed.side }}</h4>
+                    <img src="/heatmaps/{{ ehm_url }}" alt="edge {{ ed.side }}" onclick="openLightbox(this.src)">
+                </div>
+                {% endif %}
+                {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
 
     </div>
     {% endfor %}

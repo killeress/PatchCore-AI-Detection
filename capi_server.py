@@ -408,6 +408,39 @@ def aggregate_judgment(results: List[ImageResult]) -> Tuple[str, str]:
     ng_details_json = json.dumps(ng_details, ensure_ascii=False)
     return ai_judgment, ng_details_json
 
+def append_cv_edge_to_judgment(
+    ai_judgment: str, ng_details_json: str, edge_defects: List['EdgeDefect'], image_name: str
+) -> Tuple[str, str]:
+    """將 CV 邊緣瑕疵加入到判定中"""
+    if not edge_defects:
+        return ai_judgment, ng_details_json
+        
+    # 如果原本是 OK，現在因為邊緣瑕疵變成 NG
+    if ai_judgment == "OK":
+        ai_judgment = "NG"
+    elif ai_judgment.startswith("NG"):
+        # 保留原本的 NG，也可以標記為 NG_Mixed
+        pass
+        
+    try:
+        details = json.loads(ng_details_json) if ng_details_json != "[]" else []
+    except Exception:
+        details = []
+        
+    for d in edge_defects:
+        details.append({
+            "image": image_name,
+            "type": f"cv_edge_{d.side}",
+            "x": int(d.bbox[0]),
+            "y": int(d.bbox[1]),
+            "peak_x": int(d.center[0]),
+            "peak_y": int(d.center[1]),
+            "score": float(d.max_diff), # 用 max_diff 暫代 score
+            "area": int(d.area),
+            "is_cv_edge": True,
+        })
+        
+    return ai_judgment, json.dumps(details, ensure_ascii=False)
 
 # ── 推論結果 → DB 資料轉換 ──────────────────────────
 
@@ -426,18 +459,27 @@ def results_to_db_data(
         is_dust_only = 0
         is_bomb = 0
         anomaly_count = len(result.anomaly_tiles)
+        
+        # 加上 CV Edge 的 NG 數量
+        cv_edge_count = len(result.edge_defects)
 
-        if anomaly_count > 0:
+        if anomaly_count > 0 or cv_edge_count > 0:
             real_ng = [t for t, s, m in result.anomaly_tiles
                        if not t.is_suspected_dust_or_scratch and not t.is_bomb]
-            all_dust = all(t.is_suspected_dust_or_scratch for t, s, m in result.anomaly_tiles)
+            
+            # 如果有真實 NG 或是 CV 邊緣 NG，就判定為 NG
+            if real_ng or cv_edge_count > 0:
+                is_ng = 1
+                
+            all_dust = (anomaly_count > 0 and 
+                       all(t.is_suspected_dust_or_scratch for t, s, m in result.anomaly_tiles) and 
+                       cv_edge_count == 0)
+            
             has_bomb = any(t.is_bomb for t, s, m in result.anomaly_tiles)
 
-            if real_ng:
-                is_ng = 1
             if all_dust:
                 is_dust_only = 1
-            if has_bomb and not real_ng:
+            if has_bomb and not real_ng and cv_edge_count == 0:
                 is_bomb = 1
 
         max_score = max((s for _, s, _ in result.anomaly_tiles), default=0.0)
@@ -459,6 +501,7 @@ def results_to_db_data(
             "tile_count": result.processed_tile_count,
             "excluded_tiles": result.excluded_tile_count,
             "anomaly_count": anomaly_count,
+            "edge_defect_count": cv_edge_count,
             "max_score": max_score,
             "is_ng": is_ng,
             "is_dust_only": is_dust_only,
@@ -490,6 +533,23 @@ def results_to_db_data(
                 "peak_y": tile.anomaly_peak_y,
                 "heatmap_path": tile_hp,
             })
+
+        # CV 邊緣缺陷 — 獨立儲存 (不放入 tiles)
+        img_data["edge_defects"] = []
+        if hasattr(result, 'edge_defects') and result.edge_defects:
+            for i, edge in enumerate(result.edge_defects):
+                img_data["edge_defects"].append({
+                    "side": edge.side,
+                    "area": int(edge.area),
+                    "bbox_x": int(edge.bbox[0]),
+                    "bbox_y": int(edge.bbox[1]),
+                    "bbox_w": int(edge.bbox[2]),
+                    "bbox_h": int(edge.bbox[3]),
+                    "max_diff": float(edge.max_diff),
+                    "center_x": int(edge.center[0]),
+                    "center_y": int(edge.center[1]),
+                    "heatmap_path": getattr(edge, '_heatmap_path', ''),
+                })
 
         db_images.append(img_data)
 
@@ -578,10 +638,13 @@ class CAPIServer:
             # 從 DB 讀取最終設定實體
             db_params = self.db.get_all_config_params()
             if db_params:
+                # 建立 dict for quick lookup
+                db_dict = {p["param_name"]: p for p in db_params}
                 capi_config.apply_db_overrides(db_params)
                 logger.info(f"Applied {len(db_params)} config overrides from DB")
         except Exception as e:
             logger.warning(f"Failed to load DB config, using YAML values: {e}")
+            db_dict = {}
 
         # model_path 和 threshold 統一由 config 管理 (DB 優先, YAML fallback)
         model_path = capi_config.model_path or "./model.pt"
@@ -602,6 +665,14 @@ class CAPIServer:
             device=device,
             threshold=threshold,
         )
+        
+        # 同步 CV Edge 設定到 Inferencer
+        try:
+            from capi_edge_cv import EdgeInspectionConfig
+            edge_cfg = EdgeInspectionConfig.from_db_params(db_dict)
+            self.inferencer.update_edge_config(edge_cfg)
+        except Exception as e:
+            logger.warning(f"Failed to load CV Edge config from DB: {e}")
         
         # 更新全域狀態的模型資訊
         with server_status.lock:
@@ -1009,6 +1080,13 @@ class CAPIServer:
 
                 # 彙總判定
                 ai_judgment, ng_details = aggregate_judgment(results)
+
+                # 加上 CV Edge 判定
+                for result in results:
+                    if hasattr(result, 'edge_defects') and result.edge_defects:
+                        ai_judgment, ng_details = append_cv_edge_to_judgment(
+                            ai_judgment, ng_details, result.edge_defects, result.image_path.stem
+                        )
 
                 return ai_judgment, ng_details, results, is_duplicate
 

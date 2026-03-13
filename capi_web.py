@@ -18,7 +18,7 @@ import urllib.parse
 import mimetypes
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 import threading
 import logging
 from jinja2 import Environment, FileSystemLoader
@@ -176,6 +176,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_debug_inference_run()
             elif path == "/api/debug/coord-inference":
                 self._handle_debug_coord_inference()
+            elif path == "/api/debug/edge-inspect":
+                self._handle_api_debug_edge_inspect()
             elif path == "/api/ric/upload":
                 self._handle_ric_upload()
             elif path == "/api/ric/delete":
@@ -686,15 +688,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         model_resolution_map = {}
         if self.inferencer and hasattr(self.inferencer, 'config'):
             default_threshold = self.inferencer.config.anomaly_threshold
-            default_edge_margin = self.inferencer.config.edge_margin_px
-            model_resolution_map = self.inferencer.config.model_resolution_map or {}
+            # default_threshold = self.inferencer.config.anomaly_threshold # This is now handled directly in the render call
+            # default_edge_margin = self.inferencer.config.edge_margin_px # This is now handled directly in the render call
+            model_res_map = self.inferencer.config.model_resolution_map or {}
         
         template = self.jinja_env.get_template("debug_inference.html")
         html = template.render(
             request_path=path,
-            default_threshold=default_threshold,
-            default_edge_margin=default_edge_margin,
-            model_resolution_map=model_resolution_map,
+            default_threshold=self.inferencer.config.anomaly_threshold if self.inferencer else 0.5,
+            default_edge_margin=self.inferencer.config.edge_margin_px if self.inferencer else 0,
+            default_dust_extension=self.inferencer.config.dust_extension if self.inferencer else 0,
+            default_dust_metric=self.inferencer.config.dust_heatmap_metric if self.inferencer else 'iou',
+            default_dust_iou_thr=self.inferencer.config.dust_heatmap_iou_threshold if self.inferencer else 0.01,
+            default_dust_top_pct=self.inferencer.config.dust_heatmap_top_percent if self.inferencer else 5.0,
+            model_resolution_map=model_res_map
         )
         self._send_response(200, html)
 
@@ -954,7 +961,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         debug_threshold = float(data.get("threshold", 0.5))
         # 邊緣衰減覆寫：None = 使用 config 預設值，0 = 停用，>0 = 自訂寬度
         edge_margin_raw = data.get("edge_margin_px")
-        edge_margin_override = int(edge_margin_raw) if edge_margin_raw is not None else None
+        edge_margin_override = int(edge_margin_raw) if edge_margin_raw is not None and str(edge_margin_raw).strip() != "" else None
+        
+        # 灰塵檢測參數覆寫
+        dust_ext_raw = data.get("dust_extension")
+        dust_ext_override = int(dust_ext_raw) if dust_ext_raw is not None and str(dust_ext_raw).strip() != "" else None
+        
+        dust_iou_thr_raw = data.get("dust_heatmap_iou_threshold")
+        dust_iou_thr_override = float(dust_iou_thr_raw) if dust_iou_thr_raw is not None and str(dust_iou_thr_raw).strip() != "" else None
+        
+        dust_top_pct_raw = data.get("dust_heatmap_top_percent")
+        dust_top_pct_override = float(dust_top_pct_raw) if dust_top_pct_raw is not None and str(dust_top_pct_raw).strip() != "" else None
+        
+        dust_metric_override = data.get("dust_heatmap_metric")
 
         try:
             total_start = _time.time()
@@ -1017,20 +1036,78 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             cv2.imwrite(str(overview_path), overview_img)
             overview_url = f"/debug/heatmaps/{overview_filename}"
 
-            # 5. 產生各 Tile 熱力圖
+            # 5. 產生各 Tile 組合圖 (與推論記錄格式一致)
             tiles_data = []
-            for tile, score, anomaly_map in result.anomaly_tiles:
-                # 產生 heatmap overlay
-                tile_filename = f"debug_tile_{image_name}_t{tile.tile_id}.png"
-                tile_hm_path = debug_dir / tile_filename
+            image_dir = image_path.parent
+            
+            # 先找是否有 OMIT 圖片 (Panel 級別共用)
+            omit_candidates = []
+            for pattern in ["PINIGBI*.*", "OMIT0000*.*"]:
+                omit_candidates.extend(list(image_dir.glob(pattern)))
+            
+            omit_full = None
+            if omit_candidates:
+                omit_full = cv2.imread(str(omit_candidates[0]), cv2.IMREAD_UNCHANGED)
+                if omit_full is not None:
+                    logger.info(f"[DEBUG] Found OMIT image for dust check: {omit_candidates[0].name}")
 
-                # 使用 HeatmapManager 的 overlay 方法
+            for tile, score, anomaly_map in result.anomaly_tiles:
+                # 準備 TileInfo 擴充資訊 (灰塵檢查)
+                if omit_full is not None:
+                    try:
+                        tx, ty, tw, th = tile.x, tile.y, tile.width, tile.height
+                        oh, ow = omit_full.shape[:2]
+                        if tx < ow and ty < oh:
+                            x2_o = min(tx + tw, ow)
+                            y2_o = min(ty + th, oh)
+                            omit_crop = omit_full[ty:y2_o, tx:x2_o].copy()
+                            tile.omit_crop_image = omit_crop
+                            
+                            # A. 灰塵偵測
+                            is_dust, dust_mask, bright_ratio, detail_text = self.inferencer.check_dust_or_scratch_feature(omit_crop, extension_override=dust_ext_override)
+                            tile.dust_mask = dust_mask
+                            tile.dust_bright_ratio = bright_ratio
+                            
+                            # B. IOU 計算
+                            top_pct = dust_top_pct_override if dust_top_pct_override is not None else self.inferencer.config.dust_heatmap_top_percent
+                            metric_mode = dust_metric_override if dust_metric_override else self.inferencer.config.dust_heatmap_metric
+                            if is_dust and anomaly_map is not None:
+                                iou, heatmap_binary = self.inferencer.compute_dust_heatmap_iou(
+                                    dust_mask, anomaly_map, top_percent=top_pct, metric=metric_mode
+                                )
+                                tile.dust_heatmap_iou = iou
+                                # 產生 Debug 圖
+                                tile.dust_iou_debug_image = self.inferencer.generate_dust_iou_debug_image(
+                                    tile.image, anomaly_map, dust_mask, heatmap_binary, iou, top_pct, tile.is_suspected_dust_or_scratch
+                                )
+                            tile.dust_detail_text = detail_text
+                    except Exception as e:
+                        logger.warning(f"[DEBUG] Dust check processing failed for tile {tile.tile_id}: {e}")
+
+                # 產生組合圖
                 if self.heatmap_manager:
-                    overlay = self.heatmap_manager.generate_heatmap_overlay(
-                        tile.image, anomaly_map, alpha=0.5
-                    )
+                    try:
+                        composite_path = self.heatmap_manager.save_tile_heatmap(
+                            save_dir=debug_dir,
+                            image_name=f"debug_{image_name}",
+                            tile_id=tile.tile_id,
+                            tile_image=tile.image,
+                            anomaly_map=anomaly_map,
+                            score=score,
+                            tile_info=tile,
+                            score_threshold=debug_threshold,
+                            iou_threshold=dust_iou_thr_override if dust_iou_thr_override is not None else getattr(self.inferencer.config, 'dust_heatmap_iou_threshold', 0.01),
+                        )
+                        tile_url = f"/debug/heatmaps/{Path(composite_path).name}"
+                    except Exception as e:
+                        logger.error(f"[DEBUG] Composite image generation failed for tile {tile.tile_id}: {e}")
+                        # Fallback to simple overlay if composite fails
+                        overlay = self.heatmap_manager.generate_heatmap_overlay(tile.image, anomaly_map, alpha=0.5)
+                        tile_filename = f"debug_tile_{image_name}_t{tile.tile_id}_fallback.png"
+                        cv2.imwrite(str(debug_dir / tile_filename), overlay)
+                        tile_url = f"/debug/heatmaps/{tile_filename}"
                 else:
-                    # Fallback: 簡易 heatmap
+                    # Fallback (無 HeatmapManager)
                     tile_img = tile.image.copy()
                     if len(tile_img.shape) == 2:
                         tile_img = cv2.cvtColor(tile_img, cv2.COLOR_GRAY2BGR)
@@ -1039,9 +1116,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     if heatmap_color.shape[:2] != tile_img.shape[:2]:
                         heatmap_color = cv2.resize(heatmap_color, (tile_img.shape[1], tile_img.shape[0]))
                     overlay = cv2.addWeighted(tile_img, 0.5, heatmap_color, 0.5, 0)
-
-                cv2.imwrite(str(tile_hm_path), overlay)
-                tile_url = f"/debug/heatmaps/{tile_filename}"
+                    tile_filename = f"debug_tile_{image_name}_t{tile.tile_id}_simple.png"
+                    cv2.imwrite(str(debug_dir / tile_filename), overlay)
+                    tile_url = f"/debug/heatmaps/{tile_filename}"
 
                 tile_status = "NG"
                 if tile.is_bomb:
@@ -1107,6 +1184,123 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"[DEBUG] Inference error: {e}", exc_info=True)
             self._send_json({"error": f"推論失敗: {str(e)}"})
+
+    def _handle_api_debug_edge_inspect(self):
+        """API: 測試單邊 CV 邊緣檢測"""
+        import cv2
+        import numpy as np
+        import base64
+        from capi_edge_cv import CVEdgeInspector, EdgeSideConfig
+        
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except Exception:
+            self._send_json({"error": "Invalid JSON body"})
+            return
+
+        image_path_str = data.get("image_path", "").strip()
+        side = data.get("side", "left")
+        
+        if not image_path_str:
+            self._send_json({"error": "請提供圖片路徑 (image_path)"})
+            return
+
+        image_path = Path(image_path_str)
+        if not image_path.exists():
+            self._send_json({"error": f"檔案不存在: {image_path}"})
+            return
+
+        try:
+            # 讀取參數
+            cfg = EdgeSideConfig(
+                width=int(data.get("width", 450)),
+                threshold=int(data.get("threshold", 5)),
+                min_area=int(data.get("min_area", 70)),
+                exclude_top=int(data.get("exclude_top", 80)),
+                exclude_bottom=int(data.get("exclude_bottom", 80)),
+                exclude_left=int(data.get("exclude_left", 10)),
+                exclude_right=int(data.get("exclude_right", 10)),
+            )
+
+            # 準備推論器 (拿掉這段檢查，因為我們自己算邊界)
+            # if self.inferencer is None:
+            #     self._send_json({"error": "AI 推論器尚未載入，無法取得邊界參數"})
+            #     return
+                
+            # 讀取圖片並自行找範圍，不依賴 inferencer
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            if image is None:
+                self._send_json({"error": "無法讀取圖片"})
+                return
+                
+            image_size = (image.shape[1], image.shape[0])
+            
+            def _fast_otsu_bounds(img: np.ndarray) -> Tuple[int, int, int, int]:
+                """輕量版 Otsu 邊界尋找，不載入模型"""
+                if len(img.shape) == 3:
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray = img
+                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+                _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                kernel = np.ones((15, 15), np.uint8)
+                closing = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+                contours, _ = cv2.findContours(closing, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                img_h, img_w = img.shape[:2]
+                x_min, y_min = float('inf'), float('inf')
+                x_max, y_max = -float('inf'), -float('inf')
+                
+                for contour in contours:
+                    if cv2.contourArea(contour) > 1000:
+                        x, y, w, h = cv2.boundingRect(contour)
+                        x_min = min(x_min, x)
+                        y_min = min(y_min, y)
+                        x_max = max(x + w, x_max)
+                        y_max = max(y + h, y_max)
+                
+                if x_min == float('inf'):
+                    return 0, 0, img_w, img_h
+                return int(x_min), int(y_min), int(x_max), int(y_max)
+
+            # 放棄使用 self.inferencer 的 calculate_otsu_bounds，因為這會觸發卡死
+            # 直接強制使用 _fast_otsu_bounds 算出來的邊界
+            otsu_bounds = _fast_otsu_bounds(image)
+
+            # 準備 EdgeInspector (從自己 init)
+            inspector = CVEdgeInspector()
+            defects, debug_imgs = inspector.inspect_single_side(
+                image, otsu_bounds, side, config_override=cfg
+            )
+
+            # 將 debug 圖片轉為 base64
+            encoded_imgs = {}
+            for k, img in debug_imgs.items():
+                if img is not None:
+                    _, buffer = cv2.imencode('.png', img)
+                    b64 = base64.b64encode(buffer).decode('utf-8')
+                    encoded_imgs[k] = f"data:image/png;base64,{b64}"
+
+            self._send_json({
+                "success": True,
+                "defects": [
+                    {
+                        "area": d.area,
+                        "bbox": d.bbox,
+                        "center": d.center,
+                        "max_diff": d.max_diff
+                    } for d in defects
+                ],
+                "images": encoded_imgs,
+                "otsu_bounds": otsu_bounds,
+                "image_size": image_size,
+            })
+
+        except Exception as e:
+            logger.error(f"[DEBUG] Edge Inspect error: {e}", exc_info=True)
+            self._send_json({"error": f"邊緣檢測失敗: {str(e)}"})
 
     def _handle_debug_coord_inference(self):
         """API: 人工座標推論 — 以指定產品座標為中心裁切 512x512 做推論"""

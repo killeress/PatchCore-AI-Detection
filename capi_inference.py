@@ -29,7 +29,11 @@ from typing import List, Dict, Tuple, Optional, Any
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import logging
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
+from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect
+
+logger = logging.getLogger("capi.inference")
 
 
 # ── 產品解析度映射 ─────────────────────────────────────
@@ -189,6 +193,9 @@ class ImageResult:
     # 客戶端傳送的炸彈資訊 (供繪圖使用)
     client_bomb_info: Optional[Dict[str, Any]] = None
     
+    # CV 邊緣檢查結果
+    edge_defects: List[EdgeDefect] = field(default_factory=list)
+    
     @property
     def total_tiles(self) -> int:
         return len(self.tiles)
@@ -242,6 +249,9 @@ class CAPIInferencer:
         # 載入 MARK 模板
         self._load_mark_template()
         
+        # 初始化傳統 CV 邊緣檢測器 (之後會從 DB 中讀取設定後覆蓋)
+        self.edge_inspector = CVEdgeInspector()
+
         # 載入模型
         if self._model_mapping:
             # 多模型模式：預載所有映射的模型
@@ -466,6 +476,20 @@ class CAPIInferencer:
                 y_end = y_start + final_height
         
         return (x_start, y_start, x_end, y_end), original_y2
+
+    def find_panel_boundaries(self, image: np.ndarray) -> Tuple[int, int, int, int]:
+        """
+        向後相容別名，對應舊版呼叫。
+        注意：此版本僅回傳四元組邊界，不回傳 original_y2。
+        """
+        bounds, _ = self.calculate_otsu_bounds(image)
+        return bounds
+
+    def update_edge_config(self, config: Any):
+        """
+        更新 CV 邊緣檢測設定
+        """
+        self.edge_inspector = CVEdgeInspector(config)
     
     def find_mark_region(self, image: np.ndarray) -> Optional[ExclusionRegion]:
         """使用模板匹配找到 MARK 區域"""
@@ -885,6 +909,22 @@ class CAPIInferencer:
             
             if score >= active_threshold:
                 anomaly_tiles.append((tile, score, anomaly_map))
+                
+        # 執行傳統 CV 邊緣檢查
+        # 如果 edge_inspector 啟用，並且我們有 raw_bounds
+        if self.edge_inspector.config.enabled and result.raw_bounds:
+            try:
+                # 重新讀取原圖 (全尺寸) 給 CV 處理，因為它需要高解析度才能看清楚
+                # 如果 cv2 記憶體太大，可以在 preprocess 前把 raw cv_image 傳過來，但此處再次讀取較安全
+                full_image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+                if full_image is not None:
+                    # CV 內部處理需要時間，記錄一下
+                    cv_start = time.time()
+                    edge_defects = self.edge_inspector.inspect(full_image, result.raw_bounds)
+                    result.edge_defects = edge_defects
+                    logger.debug(f"CV Edge Inspection: 找到 {len(edge_defects)} 個邊緣異常，耗時 {time.time() - cv_start:.3f}s")
+            except Exception as e:
+                logger.error(f"CV 邊緣檢查失敗 {result.image_path.name}: {e}", exc_info=True)
         
         # 更新結果
         result.anomaly_tiles = anomaly_tiles
@@ -911,6 +951,7 @@ class CAPIInferencer:
             "max_score": max(scores),
             "avg_score": sum(scores) / len(scores),
             "anomaly_positions": positions,
+            "cv_edge_anomaly_count": len(result.edge_defects),
         }
     
     def visualize_preprocessing(
@@ -966,7 +1007,7 @@ class CAPIInferencer:
         return vis
 
     
-    def check_dust_or_scratch_feature(self, image: np.ndarray) -> tuple:
+    def check_dust_or_scratch_feature(self, image: np.ndarray, extension_override: Optional[int] = None) -> tuple:
         """
         進階灰塵/刮痕偵測 — 使用 CLAHE 增強 + Otsu 自適應閾值 + 形態學 + 面積篩選
         
@@ -979,6 +1020,7 @@ class CAPIInferencer:
         
         Args:
             image: OMIT 圖片裁切區域 (BGR 或灰階)
+            extension_override: 覆寫 Config 中的 dust_extension 設定
             
         Returns:
             (is_dust, dust_mask, bright_ratio, detail_text)
@@ -994,7 +1036,7 @@ class CAPIInferencer:
         fallback_threshold = self.config.dust_brightness_threshold
         area_min = self.config.dust_area_min
         area_max = self.config.dust_area_max
-        extension = self.config.dust_extension
+        extension = self.config.dust_extension if extension_override is None else extension_override
         
         # Step 1: 轉灰階
         if len(image.shape) == 3:
@@ -2109,6 +2151,24 @@ class CAPIInferencer:
         cv2.putText(vis, status, (x1 + 20, y1 + 100), 
                     cv2.FONT_HERSHEY_SIMPLEX, 4.0, color, 10)
         
+        # 標記 CV 邊緣檢測異常
+        if hasattr(result, 'edge_defects') and result.edge_defects:
+            for ed in result.edge_defects:
+                bx, by, bw, bh = ed.bbox
+                cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), (0, 0, 255), 4)
+                
+                # 在框的旁邊加上文字（處理文字是否超出邊界的邏輯）
+                text = f"Edge NG: {ed.side} ({ed.max_diff:.0f})"
+                text_x = max(10, bx)
+                text_y = max(30, by - 10)
+                if ed.side == 'top':
+                    text_y = by + bh + 30
+                elif ed.side == 'left':
+                    text_x = bx + bw + 10
+                    
+                cv2.putText(vis, text, (text_x, text_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+
         return vis
     
     def generate_bomb_diagram(self, image_path: Path, result: ImageResult,

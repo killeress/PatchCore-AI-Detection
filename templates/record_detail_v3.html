@@ -587,6 +587,11 @@
                         <span style="color: #CBD5E1;">|</span>
                         <span><strong style="color: #475569; font-weight: 500;">異常:</strong> {{ img.anomaly_count
                             }}</span>
+                        {% if img.edge_defects %}
+                        <span style="color: #CBD5E1;">|</span>
+                        <span><strong style="color: #0891B2; font-weight: 500;">邊緣缺陷:</strong> <strong
+                                style="color: #0891B2;">{{ img.edge_defects | length }}</strong></span>
+                        {% endif %}
                         <span style="color: #CBD5E1;">|</span>
                         <span><strong style="color: #475569; font-weight: 500;">最高分:</strong> <strong
                                 style="color: #0F172A;">{{ img.max_score | round(3) }}</strong></span>
@@ -663,6 +668,66 @@
                     {% endif %}
                     {% endfor %}
                 </div>
+
+                {% if img.edge_defects %}
+                <div style="margin-top: 24px; padding-top: 16px; border-top: 2px solid #0891B2;">
+                    <h5 style="font-size: 14px; font-weight: 600; color: #0891B2; margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+                        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+                        </svg>
+                        CV 邊緣檢測
+                        <span style="font-size: 11px; font-weight: 400; color: #64748B; margin-left: 4px;">(傳統 CV — 非 PatchCore)</span>
+                    </h5>
+
+                    <div style="overflow-x: auto; border: 1px solid #A5F3FC; border-radius: 8px; margin-bottom: 16px; background: #F0FDFA;">
+                        <table class="data-table list-table">
+                            <thead>
+                                <tr style="background: #ECFEFF;">
+                                    <th style="width: 80px; color: #0E7490;">邊</th>
+                                    <th style="color: #0E7490;">位置 (x, y)</th>
+                                    <th style="color: #0E7490;">大小 (w × h)</th>
+                                    <th style="color: #0E7490;">面積 (px)</th>
+                                    <th style="color: #0E7490;">差異值</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for ed in img.edge_defects %}
+                                <tr>
+                                    <td>
+                                        <span style="display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #CFFAFE; color: #0E7490; border: 1px solid #A5F3FC;">
+                                            {{ ed.side }}
+                                        </span>
+                                    </td>
+                                    <td>({{ ed.bbox_x }}, {{ ed.bbox_y }})</td>
+                                    <td>{{ ed.bbox_w }} × {{ ed.bbox_h }}</td>
+                                    <td>{{ ed.area }}</td>
+                                    <td>
+                                        <span class="badge bg-ng-subtle">
+                                            {{ ed.max_diff | round(1) }}
+                                        </span>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="img-grid-scroll">
+                        {% for ed in img.edge_defects %}
+                        {% if ed.heatmap_path and heatmap_base_dir %}
+                        {% set ehm_url = hm_relative(ed.heatmap_path, heatmap_base_dir) %}
+                        {% if ehm_url %}
+                        <div class="image-box">
+                            <div class="image-box-label" style="color: #0891B2; background: rgba(236, 254, 255, 0.95); border-color: #A5F3FC;">Edge: {{ ed.side }}</div>
+                            <img src="/heatmaps/{{ ehm_url }}" alt="edge {{ ed.side }}" onclick="openLightbox(this.src)">
+                        </div>
+                        {% endif %}
+                        {% endif %}
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
 
             </div>
             {% endfor %}

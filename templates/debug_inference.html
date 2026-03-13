@@ -214,8 +214,9 @@
 
     .tiles-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-        gap: 16px;
+        /* 改為單欄或極寬的欄位，因為組合圖比例約 5:1 */
+        grid-template-columns: 1fr;
+        gap: 20px;
     }
 
     .tile-card {
@@ -233,7 +234,9 @@
 
     .tile-card img {
         width: 100%;
-        height: 220px;
+        /* 調整高度以顯示寬比例的組合圖 */
+        height: auto;
+        min-height: 180px;
         object-fit: contain;
         background: #0a0f1a;
         cursor: pointer;
@@ -540,24 +543,84 @@
             </div>
         </div>
 
-        <!-- Input -->
-        <div class="card" style="padding:20px;">
-            <div class="input-section">
+        <!-- Input & Groups -->
+        <div class="card" style="padding: 24px; background: rgba(15, 23, 42, 0.4); border: 1px solid var(--border);">
+            <!-- Image Path Input Row -->
+            <div class="input-section" style="margin-bottom: 24px;">
                 <input type="text" id="image-path-input" placeholder="輸入圖片絕對路徑，例如: /data/images/G0F00000_143133.tif"
-                    autocomplete="off" spellcheck="false">
-                <div class="threshold-group">
-                    <label for="threshold-input">判定門檻</label>
-                    <input type="number" id="threshold-input" value="{{ default_threshold }}" min="0" max="1"
-                        step="0.01">
+                    autocomplete="off" spellcheck="false"
+                    style="flex: 1; font-size: 1rem; padding: 14px 18px; background: rgba(0,0,0,0.3); border-color: rgba(59, 130, 246, 0.3);">
+            </div>
+
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; margin-bottom: 24px;">
+                <!-- Group 1: 基礎推論設定 -->
+                <div
+                    style="background: rgba(59, 130, 246, 0.03); border: 1px solid rgba(59, 130, 246, 0.15); border-radius: 12px; padding: 18px;">
+                    <div
+                        style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px; color: #60a5fa; font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">
+                        <span>⚡ 基礎推論設定</span>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                        <div class="toggle-group">
+                            <label for="threshold-input">異常分數閾值</label>
+                            <input type="number" id="threshold-input" placeholder="預設 ({{ default_threshold }})"
+                                value="{{ default_threshold }}" min="0" max="1" step="0.01">
+                        </div>
+                        <div class="toggle-group">
+                            <label for="edge-margin-input">邊緣衰減寬度 (px)</label>
+                            <input type="number" id="edge-margin-input" placeholder="預設 ({{ default_edge_margin }})"
+                                value="{{ default_edge_margin }}" min="0" max="2000" step="1">
+                        </div>
+                    </div>
                 </div>
-                <div class="toggle-group">
-                    <label for="edge-margin-input">邊緣衰減 (px)</label>
-                    <input type="number" id="edge-margin-input" value="{{ default_edge_margin }}" min="0" max="512"
-                        step="16">
+
+                <!-- Group 2: 灰塵偵測覆寫 -->
+                <div
+                    style="background: rgba(249, 115, 22, 0.03); border: 1px solid rgba(249, 115, 22, 0.15); border-radius: 12px; padding: 18px;">
+                    <div
+                        style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px; color: #fb923c; font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">
+                        <span>🧹 灰塵偵測覆寫</span>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; row-gap: 12px;">
+                        <div class="toggle-group">
+                            <label for="dust-extension-input">灰塵區域膨脹像素</label>
+                            <input type="number" id="dust-extension-input"
+                                placeholder="預設 ({{ default_dust_extension }})" value="{{ default_dust_extension }}"
+                                min="0" max="50" step="1">
+                        </div>
+                        <div class="toggle-group">
+                            <label for="dust-metric-select">判定指標</label>
+                            <select id="dust-metric-select"
+                                style="background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; color: var(--text); font-family: 'Fira Code', monospace; font-size: 0.95rem; outline: none; width: 100%; transition: border-color 0.2s; text-align: center;">
+                                <option value="coverage" {% if default_dust_metric=='coverage' %}selected{% endif %}>
+                                    Coverage</option>
+                                <option value="iou" {% if default_dust_metric=='iou' %}selected{% endif %}>IOU</option>
+                            </select>
+                        </div>
+                        <div class="toggle-group">
+                            <label for="dust-iou-thr-input">Heatmap-Dust 重疊門檻</label>
+                            <input type="number" id="dust-iou-thr-input" placeholder="預設 ({{ default_dust_iou_thr }})"
+                                value="{{ default_dust_iou_thr }}" min="0" max="1" step="0.01">
+                        </div>
+                        <div class="toggle-group">
+                            <label for="dust-top-pct-input">Heatmap 熱區取前 X%</label>
+                            <input type="number" id="dust-top-pct-input" placeholder="預設 ({{ default_dust_top_pct }})"
+                                value="{{ default_dust_top_pct }}" min="0.1" max="100" step="0.1">
+                        </div>
+                    </div>
                 </div>
-                <button class="btn-run" id="btn-run" onclick="runInference()">
+            </div>
+
+            <!-- Footer Action Row -->
+            <div
+                style="display: flex; align-items: center; justify-content: flex-end; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.05);">
+                <div style="margin-right: auto; color: var(--text-muted); font-size: 0.85rem; font-style: italic;">
+                    <i class="fas fa-info-circle"></i> 灰塵參數若留空，將使用模型預設設定
+                </div>
+                <button class="btn-run" id="btn-run" onclick="runInference()"
+                    style="width: 180px; height: 48px; font-size: 1.1rem; box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);">
                     <span class="spinner" id="spinner"></span>
-                    <span id="btn-text">▶ 推論</span>
+                    <span id="btn-text">▶ 開始推論</span>
                 </button>
             </div>
         </div>
@@ -659,26 +722,126 @@
         </div>
     </div>
 
-    <!-- ═══ 邊緣檢測頁籤 (測試) ═══ -->
     <div id="tab-edge" class="tab-content">
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
             <div>
                 <h2
                     style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
                     📐 邊緣檢測 (測試)
-                    <span class="debug-badge"
-                        style="background:rgba(59,130,246,0.12); border-color:rgba(59,130,246,0.3); color:var(--accent);">WIP</span>
                 </h2>
                 <p style="color:var(--text-muted); font-size:0.9rem; margin-top:4px;">
-                    這項功能目前正在開發中，將提供基於電腦視覺 (CV) 的邊緣瑕疵檢測測試工具。
+                    手動輸入參數，測試 CV 邊緣檢測的判定效果。
                 </p>
             </div>
         </div>
 
-        <div class="card" style="padding:40px 20px; text-align:center;">
-            <div style="font-size:3rem; margin-bottom:16px;">🚧</div>
-            <h3 style="color:var(--text); margin-bottom:8px;">功能開發中</h3>
-            <p style="color:var(--text-muted);">邊緣檢測測試介面即將推出，敬請期待。</p>
+        <div class="card" style="padding:20px;">
+            <div class="coord-input-row">
+                <input type="text" id="edge-image-path" placeholder="圖片絕對路徑" autocomplete="off" spellcheck="false"
+                    style="flex:1; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.95rem; outline:none;">
+                <div class="coord-group">
+                    <label for="edge-side">檢測目標邊緣</label>
+                    <select id="edge-side">
+                        <option value="left" selected>Left (左)</option>
+                        <option value="right">Right (右)</option>
+                        <option value="top">Top (上)</option>
+                        <option value="bottom">Bottom (下)</option>
+                    </select>
+                </div>
+                <div class="coord-group">
+                    <label for="edge-width">掃描寬度 (px)</label>
+                    <input type="number" id="edge-width" value="450" min="1" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-threshold">明暗差閾值</label>
+                    <input type="number" id="edge-threshold" value="5" min="1" max="255" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-min-area">最小面積 (px)</label>
+                    <input type="number" id="edge-min-area" value="70" min="1" step="1">
+                </div>
+                <!-- 避開區域 -->
+                <div class="coord-group">
+                    <label for="edge-ex-top">避開上(px)</label>
+                    <input type="number" id="edge-ex-top" value="80" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-ex-bottom">避開下(px)</label>
+                    <input type="number" id="edge-ex-bottom" value="80" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-ex-left">避開左(px)</label>
+                    <input type="number" id="edge-ex-left" value="10" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-ex-right">避開右(px)</label>
+                    <input type="number" id="edge-ex-right" value="10" min="0" step="1">
+                </div>
+
+                <button class="btn-run" id="btn-edge-run" onclick="runEdgeInspect()" style="background:var(--accent);">
+                    <span class="spinner" id="edge-spinner"></span>
+                    <span id="edge-btn-text">📐 邊緣測試</span>
+                </button>
+            </div>
+
+            <!-- Algorithm Documentation Area -->
+            <div
+                style="margin-top: 16px; background: rgba(30, 41, 59, 0.3); border: 1px solid var(--border); border-radius: 10px; overflow: hidden;">
+                <button onclick="document.getElementById('algo-desc').classList.toggle('hidden')"
+                    style="width: 100%; text-align: left; background: rgba(59, 130, 246, 0.1); border: none; padding: 10px 16px; color: #93c5fd; font-size: 0.85rem; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                    💡 CV 檢測邏輯說明 (點擊展開/收合)
+                </button>
+                <div id="algo-desc" class="hidden"
+                    style="padding: 16px; font-size: 0.85rem; line-height: 1.6; color: var(--text-muted);">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+                        <div>
+                            <div
+                                style="color: var(--text); font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                                <span
+                                    style="background: var(--accent); color: white; width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px;">1</span>
+                                處理流程
+                            </div>
+                            <ol style="padding-left: 20px; margin: 0;">
+                                <li><b>ROI 擷取</b>：根據 <code>raw_bounds</code> 與 <code>掃描寬度</code> / <code>避開區域</code>
+                                    切出邊緣區塊。</li>
+                                <li><b>影像預處理</b>：執行高斯模糊 (Gaussian Blur) 消除微小噪點。</li>
+                                <li><b>背景估計</b>：使用大尺寸中值濾波 (Median Blur) 模擬平滑的產品背景。</li>
+                                <li><b>差異計算</b>：計算「原圖」與「背景」的絕對差值 (AbsDiff)。</li>
+                                <li><b>缺陷提取</b>：套用 <code>明暗差閾值</code> 進行二值化，找出顯著差異點。</li>
+                                <li><b>面積過濾</b>：過濾掉面積小於 <code>最小面積</code> 的雜訊，保留真實缺陷。</li>
+                            </ol>
+                        </div>
+                        <div>
+                            <div
+                                style="color: var(--text); font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                                <span
+                                    style="background: var(--accent); color: white; width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px;">2</span>
+                                參數說明
+                            </div>
+                            <ul style="padding-left: 20px; margin: 0; list-style-type: none;">
+                                <li style="margin-bottom: 6px;"><code
+                                        style="color: #93c5fd;">掃描寬度</code>：從邊界向產品內部延伸的掃描長度。</li>
+                                <li style="margin-bottom: 6px;"><code style="color: #93c5fd;">明暗差閾值</code>：缺陷與背景的亮度差異
+                                    (0-255)。越小越靈敏，但也越容易受背景噪音干擾。</li>
+                                <li style="margin-bottom: 6px;"><code
+                                        style="color: #93c5fd;">最小面積</code>：判定為缺陷的最小連續像素點數。</li>
+                                <li><code style="color: #93c5fd;">避開區域</code>：用於排除導線、標籤等已知干擾物。</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Edge Error -->
+        <div id="edge-error-box" class="error-box hidden"></div>
+
+        <!-- Edge Result -->
+        <div id="edge-result-section" class="hidden">
+            <div class="coord-info-cards" id="edge-info-cards"
+                style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:16px; margin:24px 0;">
+            </div>
+            <div class="coord-result-grid" id="edge-result-grid"></div>
         </div>
     </div>
 
@@ -738,14 +901,26 @@
         document.getElementById('result-section').classList.add('hidden');
 
         try {
+            const dustExt = document.getElementById('dust-extension-input').value;
+            const dustMetric = document.getElementById('dust-metric-select').value;
+            const dustIouThr = document.getElementById('dust-iou-thr-input').value;
+            const dustTopPct = document.getElementById('dust-top-pct-input').value;
+
+            const requestBody = {
+                image_path: imagePath,
+                threshold: parseFloat(document.getElementById('threshold-input').value) || 0.5,
+                edge_margin_px: document.getElementById('edge-margin-input').value !== "" ? parseInt(document.getElementById('edge-margin-input').value) : null,
+            };
+
+            if (dustExt !== "") requestBody.dust_extension = parseInt(dustExt);
+            if (dustMetric !== "") requestBody.dust_heatmap_metric = dustMetric;
+            if (dustIouThr !== "") requestBody.dust_heatmap_iou_threshold = parseFloat(dustIouThr);
+            if (dustTopPct !== "") requestBody.dust_heatmap_top_percent = parseFloat(dustTopPct);
+
             const resp = await fetch('/api/debug/inference', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    image_path: imagePath,
-                    threshold: parseFloat(document.getElementById('threshold-input').value) || 0.5,
-                    edge_margin_px: parseInt(document.getElementById('edge-margin-input').value) || 0,
-                }),
+                body: JSON.stringify(requestBody),
             });
 
             const data = await resp.json();
@@ -765,14 +940,19 @@
         }
     }
 
-    function showError(msg) {
-        const box = document.getElementById('error-box');
-        box.textContent = '❌ ' + msg;
-        box.classList.remove('hidden');
+    function showError(msg, elementId = 'error-box') {
+        const box = document.getElementById(elementId);
+        if (box) {
+            box.textContent = '❌ ' + msg;
+            box.classList.remove('hidden');
+        }
     }
 
-    function hideError() {
-        document.getElementById('error-box').classList.add('hidden');
+    function hideError(elementId = 'error-box') {
+        const box = document.getElementById(elementId);
+        if (box) {
+            box.classList.add('hidden');
+        }
     }
 
     function renderResults(data) {
@@ -1091,6 +1271,161 @@
             `;
         }
 
+        grid.innerHTML = imagesHtml;
+    }
+
+    // ── Edge Inspection Sync ──
+    let edgeSettings = {};
+    async function fetchEdgeSettings() {
+        try {
+            const res = await fetch('/api/settings');
+            const data = await res.json();
+            if (data.params) {
+                data.params.forEach(p => {
+                    if (p.param_name.startsWith('cv_edge_')) {
+                        edgeSettings[p.param_name] = p.param_value;
+                    }
+                });
+                console.log("[Edge] Settings pre-loaded:", edgeSettings);
+                // Initial sync for default selection
+                syncEdgeInputs();
+            }
+        } catch (e) {
+            console.error("[Edge] Failed to fetch settings for sync:", e);
+        }
+    }
+
+    function syncEdgeInputs() {
+        const side = document.getElementById('edge-side').value; // 'left', 'right', 'top', 'bottom'
+        const width = edgeSettings[`cv_edge_${side}_width`];
+        const threshold = edgeSettings[`cv_edge_${side}_threshold`];
+        const minArea = edgeSettings[`cv_edge_${side}_min_area`];
+
+        if (width !== undefined) document.getElementById('edge-width').value = width;
+        if (threshold !== undefined) document.getElementById('edge-threshold').value = threshold;
+        if (minArea !== undefined) document.getElementById('edge-min-area').value = minArea;
+
+        console.log(`[Edge] Synced inputs for ${side}: ${width}, ${threshold}, ${minArea}`);
+    }
+
+    document.getElementById('edge-side').addEventListener('change', syncEdgeInputs);
+
+    // Load settings on init
+    document.addEventListener('DOMContentLoaded', () => {
+        fetchEdgeSettings();
+    });
+
+    async function runEdgeInspect() {
+        const imagePath = document.getElementById('edge-image-path').value.trim();
+        if (!imagePath) {
+            showError('請輸入圖片路徑', 'edge-error-box');
+            return;
+        }
+
+        const btn = document.getElementById('btn-edge-run');
+        const btnText = document.getElementById('edge-btn-text');
+        const spinner = document.getElementById('edge-spinner');
+
+        btn.disabled = true;
+        btnText.textContent = '分析中...';
+        spinner.classList.add('active');
+        document.getElementById('edge-error-box').classList.add('hidden');
+        document.getElementById('edge-result-section').classList.add('hidden');
+
+        try {
+            const side = document.getElementById('edge-side').value;
+            const payload = {
+                image_path: imagePath,
+                side: side,
+                width: parseInt(document.getElementById('edge-width').value),
+                threshold: parseInt(document.getElementById('edge-threshold').value),
+                min_area: parseInt(document.getElementById('edge-min-area').value),
+                exclude_top: parseInt(document.getElementById('edge-ex-top').value),
+                exclude_bottom: parseInt(document.getElementById('edge-ex-bottom').value),
+                exclude_left: parseInt(document.getElementById('edge-ex-left').value),
+                exclude_right: parseInt(document.getElementById('edge-ex-right').value)
+            };
+
+            const res = await fetch('/api/debug/edge-inspect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await res.json();
+            if (!data.success) {
+                showError(data.error || '推論失敗 (不明錯誤)', 'edge-error-box');
+                return;
+            }
+
+            renderEdgeResult(data);
+        } catch (err) {
+            showError(`連線錯誤: ${err.message}`, 'edge-error-box');
+        } finally {
+            btn.disabled = false;
+            btnText.textContent = '📐 邊緣測試';
+            spinner.classList.remove('active');
+        }
+    }
+
+    function renderEdgeResult(data) {
+        document.getElementById('edge-result-section').classList.remove('hidden');
+        const cards = document.getElementById('edge-info-cards');
+
+        const defects = data.defects || [];
+        const isNG = defects.length > 0;
+
+        cards.innerHTML = `
+            <div class="summary-card">
+                <div class="label">判定結果</div>
+                <div class="value" style="color:${isNG ? 'var(--ng)' : 'var(--ok)'}">
+                    ${isNG ? '❌ 邊緣異常' : '✅ 邊緣正常'}
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="label">異常數量</div>
+                <div class="value" style="color:${isNG ? 'var(--ng)' : 'var(--text)'}">${defects.length}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">產品邊界 (Otsu)</div>
+                <div class="value" style="color:var(--text-muted); font-size:0.85rem;">
+                    (${data.otsu_bounds.join(', ')})
+                </div>
+            </div>
+        `;
+
+        const grid = document.getElementById('edge-result-grid');
+        const imgs = data.images || {};
+        let imagesHtml = '';
+
+        if (imgs.roi) {
+            imagesHtml += `
+            <div class="img-card">
+                <h4>🖼️ 原始 ROI (灰階)</h4>
+                <img src="${imgs.roi}" alt="ROI" onclick="openLightbox(this.src)">
+            </div>`;
+        }
+        if (imgs.background) {
+            imagesHtml += `
+            <div class="img-card">
+                <h4>☁️ 估計背景 (平滑後)</h4>
+                <img src="${imgs.background}" alt="Background" onclick="openLightbox(this.src)">
+            </div>`;
+        }
+        if (imgs.diff) {
+            imagesHtml += `
+            <div class="img-card">
+                <h4>🔥 差異圖 (Diff * 10)</h4>
+                <img src="${imgs.diff}" alt="Difference" onclick="openLightbox(this.src)">
+            </div>`;
+        }
+        if (imgs.result) {
+            imagesHtml += `
+            <div class="img-card">
+                <h4>🎯 最終檢測結果 (標記缺陷)</h4>
+                <img src="${imgs.result}" alt="Result" onclick="openLightbox(this.src)">
+            </div>`;
+        }
         grid.innerHTML = imagesHtml;
     }
 </script>

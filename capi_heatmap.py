@@ -251,6 +251,99 @@ class HeatmapManager:
 
         return str(filepath)
 
+    def save_edge_defect_image(
+        self,
+        save_dir: Path,
+        image_name: str,
+        edge_index: int,
+        side: str,
+        full_image: np.ndarray,
+        bbox: tuple,
+        max_diff: float,
+        area: int,
+    ) -> str:
+        """
+        儲存 CV 邊緣缺陷比較圖 (Original ROI | 缺陷標記)
+
+        Args:
+            save_dir: 儲存目錄
+            image_name: 圖片名稱
+            edge_index: 缺陷序號
+            side: 邊緣方向 (left/right/top/bottom)
+            full_image: 原始完整圖片
+            bbox: 缺陷 bounding box (x, y, w, h)
+            max_diff: 最大差異值
+            area: 缺陷面積
+
+        Returns:
+            儲存的檔案路徑
+        """
+        bx, by, bw, bh = bbox
+        img_h, img_w = full_image.shape[:2]
+
+        # 計算 ROI 區域 (擴大一些以提供上下文)
+        padding = 100
+        roi_x1 = max(0, bx - padding)
+        roi_y1 = max(0, by - padding)
+        roi_x2 = min(img_w, bx + bw + padding)
+        roi_y2 = min(img_h, by + bh + padding)
+
+        roi = full_image[roi_y1:roi_y2, roi_x1:roi_x2].copy()
+        if len(roi.shape) == 2:
+            roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
+        elif len(roi.shape) == 3 and roi.shape[2] == 1:
+            roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
+
+        # Panel 1: 原始 ROI
+        panel_orig = roi.copy()
+
+        # Panel 2: 缺陷標記 (紅色高亮 bbox)
+        panel_marked = roi.copy()
+        # 相對於 ROI 的缺陷位置
+        rel_x = bx - roi_x1
+        rel_y = by - roi_y1
+        # 半透明紅色覆蓋
+        overlay = panel_marked.copy()
+        cv2.rectangle(overlay, (rel_x, rel_y), (rel_x + bw, rel_y + bh), (0, 0, 255), -1)
+        cv2.addWeighted(overlay, 0.3, panel_marked, 0.7, 0, panel_marked)
+        # 紅色邊框
+        cv2.rectangle(panel_marked, (rel_x, rel_y), (rel_x + bw, rel_y + bh), (0, 0, 255), 3)
+
+        # 統一面板大小
+        panel_h = 400
+        scale = panel_h / max(panel_orig.shape[0], 1)
+        panel_w = int(panel_orig.shape[1] * scale)
+        panel_w = max(panel_w, 200)
+        panel_orig = cv2.resize(panel_orig, (panel_w, panel_h))
+        panel_marked = cv2.resize(panel_marked, (panel_w, panel_h))
+
+        # 橫向拼接
+        composite = np.hstack([panel_orig, panel_marked])
+        comp_h, comp_w = composite.shape[:2]
+
+        # Header
+        header_h = 50
+        header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
+        header_text = f"CV Edge NG: {side} | Diff: {max_diff:.0f} | Area: {area}px"
+        cv2.putText(header, header_text, (10, 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+        # Label bar
+        label_h = 30
+        label_bar = np.zeros((label_h, comp_w, 3), dtype=np.uint8)
+        cv2.putText(label_bar, "Original ROI", (10, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+        cv2.putText(label_bar, "Defect Highlight", (panel_w + 10, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+
+        final = np.vstack([header, composite, label_bar])
+
+        filename = f"edge_{image_name}_{side}_{edge_index}.{self.save_format}"
+        filepath = save_dir / filename
+        cv2.imwrite(str(filepath), final)
+
+        return str(filepath)
+
     def save_overview(
         self,
         save_dir: Path,
@@ -314,8 +407,9 @@ class HeatmapManager:
         for result in results:
             image_name = result.image_path.stem
 
-            # 儲存全圖總覽
-            if save_overview and result.anomaly_tiles:
+            # 儲存全圖總覽 (有 tile 異常或 edge 缺陷時)
+            has_edge = hasattr(result, 'edge_defects') and result.edge_defects
+            if save_overview and (result.anomaly_tiles or has_edge):
                 try:
                     overview = inferencer.visualize_inference_result(
                         result.image_path, result
@@ -340,6 +434,26 @@ class HeatmapManager:
                             saved_files.append(path)
                         except Exception as e:
                             print(f"⚠️ 儲存 tile heatmap 失敗 ({image_name} tile{tile.tile_id}): {e}")
+
+            # 儲存 CV 邊緣缺陷比較圖
+            if save_tile_detail and hasattr(result, 'edge_defects') and result.edge_defects:
+                try:
+                    full_img = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+                    if full_img is not None:
+                        for ei, edge in enumerate(result.edge_defects):
+                            try:
+                                edge_path = self.save_edge_defect_image(
+                                    save_dir, image_name, ei,
+                                    edge.side, full_img,
+                                    edge.bbox, edge.max_diff, edge.area,
+                                )
+                                saved_files.append(edge_path)
+                                # 回寫路徑到 edge 物件 (供後續 DB 儲存使用)
+                                edge._heatmap_path = edge_path
+                            except Exception as e:
+                                print(f"⚠️ 儲存 edge defect 圖失敗 ({image_name} {edge.side}_{ei}): {e}")
+                except Exception as e:
+                    print(f"⚠️ 載入原圖失敗 ({image_name}): {e}")
 
         return {
             "dir": str(save_dir),

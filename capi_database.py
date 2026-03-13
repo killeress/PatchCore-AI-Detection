@@ -108,6 +108,23 @@ class CAPIDatabase:
                     FOREIGN KEY (image_result_id) REFERENCES image_results(id) ON DELETE CASCADE
                 );
 
+                -- CV 邊緣缺陷結果 (獨立於 tile_results)
+                CREATE TABLE IF NOT EXISTS edge_defect_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_result_id INTEGER NOT NULL,
+                    side TEXT NOT NULL DEFAULT '',
+                    area INTEGER DEFAULT 0,
+                    bbox_x INTEGER DEFAULT 0,
+                    bbox_y INTEGER DEFAULT 0,
+                    bbox_w INTEGER DEFAULT 0,
+                    bbox_h INTEGER DEFAULT 0,
+                    max_diff REAL DEFAULT 0.0,
+                    center_x INTEGER DEFAULT 0,
+                    center_y INTEGER DEFAULT 0,
+                    heatmap_path TEXT DEFAULT '',
+                    FOREIGN KEY (image_result_id) REFERENCES image_results(id) ON DELETE CASCADE
+                );
+
                 -- RIC 匯入批次追蹤
                 CREATE TABLE IF NOT EXISTS ric_import_batches (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,6 +158,7 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_records_ai_judgment ON inference_records(ai_judgment);
                 CREATE INDEX IF NOT EXISTS idx_image_results_record_id ON image_results(record_id);
                 CREATE INDEX IF NOT EXISTS idx_tile_results_image_id ON tile_results(image_result_id);
+                CREATE INDEX IF NOT EXISTS idx_edge_defects_image_id ON edge_defect_results(image_result_id);
                 CREATE INDEX IF NOT EXISTS idx_ric_pnl_id ON ric_records(pnl_id);
                 CREATE INDEX IF NOT EXISTS idx_ric_mach_id ON ric_records(mach_id);
                 CREATE INDEX IF NOT EXISTS idx_ric_batch ON ric_records(batch_id);
@@ -304,6 +322,27 @@ class CAPIDatabase:
                                  tile_data.get("heatmap_path", ""))
                             )
 
+                        # 儲存 CV 邊緣缺陷結果
+                        for edge_data in img_data.get("edge_defects", []):
+                            conn.execute(
+                                """INSERT INTO edge_defect_results
+                                   (image_result_id, side, area,
+                                    bbox_x, bbox_y, bbox_w, bbox_h,
+                                    max_diff, center_x, center_y, heatmap_path)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (image_result_id,
+                                 edge_data.get("side", ""),
+                                 edge_data.get("area", 0),
+                                 edge_data.get("bbox_x", 0),
+                                 edge_data.get("bbox_y", 0),
+                                 edge_data.get("bbox_w", 0),
+                                 edge_data.get("bbox_h", 0),
+                                 edge_data.get("max_diff", 0.0),
+                                 edge_data.get("center_x", 0),
+                                 edge_data.get("center_y", 0),
+                                 edge_data.get("heatmap_path", ""))
+                            )
+
                 conn.commit()
                 return record_id
             except Exception as e:
@@ -413,6 +452,16 @@ class CAPIDatabase:
                     (img_dict["id"],)
                 ).fetchall()
                 img_dict["tiles"] = [dict(t) for t in tiles]
+
+                # 取得 CV 邊緣缺陷結果
+                edge_defects = conn.execute(
+                    """SELECT * FROM edge_defect_results
+                       WHERE image_result_id = ?
+                       ORDER BY max_diff DESC""",
+                    (img_dict["id"],)
+                ).fetchall()
+                img_dict["edge_defects"] = [dict(e) for e in edge_defects]
+
                 result["images"].append(img_dict)
 
             return result
@@ -1048,6 +1097,26 @@ class CAPIDatabase:
             ("dust_heatmap_iou_threshold", config.dust_heatmap_iou_threshold, "float", "Heatmap-Dust IOU/Coverage 閾值"),
             ("dust_heatmap_top_percent", config.dust_heatmap_top_percent, "float", "Heatmap 熱區取前 X%"),
             ("dust_heatmap_metric", config.dust_heatmap_metric, "string", 'Heatmap 判定指標: "coverage" (覆蓋率) 或是 "iou"'),
+            # CV 邊緣檢測
+            ("cv_edge_enabled", False, "bool", "是否啟用傳統 CV 邊緣檢測"),
+            ("cv_edge_left_width", 450, "int", "左邊界檢測寬度 (px)"),
+            ("cv_edge_left_threshold", 5, "int", "左邊界明暗差閾值"),
+            ("cv_edge_left_min_area", 70, "int", "左邊界最小缺陷面積 (px)"),
+            ("cv_edge_right_width", 650, "int", "右邊界檢測寬度 (px)"),
+            ("cv_edge_right_threshold", 5, "int", "右邊界明暗差閾值"),
+            ("cv_edge_right_min_area", 60, "int", "右邊界最小缺陷面積 (px)"),
+            ("cv_edge_top_width", 550, "int", "上邊界檢測寬度 (px)"),
+            ("cv_edge_top_threshold", 5, "int", "上邊界明暗差閾值"),
+            ("cv_edge_top_min_area", 60, "int", "上邊界最小缺陷面積 (px)"),
+            ("cv_edge_bottom_width", 360, "int", "下邊界檢測寬度 (px)"),
+            ("cv_edge_bottom_threshold", 4, "int", "下邊界明暗差閾值"),
+            ("cv_edge_bottom_min_area", 65, "int", "下邊界最小缺陷面積 (px)"),
+            # 邊緣檢測排除區域
+            ("cv_edge_exclude_enabled", False, "bool", "是否啟用邊緣檢測排除區域"),
+            ("cv_edge_exclude_x", 0, "int", "排除區域起始 X (px)"),
+            ("cv_edge_exclude_y", 0, "int", "排除區域起始 Y (px)"),
+            ("cv_edge_exclude_w", 100, "int", "排除區域寬度 (px)"),
+            ("cv_edge_exclude_h", 100, "int", "排除區域高度 (px)"),
         ]
 
         count = 0
