@@ -1016,7 +1016,7 @@
         'dust_heatmap_metric'
     ];
     const CV_EDGE_PARAMS = [
-        'cv_edge_enabled',
+        'cv_edge_enabled', 'cv_edge_dust_filter_enabled',
         'cv_edge_left_width', 'cv_edge_left_threshold', 'cv_edge_left_min_area',
         'cv_edge_left_exclude_top', 'cv_edge_left_exclude_bottom', 'cv_edge_left_exclude_left', 'cv_edge_left_exclude_right',
         'cv_edge_right_width', 'cv_edge_right_threshold', 'cv_edge_right_min_area',
@@ -1077,6 +1077,7 @@
 
         // Group CV Edge Parameters
         const edgeEnabled = cvEdgeParams.find(p => p.param_name === 'cv_edge_enabled');
+        const dustFilterEnabled = cvEdgeParams.find(p => p.param_name === 'cv_edge_dust_filter_enabled');
         const sides = {
             'left': { icon: '⬅️', title: '左側', params: [] },
             'right': { icon: '➡️', title: '右側', params: [] },
@@ -1085,7 +1086,7 @@
         };
 
         cvEdgeParams.forEach(p => {
-            if (p.param_name === 'cv_edge_enabled' || p.param_name.startsWith('cv_edge_exclude_')) return;
+            if (p.param_name === 'cv_edge_enabled' || p.param_name === 'cv_edge_dust_filter_enabled' || p.param_name.startsWith('cv_edge_exclude_')) return;
             const sideKey = ['left', 'right', 'top', 'bottom'].find(s => p.param_name.startsWith(`cv_edge_${s}_`));
             if (sideKey) sides[sideKey].params.push(p);
         });
@@ -1133,7 +1134,16 @@
                     <div class="settings-section-header">
                         <div class="icon">📐</div>
                         <span>CV 邊緣檢測設定</span>
-                        <div style="margin-left: auto;">
+                        <div style="margin-left: auto; display: flex; gap: 16px;">
+                            ${dustFilterEnabled ? `
+                                <div style="display:flex; align-items:center; gap:10px; background: rgba(0,0,0,0.2); padding: 4px 12px; border-radius: 20px; border: 1px solid rgba(249, 115, 34, 0.3);">
+                                    <span style="font-size: 0.75rem; color: #fdba74;">灰塵過濾:</span>
+                                    <label class="switch" style="transform: scale(0.85);">
+                                        <input type="checkbox" ${dustFilterEnabled.param_value === 'true' ? 'checked' : ''} onchange='toggleBoolParam("cv_edge_dust_filter_enabled", this.checked)'>
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+                            ` : ''}
                             ${edgeEnabled ? `
                                 <div style="display:flex; align-items:center; gap:10px; background: rgba(0,0,0,0.2); padding: 4px 12px; border-radius: 20px; border: 1px solid rgba(59, 130, 246, 0.3);">
                                     <span style="font-size: 0.75rem; color: var(--text-muted);">主開關:</span>

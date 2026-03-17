@@ -28,6 +28,11 @@ class EdgeDefect:
     bbox: Tuple[int, int, int, int]  # (x, y, w, h) 在原圖絕對座標
     center: Tuple[int, int]          # (cx, cy) 中心點原圖絕對座標
     max_diff: int = 0    # 該區域最大灰階差值
+    is_suspected_dust_or_scratch: bool = False
+    omit_crop_image: Optional[np.ndarray] = field(default=None, repr=False)
+    dust_mask: Optional[np.ndarray] = field(default=None, repr=False)
+    dust_bright_ratio: float = 0.0
+    dust_detail_text: str = ""
 
 
 @dataclass
@@ -56,6 +61,7 @@ class EdgeExclusionZoneConfig:
 class EdgeInspectionConfig:
     """四邊檢測參數組"""
     enabled: bool = True
+    dust_filter_enabled: bool = False
     blur_kernel: int = 3          # 高斯模糊核大小
     median_kernel: int = 65       # 中值濾波核大小（用於估計背景）
     left: EdgeSideConfig = field(default_factory=lambda: EdgeSideConfig(
@@ -88,7 +94,8 @@ class EdgeInspectionConfig:
             return v
 
         cfg = cls(
-            enabled=get("cv_edge_enabled", True),
+            enabled=bool(get("cv_edge_enabled", True)),
+            dust_filter_enabled=bool(get("cv_edge_dust_filter_enabled", False)),
         )
         # 左
         cfg.left.width = int(get("cv_edge_left_width", 450))

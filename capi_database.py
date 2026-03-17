@@ -122,6 +122,7 @@ class CAPIDatabase:
                     center_x INTEGER DEFAULT 0,
                     center_y INTEGER DEFAULT 0,
                     heatmap_path TEXT DEFAULT '',
+                    is_dust INTEGER DEFAULT 0,
                     FOREIGN KEY (image_result_id) REFERENCES image_results(id) ON DELETE CASCADE
                 );
 
@@ -202,6 +203,7 @@ class CAPIDatabase:
             add_column_if_not_exists("tile_results", "bomb_code", "TEXT DEFAULT ''")
             add_column_if_not_exists("tile_results", "peak_x", "INTEGER DEFAULT -1")
             add_column_if_not_exists("tile_results", "peak_y", "INTEGER DEFAULT -1")
+            add_column_if_not_exists("edge_defect_results", "is_dust", "INTEGER DEFAULT 0")
 
             conn.commit()
         finally:
@@ -328,8 +330,8 @@ class CAPIDatabase:
                                 """INSERT INTO edge_defect_results
                                    (image_result_id, side, area,
                                     bbox_x, bbox_y, bbox_w, bbox_h,
-                                    max_diff, center_x, center_y, heatmap_path)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    max_diff, center_x, center_y, heatmap_path, is_dust)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  edge_data.get("side", ""),
                                  edge_data.get("area", 0),
@@ -340,7 +342,8 @@ class CAPIDatabase:
                                  edge_data.get("max_diff", 0.0),
                                  edge_data.get("center_x", 0),
                                  edge_data.get("center_y", 0),
-                                 edge_data.get("heatmap_path", ""))
+                                 edge_data.get("heatmap_path", ""),
+                                 edge_data.get("is_dust", 0))
                             )
 
                 conn.commit()
@@ -1103,6 +1106,7 @@ class CAPIDatabase:
             ("dust_heatmap_metric", config.dust_heatmap_metric, "string", 'Heatmap 判定指標: "coverage" (覆蓋率) 或是 "iou"'),
             # CV 邊緣檢測
             ("cv_edge_enabled", False, "bool", "是否啟用傳統 CV 邊緣檢測"),
+            ("cv_edge_dust_filter_enabled", False, "bool", "是否啟用 CV 邊緣檢測的灰塵過濾"),
             ("cv_edge_left_width", 450, "int", "左邊界檢測寬度 (px)"),
             ("cv_edge_left_threshold", 5, "int", "左邊界明暗差閾值"),
             ("cv_edge_left_min_area", 70, "int", "左邊界最小缺陷面積 (px)"),

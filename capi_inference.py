@@ -997,12 +997,16 @@ class CAPIInferencer:
     
     def get_anomaly_summary(self, result: ImageResult) -> Dict[str, Any]:
         """取得異常摘要"""
-        if not result.anomaly_tiles:
+        # 計算真實的 CV 邊緣異常數 (排除疑似灰塵)
+        real_edge_defects = [ed for ed in getattr(result, 'edge_defects', []) if not getattr(ed, 'is_suspected_dust_or_scratch', False)]
+        
+        if not result.anomaly_tiles and not real_edge_defects:
             return {
                 "is_anomaly": False,
                 "anomaly_count": 0,
                 "max_score": 0.0,
                 "anomaly_positions": [],
+                "cv_edge_anomaly_count": 0,
             }
         
         scores = [score for _, score, _ in result.anomaly_tiles]
@@ -1011,10 +1015,10 @@ class CAPIInferencer:
         return {
             "is_anomaly": True,
             "anomaly_count": len(result.anomaly_tiles),
-            "max_score": max(scores),
-            "avg_score": sum(scores) / len(scores),
+            "max_score": max(scores) if scores else 0.0,
+            "avg_score": (sum(scores) / len(scores)) if scores else 0.0,
             "anomaly_positions": positions,
-            "cv_edge_anomaly_count": len(result.edge_defects),
+            "cv_edge_anomaly_count": len(real_edge_defects),
         }
     
     def visualize_preprocessing(
@@ -1974,13 +1978,49 @@ class CAPIInferencer:
                         
                         log_icon = "🧹" if tile.is_suspected_dust_or_scratch else "🔴"
                         print(f"{log_icon} {img_path.name} Tile@({tx},{ty}) → {detail_text}")
+
+            # === 加入 CV Edge 灰塵檢測 (與 OMIT 擷取) ===
+            if getattr(result, 'edge_defects', []) and omit_image is not None:
+                if omit_overexposed:
+                    for ed in result.edge_defects:
+                        ed.dust_detail_text = f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> Cannot verify dust, treated as REAL_NG"
+                        print(f"⚠️ {img_path.name} Edge@{ed.side} Score:{ed.max_diff:.3f} → OMIT OVEREXPOSED, skip dust check")
+                else:
+                    for ed in result.edge_defects:
+                        tx, ty, tw, th = ed.bbox
+                        oh, ow = omit_image.shape[:2]
+                        if tx < ow and ty < oh:
+                            x2 = min(tx + tw, ow)
+                            y2 = min(ty + th, oh)
+                            
+                            omit_crop = omit_image[ty:y2, tx:x2]
+                            ed.omit_crop_image = omit_crop.copy()
+                            print(f"DEBUG: ed.omit_crop_image set for Edge@{ed.side}, shape={ed.omit_crop_image.shape}")
+                            
+                            if getattr(self, 'edge_inspector', None) and self.edge_inspector.config.dust_filter_enabled:
+                                is_dust, dust_mask, bright_ratio, detail_text = self.check_dust_or_scratch_feature(omit_crop)
+                                ed.dust_mask = dust_mask
+                                ed.dust_bright_ratio = bright_ratio
+                                
+                                if is_dust:
+                                    # Edge defect 無對應異常熱力圖，所以直接根據 is_dust 判斷
+                                    ed.is_suspected_dust_or_scratch = True
+                                    detail_text += " (edge defect, marked as dust)"
+                                else:
+                                    detail_text += " NO_DUST -> REAL_NG"
+                                    
+                                ed.dust_detail_text = detail_text
+                                log_icon = "🧹" if ed.is_suspected_dust_or_scratch else "🔴"
+                                print(f"{log_icon} {img_path.name} Edge@{ed.side} → {detail_text}")
+                            else:
+                                ed.dust_detail_text = "Dust filter disabled -> REAL_NG"
             
             return result
         
         postprocess_start = time.time()
         
-        # 只對有異常且有 OMIT 的結果進行平行灰塵檢測
-        needs_dust_check = [r for r in preprocessed_results if r.anomaly_tiles and omit_image is not None]
+        # 只對有異常或有 CV 邊緣缺陷，且有 OMIT 的結果進行平行灰塵檢測
+        needs_dust_check = [r for r in preprocessed_results if (r.anomaly_tiles or getattr(r, 'edge_defects', [])) and omit_image is not None]
         
         if needs_dust_check:
             with ThreadPoolExecutor(max_workers=actual_workers) as executor:
@@ -2010,6 +2050,24 @@ class CAPIInferencer:
                             else:
                                 box_color = (0, 0, 255)
                                 label = f"REAL_NG {metric_name}:{iou:.2f}"
+                            cv2.rectangle(omit_vis, (tx, ty), (x2, y2), box_color, 5)
+                            cv2.putText(omit_vis, f"{result.image_path.name}", (tx, ty - 50), cv2.FONT_HERSHEY_SIMPLEX, 2.0, box_color, 4)
+                            cv2.putText(omit_vis, label, (tx, ty - 10), cv2.FONT_HERSHEY_SIMPLEX, 2.0, box_color, 4)
+                
+                # 在 OMIT 總圖上畫 Edge 框
+                if getattr(result, 'edge_defects', []):
+                    for ed in result.edge_defects:
+                        tx, ty, tw, th = ed.bbox
+                        oh, ow = omit_vis.shape[:2]
+                        if tx < ow and ty < oh:
+                            x2 = min(tx + tw, ow)
+                            y2 = min(ty + th, oh)
+                            if getattr(ed, 'is_suspected_dust_or_scratch', False):
+                                box_color = (0, 165, 255)
+                                label = f"Edge DUST ({ed.side})"
+                            else:
+                                box_color = (0, 0, 255)
+                                label = f"Edge NG ({ed.side})"
                             cv2.rectangle(omit_vis, (tx, ty), (x2, y2), box_color, 5)
                             cv2.putText(omit_vis, f"{result.image_path.name}", (tx, ty - 50), cv2.FONT_HERSHEY_SIMPLEX, 2.0, box_color, 4)
                             cv2.putText(omit_vis, label, (tx, ty - 10), cv2.FONT_HERSHEY_SIMPLEX, 2.0, box_color, 4)
@@ -2218,10 +2276,15 @@ class CAPIInferencer:
         if hasattr(result, 'edge_defects') and result.edge_defects:
             for ed in result.edge_defects:
                 bx, by, bw, bh = ed.bbox
-                cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), (0, 0, 255), 4)
+                
+                is_dust = getattr(ed, 'is_suspected_dust_or_scratch', False)
+                box_color = (0, 165, 255) if is_dust else (0, 0, 255)
+                
+                cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), box_color, 4)
                 
                 # 在框的旁邊加上文字（處理文字是否超出邊界的邏輯）
-                text = f"Edge NG: {ed.side} ({ed.max_diff:.0f})"
+                status_label = "DUST" if is_dust else "NG"
+                text = f"Edge {status_label}: {ed.side} ({ed.max_diff:.0f})"
                 text_x = max(10, bx)
                 text_y = max(30, by - 10)
                 if ed.side == 'top':
@@ -2230,7 +2293,7 @@ class CAPIInferencer:
                     text_x = bx + bw + 10
                     
                 cv2.putText(vis, text, (text_x, text_y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, box_color, 3)
 
         return vis
     

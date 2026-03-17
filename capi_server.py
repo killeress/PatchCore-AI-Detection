@@ -415,12 +415,15 @@ def append_cv_edge_to_judgment(
     if not edge_defects:
         return ai_judgment, ng_details_json
         
-    # 如果原本是 OK，現在因為邊緣瑕疵變成 NG
-    if ai_judgment == "OK":
-        ai_judgment = "NG"
-    elif ai_judgment.startswith("NG"):
-        # 保留原本的 NG，也可以標記為 NG_Mixed
-        pass
+    real_edge_defects = [d for d in edge_defects if not getattr(d, 'is_suspected_dust_or_scratch', False)]
+        
+    if real_edge_defects:
+        # 如果原本是 OK，現在因為真實邊緣瑕疵變成 NG
+        if ai_judgment == "OK":
+            ai_judgment = "NG"
+        elif ai_judgment.startswith("NG"):
+            # 保留原本的 NG，也可以標記為 NG_Mixed
+            pass
         
     try:
         details = json.loads(ng_details_json) if ng_details_json != "[]" else []
@@ -438,6 +441,7 @@ def append_cv_edge_to_judgment(
             "score": float(d.max_diff), # 用 max_diff 暫代 score
             "area": int(d.area),
             "is_cv_edge": True,
+            "is_dust": getattr(d, 'is_suspected_dust_or_scratch', False),
         })
         
     return ai_judgment, json.dumps(details, ensure_ascii=False)
@@ -549,6 +553,7 @@ def results_to_db_data(
                     "center_x": int(edge.center[0]),
                     "center_y": int(edge.center[1]),
                     "heatmap_path": getattr(edge, '_heatmap_path', ''),
+                    "is_dust": 1 if getattr(edge, 'is_suspected_dust_or_scratch', False) else 0,
                 })
 
         db_images.append(img_data)
