@@ -1177,12 +1177,73 @@ class CAPIInferencer:
             else:
                 particle_count += 1
         
-        # 計算亮點佔比
-        bright_ratio = float(np.sum(dust_mask > 0)) / dust_mask.size if dust_mask.size > 0 else 0.0
-        is_dust = (particle_count + scratch_count) > 0
+        # Step 6: 暗色顆粒偵測 — 偵測暗色 MARK 等暗色圖案
+        # 某些機種 MARK 樣式偏黑，在 OMIT 圖上呈現暗色顆粒
+        # 使用 THRESH_BINARY_INV 偵測低於背景的暗色區域
+        dark_particle_count = 0
+        dark_scratch_count = 0
+        dark_total_area = 0
         
+        if getattr(self.config, 'dust_detect_dark_particles', True):
+            # 計算背景統計（排除全黑邊界像素）
+            non_zero_pixels = gray[gray > 0]
+            if len(non_zero_pixels) > 100:  # 確保有足夠像素做統計
+                bg_median = float(np.median(non_zero_pixels))
+                # 暗色閾值：取低 1st percentile 或 背景中位數的一半，取較大者
+                p1 = float(np.percentile(non_zero_pixels, 1))
+                dark_threshold = max(p1, bg_median * 0.5)
+                
+                # 只在背景中位數夠亮時才偵測暗色顆粒（避免全暗圖誤判）
+                if bg_median > 20:
+                    _, dark_binary = cv2.threshold(gray, int(dark_threshold), 255, cv2.THRESH_BINARY_INV)
+                    
+                    # 排除全黑像素（圖的邊界/padding 區域）
+                    dark_binary[gray == 0] = 0
+                    
+                    # 合理性檢查
+                    dark_ratio = float(np.sum(dark_binary > 0)) / dark_binary.size if dark_binary.size > 0 else 0.0
+                    if dark_ratio <= MAX_REASONABLE_RATIO:
+                        # 形態學處理
+                        dark_binary = cv2.morphologyEx(dark_binary, cv2.MORPH_OPEN, open_kernel, iterations=1)
+                        if extension > 0:
+                            dark_binary = cv2.dilate(dark_binary, dilate_kernel, iterations=1)
+                        
+                        # Connected Components 面積篩選
+                        d_num_labels, d_labels, d_stats, _ = cv2.connectedComponentsWithStats(dark_binary)
+                        
+                        for i in range(1, d_num_labels):
+                            d_area = d_stats[i, cv2.CC_STAT_AREA]
+                            d_w = d_stats[i, cv2.CC_STAT_WIDTH]
+                            d_h = d_stats[i, cv2.CC_STAT_HEIGHT]
+                            
+                            if d_area < area_min or d_area > area_max:
+                                continue
+                            
+                            # 合併至灰塵遮罩
+                            dust_mask[d_labels == i] = 255
+                            dark_total_area += d_area
+                            
+                            d_aspect = max(d_w, d_h) / (min(d_w, d_h) + 1e-5)
+                            if d_aspect > 5:
+                                dark_scratch_count += 1
+                            else:
+                                dark_particle_count += 1
+                        
+                        if dark_particle_count + dark_scratch_count > 0:
+                            print(f"    🌑 暗色顆粒偵測: P:{dark_particle_count} S:{dark_scratch_count} Area:{dark_total_area} (Thr:{dark_threshold:.0f}, Median:{bg_median:.0f})")
+        
+        # 合併計數
+        total_particle = particle_count + dark_particle_count
+        total_scratch = scratch_count + dark_scratch_count
+        total_area = total_dust_area + dark_total_area
+        
+        # 計算灰塵面積佔比
+        bright_ratio = float(np.sum(dust_mask > 0)) / dust_mask.size if dust_mask.size > 0 else 0.0
+        is_dust = (total_particle + total_scratch) > 0
+        
+        dark_info = f" DkP:{dark_particle_count} DkS:{dark_scratch_count}" if (dark_particle_count + dark_scratch_count) > 0 else ""
         detail_text = (f"Thr:{used_threshold:.0f} P:{particle_count} S:{scratch_count} "
-                       f"Area:{total_dust_area} Ratio:{bright_ratio:.4f}")
+                       f"Area:{total_area} Ratio:{bright_ratio:.4f}{dark_info}")
         
         return is_dust, dust_mask, bright_ratio, detail_text
     

@@ -1104,6 +1104,7 @@ class CAPIDatabase:
             ("dust_heatmap_iou_threshold", config.dust_heatmap_iou_threshold, "float", "Heatmap-Dust IOU/Coverage 閾值"),
             ("dust_heatmap_top_percent", config.dust_heatmap_top_percent, "float", "Heatmap 熱區取前 X%"),
             ("dust_heatmap_metric", config.dust_heatmap_metric, "string", 'Heatmap 判定指標: "coverage" (覆蓋率) 或是 "iou"'),
+            ("dust_detect_dark_particles", config.dust_detect_dark_particles, "bool", "偵測暗色顆粒/圖案 (如偏黑 MARK) 並過濾"),
             # CV 邊緣檢測
             ("cv_edge_enabled", False, "bool", "是否啟用傳統 CV 邊緣檢測"),
             ("cv_edge_dust_filter_enabled", False, "bool", "是否啟用 CV 邊緣檢測的灰塵過濾"),

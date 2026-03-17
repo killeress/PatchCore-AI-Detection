@@ -127,6 +127,7 @@ class CAPIConfig:
     dust_heatmap_iou_threshold: float = 0.02  # Heatmap-Dust IOU/Coverage 閾值
     dust_heatmap_top_percent: float = 5.0     # Heatmap 熱區取前 X% (Percentile 二值化)
     dust_heatmap_metric: str = "coverage"     # Heatmap 判定指標: "coverage" (灰塵覆蓋率) 或是 "iou" (交集/聯集)
+    dust_detect_dark_particles: bool = True   # 偵測暗色顆粒/圖案 (如偏黑 MARK)，當作表面灰塵過濾
     
     # OMIT 過曝偵測設定 (曝光過高的 OMIT 圖無法檢測灰塵，需記錄供工程追蹤)
     omit_overexposure_mean_threshold: int = 200    # 平均亮度超過此值視為過曝
@@ -207,6 +208,7 @@ class CAPIConfig:
             dust_heatmap_iou_threshold=data.get("dust_heatmap_iou_threshold", 0.02),
             dust_heatmap_top_percent=data.get("dust_heatmap_top_percent", 5.0),
             dust_heatmap_metric=data.get("dust_heatmap_metric", "coverage"),
+            dust_detect_dark_particles=data.get("dust_detect_dark_particles", True),
             omit_overexposure_mean_threshold=data.get("omit_overexposure_mean_threshold", 200),
             omit_overexposure_ratio_threshold=data.get("omit_overexposure_ratio_threshold", 0.5),
             edge_margin_px=data.get("edge_margin_px", 80),
@@ -254,6 +256,7 @@ class CAPIConfig:
             "dust_heatmap_iou_threshold": self.dust_heatmap_iou_threshold,
             "dust_heatmap_top_percent": self.dust_heatmap_top_percent,
             "dust_heatmap_metric": self.dust_heatmap_metric,
+            "dust_detect_dark_particles": self.dust_detect_dark_particles,
             "omit_overexposure_mean_threshold": self.omit_overexposure_mean_threshold,
             "omit_overexposure_ratio_threshold": self.omit_overexposure_ratio_threshold,
             "edge_margin_px": self.edge_margin_px,
@@ -338,6 +341,9 @@ class CAPIConfig:
             self.dust_heatmap_top_percent = float(param_map["dust_heatmap_top_percent"])
         if "dust_heatmap_metric" in param_map:
             self.dust_heatmap_metric = str(param_map["dust_heatmap_metric"]).lower()
+        if "dust_detect_dark_particles" in param_map:
+            val = param_map["dust_detect_dark_particles"]
+            self.dust_detect_dark_particles = str(val).lower() == "true" if isinstance(val, str) else bool(val)
 
     def get_enabled_exclusion_zones(self) -> List[ExclusionZone]:
         """取得已啟用的排除區域"""
