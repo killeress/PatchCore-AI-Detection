@@ -33,6 +33,8 @@ class EdgeDefect:
     dust_mask: Optional[np.ndarray] = field(default=None, repr=False)
     dust_bright_ratio: float = 0.0
     dust_detail_text: str = ""
+    is_bomb: bool = False
+    bomb_defect_code: str = ""
 
 
 @dataclass
@@ -81,10 +83,38 @@ class EdgeInspectionConfig:
         exclude_top=10, exclude_bottom=10, exclude_left=80, exclude_right=80
     ))
     exclude_zones: List[EdgeExclusionZoneConfig] = field(default_factory=list)
+    # 儲存完整的按產品分組排除區域 (key=resolution_code, value=list of zones)
+    all_exclude_zones_by_product: Dict[str, List[dict]] = field(default_factory=dict)
+
+    def set_active_zones_for_product(self, resolution_code: str):
+        """根據產品解析度碼切換當前作用中的排除區域"""
+        if not self.all_exclude_zones_by_product:
+            return  # 沒有按產品分組的設定，維持現有 zones
+        
+        product_zones = self.all_exclude_zones_by_product.get(resolution_code, [])
+        if not product_zones and self.all_exclude_zones_by_product:
+            # Fallback: 取第一組
+            first_key = next(iter(self.all_exclude_zones_by_product))
+            product_zones = self.all_exclude_zones_by_product[first_key]
+        
+        self.exclude_zones = [
+            EdgeExclusionZoneConfig(
+                enabled=z.get("enabled", True),
+                x=int(z.get("x", 0)),
+                y=int(z.get("y", 0)),
+                w=int(z.get("w", 100)),
+                h=int(z.get("h", 100))
+            ) for z in product_zones if isinstance(z, dict)
+        ]
 
     @classmethod
-    def from_db_params(cls, params: Dict[str, Any]) -> "EdgeInspectionConfig":
-        """從 DB config_params 載入"""
+    def from_db_params(cls, params: Dict[str, Any], resolution_code: str = "") -> "EdgeInspectionConfig":
+        """從 DB config_params 載入
+        
+        Args:
+            params: DB 參數字典
+            resolution_code: 產品解析度碼 (例如 "H", "J")，用於選取對應的排除區域
+        """
         def get(key, default):
             v = params.get(key)
             if v is None:
@@ -131,12 +161,35 @@ class EdgeInspectionConfig:
         cfg.bottom.exclude_right = int(get("cv_edge_bottom_exclude_right", 80))
         
         
-        # 排除區域 (支援多組區域列表)
+        # 排除區域 (支援按產品解析度碼分組的 dict 格式，或向後相容的 list 格式)
         zones_json = get("cv_edge_exclude_zones", None)
         if zones_json and isinstance(zones_json, str):
             try:
                 zones_data = json.loads(zones_json)
-                if isinstance(zones_data, list):
+                # 新格式: dict keyed by resolution_code，例如 {"H": [...], "J": [...]}
+                if isinstance(zones_data, dict):
+                    # 儲存完整的 per-product zones dict (用於 runtime 切換)
+                    cfg.all_exclude_zones_by_product = zones_data
+                    # 選取對應產品的排除區域
+                    product_zones = zones_data.get(resolution_code, []) if resolution_code else []
+                    # 若找不到對應的 code，嘗試取第一組作為 fallback
+                    if not product_zones and zones_data:
+                        first_key = next(iter(zones_data))
+                        product_zones = zones_data[first_key]
+                        if resolution_code:
+                            print(f"⚠️ 排除區域未找到產品 '{resolution_code}'，使用 fallback '{first_key}'")
+                    if isinstance(product_zones, list):
+                        cfg.exclude_zones = [
+                            EdgeExclusionZoneConfig(
+                                enabled=z.get("enabled", True),
+                                x=int(z.get("x", 0)),
+                                y=int(z.get("y", 0)),
+                                w=int(z.get("w", 100)),
+                                h=int(z.get("h", 100))
+                            ) for z in product_zones
+                        ]
+                # 舊格式: 直接是 list
+                elif isinstance(zones_data, list):
                     cfg.exclude_zones = [
                         EdgeExclusionZoneConfig(
                             enabled=z.get("enabled", True),

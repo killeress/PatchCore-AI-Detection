@@ -2188,6 +2188,21 @@ class CAPIInferencer:
                             tile.bomb_defect_code = bomb_code
                             print(f"💣 {result.image_path.name} Tile@({tile.x},{tile.y}) Peak@({tile.anomaly_peak_x},{tile.anomaly_peak_y}) → BOMB match ({bomb_code})")
 
+                # === 邊緣缺陷炸彈比對 ===
+                if hasattr(result, 'edge_defects') and result.edge_defects and result.raw_bounds is not None:
+                    img_prefix = result.image_path.stem
+                    for ed in result.edge_defects:
+                        cx, cy = ed.center
+                        is_bomb, bomb_code = self.check_bomb_match(
+                            img_prefix, cx, cy, result.raw_bounds,
+                            product_resolution=product_resolution,
+                            bomb_list=active_bombs,
+                        )
+                        if is_bomb:
+                            ed.is_bomb = True
+                            ed.bomb_defect_code = bomb_code
+                            print(f"💣 {result.image_path.name} Edge@{ed.side} Center@({cx},{cy}) → BOMB match ({bomb_code})")
+
         total_panel_time = preprocess_time + inference_time + postprocess_time
         print(f"📊 Panel {panel_dir.name} 總計: 預處理 {preprocess_time:.2f}s + 推論 {inference_time:.2f}s + 後處理 {postprocess_time:.2f}s = {total_panel_time:.2f}s")
         
@@ -2338,13 +2353,25 @@ class CAPIInferencer:
             for ed in result.edge_defects:
                 bx, by, bw, bh = ed.bbox
                 
+                is_bomb_ed = getattr(ed, 'is_bomb', False)
                 is_dust = getattr(ed, 'is_suspected_dust_or_scratch', False)
-                box_color = (0, 165, 255) if is_dust else (0, 0, 255)
+                
+                if is_bomb_ed:
+                    box_color = (255, 0, 255)  # 洋紅色
+                elif is_dust:
+                    box_color = (0, 165, 255)  # 橘色
+                else:
+                    box_color = (0, 0, 255)    # 紅色
                 
                 cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), box_color, 4)
                 
                 # 在框的旁邊加上文字（處理文字是否超出邊界的邏輯）
-                status_label = "DUST" if is_dust else "NG"
+                if is_bomb_ed:
+                    status_label = f"BOMB({ed.bomb_defect_code})"
+                elif is_dust:
+                    status_label = "DUST"
+                else:
+                    status_label = "NG"
                 text = f"Edge {status_label}: {ed.side} ({ed.max_diff:.0f})"
                 text_x = max(10, bx)
                 text_y = max(30, by - 10)

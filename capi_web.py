@@ -1681,7 +1681,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """API: 取得所有設定參數"""
         try:
             params = self.db.get_all_config_params() if self.db else []
-            self._send_json({"params": params})
+            # 附帶 model_resolution_map 給前端產品選擇器使用
+            resolution_map = {}
+            if self.inferencer and hasattr(self.inferencer, 'config') and self.inferencer.config:
+                resolution_map = getattr(self.inferencer.config, 'model_resolution_map', {})
+            self._send_json({"params": params, "model_resolution_map": resolution_map})
         except Exception as e:
             self._send_json({"error": str(e)})
 

@@ -260,7 +260,9 @@ class HeatmapManager:
         full_image: np.ndarray,
     ) -> str:
         """
-        儲存 CV 邊緣缺陷比較圖 (Original ROI | 缺陷標記 | [可選 OMIT] | [可選 Dust])
+        儲存 CV 邊緣缺陷比較圖 (Original ROI | Diff Overlay | [可選 OMIT] | [可選 Dust])
+
+        仿效 heatmap tile 的疊加圖風格，Panel 2 使用 diff map + JET colormap 疊加。
 
         Args:
             save_dir: 儲存目錄
@@ -277,6 +279,8 @@ class HeatmapManager:
         area = edge_defect.area
         side = edge_defect.side
         is_dust = getattr(edge_defect, 'is_suspected_dust_or_scratch', False)
+        is_bomb = getattr(edge_defect, 'is_bomb', False)
+        bomb_code = getattr(edge_defect, 'bomb_defect_code', '')
         img_h, img_w = full_image.shape[:2]
 
         # 計算 ROI 區域 (擴大一些以提供上下文)
@@ -286,7 +290,18 @@ class HeatmapManager:
         roi_x2 = min(img_w, bx + bw + padding)
         roi_y2 = min(img_h, by + bh + padding)
 
-        roi = full_image[roi_y1:roi_y2, roi_x1:roi_x2].copy()
+        roi_raw = full_image[roi_y1:roi_y2, roi_x1:roi_x2].copy()
+        
+        # 灰階用於計算 diff
+        if len(roi_raw.shape) == 3:
+            roi_gray = cv2.cvtColor(roi_raw, cv2.COLOR_BGR2GRAY)
+        elif len(roi_raw.shape) == 2:
+            roi_gray = roi_raw
+        else:
+            roi_gray = roi_raw.reshape(roi_raw.shape[0], roi_raw.shape[1])
+        
+        # ROI 轉 BGR 用於顯示
+        roi = roi_raw.copy()
         if len(roi.shape) == 2:
             roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
         elif len(roi.shape) == 3 and roi.shape[2] == 1:
@@ -295,18 +310,38 @@ class HeatmapManager:
         # Panel 1: 原始 ROI
         panel_orig = roi.copy()
 
-        # Panel 2: 缺陷標記 (紅色高亮 bbox)
-        panel_marked = roi.copy()
-        # 相對於 ROI 的缺陷位置
+        # Panel 2: Diff Overlay (仿 heatmap 疊加圖)
+        # 計算局部 diff map (與邊緣檢測邏輯相同)
+        k = 3
+        blurred = cv2.GaussianBlur(roi_gray, (k, k), 0)
+        mk = 65
+        mk = min(mk, min(roi_gray.shape[:2]) - 1)
+        if mk % 2 == 0:
+            mk -= 1
+        if mk < 3:
+            mk = 3
+        bg = cv2.medianBlur(blurred, mk)
+        diff = cv2.absdiff(blurred, bg)
+
+        # 使用 JET colormap 上色 (放大差異以增強視覺效果)
+        diff_enhanced = np.clip(diff * 8, 0, 255).astype(np.uint8)
+        diff_colored = cv2.applyColorMap(diff_enhanced, cv2.COLORMAP_JET)
+        # 確保 diff_colored 和 roi 大小一致
+        if diff_colored.shape[:2] != roi.shape[:2]:
+            diff_colored = cv2.resize(diff_colored, (roi.shape[1], roi.shape[0]))
+        # 疊加到原始 ROI 上
+        panel_overlay = cv2.addWeighted(roi, 0.5, diff_colored, 0.5, 0)
+        
+        # 在 overlay 上標注缺陷 bbox 邊框
         rel_x = bx - roi_x1
         rel_y = by - roi_y1
-        # 半透明覆蓋
-        box_color = (0, 200, 255) if is_dust else (0, 0, 255)
-        overlay = panel_marked.copy()
-        cv2.rectangle(overlay, (rel_x, rel_y), (rel_x + bw, rel_y + bh), box_color, -1)
-        cv2.addWeighted(overlay, 0.3, panel_marked, 0.7, 0, panel_marked)
-        # 邊框
-        cv2.rectangle(panel_marked, (rel_x, rel_y), (rel_x + bw, rel_y + bh), box_color, 3)
+        if is_bomb:
+            box_color = (255, 0, 255)   # 洋紅色
+        elif is_dust:
+            box_color = (0, 200, 255)   # 橘色
+        else:
+            box_color = (0, 0, 255)     # 紅色
+        cv2.rectangle(panel_overlay, (rel_x, rel_y), (rel_x + bw, rel_y + bh), box_color, 3)
 
         # 統一面板大小
         panel_h = 400
@@ -314,9 +349,9 @@ class HeatmapManager:
         panel_w = int(panel_orig.shape[1] * scale)
         panel_w = max(panel_w, 200)
         panel_orig = cv2.resize(panel_orig, (panel_w, panel_h))
-        panel_marked = cv2.resize(panel_marked, (panel_w, panel_h))
+        panel_overlay = cv2.resize(panel_overlay, (panel_w, panel_h))
 
-        panels = [panel_orig, panel_marked]
+        panels = [panel_orig, panel_overlay]
         labels = ["Original ROI", "Defect Highlight"]
         
         # 處理灰塵相關面板
@@ -360,7 +395,10 @@ class HeatmapManager:
         header_h = 50
         header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
         
-        if is_dust:
+        if is_bomb:
+            verdict = f"BOMB: {bomb_code} (Filtered as OK)"
+            verdict_color = (255, 0, 255)
+        elif is_dust:
             verdict = "DUST (Filtered as OK)"
             verdict_color = (0, 200, 255)
         else:

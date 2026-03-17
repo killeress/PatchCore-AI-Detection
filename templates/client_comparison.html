@@ -690,9 +690,11 @@
                                 <th>機台</th>
                                 <th>AOI (RESULT_EQP)</th>
                                 <th>AI (RESULT_AI)</th>
-                                <th>RIC (RESULT_RIC)</th>
-                                <th>AOI vs RIC <span style="color:#f59e0b;font-size:0.65rem;">⚠OK無參考</span></th>
-                                <th>AI vs RIC</th>
+                                <th>RIC (原始)</th>
+                                <th>DATASTR 判定</th>
+                                <th>DATASTR 內容</th>
+                                <th>AOI vs DATASTR <span style="color:#f59e0b;font-size:0.65rem;">⚠僅參考NG</span></th>
+                                <th>AI vs DATASTR</th>
                             </tr>
                         </thead>
                         <tbody id="detailBody"></tbody>
@@ -745,8 +747,13 @@
                         </tr>
                         <tr>
                             <td>RESULT_RIC</td>
-                            <td>ric_judgment (RIC 判定)</td>
-                            <td>人工複檢結果</td>
+                            <td>(僅供對照)</td>
+                            <td>原始 RIC 判定結果，不參與此工具之準確率計算</td>
+                        </tr>
+                        <tr>
+                            <td>DATASTR</td>
+                            <td>真實判定 (Ground Truth)</td>
+                            <td>若包含 <strong>CCD</strong> 則排除；包含 <strong>NG</strong> 則視為真實 NG；否則為真實 OK</td>
                         </tr>
                     </tbody>
                 </table>
@@ -839,20 +846,49 @@
             const rows = doc.querySelectorAll('tr');
             const data = [];
 
+            // 找出關鍵欄位的索引
+            const headerCells = rows[0].querySelectorAll('td, th');
+            let indices = {
+                systime: 0, pnl_id: 1, mach_id: 2, result_eqp: 3, result_ai: 4, result_ric: 5, datastr: -1
+            };
+
+            headerCells.forEach((cell, idx) => {
+                const text = cell.textContent.trim().toUpperCase();
+                if (text === 'SYSTIME') indices.systime = idx;
+                else if (text === 'PNL_ID') indices.pnl_id = idx;
+                else if (text === 'MACH_ID') indices.mach_id = idx;
+                else if (text === 'RESULT_EQP') indices.result_eqp = idx;
+                else if (text === 'RESULT_AI') indices.result_ai = idx;
+                else if (text === 'RESULT_RIC') indices.result_ric = idx;
+                else if (text === 'DATASTR') indices.datastr = idx;
+            });
+
             for (let i = 1; i < rows.length; i++) {
                 const cells = rows[i].querySelectorAll('td');
                 if (cells.length >= 6) {
-                    // ERR 視為 OK
-                    let ricVal = cells[5].textContent.trim();
-                    if (ricVal === 'ERR') ricVal = 'OK';
+                    // 判定真實結果 (Ground Truth from DATASTR)
+                    let datastr = indices.datastr !== -1 && cells[indices.datastr] ? cells[indices.datastr].textContent.trim() : '';
+
+                    // 🚨 關鍵邏輯：若 DATASTR 包含 CCD，則排除該筆資料不納入統計 (AI 漏檢率不看 CCD)
+                    if (datastr.toUpperCase().includes('CCD')) {
+                        continue;
+                    }
+
+                    let actualResult = datastr.includes('NG') ? 'NG' : 'OK';
+
+                    // ERR 視為 OK (針對原始 RIC)
+                    let ricRaw = cells[indices.result_ric] ? cells[indices.result_ric].textContent.trim() : '';
+                    let ricValNormalized = ricRaw === 'ERR' ? 'OK' : ricRaw;
+
                     data.push({
-                        systime: cells[0].textContent.trim(),
-                        pnl_id: cells[1].textContent.trim(),
-                        mach_id: cells[2].textContent.trim(),
-                        result_eqp: cells[3].textContent.trim(),
-                        result_ai: cells[4].textContent.trim(),
-                        result_ric: ricVal,
-                        result_ric_raw: cells[5].textContent.trim(),
+                        systime: cells[indices.systime] ? cells[indices.systime].textContent.trim() : '',
+                        pnl_id: cells[indices.pnl_id] ? cells[indices.pnl_id].textContent.trim() : '',
+                        mach_id: cells[indices.mach_id] ? cells[indices.mach_id].textContent.trim() : '',
+                        result_eqp: cells[indices.result_eqp] ? cells[indices.result_eqp].textContent.trim() : '',
+                        result_ai: cells[indices.result_ai] ? cells[indices.result_ai].textContent.trim() : '',
+                        result_ric: actualResult, // 將計算基準綁定為 DATASTR 判定
+                        result_ric_raw: ricRaw,    // 保持原始 RIC 紀錄
+                        datastr: datastr,
                     });
                 }
             }
@@ -965,20 +1001,20 @@
             <div class="stat-card total" data-filter="total" onclick="filterByCard('total')">
                 <div class="label">比對總數</div>
                 <div class="value">${s.total}</div>
-                <div class="detail">${s.errCount > 0 ? `含 ${s.errCount} 筆原始 ERR (已視為 OK)` : `共 ${s.total} 筆`}</div>
+                <div class="detail">${s.total} 筆資料 (已排除 CCD)</div>
                 <div class="filter-hint">🔍 顯示全部</div>
             </div>
             <div class="stat-card aoi" data-filter="aoi_correct" onclick="filterByCard('aoi_correct')">
                 <div class="label">AOI 準確率</div>
                 <div class="value">${s.aoiAccuracy}%</div>
-                <div class="detail">${s.aoiCorrect} / ${s.total} 筆與 RIC 一致</div>
-                <div class="filter-hint">🔍 篩選 AOI 與 RIC 一致</div>
+                <div class="detail">${s.aoiCorrect} / ${s.total} 筆與 DATASTR 判定一致</div>
+                <div class="filter-hint">🔍 篩選 AOI 與 DATASTR 一致</div>
             </div>
             <div class="stat-card ai" data-filter="ai_correct" onclick="filterByCard('ai_correct')">
                 <div class="label">AI 準確率</div>
                 <div class="value">${s.aiAccuracy}%</div>
-                <div class="detail">${s.aiCorrect} / ${s.total} 筆與 RIC 一致</div>
-                <div class="filter-hint">🔍 篩選 AI 與 RIC 一致</div>
+                <div class="detail">${s.aiCorrect} / ${s.total} 筆與 DATASTR 判定一致</div>
+                <div class="filter-hint">🔍 篩選 AI 與 DATASTR 一致</div>
             </div>
             <div class="stat-card match" data-filter="ai_ng" onclick="filterByCard('ai_ng')">
                 <div class="label">AI 判 NG 數</div>
@@ -1050,9 +1086,9 @@
             }) : rawData;
 
             const labels = {
-                total: '全部', aoi_correct: 'AOI 與 RIC 一致 (⚠含RIC覆判)', ai_correct: 'AI 與 RIC 一致',
-                ai_ng: 'AI 判 NG', aoi_over: 'AOI 過檢 (AOI=NG有參考)', aoi_miss: 'AOI 漏檢 (⚠無參考)',
-                ai_over: 'AI 過檢', ai_miss: 'AI 漏檢', err: '原始 ERR (視為OK)',
+                total: '全部', aoi_correct: 'AOI 與 DATASTR 判定一致', ai_correct: 'AI 與 DATASTR 判定一致',
+                ai_ng: 'AI 判 NG', aoi_over: 'AOI 過檢 (AOI=NG 且 DATASTR=OK)', aoi_miss: 'AOI 漏檢 (AOI=OK 且 DATASTR=NG)',
+                ai_over: 'AI 過檢', ai_miss: 'AI 漏檢',
             };
 
             const labelEl = document.getElementById('filterLabel');
@@ -1081,12 +1117,15 @@
                 const aiBadge = row.result_ai === 'OK'
                     ? '<span class="badge badge-ok">OK</span>'
                     : '<span class="badge badge-ng">NG</span>';
-                // 顯示原始值，但標註已視為 OK
-                const ricBadge = isOrigERR
-                    ? '<span class="badge badge-ok">OK<sup style="font-size:0.55rem;opacity:0.7;">(ERR)</sup></span>'
-                    : row.result_ric === 'OK'
+                const ricBadgeRaw = row.result_ric_raw === 'ERR'
+                    ? '<span class="badge" style="background:rgba(245,158,11,0.1); color:var(--err)">ERR</span>'
+                    : row.result_ric_raw === 'OK'
                         ? '<span class="badge badge-ok">OK</span>'
                         : '<span class="badge badge-ng">NG</span>';
+
+                const actualBadge = row.result_ric === 'OK'
+                    ? '<span class="badge badge-ok">OK</span>'
+                    : '<span class="badge badge-ng">NG</span>';
 
                 const aoiComp = aoiMatch
                     ? '<span class="badge badge-match">✓ 一致</span>'
@@ -1099,9 +1138,6 @@
                 if (!aiMatch) {
                     tr.style.background = 'rgba(239,68,68,0.06)';
                 }
-                if (isOrigERR) {
-                    tr.style.background = 'rgba(245,158,11,0.04)';
-                }
 
                 tr.innerHTML = `
                 <td style="color:var(--text-muted); font-size:0.8rem;">${i + 1}</td>
@@ -1110,7 +1146,9 @@
                 <td>${row.mach_id}</td>
                 <td>${eqpBadge}</td>
                 <td>${aiBadge}</td>
-                <td>${ricBadge}</td>
+                <td>${ricBadgeRaw}</td>
+                <td>${actualBadge}</td>
+                <td style="font-size:0.75rem; color:var(--text-muted); max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${row.datastr}</td>
                 <td>${aoiComp}</td>
                 <td>${aiComp}</td>
             `;
@@ -1460,15 +1498,14 @@
             const diffDiv = document.getElementById('diffAnalysis');
 
             const clientRows = [
-                ['比對總數', s.total],
-                ['原始 ERR 筆數 (視為OK)', s.errCount],
+                ['比對總數 (排除CCD)', s.total],
                 ['AOI 判 NG 數', s.aoiNG],
                 ['AI 判 NG 數', s.aiNG],
-                ['RIC 判 NG 數 (真實NG)', s.ricNGTotal],
-                ['AOI 準確率', s.aoiAccuracy + '%'],
-                ['AI 準確率', s.aiAccuracy + '%'],
+                ['真實判定 NG 數 (DATASTR含NG)', s.ricNGTotal],
+                ['AOI 準確率 (vs DATASTR)', s.aoiAccuracy + '%'],
+                ['AI 準確率 (vs DATASTR)', s.aiAccuracy + '%'],
                 ['AOI 過檢率', s.aoiOverRate + '%'],
-                ['AOI 漏檢率 ⚠無參考', s.aoiMissRate + '%'],
+                ['AOI 漏檢率', s.aoiMissRate + '%'],
                 ['AI 過檢率', s.aiOverRate + '%'],
                 ['AI 漏檢率', s.aiMissRate + '%'],
             ];
@@ -1569,7 +1606,7 @@
             const rows = tbody.querySelectorAll('tr');
             if (rows.length === 0) { alert('無資料可導出'); return; }
 
-            const headers = ['#', '檢測時間', 'Panel ID', '機台', 'RESULT_EQP', 'RESULT_AI', 'RESULT_RIC', 'AOI vs RIC', 'AI vs RIC'];
+            const headers = ['#', '檢測時間', 'Panel ID', '機台', 'RESULT_EQP', 'RESULT_AI', 'RIC_RAW', 'DATASTR_JUDGE', 'DATASTR_RAW', 'AOI vs DATASTR', 'AI vs DATASTR'];
             let csv = '\ufeff' + headers.join(',') + '\n';
 
             rows.forEach(tr => {

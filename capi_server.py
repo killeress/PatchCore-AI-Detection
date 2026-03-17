@@ -415,7 +415,7 @@ def append_cv_edge_to_judgment(
     if not edge_defects:
         return ai_judgment, ng_details_json
         
-    real_edge_defects = [d for d in edge_defects if not getattr(d, 'is_suspected_dust_or_scratch', False)]
+    real_edge_defects = [d for d in edge_defects if not getattr(d, 'is_suspected_dust_or_scratch', False) and not getattr(d, 'is_bomb', False)]
         
     if real_edge_defects:
         # 如果原本是 OK，現在因為真實邊緣瑕疵變成 NG
@@ -464,8 +464,8 @@ def results_to_db_data(
         is_bomb = 0
         anomaly_count = len(result.anomaly_tiles)
         
-        # 加上 CV Edge 的 NG 數量
-        cv_edge_count = len(result.edge_defects)
+        # 加上 CV Edge 的 NG 數量 (排除灰塵和炸彈)
+        cv_edge_count = len([d for d in result.edge_defects if not getattr(d, 'is_suspected_dust_or_scratch', False) and not getattr(d, 'is_bomb', False)])
 
         if anomaly_count > 0 or cv_edge_count > 0:
             real_ng = [t for t, s, m in result.anomaly_tiles
@@ -554,6 +554,8 @@ def results_to_db_data(
                     "center_y": int(edge.center[1]),
                     "heatmap_path": getattr(edge, '_heatmap_path', ''),
                     "is_dust": 1 if getattr(edge, 'is_suspected_dust_or_scratch', False) else 0,
+                    "is_bomb": 1 if getattr(edge, 'is_bomb', False) else 0,
+                    "bomb_code": getattr(edge, 'bomb_defect_code', ''),
                 })
 
         db_images.append(img_data)

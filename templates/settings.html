@@ -1016,7 +1016,7 @@
         'dust_heatmap_metric', 'dust_detect_dark_particles'
     ];
     const CV_EDGE_PARAMS = [
-        'cv_edge_enabled', 'cv_edge_dust_filter_enabled',
+        'cv_edge_enabled', 'cv_edge_dust_filter_enabled', 'otsu_offset',
         'cv_edge_left_width', 'cv_edge_left_threshold', 'cv_edge_left_min_area',
         'cv_edge_left_exclude_top', 'cv_edge_left_exclude_bottom', 'cv_edge_left_exclude_left', 'cv_edge_left_exclude_right',
         'cv_edge_right_width', 'cv_edge_right_threshold', 'cv_edge_right_min_area',
@@ -1053,6 +1053,10 @@
     });
 
     // ── Load Settings ──
+    let modelResolutionMap = {};  // 產品解析度碼 -> [w, h] 映射
+    let allExZonesByProduct = {}; // 完整的按產品分組排除區域 dict
+    let currentProductCode = '';  // 目前選擇的產品解析度碼
+
     async function loadSettings() {
         try {
             const res = await fetch('/api/settings');
@@ -1060,6 +1064,7 @@
             if (data.error) throw new Error(data.error);
 
             allParams = data.params || [];
+            modelResolutionMap = data.model_resolution_map || {};
             renderSettings();
             populateFilter();
         } catch (e) {
@@ -1078,6 +1083,7 @@
         // Group CV Edge Parameters
         const edgeEnabled = cvEdgeParams.find(p => p.param_name === 'cv_edge_enabled');
         const dustFilterEnabled = cvEdgeParams.find(p => p.param_name === 'cv_edge_dust_filter_enabled');
+        const otsuOffsetParam = cvEdgeParams.find(p => p.param_name === 'otsu_offset');
         const sides = {
             'left': { icon: '⬅️', title: '左側', params: [] },
             'right': { icon: '➡️', title: '右側', params: [] },
@@ -1086,7 +1092,7 @@
         };
 
         cvEdgeParams.forEach(p => {
-            if (p.param_name === 'cv_edge_enabled' || p.param_name === 'cv_edge_dust_filter_enabled' || p.param_name.startsWith('cv_edge_exclude_')) return;
+            if (p.param_name === 'cv_edge_enabled' || p.param_name === 'cv_edge_dust_filter_enabled' || p.param_name === 'otsu_offset' || p.param_name.startsWith('cv_edge_exclude_')) return;
             const sideKey = ['left', 'right', 'top', 'bottom'].find(s => p.param_name.startsWith(`cv_edge_${s}_`));
             if (sideKey) sides[sideKey].params.push(p);
         });
@@ -1155,6 +1161,22 @@
                             ` : ''}
                         </div>
                     </div>
+                    
+                    ${otsuOffsetParam ? `
+                    <div style="padding: 16px; border-bottom: 1px solid rgba(59, 130, 246, 0.2);">
+                        <div class="edge-param-compact" style="background: rgba(30, 41, 59, 0.4); border-radius: 8px; border: 1px solid rgba(59, 130, 246, 0.15);">
+                            <div class="edge-param-info">
+                                <div class="edge-param-label">Otsu 產品邊緣裁切內縮 (px)，避免邊界誤判</div>
+                                <div class="edge-param-name-compact">otsu_offset</div>
+                            </div>
+                            <div class="edge-param-value-box">
+                                <div class="value-display-compact">${otsuOffsetParam.param_value}</div>
+                                <button class="btn-edit btn-edit-compact" onclick='openEdit("otsu_offset")'>✏️</button>
+                            </div>
+                        </div>
+                    </div>
+                    ` : ''}
+
                     <div class="edge-groups-container">
                         ${Object.entries(sides).map(([key, side]) => {
             const coreParams = side.params.filter(p => !p.param_name.includes('exclude'));
@@ -1251,8 +1273,16 @@
                             </div>
                         </div>
                         
+                        <!-- 產品選擇器 -->
+                        <div style="padding: 12px 16px 0; display:flex; align-items:center; gap:12px; border-bottom: 1px solid rgba(244,63,94,0.15); padding-bottom: 12px;">
+                            <span style="font-size: 0.8rem; color: #fda4af; font-weight: 600;">📦 選擇產品:</span>
+                            <select id="ex-product-selector" onchange="switchExProduct(this.value)" style="background: #1e293b; color: #e2e8f0; border: 1px solid #475569; border-radius: 6px; padding: 6px 12px; font-size: 0.85rem; font-family: 'Fira Code', monospace; cursor: pointer; min-width: 200px;">
+                                <!-- Populated by JS -->
+                            </select>
+                            <span id="ex-product-info" style="font-size: 0.75rem; color: #64748b;"></span>
+                        </div>
+
                         <div style="padding: 16px; display: grid; grid-template-columns: 3fr 2fr; gap: 24px; align-items: start;">
-                            <!-- 可視化區域 -->
                             <div id="ex-vis-container" style="background: #0f172a; border: 1px dashed #64748b; border-radius: 8px; position: relative; width: 100%; aspect-ratio: 4/3; overflow: hidden; display: flex; align-items: center; justify-content: center;">
                                 <img src="/imgs/Sample.jpg" class="vis-bg-img" alt="Panel Background">
                                 <span style="position: absolute; color: rgba(255,255,255,0.1); font-weight: bold; font-size: 2rem; user-select: none; z-index: 1;">PANEL / IMAGE</span>
@@ -1261,7 +1291,7 @@
                             </div>
                             
                             <div style="display: flex; flex-direction: column; gap: 12px; max-height: 450px; overflow-y: auto; padding-right: 4px;">
-                                <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0;">設定多個排除區域 (X, Y, W, H)，單位為 pixel。<br>邊緣檢測若與任何區域重疊，則不計入缺點。</p>
+                                <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0;">設定多個排除區域 (X, Y, W, H)，單位為 pixel。<br>邊緣檢測若與任何區域重疊，則不計入缺點。<br><strong style="color:#fda4af;">⚠️ 排除區域按產品分別設定。</strong></p>
                                 
                                 <div id="ex-zones-list">
                                     <!-- Rendered by JS -->
@@ -1637,6 +1667,66 @@
         return p.param_type === 'bool' ? p.param_value === 'true' : parseInt(p.param_value);
     }
 
+    // 取得目前選中產品的影像解析度 (用於可視化)
+    function getCurrentProductResolution() {
+        if (currentProductCode && modelResolutionMap[currentProductCode]) {
+            const res = modelResolutionMap[currentProductCode];
+            return { w: res[0], h: res[1] };
+        }
+        return { w: 6576, h: 4384 };  // fallback
+    }
+
+    function populateProductSelector() {
+        const sel = document.getElementById('ex-product-selector');
+        if (!sel) return;
+        sel.innerHTML = '';
+        const codes = Object.keys(modelResolutionMap);
+        if (codes.length === 0) {
+            sel.innerHTML = '<option value="">（無產品資料）</option>';
+            return;
+        }
+        codes.forEach(code => {
+            const res = modelResolutionMap[code];
+            const opt = document.createElement('option');
+            opt.value = code;
+            opt.textContent = `${code} — ${res[0]}×${res[1]}`;
+            sel.appendChild(opt);
+        });
+        // 預設選第一個
+        if (!currentProductCode && codes.length > 0) {
+            currentProductCode = codes[0];
+        }
+        sel.value = currentProductCode;
+    }
+
+    function switchExProduct(code) {
+        // 先把目前修改存回 allExZonesByProduct
+        if (currentProductCode) {
+            allExZonesByProduct[currentProductCode] = JSON.parse(JSON.stringify(currentExZones));
+        }
+        currentProductCode = code;
+        // 載入新產品的 zones
+        currentExZones = allExZonesByProduct[code] ? JSON.parse(JSON.stringify(allExZonesByProduct[code])) : [];
+        renderExZones();
+
+        // 更新背景圖 (若有專屬產品圖則載入，否則退回預設)
+        const bgImg = document.querySelector('.vis-bg-img');
+        if (bgImg) {
+            bgImg.onerror = function () {
+                this.onerror = null;
+                this.src = '/imgs/Sample.jpg';
+            };
+            bgImg.src = `/imgs/Sample_${code}.jpg`;
+        }
+
+        // 更新 info 文字
+        const info = document.getElementById('ex-product-info');
+        if (info && modelResolutionMap[code]) {
+            const res = modelResolutionMap[code];
+            info.textContent = `Panel: ${res[0]}×${res[1]}px`;
+        }
+    }
+
     function initExZoneData() {
         const enabled = getParamValue('cv_edge_exclude_enabled', false);
         const checkEl = document.getElementById('inp-ex-enabled');
@@ -1646,33 +1736,46 @@
 
         // 讀取多組區域列表
         const p = allParams.find(x => x.param_name === 'cv_edge_exclude_zones');
+        allExZonesByProduct = {};
         if (p && p.param_value) {
             try {
                 let parsed = JSON.parse(p.param_value);
-                // 處理可能的雙重編碼或非陣列情況
+                // 處理可能的雙重編碼
                 if (typeof parsed === 'string') {
                     try { parsed = JSON.parse(parsed); } catch { }
                 }
-                currentExZones = Array.isArray(parsed) ? parsed : [];
+                // 新格式: dict keyed by resolution_code
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    allExZonesByProduct = parsed;
+                }
+                // 舊格式: 直接是 list — 遷移至第一個產品碼
+                else if (Array.isArray(parsed) && parsed.length > 0) {
+                    const firstCode = Object.keys(modelResolutionMap)[0] || 'H';
+                    allExZonesByProduct[firstCode] = parsed;
+                }
             } catch (e) {
                 console.error("Failed to parse exclusion zones:", e);
-                currentExZones = [];
             }
         }
 
         // 向後相容：若無多組區域列表，嘗試從舊有的單一設定中提取
-        if (!currentExZones || currentExZones.length === 0) {
+        if (Object.keys(allExZonesByProduct).length === 0) {
             const oldEnabled = getParamValue('cv_edge_exclude_enabled', false);
             const x = getParamValue('cv_edge_exclude_x', 0);
             const y = getParamValue('cv_edge_exclude_y', 0);
             const w = getParamValue('cv_edge_exclude_w', 100);
             const h = getParamValue('cv_edge_exclude_h', 100);
-
-            // 只有當至少寬或高不為 0 時才加入（避免預設空的）
             if (w > 0 && h > 0) {
-                currentExZones = [{ enabled: oldEnabled, x, y, w, h }];
+                const firstCode = Object.keys(modelResolutionMap)[0] || 'H';
+                allExZonesByProduct[firstCode] = [{ enabled: oldEnabled, x, y, w, h }];
             }
         }
+
+        // 填入產品選擇器
+        populateProductSelector();
+
+        // 載入目前選中產品的 zones
+        currentExZones = allExZonesByProduct[currentProductCode] ? JSON.parse(JSON.stringify(allExZonesByProduct[currentProductCode])) : [];
 
         renderExZones();
     }
@@ -1785,20 +1888,24 @@
     }
 
     async function saveExZone() {
-        const reason = "[系統] 修改多組排除區域位置設定";
+        // 先把目前正在編輯的產品 zones 存回 dict
+        if (currentProductCode) {
+            allExZonesByProduct[currentProductCode] = JSON.parse(JSON.stringify(currentExZones));
+        }
+        const reason = `[系統] 修改排除區域設定 (產品: ${currentProductCode})`;
         try {
             const res = await fetch('/api/settings/update', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     param_name: 'cv_edge_exclude_zones',
-                    new_value: currentExZones,
+                    new_value: allExZonesByProduct,
                     reason
                 })
             });
             const data = await res.json();
             if (data.error) throw new Error(data.error);
-            showToast('✅ 排除區域設定已儲存', 'success');
+            showToast(`✅ 排除區域設定已儲存 (${currentProductCode})`, 'success');
             loadSettings();
             loadHistory();
         } catch (e) {
