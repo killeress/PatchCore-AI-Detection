@@ -430,7 +430,7 @@ def append_cv_edge_to_judgment(
     except Exception:
         details = []
         
-    for d in edge_defects:
+    for d in real_edge_defects:
         details.append({
             "image": image_name,
             "type": f"cv_edge_{d.side}",
@@ -441,7 +441,7 @@ def append_cv_edge_to_judgment(
             "score": float(d.max_diff), # 用 max_diff 暫代 score
             "area": int(d.area),
             "is_cv_edge": True,
-            "is_dust": getattr(d, 'is_suspected_dust_or_scratch', False),
+            "is_dust": False,
         })
         
     return ai_judgment, json.dumps(details, ensure_ascii=False)

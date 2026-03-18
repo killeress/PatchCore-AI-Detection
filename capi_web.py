@@ -317,27 +317,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         )
         self._send_response(200, html)
 
-    def _handle_record_detail_v3(self, record_id_str: str, path: str):
-        """記錄詳情頁 (v3 UI)"""
-        try:
-            record_id = int(record_id_str)
-        except ValueError:
-            self._send_404(path)
-            return
-
-        detail = self.db.get_record_detail(record_id) if self.db else None
-        if not detail:
-            self._send_404(path)
-            return
-
-        template = self.jinja_env.get_template("record_detail_v3.html")
-        html = template.render(
-            detail=detail,
-            heatmap_base_dir=self.heatmap_base_dir,
-            request_path=path
-        )
-        self._send_response(200, html)
-
     def _handle_search(self, query: dict, path: str):
         """搜尋頁面（含日期篩選）"""
         glass_id = query.get("glass_id", [""])[0]
@@ -600,8 +579,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _handle_api_stats(self, query: dict):
         """API: 統計資料"""
-        days = int(query.get("days", [7])[0])
-        limit = int(query.get("limit", [15])[0])
+        try:
+            days = int(query.get("days", [7])[0])
+        except (ValueError, TypeError):
+            days = 7
+        try:
+            limit = int(query.get("limit", [15])[0])
+        except (ValueError, TypeError):
+            limit = 15
         
         stats = self.db.get_statistics(days) if self.db else {}
         
@@ -1019,6 +1004,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
 
             # 3. 推論 — 若有 GPU lock 則排隊
+            # model_id: 從 POST 資料取得（可選），用於推導產品解析度
+            debug_model_id = data.get("model_id")
+
             if hasattr(self, '_gpu_lock') and self._gpu_lock:
                 with self._gpu_lock:
                     result = self.inferencer.run_inference(
@@ -1027,6 +1015,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         threshold=debug_threshold,
                         edge_margin_override=edge_margin_override,
                         patchcore_overrides=patchcore_overrides if patchcore_overrides else None,
+                        model_id=debug_model_id,
                     )
             else:
                 result = self.inferencer.run_inference(
@@ -1035,6 +1024,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     threshold=debug_threshold,
                     edge_margin_override=edge_margin_override,
                     patchcore_overrides=patchcore_overrides if patchcore_overrides else None,
+                    model_id=debug_model_id,
                 )
 
             total_time = _time.time() - total_start
@@ -1095,15 +1085,28 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                             # B. IOU 計算
                             top_pct = dust_top_pct_override if dust_top_pct_override is not None else self.inferencer.config.dust_heatmap_top_percent
                             metric_mode = dust_metric_override if dust_metric_override else self.inferencer.config.dust_heatmap_metric
+                            dust_iou_thr = dust_iou_thr_override if dust_iou_thr_override is not None else self.inferencer.config.dust_heatmap_iou_threshold
                             if is_dust and anomaly_map is not None:
                                 iou, heatmap_binary = self.inferencer.compute_dust_heatmap_iou(
                                     dust_mask, anomaly_map, top_percent=top_pct, metric=metric_mode
                                 )
                                 tile.dust_heatmap_iou = iou
+                                # 判定灰塵 (與正式路徑 _dust_check_one 一致)
+                                metric_name = "COV" if metric_mode == "coverage" else "IOU"
+                                if iou >= dust_iou_thr:
+                                    tile.is_suspected_dust_or_scratch = True
+                                    detail_text += f" {metric_name}:{iou:.3f}>={metric_name}_THR -> DUST"
+                                else:
+                                    detail_text += f" {metric_name}:{iou:.3f}<{metric_name}_THR -> REAL_NG"
                                 # 產生 Debug 圖
                                 tile.dust_iou_debug_image = self.inferencer.generate_dust_iou_debug_image(
                                     tile.image, anomaly_map, dust_mask, heatmap_binary, iou, top_pct, tile.is_suspected_dust_or_scratch
                                 )
+                            elif is_dust:
+                                tile.is_suspected_dust_or_scratch = True
+                                detail_text += " (no heatmap, marked as dust)"
+                            else:
+                                detail_text += " NO_DUST -> REAL_NG"
                             tile.dust_detail_text = detail_text
                     except Exception as e:
                         logger.warning(f"[DEBUG] Dust check processing failed for tile {tile.tile_id}: {e}")
@@ -1716,7 +1719,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if param_name.startswith("cv_edge") and hasattr(self, 'inferencer') and self.inferencer:
                     try:
                         from capi_edge_cv import EdgeInspectionConfig
-                        db_params = {r["param_name"]: r["current_value"] for r in self.db.get_all_config_params()}
+                        db_params = {r["param_name"]: r for r in self.db.get_all_config_params()}
                         edge_cfg = EdgeInspectionConfig.from_db_params(db_params)
                         self.inferencer.update_edge_config(edge_cfg)
                         logger.info(f"[Edge Hot-Reload] CV Edge config synced after updating '{param_name}'")
