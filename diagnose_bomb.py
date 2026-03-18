@@ -95,7 +95,7 @@ def main():
         print("❌ 無法預處理圖片")
         sys.exit(1)
 
-    result = inferencer.run_inference(result)
+    result = inferencer.run_inference(result, model_id=args.model_id)
     print(f"  ✅ 推論完成: {len(result.tiles)} 個 tile, {len(result.anomaly_tiles)} 個異常")
 
     # ── 3. 載入原圖並繪製 ──

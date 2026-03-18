@@ -927,7 +927,7 @@ class CAPIServer:
 
                     # 執行推論（不含 Heatmap 儲存，快速回覆）
                     start_time = time.time()
-                    ai_judgment, ng_details, inference_results, is_duplicate = self._process_request(parsed)
+                    ai_judgment, ng_details, inference_results, is_duplicate, omit_image_raw = self._process_request(parsed)
                     processing_seconds = time.time() - start_time
 
                     # 重複投片時在 LOG 標記
@@ -976,7 +976,7 @@ class CAPIServer:
                         client_addr, parsed, inference_results,
                         ai_judgment, ng_details,
                         request_time, response_time, processing_seconds,
-                        is_duplicate,
+                        is_duplicate, omit_image_raw,
                     )
 
                 except ProtocolError as e:
@@ -1046,17 +1046,17 @@ class CAPIServer:
         """
         # 檢查推論器
         if self.inferencer is None:
-            return "ERR:MODEL_NOT_LOADED", "[]", [], False
+            return "ERR:MODEL_NOT_LOADED", "[]", [], False, None
 
         # 轉換路徑
         image_dir = resolve_unc_path(parsed["image_dir"], self.path_mapping)
         panel_dir = Path(image_dir)
 
         if not panel_dir.exists():
-            return f"ERR:DIR_NOT_FOUND ({image_dir})", "[]", [], False
+            return f"ERR:DIR_NOT_FOUND ({image_dir})", "[]", [], False, None
 
         if not panel_dir.is_dir():
-            return f"ERR:NOT_A_DIR ({image_dir})", "[]", [], False
+            return f"ERR:NOT_A_DIR ({image_dir})", "[]", [], False, None
 
         logger.info(f"Inference directory: {panel_dir}")
 
@@ -1070,11 +1070,13 @@ class CAPIServer:
                     cpu_workers=self.cpu_workers,
                     product_resolution=parsed["resolution"],
                     bomb_info=parsed.get("bomb_info"),
+                    model_id=parsed.get("model_id"),
                 )
 
                 # process_panel 回傳: (results, omit_vis, omit_overexposed, omit_info, is_duplicate)
                 results = panel_result[0]
                 is_duplicate = panel_result[4]
+                omit_image_raw = panel_result[5] if len(panel_result) > 5 else None
 
                 if is_duplicate:
                     logger.warning(
@@ -1083,7 +1085,7 @@ class CAPIServer:
                     )
 
                 if not results:
-                    return "ERR:NO_IMAGES_FOUND", "[]", [], False
+                    return "ERR:NO_IMAGES_FOUND", "[]", [], False, None
 
                 # 彙總判定
                 ai_judgment, ng_details = aggregate_judgment(results)
@@ -1095,11 +1097,11 @@ class CAPIServer:
                             ai_judgment, ng_details, result.edge_defects, result.image_path.stem
                         )
 
-                return ai_judgment, ng_details, results, is_duplicate
+                return ai_judgment, ng_details, results, is_duplicate, omit_image_raw
 
             except Exception as e:
                 logger.error(f"Inference error: {e}", exc_info=True)
-                return f"ERR:INFERENCE_FAILED ({type(e).__name__}: {str(e)[:100]})", "[]", [], False
+                return f"ERR:INFERENCE_FAILED ({type(e).__name__}: {str(e)[:100]})", "[]", [], False, None
 
 
     def _save_results_async(
@@ -1113,6 +1115,7 @@ class CAPIServer:
         response_time: str,
         processing_seconds: float,
         is_duplicate: bool = False,
+        omit_image_raw: Any = None,
     ):
         """
         非同步儲存 Heatmap 和 DB 記錄（在背景執行緒中執行）
@@ -1131,6 +1134,7 @@ class CAPIServer:
                         inferencer=self.inferencer,
                         save_overview=self.save_overview,
                         save_tile_detail=self.save_tile_detail,
+                        omit_image=omit_image_raw,
                     )
                 except Exception as e:
                     logger.error(f"[{client_addr}] Async heatmap save error: {e}")

@@ -1712,6 +1712,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             success = self.db.update_config_param(param_name, new_value, reason)
             if success:
+                # Hot-reload edge config if a cv_edge_* parameter was updated
+                if param_name.startswith("cv_edge") and hasattr(self, 'inferencer') and self.inferencer:
+                    try:
+                        from capi_edge_cv import EdgeInspectionConfig
+                        db_params = {r["param_name"]: r["current_value"] for r in self.db.get_all_config_params()}
+                        edge_cfg = EdgeInspectionConfig.from_db_params(db_params)
+                        self.inferencer.update_edge_config(edge_cfg)
+                        logger.info(f"[Edge Hot-Reload] CV Edge config synced after updating '{param_name}'")
+                    except Exception as e:
+                        logger.warning(f"[Edge Hot-Reload] Failed to sync edge config: {e}")
                 self._send_json({"success": True, "message": f"已更新 {param_name}"})
             else:
                 self._send_json({"error": f"找不到參數: {param_name}"})

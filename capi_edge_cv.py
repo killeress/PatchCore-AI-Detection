@@ -162,34 +162,32 @@ class EdgeInspectionConfig:
         
         
         # 排除區域 (支援按產品解析度碼分組的 dict 格式，或向後相容的 list 格式)
-        zones_json = get("cv_edge_exclude_zones", None)
-        if zones_json and isinstance(zones_json, str):
-            try:
-                zones_data = json.loads(zones_json)
-                # 新格式: dict keyed by resolution_code，例如 {"H": [...], "J": [...]}
-                if isinstance(zones_data, dict):
-                    # 儲存完整的 per-product zones dict (用於 runtime 切換)
-                    cfg.all_exclude_zones_by_product = zones_data
-                    # 選取對應產品的排除區域
-                    product_zones = zones_data.get(resolution_code, []) if resolution_code else []
-                    # 若找不到對應的 code，嘗試取第一組作為 fallback
-                    if not product_zones and zones_data:
-                        first_key = next(iter(zones_data))
-                        product_zones = zones_data[first_key]
-                        if resolution_code:
-                            print(f"⚠️ 排除區域未找到產品 '{resolution_code}'，使用 fallback '{first_key}'")
-                    if isinstance(product_zones, list):
-                        cfg.exclude_zones = [
-                            EdgeExclusionZoneConfig(
-                                enabled=z.get("enabled", True),
-                                x=int(z.get("x", 0)),
-                                y=int(z.get("y", 0)),
-                                w=int(z.get("w", 100)),
-                                h=int(z.get("h", 100))
-                            ) for z in product_zones
-                        ]
-                # 舊格式: 直接是 list
-                elif isinstance(zones_data, list):
+        zones_raw = get("cv_edge_exclude_zones", None)
+        zones_data = None
+        if zones_raw:
+            # 可能已被 _decode_config_value 解析為 dict/list，或仍是 JSON 字串
+            if isinstance(zones_raw, (dict, list)):
+                zones_data = zones_raw
+            elif isinstance(zones_raw, str):
+                try:
+                    zones_data = json.loads(zones_raw)
+                except:
+                    pass
+        
+        if zones_data is not None:
+            # 新格式: dict keyed by resolution_code，例如 {"H": [...], "J": [...]}
+            if isinstance(zones_data, dict):
+                # 儲存完整的 per-product zones dict (用於 runtime 切換)
+                cfg.all_exclude_zones_by_product = zones_data
+                # 選取對應產品的排除區域
+                product_zones = zones_data.get(resolution_code, []) if resolution_code else []
+                # 若找不到對應的 code，嘗試取第一組作為 fallback
+                if not product_zones and zones_data:
+                    first_key = next(iter(zones_data))
+                    product_zones = zones_data[first_key]
+                    if resolution_code:
+                        print(f"⚠️ 排除區域未找到產品 '{resolution_code}'，使用 fallback '{first_key}'")
+                if isinstance(product_zones, list):
                     cfg.exclude_zones = [
                         EdgeExclusionZoneConfig(
                             enabled=z.get("enabled", True),
@@ -197,10 +195,19 @@ class EdgeInspectionConfig:
                             y=int(z.get("y", 0)),
                             w=int(z.get("w", 100)),
                             h=int(z.get("h", 100))
-                        ) for z in zones_data
+                        ) for z in product_zones
                     ]
-            except:
-                pass
+            # 舊格式: 直接是 list
+            elif isinstance(zones_data, list):
+                cfg.exclude_zones = [
+                    EdgeExclusionZoneConfig(
+                        enabled=z.get("enabled", True),
+                        x=int(z.get("x", 0)),
+                        y=int(z.get("y", 0)),
+                        w=int(z.get("w", 100)),
+                        h=int(z.get("h", 100))
+                    ) for z in zones_data
+                ]
         
         # 向後相容：若無多組區域列表，嘗試讀取舊版單一區域設定
         if not cfg.exclude_zones:
@@ -274,7 +281,8 @@ class CVEdgeInspector:
             defects = self._inspect_side(roi, side_name, side_cfg, offset_x, offset_y)
             
             # 排除區域過濾 (支援多組)
-            active_zones = [z for z in self.config.exclude_zones if z.enabled]
+            all_zones = self.config.exclude_zones
+            active_zones = [z for z in all_zones if z.enabled]
             if active_zones:
                 filtered_defects = []
                 for d in defects:
@@ -290,7 +298,6 @@ class CVEdgeInspector:
                         )
                         if overlap:
                             is_excluded = True
-                            print(f"⚠️ 邊緣缺陷 (Side:{d.side}, Area:{d.area}) 落入排除區域 (x:{zone.x}, y:{zone.y}), 已被忽略")
                             break
                     
                     if not is_excluded:

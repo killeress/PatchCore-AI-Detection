@@ -258,11 +258,21 @@ class HeatmapManager:
         edge_index: int,
         edge_defect: Any,
         full_image: np.ndarray,
+        omit_image: np.ndarray = None,
+        edge_config: Any = None,
+        dust_check_fn: Any = None,
+        dust_iou_fn: Any = None,
+        dust_iou_threshold: float = 0.3,
+        dust_heatmap_top_percent: float = 5.0,
+        dust_metric: str = "coverage",
     ) -> str:
         """
-        儲存 CV 邊緣缺陷比較圖 (Original ROI | Diff Overlay | [可選 OMIT] | [可選 Dust])
+        儲存 CV 邊緣缺陷比較圖 (Original ROI | Defect Highlight | OMIT ROI | Defect vs OMIT Overlay)
 
-        仿效 heatmap tile 的疊加圖風格，Panel 2 使用 diff map + JET colormap 疊加。
+        Panel 1: 原始 ROI
+        Panel 2: 原圖 + 缺陷 BBox 標註 (不使用熱力圖疊加)
+        Panel 3: OMIT 圖同座標 ROI 裁切 (無圖像處理)
+        Panel 4: 缺陷 mask 與 OMIT 異物 mask 疊加比對 (IOU/COV 位置交叉驗證)
 
         Args:
             save_dir: 儲存目錄
@@ -270,6 +280,13 @@ class HeatmapManager:
             edge_index: 缺陷序號
             edge_defect: EdgeDefect 物件
             full_image: 原始完整圖片
+            omit_image: OMIT 完整圖片 (與原圖尺寸一致)
+            edge_config: EdgeInspectionConfig (用於取得 blur/median 參數)
+            dust_check_fn: check_dust_or_scratch_feature 函數引用
+            dust_iou_fn: compute_dust_heatmap_iou 函數引用
+            dust_iou_threshold: IOU/COV 閾值
+            dust_heatmap_top_percent: 灰塵熱區取前百分比
+            dust_metric: "coverage" 或 "iou"
 
         Returns:
             儲存的檔案路徑
@@ -291,15 +308,15 @@ class HeatmapManager:
         roi_y2 = min(img_h, by + bh + padding)
 
         roi_raw = full_image[roi_y1:roi_y2, roi_x1:roi_x2].copy()
-        
-        # 灰階用於計算 diff
+
+        # 灰階用於計算 diff mask
         if len(roi_raw.shape) == 3:
             roi_gray = cv2.cvtColor(roi_raw, cv2.COLOR_BGR2GRAY)
         elif len(roi_raw.shape) == 2:
             roi_gray = roi_raw
         else:
             roi_gray = roi_raw.reshape(roi_raw.shape[0], roi_raw.shape[1])
-        
+
         # ROI 轉 BGR 用於顯示
         roi = roi_raw.copy()
         if len(roi.shape) == 2:
@@ -307,32 +324,13 @@ class HeatmapManager:
         elif len(roi.shape) == 3 and roi.shape[2] == 1:
             roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
 
-        # Panel 1: 原始 ROI
+        # ── Panel 1: 原始 ROI ──
         panel_orig = roi.copy()
 
-        # Panel 2: Diff Overlay (仿 heatmap 疊加圖)
-        # 計算局部 diff map (與邊緣檢測邏輯相同)
-        k = 3
-        blurred = cv2.GaussianBlur(roi_gray, (k, k), 0)
-        mk = 65
-        mk = min(mk, min(roi_gray.shape[:2]) - 1)
-        if mk % 2 == 0:
-            mk -= 1
-        if mk < 3:
-            mk = 3
-        bg = cv2.medianBlur(blurred, mk)
-        diff = cv2.absdiff(blurred, bg)
+        # ── Panel 2: Defect Highlight (原圖 + BBox 標註，不使用熱力圖) ──
+        panel_highlight = roi.copy()
 
-        # 使用 JET colormap 上色 (放大差異以增強視覺效果)
-        diff_enhanced = np.clip(diff * 8, 0, 255).astype(np.uint8)
-        diff_colored = cv2.applyColorMap(diff_enhanced, cv2.COLORMAP_JET)
-        # 確保 diff_colored 和 roi 大小一致
-        if diff_colored.shape[:2] != roi.shape[:2]:
-            diff_colored = cv2.resize(diff_colored, (roi.shape[1], roi.shape[0]))
-        # 疊加到原始 ROI 上
-        panel_overlay = cv2.addWeighted(roi, 0.5, diff_colored, 0.5, 0)
-        
-        # 在 overlay 上標注缺陷 bbox 邊框
+        # 在原圖上繪製缺陷 bbox 邊框
         rel_x = bx - roi_x1
         rel_y = by - roi_y1
         if is_bomb:
@@ -341,7 +339,35 @@ class HeatmapManager:
             box_color = (0, 200, 255)   # 橘色
         else:
             box_color = (0, 0, 255)     # 紅色
-        cv2.rectangle(panel_overlay, (rel_x, rel_y), (rel_x + bw, rel_y + bh), box_color, 3)
+        cv2.rectangle(panel_highlight, (rel_x, rel_y), (rel_x + bw, rel_y + bh), box_color, 3)
+
+        # 產生 defect binary mask (與 _inspect_side 相同邏輯)，供 Panel 4 使用
+        k = 3
+        mk = 65
+        if edge_config is not None:
+            k = getattr(edge_config, 'blur_kernel', 3)
+            mk = getattr(edge_config, 'median_kernel', 65)
+        blurred = cv2.GaussianBlur(roi_gray, (k, k), 0)
+        mk = min(mk, min(roi_gray.shape[:2]) - 1)
+        if mk % 2 == 0:
+            mk -= 1
+        if mk < 3:
+            mk = 3
+        bg = cv2.medianBlur(blurred, mk)
+        diff = cv2.absdiff(blurred, bg)
+
+        # 取得 threshold (根據邊的 config)
+        edge_threshold = 5  # 預設值
+        if edge_config is not None:
+            side_cfg = getattr(edge_config, side, None)
+            if side_cfg is not None:
+                edge_threshold = getattr(side_cfg, 'threshold', 5)
+        _, defect_mask = cv2.threshold(diff, edge_threshold, 255, cv2.THRESH_BINARY)
+
+        # 只保留缺陷 BBox 範圍內的像素（避免整個 ROI 的紋理雜訊被納入 IOU/COV 計算）
+        bbox_only_mask = np.zeros_like(defect_mask)
+        bbox_only_mask[rel_y:rel_y + bh, rel_x:rel_x + bw] = 255
+        defect_mask = cv2.bitwise_and(defect_mask, bbox_only_mask)
 
         # 統一面板大小
         panel_h = 400
@@ -349,63 +375,170 @@ class HeatmapManager:
         panel_w = int(panel_orig.shape[1] * scale)
         panel_w = max(panel_w, 200)
         panel_orig = cv2.resize(panel_orig, (panel_w, panel_h))
-        panel_overlay = cv2.resize(panel_overlay, (panel_w, panel_h))
+        panel_highlight = cv2.resize(panel_highlight, (panel_w, panel_h))
 
-        panels = [panel_orig, panel_overlay]
+        panels = [panel_orig, panel_highlight]
         labels = ["Original ROI", "Defect Highlight"]
-        
-        # 處理灰塵相關面板
-        omit_crop = getattr(edge_defect, 'omit_crop_image', None)
-        dust_mask = getattr(edge_defect, 'dust_mask', None)
-        print(f"DEBUG: save_edge_defect_image: omit_crop is {'NOT None' if omit_crop is not None else 'None'}")
-        
-        if omit_crop is not None or dust_mask is not None:
-            # OMIT Panel
-            if omit_crop is not None:
-                omit_panel = omit_crop.copy()
-                if len(omit_panel.shape) == 2:
-                    omit_panel = cv2.cvtColor(omit_panel, cv2.COLOR_GRAY2BGR)
-                elif len(omit_panel.shape) == 3 and omit_panel.shape[2] == 1:
-                    omit_panel = cv2.cvtColor(omit_panel, cv2.COLOR_GRAY2BGR)
-            else:
-                omit_panel = np.zeros((bh, bw, 3), dtype=np.uint8)
-                
-            omit_panel = cv2.resize(omit_panel, (panel_w, panel_h))
-                
-            # Dust Panel
-            if dust_mask is not None:
-                dust_panel = omit_panel.copy()
-                dust_colored = np.zeros_like(dust_panel)
-                dust_resized = cv2.resize(dust_mask, (panel_w, panel_h))
-                dust_colored[dust_resized > 0] = (0, 255, 255)
-                dust_panel = cv2.addWeighted(dust_panel, 0.6, dust_colored, 0.4, 0)
-            else:
-                dust_panel = np.zeros((panel_w, panel_h, 3), dtype=np.uint8)
-                cv2.putText(dust_panel, "No Dust Data", (min(50, panel_w//4), panel_h//2),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)
-            
-            panels.extend([omit_panel, dust_panel])
-            labels.extend(["OMIT Crop (BBox)", "Dust Mask"])
 
-        # 橫向拼接
-        composite = np.hstack(panels)
+        # ── Panel 3 & 4: OMIT ROI + Defect vs OMIT Overlay ──
+        metric_name = "COV" if dust_metric == "coverage" else "IOU"
+        surface_iou = 0.0
+        is_surface = False
+
+        if omit_image is not None:
+            oh, ow = omit_image.shape[:2]
+
+            # Panel 3: OMIT 同座標 ROI 裁切 (無圖像處理)
+            omit_roi_x1 = max(0, min(roi_x1, ow))
+            omit_roi_y1 = max(0, min(roi_y1, oh))
+            omit_roi_x2 = max(0, min(roi_x2, ow))
+            omit_roi_y2 = max(0, min(roi_y2, oh))
+
+            omit_roi_raw = omit_image[omit_roi_y1:omit_roi_y2, omit_roi_x1:omit_roi_x2].copy()
+
+            # 轉 BGR 用於顯示
+            omit_roi = omit_roi_raw.copy()
+            if len(omit_roi.shape) == 2:
+                omit_roi = cv2.cvtColor(omit_roi, cv2.COLOR_GRAY2BGR)
+            elif len(omit_roi.shape) == 3 and omit_roi.shape[2] == 1:
+                omit_roi = cv2.cvtColor(omit_roi, cv2.COLOR_GRAY2BGR)
+
+            omit_panel = cv2.resize(omit_roi, (panel_w, panel_h))
+
+            # Panel 4: Defect vs OMIT Overlay (IOU/COV 位置交叉驗證)
+            # Step 1: 在 OMIT ROI 上偵測異物 (灰塵/刮痕)
+            dust_mask_omit = None
+            if dust_check_fn is not None:
+                try:
+                    is_dust_detected, dust_mask_omit, bright_ratio, detail_text = dust_check_fn(omit_roi_raw)
+                except Exception as e:
+                    print(f"⚠️ Edge OMIT dust check failed: {e}")
+                    is_dust_detected = False
+
+            # Step 2: 計算 defect_mask 與 dust_mask 的 IOU/COV
+            if dust_mask_omit is not None and is_dust_detected:
+                # 將 defect_mask resize 到與 dust_mask_omit 相同尺寸
+                if defect_mask.shape != dust_mask_omit.shape[:2]:
+                    defect_mask_resized = cv2.resize(defect_mask,
+                                                      (dust_mask_omit.shape[1] if len(dust_mask_omit.shape) > 1 else dust_mask_omit.shape[0],
+                                                       dust_mask_omit.shape[0]),
+                                                      interpolation=cv2.INTER_NEAREST)
+                else:
+                    defect_mask_resized = defect_mask
+
+                # 確保 dust_mask 為單通道
+                dust_mask_single = dust_mask_omit
+                if len(dust_mask_single.shape) == 3:
+                    dust_mask_single = cv2.cvtColor(dust_mask_single, cv2.COLOR_BGR2GRAY)
+
+                defect_bool = defect_mask_resized > 0
+                dust_bool = dust_mask_single > 0
+
+                intersection = np.count_nonzero(defect_bool & dust_bool)
+
+                if dust_metric == "coverage":
+                    defect_area_px = np.count_nonzero(defect_bool)
+                    surface_iou = float(intersection / defect_area_px) if defect_area_px > 0 else 0.0
+                else:
+                    union = np.count_nonzero(defect_bool | dust_bool)
+                    surface_iou = float(intersection / union) if union > 0 else 0.0
+
+                is_surface = surface_iou >= dust_iou_threshold
+
+            # 產生 Panel 4 可視化圖 (R=僅缺陷, B=僅異物, G=重疊)
+            overlay_panel = omit_panel.copy()
+            if dust_mask_omit is not None and is_dust_detected:
+                # resize masks to panel size
+                defect_vis = cv2.resize(defect_mask, (panel_w, panel_h), interpolation=cv2.INTER_NEAREST)
+                dust_vis_mask = dust_mask_single if dust_mask_single is not None else dust_mask_omit
+                if len(dust_vis_mask.shape) == 3:
+                    dust_vis_mask = cv2.cvtColor(dust_vis_mask, cv2.COLOR_BGR2GRAY)
+                dust_vis = cv2.resize(dust_vis_mask, (panel_w, panel_h), interpolation=cv2.INTER_NEAREST)
+
+                # 只顯示 BBox 周圍區域的 mask (加 margin 以顯示附近異物)
+                margin = 30
+                vis_rel_x = int(rel_x * scale)
+                vis_rel_y = int(rel_y * scale)
+                vis_bw = int(bw * scale)
+                vis_bh = int(bh * scale)
+                vis_x1 = max(0, vis_rel_x - margin)
+                vis_y1 = max(0, vis_rel_y - margin)
+                vis_x2 = min(panel_w, vis_rel_x + vis_bw + margin)
+                vis_y2 = min(panel_h, vis_rel_y + vis_bh + margin)
+
+                # 在 bbox 區域外清除 mask（避免散佈的雜點）
+                bbox_vis_mask = np.zeros((panel_h, panel_w), dtype=np.uint8)
+                bbox_vis_mask[vis_y1:vis_y2, vis_x1:vis_x2] = 255
+                defect_vis = cv2.bitwise_and(defect_vis, bbox_vis_mask)
+                dust_vis = cv2.bitwise_and(dust_vis, bbox_vis_mask)
+
+                defect_b = defect_vis > 0
+                dust_b = dust_vis > 0
+                overlap_b = defect_b & dust_b
+                only_defect = defect_b & ~dust_b
+                only_dust = dust_b & ~defect_b
+
+                color_layer = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
+                color_layer[overlap_b] = (0, 255, 0)    # 綠色 = 重疊
+                color_layer[only_defect] = (0, 0, 255)   # 紅色 = 僅缺陷
+                color_layer[only_dust] = (255, 0, 0)     # 藍色 = 僅異物
+
+                # 畫 BBox 外框以利辨識
+                cv2.rectangle(overlay_panel,
+                              (vis_rel_x, vis_rel_y),
+                              (vis_rel_x + vis_bw, vis_rel_y + vis_bh),
+                              (255, 255, 0), 1)
+
+                overlay_panel = cv2.addWeighted(overlay_panel, 0.5, color_layer, 0.5, 0)
+            else:
+                cv2.putText(overlay_panel, "No OMIT Dust Data", (10, panel_h // 2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
+
+            panels.extend([omit_panel, overlay_panel])
+            labels.extend(["OMIT ROI", f"Overlay ({metric_name}:{surface_iou:.3f})"])
+
+            # 回寫判定結果到 edge_defect
+            if is_surface and not is_bomb:
+                edge_defect.is_suspected_dust_or_scratch = True
+                is_dust = True
+                edge_defect.dust_detail_text = (
+                    getattr(edge_defect, 'dust_detail_text', '') +
+                    f" {metric_name}:{surface_iou:.3f}>={dust_iou_threshold:.3f} -> SURFACE_OK"
+                )
+            elif dust_mask_omit is not None and is_dust_detected and not is_surface:
+                edge_defect.dust_detail_text = (
+                    getattr(edge_defect, 'dust_detail_text', '') +
+                    f" {metric_name}:{surface_iou:.3f}<{dust_iou_threshold:.3f} -> REAL_NG"
+                )
+
+        # 橫向拼接 (加入明顯深灰間隔，避免相連處被誤認為缺陷線)
+        gap_w = 10
+        gap = np.full((panel_h, gap_w, 3), 80, dtype=np.uint8)
+        
+        spaced_panels = []
+        for i, p in enumerate(panels):
+            spaced_panels.append(p)
+            if i < len(panels) - 1:
+                spaced_panels.append(gap)
+
+        composite = np.hstack(spaced_panels)
         comp_h, comp_w = composite.shape[:2]
 
         # Header
         header_h = 50
         header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
-        
+
         if is_bomb:
             verdict = f"BOMB: {bomb_code} (Filtered as OK)"
             verdict_color = (255, 0, 255)
         elif is_dust:
-            verdict = "DUST (Filtered as OK)"
+            verdict = f"SURFACE ({metric_name}:{surface_iou:.3f}) (Filtered as OK)"
             verdict_color = (0, 200, 255)
         else:
             verdict = "NG (Detected)"
             verdict_color = (0, 0, 255)
-            
-        header_text = f"CV Edge [v3]: {side} | Diff: {max_diff:.0f} | Area: {area}px | {verdict}"
+
+        header_text = f"CV Edge [v4]: {side} | Diff: {max_diff:.0f} | Area: {area}px | {verdict}"
         cv2.putText(header, header_text, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, verdict_color, 2)
 
@@ -413,7 +546,7 @@ class HeatmapManager:
         label_h = 40
         label_bar = np.zeros((label_h, comp_w, 3), dtype=np.uint8)
         for i, lbl in enumerate(labels):
-            lx = i * panel_w + 10
+            lx = i * (panel_w + gap_w) + 10
             cv2.putText(label_bar, lbl, (lx, 26),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
 
@@ -467,6 +600,7 @@ class HeatmapManager:
         save_overview: bool = True,
         save_tile_detail: bool = True,
         date_str: str = "",
+        omit_image: np.ndarray = None,
     ) -> Dict:
         """
         儲存整個 Panel 的所有熱力圖
@@ -478,6 +612,7 @@ class HeatmapManager:
             save_overview: 是否儲存全圖總覽
             save_tile_detail: 是否儲存 tile 細節
             date_str: 日期字串
+            omit_image: OMIT 原圖 (用於邊緣缺陷 OMIT 交叉驗證)
 
         Returns:
             {"dir": save_dir, "files": [...]}
@@ -521,6 +656,19 @@ class HeatmapManager:
                 try:
                     full_img = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
                     if full_img is not None:
+                        # 取得 edge config 和 dust 相關函數
+                        edge_config = None
+                        dust_check_fn = None
+                        dust_iou_threshold = 0.3
+                        dust_metric = "coverage"
+                        if hasattr(inferencer, 'edge_inspector') and inferencer.edge_inspector:
+                            edge_config = inferencer.edge_inspector.config
+                        if hasattr(inferencer, 'check_dust_or_scratch_feature'):
+                            dust_check_fn = inferencer.check_dust_or_scratch_feature
+                        if hasattr(inferencer, 'config'):
+                            dust_iou_threshold = getattr(inferencer.config, 'dust_heatmap_iou_threshold', 0.3)
+                            dust_metric = getattr(inferencer.config, 'dust_heatmap_metric', 'coverage')
+
                         for ei, edge in enumerate(result.edge_defects):
                             try:
                                 edge_path = self.save_edge_defect_image(
@@ -528,7 +676,12 @@ class HeatmapManager:
                                     image_name,
                                     ei,
                                     edge,
-                                    full_img
+                                    full_img,
+                                    omit_image=omit_image,
+                                    edge_config=edge_config,
+                                    dust_check_fn=dust_check_fn,
+                                    dust_iou_threshold=dust_iou_threshold,
+                                    dust_metric=dust_metric,
                                 )
                                 saved_files.append(edge_path)
                                 # 回寫路徑到 edge 物件 (供後續 DB 儲存使用)

@@ -460,7 +460,7 @@ class CAPIDatabase:
                 edge_defects = conn.execute(
                     """SELECT * FROM edge_defect_results
                        WHERE image_result_id = ?
-                       ORDER BY max_diff DESC""",
+                       ORDER BY is_dust ASC, max_diff DESC""",
                     (img_dict["id"],)
                 ).fetchall()
                 img_dict["edge_defects"] = [dict(e) for e in edge_defects]

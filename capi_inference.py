@@ -941,7 +941,8 @@ class CAPIInferencer:
     def run_inference(self, result: ImageResult, progress_callback=None,
                       inferencer=None, threshold: Optional[float] = None,
                       edge_margin_override: Optional[int] = None,
-                      patchcore_overrides: Optional[Dict[str, Any]] = None) -> ImageResult:
+                      patchcore_overrides: Optional[Dict[str, Any]] = None,
+                      model_id: Optional[str] = None) -> ImageResult:
         """
         對預處理結果執行推論
         
@@ -950,6 +951,7 @@ class CAPIInferencer:
             progress_callback: 進度回呼函數 (current, total)
             inferencer: 指定的 inferencer 物件，若為 None 使用 self.inferencer
             threshold: 指定的閾值，若為 None 使用 self.threshold
+            model_id: 機種名稱，用於推導產品解析度 (例如 'H', 'J')
             
         Returns:
             更新後的 ImageResult（包含異常 tile 資訊）
@@ -975,8 +977,16 @@ class CAPIInferencer:
                 
         # 執行傳統 CV 邊緣檢查
         # 如果 edge_inspector 啟用，並且我們有 raw_bounds
-        if self.edge_inspector.config.enabled and result.raw_bounds:
+        if getattr(self, "edge_inspector", None) and self.edge_inspector.config.enabled and result.raw_bounds:
             try:
+                # 取得產品解析度代碼 (e.g. "H", "J")
+                resolution_code = "UNKNOWN"
+                if model_id and len(model_id) >= 6:
+                    resolution_code = model_id[5].upper()
+                
+                # 切換 active zones 為當前產品
+                self.edge_inspector.config.set_active_zones_for_product(resolution_code)
+                
                 # 重新讀取原圖 (全尺寸) 給 CV 處理，因為它需要高解析度才能看清楚
                 # 如果 cv2 記憶體太大，可以在 preprocess 前把 raw cv_image 傳過來，但此處再次讀取較安全
                 full_image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
@@ -1115,29 +1125,33 @@ class CAPIInferencer:
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
         
-        # Step 3: Otsu 自適應二值化
-        # 先嘗試 Otsu，若背景過暗 (均值 < 10) 則用固定閾值
-        mean_val = np.mean(enhanced)
-        if mean_val < 10:
-            # 幾乎全黑，Otsu 可能不穩定，使用固定閾值
-            _, binary = cv2.threshold(enhanced, fallback_threshold, 255, cv2.THRESH_BINARY)
-            used_threshold = fallback_threshold
-        else:
-            otsu_thresh, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            used_threshold = otsu_thresh
+        # Step 2.5: Top-Hat 變換 (去除大面積高光背景)
+        # 邊緣區域常包含大片高光背景(如載台/膠帶)，會嚴重干擾 Otsu 閾值，導致玻璃上的微弱灰塵被忽略
+        # 使用 45x45 核做開運算估計背景 (足以覆蓋多數灰塵，area_max 一般<=1000 => radius~18)
+        kernel_bg = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (45, 45))
+        bg_est = cv2.morphologyEx(enhanced, cv2.MORPH_OPEN, kernel_bg)
+        # 相減保留局部亮點 (Top-Hat)
+        tophat = cv2.subtract(enhanced, bg_est)
         
-        # Step 3.5: 合理性檢查 — CLAHE+Otsu 有時會在暗背景邊緣產生大面積假陽性
-        # 若前景佔比超過 5%，判定為不合理結果，改用自適應回退策略
+        # Step 3: 二值化
+        # Top-Hat 後背景趨近於 0，使用 Otsu 可能因為單峰分佈而失真，
+        # 故以 config 中的 fallback_threshold 為基準，並取 otsu 為輔
+        otsu_thresh, _ = cv2.threshold(tophat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # 若 Otsu 閾值異常高或低，限制在合理範圍內
+        adaptive_thr = min(max(otsu_thresh, 15), fallback_threshold)
+        
+        _, binary = cv2.threshold(tophat, adaptive_thr, 255, cv2.THRESH_BINARY)
+        used_threshold = adaptive_thr
+        
+        # 合理性檢查：若前景佔比仍過高，可能全是雜訊，用更嚴格的閾值
         MAX_REASONABLE_RATIO = 0.10
         initial_ratio = float(np.sum(binary > 0)) / binary.size if binary.size > 0 else 0.0
         if initial_ratio > MAX_REASONABLE_RATIO:
-            # 回退策略：取原始灰階圖的 99th percentile 作為自適應閾值
-            # 確保只有真正的亮點被偵測到，而非背景雜訊
-            p99 = float(np.percentile(gray, 99))
-            adaptive_thr = max(fallback_threshold, p99)
-            print(f"    ⚠️ CLAHE+Otsu 結果異常 (前景佔比 {initial_ratio:.2%} > {MAX_REASONABLE_RATIO:.0%})，回退至自適應閾值 {adaptive_thr:.0f} (p99={p99:.0f}, cfg={fallback_threshold})")
-            _, binary = cv2.threshold(gray, int(adaptive_thr), 255, cv2.THRESH_BINARY)
-            used_threshold = adaptive_thr
+            p99 = float(np.percentile(tophat, 99))
+            strict_thr = max(adaptive_thr, p99)
+            _, binary = cv2.threshold(tophat, strict_thr, 255, cv2.THRESH_BINARY)
+            used_threshold = strict_thr
         
         # Step 4: 形態學處理
         # 開運算：去除小噪點
@@ -1724,6 +1738,7 @@ class CAPIInferencer:
         cpu_workers: int = 4,
         product_resolution: Optional[Tuple[int, int]] = None,
         bomb_info: Optional[Dict[str, Any]] = None,
+        model_id: Optional[str] = None,
     ) -> List[ImageResult]:
         """
         處理整個面板的圖片 (包含 PINIGBI 灰塵檢查 和 AOI Defect 整合)
@@ -1861,7 +1876,7 @@ class CAPIInferencer:
         
         total_files = len(files_to_process)
         if total_files == 0:
-            return results, omit_vis, omit_overexposed, omit_overexposure_info, False
+            return results, omit_vis, omit_overexposed, omit_overexposure_info, False, omit_image
         
         # 決定實際 worker 數量 (不超過檔案數量)
         actual_workers = min(cpu_workers, total_files)
@@ -1959,6 +1974,7 @@ class CAPIInferencer:
                 result,
                 inferencer=target_inferencer,
                 threshold=target_threshold,
+                model_id=model_id,
             )
             preprocessed_results[i] = result
             
@@ -2056,7 +2072,7 @@ class CAPIInferencer:
                             
                             omit_crop = omit_image[ty:y2, tx:x2]
                             ed.omit_crop_image = omit_crop.copy()
-                            print(f"DEBUG: ed.omit_crop_image set for Edge@{ed.side}, shape={ed.omit_crop_image.shape}")
+                            # print(f"DEBUG: ed.omit_crop_image set for Edge@{ed.side}, shape={ed.omit_crop_image.shape}")
                             
                             if getattr(self, 'edge_inspector', None) and self.edge_inspector.config.dust_filter_enabled:
                                 is_dust, dust_mask, bright_ratio, detail_text = self.check_dust_or_scratch_feature(omit_crop)
@@ -2210,7 +2226,7 @@ class CAPIInferencer:
             for result in results:
                 result.client_bomb_info = bomb_info
                 
-        return results, omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate
+        return results, omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image
 
     def visualize_inference_result(self, image_path: Path, result: ImageResult) -> np.ndarray:
         """視覺化推論結果（含異常標記 與 AOI 標記）"""
@@ -2277,19 +2293,21 @@ class CAPIInferencer:
             label = f"{score:.2f}"
             thickness = 6
             
-            # 炸彈 tile：洋紅色
-            if tile.is_bomb:
+            # 炸彈 tile：洋紅色 (紫色)
+            if getattr(tile, 'is_bomb', False):
                 color = (255, 0, 255)  # 洋紅色 (BGR)
-                label = f"{score:.2f} BOMB({tile.bomb_defect_code})"
-            # 如果是疑似灰塵/刮痕，改為橘色
-            elif tile.is_suspected_dust_or_scratch:
-                color = (0, 165, 255)  # 橘色 (BGR: 0, 165, 255)
+                code = getattr(tile, 'bomb_defect_code', '')
+                label = f"{score:.2f} BOMB({code})"
+            # 如果是疑似灰塵/刮痕，改為黃色
+            elif getattr(tile, 'is_suspected_dust_or_scratch', False):
+                color = (0, 255, 255)  # 黃色 (BGR: 0, 255, 255)
                 metric_name = "COV" if self.config.dust_heatmap_metric == "coverage" else "IOU"
-                label = f"{score:.2f} DUST({metric_name}:{tile.dust_heatmap_iou:.2f})"
-            elif tile.dust_heatmap_iou > 0:
+                iou = getattr(tile, 'dust_heatmap_iou', 0.0)
+                label = f"{score:.2f} DUST({metric_name}:{iou:.2f})"
+            elif getattr(tile, 'dust_heatmap_iou', 0.0) > 0:
                 # 有 OMIT 分析結果但非灰塵，顯示 IOU 或 COV
                 metric_name = "COV" if self.config.dust_heatmap_metric == "coverage" else "IOU"
-                label = f"{score:.2f} NG({metric_name}:{tile.dust_heatmap_iou:.2f})"
+                label = f"{score:.2f} NG({metric_name}:{getattr(tile, 'dust_heatmap_iou', 0.0):.2f})"
             
             # 座標邊界檢查
             h, w = vis.shape[:2]
@@ -2341,7 +2359,7 @@ class CAPIInferencer:
         elif all_bomb:
             color = (255, 0, 255)  # 洋紅色
         elif all_dust:
-            color = (0, 165, 255)
+            color = (0, 255, 255)
         else:
             color = (0, 0, 255)
         
@@ -2357,9 +2375,9 @@ class CAPIInferencer:
                 is_dust = getattr(ed, 'is_suspected_dust_or_scratch', False)
                 
                 if is_bomb_ed:
-                    box_color = (255, 0, 255)  # 洋紅色
+                    box_color = (255, 0, 255)  # 紫色 (洋紅色)
                 elif is_dust:
-                    box_color = (0, 165, 255)  # 橘色
+                    box_color = (0, 255, 255)  # 黃色
                 else:
                     box_color = (0, 0, 255)    # 紅色
                 
@@ -2367,7 +2385,7 @@ class CAPIInferencer:
                 
                 # 在框的旁邊加上文字（處理文字是否超出邊界的邏輯）
                 if is_bomb_ed:
-                    status_label = f"BOMB({ed.bomb_defect_code})"
+                    status_label = f"BOMB({getattr(ed, 'bomb_defect_code', '')})"
                 elif is_dust:
                     status_label = "DUST"
                 else:

@@ -275,7 +275,7 @@ def analyze_panel(
     # --- 執行推論 (使用原始閾值 0.6) ---
     print(f"  🔍 正在推論...")
     try:
-        panel_results, omit_vis, omit_oe, omit_oe_info, is_dup = inferencer.process_panel(panel_dir)
+        panel_results, omit_vis, omit_oe, omit_oe_info, is_dup, _omit_raw = inferencer.process_panel(panel_dir)
     except Exception as e:
         print(f"  ❌ 推論失敗: {e}")
         analysis.miss_reason = "INFERENCE_ERROR"
@@ -1126,6 +1126,8 @@ def analyze_ok_panel(inferencer: Any, panel_dir: Path) -> Optional[Dict]:
         # 執行推論 (不需存圖，不需 GT)
         # 為了加速，可以設 cpu_workers=0 (主執行緒執行) 或 2
         results = inferencer.process_panel(panel_dir, cpu_workers=2)
+        if isinstance(results, tuple):
+            results = results[0]  # 解包 tuple (results, omit_vis, ...)
         
         p_max_score = 0.0
         p_filtered = False

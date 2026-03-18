@@ -246,6 +246,7 @@
             <table>
                 <thead>
                     <tr>
+                        <th>狀態</th>
                         <th>邊</th>
                         <th>位置</th>
                         <th>大小</th>
@@ -256,6 +257,16 @@
                 <tbody>
                     {% for ed in img.edge_defects %}
                     <tr>
+                        <td>
+                            {% if ed.is_bomb %}
+                            <span class="badge"
+                                style="background-color:#a855f7; color:white; font-size:0.7rem;">BOMB</span>
+                            {% elif ed.is_dust %}
+                            <span class="badge badge-ok" style="font-size:0.7rem;">SURFACE OK</span>
+                            {% else %}
+                            <span class="badge badge-ng" style="font-size:0.7rem;">NG</span>
+                            {% endif %}
+                        </td>
                         <td><span
                                 style="padding: 2px 8px; border-radius: 4px; background: #CFFAFE; color: #0E7490; font-weight: 600;">{{
                                 ed.side }}</span></td>
@@ -275,7 +286,13 @@
                 {% if ehm_url %}
                 <div class="image-box">
                     <h4 style="margin-bottom:8px;color:#0891B2;font-size:0.85rem;font-family:'Fira Code',monospace;">
-                        Edge: {{ ed.side }}</h4>
+                        Edge: {{ ed.side }}
+                        {% if ed.is_dust %}
+                        <span style="color: #22C55E; font-size: 0.75rem;">(Filtered OK)</span>
+                        {% else %}
+                        <span style="color: #EF4444; font-size: 0.75rem;">(NG)</span>
+                        {% endif %}
+                    </h4>
                     <img src="/heatmaps/{{ ehm_url }}" alt="edge {{ ed.side }}" onclick="openLightbox(this.src)">
                 </div>
                 {% endif %}
