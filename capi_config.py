@@ -118,6 +118,11 @@ class CAPIConfig:
     patchcore_blur_sigma: float = 1.5                # 異常圖高斯平滑強度
     patchcore_min_area: int = 10                     # 判定為真異常的最小連通面積(像素)
     patchcore_score_metric: str = "max"              # 計分方式: "max", "top_k_avg", "percentile_99"
+
+    # 集中度檢查 (Concentration Check) — 過濾 heatmap 均勻偏暖的瀰漫性假陽性
+    patchcore_concentration_enabled: bool = True       # 是否啟用集中度檢查
+    patchcore_concentration_min_ratio: float = 2.0     # Peak/Mean 最小比值 (低於此值觸發降權)
+    patchcore_concentration_penalty: float = 0.5       # 降權因子 (比值=1.0 時的最大懲罰乘數)
     
     # 灰塵偵測設定 (OMIT 圖片分析)
     dust_brightness_threshold: int = 80       # OMIT 亮度閾值 (自適應 Otsu 時此為備用)
@@ -201,6 +206,9 @@ class CAPIConfig:
             patchcore_blur_sigma=data.get("patchcore_blur_sigma", 1.5),
             patchcore_min_area=data.get("patchcore_min_area", 10),
             patchcore_score_metric=data.get("patchcore_score_metric", "max"),
+            patchcore_concentration_enabled=data.get("patchcore_concentration_enabled", True),
+            patchcore_concentration_min_ratio=data.get("patchcore_concentration_min_ratio", 2.0),
+            patchcore_concentration_penalty=data.get("patchcore_concentration_penalty", 0.5),
             dust_brightness_threshold=data.get("dust_brightness_threshold", 80),
             dust_area_min=data.get("dust_area_min", 10),
             dust_area_max=data.get("dust_area_max", 50000),
@@ -249,6 +257,9 @@ class CAPIConfig:
             "patchcore_blur_sigma": self.patchcore_blur_sigma,
             "patchcore_min_area": self.patchcore_min_area,
             "patchcore_score_metric": self.patchcore_score_metric,
+            "patchcore_concentration_enabled": self.patchcore_concentration_enabled,
+            "patchcore_concentration_min_ratio": self.patchcore_concentration_min_ratio,
+            "patchcore_concentration_penalty": self.patchcore_concentration_penalty,
             "dust_brightness_threshold": self.dust_brightness_threshold,
             "dust_area_min": self.dust_area_min,
             "dust_area_max": self.dust_area_max,
@@ -327,6 +338,13 @@ class CAPIConfig:
             self.patchcore_min_area = int(param_map["patchcore_min_area"])
         if "patchcore_score_metric" in param_map:
             self.patchcore_score_metric = str(param_map["patchcore_score_metric"])
+        if "patchcore_concentration_enabled" in param_map:
+            val = param_map["patchcore_concentration_enabled"]
+            self.patchcore_concentration_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "patchcore_concentration_min_ratio" in param_map:
+            self.patchcore_concentration_min_ratio = float(param_map["patchcore_concentration_min_ratio"])
+        if "patchcore_concentration_penalty" in param_map:
+            self.patchcore_concentration_penalty = float(param_map["patchcore_concentration_penalty"])
         if "dust_brightness_threshold" in param_map:
             self.dust_brightness_threshold = int(param_map["dust_brightness_threshold"])
         if "dust_area_min" in param_map:

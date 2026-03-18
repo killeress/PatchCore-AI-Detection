@@ -953,19 +953,21 @@ class CAPIServer:
 
                 logger.info(f"[{client_addr}] << {request_data}")
 
+                inference_started = False  # 追蹤是否已遞增 active_inferences
                 try:
                     # 解析請求
                     parsed = parse_request(request_data)
                     machine_label = f"{client_addr[0]} ({parsed['machine_no']})"
-                    
+
                     with server_status.lock:
                         server_status.total_requests += 1
                         server_status.active_inferences += 1
+                        inference_started = True
                         # 將包含機台名稱的連線標籤存入
                         if client_key in server_status.connected_machines:
                             server_status.connected_machines.remove(client_key)
                         server_status.connected_machines.add(machine_label)
-                        
+
                     logger.info(
                         f"[{client_addr}] Glass={parsed['glass_id']} "
                         f"Model={parsed['model_id']} Machine={parsed['machine_no']} "
@@ -1027,6 +1029,9 @@ class CAPIServer:
                     )
 
                 except ProtocolError as e:
+                    if inference_started:
+                        with server_status.lock:
+                            server_status.active_inferences = max(0, server_status.active_inferences - 1)
                     logger.error(f"[{client_addr}] Protocol error: {e}")
                     error_msg = f"ERR:PROTOCOL_ERROR ({str(e)[:80]})"
                     if parsed:
@@ -1045,6 +1050,9 @@ class CAPIServer:
                     # 協議錯誤不斷線，繼續等待下一筆
 
                 except Exception as e:
+                    if inference_started:
+                        with server_status.lock:
+                            server_status.active_inferences = max(0, server_status.active_inferences - 1)
                     logger.error(f"[{client_addr}] Unexpected error: {e}", exc_info=True)
                     error_msg = f"ERR:INTERNAL_ERROR ({type(e).__name__})"
                     if parsed:

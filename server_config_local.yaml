@@ -49,3 +49,7 @@ logging:
   file: ""                    # 空值 = 只輸出到 console
   max_bytes: 10485760
   backup_count: 5
+
+# 定時清除舊資料
+cleanup:
+  enabled: false   # 本地測試不自動清除

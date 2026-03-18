@@ -787,21 +787,24 @@ class CAPIInferencer:
         
         return result
     
-    def predict_tile(self, tile: TileInfo, inferencer=None, edge_margin_override: Optional[int] = None, patchcore_overrides: Optional[Dict[str, Any]] = None) -> Tuple[float, Optional[np.ndarray]]:
+    def predict_tile(self, tile: TileInfo, inferencer=None, edge_margin_override: Optional[int] = None, patchcore_overrides: Optional[Dict[str, Any]] = None, threshold: Optional[float] = None) -> Tuple[float, Optional[np.ndarray]]:
         """
         對單一 tile 進行推論
-        
+
         Args:
             tile: TileInfo 物件
             inferencer: 指定的 inferencer 物件，若為 None 使用 self.inferencer
-            
+            threshold: 異常判斷閾值（用於面積過濾），若為 None 使用 self.threshold
+
         Returns:
             (異常分數, 異常熱圖) - 如果有遮罩，會過濾排除區域的異常
         """
         active_inferencer = inferencer or self.inferencer
         if active_inferencer is None:
             raise RuntimeError("模型尚未載入")
-        
+
+        active_threshold = threshold if threshold is not None else self.threshold
+
         # 使用 numpy array 進行推論
         # 如果是灰階 (2D 或 1 channel)，轉為 BGR
         input_image = tile.image
@@ -869,7 +872,7 @@ class CAPIInferencer:
                 if patchcore_overrides is not None and 'patchcore_min_area' in patchcore_overrides:
                     min_area = patchcore_overrides['patchcore_min_area']
                     
-                if min_area > 0 and pred_score >= self.threshold:
+                if min_area > 0 and pred_score >= active_threshold:
                     # 使用 OTSU 或固定比例閾值將熱圖二值化
                     # 這裡抓目前最大值的一半作為該 cluster 的邊界
                     binary = (anomaly_map > (pre_process_max * 0.5)).astype(np.uint8) * 255
@@ -885,6 +888,39 @@ class CAPIInferencer:
                         # 面積不足，大幅降權
                         pred_score = pred_score * 0.5
                         print(f"    ℹ️ Tile 異常面積過小 ({max_cluster_area} < {min_area})，降權懲罰")
+
+            # --- 集中度檢查 (Concentration Check) ---
+            # 瀰漫性假陽性: heatmap 均勻偏暖但無局部峰值 → Peak/Mean ratio 低
+            # 真實缺陷: heatmap 有明顯局部峰值 → Peak/Mean ratio 高
+            concentration_enabled = getattr(self.config, 'patchcore_concentration_enabled', True)
+            if patchcore_overrides is not None and 'patchcore_concentration_enabled' in patchcore_overrides:
+                concentration_enabled = patchcore_overrides['patchcore_concentration_enabled']
+
+            if concentration_enabled:
+                positive_vals = anomaly_map[anomaly_map > 0]
+                if len(positive_vals) > 0:
+                    peak_val = float(np.max(positive_vals))
+                    mean_val = float(np.mean(positive_vals))
+                    concentration_ratio = peak_val / mean_val if mean_val > 0 else float('inf')
+
+                    min_ratio = getattr(self.config, 'patchcore_concentration_min_ratio', 2.0)
+                    if patchcore_overrides is not None and 'patchcore_concentration_min_ratio' in patchcore_overrides:
+                        min_ratio = patchcore_overrides['patchcore_concentration_min_ratio']
+
+                    if concentration_ratio < min_ratio and min_ratio > 1.0:
+                        penalty = getattr(self.config, 'patchcore_concentration_penalty', 0.5)
+                        if patchcore_overrides is not None and 'patchcore_concentration_penalty' in patchcore_overrides:
+                            penalty = patchcore_overrides['patchcore_concentration_penalty']
+
+                        # 線性插值: ratio=1.0 → penalty, ratio=min_ratio → 1.0 (無懲罰)
+                        factor = (concentration_ratio - 1.0) / (min_ratio - 1.0)
+                        factor = max(0.0, min(1.0, factor))
+                        penalty_mult = penalty + (1.0 - penalty) * factor
+                        pred_score *= penalty_mult
+                        print(f"    ℹ️ 瀰漫性檢查: Peak/Mean={concentration_ratio:.2f} < {min_ratio:.1f}，降權 x{penalty_mult:.3f}")
+
+            # 記錄 mask/邊緣衰減前的 max (用於 decay ratio，統一使用 max 避免 metric 不一致)
+            pre_decay_max = float(np.max(anomaly_map))
 
             # 如果有遮罩，將排除區域的熱圖值設為 0
             if tile.mask is not None:
@@ -927,11 +963,11 @@ class CAPIInferencer:
         ])
         need_recalc = (tile.mask is not None) or has_edge_margin
         if need_recalc and anomaly_map is not None:
-            post_process_max = float(np.max(anomaly_map))
-            
-            if pre_process_max > 0:
-                # 用比率調整原始 pred_score，保持在 anomalib 正規化的同一尺度
-                decay_ratio = post_process_max / pre_process_max
+            post_decay_max = float(np.max(anomaly_map))
+
+            if pre_decay_max > 0:
+                # 用 max 比率調整 pred_score (統一使用 max 作為 decay 基準，避免 metric 不一致)
+                decay_ratio = post_decay_max / pre_decay_max
                 pred_score = pred_score * decay_ratio
             else:
                 pred_score = 0.0
@@ -970,7 +1006,7 @@ class CAPIInferencer:
             if progress_callback:
                 progress_callback(i + 1, total)
             
-            score, anomaly_map = self.predict_tile(tile, inferencer=active_inferencer, edge_margin_override=edge_margin_override, patchcore_overrides=patchcore_overrides)
+            score, anomaly_map = self.predict_tile(tile, inferencer=active_inferencer, edge_margin_override=edge_margin_override, patchcore_overrides=patchcore_overrides, threshold=active_threshold)
             
             if score >= active_threshold:
                 anomaly_tiles.append((tile, score, anomaly_map))
