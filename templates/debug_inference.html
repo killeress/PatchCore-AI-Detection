@@ -1098,7 +1098,10 @@
             tilesGrid.innerHTML = data.tiles.map(tile => {
                 let statusBadge = '';
                 let scoreColor = 'var(--ng)';
-                if (tile.status === 'DUST') {
+                if (tile.is_exclude_zone) {
+                    statusBadge = '<span class="badge" style="background:#6b7280;color:#fff;">不檢測區域</span>';
+                    scoreColor = '#9ca3af';
+                } else if (tile.status === 'DUST') {
                     statusBadge = '<span class="badge badge-err">DUST</span>';
                     scoreColor = 'var(--dust)';
                 } else if (tile.status === 'BOMB') {
@@ -1111,6 +1114,7 @@
                 let metaLines = `位置: (${tile.x}, ${tile.y}) ${tile.width}×${tile.height}`;
                 if (tile.is_dust) metaLines += `<br>IOU: ${tile.dust_iou}`;
                 if (tile.is_bomb) metaLines += `<br>Bomb: ${tile.bomb_code}`;
+                if (tile.is_exclude_zone) metaLines += `<br>📍 不檢測排除區域`;
 
                 return `
                 <div class="tile-card">

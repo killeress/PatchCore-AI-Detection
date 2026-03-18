@@ -204,6 +204,7 @@ class CAPIDatabase:
             add_column_if_not_exists("tile_results", "peak_x", "INTEGER DEFAULT -1")
             add_column_if_not_exists("tile_results", "peak_y", "INTEGER DEFAULT -1")
             add_column_if_not_exists("edge_defect_results", "is_dust", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("tile_results", "is_exclude_zone", "INTEGER DEFAULT 0")
 
             conn.commit()
         finally:
@@ -305,8 +306,9 @@ class CAPIDatabase:
                                 """INSERT INTO tile_results
                                    (image_result_id, tile_id, x, y, width, height,
                                     score, is_anomaly, is_dust, dust_iou, is_bomb,
-                                    bomb_code, peak_x, peak_y, heatmap_path)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    bomb_code, peak_x, peak_y, heatmap_path,
+                                    is_exclude_zone)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  tile_data.get("tile_id", 0),
                                  tile_data.get("x", 0),
@@ -321,7 +323,8 @@ class CAPIDatabase:
                                  tile_data.get("bomb_code", ""),
                                  tile_data.get("peak_x", -1),
                                  tile_data.get("peak_y", -1),
-                                 tile_data.get("heatmap_path", ""))
+                                 tile_data.get("heatmap_path", ""),
+                                 tile_data.get("is_exclude_zone", 0))
                             )
 
                         # 儲存 CV 邊緣缺陷結果
@@ -1198,7 +1201,7 @@ class CAPIDatabase:
             ("cv_edge_exclude_y", 0, "int", "排除區域起始 Y (px)"),
             ("cv_edge_exclude_w", 100, "int", "排除區域寬度 (px)"),
             ("cv_edge_exclude_h", 100, "int", "排除區域高度 (px)"),
-            ("cv_edge_exclude_zones", [], "dict", "邊緣不檢測區域列表 (JSON List)"),
+            ("cv_edge_exclude_zones", [], "dict", "不檢測排除區域列表 (適用於 PatchCore 推論及邊緣檢測)"),
         ]
 
         count = 0

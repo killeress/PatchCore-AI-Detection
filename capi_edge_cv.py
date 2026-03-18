@@ -51,7 +51,7 @@ class EdgeSideConfig:
 
 @dataclass
 class EdgeExclusionZoneConfig:
-    """邊緣檢測排除區域：檢測結果若與此區域重疊則被忽略"""
+    """不檢測排除區域：PatchCore 推論及邊緣檢測結果若與此區域重疊則標記為排除區域並視為 OK"""
     enabled: bool = False
     x: int = 0
     y: int = 0

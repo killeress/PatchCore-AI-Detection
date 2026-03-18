@@ -20,6 +20,9 @@ CAPI 推論核心模組
 import os
 # 設置環境變數以允許載入模型 (必須在 import anomalib 之前)
 os.environ["TRUST_REMOTE_CODE"] = "1"
+# 抑制 anomalib 棄用警告 (TorchInferencer legacy / TRUST_REMOTE_CODE)
+import logging as _logging
+_logging.getLogger("anomalib.deploy.inferencers.torch_inferencer").setLevel(_logging.ERROR)
 
 import cv2
 import numpy as np
@@ -29,6 +32,7 @@ from typing import List, Dict, Tuple, Optional, Any
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import torch
 import logging
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
 from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect
@@ -95,6 +99,7 @@ class TileInfo:
     dust_iou_debug_image: Optional[np.ndarray] = field(default=None, repr=False)  # IOU debug 可視化圖
     is_bomb: bool = False       # 是否為炸彈系統模擬缺陷
     bomb_defect_code: str = ""  # 匹配到的炸彈 Defect Code
+    is_in_exclude_zone: bool = False  # 是否位於不檢測排除區域內
     anomaly_peak_x: int = -1    # 熱力圖峰值 x (圖片座標, -1=未計算)
     anomaly_peak_y: int = -1    # 熱力圖峰值 y (圖片座標, -1=未計算)
     
@@ -335,7 +340,10 @@ class CAPIInferencer:
             return None
         
         print(f"✅ 模型載入完成: {model_path.name}")
-        
+
+        # fp16 KNN 優化: 將 memory bank 轉為 fp16，並 patch euclidean_dist 使用 tensor core
+        self._optimize_model_fp16(inferencer_obj)
+
         # GPU Warm-up: 預先編譯 CUDA kernels，避免首次推論延遲
         if self.device != "cpu" and inferencer_obj is not None:
             try:
@@ -787,7 +795,123 @@ class CAPIInferencer:
         
         return result
     
-    def predict_tile(self, tile: TileInfo, inferencer=None, edge_margin_override: Optional[int] = None, patchcore_overrides: Optional[Dict[str, Any]] = None, threshold: Optional[float] = None) -> Tuple[float, Optional[np.ndarray]]:
+    def _optimize_model_fp16(self, inferencer) -> None:
+        """
+        PatchCore KNN 加速: memory bank → fp16 + nearest_neighbors matmul → fp16 tensor core
+
+        PatchCore 的推論瓶頸在 euclidean_dist 中的 torch.matmul(embedding, memory_bank.T)
+        將此 matmul 轉為 fp16 可利用 GPU tensor core 大幅加速 (Ampere+ ~8x matmul throughput)
+        norms 保持 fp32 避免 catastrophic cancellation
+        """
+        model = getattr(inferencer, 'model', None)
+        if model is None or not isinstance(model, torch.nn.Module):
+            return
+
+        # 導航到 PatchCore torch model (可能被 Lightning module 包裝)
+        # inferencer.model → Patchcore (Lightning) → .model → PatchcoreModel (torch)
+        torch_model = model
+        if hasattr(model, 'model') and isinstance(model.model, torch.nn.Module):
+            torch_model = model.model
+
+        # 1. Memory bank → fp16 (省 VRAM + 讓 matmul 自動使用 fp16)
+        if hasattr(torch_model, 'memory_bank') and torch_model.memory_bank.numel() > 0:
+            mb_shape = torch_model.memory_bank.shape
+            vram_save_mb = mb_shape[0] * mb_shape[1] * 2 / 1024 / 1024  # fp32→fp16 省一半
+            torch_model.memory_bank = torch_model.memory_bank.half()
+            # 預算 y_norm (fp32) 並快取，memory bank 不變所以只需算一次
+            torch_model._y_norm_cache = torch_model.memory_bank.float().pow(2).sum(dim=-1, keepdim=True)
+            print(f"  ⚡ Memory bank → fp16 ({mb_shape[0]} vectors, 省 {vram_save_mb:.0f}MB VRAM)")
+        else:
+            print("  ⚠️ 未找到 memory_bank，跳過 fp16 優化")
+            return
+
+        # 2. Patch nearest_neighbors — 注入快取的 y_norm，matmul 用 fp16 tensor core
+        torch_model_class = type(torch_model)
+        if not getattr(torch_model_class, '_fp16_patched', False):
+            # Patch euclidean_dist — 被 nearest_neighbors 和 compute_anomaly_score 共用
+            # memory_bank 已轉 fp16，所有經過 euclidean_dist 的路徑都需要處理 dtype
+            if not hasattr(torch_model_class, 'euclidean_dist'):
+                print(f"  ⚠️ {torch_model_class.__name__} 無 euclidean_dist 方法，跳過 patch")
+                return
+
+            @staticmethod
+            def _fp16_euclidean_dist(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+                # norms 保持 fp32 (避免 catastrophic cancellation: a²-2ab+b²)
+                x_norm = x.float().pow(2).sum(dim=-1, keepdim=True)
+                y_norm = y.float().pow(2).sum(dim=-1, keepdim=True)
+                # 核心 matmul 用 fp16 → tensor core 加速
+                xy = torch.matmul(x.half(), y.half().transpose(-2, -1)).float()
+                res = x_norm - 2 * xy + y_norm.transpose(-2, -1)
+                return res.clamp_min_(0).sqrt_()
+
+            torch_model_class.euclidean_dist = _fp16_euclidean_dist
+
+            # Patch nearest_neighbors — 注入快取的 y_norm (memory bank 不變，只需算一次)
+            if hasattr(torch_model_class, 'nearest_neighbors'):
+                def _fp16_nearest_neighbors(self, embedding: torch.Tensor, n_neighbors: int):
+                    x_norm = embedding.pow(2).sum(dim=-1, keepdim=True)
+                    y_norm = getattr(self, '_y_norm_cache', None)
+                    if y_norm is None:
+                        y_norm = self.memory_bank.float().pow(2).sum(dim=-1, keepdim=True)
+                    xy = torch.matmul(embedding.half(), self.memory_bank.half().transpose(-2, -1)).float()
+                    distances = (x_norm - 2 * xy + y_norm.transpose(-2, -1)).clamp_min_(0).sqrt_()
+                    if n_neighbors == 1:
+                        return distances.min(1)
+                    return distances.topk(k=n_neighbors, largest=False, dim=1)
+
+                torch_model_class.nearest_neighbors = _fp16_nearest_neighbors
+
+            torch_model_class._fp16_patched = True
+            print("  ⚡ KNN → fp16 matmul + cached y_norm (tensor core acceleration)")
+
+    def _prepare_tile_tensor(self, tile_image: np.ndarray) -> torch.Tensor:
+        """將單一 tile 的 numpy 圖片轉為 tensor (CHW float32 [0,1])，匹配 anomalib 的預處理"""
+        img = tile_image
+        if len(img.shape) == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        elif len(img.shape) == 3 and img.shape[2] == 1:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        return torch.from_numpy(img.copy()).permute(2, 0, 1).float() / 255.0
+
+    def _batch_forward(self, tiles: List[TileInfo], inferencer, batch_size: int = 4) -> Optional[List[Tuple[float, Optional[np.ndarray]]]]:
+        """
+        批次模型推論，回傳每個 tile 的 (pred_score, anomaly_map_numpy)
+
+        僅支援 PyTorch 模型，OpenVINO 模型回傳 None (fallback 到逐 tile 推論)
+        batch_size 預設 4，512x512 tiles 在 16GB VRAM 下安全運行
+        """
+        model = getattr(inferencer, 'model', None)
+        if model is None or not isinstance(model, torch.nn.Module):
+            return None
+
+        device = getattr(inferencer, 'device', self.device)
+        model.eval()
+
+        # 預先轉換所有 tile 為 tensor (CPU 上)
+        tensors = [self._prepare_tile_tensor(t.image) for t in tiles]
+        results = []
+
+        for start in range(0, len(tensors), batch_size):
+            batch = torch.stack(tensors[start:start + batch_size]).to(device)
+            with torch.no_grad():
+                preds = model(batch)
+
+            scores = preds.pred_score
+            amaps = preds.anomaly_map
+
+            for i in range(batch.shape[0]):
+                score = float(scores[i].item()) if scores.ndim > 0 else float(scores.item())
+                amap = None
+                if amaps is not None:
+                    amap = amaps[i].squeeze().cpu().numpy()
+                results.append((score, amap))
+
+            # 釋放 GPU 記憶體
+            del batch, preds, scores, amaps
+
+        return results
+
+    def predict_tile(self, tile: TileInfo, inferencer=None, edge_margin_override: Optional[int] = None, patchcore_overrides: Optional[Dict[str, Any]] = None, threshold: Optional[float] = None, raw_prediction: Optional[Tuple[float, Optional[np.ndarray]]] = None) -> Tuple[float, Optional[np.ndarray]]:
         """
         對單一 tile 進行推論
 
@@ -795,49 +919,57 @@ class CAPIInferencer:
             tile: TileInfo 物件
             inferencer: 指定的 inferencer 物件，若為 None 使用 self.inferencer
             threshold: 異常判斷閾值（用於面積過濾），若為 None 使用 self.threshold
+            raw_prediction: 預先計算的 (pred_score, anomaly_map)，若提供則跳過模型推論
 
         Returns:
             (異常分數, 異常熱圖) - 如果有遮罩，會過濾排除區域的異常
         """
-        active_inferencer = inferencer or self.inferencer
-        if active_inferencer is None:
-            raise RuntimeError("模型尚未載入")
-
         active_threshold = threshold if threshold is not None else self.threshold
 
-        # 使用 numpy array 進行推論
-        # 如果是灰階 (2D 或 1 channel)，轉為 BGR
-        input_image = tile.image
-        if len(input_image.shape) == 2 or (len(input_image.shape) == 3 and input_image.shape[2] == 1):
-             if len(input_image.shape) == 2:
-                 input_image = cv2.cvtColor(input_image, cv2.COLOR_GRAY2BGR)
-             else:
-                 input_image = cv2.cvtColor(input_image, cv2.COLOR_GRAY2BGR)
+        if raw_prediction is not None:
+            # 使用預先批次計算的結果，跳過模型推論
+            pred_score, anomaly_map = raw_prediction
+        else:
+            # 逐 tile 推論 (fallback)
+            active_inferencer = inferencer or self.inferencer
+            if active_inferencer is None:
+                raise RuntimeError("模型尚未載入")
 
-        predictions = active_inferencer.predict(input_image)
-        
-        # 取得分數
-        pred_score = float(predictions.pred_score.item()) if hasattr(predictions.pred_score, 'item') else float(predictions.pred_score)
-        
-        # 取得熱圖（如果有的話）
-        anomaly_map = None
-        if hasattr(predictions, 'anomaly_map') and predictions.anomaly_map is not None:
-            anomaly_map = predictions.anomaly_map.squeeze().cpu().numpy() if hasattr(predictions.anomaly_map, 'cpu') else predictions.anomaly_map.squeeze()
+            # 使用 numpy array 進行推論
+            # 如果是灰階 (2D 或 1 channel)，轉為 BGR
+            input_image = tile.image
+            if len(input_image.shape) == 2 or (len(input_image.shape) == 3 and input_image.shape[2] == 1):
+                 if len(input_image.shape) == 2:
+                     input_image = cv2.cvtColor(input_image, cv2.COLOR_GRAY2BGR)
+                 else:
+                     input_image = cv2.cvtColor(input_image, cv2.COLOR_GRAY2BGR)
+
+            predictions = active_inferencer.predict(input_image)
+
+            # 取得分數
+            pred_score = float(predictions.pred_score.item()) if hasattr(predictions.pred_score, 'item') else float(predictions.pred_score)
+
+            # 取得熱圖（如果有的話）
+            anomaly_map = None
+            if hasattr(predictions, 'anomaly_map') and predictions.anomaly_map is not None:
+                anomaly_map = predictions.anomaly_map.squeeze().cpu().numpy() if hasattr(predictions.anomaly_map, 'cpu') else predictions.anomaly_map.squeeze()
             
+        # === 以下為 anomaly_map 後處理 (batch 和 fallback 共用) ===
+        if anomaly_map is not None:
             # 記錄衰減/遮罩處理前的 anomaly_map max (用於後續比率計算)
             pre_process_max = float(np.max(anomaly_map))
-            
-            # --- 新增：PatchCore 後處理過濾 ---
+
+            # --- PatchCore 後處理過濾 ---
             patchcore_enabled = getattr(self.config, 'patchcore_filter_enabled', False)
             if patchcore_overrides is not None and 'patchcore_filter_enabled' in patchcore_overrides:
                 patchcore_enabled = patchcore_overrides['patchcore_filter_enabled']
-                
+
             if patchcore_enabled:
                 # 1. 高斯平滑
                 sigma = getattr(self.config, 'patchcore_blur_sigma', 1.5)
                 if patchcore_overrides is not None and 'patchcore_blur_sigma' in patchcore_overrides:
                     sigma = patchcore_overrides['patchcore_blur_sigma']
-                    
+
                 if sigma > 0:
                     ksize = int(2 * round(3 * sigma) + 1)
                     anomaly_map = cv2.GaussianBlur(anomaly_map, (ksize, ksize), sigmaX=sigma, sigmaY=sigma)
@@ -846,7 +978,7 @@ class CAPIInferencer:
                 metric = getattr(self.config, 'patchcore_score_metric', 'max')
                 if patchcore_overrides is not None and 'patchcore_score_metric' in patchcore_overrides:
                     metric = patchcore_overrides['patchcore_score_metric']
-                    
+
                 if metric == 'top_k_avg':
                     # 取前 10 個最高值的平均 (k=10)
                     k = 10
@@ -861,7 +993,7 @@ class CAPIInferencer:
                     pre_process_max = float(np.percentile(anomaly_map, 99))
                 else: # 'max' 或其他
                     pre_process_max = float(np.max(anomaly_map))
-                
+
                 # 更新基礎預測分數 (覆寫原本直接從 anomalib 拿的 score)
                 # 這裡假設 anomaly_map 的尺度與 pred_score 一致，直接取代
                 # 如果尺度不一致，這裡會成為新的基準
@@ -871,19 +1003,19 @@ class CAPIInferencer:
                 min_area = getattr(self.config, 'patchcore_min_area', 10)
                 if patchcore_overrides is not None and 'patchcore_min_area' in patchcore_overrides:
                     min_area = patchcore_overrides['patchcore_min_area']
-                    
+
                 if min_area > 0 and pred_score >= active_threshold:
                     # 使用 OTSU 或固定比例閾值將熱圖二值化
                     # 這裡抓目前最大值的一半作為該 cluster 的邊界
                     binary = (anomaly_map > (pre_process_max * 0.5)).astype(np.uint8) * 255
                     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
-                    
+
                     max_cluster_area = 0
                     for i in range(1, num_labels): # 0 is background
                         area = stats[i, cv2.CC_STAT_AREA]
                         if area > max_cluster_area:
                             max_cluster_area = area
-                            
+
                     if max_cluster_area < min_area:
                         # 面積不足，大幅降權
                         pred_score = pred_score * 0.5
@@ -917,7 +1049,38 @@ class CAPIInferencer:
                         factor = max(0.0, min(1.0, factor))
                         penalty_mult = penalty + (1.0 - penalty) * factor
                         pred_score *= penalty_mult
-                        print(f"    ℹ️ 瀰漫性檢查: Peak/Mean={concentration_ratio:.2f} < {min_ratio:.1f}，降權 x{penalty_mult:.3f}")
+                        logger.debug(f"瀰漫性檢查: Peak/Mean={concentration_ratio:.2f} < {min_ratio:.1f}，降權 x{penalty_mult:.3f}")
+
+            # --- 擴散面積檢查 (Diffuse Area Check) ---
+            # 梯度型假陽性: heatmap 有大面積偏暖 (左熱右冷等梯度) → 熱區佔比高
+            # 真實缺陷: heatmap 熱區集中在小區域 → 熱區佔比低
+            diffuse_enabled = getattr(self.config, 'patchcore_diffuse_area_enabled', True)
+            if patchcore_overrides is not None and 'patchcore_diffuse_area_enabled' in patchcore_overrides:
+                diffuse_enabled = patchcore_overrides['patchcore_diffuse_area_enabled']
+
+            if diffuse_enabled:
+                map_max = float(np.max(anomaly_map))
+                if map_max > 0:
+                    half_peak = map_max * 0.5
+                    hot_pixels = int(np.count_nonzero(anomaly_map >= half_peak))
+                    total_pixels = anomaly_map.size
+                    hot_ratio = hot_pixels / total_pixels if total_pixels > 0 else 0.0
+
+                    diffuse_threshold = getattr(self.config, 'patchcore_diffuse_area_threshold', 0.3)
+                    if patchcore_overrides is not None and 'patchcore_diffuse_area_threshold' in patchcore_overrides:
+                        diffuse_threshold = patchcore_overrides['patchcore_diffuse_area_threshold']
+
+                    if hot_ratio > diffuse_threshold:
+                        diffuse_penalty = getattr(self.config, 'patchcore_diffuse_area_penalty', 0.5)
+                        if patchcore_overrides is not None and 'patchcore_diffuse_area_penalty' in patchcore_overrides:
+                            diffuse_penalty = patchcore_overrides['patchcore_diffuse_area_penalty']
+
+                        # 線性插值: hot_ratio=threshold → 1.0 (無懲罰), hot_ratio=1.0 → penalty (最大懲罰)
+                        factor = (hot_ratio - diffuse_threshold) / (1.0 - diffuse_threshold) if diffuse_threshold < 1.0 else 0.0
+                        factor = max(0.0, min(1.0, factor))
+                        penalty_mult = 1.0 - (1.0 - diffuse_penalty) * factor
+                        pred_score *= penalty_mult
+                        logger.debug(f"擴散面積檢查: HotRatio={hot_ratio:.2%} > {diffuse_threshold:.0%}，降權 x{penalty_mult:.3f}")
 
             # 記錄 mask/邊緣衰減前的 max (用於 decay ratio，統一使用 max 避免 metric 不一致)
             pre_decay_max = float(np.max(anomaly_map))
@@ -931,7 +1094,7 @@ class CAPIInferencer:
                     mask_resized = tile.mask
                 # 將排除區域設為 0
                 anomaly_map = anomaly_map * (mask_resized / 255.0)
-            
+
             # 邊緣衰減：過濾光影假陽性 (debug 模式可覆寫數值)
             edge_margin = self.config.edge_margin_px if edge_margin_override is None else edge_margin_override
             if edge_margin > 0:
@@ -946,7 +1109,7 @@ class CAPIInferencer:
                     sides.append('left')
                 if tile.is_right_edge and cfg_sides.get('right', False):
                     sides.append('right')
-                
+
                 if sides:
                     # 將 margin_px 按 anomaly_map 實際尺寸縮放
                     scale = anomaly_map.shape[0] / tile.height
@@ -1001,13 +1164,15 @@ class CAPIInferencer:
         inference_start = time.time()
         anomaly_tiles = []
         total = len(result.tiles)
-        
+
+        # 逐 tile 推論 (fp16 KNN 加速已在 model 載入時 patch)
+        # 注意: batch 推論在 PatchCore 反而更慢 (KNN 距離矩陣隨 batch 線性膨脹)
         for i, tile in enumerate(result.tiles):
             if progress_callback:
                 progress_callback(i + 1, total)
-            
+
             score, anomaly_map = self.predict_tile(tile, inferencer=active_inferencer, edge_margin_override=edge_margin_override, patchcore_overrides=patchcore_overrides, threshold=active_threshold)
-            
+
             if score >= active_threshold:
                 anomaly_tiles.append((tile, score, anomaly_map))
                 
@@ -1038,7 +1203,7 @@ class CAPIInferencer:
         # 更新結果
         result.anomaly_tiles = anomaly_tiles
         result.inference_time = time.time() - inference_start
-        
+
         return result
     
     def get_anomaly_summary(self, result: ImageResult) -> Dict[str, Any]:
@@ -1280,7 +1445,7 @@ class CAPIInferencer:
                                 dark_particle_count += 1
                         
                         if dark_particle_count + dark_scratch_count > 0:
-                            print(f"    🌑 暗色顆粒偵測: P:{dark_particle_count} S:{dark_scratch_count} Area:{dark_total_area} (Thr:{dark_threshold:.0f}, Median:{bg_median:.0f})")
+                            logging.debug(f"    暗色顆粒偵測: P:{dark_particle_count} S:{dark_scratch_count} Area:{dark_total_area} (Thr:{dark_threshold:.0f}, Median:{bg_median:.0f})")
         
         # 合併計數
         total_particle = particle_count + dark_particle_count
@@ -2099,6 +2264,11 @@ class CAPIInferencer:
                         ed.dust_detail_text = f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> Cannot verify dust, treated as REAL_NG"
                         print(f"⚠️ {img_path.name} Edge@{ed.side} Score:{ed.max_diff:.3f} → OMIT OVEREXPOSED, skip dust check")
                 else:
+                    # 讀取原始圖片一次，供所有 edge defect 的 defect mask 計算
+                    orig_for_edge = None
+                    if getattr(self, 'edge_inspector', None) and self.edge_inspector.config.dust_filter_enabled:
+                        orig_for_edge = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+
                     for ed in result.edge_defects:
                         ex, ey, ew, eh = ed.bbox
                         oh, ow = omit_image.shape[:2]
@@ -2110,23 +2280,85 @@ class CAPIInferencer:
                         x2 = min(ex + ew + edge_dust_padding, ow)
                         y2 = min(ey + eh + edge_dust_padding, oh)
                         if tx < ow and ty < oh:
-                            
+
                             omit_crop = omit_image[ty:y2, tx:x2]
                             ed.omit_crop_image = omit_crop.copy()
-                            # print(f"DEBUG: ed.omit_crop_image set for Edge@{ed.side}, shape={ed.omit_crop_image.shape}")
-                            
+
                             if getattr(self, 'edge_inspector', None) and self.edge_inspector.config.dust_filter_enabled:
                                 is_dust, dust_mask, bright_ratio, detail_text = self.check_dust_or_scratch_feature(omit_crop)
                                 ed.dust_mask = dust_mask
                                 ed.dust_bright_ratio = bright_ratio
-                                
-                                if is_dust:
-                                    # Edge defect 無對應異常熱力圖，所以直接根據 is_dust 判斷
-                                    ed.is_suspected_dust_or_scratch = True
-                                    detail_text += " (edge defect, marked as dust)"
+
+                                metric_mode = self.config.dust_heatmap_metric
+                                metric_name = "COV" if metric_mode == "coverage" else "IOU"
+
+                                if is_dust and dust_mask is not None and orig_for_edge is not None:
+                                    # Step B: 空間重疊驗證 — 使用實際 CV defect mask (與 heatmap 一致)
+                                    # 從原始圖片裁切相同 ROI，重建 CV 缺陷二值 mask
+                                    crop_h, crop_w = omit_crop.shape[:2]
+                                    orig_crop = orig_for_edge[ty:y2, tx:x2]
+                                    if len(orig_crop.shape) == 3:
+                                        orig_gray = cv2.cvtColor(orig_crop, cv2.COLOR_BGR2GRAY)
+                                    else:
+                                        orig_gray = orig_crop
+
+                                    # 與 save_edge_defect_image / _inspect_side 相同的 CV 檢測邏輯
+                                    ek = self.edge_inspector.config.blur_kernel
+                                    emk = self.edge_inspector.config.median_kernel
+                                    eblurred = cv2.GaussianBlur(orig_gray, (ek, ek), 0)
+                                    emk = min(emk, min(orig_gray.shape[:2]) - 1)
+                                    if emk % 2 == 0:
+                                        emk -= 1
+                                    if emk < 3:
+                                        emk = 3
+                                    ebg = cv2.medianBlur(eblurred, emk)
+                                    ediff = cv2.absdiff(eblurred, ebg)
+
+                                    side_cfg = getattr(self.edge_inspector.config, ed.side, None)
+                                    edge_threshold = side_cfg.threshold if side_cfg else 5
+                                    _, defect_mask_cv = cv2.threshold(ediff, edge_threshold, 255, cv2.THRESH_BINARY)
+
+                                    # 只保留缺陷 BBox 範圍內的像素（與 heatmap 一致）
+                                    rel_x = ex - tx
+                                    rel_y = ey - ty
+                                    bbox_only = np.zeros_like(defect_mask_cv)
+                                    ry1 = max(0, rel_y)
+                                    rx1 = max(0, rel_x)
+                                    ry2 = min(defect_mask_cv.shape[0], rel_y + eh)
+                                    rx2 = min(defect_mask_cv.shape[1], rel_x + ew)
+                                    bbox_only[ry1:ry2, rx1:rx2] = 255
+                                    defect_mask_cv = cv2.bitwise_and(defect_mask_cv, bbox_only)
+
+                                    # dust_mask 轉單通道並對齊尺寸
+                                    dm = dust_mask
+                                    if len(dm.shape) == 3:
+                                        dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
+                                    if dm.shape[:2] != defect_mask_cv.shape[:2]:
+                                        dm = cv2.resize(dm, (defect_mask_cv.shape[1], defect_mask_cv.shape[0]),
+                                                        interpolation=cv2.INTER_NEAREST)
+
+                                    defect_bool = defect_mask_cv > 0
+                                    dust_bool = dm > 0
+                                    intersection = np.count_nonzero(defect_bool & dust_bool)
+
+                                    if metric_mode == "coverage":
+                                        defect_area = np.count_nonzero(defect_bool)
+                                        cov = float(intersection / defect_area) if defect_area > 0 else 0.0
+                                    else:
+                                        union = np.count_nonzero(defect_bool | dust_bool)
+                                        cov = float(intersection / union) if union > 0 else 0.0
+
+                                    if cov >= self.config.dust_heatmap_iou_threshold:
+                                        ed.is_suspected_dust_or_scratch = True
+                                        detail_text += f" {metric_name}:{cov:.3f}>={metric_name}_THR -> DUST (edge defect)"
+                                    else:
+                                        detail_text += f" {metric_name}:{cov:.3f}<{metric_name}_THR -> REAL_NG"
+                                elif is_dust:
+                                    # 有灰塵特徵但無法做空間驗證 → 保守視為真缺陷
+                                    detail_text += " (dust detected, no spatial mask) -> REAL_NG"
                                 else:
                                     detail_text += " NO_DUST -> REAL_NG"
-                                    
+
                                 ed.dust_detail_text = detail_text
                                 log_icon = "🧹" if ed.is_suspected_dust_or_scratch else "🔴"
                                 print(f"{log_icon} {img_path.name} Edge@{ed.side} → {detail_text}")
@@ -2260,6 +2492,38 @@ class CAPIInferencer:
                             ed.bomb_defect_code = bomb_code
                             print(f"💣 {result.image_path.name} Edge@{ed.side} Center@({cx},{cy}) → BOMB match ({bomb_code})")
 
+        # === 不檢測排除區域判定 (基於 peak 位置) ===
+        # 排除區域來自 cv_edge_exclude_zones，原僅用於邊緣檢測，現擴展至 PatchCore 推論
+        # 以熱力圖峰值 (defect 精確位置) 判斷是否落在排除區域，而非整塊 512x512 tile
+        if getattr(self, "edge_inspector", None):
+            try:
+                resolution_code = ""
+                if model_id and len(model_id) >= 6:
+                    resolution_code = model_id[5].upper()
+                self.edge_inspector.config.set_active_zones_for_product(resolution_code)
+
+                active_zones = [z for z in self.edge_inspector.config.exclude_zones if z.enabled]
+                if active_zones:
+                    for result in results:
+                        if not result.anomaly_tiles:
+                            continue
+                        for tile, score, anomaly_map in result.anomaly_tiles:
+                            # 使用熱力圖峰值座標 (更精確的缺陷位置)
+                            if tile.anomaly_peak_x >= 0 and tile.anomaly_peak_y >= 0:
+                                px, py = tile.anomaly_peak_x, tile.anomaly_peak_y
+                            else:
+                                px, py = tile.x + tile.width // 2, tile.y + tile.height // 2
+
+                            for zone in active_zones:
+                                # 判斷峰值點是否在排除區域內
+                                if (zone.x <= px <= zone.x + zone.w and
+                                    zone.y <= py <= zone.y + zone.h):
+                                    tile.is_in_exclude_zone = True
+                                    logger.info(f"Tile #{tile.tile_id} peak@({px},{py}) 位於排除區域 ({zone.x},{zone.y},{zone.w},{zone.h})，標記為不檢測區域")
+                                    break
+            except Exception as e:
+                logger.error(f"排除區域檢查失敗: {e}", exc_info=True)
+
         total_panel_time = preprocess_time + inference_time + postprocess_time
         print(f"📊 Panel {panel_dir.name} 總計: 預處理 {preprocess_time:.2f}s + 推論 {inference_time:.2f}s + 後處理 {postprocess_time:.2f}s = {total_panel_time:.2f}s")
         
@@ -2333,9 +2597,14 @@ class CAPIInferencer:
             color = (0, 0, 255)  # 紅色 (預設異常)
             label = f"{score:.2f}"
             thickness = 6
-            
+
+            # 不檢測排除區域：灰色虛線風格
+            if getattr(tile, 'is_in_exclude_zone', False):
+                color = (180, 180, 180)  # 灰色 (BGR)
+                label = f"{score:.2f} EXCLUDED"
+                thickness = 3
             # 炸彈 tile：洋紅色 (紫色)
-            if getattr(tile, 'is_bomb', False):
+            elif getattr(tile, 'is_bomb', False):
                 color = (255, 0, 255)  # 洋紅色 (BGR)
                 code = getattr(tile, 'bomb_defect_code', '')
                 label = f"{score:.2f} BOMB({code})"
@@ -2386,17 +2655,29 @@ class CAPIInferencer:
         # 檢查是否所有異常都是疑似灰塵
         all_dust = False
         all_bomb = False
+        all_excluded = False
         if result.anomaly_tiles:
             non_dust = [t for t in result.anomaly_tiles if not t[0].is_suspected_dust_or_scratch or t[0].is_bomb]
             all_dust = all(t[0].is_suspected_dust_or_scratch and not t[0].is_bomb for t in result.anomaly_tiles)
             all_bomb = non_dust and all(t[0].is_bomb for t in non_dust)
-            if all_dust:
+            all_excluded = all(
+                t[0].is_in_exclude_zone or t[0].is_suspected_dust_or_scratch or t[0].is_bomb
+                for t in result.anomaly_tiles
+            ) and any(t[0].is_in_exclude_zone for t in result.anomaly_tiles)
+            if all_excluded and not any(
+                not t[0].is_in_exclude_zone and not t[0].is_suspected_dust_or_scratch and not t[0].is_bomb
+                for t in result.anomaly_tiles
+            ):
+                status = "OK (Excluded)"
+            elif all_dust:
                 status = "NG (Dust?)"
             elif all_bomb:
                 status = "BOMB"
-                
+
         if not result.anomaly_tiles:
             color = (0, 255, 0)
+        elif all_excluded and status == "OK (Excluded)":
+            color = (180, 180, 180)  # 灰色
         elif all_bomb:
             color = (255, 0, 255)  # 洋紅色
         elif all_dust:

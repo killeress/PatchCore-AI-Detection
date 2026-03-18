@@ -46,7 +46,10 @@ def img_status_info(img):
 def tile_info(t):
     badge = "badge-ng"
     info = f"Score: {t['score']:.3f}"
-    if t.get("is_dust"):
+    if t.get("is_exclude_zone"):
+        badge = "badge-ok"
+        info += " | 不檢測排除區域"
+    elif t.get("is_dust"):
         badge = "badge-err"
         info += f" | 灰塵 IOU: {t.get('dust_iou',0):.3f}"
     if t.get("is_bomb"):
@@ -547,8 +550,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                                 is_dust = bool(t["is_dust"])
                                 is_ng = bool(t["is_anomaly"])
                                 
+                                is_exclude_zone = bool(t.get("is_exclude_zone", 0))
+
                                 tile_status = "OK"
-                                if is_bomb:
+                                if is_exclude_zone:
+                                    tile_status = "EXCLUDED"
+                                elif is_bomb:
                                     tile_status = "BOMB"
                                 elif is_dust:
                                     tile_status = "DUST"
@@ -1148,7 +1155,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     tile_url = f"/debug/heatmaps/{tile_filename}"
 
                 tile_status = "NG"
-                if tile.is_bomb:
+                if tile.is_in_exclude_zone:
+                    tile_status = "EXCLUDED"
+                elif tile.is_bomb:
                     tile_status = "BOMB"
                 elif tile.is_suspected_dust_or_scratch:
                     tile_status = "DUST"
@@ -1165,12 +1174,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "dust_iou": round(tile.dust_heatmap_iou, 4),
                     "is_bomb": tile.is_bomb,
                     "bomb_code": tile.bomb_defect_code,
+                    "is_exclude_zone": tile.is_in_exclude_zone,
                     "heatmap_url": tile_url,
                 })
 
             # 6. 判定結果
             has_real_ng = any(
-                not t.is_suspected_dust_or_scratch and not t.is_bomb
+                not t.is_suspected_dust_or_scratch and not t.is_bomb and not t.is_in_exclude_zone
                 for t, s, m in result.anomaly_tiles
             )
             all_dust = (

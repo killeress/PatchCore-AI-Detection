@@ -1263,7 +1263,7 @@
                     <div class="edge-side-card" style="margin: 16px; border-color: #f43f5e;">
                         <div class="edge-side-header" style="background: rgba(244, 63, 94, 0.1); border-bottom-color: rgba(244, 63, 94, 0.2); color: #fda4af;">
                             <span class="side-icon">🚫</span>
-                            <span>邊緣不檢測區域設定 (排除區域)</span>
+                            <span>不檢測區域設定 (排除區域)</span>
                             <div style="margin-left: auto; display:flex; align-items:center; gap:10px;">
                                 <span style="font-size: 0.8rem; color: var(--text-muted);">啟用狀態:</span>
                                 <label class="switch" style="transform: scale(0.85);">
@@ -1291,7 +1291,7 @@
                             </div>
                             
                             <div style="display: flex; flex-direction: column; gap: 12px; max-height: 450px; overflow-y: auto; padding-right: 4px;">
-                                <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0;">設定多個排除區域 (X, Y, W, H)，單位為 pixel。<br>邊緣檢測若與任何區域重疊，則不計入缺點。<br><strong style="color:#fda4af;">⚠️ 排除區域按產品分別設定。</strong></p>
+                                <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0;">設定多個排除區域 (X, Y, W, H)，單位為 pixel。<br>PatchCore 推論及邊緣檢測若與任何區域重疊，仍會存圖但標記為「不檢測區域」並視為 OK。<br><strong style="color:#fda4af;">⚠️ 排除區域按產品分別設定。</strong></p>
                                 
                                 <div id="ex-zones-list">
                                     <!-- Rendered by JS -->

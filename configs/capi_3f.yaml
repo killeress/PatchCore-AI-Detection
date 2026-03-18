@@ -62,6 +62,11 @@ patchcore_concentration_enabled: true
 patchcore_concentration_min_ratio: 2.0    # Peak/Mean 低於此值觸發降權
 patchcore_concentration_penalty: 0.5      # ratio=1.0 (完全均勻) 時的降權乘數
 
+# PatchCore 後處理 — 擴散面積檢查 (過濾梯度/大面積偏暖假陽性)
+# 超過 Peak 50% 的像素佔比太高 = heatmap 大面積偏暖 → 降權
+patchcore_diffuse_area_enabled: true
+patchcore_diffuse_area_threshold: 0.3    # 熱區佔比超過此值觸發降權 (0.3 = 30%)
+patchcore_diffuse_area_penalty: 0.5      # 佔比=100% 時的降權乘數
 
 # 灰塵偵測設定 (OMIT 圖片分析)
 dust_brightness_threshold: 40    # 備用亮度閾值 (優先使用 Otsu 自適應)

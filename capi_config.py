@@ -123,7 +123,12 @@ class CAPIConfig:
     patchcore_concentration_enabled: bool = True       # 是否啟用集中度檢查
     patchcore_concentration_min_ratio: float = 2.0     # Peak/Mean 最小比值 (低於此值觸發降權)
     patchcore_concentration_penalty: float = 0.5       # 降權因子 (比值=1.0 時的最大懲罰乘數)
-    
+
+    # 擴散面積檢查 (Diffuse Area Check) — 過濾 heatmap 大面積偏暖的梯度/擴散型假陽性
+    patchcore_diffuse_area_enabled: bool = True        # 是否啟用擴散面積檢查
+    patchcore_diffuse_area_threshold: float = 0.3      # 超過 peak 50% 的像素佔比閾值 (大於此值觸發降權)
+    patchcore_diffuse_area_penalty: float = 0.5        # 降權因子 (佔比=100% 時的最大懲罰乘數)
+
     # 灰塵偵測設定 (OMIT 圖片分析)
     dust_brightness_threshold: int = 80       # OMIT 亮度閾值 (自適應 Otsu 時此為備用)
     dust_area_min: int = 10                   # 灰塵顆粒最小面積 (px)
@@ -209,6 +214,9 @@ class CAPIConfig:
             patchcore_concentration_enabled=data.get("patchcore_concentration_enabled", True),
             patchcore_concentration_min_ratio=data.get("patchcore_concentration_min_ratio", 2.0),
             patchcore_concentration_penalty=data.get("patchcore_concentration_penalty", 0.5),
+            patchcore_diffuse_area_enabled=data.get("patchcore_diffuse_area_enabled", True),
+            patchcore_diffuse_area_threshold=data.get("patchcore_diffuse_area_threshold", 0.3),
+            patchcore_diffuse_area_penalty=data.get("patchcore_diffuse_area_penalty", 0.5),
             dust_brightness_threshold=data.get("dust_brightness_threshold", 80),
             dust_area_min=data.get("dust_area_min", 10),
             dust_area_max=data.get("dust_area_max", 50000),
@@ -260,6 +268,9 @@ class CAPIConfig:
             "patchcore_concentration_enabled": self.patchcore_concentration_enabled,
             "patchcore_concentration_min_ratio": self.patchcore_concentration_min_ratio,
             "patchcore_concentration_penalty": self.patchcore_concentration_penalty,
+            "patchcore_diffuse_area_enabled": self.patchcore_diffuse_area_enabled,
+            "patchcore_diffuse_area_threshold": self.patchcore_diffuse_area_threshold,
+            "patchcore_diffuse_area_penalty": self.patchcore_diffuse_area_penalty,
             "dust_brightness_threshold": self.dust_brightness_threshold,
             "dust_area_min": self.dust_area_min,
             "dust_area_max": self.dust_area_max,
@@ -345,6 +356,13 @@ class CAPIConfig:
             self.patchcore_concentration_min_ratio = float(param_map["patchcore_concentration_min_ratio"])
         if "patchcore_concentration_penalty" in param_map:
             self.patchcore_concentration_penalty = float(param_map["patchcore_concentration_penalty"])
+        if "patchcore_diffuse_area_enabled" in param_map:
+            val = param_map["patchcore_diffuse_area_enabled"]
+            self.patchcore_diffuse_area_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "patchcore_diffuse_area_threshold" in param_map:
+            self.patchcore_diffuse_area_threshold = float(param_map["patchcore_diffuse_area_threshold"])
+        if "patchcore_diffuse_area_penalty" in param_map:
+            self.patchcore_diffuse_area_penalty = float(param_map["patchcore_diffuse_area_penalty"])
         if "dust_brightness_threshold" in param_map:
             self.dust_brightness_threshold = int(param_map["dust_brightness_threshold"])
         if "dust_area_min" in param_map:

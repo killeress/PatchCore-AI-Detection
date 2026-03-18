@@ -384,6 +384,9 @@ def aggregate_judgment(results: List[ImageResult]) -> Tuple[str, str]:
             # 跳過疑似灰塵
             if tile.is_suspected_dust_or_scratch:
                 continue
+            # 跳過不檢測排除區域
+            if tile.is_in_exclude_zone:
+                continue
 
             # 使用熱力圖峰值座標 (更精確)
             if tile.anomaly_peak_x >= 0 and tile.anomaly_peak_y >= 0:
@@ -469,7 +472,7 @@ def results_to_db_data(
 
         if anomaly_count > 0 or cv_edge_count > 0:
             real_ng = [t for t, s, m in result.anomaly_tiles
-                       if not t.is_suspected_dust_or_scratch and not t.is_bomb]
+                       if not t.is_suspected_dust_or_scratch and not t.is_bomb and not t.is_in_exclude_zone]
             
             # 如果有真實 NG 或是 CV 邊緣 NG，就判定為 NG
             if real_ng or cv_edge_count > 0:
@@ -536,6 +539,7 @@ def results_to_db_data(
                 "peak_x": tile.anomaly_peak_x,
                 "peak_y": tile.anomaly_peak_y,
                 "heatmap_path": tile_hp,
+                "is_exclude_zone": 1 if tile.is_in_exclude_zone else 0,
             })
 
         # CV 邊緣缺陷 — 獨立儲存 (不放入 tiles)
