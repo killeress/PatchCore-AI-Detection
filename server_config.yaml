@@ -46,3 +46,12 @@ logging:
   file: "/data/capi_ai/logs/server.log"
   max_bytes: 10485760                    # 單檔上限 10MB
   backup_count: 5                        # 保留 5 個備份
+
+# 定時清除舊資料
+cleanup:
+  enabled: true
+  schedule_time: "02:00"       # 每日執行時間 (HH:MM)
+  ok_retain_days: 14            # OK 記錄保留天數
+  ng_retain_days: 90            # NG / ERR 記錄保留天數
+  tile_retain_days: 7           # tile_results 保留天數 (獨立、最短)
+  vacuum_after_cleanup: true

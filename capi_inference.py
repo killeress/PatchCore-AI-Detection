@@ -2064,11 +2064,16 @@ class CAPIInferencer:
                         print(f"⚠️ {img_path.name} Edge@{ed.side} Score:{ed.max_diff:.3f} → OMIT OVEREXPOSED, skip dust check")
                 else:
                     for ed in result.edge_defects:
-                        tx, ty, tw, th = ed.bbox
+                        ex, ey, ew, eh = ed.bbox
                         oh, ow = omit_image.shape[:2]
+                        # 使用擴展 ROI (bbox ± 100px)，與 save_edge_defect_image 一致
+                        # 原始 bbox 可能極小 (如 4x15px)，無法可靠偵測灰塵
+                        edge_dust_padding = 100
+                        tx = max(0, ex - edge_dust_padding)
+                        ty = max(0, ey - edge_dust_padding)
+                        x2 = min(ex + ew + edge_dust_padding, ow)
+                        y2 = min(ey + eh + edge_dust_padding, oh)
                         if tx < ow and ty < oh:
-                            x2 = min(tx + tw, ow)
-                            y2 = min(ty + th, oh)
                             
                             omit_crop = omit_image[ty:y2, tx:x2]
                             ed.omit_crop_image = omit_crop.copy()
@@ -2377,7 +2382,7 @@ class CAPIInferencer:
                 if is_bomb_ed:
                     box_color = (255, 0, 255)  # 紫色 (洋紅色)
                 elif is_dust:
-                    box_color = (0, 255, 255)  # 黃色
+                    box_color = (0, 165, 255)
                 else:
                     box_color = (0, 0, 255)    # 紅色
                 

@@ -34,7 +34,7 @@ import argparse
 import signal
 import yaml
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple, List, Any
 
 # 確保模組路徑
@@ -750,6 +750,9 @@ class CAPIServer:
             except Exception as e:
                 logger.error(f"Failed to start web server: {e}")
 
+        # 啟動清理排程
+        self._start_cleanup_scheduler()
+
         # 建立 TCP Socket
         self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -792,6 +795,50 @@ class CAPIServer:
                 break
 
         logger.info("Server stopped")
+
+    def _start_cleanup_scheduler(self):
+        cleanup_cfg = self.server_config.get("cleanup", {})
+        if not cleanup_cfg.get("enabled", False):
+            return
+
+        schedule_time = cleanup_cfg.get("schedule_time", "02:00")
+        ok_retain     = cleanup_cfg.get("ok_retain_days", 14)
+        ng_retain     = cleanup_cfg.get("ng_retain_days", 90)
+        tile_retain   = cleanup_cfg.get("tile_retain_days", 7)
+        vacuum        = cleanup_cfg.get("vacuum_after_cleanup", True)
+        hour, minute  = map(int, schedule_time.split(":"))
+
+        def _scheduler_loop():
+            logger.info(
+                f"[Cleanup] Scheduler started, daily at {schedule_time} "
+                f"(OK={ok_retain}d, NG={ng_retain}d, tiles={tile_retain}d)"
+            )
+            while self._running:
+                now    = datetime.now()
+                target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if target <= now:
+                    target += timedelta(days=1)
+                sleep_secs = int((target - now).total_seconds())
+                # 每 60 秒醒來檢查 _running
+                for _ in range(sleep_secs // 60 + 1):
+                    if not self._running:
+                        return
+                    time.sleep(min(60, sleep_secs))
+                if not self._running:
+                    return
+                try:
+                    logger.info("[Cleanup] Starting scheduled database cleanup...")
+                    stats = self.db.cleanup_old_records(ok_retain, ng_retain, tile_retain, vacuum)
+                    logger.info(
+                        f"[Cleanup] Done — "
+                        f"inference_records={stats['inference_records_deleted']}, "
+                        f"tile_results={stats['tile_results_deleted']}"
+                    )
+                except Exception as e:
+                    logger.error(f"[Cleanup] Failed: {e}")
+
+        t = threading.Thread(target=_scheduler_loop, name="cleanup-scheduler", daemon=True)
+        t.start()
 
     def stop(self):
         """停止伺服器"""

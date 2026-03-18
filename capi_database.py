@@ -734,6 +734,60 @@ class CAPIDatabase:
             finally:
                 conn.close()
 
+    def cleanup_old_records(
+        self,
+        ok_retain_days: int = 14,
+        ng_retain_days: int = 90,
+        tile_retain_days: int = 7,
+        vacuum: bool = True,
+    ) -> dict:
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        ok_cutoff   = (now - timedelta(days=ok_retain_days)).strftime('%Y-%m-%d')
+        ng_cutoff   = (now - timedelta(days=ng_retain_days)).strftime('%Y-%m-%d')
+        tile_cutoff = (now - timedelta(days=tile_retain_days)).strftime('%Y-%m-%d')
+
+        stats = {"tile_results_deleted": 0, "inference_records_deleted": 0}
+
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                # Step 1: 清除超過 tile_retain_days 的 tile_results
+                cur = conn.execute("""
+                    DELETE FROM tile_results
+                    WHERE image_result_id IN (
+                        SELECT im.id FROM image_results im
+                        JOIN inference_records ir ON im.record_id = ir.id
+                        WHERE ir.created_at < ?
+                    )
+                """, (tile_cutoff,))
+                stats["tile_results_deleted"] = cur.rowcount
+
+                # Step 2: 清除過期 inference_records (cascade 自動刪子表)
+                cur = conn.execute("""
+                    DELETE FROM inference_records
+                    WHERE (ai_judgment = 'OK' AND created_at < ?)
+                       OR (ai_judgment != 'OK'  AND created_at < ?)
+                """, (ok_cutoff, ng_cutoff))
+                stats["inference_records_deleted"] = cur.rowcount
+
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        # Step 3: VACUUM (在鎖外，不阻塞其他操作)
+        if vacuum and (stats["tile_results_deleted"] > 0 or stats["inference_records_deleted"] > 0):
+            conn = self._get_conn()
+            try:
+                conn.execute("VACUUM")
+            finally:
+                conn.close()
+
+        return stats
+
     def get_ric_comparison(self, batch_id: int = None) -> List[Dict]:
         """
         取得 RIC 比對結果

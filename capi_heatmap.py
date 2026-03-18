@@ -497,19 +497,11 @@ class HeatmapManager:
             panels.extend([omit_panel, overlay_panel])
             labels.extend(["OMIT ROI", f"Overlay ({metric_name}:{surface_iou:.3f})"])
 
-            # 回寫判定結果到 edge_defect
+            # 判定結果僅用於 heatmap 顯示，不回寫到 edge_defect
+            # (推論結果的 is_suspected_dust_or_scratch 應在 Phase 3 中設定，
+            #  避免 async heatmap 儲存與同步判定之間的時序不一致)
             if is_surface and not is_bomb:
-                edge_defect.is_suspected_dust_or_scratch = True
                 is_dust = True
-                edge_defect.dust_detail_text = (
-                    getattr(edge_defect, 'dust_detail_text', '') +
-                    f" {metric_name}:{surface_iou:.3f}>={dust_iou_threshold:.3f} -> SURFACE_OK"
-                )
-            elif dust_mask_omit is not None and is_dust_detected and not is_surface:
-                edge_defect.dust_detail_text = (
-                    getattr(edge_defect, 'dust_detail_text', '') +
-                    f" {metric_name}:{surface_iou:.3f}<{dust_iou_threshold:.3f} -> REAL_NG"
-                )
 
         # 橫向拼接 (加入明顯深灰間隔，避免相連處被誤認為缺陷線)
         gap_w = 10
@@ -622,6 +614,15 @@ class HeatmapManager:
 
         for result in results:
             image_name = result.image_path.stem
+            
+            # 取得當前圖片實際的 threshold
+            active_threshold = getattr(inferencer, 'threshold', 0.5)
+            if hasattr(inferencer, '_get_image_prefix') and hasattr(inferencer, '_get_threshold_for_prefix'):
+                try:
+                    img_prefix = inferencer._get_image_prefix(result.image_path.name)
+                    active_threshold = inferencer._get_threshold_for_prefix(img_prefix)
+                except Exception:
+                    pass
 
             # 儲存全圖總覽 (有 tile 異常或 edge 缺陷時)
             has_edge = hasattr(result, 'edge_defects') and result.edge_defects
@@ -644,7 +645,7 @@ class HeatmapManager:
                                 save_dir, image_name, tile.tile_id,
                                 tile.image, anomaly_map, score,
                                 tile_info=tile,
-                                score_threshold=inferencer.threshold,
+                                score_threshold=active_threshold,
                                 iou_threshold=inferencer.config.dust_heatmap_iou_threshold,
                             )
                             saved_files.append(path)
