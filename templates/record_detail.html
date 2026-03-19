@@ -183,7 +183,9 @@
             耗時: {{ img.inference_time_ms | round(0) }}ms
         </p>
 
-        {% if img.tiles %}
+        {# ====== AI 推論區域 (Grid Tiles) ====== #}
+        {% set grid_tiles = img.tiles | rejectattr("is_aoi_coord") | list %}
+        {% if grid_tiles %}
         <table>
             <thead>
                 <tr>
@@ -195,23 +197,15 @@
                 </tr>
             </thead>
             <tbody>
-                {% for t in img.tiles %}
+                {% for t in grid_tiles %}
                 {% set t_badge, t_info = t | tile_info %}
-                <tr{% if t.get("is_aoi_coord") %} style="background: rgba(16, 185, 129, 0.1); border-left: 3px solid #10b981;"{% endif %}>
-                    <td>
-                        {% if t.get("is_aoi_coord") %}
-                        <span style="color: #10b981;">🎯 #{{ t.tile_id }}</span>
-                        {% else %}
-                        #{{ t.tile_id }}
-                        {% endif %}
-                    </td>
+                <tr>
+                    <td>#{{ t.tile_id }}</td>
                     <td>({{ t.x }}, {{ t.y }})</td>
                     <td>{{ t.width }}x{{ t.height }}</td>
                     <td><span class="badge {{ t_badge }}">{{ t.score | round(3) }}</span></td>
                     <td>
-                        {% if 'AOI座標' in t_info %}
-                        <span style="color: #10b981;">{{ t_info }}</span>
-                        {% elif 'DUST' in t_info or '灰塵' in t_info %}
+                        {% if 'DUST' in t_info or '灰塵' in t_info %}
                         <span style="color: #D97706;">{{ t_info }}</span>
                         {% elif 'BOMB' in t_info or '炸彈' in t_info %}
                         <span style="color: #DC2626;">{{ t_info }}</span>
@@ -239,9 +233,9 @@
             {% endif %}
             {% endif %}
 
-            {# --- 3. 各 Tile 疊加圖 (Grid Tiles) --- #}
-            {% for t in img.tiles %}
-            {% if t.heatmap_path and heatmap_base_dir and not t.get("is_aoi_coord") %}
+            {# --- 2. Grid Tile 疊加圖 --- #}
+            {% for t in grid_tiles %}
+            {% if t.heatmap_path and heatmap_base_dir %}
             {% set thm_url = hm_relative(t.heatmap_path, heatmap_base_dir) %}
             {% if thm_url %}
             <div class="image-box">
@@ -253,29 +247,77 @@
             {% endif %}
             {% endif %}
             {% endfor %}
-
-            {# --- 4. AOI 機檢座標 Tile 疊加圖 --- #}
-            {% set aoi_tiles = img.tiles | selectattr("is_aoi_coord") | list %}
-            {% if aoi_tiles %}
-            <div style="width: 100%; margin-top: 16px; padding-top: 12px; border-top: 2px solid #10b981;">
-                <h4 style="color: #10b981; margin-bottom: 8px; font-family: 'Fira Code', monospace; font-size: 0.9rem;">
-                    🎯 AOI 機檢座標區域</h4>
-            </div>
-            {% for t in aoi_tiles %}
-            {% if t.heatmap_path and heatmap_base_dir %}
-            {% set thm_url = hm_relative(t.heatmap_path, heatmap_base_dir) %}
-            {% if thm_url %}
-            <div class="image-box" style="border: 2px solid rgba(16, 185, 129, 0.3); border-radius: 8px;">
-                <h4
-                    style="margin-bottom:8px;color:#10b981;font-size:0.85rem;font-family:'Fira Code',monospace;">
-                    🎯 #{{ t.tile_id }} ({{ t.get("aoi_defect_code", "") }}) 熱力圖</h4>
-                <img src="/heatmaps/{{ thm_url }}" alt="aoi tile{{ t.tile_id }} heatmap" onclick="openLightbox(this.src)">
-            </div>
-            {% endif %}
-            {% endif %}
-            {% endfor %}
-            {% endif %}
         </div>
+
+        {# ====== AOI 機檢座標區域 (獨立區塊) ====== #}
+        {% set aoi_tiles = img.tiles | selectattr("is_aoi_coord") | list %}
+        {% if aoi_tiles %}
+        <div style="margin-top: 24px; padding-top: 16px; border-top: 2px solid #10b981;">
+            <h4 style="color: #10b981; margin-bottom: 12px; font-family: 'Fira Code', monospace; font-size: 0.9rem; display: flex; align-items: center; gap: 8px;">
+                🎯 AOI 機檢座標推論
+                <span style="font-size: 0.75rem; color: var(--text-muted);">(以 AOI 機台 NG 座標為中心切塊推論)</span>
+            </h4>
+            <table>
+                <thead>
+                    <tr>
+                        <th>區域</th>
+                        <th>異常代碼</th>
+                        <th>位置</th>
+                        <th>大小</th>
+                        <th>AI 分數</th>
+                        <th>AI 判定</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for t in aoi_tiles %}
+                    {% set t_badge, t_info = t | tile_info %}
+                    <tr>
+                        <td style="color: #10b981;">🎯 #{{ t.tile_id }}</td>
+                        <td><span style="color: #10b981; font-weight: 600;">{{ t.get("aoi_defect_code", "") }}</span></td>
+                        <td>({{ t.x }}, {{ t.y }})</td>
+                        <td>{{ t.width }}x{{ t.height }}</td>
+                        <td><span class="badge {{ t_badge }}">{{ t.score | round(3) }}</span></td>
+                        <td>
+                            {% if t.get("is_anomaly") %}
+                            <span style="color: #EF4444; font-weight: 600;">AI 也判 NG</span>
+                            {% else %}
+                            <span style="color: #22C55E; font-weight: 600;">AI 判 OK</span>
+                            {% endif %}
+                            {% if 'DUST' in t_info or '灰塵' in t_info %}
+                            <span style="color: #D97706; font-size: 0.8rem;"> | 灰塵</span>
+                            {% endif %}
+                            {% if 'BOMB' in t_info or '炸彈' in t_info %}
+                            <span style="color: #DC2626; font-size: 0.8rem;"> | 炸彈</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <div class="img-grid" style="margin-top: 12px;">
+                {% for t in aoi_tiles %}
+                {% if t.heatmap_path and heatmap_base_dir %}
+                {% set thm_url = hm_relative(t.heatmap_path, heatmap_base_dir) %}
+                {% if thm_url %}
+                <div class="image-box" style="border: 2px solid rgba(16, 185, 129, 0.3); border-radius: 8px;">
+                    <h4
+                        style="margin-bottom:8px;color:#10b981;font-size:0.85rem;font-family:'Fira Code',monospace;">
+                        🎯 #{{ t.tile_id }} — {{ t.get("aoi_defect_code", "") }}
+                        {% if t.get("is_anomaly") %}
+                        <span style="color: #EF4444;">[AI: NG]</span>
+                        {% else %}
+                        <span style="color: #22C55E;">[AI: OK]</span>
+                        {% endif %}
+                    </h4>
+                    <img src="/heatmaps/{{ thm_url }}" alt="aoi tile{{ t.tile_id }} heatmap" onclick="openLightbox(this.src)">
+                </div>
+                {% endif %}
+                {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
 
         {% if img.edge_defects %}
         <div style="margin-top: 16px; padding-top: 12px; border-top: 2px solid #0891B2;">

@@ -115,6 +115,7 @@ class HeatmapManager:
             儲存的檔案路徑
         """
         tile_size = 512
+        is_bright_spot = getattr(tile_info, 'is_bright_spot_detection', False) if tile_info else False
 
         # --- Panel 1: Original Tile ---
         orig = tile_image.copy()
@@ -123,6 +124,69 @@ class HeatmapManager:
         elif len(orig.shape) == 3 and orig.shape[2] == 1:
             orig = cv2.cvtColor(orig, cv2.COLOR_GRAY2BGR)
         orig = cv2.resize(orig, (tile_size, tile_size))
+
+        # === B0F 二值化偵測模式：2-panel (Original + Binarization Overlay) ===
+        if is_bright_spot:
+            is_bomb = getattr(tile_info, 'is_bomb', False) if tile_info else False
+            bomb_code = getattr(tile_info, 'bomb_defect_code', '') if tile_info else ''
+
+            # Panel 2: 二值化結果疊加在原圖上（紅色標記亮點）
+            if anomaly_map is not None:
+                binary_vis = orig.copy()
+                binary_resized = cv2.resize(
+                    (anomaly_map * 255).astype(np.uint8), (tile_size, tile_size)
+                )
+                # 紅色高亮標記偵測到的亮點區域
+                binary_vis[binary_resized > 0] = (0, 0, 255)
+                # 半透明混合
+                binary_panel = cv2.addWeighted(orig, 0.5, binary_vis, 0.5, 0)
+            else:
+                binary_panel = orig.copy()
+                cv2.putText(binary_panel, "No Binary", (150, 260),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)
+
+            labels = ["Original", "Binarization"]
+            panels = [orig, binary_panel]
+
+            # --- 橫向拼接 ---
+            composite = np.hstack(panels)
+            comp_h, comp_w = composite.shape[:2]
+
+            # --- 標籤列 ---
+            label_h = 40
+            label_bar = np.zeros((label_h, comp_w, 3), dtype=np.uint8)
+            for i_lbl, lbl in enumerate(labels):
+                lx = i_lbl * tile_size + 10
+                cv2.putText(label_bar, lbl, (lx, 28),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+
+            # --- 頂部 Header ---
+            header_h = 60
+            header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
+
+            if is_bomb:
+                verdict = f"BOMB: {bomb_code} (Filtered as OK)"
+                verdict_color = (255, 0, 255)
+            elif score > 0:
+                verdict = "NG (Bright Spot)"
+                verdict_color = (0, 0, 255)
+            else:
+                verdict = "OK (No Bright Spot)"
+                verdict_color = (0, 255, 0)
+
+            header_text = f"B0F Binarization | {verdict}"
+            cv2.putText(header, header_text, (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, verdict_color, 2)
+            detail_line = f"Tile#{tile_id} | {image_name}"
+            cv2.putText(header, detail_line, (10, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
+
+            final = np.vstack([header, composite, label_bar])
+
+            filename = f"heatmap_{image_name}_tile{tile_id}.{self.save_format}"
+            filepath = save_dir / filename
+            cv2.imwrite(str(filepath), final)
+            return str(filepath)
 
         # --- Panel 2: Heatmap Overlay ---
         if anomaly_map is not None:
@@ -173,7 +237,7 @@ class HeatmapManager:
                 dust_panel = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
                 cv2.putText(dust_panel, "No Dust Data", (140, 260),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)
-            
+
             # Panel 5: IOU Debug 可視化 (2x2 重疊分析圖)
             if dust_iou_debug is not None:
                 iou_debug_panel = cv2.resize(dust_iou_debug, (tile_size, tile_size))

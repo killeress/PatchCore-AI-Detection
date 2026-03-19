@@ -105,6 +105,7 @@ class TileInfo:
     anomaly_peak_y: int = -1    # 熱力圖峰值 y (圖片座標, -1=未計算)
     is_aoi_coord_tile: bool = False  # 是否來自 AOI 機檢座標
     aoi_defect_code: str = ""        # AOI 異常代碼 (PCDK2, C1111, PTMD6)
+    is_bright_spot_detection: bool = False  # 是否為二值化亮點偵測（非 PatchCore）
     
     @property
     def center(self) -> Tuple[int, int]:
@@ -1147,7 +1148,67 @@ class CAPIInferencer:
                 pred_score = 0.0
         
         return pred_score, anomaly_map
-    
+
+    def _detect_bright_spots(self, tile: 'TileInfo', bright_threshold: int = 200,
+                             min_area: int = 5) -> Tuple[float, Optional[np.ndarray]]:
+        """
+        B0F00000 專用：以二值化方式偵測黑色背景上的白色亮點。
+
+        取代 PatchCore 推論，用於無訓練模型的圖片。
+
+        Args:
+            tile: TileInfo 物件
+            bright_threshold: 二值化閾值（高於此值視為亮點）
+            min_area: 最小連通面積（過濾雜訊用）
+
+        Returns:
+            (score, binary_map) - score: 0.0 (無亮點) 或 1.0 (有亮點)
+                                  binary_map: 二值化結果 (uint8, 0/255)
+        """
+        img = tile.image
+        if img is None:
+            return 0.0, None
+
+        # 灰階化
+        if len(img.shape) == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img.copy()
+
+        # 高閾值二值化：找出特別亮的白色區域
+        _, binary = cv2.threshold(gray, bright_threshold, 255, cv2.THRESH_BINARY)
+
+        # 如果 tile 有 mask（排除區域），套用 mask
+        if tile.mask is not None:
+            mask_resized = cv2.resize(tile.mask, (binary.shape[1], binary.shape[0]))
+            binary = cv2.bitwise_and(binary, mask_resized)
+
+        # 連通分量分析，過濾小面積雜訊
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+
+        # 清除小面積區域 (label 0 = 背景)
+        filtered_binary = np.zeros_like(binary)
+        has_bright_spot = False
+        for i in range(1, num_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area >= min_area:
+                filtered_binary[labels == i] = 255
+                has_bright_spot = True
+
+        score = 1.0 if has_bright_spot else 0.0
+
+        # 轉為 float anomaly_map 格式（與 PatchCore 輸出格式相容）
+        anomaly_map = filtered_binary.astype(np.float32) / 255.0
+
+        # 標記此 tile 為二值化偵測模式
+        tile.is_bright_spot_detection = True
+
+        if has_bright_spot:
+            bright_pixel_count = np.sum(filtered_binary > 0)
+            print(f"  💡 B0F 二值化偵測: 發現亮點 ({bright_pixel_count} px), threshold={bright_threshold}")
+
+        return score, anomaly_map
+
     def run_inference(self, result: ImageResult, progress_callback=None,
                       inferencer=None, threshold: Optional[float] = None,
                       edge_margin_override: Optional[int] = None,
@@ -2398,6 +2459,33 @@ class CAPIInferencer:
             if aoi_report:
                 aoi_tile_count = 0
                 aoi_edge_count = 0
+
+                # 收集已有的圖片前綴
+                existing_prefixes = set()
+                for result in preprocessed_results:
+                    existing_prefixes.add(self._get_image_prefix(result.image_path.name))
+
+                # 對 skip_files 中有 AOI 報告的圖片，預處理後加入（僅保留 AOI coord tiles）
+                for report_prefix in aoi_report:
+                    if report_prefix not in existing_prefixes:
+                        # 在所有圖片檔（含被 skip 的）中找對應圖片
+                        matched_file = None
+                        skipped_files = [f for f in image_files if self.config.should_skip_file(f.name) and not is_dust_check_image(f)]
+                        for f in skipped_files:
+                            if self._get_image_prefix(f.name) == report_prefix:
+                                matched_file = f
+                                break
+                        if matched_file is not None:
+                            print(f"🎯 AOI Coord: 為跳過的圖片 {matched_file.name} 建立預處理 (有 {len(aoi_report[report_prefix])} 筆 AOI 座標)")
+                            skip_result = self.preprocess_image(matched_file, cached_mark=cached_mark)
+                            if skip_result is not None:
+                                # 清除 grid tiles，只保留結構供 AOI coord 使用
+                                skip_result.tiles = []
+                                skip_result.excluded_tile_count = 0
+                                skip_result.processed_tile_count = 0
+                                preprocessed_results.append(skip_result)
+                                existing_prefixes.add(report_prefix)
+
                 for result in preprocessed_results:
                     img_prefix = self._get_image_prefix(result.image_path.name)
                     if img_prefix in aoi_report:
@@ -2453,20 +2541,36 @@ class CAPIInferencer:
         for i, result in enumerate(preprocessed_results):
             # 多模型路由：依圖片前綴選擇對應的 inferencer 和 threshold
             img_prefix = self._get_image_prefix(result.image_path.name)
+
+            # === skip_files 圖片（如 B0F00000）：使用二值化偵測取代 PatchCore ===
+            if self.config.should_skip_file(result.image_path.name):
+                print(f"💡 {result.image_path.name} (skip_file) → 使用二值化偵測亮點")
+                anomaly_tiles = []
+                for tile in result.tiles:
+                    score, anomaly_map = self._detect_bright_spots(tile)
+                    if score > 0:
+                        anomaly_tiles.append((tile, score, anomaly_map))
+                result.anomaly_tiles = anomaly_tiles
+                result.inference_time = 0.0
+                preprocessed_results[i] = result
+                if progress_callback:
+                    progress_callback(i + 1, len(preprocessed_results))
+                continue
+
             target_inferencer = self._get_inferencer_for_prefix(img_prefix)
             target_threshold = self._get_threshold_for_prefix(img_prefix)
-            
+
             if target_inferencer is None:
                 print(f"⚠️ {result.image_path.name} 無可用模型，跳過推論")
                 continue
-            
+
             # 模型路由 log (僅在多模型模式下顯示)
             if self._model_mapping:
                 model_name = "fallback"
                 if img_prefix in self._model_mapping:
                     model_name = self._model_mapping[img_prefix].name
                 print(f"🎯 {result.image_path.name} → 模型: {model_name}, 閾值: {target_threshold}")
-            
+
             result = self.run_inference(
                 result,
                 inferencer=target_inferencer,
@@ -2474,7 +2578,7 @@ class CAPIInferencer:
                 model_id=model_id,
             )
             preprocessed_results[i] = result
-            
+
             if progress_callback:
                 progress_callback(i + 1, len(preprocessed_results))
         
@@ -2487,7 +2591,11 @@ class CAPIInferencer:
         def _dust_check_one(result: ImageResult) -> ImageResult:
             """單張圖片的灰塵交叉驗證 (可安全在多執行緒中呼叫)"""
             img_path = result.image_path
-            
+
+            # skip_files 圖片（如 B0F00000）不做 OMIT 灰塵比對
+            if self.config.should_skip_file(img_path.name):
+                return result
+
             if result.anomaly_tiles and omit_image is not None and omit_overexposed:
                 # OMIT 過曝：無法進行灰塵檢測，記錄但不判定
                 for tile, score, anomaly_map in result.anomaly_tiles:

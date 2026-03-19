@@ -52,7 +52,12 @@ def tile_info(t):
     badge = "badge-ng"
     info = f"Score: {t['score']:.3f}"
     if t.get("is_aoi_coord"):
-        info += f" | 🎯 AOI座標 ({t.get('aoi_defect_code', '')})"
+        code = t.get('aoi_defect_code', '')
+        if t.get("is_anomaly"):
+            info += f" | 🎯 AOI座標 ({code}) AI也判NG"
+        else:
+            badge = "badge-ok"
+            info += f" | 🎯 AOI座標 ({code}) AI判OK"
     if t.get("is_exclude_zone"):
         badge = "badge-ok"
         info += " | 不檢測排除區域"
