@@ -35,7 +35,12 @@ def ai_badge(ai_judgment):
     return "badge-ok" if simple == "OK" else ("badge-ng" if simple == "NG" else "badge-err")
 
 def mj_badge(machine_judgment):
-    return "badge-ok" if machine_judgment == "OK" else "badge-ng"
+    if machine_judgment == "OK":
+        return "badge-ok"
+    elif machine_judgment == "HY":
+        return "badge-err"
+    else:
+        return "badge-ng"
 
 def img_status_info(img):
     if img.get("is_dust_only"): return "灰塵 (DUST)", "badge-err"
@@ -46,6 +51,8 @@ def img_status_info(img):
 def tile_info(t):
     badge = "badge-ng"
     info = f"Score: {t['score']:.3f}"
+    if t.get("is_aoi_coord"):
+        info += f" | 🎯 AOI座標 ({t.get('aoi_defect_code', '')})"
     if t.get("is_exclude_zone"):
         badge = "badge-ok"
         info += " | 不檢測排除區域"
@@ -530,11 +537,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         # 2. 抓取區域熱力圖 (Tiles)，最多取 8 張以填好 9 宮格
                         img_id = row["img_id"]
                         tiles = conn.execute(
-                            """SELECT tile_id, heatmap_path, is_anomaly, is_dust, is_bomb 
-                               FROM tile_results 
-                               WHERE image_result_id = ? AND heatmap_path != '' 
+                            """SELECT tile_id, heatmap_path, is_anomaly, is_dust, is_bomb, is_aoi_coord
+                               FROM tile_results
+                               WHERE image_result_id = ? AND heatmap_path != ''
                                ORDER BY is_anomaly DESC, score DESC
-                               LIMIT 8""", 
+                               LIMIT 8""",
                             (img_id,)
                         ).fetchall()
                         
@@ -553,6 +560,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                                 is_ng = bool(t["is_anomaly"])
                                 
                                 is_exclude_zone = bool(t.get("is_exclude_zone", 0))
+                                is_aoi_coord = bool(t.get("is_aoi_coord", 0))
 
                                 tile_status = "OK"
                                 if is_exclude_zone:
@@ -564,13 +572,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                                 elif is_ng:
                                     tile_status = "NG"
 
+                                tile_label = f"Tile #{t['tile_id']}"
+                                if is_aoi_coord:
+                                    tile_label = f"🎯 AOI #{t['tile_id']}"
+
                                 recent_heatmaps.append({
                                     "url":        t_url,
                                     "glass_id":   row["glass_id"] or "",
                                     "image_name": row["image_name"] or "",
                                     "is_ng":      is_ng or is_bomb or is_dust,
                                     "status":     tile_status,
-                                    "label":      f"Tile #{t['tile_id']}",
+                                    "label":      tile_label,
                                     "judgment":   row["ai_judgment"] or "",
                                     "created_at": row["created_at"] or "",
                                     "record_id":  row["record_id"],

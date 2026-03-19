@@ -7,6 +7,7 @@ TCP/IP Socket Server，接收 Testing 客戶端的推論請求，
 通訊協議:
     [Request]  無炸彈: AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片目錄路徑
                有炸彈: AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片前綴;(座標);圖片目錄路徑
+               機檢判定: OK / NG / HY (畫異，HY 時跳過推論直接回傳 ERR:HY)
     [Response] AOI@玻璃ID;機種ID;機台編號;機檢判定;AI判定
 
 AI 判定:
@@ -251,6 +252,7 @@ def parse_request(data: str) -> Dict[str, Any]:
     格式:
         無炸彈 (6 欄位): AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片目錄路徑
         有炸彈 (8 欄位): AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片前綴;(座標);圖片目錄路徑
+        機檢判定: OK / NG / HY (畫異)
 
     Returns:
         {
@@ -540,6 +542,8 @@ def results_to_db_data(
                 "peak_y": tile.anomaly_peak_y,
                 "heatmap_path": tile_hp,
                 "is_exclude_zone": 1 if tile.is_in_exclude_zone else 0,
+                "is_aoi_coord": 1 if tile.is_aoi_coord_tile else 0,
+                "aoi_defect_code": tile.aoi_defect_code,
             })
 
         # CV 邊緣缺陷 — 獨立儲存 (不放入 tiles)
@@ -977,6 +981,40 @@ class CAPIServer:
                         f"Model={parsed['model_id']} Machine={parsed['machine_no']} "
                         f"MJ={parsed['machine_judgment']} Dir={parsed['image_dir']}"
                     )
+
+                    # 畫異 (HY) — 跳過推論，直接回傳 ERR:HY
+                    if parsed["machine_judgment"] == "HY":
+                        logger.info(f"[{client_addr}] 機檢判定=HY (畫異)，跳過推論")
+                        ai_judgment = "ERR:HY"
+                        response = build_response(
+                            parsed["glass_id"], parsed["model_id"],
+                            parsed["machine_no"], parsed["machine_judgment"],
+                            ai_judgment,
+                        )
+                        response_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                        logger.info(f"[{client_addr}] >> {response} (skipped)")
+                        with server_status.lock:
+                            server_status.active_inferences = max(0, server_status.active_inferences - 1)
+                            server_status.total_err += 1
+                            server_status.last_inference_time = response_time
+                            server_status.last_judgment_result = {
+                                "glass_id": parsed["glass_id"],
+                                "machine_no": parsed["machine_no"],
+                                "judgment": "ERR",
+                                "detail": ai_judgment,
+                                "time": datetime.now().strftime("%H:%M:%S"),
+                                "duration": "0.00s"
+                            }
+                        client_socket.sendall((response + "\r\n").encode("utf-8"))
+                        request_count += 1
+                        self._async_executor.submit(
+                            self._save_results_async,
+                            client_addr, parsed, [],
+                            ai_judgment, "[]",
+                            request_time, response_time, 0.0,
+                            False, None,
+                        )
+                        continue
 
                     # 執行推論（不含 Heatmap 儲存，快速回覆）
                     start_time = time.time()

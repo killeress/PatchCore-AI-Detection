@@ -197,12 +197,28 @@
             <tbody>
                 {% for t in img.tiles %}
                 {% set t_badge, t_info = t | tile_info %}
-                <tr>
-                    <td>#{{ t.tile_id }}</td>
+                <tr{% if t.get("is_aoi_coord") %} style="background: rgba(16, 185, 129, 0.1); border-left: 3px solid #10b981;"{% endif %}>
+                    <td>
+                        {% if t.get("is_aoi_coord") %}
+                        <span style="color: #10b981;">🎯 #{{ t.tile_id }}</span>
+                        {% else %}
+                        #{{ t.tile_id }}
+                        {% endif %}
+                    </td>
                     <td>({{ t.x }}, {{ t.y }})</td>
                     <td>{{ t.width }}x{{ t.height }}</td>
                     <td><span class="badge {{ t_badge }}">{{ t.score | round(3) }}</span></td>
-                    <td>{{ t_info }}</td>
+                    <td>
+                        {% if 'AOI座標' in t_info %}
+                        <span style="color: #10b981;">{{ t_info }}</span>
+                        {% elif 'DUST' in t_info or '灰塵' in t_info %}
+                        <span style="color: #D97706;">{{ t_info }}</span>
+                        {% elif 'BOMB' in t_info or '炸彈' in t_info %}
+                        <span style="color: #DC2626;">{{ t_info }}</span>
+                        {% else %}
+                        {{ t_info }}
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -223,9 +239,9 @@
             {% endif %}
             {% endif %}
 
-            {# --- 3. 各 Tile 疊加圖 --- #}
+            {# --- 3. 各 Tile 疊加圖 (Grid Tiles) --- #}
             {% for t in img.tiles %}
-            {% if t.heatmap_path and heatmap_base_dir %}
+            {% if t.heatmap_path and heatmap_base_dir and not t.get("is_aoi_coord") %}
             {% set thm_url = hm_relative(t.heatmap_path, heatmap_base_dir) %}
             {% if thm_url %}
             <div class="image-box">
@@ -237,6 +253,28 @@
             {% endif %}
             {% endif %}
             {% endfor %}
+
+            {# --- 4. AOI 機檢座標 Tile 疊加圖 --- #}
+            {% set aoi_tiles = img.tiles | selectattr("is_aoi_coord") | list %}
+            {% if aoi_tiles %}
+            <div style="width: 100%; margin-top: 16px; padding-top: 12px; border-top: 2px solid #10b981;">
+                <h4 style="color: #10b981; margin-bottom: 8px; font-family: 'Fira Code', monospace; font-size: 0.9rem;">
+                    🎯 AOI 機檢座標區域</h4>
+            </div>
+            {% for t in aoi_tiles %}
+            {% if t.heatmap_path and heatmap_base_dir %}
+            {% set thm_url = hm_relative(t.heatmap_path, heatmap_base_dir) %}
+            {% if thm_url %}
+            <div class="image-box" style="border: 2px solid rgba(16, 185, 129, 0.3); border-radius: 8px;">
+                <h4
+                    style="margin-bottom:8px;color:#10b981;font-size:0.85rem;font-family:'Fira Code',monospace;">
+                    🎯 #{{ t.tile_id }} ({{ t.get("aoi_defect_code", "") }}) 熱力圖</h4>
+                <img src="/heatmaps/{{ thm_url }}" alt="aoi tile{{ t.tile_id }} heatmap" onclick="openLightbox(this.src)">
+            </div>
+            {% endif %}
+            {% endif %}
+            {% endfor %}
+            {% endif %}
         </div>
 
         {% if img.edge_defects %}

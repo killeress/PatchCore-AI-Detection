@@ -1028,6 +1028,10 @@
         'cv_edge_exclude_enabled', 'cv_edge_exclude_x', 'cv_edge_exclude_y',
         'cv_edge_exclude_w', 'cv_edge_exclude_h'
     ];
+    const AOI_COORD_PARAMS = [
+        'grid_tiling_enabled', 'aoi_coord_inspection_enabled',
+        'aoi_report_path_replace_from', 'aoi_report_path_replace_to'
+    ];
 
     // ── Init ──
     let currentTab = 'inference';
@@ -1079,6 +1083,7 @@
         const patchcoreParams = PATCHCORE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const dustParams = DUST_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const cvEdgeParams = CV_EDGE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
+        const aoiCoordParams = AOI_COORD_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
 
         // Group CV Edge Parameters
         const edgeEnabled = cvEdgeParams.find(p => p.param_name === 'cv_edge_enabled');
@@ -1103,6 +1108,7 @@
             ${patchcoreParams.length > 0 ? `<button class="settings-tab-btn ${currentTab === 'patchcore' ? 'active' : ''}" data-target="patchcore" onclick="switchTab('patchcore')">🔍 PatchCore</button>` : ''}
             <button class="settings-tab-btn ${currentTab === 'dust' ? 'active' : ''}" data-target="dust" onclick="switchTab('dust')">🧹 灰塵偵測</button>
             <button class="settings-tab-btn ${currentTab === 'cv-edge' ? 'active' : ''}" data-target="cv-edge" onclick="switchTab('cv-edge')">📐 CV 邊緣檢測</button>
+            <button class="settings-tab-btn ${currentTab === 'aoi-coord' ? 'active' : ''}" data-target="aoi-coord" onclick="switchTab('aoi-coord')">🎯 AOI 機檢座標</button>
             <button class="settings-tab-btn ${currentTab === 'history' ? 'active' : ''}" data-target="history" onclick="switchTab('history')">📋 修改紀錄</button>
         `;
 
@@ -1303,6 +1309,19 @@
                             </div>
                         </div>
                     </div>
+                </div>
+            </div>
+            <div id="pane-aoi-coord" class="settings-tab-pane ${currentTab === 'aoi-coord' ? 'active' : ''}">
+                <div class="settings-section" style="border-left: 3px solid #10b981;">
+                    <div class="settings-section-header">
+                        <div class="icon">🎯</div>
+                        <span>AOI 機檢座標設定</span>
+                    </div>
+                    <div style="padding: 12px 16px; color: #94a3b8; font-size: 0.82rem; line-height: 1.6; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        解析 AOI 機台 NG 報告 TXT，以機檢座標為中心切取 512×512 tile 做 PatchCore 推論。<br>
+                        可與 Grid Tiling 同時啟用（兩者獨立開關），AOI 座標 tile 即使與 grid tile 重疊也會強制新增。
+                    </div>
+                    ${aoiCoordParams.map(p => paramRow(p)).join('')}
                 </div>
             </div>
         `;

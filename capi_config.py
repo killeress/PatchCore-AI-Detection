@@ -173,6 +173,14 @@ class CAPIConfig:
         'G': [2560, 1600],
     })
     
+    # Grid Tiling 推論開關
+    grid_tiling_enabled: bool = True
+
+    # AOI 機檢座標推論設定
+    aoi_coord_inspection_enabled: bool = False
+    aoi_report_path_replace_from: str = "yuantu"    # 報告路徑替換來源
+    aoi_report_path_replace_to: str = "Report"      # 報告路徑替換目標
+
     # 配置檔路徑（載入後記錄）
     config_path: Optional[Path] = None
     
@@ -239,6 +247,10 @@ class CAPIConfig:
                 'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200],
                 'K': [2560, 1440], 'G': [2560, 1600],
             }),
+            grid_tiling_enabled=data.get("grid_tiling_enabled", True),
+            aoi_coord_inspection_enabled=data.get("aoi_coord_inspection_enabled", False),
+            aoi_report_path_replace_from=data.get("aoi_report_path_replace_from", "yuantu"),
+            aoi_report_path_replace_to=data.get("aoi_report_path_replace_to", "Report"),
             config_path=path,
         )
         
@@ -289,6 +301,10 @@ class CAPIConfig:
             "bomb_match_tolerance": self.bomb_match_tolerance,
             "bomb_line_min_aspect_ratio": self.bomb_line_min_aspect_ratio,
             "model_resolution_map": self.model_resolution_map,
+            "grid_tiling_enabled": self.grid_tiling_enabled,
+            "aoi_coord_inspection_enabled": self.aoi_coord_inspection_enabled,
+            "aoi_report_path_replace_from": self.aoi_report_path_replace_from,
+            "aoi_report_path_replace_to": self.aoi_report_path_replace_to,
         }
         
         with open(yaml_path, "w", encoding="utf-8") as f:
@@ -380,6 +396,16 @@ class CAPIConfig:
         if "dust_detect_dark_particles" in param_map:
             val = param_map["dust_detect_dark_particles"]
             self.dust_detect_dark_particles = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "grid_tiling_enabled" in param_map:
+            val = param_map["grid_tiling_enabled"]
+            self.grid_tiling_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "aoi_coord_inspection_enabled" in param_map:
+            val = param_map["aoi_coord_inspection_enabled"]
+            self.aoi_coord_inspection_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "aoi_report_path_replace_from" in param_map:
+            self.aoi_report_path_replace_from = str(param_map["aoi_report_path_replace_from"])
+        if "aoi_report_path_replace_to" in param_map:
+            self.aoi_report_path_replace_to = str(param_map["aoi_report_path_replace_to"])
 
     def get_enabled_exclusion_zones(self) -> List[ExclusionZone]:
         """取得已啟用的排除區域"""

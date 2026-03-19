@@ -29,6 +29,7 @@ import numpy as np
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -102,6 +103,8 @@ class TileInfo:
     is_in_exclude_zone: bool = False  # 是否位於不檢測排除區域內
     anomaly_peak_x: int = -1    # 熱力圖峰值 x (圖片座標, -1=未計算)
     anomaly_peak_y: int = -1    # 熱力圖峰值 y (圖片座標, -1=未計算)
+    is_aoi_coord_tile: bool = False  # 是否來自 AOI 機檢座標
+    aoi_defect_code: str = ""        # AOI 異常代碼 (PCDK2, C1111, PTMD6)
     
     @property
     def center(self) -> Tuple[int, int]:
@@ -166,6 +169,14 @@ class AOIDefect:
     image_x: int
     image_y: int
     bounds: Tuple[int, int, int, int]  # (x1, y1, x2, y2) 標記框
+
+@dataclass
+class AOIReportDefect:
+    """AOI 機台 NG 報告缺陷 (解析自 Report TXT)"""
+    defect_code: str      # 異常代碼 (PCDK2, C1111, PTMD6)
+    product_x: int        # 產品座標 X
+    product_y: int        # 產品座標 Y
+    image_prefix: str     # 圖片前綴 (W0F00000, B0F00000)
 
 @dataclass
 class ImageResult:
@@ -1749,6 +1760,235 @@ class CAPIInferencer:
             
         return defects_map
 
+    def _get_known_image_prefixes(self) -> List[str]:
+        """取得所有已知的圖片前綴 (來自 model_mapping + skip_files)"""
+        prefixes = set()
+        if self._model_mapping:
+            prefixes.update(self._model_mapping.keys())
+        for sf in self.config.skip_files:
+            prefixes.add(sf)
+        # 常見固定前綴
+        for p in ['G0F00000', 'R0F00000', 'W0F00000', 'WGF00000', 'B0F00000', 'STANDARD']:
+            prefixes.add(p)
+        return sorted(prefixes, key=len, reverse=True)
+
+    def _parse_aoi_report_txt(self, panel_dir: Path) -> Dict[str, List['AOIReportDefect']]:
+        """
+        解析 AOI 機台 NG 報告 TXT。
+
+        1. panel_dir 路徑替換 (預設 yuantu→Report) 取得報告目錄
+        2. 找到最新 .TXT 檔
+        3. 解析第二行的 NG 缺陷字串
+
+        格式: NG{異常代碼}{10位座標}{8字元前綴}...
+        例: NGPCDK20028800554W0F00000PCDK20171100894B0F00000
+
+        Returns:
+            {image_prefix: [AOIReportDefect, ...]}
+        """
+        result_map: Dict[str, List[AOIReportDefect]] = {}
+
+        # 路徑替換取得報告目錄
+        replace_from = self.config.aoi_report_path_replace_from
+        replace_to = self.config.aoi_report_path_replace_to
+        panel_str = str(panel_dir)
+
+        if replace_from not in panel_str:
+            logger.warning(f"AOI Report: 路徑中找不到 '{replace_from}': {panel_str}")
+            return result_map
+
+        report_dir = Path(panel_str.replace(replace_from, replace_to, 1))
+
+        if not report_dir.exists():
+            logger.info(f"AOI Report: 報告目錄不存在: {report_dir}")
+            return result_map
+
+        # 找最新的 .TXT 檔案 (按檔名排序取最後一個)
+        txt_files = sorted(report_dir.glob("*.TXT")) + sorted(report_dir.glob("*.txt"))
+        if not txt_files:
+            logger.info(f"AOI Report: 報告目錄中無 TXT 檔案: {report_dir}")
+            return result_map
+
+        report_file = txt_files[-1]
+        logger.info(f"AOI Report: 讀取報告 {report_file.name}")
+
+        try:
+            with open(report_file, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            if len(lines) < 2:
+                logger.warning(f"AOI Report: 報告內容不足 2 行: {report_file}")
+                return result_map
+
+            # 第二行以 @ 開頭，; 分隔
+            line2 = lines[1].strip().rstrip(',')
+            if not line2.startswith('@'):
+                logger.warning(f"AOI Report: 第二行格式異常 (不以@開頭): {line2[:50]}")
+                return result_map
+
+            # 以 ; 分隔，找到以 NG 開頭的欄位
+            fields = line2.split(';')
+            ng_string = None
+            for field in fields:
+                field = field.strip()
+                if field.startswith('NG'):
+                    ng_string = field[2:]  # 去掉 NG 前綴
+                    break
+
+            if not ng_string:
+                logger.info(f"AOI Report: 報告中未發現 NG 記錄")
+                return result_map
+
+            # 用已知前綴建構 regex 解析缺陷記錄
+            # 格式: {異常代碼}{10位座標}{8字元前綴}
+            known_prefixes = self._get_known_image_prefixes()
+            if not known_prefixes:
+                logger.warning("AOI Report: 無已知圖片前綴，無法解析")
+                return result_map
+
+            prefix_pattern = '|'.join(re.escape(p) for p in known_prefixes)
+            pattern = re.compile(r'([A-Za-z0-9]+?)(\d{10})(' + prefix_pattern + r')')
+            matches = pattern.findall(ng_string)
+
+            if not matches:
+                logger.warning(f"AOI Report: 無法解析缺陷記錄: {ng_string[:80]}")
+                return result_map
+
+            for defect_code, coord_str, image_prefix in matches:
+                product_x = int(coord_str[:5])
+                product_y = int(coord_str[5:])
+
+                defect = AOIReportDefect(
+                    defect_code=defect_code,
+                    product_x=product_x,
+                    product_y=product_y,
+                    image_prefix=image_prefix,
+                )
+
+                if image_prefix not in result_map:
+                    result_map[image_prefix] = []
+                result_map[image_prefix].append(defect)
+
+            total = sum(len(v) for v in result_map.values())
+            logger.info(f"AOI Report: 解析到 {total} 筆缺陷 (涉及 {len(result_map)} 種圖片前綴)")
+            for prefix, defects in result_map.items():
+                for d in defects:
+                    print(f"  🎯 {d.defect_code} @ ({d.product_x}, {d.product_y}) → {prefix}")
+
+        except Exception as e:
+            logger.error(f"AOI Report: 解析失敗: {e}")
+
+        return result_map
+
+    def _create_aoi_coord_tiles(
+        self,
+        image: np.ndarray,
+        result: 'ImageResult',
+        aoi_defects: List['AOIReportDefect'],
+        product_resolution: Optional[Tuple[int, int]] = None,
+    ) -> Tuple[List['TileInfo'], List['AOIReportDefect']]:
+        """
+        以 AOI 機檢座標為中心切取 512x512 tile。
+
+        Args:
+            image: 原始圖片
+            result: 已預處理的 ImageResult (含 otsu_bounds, raw_bounds)
+            aoi_defects: 該圖片對應的 AOI 報告缺陷列表
+            product_resolution: 產品解析度
+
+        Returns:
+            (patchcore_tiles, edge_defects_for_cv)
+            - patchcore_tiles: 可做 PatchCore 推論的 tiles
+            - edge_defects_for_cv: 碰到邊緣無法完整切塊的 defects (需 CV 處理)
+        """
+        tile_size = self.config.tile_size
+        half = tile_size // 2
+        patchcore_tiles = []
+        edge_defects = []
+
+        if result.raw_bounds is None:
+            logger.warning("AOI Coord: raw_bounds 為 None，無法建立切塊")
+            return patchcore_tiles, edge_defects
+
+        otsu_x1, otsu_y1, otsu_x2, otsu_y2 = result.otsu_bounds
+        img_h, img_w = image.shape[:2]
+
+        # 需要 tile_id 從現有 tiles 之後遞增
+        next_tile_id = max((t.tile_id for t in result.tiles), default=-1) + 1
+
+        for defect in aoi_defects:
+            # 產品座標 → 圖片座標
+            img_x, img_y = self._map_aoi_coords(
+                defect.product_x, defect.product_y,
+                result.raw_bounds, product_resolution
+            )
+
+            # 計算 tile 起點 (以座標為中心)
+            tx = img_x - half
+            ty = img_y - half
+
+            # 檢查是否能完整放入 Otsu bounds 內
+            otsu_width = otsu_x2 - otsu_x1
+            otsu_height = otsu_y2 - otsu_y1
+
+            if otsu_width < tile_size or otsu_height < tile_size:
+                # 產品區域太小，無法放入 512x512 tile
+                edge_defects.append(defect)
+                print(f"  ⚠️ AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}): 產品區域太小，轉 CV 處理")
+                continue
+
+            # 判定是否碰到邊緣
+            at_edge = (
+                img_x - otsu_x1 < half or
+                otsu_x2 - img_x < half or
+                img_y - otsu_y1 < half or
+                otsu_y2 - img_y < half
+            )
+
+            if at_edge:
+                edge_defects.append(defect)
+                print(f"  📐 AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}): 碰到邊緣，轉 CV 處理")
+                continue
+
+            # 邊界 clamp (確保不超出圖片範圍)
+            tx = max(0, min(tx, img_w - tile_size))
+            ty = max(0, min(ty, img_h - tile_size))
+
+            # 切取 tile
+            tile_img = image[ty:ty + tile_size, tx:tx + tile_size].copy()
+
+            if tile_img.shape[0] != tile_size or tile_img.shape[1] != tile_size:
+                edge_defects.append(defect)
+                print(f"  ⚠️ AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}): 切塊尺寸異常 {tile_img.shape}, 轉 CV 處理")
+                continue
+
+            # 判定邊緣旗標
+            is_top = (ty <= otsu_y1 + tile_size)
+            is_bottom = (ty + tile_size >= otsu_y2 - tile_size)
+            is_left = (tx <= otsu_x1 + tile_size)
+            is_right = (tx + tile_size >= otsu_x2 - tile_size)
+
+            tile = TileInfo(
+                tile_id=next_tile_id,
+                x=tx,
+                y=ty,
+                width=tile_size,
+                height=tile_size,
+                image=tile_img,
+                is_bottom_edge=is_bottom,
+                is_top_edge=is_top,
+                is_left_edge=is_left,
+                is_right_edge=is_right,
+                is_aoi_coord_tile=True,
+                aoi_defect_code=defect.defect_code,
+            )
+
+            patchcore_tiles.append(tile)
+            next_tile_id += 1
+            print(f"  🎯 AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}) → Tile ({tx},{ty}) {tile_size}x{tile_size}")
+
+        return patchcore_tiles, edge_defects
+
     def _map_aoi_coords(self, px: int, py: int, raw_bounds: Tuple[int, int, int, int],
                          product_resolution: Optional[Tuple[int, int]] = None) -> Tuple[int, int]:
         """將產品座標映射到圖片座標"""
@@ -2148,7 +2388,63 @@ class CAPIInferencer:
         
         preprocess_time = time.time() - preprocess_start
         print(f"⚡ Phase 1 完成: {len(preprocessed_results)} 張圖片預處理耗時 {preprocess_time:.2f}s (平行 {actual_workers} 執行緒)")
-        
+
+        # ================================================================
+        # Phase 1.5: AOI 機檢座標目標切塊
+        # 解析 AOI 機台 NG 報告，以缺陷座標為中心建立額外的 512x512 tiles
+        # ================================================================
+        if self.config.aoi_coord_inspection_enabled:
+            aoi_report = self._parse_aoi_report_txt(panel_dir)
+            if aoi_report:
+                aoi_tile_count = 0
+                aoi_edge_count = 0
+                for result in preprocessed_results:
+                    img_prefix = self._get_image_prefix(result.image_path.name)
+                    if img_prefix in aoi_report:
+                        aoi_image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+                        if aoi_image is not None:
+                            new_tiles, edge_defs = self._create_aoi_coord_tiles(
+                                aoi_image, result, aoi_report[img_prefix], product_resolution
+                            )
+                            result.tiles.extend(new_tiles)
+                            aoi_tile_count += len(new_tiles)
+                            aoi_edge_count += len(edge_defs)
+                            # 邊緣 defects: 以 AOI 座標為中心取 ROI 做 CV 邊緣檢測
+                            if edge_defs and getattr(self, 'edge_inspector', None) and self.edge_inspector.config.enabled:
+                                for edef in edge_defs:
+                                    img_x, img_y = self._map_aoi_coords(
+                                        edef.product_x, edef.product_y,
+                                        result.raw_bounds, product_resolution
+                                    )
+                                    # 使用 CVEdgeInspector 對 ROI 做邊緣檢測
+                                    roi_size = self.config.tile_size
+                                    roi_half = roi_size // 2
+                                    img_h, img_w = aoi_image.shape[:2]
+                                    rx1 = max(0, img_x - roi_half)
+                                    ry1 = max(0, img_y - roi_half)
+                                    rx2 = min(img_w, img_x + roi_half)
+                                    ry2 = min(img_h, img_y + roi_half)
+                                    roi = aoi_image[ry1:ry2, rx1:rx2]
+                                    if roi.size > 0:
+                                        try:
+                                            edge_results = self.edge_inspector.inspect_roi(
+                                                roi, offset_x=rx1, offset_y=ry1
+                                            ) if hasattr(self.edge_inspector, 'inspect_roi') else []
+                                            result.edge_defects.extend(edge_results)
+                                        except Exception as e:
+                                            logger.warning(f"AOI Coord CV edge 檢測失敗 ({edef.defect_code}): {e}")
+                print(f"🎯 Phase 1.5 完成: AOI 座標新增 {aoi_tile_count} 個 tiles, {aoi_edge_count} 個邊緣 defects")
+
+        # === Grid Tiling 開關控制 ===
+        # 如果 grid_tiling_enabled=False，移除非 AOI coord 的 tiles (只推論 AOI 座標 tiles)
+        if not self.config.grid_tiling_enabled:
+            for result in preprocessed_results:
+                original_count = len(result.tiles)
+                result.tiles = [t for t in result.tiles if t.is_aoi_coord_tile]
+                removed = original_count - len(result.tiles)
+                if removed > 0:
+                    print(f"⏭️ Grid Tiling 關閉: {result.image_path.name} 移除 {removed} 個 grid tiles，保留 {len(result.tiles)} 個 AOI tiles")
+
         # ================================================================
         # Phase 2: 序列 GPU 推論 (predict_tile)
         # PyTorch GPU 推論不適合跨執行緒平行化，保持序列執行
