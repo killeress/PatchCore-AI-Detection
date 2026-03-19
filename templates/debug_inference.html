@@ -515,6 +515,123 @@
             transform: translateY(0);
         }
     }
+
+    /* ── Coords Viewer ── */
+    .cv-canvas-wrapper {
+        position: relative;
+        background: #0a0f1a;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+        cursor: crosshair;
+        width: 100%;
+        height: 75vh;
+    }
+
+    .cv-canvas-wrapper img {
+        display: block;
+        max-width: 100%;
+        max-height: 75vh;
+        user-select: none;
+        -webkit-user-drag: none;
+        transform-origin: 0 0;
+    }
+
+    .cv-canvas-wrapper canvas {
+        position: absolute;
+        pointer-events: none;
+    }
+
+    .cv-coord-bar {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        margin-top: 12px;
+        flex-wrap: wrap;
+    }
+
+    .cv-coord-tag {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 14px;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.85rem;
+        color: var(--text);
+        min-width: 160px;
+        text-align: center;
+    }
+
+    .cv-coord-tag .cv-label {
+        color: var(--text-muted);
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 2px;
+    }
+
+    .btn-copy {
+        background: rgba(59, 130, 246, 0.15);
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        border-radius: 8px;
+        padding: 8px 16px;
+        color: var(--accent);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .btn-copy:hover {
+        background: rgba(59, 130, 246, 0.25);
+        border-color: var(--accent);
+    }
+
+    .btn-copy.copied {
+        background: rgba(34, 197, 94, 0.15);
+        border-color: rgba(34, 197, 94, 0.4);
+        color: var(--ok);
+    }
+
+    .cv-regions-list {
+        margin-top: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .cv-region-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 14px;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.82rem;
+    }
+
+    .cv-region-item .cv-region-text {
+        flex: 1;
+        color: var(--text);
+    }
+
+    .cv-region-item .cv-region-delete {
+        background: none;
+        border: none;
+        color: var(--text-muted);
+        cursor: pointer;
+        font-size: 1rem;
+        padding: 2px 6px;
+        border-radius: 4px;
+        transition: color 0.2s;
+    }
+
+    .cv-region-item .cv-region-delete:hover {
+        color: var(--ng);
+    }
 </style>
 {% endblock %}
 
@@ -525,6 +642,7 @@
         <button class="tab-btn active" onclick="switchTab('tab-single', this)">📸 單圖推論</button>
         <button class="tab-btn" onclick="switchTab('tab-coord', this)">📍 座標推論</button>
         <button class="tab-btn" onclick="switchTab('tab-edge', this)">📐 邊緣檢測 (測試)</button>
+        <button class="tab-btn" onclick="switchTab('tab-coords-viewer', this)">🎯 座標查看</button>
     </div>
 
     <!-- ═══ 單圖推論頁籤 ═══ -->
@@ -905,6 +1023,69 @@
                 style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:16px; margin:24px 0;">
             </div>
             <div class="coord-result-grid" id="edge-result-grid"></div>
+        </div>
+    </div>
+
+    <!-- ═══ 座標查看頁籤 ═══ -->
+    <div id="tab-coords-viewer" class="tab-content">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+            <div>
+                <h2 style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
+                    🎯 座標查看
+                </h2>
+                <p style="color:var(--text-muted); font-size:0.85rem; margin-top:4px;">
+                    載入圖片後，拖曳框選區域即可取得像素座標。可記錄多組區域並一次複製。
+                </p>
+            </div>
+        </div>
+
+        <div class="card" style="padding:20px;">
+            <div class="coord-input-row" style="margin-bottom:16px;">
+                <input type="text" id="cv-image-path" placeholder="圖片絕對路徑" autocomplete="off" spellcheck="false"
+                    style="flex:1; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.95rem; outline:none;">
+                <button class="btn-run" id="btn-cv-load" onclick="cvLoadImage()" style="background:linear-gradient(135deg,#10b981,#059669);">
+                    📂 載入圖片
+                </button>
+            </div>
+
+            <!-- Image + Canvas overlay -->
+            <div id="cv-viewer-area" class="hidden">
+                <div style="display:flex; align-items:center; gap:12px; margin-bottom:8px;">
+                    <button class="btn-copy" onclick="cvResetZoom()">🔄 重置縮放</button>
+                    <span id="cv-zoom-display" style="font-family:'Fira Code',monospace; font-size:0.85rem; color:var(--text-muted);">100%</span>
+                    <span style="color:var(--text-muted); font-size:0.78rem;">滾輪縮放 ｜ 右鍵/中鍵拖曳平移 ｜ 左鍵框選</span>
+                </div>
+                <div class="cv-canvas-wrapper" id="cv-wrapper">
+                    <img id="cv-image" src="" alt="Loaded Image" draggable="false">
+                    <canvas id="cv-overlay"></canvas>
+                </div>
+
+                <!-- Live coordinate bar -->
+                <div class="cv-coord-bar">
+                    <div class="cv-coord-tag">
+                        <div class="cv-label">游標位置</div>
+                        <div id="cv-cursor-pos">—</div>
+                    </div>
+                    <div class="cv-coord-tag" id="cv-selection-display" style="display:none;">
+                        <div class="cv-label">框選區域 (x, y, w, h)</div>
+                        <div id="cv-selection-text">—</div>
+                    </div>
+                    <button class="btn-copy" id="cv-btn-copy-sel" style="display:none;" onclick="cvCopySelection()">📋 複製框選座標</button>
+                    <button class="btn-copy" id="cv-btn-add-region" style="display:none;" onclick="cvAddRegion()">＋ 記錄此區域</button>
+                </div>
+
+                <!-- Saved regions -->
+                <div id="cv-regions-container" class="hidden" style="margin-top:20px;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                        <span style="color:var(--text-muted); font-size:0.85rem; font-family:'Fira Code',monospace;">📋 已記錄區域</span>
+                        <div style="display:flex; gap:8px;">
+                            <button class="btn-copy" onclick="cvCopyAllRegions()">📋 全部複製</button>
+                            <button class="btn-copy" onclick="cvClearRegions()" style="color:var(--ng); border-color:rgba(239,68,68,0.3); background:rgba(239,68,68,0.1);">🗑️ 清除</button>
+                        </div>
+                    </div>
+                    <div class="cv-regions-list" id="cv-regions-list"></div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -1522,6 +1703,321 @@
             </div>`;
         }
         grid.innerHTML = imagesHtml;
+    }
+
+    // ═══ 座標查看 ═══════════════════════════════
+    const cvImg = document.getElementById('cv-image');
+    const cvOverlay = document.getElementById('cv-overlay');
+    const cvWrapper = document.getElementById('cv-wrapper');
+    let cvScale = 1;
+    let cvDragging = false;
+    let cvStartX = 0, cvStartY = 0;
+    let cvCurRect = null;
+    let cvRegions = [];
+    let cvZoom = 1;
+    let cvPanX = 0, cvPanY = 0;
+    let cvPanning = false;
+    let cvPanStartX = 0, cvPanStartY = 0;
+    let cvPanStartPX = 0, cvPanStartPY = 0;
+
+    document.getElementById('cv-image-path').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') cvLoadImage();
+    });
+
+    // 同步路徑到座標查看
+    input.addEventListener('input', () => {
+        const cvPath = document.getElementById('cv-image-path');
+        if (cvPath && !cvPath.value) cvPath.value = input.value;
+    });
+
+    (function () {
+        const params = new URLSearchParams(window.location.search);
+        const pathParam = params.get('path');
+        if (pathParam) {
+            const cvPath = document.getElementById('cv-image-path');
+            if (cvPath) cvPath.value = pathParam;
+        }
+    })();
+
+    function cvLoadImage() {
+        const pathVal = document.getElementById('cv-image-path').value.trim();
+        if (!pathVal) return;
+        const url = '/api/debug/serve-image?path=' + encodeURIComponent(pathVal);
+        cvImg.onload = function () {
+            cvZoom = 1; cvPanX = 0; cvPanY = 0;
+            cvApplyTransform();
+            cvSyncOverlay();
+            document.getElementById('cv-viewer-area').classList.remove('hidden');
+            document.getElementById('cv-zoom-display').textContent = '100%';
+            cvCurRect = null;
+            cvRegions = [];
+            cvRenderRegionsList();
+            cvRedraw();
+        };
+        cvImg.onerror = function () {
+            alert('圖片載入失敗，請確認路徑是否正確');
+        };
+        cvImg.src = url;
+    }
+
+    function cvSyncOverlay() {
+        cvOverlay.width = cvImg.clientWidth * cvZoom;
+        cvOverlay.height = cvImg.clientHeight * cvZoom;
+        cvOverlay.style.width = cvOverlay.width + 'px';
+        cvOverlay.style.height = cvOverlay.height + 'px';
+        cvOverlay.style.left = cvPanX + 'px';
+        cvOverlay.style.top = cvPanY + 'px';
+        cvScale = cvImg.naturalWidth / (cvImg.clientWidth * cvZoom);
+    }
+
+    function cvApplyTransform() {
+        cvImg.style.transformOrigin = '0 0';
+        cvImg.style.transform = `translate(${cvPanX}px, ${cvPanY}px) scale(${cvZoom})`;
+    }
+
+    // Zoom with mouse wheel
+    cvWrapper.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const rect = cvWrapper.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+
+        const oldZoom = cvZoom;
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        cvZoom = Math.max(0.2, Math.min(20, cvZoom * delta));
+
+        // Zoom toward cursor
+        cvPanX = mx - (mx - cvPanX) * (cvZoom / oldZoom);
+        cvPanY = my - (my - cvPanY) * (cvZoom / oldZoom);
+
+        cvApplyTransform();
+        cvSyncOverlay();
+        cvRedraw();
+        document.getElementById('cv-zoom-display').textContent = Math.round(cvZoom * 100) + '%';
+    }, { passive: false });
+
+    // Pan with middle button or right button
+    cvWrapper.addEventListener('mousedown', (e) => {
+        if (e.button === 1 || e.button === 2) {
+            // Middle or right click → pan
+            e.preventDefault();
+            cvPanning = true;
+            cvPanStartX = e.clientX;
+            cvPanStartY = e.clientY;
+            cvPanStartPX = cvPanX;
+            cvPanStartPY = cvPanY;
+            cvWrapper.style.cursor = 'grabbing';
+            return;
+        }
+        if (e.button !== 0) return;
+        // Left click → drag selection
+        const rect = cvWrapper.getBoundingClientRect();
+        cvStartX = e.clientX - rect.left;
+        cvStartY = e.clientY - rect.top;
+        cvDragging = true;
+        cvCurRect = null;
+    });
+
+    cvWrapper.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    cvWrapper.addEventListener('mousemove', (e) => {
+        if (cvPanning) {
+            cvPanX = cvPanStartPX + (e.clientX - cvPanStartX);
+            cvPanY = cvPanStartPY + (e.clientY - cvPanStartY);
+            cvApplyTransform();
+            cvSyncOverlay();
+            cvRedraw();
+            return;
+        }
+
+        const rect = cvWrapper.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+
+        // Real pixel coords (account for pan + zoom)
+        const realX = Math.round((mx - cvPanX) * cvScale);
+        const realY = Math.round((my - cvPanY) * cvScale);
+        document.getElementById('cv-cursor-pos').textContent = `(${realX}, ${realY})`;
+
+        if (cvDragging) {
+            const x1 = Math.min(cvStartX, mx);
+            const y1 = Math.min(cvStartY, my);
+            const x2 = Math.max(cvStartX, mx);
+            const y2 = Math.max(cvStartY, my);
+            cvCurRect = {
+                x: Math.round((x1 - cvPanX) * cvScale),
+                y: Math.round((y1 - cvPanY) * cvScale),
+                w: Math.round((x2 - x1) * cvScale),
+                h: Math.round((y2 - y1) * cvScale),
+            };
+            cvRedraw();
+            cvUpdateSelectionUI();
+        }
+    });
+
+    window.addEventListener('mouseup', (e) => {
+        if (cvPanning) {
+            cvPanning = false;
+            cvWrapper.style.cursor = 'crosshair';
+            return;
+        }
+        if (cvDragging) {
+            cvDragging = false;
+            if (!cvCurRect || cvCurRect.w < 3 || cvCurRect.h < 3) {
+                cvCurRect = null;
+                cvUpdateSelectionUI();
+            }
+        }
+    });
+
+    function cvResetZoom() {
+        cvZoom = 1; cvPanX = 0; cvPanY = 0;
+        cvApplyTransform();
+        cvSyncOverlay();
+        cvRedraw();
+        document.getElementById('cv-zoom-display').textContent = '100%';
+    }
+
+    function cvUpdateSelectionUI() {
+        const selDisplay = document.getElementById('cv-selection-display');
+        const btnCopy = document.getElementById('cv-btn-copy-sel');
+        const btnAdd = document.getElementById('cv-btn-add-region');
+        if (cvCurRect && cvCurRect.w > 2 && cvCurRect.h > 2) {
+            selDisplay.style.display = '';
+            btnCopy.style.display = '';
+            btnAdd.style.display = '';
+            document.getElementById('cv-selection-text').textContent =
+                `(${cvCurRect.x}, ${cvCurRect.y}, ${cvCurRect.w}, ${cvCurRect.h})`;
+        } else {
+            selDisplay.style.display = 'none';
+            btnCopy.style.display = 'none';
+            btnAdd.style.display = 'none';
+        }
+    }
+
+    function cvRedraw() {
+        const ctx = cvOverlay.getContext('2d');
+        ctx.clearRect(0, 0, cvOverlay.width, cvOverlay.height);
+
+        // helper: real px → canvas px
+        function toCanvas(rx, ry) {
+            return [rx / cvScale, ry / cvScale];
+        }
+
+        // Saved regions (green dashed)
+        cvRegions.forEach((r, i) => {
+            const [dx, dy] = toCanvas(r.x, r.y);
+            const [dw, dh] = toCanvas(r.w, r.h);
+            ctx.strokeStyle = 'rgba(34, 197, 94, 0.8)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 3]);
+            ctx.strokeRect(dx, dy, dw, dh);
+            ctx.setLineDash([]);
+            ctx.fillStyle = 'rgba(34, 197, 94, 0.1)';
+            ctx.fillRect(dx, dy, dw, dh);
+            ctx.fillStyle = 'rgba(34, 197, 94, 0.9)';
+            ctx.font = 'bold 12px "Fira Code", monospace';
+            ctx.fillText(`#${i + 1}`, dx + 4, dy + 14);
+        });
+
+        // Current selection (blue solid)
+        if (cvCurRect && cvCurRect.w > 0 && cvCurRect.h > 0) {
+            const [dx, dy] = toCanvas(cvCurRect.x, cvCurRect.y);
+            const [dw, dh] = toCanvas(cvCurRect.w, cvCurRect.h);
+            ctx.strokeStyle = 'rgba(59, 130, 246, 0.9)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([]);
+            ctx.strokeRect(dx, dy, dw, dh);
+            ctx.fillStyle = 'rgba(59, 130, 246, 0.12)';
+            ctx.fillRect(dx, dy, dw, dh);
+            ctx.fillStyle = 'rgba(59, 130, 246, 0.95)';
+            ctx.font = 'bold 11px "Fira Code", monospace';
+            ctx.fillText(`${cvCurRect.w}×${cvCurRect.h}`, dx + dw + 4, dy + dh / 2 + 4);
+        }
+    }
+
+    function cvCopySelection() {
+        if (!cvCurRect) return;
+        cvCopyToClipboard(`${cvCurRect.x}, ${cvCurRect.y}, ${cvCurRect.w}, ${cvCurRect.h}`, 'cv-btn-copy-sel');
+    }
+
+    function cvAddRegion() {
+        if (!cvCurRect || cvCurRect.w < 3 || cvCurRect.h < 3) return;
+        cvRegions.push({ ...cvCurRect });
+        cvCurRect = null;
+        cvUpdateSelectionUI();
+        cvRedraw();
+        cvRenderRegionsList();
+    }
+
+    function cvDeleteRegion(idx) {
+        cvRegions.splice(idx, 1);
+        cvRedraw();
+        cvRenderRegionsList();
+    }
+
+    function cvClearRegions() {
+        cvRegions = [];
+        cvRedraw();
+        cvRenderRegionsList();
+    }
+
+    function cvRenderRegionsList() {
+        const container = document.getElementById('cv-regions-container');
+        const list = document.getElementById('cv-regions-list');
+        if (cvRegions.length === 0) {
+            container.classList.add('hidden');
+            return;
+        }
+        container.classList.remove('hidden');
+        list.innerHTML = cvRegions.map((r, i) => `
+            <div class="cv-region-item">
+                <span style="color:var(--ok); font-weight:700;">#${i + 1}</span>
+                <span class="cv-region-text">x=${r.x}, y=${r.y}, w=${r.w}, h=${r.h}</span>
+                <button class="btn-copy" style="padding:4px 10px; font-size:0.78rem;" onclick="cvCopySingleRegion(${i})">📋</button>
+                <button class="cv-region-delete" onclick="cvDeleteRegion(${i})">✕</button>
+            </div>
+        `).join('');
+    }
+
+    function cvCopySingleRegion(idx) {
+        const r = cvRegions[idx];
+        cvCopyToClipboard(`${r.x}, ${r.y}, ${r.w}, ${r.h}`);
+    }
+
+    function cvCopyAllRegions() {
+        if (cvRegions.length === 0) return;
+        const text = cvRegions.map((r, i) => `#${i + 1}: x=${r.x}, y=${r.y}, w=${r.w}, h=${r.h}`).join('\n');
+        cvCopyToClipboard(text);
+    }
+
+    // HTTP 環境下 navigator.clipboard 不可用，fallback 到 execCommand
+    function cvCopyToClipboard(text, btnId) {
+        function onSuccess() {
+            if (!btnId) return;
+            const b = document.getElementById(btnId);
+            if (!b) return;
+            const orig = b.textContent;
+            b.classList.add('copied');
+            b.textContent = '✅ 已複製';
+            setTimeout(() => { b.classList.remove('copied'); b.textContent = orig; }, 1500);
+        }
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(onSuccess).catch(() => cvFallbackCopy(text, onSuccess));
+        } else {
+            cvFallbackCopy(text, onSuccess);
+        }
+    }
+
+    function cvFallbackCopy(text, cb) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); cb(); }
+        catch (_) { alert('複製失敗，請手動複製:\n' + text); }
+        document.body.removeChild(ta);
     }
 </script>
 {% endblock %}

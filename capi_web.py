@@ -151,6 +151,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_static_file(path)
             elif path.startswith("/debug/heatmaps/"):
                 self._handle_debug_heatmap_file(path)
+            elif path == "/api/debug/serve-image":
+                self._handle_debug_serve_image(query)
             elif path.startswith("/images/"):
                 self._handle_source_image(path)
             elif path.startswith("/imgs/"):
@@ -673,6 +675,53 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_404()
 
     # ── Debug 推論功能 ─────────────────────────────────
+
+    def _handle_debug_serve_image(self, query):
+        """API: 以絕對路徑提供原始圖片 (僅 Debug 用)
+        瀏覽器不支援 TIF/TIFF/BMP，自動轉為 PNG 回傳。
+        """
+        try:
+            # query 已由 do_GET 透過 parse_qs 解析為 dict
+            params = query if isinstance(query, dict) else urllib.parse.parse_qs(query)
+            img_path = params.get("path", [None])[0]
+            if not img_path:
+                self._send_error(400, "missing path parameter")
+                return
+            p = Path(img_path)
+            if not p.exists() or not p.is_file():
+                self._send_error(404, f"file not found: {img_path}")
+                return
+
+            suffix = p.suffix.lower()
+            # 瀏覽器原生可顯示的格式直接回傳
+            if suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"):
+                self._send_binary(str(p))
+                return
+
+            # 其餘格式 (tif, tiff, bmp …) 用 cv2 轉 PNG
+            import cv2
+            img = cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
+            if img is None:
+                self._send_error(400, f"cv2 cannot read: {img_path}")
+                return
+            # 16-bit → 8-bit
+            if img.dtype != "uint8":
+                import numpy as np
+                img = (img.astype(np.float32) / img.max() * 255).astype(np.uint8)
+            ok, buf = cv2.imencode(".png", img)
+            if not ok:
+                self._send_error(500, "PNG encode failed")
+                return
+            data = buf.tobytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            logger.error(f"Error serving debug image: {e}")
+            self._send_error(500, str(e))
 
     def _handle_debug_page(self, path: str):
         """Debug 推論頁面"""
