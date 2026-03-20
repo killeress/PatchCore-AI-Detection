@@ -353,6 +353,56 @@ class CVEdgeInspector:
         )
         return defects, debug_imgs
 
+    def inspect_roi(
+        self,
+        roi: np.ndarray,
+        offset_x: int = 0,
+        offset_y: int = 0,
+    ) -> List[EdgeDefect]:
+        """
+        對預先擷取的 ROI 執行邊緣缺陷檢測（用於 AOI 座標邊緣 defect）
+
+        當 AOI 座標 defect 位於產品邊緣無法切出完整 512x512 tile 時，
+        由 _create_aoi_coord_tiles 轉交此方法進行 CV 檢測。
+
+        Args:
+            roi: 預先擷取的 ROI 影像（灰階或彩色）
+            offset_x: ROI 左上角在原圖的 x 偏移
+            offset_y: ROI 左上角在原圖的 y 偏移
+
+        Returns:
+            偵測到的邊緣缺陷列表（座標已轉換為原圖絕對座標）
+        """
+        if not self.config.enabled:
+            return []
+
+        if roi is None or roi.size == 0:
+            return []
+
+        # 轉灰階
+        if len(roi.shape) == 3:
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = roi
+
+        # 使用四邊中最敏感的參數（最低 threshold、最小 min_area）
+        all_cfgs = [self.config.left, self.config.right, self.config.top, self.config.bottom]
+        min_threshold = min(c.threshold for c in all_cfgs)
+        min_area = min(c.min_area for c in all_cfgs)
+
+        roi_cfg = EdgeSideConfig(
+            width=0,
+            threshold=min_threshold,
+            min_area=min_area,
+            exclude_top=0,
+            exclude_bottom=0,
+            exclude_left=0,
+            exclude_right=0,
+        )
+
+        defects = self._inspect_side(gray, "aoi_edge", roi_cfg, offset_x, offset_y)
+        return defects
+
     # ── ROI 擷取 ──────────────────────────────
 
     def _get_left_roi(

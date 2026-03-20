@@ -1639,7 +1639,118 @@ class CAPIInferencer:
             metric_val = float(intersection / union) if union > 0 else 0.0
             
         return metric_val, heatmap_binary
-    
+
+    def check_dust_per_region(
+        self,
+        dust_mask: np.ndarray,
+        anomaly_map: np.ndarray,
+        top_percent: float = 5.0,
+        metric: str = "coverage",
+        iou_threshold: float = 0.01,
+    ) -> tuple:
+        """
+        逐區域灰塵判定 — 將 anomaly_map 的熱區拆成獨立連通區域，
+        分別與 dust_mask 做交叉驗證，只抑制與灰塵重疊的區域，保留真實缺陷。
+
+        Returns:
+            (has_real_defect, real_peak_yx, overall_iou, region_details, heatmap_binary, labels)
+            - has_real_defect: 是否存在非灰塵的真實異常區域
+            - real_peak_yx: 非灰塵區域中 anomaly_map 最大值的 (row, col)，None 表示全為灰塵
+            - overall_iou: 整體 coverage/iou (向後相容)
+            - region_details: list of dict，每個區域的判定詳情
+            - heatmap_binary: 二值化後的熱區遮罩 (向後相容)
+        """
+        if dust_mask is None or anomaly_map is None:
+            return True, None, 0.0, [], None, None
+
+        anomaly_map_f = np.asarray(anomaly_map, dtype=np.float32)
+        anomaly_map_f = np.maximum(anomaly_map_f, 0.0)
+        dust_mask_u8 = np.asarray(dust_mask, dtype=np.uint8)
+
+        if np.max(anomaly_map_f) <= 0:
+            return True, None, 0.0, [], None, None
+
+        # === Step 1: 取前 top_percent% 像素作為熱區 ===
+        positive_values = anomaly_map_f[anomaly_map_f > 0]
+        if len(positive_values) == 0:
+            return True, None, 0.0, [], None, None
+
+        threshold = np.percentile(positive_values, 100 - top_percent)
+        heat_bool = anomaly_map_f >= threshold
+        heatmap_binary = (heat_bool.astype(np.uint8)) * 255
+
+        # === Step 2: 灰塵遮罩前處理 ===
+        if len(dust_mask_u8.shape) == 3:
+            dust_mask_u8 = cv2.cvtColor(dust_mask_u8, cv2.COLOR_BGR2GRAY)
+        if dust_mask_u8.shape != heat_bool.shape:
+            dust_mask_u8 = cv2.resize(
+                dust_mask_u8,
+                (heat_bool.shape[1], heat_bool.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        dust_bool = dust_mask_u8 > 0
+
+        # === Step 3: 整體 IOU (向後相容，用於 DB 記錄) ===
+        intersection_all = np.count_nonzero(dust_bool & heat_bool)
+        if metric == "coverage":
+            dust_area_all = np.count_nonzero(dust_bool)
+            overall_iou = float(intersection_all / dust_area_all) if dust_area_all > 0 else 0.0
+        else:
+            union_all = np.count_nonzero(dust_bool | heat_bool)
+            overall_iou = float(intersection_all / union_all) if union_all > 0 else 0.0
+
+        # === Step 4: 連通區域分析 ===
+        heat_u8 = heatmap_binary.copy()
+        num_labels, labels = cv2.connectedComponents(heat_u8, connectivity=8)
+
+        region_details = []
+        has_real_defect = False
+        real_peak_yx = None
+        real_peak_score = -1.0
+
+        for label_id in range(1, num_labels):
+            region_mask = labels == label_id
+            region_area = np.count_nonzero(region_mask)
+
+            # 計算此區域與灰塵的重疊
+            region_dust_overlap = np.count_nonzero(region_mask & dust_bool)
+
+            if metric == "coverage":
+                # 此異常區域被灰塵覆蓋的比例
+                region_coverage = float(region_dust_overlap / region_area) if region_area > 0 else 0.0
+            else:
+                # IOU = 交集 / 聯集 (此異常區域 ∪ 全部灰塵)
+                total_dust = np.count_nonzero(dust_bool)
+                region_union = region_area + total_dust - region_dust_overlap
+                region_coverage = float(region_dust_overlap / region_union) if region_union > 0 else 0.0
+
+            is_dust_region = region_coverage >= iou_threshold
+
+            # 此區域內 anomaly_map 的最大值與位置 (無須複製整個陣列)
+            region_vals = anomaly_map_f[region_mask]
+            region_max_score = float(np.max(region_vals))
+            region_indices = np.where(region_mask)
+            local_argmax = np.argmax(region_vals)
+            peak_pos = (region_indices[0][local_argmax], region_indices[1][local_argmax])
+
+            region_details.append({
+                "label_id": label_id,
+                "area": region_area,
+                "dust_overlap": region_dust_overlap,
+                "coverage": region_coverage,
+                "is_dust": is_dust_region,
+                "max_score": region_max_score,
+                "peak_yx": peak_pos,
+            })
+
+            if not is_dust_region:
+                has_real_defect = True
+                if region_max_score > real_peak_score:
+                    real_peak_score = region_max_score
+                    real_peak_yx = peak_pos
+
+        return has_real_defect, real_peak_yx, overall_iou, region_details, heatmap_binary, labels
+
     def generate_dust_iou_debug_image(
         self,
         tile_image: np.ndarray,
@@ -1649,16 +1760,18 @@ class CAPIInferencer:
         iou: float,
         top_percent: float,
         is_dust: bool,
+        region_details: Optional[list] = None,
+        region_labels: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         產生灰塵 IOU 交叉驗證的 Debug 可視化圖
-        
+
         顯示：
           左上: Heatmap 疊加原圖 (紅色=異常熱區)
-          右上: 灰塵遮罩 (黃色=灰塵區域) 
+          右上: 灰塵遮罩 (黃色=灰塵區域)
           左下: 熱區二值化 (白色=top X% 最紅像素)
-          右下: 重疊分析 (綠色=交集, 紅色=僅熱區, 藍色=僅灰塵)
-        
+          右下: 逐區域判定結果 (紅色=真實缺陷, 綠色=灰塵區域, 藍色=僅灰塵遮罩)
+
         Args:
             tile_image: 原始 tile 圖片
             anomaly_map: 異常熱圖 (float)
@@ -1667,12 +1780,13 @@ class CAPIInferencer:
             iou: 計算出的 IOU 值
             top_percent: 使用的百分位數
             is_dust: 最終判定是否為灰塵
-            
+            region_details: 逐區域判定詳情 (from check_dust_per_region)
+
         Returns:
             Debug 可視化圖 (BGR)
         """
         sz = 256  # 每個子圖大小
-        
+
         # --- 準備基底圖 ---
         if len(tile_image.shape) == 2:
             base = cv2.cvtColor(tile_image, cv2.COLOR_GRAY2BGR)
@@ -1681,7 +1795,7 @@ class CAPIInferencer:
         else:
             base = tile_image.copy()
         base = cv2.resize(base, (sz, sz))
-        
+
         # --- 左上: Heatmap Overlay ---
         if anomaly_map is not None:
             norm = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
@@ -1691,7 +1805,7 @@ class CAPIInferencer:
         else:
             panel_tl = base.copy()
         cv2.putText(panel_tl, "Heatmap", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        
+
         # --- 右上: 灰塵遮罩 ---
         panel_tr = base.copy()
         if dust_mask is not None:
@@ -1703,44 +1817,80 @@ class CAPIInferencer:
             dust_overlay[dm > 0] = (0, 255, 255)  # 黃色
             panel_tr = cv2.addWeighted(panel_tr, 0.6, dust_overlay, 0.4, 0)
         cv2.putText(panel_tr, "Dust Mask", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
-        
+
         # --- 左下: 熱區二值化 ---
         panel_bl = np.zeros((sz, sz, 3), dtype=np.uint8)
         if heatmap_binary is not None:
             hb = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
             panel_bl[hb > 0] = (255, 255, 255)  # 白色 = 熱區
-        cv2.putText(panel_bl, f"Top {top_percent:g}%", (5, 20), 
+        cv2.putText(panel_bl, f"Top {top_percent:g}%", (5, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1)
-        
-        # --- 右下: 重疊分析 ---
+
+        # --- 右下: 逐區域判定結果 ---
         panel_br = np.zeros((sz, sz, 3), dtype=np.uint8)
-        if heatmap_binary is not None and dust_mask is not None:
+        if region_details is not None and heatmap_binary is not None and dust_mask is not None:
+            # 使用逐區域判定結果上色 (labels 由 check_dust_per_region 傳入，避免重複計算)
+            if region_labels is not None:
+                labels = region_labels
+            else:
+                _, labels = cv2.connectedComponents(heatmap_binary.copy(), connectivity=8)
+            num_labels = int(labels.max()) + 1
+            region_dust_map = {r["label_id"]: r["is_dust"] for r in region_details}
+
+            # 縮放 labels 到 sz x sz
+            labels_resized = cv2.resize(labels.astype(np.float32), (sz, sz),
+                                        interpolation=cv2.INTER_NEAREST).astype(np.int32)
+
+            dm = dust_mask
+            if len(dm.shape) == 3:
+                dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
+            dm = cv2.resize(dm, (sz, sz), interpolation=cv2.INTER_NEAREST)
+
+            # 先畫僅灰塵遮罩區域 (藍色)
+            hb_resized = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
+            dust_only = (dm > 0) & (hb_resized == 0)
+            panel_br[dust_only] = (255, 100, 0)  # 藍色 = 僅灰塵遮罩
+
+            # 逐區域上色
+            for label_id in range(1, num_labels):
+                region_mask = labels_resized == label_id
+                if region_dust_map.get(label_id, False):
+                    panel_br[region_mask] = (0, 200, 0)     # 綠色 = 灰塵(已抑制)
+                else:
+                    panel_br[region_mask] = (0, 0, 255)      # 紅色 = 真實缺陷(保留)
+
+            real_count = sum(1 for r in region_details if not r["is_dust"])
+            dust_count = sum(1 for r in region_details if r["is_dust"])
+            verdict_text = f"R:{real_count} D:{dust_count}"
+        elif heatmap_binary is not None and dust_mask is not None:
+            # Fallback: 舊版整塊分析
             hb = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
             dm = dust_mask
             if len(dm.shape) == 3:
                 dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
             dm = cv2.resize(dm, (sz, sz), interpolation=cv2.INTER_NEAREST)
-            
-            heat_only = (hb > 0) & (dm == 0)   # 僅熱區
-            dust_only = (dm > 0) & (hb == 0)    # 僅灰塵
-            overlap = (hb > 0) & (dm > 0)       # 交集
-            
-            panel_br[heat_only] = (0, 0, 255)     # 紅色 = 僅熱區
-            panel_br[dust_only] = (255, 100, 0)   # 藍色 = 僅灰塵
-            panel_br[overlap]   = (0, 255, 0)     # 綠色 = 交集
-        
+
+            heat_only = (hb > 0) & (dm == 0)
+            dust_only = (dm > 0) & (hb == 0)
+            overlap = (hb > 0) & (dm > 0)
+
+            panel_br[heat_only] = (0, 0, 255)
+            panel_br[dust_only] = (255, 100, 0)
+            panel_br[overlap]   = (0, 255, 0)
+            verdict_text = "DUST" if is_dust else "REAL_NG"
+        else:
+            verdict_text = "DUST" if is_dust else "REAL_NG"
+
         metric_name = "COV" if self.config.dust_heatmap_metric == "coverage" else "IOU"
         verdict_color = (0, 200, 255) if is_dust else (0, 0, 255)
-        verdict_text = "DUST" if is_dust else "REAL_NG"
         cv2.putText(panel_br, f"{metric_name}:{iou:.3f} {verdict_text}", (5, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, verdict_color, 1)
-        # 圖例已移至外層標籤列
-        
+
         # --- 組合 2x2 ---
         top_row = np.hstack([panel_tl, panel_tr])
         bottom_row = np.hstack([panel_bl, panel_br])
         debug_img = np.vstack([top_row, bottom_row])
-        
+
         return debug_img
 
     @staticmethod
@@ -2497,30 +2647,49 @@ class CAPIInferencer:
                             result.tiles.extend(new_tiles)
                             aoi_tile_count += len(new_tiles)
                             aoi_edge_count += len(edge_defs)
-                            # 邊緣 defects: 以 AOI 座標為中心取 ROI 做 CV 邊緣檢測
-                            if edge_defs and getattr(self, 'edge_inspector', None) and self.edge_inspector.config.enabled:
-                                for edef in edge_defs:
-                                    img_x, img_y = self._map_aoi_coords(
-                                        edef.product_x, edef.product_y,
-                                        result.raw_bounds, product_resolution
-                                    )
-                                    # 使用 CVEdgeInspector 對 ROI 做邊緣檢測
-                                    roi_size = self.config.tile_size
-                                    roi_half = roi_size // 2
-                                    img_h, img_w = aoi_image.shape[:2]
-                                    rx1 = max(0, img_x - roi_half)
-                                    ry1 = max(0, img_y - roi_half)
-                                    rx2 = min(img_w, img_x + roi_half)
-                                    ry2 = min(img_h, img_y + roi_half)
-                                    roi = aoi_image[ry1:ry2, rx1:rx2]
-                                    if roi.size > 0:
-                                        try:
-                                            edge_results = self.edge_inspector.inspect_roi(
-                                                roi, offset_x=rx1, offset_y=ry1
-                                            ) if hasattr(self.edge_inspector, 'inspect_roi') else []
+                            # 邊緣 defects: AOI 座標落在產品邊緣，無法切 512x512 tile
+                            # 無論 CV edge inspection 是否啟用，都要建立 EdgeDefect 以追蹤判定
+                            for edef in edge_defs:
+                                img_x, img_y = self._map_aoi_coords(
+                                    edef.product_x, edef.product_y,
+                                    result.raw_bounds, product_resolution
+                                )
+                                roi_size = self.config.tile_size
+                                roi_half = roi_size // 2
+                                img_h, img_w = aoi_image.shape[:2]
+                                rx1 = max(0, img_x - roi_half)
+                                ry1 = max(0, img_y - roi_half)
+                                rx2 = min(img_w, img_x + roi_half)
+                                ry2 = min(img_h, img_y + roi_half)
+                                roi = aoi_image[ry1:ry2, rx1:rx2]
+
+                                # 嘗試用 CV edge inspection 精確檢測
+                                cv_detected = False
+                                if roi.size > 0 and getattr(self, 'edge_inspector', None) and self.edge_inspector.config.enabled:
+                                    try:
+                                        edge_results = self.edge_inspector.inspect_roi(
+                                            roi, offset_x=rx1, offset_y=ry1
+                                        )
+                                        if edge_results:
                                             result.edge_defects.extend(edge_results)
-                                        except Exception as e:
-                                            logger.warning(f"AOI Coord CV edge 檢測失敗 ({edef.defect_code}): {e}")
+                                            cv_detected = True
+                                            print(f"  🔍 AOI Coord CV edge ({edef.defect_code}) @ ({img_x},{img_y}): 偵測到 {len(edge_results)} 個邊緣缺陷")
+                                    except Exception as e:
+                                        logger.warning(f"AOI Coord CV edge 檢測失敗 ({edef.defect_code}): {e}")
+
+                                # CV 未檢測到或未啟用 → 建立基本 EdgeDefect 保留 AOI 座標追蹤
+                                if not cv_detected:
+                                    roi_w = rx2 - rx1
+                                    roi_h = ry2 - ry1
+                                    fallback_defect = EdgeDefect(
+                                        side="aoi_edge",
+                                        area=roi_w * roi_h,
+                                        bbox=(rx1, ry1, roi_w, roi_h),
+                                        center=(img_x, img_y),
+                                        max_diff=0,
+                                    )
+                                    result.edge_defects.append(fallback_defect)
+                                    print(f"  📐 AOI Coord edge fallback ({edef.defect_code}) @ ({img_x},{img_y}): 建立邊緣 defect 記錄")
                 print(f"🎯 Phase 1.5 完成: AOI 座標新增 {aoi_tile_count} 個 tiles, {aoi_edge_count} 個邊緣 defects")
 
         # === Grid Tiling 開關控制 ===
@@ -2620,32 +2789,57 @@ class CAPIInferencer:
                         tile.dust_mask = dust_mask
                         tile.dust_bright_ratio = bright_ratio
                         
-                        # Step B: Heatmap 灰塵指標交叉驗證 (Percentile-based)
+                        # Step B: 逐區域灰塵交叉驗證 (Per-Region Dust Filtering)
                         iou = 0.0
                         heatmap_binary = None
                         top_pct = self.config.dust_heatmap_top_percent
                         metric_mode = self.config.dust_heatmap_metric
                         metric_name = "COV" if metric_mode == "coverage" else "IOU"
-                        
+
                         if is_dust and anomaly_map is not None:
-                            iou, heatmap_binary = self.compute_dust_heatmap_iou(
-                                dust_mask, anomaly_map, top_percent=top_pct, metric=metric_mode
-                            )
+                            # 逐區域判定：拆開異常連通區域，各自與灰塵比對
+                            has_real_defect, real_peak_yx, overall_iou, region_details, heatmap_binary, region_labels = \
+                                self.check_dust_per_region(
+                                    dust_mask, anomaly_map,
+                                    top_percent=top_pct,
+                                    metric=metric_mode,
+                                    iou_threshold=self.config.dust_heatmap_iou_threshold,
+                                )
+                            iou = overall_iou
                             tile.dust_heatmap_iou = iou
-                            
-                            # 判定：灰塵偵測到 且 指標 > 閾值 → 灰塵造成的偽陽性
-                            if iou >= self.config.dust_heatmap_iou_threshold:
-                                tile.is_suspected_dust_or_scratch = True
-                                detail_text += f" {metric_name}:{iou:.3f}>={metric_name}_THR -> DUST"
+
+                            dust_regions = [r for r in region_details if r["is_dust"]]
+                            real_regions = [r for r in region_details if not r["is_dust"]]
+
+                            if has_real_defect:
+                                # 有非灰塵的真實異常區域 → 保留為 NG
+                                tile.is_suspected_dust_or_scratch = False
+                                detail_text += (
+                                    f" PER_REGION: {len(real_regions)}real+"
+                                    f"{len(dust_regions)}dust -> REAL_NG"
+                                )
+
+                                # 更新 peak 座標到非灰塵區域的最大值位置
+                                if real_peak_yx is not None:
+                                    amap_h, amap_w = anomaly_map.shape[:2]
+                                    tile.anomaly_peak_y = tile.y + int(real_peak_yx[0] * tile.height / amap_h)
+                                    tile.anomaly_peak_x = tile.x + int(real_peak_yx[1] * tile.width / amap_w)
                             else:
-                                detail_text += f" {metric_name}:{iou:.3f}<{metric_name}_THR -> REAL_NG"
-                            
-                            # 產生 Debug 可視化圖
+                                # 所有異常區域都與灰塵重疊 → 標記為灰塵
+                                tile.is_suspected_dust_or_scratch = True
+                                detail_text += (
+                                    f" PER_REGION: 0real+"
+                                    f"{len(dust_regions)}dust -> DUST"
+                                )
+
+                            # 產生 Debug 可視化圖 (含逐區域標註)
                             try:
                                 tile.dust_iou_debug_image = self.generate_dust_iou_debug_image(
                                     tile.image, anomaly_map, dust_mask,
                                     heatmap_binary, iou, top_pct,
                                     tile.is_suspected_dust_or_scratch,
+                                    region_details=region_details,
+                                    region_labels=region_labels,
                                 )
                             except Exception as dbg_err:
                                 print(f"⚠️ Debug image generation failed: {dbg_err}")
@@ -2719,7 +2913,13 @@ class CAPIInferencer:
                                     ediff = cv2.absdiff(eblurred, ebg)
 
                                     side_cfg = getattr(self.edge_inspector.config, ed.side, None)
-                                    edge_threshold = side_cfg.threshold if side_cfg else 5
+                                    if side_cfg:
+                                        edge_threshold = side_cfg.threshold
+                                    else:
+                                        # aoi_edge 等非標準 side：使用四邊中最低閾值
+                                        all_sides = [self.edge_inspector.config.left, self.edge_inspector.config.right,
+                                                     self.edge_inspector.config.top, self.edge_inspector.config.bottom]
+                                        edge_threshold = min(s.threshold for s in all_sides)
                                     _, defect_mask_cv = cv2.threshold(ediff, edge_threshold, 255, cv2.THRESH_BINARY)
 
                                     # 只保留缺陷 BBox 範圍內的像素（與 heatmap 一致）
