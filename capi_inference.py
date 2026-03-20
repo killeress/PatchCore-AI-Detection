@@ -1151,22 +1151,23 @@ class CAPIInferencer:
         
         return pred_score, anomaly_map
 
-    def _detect_bright_spots(self, tile: 'TileInfo', bright_threshold: int = 200,
-                             min_area: int = 5) -> Tuple[float, Optional[np.ndarray]]:
+    def _detect_bright_spots(self, tile: 'TileInfo') -> Tuple[float, Optional[np.ndarray]]:
         """
         B0F00000 專用：以二值化方式偵測黑色背景上的白色亮點。
 
         取代 PatchCore 推論，用於無訓練模型的圖片。
+        閾值和最小面積從 config 讀取 (bright_spot_threshold, bright_spot_min_area)。
 
         Args:
             tile: TileInfo 物件
-            bright_threshold: 二值化閾值（高於此值視為亮點）
-            min_area: 最小連通面積（過濾雜訊用）
 
         Returns:
             (score, binary_map) - score: 0.0 (無亮點) 或 1.0 (有亮點)
                                   binary_map: 二值化結果 (uint8, 0/255)
         """
+        bright_threshold = self.config.bright_spot_threshold
+        min_area = self.config.bright_spot_min_area
+
         img = tile.image
         if img is None:
             return 0.0, None
@@ -1191,8 +1192,10 @@ class CAPIInferencer:
         # 清除小面積區域 (label 0 = 背景)
         filtered_binary = np.zeros_like(binary)
         has_bright_spot = False
+        max_component_area = 0
         for i in range(1, num_labels):
             area = stats[i, cv2.CC_STAT_AREA]
+            max_component_area = max(max_component_area, area)
             if area >= min_area:
                 filtered_binary[labels == i] = 255
                 has_bright_spot = True
@@ -1205,9 +1208,17 @@ class CAPIInferencer:
         # 標記此 tile 為二值化偵測模式
         tile.is_bright_spot_detection = True
 
+        # 不論是否找到亮點，都輸出偵測結果
+        max_pixel_val = int(gray.max())
+        bright_pixel_count = int(np.sum(filtered_binary > 0))
+        raw_bright_count = int(np.sum(binary > 0))
         if has_bright_spot:
-            bright_pixel_count = np.sum(filtered_binary > 0)
-            print(f"  💡 B0F 二值化偵測: 發現亮點 ({bright_pixel_count} px), threshold={bright_threshold}")
+            print(f"  💡 B0F 二值化偵測 Tile@({tile.x},{tile.y}): 發現亮點 ({bright_pixel_count} px), "
+                  f"threshold={bright_threshold}, max_pixel={max_pixel_val}")
+        else:
+            print(f"  💡 B0F 二值化偵測 Tile@({tile.x},{tile.y}): 未發現亮點, "
+                  f"threshold={bright_threshold}, max_pixel={max_pixel_val}, "
+                  f"raw_bright={raw_bright_count} px, max_component={max_component_area} px (min_area={min_area})")
 
         return score, anomaly_map
 
@@ -2538,7 +2549,7 @@ class CAPIInferencer:
         
         total_files = len(files_to_process)
         if total_files == 0:
-            return results, omit_vis, omit_overexposed, omit_overexposure_info, False, omit_image
+            return results, omit_vis, omit_overexposed, omit_overexposure_info, False, omit_image, {}
         
         # 決定實際 worker 數量 (不超過檔案數量)
         actual_workers = min(cpu_workers, total_files)
@@ -2614,6 +2625,7 @@ class CAPIInferencer:
         # Phase 1.5: AOI 機檢座標目標切塊
         # 解析 AOI 機台 NG 報告，以缺陷座標為中心建立額外的 512x512 tiles
         # ================================================================
+        aoi_report = {}
         if self.config.aoi_coord_inspection_enabled:
             aoi_report = self._parse_aoi_report_txt(panel_dir)
             if aoi_report:
@@ -3166,8 +3178,8 @@ class CAPIInferencer:
         if bomb_info is not None:
             for result in results:
                 result.client_bomb_info = bomb_info
-                
-        return results, omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image
+
+        return results, omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image, aoi_report
 
     def visualize_inference_result(self, image_path: Path, result: ImageResult) -> np.ndarray:
         """視覺化推論結果（含異常標記 與 AOI 標記）"""

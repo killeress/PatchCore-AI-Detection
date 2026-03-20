@@ -65,6 +65,7 @@ class CAPIDatabase:
                     heatmap_dir TEXT DEFAULT '',
                     error_message TEXT DEFAULT '',
                     client_bomb_info TEXT DEFAULT '',
+                    aoi_machine_coords TEXT DEFAULT '',
                     created_at TEXT DEFAULT (datetime('now', 'localtime'))
                 );
 
@@ -198,6 +199,7 @@ class CAPIDatabase:
 
             add_column_if_not_exists("inference_records", "error_message", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "client_bomb_info", "TEXT DEFAULT ''")
+            add_column_if_not_exists("inference_records", "aoi_machine_coords", "TEXT DEFAULT ''")
             add_column_if_not_exists("image_results", "is_bomb", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "is_bomb", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "bomb_code", "TEXT DEFAULT ''")
@@ -232,6 +234,7 @@ class CAPIDatabase:
         heatmap_dir: str = "",
         error_message: str = "",
         client_bomb_info: str = "",
+        aoi_machine_coords: str = "",
         image_results_data: Optional[List[Dict]] = None,
     ) -> int:
         """
@@ -254,6 +257,7 @@ class CAPIDatabase:
             heatmap_dir: 熱力圖儲存目錄
             error_message: 錯誤訊息
             client_bomb_info: 客戶端傳來的炸彈座標資訊 (JSON 字串)
+            aoi_machine_coords: AOI 機台檢測座標 (TXT 報告解析, JSON 字串)
             image_results_data: 圖片級結果列表
 
         Returns:
@@ -267,12 +271,12 @@ class CAPIDatabase:
                        (glass_id, model_id, machine_no, resolution_x, resolution_y,
                         machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                         ng_details, request_time, response_time, processing_seconds,
-                        heatmap_dir, error_message, client_bomb_info)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        heatmap_dir, error_message, client_bomb_info, aoi_machine_coords)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (glass_id, model_id, machine_no, resolution[0], resolution[1],
                      machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                      ng_details, request_time, response_time, processing_seconds,
-                     heatmap_dir, error_message, client_bomb_info)
+                     heatmap_dir, error_message, client_bomb_info, aoi_machine_coords)
                 )
                 record_id = cursor.lastrowid
 

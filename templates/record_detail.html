@@ -127,6 +127,15 @@
             </td>
         </tr>
         {% endif %}
+        {% if detail.aoi_machine_coords %}
+        <tr>
+            <th>AOI 機台檢測座標</th>
+            <td>
+                <pre
+                    style="margin:0;font-size:0.85rem;color:var(--text-muted);white-space:pre-wrap;word-break:break-all;">{{ detail.aoi_machine_coords }}</pre>
+            </td>
+        </tr>
+        {% endif %}
         <tr>
             <th>請求時間</th>
             <td>{{ detail.request_time }}</td>

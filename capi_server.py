@@ -1019,13 +1019,13 @@ class CAPIServer:
                             client_addr, parsed, [],
                             ai_judgment, "[]",
                             request_time, response_time, 0.0,
-                            False, None,
+                            False, None, None,
                         )
                         continue
 
                     # 執行推論（不含 Heatmap 儲存，快速回覆）
                     start_time = time.time()
-                    ai_judgment, ng_details, inference_results, is_duplicate, omit_image_raw = self._process_request(parsed)
+                    ai_judgment, ng_details, inference_results, is_duplicate, omit_image_raw, aoi_report = self._process_request(parsed)
                     processing_seconds = time.time() - start_time
 
                     # 重複投片時在 LOG 標記
@@ -1074,7 +1074,8 @@ class CAPIServer:
                         client_addr, parsed, inference_results,
                         ai_judgment, ng_details,
                         request_time, response_time, processing_seconds,
-                        is_duplicate, omit_image_raw,
+                        is_duplicate, aoi_report,
+                        omit_image_raw,
                     )
 
                 except ProtocolError as e:
@@ -1150,7 +1151,7 @@ class CAPIServer:
         """
         # 檢查推論器
         if self.inferencer is None:
-            return "ERR:MODEL_NOT_LOADED", "[]", [], False, None
+            return "ERR:MODEL_NOT_LOADED", "[]", [], False, None, {}
 
         # 轉換路徑
         image_dir = resolve_unc_path(parsed["image_dir"], self.path_mapping)
@@ -1177,10 +1178,11 @@ class CAPIServer:
                     model_id=parsed.get("model_id"),
                 )
 
-                # process_panel 回傳: (results, omit_vis, omit_overexposed, omit_info, is_duplicate)
+                # process_panel 回傳: (results, omit_vis, omit_overexposed, omit_info, is_duplicate, omit_image, aoi_report)
                 results = panel_result[0]
                 is_duplicate = panel_result[4]
                 omit_image_raw = panel_result[5] if len(panel_result) > 5 else None
+                aoi_report = panel_result[6] if len(panel_result) > 6 else {}
 
                 if is_duplicate:
                     logger.warning(
@@ -1189,7 +1191,7 @@ class CAPIServer:
                     )
 
                 if not results:
-                    return "ERR:NO_IMAGES_FOUND", "[]", [], False, None
+                    return "ERR:NO_IMAGES_FOUND", "[]", [], False, None, {}
 
                 # 彙總判定
                 ai_judgment, ng_details = aggregate_judgment(results)
@@ -1201,11 +1203,11 @@ class CAPIServer:
                             ai_judgment, ng_details, result.edge_defects, result.image_path.stem
                         )
 
-                return ai_judgment, ng_details, results, is_duplicate, omit_image_raw
+                return ai_judgment, ng_details, results, is_duplicate, omit_image_raw, aoi_report
 
             except Exception as e:
                 logger.error(f"Inference error: {e}", exc_info=True)
-                return f"ERR:INFERENCE_FAILED ({type(e).__name__}: {str(e)[:100]})", "[]", [], False, None
+                return f"ERR:INFERENCE_FAILED ({type(e).__name__}: {str(e)[:100]})", "[]", [], False, None, {}
 
 
     def _save_results_async(
@@ -1219,6 +1221,7 @@ class CAPIServer:
         response_time: str,
         processing_seconds: float,
         is_duplicate: bool = False,
+        aoi_report: Optional[Dict] = None,
         omit_image_raw: Any = None,
     ):
         """
@@ -1260,6 +1263,17 @@ class CAPIServer:
 
             client_bomb_info_str = json.dumps(parsed["bomb_info"], ensure_ascii=False) if parsed.get("bomb_info") else ""
 
+            # 序列化 AOI 機台檢測座標 (TXT 報告解析結果)
+            aoi_machine_coords_str = ""
+            if aoi_report:
+                aoi_coords_data = {}
+                for prefix, defects in aoi_report.items():
+                    aoi_coords_data[prefix] = [
+                        {"defect_code": d.defect_code, "product_x": d.product_x, "product_y": d.product_y}
+                        for d in defects
+                    ]
+                aoi_machine_coords_str = json.dumps(aoi_coords_data, ensure_ascii=False)
+
             self.db.save_inference_record(
                 glass_id=parsed["glass_id"],
                 model_id=parsed["model_id"],
@@ -1277,6 +1291,7 @@ class CAPIServer:
                 heatmap_dir=heatmap_info.get("dir", ""),
                 error_message=error_message,
                 client_bomb_info=client_bomb_info_str,
+                aoi_machine_coords=aoi_machine_coords_str,
                 image_results_data=image_results_data,
             )
 

@@ -149,6 +149,10 @@ class CAPIConfig:
         'top': False, 'bottom': True, 'left': False, 'right': False
     })  # 各邊是否啟用衰減
     
+    # 跳過檔案二值化偵測設定 (B0F00000 等無模型圖片)
+    bright_spot_threshold: int = 200          # 二值化亮點閾值 (灰階值高於此視為亮點)
+    bright_spot_min_area: int = 5             # 亮點最小連通面積 (px, 小於此視為雜訊)
+
     # 跳過檔案設定 (不進行推論的檔案名稱)
     skip_files: List[str] = field(default_factory=list)
     
@@ -237,6 +241,8 @@ class CAPIConfig:
             omit_overexposure_ratio_threshold=data.get("omit_overexposure_ratio_threshold", 0.5),
             edge_margin_px=data.get("edge_margin_px", 80),
             edge_margin_sides=data.get("edge_margin_sides", cls._migrate_edge_margin(data)),
+            bright_spot_threshold=data.get("bright_spot_threshold", 200),
+            bright_spot_min_area=data.get("bright_spot_min_area", 5),
             skip_files=data.get("skip_files", []),
             side_shot_prefixes=data.get("side_shot_prefixes", []),
             max_images_per_panel=data.get("max_images_per_panel", 7),
@@ -295,6 +301,8 @@ class CAPIConfig:
             "omit_overexposure_ratio_threshold": self.omit_overexposure_ratio_threshold,
             "edge_margin_px": self.edge_margin_px,
             "edge_margin_sides": self.edge_margin_sides,
+            "bright_spot_threshold": self.bright_spot_threshold,
+            "bright_spot_min_area": self.bright_spot_min_area,
             "skip_files": self.skip_files,
             "max_images_per_panel": self.max_images_per_panel,
             "bomb_defects": [b.to_dict() for b in self.bomb_defects],
@@ -402,6 +410,10 @@ class CAPIConfig:
         if "aoi_coord_inspection_enabled" in param_map:
             val = param_map["aoi_coord_inspection_enabled"]
             self.aoi_coord_inspection_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "bright_spot_threshold" in param_map:
+            self.bright_spot_threshold = int(param_map["bright_spot_threshold"])
+        if "bright_spot_min_area" in param_map:
+            self.bright_spot_min_area = int(param_map["bright_spot_min_area"])
         if "aoi_report_path_replace_from" in param_map:
             self.aoi_report_path_replace_from = str(param_map["aoi_report_path_replace_from"])
         if "aoi_report_path_replace_to" in param_map:

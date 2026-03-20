@@ -89,6 +89,10 @@ edge_margin_sides:               # 各邊是否啟用衰減
   left: true
   right: true
 
+# 跳過檔案二值化偵測設定 (B0F00000 等無模型圖片，以亮點偵測取代 PatchCore)
+bright_spot_threshold: 200    # 二值化亮點閾值 (灰階值高於此視為亮點，環境光變化時可調整)
+bright_spot_min_area: 5       # 亮點最小連通面積 (px, 小於此視為雜訊過濾)
+
 # 跳過檔案 (使用檔名前綴比對，支援帶時間戳的 TIF 檔案)
 # 例如 "B0F00000" 會匹配 "B0F00000.png" 和 "B0F00000_031447.tif"
 skip_files:
