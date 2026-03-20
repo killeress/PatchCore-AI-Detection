@@ -262,7 +262,8 @@
                     <tr>
                         <th>區域</th>
                         <th>異常代碼</th>
-                        <th>位置</th>
+                        <th>AOI 座標</th>
+                        <th>圖片位置</th>
                         <th>大小</th>
                         <th>AI 分數</th>
                         <th>AI 判定</th>
@@ -274,6 +275,13 @@
                     <tr>
                         <td style="color: #10b981;">🎯 #{{ t.tile_id }}</td>
                         <td><span style="color: #10b981; font-weight: 600;">{{ t.get("aoi_defect_code", "") }}</span></td>
+                        <td>
+                            {% if t.get("aoi_product_x", -1) >= 0 and t.get("aoi_product_y", -1) >= 0 %}
+                            <span style="color: #F59E0B; font-family: 'Fira Code', monospace;">({{ t.aoi_product_x }}, {{ t.aoi_product_y }})</span>
+                            {% else %}
+                            <span style="color: var(--text-muted);">—</span>
+                            {% endif %}
+                        </td>
                         <td>({{ t.x }}, {{ t.y }})</td>
                         <td>{{ t.width }}x{{ t.height }}</td>
                         <td><span class="badge {{ t_badge }}">{{ t.score | round(3) }}</span></td>
@@ -304,6 +312,9 @@
                     <h4
                         style="margin-bottom:8px;color:#10b981;font-size:0.85rem;font-family:'Fira Code',monospace;">
                         🎯 #{{ t.tile_id }} — {{ t.get("aoi_defect_code", "") }}
+                        {% if t.get("aoi_product_x", -1) >= 0 %}
+                        <span style="color: #F59E0B;">AOI({{ t.aoi_product_x }},{{ t.aoi_product_y }})</span>
+                        {% endif %}
                         {% if t.get("is_anomaly") %}
                         <span style="color: #EF4444;">[AI: NG]</span>
                         {% else %}

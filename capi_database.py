@@ -207,6 +207,8 @@ class CAPIDatabase:
             add_column_if_not_exists("tile_results", "is_exclude_zone", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "is_aoi_coord", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "aoi_defect_code", "TEXT DEFAULT ''")
+            add_column_if_not_exists("tile_results", "aoi_product_x", "INTEGER DEFAULT -1")
+            add_column_if_not_exists("tile_results", "aoi_product_y", "INTEGER DEFAULT -1")
 
             conn.commit()
         finally:
@@ -309,8 +311,9 @@ class CAPIDatabase:
                                    (image_result_id, tile_id, x, y, width, height,
                                     score, is_anomaly, is_dust, dust_iou, is_bomb,
                                     bomb_code, peak_x, peak_y, heatmap_path,
-                                    is_exclude_zone, is_aoi_coord, aoi_defect_code)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    is_exclude_zone, is_aoi_coord, aoi_defect_code,
+                                    aoi_product_x, aoi_product_y)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  tile_data.get("tile_id", 0),
                                  tile_data.get("x", 0),
@@ -328,7 +331,9 @@ class CAPIDatabase:
                                  tile_data.get("heatmap_path", ""),
                                  tile_data.get("is_exclude_zone", 0),
                                  tile_data.get("is_aoi_coord", 0),
-                                 tile_data.get("aoi_defect_code", ""))
+                                 tile_data.get("aoi_defect_code", ""),
+                                 tile_data.get("aoi_product_x", -1),
+                                 tile_data.get("aoi_product_y", -1))
                             )
 
                         # 儲存 CV 邊緣缺陷結果

@@ -105,6 +105,8 @@ class TileInfo:
     anomaly_peak_y: int = -1    # 熱力圖峰值 y (圖片座標, -1=未計算)
     is_aoi_coord_tile: bool = False  # 是否來自 AOI 機檢座標
     aoi_defect_code: str = ""        # AOI 異常代碼 (PCDK2, C1111, PTMD6)
+    aoi_product_x: int = -1         # AOI 產品座標 X (-1=非 AOI 座標 tile)
+    aoi_product_y: int = -1         # AOI 產品座標 Y (-1=非 AOI 座標 tile)
     is_bright_spot_detection: bool = False  # 是否為二值化亮點偵測（非 PatchCore）
     
     @property
@@ -2116,6 +2118,7 @@ class CAPIInferencer:
         half = tile_size // 2
         patchcore_tiles = []
         edge_defects = []
+        is_skip_file = self.config.should_skip_file(result.image_path.name)
 
         if result.raw_bounds is None:
             logger.warning("AOI Coord: raw_bounds 為 None，無法建立切塊")
@@ -2157,9 +2160,14 @@ class CAPIInferencer:
             )
 
             if at_edge:
-                edge_defects.append(defect)
-                print(f"  📐 AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}): 碰到邊緣，轉 CV 處理")
-                continue
+                if is_skip_file:
+                    # skip_files (如 B0F00000) 使用二值化偵測，不依賴 PatchCore 模型
+                    # 對邊緣 tile 用 clamping 建立即可，不需轉 CV 處理
+                    print(f"  🎯 AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}): 碰到邊緣，skip_file 模式仍建立 tile (clamping)")
+                else:
+                    edge_defects.append(defect)
+                    print(f"  📐 AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}): 碰到邊緣，轉 CV 處理")
+                    continue
 
             # 邊界 clamp (確保不超出圖片範圍)
             tx = max(0, min(tx, img_w - tile_size))
@@ -2192,6 +2200,8 @@ class CAPIInferencer:
                 is_right_edge=is_right,
                 is_aoi_coord_tile=True,
                 aoi_defect_code=defect.defect_code,
+                aoi_product_x=defect.product_x,
+                aoi_product_y=defect.product_y,
             )
 
             patchcore_tiles.append(tile)
@@ -3058,24 +3068,46 @@ class CAPIInferencer:
                         # 計算熱力圖峰值位置 (更精確的缺陷位置)
                         if anomaly_map is not None and anomaly_map.size > 0:
                             try:
-                                peak_local = np.unravel_index(np.argmax(anomaly_map), anomaly_map.shape)
-                                # anomaly_map 尺寸可能和 tile 不同，需要縮放
                                 amap_h, amap_w = anomaly_map.shape[:2]
-                                tile.anomaly_peak_y = tile.y + int(peak_local[0] * tile.height / amap_h)
-                                tile.anomaly_peak_x = tile.x + int(peak_local[1] * tile.width / amap_w)
-                            except Exception:
-                                tile.anomaly_peak_x = tile.x + tile.width // 2
-                                tile.anomaly_peak_y = tile.y + tile.height // 2
+                                # 二值化偵測 (B0F00000 等): 使用亮點重心而非 argmax
+                                # argmax 在 binary map 上回傳最左上方像素，容易偏離實際缺陷位置
+                                if tile.is_bright_spot_detection:
+                                    ys, xs = np.where(anomaly_map > 0.5)
+                                    if len(xs) > 0:
+                                        centroid_x = int(np.mean(xs))
+                                        centroid_y = int(np.mean(ys))
+                                    else:
+                                        logger.warning(f"Bright spot tile has no pixels > 0.5: {result.image_path.name} Tile@({tile.x},{tile.y})")
+                                        centroid_x = amap_w // 2
+                                        centroid_y = amap_h // 2
+                                    tile.anomaly_peak_x = tile.x + int(centroid_x * tile.width / amap_w)
+                                    tile.anomaly_peak_y = tile.y + int(centroid_y * tile.height / amap_h)
+                                else:
+                                    peak_local = np.unravel_index(np.argmax(anomaly_map), anomaly_map.shape)
+                                    # anomaly_map 尺寸可能和 tile 不同，需要縮放
+                                    tile.anomaly_peak_y = tile.y + int(peak_local[0] * tile.height / amap_h)
+                                    tile.anomaly_peak_x = tile.x + int(peak_local[1] * tile.width / amap_w)
+                            except Exception as e:
+                                logger.warning(f"Anomaly peak calculation failed: {e}")
+                                tile.anomaly_peak_x, tile.anomaly_peak_y = tile.center
                         else:
-                            tile.anomaly_peak_x = tile.x + tile.width // 2
-                            tile.anomaly_peak_y = tile.y + tile.height // 2
-                        
+                            tile.anomaly_peak_x, tile.anomaly_peak_y = tile.center
+
                         # 用熱力圖峰值座標來比對炸彈
                         is_bomb, bomb_code = self.check_bomb_match(
                             img_prefix, tile.anomaly_peak_x, tile.anomaly_peak_y, result.raw_bounds,
                             anomaly_map=anomaly_map, product_resolution=product_resolution,
                             bomb_list=active_bombs,
                         )
+                        # AOI coord tile fallback: 若峰值未匹配，改用 tile 中心再試一次
+                        # AOI coord tile 本身就是以 AOI 座標為中心切塊，中心位置更可靠
+                        if not is_bomb and tile.is_aoi_coord_tile:
+                            tile_cx, tile_cy = tile.center
+                            is_bomb, bomb_code = self.check_bomb_match(
+                                img_prefix, tile_cx, tile_cy, result.raw_bounds,
+                                anomaly_map=anomaly_map, product_resolution=product_resolution,
+                                bomb_list=active_bombs,
+                            )
                         if is_bomb:
                             tile.is_bomb = True
                             tile.bomb_defect_code = bomb_code

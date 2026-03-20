@@ -549,6 +549,8 @@ def results_to_db_data(
                 "is_exclude_zone": 1 if tile.is_in_exclude_zone else 0,
                 "is_aoi_coord": 1 if tile.is_aoi_coord_tile else 0,
                 "aoi_defect_code": tile.aoi_defect_code,
+                "aoi_product_x": tile.aoi_product_x,
+                "aoi_product_y": tile.aoi_product_y,
             })
 
         # CV 邊緣缺陷 — 獨立儲存 (不放入 tiles)

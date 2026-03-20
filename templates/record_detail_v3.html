@@ -607,6 +607,7 @@
                         <thead>
                             <tr>
                                 <th style="width: 80px;">區域</th>
+                                <th>AOI 座標</th>
                                 <th>位置 (x, y)</th>
                                 <th>大小 (w x h)</th>
                                 <th>異常分數</th>
@@ -617,7 +618,18 @@
                             {% for t in img.tiles %}
                             {% set t_badge, t_info = t | tile_info %}
                             <tr>
-                                <td style="color: #64748B;">#{{ t.tile_id }}</td>
+                                <td style="color: #64748B;">
+                                    {% if t.get("is_aoi_coord") %}🎯{% endif %}#{{ t.tile_id }}
+                                </td>
+                                <td>
+                                    {% if t.get("aoi_product_x", -1) >= 0 and t.get("aoi_product_y", -1) >= 0 %}
+                                    <span style="color: #D97706; font-family: 'Fira Code', monospace; font-size: 12px;">
+                                        {{ t.get("aoi_defect_code", "") }} ({{ t.aoi_product_x }}, {{ t.aoi_product_y }})
+                                    </span>
+                                    {% else %}
+                                    <span style="color: #CBD5E1;">—</span>
+                                    {% endif %}
+                                </td>
                                 <td>({{ t.x }}, {{ t.y }})</td>
                                 <td>{{ t.width }}x{{ t.height }}</td>
                                 <td>
