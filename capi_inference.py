@@ -1156,7 +1156,8 @@ class CAPIInferencer:
         B0F00000 專用：以二值化方式偵測黑色背景上的白色亮點。
 
         取代 PatchCore 推論，用於無訓練模型的圖片。
-        閾值和最小面積從 config 讀取 (bright_spot_threshold, bright_spot_min_area)。
+        使用 Otsu 自適應閾值，自動依據圖片亮度分佈計算最佳二值化門檻，
+        config.bright_spot_threshold 作為下限保護（防止全黑圖 Otsu 算出過低值）。
 
         Args:
             tile: TileInfo 物件
@@ -1165,7 +1166,7 @@ class CAPIInferencer:
             (score, binary_map) - score: 0.0 (無亮點) 或 1.0 (有亮點)
                                   binary_map: 二值化結果 (uint8, 0/255)
         """
-        bright_threshold = self.config.bright_spot_threshold
+        min_threshold = self.config.bright_spot_threshold
         min_area = self.config.bright_spot_min_area
 
         img = tile.image
@@ -1178,7 +1179,12 @@ class CAPIInferencer:
         else:
             gray = img.copy()
 
-        # 高閾值二值化：找出特別亮的白色區域
+        # Otsu 自適應閾值：自動依圖片亮度分佈找最佳切割點
+        otsu_val, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # 取 Otsu 值和設定下限的較大者，防止全黑圖產生過低閾值
+        bright_threshold = max(int(otsu_val), min_threshold)
+
+        # 二值化：找出高於閾值的亮區
         _, binary = cv2.threshold(gray, bright_threshold, 255, cv2.THRESH_BINARY)
 
         # 如果 tile 有 mask（排除區域），套用 mask
@@ -1214,10 +1220,10 @@ class CAPIInferencer:
         raw_bright_count = int(np.sum(binary > 0))
         if has_bright_spot:
             print(f"  💡 B0F 二值化偵測 Tile@({tile.x},{tile.y}): 發現亮點 ({bright_pixel_count} px), "
-                  f"threshold={bright_threshold}, max_pixel={max_pixel_val}")
+                  f"otsu={int(otsu_val)}, threshold={bright_threshold} (min={min_threshold}), max_pixel={max_pixel_val}")
         else:
             print(f"  💡 B0F 二值化偵測 Tile@({tile.x},{tile.y}): 未發現亮點, "
-                  f"threshold={bright_threshold}, max_pixel={max_pixel_val}, "
+                  f"otsu={int(otsu_val)}, threshold={bright_threshold} (min={min_threshold}), max_pixel={max_pixel_val}, "
                   f"raw_bright={raw_bright_count} px, max_component={max_component_area} px (min_area={min_area})")
 
         return score, anomaly_map

@@ -149,8 +149,8 @@ class CAPIConfig:
         'top': False, 'bottom': True, 'left': False, 'right': False
     })  # 各邊是否啟用衰減
     
-    # 跳過檔案二值化偵測設定 (B0F00000 等無模型圖片)
-    bright_spot_threshold: int = 200          # 二值化亮點閾值 (灰階值高於此視為亮點)
+    # 跳過檔案二值化偵測設定 (B0F00000 等無模型圖片，使用 Otsu 自適應閾值)
+    bright_spot_threshold: int = 200          # Otsu 閾值下限保護 (防止全黑圖算出過低值)
     bright_spot_min_area: int = 5             # 亮點最小連通面積 (px, 小於此視為雜訊)
 
     # 跳過檔案設定 (不進行推論的檔案名稱)
