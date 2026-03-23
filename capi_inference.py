@@ -2729,7 +2729,17 @@ class CAPIInferencer:
                                         logger.warning(f"AOI Coord CV edge 檢測失敗 ({edef.defect_code}): {e}")
 
                                 if not cv_detected:
-                                    print(f"  ✅ AOI Coord edge ({edef.defect_code}) @ ({img_x},{img_y}): CV 未偵測到缺陷，判定 OK")
+                                    # 建立 OK 記錄，讓結果頁面能看到此座標已被檢查
+                                    ok_defect = EdgeDefect(
+                                        side="aoi_coord_ok",
+                                        area=0,
+                                        bbox=(rx1, ry1, rx2 - rx1, ry2 - ry1),
+                                        center=(img_x, img_y),
+                                        max_diff=0,
+                                        is_cv_ok=True,
+                                    )
+                                    result.edge_defects.append(ok_defect)
+                                    print(f"  ✅ AOI Coord edge ({edef.defect_code}) @ ({img_x},{img_y}): CV 未偵測到缺陷，判定 OK（保留記錄）")
                 print(f"🎯 Phase 1.5 完成: AOI 座標新增 {aoi_tile_count} 個 tiles, {aoi_edge_count} 個邊緣 defects")
 
         # === Grid Tiling 開關控制 ===

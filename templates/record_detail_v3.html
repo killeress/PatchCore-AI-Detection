@@ -738,17 +738,27 @@
                                 {% for ed in img.edge_defects %}
                                 <tr>
                                     <td>
+                                        {% if ed.is_cv_ok %}
+                                        <span style="display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #D1FAE5; color: #065F46; border: 1px solid #6EE7B7;">
+                                            CV OK
+                                        </span>
+                                        {% else %}
                                         <span style="display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #CFFAFE; color: #0E7490; border: 1px solid #A5F3FC;">
                                             {{ ed.side }}
                                         </span>
+                                        {% endif %}
                                     </td>
                                     <td>({{ ed.bbox_x }}, {{ ed.bbox_y }})</td>
                                     <td>{{ ed.bbox_w }} × {{ ed.bbox_h }}</td>
                                     <td>{{ ed.area }}</td>
                                     <td>
+                                        {% if ed.is_cv_ok %}
+                                        <span class="badge" style="background: #D1FAE5; color: #065F46;">OK</span>
+                                        {% else %}
                                         <span class="badge bg-ng-subtle">
                                             {{ ed.max_diff | round(1) }}
                                         </span>
+                                        {% endif %}
                                     </td>
                                 </tr>
                                 {% endfor %}

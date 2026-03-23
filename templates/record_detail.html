@@ -380,7 +380,9 @@
                     {% for ed in img.edge_defects %}
                     <tr>
                         <td>
-                            {% if ed.is_bomb %}
+                            {% if ed.is_cv_ok %}
+                            <span class="badge badge-ok" style="font-size:0.7rem;">CV OK</span>
+                            {% elif ed.is_bomb %}
                             <span class="badge"
                                 style="background-color:#a855f7; color:white; font-size:0.7rem;">BOMB</span>
                             {% elif ed.is_dust %}

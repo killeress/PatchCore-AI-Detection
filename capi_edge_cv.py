@@ -35,6 +35,7 @@ class EdgeDefect:
     dust_detail_text: str = ""
     is_bomb: bool = False
     bomb_defect_code: str = ""
+    is_cv_ok: bool = False  # CV 檢查後未偵測到缺陷，僅作記錄用
 
 
 @dataclass
