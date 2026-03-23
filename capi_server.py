@@ -406,7 +406,7 @@ def aggregate_judgment(results: List[ImageResult]) -> Tuple[str, str]:
                 "peak_x": px, "peak_y": py,
                 "score": round(score, 4),
                 "is_dust": tile.is_suspected_dust_or_scratch,
-                "dust_iou": round(tile.dust_heatmap_iou, 4),
+                "dust_iou": round(getattr(tile, 'dust_region_max_cov', tile.dust_heatmap_iou), 4),
             })
 
     if not ng_details:
@@ -540,7 +540,7 @@ def results_to_db_data(
                 "score": score,
                 "is_anomaly": 0 if is_below_thr else 1,
                 "is_dust": 1 if tile.is_suspected_dust_or_scratch else 0,
-                "dust_iou": tile.dust_heatmap_iou,
+                "dust_iou": getattr(tile, 'dust_region_max_cov', tile.dust_heatmap_iou),
                 "is_bomb": 1 if tile.is_bomb else 0,
                 "bomb_code": tile.bomb_defect_code,
                 "peak_x": tile.anomaly_peak_x,

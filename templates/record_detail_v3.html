@@ -472,13 +472,33 @@
                             </tr>
                             {% endif %}
                             {% if detail.aoi_machine_coords %}
+                            {% set aoi_coords = detail.aoi_machine_coords | fromjson %}
                             <tr>
                                 <td class="label">AOI 機台檢測座標</td>
-                                <td class="value">
-                                    <div
-                                        style="font-family: monospace; font-size: 11px; color: #475569; background: #F8FAFC; padding: 6px; border: 1px solid #E2E8F0; border-radius: 4px; word-break: break-all; text-align: left; margin-top: 4px;">
-                                        {{ detail.aoi_machine_coords }}
+                                <td class="value" style="text-align: left;">
+                                    {% for img_key, coords in aoi_coords.items() %}
+                                    <div style="margin-bottom: 8px;">
+                                        <div style="font-weight: 600; font-size: 11px; color: #1E293B; margin-bottom: 4px;">{{ img_key }} ({{ coords|length }} 點)</div>
+                                        <table style="width: auto; border-collapse: collapse; font-family: 'Fira Code', monospace; font-size: 11px;">
+                                            <thead>
+                                                <tr>
+                                                    <th style="padding: 2px 10px; border: 1px solid #E2E8F0; background: #F1F5F9; text-align: center;">#</th>
+                                                    <th style="padding: 2px 10px; border: 1px solid #E2E8F0; background: #F1F5F9; text-align: center;">X</th>
+                                                    <th style="padding: 2px 10px; border: 1px solid #E2E8F0; background: #F1F5F9; text-align: center;">Y</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {% for c in coords %}
+                                                <tr>
+                                                    <td style="padding: 2px 10px; border: 1px solid #E2E8F0; text-align: center; color: #94A3B8;">{{ loop.index }}</td>
+                                                    <td style="padding: 2px 10px; border: 1px solid #E2E8F0; text-align: center;">{{ c.product_x }}</td>
+                                                    <td style="padding: 2px 10px; border: 1px solid #E2E8F0; text-align: center;">{{ c.product_y }}</td>
+                                                </tr>
+                                                {% endfor %}
+                                            </tbody>
+                                        </table>
                                     </div>
+                                    {% endfor %}
                                 </td>
                             </tr>
                             {% endif %}

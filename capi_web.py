@@ -63,7 +63,7 @@ def tile_info(t):
         info += " | 不檢測排除區域"
     elif t.get("is_dust"):
         badge = "badge-err"
-        info += f" | 灰塵 IOU: {t.get('dust_iou',0):.3f}"
+        info += f" | 灰塵 Region COV: {t.get('dust_iou',0):.3f}"
     if t.get("is_bomb"):
         badge = "badge-err"
         info += f" | 炸彈代碼: {t.get('bomb_code','')}"
@@ -110,6 +110,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             cls.jinja_env.filters['img_status_info'] = img_status_info
             cls.jinja_env.filters['tile_info'] = tile_info
             cls.jinja_env.filters['get_img_stem'] = get_img_stem
+            cls.jinja_env.filters['fromjson'] = lambda s: json.loads(s) if s else {}
             cls.jinja_env.globals['hm_relative'] = hm_relative
             
     def log_message(self, format, *args):
@@ -1237,7 +1238,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "score": round(score, 4),
                     "status": tile_status,
                     "is_dust": tile.is_suspected_dust_or_scratch,
-                    "dust_iou": round(tile.dust_heatmap_iou, 4),
+                    "dust_iou": round(getattr(tile, 'dust_region_max_cov', tile.dust_heatmap_iou), 4),
                     "is_bomb": tile.is_bomb,
                     "bomb_code": tile.bomb_defect_code,
                     "is_exclude_zone": tile.is_in_exclude_zone,

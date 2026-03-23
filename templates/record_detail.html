@@ -128,11 +128,33 @@
         </tr>
         {% endif %}
         {% if detail.aoi_machine_coords %}
+        {% set aoi_coords = detail.aoi_machine_coords | fromjson %}
         <tr>
             <th>AOI 機台檢測座標</th>
             <td>
-                <pre
-                    style="margin:0;font-size:0.85rem;color:var(--text-muted);white-space:pre-wrap;word-break:break-all;">{{ detail.aoi_machine_coords }}</pre>
+                {% for img_key, coords in aoi_coords.items() %}
+                <div style="margin-bottom:8px;">
+                    <div style="font-weight:600;font-size:0.85rem;color:var(--text-primary);margin-bottom:4px;">{{ img_key }} ({{ coords|length }} 點)</div>
+                    <table style="width:auto;border-collapse:collapse;font-size:0.8rem;font-family:'Fira Code',monospace;">
+                        <thead>
+                            <tr>
+                                <th style="padding:2px 12px;border:1px solid var(--border);background:var(--bg-secondary);text-align:center;">#</th>
+                                <th style="padding:2px 12px;border:1px solid var(--border);background:var(--bg-secondary);text-align:center;">X</th>
+                                <th style="padding:2px 12px;border:1px solid var(--border);background:var(--bg-secondary);text-align:center;">Y</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for c in coords %}
+                            <tr>
+                                <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;color:var(--text-muted);">{{ loop.index }}</td>
+                                <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;">{{ c.product_x }}</td>
+                                <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;">{{ c.product_y }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% endfor %}
             </td>
         </tr>
         {% endif %}

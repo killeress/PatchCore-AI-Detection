@@ -94,7 +94,8 @@ class TileInfo:
     is_suspected_dust_or_scratch: bool = False  # 是否疑似灰塵或刮痕 (透過 OMIT0000 檢查)
     omit_crop_image: Optional[np.ndarray] = field(default=None, repr=False)  # OMIT 圖片的對應裁切 (用於灰塵檢查)
     dust_mask: Optional[np.ndarray] = field(default=None, repr=False)
-    dust_heatmap_iou: float = 0.0
+    dust_heatmap_iou: float = 0.0  # overall coverage (intersection / total dust area)
+    dust_region_max_cov: float = 0.0  # per-region max coverage (用於實際判定)
     dust_bright_ratio: float = 0.0
     dust_detail_text: str = ""  # 灰塵判定詳細資訊
     dust_iou_debug_image: Optional[np.ndarray] = field(default=None, repr=False)  # IOU debug 可視化圖
@@ -1440,10 +1441,26 @@ class CAPIInferencer:
         MAX_REASONABLE_RATIO = 0.10
         initial_ratio = float(np.sum(binary > 0)) / binary.size if binary.size > 0 else 0.0
         if initial_ratio > MAX_REASONABLE_RATIO:
+            # 嚴格閾值前，先保護寬鬆閾值下的線性刮痕特徵
+            scratch_preserved = np.zeros_like(binary)
+            _n, _labels, _stats, _ = cv2.connectedComponentsWithStats(binary)
+            for _i in range(1, _n):
+                _area = _stats[_i, cv2.CC_STAT_AREA]
+                _w = _stats[_i, cv2.CC_STAT_WIDTH]
+                _h = _stats[_i, cv2.CC_STAT_HEIGHT]
+                if _area < area_min or _area > area_max:
+                    continue
+                _aspect = max(_w, _h) / (min(_w, _h) + 1e-5)
+                if _aspect > 5:  # 線性特徵（刮痕）才保護
+                    scratch_preserved[_labels == _i] = 255
+
             p99 = float(np.percentile(tophat, 99))
             strict_thr = max(adaptive_thr, p99)
             _, binary = cv2.threshold(tophat, strict_thr, 255, cv2.THRESH_BINARY)
             used_threshold = strict_thr
+
+            # 合併保護的刮痕回 binary
+            binary = cv2.bitwise_or(binary, scratch_preserved)
         
         # Step 4: 形態學處理
         # 開運算：去除小噪點
@@ -1902,8 +1919,14 @@ class CAPIInferencer:
 
         metric_name = "COV" if self.config.dust_heatmap_metric == "coverage" else "IOU"
         verdict_color = (0, 200, 255) if is_dust else (0, 0, 255)
-        cv2.putText(panel_br, f"{metric_name}:{iou:.3f} {verdict_text}", (5, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, verdict_color, 1)
+        # 顯示 per-region max coverage（實際判定用的值）而非 overall
+        if region_details:
+            region_max_cov = max(r["coverage"] for r in region_details)
+            cv2.putText(panel_br, f"Region{metric_name}:{region_max_cov:.3f} {verdict_text}", (5, 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, verdict_color, 1)
+        else:
+            cv2.putText(panel_br, f"{metric_name}:{iou:.3f} {verdict_text}", (5, 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, verdict_color, 1)
 
         # --- 組合 2x2 ---
         top_row = np.hstack([panel_tl, panel_tr])
@@ -2705,19 +2728,8 @@ class CAPIInferencer:
                                     except Exception as e:
                                         logger.warning(f"AOI Coord CV edge 檢測失敗 ({edef.defect_code}): {e}")
 
-                                # CV 未檢測到或未啟用 → 建立基本 EdgeDefect 保留 AOI 座標追蹤
                                 if not cv_detected:
-                                    roi_w = rx2 - rx1
-                                    roi_h = ry2 - ry1
-                                    fallback_defect = EdgeDefect(
-                                        side="aoi_edge",
-                                        area=roi_w * roi_h,
-                                        bbox=(rx1, ry1, roi_w, roi_h),
-                                        center=(img_x, img_y),
-                                        max_diff=0,
-                                    )
-                                    result.edge_defects.append(fallback_defect)
-                                    print(f"  📐 AOI Coord edge fallback ({edef.defect_code}) @ ({img_x},{img_y}): 建立邊緣 defect 記錄")
+                                    print(f"  ✅ AOI Coord edge ({edef.defect_code}) @ ({img_x},{img_y}): CV 未偵測到缺陷，判定 OK")
                 print(f"🎯 Phase 1.5 完成: AOI 座標新增 {aoi_tile_count} 個 tiles, {aoi_edge_count} 個邊緣 defects")
 
         # === Grid Tiling 開關控制 ===
@@ -2745,8 +2757,10 @@ class CAPIInferencer:
                 anomaly_tiles = []
                 for tile in result.tiles:
                     score, anomaly_map = self._detect_bright_spots(tile)
-                    if score > 0:
-                        anomaly_tiles.append((tile, score, anomaly_map))
+                    if score <= 0:
+                        # 未偵測到亮點，標記為 below_threshold 不影響判定，但仍保留以便查看原圖
+                        tile.is_aoi_coord_below_threshold = True
+                    anomaly_tiles.append((tile, score, anomaly_map))
                 result.anomaly_tiles = anomaly_tiles
                 result.inference_time = 0.0
                 preprocessed_results[i] = result
@@ -2835,6 +2849,9 @@ class CAPIInferencer:
                                 )
                             iou = overall_iou
                             tile.dust_heatmap_iou = iou
+                            # 記錄 per-region 最大 coverage（實際判定用的值）
+                            if region_details:
+                                tile.dust_region_max_cov = max(r["coverage"] for r in region_details)
 
                             dust_regions = [r for r in region_details if r["is_dust"]]
                             real_regions = [r for r in region_details if not r["is_dust"]]
@@ -3024,14 +3041,14 @@ class CAPIInferencer:
                         if tx < ow and ty < oh:
                             x2 = min(tx + tw, ow)
                             y2 = min(ty + th, oh)
-                            iou = tile.dust_heatmap_iou
+                            rcov = getattr(tile, 'dust_region_max_cov', 0.0)
                             metric_name = "COV" if self.config.dust_heatmap_metric == "coverage" else "IOU"
                             if tile.is_suspected_dust_or_scratch:
                                 box_color = (0, 165, 255)
-                                label = f"DUST {metric_name}:{iou:.2f}"
+                                label = f"DUST R.{metric_name}:{rcov:.3f}"
                             else:
                                 box_color = (0, 0, 255)
-                                label = f"REAL_NG {metric_name}:{iou:.2f}"
+                                label = f"REAL_NG R.{metric_name}:{rcov:.3f}"
                             cv2.rectangle(omit_vis, (tx, ty), (x2, y2), box_color, 5)
                             cv2.putText(omit_vis, f"{result.image_path.name}", (tx, ty - 50), cv2.FONT_HERSHEY_SIMPLEX, 2.0, box_color, 4)
                             cv2.putText(omit_vis, label, (tx, ty - 10), cv2.FONT_HERSHEY_SIMPLEX, 2.0, box_color, 4)
@@ -3266,12 +3283,13 @@ class CAPIInferencer:
             elif getattr(tile, 'is_suspected_dust_or_scratch', False):
                 color = (0, 255, 255)  # 黃色 (BGR: 0, 255, 255)
                 metric_name = "COV" if self.config.dust_heatmap_metric == "coverage" else "IOU"
-                iou = getattr(tile, 'dust_heatmap_iou', 0.0)
-                label = f"{score:.2f} DUST({metric_name}:{iou:.2f})"
+                rcov = getattr(tile, 'dust_region_max_cov', 0.0)
+                label = f"{score:.2f} DUST(R.{metric_name}:{rcov:.3f})"
             elif getattr(tile, 'dust_heatmap_iou', 0.0) > 0:
-                # 有 OMIT 分析結果但非灰塵，顯示 IOU 或 COV
+                # 有 OMIT 分析結果但非灰塵，顯示 per-region max COV
                 metric_name = "COV" if self.config.dust_heatmap_metric == "coverage" else "IOU"
-                label = f"{score:.2f} NG({metric_name}:{getattr(tile, 'dust_heatmap_iou', 0.0):.2f})"
+                rcov = getattr(tile, 'dust_region_max_cov', 0.0)
+                label = f"{score:.2f} NG(R.{metric_name}:{rcov:.3f})"
             
             # 座標邊界檢查
             h, w = vis.shape[:2]
