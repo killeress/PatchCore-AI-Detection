@@ -1468,6 +1468,13 @@ class CAPIInferencer:
             # 合併保護的特徵回 binary
             binary = cv2.bitwise_or(binary, feature_preserved)
         
+        # Step 3.5: 明顯亮區救回 — Top-Hat 會吃掉寬度>kernel 的大面積污染/刮痕
+        # 對 CLAHE 增強後的原圖做高閾值直接檢測，把肉眼明顯的亮區補回來
+        bright_rescue_thr = self.config.dust_bright_rescue_threshold
+        if bright_rescue_thr > 0:
+            _, bright_binary = cv2.threshold(enhanced, bright_rescue_thr, 255, cv2.THRESH_BINARY)
+            binary = cv2.bitwise_or(binary, bright_binary)
+
         # Step 4: 形態學處理
         # 開運算：去除小噪點
         open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))

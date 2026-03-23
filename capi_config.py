@@ -132,6 +132,7 @@ class CAPIConfig:
     # 灰塵偵測設定 (OMIT 圖片分析)
     dust_brightness_threshold: int = 80       # OMIT 亮度閾值 (自適應 Otsu 時此為備用上限)
     dust_threshold_floor: int = 25            # Otsu 自適應閾值下限 (防止低噪 OMIT 抓出過多背景噪點)
+    dust_bright_rescue_threshold: int = 180   # CLAHE 增強後的高亮直接檢測閾值 (救回被 Top-Hat 吃掉的大面積污染，0=停用)
     dust_area_min: int = 15                   # 灰塵顆粒最小面積 (px)
     dust_area_max: int = 100000               # 灰塵顆粒最大面積 (px)
     dust_extension: int = 5                   # 灰塵區域膨脹像素
@@ -232,6 +233,7 @@ class CAPIConfig:
             patchcore_diffuse_area_penalty=data.get("patchcore_diffuse_area_penalty", 0.5),
             dust_brightness_threshold=data.get("dust_brightness_threshold", 80),
             dust_threshold_floor=data.get("dust_threshold_floor", 25),
+            dust_bright_rescue_threshold=data.get("dust_bright_rescue_threshold", 180),
             dust_area_min=data.get("dust_area_min", 15),
             dust_area_max=data.get("dust_area_max", 100000),
             dust_extension=data.get("dust_extension", 5),

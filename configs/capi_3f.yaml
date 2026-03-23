@@ -71,6 +71,7 @@ patchcore_diffuse_area_penalty: 0.5      # 佔比=100% 時的降權乘數
 # 灰塵偵測設定 (OMIT 圖片分析)
 dust_brightness_threshold: 40    # 備用亮度閾值 (Otsu 自適應上限)
 dust_threshold_floor: 25         # Otsu 自適應閾值下限 (防止低噪 OMIT 抓出過多背景噪點)
+dust_bright_rescue_threshold: 180  # CLAHE 增強後直接檢測閾值 (救回被 Top-Hat 吃掉的大面積明顯污染/刮痕，0=停用)
 dust_area_min: 15                # 灰塵顆粒最小面積 (px)
 dust_area_max: 50000             # 灰塵顆粒最大面積 (px)
 dust_extension: 3                # 灰塵區域膨脹像素
