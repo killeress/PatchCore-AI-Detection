@@ -361,6 +361,7 @@ class HeatmapManager:
         side = edge_defect.side
         is_dust = getattr(edge_defect, 'is_suspected_dust_or_scratch', False)
         is_bomb = getattr(edge_defect, 'is_bomb', False)
+        is_cv_ok = getattr(edge_defect, 'is_cv_ok', False)
         bomb_code = getattr(edge_defect, 'bomb_defect_code', '')
         img_h, img_w = full_image.shape[:2]
 
@@ -584,7 +585,10 @@ class HeatmapManager:
         header_h = 50
         header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
 
-        if is_bomb:
+        if is_cv_ok:
+            verdict = "CV OK (No Defect)"
+            verdict_color = (0, 255, 0)
+        elif is_bomb:
             verdict = f"BOMB: {bomb_code} (Filtered as OK)"
             verdict_color = (255, 0, 255)
         elif is_dust:

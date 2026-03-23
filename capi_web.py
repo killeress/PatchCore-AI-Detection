@@ -98,6 +98,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     heatmap_manager = None
     _debug_heatmap_dir = None  # Debug 推論暫存目錄
     _capi_server_instance = None  # CAPIServer 實例 (用於 hot-reload)
+    _log_file = None  # 日誌檔案路徑 (用於 Log Viewer)
 
     @classmethod
     def init_jinja(cls):
@@ -142,6 +143,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_search(query, path)
             elif path == "/search/export":
                 self._handle_search_export(query)
+            elif path == "/logs":
+                self._handle_logs_page(query, path)
+            elif path == "/api/logs":
+                self._handle_api_logs(query)
             elif path == "/debug":
                 self._handle_debug_page(path)
             elif path == "/ric":
@@ -468,6 +473,73 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         )
         self._send_response(200, html)
         
+    def _handle_logs_page(self, query: dict, path: str):
+        """Log Viewer 頁面"""
+        template = self.jinja_env.get_template("logs.html")
+        # 列出可用的 log 檔案 (current + rotated)
+        log_files = []
+        if self._log_file:
+            log_path = Path(self._log_file)
+            if log_path.exists():
+                log_files.append({"name": log_path.name, "path": str(log_path), "size": log_path.stat().st_size})
+            # rotated files: server.log.1, server.log.2, ...
+            for i in range(1, 10):
+                rotated = log_path.parent / f"{log_path.name}.{i}"
+                if rotated.exists():
+                    log_files.append({"name": rotated.name, "path": str(rotated), "size": rotated.stat().st_size})
+        html = template.render(request_path=path, log_files=log_files, log_configured=bool(self._log_file))
+        self._send_response(200, html)
+
+    def _handle_api_logs(self, query: dict):
+        """API: 讀取 log 檔案內容"""
+        if not self._log_file:
+            self._send_json({"error": "未設定日誌檔案路徑", "lines": []})
+            return
+
+        # 選擇要讀取的 log 檔案 (支援 rotated files)
+        file_index = int(query.get("file", [0])[0])  # 0=current, 1=.1, 2=.2, ...
+        tail_lines = int(query.get("lines", [500])[0])
+        tail_lines = min(tail_lines, 5000)  # 上限 5000 行
+        search = query.get("search", [""])[0]
+        level_filter = query.get("level", [""])[0].upper()
+
+        log_path = Path(self._log_file)
+        if file_index > 0:
+            log_path = log_path.parent / f"{log_path.name}.{file_index}"
+
+        if not log_path.exists():
+            self._send_json({"error": f"日誌檔案不存在: {log_path.name}", "lines": []})
+            return
+
+        try:
+            # 讀取最後 N 行 (高效能 tail)
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                # 快速 tail: 讀取末尾 chunk
+                f.seek(0, 2)
+                file_size = f.tell()
+                # 估算每行約 200 bytes, 多讀一些
+                chunk_size = min(file_size, tail_lines * 300)
+                f.seek(max(0, file_size - chunk_size))
+                if f.tell() > 0:
+                    f.readline()  # 跳過不完整的第一行
+                all_lines = f.readlines()
+                lines = all_lines[-tail_lines:]
+
+            # 過濾
+            if level_filter:
+                lines = [l for l in lines if level_filter in l]
+            if search:
+                search_lower = search.lower()
+                lines = [l for l in lines if search_lower in l.lower()]
+
+            self._send_json({
+                "file": log_path.name,
+                "total_lines": len(lines),
+                "lines": [l.rstrip("\n\r") for l in lines],
+            })
+        except Exception as e:
+            self._send_json({"error": str(e), "lines": []})
+
     def _handle_api_status(self):
         """API: 即時伺服器狀態"""
         try:
@@ -1861,6 +1933,7 @@ def create_web_server(
     heatmap_manager=None,
     gpu_lock=None,
     capi_server_instance=None,
+    log_file=None,
 ) -> ThreadingHTTPServer:
     """
     建立 Web 伺服器
@@ -1875,6 +1948,7 @@ def create_web_server(
         heatmap_manager: HeatmapManager 實例 (Optional, for debug inference)
         gpu_lock: GPU 排隊鎖 (Optional, for debug inference)
         capi_server_instance: CAPIServer 實例 (Optional, for config hot-reload)
+        log_file: 日誌檔案路徑 (Optional, for log viewer)
     """
     CAPIWebHandler.db = db
     CAPIWebHandler.heatmap_base_dir = heatmap_base_dir
@@ -1883,6 +1957,7 @@ def create_web_server(
     CAPIWebHandler.heatmap_manager = heatmap_manager
     CAPIWebHandler._gpu_lock = gpu_lock
     CAPIWebHandler._capi_server_instance = capi_server_instance
+    CAPIWebHandler._log_file = log_file
     CAPIWebHandler.init_jinja()
 
     server = ThreadingHTTPServer((host, port), CAPIWebHandler)
@@ -1899,6 +1974,7 @@ def start_web_server_thread(
     heatmap_manager=None,
     gpu_lock=None,
     capi_server_instance=None,
+    log_file=None,
 ) -> threading.Thread:
     """
     在背景執行緒啟動 Web 伺服器
@@ -1912,6 +1988,7 @@ def start_web_server_thread(
         heatmap_manager=heatmap_manager,
         gpu_lock=gpu_lock,
         capi_server_instance=capi_server_instance,
+        log_file=log_file,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True, name="web-server")
     thread.start()

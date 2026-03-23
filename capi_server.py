@@ -114,6 +114,61 @@ class ServerStatusTracker:
 server_status = ServerStatusTracker()
 
 
+# ── 推論日誌擷取器 ──────────────────────────────────────────
+
+class _TeeStdout:
+    """
+    攔截 sys.stdout.write()，將 print() 輸出同時寫入 thread-local 緩衝區。
+    其他執行緒的 print 不受影響（各執行緒只擷取自己的）。
+    """
+    def __init__(self, original):
+        self._original = original
+        self._local = threading.local()
+
+    def write(self, s):
+        self._original.write(s)
+        buf = getattr(self._local, 'buffer', None)
+        if buf is not None and s.strip():
+            buf.append(s.rstrip("\n"))
+        return len(s)
+
+    def flush(self):
+        self._original.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+
+class InferenceLogCapture:
+    """
+    Thread-local stdout 擷取器：
+    攔截 sys.stdout.write()，收集當前執行緒在推論期間的所有輸出
+    (logger 經 StreamHandler 寫入 stdout 的格式化行 + 純 print() 行)。
+    保持原始輸出順序。
+    """
+    _tee = None  # _TeeStdout instance
+
+    @classmethod
+    def install_tee(cls):
+        """安裝 stdout 攔截器 (只需呼叫一次)"""
+        if cls._tee is None:
+            cls._tee = _TeeStdout(sys.stdout)
+            sys.stdout = cls._tee
+
+    @classmethod
+    def start_capture(cls):
+        if cls._tee:
+            cls._tee._local.buffer = []
+
+    @classmethod
+    def stop_capture(cls) -> str:
+        if cls._tee:
+            buf = getattr(cls._tee._local, 'buffer', None) or []
+            cls._tee._local.buffer = None
+            return "\n".join(buf)
+        return ""
+
+
 # ── 日誌設定 ──────────────────────────────────────────
 
 logger = logging.getLogger("capi.server")
@@ -127,6 +182,9 @@ def setup_logging(config: dict):
     max_bytes = log_cfg.get("max_bytes", 10 * 1024 * 1024)
     backup_count = log_cfg.get("backup_count", 5)
 
+    # 安裝 stdout 攔截器 (必須在 StreamHandler 建立前，才能擷取 logger 輸出)
+    InferenceLogCapture.install_tee()
+
     # 根 logger
     root = logging.getLogger("capi")
     root.setLevel(level)
@@ -137,7 +195,7 @@ def setup_logging(config: dict):
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # Console handler
+    # Console handler (寫入已攔截的 sys.stdout，自動進入擷取緩衝區)
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(fmt)
     root.addHandler(console)
@@ -752,6 +810,7 @@ class CAPIServer:
             web_host = web_cfg.get("host", "0.0.0.0")
             web_port = web_cfg.get("port", 8080)
             try:
+                log_file = self.server_config.get("logging", {}).get("file", "")
                 start_web_server_thread(
                     web_host, web_port, self.db,
                     str(self.heatmap_manager.base_dir),
@@ -760,6 +819,7 @@ class CAPIServer:
                     heatmap_manager=self.heatmap_manager,
                     gpu_lock=self._gpu_lock,
                     capi_server_instance=self,
+                    log_file=log_file or None,
                 )
                 print(f"[SERVER] Web server: http://{web_host}:{web_port}", flush=True)
                 logger.info(f"Web server: http://{web_host}:{web_port}")
@@ -1026,6 +1086,7 @@ class CAPIServer:
 
                     # 執行推論（不含 Heatmap 儲存，快速回覆）
                     start_time = time.time()
+                    InferenceLogCapture.start_capture()
                     ai_judgment, ng_details, inference_results, is_duplicate, omit_image_raw, aoi_report = self._process_request(parsed)
                     processing_seconds = time.time() - start_time
 
@@ -1069,6 +1130,9 @@ class CAPIServer:
                     client_socket.sendall((response + "\r\n").encode("utf-8"))
                     request_count += 1
 
+                    # 停止日誌擷取
+                    captured_log = InferenceLogCapture.stop_capture()
+
                     # 🔄 非同步儲存 Heatmap + DB（背景執行，不阻塞下一筆請求）
                     self._async_executor.submit(
                         self._save_results_async,
@@ -1077,9 +1141,11 @@ class CAPIServer:
                         request_time, response_time, processing_seconds,
                         is_duplicate, aoi_report,
                         omit_image_raw,
+                        captured_log,
                     )
 
                 except ProtocolError as e:
+                    InferenceLogCapture.stop_capture()  # 清除擷取緩衝區
                     if inference_started:
                         with server_status.lock:
                             server_status.active_inferences = max(0, server_status.active_inferences - 1)
@@ -1101,6 +1167,7 @@ class CAPIServer:
                     # 協議錯誤不斷線，繼續等待下一筆
 
                 except Exception as e:
+                    InferenceLogCapture.stop_capture()  # 清除擷取緩衝區
                     if inference_started:
                         with server_status.lock:
                             server_status.active_inferences = max(0, server_status.active_inferences - 1)
@@ -1224,6 +1291,7 @@ class CAPIServer:
         is_duplicate: bool = False,
         aoi_report: Optional[Dict] = None,
         omit_image_raw: Any = None,
+        inference_log: str = "",
     ):
         """
         非同步儲存 Heatmap 和 DB 記錄（在背景執行緒中執行）
@@ -1294,6 +1362,7 @@ class CAPIServer:
                 client_bomb_info=client_bomb_info_str,
                 aoi_machine_coords=aoi_machine_coords_str,
                 image_results_data=image_results_data,
+                inference_log=inference_log,
             )
 
             dup_tag = " [DUPLICATE]" if is_duplicate else ""

@@ -1432,17 +1432,19 @@ class CAPIInferencer:
         otsu_thresh, _ = cv2.threshold(tophat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
         # 若 Otsu 閾值異常高或低，限制在合理範圍內
-        adaptive_thr = min(max(otsu_thresh, 15), fallback_threshold)
+        threshold_floor = self.config.dust_threshold_floor
+        adaptive_thr = min(max(otsu_thresh, threshold_floor), fallback_threshold)
         
         _, binary = cv2.threshold(tophat, adaptive_thr, 255, cv2.THRESH_BINARY)
         used_threshold = adaptive_thr
         
         # 合理性檢查：若前景佔比仍過高，可能全是雜訊，用更嚴格的閾值
-        MAX_REASONABLE_RATIO = 0.10
+        # 但需注意：表面嚴重刮傷的面板確實可能有 15-25% 的灰塵/刮痕前景
+        MAX_REASONABLE_RATIO = 0.25
         initial_ratio = float(np.sum(binary > 0)) / binary.size if binary.size > 0 else 0.0
         if initial_ratio > MAX_REASONABLE_RATIO:
-            # 嚴格閾值前，先保護寬鬆閾值下的線性刮痕特徵
-            scratch_preserved = np.zeros_like(binary)
+            # 嚴格閾值前，先保護寬鬆閾值下的有效灰塵/刮痕特徵
+            feature_preserved = np.zeros_like(binary)
             _n, _labels, _stats, _ = cv2.connectedComponentsWithStats(binary)
             for _i in range(1, _n):
                 _area = _stats[_i, cv2.CC_STAT_AREA]
@@ -1451,16 +1453,20 @@ class CAPIInferencer:
                 if _area < area_min or _area > area_max:
                     continue
                 _aspect = max(_w, _h) / (min(_w, _h) + 1e-5)
-                if _aspect > 5:  # 線性特徵（刮痕）才保護
-                    scratch_preserved[_labels == _i] = 255
+                # 保護線性刮痕(aspect>5) 以及有一定面積的灰塵顆粒
+                if _aspect > 5 or _area >= area_min * 5:
+                    feature_preserved[_labels == _i] = 255
 
-            p99 = float(np.percentile(tophat, 99))
-            strict_thr = max(adaptive_thr, p99)
+            # 使用 p95 作為嚴格閾值，但限制最高不超過 adaptive_thr 的 2 倍
+            # 避免極亮刮痕導致閾值飆到 170+ 而漏掉中等亮度灰塵
+            p95 = float(np.percentile(tophat, 95))
+            strict_thr_cap = adaptive_thr * 2.0
+            strict_thr = min(max(adaptive_thr, p95), strict_thr_cap)
             _, binary = cv2.threshold(tophat, strict_thr, 255, cv2.THRESH_BINARY)
             used_threshold = strict_thr
 
-            # 合併保護的刮痕回 binary
-            binary = cv2.bitwise_or(binary, scratch_preserved)
+            # 合併保護的特徵回 binary
+            binary = cv2.bitwise_or(binary, feature_preserved)
         
         # Step 4: 形態學處理
         # 開運算：去除小噪點
@@ -2719,7 +2725,8 @@ class CAPIInferencer:
                                 if roi.size > 0 and getattr(self, 'edge_inspector', None) and self.edge_inspector.config.enabled:
                                     try:
                                         edge_results = self.edge_inspector.inspect_roi(
-                                            roi, offset_x=rx1, offset_y=ry1
+                                            roi, offset_x=rx1, offset_y=ry1,
+                                            otsu_bounds=result.otsu_bounds,
                                         )
                                         if edge_results:
                                             result.edge_defects.extend(edge_results)

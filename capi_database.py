@@ -211,6 +211,7 @@ class CAPIDatabase:
             add_column_if_not_exists("tile_results", "aoi_defect_code", "TEXT DEFAULT ''")
             add_column_if_not_exists("tile_results", "aoi_product_x", "INTEGER DEFAULT -1")
             add_column_if_not_exists("tile_results", "aoi_product_y", "INTEGER DEFAULT -1")
+            add_column_if_not_exists("inference_records", "inference_log", "TEXT DEFAULT ''")
 
             conn.commit()
         finally:
@@ -236,6 +237,7 @@ class CAPIDatabase:
         client_bomb_info: str = "",
         aoi_machine_coords: str = "",
         image_results_data: Optional[List[Dict]] = None,
+        inference_log: str = "",
     ) -> int:
         """
         儲存一筆完整推論記錄
@@ -271,12 +273,14 @@ class CAPIDatabase:
                        (glass_id, model_id, machine_no, resolution_x, resolution_y,
                         machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                         ng_details, request_time, response_time, processing_seconds,
-                        heatmap_dir, error_message, client_bomb_info, aoi_machine_coords)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        heatmap_dir, error_message, client_bomb_info, aoi_machine_coords,
+                        inference_log)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (glass_id, model_id, machine_no, resolution[0], resolution[1],
                      machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                      ng_details, request_time, response_time, processing_seconds,
-                     heatmap_dir, error_message, client_bomb_info, aoi_machine_coords)
+                     heatmap_dir, error_message, client_bomb_info, aoi_machine_coords,
+                     inference_log)
                 )
                 record_id = cursor.lastrowid
 

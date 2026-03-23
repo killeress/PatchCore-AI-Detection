@@ -359,6 +359,7 @@ class CVEdgeInspector:
         roi: np.ndarray,
         offset_x: int = 0,
         offset_y: int = 0,
+        otsu_bounds: Optional[Tuple[int, int, int, int]] = None,
     ) -> List[EdgeDefect]:
         """
         對預先擷取的 ROI 執行邊緣缺陷檢測（用於 AOI 座標邊緣 defect）
@@ -370,6 +371,8 @@ class CVEdgeInspector:
             roi: 預先擷取的 ROI 影像（灰階或彩色）
             offset_x: ROI 左上角在原圖的 x 偏移
             offset_y: ROI 左上角在原圖的 y 偏移
+            otsu_bounds: 產品前景 Otsu 邊界 (x1, y1, x2, y2)，用於建立前景遮罩
+                         排除非產品區域對背景估計的干擾
 
         Returns:
             偵測到的邊緣缺陷列表（座標已轉換為原圖絕對座標）
@@ -386,6 +389,20 @@ class CVEdgeInspector:
         else:
             gray = roi
 
+        # 建立前景遮罩：只在產品區域內做檢測，排除邊緣外黑色背景干擾
+        fg_mask = None
+        if otsu_bounds is not None:
+            ox1, oy1, ox2, oy2 = otsu_bounds
+            roi_h, roi_w = gray.shape[:2]
+            fg_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+            # 將 Otsu 邊界轉換為 ROI 局部座標
+            local_x1 = max(0, ox1 - offset_x)
+            local_y1 = max(0, oy1 - offset_y)
+            local_x2 = min(roi_w, ox2 - offset_x)
+            local_y2 = min(roi_h, oy2 - offset_y)
+            if local_x2 > local_x1 and local_y2 > local_y1:
+                fg_mask[local_y1:local_y2, local_x1:local_x2] = 255
+
         # 使用四邊中最敏感的參數（最低 threshold、最小 min_area）
         all_cfgs = [self.config.left, self.config.right, self.config.top, self.config.bottom]
         min_threshold = min(c.threshold for c in all_cfgs)
@@ -401,7 +418,7 @@ class CVEdgeInspector:
             exclude_right=0,
         )
 
-        defects = self._inspect_side(gray, "aoi_edge", roi_cfg, offset_x, offset_y)
+        defects = self._inspect_side(gray, "aoi_edge", roi_cfg, offset_x, offset_y, fg_mask=fg_mask)
         return defects
 
     # ── ROI 擷取 ──────────────────────────────
@@ -463,10 +480,29 @@ class CVEdgeInspector:
         cfg: EdgeSideConfig,
         offset_x: int,
         offset_y: int,
+        fg_mask: Optional[np.ndarray] = None,
     ) -> List[EdgeDefect]:
-        """對單邊 ROI 執行檢測"""
+        """對單邊 ROI 執行檢測
+
+        Args:
+            fg_mask: 前景遮罩 (255=前景, 0=背景)。若提供，非前景區域在背景估計前
+                     會被替換為前景中值，避免邊緣外黑色背景干擾 median filter。
+        """
         k = self.config.blur_kernel
         blurred = cv2.GaussianBlur(roi, (k, k), 0)
+
+        # 前景遮罩處理：將非前景區域填充為前景中值，
+        # 使 median filter 不受產品外黑色背景影響
+        if fg_mask is not None and np.any(fg_mask > 0):
+            fg_pixels = blurred[fg_mask > 0]
+            if fg_pixels.size > 0:
+                fg_median = int(np.median(fg_pixels))
+                blurred_for_bg = blurred.copy()
+                blurred_for_bg[fg_mask == 0] = fg_median
+            else:
+                blurred_for_bg = blurred
+        else:
+            blurred_for_bg = blurred
 
         mk = self.config.median_kernel
         # 中值濾波核必須為奇數且不超過 ROI 尺寸
@@ -475,9 +511,14 @@ class CVEdgeInspector:
             mk -= 1
         if mk < 3:
             mk = 3
-        bg = cv2.medianBlur(blurred, mk)
+        bg = cv2.medianBlur(blurred_for_bg, mk)
 
         diff = cv2.absdiff(blurred, bg)
+
+        # 只在前景區域內偵測缺陷
+        if fg_mask is not None:
+            diff[fg_mask == 0] = 0
+
         _, mask = cv2.threshold(diff, cfg.threshold, 255, cv2.THRESH_BINARY)
 
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(

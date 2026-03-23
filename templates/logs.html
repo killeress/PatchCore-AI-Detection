@@ -1,0 +1,433 @@
+{% extends "base.html" %}
+{% block title %}Server Log — CAPI AI{% endblock %}
+
+{% block extra_css %}
+<style>
+    .log-toolbar {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+    }
+    .log-toolbar select,
+    .log-toolbar input {
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 12px;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.85rem;
+    }
+    .log-toolbar select:focus,
+    .log-toolbar input:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+    }
+    .log-toolbar button {
+        padding: 8px 16px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text);
+        cursor: pointer;
+        font-size: 0.85rem;
+        font-family: 'Fira Sans', sans-serif;
+        transition: all 0.2s;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+    }
+    .log-toolbar button:hover {
+        background: rgba(59, 130, 246, 0.15);
+        border-color: var(--accent);
+    }
+    .log-toolbar button.active {
+        background: rgba(59, 130, 246, 0.2);
+        border-color: var(--accent);
+        color: #60a5fa;
+    }
+    .log-container {
+        background: #0c1222;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+        position: relative;
+    }
+    .log-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 16px;
+        background: rgba(30, 41, 59, 0.8);
+        border-bottom: 1px solid var(--border);
+        font-size: 0.8rem;
+        color: var(--text-muted);
+    }
+    .log-content {
+        overflow: auto;
+        max-height: 75vh;
+        padding: 12px 0;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.8rem;
+        line-height: 1.6;
+    }
+    .log-line {
+        padding: 1px 16px;
+        white-space: pre;
+        transition: background 0.1s;
+    }
+    .log-line:hover {
+        background: rgba(59, 130, 246, 0.08);
+    }
+    .log-line.level-error,
+    .log-line.level-critical {
+        color: #f87171;
+        background: rgba(239, 68, 68, 0.05);
+    }
+    .log-line.level-warning {
+        color: #fbbf24;
+        background: rgba(245, 158, 11, 0.05);
+    }
+    .log-line.level-info {
+        color: #e2e8f0;
+    }
+    .log-line.level-debug {
+        color: #64748b;
+    }
+    .log-line .highlight {
+        background: rgba(250, 204, 21, 0.35);
+        border-radius: 2px;
+        padding: 0 1px;
+    }
+    .copy-toast {
+        position: fixed;
+        bottom: 30px;
+        right: 30px;
+        background: #22c55e;
+        color: #fff;
+        padding: 12px 24px;
+        border-radius: 10px;
+        font-weight: 600;
+        font-size: 0.9rem;
+        opacity: 0;
+        transition: opacity 0.3s;
+        pointer-events: none;
+        z-index: 999;
+    }
+    .copy-toast.show {
+        opacity: 1;
+    }
+    .log-line-number {
+        display: inline-block;
+        width: 50px;
+        text-align: right;
+        color: #475569;
+        margin-right: 12px;
+        user-select: none;
+    }
+    .no-log-msg {
+        text-align: center;
+        padding: 60px 20px;
+        color: var(--text-muted);
+    }
+    .no-log-msg svg {
+        width: 64px;
+        height: 64px;
+        margin-bottom: 16px;
+        opacity: 0.4;
+    }
+    .level-pills {
+        display: flex;
+        gap: 6px;
+    }
+    .level-pill {
+        padding: 4px 10px;
+        border-radius: 12px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        cursor: pointer;
+        border: 1px solid transparent;
+        transition: all 0.2s;
+        user-select: none;
+    }
+    .level-pill[data-level="ERROR"] { color: #f87171; background: rgba(239, 68, 68, 0.1); }
+    .level-pill[data-level="WARNING"] { color: #fbbf24; background: rgba(245, 158, 11, 0.1); }
+    .level-pill[data-level="INFO"] { color: #60a5fa; background: rgba(59, 130, 246, 0.1); }
+    .level-pill[data-level="DEBUG"] { color: #64748b; background: rgba(100, 116, 139, 0.1); }
+    .level-pill.active {
+        border-color: currentColor;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<h2 style="margin-bottom: 20px; font-size: 1.3rem; display: flex; align-items: center; gap: 10px;">
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:28px;height:28px;color:var(--accent);">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+    </svg>
+    Server Log Viewer
+</h2>
+
+{% if not log_configured %}
+<div class="card no-log-msg">
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="display:inline-block;">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+    </svg>
+    <h3 style="margin-bottom: 8px;">Log Viewer 未啟用</h3>
+    <p>server_config.yaml 中的 <code style="font-family:'Fira Code',monospace; background:rgba(59,130,246,0.1); padding:2px 6px; border-radius:4px;">logging.file</code> 未設定。</p>
+    <p style="margin-top: 8px; font-size: 0.85rem;">請在設定檔中加入日誌路徑，例如：<code style="font-family:'Fira Code',monospace; background:rgba(59,130,246,0.1); padding:2px 6px; border-radius:4px;">file: "/data/capi_ai/logs/server.log"</code></p>
+</div>
+{% else %}
+
+<div class="log-toolbar">
+    <select id="log-file-select" title="選擇 Log 檔案">
+        {% for lf in log_files %}
+        <option value="{{ loop.index0 }}">{{ lf.name }} ({{ (lf.size / 1024) | round(1) }} KB)</option>
+        {% endfor %}
+        {% if not log_files %}
+        <option value="0">尚無 Log 檔案</option>
+        {% endif %}
+    </select>
+
+    <input type="text" id="log-search" placeholder="搜尋關鍵字 (例: glass ID, ERROR)..." style="flex:1; min-width: 200px;">
+
+    <div class="level-pills">
+        <span class="level-pill" data-level="ERROR" onclick="toggleLevel(this)">ERROR</span>
+        <span class="level-pill" data-level="WARNING" onclick="toggleLevel(this)">WARN</span>
+        <span class="level-pill" data-level="INFO" onclick="toggleLevel(this)">INFO</span>
+        <span class="level-pill" data-level="DEBUG" onclick="toggleLevel(this)">DEBUG</span>
+    </div>
+
+    <select id="log-lines-select" title="顯示行數">
+        <option value="200">200 行</option>
+        <option value="500" selected>500 行</option>
+        <option value="1000">1000 行</option>
+        <option value="2000">2000 行</option>
+        <option value="5000">5000 行</option>
+    </select>
+
+    <button onclick="loadLogs()" title="重新載入">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
+        </svg>
+        重新載入
+    </button>
+
+    <button id="btn-auto-refresh" onclick="toggleAutoRefresh()" title="自動重新整理 (5秒)">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        自動重整
+    </button>
+
+    <button onclick="copyAllLogs()" title="複製全部日誌">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" />
+        </svg>
+        複製全部
+    </button>
+
+    <button onclick="copyFilteredLogs()" title="複製已篩選日誌">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 7.5V6.108c0-1.135.845-2.098 1.976-2.192.373-.03.748-.057 1.123-.08M15.75 18H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08M15.75 18.75v-1.875a3.375 3.375 0 00-3.375-3.375h-1.5a1.125 1.125 0 01-1.125-1.125v-1.5A3.375 3.375 0 006.375 7.5H6m10.5-3.75c.068 0 .135.003.202.006a48.3 48.3 0 012.048.174c1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185A48.32 48.32 0 018.348 3.756c.067-.003.134-.006.202-.006h7.2z" />
+        </svg>
+        複製篩選
+    </button>
+</div>
+
+<div class="log-container">
+    <div class="log-header">
+        <span id="log-status">載入中...</span>
+        <span id="log-auto-status" style="color: #64748b;"></span>
+    </div>
+    <div class="log-content" id="log-content">
+    </div>
+</div>
+
+<div class="copy-toast" id="copy-toast">已複製到剪貼簿!</div>
+
+<script>
+let allLines = [];
+let autoRefreshTimer = null;
+let autoRefreshOn = false;
+let activeLevel = '';
+let lastScrollBottom = true;
+
+function getLevel(line) {
+    if (line.includes('ERROR') || line.includes('CRITICAL')) return 'ERROR';
+    if (line.includes('WARNING') || line.includes('WARN')) return 'WARNING';
+    if (line.includes('DEBUG')) return 'DEBUG';
+    if (line.includes('INFO')) return 'INFO';
+    return '';
+}
+
+function getLevelClass(level) {
+    if (level === 'ERROR') return 'level-error';
+    if (level === 'WARNING') return 'level-warning';
+    if (level === 'DEBUG') return 'level-debug';
+    return 'level-info';
+}
+
+function escapeHtml(text) {
+    const d = document.createElement('div');
+    d.textContent = text;
+    return d.innerHTML;
+}
+
+function highlightSearch(text, search) {
+    if (!search) return escapeHtml(text);
+    const escaped = escapeHtml(text);
+    const searchEscaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp('(' + searchEscaped + ')', 'gi');
+    return escaped.replace(re, '<span class="highlight">$1</span>');
+}
+
+function renderLines() {
+    const container = document.getElementById('log-content');
+    const search = document.getElementById('log-search').value.toLowerCase();
+    const wasAtBottom = lastScrollBottom;
+
+    let filtered = allLines;
+    if (activeLevel) {
+        filtered = filtered.filter(l => getLevel(l) === activeLevel);
+    }
+    if (search) {
+        filtered = filtered.filter(l => l.toLowerCase().includes(search));
+    }
+
+    // Build HTML
+    const searchVal = document.getElementById('log-search').value;
+    let html = '';
+    for (let i = 0; i < filtered.length; i++) {
+        const level = getLevel(filtered[i]);
+        const cls = getLevelClass(level);
+        html += '<div class="log-line ' + cls + '">'
+            + '<span class="log-line-number">' + (i + 1) + '</span>'
+            + highlightSearch(filtered[i], searchVal)
+            + '</div>';
+    }
+    container.innerHTML = html;
+
+    // Update status
+    const status = document.getElementById('log-status');
+    const total = allLines.length;
+    const shown = filtered.length;
+    const fileSelect = document.getElementById('log-file-select');
+    const fileName = fileSelect.options[fileSelect.selectedIndex]?.text || '';
+    status.textContent = fileName + ' — ' + shown + ' / ' + total + ' 行';
+
+    // Auto-scroll to bottom if user was at bottom
+    if (wasAtBottom) {
+        container.scrollTop = container.scrollHeight;
+    }
+}
+
+async function loadLogs() {
+    const fileIndex = document.getElementById('log-file-select').value;
+    const lines = document.getElementById('log-lines-select').value;
+    const search = document.getElementById('log-search').value;
+    const container = document.getElementById('log-content');
+
+    // Track scroll position before load
+    lastScrollBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 50;
+
+    try {
+        let url = '/api/logs?lines=' + lines + '&file=' + fileIndex;
+        const resp = await fetch(url);
+        const data = await resp.json();
+        if (data.error) {
+            container.innerHTML = '<div class="log-line level-error" style="padding:20px;">Error: ' + escapeHtml(data.error) + '</div>';
+            allLines = [];
+            return;
+        }
+        allLines = data.lines || [];
+        renderLines();
+    } catch (e) {
+        container.innerHTML = '<div class="log-line level-error" style="padding:20px;">載入失敗: ' + escapeHtml(e.message) + '</div>';
+    }
+}
+
+function toggleLevel(el) {
+    const level = el.dataset.level;
+    if (activeLevel === level) {
+        activeLevel = '';
+        el.classList.remove('active');
+    } else {
+        document.querySelectorAll('.level-pill').forEach(p => p.classList.remove('active'));
+        activeLevel = level;
+        el.classList.add('active');
+    }
+    renderLines();
+}
+
+function toggleAutoRefresh() {
+    const btn = document.getElementById('btn-auto-refresh');
+    const statusEl = document.getElementById('log-auto-status');
+    if (autoRefreshOn) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+        autoRefreshOn = false;
+        btn.classList.remove('active');
+        statusEl.textContent = '';
+    } else {
+        autoRefreshOn = true;
+        btn.classList.add('active');
+        statusEl.textContent = '自動重整: 5s';
+        loadLogs();
+        autoRefreshTimer = setInterval(loadLogs, 5000);
+    }
+}
+
+function showToast(msg) {
+    const toast = document.getElementById('copy-toast');
+    toast.textContent = msg || '已複製到剪貼簿!';
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 2000);
+}
+
+function copyAllLogs() {
+    const text = allLines.join('\n');
+    navigator.clipboard.writeText(text).then(() => showToast('已複製 ' + allLines.length + ' 行'));
+}
+
+function copyFilteredLogs() {
+    const search = document.getElementById('log-search').value.toLowerCase();
+    let filtered = allLines;
+    if (activeLevel) {
+        filtered = filtered.filter(l => getLevel(l) === activeLevel);
+    }
+    if (search) {
+        filtered = filtered.filter(l => l.toLowerCase().includes(search));
+    }
+    navigator.clipboard.writeText(filtered.join('\n')).then(() => showToast('已複製 ' + filtered.length + ' 行 (篩選後)'));
+}
+
+// Debounced search
+let searchTimer = null;
+document.getElementById('log-search').addEventListener('input', function() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(renderLines, 200);
+});
+
+// Track scroll position
+document.getElementById('log-content').addEventListener('scroll', function() {
+    lastScrollBottom = this.scrollTop + this.clientHeight >= this.scrollHeight - 50;
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown', function(e) {
+    // Ctrl+F → focus search
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault();
+        document.getElementById('log-search').focus();
+    }
+});
+
+// Initial load
+loadLogs();
+</script>
+{% endif %}
+{% endblock %}

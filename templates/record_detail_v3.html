@@ -570,6 +570,56 @@
             </div>
         </div>
 
+        {% if detail.inference_log %}
+        <div class="white-panel" style="position:relative;">
+            <div onclick="toggleLogPanel()" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;">
+                <h3 style="display:flex;align-items:center;gap:8px;margin:0;font-size:16px;font-weight:700;">
+                    <svg id="log-chevron" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;color:#94A3B8;transition:transform 0.2s;">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                    </svg>
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="#3B82F6" style="width:20px;height:20px;">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" />
+                    </svg>
+                    推論 Log
+                    <span id="log-hint" style="font-size:12px;color:#94A3B8;font-weight:400;">(點擊展開)</span>
+                </h3>
+                <button id="log-copy-btn" onclick="event.stopPropagation();copyInferenceLog()" style="padding:6px 14px;border-radius:8px;border:1px solid #E2E8F0;background:#fff;color:#64748B;cursor:pointer;font-size:12px;display:none;align-items:center;gap:6px;transition:all 0.2s;" onmouseover="this.style.borderColor='#3B82F6';this.style.color='#1E293B'" onmouseout="this.style.borderColor='#E2E8F0';this.style.color='#64748B'" title="複製推論 Log">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:14px;height:14px;">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" />
+                    </svg>
+                    複製 Log
+                </button>
+            </div>
+            <div id="log-panel" style="display:none;margin-top:12px;">
+                <pre id="inference-log" style="margin:0;padding:14px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;font-family:'Fira Code',monospace;font-size:11.5px;line-height:1.7;color:#334155;white-space:pre-wrap;word-break:break-all;max-height:500px;overflow-y:auto;">{{ detail.inference_log }}</pre>
+            </div>
+        </div>
+        <script>
+        function toggleLogPanel() {
+            const panel = document.getElementById('log-panel');
+            const chevron = document.getElementById('log-chevron');
+            const copyBtn = document.getElementById('log-copy-btn');
+            const hint = document.getElementById('log-hint');
+            const isHidden = panel.style.display === 'none';
+            panel.style.display = isHidden ? 'block' : 'none';
+            copyBtn.style.display = isHidden ? 'inline-flex' : 'none';
+            chevron.style.transform = isHidden ? 'rotate(90deg)' : '';
+            hint.textContent = isHidden ? '(點擊收合)' : '(點擊展開)';
+        }
+        function copyInferenceLog() {
+            const text = document.getElementById('inference-log').textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                const btn = document.getElementById('log-copy-btn');
+                const orig = btn.innerHTML;
+                btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="#22c55e" style="width:14px;height:14px;"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg> 已複製';
+                btn.style.borderColor = '#22c55e';
+                btn.style.color = '#22c55e';
+                setTimeout(() => { btn.innerHTML = orig; btn.style.borderColor = '#E2E8F0'; btn.style.color = '#64748B'; }, 2000);
+            });
+        }
+        </script>
+        {% endif %}
+
         {% if detail.images %}
         <div class="space-y-8">
             <h3

@@ -69,8 +69,9 @@ patchcore_diffuse_area_threshold: 0.3    # 熱區佔比超過此值觸發降權 
 patchcore_diffuse_area_penalty: 0.5      # 佔比=100% 時的降權乘數
 
 # 灰塵偵測設定 (OMIT 圖片分析)
-dust_brightness_threshold: 40    # 備用亮度閾值 (優先使用 Otsu 自適應)
-dust_area_min: 5               # 灰塵顆粒最小面積 (px)
+dust_brightness_threshold: 40    # 備用亮度閾值 (Otsu 自適應上限)
+dust_threshold_floor: 25         # Otsu 自適應閾值下限 (防止低噪 OMIT 抓出過多背景噪點)
+dust_area_min: 15                # 灰塵顆粒最小面積 (px)
 dust_area_max: 50000             # 灰塵顆粒最大面積 (px)
 dust_extension: 3                # 灰塵區域膨脹像素
 dust_heatmap_iou_threshold: 0.01 # Heatmap vs Dust IOU 閾值 (大於此值判定為灰塵)

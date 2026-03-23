@@ -130,9 +130,10 @@ class CAPIConfig:
     patchcore_diffuse_area_penalty: float = 0.5        # 降權因子 (佔比=100% 時的最大懲罰乘數)
 
     # 灰塵偵測設定 (OMIT 圖片分析)
-    dust_brightness_threshold: int = 80       # OMIT 亮度閾值 (自適應 Otsu 時此為備用)
-    dust_area_min: int = 10                   # 灰塵顆粒最小面積 (px)
-    dust_area_max: int = 50000                # 灰塵顆粒最大面積 (px)
+    dust_brightness_threshold: int = 80       # OMIT 亮度閾值 (自適應 Otsu 時此為備用上限)
+    dust_threshold_floor: int = 25            # Otsu 自適應閾值下限 (防止低噪 OMIT 抓出過多背景噪點)
+    dust_area_min: int = 15                   # 灰塵顆粒最小面積 (px)
+    dust_area_max: int = 100000               # 灰塵顆粒最大面積 (px)
     dust_extension: int = 5                   # 灰塵區域膨脹像素
     dust_heatmap_iou_threshold: float = 0.02  # Heatmap-Dust IOU/Coverage 閾值
     dust_heatmap_top_percent: float = 5.0     # Heatmap 熱區取前 X% (Percentile 二值化)
@@ -230,8 +231,9 @@ class CAPIConfig:
             patchcore_diffuse_area_threshold=data.get("patchcore_diffuse_area_threshold", 0.3),
             patchcore_diffuse_area_penalty=data.get("patchcore_diffuse_area_penalty", 0.5),
             dust_brightness_threshold=data.get("dust_brightness_threshold", 80),
-            dust_area_min=data.get("dust_area_min", 10),
-            dust_area_max=data.get("dust_area_max", 50000),
+            dust_threshold_floor=data.get("dust_threshold_floor", 25),
+            dust_area_min=data.get("dust_area_min", 15),
+            dust_area_max=data.get("dust_area_max", 100000),
             dust_extension=data.get("dust_extension", 5),
             dust_heatmap_iou_threshold=data.get("dust_heatmap_iou_threshold", 0.02),
             dust_heatmap_top_percent=data.get("dust_heatmap_top_percent", 5.0),
