@@ -360,6 +360,8 @@ class CVEdgeInspector:
         offset_x: int = 0,
         offset_y: int = 0,
         otsu_bounds: Optional[Tuple[int, int, int, int]] = None,
+        boundary_padding: int = 15,
+        boundary_min_brightness: int = 15,
     ) -> List[EdgeDefect]:
         """
         對預先擷取的 ROI 執行邊緣缺陷檢測（用於 AOI 座標邊緣 defect）
@@ -373,6 +375,8 @@ class CVEdgeInspector:
             offset_y: ROI 左上角在原圖的 y 偏移
             otsu_bounds: 產品前景 Otsu 邊界 (x1, y1, x2, y2)，用於建立前景遮罩
                          排除非產品區域對背景估計的干擾
+            boundary_padding: 前景遮罩向外擴展的像素數，用於偵測 Otsu 邊界附近的缺陷
+            boundary_min_brightness: 擴展區域中像素最低亮度閾值，低於此值視為真正背景
 
         Returns:
             偵測到的邊緣缺陷列表（座標已轉換為原圖絕對座標）
@@ -403,6 +407,27 @@ class CVEdgeInspector:
             if local_x2 > local_x1 and local_y2 > local_y1:
                 fg_mask[local_y1:local_y2, local_x1:local_x2] = 255
 
+            # 擴展前景遮罩以偵測 Otsu 邊界附近的缺陷
+            # Otsu 二值化邊界可能略為保守，導致邊界上的暗點/缺陷被排除
+            if boundary_padding > 0 and np.any(fg_mask > 0):
+                dilate_kernel = cv2.getStructuringElement(
+                    cv2.MORPH_RECT,
+                    (boundary_padding * 2 + 1, boundary_padding * 2 + 1)
+                )
+                fg_mask_expanded = cv2.dilate(fg_mask, dilate_kernel, iterations=1)
+
+                # 擴展區域中，只納入亮度高於門檻的像素（排除真正的黑色背景）
+                expansion_zone = (fg_mask_expanded > 0) & (fg_mask == 0)
+                expansion_valid = expansion_zone & (gray >= boundary_min_brightness)
+                fg_mask[expansion_valid] = 255
+
+                expanded_px = int(np.count_nonzero(expansion_valid))
+                if expanded_px > 0:
+                    print(f"  🔲 inspect_roi: fg_mask 邊界擴展 +{expanded_px} px (padding={boundary_padding}, min_bright={boundary_min_brightness})")
+
+            fg_coverage = np.count_nonzero(fg_mask) / fg_mask.size * 100
+            print(f"  🔲 inspect_roi: fg_mask coverage={fg_coverage:.1f}%, ROI=({offset_x},{offset_y}) {roi_w}x{roi_h}")
+
         # 使用四邊中最敏感的參數（最低 threshold、最小 min_area）
         all_cfgs = [self.config.left, self.config.right, self.config.top, self.config.bottom]
         min_threshold = min(c.threshold for c in all_cfgs)
@@ -419,6 +444,31 @@ class CVEdgeInspector:
         )
 
         defects = self._inspect_side(gray, "aoi_edge", roi_cfg, offset_x, offset_y, fg_mask=fg_mask)
+
+        if not defects and fg_mask is not None:
+            # 額外記錄 diff 統計，方便調試未偵測到的情況
+            k = self.config.blur_kernel
+            blurred = cv2.GaussianBlur(gray, (k, k), 0)
+            if np.any(fg_mask > 0):
+                fg_pixels = blurred[fg_mask > 0]
+                fg_median_val = int(np.median(fg_pixels))
+                mk = self.config.median_kernel
+                mk = min(mk, min(gray.shape[:2]) - 1)
+                if mk % 2 == 0:
+                    mk -= 1
+                if mk < 3:
+                    mk = 3
+                blurred_for_bg = blurred.copy()
+                blurred_for_bg[fg_mask == 0] = fg_median_val
+                bg = cv2.medianBlur(blurred_for_bg, mk)
+                diff = cv2.absdiff(blurred, bg)
+                diff[fg_mask == 0] = 0
+                max_diff_val = int(np.max(diff)) if diff.size > 0 else 0
+                diff_fg = diff[fg_mask > 0]
+                mean_diff = float(np.mean(diff_fg)) if diff_fg.size > 0 else 0.0
+                print(f"  🔲 inspect_roi: 未偵測到缺陷, max_diff={max_diff_val}, mean_diff={mean_diff:.1f}, "
+                      f"fg_median={fg_median_val}, threshold={min_threshold}, min_area={min_area}, median_k={mk}")
+
         return defects
 
     # ── ROI 擷取 ──────────────────────────────
