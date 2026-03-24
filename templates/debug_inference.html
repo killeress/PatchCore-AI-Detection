@@ -690,6 +690,21 @@
                             <input type="number" id="edge-margin-input" placeholder="預設 ({{ default_edge_margin }})"
                                 value="{{ default_edge_margin }}" min="0" max="2000" step="1">
                         </div>
+                        <div class="toggle-group"
+                            style="grid-column: span 2; flex-direction: row; align-items: center; justify-content: space-between; border-top: 1px dashed rgba(255,255,255,0.1); padding-top: 12px; margin-top: 4px;">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <label for="otsu-offset-enabled" style="margin-bottom: 0;">Otsu 內縮覆寫</label>
+                                <select id="otsu-offset-enabled"
+                                    onchange="document.getElementById('otsu-offset-input').disabled = this.value !== 'true'"
+                                    style="width: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; font-weight: 600; color: var(--text); outline: none;">
+                                    <option value="false" selected>關閉 (使用線上設定)</option>
+                                    <option value="true">開啟</option>
+                                </select>
+                            </div>
+                            <input type="number" id="otsu-offset-input" placeholder="預設 ({{ default_otsu_offset }})"
+                                value="{{ default_otsu_offset }}" min="0" max="500" step="1" disabled
+                                style="width: 140px; text-align: center;">
+                        </div>
                     </div>
                 </div>
 
@@ -1158,6 +1173,11 @@
                 threshold: parseFloat(document.getElementById('threshold-input').value) || 0.5,
                 edge_margin_px: document.getElementById('edge-margin-input').value !== "" ? parseInt(document.getElementById('edge-margin-input').value) : null,
             };
+
+            if (document.getElementById('otsu-offset-enabled').value === 'true') {
+                const otsuVal = document.getElementById('otsu-offset-input').value;
+                if (otsuVal !== "") requestBody.otsu_offset = parseInt(otsuVal, 10);
+            }
 
             if (dustExt !== "") requestBody.dust_extension = parseInt(dustExt);
             if (dustMetric !== "") requestBody.dust_heatmap_metric = dustMetric;

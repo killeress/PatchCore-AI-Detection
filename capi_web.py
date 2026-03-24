@@ -844,7 +844,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             default_patchcore_filter_enabled=get_val('patchcore_filter_enabled', False),
             default_patchcore_blur_sigma=get_val('patchcore_blur_sigma', 1.5),
             default_patchcore_min_area=get_val('patchcore_min_area', 10),
-            default_patchcore_score_metric=get_val('patchcore_score_metric', 'max')
+            default_patchcore_score_metric=get_val('patchcore_score_metric', 'max'),
+            default_otsu_offset=get_val('otsu_offset', 5)
         )
         self._send_response(200, html)
 
@@ -1118,6 +1119,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         
         dust_metric_override = data.get("dust_heatmap_metric")
         
+        otsu_offset_raw = data.get("otsu_offset")
+        otsu_offset_override = int(otsu_offset_raw) if otsu_offset_raw is not None and str(otsu_offset_raw).strip() != "" else None
+
         patchcore_overrides = {}
         if "patchcore_filter_enabled" in data:
             patchcore_overrides["patchcore_filter_enabled"] = bool(data["patchcore_filter_enabled"])
@@ -1132,7 +1136,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             total_start = _time.time()
 
             # 1. 預處理（不需要 GPU，也不用 threshold）
-            result = self.inferencer.preprocess_image(image_path)
+            result = self.inferencer.preprocess_image(image_path, otsu_offset_override=otsu_offset_override)
             if result is None:
                 self._send_json({"error": f"無法載入或預處理圖片: {image_path}"})
                 return

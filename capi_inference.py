@@ -466,18 +466,18 @@ class CAPIInferencer:
             
         return int(x_min), int(y_min), int(x_max), int(y_max)
 
-    def calculate_otsu_bounds(self, image: np.ndarray) -> Tuple[Tuple[int, int, int, int], Optional[int]]:
+    def calculate_otsu_bounds(self, image: np.ndarray, otsu_offset_override: Optional[int] = None) -> Tuple[Tuple[int, int, int, int], Optional[int]]:
         """
         計算 Otsu 前景邊界
         Returns:
             (final_bounds, original_y2) - original_y2 是裁切前的底部 y 座標
         """
         img_height, img_width = image.shape[:2]
-        
+
         # 取得原始物件邊界
         x_min, y_min, x_max, y_max = self._find_raw_object_bounds(image)
-        
-        offset = self.config.otsu_offset
+
+        offset = otsu_offset_override if otsu_offset_override is not None else self.config.otsu_offset
         x_start = max(0, int(x_min) + offset)
         y_start = max(0, int(y_min) + offset)
         x_end = min(img_width, int(x_max) - offset)
@@ -717,14 +717,15 @@ class CAPIInferencer:
         
         return tiles, excluded_count
     
-    def preprocess_image(self, image_path: Path, cached_mark: Optional[ExclusionRegion] = None) -> Optional[ImageResult]:
+    def preprocess_image(self, image_path: Path, cached_mark: Optional[ExclusionRegion] = None, otsu_offset_override: Optional[int] = None) -> Optional[ImageResult]:
         """
         預處理圖片：Otsu + 排除區域 + 切塊
-        
+
         Args:
             image_path: 圖片路徑
             cached_mark: 快取的 MARK 區域（Panel 級共用）
-            
+            otsu_offset_override: Debug 用 Otsu 內縮覆寫值 (px)
+
         Returns:
             ImageResult 或 None（如果載入失敗）
         """
@@ -742,7 +743,7 @@ class CAPIInferencer:
         raw_bounds = self._find_raw_object_bounds(image)
         
         # Otsu 裁切
-        otsu_bounds, original_y2 = self.calculate_otsu_bounds(image)
+        otsu_bounds, original_y2 = self.calculate_otsu_bounds(image, otsu_offset_override=otsu_offset_override)
         
         # 記錄裁切區域
         cropped_region = None
