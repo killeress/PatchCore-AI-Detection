@@ -238,6 +238,14 @@
             background: linear-gradient(90deg, #ef4444, #dc2626);
         }
 
+        .stat-card.revival::before {
+            background: linear-gradient(90deg, #06b6d4, #22d3ee);
+        }
+
+        .stat-card.revival .value {
+            color: #22d3ee;
+        }
+
         .stat-card .label {
             color: var(--text-muted);
             font-size: 0.75rem;
@@ -921,6 +929,7 @@
             let aiOver = 0, aiMiss = 0;   // AI 過檢 / 漏檢
             let errCount = 0; // 原始 ERR 數 (已轉為OK)
             let bothNGRicOK = 0, bothOKRicNG = 0;
+            let revival = 0; // 復活: AOI=NG, AI=OK, RIC=OK
 
             // Combo counts
             const combos = {};
@@ -951,6 +960,7 @@
 
                 if (eqp === 'NG' && ai === 'NG' && ric === 'OK') bothNGRicOK++;
                 if (eqp === 'OK' && ai === 'OK' && ric === 'NG') bothOKRicNG++;
+                if (eqp === 'NG' && ai === 'OK' && ric === 'OK') revival++;
 
                 // Combos
                 const combo = `${eqp}/${ai}/${ric}`;
@@ -982,6 +992,8 @@
             const aoiMissRate = ricNGTotal > 0 ? (aoiMiss / ricNGTotal * 100).toFixed(1) : 0;
             const aiMissRate = ricNGTotal > 0 ? (aiMiss / ricNGTotal * 100).toFixed(1) : 0;
 
+            const revivalRate = aoiNG > 0 ? (revival / aoiNG * 100).toFixed(1) : 0;
+
             return {
                 total, errCount,
                 aoiNG, aiNG, ricNG, ricNGTotal,
@@ -991,6 +1003,7 @@
                 aoiOverRate, aoiMissRate, aiOverRate, aiMissRate,
                 combos, daily,
                 bothNGRicOK, bothOKRicNG,
+                revival, revivalRate,
             };
         }
 
@@ -1050,6 +1063,12 @@
                 <div class="detail">${s.aiMiss} / ${s.ricNGTotal} 筆真實NG被AI漏檢</div>
                 <div class="filter-hint">🔍 AI=OK, RIC=NG</div>
             </div>
+            <div class="stat-card revival" data-filter="revival" onclick="filterByCard('revival')">
+                <div class="label">復活率</div>
+                <div class="value">${s.revivalRate}%</div>
+                <div class="detail">${s.revival} / ${s.aoiNG} 筆 AOI判NG被AI復活且RIC=OK</div>
+                <div class="filter-hint">🔍 AOI=NG, AI=OK, RIC=OK</div>
+            </div>
 
         `;
         }
@@ -1080,6 +1099,7 @@
                     case 'aoi_miss': return eqp === 'OK' && ric === 'NG';
                     case 'ai_over': return ai === 'NG' && ric === 'OK';
                     case 'ai_miss': return ai === 'OK' && ric === 'NG';
+                    case 'revival': return eqp === 'NG' && ai === 'OK' && ric === 'OK';
                     case 'err': return row.result_ric_raw === 'ERR';
                     default: return true;
                 }
@@ -1088,7 +1108,7 @@
             const labels = {
                 total: '全部', aoi_correct: 'AOI 與 DATASTR 判定一致', ai_correct: 'AI 與 DATASTR 判定一致',
                 ai_ng: 'AI 判 NG', aoi_over: 'AOI 過檢 (AOI=NG 且 DATASTR=OK)', aoi_miss: 'AOI 漏檢 (AOI=OK 且 DATASTR=NG)',
-                ai_over: 'AI 過檢', ai_miss: 'AI 漏檢',
+                ai_over: 'AI 過檢', ai_miss: 'AI 漏檢', revival: '復活 (AOI=NG, AI=OK, RIC=OK)',
             };
 
             const labelEl = document.getElementById('filterLabel');
