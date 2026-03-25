@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}RIC 人工檢驗比對報表 — CAPI AI{% endblock %}
+{% block title %}AI 正確率報表 — CAPI AI{% endblock %}
 
 {% block extra_css %}
 <style>
@@ -55,26 +55,6 @@
         display: none;
     }
 
-    .upload-progress {
-        display: none;
-        margin-top: 16px;
-    }
-
-    .upload-progress .bar-track {
-        height: 6px;
-        background: var(--border);
-        border-radius: 3px;
-        overflow: hidden;
-    }
-
-    .upload-progress .bar-fill {
-        height: 100%;
-        background: linear-gradient(90deg, var(--accent), #818cf8);
-        border-radius: 3px;
-        transition: width 0.3s;
-        width: 0%;
-    }
-
     .upload-msg {
         margin-top: 12px;
         padding: 12px 16px;
@@ -93,59 +73,6 @@
         background: rgba(239, 68, 68, 0.12);
         color: var(--ng);
         border: 1px solid rgba(239, 68, 68, 0.3);
-    }
-
-    /* Controls */
-    .controls-bar {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-        flex-wrap: wrap;
-        margin-bottom: 20px;
-    }
-
-    .controls-bar select,
-    .controls-bar button {
-        background: var(--surface);
-        color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 10px 16px;
-        font-size: 0.9rem;
-        cursor: pointer;
-        transition: all 0.2s;
-    }
-
-    .controls-bar select:hover,
-    .controls-bar button:hover {
-        border-color: var(--accent);
-    }
-
-    .controls-bar button {
-        background: linear-gradient(135deg, var(--accent), #6366f1);
-        border: none;
-        font-weight: 600;
-        color: white;
-    }
-
-    .controls-bar button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
-    }
-
-    .controls-bar button.btn-danger {
-        background: linear-gradient(135deg, #ef4444, #dc2626);
-    }
-
-    .controls-bar button.btn-danger:hover {
-        box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
-    }
-
-    .controls-bar button.btn-danger:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-        transform: none;
-        box-shadow: none;
     }
 
     /* Stats Cards */
@@ -186,7 +113,8 @@
         transition: opacity 0.2s;
     }
 
-    .stat-card.active .filter-hint {
+    .stat-card.active .filter-hint,
+    .stat-card:hover .filter-hint {
         opacity: 1;
     }
 
@@ -328,82 +256,162 @@
         height: 300px;
     }
 
-    /* Detail Table */
-    .detail-section h3 {
-        color: var(--text);
-        font-size: 1.1rem;
-        font-weight: 600;
-        margin: 0 0 16px 0;
+    /* ── Client Comparison specific styles ── */
+    .stat-card.revival::before {
+        background: linear-gradient(90deg, #06b6d4, #22d3ee);
     }
 
-    .detail-table-wrap {
+    .stat-card.revival .value {
+        color: #22d3ee;
+    }
+
+    /* Client sub-tabs */
+    .client-tabs {
+        display: flex;
+        gap: 4px;
+        margin-bottom: 24px;
+        background: var(--surface);
+        border-radius: 12px;
+        padding: 4px;
+        border: 1px solid var(--border);
+    }
+
+    .client-tab {
+        flex: 1;
+        padding: 12px 16px;
+        text-align: center;
+        border-radius: 10px;
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 0.9rem;
+        color: var(--text-muted);
+        transition: all 0.2s;
+    }
+
+    .client-tab:hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.04);
+    }
+
+    .client-tab.active {
+        background: linear-gradient(135deg, var(--accent), #6366f1);
+        color: white;
+    }
+
+    .client-tab-panel {
+        display: none;
+    }
+
+    .client-tab-panel.active {
+        display: block;
+    }
+
+    .client-file-info {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 18px;
+        font-size: 0.82rem;
+        color: var(--text-muted);
+        margin-bottom: 16px;
+    }
+
+    .client-file-info strong {
+        color: var(--accent);
+    }
+
+    .table-wrap {
         max-height: 500px;
         overflow-y: auto;
         border-radius: 10px;
     }
 
-    .detail-table-wrap::-webkit-scrollbar {
+    .table-wrap::-webkit-scrollbar {
         width: 6px;
     }
 
-    .detail-table-wrap::-webkit-scrollbar-thumb {
+    .table-wrap::-webkit-scrollbar-thumb {
         background: rgba(255, 255, 255, 0.15);
         border-radius: 3px;
     }
 
-    /* Loading */
-    .loading-overlay {
-        display: none;
-        text-align: center;
-        padding: 60px 20px;
-        color: var(--text-muted);
-    }
-
-    .loading-overlay .spinner {
-        width: 36px;
-        height: 36px;
-        border: 3px solid var(--border);
-        border-top-color: var(--accent);
-        border-radius: 50%;
-        animation: spin 0.8s linear infinite;
-        margin: 0 auto 16px auto;
-    }
-
-    @keyframes spin {
-        to {
-            transform: rotate(360deg);
-        }
-    }
-
-    /* Empty state */
-    .empty-state {
-        text-align: center;
-        padding: 60px 20px;
-        color: var(--text-muted);
-    }
-
-    .empty-state .icon {
-        font-size: 3rem;
-        margin-bottom: 12px;
-    }
-
-    .badge-sm {
+    /* Badge styles for client comparison */
+    .badge {
         display: inline-block;
-        padding: 2px 8px;
-        border-radius: 10px;
-        font-size: 0.7rem;
+        padding: 3px 10px;
+        border-radius: 12px;
+        font-size: 0.72rem;
         font-weight: 700;
         text-transform: uppercase;
     }
 
-    .badge-sm.found {
+    .badge-ok {
         background: rgba(34, 197, 94, 0.15);
         color: var(--ok);
     }
 
-    .badge-sm.not-found {
+    .badge-ng {
+        background: rgba(239, 68, 68, 0.15);
+        color: var(--ng);
+    }
+
+    .badge-err {
         background: rgba(245, 158, 11, 0.15);
         color: var(--err);
+    }
+
+    .badge-match {
+        background: rgba(34, 197, 94, 0.15);
+        color: var(--ok);
+    }
+
+    .badge-diff {
+        background: rgba(239, 68, 68, 0.15);
+        color: var(--ng);
+    }
+
+    /* AOI no-reference-value overlay */
+    .stat-card.no-ref {
+        opacity: 0.5;
+        position: relative;
+    }
+
+    .stat-card.no-ref::after {
+        content: '\26A0 \7121\53C3\8003\50F9\503C';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%) rotate(-15deg);
+        font-size: 0.85rem;
+        font-weight: 700;
+        color: #f59e0b;
+        background: rgba(15, 23, 42, 0.85);
+        padding: 4px 12px;
+        border-radius: 6px;
+        border: 1px solid #f59e0b;
+        pointer-events: none;
+        z-index: 2;
+        white-space: nowrap;
+    }
+
+    .no-ref-banner {
+        background: rgba(245, 158, 11, 0.1);
+        border: 1px solid rgba(245, 158, 11, 0.3);
+        border-radius: 10px;
+        padding: 12px 18px;
+        margin-bottom: 16px;
+        font-size: 0.88rem;
+        color: #fbbf24;
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        line-height: 1.6;
+    }
+
+    .no-ref-banner .icon {
+        font-size: 1.2rem;
+        flex-shrink: 0;
+        margin-top: 2px;
     }
 </style>
 {% endblock %}
@@ -411,596 +419,968 @@
 {% block extra_head %}
 <!-- 改為使用本地端的 Chart.js，避免生產環境無法連外網導致套件下載失敗 -->
 <script src="/static/js/chart.umd.min.js"></script>
+<script src="/static/js/chartjs-plugin-datalabels.min.js"></script>
+<script src="/static/js/chartjs-plugin-annotation.min.js"></script>
 {% endblock %}
 
 {% block content %}
 <div class="ric-header">
     <div>
-        <h2>📊 RIC 人工檢驗比對報表</h2>
-        <div class="subtitle">匯入 RIC (人工檢驗) 資料，與 AOI / AI 結果進行比對分析</div>
+        <h2>📊 AI 正確率報表</h2>
+        <div class="subtitle">載入檢測資料 (.xls)，分析 AOI / AI / RIC 正確率與過漏檢統計</div>
     </div>
 </div>
 
-<!-- Upload Section -->
-<div class="card" style="margin-bottom: 20px;">
-    <div style="display:flex; align-items:center; gap:8px; margin-bottom:16px;">
-        <span style="font-size:1.2rem;">📤</span>
-        <h3 style="margin:0; font-size:1rem; color:var(--text);">匯入 RIC 資料</h3>
-        <span style="color:var(--text-muted); font-size:0.8rem; margin-left:auto;">支援 .xlsx / .xls 格式</span>
-    </div>
-    <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
-        <div class="icon">📁</div>
-        <div style="color:var(--text); font-weight:600; font-size:1.05rem;">拖放 XLS 檔案至此處</div>
-        <div class="hint">或點擊選擇檔案上傳</div>
-        <input type="file" id="fileInput" accept=".xlsx,.xls">
-    </div>
-    <div class="upload-progress" id="uploadProgress">
-        <div class="bar-track">
-            <div class="bar-fill" id="progressBar"></div>
-        </div>
-        <div style="text-align:center; color:var(--text-muted); margin-top:8px; font-size:0.85rem;" id="progressText">
-            上傳中...</div>
-    </div>
-    <div class="upload-msg" id="uploadMsg"></div>
-</div>
-
-<!-- Controls -->
-<div class="controls-bar">
-    <select id="batchSelect">
-        <option value="">全部批次</option>
-        {% for batch in batches %}
-        <option value="{{ batch.id }}">
-            #{{ batch.id }} — {{ batch.filename }} ({{ batch.total_records }}筆, {{ batch.import_time }})
-        </option>
-        {% endfor %}
-    </select>
-    <button onclick="loadReport()">🔍 載入比對報表</button>
-    <button class="btn-danger" id="btnDeleteBatch" onclick="deleteBatch()" disabled>🗑 刪除批次</button>
-</div>
-
-<!-- Loading -->
-<div class="loading-overlay" id="loadingOverlay">
-    <div class="spinner"></div>
-    <div>正在載入比對資料...</div>
-</div>
-
-<!-- Report Content (hidden until loaded) -->
-<div id="reportContent" style="display:none;">
-    <!-- Stats Cards -->
-    <div class="stats-grid">
-        <div class="stat-card total" data-filter="total" onclick="filterByCard('total')">
-            <div class="label">比對總數</div>
-            <div class="value" id="statTotal">—</div>
-            <div class="detail">與 RIC 比對之面板總數</div>
-            <div class="filter-hint">🔍 點擊顯示全部</div>
-        </div>
-        <div class="stat-card aoi" data-filter="aoi_correct" onclick="filterByCard('aoi_correct')">
-            <div class="label">AOI 準確率</div>
-            <div class="value" id="statAoi">—</div>
-            <div class="detail" id="statAoiDetail">—</div>
-            <div class="filter-hint">🔍 點擊篩選 AOI 與 RIC 一致</div>
-        </div>
-        <div class="stat-card ai" data-filter="ai_correct" onclick="filterByCard('ai_correct')">
-            <div class="label">AI 準確率</div>
-            <div class="value" id="statAi">—</div>
-            <div class="detail" id="statAiDetail">—</div>
-            <div class="filter-hint">🔍 點擊篩選 AI 與 RIC 一致</div>
-        </div>
-        <div class="stat-card match" data-filter="ai_ng" onclick="filterByCard('ai_ng')">
-            <div class="label">AI 判 NG 數</div>
-            <div class="value" id="statMatch">—</div>
-            <div class="detail" id="statMatchDetail">—</div>
-            <div class="filter-hint">🔍 點擊篩選 AI 判 NG</div>
-        </div>
+<!-- File info bar (shown after load) -->
+    <div class="client-file-info" id="client_fileInfo" style="display:none;">
+        <strong>已載入</strong>: <span id="client_fileName"></span> (<span id="client_fileRows">0</span> 筆)
+        <button onclick="clientComp.clearDB()" style="margin-left:12px; background:rgba(239,68,68,0.15); color:var(--ng); border:1px solid rgba(239,68,68,0.3); border-radius:6px; padding:4px 12px; font-size:0.78rem; cursor:pointer;">🗑 清除資料庫</button>
     </div>
 
-    <!-- 過檢/漏檢 Stats Cards -->
-    <div class="stats-grid">
-        <div class="stat-card over" data-filter="aoi_over" onclick="filterByCard('aoi_over')">
-            <div class="label">AOI 過檢率</div>
-            <div class="value" id="statAoiOver">—</div>
-            <div class="detail" id="statAoiOverDetail">AOI 判 NG 但 RIC 判 OK</div>
-            <div class="filter-hint">🔍 點擊篩選過檢明細</div>
+    <!-- Upload Zone -->
+    <div class="card" id="client_uploadCard" style="margin-bottom:20px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:16px;">
+            <span style="font-size:1.2rem;">📤</span>
+            <h3 style="margin:0; font-size:1rem; color:var(--text);">載入檢測資料</h3>
+            <span style="color:var(--text-muted); font-size:0.8rem; margin-left:auto;">支援 .xls (HTML格式)</span>
         </div>
-        <div class="stat-card miss" data-filter="aoi_miss" onclick="filterByCard('aoi_miss')">
-            <div class="label">AOI 漏檢率</div>
-            <div class="value" id="statAoiMiss">—</div>
-            <div class="detail" id="statAoiMissDetail">AOI 判 OK 但 RIC 判 NG</div>
-            <div class="filter-hint">🔍 點擊篩選漏檢明細</div>
+        {% if client_record_count > 0 %}
+        <div style="background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.2); border-radius:10px; padding:14px 18px; margin-bottom:16px; display:flex; align-items:center; gap:12px;">
+            <span style="font-size:1.1rem;">💾</span>
+            <div style="flex:1;">
+                <div style="color:var(--text); font-weight:600;">資料庫已有 {{ client_record_count }} 筆檢測紀錄</div>
+                <div style="color:var(--text-muted); font-size:0.82rem; margin-top:2px;">可直接載入查閱，或上傳新檔案追加資料</div>
+            </div>
+            <button onclick="clientComp.loadFromDB()" style="background:linear-gradient(135deg,var(--accent),#6366f1); border:none; color:white; padding:8px 18px; border-radius:8px; font-size:0.88rem; font-weight:600; cursor:pointer;">📊 載入報表</button>
         </div>
-        <div class="stat-card over" data-filter="ai_over" onclick="filterByCard('ai_over')">
-            <div class="label">AI 過檢率</div>
-            <div class="value" id="statAiOver">—</div>
-            <div class="detail" id="statAiOverDetail">AI 判 NG 但 RIC 判 OK</div>
-            <div class="filter-hint">🔍 點擊篩選過檢明細</div>
+        {% endif %}
+        <div class="upload-zone" id="client_uploadZone" onclick="document.getElementById('client_fileInput').click()">
+            <div class="icon">📁</div>
+            <div style="color:var(--text); font-weight:600; font-size:1.05rem;">拖放 XLS 檔案至此處</div>
+            <div class="hint">或點擊選擇檔案上傳（新資料將自動存入資料庫，重複資料自動略過）</div>
+            <input type="file" id="client_fileInput" accept=".xls,.xlsx,.html,.htm">
         </div>
-        <div class="stat-card miss" data-filter="ai_miss" onclick="filterByCard('ai_miss')">
-            <div class="label">AI 漏檢率</div>
-            <div class="value" id="statAiMiss">—</div>
-            <div class="detail" id="statAiMissDetail">AI 判 OK 但 RIC 判 NG</div>
-            <div class="filter-hint">🔍 點擊篩選漏檢明細</div>
-        </div>
+        <div class="upload-msg" id="client_uploadMsg"></div>
     </div>
 
-    <!-- Charts -->
-    <div class="charts-row">
-        <div class="chart-card">
-            <h3>📈 每日準確率趨勢</h3>
-            <div class="chart-container">
-                <canvas id="dailyChart"></canvas>
+    <!-- Report Content (hidden until file loaded) -->
+    <div id="client_reportContent" style="display:none;">
+        <!-- Sub-tabs -->
+        <div class="client-tabs">
+            <div class="client-tab active" data-client-tab="analysis" onclick="clientComp.switchTab('analysis')">📈 統計分析</div>
+            <div class="client-tab" data-client-tab="detail" onclick="clientComp.switchTab('detail')">📋 逐筆明細</div>
+        </div>
+
+        <!-- Sub-Tab 1: Analysis -->
+        <div class="client-tab-panel active" id="client_panel-analysis">
+            <!-- RESULT_EQP warning banner -->
+            <div class="no-ref-banner">
+                <span class="icon">⚠️</span>
+                <div>
+                    <strong>RESULT_EQP=OK 無參考價值：</strong>
+                    RESULT_EQP=OK 表示外觀檢 (AOI) 判成 NG 後，由人員 (RIC) 目視複檢外觀覆判為 OK（非看 AI 畫面）。
+                    因此 <strong>AOI=OK 的資料不代表 AOI 真正判 OK</strong>，AOI 漏檢率無參考價值。
+                    但 <strong>AOI=NG 的 case 有參考價值</strong>，AOI 過檢率仍可做為參考指標。
+                </div>
+            </div>
+            <!-- Row 1: Basic Stats -->
+            <div class="stats-grid" id="client_statsGrid1"></div>
+            <!-- Row 2: Over/Miss Stats -->
+            <div class="stats-grid" id="client_statsGrid2"></div>
+            <!-- Charts -->
+            <div class="charts-row">
+                <div class="chart-card">
+                    <h3>📊 判定結果分布</h3>
+                    <div class="chart-container"><canvas id="client_resultChart"></canvas></div>
+                </div>
+                <div class="chart-card">
+                    <h3>🧩 判定組合分佈 (AOI/AI/RIC)</h3>
+                    <div class="chart-container"><canvas id="client_comboChart"></canvas></div>
+                </div>
+            </div>
+            <div class="charts-row">
+                <div class="chart-card">
+                    <h3>📈 時間軸趨勢 (每日)</h3>
+                    <div class="chart-container"><canvas id="client_trendChart"></canvas></div>
+                </div>
+                <div class="chart-card">
+                    <h3>🧮 混淆矩陣 (AOI/AI vs 實際)</h3>
+                    <div class="chart-container"><canvas id="client_confusionChart"></canvas></div>
+                </div>
+            </div>
+            <!-- Daily Metrics Tracking -->
+            <div class="charts-row">
+                <div class="chart-card" style="grid-column: 1 / -1;">
+                    <h3>📅 每日過漏檢率追蹤 (分母為當日總數量)</h3>
+                    <div class="chart-container"><canvas id="client_dailyMetricsChart"></canvas></div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 8px;">
+                        📌 備註：此圖表之漏檢與過檢率分母皆為「當日影像總數量」，以此呈現出整體佔比走勢。<br>
+                        (由於「AI判成OK，但RIC OK」為一致判定，這裡假設漏檢率是指「AI判成OK，但RIC為NG」，特此說明)
+                    </div>
+                </div>
             </div>
         </div>
-        <div class="chart-card">
-            <h3>🏭 各機台準確率</h3>
-            <div class="chart-container">
-                <canvas id="machineChart"></canvas>
+
+        <!-- Sub-Tab 2: Detail -->
+        <div class="client-tab-panel" id="client_panel-detail">
+            <div class="card">
+                <div class="detail-header">
+                    <h3>📋 逐筆明細 <span id="client_filterLabel"
+                            style="font-size:0.8rem; color:var(--accent); font-weight:400;"></span></h3>
+                    <button class="btn-export" onclick="clientComp.exportCSV()">📥 導出 CSV</button>
+                </div>
+                <div class="table-wrap" id="client_tableWrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>檢測時間</th>
+                                <th>Panel ID</th>
+                                <th>機台</th>
+                                <th>AOI (RESULT_EQP)</th>
+                                <th>AI (RESULT_AI)</th>
+                                <th>RIC (原始)</th>
+                                <th>DATASTR 判定</th>
+                                <th>DATASTR 內容</th>
+                                <th>AOI vs DATASTR <span style="color:#f59e0b;font-size:0.65rem;">⚠僅參考NG</span></th>
+                                <th>AI vs DATASTR</th>
+                            </tr>
+                        </thead>
+                        <tbody id="client_detailBody"></tbody>
+                    </table>
+                </div>
             </div>
         </div>
+
     </div>
 
-    <!-- Detail Table -->
-    <div class="card detail-section">
-        <div class="detail-header">
-            <h3>📋 逐筆比對明細 <span id="filterLabel" style="font-size:0.8rem; color:var(--accent); font-weight:400;"></span>
-            </h3>
-            <button class="btn-export" onclick="exportDetails()">📥 導出明細</button>
-        </div>
-        <div class="detail-table-wrap">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Panel ID</th>
-                        <th>機台</th>
-                        <th>AOI 判定</th>
-                        <th>AI 判定</th>
-                        <th>RIC 判定</th>
-                        <th>RIC 來源</th>
-                        <th>檢測時間</th>
-                    </tr>
-                </thead>
-                <tbody id="detailBody"></tbody>
-            </table>
-        </div>
-    </div>
-</div>
 
-<!-- Empty state -->
-<div class="empty-state" id="emptyState">
-    <div class="icon">📊</div>
-    <div style="font-size:1.1rem; color:var(--text); margin-bottom:8px;">尚未載入報表</div>
-    <div>請先匯入 RIC 資料，然後點擊「載入比對報表」查看結果</div>
-</div>
 
+<!-- ══════════════════════════════════════════════════════ -->
+<!-- JavaScript                                            -->
+<!-- ══════════════════════════════════════════════════════ -->
 <script>
-    // ── Upload Logic ──
-    const uploadZone = document.getElementById('uploadZone');
-    const fileInput = document.getElementById('fileInput');
+    const clientComp = (function () {
+        let rawData = [];
+        let currentFilter = null;
+        let resultChart = null, comboChart = null, trendChart = null, confusionChart = null, dailyMetricsChart = null;
 
-    ['dragenter', 'dragover'].forEach(ev => {
-        uploadZone.addEventListener(ev, e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
-    });
-    ['dragleave', 'drop'].forEach(ev => {
-        uploadZone.addEventListener(ev, e => { e.preventDefault(); uploadZone.classList.remove('drag-over'); });
-    });
-    uploadZone.addEventListener('drop', e => {
-        const files = e.dataTransfer.files;
-        if (files.length > 0) uploadFile(files[0]);
-    });
-    fileInput.addEventListener('change', () => {
-        if (fileInput.files.length > 0) uploadFile(fileInput.files[0]);
-    });
+        // ── Upload Logic ──
+        const uploadZone = document.getElementById('client_uploadZone');
+        const fileInput = document.getElementById('client_fileInput');
 
-    function uploadFile(file) {
-        const msgEl = document.getElementById('uploadMsg');
-        const progressEl = document.getElementById('uploadProgress');
-        const barEl = document.getElementById('progressBar');
-        const textEl = document.getElementById('progressText');
+        ['dragenter', 'dragover'].forEach(ev => {
+            uploadZone.addEventListener(ev, e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
+        });
+        ['dragleave', 'drop'].forEach(ev => {
+            uploadZone.addEventListener(ev, e => { e.preventDefault(); uploadZone.classList.remove('drag-over'); });
+        });
+        uploadZone.addEventListener('drop', e => {
+            const files = e.dataTransfer.files;
+            if (files.length > 0) loadFile(files[0]);
+        });
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) loadFile(fileInput.files[0]);
+        });
 
-        msgEl.style.display = 'none';
-        progressEl.style.display = 'block';
-        barEl.style.width = '30%';
-        textEl.textContent = `正在上傳: ${file.name} ...`;
+        function loadFile(file) {
+            const msgEl = document.getElementById('client_uploadMsg');
+            const reader = new FileReader();
+            reader.onload = function (e) {
+                try {
+                    const content = e.target.result;
+                    rawData = parseHTMLTable(content);
+                    if (rawData.length === 0) throw new Error('無法解析任何資料列');
 
-        const formData = new FormData();
-        formData.append('file', file);
-
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/ric/upload');
-
-        xhr.upload.onprogress = e => {
-            if (e.lengthComputable) {
-                const pct = Math.round(e.loaded / e.total * 100);
-                barEl.style.width = pct + '%';
-                textEl.textContent = `上傳中 ${pct}%...`;
-            }
-        };
-
-        xhr.onload = () => {
-            barEl.style.width = '100%';
-            try {
-                const data = JSON.parse(xhr.responseText);
-                if (data.success) {
                     msgEl.className = 'upload-msg success';
-                    msgEl.innerHTML = `✅ ${data.message} (批次 #${data.batch_id})`;
+                    msgEl.innerHTML = `✅ 解析 ${rawData.length} 筆資料，正在存入資料庫...`;
                     msgEl.style.display = 'block';
-                    // Refresh batch select
-                    setTimeout(() => location.reload(), 1200);
-                } else {
+
+                    // 存入資料庫 (重複自動略過)
+                    saveToDB(rawData).then(result => {
+                        msgEl.innerHTML = `✅ 成功載入 ${rawData.length} 筆資料（新增 ${result.inserted} 筆，略過 ${result.skipped} 筆重複）`;
+                    }).catch(() => {
+                        msgEl.innerHTML = `✅ 成功載入 ${rawData.length} 筆資料（離線模式，未存入資料庫）`;
+                    });
+
+                    showReport(file.name, rawData.length);
+                    renderAll();
+                } catch (err) {
                     msgEl.className = 'upload-msg error';
-                    msgEl.textContent = '❌ ' + (data.error || '上傳失敗');
+                    msgEl.textContent = '❌ 解析失敗: ' + err.message;
                     msgEl.style.display = 'block';
                 }
-            } catch (e) {
-                msgEl.className = 'upload-msg error';
-                msgEl.textContent = '❌ 伺服器回應格式錯誤';
-                msgEl.style.display = 'block';
-            }
-            setTimeout(() => { progressEl.style.display = 'none'; }, 2000);
-        };
+            };
+            reader.readAsText(file, 'GB2312');
+        }
 
-        xhr.onerror = () => {
-            msgEl.className = 'upload-msg error';
-            msgEl.textContent = '❌ 網路錯誤，請稍後重試';
+        function showReport(sourceName, count) {
+            document.getElementById('client_fileInfo').style.display = 'block';
+            document.getElementById('client_fileName').textContent = sourceName;
+            document.getElementById('client_fileRows').textContent = count;
+            document.getElementById('client_reportContent').style.display = 'block';
+            document.getElementById('client_uploadCard').style.display = 'none';
+        }
+
+        // DATASTR→NG 判定 (與 parseHTMLTable 共用邏輯)
+        function deriveJudgment(datastr) {
+            return datastr && datastr.includes('NG') ? 'NG' : 'OK';
+        }
+
+        function saveToDB(data) {
+            // DB 的 UNIQUE(time_stamp, pnl_id) 會自動跳過重複，無需客戶端去重
+            const records = data.map(row => ({
+                time_stamp: row.systime,
+                pnl_id: row.pnl_id,
+                mach_id: row.mach_id,
+                result_eqp: row.result_eqp,
+                result_ai: row.result_ai,
+                result_ric: row.result_ric_raw,
+                datastr: row.datastr,
+            }));
+
+            return fetch('/api/ric/import-client', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ records })
+            }).then(r => r.json()).then(data => {
+                if (!data.success) throw new Error(data.error);
+                return data;
+            });
+        }
+
+        function loadFromDB() {
+            const msgEl = document.getElementById('client_uploadMsg');
+            msgEl.className = 'upload-msg success';
+            msgEl.innerHTML = '⏳ 正在從資料庫載入...';
             msgEl.style.display = 'block';
-            progressEl.style.display = 'none';
-        };
 
-        xhr.send(formData);
-    }
+            fetch('/api/ric/client-data')
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success || !data.records || data.records.length === 0) {
+                        msgEl.className = 'upload-msg error';
+                        msgEl.textContent = '❌ 資料庫無資料';
+                        msgEl.style.display = 'block';
+                        return;
+                    }
+                    // DB 資料不含 CCD (匯入時已排除)，直接轉換格式
+                    rawData = data.records.map(r => ({
+                        systime: r.time_stamp,
+                        pnl_id: r.pnl_id,
+                        mach_id: r.mach_id,
+                        result_eqp: r.result_eqp,
+                        result_ai: r.result_ai,
+                        result_ric: deriveJudgment(r.datastr),
+                        result_ric_raw: r.result_ric,
+                        datastr: r.datastr || '',
+                    }));
 
-    // ── Batch Select → 控制刪除按鈕狀態 ──
-    document.getElementById('batchSelect').addEventListener('change', function () {
-        document.getElementById('btnDeleteBatch').disabled = !this.value;
-    });
-
-    // ── Delete Logic ──
-    function deleteBatch() {
-        const sel = document.getElementById('batchSelect');
-        const batchId = sel.value;
-        if (!batchId) return;
-
-        const batchText = sel.options[sel.selectedIndex].text;
-        if (!confirm(`確定要刪除此批次嗎？\n\n${batchText}\n\n此操作無法復原！`)) return;
-
-        fetch('/api/ric/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ batch_id: parseInt(batchId) })
-        })
-            .then(r => r.json())
-            .then(data => {
-                if (data.success) {
-                    const msgEl = document.getElementById('uploadMsg');
                     msgEl.className = 'upload-msg success';
-                    msgEl.innerHTML = `✅ ${data.message}`;
+                    msgEl.innerHTML = `✅ 從資料庫載入 ${rawData.length} 筆資料`;
                     msgEl.style.display = 'block';
-                    setTimeout(() => location.reload(), 1200);
-                } else {
-                    alert('❌ ' + (data.error || '刪除失敗'));
-                }
-            })
-            .catch(err => alert('❌ 網路錯誤: ' + err.message));
-    }
 
-    // ── Report Logic ──
-    let dailyChart = null;
-    let machineChart = null;
-    let allDetails = [];       // 全部明細資料
-    let currentFilter = null;  // 目前篩選條件
+                    showReport('資料庫', rawData.length);
+                    renderAll();
+                })
+                .catch(err => {
+                    msgEl.className = 'upload-msg error';
+                    msgEl.textContent = '❌ 載入失敗: ' + err.message;
+                    msgEl.style.display = 'block';
+                });
+        }
 
-    function loadReport() {
-        const batchId = document.getElementById('batchSelect').value;
-        const loading = document.getElementById('loadingOverlay');
-        const content = document.getElementById('reportContent');
-        const empty = document.getElementById('emptyState');
+        function clearDB() {
+            if (!confirm('確定要清除資料庫中所有檢測紀錄嗎？\n此操作無法復原！')) return;
+            fetch('/api/ric/clear-client', { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        alert(`已清除 ${data.deleted} 筆資料`);
+                        location.reload();
+                    } else {
+                        alert('❌ ' + (data.error || '清除失敗'));
+                    }
+                })
+                .catch(err => alert('❌ 網路錯誤: ' + err.message));
+        }
 
-        loading.style.display = 'block';
-        content.style.display = 'none';
-        empty.style.display = 'none';
+        function parseHTMLTable(html) {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            const rows = doc.querySelectorAll('tr');
+            const data = [];
 
-        let url = '/api/ric/report';
-        if (batchId) url += `?batch_id=${batchId}`;
+            const headerCells = rows[0].querySelectorAll('td, th');
+            let indices = {
+                systime: 0, pnl_id: 1, mach_id: 2, result_eqp: 3, result_ai: 4, result_ric: 5, datastr: -1
+            };
 
-        fetch(url)
-            .then(r => r.json())
-            .then(data => {
-                loading.style.display = 'none';
-                if (!data.total || data.total === 0) {
-                    empty.style.display = 'block';
-                    empty.querySelector('div:last-child').textContent = '目前無比對資料，或 RIC 資料未匯入';
-                    return;
-                }
-                content.style.display = 'block';
-                allDetails = data.details || [];
-                currentFilter = null;
-
-                try { renderStats(data); } catch (e) { console.error('Stats render error:', e); }
-                try { renderCharts(data); } catch (e) { console.error('Charts render error:', e); }
-                try { renderDetails(allDetails); } catch (e) { console.error('Details render error:', e); }
-            })
-            .catch(err => {
-                loading.style.display = 'none';
-                empty.style.display = 'block';
-                empty.querySelector('div:last-child').textContent = '載入失敗: ' + err.message;
+            headerCells.forEach((cell, idx) => {
+                const text = cell.textContent.trim().toUpperCase();
+                if (text === 'SYSTIME') indices.systime = idx;
+                else if (text === 'PNL_ID') indices.pnl_id = idx;
+                else if (text === 'MACH_ID') indices.mach_id = idx;
+                else if (text === 'RESULT_EQP') indices.result_eqp = idx;
+                else if (text === 'RESULT_AI') indices.result_ai = idx;
+                else if (text === 'RESULT_RIC') indices.result_ric = idx;
+                else if (text === 'DATASTR') indices.datastr = idx;
             });
-    }
 
-    function renderStats(data) {
-        document.getElementById('statTotal').textContent = data.total;
-        document.getElementById('statAoi').textContent = data.aoi_accuracy + '%';
-        document.getElementById('statAoiDetail').textContent = `${data.aoi_ng_correct} / ${data.total} 筆 AOI 判定與 RIC 一致`;
-        document.getElementById('statAi').textContent = data.ai_accuracy + '%';
-        document.getElementById('statAiDetail').textContent = `${data.ai_correct} / ${data.total} 筆 AI 判定與 RIC 一致`;
-        document.getElementById('statMatch').textContent = data.ai_ng_count || 0;
-        document.getElementById('statMatchDetail').textContent = `共 ${data.total} 筆中 AI 正確 ${data.ai_correct} 筆`;
+            for (let i = 1; i < rows.length; i++) {
+                const cells = rows[i].querySelectorAll('td');
+                if (cells.length >= 6) {
+                    let datastr = indices.datastr !== -1 && cells[indices.datastr] ? cells[indices.datastr].textContent.trim() : '';
 
-        // 過檢/漏檢
-        document.getElementById('statAoiOver').textContent = data.aoi_over_rate + '%';
-        document.getElementById('statAoiOverDetail').textContent = `${data.aoi_over || 0} / ${data.aoi_ng_count || 0} 筆 AOI 判 NG 中為過檢`;
-        document.getElementById('statAoiMiss').textContent = data.aoi_miss_rate + '%';
-        document.getElementById('statAoiMissDetail').textContent = `${data.aoi_miss || 0} / ${data.ric_ng_total || 0} 筆真實 NG 中被 AOI 漏檢`;
-        document.getElementById('statAiOver').textContent = data.ai_over_rate + '%';
-        document.getElementById('statAiOverDetail').textContent = `${data.ai_over || 0} / ${data.ai_ng_count || 0} 筆 AI 判 NG 中為過檢`;
-        document.getElementById('statAiMiss').textContent = data.ai_miss_rate + '%';
-        document.getElementById('statAiMissDetail').textContent = `${data.ai_miss || 0} / ${data.ric_ng_total || 0} 筆真實 NG 中被 AI 漏檢`;
-    }
+                    if (datastr.toUpperCase().includes('CCD')) {
+                        continue;
+                    }
 
-    // ── 點字卡篩選 ──
-    const filterLabels = {
-        total: '全部',
-        aoi_correct: 'AOI 與 RIC 一致',
-        ai_correct: 'AI 與 RIC 一致',
-        ai_ng: 'AI 判 NG',
-        aoi_over: 'AOI 過檢 (AOI=NG, RIC=OK)',
-        aoi_miss: 'AOI 漏檢 (AOI=OK, RIC=NG)',
-        ai_over: 'AI 過檢 (AI=NG, RIC=OK)',
-        ai_miss: 'AI 漏檢 (AI=OK, RIC=NG)',
-    };
+                    let actualResult = deriveJudgment(datastr);
 
-    function filterByCard(filterType) {
-        // 再次點擊同一張卡片 → 清除篩選
-        if (currentFilter === filterType || filterType === 'total') {
-            currentFilter = null;
-        } else {
-            currentFilter = filterType;
-        }
+                    let ricRaw = cells[indices.result_ric] ? cells[indices.result_ric].textContent.trim() : '';
 
-        // 更新 active 狀態
-        document.querySelectorAll('.stat-card').forEach(card => card.classList.remove('active'));
-        if (currentFilter) {
-            const activeCard = document.querySelector(`.stat-card[data-filter="${currentFilter}"]`);
-            if (activeCard) activeCard.classList.add('active');
-        }
-
-        // 篩選資料
-        const filtered = currentFilter ? allDetails.filter(rec => {
-            const aiJ = (!rec.ai_judgment || rec.ai_judgment === 'OK') ? 'OK' : 'NG';
-            const aoiJ = (!rec.machine_judgment || rec.machine_judgment === 'OK') ? 'OK' : 'NG';
-            const ricJ = rec.ric_judgment;
-            switch (currentFilter) {
-                case 'aoi_correct': return aoiJ === ricJ;
-                case 'ai_correct': return aiJ === ricJ;
-                case 'ai_ng': return aiJ === 'NG';
-                case 'aoi_over': return aoiJ === 'NG' && ricJ === 'OK';
-                case 'aoi_miss': return aoiJ === 'OK' && ricJ === 'NG';
-                case 'ai_over': return aiJ === 'NG' && ricJ === 'OK';
-                case 'ai_miss': return aiJ === 'OK' && ricJ === 'NG';
-                default: return true;
-            }
-        }) : allDetails;
-
-        // 更新篩選標籤
-        const labelEl = document.getElementById('filterLabel');
-        if (currentFilter) {
-            labelEl.textContent = `— 篩選：${filterLabels[currentFilter]} (${filtered.length} 筆)`;
-        } else {
-            labelEl.textContent = '';
-        }
-
-        renderDetails(filtered);
-
-        // 捲動至明細
-        document.querySelector('.detail-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-
-    // ── 導出明細 CSV ──
-    function exportDetails() {
-        const tbody = document.getElementById('detailBody');
-        const rows = tbody.querySelectorAll('tr');
-        if (rows.length === 0) {
-            alert('目前無明細資料可導出');
-            return;
-        }
-
-        const headers = ['Panel ID', '機台', 'AOI 判定', 'AI 判定', 'RIC 判定', 'RIC 來源', '檢測時間'];
-        let csv = '\ufeff' + headers.join(',') + '\n';  // UTF-8 BOM
-
-        rows.forEach(tr => {
-            const cells = tr.querySelectorAll('td');
-            const rowData = Array.from(cells).map(td => {
-                // 取純文字，移除 badge HTML
-                let text = td.textContent.trim();
-                // 包含逗號或引號時用引號括起
-                if (text.includes(',') || text.includes('"')) {
-                    text = '"' + text.replace(/"/g, '""') + '"';
+                    data.push({
+                        systime: cells[indices.systime] ? cells[indices.systime].textContent.trim() : '',
+                        pnl_id: cells[indices.pnl_id] ? cells[indices.pnl_id].textContent.trim() : '',
+                        mach_id: cells[indices.mach_id] ? cells[indices.mach_id].textContent.trim() : '',
+                        result_eqp: cells[indices.result_eqp] ? cells[indices.result_eqp].textContent.trim() : '',
+                        result_ai: cells[indices.result_ai] ? cells[indices.result_ai].textContent.trim() : '',
+                        result_ric: actualResult,
+                        result_ric_raw: ricRaw,
+                        datastr: datastr,
+                    });
                 }
-                return text;
+            }
+            return data;
+        }
+
+        // ── Sub-tab switching ──
+        function switchTab(tabId) {
+            document.querySelectorAll('.client-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.client-tab-panel').forEach(p => p.classList.remove('active'));
+            document.querySelector(`.client-tab[data-client-tab="${tabId}"]`).classList.add('active');
+            document.getElementById(`client_panel-${tabId}`).classList.add('active');
+        }
+
+        // ── Render All ──
+        function renderAll() {
+            const stats = computeStats(rawData);
+            renderStatsCards(stats);
+            renderCharts(stats);
+            renderDetails(rawData);
+
+        }
+
+        // ── Compute Statistics ──
+        function computeStats(data) {
+            const total = data.length;
+            let aoiNG = 0, aiNG = 0, ricNG = 0;
+            let aoiCorrect = 0, aiCorrect = 0;
+            let aoiOver = 0, aoiMiss = 0;
+            let aiOver = 0, aiMiss = 0;
+            let errCount = 0;
+            let bothNGRicOK = 0, bothOKRicNG = 0;
+            let revival = 0;
+
+            const combos = {};
+            const daily = {};
+
+            data.forEach(row => {
+                const eqp = row.result_eqp;
+                const ai = row.result_ai;
+                const ric = row.result_ric;
+
+                if (eqp === 'NG') aoiNG++;
+                if (ai === 'NG') aiNG++;
+                if (ric === 'NG') ricNG++;
+                if (row.result_ric_raw === 'ERR') errCount++;
+
+                if (eqp === ric) aoiCorrect++;
+                if (ai === ric) aiCorrect++;
+
+                if (eqp === 'NG' && ric === 'OK') aoiOver++;
+                if (ai === 'NG' && ric === 'OK') aiOver++;
+
+                if (eqp === 'OK' && ric === 'NG') aoiMiss++;
+                if (ai === 'OK' && ric === 'NG') aiMiss++;
+
+                if (eqp === 'NG' && ai === 'NG' && ric === 'OK') bothNGRicOK++;
+                if (eqp === 'OK' && ai === 'OK' && ric === 'NG') bothOKRicNG++;
+                if (eqp === 'NG' && ai === 'OK' && ric === 'OK') revival++;
+
+                const combo = `${eqp}/${ai}/${ric}`;
+                combos[combo] = (combos[combo] || 0) + 1;
+
+                const day = row.systime.substring(0, 10);
+                if (!daily[day]) daily[day] = {
+                    total: 0, aoiCorrect: 0, aiCorrect: 0,
+                    aiMiss: 0, aiOver: 0, aoiOver: 0
+                };
+                daily[day].total++;
+                if (eqp === ric) daily[day].aoiCorrect++;
+                if (ai === ric) daily[day].aiCorrect++;
+
+                if (ai === 'OK' && ric === 'NG') daily[day].aiMiss++;
+                if (ai === 'NG' && ric === 'OK') daily[day].aiOver++;
+                if (eqp === 'NG' && ric === 'OK') daily[day].aoiOver++;
             });
-            csv += rowData.join(',') + '\n';
-        });
 
-        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        const ts = new Date().toISOString().slice(0, 16).replace(/[-T:]/g, '');
-        const filterSuffix = currentFilter ? `_${currentFilter}` : '';
-        a.href = url;
-        a.download = `ric_detail${filterSuffix}_${ts}.csv`;
-        a.click();
-        URL.revokeObjectURL(url);
-    }
+            const aoiAccuracy = total > 0 ? (aoiCorrect / total * 100).toFixed(1) : 0;
+            const aiAccuracy = total > 0 ? (aiCorrect / total * 100).toFixed(1) : 0;
 
-    function renderCharts(data) {
-        if (typeof Chart === 'undefined') {
-            console.warn('Chart.js 尚未加載，停止渲染圖表');
-            return;
+            const aoiOverRate = aoiNG > 0 ? (aoiOver / aoiNG * 100).toFixed(1) : 0;
+            const aiOverRate = aiNG > 0 ? (aiOver / aiNG * 100).toFixed(1) : 0;
+
+            const ricNGTotal = ricNG;
+            const aoiMissRate = ricNGTotal > 0 ? (aoiMiss / ricNGTotal * 100).toFixed(1) : 0;
+            const aiMissRate = ricNGTotal > 0 ? (aiMiss / ricNGTotal * 100).toFixed(1) : 0;
+
+            const revivalRate = aoiNG > 0 ? (revival / aoiNG * 100).toFixed(1) : 0;
+
+            return {
+                total, errCount,
+                aoiNG, aiNG, ricNG, ricNGTotal,
+                aoiCorrect, aiCorrect,
+                aoiAccuracy, aiAccuracy,
+                aoiOver, aoiMiss, aiOver, aiMiss,
+                aoiOverRate, aoiMissRate, aiOverRate, aiMissRate,
+                combos, daily,
+                bothNGRicOK, bothOKRicNG,
+                revival, revivalRate,
+            };
         }
 
-        // Daily chart
-        const dailyCtx = document.getElementById('dailyChart').getContext('2d');
-        if (dailyChart) dailyChart.destroy();
-
-        const byDay = data.by_day || [];
-        dailyChart = new Chart(dailyCtx, {
-            type: 'line',
-            data: {
-                labels: byDay.map(d => d.date),
-                datasets: [
-                    {
-                        label: 'AOI 準確率 (%)',
-                        data: byDay.map(d => d.aoi_acc),
-                        borderColor: '#f59e0b',
-                        backgroundColor: 'rgba(245,158,11,0.1)',
-                        tension: 0.3,
-                        fill: true,
-                        pointRadius: 4,
-                        pointBackgroundColor: '#f59e0b',
-                    },
-                    {
-                        label: 'AI 準確率 (%)',
-                        data: byDay.map(d => d.ai_acc),
-                        borderColor: '#818cf8',
-                        backgroundColor: 'rgba(129,140,248,0.1)',
-                        tension: 0.3,
-                        fill: true,
-                        pointRadius: 4,
-                        pointBackgroundColor: '#818cf8',
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { labels: { color: '#94a3b8', font: { family: "'Fira Sans'" } } },
-                    tooltip: {
-                        backgroundColor: '#1e293b',
-                        borderColor: '#334155',
-                        borderWidth: 1,
-                        callbacks: {
-                            afterLabel: function (ctx) {
-                                const d = byDay[ctx.dataIndex];
-                                return `(共 ${d.total} 筆)`;
-                            }
-                        }
-                    }
-                },
-                scales: {
-                    x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.5)' } },
-                    y: {
-                        min: 0, max: 100,
-                        ticks: { color: '#64748b', callback: v => v + '%' },
-                        grid: { color: 'rgba(51,65,85,0.5)' }
-                    }
-                }
-            }
-        });
-
-        // Machine chart
-        const machCtx = document.getElementById('machineChart').getContext('2d');
-        if (machineChart) machineChart.destroy();
-
-        const byMach = data.by_machine || [];
-        machineChart = new Chart(machCtx, {
-            type: 'bar',
-            data: {
-                labels: byMach.map(m => m.machine),
-                datasets: [
-                    {
-                        label: 'AOI 準確率 (%)',
-                        data: byMach.map(m => m.aoi_acc),
-                        backgroundColor: 'rgba(245,158,11,0.6)',
-                        borderColor: '#f59e0b',
-                        borderWidth: 1,
-                        borderRadius: 4,
-                    },
-                    {
-                        label: 'AI 準確率 (%)',
-                        data: byMach.map(m => m.ai_acc),
-                        backgroundColor: 'rgba(129,140,248,0.6)',
-                        borderColor: '#818cf8',
-                        borderWidth: 1,
-                        borderRadius: 4,
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { labels: { color: '#94a3b8', font: { family: "'Fira Sans'" } } },
-                    tooltip: {
-                        backgroundColor: '#1e293b',
-                        borderColor: '#334155',
-                        borderWidth: 1,
-                        callbacks: {
-                            afterLabel: function (ctx) {
-                                const m = byMach[ctx.dataIndex];
-                                return `(共 ${m.total} 筆)`;
-                            }
-                        }
-                    }
-                },
-                scales: {
-                    x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
-                    y: {
-                        min: 0, max: 100,
-                        ticks: { color: '#64748b', callback: v => v + '%' },
-                        grid: { color: 'rgba(51,65,85,0.5)' }
-                    }
-                }
-            }
-        });
-    }
-
-    function renderDetails(details) {
-        const tbody = document.getElementById('detailBody');
-        tbody.innerHTML = '';
-
-        details.forEach(rec => {
-            const aiSimple = (!rec.ai_judgment || rec.ai_judgment === 'OK') ? 'OK' : 'NG';
-            const aoiSimple = (!rec.machine_judgment || rec.machine_judgment === 'OK') ? 'OK' : 'NG';
-            const aoiBadge = aoiSimple === 'OK'
-                ? `<span class="badge badge-ok">OK</span>`
-                : `<span class="badge badge-ng">NG</span>`;
-            const aiBadge = aiSimple === 'OK'
-                ? `<span class="badge badge-ok">OK</span>`
-                : `<span class="badge badge-ng">NG</span>`;
-            const ricBadge = rec.ric_judgment === 'OK'
-                ? `<span class="badge badge-ok">OK</span>`
-                : `<span class="badge badge-ng">NG</span>`;
-            const foundBadge = rec.ric_found
-                ? `<span class="badge-sm found">已匹配</span>`
-                : `<span class="badge-sm not-found">未找到 (預設OK)</span>`;
-
-            const tr = document.createElement('tr');
-            tr.innerHTML = `
-            <td style="font-family:'Fira Code',monospace; font-size:0.85rem;">${rec.glass_id || ''}</td>
-            <td>${rec.machine_no || ''}</td>
-            <td>${aoiBadge}</td>
-            <td>${aiBadge}</td>
-            <td>${ricBadge}</td>
-            <td>${foundBadge}</td>
-            <td style="color:var(--text-muted); font-size:0.85rem;">${rec.created_at || ''}</td>
+        // ── Render Stats Cards ──
+        function renderStatsCards(s) {
+            const grid1 = document.getElementById('client_statsGrid1');
+            grid1.innerHTML = `
+            <div class="stat-card total" data-client-filter="total" onclick="clientComp.filterByCard('total')">
+                <div class="label">檢測總數</div>
+                <div class="value">${s.total}</div>
+                <div class="detail">${s.total} 筆資料 (已排除 CCD)</div>
+                <div class="filter-hint">🔍 顯示全部</div>
+            </div>
+            <div class="stat-card aoi" data-client-filter="aoi_correct" onclick="clientComp.filterByCard('aoi_correct')">
+                <div class="label">AOI 準確率</div>
+                <div class="value">${s.aoiAccuracy}%</div>
+                <div class="detail">${s.aoiCorrect} / ${s.total} 筆與 DATASTR 判定一致</div>
+                <div class="filter-hint">🔍 篩選 AOI 與 DATASTR 一致</div>
+            </div>
+            <div class="stat-card ai" data-client-filter="ai_correct" onclick="clientComp.filterByCard('ai_correct')">
+                <div class="label">AI 準確率</div>
+                <div class="value">${s.aiAccuracy}%</div>
+                <div class="detail">${s.aiCorrect} / ${s.total} 筆與 DATASTR 判定一致</div>
+                <div class="filter-hint">🔍 篩選 AI 與 DATASTR 一致</div>
+            </div>
+            <div class="stat-card match" data-client-filter="ai_ng" onclick="clientComp.filterByCard('ai_ng')">
+                <div class="label">AI 判 NG 數</div>
+                <div class="value">${s.aiNG}</div>
+                <div class="detail">AOI 判 NG: ${s.aoiNG} 筆</div>
+                <div class="filter-hint">🔍 篩選 AI 判 NG</div>
+            </div>
         `;
 
-            // Highlight mismatch rows
-            if (aiSimple !== rec.ric_judgment) {
-                tr.style.background = 'rgba(239, 68, 68, 0.06)';
+            const grid2 = document.getElementById('client_statsGrid2');
+            grid2.innerHTML = `
+            <div class="stat-card over" data-client-filter="aoi_over" onclick="clientComp.filterByCard('aoi_over')">
+                <div class="label">AOI 過檢率</div>
+                <div class="value">${s.aoiOverRate}%</div>
+                <div class="detail">${s.aoiOver} / ${s.aoiNG} 筆 AOI判NG中為過檢</div>
+                <div class="filter-hint">🔍 AOI=NG, RIC=OK</div>
+            </div>
+            <div class="stat-card miss no-ref" data-client-filter="aoi_miss" onclick="clientComp.filterByCard('aoi_miss')">
+                <div class="label">AOI 漏檢率</div>
+                <div class="value">${s.aoiMissRate}%</div>
+                <div class="detail">${s.aoiMiss} / ${s.ricNGTotal} 筆 (⚠ AOI=OK為RIC覆判)</div>
+                <div class="filter-hint">🔍 AOI=OK, RIC=NG</div>
+            </div>
+            <div class="stat-card over" data-client-filter="ai_over" onclick="clientComp.filterByCard('ai_over')">
+                <div class="label">AI 過檢率</div>
+                <div class="value">${s.aiOverRate}%</div>
+                <div class="detail">${s.aiOver} / ${s.aiNG} 筆 AI判NG中為過檢</div>
+                <div class="filter-hint">🔍 AI=NG, RIC=OK</div>
+            </div>
+            <div class="stat-card miss" data-client-filter="ai_miss" onclick="clientComp.filterByCard('ai_miss')">
+                <div class="label">AI 漏檢率</div>
+                <div class="value">${s.aiMissRate}%</div>
+                <div class="detail">${s.aiMiss} / ${s.ricNGTotal} 筆真實NG被AI漏檢</div>
+                <div class="filter-hint">🔍 AI=OK, RIC=NG</div>
+            </div>
+            <div class="stat-card revival" data-client-filter="revival" onclick="clientComp.filterByCard('revival')">
+                <div class="label">復活率</div>
+                <div class="value">${s.revivalRate}%</div>
+                <div class="detail">${s.revival} / ${s.aoiNG} 筆 AOI判NG被AI復活且RIC=OK</div>
+                <div class="filter-hint">🔍 AOI=NG, AI=OK, RIC=OK</div>
+            </div>
+        `;
+        }
+
+        // ── Filter by Card ──
+        function filterByCard(filterType) {
+            if (currentFilter === filterType || filterType === 'total') {
+                currentFilter = null;
+            } else {
+                currentFilter = filterType;
             }
 
-            tbody.appendChild(tr);
-        });
-    }
+            document.querySelectorAll('.stat-card[data-client-filter]').forEach(c => c.classList.remove('active'));
+            if (currentFilter) {
+                const active = document.querySelector(`.stat-card[data-client-filter="${currentFilter}"]`);
+                if (active) active.classList.add('active');
+            }
+
+            const filtered = currentFilter ? rawData.filter(row => {
+                const eqp = row.result_eqp;
+                const ai = row.result_ai;
+                const ric = row.result_ric;
+                switch (currentFilter) {
+                    case 'aoi_correct': return eqp === ric;
+                    case 'ai_correct': return ai === ric;
+                    case 'ai_ng': return ai === 'NG';
+                    case 'aoi_over': return eqp === 'NG' && ric === 'OK';
+                    case 'aoi_miss': return eqp === 'OK' && ric === 'NG';
+                    case 'ai_over': return ai === 'NG' && ric === 'OK';
+                    case 'ai_miss': return ai === 'OK' && ric === 'NG';
+                    case 'revival': return eqp === 'NG' && ai === 'OK' && ric === 'OK';
+                    default: return true;
+                }
+            }) : rawData;
+
+            const labels = {
+                total: '全部', aoi_correct: 'AOI 與 DATASTR 判定一致', ai_correct: 'AI 與 DATASTR 判定一致',
+                ai_ng: 'AI 判 NG', aoi_over: 'AOI 過檢 (AOI=NG 且 DATASTR=OK)', aoi_miss: 'AOI 漏檢 (AOI=OK 且 DATASTR=NG)',
+                ai_over: 'AI 過檢', ai_miss: 'AI 漏檢', revival: '復活 (AOI=NG, AI=OK, RIC=OK)',
+            };
+
+            const labelEl = document.getElementById('client_filterLabel');
+            labelEl.textContent = currentFilter ? `— 篩選：${labels[currentFilter]} (${filtered.length} 筆)` : '';
+
+            renderDetails(filtered);
+
+            // Switch to detail tab
+            switchTab('detail');
+            document.getElementById('client_tableWrap').scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        // ── Render Details ──
+        function renderDetails(data) {
+            const tbody = document.getElementById('client_detailBody');
+            tbody.innerHTML = '';
+
+            data.forEach((row, i) => {
+                const aoiMatch = row.result_eqp === row.result_ric;
+                const aiMatch = row.result_ai === row.result_ric;
+
+                const eqpBadge = row.result_eqp === 'OK'
+                    ? '<span class="badge badge-ok">OK</span>'
+                    : '<span class="badge badge-ng">NG</span>';
+                const aiBadge = row.result_ai === 'OK'
+                    ? '<span class="badge badge-ok">OK</span>'
+                    : '<span class="badge badge-ng">NG</span>';
+                const ricBadgeRaw = row.result_ric_raw === 'ERR'
+                    ? '<span class="badge" style="background:rgba(245,158,11,0.1); color:var(--err)">ERR</span>'
+                    : row.result_ric_raw === 'OK'
+                        ? '<span class="badge badge-ok">OK</span>'
+                        : '<span class="badge badge-ng">NG</span>';
+
+                const actualBadge = row.result_ric === 'OK'
+                    ? '<span class="badge badge-ok">OK</span>'
+                    : '<span class="badge badge-ng">NG</span>';
+
+                const aoiComp = aoiMatch
+                    ? '<span class="badge badge-match">✓ 一致</span>'
+                    : '<span class="badge badge-diff">✗ 不一致</span>';
+                const aiComp = aiMatch
+                    ? '<span class="badge badge-match">✓ 一致</span>'
+                    : '<span class="badge badge-diff">✗ 不一致</span>';
+
+                const tr = document.createElement('tr');
+                if (!aiMatch) {
+                    tr.style.background = 'rgba(239,68,68,0.06)';
+                }
+
+                tr.innerHTML = `
+                <td style="color:var(--text-muted); font-size:0.8rem;">${i + 1}</td>
+                <td style="font-family:'Fira Code',monospace; font-size:0.82rem; color:var(--text-muted);">${row.systime}</td>
+                <td style="font-family:'Fira Code',monospace; font-size:0.85rem;">${row.pnl_id}</td>
+                <td>${row.mach_id}</td>
+                <td>${eqpBadge}</td>
+                <td>${aiBadge}</td>
+                <td>${ricBadgeRaw}</td>
+                <td>${actualBadge}</td>
+                <td style="font-size:0.75rem; color:var(--text-muted); max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${row.datastr}</td>
+                <td>${aoiComp}</td>
+                <td>${aiComp}</td>
+            `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        // ── Render Charts ──
+        function renderCharts(stats) {
+            if (typeof Chart === 'undefined') return;
+
+            // 1. Result Distribution
+            const ctx1 = document.getElementById('client_resultChart').getContext('2d');
+            if (resultChart) resultChart.destroy();
+
+            const eqpNG = stats.aoiNG, eqpOK = stats.total - eqpNG;
+            const aiNG = stats.aiNG, aiOK = stats.total - aiNG;
+            const ricNG = stats.ricNG, ricOK = stats.total - ricNG;
+
+            resultChart = new Chart(ctx1, {
+                type: 'bar',
+                plugins: [window.ChartDataLabels],
+                data: {
+                    labels: ['AOI (RESULT_EQP)', 'AI', 'RIC'],
+                    datasets: [
+                        { label: 'OK', data: [eqpOK, aiOK, ricOK], backgroundColor: 'rgba(34,197,94,0.7)', borderRadius: 4 },
+                        { label: 'NG', data: [eqpNG, aiNG, ricNG], backgroundColor: 'rgba(239,68,68,0.7)', borderRadius: 4 },
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: {
+                        datalabels: {
+                            color: '#e2e8f0',
+                            font: { size: 11, weight: 600 },
+                            anchor: 'center',
+                            align: 'center',
+                            formatter: (v) => v === 0 ? '' : v
+                        },
+                        legend: { labels: { color: '#94a3b8' } }
+                    },
+                    scales: {
+                        x: { stacked: true, ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
+                        y: { stacked: true, ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.5)' } }
+                    }
+                }
+            });
+
+            // 2. Combo Chart
+            const ctx2 = document.getElementById('client_comboChart').getContext('2d');
+            if (comboChart) comboChart.destroy();
+
+            const comboLabels = Object.keys(stats.combos).sort((a, b) => stats.combos[b] - stats.combos[a]);
+            const comboValues = comboLabels.map(k => stats.combos[k]);
+            const comboColors = comboLabels.map(k => {
+                if (k.includes('ERR')) return 'rgba(245,158,11,0.7)';
+                const parts = k.split('/');
+                if (parts[2] === 'OK' && parts[0] === 'NG' && parts[1] === 'NG') return 'rgba(239,68,68,0.5)';
+                if (parts[0] === parts[2] && parts[1] === parts[2]) return 'rgba(34,197,94,0.7)';
+                return 'rgba(129,140,248,0.6)';
+            });
+
+            comboChart = new Chart(ctx2, {
+                type: 'bar',
+                plugins: [window.ChartDataLabels],
+                data: {
+                    labels: comboLabels.map(k => `AOI/AI/RIC: ${k}`),
+                    datasets: [{
+                        label: '筆數',
+                        data: comboValues,
+                        backgroundColor: comboColors,
+                        borderRadius: 4,
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: {
+                        datalabels: {
+                            color: '#e2e8f0',
+                            font: { size: 10, weight: 600 },
+                            anchor: 'end',
+                            align: 'left',
+                            formatter: (v) => v === 0 ? '' : v
+                        },
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
+                        y: { ticks: { color: '#94a3b8', font: { family: "'Fira Code'" } }, grid: { display: false } }
+                    }
+                }
+            });
+
+            // 3. Daily Trend
+            const ctx3 = document.getElementById('client_trendChart').getContext('2d');
+            if (trendChart) trendChart.destroy();
+
+            const dateKeys = Object.keys(stats.daily).sort();
+
+            trendChart = new Chart(ctx3, {
+                type: 'line',
+                plugins: [window.ChartDataLabels],
+                data: {
+                    labels: dateKeys,
+                    datasets: [
+                        {
+                            label: 'AOI 準確率 (%)',
+                            data: dateKeys.map(k => {
+                                const d = stats.daily[k];
+                                return d.total > 0 ? (d.aoiCorrect / d.total * 100).toFixed(1) : null;
+                            }),
+                            borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)',
+                            tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: '#f59e0b',
+                        },
+                        {
+                            label: 'AI 準確率 (%)',
+                            data: dateKeys.map(k => {
+                                const d = stats.daily[k];
+                                return d.total > 0 ? (d.aiCorrect / d.total * 100).toFixed(1) : null;
+                            }),
+                            borderColor: '#818cf8', backgroundColor: 'rgba(129,140,248,0.1)',
+                            tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: '#818cf8',
+                        },
+                        {
+                            label: '筆數',
+                            data: dateKeys.map(k => stats.daily[k].total),
+                            type: 'bar',
+                            backgroundColor: 'rgba(148,163,184,0.15)',
+                            borderRadius: 4, yAxisID: 'y1',
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: {
+                        datalabels: {
+                            color: function (context) {
+                                const colors = ['#f59e0b', '#818cf8', '#94a3b8'];
+                                return colors[context.datasetIndex];
+                            },
+                            font: { size: 10, weight: 600 },
+                            align: function (context) { return context.dataset.type === 'bar' ? 'end' : 'top'; },
+                            anchor: function (context) { return context.dataset.type === 'bar' ? 'end' : 'center'; },
+                            formatter: function (value, context) {
+                                if (value === null || value === '0.0' || value === 0) return '';
+                                if (context.dataset.type === 'bar') return value;
+                                return value + '%';
+                            }
+                        },
+                        legend: { labels: { color: '#94a3b8' } }
+                    },
+                    scales: {
+                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
+                        y: { min: 0, max: 100, ticks: { color: '#64748b', callback: v => v + '%' }, grid: { color: 'rgba(51,65,85,0.5)' } },
+                        y1: { position: 'right', min: 0, ticks: { color: '#475569' }, grid: { display: false } },
+                    }
+                }
+            });
+
+            // 4. Confusion Matrix
+            const ctx4 = document.getElementById('client_confusionChart').getContext('2d');
+            if (confusionChart) confusionChart.destroy();
+
+            // Derive confusion matrix from stats (avoid redundant rawData scans)
+            const aoiFP = stats.aoiOver;  // AOI=NG, RIC=OK
+            const aoiFN = stats.aoiMiss;  // AOI=OK, RIC=NG
+            const aoiTP = stats.aoiNG - aoiFP;  // AOI=NG, RIC=NG
+            const aoiTN = stats.total - stats.aoiNG - aoiFN;  // AOI=OK, RIC=OK
+
+            const aiFP = stats.aiOver;
+            const aiFN = stats.aiMiss;
+            const aiTP = stats.aiNG - aiFP;
+            const aiTN = stats.total - stats.aiNG - aiFN;
+
+            confusionChart = new Chart(ctx4, {
+                type: 'bar',
+                plugins: [window.ChartDataLabels],
+                data: {
+                    labels: ['TP (判NG 實NG)', 'FP (過檢)', 'FN (漏檢)', 'TN (判OK 實OK)'],
+                    datasets: [
+                        { label: 'AOI', data: [aoiTP, aoiFP, aoiFN, aoiTN], backgroundColor: 'rgba(245,158,11,0.6)', borderRadius: 4 },
+                        { label: 'AI', data: [aiTP, aiFP, aiFN, aiTN], backgroundColor: 'rgba(129,140,248,0.6)', borderRadius: 4 },
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: {
+                        datalabels: {
+                            color: '#e2e8f0',
+                            font: { size: 11, weight: 600 },
+                            anchor: 'center',
+                            align: 'center',
+                            formatter: (v) => v === 0 ? '' : v
+                        },
+                        legend: { labels: { color: '#94a3b8' } }
+                    },
+                    scales: {
+                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
+                        y: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.5)' } }
+                    }
+                }
+            });
+
+            // 5. Daily Metrics Chart
+            const ctx5 = document.getElementById('client_dailyMetricsChart').getContext('2d');
+            if (dailyMetricsChart) dailyMetricsChart.destroy();
+
+            const modificationLogs = [
+                { date: '2026-03-02', label: '加嚴 threshold\n(0.6 -> 0.56)' },
+                { date: '2026-03-03', label: '縮小 dust area\n(3 -> 0.4)' },
+                { date: '2026-03-04', label: '使用07線圖片重新訓練' },
+                { date: '2026-03-05', label: '新增5畫面\n獨立模型' },
+                { date: '2026-03-06', label: '調高 threshold\n(0.56 -> 0.7)' }
+            ];
+
+            const annotations = {};
+            modificationLogs.forEach((log, index) => {
+                if (dateKeys.includes(log.date)) {
+                    annotations[`line${index}`] = {
+                        type: 'line',
+                        scaleID: 'x',
+                        value: log.date,
+                        borderColor: 'rgba(234, 88, 12, 0.7)',
+                        borderWidth: 2,
+                        borderDash: [5, 5],
+                        label: {
+                            display: true,
+                            content: log.label.split('\n'),
+                            position: 'start',
+                            backgroundColor: 'rgba(234, 88, 12, 0.9)',
+                            color: 'white',
+                            font: { size: 12, weight: 'bold' },
+                            yAdjust: index % 2 === 0 ? 0 : 40
+                        }
+                    };
+                }
+            });
+
+            dailyMetricsChart = new Chart(ctx5, {
+                type: 'line',
+                plugins: [window.ChartDataLabels],
+                data: {
+                    labels: dateKeys,
+                    datasets: [
+                        {
+                            label: 'AI 漏檢率 (%)',
+                            data: dateKeys.map(k => {
+                                const d = stats.daily[k];
+                                return d.total > 0 ? (d.aiMiss / d.total * 100).toFixed(1) : null;
+                            }),
+                            borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)',
+                            borderDash: [5, 5], tension: 0.3, fill: false, pointRadius: 4, pointBackgroundColor: '#ef4444',
+                        },
+                        {
+                            label: 'AI 過檢率 (%)',
+                            data: dateKeys.map(k => {
+                                const d = stats.daily[k];
+                                return d.total > 0 ? (d.aiOver / d.total * 100).toFixed(1) : null;
+                            }),
+                            borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)',
+                            tension: 0.3, fill: false, pointRadius: 4, pointBackgroundColor: '#3b82f6',
+                        },
+                        {
+                            label: 'AOI 過檢率 (%)',
+                            data: dateKeys.map(k => {
+                                const d = stats.daily[k];
+                                return d.total > 0 ? (d.aoiOver / d.total * 100).toFixed(1) : null;
+                            }),
+                            borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)',
+                            tension: 0.3, fill: false, pointRadius: 4, pointBackgroundColor: '#f59e0b',
+                        },
+                        {
+                            label: '當日總數量',
+                            data: dateKeys.map(k => stats.daily[k].total),
+                            type: 'bar',
+                            backgroundColor: 'rgba(148,163,184,0.15)',
+                            borderRadius: 4, yAxisID: 'y1',
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: {
+                        datalabels: {
+                            color: function (context) {
+                                const colors = ['#ef4444', '#3b82f6', '#f59e0b', '#94a3b8'];
+                                return colors[context.datasetIndex];
+                            },
+                            font: { size: 10, weight: 600 },
+                            align: function (context) { return context.dataset.type === 'bar' ? 'end' : 'top'; },
+                            anchor: function (context) { return context.dataset.type === 'bar' ? 'end' : 'center'; },
+                            formatter: function (value, context) {
+                                if (value === null || value === '0.0' || value === 0) return '';
+                                if (context.dataset.type === 'bar') return value;
+                                return value + '%';
+                            }
+                        },
+                        legend: { labels: { color: '#94a3b8' } },
+                        tooltip: {
+                            callbacks: {
+                                label: function (context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) label += ': ';
+                                    if (context.parsed.y !== null) {
+                                        label += context.parsed.y;
+                                        if (context.dataset.yAxisID !== 'y1') label += '%';
+                                    }
+                                    const day = context.chart.data.labels[context.dataIndex];
+                                    const d = stats.daily[day];
+                                    if (context.datasetIndex === 0) label += ` (${d.aiMiss} / ${d.total})`;
+                                    if (context.datasetIndex === 1) label += ` (${d.aiOver} / ${d.total})`;
+                                    if (context.datasetIndex === 2) label += ` (${d.aoiOver} / ${d.total})`;
+                                    return label;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
+                        y: { min: 0, title: { display: true, text: '百分比 (%)', color: '#64748b' }, ticks: { color: '#64748b', callback: v => v + '%' }, grid: { color: 'rgba(51,65,85,0.5)' } },
+                        y1: { position: 'right', min: 0, title: { display: true, text: '數量', color: '#64748b' }, ticks: { color: '#475569' }, grid: { display: false } },
+                    }
+                }
+            });
+
+            if (Object.keys(annotations).length > 0) {
+                dailyMetricsChart.options.plugins.annotation = {
+                    annotations: annotations
+                };
+                dailyMetricsChart.update();
+            }
+        }
+
+        // ── Export CSV ──
+        function exportCSV() {
+            const tbody = document.getElementById('client_detailBody');
+            const rows = tbody.querySelectorAll('tr');
+            if (rows.length === 0) { alert('無資料可導出'); return; }
+
+            const headers = ['#', '檢測時間', 'Panel ID', '機台', 'RESULT_EQP', 'RESULT_AI', 'RIC_RAW', 'DATASTR_JUDGE', 'DATASTR_RAW', 'AOI vs DATASTR', 'AI vs DATASTR'];
+            let csv = '\ufeff' + headers.join(',') + '\n';
+
+            rows.forEach(tr => {
+                const cells = tr.querySelectorAll('td');
+                const rowData = Array.from(cells).map(td => {
+                    let text = td.textContent.trim();
+                    if (text.includes(',') || text.includes('"')) text = '"' + text.replace(/"/g, '""') + '"';
+                    return text;
+                });
+                csv += rowData.join(',') + '\n';
+            });
+
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            const ts = new Date().toISOString().slice(0, 16).replace(/[-T:]/g, '');
+            a.href = url;
+            a.download = `ai_accuracy_report_${ts}.csv`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // Return public API
+        return {
+            switchTab: switchTab,
+            filterByCard: filterByCard,
+            exportCSV: exportCSV,
+            loadFromDB: loadFromDB,
+            clearDB: clearDB,
+        };
+    })();
 </script>
 {% endblock %}

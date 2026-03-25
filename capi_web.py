@@ -153,6 +153,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_ric_page(query, path)
             elif path == "/api/ric/report":
                 self._handle_ric_report_api(query)
+            elif path == "/api/ric/client-data":
+                self._handle_client_data_api(query)
             elif path == "/api/stats":
                 self._handle_api_stats(query)
             elif path == "/api/status":
@@ -207,6 +209,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_ric_upload()
             elif path == "/api/ric/delete":
                 self._handle_ric_delete()
+            elif path == "/api/ric/import-client":
+                self._handle_client_import()
+            elif path == "/api/ric/clear-client":
+                self._handle_client_clear()
             elif path == "/api/settings/update":
                 self._handle_api_settings_update()
             elif path == "/api/settings/reload":
@@ -854,8 +860,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _handle_ric_page(self, query: dict, path: str):
         """人工檢驗 (RIC) 比對報表頁面"""
         batches = self.db.get_ric_batches() if self.db else []
+        client_count = self.db.get_client_accuracy_count() if self.db else 0
         template = self.jinja_env.get_template("ric_report.html")
-        html = template.render(request_path=path, batches=batches)
+        html = template.render(request_path=path, batches=batches, client_record_count=client_count)
         self._send_response(200, html)
 
     def _handle_ric_upload(self):
@@ -1057,6 +1064,55 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"RIC delete error: {e}", exc_info=True)
             self._send_json({"error": f"刪除失敗: {str(e)}"})
+
+    def _handle_client_import(self):
+        """API: 匯入 client accuracy records 至資料庫"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+
+            records = data.get("records", [])
+            if not records:
+                self._send_json({"error": "無資料可匯入"})
+                return
+
+            result = self.db.save_client_accuracy_records(records)
+            self._send_json({
+                "success": True,
+                "inserted": result["inserted"],
+                "skipped": result["skipped"],
+                "message": f"新增 {result['inserted']} 筆，略過 {result['skipped']} 筆重複資料"
+            })
+        except Exception as e:
+            logger.error(f"Client import error: {e}", exc_info=True)
+            self._send_json({"error": f"匯入失敗: {str(e)}"})
+
+    def _handle_client_data_api(self, query: dict):
+        """API: 取得已儲存的 client accuracy records"""
+        try:
+            records = self.db.get_client_accuracy_records()
+            self._send_json({
+                "success": True,
+                "total": len(records),
+                "records": records
+            })
+        except Exception as e:
+            logger.error(f"Client data API error: {e}", exc_info=True)
+            self._send_json({"error": str(e)})
+
+    def _handle_client_clear(self):
+        """API: 清除所有 client accuracy records"""
+        try:
+            count = self.db.clear_client_accuracy_records()
+            self._send_json({
+                "success": True,
+                "deleted": count,
+                "message": f"已清除 {count} 筆資料"
+            })
+        except Exception as e:
+            logger.error(f"Client clear error: {e}", exc_info=True)
+            self._send_json({"error": str(e)})
 
     def _handle_ric_report_api(self, query: dict):
         """API: 取得 RIC 比對報表資料"""

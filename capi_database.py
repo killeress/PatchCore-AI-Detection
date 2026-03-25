@@ -188,6 +188,22 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_config_param_name ON config_params(param_name);
                 CREATE INDEX IF NOT EXISTS idx_config_history_param ON config_change_history(param_name);
                 CREATE INDEX IF NOT EXISTS idx_config_history_time ON config_change_history(changed_at);
+
+                -- Client accuracy records (TIME_STAMP + PNL_ID 為複合唯一鍵)
+                CREATE TABLE IF NOT EXISTS client_accuracy_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    time_stamp TEXT NOT NULL,
+                    pnl_id TEXT NOT NULL,
+                    mach_id TEXT,
+                    result_eqp TEXT,
+                    result_ai TEXT,
+                    result_ric TEXT,
+                    datastr TEXT,
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    UNIQUE(time_stamp, pnl_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_client_acc_pnl ON client_accuracy_records(pnl_id);
+                CREATE INDEX IF NOT EXISTS idx_client_acc_time ON client_accuracy_records(time_stamp);
             """)
             
             # Migration for adding missing columns to existing database
@@ -705,6 +721,90 @@ class CAPIDatabase:
 
                 conn.commit()
                 return batch_id
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+
+    def save_client_accuracy_records(self, records: list) -> dict:
+        """
+        儲存 client accuracy records (TIME_STAMP + PNL_ID 為唯一鍵)
+        重複資料自動跳過 (INSERT OR IGNORE)
+
+        Args:
+            records: list of dict with keys: time_stamp, pnl_id, mach_id, result_eqp, result_ai, result_ric, datastr
+
+        Returns:
+            dict with inserted, skipped counts
+        """
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                count_before = conn.execute(
+                    "SELECT COUNT(*) FROM client_accuracy_records"
+                ).fetchone()[0]
+
+                params = [
+                    (rec.get("time_stamp", ""),
+                     rec.get("pnl_id", ""),
+                     rec.get("mach_id", ""),
+                     rec.get("result_eqp", ""),
+                     rec.get("result_ai", ""),
+                     rec.get("result_ric", ""),
+                     rec.get("datastr", ""))
+                    for rec in records
+                ]
+                conn.executemany(
+                    """INSERT OR IGNORE INTO client_accuracy_records
+                       (time_stamp, pnl_id, mach_id, result_eqp, result_ai, result_ric, datastr)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    params
+                )
+                conn.commit()
+
+                count_after = conn.execute(
+                    "SELECT COUNT(*) FROM client_accuracy_records"
+                ).fetchone()[0]
+
+                inserted = count_after - count_before
+                return {"inserted": inserted, "skipped": len(records) - inserted}
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+
+    def get_client_accuracy_records(self) -> list:
+        """取得所有 client accuracy records"""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT time_stamp, pnl_id, mach_id, result_eqp, result_ai, result_ric, datastr
+                   FROM client_accuracy_records
+                   ORDER BY time_stamp DESC"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_client_accuracy_count(self) -> int:
+        """取得 client accuracy records 總數"""
+        conn = self._get_conn()
+        try:
+            row = conn.execute("SELECT COUNT(*) as cnt FROM client_accuracy_records").fetchone()
+            return row["cnt"] if row else 0
+        finally:
+            conn.close()
+
+    def clear_client_accuracy_records(self) -> int:
+        """清除所有 client accuracy records"""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                cursor = conn.execute("DELETE FROM client_accuracy_records")
+                conn.commit()
+                return cursor.rowcount
             except Exception as e:
                 conn.rollback()
                 raise e
