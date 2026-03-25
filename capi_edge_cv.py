@@ -20,6 +20,14 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any
 
 
+def clamp_median_kernel(kernel_size: int, max_dim: int) -> int:
+    """將 median filter 核大小限制為有效奇數值 (≥3, ≤max_dim)"""
+    mk = min(kernel_size, max_dim)
+    if mk % 2 == 0:
+        mk -= 1
+    return max(3, mk)
+
+
 @dataclass
 class EdgeDefect:
     """單一邊緣缺陷"""
@@ -36,6 +44,8 @@ class EdgeDefect:
     is_bomb: bool = False
     bomb_defect_code: str = ""
     is_cv_ok: bool = False  # CV 檢查後未偵測到缺陷，僅作記錄用
+    threshold_used: int = 0       # 使用的閾值 (用於 heatmap header 顯示)
+    min_area_used: int = 0        # 使用的最小面積 (用於 heatmap header 顯示)
 
 
 @dataclass
@@ -83,6 +93,9 @@ class EdgeInspectionConfig:
         width=360, threshold=4, min_area=65,
         exclude_top=10, exclude_bottom=10, exclude_left=80, exclude_right=80
     ))
+    # AOI 座標邊緣檢測獨立參數 (不共用四邊設定)
+    aoi_threshold: int = 4        # AOI 座標邊緣明暗差閾值
+    aoi_min_area: int = 10        # AOI 座標邊緣最小缺陷面積 (px) — AOI 已定位，可更敏感
     exclude_zones: List[EdgeExclusionZoneConfig] = field(default_factory=list)
     # 儲存完整的按產品分組排除區域 (key=resolution_code, value=list of zones)
     all_exclude_zones_by_product: Dict[str, List[dict]] = field(default_factory=dict)
@@ -160,8 +173,10 @@ class EdgeInspectionConfig:
         cfg.bottom.exclude_bottom = int(get("cv_edge_bottom_exclude_bottom", 10))
         cfg.bottom.exclude_left = int(get("cv_edge_bottom_exclude_left", 80))
         cfg.bottom.exclude_right = int(get("cv_edge_bottom_exclude_right", 80))
-        
-        
+        # AOI 座標邊緣獨立參數
+        cfg.aoi_threshold = int(get("cv_edge_aoi_threshold", 4))
+        cfg.aoi_min_area = int(get("cv_edge_aoi_min_area", 10))
+
         # 排除區域 (支援按產品解析度碼分組的 dict 格式，或向後相容的 list 格式)
         zones_raw = get("cv_edge_exclude_zones", None)
         zones_data = None
@@ -362,12 +377,14 @@ class CVEdgeInspector:
         otsu_bounds: Optional[Tuple[int, int, int, int]] = None,
         boundary_padding: int = 15,
         boundary_min_brightness: int = 15,
-    ) -> List[EdgeDefect]:
+    ) -> Tuple[List[EdgeDefect], Dict[str, Any]]:
         """
         對預先擷取的 ROI 執行邊緣缺陷檢測（用於 AOI 座標邊緣 defect）
 
         當 AOI 座標 defect 位於產品邊緣無法切出完整 512x512 tile 時，
         由 _create_aoi_coord_tiles 轉交此方法進行 CV 檢測。
+
+        使用獨立的 aoi_threshold / aoi_min_area 參數，不共用四邊設定。
 
         Args:
             roi: 預先擷取的 ROI 影像（灰階或彩色）
@@ -379,13 +396,19 @@ class CVEdgeInspector:
             boundary_min_brightness: 擴展區域中像素最低亮度閾值，低於此值視為真正背景
 
         Returns:
-            偵測到的邊緣缺陷列表（座標已轉換為原圖絕對座標）
+            (defects, stats)
+            - defects: 偵測到的邊緣缺陷列表（座標已轉換為原圖絕對座標）
+            - stats: 實際計算的統計資訊 {"max_diff", "max_area", "threshold", "min_area"}
         """
+        empty_stats = {"max_diff": 0, "max_area": 0,
+                       "threshold": self.config.aoi_threshold,
+                       "min_area": self.config.aoi_min_area}
+
         if not self.config.enabled:
-            return []
+            return [], empty_stats
 
         if roi is None or roi.size == 0:
-            return []
+            return [], empty_stats
 
         # 轉灰階
         if len(roi.shape) == 3:
@@ -408,7 +431,6 @@ class CVEdgeInspector:
                 fg_mask[local_y1:local_y2, local_x1:local_x2] = 255
 
             # 擴展前景遮罩以偵測 Otsu 邊界附近的缺陷
-            # Otsu 二值化邊界可能略為保守，導致邊界上的暗點/缺陷被排除
             if boundary_padding > 0 and np.any(fg_mask > 0):
                 dilate_kernel = cv2.getStructuringElement(
                     cv2.MORPH_RECT,
@@ -416,7 +438,6 @@ class CVEdgeInspector:
                 )
                 fg_mask_expanded = cv2.dilate(fg_mask, dilate_kernel, iterations=1)
 
-                # 擴展區域中，只納入亮度高於門檻的像素（排除真正的黑色背景）
                 expansion_zone = (fg_mask_expanded > 0) & (fg_mask == 0)
                 expansion_valid = expansion_zone & (gray >= boundary_min_brightness)
                 fg_mask[expansion_valid] = 255
@@ -428,15 +449,14 @@ class CVEdgeInspector:
             fg_coverage = np.count_nonzero(fg_mask) / fg_mask.size * 100
             print(f"  🔲 inspect_roi: fg_mask coverage={fg_coverage:.1f}%, ROI=({offset_x},{offset_y}) {roi_w}x{roi_h}")
 
-        # 使用四邊中最敏感的參數（最低 threshold、最小 min_area）
-        all_cfgs = [self.config.left, self.config.right, self.config.top, self.config.bottom]
-        min_threshold = min(c.threshold for c in all_cfgs)
-        min_area = min(c.min_area for c in all_cfgs)
+        # 使用 AOI 座標獨立參數 (不共用四邊設定)
+        aoi_threshold = self.config.aoi_threshold
+        aoi_min_area = self.config.aoi_min_area
 
         roi_cfg = EdgeSideConfig(
             width=0,
-            threshold=min_threshold,
-            min_area=min_area,
+            threshold=aoi_threshold,
+            min_area=aoi_min_area,
             exclude_top=0,
             exclude_bottom=0,
             exclude_left=0,
@@ -445,31 +465,50 @@ class CVEdgeInspector:
 
         defects = self._inspect_side(gray, "aoi_edge", roi_cfg, offset_x, offset_y, fg_mask=fg_mask)
 
-        if not defects and fg_mask is not None:
-            # 額外記錄 diff 統計，方便調試未偵測到的情況
+        # 為每個偵測到的缺陷記錄使用的判定參數
+        for d in defects:
+            d.threshold_used = aoi_threshold
+            d.min_area_used = aoi_min_area
+
+        # 計算統計供 header 顯示
+        actual_max_diff = 0
+        actual_max_area = 0
+        if defects:
+            # 有缺陷時直接從結果取統計，避免重新計算
+            actual_max_diff = max(d.max_diff for d in defects)
+            actual_max_area = max(d.area for d in defects)
+        elif fg_mask is not None and np.any(fg_mask > 0):
+            # 無缺陷時才做完整計算，供 debug 了解為何未偵測到
             k = self.config.blur_kernel
             blurred = cv2.GaussianBlur(gray, (k, k), 0)
-            if np.any(fg_mask > 0):
-                fg_pixels = blurred[fg_mask > 0]
-                fg_median_val = int(np.median(fg_pixels))
-                mk = self.config.median_kernel
-                mk = min(mk, min(gray.shape[:2]) - 1)
-                if mk % 2 == 0:
-                    mk -= 1
-                if mk < 3:
-                    mk = 3
-                blurred_for_bg = blurred.copy()
-                blurred_for_bg[fg_mask == 0] = fg_median_val
-                bg = cv2.medianBlur(blurred_for_bg, mk)
-                diff = cv2.absdiff(blurred, bg)
-                diff[fg_mask == 0] = 0
-                max_diff_val = int(np.max(diff)) if diff.size > 0 else 0
-                diff_fg = diff[fg_mask > 0]
-                mean_diff = float(np.mean(diff_fg)) if diff_fg.size > 0 else 0.0
-                print(f"  🔲 inspect_roi: 未偵測到缺陷, max_diff={max_diff_val}, mean_diff={mean_diff:.1f}, "
-                      f"fg_median={fg_median_val}, threshold={min_threshold}, min_area={min_area}, median_k={mk}")
+            fg_pixels = blurred[fg_mask > 0]
+            fg_median_val = int(np.median(fg_pixels))
+            mk = clamp_median_kernel(self.config.median_kernel, min(gray.shape[:2]) - 1)
+            blurred_for_bg = blurred.copy()
+            blurred_for_bg[fg_mask == 0] = fg_median_val
+            bg = cv2.medianBlur(blurred_for_bg, mk)
+            diff = cv2.absdiff(blurred, bg)
+            diff[fg_mask == 0] = 0
+            actual_max_diff = int(np.max(diff)) if diff.size > 0 else 0
 
-        return defects
+            _, thresh_mask = cv2.threshold(diff, aoi_threshold, 255, cv2.THRESH_BINARY)
+            n_labels, _, stats_cc, _ = cv2.connectedComponentsWithStats(thresh_mask, connectivity=8)
+            for i in range(1, n_labels):
+                a = stats_cc[i, cv2.CC_STAT_AREA]
+                if a > actual_max_area:
+                    actual_max_area = a
+
+            print(f"  🔲 inspect_roi: 未偵測到缺陷, max_diff={actual_max_diff}, max_area={actual_max_area}, "
+                  f"threshold={aoi_threshold}, min_area={aoi_min_area}, median_k={mk}")
+
+        roi_stats = {
+            "max_diff": actual_max_diff,
+            "max_area": actual_max_area,
+            "threshold": aoi_threshold,
+            "min_area": aoi_min_area,
+        }
+
+        return defects, roi_stats
 
     # ── ROI 擷取 ──────────────────────────────
 
@@ -554,13 +593,7 @@ class CVEdgeInspector:
         else:
             blurred_for_bg = blurred
 
-        mk = self.config.median_kernel
-        # 中值濾波核必須為奇數且不超過 ROI 尺寸
-        mk = min(mk, min(roi.shape[:2]) - 1)
-        if mk % 2 == 0:
-            mk -= 1
-        if mk < 3:
-            mk = 3
+        mk = clamp_median_kernel(self.config.median_kernel, min(roi.shape[:2]) - 1)
         bg = cv2.medianBlur(blurred_for_bg, mk)
 
         diff = cv2.absdiff(blurred, bg)
@@ -615,12 +648,7 @@ class CVEdgeInspector:
         k = self.config.blur_kernel
         blurred = cv2.GaussianBlur(roi, (k, k), 0)
 
-        mk = self.config.median_kernel
-        mk = min(mk, min(roi.shape[:2]) - 1)
-        if mk % 2 == 0:
-            mk -= 1
-        if mk < 3:
-            mk = 3
+        mk = clamp_median_kernel(self.config.median_kernel, min(roi.shape[:2]) - 1)
         print(f"[CV-DEBUG] start medianBlur, k={mk}", flush=True)
         bg = cv2.medianBlur(blurred, mk)
 

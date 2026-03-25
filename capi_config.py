@@ -151,9 +151,11 @@ class CAPIConfig:
         'top': False, 'bottom': True, 'left': False, 'right': False
     })  # 各邊是否啟用衰減
     
-    # 跳過檔案二值化偵測設定 (B0F00000 等無模型圖片，使用 Otsu 自適應閾值)
-    bright_spot_threshold: int = 200          # Otsu 閾值下限保護 (防止全黑圖算出過低值)
+    # 跳過檔案二值化偵測設定 (B0F00000 等無模型圖片)
+    bright_spot_threshold: int = 200          # 絕對亮度上限 (超過此值直接判定為亮點)
     bright_spot_min_area: int = 5             # 亮點最小連通面積 (px, 小於此視為雜訊)
+    bright_spot_median_kernel: int = 21       # 背景估計 median filter 核大小
+    bright_spot_diff_threshold: int = 10      # 局部對比差異閾值 (與背景差值超過此值為異常)
 
     # 跳過檔案設定 (不進行推論的檔案名稱)
     skip_files: List[str] = field(default_factory=list)
@@ -247,6 +249,8 @@ class CAPIConfig:
             edge_margin_sides=data.get("edge_margin_sides", cls._migrate_edge_margin(data)),
             bright_spot_threshold=data.get("bright_spot_threshold", 200),
             bright_spot_min_area=data.get("bright_spot_min_area", 5),
+            bright_spot_median_kernel=data.get("bright_spot_median_kernel", 21),
+            bright_spot_diff_threshold=data.get("bright_spot_diff_threshold", 10),
             skip_files=data.get("skip_files", []),
             side_shot_prefixes=data.get("side_shot_prefixes", []),
             max_images_per_panel=data.get("max_images_per_panel", 7),
@@ -307,6 +311,8 @@ class CAPIConfig:
             "edge_margin_sides": self.edge_margin_sides,
             "bright_spot_threshold": self.bright_spot_threshold,
             "bright_spot_min_area": self.bright_spot_min_area,
+            "bright_spot_median_kernel": self.bright_spot_median_kernel,
+            "bright_spot_diff_threshold": self.bright_spot_diff_threshold,
             "skip_files": self.skip_files,
             "max_images_per_panel": self.max_images_per_panel,
             "bomb_defects": [b.to_dict() for b in self.bomb_defects],
@@ -418,6 +424,10 @@ class CAPIConfig:
             self.bright_spot_threshold = int(param_map["bright_spot_threshold"])
         if "bright_spot_min_area" in param_map:
             self.bright_spot_min_area = int(param_map["bright_spot_min_area"])
+        if "bright_spot_median_kernel" in param_map:
+            self.bright_spot_median_kernel = int(param_map["bright_spot_median_kernel"])
+        if "bright_spot_diff_threshold" in param_map:
+            self.bright_spot_diff_threshold = int(param_map["bright_spot_diff_threshold"])
         if "aoi_report_path_replace_from" in param_map:
             self.aoi_report_path_replace_from = str(param_map["aoi_report_path_replace_from"])
         if "aoi_report_path_replace_to" in param_map:

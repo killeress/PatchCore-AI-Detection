@@ -36,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 import logging
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
-from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect
+from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel
 
 logger = logging.getLogger("capi.inference")
 
@@ -109,6 +109,10 @@ class TileInfo:
     aoi_product_x: int = -1         # AOI 產品座標 X (-1=非 AOI 座標 tile)
     aoi_product_y: int = -1         # AOI 產品座標 Y (-1=非 AOI 座標 tile)
     is_bright_spot_detection: bool = False  # 是否為二值化亮點偵測（非 PatchCore）
+    bright_spot_max_diff: int = 0           # B0F 偵測：最大局部差異值
+    bright_spot_diff_threshold: int = 0     # B0F 偵測：使用的差異閾值
+    bright_spot_area: int = 0               # B0F 偵測：偵測到的亮點面積 (px)
+    bright_spot_min_area: int = 0           # B0F 偵測：使用的最小面積
     
     @property
     def center(self) -> Tuple[int, int]:
@@ -466,16 +470,23 @@ class CAPIInferencer:
             
         return int(x_min), int(y_min), int(x_max), int(y_max)
 
-    def calculate_otsu_bounds(self, image: np.ndarray, otsu_offset_override: Optional[int] = None) -> Tuple[Tuple[int, int, int, int], Optional[int]]:
+    def calculate_otsu_bounds(self, image: np.ndarray, otsu_offset_override: Optional[int] = None, reference_raw_bounds: Optional[Tuple[int, int, int, int]] = None) -> Tuple[Tuple[int, int, int, int], Optional[int]]:
         """
         計算 Otsu 前景邊界
+
+        Args:
+            reference_raw_bounds: 參考用的原始邊界 (來自同資料夾的白圖)。
+                                  黑圖 (B0F) OTSU 無法正確偵測邊界時使用。
         Returns:
             (final_bounds, original_y2) - original_y2 是裁切前的底部 y 座標
         """
         img_height, img_width = image.shape[:2]
 
-        # 取得原始物件邊界
-        x_min, y_min, x_max, y_max = self._find_raw_object_bounds(image)
+        # 取得原始物件邊界 (若有參考邊界則直接使用)
+        if reference_raw_bounds is not None:
+            x_min, y_min, x_max, y_max = reference_raw_bounds
+        else:
+            x_min, y_min, x_max, y_max = self._find_raw_object_bounds(image)
 
         offset = otsu_offset_override if otsu_offset_override is not None else self.config.otsu_offset
         x_start = max(0, int(x_min) + offset)
@@ -717,7 +728,7 @@ class CAPIInferencer:
         
         return tiles, excluded_count
     
-    def preprocess_image(self, image_path: Path, cached_mark: Optional[ExclusionRegion] = None, otsu_offset_override: Optional[int] = None) -> Optional[ImageResult]:
+    def preprocess_image(self, image_path: Path, cached_mark: Optional[ExclusionRegion] = None, otsu_offset_override: Optional[int] = None, reference_raw_bounds: Optional[Tuple[int, int, int, int]] = None) -> Optional[ImageResult]:
         """
         預處理圖片：Otsu + 排除區域 + 切塊
 
@@ -725,25 +736,32 @@ class CAPIInferencer:
             image_path: 圖片路徑
             cached_mark: 快取的 MARK 區域（Panel 級共用）
             otsu_offset_override: Debug 用 Otsu 內縮覆寫值 (px)
+            reference_raw_bounds: 參考用的原始邊界 (來自同資料夾的白圖)。
+                                  黑圖 (B0F) OTSU 無法正確偵測邊界時使用。
 
         Returns:
             ImageResult 或 None（如果載入失敗）
         """
         start_time = time.time()
-        
+
         # 載入圖片 (保持原始深度，例如 8-bit 灰階)
         image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
         if image is None:
             print(f"⚠️ 無法載入: {image_path}")
             return None
-        
+
         img_h, img_w = image.shape[:2]
-        
+
         # 計算原始物件邊界 (用於 AOI 座標映射，只算一次)
-        raw_bounds = self._find_raw_object_bounds(image)
-        
-        # Otsu 裁切
-        otsu_bounds, original_y2 = self.calculate_otsu_bounds(image, otsu_offset_override=otsu_offset_override)
+        # 黑圖 (B0F) 使用參考邊界，因為 OTSU 無法正確偵測全黑畫面的邊界
+        if reference_raw_bounds is not None:
+            raw_bounds = reference_raw_bounds
+            print(f"📐 {image_path.name}: 使用參考邊界 (來自白圖) → {raw_bounds}")
+        else:
+            raw_bounds = self._find_raw_object_bounds(image)
+
+        # Otsu 裁切 (同樣使用參考邊界)
+        otsu_bounds, original_y2 = self.calculate_otsu_bounds(image, otsu_offset_override=otsu_offset_override, reference_raw_bounds=reference_raw_bounds)
         
         # 記錄裁切區域
         cropped_region = None
@@ -1155,11 +1173,18 @@ class CAPIInferencer:
 
     def _detect_bright_spots(self, tile: 'TileInfo') -> Tuple[float, Optional[np.ndarray]]:
         """
-        B0F00000 專用：以二值化方式偵測黑色背景上的白色亮點。
+        B0F00000 專用：偵測黑色背景上的異常亮點。
 
         取代 PatchCore 推論，用於無訓練模型的圖片。
-        使用 Otsu 自適應閾值，自動依據圖片亮度分佈計算最佳二值化門檻，
-        config.bright_spot_threshold 作為下限保護（防止全黑圖 Otsu 算出過低值）。
+        使用局部對比偵測（median filter 背景估計 → 差異計算 → 閾值判定），
+        同時保留絕對亮度上限保護。
+
+        偵測邏輯：
+          1. median filter 估計局部背景
+          2. 原圖 - 背景 = 局部差異（比背景亮的部分）
+          3. 差異 > diff_threshold → 候選亮點
+          4. 連通分量面積篩選 ≥ min_area
+          5. 絕對亮度 > bright_spot_threshold 的也直接納入（上限保護）
 
         Args:
             tile: TileInfo 物件
@@ -1168,8 +1193,10 @@ class CAPIInferencer:
             (score, binary_map) - score: 0.0 (無亮點) 或 1.0 (有亮點)
                                   binary_map: 二值化結果 (uint8, 0/255)
         """
-        min_threshold = self.config.bright_spot_threshold
+        abs_threshold = self.config.bright_spot_threshold
         min_area = self.config.bright_spot_min_area
+        median_kernel = self.config.bright_spot_median_kernel
+        diff_threshold = self.config.bright_spot_diff_threshold
 
         img = tile.image
         if img is None:
@@ -1181,13 +1208,20 @@ class CAPIInferencer:
         else:
             gray = img.copy()
 
-        # Otsu 自適應閾值：自動依圖片亮度分佈找最佳切割點
-        otsu_val, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        # 取 Otsu 值和設定下限的較大者，防止全黑圖產生過低閾值
-        bright_threshold = max(int(otsu_val), min_threshold)
+        mk = clamp_median_kernel(median_kernel, min(gray.shape[:2]) - 1)
 
-        # 二值化：找出高於閾值的亮區
-        _, binary = cv2.threshold(gray, bright_threshold, 255, cv2.THRESH_BINARY)
+        # 背景估計 → 局部差異
+        bg = cv2.medianBlur(gray, mk)
+        diff = cv2.subtract(gray, bg)  # 只取比背景亮的部分 (saturate at 0)
+
+        # 局部對比閾值：差異超過 diff_threshold 的為候選亮點
+        _, binary_diff = cv2.threshold(diff, diff_threshold, 255, cv2.THRESH_BINARY)
+
+        # 絕對亮度上限保護：超過 abs_threshold 的直接納入
+        _, binary_abs = cv2.threshold(gray, abs_threshold, 255, cv2.THRESH_BINARY)
+
+        # 合併兩種偵測結果
+        binary = cv2.bitwise_or(binary_diff, binary_abs)
 
         # 如果 tile 有 mask（排除區域），套用 mask
         if tile.mask is not None:
@@ -1197,7 +1231,6 @@ class CAPIInferencer:
         # 連通分量分析，過濾小面積雜訊
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
 
-        # 清除小面積區域 (label 0 = 背景)
         filtered_binary = np.zeros_like(binary)
         has_bright_spot = False
         max_component_area = 0
@@ -1213,20 +1246,27 @@ class CAPIInferencer:
         # 轉為 float anomaly_map 格式（與 PatchCore 輸出格式相容）
         anomaly_map = filtered_binary.astype(np.float32) / 255.0
 
-        # 標記此 tile 為二值化偵測模式
+        # 標記此 tile 為二值化偵測模式，並儲存偵測統計供 heatmap header 顯示
         tile.is_bright_spot_detection = True
+        tile.bright_spot_max_diff = int(diff.max())
+        tile.bright_spot_diff_threshold = diff_threshold
+        tile.bright_spot_area = int(np.sum(filtered_binary > 0))
+        tile.bright_spot_min_area = min_area
 
-        # 不論是否找到亮點，都輸出偵測結果
+        # 偵測結果 log
         max_pixel_val = int(gray.max())
+        max_diff_val = int(diff.max())
         bright_pixel_count = int(np.sum(filtered_binary > 0))
         raw_bright_count = int(np.sum(binary > 0))
         if has_bright_spot:
-            print(f"  💡 B0F 二值化偵測 Tile@({tile.x},{tile.y}): 發現亮點 ({bright_pixel_count} px), "
-                  f"otsu={int(otsu_val)}, threshold={bright_threshold} (min={min_threshold}), max_pixel={max_pixel_val}")
+            print(f"  💡 B0F 偵測 Tile@({tile.x},{tile.y}): 發現亮點 ({bright_pixel_count} px), "
+                  f"max_diff={max_diff_val}, diff_thr={diff_threshold}, abs_thr={abs_threshold}, "
+                  f"max_pixel={max_pixel_val}, median_k={mk}")
         else:
-            print(f"  💡 B0F 二值化偵測 Tile@({tile.x},{tile.y}): 未發現亮點, "
-                  f"otsu={int(otsu_val)}, threshold={bright_threshold} (min={min_threshold}), max_pixel={max_pixel_val}, "
-                  f"raw_bright={raw_bright_count} px, max_component={max_component_area} px (min_area={min_area})")
+            print(f"  💡 B0F 偵測 Tile@({tile.x},{tile.y}): 未發現亮點, "
+                  f"max_diff={max_diff_val}, diff_thr={diff_threshold}, abs_thr={abs_threshold}, "
+                  f"max_pixel={max_pixel_val}, raw_bright={raw_bright_count} px, "
+                  f"max_component={max_component_area} px (min_area={min_area})")
 
         return score, anomaly_map
 
@@ -2584,6 +2624,34 @@ class CAPIInferencer:
             elif cached_mark is None:
                 print(f"❌ MARK 模板匹配全部失敗，且未設定 Fallback 位置")
         
+        # === 黑圖 (B0F) 參考邊界：從白圖計算 ===
+        # B0F 黑圖的 OTSU 二值化無法正確偵測面板邊界（全黑畫面與背景差異太小），
+        # 因此從同資料夾的白圖 (非B0F、非OMIT) 計算邊界作為參考
+        reference_raw_bounds_for_dark = None
+        _DARK_PREFIXES = ("B0F",)  # 需要使用參考邊界的暗色圖片前綴
+        def _is_dark_image(filename: str) -> bool:
+            return filename.upper().startswith(_DARK_PREFIXES)
+
+        has_dark_files = any(_is_dark_image(f.name) for f in normal_files)
+        if has_dark_files:
+            # 從非暗色、非OMIT 圖片中計算參考邊界
+            ref_candidates = [
+                f for f in normal_files
+                if not _is_dark_image(f.name) and not is_dust_check_image(f)
+            ]
+            for ref_path in ref_candidates:
+                try:
+                    ref_img = cv2.imread(str(ref_path), cv2.IMREAD_UNCHANGED)
+                    if ref_img is not None:
+                        reference_raw_bounds_for_dark = self._find_raw_object_bounds(ref_img)
+                        print(f"📐 黑圖參考邊界已從 {ref_path.name} 計算 → {reference_raw_bounds_for_dark}")
+                        break
+                except Exception as e:
+                    print(f"⚠️ 計算參考邊界失敗 ({ref_path.name}): {e}")
+                    continue
+            if reference_raw_bounds_for_dark is None:
+                print(f"⚠️ 無法找到白圖計算參考邊界，黑圖將使用自身 OTSU 邊界 (可能不準確)")
+
         # 過濾出需要處理的檔案
         files_to_process = [f for f in normal_files if not self.config.should_skip_file(f.name)]
         for f in normal_files:
@@ -2604,7 +2672,9 @@ class CAPIInferencer:
         # ================================================================
         def _preprocess_one(img_path: Path) -> Optional[ImageResult]:
             """單張圖片的預處理 (可安全在多執行緒中呼叫)"""
-            result = self.preprocess_image(img_path, cached_mark=cached_mark)
+            # 黑圖使用參考邊界
+            ref_bounds = reference_raw_bounds_for_dark if reference_raw_bounds_for_dark and _is_dark_image(img_path.name) else None
+            result = self.preprocess_image(img_path, cached_mark=cached_mark, reference_raw_bounds=ref_bounds)
             if result is None:
                 return None
             
@@ -2692,7 +2762,9 @@ class CAPIInferencer:
                                 break
                         if matched_file is not None:
                             print(f"🎯 AOI Coord: 為跳過的圖片 {matched_file.name} 建立預處理 (有 {len(aoi_report[report_prefix])} 筆 AOI 座標)")
-                            skip_result = self.preprocess_image(matched_file, cached_mark=cached_mark)
+                            # 黑圖使用參考邊界
+                            skip_ref_bounds = reference_raw_bounds_for_dark if reference_raw_bounds_for_dark and _is_dark_image(matched_file.name) else None
+                            skip_result = self.preprocess_image(matched_file, cached_mark=cached_mark, reference_raw_bounds=skip_ref_bounds)
                             if skip_result is not None:
                                 # 清除 grid tiles，只保留結構供 AOI coord 使用
                                 skip_result.tiles = []
@@ -2730,13 +2802,19 @@ class CAPIInferencer:
 
                                 # 嘗試用 CV edge inspection 精確檢測
                                 cv_detected = False
+                                roi_stats = {"max_diff": 0, "max_area": 0, "threshold": 0, "min_area": 0}
                                 if roi.size > 0 and getattr(self, 'edge_inspector', None) and self.edge_inspector.config.enabled:
                                     try:
-                                        edge_results = self.edge_inspector.inspect_roi(
+                                        edge_results, roi_stats = self.edge_inspector.inspect_roi(
                                             roi, offset_x=rx1, offset_y=ry1,
                                             otsu_bounds=result.otsu_bounds,
                                         )
                                         if edge_results:
+                                            # 統一 bbox 為 AOI 座標 ROI (rx1,ry1,w,h)，
+                                            # 使 NG/OK 的 heatmap 裁切範圍一致
+                                            unified_bbox = (rx1, ry1, rx2 - rx1, ry2 - ry1)
+                                            for ed in edge_results:
+                                                ed.bbox = unified_bbox
                                             result.edge_defects.extend(edge_results)
                                             cv_detected = True
                                             print(f"  🔍 AOI Coord CV edge ({edef.defect_code}) @ ({img_x},{img_y}): 偵測到 {len(edge_results)} 個邊緣缺陷")
@@ -2744,17 +2822,21 @@ class CAPIInferencer:
                                         logger.warning(f"AOI Coord CV edge 檢測失敗 ({edef.defect_code}): {e}")
 
                                 if not cv_detected:
-                                    # 建立 OK 記錄，讓結果頁面能看到此座標已被檢查
+                                    # 建立 OK 記錄，帶入實際計算的 max_diff / max_area
                                     ok_defect = EdgeDefect(
                                         side="aoi_coord_ok",
-                                        area=0,
+                                        area=roi_stats.get("max_area", 0),
                                         bbox=(rx1, ry1, rx2 - rx1, ry2 - ry1),
                                         center=(img_x, img_y),
-                                        max_diff=0,
+                                        max_diff=roi_stats.get("max_diff", 0),
                                         is_cv_ok=True,
+                                        threshold_used=roi_stats.get("threshold", 0),
+                                        min_area_used=roi_stats.get("min_area", 0),
                                     )
                                     result.edge_defects.append(ok_defect)
-                                    print(f"  ✅ AOI Coord edge ({edef.defect_code}) @ ({img_x},{img_y}): CV 未偵測到缺陷，判定 OK（保留記錄）")
+                                    print(f"  ✅ AOI Coord edge ({edef.defect_code}) @ ({img_x},{img_y}): CV 未偵測到缺陷，判定 OK"
+                                          f"（max_diff={roi_stats.get('max_diff', 0)}, max_area={roi_stats.get('max_area', 0)}, "
+                                          f"thr={roi_stats.get('threshold', 0)}, min_area={roi_stats.get('min_area', 0)}）")
                 print(f"🎯 Phase 1.5 完成: AOI 座標新增 {aoi_tile_count} 個 tiles, {aoi_edge_count} 個邊緣 defects")
 
         # === Grid Tiling 開關控制 ===

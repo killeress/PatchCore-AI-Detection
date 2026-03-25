@@ -13,6 +13,7 @@ CAPI 熱力圖管理模組
 import cv2
 import numpy as np
 from pathlib import Path
+from capi_edge_cv import clamp_median_kernel
 from typing import List, Dict, Optional, Tuple, Any
 import time
 
@@ -29,6 +30,15 @@ class HeatmapManager:
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.save_format = save_format.lower()
+
+    @staticmethod
+    def _draw_split_color_header(header, info_text, verdict, verdict_color, x=10, y=30, font_scale=0.7):
+        """繪製分色 header: 資訊段白色 + verdict 段跟隨判定顏色"""
+        cv2.putText(header, info_text, (x, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (220, 220, 220), 2)
+        (info_w, _), _ = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2)
+        cv2.putText(header, verdict, (x + info_w, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, verdict_color, 2)
 
     def get_save_dir(self, glass_id: str, date_str: str = "") -> Path:
         """
@@ -164,19 +174,25 @@ class HeatmapManager:
             header_h = 60
             header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
 
+            # 取得偵測統計
+            max_diff = getattr(tile_info, 'bright_spot_max_diff', 0) if tile_info else 0
+            diff_thr = getattr(tile_info, 'bright_spot_diff_threshold', 0) if tile_info else 0
+            spot_area = getattr(tile_info, 'bright_spot_area', 0) if tile_info else 0
+            spot_min_area = getattr(tile_info, 'bright_spot_min_area', 0) if tile_info else 0
+
             if is_bomb:
                 verdict = f"BOMB: {bomb_code} (Filtered as OK)"
                 verdict_color = (255, 0, 255)
             elif score > 0:
-                verdict = "NG (Bright Spot)"
+                verdict = "NG"
                 verdict_color = (0, 0, 255)
             else:
-                verdict = "OK (No Bright Spot)"
+                verdict = "OK"
                 verdict_color = (0, 255, 0)
 
-            header_text = f"B0F Binarization | {verdict}"
-            cv2.putText(header, header_text, (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, verdict_color, 2)
+            # 資訊段 + 判定段分色顯示
+            info_text = f"B0F | Diff:{max_diff} Area:{spot_area}px | DiffThr:{diff_thr} MinArea:{spot_min_area} | "
+            self._draw_split_color_header(header, info_text, verdict, verdict_color, y=25, font_scale=0.6)
             detail_line = f"Tile#{tile_id} | {image_name}"
             cv2.putText(header, detail_line, (10, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
@@ -413,11 +429,7 @@ class HeatmapManager:
             k = getattr(edge_config, 'blur_kernel', 3)
             mk = getattr(edge_config, 'median_kernel', 65)
         blurred = cv2.GaussianBlur(roi_gray, (k, k), 0)
-        mk = min(mk, min(roi_gray.shape[:2]) - 1)
-        if mk % 2 == 0:
-            mk -= 1
-        if mk < 3:
-            mk = 3
+        mk = clamp_median_kernel(mk, min(roi_gray.shape[:2]) - 1)
         bg = cv2.medianBlur(blurred, mk)
         diff = cv2.absdiff(blurred, bg)
 
@@ -585,8 +597,12 @@ class HeatmapManager:
         header_h = 50
         header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
 
+        # 取得判定參數 (用於 header 顯示)
+        threshold_used = getattr(edge_defect, 'threshold_used', 0)
+        min_area_used = getattr(edge_defect, 'min_area_used', 0)
+
         if is_cv_ok:
-            verdict = "CV OK (No Defect)"
+            verdict = "CV OK"
             verdict_color = (0, 255, 0)
         elif is_bomb:
             verdict = f"BOMB: {bomb_code} (Filtered as OK)"
@@ -595,12 +611,23 @@ class HeatmapManager:
             verdict = f"SURFACE ({metric_name}:{surface_iou:.3f}) (Filtered as OK)"
             verdict_color = (0, 200, 255)
         else:
-            verdict = "NG (Detected)"
+            verdict = "NG"
             verdict_color = (0, 0, 255)
 
-        header_text = f"CV Edge [v4]: {side} | Diff: {max_diff:.0f} | Area: {area}px | {verdict}"
-        cv2.putText(header, header_text, (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, verdict_color, 2)
+        # 組合 header: 實際數值 + 判定閾值 + 結果
+        threshold_info = ""
+        if threshold_used > 0 or min_area_used > 0:
+            threshold_info = f" | Thr:{threshold_used} MinArea:{min_area_used}"
+        header_text = f"CV Edge [v4]: {side} | Diff:{max_diff:.0f} Area:{area}px{threshold_info} | {verdict}"
+
+        # 分段繪製: 數值部分白色，verdict 部分跟隨判定顏色
+        verdict_start = header_text.rfind("| " + verdict)
+        info_part = header_text[:verdict_start + 2] if verdict_start > 0 else ""
+        if info_part:
+            self._draw_split_color_header(header, info_part, verdict, verdict_color, y=30, font_scale=0.7)
+        else:
+            cv2.putText(header, header_text, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, verdict_color, 2)
 
         # Label bar
         label_h = 40

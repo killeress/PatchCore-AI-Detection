@@ -15,7 +15,7 @@ mark_fallback_position:
   height: 300
 
 # Otsu 裁剪設定
-otsu_offset: 20  # 四周偏移 px
+otsu_offset: 5  # 四周偏移 px
 otsu_bottom_crop: 0  # Otsu 後裁切底部像素 (若設置 > 0，則自動禁用排除區域)
 
 # 排除區域 (推論時跳過這些區域)
@@ -37,7 +37,7 @@ tile_size: 512
 tile_stride: 512  # 非重疊切塊
 
 # 推論設定
-anomaly_threshold: 0.7  # 異常分數閾值 (fallback，當 threshold_mapping 無對應時使用)
+anomaly_threshold: 0.75  # 異常分數閾值 (fallback，當 threshold_mapping 無對應時使用)
 model_path: "./model.pt"  # fallback 模型路徑 (當 model_mapping 無對應前綴時使用)
 
 # 多模型映射 — 依圖片前綴自動選用對應模型
@@ -50,38 +50,42 @@ model_mapping:
   "STANDARD": "model/CAPI03-20260305/STANDARD-model.pt"    # 標準
 # 每個前綴的獨立閾值 (可依實際 miss/overkill 數據個別微調)
 threshold_mapping:
-  "G0F00000": 0.70
-  "R0F00000": 0.70
-  "W0F00000": 0.70
-  "WGF50500": 0.70
-  "STANDARD": 0.70
+  "G0F00000": 0.75
+  "R0F00000": 0.75
+  "W0F00000": 0.75
+  "WGF50500": 0.75
+  "STANDARD": 0.75
+
 
 # PatchCore 後處理 — 集中度檢查 (過濾瀰漫性假陽性)
 # Peak/Mean ratio 低 = heatmap 均勻偏暖 (無局部峰值) → 降權
-patchcore_concentration_enabled: true
+patchcore_concentration_enabled: false
 patchcore_concentration_min_ratio: 2.0    # Peak/Mean 低於此值觸發降權
 patchcore_concentration_penalty: 0.5      # ratio=1.0 (完全均勻) 時的降權乘數
 
 # PatchCore 後處理 — 擴散面積檢查 (過濾梯度/大面積偏暖假陽性)
 # 超過 Peak 50% 的像素佔比太高 = heatmap 大面積偏暖 → 降權
-patchcore_diffuse_area_enabled: true
+patchcore_diffuse_area_enabled: false
 patchcore_diffuse_area_threshold: 0.3    # 熱區佔比超過此值觸發降權 (0.3 = 30%)
 patchcore_diffuse_area_penalty: 0.5      # 佔比=100% 時的降權乘數
 
+
+
 # 灰塵偵測設定 (OMIT 圖片分析)
-dust_brightness_threshold: 40    # 備用亮度閾值 (Otsu 自適應上限)
+dust_brightness_threshold: 40    # 備用亮度閾值 (優先使用 Otsu 自適應)
 dust_threshold_floor: 25         # Otsu 自適應閾值下限 (防止低噪 OMIT 抓出過多背景噪點)
 dust_bright_rescue_threshold: 180  # CLAHE 增強後直接檢測閾值 (救回被 Top-Hat 吃掉的大面積明顯污染/刮痕，0=停用)
-dust_area_min: 15                # 灰塵顆粒最小面積 (px)
+dust_area_min: 5               # 灰塵顆粒最小面積 (px)
 dust_area_max: 50000             # 灰塵顆粒最大面積 (px)
 dust_extension: 3                # 灰塵區域膨脹像素
-dust_heatmap_iou_threshold: 0.01 # Heatmap vs Dust IOU 閾值 (大於此值判定為灰塵)
+dust_heatmap_iou_threshold: 0.007 # Heatmap vs Dust IOU 閾值 (大於此值判定為灰塵)
 dust_heatmap_top_percent: 0.4    # Heatmap 熱區取前 X% 最紅像素
 dust_heatmap_metric: "coverage"  # 灰塵判定指標: "coverage" (推薦) 或 "iou"
 
 # OMIT 過曝偵測設定 (曝光過高的 OMIT 圖無法檢測灰塵，需記錄供工程追蹤)
 omit_overexposure_mean_threshold: 200   # 平均亮度閾值 (正常OMIT約30~80，過曝>200)
 omit_overexposure_ratio_threshold: 0.5  # 高亮像素(>230)佔比閾值 (過曝通常>60%)
+
 
 # 邊緣衰減設定 (過濾光影假陽性)
 edge_margin_px: 256              # 邊緣衰減寬度 (px)，0=停用
@@ -91,10 +95,16 @@ edge_margin_sides:               # 各邊是否啟用衰減
   left: true
   right: true
 
+
 # 跳過檔案二值化偵測設定 (B0F00000 等無模型圖片，以亮點偵測取代 PatchCore)
-# 使用 Otsu 自適應閾值，自動依圖片亮度分佈計算最佳門檻
-bright_spot_threshold: 200    # Otsu 閾值下限保護 (防止全黑圖算出過低值導致誤判)
+bright_spot_threshold: 200    # 絕對亮度上限 (超過直接判定亮點)
 bright_spot_min_area: 5       # 亮點最小連通面積 (px, 小於此視為雜訊過濾)
+bright_spot_median_kernel: 21 # 背景估計 median filter 核大小 (越大背景越平滑)
+bright_spot_diff_threshold: 10 # 局部對比差異閾值 (與背景差值超過此值為異常)
+
+
+# 邊緣補漏 tile (Otsu 邊界處額外加一排錯開的 tile，避免缺陷落在 tile 邊緣漏檢)
+edge_overlap_enabled: false
 
 # 跳過檔案 (使用檔名前綴比對，支援帶時間戳的 TIF 檔案)
 # 例如 "B0F00000" 會匹配 "B0F00000.png" 和 "B0F00000_031447.tif"
@@ -119,7 +129,7 @@ max_images_per_panel: 20
 # defect_type: "line" = 豎線 (兩點定義起終點), "point" = 點 (多個座標位置)
 # coordinates: 產品座標系 (1920x1080)
 bomb_match_tolerance: 50  # 座標匹配容忍度 (產品座標系像素)
-bomb_line_min_aspect_ratio: 3.0  # Line 型炸彈 heatmap 最小長寬比 (建議 2.5~4.0)
+bomb_line_min_aspect_ratio: 1.2  # Line 型炸彈 heatmap 最小長寬比 (建議 2.5~4.0)
 bomb_defects:
   - image_prefix: "G0F00000"
     defect_code: "PCLV6GA0"

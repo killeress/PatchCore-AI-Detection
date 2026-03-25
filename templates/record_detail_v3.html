@@ -608,14 +608,35 @@
         }
         function copyInferenceLog() {
             const text = document.getElementById('inference-log').textContent;
-            navigator.clipboard.writeText(text).then(() => {
+            const showFeedback = () => {
                 const btn = document.getElementById('log-copy-btn');
                 const orig = btn.innerHTML;
                 btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="#22c55e" style="width:14px;height:14px;"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg> 已複製';
                 btn.style.borderColor = '#22c55e';
                 btn.style.color = '#22c55e';
                 setTimeout(() => { btn.innerHTML = orig; btn.style.borderColor = '#E2E8F0'; btn.style.color = '#64748B'; }, 2000);
-            });
+            };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(showFeedback).catch(err => {
+                    console.error('Failed to copy log: ', err);
+                });
+            } else {
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+                textArea.style.position = "fixed";
+                textArea.style.left = "-9999px";
+                textArea.style.top = "-9999px";
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                try {
+                    const successful = document.execCommand('copy');
+                    if (successful) showFeedback();
+                } catch (err) {
+                    console.error('Fallback copy failed', err);
+                }
+                document.body.removeChild(textArea);
+            }
         }
         </script>
         {% endif %}

@@ -1219,6 +1219,13 @@ class CAPIDatabase:
             ("cv_edge_exclude_w", 100, "int", "排除區域寬度 (px)"),
             ("cv_edge_exclude_h", 100, "int", "排除區域高度 (px)"),
             ("cv_edge_exclude_zones", [], "dict", "不檢測排除區域列表 (適用於 PatchCore 推論及邊緣檢測)"),
+            ("cv_edge_aoi_threshold", 4, "int", "AOI 座標邊緣明暗差閾值 (獨立於四邊)"),
+            ("cv_edge_aoi_min_area", 10, "int", "AOI 座標邊緣最小缺陷面積 (px, 獨立於四邊)"),
+            # B0F 亮點偵測設定
+            ("bright_spot_threshold", 200, "int", "絕對亮度上限 (超過直接判定亮點)"),
+            ("bright_spot_min_area", 5, "int", "亮點最小連通面積 (px)"),
+            ("bright_spot_median_kernel", 21, "int", "背景估計 median filter 核大小"),
+            ("bright_spot_diff_threshold", 10, "int", "局部對比差異閾值"),
             # AOI 機檢座標設定
             ("grid_tiling_enabled", True, "bool", "啟用全面板 Grid Tiling 推論"),
             ("aoi_coord_inspection_enabled", False, "bool", "啟用 AOI 機檢座標推論"),

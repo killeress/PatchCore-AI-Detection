@@ -1030,7 +1030,12 @@
     ];
     const AOI_COORD_PARAMS = [
         'grid_tiling_enabled', 'aoi_coord_inspection_enabled',
-        'aoi_report_path_replace_from', 'aoi_report_path_replace_to'
+        'aoi_report_path_replace_from', 'aoi_report_path_replace_to',
+        'cv_edge_aoi_threshold', 'cv_edge_aoi_min_area'
+    ];
+    const B0F_BRIGHT_SPOT_PARAMS = [
+        'bright_spot_diff_threshold', 'bright_spot_median_kernel',
+        'bright_spot_min_area', 'bright_spot_threshold'
     ];
 
     // ── Init ──
@@ -1084,6 +1089,7 @@
         const dustParams = DUST_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const cvEdgeParams = CV_EDGE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const aoiCoordParams = AOI_COORD_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
+        const b0fParams = B0F_BRIGHT_SPOT_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
 
         // Group CV Edge Parameters
         const edgeEnabled = cvEdgeParams.find(p => p.param_name === 'cv_edge_enabled');
@@ -1323,6 +1329,22 @@
                     </div>
                     ${aoiCoordParams.map(p => paramRow(p)).join('')}
                 </div>
+                ${b0fParams.length > 0 ? `
+                <div class="settings-section" style="border-left: 3px solid #f59e0b; margin-top: 16px;">
+                    <div class="settings-section-header">
+                        <div class="icon">💡</div>
+                        <span>B0F 亮點偵測設定</span>
+                    </div>
+                    <div style="padding: 12px 16px; color: #94a3b8; font-size: 0.82rem; line-height: 1.6; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        B0F00000 等 skip_files 圖片使用局部對比偵測取代 PatchCore。<br>
+                        偵測邏輯：median filter 估計背景 → 計算局部差異 → 差異超過閾值且面積 ≥ min_area 判定為亮點。<br>
+                        <span style="color: #fbbf24;">diff_threshold</span>：局部對比差異閾值（越低越敏感）｜
+                        <span style="color: #fbbf24;">median_kernel</span>：背景估計核大小（越大背景越平滑）｜
+                        <span style="color: #fbbf24;">threshold</span>：絕對亮度上限保護（超過直接判定 NG）
+                    </div>
+                    ${b0fParams.map(p => paramRow(p)).join('')}
+                </div>
+                ` : ''}
             </div>
         `;
 
