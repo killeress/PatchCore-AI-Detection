@@ -2803,7 +2803,7 @@ class CAPIInferencer:
                                 # 嘗試用 CV edge inspection 精確檢測
                                 cv_detected = False
                                 roi_stats = {"max_diff": 0, "max_area": 0, "threshold": 0, "min_area": 0}
-                                if roi.size > 0 and getattr(self, 'edge_inspector', None) and self.edge_inspector.config.enabled:
+                                if roi.size > 0 and getattr(self, 'edge_inspector', None):
                                     try:
                                         edge_results, roi_stats = self.edge_inspector.inspect_roi(
                                             roi, offset_x=rx1, offset_y=ry1,
