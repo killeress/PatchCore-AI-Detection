@@ -488,7 +488,9 @@ function copyInferenceLog() {
                 <div class="image-box">
                     <h4 style="margin-bottom:8px;color:#0891B2;font-size:0.85rem;font-family:'Fira Code',monospace;">
                         Edge: {{ ed.side }}
-                        {% if ed.is_cv_ok %}
+                        {% if ed.is_bomb %}
+                        <span style="color: #A855F7; font-size: 0.75rem;">(BOMB)</span>
+                        {% elif ed.is_cv_ok %}
                         <span style="color: #22C55E; font-size: 0.75rem;">(CV OK)</span>
                         {% elif ed.is_dust %}
                         <span style="color: #22C55E; font-size: 0.75rem;">(Filtered OK)</span>
