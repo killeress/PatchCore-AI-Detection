@@ -798,6 +798,7 @@
                         <table class="data-table list-table">
                             <thead>
                                 <tr style="background: #ECFEFF;">
+                                    <th style="width: 70px; color: #0E7490;">狀態</th>
                                     <th style="width: 80px; color: #0E7490;">邊</th>
                                     <th style="color: #0E7490;">位置 (x, y)</th>
                                     <th style="color: #0E7490;">大小 (w × h)</th>
@@ -809,22 +810,37 @@
                                 {% for ed in img.edge_defects %}
                                 <tr>
                                     <td>
-                                        {% if ed.is_cv_ok %}
+                                        {% if ed.is_bomb %}
+                                        <span style="display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #FAE8FF; color: #86198F; border: 1px solid #E879F9;">
+                                            BOMB
+                                        </span>
+                                        {% elif ed.is_dust %}
+                                        <span style="display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #FEF3C7; color: #92400E; border: 1px solid #FCD34D;">
+                                            DUST
+                                        </span>
+                                        {% elif ed.is_cv_ok %}
                                         <span style="display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #D1FAE5; color: #065F46; border: 1px solid #6EE7B7;">
-                                            CV OK
+                                            OK
                                         </span>
                                         {% else %}
-                                        <span style="display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #CFFAFE; color: #0E7490; border: 1px solid #A5F3FC;">
-                                            {{ ed.side }}
+                                        <span style="display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5;">
+                                            NG
                                         </span>
                                         {% endif %}
                                     </td>
-                                    <td>({{ ed.bbox_x }}, {{ ed.bbox_y }})</td>
-                                    <td>{{ ed.bbox_w }} × {{ ed.bbox_h }}</td>
-                                    <td>{{ ed.area }}</td>
                                     <td>
-                                        {% if ed.is_cv_ok %}
-                                        <span class="badge" style="background: #D1FAE5; color: #065F46;">OK</span>
+                                        <span style="display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #CFFAFE; color: #0E7490; border: 1px solid #A5F3FC;">
+                                            {{ ed.side }}
+                                        </span>
+                                    </td>
+                                    <td>({{ ed.bbox_x }}, {{ ed.bbox_y }})</td>
+                                    <td>{{ ed.bbox_w }}×{{ ed.bbox_h }}</td>
+                                    <td>{{ ed.area }}px</td>
+                                    <td>
+                                        {% if ed.is_bomb %}
+                                        <span class="badge" style="background: #FAE8FF; color: #86198F;">{{ ed.max_diff | round(1) }}</span>
+                                        {% elif ed.is_cv_ok %}
+                                        <span class="badge" style="background: #D1FAE5; color: #065F46;">0.0</span>
                                         {% else %}
                                         <span class="badge bg-ng-subtle">
                                             {{ ed.max_diff | round(1) }}
@@ -843,7 +859,10 @@
                         {% set ehm_url = hm_relative(ed.heatmap_path, heatmap_base_dir) %}
                         {% if ehm_url %}
                         <div class="image-box">
-                            <div class="image-box-label" style="color: #0891B2; background: rgba(236, 254, 255, 0.95); border-color: #A5F3FC;">Edge: {{ ed.side }}</div>
+                            <div class="image-box-label" style="color: {% if ed.is_bomb %}#86198F{% elif ed.is_cv_ok %}#065F46{% elif ed.is_dust %}#92400E{% else %}#DC2626{% endif %}; background: {% if ed.is_bomb %}rgba(250, 232, 255, 0.95){% elif ed.is_cv_ok %}rgba(209, 250, 229, 0.95){% elif ed.is_dust %}rgba(254, 243, 199, 0.95){% else %}rgba(254, 226, 226, 0.95){% endif %}; border-color: {% if ed.is_bomb %}#E879F9{% elif ed.is_cv_ok %}#6EE7B7{% elif ed.is_dust %}#FCD34D{% else %}#FCA5A5{% endif %};">
+                                Edge: {{ ed.side }}
+                                {% if ed.is_bomb %}(BOMB){% elif ed.is_cv_ok %}(OK){% elif ed.is_dust %}(DUST){% else %}(NG){% endif %}
+                            </div>
                             <img src="/heatmaps/{{ ehm_url }}" alt="edge {{ ed.side }}" onclick="openLightbox(this.src)">
                         </div>
                         {% endif %}
