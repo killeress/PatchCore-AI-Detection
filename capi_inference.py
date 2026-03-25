@@ -2810,14 +2810,24 @@ class CAPIInferencer:
                                             otsu_bounds=result.otsu_bounds,
                                         )
                                         if edge_results:
-                                            # 統一 bbox 為 AOI 座標 ROI (rx1,ry1,w,h)，
-                                            # 使 NG/OK 的 heatmap 裁切範圍一致
+                                            # 合併為單一 EdgeDefect (以 AOI 座標為中心)
+                                            # 避免拆成多筆小 defect 導致 BOMB 比對時部分 center 偏離
                                             unified_bbox = (rx1, ry1, rx2 - rx1, ry2 - ry1)
-                                            for ed in edge_results:
-                                                ed.bbox = unified_bbox
-                                            result.edge_defects.extend(edge_results)
+                                            total_area = sum(ed.area for ed in edge_results)
+                                            worst_diff = max(ed.max_diff for ed in edge_results)
+                                            merged = EdgeDefect(
+                                                side="aoi_edge",
+                                                area=total_area,
+                                                bbox=unified_bbox,
+                                                center=(img_x, img_y),  # 使用 AOI 座標中心，確保 BOMB 比對一致
+                                                max_diff=worst_diff,
+                                                threshold_used=roi_stats.get("threshold", 0),
+                                                min_area_used=roi_stats.get("min_area", 0),
+                                            )
+                                            result.edge_defects.append(merged)
                                             cv_detected = True
-                                            print(f"  🔍 AOI Coord CV edge ({edef.defect_code}) @ ({img_x},{img_y}): 偵測到 {len(edge_results)} 個邊緣缺陷")
+                                            print(f"  🔍 AOI Coord CV edge ({edef.defect_code}) @ ({img_x},{img_y}): "
+                                                  f"偵測到 {len(edge_results)} 個缺陷 → 合併為 1 筆 (area={total_area}, diff={worst_diff})")
                                     except Exception as e:
                                         logger.warning(f"AOI Coord CV edge 檢測失敗 ({edef.defect_code}): {e}")
 
