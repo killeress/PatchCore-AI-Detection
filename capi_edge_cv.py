@@ -404,9 +404,8 @@ class CVEdgeInspector:
                        "threshold": self.config.aoi_threshold,
                        "min_area": self.config.aoi_min_area}
 
-        if not self.config.enabled:
-            return [], empty_stats
-
+        # 注意：不檢查 self.config.enabled
+        # AOI 座標邊緣 CV 偵測由呼叫端決定是否執行，不受全域 cv_edge_enabled 開關影響
         if roi is None or roi.size == 0:
             return [], empty_stats
 
