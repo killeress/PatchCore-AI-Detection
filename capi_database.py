@@ -409,6 +409,166 @@ class CAPIDatabase:
             finally:
                 conn.close()
 
+    def update_record_for_rerun(
+        self,
+        record_id: int,
+        ai_judgment: str,
+        total_images: int,
+        ng_images: int,
+        ng_details: str,
+        processing_seconds: float,
+        heatmap_dir: str = "",
+        error_message: str = "",
+        image_results_data: Optional[List[Dict]] = None,
+        inference_log: str = "",
+        omit_overexposed: int = 0,
+        omit_overexposure_info: str = "",
+    ) -> None:
+        """
+        重新推論後覆蓋更新紀錄 (同一 record_id)
+
+        1. 刪除舊的 tile_results, edge_defect_results, image_results
+        2. 更新 inference_records 欄位
+        3. 插入新的 image_results, tile_results, edge_defect_results
+        """
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                # --- 刪除舊的子紀錄 ---
+                old_image_ids = [
+                    row["id"] for row in conn.execute(
+                        "SELECT id FROM image_results WHERE record_id = ?",
+                        (record_id,)
+                    ).fetchall()
+                ]
+                if old_image_ids:
+                    placeholders = ",".join("?" * len(old_image_ids))
+                    conn.execute(
+                        f"DELETE FROM tile_results WHERE image_result_id IN ({placeholders})",
+                        old_image_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM edge_defect_results WHERE image_result_id IN ({placeholders})",
+                        old_image_ids,
+                    )
+                conn.execute(
+                    "DELETE FROM image_results WHERE record_id = ?",
+                    (record_id,),
+                )
+
+                # --- 更新主紀錄 ---
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                conn.execute(
+                    """UPDATE inference_records SET
+                           ai_judgment = ?,
+                           total_images = ?,
+                           ng_images = ?,
+                           ng_details = ?,
+                           response_time = ?,
+                           processing_seconds = ?,
+                           heatmap_dir = ?,
+                           error_message = ?,
+                           inference_log = ?,
+                           omit_overexposed = ?,
+                           omit_overexposure_info = ?
+                       WHERE id = ?""",
+                    (ai_judgment, total_images, ng_images, ng_details,
+                     now_str, processing_seconds, heatmap_dir, error_message,
+                     inference_log, omit_overexposed, omit_overexposure_info,
+                     record_id),
+                )
+
+                # --- 插入新的子紀錄 ---
+                if image_results_data:
+                    for img_data in image_results_data:
+                        img_cursor = conn.execute(
+                            """INSERT INTO image_results
+                               (record_id, image_path, image_name, image_width, image_height,
+                                otsu_bounds, tile_count, excluded_tiles, anomaly_count,
+                                max_score, is_ng, is_dust_only, is_bomb, inference_time_ms,
+                                heatmap_path)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (record_id,
+                             img_data.get("image_path", ""),
+                             img_data.get("image_name", ""),
+                             img_data.get("image_width", 0),
+                             img_data.get("image_height", 0),
+                             img_data.get("otsu_bounds", ""),
+                             img_data.get("tile_count", 0),
+                             img_data.get("excluded_tiles", 0),
+                             img_data.get("anomaly_count", 0),
+                             img_data.get("max_score", 0.0),
+                             img_data.get("is_ng", 0),
+                             img_data.get("is_dust_only", 0),
+                             img_data.get("is_bomb", 0),
+                             img_data.get("inference_time_ms", 0.0),
+                             img_data.get("heatmap_path", ""))
+                        )
+                        image_result_id = img_cursor.lastrowid
+
+                        for tile_data in img_data.get("tiles", []):
+                            conn.execute(
+                                """INSERT INTO tile_results
+                                   (image_result_id, tile_id, x, y, width, height,
+                                    score, is_anomaly, is_dust, dust_iou, is_bomb,
+                                    bomb_code, peak_x, peak_y, heatmap_path,
+                                    is_exclude_zone, is_aoi_coord, aoi_defect_code,
+                                    aoi_product_x, aoi_product_y)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (image_result_id,
+                                 tile_data.get("tile_id", 0),
+                                 tile_data.get("x", 0),
+                                 tile_data.get("y", 0),
+                                 tile_data.get("width", 0),
+                                 tile_data.get("height", 0),
+                                 tile_data.get("score", 0.0),
+                                 tile_data.get("is_anomaly", 0),
+                                 tile_data.get("is_dust", 0),
+                                 tile_data.get("dust_iou", 0.0),
+                                 tile_data.get("is_bomb", 0),
+                                 tile_data.get("bomb_code", ""),
+                                 tile_data.get("peak_x", -1),
+                                 tile_data.get("peak_y", -1),
+                                 tile_data.get("heatmap_path", ""),
+                                 tile_data.get("is_exclude_zone", 0),
+                                 tile_data.get("is_aoi_coord", 0),
+                                 tile_data.get("aoi_defect_code", ""),
+                                 tile_data.get("aoi_product_x", -1),
+                                 tile_data.get("aoi_product_y", -1))
+                            )
+
+                        for edge_data in img_data.get("edge_defects", []):
+                            conn.execute(
+                                """INSERT INTO edge_defect_results
+                                   (image_result_id, side, area,
+                                    bbox_x, bbox_y, bbox_w, bbox_h,
+                                    max_diff, center_x, center_y, heatmap_path,
+                                    is_dust, is_bomb, bomb_code, is_cv_ok)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (image_result_id,
+                                 edge_data.get("side", ""),
+                                 edge_data.get("area", 0),
+                                 edge_data.get("bbox_x", 0),
+                                 edge_data.get("bbox_y", 0),
+                                 edge_data.get("bbox_w", 0),
+                                 edge_data.get("bbox_h", 0),
+                                 edge_data.get("max_diff", 0.0),
+                                 edge_data.get("center_x", 0),
+                                 edge_data.get("center_y", 0),
+                                 edge_data.get("heatmap_path", ""),
+                                 edge_data.get("is_dust", 0),
+                                 edge_data.get("is_bomb", 0),
+                                 edge_data.get("bomb_code", ""),
+                                 edge_data.get("is_cv_ok", 0))
+                            )
+
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+
     def query_by_glass_id(self, glass_id: str) -> List[Dict]:
         """依玻璃 ID 查詢推論記錄"""
         conn = self._get_conn()
