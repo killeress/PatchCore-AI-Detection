@@ -1652,6 +1652,24 @@
         let _loaded = false;
         let trendChart = null, distChart = null, machineChart = null, modelChart = null, errChart = null;
 
+        const _darkScales = {
+            x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' } },
+            y: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' }, beginAtZero: true },
+        };
+        const _barBaseOpts = {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#94a3b8' } }, datalabels: { display: false } },
+            scales: _darkScales,
+        };
+        const _hBarBaseOpts = {
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            plugins: { legend: { labels: { color: '#94a3b8' } }, datalabels: { display: false } },
+            scales: {
+                x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' }, beginAtZero: true },
+                y: { ticks: { color: '#94a3b8' }, grid: { display: false } },
+            },
+        };
+
         function _destroyCharts() {
             [trendChart, distChart, machineChart, modelChart, errChart].forEach(c => { if (c) c.destroy(); });
             trendChart = distChart = machineChart = modelChart = errChart = null;
@@ -1789,15 +1807,7 @@
                         },
                     ],
                 },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { legend: { labels: { color: '#94a3b8' } }, datalabels: { display: false } },
-                    scales: {
-                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' } },
-                        y: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' }, beginAtZero: true },
-                    },
-                },
+                options: _barBaseOpts,
             });
         }
 
@@ -1847,16 +1857,7 @@
                         { label: 'AI NG率%', data: top10.map(m => m.ai_ng_rate), backgroundColor: 'rgba(59,130,246,0.7)' },
                     ],
                 },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    indexAxis: 'y',
-                    plugins: { legend: { labels: { color: '#94a3b8' } }, datalabels: { display: false } },
-                    scales: {
-                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' }, beginAtZero: true },
-                        y: { ticks: { color: '#94a3b8' }, grid: { display: false } },
-                    },
-                },
+                options: _hBarBaseOpts,
             });
         }
 
@@ -1869,16 +1870,7 @@
                     labels: top10.map(m => m.model),
                     datasets: [{ label: '推論筆數', data: top10.map(m => m.total), backgroundColor: 'rgba(124,77,255,0.7)' }],
                 },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    indexAxis: 'y',
-                    plugins: { legend: { display: false }, datalabels: { display: false } },
-                    scales: {
-                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' }, beginAtZero: true },
-                        y: { ticks: { color: '#94a3b8' }, grid: { display: false } },
-                    },
-                },
+                options: { ..._hBarBaseOpts, plugins: { legend: { display: false }, datalabels: { display: false } } },
             });
         }
 
@@ -1891,16 +1883,7 @@
                     labels: top10.map(e => e.type.length > 20 ? e.type.substring(0, 20) + '…' : e.type),
                     datasets: [{ label: '次數', data: top10.map(e => e.count), backgroundColor: 'rgba(245,158,11,0.7)' }],
                 },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    indexAxis: 'y',
-                    plugins: { legend: { display: false }, datalabels: { display: false } },
-                    scales: {
-                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' }, beginAtZero: true },
-                        y: { ticks: { color: '#94a3b8' }, grid: { display: false } },
-                    },
-                },
+                options: { ..._hBarBaseOpts, plugins: { legend: { display: false }, datalabels: { display: false } } },
             });
         }
 

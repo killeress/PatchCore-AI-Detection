@@ -13,9 +13,12 @@ CAPI AI 推論結果資料庫模組
 import sqlite3
 import threading
 import json
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Tuple
+
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 
 class CAPIDatabase:
@@ -1155,11 +1158,9 @@ class CAPIDatabase:
             start_date: 起始日期 YYYY-MM-DD（含）
             end_date: 結束日期 YYYY-MM-DD（含）
         """
-        import re
-        date_re = re.compile(r'^\d{4}-\d{2}-\d{2}$')
-        if start_date and not date_re.match(start_date):
+        if start_date and not _DATE_RE.match(start_date):
             return {"success": False, "error": f"Invalid start_date format: {start_date}"}
-        if end_date and not date_re.match(end_date):
+        if end_date and not _DATE_RE.match(end_date):
             return {"success": False, "error": f"Invalid end_date format: {end_date}"}
 
         conn = self._get_conn()
@@ -1175,62 +1176,34 @@ class CAPIDatabase:
                 params.append(end_date)
             where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-            # ── 1. Summary 統計 ──
-            rows = conn.execute(
-                f"SELECT machine_judgment, ai_judgment, error_message FROM inference_records{where_sql}",
+            _aoi_ng_cond = "machine_judgment != '' AND machine_judgment != 'OK'"
+            _ai_ng_cond = "ai_judgment LIKE 'NG%'"
+            _err_cond = "ai_judgment LIKE 'ERR%'"
+
+            # ── 1. Summary + Cross Matrix (single SQL aggregate) ──
+            summary_row = conn.execute(
+                f"""SELECT COUNT(*) as total,
+                           SUM(CASE WHEN {_aoi_ng_cond} THEN 1 ELSE 0 END) as aoi_ng,
+                           SUM(CASE WHEN {_ai_ng_cond} THEN 1 ELSE 0 END) as ai_ng,
+                           SUM(CASE WHEN ({_aoi_ng_cond}) AND ai_judgment = 'OK' THEN 1 ELSE 0 END) as ai_revival,
+                           SUM(CASE WHEN {_err_cond} THEN 1 ELSE 0 END) as err_count,
+                           SUM(CASE WHEN NOT ({_aoi_ng_cond}) AND NOT ({_ai_ng_cond}) AND NOT ({_err_cond}) THEN 1 ELSE 0 END) as ok_ok,
+                           SUM(CASE WHEN ({_aoi_ng_cond}) AND NOT ({_ai_ng_cond}) AND NOT ({_err_cond}) THEN 1 ELSE 0 END) as ng_ok,
+                           SUM(CASE WHEN NOT ({_aoi_ng_cond}) AND ({_ai_ng_cond}) AND NOT ({_err_cond}) THEN 1 ELSE 0 END) as ok_ng,
+                           SUM(CASE WHEN ({_aoi_ng_cond}) AND ({_ai_ng_cond}) AND NOT ({_err_cond}) THEN 1 ELSE 0 END) as ng_ng
+                    FROM inference_records{where_sql}""",
                 params
-            ).fetchall()
-
-            total = len(rows)
-            aoi_ng = 0
-            ai_ng = 0
-            ai_revival = 0  # AOI NG → AI OK
-            err_count = 0
-            ok_ok = 0
-            ng_ok = 0
-            ok_ng = 0
-            ng_ng = 0
-            err_types_counter: Dict[str, int] = {}
-
-            for row in rows:
-                mj = (row["machine_judgment"] or "").strip()
-                aj = (row["ai_judgment"] or "").strip()
-                em = (row["error_message"] or "").strip()
-
-                is_aoi_ng = mj != "" and mj != "OK"
-                is_ai_ng = aj.startswith("NG")
-                is_err = aj.startswith("ERR")
-
-                if is_aoi_ng:
-                    aoi_ng += 1
-                if is_ai_ng:
-                    ai_ng += 1
-                if is_err:
-                    err_count += 1
-                    # ERR 類型分類
-                    err_desc = aj[4:].strip() if len(aj) > 4 else (em if em else "Unknown")
-                    err_types_counter[err_desc] = err_types_counter.get(err_desc, 0) + 1
-                if is_aoi_ng and aj == "OK":
-                    ai_revival += 1
-
-                # 交叉比對矩陣（排除 ERR）
-                if not is_err:
-                    if not is_aoi_ng and not is_ai_ng:
-                        ok_ok += 1
-                    elif is_aoi_ng and not is_ai_ng:
-                        ng_ok += 1
-                    elif not is_aoi_ng and is_ai_ng:
-                        ok_ng += 1
-                    elif is_aoi_ng and is_ai_ng:
-                        ng_ng += 1
+            ).fetchone()
+            s = dict(summary_row)
+            total = s["total"] or 0
 
             # ── 2. 每日趨勢 ──
             daily_rows = conn.execute(
                 f"""SELECT DATE(request_time) as date,
                            COUNT(*) as total,
-                           SUM(CASE WHEN machine_judgment != '' AND machine_judgment != 'OK' THEN 1 ELSE 0 END) as aoi_ng,
-                           SUM(CASE WHEN ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ai_ng,
-                           SUM(CASE WHEN ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END) as err
+                           SUM(CASE WHEN {_aoi_ng_cond} THEN 1 ELSE 0 END) as aoi_ng,
+                           SUM(CASE WHEN {_ai_ng_cond} THEN 1 ELSE 0 END) as ai_ng,
+                           SUM(CASE WHEN {_err_cond} THEN 1 ELSE 0 END) as err
                     FROM inference_records{where_sql}
                     GROUP BY DATE(request_time)
                     ORDER BY date""",
@@ -1242,8 +1215,8 @@ class CAPIDatabase:
             machine_rows = conn.execute(
                 f"""SELECT machine_no as machine,
                            COUNT(*) as total,
-                           ROUND(SUM(CASE WHEN machine_judgment != '' AND machine_judgment != 'OK' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as aoi_ng_rate,
-                           ROUND(SUM(CASE WHEN ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as ai_ng_rate
+                           ROUND(SUM(CASE WHEN {_aoi_ng_cond} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as aoi_ng_rate,
+                           ROUND(SUM(CASE WHEN {_ai_ng_cond} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as ai_ng_rate
                     FROM inference_records{where_sql}
                     GROUP BY machine_no
                     ORDER BY total DESC""",
@@ -1261,31 +1234,41 @@ class CAPIDatabase:
             ).fetchall()
             by_model = [dict(r) for r in model_rows]
 
-            # ── 5. ERR 類型排序 ──
-            err_types = sorted(
-                [{"type": k, "count": v} for k, v in err_types_counter.items()],
-                key=lambda x: x["count"],
-                reverse=True
-            )
+            # ── 5. ERR 類型 (SQL GROUP BY) ──
+            err_where = f" WHERE ai_judgment LIKE 'ERR%'" if not where_clauses else where_sql + f" AND {_err_cond}"
+            err_rows = conn.execute(
+                f"""SELECT CASE WHEN LENGTH(TRIM(SUBSTR(ai_judgment, 5))) > 0
+                                THEN TRIM(SUBSTR(ai_judgment, 5))
+                                WHEN LENGTH(TRIM(error_message)) > 0
+                                THEN TRIM(error_message)
+                                ELSE 'Unknown'
+                           END as type,
+                           COUNT(*) as count
+                    FROM inference_records{err_where}
+                    GROUP BY type
+                    ORDER BY count DESC""",
+                params
+            ).fetchall()
+            err_types = [dict(r) for r in err_rows]
 
             return {
                 "success": True,
                 "summary": {
                     "total": total,
-                    "aoi_ng": aoi_ng,
-                    "ai_ng": ai_ng,
-                    "ai_revival": ai_revival,
-                    "err_count": err_count,
+                    "aoi_ng": s["aoi_ng"] or 0,
+                    "ai_ng": s["ai_ng"] or 0,
+                    "ai_revival": s["ai_revival"] or 0,
+                    "err_count": s["err_count"] or 0,
                 },
                 "daily_trend": daily_trend,
                 "by_machine": by_machine,
                 "by_model": by_model,
                 "err_types": err_types,
                 "cross_matrix": {
-                    "ok_ok": ok_ok,
-                    "ng_ok": ng_ok,
-                    "ok_ng": ok_ng,
-                    "ng_ng": ng_ng,
+                    "ok_ok": s["ok_ok"] or 0,
+                    "ng_ok": s["ng_ok"] or 0,
+                    "ok_ng": s["ok_ng"] or 0,
+                    "ng_ng": s["ng_ng"] or 0,
                 },
             }
         finally:
