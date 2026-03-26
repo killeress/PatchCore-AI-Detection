@@ -212,6 +212,19 @@ class CAPIDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_client_acc_pnl ON client_accuracy_records(pnl_id);
                 CREATE INDEX IF NOT EXISTS idx_client_acc_time ON client_accuracy_records(time_stamp);
+
+                -- Miss review records (漏檢原因回填)
+                CREATE TABLE IF NOT EXISTS miss_review (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_record_id INTEGER NOT NULL,
+                    category TEXT NOT NULL,
+                    note TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    FOREIGN KEY (client_record_id) REFERENCES client_accuracy_records(id),
+                    UNIQUE(client_record_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_miss_review_client ON miss_review(client_record_id);
             """)
             
             # Migration for adding missing columns to existing database
@@ -959,18 +972,92 @@ class CAPIDatabase:
             finally:
                 conn.close()
 
-    def get_client_accuracy_records(self) -> list:
-        """取得所有 client accuracy records"""
+    def get_client_accuracy_records(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> list:
+        """取得 client accuracy records，支援日期篩選，並 LEFT JOIN miss_review"""
+        if start_date and not _DATE_RE.match(start_date):
+            raise ValueError(f"Invalid start_date format: {start_date}")
+        if end_date and not _DATE_RE.match(end_date):
+            raise ValueError(f"Invalid end_date format: {end_date}")
+
         conn = self._get_conn()
         try:
+            where_clauses = []
+            params = []
+            if start_date:
+                where_clauses.append("c.time_stamp >= ?")
+                params.append(start_date)
+            if end_date:
+                where_clauses.append("c.time_stamp <= ?")
+                params.append(end_date + " 23:59:59")
+            where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
             rows = conn.execute(
-                """SELECT time_stamp, pnl_id, mach_id, result_eqp, result_ai, result_ric, datastr
-                   FROM client_accuracy_records
-                   ORDER BY time_stamp DESC"""
+                f"""SELECT c.id, c.time_stamp, c.pnl_id, c.mach_id,
+                           c.result_eqp, c.result_ai, c.result_ric, c.datastr,
+                           mr.id as review_id, mr.category as review_category,
+                           mr.note as review_note, mr.updated_at as review_updated_at
+                    FROM client_accuracy_records c
+                    LEFT JOIN miss_review mr ON mr.client_record_id = c.id
+                    {where_sql}
+                    ORDER BY c.time_stamp DESC""",
+                params
             ).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+    VALID_MISS_CATEGORIES = {'dust_misfilter', 'threshold_high', 'ric_misjudge', 'outside_aoi_area', 'other'}
+
+    def save_miss_review(self, client_record_id: int, category: str, note: str = '') -> int:
+        """儲存或更新漏檢 Review (UPSERT by client_record_id)"""
+        if category not in self.VALID_MISS_CATEGORIES:
+            raise ValueError(f"Invalid category: {category}")
+
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                # 驗證 client_record_id 存在
+                row = conn.execute(
+                    "SELECT id FROM client_accuracy_records WHERE id = ?",
+                    (client_record_id,)
+                ).fetchone()
+                if not row:
+                    raise ValueError(f"Record not found: {client_record_id}")
+
+                conn.execute(
+                    """INSERT INTO miss_review (client_record_id, category, note)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(client_record_id)
+                       DO UPDATE SET category = excluded.category,
+                                     note = excluded.note,
+                                     updated_at = datetime('now', 'localtime')""",
+                    (client_record_id, category, note)
+                )
+                conn.commit()
+                review_id = conn.execute(
+                    "SELECT id FROM miss_review WHERE client_record_id = ?",
+                    (client_record_id,)
+                ).fetchone()["id"]
+                return review_id
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+
+    def delete_miss_review(self, client_record_id: int) -> bool:
+        """刪除漏檢 Review"""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                cursor = conn.execute(
+                    "DELETE FROM miss_review WHERE client_record_id = ?",
+                    (client_record_id,)
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            finally:
+                conn.close()
 
     def get_client_accuracy_count(self) -> int:
         """取得 client accuracy records 總數"""
