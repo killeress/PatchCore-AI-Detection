@@ -1888,6 +1888,16 @@
         }
 
         function renderCrossMatrix(cm) {
+            // 取得當前日期篩選，組成搜尋頁面的 URL 參數
+            const sd = document.getElementById('inf_startDate').value;
+            const ed = document.getElementById('inf_endDate').value;
+            let dateParams = '';
+            if (sd) dateParams += '&start_date=' + sd;
+            if (ed) dateParams += '&end_date=' + ed;
+
+            const ngOkUrl = '/search?cross_filter=ng_ok' + dateParams;
+            const okNgUrl = '/search?cross_filter=ok_ng' + dateParams;
+
             document.getElementById('inf_crossMatrix').innerHTML = `
                 <div class="inf-cross-cell">
                     <div class="cell-label">AOI OK → AI OK</div>
@@ -1896,12 +1906,12 @@
                 </div>
                 <div class="inf-cross-cell">
                     <div class="cell-label">AOI NG → AI OK</div>
-                    <div class="cell-value" style="color:#22c55e;">${(cm.ng_ok || 0).toLocaleString()}</div>
+                    <div class="cell-value"><a href="${ngOkUrl}" style="color:#22c55e;text-decoration:underline;text-underline-offset:3px;" title="點擊查看 AI 救回記錄">${(cm.ng_ok || 0).toLocaleString()}</a></div>
                     <div class="cell-desc" style="color:#22c55e;">✓ AI 救回</div>
                 </div>
                 <div class="inf-cross-cell">
                     <div class="cell-label">AOI OK → AI NG</div>
-                    <div class="cell-value" style="color:#ef4444;">${(cm.ok_ng || 0).toLocaleString()}</div>
+                    <div class="cell-value"><a href="${okNgUrl}" style="color:#ef4444;text-decoration:underline;text-underline-offset:3px;" title="點擊查看 AI 攔截記錄">${(cm.ok_ng || 0).toLocaleString()}</a></div>
                     <div class="cell-desc" style="color:#ef4444;">AI 額外攔截</div>
                 </div>
                 <div class="inf-cross-cell">

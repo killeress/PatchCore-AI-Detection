@@ -45,6 +45,129 @@
         background: #2563eb;
         transform: translateY(-1px);
     }
+
+    .cross-filter-bar {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px solid var(--border);
+        flex-wrap: wrap;
+    }
+    .cross-filter-bar .cf-label {
+        color: var(--text-muted);
+        font-size: 0.84rem;
+        margin-right: 2px;
+    }
+    .cross-filter-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 14px;
+        border-radius: 6px;
+        font-size: 0.84rem;
+        font-weight: 500;
+        text-decoration: none;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .cross-filter-btn .cf-dot {
+        width: 7px; height: 7px;
+        border-radius: 50%;
+        flex-shrink: 0;
+    }
+    .cross-filter-btn.revival .cf-dot { background: #22c55e; }
+    .cross-filter-btn.intercept .cf-dot { background: #ef4444; }
+
+    .cross-filter-btn:hover {
+        color: var(--text);
+        border-color: var(--accent);
+        transform: translateY(-1px);
+    }
+    .cross-filter-btn.revival.active {
+        background: rgba(34,197,94,0.15);
+        border-color: #22c55e;
+        color: #4ade80;
+        box-shadow: 0 0 0 1px rgba(34,197,94,0.15);
+    }
+    .cross-filter-btn.intercept.active {
+        background: rgba(239,68,68,0.15);
+        border-color: #ef4444;
+        color: #f87171;
+        box-shadow: 0 0 0 1px rgba(239,68,68,0.15);
+    }
+    .cross-filter-btn.clear {
+        border-color: transparent;
+        background: transparent;
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        padding: 6px 10px;
+    }
+    .cross-filter-btn.clear:hover {
+        color: var(--text);
+        background: rgba(255,255,255,0.06);
+    }
+    .cross-filter-tag {
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 4px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        margin-left: 8px;
+        vertical-align: middle;
+    }
+
+    .pagination {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 4px;
+        margin-top: 16px;
+        flex-wrap: wrap;
+    }
+    .pagination a, .pagination span {
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 0.88rem;
+        text-decoration: none;
+        transition: all 0.2s;
+    }
+    .pagination a {
+        color: var(--text);
+        background: var(--bg);
+        border: 1px solid var(--border);
+    }
+    .pagination a:hover {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+    }
+    .pagination .current {
+        background: var(--accent);
+        color: #fff;
+        border: 1px solid var(--accent);
+        font-weight: 600;
+    }
+    .pagination .disabled {
+        color: var(--text-muted);
+        opacity: 0.4;
+        pointer-events: none;
+    }
+    .pagination .ellipsis {
+        color: var(--text-muted);
+        border: none;
+        padding: 6px 4px;
+    }
+    .pagination .page-info {
+        color: var(--text-muted);
+        font-size: 0.84rem;
+        margin-left: 12px;
+        border: none;
+    }
 </style>
 {% endblock %}
 
@@ -64,18 +187,38 @@
         <input type="date" name="start_date" value="{{ start_date }}" style="padding:9px 10px;min-width:140px;">
         <label style="color:var(--text-muted);font-size:0.88rem;white-space:nowrap;">結束日期</label>
         <input type="date" name="end_date" value="{{ end_date }}" style="padding:9px 10px;min-width:140px;">
+        <input type="hidden" name="cross_filter" id="cross_filter_input" value="">
         <button type="submit">立即搜尋</button>
     </form>
+    <div class="cross-filter-bar">
+        <span class="cf-label">快捷篩選</span>
+        <a class="cross-filter-btn revival{% if cross_filter=='ng_ok' %} active{% endif %}"
+           href="/search?cross_filter=ng_ok{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}{% if glass_id %}&glass_id={{ glass_id }}{% endif %}{% if machine_no %}&machine_no={{ machine_no }}{% endif %}">
+            <span class="cf-dot"></span>AI 救回<span style="opacity:0.55;font-weight:400;margin-left:2px;">AOI NG → AI OK</span>
+        </a>
+        <a class="cross-filter-btn intercept{% if cross_filter=='ok_ng' %} active{% endif %}"
+           href="/search?cross_filter=ok_ng{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}{% if glass_id %}&glass_id={{ glass_id }}{% endif %}{% if machine_no %}&machine_no={{ machine_no }}{% endif %}">
+            <span class="cf-dot"></span>AI 攔截<span style="opacity:0.55;font-weight:400;margin-left:2px;">AOI OK → AI NG</span>
+        </a>
+        {% if cross_filter %}
+        <a class="cross-filter-btn clear"
+           href="/search?{% if glass_id %}glass_id={{ glass_id }}&{% endif %}{% if machine_no %}machine_no={{ machine_no }}&{% endif %}{% if ai_judgment %}ai_judgment={{ ai_judgment }}&{% endif %}{% if start_date %}start_date={{ start_date }}&{% endif %}{% if end_date %}end_date={{ end_date }}{% endif %}">
+            ✕ 清除
+        </a>
+        {% endif %}
+    </div>
 </div>
 
 
-{% if has_search %}
 <div class="card">
     <div
         style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
-        <h3>搜尋結果 (共 {{ records|length }} 筆)</h3>
+        <h3>搜尋結果 (共 {{ total_count }} 筆)
+            {% if cross_filter == 'ng_ok' %}<span class="cross-filter-tag" style="background:rgba(34,197,94,0.15);color:#22c55e;">AI 救回</span>
+            {% elif cross_filter == 'ok_ng' %}<span class="cross-filter-tag" style="background:rgba(239,68,68,0.15);color:#ef4444;">AI 攔截</span>{% endif %}
+        </h3>
         {% if records %}
-        <a href="/search/export?glass_id={{ glass_id }}&machine_no={{ machine_no }}&ai_judgment={{ ai_judgment }}&start_date={{ start_date }}&end_date={{ end_date }}"
+        <a href="/search/export?glass_id={{ glass_id }}&machine_no={{ machine_no }}&ai_judgment={{ ai_judgment }}&start_date={{ start_date }}&end_date={{ end_date }}&cross_filter={{ cross_filter }}"
             style="padding:8px 18px;background:rgba(34,197,94,0.15);border:1px solid rgba(34,197,94,0.5);border-radius:8px;color:#22c55e;text-decoration:none;font-size:0.9rem;font-weight:600;display:flex;align-items:center;gap:6px;transition:all 0.2s;"
             onmouseover="this.style.background='rgba(34,197,94,0.25)'"
             onmouseout="this.style.background='rgba(34,197,94,0.15)'">
@@ -90,6 +233,7 @@
                 <th>ID</th>
                 <th>玻璃編號</th>
                 <th>機台</th>
+                {% if cross_filter %}<th>AOI 判定</th>{% endif %}
                 <th>AI 判定</th>
                 <th>耗時</th>
                 <th>建立時間</th>
@@ -101,17 +245,61 @@
                 <td><a href="/record/{{ r.id }}">{{ r.id }}</a></td>
                 <td>{{ r.glass_id }}</td>
                 <td>{{ r.machine_no }}</td>
+                {% if cross_filter %}<td><span class="badge {% if r.machine_judgment and r.machine_judgment != 'OK' %}badge-ng{% else %}badge-ok{% endif %}">{{ r.machine_judgment or 'OK' }}</span></td>{% endif %}
                 <td><span class="badge {{ r.ai_judgment | ai_badge }}">{{ r.ai_judgment | ai_simple }}</span></td>
                 <td>{{ r.processing_seconds | round(1) }}s</td>
                 <td>{{ r.created_at }}</td>
             </tr>
             {% else %}
             <tr>
-                <td colspan="6" style="text-align:center;color:var(--text-muted)">無搜尋結果</td>
+                <td colspan="{% if cross_filter %}7{% else %}6{% endif %}" style="text-align:center;color:var(--text-muted)">無搜尋結果</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
+
+    {% if total_pages > 1 %}
+    {% set base_url = "/search?glass_id=" ~ glass_id ~ "&machine_no=" ~ machine_no ~ "&ai_judgment=" ~ ai_judgment ~ "&start_date=" ~ start_date ~ "&end_date=" ~ end_date ~ "&cross_filter=" ~ cross_filter %}
+    <div class="pagination">
+        {% if page > 1 %}
+            <a href="{{ base_url }}&page=1" title="第一頁">&laquo;</a>
+            <a href="{{ base_url }}&page={{ page - 1 }}" title="上一頁">&lsaquo;</a>
+        {% else %}
+            <span class="disabled">&laquo;</span>
+            <span class="disabled">&lsaquo;</span>
+        {% endif %}
+
+        {% set start_p = [1, page - 3] | max %}
+        {% set end_p = [total_pages, page + 3] | min %}
+
+        {% if start_p > 1 %}
+            <a href="{{ base_url }}&page=1">1</a>
+            {% if start_p > 2 %}<span class="ellipsis">...</span>{% endif %}
+        {% endif %}
+
+        {% for p in range(start_p, end_p + 1) %}
+            {% if p == page %}
+                <span class="current">{{ p }}</span>
+            {% else %}
+                <a href="{{ base_url }}&page={{ p }}">{{ p }}</a>
+            {% endif %}
+        {% endfor %}
+
+        {% if end_p < total_pages %}
+            {% if end_p < total_pages - 1 %}<span class="ellipsis">...</span>{% endif %}
+            <a href="{{ base_url }}&page={{ total_pages }}">{{ total_pages }}</a>
+        {% endif %}
+
+        {% if page < total_pages %}
+            <a href="{{ base_url }}&page={{ page + 1 }}" title="下一頁">&rsaquo;</a>
+            <a href="{{ base_url }}&page={{ total_pages }}" title="最後一頁">&raquo;</a>
+        {% else %}
+            <span class="disabled">&rsaquo;</span>
+            <span class="disabled">&raquo;</span>
+        {% endif %}
+
+        <span class="page-info">第 {{ page }} / {{ total_pages }} 頁</span>
+    </div>
+    {% endif %}
 </div>
-{% endif %}
 {% endblock %}

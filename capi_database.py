@@ -24,6 +24,11 @@ _DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 class CAPIDatabase:
     """CAPI AI 推論結果 SQLite 資料庫"""
 
+    # 共用 SQL 條件片段（search_records 與 get_inference_stats 共用）
+    _AOI_NG_COND = "machine_judgment != '' AND machine_judgment != 'OK'"
+    _AI_NG_COND = "ai_judgment LIKE 'NG%'"
+    _ERR_COND = "ai_judgment LIKE 'ERR%'"
+
     def __init__(self, db_path: str):
         """
         初始化資料庫連線
@@ -620,9 +625,11 @@ class CAPIDatabase:
         ai_judgment: str = "",
         start_date: str = "",
         end_date: str = "",
+        cross_filter: str = "",
         limit: int = 100,
-    ) -> List[Dict]:
-        """多條件搜尋"""
+        offset: int = 0,
+    ) -> Tuple[List[Dict], int]:
+        """多條件搜尋，回傳 (records, total_count)"""
         conditions = []
         params = []
 
@@ -632,29 +639,52 @@ class CAPIDatabase:
         if machine_no:
             conditions.append("machine_no LIKE ?")
             params.append(f"%{machine_no}%")
-        if ai_judgment:
+
+        if cross_filter == "ng_ok":
+            conditions.append(
+                f"({self._AOI_NG_COND}) AND NOT ({self._AI_NG_COND}) AND NOT ({self._ERR_COND})"
+            )
+        elif cross_filter == "ok_ng":
+            conditions.append(
+                f"NOT ({self._AOI_NG_COND}) AND ({self._AI_NG_COND}) AND NOT ({self._ERR_COND})"
+            )
+        elif ai_judgment:
             conditions.append("ai_judgment LIKE ?")
             params.append(f"%{ai_judgment}%")
-        if start_date:
-            conditions.append("created_at >= ?")
-            params.append(start_date)
-        if end_date:
-            conditions.append("created_at <= ?")
-            params.append(end_date)
+
+        if cross_filter:
+            # 使用 DATE(request_time) 與 get_inference_stats 一致，確保數字對得上
+            if start_date:
+                conditions.append("DATE(request_time) >= ?")
+                params.append(start_date)
+            if end_date:
+                conditions.append("DATE(request_time) <= ?")
+                params.append(end_date)
+        else:
+            if start_date:
+                conditions.append("created_at >= ?")
+                params.append(start_date)
+            if end_date:
+                conditions.append("created_at <= ?")
+                params.append(end_date)
 
         where_clause = " AND ".join(conditions) if conditions else "1=1"
-        params.append(limit)
 
         conn = self._get_conn()
         try:
+            total_count = conn.execute(
+                f"SELECT COUNT(*) FROM inference_records WHERE {where_clause}",
+                params
+            ).fetchone()[0]
+
             rows = conn.execute(
                 f"""SELECT * FROM inference_records
                     WHERE {where_clause}
                     ORDER BY created_at DESC
-                    LIMIT ?""",
-                params
+                    LIMIT ? OFFSET ?""",
+                params + [limit, offset]
             ).fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r) for r in rows], total_count
         finally:
             conn.close()
 
@@ -1176,21 +1206,21 @@ class CAPIDatabase:
                 params.append(end_date)
             where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-            _aoi_ng_cond = "machine_judgment != '' AND machine_judgment != 'OK'"
-            _ai_ng_cond = "ai_judgment LIKE 'NG%'"
-            _err_cond = "ai_judgment LIKE 'ERR%'"
+            _aoi_ng = self._AOI_NG_COND
+            _ai_ng = self._AI_NG_COND
+            _err = self._ERR_COND
 
             # ── 1. Summary + Cross Matrix (single SQL aggregate) ──
             summary_row = conn.execute(
                 f"""SELECT COUNT(*) as total,
-                           SUM(CASE WHEN {_aoi_ng_cond} THEN 1 ELSE 0 END) as aoi_ng,
-                           SUM(CASE WHEN {_ai_ng_cond} THEN 1 ELSE 0 END) as ai_ng,
-                           SUM(CASE WHEN ({_aoi_ng_cond}) AND ai_judgment = 'OK' THEN 1 ELSE 0 END) as ai_revival,
-                           SUM(CASE WHEN {_err_cond} THEN 1 ELSE 0 END) as err_count,
-                           SUM(CASE WHEN NOT ({_aoi_ng_cond}) AND NOT ({_ai_ng_cond}) AND NOT ({_err_cond}) THEN 1 ELSE 0 END) as ok_ok,
-                           SUM(CASE WHEN ({_aoi_ng_cond}) AND NOT ({_ai_ng_cond}) AND NOT ({_err_cond}) THEN 1 ELSE 0 END) as ng_ok,
-                           SUM(CASE WHEN NOT ({_aoi_ng_cond}) AND ({_ai_ng_cond}) AND NOT ({_err_cond}) THEN 1 ELSE 0 END) as ok_ng,
-                           SUM(CASE WHEN ({_aoi_ng_cond}) AND ({_ai_ng_cond}) AND NOT ({_err_cond}) THEN 1 ELSE 0 END) as ng_ng
+                           SUM(CASE WHEN {_aoi_ng} THEN 1 ELSE 0 END) as aoi_ng,
+                           SUM(CASE WHEN {_ai_ng} THEN 1 ELSE 0 END) as ai_ng,
+                           SUM(CASE WHEN ({_aoi_ng}) AND ai_judgment = 'OK' THEN 1 ELSE 0 END) as ai_revival,
+                           SUM(CASE WHEN {_err} THEN 1 ELSE 0 END) as err_count,
+                           SUM(CASE WHEN NOT ({_aoi_ng}) AND NOT ({_ai_ng}) AND NOT ({_err}) THEN 1 ELSE 0 END) as ok_ok,
+                           SUM(CASE WHEN ({_aoi_ng}) AND NOT ({_ai_ng}) AND NOT ({_err}) THEN 1 ELSE 0 END) as ng_ok,
+                           SUM(CASE WHEN NOT ({_aoi_ng}) AND ({_ai_ng}) AND NOT ({_err}) THEN 1 ELSE 0 END) as ok_ng,
+                           SUM(CASE WHEN ({_aoi_ng}) AND ({_ai_ng}) AND NOT ({_err}) THEN 1 ELSE 0 END) as ng_ng
                     FROM inference_records{where_sql}""",
                 params
             ).fetchone()
@@ -1201,9 +1231,9 @@ class CAPIDatabase:
             daily_rows = conn.execute(
                 f"""SELECT DATE(request_time) as date,
                            COUNT(*) as total,
-                           SUM(CASE WHEN {_aoi_ng_cond} THEN 1 ELSE 0 END) as aoi_ng,
-                           SUM(CASE WHEN {_ai_ng_cond} THEN 1 ELSE 0 END) as ai_ng,
-                           SUM(CASE WHEN {_err_cond} THEN 1 ELSE 0 END) as err
+                           SUM(CASE WHEN {_aoi_ng} THEN 1 ELSE 0 END) as aoi_ng,
+                           SUM(CASE WHEN {_ai_ng} THEN 1 ELSE 0 END) as ai_ng,
+                           SUM(CASE WHEN {_err} THEN 1 ELSE 0 END) as err
                     FROM inference_records{where_sql}
                     GROUP BY DATE(request_time)
                     ORDER BY date""",
@@ -1215,8 +1245,8 @@ class CAPIDatabase:
             machine_rows = conn.execute(
                 f"""SELECT machine_no as machine,
                            COUNT(*) as total,
-                           ROUND(SUM(CASE WHEN {_aoi_ng_cond} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as aoi_ng_rate,
-                           ROUND(SUM(CASE WHEN {_ai_ng_cond} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as ai_ng_rate
+                           ROUND(SUM(CASE WHEN {_aoi_ng} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as aoi_ng_rate,
+                           ROUND(SUM(CASE WHEN {_ai_ng} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as ai_ng_rate
                     FROM inference_records{where_sql}
                     GROUP BY machine_no
                     ORDER BY total DESC""",
@@ -1235,7 +1265,7 @@ class CAPIDatabase:
             by_model = [dict(r) for r in model_rows]
 
             # ── 5. ERR 類型 (SQL GROUP BY) ──
-            err_where = f" WHERE ai_judgment LIKE 'ERR%'" if not where_clauses else where_sql + f" AND {_err_cond}"
+            err_where = f" WHERE ai_judgment LIKE 'ERR%'" if not where_clauses else where_sql + f" AND {_err}"
             err_rows = conn.execute(
                 f"""SELECT CASE WHEN LENGTH(TRIM(SUBSTR(ai_judgment, 5))) > 0
                                 THEN TRIM(SUBSTR(ai_judgment, 5))
@@ -1599,8 +1629,8 @@ if __name__ == "__main__":
     print(f"✅ Recent records: {len(recent)}")
 
     # 測試搜尋
-    results = db.search_records(machine_no="CAPI1403")
-    print(f"✅ Search by machine: {len(results)} results")
+    results, total = db.search_records(machine_no="CAPI1403")
+    print(f"✅ Search by machine: {len(results)} results (total: {total})")
 
     # 清理
     os.remove(test_db_path)

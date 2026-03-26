@@ -37,6 +37,7 @@ test_heatmaps/
 static/heatmaps/
 temp/
 tmp/
+.superpowers/
 
 # IDEs and Editors
 .vscode/

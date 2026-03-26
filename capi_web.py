@@ -16,6 +16,7 @@ import tempfile
 import json
 import urllib.parse
 import mimetypes
+from datetime import datetime, timedelta
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Optional, Tuple
@@ -349,28 +350,46 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self._send_response(200, html)
 
     def _handle_search(self, query: dict, path: str):
-        """搜尋頁面（含日期篩選）"""
+        """搜尋頁面（含日期篩選、分頁）"""
         glass_id = query.get("glass_id", [""])[0]
         machine_no = query.get("machine_no", [""])[0]
         ai_judgment = query.get("ai_judgment", [""])[0]
-        start_date = query.get("start_date", [""])[0]  # 格式 YYYY-MM-DD
-        end_date = query.get("end_date", [""])[0]      # 格式 YYYY-MM-DD
+        start_date = query.get("start_date", [""])[0]
+        end_date = query.get("end_date", [""])[0]
+        cross_filter = query.get("cross_filter", [""])[0]
 
-        # end_date 加上時間尾端，確保涵蓋當天全天
+        # 預設顯示近 7 天（首次進入頁面時）
+        if not any([glass_id, machine_no, ai_judgment, start_date, end_date, cross_filter]):
+            today = datetime.now()
+            end_date = today.strftime("%Y-%m-%d")
+            start_date = (today - timedelta(days=6)).strftime("%Y-%m-%d")
+
+        per_page = 50
+        try:
+            page = max(1, int(query.get("page", ["1"])[0]))
+        except (ValueError, IndexError):
+            page = 1
+
         end_date_full = f"{end_date} 23:59:59" if end_date else ""
 
+        # 先查總數以便在查詢前校正頁碼
         records = []
-        has_search = False
-        if any([glass_id, machine_no, ai_judgment, start_date, end_date]):
-            has_search = True
-            records = self.db.search_records(
+        total_count = 0
+        if self.db:
+            records, total_count = self.db.search_records(
                 glass_id=glass_id,
                 machine_no=machine_no,
                 ai_judgment=ai_judgment,
                 start_date=start_date,
                 end_date=end_date_full,
-                limit=500,
-            ) if self.db else []
+                cross_filter=cross_filter,
+                limit=per_page,
+                offset=(page - 1) * per_page,
+            )
+
+        total_pages = max(1, (total_count + per_page - 1) // per_page)
+        if page > total_pages:
+            page = total_pages
 
         template = self.jinja_env.get_template("search.html")
         html = template.render(
@@ -379,8 +398,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             ai_judgment=ai_judgment,
             start_date=start_date,
             end_date=end_date,
+            cross_filter=cross_filter,
             records=records,
-            has_search=has_search,
+            total_count=total_count,
+            page=page,
+            total_pages=total_pages,
             request_path=path
         )
         self._send_response(200, html)
@@ -396,16 +418,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         ai_judgment = query.get("ai_judgment", [""])[0]
         start_date = query.get("start_date",  [""])[0]
         end_date   = query.get("end_date",    [""])[0]
+        cross_filter = query.get("cross_filter", [""])[0]
         end_date_full = f"{end_date} 23:59:59" if end_date else ""
 
-        records = self.db.search_records(
+        records, _ = self.db.search_records(
             glass_id=glass_id,
             machine_no=machine_no,
             ai_judgment=ai_judgment,
             start_date=start_date,
             end_date=end_date_full,
+            cross_filter=cross_filter,
             limit=10000,
-        ) if self.db else []
+        ) if self.db else ([], 0)
 
         # 建立 CSV 內容（UTF-8 BOM，讓 Excel 正常顯示中文）
         buf = io.StringIO()
