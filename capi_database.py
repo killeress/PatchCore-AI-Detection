@@ -1155,6 +1155,13 @@ class CAPIDatabase:
             start_date: 起始日期 YYYY-MM-DD（含）
             end_date: 結束日期 YYYY-MM-DD（含）
         """
+        import re
+        date_re = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+        if start_date and not date_re.match(start_date):
+            return {"success": False, "error": f"Invalid start_date format: {start_date}"}
+        if end_date and not date_re.match(end_date):
+            return {"success": False, "error": f"Invalid end_date format: {end_date}"}
+
         conn = self._get_conn()
         try:
             # 建立日期篩選條件
