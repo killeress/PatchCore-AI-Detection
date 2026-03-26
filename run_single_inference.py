@@ -15,6 +15,7 @@ import numpy as np
 
 from capi_config import CAPIConfig
 from capi_inference import CAPIInferencer
+from capi_heatmap import build_region_zoom_panel
 
 
 def find_omit_image(image_path: Path) -> Path | None:
@@ -91,6 +92,7 @@ def generate_tile_combined_image(
     # --- 灰塵偵測與後續分析 ---
     dust_mask = None
     iou = 0.0
+    metric_name = "COV"
     detail_text = ""
     is_dust_final = False
     dust_iou_debug = None
@@ -159,15 +161,25 @@ def generate_tile_combined_image(
         cv2.putText(iou_debug_panel, "No IOU Debug", (130, 260),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)
 
+    # --- Panel 6: Region Zoom (當灰塵判定超過閾值時，放大異常區域) ---
+    zoom_panel = None
+    if is_dust_final and anomaly_map is not None:
+        zoom_panel = build_region_zoom_panel(
+            heatmap_panel, anomaly_map, dust_mask, tile_size
+        )
+
     # --- 橫向拼接（不在面板上畫標籤）---
     panels = [orig, heatmap_panel, omit_panel, dust_panel, iou_debug_panel]
+    labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask (Overall{metric_name}:{iou:.3f})", f"{metric_name} Debug (G=Overlap R=Heat B=Dust)"]
+    if zoom_panel is not None:
+        panels.append(zoom_panel)
+        labels.append("Region Zoom (Heatmap+Dust)")
     composite = np.hstack(panels)
     comp_h, comp_w = composite.shape[:2]
 
     # --- 底部獨立標籤列（不蓋到面板內容）---
     label_h = 40
     label_bar = np.zeros((label_h, comp_w, 3), dtype=np.uint8)
-    labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask ({metric_name}:{iou:.3f})", f"{metric_name} Debug (G=Overlap R=Heat B=Dust)"]
     for i, lbl in enumerate(labels):
         lx = i * tile_size + 10
         cv2.putText(label_bar, lbl, (lx, 28),
@@ -184,7 +196,7 @@ def generate_tile_combined_image(
         verdict = f"BOMB: {bomb_code} (Filtered as OK)"
         verdict_color = (255, 0, 255)  # 洋紅色
     elif is_dust_final:
-        verdict = "DUST (Filtered as OK)"
+        verdict = f"DUST (Filtered as OK) | {metric_name}:{iou:.3f}>={iou_threshold:.3f}"
         verdict_color = (0, 200, 255)
     elif score >= score_threshold:
         verdict = "NG (Detected)"
