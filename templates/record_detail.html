@@ -187,6 +187,16 @@
 </div>
 {% endif %}
 
+{% if detail.omit_overexposed %}
+<div class="card" style="border-color:#F59E0B;background:rgba(245,158,11,0.06)">
+    <h3 style="color:#D97706">OMIT 過曝警告</h3>
+    <p style="margin-top:8px;font-family:'Fira Code',monospace;font-size:0.85rem;">
+        灰塵檢查圖 (OMIT) 過度曝光，灰塵檢測已停用，異常 Tile 視為 REAL_NG。<br>
+        <span style="color:var(--text-muted)">{{ detail.omit_overexposure_info }}</span>
+    </p>
+</div>
+{% endif %}
+
 {% if detail.inference_log %}
 <div class="card" style="position:relative;">
     <div onclick="toggleLogPanel()" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;">

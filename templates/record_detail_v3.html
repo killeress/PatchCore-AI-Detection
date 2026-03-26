@@ -566,6 +566,23 @@
                             detail.error_message }}</p>
                     </div>
                     {% endif %}
+
+                    {% if detail.omit_overexposed %}
+                    <div class="white-panel" style="border-color: #F59E0B; background: #FFF7ED;">
+                        <h3
+                            style="font-size: 14px; font-weight: 600; color: #D97706; margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+                            <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                            </svg>
+                            OMIT 過曝警告
+                        </h3>
+                        <p style="font-family: monospace; font-size: 13px; color: #92400E; margin: 0;">
+                            灰塵檢查圖 (OMIT) 過度曝光，灰塵檢測已停用，異常 Tile 視為 REAL_NG。<br>
+                            <span style="color: #B45309;">{{ detail.omit_overexposure_info }}</span>
+                        </p>
+                    </div>
+                    {% endif %}
                 </div>
             </div>
         </div>

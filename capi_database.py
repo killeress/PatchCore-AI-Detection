@@ -231,6 +231,8 @@ class CAPIDatabase:
             add_column_if_not_exists("tile_results", "aoi_product_x", "INTEGER DEFAULT -1")
             add_column_if_not_exists("tile_results", "aoi_product_y", "INTEGER DEFAULT -1")
             add_column_if_not_exists("inference_records", "inference_log", "TEXT DEFAULT ''")
+            add_column_if_not_exists("inference_records", "omit_overexposed", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("inference_records", "omit_overexposure_info", "TEXT DEFAULT ''")
 
             conn.commit()
         finally:
@@ -257,6 +259,8 @@ class CAPIDatabase:
         aoi_machine_coords: str = "",
         image_results_data: Optional[List[Dict]] = None,
         inference_log: str = "",
+        omit_overexposed: int = 0,
+        omit_overexposure_info: str = "",
     ) -> int:
         """
         儲存一筆完整推論記錄
@@ -293,13 +297,13 @@ class CAPIDatabase:
                         machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                         ng_details, request_time, response_time, processing_seconds,
                         heatmap_dir, error_message, client_bomb_info, aoi_machine_coords,
-                        inference_log)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        inference_log, omit_overexposed, omit_overexposure_info)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (glass_id, model_id, machine_no, resolution[0], resolution[1],
                      machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                      ng_details, request_time, response_time, processing_seconds,
                      heatmap_dir, error_message, client_bomb_info, aoi_machine_coords,
-                     inference_log)
+                     inference_log, omit_overexposed, omit_overexposure_info)
                 )
                 record_id = cursor.lastrowid
 

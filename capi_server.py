@@ -1087,7 +1087,7 @@ class CAPIServer:
                     # 執行推論（不含 Heatmap 儲存，快速回覆）
                     start_time = time.time()
                     InferenceLogCapture.start_capture()
-                    ai_judgment, ng_details, inference_results, is_duplicate, omit_image_raw, aoi_report = self._process_request(parsed)
+                    ai_judgment, ng_details, inference_results, is_duplicate, omit_image_raw, aoi_report, omit_overexposed, omit_overexposure_info = self._process_request(parsed)
                     processing_seconds = time.time() - start_time
 
                     # 重複投片時在 LOG 標記
@@ -1142,6 +1142,7 @@ class CAPIServer:
                         is_duplicate, aoi_report,
                         omit_image_raw,
                         captured_log,
+                        omit_overexposed, omit_overexposure_info,
                     )
 
                 except ProtocolError as e:
@@ -1248,6 +1249,8 @@ class CAPIServer:
 
                 # process_panel 回傳: (results, omit_vis, omit_overexposed, omit_info, is_duplicate, omit_image, aoi_report)
                 results = panel_result[0]
+                omit_overexposed = panel_result[2] if len(panel_result) > 2 else False
+                omit_overexposure_info = panel_result[3] if len(panel_result) > 3 else ""
                 is_duplicate = panel_result[4]
                 omit_image_raw = panel_result[5] if len(panel_result) > 5 else None
                 aoi_report = panel_result[6] if len(panel_result) > 6 else {}
@@ -1259,7 +1262,7 @@ class CAPIServer:
                     )
 
                 if not results:
-                    return "ERR:NO_IMAGES_FOUND", "[]", [], False, None, {}
+                    return "ERR:NO_IMAGES_FOUND", "[]", [], False, None, {}, False, ""
 
                 # 彙總判定
                 ai_judgment, ng_details = aggregate_judgment(results)
@@ -1271,11 +1274,11 @@ class CAPIServer:
                             ai_judgment, ng_details, result.edge_defects, result.image_path.stem
                         )
 
-                return ai_judgment, ng_details, results, is_duplicate, omit_image_raw, aoi_report
+                return ai_judgment, ng_details, results, is_duplicate, omit_image_raw, aoi_report, omit_overexposed, omit_overexposure_info
 
             except Exception as e:
                 logger.error(f"Inference error: {e}", exc_info=True)
-                return f"ERR:INFERENCE_FAILED ({type(e).__name__}: {str(e)[:100]})", "[]", [], False, None, {}
+                return f"ERR:INFERENCE_FAILED ({type(e).__name__}: {str(e)[:100]})", "[]", [], False, None, {}, False, ""
 
 
     def _save_results_async(
@@ -1292,6 +1295,8 @@ class CAPIServer:
         aoi_report: Optional[Dict] = None,
         omit_image_raw: Any = None,
         inference_log: str = "",
+        omit_overexposed: bool = False,
+        omit_overexposure_info: str = "",
     ):
         """
         非同步儲存 Heatmap 和 DB 記錄（在背景執行緒中執行）
@@ -1363,6 +1368,8 @@ class CAPIServer:
                 aoi_machine_coords=aoi_machine_coords_str,
                 image_results_data=image_results_data,
                 inference_log=inference_log,
+                omit_overexposed=int(omit_overexposed),
+                omit_overexposure_info=omit_overexposure_info,
             )
 
             dup_tag = " [DUPLICATE]" if is_duplicate else ""
