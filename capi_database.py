@@ -434,23 +434,7 @@ class CAPIDatabase:
         with self._lock:
             conn = self._get_conn()
             try:
-                # --- 刪除舊的子紀錄 ---
-                old_image_ids = [
-                    row["id"] for row in conn.execute(
-                        "SELECT id FROM image_results WHERE record_id = ?",
-                        (record_id,)
-                    ).fetchall()
-                ]
-                if old_image_ids:
-                    placeholders = ",".join("?" * len(old_image_ids))
-                    conn.execute(
-                        f"DELETE FROM tile_results WHERE image_result_id IN ({placeholders})",
-                        old_image_ids,
-                    )
-                    conn.execute(
-                        f"DELETE FROM edge_defect_results WHERE image_result_id IN ({placeholders})",
-                        old_image_ids,
-                    )
+                # --- 刪除舊的子紀錄 (CASCADE 會自動刪除 tile_results, edge_defect_results) ---
                 conn.execute(
                     "DELETE FROM image_results WHERE record_id = ?",
                     (record_id,),
@@ -458,7 +442,7 @@ class CAPIDatabase:
 
                 # --- 更新主紀錄 ---
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                conn.execute(
+                cursor = conn.execute(
                     """UPDATE inference_records SET
                            ai_judgment = ?,
                            total_images = ?,
@@ -477,6 +461,8 @@ class CAPIDatabase:
                      inference_log, omit_overexposed, omit_overexposure_info,
                      record_id),
                 )
+                if cursor.rowcount == 0:
+                    raise ValueError(f"update_record_for_rerun: record_id {record_id} not found")
 
                 # --- 插入新的子紀錄 ---
                 if image_results_data:
