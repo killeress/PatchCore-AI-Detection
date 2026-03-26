@@ -413,6 +413,188 @@
         flex-shrink: 0;
         margin-top: 2px;
     }
+
+    /* ── Top-level Tab Bar ── */
+    .top-tab-bar {
+        display: flex;
+        gap: 0;
+        border-bottom: 2px solid var(--border);
+        margin-bottom: 24px;
+        background: var(--surface);
+        border-radius: 12px 12px 0 0;
+        padding: 0 8px;
+    }
+
+    .top-tab {
+        padding: 14px 28px;
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--text-muted);
+        cursor: pointer;
+        border-bottom: 3px solid transparent;
+        margin-bottom: -2px;
+        transition: all 0.2s;
+        user-select: none;
+    }
+
+    .top-tab:hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.03);
+    }
+
+    .top-tab.active {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+    }
+
+    .top-tab-content {
+        display: none;
+    }
+
+    .top-tab-content.active {
+        display: block;
+    }
+
+    /* ── Inference Tab specific ── */
+    .inf-date-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 20px;
+        flex-wrap: wrap;
+    }
+
+    .inf-date-bar .quick-btn {
+        padding: 6px 16px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .inf-date-bar .quick-btn:hover {
+        color: var(--text);
+        border-color: var(--accent);
+    }
+
+    .inf-date-bar .quick-btn.active {
+        background: var(--accent);
+        color: white;
+        border-color: var(--accent);
+    }
+
+    .inf-date-bar input[type="date"] {
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 0.85rem;
+    }
+
+    .inf-date-bar .search-btn {
+        padding: 6px 16px;
+        border-radius: 6px;
+        border: none;
+        background: var(--accent);
+        color: white;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+    }
+
+    .inf-stats-grid {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 12px;
+        margin-bottom: 20px;
+    }
+
+    .inf-stat-card {
+        background: var(--surface);
+        border-radius: 12px;
+        padding: 16px;
+        text-align: center;
+        border: 1px solid var(--border);
+        position: relative;
+        overflow: hidden;
+    }
+
+    .inf-stat-card::before {
+        content: '';
+        position: absolute;
+        left: 0; top: 0; bottom: 0;
+        width: 4px;
+    }
+
+    .inf-stat-card .label { color: var(--text-muted); font-size: 0.8rem; }
+    .inf-stat-card .value { font-size: 1.6rem; font-weight: 700; margin: 4px 0; }
+    .inf-stat-card .pct { font-size: 0.78rem; }
+
+    .inf-stat-card.aoi-ng::before { background: #f97316; }
+    .inf-stat-card.aoi-ng .value, .inf-stat-card.aoi-ng .pct { color: #f97316; }
+    .inf-stat-card.ai-ng::before { background: #3b82f6; }
+    .inf-stat-card.ai-ng .value, .inf-stat-card.ai-ng .pct { color: #3b82f6; }
+    .inf-stat-card.revival::before { background: #22c55e; }
+    .inf-stat-card.revival .value, .inf-stat-card.revival .pct { color: #22c55e; }
+    .inf-stat-card.err::before { background: #f59e0b; }
+    .inf-stat-card.err .value, .inf-stat-card.err .pct { color: #f59e0b; }
+
+    .inf-charts-row {
+        display: grid;
+        gap: 16px;
+        margin-bottom: 16px;
+    }
+
+    .inf-charts-row.row-2-1 { grid-template-columns: 2fr 1fr; }
+    .inf-charts-row.row-3 { grid-template-columns: 1fr 1fr 1fr; }
+    .inf-charts-row.row-1 { grid-template-columns: 1fr; }
+
+    .inf-chart-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+    }
+
+    .inf-chart-card h3 {
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: var(--text);
+        margin: 0 0 12px 0;
+    }
+
+    .inf-chart-container {
+        position: relative;
+        height: 280px;
+    }
+
+    .inf-cross-matrix {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 12px;
+    }
+
+    .inf-cross-cell {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+        text-align: center;
+    }
+
+    .inf-cross-cell .cell-label { color: var(--text-muted); font-size: 0.78rem; }
+    .inf-cross-cell .cell-value { font-size: 1.5rem; font-weight: 700; margin: 6px 0; }
+    .inf-cross-cell .cell-desc { font-size: 0.75rem; }
+
+    .inf-loading {
+        text-align: center;
+        padding: 60px 0;
+        color: var(--text-muted);
+    }
 </style>
 {% endblock %}
 
@@ -424,6 +606,14 @@
 {% endblock %}
 
 {% block content %}
+<!-- Top-level Tab Bar -->
+<div class="top-tab-bar">
+    <div class="top-tab active" data-top-tab="ric" onclick="switchTopTab('ric')">📊 RIC Report</div>
+    <div class="top-tab" data-top-tab="inference" onclick="switchTopTab('inference')">🤖 AI 推論紀錄</div>
+</div>
+
+<!-- Tab 1: RIC Report (existing content) -->
+<div class="top-tab-content active" id="tab-ric">
 <div class="ric-header">
     <div>
         <h2>📊 RIC Report</h2>
@@ -553,6 +743,67 @@
         </div>
 
     </div>
+
+</div><!-- end #tab-ric -->
+
+<!-- Tab 2: AI 推論紀錄 -->
+<div class="top-tab-content" id="tab-inference">
+    <!-- Date Filter Bar -->
+    <div class="inf-date-bar">
+        <span style="color:var(--text-muted); font-size:0.88rem; margin-right:4px;">日期篩選：</span>
+        <button class="quick-btn active" data-range="today" onclick="inferenceTab.quickFilter('today')">今日</button>
+        <button class="quick-btn" data-range="7d" onclick="inferenceTab.quickFilter('7d')">7 天</button>
+        <button class="quick-btn" data-range="30d" onclick="inferenceTab.quickFilter('30d')">30 天</button>
+        <button class="quick-btn" data-range="all" onclick="inferenceTab.quickFilter('all')">全部</button>
+        <span style="margin-left:12px;"></span>
+        <input type="date" id="inf_startDate">
+        <span style="color:var(--text-muted);">~</span>
+        <input type="date" id="inf_endDate">
+        <button class="search-btn" onclick="inferenceTab.customFilter()">查詢</button>
+    </div>
+
+    <!-- Loading -->
+    <div class="inf-loading" id="inf_loading">載入中...</div>
+
+    <!-- Stats Cards -->
+    <div class="inf-stats-grid" id="inf_statsGrid" style="display:none;"></div>
+
+    <!-- Charts Row 1: Trend + Distribution -->
+    <div class="inf-charts-row row-2-1" id="inf_chartsRow1" style="display:none;">
+        <div class="inf-chart-card">
+            <h3>📈 每日推論趨勢（AOI vs AI）</h3>
+            <div class="inf-chart-container"><canvas id="inf_trendChart"></canvas></div>
+        </div>
+        <div class="inf-chart-card">
+            <h3>🎯 AOI vs AI 判定分布</h3>
+            <div class="inf-chart-container"><canvas id="inf_distChart"></canvas></div>
+        </div>
+    </div>
+
+    <!-- Charts Row 2: Machine + Model + ERR -->
+    <div class="inf-charts-row row-3" id="inf_chartsRow2" style="display:none;">
+        <div class="inf-chart-card">
+            <h3>🏭 機台統計（AOI vs AI NG率）</h3>
+            <div class="inf-chart-container"><canvas id="inf_machineChart"></canvas></div>
+        </div>
+        <div class="inf-chart-card">
+            <h3>📦 產品型號統計</h3>
+            <div class="inf-chart-container"><canvas id="inf_modelChart"></canvas></div>
+        </div>
+        <div class="inf-chart-card">
+            <h3>⚠️ ERR 類型分布</h3>
+            <div class="inf-chart-container"><canvas id="inf_errChart"></canvas></div>
+        </div>
+    </div>
+
+    <!-- Cross Matrix -->
+    <div class="inf-charts-row row-1" id="inf_chartsRow3" style="display:none;">
+        <div class="inf-chart-card">
+            <h3>🔄 AOI vs AI 判定交叉比對</h3>
+            <div class="inf-cross-matrix" id="inf_crossMatrix"></div>
+        </div>
+    </div>
+</div><!-- end #tab-inference -->
 
 
 
