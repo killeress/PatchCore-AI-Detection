@@ -134,6 +134,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_dashboard_v2(query, path)
             elif path == "/v3/dashboard":
                 self._handle_dashboard_v3(query, path)
+            elif path.startswith("/api/record/") and path.endswith("/rerun/status"):
+                record_id_str = path.split("/api/record/")[1].split("/rerun/status")[0]
+                self._handle_rerun_status_sse(record_id_str)
             elif path.startswith("/v3/record/"):
                 record_id = path.split("/v3/record/")[1].rstrip("/")
                 self._handle_record_detail_v3(record_id, path)
@@ -220,6 +223,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_settings_update()
             elif path == "/api/settings/reload":
                 self._handle_api_settings_reload()
+            elif path.startswith("/api/record/") and path.endswith("/rerun"):
+                record_id_str = path.split("/api/record/")[1].split("/rerun")[0]
+                self._handle_rerun_trigger(record_id_str)
             else:
                 self._send_404(path)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -2019,6 +2025,224 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.error(f"Settings reload failed: {e}", exc_info=True)
             self._send_json({"error": f"重載失敗: {str(e)}"})
 
+    # ── Rerun inference endpoints ──────────────────────────────────────
+
+    def _handle_rerun_trigger(self, record_id_str: str):
+        """API: 觸發重新推論"""
+        try:
+            record_id = int(record_id_str)
+        except ValueError:
+            self._send_json({"status": "error", "message": "invalid record_id"})
+            return
+
+        if not self.inferencer:
+            self._send_json({"status": "error", "message": "推論器未載入"})
+            return
+
+        with self._rerun_lock:
+            task = self._rerun_tasks.get(record_id)
+            if task and task["status"] == "running":
+                self._send_json({"status": "already_running"})
+                return
+
+        detail = self.db.get_record_detail(record_id) if self.db else None
+        if not detail:
+            self._send_json({"status": "error", "message": f"找不到紀錄 #{record_id}"})
+            return
+
+        image_dir = detail.get("image_dir", "")
+        if not image_dir or not Path(image_dir).is_dir():
+            self._send_json({"status": "error", "message": f"圖片目錄不存在: {image_dir}"})
+            return
+
+        with self._rerun_lock:
+            self._rerun_tasks[record_id] = {"status": "running", "message": "正在準備推論..."}
+
+        thread = threading.Thread(
+            target=CAPIWebHandler._rerun_worker,
+            args=(record_id, detail),
+            daemon=True,
+        )
+        thread.start()
+
+        self._send_json({"status": "started", "record_id": record_id})
+
+    @classmethod
+    def _rerun_worker(cls, record_id: int, detail: dict):
+        """背景執行緒：重新推論並覆蓋紀錄"""
+        import time as _time
+        from capi_server import results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment
+
+        def _update_status(msg):
+            with cls._rerun_lock:
+                task = cls._rerun_tasks.get(record_id)
+                if task:
+                    task["message"] = msg
+
+        try:
+            panel_dir = Path(detail["image_dir"])
+            model_id = detail.get("model_id", "")
+            resolution = None
+            if detail.get("resolution_x") and detail.get("resolution_y"):
+                resolution = (detail["resolution_x"], detail["resolution_y"])
+
+            bomb_info = None
+            if detail.get("client_bomb_info"):
+                try:
+                    bomb_info = json.loads(detail["client_bomb_info"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            _update_status("正在等待 GPU...")
+            start_time = _time.time()
+
+            if cls._gpu_lock:
+                with cls._gpu_lock:
+                    _update_status("正在推論中...")
+                    panel_result = cls.inferencer.process_panel(
+                        panel_dir,
+                        progress_callback=_update_status,
+                        product_resolution=resolution,
+                        bomb_info=bomb_info,
+                        model_id=model_id,
+                    )
+            else:
+                _update_status("正在推論中...")
+                panel_result = cls.inferencer.process_panel(
+                    panel_dir,
+                    progress_callback=_update_status,
+                    product_resolution=resolution,
+                    bomb_info=bomb_info,
+                    model_id=model_id,
+                )
+
+            processing_seconds = _time.time() - start_time
+
+            results = panel_result[0]
+            omit_overexposed = panel_result[2] if len(panel_result) > 2 else False
+            omit_overexposure_info = panel_result[3] if len(panel_result) > 3 else ""
+            omit_image_raw = panel_result[5] if len(panel_result) > 5 else None
+
+            if not results:
+                with cls._rerun_lock:
+                    cls._rerun_tasks[record_id] = {"status": "error", "message": "推論完成但無圖片結果"}
+                return
+
+            ai_judgment, ng_details = aggregate_judgment(results)
+            for result in results:
+                if hasattr(result, 'edge_defects') and result.edge_defects:
+                    ai_judgment, ng_details = append_cv_edge_to_judgment(
+                        ai_judgment, ng_details, result.edge_defects, result.image_path.stem
+                    )
+
+            _update_status("正在儲存 heatmap...")
+            heatmap_info = {}
+            if cls.heatmap_manager:
+                old_heatmap_dir = detail.get("heatmap_dir", "")
+                if old_heatmap_dir and Path(old_heatmap_dir).is_dir():
+                    import shutil
+                    try:
+                        shutil.rmtree(old_heatmap_dir)
+                    except Exception:
+                        pass
+
+                heatmap_info = cls.heatmap_manager.save_panel_heatmaps(
+                    glass_id=detail["glass_id"],
+                    results=results,
+                    inferencer=cls.inferencer,
+                    save_overview=True,
+                    save_tile_detail=True,
+                    omit_image=omit_image_raw,
+                )
+
+            _update_status("正在更新資料庫...")
+            image_results_data = results_to_db_data(results, heatmap_info) if results else []
+            total_images = len(image_results_data)
+            ng_images = sum(1 for d in image_results_data if d.get("is_ng"))
+            error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
+
+            inference_log = ""
+            if hasattr(cls.inferencer, '_log_capture') and cls.inferencer._log_capture:
+                try:
+                    inference_log = cls.inferencer._log_capture.get_log()
+                except Exception:
+                    pass
+
+            cls.db.update_record_for_rerun(
+                record_id=record_id,
+                ai_judgment=ai_judgment,
+                total_images=total_images,
+                ng_images=ng_images,
+                ng_details=ng_details,
+                processing_seconds=processing_seconds,
+                heatmap_dir=heatmap_info.get("dir", ""),
+                error_message=error_message,
+                image_results_data=image_results_data,
+                inference_log=inference_log,
+                omit_overexposed=int(omit_overexposed),
+                omit_overexposure_info=omit_overexposure_info if omit_overexposure_info else "",
+            )
+
+            with cls._rerun_lock:
+                cls._rerun_tasks[record_id] = {"status": "done", "message": "完成"}
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            with cls._rerun_lock:
+                cls._rerun_tasks[record_id] = {"status": "error", "message": f"推論失敗: {e}"}
+
+    def _handle_rerun_status_sse(self, record_id_str: str):
+        """SSE: 串流重跑進度"""
+        import time as _time
+
+        try:
+            record_id = int(record_id_str)
+        except ValueError:
+            self._send_json({"status": "error", "message": "invalid record_id"})
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        def sse_send(event_type, data):
+            msg = f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+            self.wfile.write(msg.encode("utf-8"))
+            self.wfile.flush()
+
+        last_msg = ""
+        try:
+            while True:
+                with self._rerun_lock:
+                    task = self._rerun_tasks.get(record_id)
+
+                if not task:
+                    sse_send("status", {"message": "idle"})
+                    break
+
+                if task["message"] != last_msg:
+                    sse_send("status", {"message": task["message"]})
+                    last_msg = task["message"]
+
+                if task["status"] == "done":
+                    sse_send("done", {"message": "完成", "record_id": record_id})
+                    with self._rerun_lock:
+                        self._rerun_tasks.pop(record_id, None)
+                    break
+                elif task["status"] == "error":
+                    sse_send("error", {"message": task["message"]})
+                    with self._rerun_lock:
+                        self._rerun_tasks.pop(record_id, None)
+                    break
+
+                _time.sleep(0.5)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+
 
 def create_web_server(
     host: str,
@@ -2055,6 +2279,8 @@ def create_web_server(
     CAPIWebHandler._gpu_lock = gpu_lock
     CAPIWebHandler._capi_server_instance = capi_server_instance
     CAPIWebHandler._log_file = log_file
+    CAPIWebHandler._rerun_tasks = {}
+    CAPIWebHandler._rerun_lock = threading.Lock()
     CAPIWebHandler.init_jinja()
 
     server = ThreadingHTTPServer((host, port), CAPIWebHandler)
