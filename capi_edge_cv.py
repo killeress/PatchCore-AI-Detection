@@ -28,6 +28,48 @@ def clamp_median_kernel(kernel_size: int, max_dim: int) -> int:
     return max(3, mk)
 
 
+# 前景亮度閾值：低於此值的像素視為產品外背景（黑色邊界）
+FG_BRIGHTNESS_THRESHOLD = 15
+
+
+def compute_fg_aware_diff(
+    blurred: np.ndarray,
+    gray: np.ndarray,
+    median_kernel: int,
+    brightness_threshold: int = FG_BRIGHTNESS_THRESHOLD,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    計算前景感知的差異圖，排除非產品區域對背景估計的干擾。
+
+    將非前景像素填充為前景中值後做 median filter 背景估計，
+    並在差異圖中將非前景區域歸零。
+
+    Args:
+        blurred: 高斯模糊後的灰階影像
+        gray: 原始灰階影像（用於建立前景遮罩）
+        median_kernel: 中值濾波核大小（需為已 clamp 的奇數）
+        brightness_threshold: 前景亮度閾值
+
+    Returns:
+        (fg_mask, diff) — fg_mask (255=前景, 0=背景), diff (前景感知差異圖)
+    """
+    fg_mask = np.zeros_like(gray)
+    fg_mask[gray >= brightness_threshold] = 255
+
+    fg_pixels = blurred[fg_mask > 0]
+    if fg_pixels.size > 0:
+        blurred_for_bg = blurred.copy()
+        blurred_for_bg[fg_mask == 0] = int(np.median(fg_pixels))
+    else:
+        blurred_for_bg = blurred
+
+    bg = cv2.medianBlur(blurred_for_bg, median_kernel)
+    diff = cv2.absdiff(blurred, bg)
+    diff[fg_mask == 0] = 0
+
+    return fg_mask, diff
+
+
 @dataclass
 class EdgeDefect:
     """單一邊緣缺陷"""
@@ -99,6 +141,15 @@ class EdgeInspectionConfig:
     exclude_zones: List[EdgeExclusionZoneConfig] = field(default_factory=list)
     # 儲存完整的按產品分組排除區域 (key=resolution_code, value=list of zones)
     all_exclude_zones_by_product: Dict[str, List[dict]] = field(default_factory=dict)
+
+    def get_threshold_for_side(self, side: str) -> int:
+        """取得指定邊的閾值，aoi_edge 使用獨立閾值"""
+        if side == "aoi_edge":
+            return self.aoi_threshold
+        side_cfg = getattr(self, side, None)
+        if side_cfg is not None and hasattr(side_cfg, 'threshold'):
+            return side_cfg.threshold
+        return min(s.threshold for s in [self.left, self.right, self.top, self.bottom])
 
     def set_active_zones_for_product(self, resolution_code: str):
         """根據產品解析度碼切換當前作用中的排除區域"""

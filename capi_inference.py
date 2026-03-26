@@ -36,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 import logging
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
-from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel
+from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff
 
 logger = logging.getLogger("capi.inference")
 
@@ -3067,25 +3067,18 @@ class CAPIInferencer:
                                         orig_gray = orig_crop
 
                                     # 與 save_edge_defect_image / _inspect_side 相同的 CV 檢測邏輯
-                                    ek = self.edge_inspector.config.blur_kernel
-                                    emk = self.edge_inspector.config.median_kernel
+                                    ecfg = self.edge_inspector.config
+                                    ek = ecfg.blur_kernel
+                                    emk = clamp_median_kernel(ecfg.median_kernel, min(orig_gray.shape[:2]) - 1)
                                     eblurred = cv2.GaussianBlur(orig_gray, (ek, ek), 0)
-                                    emk = min(emk, min(orig_gray.shape[:2]) - 1)
-                                    if emk % 2 == 0:
-                                        emk -= 1
-                                    if emk < 3:
-                                        emk = 3
-                                    ebg = cv2.medianBlur(eblurred, emk)
-                                    ediff = cv2.absdiff(eblurred, ebg)
 
-                                    side_cfg = getattr(self.edge_inspector.config, ed.side, None)
-                                    if side_cfg:
-                                        edge_threshold = side_cfg.threshold
+                                    if ed.side == "aoi_edge":
+                                        _, ediff = compute_fg_aware_diff(eblurred, orig_gray, emk)
                                     else:
-                                        # aoi_edge 等非標準 side：使用四邊中最低閾值
-                                        all_sides = [self.edge_inspector.config.left, self.edge_inspector.config.right,
-                                                     self.edge_inspector.config.top, self.edge_inspector.config.bottom]
-                                        edge_threshold = min(s.threshold for s in all_sides)
+                                        ebg = cv2.medianBlur(eblurred, emk)
+                                        ediff = cv2.absdiff(eblurred, ebg)
+
+                                    edge_threshold = ecfg.get_threshold_for_side(ed.side)
                                     _, defect_mask_cv = cv2.threshold(ediff, edge_threshold, 255, cv2.THRESH_BINARY)
 
                                     # 只保留缺陷 BBox 範圍內的像素（與 heatmap 一致）

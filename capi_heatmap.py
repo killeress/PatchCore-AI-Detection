@@ -13,9 +13,19 @@ CAPI 熱力圖管理模組
 import cv2
 import numpy as np
 from pathlib import Path
-from capi_edge_cv import clamp_median_kernel
+from capi_edge_cv import clamp_median_kernel, compute_fg_aware_diff
 from typing import List, Dict, Optional, Tuple, Any
 import time
+
+
+def _blend_color_on_mask(image: np.ndarray, mask: np.ndarray, color, alpha: float = 0.5):
+    """在 mask > 0 的像素上疊加半透明顏色 (in-place 修改 image)"""
+    pixels = mask > 0
+    if np.any(pixels):
+        image[pixels] = (
+            image[pixels].astype(np.float32) * (1 - alpha) +
+            np.array(color, dtype=np.float32) * alpha
+        ).clip(0, 255).astype(np.uint8)
 
 
 def build_region_zoom_panels(
@@ -84,15 +94,13 @@ def build_region_zoom_panels(
             base = np.zeros((crop_sz, crop_sz, 3), dtype=np.uint8)
             base[heat_crop > 0] = (255, 255, 255)  # 白色 = 熱區
 
-            # 疊加灰塵遮罩（青色）
+            # 疊加灰塵遮罩（黃色）與重疊區域（綠色）
             if dm_resized is not None:
                 dm_crop = dm_resized[y1:y2, x1:x2]
-                dust_overlay = np.zeros_like(base)
-                dust_overlay[dm_crop > 0] = (0, 255, 255)  # 青色 = 灰塵
-                base = cv2.addWeighted(base, 0.7, dust_overlay, 0.3, 0)
-                # 重疊區域用綠色標示
+                dust_only = (dm_crop > 0) & (heat_crop == 0)
                 overlap = (heat_crop > 0) & (dm_crop > 0)
-                base[overlap] = (0, 255, 0)
+                base[dust_only] = (0, 255, 255)   # 黃色 (BGR) = 僅灰塵
+                base[overlap] = (0, 255, 0)        # 綠色 = 重疊
 
             panel = cv2.resize(base, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
 
@@ -108,13 +116,14 @@ def build_region_zoom_panels(
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, tag_color, 2)
             cv2.putText(panel, f"{metric_name}: {dust_ol}/{area} = {cov:.4f}", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
-            cv2.putText(panel, f"Thr: {iou_threshold:.4f}  {'>=  DUST' if is_dust else '<  REAL'}", (10, 85),
+            cmp_op = ">=" if is_dust else "<"
+            cv2.putText(panel, f"{cov:.4f} {cmp_op} Thr:{iou_threshold:.4f} -> {tag}", (10, 85),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, tag_color, 1)
 
             # 圖例
             legend_y = tile_size - 15
-            cv2.putText(panel, "W=Heat  C=Dust  G=Overlap", (10, legend_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1)
+            cv2.putText(panel, "White=Heat  Yellow=Dust  Green=Overlap", (10, legend_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
 
             label = f"Region#{region['label_id']} {tag} {metric_name}:{cov:.3f}"
             results.append((panel, label))
@@ -528,24 +537,11 @@ class HeatmapManager:
         elif len(roi.shape) == 3 and roi.shape[2] == 1:
             roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
 
-        # ── Panel 1: 原始 ROI ──
-        panel_orig = roi.copy()
-
-        # ── Panel 2: Defect Highlight (原圖 + BBox 標註，不使用熱力圖) ──
-        panel_highlight = roi.copy()
-
-        # 在原圖上繪製缺陷 bbox 邊框
+        # Defect BBox 相對 ROI 的座標
         rel_x = bx - roi_x1
         rel_y = by - roi_y1
-        if is_bomb:
-            box_color = (255, 0, 255)   # 洋紅色
-        elif is_dust:
-            box_color = (0, 200, 255)   # 橘色
-        else:
-            box_color = (0, 0, 255)     # 紅色
-        cv2.rectangle(panel_highlight, (rel_x, rel_y), (rel_x + bw, rel_y + bh), box_color, 3)
 
-        # 產生 defect binary mask (與 _inspect_side 相同邏輯)，供 Panel 4 使用
+        # ── 產生 defect binary mask (供 Panel 2 像素標記和 Panel 4 IOU/COV 計算) ──
         k = 3
         mk = 65
         if edge_config is not None:
@@ -553,21 +549,33 @@ class HeatmapManager:
             mk = getattr(edge_config, 'median_kernel', 65)
         blurred = cv2.GaussianBlur(roi_gray, (k, k), 0)
         mk = clamp_median_kernel(mk, min(roi_gray.shape[:2]) - 1)
-        bg = cv2.medianBlur(blurred, mk)
-        diff = cv2.absdiff(blurred, bg)
 
-        # 取得 threshold (根據邊的 config)
-        edge_threshold = 5  # 預設值
-        if edge_config is not None:
-            side_cfg = getattr(edge_config, side, None)
-            if side_cfg is not None:
-                edge_threshold = getattr(side_cfg, 'threshold', 5)
+        if side == "aoi_edge":
+            _, diff = compute_fg_aware_diff(blurred, roi_gray, mk)
+        else:
+            bg = cv2.medianBlur(blurred, mk)
+            diff = cv2.absdiff(blurred, bg)
+
+        edge_threshold = edge_config.get_threshold_for_side(side) if edge_config is not None else 5
         _, defect_mask = cv2.threshold(diff, edge_threshold, 255, cv2.THRESH_BINARY)
 
         # 只保留缺陷 BBox 範圍內的像素（避免整個 ROI 的紋理雜訊被納入 IOU/COV 計算）
         bbox_only_mask = np.zeros_like(defect_mask)
         bbox_only_mask[rel_y:rel_y + bh, rel_x:rel_x + bw] = 255
         defect_mask = cv2.bitwise_and(defect_mask, bbox_only_mask)
+
+        # ── Panel 1: 原始 ROI ──
+        panel_orig = roi.copy()
+
+        # ── Panel 2: Defect Highlight (缺陷像素紅色標記，取代方形框) ──
+        panel_highlight = roi.copy()
+        if is_bomb:
+            highlight_color = (255, 0, 255)   # 洋紅
+        elif is_dust:
+            highlight_color = (0, 200, 255)   # 橘色
+        else:
+            highlight_color = (0, 0, 255)     # 紅色
+        _blend_color_on_mask(panel_highlight, defect_mask, highlight_color)
 
         # 統一面板大小
         panel_h = 400
@@ -614,6 +622,14 @@ class HeatmapManager:
                 except Exception as e:
                     print(f"⚠️ Edge OMIT dust check failed: {e}")
                     is_dust_detected = False
+
+            # Panel 3: 在 OMIT 上標記偵測到的異物（藍色半透明覆蓋）
+            if dust_mask_omit is not None and is_dust_detected:
+                dm_for_omit = dust_mask_omit
+                if len(dm_for_omit.shape) == 3:
+                    dm_for_omit = cv2.cvtColor(dm_for_omit, cv2.COLOR_BGR2GRAY)
+                dm_vis_omit = cv2.resize(dm_for_omit, (panel_w, panel_h), interpolation=cv2.INTER_NEAREST)
+                _blend_color_on_mask(omit_panel, dm_vis_omit, (255, 100, 0))
 
             # Step 2: 計算 defect_mask 與 dust_mask 的 IOU/COV
             if dust_mask_omit is not None and is_dust_detected:
@@ -731,17 +747,27 @@ class HeatmapManager:
             verdict = f"BOMB: {bomb_code} (Filtered as OK)"
             verdict_color = (255, 0, 255)
         elif is_dust:
-            verdict = f"SURFACE ({metric_name}:{surface_iou:.3f}) (Filtered as OK)"
+            iou_cmp = ">=" if surface_iou >= dust_iou_threshold else "<"
+            verdict = f"SURFACE ({metric_name}:{surface_iou:.3f}{iou_cmp}Thr:{dust_iou_threshold:.2f}) (Filtered as OK)"
             verdict_color = (0, 200, 255)
         else:
-            verdict = "NG"
+            # 非灰塵 NG：若有 COV/IOU 數值也顯示與閾值的比較
+            if surface_iou > 0 or (omit_image is not None and dust_check_fn is not None):
+                iou_cmp = ">=" if surface_iou >= dust_iou_threshold else "<"
+                verdict = f"NG ({metric_name}:{surface_iou:.3f}{iou_cmp}Thr:{dust_iou_threshold:.2f})"
+            else:
+                verdict = "NG"
             verdict_color = (0, 0, 255)
 
-        # 組合 header: 實際數值 + 判定閾值 + 結果
+        # 組合 header: 實際數值 + 閾值判定符號 + 結果
         threshold_info = ""
         if threshold_used > 0 or min_area_used > 0:
-            threshold_info = f" | Thr:{threshold_used} MinArea:{min_area_used}"
-        header_text = f"CV Edge [v4]: {side} | Diff:{max_diff:.0f} Area:{area}px{threshold_info} | {verdict}"
+            diff_cmp = ">=" if max_diff >= threshold_used else "<"
+            area_cmp = ">=" if area >= min_area_used else "<"
+            threshold_info = f" | Diff:{max_diff:.0f}{diff_cmp}Thr:{threshold_used} Area:{area}{area_cmp}MinArea:{min_area_used}"
+        else:
+            threshold_info = f" | Diff:{max_diff:.0f} Area:{area}px"
+        header_text = f"CV Edge [v4]: {side}{threshold_info} | {verdict}"
 
         # 分段繪製: 數值部分白色，verdict 部分跟隨判定顏色
         verdict_start = header_text.rfind("| " + verdict)
