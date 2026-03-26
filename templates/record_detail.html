@@ -55,10 +55,18 @@
 
 {% block content %}
 <div class="card">
-    <h2 style="margin-bottom:16px">推論記錄 #{{ detail.id }}
-        <span class="badge {{ detail.ai_judgment | ai_badge }}" style="font-size:1rem;margin-left:8px">{{
-            detail.ai_judgment }}</span>
-    </h2>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <h2 style="margin:0">推論記錄 #{{ detail.id }}
+            <span class="badge {{ detail.ai_judgment | ai_badge }}" style="font-size:1rem;margin-left:8px">{{
+                detail.ai_judgment }}</span>
+        </h2>
+        <button id="rerunBtn" onclick="triggerRerun({{ detail.id }})"
+            style="padding:8px 18px;background:#2563EB;color:#fff;border:none;border-radius:8px;font-size:0.9rem;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all 0.2s;"
+            onmouseover="this.style.background='#1D4ED8'" onmouseout="this.style.background='#2563EB'">
+            <span id="rerunBtnIcon">&#x21bb;</span>
+            <span id="rerunBtnText">重新推論</span>
+        </button>
+    </div>
     <table style="max-width:900px">
         <tr>
             <th style="width:160px">玻璃編號</th>
@@ -521,6 +529,83 @@ function copyInferenceLog() {
     {% endfor %}
 </div>
 {% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function triggerRerun(recordId) {
+    if (!confirm('確定要重新推論此片？舊的紀錄和圖片將被覆蓋。')) return;
+
+    var btn = document.getElementById('rerunBtn');
+    var icon = document.getElementById('rerunBtnIcon');
+    var text = document.getElementById('rerunBtnText');
+    btn.disabled = true;
+    btn.style.background = '#64748B';
+    btn.style.cursor = 'not-allowed';
+    icon.innerHTML = '';
+    text.textContent = '啟動中...';
+
+    fetch('/api/record/' + recordId + '/rerun', { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.status === 'started' || data.status === 'already_running') {
+                text.textContent = '推論中...';
+                listenRerunSSE(recordId);
+            } else {
+                alert('啟動失敗: ' + (data.message || data.status));
+                resetRerunBtn();
+            }
+        })
+        .catch(function(err) {
+            alert('請求失敗: ' + err);
+            resetRerunBtn();
+        });
+}
+
+function listenRerunSSE(recordId) {
+    var text = document.getElementById('rerunBtnText');
+    var es = new EventSource('/api/record/' + recordId + '/rerun/status');
+
+    es.addEventListener('status', function(e) {
+        var d = JSON.parse(e.data);
+        if (d.message && d.message !== 'idle') {
+            text.textContent = d.message;
+        }
+    });
+
+    es.addEventListener('done', function(e) {
+        es.close();
+        text.textContent = '完成，重新載入...';
+        location.reload();
+    });
+
+    es.addEventListener('error', function(e) {
+        if (e.data) {
+            var d = JSON.parse(e.data);
+            alert('推論失敗: ' + d.message);
+        }
+        es.close();
+        resetRerunBtn();
+    });
+
+    es.onerror = function() {
+        es.close();
+        text.textContent = '連線中斷，請手動刷新';
+        setTimeout(resetRerunBtn, 3000);
+    };
+}
+
+function resetRerunBtn() {
+    var btn = document.getElementById('rerunBtn');
+    var icon = document.getElementById('rerunBtnIcon');
+    var text = document.getElementById('rerunBtnText');
+    btn.disabled = false;
+    btn.style.background = '#2563EB';
+    btn.style.cursor = 'pointer';
+    icon.innerHTML = '&#x21bb;';
+    text.textContent = '重新推論';
+}
+</script>
 {% endblock %}
 
 {% block extra_head %}
