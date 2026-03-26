@@ -596,7 +596,8 @@ class CAPIDatabase:
                      SUM(CASE WHEN ai_judgment = 'OK' THEN 1 ELSE 0 END) as ok_count,
                      SUM(CASE WHEN ai_judgment = 'NG' OR ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ng_count,
                      SUM(CASE WHEN ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END) as err_count,
-                     AVG(processing_seconds) as avg_time
+                     AVG(processing_seconds) as avg_time,
+                     SUM(CASE WHEN omit_overexposed = 1 THEN 1 ELSE 0 END) as overexposed_count
                    FROM inference_records
                    WHERE created_at >= ? AND created_at <= ?""",
                 (start_str, end_str)

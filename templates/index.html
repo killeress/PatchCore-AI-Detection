@@ -56,7 +56,7 @@
     </div>
     <div class="stat-card">
         <div class="value" style="color:var(--err)">{{ stats.err_count or 0 }}</div>
-        <div class="label">異常數量</div>
+        <div class="label">異常數量<br><span style="font-size:0.8rem;color:#f59e0b">Omit過曝 {{ stats.overexposed_count or 0 }}</span></div>
     </div>
     <div class="stat-card">
         <div class="value">{{ (stats.avg_time or 0) | round(1) }}s</div>
