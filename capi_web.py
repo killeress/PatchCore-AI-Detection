@@ -2056,6 +2056,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         with self._rerun_lock:
+            # 再次檢查防止 TOCTOU race
+            task = self._rerun_tasks.get(record_id)
+            if task and task["status"] == "running":
+                self._send_json({"status": "already_running"})
+                return
             self._rerun_tasks[record_id] = {"status": "running", "message": "正在準備推論..."}
 
         thread = threading.Thread(
@@ -2073,11 +2078,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         import time as _time
         from capi_server import results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment
 
-        def _update_status(msg):
+        def _update_status(msg, *_):
             with cls._rerun_lock:
                 task = cls._rerun_tasks.get(record_id)
                 if task:
-                    task["message"] = msg
+                    if isinstance(msg, int) and _:
+                        task["message"] = f"推論中 {msg}/{_[0]}..."
+                    else:
+                        task["message"] = str(msg)
 
         try:
             panel_dir = Path(detail["image_dir"])
