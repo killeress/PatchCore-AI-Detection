@@ -897,7 +897,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """人工檢驗 (RIC) 比對報表頁面"""
         batches = self.db.get_ric_batches() if self.db else []
         template = self.jinja_env.get_template("ric_report.html")
-        html = template.render(request_path=path, batches=batches, client_record_count=0)
+        html = template.render(request_path=path, batches=batches)
         self._send_response(200, html)
 
     def _handle_ric_upload(self):
@@ -1129,34 +1129,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             start_date = query.get('start_date', [''])[0] or None
             end_date = query.get('end_date', [''])[0] or None
             records = self.db.get_client_accuracy_records(start_date, end_date)
-
-            summary = self._compute_client_summary(records)
-
-            out_records = []
-            for r in records:
-                rec = {
-                    "id": r["id"],
-                    "time_stamp": r["time_stamp"],
-                    "pnl_id": r["pnl_id"],
-                    "mach_id": r["mach_id"],
-                    "result_eqp": r["result_eqp"],
-                    "result_ai": r["result_ai"],
-                    "result_ric": r["result_ric"],
-                    "datastr": r["datastr"] or "",
-                    "miss_review": None,
-                }
-                if r.get("review_id"):
-                    rec["miss_review"] = {
-                        "id": r["review_id"],
-                        "category": r["review_category"],
-                        "note": r["review_note"] or "",
-                        "updated_at": r["review_updated_at"],
-                    }
-                out_records.append(rec)
+            summary, out_records = self._compute_client_summary(records)
 
             self._send_json({
                 "success": True,
-                "total": len(records),
+                "total": summary["total"],
                 "summary": summary,
                 "records": out_records,
             })
@@ -1166,8 +1143,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.error(f"Client data API error: {e}", exc_info=True)
             self._send_json({"success": False, "error": str(e)})
 
-    def _compute_client_summary(self, records: list) -> dict:
-        """從 client accuracy records 計算統計摘要（搬自前端 computeStats）"""
+    def _compute_client_summary(self, records: list):
+        """從 client accuracy records 計算統計摘要並格式化 records，單次遍歷。
+        Returns: (summary_dict, out_records_list)
+        """
+        from capi_database import CAPIDatabase
+
+        _empty_cats = lambda: {c: 0 for c in CAPIDatabase.VALID_MISS_CATEGORIES}
         total = len(records)
         if total == 0:
             return {
@@ -1180,12 +1162,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "combos": {}, "daily": {},
                 "missReviewStats": {
                     "total": 0, "reviewed": 0, "unreviewed": 0,
-                    "byCategory": {
-                        "dust_misfilter": 0, "threshold_high": 0,
-                        "ric_misjudge": 0, "outside_aoi_area": 0, "other": 0,
-                    },
+                    "byCategory": _empty_cats(),
                 },
-            }
+            }, []
 
         aoiNG = aiNG = ricNG = 0
         aoiCorrect = aiCorrect = 0
@@ -1193,20 +1172,35 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         revival = 0
         combos = {}
         daily = {}
-        miss_total = 0
         miss_reviewed = 0
-        miss_by_cat = {
-            "dust_misfilter": 0, "threshold_high": 0,
-            "ric_misjudge": 0, "outside_aoi_area": 0, "other": 0,
-        }
-
-        def _derive_judgment(datastr):
-            return "NG" if datastr and "NG" in datastr else "OK"
+        miss_by_cat = _empty_cats()
+        out_records = []
 
         for rec in records:
             eqp = rec["result_eqp"] or "OK"
             ai = rec["result_ai"] or "OK"
-            ric = _derive_judgment(rec.get("datastr", ""))
+            ric = CAPIDatabase.parse_ric_judgment(rec.get("datastr", ""))
+
+            # Build formatted output record in the same pass
+            out_rec = {
+                "id": rec["id"],
+                "time_stamp": rec["time_stamp"],
+                "pnl_id": rec["pnl_id"],
+                "mach_id": rec["mach_id"],
+                "result_eqp": eqp,
+                "result_ai": ai,
+                "result_ric": rec["result_ric"],
+                "datastr": rec["datastr"] or "",
+                "miss_review": None,
+            }
+            if rec.get("review_id"):
+                out_rec["miss_review"] = {
+                    "id": rec["review_id"],
+                    "category": rec["review_category"],
+                    "note": rec["review_note"] or "",
+                    "updated_at": rec["review_updated_at"],
+                }
+            out_records.append(out_rec)
 
             if eqp == "NG":
                 aoiNG += 1
@@ -1226,7 +1220,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 aiOver += 1
             if ai == "OK" and ric == "NG":
                 aiMiss += 1
-                miss_total += 1
                 if rec.get("review_category"):
                     miss_reviewed += 1
                     cat = rec["review_category"]
@@ -1268,12 +1261,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "revival": revival, "revivalRate": revivalRate,
             "combos": combos, "daily": daily,
             "missReviewStats": {
-                "total": miss_total,
+                "total": aiMiss,
                 "reviewed": miss_reviewed,
-                "unreviewed": miss_total - miss_reviewed,
+                "unreviewed": aiMiss - miss_reviewed,
                 "byCategory": miss_by_cat,
             },
-        }
+        }, out_records
 
     def _handle_client_clear(self):
         """API: 清除所有 client accuracy records"""
