@@ -984,11 +984,11 @@ class CAPIDatabase:
             where_clauses = []
             params = []
             if start_date:
-                where_clauses.append("c.time_stamp >= ?")
+                where_clauses.append("DATE(c.time_stamp) >= ?")
                 params.append(start_date)
             if end_date:
-                where_clauses.append("c.time_stamp <= ?")
-                params.append(end_date + " 23:59:59")
+                where_clauses.append("DATE(c.time_stamp) <= ?")
+                params.append(end_date)
             where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
             rows = conn.execute(
