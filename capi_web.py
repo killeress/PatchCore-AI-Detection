@@ -219,6 +219,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_client_import()
             elif path == "/api/ric/clear-client":
                 self._handle_client_clear()
+            elif path == "/api/ric/miss-review":
+                self._handle_miss_review_save()
+            elif path == "/api/ric/miss-review/delete":
+                self._handle_miss_review_delete()
             elif path == "/api/settings/update":
                 self._handle_api_settings_update()
             elif path == "/api/settings/reload":
@@ -892,9 +896,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _handle_ric_page(self, query: dict, path: str):
         """人工檢驗 (RIC) 比對報表頁面"""
         batches = self.db.get_ric_batches() if self.db else []
-        client_count = self.db.get_client_accuracy_count() if self.db else 0
         template = self.jinja_env.get_template("ric_report.html")
-        html = template.render(request_path=path, batches=batches, client_record_count=client_count)
+        html = template.render(request_path=path, batches=batches)
         self._send_response(200, html)
 
     def _handle_ric_upload(self):
@@ -1121,17 +1124,156 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"匯入失敗: {str(e)}"})
 
     def _handle_client_data_api(self, query: dict):
-        """API: 取得已儲存的 client accuracy records"""
+        """API: 取得已儲存的 client accuracy records（支援日期篩選 + summary 統計）"""
         try:
-            records = self.db.get_client_accuracy_records()
+            start_date = query.get('start_date', [''])[0] or None
+            end_date = query.get('end_date', [''])[0] or None
+            records = self.db.get_client_accuracy_records(start_date, end_date)
+
+            summary = self._compute_client_summary(records)
+
+            out_records = []
+            for r in records:
+                rec = {
+                    "id": r["id"],
+                    "time_stamp": r["time_stamp"],
+                    "pnl_id": r["pnl_id"],
+                    "mach_id": r["mach_id"],
+                    "result_eqp": r["result_eqp"],
+                    "result_ai": r["result_ai"],
+                    "result_ric": r["result_ric"],
+                    "datastr": r["datastr"] or "",
+                    "miss_review": None,
+                }
+                if r.get("review_id"):
+                    rec["miss_review"] = {
+                        "id": r["review_id"],
+                        "category": r["review_category"],
+                        "note": r["review_note"] or "",
+                        "updated_at": r["review_updated_at"],
+                    }
+                out_records.append(rec)
+
             self._send_json({
                 "success": True,
                 "total": len(records),
-                "records": records
+                "summary": summary,
+                "records": out_records,
             })
+        except ValueError as ve:
+            self._send_json({"success": False, "error": str(ve)})
         except Exception as e:
             logger.error(f"Client data API error: {e}", exc_info=True)
-            self._send_json({"error": str(e)})
+            self._send_json({"success": False, "error": str(e)})
+
+    def _compute_client_summary(self, records: list) -> dict:
+        """從 client accuracy records 計算統計摘要（搬自前端 computeStats）"""
+        total = len(records)
+        if total == 0:
+            return {
+                "total": 0, "aoiNG": 0, "aiNG": 0, "ricNG": 0,
+                "aoiCorrect": 0, "aiCorrect": 0,
+                "aoiOver": 0, "aoiOverRate": 0,
+                "aiOver": 0, "aiOverRate": 0,
+                "aiMiss": 0, "aiMissRate": 0,
+                "revival": 0, "revivalRate": 0,
+                "combos": {}, "daily": {},
+                "missReviewStats": {
+                    "total": 0, "reviewed": 0, "unreviewed": 0,
+                    "byCategory": {
+                        "dust_misfilter": 0, "threshold_high": 0,
+                        "ric_misjudge": 0, "outside_aoi_area": 0, "other": 0,
+                    },
+                },
+            }
+
+        aoiNG = aiNG = ricNG = 0
+        aoiCorrect = aiCorrect = 0
+        aoiOver = aiOver = aiMiss = 0
+        revival = 0
+        combos = {}
+        daily = {}
+        miss_total = 0
+        miss_reviewed = 0
+        miss_by_cat = {
+            "dust_misfilter": 0, "threshold_high": 0,
+            "ric_misjudge": 0, "outside_aoi_area": 0, "other": 0,
+        }
+
+        def _derive_judgment(datastr):
+            return "NG" if datastr and "NG" in datastr else "OK"
+
+        for rec in records:
+            eqp = rec["result_eqp"] or "OK"
+            ai = rec["result_ai"] or "OK"
+            ric = _derive_judgment(rec.get("datastr", ""))
+
+            if eqp == "NG":
+                aoiNG += 1
+            if ai == "NG":
+                aiNG += 1
+            if ric == "NG":
+                ricNG += 1
+
+            if eqp == ric:
+                aoiCorrect += 1
+            if ai == ric:
+                aiCorrect += 1
+
+            if eqp == "NG" and ric == "OK":
+                aoiOver += 1
+            if ai == "NG" and ric == "OK":
+                aiOver += 1
+            if ai == "OK" and ric == "NG":
+                aiMiss += 1
+                miss_total += 1
+                if rec.get("review_category"):
+                    miss_reviewed += 1
+                    cat = rec["review_category"]
+                    if cat in miss_by_cat:
+                        miss_by_cat[cat] += 1
+            if eqp == "NG" and ai == "OK" and ric == "OK":
+                revival += 1
+
+            combo = f"{eqp}/{ai}/{ric}"
+            combos[combo] = combos.get(combo, 0) + 1
+
+            day = (rec.get("time_stamp") or "unknown")[:10]
+            if day not in daily:
+                daily[day] = {"total": 0, "aoiCorrect": 0, "aiCorrect": 0, "aiMiss": 0, "aiOver": 0, "aoiOver": 0}
+            daily[day]["total"] += 1
+            if eqp == ric:
+                daily[day]["aoiCorrect"] += 1
+            if ai == ric:
+                daily[day]["aiCorrect"] += 1
+            if ai == "OK" and ric == "NG":
+                daily[day]["aiMiss"] += 1
+            if ai == "NG" and ric == "OK":
+                daily[day]["aiOver"] += 1
+            if eqp == "NG" and ric == "OK":
+                daily[day]["aoiOver"] += 1
+
+        aoiOverRate = round(aoiOver / aoiNG * 100, 1) if aoiNG > 0 else 0
+        aiOverRate = round(aiOver / aiNG * 100, 1) if aiNG > 0 else 0
+        aiMissRate = round(aiMiss / ricNG * 100, 1) if ricNG > 0 else 0
+        revivalRate = round(revival / aoiNG * 100, 1) if aoiNG > 0 else 0
+
+        return {
+            "total": total,
+            "aoiNG": aoiNG, "aiNG": aiNG, "ricNG": ricNG,
+            "aoiCorrect": aoiCorrect, "aiCorrect": aiCorrect,
+            "aoiOver": aoiOver, "aoiOverRate": aoiOverRate,
+            "aiOver": aiOver, "aiOverRate": aiOverRate,
+            "aiMiss": aiMiss, "aiMissRate": aiMissRate,
+            "revival": revival, "revivalRate": revivalRate,
+            "combos": combos, "daily": daily,
+            "missReviewStats": {
+                "total": miss_total,
+                "reviewed": miss_reviewed,
+                "unreviewed": miss_total - miss_reviewed,
+                "byCategory": miss_by_cat,
+            },
+        }
 
     def _handle_client_clear(self):
         """API: 清除所有 client accuracy records"""
@@ -1145,6 +1287,50 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Client clear error: {e}", exc_info=True)
             self._send_json({"error": str(e)})
+
+    def _handle_miss_review_save(self):
+        """API: 儲存/更新漏檢 Review"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+
+            client_record_id = data.get("client_record_id")
+            category = data.get("category", "")
+            note = data.get("note", "")
+
+            if not client_record_id:
+                self._send_json({"success": False, "error": "缺少 client_record_id"})
+                return
+
+            review_id = self.db.save_miss_review(int(client_record_id), category, note)
+            self._send_json({"success": True, "id": review_id, "message": "Review 已儲存"})
+        except ValueError as ve:
+            self._send_json({"success": False, "error": str(ve)})
+        except Exception as e:
+            logger.error(f"Miss review save error: {e}", exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
+    def _handle_miss_review_delete(self):
+        """API: 刪除漏檢 Review"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+
+            client_record_id = data.get("client_record_id")
+            if not client_record_id:
+                self._send_json({"success": False, "error": "缺少 client_record_id"})
+                return
+
+            deleted = self.db.delete_miss_review(int(client_record_id))
+            if deleted:
+                self._send_json({"success": True, "message": "Review 已刪除"})
+            else:
+                self._send_json({"success": False, "error": "Review 不存在"})
+        except Exception as e:
+            logger.error(f"Miss review delete error: {e}", exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
 
     def _handle_ric_report_api(self, query: dict):
         """API: 取得 RIC 比對報表資料"""
