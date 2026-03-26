@@ -155,6 +155,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_ric_report_api(query)
             elif path == "/api/ric/client-data":
                 self._handle_client_data_api(query)
+            elif path == "/api/ric/inference-stats":
+                self._handle_inference_stats_api(query)
             elif path == "/api/stats":
                 self._handle_api_stats(query)
             elif path == "/api/status":
@@ -1124,6 +1126,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         stats = self.db.get_ric_accuracy_stats(batch_id) if self.db else {}
         self._send_json(stats)
+
+    def _handle_inference_stats_api(self, query: dict):
+        """API: 取得 AI 推論紀錄統計資料"""
+        try:
+            start_date = query.get('start_date', [''])[0] or None
+            end_date = query.get('end_date', [''])[0] or None
+            stats = self.db.get_inference_stats(start_date, end_date) if self.db else {"success": False, "error": "DB not available"}
+            self._send_json(stats)
+        except Exception as e:
+            logger.error(f"Inference stats API error: {e}", exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
 
     def _handle_debug_inference_run(self):
         """API: 執行 Debug 單圖推論"""
