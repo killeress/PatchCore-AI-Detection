@@ -897,7 +897,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """人工檢驗 (RIC) 比對報表頁面"""
         batches = self.db.get_ric_batches() if self.db else []
         template = self.jinja_env.get_template("ric_report.html")
-        html = template.render(request_path=path, batches=batches)
+        html = template.render(request_path=path, batches=batches, client_record_count=0)
         self._send_response(200, html)
 
     def _handle_ric_upload(self):
