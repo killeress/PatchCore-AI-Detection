@@ -1711,11 +1711,11 @@
                 document.getElementById(id).style.display = 'none';
             });
 
-            let url = '/api/ric/inference-stats?';
-            if (startDate) url += 'start_date=' + startDate + '&';
-            if (endDate) url += 'end_date=' + endDate;
+            const qp = new URLSearchParams();
+            if (startDate) qp.set('start_date', startDate);
+            if (endDate) qp.set('end_date', endDate);
 
-            fetch(url)
+            fetch('/api/ric/inference-stats?' + qp.toString())
                 .then(r => r.json())
                 .then(data => {
                     if (!data.success) { loading.textContent = '載入失敗: ' + (data.error || ''); return; }
