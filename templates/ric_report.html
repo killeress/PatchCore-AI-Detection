@@ -1633,5 +1633,302 @@
             clearDB: clearDB,
         };
     })();
+
+    // ══════════════════════════════════════════
+    // Top-level Tab Switching
+    // ══════════════════════════════════════════
+    function switchTopTab(tabName) {
+        document.querySelectorAll('.top-tab').forEach(t => t.classList.toggle('active', t.dataset.topTab === tabName));
+        document.querySelectorAll('.top-tab-content').forEach(p => p.classList.toggle('active', p.id === 'tab-' + tabName));
+        if (tabName === 'inference' && !inferenceTab._loaded) {
+            inferenceTab.quickFilter('today');
+        }
+    }
+
+    // ══════════════════════════════════════════
+    // AI 推論紀錄 Tab Module
+    // ══════════════════════════════════════════
+    const inferenceTab = (function () {
+        let _loaded = false;
+        let trendChart = null, distChart = null, machineChart = null, modelChart = null, errChart = null;
+
+        function _destroyCharts() {
+            [trendChart, distChart, machineChart, modelChart, errChart].forEach(c => { if (c) c.destroy(); });
+            trendChart = distChart = machineChart = modelChart = errChart = null;
+        }
+
+        function _formatDate(d) {
+            return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+        }
+
+        function _getDateRange(range) {
+            const today = new Date();
+            const end = _formatDate(today);
+            if (range === 'all') return { start: '', end: '' };
+            if (range === 'today') return { start: end, end: end };
+            const d = new Date(today);
+            d.setDate(d.getDate() - (range === '7d' ? 6 : 29));
+            return { start: _formatDate(d), end: end };
+        }
+
+        function quickFilter(range) {
+            document.querySelectorAll('.inf-date-bar .quick-btn').forEach(b => b.classList.toggle('active', b.dataset.range === range));
+            const { start, end } = _getDateRange(range);
+            document.getElementById('inf_startDate').value = start;
+            document.getElementById('inf_endDate').value = end;
+            loadData(start, end);
+        }
+
+        function customFilter() {
+            document.querySelectorAll('.inf-date-bar .quick-btn').forEach(b => b.classList.remove('active'));
+            const start = document.getElementById('inf_startDate').value;
+            const end = document.getElementById('inf_endDate').value;
+            loadData(start, end);
+        }
+
+        function loadData(startDate, endDate) {
+            const loading = document.getElementById('inf_loading');
+            loading.style.display = 'block';
+            ['inf_statsGrid', 'inf_chartsRow1', 'inf_chartsRow2', 'inf_chartsRow3'].forEach(id => {
+                document.getElementById(id).style.display = 'none';
+            });
+
+            let url = '/api/ric/inference-stats?';
+            if (startDate) url += 'start_date=' + startDate + '&';
+            if (endDate) url += 'end_date=' + endDate;
+
+            fetch(url)
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) { loading.textContent = '載入失敗: ' + (data.error || ''); return; }
+                    loading.style.display = 'none';
+                    _loaded = true;
+                    renderCards(data.summary);
+                    renderCharts(data);
+                    renderCrossMatrix(data.cross_matrix);
+                    ['inf_statsGrid', 'inf_chartsRow1', 'inf_chartsRow2', 'inf_chartsRow3'].forEach(id => {
+                        document.getElementById(id).style.display = '';
+                    });
+                })
+                .catch(err => { loading.textContent = '載入失敗: ' + err.message; });
+        }
+
+        function renderCards(s) {
+            const total = s.total || 1;
+            const pct = v => (v / total * 100).toFixed(1) + '%';
+            document.getElementById('inf_statsGrid').innerHTML = `
+                <div class="inf-stat-card">
+                    <div class="label">總推論次數</div>
+                    <div class="value" style="color:var(--text);">${s.total.toLocaleString()}</div>
+                </div>
+                <div class="inf-stat-card aoi-ng">
+                    <div class="label">AOI 判 NG</div>
+                    <div class="value">${s.aoi_ng.toLocaleString()}</div>
+                    <div class="pct">${pct(s.aoi_ng)}</div>
+                </div>
+                <div class="inf-stat-card ai-ng">
+                    <div class="label">AI 判 NG</div>
+                    <div class="value">${s.ai_ng.toLocaleString()}</div>
+                    <div class="pct">${pct(s.ai_ng)}</div>
+                </div>
+                <div class="inf-stat-card revival">
+                    <div class="label">AI 救回 (AOI NG→AI OK)</div>
+                    <div class="value">${s.ai_revival.toLocaleString()}</div>
+                    <div class="pct">${s.aoi_ng ? (s.ai_revival / s.aoi_ng * 100).toFixed(1) + '% of AOI NG' : '-'}</div>
+                </div>
+                <div class="inf-stat-card err">
+                    <div class="label">ERR 錯誤</div>
+                    <div class="value">${s.err_count.toLocaleString()}</div>
+                    <div class="pct">${pct(s.err_count)}</div>
+                </div>`;
+        }
+
+        function renderCharts(data) {
+            _destroyCharts();
+            _renderTrendChart(data.daily_trend);
+            _renderDistChart(data.summary);
+            _renderMachineChart(data.by_machine);
+            _renderModelChart(data.by_model);
+            _renderErrChart(data.err_types);
+        }
+
+        function _renderTrendChart(daily) {
+            const ctx = document.getElementById('inf_trendChart').getContext('2d');
+            trendChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: daily.map(d => d.date),
+                    datasets: [
+                        {
+                            label: '總推論數',
+                            data: daily.map(d => d.total),
+                            backgroundColor: 'rgba(100, 116, 139, 0.3)',
+                            borderColor: 'rgba(100, 116, 139, 0.6)',
+                            borderWidth: 1,
+                            order: 2,
+                        },
+                        {
+                            label: 'AOI NG',
+                            data: daily.map(d => d.aoi_ng),
+                            type: 'line',
+                            borderColor: '#f97316',
+                            backgroundColor: 'rgba(249, 115, 22, 0.1)',
+                            pointRadius: 3,
+                            tension: 0.3,
+                            order: 1,
+                        },
+                        {
+                            label: 'AI NG',
+                            data: daily.map(d => d.ai_ng),
+                            type: 'line',
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            pointRadius: 3,
+                            tension: 0.3,
+                            order: 1,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { labels: { color: '#94a3b8' } }, datalabels: { display: false } },
+                    scales: {
+                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' } },
+                        y: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' }, beginAtZero: true },
+                    },
+                },
+            });
+        }
+
+        function _renderDistChart(s) {
+            const ctx = document.getElementById('inf_distChart').getContext('2d');
+            const aoiOk = s.total - s.aoi_ng - s.err_count;
+            const aiOk = s.total - s.ai_ng - s.err_count;
+            distChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['AOI OK', 'AOI NG', 'AI OK', 'AI NG', 'ERR'],
+                    datasets: [
+                        {
+                            label: 'AOI',
+                            data: [aoiOk, s.aoi_ng, 0, 0, 0],
+                            backgroundColor: ['#22c55e', '#f97316', 'transparent', 'transparent', 'transparent'],
+                            borderWidth: 0,
+                        },
+                        {
+                            label: 'AI',
+                            data: [0, 0, aiOk, s.ai_ng, s.err_count],
+                            backgroundColor: ['transparent', 'transparent', '#22c55e', '#ef4444', '#f59e0b'],
+                            borderWidth: 0,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'bottom', labels: { color: '#94a3b8', filter: item => item.text !== '' } },
+                        datalabels: { display: false },
+                    },
+                },
+            });
+        }
+
+        function _renderMachineChart(machines) {
+            const top10 = machines.slice(0, 10);
+            const ctx = document.getElementById('inf_machineChart').getContext('2d');
+            machineChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: top10.map(m => m.machine),
+                    datasets: [
+                        { label: 'AOI NG率%', data: top10.map(m => m.aoi_ng_rate), backgroundColor: 'rgba(249,115,22,0.7)' },
+                        { label: 'AI NG率%', data: top10.map(m => m.ai_ng_rate), backgroundColor: 'rgba(59,130,246,0.7)' },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    indexAxis: 'y',
+                    plugins: { legend: { labels: { color: '#94a3b8' } }, datalabels: { display: false } },
+                    scales: {
+                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' }, beginAtZero: true },
+                        y: { ticks: { color: '#94a3b8' }, grid: { display: false } },
+                    },
+                },
+            });
+        }
+
+        function _renderModelChart(models) {
+            const top10 = models.slice(0, 10);
+            const ctx = document.getElementById('inf_modelChart').getContext('2d');
+            modelChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: top10.map(m => m.model),
+                    datasets: [{ label: '推論筆數', data: top10.map(m => m.total), backgroundColor: 'rgba(124,77,255,0.7)' }],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    indexAxis: 'y',
+                    plugins: { legend: { display: false }, datalabels: { display: false } },
+                    scales: {
+                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' }, beginAtZero: true },
+                        y: { ticks: { color: '#94a3b8' }, grid: { display: false } },
+                    },
+                },
+            });
+        }
+
+        function _renderErrChart(errTypes) {
+            const top10 = errTypes.slice(0, 10);
+            const ctx = document.getElementById('inf_errChart').getContext('2d');
+            errChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: top10.map(e => e.type.length > 20 ? e.type.substring(0, 20) + '…' : e.type),
+                    datasets: [{ label: '次數', data: top10.map(e => e.count), backgroundColor: 'rgba(245,158,11,0.7)' }],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    indexAxis: 'y',
+                    plugins: { legend: { display: false }, datalabels: { display: false } },
+                    scales: {
+                        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(148,163,184,0.1)' }, beginAtZero: true },
+                        y: { ticks: { color: '#94a3b8' }, grid: { display: false } },
+                    },
+                },
+            });
+        }
+
+        function renderCrossMatrix(cm) {
+            document.getElementById('inf_crossMatrix').innerHTML = `
+                <div class="inf-cross-cell">
+                    <div class="cell-label">AOI OK → AI OK</div>
+                    <div class="cell-value" style="color:#22c55e;">${(cm.ok_ok || 0).toLocaleString()}</div>
+                    <div class="cell-desc" style="color:var(--text-muted);">一致 OK</div>
+                </div>
+                <div class="inf-cross-cell">
+                    <div class="cell-label">AOI NG → AI OK</div>
+                    <div class="cell-value" style="color:#22c55e;">${(cm.ng_ok || 0).toLocaleString()}</div>
+                    <div class="cell-desc" style="color:#22c55e;">✓ AI 救回</div>
+                </div>
+                <div class="inf-cross-cell">
+                    <div class="cell-label">AOI OK → AI NG</div>
+                    <div class="cell-value" style="color:#ef4444;">${(cm.ok_ng || 0).toLocaleString()}</div>
+                    <div class="cell-desc" style="color:#ef4444;">AI 額外攔截</div>
+                </div>
+                <div class="inf-cross-cell">
+                    <div class="cell-label">AOI NG → AI NG</div>
+                    <div class="cell-value" style="color:#f97316;">${(cm.ng_ng || 0).toLocaleString()}</div>
+                    <div class="cell-desc" style="color:var(--text-muted);">一致 NG</div>
+                </div>`;
+        }
+
+        return { _loaded, quickFilter, customFilter, loadData, renderCards, renderCharts, renderCrossMatrix };
+    })();
 </script>
 {% endblock %}
