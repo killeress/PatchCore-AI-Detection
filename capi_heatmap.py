@@ -18,56 +18,110 @@ from typing import List, Dict, Optional, Tuple, Any
 import time
 
 
-def build_region_zoom_panel(
-    heatmap_panel: np.ndarray,
-    anomaly_map: np.ndarray,
+def build_region_zoom_panels(
+    heatmap_binary: Optional[np.ndarray],
     dust_mask: Optional[np.ndarray],
+    region_details: Optional[list],
     tile_size: int = 512,
-) -> Optional[np.ndarray]:
-    """以 anomaly_map 峰值為中心，裁切 heatmap+dust 疊加後放大至 tile_size。
+    metric_name: str = "COV",
+    iou_threshold: float = 0.01,
+    max_panels: int = 3,
+) -> List[Tuple[np.ndarray, str]]:
+    """為每個異常區域生成放大面板（二值化 heatmap + 灰塵遮罩疊加 + 計算數值標註）。
+
+    Args:
+        heatmap_binary: 二值化 heatmap（來自 check_dust_per_region）
+        dust_mask: 灰塵遮罩（原始尺寸）
+        region_details: per-region 判定結果列表
+        tile_size: 面板大小
+        metric_name: "COV" 或 "IOU"
+        iou_threshold: 判定閾值
+        max_panels: 最多生成幾張
 
     Returns:
-        放大面板 (BGR) 或 None（失敗時）
+        [(panel_image, label_text), ...] 最多 max_panels 筆
     """
-    try:
-        amap = anomaly_map
-        if len(amap.shape) == 3:
-            amap = amap[:, :, 0]
+    if not region_details or heatmap_binary is None:
+        return []
 
-        # 在原始解析度找峰值再縮放座標（避免冗餘 resize）
-        peak_yx = np.unravel_index(np.argmax(amap), amap.shape)
-        peak_y = int(peak_yx[0] * tile_size / amap.shape[0])
-        peak_x = int(peak_yx[1] * tile_size / amap.shape[1])
+    # 按 max_score 降序，取前 max_panels 個
+    sorted_regions = sorted(region_details, key=lambda r: r["max_score"], reverse=True)[:max_panels]
 
-        crop_sz = tile_size // 2
-        y1 = max(0, peak_y - crop_sz // 2)
-        x1 = max(0, peak_x - crop_sz // 2)
-        y2 = min(tile_size, y1 + crop_sz)
-        x2 = min(tile_size, x1 + crop_sz)
-        if y2 - y1 < crop_sz:
-            y1 = max(0, y2 - crop_sz)
-        if x2 - x1 < crop_sz:
-            x1 = max(0, x2 - crop_sz)
+    # 準備 tile_size 尺寸的二值化圖與灰塵遮罩
+    heat_bin = heatmap_binary
+    if len(heat_bin.shape) == 3:
+        heat_bin = heat_bin[:, :, 0]
+    heat_resized = cv2.resize(heat_bin, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
 
-        zoom_crop = heatmap_panel[y1:y2, x1:x2].copy()
+    dm_resized = None
+    if dust_mask is not None:
+        dm = dust_mask
+        if len(dm.shape) == 3:
+            dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
+        dm_resized = cv2.resize(dm, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
 
-        if dust_mask is not None:
-            dm = dust_mask
-            if len(dm.shape) == 3:
-                dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
-            dm_resized = cv2.resize(dm, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
-            dm_crop = dm_resized[y1:y2, x1:x2]
-            dust_overlay = np.zeros_like(zoom_crop)
-            dust_overlay[dm_crop > 0] = (0, 255, 255)
-            zoom_crop = cv2.addWeighted(zoom_crop, 0.7, dust_overlay, 0.3, 0)
+    h_src, w_src = heatmap_binary.shape[:2]
+    results = []
 
-        panel = cv2.resize(zoom_crop, (tile_size, tile_size), interpolation=cv2.INTER_LINEAR)
-        ctr = tile_size // 2
-        cv2.drawMarker(panel, (ctr, ctr), (0, 0, 255), cv2.MARKER_CROSS, 40, 2)
-        return panel
-    except Exception as e:
-        print(f"⚠️ Region zoom panel failed: {e}")
-        return None
+    for region in sorted_regions:
+        try:
+            # 峰值座標縮放到 tile_size 空間
+            peak_y = int(region["peak_yx"][0] * tile_size / h_src)
+            peak_x = int(region["peak_yx"][1] * tile_size / w_src)
+
+            crop_sz = tile_size // 2
+            y1 = max(0, peak_y - crop_sz // 2)
+            x1 = max(0, peak_x - crop_sz // 2)
+            y2 = min(tile_size, y1 + crop_sz)
+            x2 = min(tile_size, x1 + crop_sz)
+            if y2 - y1 < crop_sz:
+                y1 = max(0, y2 - crop_sz)
+            if x2 - x1 < crop_sz:
+                x1 = max(0, x2 - crop_sz)
+
+            # 底圖：二值化 heatmap 區域（白色）在黑色背景上
+            heat_crop = heat_resized[y1:y2, x1:x2]
+            base = np.zeros((crop_sz, crop_sz, 3), dtype=np.uint8)
+            base[heat_crop > 0] = (255, 255, 255)  # 白色 = 熱區
+
+            # 疊加灰塵遮罩（青色）
+            if dm_resized is not None:
+                dm_crop = dm_resized[y1:y2, x1:x2]
+                dust_overlay = np.zeros_like(base)
+                dust_overlay[dm_crop > 0] = (0, 255, 255)  # 青色 = 灰塵
+                base = cv2.addWeighted(base, 0.7, dust_overlay, 0.3, 0)
+                # 重疊區域用綠色標示
+                overlap = (heat_crop > 0) & (dm_crop > 0)
+                base[overlap] = (0, 255, 0)
+
+            panel = cv2.resize(base, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+
+            # 標註計算過程
+            cov = region["coverage"]
+            area = region["area"]
+            dust_ol = region["dust_overlap"]
+            is_dust = region["is_dust"]
+            tag = "DUST" if is_dust else "REAL"
+            tag_color = (0, 200, 255) if is_dust else (0, 0, 255)
+
+            cv2.putText(panel, f"{tag}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, tag_color, 2)
+            cv2.putText(panel, f"{metric_name}: {dust_ol}/{area} = {cov:.4f}", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
+            cv2.putText(panel, f"Thr: {iou_threshold:.4f}  {'>=  DUST' if is_dust else '<  REAL'}", (10, 85),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, tag_color, 1)
+
+            # 圖例
+            legend_y = tile_size - 15
+            cv2.putText(panel, "W=Heat  C=Dust  G=Overlap", (10, legend_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1)
+
+            label = f"Region#{region['label_id']} {tag} {metric_name}:{cov:.3f}"
+            results.append((panel, label))
+        except Exception as e:
+            print(f"⚠️ Region zoom panel #{region.get('label_id', '?')} failed: {e}")
+
+    return results
 
 
 class HeatmapManager:
@@ -325,20 +379,25 @@ class HeatmapManager:
         if dust_detail and "IOU:" in dust_detail:
             metric_name = "IOU"
 
-        # --- Panel 6: Region Zoom (當灰塵判定超過閾值時，放大異常區域) ---
-        zoom_panel = None
-        if has_omit and is_dust and anomaly_map is not None:
-            zoom_panel = build_region_zoom_panel(
-                heatmap_panel, anomaly_map, dust_mask, tile_size
+        # --- Panel 6+: Region Zoom (逐區域放大，最多 3 張) ---
+        zoom_results = []
+        if has_omit and is_dust and tile_info is not None:
+            region_details = getattr(tile_info, 'dust_region_details', None)
+            heatmap_binary = getattr(tile_info, 'dust_heatmap_binary', None)
+            zoom_results = build_region_zoom_panels(
+                heatmap_binary, dust_mask, region_details,
+                tile_size=tile_size,
+                metric_name=metric_name,
+                iou_threshold=iou_threshold,
             )
 
         # --- 底部獨立標籤列（不蓋到面板內容）---
         if has_omit:
-            labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask (Overall{metric_name}:{dust_iou:.3f})", f"{metric_name} Debug (G=Overlap R=Heat B=Dust)"]
+            labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask (Overall{metric_name}:{dust_iou:.3f})", f"{metric_name} Debug (G=Dust R=RealNG B=DustOnly)"]
             panels = [orig, heatmap_panel, omit_panel, dust_panel, iou_debug_panel]
-            if zoom_panel is not None:
-                labels.append("Region Zoom (Heatmap+Dust)")
-                panels.append(zoom_panel)
+            for zoom_img, zoom_label in zoom_results:
+                panels.append(zoom_img)
+                labels.append(zoom_label)
         else:
             labels = ["Original", "Heatmap"]
             panels = [orig, heatmap_panel]
@@ -586,7 +645,7 @@ class HeatmapManager:
 
                 is_surface = surface_iou >= dust_iou_threshold
 
-            # 產生 Panel 4 可視化圖 (R=僅缺陷, B=僅異物, G=重疊)
+            # 產生 Panel 4 可視化圖 (R=僅缺陷, G=重疊, B=僅異物)
             overlay_panel = omit_panel.copy()
             if dust_mask_omit is not None and is_dust_detected:
                 # resize masks to panel size

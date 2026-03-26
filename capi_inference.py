@@ -96,6 +96,8 @@ class TileInfo:
     dust_mask: Optional[np.ndarray] = field(default=None, repr=False)
     dust_heatmap_iou: float = 0.0  # overall coverage (intersection / total dust area)
     dust_region_max_cov: float = 0.0  # per-region max coverage (用於實際判定)
+    dust_region_details: Optional[list] = field(default=None, repr=False)  # per-region 判定詳情
+    dust_heatmap_binary: Optional[np.ndarray] = field(default=None, repr=False)  # 二值化 heatmap
     dust_bright_ratio: float = 0.0
     dust_detail_text: str = ""  # 灰塵判定詳細資訊
     dust_iou_debug_image: Optional[np.ndarray] = field(default=None, repr=False)  # IOU debug 可視化圖
@@ -2967,6 +2969,8 @@ class CAPIInferencer:
                             iou = overall_iou
                             tile.dust_heatmap_iou = iou
                             # 記錄 per-region 最大 coverage（實際判定用的值）
+                            tile.dust_region_details = region_details
+                            tile.dust_heatmap_binary = heatmap_binary
                             if region_details:
                                 tile.dust_region_max_cov = max(r["coverage"] for r in region_details)
 

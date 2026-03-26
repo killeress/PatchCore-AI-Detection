@@ -15,7 +15,7 @@ import numpy as np
 
 from capi_config import CAPIConfig
 from capi_inference import CAPIInferencer
-from capi_heatmap import build_region_zoom_panel
+from capi_heatmap import build_region_zoom_panels
 
 
 def find_omit_image(image_path: Path) -> Path | None:
@@ -96,6 +96,8 @@ def generate_tile_combined_image(
     detail_text = ""
     is_dust_final = False
     dust_iou_debug = None
+    region_details = None
+    heatmap_binary = None
     is_bomb = getattr(tile, 'is_bomb', False)
     bomb_code = getattr(tile, 'bomb_defect_code', '')
 
@@ -106,26 +108,37 @@ def generate_tile_combined_image(
         top_pct = inferencer.config.dust_heatmap_top_percent
         metric_mode = inferencer.config.dust_heatmap_metric
         metric_name = "COV" if metric_mode == "coverage" else "IOU"
-        heatmap_binary = None
-
         if is_dust and anomaly_map is not None:
-            iou, heatmap_binary = inferencer.compute_dust_heatmap_iou(
-                dust_mask, anomaly_map, top_percent=top_pct, metric=metric_mode
-            )
+            iou_threshold = inferencer.config.dust_heatmap_iou_threshold
+            has_real_defect, real_peak_yx, iou, region_details, heatmap_binary, region_labels = \
+                inferencer.check_dust_per_region(
+                    dust_mask, anomaly_map,
+                    top_percent=top_pct,
+                    metric=metric_mode,
+                    iou_threshold=iou_threshold,
+                )
             tile.dust_heatmap_iou = iou
-            
-            if iou >= inferencer.config.dust_heatmap_iou_threshold:
+            tile.dust_region_details = region_details
+            tile.dust_heatmap_binary = heatmap_binary
+            if region_details:
+                tile.dust_region_max_cov = max(r["coverage"] for r in region_details)
+
+            dust_regions = [r for r in region_details if r["is_dust"]]
+            real_regions = [r for r in region_details if not r["is_dust"]]
+            if not has_real_defect:
                 is_dust_final = True
                 tile.is_suspected_dust_or_scratch = True
-                detail_text += f" {metric_name}:{iou:.3f}>={metric_name}_THR -> DUST"
+                detail_text += f" PER_REGION: 0real+{len(dust_regions)}dust -> DUST"
             else:
-                detail_text += f" {metric_name}:{iou:.3f}<{metric_name}_THR -> REAL_NG"
-            
+                detail_text += f" PER_REGION: {len(real_regions)}real+{len(dust_regions)}dust -> REAL_NG"
+
             try:
                 dust_iou_debug = inferencer.generate_dust_iou_debug_image(
                     tile.image, anomaly_map, dust_mask,
                     heatmap_binary, iou, top_pct,
                     tile.is_suspected_dust_or_scratch,
+                    region_details=region_details,
+                    region_labels=region_labels,
                 )
             except Exception:
                 pass
@@ -161,19 +174,23 @@ def generate_tile_combined_image(
         cv2.putText(iou_debug_panel, "No IOU Debug", (130, 260),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)
 
-    # --- Panel 6: Region Zoom (當灰塵判定超過閾值時，放大異常區域) ---
-    zoom_panel = None
-    if is_dust_final and anomaly_map is not None:
-        zoom_panel = build_region_zoom_panel(
-            heatmap_panel, anomaly_map, dust_mask, tile_size
+    # --- Panel 6+: Region Zoom (逐區域放大，最多 3 張) ---
+    zoom_results = []
+    if is_dust_final and heatmap_binary is not None:
+        iou_threshold = inferencer.config.dust_heatmap_iou_threshold
+        zoom_results = build_region_zoom_panels(
+            heatmap_binary, dust_mask, region_details,
+            tile_size=tile_size,
+            metric_name=metric_name,
+            iou_threshold=iou_threshold,
         )
 
     # --- 橫向拼接（不在面板上畫標籤）---
     panels = [orig, heatmap_panel, omit_panel, dust_panel, iou_debug_panel]
-    labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask (Overall{metric_name}:{iou:.3f})", f"{metric_name} Debug (G=Overlap R=Heat B=Dust)"]
-    if zoom_panel is not None:
-        panels.append(zoom_panel)
-        labels.append("Region Zoom (Heatmap+Dust)")
+    labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask (Overall{metric_name}:{iou:.3f})", f"{metric_name} Debug (G=Dust R=RealNG B=DustOnly)"]
+    for zoom_img, zoom_label in zoom_results:
+        panels.append(zoom_img)
+        labels.append(zoom_label)
     composite = np.hstack(panels)
     comp_h, comp_w = composite.shape[:2]
 
@@ -196,7 +213,8 @@ def generate_tile_combined_image(
         verdict = f"BOMB: {bomb_code} (Filtered as OK)"
         verdict_color = (255, 0, 255)  # 洋紅色
     elif is_dust_final:
-        verdict = f"DUST (Filtered as OK) | {metric_name}:{iou:.3f}>={iou_threshold:.3f}"
+        dust_rcov = getattr(tile, 'dust_region_max_cov', 0.0)
+        verdict = f"DUST (Filtered as OK) | Region{metric_name}:{dust_rcov:.3f}>={iou_threshold:.3f}"
         verdict_color = (0, 200, 255)
     elif score >= score_threshold:
         verdict = "NG (Detected)"
