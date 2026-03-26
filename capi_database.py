@@ -1147,6 +1147,143 @@ class CAPIDatabase:
             "details": comparisons,
         }
 
+    def get_inference_stats(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict:
+        """
+        取得推論紀錄統計資料（供 AI 推論紀錄 Tab 使用）
+
+        Args:
+            start_date: 起始日期 YYYY-MM-DD（含）
+            end_date: 結束日期 YYYY-MM-DD（含）
+        """
+        conn = self._get_conn()
+        try:
+            # 建立日期篩選條件
+            where_clauses = []
+            params = []
+            if start_date:
+                where_clauses.append("DATE(request_time) >= ?")
+                params.append(start_date)
+            if end_date:
+                where_clauses.append("DATE(request_time) <= ?")
+                params.append(end_date)
+            where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+            # ── 1. Summary 統計 ──
+            rows = conn.execute(
+                f"SELECT machine_judgment, ai_judgment, error_message FROM inference_records{where_sql}",
+                params
+            ).fetchall()
+
+            total = len(rows)
+            aoi_ng = 0
+            ai_ng = 0
+            ai_revival = 0  # AOI NG → AI OK
+            err_count = 0
+            ok_ok = 0
+            ng_ok = 0
+            ok_ng = 0
+            ng_ng = 0
+            err_types_counter: Dict[str, int] = {}
+
+            for row in rows:
+                mj = (row["machine_judgment"] or "").strip()
+                aj = (row["ai_judgment"] or "").strip()
+                em = (row["error_message"] or "").strip()
+
+                is_aoi_ng = mj != "" and mj != "OK"
+                is_ai_ng = aj.startswith("NG")
+                is_err = aj.startswith("ERR")
+
+                if is_aoi_ng:
+                    aoi_ng += 1
+                if is_ai_ng:
+                    ai_ng += 1
+                if is_err:
+                    err_count += 1
+                    # ERR 類型分類
+                    err_desc = aj[4:].strip() if len(aj) > 4 else (em if em else "Unknown")
+                    err_types_counter[err_desc] = err_types_counter.get(err_desc, 0) + 1
+                if is_aoi_ng and aj == "OK":
+                    ai_revival += 1
+
+                # 交叉比對矩陣（排除 ERR）
+                if not is_err:
+                    if not is_aoi_ng and not is_ai_ng:
+                        ok_ok += 1
+                    elif is_aoi_ng and not is_ai_ng:
+                        ng_ok += 1
+                    elif not is_aoi_ng and is_ai_ng:
+                        ok_ng += 1
+                    elif is_aoi_ng and is_ai_ng:
+                        ng_ng += 1
+
+            # ── 2. 每日趨勢 ──
+            daily_rows = conn.execute(
+                f"""SELECT DATE(request_time) as date,
+                           COUNT(*) as total,
+                           SUM(CASE WHEN machine_judgment != '' AND machine_judgment != 'OK' THEN 1 ELSE 0 END) as aoi_ng,
+                           SUM(CASE WHEN ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ai_ng,
+                           SUM(CASE WHEN ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END) as err
+                    FROM inference_records{where_sql}
+                    GROUP BY DATE(request_time)
+                    ORDER BY date""",
+                params
+            ).fetchall()
+            daily_trend = [dict(r) for r in daily_rows]
+
+            # ── 3. 機台統計 ──
+            machine_rows = conn.execute(
+                f"""SELECT machine_no as machine,
+                           COUNT(*) as total,
+                           ROUND(SUM(CASE WHEN machine_judgment != '' AND machine_judgment != 'OK' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as aoi_ng_rate,
+                           ROUND(SUM(CASE WHEN ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as ai_ng_rate
+                    FROM inference_records{where_sql}
+                    GROUP BY machine_no
+                    ORDER BY total DESC""",
+                params
+            ).fetchall()
+            by_machine = [dict(r) for r in machine_rows]
+
+            # ── 4. 產品型號統計 ──
+            model_rows = conn.execute(
+                f"""SELECT model_id as model, COUNT(*) as total
+                    FROM inference_records{where_sql}
+                    GROUP BY model_id
+                    ORDER BY total DESC""",
+                params
+            ).fetchall()
+            by_model = [dict(r) for r in model_rows]
+
+            # ── 5. ERR 類型排序 ──
+            err_types = sorted(
+                [{"type": k, "count": v} for k, v in err_types_counter.items()],
+                key=lambda x: x["count"],
+                reverse=True
+            )
+
+            return {
+                "success": True,
+                "summary": {
+                    "total": total,
+                    "aoi_ng": aoi_ng,
+                    "ai_ng": ai_ng,
+                    "ai_revival": ai_revival,
+                    "err_count": err_count,
+                },
+                "daily_trend": daily_trend,
+                "by_machine": by_machine,
+                "by_model": by_model,
+                "err_types": err_types,
+                "cross_matrix": {
+                    "ok_ok": ok_ok,
+                    "ng_ok": ng_ok,
+                    "ok_ng": ok_ng,
+                    "ng_ng": ng_ng,
+                },
+            }
+        finally:
+            conn.close()
+
     # ── 設定參數管理方法 ─────────────────────────────────
 
     def get_config_param(self, param_name: str) -> Optional[Dict]:
