@@ -809,11 +809,17 @@
                 <div class="chart-container"><canvas id="review_pieChart"></canvas></div>
             </div>
         </div>
-        <div class="card">
+        <!-- Review sub-tabs: 未處理 / 已處理 -->
+        <div class="client-tabs" style="margin-bottom:16px;">
+            <div class="client-tab active" data-review-tab="pending" onclick="clientComp.switchReviewTab('pending')">⏳ 未處理 <span id="review_pendingCount" style="font-size:0.78rem;"></span></div>
+            <div class="client-tab" data-review-tab="done" onclick="clientComp.switchReviewTab('done')">✅ 已處理 <span id="review_doneCount" style="font-size:0.78rem;"></span></div>
+        </div>
+
+        <div class="card" id="review_panel_pending">
             <div class="detail-header">
-                <h3>🔍 漏檢案例 Review <span id="review_countLabel" style="font-size:0.8rem; color:var(--accent); font-weight:400;"></span></h3>
+                <h3>⏳ 待 Review</h3>
             </div>
-            <div class="table-wrap" id="review_tableWrap">
+            <div class="table-wrap" id="review_tableWrap_pending">
                 <table>
                     <thead>
                         <tr>
@@ -831,7 +837,34 @@
                             <th style="min-width:100px;">操作</th>
                         </tr>
                     </thead>
-                    <tbody id="review_detailBody"></tbody>
+                    <tbody id="review_detailBody_pending"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="card" id="review_panel_done" style="display:none;">
+            <div class="detail-header">
+                <h3>✅ 已處理</h3>
+            </div>
+            <div class="table-wrap" id="review_tableWrap_done">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>檢測時間</th>
+                            <th>Panel ID</th>
+                            <th>機台</th>
+                            <th>AOI</th>
+                            <th>AI</th>
+                            <th>RIC</th>
+                            <th>DATASTR</th>
+                            <th>推論紀錄</th>
+                            <th>分類</th>
+                            <th>備註</th>
+                            <th style="min-width:100px;">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="review_detailBody_done"></tbody>
                 </table>
             </div>
         </div>
@@ -1657,12 +1690,20 @@
 
         function renderReviewTable(records) {
             const missRecords = records.filter(r => r.result_ai === 'OK' && deriveJudgment(r.datastr) === 'NG');
+            const pending = missRecords.filter(r => !r.miss_review || !r.miss_review.category);
+            const done = missRecords.filter(r => r.miss_review && r.miss_review.category);
+
             document.getElementById('review_countLabel').textContent = `(${missRecords.length} 筆)`;
+            document.getElementById('review_pendingCount').textContent = `(${pending.length})`;
+            document.getElementById('review_doneCount').textContent = `(${done.length})`;
 
-            const tbody = document.getElementById('review_detailBody');
+            _fillReviewRows(document.getElementById('review_detailBody_pending'), pending, true);
+            _fillReviewRows(document.getElementById('review_detailBody_done'), done, false);
+        }
+
+        function _fillReviewRows(tbody, rows, editable) {
             tbody.innerHTML = '';
-
-            missRecords.forEach((row, i) => {
+            rows.forEach((row, i) => {
                 const review = row.miss_review;
                 const hasReview = review && review.category;
 
@@ -1706,6 +1747,12 @@
                 `;
                 tbody.appendChild(tr);
             });
+        }
+
+        function switchReviewTab(tabName) {
+            document.querySelectorAll('[data-review-tab]').forEach(t => t.classList.toggle('active', t.dataset.reviewTab === tabName));
+            document.getElementById('review_panel_pending').style.display = tabName === 'pending' ? 'block' : 'none';
+            document.getElementById('review_panel_done').style.display = tabName === 'done' ? 'block' : 'none';
         }
 
         function _markDirty(recordId) {
@@ -1790,6 +1837,7 @@
             const mrs = { total, reviewed, unreviewed: total - reviewed, byCategory };
             renderReviewStats(mrs);
             renderReviewPieChart(mrs);
+            renderReviewTable(rawRecords);
         }
 
         // ── Init ──
@@ -1798,7 +1846,7 @@
         loadData('', '');
 
         return {
-            switchTab, filterByCard, exportCSV, clearDB,
+            switchTab, switchReviewTab, filterByCard, exportCSV, clearDB,
             quickFilter, customFilter, loadData, toggleUpload,
             _saveReview, _deleteReview, _markDirty,
         };
