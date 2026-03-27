@@ -1191,6 +1191,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "result_ai": ai,
                 "result_ric": rec["result_ric"],
                 "datastr": rec["datastr"] or "",
+                "inference_record_id": rec.get("inference_record_id"),
                 "miss_review": None,
             }
             if rec.get("review_id"):

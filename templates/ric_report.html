@@ -1681,7 +1681,10 @@
                 <td><span class="badge badge-ok">OK</span></td>
                 <td><span class="badge badge-ng">NG</span></td>
                 <td style="font-size:0.75rem; color:var(--text-muted); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${row.datastr}">${row.datastr}</td>
-                <td><a href="/search?glass_id=${encodeURIComponent(row.pnl_id)}&start_date=${row.time_stamp.substring(0,10)}&end_date=${row.time_stamp.substring(0,10)}" target="_blank" style="color:var(--accent); font-size:0.82rem; text-decoration:underline;">🔗 查看</a></td>
+                <td>${row.inference_record_id
+                    ? `<a href="/v3/record/${row.inference_record_id}" target="_blank" style="color:var(--accent); font-size:0.82rem; text-decoration:underline;">🔗 查看</a>`
+                    : `<span style="color:var(--text-muted); font-size:0.78rem;">無紀錄</span>`
+                }</td>
                 <td>
                     <select class="review-select" id="review_cat_${row.id}" onchange="clientComp._markDirty(${row.id})">
                         <option value="">請選擇</option>

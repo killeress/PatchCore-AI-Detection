@@ -995,7 +995,12 @@ class CAPIDatabase:
                 f"""SELECT c.id, c.time_stamp, c.pnl_id, c.mach_id,
                            c.result_eqp, c.result_ai, c.result_ric, c.datastr,
                            mr.id as review_id, mr.category as review_category,
-                           mr.note as review_note, mr.updated_at as review_updated_at
+                           mr.note as review_note, mr.updated_at as review_updated_at,
+                           (SELECT ir.id FROM inference_records ir
+                            WHERE ir.glass_id = c.pnl_id
+                              AND DATE(ir.request_time) = DATE(c.time_stamp)
+                            ORDER BY ir.request_time DESC LIMIT 1
+                           ) as inference_record_id
                     FROM client_accuracy_records c
                     LEFT JOIN miss_review mr ON mr.client_record_id = c.id
                     {where_sql}
