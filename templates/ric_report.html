@@ -1674,13 +1674,13 @@
                 tr.id = `review_row_${row.id}`;
                 tr.innerHTML = `
                 <td style="color:var(--text-muted); font-size:0.8rem;">${i + 1}</td>
-                <td style="font-family:'Fira Code',monospace; font-size:0.82rem; color:var(--text-muted);">${row.time_stamp}</td>
-                <td style="font-family:'Fira Code',monospace; font-size:0.85rem;">${row.pnl_id}</td>
-                <td>${row.mach_id}</td>
+                <td style="font-family:'Fira Code',monospace; font-size:0.75rem; color:var(--text-muted); white-space:nowrap;">${row.time_stamp.substring(5)}</td>
+                <td style="font-family:'Fira Code',monospace; font-size:0.75rem; white-space:nowrap;" title="${row.pnl_id}">${row.pnl_id.length > 12 ? row.pnl_id.substring(0,12) + '…' : row.pnl_id}</td>
+                <td style="font-size:0.8rem;">${row.mach_id}</td>
                 <td><span class="badge badge-ng">NG</span></td>
                 <td><span class="badge badge-ok">OK</span></td>
                 <td><span class="badge badge-ng">NG</span></td>
-                <td style="font-size:0.75rem; color:var(--text-muted); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${row.datastr}">${row.datastr}</td>
+                <td style="font-size:0.75rem; color:var(--text-muted); word-break:break-all; max-width:350px;">${row.datastr}</td>
                 <td>${row.inference_record_id
                     ? `<a href="/v3/record/${row.inference_record_id}" target="_blank" style="color:var(--accent); font-size:0.82rem; text-decoration:underline;">🔗 查看</a>`
                     : `<span style="color:var(--text-muted); font-size:0.78rem;">無紀錄</span>`
