@@ -1693,7 +1693,6 @@
             const pending = missRecords.filter(r => !r.miss_review || !r.miss_review.category);
             const done = missRecords.filter(r => r.miss_review && r.miss_review.category);
 
-            document.getElementById('review_countLabel').textContent = `(${missRecords.length} 筆)`;
             document.getElementById('review_pendingCount').textContent = `(${pending.length})`;
             document.getElementById('review_doneCount').textContent = `(${done.length})`;
 
