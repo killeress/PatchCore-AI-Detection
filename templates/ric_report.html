@@ -1674,7 +1674,7 @@
                 tr.id = `review_row_${row.id}`;
                 tr.innerHTML = `
                 <td style="color:var(--text-muted); font-size:0.8rem;">${i + 1}</td>
-                <td style="font-family:'Fira Code',monospace; font-size:0.75rem; color:var(--text-muted); white-space:nowrap;">${row.time_stamp.substring(5)}</td>
+                <td style="font-family:'Fira Code',monospace; font-size:0.75rem; color:var(--text-muted); white-space:nowrap;">${row.time_stamp.substring(5, 19)}</td>
                 <td style="font-family:'Fira Code',monospace; font-size:0.75rem; white-space:nowrap;" title="${row.pnl_id}">${row.pnl_id.length > 12 ? row.pnl_id.substring(0,12) + '…' : row.pnl_id}</td>
                 <td style="font-size:0.8rem;">${row.mach_id}</td>
                 <td><span class="badge badge-ng">NG</span></td>
