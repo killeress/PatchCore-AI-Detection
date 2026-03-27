@@ -824,6 +824,8 @@
                             <th>AOI</th>
                             <th>AI</th>
                             <th>RIC</th>
+                            <th>DATASTR</th>
+                            <th>推論紀錄</th>
                             <th style="min-width:160px;">分類</th>
                             <th style="min-width:200px;">備註</th>
                             <th style="min-width:100px;">操作</th>
@@ -1678,6 +1680,8 @@
                 <td><span class="badge badge-ng">NG</span></td>
                 <td><span class="badge badge-ok">OK</span></td>
                 <td><span class="badge badge-ng">NG</span></td>
+                <td style="font-size:0.75rem; color:var(--text-muted); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${row.datastr}">${row.datastr}</td>
+                <td><a href="/search?glass_id=${encodeURIComponent(row.pnl_id)}" target="_blank" style="color:var(--accent); font-size:0.82rem; text-decoration:underline;">🔗 查看</a></td>
                 <td>
                     <select class="review-select" id="review_cat_${row.id}" onchange="clientComp._markDirty(${row.id})">
                         <option value="">請選擇</option>
