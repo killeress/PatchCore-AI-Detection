@@ -643,6 +643,7 @@
         <button class="tab-btn" onclick="switchTab('tab-coord', this)">📍 座標推論</button>
         <button class="tab-btn" onclick="switchTab('tab-edge', this)">📐 邊緣檢測 (測試)</button>
         <button class="tab-btn" onclick="switchTab('tab-coords-viewer', this)">🎯 座標查看</button>
+        <button class="tab-btn" onclick="switchTab('tab-bright-spot', this)">💡 黑畫面推論</button>
     </div>
 
     <!-- ═══ 單圖推論頁籤 ═══ -->
@@ -1104,6 +1105,91 @@
         </div>
     </div>
 
+    <!-- ═══ 黑畫面推論頁籤 ═══ -->
+    <div id="tab-bright-spot" class="tab-content">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+            <div>
+                <h2 style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
+                    💡 黑畫面推論
+                </h2>
+                <p style="color:var(--text-muted); font-size:0.85rem; margin-top:4px;">
+                    輸入 B0F 黑畫面圖片 + 產品座標，裁切 512×512 做亮點偵測（完全復現推論管線）
+                </p>
+            </div>
+        </div>
+
+        <div class="card" style="padding:20px;">
+            <div class="coord-input-row">
+                <input type="text" id="bs-image-path" placeholder="B0F 圖片絕對路徑" autocomplete="off" spellcheck="false"
+                    style="flex:1; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.95rem; outline:none;">
+                <div class="coord-group">
+                    <label for="bs-coord-x">Product X</label>
+                    <input type="number" id="bs-coord-x" value="960" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="bs-coord-y">Product Y</label>
+                    <input type="number" id="bs-coord-y" value="540" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="bs-resolution">產品解析度</label>
+                    <select id="bs-resolution">
+                        {% for code, res in model_resolution_map.items() %}
+                        <option value="{{ res[0] }},{{ res[1] }}" {% if res[0]==1920 and res[1]==1080 %} selected{% endif %}>
+                            {{ code }}: {{ res[0] }}×{{ res[1] }}
+                        </option>
+                        {% endfor %}
+                        {% if not model_resolution_map %}
+                        <option value="1920,1080" selected>1920×1080</option>
+                        {% endif %}
+                    </select>
+                </div>
+                <button class="btn-run" id="btn-bs-run" onclick="runBrightSpotInference()"
+                    style="background:linear-gradient(135deg,#f59e0b,#d97706);">
+                    <span class="spinner" id="bs-spinner"></span>
+                    <span id="bs-btn-text">💡 亮點偵測</span>
+                </button>
+            </div>
+
+            <!-- Bright Spot Parameters -->
+            <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
+                    <span style="color:var(--text-muted); font-size:0.78rem; font-family:'Fira Code',monospace; text-transform:uppercase; letter-spacing:0.5px;">B0F 偵測參數</span>
+                </div>
+                <div class="coord-input-row">
+                    <div class="coord-group">
+                        <label for="bs-diff-threshold">diff_threshold</label>
+                        <input type="number" id="bs-diff-threshold" value="{{ default_bs_diff_threshold }}" min="1" max="255" step="1"
+                            style="color:#fbbf24;" title="局部對比差異閾值（越低越敏感）">
+                    </div>
+                    <div class="coord-group">
+                        <label for="bs-median-kernel">median_kernel</label>
+                        <input type="number" id="bs-median-kernel" value="{{ default_bs_median_kernel }}" min="3" max="99" step="2"
+                            style="color:#fbbf24;" title="背景估計 median filter 核大小（必須為奇數）">
+                    </div>
+                    <div class="coord-group">
+                        <label for="bs-min-area">min_area</label>
+                        <input type="number" id="bs-min-area" value="{{ default_bs_min_area }}" min="1" max="10000" step="1"
+                            style="color:#fbbf24;" title="亮點最小連通面積 (px)">
+                    </div>
+                    <div class="coord-group">
+                        <label for="bs-threshold">threshold</label>
+                        <input type="number" id="bs-threshold" value="{{ default_bs_threshold }}" min="1" max="255" step="1"
+                            style="color:#fbbf24;" title="絕對亮度上限（超過直接判定亮點）">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- BS Error -->
+        <div id="bs-error-box" class="error-box hidden"></div>
+
+        <!-- BS Result -->
+        <div id="bs-result-section" class="hidden">
+            <div class="coord-info-cards" id="bs-info-cards"></div>
+            <div class="coord-result-grid" id="bs-result-grid"></div>
+        </div>
+    </div>
+
 </div>
 {% endblock %}
 
@@ -1340,11 +1426,13 @@
     // ═══ 座標推論 ═══════════════════════════════
     const coordPathInput = document.getElementById('coord-image-path');
 
-    // 同步圖片路徑: 全圖推論 → 座標推論/邊緣檢測
+    // 同步圖片路徑: 全圖推論 → 座標推論/邊緣檢測/黑畫面推論
     input.addEventListener('input', () => {
         if (!coordPathInput.value) coordPathInput.value = input.value;
         const edgePathInput = document.getElementById('edge-image-path');
         if (edgePathInput && !edgePathInput.value) edgePathInput.value = input.value;
+        const bsInput = document.getElementById('bs-image-path');
+        if (bsInput && !bsInput.value) bsInput.value = input.value;
     });
     coordPathInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') runCoordInference();
@@ -1550,6 +1638,212 @@
                     <img src="${data.composite_url}?t=${t}" alt="Composite Coordinate Inference"
                          style="width:100%; display:block; cursor:pointer; background:#0a0f1a;"
                          onclick="openLightbox(this.src)">
+                </div>
+            `;
+        }
+
+        grid.innerHTML = imagesHtml;
+    }
+
+    // ═══ 黑畫面推論 ═══════════════════════════════
+    const bsPathInput = document.getElementById('bs-image-path');
+
+    bsPathInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') runBrightSpotInference();
+    });
+
+    // 自動帶入 URL 的 ?path= 參數
+    (function () {
+        const params = new URLSearchParams(window.location.search);
+        const pathParam = params.get('path');
+        if (pathParam && !bsPathInput.value) {
+            bsPathInput.value = pathParam;
+            bsAutoSelectResolution(pathParam);
+        }
+    })();
+
+    bsPathInput.addEventListener('input', () => {
+        bsAutoSelectResolution(bsPathInput.value);
+    });
+
+    function bsAutoSelectResolution(pathStr) {
+        if (!pathStr) return;
+        const normalized = pathStr.replace(/\\/g, '/');
+        const parts = normalized.split('/');
+        const selectEl = document.getElementById('bs-resolution');
+
+        for (let p = parts.length - 1; p >= 0; p--) {
+            const part = parts[p];
+            if (part && part.length >= 6) {
+                const code = part[5].toUpperCase();
+                for (let i = 0; i < selectEl.options.length; i++) {
+                    if (selectEl.options[i].text.startsWith(code + ':')) {
+                        selectEl.selectedIndex = i;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async function runBrightSpotInference() {
+        const imgPath = bsPathInput.value.trim() || input.value.trim();
+        if (!imgPath) {
+            showBsError('請輸入圖片路徑');
+            return;
+        }
+
+        const resSel = document.getElementById('bs-resolution').value.split(',');
+        const productW = parseInt(resSel[0]) || 1920;
+        const productH = parseInt(resSel[1]) || 1080;
+
+        // median_kernel 必須為奇數
+        let medianKernel = parseInt(document.getElementById('bs-median-kernel').value) || 21;
+        if (medianKernel % 2 === 0) {
+            medianKernel += 1;
+            document.getElementById('bs-median-kernel').value = medianKernel;
+        }
+
+        const btnRun = document.getElementById('btn-bs-run');
+        const btnText = document.getElementById('bs-btn-text');
+        const spn = document.getElementById('bs-spinner');
+
+        btnRun.disabled = true;
+        btnText.textContent = '偵測中...';
+        spn.classList.add('active');
+        hideBsError();
+        document.getElementById('bs-result-section').classList.add('hidden');
+
+        try {
+            const resp = await fetch('/api/debug/bright-spot-inference', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    image_path: imgPath,
+                    product_x: parseInt(document.getElementById('bs-coord-x').value) || 0,
+                    product_y: parseInt(document.getElementById('bs-coord-y').value) || 0,
+                    product_w: productW,
+                    product_h: productH,
+                    bs_diff_threshold: parseInt(document.getElementById('bs-diff-threshold').value) || 10,
+                    bs_median_kernel: medianKernel,
+                    bs_min_area: parseInt(document.getElementById('bs-min-area').value) || 5,
+                    bs_threshold: parseInt(document.getElementById('bs-threshold').value) || 200,
+                }),
+            });
+
+            const data = await resp.json();
+            if (data.error) {
+                showBsError(data.error);
+                return;
+            }
+            renderBrightSpotResults(data);
+        } catch (err) {
+            showBsError('請求失敗: ' + err.message);
+        } finally {
+            btnRun.disabled = false;
+            btnText.textContent = '💡 亮點偵測';
+            spn.classList.remove('active');
+        }
+    }
+
+    function showBsError(msg) {
+        const box = document.getElementById('bs-error-box');
+        box.textContent = '❌ ' + msg;
+        box.classList.remove('hidden');
+    }
+    function hideBsError() {
+        document.getElementById('bs-error-box').classList.add('hidden');
+    }
+
+    function renderBrightSpotResults(data) {
+        const section = document.getElementById('bs-result-section');
+        section.classList.remove('hidden');
+
+        const isNG = data.judgment === 'NG';
+        const jColor = isNG ? 'var(--ng)' : 'var(--ok)';
+        const jIcon = isNG ? '🔴' : '🟢';
+        const p = data.params_used;
+
+        // Info cards
+        const cards = document.getElementById('bs-info-cards');
+        cards.innerHTML = `
+            <div class="summary-card" style="border-color:${isNG ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}">
+                <div class="label">判定</div>
+                <div class="value" style="color:${jColor}">${jIcon} ${data.judgment}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">亮點面積 (px)</div>
+                <div class="value" style="color:${data.bright_spot_area > 0 ? 'var(--ng)' : 'var(--ok)'}">${data.bright_spot_area}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">最大差異值</div>
+                <div class="value" style="color:var(--accent)">${data.bright_spot_max_diff}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">耗時</div>
+                <div class="value" style="color:var(--accent)">${data.processing_time}s</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">產品座標</div>
+                <div class="value" style="color:var(--text);font-size:1rem;">(${data.product_coord[0]}, ${data.product_coord[1]})</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">圖片座標</div>
+                <div class="value" style="color:var(--text);font-size:1rem;">(${data.image_coord[0]}, ${data.image_coord[1]})</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">裁切區域</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.85rem;">(${data.crop_region[0]},${data.crop_region[1]}) → (${data.crop_region[2]},${data.crop_region[3]})</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">使用參數</div>
+                <div class="value" style="color:#fbbf24;font-size:0.75rem;">diff=${p.diff_threshold} kern=${p.median_kernel} area=${p.min_area} thr=${p.threshold}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">參考邊界來源</div>
+                <div class="value" style="color:${data.ref_image ? 'var(--ok)' : 'var(--ng)'};font-size:0.75rem;">${data.ref_image || '自身 Otsu (可能不準確)'}</div>
+            </div>
+        `;
+
+        // Images
+        const grid = document.getElementById('bs-result-grid');
+        const t = Date.now();
+        let imagesHtml = '';
+
+        // 1. Overview
+        if (data.overview_url) {
+            imagesHtml += `
+                <div class="img-card">
+                    <h4>🗺️ 全圖定位 (Overview)</h4>
+                    <img src="${data.overview_url}?t=${t}" alt="Overview" onclick="openLightbox(this.src)">
+                </div>
+            `;
+        }
+
+        // 2. Original Crop
+        imagesHtml += `
+            <div class="img-card">
+                <h4>🖼️ 原圖裁切 (512×512)</h4>
+                <img src="${data.crop_url}?t=${t}" alt="Original Crop" onclick="openLightbox(this.src)">
+            </div>
+        `;
+
+        // 3. Detection Result
+        if (data.detect_url) {
+            imagesHtml += `
+                <div class="img-card">
+                    <h4>🔴 亮點偵測結果</h4>
+                    <img src="${data.detect_url}?t=${t}" alt="Detection Result" onclick="openLightbox(this.src)">
+                </div>
+            `;
+        }
+
+        // 4. Diff Visualization
+        if (data.diff_url) {
+            imagesHtml += `
+                <div class="img-card">
+                    <h4>🌡️ 差異圖 (gray - median background)</h4>
+                    <img src="${data.diff_url}?t=${t}" alt="Diff Map" onclick="openLightbox(this.src)">
                 </div>
             `;
         }

@@ -211,6 +211,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_debug_coord_inference()
             elif path == "/api/debug/edge-inspect":
                 self._handle_api_debug_edge_inspect()
+            elif path == "/api/debug/bright-spot-inference":
+                self._handle_debug_bright_spot_inference()
             elif path == "/api/ric/upload":
                 self._handle_ric_upload()
             elif path == "/api/ric/delete":
@@ -887,7 +889,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             default_patchcore_blur_sigma=get_val('patchcore_blur_sigma', 1.5),
             default_patchcore_min_area=get_val('patchcore_min_area', 10),
             default_patchcore_score_metric=get_val('patchcore_score_metric', 'max'),
-            default_otsu_offset=get_val('otsu_offset', 5)
+            default_otsu_offset=get_val('otsu_offset', 5),
+            default_bs_diff_threshold=get_val('bright_spot_diff_threshold', 10),
+            default_bs_median_kernel=get_val('bright_spot_median_kernel', 21),
+            default_bs_min_area=get_val('bright_spot_min_area', 5),
+            default_bs_threshold=get_val('bright_spot_threshold', 200),
         )
         self._send_response(200, html)
 
@@ -2084,6 +2090,297 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"[DEBUG-COORD] Error: {e}", exc_info=True)
             self._send_json({"error": f"座標推論失敗: {str(e)}"})
+
+    def _handle_debug_bright_spot_inference(self):
+        """API: 黑畫面亮點偵測 — 以指定產品座標為中心裁切 512x512 做 B0F 偵測"""
+        import time as _time
+        import cv2
+        import numpy as np
+        from capi_inference import TileInfo
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except Exception:
+            self._send_json({"error": "Invalid JSON body"})
+            return
+
+        image_path_str = data.get("image_path", "").strip()
+        if not image_path_str:
+            self._send_json({"error": "請提供圖片路徑 (image_path)"})
+            return
+
+        image_path = Path(image_path_str)
+        if not image_path.exists():
+            self._send_json({"error": f"檔案不存在: {image_path}"})
+            return
+
+        if self.inferencer is None:
+            self._send_json({"error": "推論器尚未載入 (inferencer is None)"})
+            return
+
+        # 解析座標參數
+        try:
+            product_x = int(data.get("product_x", 0))
+            product_y = int(data.get("product_y", 0))
+            product_w = int(data.get("product_w", 1920))
+            product_h = int(data.get("product_h", 1080))
+        except (ValueError, TypeError) as e:
+            self._send_json({"error": f"座標或解析度參數無效: {e}"})
+            return
+
+        # 解析 bright_spot 參數覆蓋
+        bs_diff_threshold = int(data.get("bs_diff_threshold", self.inferencer.config.bright_spot_diff_threshold))
+        bs_median_kernel = int(data.get("bs_median_kernel", self.inferencer.config.bright_spot_median_kernel))
+        bs_min_area = int(data.get("bs_min_area", self.inferencer.config.bright_spot_min_area))
+        bs_threshold = int(data.get("bs_threshold", self.inferencer.config.bright_spot_threshold))
+
+        try:
+            total_start = _time.time()
+
+            # 1. 載入圖片
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            if image is None:
+                self._send_json({"error": f"無法載入圖片: {image_path}"})
+                return
+
+            img_h, img_w = image.shape[:2]
+
+            # 2. 計算 raw_bounds / otsu_bounds
+            #    黑圖 Otsu 無法正確偵測邊界，從同資料夾找白圖計算參考邊界
+            #    (與 process_panel 中 reference_raw_bounds_for_dark 邏輯一致)
+            reference_bounds = None
+            ref_image_name = None
+            image_dir = image_path.parent
+            _DARK_PREFIXES = ("B0F",)
+            is_dark = image_path.name.upper().startswith(_DARK_PREFIXES)
+            if is_dark:
+                # 找同資料夾的白圖 (W0F00000_ 開頭優先，其次任何非 B0F/OMIT/PINIGBI 圖)
+                _IMG_EXTS = ('.bmp', '.tif', '.tiff', '.png', '.jpg', '.jpeg')
+                all_files = sorted(image_dir.iterdir())
+                # 第一輪：優先找 W0F00000_ 開頭
+                for candidate in all_files:
+                    if not candidate.is_file() or candidate.suffix.lower() not in _IMG_EXTS:
+                        continue
+                    if candidate.name.upper().startswith("W0F00000"):
+                        try:
+                            ref_img = cv2.imread(str(candidate), cv2.IMREAD_UNCHANGED)
+                            if ref_img is not None:
+                                reference_bounds = self.inferencer._find_raw_object_bounds(ref_img)
+                                ref_image_name = candidate.name
+                                break
+                        except Exception:
+                            continue
+                # 第二輪 fallback：任何非暗色、非 OMIT 圖片
+                if reference_bounds is None:
+                    for candidate in all_files:
+                        if not candidate.is_file() or candidate.suffix.lower() not in _IMG_EXTS:
+                            continue
+                        cname = candidate.name.upper()
+                        if cname.startswith(_DARK_PREFIXES) or cname.startswith("OMIT0000") or cname.startswith("PINIGBI"):
+                            continue
+                        try:
+                            ref_img = cv2.imread(str(candidate), cv2.IMREAD_UNCHANGED)
+                            if ref_img is not None:
+                                reference_bounds = self.inferencer._find_raw_object_bounds(ref_img)
+                                ref_image_name = candidate.name
+                                break
+                        except Exception:
+                            continue
+                if reference_bounds is not None:
+                    logger.info(f"[DEBUG-BS] 黑圖參考邊界已從 {ref_image_name} 計算 → {reference_bounds}")
+
+            if reference_bounds is not None:
+                raw_bounds = reference_bounds
+                otsu_bounds, _ = self.inferencer.calculate_otsu_bounds(image, reference_raw_bounds=reference_bounds)
+                if otsu_bounds is None:
+                    otsu_bounds = raw_bounds
+            else:
+                raw_bounds = self.inferencer._find_raw_object_bounds(image)
+                if raw_bounds is None:
+                    raw_bounds = (0, 0, img_w, img_h)
+                otsu_bounds, _ = self.inferencer.calculate_otsu_bounds(image)
+                if otsu_bounds is None:
+                    otsu_bounds = raw_bounds
+                if is_dark:
+                    logger.warning(f"[DEBUG-BS] 無法找到白圖計算參考邊界，使用自身 Otsu 邊界 (可能不準確)")
+
+            x_start, y_start, x_end, y_end = raw_bounds
+
+            # 3. 產品座標 → 圖片座標
+            scale_x = (x_end - x_start) / product_w if product_w > 0 else 1.0
+            scale_y = (y_end - y_start) / product_h if product_h > 0 else 1.0
+            img_cx = int(product_x * scale_x + x_start)
+            img_cy = int(product_y * scale_y + y_start)
+
+            # 4. 以 (img_cx, img_cy) 為中心裁切 512x512
+            tile_size = 512
+            half = tile_size // 2
+            crop_x1 = max(0, img_cx - half)
+            crop_y1 = max(0, img_cy - half)
+            crop_x2 = crop_x1 + tile_size
+            crop_y2 = crop_y1 + tile_size
+
+            if crop_x2 > img_w:
+                crop_x2 = img_w
+                crop_x1 = max(0, crop_x2 - tile_size)
+            if crop_y2 > img_h:
+                crop_y2 = img_h
+                crop_y1 = max(0, crop_y2 - tile_size)
+
+            crop_w = crop_x2 - crop_x1
+            crop_h = crop_y2 - crop_y1
+            tile_image = image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+
+            # 5. 建立 TileInfo
+            tile_info = TileInfo(
+                tile_id=0,
+                x=crop_x1, y=crop_y1,
+                width=crop_w, height=crop_h,
+                image=tile_image,
+            )
+
+            # 6. 暫時覆蓋 config 值，呼叫 _detect_bright_spots，再還原
+            cfg = self.inferencer.config
+            orig_diff = cfg.bright_spot_diff_threshold
+            orig_kernel = cfg.bright_spot_median_kernel
+            orig_area = cfg.bright_spot_min_area
+            orig_thr = cfg.bright_spot_threshold
+            try:
+                cfg.bright_spot_diff_threshold = bs_diff_threshold
+                cfg.bright_spot_median_kernel = bs_median_kernel
+                cfg.bright_spot_min_area = bs_min_area
+                cfg.bright_spot_threshold = bs_threshold
+                score, anomaly_map = self.inferencer._detect_bright_spots(tile_info)
+            finally:
+                cfg.bright_spot_diff_threshold = orig_diff
+                cfg.bright_spot_median_kernel = orig_kernel
+                cfg.bright_spot_min_area = orig_area
+                cfg.bright_spot_threshold = orig_thr
+
+            total_time = _time.time() - total_start
+
+            # 7. 準備暫存目錄
+            if CAPIWebHandler._debug_heatmap_dir is None:
+                CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
+            debug_dir = CAPIWebHandler._debug_heatmap_dir
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            image_name = image_path.stem
+            ts = int(_time.time() * 1000) % 100000
+
+            # 8. 儲存原始裁切圖
+            crop_bgr = tile_image.copy()
+            if len(crop_bgr.shape) == 2:
+                crop_bgr = cv2.cvtColor(crop_bgr, cv2.COLOR_GRAY2BGR)
+            elif len(crop_bgr.shape) == 3 and crop_bgr.shape[2] == 1:
+                crop_bgr = cv2.cvtColor(crop_bgr, cv2.COLOR_GRAY2BGR)
+            crop_filename = f"debug_bs_crop_{image_name}_{ts}.png"
+            cv2.imwrite(str(debug_dir / crop_filename), crop_bgr)
+            crop_url = f"/debug/heatmaps/{crop_filename}"
+
+            # 9. 產生亮點偵測結果圖 (binary overlay)
+            detect_url = ""
+            if anomaly_map is not None:
+                binary_mask = (anomaly_map * 255).astype(np.uint8)
+                # 紅色 overlay 標記亮點
+                overlay = crop_bgr.copy()
+                red_mask = np.zeros_like(overlay)
+                red_mask[:, :, 2] = binary_mask  # Red channel
+                overlay = cv2.addWeighted(overlay, 0.7, red_mask, 0.8, 0)
+                # 畫亮點輪廓
+                contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(overlay, contours, -1, (0, 0, 255), 2)
+                detect_filename = f"debug_bs_detect_{image_name}_{ts}.png"
+                cv2.imwrite(str(debug_dir / detect_filename), overlay)
+                detect_url = f"/debug/heatmaps/{detect_filename}"
+
+            # 10. 產生差異圖 (diff visualization)
+            diff_url = ""
+            gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if len(tile_image.shape) == 3 else tile_image.copy()
+            from capi_edge_cv import clamp_median_kernel
+            mk = clamp_median_kernel(bs_median_kernel, min(gray.shape[:2]) - 1)
+            bg = cv2.medianBlur(gray, mk)
+            diff = cv2.subtract(gray, bg)
+            diff_color = cv2.applyColorMap(
+                cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8),
+                cv2.COLORMAP_JET
+            )
+            diff_filename = f"debug_bs_diff_{image_name}_{ts}.png"
+            cv2.imwrite(str(debug_dir / diff_filename), diff_color)
+            diff_url = f"/debug/heatmaps/{diff_filename}"
+
+            # 11. 產生 Overview 圖 (加上裁切框)
+            overview_img = image.copy()
+            if len(overview_img.shape) == 2:
+                overview_img = cv2.cvtColor(overview_img, cv2.COLOR_GRAY2BGR)
+            elif len(overview_img.shape) == 3 and overview_img.shape[2] == 1:
+                overview_img = cv2.cvtColor(overview_img, cv2.COLOR_GRAY2BGR)
+
+            overlay_bg = overview_img.copy()
+            cv2.rectangle(overlay_bg, (crop_x1, crop_y1), (crop_x2, crop_y2), (0, 0, 255), -1)
+            cv2.addWeighted(overlay_bg, 0.3, overview_img, 0.7, 0, overview_img)
+            ox1, oy1, ox2, oy2 = otsu_bounds
+            cv2.rectangle(overview_img, (ox1, oy1), (ox2, oy2), (0, 255, 255), 4)
+            cv2.rectangle(overview_img, (crop_x1, crop_y1), (crop_x2, crop_y2), (0, 0, 255), 6)
+            cv2.circle(overview_img, (img_cx, img_cy), 10, (0, 255, 0), -1)
+
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            cv2.putText(overview_img, f"({ox1}, {oy1})", (ox1, max(30, oy1 - 10)), font, 1.5, (0, 255, 255), 3)
+            cv2.putText(overview_img, f"({ox2}, {oy2})", (max(0, ox2 - 300), min(img_h - 10, oy2 + 40)), font, 1.5, (0, 255, 255), 3)
+
+            max_dim = 2000
+            oh, ow = overview_img.shape[:2]
+            if max(oh, ow) > max_dim:
+                scale_o = max_dim / max(oh, ow)
+                overview_img = cv2.resize(overview_img, (int(ow * scale_o), int(oh * scale_o)))
+            ov_filename = f"debug_bs_overview_{image_name}_{ts}.png"
+            cv2.imwrite(str(debug_dir / ov_filename), overview_img)
+            overview_url = f"/debug/heatmaps/{ov_filename}"
+
+            # 12. 判定結果
+            judgment = "NG" if score >= 1.0 else "OK"
+
+            # 從 tile_info 取出偵測統計
+            bright_spot_area = getattr(tile_info, 'bright_spot_area', 0)
+            bright_spot_max_diff = getattr(tile_info, 'bright_spot_max_diff', 0)
+
+            response_data = {
+                "success": True,
+                "product_coord": [product_x, product_y],
+                "product_resolution": [product_w, product_h],
+                "image_coord": [img_cx, img_cy],
+                "crop_region": [crop_x1, crop_y1, crop_x2, crop_y2],
+                "raw_bounds": list(raw_bounds),
+                "otsu_bounds": [ox1, oy1, ox2, oy2],
+                "scale": [round(scale_x, 4), round(scale_y, 4)],
+                "image_size": [img_w, img_h],
+                "score": round(score, 4),
+                "judgment": judgment,
+                "processing_time": round(total_time, 3),
+                "crop_url": crop_url,
+                "detect_url": detect_url,
+                "diff_url": diff_url,
+                "overview_url": overview_url,
+                "bright_spot_area": bright_spot_area,
+                "bright_spot_max_diff": bright_spot_max_diff,
+                "ref_image": ref_image_name,
+                "params_used": {
+                    "diff_threshold": bs_diff_threshold,
+                    "median_kernel": bs_median_kernel,
+                    "min_area": bs_min_area,
+                    "threshold": bs_threshold,
+                },
+            }
+
+            self._send_json(response_data)
+            logger.info(f"[DEBUG-BS] ({product_x},{product_y})→({img_cx},{img_cy}) "
+                        f"Score={score:.1f} {judgment} area={bright_spot_area} ({total_time:.2f}s)")
+
+        except Exception as e:
+            logger.error(f"[DEBUG-BS] Error: {e}", exc_info=True)
+            self._send_json({"error": f"黑畫面推論失敗: {str(e)}"})
 
     def _handle_debug_heatmap_file(self, path: str):
         """靜態檔案服務 (Debug 推論熱力圖)"""

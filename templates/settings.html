@@ -949,6 +949,54 @@
     </div>
 </div>
 
+<!-- B0F Help Modal -->
+<div class="modal-overlay" id="b0f-help-modal" onclick="if(event.target===this) this.classList.remove('show')">
+    <div class="modal-box" style="max-width: 560px;">
+        <div class="modal-header">
+            <h3>💡 B0F 亮點偵測 — 參數說明</h3>
+            <button class="modal-close" onclick="document.getElementById('b0f-help-modal').classList.remove('show')">&times;</button>
+        </div>
+        <div class="modal-body" style="padding: 20px 24px; font-size: 0.85rem; line-height: 1.7; color: #cbd5e1;">
+            <div style="margin-bottom: 16px; color: #94a3b8;">
+                B0F00000(黑畫面) 圖片使用局部對比偵測取代 PatchCore。<br>
+                偵測邏輯：median filter 估計背景 → 計算局部差異 → 差異超過閾值且面積 ≥ min_area 判定為亮點。
+            </div>
+
+            <table style="width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-bottom: 18px;">
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <td style="padding: 8px 10px; color: #fbbf24; font-weight: 600; white-space: nowrap; width: 140px;">diff_threshold</td>
+                    <td style="padding: 8px 10px;">局部對比差異閾值（越低越敏感）</td>
+                </tr>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <td style="padding: 8px 10px; color: #fbbf24; font-weight: 600;">median_kernel</td>
+                    <td style="padding: 8px 10px;">背景估計觀察範圍（必須為奇數，最小 3）</td>
+                </tr>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <td style="padding: 8px 10px; color: #fbbf24; font-weight: 600;">min_area</td>
+                    <td style="padding: 8px 10px;">亮點最小連通面積（低於此面積視為雜訊忽略）</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 10px; color: #fbbf24; font-weight: 600;">threshold</td>
+                    <td style="padding: 8px 10px;">絕對亮度上限（超過直接判定 NG）</td>
+                </tr>
+            </table>
+
+            <div style="padding: 14px 16px; background: rgba(245, 158, 11, 0.08); border-left: 3px solid #f59e0b; border-radius: 0 8px 8px 0;">
+                <div style="color: #fbbf24; font-weight: 600; margin-bottom: 8px; font-size: 0.88rem;">⚠️ median_kernel 設定注意</div>
+                <div style="margin-bottom: 10px;">
+                    此參數決定背景估計的「觀察範圍」— 系統用多大的區域來判斷什麼是正常背景、什麼是異常亮點。
+                </div>
+                <div style="display: flex; gap: 12px;">
+                    <div style="flex: 1; padding: 10px 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); border-radius: 6px;">
+                        <div style="color: #ef4444; font-weight: 600; margin-bottom: 4px;">✗ 值太小（1~5）</div>
+                        <div style="color: #94a3b8; font-size: 0.8rem;">觀察範圍太小，會把缺陷本身當成背景，導致缺陷「消失」而漏偵</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Edit Modal -->
 <div class="modal-overlay" id="edit-modal" onclick="if(event.target===this) closeModal()">
     <div class="modal-box">
@@ -1334,13 +1382,11 @@
                     <div class="settings-section-header">
                         <div class="icon">💡</div>
                         <span>B0F 亮點偵測設定</span>
-                    </div>
-                    <div style="padding: 12px 16px; color: #94a3b8; font-size: 0.82rem; line-height: 1.6; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                        B0F00000 等 skip_files 圖片使用局部對比偵測取代 PatchCore。<br>
-                        偵測邏輯：median filter 估計背景 → 計算局部差異 → 差異超過閾值且面積 ≥ min_area 判定為亮點。<br>
-                        <span style="color: #fbbf24;">diff_threshold</span>：局部對比差異閾值（越低越敏感）｜
-                        <span style="color: #fbbf24;">median_kernel</span>：背景估計核大小（越大背景越平滑）｜
-                        <span style="color: #fbbf24;">threshold</span>：絕對亮度上限保護（超過直接判定 NG）
+                        <span onclick="document.getElementById('b0f-help-modal').classList.add('show')"
+                              style="margin-left: 8px; cursor: pointer; font-size: 0.85rem; color: #64748b; background: rgba(100,116,139,0.15); padding: 2px 8px; border-radius: 4px; transition: all 0.2s;"
+                              onmouseover="this.style.color='#fbbf24'; this.style.background='rgba(245,158,11,0.15)'"
+                              onmouseout="this.style.color='#64748b'; this.style.background='rgba(100,116,139,0.15)'"
+                              title="參數說明">&#x2753; 參數說明</span>
                     </div>
                     ${b0fParams.map(p => paramRow(p)).join('')}
                 </div>

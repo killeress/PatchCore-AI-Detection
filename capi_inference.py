@@ -3293,6 +3293,9 @@ class CAPIInferencer:
                         if not result.anomaly_tiles:
                             continue
                         for tile, score, anomaly_map in result.anomaly_tiles:
+                            # 亮點偵測 tile (B0F 等黑圖) 不受排除區域影響
+                            if tile.is_bright_spot_detection:
+                                continue
                             # 使用熱力圖峰值座標 (更精確的缺陷位置)
                             if tile.anomaly_peak_x >= 0 and tile.anomaly_peak_y >= 0:
                                 px, py = tile.anomaly_peak_x, tile.anomaly_peak_y
@@ -3379,9 +3382,15 @@ class CAPIInferencer:
         if result.anomaly_tiles:
             print(f"🔍 發現異常 tiles，共 {len(result.anomaly_tiles)} 個")
         for tile, score, _ in result.anomaly_tiles:
-            color = (0, 0, 255)  # 紅色 (預設異常)
-            label = f"{score:.2f}"
-            thickness = 6
+            # AOI 座標 tile 但 AI 判定未達閾值：綠色框標 OK（不算 NG）
+            if getattr(tile, 'is_aoi_coord_below_threshold', False):
+                color = (0, 255, 0)  # 綠色 (BGR)
+                label = f"{score:.2f} OK"
+                thickness = 3
+            else:
+                color = (0, 0, 255)  # 紅色 (預設異常)
+                label = f"{score:.2f}"
+                thickness = 6
 
             # 不檢測排除區域：灰色虛線風格
             if getattr(tile, 'is_in_exclude_zone', False):
@@ -3436,23 +3445,25 @@ class CAPIInferencer:
             except Exception as e:
                 print(f"❌ 繪製 Tile {tile.tile_id} 失敗: {e}, 座標: ({x1_clip},{y1_clip})->({x2_clip},{y2_clip})")
         
-        # 結果標籤
-        status = "NG" if result.anomaly_tiles else "OK"
+        # 結果標籤 — 過濾掉 AOI 座標未達閾值的 tile (不影響 NG 判定)
+        effective_anomaly_tiles = [t for t in result.anomaly_tiles
+                                   if not getattr(t[0], 'is_aoi_coord_below_threshold', False)]
+        status = "NG" if effective_anomaly_tiles else "OK"
         # 檢查是否所有異常都是疑似灰塵
         all_dust = False
         all_bomb = False
         all_excluded = False
-        if result.anomaly_tiles:
-            non_dust = [t for t in result.anomaly_tiles if not t[0].is_suspected_dust_or_scratch or t[0].is_bomb]
-            all_dust = all(t[0].is_suspected_dust_or_scratch and not t[0].is_bomb for t in result.anomaly_tiles)
+        if effective_anomaly_tiles:
+            non_dust = [t for t in effective_anomaly_tiles if not t[0].is_suspected_dust_or_scratch or t[0].is_bomb]
+            all_dust = all(t[0].is_suspected_dust_or_scratch and not t[0].is_bomb for t in effective_anomaly_tiles)
             all_bomb = non_dust and all(t[0].is_bomb for t in non_dust)
             all_excluded = all(
                 t[0].is_in_exclude_zone or t[0].is_suspected_dust_or_scratch or t[0].is_bomb
-                for t in result.anomaly_tiles
-            ) and any(t[0].is_in_exclude_zone for t in result.anomaly_tiles)
+                for t in effective_anomaly_tiles
+            ) and any(t[0].is_in_exclude_zone for t in effective_anomaly_tiles)
             if all_excluded and not any(
                 not t[0].is_in_exclude_zone and not t[0].is_suspected_dust_or_scratch and not t[0].is_bomb
-                for t in result.anomaly_tiles
+                for t in effective_anomaly_tiles
             ):
                 status = "OK (Excluded)"
             elif all_dust:
@@ -3460,7 +3471,7 @@ class CAPIInferencer:
             elif all_bomb:
                 status = "BOMB"
 
-        if not result.anomaly_tiles:
+        if not effective_anomaly_tiles:
             color = (0, 255, 0)
         elif all_excluded and status == "OK (Excluded)":
             color = (180, 180, 180)  # 灰色
