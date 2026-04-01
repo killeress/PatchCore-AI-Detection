@@ -2420,6 +2420,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """API: 取得所有設定參數"""
         try:
             params = self.db.get_all_config_params() if self.db else []
+            # 補上 config 中有但 DB 沒有的參數（用目前執行值作為預設）
+            if self.inferencer and hasattr(self.inferencer, 'config') and self.inferencer.config:
+                existing_names = {p["param_name"] for p in params}
+                config_dict = self.inferencer.config.to_dict()
+                for key, val in config_dict.items():
+                    if key not in existing_names:
+                        params.append({
+                            "param_name": key,
+                            "param_value": str(val) if not isinstance(val, (dict, list)) else json.dumps(val),
+                            "updated_at": None,
+                        })
             # 附帶 model_resolution_map 給前端產品選擇器使用
             resolution_map = {}
             if self.inferencer and hasattr(self.inferencer, 'config') and self.inferencer.config:
