@@ -2424,15 +2424,25 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if self.inferencer and hasattr(self.inferencer, 'config') and self.inferencer.config:
                 existing_names = {p["param_name"] for p in params}
                 import dataclasses
-                config_fields = {f.name: getattr(self.inferencer.config, f.name)
-                                 for f in dataclasses.fields(self.inferencer.config)}
-                for key, val in config_fields.items():
-                    if key not in existing_names:
-                        params.append({
-                            "param_name": key,
-                            "param_value": str(val) if not isinstance(val, (dict, list)) else json.dumps(val),
-                            "updated_at": None,
-                        })
+                for f in dataclasses.fields(self.inferencer.config):
+                    if f.name in existing_names:
+                        continue
+                    val = getattr(self.inferencer.config, f.name)
+                    # 只處理 JSON 可序列化的基本型別
+                    if isinstance(val, (str, int, float, bool)):
+                        val_str = str(val)
+                    elif isinstance(val, (dict, list)):
+                        try:
+                            val_str = json.dumps(val)
+                        except (TypeError, ValueError):
+                            continue
+                    else:
+                        continue
+                    params.append({
+                        "param_name": f.name,
+                        "param_value": val_str,
+                        "updated_at": None,
+                    })
             # 附帶 model_resolution_map 給前端產品選擇器使用
             resolution_map = {}
             if self.inferencer and hasattr(self.inferencer, 'config') and self.inferencer.config:
