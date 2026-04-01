@@ -1629,20 +1629,35 @@ class CAPIDatabase:
                     (param_name,)
                 ).fetchone()
 
-                if not old_row:
-                    return False
-
-                old_value = old_row["param_value"]
-                param_type = old_row["param_type"]
                 new_value_json = json.dumps(new_value, ensure_ascii=False)
-
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                # 更新設定值
-                conn.execute(
-                    "UPDATE config_params SET param_value = ?, updated_at = ? WHERE param_name = ?",
-                    (new_value_json, now, param_name)
-                )
+                if not old_row:
+                    # 參數不存在於 DB → 自動新增 (從 config dataclass 補上的參數)
+                    if isinstance(new_value, bool):
+                        param_type = "bool"
+                    elif isinstance(new_value, int):
+                        param_type = "int"
+                    elif isinstance(new_value, float):
+                        param_type = "float"
+                    else:
+                        param_type = "str"
+                    old_value = ""
+                    conn.execute(
+                        """INSERT INTO config_params
+                           (param_name, param_value, param_type, updated_at)
+                           VALUES (?, ?, ?, ?)""",
+                        (param_name, new_value_json, param_type, now)
+                    )
+                else:
+                    old_value = old_row["param_value"]
+                    param_type = old_row["param_type"]
+
+                    # 更新設定值
+                    conn.execute(
+                        "UPDATE config_params SET param_value = ?, updated_at = ? WHERE param_name = ?",
+                        (new_value_json, now, param_name)
+                    )
 
                 # 記錄修改歷史
                 conn.execute(
