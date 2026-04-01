@@ -1061,7 +1061,10 @@
     const DUST_PARAMS = [
         'dust_brightness_threshold', 'dust_area_min', 'dust_area_max',
         'dust_extension', 'dust_heatmap_iou_threshold', 'dust_heatmap_top_percent',
-        'dust_heatmap_metric', 'dust_detect_dark_particles'
+        'dust_heatmap_metric', 'dust_mask_before_binarize',
+        'dust_two_stage_enabled', 'dust_two_stage_dust_ratio', 'dust_two_stage_bg_blur',
+        'dust_two_stage_diff_percentile', 'dust_two_stage_min_area', 'dust_two_stage_fallback_score',
+        'dust_detect_dark_particles'
     ];
     const CV_EDGE_PARAMS = [
         'cv_edge_enabled', 'cv_edge_dust_filter_enabled', 'otsu_offset',

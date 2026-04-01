@@ -139,6 +139,13 @@ class CAPIConfig:
     dust_heatmap_iou_threshold: float = 0.02  # Heatmap-Dust IOU/Coverage 閾值
     dust_heatmap_top_percent: float = 5.0     # Heatmap 熱區取前 X% (Percentile 二值化)
     dust_heatmap_metric: str = "coverage"     # Heatmap 判定指標: "coverage" (灰塵覆蓋率) 或是 "iou" (交集/聯集)
+    dust_mask_before_binarize: bool = False   # 先遮罩灰塵區域再二值化 (解決灰塵強訊號淹沒弱缺陷的問題)
+    dust_two_stage_enabled: bool = False      # 兩階段灰塵判定：heatmap定位→原圖找特徵點→精準比對dust_mask
+    dust_two_stage_dust_ratio: float = 0.3    # 特徵點與灰塵重疊比例 >= 此值判為灰塵
+    dust_two_stage_bg_blur: int = 31          # 局部背景估計的 Gaussian blur kernel size
+    dust_two_stage_diff_percentile: float = 90.0  # 取 diff 分布的此百分位作為特徵閾值
+    dust_two_stage_min_area: int = 3          # 特徵最小面積 (px)
+    dust_two_stage_fallback_score: float = 0.7    # 找不到特徵時，heatmap 分數高於此值保守判 NG
     dust_detect_dark_particles: bool = True   # 偵測暗色顆粒/圖案 (如偏黑 MARK)，當作表面灰塵過濾
     
     # OMIT 過曝偵測設定 (曝光過高的 OMIT 圖無法檢測灰塵，需記錄供工程追蹤)
@@ -242,6 +249,13 @@ class CAPIConfig:
             dust_heatmap_iou_threshold=data.get("dust_heatmap_iou_threshold", 0.02),
             dust_heatmap_top_percent=data.get("dust_heatmap_top_percent", 5.0),
             dust_heatmap_metric=data.get("dust_heatmap_metric", "coverage"),
+            dust_mask_before_binarize=data.get("dust_mask_before_binarize", False),
+            dust_two_stage_enabled=data.get("dust_two_stage_enabled", False),
+            dust_two_stage_dust_ratio=data.get("dust_two_stage_dust_ratio", 0.3),
+            dust_two_stage_bg_blur=data.get("dust_two_stage_bg_blur", 31),
+            dust_two_stage_diff_percentile=data.get("dust_two_stage_diff_percentile", 90.0),
+            dust_two_stage_min_area=data.get("dust_two_stage_min_area", 3),
+            dust_two_stage_fallback_score=data.get("dust_two_stage_fallback_score", 0.7),
             dust_detect_dark_particles=data.get("dust_detect_dark_particles", True),
             omit_overexposure_mean_threshold=data.get("omit_overexposure_mean_threshold", 200),
             omit_overexposure_ratio_threshold=data.get("omit_overexposure_ratio_threshold", 0.5),
@@ -304,6 +318,13 @@ class CAPIConfig:
             "dust_heatmap_iou_threshold": self.dust_heatmap_iou_threshold,
             "dust_heatmap_top_percent": self.dust_heatmap_top_percent,
             "dust_heatmap_metric": self.dust_heatmap_metric,
+            "dust_mask_before_binarize": self.dust_mask_before_binarize,
+            "dust_two_stage_enabled": self.dust_two_stage_enabled,
+            "dust_two_stage_dust_ratio": self.dust_two_stage_dust_ratio,
+            "dust_two_stage_bg_blur": self.dust_two_stage_bg_blur,
+            "dust_two_stage_diff_percentile": self.dust_two_stage_diff_percentile,
+            "dust_two_stage_min_area": self.dust_two_stage_min_area,
+            "dust_two_stage_fallback_score": self.dust_two_stage_fallback_score,
             "dust_detect_dark_particles": self.dust_detect_dark_particles,
             "omit_overexposure_mean_threshold": self.omit_overexposure_mean_threshold,
             "omit_overexposure_ratio_threshold": self.omit_overexposure_ratio_threshold,
@@ -411,6 +432,22 @@ class CAPIConfig:
             self.dust_heatmap_top_percent = float(param_map["dust_heatmap_top_percent"])
         if "dust_heatmap_metric" in param_map:
             self.dust_heatmap_metric = str(param_map["dust_heatmap_metric"]).lower()
+        if "dust_mask_before_binarize" in param_map:
+            val = param_map["dust_mask_before_binarize"]
+            self.dust_mask_before_binarize = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "dust_two_stage_enabled" in param_map:
+            val = param_map["dust_two_stage_enabled"]
+            self.dust_two_stage_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "dust_two_stage_dust_ratio" in param_map:
+            self.dust_two_stage_dust_ratio = float(param_map["dust_two_stage_dust_ratio"])
+        if "dust_two_stage_bg_blur" in param_map:
+            self.dust_two_stage_bg_blur = int(param_map["dust_two_stage_bg_blur"])
+        if "dust_two_stage_diff_percentile" in param_map:
+            self.dust_two_stage_diff_percentile = float(param_map["dust_two_stage_diff_percentile"])
+        if "dust_two_stage_min_area" in param_map:
+            self.dust_two_stage_min_area = int(param_map["dust_two_stage_min_area"])
+        if "dust_two_stage_fallback_score" in param_map:
+            self.dust_two_stage_fallback_score = float(param_map["dust_two_stage_fallback_score"])
         if "dust_detect_dark_particles" in param_map:
             val = param_map["dust_detect_dark_particles"]
             self.dust_detect_dark_particles = str(val).lower() == "true" if isinstance(val, str) else bool(val)

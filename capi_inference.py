@@ -1762,25 +1762,40 @@ class CAPIInferencer:
         if np.max(anomaly_map_f) <= 0:
             return True, None, 0.0, [], None, None
 
-        # === Step 1: 取前 top_percent% 像素作為熱區 ===
-        positive_values = anomaly_map_f[anomaly_map_f > 0]
-        if len(positive_values) == 0:
-            return True, None, 0.0, [], None, None
-
-        threshold = np.percentile(positive_values, 100 - top_percent)
-        heat_bool = anomaly_map_f >= threshold
-        heatmap_binary = (heat_bool.astype(np.uint8)) * 255
-
-        # === Step 2: 灰塵遮罩前處理 ===
+        # === Step 1.5: 灰塵遮罩前處理 (提前到 Step 1 之前，供 mask 模式使用) ===
         if len(dust_mask_u8.shape) == 3:
             dust_mask_u8 = cv2.cvtColor(dust_mask_u8, cv2.COLOR_BGR2GRAY)
-        if dust_mask_u8.shape != heat_bool.shape:
+        if dust_mask_u8.shape != anomaly_map_f.shape:
             dust_mask_u8 = cv2.resize(
                 dust_mask_u8,
-                (heat_bool.shape[1], heat_bool.shape[0]),
+                (anomaly_map_f.shape[1], anomaly_map_f.shape[0]),
                 interpolation=cv2.INTER_NEAREST,
             )
         dust_bool = dust_mask_u8 > 0
+
+        # === Step 1: 取前 top_percent% 像素作為熱區 ===
+        use_mask_mode = getattr(self.config, 'dust_mask_before_binarize', False)
+
+        if use_mask_mode:
+            # 方法 4: 先將灰塵區域歸零，再對剩餘區域做 top% 二值化
+            masked_anomaly = anomaly_map_f.copy()
+            masked_anomaly[dust_bool] = 0
+            positive_values = masked_anomaly[masked_anomaly > 0]
+            if len(positive_values) == 0:
+                # 全部被 mask 掉 → 整張都是灰塵
+                heatmap_binary = np.zeros_like(anomaly_map_f, dtype=np.uint8)
+                return False, None, 1.0, [], heatmap_binary, None
+            threshold = np.percentile(positive_values, 100 - top_percent)
+            heat_bool = masked_anomaly >= threshold
+        else:
+            # 現有流程: 直接對原始 anomaly_map 做 top% 二值化
+            positive_values = anomaly_map_f[anomaly_map_f > 0]
+            if len(positive_values) == 0:
+                return True, None, 0.0, [], None, None
+            threshold = np.percentile(positive_values, 100 - top_percent)
+            heat_bool = anomaly_map_f >= threshold
+
+        heatmap_binary = (heat_bool.astype(np.uint8)) * 255
 
         # === Step 3: 整體 IOU (向後相容，用於 DB 記錄) ===
         intersection_all = np.count_nonzero(dust_bool & heat_bool)
@@ -1842,6 +1857,156 @@ class CAPIInferencer:
                     real_peak_yx = peak_pos
 
         return has_real_defect, real_peak_yx, overall_iou, region_details, heatmap_binary, labels
+
+    def check_dust_two_stage(
+        self,
+        tile_image: np.ndarray,
+        anomaly_map: np.ndarray,
+        dust_mask: np.ndarray,
+        score: float,
+    ) -> tuple:
+        """
+        兩階段灰塵判定：
+          Stage 1: 用 heatmap 找出 hot zone（大概位置）
+          Stage 2: 回到原圖找 feature 點 → 精準比對 dust_mask（無擴散問題）
+
+        Returns:
+            (has_real_defect, real_peak_yx, feature_details, detail_text)
+        """
+        cfg = self.config
+        dust_ratio_thr = cfg.dust_two_stage_dust_ratio
+        bg_blur_k = cfg.dust_two_stage_bg_blur
+        diff_pct = cfg.dust_two_stage_diff_percentile
+        min_area = cfg.dust_two_stage_min_area
+        fallback_score = cfg.dust_two_stage_fallback_score
+
+        if tile_image is None or anomaly_map is None or dust_mask is None:
+            return True, None, [], "TWO_STAGE: missing data -> REAL_NG"
+
+        # --- Prepare images ---
+        if len(tile_image.shape) == 3:
+            tile_gray = cv2.cvtColor(tile_image, cv2.COLOR_BGR2GRAY)
+        else:
+            tile_gray = tile_image.copy()
+        tile_h, tile_w = tile_gray.shape
+
+        anomaly_f = np.asarray(anomaly_map, dtype=np.float32)
+        anomaly_f = np.maximum(anomaly_f, 0.0)
+        h_am, w_am = anomaly_f.shape
+
+        dm = np.asarray(dust_mask, dtype=np.uint8)
+        if len(dm.shape) == 3:
+            dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
+        if dm.shape != (tile_h, tile_w):
+            dm = cv2.resize(dm, (tile_w, tile_h), interpolation=cv2.INTER_NEAREST)
+
+        # --- Stage 1: Heatmap -> hot zones ---
+        pos_vals = anomaly_f[anomaly_f > 0]
+        if len(pos_vals) == 0:
+            return True, None, [], "TWO_STAGE: no positive heatmap -> REAL_NG"
+
+        hot_thr = np.percentile(pos_vals, 95)
+        hot_mask = (anomaly_f >= hot_thr).astype(np.uint8) * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        hot_mask = cv2.dilate(hot_mask, kernel, iterations=2)
+        n_labels, labels = cv2.connectedComponents(hot_mask, connectivity=8)
+
+        scale = tile_w / w_am
+        pad = 20
+
+        # --- Stage 2: Find features on original ---
+        all_features = []
+
+        for lid in range(1, n_labels):
+            rm = labels == lid
+            ys, xs = np.where(rm)
+            y1, y2 = int(np.min(ys)), int(np.max(ys))
+            x1, x2 = int(np.min(xs)), int(np.max(xs))
+
+            # convert to tile space with padding
+            ty1 = max(0, int(y1 * scale) - pad)
+            ty2 = min(tile_h, int((y2 + 1) * scale) + pad)
+            tx1 = max(0, int(x1 * scale) - pad)
+            tx2 = min(tile_w, int((x2 + 1) * scale) + pad)
+
+            crop_gray = tile_gray[ty1:ty2, tx1:tx2]
+            crop_dust = dm[ty1:ty2, tx1:tx2]
+
+            if crop_gray.size == 0:
+                continue
+
+            # ensure blur kernel is odd and <= crop size
+            bk = bg_blur_k
+            bk = min(bk, min(crop_gray.shape) - 1)
+            if bk % 2 == 0:
+                bk += 1
+            if bk < 3:
+                bk = 3
+
+            blur = cv2.GaussianBlur(crop_gray, (bk, bk), 0)
+
+            # detect dark + bright spots
+            for diff, spot_type in [
+                (blur.astype(np.float32) - crop_gray.astype(np.float32), "dark"),
+                (crop_gray.astype(np.float32) - blur.astype(np.float32), "bright"),
+            ]:
+                diff_pos = diff[diff > 0]
+                if len(diff_pos) < 10:
+                    continue
+                thr = max(float(np.percentile(diff_pos, diff_pct)), 3.0)
+                binary = (diff >= thr).astype(np.uint8) * 255
+                morph_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, morph_k)
+
+                n_feat, feat_labels = cv2.connectedComponents(binary, connectivity=8)
+                for fid in range(1, n_feat):
+                    fm = feat_labels == fid
+                    farea = int(np.count_nonzero(fm))
+                    if farea < min_area:
+                        continue
+
+                    fys, fxs = np.where(fm)
+                    fcy, fcx = int(np.mean(fys)), int(np.mean(fxs))
+
+                    # dust check: use ALL feature pixels
+                    feat_dust = crop_dust[fm]
+                    dust_overlap = int(np.count_nonzero(feat_dust > 0))
+                    feat_dust_ratio = dust_overlap / farea
+
+                    abs_x = tx1 + fcx
+                    abs_y = ty1 + fcy
+
+                    all_features.append({
+                        "abs_pos": (abs_x, abs_y),
+                        "area": farea,
+                        "type": spot_type,
+                        "dust_ratio": feat_dust_ratio,
+                        "is_dust": feat_dust_ratio >= dust_ratio_thr,
+                    })
+
+        # --- Verdict ---
+        real_features = [f for f in all_features if not f["is_dust"]]
+        dust_features = [f for f in all_features if f["is_dust"]]
+
+        if real_features:
+            # find peak position of largest real feature
+            best = max(real_features, key=lambda f: f["area"])
+            bx, by = best["abs_pos"]
+            # convert to anomaly_map space for peak_yx
+            real_peak_yx = (int(by / scale), int(bx / scale))
+            detail = (f"TWO_STAGE: {len(real_features)}real+{len(dust_features)}dust "
+                      f"-> REAL_NG (best@({bx},{by}) area={best['area']})")
+            return True, real_peak_yx, all_features, detail
+
+        elif not all_features and score >= fallback_score:
+            detail = (f"TWO_STAGE: 0features but score={score:.3f}>={fallback_score} "
+                      f"-> REAL_NG (fallback)")
+            return True, None, all_features, detail
+
+        else:
+            detail = (f"TWO_STAGE: 0real+{len(dust_features)}dust "
+                      f"-> DUST")
+            return False, None, all_features, detail
 
     def generate_dust_iou_debug_image(
         self,
@@ -2991,12 +3156,42 @@ class CAPIInferencer:
                                     tile.anomaly_peak_y = tile.y + int(real_peak_yx[0] * tile.height / amap_h)
                                     tile.anomaly_peak_x = tile.x + int(real_peak_yx[1] * tile.width / amap_w)
                             else:
-                                # 所有異常區域都與灰塵重疊 → 標記為灰塵
-                                tile.is_suspected_dust_or_scratch = True
-                                detail_text += (
-                                    f" PER_REGION: 0real+"
-                                    f"{len(dust_regions)}dust -> DUST"
-                                )
+                                # 所有異常區域都與灰塵重疊 → 初步標記為灰塵
+                                # 如果啟用兩階段判定，進行二次確認
+                                if self.config.dust_two_stage_enabled:
+                                    # 兩階段: 用原圖精準定位 feature 點，比對 dust_mask (ext=0)
+                                    dust_mask_no_ext = None
+                                    if omit_crop is not None:
+                                        _, dust_mask_no_ext, _, _ = self.check_dust_or_scratch_feature(
+                                            omit_crop, extension_override=0)
+                                    ts_has_real, ts_peak_yx, ts_features, ts_detail = \
+                                        self.check_dust_two_stage(
+                                            tile.image, anomaly_map,
+                                            dust_mask_no_ext if dust_mask_no_ext is not None else dust_mask,
+                                            score,
+                                        )
+                                    if ts_has_real:
+                                        tile.is_suspected_dust_or_scratch = False
+                                        detail_text += (
+                                            f" PER_REGION: 0real+{len(dust_regions)}dust"
+                                            f" -> {ts_detail}"
+                                        )
+                                        if ts_peak_yx is not None:
+                                            amap_h, amap_w = anomaly_map.shape[:2]
+                                            tile.anomaly_peak_y = tile.y + int(ts_peak_yx[0] * tile.height / amap_h)
+                                            tile.anomaly_peak_x = tile.x + int(ts_peak_yx[1] * tile.width / amap_w)
+                                    else:
+                                        tile.is_suspected_dust_or_scratch = True
+                                        detail_text += (
+                                            f" PER_REGION: 0real+{len(dust_regions)}dust"
+                                            f" -> {ts_detail}"
+                                        )
+                                else:
+                                    tile.is_suspected_dust_or_scratch = True
+                                    detail_text += (
+                                        f" PER_REGION: 0real+"
+                                        f"{len(dust_regions)}dust -> DUST"
+                                    )
 
                             # 產生 Debug 可視化圖 (含逐區域標註)
                             try:
