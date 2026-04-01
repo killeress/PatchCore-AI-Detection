@@ -1066,6 +1066,21 @@
         'dust_two_stage_diff_percentile', 'dust_two_stage_min_area', 'dust_two_stage_fallback_score',
         'dust_detect_dark_particles'
     ];
+    // Sub-groups within DUST tab
+    const DUST_OMIT_PARAMS = [
+        'dust_brightness_threshold', 'dust_area_min', 'dust_area_max',
+        'dust_extension', 'dust_detect_dark_particles'
+    ];
+    const DUST_HEATMAP_PARAMS = [
+        'dust_heatmap_iou_threshold', 'dust_heatmap_top_percent', 'dust_heatmap_metric'
+    ];
+    const DUST_METHOD_PARAMS = [
+        'dust_mask_before_binarize'
+    ];
+    const DUST_TWO_STAGE_PARAMS = [
+        'dust_two_stage_enabled', 'dust_two_stage_dust_ratio', 'dust_two_stage_bg_blur',
+        'dust_two_stage_diff_percentile', 'dust_two_stage_min_area', 'dust_two_stage_fallback_score'
+    ];
     const CV_EDGE_PARAMS = [
         'cv_edge_enabled', 'cv_edge_dust_filter_enabled', 'otsu_offset',
         'cv_edge_left_width', 'cv_edge_left_threshold', 'cv_edge_left_min_area',
@@ -1190,13 +1205,66 @@
                 </div>
             </div>` : ''}
             <div id="pane-dust" class="settings-tab-pane ${currentTab === 'dust' ? 'active' : ''}">
-                <div class="settings-section section-dust" style="border-left: 3px solid #fb923c;">
-                    <div class="settings-section-header">
-                        <div class="icon">🧹</div>
-                        <span>灰塵偵測設定</span>
+                ${(() => {
+                    const omitParams = DUST_OMIT_PARAMS.map(n => allParams.find(p => p.param_name === n)).filter(Boolean);
+                    const heatmapParams = DUST_HEATMAP_PARAMS.map(n => allParams.find(p => p.param_name === n)).filter(Boolean);
+                    const methodParams = DUST_METHOD_PARAMS.map(n => allParams.find(p => p.param_name === n)).filter(Boolean);
+                    const twoStageParams = DUST_TWO_STAGE_PARAMS.map(n => allParams.find(p => p.param_name === n)).filter(Boolean);
+                    const maskEnabled = methodParams.find(p => p.param_name === 'dust_mask_before_binarize');
+                    const tsEnabled = twoStageParams.find(p => p.param_name === 'dust_two_stage_enabled');
+                    return `
+                    <div class="settings-section section-dust" style="border-left: 3px solid #fb923c;">
+                        <div class="settings-section-header">
+                            <div class="icon">🧹</div>
+                            <span>OMIT 灰塵偵測 (Step A: 從 OMIT 圖找灰塵位置)</span>
+                        </div>
+                        ${omitParams.map(p => paramRow(p)).join('')}
                     </div>
-                    ${dustParams.map(p => paramRow(p)).join('')}
-                </div>
+                    <div class="settings-section" style="border-left: 3px solid #f59e0b; margin-top: 12px;">
+                        <div class="settings-section-header" style="background: rgba(245, 158, 11, 0.1); border-bottom: 1px solid rgba(245, 158, 11, 0.2);">
+                            <div class="icon" style="background: rgba(245, 158, 11, 0.2); color: #fbbf24;">📊</div>
+                            <span style="color: #fbbf24;">Heatmap 交叉驗證 (Step B: 原始逐區域 COV 判定)</span>
+                        </div>
+                        ${heatmapParams.map(p => paramRow(p)).join('')}
+                    </div>
+                    <div class="settings-section" style="border-left: 3px solid #8b5cf6; margin-top: 12px;">
+                        <div class="settings-section-header" style="background: rgba(139, 92, 246, 0.1); border-bottom: 1px solid rgba(139, 92, 246, 0.2);">
+                            <div class="icon" style="background: rgba(139, 92, 246, 0.2); color: #c4b5fd;">🔧</div>
+                            <span style="color: #c4b5fd;">Dust Mask 遮罩模式 (灰塵歸零後再二值化)</span>
+                            ${maskEnabled ? `
+                            <div style="margin-left: auto; display: flex; align-items: center; gap: 10px; background: rgba(0,0,0,0.2); padding: 4px 12px; border-radius: 20px; border: 1px solid rgba(139, 92, 246, 0.3);">
+                                <span style="font-size: 0.75rem; color: #a78bfa;">啟用:</span>
+                                <label class="switch" style="transform: scale(0.85);">
+                                    <input type="checkbox" ${maskEnabled.param_value === 'True' || maskEnabled.param_value === 'true' ? 'checked' : ''} onchange='toggleBoolParam("dust_mask_before_binarize", this.checked)'>
+                                    <span class="slider"></span>
+                                </label>
+                            </div>` : ''}
+                        </div>
+                        <div style="padding: 12px 16px; color: #94a3b8; font-size: 0.8rem; border-bottom: 1px solid rgba(139, 92, 246, 0.1);">
+                            先將 dust_mask 覆蓋的 heatmap 像素歸零，再做 top% 二值化。解決灰塵強訊號淹沒弱缺陷的問題。<br>
+                            <span style="color: #f59e0b;">注意: 與兩階段模式互斥，兩者同時啟用時以兩階段為優先。</span>
+                        </div>
+                    </div>
+                    <div class="settings-section" style="border-left: 3px solid #ef4444; margin-top: 12px;">
+                        <div class="settings-section-header" style="background: rgba(239, 68, 68, 0.1); border-bottom: 1px solid rgba(239, 68, 68, 0.2);">
+                            <div class="icon" style="background: rgba(239, 68, 68, 0.2); color: #fca5a5;">🎯</div>
+                            <span style="color: #fca5a5;">兩階段精準比對 (Heatmap 定位 → 原圖找特徵 → Dust Mask 比對)</span>
+                            ${tsEnabled ? `
+                            <div style="margin-left: auto; display: flex; align-items: center; gap: 10px; background: rgba(0,0,0,0.2); padding: 4px 12px; border-radius: 20px; border: 1px solid rgba(239, 68, 68, 0.3);">
+                                <span style="font-size: 0.75rem; color: #fca5a5;">啟用:</span>
+                                <label class="switch" style="transform: scale(0.85);">
+                                    <input type="checkbox" ${tsEnabled.param_value === 'True' || tsEnabled.param_value === 'true' ? 'checked' : ''} onchange='toggleBoolParam("dust_two_stage_enabled", this.checked)'>
+                                    <span class="slider"></span>
+                                </label>
+                            </div>` : ''}
+                        </div>
+                        <div style="padding: 12px 16px; color: #94a3b8; font-size: 0.8rem; border-bottom: 1px solid rgba(239, 68, 68, 0.1);">
+                            當舊版 COV 判定為灰塵時，啟動二次確認：用 heatmap 找大概位置 → 回到原圖找實際特徵點 → 在 pixel 層級精準比對 dust_mask (ext=0)。<br>
+                            繞過 PatchCore heatmap 的擴散問題，避免灰塵邊緣殘留導致誤判。
+                        </div>
+                        ${twoStageParams.filter(p => p.param_name !== 'dust_two_stage_enabled').map(p => paramRow(p)).join('')}
+                    </div>`;
+                })()}
             </div>
             <div id="pane-cv-edge" class="settings-tab-pane-block ${currentTab === 'cv-edge' ? 'active' : ''}">
                 <div class="settings-section section-cv-edge" style="border-left: 3px solid #3b82f6;">
