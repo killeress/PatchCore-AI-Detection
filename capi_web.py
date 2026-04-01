@@ -2423,8 +2423,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             # 補上 config 中有但 DB 沒有的參數（用目前執行值作為預設）
             if self.inferencer and hasattr(self.inferencer, 'config') and self.inferencer.config:
                 existing_names = {p["param_name"] for p in params}
-                config_dict = self.inferencer.config.to_dict()
-                for key, val in config_dict.items():
+                import dataclasses
+                config_fields = {f.name: getattr(self.inferencer.config, f.name)
+                                 for f in dataclasses.fields(self.inferencer.config)}
+                for key, val in config_fields.items():
                     if key not in existing_names:
                         params.append({
                             "param_name": key,
