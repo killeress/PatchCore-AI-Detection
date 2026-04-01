@@ -1208,62 +1208,79 @@
                 ${(() => {
                     const omitParams = DUST_OMIT_PARAMS.map(n => allParams.find(p => p.param_name === n)).filter(Boolean);
                     const heatmapParams = DUST_HEATMAP_PARAMS.map(n => allParams.find(p => p.param_name === n)).filter(Boolean);
-                    const methodParams = DUST_METHOD_PARAMS.map(n => allParams.find(p => p.param_name === n)).filter(Boolean);
                     const twoStageParams = DUST_TWO_STAGE_PARAMS.map(n => allParams.find(p => p.param_name === n)).filter(Boolean);
-                    const maskEnabled = methodParams.find(p => p.param_name === 'dust_mask_before_binarize');
-                    const tsEnabled = twoStageParams.find(p => p.param_name === 'dust_two_stage_enabled');
+                    const maskVal = allParams.find(p => p.param_name === 'dust_mask_before_binarize');
+                    const tsVal = allParams.find(p => p.param_name === 'dust_two_stage_enabled');
+                    const isMask = maskVal && (maskVal.param_value === 'True' || maskVal.param_value === 'true');
+                    const isTS = tsVal && (tsVal.param_value === 'True' || tsVal.param_value === 'true');
+                    const activeMode = isTS ? 'two_stage' : (isMask ? 'mask' : 'classic');
+                    // OMIT params: hide dust_extension for two-stage mode
+                    const omitFiltered = omitParams.filter(p =>
+                        !(activeMode === 'two_stage' && p.param_name === 'dust_extension')
+                    );
                     return `
                     <div class="settings-section section-dust" style="border-left: 3px solid #fb923c;">
                         <div class="settings-section-header">
                             <div class="icon">🧹</div>
                             <span>OMIT 灰塵偵測 (Step A: 從 OMIT 圖找灰塵位置)</span>
                         </div>
-                        ${omitParams.map(p => paramRow(p)).join('')}
+                        ${omitFiltered.map(p => paramRow(p)).join('')}
+                        ${activeMode === 'two_stage' ? `
+                        <div style="padding: 8px 16px; color: #94a3b8; font-size: 0.75rem; background: rgba(239, 68, 68, 0.05);">
+                            <span style="color: #fca5a5;">dust_extension</span> 在兩階段模式下不使用 (自動以 ext=0 精準比對)
+                        </div>` : ''}
                     </div>
+
+                    <!-- Mode Selector -->
+                    <div class="settings-section" style="border-left: 3px solid #6366f1; margin-top: 12px;">
+                        <div class="settings-section-header" style="background: rgba(99, 102, 241, 0.1); border-bottom: 1px solid rgba(99, 102, 241, 0.2);">
+                            <div class="icon" style="background: rgba(99, 102, 241, 0.2); color: #a5b4fc;">⚙️</div>
+                            <span style="color: #a5b4fc; font-weight: 600;">Step B 灰塵判定模式</span>
+                        </div>
+                        <div style="padding: 16px; display: flex; flex-direction: column; gap: 8px;">
+                            <label style="display: flex; align-items: flex-start; gap: 12px; padding: 12px; border-radius: 8px; cursor: pointer; border: 2px solid ${activeMode === 'classic' ? '#f59e0b' : 'rgba(255,255,255,0.08)'}; background: ${activeMode === 'classic' ? 'rgba(245, 158, 11, 0.08)' : 'transparent'}; transition: all 0.2s;">
+                                <input type="radio" name="dust_mode" value="classic" ${activeMode === 'classic' ? 'checked' : ''} onchange="switchDustMode('classic')" style="margin-top: 3px; accent-color: #f59e0b;">
+                                <div>
+                                    <div style="font-weight: 600; color: ${activeMode === 'classic' ? '#fbbf24' : '#94a3b8'};">📊 舊版 COV 比對</div>
+                                    <div style="font-size: 0.78rem; color: #64748b; margin-top: 2px;">Heatmap top% 二值化 → 逐區域計算與灰塵的 Coverage → 判定 DUST 或 REAL</div>
+                                </div>
+                            </label>
+                            <label style="display: flex; align-items: flex-start; gap: 12px; padding: 12px; border-radius: 8px; cursor: pointer; border: 2px solid ${activeMode === 'mask' ? '#8b5cf6' : 'rgba(255,255,255,0.08)'}; background: ${activeMode === 'mask' ? 'rgba(139, 92, 246, 0.08)' : 'transparent'}; transition: all 0.2s;">
+                                <input type="radio" name="dust_mode" value="mask" ${activeMode === 'mask' ? 'checked' : ''} onchange="switchDustMode('mask')" style="margin-top: 3px; accent-color: #8b5cf6;">
+                                <div>
+                                    <div style="font-weight: 600; color: ${activeMode === 'mask' ? '#c4b5fd' : '#94a3b8'};">🔧 Mask 遮罩模式</div>
+                                    <div style="font-size: 0.78rem; color: #64748b; margin-top: 2px;">先將灰塵區域 heatmap 歸零 → 再做 top% 二值化 → 解決灰塵強訊號淹沒弱缺陷</div>
+                                </div>
+                            </label>
+                            <label style="display: flex; align-items: flex-start; gap: 12px; padding: 12px; border-radius: 8px; cursor: pointer; border: 2px solid ${activeMode === 'two_stage' ? '#ef4444' : 'rgba(255,255,255,0.08)'}; background: ${activeMode === 'two_stage' ? 'rgba(239, 68, 68, 0.08)' : 'transparent'}; transition: all 0.2s;">
+                                <input type="radio" name="dust_mode" value="two_stage" ${activeMode === 'two_stage' ? 'checked' : ''} onchange="switchDustMode('two_stage')" style="margin-top: 3px; accent-color: #ef4444;">
+                                <div>
+                                    <div style="font-weight: 600; color: ${activeMode === 'two_stage' ? '#fca5a5' : '#94a3b8'};">🎯 兩階段精準比對</div>
+                                    <div style="font-size: 0.78rem; color: #64748b; margin-top: 2px;">舊版 COV 判 DUST 時啟動二次確認 → Heatmap 定位熱區 → 原圖找特徵點 → pixel 級精準比對 dust_mask (ext=0)<br>繞過 PatchCore heatmap 擴散問題</div>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Classic mode params (always visible since it's the base) -->
                     <div class="settings-section" style="border-left: 3px solid #f59e0b; margin-top: 12px;">
                         <div class="settings-section-header" style="background: rgba(245, 158, 11, 0.1); border-bottom: 1px solid rgba(245, 158, 11, 0.2);">
                             <div class="icon" style="background: rgba(245, 158, 11, 0.2); color: #fbbf24;">📊</div>
-                            <span style="color: #fbbf24;">Heatmap 交叉驗證 (Step B: 原始逐區域 COV 判定)</span>
+                            <span style="color: #fbbf24;">Heatmap COV 參數 (所有模式共用)</span>
                         </div>
                         ${heatmapParams.map(p => paramRow(p)).join('')}
                     </div>
-                    <div class="settings-section" style="border-left: 3px solid #8b5cf6; margin-top: 12px;">
-                        <div class="settings-section-header" style="background: rgba(139, 92, 246, 0.1); border-bottom: 1px solid rgba(139, 92, 246, 0.2);">
-                            <div class="icon" style="background: rgba(139, 92, 246, 0.2); color: #c4b5fd;">🔧</div>
-                            <span style="color: #c4b5fd;">Dust Mask 遮罩模式 (灰塵歸零後再二值化)</span>
-                            ${maskEnabled ? `
-                            <div style="margin-left: auto; display: flex; align-items: center; gap: 10px; background: rgba(0,0,0,0.2); padding: 4px 12px; border-radius: 20px; border: 1px solid rgba(139, 92, 246, 0.3);">
-                                <span style="font-size: 0.75rem; color: #a78bfa;">啟用:</span>
-                                <label class="switch" style="transform: scale(0.85);">
-                                    <input type="checkbox" ${maskEnabled.param_value === 'True' || maskEnabled.param_value === 'true' ? 'checked' : ''} onchange='toggleBoolParam("dust_mask_before_binarize", this.checked)'>
-                                    <span class="slider"></span>
-                                </label>
-                            </div>` : ''}
-                        </div>
-                        <div style="padding: 12px 16px; color: #94a3b8; font-size: 0.8rem; border-bottom: 1px solid rgba(139, 92, 246, 0.1);">
-                            先將 dust_mask 覆蓋的 heatmap 像素歸零，再做 top% 二值化。解決灰塵強訊號淹沒弱缺陷的問題。<br>
-                            <span style="color: #f59e0b;">注意: 與兩階段模式互斥，兩者同時啟用時以兩階段為優先。</span>
-                        </div>
-                    </div>
+
+                    <!-- Two-stage params (only show when two_stage active) -->
+                    ${activeMode === 'two_stage' ? `
                     <div class="settings-section" style="border-left: 3px solid #ef4444; margin-top: 12px;">
                         <div class="settings-section-header" style="background: rgba(239, 68, 68, 0.1); border-bottom: 1px solid rgba(239, 68, 68, 0.2);">
                             <div class="icon" style="background: rgba(239, 68, 68, 0.2); color: #fca5a5;">🎯</div>
-                            <span style="color: #fca5a5;">兩階段精準比對 (Heatmap 定位 → 原圖找特徵 → Dust Mask 比對)</span>
-                            ${tsEnabled ? `
-                            <div style="margin-left: auto; display: flex; align-items: center; gap: 10px; background: rgba(0,0,0,0.2); padding: 4px 12px; border-radius: 20px; border: 1px solid rgba(239, 68, 68, 0.3);">
-                                <span style="font-size: 0.75rem; color: #fca5a5;">啟用:</span>
-                                <label class="switch" style="transform: scale(0.85);">
-                                    <input type="checkbox" ${tsEnabled.param_value === 'True' || tsEnabled.param_value === 'true' ? 'checked' : ''} onchange='toggleBoolParam("dust_two_stage_enabled", this.checked)'>
-                                    <span class="slider"></span>
-                                </label>
-                            </div>` : ''}
-                        </div>
-                        <div style="padding: 12px 16px; color: #94a3b8; font-size: 0.8rem; border-bottom: 1px solid rgba(239, 68, 68, 0.1);">
-                            當舊版 COV 判定為灰塵時，啟動二次確認：用 heatmap 找大概位置 → 回到原圖找實際特徵點 → 在 pixel 層級精準比對 dust_mask (ext=0)。<br>
-                            繞過 PatchCore heatmap 的擴散問題，避免灰塵邊緣殘留導致誤判。
+                            <span style="color: #fca5a5;">兩階段參數</span>
                         </div>
                         ${twoStageParams.filter(p => p.param_name !== 'dust_two_stage_enabled').map(p => paramRow(p)).join('')}
-                    </div>`;
+                    </div>` : ''}
+                    `;
                 })()}
             </div>
             <div id="pane-cv-edge" class="settings-tab-pane-block ${currentTab === 'cv-edge' ? 'active' : ''}">
@@ -1788,6 +1805,38 @@
         t.textContent = msg;
         t.className = 'toast ' + type + ' show';
         setTimeout(() => t.classList.remove('show'), 3500);
+    }
+
+    async function switchDustMode(mode) {
+        // mode: 'classic', 'mask', 'two_stage'
+        // Set the two bool params accordingly (mutually exclusive)
+        const maskVal = (mode === 'mask');
+        const tsVal = (mode === 'two_stage');
+        try {
+            // Update both params
+            for (const [name, val] of [['dust_mask_before_binarize', maskVal], ['dust_two_stage_enabled', tsVal]]) {
+                const res = await fetch('/api/settings/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        param_name: name,
+                        new_value: val,
+                        reason: `Switch dust mode to: ${mode}`
+                    })
+                });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+                const p = allParams.find(x => x.param_name === name);
+                if (p) p.param_value = String(val);
+            }
+            const labels = { classic: '舊版 COV 比對', mask: 'Mask 遮罩模式', two_stage: '兩階段精準比對' };
+            showToast(`✅ 灰塵判定模式已切換: ${labels[mode]}`, 'success');
+            renderSettings(); // re-render to show/hide params
+            loadHistory();
+        } catch (e) {
+            showToast(`❌ 切換失敗: ${e.message}`, 'error');
+            loadSettings();
+        }
     }
 
     async function toggleBoolParam(paramName, isChecked) {
