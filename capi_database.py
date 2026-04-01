@@ -1011,6 +1011,32 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def get_dust_affected_record_ids(self, record_ids: list) -> set:
+        """返回有灰塵過濾影響的 inference record IDs (is_dust_only 或 edge is_dust)"""
+        if not record_ids:
+            return set()
+        conn = self._get_conn()
+        try:
+            result_ids = set()
+            chunk_size = 450  # Each ID appears twice in UNION, stay under SQLite 999 limit
+            for i in range(0, len(record_ids), chunk_size):
+                chunk = record_ids[i:i + chunk_size]
+                ph = ','.join('?' * len(chunk))
+                rows = conn.execute(
+                    f"SELECT DISTINCT record_id FROM image_results "
+                    f"WHERE record_id IN ({ph}) AND is_dust_only = 1 "
+                    f"UNION "
+                    f"SELECT DISTINCT img.record_id "
+                    f"FROM edge_defect_results edr "
+                    f"JOIN image_results img ON img.id = edr.image_result_id "
+                    f"WHERE img.record_id IN ({ph}) AND img.is_ng = 0 AND edr.is_dust = 1",
+                    chunk + chunk
+                ).fetchall()
+                result_ids.update(r["record_id"] for r in rows)
+            return result_ids
+        finally:
+            conn.close()
+
     VALID_MISS_CATEGORIES = {'dust_misfilter', 'threshold_high', 'ric_misjudge', 'outside_aoi_area', 'other'}
 
     def save_miss_review(self, client_record_id: int, category: str, note: str = '') -> int:

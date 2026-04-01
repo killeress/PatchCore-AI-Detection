@@ -648,6 +648,38 @@
         text-decoration: underline;
         margin-left: 8px;
     }
+
+    /* OMIT Toggle Switch */
+    .omit-toggle {
+        position: relative;
+        display: inline-block;
+        width: 40px;
+        height: 22px;
+        cursor: pointer;
+    }
+    .omit-toggle input { opacity: 0; width: 0; height: 0; }
+    .omit-toggle-slider {
+        position: absolute;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(100, 116, 139, 0.4);
+        border-radius: 22px;
+        transition: all 0.3s;
+    }
+    .omit-toggle-slider::before {
+        content: '';
+        position: absolute;
+        width: 16px; height: 16px;
+        left: 3px; bottom: 3px;
+        background: white;
+        border-radius: 50%;
+        transition: all 0.3s;
+    }
+    .omit-toggle input:checked + .omit-toggle-slider {
+        background: linear-gradient(135deg, #f59e0b, #f97316);
+    }
+    .omit-toggle input:checked + .omit-toggle-slider::before {
+        transform: translateX(18px);
+    }
 </style>
 {% endblock %}
 
@@ -706,6 +738,16 @@
     <span style="color:var(--text-muted);">~</span>
     <input type="date" id="client_endDate">
     <button class="search-btn" onclick="clientComp.customFilter()">查詢</button>
+    <span style="margin-left:16px; display:inline-flex; align-items:center; gap:6px;">
+        <label class="omit-toggle" title="忽略 OMIT 灰塵過濾，顯示純 PatchCore 結果">
+            <input type="checkbox" id="client_ignoreOmit" onchange="clientComp.toggleIgnoreOmit(this.checked)">
+            <span class="omit-toggle-slider"></span>
+        </label>
+        <span style="color:var(--text-muted); font-size:0.82rem; cursor:help;"
+              title="開啟後，原本因 OMIT 灰塵過濾而判 OK 的紀錄會改為 NG，用於評估純 PatchCore 模型效能">忽略 OMIT</span>
+        <span id="client_omitBadge" style="display:none; background:rgba(245,158,11,0.15); color:#f59e0b;
+              padding:2px 8px; border-radius:6px; font-size:0.75rem; font-weight:600;">已開啟</span>
+    </span>
 </div>
 
 <!-- Loading -->
@@ -942,8 +984,116 @@
         let rawRecords = [];     // API 回傳的 records
         let currentSummary = {}; // API 回傳的 summary
         let currentFilter = null;
+        let ignoreOmit = false;  // 忽略 OMIT 灰塵過濾模式
         let resultChart = null, comboChart = null, trendChart = null, confusionChart = null, dailyMetricsChart = null;
         let reviewPieChart = null;
+
+        // ── Ignore OMIT helpers ──
+        function getEffectiveAI(rec) {
+            if (ignoreOmit && rec.has_dust_filtering && rec.result_ai === 'OK') return 'NG';
+            return rec.result_ai;
+        }
+
+        function applyFilter(records) {
+            if (!currentFilter) return records;
+            return records.filter(row => {
+                const eqp = row.result_eqp;
+                const ai = getEffectiveAI(row);
+                const ric = deriveJudgment(row.datastr);
+                switch (currentFilter) {
+                    case 'aoi_correct': return eqp === ric;
+                    case 'ai_correct': return ai === ric;
+                    case 'ai_ng': return ai === 'NG';
+                    case 'aoi_over': return eqp === 'NG' && ric === 'OK';
+                    case 'ai_over': return ai === 'NG' && ric === 'OK';
+                    case 'ai_miss': return ai === 'OK' && ric === 'NG';
+                    case 'revival': return eqp === 'NG' && ai === 'OK' && ric === 'OK';
+                    default: return true;
+                }
+            });
+        }
+
+        function recomputeSummary(records) {
+            const total = records.length;
+            if (total === 0) return currentSummary;
+
+            let aoiNG = 0, aiNG = 0, ricNG = 0;
+            let aoiCorrect = 0, aiCorrect = 0;
+            let aoiOver = 0, aiOver = 0, aiMiss = 0;
+            let revival = 0;
+            const combos = {};
+            const daily = {};
+            let missReviewed = 0;
+            const missByCat = { dust_misfilter: 0, threshold_high: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
+
+            records.forEach(rec => {
+                const eqp = rec.result_eqp || 'OK';
+                const ai = getEffectiveAI(rec);
+                const ric = deriveJudgment(rec.datastr);
+
+                if (eqp === 'NG') aoiNG++;
+                if (ai === 'NG') aiNG++;
+                if (ric === 'NG') ricNG++;
+                if (eqp === ric) aoiCorrect++;
+                if (ai === ric) aiCorrect++;
+                if (eqp === 'NG' && ric === 'OK') aoiOver++;
+                if (ai === 'NG' && ric === 'OK') aiOver++;
+                if (ai === 'OK' && ric === 'NG') {
+                    aiMiss++;
+                    if (rec.miss_review && rec.miss_review.category) {
+                        missReviewed++;
+                        const cat = rec.miss_review.category;
+                        if (cat in missByCat) missByCat[cat]++;
+                    }
+                }
+                if (eqp === 'NG' && ai === 'OK' && ric === 'OK') revival++;
+
+                const combo = `${eqp}/${ai}/${ric}`;
+                combos[combo] = (combos[combo] || 0) + 1;
+
+                const day = (rec.time_stamp || 'unknown').substring(0, 10);
+                if (!daily[day]) daily[day] = { total: 0, aoiCorrect: 0, aiCorrect: 0, aiMiss: 0, aiOver: 0, aoiOver: 0 };
+                daily[day].total++;
+                if (eqp === ric) daily[day].aoiCorrect++;
+                if (ai === ric) daily[day].aiCorrect++;
+                if (ai === 'OK' && ric === 'NG') daily[day].aiMiss++;
+                if (ai === 'NG' && ric === 'OK') daily[day].aiOver++;
+                if (eqp === 'NG' && ric === 'OK') daily[day].aoiOver++;
+            });
+
+            const aoiOverRate = aoiNG > 0 ? Math.round(aoiOver / aoiNG * 1000) / 10 : 0;
+            const aiOverRate = aiNG > 0 ? Math.round(aiOver / aiNG * 1000) / 10 : 0;
+            const aiMissRate = ricNG > 0 ? Math.round(aiMiss / ricNG * 1000) / 10 : 0;
+            const revivalRate = aoiNG > 0 ? Math.round(revival / aoiNG * 1000) / 10 : 0;
+
+            return {
+                total, aoiNG, aiNG, ricNG,
+                aoiCorrect, aiCorrect,
+                aoiOver, aoiOverRate,
+                aiOver, aiOverRate,
+                aiMiss, aiMissRate,
+                revival, revivalRate,
+                combos, daily,
+                missReviewStats: {
+                    total: aiMiss,
+                    reviewed: missReviewed,
+                    unreviewed: aiMiss - missReviewed,
+                    byCategory: missByCat,
+                },
+            };
+        }
+
+        function toggleIgnoreOmit(checked) {
+            ignoreOmit = checked;
+            document.getElementById('client_omitBadge').style.display = checked ? 'inline' : 'none';
+            if (!rawRecords.length) return;
+            const s = recomputeSummary(rawRecords);
+            currentSummary = s;
+            renderStatsCards(s);
+            renderCharts(s);
+            renderDetails(applyFilter(rawRecords));
+            renderReviewTab(s, rawRecords);
+        }
 
         // ── Upload Logic ──
         function initUpload() {
@@ -1157,7 +1307,7 @@
                     }
 
                     rawRecords = data.records;
-                    currentSummary = data.summary;
+                    currentSummary = ignoreOmit ? recomputeSummary(rawRecords) : data.summary;
                     report.style.display = 'block';
 
                     renderStatsCards(currentSummary);
@@ -1253,21 +1403,7 @@
                 if (active) active.classList.add('active');
             }
 
-            const filtered = currentFilter ? rawRecords.filter(row => {
-                const eqp = row.result_eqp;
-                const ai = row.result_ai;
-                const ric = deriveJudgment(row.datastr);
-                switch (currentFilter) {
-                    case 'aoi_correct': return eqp === ric;
-                    case 'ai_correct': return ai === ric;
-                    case 'ai_ng': return ai === 'NG';
-                    case 'aoi_over': return eqp === 'NG' && ric === 'OK';
-                    case 'ai_over': return ai === 'NG' && ric === 'OK';
-                    case 'ai_miss': return ai === 'OK' && ric === 'NG';
-                    case 'revival': return eqp === 'NG' && ai === 'OK' && ric === 'OK';
-                    default: return true;
-                }
-            }) : rawRecords;
+            const filtered = applyFilter(rawRecords);
 
             const labels = {
                 total: '全部', aoi_correct: 'AOI 與 DATASTR 判定一致', ai_correct: 'AI 與 DATASTR 判定一致',
@@ -1290,15 +1426,20 @@
 
             data.forEach((row, i) => {
                 const ric = deriveJudgment(row.datastr);
+                const effectiveAI = getEffectiveAI(row);
                 const aoiMatch = row.result_eqp === ric;
-                const aiMatch = row.result_ai === ric;
+                const aiMatch = effectiveAI === ric;
+                const dustOverride = (ignoreOmit && row.has_dust_filtering && row.result_ai === 'OK');
 
                 const eqpBadge = row.result_eqp === 'OK'
                     ? '<span class="badge badge-ok">OK</span>'
                     : '<span class="badge badge-ng">NG</span>';
-                const aiBadge = row.result_ai === 'OK'
+                const aiBadge = effectiveAI === 'OK'
                     ? '<span class="badge badge-ok">OK</span>'
                     : '<span class="badge badge-ng">NG</span>';
+                const dustTag = dustOverride
+                    ? ' <span style="color:#f59e0b; font-size:0.65rem;" title="原判OK，因忽略OMIT改為NG">dust</span>'
+                    : '';
                 const ricBadgeRaw = row.result_ric === 'ERR'
                     ? '<span class="badge" style="background:rgba(245,158,11,0.1); color:var(--err)">ERR</span>'
                     : row.result_ric === 'OK'
@@ -1318,6 +1459,7 @@
 
                 const tr = document.createElement('tr');
                 if (!aiMatch) tr.style.background = 'rgba(239,68,68,0.06)';
+                if (dustOverride) tr.style.background = 'rgba(245,158,11,0.08)';
 
                 tr.innerHTML = `
                 <td style="color:var(--text-muted); font-size:0.8rem;">${i + 1}</td>
@@ -1325,7 +1467,7 @@
                 <td style="font-family:'Fira Code',monospace; font-size:0.85rem;">${row.pnl_id}</td>
                 <td>${row.mach_id}</td>
                 <td>${eqpBadge}</td>
-                <td>${aiBadge}</td>
+                <td>${aiBadge}${dustTag}</td>
                 <td>${ricBadgeRaw}</td>
                 <td>${actualBadge}</td>
                 <td style="font-size:0.75rem; color:var(--text-muted); max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${row.datastr}</td>
@@ -1563,7 +1705,8 @@
             if (rows.length === 0) { alert('無資料可導出'); return; }
 
             const headers = ['#', '檢測時間', 'Panel ID', '機台', 'RESULT_EQP', 'RESULT_AI', 'RIC_RAW', 'DATASTR_JUDGE', 'DATASTR_RAW', 'AOI vs DATASTR', 'AI vs DATASTR'];
-            let csv = '\ufeff' + headers.join(',') + '\n';
+            const modeNote = ignoreOmit ? '# 模式：忽略 OMIT 灰塵過濾 (純 PatchCore)\n' : '';
+            let csv = '\ufeff' + modeNote + headers.join(',') + '\n';
 
             rows.forEach(tr => {
                 const cells = tr.querySelectorAll('td');
@@ -1689,7 +1832,7 @@
         }
 
         function renderReviewTable(records) {
-            const missRecords = records.filter(r => r.result_ai === 'OK' && deriveJudgment(r.datastr) === 'NG');
+            const missRecords = records.filter(r => getEffectiveAI(r) === 'OK' && deriveJudgment(r.datastr) === 'NG');
             const pending = missRecords.filter(r => !r.miss_review || !r.miss_review.category);
             const done = missRecords.filter(r => r.miss_review && r.miss_review.category);
 
@@ -1820,7 +1963,7 @@
 
         function _updateReviewStats() {
             // Recompute missReviewStats from local rawRecords
-            const missRecords = rawRecords.filter(r => r.result_ai === 'OK' && deriveJudgment(r.datastr) === 'NG');
+            const missRecords = rawRecords.filter(r => getEffectiveAI(r) === 'OK' && deriveJudgment(r.datastr) === 'NG');
             const total = missRecords.length;
             let reviewed = 0;
             const byCategory = { dust_misfilter: 0, threshold_high: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
@@ -1846,7 +1989,7 @@
 
         return {
             switchTab, switchReviewTab, filterByCard, exportCSV, clearDB,
-            quickFilter, customFilter, loadData, toggleUpload,
+            quickFilter, customFilter, loadData, toggleUpload, toggleIgnoreOmit,
             _saveReview, _deleteReview, _markDirty,
         };
     })();

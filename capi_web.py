@@ -1135,7 +1135,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             start_date = query.get('start_date', [''])[0] or None
             end_date = query.get('end_date', [''])[0] or None
             records = self.db.get_client_accuracy_records(start_date, end_date)
-            summary, out_records = self._compute_client_summary(records)
+            inf_ids = list({r["inference_record_id"] for r in records if r.get("inference_record_id")})
+            dust_ids = self.db.get_dust_affected_record_ids(inf_ids) if inf_ids else set()
+            summary, out_records = self._compute_client_summary(records, dust_ids)
 
             self._send_json({
                 "success": True,
@@ -1149,7 +1151,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.error(f"Client data API error: {e}", exc_info=True)
             self._send_json({"success": False, "error": str(e)})
 
-    def _compute_client_summary(self, records: list):
+    def _compute_client_summary(self, records: list, dust_affected_ids: set = None):
         """從 client accuracy records 計算統計摘要並格式化 records，單次遍歷。
         Returns: (summary_dict, out_records_list)
         """
@@ -1198,6 +1200,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "result_ric": rec["result_ric"],
                 "datastr": rec["datastr"] or "",
                 "inference_record_id": rec.get("inference_record_id"),
+                "has_dust_filtering": bool(
+                    dust_affected_ids
+                    and rec.get("inference_record_id")
+                    and rec["inference_record_id"] in dust_affected_ids
+                ),
                 "miss_review": None,
             }
             if rec.get("review_id"):
