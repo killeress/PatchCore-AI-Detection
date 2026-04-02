@@ -143,6 +143,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/record/"):
                 record_id = path.split("/record/")[1].rstrip("/")
                 self._handle_record_detail(record_id, path)
+            elif path == "/overexposed":
+                self._handle_overexposed(query, path)
             elif path == "/search":
                 self._handle_search(query, path)
             elif path == "/search/export":
@@ -336,6 +338,36 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             page=page,
             limit=limit,
             total_count=total_count,
+            total_pages=total_pages,
+        )
+        self._send_response(200, html)
+
+    def _handle_overexposed(self, query: dict, path: str):
+        """過曝記錄列表"""
+        try:
+            limit = int(query.get("limit", [50])[0])
+            limit = max(1, min(limit, 500))
+        except (ValueError, TypeError):
+            limit = 50
+        try:
+            page = int(query.get("page", [1])[0])
+            page = max(1, page)
+        except (ValueError, TypeError):
+            page = 1
+
+        offset = (page - 1) * limit
+        records, total_count = self.db.query_overexposed(limit, offset) if self.db else ([], 0)
+
+        import math
+        total_pages = max(1, math.ceil(total_count / limit))
+
+        template = self.jinja_env.get_template("overexposed.html")
+        html = template.render(
+            records=records,
+            total_count=total_count,
+            request_path=path,
+            page=page,
+            limit=limit,
             total_pages=total_pages,
         )
         self._send_response(200, html)

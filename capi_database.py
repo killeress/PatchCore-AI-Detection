@@ -613,6 +613,24 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def query_overexposed(self, limit: int = 50, offset: int = 0) -> tuple:
+        """查詢過曝記錄，回傳 (records, total_count)"""
+        conn = self._get_conn()
+        try:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM inference_records WHERE omit_overexposed = 1"
+            ).fetchone()[0]
+            rows = conn.execute(
+                """SELECT * FROM inference_records
+                   WHERE omit_overexposed = 1
+                   ORDER BY created_at DESC
+                   LIMIT ? OFFSET ?""",
+                (limit, offset)
+            ).fetchall()
+            return [dict(r) for r in rows], total
+        finally:
+            conn.close()
+
     def query_paged(self, limit: int = 50, offset: int = 0) -> tuple:
         """分頁查詢推論記錄，回傳 (records, total_count)"""
         conn = self._get_conn()

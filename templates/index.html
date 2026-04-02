@@ -52,7 +52,7 @@
     <div class="stat-card">
         <div class="value" style="color:var(--ng)">{{ stats.ng_count or 0 }}</div>
         <div class="label">NG 數量<br><span style="font-size:1.1rem;font-weight:700;color:var(--ng)">{{ ng_rate | round(1)
-                }}%</span><br><span style="font-size:0.8rem;color:#f59e0b">⚠️ Omit過曝 {{ stats.overexposed_count or 0 }}</span></div>
+                }}%</span><br><a href="/overexposed" style="font-size:0.8rem;color:#f59e0b;text-decoration:none;" title="查看過曝記錄列表">⚠️ Omit過曝 {{ stats.overexposed_count or 0 }}</a></div>
     </div>
     <div class="stat-card">
         <div class="value" style="color:var(--err)">{{ stats.err_count or 0 }}</div>

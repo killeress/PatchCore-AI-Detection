@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+
+{% block title %}CAPI AI — Omit 過曝記錄{% endblock %}
+
+{% block extra_css %}
+<style>
+    .oe-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .oe-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        font-weight: 600;
+    }
+
+    .oe-info {
+        font-size: 0.8rem;
+        color: #f59e0b;
+        word-break: break-all;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="oe-header">
+        <h3>⚠️ Omit 過曝記錄
+            <span style="font-size:0.85rem;font-weight:400;color:var(--text-muted);margin-left:8px;">
+                共 {{ total_count }} 筆，第 {{ page }}/{{ total_pages }} 頁
+            </span>
+        </h3>
+        <div style="display:flex;align-items:center;gap:12px;">
+            <a href="/" style="font-size:0.85rem;color:var(--accent);text-decoration:none;">← 返回首頁</a>
+            <form method="GET" action="/overexposed" style="display:flex;align-items:center;gap:8px;">
+                <label style="font-size:0.85rem;color:var(--text-muted);">每頁</label>
+                <select name="limit" onchange="this.form.submit()"
+                    style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:0.9rem;cursor:pointer;">
+                    <option value="20" {% if limit==20 %}selected{% endif %}>20 筆</option>
+                    <option value="50" {% if limit==50 %}selected{% endif %}>50 筆</option>
+                    <option value="100" {% if limit==100 %}selected{% endif %}>100 筆</option>
+                </select>
+                <input type="hidden" name="page" value="1">
+            </form>
+        </div>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>玻璃編號</th>
+                <th>機種</th>
+                <th>機台</th>
+                <th>AI 判定</th>
+                <th>過曝資訊</th>
+                <th>建立時間</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in records %}
+            <tr>
+                <td><a href="/v3/record/{{ r.id }}">{{ r.id }}</a></td>
+                <td>{{ r.glass_id }}</td>
+                <td>{{ r.model_id }}</td>
+                <td>{{ r.machine_no }}</td>
+                <td><span class="badge {{ r.ai_judgment | ai_badge }}">{{ r.ai_judgment | ai_simple }}</span></td>
+                <td><span class="oe-info">{{ r.omit_overexposure_info or '-' }}</span></td>
+                <td>{{ r.created_at }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="7" style="text-align:center;color:var(--text-muted)">尚無過曝記錄</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- 分頁導覽 -->
+    {% if total_pages > 1 %}
+    <div style="display:flex;justify-content:center;align-items:center;gap:8px;margin-top:20px;flex-wrap:wrap;">
+        {% if page > 1 %}
+        <a href="/overexposed?page={{ page - 1 }}&limit={{ limit }}"
+            style="padding:6px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);text-decoration:none;font-size:0.9rem;">
+            ← 上一頁
+        </a>
+        {% endif %}
+
+        {% for p in range(1, total_pages + 1) %}
+        {% if p == page %}
+        <span
+            style="padding:6px 14px;background:var(--accent);border-radius:6px;color:#fff;font-size:0.9rem;font-weight:700;">{{
+            p }}</span>
+        {% elif p == 1 or p == total_pages or (p >= page - 2 and p <= page + 2) %}
+        <a href="/overexposed?page={{ p }}&limit={{ limit }}"
+            style="padding:6px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);text-decoration:none;font-size:0.9rem;">
+            {{ p }}
+        </a>
+        {% elif p == page - 3 or p == page + 3 %}
+        <span style="color:var(--text-muted);">…</span>
+        {% endif %}
+        {% endfor %}
+
+        {% if page < total_pages %}
+        <a href="/overexposed?page={{ page + 1 }}&limit={{ limit }}"
+            style="padding:6px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);text-decoration:none;font-size:0.9rem;">
+            下一頁 →
+        </a>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
