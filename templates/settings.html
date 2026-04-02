@@ -1488,6 +1488,28 @@
         }, 50);
     }
 
+    const PARAM_LABELS = {
+        // OMIT dust detection
+        'dust_brightness_threshold': 'OMIT 亮度閾值 (自適應 Otsu 備用上限)',
+        'dust_area_min': '灰塵顆粒最小面積 (px)',
+        'dust_area_max': '灰塵顆粒最大面積 (px)',
+        'dust_extension': '灰塵區域膨脹像素',
+        'dust_detect_dark_particles': '偵測暗色顆粒 (如偏黑 MARK)',
+        // Heatmap COV
+        'dust_heatmap_iou_threshold': 'Heatmap-Dust Coverage 閾值 (≥ 此值判灰塵)',
+        'dust_heatmap_top_percent': 'Heatmap 熱區取前 X% 做二值化',
+        'dust_heatmap_metric': '判定指標: coverage (覆蓋率) 或 iou (交集/聯集)',
+        // Mask mode
+        'dust_mask_before_binarize': '先遮罩灰塵區域再做 top% 二值化',
+        // Two-stage
+        'dust_two_stage_enabled': '啟用兩階段精準比對',
+        'dust_two_stage_dust_ratio': '特徵點與灰塵重疊比例 ≥ 此值判為灰塵 (0~1)',
+        'dust_two_stage_bg_blur': '局部背景估計 Gaussian Blur 核大小 (px, 必須奇數)',
+        'dust_two_stage_diff_percentile': '特徵偵測靈敏度 (取 diff 分布的此百分位, 越低越敏感)',
+        'dust_two_stage_min_area': '特徵最小面積，低於此值視為雜訊 (px)',
+        'dust_two_stage_fallback_score': '安全網: 找不到特徵但 heatmap 分數 ≥ 此值時保守判 NG',
+    };
+
     function paramRow(p) {
         const isDict = p.param_type === 'dict';
         const isModelMapping = p.param_name === 'model_mapping';
@@ -1547,7 +1569,7 @@
             <div class="param-row">
                 <div class="param-info">
                     <div class="param-name">${p.param_name}</div>
-                    <div class="param-desc">${p.description || ''}</div>
+                    <div class="param-desc">${p.description || PARAM_LABELS[p.param_name] || ''}</div>
                 </div>
                 <div class="param-value">
                     ${valueContent}
