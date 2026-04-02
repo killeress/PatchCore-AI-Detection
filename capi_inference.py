@@ -2156,6 +2156,144 @@ class CAPIInferencer:
 
         return debug_img
 
+    def generate_two_stage_debug_image(
+        self,
+        tile_image: np.ndarray,
+        anomaly_map: np.ndarray,
+        dust_mask_no_ext: np.ndarray,
+        features: list,
+        is_dust: bool,
+    ) -> np.ndarray:
+        """
+        產生兩階段灰塵判定的 Debug 可視化圖
+
+        顯示：
+          左上: Heatmap + Hot Zone 框
+          右上: 原圖 + Dust Mask (黃, ext=0) + 特徵點標記
+          左下: 原圖放大 (hot zone 區域)
+          右下: 特徵判定結果 (紅=REAL, 綠=DUST)
+        """
+        sz = 256
+
+        # --- base image ---
+        if len(tile_image.shape) == 2:
+            base = cv2.cvtColor(tile_image, cv2.COLOR_GRAY2BGR)
+        elif tile_image.shape[2] == 1:
+            base = cv2.cvtColor(tile_image, cv2.COLOR_GRAY2BGR)
+        else:
+            base = tile_image.copy()
+        tile_h, tile_w = base.shape[:2]
+        base_sm = cv2.resize(base, (sz, sz))
+
+        anomaly_f = np.asarray(anomaly_map, dtype=np.float32)
+        anomaly_f = np.maximum(anomaly_f, 0.0)
+        h_am, w_am = anomaly_f.shape
+        scale_tile = tile_w / w_am
+
+        # --- dust mask prep ---
+        dm = np.asarray(dust_mask_no_ext, dtype=np.uint8)
+        if len(dm.shape) == 3:
+            dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
+        if dm.shape != (tile_h, tile_w):
+            dm = cv2.resize(dm, (tile_w, tile_h), interpolation=cv2.INTER_NEAREST)
+
+        # --- hot zone detection (same as check_dust_two_stage) ---
+        pos_vals = anomaly_f[anomaly_f > 0]
+        hot_thr = np.percentile(pos_vals, 95) if len(pos_vals) > 0 else 0
+        hot_mask = (anomaly_f >= hot_thr).astype(np.uint8) * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        hot_mask = cv2.dilate(hot_mask, kernel, iterations=2)
+
+        # --- 左上: Heatmap + Hot Zone ---
+        norm = cv2.normalize(anomaly_f, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        norm_rsz = cv2.resize(norm, (sz, sz))
+        hm_color = cv2.applyColorMap(norm_rsz, cv2.COLORMAP_JET)
+        panel_tl = cv2.addWeighted(base_sm, 0.5, hm_color, 0.5, 0)
+        # draw hot zone contour
+        hot_rsz = cv2.resize(hot_mask, (sz, sz), interpolation=cv2.INTER_NEAREST)
+        contours, _ = cv2.findContours(hot_rsz, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(panel_tl, contours, -1, (0, 255, 0), 1)
+        cv2.putText(panel_tl, "Heatmap+HotZone", (5, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        # --- 右上: 原圖 + Dust Mask + 特徵標記 ---
+        panel_tr = base_sm.copy()
+        dm_sm = cv2.resize(dm, (sz, sz), interpolation=cv2.INTER_NEAREST)
+        dust_ol = np.zeros_like(panel_tr)
+        dust_ol[dm_sm > 0] = (0, 255, 255)
+        panel_tr = cv2.addWeighted(panel_tr, 0.6, dust_ol, 0.4, 0)
+        sx, sy = sz / tile_w, sz / tile_h
+        for feat in features:
+            fx, fy = feat["abs_pos"]
+            dx, dy = int(fx * sx), int(fy * sy)
+            color = (0, 200, 0) if feat["is_dust"] else (0, 0, 255)
+            cv2.circle(panel_tr, (dx, dy), 5, color, 2)
+            label = "D" if feat["is_dust"] else "R"
+            cv2.putText(panel_tr, label, (dx + 7, dy + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+        cv2.putText(panel_tr, "Features (R=Real G=Dust)", (5, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
+
+        # --- 左下: Hot Zone 放大 ---
+        # find bounding box of hot zone in tile space
+        n_labels, labels = cv2.connectedComponents(hot_mask, connectivity=8)
+        if n_labels > 1:
+            ys, xs = np.where(labels > 0)
+            pad = 20
+            zy1 = max(0, int(np.min(ys) * scale_tile) - pad)
+            zy2 = min(tile_h, int((np.max(ys) + 1) * scale_tile) + pad)
+            zx1 = max(0, int(np.min(xs) * scale_tile) - pad)
+            zx2 = min(tile_w, int((np.max(xs) + 1) * scale_tile) + pad)
+        else:
+            zx1, zy1, zx2, zy2 = 0, 0, tile_w, tile_h
+
+        crop = base[zy1:zy2, zx1:zx2].copy()
+        # overlay dust mask on crop
+        crop_dm = dm[zy1:zy2, zx1:zx2]
+        dust_crop_ol = np.zeros_like(crop)
+        dust_crop_ol[crop_dm > 0] = (0, 255, 255)
+        crop = cv2.addWeighted(crop, 0.7, dust_crop_ol, 0.3, 0)
+        # mark features
+        for feat in features:
+            fx, fy = feat["abs_pos"]
+            lx, ly = fx - zx1, fy - zy1
+            if 0 <= lx < crop.shape[1] and 0 <= ly < crop.shape[0]:
+                color = (0, 200, 0) if feat["is_dust"] else (0, 0, 255)
+                cv2.circle(crop, (lx, ly), 6, color, 2)
+                label = f"D{feat['dust_ratio']:.0%}" if feat["is_dust"] else f"R{feat['dust_ratio']:.0%}"
+                cv2.putText(crop, label, (lx + 8, ly + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        panel_bl = cv2.resize(crop, (sz, sz))
+        cv2.putText(panel_bl, "Zone Zoom (R=Real G=Dust)", (5, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
+
+        # --- 右下: 判定結果 ---
+        panel_br = np.zeros((sz, sz, 3), dtype=np.uint8)
+        # dust mask as blue background
+        panel_br[dm_sm > 0] = (180, 80, 0)
+        # feature areas
+        real_count = sum(1 for f in features if not f["is_dust"])
+        dust_count = sum(1 for f in features if f["is_dust"])
+        for feat in features:
+            fx, fy = feat["abs_pos"]
+            dx, dy = int(fx * sx), int(fy * sy)
+            r = max(3, int(feat["area"] ** 0.5))
+            color = (0, 0, 255) if not feat["is_dust"] else (0, 200, 0)
+            cv2.circle(panel_br, (dx, dy), r, color, -1)
+            cv2.circle(panel_br, (dx, dy), r + 1, (255, 255, 255), 1)
+
+        verdict_color = (0, 0, 255) if not is_dust else (0, 200, 255)
+        verdict_text = f"R:{real_count} D:{dust_count}"
+        cv2.putText(panel_br, f"TwoStage {verdict_text}", (5, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, verdict_color, 1)
+        cv2.putText(panel_br, "B=DustMask R=Real G=Dust", (5, sz - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (128, 128, 128), 1)
+
+        # --- 組合 2x2 ---
+        top_row = np.hstack([panel_tl, panel_tr])
+        bottom_row = np.hstack([panel_bl, panel_br])
+        return np.vstack([top_row, bottom_row])
+
     @staticmethod
     def _select_latest_panel_images(image_files: List[Path]) -> List[Path]:
         """
@@ -3161,6 +3299,9 @@ class CAPIInferencer:
                             else:
                                 # 所有異常區域都與灰塵重疊 → 初步標記為灰塵
                                 # 如果啟用兩階段判定，進行二次確認
+                                _two_stage_ran = False
+                                _ts_features = []
+                                _ts_dust_mask_no_ext = None
                                 if self.config.dust_two_stage_enabled:
                                     # 兩階段: 用原圖精準定位 feature 點，比對 dust_mask (ext=0)
                                     dust_mask_no_ext = None
@@ -3173,6 +3314,9 @@ class CAPIInferencer:
                                             dust_mask_no_ext if dust_mask_no_ext is not None else dust_mask,
                                             score,
                                         )
+                                    _two_stage_ran = True
+                                    _ts_features = ts_features
+                                    _ts_dust_mask_no_ext = dust_mask_no_ext
                                     if ts_has_real:
                                         tile.is_suspected_dust_or_scratch = False
                                         detail_text += (
@@ -3196,15 +3340,23 @@ class CAPIInferencer:
                                         f"{len(dust_regions)}dust -> DUST"
                                     )
 
-                            # 產生 Debug 可視化圖 (含逐區域標註)
+                            # 產生 Debug 可視化圖
                             try:
-                                tile.dust_iou_debug_image = self.generate_dust_iou_debug_image(
-                                    tile.image, anomaly_map, dust_mask,
-                                    heatmap_binary, iou, top_pct,
-                                    tile.is_suspected_dust_or_scratch,
-                                    region_details=region_details,
-                                    region_labels=region_labels,
-                                )
+                                if _two_stage_ran:
+                                    dm_for_debug = _ts_dust_mask_no_ext if _ts_dust_mask_no_ext is not None else dust_mask
+                                    tile.dust_iou_debug_image = self.generate_two_stage_debug_image(
+                                        tile.image, anomaly_map, dm_for_debug,
+                                        _ts_features,
+                                        tile.is_suspected_dust_or_scratch,
+                                    )
+                                else:
+                                    tile.dust_iou_debug_image = self.generate_dust_iou_debug_image(
+                                        tile.image, anomaly_map, dust_mask,
+                                        heatmap_binary, iou, top_pct,
+                                        tile.is_suspected_dust_or_scratch,
+                                        region_details=region_details,
+                                        region_labels=region_labels,
+                                    )
                             except Exception as dbg_err:
                                 print(f"⚠️ Debug image generation failed: {dbg_err}")
                         elif is_dust:

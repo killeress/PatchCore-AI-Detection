@@ -358,13 +358,20 @@ def test_aoi_coord(
                                 detail_text += f" PER_REGION: 0real+{len(dust_regions)}dust -> DUST"
 
                         try:
-                            tile.dust_iou_debug_image = inferencer.generate_dust_iou_debug_image(
-                                tile.image, anomaly_map, dust_mask,
-                                heatmap_binary, iou, top_pct,
-                                tile.is_suspected_dust_or_scratch,
-                                region_details=region_details,
-                                region_labels=region_labels,
-                            )
+                            if config.dust_two_stage_enabled and 'ts_features' in locals():
+                                dm_dbg = dust_mask_no_ext if 'dust_mask_no_ext' in locals() and dust_mask_no_ext is not None else dust_mask
+                                tile.dust_iou_debug_image = inferencer.generate_two_stage_debug_image(
+                                    tile.image, anomaly_map, dm_dbg,
+                                    ts_features, tile.is_suspected_dust_or_scratch,
+                                )
+                            else:
+                                tile.dust_iou_debug_image = inferencer.generate_dust_iou_debug_image(
+                                    tile.image, anomaly_map, dust_mask,
+                                    heatmap_binary, iou, top_pct,
+                                    tile.is_suspected_dust_or_scratch,
+                                    region_details=region_details,
+                                    region_labels=region_labels,
+                                )
                         except Exception:
                             pass
                     elif is_dust:
