@@ -343,6 +343,7 @@ def test_aoi_coord(
                                         dust_mask_no_ext if dust_mask_no_ext is not None else dust_mask,
                                         score,
                                     )
+                                tile.dust_two_stage_features = ts_features
                                 if ts_has_real:
                                     tile.is_suspected_dust_or_scratch = False
                                     detail_text += f" PER_REGION: 0real+{len(dust_regions)}dust -> {ts_detail}"

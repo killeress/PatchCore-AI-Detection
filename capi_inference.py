@@ -101,6 +101,7 @@ class TileInfo:
     dust_bright_ratio: float = 0.0
     dust_detail_text: str = ""  # 灰塵判定詳細資訊
     dust_iou_debug_image: Optional[np.ndarray] = field(default=None, repr=False)  # IOU debug 可視化圖
+    dust_two_stage_features: Optional[list] = field(default=None, repr=False)  # 兩階段特徵點列表
     is_bomb: bool = False       # 是否為炸彈系統模擬缺陷
     bomb_defect_code: str = ""  # 匹配到的炸彈 Defect Code
     is_in_exclude_zone: bool = False  # 是否位於不檢測排除區域內
@@ -3317,6 +3318,7 @@ class CAPIInferencer:
                                     _two_stage_ran = True
                                     _ts_features = ts_features
                                     _ts_dust_mask_no_ext = dust_mask_no_ext
+                                    tile.dust_two_stage_features = ts_features
                                     if ts_has_real:
                                         tile.is_suspected_dust_or_scratch = False
                                         detail_text += (
@@ -3655,20 +3657,24 @@ class CAPIInferencer:
                             tile.bomb_defect_code = bomb_code
                             print(f"💣 {result.image_path.name} Tile@({tile.x},{tile.y}) → BOMB consensus match ({bomb_code}, {confirmed} tiles confirmed)")
 
-                # === 邊緣缺陷炸彈比對 ===
-                if hasattr(result, 'edge_defects') and result.edge_defects and result.raw_bounds is not None:
-                    img_prefix = result.image_path.stem
-                    for ed in result.edge_defects:
-                        cx, cy = ed.center
-                        is_bomb, bomb_code = self.check_bomb_match(
-                            img_prefix, cx, cy, result.raw_bounds,
-                            product_resolution=product_resolution,
-                            bomb_list=active_bombs,
-                        )
-                        if is_bomb:
-                            ed.is_bomb = True
-                            ed.bomb_defect_code = bomb_code
-                            print(f"💣 {result.image_path.name} Edge@{ed.side} Center@({cx},{cy}) → BOMB match ({bomb_code})")
+            # === 邊緣缺陷炸彈比對 ===
+            for result in results:
+                if not hasattr(result, 'edge_defects') or not result.edge_defects or result.raw_bounds is None:
+                    continue
+                img_prefix = result.image_path.stem
+                for ed in result.edge_defects:
+                    if getattr(ed, 'is_cv_ok', False):
+                        continue
+                    cx, cy = ed.center
+                    is_bomb, bomb_code = self.check_bomb_match(
+                        img_prefix, cx, cy, result.raw_bounds,
+                        product_resolution=product_resolution,
+                        bomb_list=active_bombs,
+                    )
+                    if is_bomb:
+                        ed.is_bomb = True
+                        ed.bomb_defect_code = bomb_code
+                        print(f"💣 {result.image_path.name} Edge@{ed.side} Center@({cx},{cy}) → BOMB match ({bomb_code})")
 
         # === 不檢測排除區域判定 (基於 peak 位置) ===
         # 排除區域來自 cv_edge_exclude_zones，原僅用於邊緣檢測，現擴展至 PatchCore 推論

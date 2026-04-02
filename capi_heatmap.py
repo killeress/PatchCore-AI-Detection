@@ -330,6 +330,31 @@ class HeatmapManager:
             cv2.putText(heatmap_panel, "No Heatmap", (150, 260),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)
 
+        # --- Draw two-stage feature markers on Original & Heatmap ---
+        ts_features = getattr(tile_info, 'dust_two_stage_features', None) if tile_info else None
+        if ts_features:
+            tile_h_orig, tile_w_orig = getattr(tile_info, 'height', tile_size), getattr(tile_info, 'width', tile_size)
+            sx = tile_size / tile_w_orig
+            sy = tile_size / tile_h_orig
+            tile_x0 = getattr(tile_info, 'x', 0)
+            tile_y0 = getattr(tile_info, 'y', 0)
+            for feat in ts_features:
+                abs_x, abs_y = feat["abs_pos"]
+                # abs_pos is relative to tile origin, convert to panel coords
+                dx = int(abs_x * sx)
+                dy = int(abs_y * sy)
+                if not (0 <= dx < tile_size and 0 <= dy < tile_size):
+                    continue
+                is_dust_feat = feat.get("is_dust", False)
+                color = (0, 200, 0) if is_dust_feat else (0, 0, 255)
+                marker_r = max(8, int(feat.get("area", 5) ** 0.5 * 2))
+                # Draw on both Original and Heatmap panels
+                for panel in [orig, heatmap_panel]:
+                    cv2.circle(panel, (dx, dy), marker_r, color, 2)
+                    label = "D" if is_dust_feat else "R"
+                    cv2.putText(panel, label, (dx + marker_r + 3, dy + 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
         # --- Panel 3 & 4 & 5: OMIT Crop & Dust Mask & IOU Debug (如果有 tile_info) ---
         has_omit = False
         iou_debug_panel = None
