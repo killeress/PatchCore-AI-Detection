@@ -877,17 +877,18 @@ class CAPIServer:
         if not cleanup_cfg.get("enabled", False):
             return
 
-        schedule_time = cleanup_cfg.get("schedule_time", "02:00")
-        ok_retain     = cleanup_cfg.get("ok_retain_days", 14)
-        ng_retain     = cleanup_cfg.get("ng_retain_days", 90)
-        tile_retain   = cleanup_cfg.get("tile_retain_days", 7)
-        vacuum        = cleanup_cfg.get("vacuum_after_cleanup", True)
-        hour, minute  = map(int, schedule_time.split(":"))
+        schedule_time  = cleanup_cfg.get("schedule_time", "02:00")
+        ok_retain      = cleanup_cfg.get("ok_retain_days", 14)
+        ng_retain      = cleanup_cfg.get("ng_retain_days", 90)
+        tile_retain    = cleanup_cfg.get("tile_retain_days", 7)
+        heatmap_retain = cleanup_cfg.get("heatmap_retain_days", 0)
+        vacuum         = cleanup_cfg.get("vacuum_after_cleanup", True)
+        hour, minute   = map(int, schedule_time.split(":"))
 
         def _scheduler_loop():
             logger.info(
                 f"[Cleanup] Scheduler started, daily at {schedule_time} "
-                f"(OK={ok_retain}d, NG={ng_retain}d, tiles={tile_retain}d)"
+                f"(OK={ok_retain}d, NG={ng_retain}d, tiles={tile_retain}d, heatmaps={heatmap_retain}d)"
             )
             while self._running:
                 now    = datetime.now()
@@ -904,11 +905,14 @@ class CAPIServer:
                     return
                 try:
                     logger.info("[Cleanup] Starting scheduled database cleanup...")
-                    stats = self.db.cleanup_old_records(ok_retain, ng_retain, tile_retain, vacuum)
+                    stats = self.db.cleanup_old_records(
+                        ok_retain, ng_retain, tile_retain, vacuum, heatmap_retain
+                    )
                     logger.info(
                         f"[Cleanup] Done — "
                         f"inference_records={stats['inference_records_deleted']}, "
-                        f"tile_results={stats['tile_results_deleted']}"
+                        f"tile_results={stats['tile_results_deleted']}, "
+                        f"heatmap_dirs={stats['heatmap_dirs_deleted']}"
                     )
                 except Exception as e:
                     logger.error(f"[Cleanup] Failed: {e}")

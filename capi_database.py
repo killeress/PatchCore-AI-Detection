@@ -1169,14 +1169,35 @@ class CAPIDatabase:
         ng_retain_days: int = 90,
         tile_retain_days: int = 7,
         vacuum: bool = True,
+        heatmap_retain_days: int = 0,
     ) -> dict:
         from datetime import datetime, timedelta
+        import shutil
         now = datetime.now()
         ok_cutoff   = (now - timedelta(days=ok_retain_days)).strftime('%Y-%m-%d')
         ng_cutoff   = (now - timedelta(days=ng_retain_days)).strftime('%Y-%m-%d')
         tile_cutoff = (now - timedelta(days=tile_retain_days)).strftime('%Y-%m-%d')
 
-        stats = {"tile_results_deleted": 0, "inference_records_deleted": 0}
+        stats = {
+            "tile_results_deleted": 0,
+            "inference_records_deleted": 0,
+            "heatmap_dirs_deleted": 0,
+        }
+
+        # Step 0: 清除過期 heatmap 目錄 (獨立天數，在 DB 記錄刪除前先查詢)
+        heatmap_dirs_to_delete = []
+        if heatmap_retain_days > 0:
+            hm_cutoff = (now - timedelta(days=heatmap_retain_days)).strftime('%Y-%m-%d')
+            with self._lock:
+                conn = self._get_conn()
+                try:
+                    rows = conn.execute("""
+                        SELECT heatmap_dir FROM inference_records
+                        WHERE heatmap_dir != '' AND created_at < ?
+                    """, (hm_cutoff,)).fetchall()
+                    heatmap_dirs_to_delete = [r[0] for r in rows if r[0]]
+                finally:
+                    conn.close()
 
         with self._lock:
             conn = self._get_conn()
@@ -1200,6 +1221,15 @@ class CAPIDatabase:
                 """, (ok_cutoff, ng_cutoff))
                 stats["inference_records_deleted"] = cur.rowcount
 
+                # Step 2.5: 清除已刪記錄的 heatmap_dir 欄位 (圖檔已刪但記錄還在的情況)
+                if heatmap_retain_days > 0:
+                    hm_cutoff = (now - timedelta(days=heatmap_retain_days)).strftime('%Y-%m-%d')
+                    conn.execute("""
+                        UPDATE inference_records
+                        SET heatmap_dir = ''
+                        WHERE heatmap_dir != '' AND created_at < ?
+                    """, (hm_cutoff,))
+
                 conn.commit()
             except Exception as e:
                 conn.rollback()
@@ -1207,7 +1237,17 @@ class CAPIDatabase:
             finally:
                 conn.close()
 
-        # Step 3: VACUUM (在鎖外，不阻塞其他操作)
+        # Step 3: 刪除實體 heatmap 目錄 (在鎖外執行，避免 IO 阻塞)
+        for d in heatmap_dirs_to_delete:
+            try:
+                p = Path(d)
+                if p.is_dir():
+                    shutil.rmtree(p)
+                    stats["heatmap_dirs_deleted"] += 1
+            except Exception:
+                pass  # 目錄不存在或權限問題，跳過
+
+        # Step 4: VACUUM (在鎖外，不阻塞其他操作)
         if vacuum and (stats["tile_results_deleted"] > 0 or stats["inference_records_deleted"] > 0):
             conn = self._get_conn()
             try:

@@ -54,4 +54,5 @@ cleanup:
   ok_retain_days: 14            # OK 記錄保留天數
   ng_retain_days: 90            # NG / ERR 記錄保留天數
   tile_retain_days: 7           # tile_results 保留天數 (獨立、最短)
+  heatmap_retain_days: 90       # heatmap 圖檔保留天數 (0=不清除)
   vacuum_after_cleanup: true

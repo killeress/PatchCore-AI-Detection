@@ -2579,6 +2579,7 @@ class CAPIInferencer:
         anomaly_map: Optional[np.ndarray] = None,
         product_resolution: Optional[Tuple[int, int]] = None,
         bomb_list: Optional[List] = None,
+        skip_shape_check: bool = False,
     ) -> Tuple[bool, str]:
         """
         檢查異常 tile 是否匹配炸彈系統的已知座標
@@ -2626,7 +2627,7 @@ class CAPIInferencer:
                 
                 if min_x <= tile_center_x <= max_x and min_y <= tile_center_y <= max_y:
                     # 額外驗證：heatmap 是否呈現線狀形態
-                    if anomaly_map is not None:
+                    if anomaly_map is not None and not skip_shape_check:
                         is_line, aspect_ratio = self._check_heatmap_line_shape(
                             anomaly_map,
                             min_aspect_ratio=self.config.bomb_line_min_aspect_ratio,
@@ -2635,6 +2636,8 @@ class CAPIInferencer:
                             print(f"⚠️ BOMB line 位置匹配但熱力圖非線狀 (aspect_ratio={aspect_ratio:.2f} < {self.config.bomb_line_min_aspect_ratio})，跳過 {bomb.defect_code}")
                             continue
                         print(f"✅ BOMB line 形態驗證通過 (aspect_ratio={aspect_ratio:.2f})")
+                    elif skip_shape_check:
+                        print(f"✅ BOMB line 共識通過 (同線已有足夠匹配，跳過形態驗證)")
                     return True, bomb.defect_code
                     
             elif bomb.defect_type == "point":
@@ -3456,6 +3459,49 @@ class CAPIInferencer:
                             tile.is_bomb = True
                             tile.bomb_defect_code = bomb_code
                             print(f"💣 {result.image_path.name} Tile@({tile.x},{tile.y}) Peak@({tile.anomaly_peak_x},{tile.anomaly_peak_y}) → BOMB match ({bomb_code})")
+
+            # === Bomb line 共識機制 ===
+            # 若同一條 bomb line 已有 ≥3 個 tile 通過形態驗證，
+            # 則位置匹配但形態不通過的 tile 也視為 bomb（線已被確認存在）
+            for bomb in active_bombs:
+                if bomb.defect_type != "line":
+                    continue
+                for result in results:
+                    if not result.anomaly_tiles or result.raw_bounds is None:
+                        continue
+                    img_prefix = result.image_path.stem
+                    if not (img_prefix == bomb.image_prefix or
+                            img_prefix.startswith(bomb.image_prefix + "_")):
+                        continue
+                    # 計算此 bomb line 已確認的 tile 數
+                    confirmed = sum(
+                        1 for t, _, _ in result.anomaly_tiles
+                        if t.is_bomb and t.bomb_defect_code == bomb.defect_code
+                    )
+                    if confirmed < 3:
+                        continue
+                    # 對未匹配的 tile 做位置-only 第二輪檢查
+                    for tile, score, anomaly_map in result.anomaly_tiles:
+                        if tile.is_bomb:
+                            continue
+                        peak_x = getattr(tile, 'anomaly_peak_x', tile.center[0])
+                        peak_y = getattr(tile, 'anomaly_peak_y', tile.center[1])
+                        is_bomb, bomb_code = self.check_bomb_match(
+                            img_prefix, peak_x, peak_y, result.raw_bounds,
+                            anomaly_map=anomaly_map, product_resolution=product_resolution,
+                            bomb_list=[bomb], skip_shape_check=True,
+                        )
+                        if not is_bomb and tile.is_aoi_coord_tile:
+                            tile_cx, tile_cy = tile.center
+                            is_bomb, bomb_code = self.check_bomb_match(
+                                img_prefix, tile_cx, tile_cy, result.raw_bounds,
+                                anomaly_map=anomaly_map, product_resolution=product_resolution,
+                                bomb_list=[bomb], skip_shape_check=True,
+                            )
+                        if is_bomb:
+                            tile.is_bomb = True
+                            tile.bomb_defect_code = bomb_code
+                            print(f"💣 {result.image_path.name} Tile@({tile.x},{tile.y}) → BOMB consensus match ({bomb_code}, {confirmed} tiles confirmed)")
 
                 # === 邊緣缺陷炸彈比對 ===
                 if hasattr(result, 'edge_defects') and result.edge_defects and result.raw_bounds is not None:
