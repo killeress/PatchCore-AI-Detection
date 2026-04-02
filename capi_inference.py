@@ -3749,10 +3749,27 @@ class CAPIInferencer:
         
         # AOI 缺陷標記已移除 (無意義)
         
-        # 排除區域
+        # 排除區域 (MARK / 機構)
         for region in result.exclusion_regions:
             cv2.rectangle(vis, (region.x1, region.y1), (region.x2, region.y2), (128, 128, 128), 4)
-        
+
+        # CV 邊緣不檢測排除區域 (settings 設定，按機種劃分)
+        EXCLUDE_ZONE_COLOR = (0, 200, 200)  # 青黃色 (BGR)
+        if getattr(self, "edge_inspector", None):
+            active_zones = [z for z in self.edge_inspector.config.exclude_zones if z.enabled]
+            for zone in active_zones:
+                zx1, zy1 = zone.x, zone.y
+                zx2, zy2 = zone.x + zone.w, zone.y + zone.h
+                # 半透明填充
+                overlay = vis.copy()
+                cv2.rectangle(overlay, (zx1, zy1), (zx2, zy2), EXCLUDE_ZONE_COLOR, -1)
+                cv2.addWeighted(overlay, 0.2, vis, 0.8, 0, vis)
+                # 邊框
+                cv2.rectangle(vis, (zx1, zy1), (zx2, zy2), EXCLUDE_ZONE_COLOR, 3)
+                # 標籤
+                cv2.putText(vis, "EXCLUDE ZONE", (zx1 + 5, zy1 + 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, EXCLUDE_ZONE_COLOR, 2)
+
         # 正常 tiles（整齊的綠色網格線）
         # 收集所有唯一的水平和垂直座標，避免邊緣 tile 回推造成的雙線
         h_lines = set()  # 水平線 y 座標
