@@ -997,6 +997,95 @@
     </div>
 </div>
 
+<!-- Two-Stage Help Modal -->
+<div class="modal-overlay" id="two-stage-help-modal" onclick="if(event.target===this) this.classList.remove('show')">
+    <div class="modal-box" style="max-width: 680px;">
+        <div class="modal-header">
+            <h3>🎯 兩階段精準比對 — 參數說明</h3>
+            <button class="modal-close" onclick="document.getElementById('two-stage-help-modal').classList.remove('show')">&times;</button>
+        </div>
+        <div class="modal-body" style="padding: 20px 24px; font-size: 0.85rem; line-height: 1.7; color: #cbd5e1;">
+
+            <div style="margin-bottom: 16px; color: #94a3b8;">
+                舊版 COV 判定為「灰塵」時，啟動二次確認。<br>
+                用 heatmap 框出大概的問題區域 → 回到原圖在該區域內找實際特徵點 → 逐點比對 dust_mask 判定灰塵或真實缺陷。
+            </div>
+
+            <div style="padding: 12px 16px; background: rgba(99, 102, 241, 0.08); border-left: 3px solid #6366f1; border-radius: 0 8px 8px 0; margin-bottom: 16px;">
+                <div style="color: #a5b4fc; font-weight: 600; margin-bottom: 6px;">流程示意</div>
+                <div style="font-family: monospace; font-size: 0.78rem; color: #94a3b8; line-height: 1.8;">
+                    Step 1: Heatmap top 5% → 框出「熱區」(大概位置)<br>
+                    Step 2: 在熱區範圍的原圖中找「跟周圍不一樣的點」<br>
+                    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ 計算每個 pixel 跟局部背景(Gaussian Blur)的差異<br>
+                    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ 差異排在前 X% 的 pixel 被標記為特徵<br>
+                    Step 3: 每個特徵點比對 dust_mask (ext=0, 不膨脹)<br>
+                    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ 重疊比例 ≥ 閾值 → 灰塵<br>
+                    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ 重疊比例 < 閾值 → 真實缺陷 → NG
+                </div>
+            </div>
+
+            <table style="width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-bottom: 18px;">
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <td style="padding: 10px; color: #fca5a5; font-weight: 600; white-space: nowrap; width: 180px;">dust_ratio (0.3)</td>
+                    <td style="padding: 10px;">
+                        <b>特徵點被灰塵蓋住多少比例才算灰塵？</b><br>
+                        <span style="color:#94a3b8;">例: 特徵佔 10 pixel，其中 8 pixel 在 dust_mask 內 → 80% ≥ 0.3 → 灰塵</span><br>
+                        <span style="color:#f59e0b;">↑ 調高 (0.8):</span> 要幾乎完全蓋住才判灰塵 → 過殺增加<br>
+                        <span style="color:#22c55e;">↓ 調低 (0.1):</span> 沾到一點灰塵就判灰塵 → 漏放增加
+                    </td>
+                </tr>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <td style="padding: 10px; color: #fca5a5; font-weight: 600;">bg_blur (31)</td>
+                    <td style="padding: 10px;">
+                        <b>看多大範圍算「局部背景」？</b><br>
+                        <span style="color:#94a3b8;">31 = 用 31×31 pixel 的 Gaussian Blur 估計背景亮度，跟背景差異大的就是特徵</span><br>
+                        <span style="color:#f59e0b;">↑ 調大 (51):</span> 背景更平滑，適合均勻面板，但大缺陷可能被平滑掉<br>
+                        <span style="color:#22c55e;">↓ 調小 (15):</span> 背景更局部，能抓小變化，但紋理容易產生假特徵
+                    </td>
+                </tr>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <td style="padding: 10px; color: #fca5a5; font-weight: 600;">diff_percentile (90)</td>
+                    <td style="padding: 10px;">
+                        <b>差異排在前幾 % 才算特徵？</b><br>
+                        <span style="color:#94a3b8;">90 = 只有差異最大的前 10% pixel 才被標記為特徵點</span><br>
+                        <span style="color:#f59e0b;">↑ 調高 (95):</span> 只抓最明顯的前 5% → 微弱缺陷可能漏掉<br>
+                        <span style="color:#22c55e;">↓ 調低 (80):</span> 前 20% 都算 → 抓更多但容易把正常紋理也抓進來
+                    </td>
+                </tr>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <td style="padding: 10px; color: #fca5a5; font-weight: 600;">min_area (3)</td>
+                    <td style="padding: 10px;">
+                        <b>特徵至少要多大才算數？</b><br>
+                        <span style="color:#94a3b8;">3 = 至少 3 個 pixel 連在一起才算一個特徵，低於此視為雜訊</span><br>
+                        <span style="color:#f59e0b;">↑ 調大 (10):</span> 只認大特徵 → 小缺陷被忽略<br>
+                        <span style="color:#22c55e;">↓ 調小 (1):</span> 1 pixel 也算 → 雜訊容易被當成缺陷
+                    </td>
+                </tr>
+                <tr>
+                    <td style="padding: 10px; color: #fca5a5; font-weight: 600;">fallback_score (0.7)</td>
+                    <td style="padding: 10px;">
+                        <b>安全網: 找不到特徵時怎麼辦？</b><br>
+                        <span style="color:#94a3b8;">如果原圖影像處理找不到任何特徵，但 PatchCore 分數 ≥ 此值 → 保守判 NG</span><br>
+                        <span style="color:#f59e0b;">↑ 調高 (0.9):</span> 只有極高分才觸發安全網 → 安全網很少啟動<br>
+                        <span style="color:#22c55e;">↓ 調低 (0.5):</span> 中等分數就觸發 → 兩階段幾乎不會判 OK
+                    </td>
+                </tr>
+            </table>
+
+            <div style="padding: 14px 16px; background: rgba(239, 68, 68, 0.08); border-left: 3px solid #ef4444; border-radius: 0 8px 8px 0;">
+                <div style="color: #fca5a5; font-weight: 600; margin-bottom: 8px;">為什麼需要兩階段？</div>
+                <div style="margin-bottom: 8px;">
+                    PatchCore 模型的 heatmap 有「擴散」特性 — 一個小黑點會在 heatmap 上產生大面積紅色區域 (receptive field ~60px)。
+                    灰塵的 dust_mask 只標記灰塵實際位置，比 heatmap 擴散區域小很多，導致舊版 COV 比對尺度不匹配。
+                </div>
+                <div>
+                    兩階段繞過這個問題：不在 heatmap 上做灰塵分離，改在原圖 pixel 層級直接比對，灰塵和缺陷都是精準位置，不存在擴散問題。
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Edit Modal -->
 <div class="modal-overlay" id="edit-modal" onclick="if(event.target===this) closeModal()">
     <div class="modal-box">
@@ -1276,6 +1365,11 @@
                         <div class="settings-section-header" style="background: rgba(239, 68, 68, 0.1); border-bottom: 1px solid rgba(239, 68, 68, 0.2);">
                             <div class="icon" style="background: rgba(239, 68, 68, 0.2); color: #fca5a5;">🎯</div>
                             <span style="color: #fca5a5;">兩階段參數</span>
+                            <span onclick="document.getElementById('two-stage-help-modal').classList.add('show')"
+                                  style="margin-left: 8px; cursor: pointer; font-size: 0.85rem; color: #64748b; background: rgba(100,116,139,0.15); padding: 2px 8px; border-radius: 4px; transition: all 0.2s;"
+                                  onmouseover="this.style.color='#fca5a5'; this.style.background='rgba(239,68,68,0.15)'"
+                                  onmouseout="this.style.color='#64748b'; this.style.background='rgba(100,116,139,0.15)'"
+                                  title="參數說明">❓ 參數說明</span>
                         </div>
                         ${twoStageParams.filter(p => p.param_name !== 'dust_two_stage_enabled').map(p => paramRow(p)).join('')}
                     </div>` : ''}
