@@ -402,7 +402,12 @@ class HeatmapManager:
 
         # --- 底部獨立標籤列（不蓋到面板內容）---
         if has_omit:
-            labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask (Overall{metric_name}:{dust_iou:.3f})", f"{metric_name} Debug (G=Dust R=RealNG B=DustOnly)"]
+            is_two_stage = "TWO_STAGE" in dust_detail
+            if is_two_stage:
+                debug_label = "TwoStage Debug (G=Dust R=RealNG B=DustMask)"
+            else:
+                debug_label = f"{metric_name} Debug (G=Dust R=RealNG B=DustOnly)"
+            labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask (Overall{metric_name}:{dust_iou:.3f})", debug_label]
             panels = [orig, heatmap_panel, omit_panel, dust_panel, iou_debug_panel]
             for zoom_img, zoom_label in zoom_results:
                 panels.append(zoom_img)
