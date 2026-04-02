@@ -12,10 +12,13 @@ Pipeline (與 server 一致):
   Phase 4  : 炸彈比對 + peak 計算
   Output   : save_panel_heatmaps (overview + tile detail + edge defect)
 """
+import sys
 import re
 import time
 from pathlib import Path
 from typing import List, Tuple, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cv2
 import numpy as np

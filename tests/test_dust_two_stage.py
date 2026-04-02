@@ -10,8 +10,11 @@ v2 improvements:
   - Fallback: if no features found but heatmap is strong -> keep NG
   - Better visualization with per-feature detail
 """
-import re, cv2, numpy as np
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import re, cv2, numpy as np
 from capi_config import CAPIConfig
 from capi_inference import CAPIInferencer, AOIReportDefect, DEFAULT_PRODUCT_RESOLUTION
 import matplotlib
@@ -81,14 +84,15 @@ def find_features_in_zone(crop_gray, crop_dust, min_area=3):
 
 
 def main():
-    config = CAPIConfig.from_yaml("configs/capi_3f.yaml")
+    project_root = Path(__file__).resolve().parent.parent
+    config = CAPIConfig.from_yaml(str(project_root / "configs" / "capi_3f.yaml"))
     config.dust_brightness_threshold = 20
     config.dust_threshold_floor = 15
     config.dust_heatmap_top_percent = 0.2
     config.dust_heatmap_iou_threshold = 0.100
     inferencer = CAPIInferencer(config)
 
-    image_dir = Path("./test_images")
+    image_dir = project_root / "test_images"
     image_path = list(image_dir.glob("W0F*.tif"))[0]
     omit_image = cv2.imread(str(list(image_dir.glob("PINIGBI*.*"))[0]), cv2.IMREAD_UNCHANGED)
     txt = list(image_dir.glob("*_X*Y*.txt"))[0]
@@ -336,7 +340,9 @@ def main():
         axes[1, zi].axis("off")
 
     plt.tight_layout()
-    out = "test_dust_comparison_output/debug_two_stage.png"
+    out_dir = project_root / "test_dust_comparison_output"
+    out_dir.mkdir(exist_ok=True)
+    out = str(out_dir / "debug_two_stage.png")
     fig.savefig(out, dpi=130, bbox_inches="tight")
     plt.close(fig)
     print(f"\nChart saved: {out}")
