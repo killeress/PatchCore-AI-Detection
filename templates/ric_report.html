@@ -1130,7 +1130,7 @@
             if (existing) existing.remove();
 
             function fmtDiff(oldVal, newVal, suffix) {
-                const d = newVal - oldVal;
+                const d = Math.round((newVal - oldVal) * 100) / 100;
                 if (d === 0) return `<span class="omit-toast-val same">${newVal}${suffix || ''}</span>`;
                 const cls = d > 0 ? 'up' : 'down';
                 const sign = d > 0 ? '+' : '';
