@@ -2334,21 +2334,9 @@ class CAPIInferencer:
         命名規則假設: {前綴}_{HHMMSS}.{副檔名}
         例如: G0F00000_104441.tif → 前綴 G0F00000，時間戳 104441。
 
-        排序優先順序：
-          1. 【優先】檔名中的 HHMMSS 時間戳（跨 Windows/Linux 完全一致，
-                     不受 rsync/cp 複製時 mtime 被保留的影響）
-          2. 【Fallback】st_mtime（當檔名格式不符時使用）
+        使用 st_mtime 排序，避免跨日時 HHMMSS 時間戳倒序 (如 235959 → 000001)。
         """
         from collections import defaultdict
-
-        def _sort_key(f: Path):
-            """回傳排序鍵：優先取檔名時間戳，否則用 st_mtime"""
-            parts = f.stem.rsplit("_", 1)
-            if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 6:
-                # 檔名時間戳 (HHMMSS) 轉整數，數值越大越新
-                return (1, int(parts[1]), 0.0)
-            # fallback: mtime (跨平台一致，但可能受複製影響)
-            return (0, 0, f.stat().st_mtime)
 
         prefix_map: Dict[str, List[Path]] = defaultdict(list)
         for f in image_files:
@@ -2362,7 +2350,7 @@ class CAPIInferencer:
 
         selected = []
         for prefix, files in prefix_map.items():
-            latest = max(files, key=_sort_key)
+            latest = max(files, key=lambda f: f.stat().st_mtime)
             selected.append(latest)
 
         return sorted(selected)
@@ -2446,13 +2434,15 @@ class CAPIInferencer:
             logger.info(f"AOI Report: 報告目錄不存在: {report_dir}")
             return result_map
 
-        # 找最新的 .TXT 檔案 (按檔名排序取最後一個)
-        txt_files = sorted(report_dir.glob("*.TXT")) + sorted(report_dir.glob("*.txt"))
+        # 找最新的 .TXT 檔案 (依 st_mtime 排序，避免跨日時 HHMMSS 時間戳倒序)
+        # 用 set 去重，避免 Windows 大小寫不敏感時 *.TXT 與 *.txt 回傳相同檔案
+        txt_files = list({f.resolve() for f in
+            list(report_dir.glob("*.TXT")) + list(report_dir.glob("*.txt"))})
         if not txt_files:
             logger.info(f"AOI Report: 報告目錄中無 TXT 檔案: {report_dir}")
             return result_map
 
-        report_file = txt_files[-1]
+        report_file = max(txt_files, key=lambda f: f.stat().st_mtime)
         logger.info(f"AOI Report: 讀取報告 {report_file.name}")
 
         try:
@@ -2474,7 +2464,7 @@ class CAPIInferencer:
             ng_string = None
             for field in fields:
                 field = field.strip()
-                if field.startswith('NG'):
+                if field.startswith('NG') and len(field) > 2:
                     ng_string = field[2:]  # 去掉 NG 前綴
                     break
 
