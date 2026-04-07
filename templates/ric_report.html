@@ -680,6 +680,31 @@
     .omit-toggle input:checked + .omit-toggle-slider::before {
         transform: translateX(18px);
     }
+    /* Toast notification */
+    .omit-toast {
+        position: fixed; top: 24px; right: 24px; z-index: 9999;
+        background: var(--card-bg, #1e293b); border: 1px solid rgba(245,158,11,0.3);
+        border-radius: 12px; padding: 16px 22px; min-width: 280px; max-width: 420px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        animation: omitToastIn 0.3s ease-out;
+        font-size: 0.85rem; color: var(--text-primary, #e2e8f0);
+    }
+    .omit-toast.fade-out { animation: omitToastOut 0.3s ease-in forwards; }
+    .omit-toast-title { font-weight: 700; margin-bottom: 8px; color: #f59e0b; font-size: 0.9rem; }
+    .omit-toast-row { display: flex; justify-content: space-between; padding: 2px 0; }
+    .omit-toast-label { color: var(--text-muted, #94a3b8); }
+    .omit-toast-val { font-family: 'Fira Code', monospace; font-weight: 600; }
+    .omit-toast-val.up { color: #f87171; }
+    .omit-toast-val.down { color: #34d399; }
+    .omit-toast-val.same { color: var(--text-muted, #94a3b8); }
+    .omit-toast-divider { border-top: 1px solid rgba(148,163,184,0.15); margin: 6px 0; }
+    .omit-toast-close {
+        position: absolute; top: 10px; right: 14px; cursor: pointer;
+        font-size: 1.2rem; color: var(--text-muted, #94a3b8); line-height: 1;
+    }
+    .omit-toast-close:hover { color: var(--text-primary, #e2e8f0); }
+    @keyframes omitToastIn { from { opacity:0; transform:translateY(-12px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes omitToastOut { from { opacity:1; } to { opacity:0; transform:translateY(-12px); } }
 </style>
 {% endblock %}
 
@@ -1024,7 +1049,7 @@
             const combos = {};
             const daily = {};
             let missReviewed = 0;
-            const missByCat = { dust_misfilter: 0, threshold_high: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
+            const missByCat = { dust_misfilter: 0, data_error_actually_ok: 0, threshold_high: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
 
             records.forEach(rec => {
                 const eqp = rec.result_eqp || 'OK';
@@ -1087,6 +1112,7 @@
         }
 
         function toggleIgnoreOmit(checked) {
+            const prevSummary = currentSummary;
             ignoreOmit = checked;
             document.getElementById('client_omitBadge').style.display = checked ? 'inline' : 'none';
             if (!rawRecords.length) return;
@@ -1096,6 +1122,52 @@
             renderCharts(s);
             renderDetails(applyFilter(rawRecords));
             renderReviewTab(s, rawRecords);
+            if (prevSummary) showOmitToast(prevSummary, s, checked);
+        }
+
+        function showOmitToast(prev, curr, isOn) {
+            const existing = document.querySelector('.omit-toast');
+            if (existing) existing.remove();
+
+            function fmtDiff(oldVal, newVal, suffix) {
+                const d = newVal - oldVal;
+                if (d === 0) return `<span class="omit-toast-val same">${newVal}${suffix || ''}</span>`;
+                const cls = d > 0 ? 'up' : 'down';
+                const sign = d > 0 ? '+' : '';
+                return `<span class="omit-toast-val ${cls}">${newVal}${suffix || ''} (${sign}${d})</span>`;
+            }
+
+            const rows = [
+                ['漏檢數', fmtDiff(prev.aiMiss, curr.aiMiss, ' 筆')],
+                ['過檢數', fmtDiff(prev.aiOver, curr.aiOver, ' 筆')],
+                ['AI 準確率', fmtDiff(
+                    prev.total > 0 ? Math.round(prev.aiCorrect / prev.total * 1000) / 10 : 0,
+                    curr.total > 0 ? Math.round(curr.aiCorrect / curr.total * 1000) / 10 : 0,
+                    '%')],
+                ['AI NG 數', fmtDiff(prev.aiNG, curr.aiNG, ' 筆')],
+            ];
+
+            // Miss category breakdown
+            const catLabels = { dust_misfilter: 'Dust 誤濾', data_error_actually_ok: '資料有誤', ric_misjudge: 'RIC 誤判', threshold_high: '閾值偏高', outside_aoi_area: 'AOI 區域外', other: '其他' };
+            const prevCat = prev.missReviewStats ? prev.missReviewStats.byCategory : {};
+            const currCat = curr.missReviewStats ? curr.missReviewStats.byCategory : {};
+            const catRows = [];
+            for (const [key, label] of Object.entries(catLabels)) {
+                const o = prevCat[key] || 0, n = currCat[key] || 0;
+                if (o > 0 || n > 0) catRows.push([label, fmtDiff(o, n, '')]);
+            }
+
+            const toast = document.createElement('div');
+            toast.className = 'omit-toast';
+            toast.innerHTML = `
+                <span class="omit-toast-close">&times;</span>
+                <div class="omit-toast-title">${isOn ? '🔍 忽略 OMIT 已開啟' : '🔄 忽略 OMIT 已關閉'}</div>
+                ${rows.map(([l, v]) => `<div class="omit-toast-row"><span class="omit-toast-label">${l}</span>${v}</div>`).join('')}
+                ${catRows.length ? '<div class="omit-toast-divider"></div><div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:4px;">漏檢原因變化</div>' +
+                    catRows.map(([l, v]) => `<div class="omit-toast-row"><span class="omit-toast-label">${l}</span>${v}</div>`).join('') : ''}
+            `;
+            document.body.appendChild(toast);
+            toast.querySelector('.omit-toast-close').addEventListener('click', () => { toast.classList.add('fade-out'); setTimeout(() => toast.remove(), 300); });
         }
 
         // ── Upload Logic ──

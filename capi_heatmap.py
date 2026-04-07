@@ -116,8 +116,15 @@ def build_region_zoom_panels(
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, tag_color, 2)
             cv2.putText(panel, f"{metric_name}: {dust_ol}/{area} = {cov:.4f}", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
-            cmp_op = ">=" if is_dust else "<"
-            cv2.putText(panel, f"{cov:.4f} {cmp_op} Thr:{iou_threshold:.4f} -> {tag}", (10, 85),
+            peak_in = region.get("peak_in_dust", True)
+            thr_str = f"Thr:{iou_threshold}"
+            if is_dust:
+                reason = f"PeakInDust ({thr_str}) -> DUST"
+            elif cov < iou_threshold:
+                reason = f"{metric_name}<{thr_str} -> REAL"
+            else:
+                reason = f"PeakNotInDust ({thr_str}) -> REAL"
+            cv2.putText(panel, reason, (10, 85),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, tag_color, 1)
 
             # 圖例
@@ -415,7 +422,8 @@ class HeatmapManager:
 
         # --- Panel 6+: Region Zoom (逐區域放大，最多 3 張) ---
         zoom_results = []
-        if has_omit and is_dust and tile_info is not None:
+        has_region_details = tile_info is not None and getattr(tile_info, 'dust_region_details', None)
+        if has_omit and has_region_details:
             region_details = getattr(tile_info, 'dust_region_details', None)
             heatmap_binary = getattr(tile_info, 'dust_heatmap_binary', None)
             zoom_results = build_region_zoom_panels(
