@@ -1452,12 +1452,12 @@ class CAPIDatabase:
             if ric_j == "NG":
                 ric_ng_total += 1
                 
-        aoi_over_rate = round((aoi_over / aoi_ng_count * 100), 1) if aoi_ng_count > 0 else 0
-        aoi_miss_rate = round((aoi_miss / ric_ng_total * 100), 1) if ric_ng_total > 0 else 0
+        aoi_over_rate = round((aoi_over / total * 100), 1) if total > 0 else 0
+        aoi_miss_rate = round((aoi_miss / total * 100), 1) if total > 0 else 0
 
         # AI 過檢率 / 漏檢率
-        ai_over_rate = round(ai_over / ai_ng_count * 100, 1) if ai_ng_count > 0 else 0
-        ai_miss_rate = round(ai_miss / ric_ng_total * 100, 1) if ric_ng_total > 0 else 0
+        ai_over_rate = round(ai_over / total * 100, 1) if total > 0 else 0
+        ai_miss_rate = round(ai_miss / total * 100, 1) if total > 0 else 0
 
         by_day = []
         for date_str in sorted(day_stats.keys()):

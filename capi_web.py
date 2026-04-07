@@ -1292,10 +1292,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if eqp == "NG" and ric == "OK":
                 daily[day]["aoiOver"] += 1
 
-        aoiOverRate = round(aoiOver / aoiNG * 100, 1) if aoiNG > 0 else 0
-        aiOverRate = round(aiOver / aiNG * 100, 1) if aiNG > 0 else 0
-        aiMissRate = round(aiMiss / ricNG * 100, 1) if ricNG > 0 else 0
-        revivalRate = round(revival / aoiNG * 100, 1) if aoiNG > 0 else 0
+        aoiOverRate = round(aoiOver / total * 100, 1) if total > 0 else 0
+        aiOverRate = round(aiOver / total * 100, 1) if total > 0 else 0
+        aiMissRate = round(aiMiss / total * 100, 1) if total > 0 else 0
+        revivalRate = round(revival / total * 100, 1) if total > 0 else 0
 
         return {
             "total": total,

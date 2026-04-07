@@ -806,7 +806,7 @@
                 <h3>📅 每日過漏檢率追蹤 (分母為當日總數量)</h3>
                 <div class="chart-container"><canvas id="client_dailyMetricsChart"></canvas></div>
                 <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 8px;">
-                    📌 備註：此圖表之漏檢與過檢率分母皆為「當日影像總數量」，以此呈現出整體佔比走勢。
+                    📌 備註：過檢率與漏檢率分母皆為「當日影像總數量」，與上方卡片計算方式一致。
                 </div>
             </div>
         </div>
@@ -1052,19 +1052,22 @@
                 combos[combo] = (combos[combo] || 0) + 1;
 
                 const day = (rec.time_stamp || 'unknown').substring(0, 10);
-                if (!daily[day]) daily[day] = { total: 0, aoiCorrect: 0, aiCorrect: 0, aiMiss: 0, aiOver: 0, aoiOver: 0 };
+                if (!daily[day]) daily[day] = { total: 0, aoiCorrect: 0, aiCorrect: 0, aiMiss: 0, aiOver: 0, aoiOver: 0, aiNG: 0, aoiNG: 0, ricNG: 0 };
                 daily[day].total++;
                 if (eqp === ric) daily[day].aoiCorrect++;
                 if (ai === ric) daily[day].aiCorrect++;
                 if (ai === 'OK' && ric === 'NG') daily[day].aiMiss++;
                 if (ai === 'NG' && ric === 'OK') daily[day].aiOver++;
                 if (eqp === 'NG' && ric === 'OK') daily[day].aoiOver++;
+                if (ai === 'NG') daily[day].aiNG++;
+                if (eqp === 'NG') daily[day].aoiNG++;
+                if (ric === 'NG') daily[day].ricNG++;
             });
 
-            const aoiOverRate = aoiNG > 0 ? Math.round(aoiOver / aoiNG * 1000) / 10 : 0;
-            const aiOverRate = aiNG > 0 ? Math.round(aiOver / aiNG * 1000) / 10 : 0;
-            const aiMissRate = ricNG > 0 ? Math.round(aiMiss / ricNG * 1000) / 10 : 0;
-            const revivalRate = aoiNG > 0 ? Math.round(revival / aoiNG * 1000) / 10 : 0;
+            const aoiOverRate = total > 0 ? Math.round(aoiOver / total * 1000) / 10 : 0;
+            const aiOverRate = total > 0 ? Math.round(aiOver / total * 1000) / 10 : 0;
+            const aiMissRate = total > 0 ? Math.round(aiMiss / total * 1000) / 10 : 0;
+            const revivalRate = total > 0 ? Math.round(revival / total * 1000) / 10 : 0;
 
             return {
                 total, aoiNG, aiNG, ricNG,
@@ -1365,25 +1368,25 @@
             <div class="stat-card over" data-client-filter="aoi_over" onclick="clientComp.filterByCard('aoi_over')">
                 <div class="label">AOI 過檢率</div>
                 <div class="value">${s.aoiOverRate}%</div>
-                <div class="detail">${s.aoiOver} / ${s.aoiNG} 筆 AOI判NG中為過檢</div>
+                <div class="detail">${s.aoiOver} / ${s.total} 筆 AOI判NG中為過檢</div>
                 <div class="filter-hint">🔍 AOI=NG, RIC=OK</div>
             </div>
             <div class="stat-card over" data-client-filter="ai_over" onclick="clientComp.filterByCard('ai_over')">
                 <div class="label">AI 過檢率</div>
                 <div class="value">${s.aiOverRate}%</div>
-                <div class="detail">${s.aiOver} / ${s.aiNG} 筆 AI判NG中為過檢</div>
+                <div class="detail">${s.aiOver} / ${s.total} 筆 AI判NG中為過檢</div>
                 <div class="filter-hint">🔍 AI=NG, RIC=OK</div>
             </div>
             <div class="stat-card miss" data-client-filter="ai_miss" onclick="clientComp.filterByCard('ai_miss')">
                 <div class="label">AI 漏檢率</div>
                 <div class="value">${s.aiMissRate}%</div>
-                <div class="detail">${s.aiMiss} / ${s.ricNG} 筆真實NG被AI漏檢</div>
+                <div class="detail">${s.aiMiss} / ${s.total} 筆真實NG被AI漏檢</div>
                 <div class="filter-hint">🔍 AI=OK, RIC=NG</div>
             </div>
             <div class="stat-card revival" data-client-filter="revival" onclick="clientComp.filterByCard('revival')">
                 <div class="label">復活率</div>
                 <div class="value">${s.revivalRate}%</div>
-                <div class="detail">${s.revival} / ${s.aoiNG} 筆 AOI判NG被AI復活且RIC=OK</div>
+                <div class="detail">${s.revival} / ${s.total} 筆 AOI判NG被AI復活且RIC=OK</div>
                 <div class="filter-hint">🔍 AOI=NG, AI=OK, RIC=OK</div>
             </div>
             `;

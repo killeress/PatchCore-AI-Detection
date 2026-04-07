@@ -3284,6 +3284,10 @@ class CAPIInferencer:
                             dust_regions = [r for r in region_details if r["is_dust"]]
                             real_regions = [r for r in region_details if not r["is_dust"]]
 
+                            _two_stage_ran = False
+                            _ts_features = []
+                            _ts_dust_mask_no_ext = None
+
                             if has_real_defect:
                                 # 有非灰塵的真實異常區域 → 保留為 NG
                                 tile.is_suspected_dust_or_scratch = False
@@ -3300,9 +3304,6 @@ class CAPIInferencer:
                             else:
                                 # 所有異常區域都與灰塵重疊 → 初步標記為灰塵
                                 # 如果啟用兩階段判定，進行二次確認
-                                _two_stage_ran = False
-                                _ts_features = []
-                                _ts_dust_mask_no_ext = None
                                 if self.config.dust_two_stage_enabled:
                                     # 兩階段: 用原圖精準定位 feature 點，比對 dust_mask (ext=0)
                                     dust_mask_no_ext = None
