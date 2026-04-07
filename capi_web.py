@@ -395,6 +395,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _handle_search(self, query: dict, path: str):
         """搜尋頁面（含日期篩選、分頁）"""
+        record_id = query.get("record_id", [""])[0]
         glass_id = query.get("glass_id", [""])[0]
         machine_no = query.get("machine_no", [""])[0]
         ai_judgment = query.get("ai_judgment", [""])[0]
@@ -403,7 +404,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         cross_filter = query.get("cross_filter", [""])[0]
 
         # 預設顯示近 7 天（首次進入頁面時）
-        if not any([glass_id, machine_no, ai_judgment, start_date, end_date, cross_filter]):
+        if not any([record_id, glass_id, machine_no, ai_judgment, start_date, end_date, cross_filter]):
             today = datetime.now()
             end_date = today.strftime("%Y-%m-%d")
             start_date = (today - timedelta(days=6)).strftime("%Y-%m-%d")
@@ -427,6 +428,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 start_date=start_date,
                 end_date=end_date_full,
                 cross_filter=cross_filter,
+                record_id=record_id,
                 limit=per_page,
                 offset=(page - 1) * per_page,
             )
@@ -437,6 +439,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         template = self.jinja_env.get_template("search.html")
         html = template.render(
+            record_id=record_id,
             glass_id=glass_id,
             machine_no=machine_no,
             ai_judgment=ai_judgment,
@@ -457,6 +460,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         import io
         from datetime import datetime as _dt
 
+        record_id  = query.get("record_id",   [""])[0]
         glass_id   = query.get("glass_id",    [""])[0]
         machine_no = query.get("machine_no",  [""])[0]
         ai_judgment = query.get("ai_judgment", [""])[0]
@@ -472,6 +476,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             start_date=start_date,
             end_date=end_date_full,
             cross_filter=cross_filter,
+            record_id=record_id,
             limit=10000,
         ) if self.db else ([], 0)
 

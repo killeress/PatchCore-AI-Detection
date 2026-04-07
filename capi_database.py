@@ -803,6 +803,7 @@ class CAPIDatabase:
         start_date: str = "",
         end_date: str = "",
         cross_filter: str = "",
+        record_id: str = "",
         limit: int = 100,
         offset: int = 0,
     ) -> Tuple[List[Dict], int]:
@@ -810,6 +811,9 @@ class CAPIDatabase:
         conditions = []
         params = []
 
+        if record_id:
+            conditions.append("CAST(id AS TEXT) LIKE ?")
+            params.append(f"%{record_id}%")
         if glass_id:
             conditions.append("glass_id LIKE ?")
             params.append(f"%{glass_id}%")
@@ -1055,7 +1059,7 @@ class CAPIDatabase:
         finally:
             conn.close()
 
-    VALID_MISS_CATEGORIES = {'dust_misfilter', 'threshold_high', 'ric_misjudge', 'outside_aoi_area', 'other'}
+    VALID_MISS_CATEGORIES = {'dust_misfilter', 'threshold_high', 'ric_misjudge', 'outside_aoi_area', 'data_error_actually_ok', 'other'}
 
     def save_miss_review(self, client_record_id: int, category: str, note: str = '') -> int:
         """儲存或更新漏檢 Review (UPSERT by client_record_id)"""

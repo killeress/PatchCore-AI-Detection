@@ -175,6 +175,7 @@
 <div class="card">
     <h3 style="margin-bottom:12px">搜尋推論記錄</h3>
     <form method="GET" action="/search" class="search-box">
+        <input name="record_id" placeholder="記錄 ID" value="{{ record_id }}" style="max-width:100px;">
         <input name="glass_id" placeholder="玻璃編號 Glass ID" value="{{ glass_id }}">
         <input name="machine_no" placeholder="機台編號 Machine No" value="{{ machine_no }}">
         <select name="ai_judgment">
@@ -193,16 +194,16 @@
     <div class="cross-filter-bar">
         <span class="cf-label">快捷篩選</span>
         <a class="cross-filter-btn revival{% if cross_filter=='ng_ok' %} active{% endif %}"
-           href="/search?cross_filter=ng_ok{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}{% if glass_id %}&glass_id={{ glass_id }}{% endif %}{% if machine_no %}&machine_no={{ machine_no }}{% endif %}">
+           href="/search?cross_filter=ng_ok{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}{% if record_id %}&record_id={{ record_id }}{% endif %}{% if glass_id %}&glass_id={{ glass_id }}{% endif %}{% if machine_no %}&machine_no={{ machine_no }}{% endif %}">
             <span class="cf-dot"></span>AI 救回<span style="opacity:0.55;font-weight:400;margin-left:2px;">AOI NG → AI OK</span>
         </a>
         <a class="cross-filter-btn intercept{% if cross_filter=='ok_ng' %} active{% endif %}"
-           href="/search?cross_filter=ok_ng{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}{% if glass_id %}&glass_id={{ glass_id }}{% endif %}{% if machine_no %}&machine_no={{ machine_no }}{% endif %}">
+           href="/search?cross_filter=ok_ng{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}{% if record_id %}&record_id={{ record_id }}{% endif %}{% if glass_id %}&glass_id={{ glass_id }}{% endif %}{% if machine_no %}&machine_no={{ machine_no }}{% endif %}">
             <span class="cf-dot"></span>AI 攔截<span style="opacity:0.55;font-weight:400;margin-left:2px;">AOI OK → AI NG</span>
         </a>
         {% if cross_filter %}
         <a class="cross-filter-btn clear"
-           href="/search?{% if glass_id %}glass_id={{ glass_id }}&{% endif %}{% if machine_no %}machine_no={{ machine_no }}&{% endif %}{% if ai_judgment %}ai_judgment={{ ai_judgment }}&{% endif %}{% if start_date %}start_date={{ start_date }}&{% endif %}{% if end_date %}end_date={{ end_date }}{% endif %}">
+           href="/search?{% if record_id %}record_id={{ record_id }}&{% endif %}{% if glass_id %}glass_id={{ glass_id }}&{% endif %}{% if machine_no %}machine_no={{ machine_no }}&{% endif %}{% if ai_judgment %}ai_judgment={{ ai_judgment }}&{% endif %}{% if start_date %}start_date={{ start_date }}&{% endif %}{% if end_date %}end_date={{ end_date }}{% endif %}">
             ✕ 清除
         </a>
         {% endif %}
@@ -218,7 +219,7 @@
             {% elif cross_filter == 'ok_ng' %}<span class="cross-filter-tag" style="background:rgba(239,68,68,0.15);color:#ef4444;">AI 攔截</span>{% endif %}
         </h3>
         {% if records %}
-        <a href="/search/export?glass_id={{ glass_id }}&machine_no={{ machine_no }}&ai_judgment={{ ai_judgment }}&start_date={{ start_date }}&end_date={{ end_date }}&cross_filter={{ cross_filter }}"
+        <a href="/search/export?record_id={{ record_id }}&glass_id={{ glass_id }}&machine_no={{ machine_no }}&ai_judgment={{ ai_judgment }}&start_date={{ start_date }}&end_date={{ end_date }}&cross_filter={{ cross_filter }}"
             style="padding:8px 18px;background:rgba(34,197,94,0.15);border:1px solid rgba(34,197,94,0.5);border-radius:8px;color:#22c55e;text-decoration:none;font-size:0.9rem;font-weight:600;display:flex;align-items:center;gap:6px;transition:all 0.2s;"
             onmouseover="this.style.background='rgba(34,197,94,0.25)'"
             onmouseout="this.style.background='rgba(34,197,94,0.15)'">
@@ -259,7 +260,7 @@
     </table>
 
     {% if total_pages > 1 %}
-    {% set base_url = "/search?glass_id=" ~ glass_id ~ "&machine_no=" ~ machine_no ~ "&ai_judgment=" ~ ai_judgment ~ "&start_date=" ~ start_date ~ "&end_date=" ~ end_date ~ "&cross_filter=" ~ cross_filter %}
+    {% set base_url = "/search?record_id=" ~ record_id ~ "&glass_id=" ~ glass_id ~ "&machine_no=" ~ machine_no ~ "&ai_judgment=" ~ ai_judgment ~ "&start_date=" ~ start_date ~ "&end_date=" ~ end_date ~ "&cross_filter=" ~ cross_filter %}
     <div class="pagination">
         {% if page > 1 %}
             <a href="{{ base_url }}&page=1" title="第一頁">&laquo;</a>

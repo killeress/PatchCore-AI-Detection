@@ -1311,7 +1311,11 @@ class CAPIInferencer:
 
             if score >= active_threshold:
                 anomaly_tiles.append((tile, score, anomaly_map))
-                
+            elif tile.is_aoi_coord_tile:
+                # AOI 座標 tile 即使低於閾值也保留，供追蹤查看
+                tile.is_aoi_coord_below_threshold = True
+                anomaly_tiles.append((tile, score, anomaly_map))
+
         # 執行傳統 CV 邊緣檢查
         # 如果 edge_inspector 啟用，並且我們有 raw_bounds
         if getattr(self, "edge_inspector", None) and self.edge_inspector.config.enabled and result.raw_bounds:
@@ -1832,8 +1836,6 @@ class CAPIInferencer:
                 region_union = region_area + total_dust - region_dust_overlap
                 region_coverage = float(region_dust_overlap / region_union) if region_union > 0 else 0.0
 
-            is_dust_region = region_coverage >= iou_threshold
-
             # 此區域內 anomaly_map 的最大值與位置 (無須複製整個陣列)
             region_vals = anomaly_map_f[region_mask]
             region_max_score = float(np.max(region_vals))
@@ -1841,12 +1843,18 @@ class CAPIInferencer:
             local_argmax = np.argmax(region_vals)
             peak_pos = (region_indices[0][local_argmax], region_indices[1][local_argmax])
 
+            # 判定是否為灰塵：覆蓋率須達閾值 且 峰值（最熱點）必須落在灰塵 mask 內
+            # 若峰值不在灰塵上，代表缺陷核心與灰塵無關，僅邊緣碰到，不應判為灰塵
+            peak_in_dust = bool(dust_bool[peak_pos[0], peak_pos[1]])
+            is_dust_region = region_coverage >= iou_threshold and peak_in_dust
+
             region_details.append({
                 "label_id": label_id,
                 "area": region_area,
                 "dust_overlap": region_dust_overlap,
                 "coverage": region_coverage,
                 "is_dust": is_dust_region,
+                "peak_in_dust": peak_in_dust,
                 "max_score": region_max_score,
                 "peak_yx": peak_pos,
             })
@@ -2110,12 +2118,30 @@ class CAPIInferencer:
             panel_br[dust_only] = (255, 100, 0)  # 藍色 = 僅灰塵遮罩
 
             # 逐區域上色
+            region_peak_dust_map = {r["label_id"]: r.get("peak_in_dust", True) for r in region_details}
+            orig_h, orig_w = heatmap_binary.shape[:2]
+            scale_x = sz / orig_w
+            scale_y = sz / orig_h
             for label_id in range(1, num_labels):
                 region_mask = labels_resized == label_id
                 if region_dust_map.get(label_id, False):
                     panel_br[region_mask] = (0, 200, 0)     # 綠色 = 灰塵(已抑制)
                 else:
                     panel_br[region_mask] = (0, 0, 255)      # 紅色 = 真實缺陷(保留)
+
+            # 在每個 region 的峰值位置畫標記
+            for r in region_details:
+                py, px = r["peak_yx"]
+                sx = int(px * scale_x)
+                sy = int(py * scale_y)
+                peak_in = r.get("peak_in_dust", True)
+                if peak_in:
+                    # 峰值在灰塵上 → 黃色圓點
+                    cv2.circle(panel_br, (sx, sy), 4, (0, 255, 255), -1)
+                else:
+                    # 峰值不在灰塵上 → 白色十字 (關鍵：這是被救回的真實缺陷)
+                    cv2.drawMarker(panel_br, (sx, sy), (255, 255, 255),
+                                   cv2.MARKER_CROSS, 10, 2)
 
             real_count = sum(1 for r in region_details if not r["is_dust"])
             dust_count = sum(1 for r in region_details if r["is_dust"])
@@ -2144,7 +2170,11 @@ class CAPIInferencer:
         # 顯示 per-region max coverage（實際判定用的值）而非 overall
         if region_details:
             region_max_cov = max(r["coverage"] for r in region_details)
-            cv2.putText(panel_br, f"Region{metric_name}:{region_max_cov:.3f} {verdict_text}", (5, 20),
+            peak_out_count = sum(1 for r in region_details
+                                 if r["coverage"] >= self.config.dust_heatmap_iou_threshold
+                                 and not r.get("peak_in_dust", True))
+            peak_hint = f" PeakOut:{peak_out_count}" if peak_out_count > 0 else ""
+            cv2.putText(panel_br, f"Region{metric_name}:{region_max_cov:.3f} {verdict_text}{peak_hint}", (5, 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, verdict_color, 1)
         else:
             cv2.putText(panel_br, f"{metric_name}:{iou:.3f} {verdict_text}", (5, 20),
