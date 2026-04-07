@@ -33,11 +33,20 @@ var/
 
 # Logs and Temporary files
 *.log
-test_heatmaps/
+test_heatmaps*/
+test_images/
+test_dust_comparison_output/
 static/heatmaps/
 temp/
 tmp/
 .superpowers/
+
+# Data files and screenshots
+*.xls
+*.xlsx
+*.png
+*.jpg
+*.jpeg
 
 # IDEs and Editors
 .vscode/
@@ -51,6 +60,7 @@ Thumbs.db
 
 # Agent Metadata
 .agent/
+.claude/
 brain/
 .agents/
 _agents/
