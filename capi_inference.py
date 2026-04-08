@@ -1845,8 +1845,10 @@ class CAPIInferencer:
 
             # 判定是否為灰塵：覆蓋率須達閾值 且 峰值（最熱點）必須落在灰塵 mask 內
             # 若峰值不在灰塵上，代表缺陷核心與灰塵無關，僅邊緣碰到，不應判為灰塵
+            # 但 heatmap peak 有膨脹偏移問題，高覆蓋率時直接判 dust 不依賴 peak 位置
             peak_in_dust = bool(dust_bool[peak_pos[0], peak_pos[1]])
-            is_dust_region = region_coverage >= iou_threshold and peak_in_dust
+            high_cov_thr = getattr(self.config, 'dust_high_cov_threshold', 0.5)
+            is_dust_region = region_coverage >= iou_threshold and (peak_in_dust or region_coverage >= high_cov_thr)
 
             # 殘餘異常檢查：即使 peak 在灰塵上，若非灰塵區域仍有強異常信號則 rescue
             # 解決「灰塵信號遮蔽同區域內細微真實缺陷」的漏檢問題

@@ -148,6 +148,7 @@ class CAPIConfig:
     dust_two_stage_fallback_score: float = 0.7    # 找不到特徵時，heatmap 分數高於此值保守判 NG
     dust_detect_dark_particles: bool = True   # 偵測暗色顆粒/圖案 (如偏黑 MARK)，當作表面灰塵過濾
     dust_residual_ratio: float = 0.7          # 殘餘異常比例：非灰塵區 sub-peak / 區域 peak >= 此值時 rescue 為 REAL_NG
+    dust_high_cov_threshold: float = 0.5       # 高覆蓋率門檻：region COV >= 此值時直接判 dust，不要求 peak_in_dust（因 heatmap peak 有膨脹偏移）
     
     # OMIT 過曝偵測設定 (曝光過高的 OMIT 圖無法檢測灰塵，需記錄供工程追蹤)
     omit_overexposure_mean_threshold: int = 200    # 平均亮度超過此值視為過曝
