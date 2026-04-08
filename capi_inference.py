@@ -1848,6 +1848,23 @@ class CAPIInferencer:
             peak_in_dust = bool(dust_bool[peak_pos[0], peak_pos[1]])
             is_dust_region = region_coverage >= iou_threshold and peak_in_dust
 
+            # 殘餘異常檢查：即使 peak 在灰塵上，若非灰塵區域仍有強異常信號則 rescue
+            # 解決「灰塵信號遮蔽同區域內細微真實缺陷」的漏檢問題
+            residual_ratio = 0.0
+            if is_dust_region:
+                non_dust_in_region = region_mask & (~dust_bool)
+                if np.any(non_dust_in_region):
+                    sub_peak_score = float(np.max(anomaly_map_f[non_dust_in_region]))
+                    residual_ratio = sub_peak_score / region_max_score if region_max_score > 0 else 0.0
+                    residual_thr = getattr(self.config, 'dust_residual_ratio', 0.7)
+                    if residual_ratio >= residual_thr:
+                        is_dust_region = False
+                        logging.info(
+                            f"    Region {label_id}: DUST->REAL_NG rescue "
+                            f"(residual sub-peak {sub_peak_score:.4f}/{region_max_score:.4f}"
+                            f"={residual_ratio:.2f} >= {residual_thr})"
+                        )
+
             region_details.append({
                 "label_id": label_id,
                 "area": region_area,
@@ -1855,6 +1872,7 @@ class CAPIInferencer:
                 "coverage": region_coverage,
                 "is_dust": is_dust_region,
                 "peak_in_dust": peak_in_dust,
+                "residual_ratio": residual_ratio,
                 "max_score": region_max_score,
                 "peak_yx": peak_pos,
             })

@@ -132,6 +132,28 @@ def main():
     if dm.shape != (tile_h, tile_w):
         dm = cv2.resize(dm, (tile_w, tile_h), interpolation=cv2.INTER_NEAREST)
 
+    # ================================================================
+    # Per-Region Check (with residual sub-peak rescue)
+    # ================================================================
+    is_dust_full, dust_mask_full, _, detail_full = inferencer.check_dust_or_scratch_feature(omit_crop)
+    if is_dust_full and anomaly_map is not None:
+        has_real, real_peak, overall_iou, region_details, hm_bin, _ = \
+            inferencer.check_dust_per_region(
+                dust_mask_full, anomaly_map,
+                top_percent=config.dust_heatmap_top_percent,
+                metric=config.dust_heatmap_metric,
+                iou_threshold=config.dust_heatmap_iou_threshold,
+            )
+        print("=" * 60)
+        print(f"PER_REGION (with residual rescue): has_real={has_real}")
+        for r in region_details:
+            res_info = f" residual={r.get('residual_ratio', 0):.2f}" if r.get('residual_ratio', 0) > 0 else ""
+            print(f"  Region {r['label_id']}: area={r['area']} cov={r['coverage']:.3f} "
+                  f"peak_in_dust={r['peak_in_dust']} is_dust={r['is_dust']}{res_info}")
+        verdict_pr = "REAL_NG" if has_real else "DUST"
+        print(f"  -> {verdict_pr}")
+        print("=" * 60)
+
     print("=" * 60)
     print("Two-Stage Approach v2")
     print("=" * 60)
@@ -227,7 +249,33 @@ def main():
     print("=" * 60)
 
     # ================================================================
-    # Visualization
+    # Per-Region Residual Rescue (NEW)
+    # ================================================================
+    is_dust_full, dust_mask_full, _, _ = inferencer.check_dust_or_scratch_feature(omit_crop)
+    pr_has_real = False
+    pr_region_details = []
+    pr_hm_bin = None
+    residual_map = None
+    if is_dust_full and anomaly_map is not None:
+        pr_has_real, pr_real_peak, pr_iou, pr_region_details, pr_hm_bin, _ = \
+            inferencer.check_dust_per_region(
+                dust_mask_full, anomaly_map,
+                top_percent=config.dust_heatmap_top_percent,
+                metric=config.dust_heatmap_metric,
+                iou_threshold=config.dust_heatmap_iou_threshold,
+            )
+        # Build residual map for visualization
+        dm_full = np.asarray(dust_mask_full, dtype=np.uint8)
+        if len(dm_full.shape) == 3:
+            dm_full = cv2.cvtColor(dm_full, cv2.COLOR_BGR2GRAY)
+        if dm_full.shape != anomaly_f.shape:
+            dm_full = cv2.resize(dm_full, (anomaly_f.shape[1], anomaly_f.shape[0]),
+                                 interpolation=cv2.INTER_NEAREST)
+        residual_map = anomaly_f.copy()
+        residual_map[dm_full > 0] = 0
+
+    # ================================================================
+    # Visualization (3 rows)
     # ================================================================
     tile_rgb = (cv2.cvtColor(tile_img, cv2.COLOR_BGR2RGB) if len(tile_img.shape) == 3
                 else cv2.cvtColor(tile_img, cv2.COLOR_GRAY2RGB))
@@ -235,12 +283,12 @@ def main():
     norm = cv2.normalize(anomaly_f, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     hm_rgb = cv2.cvtColor(cv2.applyColorMap(norm, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
 
-    fig, axes = plt.subplots(2, 4, figsize=(24, 12))
-    fig.suptitle("Two-Stage Approach v2\n"
-                 "Stage1: heatmap->hot zone | Stage2: original->features (dark+bright) | dust_mask(ext=0)->verdict",
+    fig, axes = plt.subplots(3, 4, figsize=(24, 18))
+    fig.suptitle("Dust Filtering Debug: Two-Stage + Residual Rescue\n"
+                 "Row1: Heatmap & Two-Stage | Row2: Zone Zoom | Row3: Residual Rescue (NEW)",
                  fontsize=13, fontweight="bold")
 
-    # Row 1 Col 0: heatmap + zones
+    # ---- Row 1: Heatmap + Two-Stage ----
     ax = axes[0, 0]
     ax.imshow(cv2.addWeighted(tile_sm, 0.5, hm_rgb, 0.5, 0))
     for zone in zones:
@@ -249,7 +297,6 @@ def main():
                      linewidth=2, edgecolor="lime", facecolor="none", linestyle="--"))
     ax.set_title("Stage 1: Heatmap + Hot Zone")
 
-    # Row 1 Col 1: original + features
     ax = axes[0, 1]
     ax.imshow(tile_sm)
     for feat in all_features:
@@ -260,9 +307,8 @@ def main():
         marker = "s" if feat["type"] == "bright" else "o"
         ax.plot(dx, dy, marker, color=color, markersize=8,
                 markeredgecolor="white", markeredgewidth=1.5)
-    ax.set_title("Stage 2: Features on Original\no=dark s=bright | yellow=DUST red=REAL")
+    ax.set_title("Stage 2: Features on Original\nyellow=DUST red=REAL")
 
-    # Row 1 Col 2: dust mask + features
     ax = axes[0, 2]
     ax.imshow(tile_sm)
     dm_sm = cv2.resize(dm, (w_am, h_am), interpolation=cv2.INTER_NEAREST)
@@ -277,39 +323,30 @@ def main():
         marker = "s" if feat["type"] == "bright" else "o"
         ax.plot(dx, dy, marker, color=color, markersize=8,
                 markeredgecolor="white", markeredgewidth=1.5)
-    ax.set_title("Features vs Dust Mask (ext=0)\nred NOT in yellow = REAL")
+    ax.set_title("Features vs Dust Mask (ext=0)")
 
-    # Row 1 Col 3: verdict
     ax = axes[0, 3]
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1)
     ax.text(0.5, 0.85, f"Score: {score:.4f}", fontsize=16, ha="center")
-    ax.text(0.5, 0.70, f"Features: {len(all_features)} (dark+bright)", fontsize=13, ha="center")
+    ax.text(0.5, 0.70, f"Two-Stage Features: {len(all_features)}", fontsize=13, ha="center")
     ax.text(0.5, 0.55, f"Dust: {len(dust_features)}  Real: {len(real_features)}", fontsize=14, ha="center")
     v_color = "red" if "NG" in verdict else "orange"
     v_short = "NG" if "NG" in verdict else "DUST(OK)"
-    ax.text(0.5, 0.35, f"-> {v_short}", fontsize=28, ha="center", fontweight="bold", color=v_color)
-    if fallback:
-        ax.text(0.5, 0.15, "(fallback: strong heatmap)", fontsize=10, ha="center", color="gray")
-    else:
-        ax.text(0.5, 0.15, "pixel-level comparison\next=0, no diffusion problem", fontsize=10, ha="center", color="gray")
+    ax.text(0.5, 0.35, f"Two-Stage: {v_short}", fontsize=22, ha="center", fontweight="bold", color=v_color)
+    ax.text(0.5, 0.15, "feature detection missed\nsubtle defect", fontsize=10, ha="center", color="gray")
     ax.axis("off")
-    ax.set_title("Verdict")
+    ax.set_title("Two-Stage Verdict")
 
-    # Row 2: Zoom per zone with detailed feature overlay
+    # ---- Row 2: Zoom per zone ----
     for zi, zone in enumerate(zones[:4]):
         ax = axes[1, zi]
         tx1, ty1, tx2, ty2 = zone["tile_bbox"]
         crop_rgb = tile_rgb[ty1:ty2, tx1:tx2]
         ax.imshow(crop_rgb)
-
-        # dust mask overlay
         crop_dm = dm[ty1:ty2, tx1:tx2]
         dust_ol_z = np.zeros((*crop_rgb.shape[:2], 4))
         dust_ol_z[crop_dm > 0] = [1, 1, 0, 0.3]
         ax.imshow(dust_ol_z)
-
-        # features in this zone
         zone_feats = [f for f in all_features if f["zone"] == zi]
         for feat in zone_feats:
             lx = feat["abs_pos"][0] - tx1
@@ -323,21 +360,90 @@ def main():
             ax.text(lx + 8, ly - 5, f"{tag}\n{feat['type']}\n{feat['area']}px",
                     fontsize=7, color="white", fontweight="bold",
                     bbox=dict(boxstyle="round,pad=0.2", facecolor=color, alpha=0.8))
-
-        # also show feature pixel masks
         for feat in zone_feats:
             fm = feat["mask"]
-            is_dust = feat["dust_ratio"] >= DUST_THRESHOLD
+            is_dust_f = feat["dust_ratio"] >= DUST_THRESHOLD
             feat_ol = np.zeros((*crop_rgb.shape[:2], 4))
-            feat_ol[fm] = [0, 1, 0, 0.4] if not is_dust else [1, 0.5, 0, 0.3]
+            feat_ol[fm] = [0, 1, 0, 0.4] if not is_dust_f else [1, 0.5, 0, 0.3]
             ax.imshow(feat_ol)
-
         n_d = sum(1 for f in zone_feats if f["dust_ratio"] >= DUST_THRESHOLD)
         n_r = sum(1 for f in zone_feats if f["dust_ratio"] < DUST_THRESHOLD)
-        ax.set_title(f"Zone {zi+1} Zoom | D={n_d} R={n_r}\ngreen highlight = REAL feature pixels")
-
+        ax.set_title(f"Zone {zi+1} Zoom | D={n_d} R={n_r}")
     for zi in range(len(zones), 4):
         axes[1, zi].axis("off")
+
+    # ---- Row 3: Residual Rescue (NEW) ----
+    # Col 0: Original heatmap
+    ax = axes[2, 0]
+    ax.imshow(hm_rgb)
+    ax.set_title(f"Original Heatmap\nmax={float(np.max(anomaly_f)):.4f}")
+
+    # Col 1: Dust mask overlay on heatmap
+    ax = axes[2, 1]
+    ax.imshow(hm_rgb)
+    if dust_mask_full is not None:
+        dm_full_vis = np.asarray(dust_mask_full, dtype=np.uint8)
+        if len(dm_full_vis.shape) == 3:
+            dm_full_vis = cv2.cvtColor(dm_full_vis, cv2.COLOR_BGR2GRAY)
+        if dm_full_vis.shape != (h_am, w_am):
+            dm_full_vis = cv2.resize(dm_full_vis, (w_am, h_am), interpolation=cv2.INTER_NEAREST)
+        dust_hm_ol = np.zeros((*hm_rgb.shape[:2], 4))
+        dust_hm_ol[dm_full_vis > 0] = [1, 1, 0, 0.6]
+        ax.imshow(dust_hm_ol)
+    ax.set_title("Heatmap + Dust Mask (yellow)\npeak may land on dust")
+
+    # Col 2: Residual heatmap (dust masked out)
+    ax = axes[2, 2]
+    if residual_map is not None:
+        res_max = float(np.max(residual_map))
+        res_norm = cv2.normalize(residual_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        res_rgb = cv2.cvtColor(cv2.applyColorMap(res_norm, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
+        # Gray out the masked (dust) areas
+        gray_bg = np.full_like(res_rgb, 40)
+        dm_full_bool = dm_full_vis > 0 if dust_mask_full is not None else np.zeros((h_am, w_am), dtype=bool)
+        res_vis = res_rgb.copy()
+        res_vis[dm_full_bool] = gray_bg[dm_full_bool]
+        ax.imshow(res_vis)
+        ax.set_title(f"Residual Heatmap (dust=gray)\nresidual max={res_max:.4f}")
+    else:
+        ax.text(0.5, 0.5, "N/A", fontsize=20, ha="center", va="center")
+        ax.axis("off")
+        ax.set_title("Residual Heatmap")
+
+    # Col 3: Residual Rescue Verdict
+    ax = axes[2, 3]
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1)
+    ax.text(0.5, 0.90, "Residual Rescue Check", fontsize=14, ha="center", fontweight="bold")
+    if pr_region_details:
+        y_pos = 0.75
+        for r in pr_region_details:
+            res_r = r.get('residual_ratio', 0)
+            res_thr = config.dust_residual_ratio
+            tag = "RESCUED -> REAL_NG" if (not r['is_dust'] and r['peak_in_dust']) else \
+                  ("DUST" if r['is_dust'] else "REAL_NG")
+            tag_color = "green" if "REAL" in tag else "orange"
+            ax.text(0.5, y_pos,
+                    f"Region {r['label_id']}: cov={r['coverage']:.2f}  "
+                    f"peak_in_dust={r['peak_in_dust']}",
+                    fontsize=10, ha="center")
+            y_pos -= 0.08
+            if res_r > 0:
+                ax.text(0.5, y_pos,
+                        f"residual={res_r:.2f} (thr={res_thr})  -> {tag}",
+                        fontsize=11, ha="center", fontweight="bold", color=tag_color)
+            else:
+                ax.text(0.5, y_pos, f"-> {tag}",
+                        fontsize=11, ha="center", fontweight="bold", color=tag_color)
+            y_pos -= 0.12
+    pr_verdict = "REAL_NG" if pr_has_real else "DUST(OK)"
+    pr_color = "red" if pr_has_real else "orange"
+    ax.text(0.5, 0.25, f"Final: {pr_verdict}", fontsize=26, ha="center",
+            fontweight="bold", color=pr_color)
+    if pr_has_real and not real_features:
+        ax.text(0.5, 0.08, "Two-Stage missed it,\nResidual Rescue caught it!",
+                fontsize=11, ha="center", color="green", fontweight="bold")
+    ax.axis("off")
+    ax.set_title("Residual Rescue Verdict (NEW)")
 
     plt.tight_layout()
     out_dir = project_root / "test_dust_comparison_output"
