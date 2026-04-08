@@ -3648,6 +3648,36 @@ class CAPIInferencer:
                                 anomaly_map=anomaly_map, product_resolution=product_resolution,
                                 bomb_list=active_bombs,
                             )
+                        # AOI coord tile 保護: peak 可能被鄰近炸彈亮點吸引，
+                        # 需驗證原始 AOI 產品座標本身也在炸彈容忍範圍內
+                        if is_bomb and tile.is_aoi_coord_tile and tile.aoi_product_x >= 0:
+                            aoi_matches_bomb = False
+                            tolerance = self.config.bomb_match_tolerance
+                            for bomb in active_bombs:
+                                if not (img_prefix == bomb.image_prefix or
+                                        img_prefix.startswith(bomb.image_prefix + "_")):
+                                    continue
+                                if bomb.defect_type == "point":
+                                    for coord in bomb.coordinates:
+                                        if (abs(tile.aoi_product_x - coord[0]) <= tolerance and
+                                            abs(tile.aoi_product_y - coord[1]) <= tolerance):
+                                            aoi_matches_bomb = True
+                                            break
+                                elif bomb.defect_type == "line" and len(bomb.coordinates) >= 2:
+                                    # line 型: 檢查 AOI 座標是否在線段緩衝帶內
+                                    pt1, pt2 = bomb.coordinates[0], bomb.coordinates[1]
+                                    min_x = min(pt1[0], pt2[0]) - tolerance
+                                    max_x = max(pt1[0], pt2[0]) + tolerance
+                                    min_y = min(pt1[1], pt2[1])
+                                    max_y = max(pt1[1], pt2[1])
+                                    if (min_x <= tile.aoi_product_x <= max_x and
+                                        min_y <= tile.aoi_product_y <= max_y):
+                                        aoi_matches_bomb = True
+                                if aoi_matches_bomb:
+                                    break
+                            if not aoi_matches_bomb:
+                                is_bomb = False
+                                print(f"🛡️ {result.image_path.name} Tile@({tile.x},{tile.y}) Peak 匹配炸彈但 AOI 座標 ({tile.aoi_product_x},{tile.aoi_product_y}) 距離炸彈超過容忍度，保留為真實缺陷")
                         if is_bomb:
                             tile.is_bomb = True
                             tile.bomb_defect_code = bomb_code
