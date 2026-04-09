@@ -946,6 +946,10 @@
                 <h3>🔎 過檢原因分布</h3>
                 <div class="chart-container"><canvas id="over_review_pieChart"></canvas></div>
             </div>
+            <div class="chart-card">
+                <h3>📊 已回填原因分布</h3>
+                <div class="chart-container"><canvas id="over_review_reviewedPieChart"></canvas></div>
+            </div>
         </div>
         <!-- Over Review sub-tabs: 未處理 / 已處理 -->
         <div class="client-tabs" style="margin-bottom:16px;">
@@ -1084,6 +1088,7 @@
         let resultChart = null, comboChart = null, trendChart = null, confusionChart = null, dailyMetricsChart = null;
         let reviewPieChart = null;
         let overReviewPieChart = null;
+        let overReviewReviewedPieChart = null;
 
         // ── Ignore OMIT helpers ──
         function getEffectiveAI(rec) {
@@ -2173,6 +2178,7 @@
             const ors = summary.overReviewStats || { total: 0, reviewed: 0, unreviewed: 0, byCategory: {} };
             renderOverReviewStats(ors);
             renderOverReviewPieChart(ors);
+            renderOverReviewReviewedPieChart(ors);
             renderOverReviewTable(records);
         }
 
@@ -2232,6 +2238,51 @@
             }
 
             overReviewPieChart = new Chart(ctx, {
+                type: 'doughnut',
+                plugins: [window.ChartDataLabels],
+                data: {
+                    labels: labels,
+                    datasets: [{ data: data, backgroundColor: colors, borderWidth: 0 }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'bottom', labels: { color: '#94a3b8', padding: 16 } },
+                        datalabels: {
+                            color: '#e2e8f0', font: { size: 12, weight: 600 },
+                            formatter: (v, ctx) => {
+                                const total = ctx.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
+                                return total > 0 && v > 0 ? v + ' (' + (v / total * 100).toFixed(0) + '%)' : '';
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderOverReviewReviewedPieChart(ors) {
+            const ctx = document.getElementById('over_review_reviewedPieChart').getContext('2d');
+            if (overReviewReviewedPieChart) overReviewReviewedPieChart.destroy();
+
+            const labels = [];
+            const data = [];
+            const colors = [];
+
+            Object.entries(ors.byCategory || {}).forEach(([key, count]) => {
+                if (count > 0) {
+                    labels.push(OVER_CATEGORY_LABELS[key] || key);
+                    data.push(count);
+                    colors.push(OVER_CATEGORY_COLORS[key] || '#64748b');
+                }
+            });
+
+            if (data.length === 0) {
+                labels.push('尚無回填');
+                data.push(1);
+                colors.push('rgba(148,163,184,0.2)');
+            }
+
+            overReviewReviewedPieChart = new Chart(ctx, {
                 type: 'doughnut',
                 plugins: [window.ChartDataLabels],
                 data: {
@@ -2399,6 +2450,7 @@
             const ors = { total, reviewed, unreviewed: total - reviewed, byCategory };
             renderOverReviewStats(ors);
             renderOverReviewPieChart(ors);
+            renderOverReviewReviewedPieChart(ors);
             renderOverReviewTable(rawRecords);
         }
 
