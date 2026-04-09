@@ -1912,7 +1912,7 @@
         };
 
         function renderReviewTab(summary, records) {
-            const mrs = summary.missReviewStats;
+            const mrs = summary.missReviewStats || { total: 0, reviewed: 0, unreviewed: 0, byCategory: {} };
             renderReviewStats(mrs);
             renderReviewPieChart(mrs);
             renderReviewTable(records);
@@ -2170,7 +2170,7 @@
         };
 
         function renderOverReviewTab(summary, records) {
-            const ors = summary.overReviewStats;
+            const ors = summary.overReviewStats || { total: 0, reviewed: 0, unreviewed: 0, byCategory: {} };
             renderOverReviewStats(ors);
             renderOverReviewPieChart(ors);
             renderOverReviewTable(records);
