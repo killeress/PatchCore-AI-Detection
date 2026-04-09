@@ -227,6 +227,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_miss_review_save()
             elif path == "/api/ric/miss-review/delete":
                 self._handle_miss_review_delete()
+            elif path == "/api/ric/over-review":
+                self._handle_over_review_save()
+            elif path == "/api/ric/over-review/delete":
+                self._handle_over_review_delete()
             elif path == "/api/settings/update":
                 self._handle_api_settings_update()
             elif path == "/api/settings/reload":
@@ -1194,7 +1198,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """
         from capi_database import CAPIDatabase
 
-        _empty_cats = lambda: {c: 0 for c in CAPIDatabase.VALID_MISS_CATEGORIES}
+        _empty_miss_cats = lambda: {c: 0 for c in CAPIDatabase.VALID_MISS_CATEGORIES}
+        _empty_over_cats = lambda: {c: 0 for c in CAPIDatabase.VALID_OVER_CATEGORIES}
         total = len(records)
         if total == 0:
             return {
@@ -1207,7 +1212,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "combos": {}, "daily": {},
                 "missReviewStats": {
                     "total": 0, "reviewed": 0, "unreviewed": 0,
-                    "byCategory": _empty_cats(),
+                    "byCategory": _empty_miss_cats(),
+                },
+                "overReviewStats": {
+                    "total": 0, "reviewed": 0, "unreviewed": 0,
+                    "byCategory": _empty_over_cats(),
                 },
             }, []
 
@@ -1218,7 +1227,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         combos = {}
         daily = {}
         miss_reviewed = 0
-        miss_by_cat = _empty_cats()
+        miss_by_cat = _empty_miss_cats()
+        over_reviewed = 0
+        over_by_cat = _empty_over_cats()
         out_records = []
 
         for rec in records:
@@ -1243,6 +1254,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     and rec["inference_record_id"] in dust_affected_ids
                 ),
                 "miss_review": None,
+                "over_review": None,
             }
             if rec.get("review_id"):
                 out_rec["miss_review"] = {
@@ -1250,6 +1262,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "category": rec["review_category"],
                     "note": rec["review_note"] or "",
                     "updated_at": rec["review_updated_at"],
+                }
+            if rec.get("over_review_id"):
+                out_rec["over_review"] = {
+                    "id": rec["over_review_id"],
+                    "category": rec["over_review_category"],
+                    "note": rec["over_review_note"] or "",
+                    "updated_at": rec["over_review_updated_at"],
                 }
             out_records.append(out_rec)
 
@@ -1269,6 +1288,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 aoiOver += 1
             if ai == "NG" and ric == "OK":
                 aiOver += 1
+                if rec.get("over_review_category"):
+                    over_reviewed += 1
+                    cat = rec["over_review_category"]
+                    if cat in over_by_cat:
+                        over_by_cat[cat] += 1
             if ai == "OK" and ric == "NG":
                 aiMiss += 1
                 if rec.get("review_category"):
@@ -1316,6 +1340,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "reviewed": miss_reviewed,
                 "unreviewed": aiMiss - miss_reviewed,
                 "byCategory": miss_by_cat,
+            },
+            "overReviewStats": {
+                "total": aiOver,
+                "reviewed": over_reviewed,
+                "unreviewed": aiOver - over_reviewed,
+                "byCategory": over_by_cat,
             },
         }, out_records
 
@@ -1374,6 +1404,50 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": False, "error": "Review 不存在"})
         except Exception as e:
             logger.error(f"Miss review delete error: {e}", exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
+    def _handle_over_review_save(self):
+        """API: 儲存/更新過檢 Review"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+
+            client_record_id = data.get("client_record_id")
+            category = data.get("category", "")
+            note = data.get("note", "")
+
+            if not client_record_id:
+                self._send_json({"success": False, "error": "缺少 client_record_id"})
+                return
+
+            review_id = self.db.save_over_review(int(client_record_id), category, note)
+            self._send_json({"success": True, "id": review_id, "message": "Review 已儲存"})
+        except ValueError as ve:
+            self._send_json({"success": False, "error": str(ve)})
+        except Exception as e:
+            logger.error(f"Over review save error: {e}", exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
+    def _handle_over_review_delete(self):
+        """API: 刪除過檢 Review"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+
+            client_record_id = data.get("client_record_id")
+            if not client_record_id:
+                self._send_json({"success": False, "error": "缺少 client_record_id"})
+                return
+
+            deleted = self.db.delete_over_review(int(client_record_id))
+            if deleted:
+                self._send_json({"success": True, "message": "Review 已刪除"})
+            else:
+                self._send_json({"success": False, "error": "Review 不存在"})
+        except Exception as e:
+            logger.error(f"Over review delete error: {e}", exc_info=True)
             self._send_json({"success": False, "error": str(e)})
 
     def _handle_ric_report_api(self, query: dict):

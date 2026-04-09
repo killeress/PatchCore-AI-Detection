@@ -791,6 +791,7 @@
         <div class="client-tab active" data-client-tab="analysis" onclick="clientComp.switchTab('analysis')">📈 統計分析</div>
         <div class="client-tab" data-client-tab="detail" onclick="clientComp.switchTab('detail')">📋 逐筆明細</div>
         <div class="client-tab" data-client-tab="review" onclick="clientComp.switchTab('review')">🔍 漏檢 Review</div>
+        <div class="client-tab" data-client-tab="over_review" onclick="clientComp.switchTab('over_review')">🔎 過檢 Review</div>
     </div>
 
     <!-- Sub-Tab 1: Analysis (unchanged) -->
@@ -937,6 +938,76 @@
         </div>
     </div>
 
+    <!-- Sub-Tab 4: Over Review (過檢) -->
+    <div class="client-tab-panel" id="client_panel-over_review">
+        <div class="stats-grid" id="over_review_statsGrid"></div>
+        <div class="charts-row">
+            <div class="chart-card">
+                <h3>🔎 過檢原因分布</h3>
+                <div class="chart-container"><canvas id="over_review_pieChart"></canvas></div>
+            </div>
+        </div>
+        <!-- Over Review sub-tabs: 未處理 / 已處理 -->
+        <div class="client-tabs" style="margin-bottom:16px;">
+            <div class="client-tab active" data-over-review-tab="pending" onclick="clientComp.switchOverReviewTab('pending')">⏳ 未處理 <span id="over_review_pendingCount" style="font-size:0.78rem;"></span></div>
+            <div class="client-tab" data-over-review-tab="done" onclick="clientComp.switchOverReviewTab('done')">✅ 已處理 <span id="over_review_doneCount" style="font-size:0.78rem;"></span></div>
+        </div>
+
+        <div class="card" id="over_review_panel_pending">
+            <div class="detail-header">
+                <h3>⏳ 待 Review</h3>
+            </div>
+            <div class="table-wrap" id="over_review_tableWrap_pending">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>檢測時間</th>
+                            <th>Panel ID</th>
+                            <th>機台</th>
+                            <th>AOI</th>
+                            <th>AI</th>
+                            <th>RIC</th>
+                            <th>DATASTR</th>
+                            <th>推論紀錄</th>
+                            <th style="min-width:160px;">分類</th>
+                            <th style="min-width:200px;">備註</th>
+                            <th style="min-width:100px;">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="over_review_detailBody_pending"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="card" id="over_review_panel_done" style="display:none;">
+            <div class="detail-header">
+                <h3>✅ 已處理</h3>
+            </div>
+            <div class="table-wrap" id="over_review_tableWrap_done">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>檢測時間</th>
+                            <th>Panel ID</th>
+                            <th>機台</th>
+                            <th>AOI</th>
+                            <th>AI</th>
+                            <th>RIC</th>
+                            <th>DATASTR</th>
+                            <th>推論紀錄</th>
+                            <th>分類</th>
+                            <th>備註</th>
+                            <th style="min-width:100px;">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="over_review_detailBody_done"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
 </div>
 </div><!-- end #tab-ric -->
 
@@ -1012,6 +1083,7 @@
         let ignoreOmit = false;  // 忽略 OMIT 灰塵過濾模式
         let resultChart = null, comboChart = null, trendChart = null, confusionChart = null, dailyMetricsChart = null;
         let reviewPieChart = null;
+        let overReviewPieChart = null;
 
         // ── Ignore OMIT helpers ──
         function getEffectiveAI(rec) {
@@ -1050,6 +1122,8 @@
             const daily = {};
             let missReviewed = 0;
             const missByCat = { dust_misfilter: 0, data_error_actually_ok: 0, threshold_high: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
+            let overReviewed = 0;
+            const overByCat = { edge_false_positive: 0, within_spec: 0, overexposure: 0, surface_scratch: 0, aoi_ai_false_positive: 0, other: 0 };
 
             records.forEach(rec => {
                 const eqp = rec.result_eqp || 'OK';
@@ -1062,7 +1136,14 @@
                 if (eqp === ric) aoiCorrect++;
                 if (ai === ric) aiCorrect++;
                 if (eqp === 'NG' && ric === 'OK') aoiOver++;
-                if (ai === 'NG' && ric === 'OK') aiOver++;
+                if (ai === 'NG' && ric === 'OK') {
+                    aiOver++;
+                    if (rec.over_review && rec.over_review.category) {
+                        overReviewed++;
+                        const cat = rec.over_review.category;
+                        if (cat in overByCat) overByCat[cat]++;
+                    }
+                }
                 if (ai === 'OK' && ric === 'NG') {
                     aiMiss++;
                     if (rec.miss_review && rec.miss_review.category) {
@@ -1108,6 +1189,12 @@
                     unreviewed: aiMiss - missReviewed,
                     byCategory: missByCat,
                 },
+                overReviewStats: {
+                    total: aiOver,
+                    reviewed: overReviewed,
+                    unreviewed: aiOver - overReviewed,
+                    byCategory: overByCat,
+                },
             };
         }
 
@@ -1122,6 +1209,7 @@
             renderCharts(s);
             renderDetails(applyFilter(rawRecords));
             renderReviewTab(s, rawRecords);
+            renderOverReviewTab(s, rawRecords);
             if (prevSummary) showOmitToast(prevSummary, s, checked);
         }
 
@@ -1389,6 +1477,7 @@
                     renderCharts(currentSummary);
                     renderDetails(rawRecords);
                     renderReviewTab(currentSummary, rawRecords);
+                    renderOverReviewTab(currentSummary, rawRecords);
                 })
                 .catch(err => {
                     loading.style.display = 'none';
@@ -2059,15 +2148,270 @@
             renderReviewTable(rawRecords);
         }
 
+        // ── Over Review Tab ──
+        const OVER_CATEGORY_LABELS = {
+            'edge_false_positive': '邊緣過檢',
+            'within_spec': '規格內',
+            'overexposure': '過曝',
+            'surface_scratch': '表面划痕',
+            'aoi_ai_false_positive': 'AOI & AI 過檢',
+            'other': '其他',
+        };
+        // Ordered keys for dropdown (邊緣過檢, 規格內, 過曝 first)
+        const OVER_CATEGORY_ORDER = ['edge_false_positive', 'within_spec', 'overexposure', 'surface_scratch', 'aoi_ai_false_positive', 'other'];
+
+        const OVER_CATEGORY_COLORS = {
+            'edge_false_positive': '#f59e0b',
+            'within_spec': '#3b82f6',
+            'overexposure': '#ef4444',
+            'surface_scratch': '#22c55e',
+            'aoi_ai_false_positive': '#a855f7',
+            'other': '#64748b',
+        };
+
+        function renderOverReviewTab(summary, records) {
+            const ors = summary.overReviewStats;
+            renderOverReviewStats(ors);
+            renderOverReviewPieChart(ors);
+            renderOverReviewTable(records);
+        }
+
+        function renderOverReviewStats(ors) {
+            const grid = document.getElementById('over_review_statsGrid');
+            const completionRate = ors.total > 0 ? (ors.reviewed / ors.total * 100).toFixed(1) : 0;
+            grid.innerHTML = `
+            <div class="stat-card over">
+                <div class="label">過檢總數</div>
+                <div class="value">${ors.total}</div>
+                <div class="detail">AI=NG, RIC=OK</div>
+            </div>
+            <div class="stat-card ai">
+                <div class="label">已 Review</div>
+                <div class="value">${ors.reviewed}</div>
+                <div class="detail">${ors.total > 0 ? (ors.reviewed / ors.total * 100).toFixed(1) : 0}%</div>
+            </div>
+            <div class="stat-card miss">
+                <div class="label">未 Review</div>
+                <div class="value">${ors.unreviewed}</div>
+                <div class="detail">${ors.total > 0 ? (ors.unreviewed / ors.total * 100).toFixed(1) : 0}%</div>
+            </div>
+            <div class="stat-card match">
+                <div class="label">完成率</div>
+                <div class="value">${completionRate}%</div>
+                <div class="detail">${ors.reviewed} / ${ors.total}</div>
+            </div>
+            `;
+        }
+
+        function renderOverReviewPieChart(ors) {
+            const ctx = document.getElementById('over_review_pieChart').getContext('2d');
+            if (overReviewPieChart) overReviewPieChart.destroy();
+
+            const labels = [];
+            const data = [];
+            const colors = [];
+
+            Object.entries(ors.byCategory).forEach(([key, count]) => {
+                if (count > 0) {
+                    labels.push(OVER_CATEGORY_LABELS[key] || key);
+                    data.push(count);
+                    colors.push(OVER_CATEGORY_COLORS[key] || '#64748b');
+                }
+            });
+
+            if (ors.unreviewed > 0) {
+                labels.push('未 Review');
+                data.push(ors.unreviewed);
+                colors.push('rgba(148,163,184,0.4)');
+            }
+
+            if (data.length === 0) {
+                labels.push('無過檢');
+                data.push(1);
+                colors.push('rgba(148,163,184,0.2)');
+            }
+
+            overReviewPieChart = new Chart(ctx, {
+                type: 'doughnut',
+                plugins: [window.ChartDataLabels],
+                data: {
+                    labels: labels,
+                    datasets: [{ data: data, backgroundColor: colors, borderWidth: 0 }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'bottom', labels: { color: '#94a3b8', padding: 16 } },
+                        datalabels: {
+                            color: '#e2e8f0', font: { size: 12, weight: 600 },
+                            formatter: (v, ctx) => {
+                                const total = ctx.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
+                                return total > 0 && v > 0 ? v + ' (' + (v / total * 100).toFixed(0) + '%)' : '';
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderOverReviewTable(records) {
+            const overRecords = records.filter(r => getEffectiveAI(r) === 'NG' && deriveJudgment(r.datastr) === 'OK');
+            const pending = overRecords.filter(r => !r.over_review || !r.over_review.category);
+            const done = overRecords.filter(r => r.over_review && r.over_review.category);
+
+            document.getElementById('over_review_pendingCount').textContent = `(${pending.length})`;
+            document.getElementById('over_review_doneCount').textContent = `(${done.length})`;
+
+            _fillOverReviewRows(document.getElementById('over_review_detailBody_pending'), pending, true);
+            _fillOverReviewRows(document.getElementById('over_review_detailBody_done'), done, false);
+        }
+
+        function _fillOverReviewRows(tbody, rows, editable) {
+            tbody.innerHTML = '';
+            rows.forEach((row, i) => {
+                const review = row.over_review;
+                const hasReview = review && review.category;
+
+                const categoryOptions = OVER_CATEGORY_ORDER.map(k =>
+                    `<option value="${k}" ${hasReview && review.category === k ? 'selected' : ''}>${OVER_CATEGORY_LABELS[k]}</option>`
+                ).join('');
+
+                const tr = document.createElement('tr');
+                tr.id = `over_review_row_${row.id}`;
+                tr.innerHTML = `
+                <td style="color:var(--text-muted); font-size:0.8rem;">${i + 1}</td>
+                <td style="font-family:'Fira Code',monospace; font-size:0.75rem; color:var(--text-muted); white-space:nowrap;">${row.time_stamp.substring(5, 19)}</td>
+                <td style="font-family:'Fira Code',monospace; font-size:0.75rem; white-space:nowrap;" title="${row.pnl_id}">${row.pnl_id.length > 12 ? row.pnl_id.substring(0,12) + '…' : row.pnl_id}</td>
+                <td style="font-size:0.8rem;">${row.mach_id}</td>
+                <td><span class="badge badge-${row.result_eqp === 'NG' ? 'ng' : 'ok'}">${row.result_eqp}</span></td>
+                <td><span class="badge badge-ng">NG</span></td>
+                <td><span class="badge badge-ok">OK</span></td>
+                <td style="font-size:0.75rem; color:var(--text-muted); word-break:break-all; max-width:350px;">${row.datastr}</td>
+                <td>${row.inference_record_id
+                    ? `<a href="/record/${row.inference_record_id}" target="_blank" style="color:var(--accent); font-size:0.82rem; text-decoration:underline;">🔗 查看</a>`
+                    : `<span style="color:var(--text-muted); font-size:0.78rem;">無紀錄</span>`
+                }</td>
+                <td>
+                    <select class="review-select" id="over_review_cat_${row.id}" onchange="clientComp._markOverDirty(${row.id})">
+                        <option value="">請選擇</option>
+                        ${categoryOptions}
+                    </select>
+                </td>
+                <td>
+                    <input type="text" class="review-input" id="over_review_note_${row.id}"
+                           value="${hasReview ? (review.note || '').replace(/"/g, '&quot;') : ''}"
+                           placeholder="備註 (選填)"
+                           onchange="clientComp._markOverDirty(${row.id})">
+                </td>
+                <td id="over_review_action_${row.id}">
+                    ${hasReview
+                        ? `<span class="review-saved">已儲存 ✓</span><button class="review-btn-delete" onclick="clientComp._deleteOverReview(${row.id})">刪除</button>`
+                        : `<button class="review-btn-save" id="over_review_save_${row.id}" onclick="clientComp._saveOverReview(${row.id})">儲存</button>`
+                    }
+                </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function switchOverReviewTab(tabName) {
+            document.querySelectorAll('[data-over-review-tab]').forEach(t => t.classList.toggle('active', t.dataset.overReviewTab === tabName));
+            document.getElementById('over_review_panel_pending').style.display = tabName === 'pending' ? 'block' : 'none';
+            document.getElementById('over_review_panel_done').style.display = tabName === 'done' ? 'block' : 'none';
+        }
+
+        function _markOverDirty(recordId) {
+            const actionCell = document.getElementById(`over_review_action_${recordId}`);
+            actionCell.innerHTML = `<button class="review-btn-save" onclick="clientComp._saveOverReview(${recordId})">儲存</button>`;
+        }
+
+        function _saveOverReview(recordId) {
+            const category = document.getElementById(`over_review_cat_${recordId}`).value;
+            if (!category) { alert('請選擇分類'); return; }
+            const note = document.getElementById(`over_review_note_${recordId}`).value;
+
+            const btn = document.querySelector(`#over_review_action_${recordId} .review-btn-save`);
+            if (btn) { btn.disabled = true; btn.textContent = '儲存中...'; }
+
+            fetch('/api/ric/over-review', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ client_record_id: recordId, category, note })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    const actionCell = document.getElementById(`over_review_action_${recordId}`);
+                    actionCell.innerHTML = `<span class="review-saved">已儲存 ✓</span><button class="review-btn-delete" onclick="clientComp._deleteOverReview(${recordId})">刪除</button>`;
+                    const rec = rawRecords.find(r => r.id === recordId);
+                    if (rec) rec.over_review = { id: data.id, category, note, updated_at: new Date().toISOString() };
+                    _updateOverReviewStats();
+                } else {
+                    alert('❌ ' + (data.error || '儲存失敗'));
+                    if (btn) { btn.disabled = false; btn.textContent = '儲存'; }
+                }
+            })
+            .catch(err => {
+                alert('❌ 網路錯誤: ' + err.message);
+                if (btn) { btn.disabled = false; btn.textContent = '儲存'; }
+            });
+        }
+
+        function _deleteOverReview(recordId) {
+            if (!confirm('確定要刪除此 Review？')) return;
+
+            fetch('/api/ric/over-review/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ client_record_id: recordId })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    document.getElementById(`over_review_cat_${recordId}`).value = '';
+                    document.getElementById(`over_review_note_${recordId}`).value = '';
+                    const actionCell = document.getElementById(`over_review_action_${recordId}`);
+                    actionCell.innerHTML = `<button class="review-btn-save" onclick="clientComp._saveOverReview(${recordId})">儲存</button>`;
+                    const rec = rawRecords.find(r => r.id === recordId);
+                    if (rec) rec.over_review = null;
+                    _updateOverReviewStats();
+                } else {
+                    alert('❌ ' + (data.error || '刪除失敗'));
+                }
+            })
+            .catch(err => alert('❌ 網路錯誤: ' + err.message));
+        }
+
+        function _updateOverReviewStats() {
+            const overRecords = rawRecords.filter(r => getEffectiveAI(r) === 'NG' && deriveJudgment(r.datastr) === 'OK');
+            const total = overRecords.length;
+            let reviewed = 0;
+            const byCategory = { edge_false_positive: 0, within_spec: 0, overexposure: 0, surface_scratch: 0, aoi_ai_false_positive: 0, other: 0 };
+
+            overRecords.forEach(r => {
+                if (r.over_review && r.over_review.category) {
+                    reviewed++;
+                    const cat = r.over_review.category;
+                    if (cat in byCategory) byCategory[cat]++;
+                }
+            });
+
+            const ors = { total, reviewed, unreviewed: total - reviewed, byCategory };
+            renderOverReviewStats(ors);
+            renderOverReviewPieChart(ors);
+            renderOverReviewTable(rawRecords);
+        }
+
         // ── Init ──
         initUpload();
         // Auto-load data on page load (default: all)
         quickFilter('today');
 
         return {
-            switchTab, switchReviewTab, filterByCard, exportCSV, clearDB,
+            switchTab, switchReviewTab, switchOverReviewTab, filterByCard, exportCSV, clearDB,
             quickFilter, customFilter, loadData, toggleUpload, toggleIgnoreOmit,
             _saveReview, _deleteReview, _markDirty,
+            _saveOverReview, _deleteOverReview, _markOverDirty,
         };
     })();
 

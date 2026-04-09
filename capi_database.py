@@ -225,6 +225,19 @@ class CAPIDatabase:
                     UNIQUE(client_record_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_miss_review_client ON miss_review(client_record_id);
+
+                -- Over review records (過檢原因回填)
+                CREATE TABLE IF NOT EXISTS over_review (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_record_id INTEGER NOT NULL,
+                    category TEXT NOT NULL,
+                    note TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    FOREIGN KEY (client_record_id) REFERENCES client_accuracy_records(id),
+                    UNIQUE(client_record_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_over_review_client ON over_review(client_record_id);
             """)
             
             # Migration for adding missing columns to existing database
@@ -1018,6 +1031,8 @@ class CAPIDatabase:
                            c.result_eqp, c.result_ai, c.result_ric, c.datastr,
                            mr.id as review_id, mr.category as review_category,
                            mr.note as review_note, mr.updated_at as review_updated_at,
+                           ovr.id as over_review_id, ovr.category as over_review_category,
+                           ovr.note as over_review_note, ovr.updated_at as over_review_updated_at,
                            (SELECT ir.id FROM inference_records ir
                             WHERE ir.glass_id = c.pnl_id
                               AND DATE(ir.request_time) = DATE(c.time_stamp)
@@ -1025,6 +1040,7 @@ class CAPIDatabase:
                            ) as inference_record_id
                     FROM client_accuracy_records c
                     LEFT JOIN miss_review mr ON mr.client_record_id = c.id
+                    LEFT JOIN over_review ovr ON ovr.client_record_id = c.id
                     {where_sql}
                     ORDER BY c.time_stamp DESC""",
                 params
@@ -1060,16 +1076,16 @@ class CAPIDatabase:
             conn.close()
 
     VALID_MISS_CATEGORIES = {'dust_misfilter', 'threshold_high', 'ric_misjudge', 'outside_aoi_area', 'data_error_actually_ok', 'other'}
+    VALID_OVER_CATEGORIES = {'edge_false_positive', 'within_spec', 'overexposure', 'surface_scratch', 'aoi_ai_false_positive', 'other'}
 
-    def save_miss_review(self, client_record_id: int, category: str, note: str = '') -> int:
-        """儲存或更新漏檢 Review (UPSERT by client_record_id)"""
-        if category not in self.VALID_MISS_CATEGORIES:
+    def _save_review(self, table: str, valid_categories: set, client_record_id: int, category: str, note: str = '') -> int:
+        """儲存或更新 Review (UPSERT by client_record_id)"""
+        if category not in valid_categories:
             raise ValueError(f"Invalid category: {category}")
 
         with self._lock:
             conn = self._get_conn()
             try:
-                # 驗證 client_record_id 存在
                 row = conn.execute(
                     "SELECT id FROM client_accuracy_records WHERE id = ?",
                     (client_record_id,)
@@ -1078,7 +1094,7 @@ class CAPIDatabase:
                     raise ValueError(f"Record not found: {client_record_id}")
 
                 conn.execute(
-                    """INSERT INTO miss_review (client_record_id, category, note)
+                    f"""INSERT INTO {table} (client_record_id, category, note)
                        VALUES (?, ?, ?)
                        ON CONFLICT(client_record_id)
                        DO UPDATE SET category = excluded.category,
@@ -1088,7 +1104,7 @@ class CAPIDatabase:
                 )
                 conn.commit()
                 review_id = conn.execute(
-                    "SELECT id FROM miss_review WHERE client_record_id = ?",
+                    f"SELECT id FROM {table} WHERE client_record_id = ?",
                     (client_record_id,)
                 ).fetchone()["id"]
                 return review_id
@@ -1098,19 +1114,31 @@ class CAPIDatabase:
             finally:
                 conn.close()
 
-    def delete_miss_review(self, client_record_id: int) -> bool:
-        """刪除漏檢 Review"""
+    def _delete_review(self, table: str, client_record_id: int) -> bool:
+        """刪除 Review"""
         with self._lock:
             conn = self._get_conn()
             try:
                 cursor = conn.execute(
-                    "DELETE FROM miss_review WHERE client_record_id = ?",
+                    f"DELETE FROM {table} WHERE client_record_id = ?",
                     (client_record_id,)
                 )
                 conn.commit()
                 return cursor.rowcount > 0
             finally:
                 conn.close()
+
+    def save_miss_review(self, client_record_id: int, category: str, note: str = '') -> int:
+        return self._save_review('miss_review', self.VALID_MISS_CATEGORIES, client_record_id, category, note)
+
+    def delete_miss_review(self, client_record_id: int) -> bool:
+        return self._delete_review('miss_review', client_record_id)
+
+    def save_over_review(self, client_record_id: int, category: str, note: str = '') -> int:
+        return self._save_review('over_review', self.VALID_OVER_CATEGORIES, client_record_id, category, note)
+
+    def delete_over_review(self, client_record_id: int) -> bool:
+        return self._delete_review('over_review', client_record_id)
 
     def get_client_accuracy_count(self) -> int:
         """取得 client accuracy records 總數"""
