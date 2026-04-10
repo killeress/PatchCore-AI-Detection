@@ -3282,7 +3282,9 @@ class CAPIInferencer:
                             reference_polygon_for_dark = self._find_panel_polygon(
                                 ref_binary, ref_bounds
                             )
-                        poly_str = "有" if reference_polygon_for_dark is not None else "無"
+                            poly_str = "有" if reference_polygon_for_dark is not None else "品質不足"
+                        else:
+                            poly_str = "關閉"
                         print(f"📐 黑圖參考邊界已從 {ref_path.name} 計算 → {reference_raw_bounds_for_dark}"
                               f" (polygon: {poly_str})")
                         break
