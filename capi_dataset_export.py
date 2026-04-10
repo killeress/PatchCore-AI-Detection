@@ -59,6 +59,77 @@ JOB_STATE_FAILED = "failed"
 JOB_STATE_CANCELLED = "cancelled"
 
 
+# ---- Crop Tool Functions ----
+
+def _pad_to_size(img: np.ndarray, target: int = CROP_SIZE,
+                 pad_top: int = 0, pad_left: int = 0) -> np.ndarray:
+    """將 img pad 到 target×target，黑邊 (value=0)。
+    pad_top / pad_left 允許指定「原圖左上角在 target 中的偏移」，
+    其餘空間用 BORDER_CONSTANT 補黑。
+    """
+    h, w = img.shape[:2]
+    pad_bottom = target - h - pad_top
+    pad_right = target - w - pad_left
+    if pad_top < 0 or pad_left < 0 or pad_bottom < 0 or pad_right < 0:
+        raise ValueError(
+            f"Image too large for target: shape=({h},{w}) target={target} "
+            f"offset=({pad_top},{pad_left})"
+        )
+    return cv2.copyMakeBorder(
+        img, pad_top, pad_bottom, pad_left, pad_right,
+        cv2.BORDER_CONSTANT, value=0
+    )
+
+
+def crop_patchcore_tile(img: np.ndarray, x: int, y: int, w: int, h: int) -> np.ndarray:
+    """從原圖切出 PatchCore tile 區域，不足 CROP_SIZE 用黑邊在右/下側 pad。
+
+    Args:
+        img: 原圖 (H, W, C) 或 (H, W)
+        x, y, w, h: tile 在原圖的絕對座標（tile_results.x/y/width/height）
+
+    Returns:
+        CROP_SIZE × CROP_SIZE 的 crop
+    """
+    H, W = img.shape[:2]
+    x1 = max(0, x)
+    y1 = max(0, y)
+    x2 = min(W, x + w)
+    y2 = min(H, y + h)
+    crop = img[y1:y2, x1:x2]
+    if crop.shape[:2] == (CROP_SIZE, CROP_SIZE):
+        return crop
+    # 右/下 pad（tile 通常在 grid 邊緣才會不足）
+    return _pad_to_size(crop, CROP_SIZE, pad_top=0, pad_left=0)
+
+
+def crop_edge_defect(img: np.ndarray, cx: int, cy: int) -> np.ndarray:
+    """以 (cx, cy) 為中心切出 CROP_SIZE × CROP_SIZE，clamp 後再 pad 保持中心對齐。
+
+    Args:
+        img: 原圖
+        cx, cy: edge_defect_results.center_x / center_y
+
+    Returns:
+        CROP_SIZE × CROP_SIZE 的 crop
+    """
+    half = CROP_SIZE // 2
+    H, W = img.shape[:2]
+    x1, y1 = cx - half, cy - half
+    x2, y2 = cx + half, cy + half
+
+    x1_c = max(0, x1)
+    y1_c = max(0, y1)
+    x2_c = min(W, x2)
+    y2_c = min(H, y2)
+    crop = img[y1_c:y2_c, x1_c:x2_c]
+
+    # 以 clamp 掉的量當 top/left pad，確保 defect 中心在 crop 的 (half, half)
+    pad_top = y1_c - y1
+    pad_left = x1_c - x1
+    return _pad_to_size(crop, CROP_SIZE, pad_top=pad_top, pad_left=pad_left)
+
+
 # ---- Dataclasses ----
 
 @dataclass
