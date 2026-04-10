@@ -58,6 +58,26 @@ JOB_STATE_COMPLETED = "completed"
 JOB_STATE_FAILED = "failed"
 JOB_STATE_CANCELLED = "cancelled"
 
+# 黑畫面判定閾值：crop 區域平均亮度 + 標準差都低於此值 → 視為無效黑畫面
+# (8-bit 圖像，正常 panel 圖像即便暗，std 也會明顯高於 5)
+BLACK_IMAGE_MEAN_THRESHOLD = 10.0
+BLACK_IMAGE_STD_THRESHOLD = 5.0
+
+
+def is_black_crop(crop: np.ndarray) -> bool:
+    """判定 crop 是否為黑畫面（無效區域，不適合當訓練樣本）。
+
+    以平均亮度 + 標準差雙重條件避免誤判：
+      - 全黑或接近全黑 (mean < 10)
+      - 且沒什麼變化 (std < 5)
+    正常的暗色產品圖仍會有足夠 std，不會被誤判。
+    """
+    if crop is None or crop.size == 0:
+        return True
+    mean = float(crop.mean())
+    std = float(crop.std())
+    return mean < BLACK_IMAGE_MEAN_THRESHOLD and std < BLACK_IMAGE_STD_THRESHOLD
+
 
 def determine_label(ric: str, over_category: Optional[str]) -> Optional[str]:
     """依 RIC 判定與 over_review category 決定輸出 label。
@@ -379,6 +399,13 @@ class DatasetExporter:
     ) -> List[SampleCandidate]:
         """把一筆 inference_record 展開成多個 SampleCandidate（依 image / tile / edge）。"""
         out: List[SampleCandidate] = []
+
+        # 若 AOI 機台 request 帶有 bomb_info，代表整片面板屬於炸彈測試，整個 record 跳過。
+        # 這比 image_results.is_bomb 更可靠 —— 後者只在「有炸彈 AND 沒真 NG AND 沒邊緣缺陷」
+        # 時才會設為 1，實測會漏掉同時有其他異常的炸彈 panel (capi_server.py:549)。
+        if detail.get("client_bomb_info"):
+            return out
+
         glass_id = detail.get("glass_id") or row.get("pnl_id") or ""
         inference_timestamp = detail.get("request_time") or row.get("time_stamp") or ""
         record_id = detail.get("id")
@@ -609,6 +636,11 @@ class DatasetExporter:
             defect_x = cand.edge_center_x
             defect_y = cand.edge_center_y
             sample_key = f"edge{cand.edge_defect_id}"
+
+        # 黑畫面檢測：crop 平均亮度 + std 都很低 → 無效樣本，跳過
+        if is_black_crop(crop):
+            row["status"] = "skipped_black_image"
+            return row
 
         # Heatmap 必須存在
         src_hm = Path(cand.src_heatmap_path) if cand.src_heatmap_path else None
