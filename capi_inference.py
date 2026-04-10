@@ -683,11 +683,16 @@ class CAPIInferencer:
                 raw_bbox = (int(x_min), int(y_min), int(x_max), int(y_max))
                 panel_polygon = self._find_panel_polygon(binary_mask, raw_bbox)
 
-            # 若 polygon 存在且使用者有設 otsu_offset，對 polygon 做同向內縮
-            if panel_polygon is not None and offset != 0:
+            # 對「新鮮偵測出的 polygon」做 offset 內縮 (reference_polygon 已由來源 caller
+            # 處理過 offset，不可在這裡再縮一次，否則 B0F 路徑會雙重內縮)
+            # 數學: 朝 centroid 沿對角線方向縮 offset px。對 axis-aligned 矩形而言
+            # 結果會比 bbox 的 4-edge inset 略大一點 (長寬比越懸殊差異越明顯)，但因
+            # Task 4 的 tile grid 是以 bbox 為界，差距的那幾個 px 不會真的出現在 mask 上。
+            if (panel_polygon is not None
+                    and offset != 0
+                    and reference_polygon is None):
                 cx = (panel_polygon[:, 0].mean())
                 cy = (panel_polygon[:, 1].mean())
-                # 朝中心點內縮 offset px
                 for i in range(4):
                     dx = panel_polygon[i, 0] - cx
                     dy = panel_polygon[i, 1] - cy
@@ -697,12 +702,32 @@ class CAPIInferencer:
                         panel_polygon[i, 0] -= dx * shrink
                         panel_polygon[i, 1] -= dy * shrink
 
-            # 若 polygon 存在且啟用 otsu_bottom_crop，截掉下半部
+            # 若 polygon 存在且啟用 otsu_bottom_crop，截掉下半部 —
+            # 用 left/right 邊與新底線 y=new_bottom 的交點當新的 BL/BR，
+            # 保留 panel 的底部傾斜度，而不是把兩角硬壓成同一 y。
             if panel_polygon is not None and original_y2 is not None:
                 new_bottom = float(y_end)
-                for i in (2, 3):  # BR, BL
-                    if panel_polygon[i, 1] > new_bottom:
-                        panel_polygon[i, 1] = new_bottom
+                TL = panel_polygon[0]
+                TR = panel_polygon[1]
+                BR = panel_polygon[2]
+                BL = panel_polygon[3]
+
+                def _intersect_edge_with_horizontal(p_top, p_bot, y_line):
+                    """線段 (p_top→p_bot) 與水平線 y=y_line 的交點 x 座標"""
+                    dy = p_bot[1] - p_top[1]
+                    if abs(dy) < 1e-9:
+                        return float(p_top[0])
+                    t = (y_line - p_top[1]) / dy
+                    return float(p_top[0] + t * (p_bot[0] - p_top[0]))
+
+                # 只有當現有 BR/BL 已經低於 new_bottom 時才做裁切
+                if BR[1] > new_bottom or BL[1] > new_bottom:
+                    new_BR_x = _intersect_edge_with_horizontal(TR, BR, new_bottom)
+                    new_BL_x = _intersect_edge_with_horizontal(TL, BL, new_bottom)
+                    panel_polygon[2, 0] = new_BR_x
+                    panel_polygon[2, 1] = new_bottom
+                    panel_polygon[3, 0] = new_BL_x
+                    panel_polygon[3, 1] = new_bottom
 
         return bounds, original_y2, panel_polygon
 

@@ -213,6 +213,110 @@ def test_preprocess_image_polygon_disabled_when_toggle_off():
     print("✅ test_preprocess_image_polygon_disabled_when_toggle_off")
 
 
+def test_reference_polygon_not_double_shrunk():
+    """
+    回歸 I1: 傳入 reference_polygon 時，calculate_otsu_bounds 不應再次內縮。
+    Task 6 的 B0F 路徑會依賴這個保證。
+    """
+    cfg = CAPIConfig()
+    cfg.tile_size = 512
+    cfg.otsu_offset = 10  # 明顯的 offset，雙重內縮會產生明顯差異
+    cfg.otsu_bottom_crop = 0
+    inf = CAPIInferencer(cfg)
+
+    # 用一張合成圖 (4000x3000 黑底 + 大白矩形)，OTSU 會成功偵測
+    synthetic = np.zeros((3000, 4000), dtype=np.uint8)
+    synthetic[200:2800, 300:3700] = 200  # 亮度 200 > OTSU threshold
+
+    # 第一次: 讓 calculate_otsu_bounds 自己算 polygon (會經過 offset 內縮)
+    bounds1, _, polygon1 = inf.calculate_otsu_bounds(synthetic)
+    assert polygon1 is not None, "第一次必須算出 polygon"
+
+    # 第二次: 傳入 polygon1 當 reference_polygon，結果應該跟 polygon1 相同
+    # (reference_polygon 已經是內縮過的，不應被再次內縮)
+    _, _, polygon2 = inf.calculate_otsu_bounds(
+        synthetic,
+        reference_polygon=polygon1,
+    )
+    assert polygon2 is not None
+    diff = float(np.abs(polygon1 - polygon2).max())
+    assert diff < 0.01, \
+        f"reference_polygon 被雙重內縮: max diff={diff:.3f}px (應為 0)"
+    print(f"✅ test_reference_polygon_not_double_shrunk (max diff={diff:.4f}px)")
+
+
+def test_bottom_crop_preserves_polygon_tilt():
+    """
+    回歸 I3: otsu_bottom_crop 觸發時，polygon 底邊應以 left/right edge 與新
+    底線的交點為新 BR/BL (保留傾斜度)，而不是只改 y 保留原 x。
+
+    用一個「左右 side edge 都斜」的平行四邊形驗證:
+      - TL (400, 100), TR (3600, 100)
+      - BL (200, 2800), BR (3800, 2800)  ← 底部比頂部寬 400 px
+    Side edges 斜率明確 → intersection 交點 x 與原 BL/BR x 有可量化的差異
+    """
+    cfg = CAPIConfig()
+    cfg.tile_size = 512
+    cfg.otsu_offset = 0
+    cfg.otsu_bottom_crop = 500
+    inf = CAPIInferencer(cfg)
+
+    synthetic = np.zeros((3000, 4000), dtype=np.uint8)
+    parallelogram = np.array([
+        [400, 100],    # TL
+        [3600, 100],   # TR
+        [3800, 2800],  # BR (右下比 TR 偏右 200 px)
+        [200, 2800],   # BL (左下比 TL 偏左 200 px)
+    ], dtype=np.int32)
+    cv2.fillPoly(synthetic, [parallelogram], 200)
+
+    bounds, original_y2, polygon = inf.calculate_otsu_bounds(synthetic)
+    assert polygon is not None
+    assert original_y2 is not None, "bottom_crop 應該觸發"
+
+    y_end = bounds[3]
+    BR = polygon[2]
+    BL = polygon[3]
+    TR = polygon[1]
+    TL = polygon[0]
+
+    # 裁切後 BR/BL 的 y 都應等於 new_bottom (= y_end)
+    assert abs(float(BR[1]) - y_end) < 0.5, \
+        f"BR.y={BR[1]} 應貼齊 y_end={y_end}"
+    assert abs(float(BL[1]) - y_end) < 0.5, \
+        f"BL.y={BL[1]} 應貼齊 y_end={y_end}"
+
+    # 核心驗證: 底邊的 x 應該是「side edge 與新底線的交點」
+    # Left edge 方程 (TL → BL) 在 y=y_end 處的 x:
+    def _interp_x(p_top, p_bot, y_line):
+        dy = float(p_bot[1]) - float(p_top[1])
+        if abs(dy) < 1e-9:
+            return float(p_top[0])
+        t = (y_line - float(p_top[1])) / dy
+        return float(p_top[0]) + t * (float(p_bot[0]) - float(p_top[0]))
+
+    expected_BL_x = _interp_x(TL, np.array([200.0, 2800.0]), y_end)
+    expected_BR_x = _interp_x(TR, np.array([3800.0, 2800.0]), y_end)
+
+    # 容忍 polyfit 偵測的數值誤差
+    assert abs(float(BL[0]) - expected_BL_x) < 5.0, \
+        f"BL.x={BL[0]} 應該 ≈ interp({expected_BL_x:.1f})，差距過大"
+    assert abs(float(BR[0]) - expected_BR_x) < 5.0, \
+        f"BR.x={BR[0]} 應該 ≈ interp({expected_BR_x:.1f})，差距過大"
+
+    # 舊 code 會把 BR.x/BL.x 保留成原 polygon 的 BR/BL x (3800/200)
+    # 新 code 應該產出明顯向內的 x (因為裁切後的 y 更靠近頂部)
+    # Diff = expected 交點 vs 原 BL/BR x
+    diff_BL_from_orig = abs(float(BL[0]) - 200.0)
+    diff_BR_from_orig = abs(float(BR[0]) - 3800.0)
+    assert diff_BL_from_orig > 5.0 or diff_BR_from_orig > 5.0, \
+        f"BL/BR x 完全沒動 (BL.x={BL[0]}, BR.x={BR[0]})，疑似舊 buggy 行為"
+
+    print(f"✅ test_bottom_crop_preserves_polygon_tilt "
+          f"(BR={BR.round(1).tolist()} [expect x≈{expected_BR_x:.1f}], "
+          f"BL={BL.round(1).tolist()} [expect x≈{expected_BL_x:.1f}])")
+
+
 if __name__ == "__main__":
     test_config_enable_panel_polygon_default_true()
     test_config_roundtrip_enable_panel_polygon()
@@ -227,5 +331,7 @@ if __name__ == "__main__":
 
     test_preprocess_image_populates_panel_polygon()
     test_preprocess_image_polygon_disabled_when_toggle_off()
+    test_reference_polygon_not_double_shrunk()
+    test_bottom_crop_preserves_polygon_tilt()
 
     print("\n✅ 所有測試通過")
