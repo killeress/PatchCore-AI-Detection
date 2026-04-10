@@ -374,6 +374,89 @@ def test_exclusion_region_uses_polygon_br_anchor():
           f"bbox BR=({bbox_x2},{bbox_y2}))")
 
 
+def test_toggle_off_bbox_unchanged():
+    """
+    enable_panel_polygon=False 時 otsu_bounds 與 toggle=True 時完全一致
+    (polygon 可能改變 bbox 計算路徑時，此測試會抓到)
+    """
+    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
+    if not img_path.exists():
+        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
+        return
+
+    cfg_on = CAPIConfig()
+    cfg_on.tile_size = 512
+    cfg_on.tile_stride = 512
+    cfg_on.otsu_bottom_crop = 0
+    cfg_on.enable_panel_polygon = True
+
+    cfg_off = CAPIConfig()
+    cfg_off.tile_size = 512
+    cfg_off.tile_stride = 512
+    cfg_off.otsu_bottom_crop = 0
+    cfg_off.enable_panel_polygon = False
+
+    inf_on = CAPIInferencer(cfg_on)
+    inf_off = CAPIInferencer(cfg_off)
+
+    r_on = inf_on.preprocess_image(img_path)
+    r_off = inf_off.preprocess_image(img_path)
+
+    assert r_on.otsu_bounds == r_off.otsu_bounds, \
+        f"otsu_bounds 應相同, on={r_on.otsu_bounds} off={r_off.otsu_bounds}"
+    assert r_off.panel_polygon is None
+    assert r_on.panel_polygon is not None
+    print(f"✅ test_toggle_off_bbox_unchanged (bbox={r_on.otsu_bounds})")
+
+
+def test_toggle_off_all_tile_masks_are_none():
+    """
+    enable_panel_polygon=False 時每個 tile 的 mask 都必須是 None
+    (否則代表有未受 toggle 控制的程式碼在設 mask)
+    """
+    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
+    if not img_path.exists():
+        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
+        return
+
+    cfg = CAPIConfig()
+    cfg.tile_size = 512
+    cfg.tile_stride = 512
+    cfg.otsu_bottom_crop = 0
+    cfg.enable_panel_polygon = False
+    inf = CAPIInferencer(cfg)
+    result = inf.preprocess_image(img_path)
+
+    none_count = sum(1 for t in result.tiles if t.mask is None)
+    assert none_count == len(result.tiles), \
+        f"toggle off 時所有 tile mask 必須為 None，實際 {none_count}/{len(result.tiles)}"
+    print(f"✅ test_toggle_off_all_tile_masks_are_none ({len(result.tiles)} tiles, all mask=None)")
+
+
+def test_toggle_on_some_edge_tiles_have_mask():
+    """
+    enable_panel_polygon=True 時至少有一個邊緣 tile 有 mask (非 None)
+    (否則代表 polygon 沒實際生效)
+    """
+    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
+    if not img_path.exists():
+        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
+        return
+
+    cfg = CAPIConfig()
+    cfg.tile_size = 512
+    cfg.tile_stride = 512
+    cfg.otsu_bottom_crop = 0
+    cfg.enable_panel_polygon = True
+    inf = CAPIInferencer(cfg)
+    result = inf.preprocess_image(img_path)
+
+    masked = [t for t in result.tiles if t.mask is not None]
+    assert len(masked) >= 1, \
+        f"toggle on 時應至少 1 個邊緣 tile 有 mask，實際 {len(masked)}"
+    print(f"✅ test_toggle_on_some_edge_tiles_have_mask ({len(masked)} 個 tile 有 mask)")
+
+
 if __name__ == "__main__":
     test_config_enable_panel_polygon_default_true()
     test_config_roundtrip_enable_panel_polygon()
@@ -391,5 +474,9 @@ if __name__ == "__main__":
     test_reference_polygon_not_double_shrunk()
     test_bottom_crop_preserves_polygon_tilt()
     test_exclusion_region_uses_polygon_br_anchor()
+
+    test_toggle_off_bbox_unchanged()
+    test_toggle_off_all_tile_masks_are_none()
+    test_toggle_on_some_edge_tiles_have_mask()
 
     print("\n✅ 所有測試通過")
