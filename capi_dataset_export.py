@@ -58,25 +58,8 @@ JOB_STATE_COMPLETED = "completed"
 JOB_STATE_FAILED = "failed"
 JOB_STATE_CANCELLED = "cancelled"
 
-# 黑畫面判定閾值：crop 區域平均亮度 + 標準差都低於此值 → 視為無效黑畫面
-# (8-bit 圖像，正常 panel 圖像即便暗，std 也會明顯高於 5)
-BLACK_IMAGE_MEAN_THRESHOLD = 10.0
-BLACK_IMAGE_STD_THRESHOLD = 5.0
-
-
-def is_black_crop(crop: np.ndarray) -> bool:
-    """判定 crop 是否為黑畫面（無效區域，不適合當訓練樣本）。
-
-    以平均亮度 + 標準差雙重條件避免誤判：
-      - 全黑或接近全黑 (mean < 10)
-      - 且沒什麼變化 (std < 5)
-    正常的暗色產品圖仍會有足夠 std，不會被誤判。
-    """
-    if crop is None or crop.size == 0:
-        return True
-    mean = float(crop.mean())
-    std = float(crop.std())
-    return mean < BLACK_IMAGE_MEAN_THRESHOLD and std < BLACK_IMAGE_STD_THRESHOLD
+# 黑畫面光源 prefix：該光源條件下面板是關燈狀態，整張圖無訓練價值，直接以檔名過濾
+BLACK_IMAGE_PREFIX = "B0F"
 
 
 def determine_label(ric: str, over_category: Optional[str]) -> Optional[str]:
@@ -414,6 +397,9 @@ class DatasetExporter:
             if img.get("is_bomb"):
                 continue
             image_name = img.get("image_name") or ""
+            # 黑光源圖 (B0F) 無訓練價值，整張跳過
+            if image_name.startswith(BLACK_IMAGE_PREFIX):
+                continue
             image_path = img.get("image_path") or ""
             image_result_id = img.get("id")
             prefix = extract_prefix(image_name)
@@ -636,11 +622,6 @@ class DatasetExporter:
             defect_x = cand.edge_center_x
             defect_y = cand.edge_center_y
             sample_key = f"edge{cand.edge_defect_id}"
-
-        # 黑畫面檢測：crop 平均亮度 + std 都很低 → 無效樣本，跳過
-        if is_black_crop(crop):
-            row["status"] = "skipped_black_image"
-            return row
 
         # Heatmap 必須存在
         src_hm = Path(cand.src_heatmap_path) if cand.src_heatmap_path else None

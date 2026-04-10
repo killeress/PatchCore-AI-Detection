@@ -447,35 +447,38 @@ def test_exporter_run_second_pass_moves_on_label_change(tmp_path):
     assert manifest["GLS123_G0F00000_114438_tile3"]["label"] == "over_edge_false_positive"
 
 
-# ==== is_black_crop / bomb record 過濾測試 ====
+# ==== 黑光源圖 (B0F) / bomb record 過濾測試 ====
 
-from capi_dataset_export import is_black_crop, BLACK_IMAGE_MEAN_THRESHOLD
-
-
-def test_is_black_crop_true_for_all_zero():
-    crop = np.zeros((512, 512, 3), dtype=np.uint8)
-    assert is_black_crop(crop) is True
+from capi_dataset_export import BLACK_IMAGE_PREFIX
 
 
-def test_is_black_crop_true_for_near_zero_flat():
-    """接近全黑但不完全 0 的畫面仍應判定為黑"""
-    crop = np.full((512, 512, 3), 3, dtype=np.uint8)
-    assert is_black_crop(crop) is True
+def test_collect_candidates_skips_b0f_images():
+    """檔名以 B0F 開頭 → 黑光源圖，該 image 不蒐集（tile 與 edge 都跳過）"""
+    row = _make_accuracy_row()
+    detail = _make_record_detail()
+    # 把第一張 image 改成黑光源
+    detail["images"][0]["image_name"] = "B0F00000_114438.tif"
+    detail["images"][0]["image_path"] = "/data/panels/GLS123/B0F00000_114438.tif"
+    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
+    exporter = DatasetExporter(db, base_dir="/tmp/out", path_mapping={})
+    cands = exporter.collect_candidates(days=3, include_true_ng=True)
+    # B0F 的 tile 和 edge 都不該出現
+    assert not any("B0F" in c.sample_id for c in cands)
+    # 其他 image（非 B0F）仍照常蒐集 — 本 fixture 另一張是 W0F 但被標為 is_bomb，
+    # 所以也會被過濾，最終 candidates 應為空
+    assert cands == []
 
 
-def test_is_black_crop_false_for_normal_image():
-    """正常 panel 圖：平均 150，噪聲分布 → 不是黑畫面"""
-    rng = np.random.default_rng(42)
-    crop = rng.integers(120, 180, size=(512, 512, 3), dtype=np.uint8)
-    assert is_black_crop(crop) is False
-
-
-def test_is_black_crop_false_for_dark_but_textured():
-    """暗色但有紋理的產品圖（std 大）→ 不視為黑畫面"""
-    rng = np.random.default_rng(7)
-    # 平均 約 25（低），但 std 明顯 > 5
-    crop = rng.integers(0, 50, size=(512, 512, 3), dtype=np.uint8)
-    assert is_black_crop(crop) is False
+def test_collect_candidates_keeps_non_b0f_images():
+    """確認 B0F prefix 過濾不會誤殺 G0F / W0F 等正常光源"""
+    row = _make_accuracy_row()
+    detail = _make_record_detail()
+    # 原本的 G0F 應保留，確認 G0F 不以 B0F 開頭
+    assert BLACK_IMAGE_PREFIX == "B0F"
+    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
+    exporter = DatasetExporter(db, base_dir="/tmp/out", path_mapping={})
+    cands = exporter.collect_candidates(days=3, include_true_ng=True)
+    assert any("G0F00000" in c.sample_id for c in cands)
 
 
 def test_collect_candidates_skips_record_with_client_bomb_info():
@@ -497,43 +500,6 @@ def test_collect_candidates_keeps_record_when_client_bomb_info_empty():
     exporter = DatasetExporter(db, base_dir="/tmp/out", path_mapping={})
     cands = exporter.collect_candidates(days=3, include_true_ng=True)
     assert len(cands) >= 1
-
-
-def test_exporter_run_skips_black_crop(tmp_path):
-    """原圖是全黑畫面 → crop 被判定為 black，status=skipped_black_image，無實體檔輸出"""
-    import cv2
-    from capi_dataset_export import read_manifest
-
-    panel_dir = tmp_path / "panels" / "GLS123"
-    panel_dir.mkdir(parents=True)
-    fake_img_path = panel_dir / "G0F00000_114438.tif"
-    # 全黑 panel
-    cv2.imwrite(str(fake_img_path), np.zeros((2048, 2048, 3), dtype=np.uint8))
-
-    heatmap_dir = tmp_path / "heatmaps"
-    heatmap_dir.mkdir()
-    fake_hm = heatmap_dir / "heatmap_tile3.png"
-    cv2.imwrite(str(fake_hm), np.zeros((256, 1024, 3), dtype=np.uint8))
-
-    row = _make_accuracy_row()
-    detail = _make_record_detail()
-    detail["images"][0]["image_path"] = str(fake_img_path)
-    detail["images"][0]["tiles"][0]["heatmap_path"] = str(fake_hm)
-    detail["images"][0]["edge_defects"] = []
-    detail["images"].pop(1)
-
-    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
-    output = tmp_path / "out"
-    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
-
-    summary = exporter.run(days=3, include_true_ng=True, skip_existing=True)
-
-    manifest = read_manifest(output / "manifest.csv")
-    assert manifest["GLS123_G0F00000_114438_tile3"]["status"] == "skipped_black_image"
-    assert summary.skipped.get("skipped_black_image", 0) == 1
-    # 無實體 crop 檔輸出
-    assert not (output / "over_edge_false_positive" / "G0F00000" / "crop"
-                / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
 
 
 if __name__ == "__main__":
