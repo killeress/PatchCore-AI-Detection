@@ -879,6 +879,8 @@ class CAPIInferencer:
         # 這樣可以避免「shifted polygon 超出 tile canvas 時 cv2.fillPoly
         # 邊緣 rasterization 與 full-canvas 路徑不一致」的問題，
         # 同時保證與外部 ground truth (fillPoly(full_image_size)) 完全相符。
+        # 記憶體成本: H*W uint8 (~28 MB for 6576x4384 panels)，
+        # tile_image 返回時就釋放。
         full_panel_mask: Optional[np.ndarray] = None
         if panel_polygon is not None:
             H, W = image.shape[:2]
@@ -946,6 +948,9 @@ class CAPIInferencer:
                 tile_img = image[y:tile_y2, x:tile_x2].copy()
 
                 # 計算 tile 的 panel mask (polygon 交集)
+                # 注意: .copy() 是必要的 — 不 copy 的話 tile.mask 會是
+                # full_panel_mask 的 view，讓整張 28 MB buffer 無法在
+                # tile_image 返回時釋放。不要刪除這個 copy。
                 tile_mask: Optional[np.ndarray] = None
                 if full_panel_mask is not None:
                     mask = full_panel_mask[y:tile_y2, x:tile_x2].copy()

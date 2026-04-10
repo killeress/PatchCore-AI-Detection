@@ -83,10 +83,11 @@ def test_tile_mask_matches_polygon():
             masked_tiles += 1
             gt_sub = gt_mask[tile.y:tile.y + tile.height,
                              tile.x:tile.x + tile.width]
-            # Mask 應該與 ground truth 完全一致 (fillPoly 是 deterministic)
+            # Mask 應該與 ground truth 完全一致 (pre-compute-and-slice 保證
+            # 與 gt_mask 同源，無 rasterization 誤差 — 鎖死 0 mismatch)
             mismatch = int(np.count_nonzero(tile.mask != gt_sub))
             total = tile.mask.size
-            assert mismatch / total < 0.001, \
+            assert mismatch == 0, \
                 f"tile {tile.tile_id} mask mismatch {mismatch}/{total} " \
                 f"({mismatch/total:.3%})"
 
