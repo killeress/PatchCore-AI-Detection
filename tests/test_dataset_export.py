@@ -335,5 +335,117 @@ def test_move_existing_sample_to_new_label(tmp_path):
     assert not old_hm.exists()
 
 
+def test_exporter_run_end_to_end(tmp_path):
+    """完整跑一次 run()：生成 fake 原圖與 heatmap → 驗證目錄與 manifest 正確"""
+    import cv2
+
+    # 1. 造 fake 原圖
+    panel_dir = tmp_path / "panels" / "GLS123"
+    panel_dir.mkdir(parents=True)
+    fake_img_path = panel_dir / "G0F00000_114438.tif"
+    fake_img = np.full((2048, 2048, 3), 150, dtype=np.uint8)
+    cv2.imwrite(str(fake_img_path), fake_img)
+
+    # 2. 造 fake heatmap
+    heatmap_dir = tmp_path / "heatmaps"
+    heatmap_dir.mkdir()
+    fake_hm = heatmap_dir / "heatmap_tile3.png"
+    cv2.imwrite(str(fake_hm), np.zeros((256, 1024, 3), dtype=np.uint8))
+    fake_edge_hm = heatmap_dir / "edge_7001.png"
+    cv2.imwrite(str(fake_edge_hm), np.zeros((256, 256, 3), dtype=np.uint8))
+
+    # 3. 準備 fake DB
+    row = _make_accuracy_row()
+    detail = _make_record_detail()
+    detail["images"][0]["image_path"] = str(fake_img_path)
+    detail["images"][0]["tiles"][0]["heatmap_path"] = str(fake_hm)
+    detail["images"][0]["edge_defects"][0]["heatmap_path"] = str(fake_edge_hm)
+    detail["images"].pop(1)  # 移除炸彈 image 避免路徑失效
+
+    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
+    output = tmp_path / "out"
+    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
+
+    summary = exporter.run(days=3, include_true_ng=True, skip_existing=True)
+
+    # 4. 驗證目錄
+    assert (output / "over_edge_false_positive" / "G0F00000" / "crop"
+            / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
+    assert (output / "over_edge_false_positive" / "G0F00000" / "heatmap"
+            / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
+    assert (output / "over_edge_false_positive" / "G0F00000" / "crop"
+            / "20260408_GLS123_G0F00000_114438_edge7001.png").exists()
+
+    # 5. 驗證 manifest
+    from capi_dataset_export import read_manifest
+    manifest = read_manifest(output / "manifest.csv")
+    assert "GLS123_G0F00000_114438_tile3" in manifest
+    assert "GLS123_G0F00000_114438_edge7001" in manifest
+    assert manifest["GLS123_G0F00000_114438_tile3"]["label"] == "over_edge_false_positive"
+    assert manifest["GLS123_G0F00000_114438_tile3"]["status"] == "ok"
+
+    # 6. 驗證 summary
+    assert summary.total == 2
+    assert summary.labels.get("over_edge_false_positive") == 2
+
+
+def test_exporter_run_skip_missing_source(tmp_path):
+    """原圖不存在 → 樣本寫入 manifest 但 status=skipped_no_source，實體檔不生"""
+    from capi_dataset_export import read_manifest
+    row = _make_accuracy_row()
+    detail = _make_record_detail()
+    detail["images"][0]["image_path"] = str(tmp_path / "does_not_exist.tif")
+    detail["images"].pop(1)
+    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
+    output = tmp_path / "out"
+    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
+
+    summary = exporter.run(days=3, include_true_ng=True, skip_existing=True)
+
+    manifest = read_manifest(output / "manifest.csv")
+    assert manifest["GLS123_G0F00000_114438_tile3"]["status"] == "skipped_no_source"
+    assert summary.skipped.get("skipped_no_source", 0) >= 1
+
+
+def test_exporter_run_second_pass_moves_on_label_change(tmp_path):
+    """第一次跑 label=other → 第二次 DB 改成 edge_false_positive → 檔案應 move"""
+    import cv2
+    from capi_dataset_export import read_manifest
+
+    panel_dir = tmp_path / "panels" / "GLS123"
+    panel_dir.mkdir(parents=True)
+    fake_img = panel_dir / "G0F00000_114438.tif"
+    cv2.imwrite(str(fake_img), np.full((2048, 2048, 3), 150, dtype=np.uint8))
+    fake_hm = tmp_path / "heatmaps" / "heatmap_tile3.png"
+    fake_hm.parent.mkdir()
+    cv2.imwrite(str(fake_hm), np.zeros((256, 1024, 3), dtype=np.uint8))
+
+    row = _make_accuracy_row(over_review_category="other")
+    detail = _make_record_detail()
+    detail["images"][0]["image_path"] = str(fake_img)
+    detail["images"][0]["tiles"][0]["heatmap_path"] = str(fake_hm)
+    detail["images"][0]["edge_defects"] = []
+    detail["images"].pop(1)
+    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
+    output = tmp_path / "out"
+    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
+
+    exporter.run(days=3, include_true_ng=True, skip_existing=True)
+    assert (output / "over_other" / "G0F00000" / "crop"
+            / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
+
+    # 模擬使用者改 category
+    db._accuracy_rows[0]["over_review_category"] = "edge_false_positive"
+    exporter.run(days=3, include_true_ng=True, skip_existing=True)
+
+    # 檔案應 move 到新 label 目錄
+    assert (output / "over_edge_false_positive" / "G0F00000" / "crop"
+            / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
+    assert not (output / "over_other" / "G0F00000" / "crop"
+                / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
+    manifest = read_manifest(output / "manifest.csv")
+    assert manifest["GLS123_G0F00000_114438_tile3"]["label"] == "over_edge_false_positive"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

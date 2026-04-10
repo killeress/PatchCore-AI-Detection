@@ -454,5 +454,212 @@ class DatasetExporter:
     def run(self, days: int, include_true_ng: bool, skip_existing: bool,
             status_callback=None, cancel_event: Optional[threading.Event] = None
             ) -> JobSummary:
-        """主執行入口（實作在 Task 6）"""
-        raise NotImplementedError("Implemented in Task 6")
+        """主執行入口。
+
+        Args:
+            days: 抓最近 N 日 (含今天)
+            include_true_ng: 是否包含 AI=NG & RIC=NG 樣本
+            skip_existing: True → 已存在且 label 未變的樣本 skip
+            status_callback: callable(current, total, last_glass_id) 可選
+            cancel_event: threading.Event，set 後會在下一筆前停止
+        """
+        from capi_server import resolve_unc_path  # lazy import 避免 circular
+
+        started_at = datetime.now()
+        job_id = started_at.strftime("job_%Y%m%d_%H%M%S")
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = self.base_dir / "manifest.csv"
+
+        # 1. 讀 manifest
+        existing = read_manifest(manifest_path)
+
+        # 2. 蒐集 candidates
+        candidates = self.collect_candidates(days=days, include_true_ng=include_true_ng)
+        total = len(candidates)
+        logger.info("Collected %d candidates (days=%d, include_true_ng=%s)",
+                    total, days, include_true_ng)
+
+        labels_count: Dict[str, int] = {}
+        skipped_count: Dict[str, int] = {}
+
+        # 3. 處理每個 candidate
+        for idx, cand in enumerate(candidates, start=1):
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info("Job cancelled at %d/%d", idx, total)
+                break
+
+            if status_callback:
+                try:
+                    status_callback(idx, total, cand.glass_id)
+                except Exception:
+                    logger.exception("status_callback error")
+
+            # 解析原圖路徑（UNC → Linux）
+            source_path = self._resolve_source_path(cand.image_path, resolve_unc_path)
+
+            new_row = self._process_candidate(
+                cand=cand,
+                existing_row=existing.get(cand.sample_id),
+                skip_existing=skip_existing,
+                source_path=source_path,
+            )
+            if new_row is None:
+                continue  # skip_existing 命中，不更動 manifest 該 row
+            existing[cand.sample_id] = new_row
+
+            status = new_row["status"]
+            if status == "ok":
+                labels_count[new_row["label"]] = labels_count.get(new_row["label"], 0) + 1
+            else:
+                skipped_count[status] = skipped_count.get(status, 0) + 1
+
+        # 4. 寫回 manifest
+        write_manifest(manifest_path, existing)
+
+        finished_at = datetime.now()
+        return JobSummary(
+            job_id=job_id,
+            started_at=started_at.isoformat(timespec="seconds"),
+            finished_at=finished_at.isoformat(timespec="seconds"),
+            duration_sec=(finished_at - started_at).total_seconds(),
+            total=sum(labels_count.values()) + sum(skipped_count.values()),
+            labels=labels_count,
+            skipped=skipped_count,
+            output_dir=str(self.base_dir),
+        )
+
+    def _resolve_source_path(self, image_path: str, resolver) -> Path:
+        """套用 path_mapping 轉換，回傳 Path；若 path_mapping 為空或已是本地路徑，直接回原字串"""
+        if self.path_mapping:
+            try:
+                mapped = resolver(image_path, self.path_mapping)
+                return Path(mapped)
+            except Exception:
+                logger.exception("resolve_unc_path failed for %s", image_path)
+        return Path(image_path)
+
+    def _process_candidate(
+        self, cand: SampleCandidate, existing_row: Optional[Dict[str, str]],
+        skip_existing: bool, source_path: Path,
+    ) -> Optional[Dict[str, str]]:
+        """處理一個 candidate，回傳更新後的 manifest row，或 None（代表 skip 不更動 manifest）"""
+        # === 去重/移動 ===
+        if existing_row is not None:
+            old_label = existing_row.get("label", "")
+            old_status = existing_row.get("status", "")
+
+            if old_status == "ok" and old_label == cand.label:
+                if skip_existing:
+                    return None  # 完全相同，skip
+                # 不 skip → 重做一次（往下走）
+
+            if old_status == "ok" and old_label != cand.label:
+                # label 變了 → move 實體檔 + 更新 row
+                new_crop_rel, new_hm_rel = move_sample_files(
+                    base_dir=self.base_dir,
+                    old_crop_rel=existing_row.get("crop_path", ""),
+                    old_heatmap_rel=existing_row.get("heatmap_path", ""),
+                    new_label=cand.label,
+                    prefix=cand.prefix,
+                )
+                updated = dict(existing_row)
+                updated["label"] = cand.label
+                updated["crop_path"] = new_crop_rel
+                updated["heatmap_path"] = new_hm_rel
+                updated["collected_at"] = datetime.now().isoformat(timespec="seconds")
+                updated["over_review_category"] = cand.over_review_category
+                updated["over_review_note"] = cand.over_review_note
+                return updated
+
+            if old_status.startswith("skipped_") and skip_existing:
+                return None  # 之前 skip 過，不 retry
+
+        # === 新樣本（或強制重做） ===
+        row = self._build_row_stub(cand)
+
+        # 讀原圖
+        if not source_path.exists():
+            row["status"] = "skipped_no_source"
+            logger.warning("Source not found: %s (sample_id=%s)", source_path, cand.sample_id)
+            return row
+
+        img = cv2.imread(str(source_path), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            row["status"] = "skipped_no_source"
+            return row
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+        # Crop
+        if cand.source_type == "patchcore_tile":
+            crop = crop_patchcore_tile(img, cand.tile_x, cand.tile_y, cand.tile_w, cand.tile_h)
+            defect_x = cand.tile_x + cand.tile_w // 2
+            defect_y = cand.tile_y + cand.tile_h // 2
+            sample_key = f"tile{cand.tile_idx}"
+        else:  # edge_defect
+            # 有效像素 < 25% → skip
+            H, W = img.shape[:2]
+            half = CROP_SIZE // 2
+            valid_w = min(W, cand.edge_center_x + half) - max(0, cand.edge_center_x - half)
+            valid_h = min(H, cand.edge_center_y + half) - max(0, cand.edge_center_y - half)
+            if max(0, valid_w) * max(0, valid_h) < (CROP_SIZE * CROP_SIZE) * 0.25:
+                row["status"] = "skipped_out_of_bounds"
+                return row
+            crop = crop_edge_defect(img, cand.edge_center_x, cand.edge_center_y)
+            defect_x = cand.edge_center_x
+            defect_y = cand.edge_center_y
+            sample_key = f"edge{cand.edge_defect_id}"
+
+        # Heatmap 必須存在
+        src_hm = Path(cand.src_heatmap_path) if cand.src_heatmap_path else None
+        if src_hm is None or not src_hm.exists():
+            row["status"] = "skipped_no_heatmap"
+            return row
+
+        # 決定目的路徑
+        filename = build_sample_filename(
+            glass_id=cand.glass_id, image_name=cand.image_name,
+            sample_key=sample_key, inference_timestamp=cand.inference_timestamp,
+        )
+        crop_rel = f"{cand.label}/{cand.prefix}/crop/{filename}"
+        hm_rel = f"{cand.label}/{cand.prefix}/heatmap/{filename}"
+        crop_dst = self.base_dir / crop_rel
+        hm_dst = self.base_dir / hm_rel
+        crop_dst.parent.mkdir(parents=True, exist_ok=True)
+        hm_dst.parent.mkdir(parents=True, exist_ok=True)
+
+        cv2.imwrite(str(crop_dst), crop)
+        shutil.copy2(str(src_hm), str(hm_dst))
+
+        row["crop_path"] = crop_rel
+        row["heatmap_path"] = hm_rel
+        row["defect_x"] = str(defect_x)
+        row["defect_y"] = str(defect_y)
+        row["status"] = "ok"
+        return row
+
+    def _build_row_stub(self, cand: SampleCandidate) -> Dict[str, str]:
+        """從 candidate 組出 manifest row 的初始值（尚未 crop/copy）"""
+        return {
+            "sample_id": cand.sample_id,
+            "collected_at": datetime.now().isoformat(timespec="seconds"),
+            "label": cand.label,
+            "source_type": cand.source_type,
+            "prefix": cand.prefix,
+            "glass_id": cand.glass_id,
+            "image_name": cand.image_name,
+            "inference_record_id": str(cand.inference_record_id or ""),
+            "image_result_id": str(cand.image_result_id or ""),
+            "tile_idx": str(cand.tile_idx) if cand.tile_idx is not None else "",
+            "edge_defect_id": str(cand.edge_defect_id) if cand.edge_defect_id is not None else "",
+            "crop_path": "",
+            "heatmap_path": "",
+            "ai_score": f"{cand.ai_score:.4f}",
+            "defect_x": "",
+            "defect_y": "",
+            "ric_judgment": cand.ric_judgment,
+            "over_review_category": cand.over_review_category,
+            "over_review_note": cand.over_review_note,
+            "inference_timestamp": cand.inference_timestamp,
+            "status": "",
+        }
