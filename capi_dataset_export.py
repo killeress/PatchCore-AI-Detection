@@ -59,6 +59,73 @@ JOB_STATE_FAILED = "failed"
 JOB_STATE_CANCELLED = "cancelled"
 
 
+def determine_label(ric: str, over_category: Optional[str]) -> Optional[str]:
+    """依 RIC 判定與 over_review category 決定輸出 label。
+
+    Returns:
+        - "true_ng" 若 RIC=NG
+        - "over_<category>" 若 RIC=OK 且 category 在 OVER_LABEL_MAP
+        - None 若 RIC=OK 且 category 未填（這類樣本不蒐集）
+
+    Raises:
+        ValueError: 若 RIC=OK 且 category 不在合法 enum
+    """
+    if ric == "NG":
+        return TRUE_NG_LABEL
+    if ric == "OK":
+        if not over_category:
+            return None
+        if over_category not in OVER_LABEL_MAP:
+            raise ValueError(f"Unknown over_review category: {over_category}")
+        return OVER_LABEL_MAP[over_category]
+    raise ValueError(f"Unknown RIC judgment: {ric}")
+
+
+def extract_prefix(image_name: str) -> str:
+    """從原圖檔名抽出光源 prefix（去掉 timestamp 尾綴）。
+
+    Mirror of capi_inference.CAPIInferencer._get_image_prefix but stand-alone
+    so 本工具不需要 inferencer 實例就能分類樣本。
+
+    Examples:
+        G0F00000_114438.tif → G0F00000
+        STANDARD.png → STANDARD
+        WGF_0001_20260410.bmp → WGF_0001
+    """
+    stem = Path(image_name).stem
+    if "_" in stem:
+        return stem.rsplit("_", 1)[0]
+    return stem
+
+
+def build_sample_id(glass_id: str, image_name: str, source_type: str,
+                    tile_idx: Optional[int] = None,
+                    edge_defect_id: Optional[int] = None) -> str:
+    """去重 key：glass_id + image_stem + sample_key"""
+    stem = Path(image_name).stem
+    if source_type == "patchcore_tile":
+        if tile_idx is None:
+            raise ValueError("tile_idx required for patchcore_tile")
+        return f"{glass_id}_{stem}_tile{tile_idx}"
+    if source_type == "edge_defect":
+        if edge_defect_id is None:
+            raise ValueError("edge_defect_id required for edge_defect")
+        return f"{glass_id}_{stem}_edge{edge_defect_id}"
+    raise ValueError(f"Unknown source_type: {source_type}")
+
+
+def build_sample_filename(glass_id: str, image_name: str,
+                          sample_key: str, inference_timestamp: str) -> str:
+    """檔名：{YYYYMMDD}_{glass_id}_{image_stem}_{sample_key}.png
+
+    inference_timestamp 支援 'YYYY-MM-DDTHH:MM:SS' 與 'YYYY-MM-DD HH:MM:SS'。
+    """
+    stem = Path(image_name).stem
+    ts = inference_timestamp.replace("T", " ")[:10]  # 'YYYY-MM-DD'
+    yyyymmdd = ts.replace("-", "")
+    return f"{yyyymmdd}_{glass_id}_{stem}_{sample_key}.png"
+
+
 # ---- Crop Tool Functions ----
 
 def _pad_to_size(img: np.ndarray, target: int = CROP_SIZE,

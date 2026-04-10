@@ -76,5 +76,53 @@ def test_crop_edge_defect_near_top_left_corner():
     assert tuple(crop[0, 0]) == (0, 0, 0)
 
 
+from capi_dataset_export import (
+    determine_label, extract_prefix, build_sample_filename, build_sample_id,
+)
+
+
+def test_determine_label_true_ng():
+    assert determine_label(ric="NG", over_category=None) == "true_ng"
+
+
+def test_determine_label_over_review_category():
+    assert determine_label(ric="OK", over_category="edge_false_positive") == "over_edge_false_positive"
+    assert determine_label(ric="OK", over_category="other") == "over_other"
+
+
+def test_determine_label_returns_none_for_unfilled():
+    """RIC=OK 但沒回填 category → 不蒐集（回 None）"""
+    assert determine_label(ric="OK", over_category=None) is None
+    assert determine_label(ric="OK", over_category="") is None
+
+
+def test_determine_label_unknown_category_raises():
+    with pytest.raises(ValueError):
+        determine_label(ric="OK", over_category="not_a_real_category")
+
+
+def test_extract_prefix_with_timestamp():
+    assert extract_prefix("G0F00000_114438.tif") == "G0F00000"
+    assert extract_prefix("STANDARD.png") == "STANDARD"
+    assert extract_prefix("WGF_0001_20260410.bmp") == "WGF_0001"
+
+
+def test_build_sample_id_patchcore():
+    assert build_sample_id("GLS123", "G0F0001.bmp", "patchcore_tile", tile_idx=3) == "GLS123_G0F0001_tile3"
+
+
+def test_build_sample_id_edge_defect():
+    assert build_sample_id("GLS123", "W0F0002.bmp", "edge_defect", edge_defect_id=7) == "GLS123_W0F0002_edge7"
+
+
+def test_build_sample_filename_patchcore():
+    # 日期取自 inference_timestamp 的 YYYY-MM-DD
+    fn = build_sample_filename(
+        glass_id="GLS123", image_name="G0F0001.bmp",
+        sample_key="tile3", inference_timestamp="2026-04-08T14:22:03"
+    )
+    assert fn == "20260408_GLS123_G0F0001_tile3.png"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
