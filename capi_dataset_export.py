@@ -517,7 +517,10 @@ class DatasetExporter:
                 source_path=source_path,
             )
             if new_row is None:
-                continue  # skip_existing 命中，不更動 manifest 該 row
+                # skip_existing 命中：manifest 已有且 label 未變 → 不動檔案，但要計數
+                # 否則 summary 會顯示 total=0 誤導使用者以為什麼都沒跑到
+                skipped_count["already_exists"] = skipped_count.get("already_exists", 0) + 1
+                continue
             existing[cand.sample_id] = new_row
 
             status = new_row["status"]
@@ -526,7 +529,31 @@ class DatasetExporter:
             else:
                 skipped_count[status] = skipped_count.get(status, 0) + 1
 
-        # 4. 寫回 manifest
+        # 4. 清理 stale：manifest 內存在但本次沒在 candidate list 的樣本
+        # 代表該樣本在新的過濾規則下（bomb_info / B0F 等）已不再符合蒐集條件
+        current_sample_ids = {c.sample_id for c in candidates}
+        stale_ids = [sid for sid in list(existing.keys()) if sid not in current_sample_ids]
+        cleanup_count = 0
+        for sid in stale_ids:
+            old_row = existing[sid]
+            if old_row.get("status") == "ok":
+                # 刪實體檔
+                for rel_key in ("crop_path", "heatmap_path"):
+                    rel = old_row.get(rel_key) or ""
+                    if rel:
+                        full = self.base_dir / rel
+                        if full.exists():
+                            try:
+                                full.unlink()
+                            except OSError:
+                                logger.exception("Failed to unlink stale %s: %s", rel_key, full)
+            del existing[sid]
+            cleanup_count += 1
+        if cleanup_count:
+            logger.info("Cleaned up %d stale manifest entries (no longer candidates)", cleanup_count)
+            skipped_count["cleaned_stale"] = cleanup_count
+
+        # 5. 寫回 manifest
         write_manifest(manifest_path, existing)
 
         finished_at = datetime.now()

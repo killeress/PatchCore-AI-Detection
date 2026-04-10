@@ -491,6 +491,80 @@ def test_collect_candidates_skips_record_with_client_bomb_info():
     assert exporter.collect_candidates(days=3, include_true_ng=True) == []
 
 
+def test_exporter_run_counts_already_exists_on_second_pass(tmp_path):
+    """第二次跑 (skip_existing=True, label 未變) → 樣本計入 skipped['already_exists']，total 不為 0"""
+    import cv2
+    from capi_dataset_export import read_manifest
+
+    panel_dir = tmp_path / "panels" / "GLS123"
+    panel_dir.mkdir(parents=True)
+    fake_img = panel_dir / "G0F00000_114438.tif"
+    cv2.imwrite(str(fake_img), np.full((2048, 2048, 3), 150, dtype=np.uint8))
+    fake_hm = tmp_path / "heatmaps" / "heatmap_tile3.png"
+    fake_hm.parent.mkdir()
+    cv2.imwrite(str(fake_hm), np.zeros((256, 1024, 3), dtype=np.uint8))
+
+    row = _make_accuracy_row()
+    detail = _make_record_detail()
+    detail["images"][0]["image_path"] = str(fake_img)
+    detail["images"][0]["tiles"][0]["heatmap_path"] = str(fake_hm)
+    detail["images"][0]["edge_defects"] = []
+    detail["images"].pop(1)
+    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
+    output = tmp_path / "out"
+    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
+
+    # 第一次：蒐集到一筆
+    s1 = exporter.run(days=3, include_true_ng=True, skip_existing=True)
+    assert s1.labels.get("over_edge_false_positive") == 1
+    assert s1.skipped.get("already_exists", 0) == 0
+
+    # 第二次：label 沒變、檔已存在 → already_exists 應計入
+    s2 = exporter.run(days=3, include_true_ng=True, skip_existing=True)
+    assert s2.labels == {}  # 沒有新增
+    assert s2.skipped.get("already_exists") == 1
+    assert s2.total == 1
+
+
+def test_exporter_run_cleans_stale_manifest_entries(tmp_path):
+    """舊樣本在新過濾規則下不再是 candidate → 檔案與 manifest 都應被清除"""
+    import cv2
+    from capi_dataset_export import read_manifest
+
+    panel_dir = tmp_path / "panels" / "GLS123"
+    panel_dir.mkdir(parents=True)
+    fake_img = panel_dir / "G0F00000_114438.tif"
+    cv2.imwrite(str(fake_img), np.full((2048, 2048, 3), 150, dtype=np.uint8))
+    fake_hm = tmp_path / "heatmaps" / "heatmap_tile3.png"
+    fake_hm.parent.mkdir()
+    cv2.imwrite(str(fake_hm), np.zeros((256, 1024, 3), dtype=np.uint8))
+
+    row = _make_accuracy_row()
+    detail = _make_record_detail()
+    detail["images"][0]["image_path"] = str(fake_img)
+    detail["images"][0]["tiles"][0]["heatmap_path"] = str(fake_hm)
+    detail["images"][0]["edge_defects"] = []
+    detail["images"].pop(1)
+    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
+    output = tmp_path / "out"
+    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
+
+    # 第一次：正常蒐集
+    exporter.run(days=3, include_true_ng=True, skip_existing=True)
+    stale_crop = output / "over_edge_false_positive" / "G0F00000" / "crop" / "20260408_GLS123_G0F00000_114438_tile3.png"
+    assert stale_crop.exists()
+
+    # 模擬：DB 這筆 record 突然被標記為 bomb panel（或手動改 record 讓它不再是 candidate）
+    db._record_details[1001]["client_bomb_info"] = '{"coords":[{"x":100,"y":200}]}'
+
+    # 第二次：沒 candidate，應清掉舊樣本
+    s2 = exporter.run(days=3, include_true_ng=True, skip_existing=True)
+    assert not stale_crop.exists()
+    manifest = read_manifest(output / "manifest.csv")
+    assert "GLS123_G0F00000_114438_tile3" not in manifest
+    assert s2.skipped.get("cleaned_stale") == 1
+
+
 def test_collect_candidates_keeps_record_when_client_bomb_info_empty():
     """client_bomb_info 空字串 → 照常蒐集（防 regression）"""
     row = _make_accuracy_row()
