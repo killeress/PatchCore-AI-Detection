@@ -304,6 +304,8 @@ class JobSummary:
     labels: Dict[str, int] = field(default_factory=dict)  # label → 數量
     skipped: Dict[str, int] = field(default_factory=dict)  # reason → 數量
     output_dir: str = ""
+    # 診斷用：collect_candidates 每階段的過濾計數（幫助排查為何 total=0）
+    diagnostics: Dict[str, int] = field(default_factory=dict)
 
 
 # ---- Exporter（實作在後續 Task 加入） ----
@@ -317,7 +319,15 @@ class DatasetExporter:
         self.path_mapping = path_mapping
 
     def collect_candidates(self, days: int, include_true_ng: bool) -> List[SampleCandidate]:
-        """從 DB 讀最近 N 日的 client_accuracy_records，展開成 candidate 清單。
+        """便利包裝：只回傳 candidates，忽略診斷統計。"""
+        candidates, _diag = self.collect_candidates_with_diagnostics(days, include_true_ng)
+        return candidates
+
+    def collect_candidates_with_diagnostics(
+        self, days: int, include_true_ng: bool
+    ) -> Tuple[List[SampleCandidate], Dict[str, int]]:
+        """從 DB 讀最近 N 日的 client_accuracy_records，展開成 candidate 清單，
+        同時記錄每個過濾階段掉了多少筆，方便排查為何 total=0。
 
         篩選規則：
           - result_ai == "NG"
@@ -329,6 +339,12 @@ class DatasetExporter:
           - image_results.is_bomb == 1 整張跳過
           - tile_results.is_bomb == 1 該 tile 跳過
           - tile_results.is_anomaly == 0 跳過（只蒐集 NG tile）
+
+        Returns:
+            (candidates, diagnostics) — diagnostics 是 dict，key 包含：
+              total_accuracy_rows, ai_not_ng, ric_ng_kept, ric_ng_skipped_opt_out,
+              ric_ok_filled, ric_ok_empty, ric_other, missing_inference_id,
+              missing_record_detail, bomb_record_skipped, final_candidates
         """
         end = datetime.now().date()
         start = end - timedelta(days=days - 1)
@@ -336,9 +352,26 @@ class DatasetExporter:
             start_date=start.isoformat(), end_date=end.isoformat()
         )
 
+        diag: Dict[str, int] = {
+            "date_start": start.isoformat(),
+            "date_end": end.isoformat(),
+            "total_accuracy_rows": len(rows),
+            "ai_not_ng": 0,
+            "ric_ng_kept": 0,
+            "ric_ng_skipped_opt_out": 0,
+            "ric_ok_filled": 0,
+            "ric_ok_empty": 0,
+            "ric_other": 0,
+            "missing_inference_id": 0,
+            "missing_record_detail": 0,
+            "bomb_record_skipped": 0,
+            "final_candidates": 0,
+        }
+
         candidates: List[SampleCandidate] = []
         for row in rows:
             if row.get("result_ai") != "NG":
+                diag["ai_not_ng"] += 1
                 continue
 
             ric = row.get("result_ric") or ""
@@ -346,36 +379,53 @@ class DatasetExporter:
 
             if ric == "NG":
                 if not include_true_ng:
+                    diag["ric_ng_skipped_opt_out"] += 1
                     continue
                 label = TRUE_NG_LABEL
+                diag["ric_ng_kept"] += 1
             elif ric == "OK":
                 if not over_category:
+                    diag["ric_ok_empty"] += 1
                     continue  # 未回填的跳過
                 try:
                     label = determine_label(ric, over_category)
                 except ValueError as e:
                     logger.warning("Skip unknown over_review category: %s", e)
+                    diag["ric_ok_empty"] += 1
                     continue
                 if label is None:
+                    diag["ric_ok_empty"] += 1
                     continue
+                diag["ric_ok_filled"] += 1
             else:
+                diag["ric_other"] += 1
                 continue
 
             inference_record_id = row.get("inference_record_id")
             if not inference_record_id:
                 logger.warning("No inference_record linked: pnl_id=%s time=%s",
                                row.get("pnl_id"), row.get("time_stamp"))
+                diag["missing_inference_id"] += 1
                 continue
 
             detail = self.db.get_record_detail(inference_record_id)
             if not detail:
+                diag["missing_record_detail"] += 1
                 continue
 
-            candidates.extend(self._flatten_record_to_candidates(
+            # 注意：_flatten_record_to_candidates 內部會在 client_bomb_info 非空時
+            # 回空 list，這裡用前後數量差判斷是否因此被刷掉
+            before_len = len(candidates)
+            flattened = self._flatten_record_to_candidates(
                 detail=detail, label=label, row=row,
-            ))
+            )
+            if not flattened and detail.get("client_bomb_info"):
+                diag["bomb_record_skipped"] += 1
+            candidates.extend(flattened)
 
-        return candidates
+        diag["final_candidates"] = len(candidates)
+        logger.info("collect_candidates diagnostics: %s", diag)
+        return candidates, diag
 
     def _flatten_record_to_candidates(
         self, detail: Dict, label: str, row: Dict
@@ -486,8 +536,10 @@ class DatasetExporter:
         # 1. 讀 manifest
         existing = read_manifest(manifest_path)
 
-        # 2. 蒐集 candidates
-        candidates = self.collect_candidates(days=days, include_true_ng=include_true_ng)
+        # 2. 蒐集 candidates（含診斷資訊）
+        candidates, diag = self.collect_candidates_with_diagnostics(
+            days=days, include_true_ng=include_true_ng
+        )
         total = len(candidates)
         logger.info("Collected %d candidates (days=%d, include_true_ng=%s)",
                     total, days, include_true_ng)
@@ -566,6 +618,7 @@ class DatasetExporter:
             labels=labels_count,
             skipped=skipped_count,
             output_dir=str(self.base_dir),
+            diagnostics=diag,
         )
 
     def _resolve_source_path(self, image_path: str, resolver) -> Path:

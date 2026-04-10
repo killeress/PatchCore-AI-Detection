@@ -491,6 +491,42 @@ def test_collect_candidates_skips_record_with_client_bomb_info():
     assert exporter.collect_candidates(days=3, include_true_ng=True) == []
 
 
+def test_collect_candidates_with_diagnostics_fills_counters():
+    """診斷計數器：每階段掉了多少樣本都要能看見"""
+    # 3 筆 row:
+    #   1) ai=OK → ai_not_ng
+    #   2) ai=NG, ric=OK, category 空 → ric_ok_empty
+    #   3) ai=NG, ric=OK, category=edge_false_positive → ric_ok_filled，進入蒐集
+    rows = [
+        _make_accuracy_row(id=1, pnl_id="P1", result_ai="OK"),
+        _make_accuracy_row(id=2, pnl_id="P2", over_review_id=None, over_review_category=None),
+        _make_accuracy_row(id=3, pnl_id="P3", inference_record_id=1001),
+    ]
+    db = FakeDB(accuracy_rows=rows, record_details={1001: _make_record_detail()})
+    exporter = DatasetExporter(db, base_dir="/tmp/out", path_mapping={})
+    cands, diag = exporter.collect_candidates_with_diagnostics(days=3, include_true_ng=True)
+
+    assert diag["total_accuracy_rows"] == 3
+    assert diag["ai_not_ng"] == 1
+    assert diag["ric_ok_empty"] == 1
+    assert diag["ric_ok_filled"] == 1
+    assert diag["missing_inference_id"] == 0
+    assert diag["final_candidates"] == len(cands)
+    assert "date_start" in diag and "date_end" in diag
+
+
+def test_exporter_run_exposes_diagnostics_in_summary(tmp_path):
+    """即使 total=0，summary.diagnostics 應顯示查到幾筆 row 及每階段掉了多少"""
+    rows = [_make_accuracy_row(result_ai="OK")]  # 全部都 ai=OK → 0 candidates
+    db = FakeDB(accuracy_rows=rows, record_details={})
+    exporter = DatasetExporter(db, base_dir=str(tmp_path / "out"), path_mapping={})
+    summary = exporter.run(days=3, include_true_ng=True, skip_existing=True)
+    assert summary.total == 0
+    assert summary.diagnostics["total_accuracy_rows"] == 1
+    assert summary.diagnostics["ai_not_ng"] == 1
+    assert summary.diagnostics["final_candidates"] == 0
+
+
 def test_exporter_run_counts_already_exists_on_second_pass(tmp_path):
     """第二次跑 (skip_existing=True, label 未變) → 樣本計入 skipped['already_exists']，total 不為 0"""
     import cv2
