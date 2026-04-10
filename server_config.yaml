@@ -56,3 +56,9 @@ cleanup:
   tile_retain_days: 7           # tile_results 保留天數 (獨立、最短)
   heatmap_retain_days: 90       # heatmap 圖檔保留天數 (0=不清除)
   vacuum_after_cleanup: true
+
+# 過檢訓練資料集蒐集
+dataset_export:
+  base_dir: "/data/capi_ai/datasets/over_review"
+  # 啟動前檢查磁碟剩餘空間 (GB)，小於此值會拒絕啟動 job
+  min_free_space_gb: 1

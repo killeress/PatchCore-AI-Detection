@@ -53,3 +53,8 @@ logging:
 # 定時清除舊資料
 cleanup:
   enabled: false   # 本地測試不自動清除
+
+# 過檢訓練資料集蒐集
+dataset_export:
+  base_dir: "./datasets/over_review"
+  min_free_space_gb: 1
