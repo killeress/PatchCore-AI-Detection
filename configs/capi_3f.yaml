@@ -18,6 +18,9 @@ mark_fallback_position:
 otsu_offset: 5  # 四周偏移 px
 otsu_bottom_crop: 0  # Otsu 後裁切底部像素 (若設置 > 0，則自動禁用排除區域)
 
+# 面板 4 角 polygon 偵測
+enable_panel_polygon: true  # false 則完全退回 axis-aligned bbox 行為
+
 # 排除區域 (推論時跳過這些區域)
 exclusion_zones:
   - name: "mark_area"

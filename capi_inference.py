@@ -441,24 +441,31 @@ class CAPIInferencer:
         else:
             print(f"⚠️ MARK 模板不存在: {template_path}")
     
-    def _find_raw_object_bounds(self, image: np.ndarray) -> Tuple[int, int, int, int]:
-        """找尋物件的原始邊界 (不含 Offset)"""
+    def _find_raw_object_bounds(
+        self, image: np.ndarray
+    ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
+        """找尋物件的原始邊界 (不含 Offset)
+
+        Returns:
+            ((x_min, y_min, x_max, y_max), binary_mask) — binary_mask 是 Otsu +
+            morphology close 後的 uint8 前景圖（255=前景），供後續 polygon 偵測重用。
+        """
         img_height, img_width = image.shape[:2]
-        
+
         if len(image.shape) == 2:
             gray = image
         else:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
+
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         kernel = np.ones((15, 15), np.uint8)
         closing = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
         contours, _ = cv2.findContours(closing, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+
         x_min, y_min = np.inf, np.inf
         x_max, y_max = -np.inf, -np.inf
-        
+
         MIN_AREA = 1000
         for contour in contours:
             if cv2.contourArea(contour) > MIN_AREA:
@@ -467,11 +474,11 @@ class CAPIInferencer:
                 y_min = min(y_min, y)
                 x_max = max(x + w, x_max)
                 y_max = max(y + h, y_max)
-        
+
         if x_min == np.inf:
-            return 0, 0, img_width, img_height
-            
-        return int(x_min), int(y_min), int(x_max), int(y_max)
+            return (0, 0, img_width, img_height), closing
+
+        return (int(x_min), int(y_min), int(x_max), int(y_max)), closing
 
     def calculate_otsu_bounds(self, image: np.ndarray, otsu_offset_override: Optional[int] = None, reference_raw_bounds: Optional[Tuple[int, int, int, int]] = None) -> Tuple[Tuple[int, int, int, int], Optional[int]]:
         """
@@ -488,8 +495,9 @@ class CAPIInferencer:
         # 取得原始物件邊界 (若有參考邊界則直接使用)
         if reference_raw_bounds is not None:
             x_min, y_min, x_max, y_max = reference_raw_bounds
+            binary_mask = None  # 使用參考邊界時無 binary mask
         else:
-            x_min, y_min, x_max, y_max = self._find_raw_object_bounds(image)
+            (x_min, y_min, x_max, y_max), binary_mask = self._find_raw_object_bounds(image)
 
         offset = otsu_offset_override if otsu_offset_override is not None else self.config.otsu_offset
         x_start = max(0, int(x_min) + offset)
@@ -761,7 +769,7 @@ class CAPIInferencer:
             raw_bounds = reference_raw_bounds
             print(f"📐 {image_path.name}: 使用參考邊界 (來自白圖) → {raw_bounds}")
         else:
-            raw_bounds = self._find_raw_object_bounds(image)
+            raw_bounds, _raw_binary = self._find_raw_object_bounds(image)
 
         # Otsu 裁切 (同樣使用參考邊界)
         otsu_bounds, original_y2 = self.calculate_otsu_bounds(image, otsu_offset_override=otsu_offset_override, reference_raw_bounds=reference_raw_bounds)
@@ -2992,7 +3000,8 @@ class CAPIInferencer:
                 try:
                     ref_img = cv2.imread(str(ref_path), cv2.IMREAD_UNCHANGED)
                     if ref_img is not None:
-                        reference_raw_bounds_for_dark = self._find_raw_object_bounds(ref_img)
+                        ref_bounds, _ref_binary = self._find_raw_object_bounds(ref_img)
+                        reference_raw_bounds_for_dark = ref_bounds
                         print(f"📐 黑圖參考邊界已從 {ref_path.name} 計算 → {reference_raw_bounds_for_dark}")
                         break
                 except Exception as e:

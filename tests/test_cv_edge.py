@@ -27,7 +27,7 @@ def inspect_edge_cv(image_path: str, config_yaml: str):
     # 利用 CAPIInferencer 來拿，確保基礎線一致
     config = CAPIConfig.from_yaml(config_yaml)
     inf = CAPIInferencer(config=config, device='cpu')
-    raw_bounds = inf._find_raw_object_bounds(image)
+    raw_bounds, _ = inf._find_raw_object_bounds(image)
     rx1, ry1, rx2, ry2 = raw_bounds
     print(f"📐 產品邊界 (raw_bounds): {raw_bounds}")
     

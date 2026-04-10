@@ -95,7 +95,10 @@ class CAPIConfig:
     # Otsu 裁剪設定
     otsu_offset: int = 5
     otsu_bottom_crop: int = 1000  # Otsu 後裁切底部像素
-    
+
+    # 面板 4 角 polygon 偵測（新增）
+    enable_panel_polygon: bool = True  # 啟用後在 tile.mask 上套用 polygon 做精準裁切
+
     # 排除區域
     exclusion_zones: List[ExclusionZone] = field(default_factory=list)
     
@@ -207,10 +210,20 @@ class CAPIConfig:
         path = Path(yaml_path)
         if not path.exists():
             raise FileNotFoundError(f"配置檔不存在: {yaml_path}")
-        
+
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        
+
+        config = cls.from_dict(data)
+        config.config_path = path
+        return config
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CAPIConfig":
+        """從 dict 建立 CAPIConfig（供 round-trip / 測試使用）"""
+        if data is None:
+            data = {}
+
         # 解析排除區域
         exclusion_zones = []
         for zone_data in data.get("exclusion_zones", []):
@@ -225,6 +238,7 @@ class CAPIConfig:
             mark_min_y_ratio=data.get("mark_min_y_ratio", 0.6),
             otsu_offset=data.get("otsu_offset", 5),
             otsu_bottom_crop=data.get("otsu_bottom_crop", 1000),
+            enable_panel_polygon=data.get("enable_panel_polygon", True),
             exclusion_zones=exclusion_zones,
             tile_size=data.get("tile_size", 512),
             tile_stride=data.get("tile_stride", 512),
@@ -281,11 +295,77 @@ class CAPIConfig:
             aoi_coord_inspection_enabled=data.get("aoi_coord_inspection_enabled", False),
             aoi_report_path_replace_from=data.get("aoi_report_path_replace_from", "yuantu"),
             aoi_report_path_replace_to=data.get("aoi_report_path_replace_to", "Report"),
-            config_path=path,
         )
-        
+
         return config
-    
+
+    def to_dict(self) -> Dict[str, Any]:
+        """序列化為 dict（供 round-trip / 測試使用）"""
+        return {
+            "machine_id": self.machine_id,
+            "product_name": self.product_name,
+            "mark_template_path": self.mark_template_path,
+            "mark_match_threshold": self.mark_match_threshold,
+            "mark_min_y_ratio": self.mark_min_y_ratio,
+            "mark_fallback_position": self.mark_fallback_position,
+            "otsu_offset": self.otsu_offset,
+            "otsu_bottom_crop": self.otsu_bottom_crop,
+            "enable_panel_polygon": self.enable_panel_polygon,
+            "exclusion_zones": [zone.to_dict() for zone in self.exclusion_zones],
+            "tile_size": self.tile_size,
+            "tile_stride": self.tile_stride,
+            "anomaly_threshold": self.anomaly_threshold,
+            "model_path": self.model_path,
+            "model_mapping": self.model_mapping,
+            "threshold_mapping": self.threshold_mapping,
+            "patchcore_filter_enabled": self.patchcore_filter_enabled,
+            "patchcore_blur_sigma": self.patchcore_blur_sigma,
+            "patchcore_min_area": self.patchcore_min_area,
+            "patchcore_score_metric": self.patchcore_score_metric,
+            "patchcore_concentration_enabled": self.patchcore_concentration_enabled,
+            "patchcore_concentration_min_ratio": self.patchcore_concentration_min_ratio,
+            "patchcore_concentration_penalty": self.patchcore_concentration_penalty,
+            "patchcore_diffuse_area_enabled": self.patchcore_diffuse_area_enabled,
+            "patchcore_diffuse_area_threshold": self.patchcore_diffuse_area_threshold,
+            "patchcore_diffuse_area_penalty": self.patchcore_diffuse_area_penalty,
+            "dust_brightness_threshold": self.dust_brightness_threshold,
+            "dust_threshold_floor": self.dust_threshold_floor,
+            "dust_bright_rescue_threshold": self.dust_bright_rescue_threshold,
+            "dust_area_min": self.dust_area_min,
+            "dust_area_max": self.dust_area_max,
+            "dust_extension": self.dust_extension,
+            "dust_heatmap_iou_threshold": self.dust_heatmap_iou_threshold,
+            "dust_heatmap_top_percent": self.dust_heatmap_top_percent,
+            "dust_heatmap_metric": self.dust_heatmap_metric,
+            "dust_mask_before_binarize": self.dust_mask_before_binarize,
+            "dust_two_stage_enabled": self.dust_two_stage_enabled,
+            "dust_two_stage_dust_ratio": self.dust_two_stage_dust_ratio,
+            "dust_two_stage_bg_blur": self.dust_two_stage_bg_blur,
+            "dust_two_stage_diff_percentile": self.dust_two_stage_diff_percentile,
+            "dust_two_stage_min_area": self.dust_two_stage_min_area,
+            "dust_two_stage_fallback_score": self.dust_two_stage_fallback_score,
+            "dust_detect_dark_particles": self.dust_detect_dark_particles,
+            "omit_overexposure_mean_threshold": self.omit_overexposure_mean_threshold,
+            "omit_overexposure_ratio_threshold": self.omit_overexposure_ratio_threshold,
+            "edge_margin_px": self.edge_margin_px,
+            "edge_margin_sides": self.edge_margin_sides,
+            "bright_spot_threshold": self.bright_spot_threshold,
+            "bright_spot_min_area": self.bright_spot_min_area,
+            "bright_spot_median_kernel": self.bright_spot_median_kernel,
+            "bright_spot_diff_threshold": self.bright_spot_diff_threshold,
+            "skip_files": self.skip_files,
+            "side_shot_prefixes": self.side_shot_prefixes,
+            "max_images_per_panel": self.max_images_per_panel,
+            "bomb_defects": [b.to_dict() for b in self.bomb_defects],
+            "bomb_match_tolerance": self.bomb_match_tolerance,
+            "bomb_line_min_aspect_ratio": self.bomb_line_min_aspect_ratio,
+            "model_resolution_map": self.model_resolution_map,
+            "grid_tiling_enabled": self.grid_tiling_enabled,
+            "aoi_coord_inspection_enabled": self.aoi_coord_inspection_enabled,
+            "aoi_report_path_replace_from": self.aoi_report_path_replace_from,
+            "aoi_report_path_replace_to": self.aoi_report_path_replace_to,
+        }
+
     def to_yaml(self, yaml_path: str) -> None:
         """儲存配置到 YAML 檔案"""
         data = {
@@ -297,6 +377,7 @@ class CAPIConfig:
             "mark_fallback_position": self.mark_fallback_position,
             "otsu_offset": self.otsu_offset,
             "otsu_bottom_crop": self.otsu_bottom_crop,
+            "enable_panel_polygon": self.enable_panel_polygon,
             "exclusion_zones": [zone.to_dict() for zone in self.exclusion_zones],
             "tile_size": self.tile_size,
             "tile_stride": self.tile_stride,

@@ -1965,7 +1965,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             img_h, img_w = image.shape[:2]
 
             # 2. 計算 raw_bounds (面板在圖片中的實際邊界) 與 otsu_bounds
-            raw_bounds = self.inferencer._find_raw_object_bounds(image)
+            raw_bounds, _ = self.inferencer._find_raw_object_bounds(image)
             if raw_bounds is None:
                 raw_bounds = (0, 0, img_w, img_h)
             
@@ -2309,7 +2309,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         try:
                             ref_img = cv2.imread(str(candidate), cv2.IMREAD_UNCHANGED)
                             if ref_img is not None:
-                                reference_bounds = self.inferencer._find_raw_object_bounds(ref_img)
+                                reference_bounds, _ = self.inferencer._find_raw_object_bounds(ref_img)
                                 ref_image_name = candidate.name
                                 break
                         except Exception:
@@ -2325,7 +2325,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         try:
                             ref_img = cv2.imread(str(candidate), cv2.IMREAD_UNCHANGED)
                             if ref_img is not None:
-                                reference_bounds = self.inferencer._find_raw_object_bounds(ref_img)
+                                reference_bounds, _ = self.inferencer._find_raw_object_bounds(ref_img)
                                 ref_image_name = candidate.name
                                 break
                         except Exception:
@@ -2339,7 +2339,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if otsu_bounds is None:
                     otsu_bounds = raw_bounds
             else:
-                raw_bounds = self.inferencer._find_raw_object_bounds(image)
+                raw_bounds, _ = self.inferencer._find_raw_object_bounds(image)
                 if raw_bounds is None:
                     raw_bounds = (0, 0, img_w, img_h)
                 otsu_bounds, _ = self.inferencer.calculate_otsu_bounds(image)
