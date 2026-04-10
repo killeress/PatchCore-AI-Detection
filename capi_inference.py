@@ -801,17 +801,20 @@ class CAPIInferencer:
         )
     
     def calculate_exclusion_regions(
-        self, 
+        self,
         image: np.ndarray,
         otsu_bounds: Tuple[int, int, int, int],
         cached_mark: Optional[ExclusionRegion] = None,
+        panel_polygon: Optional[np.ndarray] = None,
     ) -> List[ExclusionRegion]:
         """計算所有排除區域
-        
+
         Args:
             image: 原始圖片
             otsu_bounds: Otsu 邊界
             cached_mark: 快取的 MARK 區域（Panel 級共用），若提供則跳過模板匹配
+            panel_polygon: 面板 4 角 polygon，若提供則 relative_bottom_right 以
+                           polygon BR 為錨點
         """
         # 如果啟用了底部裁切，且裁切量足夠大（例如 > 0），則假設機構和 MARK 都已被切除
         # 因此不再計算排外區域，避免 relative_bottom_right 誤標記到新的底部
@@ -833,15 +836,22 @@ class CAPIInferencer:
                         regions.append(mark_region)
             
             elif zone.type == "relative_bottom_right":
-                # 相對於 Otsu 邊界的右下角
-                br_x1 = max(otsu_x1, otsu_x2 - zone.width)
-                br_y1 = max(otsu_y1, otsu_y2 - zone.height)
+                # 錨點: polygon BR 優先，否則回退到 bbox 右下
+                if panel_polygon is not None:
+                    anchor_x = int(round(float(panel_polygon[2][0])))
+                    anchor_y = int(round(float(panel_polygon[2][1])))
+                else:
+                    anchor_x = otsu_x2
+                    anchor_y = otsu_y2
+
+                br_x1 = max(otsu_x1, anchor_x - zone.width)
+                br_y1 = max(otsu_y1, anchor_y - zone.height)
                 regions.append(ExclusionRegion(
                     name=zone.name,
                     x1=br_x1,
                     y1=br_y1,
-                    x2=otsu_x2,
-                    y2=otsu_y2,
+                    x2=anchor_x,
+                    y2=anchor_y,
                 ))
         
         return regions
@@ -1038,7 +1048,11 @@ class CAPIInferencer:
             cropped_region = (otsu_bounds[0], otsu_bounds[3], otsu_bounds[2], original_y2)
         
         # 計算排除區域（使用快取的 MARK 位置）
-        exclusion_regions = self.calculate_exclusion_regions(image, otsu_bounds, cached_mark=cached_mark)
+        exclusion_regions = self.calculate_exclusion_regions(
+            image, otsu_bounds,
+            cached_mark=cached_mark,
+            panel_polygon=panel_polygon,
+        )
         
         # 切塊
         tiles, excluded_count = self.tile_image(

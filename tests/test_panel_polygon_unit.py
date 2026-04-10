@@ -317,6 +317,57 @@ def test_bottom_crop_preserves_polygon_tilt():
           f"BL={BL.round(1).tolist()} [expect x≈{expected_BL_x:.1f}])")
 
 
+def test_exclusion_region_uses_polygon_br_anchor():
+    """
+    relative_bottom_right 排除區應以 polygon BR 為錨點，
+    而不是 bbox 右下角。
+    """
+    from capi_config import ExclusionZone
+
+    cfg = CAPIConfig()
+    cfg.tile_size = 512
+    cfg.tile_stride = 512
+    cfg.otsu_bottom_crop = 0
+    cfg.otsu_offset = 0
+    cfg.exclusion_zones = [
+        ExclusionZone(
+            name="test_br",
+            type="relative_bottom_right",
+            width=300,
+            height=200,
+            enabled=True,
+        ),
+    ]
+    inf = CAPIInferencer(cfg)
+
+    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
+    if not img_path.exists():
+        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
+        return
+
+    result = inf.preprocess_image(img_path)
+    assert result is not None
+    assert result.panel_polygon is not None
+
+    # 找到 test_br 排除區
+    br_regions = [r for r in result.exclusion_regions if r.name == "test_br"]
+    assert len(br_regions) == 1, f"應該找到 1 個 test_br 排除區，實際 {len(br_regions)}"
+    br = br_regions[0]
+
+    # 排除區的 x2/y2 必須接近 polygon BR，不能是 bbox 右下
+    poly_br_x, poly_br_y = int(round(result.panel_polygon[2][0])), int(round(result.panel_polygon[2][1]))
+    bbox_x2, bbox_y2 = result.otsu_bounds[2], result.otsu_bounds[3]
+
+    # G0F 這張 polygon BR 與 bbox 右下差 ~37 px
+    assert abs(br.x2 - poly_br_x) <= 1, \
+        f"排除區 x2={br.x2} 應接近 polygon BR x={poly_br_x}，而非 bbox x2={bbox_x2}"
+    assert abs(br.y2 - poly_br_y) <= 1, \
+        f"排除區 y2={br.y2} 應接近 polygon BR y={poly_br_y}，而非 bbox y2={bbox_y2}"
+    print(f"✅ test_exclusion_region_uses_polygon_br_anchor "
+          f"(br=({br.x2},{br.y2}), poly BR=({poly_br_x},{poly_br_y}), "
+          f"bbox BR=({bbox_x2},{bbox_y2}))")
+
+
 if __name__ == "__main__":
     test_config_enable_panel_polygon_default_true()
     test_config_roundtrip_enable_panel_polygon()
@@ -333,5 +384,6 @@ if __name__ == "__main__":
     test_preprocess_image_polygon_disabled_when_toggle_off()
     test_reference_polygon_not_double_shrunk()
     test_bottom_crop_preserves_polygon_tilt()
+    test_exclusion_region_uses_polygon_br_anchor()
 
     print("\n✅ 所有測試通過")
