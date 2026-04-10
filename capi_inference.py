@@ -3260,6 +3260,7 @@ class CAPIInferencer:
         # B0F 黑圖的 OTSU 二值化無法正確偵測面板邊界（全黑畫面與背景差異太小），
         # 因此從同資料夾的白圖 (非B0F、非OMIT) 計算邊界作為參考
         reference_raw_bounds_for_dark = None
+        reference_polygon_for_dark: Optional[np.ndarray] = None
         _DARK_PREFIXES = ("B0F",)  # 需要使用參考邊界的暗色圖片前綴
         def _is_dark_image(filename: str) -> bool:
             return filename.upper().startswith(_DARK_PREFIXES)
@@ -3275,9 +3276,15 @@ class CAPIInferencer:
                 try:
                     ref_img = cv2.imread(str(ref_path), cv2.IMREAD_UNCHANGED)
                     if ref_img is not None:
-                        ref_bounds, _ref_binary = self._find_raw_object_bounds(ref_img)
+                        ref_bounds, ref_binary = self._find_raw_object_bounds(ref_img)
                         reference_raw_bounds_for_dark = ref_bounds
-                        print(f"📐 黑圖參考邊界已從 {ref_path.name} 計算 → {reference_raw_bounds_for_dark}")
+                        if self.config.enable_panel_polygon:
+                            reference_polygon_for_dark = self._find_panel_polygon(
+                                ref_binary, ref_bounds
+                            )
+                        poly_str = "有" if reference_polygon_for_dark is not None else "無"
+                        print(f"📐 黑圖參考邊界已從 {ref_path.name} 計算 → {reference_raw_bounds_for_dark}"
+                              f" (polygon: {poly_str})")
                         break
                 except Exception as e:
                     print(f"⚠️ 計算參考邊界失敗 ({ref_path.name}): {e}")
@@ -3307,7 +3314,13 @@ class CAPIInferencer:
             """單張圖片的預處理 (可安全在多執行緒中呼叫)"""
             # 黑圖使用參考邊界
             ref_bounds = reference_raw_bounds_for_dark if reference_raw_bounds_for_dark and _is_dark_image(img_path.name) else None
-            result = self.preprocess_image(img_path, cached_mark=cached_mark, reference_raw_bounds=ref_bounds)
+            ref_poly = reference_polygon_for_dark if reference_polygon_for_dark is not None and _is_dark_image(img_path.name) else None
+            result = self.preprocess_image(
+                img_path,
+                cached_mark=cached_mark,
+                reference_raw_bounds=ref_bounds,
+                reference_polygon=ref_poly,
+            )
             if result is None:
                 return None
             
@@ -3397,7 +3410,13 @@ class CAPIInferencer:
                             print(f"🎯 AOI Coord: 為跳過的圖片 {matched_file.name} 建立預處理 (有 {len(aoi_report[report_prefix])} 筆 AOI 座標)")
                             # 黑圖使用參考邊界
                             skip_ref_bounds = reference_raw_bounds_for_dark if reference_raw_bounds_for_dark and _is_dark_image(matched_file.name) else None
-                            skip_result = self.preprocess_image(matched_file, cached_mark=cached_mark, reference_raw_bounds=skip_ref_bounds)
+                            skip_ref_poly = reference_polygon_for_dark if reference_polygon_for_dark is not None and _is_dark_image(matched_file.name) else None
+                            skip_result = self.preprocess_image(
+                                matched_file,
+                                cached_mark=cached_mark,
+                                reference_raw_bounds=skip_ref_bounds,
+                                reference_polygon=skip_ref_poly,
+                            )
                             if skip_result is not None:
                                 # 清除 grid tiles，只保留結構供 AOI coord 使用
                                 skip_result.tiles = []
