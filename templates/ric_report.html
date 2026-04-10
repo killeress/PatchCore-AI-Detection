@@ -940,9 +940,9 @@
 
     <!-- Sub-Tab 4: Over Review (過檢) -->
     <div class="client-tab-panel" id="client_panel-over_review">
-        <div class="mb-3">
-            <button type="button" class="btn btn-primary" id="btnExportDataset">
-                匯出訓練資料集
+        <div style="margin-bottom:16px;">
+            <button type="button" class="btn-export" id="btnExportDataset">
+                📦 匯出訓練資料集
             </button>
         </div>
         <div class="stats-grid" id="over_review_statsGrid"></div>
@@ -2763,48 +2763,87 @@
     })();
 </script>
 
-<!-- Dataset Export Modal -->
-<div class="modal fade" id="datasetExportModal" tabindex="-1">
-  <div class="modal-dialog">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">匯出訓練資料集</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-      </div>
-      <div class="modal-body">
-        <div id="dsExportForm">
-          <div class="mb-2">
-            <label class="form-label">天數</label>
-            <input type="number" class="form-control" id="dsExportDays" value="3" min="1" max="30">
-          </div>
-          <div class="mb-2">
-            <label class="form-label">輸出目錄（留空使用 server_config 預設）</label>
-            <input type="text" class="form-control" id="dsExportOutputDir" placeholder="/data/capi_ai/datasets/over_review">
-          </div>
-          <div class="form-check mb-2">
-            <input class="form-check-input" type="checkbox" id="dsExportIncludeTrueNg" checked>
-            <label class="form-check-label" for="dsExportIncludeTrueNg">包含真 NG 樣本 (true_ng)</label>
-          </div>
-          <div class="form-check mb-2">
-            <input class="form-check-input" type="checkbox" id="dsExportSkipExisting" checked>
-            <label class="form-check-label" for="dsExportSkipExisting">跳過已存在的樣本</label>
-          </div>
+<!-- Dataset Export Modal (pure Tailwind + vanilla JS, 無 Bootstrap 依賴) -->
+<div id="datasetExportModal"
+     class="fixed inset-0 z-50 hidden flex items-center justify-center p-4"
+     style="background-color: rgba(2, 6, 23, 0.8); backdrop-filter: blur(8px);"
+     onclick="if(event.target === this) document.getElementById('datasetExportModal').classList.add('hidden')">
+  <div class="w-full max-w-lg bg-slate-900/95 border border-white/10 rounded-2xl shadow-2xl flex flex-col max-h-[90vh]"
+       style="font-family: 'Fira Sans', sans-serif;">
+
+    <!-- Header -->
+    <div class="flex items-center justify-between border-b border-white/10 p-5 bg-slate-800/50 rounded-t-2xl">
+      <div class="flex items-center gap-3">
+        <div class="text-emerald-400 bg-emerald-500/10 p-2 rounded-lg border border-emerald-500/20">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+          </svg>
         </div>
-        <div id="dsExportProgress" style="display:none;">
-          <p>Job ID: <span id="dsExportJobId"></span></p>
-          <div class="progress mb-2"><div id="dsExportBar" class="progress-bar" style="width:0%;"></div></div>
-          <p id="dsExportCurrentInfo"></p>
-        </div>
-        <div id="dsExportSummary" style="display:none;">
-          <h6>匯出完成</h6>
-          <pre id="dsExportSummaryText" style="background:#f8f9fa;padding:10px;"></pre>
-        </div>
+        <h2 class="text-lg font-semibold text-slate-100 m-0">匯出訓練資料集</h2>
       </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">關閉</button>
-        <button type="button" class="btn btn-warning" id="btnDsExportCancel" style="display:none;">取消 Job</button>
-        <button type="button" class="btn btn-primary" id="btnDsExportStart">開始匯出</button>
+      <button type="button" id="btnDsExportClose"
+              class="text-slate-400 hover:text-white p-2 hover:bg-red-500/20 rounded-full border border-slate-700 hover:border-red-500/50 transition-colors cursor-pointer">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Body -->
+    <div class="p-5 overflow-y-auto flex-1 text-slate-200 text-sm">
+
+      <!-- Form -->
+      <div id="dsExportForm" class="flex flex-col gap-4">
+        <div>
+          <label class="block text-slate-300 mb-1">天數</label>
+          <input type="number" id="dsExportDays" value="3" min="1" max="30"
+                 class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-emerald-500">
+        </div>
+        <div>
+          <label class="block text-slate-300 mb-1">輸出目錄（留空使用 server_config 預設）</label>
+          <input type="text" id="dsExportOutputDir" placeholder="./datasets/over_review"
+                 class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-emerald-500">
+        </div>
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" id="dsExportIncludeTrueNg" checked class="w-4 h-4 accent-emerald-500">
+          <span>包含真 NG 樣本 (true_ng)</span>
+        </label>
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" id="dsExportSkipExisting" checked class="w-4 h-4 accent-emerald-500">
+          <span>跳過已存在的樣本</span>
+        </label>
       </div>
+
+      <!-- Progress -->
+      <div id="dsExportProgress" class="hidden flex-col gap-3">
+        <div class="text-slate-400 text-xs">Job ID：<span id="dsExportJobId" class="text-slate-200 font-mono"></span></div>
+        <div class="w-full bg-slate-800 rounded-full h-2 overflow-hidden border border-slate-700">
+          <div id="dsExportBar" class="h-full bg-gradient-to-r from-emerald-500 to-green-400 transition-all duration-300" style="width:0%;"></div>
+        </div>
+        <div id="dsExportCurrentInfo" class="text-slate-300 text-xs font-mono"></div>
+      </div>
+
+      <!-- Summary -->
+      <div id="dsExportSummary" class="hidden flex-col gap-2">
+        <h3 class="text-emerald-400 font-semibold m-0">✅ 匯出完成</h3>
+        <pre id="dsExportSummaryText" class="bg-slate-800 border border-slate-700 rounded-lg p-3 text-xs text-slate-200 overflow-x-auto whitespace-pre-wrap max-h-64"></pre>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="flex items-center justify-end gap-2 border-t border-white/10 p-4 bg-slate-800/30 rounded-b-2xl">
+      <button type="button" id="btnDsExportCloseFooter"
+              class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm transition-colors cursor-pointer">
+        關閉
+      </button>
+      <button type="button" id="btnDsExportCancel"
+              class="hidden px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-sm transition-colors cursor-pointer">
+        取消 Job
+      </button>
+      <button type="button" id="btnDsExportStart"
+              class="px-4 py-2 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white rounded-lg text-sm font-semibold transition-all shadow-lg shadow-emerald-500/20 cursor-pointer">
+        開始匯出
+      </button>
     </div>
   </div>
 </div>
@@ -2813,25 +2852,43 @@
 (function() {
   let dsExportPollTimer = null;
 
+  const $ = (id) => document.getElementById(id);
+
+  function showEl(el) { el.classList.remove("hidden"); el.classList.add("flex"); }
+  function hideEl(el) { el.classList.add("hidden"); el.classList.remove("flex"); }
+
+  function openModal() {
+    // 重置為表單狀態
+    $("dsExportForm").classList.remove("hidden");
+    $("dsExportForm").classList.add("flex");
+    hideEl($("dsExportProgress"));
+    hideEl($("dsExportSummary"));
+    $("btnDsExportStart").classList.remove("hidden");
+    $("btnDsExportCancel").classList.add("hidden");
+    $("datasetExportModal").classList.remove("hidden");
+  }
+
+  function closeModal() {
+    $("datasetExportModal").classList.add("hidden");
+  }
+
+  // Event delegation: btnExportDataset is inside a tab panel that may be hidden/shown
   document.addEventListener("click", function(ev) {
-    if (ev.target && ev.target.id === "btnExportDataset") {
-      document.getElementById("dsExportForm").style.display = "";
-      document.getElementById("dsExportProgress").style.display = "none";
-      document.getElementById("dsExportSummary").style.display = "none";
-      document.getElementById("btnDsExportStart").style.display = "";
-      document.getElementById("btnDsExportCancel").style.display = "none";
-      const m = new bootstrap.Modal(document.getElementById("datasetExportModal"));
-      m.show();
+    if (ev.target && (ev.target.id === "btnExportDataset" || ev.target.closest("#btnExportDataset"))) {
+      openModal();
     }
   });
 
-  document.getElementById("btnDsExportStart").addEventListener("click", async function() {
-    const days = parseInt(document.getElementById("dsExportDays").value || "3", 10);
-    const outputDir = document.getElementById("dsExportOutputDir").value.trim();
+  $("btnDsExportClose").addEventListener("click", closeModal);
+  $("btnDsExportCloseFooter").addEventListener("click", closeModal);
+
+  $("btnDsExportStart").addEventListener("click", async function() {
+    const days = parseInt($("dsExportDays").value || "3", 10);
+    const outputDir = $("dsExportOutputDir").value.trim();
     const body = {
       days: days,
-      include_true_ng: document.getElementById("dsExportIncludeTrueNg").checked,
-      skip_existing: document.getElementById("dsExportSkipExisting").checked,
+      include_true_ng: $("dsExportIncludeTrueNg").checked,
+      skip_existing: $("dsExportSkipExisting").checked,
     };
     if (outputDir) body.output_dir = outputDir;
 
@@ -2846,19 +2903,24 @@
         alert("啟動失敗: " + (data.error || resp.status));
         return;
       }
-      document.getElementById("dsExportForm").style.display = "none";
-      document.getElementById("dsExportProgress").style.display = "";
-      document.getElementById("btnDsExportStart").style.display = "none";
-      document.getElementById("btnDsExportCancel").style.display = "";
-      document.getElementById("dsExportJobId").textContent = data.job_id;
+      // 切到進度畫面
+      hideEl($("dsExportForm"));
+      showEl($("dsExportProgress"));
+      $("btnDsExportStart").classList.add("hidden");
+      $("btnDsExportCancel").classList.remove("hidden");
+      $("dsExportJobId").textContent = data.job_id;
       startDsExportPolling(data.job_id);
     } catch (e) {
       alert("網路錯誤: " + e);
     }
   });
 
-  document.getElementById("btnDsExportCancel").addEventListener("click", async function() {
-    await fetch("/api/dataset_export/cancel", {method: "POST"});
+  $("btnDsExportCancel").addEventListener("click", async function() {
+    try {
+      await fetch("/api/dataset_export/cancel", {method: "POST"});
+    } catch (e) {
+      console.error("cancel error", e);
+    }
   });
 
   function startDsExportPolling(jobId) {
@@ -2869,21 +2931,21 @@
         const s = await r.json();
         if (s.state === "running") {
           const pct = s.total > 0 ? (s.current * 100 / s.total) : 0;
-          document.getElementById("dsExportBar").style.width = pct + "%";
-          document.getElementById("dsExportCurrentInfo").textContent =
-            `${s.current} / ${s.total}  (${s.last_glass_id || ""})  已耗時 ${s.elapsed_sec || 0}s`;
+          $("dsExportBar").style.width = pct + "%";
+          $("dsExportCurrentInfo").textContent =
+            `${s.current} / ${s.total}  ${s.last_glass_id ? "(" + s.last_glass_id + ")" : ""}  已耗時 ${s.elapsed_sec || 0}s`;
         } else if (s.state === "completed" || s.state === "cancelled" || s.state === "failed") {
           clearInterval(dsExportPollTimer);
           dsExportPollTimer = null;
-          document.getElementById("btnDsExportCancel").style.display = "none";
+          $("btnDsExportCancel").classList.add("hidden");
           if (s.state === "completed") {
             const sr = await fetch("/api/dataset_export/summary/" + jobId);
             const sm = await sr.json();
-            document.getElementById("dsExportProgress").style.display = "none";
-            document.getElementById("dsExportSummary").style.display = "";
-            document.getElementById("dsExportSummaryText").textContent = JSON.stringify(sm, null, 2);
+            hideEl($("dsExportProgress"));
+            showEl($("dsExportSummary"));
+            $("dsExportSummaryText").textContent = JSON.stringify(sm, null, 2);
           } else {
-            document.getElementById("dsExportCurrentInfo").textContent =
+            $("dsExportCurrentInfo").textContent =
               `Job ${s.state}: ${s.error || ""}`;
           }
         }
