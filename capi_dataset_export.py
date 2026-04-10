@@ -126,6 +126,67 @@ def build_sample_filename(glass_id: str, image_name: str,
     return f"{yyyymmdd}_{glass_id}_{stem}_{sample_key}.png"
 
 
+def read_manifest(manifest_path: Path) -> Dict[str, Dict[str, str]]:
+    """讀 manifest.csv 成 {sample_id: row_dict}。檔案不存在回空 dict。"""
+    manifest_path = Path(manifest_path)
+    if not manifest_path.exists():
+        return {}
+    out: Dict[str, Dict[str, str]] = {}
+    with manifest_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            sid = row.get("sample_id")
+            if sid:
+                out[sid] = row
+    return out
+
+
+def write_manifest(manifest_path: Path, rows: Dict[str, Dict[str, str]]) -> None:
+    """整批 rewrite manifest.csv（呼叫者須持有 job lock 保證單寫入者）"""
+    manifest_path = Path(manifest_path)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=MANIFEST_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for sid in sorted(rows.keys()):
+            row = rows[sid]
+            # 確保所有欄位都存在（補空值）
+            full = {k: str(row.get(k, "")) for k in MANIFEST_FIELDS}
+            writer.writerow(full)
+    tmp_path.replace(manifest_path)  # atomic on same filesystem
+
+
+def move_sample_files(
+    base_dir: Path, old_crop_rel: str, old_heatmap_rel: str,
+    new_label: str, prefix: str,
+) -> Tuple[str, str]:
+    """把 crop 與 heatmap 從舊 label 目錄 move 到新 label 目錄。
+
+    Returns:
+        (new_crop_rel, new_heatmap_rel) — 兩個新的相對路徑
+    """
+    base_dir = Path(base_dir)
+    old_crop = base_dir / old_crop_rel
+    old_hm = base_dir / old_heatmap_rel
+
+    filename = old_crop.name
+    new_crop_rel = f"{new_label}/{prefix}/crop/{filename}"
+    new_hm_rel = f"{new_label}/{prefix}/heatmap/{filename}"
+    new_crop = base_dir / new_crop_rel
+    new_hm = base_dir / new_hm_rel
+
+    new_crop.parent.mkdir(parents=True, exist_ok=True)
+    new_hm.parent.mkdir(parents=True, exist_ok=True)
+
+    if old_crop.exists():
+        shutil.move(str(old_crop), str(new_crop))
+    if old_hm.exists():
+        shutil.move(str(old_hm), str(new_hm))
+
+    return new_crop_rel, new_hm_rel
+
+
 # ---- Crop Tool Functions ----
 
 def _pad_to_size(img: np.ndarray, target: int = CROP_SIZE,

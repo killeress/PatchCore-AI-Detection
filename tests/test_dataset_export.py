@@ -270,5 +270,70 @@ def test_collect_candidates_attaches_prefix_and_metadata():
     assert tile_cand.tile_x == 0 and tile_cand.tile_w == 512
 
 
+def test_manifest_read_empty_when_not_exists(tmp_path):
+    from capi_dataset_export import read_manifest
+    m = read_manifest(tmp_path / "manifest.csv")
+    assert m == {}
+
+
+def test_manifest_roundtrip(tmp_path):
+    from capi_dataset_export import read_manifest, write_manifest
+    manifest_path = tmp_path / "manifest.csv"
+    rows = {
+        "GLS123_G0F0001_tile3": {
+            "sample_id": "GLS123_G0F0001_tile3",
+            "collected_at": "2026-04-10T15:00:00",
+            "label": "true_ng",
+            "source_type": "patchcore_tile",
+            "prefix": "G0F0001",
+            "glass_id": "GLS123",
+            "image_name": "G0F0001.bmp",
+            "inference_record_id": "1001",
+            "image_result_id": "5001",
+            "tile_idx": "3",
+            "edge_defect_id": "",
+            "crop_path": "true_ng/G0F0001/crop/20260408_GLS123_G0F0001_tile3.png",
+            "heatmap_path": "true_ng/G0F0001/heatmap/20260408_GLS123_G0F0001_tile3.png",
+            "ai_score": "0.85",
+            "defect_x": "256",
+            "defect_y": "256",
+            "ric_judgment": "NG",
+            "over_review_category": "",
+            "over_review_note": "",
+            "inference_timestamp": "2026-04-08T10:00:00",
+            "status": "ok",
+        }
+    }
+    write_manifest(manifest_path, rows)
+    loaded = read_manifest(manifest_path)
+    assert loaded == rows
+
+
+def test_move_existing_sample_to_new_label(tmp_path):
+    """label 變更時，實體檔案要從舊目錄 move 到新目錄"""
+    from capi_dataset_export import move_sample_files
+    base = tmp_path
+    old_crop = base / "over_other" / "G0F0001" / "crop" / "a.png"
+    old_hm = base / "over_other" / "G0F0001" / "heatmap" / "a.png"
+    old_crop.parent.mkdir(parents=True)
+    old_hm.parent.mkdir(parents=True)
+    old_crop.write_bytes(b"crop")
+    old_hm.write_bytes(b"heatmap")
+
+    new_crop_rel, new_hm_rel = move_sample_files(
+        base_dir=base,
+        old_crop_rel="over_other/G0F0001/crop/a.png",
+        old_heatmap_rel="over_other/G0F0001/heatmap/a.png",
+        new_label="over_edge_false_positive",
+        prefix="G0F0001",
+    )
+
+    assert new_crop_rel == "over_edge_false_positive/G0F0001/crop/a.png"
+    assert (base / new_crop_rel).read_bytes() == b"crop"
+    assert (base / new_hm_rel).read_bytes() == b"heatmap"
+    assert not old_crop.exists()
+    assert not old_hm.exists()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
