@@ -1969,7 +1969,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if raw_bounds is None:
                 raw_bounds = (0, 0, img_w, img_h)
             
-            otsu_bounds, _ = self.inferencer.calculate_otsu_bounds(image)
+            otsu_bounds, _, _ = self.inferencer.calculate_otsu_bounds(image)
             if otsu_bounds is None:
                 otsu_bounds = raw_bounds
 
@@ -2335,14 +2335,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             if reference_bounds is not None:
                 raw_bounds = reference_bounds
-                otsu_bounds, _ = self.inferencer.calculate_otsu_bounds(image, reference_raw_bounds=reference_bounds)
+                otsu_bounds, _, _ = self.inferencer.calculate_otsu_bounds(image, reference_raw_bounds=reference_bounds)
                 if otsu_bounds is None:
                     otsu_bounds = raw_bounds
             else:
                 raw_bounds, _ = self.inferencer._find_raw_object_bounds(image)
                 if raw_bounds is None:
                     raw_bounds = (0, 0, img_w, img_h)
-                otsu_bounds, _ = self.inferencer.calculate_otsu_bounds(image)
+                otsu_bounds, _, _ = self.inferencer.calculate_otsu_bounds(image)
                 if otsu_bounds is None:
                     otsu_bounds = raw_bounds
                 if is_dark:

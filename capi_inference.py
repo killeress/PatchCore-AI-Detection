@@ -213,7 +213,11 @@ class ImageResult:
     
     # 原始物件邊界 (用於 AOI 座標映射，避免重複讀取圖片)
     raw_bounds: Optional[Tuple[int, int, int, int]] = None
-    
+
+    # 面板 4 角 polygon (shape (4,2) float32，順序 TL/TR/BR/BL)
+    # None 代表 polygon 偵測失敗或未啟用，下游應 fallback 回 axis-aligned bbox
+    panel_polygon: Optional[np.ndarray] = field(default=None, repr=False)
+
     # 推論耗時 (秒)
     inference_time: float = 0.0
     
@@ -619,23 +623,30 @@ class CAPIInferencer:
 
         return polygon
 
-    def calculate_otsu_bounds(self, image: np.ndarray, otsu_offset_override: Optional[int] = None, reference_raw_bounds: Optional[Tuple[int, int, int, int]] = None) -> Tuple[Tuple[int, int, int, int], Optional[int]]:
+    def calculate_otsu_bounds(
+        self,
+        image: np.ndarray,
+        otsu_offset_override: Optional[int] = None,
+        reference_raw_bounds: Optional[Tuple[int, int, int, int]] = None,
+        reference_polygon: Optional[np.ndarray] = None,
+    ) -> Tuple[Tuple[int, int, int, int], Optional[int], Optional[np.ndarray]]:
         """
-        計算 Otsu 前景邊界
+        計算 Otsu 前景邊界與 panel polygon。
 
         Args:
             reference_raw_bounds: 參考用的原始邊界 (來自同資料夾的白圖)。
                                   黑圖 (B0F) OTSU 無法正確偵測邊界時使用。
+            reference_polygon: 參考用的 panel polygon (來自同資料夾的白圖)，
+                               與 reference_raw_bounds 同時使用於 B0F fallback。
         Returns:
-            (final_bounds, original_y2) - original_y2 是裁切前的底部 y 座標
+            (final_bounds, original_y2, panel_polygon)
         """
         img_height, img_width = image.shape[:2]
 
-        # 取得原始物件邊界 (若有參考邊界則直接使用)
-        # 注意: binary_mask 會由 Task 3 的 _find_panel_polygon 消費，Task 1 只是先接著
+        # 取得原始物件邊界與 binary mask
         if reference_raw_bounds is not None:
             x_min, y_min, x_max, y_max = reference_raw_bounds
-            binary_mask = None  # 使用參考邊界時無 binary mask
+            binary_mask = None
         else:
             (x_min, y_min, x_max, y_max), binary_mask = self._find_raw_object_bounds(image)
 
@@ -644,30 +655,63 @@ class CAPIInferencer:
         y_start = max(0, int(y_min) + offset)
         x_end = min(img_width, int(x_max) - offset)
         y_end = min(img_height, int(y_max) - offset)
-        
+
         if x_start >= x_end or y_start >= y_end:
             x_start, y_start = 0, 0
             x_end, y_end = img_width, img_height
-            
+
         # 應用底部裁切 (otsu_bottom_crop)
         original_y2 = None
         if self.config.otsu_bottom_crop > 0:
             h = y_end - y_start
             desired_height = max(self.config.tile_size, h - self.config.otsu_bottom_crop)
             final_height = min(h, desired_height)
-            
+
             if final_height < h:
                 original_y2 = y_end
                 y_end = y_start + final_height
-        
-        return (x_start, y_start, x_end, y_end), original_y2
+
+        bounds = (x_start, y_start, x_end, y_end)
+
+        # 計算 panel polygon
+        panel_polygon: Optional[np.ndarray] = None
+        if self.config.enable_panel_polygon:
+            if reference_polygon is not None:
+                panel_polygon = reference_polygon.copy()
+            elif binary_mask is not None:
+                # 使用原始 (未內縮) bbox 做邊緣掃描
+                raw_bbox = (int(x_min), int(y_min), int(x_max), int(y_max))
+                panel_polygon = self._find_panel_polygon(binary_mask, raw_bbox)
+
+            # 若 polygon 存在且使用者有設 otsu_offset，對 polygon 做同向內縮
+            if panel_polygon is not None and offset != 0:
+                cx = (panel_polygon[:, 0].mean())
+                cy = (panel_polygon[:, 1].mean())
+                # 朝中心點內縮 offset px
+                for i in range(4):
+                    dx = panel_polygon[i, 0] - cx
+                    dy = panel_polygon[i, 1] - cy
+                    length = float(np.hypot(dx, dy))
+                    if length > 1e-6:
+                        shrink = offset / length
+                        panel_polygon[i, 0] -= dx * shrink
+                        panel_polygon[i, 1] -= dy * shrink
+
+            # 若 polygon 存在且啟用 otsu_bottom_crop，截掉下半部
+            if panel_polygon is not None and original_y2 is not None:
+                new_bottom = float(y_end)
+                for i in (2, 3):  # BR, BL
+                    if panel_polygon[i, 1] > new_bottom:
+                        panel_polygon[i, 1] = new_bottom
+
+        return bounds, original_y2, panel_polygon
 
     def find_panel_boundaries(self, image: np.ndarray) -> Tuple[int, int, int, int]:
         """
         向後相容別名，對應舊版呼叫。
-        注意：此版本僅回傳四元組邊界，不回傳 original_y2。
+        注意：此版本僅回傳四元組邊界，不回傳 original_y2 / polygon。
         """
-        bounds, _ = self.calculate_otsu_bounds(image)
+        bounds, _, _ = self.calculate_otsu_bounds(image)
         return bounds
 
     def update_edge_config(self, config: Any):
@@ -879,7 +923,14 @@ class CAPIInferencer:
         
         return tiles, excluded_count
     
-    def preprocess_image(self, image_path: Path, cached_mark: Optional[ExclusionRegion] = None, otsu_offset_override: Optional[int] = None, reference_raw_bounds: Optional[Tuple[int, int, int, int]] = None) -> Optional[ImageResult]:
+    def preprocess_image(
+        self,
+        image_path: Path,
+        cached_mark: Optional[ExclusionRegion] = None,
+        otsu_offset_override: Optional[int] = None,
+        reference_raw_bounds: Optional[Tuple[int, int, int, int]] = None,
+        reference_polygon: Optional[np.ndarray] = None,
+    ) -> Optional[ImageResult]:
         """
         預處理圖片：Otsu + 排除區域 + 切塊
 
@@ -889,6 +940,8 @@ class CAPIInferencer:
             otsu_offset_override: Debug 用 Otsu 內縮覆寫值 (px)
             reference_raw_bounds: 參考用的原始邊界 (來自同資料夾的白圖)。
                                   黑圖 (B0F) OTSU 無法正確偵測邊界時使用。
+            reference_polygon: 參考用的 panel polygon (來自同資料夾的白圖)，
+                               與 reference_raw_bounds 同時使用於 B0F fallback。
 
         Returns:
             ImageResult 或 None（如果載入失敗）
@@ -912,7 +965,12 @@ class CAPIInferencer:
             raw_bounds, _raw_binary = self._find_raw_object_bounds(image)
 
         # Otsu 裁切 (同樣使用參考邊界)
-        otsu_bounds, original_y2 = self.calculate_otsu_bounds(image, otsu_offset_override=otsu_offset_override, reference_raw_bounds=reference_raw_bounds)
+        otsu_bounds, original_y2, panel_polygon = self.calculate_otsu_bounds(
+            image,
+            otsu_offset_override=otsu_offset_override,
+            reference_raw_bounds=reference_raw_bounds,
+            reference_polygon=reference_polygon,
+        )
         
         # 記錄裁切區域
         cropped_region = None
@@ -939,6 +997,7 @@ class CAPIInferencer:
             processed_tile_count=len(tiles),
             processing_time=elapsed,
             raw_bounds=raw_bounds,
+            panel_polygon=panel_polygon,
         )
     
     def _apply_edge_margin(self, anomaly_map: np.ndarray, margin_px: int,

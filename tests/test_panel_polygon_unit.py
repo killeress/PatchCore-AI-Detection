@@ -172,6 +172,47 @@ def test_polygon_corner_ordering():
     print("✅ test_polygon_corner_ordering")
 
 
+def test_preprocess_image_populates_panel_polygon():
+    """preprocess_image 跑完後 result.panel_polygon 必須是 (4,2) float32"""
+    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
+    if not img_path.exists():
+        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
+        return
+
+    cfg = CAPIConfig()
+    cfg.tile_size = 512
+    cfg.tile_stride = 512
+    cfg.otsu_bottom_crop = 0  # 不做 bottom crop 以便直接比對
+    inf = CAPIInferencer(cfg)
+    result = inf.preprocess_image(img_path)
+    assert result is not None
+    assert result.panel_polygon is not None, "polygon 應該要被計算"
+    assert result.panel_polygon.shape == (4, 2)
+    assert result.panel_polygon.dtype == np.float32
+    print(f"✅ test_preprocess_image_populates_panel_polygon "
+          f"(polygon={result.panel_polygon.round(1).tolist()})")
+
+
+def test_preprocess_image_polygon_disabled_when_toggle_off():
+    """enable_panel_polygon=False 時 panel_polygon 必須為 None"""
+    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
+    if not img_path.exists():
+        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
+        return
+
+    cfg = CAPIConfig()
+    cfg.tile_size = 512
+    cfg.tile_stride = 512
+    cfg.otsu_bottom_crop = 0
+    cfg.enable_panel_polygon = False
+    inf = CAPIInferencer(cfg)
+    result = inf.preprocess_image(img_path)
+    assert result is not None
+    assert result.panel_polygon is None, \
+        f"toggle off 時 polygon 應為 None，實際 {result.panel_polygon}"
+    print("✅ test_preprocess_image_polygon_disabled_when_toggle_off")
+
+
 if __name__ == "__main__":
     test_config_enable_panel_polygon_default_true()
     test_config_roundtrip_enable_panel_polygon()
@@ -183,5 +224,8 @@ if __name__ == "__main__":
     test_polygon_detect_real_W0F()
     test_polygon_detect_real_G0F()
     test_polygon_corner_ordering()
+
+    test_preprocess_image_populates_panel_polygon()
+    test_preprocess_image_polygon_disabled_when_toggle_off()
 
     print("\n✅ 所有測試通過")
