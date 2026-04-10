@@ -480,6 +480,145 @@ class CAPIInferencer:
 
         return (int(x_min), int(y_min), int(x_max), int(y_max)), closing
 
+    def _find_panel_polygon(
+        self,
+        binary_mask: np.ndarray,
+        bbox: Tuple[int, int, int, int],
+    ) -> Optional[np.ndarray]:
+        """
+        在既有 Otsu binary mask 上用逐邊 polyfit 找 4 角 panel polygon。
+
+        演算法:
+          1. 逐邊 (top/bottom/left/right) 取樣前景邊緣點
+          2. 每邊用 np.polyfit 擬合直線 + 3σ robust filter
+          3. 4 線兩兩相交求 4 角 (TL/TR/BR/BL)
+          4. 品質檢查 (面積、邊長、線近乎平行) — 任一失敗回傳 None
+
+        Args:
+            binary_mask: Otsu + morphology close 後的 uint8 前景圖 (255=前景)
+            bbox: 粗略 bbox (x_min, y_min, x_max, y_max)，作為邊緣掃描範圍
+
+        Returns:
+            np.ndarray shape (4,2) float32，順序 [TL, TR, BR, BL]；
+            偵測失敗或品質不足回傳 None。
+        """
+        # 常數 (hardcode，不入 config)
+        EDGE_MARGIN = 20
+        SAMPLE_STEP = 50
+        OUTLIER_SIGMA = 3.0
+        MIN_EDGE_LEN_RATIO = 1.0          # 相對 tile_size
+        MIN_POLYGON_AREA_RATIO = 0.9      # 相對 bbox 面積
+        MIN_SAMPLES_PER_EDGE = 5
+
+        if binary_mask is None or binary_mask.size == 0:
+            return None
+
+        H, W = binary_mask.shape[:2]
+        xmin, ymin, xmax, ymax = bbox
+        if xmax - xmin < 2 * EDGE_MARGIN or ymax - ymin < 2 * EDGE_MARGIN:
+            return None
+
+        # --- Step 1: 逐邊掃描 ---
+        tops, bots = [], []
+        for x in range(xmin + EDGE_MARGIN, xmax - EDGE_MARGIN, SAMPLE_STEP):
+            if x < 0 or x >= W:
+                continue
+            col = binary_mask[:, x]
+            ys = np.where(col > 0)[0]
+            if len(ys) > 0:
+                tops.append((x, int(ys[0])))
+                bots.append((x, int(ys[-1])))
+
+        lefts, rights = [], []
+        for y in range(ymin + EDGE_MARGIN, ymax - EDGE_MARGIN, SAMPLE_STEP):
+            if y < 0 or y >= H:
+                continue
+            row = binary_mask[y, :]
+            xs = np.where(row > 0)[0]
+            if len(xs) > 0:
+                lefts.append((int(xs[0]), y))
+                rights.append((int(xs[-1]), y))
+
+        if (len(tops) < MIN_SAMPLES_PER_EDGE or len(bots) < MIN_SAMPLES_PER_EDGE
+                or len(lefts) < MIN_SAMPLES_PER_EDGE or len(rights) < MIN_SAMPLES_PER_EDGE):
+            return None
+
+        # --- Step 2: 每邊 polyfit + 3σ robust filter ---
+        def fit_line_robust(pts, horizontal: bool) -> Optional[Tuple[float, float]]:
+            """horizontal=True: 回傳 (a, b) 代表 y = a*x + b；否則代表 x = a*y + b"""
+            arr = np.array(pts, dtype=float)
+            if horizontal:
+                ind = arr[:, 0]; dep = arr[:, 1]
+            else:
+                ind = arr[:, 1]; dep = arr[:, 0]
+            try:
+                a, b = np.polyfit(ind, dep, 1)
+            except (np.linalg.LinAlgError, ValueError):
+                return None
+            residuals = dep - (a * ind + b)
+            sigma = float(residuals.std())
+            if sigma > 0:
+                keep = np.abs(residuals) < OUTLIER_SIGMA * sigma
+                if keep.sum() >= 3:
+                    try:
+                        a, b = np.polyfit(ind[keep], dep[keep], 1)
+                    except (np.linalg.LinAlgError, ValueError):
+                        pass
+            return (float(a), float(b))
+
+        top_line = fit_line_robust(tops, horizontal=True)
+        bot_line = fit_line_robust(bots, horizontal=True)
+        left_line = fit_line_robust(lefts, horizontal=False)
+        right_line = fit_line_robust(rights, horizontal=False)
+        if None in (top_line, bot_line, left_line, right_line):
+            return None
+
+        # --- Step 3: 4 線相交 ---
+        def intersect_hv(h_line, v_line):
+            # h: y = a_h*x + b_h ; v: x = a_v*y + b_v
+            a_h, b_h = h_line
+            a_v, b_v = v_line
+            denom = 1.0 - a_h * a_v
+            if abs(denom) < 1e-9:
+                return None
+            y = (a_h * b_v + b_h) / denom
+            x = a_v * y + b_v
+            return (x, y)
+
+        TL = intersect_hv(top_line, left_line)
+        TR = intersect_hv(top_line, right_line)
+        BR = intersect_hv(bot_line, right_line)
+        BL = intersect_hv(bot_line, left_line)
+        if None in (TL, TR, BR, BL):
+            return None
+
+        polygon = np.array([TL, TR, BR, BL], dtype=np.float32)
+
+        # --- Step 4: 品質檢查 ---
+        # 4a. 所有角必須大致在 image 範圍內 (容忍 50 px 溢出)
+        tol = 50
+        if (polygon[:, 0].min() < -tol or polygon[:, 0].max() > W + tol or
+                polygon[:, 1].min() < -tol or polygon[:, 1].max() > H + tol):
+            return None
+
+        # 4b. 邊長必須 > tile_size
+        tile_size = self.config.tile_size
+        min_edge_len = tile_size * MIN_EDGE_LEN_RATIO
+        for i in range(4):
+            p1 = polygon[i]
+            p2 = polygon[(i + 1) % 4]
+            edge_len = float(np.linalg.norm(p2 - p1))
+            if edge_len < min_edge_len:
+                return None
+
+        # 4c. polygon 面積必須 >= bbox 面積 * 0.9
+        bbox_area = float((xmax - xmin) * (ymax - ymin))
+        poly_area = float(cv2.contourArea(polygon))
+        if bbox_area <= 0 or poly_area < bbox_area * MIN_POLYGON_AREA_RATIO:
+            return None
+
+        return polygon
+
     def calculate_otsu_bounds(self, image: np.ndarray, otsu_offset_override: Optional[int] = None, reference_raw_bounds: Optional[Tuple[int, int, int, int]] = None) -> Tuple[Tuple[int, int, int, int], Optional[int]]:
         """
         計算 Otsu 前景邊界
