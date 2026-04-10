@@ -23,6 +23,12 @@ from typing import Optional, Tuple
 import threading
 import logging
 from jinja2 import Environment, FileSystemLoader
+import shutil
+from capi_dataset_export import (
+    DatasetExporter, JobSummary,
+    JOB_STATE_IDLE, JOB_STATE_RUNNING, JOB_STATE_COMPLETED,
+    JOB_STATE_FAILED, JOB_STATE_CANCELLED,
+)
 
 logger = logging.getLogger("capi.web")
 
@@ -187,6 +193,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_imgs_file(path)
             elif path.startswith("/static/"):
                 self._handle_static_assets(path)
+            elif path == "/api/dataset_export/status":
+                self._handle_dataset_export_status()
+                return
+            elif path.startswith("/api/dataset_export/summary/"):
+                job_id = path.split("/api/dataset_export/summary/", 1)[1]
+                self._handle_dataset_export_summary(job_id)
+                return
             elif path == "/favicon.ico":
                 self._send_response(204, "")
             else:
@@ -238,6 +251,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/record/") and path.endswith("/rerun"):
                 record_id_str = path.split("/api/record/")[1].split("/rerun")[0]
                 self._handle_rerun_trigger(record_id_str)
+            elif path == "/api/dataset_export/start":
+                self._handle_dataset_export_start()
+                return
+            elif path == "/api/dataset_export/cancel":
+                self._handle_dataset_export_cancel()
+                return
             else:
                 self._send_404(path)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -256,9 +275,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content.encode("utf-8"))
 
-    def _send_json(self, data):
+    def _send_json(self, data, status=200):
         content = json.dumps(data, ensure_ascii=False, indent=2, default=str)
-        self._send_response(200, content, "application/json; charset=utf-8")
+        content_bytes = content.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(content_bytes)))
+        self.end_headers()
+        self.wfile.write(content_bytes)
 
     def _send_404(self, path=""):
         self._send_error(404, "Page Not Found", path)
@@ -2818,6 +2842,155 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             with cls._rerun_lock:
                 cls._rerun_tasks[record_id] = {"status": "error", "message": f"推論失敗: {e}"}
 
+    # ==== Dataset Export Endpoints ====
+
+    @classmethod
+    def _dataset_export_worker(cls, days: int, include_true_ng: bool,
+                               skip_existing: bool, output_dir: str):
+        """背景執行 DatasetExporter.run()"""
+        state = cls._dataset_export_state
+        try:
+            server_inst = cls._capi_server_instance
+            path_mapping = getattr(server_inst, "path_mapping", {}) if server_inst else {}
+
+            def status_callback(current, total, last_glass_id):
+                with state["lock"]:
+                    if state["current_job"]:
+                        state["current_job"]["current"] = current
+                        state["current_job"]["total"] = total
+                        state["current_job"]["last_glass_id"] = last_glass_id
+
+            exporter = DatasetExporter(
+                db=cls.db, base_dir=output_dir, path_mapping=path_mapping,
+            )
+            summary = exporter.run(
+                days=days, include_true_ng=include_true_ng,
+                skip_existing=skip_existing,
+                status_callback=status_callback,
+                cancel_event=state["cancel_event"],
+            )
+            with state["lock"]:
+                if state["current_job"]:
+                    state["current_job"]["state"] = (
+                        JOB_STATE_CANCELLED if state["cancel_event"].is_set() else JOB_STATE_COMPLETED
+                    )
+                state["last_summary"] = summary
+        except Exception as e:
+            logger.exception("dataset_export worker failed")
+            with state["lock"]:
+                if state["current_job"]:
+                    state["current_job"]["state"] = JOB_STATE_FAILED
+                    state["current_job"]["error"] = str(e)
+        finally:
+            with state["lock"]:
+                state["cancel_event"].clear()
+
+    def _handle_dataset_export_start(self):
+        """POST /api/dataset_export/start"""
+        import json as _json
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            data = _json.loads(body) if body else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON body"}, status=400)
+            return
+
+        days = int(data.get("days", 3))
+        include_true_ng = bool(data.get("include_true_ng", True))
+        skip_existing = bool(data.get("skip_existing", True))
+
+        # 決定 output_dir
+        server_inst = self._capi_server_instance
+        default_cfg = {}
+        if server_inst:
+            default_cfg = server_inst.server_config.get("dataset_export", {})
+        output_dir = data.get("output_dir") or default_cfg.get("base_dir") or "./datasets/over_review"
+        min_free_gb = float(default_cfg.get("min_free_space_gb", 1))
+
+        state = self._dataset_export_state
+        with state["lock"]:
+            if state["current_job"] and state["current_job"].get("state") == JOB_STATE_RUNNING:
+                self._send_json({
+                    "error": "job_already_running",
+                    "current_job_id": state["current_job"].get("job_id"),
+                }, status=409)
+                return
+
+            # 磁碟空間檢查
+            try:
+                output_path = Path(output_dir)
+                output_path.mkdir(parents=True, exist_ok=True)
+                free_bytes = shutil.disk_usage(str(output_path)).free
+                if free_bytes < min_free_gb * (1024 ** 3):
+                    self._send_json({
+                        "error": "insufficient_disk_space",
+                        "free_gb": round(free_bytes / (1024 ** 3), 2),
+                        "required_gb": min_free_gb,
+                    }, status=409)
+                    return
+            except Exception as e:
+                self._send_json({"error": f"cannot access output_dir: {e}"}, status=400)
+                return
+
+            job_id = datetime.now().strftime("job_%Y%m%d_%H%M%S")
+            state["cancel_event"].clear()
+            state["current_job"] = {
+                "job_id": job_id,
+                "state": JOB_STATE_RUNNING,
+                "current": 0,
+                "total": 0,
+                "last_glass_id": "",
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+            }
+
+        thread = threading.Thread(
+            target=CAPIWebHandler._dataset_export_worker,
+            args=(days, include_true_ng, skip_existing, output_dir),
+            daemon=True,
+            name=f"dataset-export-{job_id}",
+        )
+        thread.start()
+        self._send_json({"job_id": job_id, "started_at": state["current_job"]["started_at"]})
+
+    def _handle_dataset_export_status(self):
+        """GET /api/dataset_export/status"""
+        state = self._dataset_export_state
+        with state["lock"]:
+            job = state["current_job"]
+            if not job:
+                self._send_json({"state": JOB_STATE_IDLE})
+                return
+            resp = dict(job)
+            if resp.get("started_at"):
+                try:
+                    started = datetime.fromisoformat(resp["started_at"])
+                    resp["elapsed_sec"] = round((datetime.now() - started).total_seconds(), 1)
+                except Exception:
+                    resp["elapsed_sec"] = 0
+            self._send_json(resp)
+
+    def _handle_dataset_export_summary(self, job_id: str):
+        """GET /api/dataset_export/summary/<job_id>"""
+        from dataclasses import asdict as _asdict
+        state = self._dataset_export_state
+        with state["lock"]:
+            summary = state["last_summary"]
+            if not summary or summary.job_id != job_id:
+                self._send_json({"error": "not_found"}, status=404)
+                return
+            self._send_json(_asdict(summary))
+
+    def _handle_dataset_export_cancel(self):
+        """POST /api/dataset_export/cancel"""
+        state = self._dataset_export_state
+        with state["lock"]:
+            if not state["current_job"] or state["current_job"].get("state") != JOB_STATE_RUNNING:
+                self._send_json({"error": "no_running_job"}, status=404)
+                return
+            state["cancel_event"].set()
+        self._send_json({"ok": True})
+
     def _handle_rerun_status_sse(self, record_id_str: str):
         """SSE: 串流重跑進度"""
         import time as _time
@@ -2907,6 +3080,12 @@ def create_web_server(
     CAPIWebHandler._log_file = log_file
     CAPIWebHandler._rerun_tasks = {}
     CAPIWebHandler._rerun_lock = threading.Lock()
+    CAPIWebHandler._dataset_export_state = {
+        "lock": threading.Lock(),
+        "current_job": None,         # dict: job_id, state, current, total, last_glass_id, started_at
+        "cancel_event": threading.Event(),
+        "last_summary": None,        # JobSummary instance
+    }
     CAPIWebHandler.init_jinja()
 
     server = ThreadingHTTPServer((host, port), CAPIWebHandler)
