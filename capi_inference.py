@@ -85,7 +85,7 @@ class TileInfo:
     width: int
     height: int
     image: np.ndarray = field(repr=False)
-    mask: Optional[np.ndarray] = field(default=None, repr=False)  # 遮罩: 255=有效, 0=排除
+    mask: Optional[np.ndarray] = field(default=None, repr=False)  # 遮罩: 255=panel 內, 0=panel 外 (tile 完全在 polygon 內時為 None)
     has_exclusion: bool = False  # 是否包含排除區域
     is_bottom_edge: bool = False # 是否為底部邊緣切塊
     is_top_edge: bool = False    # 是否為頂部邊緣切塊
@@ -851,24 +851,39 @@ class CAPIInferencer:
         image: np.ndarray,
         otsu_bounds: Tuple[int, int, int, int],
         exclusion_regions: List[ExclusionRegion],
+        panel_polygon: Optional[np.ndarray] = None,
         exclusion_threshold: float = 0.0,  # 重疊比例超過此值則跳過 (0.0 = 任何重疊都跳過)
     ) -> Tuple[List[TileInfo], int]:
         """
         將圖片切成 tile，完全跳過與排除區域重疊的 tile
         邊緣不足 512px 的區域會向前回推補齊
-        
+
         Args:
             image: 原始圖片
             otsu_bounds: Otsu 邊界
             exclusion_regions: 排除區域列表
+            panel_polygon: 面板 4 角 polygon (shape (4,2))。若提供，會與每個 tile
+                           求交集產生 tile.mask，完全在 polygon 外的 tile 會被跳過，
+                           完全在 polygon 內的 tile mask 設為 None 以節省記憶體。
             exclusion_threshold: 重疊比例閾值，超過此值則跳過該 tile (預設 0.0 = 任何重疊都跳過)
-            
+
         Returns:
             (有效 tiles, 被跳過的 tile 數量)
         """
         otsu_x1, otsu_y1, otsu_x2, otsu_y2 = otsu_bounds
         tile_size = self.config.tile_size
         stride = self.config.tile_stride
+
+        # 若提供 polygon，先在整張圖尺寸上畫好 panel mask，
+        # 之後每個 tile 只要從裡面 slice 出對應區塊即可。
+        # 這樣可以避免「shifted polygon 超出 tile canvas 時 cv2.fillPoly
+        # 邊緣 rasterization 與 full-canvas 路徑不一致」的問題，
+        # 同時保證與外部 ground truth (fillPoly(full_image_size)) 完全相符。
+        full_panel_mask: Optional[np.ndarray] = None
+        if panel_polygon is not None:
+            H, W = image.shape[:2]
+            full_panel_mask = np.zeros((H, W), dtype=np.uint8)
+            cv2.fillPoly(full_panel_mask, [panel_polygon.astype(np.int32)], 255)
         
         # 計算 X 和 Y 軸的 tile 起始座標（包含邊緣補齊）
         def generate_tile_positions(start: int, end: int, size: int, step: int) -> List[int]:
@@ -929,7 +944,21 @@ class CAPIInferencer:
                 
                 # 擷取 tile 圖片
                 tile_img = image[y:tile_y2, x:tile_x2].copy()
-                
+
+                # 計算 tile 的 panel mask (polygon 交集)
+                tile_mask: Optional[np.ndarray] = None
+                if full_panel_mask is not None:
+                    mask = full_panel_mask[y:tile_y2, x:tile_x2].copy()
+                    if mask.max() == 0:
+                        # Tile 完全在 polygon 外 → 跳過
+                        excluded_count += 1
+                        continue
+                    if mask.min() == 255:
+                        # Tile 完全在 polygon 內 → 省記憶體
+                        tile_mask = None
+                    else:
+                        tile_mask = mask
+
                 tiles.append(TileInfo(
                     tile_id=tile_id,
                     x=x,
@@ -937,7 +966,7 @@ class CAPIInferencer:
                     width=tile_size,
                     height=tile_size,
                     image=tile_img,
-                    mask=None,  # 不再使用遮罩
+                    mask=tile_mask,
                     has_exclusion=False,  # 保留此欄位以免影響其他程式碼
                     is_bottom_edge=is_bottom,
                     is_top_edge=is_top,
@@ -1007,7 +1036,10 @@ class CAPIInferencer:
         exclusion_regions = self.calculate_exclusion_regions(image, otsu_bounds, cached_mark=cached_mark)
         
         # 切塊
-        tiles, excluded_count = self.tile_image(image, otsu_bounds, exclusion_regions)
+        tiles, excluded_count = self.tile_image(
+            image, otsu_bounds, exclusion_regions,
+            panel_polygon=panel_polygon,
+        )
         
         elapsed = time.time() - start_time
         
