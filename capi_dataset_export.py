@@ -364,7 +364,10 @@ class DatasetExporter:
             "ric_other": 0,
             "missing_inference_id": 0,
             "missing_record_detail": 0,
-            "bomb_record_skipped": 0,
+            "images_bomb_skipped": 0,      # image_results.is_bomb=1 被整張跳過
+            "images_b0f_skipped": 0,       # 黑光源 B0F 檔名被跳過
+            "tiles_bomb_skipped": 0,       # tile_results.is_bomb=1 被跳過
+            "tiles_not_anomaly": 0,        # tile_results.is_anomaly=0 被跳過
             "final_candidates": 0,
         }
 
@@ -413,14 +416,9 @@ class DatasetExporter:
                 diag["missing_record_detail"] += 1
                 continue
 
-            # 注意：_flatten_record_to_candidates 內部會在 client_bomb_info 非空時
-            # 回空 list，這裡用前後數量差判斷是否因此被刷掉
-            before_len = len(candidates)
             flattened = self._flatten_record_to_candidates(
-                detail=detail, label=label, row=row,
+                detail=detail, label=label, row=row, diag=diag,
             )
-            if not flattened and detail.get("client_bomb_info"):
-                diag["bomb_record_skipped"] += 1
             candidates.extend(flattened)
 
         diag["final_candidates"] = len(candidates)
@@ -428,16 +426,26 @@ class DatasetExporter:
         return candidates, diag
 
     def _flatten_record_to_candidates(
-        self, detail: Dict, label: str, row: Dict
+        self, detail: Dict, label: str, row: Dict,
+        diag: Optional[Dict[str, int]] = None,
     ) -> List[SampleCandidate]:
-        """把一筆 inference_record 展開成多個 SampleCandidate（依 image / tile / edge）。"""
+        """把一筆 inference_record 展開成多個 SampleCandidate（依 image / tile / edge）。
+
+        炸彈過濾策略：
+          - 不看 inference_records.client_bomb_info (實測正式機幾乎每筆都有值，
+            這個欄位是 AOI 機台傳來的炸彈參考座標列表，非「此片為炸彈測試」指標)
+          - image_results.is_bomb == 1 整張跳過 (capi_server.py:549 判定為「純炸彈」時設)
+          - tile_results.is_bomb == 1 該 tile 跳過 (check_bomb_match 個別標註)
+
+        Args:
+            diag: 可選的診斷計數器 dict，傳入時會更新 images_bomb_skipped /
+                  images_b0f_skipped / tiles_bomb_skipped / tiles_not_anomaly
+        """
         out: List[SampleCandidate] = []
 
-        # 若 AOI 機台 request 帶有 bomb_info，代表整片面板屬於炸彈測試，整個 record 跳過。
-        # 這比 image_results.is_bomb 更可靠 —— 後者只在「有炸彈 AND 沒真 NG AND 沒邊緣缺陷」
-        # 時才會設為 1，實測會漏掉同時有其他異常的炸彈 panel (capi_server.py:549)。
-        if detail.get("client_bomb_info"):
-            return out
+        def _bump(key: str) -> None:
+            if diag is not None:
+                diag[key] = diag.get(key, 0) + 1
 
         glass_id = detail.get("glass_id") or row.get("pnl_id") or ""
         inference_timestamp = detail.get("request_time") or row.get("time_stamp") or ""
@@ -445,10 +453,12 @@ class DatasetExporter:
 
         for img in detail.get("images") or []:
             if img.get("is_bomb"):
+                _bump("images_bomb_skipped")
                 continue
             image_name = img.get("image_name") or ""
             # 黑光源圖 (B0F) 無訓練價值，整張跳過
             if image_name.startswith(BLACK_IMAGE_PREFIX):
+                _bump("images_b0f_skipped")
                 continue
             image_path = img.get("image_path") or ""
             image_result_id = img.get("id")
@@ -457,8 +467,10 @@ class DatasetExporter:
             # PatchCore tile 樣本
             for tile in img.get("tiles") or []:
                 if tile.get("is_bomb"):
+                    _bump("tiles_bomb_skipped")
                     continue
                 if not tile.get("is_anomaly"):
+                    _bump("tiles_not_anomaly")
                     continue
                 tile_idx = tile.get("tile_id", 0)
                 sample_id = build_sample_id(glass_id, image_name, "patchcore_tile", tile_idx=tile_idx)

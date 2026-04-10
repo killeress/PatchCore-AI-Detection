@@ -481,14 +481,16 @@ def test_collect_candidates_keeps_non_b0f_images():
     assert any("G0F00000" in c.sample_id for c in cands)
 
 
-def test_collect_candidates_skips_record_with_client_bomb_info():
-    """inference_records.client_bomb_info 非空 → 整個 record 不蒐集"""
+def test_collect_candidates_ignores_client_bomb_info():
+    """client_bomb_info 非空不該影響蒐集 (實測正式機幾乎每筆都有值，不是可靠指標)"""
     row = _make_accuracy_row()
     detail = _make_record_detail()
     detail["client_bomb_info"] = '{"coords":[{"x":100,"y":200}]}'
     db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
     exporter = DatasetExporter(db, base_dir="/tmp/out", path_mapping={})
-    assert exporter.collect_candidates(days=3, include_true_ng=True) == []
+    # 應照常蒐集非炸彈 tile（依 tile_results.is_bomb 個別判定）
+    cands = exporter.collect_candidates(days=3, include_true_ng=True)
+    assert len(cands) > 0
 
 
 def test_collect_candidates_with_diagnostics_fills_counters():
@@ -590,8 +592,8 @@ def test_exporter_run_cleans_stale_manifest_entries(tmp_path):
     stale_crop = output / "over_edge_false_positive" / "G0F00000" / "crop" / "20260408_GLS123_G0F00000_114438_tile3.png"
     assert stale_crop.exists()
 
-    # 模擬：DB 這筆 record 突然被標記為 bomb panel（或手動改 record 讓它不再是 candidate）
-    db._record_details[1001]["client_bomb_info"] = '{"coords":[{"x":100,"y":200}]}'
+    # 模擬：DB 這張 image 突然被標記為 is_bomb=1，整張應從 candidates 剃除
+    db._record_details[1001]["images"][0]["is_bomb"] = 1
 
     # 第二次：沒 candidate，應清掉舊樣本
     s2 = exporter.run(days=3, include_true_ng=True, skip_existing=True)
@@ -601,15 +603,22 @@ def test_exporter_run_cleans_stale_manifest_entries(tmp_path):
     assert s2.skipped.get("cleaned_stale") == 1
 
 
-def test_collect_candidates_keeps_record_when_client_bomb_info_empty():
-    """client_bomb_info 空字串 → 照常蒐集（防 regression）"""
+def test_flatten_record_diagnostic_counters_image_level():
+    """診斷計數：image 層級 is_bomb 與 B0F 檔名各自的跳過次數可觀察"""
     row = _make_accuracy_row()
     detail = _make_record_detail()
-    detail["client_bomb_info"] = ""  # 明確設為空
+    # 塞一張 B0F 圖
+    detail["images"].append({
+        "id": 5003, "image_name": "B0F00000_120000.tif",
+        "image_path": "/x/B0F00000_120000.tif", "is_bomb": 0,
+        "tiles": [], "edge_defects": [],
+    })
     db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
     exporter = DatasetExporter(db, base_dir="/tmp/out", path_mapping={})
-    cands = exporter.collect_candidates(days=3, include_true_ng=True)
-    assert len(cands) >= 1
+    _, diag = exporter.collect_candidates_with_diagnostics(days=3, include_true_ng=True)
+    assert diag["images_bomb_skipped"] == 1   # fixture 中第二張圖 is_bomb=1
+    assert diag["images_b0f_skipped"] == 1    # 新加的 B0F
+    assert diag["tiles_bomb_skipped"] == 1    # fixture 中 tile4 的 is_bomb=1
 
 
 if __name__ == "__main__":
