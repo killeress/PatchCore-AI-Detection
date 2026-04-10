@@ -358,6 +358,12 @@ def test_exclusion_region_uses_polygon_br_anchor():
     poly_br_x, poly_br_y = int(round(result.panel_polygon[2][0])), int(round(result.panel_polygon[2][1]))
     bbox_x2, bbox_y2 = result.otsu_bounds[2], result.otsu_bounds[3]
 
+    # 防護: 測試圖的 polygon BR 必須明顯偏離 bbox BR，否則此測試會變成「兩者都對」
+    # 的同義反覆 — 若未來有人換成 axis-aligned 的測試圖，這個 guard 會 fail fast
+    delta = abs(poly_br_x - bbox_x2) + abs(poly_br_y - bbox_y2)
+    assert delta >= 5, \
+        f"測試圖 polygon BR 必須明顯偏離 bbox BR (delta={delta})，否則無法區分新舊行為"
+
     # G0F 這張 polygon BR 與 bbox 右下差 ~37 px
     assert abs(br.x2 - poly_br_x) <= 1, \
         f"排除區 x2={br.x2} 應接近 polygon BR x={poly_br_x}，而非 bbox x2={bbox_x2}"
