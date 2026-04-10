@@ -3,6 +3,13 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Windows cp950 console 無法顯示 Unicode 檢查記號，強制 utf-8
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError):
+        pass
+
 import yaml
 import numpy as np
 from capi_config import CAPIConfig

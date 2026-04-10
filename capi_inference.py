@@ -493,6 +493,7 @@ class CAPIInferencer:
         img_height, img_width = image.shape[:2]
 
         # 取得原始物件邊界 (若有參考邊界則直接使用)
+        # 注意: binary_mask 會由 Task 3 的 _find_panel_polygon 消費，Task 1 只是先接著
         if reference_raw_bounds is not None:
             x_min, y_min, x_max, y_max = reference_raw_bounds
             binary_mask = None  # 使用參考邊界時無 binary mask
