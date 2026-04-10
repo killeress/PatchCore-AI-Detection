@@ -1668,8 +1668,15 @@ class CAPIInferencer:
         # Otsu 邊界（藍色）
         x1, y1, x2, y2 = result.otsu_bounds
         cv2.rectangle(vis, (x1, y1), (x2, y2), (255, 0, 0), 10)
-        cv2.putText(vis, "Otsu Bounds", (x1 + 10, y1 + 60), 
+        cv2.putText(vis, "Otsu Bounds", (x1 + 10, y1 + 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 2.0, (255, 0, 0), 4)
+
+        # Panel polygon（紅色）
+        if result.panel_polygon is not None:
+            poly_int = result.panel_polygon.astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(vis, [poly_int], True, (0, 0, 255), 10)
+            cv2.putText(vis, "Panel Polygon", (x1 + 10, y1 + 130),
+                        cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 4)
 
         # 顯示裁切區域（灰色斜線或半透明）
         if result.cropped_region:
@@ -4110,7 +4117,12 @@ class CAPIInferencer:
         # Otsu 邊界（藍色）
         x1, y1, x2, y2 = result.otsu_bounds
         cv2.rectangle(vis, (x1, y1), (x2, y2), (255, 0, 0), 6)
-        
+
+        # Panel polygon（紅色）
+        if result.panel_polygon is not None:
+            poly_int = result.panel_polygon.astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(vis, [poly_int], True, (0, 0, 255), 6)
+
         # 顯示裁切區域
         if result.cropped_region:
             cx1, cy1, cx2, cy2 = result.cropped_region
