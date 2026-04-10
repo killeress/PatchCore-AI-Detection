@@ -940,6 +940,11 @@
 
     <!-- Sub-Tab 4: Over Review (過檢) -->
     <div class="client-tab-panel" id="client_panel-over_review">
+        <div class="mb-3">
+            <button type="button" class="btn btn-primary" id="btnExportDataset">
+                匯出訓練資料集
+            </button>
+        </div>
         <div class="stats-grid" id="over_review_statsGrid"></div>
         <div class="charts-row">
             <div class="chart-card">
@@ -2756,5 +2761,137 @@
 
         return { get _loaded() { return _loaded; }, quickFilter, customFilter, loadData, renderCards, renderCharts, renderCrossMatrix };
     })();
+</script>
+
+<!-- Dataset Export Modal -->
+<div class="modal fade" id="datasetExportModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">匯出訓練資料集</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="dsExportForm">
+          <div class="mb-2">
+            <label class="form-label">天數</label>
+            <input type="number" class="form-control" id="dsExportDays" value="3" min="1" max="30">
+          </div>
+          <div class="mb-2">
+            <label class="form-label">輸出目錄（留空使用 server_config 預設）</label>
+            <input type="text" class="form-control" id="dsExportOutputDir" placeholder="/data/capi_ai/datasets/over_review">
+          </div>
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="dsExportIncludeTrueNg" checked>
+            <label class="form-check-label" for="dsExportIncludeTrueNg">包含真 NG 樣本 (true_ng)</label>
+          </div>
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="dsExportSkipExisting" checked>
+            <label class="form-check-label" for="dsExportSkipExisting">跳過已存在的樣本</label>
+          </div>
+        </div>
+        <div id="dsExportProgress" style="display:none;">
+          <p>Job ID: <span id="dsExportJobId"></span></p>
+          <div class="progress mb-2"><div id="dsExportBar" class="progress-bar" style="width:0%;"></div></div>
+          <p id="dsExportCurrentInfo"></p>
+        </div>
+        <div id="dsExportSummary" style="display:none;">
+          <h6>匯出完成</h6>
+          <pre id="dsExportSummaryText" style="background:#f8f9fa;padding:10px;"></pre>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">關閉</button>
+        <button type="button" class="btn btn-warning" id="btnDsExportCancel" style="display:none;">取消 Job</button>
+        <button type="button" class="btn btn-primary" id="btnDsExportStart">開始匯出</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  let dsExportPollTimer = null;
+
+  document.addEventListener("click", function(ev) {
+    if (ev.target && ev.target.id === "btnExportDataset") {
+      document.getElementById("dsExportForm").style.display = "";
+      document.getElementById("dsExportProgress").style.display = "none";
+      document.getElementById("dsExportSummary").style.display = "none";
+      document.getElementById("btnDsExportStart").style.display = "";
+      document.getElementById("btnDsExportCancel").style.display = "none";
+      const m = new bootstrap.Modal(document.getElementById("datasetExportModal"));
+      m.show();
+    }
+  });
+
+  document.getElementById("btnDsExportStart").addEventListener("click", async function() {
+    const days = parseInt(document.getElementById("dsExportDays").value || "3", 10);
+    const outputDir = document.getElementById("dsExportOutputDir").value.trim();
+    const body = {
+      days: days,
+      include_true_ng: document.getElementById("dsExportIncludeTrueNg").checked,
+      skip_existing: document.getElementById("dsExportSkipExisting").checked,
+    };
+    if (outputDir) body.output_dir = outputDir;
+
+    try {
+      const resp = await fetch("/api/dataset_export/start", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert("啟動失敗: " + (data.error || resp.status));
+        return;
+      }
+      document.getElementById("dsExportForm").style.display = "none";
+      document.getElementById("dsExportProgress").style.display = "";
+      document.getElementById("btnDsExportStart").style.display = "none";
+      document.getElementById("btnDsExportCancel").style.display = "";
+      document.getElementById("dsExportJobId").textContent = data.job_id;
+      startDsExportPolling(data.job_id);
+    } catch (e) {
+      alert("網路錯誤: " + e);
+    }
+  });
+
+  document.getElementById("btnDsExportCancel").addEventListener("click", async function() {
+    await fetch("/api/dataset_export/cancel", {method: "POST"});
+  });
+
+  function startDsExportPolling(jobId) {
+    if (dsExportPollTimer) clearInterval(dsExportPollTimer);
+    dsExportPollTimer = setInterval(async function() {
+      try {
+        const r = await fetch("/api/dataset_export/status");
+        const s = await r.json();
+        if (s.state === "running") {
+          const pct = s.total > 0 ? (s.current * 100 / s.total) : 0;
+          document.getElementById("dsExportBar").style.width = pct + "%";
+          document.getElementById("dsExportCurrentInfo").textContent =
+            `${s.current} / ${s.total}  (${s.last_glass_id || ""})  已耗時 ${s.elapsed_sec || 0}s`;
+        } else if (s.state === "completed" || s.state === "cancelled" || s.state === "failed") {
+          clearInterval(dsExportPollTimer);
+          dsExportPollTimer = null;
+          document.getElementById("btnDsExportCancel").style.display = "none";
+          if (s.state === "completed") {
+            const sr = await fetch("/api/dataset_export/summary/" + jobId);
+            const sm = await sr.json();
+            document.getElementById("dsExportProgress").style.display = "none";
+            document.getElementById("dsExportSummary").style.display = "";
+            document.getElementById("dsExportSummaryText").textContent = JSON.stringify(sm, null, 2);
+          } else {
+            document.getElementById("dsExportCurrentInfo").textContent =
+              `Job ${s.state}: ${s.error || ""}`;
+          }
+        }
+      } catch (e) {
+        console.error("poll error", e);
+      }
+    }, 2000);
+  }
+})();
 </script>
 {% endblock %}
