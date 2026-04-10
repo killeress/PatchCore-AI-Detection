@@ -124,5 +124,151 @@ def test_build_sample_filename_patchcore():
     assert fn == "20260408_GLS123_G0F0001_tile3.png"
 
 
+class FakeDB:
+    """模擬 CAPIDatabase，用靜態 dict 回傳 fixture"""
+
+    def __init__(self, accuracy_rows, record_details):
+        self._accuracy_rows = accuracy_rows
+        self._record_details = record_details
+
+    def get_client_accuracy_records(self, start_date=None, end_date=None):
+        return self._accuracy_rows
+
+    def get_record_detail(self, record_id):
+        return self._record_details.get(record_id)
+
+
+def _make_accuracy_row(**overrides):
+    base = {
+        "id": 1, "time_stamp": "2026-04-08 10:00:00", "pnl_id": "GLS123",
+        "mach_id": "M01", "result_eqp": "NG", "result_ai": "NG",
+        "result_ric": "OK", "datastr": "",
+        "review_id": None, "review_category": None, "review_note": None,
+        "review_updated_at": None,
+        "over_review_id": 1, "over_review_category": "edge_false_positive",
+        "over_review_note": "測試", "over_review_updated_at": "2026-04-09 15:00:00",
+        "inference_record_id": 1001,
+    }
+    base.update(overrides)
+    return base
+
+
+def _make_record_detail(**overrides):
+    base = {
+        "id": 1001, "glass_id": "GLS123", "image_dir": "/data/panels/GLS123",
+        "request_time": "2026-04-08T10:00:00",
+        "images": [
+            {
+                "id": 5001, "image_name": "G0F00000_114438.tif",
+                "image_path": "/data/panels/GLS123/G0F00000_114438.tif",
+                "is_bomb": 0,
+                "tiles": [
+                    {"id": 9001, "tile_id": 3, "x": 0, "y": 0, "width": 512, "height": 512,
+                     "score": 0.85, "is_anomaly": 1, "is_bomb": 0,
+                     "heatmap_path": "/tmp/heatmap_tile3.png"},
+                    {"id": 9002, "tile_id": 4, "x": 512, "y": 0, "width": 512, "height": 512,
+                     "score": 0.95, "is_anomaly": 1, "is_bomb": 1,  # 炸彈 tile 要被過濾
+                     "heatmap_path": "/tmp/heatmap_tile4.png"},
+                ],
+                "edge_defects": [
+                    {"id": 7001, "center_x": 1000, "center_y": 1200,
+                     "max_diff": 30.5, "heatmap_path": "/tmp/edge_7001.png",
+                     "is_dust": 0},
+                ],
+            },
+            {
+                "id": 5002, "image_name": "W0F00000_114500.tif",
+                "image_path": "/data/panels/GLS123/W0F00000_114500.tif",
+                "is_bomb": 1,  # 整張炸彈圖 → 全部跳過
+                "tiles": [
+                    {"id": 9003, "tile_id": 1, "x": 0, "y": 0, "width": 512, "height": 512,
+                     "score": 0.91, "is_anomaly": 1, "is_bomb": 0,
+                     "heatmap_path": "/tmp/heatmap_wtile1.png"},
+                ],
+                "edge_defects": [],
+            },
+        ],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_collect_candidates_filters_bomb_and_non_anomaly():
+    db = FakeDB(
+        accuracy_rows=[_make_accuracy_row()],
+        record_details={1001: _make_record_detail()},
+    )
+    exporter = DatasetExporter(db, base_dir="/tmp/out", path_mapping={})
+    candidates = exporter.collect_candidates(
+        days=3, include_true_ng=True,
+    )
+    ids = [c.sample_id for c in candidates]
+
+    # 應有：tile3 (G0F) + edge7001 (G0F)
+    # 應無：tile4 (is_bomb=1), W0F image 整張 (is_bomb=1)
+    assert "GLS123_G0F00000_114438_tile3" in ids
+    assert "GLS123_G0F00000_114438_edge7001" in ids
+    assert not any("tile4" in i for i in ids)
+    assert not any("W0F" in i for i in ids)
+
+
+def test_collect_candidates_skips_unfilled_over_review():
+    row_unfilled = _make_accuracy_row(
+        over_review_id=None, over_review_category=None, over_review_note=None
+    )
+    db = FakeDB(
+        accuracy_rows=[row_unfilled],
+        record_details={1001: _make_record_detail()},
+    )
+    exporter = DatasetExporter(db, base_dir="/tmp/out", path_mapping={})
+    candidates = exporter.collect_candidates(days=3, include_true_ng=True)
+    assert candidates == []
+
+
+def test_collect_candidates_include_true_ng_false_skips_ric_ng():
+    row_true_ng = _make_accuracy_row(
+        result_ric="NG", over_review_id=None, over_review_category=None,
+    )
+    db = FakeDB(
+        accuracy_rows=[row_true_ng],
+        record_details={1001: _make_record_detail()},
+    )
+    exporter = DatasetExporter(db, base_dir="/tmp/out", path_mapping={})
+    candidates = exporter.collect_candidates(days=3, include_true_ng=False)
+    assert candidates == []
+
+
+def test_collect_candidates_labels_true_ng():
+    row_true_ng = _make_accuracy_row(
+        result_ric="NG", over_review_id=None, over_review_category=None,
+    )
+    db = FakeDB(
+        accuracy_rows=[row_true_ng],
+        record_details={1001: _make_record_detail()},
+    )
+    exporter = DatasetExporter(db, base_dir="/tmp/out", path_mapping={})
+    candidates = exporter.collect_candidates(days=3, include_true_ng=True)
+    assert len(candidates) >= 1
+    assert all(c.label == "true_ng" for c in candidates)
+
+
+def test_collect_candidates_attaches_prefix_and_metadata():
+    db = FakeDB(
+        accuracy_rows=[_make_accuracy_row()],
+        record_details={1001: _make_record_detail()},
+    )
+    exporter = DatasetExporter(db, base_dir="/tmp/out", path_mapping={})
+    tile_cand = next(
+        c for c in exporter.collect_candidates(days=3, include_true_ng=True)
+        if c.source_type == "patchcore_tile"
+    )
+    assert tile_cand.prefix == "G0F00000"
+    assert tile_cand.label == "over_edge_false_positive"
+    assert tile_cand.ai_score == 0.85
+    assert tile_cand.over_review_note == "測試"
+    assert tile_cand.ric_judgment == "OK"
+    assert tile_cand.tile_x == 0 and tile_cand.tile_w == 512
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

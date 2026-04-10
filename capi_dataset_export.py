@@ -252,6 +252,144 @@ class DatasetExporter:
         self.base_dir = Path(base_dir).resolve()
         self.path_mapping = path_mapping
 
+    def collect_candidates(self, days: int, include_true_ng: bool) -> List[SampleCandidate]:
+        """從 DB 讀最近 N 日的 client_accuracy_records，展開成 candidate 清單。
+
+        篩選規則：
+          - result_ai == "NG"
+          - 若 result_ric == "NG" 且 include_true_ng → 收為 true_ng
+          - 若 result_ric == "OK" 且 over_review_category 已填 → 收為 over_<category>
+          - 其他情況跳過
+
+        過濾：
+          - image_results.is_bomb == 1 整張跳過
+          - tile_results.is_bomb == 1 該 tile 跳過
+          - tile_results.is_anomaly == 0 跳過（只蒐集 NG tile）
+        """
+        end = datetime.now().date()
+        start = end - timedelta(days=days - 1)
+        rows = self.db.get_client_accuracy_records(
+            start_date=start.isoformat(), end_date=end.isoformat()
+        )
+
+        candidates: List[SampleCandidate] = []
+        for row in rows:
+            if row.get("result_ai") != "NG":
+                continue
+
+            ric = row.get("result_ric") or ""
+            over_category = row.get("over_review_category")
+
+            if ric == "NG":
+                if not include_true_ng:
+                    continue
+                label = TRUE_NG_LABEL
+            elif ric == "OK":
+                if not over_category:
+                    continue  # 未回填的跳過
+                try:
+                    label = determine_label(ric, over_category)
+                except ValueError as e:
+                    logger.warning("Skip unknown over_review category: %s", e)
+                    continue
+                if label is None:
+                    continue
+            else:
+                continue
+
+            inference_record_id = row.get("inference_record_id")
+            if not inference_record_id:
+                logger.warning("No inference_record linked: pnl_id=%s time=%s",
+                               row.get("pnl_id"), row.get("time_stamp"))
+                continue
+
+            detail = self.db.get_record_detail(inference_record_id)
+            if not detail:
+                continue
+
+            candidates.extend(self._flatten_record_to_candidates(
+                detail=detail, label=label, row=row,
+            ))
+
+        return candidates
+
+    def _flatten_record_to_candidates(
+        self, detail: Dict, label: str, row: Dict
+    ) -> List[SampleCandidate]:
+        """把一筆 inference_record 展開成多個 SampleCandidate（依 image / tile / edge）。"""
+        out: List[SampleCandidate] = []
+        glass_id = detail.get("glass_id") or row.get("pnl_id") or ""
+        inference_timestamp = detail.get("request_time") or row.get("time_stamp") or ""
+        record_id = detail.get("id")
+
+        for img in detail.get("images") or []:
+            if img.get("is_bomb"):
+                continue
+            image_name = img.get("image_name") or ""
+            image_path = img.get("image_path") or ""
+            image_result_id = img.get("id")
+            prefix = extract_prefix(image_name)
+
+            # PatchCore tile 樣本
+            for tile in img.get("tiles") or []:
+                if tile.get("is_bomb"):
+                    continue
+                if not tile.get("is_anomaly"):
+                    continue
+                tile_idx = tile.get("tile_id", 0)
+                sample_id = build_sample_id(glass_id, image_name, "patchcore_tile", tile_idx=tile_idx)
+                out.append(SampleCandidate(
+                    sample_id=sample_id,
+                    source_type="patchcore_tile",
+                    glass_id=glass_id,
+                    image_name=image_name,
+                    image_path=image_path,
+                    inference_record_id=record_id,
+                    image_result_id=image_result_id,
+                    tile_idx=tile_idx,
+                    edge_defect_id=None,
+                    prefix=prefix,
+                    label=label,
+                    tile_x=tile.get("x", 0),
+                    tile_y=tile.get("y", 0),
+                    tile_w=tile.get("width", CROP_SIZE),
+                    tile_h=tile.get("height", CROP_SIZE),
+                    src_heatmap_path=tile.get("heatmap_path", ""),
+                    ai_score=float(tile.get("score", 0.0)),
+                    ric_judgment=row.get("result_ric") or "",
+                    over_review_category=row.get("over_review_category") or "",
+                    over_review_note=row.get("over_review_note") or "",
+                    inference_timestamp=inference_timestamp,
+                ))
+
+            # Edge defect 樣本
+            for edge in img.get("edge_defects") or []:
+                edge_id = edge.get("id")
+                sample_id = build_sample_id(glass_id, image_name, "edge_defect", edge_defect_id=edge_id)
+                out.append(SampleCandidate(
+                    sample_id=sample_id,
+                    source_type="edge_defect",
+                    glass_id=glass_id,
+                    image_name=image_name,
+                    image_path=image_path,
+                    inference_record_id=record_id,
+                    image_result_id=image_result_id,
+                    tile_idx=None,
+                    edge_defect_id=edge_id,
+                    prefix=prefix,
+                    label=label,
+                    edge_center_x=edge.get("center_x", 0),
+                    edge_center_y=edge.get("center_y", 0),
+                    src_heatmap_path=edge.get("heatmap_path", ""),
+                    ai_score=float(edge.get("max_diff", 0.0)),
+                    ric_judgment=row.get("result_ric") or "",
+                    over_review_category=row.get("over_review_category") or "",
+                    over_review_note=row.get("over_review_note") or "",
+                    inference_timestamp=inference_timestamp,
+                ))
+
+        return out
+
     def run(self, days: int, include_true_ng: bool, skip_existing: bool,
             status_callback=None, cancel_event: Optional[threading.Event] = None
             ) -> JobSummary:
