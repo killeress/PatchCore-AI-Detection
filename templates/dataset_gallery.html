@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}訓練資料集瀏覽 — CAPI AI{% endblock %}
+
+{% block content %}
+<div class="p-6 max-w-[1600px] mx-auto" style="font-family: 'Fira Sans', sans-serif;">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-6">
+    <div class="flex items-center gap-3">
+      <div class="text-emerald-400 bg-emerald-500/10 p-2.5 rounded-lg border border-emerald-500/20">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+        </svg>
+      </div>
+      <div>
+        <h2 class="text-xl md:text-2xl font-semibold text-slate-100 m-0">訓練資料集瀏覽</h2>
+        <p class="text-sm text-slate-400 mt-0.5">總樣本數 {{ total_count }} 張
+          {% if manifest_error %}<span class="text-amber-400">（{{ manifest_error }}）</span>{% endif %}
+        </p>
+      </div>
+    </div>
+    <a href="/ric" class="text-slate-300 hover:text-white text-sm px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors">← 回 RIC 報表</a>
+  </div>
+
+  <!-- Filters -->
+  <div class="flex flex-wrap items-end gap-3 mb-6 p-4 bg-slate-900/50 border border-slate-800 rounded-xl">
+    <div>
+      <label class="block text-xs text-slate-400 mb-1">Label (類別)</label>
+      <select id="filter-label" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 text-sm min-w-[220px]">
+        <option value="">全部 ({{ total_count }})</option>
+        {% for lbl, cnt in label_counts.items() %}
+        <option value="{{ lbl }}" {% if lbl == current_label %}selected{% endif %}>{{ lbl }} ({{ cnt }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs text-slate-400 mb-1">Prefix (光源)</label>
+      <select id="filter-prefix" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 text-sm min-w-[140px]">
+        <option value="">全部</option>
+        {% for p in prefixes %}
+        <option value="{{ p }}" {% if p == current_prefix %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs text-slate-400 mb-1">每頁</label>
+      <select id="filter-limit" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 text-sm">
+        <option value="24" {% if limit == 24 %}selected{% endif %}>24</option>
+        <option value="48" {% if limit == 48 %}selected{% endif %}>48</option>
+        <option value="96" {% if limit == 96 %}selected{% endif %}>96</option>
+        <option value="200" {% if limit == 200 %}selected{% endif %}>200</option>
+      </select>
+    </div>
+    <button id="btn-apply" class="px-4 py-2 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white rounded-lg text-sm font-semibold transition-all cursor-pointer">套用</button>
+    <div class="ml-auto text-slate-400 text-sm">
+      顯示 <span class="text-slate-100 font-mono">{{ start_idx + 1 }}–{{ end_idx }}</span> / <span class="text-slate-100 font-mono">{{ filtered_count }}</span>
+    </div>
+  </div>
+
+  <!-- Grid -->
+  {% if items %}
+  <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
+    {% for it in items %}
+    <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden hover:border-slate-600 transition-colors">
+      <!-- Pair of images -->
+      <div class="grid grid-cols-2 gap-0 bg-slate-950">
+        <div class="relative group cursor-pointer" onclick="openViewer('{{ it.crop_url }}', '{{ it.sample_id }} — Crop')">
+          <img src="{{ it.crop_url }}" alt="crop" loading="lazy"
+               class="w-full aspect-square object-cover group-hover:opacity-80 transition-opacity">
+          <span class="absolute top-1 left-1 text-[10px] bg-black/60 text-slate-200 px-1.5 py-0.5 rounded font-mono">crop</span>
+        </div>
+        <div class="relative group cursor-pointer border-l border-slate-800" onclick="openViewer('{{ it.heatmap_url }}', '{{ it.sample_id }} — Heatmap')">
+          <img src="{{ it.heatmap_url }}" alt="heatmap" loading="lazy"
+               class="w-full aspect-square object-cover group-hover:opacity-80 transition-opacity">
+          <span class="absolute top-1 left-1 text-[10px] bg-black/60 text-slate-200 px-1.5 py-0.5 rounded font-mono">heatmap</span>
+        </div>
+      </div>
+      <!-- Meta -->
+      <div class="p-3 flex flex-col gap-1.5 text-xs">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="px-2 py-0.5 rounded font-semibold text-[11px]
+            {% if it.label == 'true_ng' %}bg-red-500/15 text-red-300 border border-red-500/30
+            {% else %}bg-amber-500/15 text-amber-300 border border-amber-500/30{% endif %}">
+            {{ it.label }}
+          </span>
+          <span class="text-slate-500 font-mono">{{ it.prefix }}</span>
+          <span class="text-slate-500 font-mono ml-auto">score {{ '%.3f'|format(it.ai_score|float) }}</span>
+        </div>
+        <div class="text-slate-300 font-mono text-[11px] truncate" title="{{ it.sample_id }}">{{ it.sample_id }}</div>
+        {% if it.over_review_note %}
+        <div class="text-slate-400 text-[11px] line-clamp-2" title="{{ it.over_review_note }}">📝 {{ it.over_review_note }}</div>
+        {% endif %}
+        <div class="text-slate-500 text-[10px] font-mono">{{ it.inference_timestamp }}</div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Pagination -->
+  <div class="flex items-center justify-center gap-2 mt-8 text-sm">
+    {% if has_prev %}
+      <a href="{{ prev_url }}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg border border-slate-700">← 上一頁</a>
+    {% else %}
+      <span class="px-3 py-1.5 bg-slate-900 text-slate-600 rounded-lg border border-slate-800 cursor-not-allowed">← 上一頁</span>
+    {% endif %}
+    <span class="px-3 py-1.5 text-slate-400">第 {{ page }} / {{ total_pages }} 頁</span>
+    {% if has_next %}
+      <a href="{{ next_url }}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg border border-slate-700">下一頁 →</a>
+    {% else %}
+      <span class="px-3 py-1.5 bg-slate-900 text-slate-600 rounded-lg border border-slate-800 cursor-not-allowed">下一頁 →</span>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-12 text-center">
+    <p class="text-slate-400">沒有符合條件的樣本</p>
+    <p class="text-slate-500 text-sm mt-2">檢查 <code class="text-slate-300 font-mono bg-slate-800 px-1.5 rounded">{{ base_dir }}</code> 下的 manifest.csv</p>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Image Viewer Modal -->
+<div id="imageViewer" class="fixed inset-0 z-50 hidden items-center justify-center p-4"
+     style="background-color: rgba(2,6,23,0.92); backdrop-filter: blur(8px);"
+     onclick="if(event.target === this) closeViewer()">
+  <div class="relative max-w-[90vw] max-h-[90vh]">
+    <button onclick="closeViewer()"
+            class="absolute -top-3 -right-3 z-10 w-8 h-8 flex items-center justify-center bg-slate-800 hover:bg-red-500/30 text-slate-200 rounded-full border border-slate-600 cursor-pointer">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+      </svg>
+    </button>
+    <img id="viewerImg" src="" class="max-w-[90vw] max-h-[85vh] rounded-lg shadow-2xl border border-slate-700" />
+    <div id="viewerCaption" class="mt-2 text-slate-300 text-xs font-mono text-center"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const qs = (id) => document.getElementById(id);
+
+  function buildUrl() {
+    const params = new URLSearchParams();
+    const label = qs("filter-label").value;
+    const prefix = qs("filter-prefix").value;
+    const limit = qs("filter-limit").value;
+    if (label) params.set("label", label);
+    if (prefix) params.set("prefix", prefix);
+    if (limit) params.set("limit", limit);
+    params.set("page", 1);
+    return "/dataset_gallery?" + params.toString();
+  }
+
+  qs("btn-apply").addEventListener("click", () => { window.location.href = buildUrl(); });
+  ["filter-label", "filter-prefix", "filter-limit"].forEach(id => {
+    qs(id).addEventListener("change", () => { window.location.href = buildUrl(); });
+  });
+})();
+
+function openViewer(url, caption) {
+  const modal = document.getElementById("imageViewer");
+  document.getElementById("viewerImg").src = url;
+  document.getElementById("viewerCaption").textContent = caption || "";
+  modal.classList.remove("hidden");
+  modal.classList.add("flex");
+}
+function closeViewer() {
+  const modal = document.getElementById("imageViewer");
+  modal.classList.add("hidden");
+  modal.classList.remove("flex");
+  document.getElementById("viewerImg").src = "";
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeViewer();
+});
+</script>
+{% endblock %}

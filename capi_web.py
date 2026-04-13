@@ -200,6 +200,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 job_id = path.split("/api/dataset_export/summary/", 1)[1]
                 self._handle_dataset_export_summary(job_id)
                 return
+            elif path == "/dataset_gallery":
+                self._handle_dataset_gallery_page(query)
+                return
+            elif path == "/api/dataset_export/file":
+                self._handle_dataset_export_file(query)
+                return
             elif path == "/favicon.ico":
                 self._send_response(204, "")
             else:
@@ -2990,6 +2996,168 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             state["cancel_event"].set()
         self._send_json({"ok": True})
+
+    def _dataset_export_base_dir(self) -> Path:
+        """讀 server_config.dataset_export.base_dir，回傳 resolve 後的 Path"""
+        server_inst = self._capi_server_instance
+        cfg = {}
+        if server_inst:
+            cfg = server_inst.server_config.get("dataset_export", {})
+        base = cfg.get("base_dir") or "./datasets/over_review"
+        return Path(base).resolve()
+
+    def _handle_dataset_gallery_page(self, query: dict):
+        """GET /dataset_gallery — 樣本瀏覽頁"""
+        from capi_dataset_export import read_manifest
+
+        # 解析 query 參數
+        def _q(key, default=None):
+            v = query.get(key)
+            if isinstance(v, list):
+                return v[0] if v else default
+            return v if v is not None else default
+
+        current_label = _q("label", "") or ""
+        current_prefix = _q("prefix", "") or ""
+        try:
+            page = max(1, int(_q("page", "1") or 1))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            limit = int(_q("limit", "48") or 48)
+            limit = max(1, min(limit, 500))
+        except (TypeError, ValueError):
+            limit = 48
+
+        base_dir = self._dataset_export_base_dir()
+        manifest_path = base_dir / "manifest.csv"
+
+        items_all: list = []
+        manifest_error = ""
+        label_counts: dict = {}
+        prefixes_set: set = set()
+
+        if not manifest_path.exists():
+            manifest_error = f"manifest.csv 不存在：{manifest_path}"
+        else:
+            try:
+                manifest = read_manifest(manifest_path)
+            except Exception as e:
+                manifest_error = f"讀 manifest.csv 失敗：{e}"
+                manifest = {}
+
+            # 只取 status=ok 的樣本
+            for sid, row in manifest.items():
+                if row.get("status") != "ok":
+                    continue
+                label = row.get("label", "")
+                prefix = row.get("prefix", "")
+                label_counts[label] = label_counts.get(label, 0) + 1
+                if prefix:
+                    prefixes_set.add(prefix)
+                items_all.append(row)
+
+            # 依 filter 篩選
+            def _match(r):
+                if current_label and r.get("label") != current_label:
+                    return False
+                if current_prefix and r.get("prefix") != current_prefix:
+                    return False
+                return True
+
+            items_all = [r for r in items_all if _match(r)]
+            # 依 collected_at 倒序 (新的在前)
+            items_all.sort(key=lambda r: r.get("collected_at", ""), reverse=True)
+
+        total_count = sum(label_counts.values())
+        filtered_count = len(items_all)
+        total_pages = max(1, (filtered_count + limit - 1) // limit)
+        page = min(page, total_pages)
+        start_idx = (page - 1) * limit
+        end_idx = min(start_idx + limit, filtered_count)
+        page_items = items_all[start_idx:end_idx]
+
+        # 幫每筆 item 補 URL（供 img src 使用）
+        import urllib.parse as _up
+        for it in page_items:
+            crop_rel = it.get("crop_path", "")
+            hm_rel = it.get("heatmap_path", "")
+            it["crop_url"] = "/api/dataset_export/file?path=" + _up.quote(crop_rel)
+            it["heatmap_url"] = "/api/dataset_export/file?path=" + _up.quote(hm_rel)
+
+        # 組 prev/next URL（保留當前 filter）
+        def _page_url(p):
+            qs = {"page": p, "limit": limit}
+            if current_label:
+                qs["label"] = current_label
+            if current_prefix:
+                qs["prefix"] = current_prefix
+            return "/dataset_gallery?" + _up.urlencode(qs)
+
+        has_prev = page > 1
+        has_next = page < total_pages
+        prev_url = _page_url(page - 1) if has_prev else ""
+        next_url = _page_url(page + 1) if has_next else ""
+
+        template = self.jinja_env.get_template("dataset_gallery.html")
+        html = template.render(
+            request_path="/dataset_gallery",
+            base_dir=str(base_dir),
+            manifest_error=manifest_error,
+            total_count=total_count,
+            filtered_count=filtered_count,
+            label_counts=dict(sorted(label_counts.items())),
+            prefixes=sorted(prefixes_set),
+            current_label=current_label,
+            current_prefix=current_prefix,
+            items=page_items,
+            page=page,
+            limit=limit,
+            total_pages=total_pages,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            has_prev=has_prev,
+            has_next=has_next,
+            prev_url=prev_url,
+            next_url=next_url,
+        )
+        self._send_response(200, html)
+
+    def _handle_dataset_export_file(self, query: dict):
+        """GET /api/dataset_export/file?path=<rel> — 安全地 serve base_dir 內的檔案
+
+        path traversal 防護：resolve 後必須 is_relative_to base_dir
+        """
+        def _q(key, default=None):
+            v = query.get(key)
+            if isinstance(v, list):
+                return v[0] if v else default
+            return v if v is not None else default
+
+        rel = _q("path", "") or ""
+        if not rel:
+            self._send_error(400, "missing path parameter")
+            return
+
+        base_dir = self._dataset_export_base_dir()
+        try:
+            target = (base_dir / rel).resolve()
+        except (OSError, ValueError):
+            self._send_404()
+            return
+
+        # Path traversal 防護：目標必須在 base_dir 底下
+        try:
+            target.relative_to(base_dir)
+        except ValueError:
+            self._send_error(403, "path outside base_dir")
+            return
+
+        if not target.exists() or not target.is_file():
+            self._send_404()
+            return
+
+        self._send_binary(str(target))
 
     def _handle_rerun_status_sse(self, record_id_str: str):
         """SSE: 串流重跑進度"""

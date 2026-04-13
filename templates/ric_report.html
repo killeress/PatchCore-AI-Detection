@@ -940,10 +940,13 @@
 
     <!-- Sub-Tab 4: Over Review (過檢) -->
     <div class="client-tab-panel" id="client_panel-over_review">
-        <div style="margin-bottom:16px;">
+        <div style="margin-bottom:16px; display:flex; gap:8px; flex-wrap:wrap;">
             <button type="button" class="btn-export" id="btnExportDataset">
                 📦 匯出訓練資料集
             </button>
+            <a href="/dataset_gallery" target="_blank" class="btn-export" style="text-decoration:none; display:inline-flex; align-items:center;">
+                🖼️ 樣本瀏覽
+            </a>
         </div>
         <div class="stats-grid" id="over_review_statsGrid"></div>
         <div class="charts-row">
