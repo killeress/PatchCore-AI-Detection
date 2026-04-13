@@ -1136,7 +1136,7 @@
             let missReviewed = 0;
             const missByCat = { dust_misfilter: 0, data_error_actually_ok: 0, threshold_high: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
             let overReviewed = 0;
-            const overByCat = { edge_false_positive: 0, within_spec: 0, overexposure: 0, surface_scratch: 0, surface_dirt: 0, bubble: 0, aoi_ai_false_positive: 0, other: 0 };
+            const overByCat = { edge_false_positive: 0, within_spec: 0, overexposure: 0, surface_scratch: 0, surface_dirt: 0, bubble: 0, aoi_ai_false_positive: 0, dust_mask_incomplete: 0, other: 0 };
 
             records.forEach(rec => {
                 const eqp = rec.result_eqp || 'OK';
@@ -2170,10 +2170,11 @@
             'surface_dirt': '表面汙',
             'bubble': '氣泡',
             'aoi_ai_false_positive': 'AOI & AI 過檢',
+            'dust_mask_incomplete': '灰塵屏蔽需完善',
             'other': '其他',
         };
         // Ordered keys for dropdown (邊緣過檢, 規格內, 過曝 first)
-        const OVER_CATEGORY_ORDER = ['edge_false_positive', 'within_spec', 'overexposure', 'surface_scratch', 'surface_dirt', 'bubble', 'aoi_ai_false_positive', 'other'];
+        const OVER_CATEGORY_ORDER = ['edge_false_positive', 'within_spec', 'overexposure', 'surface_scratch', 'surface_dirt', 'bubble', 'aoi_ai_false_positive', 'dust_mask_incomplete', 'other'];
 
         const OVER_CATEGORY_COLORS = {
             'edge_false_positive': '#f59e0b',
@@ -2183,6 +2184,7 @@
             'surface_dirt': '#ec4899',
             'bubble': '#06b6d4',
             'aoi_ai_false_positive': '#a855f7',
+            'dust_mask_incomplete': '#14b8a6',
             'other': '#64748b',
         };
 
@@ -2449,7 +2451,7 @@
             const overRecords = rawRecords.filter(r => getEffectiveAI(r) === 'NG' && deriveJudgment(r.datastr) === 'OK');
             const total = overRecords.length;
             let reviewed = 0;
-            const byCategory = { edge_false_positive: 0, within_spec: 0, overexposure: 0, surface_scratch: 0, surface_dirt: 0, bubble: 0, aoi_ai_false_positive: 0, other: 0 };
+            const byCategory = { edge_false_positive: 0, within_spec: 0, overexposure: 0, surface_scratch: 0, surface_dirt: 0, bubble: 0, aoi_ai_false_positive: 0, dust_mask_incomplete: 0, other: 0 };
 
             overRecords.forEach(r => {
                 if (r.over_review && r.over_review.category) {

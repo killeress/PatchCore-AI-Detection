@@ -37,6 +37,7 @@ OVER_LABEL_MAP = {
     "surface_dirt": "over_surface_dirt",
     "bubble": "over_bubble",
     "aoi_ai_false_positive": "over_aoi_ai_false_positive",
+    "dust_mask_incomplete": "over_dust_mask_incomplete",
     "other": "over_other",
 }
 
@@ -52,6 +53,7 @@ LABEL_ZH = {
     "over_surface_dirt": "表面汙",
     "over_bubble": "氣泡",
     "over_aoi_ai_false_positive": "AOI/AI 都誤判",
+    "over_dust_mask_incomplete": "灰塵屏蔽需完善",
     "over_other": "其他",
 }
 
