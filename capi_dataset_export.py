@@ -34,6 +34,8 @@ OVER_LABEL_MAP = {
     "within_spec": "over_within_spec",
     "overexposure": "over_overexposure",
     "surface_scratch": "over_surface_scratch",
+    "surface_dirt": "over_surface_dirt",
+    "bubble": "over_bubble",
     "aoi_ai_false_positive": "over_aoi_ai_false_positive",
     "other": "over_other",
 }
@@ -47,6 +49,8 @@ LABEL_ZH = {
     "over_within_spec": "規格內",
     "over_overexposure": "曝光過度",
     "over_surface_scratch": "表面刮痕",
+    "over_surface_dirt": "表面汙",
+    "over_bubble": "氣泡",
     "over_aoi_ai_false_positive": "AOI/AI 都誤判",
     "over_other": "其他",
 }
