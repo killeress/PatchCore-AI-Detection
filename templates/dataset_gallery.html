@@ -1,6 +1,64 @@
 {% extends "base.html" %}
 {% block title %}訓練資料集瀏覽 — CAPI AI{% endblock %}
 
+{% block extra_css %}
+<style>
+  /* Move menu — 不用 Tailwind class 因為這個 template 的 Tailwind
+     是 CDN dev build 只掃 load 時的 DOM，JS 動態產生的 class 不會被偵測到 */
+  #moveMenu {
+    background: #0f172a;              /* slate-900 */
+    border: 1px solid #334155;        /* slate-700 */
+    border-radius: 8px;
+    box-shadow: 0 20px 25px -5px rgba(0,0,0,0.6), 0 10px 10px -5px rgba(0,0,0,0.4);
+    min-width: 260px;
+    padding: 4px 0;
+  }
+  .move-menu-header {
+    padding: 8px 12px 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #64748b;                   /* slate-500 */
+    border-bottom: 1px solid #1e293b;
+  }
+  .move-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 9px 12px;
+    color: #e2e8f0;                   /* slate-200 */
+    background: transparent;
+    border: none;
+    text-align: left;
+    cursor: pointer;
+    font-size: 13px;
+    transition: background-color 0.12s;
+  }
+  .move-menu-item:hover {
+    background: #1e293b;               /* slate-800 */
+  }
+  .move-menu-item .en {
+    color: #64748b;                    /* slate-500 */
+    font-family: 'Fira Code', monospace;
+    font-size: 10px;
+  }
+  .move-menu-item.current {
+    color: #64748b;                    /* slate-500 */
+    cursor: not-allowed;
+  }
+  .move-menu-item.current:hover {
+    background: transparent;
+  }
+  .move-menu-item .check {
+    display: inline-block;
+    width: 14px;
+    color: #10b981;                    /* emerald-500 */
+  }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="p-6 max-w-[1600px] mx-auto" style="font-family: 'Fira Sans', sans-serif;">
 
@@ -26,10 +84,10 @@
   <div class="flex flex-wrap items-end gap-3 mb-6 p-4 bg-slate-900/50 border border-slate-800 rounded-xl">
     <div>
       <label class="block text-xs text-slate-400 mb-1">Label (類別)</label>
-      <select id="filter-label" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 text-sm min-w-[220px]">
+      <select id="filter-label" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 text-sm min-w-[280px]">
         <option value="">全部 ({{ total_count }})</option>
         {% for lbl, cnt in label_counts.items() %}
-        <option value="{{ lbl }}" {% if lbl == current_label %}selected{% endif %}>{{ lbl }} ({{ cnt }})</option>
+        <option value="{{ lbl }}" {% if lbl == current_label %}selected{% endif %}>{{ label_zh.get(lbl, lbl) }} · {{ lbl }} ({{ cnt }})</option>
         {% endfor %}
       </select>
     </div>
@@ -92,8 +150,9 @@
         <div class="flex items-center gap-2 flex-wrap">
           <span class="sample-label px-2 py-0.5 rounded font-semibold text-[11px]
             {% if it.label == 'true_ng' %}bg-red-500/15 text-red-300 border border-red-500/30
-            {% else %}bg-amber-500/15 text-amber-300 border border-amber-500/30{% endif %}">
-            {{ it.label }}
+            {% else %}bg-amber-500/15 text-amber-300 border border-amber-500/30{% endif %}"
+            title="{{ it.label }}">
+            {{ label_zh.get(it.label, it.label) }}
           </span>
           <span class="text-slate-500 font-mono">{{ it.prefix }}</span>
           <span class="text-slate-500 font-mono ml-auto">score {{ '%.3f'|format(it.ai_score|float) }}</span>
@@ -130,12 +189,9 @@
   {% endif %}
 </div>
 
-<!-- Move-to-label Popup (單一實例，動態定位) -->
-<div id="moveMenu" class="fixed z-50 hidden bg-slate-900 border border-slate-700 rounded-lg shadow-2xl py-1 min-w-[220px]"
-     onclick="event.stopPropagation()">
-  <div class="px-3 py-1.5 text-[10px] uppercase text-slate-500 tracking-wider border-b border-slate-800">
-    轉到類別
-  </div>
+<!-- Move-to-label Popup (單一實例，動態定位；用 inline CSS 避免 Tailwind dev-build JIT 掃不到動態 class 的問題) -->
+<div id="moveMenu" class="fixed z-50 hidden" onclick="event.stopPropagation()">
+  <div class="move-menu-header">轉到類別</div>
   <div id="moveMenuItems"></div>
 </div>
 
@@ -156,16 +212,9 @@
 </div>
 
 <script>
-// 所有合法 label (由 capi_dataset_export.get_valid_labels() 產生)
-const VALID_LABELS = [
-  "true_ng",
-  "over_aoi_ai_false_positive",
-  "over_edge_false_positive",
-  "over_other",
-  "over_overexposure",
-  "over_surface_scratch",
-  "over_within_spec"
-];
+// 由後端 capi_dataset_export.get_valid_labels() 與 LABEL_ZH 傳入
+const VALID_LABELS = {{ valid_labels|tojson }};
+const LABEL_ZH = {{ label_zh|tojson }};
 
 (function(){
   const qs = (id) => document.getElementById(id);
@@ -242,11 +291,16 @@ function openMoveMenu(ev, btnEl, sampleId, currentLabel) {
     row.type = "button";
     const isCurrent = (lbl === currentLabel);
     row.disabled = isCurrent;
-    row.className = isCurrent
-      ? "w-full text-left px-3 py-2 text-xs text-slate-500 font-mono cursor-not-allowed"
-      : "w-full text-left px-3 py-2 text-xs text-slate-200 font-mono hover:bg-slate-800 cursor-pointer";
-    row.textContent = (isCurrent ? "✓ " : "  ") + lbl;
-    row.onclick = (e) => { e.stopPropagation(); moveSample(sampleId, lbl); };
+    row.className = isCurrent ? "move-menu-item current" : "move-menu-item";
+    const zh = LABEL_ZH[lbl] || lbl;
+    // 左側：check + 中文名；右側：英文 label
+    row.innerHTML =
+      `<span><span class="check">${isCurrent ? "✓" : ""}</span>${zh}</span>` +
+      `<span class="en">${lbl}</span>`;
+    row.onclick = (e) => {
+      e.stopPropagation();
+      if (!isCurrent) moveSample(sampleId, lbl);
+    };
     items.appendChild(row);
   });
 

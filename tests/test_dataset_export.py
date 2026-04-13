@@ -438,10 +438,8 @@ def test_exporter_run_end_to_end(tmp_path):
 
     summary = exporter.run(days=3, include_true_ng=True, skip_existing=True)
 
-    # 4. 驗證目錄
+    # 4. 驗證目錄 (heatmap 已停止蒐集，只檢查 crop)
     assert (output / "over_edge_false_positive" / "G0F00000" / "crop"
-            / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
-    assert (output / "over_edge_false_positive" / "G0F00000" / "heatmap"
             / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
     assert (output / "over_edge_false_positive" / "G0F00000" / "crop"
             / "20260408_GLS123_G0F00000_114438_edge7001.png").exists()
@@ -508,7 +506,7 @@ def test_exporter_run_second_pass_moves_on_label_change(tmp_path):
     db._accuracy_rows[0]["over_review_category"] = "edge_false_positive"
     exporter.run(days=3, include_true_ng=True, skip_existing=True)
 
-    # 檔案應 move 到新 label 目錄
+    # 檔案應 move 到新 label 目錄 (只檢查 crop，heatmap 已停止蒐集)
     assert (output / "over_edge_false_positive" / "G0F00000" / "crop"
             / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
     assert not (output / "over_other" / "G0F00000" / "crop"

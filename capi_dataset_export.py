@@ -2,7 +2,8 @@
 過檢訓練資料集蒐集工具
 
 從 RIC 回填結果蒐集 AI=NG&RIC=NG (true_ng) 與 AI=NG&RIC=OK 已回填 category 的樣本，
-輸出 crop + heatmap 對到分類目錄結構 + manifest.csv，供後續分類 AI 訓練或 CV 後處理評估。
+輸出 crop 對到分類目錄結構 + manifest.csv，供後續分類 AI 訓練或 CV 後處理評估。
+(heatmap 已停止蒐集；manifest 保留 heatmap_path 欄位但新樣本留空以維持向後相容)
 
 Spec: docs/superpowers/specs/2026-04-10-over-review-dataset-collector-design.md
 """
@@ -38,6 +39,17 @@ OVER_LABEL_MAP = {
 }
 
 TRUE_NG_LABEL = "true_ng"
+
+# Label 中文說明（供 web UI 呈現與翻圖時快速理解類別）
+LABEL_ZH = {
+    "true_ng": "真實 NG",
+    "over_edge_false_positive": "邊緣誤判",
+    "over_within_spec": "規格內",
+    "over_overexposure": "曝光過度",
+    "over_surface_scratch": "表面刮痕",
+    "over_aoi_ai_false_positive": "AOI/AI 都誤判",
+    "over_other": "其他",
+}
 
 # Manifest CSV 欄位順序（固定，避免 DictWriter 亂序）
 MANIFEST_FIELDS = [
@@ -170,22 +182,30 @@ def move_sample_files(
         (new_crop_rel, new_heatmap_rel) — 兩個新的相對路徑
     """
     base_dir = Path(base_dir)
-    old_crop = base_dir / old_crop_rel
-    old_hm = base_dir / old_heatmap_rel
 
-    filename = old_crop.name
-    new_crop_rel = f"{new_label}/{prefix}/crop/{filename}"
-    new_hm_rel = f"{new_label}/{prefix}/heatmap/{filename}"
-    new_crop = base_dir / new_crop_rel
-    new_hm = base_dir / new_hm_rel
+    # 空字串時 base_dir / "" == base_dir (即整個 out 目錄)，會害 shutil.move 誤移，必須先檔掉
+    if not old_crop_rel:
+        new_crop_rel = ""
+    else:
+        old_crop = base_dir / old_crop_rel
+        filename = old_crop.name
+        new_crop_rel = f"{new_label}/{prefix}/crop/{filename}"
+        new_crop = base_dir / new_crop_rel
+        new_crop.parent.mkdir(parents=True, exist_ok=True)
+        if old_crop.exists():
+            shutil.move(str(old_crop), str(new_crop))
 
-    new_crop.parent.mkdir(parents=True, exist_ok=True)
-    new_hm.parent.mkdir(parents=True, exist_ok=True)
-
-    if old_crop.exists():
-        shutil.move(str(old_crop), str(new_crop))
-    if old_hm.exists():
-        shutil.move(str(old_hm), str(new_hm))
+    if not old_heatmap_rel:
+        # heatmap 已停止蒐集，舊樣本也可能沒有 heatmap_path → 跳過 heatmap move
+        new_hm_rel = ""
+    else:
+        old_hm = base_dir / old_heatmap_rel
+        filename_hm = old_hm.name
+        new_hm_rel = f"{new_label}/{prefix}/heatmap/{filename_hm}"
+        new_hm = base_dir / new_hm_rel
+        new_hm.parent.mkdir(parents=True, exist_ok=True)
+        if old_hm.exists():
+            shutil.move(str(old_hm), str(new_hm))
 
     return new_crop_rel, new_hm_rel
 
@@ -789,29 +809,19 @@ class DatasetExporter:
             defect_y = cand.edge_center_y
             sample_key = f"edge{cand.edge_defect_id}"
 
-        # Heatmap 必須存在
-        src_hm = Path(cand.src_heatmap_path) if cand.src_heatmap_path else None
-        if src_hm is None or not src_hm.exists():
-            row["status"] = "skipped_no_heatmap"
-            return row
-
-        # 決定目的路徑
+        # 決定目的路徑 (heatmap 已停止蒐集；僅輸出 crop)
         filename = build_sample_filename(
             glass_id=cand.glass_id, image_name=cand.image_name,
             sample_key=sample_key, inference_timestamp=cand.inference_timestamp,
         )
         crop_rel = f"{cand.label}/{cand.prefix}/crop/{filename}"
-        hm_rel = f"{cand.label}/{cand.prefix}/heatmap/{filename}"
         crop_dst = self.base_dir / crop_rel
-        hm_dst = self.base_dir / hm_rel
         crop_dst.parent.mkdir(parents=True, exist_ok=True)
-        hm_dst.parent.mkdir(parents=True, exist_ok=True)
 
         cv2.imwrite(str(crop_dst), crop)
-        shutil.copy2(str(src_hm), str(hm_dst))
 
         row["crop_path"] = crop_rel
-        row["heatmap_path"] = hm_rel
+        row["heatmap_path"] = ""
         row["defect_x"] = str(defect_x)
         row["defect_y"] = str(defect_y)
         row["status"] = "ok"

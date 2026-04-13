@@ -29,7 +29,7 @@ from capi_dataset_export import (
     JOB_STATE_IDLE, JOB_STATE_RUNNING, JOB_STATE_COMPLETED,
     JOB_STATE_FAILED, JOB_STATE_CANCELLED,
     read_manifest, write_manifest, delete_sample, relabel_sample,
-    get_valid_labels,
+    get_valid_labels, LABEL_ZH,
 )
 
 logger = logging.getLogger("capi.web")
@@ -3128,6 +3128,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             has_next=has_next,
             prev_url=prev_url,
             next_url=next_url,
+            label_zh=LABEL_ZH,
+            valid_labels=get_valid_labels(),
         )
         self._send_response(200, html)
 
