@@ -123,6 +123,14 @@
          data-sample-id="{{ it.sample_id }}" data-label="{{ it.label }}">
       <!-- Action buttons (top-right overlay) -->
       <div class="absolute top-1.5 right-1.5 z-10 flex gap-1">
+        {% if it.inference_record_id %}
+        <a href="/record/{{ it.inference_record_id }}" target="_blank" title="查看推論紀錄 (record #{{ it.inference_record_id }})"
+           class="w-7 h-7 flex items-center justify-center bg-slate-800/80 hover:bg-emerald-500/30 text-slate-200 rounded-md border border-slate-700 hover:border-emerald-400 backdrop-blur-sm transition-colors cursor-pointer no-underline">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+          </svg>
+        </a>
+        {% endif %}
         <button type="button" title="轉類別"
                 onclick="openMoveMenu(event, this, '{{ it.sample_id }}', '{{ it.label }}')"
                 class="w-7 h-7 flex items-center justify-center bg-slate-800/80 hover:bg-blue-500/30 text-slate-200 rounded-md border border-slate-700 hover:border-blue-400 backdrop-blur-sm transition-colors cursor-pointer">
