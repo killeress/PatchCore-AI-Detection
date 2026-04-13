@@ -190,6 +190,75 @@ def move_sample_files(
     return new_crop_rel, new_hm_rel
 
 
+def get_valid_labels() -> List[str]:
+    """回傳所有合法 label 目錄名（for 手動 relabel 驗證 + 前端下拉）"""
+    return [TRUE_NG_LABEL] + sorted(OVER_LABEL_MAP.values())
+
+
+def delete_sample(
+    base_dir: Path, manifest: Dict[str, Dict[str, str]], sample_id: str
+) -> bool:
+    """從 manifest 與 disk 刪除一個樣本（用於人工 curation）。
+
+    Caller 須在呼叫前後持 lock 並負責把 manifest 寫回 (write_manifest)。
+
+    Returns:
+        True 表示有刪除動作，False 表示 sample_id 不存在於 manifest。
+    """
+    base_dir = Path(base_dir)
+    if sample_id not in manifest:
+        return False
+    row = manifest[sample_id]
+    for rel_key in ("crop_path", "heatmap_path"):
+        rel = row.get(rel_key) or ""
+        if rel:
+            full = base_dir / rel
+            if full.exists():
+                try:
+                    full.unlink()
+                except OSError:
+                    logger.exception("Failed to unlink %s: %s", rel_key, full)
+    del manifest[sample_id]
+    return True
+
+
+def relabel_sample(
+    base_dir: Path, manifest: Dict[str, Dict[str, str]],
+    sample_id: str, new_label: str,
+) -> Optional[Dict[str, str]]:
+    """把樣本的 label 改成 new_label：實體檔 move + manifest row 更新。
+
+    Args:
+        new_label: 必須在 get_valid_labels() 內，否則 raise ValueError
+
+    Returns:
+        更新後的 row dict，或 None 若 sample_id 不存在於 manifest。
+    """
+    if new_label not in get_valid_labels():
+        raise ValueError(f"Invalid label: {new_label}")
+    base_dir = Path(base_dir)
+    if sample_id not in manifest:
+        return None
+    row = dict(manifest[sample_id])  # copy 避免 in-place 副作用
+    old_label = row.get("label", "")
+    if old_label == new_label:
+        return row  # no-op
+
+    new_crop_rel, new_hm_rel = move_sample_files(
+        base_dir=base_dir,
+        old_crop_rel=row.get("crop_path", ""),
+        old_heatmap_rel=row.get("heatmap_path", ""),
+        new_label=new_label,
+        prefix=row.get("prefix", ""),
+    )
+    row["label"] = new_label
+    row["crop_path"] = new_crop_rel
+    row["heatmap_path"] = new_hm_rel
+    row["collected_at"] = datetime.now().isoformat(timespec="seconds")
+    manifest[sample_id] = row
+    return row
+
+
 # ---- Crop Tool Functions ----
 
 def _pad_to_size(img: np.ndarray, target: int = CROP_SIZE,
@@ -368,6 +437,7 @@ class DatasetExporter:
             "images_b0f_skipped": 0,       # 黑光源 B0F 檔名被跳過
             "tiles_bomb_skipped": 0,       # tile_results.is_bomb=1 被跳過
             "tiles_not_anomaly": 0,        # tile_results.is_anomaly=0 被跳過
+            "edges_bomb_skipped": 0,       # edge_defect_results.is_bomb=1 被跳過
             "final_candidates": 0,
         }
 
@@ -436,6 +506,7 @@ class DatasetExporter:
             這個欄位是 AOI 機台傳來的炸彈參考座標列表，非「此片為炸彈測試」指標)
           - image_results.is_bomb == 1 整張跳過 (capi_server.py:549 判定為「純炸彈」時設)
           - tile_results.is_bomb == 1 該 tile 跳過 (check_bomb_match 個別標註)
+          - edge_defect_results.is_bomb == 1 該 edge 跳過 (check_bomb_match 個別標註)
 
         Args:
             diag: 可選的診斷計數器 dict，傳入時會更新 images_bomb_skipped /
@@ -500,6 +571,9 @@ class DatasetExporter:
 
             # Edge defect 樣本
             for edge in img.get("edge_defects") or []:
+                if edge.get("is_bomb"):
+                    _bump("edges_bomb_skipped")
+                    continue
                 edge_id = edge.get("id")
                 sample_id = build_sample_id(glass_id, image_name, "edge_defect", edge_defect_id=edge_id)
                 out.append(SampleCandidate(

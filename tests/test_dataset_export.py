@@ -335,6 +335,76 @@ def test_move_existing_sample_to_new_label(tmp_path):
     assert not old_hm.exists()
 
 
+def test_delete_sample_removes_files_and_row(tmp_path):
+    """delete_sample 應刪實體 crop + heatmap 檔並從 manifest 移除該 row"""
+    from capi_dataset_export import delete_sample
+    base = tmp_path
+    crop = base / "true_ng" / "G0F" / "crop" / "a.png"
+    hm = base / "true_ng" / "G0F" / "heatmap" / "a.png"
+    crop.parent.mkdir(parents=True); hm.parent.mkdir(parents=True)
+    crop.write_bytes(b"c"); hm.write_bytes(b"h")
+
+    manifest = {"sid1": {
+        "sample_id": "sid1", "label": "true_ng", "prefix": "G0F",
+        "crop_path": "true_ng/G0F/crop/a.png",
+        "heatmap_path": "true_ng/G0F/heatmap/a.png",
+        "status": "ok",
+    }}
+    assert delete_sample(base, manifest, "sid1") is True
+    assert "sid1" not in manifest
+    assert not crop.exists()
+    assert not hm.exists()
+
+
+def test_delete_sample_returns_false_when_not_found(tmp_path):
+    from capi_dataset_export import delete_sample
+    assert delete_sample(tmp_path, {}, "nope") is False
+
+
+def test_relabel_sample_moves_files_and_updates_row(tmp_path):
+    from capi_dataset_export import relabel_sample
+    base = tmp_path
+    crop = base / "over_other" / "G0F" / "crop" / "a.png"
+    hm = base / "over_other" / "G0F" / "heatmap" / "a.png"
+    crop.parent.mkdir(parents=True); hm.parent.mkdir(parents=True)
+    crop.write_bytes(b"c"); hm.write_bytes(b"h")
+
+    manifest = {"sid1": {
+        "sample_id": "sid1", "label": "over_other", "prefix": "G0F",
+        "crop_path": "over_other/G0F/crop/a.png",
+        "heatmap_path": "over_other/G0F/heatmap/a.png",
+        "status": "ok",
+        "collected_at": "2026-04-01T00:00:00",
+    }}
+    updated = relabel_sample(base, manifest, "sid1", "over_edge_false_positive")
+    assert updated is not None
+    assert updated["label"] == "over_edge_false_positive"
+    assert updated["crop_path"] == "over_edge_false_positive/G0F/crop/a.png"
+    assert (base / "over_edge_false_positive" / "G0F" / "crop" / "a.png").read_bytes() == b"c"
+    assert not crop.exists()
+    # manifest 被 in-place 更新
+    assert manifest["sid1"]["label"] == "over_edge_false_positive"
+
+
+def test_relabel_sample_rejects_invalid_label(tmp_path):
+    from capi_dataset_export import relabel_sample
+    manifest = {"sid1": {"label": "true_ng", "prefix": "G0F",
+                         "crop_path": "", "heatmap_path": ""}}
+    with pytest.raises(ValueError):
+        relabel_sample(tmp_path, manifest, "sid1", "bogus_label")
+
+
+def test_relabel_sample_noop_when_same_label(tmp_path):
+    from capi_dataset_export import relabel_sample
+    manifest = {"sid1": {"label": "true_ng", "prefix": "G0F",
+                         "crop_path": "true_ng/G0F/crop/a.png",
+                         "heatmap_path": "true_ng/G0F/heatmap/a.png",
+                         "collected_at": "2026-01-01T00:00:00"}}
+    # 即使實體檔不存在也不該 raise
+    updated = relabel_sample(tmp_path, manifest, "sid1", "true_ng")
+    assert updated["label"] == "true_ng"
+
+
 def test_exporter_run_end_to_end(tmp_path):
     """完整跑一次 run()：生成 fake 原圖與 heatmap → 驗證目錄與 manifest 正確"""
     import cv2

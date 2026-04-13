@@ -61,7 +61,25 @@
   {% if items %}
   <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-3">
     {% for it in items %}
-    <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden hover:border-slate-600 transition-colors">
+    <div class="sample-card bg-slate-900 border border-slate-800 rounded-xl overflow-hidden hover:border-slate-600 transition-colors relative"
+         data-sample-id="{{ it.sample_id }}" data-label="{{ it.label }}">
+      <!-- Action buttons (top-right overlay) -->
+      <div class="absolute top-1.5 right-1.5 z-10 flex gap-1">
+        <button type="button" title="轉類別"
+                onclick="openMoveMenu(event, this, '{{ it.sample_id }}', '{{ it.label }}')"
+                class="w-7 h-7 flex items-center justify-center bg-slate-800/80 hover:bg-blue-500/30 text-slate-200 rounded-md border border-slate-700 hover:border-blue-400 backdrop-blur-sm transition-colors cursor-pointer">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
+          </svg>
+        </button>
+        <button type="button" title="刪除"
+                onclick="deleteSample('{{ it.sample_id }}')"
+                class="w-7 h-7 flex items-center justify-center bg-slate-800/80 hover:bg-red-500/30 text-slate-200 rounded-md border border-slate-700 hover:border-red-400 backdrop-blur-sm transition-colors cursor-pointer">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M8 7V5a2 2 0 012-2h4a2 2 0 012 2v2"/>
+          </svg>
+        </button>
+      </div>
       <!-- Crop image -->
       <div class="bg-slate-950">
         <div class="relative group cursor-pointer" onclick="openViewer('{{ it.crop_url }}', '{{ it.sample_id }}')">
@@ -72,7 +90,7 @@
       <!-- Meta -->
       <div class="p-3 flex flex-col gap-1.5 text-xs">
         <div class="flex items-center gap-2 flex-wrap">
-          <span class="px-2 py-0.5 rounded font-semibold text-[11px]
+          <span class="sample-label px-2 py-0.5 rounded font-semibold text-[11px]
             {% if it.label == 'true_ng' %}bg-red-500/15 text-red-300 border border-red-500/30
             {% else %}bg-amber-500/15 text-amber-300 border border-amber-500/30{% endif %}">
             {{ it.label }}
@@ -112,6 +130,15 @@
   {% endif %}
 </div>
 
+<!-- Move-to-label Popup (單一實例，動態定位) -->
+<div id="moveMenu" class="fixed z-50 hidden bg-slate-900 border border-slate-700 rounded-lg shadow-2xl py-1 min-w-[220px]"
+     onclick="event.stopPropagation()">
+  <div class="px-3 py-1.5 text-[10px] uppercase text-slate-500 tracking-wider border-b border-slate-800">
+    轉到類別
+  </div>
+  <div id="moveMenuItems"></div>
+</div>
+
 <!-- Image Viewer Modal -->
 <div id="imageViewer" class="fixed inset-0 z-50 hidden items-center justify-center p-4"
      style="background-color: rgba(2,6,23,0.92); backdrop-filter: blur(8px);"
@@ -129,6 +156,17 @@
 </div>
 
 <script>
+// 所有合法 label (由 capi_dataset_export.get_valid_labels() 產生)
+const VALID_LABELS = [
+  "true_ng",
+  "over_aoi_ai_false_positive",
+  "over_edge_false_positive",
+  "over_other",
+  "over_overexposure",
+  "over_surface_scratch",
+  "over_within_spec"
+];
+
 (function(){
   const qs = (id) => document.getElementById(id);
 
@@ -148,8 +186,12 @@
   ["filter-label", "filter-prefix", "filter-limit"].forEach(id => {
     qs(id).addEventListener("change", () => { window.location.href = buildUrl(); });
   });
+
+  // 點頁面其他位置關閉 move menu
+  document.addEventListener("click", () => closeMoveMenu());
 })();
 
+// ---- Image Viewer ----
 function openViewer(url, caption) {
   const modal = document.getElementById("imageViewer");
   document.getElementById("viewerImg").src = url;
@@ -164,7 +206,117 @@ function closeViewer() {
   document.getElementById("viewerImg").src = "";
 }
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeViewer();
+  if (e.key === "Escape") { closeViewer(); closeMoveMenu(); }
 });
+
+// ---- Delete ----
+async function deleteSample(sampleId) {
+  if (!confirm(`確定刪除樣本？\n\n${sampleId}\n\n實體檔案 (crop + heatmap) 與 manifest row 都會移除，無法復原。`)) {
+    return;
+  }
+  try {
+    const r = await fetch("/api/dataset_export/sample/delete", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({sample_id: sampleId}),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      alert("刪除失敗: " + (data.error || r.status));
+      return;
+    }
+    removeCardFromDom(sampleId);
+  } catch (e) {
+    alert("網路錯誤: " + e);
+  }
+}
+
+// ---- Move to another label ----
+function openMoveMenu(ev, btnEl, sampleId, currentLabel) {
+  ev.stopPropagation();
+  const menu = document.getElementById("moveMenu");
+  const items = document.getElementById("moveMenuItems");
+  items.innerHTML = "";
+  VALID_LABELS.forEach(lbl => {
+    const row = document.createElement("button");
+    row.type = "button";
+    const isCurrent = (lbl === currentLabel);
+    row.disabled = isCurrent;
+    row.className = isCurrent
+      ? "w-full text-left px-3 py-2 text-xs text-slate-500 font-mono cursor-not-allowed"
+      : "w-full text-left px-3 py-2 text-xs text-slate-200 font-mono hover:bg-slate-800 cursor-pointer";
+    row.textContent = (isCurrent ? "✓ " : "  ") + lbl;
+    row.onclick = (e) => { e.stopPropagation(); moveSample(sampleId, lbl); };
+    items.appendChild(row);
+  });
+
+  // 定位：顯示在按鈕右下
+  const rect = btnEl.getBoundingClientRect();
+  const menuWidth = 220;
+  let left = rect.right - menuWidth;
+  if (left < 8) left = 8;
+  if (left + menuWidth > window.innerWidth - 8) {
+    left = window.innerWidth - menuWidth - 8;
+  }
+  let top = rect.bottom + 4;
+  menu.style.left = left + "px";
+  menu.style.top = top + "px";
+  menu.classList.remove("hidden");
+}
+
+function closeMoveMenu() {
+  const menu = document.getElementById("moveMenu");
+  if (menu) menu.classList.add("hidden");
+}
+
+async function moveSample(sampleId, newLabel) {
+  closeMoveMenu();
+  try {
+    const r = await fetch("/api/dataset_export/sample/move", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({sample_id: sampleId, new_label: newLabel}),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      alert("轉類別失敗: " + (data.error || r.status));
+      return;
+    }
+    // 當前頁若有 label filter 就移除 card (已不屬此 label)，否則更新 UI
+    const card = document.querySelector(`.sample-card[data-sample-id="${CSS.escape(sampleId)}"]`);
+    if (!card) return;
+    const activeFilter = document.getElementById("filter-label").value;
+    if (activeFilter && activeFilter !== newLabel) {
+      removeCardFromDom(sampleId);
+    } else {
+      // 更新 label 徽章與 dataset 屬性
+      card.dataset.label = newLabel;
+      const badge = card.querySelector(".sample-label");
+      if (badge) {
+        badge.textContent = newLabel;
+        badge.className = "sample-label px-2 py-0.5 rounded font-semibold text-[11px] "
+          + (newLabel === "true_ng"
+              ? "bg-red-500/15 text-red-300 border border-red-500/30"
+              : "bg-amber-500/15 text-amber-300 border border-amber-500/30");
+      }
+      // 閃一下 emerald border 當作回饋
+      card.style.transition = "border-color 0.3s";
+      const origBorder = card.style.borderColor;
+      card.style.borderColor = "#10b981";
+      setTimeout(() => { card.style.borderColor = origBorder; }, 600);
+    }
+  } catch (e) {
+    alert("網路錯誤: " + e);
+  }
+}
+
+function removeCardFromDom(sampleId) {
+  const card = document.querySelector(`.sample-card[data-sample-id="${CSS.escape(sampleId)}"]`);
+  if (!card) return;
+  card.style.transition = "opacity 0.25s, transform 0.25s";
+  card.style.opacity = "0";
+  card.style.transform = "scale(0.96)";
+  setTimeout(() => card.remove(), 260);
+}
 </script>
 {% endblock %}

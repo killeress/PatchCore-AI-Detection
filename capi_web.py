@@ -28,6 +28,8 @@ from capi_dataset_export import (
     DatasetExporter, JobSummary,
     JOB_STATE_IDLE, JOB_STATE_RUNNING, JOB_STATE_COMPLETED,
     JOB_STATE_FAILED, JOB_STATE_CANCELLED,
+    read_manifest, write_manifest, delete_sample, relabel_sample,
+    get_valid_labels,
 )
 
 logger = logging.getLogger("capi.web")
@@ -262,6 +264,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path == "/api/dataset_export/cancel":
                 self._handle_dataset_export_cancel()
+                return
+            elif path == "/api/dataset_export/sample/delete":
+                self._handle_dataset_sample_delete()
+                return
+            elif path == "/api/dataset_export/sample/move":
+                self._handle_dataset_sample_move()
                 return
             else:
                 self._send_404(path)
@@ -3159,6 +3167,78 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         self._send_binary(str(target))
 
+    def _read_json_body(self) -> Optional[dict]:
+        """讀 POST JSON body；失敗回 None 並已送出 400 response"""
+        import json as _json
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            return _json.loads(body) if body else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON body"}, status=400)
+            return None
+
+    def _handle_dataset_sample_delete(self):
+        """POST /api/dataset_export/sample/delete  body: {sample_id}"""
+        data = self._read_json_body()
+        if data is None:
+            return
+        sample_id = (data.get("sample_id") or "").strip()
+        if not sample_id:
+            self._send_json({"error": "missing sample_id"}, status=400)
+            return
+
+        base_dir = self._dataset_export_base_dir()
+        manifest_path = base_dir / "manifest.csv"
+        state = self._dataset_export_state
+        with state["manifest_lock"]:
+            manifest = read_manifest(manifest_path)
+            ok = delete_sample(base_dir, manifest, sample_id)
+            if ok:
+                write_manifest(manifest_path, manifest)
+        if not ok:
+            self._send_json({"error": "sample_id not found"}, status=404)
+            return
+        self._send_json({"ok": True, "sample_id": sample_id})
+
+    def _handle_dataset_sample_move(self):
+        """POST /api/dataset_export/sample/move  body: {sample_id, new_label}"""
+        data = self._read_json_body()
+        if data is None:
+            return
+        sample_id = (data.get("sample_id") or "").strip()
+        new_label = (data.get("new_label") or "").strip()
+        if not sample_id or not new_label:
+            self._send_json({"error": "missing sample_id or new_label"}, status=400)
+            return
+        if new_label not in get_valid_labels():
+            self._send_json({
+                "error": "invalid new_label",
+                "valid_labels": get_valid_labels(),
+            }, status=400)
+            return
+
+        base_dir = self._dataset_export_base_dir()
+        manifest_path = base_dir / "manifest.csv"
+        state = self._dataset_export_state
+        with state["manifest_lock"]:
+            manifest = read_manifest(manifest_path)
+            try:
+                updated = relabel_sample(base_dir, manifest, sample_id, new_label)
+            except ValueError as e:
+                self._send_json({"error": str(e)}, status=400)
+                return
+            if updated is None:
+                self._send_json({"error": "sample_id not found"}, status=404)
+                return
+            write_manifest(manifest_path, manifest)
+        self._send_json({
+            "ok": True,
+            "sample_id": sample_id,
+            "new_label": updated["label"],
+            "crop_path": updated["crop_path"],
+        })
+
     def _handle_rerun_status_sse(self, record_id_str: str):
         """SSE: 串流重跑進度"""
         import time as _time
@@ -3253,6 +3333,7 @@ def create_web_server(
         "current_job": None,         # dict: job_id, state, current, total, last_glass_id, started_at
         "cancel_event": threading.Event(),
         "last_summary": None,        # JobSummary instance
+        "manifest_lock": threading.Lock(),  # 保護 manifest.csv 手動 curation 的 read-modify-write
     }
     CAPIWebHandler.init_jinja()
 
