@@ -59,20 +59,14 @@
 
   <!-- Grid -->
   {% if items %}
-  <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
+  <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-3">
     {% for it in items %}
     <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden hover:border-slate-600 transition-colors">
-      <!-- Pair of images -->
-      <div class="grid grid-cols-2 gap-0 bg-slate-950">
-        <div class="relative group cursor-pointer" onclick="openViewer('{{ it.crop_url }}', '{{ it.sample_id }} — Crop')">
+      <!-- Crop image -->
+      <div class="bg-slate-950">
+        <div class="relative group cursor-pointer" onclick="openViewer('{{ it.crop_url }}', '{{ it.sample_id }}')">
           <img src="{{ it.crop_url }}" alt="crop" loading="lazy"
                class="w-full aspect-square object-cover group-hover:opacity-80 transition-opacity">
-          <span class="absolute top-1 left-1 text-[10px] bg-black/60 text-slate-200 px-1.5 py-0.5 rounded font-mono">crop</span>
-        </div>
-        <div class="relative group cursor-pointer border-l border-slate-800" onclick="openViewer('{{ it.heatmap_url }}', '{{ it.sample_id }} — Heatmap')">
-          <img src="{{ it.heatmap_url }}" alt="heatmap" loading="lazy"
-               class="w-full aspect-square object-cover group-hover:opacity-80 transition-opacity">
-          <span class="absolute top-1 left-1 text-[10px] bg-black/60 text-slate-200 px-1.5 py-0.5 rounded font-mono">heatmap</span>
         </div>
       </div>
       <!-- Meta -->
