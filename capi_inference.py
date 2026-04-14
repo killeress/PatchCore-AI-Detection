@@ -37,6 +37,8 @@ import torch
 import logging
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
 from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff
+from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
+from scratch_filter import ScratchFilter
 
 logger = logging.getLogger("capi.inference")
 
@@ -116,7 +118,10 @@ class TileInfo:
     bright_spot_diff_threshold: int = 0     # B0F 偵測：使用的差異閾值
     bright_spot_area: int = 0               # B0F 偵測：偵測到的亮點面積 (px)
     bright_spot_min_area: int = 0           # B0F 偵測：使用的最小面積
-    
+    # Scratch classifier post-filter (over-review reduction)
+    scratch_score: float = 0.0              # 0 = 未跑 classifier
+    scratch_filtered: bool = False          # True = 被翻回 OK
+
     @property
     def center(self) -> Tuple[int, int]:
         return (self.x + self.width // 2, self.y + self.height // 2)
@@ -220,7 +225,10 @@ class ImageResult:
 
     # 推論耗時 (秒)
     inference_time: float = 0.0
-    
+
+    # Scratch classifier post-filter stats
+    scratch_filter_count: int = 0           # 此 image 中被翻 OK 的 tile 數
+
     # 客戶端傳送的炸彈資訊 (供繪圖使用)
     client_bomb_info: Optional[Dict[str, Any]] = None
     
@@ -302,7 +310,44 @@ class CAPIInferencer:
         elif self.model_path:
             # 單一模型模式 (向後相容)
             self._load_model()
-    
+
+        # Scratch classifier post-filter (lazy-loaded on first NG tile)
+        self.scratch_filter: ScratchFilter | None = None
+        self._scratch_load_failed = False
+
+    def _get_scratch_filter(self):
+        """Lazy-load ScratchFilter (first call only). Thread-safe via _gpu_lock
+        (caller responsibility — called inside process_panel)."""
+        if not getattr(self.config, "scratch_classifier_enabled", False):
+            return None
+        if self._scratch_load_failed:
+            return None
+
+        # Rebuild filter if safety multiplier changed (dynamic config)
+        current_safety = float(getattr(self.config, "scratch_safety_multiplier", 1.1))
+        if self.scratch_filter is not None and \
+                abs(self.scratch_filter._safety - current_safety) > 1e-9:
+            self.scratch_filter = ScratchFilter(self.scratch_filter._classifier,
+                                                safety_multiplier=current_safety)
+
+        if self.scratch_filter is not None:
+            return self.scratch_filter
+
+        bundle = getattr(self.config, "scratch_bundle_path", "")
+        weights = getattr(self.config, "scratch_dinov2_weights_path", "")
+        try:
+            clf = ScratchClassifier(
+                bundle_path=bundle,
+                dinov2_weights_path=weights or None,
+                device=self.device,
+            )
+        except ScratchClassifierLoadError as e:
+            logger.error("ScratchClassifier load failed: %s", e)
+            self._scratch_load_failed = True
+            return None
+        self.scratch_filter = ScratchFilter(clf, safety_multiplier=current_safety)
+        return self.scratch_filter
+
     def _get_device(self, device: str) -> str:
         """取得運算裝置"""
         if device == "auto":
@@ -4094,9 +4139,16 @@ class CAPIInferencer:
             except Exception as e:
                 logger.error(f"排除區域檢查失敗: {e}", exc_info=True)
 
+        # === Scratch post-filter: flip high-confidence scratch NG tiles to OK ===
+        sf = self._get_scratch_filter()
+        if sf is not None:
+            for result in results:
+                if result.anomaly_tiles:
+                    sf.apply_to_image_result(result)
+
         total_panel_time = preprocess_time + inference_time + postprocess_time
         print(f"📊 Panel {panel_dir.name} 總計: 預處理 {preprocess_time:.2f}s + 推論 {inference_time:.2f}s + 後處理 {postprocess_time:.2f}s = {total_panel_time:.2f}s")
-        
+
         if bomb_info is not None:
             for result in results:
                 result.client_bomb_info = bomb_info

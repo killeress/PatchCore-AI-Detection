@@ -201,6 +201,12 @@ class CAPIConfig:
     aoi_report_path_replace_from: str = "yuantu"    # 報告路徑替換來源
     aoi_report_path_replace_to: str = "Report"      # 報告路徑替換目標
 
+    # Scratch classifier post-filter (over-review reduction)
+    scratch_classifier_enabled: bool = True
+    scratch_safety_multiplier: float = 1.1
+    scratch_bundle_path: str = "deployment/scratch_classifier_v1.pkl"
+    scratch_dinov2_weights_path: str = "deployment/dinov2_vitb14.pth"
+
     # 配置檔路徑（載入後記錄）
     config_path: Optional[Path] = None
     
@@ -295,6 +301,10 @@ class CAPIConfig:
             aoi_coord_inspection_enabled=data.get("aoi_coord_inspection_enabled", False),
             aoi_report_path_replace_from=data.get("aoi_report_path_replace_from", "yuantu"),
             aoi_report_path_replace_to=data.get("aoi_report_path_replace_to", "Report"),
+            scratch_classifier_enabled=data.get("scratch_classifier_enabled", True),
+            scratch_safety_multiplier=float(data.get("scratch_safety_multiplier", 1.1)),
+            scratch_bundle_path=data.get("scratch_bundle_path", "deployment/scratch_classifier_v1.pkl"),
+            scratch_dinov2_weights_path=data.get("scratch_dinov2_weights_path", "deployment/dinov2_vitb14.pth"),
         )
 
         return config
@@ -364,6 +374,10 @@ class CAPIConfig:
             "aoi_coord_inspection_enabled": self.aoi_coord_inspection_enabled,
             "aoi_report_path_replace_from": self.aoi_report_path_replace_from,
             "aoi_report_path_replace_to": self.aoi_report_path_replace_to,
+            "scratch_classifier_enabled": self.scratch_classifier_enabled,
+            "scratch_safety_multiplier": self.scratch_safety_multiplier,
+            "scratch_bundle_path": self.scratch_bundle_path,
+            "scratch_dinov2_weights_path": self.scratch_dinov2_weights_path,
         }
 
     def to_yaml(self, yaml_path: str) -> None:
@@ -427,8 +441,12 @@ class CAPIConfig:
             "aoi_coord_inspection_enabled": self.aoi_coord_inspection_enabled,
             "aoi_report_path_replace_from": self.aoi_report_path_replace_from,
             "aoi_report_path_replace_to": self.aoi_report_path_replace_to,
+            "scratch_classifier_enabled": self.scratch_classifier_enabled,
+            "scratch_safety_multiplier": self.scratch_safety_multiplier,
+            "scratch_bundle_path": self.scratch_bundle_path,
+            "scratch_dinov2_weights_path": self.scratch_dinov2_weights_path,
         }
-        
+
         with open(yaml_path, "w", encoding="utf-8") as f:
             yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
     
@@ -552,6 +570,15 @@ class CAPIConfig:
             self.aoi_report_path_replace_from = str(param_map["aoi_report_path_replace_from"])
         if "aoi_report_path_replace_to" in param_map:
             self.aoi_report_path_replace_to = str(param_map["aoi_report_path_replace_to"])
+        if "scratch_classifier_enabled" in param_map:
+            val = param_map["scratch_classifier_enabled"]
+            self.scratch_classifier_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "scratch_safety_multiplier" in param_map:
+            self.scratch_safety_multiplier = float(param_map["scratch_safety_multiplier"])
+        if "scratch_bundle_path" in param_map:
+            self.scratch_bundle_path = str(param_map["scratch_bundle_path"])
+        if "scratch_dinov2_weights_path" in param_map:
+            self.scratch_dinov2_weights_path = str(param_map["scratch_dinov2_weights_path"])
 
     def get_enabled_exclusion_zones(self) -> List[ExclusionZone]:
         """取得已啟用的排除區域"""

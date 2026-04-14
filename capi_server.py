@@ -447,6 +447,9 @@ def aggregate_judgment(results: List[ImageResult]) -> Tuple[str, str]:
             # 跳過不檢測排除區域
             if tile.is_in_exclude_zone:
                 continue
+            # 跳過被 scratch classifier 翻 OK 的 tile (over-review 過濾)
+            if tile.scratch_filtered:
+                continue
             # 跳過 AOI 座標但分數未達閾值的 tile (僅記錄用，不影響判定)
             if getattr(tile, 'is_aoi_coord_below_threshold', False):
                 continue
@@ -536,7 +539,8 @@ def results_to_db_data(
         if anomaly_count > 0 or cv_edge_count > 0:
             real_ng = [t for t, s, m in result.anomaly_tiles
                        if not t.is_suspected_dust_or_scratch and not t.is_bomb and not t.is_in_exclude_zone
-                       and not getattr(t, 'is_aoi_coord_below_threshold', False)]
+                       and not getattr(t, 'is_aoi_coord_below_threshold', False)
+                       and not t.scratch_filtered]
             
             # 如果有真實 NG 或是 CV 邊緣 NG，就判定為 NG
             if real_ng or cv_edge_count > 0:
@@ -579,6 +583,7 @@ def results_to_db_data(
             "is_bomb": is_bomb,
             "inference_time_ms": result.inference_time * 1000,
             "heatmap_path": overview_path,
+            "scratch_filter_count": result.scratch_filter_count,
             "tiles": [],
         }
 
@@ -609,6 +614,8 @@ def results_to_db_data(
                 "aoi_defect_code": tile.aoi_defect_code,
                 "aoi_product_x": tile.aoi_product_x,
                 "aoi_product_y": tile.aoi_product_y,
+                "scratch_score": tile.scratch_score,
+                "scratch_filtered": tile.scratch_filtered,
             })
 
         # CV 邊緣缺陷 — 獨立儲存 (不放入 tiles)

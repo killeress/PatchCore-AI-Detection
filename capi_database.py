@@ -267,6 +267,10 @@ class CAPIDatabase:
             add_column_if_not_exists("inference_records", "inference_log", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "omit_overexposed", "INTEGER DEFAULT 0")
             add_column_if_not_exists("inference_records", "omit_overexposure_info", "TEXT DEFAULT ''")
+            # Scratch classifier post-filter (over-review reduction)
+            add_column_if_not_exists("tile_results", "scratch_score", "REAL DEFAULT 0.0")
+            add_column_if_not_exists("tile_results", "scratch_filtered", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("image_results", "scratch_filter_count", "INTEGER DEFAULT 0")
 
             conn.commit()
         finally:
@@ -349,8 +353,8 @@ class CAPIDatabase:
                                (record_id, image_path, image_name, image_width, image_height,
                                 otsu_bounds, tile_count, excluded_tiles, anomaly_count,
                                 max_score, is_ng, is_dust_only, is_bomb, inference_time_ms,
-                                heatmap_path)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                heatmap_path, scratch_filter_count)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (record_id,
                              img_data.get("image_path", ""),
                              img_data.get("image_name", ""),
@@ -365,7 +369,8 @@ class CAPIDatabase:
                              img_data.get("is_dust_only", 0),
                              img_data.get("is_bomb", 0),
                              img_data.get("inference_time_ms", 0.0),
-                             img_data.get("heatmap_path", ""))
+                             img_data.get("heatmap_path", ""),
+                             img_data.get("scratch_filter_count", 0))
                         )
                         image_result_id = img_cursor.lastrowid
 
@@ -377,8 +382,9 @@ class CAPIDatabase:
                                     score, is_anomaly, is_dust, dust_iou, is_bomb,
                                     bomb_code, peak_x, peak_y, heatmap_path,
                                     is_exclude_zone, is_aoi_coord, aoi_defect_code,
-                                    aoi_product_x, aoi_product_y)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    aoi_product_x, aoi_product_y,
+                                    scratch_score, scratch_filtered)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  tile_data.get("tile_id", 0),
                                  tile_data.get("x", 0),
@@ -398,7 +404,9 @@ class CAPIDatabase:
                                  tile_data.get("is_aoi_coord", 0),
                                  tile_data.get("aoi_defect_code", ""),
                                  tile_data.get("aoi_product_x", -1),
-                                 tile_data.get("aoi_product_y", -1))
+                                 tile_data.get("aoi_product_y", -1),
+                                 tile_data.get("scratch_score", 0.0),
+                                 int(tile_data.get("scratch_filtered", 0)))
                             )
 
                         # 儲存 CV 邊緣缺陷結果
@@ -498,8 +506,8 @@ class CAPIDatabase:
                                (record_id, image_path, image_name, image_width, image_height,
                                 otsu_bounds, tile_count, excluded_tiles, anomaly_count,
                                 max_score, is_ng, is_dust_only, is_bomb, inference_time_ms,
-                                heatmap_path)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                heatmap_path, scratch_filter_count)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (record_id,
                              img_data.get("image_path", ""),
                              img_data.get("image_name", ""),
@@ -514,7 +522,8 @@ class CAPIDatabase:
                              img_data.get("is_dust_only", 0),
                              img_data.get("is_bomb", 0),
                              img_data.get("inference_time_ms", 0.0),
-                             img_data.get("heatmap_path", ""))
+                             img_data.get("heatmap_path", ""),
+                             img_data.get("scratch_filter_count", 0))
                         )
                         image_result_id = img_cursor.lastrowid
 
@@ -525,8 +534,9 @@ class CAPIDatabase:
                                     score, is_anomaly, is_dust, dust_iou, is_bomb,
                                     bomb_code, peak_x, peak_y, heatmap_path,
                                     is_exclude_zone, is_aoi_coord, aoi_defect_code,
-                                    aoi_product_x, aoi_product_y)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    aoi_product_x, aoi_product_y,
+                                    scratch_score, scratch_filtered)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  tile_data.get("tile_id", 0),
                                  tile_data.get("x", 0),
@@ -546,7 +556,9 @@ class CAPIDatabase:
                                  tile_data.get("is_aoi_coord", 0),
                                  tile_data.get("aoi_defect_code", ""),
                                  tile_data.get("aoi_product_x", -1),
-                                 tile_data.get("aoi_product_y", -1))
+                                 tile_data.get("aoi_product_y", -1),
+                                 tile_data.get("scratch_score", 0.0),
+                                 int(tile_data.get("scratch_filtered", 0)))
                             )
 
                         for edge_data in img_data.get("edge_defects", []):
