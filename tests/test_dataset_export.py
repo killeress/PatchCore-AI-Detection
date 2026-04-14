@@ -438,21 +438,31 @@ def test_exporter_run_end_to_end(tmp_path):
 
     summary = exporter.run(days=3, include_true_ng=True, skip_existing=True)
 
-    # 4. 驗證目錄 (heatmap 已停止蒐集，只檢查 crop)
-    assert (output / "over_edge_false_positive" / "G0F00000" / "crop"
+    # 4. 驗證 snapshot 結構：base_dir/<YYYYMMDD_HHMMSS>/...
+    from pathlib import Path as _P
+    from capi_dataset_export import read_manifest, list_job_dirs
+    jobs = list_job_dirs(output)
+    assert len(jobs) == 1, f"expected exactly one job folder, got {jobs}"
+    job_dir = jobs[0]
+    # 資料夾名為 YYYYMMDD_HHMMSS (15 字元，1 個底線)
+    assert len(job_dir.name) == 15 and job_dir.name.count("_") == 1
+    # summary.output_dir 應指向這個 job 資料夾
+    assert _P(summary.output_dir) == job_dir
+
+    # 5. 驗證 crop 檔案位於 job_dir 內
+    assert (job_dir / "over_edge_false_positive" / "G0F00000" / "crop"
             / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
-    assert (output / "over_edge_false_positive" / "G0F00000" / "crop"
+    assert (job_dir / "over_edge_false_positive" / "G0F00000" / "crop"
             / "20260408_GLS123_G0F00000_114438_edge7001.png").exists()
 
-    # 5. 驗證 manifest
-    from capi_dataset_export import read_manifest
-    manifest = read_manifest(output / "manifest.csv")
+    # 6. 驗證 manifest 位於 job_dir 內
+    manifest = read_manifest(job_dir / "manifest.csv")
     assert "GLS123_G0F00000_114438_tile3" in manifest
     assert "GLS123_G0F00000_114438_edge7001" in manifest
     assert manifest["GLS123_G0F00000_114438_tile3"]["label"] == "over_edge_false_positive"
     assert manifest["GLS123_G0F00000_114438_tile3"]["status"] == "ok"
 
-    # 6. 驗證 summary
+    # 7. 驗證 summary
     assert summary.total == 2
     assert summary.labels.get("over_edge_false_positive") == 2
 
@@ -470,49 +480,12 @@ def test_exporter_run_skip_missing_source(tmp_path):
 
     summary = exporter.run(days=3, include_true_ng=True, skip_existing=True)
 
-    manifest = read_manifest(output / "manifest.csv")
+    from capi_dataset_export import list_job_dirs
+    jobs = list_job_dirs(output)
+    assert len(jobs) == 1
+    manifest = read_manifest(jobs[0] / "manifest.csv")
     assert manifest["GLS123_G0F00000_114438_tile3"]["status"] == "skipped_no_source"
     assert summary.skipped.get("skipped_no_source", 0) >= 1
-
-
-def test_exporter_run_second_pass_moves_on_label_change(tmp_path):
-    """第一次跑 label=other → 第二次 DB 改成 edge_false_positive → 檔案應 move"""
-    import cv2
-    from capi_dataset_export import read_manifest
-
-    panel_dir = tmp_path / "panels" / "GLS123"
-    panel_dir.mkdir(parents=True)
-    fake_img = panel_dir / "G0F00000_114438.tif"
-    cv2.imwrite(str(fake_img), np.full((2048, 2048, 3), 150, dtype=np.uint8))
-    fake_hm = tmp_path / "heatmaps" / "heatmap_tile3.png"
-    fake_hm.parent.mkdir()
-    cv2.imwrite(str(fake_hm), np.zeros((256, 1024, 3), dtype=np.uint8))
-
-    row = _make_accuracy_row(over_review_category="other")
-    detail = _make_record_detail()
-    detail["images"][0]["image_path"] = str(fake_img)
-    detail["images"][0]["tiles"][0]["heatmap_path"] = str(fake_hm)
-    detail["images"][0]["edge_defects"] = []
-    detail["images"].pop(1)
-    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
-    output = tmp_path / "out"
-    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
-
-    exporter.run(days=3, include_true_ng=True, skip_existing=True)
-    assert (output / "over_other" / "G0F00000" / "crop"
-            / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
-
-    # 模擬使用者改 category
-    db._accuracy_rows[0]["over_review_category"] = "edge_false_positive"
-    exporter.run(days=3, include_true_ng=True, skip_existing=True)
-
-    # 檔案應 move 到新 label 目錄 (只檢查 crop，heatmap 已停止蒐集)
-    assert (output / "over_edge_false_positive" / "G0F00000" / "crop"
-            / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
-    assert not (output / "over_other" / "G0F00000" / "crop"
-                / "20260408_GLS123_G0F00000_114438_tile3.png").exists()
-    manifest = read_manifest(output / "manifest.csv")
-    assert manifest["GLS123_G0F00000_114438_tile3"]["label"] == "over_edge_false_positive"
 
 
 # ==== 黑光源圖 (B0F) / bomb record 過濾測試 ====
@@ -597,80 +570,6 @@ def test_exporter_run_exposes_diagnostics_in_summary(tmp_path):
     assert summary.diagnostics["final_candidates"] == 0
 
 
-def test_exporter_run_counts_already_exists_on_second_pass(tmp_path):
-    """第二次跑 (skip_existing=True, label 未變) → 樣本計入 skipped['already_exists']，total 不為 0"""
-    import cv2
-    from capi_dataset_export import read_manifest
-
-    panel_dir = tmp_path / "panels" / "GLS123"
-    panel_dir.mkdir(parents=True)
-    fake_img = panel_dir / "G0F00000_114438.tif"
-    cv2.imwrite(str(fake_img), np.full((2048, 2048, 3), 150, dtype=np.uint8))
-    fake_hm = tmp_path / "heatmaps" / "heatmap_tile3.png"
-    fake_hm.parent.mkdir()
-    cv2.imwrite(str(fake_hm), np.zeros((256, 1024, 3), dtype=np.uint8))
-
-    row = _make_accuracy_row()
-    detail = _make_record_detail()
-    detail["images"][0]["image_path"] = str(fake_img)
-    detail["images"][0]["tiles"][0]["heatmap_path"] = str(fake_hm)
-    detail["images"][0]["edge_defects"] = []
-    detail["images"].pop(1)
-    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
-    output = tmp_path / "out"
-    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
-
-    # 第一次：蒐集到一筆
-    s1 = exporter.run(days=3, include_true_ng=True, skip_existing=True)
-    assert s1.labels.get("over_edge_false_positive") == 1
-    assert s1.skipped.get("already_exists", 0) == 0
-
-    # 第二次：label 沒變、檔已存在 → already_exists 應計入
-    s2 = exporter.run(days=3, include_true_ng=True, skip_existing=True)
-    assert s2.labels == {}  # 沒有新增
-    assert s2.skipped.get("already_exists") == 1
-    assert s2.total == 1
-
-
-def test_exporter_run_cleans_stale_manifest_entries(tmp_path):
-    """舊樣本在新過濾規則下不再是 candidate → 檔案與 manifest 都應被清除"""
-    import cv2
-    from capi_dataset_export import read_manifest
-
-    panel_dir = tmp_path / "panels" / "GLS123"
-    panel_dir.mkdir(parents=True)
-    fake_img = panel_dir / "G0F00000_114438.tif"
-    cv2.imwrite(str(fake_img), np.full((2048, 2048, 3), 150, dtype=np.uint8))
-    fake_hm = tmp_path / "heatmaps" / "heatmap_tile3.png"
-    fake_hm.parent.mkdir()
-    cv2.imwrite(str(fake_hm), np.zeros((256, 1024, 3), dtype=np.uint8))
-
-    row = _make_accuracy_row()
-    detail = _make_record_detail()
-    detail["images"][0]["image_path"] = str(fake_img)
-    detail["images"][0]["tiles"][0]["heatmap_path"] = str(fake_hm)
-    detail["images"][0]["edge_defects"] = []
-    detail["images"].pop(1)
-    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
-    output = tmp_path / "out"
-    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
-
-    # 第一次：正常蒐集
-    exporter.run(days=3, include_true_ng=True, skip_existing=True)
-    stale_crop = output / "over_edge_false_positive" / "G0F00000" / "crop" / "20260408_GLS123_G0F00000_114438_tile3.png"
-    assert stale_crop.exists()
-
-    # 模擬：DB 這張 image 突然被標記為 is_bomb=1，整張應從 candidates 剃除
-    db._record_details[1001]["images"][0]["is_bomb"] = 1
-
-    # 第二次：沒 candidate，應清掉舊樣本
-    s2 = exporter.run(days=3, include_true_ng=True, skip_existing=True)
-    assert not stale_crop.exists()
-    manifest = read_manifest(output / "manifest.csv")
-    assert "GLS123_G0F00000_114438_tile3" not in manifest
-    assert s2.skipped.get("cleaned_stale") == 1
-
-
 def test_flatten_record_diagnostic_counters_image_level():
     """診斷計數：image 層級 is_bomb 與 B0F 檔名各自的跳過次數可觀察"""
     row = _make_accuracy_row()
@@ -719,6 +618,98 @@ def test_load_known_sample_ids_unions_across_jobs(tmp_path):
         "sid_3": {"sample_id": "sid_3", "status": "ok"},
     })
     assert load_known_sample_ids(tmp_path) == {"sid_1", "sid_2", "sid_3"}
+
+
+def test_exporter_run_second_pass_skips_already_known_samples(tmp_path):
+    """第二次跑 (skip_existing=True, label 未變)：
+    prior job manifest 已有該 sample_id → 本次整個跳過；total=0，不建空資料夾。"""
+    import cv2
+    from capi_dataset_export import list_job_dirs
+
+    panel_dir = tmp_path / "panels" / "GLS123"
+    panel_dir.mkdir(parents=True)
+    fake_img = panel_dir / "G0F00000_114438.tif"
+    cv2.imwrite(str(fake_img), np.full((2048, 2048, 3), 150, dtype=np.uint8))
+
+    row = _make_accuracy_row()
+    detail = _make_record_detail()
+    detail["images"][0]["image_path"] = str(fake_img)
+    detail["images"][0]["edge_defects"] = []
+    detail["images"].pop(1)
+    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
+    output = tmp_path / "out"
+    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
+
+    s1 = exporter.run(days=3, include_true_ng=True, skip_existing=True)
+    assert s1.total == 1
+    assert len(list_job_dirs(output)) == 1
+
+    # 強制時戳不同（資料夾名才會不同），避免第一次的 timestamp collision
+    import time as _t; _t.sleep(1.1)
+    s2 = exporter.run(days=3, include_true_ng=True, skip_existing=True)
+    assert s2.total == 0
+    assert s2.skipped.get("already_exists") == 1
+    # 空 job → 不建第二個資料夾
+    assert len(list_job_dirs(output)) == 1
+
+
+def test_exporter_run_does_not_touch_prior_job_folder(tmp_path):
+    """使用者在舊 job 資料夾裡新增檔案 / 修改 manifest，下一次 run 都不會動它。"""
+    import cv2
+    from capi_dataset_export import list_job_dirs
+
+    panel_dir = tmp_path / "panels" / "GLS123"
+    panel_dir.mkdir(parents=True)
+    fake_img = panel_dir / "G0F00000_114438.tif"
+    cv2.imwrite(str(fake_img), np.full((2048, 2048, 3), 150, dtype=np.uint8))
+
+    row = _make_accuracy_row()
+    detail = _make_record_detail()
+    detail["images"][0]["image_path"] = str(fake_img)
+    detail["images"][0]["edge_defects"] = []
+    detail["images"].pop(1)
+    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
+    output = tmp_path / "out"
+    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
+
+    s1 = exporter.run(days=3, include_true_ng=True, skip_existing=True)
+    first_job = list_job_dirs(output)[0]
+    user_file = first_job / "USER_ADDED.txt"
+    user_file.write_text("human touched this", encoding="utf-8")
+    old_manifest_bytes = (first_job / "manifest.csv").read_bytes()
+
+    import time as _t; _t.sleep(1.1)
+    exporter.run(days=3, include_true_ng=True, skip_existing=True)
+
+    assert user_file.exists(), "第一次 job 的使用者檔案被動到"
+    assert (first_job / "manifest.csv").read_bytes() == old_manifest_bytes
+
+
+def test_exporter_run_skip_existing_false_forces_reprocess(tmp_path):
+    """skip_existing=False 時，即使 prior job 有同 sample_id，也要寫進新 job (產生副本)。"""
+    import cv2
+    from capi_dataset_export import list_job_dirs
+
+    panel_dir = tmp_path / "panels" / "GLS123"
+    panel_dir.mkdir(parents=True)
+    fake_img = panel_dir / "G0F00000_114438.tif"
+    cv2.imwrite(str(fake_img), np.full((2048, 2048, 3), 150, dtype=np.uint8))
+
+    row = _make_accuracy_row()
+    detail = _make_record_detail()
+    detail["images"][0]["image_path"] = str(fake_img)
+    detail["images"][0]["edge_defects"] = []
+    detail["images"].pop(1)
+    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
+    output = tmp_path / "out"
+    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
+
+    exporter.run(days=3, include_true_ng=True, skip_existing=True)
+    import time as _t; _t.sleep(1.1)
+    s2 = exporter.run(days=3, include_true_ng=True, skip_existing=False)
+
+    assert s2.total == 1
+    assert len(list_job_dirs(output)) == 2
 
 
 if __name__ == "__main__":
