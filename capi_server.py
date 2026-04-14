@@ -579,6 +579,7 @@ def results_to_db_data(
             "is_bomb": is_bomb,
             "inference_time_ms": result.inference_time * 1000,
             "heatmap_path": overview_path,
+            "scratch_filter_count": result.scratch_filter_count,
             "tiles": [],
         }
 
@@ -609,6 +610,8 @@ def results_to_db_data(
                 "aoi_defect_code": tile.aoi_defect_code,
                 "aoi_product_x": tile.aoi_product_x,
                 "aoi_product_y": tile.aoi_product_y,
+                "scratch_score": tile.scratch_score,
+                "scratch_filtered": tile.scratch_filtered,
             })
 
         # CV 邊緣缺陷 — 獨立儲存 (不放入 tiles)
