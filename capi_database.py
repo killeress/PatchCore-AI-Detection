@@ -353,8 +353,8 @@ class CAPIDatabase:
                                (record_id, image_path, image_name, image_width, image_height,
                                 otsu_bounds, tile_count, excluded_tiles, anomaly_count,
                                 max_score, is_ng, is_dust_only, is_bomb, inference_time_ms,
-                                heatmap_path)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                heatmap_path, scratch_filter_count)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (record_id,
                              img_data.get("image_path", ""),
                              img_data.get("image_name", ""),
@@ -369,7 +369,8 @@ class CAPIDatabase:
                              img_data.get("is_dust_only", 0),
                              img_data.get("is_bomb", 0),
                              img_data.get("inference_time_ms", 0.0),
-                             img_data.get("heatmap_path", ""))
+                             img_data.get("heatmap_path", ""),
+                             img_data.get("scratch_filter_count", 0))
                         )
                         image_result_id = img_cursor.lastrowid
 
@@ -381,8 +382,9 @@ class CAPIDatabase:
                                     score, is_anomaly, is_dust, dust_iou, is_bomb,
                                     bomb_code, peak_x, peak_y, heatmap_path,
                                     is_exclude_zone, is_aoi_coord, aoi_defect_code,
-                                    aoi_product_x, aoi_product_y)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    aoi_product_x, aoi_product_y,
+                                    scratch_score, scratch_filtered)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  tile_data.get("tile_id", 0),
                                  tile_data.get("x", 0),
@@ -402,7 +404,9 @@ class CAPIDatabase:
                                  tile_data.get("is_aoi_coord", 0),
                                  tile_data.get("aoi_defect_code", ""),
                                  tile_data.get("aoi_product_x", -1),
-                                 tile_data.get("aoi_product_y", -1))
+                                 tile_data.get("aoi_product_y", -1),
+                                 tile_data.get("scratch_score", 0.0),
+                                 int(tile_data.get("scratch_filtered", 0)))
                             )
 
                         # 儲存 CV 邊緣缺陷結果
@@ -433,146 +437,6 @@ class CAPIDatabase:
 
                 conn.commit()
                 return record_id
-            except Exception as e:
-                conn.rollback()
-                raise e
-            finally:
-                conn.close()
-
-    def save_image_result(
-        self,
-        record_id: int,
-        image_path: str,
-        image_name: str,
-        image_width: int,
-        image_height: int,
-        is_ng: bool,
-        tile_count: int,
-        anomaly_count: int,
-        max_score: float,
-        inference_time_ms: float,
-        otsu_bounds: str = "",
-        excluded_tiles: int = 0,
-        is_dust_only: bool = False,
-        is_bomb: bool = False,
-        heatmap_path: str = "",
-        scratch_filter_count: int = 0,
-    ) -> int:
-        """
-        儲存單張圖片推論結果
-
-        Args:
-            record_id: 對應的 inference_records.id
-            image_path: 完整圖片路徑
-            image_name: 圖片檔名
-            image_width: 圖片寬度 (px)
-            image_height: 圖片高度 (px)
-            is_ng: AI 判定 NG
-            tile_count: tile 總數
-            anomaly_count: 異常 tile 數
-            max_score: 最高異常分數
-            inference_time_ms: 推論耗時 (ms)
-            otsu_bounds: Otsu 前景邊界 (JSON 字串)
-            excluded_tiles: 排除 tile 數
-            is_dust_only: 僅有粉塵
-            is_bomb: 命中炸彈座標
-            heatmap_path: 熱力圖路徑
-            scratch_filter_count: scratch 過濾掉的 tile 數
-
-        Returns:
-            image_result_id
-        """
-        with self._lock:
-            conn = self._get_conn()
-            try:
-                cursor = conn.execute(
-                    """INSERT INTO image_results
-                       (record_id, image_path, image_name, image_width, image_height,
-                        otsu_bounds, tile_count, excluded_tiles, anomaly_count,
-                        max_score, is_ng, is_dust_only, is_bomb, inference_time_ms,
-                        heatmap_path, scratch_filter_count)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (record_id, image_path, image_name, image_width, image_height,
-                     otsu_bounds, tile_count, excluded_tiles, anomaly_count,
-                     max_score, int(is_ng), int(is_dust_only), int(is_bomb),
-                     inference_time_ms, heatmap_path, scratch_filter_count),
-                )
-                conn.commit()
-                return cursor.lastrowid
-            except Exception as e:
-                conn.rollback()
-                raise e
-            finally:
-                conn.close()
-
-    def save_tile_result(
-        self,
-        image_result_id: int,
-        tile_id: int,
-        x: int,
-        y: int,
-        width: int,
-        height: int,
-        score: float,
-        is_anomaly: bool,
-        is_dust: bool,
-        heatmap_path: str = "",
-        dust_iou: float = 0.0,
-        is_bomb: bool = False,
-        bomb_code: str = "",
-        peak_x: int = -1,
-        peak_y: int = -1,
-        is_exclude_zone: bool = False,
-        is_aoi_coord: bool = False,
-        aoi_defect_code: str = "",
-        aoi_product_x: int = -1,
-        aoi_product_y: int = -1,
-        scratch_score: float = 0.0,
-        scratch_filtered: bool = False,
-    ) -> None:
-        """
-        儲存單個 tile 推論結果
-
-        Args:
-            image_result_id: 對應的 image_results.id
-            tile_id: tile 編號
-            x, y: tile 左上角座標 (px)
-            width, height: tile 尺寸 (px)
-            score: 異常分數
-            is_anomaly: 是否為異常 tile
-            is_dust: 是否為粉塵
-            heatmap_path: 熱力圖路徑
-            dust_iou: 粉塵 IOU 值
-            is_bomb: 是否為炸彈 tile
-            bomb_code: 炸彈代碼
-            peak_x, peak_y: 熱力圖峰值座標
-            is_exclude_zone: 是否在排除區域內
-            is_aoi_coord: 是否與 AOI 座標重疊
-            aoi_defect_code: AOI 缺陷代碼
-            aoi_product_x, aoi_product_y: AOI 產品座標
-            scratch_score: scratch 分類器信心分數
-            scratch_filtered: 是否被 scratch 過濾器排除
-        """
-        with self._lock:
-            conn = self._get_conn()
-            try:
-                conn.execute(
-                    """INSERT INTO tile_results
-                       (image_result_id, tile_id, x, y, width, height,
-                        score, is_anomaly, is_dust, dust_iou, is_bomb,
-                        bomb_code, peak_x, peak_y, heatmap_path,
-                        is_exclude_zone, is_aoi_coord, aoi_defect_code,
-                        aoi_product_x, aoi_product_y,
-                        scratch_score, scratch_filtered)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (image_result_id, tile_id, x, y, width, height,
-                     score, int(is_anomaly), int(is_dust), dust_iou, int(is_bomb),
-                     bomb_code, peak_x, peak_y, heatmap_path,
-                     int(is_exclude_zone), int(is_aoi_coord), aoi_defect_code,
-                     aoi_product_x, aoi_product_y,
-                     scratch_score, int(scratch_filtered)),
-                )
-                conn.commit()
             except Exception as e:
                 conn.rollback()
                 raise e
@@ -642,8 +506,8 @@ class CAPIDatabase:
                                (record_id, image_path, image_name, image_width, image_height,
                                 otsu_bounds, tile_count, excluded_tiles, anomaly_count,
                                 max_score, is_ng, is_dust_only, is_bomb, inference_time_ms,
-                                heatmap_path)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                heatmap_path, scratch_filter_count)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (record_id,
                              img_data.get("image_path", ""),
                              img_data.get("image_name", ""),
@@ -658,7 +522,8 @@ class CAPIDatabase:
                              img_data.get("is_dust_only", 0),
                              img_data.get("is_bomb", 0),
                              img_data.get("inference_time_ms", 0.0),
-                             img_data.get("heatmap_path", ""))
+                             img_data.get("heatmap_path", ""),
+                             img_data.get("scratch_filter_count", 0))
                         )
                         image_result_id = img_cursor.lastrowid
 
@@ -669,8 +534,9 @@ class CAPIDatabase:
                                     score, is_anomaly, is_dust, dust_iou, is_bomb,
                                     bomb_code, peak_x, peak_y, heatmap_path,
                                     is_exclude_zone, is_aoi_coord, aoi_defect_code,
-                                    aoi_product_x, aoi_product_y)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    aoi_product_x, aoi_product_y,
+                                    scratch_score, scratch_filtered)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  tile_data.get("tile_id", 0),
                                  tile_data.get("x", 0),
@@ -690,7 +556,9 @@ class CAPIDatabase:
                                  tile_data.get("is_aoi_coord", 0),
                                  tile_data.get("aoi_defect_code", ""),
                                  tile_data.get("aoi_product_x", -1),
-                                 tile_data.get("aoi_product_y", -1))
+                                 tile_data.get("aoi_product_y", -1),
+                                 tile_data.get("scratch_score", 0.0),
+                                 int(tile_data.get("scratch_filtered", 0)))
                             )
 
                         for edge_data in img_data.get("edge_defects", []):
