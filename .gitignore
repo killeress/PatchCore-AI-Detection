@@ -68,3 +68,7 @@ _agent/
 
 # Over-review POC outputs
 reports/over_review_scratch_poc/
+
+# Deployment bundles (large ML models and pickled classifiers)
+deployment/*.pkl
+deployment/*.pth
