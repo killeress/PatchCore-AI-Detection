@@ -201,6 +201,12 @@ class CAPIConfig:
     aoi_report_path_replace_from: str = "yuantu"    # 報告路徑替換來源
     aoi_report_path_replace_to: str = "Report"      # 報告路徑替換目標
 
+    # Scratch classifier post-filter (over-review reduction)
+    scratch_classifier_enabled: bool = True
+    scratch_safety_multiplier: float = 1.1
+    scratch_bundle_path: str = "deployment/scratch_classifier_v1.pkl"
+    scratch_dinov2_weights_path: str = "deployment/dinov2_vitb14.pth"
+
     # 配置檔路徑（載入後記錄）
     config_path: Optional[Path] = None
     
@@ -295,6 +301,10 @@ class CAPIConfig:
             aoi_coord_inspection_enabled=data.get("aoi_coord_inspection_enabled", False),
             aoi_report_path_replace_from=data.get("aoi_report_path_replace_from", "yuantu"),
             aoi_report_path_replace_to=data.get("aoi_report_path_replace_to", "Report"),
+            scratch_classifier_enabled=data.get("scratch_classifier_enabled", True),
+            scratch_safety_multiplier=float(data.get("scratch_safety_multiplier", 1.1)),
+            scratch_bundle_path=data.get("scratch_bundle_path", "deployment/scratch_classifier_v1.pkl"),
+            scratch_dinov2_weights_path=data.get("scratch_dinov2_weights_path", "deployment/dinov2_vitb14.pth"),
         )
 
         return config
