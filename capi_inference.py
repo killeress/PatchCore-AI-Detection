@@ -116,7 +116,10 @@ class TileInfo:
     bright_spot_diff_threshold: int = 0     # B0F 偵測：使用的差異閾值
     bright_spot_area: int = 0               # B0F 偵測：偵測到的亮點面積 (px)
     bright_spot_min_area: int = 0           # B0F 偵測：使用的最小面積
-    
+    # Scratch classifier post-filter (over-review reduction)
+    scratch_score: float = 0.0              # 0 = 未跑 classifier
+    scratch_filtered: bool = False          # True = 被翻回 OK
+
     @property
     def center(self) -> Tuple[int, int]:
         return (self.x + self.width // 2, self.y + self.height // 2)
@@ -220,7 +223,10 @@ class ImageResult:
 
     # 推論耗時 (秒)
     inference_time: float = 0.0
-    
+
+    # Scratch classifier post-filter stats
+    scratch_filter_count: int = 0           # 此 image 中被翻 OK 的 tile 數
+
     # 客戶端傳送的炸彈資訊 (供繪圖使用)
     client_bomb_info: Optional[Dict[str, Any]] = None
     
