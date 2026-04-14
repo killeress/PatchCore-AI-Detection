@@ -691,35 +691,40 @@ class DatasetExporter:
         return out
 
     def run(self, days: int, include_true_ng: bool, skip_existing: bool,
-            status_callback=None, cancel_event: Optional[threading.Event] = None
-            ) -> JobSummary:
-        """主執行入口。
+            status_callback=None, cancel_event=None) -> JobSummary:
+        """執行一次 export job。
 
-        Args:
-            days: 抓最近 N 日 (含今天)
-            include_true_ng: 是否包含 AI=NG & RIC=NG 樣本
-            skip_existing: True → 已存在且 label 未變的樣本 skip
-            status_callback: callable(current, total, last_glass_id) 可選
-            cancel_event: threading.Event，set 後會在下一筆前停止
+        與舊版差異：
+          - 輸出到 self.base_dir/<YYYYMMDD_HHMMSS>/（每次跑產生獨立 snapshot）
+          - skip 基準改成「所有歷史 job 的 sample_id 聯集」
+          - 不做 stale cleanup（舊 job 永遠不動）
+          - skip_existing=True 時跳過歷史已匯出的 sample；False 時照常處理（會在新 job 產生副本）
+          - 本次沒有任何 row 要寫 → 不建立 job 資料夾、output_dir 填 base_dir、total=0
         """
         from capi_server import resolve_unc_path  # lazy import 避免 circular
 
         started_at = datetime.now()
         job_id = started_at.strftime("job_%Y%m%d_%H%M%S")
+        job_folder_name = started_at.strftime("%Y%m%d_%H%M%S")
+        job_dir = self.base_dir / job_folder_name
+        manifest_path = job_dir / "manifest.csv"
+
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path = self.base_dir / "manifest.csv"
 
-        # 1. 讀 manifest
-        existing = read_manifest(manifest_path)
+        # 1. 掃歷史 job，建 known sample_id 集合
+        known_ids = load_known_sample_ids(self.base_dir) if skip_existing else set()
 
-        # 2. 蒐集 candidates（含診斷資訊）
+        # 2. 蒐集 candidates
         candidates, diag = self.collect_candidates_with_diagnostics(
             days=days, include_true_ng=include_true_ng
         )
         total = len(candidates)
-        logger.info("Collected %d candidates (days=%d, include_true_ng=%s)",
-                    total, days, include_true_ng)
+        logger.info(
+            "Collected %d candidates (days=%d, include_true_ng=%s, known_prior=%d)",
+            total, days, include_true_ng, len(known_ids),
+        )
 
+        new_rows: Dict[str, Dict[str, str]] = {}
         labels_count: Dict[str, int] = {}
         skipped_count: Dict[str, int] = {}
 
@@ -735,21 +740,13 @@ class DatasetExporter:
                 except Exception:
                     logger.exception("status_callback error")
 
-            # 解析原圖路徑（UNC → Linux）
-            source_path = self._resolve_source_path(cand.image_path, resolve_unc_path)
-
-            new_row = self._process_candidate(
-                cand=cand,
-                existing_row=existing.get(cand.sample_id),
-                skip_existing=skip_existing,
-                source_path=source_path,
-            )
-            if new_row is None:
-                # skip_existing 命中：manifest 已有且 label 未變 → 不動檔案，但要計數
-                # 否則 summary 會顯示 total=0 誤導使用者以為什麼都沒跑到
+            if cand.sample_id in known_ids:
                 skipped_count["already_exists"] = skipped_count.get("already_exists", 0) + 1
                 continue
-            existing[cand.sample_id] = new_row
+
+            source_path = self._resolve_source_path(cand.image_path, resolve_unc_path)
+            new_row = self._process_candidate(cand=cand, source_path=source_path, job_dir=job_dir)
+            new_rows[cand.sample_id] = new_row
 
             status = new_row["status"]
             if status == "ok":
@@ -757,43 +754,34 @@ class DatasetExporter:
             else:
                 skipped_count[status] = skipped_count.get(status, 0) + 1
 
-        # 4. 清理 stale：manifest 內存在但本次沒在 candidate list 的樣本
-        # 代表該樣本在新的過濾規則下（bomb_info / B0F 等）已不再符合蒐集條件
-        current_sample_ids = {c.sample_id for c in candidates}
-        stale_ids = [sid for sid in list(existing.keys()) if sid not in current_sample_ids]
-        cleanup_count = 0
-        for sid in stale_ids:
-            old_row = existing[sid]
-            if old_row.get("status") == "ok":
-                # 刪實體檔
-                for rel_key in ("crop_path", "heatmap_path"):
-                    rel = old_row.get(rel_key) or ""
-                    if rel:
-                        full = self.base_dir / rel
-                        if full.exists():
-                            try:
-                                full.unlink()
-                            except OSError:
-                                logger.exception("Failed to unlink stale %s: %s", rel_key, full)
-            del existing[sid]
-            cleanup_count += 1
-        if cleanup_count:
-            logger.info("Cleaned up %d stale manifest entries (no longer candidates)", cleanup_count)
-            skipped_count["cleaned_stale"] = cleanup_count
+        # 4. 空 job：不建資料夾、不寫 manifest
+        if not new_rows:
+            logger.info("No new samples for this job; skipping folder creation")
+            finished_at = datetime.now()
+            return JobSummary(
+                job_id=job_id,
+                started_at=started_at.isoformat(timespec="seconds"),
+                finished_at=finished_at.isoformat(timespec="seconds"),
+                duration_sec=round((finished_at - started_at).total_seconds(), 2),
+                total=0,
+                labels=labels_count,
+                skipped=skipped_count,
+                output_dir=str(self.base_dir),
+                diagnostics=diag,
+            )
 
-        # 5. 寫回 manifest
-        write_manifest(manifest_path, existing)
-
+        # 5. 寫 manifest
+        write_manifest(manifest_path, new_rows)
         finished_at = datetime.now()
         return JobSummary(
             job_id=job_id,
             started_at=started_at.isoformat(timespec="seconds"),
             finished_at=finished_at.isoformat(timespec="seconds"),
-            duration_sec=(finished_at - started_at).total_seconds(),
-            total=sum(labels_count.values()) + sum(skipped_count.values()),
+            duration_sec=round((finished_at - started_at).total_seconds(), 2),
+            total=len(new_rows),
             labels=labels_count,
             skipped=skipped_count,
-            output_dir=str(self.base_dir),
+            output_dir=str(job_dir),
             diagnostics=diag,
         )
 
@@ -808,45 +796,15 @@ class DatasetExporter:
         return Path(image_path)
 
     def _process_candidate(
-        self, cand: SampleCandidate, existing_row: Optional[Dict[str, str]],
-        skip_existing: bool, source_path: Path,
-    ) -> Optional[Dict[str, str]]:
-        """處理一個 candidate，回傳更新後的 manifest row，或 None（代表 skip 不更動 manifest）"""
-        # === 去重/移動 ===
-        if existing_row is not None:
-            old_label = existing_row.get("label", "")
-            old_status = existing_row.get("status", "")
+        self, cand: SampleCandidate, source_path: Path, job_dir: Path,
+    ) -> Dict[str, str]:
+        """處理單一 candidate，回傳 manifest row。
 
-            if old_status == "ok" and old_label == cand.label:
-                if skip_existing:
-                    return None  # 完全相同，skip
-                # 不 skip → 重做一次（往下走）
-
-            if old_status == "ok" and old_label != cand.label:
-                # label 變了 → move 實體檔 + 更新 row
-                new_crop_rel, new_hm_rel = move_sample_files(
-                    base_dir=self.base_dir,
-                    old_crop_rel=existing_row.get("crop_path", ""),
-                    old_heatmap_rel=existing_row.get("heatmap_path", ""),
-                    new_label=cand.label,
-                    prefix=cand.prefix,
-                )
-                updated = dict(existing_row)
-                updated["label"] = cand.label
-                updated["crop_path"] = new_crop_rel
-                updated["heatmap_path"] = new_hm_rel
-                updated["collected_at"] = datetime.now().isoformat(timespec="seconds")
-                updated["over_review_category"] = cand.over_review_category
-                updated["over_review_note"] = cand.over_review_note
-                return updated
-
-            if old_status.startswith("skipped_") and skip_existing:
-                return None  # 之前 skip 過，不 retry
-
-        # === 新樣本（或強制重做） ===
+        新架構不再處理「既有 row 的 label 變動 / 強制重做」分支 —
+        已存在於任何歷史 job 的 sample_id 早在 run() 入口就被 known_ids skip 掉。
+        """
         row = self._build_row_stub(cand)
 
-        # 讀原圖
         if not source_path.exists():
             row["status"] = "skipped_no_source"
             logger.warning("Source not found: %s (sample_id=%s)", source_path, cand.sample_id)
@@ -859,14 +817,12 @@ class DatasetExporter:
         if img.ndim == 2:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-        # Crop
         if cand.source_type == "patchcore_tile":
             crop = crop_patchcore_tile(img, cand.tile_x, cand.tile_y, cand.tile_w, cand.tile_h)
             defect_x = cand.tile_x + cand.tile_w // 2
             defect_y = cand.tile_y + cand.tile_h // 2
             sample_key = f"tile{cand.tile_idx}"
         else:  # edge_defect
-            # 有效像素 < 25% → skip
             H, W = img.shape[:2]
             half = CROP_SIZE // 2
             valid_w = min(W, cand.edge_center_x + half) - max(0, cand.edge_center_x - half)
@@ -879,15 +835,13 @@ class DatasetExporter:
             defect_y = cand.edge_center_y
             sample_key = f"edge{cand.edge_defect_id}"
 
-        # 決定目的路徑 (heatmap 已停止蒐集；僅輸出 crop)
         filename = build_sample_filename(
             glass_id=cand.glass_id, image_name=cand.image_name,
             sample_key=sample_key, inference_timestamp=cand.inference_timestamp,
         )
         crop_rel = f"{cand.label}/{cand.prefix}/crop/{filename}"
-        crop_dst = self.base_dir / crop_rel
+        crop_dst = job_dir / crop_rel
         crop_dst.parent.mkdir(parents=True, exist_ok=True)
-
         cv2.imwrite(str(crop_dst), crop)
 
         row["crop_path"] = crop_rel
