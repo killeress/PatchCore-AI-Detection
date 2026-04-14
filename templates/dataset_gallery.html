@@ -83,6 +83,17 @@
   <!-- Filters -->
   <div class="flex flex-wrap items-end gap-3 mb-6 p-4 bg-slate-900/50 border border-slate-800 rounded-xl">
     <div>
+      <label class="block text-xs text-slate-400 mb-1">Job (匯出批次)</label>
+      <select id="filter-job" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 text-sm font-mono min-w-[200px]">
+        {% if not jobs %}
+        <option value="">（無 job）</option>
+        {% endif %}
+        {% for j in jobs %}
+        <option value="{{ j }}" {% if j == current_job %}selected{% endif %}>{{ j }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
       <label class="block text-xs text-slate-400 mb-1">Label (類別)</label>
       <select id="filter-label" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 text-sm min-w-[280px]">
         <option value="">全部 ({{ total_count }})</option>
@@ -223,15 +234,18 @@
 // 由後端 capi_dataset_export.get_valid_labels() 與 LABEL_ZH 傳入
 const VALID_LABELS = {{ valid_labels|tojson }};
 const LABEL_ZH = {{ label_zh|tojson }};
+const CURRENT_JOB = {{ current_job|tojson }};
 
 (function(){
   const qs = (id) => document.getElementById(id);
 
   function buildUrl() {
     const params = new URLSearchParams();
+    const job = qs("filter-job") ? qs("filter-job").value : "";
     const label = qs("filter-label").value;
     const prefix = qs("filter-prefix").value;
     const limit = qs("filter-limit").value;
+    if (job) params.set("job", job);
     if (label) params.set("label", label);
     if (prefix) params.set("prefix", prefix);
     if (limit) params.set("limit", limit);
@@ -240,8 +254,9 @@ const LABEL_ZH = {{ label_zh|tojson }};
   }
 
   qs("btn-apply").addEventListener("click", () => { window.location.href = buildUrl(); });
-  ["filter-label", "filter-prefix", "filter-limit"].forEach(id => {
-    qs(id).addEventListener("change", () => { window.location.href = buildUrl(); });
+  ["filter-job", "filter-label", "filter-prefix", "filter-limit"].forEach(id => {
+    const el = qs(id);
+    if (el) el.addEventListener("change", () => { window.location.href = buildUrl(); });
   });
 
   // 點頁面其他位置關閉 move menu
@@ -275,7 +290,7 @@ async function deleteSample(sampleId) {
     const r = await fetch("/api/dataset_export/sample/delete", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({sample_id: sampleId}),
+      body: JSON.stringify({job: CURRENT_JOB, sample_id: sampleId}),
     });
     const data = await r.json();
     if (!r.ok) {
@@ -337,7 +352,7 @@ async function moveSample(sampleId, newLabel) {
     const r = await fetch("/api/dataset_export/sample/move", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({sample_id: sampleId, new_label: newLabel}),
+      body: JSON.stringify({job: CURRENT_JOB, sample_id: sampleId, new_label: newLabel}),
     });
     const data = await r.json();
     if (!r.ok) {
