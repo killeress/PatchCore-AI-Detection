@@ -689,5 +689,37 @@ def test_flatten_record_diagnostic_counters_image_level():
     assert diag["tiles_bomb_skipped"] == 1    # fixture 中 tile4 的 is_bomb=1
 
 
+def test_list_job_dirs_returns_sorted_subdirs_with_manifest(tmp_path):
+    from capi_dataset_export import list_job_dirs
+    for name in ["20260414_100000", "20260414_120000", "20260413_090000"]:
+        d = tmp_path / name
+        d.mkdir()
+        (d / "manifest.csv").write_text("sample_id\n", encoding="utf-8")
+    (tmp_path / "no_manifest_dir").mkdir()
+    (tmp_path / "manifest.csv").write_text("sample_id\n", encoding="utf-8")  # legacy root
+
+    jobs = list_job_dirs(tmp_path)
+    assert [j.name for j in jobs] == ["20260413_090000", "20260414_100000", "20260414_120000"]
+
+
+def test_list_job_dirs_empty_when_base_missing(tmp_path):
+    from capi_dataset_export import list_job_dirs
+    assert list_job_dirs(tmp_path / "does_not_exist") == []
+
+
+def test_load_known_sample_ids_unions_across_jobs(tmp_path):
+    from capi_dataset_export import load_known_sample_ids, write_manifest
+    job_a = tmp_path / "20260414_100000"
+    job_b = tmp_path / "20260414_110000"
+    write_manifest(job_a / "manifest.csv", {
+        "sid_1": {"sample_id": "sid_1", "status": "ok"},
+        "sid_2": {"sample_id": "sid_2", "status": "skipped_no_source"},
+    })
+    write_manifest(job_b / "manifest.csv", {
+        "sid_3": {"sample_id": "sid_3", "status": "ok"},
+    })
+    assert load_known_sample_ids(tmp_path) == {"sid_1", "sid_2", "sid_3"}
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

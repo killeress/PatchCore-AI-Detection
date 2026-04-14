@@ -200,6 +200,36 @@ def write_manifest(manifest_path: Path, rows: Dict[str, Dict[str, str]]) -> None
     tmp_path.replace(manifest_path)  # atomic on same filesystem
 
 
+def list_job_dirs(base_dir: Path) -> List[Path]:
+    """列出 base_dir 下的 job 資料夾（子目錄且含 manifest.csv），依目錄名升冪排序。
+
+    不含 base_dir 根目錄層（legacy 扁平結構）的 manifest.csv。
+    不存在的 base_dir 回空 list。
+    """
+    base_dir = Path(base_dir)
+    if not base_dir.exists():
+        return []
+    out: List[Path] = []
+    for child in sorted(base_dir.iterdir(), key=lambda p: p.name):
+        if child.is_dir() and (child / "manifest.csv").exists():
+            out.append(child)
+    return out
+
+
+def load_known_sample_ids(base_dir: Path) -> set:
+    """Union 所有 job 資料夾 manifest.csv 內的 sample_id。
+
+    供 DatasetExporter.run 判定新 candidate 用：只要任一 prior job 有此 sample_id → skip。
+    status 不限制（即使 skipped_* 也算已處理過），避免使用者明明看過該 sample 卻
+    被下次 run 重新蒐集而產生重複干擾。
+    """
+    ids: set = set()
+    for job_dir in list_job_dirs(base_dir):
+        rows = read_manifest(job_dir / "manifest.csv")
+        ids.update(rows.keys())
+    return ids
+
+
 def move_sample_files(
     base_dir: Path, old_crop_rel: str, old_heatmap_rel: str,
     new_label: str, prefix: str,
