@@ -143,5 +143,59 @@ def test_group_kfold_stratify_balance():
             f"fold {fold_idx} 缺 source_type ({src_types})"
 
 
+# ---------- Task 5: evaluate ----------
+
+from scripts.over_review_poc.evaluate import find_threshold_at_full_recall, _find_threshold
+
+
+def test_find_threshold_separable_perfect_recall():
+    """全分離：所有 scratch score > 所有 true_ng score → scratch_recall 應 = 1.0"""
+    train_scores = np.array([0.1, 0.2, 0.15])      # 全 true_ng
+    train_is_true_ng = np.array([True, True, True])
+    test_scores = np.array([0.05, 0.9, 0.8, 0.1])  # 2 scratch, 2 true_ng
+    test_is_true_ng = np.array([True, False, False, True])
+    test_is_scratch = np.array([False, True, True, False])
+
+    out = find_threshold_at_full_recall(
+        train_scores, train_is_true_ng, test_scores, test_is_true_ng, test_is_scratch,
+    )
+    assert out["realistic_threshold"] == pytest.approx(0.2)
+    assert out["realistic_scratch_recall"] == pytest.approx(1.0)
+    assert out["realistic_true_ng_recall"] == pytest.approx(1.0)
+
+
+def test_find_threshold_complete_overlap_zero_recall():
+    """完全重疊：所有 scratch score ≤ 某 true_ng → scratch_recall 應 = 0.0"""
+    train_scores = np.array([0.9, 0.5, 0.7])
+    train_is_true_ng = np.array([True, True, True])
+    test_scores = np.array([0.6, 0.5, 0.4, 0.3])
+    test_is_true_ng = np.array([True, False, False, False])
+    test_is_scratch = np.array([False, True, True, True])
+
+    out = find_threshold_at_full_recall(
+        train_scores, train_is_true_ng, test_scores, test_is_true_ng, test_is_scratch,
+    )
+    assert out["realistic_threshold"] == pytest.approx(0.9)
+    assert out["realistic_scratch_recall"] == pytest.approx(0.0)
+
+
+def test_find_threshold_partial_overlap():
+    """部分重疊：realistic threshold = max(train true_ng) = 0.4；test 中 score > 0.4 的 scratch 才被擋下。"""
+    train_scores = np.array([0.1, 0.4, 0.2])
+    train_is_true_ng = np.array([True, True, True])
+    test_scores = np.array([0.35, 0.9, 0.5, 0.2, 0.6])
+    test_is_true_ng = np.array([True, False, False, True, False])
+    test_is_scratch = np.array([False, True, True, False, True])
+
+    out = find_threshold_at_full_recall(
+        train_scores, train_is_true_ng, test_scores, test_is_true_ng, test_is_scratch,
+    )
+    assert out["realistic_threshold"] == pytest.approx(0.4)
+    # test scratch scores: [0.9, 0.5, 0.6] → 三個都 > 0.4 → recall = 1.0
+    assert out["realistic_scratch_recall"] == pytest.approx(1.0)
+    # test true_ng scores: [0.35, 0.2] → 都 < 0.4 → true_ng_recall = 1.0
+    assert out["realistic_true_ng_recall"] == pytest.approx(1.0)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
