@@ -186,3 +186,29 @@ def test_predict_batch_matches_loop(tmp_path: Path):
     batch_scores = clf.predict_batch(imgs)
     loop_scores = np.array([clf.predict(i) for i in imgs])
     assert np.allclose(batch_scores, loop_scores, atol=1e-5)
+
+
+def test_to_pil_rejects_float_ndarray():
+    """I1 regression: float ndarrays must be rejected explicitly, not silently corrupted."""
+    from scratch_classifier import _to_pil
+    float_img = np.random.rand(64, 64, 3).astype(np.float32)  # [0,1] range
+    with pytest.raises(TypeError, match="float ndarray"):
+        _to_pil(float_img)
+
+
+def test_to_pil_rejects_wrong_channel_count():
+    """I2 regression: RGBA or other non-3-channel shapes must raise ValueError."""
+    from scratch_classifier import _to_pil
+    rgba = np.zeros((64, 64, 4), dtype=np.uint8)
+    with pytest.raises(ValueError, match="HxW or HxWx3"):
+        _to_pil(rgba)
+
+
+def test_to_pil_accepts_grayscale():
+    """Sanity: 2D uint8 grayscale should still work (converted to 3-channel)."""
+    from scratch_classifier import _to_pil
+    from PIL import Image
+    gray = np.zeros((32, 32), dtype=np.uint8)
+    result = _to_pil(gray)
+    assert isinstance(result, Image.Image)
+    assert result.size == (32, 32)

@@ -128,12 +128,21 @@ def _build_transform(clahe_clip: float, clahe_tile: int,
     ])
 
 
-def _to_pil(img) -> Image.Image:
+def _to_pil(img: Image.Image | np.ndarray) -> Image.Image:
     if isinstance(img, Image.Image):
         return img
     if isinstance(img, np.ndarray):
+        if img.dtype.kind == "f":
+            raise TypeError(
+                f"_to_pil: float ndarray not supported (got dtype={img.dtype}). "
+                "Scale to uint8 before calling, or pass a PIL.Image."
+            )
         if img.ndim == 2:
             img = np.stack([img] * 3, axis=-1)
+        elif img.ndim != 3 or img.shape[-1] != 3:
+            raise ValueError(
+                f"_to_pil: expected HxW or HxWx3 ndarray, got shape {img.shape}"
+            )
         return Image.fromarray(img.astype(np.uint8))
     raise TypeError(f"Unsupported image type: {type(img)}")
 
@@ -237,12 +246,17 @@ class ScratchClassifier:
     def device(self) -> torch.device:
         return self._device
 
-    def predict(self, image) -> float:
-        """Return scratch probability in [0, 1]. Accepts PIL or np.ndarray RGB."""
+    def predict(self, image: Image.Image | np.ndarray) -> float:
+        """Return scratch probability in [0, 1]. Accepts PIL or np.ndarray (uint8 RGB)."""
         return float(self.predict_batch([image])[0])
 
-    def predict_batch(self, images) -> np.ndarray:
-        """Vectorised predict for a list of images."""
+    def predict_batch(self, images: list) -> np.ndarray:
+        """Vectorised predict for a list of images.
+
+        Inputs may be PIL or np.ndarray (uint8, HxW or HxWx3). All images
+        transformed independently (mixed sizes OK) then stacked for a single
+        forward pass.
+        """
         if len(images) == 0:
             return np.zeros(0, dtype=np.float32)
         tensors = [self._transform(_to_pil(i)) for i in images]
