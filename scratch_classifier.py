@@ -16,10 +16,13 @@ from typing import Any
 
 os.environ.setdefault("TRUST_REMOTE_CODE", "1")
 
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
+from PIL import Image
 from sklearn.linear_model import LogisticRegression
+from torchvision import transforms
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +99,43 @@ def load_bundle(
         meta,
         payload["calibration_scores"],
     )
+
+
+_IMAGENET_MEAN = [0.485, 0.456, 0.406]
+_IMAGENET_STD = [0.229, 0.224, 0.225]
+
+
+def _preprocess_clahe(pil_img: Image.Image, clip_limit: float, tile_grid: int) -> Image.Image:
+    """CLAHE grayscale enhance → 3-channel stack. Matches
+    scripts.over_review_poc.features.preprocess_clahe exactly.
+    """
+    rgb = np.asarray(pil_img.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(tile_grid, tile_grid))
+    enhanced = clahe.apply(gray)
+    return Image.fromarray(np.stack([enhanced] * 3, axis=-1))
+
+
+def _build_transform(clahe_clip: float, clahe_tile: int,
+                     input_size: int) -> transforms.Compose:
+    def _clahe(img):
+        return _preprocess_clahe(img, clahe_clip, clahe_tile)
+    return transforms.Compose([
+        transforms.Lambda(_clahe),
+        transforms.Resize((input_size, input_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
+    ])
+
+
+def _to_pil(img) -> Image.Image:
+    if isinstance(img, Image.Image):
+        return img
+    if isinstance(img, np.ndarray):
+        if img.ndim == 2:
+            img = np.stack([img] * 3, axis=-1)
+        return Image.fromarray(img.astype(np.uint8))
+    raise TypeError(f"Unsupported image type: {type(img)}")
 
 
 class LoRALinear(nn.Module):
@@ -182,6 +222,9 @@ class ScratchClassifier:
         model.eval()
         self._device = torch.device(device)
         self._model = model.to(self._device)
+        self._transform = _build_transform(
+            meta.clahe_clip, meta.clahe_tile, meta.input_size,
+        )
         logger.info("ScratchClassifier loaded: rank=%d blocks=%d threshold=%.4f",
                     meta.lora_rank, meta.lora_n_blocks, meta.conformal_threshold)
 
@@ -193,3 +236,17 @@ class ScratchClassifier:
     @property
     def device(self) -> torch.device:
         return self._device
+
+    def predict(self, image) -> float:
+        """Return scratch probability in [0, 1]. Accepts PIL or np.ndarray RGB."""
+        return float(self.predict_batch([image])[0])
+
+    def predict_batch(self, images) -> np.ndarray:
+        """Vectorised predict for a list of images."""
+        if len(images) == 0:
+            return np.zeros(0, dtype=np.float32)
+        tensors = [self._transform(_to_pil(i)) for i in images]
+        batch = torch.stack(tensors).to(self._device)
+        with torch.no_grad():
+            feats = self._model(batch).cpu().numpy()
+        return self._logreg.predict_proba(feats)[:, 1].astype(np.float32)

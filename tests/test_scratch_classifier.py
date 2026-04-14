@@ -145,3 +145,44 @@ def test_classifier_fails_when_no_lora_keys_match(tmp_path: Path):
     with pytest.raises(ScratchClassifierLoadError,
                        match="No LoRA keys from bundle matched"):
         ScratchClassifier(bundle_path=bundle_path, device="cpu")
+
+
+from PIL import Image
+
+
+def _make_fake_image(size: int = 256) -> Image.Image:
+    rng = np.random.default_rng(42)
+    arr = rng.integers(0, 255, (size, size, 3), dtype=np.uint8)
+    return Image.fromarray(arr)
+
+
+def test_preprocessing_matches_poc(tmp_path: Path):
+    """ScratchClassifier preprocessing must produce identical tensor to POC helper."""
+    from scratch_classifier import _build_transform  # module-private helper
+    from scripts.over_review_poc.features import build_transform_clahe
+
+    img = _make_fake_image()
+    poc_tensor = build_transform_clahe(clip_limit=4.0, tile_grid=8)(img)
+    our_tensor = _build_transform(clahe_clip=4.0, clahe_tile=8, input_size=224)(img)
+    assert torch.allclose(poc_tensor, our_tensor, atol=1e-6)
+
+
+@pytest.mark.slow
+def test_predict_score_range(tmp_path: Path):
+    from scratch_classifier import ScratchClassifier
+    bundle_path = _train_tiny_stub(tmp_path)
+    clf = ScratchClassifier(bundle_path=bundle_path, device="cpu")
+    img = _make_fake_image()
+    score = clf.predict(img)
+    assert 0.0 <= score <= 1.0
+
+
+@pytest.mark.slow
+def test_predict_batch_matches_loop(tmp_path: Path):
+    from scratch_classifier import ScratchClassifier
+    bundle_path = _train_tiny_stub(tmp_path)
+    clf = ScratchClassifier(bundle_path=bundle_path, device="cpu")
+    imgs = [_make_fake_image(size=s) for s in (100, 150, 200, 256)]
+    batch_scores = clf.predict_batch(imgs)
+    loop_scores = np.array([clf.predict(i) for i in imgs])
+    assert np.allclose(batch_scores, loop_scores, atol=1e-5)
