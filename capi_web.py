@@ -29,7 +29,7 @@ from capi_dataset_export import (
     JOB_STATE_IDLE, JOB_STATE_RUNNING, JOB_STATE_COMPLETED,
     JOB_STATE_FAILED, JOB_STATE_CANCELLED,
     read_manifest, write_manifest, delete_sample, relabel_sample,
-    get_valid_labels, LABEL_ZH,
+    get_valid_labels, LABEL_ZH, list_job_dirs,
 )
 
 logger = logging.getLogger("capi.web")
@@ -3014,17 +3014,39 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         base = cfg.get("base_dir") or "./datasets/over_review"
         return Path(base).resolve()
 
+    _JOB_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_]+$")
+
+    def _dataset_list_jobs(self) -> list:
+        """回傳 base_dir 下所有 job 資料夾名稱（字串），依名稱降冪（最新在前）"""
+        base = self._dataset_export_base_dir()
+        return [p.name for p in reversed(list_job_dirs(base))]
+
+    def _dataset_resolve_job_dir(self, job_id: str) -> Optional[Path]:
+        """驗證 job_id 字元集 + 必須存在 + 必須有 manifest.csv；無效回 None"""
+        if not job_id or not self._JOB_ID_RE.match(job_id):
+            return None
+        base = self._dataset_export_base_dir()
+        cand = (base / job_id).resolve()
+        try:
+            cand.relative_to(base)
+        except ValueError:
+            return None
+        if not cand.is_dir() or not (cand / "manifest.csv").exists():
+            return None
+        return cand
+
     def _handle_dataset_gallery_page(self, query: dict):
-        """GET /dataset_gallery — 樣本瀏覽頁"""
+        """GET /dataset_gallery — 樣本瀏覽頁（按 job 資料夾切換）"""
         from capi_dataset_export import read_manifest
 
-        # 解析 query 參數
         def _q(key, default=None):
             v = query.get(key)
             if isinstance(v, list):
                 return v[0] if v else default
             return v if v is not None else default
 
+        jobs = self._dataset_list_jobs()
+        current_job = _q("job", "") or (jobs[0] if jobs else "")
         current_label = _q("label", "") or ""
         current_prefix = _q("prefix", "") or ""
         try:
@@ -3038,44 +3060,45 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             limit = 48
 
         base_dir = self._dataset_export_base_dir()
-        manifest_path = base_dir / "manifest.csv"
-
         items_all: list = []
         manifest_error = ""
         label_counts: dict = {}
         prefixes_set: set = set()
+        job_dir = None
 
-        if not manifest_path.exists():
-            manifest_error = f"manifest.csv 不存在：{manifest_path}"
+        if not jobs:
+            manifest_error = f"尚未有任何 export job 資料夾：{base_dir}"
+        elif not current_job:
+            manifest_error = "請選擇 job 資料夾"
         else:
-            try:
-                manifest = read_manifest(manifest_path)
-            except Exception as e:
-                manifest_error = f"讀 manifest.csv 失敗：{e}"
-                manifest = {}
+            job_dir = self._dataset_resolve_job_dir(current_job)
+            if job_dir is None:
+                manifest_error = f"指定的 job 不存在：{current_job}"
+            else:
+                try:
+                    manifest = read_manifest(job_dir / "manifest.csv")
+                except Exception as e:
+                    manifest_error = f"讀 manifest.csv 失敗：{e}"
+                    manifest = {}
+                for sid, row in manifest.items():
+                    if row.get("status") != "ok":
+                        continue
+                    label = row.get("label", "")
+                    prefix = row.get("prefix", "")
+                    label_counts[label] = label_counts.get(label, 0) + 1
+                    if prefix:
+                        prefixes_set.add(prefix)
+                    items_all.append(row)
 
-            # 只取 status=ok 的樣本
-            for sid, row in manifest.items():
-                if row.get("status") != "ok":
-                    continue
-                label = row.get("label", "")
-                prefix = row.get("prefix", "")
-                label_counts[label] = label_counts.get(label, 0) + 1
-                if prefix:
-                    prefixes_set.add(prefix)
-                items_all.append(row)
+                def _match(r):
+                    if current_label and r.get("label") != current_label:
+                        return False
+                    if current_prefix and r.get("prefix") != current_prefix:
+                        return False
+                    return True
 
-            # 依 filter 篩選
-            def _match(r):
-                if current_label and r.get("label") != current_label:
-                    return False
-                if current_prefix and r.get("prefix") != current_prefix:
-                    return False
-                return True
-
-            items_all = [r for r in items_all if _match(r)]
-            # 依 collected_at 倒序 (新的在前)
-            items_all.sort(key=lambda r: r.get("collected_at", ""), reverse=True)
+                items_all = [r for r in items_all if _match(r)]
+                items_all.sort(key=lambda r: r.get("collected_at", ""), reverse=True)
 
         total_count = sum(label_counts.values())
         filtered_count = len(items_all)
@@ -3085,17 +3108,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         end_idx = min(start_idx + limit, filtered_count)
         page_items = items_all[start_idx:end_idx]
 
-        # 幫每筆 item 補 URL（供 img src 使用）
         import urllib.parse as _up
         for it in page_items:
             crop_rel = it.get("crop_path", "")
             hm_rel = it.get("heatmap_path", "")
-            it["crop_url"] = "/api/dataset_export/file?path=" + _up.quote(crop_rel)
-            it["heatmap_url"] = "/api/dataset_export/file?path=" + _up.quote(hm_rel)
+            q = {"job": current_job, "path": crop_rel}
+            it["crop_url"] = "/api/dataset_export/file?" + _up.urlencode(q)
+            q_hm = {"job": current_job, "path": hm_rel}
+            it["heatmap_url"] = "/api/dataset_export/file?" + _up.urlencode(q_hm)
 
-        # 組 prev/next URL（保留當前 filter）
         def _page_url(p):
             qs = {"page": p, "limit": limit}
+            if current_job:
+                qs["job"] = current_job
             if current_label:
                 qs["label"] = current_label
             if current_prefix:
@@ -3111,6 +3136,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         html = template.render(
             request_path="/dataset_gallery",
             base_dir=str(base_dir),
+            jobs=jobs,
+            current_job=current_job,
             manifest_error=manifest_error,
             total_count=total_count,
             filtered_count=filtered_count,
@@ -3134,9 +3161,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self._send_response(200, html)
 
     def _handle_dataset_export_file(self, query: dict):
-        """GET /api/dataset_export/file?path=<rel> — 安全地 serve base_dir 內的檔案
+        """GET /api/dataset_export/file?job=<job_id>&path=<rel>
 
-        path traversal 防護：resolve 後必須 is_relative_to base_dir
+        path traversal 防護：resolve 後必須 is_relative_to base_dir/<job>
         """
         def _q(key, default=None):
             v = query.get(key)
@@ -3144,23 +3171,30 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return v[0] if v else default
             return v if v is not None else default
 
+        job_id = _q("job", "") or ""
         rel = _q("path", "") or ""
+        if not job_id:
+            self._send_error(400, "missing job parameter")
+            return
         if not rel:
             self._send_error(400, "missing path parameter")
             return
 
-        base_dir = self._dataset_export_base_dir()
+        job_dir = self._dataset_resolve_job_dir(job_id)
+        if job_dir is None:
+            self._send_error(404, "invalid job")
+            return
+
         try:
-            target = (base_dir / rel).resolve()
+            target = (job_dir / rel).resolve()
         except (OSError, ValueError):
             self._send_404()
             return
 
-        # Path traversal 防護：目標必須在 base_dir 底下
         try:
-            target.relative_to(base_dir)
+            target.relative_to(job_dir)
         except ValueError:
-            self._send_error(403, "path outside base_dir")
+            self._send_error(403, "path outside job_dir")
             return
 
         if not target.exists() or not target.is_file():
@@ -3181,21 +3215,26 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return None
 
     def _handle_dataset_sample_delete(self):
-        """POST /api/dataset_export/sample/delete  body: {sample_id}"""
+        """POST /api/dataset_export/sample/delete  body: {job, sample_id}"""
         data = self._read_json_body()
         if data is None:
             return
+        job_id = (data.get("job") or "").strip()
         sample_id = (data.get("sample_id") or "").strip()
-        if not sample_id:
-            self._send_json({"error": "missing sample_id"}, status=400)
+        if not job_id or not sample_id:
+            self._send_json({"error": "missing job or sample_id"}, status=400)
             return
 
-        base_dir = self._dataset_export_base_dir()
-        manifest_path = base_dir / "manifest.csv"
+        job_dir = self._dataset_resolve_job_dir(job_id)
+        if job_dir is None:
+            self._send_json({"error": "invalid job"}, status=404)
+            return
+
+        manifest_path = job_dir / "manifest.csv"
         state = self._dataset_export_state
         with state["manifest_lock"]:
             manifest = read_manifest(manifest_path)
-            ok = delete_sample(base_dir, manifest, sample_id)
+            ok = delete_sample(job_dir, manifest, sample_id)
             if ok:
                 write_manifest(manifest_path, manifest)
         if not ok:
@@ -3204,14 +3243,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": True, "sample_id": sample_id})
 
     def _handle_dataset_sample_move(self):
-        """POST /api/dataset_export/sample/move  body: {sample_id, new_label}"""
+        """POST /api/dataset_export/sample/move  body: {job, sample_id, new_label}"""
         data = self._read_json_body()
         if data is None:
             return
+        job_id = (data.get("job") or "").strip()
         sample_id = (data.get("sample_id") or "").strip()
         new_label = (data.get("new_label") or "").strip()
-        if not sample_id or not new_label:
-            self._send_json({"error": "missing sample_id or new_label"}, status=400)
+        if not job_id or not sample_id or not new_label:
+            self._send_json({"error": "missing job, sample_id or new_label"}, status=400)
             return
         if new_label not in get_valid_labels():
             self._send_json({
@@ -3220,13 +3260,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             }, status=400)
             return
 
-        base_dir = self._dataset_export_base_dir()
-        manifest_path = base_dir / "manifest.csv"
+        job_dir = self._dataset_resolve_job_dir(job_id)
+        if job_dir is None:
+            self._send_json({"error": "invalid job"}, status=404)
+            return
+
+        manifest_path = job_dir / "manifest.csv"
         state = self._dataset_export_state
         with state["manifest_lock"]:
             manifest = read_manifest(manifest_path)
             try:
-                updated = relabel_sample(base_dir, manifest, sample_id, new_label)
+                updated = relabel_sample(job_dir, manifest, sample_id, new_label)
             except ValueError as e:
                 self._send_json({"error": str(e)}, status=400)
                 return
