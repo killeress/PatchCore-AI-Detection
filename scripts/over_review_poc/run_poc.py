@@ -35,20 +35,30 @@ from scripts.over_review_poc.report import aggregate
 
 
 def _resolve_transform(args):
-    """Return (factory, preprocessing_id) for the selected transform + params."""
+    """Return (factory, preprocessing_id) for the selected transform + params.
+
+    preprocessing_id encodes both the image transform and the pool_mode so the
+    embedding cache stays distinct across every combination.
+    """
     if args.transform == "naive":
-        return build_transform, "v1_naive_resize"
-    if args.transform == "otsu":
-        return build_transform_otsu_aspect, "v2_otsu_panel_aspect_pad"
-    if args.transform == "clahe":
+        base_factory, base_id = build_transform, "v1_naive_resize"
+    elif args.transform == "otsu":
+        base_factory, base_id = build_transform_otsu_aspect, "v2_otsu_panel_aspect_pad"
+    elif args.transform == "clahe":
         clip, tg = args.clahe_clip, args.clahe_tile
-        return (lambda: build_transform_clahe(clip, tg),
-                f"v3_clahe_cl{clip}_tg{tg}")
-    if args.transform == "clahe_tile":
+        base_factory = lambda: build_transform_clahe(clip, tg)
+        base_id = f"v3_clahe_cl{clip}_tg{tg}"
+    elif args.transform == "clahe_tile":
         clip, tg = args.clahe_clip, args.clahe_tile
-        return (lambda: build_transform_clahe_tile_only(clip, tg),
-                f"v4_clahe_tile_only_cl{clip}_tg{tg}")
-    raise ValueError(f"Unknown transform: {args.transform}")
+        base_factory = lambda: build_transform_clahe_tile_only(clip, tg)
+        base_id = f"v4_clahe_tile_only_cl{clip}_tg{tg}"
+    else:
+        raise ValueError(f"Unknown transform: {args.transform}")
+    # Preserve legacy cache keys: pool_mode='cls' keeps the short base_id form
+    # so previously-built caches stay valid. Non-cls modes get a pool suffix.
+    if args.pool_mode == "cls":
+        return base_factory, base_id
+    return base_factory, f"{base_id}__pool-{args.pool_mode}"
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +138,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="CLAHE clipLimit (default 2.0; tried 2/3/4)")
     parser.add_argument("--clahe-tile", type=int, default=8,
                         help="CLAHE tileGridSize (default 8 → 8x8 grid)")
+    parser.add_argument("--pool-mode",
+                        choices=["cls", "max", "cls_max",
+                                 "cls_max_anom", "cls_top5_anom"],
+                        default="cls",
+                        help="Feature pooling over DINOv2 patch tokens. "
+                             "cls=baseline (fast), max=channel-wise max pool, "
+                             "cls_max=concat CLS+max, cls_max_anom=concat CLS + "
+                             "most-anomalous patch, cls_top5_anom=concat CLS + "
+                             "mean of top-5 patches by distance from image mean.")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -154,7 +173,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- Features ----
     transform_factory, preprocessing_id = _resolve_transform(args)
-    logger.info("Preprocessing: %s (id=%s)", args.transform, preprocessing_id)
+    logger.info("Preprocessing: %s | pool=%s (id=%s)",
+                args.transform, args.pool_mode, preprocessing_id)
     cache_path = args.output / "embeddings_cache.npz"
     embeddings = get_or_extract(
         samples, cache_path,
@@ -162,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         preprocessing_id=preprocessing_id,
         checkpoint_path=args.checkpoint,
         batch_size=args.batch_size,
+        pool_mode=args.pool_mode,
     )
     assert embeddings.shape[0] == len(samples), "embedding count mismatch"
 
@@ -186,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         "seed": args.seed,
         "dinov2_model": DINOV2_MODEL,
         "transform": args.transform,
+        "pool_mode": args.pool_mode,
         "preprocessing_id": preprocessing_id,
         "git_commit": _git_commit(),
         "python": platform.python_version(),

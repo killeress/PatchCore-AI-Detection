@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
@@ -87,14 +88,26 @@ def main(argv: list[str] | None = None) -> int:
 
     folds = group_kfold_stratified(samples, k=args.k, seed=args.seed)
 
+    def _svc():
+        return SVC(kernel="rbf", probability=False,
+                   class_weight="balanced", random_state=args.seed)
+
     classifiers = {
         "LogReg": lambda: LogisticRegression(max_iter=1000, class_weight="balanced",
                                              random_state=args.seed),
         "k-NN(k=5)": lambda: KNeighborsClassifier(n_neighbors=5, metric="cosine"),
-        "RBF-SVM": lambda: SVC(kernel="rbf", probability=False,
-                               class_weight="balanced", random_state=args.seed),
+        "RBF-SVM": _svc,
         "GBM": lambda: GradientBoostingClassifier(n_estimators=100, max_depth=3,
                                                   random_state=args.seed),
+        # Calibrated variants: wrap base estimator; CalibratedClassifierCV does
+        # internal cv=3 to learn a monotone map from raw scores to probabilities
+        # so `realistic_threshold` (set from train true_ng) transfers to test.
+        "RBF-SVM+Platt": lambda: CalibratedClassifierCV(_svc(), method="sigmoid", cv=3),
+        "RBF-SVM+Isotonic": lambda: CalibratedClassifierCV(_svc(), method="isotonic", cv=3),
+        "LogReg+Isotonic": lambda: CalibratedClassifierCV(
+            LogisticRegression(max_iter=1000, class_weight="balanced",
+                               random_state=args.seed),
+            method="isotonic", cv=3),
     }
 
     # Normalize features for RBF-SVM (others don't need, but harmless)

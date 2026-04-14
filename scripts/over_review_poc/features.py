@@ -208,13 +208,53 @@ def _manifest_fingerprint(samples: Sequence[Sample],
     return h.hexdigest()
 
 
+def _pool_features(cls_token: torch.Tensor,
+                   patch_tokens: torch.Tensor,
+                   pool_mode: str) -> torch.Tensor:
+    """Pool DINOv2 outputs into a single image representation.
+
+    Args:
+        cls_token: (B, D) normalized CLS token
+        patch_tokens: (B, N, D) normalized patch tokens (N=196 for 224×14)
+        pool_mode: 'cls' | 'max' | 'cls_max' | 'cls_max_anom' | 'cls_top5_anom'
+
+    Returns:
+        (B, D) or (B, 2D) tensor depending on mode.
+    """
+    if pool_mode == "cls":
+        return cls_token
+    if pool_mode == "max":
+        return patch_tokens.max(dim=1).values
+    if pool_mode == "cls_max":
+        return torch.cat([cls_token, patch_tokens.max(dim=1).values], dim=-1)
+    # Anomaly-aware: rank patches by L2 distance from per-image mean patch
+    mean_patch = patch_tokens.mean(dim=1, keepdim=True)      # (B, 1, D)
+    dist = (patch_tokens - mean_patch).norm(dim=-1)          # (B, N)
+    if pool_mode == "cls_max_anom":
+        idx = dist.argmax(dim=-1)                             # (B,)
+        top_patch = patch_tokens[torch.arange(patch_tokens.size(0)), idx]
+        return torch.cat([cls_token, top_patch], dim=-1)
+    if pool_mode == "cls_top5_anom":
+        top5_idx = dist.topk(5, dim=-1).indices               # (B, 5)
+        gather_idx = top5_idx.unsqueeze(-1).expand(-1, -1, patch_tokens.size(-1))
+        top5 = torch.gather(patch_tokens, 1, gather_idx)      # (B, 5, D)
+        return torch.cat([cls_token, top5.mean(dim=1)], dim=-1)
+    raise ValueError(f"Unknown pool_mode: {pool_mode}")
+
+
 def extract_batch(
     model: torch.nn.Module,
     samples: Sequence[Sample],
     transform: transforms.Compose,
     batch_size: int = 32,
+    pool_mode: str = "cls",
 ) -> np.ndarray:
-    """Batched CLS-token extraction. Auto-falls back on CUDA OOM: 32→16→8→4→CPU."""
+    """Batched feature extraction. Auto-falls back on CUDA OOM: 32→16→8→4→CPU.
+
+    pool_mode='cls' uses the fast `model(x)` call (CLS-only). Other modes call
+    `model.forward_features(x)` and apply `_pool_features` to aggregate patch
+    tokens; output dim may be D or 2D depending on mode.
+    """
     device = next(model.parameters()).device
     all_embs: list[np.ndarray] = []
 
@@ -226,7 +266,13 @@ def extract_batch(
             imgs = [transform(Image.open(s.crop_path).convert("RGB")) for s in chunk_samples]
             batch = torch.stack(imgs).to(device)
             with torch.no_grad():
-                emb = model(batch)  # DINOv2 forward → CLS token (B, 768)
+                if pool_mode == "cls":
+                    emb = model(batch)  # (B, D)
+                else:
+                    out = model.forward_features(batch)
+                    cls = out["x_norm_clstoken"]
+                    patches = out["x_norm_patchtokens"]
+                    emb = _pool_features(cls, patches, pool_mode)
             all_embs.append(emb.cpu().numpy())
             i += current_bs
         except torch.cuda.OutOfMemoryError:
@@ -249,14 +295,19 @@ def get_or_extract(
     preprocessing_id: str | None = None,
     checkpoint_path: Path | None = None,
     batch_size: int = 32,
+    pool_mode: str = "cls",
 ) -> np.ndarray:
-    """Return embeddings (N × 768). Load cache if fingerprint matches, else compute & save.
+    """Return embeddings (N × D). Load cache if fingerprint matches, else compute & save.
 
     Args:
         transform_factory: zero-arg callable returning a torchvision Compose.
             Defaults to `build_transform` (v1 naive resize).
-        preprocessing_id: string key identifying the transform; goes into the
-            cache fingerprint. Defaults to module-level PREPROCESSING_VERSION.
+        preprocessing_id: string key identifying the transform+pool combination;
+            goes into the cache fingerprint. Defaults to module-level
+            PREPROCESSING_VERSION. Callers should embed pool_mode into the id
+            when they use non-cls pooling.
+        pool_mode: see `_pool_features`. Non-cls modes use `forward_features`
+            and may produce embeddings with dim > 768 (e.g. cls_max → 1536).
     """
     if transform_factory is None:
         transform_factory = build_transform
@@ -277,9 +328,11 @@ def get_or_extract(
 
     model = load_dinov2(checkpoint_path)
     transform = transform_factory()
-    embeddings = extract_batch(model, samples, transform, batch_size=batch_size)
+    embeddings = extract_batch(model, samples, transform, batch_size=batch_size,
+                               pool_mode=pool_mode)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(cache_path, embeddings=embeddings, fingerprint=np.array(fingerprint))
-    logger.info("Saved embeddings to cache: %s (N=%d)", cache_path, embeddings.shape[0])
+    logger.info("Saved embeddings to cache: %s (N=%d, D=%d)",
+                cache_path, embeddings.shape[0], embeddings.shape[1])
     return embeddings
