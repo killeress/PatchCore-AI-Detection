@@ -146,6 +146,24 @@ python -m pytest tests/test_over_review_poc.py -v
 
 ---
 
+## 5.5. 已做過的 ablation（避免重走）
+
+| 日期 | 嘗試 | 結果 | 備註 |
+|---|---|---|---|
+| 2026-04-14 | **Otsu panel mask + aspect-preserve resize + pad**（移除 edge crop 的黑背景，減少 DINOv2 CLS token 的 layout bias） | **wash**：realistic 87.7%→85.9%、oracle 66.7%→53.7%、edge_defect recall 2/5→1/5；全部差異在 1 std 內 | Helper 保留在 `features.py::build_transform_otsu_aspect()`；commit `4895fa4` |
+
+**A1 肉眼分析結論**：14 筆漏檢 scratch 中，A 類（~57%）= scratch 像素極小低對比（DINOv2 根本看不到）、B 類（~21%）= edge crop pipeline 可能 crop 位置錯、C+D（~14%）= 光源/形狀 OOD。Threshold margin（B1）對 A 類無效。
+
+**A2 UMAP 判讀**：5 folds 一致觀察 — scratch（紅）跟 true_ng（藍）在 DINOv2 embedding 空間**明顯重疊**，沒有乾淨分離；87.7% 是 LogReg 在 768-d 高維找到的超平面硬切，UMAP 2D 看不到邊界。主要 cluster 分離維度是「光源/crop type」而非 scratch 標籤。
+
+**下一步該試（按 ROI）**：
+1. **CLAHE 對比度增強** 餵進 DINOv2 — 直接放大 A 類（低對比小 scratch）訊號
+2. **回頭檢查 B 類 edge crop pipeline** 的裁切座標正確性
+3. **蒐集更多 W0F/WGF/STANDARD + edge_defect scratch 樣本**
+4. 進階：patch-level mean pool 只 pool panel patches / 加 AOI heatmap 當 second channel
+
+---
+
 ## 6. 開放問題
 
 - Q1. 目前 POC 的 Realistic vs Oracle 落差是因為 scratch 樣本數（114）不足 → 要不要蒐集更多 scratch 樣本讓門檻穩定？還是直接接受 margin 策略？
