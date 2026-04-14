@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Sequence
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -21,6 +22,14 @@ EMBEDDING_DIM = 768
 INPUT_SIZE = 224
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
+
+# Preprocessing pipeline version — bump to invalidate embedding caches when
+# the transform semantics change. Main path is v1 naive resize; v2 panel-mask
+# helpers below are kept for ablation (see build_transform_otsu_aspect).
+PREPROCESSING_VERSION = "v1_naive_resize"
+_DARK_THRESHOLD = 30       # pixels < this are treated as "panel-exterior black"
+_MIN_DARK_RATIO = 0.05     # below this → no meaningful black region, skip cropping
+_MAX_DARK_RATIO = 0.95     # above this → image is mostly black, skip cropping
 
 
 def load_dinov2(checkpoint_path: Path | None = None, device: str | None = None) -> torch.nn.Module:
@@ -41,7 +50,62 @@ def load_dinov2(checkpoint_path: Path | None = None, device: str | None = None) 
     return model
 
 
+def _find_panel_bbox(gray: np.ndarray) -> tuple[int, int, int, int] | None:
+    """Otsu-based panel bbox. Returns None if no meaningful black region.
+
+    edge_defect crops often contain large black areas outside the panel; we
+    crop to the panel region so DINOv2's CLS token isn't dominated by the
+    black/gray layout edge. patchcore_tile crops are uniformly panel → Otsu
+    would split arbitrarily, so we short-circuit on dark-pixel ratio.
+    """
+    dark_ratio = float((gray < _DARK_THRESHOLD).mean())
+    if dark_ratio < _MIN_DARK_RATIO or dark_ratio > _MAX_DARK_RATIO:
+        return None
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    ys, xs = np.where(binary > 0)
+    if xs.size == 0:
+        return None
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def _aspect_resize_pad(img: np.ndarray, target: int, pad_value: int) -> np.ndarray:
+    """Resize longest side to `target`, pad to target×target with `pad_value`."""
+    h, w = img.shape[:2]
+    if h == 0 or w == 0:
+        return np.full((target, target, 3), pad_value, dtype=np.uint8)
+    scale = target / max(h, w)
+    new_h = max(1, int(round(h * scale)))
+    new_w = max(1, int(round(w * scale)))
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    out = np.full((target, target, 3), pad_value, dtype=np.uint8)
+    top = (target - new_h) // 2
+    left = (target - new_w) // 2
+    out[top:top + new_h, left:left + new_w] = resized
+    return out
+
+
+def preprocess_crop(pil_img: Image.Image) -> Image.Image:
+    """Otsu-crop panel (if meaningful black region) → aspect-preserve resize + pad.
+
+    Ablation helper (not on default path). Intended to reduce the layout-edge
+    bias in DINOv2 CLS tokens for crops with large black background. Wire via
+    `build_transform_otsu_aspect`.
+    """
+    rgb = np.asarray(pil_img.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    bbox = _find_panel_bbox(gray)
+    if bbox is not None:
+        x0, y0, x1, y1 = bbox
+        panel = rgb[y0:y1, x0:x1]
+        pad_value = int(np.median(gray[y0:y1, x0:x1]))
+    else:
+        panel = rgb
+        pad_value = int(np.median(gray))
+    return Image.fromarray(_aspect_resize_pad(panel, INPUT_SIZE, pad_value))
+
+
 def build_transform() -> transforms.Compose:
+    """Naive resize (v1 baseline, production-default)."""
     return transforms.Compose([
         transforms.Resize((INPUT_SIZE, INPUT_SIZE)),
         transforms.ToTensor(),
@@ -49,9 +113,29 @@ def build_transform() -> transforms.Compose:
     ])
 
 
+def build_transform_otsu_aspect() -> transforms.Compose:
+    """Experimental: Otsu panel crop + aspect-preserve pad.
+
+    Ablation run (2026-04-14) showed this is a wash vs. the naive resize on the
+    scratch POC — metric delta within 1 std. Kept for future combination with
+    CLAHE or patch-level pooling experiments.
+    """
+    return transforms.Compose([
+        transforms.Lambda(preprocess_crop),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+    ])
+
+
 def _manifest_fingerprint(samples: Sequence[Sample]) -> str:
-    """Stable hash over sample_ids (任何新增/移除/重排會觸發 cache 失效)。"""
+    """Stable hash over preprocessing version + sample_ids.
+
+    Changing PREPROCESSING_VERSION invalidates the cache (new transforms
+    produce different embeddings).
+    """
     h = hashlib.sha256()
+    h.update(PREPROCESSING_VERSION.encode("utf-8"))
+    h.update(b"\x00")
     for s in samples:
         h.update(s.sample_id.encode("utf-8"))
         h.update(b"\x00")

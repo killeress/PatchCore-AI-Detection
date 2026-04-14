@@ -197,5 +197,86 @@ def test_find_threshold_partial_overlap():
     assert out["realistic_true_ng_recall"] == pytest.approx(1.0)
 
 
+# ---------- Task A-followup: preprocess_crop (panel mask + aspect-preserve resize) ----------
+
+from PIL import Image as _PILImage
+
+from scripts.over_review_poc.features import (
+    preprocess_crop,
+    _find_panel_bbox,
+    INPUT_SIZE,
+    PREPROCESSING_VERSION,
+)
+
+
+def test_preprocess_crop_removes_black_half():
+    """Top half black + bottom half gray → output is panel-dominated, no large black region."""
+    arr = np.zeros((400, 200, 3), dtype=np.uint8)
+    arr[200:, :, :] = 128
+    out = preprocess_crop(_PILImage.fromarray(arr))
+    out_arr = np.asarray(out)
+
+    assert out.size == (INPUT_SIZE, INPUT_SIZE)
+    assert out_arr.shape == (INPUT_SIZE, INPUT_SIZE, 3)
+    black_ratio = float((out_arr.mean(axis=-1) < 30).mean())
+    assert black_ratio < 0.10, f"black region should be cropped out, got ratio={black_ratio:.3f}"
+    assert 100 < out_arr.mean() < 150, f"output should be panel-dominated, got mean={out_arr.mean():.1f}"
+
+
+def test_preprocess_crop_uniform_panel_is_noop_like():
+    """No significant black → Otsu skipped, aspect-resize only."""
+    arr = np.full((300, 300, 3), 100, dtype=np.uint8)
+    out = preprocess_crop(_PILImage.fromarray(arr))
+    out_arr = np.asarray(out)
+
+    assert out.size == (INPUT_SIZE, INPUT_SIZE)
+    assert abs(out_arr.mean() - 100) < 3, f"uniform input should survive intact, got mean={out_arr.mean():.1f}"
+
+
+def test_preprocess_crop_non_square_pad_preserves_aspect():
+    """Non-square uniform input is padded with median gray, not distorted."""
+    arr = np.full((100, 300, 3), 128, dtype=np.uint8)  # wide
+    out = preprocess_crop(_PILImage.fromarray(arr))
+    out_arr = np.asarray(out)
+
+    assert out.size == (INPUT_SIZE, INPUT_SIZE)
+    # No stretch: wide input → letterboxed with panel median (top/bottom pad = 128)
+    assert abs(out_arr.mean() - 128) < 3
+
+
+def test_find_panel_bbox_skips_uniform():
+    gray = np.full((100, 100), 128, dtype=np.uint8)
+    assert _find_panel_bbox(gray) is None
+
+
+def test_find_panel_bbox_finds_black_half():
+    gray = np.zeros((200, 200), dtype=np.uint8)
+    gray[100:, :] = 128
+    bbox = _find_panel_bbox(gray)
+    assert bbox is not None
+    x0, y0, x1, y1 = bbox
+    # Panel occupies bottom half → y0 ≈ 100
+    assert 95 <= y0 <= 105, f"expected panel to start around y=100, got y0={y0}"
+    assert y1 == 200
+
+
+def test_preprocessing_version_in_fingerprint():
+    """Fingerprint must change when PREPROCESSING_VERSION changes (cache invalidation)."""
+    from scripts.over_review_poc.features import _manifest_fingerprint
+    import scripts.over_review_poc.features as F
+
+    samples = [_mk_sample("s1", "true_ng", "g1", "G0F00000", "patchcore_tile")]
+    fp_a = _manifest_fingerprint(samples)
+
+    original = F.PREPROCESSING_VERSION
+    try:
+        F.PREPROCESSING_VERSION = original + "_mutated"
+        fp_b = _manifest_fingerprint(samples)
+    finally:
+        F.PREPROCESSING_VERSION = original
+
+    assert fp_a != fp_b, "fingerprint must differ when preprocessing version changes"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
