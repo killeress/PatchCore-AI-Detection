@@ -49,7 +49,7 @@ python -m scripts.over_review_poc.prepare_offline_model \
 
 ## Runtime override
 
-Toggle via DB `config_params` (no restart needed):
+Toggle via DB `config_params`. Values take effect after clicking **Reload Settings** on the dashboard (or on next server restart) — no process-level restart required:
 
 ```sql
 UPDATE config_params SET param_value = 'false'

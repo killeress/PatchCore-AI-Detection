@@ -75,7 +75,8 @@ def test_filter_flips_high_score():
 
     sf.apply_to_image_result(ir)
 
-    assert len(ir.anomaly_tiles) == 0
+    # C1 fix: tiles stay in anomaly_tiles (for DB audit), just flagged
+    assert len(ir.anomaly_tiles) == 3
     assert ir.scratch_filter_count == 3
     for t in ir.tiles:
         assert t.scratch_filtered is True
@@ -143,3 +144,23 @@ def test_effective_threshold():
 
     sf2 = ScratchFilter(clf, safety_multiplier=1.0)
     assert sf2.effective_threshold == pytest.approx(0.8)
+
+
+def test_filter_keeps_tile_in_anomaly_tiles_when_flipping():
+    """C1 regression: tiles with scratch_filtered=True MUST stay in anomaly_tiles
+    so downstream results_to_db_data can serialize them to tile_results."""
+    from scratch_filter import ScratchFilter
+    clf = _MockClassifier(fixed_score=0.95, conformal_threshold=0.7)
+    sf = ScratchFilter(clf, safety_multiplier=1.0)
+    ir = _fake_image_result_with_tiles(3)
+
+    sf.apply_to_image_result(ir)
+
+    # All 3 tiles STILL in anomaly_tiles (just flagged)
+    assert len(ir.anomaly_tiles) == 3
+    # All flagged
+    for t in ir.tiles:
+        assert t.scratch_filtered is True
+        assert t.scratch_score == pytest.approx(0.95)
+    # Aggregate count still tracks how many were flipped
+    assert ir.scratch_filter_count == 3

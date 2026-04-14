@@ -81,5 +81,8 @@ def test_process_panel_applies_scratch_filter_inline(tmp_path, monkeypatch):
     ir = _make_image_result_with_ng_tiles(2)
     sf = inferencer._get_scratch_filter()
     sf.apply_to_image_result(ir)
-    assert len(ir.anomaly_tiles) == 0
+    # C1 fix: tiles remain in anomaly_tiles (for DB audit), just flagged
+    assert len(ir.anomaly_tiles) == 2
     assert ir.scratch_filter_count == 2
+    for t, _, _ in ir.anomaly_tiles:
+        assert t.scratch_filtered is True
