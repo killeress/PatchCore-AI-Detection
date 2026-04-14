@@ -90,5 +90,58 @@ def test_load_samples_skips_missing_and_non_ok_status(tmp_path):
     assert samples[0].prefix == "R0F00000"
 
 
+# ---------- Task 3: splits ----------
+
+from scripts.over_review_poc.splits import group_kfold_stratified
+
+
+def _mk_sample(sid, label, glass, prefix, src):
+    return Sample(
+        sample_id=sid, crop_path=Path("/dummy.png"),
+        label=to_binary_label(label), original_label=label,
+        glass_id=glass, prefix=prefix, source_type=src,
+        ai_score=0.5, defect_x=0, defect_y=0,
+    )
+
+
+def _build_balanced_fixture(n_glass=25, per_glass=4):
+    """25 glasses × 4 tiles = 100 samples；每片玻璃 3 個 not_scratch + 1 個 scratch。"""
+    samples = []
+    for g in range(n_glass):
+        prefix = ["G0F00000", "R0F00000", "W0F00000"][g % 3]
+        src = "patchcore_tile" if g % 2 == 0 else "edge_defect"
+        samples.append(_mk_sample(f"s{g}_scratch", "over_surface_scratch",
+                                  f"glass{g}", prefix, src))
+        for i in range(per_glass - 1):
+            lbl = "true_ng" if i == 0 else "over_overexposure"
+            samples.append(_mk_sample(f"s{g}_ng{i}", lbl, f"glass{g}", prefix, src))
+    return samples
+
+
+def test_group_kfold_no_leakage():
+    """同 glass_id 不能同時出現在 train 與 test。"""
+    samples = _build_balanced_fixture()
+    folds = group_kfold_stratified(samples, k=5, seed=42)
+    assert len(folds) == 5
+    for train_idx, test_idx in folds:
+        train_glasses = {samples[i].glass_id for i in train_idx}
+        test_glasses = {samples[i].glass_id for i in test_idx}
+        assert train_glasses.isdisjoint(test_glasses), "glass_id 在 train 與 test 同時出現"
+
+
+def test_group_kfold_stratify_balance():
+    """每 fold test 至少 1 個 scratch、至少 1 個 true_ng、兩種 source_type 各有 ≥1。"""
+    samples = _build_balanced_fixture()
+    folds = group_kfold_stratified(samples, k=5, seed=42)
+    for fold_idx, (_, test_idx) in enumerate(folds):
+        n_scratch = sum(1 for i in test_idx if samples[i].label == SCRATCH_BINARY)
+        n_true_ng = sum(1 for i in test_idx if samples[i].original_label == "true_ng")
+        src_types = {samples[i].source_type for i in test_idx}
+        assert n_scratch >= 1, f"fold {fold_idx} 沒有 scratch"
+        assert n_true_ng >= 1, f"fold {fold_idx} 沒有 true_ng"
+        assert "patchcore_tile" in src_types and "edge_defect" in src_types, \
+            f"fold {fold_idx} 缺 source_type ({src_types})"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
