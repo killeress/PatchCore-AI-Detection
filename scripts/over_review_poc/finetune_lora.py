@@ -47,6 +47,7 @@ from scripts.over_review_poc.features import (
     build_transform_otsu_aspect,
 )
 from scripts.over_review_poc.splits import group_kfold_stratified
+from scripts.over_review_poc.zero_leak_analysis import _group_aware_split
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,9 @@ def main(argv=None):
     p.add_argument("--k", type=int, default=5)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output", type=Path, default=Path("reports/poc_lora"))
+    p.add_argument("--calib-frac", type=float, default=0.2,
+                   help="Fraction of training fold held out for conformal calibration "
+                        "of the deployment threshold (default 0.2)")
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args(argv)
 
@@ -246,16 +250,39 @@ def main(argv=None):
         pr_auc = float(average_precision_score(y[test_idx], test_sc)) \
             if y[test_idx].sum() else 0.0
 
+        # Conformal calibration for deployment threshold (group-aware split)
+        proper_idx, calib_idx = _group_aware_split(
+            train_idx, samples, args.calib_frac, args.seed)
+        proper_mask = np.isin(train_idx, proper_idx)
+        calib_mask = np.isin(train_idx, calib_idx)
+        logreg_conf = LogisticRegression(class_weight="balanced", max_iter=2000,
+                                         C=1.0, solver="lbfgs",
+                                         random_state=args.seed).fit(
+            train_feats[proper_mask], y[train_idx][proper_mask])
+        calib_scores = logreg_conf.predict_proba(train_feats[calib_mask])[:, 1]
+        calib_ng_mask = is_true_ng[train_idx][calib_mask]
+        conformal_thr = float(calib_scores[calib_ng_mask].max()) if calib_ng_mask.any() else 1.0
+        test_sc_conf = logreg_conf.predict_proba(test_feats)[:, 1]
+        test_scratch_sc = test_sc_conf[is_scratch[test_idx]]
+        test_ng_sc = test_sc_conf[is_true_ng[test_idx]]
+        conformal_scratch = float((test_scratch_sc > conformal_thr).mean()) \
+            if len(test_scratch_sc) else 0.0
+        conformal_leak = float((test_ng_sc > conformal_thr).mean()) \
+            if len(test_ng_sc) else 0.0
+
         fold_metrics.append({
             "fold": fi,
             "realistic_scratch_recall": thr["realistic_scratch_recall"],
             "realistic_true_ng_recall": thr["realistic_true_ng_recall"],
             "oracle_scratch_recall": thr["oracle_scratch_recall"],
             "pr_auc": pr_auc,
+            "conformal_scratch_recall": conformal_scratch,
+            "conformal_leak": conformal_leak,
         })
-        logger.info("[Fold %d] Realistic=%.3f (true_ng=%.3f) | Oracle=%.3f | PR-AUC=%.3f",
+        logger.info("[Fold %d] Realistic=%.3f (ng=%.3f) | Oracle=%.3f | "
+                    "Conformal=%.3f (leak=%.3f) | PR-AUC=%.3f",
                     fi, thr["realistic_scratch_recall"], thr["realistic_true_ng_recall"],
-                    thr["oracle_scratch_recall"], pr_auc)
+                    thr["oracle_scratch_recall"], conformal_scratch, conformal_leak, pr_auc)
         # Free per-fold model memory before next fold
         del model
         if torch.cuda.is_available():
@@ -267,16 +294,20 @@ def main(argv=None):
     print(f"LoRA:       rank={args.rank}, alpha={args.alpha}, blocks={args.n_lora_blocks}, "
           f"epochs={args.epochs}, lr={args.lr}")
     print()
-    print(f"{'fold':<5} | {'Realistic':<12} | {'true_ng':<12} | {'Oracle':<12} | {'PR-AUC':<8}")
-    print("-" * 60)
+    print(f"{'fold':<5} | {'Realistic':<10} | {'true_ng':<10} | {'Oracle':<10} | "
+          f"{'Conformal':<10} | {'Leak':<8} | {'PR-AUC':<8}")
+    print("-" * 80)
     for m in fold_metrics:
         print(f"{m['fold']:<5} | "
-              f"{m['realistic_scratch_recall']:<12.3f} | "
-              f"{m['realistic_true_ng_recall']:<12.3f} | "
-              f"{m['oracle_scratch_recall']:<12.3f} | "
+              f"{m['realistic_scratch_recall']:<10.3f} | "
+              f"{m['realistic_true_ng_recall']:<10.3f} | "
+              f"{m['oracle_scratch_recall']:<10.3f} | "
+              f"{m['conformal_scratch_recall']:<10.3f} | "
+              f"{m['conformal_leak']:<8.3f} | "
               f"{m['pr_auc']:<8.3f}")
     for key in ["realistic_scratch_recall", "realistic_true_ng_recall",
-                "oracle_scratch_recall", "pr_auc"]:
+                "oracle_scratch_recall",
+                "conformal_scratch_recall", "conformal_leak", "pr_auc"]:
         vals = np.array([m[key] for m in fold_metrics])
         print(f"{key:<30} mean = {vals.mean():.3f} ± {vals.std():.3f}")
     return 0
