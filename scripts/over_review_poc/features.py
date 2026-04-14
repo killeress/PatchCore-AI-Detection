@@ -127,14 +127,80 @@ def build_transform_otsu_aspect() -> transforms.Compose:
     ])
 
 
-def _manifest_fingerprint(samples: Sequence[Sample]) -> str:
-    """Stable hash over preprocessing version + sample_ids.
+def preprocess_clahe(pil_img: Image.Image,
+                     clip_limit: float = 2.0,
+                     tile_grid: int = 8) -> Image.Image:
+    """Grayscale CLAHE contrast enhancement → 3-channel RGB.
 
-    Changing PREPROCESSING_VERSION invalidates the cache (new transforms
-    produce different embeddings).
+    Targets the A-type misses (low-contrast small scratches) by locally
+    equalizing histogram in each tile. Industrial AOI crops are effectively
+    grayscale (R=G=B), so we apply CLAHE on the single luminance channel and
+    stack back to 3 channels for DINOv2.
     """
+    rgb = np.asarray(pil_img.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(tile_grid, tile_grid))
+    enhanced = clahe.apply(gray)
+    return Image.fromarray(np.stack([enhanced] * 3, axis=-1))
+
+
+def build_transform_clahe(clip_limit: float = 2.0,
+                          tile_grid: int = 8) -> transforms.Compose:
+    """CLAHE contrast enhancement → naive resize → normalize."""
+    def _clahe(img):
+        return preprocess_clahe(img, clip_limit, tile_grid)
+    return transforms.Compose([
+        transforms.Lambda(_clahe),
+        transforms.Resize((INPUT_SIZE, INPUT_SIZE)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+    ])
+
+
+def preprocess_clahe_tile_only(pil_img: Image.Image,
+                               clip_limit: float = 2.0,
+                               tile_grid: int = 8) -> Image.Image:
+    """CLAHE only on panel-interior tiles; skip for edge crops (large black area).
+
+    Edge-defect crops have ~50% dark pixels (area outside physical panel);
+    CLAHE there would amplify noise in the useless dark region. Heuristic: if
+    dark_ratio ≥ 5% then skip CLAHE and pass through unchanged.
+    """
+    rgb = np.asarray(pil_img.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    dark_ratio = float((gray < _DARK_THRESHOLD).mean())
+    if dark_ratio >= _MIN_DARK_RATIO:
+        return Image.fromarray(rgb)
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(tile_grid, tile_grid))
+    enhanced = clahe.apply(gray)
+    return Image.fromarray(np.stack([enhanced] * 3, axis=-1))
+
+
+def build_transform_clahe_tile_only(clip_limit: float = 2.0,
+                                    tile_grid: int = 8) -> transforms.Compose:
+    """CLAHE on tiles only (pass-through for edge crops) → resize → normalize."""
+    def _clahe_tile(img):
+        return preprocess_clahe_tile_only(img, clip_limit, tile_grid)
+    return transforms.Compose([
+        transforms.Lambda(_clahe_tile),
+        transforms.Resize((INPUT_SIZE, INPUT_SIZE)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+    ])
+
+
+def _manifest_fingerprint(samples: Sequence[Sample],
+                          preprocessing_id: str | None = None) -> str:
+    """Stable hash over preprocessing id + sample_ids.
+
+    Changing `preprocessing_id` (or the module-level PREPROCESSING_VERSION
+    default) invalidates the cache — new transforms produce different
+    embeddings so we must not reuse a stale cache.
+    """
+    if preprocessing_id is None:
+        preprocessing_id = PREPROCESSING_VERSION
     h = hashlib.sha256()
-    h.update(PREPROCESSING_VERSION.encode("utf-8"))
+    h.update(preprocessing_id.encode("utf-8"))
     h.update(b"\x00")
     for s in samples:
         h.update(s.sample_id.encode("utf-8"))
@@ -179,12 +245,23 @@ def extract_batch(
 def get_or_extract(
     samples: Sequence[Sample],
     cache_path: Path,
+    transform_factory: "callable" = None,
+    preprocessing_id: str | None = None,
     checkpoint_path: Path | None = None,
     batch_size: int = 32,
 ) -> np.ndarray:
-    """Return embeddings (N × 768). Load cache if fingerprint matches, else compute & save."""
+    """Return embeddings (N × 768). Load cache if fingerprint matches, else compute & save.
+
+    Args:
+        transform_factory: zero-arg callable returning a torchvision Compose.
+            Defaults to `build_transform` (v1 naive resize).
+        preprocessing_id: string key identifying the transform; goes into the
+            cache fingerprint. Defaults to module-level PREPROCESSING_VERSION.
+    """
+    if transform_factory is None:
+        transform_factory = build_transform
     cache_path = Path(cache_path)
-    fingerprint = _manifest_fingerprint(samples)
+    fingerprint = _manifest_fingerprint(samples, preprocessing_id)
 
     if cache_path.exists():
         try:
@@ -199,7 +276,7 @@ def get_or_extract(
             logger.warning("Failed to read cache (%s); recomputing", e)
 
     model = load_dinov2(checkpoint_path)
-    transform = build_transform()
+    transform = transform_factory()
     embeddings = extract_batch(model, samples, transform, batch_size=batch_size)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)

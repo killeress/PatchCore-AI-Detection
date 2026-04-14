@@ -278,5 +278,99 @@ def test_preprocessing_version_in_fingerprint():
     assert fp_a != fp_b, "fingerprint must differ when preprocessing version changes"
 
 
+def test_fingerprint_differs_by_preprocessing_id():
+    """Passing a different preprocessing_id argument must produce different fingerprint."""
+    from scripts.over_review_poc.features import _manifest_fingerprint
+
+    samples = [_mk_sample("s1", "true_ng", "g1", "G0F00000", "patchcore_tile")]
+    fp_naive = _manifest_fingerprint(samples, preprocessing_id="v1_naive_resize")
+    fp_clahe = _manifest_fingerprint(samples, preprocessing_id="v3_clahe_cl2.0_tg8")
+    assert fp_naive != fp_clahe
+
+
+# ---------- CLAHE ----------
+
+from scripts.over_review_poc.features import preprocess_clahe, build_transform_clahe
+
+
+def test_preprocess_clahe_boosts_low_contrast_local_variance():
+    """CLAHE should increase local contrast on a region with a faint feature."""
+    # Mid-gray background (128) with a faint dark line (Δ=8)
+    arr = np.full((200, 200, 3), 128, dtype=np.uint8)
+    arr[95:105, 40:160, :] = 120
+    img = _PILImage.fromarray(arr)
+    pre_std = float(np.asarray(img.convert("L"))[80:120, 30:170].std())
+
+    out = preprocess_clahe(img)
+    out_gray = np.asarray(out.convert("L"))
+    post_std = float(out_gray[80:120, 30:170].std())
+
+    assert out.size == img.size, "preprocess_clahe must not resize"
+    # clipLimit=2.0 is conservative; even a modest 1.1x bump proves it is amplifying
+    # local contrast rather than just passing through.
+    assert post_std > pre_std * 1.1, (
+        f"CLAHE should amplify local contrast: pre_std={pre_std:.2f}, post_std={post_std:.2f}"
+    )
+
+
+def test_preprocess_clahe_output_is_rgb_3channel():
+    """Even grayscale input should produce 3-channel RGB (for DINOv2 input)."""
+    arr = np.full((100, 100), 100, dtype=np.uint8)
+    img = _PILImage.fromarray(arr, mode="L")
+    out = preprocess_clahe(img)
+    assert out.mode == "RGB"
+    out_arr = np.asarray(out)
+    assert out_arr.shape == (100, 100, 3)
+    # R == G == B (grayscale stacked)
+    assert np.array_equal(out_arr[..., 0], out_arr[..., 1])
+    assert np.array_equal(out_arr[..., 1], out_arr[..., 2])
+
+
+def test_build_transform_clahe_output_tensor_shape():
+    """End-to-end CLAHE transform produces 3×INPUT_SIZE×INPUT_SIZE normalized tensor."""
+    arr = np.full((300, 300, 3), 120, dtype=np.uint8)
+    arr[140:160, 50:250, :] = 100  # faint feature
+    img = _PILImage.fromarray(arr)
+
+    transform = build_transform_clahe()
+    out = transform(img)
+    assert out.shape == (3, INPUT_SIZE, INPUT_SIZE)
+    # ImageNet-normalized values typically within roughly [-3, 3]
+    assert out.min() > -5 and out.max() < 5
+
+
+# ---------- CLAHE tile-only (v4) ----------
+
+from scripts.over_review_poc.features import (
+    preprocess_clahe_tile_only,
+    build_transform_clahe_tile_only,
+)
+
+
+def test_clahe_tile_only_applies_on_uniform_tile():
+    """Uniform panel tile (no black) → CLAHE applied → local variance increases."""
+    arr = np.full((300, 300, 3), 120, dtype=np.uint8)
+    arr[140:160, 50:250, :] = 110  # faint feature
+    img = _PILImage.fromarray(arr)
+    pre_std = float(np.asarray(img.convert("L"))[130:170, 40:260].std())
+
+    out = preprocess_clahe_tile_only(img)
+    post_std = float(np.asarray(out.convert("L"))[130:170, 40:260].std())
+    assert post_std > pre_std, (
+        f"tile-only CLAHE should amplify local contrast on tile crop: "
+        f"pre={pre_std:.2f}, post={post_std:.2f}"
+    )
+
+
+def test_clahe_tile_only_passes_through_edge_crop():
+    """Edge crop (50% black) → CLAHE skipped → output = input unchanged."""
+    arr = np.zeros((400, 400, 3), dtype=np.uint8)
+    arr[200:, :, :] = 128  # bottom half is panel gray
+    img = _PILImage.fromarray(arr)
+    out_arr = np.asarray(preprocess_clahe_tile_only(img))
+    # Should be identical — pass-through
+    assert np.array_equal(out_arr, np.asarray(img))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

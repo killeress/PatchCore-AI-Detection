@@ -21,10 +21,34 @@ import numpy as np
 import torch
 
 from scripts.over_review_poc.dataset import load_samples, SCRATCH_BINARY
-from scripts.over_review_poc.features import DINOV2_MODEL, get_or_extract
+from scripts.over_review_poc.features import (
+    DINOV2_MODEL,
+    get_or_extract,
+    build_transform,
+    build_transform_clahe,
+    build_transform_clahe_tile_only,
+    build_transform_otsu_aspect,
+)
 from scripts.over_review_poc.splits import group_kfold_stratified
 from scripts.over_review_poc.evaluate import run_fold
 from scripts.over_review_poc.report import aggregate
+
+
+def _resolve_transform(args):
+    """Return (factory, preprocessing_id) for the selected transform + params."""
+    if args.transform == "naive":
+        return build_transform, "v1_naive_resize"
+    if args.transform == "otsu":
+        return build_transform_otsu_aspect, "v2_otsu_panel_aspect_pad"
+    if args.transform == "clahe":
+        clip, tg = args.clahe_clip, args.clahe_tile
+        return (lambda: build_transform_clahe(clip, tg),
+                f"v3_clahe_cl{clip}_tg{tg}")
+    if args.transform == "clahe_tile":
+        clip, tg = args.clahe_clip, args.clahe_tile
+        return (lambda: build_transform_clahe_tile_only(clip, tg),
+                f"v4_clahe_tile_only_cl{clip}_tg{tg}")
+    raise ValueError(f"Unknown transform: {args.transform}")
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +119,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--checkpoint", type=Path, default=None,
                         help="選填：本地 DINOv2 .pth，預設走 torch.hub")
+    parser.add_argument("--transform",
+                        choices=["naive", "clahe", "clahe_tile", "otsu"],
+                        default="naive",
+                        help="Preprocessing variant "
+                             "(naive=v1 / clahe=all / clahe_tile=tile-only / otsu)")
+    parser.add_argument("--clahe-clip", type=float, default=2.0,
+                        help="CLAHE clipLimit (default 2.0; tried 2/3/4)")
+    parser.add_argument("--clahe-tile", type=int, default=8,
+                        help="CLAHE tileGridSize (default 8 → 8x8 grid)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -120,9 +153,16 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(f"scratch 樣本 ({n_scratch}) 不足以做 {args.k}-fold")
 
     # ---- Features ----
+    transform_factory, preprocessing_id = _resolve_transform(args)
+    logger.info("Preprocessing: %s (id=%s)", args.transform, preprocessing_id)
     cache_path = args.output / "embeddings_cache.npz"
-    embeddings = get_or_extract(samples, cache_path, checkpoint_path=args.checkpoint,
-                                batch_size=args.batch_size)
+    embeddings = get_or_extract(
+        samples, cache_path,
+        transform_factory=transform_factory,
+        preprocessing_id=preprocessing_id,
+        checkpoint_path=args.checkpoint,
+        batch_size=args.batch_size,
+    )
     assert embeddings.shape[0] == len(samples), "embedding count mismatch"
 
     # ---- Splits ----
@@ -145,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
         "n_folds": args.k,
         "seed": args.seed,
         "dinov2_model": DINOV2_MODEL,
+        "transform": args.transform,
+        "preprocessing_id": preprocessing_id,
         "git_commit": _git_commit(),
         "python": platform.python_version(),
         "platform": platform.platform(),
