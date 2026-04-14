@@ -80,6 +80,28 @@ JOB_STATE_CANCELLED = "cancelled"
 BLACK_IMAGE_PREFIX = "B0F"
 
 
+def parse_datastr_per_prefix(datastr: str) -> Dict[str, str]:
+    """解析 RIC DATASTR，回傳 {prefix: "OK"|"NG"} dict。
+
+    例: "W0F00000,OK;WGF50500,OK;G0F00000,NG;3;"
+        → {"W0F00000": "OK", "WGF50500": "OK", "G0F00000": "NG"}
+
+    末尾純數字 (張數計數) 會被略過。空字串回傳空 dict。
+    """
+    out: Dict[str, str] = {}
+    if not datastr:
+        return out
+    for part in datastr.strip().rstrip(";").split(";"):
+        part = part.strip()
+        if not part or part.isdigit():
+            continue
+        if "," not in part:
+            continue
+        prefix, result = part.rsplit(",", 1)
+        out[prefix.strip()] = result.strip().upper()
+    return out
+
+
 def determine_label(ric: str, over_category: Optional[str]) -> Optional[str]:
     """依 RIC 判定與 over_review category 決定輸出 label。
 
@@ -461,6 +483,7 @@ class DatasetExporter:
             "missing_record_detail": 0,
             "images_bomb_skipped": 0,      # image_results.is_bomb=1 被整張跳過
             "images_b0f_skipped": 0,       # 黑光源 B0F 檔名被跳過
+            "images_ric_ok_skipped": 0,    # true_ng panel 內 RIC 個別判 OK 的 prefix 被跳過
             "tiles_bomb_skipped": 0,       # tile_results.is_bomb=1 被跳過
             "tiles_not_anomaly": 0,        # tile_results.is_anomaly=0 被跳過
             "edges_bomb_skipped": 0,       # edge_defect_results.is_bomb=1 被跳過
@@ -548,6 +571,11 @@ class DatasetExporter:
         inference_timestamp = detail.get("request_time") or row.get("time_stamp") or ""
         record_id = detail.get("id")
 
+        # 解析 DATASTR 取得 RIC 對各 prefix 的個別判定 (W0F=OK, G0F=NG ...)
+        # 只在 true_ng 蒐集時才生效：panel 雖整體 NG，但某些光源 prefix 是 OK，
+        # 那些 image 不該被當 NG 樣本蒐集。空 DATASTR → 不做此過濾 (回退舊行為)。
+        ric_per_prefix = parse_datastr_per_prefix(row.get("datastr") or "")
+
         for img in detail.get("images") or []:
             if img.get("is_bomb"):
                 _bump("images_bomb_skipped")
@@ -560,6 +588,12 @@ class DatasetExporter:
             image_path = img.get("image_path") or ""
             image_result_id = img.get("id")
             prefix = extract_prefix(image_name)
+
+            # true_ng 樣本：只收 RIC 在 DATASTR 內亦判 NG 的 prefix
+            if label == TRUE_NG_LABEL and ric_per_prefix:
+                if ric_per_prefix.get(prefix) != "NG":
+                    _bump("images_ric_ok_skipped")
+                    continue
 
             # PatchCore tile 樣本
             for tile in img.get("tiles") or []:
