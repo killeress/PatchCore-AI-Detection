@@ -267,6 +267,10 @@ class CAPIDatabase:
             add_column_if_not_exists("inference_records", "inference_log", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "omit_overexposed", "INTEGER DEFAULT 0")
             add_column_if_not_exists("inference_records", "omit_overexposure_info", "TEXT DEFAULT ''")
+            # Scratch classifier post-filter (over-review reduction)
+            add_column_if_not_exists("tile_results", "scratch_score", "REAL DEFAULT 0.0")
+            add_column_if_not_exists("tile_results", "scratch_filtered", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("image_results", "scratch_filter_count", "INTEGER DEFAULT 0")
 
             conn.commit()
         finally:
