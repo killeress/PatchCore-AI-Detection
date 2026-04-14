@@ -53,7 +53,13 @@
 - threshold = max(calibration true_ng 分數) × safety_multiplier
 - safety=1.0 時 leak ~1.6%；safety=1.05 時 scratch catch 稍降、leak 更小
 
-等 `reports/poc_lora_r16_conformal/` 跑完後會有具體 Conformal / Leak 數字可用。
+**Conformal 實測結果**（2026-04-14 跑完 r=16 + conformal 版本）：
+```
+Conformal scratch_recall = 90.4% ± 5.8%   （跟 Realistic 幾乎一樣）
+Conformal leak           = 2.6% ± 2.8%    （fold 5 拖累平均到 8.1%）
+```
+
+**結論**：LoRA 後的 LogReg 分數分離度夠好，conformal calibration 在 r=16 這組 embedding **沒帶來額外效益**。純 threshold 方案的 leak 下限約 1.7-2.6%，要達真 0 漏檢必須走**兩階段人工覆判**（見 §3.1-E）。
 
 ---
 
@@ -153,20 +159,13 @@ python -m scripts.over_review_poc.train_final_model \
 
 ---
 
-## 4. 仍在跑的背景任務
+## 4. 相關參考文件
 
-**Task id: `bq4mmwb8m`** — LoRA r=16 + conformal 重跑
-- 14:50 開始，預估 25-30 分鐘
-- 輸出：`/tmp/lora_r16_conformal.log` + `reports/poc_lora_r16_conformal/`
-- 新對話可以直接讀 log 拿 conformal 數字
-
-**怎麼確認跑完：**
-```bash
-grep "LoRA fine-tune summary" /tmp/lora_r16_conformal.log
-# 或
-nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits
-# 降到 <5% 代表結束
-```
+- **資料維護策略** — `docs/over_review_scratch_data_maintenance.md`
+  涵蓋：重訓觸發條件、三道驗證 gate、hold-out test set、drift monitoring、
+  active learning、標註 QC、模型版本管理、自動化 pipeline。**上線前建置
+  hold-out test 必讀**。
+- **POC 完整 ablation 歷史** — `docs/over_review_scratch_poc_result.md`
 
 ---
 
@@ -187,9 +186,9 @@ a3f2d16 feat: patch-level pool + conformal threshold + LoRA fine-tune
 ## 6. 新對話開場建議
 
 告訴下一個對話：
-> 「接續 over-review scratch POC，POC 已完成，進入部署規劃。先讀：
-> 1. `docs/over_review_scratch_deployment_handoff.md`（這份）
-> 2. `docs/over_review_scratch_poc_result.md`（完整 ablation 歷史）
-> 3. 檢查 `reports/poc_lora_r16_conformal/` 和 `/tmp/lora_r16_conformal.log` 拿 conformal 數字
-> 
-> 然後開一份 deployment spec：`docs/superpowers/specs/YYYY-MM-DD-over-review-scratch-deployment.md`，涵蓋上面 §3.1 A-G 全部項目。spec 完成後再進 plan → implementation。」
+> 「接續 over-review scratch POC，POC 已完成，進入部署規劃。先依序讀：
+> 1. `docs/over_review_scratch_deployment_handoff.md`（這份，部署規劃主文件）
+> 2. `docs/over_review_scratch_data_maintenance.md`（資料維護與持續學習策略，上線前的 hold-out 必讀）
+> 3. `docs/over_review_scratch_poc_result.md`（完整 ablation 歷史，可選）
+>
+> 然後開一份 deployment spec：`docs/superpowers/specs/YYYY-MM-DD-over-review-scratch-deployment.md`，涵蓋上面 §3.1 A-G 全部項目 + §4 引用的資料維護策略。spec 完成後再進 plan → implementation。」

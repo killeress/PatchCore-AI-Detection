@@ -218,6 +218,22 @@ r=16 的 fold 1 達成 Realistic 90.9% / **true_ng 100.0%**（零漏檢）、fol
 
 344K 可訓練參數（r=16，base 86M 完全凍結）。
 
+### r=16 + Conformal calibration（部署 threshold 分析）
+
+```
+fold | Realistic | true_ng | Oracle | Conformal | Leak  | PR-AUC
+1    | 0.909     | 1.000   | 0.909  | 0.909     | 0.019 | 0.955
+2    | 0.870     | 0.978   | 0.870  | 0.870     | 0.009 | 0.928
+3    | 1.000     | 1.000   | 1.000  | 1.000     | 0.005 | 0.995
+4    | 0.826     | 0.984   | 0.739  | 0.826     | 0.016 | 0.867
+5    | 0.913     | 0.954   | 0.783  | 0.913     | 0.081 | 0.910  ← 問題 fold
+mean | 0.904     | 0.983   | 0.860  | 0.904     | 0.026 | 0.931
+```
+
+**關鍵觀察**：Conformal threshold 跟 Realistic 幾乎重合（scratch_recall 一模一樣），代表 **LoRA 後的 LogReg 已經產出足夠分離的分數 → 不需要額外 calibration**。Conformal leak 2.6% 略高於 Realistic 1.7%，主要被 fold 5 的 8.1% 拖累（該 fold 有幾筆 hard true_ng 打到 0.9998）。
+
+**→ 要達真 0 漏檢必須走兩階段系統**：高信心自動擋（score > 高 threshold）+ 中信心送人工（如 deployment handoff §3.1-E）。純 threshold 無論怎麼設都有 ~1-3% 殘留 leak 下限。
+
 ### Downstream classifier ablation（在 CLAHE embedding 上試 RBF-SVM、GradientBoosting）
 
 用 `scripts/over_review_poc/compare_classifiers.py`。測 Oracle（classifier 能力上限）：
