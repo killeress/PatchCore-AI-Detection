@@ -65,3 +65,6 @@ brain/
 .agents/
 _agents/
 _agent/
+
+# Over-review POC outputs
+reports/over_review_scratch_poc/
