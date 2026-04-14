@@ -62,11 +62,11 @@ def _train_tiny_stub(tmp_path: Path, device: str = "cpu") -> Path:
     # (last 2 blocks, qkv/mlp.fc1/mlp.fc2; rank=8 for speed)
     rank = 8
     lora_sd = {}
-    for blk in range(-2, 0):  # last 2 blocks (logical indexing in implementation)
+    # DINOv2 ViT-B/14 has 12 transformer blocks; LoRA is applied to last 2 → indices 10, 11
+    for blk in (10, 11):
         for proj in ("attn.qkv", "mlp.fc1", "mlp.fc2"):
             for side, out_dim in (("lora_A.weight", 768), ("lora_B.weight", 768)):
                 # Shapes based on DINOv2 ViT-B/14 (D=768, qkv→3*768, mlp→3072)
-                in_dim = 768
                 actual_out = 3 * 768 if "qkv" in proj else (3072 if "fc1" in proj else 768)
                 in_dim_actual = 768 if "fc1" in proj or "qkv" in proj else 3072
                 if "lora_A" in side:
@@ -101,8 +101,47 @@ def test_classifier_loads_bundle_and_weights(tmp_path: Path):
     assert clf.metadata.lora_rank == 8
     assert clf.metadata.lora_n_blocks == 2
 
+    # Verify LoRA weights actually loaded — pick one key from the bundle and
+    # compare to the value in the loaded model. Regression test for the bug
+    # where range(-2, 0) produced keys that silently failed to load.
+    import pickle
+    with open(bundle_path, "rb") as f:
+        payload = pickle.load(f)
+    bundle_lora_sd = payload["lora_state_dict"]
+    sample_key = next(iter(bundle_lora_sd.keys()))    # e.g. "blocks.10.attn.qkv.lora_A.weight"
+    loaded_model_sd = clf._model.state_dict()
+    assert sample_key in loaded_model_sd, f"{sample_key} missing from loaded model"
+    assert torch.allclose(
+        loaded_model_sd[sample_key].cpu(),
+        bundle_lora_sd[sample_key].cpu(),
+    ), f"{sample_key} value mismatch — weights didn't transfer"
+
 
 def test_classifier_missing_bundle_raises(tmp_path: Path):
     from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
     with pytest.raises(ScratchClassifierLoadError):
         ScratchClassifier(bundle_path=tmp_path / "missing.pkl", device="cpu")
+
+
+@pytest.mark.slow
+def test_classifier_fails_when_no_lora_keys_match(tmp_path: Path):
+    """I1 regression: bundle with zero matching LoRA keys should raise, not silently skip."""
+    from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
+    # Create bundle with intentionally wrong key names
+    lora_sd = {"wrong.key.name.lora_A.weight": torch.randn(8, 768)}
+    logreg = LogisticRegression(max_iter=200).fit(
+        np.random.randn(20, 768), np.array([0]*10 + [1]*10))
+    meta = ScratchClassifierMetadata(
+        preprocessing_id="v3_clahe_cl4.0_tg8",
+        clahe_clip=4.0, clahe_tile=8, input_size=224,
+        dinov2_repo="facebookresearch/dinov2", dinov2_model="dinov2_vitb14",
+        lora_rank=8, lora_alpha=16, lora_n_blocks=2,
+        conformal_threshold=0.8, safety_multiplier=1.1,
+        trained_at="t", dataset_sha256="x", git_commit="y",
+    )
+    bundle_path = tmp_path / "bad.pkl"
+    save_bundle(bundle_path, lora_sd, logreg, meta, np.array([0.5]))
+
+    with pytest.raises(ScratchClassifierLoadError,
+                       match="No LoRA keys from bundle matched"):
+        ScratchClassifier(bundle_path=bundle_path, device="cpu")

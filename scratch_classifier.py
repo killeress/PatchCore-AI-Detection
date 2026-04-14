@@ -164,7 +164,20 @@ class ScratchClassifier:
         _apply_lora(model, meta.lora_n_blocks, meta.lora_rank, meta.lora_alpha)
         missing, unexpected = model.load_state_dict(lora_sd, strict=False)
         if unexpected:
-            logger.warning("Unexpected keys in LoRA state_dict: %s", unexpected[:5])
+            logger.warning("Unexpected keys (%d) in LoRA state_dict: %s",
+                           len(unexpected), unexpected[:5])
+        lora_missing = [k for k in missing if ".lora_A." in k or ".lora_B." in k]
+        if lora_missing:
+            logger.warning("Missing LoRA keys (%d) — will use random init: %s",
+                           len(lora_missing), lora_missing[:5])
+        loaded_count = len(lora_sd) - len(unexpected)
+        if loaded_count == 0 and len(lora_sd) > 0:
+            raise ScratchClassifierLoadError(
+                f"No LoRA keys from bundle matched model structure "
+                f"(bundle has {len(lora_sd)} keys, all unexpected). "
+                f"Sample bundle keys: {list(lora_sd.keys())[:3]}. "
+                f"Sample expected keys: {[k for k in model.state_dict().keys() if 'lora' in k.lower()][:3]}"
+            )
 
         model.eval()
         self._device = torch.device(device)
