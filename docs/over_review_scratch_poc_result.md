@@ -103,6 +103,17 @@ python -m scripts.over_review_poc.run_poc --manifest ... --output ... --batch-si
 # 指定不同 seed / k
 python -m scripts.over_review_poc.run_poc --manifest ... --output ... --seed 123 --k 10
 
+# 跑 CLAHE preprocessing variants（ablation）
+python -m scripts.over_review_poc.run_poc --manifest ... --output reports/poc_clahe_cl4 \
+    --transform clahe --clahe-clip 4.0
+python -m scripts.over_review_poc.run_poc --manifest ... --output reports/poc_clahe_tile \
+    --transform clahe_tile --clahe-clip 2.0
+
+# 對 cached embeddings 跑 downstream classifier 比較（LogReg/k-NN/RBF-SVM/GBM）
+python -m scripts.over_review_poc.compare_classifiers \
+    --embeddings reports/poc_clahe_cl4/embeddings_cache.npz \
+    --manifest datasets/over_review/manifest.csv --label cl4
+
 # 離線部署前置（在有外網機器執行，印 cache 路徑）
 python -m scripts.over_review_poc.prepare_offline_model
 python -m scripts.over_review_poc.prepare_offline_model --export-state-dict /tmp/dinov2_vitb14.pth
@@ -148,19 +159,56 @@ python -m pytest tests/test_over_review_poc.py -v
 
 ## 5.5. 已做過的 ablation（避免重走）
 
-| 日期 | 嘗試 | 結果 | 備註 |
-|---|---|---|---|
-| 2026-04-14 | **Otsu panel mask + aspect-preserve resize + pad**（移除 edge crop 的黑背景，減少 DINOv2 CLS token 的 layout bias） | **wash**：realistic 87.7%→85.9%、oracle 66.7%→53.7%、edge_defect recall 2/5→1/5；全部差異在 1 std 內 | Helper 保留在 `features.py::build_transform_otsu_aspect()`；commit `4895fa4` |
+### A1 肉眼分析（14 筆 missed scratch）
 
-**A1 肉眼分析結論**：14 筆漏檢 scratch 中，A 類（~57%）= scratch 像素極小低對比（DINOv2 根本看不到）、B 類（~21%）= edge crop pipeline 可能 crop 位置錯、C+D（~14%）= 光源/形狀 OOD。Threshold margin（B1）對 A 類無效。
+A 類（~57%）= scratch 像素極小低對比（DINOv2 根本看不到）；B 類（~21%）= edge crop 在 crop 內看不到；C+D（~14%）= 光源/形狀 OOD。Threshold margin 對 A 類無效。
 
-**A2 UMAP 判讀**：5 folds 一致觀察 — scratch（紅）跟 true_ng（藍）在 DINOv2 embedding 空間**明顯重疊**，沒有乾淨分離；87.7% 是 LogReg 在 768-d 高維找到的超平面硬切，UMAP 2D 看不到邊界。主要 cluster 分離維度是「光源/crop type」而非 scratch 標籤。
+### A2 UMAP 判讀
 
-**下一步該試（按 ROI）**：
-1. **CLAHE 對比度增強** 餵進 DINOv2 — 直接放大 A 類（低對比小 scratch）訊號
-2. **回頭檢查 B 類 edge crop pipeline** 的裁切座標正確性
-3. **蒐集更多 W0F/WGF/STANDARD + edge_defect scratch 樣本**
-4. 進階：patch-level mean pool 只 pool panel patches / 加 AOI heatmap 當 second channel
+5 folds 一致觀察 — scratch（紅）跟 true_ng（藍）在 DINOv2 embedding 空間**明顯重疊**，87.7% 是 LogReg 在 768-d 高維找到的超平面硬切，UMAP 2D 看不到邊界。主要 cluster 分離維度是「光源/crop type」而非 scratch 標籤。
+
+### Preprocessing ablation
+
+| Variant | LogReg Realistic | LogReg Oracle | k-NN Realistic | commit |
+|---|---|---|---|---|
+| v1 naive baseline | 87.7% ± 4.2% | 66.7% ± 19.1% | 24.5% ± 11.1% | (pre-`4895fa4`) |
+| v2 Otsu panel mask + aspect-preserve pad | 85.9% ± 6.0% | 53.7% ± 28.0% | — | wash; `4895fa4` |
+| v3 CLAHE clip=2.0 | 87.7% ± 4.3% | 57.2% ± 17.3% | **50.0% ± 13.0%** | `8bc081d` |
+| v3 CLAHE clip=3.0 | 85.1% ± 5.9% | **72.0% ± 12.9%** 🎯 | 53.4% ± 12.4% | `8bc081d` |
+| v3 CLAHE clip=4.0 | 87.6% ± 6.7% | 65.9% ± 22.8% | 52.6% ± 7.4% | `8bc081d` |
+| v4 CLAHE tile-only clip=2.0 | 86.8% ± 4.8% | 65.1% ± 21.5% | 50.0% ± 13.0% | `8bc081d` |
+
+**結論**：LogReg Realistic 在 85-88% 飽和（與 preprocessing 無關），但 CLAHE 對 embedding 結構**真的有改善** — k-NN recall 從 24.5% 翻倍到 ~50%。
+
+### Downstream classifier ablation（在 CLAHE embedding 上試 RBF-SVM、GradientBoosting）
+
+用 `scripts/over_review_poc/compare_classifiers.py`。測 Oracle（classifier 能力上限）：
+
+| Classifier | v1 naive | cl=2 | cl=3 | **cl=4** |
+|---|---|---|---|---|
+| LogReg | 65.0% | 56.3% | 68.6% | 70.2% |
+| k-NN(k=5) | 41.3% | 51.1% | 48.4% | 55.4% |
+| **RBF-SVM** | 59.0% | 62.5% | 64.3% | **71.2%** 🎯 |
+| GBM | 42.3% | 52.7% | 38.6% | 52.8% |
+
+**CLAHE clip=4.0 + RBF-SVM 首次讓 Oracle 破 71%**（v1 是 65%），但 RBF-SVM Realistic 只有 39.4% — 因為 `decision_function` 沒校準到 train true_ng 分數尺度。需加 Platt / isotonic calibration 才能用。
+
+### D — Edge crop pipeline 查核結論
+
+`capi_dataset_export.crop_edge_defect()` 以 defect 中心切 512×512。3 筆 persistent-missed edge scratch 的黑背景**不是 pad**，是**實體 panel 邊緣**的暗區（panel 之外的機械 fixture）。scratch 位於 crop 正中心但貼著 panel 邊界 — 本質低訊號，**不是 preprocessing / CLAHE 能救的**。要救必須幾何規則處理或 edge-only 專屬模型。
+
+### 當前 Oracle ceiling 結論
+
+**71-72%** 是在 DINOv2 ViT-B/14 CLS token + 114 scratch 樣本 + RBF-SVM/LogReg 組合下的上限。要突破必須在：(a) 蒐集更多 scratch 樣本、(b) fine-tune DINOv2 最後 block、(c) 改用 patch-level 特徵，(d) 加 AOI heatmap 當 second channel。
+
+### 下一步建議
+
+| 優先 | 項目 |
+|---|---|
+| 1 | **CLAHE cl=4 + RBF-SVM + isotonic calibration**：讓 Realistic 能吃到 Oracle 71% 的能力 |
+| 2 | 蒐集 W0F/WGF/STANDARD 光源樣本（目前各 <10 筆） |
+| 3 | 替 edge_defect scratch 寫專屬幾何判別（非 ML） |
+| 4 | fine-tune DINOv2 最後 transformer block（LoRA） |
 
 ---
 
