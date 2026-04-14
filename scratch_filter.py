@@ -7,8 +7,10 @@ and records audit fields on each TileInfo.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
-from capi_inference import ImageResult
+if TYPE_CHECKING:
+    from capi_inference import ImageResult
 
 logger = logging.getLogger(__name__)
 
