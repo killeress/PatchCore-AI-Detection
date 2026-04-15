@@ -61,9 +61,15 @@ UPDATE config_params SET param_value = '1.2'
 
 ## Version log
 
-| Version | Built at | git_commit | Conformal thr | Notes |
-|---------|----------|------------|---------------|-------|
-| v1      | TBD      | TBD        | TBD           | Initial deployment |
+| Version | Built at            | git_commit  | Conformal thr | Eff. thr (safety 1.1) | Notes                                                                                |
+|---------|---------------------|-------------|---------------|-----------------------|--------------------------------------------------------------------------------------|
+| v1      | 2026-04-15 11:29    | `58744630`  | 0.000783      | 0.000861              | Initial deployment. LoRA r=16/2 blocks/15 ep + CLAHE cl=4. Calib 222 NG / 349 total. |
+
+**v1 bundle SHA256:**
+- `scratch_classifier_v1.pkl` = `ee0a5827404d02fdbcccee51b3b14c1d37754a4cd4096d7066bf0d127b07ec8e`
+- `dinov2_vitb14.pth` = `09bb0cc208e41c267009900c7647a10919677bed8e0c35855d6c9d5641b73ef7`
+
+**v1 calibration distribution notes:** scores are sharply bimodal — 91.7% of calibration samples score < 0.001 (not-scratch cluster), 8.3% score > 0.5 (scratch cluster), nothing in between. The conformal threshold (0.000783) sits right at the tail of the not-scratch cluster, so margin is thin. Consider using `safety_multiplier` ≥ 1.5 (effective 0.00117) or higher during initial rollout and tighten after monitoring RIC leak rate.
 
 Append new rows when producing a new bundle; keep old `.pkl` files for rollback.
 

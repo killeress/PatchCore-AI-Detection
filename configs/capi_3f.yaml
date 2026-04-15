@@ -183,3 +183,22 @@ model_resolution_map:
   B: [1366, 768]
   K: [2560, 1440]
   G: [2560, 1600]
+
+
+# ====================================================================
+# Scratch Classifier 後濾 (Over-review 降低 — DINOv2 LoRA + LogReg)
+# PatchCore 判 NG 的 tile 若分類器評估為高信心 scratch，翻回 OK；
+# 其餘 NG 保留走原流程 / RIC 物理覆檢。
+# 詳細設計見 docs/superpowers/specs/2026-04-14-over-review-scratch-deployment-design.md
+# ====================================================================
+scratch_classifier_enabled: true
+
+# Threshold safety multiplier. Effective threshold = conformal × this.
+# v1 bundle 的 calib margin 偏窄 (conformal=0.000783，見 deployment/README.md)，
+# 產線首次上線建議 1.5；穩定後依 RIC 結果調整 (典型範圍 1.1 ~ 2.0)。
+scratch_safety_multiplier: 1.5
+
+# Bundle 與 DINOv2 base 權重路徑 (相對於 server 啟動目錄；如 systemd
+# 啟動工作目錄可能不是 CAPI root，請改成絕對路徑)
+scratch_bundle_path: "deployment/scratch_classifier_v1.pkl"
+scratch_dinov2_weights_path: "deployment/dinov2_vitb14.pth"
