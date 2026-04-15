@@ -335,10 +335,12 @@ class CAPIInferencer:
 
         bundle = getattr(self.config, "scratch_bundle_path", "")
         weights = getattr(self.config, "scratch_dinov2_weights_path", "")
+        repo_path = getattr(self.config, "scratch_dinov2_repo_path", "")
         try:
             clf = ScratchClassifier(
                 bundle_path=bundle,
                 dinov2_weights_path=weights or None,
+                dinov2_repo_path=repo_path or None,
                 device=self.device,
             )
         except ScratchClassifierLoadError as e:

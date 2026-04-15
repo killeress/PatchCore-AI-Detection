@@ -179,8 +179,43 @@ def _apply_lora(model: nn.Module, n_blocks: int, rank: int, alpha: int) -> None:
 
 
 def _load_dinov2(repo: str, name: str,
-                 weights_path: str | Path | None) -> nn.Module:
-    """Load DINOv2 from torch.hub; if weights_path given, load local checkpoint."""
+                 weights_path: str | Path | None,
+                 repo_local_path: str | Path | None = None) -> nn.Module:
+    """Load DINOv2 from torch.hub.
+
+    Args:
+        repo: e.g. "facebookresearch/dinov2" — used with source="github"
+            fallback when no local repo is provided.
+        name: e.g. "dinov2_vitb14" — the entry point in hubconf.py.
+        weights_path: optional local .pth for the pretrained state_dict; when
+            given, we skip the torch.hub download of the pretrained weights
+            and `torch.load` the file ourselves.
+        repo_local_path: optional local path to a directory containing the
+            DINOv2 repo code (i.e. the contents of
+            `~/.cache/torch/hub/facebookresearch_dinov2_main/`). When given,
+            we use `source="local"` so no network/cache is required — this is
+            the intended path for offline deployment.
+
+    Offline deployment should pass BOTH `repo_local_path` (for model code) and
+    `weights_path` (for the pretrained weights). Passing only one means the
+    missing half still requires network/cache.
+    """
+    if repo_local_path is not None:
+        repo_local_path = Path(repo_local_path)
+        if not repo_local_path.exists():
+            raise FileNotFoundError(
+                f"DINOv2 repo_local_path does not exist: {repo_local_path}"
+            )
+        # source="local" makes torch.hub read the repo from this path directly;
+        # no network, no ~/.cache/torch/hub lookup.
+        model = torch.hub.load(str(repo_local_path), name,
+                                source="local", pretrained=False)
+        if weights_path is not None:
+            state = torch.load(str(weights_path), map_location="cpu")
+            model.load_state_dict(state)
+        return model
+
+    # Legacy / dev-machine path: requires torch.hub cache or network.
     if weights_path is not None:
         model = torch.hub.load(repo, name, pretrained=False, source="github")
         state = torch.load(str(weights_path), map_location="cpu")
@@ -195,8 +230,20 @@ class ScratchClassifier:
         self,
         bundle_path: str | Path,
         dinov2_weights_path: str | Path | None = None,
+        dinov2_repo_path: str | Path | None = None,
         device: str = "cuda",
     ):
+        """
+        Args:
+            bundle_path: pickled bundle produced by ``save_bundle``.
+            dinov2_weights_path: local .pth for DINOv2 pretrained weights;
+                required in offline deployments.
+            dinov2_repo_path: local directory containing DINOv2 repo code
+                (torch.hub source="local"); required in offline deployments.
+                If ``None``, falls back to torch.hub cache / GitHub (needs
+                network or pre-warmed ~/.cache/torch/hub).
+            device: torch device string ("cuda", "cpu", ...).
+        """
         lora_sd, logreg, meta, calib_scores = load_bundle(bundle_path)
         self.metadata = meta
         self._logreg = logreg
@@ -204,7 +251,8 @@ class ScratchClassifier:
 
         try:
             model = _load_dinov2(meta.dinov2_repo, meta.dinov2_model,
-                                  dinov2_weights_path)
+                                  dinov2_weights_path,
+                                  repo_local_path=dinov2_repo_path)
         except Exception as e:  # pragma: no cover - depends on network/filesystem
             raise ScratchClassifierLoadError(
                 f"Failed to load DINOv2 ({meta.dinov2_repo}/{meta.dinov2_model}): {e}"

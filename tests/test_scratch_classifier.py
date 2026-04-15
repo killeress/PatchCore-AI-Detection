@@ -212,3 +212,96 @@ def test_to_pil_accepts_grayscale():
     result = _to_pil(gray)
     assert isinstance(result, Image.Image)
     assert result.size == (32, 32)
+
+
+def test_load_dinov2_uses_local_source_when_repo_path_given(tmp_path, monkeypatch):
+    """With repo_local_path set, _load_dinov2 must call torch.hub.load with source='local'
+    (no network). Offline-deployment regression test."""
+    from scratch_classifier import _load_dinov2
+    import torch.nn as nn
+
+    repo_dir = tmp_path / "dinov2_repo"
+    repo_dir.mkdir()
+    (repo_dir / "hubconf.py").write_text("")   # minimal valid local hub repo
+
+    captured = {}
+
+    def fake_hub_load(path_or_repo, name, **kwargs):
+        captured["path"] = str(path_or_repo)
+        captured["name"] = name
+        captured.update(kwargs)
+        return nn.Linear(2, 2)
+
+    monkeypatch.setattr("torch.hub.load", fake_hub_load)
+    monkeypatch.setattr("torch.load", lambda *a, **kw: {"fake": torch.zeros(1)})
+
+    _load_dinov2("facebookresearch/dinov2", "dinov2_vitb14",
+                 weights_path=None, repo_local_path=str(repo_dir))
+
+    assert captured["source"] == "local"
+    assert captured["path"] == str(repo_dir)
+    assert captured["name"] == "dinov2_vitb14"
+
+
+def test_load_dinov2_local_source_with_weights_path(tmp_path, monkeypatch):
+    """Both repo_local_path AND weights_path provided → local source + state_dict load."""
+    from scratch_classifier import _load_dinov2
+    import torch.nn as nn
+
+    repo_dir = tmp_path / "dinov2_repo"
+    repo_dir.mkdir()
+    (repo_dir / "hubconf.py").write_text("")
+    weights = tmp_path / "dinov2.pth"
+    weights.write_bytes(b"fake")
+
+    captured = {"torch_load_called": False}
+
+    def fake_hub_load(*args, **kwargs):
+        captured["source"] = kwargs.get("source")
+        m = nn.Linear(2, 2)
+        return m
+
+    def fake_torch_load(path, **kw):
+        captured["torch_load_called"] = True
+        captured["weights_path"] = str(path)
+        # Return a state_dict whose only key matches the nn.Linear we return above.
+        return {"weight": torch.zeros(2, 2), "bias": torch.zeros(2)}
+
+    monkeypatch.setattr("torch.hub.load", fake_hub_load)
+    monkeypatch.setattr("torch.load", fake_torch_load)
+
+    _load_dinov2("facebookresearch/dinov2", "dinov2_vitb14",
+                 weights_path=weights, repo_local_path=repo_dir)
+
+    assert captured["source"] == "local"
+    assert captured["torch_load_called"] is True
+    assert captured["weights_path"] == str(weights)
+
+
+def test_load_dinov2_missing_local_repo_raises(tmp_path, monkeypatch):
+    """If repo_local_path is given but the directory doesn't exist, raise explicit error."""
+    from scratch_classifier import _load_dinov2
+
+    missing = tmp_path / "does_not_exist"
+    # Do not create the directory.
+
+    with pytest.raises((FileNotFoundError, ValueError)):
+        _load_dinov2("facebookresearch/dinov2", "dinov2_vitb14",
+                     weights_path=None, repo_local_path=missing)
+
+
+def test_load_dinov2_falls_back_to_github_when_no_local_path(monkeypatch):
+    """Preserve legacy behavior: no repo_local_path → source='github' (needs network/cache)."""
+    from scratch_classifier import _load_dinov2
+    import torch.nn as nn
+
+    captured = {}
+
+    def fake_hub_load(repo_or_path, name, **kwargs):
+        captured["source"] = kwargs.get("source")
+        return nn.Linear(2, 2)
+
+    monkeypatch.setattr("torch.hub.load", fake_hub_load)
+
+    _load_dinov2("facebookresearch/dinov2", "dinov2_vitb14", weights_path=None)
+    assert captured["source"] == "github"

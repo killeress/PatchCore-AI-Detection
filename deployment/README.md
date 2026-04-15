@@ -7,6 +7,7 @@ post-filter. Bundle layout:
 deployment/
 ├── scratch_classifier_v1.pkl    # LoRA + LogReg + metadata (produced by train_final_model.py)
 ├── dinov2_vitb14.pth            # DINOv2 base weights (330 MB)
+├── dinov2_repo/                 # DINOv2 repo code (offline: torch.hub source="local")
 └── README.md                    # this file
 ```
 
@@ -33,6 +34,39 @@ in the version log below.
 python -m scripts.over_review_poc.prepare_offline_model \
     --export-state-dict deployment/dinov2_vitb14.pth
 ```
+
+## Copying DINOv2 repo code (offline deployment — REQUIRED if production has no internet)
+
+`torch.hub.load(..., source="github")` fetches repo code from GitHub on every
+call, which fails on air-gapped production hosts with an empty
+`~/.cache/torch/hub`. Ship the repo code alongside the weights and point
+`scratch_dinov2_repo_path` at it.
+
+On a machine that has run `prepare_offline_model.py` at least once (populates
+the hub cache):
+
+```bash
+# Linux / macOS
+cp -r ~/.cache/torch/hub/facebookresearch_dinov2_main deployment/dinov2_repo
+
+# Windows
+xcopy /E /I %USERPROFILE%\.cache\torch\hub\facebookresearch_dinov2_main deployment\dinov2_repo
+```
+
+Verify the copy:
+
+```bash
+ls deployment/dinov2_repo/hubconf.py   # must exist
+```
+
+On production, set in `configs/capi_3f.yaml`:
+
+```yaml
+scratch_dinov2_repo_path: "deployment/dinov2_repo"
+```
+
+or use an absolute path if starting via systemd. Leave the value empty to
+keep the legacy torch.hub GitHub/cache fallback (not recommended for offline).
 
 ## Deploying to production
 

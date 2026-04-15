@@ -72,3 +72,5 @@ reports/over_review_scratch_poc/
 # Deployment bundles (large ML models and pickled classifiers)
 deployment/*.pkl
 deployment/*.pth
+# DINOv2 repo code copy (4.5MB, copied from ~/.cache/torch/hub for offline deploy)
+deployment/dinov2_repo/

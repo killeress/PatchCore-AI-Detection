@@ -202,3 +202,8 @@ scratch_safety_multiplier: 1.5
 # 啟動工作目錄可能不是 CAPI root，請改成絕對路徑)
 scratch_bundle_path: "deployment/scratch_classifier_v1.pkl"
 scratch_dinov2_weights_path: "deployment/dinov2_vitb14.pth"
+
+# 離線部署：DINOv2 repo code 路徑 (torch.hub source="local")。
+# 這個資料夾就是 ~/.cache/torch/hub/facebookresearch_dinov2_main 的完整複製。
+# 若為空字串 ""，會退回使用 ~/.cache/torch/hub 或下載，產線無外網時必填。
+scratch_dinov2_repo_path: "deployment/dinov2_repo"

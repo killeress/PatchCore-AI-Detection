@@ -7,6 +7,27 @@ def test_default_scratch_config_enabled():
     assert cfg.scratch_safety_multiplier == 1.1
     assert cfg.scratch_bundle_path == "deployment/scratch_classifier_v1.pkl"
     assert cfg.scratch_dinov2_weights_path == "deployment/dinov2_vitb14.pth"
+    # Offline-deployment path: repo code directory (source='local')
+    assert cfg.scratch_dinov2_repo_path == ""   # empty = fall back to torch.hub
+
+
+def test_dinov2_repo_path_roundtrip(tmp_path):
+    """scratch_dinov2_repo_path flows through yaml + from_dict + to_dict + apply_db_overrides."""
+    import yaml
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "scratch_dinov2_repo_path": "/opt/capi/deployment/dinov2_repo",
+    }))
+    cfg = CAPIConfig.from_yaml(str(cfg_path))
+    assert cfg.scratch_dinov2_repo_path == "/opt/capi/deployment/dinov2_repo"
+    assert "scratch_dinov2_repo_path" in cfg.to_dict()
+
+    cfg2 = CAPIConfig()
+    cfg2.apply_db_overrides([
+        {"param_name": "scratch_dinov2_repo_path",
+         "decoded_value": "/override/repo"},
+    ])
+    assert cfg2.scratch_dinov2_repo_path == "/override/repo"
 
 
 def test_yaml_roundtrip_preserves_scratch(tmp_path):

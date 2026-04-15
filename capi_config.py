@@ -206,6 +206,10 @@ class CAPIConfig:
     scratch_safety_multiplier: float = 1.1
     scratch_bundle_path: str = "deployment/scratch_classifier_v1.pkl"
     scratch_dinov2_weights_path: str = "deployment/dinov2_vitb14.pth"
+    # Local path to DINOv2 repo code for torch.hub source="local" (offline deploy).
+    # When empty (""), falls back to torch.hub GitHub/cache — needs network or
+    # pre-warmed ~/.cache/torch/hub.
+    scratch_dinov2_repo_path: str = ""
 
     # 配置檔路徑（載入後記錄）
     config_path: Optional[Path] = None
@@ -305,6 +309,7 @@ class CAPIConfig:
             scratch_safety_multiplier=float(data.get("scratch_safety_multiplier", 1.1)),
             scratch_bundle_path=data.get("scratch_bundle_path", "deployment/scratch_classifier_v1.pkl"),
             scratch_dinov2_weights_path=data.get("scratch_dinov2_weights_path", "deployment/dinov2_vitb14.pth"),
+            scratch_dinov2_repo_path=data.get("scratch_dinov2_repo_path", ""),
         )
 
         return config
@@ -378,6 +383,7 @@ class CAPIConfig:
             "scratch_safety_multiplier": self.scratch_safety_multiplier,
             "scratch_bundle_path": self.scratch_bundle_path,
             "scratch_dinov2_weights_path": self.scratch_dinov2_weights_path,
+            "scratch_dinov2_repo_path": self.scratch_dinov2_repo_path,
         }
 
     def to_yaml(self, yaml_path: str) -> None:
@@ -445,6 +451,7 @@ class CAPIConfig:
             "scratch_safety_multiplier": self.scratch_safety_multiplier,
             "scratch_bundle_path": self.scratch_bundle_path,
             "scratch_dinov2_weights_path": self.scratch_dinov2_weights_path,
+            "scratch_dinov2_repo_path": self.scratch_dinov2_repo_path,
         }
 
         with open(yaml_path, "w", encoding="utf-8") as f:
@@ -579,6 +586,8 @@ class CAPIConfig:
             self.scratch_bundle_path = str(param_map["scratch_bundle_path"])
         if "scratch_dinov2_weights_path" in param_map:
             self.scratch_dinov2_weights_path = str(param_map["scratch_dinov2_weights_path"])
+        if "scratch_dinov2_repo_path" in param_map:
+            self.scratch_dinov2_repo_path = str(param_map["scratch_dinov2_repo_path"])
 
     def get_enabled_exclusion_zones(self) -> List[ExclusionZone]:
         """取得已啟用的排除區域"""
