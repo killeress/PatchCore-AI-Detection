@@ -1,0 +1,506 @@
+{% extends "base.html" %}
+{% block title %}批次分類器驗證 — CAPI AI{% endblock %}
+
+{% block extra_css %}
+<style>
+    .sb-container { max-width: 1280px; margin: 0 auto; }
+    .sb-toolbar {
+        display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap;
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: 10px; padding: 16px 20px; margin-bottom: 16px;
+    }
+    .sb-field { display: flex; flex-direction: column; gap: 4px; }
+    .sb-field label {
+        color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase;
+        letter-spacing: 0.5px; font-family: 'Fira Code', monospace;
+    }
+    .sb-field select, .sb-field input {
+        background: var(--bg); border: 1px solid var(--border);
+        border-radius: 8px; padding: 10px 12px; color: var(--text);
+        font-family: 'Fira Code', monospace; font-size: 0.9rem;
+        min-width: 240px;
+    }
+    .sb-btn {
+        background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff;
+        border: none; border-radius: 8px; padding: 10px 20px; font-weight: 600;
+        cursor: pointer; transition: all 0.2s;
+    }
+    .sb-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(59,130,246,0.3); }
+    .sb-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .sb-btn-cancel { background: linear-gradient(135deg, #ef4444, #b91c1c); }
+
+    .sb-progress-wrap {
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: 10px; padding: 14px 18px; margin-bottom: 16px;
+    }
+    .sb-progress-meta {
+        display: flex; justify-content: space-between; align-items: center;
+        font-family: 'Fira Code', monospace; font-size: 0.85rem;
+        color: var(--text-muted); margin-bottom: 8px;
+    }
+    .sb-progress-bar {
+        height: 12px; background: #0a0f1a; border-radius: 6px; overflow: hidden;
+        border: 1px solid var(--border);
+    }
+    .sb-progress-bar > div {
+        height: 100%; background: linear-gradient(90deg, #3b82f6, #22c55e);
+        width: 0%; transition: width 0.25s ease;
+    }
+
+    .sb-summary {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 12px; margin-bottom: 16px;
+    }
+    .sb-card {
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: 10px; padding: 14px 16px; text-align: center;
+    }
+    .sb-card .label {
+        color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase;
+        letter-spacing: 0.5px; margin-bottom: 6px;
+    }
+    .sb-card .value {
+        font-size: 1.4rem; font-weight: 700; font-family: 'Fira Code', monospace;
+    }
+    .sb-card.ok { border-color: rgba(34,197,94,0.3); }
+    .sb-card.ok .value { color: var(--ok); }
+    .sb-card.warn { border-color: rgba(239,68,68,0.3); }
+    .sb-card.warn .value { color: var(--ng); }
+    .sb-card.info .value { color: #60a5fa; }
+
+    .sb-row {
+        display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;
+    }
+    @media (max-width: 960px) { .sb-row { grid-template-columns: 1fr; } }
+    .sb-panel {
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: 10px; padding: 16px 18px;
+    }
+    .sb-panel h3 {
+        font-size: 1rem; color: var(--text-muted); margin: 0 0 10px;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .cm-table { width: 100%; border-collapse: collapse; font-family: 'Fira Code', monospace; }
+    .cm-table th, .cm-table td {
+        border: 1px solid var(--border); padding: 10px 8px; text-align: center;
+        font-size: 0.9rem;
+    }
+    .cm-table th { background: #0a0f1a; color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; }
+    .cm-table td.val { font-size: 1.2rem; font-weight: 700; }
+    .cm-tp { color: var(--ok); }
+    .cm-tn { color: #60a5fa; }
+    .cm-fp { color: var(--ng); }
+    .cm-fn { color: #f59e0b; }
+
+    .thr-panel { margin-bottom: 16px; }
+    .thr-row { display: flex; align-items: center; gap: 14px; }
+    .thr-row input[type="range"] { flex: 1; }
+    .thr-row .thr-val {
+        font-family: 'Fira Code', monospace; font-weight: 700;
+        color: var(--err); min-width: 120px; text-align: right;
+    }
+
+    .sample-grid {
+        display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+        gap: 10px; max-height: 520px; overflow-y: auto; padding: 4px;
+    }
+    .sample-card {
+        background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+        padding: 8px; text-align: center; font-family: 'Fira Code', monospace;
+        font-size: 0.72rem;
+    }
+    .sample-card img { width: 100%; height: 130px; object-fit: contain; background: #000; border-radius: 4px; }
+    .sample-card .score { color: var(--err); font-weight: 700; margin-top: 4px; }
+    .sample-card .label { color: var(--text-muted); }
+    .sample-card .gid { color: var(--text-muted); font-size: 0.65rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .err-box {
+        background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3);
+        color: var(--ng); padding: 12px 16px; border-radius: 8px; margin-bottom: 12px;
+        font-family: 'Fira Code', monospace;
+    }
+    .warn-box {
+        background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3);
+        color: var(--err); padding: 12px 16px; border-radius: 8px; margin-bottom: 12px;
+        font-family: 'Fira Code', monospace;
+    }
+    .sb-link-back {
+        display: inline-block; margin-bottom: 12px; color: var(--text-muted);
+        text-decoration: none; font-family: 'Fira Code', monospace; font-size: 0.85rem;
+    }
+    .sb-link-back:hover { color: var(--text); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="sb-container">
+    <a class="sb-link-back" href="/debug">← 回 Debug 推論</a>
+    <h2 style="margin: 0 0 12px;">批次 Scratch 分類器驗證 <span style="font-size:0.8rem; color:var(--text-muted); font-weight:normal;">（DINOv2 over-review）</span></h2>
+    <p style="color: var(--text-muted); font-size: 0.85rem; margin: 0 0 16px;">
+        選一個匯出批次 (Job)，對該批次所有樣本逐張跑 Scratch 分類器。
+        <strong>陽性</strong> = <code>{{ positive_label }}</code>（應被分類器翻回 OK）；
+        <strong>陰性</strong> = 其他全部（含 true_ng 與其他過檢類型，任何被翻回 OK 都計入 leak）。
+        最多處理 2000 張。
+    </p>
+
+    <div class="sb-toolbar">
+        <div class="sb-field">
+            <label>匯出批次 (Job)</label>
+            <select id="sb-job">
+                {% for j in jobs %}
+                <option value="{{ j }}">{{ j }}</option>
+                {% endfor %}
+                {% if not jobs %}
+                <option value="">（尚無 job 資料夾）</option>
+                {% endif %}
+            </select>
+        </div>
+        <button id="sb-start" class="sb-btn" {% if not jobs %}disabled{% endif %}>開始測試</button>
+        <button id="sb-cancel" class="sb-btn sb-btn-cancel" style="display:none;">取消</button>
+        {% if recent_tasks %}
+        <div class="sb-field" style="margin-left:auto;">
+            <label>最近任務</label>
+            <select id="sb-recent">
+                <option value="">—— 載入先前結果 ——</option>
+                {% for t in recent_tasks %}
+                <option value="{{ t.task_id }}">{{ t.task_id }} ({{ t.job_id }}, {{ t.state }}, {{ t.done }}/{{ t.total }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% endif %}
+    </div>
+
+    <div id="sb-error" class="err-box" style="display:none;"></div>
+    <div id="sb-warn" class="warn-box" style="display:none;"></div>
+
+    <div id="sb-progress" class="sb-progress-wrap" style="display:none;">
+        <div class="sb-progress-meta">
+            <span id="sb-progress-label">準備中…</span>
+            <span id="sb-progress-pct">0%</span>
+        </div>
+        <div class="sb-progress-bar"><div id="sb-progress-fill"></div></div>
+    </div>
+
+    <div id="sb-report" style="display:none;">
+        <div class="thr-panel sb-panel">
+            <h3>Threshold 試算（拖動即時重算）</h3>
+            <div class="thr-row">
+                <input type="range" id="thr-slider" min="0" max="1" step="0.0001" value="0.5">
+                <div class="thr-val" id="thr-val">threshold = 0.5000</div>
+            </div>
+            <div style="color:var(--text-muted); font-size:0.8rem; margin-top:8px;">
+                模型 conformal threshold = <span id="thr-conformal">-</span> |
+                safety × <span id="thr-safety">-</span> |
+                <strong>目前生效值</strong> = <span id="thr-effective" style="color:var(--err);">-</span>
+                <button id="thr-reset" style="margin-left:12px; background:transparent; color:var(--text-muted); border:1px solid var(--border); border-radius:6px; padding:3px 10px; cursor:pointer; font-family:'Fira Code', monospace; font-size:0.75rem;">重置為生效值</button>
+            </div>
+        </div>
+
+        <div class="sb-summary">
+            <div class="sb-card info"><div class="label">樣本總數</div><div class="value" id="s-total">-</div></div>
+            <div class="sb-card info"><div class="label">跳過</div><div class="value" id="s-skip">-</div></div>
+            <div class="sb-card ok"><div class="label">陽性 (scratch)</div><div class="value" id="s-pos">-</div></div>
+            <div class="sb-card warn"><div class="label">陰性 (其他)</div><div class="value" id="s-neg">-</div></div>
+            <div class="sb-card ok"><div class="label">Recall</div><div class="value" id="s-recall">-</div></div>
+            <div class="sb-card warn"><div class="label">Leak Rate</div><div class="value" id="s-leak">-</div></div>
+        </div>
+
+        <div class="sb-row">
+            <div class="sb-panel">
+                <h3>混淆矩陣</h3>
+                <table class="cm-table">
+                    <tr><th></th><th>預測：應 flip (score&gt;thr)</th><th>預測：保持 NG</th></tr>
+                    <tr>
+                        <th>實際：陽性</th>
+                        <td class="val cm-tp" id="cm-tp">-</td>
+                        <td class="val cm-fn" id="cm-fn">-</td>
+                    </tr>
+                    <tr>
+                        <th>實際：陰性</th>
+                        <td class="val cm-fp" id="cm-fp">-</td>
+                        <td class="val cm-tn" id="cm-tn">-</td>
+                    </tr>
+                </table>
+                <div style="margin-top:10px; font-size:0.8rem; color:var(--text-muted);">
+                    TP = 正確翻 OK　｜　FN = 漏翻（應翻但沒翻）　｜　FP = leak（不該翻卻翻了）　｜　TN = 正確保持 NG
+                </div>
+            </div>
+            <div class="sb-panel">
+                <h3>分數分佈</h3>
+                <canvas id="hist-canvas" width="560" height="260"
+                    style="width:100%; max-width:100%; background:#0a0f1a; border-radius:6px;"></canvas>
+                <div style="margin-top:8px; font-size:0.78rem; color:var(--text-muted);">
+                    <span style="display:inline-block; width:10px; height:10px; background:#22c55e; margin-right:4px;"></span>陽性
+                    <span style="display:inline-block; width:10px; height:10px; background:#ef4444; margin-right:4px;"></span>陰性
+                    <span style="display:inline-block; width:10px; height:10px; background:#f59e0b; margin-right:4px;"></span>threshold
+                </div>
+            </div>
+        </div>
+
+        <div class="sb-row">
+            <div class="sb-panel">
+                <h3>Leak 清單（陰性被翻 OK，應修正）<span id="fp-count" style="color:var(--ng); margin-left:8px;">-</span></h3>
+                <div class="sample-grid" id="fp-grid"></div>
+            </div>
+            <div class="sb-panel">
+                <h3>漏翻清單（陽性未翻）<span id="fn-count" style="color:#f59e0b; margin-left:8px;">-</span></h3>
+                <div class="sample-grid" id="fn-grid"></div>
+            </div>
+        </div>
+
+        <div style="margin-top:16px; display:flex; gap:12px;">
+            <button id="export-csv" class="sb-btn">匯出 CSV</button>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    const jobSel = document.getElementById('sb-job');
+    const startBtn = document.getElementById('sb-start');
+    const cancelBtn = document.getElementById('sb-cancel');
+    const errBox = document.getElementById('sb-error');
+    const warnBox = document.getElementById('sb-warn');
+    const progWrap = document.getElementById('sb-progress');
+    const progLabel = document.getElementById('sb-progress-label');
+    const progPct = document.getElementById('sb-progress-pct');
+    const progFill = document.getElementById('sb-progress-fill');
+    const report = document.getElementById('sb-report');
+    const recent = document.getElementById('sb-recent');
+    const slider = document.getElementById('thr-slider');
+    const thrVal = document.getElementById('thr-val');
+    const thrConformal = document.getElementById('thr-conformal');
+    const thrSafety = document.getElementById('thr-safety');
+    const thrEffective = document.getElementById('thr-effective');
+    const thrReset = document.getElementById('thr-reset');
+    const exportBtn = document.getElementById('export-csv');
+
+    let currentTaskId = null;
+    let pollTimer = null;
+    let cachedResults = [];
+    let effThreshold = 0;
+    let currentJob = '';
+
+    function showError(msg) {
+        errBox.textContent = msg || '';
+        errBox.style.display = msg ? 'block' : 'none';
+    }
+    function showWarn(msg) {
+        warnBox.textContent = msg || '';
+        warnBox.style.display = msg ? 'block' : 'none';
+    }
+
+    function setProgress(state, done, total, elapsed) {
+        progWrap.style.display = 'block';
+        const pct = total > 0 ? (done * 100 / total) : 0;
+        progFill.style.width = pct.toFixed(1) + '%';
+        progPct.textContent = pct.toFixed(1) + '%';
+        const eta = (done > 0 && total > done && elapsed > 0)
+            ? ` / 預估剩餘 ${Math.round(elapsed / done * (total - done))}s` : '';
+        const stateZh = {running:'執行中', done:'完成', cancelled:'已取消', failed:'失敗'}[state] || state;
+        progLabel.textContent = `${stateZh} — ${done} / ${total}${eta}`;
+    }
+
+    async function startJob() {
+        const job = jobSel.value;
+        if (!job) { showError('請選一個 Job'); return; }
+        showError(''); showWarn('');
+        startBtn.disabled = true;
+        try {
+            const resp = await fetch('/api/debug/scratch-batch/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({job_id: job})
+            });
+            const data = await resp.json();
+            if (!resp.ok) { showError(data.error || '啟動失敗'); startBtn.disabled = false; return; }
+            currentTaskId = data.task_id;
+            currentJob = job;
+            cancelBtn.style.display = 'inline-block';
+            report.style.display = 'none';
+            startPoll();
+        } catch (e) {
+            showError('網路錯誤：' + e.message);
+            startBtn.disabled = false;
+        }
+    }
+
+    async function cancelJob() {
+        if (!currentTaskId) return;
+        cancelBtn.disabled = true;
+        try {
+            await fetch('/api/debug/scratch-batch/cancel', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({task_id: currentTaskId})
+            });
+        } catch (e) {}
+        cancelBtn.disabled = false;
+    }
+
+    function startPoll() {
+        stopPoll();
+        pollTimer = setInterval(poll, 1000);
+        poll();
+    }
+    function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+    async function poll() {
+        if (!currentTaskId) return;
+        try {
+            const resp = await fetch('/api/debug/scratch-batch/status?task_id=' + encodeURIComponent(currentTaskId));
+            const s = await resp.json();
+            if (s.state === 'not_found') return;
+            setProgress(s.state, s.done, s.total, s.elapsed);
+            if (s.state === 'failed') { showError('任務失敗：' + (s.error || '未知錯誤')); stopPoll(); done(); return; }
+            if (s.error && s.state === 'running') { showWarn(s.error); }
+            if (s.state === 'done' || s.state === 'cancelled') { stopPoll(); await loadResult(); done(); }
+        } catch (e) { /* silent */ }
+    }
+
+    function done() {
+        startBtn.disabled = false;
+        cancelBtn.style.display = 'none';
+    }
+
+    async function loadResult() {
+        if (!currentTaskId) return;
+        try {
+            const resp = await fetch('/api/debug/scratch-batch/result?task_id=' + encodeURIComponent(currentTaskId));
+            const data = await resp.json();
+            if (!resp.ok) { showError(data.error || '讀取結果失敗'); return; }
+            cachedResults = data.results || [];
+            const status = data.status;
+            effThreshold = status.effective_threshold || 0;
+            currentJob = status.job_id;
+            thrConformal.textContent = (status.conformal_threshold || 0).toFixed(6);
+            thrSafety.textContent = (status.safety_multiplier || 0).toFixed(2);
+            thrEffective.textContent = effThreshold.toFixed(6);
+            slider.value = effThreshold;
+            recomputeAll(effThreshold);
+            report.style.display = 'block';
+        } catch (e) { showError('讀取結果失敗：' + e.message); }
+    }
+
+    function recomputeAll(thr) {
+        thrVal.textContent = 'threshold = ' + thr.toFixed(4);
+        let tp=0, fp=0, tn=0, fn=0, pos=0, neg=0, skip=0;
+        const fpList = [], fnList = [];
+        for (const r of cachedResults) {
+            const flipped = r.score > thr;
+            if (r.is_positive) {
+                pos += 1;
+                if (flipped) tp += 1; else { fn += 1; fnList.push(r); }
+            } else {
+                neg += 1;
+                if (flipped) { fp += 1; fpList.push(r); } else tn += 1;
+            }
+        }
+        const recall = pos ? tp / pos : 0;
+        const leak = neg ? fp / neg : 0;
+        document.getElementById('s-total').textContent = cachedResults.length;
+        document.getElementById('s-skip').textContent = skip;
+        document.getElementById('s-pos').textContent = pos;
+        document.getElementById('s-neg').textContent = neg;
+        document.getElementById('s-recall').textContent = (recall * 100).toFixed(1) + '%';
+        document.getElementById('s-leak').textContent = (leak * 100).toFixed(2) + '%';
+        document.getElementById('cm-tp').textContent = tp;
+        document.getElementById('cm-fn').textContent = fn;
+        document.getElementById('cm-fp').textContent = fp;
+        document.getElementById('cm-tn').textContent = tn;
+        fpList.sort((a, b) => b.score - a.score);
+        fnList.sort((a, b) => a.score - b.score);
+        document.getElementById('fp-count').textContent = `(${fp})`;
+        document.getElementById('fn-count').textContent = `(${fn})`;
+        renderGrid('fp-grid', fpList.slice(0, 200));
+        renderGrid('fn-grid', fnList.slice(0, 200));
+        drawHistogram(thr);
+    }
+
+    function renderGrid(id, samples) {
+        const grid = document.getElementById(id);
+        if (samples.length === 0) {
+            grid.innerHTML = '<div style="color:var(--text-muted); grid-column: 1/-1; text-align:center; padding:20px;">（無）</div>';
+            return;
+        }
+        const html = samples.map(r => {
+            const url = '/api/dataset_export/file?job=' + encodeURIComponent(currentJob) + '&path=' + encodeURIComponent(r.crop_path);
+            const cat = r.over_review_category || r.label;
+            return `<div class="sample-card">
+                <img src="${url}" loading="lazy" title="${r.sample_id}">
+                <div class="score">${r.score.toFixed(4)}</div>
+                <div class="label">${cat}</div>
+                <div class="gid" title="${r.glass_id} / ${r.image_name}">${r.glass_id}</div>
+            </div>`;
+        }).join('');
+        grid.innerHTML = html;
+    }
+
+    function drawHistogram(thr) {
+        const canvas = document.getElementById('hist-canvas');
+        const ctx = canvas.getContext('2d');
+        const W = canvas.width, H = canvas.height;
+        ctx.clearRect(0, 0, W, H);
+        const BINS = 40;
+        const posH = new Array(BINS).fill(0);
+        const negH = new Array(BINS).fill(0);
+        for (const r of cachedResults) {
+            const b = Math.min(BINS - 1, Math.max(0, Math.floor(r.score * BINS)));
+            if (r.is_positive) posH[b] += 1; else negH[b] += 1;
+        }
+        let maxH = 1;
+        for (let i = 0; i < BINS; i++) maxH = Math.max(maxH, posH[i] + negH[i]);
+        const PAD = 24;
+        const plotW = W - 2*PAD, plotH = H - 2*PAD;
+        const bw = plotW / BINS;
+        ctx.strokeStyle = '#2a3246'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(PAD, PAD); ctx.lineTo(PAD, H-PAD); ctx.lineTo(W-PAD, H-PAD); ctx.stroke();
+        for (let i = 0; i < BINS; i++) {
+            const x = PAD + i * bw;
+            const nH = negH[i] / maxH * plotH;
+            const pH = posH[i] / maxH * plotH;
+            if (nH > 0) {
+                ctx.fillStyle = '#ef4444';
+                ctx.fillRect(x+0.5, H-PAD - nH, Math.max(1, bw-1), nH);
+            }
+            if (pH > 0) {
+                ctx.fillStyle = '#22c55e';
+                ctx.fillRect(x+0.5, H-PAD - nH - pH, Math.max(1, bw-1), pH);
+            }
+        }
+        const tx = PAD + thr * plotW;
+        ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 2;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath(); ctx.moveTo(tx, PAD); ctx.lineTo(tx, H-PAD); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#f59e0b'; ctx.font = '11px monospace';
+        ctx.fillText('thr=' + thr.toFixed(3), tx + 4, PAD + 12);
+        ctx.fillStyle = '#6b7280'; ctx.font = '10px monospace';
+        ctx.fillText('0', PAD, H - PAD + 14);
+        ctx.fillText('1', W - PAD - 6, H - PAD + 14);
+        ctx.fillText('分數', (W / 2) - 12, H - 4);
+    }
+
+    startBtn.addEventListener('click', startJob);
+    cancelBtn.addEventListener('click', cancelJob);
+    slider.addEventListener('input', () => recomputeAll(parseFloat(slider.value)));
+    thrReset.addEventListener('click', () => { slider.value = effThreshold; recomputeAll(effThreshold); });
+    exportBtn.addEventListener('click', () => {
+        if (!currentTaskId) return;
+        const thr = parseFloat(slider.value);
+        window.location.href = '/api/debug/scratch-batch/export?task_id=' + encodeURIComponent(currentTaskId)
+            + '&threshold=' + encodeURIComponent(thr);
+    });
+    if (recent) {
+        recent.addEventListener('change', async () => {
+            const tid = recent.value;
+            if (!tid) return;
+            currentTaskId = tid;
+            await loadResult();
+            progWrap.style.display = 'none';
+        });
+    }
+})();
+</script>
+{% endblock %}

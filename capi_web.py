@@ -31,6 +31,11 @@ from capi_dataset_export import (
     read_manifest, write_manifest, delete_sample, relabel_sample,
     get_valid_labels, LABEL_ZH, list_job_dirs,
 )
+from capi_scratch_batch import (
+    ScratchBatchRunner, compute_summary as scratch_batch_summary,
+    POSITIVE_LABEL as SCRATCH_POSITIVE_LABEL,
+    STATE_RUNNING as SCRATCH_STATE_RUNNING,
+)
 
 logger = logging.getLogger("capi.web")
 
@@ -76,6 +81,9 @@ def tile_info(t):
     if t.get("is_bomb"):
         badge = "badge-err"
         info += f" | 炸彈代碼: {t.get('bomb_code','')}"
+    if t.get("scratch_filtered") and not t.get("is_bomb") and not t.get("is_dust"):
+        badge = "badge-ok"
+        info += f" | 🧽 DINOv2 救回 (scratch={t.get('scratch_score', 0):.3f})"
     return badge, info
 
 def get_img_stem(img):
@@ -208,6 +216,21 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/api/dataset_export/file":
                 self._handle_dataset_export_file(query)
                 return
+            elif path == "/debug/scratch-batch":
+                self._handle_scratch_batch_page(path, query)
+                return
+            elif path == "/api/debug/scratch-batch/jobs":
+                self._handle_scratch_batch_jobs()
+                return
+            elif path == "/api/debug/scratch-batch/status":
+                self._handle_scratch_batch_status(query)
+                return
+            elif path == "/api/debug/scratch-batch/result":
+                self._handle_scratch_batch_result(query)
+                return
+            elif path == "/api/debug/scratch-batch/export":
+                self._handle_scratch_batch_export(query)
+                return
             elif path == "/favicon.ico":
                 self._send_response(204, "")
             else:
@@ -270,6 +293,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path == "/api/dataset_export/sample/move":
                 self._handle_dataset_sample_move()
+                return
+            elif path == "/api/debug/scratch-batch/start":
+                self._handle_scratch_batch_start()
+                return
+            elif path == "/api/debug/scratch-batch/cancel":
+                self._handle_scratch_batch_cancel()
                 return
             else:
                 self._send_404(path)
@@ -1216,7 +1245,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             records = self.db.get_client_accuracy_records(start_date, end_date)
             inf_ids = list({r["inference_record_id"] for r in records if r.get("inference_record_id")})
             dust_ids = self.db.get_dust_affected_record_ids(inf_ids) if inf_ids else set()
-            summary, out_records = self._compute_client_summary(records, dust_ids)
+            scratch_stats = self.db.get_scratch_rescue_stats(inf_ids) if inf_ids else {}
+            summary, out_records = self._compute_client_summary(records, dust_ids, scratch_stats)
 
             self._send_json({
                 "success": True,
@@ -1230,7 +1260,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.error(f"Client data API error: {e}", exc_info=True)
             self._send_json({"success": False, "error": str(e)})
 
-    def _compute_client_summary(self, records: list, dust_affected_ids: set = None):
+    def _compute_client_summary(self, records: list, dust_affected_ids: set = None, scratch_stats: dict = None):
         """從 client accuracy records 計算統計摘要並格式化 records，單次遍歷。
         Returns: (summary_dict, out_records_list)
         """
@@ -1256,6 +1286,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "total": 0, "reviewed": 0, "unreviewed": 0,
                     "byCategory": _empty_over_cats(),
                 },
+                "scratchRescueStats": {
+                    "panels": 0, "images": 0, "tiles": 0,
+                },
             }, []
 
         aoiNG = aiNG = ricNG = 0
@@ -1268,6 +1301,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         miss_by_cat = _empty_miss_cats()
         over_reviewed = 0
         over_by_cat = _empty_over_cats()
+        scratch_stats = scratch_stats or {}
+        scratch_panels = 0
+        scratch_images_total = 0
+        scratch_tiles_total = 0
         out_records = []
 
         for rec in records:
@@ -1293,7 +1330,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 ),
                 "miss_review": None,
                 "over_review": None,
+                "scratch_rescue": None,
             }
+            rid = rec.get("inference_record_id")
+            sr = scratch_stats.get(rid) if rid else None
+            if sr:
+                out_rec["scratch_rescue"] = {"tiles": sr["tiles"], "images": sr["images"]}
+                scratch_panels += 1
+                scratch_images_total += sr["images"]
+                scratch_tiles_total += sr["tiles"]
             if rec.get("review_id"):
                 out_rec["miss_review"] = {
                     "id": rec["review_id"],
@@ -1384,6 +1429,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "reviewed": over_reviewed,
                 "unreviewed": aiOver - over_reviewed,
                 "byCategory": over_by_cat,
+            },
+            "scratchRescueStats": {
+                "panels": scratch_panels,
+                "images": scratch_images_total,
+                "tiles": scratch_tiles_total,
             },
         }, out_records
 
@@ -3202,6 +3252,159 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         self._send_binary(str(target))
+
+    # ── Debug: 批次 Scratch 分類器驗證 ─────────────────
+    _scratch_batch_runner = None
+    _scratch_batch_lock = threading.Lock()
+
+    @classmethod
+    def _get_scratch_batch_runner(cls):
+        with cls._scratch_batch_lock:
+            if cls._scratch_batch_runner is None:
+                cache_dir = Path("reports") / "scratch_batch"
+                cls._scratch_batch_runner = ScratchBatchRunner(
+                    inferencer=cls.inferencer,
+                    gpu_lock=cls._gpu_lock,
+                    cache_dir=cache_dir,
+                )
+            return cls._scratch_batch_runner
+
+    def _handle_scratch_batch_page(self, path: str, query: dict):
+        jobs = self._dataset_list_jobs()
+        runner = self._get_scratch_batch_runner()
+        recent = runner.list_recent(limit=10)
+        template = self.jinja_env.get_template("debug_scratch_batch.html")
+        html = template.render(
+            request_path=path,
+            jobs=jobs,
+            recent_tasks=[t.to_status_dict() for t in recent],
+            positive_label=SCRATCH_POSITIVE_LABEL,
+        )
+        self._send_response(200, html)
+
+    def _handle_scratch_batch_jobs(self):
+        self._send_json({"jobs": self._dataset_list_jobs()})
+
+    def _handle_scratch_batch_start(self):
+        data = self._read_json_body()
+        if data is None:
+            return
+        job_id = (data.get("job_id") or "").strip()
+        if not job_id:
+            self._send_json({"error": "缺少 job_id"}, status=400)
+            return
+        job_dir = self._dataset_resolve_job_dir(job_id)
+        if job_dir is None:
+            self._send_json({"error": f"無效的 job：{job_id}"}, status=404)
+            return
+        if self.inferencer is None:
+            self._send_json({"error": "Inferencer 未初始化，無法執行分類器"}, status=500)
+            return
+
+        runner = self._get_scratch_batch_runner()
+        try:
+            task = runner.start(job_id, job_dir)
+        except RuntimeError as e:
+            self._send_json({"error": str(e)}, status=409)
+            return
+        self._send_json(task.to_status_dict())
+
+    def _handle_scratch_batch_cancel(self):
+        data = self._read_json_body()
+        if data is None:
+            return
+        task_id = (data.get("task_id") or "").strip()
+        if not task_id:
+            self._send_json({"error": "缺少 task_id"}, status=400)
+            return
+        ok = self._get_scratch_batch_runner().cancel(task_id)
+        self._send_json({"cancelled": bool(ok)})
+
+    def _handle_scratch_batch_status(self, query: dict):
+        tid = (query.get("task_id", [""])[0] if isinstance(query.get("task_id"), list) else query.get("task_id")) or ""
+        runner = self._get_scratch_batch_runner()
+        task = runner.get(tid) if tid else runner.current()
+        if task is None:
+            self._send_json({"state": "not_found"})
+            return
+        self._send_json(task.to_status_dict())
+
+    def _handle_scratch_batch_result(self, query: dict):
+        tid = (query.get("task_id", [""])[0] if isinstance(query.get("task_id"), list) else query.get("task_id")) or ""
+        if not tid:
+            self._send_json({"error": "缺少 task_id"}, status=400)
+            return
+        runner = self._get_scratch_batch_runner()
+        task = runner.get(tid)
+        if task is None:
+            self._send_json({"error": "找不到該任務"}, status=404)
+            return
+        status = task.to_status_dict()
+        results = [
+            {
+                "sample_id": r.sample_id,
+                "label": r.label,
+                "is_positive": r.is_positive,
+                "score": r.score,
+                "crop_path": r.crop_path,
+                "glass_id": r.glass_id,
+                "image_name": r.image_name,
+                "over_review_category": r.over_review_category,
+            }
+            for r in task.results
+        ]
+        default_summary = scratch_batch_summary(task.results, task.effective_threshold)
+        self._send_json({
+            "status": status,
+            "results": results,
+            "default_summary": default_summary,
+            "positive_label": SCRATCH_POSITIVE_LABEL,
+        })
+
+    def _handle_scratch_batch_export(self, query: dict):
+        import csv as _csv
+        import io as _io
+        tid = (query.get("task_id", [""])[0] if isinstance(query.get("task_id"), list) else query.get("task_id")) or ""
+        try:
+            thr = float((query.get("threshold", [""])[0] if isinstance(query.get("threshold"), list) else query.get("threshold")) or 0)
+        except Exception:
+            thr = 0.0
+        if not tid:
+            self._send_json({"error": "缺少 task_id"}, status=400)
+            return
+        task = self._get_scratch_batch_runner().get(tid)
+        if task is None:
+            self._send_json({"error": "找不到該任務"}, status=404)
+            return
+        if thr <= 0:
+            thr = task.effective_threshold
+
+        buf = _io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow([
+            "sample_id", "label", "is_positive", "score", "flipped",
+            "judgment", "glass_id", "image_name", "over_review_category", "crop_path",
+        ])
+        for r in task.results:
+            flipped = r.score > thr
+            if r.is_positive:
+                judgment = "TP" if flipped else "FN"
+            else:
+                judgment = "FP (leak)" if flipped else "TN"
+            w.writerow([
+                r.sample_id, r.label, int(r.is_positive), f"{r.score:.6f}",
+                int(flipped), judgment, r.glass_id, r.image_name,
+                r.over_review_category, r.crop_path,
+            ])
+        content = buf.getvalue()
+        content_bytes = ("\ufeff" + content).encode("utf-8")
+        filename = f"scratch_batch_{tid}.csv"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
+        self.send_header("Content-Length", str(len(content_bytes)))
+        self.end_headers()
+        self.wfile.write(content_bytes)
 
     def _read_json_body(self) -> Optional[dict]:
         """讀 POST JSON body；失敗回 None 並已送出 400 response"""
