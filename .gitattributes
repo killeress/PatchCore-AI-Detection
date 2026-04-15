@@ -1,0 +1,20 @@
+# Force LF line endings for shell scripts so they run on Linux production
+# (Windows dev would otherwise add CRLF and break ./start_server.sh)
+*.sh        text eol=lf
+*.bash      text eol=lf
+
+# Treat Python / YAML / Markdown as text but let Git auto-detect line ending
+*.py        text
+*.yaml      text
+*.yml       text
+*.md        text
+
+# Binary blobs — never normalize
+*.pkl       binary
+*.pth       binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.tif       binary
+*.tiff      binary
+*.npz       binary
