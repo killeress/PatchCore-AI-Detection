@@ -56,6 +56,50 @@
     width: 14px;
     color: #10b981;                    /* emerald-500 */
   }
+  /* Multi-select mode */
+  .select-mode .sample-card {
+    cursor: pointer;
+  }
+  .select-mode .sample-card .select-check {
+    display: flex;
+  }
+  .sample-card .select-check {
+    display: none;
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    z-index: 10;
+    width: 24px;
+    height: 24px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    border: 2px solid #475569;
+    background: rgba(15, 23, 42, 0.8);
+    backdrop-filter: blur(4px);
+    transition: all 0.15s;
+  }
+  .sample-card.selected .select-check {
+    border-color: #10b981;
+    background: #10b981;
+  }
+  .sample-card.selected .select-check svg {
+    display: block;
+  }
+  .sample-card .select-check svg {
+    display: none;
+    width: 14px;
+    height: 14px;
+    color: white;
+  }
+  .sample-card.selected {
+    border-color: #10b981 !important;
+    box-shadow: 0 0 0 1px #10b981;
+  }
+  /* 多選模式下隱藏單張操作按鈕 */
+  .select-mode .sample-card .action-buttons {
+    display: none;
+  }
 </style>
 {% endblock %}
 
@@ -121,6 +165,10 @@
       </select>
     </div>
     <button id="btn-apply" class="px-4 py-2 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white rounded-lg text-sm font-semibold transition-all cursor-pointer">套用</button>
+    <button id="btn-select-mode" type="button"
+            class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-sm font-semibold transition-all cursor-pointer">
+      多選模式
+    </button>
     <div class="ml-auto text-slate-400 text-sm">
       顯示 <span class="text-slate-100 font-mono">{{ start_idx + 1 }}–{{ end_idx }}</span> / <span class="text-slate-100 font-mono">{{ filtered_count }}</span>
     </div>
@@ -132,8 +180,14 @@
     {% for it in items %}
     <div class="sample-card bg-slate-900 border border-slate-800 rounded-xl overflow-hidden hover:border-slate-600 transition-colors relative"
          data-sample-id="{{ it.sample_id }}" data-label="{{ it.label }}">
+      <!-- Select checkbox (多選模式) -->
+      <div class="select-check">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
+        </svg>
+      </div>
       <!-- Action buttons (top-right overlay) -->
-      <div class="absolute top-1.5 right-1.5 z-10 flex gap-1">
+      <div class="action-buttons absolute top-1.5 right-1.5 z-10 flex gap-1">
         {% if it.inference_record_id %}
         <a href="/record/{{ it.inference_record_id }}" target="_blank" title="查看推論紀錄 (record #{{ it.inference_record_id }})"
            class="w-7 h-7 flex items-center justify-center bg-slate-800/80 hover:bg-emerald-500/30 text-slate-200 rounded-md border border-slate-700 hover:border-emerald-400 backdrop-blur-sm transition-colors cursor-pointer no-underline">
@@ -212,6 +266,33 @@
 <div id="moveMenu" class="fixed z-50 hidden" onclick="event.stopPropagation()">
   <div class="move-menu-header">轉到類別</div>
   <div id="moveMenuItems"></div>
+</div>
+
+<!-- Batch Action Toolbar (多選模式底部工具列) -->
+<div id="batchBar" class="fixed bottom-0 left-0 right-0 z-40 hidden"
+     style="background: linear-gradient(to top, #0f172a, rgba(15,23,42,0.95)); border-top: 1px solid #334155; backdrop-filter: blur(8px);">
+  <div class="max-w-[1600px] mx-auto px-6 py-3 flex items-center gap-4">
+    <button type="button" id="btn-select-all"
+            class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-sm cursor-pointer transition-colors">
+      全選本頁
+    </button>
+    <button type="button" id="btn-select-none"
+            class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-sm cursor-pointer transition-colors">
+      取消全選
+    </button>
+    <span id="batchCount" class="text-slate-300 text-sm font-mono">已選 0 張</span>
+    <div class="ml-auto flex items-center gap-3">
+      <button type="button" id="btn-batch-delete"
+              class="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg text-sm font-semibold transition-colors cursor-pointer disabled:cursor-not-allowed"
+              disabled>
+        刪除所選
+      </button>
+      <button type="button" id="btn-exit-select"
+              class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm font-semibold transition-colors cursor-pointer">
+        退出多選
+      </button>
+    </div>
+  </div>
 </div>
 
 <!-- Image Viewer Modal -->
@@ -395,5 +476,119 @@ function removeCardFromDom(sampleId) {
   card.style.transform = "scale(0.96)";
   setTimeout(() => card.remove(), 260);
 }
+
+// ---- Multi-select Mode ----
+const selectedIds = new Set();
+let selectMode = false;
+
+function enterSelectMode() {
+  selectMode = true;
+  document.querySelector(".p-6").classList.add("select-mode");
+  document.getElementById("batchBar").classList.remove("hidden");
+  document.getElementById("btn-select-mode").textContent = "多選模式 (開啟中)";
+  document.getElementById("btn-select-mode").classList.add("bg-emerald-600/30", "border-emerald-500/50");
+  updateBatchCount();
+}
+
+function exitSelectMode() {
+  selectMode = false;
+  selectedIds.clear();
+  document.querySelector(".p-6").classList.remove("select-mode");
+  document.getElementById("batchBar").classList.add("hidden");
+  document.getElementById("btn-select-mode").textContent = "多選模式";
+  document.getElementById("btn-select-mode").classList.remove("bg-emerald-600/30", "border-emerald-500/50");
+  document.querySelectorAll(".sample-card.selected").forEach(c => c.classList.remove("selected"));
+}
+
+function toggleSelect(card) {
+  const sid = card.dataset.sampleId;
+  if (selectedIds.has(sid)) {
+    selectedIds.delete(sid);
+    card.classList.remove("selected");
+  } else {
+    selectedIds.add(sid);
+    card.classList.add("selected");
+  }
+  updateBatchCount();
+}
+
+function updateBatchCount() {
+  const n = selectedIds.size;
+  document.getElementById("batchCount").textContent = `已選 ${n} 張`;
+  document.getElementById("btn-batch-delete").disabled = (n === 0);
+}
+
+async function batchDelete() {
+  const ids = Array.from(selectedIds);
+  if (ids.length === 0) return;
+  if (!confirm(`確定刪除所選的 ${ids.length} 張樣本？\n\n實體檔案 (crop + heatmap) 與 manifest row 都會移除，無法復原。`)) {
+    return;
+  }
+  document.getElementById("btn-batch-delete").disabled = true;
+  document.getElementById("btn-batch-delete").textContent = "刪除中…";
+  try {
+    const r = await fetch("/api/dataset_export/sample/batch_delete", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({job: CURRENT_JOB, sample_ids: ids}),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      alert("批次刪除失敗: " + (data.error || r.status));
+      return;
+    }
+    // 移除已刪除的卡片
+    (data.deleted || []).forEach(sid => {
+      selectedIds.delete(sid);
+      removeCardFromDom(sid);
+    });
+    if (data.not_found && data.not_found.length > 0) {
+      alert(`${data.deleted_count} 張刪除成功，${data.not_found.length} 張找不到。`);
+    }
+    updateBatchCount();
+  } catch (e) {
+    alert("網路錯誤: " + e);
+  } finally {
+    document.getElementById("btn-batch-delete").textContent = "刪除所選";
+    updateBatchCount();
+  }
+}
+
+// 卡片點擊 — 多選模式下切換選取
+document.addEventListener("click", (e) => {
+  if (!selectMode) return;
+  const card = e.target.closest(".sample-card");
+  if (!card) return;
+  // 不攔截連結點擊
+  if (e.target.closest("a")) return;
+  e.preventDefault();
+  e.stopPropagation();
+  toggleSelect(card);
+}, true);
+
+// 工具列按鈕綁定
+document.getElementById("btn-select-mode").addEventListener("click", () => {
+  if (selectMode) exitSelectMode(); else enterSelectMode();
+});
+document.getElementById("btn-exit-select").addEventListener("click", exitSelectMode);
+document.getElementById("btn-batch-delete").addEventListener("click", batchDelete);
+document.getElementById("btn-select-all").addEventListener("click", () => {
+  document.querySelectorAll(".sample-card").forEach(card => {
+    const sid = card.dataset.sampleId;
+    selectedIds.add(sid);
+    card.classList.add("selected");
+  });
+  updateBatchCount();
+});
+document.getElementById("btn-select-none").addEventListener("click", () => {
+  selectedIds.clear();
+  document.querySelectorAll(".sample-card.selected").forEach(c => c.classList.remove("selected"));
+  updateBatchCount();
+});
+
+// ESC 退出多選模式
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && selectMode) exitSelectMode();
+});
 </script>
 {% endblock %}

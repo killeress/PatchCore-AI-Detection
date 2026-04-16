@@ -291,6 +291,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/api/dataset_export/sample/delete":
                 self._handle_dataset_sample_delete()
                 return
+            elif path == "/api/dataset_export/sample/batch_delete":
+                self._handle_dataset_sample_batch_delete()
+                return
             elif path == "/api/dataset_export/sample/move":
                 self._handle_dataset_sample_move()
                 return
@@ -3444,6 +3447,45 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "sample_id not found"}, status=404)
             return
         self._send_json({"ok": True, "sample_id": sample_id})
+
+    def _handle_dataset_sample_batch_delete(self):
+        """POST /api/dataset_export/sample/batch_delete  body: {job, sample_ids: [...]}"""
+        data = self._read_json_body()
+        if data is None:
+            return
+        job_id = (data.get("job") or "").strip()
+        sample_ids = data.get("sample_ids")
+        if not job_id or not isinstance(sample_ids, list) or not sample_ids:
+            self._send_json({"error": "missing job or sample_ids"}, status=400)
+            return
+
+        job_dir = self._dataset_resolve_job_dir(job_id)
+        if job_dir is None:
+            self._send_json({"error": "invalid job"}, status=404)
+            return
+
+        manifest_path = job_dir / "manifest.csv"
+        state = self._dataset_export_state
+        deleted = []
+        not_found = []
+        with state["manifest_lock"]:
+            manifest = read_manifest(manifest_path)
+            for sid in sample_ids:
+                sid = (sid or "").strip()
+                if not sid:
+                    continue
+                if delete_sample(job_dir, manifest, sid):
+                    deleted.append(sid)
+                else:
+                    not_found.append(sid)
+            if deleted:
+                write_manifest(manifest_path, manifest)
+        self._send_json({
+            "ok": True,
+            "deleted": deleted,
+            "not_found": not_found,
+            "deleted_count": len(deleted),
+        })
 
     def _handle_dataset_sample_move(self):
         """POST /api/dataset_export/sample/move  body: {job, sample_id, new_label}"""
