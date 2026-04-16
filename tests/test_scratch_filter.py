@@ -164,3 +164,26 @@ def test_filter_keeps_tile_in_anomaly_tiles_when_flipping():
         assert t.scratch_score == pytest.approx(0.95)
     # Aggregate count still tracks how many were flipped
     assert ir.scratch_filter_count == 3
+
+
+def test_filter_skips_bomb_tile():
+    """C2 regression: bomb tile 不應進入 classifier；scratch 欄位保持預設值。"""
+    from scratch_filter import ScratchFilter
+    clf = _MockClassifier(fixed_score=0.99, conformal_threshold=0.7)
+    sf = ScratchFilter(clf, safety_multiplier=1.0)   # threshold = 0.7
+    ir = _fake_image_result_with_tiles(2)
+    # 第一顆 tile 標記為炸彈
+    ir.tiles[0].is_bomb = True
+
+    sf.apply_to_image_result(ir)
+
+    # Bomb tile: classifier 未被呼叫，scratch 欄位為預設值
+    assert ir.tiles[0].scratch_score == 0.0
+    assert ir.tiles[0].scratch_filtered is False
+    # Non-bomb tile: 正常跑，高分被翻回 OK
+    assert ir.tiles[1].scratch_score == pytest.approx(0.99)
+    assert ir.tiles[1].scratch_filtered is True
+    # scratch_filter_count 只計非 bomb tile
+    assert ir.scratch_filter_count == 1
+    # anomaly_tiles 仍保留兩顆 tile（C1 不變性）
+    assert len(ir.anomaly_tiles) == 2

@@ -35,6 +35,8 @@ class ScratchFilter:
         t_image_start = time.perf_counter()
         for entry in image_result.anomaly_tiles:
             tile = entry[0]
+            if getattr(tile, "is_bomb", False):
+                continue
             t0 = time.perf_counter()
             try:
                 score = float(self._classifier.predict(tile.image))
