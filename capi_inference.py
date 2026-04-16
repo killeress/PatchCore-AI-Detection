@@ -23,6 +23,9 @@ os.environ["TRUST_REMOTE_CODE"] = "1"
 # 抑制 anomalib 棄用警告 (TorchInferencer legacy / TRUST_REMOTE_CODE)
 import logging as _logging
 _logging.getLogger("anomalib.deploy.inferencers.torch_inferencer").setLevel(_logging.ERROR)
+# 抑制 dinov2 載入時 xFormers 不可用的 UserWarning
+import warnings as _warnings
+_warnings.filterwarnings("ignore", message=r".*xFormers is not available.*")
 
 import cv2
 import numpy as np
@@ -323,13 +326,11 @@ class CAPIInferencer:
         if self._scratch_load_failed:
             return None
 
-        # Rebuild filter if safety multiplier changed (dynamic config)
         current_safety = float(getattr(self.config, "scratch_safety_multiplier", 1.1))
         if self.scratch_filter is not None and \
                 abs(self.scratch_filter._safety - current_safety) > 1e-9:
             self.scratch_filter = ScratchFilter(self.scratch_filter._classifier,
                                                 safety_multiplier=current_safety)
-
         if self.scratch_filter is not None:
             return self.scratch_filter
 
@@ -343,11 +344,13 @@ class CAPIInferencer:
                 dinov2_repo_path=repo_path or None,
                 device=self.device,
             )
-        except ScratchClassifierLoadError as e:
-            logger.error("ScratchClassifier load failed: %s", e)
+        except Exception as e:
+            logger.error("ScratchClassifier load failed: %s", e, exc_info=True)
             self._scratch_load_failed = True
             return None
         self.scratch_filter = ScratchFilter(clf, safety_multiplier=current_safety)
+        logger.info("ScratchClassifier filter ready (safety=%.2f, threshold=%.6f)",
+                    current_safety, self.scratch_filter.effective_threshold)
         return self.scratch_filter
 
     def _get_device(self, device: str) -> str:
@@ -2860,10 +2863,13 @@ class CAPIInferencer:
                 result_map[image_prefix].append(defect)
 
             total = sum(len(v) for v in result_map.values())
-            logger.info(f"AOI Report: 解析到 {total} 筆缺陷 (涉及 {len(result_map)} 種圖片前綴)")
+            per_prefix = ", ".join(f"{p}×{len(v)}" for p, v in result_map.items())
+            logger.info(
+                f"AOI Report: 解析到 {total} 筆缺陷 (涉及 {len(result_map)} 種圖片前綴) [{per_prefix}]"
+            )
             for prefix, defects in result_map.items():
                 for d in defects:
-                    print(f"  🎯 {d.defect_code} @ ({d.product_x}, {d.product_y}) → {prefix}")
+                    logger.debug(f"  🎯 {d.defect_code} @ ({d.product_x}, {d.product_y}) → {prefix}")
 
         except Exception as e:
             logger.error(f"AOI Report: 解析失敗: {e}")
@@ -2983,7 +2989,7 @@ class CAPIInferencer:
 
             patchcore_tiles.append(tile)
             next_tile_id += 1
-            print(f"  🎯 AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}) → Tile ({tx},{ty}) {tile_size}x{tile_size}")
+            logger.debug(f"  🎯 AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}) → Tile ({tx},{ty}) {tile_size}x{tile_size}")
 
         return patchcore_tiles, edge_defects
 
@@ -3151,9 +3157,6 @@ class CAPIInferencer:
                         if not is_line:
                             print(f"⚠️ BOMB line 位置匹配但熱力圖非線狀 (aspect_ratio={aspect_ratio:.2f} < {self.config.bomb_line_min_aspect_ratio})，跳過 {bomb.defect_code}")
                             continue
-                        print(f"✅ BOMB line 形態驗證通過 (aspect_ratio={aspect_ratio:.2f})")
-                    elif skip_shape_check:
-                        print(f"✅ BOMB line 共識通過 (同線已有足夠匹配，跳過形態驗證)")
                     return True, bomb.defect_code
                     
             elif bomb.defect_type == "point":
@@ -3217,8 +3220,7 @@ class CAPIInferencer:
                 f"⚠️ 重複投片偵測: {panel_dir.name} 共 {original_count} 張圖片 (上限 {max_imgs})，"
                 f"依建立時間選出最新 {len(image_files)} 張繼續推論"
             )
-            for f in image_files:
-                print(f"   ✅ 選用: {f.name}")
+            print(f"   ✅ 選用: {', '.join(f.name for f in image_files)}")
         
         # 如果有的話，解析 Defect.txt
         defect_map = self._parse_defect_txt(panel_dir / "Defect.txt")
@@ -3350,9 +3352,9 @@ class CAPIInferencer:
 
         # 過濾出需要處理的檔案
         files_to_process = [f for f in normal_files if not self.config.should_skip_file(f.name)]
-        for f in normal_files:
-            if self.config.should_skip_file(f.name):
-                print(f"⏭️ 跳過檔案 (設定): {f.name}")
+        skipped = [f.name for f in normal_files if self.config.should_skip_file(f.name)]
+        if skipped:
+            print(f"⏭️ 跳過檔案 (設定) ×{len(skipped)}: {', '.join(skipped)}")
         
         total_files = len(files_to_process)
         if total_files == 0:
@@ -4042,7 +4044,6 @@ class CAPIInferencer:
                         if is_bomb:
                             tile.is_bomb = True
                             tile.bomb_defect_code = bomb_code
-                            print(f"💣 {result.image_path.name} Tile@({tile.x},{tile.y}) Peak@({tile.anomaly_peak_x},{tile.anomaly_peak_y}) → BOMB match ({bomb_code})")
 
             # === Bomb line 共識機制 ===
             # 若同一條 bomb line 已有 ≥3 個 tile 通過形態驗證，
@@ -4085,7 +4086,6 @@ class CAPIInferencer:
                         if is_bomb:
                             tile.is_bomb = True
                             tile.bomb_defect_code = bomb_code
-                            print(f"💣 {result.image_path.name} Tile@({tile.x},{tile.y}) → BOMB consensus match ({bomb_code}, {confirmed} tiles confirmed)")
 
             # === 邊緣缺陷炸彈比對 ===
             for result in results:
@@ -4104,7 +4104,16 @@ class CAPIInferencer:
                     if is_bomb:
                         ed.is_bomb = True
                         ed.bomb_defect_code = bomb_code
-                        print(f"💣 {result.image_path.name} Edge@{ed.side} Center@({cx},{cy}) → BOMB match ({bomb_code})")
+
+            from collections import Counter
+            for result in results:
+                edge_bombs = [ed for ed in result.edge_defects if ed.is_bomb]
+                summary = Counter(t.bomb_defect_code for t, _, _ in result.anomaly_tiles if t.is_bomb)
+                summary.update(ed.bomb_defect_code for ed in edge_bombs)
+                if summary:
+                    parts = [f"{c}×{n}" for c, n in summary.items()]
+                    suffix = f" (含 edge {len(edge_bombs)})" if edge_bombs else ""
+                    print(f"💣 {result.image_path.name} BOMB match: {', '.join(parts)}{suffix}")
 
         # === 不檢測排除區域判定 (基於 peak 位置) ===
         # 排除區域來自 cv_edge_exclude_zones，原僅用於邊緣檢測，現擴展至 PatchCore 推論
@@ -4141,12 +4150,19 @@ class CAPIInferencer:
             except Exception as e:
                 logger.error(f"排除區域檢查失敗: {e}", exc_info=True)
 
-        # === Scratch post-filter: flip high-confidence scratch NG tiles to OK ===
         sf = self._get_scratch_filter()
         if sf is not None:
+            panel_tiles = panel_filtered = 0
+            panel_ms = 0.0
             for result in results:
                 if result.anomaly_tiles:
                     sf.apply_to_image_result(result)
+                    panel_tiles += len(result.anomaly_tiles)
+                    panel_filtered += getattr(result, "scratch_filter_count", 0)
+                    panel_ms += getattr(result, "scratch_elapsed_ms", 0.0)
+            if panel_tiles:
+                logger.info("[scratch] Panel 總計: 檢查 %d tiles, filtered=%d, TT=%.1fms",
+                            panel_tiles, panel_filtered, panel_ms)
 
         total_panel_time = preprocess_time + inference_time + postprocess_time
         print(f"📊 Panel {panel_dir.name} 總計: 預處理 {preprocess_time:.2f}s + 推論 {inference_time:.2f}s + 後處理 {postprocess_time:.2f}s = {total_panel_time:.2f}s")

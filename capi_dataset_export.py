@@ -79,6 +79,16 @@ JOB_STATE_CANCELLED = "cancelled"
 # 黑畫面光源 prefix：該光源條件下面板是關燈狀態，整張圖無訓練價值，直接以檔名過濾
 BLACK_IMAGE_PREFIX = "B0F"
 
+# 過曝過濾（只套用在 true_ng 樣本）：crop 前景幾乎全白時，代表曝光過度、無訓練價值。
+# 門檻以 datasets/over_review/true_ng 觀測值校正：
+#   - 前景 = gray > OVEREXPOSURE_FG_THRESHOLD 的像素（排除黑色背景）
+#   - 前景佔比太低 → 不做判斷（避免誤殺）
+#   - 前景平均亮度 ≥ MEAN 且 ≥200 亮度像素比例 ≥ RATIO → 判為過曝
+OVEREXPOSURE_FG_THRESHOLD = 30
+OVEREXPOSURE_MIN_FG_FRAC = 0.20
+OVEREXPOSURE_FG_MEAN = 200.0
+OVEREXPOSURE_BRIGHT200_RATIO = 0.65
+
 
 def parse_datastr_per_prefix(datastr: str) -> Dict[str, str]:
     """解析 RIC DATASTR，回傳 {prefix: "OK"|"NG"} dict。
@@ -379,6 +389,31 @@ def crop_patchcore_tile(img: np.ndarray, x: int, y: int, w: int, h: int) -> np.n
         return crop
     # 右/下 pad（tile 通常在 grid 邊緣才會不足）
     return _pad_to_size(crop, CROP_SIZE, pad_top=0, pad_left=0)
+
+
+def is_overexposed_crop(crop: np.ndarray) -> bool:
+    """判斷 crop 是否為過曝無訓練價值的樣本。
+
+    規則：前景（gray > OVEREXPOSURE_FG_THRESHOLD，用以排除黑色背景）
+    佔比 ≥ OVEREXPOSURE_MIN_FG_FRAC，且前景平均亮度 ≥ OVEREXPOSURE_FG_MEAN
+    且前景中 ≥200 的像素比例 ≥ OVEREXPOSURE_BRIGHT200_RATIO。
+    """
+    if crop.ndim == 3:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = crop
+    fg_mask = gray > OVEREXPOSURE_FG_THRESHOLD
+    fg_cnt = int(fg_mask.sum())
+    if fg_cnt == 0:
+        return False
+    fg_frac = fg_cnt / gray.size
+    if fg_frac < OVEREXPOSURE_MIN_FG_FRAC:
+        return False
+    fg = gray[fg_mask]
+    if float(fg.mean()) < OVEREXPOSURE_FG_MEAN:
+        return False
+    bright_ratio = float((fg >= 200).sum()) / fg_cnt
+    return bright_ratio >= OVEREXPOSURE_BRIGHT200_RATIO
 
 
 def crop_edge_defect(img: np.ndarray, cx: int, cy: int) -> np.ndarray:
@@ -834,6 +869,12 @@ class DatasetExporter:
             defect_x = cand.edge_center_x
             defect_y = cand.edge_center_y
             sample_key = f"edge{cand.edge_defect_id}"
+
+        # true_ng 才做過曝過濾：crop 近乎全白（邊緣強光照射或整體曝光過度）
+        # 對分類訓練沒有幫助，直接丟棄。
+        if cand.label == TRUE_NG_LABEL and is_overexposed_crop(crop):
+            row["status"] = "skipped_overexposure"
+            return row
 
         filename = build_sample_filename(
             glass_id=cand.glass_id, image_name=cand.image_name,

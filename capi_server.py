@@ -23,6 +23,10 @@ import os
 # 設置環境變數 (必須在 import anomalib 之前)
 os.environ["TRUST_REMOTE_CODE"] = "1"
 
+# 抑制 dinov2 載入時 xFormers 不可用的 UserWarning (每次推論都跳 3 條)
+import warnings as _warnings
+_warnings.filterwarnings("ignore", message=r".*xFormers is not available.*")
+
 import sys
 import socket
 import threading
@@ -188,6 +192,12 @@ def setup_logging(config: dict):
     # 根 logger
     root = logging.getLogger("capi")
     root.setLevel(level)
+    # 關閉向 root logger 傳遞，避免第三方函式庫 (anomalib/lightning 等) 在 root
+    # 掛的預設 handler 造成每條 log 印兩次
+    root.propagate = False
+    # 清掉舊 handler，避免重啟/重新 setup 時堆疊
+    for h in list(root.handlers):
+        root.removeHandler(h)
 
     # 格式
     fmt = logging.Formatter(

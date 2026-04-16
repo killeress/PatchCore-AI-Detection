@@ -257,6 +257,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_debug_coord_inference()
             elif path == "/api/debug/edge-inspect":
                 self._handle_api_debug_edge_inspect()
+            elif path == "/api/debug/edge-inspect-corner":
+                self._handle_api_debug_edge_inspect_corner()
             elif path == "/api/debug/bright-spot-inference":
                 self._handle_debug_bright_spot_inference()
             elif path == "/api/ric/upload":
@@ -1005,6 +1007,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             default_bs_median_kernel=get_val('bright_spot_median_kernel', 21),
             default_bs_min_area=get_val('bright_spot_min_area', 5),
             default_bs_threshold=get_val('bright_spot_threshold', 200),
+            default_aoi_threshold=get_val('cv_edge_aoi_threshold', 4),
+            default_aoi_min_area=get_val('cv_edge_aoi_min_area', 40),
+            default_aoi_solidity_min=get_val('cv_edge_aoi_solidity_min', 0.2),
+            default_aoi_boundary_padding=15,
+            default_aoi_boundary_min_bright=15,
         )
         self._send_response(200, html)
 
@@ -1975,6 +1982,195 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"[DEBUG] Edge Inspect error: {e}", exc_info=True)
             self._send_json({"error": f"邊緣檢測失敗: {str(e)}"})
+
+    def _handle_api_debug_edge_inspect_corner(self):
+        """API: 測試 AOI 座標角落 CV 邊緣檢測（複製 production inspect_roi 邏輯）"""
+        import cv2
+        import numpy as np
+        import base64
+        from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, clamp_median_kernel
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except Exception:
+            self._send_json({"error": "Invalid JSON body"})
+            return
+
+        image_path_str = data.get("image_path", "").strip()
+        if not image_path_str:
+            self._send_json({"error": "請提供圖片路徑 (image_path)"})
+            return
+
+        image_path = Path(image_path_str)
+        if not image_path.exists():
+            self._send_json({"error": f"檔案不存在: {image_path}"})
+            return
+
+        try:
+            roi_x = int(data.get("roi_x", 0))
+            roi_y = int(data.get("roi_y", 0))
+            tile_size = int(data.get("tile_size", 512))
+            threshold = int(data.get("threshold", 4))
+            min_area = int(data.get("min_area", 40))
+            solidity_min = float(data.get("solidity_min", 0.2))
+            boundary_padding = int(data.get("boundary_padding", 15))
+            boundary_min_brightness = int(data.get("boundary_min_brightness", 15))
+
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            if image is None:
+                self._send_json({"error": "無法讀取圖片"})
+                return
+
+            if image.dtype == np.uint16:
+                image = (image / 256).astype(np.uint8)
+
+            img_h, img_w = image.shape[:2]
+
+            # Fast Otsu bounds (與 /api/debug/edge-inspect 一致)
+            def _fast_otsu_bounds(img: np.ndarray) -> Tuple[int, int, int, int]:
+                if len(img.shape) == 3:
+                    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                else:
+                    g = img
+                blurred = cv2.GaussianBlur(g, (5, 5), 0)
+                _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                kernel = np.ones((15, 15), np.uint8)
+                closing = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+                contours, _ = cv2.findContours(closing, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                x_min, y_min = float('inf'), float('inf')
+                x_max, y_max = -float('inf'), -float('inf')
+                for contour in contours:
+                    if cv2.contourArea(contour) > 1000:
+                        x, y, w, h = cv2.boundingRect(contour)
+                        x_min = min(x_min, x)
+                        y_min = min(y_min, y)
+                        x_max = max(x + w, x_max)
+                        y_max = max(y + h, y_max)
+                if x_min == float('inf'):
+                    return 0, 0, img.shape[1], img.shape[0]
+                return int(x_min), int(y_min), int(x_max), int(y_max)
+
+            otsu_bounds = _fast_otsu_bounds(image)
+
+            # ROI 擷取（對齊 capi_inference 切法）
+            rx1 = max(0, roi_x)
+            ry1 = max(0, roi_y)
+            rx2 = min(img_w, roi_x + tile_size)
+            ry2 = min(img_h, roi_y + tile_size)
+            roi = image[ry1:ry2, rx1:rx2]
+            if roi.size == 0:
+                self._send_json({"error": f"ROI 超出影像範圍: ({roi_x},{roi_y}) size={tile_size}"})
+                return
+
+            # 用前端傳入參數 override inspector config
+            cfg = EdgeInspectionConfig()
+            cfg.aoi_threshold = threshold
+            cfg.aoi_min_area = min_area
+            cfg.aoi_solidity_min = solidity_min
+            inspector = CVEdgeInspector(cfg)
+
+            defects, roi_stats = inspector.inspect_roi(
+                roi, offset_x=rx1, offset_y=ry1,
+                otsu_bounds=otsu_bounds,
+                boundary_padding=boundary_padding,
+                boundary_min_brightness=boundary_min_brightness,
+            )
+
+            # 手動重建 debug 影像（對齊 _inspect_side 完整流程，含 fg_median 填充）
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
+            roi_h, roi_w = gray.shape[:2]
+
+            fg_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+            ox1, oy1, ox2, oy2 = otsu_bounds
+            lx1 = max(0, ox1 - rx1); ly1 = max(0, oy1 - ry1)
+            lx2 = min(roi_w, ox2 - rx1); ly2 = min(roi_h, oy2 - ry1)
+            if lx2 > lx1 and ly2 > ly1:
+                fg_mask[ly1:ly2, lx1:lx2] = 255
+            if boundary_padding > 0 and np.any(fg_mask > 0):
+                dk = cv2.getStructuringElement(cv2.MORPH_RECT,
+                        (boundary_padding * 2 + 1, boundary_padding * 2 + 1))
+                fg_mask_expanded = cv2.dilate(fg_mask, dk, iterations=1)
+                expansion_zone = (fg_mask_expanded > 0) & (fg_mask == 0)
+                expansion_valid = expansion_zone & (gray >= boundary_min_brightness)
+                fg_mask[expansion_valid] = 255
+
+            k = cfg.blur_kernel
+            blurred = cv2.GaussianBlur(gray, (k, k), 0)
+            if np.any(fg_mask > 0):
+                fg_pixels = blurred[fg_mask > 0]
+                fg_median = int(np.median(fg_pixels)) if fg_pixels.size > 0 else 0
+                blurred_for_bg = blurred.copy()
+                blurred_for_bg[fg_mask == 0] = fg_median
+            else:
+                blurred_for_bg = blurred
+            mk = clamp_median_kernel(cfg.median_kernel, min(gray.shape[:2]) - 1)
+            bg = cv2.medianBlur(blurred_for_bg, mk)
+            diff = cv2.absdiff(blurred, bg)
+            diff[fg_mask == 0] = 0
+            _, mask_bin = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+
+            # Result 圖：roi 疊 defect bbox
+            result_img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            for d in defects:
+                # 轉回 ROI 局部座標
+                dx, dy, dw, dh = d.bbox
+                lx, ly = dx - rx1, dy - ry1
+                cv2.rectangle(result_img, (lx, ly), (lx + dw, ly + dh), (0, 0, 255), 2)
+                cv2.putText(result_img, f"A:{d.area}", (lx, max(ly - 5, 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+            # fg_mask 疊到 ROI
+            fg_overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            fg_overlay[fg_mask == 0] = (0, 0, 60)  # 非前景塗暗紅
+
+            diff_colored = cv2.applyColorMap(
+                np.clip(diff * 10, 0, 255).astype(np.uint8), cv2.COLORMAP_JET)
+
+            debug_imgs = {
+                "roi": cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
+                "fg_mask": fg_overlay,
+                "background": cv2.cvtColor(bg, cv2.COLOR_GRAY2BGR),
+                "diff": diff_colored,
+                "mask": cv2.cvtColor(mask_bin, cv2.COLOR_GRAY2BGR),
+                "result": result_img,
+            }
+
+            encoded_imgs = {}
+            for kname, img in debug_imgs.items():
+                _, buffer = cv2.imencode('.png', img)
+                encoded_imgs[kname] = f"data:image/png;base64,{base64.b64encode(buffer).decode('utf-8')}"
+
+            fg_coverage_pct = float(np.count_nonzero(fg_mask) / fg_mask.size * 100) if fg_mask.size > 0 else 0.0
+
+            self._send_json({
+                "success": True,
+                "defects": [
+                    {
+                        "area": d.area,
+                        "bbox": d.bbox,
+                        "center": d.center,
+                        "max_diff": d.max_diff,
+                    } for d in defects
+                ],
+                "stats": {
+                    "max_diff": roi_stats.get("max_diff", 0),
+                    "max_area": roi_stats.get("max_area", 0),
+                    "threshold": roi_stats.get("threshold", threshold),
+                    "min_area": roi_stats.get("min_area", min_area),
+                    "solidity_min": solidity_min,
+                    "fg_coverage_pct": fg_coverage_pct,
+                },
+                "images": encoded_imgs,
+                "otsu_bounds": otsu_bounds,
+                "roi_bbox": [rx1, ry1, rx2, ry2],
+                "image_size": [img_w, img_h],
+            })
+
+        except Exception as e:
+            logger.error(f"[DEBUG] Edge Inspect Corner error: {e}", exc_info=True)
+            self._send_json({"error": f"角落邊緣檢測失敗: {str(e)}"})
 
     def _handle_debug_coord_inference(self):
         """API: 人工座標推論 — 以指定產品座標為中心裁切 512x512 做推論"""

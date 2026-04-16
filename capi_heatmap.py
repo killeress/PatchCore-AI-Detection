@@ -480,6 +480,13 @@ class HeatmapManager:
             verdict = f"Score < THR"
             verdict_color = (0, 255, 255)
 
+        scratch_score_val = float(getattr(tile_info, 'scratch_score', 0.0) or 0.0) if tile_info else 0.0
+        scratch_filtered_val = bool(getattr(tile_info, 'scratch_filtered', False)) if tile_info else False
+
+        if scratch_filtered_val and not is_bomb and not is_dust:
+            verdict = f"[SCR] Scratch Filter OK (score={scratch_score_val:.3f})"
+            verdict_color = (180, 220, 100)  # 青綠色
+
         header_text = f"Score: {score:.4f} | {verdict}"
         cv2.putText(header, header_text, (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, verdict_color, 2)
@@ -490,6 +497,8 @@ class HeatmapManager:
             detail_line = detail_line.replace(f'<{metric_name}_THR', f'<{iou_threshold:.3f}')
         else:
             detail_line = f"Tile#{tile_id} | {image_name}"
+        if scratch_score_val > 0 and not scratch_filtered_val:
+            detail_line = f"{detail_line} | SCR:{scratch_score_val:.3f}"
         cv2.putText(header, detail_line, (10, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
 

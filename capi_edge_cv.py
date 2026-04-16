@@ -137,7 +137,8 @@ class EdgeInspectionConfig:
     ))
     # AOI 座標邊緣檢測獨立參數 (不共用四邊設定)
     aoi_threshold: int = 4        # AOI 座標邊緣明暗差閾值
-    aoi_min_area: int = 10        # AOI 座標邊緣最小缺陷面積 (px) — AOI 已定位，可更敏感
+    aoi_min_area: int = 40        # AOI 座標邊緣最小缺陷面積 (px) — 對齊 debug 頁預設
+    aoi_solidity_min: float = 0.2 # Solidity 下限: 低於此值視為 L 形邊界偽影 (0=停用)
     exclude_zones: List[EdgeExclusionZoneConfig] = field(default_factory=list)
     # 儲存完整的按產品分組排除區域 (key=resolution_code, value=list of zones)
     all_exclude_zones_by_product: Dict[str, List[dict]] = field(default_factory=dict)
@@ -226,7 +227,8 @@ class EdgeInspectionConfig:
         cfg.bottom.exclude_right = int(get("cv_edge_bottom_exclude_right", 80))
         # AOI 座標邊緣獨立參數
         cfg.aoi_threshold = int(get("cv_edge_aoi_threshold", 4))
-        cfg.aoi_min_area = int(get("cv_edge_aoi_min_area", 10))
+        cfg.aoi_min_area = int(get("cv_edge_aoi_min_area", 40))
+        cfg.aoi_solidity_min = float(get("cv_edge_aoi_solidity_min", 0.2))
 
         # 排除區域 (支援按產品解析度碼分組的 dict 格式，或向後相容的 list 格式)
         zones_raw = get("cv_edge_exclude_zones", None)
@@ -630,8 +632,6 @@ class CVEdgeInspector:
         k = self.config.blur_kernel
         blurred = cv2.GaussianBlur(roi, (k, k), 0)
 
-        # 前景遮罩處理：將非前景區域填充為前景中值，
-        # 使 median filter 不受產品外黑色背景影響
         if fg_mask is not None and np.any(fg_mask > 0):
             fg_pixels = blurred[fg_mask > 0]
             if fg_pixels.size > 0:
@@ -648,7 +648,6 @@ class CVEdgeInspector:
 
         diff = cv2.absdiff(blurred, bg)
 
-        # 只在前景區域內偵測缺陷
         if fg_mask is not None:
             diff[fg_mask == 0] = 0
 
@@ -671,6 +670,18 @@ class CVEdgeInspector:
                 # 該區域的最大差異值
                 component_mask = (labels == i).astype(np.uint8)
                 max_diff = int(np.max(diff[component_mask > 0])) if np.any(component_mask) else 0
+
+                # Solidity 過濾：L 形邊界偽影 solidity 極低 (~0.15)，真缺陷 >0.5
+                if side == "aoi_edge" and self.config.aoi_solidity_min > 0:
+                    contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if contours:
+                        hull = cv2.convexHull(contours[0])
+                        hull_area = cv2.contourArea(hull)
+                        solidity = area / hull_area if hull_area > 0 else 1.0
+                        if solidity < self.config.aoi_solidity_min:
+                            print(f"  🔲 _inspect_side: 排除低 solidity component "
+                                  f"(side={side}, area={area}, solidity={solidity:.3f} < {self.config.aoi_solidity_min})")
+                            continue
 
                 defects.append(EdgeDefect(
                     side=side,

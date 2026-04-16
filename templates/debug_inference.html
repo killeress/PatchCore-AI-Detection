@@ -468,6 +468,14 @@
         margin-bottom: 24px;
         border-bottom: 1px solid var(--border);
         padding-bottom: 2px;
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+    }
+
+    .tabs-nav::-webkit-scrollbar {
+        display: none;
     }
 
     .tab-btn {
@@ -482,6 +490,8 @@
         border-bottom: 3px solid transparent;
         transition: all 0.2s;
         border-radius: 8px 8px 0 0;
+        white-space: nowrap;
+        flex-shrink: 0;
     }
 
     .tab-btn:hover {
@@ -641,7 +651,8 @@
     <div class="tabs-nav">
         <button class="tab-btn active" onclick="switchTab('tab-single', this)">📸 單圖推論</button>
         <button class="tab-btn" onclick="switchTab('tab-coord', this)">📍 座標推論</button>
-        <button class="tab-btn" onclick="switchTab('tab-edge', this)">📐 邊緣檢測 (測試)</button>
+        <button class="tab-btn" onclick="switchTab('tab-edge', this)">📐 邊緣檢測 (整邊)</button>
+        <button class="tab-btn" onclick="switchTab('tab-edge-corner', this)">📐 邊緣檢測 (角落)</button>
         <button class="tab-btn" onclick="switchTab('tab-coords-viewer', this)">🎯 座標查看</button>
         <button class="tab-btn" onclick="switchTab('tab-bright-spot', this)">💡 黑畫面推論</button>
         <a href="/debug/scratch-batch" class="tab-btn" style="text-decoration:none; display:inline-flex; align-items:center;">🧽 批次分類器驗證</a>
@@ -925,7 +936,7 @@
             <div>
                 <h2
                     style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
-                    📐 邊緣檢測 (測試)
+                    📐 邊緣檢測 (整邊)
                 </h2>
                 <p style="color:var(--text-muted); font-size:0.9rem; margin-top:4px;">
                     手動輸入參數，測試 CV 邊緣檢測的判定效果。
@@ -1040,6 +1051,77 @@
                 style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:16px; margin:24px 0;">
             </div>
             <div class="coord-result-grid" id="edge-result-grid"></div>
+        </div>
+    </div>
+
+    <!-- ═══ 邊緣檢測 (角落) 頁籤 — 對齊 production inspect_roi 邏輯 ═══ -->
+    <div id="tab-edge-corner" class="tab-content">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+            <div>
+                <h2 style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
+                    📐 邊緣檢測 (角落)
+                </h2>
+                <p style="color:var(--text-muted); font-size:0.9rem; margin-top:4px;">
+                    重現 production 的 AOI 座標邊緣 CV 檢測 (inspect_roi)，包含 fg_mask / fg_median 填充 / solidity 過濾。
+                </p>
+            </div>
+        </div>
+
+        <div class="card" style="padding:20px;">
+            <div class="coord-input-row">
+                <input type="text" id="edge-corner-image-path" placeholder="圖片絕對路徑" autocomplete="off" spellcheck="false"
+                    style="flex:1; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.95rem; outline:none;">
+                <div class="coord-group">
+                    <label for="edge-corner-roi-x">ROI X</label>
+                    <input type="number" id="edge-corner-roi-x" value="0" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-corner-roi-y">ROI Y</label>
+                    <input type="number" id="edge-corner-roi-y" value="0" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-corner-tile-size">ROI 大小</label>
+                    <input type="number" id="edge-corner-tile-size" value="512" min="16" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-corner-threshold">明暗差閾值</label>
+                    <input type="number" id="edge-corner-threshold" value="{{ default_aoi_threshold }}" min="1" max="255" step="1" title="伺服器目前設定值: {{ default_aoi_threshold }}">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-corner-min-area">最小面積 (px)</label>
+                    <input type="number" id="edge-corner-min-area" value="{{ default_aoi_min_area }}" min="1" step="1" title="伺服器目前設定值: {{ default_aoi_min_area }}">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-corner-solidity">Solidity 下限</label>
+                    <input type="number" id="edge-corner-solidity" value="{{ default_aoi_solidity_min }}" min="0" max="1" step="0.01" title="伺服器目前設定值: {{ default_aoi_solidity_min }}">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-corner-boundary-padding">邊界擴展 (px)</label>
+                    <input type="number" id="edge-corner-boundary-padding" value="{{ default_aoi_boundary_padding }}" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-corner-boundary-min-bright">擴展最低亮度</label>
+                    <input type="number" id="edge-corner-boundary-min-bright" value="{{ default_aoi_boundary_min_bright }}" min="0" max="255" step="1">
+                </div>
+
+                <button class="btn-run" id="btn-edge-corner-run" onclick="runEdgeInspectCorner()" style="background:var(--accent);">
+                    <span class="spinner" id="edge-corner-spinner"></span>
+                    <span id="edge-corner-btn-text">📐 角落測試</span>
+                </button>
+            </div>
+
+            <div style="margin-top: 16px; background: rgba(30, 41, 59, 0.3); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-size: 0.82rem; color: var(--text-muted); line-height:1.6;">
+                與「邊緣檢測 (整邊)」差異：切 ROI 用 <code>ROI X/Y + 大小</code> 方塊（不是整條邊），建立 <code>fg_mask</code> 後把非前景區填 fg 中值再做 medianBlur，最後套 <code>solidity</code> 過濾濾掉 L 形偽影。這條路徑才是 production 接 AOI 報告時走的邏輯。
+            </div>
+        </div>
+
+        <div id="edge-corner-error-box" class="error-box hidden"></div>
+
+        <div id="edge-corner-result-section" class="hidden">
+            <div class="coord-info-cards" id="edge-corner-info-cards"
+                style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:16px; margin:24px 0;">
+            </div>
+            <div class="coord-result-grid" id="edge-corner-result-grid"></div>
         </div>
     </div>
 
@@ -1232,6 +1314,31 @@
 
             const edgePathInput = document.getElementById('edge-image-path');
             if (edgePathInput) edgePathInput.value = pathParam;
+
+            const cornerPathInput = document.getElementById('edge-corner-image-path');
+            if (cornerPathInput) cornerPathInput.value = pathParam;
+        }
+
+        // 從 record_detail 帶 ROI 座標自動填入角落 tab 並切換
+        const roiX = params.get('roi_x');
+        const roiY = params.get('roi_y');
+        if (roiX !== null) {
+            const el = document.getElementById('edge-corner-roi-x');
+            if (el) el.value = parseInt(roiX);
+        }
+        if (roiY !== null) {
+            const el = document.getElementById('edge-corner-roi-y');
+            if (el) el.value = parseInt(roiY);
+        }
+        const tileParam = params.get('tile');
+        if (tileParam !== null) {
+            const el = document.getElementById('edge-corner-tile-size');
+            if (el) el.value = parseInt(tileParam);
+        }
+        const tabParam = params.get('tab');
+        if (tabParam === 'edge-corner') {
+            const targetBtn = document.querySelector('.tab-btn[onclick*="tab-edge-corner"]');
+            if (targetBtn) switchTab('tab-edge-corner', targetBtn);
         }
     })();
 
@@ -2018,6 +2125,123 @@
             </div>`;
         }
         grid.innerHTML = imagesHtml;
+    }
+
+    // ═══ 邊緣檢測 (角落) — production inspect_roi 路徑 ═══
+    async function runEdgeInspectCorner() {
+        const imagePath = document.getElementById('edge-corner-image-path').value.trim();
+        if (!imagePath) {
+            showError('請輸入圖片路徑', 'edge-corner-error-box');
+            return;
+        }
+
+        const btn = document.getElementById('btn-edge-corner-run');
+        const btnText = document.getElementById('edge-corner-btn-text');
+        const spinner = document.getElementById('edge-corner-spinner');
+
+        btn.disabled = true;
+        btnText.textContent = '分析中...';
+        spinner.classList.add('active');
+        document.getElementById('edge-corner-error-box').classList.add('hidden');
+        document.getElementById('edge-corner-result-section').classList.add('hidden');
+
+        try {
+            const payload = {
+                image_path: imagePath,
+                roi_x: parseInt(document.getElementById('edge-corner-roi-x').value),
+                roi_y: parseInt(document.getElementById('edge-corner-roi-y').value),
+                tile_size: parseInt(document.getElementById('edge-corner-tile-size').value),
+                threshold: parseInt(document.getElementById('edge-corner-threshold').value),
+                min_area: parseInt(document.getElementById('edge-corner-min-area').value),
+                solidity_min: parseFloat(document.getElementById('edge-corner-solidity').value),
+                boundary_padding: parseInt(document.getElementById('edge-corner-boundary-padding').value),
+                boundary_min_brightness: parseInt(document.getElementById('edge-corner-boundary-min-bright').value),
+            };
+
+            const res = await fetch('/api/debug/edge-inspect-corner', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await res.json();
+            if (!data.success) {
+                showError(data.error || '推論失敗 (不明錯誤)', 'edge-corner-error-box');
+                return;
+            }
+
+            renderEdgeCornerResult(data);
+        } catch (err) {
+            showError(`連線錯誤: ${err.message}`, 'edge-corner-error-box');
+        } finally {
+            btn.disabled = false;
+            btnText.textContent = '📐 角落測試';
+            spinner.classList.remove('active');
+        }
+    }
+
+    function renderEdgeCornerResult(data) {
+        document.getElementById('edge-corner-result-section').classList.remove('hidden');
+        const cards = document.getElementById('edge-corner-info-cards');
+
+        const defects = data.defects || [];
+        const isNG = defects.length > 0;
+        const stats = data.stats || {};
+
+        cards.innerHTML = `
+            <div class="summary-card">
+                <div class="label">判定結果</div>
+                <div class="value" style="color:${isNG ? 'var(--ng)' : 'var(--ok)'}">
+                    ${isNG ? '❌ 邊緣異常' : '✅ 邊緣正常'}
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="label">通過 Solidity 的異常</div>
+                <div class="value" style="color:${isNG ? 'var(--ng)' : 'var(--text)'}">${defects.length}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">最大 max_diff / area</div>
+                <div class="value" style="color:var(--text-muted); font-size:0.95rem;">
+                    ${stats.max_diff || 0} / ${stats.max_area || 0}
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="label">fg_mask 覆蓋率</div>
+                <div class="value" style="color:var(--text-muted); font-size:0.95rem;">
+                    ${(stats.fg_coverage_pct || 0).toFixed(1)}%
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="label">ROI 範圍</div>
+                <div class="value" style="color:var(--text-muted); font-size:0.85rem;">
+                    (${(data.roi_bbox || []).join(', ')})
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="label">產品邊界 (Otsu)</div>
+                <div class="value" style="color:var(--text-muted); font-size:0.85rem;">
+                    (${(data.otsu_bounds || []).join(', ')})
+                </div>
+            </div>
+        `;
+
+        const grid = document.getElementById('edge-corner-result-grid');
+        const imgs = data.images || {};
+        let html = '';
+        const items = [
+            ['roi', '🖼️ 原始 ROI (灰階)'],
+            ['fg_mask', '🔲 fg_mask 覆蓋 (暗紅=非前景)'],
+            ['background', '☁️ 估計背景 (medianBlur + fg_median 填充)'],
+            ['diff', '🔥 差異圖 (Diff × 10)'],
+            ['mask', '📊 二值化遮罩 (threshold 後)'],
+            ['result', '🎯 最終結果 (solidity 過濾後標記)'],
+        ];
+        for (const [k, title] of items) {
+            if (imgs[k]) {
+                html += `<div class="img-card"><h4>${title}</h4><img src="${imgs[k]}" onclick="openLightbox(this.src)"></div>`;
+            }
+        }
+        grid.innerHTML = html;
     }
 
     // ═══ 座標查看 ═══════════════════════════════

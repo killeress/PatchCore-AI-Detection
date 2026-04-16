@@ -265,6 +265,14 @@
         color: #22d3ee;
     }
 
+    .stat-card.scratch::before {
+        background: linear-gradient(90deg, #8b5cf6, #a78bfa);
+    }
+
+    .stat-card.scratch .value {
+        color: #8b5cf6;
+    }
+
     /* Client sub-tabs */
     .client-tabs {
         display: flex;
@@ -2190,15 +2198,19 @@
 
         function renderOverReviewTab(summary, records) {
             const ors = summary.overReviewStats || { total: 0, reviewed: 0, unreviewed: 0, byCategory: {} };
-            renderOverReviewStats(ors);
+            const srs = summary.scratchRescueStats || { panels: 0, images: 0, tiles: 0 };
+            renderOverReviewStats(ors, srs);
             renderOverReviewPieChart(ors);
             renderOverReviewReviewedPieChart(ors);
             renderOverReviewTable(records);
         }
 
-        function renderOverReviewStats(ors) {
+        function renderOverReviewStats(ors, srs) {
             const grid = document.getElementById('over_review_statsGrid');
             const completionRate = ors.total > 0 ? (ors.reviewed / ors.total * 100).toFixed(1) : 0;
+            srs = srs || { panels: 0, images: 0, tiles: 0 };
+            const scratchCard = (label, value, detail) =>
+                `<div class="stat-card scratch"><div class="label">🩹 ${label}</div><div class="value">${value}</div><div class="detail">${detail}</div></div>`;
             grid.innerHTML = `
             <div class="stat-card over">
                 <div class="label">過檢總數</div>
@@ -2220,6 +2232,9 @@
                 <div class="value">${completionRate}%</div>
                 <div class="detail">${ors.reviewed} / ${ors.total}</div>
             </div>
+            ${scratchCard('DINOv2 救回片數', srs.panels, '被刮痕濾網翻為 OK 的 panel')}
+            ${scratchCard('DINOv2 救回圖數', srs.images, '至少 1 個 tile 被救回')}
+            ${scratchCard('DINOv2 救回 tile 數', srs.tiles, 'scratch_filtered = 1 tile 總數')}
             `;
         }
 
@@ -2932,6 +2947,73 @@
     }
   });
 
+  const DS_LABEL_ZH = {
+    "true_ng": "真實 NG",
+    "over_edge_false_positive": "邊緣誤判",
+    "over_within_spec": "規格內",
+    "over_overexposure": "曝光過度",
+    "over_surface_scratch": "表面刮痕",
+    "over_surface_dirt": "表面汙",
+    "over_bubble": "氣泡",
+    "over_aoi_ai_false_positive": "AOI/AI 都誤判",
+    "over_dust_mask_incomplete": "灰塵屏蔽需完善",
+    "over_other": "其他",
+  };
+
+  function fmtDsDateTime(iso) {
+    if (!iso) return "—";
+    return String(iso).replace("T", " ");
+  }
+
+  function fmtDsDuration(sec) {
+    sec = Number(sec || 0);
+    if (sec < 60) return sec.toFixed(2) + " 秒";
+    const m = Math.floor(sec / 60);
+    const s = Math.round(sec - m * 60);
+    if (m < 60) return `${sec.toFixed(2)} 秒（約 ${m} 分 ${s} 秒）`;
+    const h = Math.floor(m / 60);
+    const mm = m - h * 60;
+    return `${sec.toFixed(2)} 秒（約 ${h} 小時 ${mm} 分）`;
+  }
+
+  function formatDsExportSummary(sm) {
+    const lines = [];
+    lines.push(`匯出編號：${sm.job_id || "—"}`);
+    lines.push(`開始時間：${fmtDsDateTime(sm.started_at)}`);
+    lines.push(`結束時間：${fmtDsDateTime(sm.finished_at)}`);
+    lines.push(`耗時：${fmtDsDuration(sm.duration_sec)}`);
+    lines.push(`新增樣本總數：${sm.total || 0} 筆`);
+    if (sm.output_dir) lines.push(`輸出路徑：${sm.output_dir}`);
+
+    const labels = sm.labels || {};
+    const labelEntries = Object.entries(labels).filter(([, n]) => n > 0);
+    labelEntries.sort((a, b) => b[1] - a[1]);
+    if (labelEntries.length > 0) {
+      lines.push("");
+      lines.push("各類別數量：");
+      for (const [k, n] of labelEntries) {
+        const zh = DS_LABEL_ZH[k] || k;
+        lines.push(`  ${zh}（${k}）：${n}`);
+      }
+    } else if ((sm.total || 0) === 0) {
+      lines.push("");
+      lines.push("本次沒有蒐集到任何新樣本。");
+    }
+
+    const skipped = sm.skipped || {};
+    const skipEntries = Object.entries(skipped).filter(([, n]) => n > 0);
+    if (skipEntries.length > 0) {
+      lines.push("");
+      lines.push("略過項目：");
+      skipEntries.sort((a, b) => b[1] - a[1]);
+      for (const [k, n] of skipEntries) {
+        lines.push(`  ${k}：${n}`);
+      }
+    }
+
+    return lines.join("\n");
+  }
+
   function startDsExportPolling(jobId) {
     if (dsExportPollTimer) clearInterval(dsExportPollTimer);
     dsExportPollTimer = setInterval(async function() {
@@ -2952,7 +3034,7 @@
             const sm = await sr.json();
             hideEl($("dsExportProgress"));
             showEl($("dsExportSummary"));
-            $("dsExportSummaryText").textContent = JSON.stringify(sm, null, 2);
+            $("dsExportSummaryText").textContent = formatDsExportSummary(sm);
           } else {
             $("dsExportCurrentInfo").textContent =
               `Job ${s.state}: ${s.error || ""}`;

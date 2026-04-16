@@ -300,6 +300,9 @@ function copyInferenceLog() {
             {% if img.edge_defects %} | <strong style="color: #0891B2;">邊緣缺陷: {{ img.edge_defects | length }}</strong>{%
             endif %} |
             最高分: {{ img.max_score | round(3) }} |
+            {% if img.scratch_filter_count %}
+            <strong style="color: #0D9488;">🧽 DINOv2 救回: {{ img.scratch_filter_count }} tile</strong> |
+            {% endif %}
             耗時: {{ img.inference_time_ms | round(0) }}ms
         </p>
 
@@ -319,13 +322,16 @@ function copyInferenceLog() {
             <tbody>
                 {% for t in grid_tiles %}
                 {% set t_badge, t_info = t | tile_info %}
+                {% set is_scratch = t.get("scratch_filtered") %}
                 <tr>
-                    <td>#{{ t.tile_id }}</td>
+                    <td>{% if is_scratch %}🧽 {% endif %}#{{ t.tile_id }}</td>
                     <td>({{ t.x }}, {{ t.y }})</td>
                     <td>{{ t.width }}x{{ t.height }}</td>
                     <td><span class="badge {{ t_badge }}">{{ t.score | round(3) }}</span></td>
                     <td>
-                        {% if 'DUST' in t_info or '灰塵' in t_info %}
+                        {% if is_scratch %}
+                        <span style="color: #0D9488; font-weight: 600;">{{ t_info }}</span>
+                        {% elif 'DUST' in t_info or '灰塵' in t_info %}
                         <span style="color: #D97706;">{{ t_info }}</span>
                         {% elif 'BOMB' in t_info or '炸彈' in t_info %}
                         <span style="color: #DC2626;">{{ t_info }}</span>
@@ -357,11 +363,12 @@ function copyInferenceLog() {
             {% for t in grid_tiles %}
             {% if t.heatmap_path and heatmap_base_dir %}
             {% set thm_url = hm_relative(t.heatmap_path, heatmap_base_dir) %}
+            {% set is_scratch = t.get("scratch_filtered") %}
             {% if thm_url %}
             <div class="image-box">
                 <h4
-                    style="margin-bottom:8px;color:var(--text-muted);font-size:0.85rem;font-family:'Fira Code',monospace;">
-                    區域 #{{ t.tile_id }} 熱力圖</h4>
+                    style="margin-bottom:8px;color:{% if is_scratch %}#0D9488{% else %}var(--text-muted){% endif %};font-size:0.85rem;font-family:'Fira Code',monospace;">
+                    {% if is_scratch %}🧽 {% endif %}區域 #{{ t.tile_id }} 熱力圖</h4>
                 <img src="/heatmaps/{{ thm_url }}" alt="tile{{ t.tile_id }} heatmap" onclick="openLightbox(this.src)">
             </div>
             {% endif %}
@@ -392,6 +399,8 @@ function copyInferenceLog() {
                 <tbody>
                     {% for t in aoi_tiles %}
                     {% set t_badge, t_info = t | tile_info %}
+                    {% set aoi_is_scratch = t.get("scratch_filtered") %}
+                    {% set aoi_scr_score = t.get("scratch_score", 0) or 0 %}
                     <tr>
                         <td style="color: #10b981;">🎯 #{{ t.tile_id }}</td>
                         <td><span style="color: #10b981; font-weight: 600;">{{ t.get("aoi_defect_code", "") }}</span></td>
@@ -406,7 +415,10 @@ function copyInferenceLog() {
                         <td>{{ t.width }}x{{ t.height }}</td>
                         <td><span class="badge {{ t_badge }}">{{ t.score | round(3) }}</span></td>
                         <td>
-                            {% if t.get("is_anomaly") %}
+                            {% if aoi_is_scratch %}
+                            <span style="color: #0D9488; font-weight: 600;">🧽 Scratch 救回 OK</span>
+                            <span style="color: #0D9488; font-size: 0.8rem;"> (score={{ aoi_scr_score | round(3) }})</span>
+                            {% elif t.get("is_anomaly") %}
                             <span style="color: #EF4444; font-weight: 600;">AI 也判 NG</span>
                             {% else %}
                             <span style="color: #22C55E; font-weight: 600;">AI 判 OK</span>
@@ -416,6 +428,9 @@ function copyInferenceLog() {
                             {% endif %}
                             {% if 'BOMB' in t_info or '炸彈' in t_info %}
                             <span style="color: #DC2626; font-size: 0.8rem;"> | 炸彈</span>
+                            {% endif %}
+                            {% if aoi_scr_score > 0 and not aoi_is_scratch %}
+                            <span style="color: var(--text-muted); font-size: 0.8rem;"> | SCR:{{ aoi_scr_score | round(3) }}</span>
                             {% endif %}
                         </td>
                     </tr>
@@ -435,10 +450,16 @@ function copyInferenceLog() {
                         {% if t.get("aoi_product_x", -1) >= 0 %}
                         <span style="color: #F59E0B;">AOI({{ t.aoi_product_x }},{{ t.aoi_product_y }})</span>
                         {% endif %}
-                        {% if t.get("is_anomaly") %}
+                        {% if t.get("scratch_filtered") %}
+                        <span style="color: #0D9488;">[🧽 Scratch 救回 OK]</span>
+                        {% elif t.get("is_anomaly") %}
                         <span style="color: #EF4444;">[AI: NG]</span>
                         {% else %}
                         <span style="color: #22C55E;">[AI: OK]</span>
+                        {% endif %}
+                        {% set aoi_sc = t.get("scratch_score", 0) or 0 %}
+                        {% if aoi_sc > 0 and not t.get("scratch_filtered") %}
+                        <span style="color: var(--text-muted); font-size: 0.75rem;">SCR:{{ aoi_sc | round(3) }}</span>
                         {% endif %}
                     </h4>
                     <img src="/heatmaps/{{ thm_url }}" alt="aoi tile{{ t.tile_id }} heatmap" onclick="openLightbox(this.src)">
@@ -463,6 +484,7 @@ function copyInferenceLog() {
                         <th>大小</th>
                         <th>面積</th>
                         <th>差異值</th>
+                        <th>操作</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -491,6 +513,14 @@ function copyInferenceLog() {
                             <span class="badge" style="background: #D1FAE5; color: #065F46;">0.0</span>
                             {% else %}
                             <span class="badge badge-ng">{{ ed.max_diff | round(1) }}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if detail.image_dir and img.image_name and ed.side in ('aoi_edge', 'aoi_coord_ok') %}
+                            <a href="/debug?tab=edge-corner&path={{ (detail.image_dir ~ '/' ~ img.image_name) | urlencode }}&roi_x={{ ed.bbox_x }}&roi_y={{ ed.bbox_y }}&tile={{ ed.bbox_w }}"
+                                target="_blank"
+                                style="font-size:0.72rem; padding:3px 8px; background:rgba(59,130,246,0.15); border:1px solid rgba(59,130,246,0.3); border-radius:5px; color:var(--accent); text-decoration:none; font-weight:600; white-space:nowrap;"
+                                title="在 Debug 頁用 production 邏輯重跑此角落 CV 檢測">📐 角落</a>
                             {% endif %}
                         </td>
                     </tr>

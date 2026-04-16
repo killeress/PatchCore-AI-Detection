@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>AOI 過檢降低 AI 專案 — 主管說明報告</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Microsoft JhengHei", "PingFang TC", "Helvetica Neue", sans-serif;
+    line-height: 1.7;
+    color: #2c3e50;
+    max-width: 960px;
+    margin: 40px auto;
+    padding: 0 24px;
+    background: #f9fafb;
+  }
+  h1 {
+    font-size: 28px;
+    border-bottom: 3px solid #3498db;
+    padding-bottom: 10px;
+    margin-top: 0;
+  }
+  h2 {
+    font-size: 22px;
+    margin-top: 40px;
+    color: #2980b9;
+    border-left: 5px solid #3498db;
+    padding-left: 12px;
+  }
+  h3 {
+    font-size: 17px;
+    color: #34495e;
+    margin-top: 28px;
+  }
+  p, li { font-size: 15px; }
+  .tldr {
+    background: linear-gradient(135deg, #3498db, #2980b9);
+    color: white;
+    padding: 24px;
+    border-radius: 8px;
+    margin: 20px 0;
+  }
+  .tldr h3 { color: white; margin-top: 0; }
+  .tldr p { font-size: 16px; margin: 8px 0; }
+  .highlight {
+    background: #fff3cd;
+    border-left: 4px solid #ffc107;
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 4px;
+  }
+  .danger {
+    background: #f8d7da;
+    border-left: 4px solid #dc3545;
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 4px;
+  }
+  .success {
+    background: #d4edda;
+    border-left: 4px solid #28a745;
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 4px;
+  }
+  .info {
+    background: #e7f3ff;
+    border-left: 4px solid #2196f3;
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 4px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    background: white;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  th {
+    background: #3498db;
+    color: white;
+    padding: 12px;
+    text-align: left;
+    font-weight: 600;
+  }
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #eee;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:nth-child(even) { background: #f8f9fa; }
+  .metric-row {
+    display: flex;
+    gap: 16px;
+    margin: 20px 0;
+    flex-wrap: wrap;
+  }
+  .metric-card {
+    flex: 1;
+    min-width: 200px;
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    text-align: center;
+  }
+  .metric-card .label { font-size: 13px; color: #7f8c8d; }
+  .metric-card .value {
+    font-size: 32px;
+    font-weight: 700;
+    color: #2c3e50;
+    margin: 6px 0;
+  }
+  .metric-card.green .value { color: #27ae60; }
+  .metric-card.red .value { color: #c0392b; }
+  .metric-card.orange .value { color: #e67e22; }
+  .metric-card .delta {
+    font-size: 12px;
+    color: #7f8c8d;
+  }
+  .flow {
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    margin: 16px 0;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+  }
+  .flow-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    padding: 12px 0;
+    border-bottom: 1px dashed #ddd;
+  }
+  .flow-step:last-child { border-bottom: none; }
+  .flow-num {
+    min-width: 32px;
+    height: 32px;
+    background: #3498db;
+    color: white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+  }
+  .bar-chart {
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    margin: 16px 0;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+  }
+  .bar-row {
+    display: flex;
+    align-items: center;
+    margin: 10px 0;
+    gap: 12px;
+  }
+  .bar-label {
+    min-width: 200px;
+    font-size: 13px;
+  }
+  .bar-track {
+    flex: 1;
+    height: 26px;
+    background: #ecf0f1;
+    border-radius: 4px;
+    position: relative;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    padding-left: 10px;
+    color: white;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 4px;
+  }
+  .jargon {
+    border-bottom: 2px dotted #3498db;
+    cursor: help;
+    position: relative;
+  }
+  .gray-note {
+    color: #7f8c8d;
+    font-size: 13px;
+  }
+  .section-summary {
+    background: #eaf4fc;
+    padding: 16px 20px;
+    border-radius: 6px;
+    margin: 16px 0;
+    font-size: 15px;
+  }
+  .section-summary strong { color: #2980b9; }
+  .timeline {
+    position: relative;
+    padding-left: 24px;
+    margin: 20px 0;
+  }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 8px;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: #3498db;
+  }
+  .timeline-item {
+    position: relative;
+    margin: 18px 0;
+    padding-left: 16px;
+  }
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: -22px;
+    top: 5px;
+    width: 14px;
+    height: 14px;
+    background: white;
+    border: 3px solid #3498db;
+    border-radius: 50%;
+  }
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-right: 6px;
+  }
+  .badge-green { background: #d4edda; color: #155724; }
+  .badge-yellow { background: #fff3cd; color: #856404; }
+  .badge-red { background: #f8d7da; color: #721c24; }
+  .badge-gray { background: #e9ecef; color: #495057; }
+  footer {
+    margin-top: 48px;
+    padding-top: 20px;
+    border-top: 1px solid #ddd;
+    color: #7f8c8d;
+    font-size: 13px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<h1>AOI 過檢降低 AI 專案 — POC 成果報告</h1>
+<p class="gray-note">日期：2026-04-14　|　階段：概念驗證（POC）完成，進入部署規劃</p>
+
+<!-- ======== 1. 一分鐘摘要 ======== -->
+
+<div class="tldr">
+  <h3>📌 一分鐘結論</h3>
+  <p>1. AOI 目前會把 <strong>14% 的 OK panel 誤判成 NG</strong>（過檢），這些要人工覆判，成本高。</p>
+  <p>2. 我們做了 AI 後端加一層「智能判讀」，可以<strong>自動擋下 90% 的過檢</strong>（AI 認得這是誤判，改回 OK）。</p>
+  <p>3. 但要<strong>百分之百不漏掉真 NG</strong>，最多只能自動擋 86%，剩下 14% 要靠「兩階段人工覆判」機制。</p>
+  <p>4. 下一步是<strong>系統整合到產線</strong>，以及建立<strong>持續學習機制</strong>讓模型隨新資料越來越準。</p>
+</div>
+
+<!-- ======== 2. 問題背景 ======== -->
+
+<h2>一、問題背景：為什麼要做這件事</h2>
+
+<h3>AOI 光學檢測的現狀</h3>
+<p>產線上 AOI 機器會對每片面板拍照後自動判定 OK / NG。但為求<strong>絕對不漏檢</strong>，AOI 判 NG 的門檻設得很嚴 — 結果大量本來是 OK 的產品被誤判成 NG，需要人工覆判確認。</p>
+
+<div class="metric-row">
+  <div class="metric-card red">
+    <div class="label">AOI 過檢率（現狀）</div>
+    <div class="value">~14%</div>
+    <div class="delta">每 100 片就有 14 片 OK 被誤判成 NG，要人工看</div>
+  </div>
+  <div class="metric-card orange">
+    <div class="label">主要過檢類別</div>
+    <div class="value">9 類</div>
+    <div class="delta">其中最常見是「表面刮痕」、「過度曝光」、「規格內」</div>
+  </div>
+  <div class="metric-card green">
+    <div class="label">真 NG 漏檢要求</div>
+    <div class="value">0%</div>
+    <div class="delta">絕對不能讓真的瑕疵產品流到客戶手上</div>
+  </div>
+</div>
+
+<h3>這次 POC 的範圍</h3>
+<p>全部 9 類過檢一起做規模太大。我們先挑「<strong>表面刮痕（scratch）</strong>」這一類（114 筆樣本）做可行性驗證，證明技術可行後，其他類別可沿用同一套架構擴充。</p>
+
+<div class="section-summary">
+  <strong>任務定義：</strong>給一張「AOI 判 NG」的面板圖，AI 要判斷「這真的是 NG，還是誤判的 scratch 過檢？」<br>
+  — 如果 AI 認得出是 scratch 過檢 → <strong>自動翻回 OK</strong>，省掉人工覆判；<br>
+  — 如果 AI 不確定或看起來是真 NG → <strong>保持 NG，仍送人工覆判</strong>。
+</div>
+
+<!-- ======== 3. 方法簡介 ======== -->
+
+<h2>二、技術方法（白話版）</h2>
+
+<h3>核心概念：讓電腦「看懂」瑕疵圖片</h3>
+<p>我們用一個叫 <span class="jargon" title="Meta (Facebook) 2023 年開源的視覺基礎模型，用數百萬張自然圖片預訓練，已經會「看圖」的 AI">DINOv2</span> 的 AI 視覺模型。它是 Meta（Facebook）開源的，已經在數百萬張照片上訓練過，會辨識圖片內容。我們不從零開始訓練（太耗資源），而是<strong>站在巨人肩膀上</strong>：</p>
+
+<div class="flow">
+  <div class="flow-step">
+    <div class="flow-num">1</div>
+    <div>
+      <strong>拿現成 AI 視覺模型</strong><br>
+      <span class="gray-note">就像聘請一位已經會看圖的顧問，不用從零教他「什麼是邊緣、什麼是紋理」</span>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num">2</div>
+    <div>
+      <strong>把面板照片餵進去</strong><br>
+      <span class="gray-note">模型把圖片轉成一串數字（768 個），代表圖片的「特徵」</span>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num">3</div>
+    <div>
+      <strong>訓練小型分類器學 scratch vs 真 NG</strong><br>
+      <span class="gray-note">用這 114 筆 scratch 樣本 + 966 筆真 NG 樣本告訴它「這種特徵是 scratch、那種特徵是真 NG」</span>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num">4</div>
+    <div>
+      <strong>新圖片進來時，AI 給分數</strong><br>
+      <span class="gray-note">分數越高越像 scratch（可翻 OK），越低越像真 NG（保持 NG）</span>
+    </div>
+  </div>
+</div>
+
+<div class="info">
+  <strong>💡 為什麼不自己從零訓練？</strong>
+  114 筆 scratch 樣本太少，從零訓練會讓模型「背答案」而不是真的學到東西（overfit）。用預訓練模型 + 小型分類器是業界標準做法，效果穩定且訓練快。
+</div>
+
+<!-- ======== 4. 實驗過程 ======== -->
+
+<h2>三、實驗過程：一層層優化</h2>
+
+<p>我們嘗試了<strong>四個層次的優化</strong>，每層都有顯著改善。以下用非技術語言解釋每個做了什麼、為什麼做、改善多少。</p>
+
+<div class="timeline">
+
+  <div class="timeline-item">
+    <span class="badge badge-gray">第 0 層</span>
+    <strong>起點：直接用預訓練模型 + 邏輯迴歸分類器</strong>
+    <p>最基本的做法：DINOv2 看圖 → 抽特徵 → <span class="jargon" title="Logistic Regression，最基本的二分類演算法">LogReg</span> 分類。<br>
+    <span class="gray-note">結果：擋下 87.7% 過檢，但有 3.3% 真 NG 漏檢 → <strong>不可接受</strong>。</span></p>
+  </div>
+
+  <div class="timeline-item">
+    <span class="badge badge-yellow">第 1 層</span>
+    <strong>圖像對比度增強（CLAHE）</strong>
+    <p>scratch 通常很淡很細，一般處理下 AI 看不清楚。我們加了一個「自動對比度增強」步驟（<span class="jargon" title="Contrast Limited Adaptive Histogram Equalization，局部直方圖均衡化，相機的「自動對比度」就是類似技術">CLAHE</span>），把淡淡的刮痕放大成 AI 能看見的程度。<br>
+    <span class="gray-note">就像把照片的對比度滑桿往右拉 —— 暗的地方變得更暗、亮的地方更亮，細節浮出來。</span></p>
+  </div>
+
+  <div class="timeline-item">
+    <span class="badge badge-yellow">第 2 層</span>
+    <strong>只看「最可疑」的區塊（Patch-level attention）</strong>
+    <p>原本 AI 把整張圖壓成「一個總體印象」，小 scratch 的訊號被平均掉了。<br>
+    改成：把圖切成 196 小格，找出「長得最不像正常面板」的那 5 格，把它們當主要判斷依據。<br>
+    <span class="gray-note">直覺：scratch 是局部缺陷，不該被整張圖的大片平坦區域稀釋掉訊號。</span></p>
+  </div>
+
+  <div class="timeline-item">
+    <span class="badge badge-green">第 3 層 ⭐</span>
+    <strong>微調 AI 模型本身（LoRA fine-tune）</strong>
+    <p>這是最關鍵的突破。前兩層都是「拿現成的尺去量」，這層是「<strong>把尺改一改讓它更會量 scratch</strong>」。<br><br>
+    <span class="jargon" title="Low-Rank Adaptation，微軟 2021 年發表，讓大型 AI 模型只改 0.2% 的參數就能適應新任務">LoRA</span> 的概念：AI 模型有 8600 萬個參數，我們只新增 34 萬個「微調旋鈕」（0.4%），用這 1748 筆面板資料微調它，讓 AI 從「通用視覺」變成「面板瑕疵專家」。<br><br>
+    <strong>成效：理論上限（Oracle）從 66.7% 一路提升到 86%</strong>，代表在零漏檢前提下能抓到的 scratch 比例大幅增加。</p>
+  </div>
+
+</div>
+
+<!-- ======== 5. 關鍵數字 ======== -->
+
+<h2>四、關鍵成果</h2>
+
+<h3>逐層改善的「天花板」（零漏檢能抓多少 scratch）</h3>
+
+<div class="bar-chart">
+  <div class="bar-row">
+    <div class="bar-label">起點（基本方案）</div>
+    <div class="bar-track">
+      <div class="bar-fill" style="width: 66.7%; background: #95a5a6;">66.7%</div>
+    </div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">+ 對比度增強</div>
+    <div class="bar-track">
+      <div class="bar-fill" style="width: 72.0%; background: #f39c12;">72.0%</div>
+    </div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">+ Patch-level 注意力</div>
+    <div class="bar-track">
+      <div class="bar-fill" style="width: 73.8%; background: #e67e22;">73.8%</div>
+    </div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">+ LoRA 微調（最終）</div>
+    <div class="bar-track">
+      <div class="bar-fill" style="width: 86.0%; background: #27ae60;">86.0%</div>
+    </div>
+  </div>
+  <p class="gray-note" style="margin-top: 16px; font-size: 12px;">
+    * 「天花板」= 理論最佳情況下，不漏檢任何一筆真 NG 的前提下能擋下的 scratch 比例。
+  </p>
+</div>
+
+<h3>最終方案的完整表現</h3>
+
+<div class="metric-row">
+  <div class="metric-card green">
+    <div class="label">Scratch 自動擋下率</div>
+    <div class="value">90.4%</div>
+    <div class="delta">起點 87.7% → +2.7%</div>
+  </div>
+  <div class="metric-card green">
+    <div class="label">真 NG 保住率</div>
+    <div class="value">98.2%</div>
+    <div class="delta">起點 96.7% → 漏檢從 3.3% 降到 1.8%</div>
+  </div>
+  <div class="metric-card green">
+    <div class="label">零漏檢下天花板</div>
+    <div class="value">86.0%</div>
+    <div class="delta">起點 66.7% → +19%</div>
+  </div>
+</div>
+
+<h3>業務影響估算（假設每月 10,000 片 AOI 判 NG，其中 scratch 過檢佔 30%）</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>情境</th>
+      <th>人工覆判量</th>
+      <th>AI 自動化省下</th>
+      <th>真 NG 風險</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>現狀（無 AI 後處理）</td>
+      <td>10,000 片</td>
+      <td>0</td>
+      <td>0（100% 人工把關）</td>
+    </tr>
+    <tr>
+      <td>AI 方案 A（純自動化，容忍 1.8% 漏檢）</td>
+      <td>~7,300 片</td>
+      <td><strong>2,700 片/月</strong></td>
+      <td style="color: #c0392b;">~180 片/年 真 NG 漏出</td>
+    </tr>
+    <tr>
+      <td><strong>AI 方案 B（兩階段系統，零漏檢）</strong></td>
+      <td><strong>~7,600 片</strong>（僅中信心送人工）</td>
+      <td><strong>~2,400 片/月</strong></td>
+      <td style="color: #27ae60;"><strong>0（人工覆判把關）</strong></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="danger">
+  <strong>⚠️ 方案 A 風險說明：</strong>
+  1.8% 漏檢率聽起來小，但代表每年可能有 ~180 片真 NG 流出。對高單價產品線不可接受。<br>
+  <strong>因此我們推薦方案 B 的「兩階段系統」</strong>，用 AI 處理高信心的 scratch 過檢、中等信心仍送人工，達到「高自動化 + 零風險」的平衡。
+</div>
+
+<!-- ======== 6. 推薦方案 ======== -->
+
+<h2>五、推薦部署方案：兩階段系統</h2>
+
+<div class="flow">
+  <div class="flow-step">
+    <div class="flow-num" style="background: #27ae60;">A</div>
+    <div>
+      <strong>AI 分數高（明顯是 scratch）→ 自動翻回 OK</strong><br>
+      <span class="gray-note">約 80% 的 scratch 過檢落在這區，直接釋放，不用人看</span>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num" style="background: #f39c12;">B</div>
+    <div>
+      <strong>AI 分數中等（模糊地帶）→ 送人工覆判</strong><br>
+      <span class="gray-note">約 15% 的邊界情況，人工做最終決定</span>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num" style="background: #c0392b;">C</div>
+    <div>
+      <strong>AI 分數低（像真 NG）→ 保持 NG，仍送人工覆判</strong><br>
+      <span class="gray-note">約 5%，與現狀流程相同</span>
+    </div>
+  </div>
+</div>
+
+<div class="success">
+  <strong>✅ 這個系統的好處：</strong><br>
+  • <strong>真 0% 漏檢</strong>：人工覆判是最終安全網<br>
+  • <strong>自動化 ~80% 的 scratch 過檢</strong>：大幅降低人工負擔<br>
+  • <strong>可調整</strong>：AI 信心門檻可依人力調整；人力緊張時縮緊中間區間、人力充裕時放寬
+</div>
+
+<!-- ======== 7. 下一步 ======== -->
+
+<h2>六、下一步規劃</h2>
+
+<h3>即將要做（本月內）</h3>
+<ul>
+  <li><strong>部署規劃文件（spec）</strong>：定義 AI 整合到 CAPI 系統的細節、介面、延遲需求</li>
+  <li><strong>訓練最終部署模型</strong>：用全部 1748 筆資料訓一個單一模型（POC 是 5-fold 交叉驗證，沒存部署用的檔案）</li>
+  <li><strong>凍結驗證資料集</strong>：抽 300 筆永不用於訓練，只做新模型驗證 — 確保未來更新不會讓模型退化</li>
+</ul>
+
+<h3>中期（1-3 個月）</h3>
+<ul>
+  <li><strong>整合到 CAPI 產線</strong>：AI 後處理接在 PatchCore 判 NG 之後，DB 記錄 AI 分數</li>
+  <li><strong>Staging 環境 Shadow Mode</strong>：新舊模型並排跑 1 週，比對差異再正式切換</li>
+  <li><strong>人工覆判介面改版</strong>：支援兩階段系統的「中信心送人工」流程</li>
+</ul>
+
+<h3>長期（半年後）</h3>
+<ul>
+  <li><strong>持續學習機制</strong>：每月新增 30+ 筆 scratch 樣本時自動重訓 → 測試驗證 → 確認後上線</li>
+  <li><strong>擴充其他過檢類別</strong>：
+    <ul>
+      <li>過度曝光（306 筆樣本，最大宗）</li>
+      <li>規格內（208 筆）</li>
+      <li>邊緣誤判（132 筆）</li>
+    </ul>
+    套用同一 pipeline，預計每類 1 週可完成 POC</li>
+  <li><strong>資料品質監控</strong>：自動偵測生產資料分布變化，異常時警報</li>
+</ul>
+
+<!-- ======== 8. 風險與限制 ======== -->
+
+<h2>七、風險與限制</h2>
+
+<h3>目前仍有的限制</h3>
+
+<div class="highlight">
+  <strong>① 樣本量偏少</strong><br>
+  scratch 只有 114 筆，5 fold 驗證每 fold 僅 ~23 筆測試樣本 → 數字有一定波動範圍（±6%）。
+  隨產線累積資料可逐步穩定。
+</div>
+
+<div class="highlight">
+  <strong>② 特定光源表現較弱</strong><br>
+  W0F / WGF / STANDARD 三種光源的 scratch 樣本各 &lt; 10 筆，recall 僅 33-67%。需優先蒐集這幾類補強。
+</div>
+
+<div class="highlight">
+  <strong>③ 邊緣缺陷本質困難</strong><br>
+  panel 邊緣的 scratch（5 筆）AI 擋下率僅 20%。這類缺陷位置緊貼面板邊界，影像中一半是機械遮蔽的黑區，訊號本質不足。建議用<strong>幾何規則判定</strong>補強（非 ML 問題）。
+</div>
+
+<h3>部署後需持續監控</h3>
+<ul>
+  <li>生產資料分布變化（新產品、新光源、新治具）→ 可能讓模型退化</li>
+  <li>人工覆判標註一致性（多位覆判員可能標準不一）→ 定期做「雙人覆判+仲裁」校驗</li>
+  <li>模型版本管理：每次更新必須經過三道驗證 gate，不可直接上線</li>
+</ul>
+
+<!-- ======== 9. 資源需求 ======== -->
+
+<h2>八、資源需求</h2>
+
+<h3>硬體</h3>
+<table>
+  <thead>
+    <tr>
+      <th>用途</th>
+      <th>GPU</th>
+      <th>時間</th>
+      <th>說明</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>訓練（離線，每月 1 次）</td>
+      <td>RTX 5060 Ti / 2080 Ti</td>
+      <td>~10-25 分鐘</td>
+      <td>頻率低，任一 GPU 都夠</td>
+    </tr>
+    <tr>
+      <td>產線推論（即時）</td>
+      <td>RTX 5060 Ti</td>
+      <td>~25 ms/crop</td>
+      <td>已是產線現有配置，無額外投資</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>人力</h3>
+<ul>
+  <li><strong>AI 工程師（目前）</strong>：部署整合 + 資料維護機制建置</li>
+  <li><strong>產線工程師</strong>：CAPI pipeline 整合 + 人工覆判介面配合</li>
+  <li><strong>覆判人員（持續）</strong>：人力需求從「全量覆判」降為「中信心覆判」，負擔減少 ~75%</li>
+</ul>
+
+<!-- ======== 10. 總結 ======== -->
+
+<h2>九、一頁總結</h2>
+
+<div class="tldr">
+  <h3>專案現況</h3>
+  <p>✅ POC 成功完成，技術可行性驗證</p>
+  <p>✅ 最佳方案達成：scratch 擋下率 90%、真 NG 保住率 98%、零漏檢天花板 86%</p>
+  <p>✅ 相較起點方案，<strong>模型能力提升近 20 個百分點</strong></p>
+  <h3 style="margin-top: 20px;">下一階段需求</h3>
+  <p>📋 批准部署規劃（spec）進入 Plan → 實作階段</p>
+  <p>🔧 產線 CAPI 整合工程與 staging 測試</p>
+  <p>👥 人工覆判介面配合兩階段系統改版</p>
+  <p>📊 建立資料維護與持續學習機制（長期生產穩定性）</p>
+</div>
+
+<footer>
+  <p>本報告基於 POC 階段 5-fold 交叉驗證結果整理。詳細技術細節與完整實驗歷史見：<br>
+  <code>docs/over_review_scratch_poc_result.md</code>、<code>docs/over_review_scratch_deployment_handoff.md</code>、<code>docs/over_review_scratch_data_maintenance.md</code></p>
+</footer>
+
+</body>
+</html>

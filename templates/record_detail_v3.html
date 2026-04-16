@@ -720,6 +720,11 @@
                         <span style="color: #CBD5E1;">|</span>
                         <span><strong style="color: #475569; font-weight: 500;">最高分:</strong> <strong
                                 style="color: #0F172A;">{{ img.max_score | round(3) }}</strong></span>
+                        {% if img.scratch_filter_count %}
+                        <span style="color: #CBD5E1;">|</span>
+                        <span><strong style="color: #0D9488; font-weight: 500;">🧽 DINOv2 救回:</strong>
+                            <strong style="color: #0D9488;">{{ img.scratch_filter_count }}</strong> tile</span>
+                        {% endif %}
                         <span style="color: #CBD5E1;">|</span>
                         <span><strong style="color: #475569; font-weight: 500;">耗時:</strong> {{ img.inference_time_ms |
                             round(0) }}ms</span>
@@ -742,9 +747,10 @@
                         <tbody>
                             {% for t in img.tiles %}
                             {% set t_badge, t_info = t | tile_info %}
+                            {% set is_scratch = t.get("scratch_filtered") %}
                             <tr>
                                 <td style="color: #64748B;">
-                                    {% if t.get("is_aoi_coord") %}🎯{% endif %}#{{ t.tile_id }}
+                                    {% if t.get("is_aoi_coord") %}🎯{% endif %}{% if is_scratch %}🧽{% endif %}#{{ t.tile_id }}
                                 </td>
                                 <td>
                                     {% if t.get("aoi_product_x", -1) >= 0 and t.get("aoi_product_y", -1) >= 0 %}
@@ -764,7 +770,9 @@
                                     </span>
                                 </td>
                                 <td style="font-size: 13px;">
-                                    {% if 'DUST' in t_info or '灰塵' in t_info %}
+                                    {% if is_scratch %}
+                                    <span style="color: #0D9488; font-weight: 500;">{{ t_info }}</span>
+                                    {% elif 'DUST' in t_info or '灰塵' in t_info %}
                                     <span style="color: #D97706;">{{ t_info }}</span>
                                     {% elif 'BOMB' in t_info or '炸彈' in t_info %}
                                     <span style="color: #DC2626;">{{ t_info }}</span>
@@ -795,9 +803,12 @@
                     {% for t in img.tiles %}
                     {% if t.heatmap_path and heatmap_base_dir %}
                     {% set thm_url = hm_relative(t.heatmap_path, heatmap_base_dir) %}
+                    {% set is_scratch = t.get("scratch_filtered") %}
                     {% if thm_url %}
                     <div class="image-box">
-                        <div class="image-box-label">區域 #{{ t.tile_id }}</div>
+                        <div class="image-box-label"{% if is_scratch %} style="color: #0D9488;"{% endif %}>
+                            {% if is_scratch %}🧽 {% endif %}區域 #{{ t.tile_id }}
+                        </div>
                         <img src="/heatmaps/{{ thm_url }}" alt="tile{{ t.tile_id }} heatmap"
                             onclick="openLightbox(this.src)">
                     </div>

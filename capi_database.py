@@ -1087,6 +1087,41 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def get_scratch_rescue_stats(self, record_ids: list) -> dict:
+        """回傳 {record_id: {"tiles": N, "images": N}} — DINOv2 scratch filter 救回統計。
+
+        tiles: 該 record 下 scratch_filtered=1 的 tile 總數
+        images: 該 record 下至少有 1 個 tile 被救回的 image 數
+        （未被列入結果的 record_id = 無救回）
+        """
+        if not record_ids:
+            return {}
+        conn = self._get_conn()
+        try:
+            stats: dict = {}
+            chunk_size = 900
+            for i in range(0, len(record_ids), chunk_size):
+                chunk = record_ids[i:i + chunk_size]
+                ph = ','.join('?' * len(chunk))
+                rows = conn.execute(
+                    f"SELECT img.record_id AS rid, "
+                    f"       COUNT(DISTINCT img.id) AS img_cnt, "
+                    f"       SUM(CASE WHEN t.scratch_filtered=1 THEN 1 ELSE 0 END) AS tile_cnt "
+                    f"FROM tile_results t "
+                    f"JOIN image_results img ON img.id = t.image_result_id "
+                    f"WHERE img.record_id IN ({ph}) AND t.scratch_filtered = 1 "
+                    f"GROUP BY img.record_id",
+                    chunk
+                ).fetchall()
+                for r in rows:
+                    stats[r["rid"]] = {
+                        "tiles": int(r["tile_cnt"] or 0),
+                        "images": int(r["img_cnt"] or 0),
+                    }
+            return stats
+        finally:
+            conn.close()
+
     VALID_MISS_CATEGORIES = {'dust_misfilter', 'threshold_high', 'ric_misjudge', 'outside_aoi_area', 'data_error_actually_ok', 'other'}
     VALID_OVER_CATEGORIES = {'edge_false_positive', 'within_spec', 'overexposure', 'surface_scratch', 'surface_dirt', 'bubble', 'aoi_ai_false_positive', 'dust_mask_incomplete', 'other'}
 
@@ -1870,7 +1905,8 @@ class CAPIDatabase:
             ("cv_edge_exclude_h", 100, "int", "排除區域高度 (px)"),
             ("cv_edge_exclude_zones", [], "dict", "不檢測排除區域列表 (適用於 PatchCore 推論及邊緣檢測)"),
             ("cv_edge_aoi_threshold", 4, "int", "AOI 座標邊緣明暗差閾值 (獨立於四邊)"),
-            ("cv_edge_aoi_min_area", 10, "int", "AOI 座標邊緣最小缺陷面積 (px, 獨立於四邊)"),
+            ("cv_edge_aoi_min_area", 40, "int", "AOI 座標邊緣最小缺陷面積 (px, 獨立於四邊)"),
+            ("cv_edge_aoi_solidity_min", 0.2, "float", "AOI 邊緣 Solidity 下限 (低於此值視為 L 形偽影排除, 0=停用)"),
             # B0F 亮點偵測設定
             ("bright_spot_threshold", 200, "int", "絕對亮度上限 (超過直接判定亮點)"),
             ("bright_spot_min_area", 5, "int", "亮點最小連通面積 (px)"),
