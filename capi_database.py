@@ -259,6 +259,8 @@ class CAPIDatabase:
             add_column_if_not_exists("edge_defect_results", "is_bomb", "INTEGER DEFAULT 0")
             add_column_if_not_exists("edge_defect_results", "bomb_code", "TEXT DEFAULT ''")
             add_column_if_not_exists("edge_defect_results", "is_cv_ok", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("edge_defect_results", "threshold_used", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("edge_defect_results", "min_area_used", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "is_exclude_zone", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "is_aoi_coord", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "aoi_defect_code", "TEXT DEFAULT ''")
@@ -416,8 +418,9 @@ class CAPIDatabase:
                                    (image_result_id, side, area,
                                     bbox_x, bbox_y, bbox_w, bbox_h,
                                     max_diff, center_x, center_y, heatmap_path,
-                                    is_dust, is_bomb, bomb_code, is_cv_ok)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    is_dust, is_bomb, bomb_code, is_cv_ok,
+                                    threshold_used, min_area_used)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  edge_data.get("side", ""),
                                  edge_data.get("area", 0),
@@ -432,7 +435,9 @@ class CAPIDatabase:
                                  edge_data.get("is_dust", 0),
                                  edge_data.get("is_bomb", 0),
                                  edge_data.get("bomb_code", ""),
-                                 edge_data.get("is_cv_ok", 0))
+                                 edge_data.get("is_cv_ok", 0),
+                                 edge_data.get("threshold_used", 0),
+                                 edge_data.get("min_area_used", 0))
                             )
 
                 conn.commit()
@@ -567,8 +572,9 @@ class CAPIDatabase:
                                    (image_result_id, side, area,
                                     bbox_x, bbox_y, bbox_w, bbox_h,
                                     max_diff, center_x, center_y, heatmap_path,
-                                    is_dust, is_bomb, bomb_code, is_cv_ok)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    is_dust, is_bomb, bomb_code, is_cv_ok,
+                                    threshold_used, min_area_used)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  edge_data.get("side", ""),
                                  edge_data.get("area", 0),
@@ -583,7 +589,9 @@ class CAPIDatabase:
                                  edge_data.get("is_dust", 0),
                                  edge_data.get("is_bomb", 0),
                                  edge_data.get("bomb_code", ""),
-                                 edge_data.get("is_cv_ok", 0))
+                                 edge_data.get("is_cv_ok", 0),
+                                 edge_data.get("threshold_used", 0),
+                                 edge_data.get("min_area_used", 0))
                             )
 
                 conn.commit()

@@ -788,7 +788,16 @@ class HeatmapManager:
         min_area_used = getattr(edge_defect, 'min_area_used', 0)
 
         if is_cv_ok:
-            verdict = "CV OK"
+            # 推算 OK 原因：差異未達 / 面積未達 / 兩者皆過 → 必是形狀(solidity)過濾
+            if threshold_used > 0 and max_diff < threshold_used:
+                cv_ok_reason = "Diff<Thr"
+            elif min_area_used > 0 and area < min_area_used:
+                cv_ok_reason = "Area<Min"
+            elif threshold_used > 0 or min_area_used > 0:
+                cv_ok_reason = "Shape filtered"
+            else:
+                cv_ok_reason = ""
+            verdict = f"CV OK ({cv_ok_reason})" if cv_ok_reason else "CV OK"
             verdict_color = (0, 255, 0)
         elif is_bomb:
             verdict = f"BOMB: {bomb_code} (Filtered as OK)"

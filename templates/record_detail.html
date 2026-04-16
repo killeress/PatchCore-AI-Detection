@@ -489,10 +489,26 @@ function copyInferenceLog() {
                 </thead>
                 <tbody>
                     {% for ed in img.edge_defects %}
+                    {% set ed_thr = ed.get('threshold_used', 0) %}
+                    {% set ed_min = ed.get('min_area_used', 0) %}
+                    {% if ed.is_cv_ok %}
+                      {% if ed_thr > 0 and ed.max_diff < ed_thr %}
+                        {% set cv_ok_reason = '差異未達門檻' %}
+                      {% elif ed_min > 0 and ed.area < ed_min %}
+                        {% set cv_ok_reason = '面積未達門檻' %}
+                      {% elif ed_thr > 0 or ed_min > 0 %}
+                        {% set cv_ok_reason = '形狀過濾 (L 形偽影)' %}
+                      {% else %}
+                        {% set cv_ok_reason = '' %}
+                      {% endif %}
+                    {% endif %}
                     <tr>
                         <td>
                             {% if ed.is_cv_ok %}
                             <span class="badge badge-ok" style="font-size:0.7rem;">CV OK</span>
+                            {% if cv_ok_reason %}
+                            <div style="margin-top:3px;font-size:0.68rem;color:var(--text-muted);font-style:italic;">{{ cv_ok_reason }}</div>
+                            {% endif %}
                             {% elif ed.is_bomb %}
                             <span class="badge"
                                 style="background-color:#a855f7; color:white; font-size:0.7rem;">BOMB</span>
@@ -507,10 +523,18 @@ function copyInferenceLog() {
                                 ed.side }}</span></td>
                         <td>({{ ed.bbox_x }}, {{ ed.bbox_y }})</td>
                         <td>{{ ed.bbox_w }}x{{ ed.bbox_h }}</td>
-                        <td>{{ ed.area }}px</td>
+                        <td>
+                            {{ ed.area }}px
+                            {% if ed.is_cv_ok and ed_min > 0 %}
+                            <div style="font-size:0.68rem;color:var(--text-muted);">vs Min:{{ ed_min }}</div>
+                            {% endif %}
+                        </td>
                         <td>
                             {% if ed.is_cv_ok %}
-                            <span class="badge" style="background: #D1FAE5; color: #065F46;">0.0</span>
+                            <span class="badge" style="background: #D1FAE5; color: #065F46;">{{ ed.max_diff | round(1) }}</span>
+                            {% if ed_thr > 0 %}
+                            <div style="font-size:0.68rem;color:var(--text-muted);">vs Thr:{{ ed_thr }}</div>
+                            {% endif %}
                             {% else %}
                             <span class="badge badge-ng">{{ ed.max_diff | round(1) }}</span>
                             {% endif %}
