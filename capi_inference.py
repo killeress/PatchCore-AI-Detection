@@ -3312,43 +3312,52 @@ class CAPIInferencer:
             elif cached_mark is None:
                 print(f"❌ MARK 模板匹配全部失敗，且未設定 Fallback 位置")
         
-        # === 黑圖 (B0F) 參考邊界：從白圖計算 ===
-        # B0F 黑圖的 OTSU 二值化無法正確偵測面板邊界（全黑畫面與背景差異太小），
-        # 因此從同資料夾的白圖 (非B0F、非OMIT) 計算邊界作為參考
-        reference_raw_bounds_for_dark = None
-        reference_polygon_for_dark: Optional[np.ndarray] = None
-        _DARK_PREFIXES = ("B0F",)  # 需要使用參考邊界的暗色圖片前綴
-        def _is_dark_image(filename: str) -> bool:
-            return filename.upper().startswith(_DARK_PREFIXES)
+        # === 統一參考邊界 (Panel 級)：依優先序挑一張圖計算，套用到所有圖片 ===
+        # 同一 panel 的所有圖片皆為同一位置拍攝，理論邊界相同；各圖獨立 OTSU
+        # 在光源較弱的機種（如 G0F / R0F / STANDARD）會抓歪 polygon，連帶影響
+        # tiling / mask / exclusion。這裡以 W0F (白光) 優先作為參考，其他圖套用。
+        # B0F (暗色) 本來就無法獨立偵測邊界，同樣走這條路徑。
+        _DARK_PREFIXES = ("B0F",)  # 不得作為 reference 的暗色圖片前綴
+        _REFERENCE_PRIORITY = ("W0F", "WGF", "G0F", "R0F", "STANDARD")
 
-        has_dark_files = any(_is_dark_image(f.name) for f in normal_files)
-        if has_dark_files:
-            # 從非暗色、非OMIT 圖片中計算參考邊界
-            ref_candidates = [
-                f for f in normal_files
-                if not _is_dark_image(f.name) and not is_dust_check_image(f)
-            ]
-            for ref_path in ref_candidates:
-                try:
-                    ref_img = cv2.imread(str(ref_path), cv2.IMREAD_UNCHANGED)
-                    if ref_img is not None:
-                        ref_bounds, ref_binary = self._find_raw_object_bounds(ref_img)
-                        reference_raw_bounds_for_dark = ref_bounds
-                        if self.config.enable_panel_polygon:
-                            reference_polygon_for_dark = self._find_panel_polygon(
-                                ref_binary, ref_bounds
-                            )
-                            poly_str = "有" if reference_polygon_for_dark is not None else "品質不足"
-                        else:
-                            poly_str = "關閉"
-                        print(f"📐 黑圖參考邊界已從 {ref_path.name} 計算 → {reference_raw_bounds_for_dark}"
-                              f" (polygon: {poly_str})")
-                        break
-                except Exception as e:
-                    print(f"⚠️ 計算參考邊界失敗 ({ref_path.name}): {e}")
+        def _prefix_rank(filename: str) -> int:
+            up = filename.upper()
+            for i, p in enumerate(_REFERENCE_PRIORITY):
+                if up.startswith(p):
+                    return i
+            return len(_REFERENCE_PRIORITY)  # 兜底：其他非暗色非 OMIT
+
+        panel_reference_raw_bounds: Optional[Tuple[int, int, int, int]] = None
+        panel_reference_polygon: Optional[np.ndarray] = None
+
+        ref_candidates = sorted(
+            [f for f in normal_files
+             if not f.name.upper().startswith(_DARK_PREFIXES)
+             and not is_dust_check_image(f)],
+            key=lambda f: _prefix_rank(f.name),
+        )
+        for ref_path in ref_candidates:
+            try:
+                ref_img = cv2.imread(str(ref_path), cv2.IMREAD_UNCHANGED)
+                if ref_img is None:
                     continue
-            if reference_raw_bounds_for_dark is None:
-                print(f"⚠️ 無法找到白圖計算參考邊界，黑圖將使用自身 OTSU 邊界 (可能不準確)")
+                ref_bounds, ref_binary = self._find_raw_object_bounds(ref_img)
+                panel_reference_raw_bounds = ref_bounds
+                if self.config.enable_panel_polygon:
+                    panel_reference_polygon = self._find_panel_polygon(
+                        ref_binary, ref_bounds
+                    )
+                    poly_str = "有" if panel_reference_polygon is not None else "品質不足"
+                else:
+                    poly_str = "關閉"
+                print(f"📐 統一參考邊界 (Panel 級) 已從 {ref_path.name} 計算 → "
+                      f"{panel_reference_raw_bounds} (polygon: {poly_str})")
+                break
+            except Exception as e:
+                print(f"⚠️ 計算參考邊界失敗 ({ref_path.name}): {e}")
+                continue
+        if panel_reference_raw_bounds is None:
+            print("⚠️ 無法計算統一參考邊界，所有圖片將各自計算 OTSU (可能不一致)")
 
         # 過濾出需要處理的檔案
         files_to_process = [f for f in normal_files if not self.config.should_skip_file(f.name)]
@@ -3370,14 +3379,12 @@ class CAPIInferencer:
         # ================================================================
         def _preprocess_one(img_path: Path) -> Optional[ImageResult]:
             """單張圖片的預處理 (可安全在多執行緒中呼叫)"""
-            # 黑圖使用參考邊界
-            ref_bounds = reference_raw_bounds_for_dark if reference_raw_bounds_for_dark and _is_dark_image(img_path.name) else None
-            ref_poly = reference_polygon_for_dark if reference_polygon_for_dark is not None and _is_dark_image(img_path.name) else None
+            # 所有圖片套用統一參考邊界 (若計算成功)
             result = self.preprocess_image(
                 img_path,
                 cached_mark=cached_mark,
-                reference_raw_bounds=ref_bounds,
-                reference_polygon=ref_poly,
+                reference_raw_bounds=panel_reference_raw_bounds,
+                reference_polygon=panel_reference_polygon,
             )
             if result is None:
                 return None
@@ -3466,14 +3473,12 @@ class CAPIInferencer:
                                 break
                         if matched_file is not None:
                             print(f"🎯 AOI Coord: 為跳過的圖片 {matched_file.name} 建立預處理 (有 {len(aoi_report[report_prefix])} 筆 AOI 座標)")
-                            # 黑圖使用參考邊界
-                            skip_ref_bounds = reference_raw_bounds_for_dark if reference_raw_bounds_for_dark and _is_dark_image(matched_file.name) else None
-                            skip_ref_poly = reference_polygon_for_dark if reference_polygon_for_dark is not None and _is_dark_image(matched_file.name) else None
+                            # 套用統一參考邊界 (若計算成功)
                             skip_result = self.preprocess_image(
                                 matched_file,
                                 cached_mark=cached_mark,
-                                reference_raw_bounds=skip_ref_bounds,
-                                reference_polygon=skip_ref_poly,
+                                reference_raw_bounds=panel_reference_raw_bounds,
+                                reference_polygon=panel_reference_polygon,
                             )
                             if skip_result is not None:
                                 # 清除 grid tiles，只保留結構供 AOI coord 使用
