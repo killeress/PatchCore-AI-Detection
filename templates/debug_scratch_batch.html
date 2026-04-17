@@ -130,6 +130,112 @@
         text-decoration: none; font-family: 'Fira Code', monospace; font-size: 0.85rem;
     }
     .sb-link-back:hover { color: var(--text); }
+
+    /* 關於這個分類器 — 摺疊介紹 */
+    .sb-about {
+        background: rgba(96,165,250,0.06);
+        border-left: 3px solid #60a5fa;
+        border-radius: 8px;
+        padding: 12px 18px;
+        margin-bottom: 16px;
+        max-width: 720px;
+    }
+    .sb-about summary {
+        cursor: pointer; color: #60a5fa; font-weight: 600;
+        font-size: 0.9rem; user-select: none; outline: none;
+    }
+    .sb-about summary:hover { color: #93c5fd; }
+    .sb-about[open] summary { margin-bottom: 10px; }
+    .sb-about-body {
+        color: #d1d5db; font-size: 0.85rem; line-height: 1.75;
+        font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans TC", sans-serif;
+    }
+    .sb-about-body p { margin: 0 0 10px; }
+    .sb-about-body p:last-child { margin-bottom: 0; }
+    .sb-about-body strong { color: #e5e7eb; }
+
+    /* ⓘ tooltip */
+    .sb-tip {
+        color: #60a5fa; cursor: help; margin-left: 3px;
+        font-size: 0.75rem; position: relative; display: inline-block;
+        font-family: -apple-system, "Segoe UI", sans-serif;
+        vertical-align: baseline;
+    }
+    .sb-tip:hover::after {
+        content: attr(data-tip);
+        position: absolute; bottom: 150%; left: 50%;
+        transform: translateX(-50%);
+        background: #1e293b; color: #e5e7eb;
+        padding: 10px 12px; border-radius: 6px;
+        width: 260px; font-size: 0.78rem; line-height: 1.55;
+        z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        border: 1px solid #374151;
+        font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans TC", sans-serif;
+        text-transform: none; letter-spacing: normal;
+        white-space: normal; text-align: left; font-weight: normal;
+        pointer-events: none;
+    }
+    .sb-tip:hover::before {
+        content: ""; position: absolute; bottom: 150%; left: 50%;
+        transform: translateX(-50%) translateY(6px);
+        border: 6px solid transparent; border-top-color: #1e293b;
+        z-index: 101;
+    }
+
+    /* Hero 雙主指標 */
+    .sb-hero-row {
+        display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+        margin-bottom: 14px;
+    }
+    @media (max-width: 720px) { .sb-hero-row { grid-template-columns: 1fr; } }
+    .sb-hero-card {
+        padding: 18px 22px; border-radius: 10px; border: 1px solid;
+        position: relative; overflow: visible;
+    }
+    .sb-hero-card.hero-ok {
+        background: linear-gradient(135deg, rgba(34,197,94,0.12), rgba(10,15,26,0.4));
+        border-color: rgba(34,197,94,0.35);
+    }
+    .sb-hero-card.hero-warn {
+        background: linear-gradient(135deg, rgba(239,68,68,0.12), rgba(10,15,26,0.4));
+        border-color: rgba(239,68,68,0.35);
+    }
+    .sb-hero-label {
+        font-size: 0.75rem; letter-spacing: 1px; text-transform: uppercase;
+        margin-bottom: 8px; font-family: 'Fira Code', monospace;
+    }
+    .sb-hero-card.hero-ok .sb-hero-label { color: var(--ok); }
+    .sb-hero-card.hero-warn .sb-hero-label { color: var(--ng); }
+    .sb-hero-value {
+        font-size: 2.4rem; font-weight: 700;
+        font-family: 'Fira Code', monospace; line-height: 1;
+    }
+    .sb-hero-card.hero-ok .sb-hero-value { color: var(--ok); }
+    .sb-hero-card.hero-warn .sb-hero-value { color: var(--ng); }
+    .sb-hero-sub {
+        color: var(--text-muted); font-size: 0.82rem;
+        margin-top: 10px; line-height: 1.55;
+    }
+    .sb-hero-sub strong {
+        color: var(--text); font-family: 'Fira Code', monospace;
+    }
+
+    /* 次要統計縮小版 */
+    .sb-summary-compact {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 10px; margin-bottom: 16px;
+    }
+    .sb-summary-compact .sb-card { padding: 10px 12px; }
+    .sb-summary-compact .sb-card .label { font-size: 0.68rem; margin-bottom: 4px; }
+    .sb-summary-compact .sb-card .value { font-size: 1.1rem; }
+
+    /* 混淆矩陣：主數字放大、代號縮小 */
+    .cm-table td.val { font-size: 1.4rem; }
+    .cm-code {
+        font-size: 0.7rem; color: var(--text-muted); margin-left: 6px;
+        font-weight: 400;
+    }
 </style>
 {% endblock %}
 
@@ -137,16 +243,32 @@
 <div class="sb-container">
     <a class="sb-link-back" href="/debug">← 回 Debug 推論</a>
     <h2 style="margin: 0 0 12px;">批次 Scratch 分類器驗證 <span style="font-size:0.8rem; color:var(--text-muted); font-weight:normal;">（DINOv2 over-review）</span></h2>
-    <p style="color: var(--text-muted); font-size: 0.85rem; margin: 0 0 16px;">
-        選一個匯出批次 (Job)，對該批次所有樣本逐張跑 Scratch 分類器。
-        <strong>陽性</strong> = <code>{{ positive_label }}</code>（應被分類器翻回 OK）；
-        <strong>陰性</strong> = 其他全部（含 true_ng 與其他過檢類型，任何被翻回 OK 都計入 leak）。
-        最多處理 2000 張。
+
+    <details class="sb-about">
+        <summary>▶ 關於這個分類器（DINOv2 + LoRA）— 點擊展開白話說明</summary>
+        <div class="sb-about-body">
+            <p><strong>DINOv2 — 通用「看圖腦袋」</strong><br>
+            Meta 開源、預先用上億張網路圖片訓練好的視覺模型。就像一個「已經會看圖的腦袋」，內建對紋理、形狀、表面特徵的理解，不限制看過哪種產品。</p>
+            <p><strong>LoRA — 輕量微調補丁</strong><br>
+            LoRA（Low-Rank Adaptation）是一種只訓練「少量補丁」的微調技術。不動 DINOv2 主體，只在旁邊接上幾層小網路，用我們手上的 scratch 樣本學「什麼才是真 scratch」。訓練快、資料需求少、不會破壞 DINOv2 原本的視覺能力。</p>
+            <p><strong>為什麼這個組合？</strong><br>
+            AOI 過檢的 scratch 和其他 NG 長得很像（都是黑點或短線）。DINOv2 給通用視覺能力，LoRA 負責把它特化成「只分辨 scratch vs 其他」。這比從零訓練小模型更準、也比整個重新訓練 DINOv2 更省資源。</p>
+        </div>
+    </details>
+
+    <p style="color: var(--text-muted); font-size: 0.85rem; margin: 0 0 16px; line-height: 1.7;">
+        選一個已匯出的驗證批次，讓 Scratch 分類器逐張判斷是否該把 AOI 判的 NG 翻回 OK。
+        <br>
+        <strong style="color:var(--ok);">陽性樣本</strong><span class="sb-tip" data-tip="標註為 over_surface_scratch 的過檢類型。這些原本是 AOI 誤判成 NG 的，希望分類器能把它們翻回 OK。">ⓘ</span>：標為 <code>{{ positive_label }}</code>（希望被翻回 OK）
+        &nbsp;·&nbsp;
+        <strong style="color:var(--ng);">陰性樣本</strong><span class="sb-tip" data-tip="真 NG + 其他過檢類型。這些不該被翻回 OK，任何被翻走的都計入 leak。">ⓘ</span>：其他全部（任何被翻回 OK 都計入 <span style="color:var(--ng);">leak</span>）
+        <br>
+        <span style="color:var(--text-muted);">· 每次最多處理 2000 張</span>
     </p>
 
     <div class="sb-toolbar">
         <div class="sb-field">
-            <label>匯出批次 (Job)</label>
+            <label>匯出批次 (Job)<span class="sb-tip" data-tip="從 Over-Review 標註頁匯出的一組樣本。每個 job 是一次獨立的驗證資料集。">ⓘ</span></label>
             <select id="sb-job">
                 {% for j in jobs %}
                 <option value="{{ j }}">{{ j }}</option>
@@ -184,67 +306,86 @@
 
     <div id="sb-report" style="display:none;">
         <div class="thr-panel sb-panel">
-            <h3>Threshold 試算（拖動即時重算）</h3>
+            <h3>Threshold 試算<span class="sb-tip" data-tip="score 高於門檻 → 分類器判斷「應該翻回 OK」。拖動可即時重算下方所有指標。">ⓘ</span>　<span style="font-size:0.75rem; color:var(--text-muted); font-weight:normal;">（拖動即時重算）</span></h3>
             <div class="thr-row">
                 <input type="range" id="thr-slider" min="0" max="1" step="0.0001" value="0.5">
                 <div class="thr-val" id="thr-val">threshold = 0.5000</div>
             </div>
-            <div style="color:var(--text-muted); font-size:0.8rem; margin-top:8px;">
-                模型 conformal threshold = <span id="thr-conformal">-</span> |
-                safety × <span id="thr-safety">-</span> |
-                <strong>目前生效值</strong> = <span id="thr-effective" style="color:var(--err);">-</span>
+            <div style="color:var(--text-muted); font-size:0.8rem; margin-top:10px; line-height:1.7;">
+                <strong>生效門檻</strong> = <span id="thr-effective" style="color:var(--err); font-weight:700;">-</span>
+                &nbsp;＝&nbsp;
+                模型校準值<span class="sb-tip" data-tip="conformal threshold：模型訓練時以校準集算出的保守門檻，用來控制 leak 率。">ⓘ</span>
+                <span id="thr-conformal">-</span>
+                ×
+                安全倍率<span class="sb-tip" data-tip="safety multiplier：在校準值上再乘的倍率。> 1 更嚴格、< 1 更寬鬆。">ⓘ</span>
+                <span id="thr-safety">-</span>
                 <button id="thr-reset" style="margin-left:12px; background:transparent; color:var(--text-muted); border:1px solid var(--border); border-radius:6px; padding:3px 10px; cursor:pointer; font-family:'Fira Code', monospace; font-size:0.75rem;">重置為生效值</button>
             </div>
         </div>
 
-        <div class="sb-summary">
+        <div class="sb-hero-row">
+            <div class="sb-hero-card hero-ok">
+                <div class="sb-hero-label">
+                    Recall<span class="sb-tip" data-tip="分類器成功抓出的陽性比例 = TP / (TP + FN)。越高越好，代表該翻的都翻到了。">ⓘ</span>
+                </div>
+                <div class="sb-hero-value" id="s-recall">-</div>
+                <div class="sb-hero-sub" id="s-recall-sub">-</div>
+            </div>
+            <div class="sb-hero-card hero-warn">
+                <div class="sb-hero-label">
+                    Leak Rate<span class="sb-tip" data-tip="陰性被誤翻的比例 = FP / (FP + TN)。越低越好。0% 代表沒有真 NG 被放行。">ⓘ</span>
+                </div>
+                <div class="sb-hero-value" id="s-leak">-</div>
+                <div class="sb-hero-sub" id="s-leak-sub">-</div>
+            </div>
+        </div>
+
+        <div class="sb-summary-compact">
             <div class="sb-card info"><div class="label">樣本總數</div><div class="value" id="s-total">-</div></div>
             <div class="sb-card info"><div class="label">跳過</div><div class="value" id="s-skip">-</div></div>
-            <div class="sb-card ok"><div class="label">陽性 (scratch)</div><div class="value" id="s-pos">-</div></div>
-            <div class="sb-card warn"><div class="label">陰性 (其他)</div><div class="value" id="s-neg">-</div></div>
-            <div class="sb-card ok"><div class="label">Recall</div><div class="value" id="s-recall">-</div></div>
-            <div class="sb-card warn"><div class="label">Leak Rate</div><div class="value" id="s-leak">-</div></div>
+            <div class="sb-card ok"><div class="label">陽性 (scratch)<span class="sb-tip" data-tip="標註為 over_surface_scratch 的過檢類型數量。">ⓘ</span></div><div class="value" id="s-pos">-</div></div>
+            <div class="sb-card warn"><div class="label">陰性 (其他)<span class="sb-tip" data-tip="真 NG 與其他過檢類型數量。">ⓘ</span></div><div class="value" id="s-neg">-</div></div>
         </div>
 
         <div class="sb-row">
             <div class="sb-panel">
                 <h3>混淆矩陣</h3>
                 <table class="cm-table">
-                    <tr><th></th><th>預測：應 flip (score&gt;thr)</th><th>預測：保持 NG</th></tr>
+                    <tr><th></th><th>預測：應翻 OK (score&gt;門檻)</th><th>預測：保持 NG</th></tr>
                     <tr>
                         <th>實際：陽性</th>
-                        <td class="val cm-tp" id="cm-tp">-</td>
-                        <td class="val cm-fn" id="cm-fn">-</td>
+                        <td class="val cm-tp"><span id="cm-tp">-</span><span class="cm-code">TP<span class="sb-tip" data-tip="True Positive：陽性且分類器判翻 OK。">ⓘ</span></span></td>
+                        <td class="val cm-fn"><span id="cm-fn">-</span><span class="cm-code">FN<span class="sb-tip" data-tip="False Negative：陽性但分類器沒翻，應翻而漏翻。">ⓘ</span></span></td>
                     </tr>
                     <tr>
                         <th>實際：陰性</th>
-                        <td class="val cm-fp" id="cm-fp">-</td>
-                        <td class="val cm-tn" id="cm-tn">-</td>
+                        <td class="val cm-fp"><span id="cm-fp">-</span><span class="cm-code">FP<span class="sb-tip" data-tip="False Positive：陰性被翻 OK，就是 leak。這是最嚴重的錯誤。">ⓘ</span></span></td>
+                        <td class="val cm-tn"><span id="cm-tn">-</span><span class="cm-code">TN<span class="sb-tip" data-tip="True Negative：陰性且分類器保持 NG。">ⓘ</span></span></td>
                     </tr>
                 </table>
                 <div style="margin-top:10px; font-size:0.8rem; color:var(--text-muted);">
-                    TP = 正確翻 OK　｜　FN = 漏翻（應翻但沒翻）　｜　FP = leak（不該翻卻翻了）　｜　TN = 正確保持 NG
+                    <span style="color:var(--ok); font-weight:700;">TP</span> = 正確翻 OK　｜　<span style="color:#f59e0b; font-weight:700;">FN</span> = 漏翻（應翻但沒翻）　｜　<span style="color:var(--ng); font-weight:700;">FP</span> = leak（不該翻卻翻了）　｜　<span style="color:#60a5fa; font-weight:700;">TN</span> = 正確保持 NG
                 </div>
             </div>
             <div class="sb-panel">
-                <h3>分數分佈</h3>
+                <h3>分數分佈<span class="sb-tip" data-tip="每張樣本的分類器輸出分數分佈。綠=陽性、紅=陰性。越好的模型，兩色重疊越少。">ⓘ</span></h3>
                 <canvas id="hist-canvas" width="560" height="260"
                     style="width:100%; max-width:100%; background:#0a0f1a; border-radius:6px;"></canvas>
                 <div style="margin-top:8px; font-size:0.78rem; color:var(--text-muted);">
                     <span style="display:inline-block; width:10px; height:10px; background:#22c55e; margin-right:4px;"></span>陽性
                     <span style="display:inline-block; width:10px; height:10px; background:#ef4444; margin-right:4px;"></span>陰性
-                    <span style="display:inline-block; width:10px; height:10px; background:#f59e0b; margin-right:4px;"></span>threshold
+                    <span style="display:inline-block; width:10px; height:10px; background:#f59e0b; margin-right:4px;"></span>門檻
                 </div>
             </div>
         </div>
 
         <div class="sb-row">
             <div class="sb-panel">
-                <h3>Leak 清單（陰性被翻 OK，應修正）<span id="fp-count" style="color:var(--ng); margin-left:8px;">-</span></h3>
+                <h3>Leak 清單<span class="sb-tip" data-tip="應保持 NG 但被翻回 OK 的樣本，屬誤放，需檢查並修正。">ⓘ</span>（陰性被翻 OK，應修正）<span id="fp-count" style="color:var(--ng); margin-left:8px;">-</span></h3>
                 <div class="sample-grid" id="fp-grid"></div>
             </div>
             <div class="sb-panel">
-                <h3>漏翻清單（陽性未翻）<span id="fn-count" style="color:#f59e0b; margin-left:8px;">-</span></h3>
+                <h3>漏翻清單<span class="sb-tip" data-tip="應翻回 OK 但保持 NG 的樣本，屬漏抓；對出廠安全無害但會增加人工複檢成本。">ⓘ</span>（陽性未翻）<span id="fn-count" style="color:#f59e0b; margin-left:8px;">-</span></h3>
                 <div class="sample-grid" id="fn-grid"></div>
             </div>
         </div>
@@ -291,15 +432,23 @@
         warnBox.style.display = msg ? 'block' : 'none';
     }
 
+    function formatSeconds(sec) {
+        const s = Math.max(0, Math.round(sec));
+        if (s < 60) return `${s}s`;
+        const m = Math.floor(s / 60);
+        const rem = s % 60;
+        return rem === 0 ? `${m}m` : `${m}m ${rem}s`;
+    }
+
     function setProgress(state, done, total, elapsed) {
         progWrap.style.display = 'block';
         const pct = total > 0 ? (done * 100 / total) : 0;
         progFill.style.width = pct.toFixed(1) + '%';
         progPct.textContent = pct.toFixed(1) + '%';
         const eta = (done > 0 && total > done && elapsed > 0)
-            ? ` / 預估剩餘 ${Math.round(elapsed / done * (total - done))}s` : '';
+            ? ` / 預估剩餘 ${formatSeconds(elapsed / done * (total - done))}` : '';
         const stateZh = {running:'執行中', done:'完成', cancelled:'已取消', failed:'失敗'}[state] || state;
-        progLabel.textContent = `${stateZh} — ${done} / ${total}${eta}`;
+        progLabel.textContent = `${stateZh} — ${done.toLocaleString()} / ${total.toLocaleString()}${eta}`;
     }
 
     async function startJob() {
@@ -374,9 +523,9 @@
             const status = data.status;
             effThreshold = status.effective_threshold || 0;
             currentJob = status.job_id;
-            thrConformal.textContent = (status.conformal_threshold || 0).toFixed(6);
+            thrConformal.textContent = (status.conformal_threshold || 0).toFixed(4);
             thrSafety.textContent = (status.safety_multiplier || 0).toFixed(2);
-            thrEffective.textContent = effThreshold.toFixed(6);
+            thrEffective.textContent = effThreshold.toFixed(4);
             slider.value = effThreshold;
             recomputeAll(effThreshold);
             report.style.display = 'block';
@@ -397,22 +546,28 @@
                 if (flipped) { fp += 1; fpList.push(r); } else tn += 1;
             }
         }
-        const recall = pos ? tp / pos : 0;
-        const leak = neg ? fp / neg : 0;
-        document.getElementById('s-total').textContent = cachedResults.length;
-        document.getElementById('s-skip').textContent = skip;
-        document.getElementById('s-pos').textContent = pos;
-        document.getElementById('s-neg').textContent = neg;
-        document.getElementById('s-recall').textContent = (recall * 100).toFixed(1) + '%';
-        document.getElementById('s-leak').textContent = (leak * 100).toFixed(2) + '%';
-        document.getElementById('cm-tp').textContent = tp;
-        document.getElementById('cm-fn').textContent = fn;
-        document.getElementById('cm-fp').textContent = fp;
-        document.getElementById('cm-tn').textContent = tn;
+        const recallStr = pos > 0 ? ((tp / pos) * 100).toFixed(1) + '%' : '—';
+        const leakStr = neg > 0 ? ((fp / neg) * 100).toFixed(2) + '%' : '—';
+        document.getElementById('s-total').textContent = cachedResults.length.toLocaleString();
+        document.getElementById('s-skip').textContent = skip.toLocaleString();
+        document.getElementById('s-pos').textContent = pos.toLocaleString();
+        document.getElementById('s-neg').textContent = neg.toLocaleString();
+        document.getElementById('s-recall').textContent = recallStr;
+        document.getElementById('s-leak').textContent = leakStr;
+        document.getElementById('s-recall-sub').innerHTML = pos > 0
+            ? `在 <strong>${pos.toLocaleString()}</strong> 張 scratch 樣本中，<strong>${tp.toLocaleString()}</strong> 張成功翻回 OK`
+            : '（此批次無陽性樣本）';
+        document.getElementById('s-leak-sub').innerHTML = neg > 0
+            ? `在 <strong>${neg.toLocaleString()}</strong> 張真 NG 或其他類型中，<strong>${fp.toLocaleString()}</strong> 張被誤翻為 OK`
+            : '（此批次無陰性樣本）';
+        document.getElementById('cm-tp').textContent = tp.toLocaleString();
+        document.getElementById('cm-fn').textContent = fn.toLocaleString();
+        document.getElementById('cm-fp').textContent = fp.toLocaleString();
+        document.getElementById('cm-tn').textContent = tn.toLocaleString();
         fpList.sort((a, b) => b.score - a.score);
         fnList.sort((a, b) => a.score - b.score);
-        document.getElementById('fp-count').textContent = `(${fp})`;
-        document.getElementById('fn-count').textContent = `(${fn})`;
+        document.getElementById('fp-count').textContent = `(${fp.toLocaleString()})`;
+        document.getElementById('fn-count').textContent = `(${fn.toLocaleString()})`;
         renderGrid('fp-grid', fpList.slice(0, 200));
         renderGrid('fn-grid', fnList.slice(0, 200));
         drawHistogram(thr);
