@@ -179,6 +179,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_client_data_api(query)
             elif path == "/api/ric/inference-stats":
                 self._handle_inference_stats_api(query)
+            elif path == "/scratch-review":
+                self._handle_scratch_review_page(path)
+            elif path == "/api/scratch-review/list":
+                self._handle_scratch_review_list_api(query)
             elif path == "/api/stats":
                 self._handle_api_stats(query)
             elif path == "/api/status":
@@ -277,6 +281,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_over_review_save()
             elif path == "/api/ric/over-review/delete":
                 self._handle_over_review_delete()
+            elif path == "/api/scratch-review/mark":
+                self._handle_scratch_review_mark()
+            elif path == "/api/scratch-review/unmark":
+                self._handle_scratch_review_unmark()
             elif path == "/api/settings/update":
                 self._handle_api_settings_update()
             elif path == "/api/settings/reload":
@@ -1551,6 +1559,93 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": False, "error": "Review 不存在"})
         except Exception as e:
             logger.error(f"Over review delete error: {e}", exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
+    # ── Scratch 救回審查頁面 ────────────────────────
+
+    def _handle_scratch_review_page(self, path: str):
+        """渲染 Scratch 救回審查頁面"""
+        template = self.jinja_env.get_template("scratch_review.html")
+        html = template.render(request_path=path)
+        self._send_response(200, html)
+
+    def _handle_scratch_review_list_api(self, query: dict):
+        """API: 列出被 scratch filter 救回的 tile"""
+        try:
+            start_date = query.get('start_date', [''])[0] or None
+            end_date = query.get('end_date', [''])[0] or None
+            order_by = query.get('order', ['latest'])[0] or 'latest'
+            try:
+                limit = int(query.get('limit', ['24'])[0])
+            except (ValueError, TypeError):
+                limit = 24
+            try:
+                offset = int(query.get('offset', ['0'])[0])
+            except (ValueError, TypeError):
+                offset = 0
+
+            items = self.db.list_scratch_rescued_tiles(
+                start_date=start_date,
+                end_date=end_date,
+                order_by=order_by,
+                limit=limit,
+                offset=offset,
+            )
+            base = self.heatmap_base_dir
+            for it in items:
+                hm = it.pop("heatmap_path", "")
+                it["heatmap_url"] = f"/heatmaps/{hm_relative(hm, base)}" if (hm and base and hm_relative(hm, base)) else ""
+
+            counts = self.db.count_scratch_rescued_tiles(start_date=start_date, end_date=end_date)
+            self._send_json({
+                "success": True,
+                "total": counts["total"],
+                "marked": counts["marked"],
+                "items": items,
+                "limit": limit,
+                "offset": offset,
+            })
+        except Exception as e:
+            logger.error(f"Scratch review list error: {e}", exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
+    def _handle_scratch_review_mark(self):
+        """API: 標記 tile 為誤救"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+
+            tile_id = data.get("tile_id")
+            note = data.get("note", "") or ""
+            if not tile_id:
+                self._send_json({"success": False, "error": "缺少 tile_id"})
+                return
+
+            review_id = self.db.mark_scratch_misrescue(int(tile_id), note)
+            self._send_json({"success": True, "id": review_id, "message": "已標記為誤救"})
+        except ValueError as ve:
+            self._send_json({"success": False, "error": str(ve)})
+        except Exception as e:
+            logger.error(f"Scratch review mark error: {e}", exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
+    def _handle_scratch_review_unmark(self):
+        """API: 取消誤救標記"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+
+            tile_id = data.get("tile_id")
+            if not tile_id:
+                self._send_json({"success": False, "error": "缺少 tile_id"})
+                return
+
+            deleted = self.db.unmark_scratch_misrescue(int(tile_id))
+            self._send_json({"success": True, "deleted": deleted, "message": "已取消標記"})
+        except Exception as e:
+            logger.error(f"Scratch review unmark error: {e}", exc_info=True)
             self._send_json({"success": False, "error": str(e)})
 
     def _handle_ric_report_api(self, query: dict):

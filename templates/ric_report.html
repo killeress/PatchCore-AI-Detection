@@ -728,6 +728,7 @@
 <div class="top-tab-bar">
     <div class="top-tab active" data-top-tab="ric" onclick="switchTopTab('ric')">📊 RIC Report</div>
     <div class="top-tab" data-top-tab="inference" onclick="switchTopTab('inference')">🤖 AI 推論紀錄</div>
+    <div class="top-tab" data-top-tab="scratch" onclick="switchTopTab('scratch')">🩹 Scratch 審查</div>
 </div>
 
 <!-- Tab 1: RIC Report (existing content) -->
@@ -1089,6 +1090,11 @@
         </div>
     </div>
 </div><!-- end #tab-inference -->
+
+<!-- Tab 3: Scratch 審查 -->
+<div class="top-tab-content" id="tab-scratch">
+    {% include '_scratch_review_content.html' %}
+</div>
 
 
 
@@ -2232,9 +2238,7 @@
                 <div class="value">${completionRate}%</div>
                 <div class="detail">${ors.reviewed} / ${ors.total}</div>
             </div>
-            ${scratchCard('DINOv2 救回片數', srs.panels, '被刮痕濾網翻為 OK 的 panel')}
-            ${scratchCard('DINOv2 救回圖數', srs.images, '至少 1 個 tile 被救回')}
-            ${scratchCard('DINOv2 救回 tile 數', srs.tiles, 'scratch_filtered = 1 tile 總數')}
+            ${scratchCard('救回片數（刮痕）', srs.panels, '被刮痕濾網翻為 OK 的 panel')}
             `;
         }
 
@@ -2504,6 +2508,9 @@
         document.querySelectorAll('.top-tab-content').forEach(p => p.classList.toggle('active', p.id === 'tab-' + tabName));
         if (tabName === 'inference' && !inferenceTab._loaded) {
             inferenceTab.quickFilter('today');
+        }
+        if (tabName === 'scratch' && typeof srInit === 'function') {
+            srInit();
         }
     }
 

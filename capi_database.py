@@ -238,6 +238,19 @@ class CAPIDatabase:
                     UNIQUE(client_record_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_over_review_client ON over_review(client_record_id);
+
+                -- Scratch 誤救標記 (以 tile 為單位，供 DINOv2 再訓練負樣本收集)
+                CREATE TABLE IF NOT EXISTS scratch_rescue_review (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tile_result_id INTEGER NOT NULL,
+                    is_misrescue INTEGER NOT NULL DEFAULT 1,
+                    note TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    FOREIGN KEY (tile_result_id) REFERENCES tile_results(id),
+                    UNIQUE(tile_result_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_scratch_rescue_review_tile ON scratch_rescue_review(tile_result_id);
             """)
             
             # Migration for adding missing columns to existing database
@@ -1129,6 +1142,187 @@ class CAPIDatabase:
             return stats
         finally:
             conn.close()
+
+    _SCRATCH_REVIEW_ORDER = {
+        "latest": "ir.created_at DESC, t.id DESC",
+        "score_asc": "t.scratch_score ASC, ir.created_at DESC",
+    }
+
+    def list_scratch_rescued_tiles(
+        self,
+        start_date: str = None,
+        end_date: str = None,
+        order_by: str = "latest",
+        limit: int = 24,
+        offset: int = 0,
+    ) -> list:
+        """列出被 scratch filter 救回的 tile（scratch_filtered=1），含誤救標記狀態。
+
+        回傳 list of dict：
+          tile_id, record_id, glass_id, machine_no, created_at, ai_judgment,
+          image_name, heatmap_path (tile 層，fallback 至 image 層), tile x/y,
+          scratch_score, score, is_misrescue (0/1), review_note
+        """
+        order_clause = self._SCRATCH_REVIEW_ORDER.get(order_by, self._SCRATCH_REVIEW_ORDER["latest"])
+        limit = max(1, min(int(limit or 24), 100))
+        offset = max(0, int(offset or 0))
+
+        where = ["t.scratch_filtered = 1"]
+        params = []
+        if start_date:
+            where.append("DATE(ir.created_at) >= DATE(?)")
+            params.append(start_date)
+        if end_date:
+            where.append("DATE(ir.created_at) <= DATE(?)")
+            params.append(end_date)
+        where_sql = " AND ".join(where)
+
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    t.id                 AS tile_id,
+                    t.tile_id            AS tile_seq,
+                    t.x                  AS x,
+                    t.y                  AS y,
+                    t.score              AS score,
+                    t.scratch_score      AS scratch_score,
+                    t.heatmap_path       AS tile_heatmap,
+                    img.id               AS image_id,
+                    img.image_name       AS image_name,
+                    img.heatmap_path     AS image_heatmap,
+                    ir.id                AS record_id,
+                    ir.glass_id          AS glass_id,
+                    ir.machine_no        AS machine_no,
+                    ir.created_at        AS created_at,
+                    ir.ai_judgment       AS ai_judgment,
+                    srr.id               AS review_id,
+                    srr.is_misrescue     AS is_misrescue,
+                    srr.note             AS review_note
+                FROM tile_results t
+                JOIN image_results img ON img.id = t.image_result_id
+                JOIN inference_records ir ON ir.id = img.record_id
+                LEFT JOIN scratch_rescue_review srr ON srr.tile_result_id = t.id
+                WHERE {where_sql}
+                ORDER BY {order_clause}
+                LIMIT ? OFFSET ?
+                """,
+                (*params, limit, offset)
+            ).fetchall()
+            out = []
+            for r in rows:
+                heatmap = r["tile_heatmap"] or r["image_heatmap"] or ""
+                out.append({
+                    "tile_id": r["tile_id"],
+                    "tile_seq": r["tile_seq"],
+                    "x": r["x"],
+                    "y": r["y"],
+                    "score": float(r["score"] or 0.0),
+                    "scratch_score": float(r["scratch_score"] or 0.0),
+                    "heatmap_path": heatmap,
+                    "image_id": r["image_id"],
+                    "image_name": r["image_name"],
+                    "record_id": r["record_id"],
+                    "glass_id": r["glass_id"],
+                    "machine_no": r["machine_no"],
+                    "created_at": r["created_at"],
+                    "ai_judgment": r["ai_judgment"],
+                    "is_misrescue": int(r["is_misrescue"] or 0) if r["review_id"] else 0,
+                    "review_note": r["review_note"] or "",
+                    "reviewed": r["review_id"] is not None,
+                })
+            return out
+        finally:
+            conn.close()
+
+    def count_scratch_rescued_tiles(self, start_date: str = None, end_date: str = None) -> dict:
+        """回傳 {total, marked}：被救回 tile 總數、已標記誤救 tile 數。"""
+        where = ["t.scratch_filtered = 1"]
+        params = []
+        if start_date:
+            where.append("DATE(ir.created_at) >= DATE(?)")
+            params.append(start_date)
+        if end_date:
+            where.append("DATE(ir.created_at) <= DATE(?)")
+            params.append(end_date)
+        where_sql = " AND ".join(where)
+        conn = self._get_conn()
+        try:
+            total_row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM tile_results t
+                JOIN image_results img ON img.id = t.image_result_id
+                JOIN inference_records ir ON ir.id = img.record_id
+                WHERE {where_sql}
+                """,
+                params
+            ).fetchone()
+            marked_row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM tile_results t
+                JOIN image_results img ON img.id = t.image_result_id
+                JOIN inference_records ir ON ir.id = img.record_id
+                JOIN scratch_rescue_review srr ON srr.tile_result_id = t.id
+                WHERE {where_sql} AND srr.is_misrescue = 1
+                """,
+                params
+            ).fetchone()
+            return {
+                "total": int(total_row["cnt"] or 0),
+                "marked": int(marked_row["cnt"] or 0),
+            }
+        finally:
+            conn.close()
+
+    def mark_scratch_misrescue(self, tile_result_id: int, note: str = '') -> int:
+        """標記一個 tile 為誤救。UPSERT，回傳 review id。"""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                row = conn.execute(
+                    "SELECT id FROM tile_results WHERE id = ?",
+                    (tile_result_id,)
+                ).fetchone()
+                if not row:
+                    raise ValueError(f"Tile not found: {tile_result_id}")
+
+                conn.execute(
+                    """INSERT INTO scratch_rescue_review (tile_result_id, is_misrescue, note)
+                       VALUES (?, 1, ?)
+                       ON CONFLICT(tile_result_id)
+                       DO UPDATE SET is_misrescue = 1,
+                                     note = excluded.note,
+                                     updated_at = datetime('now', 'localtime')""",
+                    (tile_result_id, note)
+                )
+                conn.commit()
+                review_id = conn.execute(
+                    "SELECT id FROM scratch_rescue_review WHERE tile_result_id = ?",
+                    (tile_result_id,)
+                ).fetchone()["id"]
+                return review_id
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+
+    def unmark_scratch_misrescue(self, tile_result_id: int) -> bool:
+        """取消誤救標記。"""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                cursor = conn.execute(
+                    "DELETE FROM scratch_rescue_review WHERE tile_result_id = ?",
+                    (tile_result_id,)
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            finally:
+                conn.close()
 
     VALID_MISS_CATEGORIES = {'dust_misfilter', 'threshold_high', 'ric_misjudge', 'outside_aoi_area', 'data_error_actually_ok', 'other'}
     VALID_OVER_CATEGORIES = {'edge_false_positive', 'within_spec', 'overexposure', 'surface_scratch', 'surface_dirt', 'bubble', 'aoi_ai_false_positive', 'dust_mask_incomplete', 'other'}

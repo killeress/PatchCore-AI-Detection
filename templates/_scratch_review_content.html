@@ -1,0 +1,623 @@
+{# Shared partial for Scratch 救回審查 — 可嵌在 standalone 頁面或 /ric 的 tab 內 #}
+<style>
+    .scratch-review-scope .sr-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 24px;
+    }
+
+    .scratch-review-scope .sr-header h2 {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #e2e8f0;
+        margin: 0;
+    }
+
+    .scratch-review-scope .sr-header .subtitle {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+    }
+
+    .scratch-review-scope .sr-stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 16px;
+        margin-bottom: 24px;
+    }
+
+    .scratch-review-scope .sr-stat-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 20px;
+        text-align: center;
+        position: relative;
+        overflow: hidden;
+        transition: all 0.25s ease;
+    }
+
+    .scratch-review-scope .sr-stat-card::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0; height: 3px;
+    }
+
+    .scratch-review-scope .sr-stat-card.total::before { background: linear-gradient(90deg, #8b5cf6, #a855f7); }
+    .scratch-review-scope .sr-stat-card.total .value  { color: #a855f7; }
+    .scratch-review-scope .sr-stat-card.marked::before { background: linear-gradient(90deg, #ef4444, #f87171); }
+    .scratch-review-scope .sr-stat-card.marked .value  { color: #f87171; }
+    .scratch-review-scope .sr-stat-card.page::before   { background: linear-gradient(90deg, #22c55e, #10b981); }
+    .scratch-review-scope .sr-stat-card.page .value    { color: #22c55e; }
+
+    .scratch-review-scope .sr-stat-card .label {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        margin-bottom: 8px;
+    }
+
+    .scratch-review-scope .sr-stat-card .value {
+        font-size: 2.2rem;
+        font-weight: 700;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .scratch-review-scope .sr-stat-card .detail {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        margin-top: 4px;
+    }
+
+    .scratch-review-scope .sr-filter-bar {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 14px 18px;
+        margin-bottom: 20px;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 16px;
+    }
+
+    .scratch-review-scope .sr-filter-bar label {
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        font-weight: 500;
+    }
+
+    .scratch-review-scope .sr-filter-bar input[type="date"],
+    .scratch-review-scope .sr-filter-bar select {
+        background: #0f172a;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--text);
+        padding: 6px 10px;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.85rem;
+    }
+
+    .scratch-review-scope .sr-filter-bar input[type="date"]:focus,
+    .scratch-review-scope .sr-filter-bar select:focus {
+        outline: none;
+        border-color: var(--accent);
+    }
+
+    .scratch-review-scope .sr-order-toggle {
+        display: inline-flex;
+        background: #0f172a;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 2px;
+    }
+
+    .scratch-review-scope .sr-order-toggle button {
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        padding: 6px 12px;
+        font-size: 0.82rem;
+        font-weight: 600;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .scratch-review-scope .sr-order-toggle button.active {
+        background: linear-gradient(135deg, var(--accent), #6366f1);
+        color: white;
+    }
+
+    .scratch-review-scope .sr-btn-apply {
+        background: linear-gradient(135deg, var(--accent), #6366f1);
+        border: none;
+        color: white;
+        padding: 7px 16px;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        margin-left: auto;
+    }
+
+    .scratch-review-scope .sr-btn-apply:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+    }
+
+    .scratch-review-scope .sr-tile-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        gap: 16px;
+    }
+
+    .scratch-review-scope .sr-tile-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+        transition: all 0.2s;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .scratch-review-scope .sr-tile-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+        border-color: #475569;
+    }
+
+    .scratch-review-scope .sr-tile-card.marked {
+        border-color: var(--ng);
+        box-shadow: 0 0 0 1px var(--ng), 0 6px 20px rgba(239, 68, 68, 0.15);
+    }
+
+    .scratch-review-scope .sr-tile-card .img-wrap {
+        position: relative;
+        aspect-ratio: 1 / 1;
+        background: #0a1120;
+        cursor: pointer;
+        overflow: hidden;
+    }
+
+    .scratch-review-scope .sr-tile-card .img-wrap img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: block;
+    }
+
+    .scratch-review-scope .sr-tile-card .img-missing {
+        width: 100%; height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--text-muted);
+        font-size: 0.8rem;
+    }
+
+    .scratch-review-scope .sr-tile-card .score-overlay {
+        position: absolute;
+        top: 6px;
+        left: 6px;
+        background: rgba(0, 0, 0, 0.65);
+        backdrop-filter: blur(4px);
+        color: #f8fafc;
+        padding: 3px 8px;
+        border-radius: 6px;
+        font-size: 0.72rem;
+        font-family: 'Fira Code', monospace;
+        font-weight: 600;
+    }
+
+    .scratch-review-scope .score-low { color: #f87171; }
+    .scratch-review-scope .score-mid { color: #fbbf24; }
+    .scratch-review-scope .score-high { color: #22d3ee; }
+
+    .scratch-review-scope .sr-tile-card .info {
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .scratch-review-scope .sr-tile-card .pnl-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 8px;
+    }
+
+    .scratch-review-scope .sr-tile-card .pnl {
+        font-family: 'Fira Code', monospace;
+        font-size: 0.78rem;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .scratch-review-scope .sr-tile-card .mach {
+        font-size: 0.72rem;
+        color: var(--text-muted);
+        white-space: nowrap;
+    }
+
+    .scratch-review-scope .sr-tile-card .time {
+        font-family: 'Fira Code', monospace;
+        font-size: 0.7rem;
+        color: var(--text-muted);
+    }
+
+    .scratch-review-scope .sr-tile-card .actions {
+        display: flex;
+        gap: 6px;
+        padding: 8px 12px 12px;
+        border-top: 1px solid var(--border);
+        margin-top: 2px;
+    }
+
+    .scratch-review-scope .sr-tile-card .btn-mark {
+        flex: 1;
+        background: rgba(239, 68, 68, 0.08);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        color: var(--ng);
+        padding: 6px 10px;
+        border-radius: 6px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.15s;
+    }
+
+    .scratch-review-scope .sr-tile-card .btn-mark:hover {
+        background: rgba(239, 68, 68, 0.16);
+    }
+
+    .scratch-review-scope .sr-tile-card .btn-mark.active {
+        background: rgba(239, 68, 68, 0.25);
+        border-color: var(--ng);
+        color: #fecaca;
+    }
+
+    .scratch-review-scope .sr-tile-card .btn-record {
+        background: rgba(59, 130, 246, 0.08);
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        color: var(--accent);
+        padding: 6px 10px;
+        border-radius: 6px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        cursor: pointer;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+    }
+
+    .scratch-review-scope .sr-tile-card .btn-record:hover {
+        background: rgba(59, 130, 246, 0.16);
+        text-decoration: none;
+    }
+
+    .scratch-review-scope .sr-empty-state,
+    .scratch-review-scope .sr-loading-state {
+        text-align: center;
+        padding: 60px 20px;
+        color: var(--text-muted);
+        font-size: 0.95rem;
+    }
+
+    .scratch-review-scope .sr-empty-state .icon {
+        font-size: 3rem;
+        margin-bottom: 12px;
+        opacity: 0.5;
+    }
+
+    .scratch-review-scope .sr-pagination {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 8px;
+        margin-top: 24px;
+    }
+
+    .scratch-review-scope .sr-pagination button {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 7px 14px;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        cursor: pointer;
+        font-family: 'Fira Code', monospace;
+        transition: all 0.15s;
+    }
+
+    .scratch-review-scope .sr-pagination button:hover:not(:disabled) {
+        border-color: var(--accent);
+    }
+
+    .scratch-review-scope .sr-pagination button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+    }
+
+    .scratch-review-scope .sr-pagination .page-info {
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        font-family: 'Fira Code', monospace;
+        padding: 0 10px;
+    }
+</style>
+
+<div class="scratch-review-scope">
+    <div class="sr-header">
+        <div>
+            <h2>🩹 Scratch 救回審查</h2>
+            <div class="subtitle">檢查 DINOv2 刮痕分類器是否有誤救（將真缺陷錯判為刮痕 → 漏檢）</div>
+        </div>
+    </div>
+
+    <div class="sr-filter-bar">
+        <label>日期範圍：</label>
+        <input type="date" id="sr-start-date">
+        <span style="color:var(--text-muted)">→</span>
+        <input type="date" id="sr-end-date">
+
+        <label style="margin-left:18px;">排序：</label>
+        <div class="sr-order-toggle">
+            <button id="sr-order-latest" class="active" onclick="srSetOrder('latest')">最新在前</button>
+            <button id="sr-order-score" onclick="srSetOrder('score_asc')">分數低優先</button>
+        </div>
+
+        <label style="margin-left:18px;">每頁：</label>
+        <select id="sr-page-size">
+            <option value="12">12</option>
+            <option value="24" selected>24</option>
+            <option value="48">48</option>
+            <option value="96">96</option>
+        </select>
+
+        <button class="sr-btn-apply" onclick="srApplyFilter()">套用 / 重新整理</button>
+    </div>
+
+    <div class="sr-stats-grid">
+        <div class="sr-stat-card total">
+            <div class="label">總救回 tile 數</div>
+            <div class="value" id="sr-total">—</div>
+            <div class="detail">符合日期範圍</div>
+        </div>
+        <div class="sr-stat-card marked">
+            <div class="label">已標記誤救</div>
+            <div class="value" id="sr-marked">—</div>
+            <div class="detail" id="sr-marked-pct">—</div>
+        </div>
+        <div class="sr-stat-card page">
+            <div class="label">目前頁範圍</div>
+            <div class="value" id="sr-page-range" style="font-size:1.2rem;">—</div>
+            <div class="detail" id="sr-order-info">—</div>
+        </div>
+    </div>
+
+    <div id="sr-grid-wrap">
+        <div class="sr-loading-state">載入中…</div>
+    </div>
+
+    <div class="sr-pagination" id="sr-pagination" style="display:none;">
+        <button id="sr-prev" onclick="srGotoPage(srCurrentPage - 1)">← 上一頁</button>
+        <div class="page-info" id="sr-page-info">第 1 頁</div>
+        <button id="sr-next" onclick="srGotoPage(srCurrentPage + 1)">下一頁 →</button>
+    </div>
+</div>
+
+<script>
+    // Scratch 救回審查：partial 可在 standalone 頁面或 tab 內使用
+    // 由外部呼叫 window.srInit() 觸發初始化（避免 tab 未啟動時就 fetch）
+    var srCurrentOrder = 'latest';
+    var srCurrentPage = 1;
+    var srPageSize = 24;
+    var srTotalCount = 0;
+    var _srInited = false;
+
+    function srSetOrder(o) {
+        srCurrentOrder = o;
+        document.getElementById('sr-order-latest').classList.toggle('active', o === 'latest');
+        document.getElementById('sr-order-score').classList.toggle('active', o === 'score_asc');
+        srCurrentPage = 1;
+        srFetchAndRender();
+    }
+
+    function srGotoPage(p) {
+        const maxPage = Math.max(1, Math.ceil(srTotalCount / srPageSize));
+        if (p < 1 || p > maxPage) return;
+        srCurrentPage = p;
+        srFetchAndRender();
+    }
+
+    function srApplyFilter() {
+        srPageSize = parseInt(document.getElementById('sr-page-size').value, 10) || 24;
+        srCurrentPage = 1;
+        srFetchAndRender();
+    }
+
+    function srScoreClass(score) {
+        if (score < 0.3) return 'score-low';
+        if (score < 0.6) return 'score-mid';
+        return 'score-high';
+    }
+
+    function srShortTime(t) {
+        if (!t) return '';
+        return t.substring(5, 16);
+    }
+
+    function srShortPnl(p) {
+        if (!p) return '';
+        return p.length > 14 ? p.substring(0, 14) + '…' : p;
+    }
+
+    async function srFetchAndRender() {
+        const startDate = document.getElementById('sr-start-date').value;
+        const endDate = document.getElementById('sr-end-date').value;
+        const offset = (srCurrentPage - 1) * srPageSize;
+
+        const params = new URLSearchParams({
+            order: srCurrentOrder,
+            limit: srPageSize,
+            offset: offset,
+        });
+        if (startDate) params.set('start_date', startDate);
+        if (endDate) params.set('end_date', endDate);
+
+        const gridWrap = document.getElementById('sr-grid-wrap');
+        gridWrap.innerHTML = '<div class="sr-loading-state">載入中…</div>';
+
+        try {
+            const res = await fetch('/api/scratch-review/list?' + params.toString());
+            const data = await res.json();
+            if (!data.success) {
+                gridWrap.innerHTML = `<div class="sr-empty-state"><div class="icon">⚠️</div>載入失敗：${data.error || '未知錯誤'}</div>`;
+                return;
+            }
+            srTotalCount = data.total || 0;
+            document.getElementById('sr-total').textContent = srTotalCount.toLocaleString();
+            document.getElementById('sr-marked').textContent = (data.marked || 0).toLocaleString();
+            const pct = srTotalCount > 0 ? ((data.marked / srTotalCount) * 100).toFixed(1) : 0;
+            document.getElementById('sr-marked-pct').textContent = `${pct}% of 總數`;
+            document.getElementById('sr-order-info').textContent = srCurrentOrder === 'latest' ? '最新在前' : '分數低優先';
+
+            const from = srTotalCount === 0 ? 0 : offset + 1;
+            const to = Math.min(offset + (data.items || []).length, srTotalCount);
+            document.getElementById('sr-page-range').textContent = `${from} – ${to}`;
+
+            srRenderGrid(data.items || []);
+            srRenderPagination();
+        } catch (e) {
+            gridWrap.innerHTML = `<div class="sr-empty-state"><div class="icon">⚠️</div>網路錯誤：${e.message}</div>`;
+        }
+    }
+
+    function srRenderGrid(items) {
+        const gridWrap = document.getElementById('sr-grid-wrap');
+        if (items.length === 0) {
+            gridWrap.innerHTML = '<div class="sr-empty-state"><div class="icon">🔍</div>此範圍內沒有被救回的 tile</div>';
+            return;
+        }
+        const grid = document.createElement('div');
+        grid.className = 'sr-tile-grid';
+        items.forEach(it => grid.appendChild(srBuildCard(it)));
+        gridWrap.innerHTML = '';
+        gridWrap.appendChild(grid);
+    }
+
+    function srBuildCard(it) {
+        const card = document.createElement('div');
+        card.className = 'sr-tile-card' + (it.is_misrescue ? ' marked' : '');
+        card.id = 'sr-card-' + it.tile_id;
+
+        const imgHtml = it.heatmap_url
+            ? `<img src="${it.heatmap_url}" alt="tile heatmap" loading="lazy">`
+            : `<div class="img-missing">無熱力圖</div>`;
+
+        const scoreCls = srScoreClass(it.scratch_score);
+
+        card.innerHTML = `
+            <div class="img-wrap" onclick="${it.heatmap_url ? `openLightbox('${it.heatmap_url}')` : ''}">
+                ${imgHtml}
+                <div class="score-overlay ${scoreCls}">DINOv2: ${it.scratch_score.toFixed(3)}</div>
+            </div>
+            <div class="info">
+                <div class="pnl-row">
+                    <span class="pnl" title="${it.glass_id || ''}">${srShortPnl(it.glass_id)}</span>
+                    <span class="mach">${it.machine_no || ''}</span>
+                </div>
+                <div class="time">${srShortTime(it.created_at)} · (x=${it.x}, y=${it.y})</div>
+            </div>
+            <div class="actions">
+                <button class="btn-mark ${it.is_misrescue ? 'active' : ''}"
+                        onclick="srToggleMark(${it.tile_id})"
+                        id="sr-btn-${it.tile_id}">
+                    ${it.is_misrescue ? '✓ 已標記誤救' : '🚩 誤救'}
+                </button>
+                <a class="btn-record" href="/record/${it.record_id}" target="_blank" title="開啟完整推論紀錄">🔗</a>
+            </div>
+        `;
+        return card;
+    }
+
+    function srRenderPagination() {
+        const maxPage = Math.max(1, Math.ceil(srTotalCount / srPageSize));
+        const pag = document.getElementById('sr-pagination');
+        if (srTotalCount === 0) {
+            pag.style.display = 'none';
+            return;
+        }
+        pag.style.display = 'flex';
+        document.getElementById('sr-prev').disabled = srCurrentPage <= 1;
+        document.getElementById('sr-next').disabled = srCurrentPage >= maxPage;
+        document.getElementById('sr-page-info').textContent = `第 ${srCurrentPage} / ${maxPage} 頁`;
+    }
+
+    async function srToggleMark(tileId) {
+        const card = document.getElementById('sr-card-' + tileId);
+        const btn = document.getElementById('sr-btn-' + tileId);
+        const isMarked = card.classList.contains('marked');
+        const url = isMarked ? '/api/scratch-review/unmark' : '/api/scratch-review/mark';
+
+        btn.disabled = true;
+        const originalText = btn.textContent;
+        btn.textContent = '處理中…';
+
+        try {
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tile_id: tileId })
+            });
+            const data = await res.json();
+            if (!data.success) {
+                alert('操作失敗：' + (data.error || '未知錯誤'));
+                btn.textContent = originalText;
+                return;
+            }
+            if (isMarked) {
+                card.classList.remove('marked');
+                btn.classList.remove('active');
+                btn.textContent = '🚩 誤救';
+                srUpdateMarkedCount(-1);
+            } else {
+                card.classList.add('marked');
+                btn.classList.add('active');
+                btn.textContent = '✓ 已標記誤救';
+                srUpdateMarkedCount(+1);
+            }
+        } catch (e) {
+            alert('網路錯誤：' + e.message);
+            btn.textContent = originalText;
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    function srUpdateMarkedCount(delta) {
+        const el = document.getElementById('sr-marked');
+        const current = parseInt(el.textContent.replace(/,/g, ''), 10) || 0;
+        const next = Math.max(0, current + delta);
+        el.textContent = next.toLocaleString();
+        const pct = srTotalCount > 0 ? ((next / srTotalCount) * 100).toFixed(1) : 0;
+        document.getElementById('sr-marked-pct').textContent = `${pct}% of 總數`;
+    }
+
+    window.srInit = function () {
+        if (_srInited) return;
+        _srInited = true;
+        const today = new Date();
+        const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const fmt = d => d.toISOString().slice(0, 10);
+        document.getElementById('sr-end-date').value = fmt(today);
+        document.getElementById('sr-start-date').value = fmt(weekAgo);
+        srFetchAndRender();
+    };
+</script>

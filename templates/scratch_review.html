@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Scratch 救回審查 — CAPI AI{% endblock %}
+
+{% block content %}
+{% include '_scratch_review_content.html' %}
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        if (typeof srInit === 'function') srInit();
+    });
+</script>
+{% endblock %}
