@@ -402,12 +402,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         records, total_count = self.db.query_paged(limit, offset) if self.db else ([], 0)
         shift_stats = self.db.get_shift_statistics() if self.db else {}
 
-        # 計算 OK/NG 比率
+        # 計算 OK/NG 比率（異常 HY 不列入分母）
         s_total = shift_stats.get('total', 0) or 0
         s_ok = shift_stats.get('ok_count', 0) or 0
         s_ng = shift_stats.get('ng_count', 0) or 0
-        ok_rate = (s_ok / s_total * 100) if s_total > 0 else 0
-        ng_rate = (s_ng / s_total * 100) if s_total > 0 else 0
+        s_err = shift_stats.get('err_count', 0) or 0
+        s_denom = s_total - s_err
+        ok_rate = (s_ok / s_denom * 100) if s_denom > 0 else 0
+        ng_rate = (s_ng / s_denom * 100) if s_denom > 0 else 0
 
         import math
         total_pages = max(1, math.ceil(total_count / limit))
