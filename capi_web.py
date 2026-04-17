@@ -1010,6 +1010,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             default_aoi_threshold=get_val('cv_edge_aoi_threshold', 4),
             default_aoi_min_area=get_val('cv_edge_aoi_min_area', 40),
             default_aoi_solidity_min=get_val('cv_edge_aoi_solidity_min', 0.2),
+            default_aoi_polygon_erode_px=get_val('cv_edge_aoi_polygon_erode_px', 3),
+            default_aoi_morph_open_kernel=get_val('cv_edge_aoi_morph_open_kernel', 3),
+            default_aoi_min_max_diff=get_val('cv_edge_aoi_min_max_diff', 20),
+            default_aoi_line_min_length=get_val('cv_edge_aoi_line_min_length', 30),
+            default_aoi_line_max_width=get_val('cv_edge_aoi_line_max_width', 3),
             default_aoi_boundary_padding=15,
             default_aoi_boundary_min_bright=15,
         )
@@ -1988,7 +1993,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         import cv2
         import numpy as np
         import base64
-        from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, clamp_median_kernel
+        from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, clamp_median_kernel, inpaint_non_fg_region
 
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length)
@@ -2015,6 +2020,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             threshold = int(data.get("threshold", 4))
             min_area = int(data.get("min_area", 40))
             solidity_min = float(data.get("solidity_min", 0.2))
+            polygon_erode_px = int(data.get("polygon_erode_px", 3))
+            morph_open_kernel = int(data.get("morph_open_kernel", 3))
+            min_max_diff = int(data.get("min_max_diff", 20))
+            line_min_length = int(data.get("line_min_length", 30))
+            line_max_width = int(data.get("line_max_width", 3))
             boundary_padding = int(data.get("boundary_padding", 15))
             boundary_min_brightness = int(data.get("boundary_min_brightness", 15))
 
@@ -2029,7 +2039,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             img_h, img_w = image.shape[:2]
 
             # Fast Otsu bounds (與 /api/debug/edge-inspect 一致)
-            def _fast_otsu_bounds(img: np.ndarray) -> Tuple[int, int, int, int]:
+            # 同時回傳 closing mask 供 polygon 偵測使用
+            def _fast_otsu_bounds(img: np.ndarray) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
                 if len(img.shape) == 3:
                     g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 else:
@@ -2049,10 +2060,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         x_max = max(x + w, x_max)
                         y_max = max(y + h, y_max)
                 if x_min == float('inf'):
-                    return 0, 0, img.shape[1], img.shape[0]
-                return int(x_min), int(y_min), int(x_max), int(y_max)
+                    return (0, 0, img.shape[1], img.shape[0]), closing
+                return (int(x_min), int(y_min), int(x_max), int(y_max)), closing
 
-            otsu_bounds = _fast_otsu_bounds(image)
+            otsu_bounds, otsu_closing = _fast_otsu_bounds(image)
+
+            # 用 inferencer 的 polygon 偵測 (對齊 production)，無 inferencer 時 fallback 為 None
+            panel_polygon = None
+            if self.inferencer is not None:
+                try:
+                    panel_polygon = self.inferencer._find_panel_polygon(otsu_closing, otsu_bounds)
+                except Exception as poly_err:
+                    logger.warning(f"[DEBUG corner] panel_polygon 偵測失敗，fallback 用矩形: {poly_err}")
 
             # ROI 擷取（對齊 capi_inference 切法）
             rx1 = max(0, roi_x)
@@ -2069,6 +2088,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             cfg.aoi_threshold = threshold
             cfg.aoi_min_area = min_area
             cfg.aoi_solidity_min = solidity_min
+            cfg.aoi_polygon_erode_px = polygon_erode_px
+            cfg.aoi_morph_open_kernel = morph_open_kernel
+            cfg.aoi_min_max_diff = min_max_diff
+            cfg.aoi_line_min_length = line_min_length
+            cfg.aoi_line_max_width = line_max_width
             inspector = CVEdgeInspector(cfg)
 
             defects, roi_stats = inspector.inspect_roi(
@@ -2076,43 +2100,56 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 otsu_bounds=otsu_bounds,
                 boundary_padding=boundary_padding,
                 boundary_min_brightness=boundary_min_brightness,
+                panel_polygon=panel_polygon,
             )
 
-            # 手動重建 debug 影像（對齊 _inspect_side 完整流程，含 fg_median 填充）
+            # 手動重建 debug 影像（對齊 _inspect_side 完整流程，含 inpaint 填充）
             gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
             roi_h, roi_w = gray.shape[:2]
 
             fg_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
-            ox1, oy1, ox2, oy2 = otsu_bounds
-            lx1 = max(0, ox1 - rx1); ly1 = max(0, oy1 - ry1)
-            lx2 = min(roi_w, ox2 - rx1); ly2 = min(roi_h, oy2 - ry1)
-            if lx2 > lx1 and ly2 > ly1:
-                fg_mask[ly1:ly2, lx1:lx2] = 255
-            if boundary_padding > 0 and np.any(fg_mask > 0):
-                dk = cv2.getStructuringElement(cv2.MORPH_RECT,
-                        (boundary_padding * 2 + 1, boundary_padding * 2 + 1))
-                fg_mask_expanded = cv2.dilate(fg_mask, dk, iterations=1)
-                expansion_zone = (fg_mask_expanded > 0) & (fg_mask == 0)
-                expansion_valid = expansion_zone & (gray >= boundary_min_brightness)
-                fg_mask[expansion_valid] = 255
+            if panel_polygon is not None:
+                # 與 inspect_roi 同步：polygon 優先 (轉 ROI 局部座標 rasterize)
+                local_poly = panel_polygon.copy().astype(np.float32)
+                local_poly[:, 0] -= rx1
+                local_poly[:, 1] -= ry1
+                cv2.fillPoly(fg_mask, [local_poly.astype(np.int32)], 255)
+                # Polygon 內縮：避開面板邊緣亮帶轉換區
+                if polygon_erode_px > 0 and np.any(fg_mask > 0):
+                    ek = cv2.getStructuringElement(cv2.MORPH_RECT,
+                            (polygon_erode_px * 2 + 1, polygon_erode_px * 2 + 1))
+                    fg_mask = cv2.erode(fg_mask, ek)
+            else:
+                ox1, oy1, ox2, oy2 = otsu_bounds
+                lx1 = max(0, ox1 - rx1); ly1 = max(0, oy1 - ry1)
+                lx2 = min(roi_w, ox2 - rx1); ly2 = min(roi_h, oy2 - ry1)
+                if lx2 > lx1 and ly2 > ly1:
+                    fg_mask[ly1:ly2, lx1:lx2] = 255
+                # 矩形 bbox 模式才做 boundary_padding 外擴 (polygon 模式跳過)
+                if boundary_padding > 0 and np.any(fg_mask > 0):
+                    dk = cv2.getStructuringElement(cv2.MORPH_RECT,
+                            (boundary_padding * 2 + 1, boundary_padding * 2 + 1))
+                    fg_mask_expanded = cv2.dilate(fg_mask, dk, iterations=1)
+                    expansion_zone = (fg_mask_expanded > 0) & (fg_mask == 0)
+                    expansion_valid = expansion_zone & (gray >= boundary_min_brightness)
+                    fg_mask[expansion_valid] = 255
 
             k = cfg.blur_kernel
             blurred = cv2.GaussianBlur(gray, (k, k), 0)
-            if np.any(fg_mask > 0):
-                fg_pixels = blurred[fg_mask > 0]
-                fg_median = int(np.median(fg_pixels)) if fg_pixels.size > 0 else 0
-                blurred_for_bg = blurred.copy()
-                blurred_for_bg[fg_mask == 0] = fg_median
-            else:
-                blurred_for_bg = blurred
+            blurred_for_bg = inpaint_non_fg_region(blurred, fg_mask)
             mk = clamp_median_kernel(cfg.median_kernel, min(gray.shape[:2]) - 1)
             bg = cv2.medianBlur(blurred_for_bg, mk)
             diff = cv2.absdiff(blurred, bg)
             diff[fg_mask == 0] = 0
             _, mask_bin = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+            if morph_open_kernel > 0:
+                ko = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_open_kernel, morph_open_kernel))
+                mask_bin = cv2.morphologyEx(mask_bin, cv2.MORPH_OPEN, ko)
 
-            # Result 圖：roi 疊 defect bbox
+            # Result 圖：roi 疊 fg_mask 暗紅 (與 fg_mask 覆蓋圖同色) + defect bbox
+            # 先疊 fg_mask=0 區讓用戶看到非前景確實被排除，再畫 bbox
             result_img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            result_img[fg_mask == 0] = (0, 0, 60)
             for d in defects:
                 # 轉回 ROI 局部座標
                 dx, dy, dw, dh = d.bbox
@@ -2152,6 +2189,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         "bbox": d.bbox,
                         "center": d.center,
                         "max_diff": d.max_diff,
+                        "solidity": float(d.solidity),
                     } for d in defects
                 ],
                 "stats": {
@@ -2160,10 +2198,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "threshold": roi_stats.get("threshold", threshold),
                     "min_area": roi_stats.get("min_area", min_area),
                     "solidity_min": solidity_min,
+                    "morph_open_kernel": morph_open_kernel,
+                    "min_max_diff": min_max_diff,
+                    "line_min_length": line_min_length,
+                    "line_max_width": line_max_width,
                     "fg_coverage_pct": fg_coverage_pct,
                 },
                 "images": encoded_imgs,
                 "otsu_bounds": otsu_bounds,
+                "panel_polygon": panel_polygon.astype(int).tolist() if panel_polygon is not None else None,
                 "roi_bbox": [rx1, ry1, rx2, ry2],
                 "image_size": [img_w, img_h],
             })

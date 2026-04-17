@@ -28,6 +28,17 @@ def clamp_median_kernel(kernel_size: int, max_dim: int) -> int:
     return max(3, mk)
 
 
+def inpaint_non_fg_region(blurred: np.ndarray, fg_mask: np.ndarray, inpaint_radius: int = 3) -> np.ndarray:
+    """用 Navier-Stokes inpaint 填非前景區，取代 fg_median 常數填充，避免 medianBlur bg 估計在邊界內側被拉偏。"""
+    if fg_mask is None:
+        return blurred
+    non_fg = (fg_mask == 0).astype(np.uint8)
+    if not np.any(non_fg) or not np.any(fg_mask > 0):
+        return blurred
+    blurred_c = np.ascontiguousarray(blurred)
+    return cv2.inpaint(blurred_c, non_fg, inpaint_radius, cv2.INPAINT_NS)
+
+
 # 前景亮度閾值：低於此值的像素視為產品外背景（黑色邊界）
 FG_BRIGHTNESS_THRESHOLD = 15
 
@@ -56,12 +67,7 @@ def compute_fg_aware_diff(
     fg_mask = np.zeros_like(gray)
     fg_mask[gray >= brightness_threshold] = 255
 
-    fg_pixels = blurred[fg_mask > 0]
-    if fg_pixels.size > 0:
-        blurred_for_bg = blurred.copy()
-        blurred_for_bg[fg_mask == 0] = int(np.median(fg_pixels))
-    else:
-        blurred_for_bg = blurred
+    blurred_for_bg = inpaint_non_fg_region(blurred, fg_mask)
 
     bg = cv2.medianBlur(blurred_for_bg, median_kernel)
     diff = cv2.absdiff(blurred, bg)
@@ -78,6 +84,7 @@ class EdgeDefect:
     bbox: Tuple[int, int, int, int]  # (x, y, w, h) 在原圖絕對座標
     center: Tuple[int, int]          # (cx, cy) 中心點原圖絕對座標
     max_diff: int = 0    # 該區域最大灰階差值
+    solidity: float = 1.0  # convex-hull solidity；aoi_edge 用以過濾 L 形邊界偽影
     is_suspected_dust_or_scratch: bool = False
     omit_crop_image: Optional[np.ndarray] = field(default=None, repr=False)
     dust_mask: Optional[np.ndarray] = field(default=None, repr=False)
@@ -139,6 +146,11 @@ class EdgeInspectionConfig:
     aoi_threshold: int = 4        # AOI 座標邊緣明暗差閾值
     aoi_min_area: int = 40        # AOI 座標邊緣最小缺陷面積 (px) — 對齊 debug 頁預設
     aoi_solidity_min: float = 0.2 # Solidity 下限: 低於此值視為 L 形邊界偽影 (0=停用)
+    aoi_polygon_erode_px: int = 3 # polygon fg_mask 內縮 px 數，避開面板邊緣亮帶轉換區 (0=停用，僅 polygon 模式有效)
+    aoi_morph_open_kernel: int = 3 # 二值化後 morphological opening kernel 大小，去除 1-px 條紋與細雜訊橋 (0=停用)
+    aoi_min_max_diff: int = 20 # component 內最大 diff 下限：低於此值視為低對比度紋理雜訊 (0=停用)
+    aoi_line_min_length: int = 30 # 投影法偵測薄線最小長度 px (垂直/水平連續活化像素投影, 0=停用)
+    aoi_line_max_width: int = 3 # 薄線最大寬度 px (超過視為一般 component, 由 CC path 處理)
     exclude_zones: List[EdgeExclusionZoneConfig] = field(default_factory=list)
     # 儲存完整的按產品分組排除區域 (key=resolution_code, value=list of zones)
     all_exclude_zones_by_product: Dict[str, List[dict]] = field(default_factory=dict)
@@ -229,6 +241,11 @@ class EdgeInspectionConfig:
         cfg.aoi_threshold = int(get("cv_edge_aoi_threshold", 4))
         cfg.aoi_min_area = int(get("cv_edge_aoi_min_area", 40))
         cfg.aoi_solidity_min = float(get("cv_edge_aoi_solidity_min", 0.2))
+        cfg.aoi_polygon_erode_px = int(get("cv_edge_aoi_polygon_erode_px", 3))
+        cfg.aoi_morph_open_kernel = int(get("cv_edge_aoi_morph_open_kernel", 3))
+        cfg.aoi_min_max_diff = int(get("cv_edge_aoi_min_max_diff", 20))
+        cfg.aoi_line_min_length = int(get("cv_edge_aoi_line_min_length", 30))
+        cfg.aoi_line_max_width = int(get("cv_edge_aoi_line_max_width", 3))
 
         # 排除區域 (支援按產品解析度碼分組的 dict 格式，或向後相容的 list 格式)
         zones_raw = get("cv_edge_exclude_zones", None)
@@ -430,6 +447,7 @@ class CVEdgeInspector:
         otsu_bounds: Optional[Tuple[int, int, int, int]] = None,
         boundary_padding: int = 15,
         boundary_min_brightness: int = 15,
+        panel_polygon: Optional[np.ndarray] = None,
     ) -> Tuple[List[EdgeDefect], Dict[str, Any]]:
         """
         對預先擷取的 ROI 執行邊緣缺陷檢測（用於 AOI 座標邊緣 defect）
@@ -447,6 +465,9 @@ class CVEdgeInspector:
                          排除非產品區域對背景估計的干擾
             boundary_padding: 前景遮罩向外擴展的像素數，用於偵測 Otsu 邊界附近的缺陷
             boundary_min_brightness: 擴展區域中像素最低亮度閾值，低於此值視為真正背景
+            panel_polygon: 面板 4 角 polygon (shape (4,2) 原圖絕對座標, 順序 TL/TR/BR/BL)。
+                          若提供，fg_mask 會用 polygon rasterize（精確貼合面板邊緣，
+                          且 polygon 已內縮 → 排除邊緣亮帶轉換區），優先於 otsu_bounds。
 
         Returns:
             (defects, stats)
@@ -470,7 +491,19 @@ class CVEdgeInspector:
 
         # 建立前景遮罩：只在產品區域內做檢測，排除邊緣外黑色背景干擾
         fg_mask = None
-        if otsu_bounds is not None:
+        used_polygon = False  # 標記本次是否走 polygon 分支 (決定後續要 erode 還是 dilate)
+        if panel_polygon is not None:
+            used_polygon = True
+            roi_h, roi_w = gray.shape[:2]
+            fg_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+            # 將 polygon 由原圖絕對座標轉成 ROI 局部座標再 rasterize
+            local_poly = panel_polygon.copy().astype(np.float32)
+            local_poly[:, 0] -= offset_x
+            local_poly[:, 1] -= offset_y
+            cv2.fillPoly(fg_mask, [local_poly.astype(np.int32)], 255)
+            print(f"  🔲 inspect_roi: fg_mask 由 panel_polygon rasterize (4 角 ROI 局部座標 = "
+                  f"{[(int(p[0]), int(p[1])) for p in local_poly]})")
+        elif otsu_bounds is not None:
             ox1, oy1, ox2, oy2 = otsu_bounds
             roi_h, roi_w = gray.shape[:2]
             fg_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
@@ -482,21 +515,36 @@ class CVEdgeInspector:
             if local_x2 > local_x1 and local_y2 > local_y1:
                 fg_mask[local_y1:local_y2, local_x1:local_x2] = 255
 
-            # 擴展前景遮罩以偵測 Otsu 邊界附近的缺陷
-            if boundary_padding > 0 and np.any(fg_mask > 0):
-                dilate_kernel = cv2.getStructuringElement(
-                    cv2.MORPH_RECT,
-                    (boundary_padding * 2 + 1, boundary_padding * 2 + 1)
-                )
-                fg_mask_expanded = cv2.dilate(fg_mask, dilate_kernel, iterations=1)
+        if fg_mask is not None:
+            if used_polygon:
+                # Polygon 已精確貼合面板邊緣 → 內縮 N px 排除邊緣亮帶轉換區
+                # 不做外擴 boundary_padding（polygon 模式下外擴只會把亮帶塞回前景）
+                erode_n = int(getattr(self.config, 'aoi_polygon_erode_px', 0))
+                if erode_n > 0 and np.any(fg_mask > 0):
+                    erode_kernel = cv2.getStructuringElement(
+                        cv2.MORPH_RECT,
+                        (erode_n * 2 + 1, erode_n * 2 + 1)
+                    )
+                    before_px = int(np.count_nonzero(fg_mask))
+                    fg_mask = cv2.erode(fg_mask, erode_kernel)
+                    after_px = int(np.count_nonzero(fg_mask))
+                    print(f"  🔲 inspect_roi: fg_mask polygon 內縮 -{erode_n} px ({before_px} → {after_px} px, 跳過 boundary_padding)")
+            else:
+                # 矩形 bbox 模式：保持原行為，向外擴展抓邊界附近亮像素
+                if boundary_padding > 0 and np.any(fg_mask > 0):
+                    dilate_kernel = cv2.getStructuringElement(
+                        cv2.MORPH_RECT,
+                        (boundary_padding * 2 + 1, boundary_padding * 2 + 1)
+                    )
+                    fg_mask_expanded = cv2.dilate(fg_mask, dilate_kernel, iterations=1)
 
-                expansion_zone = (fg_mask_expanded > 0) & (fg_mask == 0)
-                expansion_valid = expansion_zone & (gray >= boundary_min_brightness)
-                fg_mask[expansion_valid] = 255
+                    expansion_zone = (fg_mask_expanded > 0) & (fg_mask == 0)
+                    expansion_valid = expansion_zone & (gray >= boundary_min_brightness)
+                    fg_mask[expansion_valid] = 255
 
-                expanded_px = int(np.count_nonzero(expansion_valid))
-                if expanded_px > 0:
-                    print(f"  🔲 inspect_roi: fg_mask 邊界擴展 +{expanded_px} px (padding={boundary_padding}, min_bright={boundary_min_brightness})")
+                    expanded_px = int(np.count_nonzero(expansion_valid))
+                    if expanded_px > 0:
+                        print(f"  🔲 inspect_roi: fg_mask 邊界擴展 +{expanded_px} px (padding={boundary_padding}, min_bright={boundary_min_brightness})")
 
             fg_coverage = np.count_nonzero(fg_mask) / fg_mask.size * 100
             print(f"  🔲 inspect_roi: fg_mask coverage={fg_coverage:.1f}%, ROI=({offset_x},{offset_y}) {roi_w}x{roi_h}")
@@ -533,17 +581,18 @@ class CVEdgeInspector:
             # 無缺陷時才做完整計算，供 debug 了解為何未偵測到
             k = self.config.blur_kernel
             blurred = cv2.GaussianBlur(gray, (k, k), 0)
-            fg_pixels = blurred[fg_mask > 0]
-            fg_median_val = int(np.median(fg_pixels))
             mk = clamp_median_kernel(self.config.median_kernel, min(gray.shape[:2]) - 1)
-            blurred_for_bg = blurred.copy()
-            blurred_for_bg[fg_mask == 0] = fg_median_val
+            blurred_for_bg = inpaint_non_fg_region(blurred, fg_mask)
             bg = cv2.medianBlur(blurred_for_bg, mk)
             diff = cv2.absdiff(blurred, bg)
             diff[fg_mask == 0] = 0
             actual_max_diff = int(np.max(diff)) if diff.size > 0 else 0
 
             _, thresh_mask = cv2.threshold(diff, aoi_threshold, 255, cv2.THRESH_BINARY)
+            if self.config.aoi_morph_open_kernel > 0:
+                mk_open = self.config.aoi_morph_open_kernel
+                kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (mk_open, mk_open))
+                thresh_mask = cv2.morphologyEx(thresh_mask, cv2.MORPH_OPEN, kernel_open)
             n_labels, _, stats_cc, _ = cv2.connectedComponentsWithStats(thresh_mask, connectivity=8)
             for i in range(1, n_labels):
                 a = stats_cc[i, cv2.CC_STAT_AREA]
@@ -632,16 +681,7 @@ class CVEdgeInspector:
         k = self.config.blur_kernel
         blurred = cv2.GaussianBlur(roi, (k, k), 0)
 
-        if fg_mask is not None and np.any(fg_mask > 0):
-            fg_pixels = blurred[fg_mask > 0]
-            if fg_pixels.size > 0:
-                fg_median = int(np.median(fg_pixels))
-                blurred_for_bg = blurred.copy()
-                blurred_for_bg[fg_mask == 0] = fg_median
-            else:
-                blurred_for_bg = blurred
-        else:
-            blurred_for_bg = blurred
+        blurred_for_bg = inpaint_non_fg_region(blurred, fg_mask) if fg_mask is not None else blurred
 
         mk = clamp_median_kernel(self.config.median_kernel, min(roi.shape[:2]) - 1)
         bg = cv2.medianBlur(blurred_for_bg, mk)
@@ -652,6 +692,16 @@ class CVEdgeInspector:
             diff[fg_mask == 0] = 0
 
         _, mask = cv2.threshold(diff, cfg.threshold, 255, cv2.THRESH_BINARY)
+
+        # 薄線偵測 (在 morph_open 之前，否則 1-px 寬線被殺掉)；直接產生 EdgeDefect 旁路 CC filter
+        line_defects: List[EdgeDefect] = []
+        if side == "aoi_edge" and self.config.aoi_line_min_length > 0:
+            line_defects = self._detect_thin_lines(mask, diff, offset_x, offset_y)
+
+        if side == "aoi_edge" and self.config.aoi_morph_open_kernel > 0:
+            mk_open = self.config.aoi_morph_open_kernel
+            kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (mk_open, mk_open))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
 
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
             mask, connectivity=8
@@ -671,14 +721,22 @@ class CVEdgeInspector:
                 component_mask = (labels == i).astype(np.uint8)
                 max_diff = int(np.max(diff[component_mask > 0])) if np.any(component_mask) else 0
 
+                # max_diff 過濾：低對比度紋理雜訊 (max_diff 剛壓過 threshold) 視為非缺陷
+                if side == "aoi_edge" and self.config.aoi_min_max_diff > 0:
+                    if max_diff < self.config.aoi_min_max_diff:
+                        print(f"  🔲 _inspect_side: 排除低對比 component "
+                              f"(side={side}, area={area}, max_diff={max_diff} < {self.config.aoi_min_max_diff})")
+                        continue
+
                 # Solidity 過濾：L 形邊界偽影 solidity 極低 (~0.15)，真缺陷 >0.5
-                if side == "aoi_edge" and self.config.aoi_solidity_min > 0:
+                solidity = 1.0
+                if side == "aoi_edge":
                     contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     if contours:
                         hull = cv2.convexHull(contours[0])
                         hull_area = cv2.contourArea(hull)
                         solidity = area / hull_area if hull_area > 0 else 1.0
-                        if solidity < self.config.aoi_solidity_min:
+                        if self.config.aoi_solidity_min > 0 and solidity < self.config.aoi_solidity_min:
                             print(f"  🔲 _inspect_side: 排除低 solidity component "
                                   f"(side={side}, area={area}, solidity={solidity:.3f} < {self.config.aoi_solidity_min})")
                             continue
@@ -689,7 +747,114 @@ class CVEdgeInspector:
                     bbox=(offset_x + x, offset_y + y, w, h),
                     center=(int(offset_x + cx), int(offset_y + cy)),
                     max_diff=max_diff,
+                    solidity=solidity,
                 ))
+
+        defects.extend(line_defects)
+        return defects
+
+    @staticmethod
+    def _group_true_runs(bool_arr: np.ndarray, max_gap: int = 0) -> List[Tuple[int, int]]:
+        """找 bool 陣列中連續 True 的區段 (允許中間最多 max_gap 個 False 跨接)。"""
+        runs = []
+        n = len(bool_arr)
+        in_run = False
+        start = 0
+        last_true = -1
+        gap = 0
+        for i in range(n):
+            if bool_arr[i]:
+                if not in_run:
+                    start = i
+                    in_run = True
+                last_true = i
+                gap = 0
+            else:
+                if in_run:
+                    gap += 1
+                    if gap > max_gap:
+                        runs.append((start, last_true))
+                        in_run = False
+        if in_run:
+            runs.append((start, last_true))
+        return runs
+
+    def _detect_thin_lines(
+        self,
+        mask: np.ndarray,
+        diff: np.ndarray,
+        offset_x: int,
+        offset_y: int,
+    ) -> List[EdgeDefect]:
+        """投影法偵測薄線缺陷：垂直/水平連續活化像素數達門檻即視為線狀缺陷。
+
+        在 morph_open 之前執行，避免 1-px 寬真實線條被 3x3 opening erode 歸零。
+        產出的 EdgeDefect 旁路 CC 路徑後續過濾（min_area/solidity/min_max_diff）。
+        """
+        min_len = self.config.aoi_line_min_length
+        max_w = self.config.aoi_line_max_width
+        if min_len <= 0:
+            return []
+
+        # 先做 1D close 橋接點狀缺失 (線被 threshold 切成虛線時有機會還原)
+        k_close_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
+        k_close_h = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
+        mask_v = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close_v)
+        mask_h = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close_h)
+
+        defects: List[EdgeDefect] = []
+
+        # 垂直線：各 column 活化 pixel 數 ≥ min_len
+        col_counts = (mask_v > 0).sum(axis=0)
+        for x_start, x_end in self._group_true_runs(col_counts >= min_len, max_gap=1):
+            line_w = x_end - x_start + 1
+            if line_w > max_w:
+                continue
+            band = mask_v[:, x_start:x_end + 1]
+            rows_any = band.any(axis=1)
+            ys = np.where(rows_any)[0]
+            if len(ys) < min_len:
+                continue
+            y_min, y_max = int(ys[0]), int(ys[-1])
+            area = int((mask[:, x_start:x_end + 1] > 0).sum())  # 原 mask 活化數
+            max_diff = int(diff[y_min:y_max + 1, x_start:x_end + 1].max())
+            defects.append(EdgeDefect(
+                side="aoi_edge",
+                area=area,
+                bbox=(offset_x + x_start, offset_y + y_min, line_w, y_max - y_min + 1),
+                center=(int(offset_x + (x_start + x_end) / 2),
+                        int(offset_y + (y_min + y_max) / 2)),
+                max_diff=max_diff,
+                solidity=1.0,
+            ))
+            print(f"  🔲 _detect_thin_lines: 垂直線 ({offset_x + x_start},{offset_y + y_min}) "
+                  f"{line_w}x{y_max - y_min + 1}, area={area}, max_diff={max_diff}")
+
+        # 水平線：各 row 活化 pixel 數 ≥ min_len
+        row_counts = (mask_h > 0).sum(axis=1)
+        for y_start, y_end in self._group_true_runs(row_counts >= min_len, max_gap=1):
+            line_h = y_end - y_start + 1
+            if line_h > max_w:
+                continue
+            band = mask_h[y_start:y_end + 1, :]
+            cols_any = band.any(axis=0)
+            xs = np.where(cols_any)[0]
+            if len(xs) < min_len:
+                continue
+            x_min, x_max = int(xs[0]), int(xs[-1])
+            area = int((mask[y_start:y_end + 1, :] > 0).sum())
+            max_diff = int(diff[y_start:y_end + 1, x_min:x_max + 1].max())
+            defects.append(EdgeDefect(
+                side="aoi_edge",
+                area=area,
+                bbox=(offset_x + x_min, offset_y + y_start, x_max - x_min + 1, line_h),
+                center=(int(offset_x + (x_min + x_max) / 2),
+                        int(offset_y + (y_start + y_end) / 2)),
+                max_diff=max_diff,
+                solidity=1.0,
+            ))
+            print(f"  🔲 _detect_thin_lines: 水平線 ({offset_x + x_min},{offset_y + y_start}) "
+                  f"{x_max - x_min + 1}x{line_h}, area={area}, max_diff={max_diff}")
 
         return defects
 

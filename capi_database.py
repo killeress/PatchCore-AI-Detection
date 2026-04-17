@@ -1915,6 +1915,11 @@ class CAPIDatabase:
             ("cv_edge_aoi_threshold", 4, "int", "AOI 座標邊緣明暗差閾值 (獨立於四邊)"),
             ("cv_edge_aoi_min_area", 40, "int", "AOI 座標邊緣最小缺陷面積 (px, 獨立於四邊)"),
             ("cv_edge_aoi_solidity_min", 0.2, "float", "AOI 邊緣 Solidity 下限 (低於此值視為 L 形偽影排除, 0=停用)"),
+            ("cv_edge_aoi_polygon_erode_px", 3, "int", "AOI 邊緣 polygon fg_mask 內縮 px 數 (避開面板邊緣亮帶轉換區, 0=停用; 僅 polygon 模式有效)"),
+            ("cv_edge_aoi_morph_open_kernel", 3, "int", "AOI 邊緣二值化後 morphological opening kernel 大小 (去除 1-px 條紋與細雜訊橋, 0=停用)"),
+            ("cv_edge_aoi_min_max_diff", 20, "int", "AOI 邊緣 component 最大 diff 下限 (低於此值視為低對比紋理雜訊, 建議 threshold×5~7, 0=停用)"),
+            ("cv_edge_aoi_line_min_length", 30, "int", "AOI 邊緣薄線偵測最小長度 px (投影法, 旁路 min_max_diff/solidity 過濾以抓faint 線狀缺陷; 0=停用)"),
+            ("cv_edge_aoi_line_max_width", 3, "int", "AOI 邊緣薄線最大寬度 px (超過視為一般 component, 由 CC path 處理)"),
             # B0F 亮點偵測設定
             ("bright_spot_threshold", 200, "int", "絕對亮度上限 (超過直接判定亮點)"),
             ("bright_spot_min_area", 5, "int", "亮點最小連通面積 (px)"),

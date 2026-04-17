@@ -1062,7 +1062,7 @@
                     📐 邊緣檢測 (角落)
                 </h2>
                 <p style="color:var(--text-muted); font-size:0.9rem; margin-top:4px;">
-                    重現 production 的 AOI 座標邊緣 CV 檢測 (inspect_roi)，包含 fg_mask / fg_median 填充 / solidity 過濾。
+                    重現 production 的 AOI 座標邊緣 CV 檢測 (inspect_roi)，包含 fg_mask / inpaint 填充 / solidity 過濾。
                 </p>
             </div>
         </div>
@@ -1096,8 +1096,28 @@
                     <input type="number" id="edge-corner-solidity" value="{{ default_aoi_solidity_min }}" min="0" max="1" step="0.01" title="伺服器目前設定值: {{ default_aoi_solidity_min }}">
                 </div>
                 <div class="coord-group">
+                    <label for="edge-corner-polygon-erode">Polygon 內縮 (px)</label>
+                    <input type="number" id="edge-corner-polygon-erode" value="{{ default_aoi_polygon_erode_px }}" min="0" max="50" step="1" title="僅 polygon 模式有效，避開面板邊緣亮帶轉換區。伺服器目前設定值: {{ default_aoi_polygon_erode_px }}">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-corner-morph-open">Morph Open (px)</label>
+                    <input type="number" id="edge-corner-morph-open" value="{{ default_aoi_morph_open_kernel }}" min="0" max="15" step="1" title="二值化後做 morphological opening 移除 1-px 條紋與細雜訊橋 (0=停用)。伺服器目前設定值: {{ default_aoi_morph_open_kernel }}">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-corner-min-max-diff">Max Diff 下限</label>
+                    <input type="number" id="edge-corner-min-max-diff" value="{{ default_aoi_min_max_diff }}" min="0" max="255" step="1" title="component 內最大 diff 下限：低於此值視為低對比紋理雜訊 (0=停用)。建議值約 threshold×4。伺服器目前設定值: {{ default_aoi_min_max_diff }}">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-corner-line-min-length">薄線最小長度 (px)</label>
+                    <input type="number" id="edge-corner-line-min-length" value="{{ default_aoi_line_min_length }}" min="0" max="512" step="1" title="投影法偵測薄線 (1-px 寬真 defect 會被 morph_open 殺掉) 最小長度，旁路 min_max_diff/solidity 過濾 (0=停用)。伺服器目前設定值: {{ default_aoi_line_min_length }}">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-corner-line-max-width">薄線最大寬度 (px)</label>
+                    <input type="number" id="edge-corner-line-max-width" value="{{ default_aoi_line_max_width }}" min="1" max="10" step="1" title="薄線最大寬度：超過此值的 component 由 CC path 處理 (不走薄線特殊路徑)。伺服器目前設定值: {{ default_aoi_line_max_width }}">
+                </div>
+                <div class="coord-group">
                     <label for="edge-corner-boundary-padding">邊界擴展 (px)</label>
-                    <input type="number" id="edge-corner-boundary-padding" value="{{ default_aoi_boundary_padding }}" min="0" step="1">
+                    <input type="number" id="edge-corner-boundary-padding" value="{{ default_aoi_boundary_padding }}" min="0" step="1" title="僅矩形 bbox 模式有效；polygon 模式自動跳過">
                 </div>
                 <div class="coord-group">
                     <label for="edge-corner-boundary-min-bright">擴展最低亮度</label>
@@ -1121,6 +1141,7 @@
             <div class="coord-info-cards" id="edge-corner-info-cards"
                 style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:16px; margin:24px 0;">
             </div>
+            <div id="edge-corner-defect-detail" style="margin:16px 0;"></div>
             <div class="coord-result-grid" id="edge-corner-result-grid"></div>
         </div>
     </div>
@@ -2154,6 +2175,11 @@
                 threshold: parseInt(document.getElementById('edge-corner-threshold').value),
                 min_area: parseInt(document.getElementById('edge-corner-min-area').value),
                 solidity_min: parseFloat(document.getElementById('edge-corner-solidity').value),
+                polygon_erode_px: parseInt(document.getElementById('edge-corner-polygon-erode').value),
+                morph_open_kernel: parseInt(document.getElementById('edge-corner-morph-open').value),
+                min_max_diff: parseInt(document.getElementById('edge-corner-min-max-diff').value),
+                line_min_length: parseInt(document.getElementById('edge-corner-line-min-length').value),
+                line_max_width: parseInt(document.getElementById('edge-corner-line-max-width').value),
                 boundary_padding: parseInt(document.getElementById('edge-corner-boundary-padding').value),
                 boundary_min_brightness: parseInt(document.getElementById('edge-corner-boundary-min-bright').value),
             };
@@ -2225,13 +2251,63 @@
             </div>
         `;
 
+        const detail = document.getElementById('edge-corner-defect-detail');
+        if (defects.length > 0) {
+            const minArea = stats.min_area ?? '?';
+            const solMin = stats.solidity_min ?? '?';
+            const threshold = stats.threshold ?? '?';
+            const rows = defects.map((d, i) => {
+                const bw = (d.bbox && d.bbox[2]) || 0;
+                const bh = (d.bbox && d.bbox[3]) || 0;
+                const cx = (d.center && d.center[0]) || 0;
+                const cy = (d.center && d.center[1]) || 0;
+                const sol = (d.solidity ?? 1).toFixed(3);
+                const areaColor = d.area >= 200 ? 'var(--ng)' : (d.area >= 80 ? 'var(--warn, #f59e0b)' : 'var(--text)');
+                return `
+                    <tr style="border-bottom:1px solid var(--border);">
+                        <td style="padding:6px 10px; color:var(--text-muted);">#${i + 1}</td>
+                        <td style="padding:6px 10px; font-family:'Fira Code',monospace;">(${cx}, ${cy})</td>
+                        <td style="padding:6px 10px; font-family:'Fira Code',monospace;">${bw}×${bh}</td>
+                        <td style="padding:6px 10px; text-align:right; color:${areaColor}; font-weight:600;">${d.area}</td>
+                        <td style="padding:6px 10px; text-align:right;">${d.max_diff}</td>
+                        <td style="padding:6px 10px; text-align:right;">${sol}</td>
+                    </tr>`;
+            }).join('');
+            detail.innerHTML = `
+                <div class="card" style="padding:16px;">
+                    <h3 style="margin:0 0 10px 0; font-size:1rem; display:flex; align-items:center; gap:8px;">
+                        🔍 判定為異常的 component 明細 (${defects.length})
+                    </h3>
+                    <div style="color:var(--text-muted); font-size:0.85rem; margin-bottom:12px;">
+                        判定規則：<b>CC path</b> component 需同時滿足 area ≥ ${minArea}、solidity ≥ ${solMin}、max_diff ≥ ${stats.min_max_diff ?? 0}（threshold=${threshold}，morph_open=${stats.morph_open_kernel ?? '?'}）；<b>Line path</b>（薄線）投影長度 ≥ ${stats.line_min_length ?? '?'}、寬度 ≤ ${stats.line_max_width ?? '?'}（旁路 CC 過濾，catch faint 線狀 defect）。只要任一 path ≥1 個通過即判 NG。
+                    </div>
+                    <div style="overflow-x:auto;">
+                    <table style="width:100%; font-size:0.9rem; border-collapse:collapse;">
+                        <thead>
+                            <tr style="border-bottom:1px solid var(--border); color:var(--text-muted);">
+                                <th style="text-align:left; padding:6px 10px;">#</th>
+                                <th style="text-align:left; padding:6px 10px;">Center (絕對座標)</th>
+                                <th style="text-align:left; padding:6px 10px;">BBox (w×h)</th>
+                                <th style="text-align:right; padding:6px 10px;">Area</th>
+                                <th style="text-align:right; padding:6px 10px;">Max Diff</th>
+                                <th style="text-align:right; padding:6px 10px;">Solidity</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                    </div>
+                </div>`;
+        } else {
+            detail.innerHTML = '';
+        }
+
         const grid = document.getElementById('edge-corner-result-grid');
         const imgs = data.images || {};
         let html = '';
         const items = [
             ['roi', '🖼️ 原始 ROI (灰階)'],
             ['fg_mask', '🔲 fg_mask 覆蓋 (暗紅=非前景)'],
-            ['background', '☁️ 估計背景 (medianBlur + fg_median 填充)'],
+            ['background', '☁️ 估計背景 (medianBlur + inpaint 填充)'],
             ['diff', '🔥 差異圖 (Diff × 10)'],
             ['mask', '📊 二值化遮罩 (threshold 後)'],
             ['result', '🎯 最終結果 (solidity 過濾後標記)'],

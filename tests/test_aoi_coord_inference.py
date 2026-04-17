@@ -219,6 +219,7 @@ def test_aoi_coord(
                     edge_results, roi_stats = inferencer.edge_inspector.inspect_roi(
                         roi, offset_x=rx1, offset_y=ry1,
                         otsu_bounds=result.otsu_bounds,
+                        panel_polygon=getattr(result, 'panel_polygon', None),
                     )
                     if edge_results:
                         unified_bbox = (rx1, ry1, rx2 - rx1, ry2 - ry1)

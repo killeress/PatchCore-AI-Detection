@@ -632,6 +632,26 @@ class HeatmapManager:
         panel_orig = cv2.resize(panel_orig, (panel_w, panel_h))
         panel_highlight = cv2.resize(panel_highlight, (panel_w, panel_h))
 
+        # CV OK 時在 Defect Highlight 角落加標：紅色是「候選但被形狀過濾」，非真缺陷
+        if is_cv_ok:
+            corner_text = "[!] SHAPE FILTERED"
+            corner_font = cv2.FONT_HERSHEY_SIMPLEX
+            corner_scale = 0.5
+            corner_thickness = 1
+            (tw, th), _ = cv2.getTextSize(corner_text, corner_font, corner_scale, corner_thickness)
+            pad = 5
+            bx1 = panel_w - tw - 2 * pad - 6
+            by1 = 6
+            bx2 = panel_w - 6
+            by2 = by1 + th + 2 * pad
+            overlay = panel_highlight.copy()
+            cv2.rectangle(overlay, (bx1, by1), (bx2, by2), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.65, panel_highlight, 0.35, 0, panel_highlight)
+            cv2.rectangle(panel_highlight, (bx1, by1), (bx2, by2), (0, 165, 255), 1)
+            cv2.putText(panel_highlight, corner_text,
+                        (bx1 + pad, by1 + pad + th),
+                        corner_font, corner_scale, (0, 165, 255), corner_thickness)
+
         panels = [panel_orig, panel_highlight]
         labels = ["Original ROI", "Defect Highlight"]
 

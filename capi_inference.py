@@ -3523,6 +3523,7 @@ class CAPIInferencer:
                                         edge_results, roi_stats = self.edge_inspector.inspect_roi(
                                             roi, offset_x=rx1, offset_y=ry1,
                                             otsu_bounds=result.otsu_bounds,
+                                            panel_polygon=result.panel_polygon,
                                         )
                                         if edge_results:
                                             # 合併為單一 EdgeDefect (以 AOI 座標為中心)
