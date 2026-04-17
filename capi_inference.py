@@ -38,6 +38,56 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import torch
 import logging
+
+# ── 舊版 anomalib 相容性修補 ─────────────────────────────
+# 修補 1: PrecisionType stub
+# 舊版 anomalib checkpoint 裡 pickle 序列化了 anomalib.PrecisionType enum，
+# 新版已移除 → torch.load() AttributeError。注入 stub 讓反序列化成功。
+import anomalib as _anomalib
+if not hasattr(_anomalib, "PrecisionType"):
+    import enum as _enum
+    class _PrecisionType(str, _enum.Enum):
+        FLOAT16 = "float16"
+        FLOAT32 = "float32"
+        BFLOAT16 = "bfloat16"
+    _anomalib.PrecisionType = _PrecisionType
+    logging.getLogger("capi.inference").info(
+        "Injected PrecisionType stub into anomalib for legacy checkpoint compat"
+    )
+
+# 修補 2: TorchInferencer.predict → 強制 float32 輸入
+# 舊版 checkpoint 序列化了 PrecisionType.FLOAT16，新版 anomalib 的
+# TorchInferencer.predict() 會將輸入轉 fp16，但 backbone 權重仍為 float32
+# → RuntimeError: Input type (HalfTensor) and weight type (FloatTensor) mismatch
+# 解法: 包裝 model.forward，在 forward 前強制輸入轉 float32
+try:
+    from anomalib.deploy import TorchInferencer as _TI
+    _orig_predict = _TI.predict
+
+    def _fp32_predict(self, *args, **kwargs):
+        _orig_fwd = self.model.forward
+        def _force_fp32_fwd(batch, *a, **kw):
+            # anomalib 使用 InferenceBatch dataclass，圖片在 .image 屬性
+            if hasattr(batch, 'image') and isinstance(batch.image, torch.Tensor):
+                batch.image = batch.image.float()
+            elif isinstance(batch, torch.Tensor):
+                batch = batch.float()
+            return _orig_fwd(batch, *a, **kw)
+        self.model.forward = _force_fp32_fwd
+        try:
+            return _orig_predict(self, *args, **kwargs)
+        finally:
+            self.model.forward = _orig_fwd
+
+    _TI.predict = _fp32_predict
+    logging.getLogger("capi.inference").info(
+        "Patched TorchInferencer.predict → force float32 input"
+    )
+except Exception as _e:
+    logging.getLogger("capi.inference").warning(
+        "Failed to patch TorchInferencer.predict: %s", _e
+    )
+
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
 from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff
 from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
@@ -416,6 +466,13 @@ class CAPIInferencer:
             return None
         
         print(f"✅ 模型載入完成: {model_path.name}")
+
+        # ── 舊版 checkpoint fp16 precision 修補 ──────────────────
+        # 舊版 anomalib checkpoint 可能序列化了 PrecisionType.FLOAT16，
+        # 新版 TorchInferencer.predict() 會依此將輸入轉 fp16，
+        # 但 backbone 權重仍為 float32 → RuntimeError: Input type mismatch
+        # 修補: 強制將 precision 設回 float32，並確保模型全為 float32
+        self._fix_legacy_precision(inferencer_obj)
 
         # fp16 KNN 優化: 將 memory bank 轉為 fp16，並 patch euclidean_dist 使用 tensor core
         self._optimize_model_fp16(inferencer_obj)
@@ -1164,7 +1221,88 @@ class CAPIInferencer:
             result[:, :margin_px] *= gradient[None, ::-1]  # 反向：左側邊緣 0 → 1
         
         return result
-    
+
+    def _fix_legacy_precision(self, inferencer) -> None:
+        """
+        修補舊版/跨版本 anomalib checkpoint 的 fp16 precision 問題。
+
+        問題: 模型 checkpoint 若以 fp16 precision 訓練（或跨版本載入時
+        precision 屬性被錯誤還原），anomalib 的 forward 路徑可能使用
+        torch.autocast(dtype=float16) 將輸入轉為 fp16，但 backbone
+        (feature_extractor) 權重仍為 float32 → RuntimeError。
+
+        策略:
+        1. 修補所有能找到的 precision 屬性為 float32
+        2. 在 feature_extractor (timm backbone) 上註冊 forward pre-hook，
+           在每次 forward 前強制將輸入轉為 float32 — 此 hook 在最底層攔截，
+           不受上層 autocast 影響，是最可靠的修補方式
+        3. 確保模型權重為 float32
+        """
+        import enum
+
+        model = getattr(inferencer, 'model', None)
+        if model is None:
+            return
+
+        # ── Step 1: 修補所有 precision 屬性 ──
+        fp32_values = {"float32", "FLOAT32", "32"}
+        targets = [inferencer, model]
+
+        # 也檢查 model.model (inner PatchcoreModel)
+        inner_model = getattr(model, 'model', None)
+        if inner_model is not None:
+            targets.append(inner_model)
+
+        for obj in targets:
+            obj_name = type(obj).__name__
+            for attr_name in ("precision", "_precision"):
+                val = getattr(obj, attr_name, None)
+                if val is None:
+                    continue
+                val_str = val.value if isinstance(val, enum.Enum) else str(val)
+                if val_str not in fp32_values:
+                    # 嘗試用同類 enum 的 FLOAT32 成員替換
+                    if isinstance(val, enum.Enum):
+                        try:
+                            setattr(obj, attr_name, type(val)("float32"))
+                            print(f"  🔧 修補 {obj_name}.{attr_name}: {val} → float32")
+                            continue
+                        except (ValueError, KeyError):
+                            pass
+                    setattr(obj, attr_name, "float32")
+                    print(f"  🔧 修補 {obj_name}.{attr_name}: {val} → 'float32'")
+
+        # ── Step 2: 在 feature_extractor 上註冊 forward pre-hook ──
+        # 找到 feature_extractor (可能在 model 或 model.model 上)
+        fe = None
+        for candidate in [inner_model, model]:
+            if candidate is not None and hasattr(candidate, 'feature_extractor'):
+                fe = candidate.feature_extractor
+                break
+
+        if fe is not None:
+            def _force_fp32_hook(module, args):
+                """Forward pre-hook: 強制所有 tensor 輸入轉為 float32"""
+                new_args = []
+                for arg in args:
+                    if isinstance(arg, torch.Tensor) and arg.dtype == torch.float16:
+                        new_args.append(arg.float())
+                    else:
+                        new_args.append(arg)
+                return tuple(new_args)
+
+            fe.register_forward_pre_hook(_force_fp32_hook)
+            print(f"  🔧 已在 feature_extractor ({type(fe).__name__}) 註冊 float32 pre-hook")
+        else:
+            print("  ⚠️ 未找到 feature_extractor，無法註冊 pre-hook")
+
+        # ── Step 3: 確保模型權重為 float32 ──
+        if isinstance(model, torch.nn.Module):
+            has_half = any(p.dtype == torch.float16 for p in model.parameters())
+            if has_half:
+                model.float()
+                print("  🔧 模型權重已全部轉回 float32")
+
     def _optimize_model_fp16(self, inferencer) -> None:
         """
         PatchCore KNN 加速: memory bank → fp16 + nearest_neighbors matmul → fp16 tensor core
