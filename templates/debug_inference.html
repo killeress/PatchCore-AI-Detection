@@ -1068,6 +1068,20 @@
         </div>
 
         <div class="card" style="padding:20px;">
+            <div style="margin-bottom:12px; display:flex; gap:18px; align-items:center;">
+                <span style="color:var(--text); font-weight:600;">Inspector:</span>
+                <label style="display:flex; gap:6px; align-items:center; cursor:pointer;">
+                    <input type="radio" name="edge-corner-inspector" value="cv" checked onchange="updateCornerInspectorUI()">
+                    <span>CV (傳統)</span>
+                </label>
+                <label style="display:flex; gap:6px; align-items:center; cursor:pointer;">
+                    <input type="radio" name="edge-corner-inspector" value="patchcore" onchange="updateCornerInspectorUI()">
+                    <span>PatchCore (模型)</span>
+                </label>
+                <span id="edge-corner-inspector-hint" style="color:var(--text-muted); font-size:0.85rem;">
+                    傳統 CV 二值化+形狀過濾；PatchCore 走 /predict_tile pipeline（沿用中央 tile 設定）
+                </span>
+            </div>
             <div class="coord-input-row">
                 <input type="text" id="edge-corner-image-path" placeholder="圖片絕對路徑" autocomplete="off" spellcheck="false"
                     style="flex:1; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.95rem; outline:none;">
@@ -2149,6 +2163,29 @@
     }
 
     // ═══ 邊緣檢測 (角落) — production inspect_roi 路徑 ═══
+    function getCornerInspectorMode() {
+        const r = document.querySelector('input[name="edge-corner-inspector"]:checked');
+        return r ? r.value : 'cv';
+    }
+
+    function updateCornerInspectorUI() {
+        const mode = getCornerInspectorMode();
+        const cvOnlyIds = [
+            'edge-corner-threshold', 'edge-corner-min-area', 'edge-corner-solidity',
+            'edge-corner-polygon-erode', 'edge-corner-morph-open', 'edge-corner-min-max-diff',
+            'edge-corner-line-min-length', 'edge-corner-line-max-width',
+            'edge-corner-boundary-padding', 'edge-corner-boundary-min-bright',
+        ];
+        const disabled = mode === 'patchcore';
+        cvOnlyIds.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.disabled = disabled;
+                el.style.opacity = disabled ? 0.5 : 1;
+            }
+        });
+    }
+
     async function runEdgeInspectCorner() {
         const imagePath = document.getElementById('edge-corner-image-path').value.trim();
         if (!imagePath) {
@@ -2156,6 +2193,7 @@
             return;
         }
 
+        const inspector = getCornerInspectorMode();
         const btn = document.getElementById('btn-edge-corner-run');
         const btnText = document.getElementById('edge-corner-btn-text');
         const spinner = document.getElementById('edge-corner-spinner');
@@ -2172,17 +2210,22 @@
                 roi_x: parseInt(document.getElementById('edge-corner-roi-x').value),
                 roi_y: parseInt(document.getElementById('edge-corner-roi-y').value),
                 tile_size: parseInt(document.getElementById('edge-corner-tile-size').value),
-                threshold: parseInt(document.getElementById('edge-corner-threshold').value),
-                min_area: parseInt(document.getElementById('edge-corner-min-area').value),
-                solidity_min: parseFloat(document.getElementById('edge-corner-solidity').value),
-                polygon_erode_px: parseInt(document.getElementById('edge-corner-polygon-erode').value),
-                morph_open_kernel: parseInt(document.getElementById('edge-corner-morph-open').value),
-                min_max_diff: parseInt(document.getElementById('edge-corner-min-max-diff').value),
-                line_min_length: parseInt(document.getElementById('edge-corner-line-min-length').value),
-                line_max_width: parseInt(document.getElementById('edge-corner-line-max-width').value),
-                boundary_padding: parseInt(document.getElementById('edge-corner-boundary-padding').value),
-                boundary_min_brightness: parseInt(document.getElementById('edge-corner-boundary-min-bright').value),
+                inspector: inspector,
             };
+            if (inspector === 'cv') {
+                Object.assign(payload, {
+                    threshold: parseInt(document.getElementById('edge-corner-threshold').value),
+                    min_area: parseInt(document.getElementById('edge-corner-min-area').value),
+                    solidity_min: parseFloat(document.getElementById('edge-corner-solidity').value),
+                    polygon_erode_px: parseInt(document.getElementById('edge-corner-polygon-erode').value),
+                    morph_open_kernel: parseInt(document.getElementById('edge-corner-morph-open').value),
+                    min_max_diff: parseInt(document.getElementById('edge-corner-min-max-diff').value),
+                    line_min_length: parseInt(document.getElementById('edge-corner-line-min-length').value),
+                    line_max_width: parseInt(document.getElementById('edge-corner-line-max-width').value),
+                    boundary_padding: parseInt(document.getElementById('edge-corner-boundary-padding').value),
+                    boundary_min_brightness: parseInt(document.getElementById('edge-corner-boundary-min-bright').value),
+                });
+            }
 
             const res = await fetch('/api/debug/edge-inspect-corner', {
                 method: 'POST',
@@ -2196,7 +2239,11 @@
                 return;
             }
 
-            renderEdgeCornerResult(data);
+            if (data.inspector === 'patchcore') {
+                renderEdgeCornerPatchCoreResult(data);
+            } else {
+                renderEdgeCornerResult(data);
+            }
         } catch (err) {
             showError(`連線錯誤: ${err.message}`, 'edge-corner-error-box');
         } finally {
@@ -2204,6 +2251,56 @@
             btnText.textContent = '📐 角落測試';
             spinner.classList.remove('active');
         }
+    }
+
+    function renderEdgeCornerPatchCoreResult(data) {
+        document.getElementById('edge-corner-result-section').classList.remove('hidden');
+        const cards = document.getElementById('edge-corner-info-cards');
+        const stats = data.stats || {};
+        const score = stats.score || 0;
+        const thr = stats.threshold || 0;
+        const area = stats.area || 0;
+        const isNG = score >= thr;
+        const okReason = stats.ok_reason || '';
+        cards.innerHTML = `
+            <div class="summary-card">
+                <div class="label">判定結果 (PatchCore)</div>
+                <div class="value" style="color:${isNG ? 'var(--ng)' : 'var(--ok)'}">
+                    ${isNG ? '❌ NG' : '✅ PC OK' + (okReason ? ' (' + okReason + ')' : '')}
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="label">Score vs Threshold</div>
+                <div class="value" style="color:${isNG ? 'var(--ng)' : 'var(--text)'}">
+                    ${score.toFixed(3)} ${isNG ? '≥' : '<'} ${thr.toFixed(3)}
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="label">Anomaly Area (px)</div>
+                <div class="value" style="color:var(--text);">${area}</div>
+            </div>
+        `;
+        const imgGrid = document.getElementById('edge-corner-result-grid');
+        const imgs = data.images || {};
+        if (imgGrid) {
+            imgGrid.innerHTML = '';
+            const order = [
+                ['roi', 'Original ROI (masked)'],
+                ['heatmap', 'Anomaly Heatmap'],
+                ['fg_mask', 'FG Mask'],
+            ];
+            for (const [k, lbl] of order) {
+                if (!imgs[k]) continue;
+                imgGrid.innerHTML += `
+                    <div class="debug-image-card">
+                        <div class="debug-image-label">${lbl}</div>
+                        <img src="${imgs[k]}" alt="${lbl}">
+                    </div>`;
+            }
+        }
+        // 清掉 CV 結果的 defect 明細
+        const detail = document.getElementById('edge-corner-defect-detail');
+        if (detail) detail.innerHTML = '';
     }
 
     function renderEdgeCornerResult(data) {

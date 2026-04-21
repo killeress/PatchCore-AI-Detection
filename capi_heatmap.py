@@ -28,6 +28,57 @@ def _blend_color_on_mask(image: np.ndarray, mask: np.ndarray, color, alpha: floa
         ).clip(0, 255).astype(np.uint8)
 
 
+def ensure_bgr(img: np.ndarray) -> np.ndarray:
+    """將 grayscale / 單通道 ndarray 統一轉為 BGR，多通道直接 copy"""
+    if img.ndim == 2 or (img.ndim == 3 and img.shape[2] == 1):
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    return img.copy()
+
+
+def render_pc_masked_roi(roi_bgr: np.ndarray, fg_mask: Optional[np.ndarray]) -> np.ndarray:
+    """Panel 1: Original ROI，panel 外區塗暗紅 + 對角斜線標示 masked 區"""
+    panel = roi_bgr.copy()
+    if fg_mask is None:
+        return panel
+    panel[fg_mask == 0] = (0, 0, 60)
+    # 對角斜線 mask (向量化，不用 Python loop)
+    h, w = panel.shape[:2]
+    yy, xx = np.indices((h, w))
+    hatch = ((xx - yy) % 12 == 0)
+    stripe = hatch & (fg_mask == 0)
+    panel[stripe] = (0, 0, 120)
+    return panel
+
+
+def render_pc_overlay(
+    roi_bgr: np.ndarray,
+    fg_mask: Optional[np.ndarray],
+    anomaly_map: Optional[np.ndarray],
+) -> np.ndarray:
+    """Panel 2: 將 anomaly_map 歸一化 + JET colormap 半透明疊加於 ROI 上，panel 外塗暗紅"""
+    h, w = roi_bgr.shape[:2]
+    panel = roi_bgr.copy()
+    if anomaly_map is None or anomaly_map.size == 0:
+        cv2.putText(panel, "No anomaly map", (20, h // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        return panel
+    amap = np.asarray(anomaly_map, dtype=np.float32)
+    if amap.shape[:2] != (h, w):
+        amap = cv2.resize(amap, (w, h))
+    if fg_mask is not None:
+        amap = amap * (fg_mask.astype(np.float32) / 255.0)
+    peak = float(np.max(amap)) if amap.size > 0 else 0.0
+    if peak > 1e-6:
+        amap_u8 = (amap / peak * 255.0).clip(0, 255).astype(np.uint8)
+    else:
+        amap_u8 = np.zeros((h, w), dtype=np.uint8)
+    heatmap = cv2.applyColorMap(amap_u8, cv2.COLORMAP_JET)
+    panel = cv2.addWeighted(roi_bgr, 0.5, heatmap, 0.5, 0)
+    if fg_mask is not None:
+        panel[fg_mask == 0] = (0, 0, 60)
+    return panel
+
+
 def build_region_zoom_panels(
     heatmap_binary: Optional[np.ndarray],
     dust_mask: Optional[np.ndarray],
@@ -550,6 +601,12 @@ class HeatmapManager:
         Returns:
             儲存的檔案路徑
         """
+        if getattr(edge_defect, 'inspector_mode', 'cv') == 'patchcore':
+            return self._save_patchcore_edge_image(
+                save_dir, image_name, edge_index, edge_defect,
+                full_image, omit_image,
+            )
+
         bx, by, bw, bh = edge_defect.bbox
         max_diff = edge_defect.max_diff
         area = edge_defect.area
@@ -865,6 +922,128 @@ class HeatmapManager:
         final = np.vstack([header, composite, label_bar])
 
         filename = f"edge_{image_name}_{side}_{edge_index}.{self.save_format}"
+        filepath = save_dir / filename
+        cv2.imwrite(str(filepath), final)
+
+        return str(filepath)
+
+    def _save_patchcore_edge_image(
+        self,
+        save_dir: Path,
+        image_name: str,
+        edge_index: int,
+        edge_defect: Any,
+        full_image: np.ndarray,
+        omit_image: np.ndarray = None,
+    ) -> str:
+        """PatchCore inspector 邊緣缺陷比較圖。
+
+        Panel 1: Original ROI (panel 外區用暗紅 + 斜線標示遭 mask)
+        Panel 2: Anomaly Heatmap Overlay (半透明 colormap 疊於 ROI 上)
+        Panel 3: OMIT ROI (若 omit_image 提供)
+        """
+        side = edge_defect.side
+        center = edge_defect.center
+        bbox = edge_defect.bbox
+        score = float(getattr(edge_defect, 'patchcore_score', 0.0))
+        threshold = float(getattr(edge_defect, 'patchcore_threshold', 0.0))
+        area = int(edge_defect.area)
+        is_cv_ok = bool(getattr(edge_defect, 'is_cv_ok', False))
+        is_bomb = bool(getattr(edge_defect, 'is_bomb', False))
+        bomb_code = getattr(edge_defect, 'bomb_defect_code', '')
+        ok_reason = getattr(edge_defect, 'patchcore_ok_reason', '')
+
+        roi = edge_defect.pc_roi
+        fg_mask = edge_defect.pc_fg_mask
+        anomaly_map = edge_defect.pc_anomaly_map
+
+        # Fallback: 推論 artifact 遺失時用 bbox 擷取避免爆錯
+        img_h, img_w = full_image.shape[:2]
+        if roi is None:
+            bx, by, bw, bh = bbox
+            rx1 = max(0, bx); ry1 = max(0, by)
+            rx2 = min(img_w, bx + bw); ry2 = min(img_h, by + bh)
+            roi = full_image[ry1:ry2, rx1:rx2].copy()
+            fg_mask = np.ones(roi.shape[:2], dtype=np.uint8) * 255
+
+        roi_bgr = ensure_bgr(roi)
+        panel_orig = render_pc_masked_roi(roi_bgr, fg_mask)
+        h_roi, w_roi = panel_orig.shape[:2]
+        cv2.drawMarker(panel_orig, (w_roi // 2, h_roi // 2), (0, 255, 255),
+                       markerType=cv2.MARKER_CROSS, markerSize=30, thickness=2)
+
+        panel_heatmap = render_pc_overlay(roi_bgr, fg_mask, anomaly_map)
+
+        panel_h = 400
+        scale = panel_h / max(panel_orig.shape[0], 1)
+        panel_w = max(int(panel_orig.shape[1] * scale), 200)
+        panel_orig = cv2.resize(panel_orig, (panel_w, panel_h))
+        panel_heatmap = cv2.resize(panel_heatmap, (panel_w, panel_h))
+
+        panels = [panel_orig, panel_heatmap]
+        labels = ["Original ROI (masked)", "PatchCore Heatmap"]
+
+        if omit_image is not None:
+            try:
+                oh, ow = omit_image.shape[:2]
+                tile_size = roi.shape[0]
+                cx, cy = int(center[0]), int(center[1])
+                half = tile_size // 2
+                shape = (tile_size, tile_size, 3) if roi.ndim == 3 else (tile_size, tile_size)
+                omit_canvas = np.zeros(shape, dtype=roi.dtype)
+                osx1 = max(0, cx - half); osy1 = max(0, cy - half)
+                osx2 = min(ow, cx + half); osy2 = min(oh, cy + half)
+                if osx2 > osx1 and osy2 > osy1:
+                    odx1 = osx1 - (cx - half); ody1 = osy1 - (cy - half)
+                    odx2 = odx1 + (osx2 - osx1); ody2 = ody1 + (osy2 - osy1)
+                    omit_canvas[ody1:ody2, odx1:odx2] = omit_image[osy1:osy2, osx1:osx2]
+                omit_panel = cv2.resize(ensure_bgr(omit_canvas), (panel_w, panel_h))
+                panels.append(omit_panel)
+                labels.append("OMIT ROI")
+            except Exception as e:
+                print(f"⚠️ PatchCore edge OMIT panel 失敗: {e}")
+
+        # 拼接
+        gap_w = 10
+        gap = np.full((panel_h, gap_w, 3), 80, dtype=np.uint8)
+        spaced = []
+        for i, p in enumerate(panels):
+            spaced.append(p)
+            if i < len(panels) - 1:
+                spaced.append(gap)
+        composite = np.hstack(spaced)
+        comp_h, comp_w = composite.shape[:2]
+
+        # Header
+        header_h = 50
+        header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
+
+        if is_bomb:
+            verdict = f"BOMB: {bomb_code} (Filtered as OK)"
+            verdict_color = (255, 0, 255)
+        elif is_cv_ok:
+            reason_txt = ok_reason if ok_reason else ""
+            verdict = f"PC OK ({reason_txt})" if reason_txt else "PC OK"
+            verdict_color = (0, 255, 0)
+        else:
+            verdict = "NG"
+            verdict_color = (0, 0, 255)
+
+        score_cmp = ">=" if score >= threshold else "<"
+        info_part = f"PC Edge [v1]: {side} | Score:{score:.3f}{score_cmp}Thr:{threshold:.3f} | Area:{area}px | "
+        self._draw_split_color_header(header, info_part, verdict, verdict_color, y=30, font_scale=0.65)
+
+        # Label bar
+        label_h = 40
+        label_bar = np.zeros((label_h, comp_w, 3), dtype=np.uint8)
+        for i, lbl in enumerate(labels):
+            lx = i * (panel_w + gap_w) + 10
+            cv2.putText(label_bar, lbl, (lx, 26),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+
+        final = np.vstack([header, composite, label_bar])
+
+        filename = f"edge_pc_{image_name}_{side}_{edge_index}.{self.save_format}"
         filepath = save_dir / filename
         cv2.imwrite(str(filepath), final)
 

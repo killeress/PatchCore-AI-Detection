@@ -63,6 +63,45 @@ capi_server.py:772  →  EdgeInspectionConfig.from_db_params(db_dict)
 - **Code**：`_detect_thin_lines()` + `_group_true_runs()` in `capi_edge_cv.py`
 - **驗證**：模擬測試：垂直虛線 (30 點, 間距 5) 被抓；1×12 雜訊條紋 (< 30) 被擋；低對比紋理塊 (max_diff=6) 被 min_max_diff 擋。三路各司其職。
 
+### Phase 5 — PatchCore Inspector 切換 (2026-04-21)
+
+- **動機**：Phase 3 的 `min_max_diff=20` 與 faint 黑點 max_diff 15-19 衝突（Issue 1），靠
+  component-level CV metric 無法區分，且持續累積的 CV 參數維護負擔高。改以 PatchCore
+  同時處理中央 tile 與 AOI 邊緣，利用模型對異常的語意學習直接繞開這個困境。
+- **設計決策**：
+  - 互斥切換（不做 OR / AND 串接），DB key `aoi_edge_inspector: "cv" | "patchcore"`
+  - 只動 AOI 座標邊緣路徑；四邊全掃 / 中央 tile 路徑不動
+  - ROI 策略 (a')：中心對齊 AOI 座標 + 黑 pad (panel 外本來就是黑色，非合成 OOD) +
+    `tile.mask=fg_mask` 遮罩 anomaly_map (panel 外分數歸零，沿用 `predict_tile` 現有機制)
+  - Inspector 建立的 TileInfo `is_*_edge=False` → 不觸發 `_apply_edge_margin` 衰減
+  - threshold / PatchCore 後處理 / OMIT 灰塵 / Bomb 比對：全部沿用中央 tile pipeline
+  - Bomb 比對邏輯不改 — 純座標 match (center=AOI 座標強制保留)
+- **EdgeDefect 擴充**：`inspector_mode` / `patchcore_score` / `patchcore_threshold` /
+  `patchcore_ok_reason` 四欄，向下相容 (CV path 預設值)
+- **Config key**：`aoi_edge_inspector: str = "cv"` (default)；hot-reload 觸發條件擴充
+- **UI**：
+  - `/settings` → 🎯 AOI tab radio (cv / patchcore)
+  - `/debug` → 📐 角落測試 top 加 inspector radio，PatchCore 時停用 CV 專屬參數；
+    呼叫 `/api/debug/edge-inspect-corner` 帶 `inspector` 參數分派到 `_inspect_roi_patchcore`
+  - `record_detail` 邊緣表格：根據 mode 分支顯示「score vs Thr」或「max_diff vs Thr」；
+    PC OK 帶「分數未達/面積未達」原因
+  - Heatmap：PatchCore path 走獨立渲染 (`_save_patchcore_edge_image`)，
+    Panel 1 = Original ROI（panel 外用暗紅 + 斜線標示遭 mask），
+    Panel 2 = Anomaly Heatmap Overlay，Panel 3 = OMIT ROI (如有)
+- **Trade-off**：
+  - **(+)** 省 min_max_diff 的 trade-off；faint 真 defect 由模型語意判定
+  - **(+)** 統一中央 / 邊緣的異常判定邏輯，降低 CV 啟發式調校負擔
+  - **(−)** ROI 含 panel 邊界，backbone 感受野 (~30-50 px) 會污染近邊 feature，
+    可能產生不同 pattern 的假陽性；但 training 資料裡邊角 tile 也有相同現象，
+    模型已學到大部分。實際效果待線上驗證
+  - **(−)** GPU 多一次推論/AOI 座標。以 per-panel 3~10 個座標估算，影響可忽略
+- **Code**：`capi_inference.py::_inspect_roi_patchcore`；AOI loop 分支在 L3656 附近；
+  `capi_edge_cv.py` EdgeDefect / EdgeInspectionConfig 欄位；
+  `capi_heatmap.py::_save_patchcore_edge_image`；
+  `capi_database.py` migration + seed
+- **測試**：`tests/test_aoi_edge_patchcore.py` 8 項 (ROI 建構 / fg_mask / EdgeDefect mapping /
+  OK 原因 / 邊界外 / 前綴未載入 / 向下相容 / config 讀取)
+
 ## 目前的完整 Filter 順序（`_inspect_side` aoi_edge path）
 
 ```
@@ -104,6 +143,7 @@ return defects
 | `cv_edge_aoi_min_max_diff` | **20** | Phase 3 max_diff 下限（0=停用）|
 | `cv_edge_aoi_line_min_length` | **30** | Phase 4 薄線最小長度（0=停用）|
 | `cv_edge_aoi_line_max_width` | **3** | Phase 4 薄線最大寬度 |
+| `aoi_edge_inspector` | **"cv"** | Phase 5 AOI 座標邊緣 inspector：`"cv"` / `"patchcore"` |
 
 粗體 = 本次討論新增。Defaults 有三處需同步：
 - dataclass `EdgeInspectionConfig` (`capi_edge_cv.py:116` 附近)

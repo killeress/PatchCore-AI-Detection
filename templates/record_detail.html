@@ -491,21 +491,41 @@ function copyInferenceLog() {
                     {% for ed in img.edge_defects %}
                     {% set ed_thr = ed.get('threshold_used', 0) %}
                     {% set ed_min = ed.get('min_area_used', 0) %}
+                    {% set ed_mode = ed.get('inspector_mode', 'cv') %}
+                    {% set pc_score = ed.get('patchcore_score', 0.0) %}
+                    {% set pc_thr = ed.get('patchcore_threshold', 0.0) %}
+                    {% set pc_reason = ed.get('patchcore_ok_reason', '') %}
                     {% if ed.is_cv_ok %}
-                      {% if ed_thr > 0 and ed.max_diff < ed_thr %}
-                        {% set cv_ok_reason = '差異未達門檻' %}
-                      {% elif ed_min > 0 and ed.area < ed_min %}
-                        {% set cv_ok_reason = '面積未達門檻' %}
-                      {% elif ed_thr > 0 or ed_min > 0 %}
-                        {% set cv_ok_reason = '形狀過濾 (L 形偽影)' %}
+                      {% if ed_mode == 'patchcore' %}
+                        {% if pc_reason == 'Score<Thr' %}
+                          {% set cv_ok_reason = '分數未達門檻' %}
+                        {% elif pc_reason == 'Area<Min' %}
+                          {% set cv_ok_reason = '面積未達門檻' %}
+                        {% elif pc_reason %}
+                          {% set cv_ok_reason = pc_reason %}
+                        {% else %}
+                          {% set cv_ok_reason = '' %}
+                        {% endif %}
                       {% else %}
-                        {% set cv_ok_reason = '' %}
+                        {% if ed_thr > 0 and ed.max_diff < ed_thr %}
+                          {% set cv_ok_reason = '差異未達門檻' %}
+                        {% elif ed_min > 0 and ed.area < ed_min %}
+                          {% set cv_ok_reason = '面積未達門檻' %}
+                        {% elif ed_thr > 0 or ed_min > 0 %}
+                          {% set cv_ok_reason = '形狀過濾 (L 形偽影)' %}
+                        {% else %}
+                          {% set cv_ok_reason = '' %}
+                        {% endif %}
                       {% endif %}
                     {% endif %}
                     <tr>
                         <td>
                             {% if ed.is_cv_ok %}
+                            {% if ed_mode == 'patchcore' %}
+                            <span class="badge badge-ok" style="font-size:0.7rem;">PC OK</span>
+                            {% else %}
                             <span class="badge badge-ok" style="font-size:0.7rem;">CV OK</span>
+                            {% endif %}
                             {% if cv_ok_reason %}
                             <div style="margin-top:3px;font-size:0.68rem;color:var(--text-muted);font-style:italic;">{{ cv_ok_reason }}</div>
                             {% endif %}
@@ -517,6 +537,9 @@ function copyInferenceLog() {
                             {% else %}
                             <span class="badge badge-ng" style="font-size:0.7rem;">NG</span>
                             {% endif %}
+                            {% if ed_mode == 'patchcore' %}
+                            <div style="margin-top:3px;font-size:0.62rem;color:#8b5cf6;font-family:'Fira Code',monospace;">[PatchCore]</div>
+                            {% endif %}
                         </td>
                         <td><span
                                 style="padding: 2px 8px; border-radius: 4px; background: #CFFAFE; color: #0E7490; font-weight: 600;">{{
@@ -525,18 +548,31 @@ function copyInferenceLog() {
                         <td>{{ ed.bbox_w }}x{{ ed.bbox_h }}</td>
                         <td>
                             {{ ed.area }}px
-                            {% if ed.is_cv_ok and ed_min > 0 %}
+                            {% if ed_mode == 'patchcore' %}
+                              {# PatchCore 路徑沒有 min_area 硬門檻顯示 #}
+                            {% elif ed.is_cv_ok and ed_min > 0 %}
                             <div style="font-size:0.68rem;color:var(--text-muted);">vs Min:{{ ed_min }}</div>
                             {% endif %}
                         </td>
                         <td>
-                            {% if ed.is_cv_ok %}
-                            <span class="badge" style="background: #D1FAE5; color: #065F46;">{{ ed.max_diff | round(1) }}</span>
-                            {% if ed_thr > 0 %}
-                            <div style="font-size:0.68rem;color:var(--text-muted);">vs Thr:{{ ed_thr }}</div>
-                            {% endif %}
+                            {% if ed_mode == 'patchcore' %}
+                              {% if ed.is_cv_ok %}
+                              <span class="badge" style="background: #D1FAE5; color: #065F46;">score {{ pc_score | round(3) }}</span>
+                              {% else %}
+                              <span class="badge badge-ng">score {{ pc_score | round(3) }}</span>
+                              {% endif %}
+                              {% if pc_thr > 0 %}
+                              <div style="font-size:0.68rem;color:var(--text-muted);">vs Thr:{{ pc_thr | round(3) }}</div>
+                              {% endif %}
                             {% else %}
-                            <span class="badge badge-ng">{{ ed.max_diff | round(1) }}</span>
+                              {% if ed.is_cv_ok %}
+                              <span class="badge" style="background: #D1FAE5; color: #065F46;">{{ ed.max_diff | round(1) }}</span>
+                              {% if ed_thr > 0 %}
+                              <div style="font-size:0.68rem;color:var(--text-muted);">vs Thr:{{ ed_thr }}</div>
+                              {% endif %}
+                              {% else %}
+                              <span class="badge badge-ng">{{ ed.max_diff | round(1) }}</span>
+                              {% endif %}
                             {% endif %}
                         </td>
                         <td>
@@ -560,10 +596,17 @@ function copyInferenceLog() {
                 <div class="image-box">
                     <h4 style="margin-bottom:8px;color:#0891B2;font-size:0.85rem;font-family:'Fira Code',monospace;">
                         Edge: {{ ed.side }}
+                        {% if ed.get('inspector_mode', 'cv') == 'patchcore' %}
+                        <span style="color:#8b5cf6; font-size:0.7rem;">[PatchCore]</span>
+                        {% endif %}
                         {% if ed.is_bomb %}
                         <span style="color: #A855F7; font-size: 0.75rem;">(BOMB)</span>
                         {% elif ed.is_cv_ok %}
+                        {% if ed.get('inspector_mode', 'cv') == 'patchcore' %}
+                        <span style="color: #22C55E; font-size: 0.75rem;">(PC OK)</span>
+                        {% else %}
                         <span style="color: #22C55E; font-size: 0.75rem;">(CV OK)</span>
+                        {% endif %}
                         {% elif ed.is_dust %}
                         <span style="color: #22C55E; font-size: 0.75rem;">(Filtered OK)</span>
                         {% else %}

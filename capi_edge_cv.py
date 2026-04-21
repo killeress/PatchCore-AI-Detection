@@ -95,6 +95,14 @@ class EdgeDefect:
     is_cv_ok: bool = False  # CV 檢查後未偵測到缺陷，僅作記錄用
     threshold_used: int = 0       # 使用的閾值 (用於 heatmap header 顯示)
     min_area_used: int = 0        # 使用的最小面積 (用於 heatmap header 顯示)
+    inspector_mode: str = "cv"    # "cv" | "patchcore"
+    patchcore_score: float = 0.0
+    patchcore_threshold: float = 0.0
+    patchcore_ok_reason: str = ""
+    # 推論當下保留的 render artifacts (async heatmap 用，不入 DB)
+    pc_roi: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    pc_fg_mask: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    pc_anomaly_map: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -151,6 +159,7 @@ class EdgeInspectionConfig:
     aoi_min_max_diff: int = 20 # component 內最大 diff 下限：低於此值視為低對比度紋理雜訊 (0=停用)
     aoi_line_min_length: int = 30 # 投影法偵測薄線最小長度 px (垂直/水平連續活化像素投影, 0=停用)
     aoi_line_max_width: int = 3 # 薄線最大寬度 px (超過視為一般 component, 由 CC path 處理)
+    aoi_edge_inspector: str = "cv"  # "cv" | "patchcore"
     exclude_zones: List[EdgeExclusionZoneConfig] = field(default_factory=list)
     # 儲存完整的按產品分組排除區域 (key=resolution_code, value=list of zones)
     all_exclude_zones_by_product: Dict[str, List[dict]] = field(default_factory=dict)
@@ -246,6 +255,8 @@ class EdgeInspectionConfig:
         cfg.aoi_min_max_diff = int(get("cv_edge_aoi_min_max_diff", 20))
         cfg.aoi_line_min_length = int(get("cv_edge_aoi_line_min_length", 30))
         cfg.aoi_line_max_width = int(get("cv_edge_aoi_line_max_width", 3))
+        inspector_val = str(get("aoi_edge_inspector", "cv")).lower().strip()
+        cfg.aoi_edge_inspector = inspector_val if inspector_val in ("cv", "patchcore") else "cv"
 
         # 排除區域 (支援按產品解析度碼分組的 dict 格式，或向後相容的 list 格式)
         zones_raw = get("cv_edge_exclude_zones", None)

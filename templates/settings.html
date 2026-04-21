@@ -1122,6 +1122,12 @@
                 <option value="iou">iou (正式 IOU)</option>
             </select>
 
+            <select id="modal-aoi-edge-inspector-select"
+                style="display:none; width: 100%; background: #0f172a; border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-family: 'Fira Code', monospace; font-size: 0.88rem; margin-bottom: 16px; outline: none;">
+                <option value="cv">cv (傳統 CV - 預設)</option>
+                <option value="patchcore">patchcore (PatchCore 模型)</option>
+            </select>
+
             <select id="modal-patchcore-metric-select"
                 style="display:none; width: 100%; background: #0f172a; border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-family: 'Fira Code', monospace; font-size: 0.88rem; margin-bottom: 16px; outline: none;">
                 <option value="max">Max (預設 - 單點最強值)</option>
@@ -1186,6 +1192,7 @@
     const AOI_COORD_PARAMS = [
         'grid_tiling_enabled', 'aoi_coord_inspection_enabled',
         'aoi_report_path_replace_from', 'aoi_report_path_replace_to',
+        'aoi_edge_inspector',
         'cv_edge_aoi_threshold', 'cv_edge_aoi_min_area', 'cv_edge_aoi_solidity_min',
         'cv_edge_aoi_polygon_erode_px',
         'cv_edge_aoi_morph_open_kernel', 'cv_edge_aoi_min_max_diff',
@@ -1781,6 +1788,8 @@
             inputEl.style.display = 'none';
             selectEl.style.display = 'none';
             patchcoreMetricSelectEl.style.display = 'none';
+            const aoiEdgeInspectorSelectEl = document.getElementById('modal-aoi-edge-inspector-select');
+            if (aoiEdgeInspectorSelectEl) aoiEdgeInspectorSelectEl.style.display = 'none';
             helpEl.style.display = 'none';
 
             if (paramName === 'dust_heatmap_metric') {
@@ -1792,6 +1801,10 @@
                 patchcoreMetricSelectEl.style.display = 'block';
                 labelEl.innerHTML = 'PatchCore 計分方式選擇';
                 patchcoreMetricSelectEl.value = prefill.replace(/"/g, '');
+            } else if (paramName === 'aoi_edge_inspector' && aoiEdgeInspectorSelectEl) {
+                aoiEdgeInspectorSelectEl.style.display = 'block';
+                labelEl.innerHTML = 'AOI 座標邊緣 Inspector 選擇';
+                aoiEdgeInspectorSelectEl.value = prefill.replace(/"/g, '');
             } else {
                 inputEl.style.display = 'block';
                 labelEl.innerHTML = '新的值 <span style="color:var(--text-muted); font-weight:normal;">(JSON 格式，數值直接輸入)</span>';
@@ -1828,10 +1841,14 @@
         const patchcoreMetricSelectEl = document.getElementById('modal-patchcore-metric-select');
 
         let newValueRaw = "";
+        const aoiEdgeInspectorSelectEl = document.getElementById('modal-aoi-edge-inspector-select');
         if (paramName === 'dust_heatmap_metric' && selectEl.style.display === 'block') {
             newValueRaw = JSON.stringify(selectEl.value);
         } else if (paramName === 'patchcore_score_metric' && patchcoreMetricSelectEl.style.display === 'block') {
             newValueRaw = JSON.stringify(patchcoreMetricSelectEl.value);
+        } else if (paramName === 'aoi_edge_inspector' && aoiEdgeInspectorSelectEl &&
+                   aoiEdgeInspectorSelectEl.style.display === 'block') {
+            newValueRaw = JSON.stringify(aoiEdgeInspectorSelectEl.value);
         } else {
             newValueRaw = inputEl.value.trim();
         }

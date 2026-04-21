@@ -2086,7 +2086,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"邊緣檢測失敗: {str(e)}"})
 
     def _handle_api_debug_edge_inspect_corner(self):
-        """API: 測試 AOI 座標角落 CV 邊緣檢測（複製 production inspect_roi 邏輯）"""
+        """API: 測試 AOI 座標角落邊緣檢測（CV 或 PatchCore 可切換）"""
         import cv2
         import numpy as np
         import base64
@@ -2109,6 +2109,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if not image_path.exists():
             self._send_json({"error": f"檔案不存在: {image_path}"})
             return
+
+        inspector_mode = str(data.get("inspector", "cv")).lower().strip()
+        if inspector_mode == "patchcore":
+            return self._handle_api_debug_edge_corner_patchcore(data, image_path)
 
         try:
             roi_x = int(data.get("roi_x", 0))
@@ -2311,6 +2315,92 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"[DEBUG] Edge Inspect Corner error: {e}", exc_info=True)
             self._send_json({"error": f"角落邊緣檢測失敗: {str(e)}"})
+
+    def _handle_api_debug_edge_corner_patchcore(self, data: dict, image_path: Path):
+        """API: 角落 PatchCore 推論 (走 production _inspect_roi_patchcore)"""
+        import cv2
+        import numpy as np
+        import base64
+        from capi_heatmap import ensure_bgr, render_pc_masked_roi, render_pc_overlay
+
+        if self.inferencer is None:
+            self._send_json({"error": "推論器尚未載入 (inferencer is None)"})
+            return
+
+        try:
+            roi_x = int(data.get("roi_x", 0))
+            roi_y = int(data.get("roi_y", 0))
+            tile_size = int(data.get("tile_size", self.inferencer.config.tile_size))
+
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            if image is None:
+                self._send_json({"error": "無法讀取圖片"})
+                return
+            if image.dtype == np.uint16:
+                image = (image / 256).astype(np.uint8)
+
+            img_h, img_w = image.shape[:2]
+
+            # UI 的 ROI X/Y 指左上角，轉回中心供 _inspect_roi_patchcore
+            img_cx = roi_x + tile_size // 2
+            img_cy = roi_y + tile_size // 2
+
+            panel_polygon = None
+            try:
+                _, _, panel_polygon = self.inferencer.calculate_otsu_bounds(image)
+            except Exception as poly_err:
+                logger.warning(f"[DEBUG corner PC] polygon 偵測失敗: {poly_err}")
+
+            img_prefix = self.inferencer._get_image_prefix(image_path.name)
+
+            defects, stats = self.inferencer._inspect_roi_patchcore(
+                image, img_cx, img_cy, img_prefix,
+                panel_polygon=panel_polygon,
+            )
+
+            roi = stats.get("roi")
+            fg_mask = stats.get("fg_mask")
+            anomaly_map = stats.get("anomaly_map")
+
+            def _to_data_url(img: np.ndarray) -> str:
+                _, buf = cv2.imencode('.png', img)
+                return f"data:image/png;base64,{base64.b64encode(buf).decode('utf-8')}"
+
+            encoded_imgs = {}
+            if roi is not None:
+                roi_bgr = ensure_bgr(roi)
+                encoded_imgs["roi"] = _to_data_url(render_pc_masked_roi(roi_bgr, fg_mask))
+                encoded_imgs["heatmap"] = _to_data_url(render_pc_overlay(roi_bgr, fg_mask, anomaly_map))
+            if fg_mask is not None:
+                encoded_imgs["fg_mask"] = _to_data_url(cv2.cvtColor(fg_mask, cv2.COLOR_GRAY2BGR))
+
+            self._send_json({
+                "success": True,
+                "inspector": "patchcore",
+                "defects": [
+                    {
+                        "area": d.area,
+                        "bbox": list(d.bbox),
+                        "center": list(d.center),
+                        "patchcore_score": getattr(d, 'patchcore_score', 0.0),
+                        "patchcore_threshold": getattr(d, 'patchcore_threshold', 0.0),
+                    } for d in defects
+                ],
+                "stats": {
+                    "score": float(stats.get("score", 0.0)),
+                    "threshold": float(stats.get("threshold", 0.0)),
+                    "area": int(stats.get("area", 0)),
+                    "min_area": int(stats.get("min_area", 0)),
+                    "ok_reason": str(stats.get("ok_reason", "")),
+                    "prefix": img_prefix,
+                },
+                "images": encoded_imgs,
+                "panel_polygon": panel_polygon.astype(int).tolist() if panel_polygon is not None else None,
+                "image_size": [img_w, img_h],
+            })
+        except Exception as e:
+            logger.error(f"[DEBUG] Edge Inspect Corner (PatchCore) error: {e}", exc_info=True)
+            self._send_json({"error": f"PatchCore 角落檢測失敗: {str(e)}"})
 
     def _handle_debug_coord_inference(self):
         """API: 人工座標推論 — 以指定產品座標為中心裁切 512x512 做推論"""
@@ -3012,8 +3102,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             success = self.db.update_config_param(param_name, new_value, reason)
             if success:
-                # Hot-reload edge config if a cv_edge_* parameter was updated
-                if param_name.startswith("cv_edge") and hasattr(self, 'inferencer') and self.inferencer:
+                # Hot-reload edge config if a cv_edge_* or aoi_edge_* parameter was updated
+                edge_triggers = param_name.startswith("cv_edge") or param_name == "aoi_edge_inspector"
+                if edge_triggers and hasattr(self, 'inferencer') and self.inferencer:
                     try:
                         from capi_edge_cv import EdgeInspectionConfig
                         db_params = {r["param_name"]: r for r in self.db.get_all_config_params()}
