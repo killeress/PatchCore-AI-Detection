@@ -173,14 +173,15 @@ return defects
 
 ### Issue 2：`CV OK (Shape filtered)` 標籤誤導
 
-- **位置**：`capi_heatmap.py:810-820`
+- **位置**：`capi_heatmap.py:867-880`
 - **問題**：原本「Shape filtered」只指 solidity 過濾；新加的 min_max_diff / morph_open / line_detect 過濾也全部落到這個 catch-all 標籤，使用者會以為是 solidity 但其實是 min_max_diff 擋的
-- **修法方向**：
-  - `EdgeDefect` 加 `min_max_diff_used` 欄位
-  - `inspect_roi` 的 `roi_stats` 帶出 min_max_diff
-  - `capi_inference.py:3554-3555` 建 ok_defect 時填入
-  - `capi_heatmap.py` 判定推斷分支加 `elif min_max_diff_used > 0 and max_diff < min_max_diff_used: cv_ok_reason = "Diff<MinMaxDiff"`
-- **尚未實作**
+- **已修 (2026-04-21)**：
+  - `EdgeDefect` 加 `min_max_diff_used` 欄位 (`capi_edge_cv.py:98`)
+  - `inspect_roi` 的 `roi_stats` 帶出 `min_max_diff` (`capi_edge_cv.py:617+626`)
+  - `capi_inference.py:3869+3889` 建 merged/ok_defect 時填入
+  - `capi_server.py:652` dict 轉換補欄位；`capi_database.py` schema + 兩處 INSERT 同步補
+  - `capi_heatmap.py:875` 判定推斷加 `elif min_max_diff_used > 0 and max_diff < min_max_diff_used: cv_ok_reason = "Diff<MinMaxDiff({min_max_diff_used})"`
+  - `templates/record_detail.html:514` 同步加「低對比過濾 (Diff<N)」分支
 
 ## 除錯/驗證慣用工具
 

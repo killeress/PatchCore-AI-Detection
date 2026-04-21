@@ -233,6 +233,7 @@ def test_aoi_coord(
                             max_diff=worst_diff,
                             threshold_used=roi_stats.get("threshold", 0),
                             min_area_used=roi_stats.get("min_area", 0),
+                            min_max_diff_used=roi_stats.get("min_max_diff", 0),
                         )
                         result.edge_defects.append(merged)
                         cv_detected = True
@@ -250,6 +251,7 @@ def test_aoi_coord(
                     is_cv_ok=True,
                     threshold_used=roi_stats.get("threshold", 0),
                     min_area_used=roi_stats.get("min_area", 0),
+                    min_max_diff_used=roi_stats.get("min_max_diff", 0),
                 )
                 result.edge_defects.append(ok_defect)
                 print(f"  ✅ Edge ({edef.defect_code}) @ ({img_x},{img_y}): CV OK")

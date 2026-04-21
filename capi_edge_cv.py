@@ -95,6 +95,7 @@ class EdgeDefect:
     is_cv_ok: bool = False  # CV 檢查後未偵測到缺陷，僅作記錄用
     threshold_used: int = 0       # 使用的閾值 (用於 heatmap header 顯示)
     min_area_used: int = 0        # 使用的最小面積 (用於 heatmap header 顯示)
+    min_max_diff_used: int = 0    # 使用的 min_max_diff 下限 (用於 CV OK 原因推斷，0=未啟用)
     inspector_mode: str = "cv"    # "cv" | "patchcore"
     patchcore_score: float = 0.0
     patchcore_threshold: float = 0.0
@@ -487,7 +488,8 @@ class CVEdgeInspector:
         """
         empty_stats = {"max_diff": 0, "max_area": 0,
                        "threshold": self.config.aoi_threshold,
-                       "min_area": self.config.aoi_min_area}
+                       "min_area": self.config.aoi_min_area,
+                       "min_max_diff": self.config.aoi_min_max_diff}
 
         # 注意：不檢查 self.config.enabled
         # AOI 座標邊緣 CV 偵測由呼叫端決定是否執行，不受全域 cv_edge_enabled 開關影響
@@ -618,6 +620,7 @@ class CVEdgeInspector:
             "max_area": actual_max_area,
             "threshold": aoi_threshold,
             "min_area": aoi_min_area,
+            "min_max_diff": self.config.aoi_min_max_diff,
         }
 
         return defects, roi_stats
