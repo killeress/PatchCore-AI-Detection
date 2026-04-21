@@ -66,8 +66,16 @@ brain/
 _agents/
 _agent/
 
-# Over-review POC outputs
-reports/over_review_scratch_poc/
+# Analysis / over-review outputs
+reports/
+
+# Training datasets and artifacts (large, local-only)
+BGA_Train/
+dataset_v2/
+
+# Crash dumps and training logs (txt, not caught by *.log)
+*.stackdump
+log*.txt
 
 # Deployment bundles (large ML models and pickled classifiers)
 deployment/*.pkl
