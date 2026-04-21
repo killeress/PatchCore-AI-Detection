@@ -646,27 +646,44 @@ class HeatmapManager:
         rel_y = by - roi_y1
 
         # ── 產生 defect binary mask (供 Panel 2 像素標記和 Panel 4 IOU/COV 計算) ──
-        k = 3
-        mk = 65
-        if edge_config is not None:
-            k = getattr(edge_config, 'blur_kernel', 3)
-            mk = getattr(edge_config, 'median_kernel', 65)
-        blurred = cv2.GaussianBlur(roi_gray, (k, k), 0)
-        mk = clamp_median_kernel(mk, min(roi_gray.shape[:2]) - 1)
+        # 優先使用 inspect_roi 產生的真實過濾後 mask，避免 heatmap 路徑與判定路徑分歧
+        cv_mask = getattr(edge_defect, 'cv_filtered_mask', None)
+        cv_mask_offset = getattr(edge_defect, 'cv_mask_offset', None)
+        defect_mask = None
+        if cv_mask is not None and cv_mask_offset is not None:
+            mo_x, mo_y = cv_mask_offset
+            mh, mw = cv_mask.shape[:2]
+            # 貼到 panel (padding 後 roi) 的對位 offset
+            paste_x = mo_x - roi_x1
+            paste_y = mo_y - roi_y1
+            if (0 <= paste_x < roi_gray.shape[1] and 0 <= paste_y < roi_gray.shape[0]
+                    and paste_x + mw <= roi_gray.shape[1] and paste_y + mh <= roi_gray.shape[0]):
+                defect_mask = np.zeros(roi_gray.shape[:2], dtype=np.uint8)
+                defect_mask[paste_y:paste_y + mh, paste_x:paste_x + mw] = cv_mask
 
-        if side == "aoi_edge":
-            _, diff = compute_fg_aware_diff(blurred, roi_gray, mk)
-        else:
-            bg = cv2.medianBlur(blurred, mk)
-            diff = cv2.absdiff(blurred, bg)
+        if defect_mask is None:
+            # Fallback：舊紀錄 / 四邊檢測 / cv_mask 缺失時重算 (保持向下相容)
+            k = 3
+            mk = 65
+            if edge_config is not None:
+                k = getattr(edge_config, 'blur_kernel', 3)
+                mk = getattr(edge_config, 'median_kernel', 65)
+            blurred = cv2.GaussianBlur(roi_gray, (k, k), 0)
+            mk = clamp_median_kernel(mk, min(roi_gray.shape[:2]) - 1)
 
-        edge_threshold = edge_config.get_threshold_for_side(side) if edge_config is not None else 5
-        _, defect_mask = cv2.threshold(diff, edge_threshold, 255, cv2.THRESH_BINARY)
+            if side == "aoi_edge":
+                _, diff = compute_fg_aware_diff(blurred, roi_gray, mk)
+            else:
+                bg = cv2.medianBlur(blurred, mk)
+                diff = cv2.absdiff(blurred, bg)
 
-        # 只保留缺陷 BBox 範圍內的像素（避免整個 ROI 的紋理雜訊被納入 IOU/COV 計算）
-        bbox_only_mask = np.zeros_like(defect_mask)
-        bbox_only_mask[rel_y:rel_y + bh, rel_x:rel_x + bw] = 255
-        defect_mask = cv2.bitwise_and(defect_mask, bbox_only_mask)
+            edge_threshold = edge_config.get_threshold_for_side(side) if edge_config is not None else 5
+            _, defect_mask = cv2.threshold(diff, edge_threshold, 255, cv2.THRESH_BINARY)
+
+            # 只保留缺陷 BBox 範圍內的像素（避免整個 ROI 的紋理雜訊被納入 IOU/COV 計算）
+            bbox_only_mask = np.zeros_like(defect_mask)
+            bbox_only_mask[rel_y:rel_y + bh, rel_x:rel_x + bw] = 255
+            defect_mask = cv2.bitwise_and(defect_mask, bbox_only_mask)
 
         # ── Panel 1: 原始 ROI ──
         panel_orig = roi.copy()

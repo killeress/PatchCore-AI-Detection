@@ -104,6 +104,9 @@ class EdgeDefect:
     pc_roi: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     pc_fg_mask: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     pc_anomaly_map: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    # CV 路徑真實過濾後 mask（_inspect_side 輸出），heatmap 直接疊色不再重算 threshold
+    cv_filtered_mask: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    cv_mask_offset: Tuple[int, int] = (0, 0)  # mask 左上角原圖絕對座標 (對位用)
 
 
 @dataclass
@@ -376,7 +379,7 @@ class CVEdgeInspector:
             if roi is None or roi.size == 0:
                 continue
 
-            defects = self._inspect_side(roi, side_name, side_cfg, offset_x, offset_y)
+            defects, _ = self._inspect_side(roi, side_name, side_cfg, offset_x, offset_y)
             
             # 排除區域過濾 (支援多組)
             all_zones = self.config.exclude_zones
@@ -576,7 +579,7 @@ class CVEdgeInspector:
             exclude_right=0,
         )
 
-        defects = self._inspect_side(gray, "aoi_edge", roi_cfg, offset_x, offset_y, fg_mask=fg_mask)
+        defects, filtered_mask = self._inspect_side(gray, "aoi_edge", roi_cfg, offset_x, offset_y, fg_mask=fg_mask)
 
         # 為每個偵測到的缺陷記錄使用的判定參數
         for d in defects:
@@ -621,6 +624,8 @@ class CVEdgeInspector:
             "threshold": aoi_threshold,
             "min_area": aoi_min_area,
             "min_max_diff": self.config.aoi_min_max_diff,
+            "filtered_mask": filtered_mask,          # ROI 局部座標過濾後 mask，供 heatmap pixel 還原
+            "roi_offset": (int(offset_x), int(offset_y)),  # ROI 左上角原圖絕對座標
         }
 
         return defects, roi_stats
@@ -685,12 +690,17 @@ class CVEdgeInspector:
         offset_x: int,
         offset_y: int,
         fg_mask: Optional[np.ndarray] = None,
-    ) -> List[EdgeDefect]:
+    ) -> Tuple[List[EdgeDefect], np.ndarray]:
         """對單邊 ROI 執行檢測
 
         Args:
             fg_mask: 前景遮罩 (255=前景, 0=背景)。若提供，非前景區域在背景估計前
                      會被替換為前景中值，避免邊緣外黑色背景干擾 median filter。
+
+        Returns:
+            (defects, filtered_mask) — filtered_mask 為 ROI 局部尺寸 uint8 (255=通過
+            所有過濾並納入判定的 pixel / 0=被過濾或非前景)，供上游生 heatmap 時直接
+            還原實際判定用 mask，不用再靠 threshold 重算。
         """
         k = self.config.blur_kernel
         blurred = cv2.GaussianBlur(roi, (k, k), 0)
@@ -707,10 +717,14 @@ class CVEdgeInspector:
 
         _, mask = cv2.threshold(diff, cfg.threshold, 255, cv2.THRESH_BINARY)
 
+        filtered_mask = np.zeros_like(mask, dtype=np.uint8)
+
         # 薄線偵測 (在 morph_open 之前，否則 1-px 寬線被殺掉)；直接產生 EdgeDefect 旁路 CC filter
         line_defects: List[EdgeDefect] = []
         if side == "aoi_edge" and self.config.aoi_line_min_length > 0:
-            line_defects = self._detect_thin_lines(mask, diff, offset_x, offset_y)
+            line_defects, line_mask = self._detect_thin_lines(mask, diff, offset_x, offset_y)
+            if line_mask is not None and line_mask.shape == filtered_mask.shape:
+                filtered_mask = cv2.bitwise_or(filtered_mask, line_mask)
 
         if side == "aoi_edge" and self.config.aoi_morph_open_kernel > 0:
             mk_open = self.config.aoi_morph_open_kernel
@@ -755,6 +769,7 @@ class CVEdgeInspector:
                                   f"(side={side}, area={area}, solidity={solidity:.3f} < {self.config.aoi_solidity_min})")
                             continue
 
+                filtered_mask[component_mask > 0] = 255
                 defects.append(EdgeDefect(
                     side=side,
                     area=area,
@@ -765,7 +780,7 @@ class CVEdgeInspector:
                 ))
 
         defects.extend(line_defects)
-        return defects
+        return defects, filtered_mask
 
     @staticmethod
     def _group_true_runs(bool_arr: np.ndarray, max_gap: int = 0) -> List[Tuple[int, int]]:
@@ -799,16 +814,21 @@ class CVEdgeInspector:
         diff: np.ndarray,
         offset_x: int,
         offset_y: int,
-    ) -> List[EdgeDefect]:
+    ) -> Tuple[List[EdgeDefect], np.ndarray]:
         """投影法偵測薄線缺陷：垂直/水平連續活化像素數達門檻即視為線狀缺陷。
 
         在 morph_open 之前執行，避免 1-px 寬真實線條被 3x3 opening erode 歸零。
         產出的 EdgeDefect 旁路 CC 路徑後續過濾（min_area/solidity/min_max_diff）。
+
+        Returns:
+            (defects, line_mask) — line_mask 為 ROI 局部尺寸 uint8，255=通過線偵測
+            的 pixel，供上游累積到 filtered_mask 還原真實判定區域。
         """
         min_len = self.config.aoi_line_min_length
         max_w = self.config.aoi_line_max_width
+        line_mask = np.zeros_like(mask, dtype=np.uint8)
         if min_len <= 0:
-            return []
+            return [], line_mask
 
         # 先做 1D close 橋接點狀缺失 (線被 threshold 切成虛線時有機會還原)
         k_close_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
@@ -832,6 +852,10 @@ class CVEdgeInspector:
             y_min, y_max = int(ys[0]), int(ys[-1])
             area = int((mask[:, x_start:x_end + 1] > 0).sum())  # 原 mask 活化數
             max_diff = int(diff[y_min:y_max + 1, x_start:x_end + 1].max())
+            line_mask[y_min:y_max + 1, x_start:x_end + 1] = cv2.bitwise_or(
+                line_mask[y_min:y_max + 1, x_start:x_end + 1],
+                mask_v[y_min:y_max + 1, x_start:x_end + 1],
+            )
             defects.append(EdgeDefect(
                 side="aoi_edge",
                 area=area,
@@ -858,6 +882,10 @@ class CVEdgeInspector:
             x_min, x_max = int(xs[0]), int(xs[-1])
             area = int((mask[y_start:y_end + 1, :] > 0).sum())
             max_diff = int(diff[y_start:y_end + 1, x_min:x_max + 1].max())
+            line_mask[y_start:y_end + 1, x_min:x_max + 1] = cv2.bitwise_or(
+                line_mask[y_start:y_end + 1, x_min:x_max + 1],
+                mask_h[y_start:y_end + 1, x_min:x_max + 1],
+            )
             defects.append(EdgeDefect(
                 side="aoi_edge",
                 area=area,
@@ -870,7 +898,7 @@ class CVEdgeInspector:
             print(f"  🔲 _detect_thin_lines: 水平線 ({offset_x + x_min},{offset_y + y_start}) "
                   f"{x_max - x_min + 1}x{line_h}, area={area}, max_diff={max_diff}")
 
-        return defects
+        return defects, line_mask
 
     def _inspect_side_debug(
         self,
