@@ -2247,17 +2247,28 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 ko = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_open_kernel, morph_open_kernel))
                 mask_bin = cv2.morphologyEx(mask_bin, cv2.MORPH_OPEN, ko)
 
-            # Result 圖：roi 疊 fg_mask 暗紅 (與 fg_mask 覆蓋圖同色) + defect bbox
-            # 先疊 fg_mask=0 區讓用戶看到非前景確實被排除，再畫 bbox
+            # Result 圖：roi 疊 fg_mask 暗紅 + pixel mask 紅色 (對齊 production
+            # Defect Highlight) + 細青色 bbox overlay 保留 component 邊界參考
             result_img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
             result_img[fg_mask == 0] = (0, 0, 60)
+            # 主體：用 inspect_roi 回傳的 filtered_mask 塗紅 (和 production 一致)
+            filtered_mask_local = roi_stats.get('filtered_mask')
+            if filtered_mask_local is not None and filtered_mask_local.shape == result_img.shape[:2]:
+                vis_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+                vis_mask_local = cv2.dilate(filtered_mask_local, vis_kernel, iterations=1)
+                mp = vis_mask_local > 0
+                if mp.any():
+                    result_img[mp] = (
+                        result_img[mp].astype(np.float32) * 0.5
+                        + np.array([0, 0, 255], dtype=np.float32) * 0.5
+                    ).clip(0, 255).astype(np.uint8)
+            # Overlay：細青色 bbox outline + A: 標籤 (debug 用，不搶眼)
             for d in defects:
-                # 轉回 ROI 局部座標
                 dx, dy, dw, dh = d.bbox
                 lx, ly = dx - rx1, dy - ry1
-                cv2.rectangle(result_img, (lx, ly), (lx + dw, ly + dh), (0, 0, 255), 2)
+                cv2.rectangle(result_img, (lx, ly), (lx + dw, ly + dh), (255, 255, 0), 1)
                 cv2.putText(result_img, f"A:{d.area}", (lx, max(ly - 5, 12)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
 
             # fg_mask 疊到 ROI
             fg_overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
