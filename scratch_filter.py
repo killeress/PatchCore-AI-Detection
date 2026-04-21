@@ -28,7 +28,10 @@ class ScratchFilter:
     def apply_to_image_result(self, image_result: ImageResult) -> None:
         if not image_result.anomaly_tiles:
             return
-        img_name = getattr(image_result, "image_name", "?")
+        img_name = image_result.image_path.name
+        if img_name.startswith("B0F"):
+            logger.info("[scratch] %s: B0F 黑畫面跳過刮痕分類", img_name)
+            return
         n = len(image_result.anomaly_tiles)
         filtered = 0
         infer_sum_ms = 0.0
