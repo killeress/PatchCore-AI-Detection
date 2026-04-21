@@ -863,14 +863,21 @@ class HeatmapManager:
         # 取得判定參數 (用於 header 顯示)
         threshold_used = getattr(edge_defect, 'threshold_used', 0)
         min_area_used = getattr(edge_defect, 'min_area_used', 0)
+        min_max_diff_used = getattr(edge_defect, 'min_max_diff_used', 0)
 
         if is_cv_ok:
-            # 推算 OK 原因：差異未達 / 面積未達 / 兩者皆過 → 必是形狀(solidity)過濾
+            # 推算 OK 原因：由淺入深依序排除
+            #   1. diff 未達 threshold → Diff<Thr
+            #   2. area 未達 min_area → Area<Min
+            #   3. diff 達 threshold 但 < min_max_diff (低對比紋理雜訊) → Diff<MinMaxDiff
+            #   4. 以上皆不成立 → 必是 solidity/morph_open 過濾 → Shape filtered
             if threshold_used > 0 and max_diff < threshold_used:
                 cv_ok_reason = "Diff<Thr"
             elif min_area_used > 0 and area < min_area_used:
                 cv_ok_reason = "Area<Min"
-            elif threshold_used > 0 or min_area_used > 0:
+            elif min_max_diff_used > 0 and max_diff < min_max_diff_used:
+                cv_ok_reason = f"Diff<MinMaxDiff({min_max_diff_used})"
+            elif threshold_used > 0 or min_area_used > 0 or min_max_diff_used > 0:
                 cv_ok_reason = "Shape filtered"
             else:
                 cv_ok_reason = ""

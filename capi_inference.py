@@ -3843,7 +3843,7 @@ class CAPIInferencer:
 
                                 # CV 路徑 (現行)
                                 roi = aoi_image[ry1:ry2, rx1:rx2]
-                                roi_stats = {"max_diff": 0, "max_area": 0, "threshold": 0, "min_area": 0}
+                                roi_stats = {"max_diff": 0, "max_area": 0, "threshold": 0, "min_area": 0, "min_max_diff": 0}
                                 if roi.size > 0 and getattr(self, 'edge_inspector', None):
                                     try:
                                         edge_results, roi_stats = self.edge_inspector.inspect_roi(
@@ -3865,6 +3865,7 @@ class CAPIInferencer:
                                                 max_diff=worst_diff,
                                                 threshold_used=roi_stats.get("threshold", 0),
                                                 min_area_used=roi_stats.get("min_area", 0),
+                                                min_max_diff_used=roi_stats.get("min_max_diff", 0),
                                                 inspector_mode="cv",
                                             )
                                             result.edge_defects.append(merged)
@@ -3885,12 +3886,14 @@ class CAPIInferencer:
                                         is_cv_ok=True,
                                         threshold_used=roi_stats.get("threshold", 0),
                                         min_area_used=roi_stats.get("min_area", 0),
+                                        min_max_diff_used=roi_stats.get("min_max_diff", 0),
                                         inspector_mode="cv",
                                     )
                                     result.edge_defects.append(ok_defect)
                                     print(f"  ✅ AOI Coord edge ({edef.defect_code}) @ ({img_x},{img_y}): CV 未偵測到缺陷，判定 OK"
                                           f"（max_diff={roi_stats.get('max_diff', 0)}, max_area={roi_stats.get('max_area', 0)}, "
-                                          f"thr={roi_stats.get('threshold', 0)}, min_area={roi_stats.get('min_area', 0)}）")
+                                          f"thr={roi_stats.get('threshold', 0)}, min_area={roi_stats.get('min_area', 0)}, "
+                                          f"min_max_diff={roi_stats.get('min_max_diff', 0)}）")
                 print(f"🎯 Phase 1.5 完成: AOI 座標新增 {aoi_tile_count} 個 tiles, {aoi_edge_count} 個邊緣 defects")
 
         # === Grid Tiling 開關控制 ===

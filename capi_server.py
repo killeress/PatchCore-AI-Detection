@@ -649,6 +649,7 @@ def results_to_db_data(
                     "is_cv_ok": 1 if getattr(edge, 'is_cv_ok', False) else 0,
                     "threshold_used": int(getattr(edge, 'threshold_used', 0)),
                     "min_area_used": int(getattr(edge, 'min_area_used', 0)),
+                    "min_max_diff_used": int(getattr(edge, 'min_max_diff_used', 0)),
                     "inspector_mode": str(getattr(edge, 'inspector_mode', 'cv')),
                     "patchcore_score": float(getattr(edge, 'patchcore_score', 0.0)),
                     "patchcore_threshold": float(getattr(edge, 'patchcore_threshold', 0.0)),

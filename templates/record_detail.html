@@ -491,6 +491,7 @@ function copyInferenceLog() {
                     {% for ed in img.edge_defects %}
                     {% set ed_thr = ed.get('threshold_used', 0) %}
                     {% set ed_min = ed.get('min_area_used', 0) %}
+                    {% set ed_mindiff = ed.get('min_max_diff_used', 0) %}
                     {% set ed_mode = ed.get('inspector_mode', 'cv') %}
                     {% set pc_score = ed.get('patchcore_score', 0.0) %}
                     {% set pc_thr = ed.get('patchcore_threshold', 0.0) %}
@@ -511,8 +512,10 @@ function copyInferenceLog() {
                           {% set cv_ok_reason = '差異未達門檻' %}
                         {% elif ed_min > 0 and ed.area < ed_min %}
                           {% set cv_ok_reason = '面積未達門檻' %}
-                        {% elif ed_thr > 0 or ed_min > 0 %}
-                          {% set cv_ok_reason = '形狀過濾 (L 形偽影)' %}
+                        {% elif ed_mindiff > 0 and ed.max_diff < ed_mindiff %}
+                          {% set cv_ok_reason = '低對比過濾 (Diff<' ~ ed_mindiff ~ ')' %}
+                        {% elif ed_thr > 0 or ed_min > 0 or ed_mindiff > 0 %}
+                          {% set cv_ok_reason = '形狀/Morph 過濾' %}
                         {% else %}
                           {% set cv_ok_reason = '' %}
                         {% endif %}
