@@ -234,7 +234,9 @@ def test_aoi_coord(
                             threshold_used=roi_stats.get("threshold", 0),
                             min_area_used=roi_stats.get("min_area", 0),
                             min_max_diff_used=roi_stats.get("min_max_diff", 0),
+                            cv_mask_offset=roi_stats.get("roi_offset", (rx1, ry1)),
                         )
+                        merged.cv_filtered_mask = roi_stats.get("filtered_mask")
                         result.edge_defects.append(merged)
                         cv_detected = True
                         print(f"  🔍 Edge ({edef.defect_code}) @ ({img_x},{img_y}): CV NG (area={total_area}, diff={worst_diff})")
@@ -252,7 +254,9 @@ def test_aoi_coord(
                     threshold_used=roi_stats.get("threshold", 0),
                     min_area_used=roi_stats.get("min_area", 0),
                     min_max_diff_used=roi_stats.get("min_max_diff", 0),
+                    cv_mask_offset=roi_stats.get("roi_offset", (rx1, ry1)),
                 )
+                ok_defect.cv_filtered_mask = roi_stats.get("filtered_mask")
                 result.edge_defects.append(ok_defect)
                 print(f"  ✅ Edge ({edef.defect_code}) @ ({img_x},{img_y}): CV OK")
 
