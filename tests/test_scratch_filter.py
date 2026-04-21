@@ -166,6 +166,26 @@ def test_filter_keeps_tile_in_anomaly_tiles_when_flipping():
     assert ir.scratch_filter_count == 3
 
 
+def test_filter_skips_b0f_black_image():
+    """B0F 黑畫面前綴：整張 image 跳過刮痕分類，tile 上的 scratch 欄位保持預設。"""
+    from pathlib import Path
+    from scratch_filter import ScratchFilter
+    clf = _MockClassifier(fixed_score=0.99, conformal_threshold=0.7)
+    sf = ScratchFilter(clf, safety_multiplier=1.0)
+    ir = _fake_image_result_with_tiles(2)
+    ir.image_path = Path("B0F00000_114438.tif")
+
+    sf.apply_to_image_result(ir)
+
+    # classifier 完全未被呼叫 → scratch 欄位維持預設值
+    assert ir.scratch_filter_count == 0
+    for t in ir.tiles:
+        assert t.scratch_score == 0.0
+        assert t.scratch_filtered is False
+    # anomaly_tiles 保留（B0F 的亮點偵測結果仍需保留給下游）
+    assert len(ir.anomaly_tiles) == 2
+
+
 def test_filter_skips_bomb_tile():
     """C2 regression: bomb tile 不應進入 classifier；scratch 欄位保持預設值。"""
     from scratch_filter import ScratchFilter
