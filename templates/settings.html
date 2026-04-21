@@ -1609,7 +1609,6 @@
 
     function paramRow(p) {
         const isDict = p.param_type === 'dict';
-        const isModelMapping = p.param_name === 'model_mapping';
 
         if (isDict) {
             try {
@@ -1618,9 +1617,7 @@
                     const entries = Object.entries(parsed);
                     return entries.map(([k, v]) => {
                         const displayVal = String(v);
-                        const editBtnHtml = isModelMapping
-                            ? `<button class="btn-edit" style="opacity:0.5; cursor:not-allowed;" disabled title="目前暫不開放修改路徑">🔒 唯讀</button>`
-                            : `<button class="btn-edit" onclick='openEdit(${JSON.stringify(p.param_name)}, ${JSON.stringify(k)})'>✏️ 修改</button>`;
+                        const editBtnHtml = `<button class="btn-edit" onclick='openEdit(${JSON.stringify(p.param_name)}, ${JSON.stringify(k)})'>✏️ 修改</button>`;
 
                         return `
                             <div class="param-row">
