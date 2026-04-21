@@ -689,6 +689,11 @@ class HeatmapManager:
         panel_orig = roi.copy()
 
         # ── Panel 2: Defect Highlight (缺陷像素紅色標記，取代方形框) ──
+        # vis_mask = defect_mask 做 3×3 dilate，只用於視覺塗色 (讓 1-3 px 寬薄線
+        # resize 到 panel_h=400 後不被 INTER_LINEAR 淡化成看不見)。
+        # defect_mask 本身保持原狀，後續 COV/IOU 計算仍用精確面積。
+        vis_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        vis_mask = cv2.dilate(defect_mask, vis_kernel, iterations=1)
         panel_highlight = roi.copy()
         if is_bomb:
             highlight_color = (255, 0, 255)   # 洋紅
@@ -696,7 +701,7 @@ class HeatmapManager:
             highlight_color = (0, 200, 255)   # 橘色
         else:
             highlight_color = (0, 0, 255)     # 紅色
-        _blend_color_on_mask(panel_highlight, defect_mask, highlight_color)
+        _blend_color_on_mask(panel_highlight, vis_mask, highlight_color)
 
         # 統一面板大小
         panel_h = 400
@@ -805,8 +810,8 @@ class HeatmapManager:
             # 產生 Panel 4 可視化圖 (R=僅缺陷, G=重疊, B=僅異物)
             overlay_panel = omit_panel.copy()
             if dust_mask_omit is not None and is_dust_detected:
-                # resize masks to panel size
-                defect_vis = cv2.resize(defect_mask, (panel_w, panel_h), interpolation=cv2.INTER_NEAREST)
+                # resize masks to panel size (用 vis_mask 保薄線可見度)
+                defect_vis = cv2.resize(vis_mask, (panel_w, panel_h), interpolation=cv2.INTER_NEAREST)
                 dust_vis_mask = dust_mask_single if dust_mask_single is not None else dust_mask_omit
                 if len(dust_vis_mask.shape) == 3:
                     dust_vis_mask = cv2.cvtColor(dust_vis_mask, cv2.COLOR_BGR2GRAY)
