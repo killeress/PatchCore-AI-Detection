@@ -1168,6 +1168,12 @@ class CAPIDatabase:
         "score_asc": "t.scratch_score ASC, ir.created_at DESC",
     }
 
+    _SCRATCH_REVIEW_FILTER = {
+        "pending": "srr.id IS NULL",
+        "marked": "srr.is_misrescue = 1",
+        "all": None,
+    }
+
     def list_scratch_rescued_tiles(
         self,
         start_date: str = None,
@@ -1175,8 +1181,11 @@ class CAPIDatabase:
         order_by: str = "latest",
         limit: int = 24,
         offset: int = 0,
+        filter_state: str = "pending",
     ) -> list:
         """列出被 scratch filter 救回的 tile（scratch_filtered=1），含誤救標記狀態。
+
+        filter_state: pending（未審查）/ marked（已標記誤救）/ all。
 
         回傳 list of dict：
           tile_id, record_id, glass_id, machine_no, created_at, ai_judgment,
@@ -1195,6 +1204,9 @@ class CAPIDatabase:
         if end_date:
             where.append("DATE(ir.created_at) <= DATE(?)")
             params.append(end_date)
+        filter_clause = self._SCRATCH_REVIEW_FILTER.get(filter_state, self._SCRATCH_REVIEW_FILTER["pending"])
+        if filter_clause:
+            where.append(filter_clause)
         where_sql = " AND ".join(where)
 
         conn = self._get_conn()
@@ -1253,6 +1265,62 @@ class CAPIDatabase:
                     "reviewed": r["review_id"] is not None,
                 })
             return out
+        finally:
+            conn.close()
+
+    def list_scratch_misrescue_for_export(
+        self,
+        start_date: str = None,
+        end_date: str = None,
+    ) -> list:
+        """列出所有已標記誤救的 tile，附帶原圖路徑與 tile 幾何資訊供匯出流程 re-crop。
+
+        回傳欄位：tile_result_id, record_id, image_result_id, tile_seq,
+        glass_id, image_name, image_path, x, y, width, height,
+        scratch_score, score, created_at (inference), reviewed_at,
+        review_note, ai_judgment
+        """
+        where = ["t.scratch_filtered = 1", "srr.is_misrescue = 1"]
+        params = []
+        if start_date:
+            where.append("DATE(ir.created_at) >= DATE(?)")
+            params.append(start_date)
+        if end_date:
+            where.append("DATE(ir.created_at) <= DATE(?)")
+            params.append(end_date)
+        where_sql = " AND ".join(where)
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    t.id             AS tile_result_id,
+                    t.tile_id        AS tile_seq,
+                    t.x              AS x,
+                    t.y              AS y,
+                    t.width          AS width,
+                    t.height         AS height,
+                    t.score          AS score,
+                    t.scratch_score  AS scratch_score,
+                    img.id           AS image_result_id,
+                    img.image_path   AS image_path,
+                    img.image_name   AS image_name,
+                    ir.id            AS record_id,
+                    ir.glass_id      AS glass_id,
+                    ir.created_at    AS created_at,
+                    ir.ai_judgment   AS ai_judgment,
+                    srr.updated_at   AS reviewed_at,
+                    srr.note         AS review_note
+                FROM tile_results t
+                JOIN image_results img ON img.id = t.image_result_id
+                JOIN inference_records ir ON ir.id = img.record_id
+                JOIN scratch_rescue_review srr ON srr.tile_result_id = t.id
+                WHERE {where_sql}
+                ORDER BY ir.created_at DESC, t.id DESC
+                """,
+                params
+            ).fetchall()
+            return [dict(r) for r in rows]
         finally:
             conn.close()
 
