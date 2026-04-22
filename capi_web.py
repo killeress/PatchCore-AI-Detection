@@ -2167,6 +2167,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         inspector_mode = str(data.get("inspector", "cv")).lower().strip()
         if inspector_mode == "patchcore":
             return self._handle_api_debug_edge_corner_patchcore(data, image_path)
+        if inspector_mode == "fusion":
+            return self._handle_api_debug_edge_corner_fusion(data, image_path)
 
         try:
             roi_x = int(data.get("roi_x", 0))
@@ -2457,6 +2459,123 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"[DEBUG] Edge Inspect Corner (PatchCore) error: {e}", exc_info=True)
             self._send_json({"error": f"PatchCore 角落檢測失敗: {str(e)}"})
+
+    def _handle_api_debug_edge_corner_fusion(self, data: dict, image_path: Path):
+        """API: 角落 Fusion 推論 (走 production _inspect_roi_fusion)"""
+        import cv2
+        import numpy as np
+        import base64
+        from capi_heatmap import ensure_bgr, render_pc_masked_roi, render_pc_overlay
+
+        if self.inferencer is None:
+            self._send_json({"error": "推論器尚未載入 (inferencer is None)"})
+            return
+
+        try:
+            roi_x = int(data.get("roi_x", 0))
+            roi_y = int(data.get("roi_y", 0))
+            tile_size = int(data.get("tile_size", self.inferencer.config.tile_size))
+            band_px = int(data.get("boundary_band_px",
+                                    getattr(self.inferencer.edge_inspector.config,
+                                            "aoi_edge_boundary_band_px", 40)))
+
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            if image is None:
+                self._send_json({"error": "無法讀取圖片"})
+                return
+            if image.dtype == np.uint16:
+                image = (image / 256).astype(np.uint8)
+
+            img_h, img_w = image.shape[:2]
+            img_cx = roi_x + tile_size // 2
+            img_cy = roi_y + tile_size // 2
+
+            panel_polygon = None
+            try:
+                _, _, panel_polygon = self.inferencer.calculate_otsu_bounds(image)
+            except Exception as poly_err:
+                logger.warning(f"[DEBUG corner Fusion] polygon 偵測失敗: {poly_err}")
+
+            img_prefix = self.inferencer._get_image_prefix(image_path.name)
+
+            # Override band_px on the inspector for this single test
+            orig_band_px = self.inferencer.edge_inspector.config.aoi_edge_boundary_band_px
+            self.inferencer.edge_inspector.config.aoi_edge_boundary_band_px = band_px
+            try:
+                defects, stats = self.inferencer._inspect_roi_fusion(
+                    image, img_cx, img_cy, img_prefix,
+                    panel_polygon=panel_polygon,
+                    omit_image=None,           # debug 頁不做 OMIT 屏蔽
+                    omit_overexposed=False,
+                )
+            finally:
+                self.inferencer.edge_inspector.config.aoi_edge_boundary_band_px = orig_band_px
+
+            band_mask = stats.get("band_mask")
+            interior_mask = stats.get("interior_mask")
+            pc_anomaly_map = stats.get("pc_anomaly_map")
+            pc_anomaly_map_interior = stats.get("pc_anomaly_map_interior")
+            pc_stats = stats.get("pc_stats", {})
+            cv_stats = stats.get("cv_stats", {})
+            pc_roi = pc_stats.get("roi")
+            pc_fg_mask = pc_stats.get("fg_mask")
+
+            def _to_data_url(img: np.ndarray) -> str:
+                _, buf = cv2.imencode('.png', img)
+                return f"data:image/png;base64,{base64.b64encode(buf).decode('utf-8')}"
+
+            encoded_imgs = {}
+            if pc_roi is not None:
+                roi_bgr = ensure_bgr(pc_roi)
+                encoded_imgs["roi"] = _to_data_url(render_pc_masked_roi(roi_bgr, pc_fg_mask))
+                encoded_imgs["heatmap_full"] = _to_data_url(
+                    render_pc_overlay(roi_bgr, pc_fg_mask, pc_anomaly_map))
+                encoded_imgs["heatmap_interior"] = _to_data_url(
+                    render_pc_overlay(roi_bgr, pc_fg_mask, pc_anomaly_map_interior))
+            if band_mask is not None:
+                encoded_imgs["band_mask"] = _to_data_url(
+                    cv2.cvtColor(band_mask, cv2.COLOR_GRAY2BGR))
+            if interior_mask is not None:
+                encoded_imgs["interior_mask"] = _to_data_url(
+                    cv2.cvtColor(interior_mask, cv2.COLOR_GRAY2BGR))
+
+            cv_kept = [d for d in defects if getattr(d, 'source_inspector', '') == 'cv']
+            pc_kept = [d for d in defects if getattr(d, 'source_inspector', '') == 'patchcore']
+
+            self._send_json({
+                "success": True,
+                "inspector": "fusion",
+                "boundary_band_px": band_px,
+                "fusion_fallback_reason": stats.get("fusion_fallback_reason", ""),
+                "defects": [
+                    {
+                        "area": d.area,
+                        "bbox": list(d.bbox),
+                        "center": list(d.center),
+                        "source_inspector": getattr(d, 'source_inspector', ''),
+                        "d_edge_px": getattr(d, 'd_edge_px', 0.0),
+                        "max_diff": d.max_diff,
+                        "patchcore_score": getattr(d, 'patchcore_score', 0.0),
+                        "patchcore_threshold": getattr(d, 'patchcore_threshold', 0.0),
+                        "is_dust": bool(getattr(d, 'is_suspected_dust_or_scratch', False)),
+                        "dust_detail_text": getattr(d, 'dust_detail_text', ''),
+                    } for d in defects
+                ],
+                "summary": {
+                    "cv_band_count": len(cv_kept),
+                    "pc_interior_count": len(pc_kept),
+                    "ng_count": sum(1 for d in defects
+                                     if not getattr(d, 'is_suspected_dust_or_scratch', False)),
+                    "dust_count": sum(1 for d in defects
+                                       if getattr(d, 'is_suspected_dust_or_scratch', False)),
+                },
+                "images": encoded_imgs,
+                "panel_polygon": panel_polygon.astype(int).tolist() if panel_polygon is not None else None,
+                "image_size": [img_w, img_h],
+            })
+        except Exception as e:
+            logger.error(f"[DEBUG] Edge Inspect Corner (Fusion) error: {e}", exc_info=True)
+            self._send_json({"error": f"Fusion 角落檢測失敗: {str(e)}"})
 
     def _handle_debug_coord_inference(self):
         """API: 人工座標推論 — 以指定產品座標為中心裁切 512x512 做推論"""
@@ -3159,7 +3278,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             success = self.db.update_config_param(param_name, new_value, reason)
             if success:
                 # Hot-reload edge config if a cv_edge_* or aoi_edge_* parameter was updated
-                edge_triggers = param_name.startswith("cv_edge") or param_name == "aoi_edge_inspector"
+                edge_triggers = (
+                    param_name.startswith("cv_edge")
+                    or param_name == "aoi_edge_inspector"
+                    or param_name == "aoi_edge_boundary_band_px"
+                )
                 if edge_triggers and hasattr(self, 'inferencer') and self.inferencer:
                     try:
                         from capi_edge_cv import EdgeInspectionConfig

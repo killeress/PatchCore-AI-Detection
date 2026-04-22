@@ -1078,8 +1078,12 @@
                     <input type="radio" name="edge-corner-inspector" value="patchcore" onchange="updateCornerInspectorUI()">
                     <span>PatchCore (模型)</span>
                 </label>
+                <label style="display:flex; gap:6px; align-items:center; cursor:pointer;">
+                    <input type="radio" name="edge-corner-inspector" value="fusion" onchange="updateCornerInspectorUI()">
+                    <span>Fusion (CV band + PC interior)</span>
+                </label>
                 <span id="edge-corner-inspector-hint" style="color:var(--text-muted); font-size:0.85rem;">
-                    傳統 CV 二值化+形狀過濾；PatchCore 走 /predict_tile pipeline（沿用中央 tile 設定）
+                    傳統 CV 二值化+形狀過濾；PatchCore 走 /predict_tile pipeline；Fusion 同 ROI 雙跑、CV 管 boundary band+PC 管 interior（Phase 6）
                 </span>
             </div>
             <div class="coord-input-row">

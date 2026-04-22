@@ -484,6 +484,9 @@ function copyInferenceLog() {
                         <th>大小</th>
                         <th>面積</th>
                         <th>差異值</th>
+                        <th>Source</th>
+                        <th>d_edge</th>
+                        <th>OMIT</th>
                         <th>操作</th>
                     </tr>
                 </thead>
@@ -496,6 +499,11 @@ function copyInferenceLog() {
                     {% set pc_score = ed.get('patchcore_score', 0.0) %}
                     {% set pc_thr = ed.get('patchcore_threshold', 0.0) %}
                     {% set pc_reason = ed.get('patchcore_ok_reason', '') %}
+                    {% set src_ins = ed.get('source_inspector', '') %}
+                    {% set d_edge = ed.get('d_edge_px', 0.0) %}
+                    {% set fb_reason = ed.get('fusion_fallback_reason', '') %}
+                    {% set is_dust_flag = ed.get('is_dust', 0) %}
+                    {% set dust_detail = ed.get('dust_detail_text', '') %}
                     {% if ed.is_cv_ok %}
                       {% if ed_mode == 'patchcore' %}
                         {% if pc_reason == 'Score<Thr' %}
@@ -576,6 +584,43 @@ function copyInferenceLog() {
                               {% else %}
                               <span class="badge badge-ng">{{ ed.max_diff | round(1) }}</span>
                               {% endif %}
+                            {% endif %}
+                        </td>
+                        <td>
+                            {# Phase 6 fusion: source_inspector pill #}
+                            {% if src_ins == 'cv' %}
+                            <span class="badge" style="background:#FED7AA;color:#9A3412;font-size:0.68rem;">CV (band)</span>
+                            {% elif src_ins == 'patchcore' %}
+                            <span class="badge" style="background:#FBCFE8;color:#9D174D;font-size:0.68rem;">PC (interior)</span>
+                            {% elif ed_mode == 'fusion' %}
+                            <span style="color:var(--text-muted);font-size:0.7rem;">—</span>
+                            {% else %}
+                            <span style="color:var(--text-muted);font-size:0.7rem;">—</span>
+                            {% endif %}
+                            {% if fb_reason %}
+                            <div style="font-size:0.62rem;color:#f59e0b;font-style:italic;margin-top:2px;">fallback: {{ fb_reason }}</div>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if ed_mode == 'fusion' and d_edge > 0 %}
+                            <span style="font-family:'Fira Code',monospace;font-size:0.78rem;">{{ d_edge | round(1) }}px</span>
+                            {% else %}
+                            <span style="color:var(--text-muted);font-size:0.7rem;">—</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {# OMIT 屏蔽狀態 — fusion / Phase 5 共用 dust 欄位 #}
+                            {% if is_dust_flag %}
+                            <span class="badge" style="background:#9CA3AF;color:#fff;font-size:0.68rem;">DUST 已屏蔽</span>
+                            {% if dust_detail %}
+                            <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px;font-style:italic;">{{ dust_detail }}</div>
+                            {% endif %}
+                            {% elif dust_detail and 'OVEREXPOSED' in dust_detail %}
+                            <span class="badge" style="background:#FEF3C7;color:#92400E;font-size:0.68rem;">OMIT 過曝→REAL</span>
+                            {% elif dust_detail %}
+                            <span class="badge" style="background:#D1FAE5;color:#065F46;font-size:0.68rem;">非灰塵</span>
+                            {% else %}
+                            <span style="color:var(--text-muted);font-size:0.7rem;">—</span>
                             {% endif %}
                         </td>
                         <td>

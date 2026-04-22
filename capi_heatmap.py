@@ -601,7 +601,13 @@ class HeatmapManager:
         Returns:
             儲存的檔案路徑
         """
-        if getattr(edge_defect, 'inspector_mode', 'cv') == 'patchcore':
+        # Phase 5: inspector_mode='patchcore' → PC renderer
+        # Phase 6: inspector_mode='fusion' + source_inspector='patchcore' → PC renderer
+        inspector_mode = getattr(edge_defect, 'inspector_mode', 'cv')
+        source_inspector = getattr(edge_defect, 'source_inspector', '')
+        if inspector_mode == 'patchcore' or (
+            inspector_mode == 'fusion' and source_inspector == 'patchcore'
+        ):
             return self._save_patchcore_edge_image(
                 save_dir, image_name, edge_index, edge_defect,
                 full_image, omit_image,
@@ -710,6 +716,12 @@ class HeatmapManager:
         panel_w = max(panel_w, 200)
         panel_orig = cv2.resize(panel_orig, (panel_w, panel_h))
         panel_highlight = cv2.resize(panel_highlight, (panel_w, panel_h))
+
+        # Phase 6: fusion 模式下 CV 來源 → 左上角 [CV] 角標
+        if inspector_mode == 'fusion' and source_inspector == 'cv':
+            cv2.rectangle(panel_highlight, (5, 5), (60, 28), (0, 0, 0), -1)
+            cv2.putText(panel_highlight, "[CV]", (10, 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
 
         # 取得判定參數 + 推算 CV OK 原因（corner 標記與下方 header verdict 共用，確保同步）
         threshold_used = getattr(edge_defect, 'threshold_used', 0)
@@ -1009,6 +1021,14 @@ class HeatmapManager:
         panel_w = max(int(panel_orig.shape[1] * scale), 200)
         panel_orig = cv2.resize(panel_orig, (panel_w, panel_h))
         panel_heatmap = cv2.resize(panel_heatmap, (panel_w, panel_h))
+
+        # Phase 6: fusion 模式 PC 來源 → 左上角 [PC] 角標
+        edge_inspector_mode = getattr(edge_defect, 'inspector_mode', 'cv')
+        edge_source = getattr(edge_defect, 'source_inspector', '')
+        if edge_inspector_mode == 'fusion' and edge_source == 'patchcore':
+            cv2.rectangle(panel_heatmap, (5, 5), (60, 28), (0, 0, 0), -1)
+            cv2.putText(panel_heatmap, "[PC]", (10, 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 0, 255), 2)
 
         panels = [panel_orig, panel_heatmap]
         labels = ["Original ROI (masked)", "PatchCore Heatmap"]

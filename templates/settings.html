@@ -1126,6 +1126,7 @@
                 style="display:none; width: 100%; background: #0f172a; border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-family: 'Fira Code', monospace; font-size: 0.88rem; margin-bottom: 16px; outline: none;">
                 <option value="cv">cv (傳統 CV - 預設)</option>
                 <option value="patchcore">patchcore (PatchCore 模型)</option>
+                <option value="fusion">fusion (Phase 6 — CV 管 band + PC 管 interior)</option>
             </select>
 
             <select id="modal-patchcore-metric-select"
@@ -1192,7 +1193,7 @@
     const AOI_COORD_PARAMS = [
         'grid_tiling_enabled', 'aoi_coord_inspection_enabled',
         'aoi_report_path_replace_from', 'aoi_report_path_replace_to',
-        'aoi_edge_inspector',
+        'aoi_edge_inspector', 'aoi_edge_boundary_band_px',
         'cv_edge_aoi_threshold', 'cv_edge_aoi_min_area', 'cv_edge_aoi_solidity_min',
         'cv_edge_aoi_polygon_erode_px',
         'cv_edge_aoi_morph_open_kernel', 'cv_edge_aoi_min_max_diff',

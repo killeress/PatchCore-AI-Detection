@@ -63,6 +63,61 @@ capi_server.py:772  →  EdgeInspectionConfig.from_db_params(db_dict)
 - **Code**：`_detect_thin_lines()` + `_group_true_runs()` in `capi_edge_cv.py`
 - **驗證**：模擬測試：垂直虛線 (30 點, 間距 5) 被抓；1×12 雜訊條紋 (< 30) 被擋；低對比紋理塊 (max_diff=6) 被 min_max_diff 擋。三路各司其職。
 
+### Phase 6 — CV+PatchCore 空間分權 Fusion Inspector (2026-04-22)
+
+- **動機**：Phase 5 互斥切換實際上線後觀察到：
+  - `inspector="cv"` + `min_max_diff=20` → faint 真黑點 (max_diff 15-19) 漏檢增加 (Issue 1)
+  - `inspector="patchcore"` → faint 漏檢救回，但 backbone 感受野 (~30-50 px) 被 panel 邊界
+    黑 pad 污染，AOI 座標貼邊時產生大量近邊假陽 (過檢)
+  - 兩個弱點 **空間不重疊**：PC 弱點只在 polygon 邊內側 ~40 px，CV 弱點 (低對比過濾)
+    在中遠區的 faint defect 才關鍵。
+- **設計決策**：
+  - 第三選項 `aoi_edge_inspector="fusion"`，新增 `aoi_edge_boundary_band_px=40` (px)
+  - 同一顆 AOI 座標 ROI **同時跑 CV + PC**，依 boundary_band_mask 做空間分權：
+    - CV 管「polygon 邊往 panel 內 boundary_band_px 寬帶」
+    - PC 管「band 外的 interior」(把 anomaly_map 在 band 區歸零)
+  - 聚合：兩管轄區都乾淨才 OK；任一找到非 dust defect 即 NG
+  - **統一 pipeline 不加 skip 優化**：deep interior (ROI 內無 polygon edge) 仍跑完整 fusion
+    流程 (CV defect 全被 band mask 過濾 = 變相 PC only)，避免條件分支複雜度
+  - OMIT 灰塵屏蔽 fusion 後**統一**套一次 (`apply_omit_dust_filter`)，不分 source；
+    沿用既存 `check_dust_or_scratch_feature` + per-region IoU/Coverage
+  - **fusion 模式下 `cv_edge_dust_filter_enabled` 強制視為關閉** (UI disable + 後端忽略)
+    避免雙層 dust filter 邏輯分歧
+  - Polygon 失敗 → fallback CV only，標 `fusion_fallback_reason="polygon_unavailable"`
+- **Trade-off**：
+  - **(+)** 同時解 PC 近邊過檢 與 CV 中遠區 faint 漏檢
+  - **(+)** UI 完全可解釋：每個 defect 帶 `source_inspector` (cv/patchcore) +
+    `d_edge_px` (defect center 到 polygon 邊距離) + Source 徽章
+  - **(−)** 算力 ~2x (CV+PC 都跑)，CV 部分輕量，per-panel 影響可忽略
+  - **(−)** 殘留 Issue 1 在 band 內：若 faint defect 落在 band 內 CV 管轄區、max_diff 15-19
+    仍會被 `min_max_diff=20` 擋；觀察線上發生率後再決定是否做 band 專屬 CV 放寬
+- **Code**：
+  - `capi_edge_cv.py::compute_boundary_band_mask` 幾何 helper
+  - `capi_inference.py::_inspect_roi_fusion` 主流程 (L3163 附近)
+  - `capi_inference.py::_apply_omit_dust_filter_to_edge_defects` OMIT 整合
+  - `capi_inference.py::_inspect_roi_patchcore` 加 `return_raw=True` 參數
+    (跳過 defect 抽取、回 anomaly_map 給 fusion)
+  - AOI loop 加 `inspector_mode=="fusion"` 分支 (L4070 附近)
+  - `capi_database.py` migration 加 `source_inspector` / `d_edge_px` /
+    `fusion_fallback_reason` 三欄 + seed `aoi_edge_boundary_band_px=40`
+  - `capi_heatmap.py` defect highlight 渲染：fusion 模式 PC 來源走 PC renderer，
+    兩條路徑加 [CV] / [PC] 角標
+  - `capi_web.py::_handle_api_debug_edge_corner_fusion` 新 endpoint
+  - UI: `/settings` AOI tab radio 加 fusion；`/debug` 角落測試 radio 加 fusion；
+    `/record/<id>` (預設版，不動 v3) 邊緣表格加 Source / d_edge / OMIT 三欄
+- **測試**：`tests/test_aoi_edge_fusion.py` 17 項：
+  - Boundary band geometry 5 項 (deep interior / near edge / on edge / band_px=0 / polygon=None)
+  - `_inspect_roi_patchcore return_raw` 2 項
+  - `apply_omit_dust_filter` 4 項 (omit None / overexposed / dust hit / clean)
+  - `_inspect_roi_fusion` 6 項 (fallback / CV in/out band / PC in/out band / deep interior)
+  - 既有 Phase 5 (8 項) + AOI coord (3 項) regression 全綠
+- **Config 預設值表更新**:
+
+  | Key | 預設 | 角色 |
+  |---|---|---|
+  | `aoi_edge_inspector` | `"cv"` | 改：`"cv"` / `"patchcore"` / **`"fusion"`** 三選項 |
+  | `aoi_edge_boundary_band_px` | **40** | Phase 6 新增；fusion 下 CV 管轄帶寬度 |
+
 ### Phase 5 — PatchCore Inspector 切換 (2026-04-21)
 
 - **動機**：Phase 3 的 `min_max_diff=20` 與 faint 黑點 max_diff 15-19 衝突（Issue 1），靠

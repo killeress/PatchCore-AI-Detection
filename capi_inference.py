@@ -89,7 +89,7 @@ except Exception as _e:
     )
 
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
-from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff
+from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff, compute_boundary_band_mask
 from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
 from scratch_filter import ScratchFilter
 
@@ -3160,6 +3160,262 @@ class CAPIInferencer:
         
         return img_x, img_y
 
+    def _inspect_roi_fusion(
+        self,
+        image: np.ndarray,
+        img_x: int,
+        img_y: int,
+        img_prefix: str,
+        panel_polygon: Optional[np.ndarray] = None,
+        omit_image: Optional[np.ndarray] = None,
+        omit_overexposed: bool = False,
+        otsu_bounds: Optional[Tuple[int, int, int, int]] = None,
+    ) -> Tuple[List[EdgeDefect], Dict[str, Any]]:
+        """Phase 6 — AOI 邊緣 CV+PatchCore 空間分權 Fusion。
+
+        對單顆 AOI 座標 ROI 同時跑 CV + PC，依 boundary_band_mask 把:
+          - CV 的 defect 限定在 band 內 (CV 管 polygon 邊內側 boundary_band_px 寬帶)
+          - PC 的 anomaly_map 把 band 部分歸零後再 threshold (PC 管 interior)
+        最後對合併 defect list 統一套 OMIT 灰塵屏蔽。
+
+        Args:
+            panel_polygon: panel 邊界 polygon (np.ndarray Nx2)；None → fallback CV only
+            omit_image / omit_overexposed: OMIT 影像與過曝旗標 (沿用 tile 路徑語意)
+            otsu_bounds: 傳給 CV inspect_roi (僅四邊掃用得到，AOI 邊緣可不傳)
+
+        Returns:
+            (defects, stats)
+            - defects: fusion 後保留的 EdgeDefect list (含 source_inspector 標籤)
+            - stats: {"band_mask", "interior_mask", "pc_anomaly_map",
+                     "pc_anomaly_map_interior", "cv_stats", "pc_stats",
+                     "fusion_fallback_reason"}
+        """
+        tile_size = self.config.tile_size
+        half = tile_size // 2
+        rx1 = img_x - half
+        ry1 = img_y - half
+        rx2 = rx1 + tile_size
+        ry2 = ry1 + tile_size
+        img_h, img_w = image.shape[:2]
+
+        band_px = int(getattr(self.edge_inspector.config, "aoi_edge_boundary_band_px", 40))
+
+        # === Fallback: polygon 偵測失敗 → CV only ===
+        if panel_polygon is None:
+            sx1 = max(0, rx1)
+            sy1 = max(0, ry1)
+            sx2 = min(img_w, rx2)
+            sy2 = min(img_h, ry2)
+            cv_defects: List[EdgeDefect] = []
+            cv_stats: Dict[str, Any] = {}
+            if sx2 > sx1 and sy2 > sy1:
+                roi_for_cv = image[sy1:sy2, sx1:sx2]
+                cv_defects, cv_stats = self.edge_inspector.inspect_roi(
+                    roi_for_cv, offset_x=sx1, offset_y=sy1,
+                    otsu_bounds=otsu_bounds, panel_polygon=None,
+                )
+            for d in cv_defects:
+                d.source_inspector = "cv"
+                d.inspector_mode = "fusion"
+                d.fusion_fallback_reason = "polygon_unavailable"
+                d.d_edge_px = 0.0
+            cv_defects = self._apply_omit_dust_filter_to_edge_defects(
+                cv_defects, omit_image, omit_overexposed,
+            )
+            return cv_defects, {
+                "band_mask": None,
+                "interior_mask": None,
+                "pc_anomaly_map": None,
+                "pc_anomaly_map_interior": None,
+                "cv_stats": cv_stats,
+                "pc_stats": {},
+                "fusion_fallback_reason": "polygon_unavailable",
+            }
+
+        # === Build ROI 與 fg_mask（與 _inspect_roi_patchcore 一致）===
+        sx1 = max(0, rx1)
+        sy1 = max(0, ry1)
+        sx2 = min(img_w, rx2)
+        sy2 = min(img_h, ry2)
+        if sx2 <= sx1 or sy2 <= sy1:
+            return [], {
+                "band_mask": None, "interior_mask": None,
+                "pc_anomaly_map": None, "pc_anomaly_map_interior": None,
+                "cv_stats": {}, "pc_stats": {},
+                "fusion_fallback_reason": "roi_out_of_image",
+            }
+
+        dx1 = sx1 - rx1
+        dy1 = sy1 - ry1
+        dx2 = dx1 + (sx2 - sx1)
+        dy2 = dy1 + (sy2 - sy1)
+        channels = image.shape[2] if image.ndim == 3 else 1
+        if channels == 1:
+            roi = np.zeros((tile_size, tile_size), dtype=image.dtype)
+        else:
+            roi = np.zeros((tile_size, tile_size, channels), dtype=image.dtype)
+        roi[dy1:dy2, dx1:dx2] = image[sy1:sy2, sx1:sx2]
+
+        fg_mask = np.zeros((tile_size, tile_size), dtype=np.uint8)
+        local_poly = panel_polygon.copy().astype(np.float32)
+        local_poly[:, 0] -= rx1
+        local_poly[:, 1] -= ry1
+        cv2.fillPoly(fg_mask, [local_poly.astype(np.int32)], 255)
+
+        # === Boundary band mask ===
+        band_mask = compute_boundary_band_mask(
+            roi_shape=(tile_size, tile_size),
+            roi_origin=(rx1, ry1),
+            panel_polygon=[(int(p[0]), int(p[1])) for p in panel_polygon],
+            band_px=band_px,
+            fg_mask=fg_mask,
+        )
+
+        # === CV 路徑 ===
+        cv_defects_all, cv_stats = self.edge_inspector.inspect_roi(
+            roi, offset_x=rx1, offset_y=ry1,
+            otsu_bounds=otsu_bounds, panel_polygon=panel_polygon,
+        )
+        cv_defects_kept: List[EdgeDefect] = []
+        polygon_int = panel_polygon.astype(np.int32)
+        for d in cv_defects_all:
+            cx, cy = d.center
+            roi_cx = int(cx - rx1)
+            roi_cy = int(cy - ry1)
+            if not (0 <= roi_cx < tile_size and 0 <= roi_cy < tile_size):
+                continue
+            if band_mask[roi_cy, roi_cx] > 0:
+                d.source_inspector = "cv"
+                d.inspector_mode = "fusion"
+                d.d_edge_px = float(max(0.0, cv2.pointPolygonTest(
+                    polygon_int, (float(cx), float(cy)), True)))
+                cv_defects_kept.append(d)
+
+        # === PC 路徑 ===
+        _, pc_stats = self._inspect_roi_patchcore(
+            image, img_x, img_y, img_prefix,
+            panel_polygon=panel_polygon, return_raw=True,
+        )
+        pc_anomaly_map = pc_stats.get("anomaly_map")
+        pc_threshold = float(pc_stats.get("threshold", 0.0))
+        anomaly_map_interior = None
+        pc_defects: List[EdgeDefect] = []
+
+        if pc_anomaly_map is not None:
+            anomaly_map_interior = pc_anomaly_map.copy()
+            anomaly_map_interior[band_mask > 0] = 0.0
+            anomaly_map_interior[fg_mask == 0] = 0.0
+
+            interior_score = float(np.max(anomaly_map_interior))
+            if interior_score >= pc_threshold:
+                interior_max_area = _anomaly_max_cc_area(anomaly_map_interior)
+                pc_def = EdgeDefect(
+                    side="aoi_edge",
+                    area=int(interior_max_area),
+                    bbox=(rx1, ry1, tile_size, tile_size),
+                    center=(img_x, img_y),
+                    max_diff=0,
+                    inspector_mode="fusion",
+                    patchcore_score=interior_score,
+                    patchcore_threshold=pc_threshold,
+                )
+                pc_def.source_inspector = "patchcore"
+                pc_def.d_edge_px = float(max(0.0, cv2.pointPolygonTest(
+                    polygon_int, (float(img_x), float(img_y)), True)))
+                pc_def.pc_roi = pc_stats.get("roi")
+                pc_def.pc_fg_mask = fg_mask
+                pc_def.pc_anomaly_map = anomaly_map_interior
+                pc_defects.append(pc_def)
+
+        # === Merge + OMIT ===
+        fusion_defects = cv_defects_kept + pc_defects
+        fusion_defects = self._apply_omit_dust_filter_to_edge_defects(
+            fusion_defects, omit_image, omit_overexposed,
+        )
+
+        stats = {
+            "band_mask": band_mask,
+            "interior_mask": cv2.bitwise_and(fg_mask, cv2.bitwise_not(band_mask)),
+            "pc_anomaly_map": pc_anomaly_map,
+            "pc_anomaly_map_interior": anomaly_map_interior,
+            "cv_stats": cv_stats,
+            "pc_stats": pc_stats,
+            "fusion_fallback_reason": "",
+        }
+        return fusion_defects, stats
+
+    def _apply_omit_dust_filter_to_edge_defects(
+        self,
+        defects: List[EdgeDefect],
+        omit_image: Optional[np.ndarray],
+        omit_overexposed: bool,
+    ) -> List[EdgeDefect]:
+        """Phase 6 fusion — fusion 後對 edge defect list 統一套 OMIT 灰塵屏蔽。
+
+        不分 source_inspector ("cv" / "patchcore") 一套邏輯，沿用既有
+        check_dust_or_scratch_feature + compute_dust_heatmap_iou。
+
+        Args:
+            defects: fusion 產出的 EdgeDefect list (bbox in panel 座標系)
+            omit_image: full panel OMIT 灰階影像；None 視為 OMIT 缺失
+            omit_overexposed: True 時跳過 dust 判定、defect 全保留並標 detail_text
+
+        Returns:
+            原 defect list (in-place mutation 寫回 is_suspected_dust_or_scratch /
+            dust_mask / dust_bright_ratio / dust_detail_text / omit_crop_image)。
+        """
+        if omit_image is None:
+            return defects
+
+        if omit_overexposed:
+            for d in defects:
+                d.dust_detail_text = "OMIT_OVEREXPOSED → REAL_NG"
+            return defects
+
+        oh, ow = omit_image.shape[:2]
+        top_pct = self.config.dust_heatmap_top_percent
+        metric = self.config.dust_heatmap_metric
+        iou_thr = self.config.dust_heatmap_iou_threshold
+
+        for d in defects:
+            bx, by, bw, bh = d.bbox
+            if bx >= ow or by >= oh or bw <= 0 or bh <= 0:
+                continue
+            x2 = min(bx + bw, ow)
+            y2 = min(by + bh, oh)
+            if x2 <= bx or y2 <= by:
+                continue
+            omit_crop = omit_image[by:y2, bx:x2]
+
+            is_dust, dust_mask, bright_ratio, detail = self.check_dust_or_scratch_feature(omit_crop)
+            d.dust_bright_ratio = float(bright_ratio)
+            d.dust_detail_text = detail
+            d.omit_crop_image = omit_crop.copy()
+
+            if not is_dust or dust_mask is None:
+                continue
+
+            # 取 defect 自己的「熱區 mask / map」與 OMIT dust_mask 比對重疊
+            # PC: pc_anomaly_map (bbox 範圍) — float anomaly
+            # CV: cv_filtered_mask (bbox 範圍) — uint8 binary
+            defect_anomaly = None
+            if getattr(d, "source_inspector", "") == "patchcore" and d.pc_anomaly_map is not None:
+                defect_anomaly = d.pc_anomaly_map.astype(np.float32)
+            elif getattr(d, "source_inspector", "") == "cv" and d.cv_filtered_mask is not None:
+                defect_anomaly = d.cv_filtered_mask.astype(np.float32)
+
+            if defect_anomaly is None:
+                continue
+
+            metric_val, _ = self.compute_dust_heatmap_iou(
+                dust_mask, defect_anomaly, top_percent=top_pct, metric=metric,
+            )
+            if metric_val >= iou_thr:
+                d.is_suspected_dust_or_scratch = True
+                d.dust_mask = dust_mask
+
+        return defects
+
     def _inspect_roi_patchcore(
         self,
         image: np.ndarray,
@@ -3167,6 +3423,7 @@ class CAPIInferencer:
         img_y: int,
         img_prefix: str,
         panel_polygon: Optional[np.ndarray] = None,
+        return_raw: bool = False,
     ) -> Tuple[List[EdgeDefect], Dict[str, Any]]:
         """用 PatchCore 做 AOI 座標邊緣 ROI 推論。
 
@@ -3174,10 +3431,16 @@ class CAPIInferencer:
         anomaly_map (panel 外歸零)。TileInfo 不標 is_*_edge，避免 edge_margin
         decay 在近 ROI 邊緣誤抑 AOI 中心的 defect。
 
+        Args:
+            return_raw: Phase 6 fusion 用——True 時跳過 defect 抽取/OK 原因判定，
+                只回 (空 list, stats with anomaly_map+roi+fg_mask)，供 fusion 後
+                外掛 boundary band mask + 自行 thresholding。預設 False (Phase 5 行為)。
+
         Returns:
             (defects, stats)
-            - defects: 若 NG 則 1 個 EdgeDefect，否則空 list
-            - stats: {"score", "threshold", "area", "min_area", "ok_reason"}
+            - defects: 若 NG 則 1 個 EdgeDefect，否則空 list；return_raw=True 永遠空
+            - stats: {"score", "threshold", "area", "min_area", "ok_reason",
+                     "roi", "fg_mask", "anomaly_map"}
         """
         tile_size = self.config.tile_size
         half = tile_size // 2
@@ -3264,6 +3527,11 @@ class CAPIInferencer:
             "fg_mask": fg_mask,
             "anomaly_map": anomaly_map,
         }
+
+        if return_raw:
+            # Phase 6 fusion 路徑：跳過 defect 抽取與 OK 原因，把原始 anomaly_map
+            # 交給 fusion 自行 mask + threshold + CC
+            return [], stats
 
         if is_ng:
             defect = EdgeDefect(
@@ -3798,6 +4066,47 @@ class CAPIInferencer:
                                 ry2 = min(img_h, img_y + roi_half)
 
                                 detected = False
+
+                                if inspector_mode == "fusion":
+                                    try:
+                                        fusion_defects, fusion_stats = self._inspect_roi_fusion(
+                                            aoi_image, img_x, img_y, img_prefix,
+                                            panel_polygon=result.panel_polygon,
+                                            omit_image=omit_image,
+                                            omit_overexposed=omit_overexposed,
+                                            otsu_bounds=result.otsu_bounds,
+                                        )
+                                        # Force defect center to AOI 座標確保 BOMB 比對一致
+                                        for d in fusion_defects:
+                                            d.center = (img_x, img_y)
+                                            result.edge_defects.append(d)
+                                            detected = True
+                                            print(f"  🔍 AOI Coord Fusion edge ({edef.defect_code}) "
+                                                  f"@ ({img_x},{img_y}): src={d.source_inspector} "
+                                                  f"score={d.patchcore_score:.3f} max_diff={d.max_diff} "
+                                                  f"d_edge={d.d_edge_px:.1f}px "
+                                                  f"is_dust={d.is_suspected_dust_or_scratch}")
+                                        if not detected:
+                                            ok_defect = EdgeDefect(
+                                                side="aoi_coord_ok",
+                                                area=0,
+                                                bbox=(rx1, ry1, rx2 - rx1, ry2 - ry1),
+                                                center=(img_x, img_y),
+                                                max_diff=0,
+                                                is_cv_ok=True,
+                                                inspector_mode="fusion",
+                                                fusion_fallback_reason=str(fusion_stats.get("fusion_fallback_reason", "")),
+                                            )
+                                            ok_defect.source_inspector = ""  # OK row 不指定 source
+                                            ok_defect.pc_anomaly_map = fusion_stats.get("pc_anomaly_map_interior")
+                                            ok_defect.pc_fg_mask = fusion_stats.get("interior_mask")
+                                            result.edge_defects.append(ok_defect)
+                                            fb = fusion_stats.get("fusion_fallback_reason", "")
+                                            print(f"  ✅ AOI Coord Fusion edge ({edef.defect_code}) @ ({img_x},{img_y}): OK"
+                                                  f"{' (fallback=' + fb + ')' if fb else ''}")
+                                    except Exception as e:
+                                        logger.warning(f"AOI Coord Fusion edge 失敗 ({edef.defect_code}): {e}")
+                                    continue
 
                                 if inspector_mode == "patchcore":
                                     try:

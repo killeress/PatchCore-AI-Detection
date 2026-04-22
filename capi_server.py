@@ -654,6 +654,12 @@ def results_to_db_data(
                     "patchcore_score": float(getattr(edge, 'patchcore_score', 0.0)),
                     "patchcore_threshold": float(getattr(edge, 'patchcore_threshold', 0.0)),
                     "patchcore_ok_reason": str(getattr(edge, 'patchcore_ok_reason', '')),
+                    # Phase 6 fusion 欄位
+                    "source_inspector": str(getattr(edge, 'source_inspector', '')),
+                    "d_edge_px": float(getattr(edge, 'd_edge_px', 0.0)),
+                    "fusion_fallback_reason": str(getattr(edge, 'fusion_fallback_reason', '')),
+                    # OMIT dust detail (Phase 6 UI 顯示用，沿用既有 EdgeDefect 欄位，不入 DB)
+                    "dust_detail_text": str(getattr(edge, 'dust_detail_text', '')),
                 })
 
         db_images.append(img_data)
