@@ -28,6 +28,52 @@ def clamp_median_kernel(kernel_size: int, max_dim: int) -> int:
     return max(3, mk)
 
 
+def compute_boundary_band_mask(
+    roi_shape: Tuple[int, int],
+    roi_origin: Tuple[int, int],
+    panel_polygon: Optional[list],
+    band_px: int,
+    fg_mask: np.ndarray,
+) -> np.ndarray:
+    """Phase 6 fusion — 計算 ROI 內 boundary band mask。
+
+    Band = 「ROI 內所有距 polygon 邊 ≤ band_px 的像素」且「在 fg_mask 內」。
+    語意：fusion 模式下 CV 管轄區（PC backbone 感受野受 panel 邊界污染處）。
+
+    Args:
+        roi_shape: (h, w) ROI 尺寸
+        roi_origin: (ox, oy) ROI 左上角在 panel 原圖的絕對座標
+        panel_polygon: panel 邊界多邊形頂點 list[(x, y)] (panel 座標系)；None → 回空 band
+        band_px: band 寬度 (px)；≤0 → 回空 band
+        fg_mask: ROI 大小的前景遮罩 (uint8, 0/255)
+
+    Returns:
+        ROI 大小 uint8 mask，0/255。
+        - 邊界情境（polygon=None / band_px≤0 / ROI 內無 polygon edge）→ 全 0
+    """
+    h, w = roi_shape[:2]
+    if panel_polygon is None or band_px <= 0:
+        return np.zeros((h, w), dtype=np.uint8)
+
+    roi_ox, roi_oy = roi_origin
+    poly_roi = np.array(
+        [(int(x - roi_ox), int(y - roi_oy)) for x, y in panel_polygon],
+        dtype=np.int32,
+    )
+
+    edge_img = np.zeros((h, w), dtype=np.uint8)
+    cv2.polylines(edge_img, [poly_roi], isClosed=True, color=255, thickness=1)
+
+    if not edge_img.any():
+        # ROI 完全在 panel 內或外、polygon 邊未進入 ROI → band 空
+        return np.zeros((h, w), dtype=np.uint8)
+
+    kernel_size = 2 * band_px + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    band_near_edge = cv2.dilate(edge_img, kernel)
+    return cv2.bitwise_and(band_near_edge, fg_mask)
+
+
 def inpaint_non_fg_region(blurred: np.ndarray, fg_mask: np.ndarray, inpaint_radius: int = 3) -> np.ndarray:
     """用 Navier-Stokes inpaint 填非前景區，取代 fg_median 常數填充，避免 medianBlur bg 估計在邊界內側被拉偏。"""
     if fg_mask is None:
@@ -96,10 +142,14 @@ class EdgeDefect:
     threshold_used: int = 0       # 使用的閾值 (用於 heatmap header 顯示)
     min_area_used: int = 0        # 使用的最小面積 (用於 heatmap header 顯示)
     min_max_diff_used: int = 0    # 使用的 min_max_diff 下限 (用於 CV OK 原因推斷，0=未啟用)
-    inspector_mode: str = "cv"    # "cv" | "patchcore"
+    inspector_mode: str = "cv"    # "cv" | "patchcore" | "fusion" (Phase 6 新增 fusion 為 ROI 層模式)
     patchcore_score: float = 0.0
     patchcore_threshold: float = 0.0
     patchcore_ok_reason: str = ""
+    # Phase 6 fusion 欄位 — 個別 defect 層 (與 inspector_mode 並存)
+    source_inspector: str = ""    # fusion 模式下："cv"=來自 band / "patchcore"=來自 interior；非 fusion 為 ""
+    d_edge_px: float = 0.0        # defect center 到 panel polygon 邊距離 (px)；fusion 模式才有值，其餘 0
+    fusion_fallback_reason: str = ""  # fusion 模式下退回 fallback 原因 (例 "polygon_unavailable")；正常 fusion 為 ""
     # 推論當下保留的 render artifacts (async heatmap 用，不入 DB)
     pc_roi: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     pc_fg_mask: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
@@ -163,7 +213,8 @@ class EdgeInspectionConfig:
     aoi_min_max_diff: int = 20 # component 內最大 diff 下限：低於此值視為低對比度紋理雜訊 (0=停用)
     aoi_line_min_length: int = 30 # 投影法偵測薄線最小長度 px (垂直/水平連續活化像素投影, 0=停用)
     aoi_line_max_width: int = 3 # 薄線最大寬度 px (超過視為一般 component, 由 CC path 處理)
-    aoi_edge_inspector: str = "cv"  # "cv" | "patchcore"
+    aoi_edge_inspector: str = "cv"  # "cv" | "patchcore" | "fusion"
+    aoi_edge_boundary_band_px: int = 40  # Phase 6 fusion 模式 CV 管轄帶寬度 (polygon 邊往 panel 內延伸 px); 0=等同 patchcore
     exclude_zones: List[EdgeExclusionZoneConfig] = field(default_factory=list)
     # 儲存完整的按產品分組排除區域 (key=resolution_code, value=list of zones)
     all_exclude_zones_by_product: Dict[str, List[dict]] = field(default_factory=dict)
@@ -260,7 +311,8 @@ class EdgeInspectionConfig:
         cfg.aoi_line_min_length = int(get("cv_edge_aoi_line_min_length", 30))
         cfg.aoi_line_max_width = int(get("cv_edge_aoi_line_max_width", 3))
         inspector_val = str(get("aoi_edge_inspector", "cv")).lower().strip()
-        cfg.aoi_edge_inspector = inspector_val if inspector_val in ("cv", "patchcore") else "cv"
+        cfg.aoi_edge_inspector = inspector_val if inspector_val in ("cv", "patchcore", "fusion") else "cv"
+        cfg.aoi_edge_boundary_band_px = int(get("aoi_edge_boundary_band_px", 40))
 
         # 排除區域 (支援按產品解析度碼分組的 dict 格式，或向後相容的 list 格式)
         zones_raw = get("cv_edge_exclude_zones", None)

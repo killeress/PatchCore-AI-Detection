@@ -280,6 +280,10 @@ class CAPIDatabase:
             add_column_if_not_exists("edge_defect_results", "patchcore_score", "REAL DEFAULT 0.0")
             add_column_if_not_exists("edge_defect_results", "patchcore_threshold", "REAL DEFAULT 0.0")
             add_column_if_not_exists("edge_defect_results", "patchcore_ok_reason", "TEXT DEFAULT ''")
+            # Phase 6 fusion 欄位
+            add_column_if_not_exists("edge_defect_results", "source_inspector", "TEXT DEFAULT ''")
+            add_column_if_not_exists("edge_defect_results", "d_edge_px", "REAL DEFAULT 0.0")
+            add_column_if_not_exists("edge_defect_results", "fusion_fallback_reason", "TEXT DEFAULT ''")
             add_column_if_not_exists("tile_results", "is_exclude_zone", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "is_aoi_coord", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "aoi_defect_code", "TEXT DEFAULT ''")
@@ -440,8 +444,9 @@ class CAPIDatabase:
                                     is_dust, is_bomb, bomb_code, is_cv_ok,
                                     threshold_used, min_area_used, min_max_diff_used,
                                     inspector_mode, patchcore_score,
-                                    patchcore_threshold, patchcore_ok_reason)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    patchcore_threshold, patchcore_ok_reason,
+                                    source_inspector, d_edge_px, fusion_fallback_reason)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  edge_data.get("side", ""),
                                  edge_data.get("area", 0),
@@ -463,7 +468,10 @@ class CAPIDatabase:
                                  edge_data.get("inspector_mode", "cv"),
                                  edge_data.get("patchcore_score", 0.0),
                                  edge_data.get("patchcore_threshold", 0.0),
-                                 edge_data.get("patchcore_ok_reason", ""))
+                                 edge_data.get("patchcore_ok_reason", ""),
+                                 edge_data.get("source_inspector", ""),
+                                 edge_data.get("d_edge_px", 0.0),
+                                 edge_data.get("fusion_fallback_reason", ""))
                             )
 
                 conn.commit()
@@ -601,8 +609,9 @@ class CAPIDatabase:
                                     is_dust, is_bomb, bomb_code, is_cv_ok,
                                     threshold_used, min_area_used, min_max_diff_used,
                                     inspector_mode, patchcore_score,
-                                    patchcore_threshold, patchcore_ok_reason)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    patchcore_threshold, patchcore_ok_reason,
+                                    source_inspector, d_edge_px, fusion_fallback_reason)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  edge_data.get("side", ""),
                                  edge_data.get("area", 0),
@@ -624,7 +633,10 @@ class CAPIDatabase:
                                  edge_data.get("inspector_mode", "cv"),
                                  edge_data.get("patchcore_score", 0.0),
                                  edge_data.get("patchcore_threshold", 0.0),
-                                 edge_data.get("patchcore_ok_reason", ""))
+                                 edge_data.get("patchcore_ok_reason", ""),
+                                 edge_data.get("source_inspector", ""),
+                                 edge_data.get("d_edge_px", 0.0),
+                                 edge_data.get("fusion_fallback_reason", ""))
                             )
 
                 conn.commit()
@@ -2202,7 +2214,8 @@ class CAPIDatabase:
             ("cv_edge_aoi_min_max_diff", 20, "int", "AOI 邊緣 component 最大 diff 下限 (低於此值視為低對比紋理雜訊, 建議 threshold×5~7, 0=停用)"),
             ("cv_edge_aoi_line_min_length", 30, "int", "AOI 邊緣薄線偵測最小長度 px (投影法, 旁路 min_max_diff/solidity 過濾以抓faint 線狀缺陷; 0=停用)"),
             ("cv_edge_aoi_line_max_width", 3, "int", "AOI 邊緣薄線最大寬度 px (超過視為一般 component, 由 CC path 處理)"),
-            ("aoi_edge_inspector", "cv", "string", "AOI 座標邊緣 inspector: 'cv' (傳統 CV) 或 'patchcore' (PatchCore 模型)"),
+            ("aoi_edge_inspector", "cv", "string", "AOI 座標邊緣 inspector: 'cv' (傳統 CV) | 'patchcore' (PatchCore 模型) | 'fusion' (Phase 6 空間分權，CV 管 band+PC 管 interior)"),
+            ("aoi_edge_boundary_band_px", 40, "int", "AOI 邊緣 fusion 模式 CV 管轄帶寬度 (polygon 邊往 panel 內延伸 px), 僅 inspector='fusion' 時生效, 0=等同 patchcore"),
             # B0F 亮點偵測設定
             ("bright_spot_threshold", 200, "int", "絕對亮度上限 (超過直接判定亮點)"),
             ("bright_spot_min_area", 5, "int", "亮點最小連通面積 (px)"),
