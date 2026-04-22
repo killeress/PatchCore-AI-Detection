@@ -285,6 +285,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_scratch_review_mark()
             elif path == "/api/scratch-review/unmark":
                 self._handle_scratch_review_unmark()
+            elif path == "/api/scratch-review/export":
+                self._handle_scratch_review_export()
             elif path == "/api/settings/update":
                 self._handle_api_settings_update()
             elif path == "/api/settings/reload":
@@ -1577,6 +1579,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             start_date = query.get('start_date', [''])[0] or None
             end_date = query.get('end_date', [''])[0] or None
             order_by = query.get('order', ['latest'])[0] or 'latest'
+            filter_state = query.get('filter', ['pending'])[0] or 'pending'
+            if filter_state not in self.db._SCRATCH_REVIEW_FILTER:
+                filter_state = 'pending'
             try:
                 limit = int(query.get('limit', ['24'])[0])
             except (ValueError, TypeError):
@@ -1592,6 +1597,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 order_by=order_by,
                 limit=limit,
                 offset=offset,
+                filter_state=filter_state,
             )
             base = self.heatmap_base_dir
             for it in items:
@@ -1599,10 +1605,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 it["heatmap_url"] = f"/heatmaps/{hm_relative(hm, base)}" if (hm and base and hm_relative(hm, base)) else ""
 
             counts = self.db.count_scratch_rescued_tiles(start_date=start_date, end_date=end_date)
+            total_all = counts["total"]
+            marked = counts["marked"]
+            filtered_total = {
+                "pending": max(0, total_all - marked),
+                "marked": marked,
+                "all": total_all,
+            }[filter_state]
             self._send_json({
                 "success": True,
-                "total": counts["total"],
-                "marked": counts["marked"],
+                "total": filtered_total,
+                "total_all": total_all,
+                "marked": marked,
+                "filter": filter_state,
                 "items": items,
                 "limit": limit,
                 "offset": offset,
@@ -1648,6 +1663,45 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"success": True, "deleted": deleted, "message": "已取消標記"})
         except Exception as e:
             logger.error(f"Scratch review unmark error: {e}", exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
+    def _handle_scratch_review_export(self):
+        """API: 匯出已標記誤救 tile 為 DINOv2 hard-negative 訓練樣本。
+
+        Body (JSON, 可選): {start_date, end_date}
+        """
+        try:
+            content_length = int(self.headers.get('Content-Length', 0) or 0)
+            data = {}
+            if content_length > 0:
+                body = self.rfile.read(content_length)
+                if body:
+                    try:
+                        data = json.loads(body.decode('utf-8'))
+                    except json.JSONDecodeError:
+                        data = {}
+
+            start_date = data.get("start_date") or None
+            end_date = data.get("end_date") or None
+
+            from capi_scratch_export import export_misrescue_samples, DEFAULT_BASE_DIR
+            server_inst = self._capi_server_instance
+            path_mapping = getattr(server_inst, "path_mapping", {}) if server_inst else {}
+            base_dir = self._export_base_dir("scratch_export", DEFAULT_BASE_DIR)
+            base_dir.mkdir(parents=True, exist_ok=True)
+
+            summary = export_misrescue_samples(
+                db=self.db,
+                base_dir=base_dir,
+                path_mapping=path_mapping,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            summary["success"] = True
+            summary["base_dir"] = str(base_dir)
+            self._send_json(summary)
+        except Exception as e:
+            logger.error(f"Scratch review export error: {e}", exc_info=True)
             self._send_json({"success": False, "error": str(e)})
 
     def _handle_ric_report_api(self, query: dict):
@@ -3487,14 +3541,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             state["cancel_event"].set()
         self._send_json({"ok": True})
 
-    def _dataset_export_base_dir(self) -> Path:
-        """讀 server_config.dataset_export.base_dir，回傳 resolve 後的 Path"""
+    def _export_base_dir(self, config_key: str, default: str) -> Path:
+        """讀 server_config.<config_key>.base_dir，fallback 至 default，回傳 resolve 後的 Path"""
         server_inst = self._capi_server_instance
         cfg = {}
         if server_inst:
-            cfg = server_inst.server_config.get("dataset_export", {})
-        base = cfg.get("base_dir") or "./datasets/over_review"
-        return Path(base).resolve()
+            cfg = server_inst.server_config.get(config_key, {})
+        return Path(cfg.get("base_dir") or default).resolve()
+
+    def _dataset_export_base_dir(self) -> Path:
+        return self._export_base_dir("dataset_export", "./datasets/over_review")
 
     _JOB_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_]+$")
 

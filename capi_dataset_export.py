@@ -194,20 +194,34 @@ def read_manifest(manifest_path: Path) -> Dict[str, Dict[str, str]]:
     return out
 
 
-def write_manifest(manifest_path: Path, rows: Dict[str, Dict[str, str]]) -> None:
+def resolve_source_path(image_path: str, path_mapping: Dict[str, str]) -> Path:
+    """套用 path_mapping 轉換，回傳 Path；無 mapping 或失敗時直接回原字串對應的 Path。"""
+    if path_mapping:
+        from capi_server import resolve_unc_path
+        try:
+            return Path(resolve_unc_path(image_path, path_mapping))
+        except Exception:
+            logger.exception("resolve_unc_path failed for %s", image_path)
+    return Path(image_path)
+
+
+def write_manifest(
+    manifest_path: Path,
+    rows: Dict[str, Dict[str, str]],
+    fieldnames: Optional[List[str]] = None,
+) -> None:
     """整批 rewrite manifest.csv（呼叫者須持有 job lock 保證單寫入者）"""
+    fields = fieldnames if fieldnames is not None else MANIFEST_FIELDS
     manifest_path = Path(manifest_path)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=MANIFEST_FIELDS, extrasaction="ignore")
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         for sid in sorted(rows.keys()):
-            row = rows[sid]
-            # 確保所有欄位都存在（補空值）
-            full = {k: str(row.get(k, "")) for k in MANIFEST_FIELDS}
+            full = {k: str(rows[sid].get(k, "")) for k in fields}
             writer.writerow(full)
-    tmp_path.replace(manifest_path)  # atomic on same filesystem
+    tmp_path.replace(manifest_path)
 
 
 def list_job_dirs(base_dir: Path) -> List[Path]:
@@ -736,8 +750,6 @@ class DatasetExporter:
           - skip_existing=True 時跳過歷史已匯出的 sample；False 時照常處理（會在新 job 產生副本）
           - 本次沒有任何 row 要寫 → 不建立 job 資料夾、output_dir 填 base_dir、total=0
         """
-        from capi_server import resolve_unc_path  # lazy import 避免 circular
-
         started_at = datetime.now()
         job_id = started_at.strftime("job_%Y%m%d_%H%M%S")
         job_folder_name = started_at.strftime("%Y%m%d_%H%M%S")
@@ -779,7 +791,7 @@ class DatasetExporter:
                 skipped_count["already_exists"] = skipped_count.get("already_exists", 0) + 1
                 continue
 
-            source_path = self._resolve_source_path(cand.image_path, resolve_unc_path)
+            source_path = self._resolve_source_path(cand.image_path)
             new_row = self._process_candidate(cand=cand, source_path=source_path, job_dir=job_dir)
             new_rows[cand.sample_id] = new_row
 
@@ -820,15 +832,8 @@ class DatasetExporter:
             diagnostics=diag,
         )
 
-    def _resolve_source_path(self, image_path: str, resolver) -> Path:
-        """套用 path_mapping 轉換，回傳 Path；若 path_mapping 為空或已是本地路徑，直接回原字串"""
-        if self.path_mapping:
-            try:
-                mapped = resolver(image_path, self.path_mapping)
-                return Path(mapped)
-            except Exception:
-                logger.exception("resolve_unc_path failed for %s", image_path)
-        return Path(image_path)
+    def _resolve_source_path(self, image_path: str) -> Path:
+        return resolve_source_path(image_path, self.path_mapping)
 
     def _process_candidate(
         self, cand: SampleCandidate, source_path: Path, job_dir: Path,

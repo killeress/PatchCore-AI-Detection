@@ -130,6 +130,80 @@
         color: white;
     }
 
+    .scratch-review-scope .sr-filter-toggle {
+        display: inline-flex;
+        background: #0f172a;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 2px;
+    }
+
+    .scratch-review-scope .sr-filter-toggle button {
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        padding: 6px 12px;
+        font-size: 0.82rem;
+        font-weight: 600;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .scratch-review-scope .sr-filter-toggle button.active.pending {
+        background: linear-gradient(135deg, #f59e0b, #fbbf24);
+        color: #0f172a;
+    }
+
+    .scratch-review-scope .sr-filter-toggle button.active.marked {
+        background: linear-gradient(135deg, #ef4444, #f87171);
+        color: white;
+    }
+
+    .scratch-review-scope .sr-filter-toggle button.active.all {
+        background: linear-gradient(135deg, var(--accent), #6366f1);
+        color: white;
+    }
+
+    .scratch-review-scope .sr-btn-export {
+        background: linear-gradient(135deg, #10b981, #22c55e);
+        border: none;
+        color: white;
+        padding: 7px 16px;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+    }
+
+    .scratch-review-scope .sr-btn-export:hover:not(:disabled) {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+    }
+
+    .scratch-review-scope .sr-btn-export:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+    }
+
+    .scratch-review-scope .sr-export-result {
+        background: #0f172a;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px 16px;
+        margin-bottom: 16px;
+        font-size: 0.85rem;
+        font-family: 'Fira Code', monospace;
+        color: var(--text);
+        display: none;
+    }
+
+    .scratch-review-scope .sr-export-result.success { border-color: #22c55e; }
+    .scratch-review-scope .sr-export-result.error { border-color: var(--ng); }
+    .scratch-review-scope .sr-export-result .title { font-weight: 700; margin-bottom: 6px; }
+    .scratch-review-scope .sr-export-result .kv { color: var(--text-muted); }
+    .scratch-review-scope .sr-export-result .path { color: #22d3ee; word-break: break-all; }
+
     .scratch-review-scope .sr-btn-apply {
         background: linear-gradient(135deg, var(--accent), #6366f1);
         border: none;
@@ -366,6 +440,13 @@
         <span style="color:var(--text-muted)">→</span>
         <input type="date" id="sr-end-date">
 
+        <label style="margin-left:18px;">狀態：</label>
+        <div class="sr-filter-toggle">
+            <button id="sr-filter-pending" class="active pending" onclick="srSetFilter('pending')">未審查</button>
+            <button id="sr-filter-marked" onclick="srSetFilter('marked')">已標記誤救</button>
+            <button id="sr-filter-all" onclick="srSetFilter('all')">全部</button>
+        </div>
+
         <label style="margin-left:18px;">排序：</label>
         <div class="sr-order-toggle">
             <button id="sr-order-latest" class="active" onclick="srSetOrder('latest')">最新在前</button>
@@ -381,7 +462,10 @@
         </select>
 
         <button class="sr-btn-apply" onclick="srApplyFilter()">套用 / 重新整理</button>
+        <button class="sr-btn-export" id="sr-btn-export" onclick="srExport()" style="display:none;">📦 匯出 DINOv2 負樣本</button>
     </div>
+
+    <div class="sr-export-result" id="sr-export-result"></div>
 
     <div class="sr-stats-grid">
         <div class="sr-stat-card total">
@@ -416,15 +500,30 @@
     // Scratch 救回審查：partial 可在 standalone 頁面或 tab 內使用
     // 由外部呼叫 window.srInit() 觸發初始化（避免 tab 未啟動時就 fetch）
     var srCurrentOrder = 'latest';
+    var srCurrentFilter = 'pending';
     var srCurrentPage = 1;
     var srPageSize = 24;
     var srTotalCount = 0;
+    var srTotalAll = 0;
     var _srInited = false;
 
     function srSetOrder(o) {
         srCurrentOrder = o;
         document.getElementById('sr-order-latest').classList.toggle('active', o === 'latest');
         document.getElementById('sr-order-score').classList.toggle('active', o === 'score_asc');
+        srCurrentPage = 1;
+        srFetchAndRender();
+    }
+
+    function srSetFilter(f) {
+        srCurrentFilter = f;
+        ['pending', 'marked', 'all'].forEach(k => {
+            const btn = document.getElementById('sr-filter-' + k);
+            btn.classList.remove('active', 'pending', 'marked', 'all');
+            if (k === f) btn.classList.add('active', k);
+        });
+        document.getElementById('sr-btn-export').style.display = (f === 'marked') ? '' : 'none';
+        document.getElementById('sr-export-result').style.display = 'none';
         srCurrentPage = 1;
         srFetchAndRender();
     }
@@ -465,6 +564,7 @@
 
         const params = new URLSearchParams({
             order: srCurrentOrder,
+            filter: srCurrentFilter,
             limit: srPageSize,
             offset: offset,
         });
@@ -482,11 +582,14 @@
                 return;
             }
             srTotalCount = data.total || 0;
-            document.getElementById('sr-total').textContent = srTotalCount.toLocaleString();
+            srTotalAll = data.total_all || 0;
+            document.getElementById('sr-total').textContent = srTotalAll.toLocaleString();
             document.getElementById('sr-marked').textContent = (data.marked || 0).toLocaleString();
-            const pct = srTotalCount > 0 ? ((data.marked / srTotalCount) * 100).toFixed(1) : 0;
+            const pct = srTotalAll > 0 ? ((data.marked / srTotalAll) * 100).toFixed(1) : 0;
             document.getElementById('sr-marked-pct').textContent = `${pct}% of 總數`;
-            document.getElementById('sr-order-info').textContent = srCurrentOrder === 'latest' ? '最新在前' : '分數低優先';
+            const filterLabel = { pending: '未審查', marked: '已標記誤救', all: '全部' }[srCurrentFilter];
+            const orderLabel = srCurrentOrder === 'latest' ? '最新在前' : '分數低優先';
+            document.getElementById('sr-order-info').textContent = `${filterLabel} · ${orderLabel}`;
 
             const from = srTotalCount === 0 ? 0 : offset + 1;
             const to = Math.min(offset + (data.items || []).length, srTotalCount);
@@ -502,7 +605,12 @@
     function srRenderGrid(items) {
         const gridWrap = document.getElementById('sr-grid-wrap');
         if (items.length === 0) {
-            gridWrap.innerHTML = '<div class="sr-empty-state"><div class="icon">🔍</div>此範圍內沒有被救回的 tile</div>';
+            const emptyMsg = {
+                pending: '太好了，目前沒有未審查的救回 tile',
+                marked: '此範圍內沒有已標記為誤救的 tile',
+                all: '此範圍內沒有被救回的 tile',
+            }[srCurrentFilter] || '此範圍內沒有被救回的 tile';
+            gridWrap.innerHTML = `<div class="sr-empty-state"><div class="icon">🔍</div>${emptyMsg}</div>`;
             return;
         }
         const grid = document.createElement('div');
@@ -582,16 +690,20 @@
                 btn.textContent = originalText;
                 return;
             }
-            if (isMarked) {
+            srUpdateMarkedCount(isMarked ? -1 : +1);
+            const leavesView =
+                (isMarked && srCurrentFilter === 'marked') ||
+                (!isMarked && srCurrentFilter === 'pending');
+            if (leavesView) {
+                srRemoveCardAndMaybeRefetch(card);
+            } else if (isMarked) {
                 card.classList.remove('marked');
                 btn.classList.remove('active');
                 btn.textContent = '🚩 誤救';
-                srUpdateMarkedCount(-1);
             } else {
                 card.classList.add('marked');
                 btn.classList.add('active');
                 btn.textContent = '✓ 已標記誤救';
-                srUpdateMarkedCount(+1);
             }
         } catch (e) {
             alert('網路錯誤：' + e.message);
@@ -601,12 +713,67 @@
         }
     }
 
+    function srRemoveCardAndMaybeRefetch(card) {
+        const grid = card.parentElement;
+        card.remove();
+        srTotalCount = Math.max(0, srTotalCount - 1);
+        if (grid && grid.children.length === 0) srFetchAndRender();
+    }
+
+    async function srExport() {
+        const btn = document.getElementById('sr-btn-export');
+        const resultBox = document.getElementById('sr-export-result');
+        const startDate = document.getElementById('sr-start-date').value;
+        const endDate = document.getElementById('sr-end-date').value;
+
+        btn.disabled = true;
+        const origText = btn.textContent;
+        btn.textContent = '匯出中…';
+        resultBox.style.display = 'none';
+
+        try {
+            const body = {};
+            if (startDate) body.start_date = startDate;
+            if (endDate) body.end_date = endDate;
+            const res = await fetch('/api/scratch-review/export', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (!data.success) {
+                resultBox.className = 'sr-export-result error';
+                resultBox.style.display = '';
+                resultBox.innerHTML = `<div class="title">❌ 匯出失敗</div><div class="kv">${data.error || '未知錯誤'}</div>`;
+                return;
+            }
+            resultBox.className = 'sr-export-result success';
+            resultBox.style.display = '';
+            const jobLine = data.job_dir
+                ? `<div class="kv">job 目錄：<span class="path">${data.job_dir}</span></div>`
+                : `<div class="kv">（無新增樣本，未建立新 job 目錄）</div>`;
+            resultBox.innerHTML = `
+                <div class="title">✅ 匯出完成</div>
+                <div class="kv">符合範圍已標記：${data.total_marked}　｜　新增匯出：${data.exported}　｜　已去重（先前 job 已含）：${data.skipped_dup}　｜　原圖不存在：${data.missing_source}　｜　超出邊界：${data.out_of_bounds}</div>
+                ${jobLine}
+                <div class="kv">base_dir：<span class="path">${data.base_dir}</span></div>
+            `;
+        } catch (e) {
+            resultBox.className = 'sr-export-result error';
+            resultBox.style.display = '';
+            resultBox.innerHTML = `<div class="title">❌ 網路錯誤</div><div class="kv">${e.message}</div>`;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = origText;
+        }
+    }
+
     function srUpdateMarkedCount(delta) {
         const el = document.getElementById('sr-marked');
         const current = parseInt(el.textContent.replace(/,/g, ''), 10) || 0;
         const next = Math.max(0, current + delta);
         el.textContent = next.toLocaleString();
-        const pct = srTotalCount > 0 ? ((next / srTotalCount) * 100).toFixed(1) : 0;
+        const pct = srTotalAll > 0 ? ((next / srTotalAll) * 100).toFixed(1) : 0;
         document.getElementById('sr-marked-pct').textContent = `${pct}% of 總數`;
     }
 

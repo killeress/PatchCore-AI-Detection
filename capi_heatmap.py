@@ -711,9 +711,29 @@ class HeatmapManager:
         panel_orig = cv2.resize(panel_orig, (panel_w, panel_h))
         panel_highlight = cv2.resize(panel_highlight, (panel_w, panel_h))
 
-        # CV OK 時在 Defect Highlight 角落加標：紅色是「候選但被形狀過濾」，非真缺陷
+        # 取得判定參數 + 推算 CV OK 原因（corner 標記與下方 header verdict 共用，確保同步）
+        threshold_used = getattr(edge_defect, 'threshold_used', 0)
+        min_area_used = getattr(edge_defect, 'min_area_used', 0)
+        min_max_diff_used = getattr(edge_defect, 'min_max_diff_used', 0)
+        cv_ok_reason = ""
         if is_cv_ok:
-            corner_text = "[!] SHAPE FILTERED"
+            # 推算 OK 原因：由淺入深依序排除
+            #   1. diff 未達 threshold → Diff<Thr
+            #   2. area 未達 min_area → Area<Min
+            #   3. diff 達 threshold 但 < min_max_diff (低對比紋理雜訊) → Diff<MinMaxDiff
+            #   4. 以上皆不成立 → 必是 solidity/morph_open 過濾 → Shape filtered
+            if threshold_used > 0 and max_diff < threshold_used:
+                cv_ok_reason = "Diff<Thr"
+            elif min_area_used > 0 and area < min_area_used:
+                cv_ok_reason = "Area<Min"
+            elif min_max_diff_used > 0 and max_diff < min_max_diff_used:
+                cv_ok_reason = f"Diff<MinMaxDiff({min_max_diff_used})"
+            elif threshold_used > 0 or min_area_used > 0 or min_max_diff_used > 0:
+                cv_ok_reason = "Shape filtered"
+
+        # CV OK 時在 Defect Highlight 角落加標：表明紅色像素是被過濾的候選，非真缺陷
+        if is_cv_ok:
+            corner_text = f"[!] {cv_ok_reason}" if cv_ok_reason else "[!] CV OK"
             corner_font = cv2.FONT_HERSHEY_SIMPLEX
             corner_scale = 0.5
             corner_thickness = 1
@@ -882,27 +902,8 @@ class HeatmapManager:
         header_h = 50
         header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
 
-        # 取得判定參數 (用於 header 顯示)
-        threshold_used = getattr(edge_defect, 'threshold_used', 0)
-        min_area_used = getattr(edge_defect, 'min_area_used', 0)
-        min_max_diff_used = getattr(edge_defect, 'min_max_diff_used', 0)
-
+        # threshold_used / min_area_used / min_max_diff_used / cv_ok_reason 已於 Panel 2 前計算
         if is_cv_ok:
-            # 推算 OK 原因：由淺入深依序排除
-            #   1. diff 未達 threshold → Diff<Thr
-            #   2. area 未達 min_area → Area<Min
-            #   3. diff 達 threshold 但 < min_max_diff (低對比紋理雜訊) → Diff<MinMaxDiff
-            #   4. 以上皆不成立 → 必是 solidity/morph_open 過濾 → Shape filtered
-            if threshold_used > 0 and max_diff < threshold_used:
-                cv_ok_reason = "Diff<Thr"
-            elif min_area_used > 0 and area < min_area_used:
-                cv_ok_reason = "Area<Min"
-            elif min_max_diff_used > 0 and max_diff < min_max_diff_used:
-                cv_ok_reason = f"Diff<MinMaxDiff({min_max_diff_used})"
-            elif threshold_used > 0 or min_area_used > 0 or min_max_diff_used > 0:
-                cv_ok_reason = "Shape filtered"
-            else:
-                cv_ok_reason = ""
             verdict = f"CV OK ({cv_ok_reason})" if cv_ok_reason else "CV OK"
             verdict_color = (0, 255, 0)
         elif is_bomb:
