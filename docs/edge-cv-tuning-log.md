@@ -63,6 +63,34 @@ capi_server.py:772  →  EdgeInspectionConfig.from_db_params(db_dict)
 - **Code**：`_detect_thin_lines()` + `_group_true_runs()` in `capi_edge_cv.py`
 - **驗證**：模擬測試：垂直虛線 (30 點, 間距 5) 被抓；1×12 雜訊條紋 (< 30) 被擋；低對比紋理塊 (max_diff=6) 被 min_max_diff 擋。三路各司其職。
 
+### Phase 7.1c — PC ROI shift 寬帶與 band_mask 脫鉤 + AOI marker 改空心圓 (2026-04-23)
+
+- **動機**：現場 AOI 距邊 ~70 px 的片頻繁觸發 `shift_insufficient` fallback：band_px=40
+  同時服務 Phase 6 band_mask 與 Phase 7 shift verify，導致 needed shift = 40+256-d_edge 常
+  超過 max_shift=192；且置中 ROI 邊緣 discontinuity 上限仍受 40 px 保護意義有限。
+- **設計決策**：新增 config `aoi_edge_pc_shift_band_px`（預設 0），把 PC ROI shift 寬帶
+  與 band_mask 寬帶解耦：
+  - `0`：只要 shift 後 polygon 不再「真的侵入」PC ROI 即放行 → 最大利用 max_shift
+  - `>0`：要求 polygon 邊距 ROI 至少 buffer（舊行為；測試 fallback 路徑時用 40 重現）
+  - `aoi_edge_boundary_band_px=40` 仍獨立服務 Phase 6 band_mask 與 CV defect 帶內過濾
+- **副作用提醒**：shift 寬帶=0 時 shifted ROI 可能緊貼 polygon 邊，backbone receptive field
+  邊緣 feature 會「看到」panel 邊 discontinuity；正在觀察是否產生新假陽。若失控改回 40。
+- **UI 對齊**：`capi_heatmap.py` Original ROI (masked) 的 AOI 座標標記從 30×30 實心十字
+  (`cv2.MARKER_CROSS`) 改成空心圓（r=15, t=2, LINE_AA）—— 現場反映十字易蓋住中心 defect。
+- **Code**：
+  - `capi_edge_cv.py::EdgeInspectionConfig` 新欄位 + `from_db_params` 取值
+  - `capi_inference.py::_inspect_roi_fusion` 改讀 `aoi_edge_pc_shift_band_px`
+  - `capi_database.py` `params_def` 新增 DB 欄位
+  - `capi_web.py` hot-reload triggers 加新 param
+  - `capi_heatmap.py` AOI marker 改 circle
+- **測試**：
+  - 整合測試 `test_near_left_edge_shifts_pc_roi_right` / `test_shifted_pc_defect_fields_populated`
+    斷言值由 shift=192 → 152、origin x 由 40 → 0（band_px=0 新行為）
+  - Fallback 整合測試 (`test_fallback_concave_polygon_l_shape` / `test_fallback_shift_insufficient_straight_edge`)
+    在 test body 覆寫 `aoi_edge_pc_shift_band_px=40` 以重現 fallback
+  - `test_aoi_edge_fusion.py` fixture 鎖 shift band=40，維持 Phase 6 band_mask 測試語意
+  - 全套迴歸 177 綠 / 2 skipped
+
 ### Phase 7.1b — PC ROI fallback 原因精細分類 (2026-04-23)
 
 - **動機**：現場觀察推論 log / record_detail 只看到 `concave_polygon` 一種 fallback

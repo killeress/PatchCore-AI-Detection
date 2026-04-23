@@ -269,6 +269,7 @@ class TestInspectRoiFusionShifted:
         inf.edge_inspector.config.aoi_edge_boundary_band_px = 40
         inf.edge_inspector.config.aoi_edge_pc_roi_inward_shift_enabled = True
         inf.edge_inspector.config.aoi_edge_aoi_margin_px = 64
+        inf.edge_inspector.config.aoi_edge_pc_shift_band_px = 0
         inf.check_dust_or_scratch_feature = lambda img, **kw: (False, None, 0.0, "")
         # CV 預設回空 defect list
         inf.edge_inspector.inspect_roi = lambda roi, **kw: (
@@ -299,7 +300,9 @@ class TestInspectRoiFusionShifted:
         assert captured["tile_y"] == 744
 
     def test_near_left_edge_shifts_pc_roi_right(self, fusion_inferencer):
-        """AOI (104, 1000) 近左邊 → shift 192 → PC ROI 左邊 x=40 剛好 = band_px，verify 通過"""
+        """AOI (104, 1000) 近左邊；pc_shift_band_px=0 → needed=152 < max_shift=192 →
+        shift 152 → PC ROI 左邊 x=0 貼到 polygon 左邊，verify (dist<0) 通過。
+        """
         inf = fusion_inferencer
         img, poly = self._image_and_polygon()
         captured = {}
@@ -310,8 +313,8 @@ class TestInspectRoiFusionShifted:
             panel_polygon=poly, omit_image=None, omit_overexposed=False,
         )
 
-        # shifted origin x = 104 + 192 - 256 = 40
-        assert captured["tile_x"] == 40, f"expected 40 (shifted), got {captured.get('tile_x')}"
+        # shifted origin x = 104 + 152 - 256 = 0
+        assert captured["tile_x"] == 0, f"expected 0 (shifted), got {captured.get('tile_x')}"
         assert captured["tile_y"] == 744
 
     def test_shifted_pc_defect_fields_populated(self, fusion_inferencer):
@@ -334,11 +337,11 @@ class TestInspectRoiFusionShifted:
         d = pc_def[0]
         # 中心強制為 AOI 座標
         assert d.center == (104, 1000), f"center should be AOI coord, got {d.center}"
-        # shift_dx = 192 (向右), dy = 0
-        assert d.pc_roi_shift_dx == 192, f"shift_dx expected 192, got {d.pc_roi_shift_dx}"
+        # pc_shift_band_px=0 → needed=152, shift_dx=152 (向右), dy=0
+        assert d.pc_roi_shift_dx == 152, f"shift_dx expected 152, got {d.pc_roi_shift_dx}"
         assert d.pc_roi_shift_dy == 0
-        # pc_roi_origin = (104+192-256, 1000-256) = (40, 744)
-        assert d.pc_roi_origin_x == 40
+        # pc_roi_origin = (104+152-256, 1000-256) = (0, 744)
+        assert d.pc_roi_origin_x == 0
         assert d.pc_roi_origin_y == 744
         assert d.pc_roi_fallback_reason == ""
 
@@ -361,9 +364,11 @@ class TestInspectRoiFusionShifted:
 
     def test_fallback_concave_polygon_l_shape(self, fusion_inferencer):
         """L 形 polygon：shift 沿內凹口 inward normal → 另一條邊從另一側侵入
-        → classify 回 concave_polygon（兩條邊都在 band_px 內，不只是近邊沒清掉）
+        → classify 回 concave_polygon（兩條邊都在 band_px 內，不只是近邊沒清掉）。
+        需將 pc_shift_band_px 覆寫為 40 以重現 fallback 路徑（預設 0 會讓 verify 放行）。
         """
         inf = fusion_inferencer
+        inf.edge_inspector.config.aoi_edge_pc_shift_band_px = 40
         l_shape = np.array([
             [0, 0], [2000, 0], [2000, 2000],
             [1000, 2000], [1000, 1000], [0, 1000],
@@ -391,16 +396,18 @@ class TestInspectRoiFusionShifted:
 
     def test_fallback_shift_insufficient_straight_edge(self, fusion_inferencer):
         """AOI 距邊極近（d_edge=20），max_shift=192 清不掉 polygon edge →
-        classify 回 shift_insufficient（不是 concave — polygon 是普通四邊形）
+        classify 回 shift_insufficient（不是 concave — polygon 是普通四邊形）。
+        需將 pc_shift_band_px 覆寫為 40 以重現 fallback 路徑（預設 0 會讓 verify 放行）。
         """
         inf = fusion_inferencer
+        inf.edge_inspector.config.aoi_edge_pc_shift_band_px = 40
         img, poly = self._image_and_polygon()
         captured = {}
         inf.predict_tile = _capturing_predict_tile(
             captured, score=2.0, hot_region=(240, 280, 240, 280), hot_value=2.0
         )
 
-        # AOI (1000, 20)：距 top edge 20 px；needed shift = 40 - (20-256) = 276 > max 192
+        # AOI (1000, 20)：距 top edge 20 px；needed shift = 40 + 256 - 20 = 276 > max 192
         # 即使 shift 192 下去，PC ROI 上緣仍距 polygon top 不到 40 → verify fail
         defects, stats = inf._inspect_roi_fusion(
             img, img_x=1000, img_y=20, img_prefix="W0F",
@@ -445,6 +452,7 @@ class TestFusionCollapseToRepresentative:
         inf.edge_inspector.config.aoi_edge_inspector = "fusion"
         inf.edge_inspector.config.aoi_edge_boundary_band_px = 40
         inf.edge_inspector.config.aoi_edge_pc_roi_inward_shift_enabled = True
+        inf.edge_inspector.config.aoi_edge_pc_shift_band_px = 0
         inf.check_dust_or_scratch_feature = lambda img, **kw: (False, None, 0.0, "")
         return inf
 

@@ -520,6 +520,7 @@ class EdgeInspectionConfig:
     aoi_edge_boundary_band_px: int = 40  # Phase 6 fusion 模式 CV 管轄帶寬度 (polygon 邊往 panel 內延伸 px); 0=等同 patchcore
     aoi_edge_pc_roi_inward_shift_enabled: bool = True  # Phase 7: fusion 模式 PC ROI 自動內移到距 polygon ≥ band_px
     aoi_edge_aoi_margin_px: int = 64  # Phase 7: PC ROI 內移時 AOI 座標距 PC ROI 邊最小 margin (px)
+    aoi_edge_pc_shift_band_px: int = 0  # Phase 7.1c: PC ROI shift target / verify 寬帶 (0=最大程度利用 shift, >0=留 buffer 避開 polygon 邊 discontinuity，清不到時走 fallback)
     exclude_zones: List[EdgeExclusionZoneConfig] = field(default_factory=list)
     # 儲存完整的按產品分組排除區域 (key=resolution_code, value=list of zones)
     all_exclude_zones_by_product: Dict[str, List[dict]] = field(default_factory=dict)
@@ -620,6 +621,7 @@ class EdgeInspectionConfig:
         cfg.aoi_edge_boundary_band_px = int(get("aoi_edge_boundary_band_px", 40))
         cfg.aoi_edge_pc_roi_inward_shift_enabled = bool(get("aoi_edge_pc_roi_inward_shift_enabled", True))
         cfg.aoi_edge_aoi_margin_px = int(get("aoi_edge_aoi_margin_px", 64))
+        cfg.aoi_edge_pc_shift_band_px = int(get("aoi_edge_pc_shift_band_px", 0))
 
         # 排除區域 (支援按產品解析度碼分組的 dict 格式，或向後相容的 list 格式)
         zones_raw = get("cv_edge_exclude_zones", None)

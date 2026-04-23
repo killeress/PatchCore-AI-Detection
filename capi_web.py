@@ -3307,6 +3307,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     or param_name == "aoi_edge_boundary_band_px"
                     or param_name == "aoi_edge_pc_roi_inward_shift_enabled"
                     or param_name == "aoi_edge_aoi_margin_px"
+                    or param_name == "aoi_edge_pc_shift_band_px"
                 )
                 if edge_triggers and hasattr(self, 'inferencer') and self.inferencer:
                     try:

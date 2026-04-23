@@ -1011,8 +1011,8 @@ class HeatmapManager:
         roi_bgr = ensure_bgr(roi)
         panel_orig = render_pc_masked_roi(roi_bgr, fg_mask)
         h_roi, w_roi = panel_orig.shape[:2]
-        cv2.drawMarker(panel_orig, (w_roi // 2, h_roi // 2), (0, 255, 255),
-                       markerType=cv2.MARKER_CROSS, markerSize=30, thickness=2)
+        cv2.circle(panel_orig, (w_roi // 2, h_roi // 2), 15, (0, 255, 255),
+                   thickness=2, lineType=cv2.LINE_AA)
 
         panel_heatmap = render_pc_overlay(roi_bgr, fg_mask, anomaly_map)
 

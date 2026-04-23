@@ -3299,11 +3299,17 @@ class CAPIInferencer:
             self.edge_inspector.config, "aoi_edge_pc_roi_inward_shift_enabled", True))
         aoi_margin_px = int(getattr(
             self.edge_inspector.config, "aoi_edge_aoi_margin_px", 64))
+        # Phase 7.1c — PC ROI shift 寬帶與 Phase 6 band_mask 脫鉤（config: aoi_edge_pc_shift_band_px）。
+        # 0 = 只要 shift 後 polygon 不再侵入 ROI 即視為可用，最大程度利用 max_shift；
+        # >0 = 要求 shift 後 ROI 邊距 polygon ≥ band_px buffer，清不到時 fallback。
+        # band_mask（line 3269）仍獨立用 band_px=40，保留置中 fallback 的邊緣保護。
+        pc_shift_band_px = int(getattr(
+            self.edge_inspector.config, "aoi_edge_pc_shift_band_px", 0))
 
         pc_roi_origin_candidate, shift_vec, _d_edge_signed = compute_pc_roi_offset(
             aoi_xy=(img_x, img_y),
             polygon=polygon_int,
-            band_px=band_px,
+            band_px=pc_shift_band_px,
             aoi_margin_px=aoi_margin_px,
             roi_size=tile_size,
         )
@@ -3319,7 +3325,7 @@ class CAPIInferencer:
                 pc_roi_origin=pc_roi_origin_candidate,
                 roi_size=tile_size,
                 polygon=polygon_int,
-                band_px=band_px,
+                band_px=pc_shift_band_px,
             ):
                 use_shifted = True
             else:
@@ -3329,7 +3335,7 @@ class CAPIInferencer:
                     pc_roi_origin=pc_roi_origin_candidate,
                     roi_size=tile_size,
                     polygon=polygon_int,
-                    band_px=band_px,
+                    band_px=pc_shift_band_px,
                 )
                 shift_vec = (0, 0)
 

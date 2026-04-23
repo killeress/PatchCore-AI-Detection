@@ -2238,6 +2238,7 @@ class CAPIDatabase:
             ("aoi_edge_boundary_band_px", 40, "int", "AOI 邊緣 fusion 模式 CV 管轄帶寬度 (polygon 邊往 panel 內延伸 px), 僅 inspector='fusion' 時生效, 0=等同 patchcore"),
             ("aoi_edge_pc_roi_inward_shift_enabled", True, "bool", "Phase 7: fusion 模式下 PC ROI 自動內移到距 polygon ≥ band_px 處，讓 PC feature map 完全脫離 panel 邊 discontinuity，進一步抑制近邊過檢；凹角 polygon 會 fallback"),
             ("aoi_edge_aoi_margin_px", 64, "int", "Phase 7: PC ROI 內移時 AOI 座標距 PC ROI 邊最小 margin (px)，避免 defect 落在 PC ROI 角落造成 feature 不穩"),
+            ("aoi_edge_pc_shift_band_px", 0, "int", "Phase 7.1c: PC ROI shift 寬帶 (0=只要 shift 後 polygon 不侵入 ROI 即通過, >0=要求 polygon 邊距 ROI ≥ 此值 buffer, 清不到走 fallback); 與 aoi_edge_boundary_band_px 脫鉤"),
             # B0F 亮點偵測設定
             ("bright_spot_threshold", 200, "int", "絕對亮度上限 (超過直接判定亮點)"),
             ("bright_spot_min_area", 5, "int", "亮點最小連通面積 (px)"),
