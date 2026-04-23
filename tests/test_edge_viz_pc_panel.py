@@ -267,3 +267,69 @@ class TestPCGroupPanel3DustOverlay:
         # is_dust=False 不應 overlay，Panel 3 應為純 OMIT 灰
         assert abs(int(px[0]) - int(px[2])) < 20, \
             f"is_dust=False 時 Panel 3 應為灰 (B≈R)，實為 B={px[0]} R={px[2]}"
+
+
+class TestPCHeaderShiftInfo:
+    """PC header 加 shift / fallback info 欄位"""
+
+    def test_header_contains_shift_info(self, tmp_path, monkeypatch):
+        """有 shift 時 header 文字應含 'PC dx=' 字串"""
+        captured = []
+        _real_put = cv2.putText
+        def _capture(img, text, *args, **kwargs):
+            captured.append(text)
+            return _real_put(img, text, *args, **kwargs)
+        monkeypatch.setattr("capi_heatmap.cv2.putText", _capture)
+
+        ed = _make_edge_defect(center=(1000, 500), shift=(0, -192))
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        saver._save_patchcore_edge_image(
+            save_dir=tmp_path, image_name="h1", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=None,
+        )
+        all_text = " ".join(captured)
+        assert "PC dx=" in all_text or "dy=-192" in all_text, \
+            f"header 應含 PC dx/dy 資訊，實際 putText 字串: {captured}"
+
+    def test_header_contains_fallback_reason(self, tmp_path, monkeypatch):
+        """fallback=shift_insufficient 時 header 應含 'PC-FB=shift_insufficient'"""
+        captured = []
+        _real_put = cv2.putText
+        def _capture(img, text, *args, **kwargs):
+            captured.append(text)
+            return _real_put(img, text, *args, **kwargs)
+        monkeypatch.setattr("capi_heatmap.cv2.putText", _capture)
+
+        ed = _make_edge_defect(center=(1000, 500), shift=(0, 0),
+                                fallback_reason="shift_insufficient")
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        saver._save_patchcore_edge_image(
+            save_dir=tmp_path, image_name="h2", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=None,
+        )
+        all_text = " ".join(captured)
+        assert "PC-FB=shift_insufficient" in all_text, \
+            f"header 應含 PC-FB=shift_insufficient，實際 putText: {captured}"
+
+    def test_header_no_shift_info_when_none(self, tmp_path, monkeypatch):
+        """無 shift 且無 fallback 時 header 不含 PC dx= 或 PC-FB= 字串"""
+        captured = []
+        _real_put = cv2.putText
+        def _capture(img, text, *args, **kwargs):
+            captured.append(text)
+            return _real_put(img, text, *args, **kwargs)
+        monkeypatch.setattr("capi_heatmap.cv2.putText", _capture)
+
+        ed = _make_edge_defect(center=(1000, 500), shift=(0, 0),
+                                fallback_reason="")
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        saver._save_patchcore_edge_image(
+            save_dir=tmp_path, image_name="h3", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=None,
+        )
+        all_text = " ".join(captured)
+        assert "PC dx=" not in all_text and "PC-FB=" not in all_text, \
+            f"無 shift/fallback 時 header 不應出現 dx/FB，實 putText: {captured}"
