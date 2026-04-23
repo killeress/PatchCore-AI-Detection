@@ -1223,11 +1223,10 @@ class HeatmapManager:
             metric_label = "COV" if dust_metric == "coverage" else "IOU"
             cov_text = f" | {metric_label}={cov_val:.2f}"
 
-        header_h = 50
-        header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
-        info_part = f"CV Edge: {side} | MaxDiff:{max_diff} | Area:{area}px{cov_text} | "
-        self._draw_split_color_header(header, info_part, verdict, v_color,
-                                       y=30, font_scale=0.65)
+        header_text_info = f"CV Edge: {side} | MaxDiff:{max_diff} | Area:{area}px{cov_text} | "
+        header = self._render_edge_header(
+            width=comp_w, info=header_text_info, verdict=verdict, verdict_color=v_color,
+        )
 
         label_h = 40
         label_bar = np.zeros((label_h, comp_w, 3), dtype=np.uint8)
@@ -1404,10 +1403,7 @@ class HeatmapManager:
         composite = np.hstack(spaced)
         comp_h, comp_w = composite.shape[:2]
 
-        # Header
-        header_h = 50
-        header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
-
+        # Verdict 分類
         if is_bomb:
             verdict = f"BOMB: {bomb_code} (Filtered as OK)"
             verdict_color = (255, 0, 255)
@@ -1421,27 +1417,27 @@ class HeatmapManager:
 
         score_cmp = ">=" if score >= threshold else "<"
         info_part = f"PC Edge [v1]: {side} | Score:{score:.3f}{score_cmp}Thr:{threshold:.3f} | Area:{area}px | "
-        self._draw_split_color_header(header, info_part, verdict, verdict_color, y=30, font_scale=0.65)
 
-        # Phase 7.2 A4: Header 右側加 shift / fallback 資訊
+        # Phase 7.2-C2: extra_right 組 shift / fallback 資訊
         shift_dx = int(getattr(edge_defect, 'pc_roi_shift_dx', 0))
         shift_dy = int(getattr(edge_defect, 'pc_roi_shift_dy', 0))
         pc_fb = str(getattr(edge_defect, 'pc_roi_fallback_reason', ''))
-        extra_text = ""
+        extra = ""
         if shift_dx or shift_dy:
-            extra_text = f"PC dx={shift_dx:+d} dy={shift_dy:+d}"
+            extra = f"PC dx={shift_dx:+d} dy={shift_dy:+d}"
         elif pc_fb == "shift_insufficient":
-            extra_text = "PC-FB=shift_insufficient(offset short)"
+            extra = "PC-FB=shift_insufficient(offset short)"
         elif pc_fb == "concave_polygon":
-            extra_text = "PC-FB=concave_polygon(concave)"
+            extra = "PC-FB=concave_polygon(concave)"
         elif pc_fb == "shift_disabled":
-            extra_text = "PC-FB=shift_disabled"
+            extra = "PC-FB=shift_disabled"
         elif pc_fb:
-            extra_text = f"PC-FB={pc_fb}"
-        if extra_text:
-            (et_w, _), _ = cv2.getTextSize(extra_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.putText(header, extra_text, (comp_w - et_w - 10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 255), 1)
+            extra = f"PC-FB={pc_fb}"
+
+        header = self._render_edge_header(
+            width=comp_w, info=info_part, verdict=verdict, verdict_color=verdict_color,
+            extra_right=extra,
+        )
 
         # Label bar
         label_h = 40
