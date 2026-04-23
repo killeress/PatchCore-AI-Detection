@@ -82,3 +82,50 @@ class TestCVFusionDispatch:
                 tmp_path, "img", 0, ed, full, omit_image=None,
             )
             assert not mock_new.called, "非 fusion 的 aoi_edge CV 應繼續走舊 renderer"
+
+
+class TestCVFusionPanel1Detection:
+    """Panel 1: 原圖 + 藍色 band 虛線輪廓 + 紅色 defect 像素"""
+
+    def test_panel1_has_red_defect_overlay(self, tmp_path):
+        """cv_filtered_mask=255 的像素在 Panel 1 應呈紅色 (R 高 G/B 低)"""
+        ed = _make_cv_fusion_defect()
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        path = saver._save_cv_fusion_edge_image(
+            save_dir=tmp_path, image_name="b2", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=None,
+            dust_check_fn=None,
+        )
+        out = cv2.imread(path)
+        h, w = out.shape[:2]
+        header_h = 50
+        panel_h = 400
+        # Panel 1 在左側（0..panel_w），掃整個 Panel 1 區域找紅色像素（容忍位置偏移）
+        panel_w_approx = w // 3
+        panel1 = out[header_h:header_h + panel_h, 0:panel_w_approx]
+        red_pixels = (panel1[:, :, 2] > 150) & (panel1[:, :, 0] < 100) & (panel1[:, :, 1] < 100)
+        assert np.sum(red_pixels) >= 10, \
+            f"Panel 1 應有紅色 defect overlay 像素 (>=10 px)，實 {np.sum(red_pixels)}"
+
+    def test_panel1_has_blue_band_contour(self, tmp_path):
+        """有 panel_polygon 與 band_px 時，Panel 1 沿 polygon 邊畫藍虛線"""
+        polygon = np.array([[900, 400], [1100, 400], [1100, 600], [900, 600]], dtype=np.int32)
+        ed = _make_cv_fusion_defect(bbox=(920, 420, 40, 40), center=(940, 440))
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        class _Cfg:
+            aoi_edge_boundary_band_px = 40
+        path = saver._save_cv_fusion_edge_image(
+            save_dir=tmp_path, image_name="b2band", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=None,
+            dust_check_fn=None, edge_config=_Cfg(), panel_polygon=polygon,
+        )
+        out = cv2.imread(path)
+        h, w = out.shape[:2]
+        panel_w_approx = w // 3
+        header_h = 50; panel_h = 400
+        panel1 = out[header_h:header_h + panel_h, 0:panel_w_approx]
+        blue_pixels = (panel1[:, :, 0] > 150) & (panel1[:, :, 2] < 100)
+        assert np.sum(blue_pixels) > 10, \
+            f"Panel 1 應該有藍色 band 輪廓像素（>10 px），實 {np.sum(blue_pixels)}"

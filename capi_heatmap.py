@@ -996,17 +996,105 @@ class HeatmapManager:
         dust_metric: str = "coverage",
         panel_polygon: Optional[np.ndarray] = None,
     ) -> str:
-        """Phase 7.2-B: Fusion 模式 CV defect 3 板組合圖（Detection / OMIT+Dust / Overlap）。
+        """Phase 7.2-B: Fusion 模式 CV defect 3 板組合圖
+        (Panel 1: Detection / Panel 2: OMIT+Dust / Panel 3: Overlap)"""
+        bx, by, bw, bh = edge_defect.bbox
+        side = edge_defect.side
+        max_diff = int(getattr(edge_defect, 'max_diff', 0))
+        area = int(edge_defect.area)
+        is_dust = bool(getattr(edge_defect, 'is_suspected_dust_or_scratch', False))
+        is_bomb = bool(getattr(edge_defect, 'is_bomb', False))
+        is_cv_ok = bool(getattr(edge_defect, 'is_cv_ok', False))
+        img_h, img_w = full_image.shape[:2]
 
-        目前是空殼回傳占位圖；B2-B5 會逐步實作三板內容與 header。
-        """
-        h, w = 50 + 400 + 40, 1200
-        placeholder = np.zeros((h, w, 3), dtype=np.uint8)
-        cv2.putText(placeholder, "CV Fusion Renderer (TBD)", (20, h // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
-        filename = f"edge_cvfusion_{image_name}_{edge_defect.side}_{edge_index}.{self.save_format}"
+        padding = 100
+        rx1 = max(0, bx - padding); ry1 = max(0, by - padding)
+        rx2 = min(img_w, bx + bw + padding); ry2 = min(img_h, by + bh + padding)
+        roi_raw = full_image[ry1:ry2, rx1:rx2].copy()
+        roi_bgr = ensure_bgr(roi_raw)
+
+        # --- Panel 1: Detection ---
+        panel1 = roi_bgr.copy()
+
+        # 1-a: 藍虛線畫 band 輪廓（polygon 邊往內縮 band_px 的等距線）
+        band_px = 40
+        if edge_config is not None:
+            band_px = int(getattr(edge_config, 'aoi_edge_boundary_band_px', 40))
+        if panel_polygon is not None and len(panel_polygon) >= 3:
+            poly_local = panel_polygon.astype(np.float32).copy()
+            poly_local[:, 0] -= rx1; poly_local[:, 1] -= ry1
+            # 原 polygon 邊
+            cv2.polylines(panel1, [poly_local.astype(np.int32)], isClosed=True,
+                          color=(255, 100, 0), thickness=1, lineType=cv2.LINE_AA)
+            # 內縮 band_px 虛線（純視覺，不影響判定）
+            fg_mask = np.zeros(panel1.shape[:2], dtype=np.uint8)
+            cv2.fillPoly(fg_mask, [poly_local.astype(np.int32)], 255)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * band_px + 1, 2 * band_px + 1))
+            fg_inner = cv2.erode(fg_mask, kernel)
+            band_contour = cv2.subtract(fg_mask, fg_inner)
+            dash_pattern = np.zeros_like(band_contour)
+            dash_pattern[::4, :] = 255  # 每 4 行取 1 行製造虛線
+            band_dash = cv2.bitwise_and(band_contour, dash_pattern)
+            panel1[band_dash > 0] = (255, 100, 0)
+
+        # 1-b: 紅色 defect 像素 (cv_filtered_mask)
+        cv_mask = getattr(edge_defect, 'cv_filtered_mask', None)
+        cv_mask_offset = getattr(edge_defect, 'cv_mask_offset', None)
+        if cv_mask is not None and cv_mask_offset is not None:
+            mo_x, mo_y = cv_mask_offset
+            paste_x = mo_x - rx1; paste_y = mo_y - ry1
+            mh, mw = cv_mask.shape[:2]
+            if (0 <= paste_x and 0 <= paste_y
+                    and paste_x + mw <= panel1.shape[1] and paste_y + mh <= panel1.shape[0]):
+                defect_mask = np.zeros(panel1.shape[:2], dtype=np.uint8)
+                defect_mask[paste_y:paste_y + mh, paste_x:paste_x + mw] = cv_mask
+                vis_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+                vis_mask = cv2.dilate(defect_mask, vis_kernel, iterations=1)
+                if is_bomb:
+                    highlight = (255, 0, 255)
+                elif is_dust:
+                    highlight = (0, 200, 255)
+                else:
+                    highlight = (0, 0, 255)
+                _blend_color_on_mask(panel1, vis_mask, highlight, alpha=0.55)
+
+        # Panel 2 / 3 placeholder，B3 / B4 會填
+        panel_h = 400
+        scale = panel_h / max(panel1.shape[0], 1)
+        panel_w = max(int(panel1.shape[1] * scale), 200)
+        panel1_resized = cv2.resize(panel1, (panel_w, panel_h))
+        placeholder2 = np.full((panel_h, panel_w, 3), 40, dtype=np.uint8)
+        placeholder3 = np.full((panel_h, panel_w, 3), 40, dtype=np.uint8)
+        panels = [panel1_resized, placeholder2, placeholder3]
+        labels = ["CV Detection (band)", "OMIT + Dust", "Overlap"]
+
+        gap_w = 10
+        gap = np.full((panel_h, gap_w, 3), 80, dtype=np.uint8)
+        spaced = []
+        for i, p in enumerate(panels):
+            spaced.append(p)
+            if i < len(panels) - 1:
+                spaced.append(gap)
+        composite = np.hstack(spaced)
+        comp_h, comp_w = composite.shape[:2]
+
+        header_h = 50
+        header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
+        header_text = f"CV Edge: {side} | MaxDiff:{max_diff} | Area:{area}px"
+        cv2.putText(header, header_text, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (220, 220, 220), 2)
+
+        label_h = 40
+        label_bar = np.zeros((label_h, comp_w, 3), dtype=np.uint8)
+        for i, lbl in enumerate(labels):
+            lx = i * (panel_w + gap_w) + 10
+            cv2.putText(label_bar, lbl, (lx, 26),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+
+        final = np.vstack([header, composite, label_bar])
+        filename = f"edge_cvfusion_{image_name}_{side}_{edge_index}.{self.save_format}"
         filepath = save_dir / filename
-        cv2.imwrite(str(filepath), placeholder)
+        cv2.imwrite(str(filepath), final)
         return str(filepath)
 
     def _save_patchcore_edge_image(
