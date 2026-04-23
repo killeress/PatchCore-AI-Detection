@@ -213,6 +213,52 @@ class HeatmapManager:
         cv2.putText(header, verdict, (x + info_w, y),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, verdict_color, 2)
 
+    def _render_edge_header(
+        self,
+        width: int,
+        info: str,
+        verdict: str,
+        verdict_color: Tuple[int, int, int],
+        extra_right: str = "",
+        height: int = 50,
+        font_scale: float = 0.65,
+    ) -> np.ndarray:
+        """Phase 7.2-C: Edge defect 組合圖通用 header helper。
+
+        Layout:
+          [左側 info 白字] [verdict 大字彩色] ............ [右側 extra_right 灰字]
+
+        Verdict 字大小 = font_scale × 1.5，thickness=2 突出。
+
+        Args:
+            width: header 寬度（通常 = composite width）
+            info: 左側資訊字串，白字
+            verdict: 判定結果字串（NG / OK (dust) / ...）
+            verdict_color: verdict 字顏色 BGR
+            extra_right: 右側可選輔助字串（灰字）— 用於 PC shift/fallback 資訊
+            height: header 高度（預設 50）
+            font_scale: info 字體 scale（verdict 會自動 × 1.5 放大）
+
+        Returns:
+            header image (height, width, 3) uint8
+        """
+        header = np.zeros((height, width, 3), dtype=np.uint8)
+        # info 白字
+        cv2.putText(header, info, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (220, 220, 220), 2)
+        (info_w, _), _ = cv2.getTextSize(info, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2)
+        # verdict 大字（緊跟 info，但至少從 header 中央開始以確保視覺突出）
+        verdict_scale = font_scale * 1.5
+        verdict_x = max(10 + info_w, width // 2)
+        cv2.putText(header, verdict, (verdict_x, 32),
+                    cv2.FONT_HERSHEY_SIMPLEX, verdict_scale, verdict_color, 2)
+        # 右側 extra 字（若有）
+        if extra_right:
+            (ex_w, _), _ = cv2.getTextSize(extra_right, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            cv2.putText(header, extra_right, (width - ex_w - 10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 255), 1)
+        return header
+
     def get_save_dir(self, glass_id: str, date_str: str = "") -> Path:
         """
         取得儲存目錄路徑
