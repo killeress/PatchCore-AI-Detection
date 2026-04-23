@@ -980,7 +980,7 @@ class HeatmapManager:
     ) -> str:
         """PatchCore inspector 邊緣缺陷比較圖。
 
-        Panel 1: Original ROI (panel 外區用暗紅 + 斜線標示遭 mask)
+        Panel 1: Original ROI (AOI centered raw crop，不疊 mask / marker)
         Panel 2: Anomaly Heatmap Overlay (半透明 colormap 疊於 ROI 上)
         Panel 3: OMIT ROI (若 omit_image 提供)
         """
@@ -1063,7 +1063,7 @@ class HeatmapManager:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
 
         panels = [panel_orig, panel_heatmap]
-        labels = ["Original ROI (masked)", "PatchCore Heatmap"]
+        labels = ["Original ROI (AOI)", "PatchCore Heatmap"]
 
         if omit_image is not None:
             try:

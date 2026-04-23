@@ -82,9 +82,10 @@ class TestPCGroupPanel1:
         panel1_center_y = 50 + 400 // 2
         panel1_center_x = panel_w_approx // 2
         px = out[panel1_center_y, panel1_center_x]
-        # 不能是 (0,0,60) 或 (0,0,120) 暗紅 mask
-        assert not (px[0] < 30 and px[1] < 30 and px[2] > 40 and px[2] < 150), \
-            f"Panel 1 中心像素 {px.tolist()} 看起來是暗紅 mask，應為 raw"
+        # AOI 中心應為 raw 亮方塊 (fixture 設定 full[400:600, 900:1100] = 200)
+        # 不是暗紅 mask (0,0,60/120)，也不是黑 pad
+        assert px[0] > 150 and px[1] > 150 and px[2] > 150, \
+            f"Panel 1 中心應為 raw pixel (~200)，實測 {px.tolist()}"
 
     def test_panel1_has_no_yellow_marker(self, tmp_path):
         """Panel 1 中央不應有黃色圓圈 (0, 255, 255)"""
