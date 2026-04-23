@@ -91,6 +91,32 @@ capi_server.py:772  →  EdgeInspectionConfig.from_db_params(db_dict)
   - `test_aoi_edge_fusion.py` fixture 鎖 shift band=40，維持 Phase 6 band_mask 測試語意
   - 全套迴歸 177 綠 / 2 skipped
 
+### Phase 7.2-A — PC 組組合圖重構 (2026-04-23)
+
+- **Panel 1** 改為 AOI centered raw crop：移除 `render_pc_masked_roi` 紅色斜線 mask、移除
+  `cv2.circle` 黃色空心圓 marker（現場回饋遮蓋 defect 細節）。`_save_patchcore_edge_image`
+  改從 `full_image` 以 AOI center 直接擷取 `tile_size × tile_size` raw pixels，超出邊界黑色 pad。
+- **Panel 3** OMIT 擷取起點改以 `pc_roi_origin_x/y` 為準（原本是 AOI center），對齊 shifted ROI
+  位置。舊 record 無 origin（預設 0,0）→ fallback AOI center。Label 在有 shift 時加 `(shifted)`。
+- **Panel 3** 加 `dust_check_fn` 回傳的藍色 dust_mask overlay（BGR 255,100,0, alpha=0.5），
+  與 CV 路徑 `is_dust_detected` gating 行為一致（非空 mask + is_dust=True 才畫）。
+- **Panel 3 副效** — 修了既存 broadcast bug：OMIT 2D gray 時 `omit_canvas` 用 `roi.ndim` 判 shape
+  會造成 3D canvas = 2D slice 賦值失敗被 except 吞掉；修法是先 `ensure_bgr(omit_image)` 統一為 3D。
+- **Header** 右側加 shift / fallback 資訊：
+  - 有 shift → `PC dx={+d} dy={+d}` (灰字，靠右)
+  - fallback → `PC-FB=shift_insufficient(offset short)` / `PC-FB=concave_polygon(concave)` /
+    `PC-FB=shift_disabled` / `PC-FB={reason}`
+  - 都無 → 省略
+- **測試**：`tests/test_edge_viz_pc_panel.py` 11 項；全套 regression 188+ 綠。
+
+**Phase A 收尾 open items（留待 Phase C 處理）：**
+1. Panel 2 左上角 `[PC dx= dy=]` / `[PC FB: ...]` badge 與 Header 右側 extra_text 訊息重複。
+   Phase C header helper 完成後，移除 Panel 2 badge，保留 Header 為唯一 shift 資訊呈現。
+2. `_save_patchcore_edge_image` 內 `getattr(..., 'pc_roi_*', 0)` 與直接屬性存取風格不一致。
+   Phase C 重構時統一為 `getattr` 版本（更 defensive）。
+3. Panel 1 raw crop 與 Panel 3 OMIT crop 結構高度雷同（compute origin / zero canvas / clamp
+   src,dst / paste），Phase C 可抽 `_aoi_centered_crop(src, origin, size)` helper。
+
 ### Phase 7.1b — PC ROI fallback 原因精細分類 (2026-04-23)
 
 - **動機**：現場觀察推論 log / record_detail 只看到 `concave_polygon` 一種 fallback
