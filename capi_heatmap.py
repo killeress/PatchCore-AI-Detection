@@ -1023,12 +1023,25 @@ class HeatmapManager:
         panel_heatmap = cv2.resize(panel_heatmap, (panel_w, panel_h))
 
         # Phase 6: fusion 模式 PC 來源 → 左上角 [PC] 角標
+        # Phase 7: 加 shift / fallback 資訊
         edge_inspector_mode = getattr(edge_defect, 'inspector_mode', 'cv')
         edge_source = getattr(edge_defect, 'source_inspector', '')
         if edge_inspector_mode == 'fusion' and edge_source == 'patchcore':
-            cv2.rectangle(panel_heatmap, (5, 5), (60, 28), (0, 0, 0), -1)
-            cv2.putText(panel_heatmap, "[PC]", (10, 24),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 0, 255), 2)
+            shift_dx = int(getattr(edge_defect, 'pc_roi_shift_dx', 0))
+            shift_dy = int(getattr(edge_defect, 'pc_roi_shift_dy', 0))
+            pc_fb = str(getattr(edge_defect, 'pc_roi_fallback_reason', ''))
+            if shift_dx or shift_dy:
+                badge_text = f"[PC dx={shift_dx:+d} dy={shift_dy:+d}]"
+                badge_w = 200
+            elif pc_fb:
+                badge_text = f"[PC FB:{pc_fb}]"
+                badge_w = 220
+            else:
+                badge_text = "[PC]"
+                badge_w = 60
+            cv2.rectangle(panel_heatmap, (5, 5), (badge_w, 28), (0, 0, 0), -1)
+            cv2.putText(panel_heatmap, badge_text, (10, 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
 
         panels = [panel_orig, panel_heatmap]
         labels = ["Original ROI (masked)", "PatchCore Heatmap"]

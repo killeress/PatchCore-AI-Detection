@@ -74,6 +74,239 @@ def compute_boundary_band_mask(
     return cv2.bitwise_and(band_near_edge, fg_mask)
 
 
+def _point_to_segment_distance(
+    px: float, py: float, ax: float, ay: float, bx: float, by: float
+) -> Tuple[float, float, float]:
+    """Returns (distance, closest_x, closest_y) — 點 P 到線段 AB 的最短距離與最近點。"""
+    dx = bx - ax
+    dy = by - ay
+    len_sq = dx * dx + dy * dy
+    if len_sq <= 1e-9:
+        closest_x, closest_y = ax, ay
+    else:
+        t = ((px - ax) * dx + (py - ay) * dy) / len_sq
+        t = max(0.0, min(1.0, t))
+        closest_x = ax + t * dx
+        closest_y = ay + t * dy
+    ddx = px - closest_x
+    ddy = py - closest_y
+    return (ddx * ddx + ddy * ddy) ** 0.5, closest_x, closest_y
+
+
+def _nearest_polygon_edge_info(
+    aoi_x: float, aoi_y: float, polygon: np.ndarray
+) -> Tuple[float, float, float]:
+    """返回 AOI 到 polygon 所有邊的「最近點距離、最近點 x、最近點 y」。
+
+    只回無號距離；caller 用 cv2.pointPolygonTest 再決定內/外號位。
+    """
+    best_d = float("inf")
+    best_cx, best_cy = 0.0, 0.0
+    n = len(polygon)
+    for i in range(n):
+        ax, ay = float(polygon[i][0]), float(polygon[i][1])
+        bx, by = float(polygon[(i + 1) % n][0]), float(polygon[(i + 1) % n][1])
+        d, cx, cy = _point_to_segment_distance(aoi_x, aoi_y, ax, ay, bx, by)
+        if d < best_d:
+            best_d = d
+            best_cx, best_cy = cx, cy
+    return best_d, best_cx, best_cy
+
+
+def compute_pc_roi_offset(
+    aoi_xy: Tuple[int, int],
+    polygon: Optional[np.ndarray],
+    band_px: int = 40,
+    aoi_margin_px: int = 64,
+    roi_size: int = 512,
+) -> Tuple[Tuple[int, int], Tuple[int, int], float]:
+    """Phase 7 — 計算 PC ROI 應有的內移偏移量。
+
+    目標：把 PC ROI 從 centered 位置往 panel 內側偏移，使偏移後 PC ROI 距
+    polygon 邊 ≥ `band_px`，讓 backbone feature map 完全脫離 panel 邊
+    discontinuity；同時 AOI 座標必須仍在 PC ROI 內，距邊 ≥ `aoi_margin_px`。
+
+    偏移方向 = AOI 座標到最近 polygon 邊的 inward normal（指向 panel 內）。
+    偏移量大小 = max(0, band_px - (d_edge - roi_size/2))
+               然後 clamp 到 [0, roi_size/2 - aoi_margin_px]。
+
+    Args:
+        aoi_xy: AOI 座標 (x, y) panel 絕對座標
+        polygon: panel 邊界 Nx2 np.ndarray，None / 頂點<3 → 不偏移
+        band_px: 希望 PC ROI 距 polygon 的最小距離 (px)
+        aoi_margin_px: AOI 座標距 PC ROI 邊的最小 margin (px)
+        roi_size: ROI 邊長 (px)
+
+    Returns:
+        (pc_roi_origin, shift_vec, d_edge)
+        - pc_roi_origin: (ox, oy) 偏移後 PC ROI 左上角 panel 絕對座標
+        - shift_vec: (dx, dy) 相對 centered ROI 的偏移量；(0,0) 代表無偏移
+        - d_edge: AOI 座標到 polygon 的有號距離（內側 >0，外側 <0）；polygon 無效回 0
+
+    Rules:
+        polygon=None / 頂點<3 → shift=(0,0), origin=centered, d_edge=0
+        AOI 在 polygon 外（d_edge<0） → shift=(0,0), origin=centered
+        Deep interior (d_edge >= roi_size/2 + band_px) → shift=(0,0)
+    """
+    aoi_x, aoi_y = int(aoi_xy[0]), int(aoi_xy[1])
+    half = roi_size // 2
+    centered_origin = (aoi_x - half, aoi_y - half)
+
+    if polygon is None or len(polygon) < 3:
+        return centered_origin, (0, 0), 0.0
+
+    polygon_int = np.asarray(polygon, dtype=np.int32)
+
+    # 內外判定 — 在 polygon 外則不偏移
+    signed_dist = float(cv2.pointPolygonTest(
+        polygon_int, (float(aoi_x), float(aoi_y)), True
+    ))
+    if signed_dist <= 0:
+        return centered_origin, (0, 0), signed_dist
+
+    # 需要的偏移量（往內側）
+    needed = band_px - (signed_dist - half)
+    if needed <= 0:
+        return centered_origin, (0, 0), signed_dist
+
+    max_shift = max(0, half - aoi_margin_px)
+    actual = int(min(needed, max_shift))
+    if actual <= 0:
+        return centered_origin, (0, 0), signed_dist
+
+    # 找最近 polygon 邊上的點 → inward normal = AOI - closest_pt（指向 panel 內）
+    _, cx, cy = _nearest_polygon_edge_info(float(aoi_x), float(aoi_y), polygon_int)
+    nx = float(aoi_x) - cx
+    ny = float(aoi_y) - cy
+    nlen = (nx * nx + ny * ny) ** 0.5
+    if nlen <= 1e-6:
+        # AOI 剛好在 polygon 邊上，無法決定方向 → 不偏移
+        return centered_origin, (0, 0), signed_dist
+
+    # 取主軸：axis-aligned polygon 下 normal 會是純 x 或純 y
+    # 若 |nx| >> |ny| 取水平偏移，反之垂直；相近則仍取較大者
+    if abs(nx) >= abs(ny):
+        dx = int(round((nx / abs(nx)) * actual))
+        dy = 0
+    else:
+        dx = 0
+        dy = int(round((ny / abs(ny)) * actual))
+
+    pc_origin = (aoi_x + dx - half, aoi_y + dy - half)
+    return pc_origin, (dx, dy), signed_dist
+
+
+def verify_polygon_clear_of_pc_roi(
+    pc_roi_origin: Tuple[int, int],
+    roi_size: int,
+    polygon: Optional[np.ndarray],
+    band_px: int,
+) -> bool:
+    """Phase 7 — 驗證偏移後 PC ROI 內部所有像素距 polygon 邊 ≥ band_px。
+
+    做法：
+      1. 逐條 polygon 邊，取線段端點在 PC ROI 局部座標系的位置
+      2. 若該線段與 PC ROI 矩形有任一點在 ROI 內側 < band_px → False
+      3. 另也檢查 polygon 頂點是否在 PC ROI 邊界 band_px 範圍內
+
+    凹角 / 複雜形狀情境：polygon 角點從另一側逼近 PC ROI → 此函式回 False
+    讓 caller 退回 centered + band_mask 排除的 Phase 6 行為。
+
+    Args:
+        pc_roi_origin: (ox, oy) PC ROI 左上角
+        roi_size: ROI 邊長
+        polygon: Nx2 np.ndarray；None → True（無 polygon 不限制）
+        band_px: 最小允許距離
+
+    Returns:
+        True：polygon 所有邊距 PC ROI ≥ band_px（安全偏移）
+        False：有邊侵入或太近（需 fallback）
+    """
+    if polygon is None or len(polygon) < 2:
+        return True
+
+    ox, oy = pc_roi_origin
+    # PC ROI bounds (panel 絕對座標)
+    x1, y1 = ox, oy
+    x2, y2 = ox + roi_size, oy + roi_size
+
+    n = len(polygon)
+    for i in range(n):
+        ax = float(polygon[i][0])
+        ay = float(polygon[i][1])
+        bx = float(polygon[(i + 1) % n][0])
+        by = float(polygon[(i + 1) % n][1])
+
+        # 線段 AB 任一點距 PC ROI 矩形 < band_px?
+        # 做法：對 PC ROI 四角測距線段，再對線段頂點測距 PC ROI 矩形
+        # 簡化：取 PC ROI 矩形內最近點到線段 AB 的距離
+        dist = _segment_to_rect_distance(ax, ay, bx, by, x1, y1, x2, y2)
+        if dist < band_px:
+            return False
+    return True
+
+
+def _segment_to_rect_distance(
+    ax: float, ay: float, bx: float, by: float,
+    rx1: float, ry1: float, rx2: float, ry2: float,
+) -> float:
+    """Returns minimum distance from line segment AB to axis-aligned rectangle.
+
+    若線段穿過矩形 → 0
+    否則取「矩形四角到線段距離」與「線段兩端點到矩形距離」的最小值
+    """
+    # 線段是否穿過矩形（cohen-sutherland 式粗略判定 + 精確 intersection check）
+    if _segment_intersects_rect(ax, ay, bx, by, rx1, ry1, rx2, ry2):
+        return 0.0
+
+    # 矩形四角到線段
+    best = float("inf")
+    for (cx, cy) in [(rx1, ry1), (rx2, ry1), (rx1, ry2), (rx2, ry2)]:
+        d, _, _ = _point_to_segment_distance(cx, cy, ax, ay, bx, by)
+        if d < best:
+            best = d
+    # 線段兩端點到矩形
+    for (px, py) in [(ax, ay), (bx, by)]:
+        cx = min(max(px, rx1), rx2)
+        cy = min(max(py, ry1), ry2)
+        d = ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
+        if d < best:
+            best = d
+    return best
+
+
+def _segment_intersects_rect(
+    ax: float, ay: float, bx: float, by: float,
+    rx1: float, ry1: float, rx2: float, ry2: float,
+) -> bool:
+    """檢查線段 AB 是否與 axis-aligned 矩形相交（含端點在矩形內）"""
+    # 端點任一在矩形內
+    if (rx1 <= ax <= rx2 and ry1 <= ay <= ry2) or (rx1 <= bx <= rx2 and ry1 <= by <= ry2):
+        return True
+    # 線段與矩形四邊相交？對每條矩形邊做線段交測
+    edges = [
+        (rx1, ry1, rx2, ry1),  # top
+        (rx2, ry1, rx2, ry2),  # right
+        (rx2, ry2, rx1, ry2),  # bottom
+        (rx1, ry2, rx1, ry1),  # left
+    ]
+    for (ex1, ey1, ex2, ey2) in edges:
+        if _segments_intersect(ax, ay, bx, by, ex1, ey1, ex2, ey2):
+            return True
+    return False
+
+
+def _segments_intersect(
+    p1x: float, p1y: float, p2x: float, p2y: float,
+    p3x: float, p3y: float, p4x: float, p4y: float,
+) -> bool:
+    """標準線段交測"""
+    def ccw(ax, ay, bx, by, cx, cy):
+        return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax)
+    return (ccw(p1x, p1y, p3x, p3y, p4x, p4y) != ccw(p2x, p2y, p3x, p3y, p4x, p4y)
+            and ccw(p1x, p1y, p2x, p2y, p3x, p3y) != ccw(p1x, p1y, p2x, p2y, p4x, p4y))
+
+
 def inpaint_non_fg_region(blurred: np.ndarray, fg_mask: np.ndarray, inpaint_radius: int = 3) -> np.ndarray:
     """用 Navier-Stokes inpaint 填非前景區，取代 fg_median 常數填充，避免 medianBlur bg 估計在邊界內側被拉偏。"""
     if fg_mask is None:
@@ -150,6 +383,12 @@ class EdgeDefect:
     source_inspector: str = ""    # fusion 模式下："cv"=來自 band / "patchcore"=來自 interior；非 fusion 為 ""
     d_edge_px: float = 0.0        # defect center 到 panel polygon 邊距離 (px)；fusion 模式才有值，其餘 0
     fusion_fallback_reason: str = ""  # fusion 模式下退回 fallback 原因 (例 "polygon_unavailable")；正常 fusion 為 ""
+    # Phase 7: PC ROI 內移欄位 (fusion 專用，非 fusion 全為預設)
+    pc_roi_origin_x: int = 0      # PC 實際跑的 ROI 左上角 x (panel 絕對座標)
+    pc_roi_origin_y: int = 0      # PC 實際跑的 ROI 左上角 y (panel 絕對座標)
+    pc_roi_shift_dx: int = 0      # 相對 centered ROI 的偏移 x (往 panel 內為正/負依 inward normal)
+    pc_roi_shift_dy: int = 0      # 相對 centered ROI 的偏移 y
+    pc_roi_fallback_reason: str = ""  # PC ROI 內移 fallback 原因: "" / "concave_polygon" / "shift_disabled" / "polygon_unavailable"
     # 推論當下保留的 render artifacts (async heatmap 用，不入 DB)
     pc_roi: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     pc_fg_mask: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
@@ -215,6 +454,8 @@ class EdgeInspectionConfig:
     aoi_line_max_width: int = 3 # 薄線最大寬度 px (超過視為一般 component, 由 CC path 處理)
     aoi_edge_inspector: str = "cv"  # "cv" | "patchcore" | "fusion"
     aoi_edge_boundary_band_px: int = 40  # Phase 6 fusion 模式 CV 管轄帶寬度 (polygon 邊往 panel 內延伸 px); 0=等同 patchcore
+    aoi_edge_pc_roi_inward_shift_enabled: bool = True  # Phase 7: fusion 模式 PC ROI 自動內移到距 polygon ≥ band_px
+    aoi_edge_aoi_margin_px: int = 64  # Phase 7: PC ROI 內移時 AOI 座標距 PC ROI 邊最小 margin (px)
     exclude_zones: List[EdgeExclusionZoneConfig] = field(default_factory=list)
     # 儲存完整的按產品分組排除區域 (key=resolution_code, value=list of zones)
     all_exclude_zones_by_product: Dict[str, List[dict]] = field(default_factory=dict)
@@ -313,6 +554,8 @@ class EdgeInspectionConfig:
         inspector_val = str(get("aoi_edge_inspector", "cv")).lower().strip()
         cfg.aoi_edge_inspector = inspector_val if inspector_val in ("cv", "patchcore", "fusion") else "cv"
         cfg.aoi_edge_boundary_band_px = int(get("aoi_edge_boundary_band_px", 40))
+        cfg.aoi_edge_pc_roi_inward_shift_enabled = bool(get("aoi_edge_pc_roi_inward_shift_enabled", True))
+        cfg.aoi_edge_aoi_margin_px = int(get("aoi_edge_aoi_margin_px", 64))
 
         # 排除區域 (支援按產品解析度碼分組的 dict 格式，或向後相容的 list 格式)
         zones_raw = get("cv_edge_exclude_zones", None)
