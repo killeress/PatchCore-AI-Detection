@@ -237,3 +237,33 @@ class TestPCGroupPanel3DustOverlay:
             dust_check_fn=failing_fn,
         )
         assert Path(path).exists(), "即使 dust_check_fn 丟 exception 也要能產出圖"
+
+    def test_no_overlay_when_fn_returns_is_dust_false(self, tmp_path):
+        """dust_check_fn 回傳 is_dust=False 時不該 overlay（與 CV 路徑行為一致）"""
+        omit = np.full((2000, 2000), 128, dtype=np.uint8)
+
+        def stub_weak(img):
+            h, w = img.shape[:2]
+            mask = np.zeros((h, w), dtype=np.uint8)
+            mask[h // 2 - 50:h // 2 + 50, w // 2 - 50:w // 2 + 50] = 255
+            # mask 有像素但 is_dust=False（模擬候選未達閾值）
+            return False, mask, 0.01, "too small"
+
+        ed = _make_edge_defect(center=(1000, 500), shift=(0, 0))
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        path = saver._save_patchcore_edge_image(
+            save_dir=tmp_path, image_name="test_weak", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=omit,
+            dust_check_fn=stub_weak,
+        )
+        out = cv2.imread(path)
+        h_out, w_out = out.shape[:2]
+        panel_w_approx = w_out // 3
+        panel3_left = panel_w_approx * 2 + 20
+        center_x = (panel3_left + w_out - 5) // 2
+        center_y = 50 + 200
+        px = out[center_y, center_x]
+        # is_dust=False 不應 overlay，Panel 3 應為純 OMIT 灰
+        assert abs(int(px[0]) - int(px[2])) < 20, \
+            f"is_dust=False 時 Panel 3 應為灰 (B≈R)，實為 B={px[0]} R={px[2]}"
