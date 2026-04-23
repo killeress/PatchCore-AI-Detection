@@ -1033,9 +1033,18 @@ class HeatmapManager:
             if shift_dx or shift_dy:
                 badge_text = f"[PC dx={shift_dx:+d} dy={shift_dy:+d}]"
                 badge_w = 200
+            elif pc_fb == "shift_insufficient":
+                badge_text = "[PC FB: shift_insufficient]"
+                badge_w = 310
+            elif pc_fb == "concave_polygon":
+                badge_text = "[PC FB: concave_polygon]"
+                badge_w = 290
+            elif pc_fb == "shift_disabled":
+                badge_text = "[PC FB: shift_disabled]"
+                badge_w = 280
             elif pc_fb:
-                badge_text = f"[PC FB:{pc_fb}]"
-                badge_w = 220
+                badge_text = f"[PC FB: {pc_fb}]"
+                badge_w = 250
             else:
                 badge_text = "[PC]"
                 badge_w = 60
