@@ -518,8 +518,12 @@ class TestFusionCollapseToRepresentative:
         )
         assert len(defects) == 0
 
-    def test_debug_mode_preserves_all_defects(self, fusion_inferencer):
-        """collapse_to_representative=False → 回全部 defect"""
+    def test_collapse_false_preserves_all_defects(self, fusion_inferencer):
+        """collapse_to_representative=False 旗標仍可用（供未來診斷用途）
+
+        注意：debug endpoint 目前同步使用 collapse=True 與推論紀錄一致；
+        此參數仍保留供單測/未來需要時覆寫。
+        """
         inf = fusion_inferencer
         img, poly = self._image_and_poly()
 
