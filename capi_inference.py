@@ -3222,6 +3222,9 @@ class CAPIInferencer:
                 d.inspector_mode = "fusion"
                 d.fusion_fallback_reason = "polygon_unavailable"
                 d.d_edge_px = 0.0
+                # Phase 7.2 fix: 補填 cv_filtered_mask / cv_mask_offset 給新 CV fusion renderer
+                d.cv_filtered_mask = cv_stats.get("filtered_mask")
+                d.cv_mask_offset = cv_stats.get("roi_offset", (sx1, sy1))
             cv_defects = self._apply_omit_dust_filter_to_edge_defects(
                 cv_defects, omit_image, omit_overexposed,
             )
@@ -3292,6 +3295,9 @@ class CAPIInferencer:
                 d.inspector_mode = "fusion"
                 d.d_edge_px = float(max(0.0, cv2.pointPolygonTest(
                     polygon_int, (float(cx), float(cy)), True)))
+                # Phase 7.2 fix: 補填 cv_filtered_mask / cv_mask_offset 給新 CV fusion renderer
+                d.cv_filtered_mask = cv_stats.get("filtered_mask")
+                d.cv_mask_offset = cv_stats.get("roi_offset", (rx1, ry1))
                 cv_defects_kept.append(d)
 
         # === PC 路徑（Phase 7: 內移 PC ROI 以避開 polygon 邊 discontinuity）===

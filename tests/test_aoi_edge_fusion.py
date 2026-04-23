@@ -529,3 +529,85 @@ class TestInspectRoiFusion:
         # PC 管 interior 全部 → PC defect 應產
         pc_kept = [d for d in defects if d.source_inspector == "patchcore"]
         assert len(pc_kept) == 1
+
+    def test_fusion_cv_defect_has_cv_filtered_mask(self, fusion_inferencer):
+        """Phase 7.2 fix: fusion 主路徑的 CV defect 要從 cv_stats 取回 cv_filtered_mask
+        / cv_mask_offset，否則新 CV fusion renderer 拿不到紅色 defect mask。"""
+        inf = fusion_inferencer
+        image, polygon = self._build_test_image_and_polygon()
+
+        # CV defect 放在 band 內 (同 test_cv_defect_in_band_kept)
+        cv_def_panel_center = (130, 540)
+
+        # stub 回 filtered_mask + roi_offset (mimic capi_edge_cv.inspect_roi 實際行為)
+        # 特意不手動設 ed.cv_filtered_mask / ed.cv_mask_offset，驗證 fusion 路徑有從
+        # cv_stats 正確帶回 defect
+        def _cv_stub(roi, offset_x, offset_y, **kwargs):
+            ed = EdgeDefect(
+                side="aoi_edge", area=50,
+                bbox=(cv_def_panel_center[0] - 5, cv_def_panel_center[1] - 5, 10, 10),
+                center=cv_def_panel_center,
+                max_diff=30,
+            )
+            fm = np.zeros((512, 512), dtype=np.uint8)
+            fm[250:260, 250:260] = 255
+            return [ed], {
+                "max_diff": 30, "max_area": 50, "threshold": 4,
+                "min_area": 40, "min_max_diff": 20,
+                "filtered_mask": fm,
+                "roi_offset": (int(offset_x), int(offset_y)),
+            }
+        inf.edge_inspector.inspect_roi = _cv_stub
+        inf.predict_tile = _stub_predict_tile(score=0.0)
+
+        defects, stats = inf._inspect_roi_fusion(
+            image, img_x=160, img_y=540, img_prefix="W0F",
+            panel_polygon=polygon,
+            omit_image=None, omit_overexposed=False,
+        )
+
+        cv_kept = [d for d in defects if d.source_inspector == "cv"]
+        assert len(cv_kept) == 1, "band 內 CV defect 應保留"
+        d = cv_kept[0]
+        assert d.cv_filtered_mask is not None, \
+            "fusion CV defect 應攜帶 cv_filtered_mask（新 renderer 畫紅色依賴此 attr）"
+        assert d.cv_mask_offset is not None, \
+            "fusion CV defect 應攜帶 cv_mask_offset"
+
+    def test_fusion_fallback_cv_defect_has_cv_filtered_mask(self, fusion_inferencer):
+        """Phase 7.2 fix: polygon_unavailable fallback 分支的 CV defect 亦要攜帶
+        cv_filtered_mask / cv_mask_offset。"""
+        inf = fusion_inferencer
+        image = np.full((1080, 1920, 3), 128, dtype=np.uint8)
+
+        def _cv_stub(roi, offset_x, offset_y, **kwargs):
+            ed = EdgeDefect(
+                side="aoi_edge", area=50,
+                bbox=(offset_x + 100, offset_y + 100, 30, 30),
+                center=(offset_x + 115, offset_y + 115),
+                max_diff=30,
+            )
+            fm = np.zeros((512, 512), dtype=np.uint8)
+            fm[100:130, 100:130] = 255
+            return [ed], {
+                "max_diff": 30, "max_area": 50, "threshold": 4,
+                "min_area": 40, "min_max_diff": 20,
+                "filtered_mask": fm,
+                "roi_offset": (int(offset_x), int(offset_y)),
+            }
+        inf.edge_inspector.inspect_roi = _cv_stub
+        inf.predict_tile = _stub_predict_tile(score=0.0)
+
+        defects, stats = inf._inspect_roi_fusion(
+            image, img_x=160, img_y=540, img_prefix="W0F",
+            panel_polygon=None,  # trigger polygon_unavailable fallback
+            omit_image=None, omit_overexposed=False,
+        )
+
+        assert len(defects) >= 1
+        d = defects[0]
+        assert d.fusion_fallback_reason == "polygon_unavailable"
+        assert d.cv_filtered_mask is not None, \
+            "polygon_unavailable fallback CV defect 也要攜帶 cv_filtered_mask"
+        assert d.cv_mask_offset is not None, \
+            "polygon_unavailable fallback CV defect 也要攜帶 cv_mask_offset"
