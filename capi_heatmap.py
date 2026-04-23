@@ -1093,14 +1093,53 @@ class HeatmapManager:
             cv2.putText(panel2, "No OMIT", (10, panel2.shape[0] // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-        # Panel 3 placeholder，B4 會填
+        # --- Panel 3: Overlap (OMIT 底 + 紅 defect + 藍 dust + 紫交集) ---
+        if omit_image is not None and omit_sub is not None:
+            panel3 = ensure_bgr(omit_sub).copy()
+        else:
+            panel3 = roi_bgr.copy()
+
+        # 組 defect mask（在 panel3 尺寸）
+        defect_mask_p3 = None
+        if cv_mask is not None and cv_mask_offset is not None:
+            mo_x, mo_y = cv_mask_offset
+            paste_x = mo_x - rx1; paste_y = mo_y - ry1
+            mh, mw = cv_mask.shape[:2]
+            if (0 <= paste_x and 0 <= paste_y
+                    and paste_x + mw <= panel3.shape[1] and paste_y + mh <= panel3.shape[0]):
+                defect_mask_p3 = np.zeros(panel3.shape[:2], dtype=np.uint8)
+                defect_mask_p3[paste_y:paste_y + mh, paste_x:paste_x + mw] = cv_mask
+                defect_mask_p3 = cv2.dilate(
+                    defect_mask_p3,
+                    cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+                    iterations=1,
+                )
+
+        # 畫紅色 defect
+        if defect_mask_p3 is not None:
+            _blend_color_on_mask(panel3, defect_mask_p3, (0, 0, 255), alpha=0.55)
+        # 畫藍色 dust（與 Panel 2 一致：is_dust_detected=True 且 mask 非 None 才畫）
+        if dust_mask_omit is not None and is_dust_detected:
+            _blend_color_on_mask(panel3, dust_mask_omit, (255, 100, 0), alpha=0.5)
+        # 畫紫色交集（純色覆蓋）— 需 defect + is_dust + dust_mask 三者都有
+        if (defect_mask_p3 is not None and dust_mask_omit is not None
+                and is_dust_detected):
+            # 尺寸對齊
+            if dust_mask_omit.shape != panel3.shape[:2]:
+                dust_resized = cv2.resize(dust_mask_omit, (panel3.shape[1], panel3.shape[0]),
+                                           interpolation=cv2.INTER_NEAREST)
+            else:
+                dust_resized = dust_mask_omit
+            overlap = cv2.bitwise_and(defect_mask_p3, dust_resized)
+            panel3[overlap > 0] = (220, 0, 180)  # 紫
+
         panel_h = 400
         scale = panel_h / max(panel1.shape[0], 1)
         panel_w = max(int(panel1.shape[1] * scale), 200)
         panel1_resized = cv2.resize(panel1, (panel_w, panel_h))
         panel2_resized = cv2.resize(panel2, (panel_w, panel_h))
-        placeholder3 = np.full((panel_h, panel_w, 3), 40, dtype=np.uint8)
-        panels = [panel1_resized, panel2_resized, placeholder3]
+        panel3_resized = cv2.resize(panel3, (panel_w, panel_h))
+        panels = [panel1_resized, panel2_resized, panel3_resized]
         labels = ["CV Detection (band)", "OMIT + Dust", "Overlap"]
 
         gap_w = 10
