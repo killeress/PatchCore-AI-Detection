@@ -219,3 +219,74 @@ class TestCVFusionPanel3Overlap:
         purple = (panel3[:, :, 0] > 150) & (panel3[:, :, 1] < 80) & (panel3[:, :, 2] > 150)
         assert np.sum(purple) > 5, \
             f"Panel 3 應有紫色像素 (紅∩藍交集)，實 {np.sum(purple)} px"
+
+
+class TestCVFusionHeader:
+    """CV fusion header: MaxDiff / Area / COV → VERDICT"""
+
+    def test_header_shows_ok_dust_verdict(self, tmp_path, monkeypatch):
+        """is_suspected_dust_or_scratch=True 時 header 寫 'OK (dust)'"""
+        captured = []
+        _real = cv2.putText
+        def cap(img, text, *a, **kw):
+            captured.append(text)
+            return _real(img, text, *a, **kw)
+        monkeypatch.setattr("capi_heatmap.cv2.putText", cap)
+
+        ed = _make_cv_fusion_defect(is_dust=True)
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        saver._save_cv_fusion_edge_image(
+            save_dir=tmp_path, image_name="b5ok", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=None,
+            dust_check_fn=None,
+        )
+        all_text = " ".join(captured)
+        assert "OK (dust)" in all_text, \
+            f"header 應含 'OK (dust)'，實 putText: {captured}"
+
+    def test_header_shows_ng_verdict(self, tmp_path, monkeypatch):
+        """普通 NG case header 寫 'NG'"""
+        captured = []
+        _real = cv2.putText
+        def cap(img, text, *a, **kw):
+            captured.append(text)
+            return _real(img, text, *a, **kw)
+        monkeypatch.setattr("capi_heatmap.cv2.putText", cap)
+
+        ed = _make_cv_fusion_defect()
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        saver._save_cv_fusion_edge_image(
+            save_dir=tmp_path, image_name="b5ng", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=None,
+            dust_check_fn=None,
+        )
+        all_text = " ".join(captured)
+        assert " NG" in all_text, f"header 應含 'NG'，實 putText: {captured}"
+
+    def test_header_shows_cov_when_dust_check_runs(self, tmp_path, monkeypatch):
+        """OMIT + dust_check_fn 有跑 + is_dust=True → header 含 'COV=' 字串"""
+        captured = []
+        _real = cv2.putText
+        def cap(img, text, *a, **kw):
+            captured.append(text)
+            return _real(img, text, *a, **kw)
+        monkeypatch.setattr("capi_heatmap.cv2.putText", cap)
+
+        def stub(img):
+            m = np.zeros(img.shape[:2], dtype=np.uint8)
+            m[50:100, 50:100] = 255
+            return True, m, 0.1, ""
+
+        ed = _make_cv_fusion_defect()
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        omit = np.full((2000, 2000), 160, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        saver._save_cv_fusion_edge_image(
+            save_dir=tmp_path, image_name="b5cov", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=omit,
+            dust_check_fn=stub,
+        )
+        all_text = " ".join(captured)
+        assert "COV=" in all_text, f"header 應含 'COV='，實 putText: {captured}"

@@ -1152,11 +1152,37 @@ class HeatmapManager:
         composite = np.hstack(spaced)
         comp_h, comp_w = composite.shape[:2]
 
+        # Verdict 分類
+        if is_bomb:
+            verdict = "BOMB (filter OK)"; v_color = (255, 0, 255)
+        elif is_cv_ok:
+            verdict = "OK (CV filtered)"; v_color = (0, 255, 0)
+        elif is_dust:
+            verdict = "OK (dust)"; v_color = (0, 255, 0)
+        else:
+            verdict = "NG"; v_color = (0, 0, 255)
+
+        # COV 值（若有跑 dust_check + 有 defect + is_dust_detected）
+        cov_text = ""
+        if (defect_mask_p3 is not None
+                and dust_mask_omit is not None
+                and is_dust_detected):
+            if dust_mask_omit.shape != defect_mask_p3.shape[:2]:
+                dust_cmp = cv2.resize(dust_mask_omit, defect_mask_p3.shape[::-1],
+                                       interpolation=cv2.INTER_NEAREST)
+            else:
+                dust_cmp = dust_mask_omit
+            inter = int(np.count_nonzero((defect_mask_p3 > 0) & (dust_cmp > 0)))
+            defect_area = max(1, int(np.count_nonzero(defect_mask_p3 > 0)))
+            cov_val = inter / defect_area
+            metric_label = "COV" if dust_metric == "coverage" else "IOU"
+            cov_text = f" | {metric_label}={cov_val:.2f}"
+
         header_h = 50
         header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
-        header_text = f"CV Edge: {side} | MaxDiff:{max_diff} | Area:{area}px"
-        cv2.putText(header, header_text, (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (220, 220, 220), 2)
+        info_part = f"CV Edge: {side} | MaxDiff:{max_diff} | Area:{area}px{cov_text} | "
+        self._draw_split_color_header(header, info_part, verdict, v_color,
+                                       y=30, font_scale=0.65)
 
         label_h = 40
         label_bar = np.zeros((label_h, comp_w, 3), dtype=np.uint8)
