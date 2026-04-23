@@ -613,6 +613,18 @@ class HeatmapManager:
                 full_image, omit_image,
                 dust_check_fn=dust_check_fn,
             )
+        # Phase 7.2-B: fusion 的 CV defect 走新 3 板 renderer
+        if inspector_mode == 'fusion' and source_inspector == 'cv':
+            return self._save_cv_fusion_edge_image(
+                save_dir, image_name, edge_index, edge_defect,
+                full_image, omit_image,
+                edge_config=edge_config,
+                dust_check_fn=dust_check_fn,
+                dust_iou_threshold=dust_iou_threshold,
+                dust_metric=dust_metric,
+                panel_polygon=getattr(edge_defect, 'panel_polygon', None),
+            )
+        # 四邊 CV / 非 fusion CV 繼續走舊主分支（保留現有 4 板邏輯）
 
         bx, by, bw, bh = edge_defect.bbox
         max_diff = edge_defect.max_diff
@@ -968,6 +980,33 @@ class HeatmapManager:
         filepath = save_dir / filename
         cv2.imwrite(str(filepath), final)
 
+        return str(filepath)
+
+    def _save_cv_fusion_edge_image(
+        self,
+        save_dir: Path,
+        image_name: str,
+        edge_index: int,
+        edge_defect: Any,
+        full_image: np.ndarray,
+        omit_image: np.ndarray = None,
+        edge_config: Any = None,
+        dust_check_fn: Any = None,
+        dust_iou_threshold: float = 0.3,
+        dust_metric: str = "coverage",
+        panel_polygon: Optional[np.ndarray] = None,
+    ) -> str:
+        """Phase 7.2-B: Fusion 模式 CV defect 3 板組合圖（Detection / OMIT+Dust / Overlap）。
+
+        目前是空殼回傳占位圖；B2-B5 會逐步實作三板內容與 header。
+        """
+        h, w = 50 + 400 + 40, 1200
+        placeholder = np.zeros((h, w, 3), dtype=np.uint8)
+        cv2.putText(placeholder, "CV Fusion Renderer (TBD)", (20, h // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
+        filename = f"edge_cvfusion_{image_name}_{edge_defect.side}_{edge_index}.{self.save_format}"
+        filepath = save_dir / filename
+        cv2.imwrite(str(filepath), placeholder)
         return str(filepath)
 
     def _save_patchcore_edge_image(
