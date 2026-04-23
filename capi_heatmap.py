@@ -247,10 +247,9 @@ class HeatmapManager:
         cv2.putText(header, info, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (220, 220, 220), 2)
         (info_w, _), _ = cv2.getTextSize(info, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2)
-        # verdict 大字（緊跟 info，但至少從 header 中央開始以確保視覺突出）
+        # verdict 大字（緊跟 info 後方）
         verdict_scale = font_scale * 1.5
-        verdict_x = max(10 + info_w, width // 2)
-        cv2.putText(header, verdict, (verdict_x, 32),
+        cv2.putText(header, verdict, (10 + info_w, 32),
                     cv2.FONT_HERSHEY_SIMPLEX, verdict_scale, verdict_color, 2)
         # 右側 extra 字（若有）
         if extra_right:

@@ -27,17 +27,19 @@ class TestRenderEdgeHeader:
     def test_verdict_uses_correct_color(self):
         """NG 區塊應有紅色像素、OK 區塊應有綠色像素"""
         saver = HeatmapManager(base_dir=".", save_format="png")
+        # 用 realistic 長 info（與 PC/CV renderer 實際情況相近）讓 verdict 落在右半部
+        long_info = "PC Edge [v1]: aoi_edge | Score:0.764>=Thr:0.500 | Area:95288px | "
         img_ng = saver._render_edge_header(
-            width=800, info="X | ", verdict="NG", verdict_color=(0, 0, 255),
+            width=1200, info=long_info, verdict="NG", verdict_color=(0, 0, 255),
         )
         img_ok = saver._render_edge_header(
-            width=800, info="X | ", verdict="OK", verdict_color=(0, 255, 0),
+            width=1200, info=long_info, verdict="OK", verdict_color=(0, 255, 0),
         )
         # NG header 右側區塊掃 red pixel 數量
-        right_ng = img_ng[:, 400:]
+        right_ng = img_ng[:, 600:]
         red = (right_ng[:, :, 2] > 150) & (right_ng[:, :, 0] < 80)
         assert np.sum(red) > 5, "NG verdict 應畫紅字"
-        right_ok = img_ok[:, 400:]
+        right_ok = img_ok[:, 600:]
         green = (right_ok[:, :, 1] > 150) & (right_ok[:, :, 0] < 80) & (right_ok[:, :, 2] < 80)
         assert np.sum(green) > 5, "OK verdict 應畫綠字"
 
