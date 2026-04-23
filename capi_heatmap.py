@@ -1009,10 +1009,20 @@ class HeatmapManager:
             fg_mask = np.ones(roi.shape[:2], dtype=np.uint8) * 255
 
         roi_bgr = ensure_bgr(roi)
-        panel_orig = render_pc_masked_roi(roi_bgr, fg_mask)
-        h_roi, w_roi = panel_orig.shape[:2]
-        cv2.circle(panel_orig, (w_roi // 2, h_roi // 2), 15, (0, 255, 255),
-                   thickness=2, lineType=cv2.LINE_AA)
+        # Phase 7.2 A1: Panel 1 改 AOI centered raw crop，不疊 mask / marker
+        cx, cy = int(center[0]), int(center[1])
+        tile_size = roi.shape[0] if roi is not None else 512
+        half = tile_size // 2
+        img_h, img_w = full_image.shape[:2]
+        shape = (tile_size, tile_size, 3) if full_image.ndim == 3 else (tile_size, tile_size)
+        raw_canvas = np.zeros(shape, dtype=full_image.dtype)
+        sx1 = max(0, cx - half); sy1 = max(0, cy - half)
+        sx2 = min(img_w, cx + half); sy2 = min(img_h, cy + half)
+        if sx2 > sx1 and sy2 > sy1:
+            dx1 = sx1 - (cx - half); dy1 = sy1 - (cy - half)
+            dx2 = dx1 + (sx2 - sx1); dy2 = dy1 + (sy2 - sy1)
+            raw_canvas[dy1:dy2, dx1:dx2] = full_image[sy1:sy2, sx1:sx2]
+        panel_orig = ensure_bgr(raw_canvas)
 
         panel_heatmap = render_pc_overlay(roi_bgr, fg_mask, anomaly_map)
 
