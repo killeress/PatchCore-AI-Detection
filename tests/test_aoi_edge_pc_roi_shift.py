@@ -359,10 +359,11 @@ class TestInspectRoiFusionShifted:
         assert captured["tile_x"] == -152, \
             f"shift disabled, expected centered origin -152, got {captured['tile_x']}"
 
-    def test_fallback_when_verify_fails_concave(self, fusion_inferencer):
-        """凹角 polygon 偏移後其他邊侵入 → fallback 到 centered + band_mask"""
+    def test_fallback_concave_polygon_l_shape(self, fusion_inferencer):
+        """L 形 polygon：shift 沿內凹口 inward normal → 另一條邊從另一側侵入
+        → classify 回 concave_polygon（兩條邊都在 band_px 內，不只是近邊沒清掉）
+        """
         inf = fusion_inferencer
-        # L 形 polygon，AOI 剛好在凹角附近
         l_shape = np.array([
             [0, 0], [2000, 0], [2000, 2000],
             [1000, 2000], [1000, 1000], [0, 1000],
@@ -373,8 +374,8 @@ class TestInspectRoiFusionShifted:
             captured, score=2.0, hot_region=(240, 280, 240, 280), hot_value=2.0
         )
 
-        # AOI at (100, 900)，接近 left 邊 → 會嘗試 shift 右 192 → PC ROI 在 [36, 548] x [644, 1156]
-        # 這時下方凹角 (0,1000)-(1000,1000) 邊在 y=1000 穿過 PC ROI → verify fail → fallback
+        # AOI (100, 900)：與 left edge(x=0) 和 inner notch top(y=1000) 皆距 100
+        # shift 後兩條邊會同時在 band_px 內 → concave_polygon
         defects, stats = inf._inspect_roi_fusion(
             img, img_x=100, img_y=900, img_prefix="W0F",
             panel_polygon=l_shape, omit_image=None, omit_overexposed=False,
@@ -383,11 +384,35 @@ class TestInspectRoiFusionShifted:
         pc_def = [d for d in defects if d.source_inspector == "patchcore"]
         if pc_def:
             d = pc_def[0]
-            assert d.pc_roi_fallback_reason in ("concave_polygon", "shift_disabled", ""), \
-                f"fallback_reason unexpected: {d.pc_roi_fallback_reason}"
-            # fallback 後 shift 應為 0
-            if d.pc_roi_fallback_reason == "concave_polygon":
-                assert d.pc_roi_shift_dx == 0 and d.pc_roi_shift_dy == 0
+            assert d.pc_roi_fallback_reason == "concave_polygon", \
+                f"L 形 fallback reason 應為 concave_polygon，實為 {d.pc_roi_fallback_reason}"
+            assert d.pc_roi_shift_dx == 0 and d.pc_roi_shift_dy == 0, \
+                "concave_polygon fallback 後 shift 應為 0"
+
+    def test_fallback_shift_insufficient_straight_edge(self, fusion_inferencer):
+        """AOI 距邊極近（d_edge=20），max_shift=192 清不掉 polygon edge →
+        classify 回 shift_insufficient（不是 concave — polygon 是普通四邊形）
+        """
+        inf = fusion_inferencer
+        img, poly = self._image_and_polygon()
+        captured = {}
+        inf.predict_tile = _capturing_predict_tile(
+            captured, score=2.0, hot_region=(240, 280, 240, 280), hot_value=2.0
+        )
+
+        # AOI (1000, 20)：距 top edge 20 px；needed shift = 40 - (20-256) = 276 > max 192
+        # 即使 shift 192 下去，PC ROI 上緣仍距 polygon top 不到 40 → verify fail
+        defects, stats = inf._inspect_roi_fusion(
+            img, img_x=1000, img_y=20, img_prefix="W0F",
+            panel_polygon=poly, omit_image=None, omit_overexposed=False,
+        )
+
+        pc_def = [d for d in defects if d.source_inspector == "patchcore"]
+        assert len(pc_def) == 1, "expected 1 PC defect"
+        d = pc_def[0]
+        assert d.pc_roi_fallback_reason == "shift_insufficient", \
+            f"straight edge clamped 應為 shift_insufficient，實為 {d.pc_roi_fallback_reason}"
+        assert d.pc_roi_shift_dx == 0 and d.pc_roi_shift_dy == 0
 
 
 # =========================================================================

@@ -63,6 +63,31 @@ capi_server.py:772  →  EdgeInspectionConfig.from_db_params(db_dict)
 - **Code**：`_detect_thin_lines()` + `_group_true_runs()` in `capi_edge_cv.py`
 - **驗證**：模擬測試：垂直虛線 (30 點, 間距 5) 被抓；1×12 雜訊條紋 (< 30) 被擋；低對比紋理塊 (max_diff=6) 被 min_max_diff 擋。三路各司其職。
 
+### Phase 7.1b — PC ROI fallback 原因精細分類 (2026-04-23)
+
+- **動機**：現場觀察推論 log / record_detail 只看到 `concave_polygon` 一種 fallback
+  reason，但實際上常見 panel 是普通四邊形、只是 AOI 離邊太近導致 max_shift 不足，命名誤導。
+- **設計決策**：拆成兩個更精確的分類（回傳值皆為小寫下底線）：
+  - `shift_insufficient`：唯一侵入 PC ROI 的是「AOI 最近的那條邊」→ shift 方向正確，
+    只是 `max_shift = roi_size/2 - aoi_margin_px = 192` 不夠清開。常見於 axis-aligned
+    四邊形 + AOI 距邊極近（d_edge < band_px + aoi_margin_px）。
+  - `concave_polygon`：多條邊同時違反 OR 唯一違反的不是最近邊 → polygon 形狀導致
+    shift 沿單一 inward normal 無法清場；典型 L 形、C 形凹角。
+- **判別邏輯**：`classify_pc_roi_verify_failure` 對 polygon 所有邊計算與 PC ROI 的距離，
+  蒐集所有 < band_px 的邊 index；若僅 1 條違反 且 正好是最近邊 → `shift_insufficient`，
+  其餘 → `concave_polygon`。
+- **Code**：
+  - `capi_edge_cv.py::classify_pc_roi_verify_failure` 新 helper
+  - `capi_inference.py` fusion verify fail 時改呼叫 classifier
+  - `templates/record_detail.html` PC Shift 欄 badge 加兩種分類對應中文 + tooltip
+  - `capi_heatmap.py` PC badge 文字對應三種 fallback (`shift_insufficient` / `concave_polygon` / `shift_disabled`)
+  - `capi_inference.py` AOI loop print 加中文註解 (e.g. `PC-FB=shift_insufficient(偏移不足)`)
+- **測試**：
+  - `test_fallback_shift_insufficient_straight_edge`：大矩形 polygon + AOI (1000,20)
+    → `shift_insufficient`
+  - `test_fallback_concave_polygon_l_shape`：L 形 + AOI 於凹口附近 → `concave_polygon`
+  - 全套迴歸 27 項全綠（Phase 7 原 22 + Phase 7.1 collapse 4 + 2 個新 classify）
+
 ### Phase 7.1 — Fusion 結果 collapse 成每 AOI 1 筆代表 defect (2026-04-23)
 
 - **動機**：Phase 7 上線後現場觀察：2 個 AOI 座標吐 8 行結果

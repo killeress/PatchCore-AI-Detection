@@ -246,6 +246,70 @@ def verify_polygon_clear_of_pc_roi(
     return True
 
 
+def classify_pc_roi_verify_failure(
+    aoi_xy: Tuple[int, int],
+    pc_roi_origin: Tuple[int, int],
+    roi_size: int,
+    polygon: np.ndarray,
+    band_px: int,
+) -> str:
+    """Phase 7.1 — fallback 原因分類（verify 失敗時呼叫）。
+
+    區分兩種常見情境以產生更精確的 UI / log tag：
+
+    - `shift_insufficient`：唯一侵入 PC ROI 的 polygon 線段就是「AOI 最近的那條邊」
+      —— 代表 shift 方向正確，只是 max_shift (= roi_size/2 - aoi_margin_px) 不足以
+      把這條邊清到 band_px 之外。常見於 axis-aligned 四邊形 + AOI 距邊極近的情境。
+
+    - `concave_polygon`：有多條邊同時侵入，或唯一侵入的邊不是最近邊 →
+      polygon 形狀導致 shift 沿單一 inward normal 無法清場；典型為凹角 / L 形。
+
+    Args:
+        aoi_xy: AOI 座標 panel 絕對座標
+        pc_roi_origin: shifted PC ROI 左上角
+        roi_size: ROI 邊長
+        polygon: panel polygon Nx2
+        band_px: 判定門檻（同 fusion band 寬度）
+
+    Returns:
+        "shift_insufficient" 或 "concave_polygon"
+    """
+    if polygon is None or len(polygon) < 2:
+        return "concave_polygon"  # 防呆：理論上 caller 不該在此情況下來
+
+    # 找 AOI 最近邊的 index（與 compute_pc_roi_offset 同演算法，確保一致）
+    n = len(polygon)
+    best_d = float("inf")
+    nearest_edge_idx = 0
+    for i in range(n):
+        ax, ay = float(polygon[i][0]), float(polygon[i][1])
+        bx, by = float(polygon[(i + 1) % n][0]), float(polygon[(i + 1) % n][1])
+        d, _, _ = _point_to_segment_distance(
+            float(aoi_xy[0]), float(aoi_xy[1]), ax, ay, bx, by
+        )
+        if d < best_d:
+            best_d = d
+            nearest_edge_idx = i
+
+    # 找所有違反 band_px 的邊 index
+    ox, oy = pc_roi_origin
+    x1, y1 = float(ox), float(oy)
+    x2, y2 = float(ox + roi_size), float(oy + roi_size)
+    violating_indices = []
+    for i in range(n):
+        ax, ay = float(polygon[i][0]), float(polygon[i][1])
+        bx, by = float(polygon[(i + 1) % n][0]), float(polygon[(i + 1) % n][1])
+        dist = _segment_to_rect_distance(ax, ay, bx, by, x1, y1, x2, y2)
+        if dist < band_px:
+            violating_indices.append(i)
+
+    # 僅 1 條邊違反 且 正好是最近邊 → shift_insufficient
+    # 其他情境（多邊違反 或 違反的不是最近邊）→ concave_polygon
+    if len(violating_indices) == 1 and violating_indices[0] == nearest_edge_idx:
+        return "shift_insufficient"
+    return "concave_polygon"
+
+
 def _segment_to_rect_distance(
     ax: float, ay: float, bx: float, by: float,
     rx1: float, ry1: float, rx2: float, ry2: float,

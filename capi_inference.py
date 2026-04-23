@@ -89,7 +89,7 @@ except Exception as _e:
     )
 
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
-from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff, compute_boundary_band_mask, compute_pc_roi_offset, verify_polygon_clear_of_pc_roi
+from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff, compute_boundary_band_mask, compute_pc_roi_offset, verify_polygon_clear_of_pc_roi, classify_pc_roi_verify_failure
 from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
 from scratch_filter import ScratchFilter
 
@@ -3323,7 +3323,14 @@ class CAPIInferencer:
             ):
                 use_shifted = True
             else:
-                pc_fallback_reason = "concave_polygon"
+                # Phase 7.1 — 精細 fallback 原因分類
+                pc_fallback_reason = classify_pc_roi_verify_failure(
+                    aoi_xy=(img_x, img_y),
+                    pc_roi_origin=pc_roi_origin_candidate,
+                    roi_size=tile_size,
+                    polygon=polygon_int,
+                    band_px=band_px,
+                )
                 shift_vec = (0, 0)
 
         if use_shifted:
@@ -4176,7 +4183,17 @@ class CAPIInferencer:
                                             detected = True
                                             shift_tag = f" shift=({d.pc_roi_shift_dx:+d},{d.pc_roi_shift_dy:+d})" \
                                                         if (d.pc_roi_shift_dx or d.pc_roi_shift_dy) else ""
-                                            fb_tag = f" pcfb={d.pc_roi_fallback_reason}" if d.pc_roi_fallback_reason else ""
+                                            # Phase 7.1 — pcfb 標示改用精確分類
+                                            if d.pc_roi_fallback_reason == "shift_insufficient":
+                                                fb_tag = " PC-FB=shift_insufficient(偏移不足)"
+                                            elif d.pc_roi_fallback_reason == "concave_polygon":
+                                                fb_tag = " PC-FB=concave_polygon(凹角)"
+                                            elif d.pc_roi_fallback_reason == "shift_disabled":
+                                                fb_tag = " PC-FB=shift_disabled(內移停用)"
+                                            elif d.pc_roi_fallback_reason:
+                                                fb_tag = f" PC-FB={d.pc_roi_fallback_reason}"
+                                            else:
+                                                fb_tag = ""
                                             print(f"  🔍 AOI Coord Fusion edge ({edef.defect_code}) "
                                                   f"@ ({img_x},{img_y}): src={d.source_inspector} "
                                                   f"score={d.patchcore_score:.3f} max_diff={d.max_diff} "
@@ -4206,7 +4223,17 @@ class CAPIInferencer:
                                             fb = fusion_stats.get("fusion_fallback_reason", "")
                                             shift_tag = f" shift=({pc_shift[0]:+d},{pc_shift[1]:+d})" \
                                                         if (pc_shift[0] or pc_shift[1]) else ""
-                                            pcfb_tag = f" pcfb={pc_fb}" if pc_fb else ""
+                                            # Phase 7.1 — 精確 fallback 分類標記
+                                            if pc_fb == "shift_insufficient":
+                                                pcfb_tag = " PC-FB=shift_insufficient(偏移不足)"
+                                            elif pc_fb == "concave_polygon":
+                                                pcfb_tag = " PC-FB=concave_polygon(凹角)"
+                                            elif pc_fb == "shift_disabled":
+                                                pcfb_tag = " PC-FB=shift_disabled(內移停用)"
+                                            elif pc_fb:
+                                                pcfb_tag = f" PC-FB={pc_fb}"
+                                            else:
+                                                pcfb_tag = ""
                                             print(f"  ✅ AOI Coord Fusion edge ({edef.defect_code}) @ ({img_x},{img_y}): OK"
                                                   f"{' (fallback=' + fb + ')' if fb else ''}"
                                                   f"{shift_tag}{pcfb_tag}")
