@@ -182,3 +182,40 @@ class TestCVFusionPanel2OMITDust:
         px = out[p2_cy, p2_cx]
         assert px[0] > px[2] + 30, \
             f"Panel 2 dust 區應偏藍 B>R+30，實 B={px[0]} R={px[2]}"
+
+
+class TestCVFusionPanel3Overlap:
+    """Panel 3: OMIT 底 + 紅 defect + 藍 dust + 紫色交集"""
+
+    def test_panel3_has_purple_intersection(self, tmp_path):
+        """defect mask 與 dust mask 交集處出現紫色像素 (B 高 R 高 G 低)"""
+        omit = np.full((2000, 2000), 160, dtype=np.uint8)
+
+        def stub_dust(img):
+            h, w = img.shape[:2]
+            m = np.zeros((h, w), dtype=np.uint8)
+            # dust mask 覆蓋 ROI 中央
+            m[h // 2 - 50:h // 2 + 50, w // 2 - 50:w // 2 + 50] = 255
+            return True, m, 0.1, ""
+
+        # cv_filtered_mask 也在中央，與 dust mask 重疊
+        cv_mask = np.zeros((200, 200), dtype=np.uint8)
+        cv_mask[95:115, 95:115] = 255
+        ed = _make_cv_fusion_defect(cv_filtered_mask=cv_mask, cv_mask_offset=(850, 350))
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        path = saver._save_cv_fusion_edge_image(
+            save_dir=tmp_path, image_name="b4ov", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=omit,
+            dust_check_fn=stub_dust,
+        )
+        out = cv2.imread(path)
+        h, w = out.shape[:2]
+        panel_w_approx = w // 3
+        header_h = 50; panel_h = 400
+        p3_left = panel_w_approx * 2 + 20
+        panel3 = out[header_h:header_h + panel_h, p3_left:w - 5]
+        # 紫色像素：B > 150, G < 80, R > 150
+        purple = (panel3[:, :, 0] > 150) & (panel3[:, :, 1] < 80) & (panel3[:, :, 2] > 150)
+        assert np.sum(purple) > 5, \
+            f"Panel 3 應有紫色像素 (紅∩藍交集)，實 {np.sum(purple)} px"
