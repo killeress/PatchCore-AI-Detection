@@ -2334,10 +2334,12 @@ class CAPIInferencer:
             high_cov_thr = getattr(self.config, 'dust_high_cov_threshold', 0.5)
             is_dust_region = region_coverage >= iou_threshold and (peak_in_dust or region_coverage >= high_cov_thr)
 
-            # 殘餘異常檢查：即使 peak 在灰塵上，若非灰塵區域仍有強異常信號則 rescue
+            # 殘餘異常檢查：僅在 peak 位於灰塵上時觸發，檢查非灰塵區是否藏有次峰真實缺陷
             # 解決「灰塵信號遮蔽同區域內細微真實缺陷」的漏檢問題
+            # 注意: peak_in_dust=False 時 peak 本身即在 non_dust 區，residual_ratio 必為 1.0，
+            # 會誤抵消上方 high_cov_thr 的救援，因此必須加上 peak_in_dust 前提
             residual_ratio = 0.0
-            if is_dust_region:
+            if is_dust_region and peak_in_dust:
                 non_dust_in_region = region_mask & (~dust_bool)
                 if np.any(non_dust_in_region):
                     sub_peak_score = float(np.max(anomaly_map_f[non_dust_in_region]))
