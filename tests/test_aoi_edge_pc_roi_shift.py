@@ -388,3 +388,162 @@ class TestInspectRoiFusionShifted:
             # fallback 後 shift 應為 0
             if d.pc_roi_fallback_reason == "concave_polygon":
                 assert d.pc_roi_shift_dx == 0 and d.pc_roi_shift_dy == 0
+
+
+# =========================================================================
+# Slice 9: fusion collapse — 每 AOI 座標最多 1 筆代表 defect
+# =========================================================================
+
+class TestFusionCollapseToRepresentative:
+    """Phase 7.1: fusion 結果 collapse 邏輯
+
+    規則 (real_NG 優先 > dust)：
+      1. 若有 real NG：PC > CV；CV 內 max area 取一
+      2. 全 dust：取任一保留 dust 旗標
+      3. 空 list：回空
+    Debug path 用 collapse_to_representative=False 保留全細節
+    """
+
+    @pytest.fixture
+    def fusion_inferencer(self):
+        cfg = CAPIConfig()
+        cfg.tile_size = 512
+        cfg.anomaly_threshold = 1.0
+        cfg.threshold_mapping = {}
+        cfg.model_mapping = {}
+        cfg.patchcore_min_area = 10
+        cfg.patchcore_filter_enabled = False
+        cfg.patchcore_concentration_enabled = False
+        inf = CAPIInferencer(cfg, threshold=1.0)
+        inf._get_inferencer_for_prefix = lambda _p: MagicMock()
+        inf._get_threshold_for_prefix = lambda _p: 1.0
+        inf.edge_inspector.config.aoi_edge_inspector = "fusion"
+        inf.edge_inspector.config.aoi_edge_boundary_band_px = 40
+        inf.edge_inspector.config.aoi_edge_pc_roi_inward_shift_enabled = True
+        inf.check_dust_or_scratch_feature = lambda img, **kw: (False, None, 0.0, "")
+        return inf
+
+    def _image_and_poly(self):
+        img = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        return img, BIG_SQUARE.astype(np.float32)
+
+    def test_multi_cv_band_collapsed_to_largest_area(self, fusion_inferencer):
+        """CV 回 3 個 component → collapse 後只剩 1 筆（面積最大）"""
+        inf = fusion_inferencer
+        img, poly = self._image_and_poly()
+
+        def _cv_stub(roi, offset_x, offset_y, **kw):
+            # 3 個 CV defect，area 不同，center 都在 band 內（AOI 近左邊 x=104）
+            defects = []
+            # AOI at (104, 1000)，band 大約 ROI x∈[60,140] 的 polygon 內側
+            for cx, area in [(10, 37), (30, 65), (20, 58)]:  # 65 最大
+                ed = EdgeDefect(
+                    side="aoi_edge", area=area,
+                    bbox=(max(0, cx - 3), 1000 - 3, 6, 6),
+                    center=(cx, 1000), max_diff=7,
+                )
+                ed.cv_filtered_mask = np.full((512, 512), 255, dtype=np.uint8)
+                ed.cv_mask_offset = (offset_x, offset_y)
+                defects.append(ed)
+            return defects, {"max_diff": 7, "max_area": 65,
+                              "threshold": 4, "min_area": 40, "min_max_diff": 20}
+        inf.edge_inspector.inspect_roi = _cv_stub
+
+        def _pt(tile, **kw):
+            return 0.0, np.zeros((512, 512), dtype=np.float32)
+        inf.predict_tile = _pt
+
+        defects, stats = inf._inspect_roi_fusion(
+            img, img_x=104, img_y=1000, img_prefix="W0F",
+            panel_polygon=poly, omit_image=None, omit_overexposed=False,
+        )
+
+        assert len(defects) == 1, f"expected 1 collapsed defect, got {len(defects)}"
+        assert defects[0].source_inspector == "cv"
+        assert defects[0].area == 65, f"expected largest area 65, got {defects[0].area}"
+        # stats 應保留原始計數供診斷
+        assert stats.get("pre_collapse_count", 0) == 3
+
+    def test_pc_wins_over_cv_when_both_ng(self, fusion_inferencer):
+        """CV 3 筆 + PC 1 筆 → collapse 後取 PC"""
+        inf = fusion_inferencer
+        img, poly = self._image_and_poly()
+
+        def _cv_stub(roi, offset_x, offset_y, **kw):
+            defects = []
+            for cx, area in [(10, 37), (30, 65), (20, 58)]:
+                ed = EdgeDefect(
+                    side="aoi_edge", area=area,
+                    bbox=(max(0, cx - 3), 1000 - 3, 6, 6),
+                    center=(cx, 1000), max_diff=7,
+                )
+                ed.cv_filtered_mask = np.full((512, 512), 255, dtype=np.uint8)
+                ed.cv_mask_offset = (offset_x, offset_y)
+                defects.append(ed)
+            return defects, {"max_diff": 7, "max_area": 65,
+                              "threshold": 4, "min_area": 40, "min_max_diff": 20}
+        inf.edge_inspector.inspect_roi = _cv_stub
+
+        def _pt(tile, **kw):
+            amap = np.zeros((512, 512), dtype=np.float32)
+            amap[240:280, 240:280] = 2.0  # > thr=1.0
+            return 2.0, amap
+        inf.predict_tile = _pt
+
+        defects, stats = inf._inspect_roi_fusion(
+            img, img_x=104, img_y=1000, img_prefix="W0F",
+            panel_polygon=poly, omit_image=None, omit_overexposed=False,
+        )
+
+        assert len(defects) == 1
+        assert defects[0].source_inspector == "patchcore", \
+            f"expected PC to win, got {defects[0].source_inspector}"
+        assert stats.get("pre_collapse_count", 0) == 4  # 3 CV + 1 PC
+
+    def test_empty_defects_returns_empty(self, fusion_inferencer):
+        """fusion 全 clean → 回空 list（OK 由 caller 處理）"""
+        inf = fusion_inferencer
+        img, poly = self._image_and_poly()
+        inf.edge_inspector.inspect_roi = lambda roi, **kw: (
+            [], {"max_diff": 0, "max_area": 0, "threshold": 4,
+                 "min_area": 40, "min_max_diff": 20}
+        )
+        def _pt(tile, **kw):
+            return 0.0, np.zeros((512, 512), dtype=np.float32)
+        inf.predict_tile = _pt
+
+        defects, stats = inf._inspect_roi_fusion(
+            img, img_x=104, img_y=1000, img_prefix="W0F",
+            panel_polygon=poly, omit_image=None, omit_overexposed=False,
+        )
+        assert len(defects) == 0
+
+    def test_debug_mode_preserves_all_defects(self, fusion_inferencer):
+        """collapse_to_representative=False → 回全部 defect"""
+        inf = fusion_inferencer
+        img, poly = self._image_and_poly()
+
+        def _cv_stub(roi, offset_x, offset_y, **kw):
+            defects = []
+            for cx, area in [(10, 37), (30, 65), (20, 58)]:
+                ed = EdgeDefect(
+                    side="aoi_edge", area=area,
+                    bbox=(max(0, cx - 3), 1000 - 3, 6, 6),
+                    center=(cx, 1000), max_diff=7,
+                )
+                ed.cv_filtered_mask = np.full((512, 512), 255, dtype=np.uint8)
+                ed.cv_mask_offset = (offset_x, offset_y)
+                defects.append(ed)
+            return defects, {"max_diff": 7, "max_area": 65,
+                              "threshold": 4, "min_area": 40, "min_max_diff": 20}
+        inf.edge_inspector.inspect_roi = _cv_stub
+        def _pt(tile, **kw):
+            return 0.0, np.zeros((512, 512), dtype=np.float32)
+        inf.predict_tile = _pt
+
+        defects, stats = inf._inspect_roi_fusion(
+            img, img_x=104, img_y=1000, img_prefix="W0F",
+            panel_polygon=poly, omit_image=None, omit_overexposed=False,
+            collapse_to_representative=False,
+        )
+        assert len(defects) == 3, f"debug mode should keep all 3, got {len(defects)}"

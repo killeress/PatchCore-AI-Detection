@@ -2517,6 +2517,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     panel_polygon=panel_polygon,
                     omit_image=None,           # debug 頁不做 OMIT 屏蔽
                     omit_overexposed=False,
+                    collapse_to_representative=False,  # Debug 頁保留全部細節
                 )
             finally:
                 cfg.aoi_edge_boundary_band_px = orig_band_px

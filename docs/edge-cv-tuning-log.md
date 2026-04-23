@@ -63,6 +63,27 @@ capi_server.py:772  →  EdgeInspectionConfig.from_db_params(db_dict)
 - **Code**：`_detect_thin_lines()` + `_group_true_runs()` in `capi_edge_cv.py`
 - **驗證**：模擬測試：垂直虛線 (30 點, 間距 5) 被抓；1×12 雜訊條紋 (< 30) 被擋；低對比紋理塊 (max_diff=6) 被 min_max_diff 擋。三路各司其職。
 
+### Phase 7.1 — Fusion 結果 collapse 成每 AOI 1 筆代表 defect (2026-04-23)
+
+- **動機**：Phase 7 上線後現場觀察：2 個 AOI 座標吐 8 行結果
+  - CV `inspect_roi` 單 ROI 內可吐多個 component（band 內 3 個黑點 → 3 筆）
+  - 相鄰 AOI 座標（距 67 px）的 512×512 ROI 重疊 → 同一個 defect 被兩顆 AOI 各抓一次
+  - UI 8 行難解讀，與使用者「1 AOI 座標 = 1 NG」的心智模型不符
+- **設計決策**：`_inspect_roi_fusion` 加 `collapse_to_representative=True` 參數（預設開）
+  - 優先序：real NG > dust；real NG 內 PC > CV；CV 內 max area（tiebreak max_diff）
+  - 全 dust：同優先序取代表，保留 dust 旗標
+  - 空 list：回空（OK 由 caller 處理）
+  - Debug endpoint 傳 `collapse_to_representative=False` 保留全細節供診斷
+- **Trade-off**：
+  - **(+)** 1 AOI 座標 = 1 result row，UI 清爽符合機台語意
+  - **(+)** stats 保留 `pre_collapse_count` / `cv_band_count` / `pc_interior_count` 供 log / 診斷
+  - **(−)** 遺失 band 內其他 component 明細（可在 debug 頁重跑看全部）
+- **Code**：
+  - `capi_inference.py::_inspect_roi_fusion` 末端加 collapse + stats 4 個診斷欄位
+  - `capi_web.py::_handle_api_debug_edge_corner_fusion` 傳 `collapse_to_representative=False`
+- **測試**：`tests/test_aoi_edge_pc_roi_shift.py::TestFusionCollapseToRepresentative` 4 項：
+  - 多 CV → 取最大 area / CV+PC → PC wins / 空 → 空 / debug 模式保留全部
+
 ### Phase 7 — Fusion PC ROI 內移避開 polygon 邊 (2026-04-23)
 
 - **動機**：Phase 6 上線觀察：fusion 雖在 scoring 層把 band 區從 PC 歸零，但 PC backbone
