@@ -148,6 +148,26 @@ capi_server.py:772  →  EdgeInspectionConfig.from_db_params(db_dict)
 4. 藍 band 虛線只做水平 dash，直邊呈連續線 → C 階段可改
    `dash_pattern[::4, :] = dash_pattern[:, ::4] = 255` 棋盤格點式
 
+### Phase 7.2-C — Header helper 統一 (2026-04-23)
+
+- **新增 `HeatmapManager._render_edge_header(width, info, verdict, verdict_color, extra_right="", height=50, font_scale=0.65)`**：
+  統一 PC/CV fusion 組合圖 header 建構；內部畫 info 白字 + verdict 放大 ×1.5 彩色字 +
+  可選 extra_right 右側灰字（font 0.5, thickness 1, BGR 180,180,255）
+- **PC renderer** (`_save_patchcore_edge_image`) 與 **CV fusion renderer**
+  (`_save_cv_fusion_edge_image`) header 段改呼叫 helper；刪除兩處 `np.zeros +
+  _draw_split_color_header + A4 extra_text putText` 重複碼
+- **Verdict 字放大 ×1.5** (font_scale 0.65 → 0.975)，thickness=2，突出強化現場判讀
+- **`_draw_split_color_header` 保留**：B0F 二值化 tile / 一般 tile heatmap 兩處仍在用，
+  scope 嚴守 edge defect 組合圖
+- **測試**：`tests/test_edge_viz_header.py` 3 項（size / verdict 色 / extra_right 渲染）；
+  全套 regression 202 passed / 2 skipped
+- **Important follow-up**（視覺抽檢時觀察）：
+  BOMB defect 的 verdict 字串較長（例：`BOMB: PCLV6GA0 (Filtered as OK)` ≈ 528 px × 1.5
+  scale），常見 PC info ≈ 715 px，兩者相加可能超出 composite width (1220 px)，BOMB
+  code 後半截可能被 cv2.putText 截掉。C3 階段選擇不自動 clamp，保持 layout 單純；
+  若現場抽檢確認截字問題，helper 可加一層 `if info_w + verdict_w > width - ...: scale down`
+  保護。
+
 ### Phase 7.1b — PC ROI fallback 原因精細分類 (2026-04-23)
 
 - **動機**：現場觀察推論 log / record_detail 只看到 `concave_polygon` 一種 fallback
