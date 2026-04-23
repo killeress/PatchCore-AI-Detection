@@ -73,7 +73,8 @@ capi_server.py:772  →  EdgeInspectionConfig.from_db_params(db_dict)
   - 優先序：real NG > dust；real NG 內 PC > CV；CV 內 max area（tiebreak max_diff）
   - 全 dust：同優先序取代表，保留 dust 旗標
   - 空 list：回空（OK 由 caller 處理）
-  - Debug endpoint 傳 `collapse_to_representative=False` 保留全細節供診斷
+  - **Debug endpoint 也用 collapse=True，與推論紀錄行為同步**（使用者要求：兩處顯示一致才好比對）
+  - 參數保留供未來診斷用途（單測覆蓋 `collapse=False` 分支）
 - **Trade-off**：
   - **(+)** 1 AOI 座標 = 1 result row，UI 清爽符合機台語意
   - **(+)** stats 保留 `pre_collapse_count` / `cv_band_count` / `pc_interior_count` 供 log / 診斷
