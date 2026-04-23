@@ -117,6 +117,37 @@ capi_server.py:772  →  EdgeInspectionConfig.from_db_params(db_dict)
 3. Panel 1 raw crop 與 Panel 3 OMIT crop 結構高度雷同（compute origin / zero canvas / clamp
    src,dst / paste），Phase C 可抽 `_aoi_centered_crop(src, origin, size)` helper。
 
+### Phase 7.2-B — CV fusion 組組合圖 3 板重構 (2026-04-23)
+
+- **新增 `_save_cv_fusion_edge_image`** renderer：`save_edge_defect_image` 分派規則
+  `inspector_mode='fusion' + source_inspector='cv'` → 新 renderer；四邊 CV 與非 fusion CV
+  仍走舊 4 板 `save_edge_defect_image` 主分支。
+- **Panel 1 CV Detection**：ROI 原圖 + 藍色 polygon band 虛線輪廓（polylines 外框 + erode
+  band_px 得內縮帶 + `[::4, :]` 水平 dash pattern）+ 紅色 `cv_filtered_mask` 半透明
+  overlay (BGR 0,0,255 alpha=0.55)；dust/bomb 改用橘/洋紅。
+- **Panel 2 OMIT + Dust**：OMIT 同 bbox+padding ROI 範圍擷取成 gray（未 OMIT fallback
+  黑底+"No OMIT" 字樣），`dust_check_fn` 直接收 `omit_sub` 不額外 cvtColor；藍色
+  dust overlay (BGR 255,100,0 alpha=0.5) 在 `is_dust_detected=True` 才畫。
+- **Panel 3 Overlap**：基底 OMIT；紅色 defect（dilated 3×3）alpha=0.55 + 藍色 dust
+  alpha=0.5 + 紫色純色 (BGR 220,0,180) 覆蓋紅∩藍交集，強化「表面匹配翻 OK 的視覺憑據」。
+- **Header**：`CV Edge: {side} | MaxDiff:{} | Area:{}px | COV={x.xx} | <VERDICT>`，
+  verdict 四分支（BOMB 洋紅 / OK (CV filtered) 綠 / OK (dust) 綠 / NG 紅）；COV 只在
+  defect + dust + is_dust_detected 三合一時計算與顯示。
+- **Cross-panel 變數**：`omit_sub` / `dust_mask_omit` / `is_dust_detected` / `defect_mask_p3`
+  在函式 scope 貫穿 Panel 2/3/header，避免重複計算。
+- **測試**：`tests/test_edge_viz_cv_fusion_panel.py` 11 項（dispatch 3 / Panel 1 2 /
+  Panel 2 2 / Panel 3 1 / Header 3）；全套 regression 199+ 綠。
+
+**Phase B 收尾 open items（留待 Phase C）：**
+1. Panel 1 的 defect paste + dilate 與 Panel 3 幾乎重複 → C 階段抽
+   `_paste_cv_mask_to_panel(panel, cv_mask, cv_mask_offset, rx1, ry1)` helper
+2. OMIT ROI crop 邏輯 3 處重複（CV 舊、PC shifted、B3 fusion）→ C 階段抽
+   `_crop_omit_sub(omit_image, ...)` helper
+3. Verdict 分類邏輯散在 CV 舊 renderer、PC renderer、新 CV fusion renderer 三處，
+   優先序略不同 → C 階段抽 `_classify_edge_verdict(edge_defect)` 統一
+4. 藍 band 虛線只做水平 dash，直邊呈連續線 → C 階段可改
+   `dash_pattern[::4, :] = dash_pattern[:, ::4] = 255` 棋盤格點式
+
 ### Phase 7.1b — PC ROI fallback 原因精細分類 (2026-04-23)
 
 - **動機**：現場觀察推論 log / record_detail 只看到 `concave_polygon` 一種 fallback
