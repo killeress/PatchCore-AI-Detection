@@ -1067,21 +1067,30 @@ class HeatmapManager:
 
         if omit_image is not None:
             try:
-                oh, ow = omit_image.shape[:2]
+                # Phase 7.2 A2: 先把 OMIT 標準化成 BGR 再擷取（避免 gray vs BGR broadcast 失敗）
+                omit_src = ensure_bgr(omit_image)
+                oh, ow = omit_src.shape[:2]
                 tile_size = roi.shape[0]
-                cx, cy = int(center[0]), int(center[1])
-                half = tile_size // 2
-                shape = (tile_size, tile_size, 3) if roi.ndim == 3 else (tile_size, tile_size)
-                omit_canvas = np.zeros(shape, dtype=roi.dtype)
-                osx1 = max(0, cx - half); osy1 = max(0, cy - half)
-                osx2 = min(ow, cx + half); osy2 = min(oh, cy + half)
+                # Phase 7.2 A2: OMIT 擷取改以 shifted ROI origin 為起點（pc_roi_origin_x/y）
+                ox_origin = int(getattr(edge_defect, "pc_roi_origin_x", 0))
+                oy_origin = int(getattr(edge_defect, "pc_roi_origin_y", 0))
+                # 舊 record 無 origin（預設 0,0）→ fallback 用 AOI center
+                if ox_origin == 0 and oy_origin == 0:
+                    cx, cy = int(center[0]), int(center[1])
+                    ox_origin = cx - tile_size // 2
+                    oy_origin = cy - tile_size // 2
+                omit_canvas = np.zeros((tile_size, tile_size, 3), dtype=omit_src.dtype)
+                osx1 = max(0, ox_origin); osy1 = max(0, oy_origin)
+                osx2 = min(ow, ox_origin + tile_size); osy2 = min(oh, oy_origin + tile_size)
                 if osx2 > osx1 and osy2 > osy1:
-                    odx1 = osx1 - (cx - half); ody1 = osy1 - (cy - half)
+                    odx1 = osx1 - ox_origin; ody1 = osy1 - oy_origin
                     odx2 = odx1 + (osx2 - osx1); ody2 = ody1 + (osy2 - osy1)
-                    omit_canvas[ody1:ody2, odx1:odx2] = omit_image[osy1:osy2, osx1:osx2]
-                omit_panel = cv2.resize(ensure_bgr(omit_canvas), (panel_w, panel_h))
+                    omit_canvas[ody1:ody2, odx1:odx2] = omit_src[osy1:osy2, osx1:osx2]
+                omit_panel = cv2.resize(omit_canvas, (panel_w, panel_h))
                 panels.append(omit_panel)
-                labels.append("OMIT ROI")
+                labels.append("OMIT ROI (shifted)" if (
+                    edge_defect.pc_roi_shift_dx or edge_defect.pc_roi_shift_dy
+                ) else "OMIT ROI")
             except Exception as e:
                 print(f"⚠️ PatchCore edge OMIT panel 失敗: {e}")
 
