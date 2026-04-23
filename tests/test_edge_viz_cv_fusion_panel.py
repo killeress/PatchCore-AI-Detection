@@ -129,3 +129,56 @@ class TestCVFusionPanel1Detection:
         blue_pixels = (panel1[:, :, 0] > 150) & (panel1[:, :, 2] < 100)
         assert np.sum(blue_pixels) > 10, \
             f"Panel 1 應該有藍色 band 輪廓像素（>10 px），實 {np.sum(blue_pixels)}"
+
+
+class TestCVFusionPanel2OMITDust:
+    """Panel 2: OMIT 同 ROI + 藍色 dust overlay"""
+
+    def test_panel2_shows_omit_gray(self, tmp_path):
+        """Panel 2 中心像素應反映 OMIT 原圖灰度（180），不是黑 placeholder (40)"""
+        omit = np.full((2000, 2000), 180, dtype=np.uint8)
+        ed = _make_cv_fusion_defect()
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        path = saver._save_cv_fusion_edge_image(
+            save_dir=tmp_path, image_name="b3omit", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=omit,
+            dust_check_fn=None,
+        )
+        out = cv2.imread(path)
+        h, w = out.shape[:2]
+        panel_w_approx = w // 3
+        header_h = 50; panel_h = 400
+        p2_cx = panel_w_approx + panel_w_approx // 2 + 5
+        p2_cy = header_h + panel_h // 2
+        px = out[p2_cy, p2_cx]
+        assert 120 < px[0] < 200 and 120 < px[1] < 200 and 120 < px[2] < 200, \
+            f"Panel 2 應為灰 OMIT (~180)，實 {px.tolist()}"
+
+    def test_panel2_has_blue_dust_overlay(self, tmp_path):
+        """dust_check_fn 回傳 mask + is_dust=True 時 Panel 2 對應區塊偏藍"""
+        omit = np.full((2000, 2000), 180, dtype=np.uint8)
+
+        def stub_dust(img):
+            h, w = img.shape[:2]
+            m = np.zeros((h, w), dtype=np.uint8)
+            m[h // 2 - 30:h // 2 + 30, w // 2 - 30:w // 2 + 30] = 255
+            return True, m, 0.1, ""
+
+        ed = _make_cv_fusion_defect()
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        path = saver._save_cv_fusion_edge_image(
+            save_dir=tmp_path, image_name="b3dust", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=omit,
+            dust_check_fn=stub_dust,
+        )
+        out = cv2.imread(path)
+        h, w = out.shape[:2]
+        panel_w_approx = w // 3
+        header_h = 50; panel_h = 400
+        p2_cx = panel_w_approx + panel_w_approx // 2 + 5
+        p2_cy = header_h + panel_h // 2
+        px = out[p2_cy, p2_cx]
+        assert px[0] > px[2] + 30, \
+            f"Panel 2 dust 區應偏藍 B>R+30，實 B={px[0]} R={px[2]}"

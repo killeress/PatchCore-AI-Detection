@@ -1058,14 +1058,49 @@ class HeatmapManager:
                     highlight = (0, 0, 255)
                 _blend_color_on_mask(panel1, vis_mask, highlight, alpha=0.55)
 
-        # Panel 2 / 3 placeholder，B3 / B4 會填
+        # --- Panel 2: OMIT + Dust Overlay ---
+        # 變數保留給 B4 Panel 3 / B5 header 使用
+        dust_mask_omit = None
+        omit_sub = None
+        is_dust_detected = False
+        if omit_image is not None:
+            oh, ow = omit_image.shape[:2]
+            osx1 = max(0, rx1); osy1 = max(0, ry1)
+            osx2 = min(ow, rx2); osy2 = min(oh, ry2)
+            omit_sub = np.zeros(roi_bgr.shape[:2], dtype=np.uint8)
+            if osx2 > osx1 and osy2 > osy1:
+                omit_crop = omit_image[osy1:osy2, osx1:osx2]
+                dx1 = osx1 - rx1; dy1 = osy1 - ry1
+                dx2 = dx1 + (osx2 - osx1); dy2 = dy1 + (osy2 - osy1)
+                omit_sub[dy1:dy2, dx1:dx2] = omit_crop if omit_crop.ndim == 2 else (
+                    cv2.cvtColor(omit_crop, cv2.COLOR_BGR2GRAY)
+                )
+            panel2 = ensure_bgr(omit_sub)
+            if dust_check_fn is not None:
+                try:
+                    is_dust_detected, dust_mask_raw, _br, _dt = dust_check_fn(omit_sub)
+                    if dust_mask_raw is not None:
+                        if dust_mask_raw.ndim == 3:
+                            dust_mask_raw = cv2.cvtColor(dust_mask_raw, cv2.COLOR_BGR2GRAY)
+                        dust_mask_omit = dust_mask_raw
+                        if is_dust_detected:
+                            _blend_color_on_mask(panel2, dust_mask_omit,
+                                                  (255, 100, 0), alpha=0.5)
+                except Exception as e:
+                    print(f"⚠️ CV Fusion Panel 2 dust check 失敗: {e}")
+        else:
+            panel2 = np.full(roi_bgr.shape, 40, dtype=np.uint8)
+            cv2.putText(panel2, "No OMIT", (10, panel2.shape[0] // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+        # Panel 3 placeholder，B4 會填
         panel_h = 400
         scale = panel_h / max(panel1.shape[0], 1)
         panel_w = max(int(panel1.shape[1] * scale), 200)
         panel1_resized = cv2.resize(panel1, (panel_w, panel_h))
-        placeholder2 = np.full((panel_h, panel_w, 3), 40, dtype=np.uint8)
+        panel2_resized = cv2.resize(panel2, (panel_w, panel_h))
         placeholder3 = np.full((panel_h, panel_w, 3), 40, dtype=np.uint8)
-        panels = [panel1_resized, placeholder2, placeholder3]
+        panels = [panel1_resized, panel2_resized, placeholder3]
         labels = ["CV Detection (band)", "OMIT + Dust", "Overlap"]
 
         gap_w = 10
