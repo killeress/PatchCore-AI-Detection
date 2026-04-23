@@ -167,3 +167,73 @@ class TestPCGroupPanel3OMITAlign:
         # 亮帶 y=[244, 500] 在 crop y=[244, 756] 映射到 ratio [0, 0.5]
         assert peak_y_ratio <= 0.5, \
             f"無 shift 時亮帶應該在 Panel 3 上半 (<=0.5)，實 ratio={peak_y_ratio}"
+
+
+class TestPCGroupPanel3DustOverlay:
+    """Panel 3: 套 dust_check_fn 回傳的藍色 overlay (BGR 255,100,0)"""
+
+    def test_dust_overlay_applied_when_fn_returns_mask(self, tmp_path):
+        """dust_check_fn 回傳 dust_mask 時，Panel 3 中 dust 區塊偏藍色 (B 高 R 低)"""
+        omit = np.full((2000, 2000), 128, dtype=np.uint8)
+
+        def stub_dust_check(img):
+            h, w = img.shape[:2]
+            mask = np.zeros((h, w), dtype=np.uint8)
+            mask[h // 2 - 50:h // 2 + 50, w // 2 - 50:w // 2 + 50] = 255
+            return True, mask, 0.1, "stub dust"
+
+        ed = _make_edge_defect(center=(1000, 500), shift=(0, 0))
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        path = saver._save_patchcore_edge_image(
+            save_dir=tmp_path, image_name="test_dust", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=omit,
+            dust_check_fn=stub_dust_check,
+        )
+        out = cv2.imread(path)
+        h_out, w_out = out.shape[:2]
+        panel_w_approx = w_out // 3
+        panel3_left = panel_w_approx * 2 + 20
+        header_h = 50; panel_h = 400
+        center_x = (panel3_left + w_out - 5) // 2
+        center_y = header_h + panel_h // 2
+        px = out[center_y, center_x]
+        # 藍色 overlay 後 B > R 明顯
+        assert px[0] > px[2] + 30, \
+            f"dust 中心像素應偏藍 (B>R+30)，實為 B={px[0]} G={px[1]} R={px[2]}"
+
+    def test_no_dust_overlay_when_fn_is_none(self, tmp_path):
+        """dust_check_fn 為 None 時 Panel 3 保持純 OMIT (灰)，無藍色覆蓋"""
+        omit = np.full((2000, 2000), 128, dtype=np.uint8)
+        ed = _make_edge_defect(center=(1000, 500))
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        path = saver._save_patchcore_edge_image(
+            save_dir=tmp_path, image_name="test_nodust", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=omit,
+            dust_check_fn=None,
+        )
+        out = cv2.imread(path)
+        h_out, w_out = out.shape[:2]
+        panel3_left = (w_out // 3) * 2 + 20
+        center_x = (panel3_left + w_out - 5) // 2
+        center_y = 50 + 200
+        px = out[center_y, center_x]
+        # 純灰，B/G/R 差不多
+        assert abs(int(px[0]) - int(px[2])) < 20, \
+            f"無 dust_check_fn 時 Panel 3 應為灰 (B≈R)，實為 B={px[0]} R={px[2]}"
+
+    def test_dust_check_exception_does_not_crash(self, tmp_path):
+        """dust_check_fn 丟 exception 時 Panel 3 仍能產圖（不爆，無 overlay）"""
+        omit = np.full((2000, 2000), 128, dtype=np.uint8)
+        def failing_fn(img):
+            raise RuntimeError("dust check failed")
+        ed = _make_edge_defect(center=(1000, 500))
+        full = np.full((2000, 2000, 3), 128, dtype=np.uint8)
+        saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+        path = saver._save_patchcore_edge_image(
+            save_dir=tmp_path, image_name="test_except", edge_index=0,
+            edge_defect=ed, full_image=full, omit_image=omit,
+            dust_check_fn=failing_fn,
+        )
+        assert Path(path).exists(), "即使 dust_check_fn 丟 exception 也要能產出圖"

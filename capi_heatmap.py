@@ -611,6 +611,7 @@ class HeatmapManager:
             return self._save_patchcore_edge_image(
                 save_dir, image_name, edge_index, edge_defect,
                 full_image, omit_image,
+                dust_check_fn=dust_check_fn,
             )
 
         bx, by, bw, bh = edge_defect.bbox
@@ -977,6 +978,7 @@ class HeatmapManager:
         edge_defect: Any,
         full_image: np.ndarray,
         omit_image: np.ndarray = None,
+        dust_check_fn: Any = None,
     ) -> str:
         """PatchCore inspector 邊緣缺陷比較圖。
 
@@ -1086,7 +1088,29 @@ class HeatmapManager:
                     odx1 = osx1 - ox_origin; ody1 = osy1 - oy_origin
                     odx2 = odx1 + (osx2 - osx1); ody2 = ody1 + (osy2 - osy1)
                     omit_canvas[ody1:ody2, odx1:odx2] = omit_src[osy1:osy2, osx1:osx2]
-                omit_panel = cv2.resize(omit_canvas, (panel_w, panel_h))
+
+                # Phase 7.2 A3: 套 dust_check_fn 的藍色 overlay（BGR 255,100,0）
+                # 輸入降 gray 以與 CV 路徑（capi_heatmap.py:799 傳 omit_roi_raw 通常為 gray）一致
+                dust_mask_panel = None
+                if dust_check_fn is not None:
+                    try:
+                        dust_input = (
+                            cv2.cvtColor(omit_canvas, cv2.COLOR_BGR2GRAY)
+                            if omit_canvas.ndim == 3 else omit_canvas
+                        )
+                        _is_dust, dust_mask_raw, _br, _dt = dust_check_fn(dust_input)
+                        if dust_mask_raw is not None:
+                            if dust_mask_raw.ndim == 3:
+                                dust_mask_raw = cv2.cvtColor(dust_mask_raw, cv2.COLOR_BGR2GRAY)
+                            dust_mask_panel = dust_mask_raw
+                    except Exception as e:
+                        print(f"⚠️ PC Panel 3 dust check 失敗: {e}")
+
+                omit_panel_bgr = ensure_bgr(omit_canvas)
+                if dust_mask_panel is not None:
+                    _blend_color_on_mask(omit_panel_bgr, dust_mask_panel,
+                                         (255, 100, 0), alpha=0.5)
+                omit_panel = cv2.resize(omit_panel_bgr, (panel_w, panel_h))
                 panels.append(omit_panel)
                 labels.append("OMIT ROI (shifted)" if (
                     edge_defect.pc_roi_shift_dx or edge_defect.pc_roi_shift_dy
