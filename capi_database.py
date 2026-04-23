@@ -284,6 +284,12 @@ class CAPIDatabase:
             add_column_if_not_exists("edge_defect_results", "source_inspector", "TEXT DEFAULT ''")
             add_column_if_not_exists("edge_defect_results", "d_edge_px", "REAL DEFAULT 0.0")
             add_column_if_not_exists("edge_defect_results", "fusion_fallback_reason", "TEXT DEFAULT ''")
+            # Phase 7 PC ROI 內移欄位
+            add_column_if_not_exists("edge_defect_results", "pc_roi_origin_x", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("edge_defect_results", "pc_roi_origin_y", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("edge_defect_results", "pc_roi_shift_dx", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("edge_defect_results", "pc_roi_shift_dy", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("edge_defect_results", "pc_roi_fallback_reason", "TEXT DEFAULT ''")
             add_column_if_not_exists("tile_results", "is_exclude_zone", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "is_aoi_coord", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "aoi_defect_code", "TEXT DEFAULT ''")
@@ -445,8 +451,10 @@ class CAPIDatabase:
                                     threshold_used, min_area_used, min_max_diff_used,
                                     inspector_mode, patchcore_score,
                                     patchcore_threshold, patchcore_ok_reason,
-                                    source_inspector, d_edge_px, fusion_fallback_reason)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    source_inspector, d_edge_px, fusion_fallback_reason,
+                                    pc_roi_origin_x, pc_roi_origin_y,
+                                    pc_roi_shift_dx, pc_roi_shift_dy, pc_roi_fallback_reason)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  edge_data.get("side", ""),
                                  edge_data.get("area", 0),
@@ -471,7 +479,12 @@ class CAPIDatabase:
                                  edge_data.get("patchcore_ok_reason", ""),
                                  edge_data.get("source_inspector", ""),
                                  edge_data.get("d_edge_px", 0.0),
-                                 edge_data.get("fusion_fallback_reason", ""))
+                                 edge_data.get("fusion_fallback_reason", ""),
+                                 edge_data.get("pc_roi_origin_x", 0),
+                                 edge_data.get("pc_roi_origin_y", 0),
+                                 edge_data.get("pc_roi_shift_dx", 0),
+                                 edge_data.get("pc_roi_shift_dy", 0),
+                                 edge_data.get("pc_roi_fallback_reason", ""))
                             )
 
                 conn.commit()
@@ -610,8 +623,10 @@ class CAPIDatabase:
                                     threshold_used, min_area_used, min_max_diff_used,
                                     inspector_mode, patchcore_score,
                                     patchcore_threshold, patchcore_ok_reason,
-                                    source_inspector, d_edge_px, fusion_fallback_reason)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    source_inspector, d_edge_px, fusion_fallback_reason,
+                                    pc_roi_origin_x, pc_roi_origin_y,
+                                    pc_roi_shift_dx, pc_roi_shift_dy, pc_roi_fallback_reason)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  edge_data.get("side", ""),
                                  edge_data.get("area", 0),
@@ -636,7 +651,12 @@ class CAPIDatabase:
                                  edge_data.get("patchcore_ok_reason", ""),
                                  edge_data.get("source_inspector", ""),
                                  edge_data.get("d_edge_px", 0.0),
-                                 edge_data.get("fusion_fallback_reason", ""))
+                                 edge_data.get("fusion_fallback_reason", ""),
+                                 edge_data.get("pc_roi_origin_x", 0),
+                                 edge_data.get("pc_roi_origin_y", 0),
+                                 edge_data.get("pc_roi_shift_dx", 0),
+                                 edge_data.get("pc_roi_shift_dy", 0),
+                                 edge_data.get("pc_roi_fallback_reason", ""))
                             )
 
                 conn.commit()
@@ -2216,6 +2236,8 @@ class CAPIDatabase:
             ("cv_edge_aoi_line_max_width", 3, "int", "AOI 邊緣薄線最大寬度 px (超過視為一般 component, 由 CC path 處理)"),
             ("aoi_edge_inspector", "cv", "string", "AOI 座標邊緣 inspector: 'cv' (傳統 CV) | 'patchcore' (PatchCore 模型) | 'fusion' (Phase 6 空間分權，CV 管 band+PC 管 interior)"),
             ("aoi_edge_boundary_band_px", 40, "int", "AOI 邊緣 fusion 模式 CV 管轄帶寬度 (polygon 邊往 panel 內延伸 px), 僅 inspector='fusion' 時生效, 0=等同 patchcore"),
+            ("aoi_edge_pc_roi_inward_shift_enabled", True, "bool", "Phase 7: fusion 模式下 PC ROI 自動內移到距 polygon ≥ band_px 處，讓 PC feature map 完全脫離 panel 邊 discontinuity，進一步抑制近邊過檢；凹角 polygon 會 fallback"),
+            ("aoi_edge_aoi_margin_px", 64, "int", "Phase 7: PC ROI 內移時 AOI 座標距 PC ROI 邊最小 margin (px)，避免 defect 落在 PC ROI 角落造成 feature 不穩"),
             # B0F 亮點偵測設定
             ("bright_spot_threshold", 200, "int", "絕對亮度上限 (超過直接判定亮點)"),
             ("bright_spot_min_area", 5, "int", "亮點最小連通面積 (px)"),

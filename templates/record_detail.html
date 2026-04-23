@@ -486,6 +486,7 @@ function copyInferenceLog() {
                         <th>差異值</th>
                         <th>Source</th>
                         <th>d_edge</th>
+                        <th>PC Shift</th>
                         <th>OMIT</th>
                         <th>操作</th>
                     </tr>
@@ -502,6 +503,9 @@ function copyInferenceLog() {
                     {% set src_ins = ed.get('source_inspector', '') %}
                     {% set d_edge = ed.get('d_edge_px', 0.0) %}
                     {% set fb_reason = ed.get('fusion_fallback_reason', '') %}
+                    {% set pc_shift_dx = ed.get('pc_roi_shift_dx', 0) %}
+                    {% set pc_shift_dy = ed.get('pc_roi_shift_dy', 0) %}
+                    {% set pc_fb = ed.get('pc_roi_fallback_reason', '') %}
                     {% set is_dust_flag = ed.get('is_dust', 0) %}
                     {% set dust_detail = ed.get('dust_detail_text', '') %}
                     {% if ed.is_cv_ok %}
@@ -604,6 +608,22 @@ function copyInferenceLog() {
                         <td>
                             {% if ed_mode == 'fusion' and d_edge > 0 %}
                             <span style="font-family:'Fira Code',monospace;font-size:0.78rem;">{{ d_edge | round(1) }}px</span>
+                            {% else %}
+                            <span style="color:var(--text-muted);font-size:0.7rem;">—</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {# Phase 7: PC ROI 內移量 — 僅 fusion 模式有意義 #}
+                            {% if ed_mode == 'fusion' %}
+                              {% if pc_shift_dx != 0 or pc_shift_dy != 0 %}
+                              <span class="badge" style="background:#DBEAFE;color:#1E3A8A;font-size:0.68rem;font-family:'Fira Code',monospace;">
+                                ({% if pc_shift_dx > 0 %}+{% endif %}{{ pc_shift_dx }}, {% if pc_shift_dy > 0 %}+{% endif %}{{ pc_shift_dy }})
+                              </span>
+                              {% elif pc_fb %}
+                              <span class="badge" style="background:#FEF3C7;color:#92400E;font-size:0.62rem;">fallback: {{ pc_fb }}</span>
+                              {% else %}
+                              <span style="color:var(--text-muted);font-size:0.7rem;">—</span>
+                              {% endif %}
                             {% else %}
                             <span style="color:var(--text-muted);font-size:0.7rem;">—</span>
                             {% endif %}

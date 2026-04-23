@@ -89,7 +89,7 @@ except Exception as _e:
     )
 
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
-from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff, compute_boundary_band_mask
+from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff, compute_boundary_band_mask, compute_pc_roi_offset, verify_polygon_clear_of_pc_roi
 from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
 from scratch_filter import ScratchFilter
 
@@ -3293,20 +3293,69 @@ class CAPIInferencer:
                     polygon_int, (float(cx), float(cy)), True)))
                 cv_defects_kept.append(d)
 
-        # === PC 路徑 ===
+        # === PC 路徑（Phase 7: 內移 PC ROI 以避開 polygon 邊 discontinuity）===
+        shift_enabled = bool(getattr(
+            self.edge_inspector.config, "aoi_edge_pc_roi_inward_shift_enabled", True))
+        aoi_margin_px = int(getattr(
+            self.edge_inspector.config, "aoi_edge_aoi_margin_px", 64))
+
+        pc_roi_origin_candidate, shift_vec, _d_edge_signed = compute_pc_roi_offset(
+            aoi_xy=(img_x, img_y),
+            polygon=polygon_int,
+            band_px=band_px,
+            aoi_margin_px=aoi_margin_px,
+            roi_size=tile_size,
+        )
+
+        use_shifted = False
+        pc_fallback_reason = ""
+        if not shift_enabled and shift_vec != (0, 0):
+            # 明確 disabled 且本該偏移 → 記錄 fallback reason
+            pc_fallback_reason = "shift_disabled"
+            shift_vec = (0, 0)
+        elif shift_enabled and shift_vec != (0, 0):
+            if verify_polygon_clear_of_pc_roi(
+                pc_roi_origin=pc_roi_origin_candidate,
+                roi_size=tile_size,
+                polygon=polygon_int,
+                band_px=band_px,
+            ):
+                use_shifted = True
+            else:
+                pc_fallback_reason = "concave_polygon"
+                shift_vec = (0, 0)
+
+        if use_shifted:
+            pc_center_x = img_x + shift_vec[0]
+            pc_center_y = img_y + shift_vec[1]
+            pc_roi_x1 = pc_roi_origin_candidate[0]
+            pc_roi_y1 = pc_roi_origin_candidate[1]
+        else:
+            pc_center_x = img_x
+            pc_center_y = img_y
+            pc_roi_x1 = rx1
+            pc_roi_y1 = ry1
+
         _, pc_stats = self._inspect_roi_patchcore(
-            image, img_x, img_y, img_prefix,
+            image, pc_center_x, pc_center_y, img_prefix,
             panel_polygon=panel_polygon, return_raw=True,
         )
         pc_anomaly_map = pc_stats.get("anomaly_map")
         pc_threshold = float(pc_stats.get("threshold", 0.0))
+        pc_fg_mask_returned = pc_stats.get("fg_mask")
         anomaly_map_interior = None
         pc_defects: List[EdgeDefect] = []
 
         if pc_anomaly_map is not None:
             anomaly_map_interior = pc_anomaly_map.copy()
-            anomaly_map_interior[band_mask > 0] = 0.0
-            anomaly_map_interior[fg_mask == 0] = 0.0
+            if use_shifted:
+                # Shifted: 只過 shifted fg_mask，band_mask 不適用（polygon 已 ≥ band_px 外）
+                if pc_fg_mask_returned is not None:
+                    anomaly_map_interior[pc_fg_mask_returned == 0] = 0.0
+            else:
+                # Fallback/centered: 沿用 Phase 6 band_mask 排除
+                anomaly_map_interior[band_mask > 0] = 0.0
+                anomaly_map_interior[fg_mask == 0] = 0.0
 
             interior_score = float(np.max(anomaly_map_interior))
             if interior_score >= pc_threshold:
@@ -3314,7 +3363,7 @@ class CAPIInferencer:
                 pc_def = EdgeDefect(
                     side="aoi_edge",
                     area=int(interior_max_area),
-                    bbox=(rx1, ry1, tile_size, tile_size),
+                    bbox=(pc_roi_x1, pc_roi_y1, tile_size, tile_size),
                     center=(img_x, img_y),
                     max_diff=0,
                     inspector_mode="fusion",
@@ -3325,8 +3374,14 @@ class CAPIInferencer:
                 pc_def.d_edge_px = float(max(0.0, cv2.pointPolygonTest(
                     polygon_int, (float(img_x), float(img_y)), True)))
                 pc_def.pc_roi = pc_stats.get("roi")
-                pc_def.pc_fg_mask = fg_mask
+                pc_def.pc_fg_mask = pc_fg_mask_returned if use_shifted else fg_mask
                 pc_def.pc_anomaly_map = anomaly_map_interior
+                # Phase 7 shift 標記
+                pc_def.pc_roi_origin_x = int(pc_roi_x1)
+                pc_def.pc_roi_origin_y = int(pc_roi_y1)
+                pc_def.pc_roi_shift_dx = int(shift_vec[0])
+                pc_def.pc_roi_shift_dy = int(shift_vec[1])
+                pc_def.pc_roi_fallback_reason = pc_fallback_reason
                 pc_defects.append(pc_def)
 
         # === Merge + OMIT ===
@@ -3343,6 +3398,11 @@ class CAPIInferencer:
             "cv_stats": cv_stats,
             "pc_stats": pc_stats,
             "fusion_fallback_reason": "",
+            # Phase 7 PC ROI 內移資訊（供 UI / OK defect 紀錄）
+            "pc_roi_origin": (int(pc_roi_x1), int(pc_roi_y1)),
+            "pc_roi_shift": (int(shift_vec[0]), int(shift_vec[1])),
+            "pc_roi_fallback_reason": pc_fallback_reason,
+            "pc_roi_fg_mask": pc_fg_mask_returned if use_shifted else fg_mask,
         }
         return fusion_defects, stats
 
@@ -4078,15 +4138,22 @@ class CAPIInferencer:
                                             omit_overexposed=omit_overexposed,
                                             otsu_bounds=result.otsu_bounds,
                                         )
+                                        pc_shift = fusion_stats.get("pc_roi_shift", (0, 0))
+                                        pc_origin = fusion_stats.get("pc_roi_origin", (rx1, ry1))
+                                        pc_fb = str(fusion_stats.get("pc_roi_fallback_reason", ""))
                                         # Force defect center to AOI 座標確保 BOMB 比對一致
                                         for d in fusion_defects:
                                             d.center = (img_x, img_y)
                                             result.edge_defects.append(d)
                                             detected = True
+                                            shift_tag = f" shift=({d.pc_roi_shift_dx:+d},{d.pc_roi_shift_dy:+d})" \
+                                                        if (d.pc_roi_shift_dx or d.pc_roi_shift_dy) else ""
+                                            fb_tag = f" pcfb={d.pc_roi_fallback_reason}" if d.pc_roi_fallback_reason else ""
                                             print(f"  🔍 AOI Coord Fusion edge ({edef.defect_code}) "
                                                   f"@ ({img_x},{img_y}): src={d.source_inspector} "
                                                   f"score={d.patchcore_score:.3f} max_diff={d.max_diff} "
-                                                  f"d_edge={d.d_edge_px:.1f}px "
+                                                  f"d_edge={d.d_edge_px:.1f}px"
+                                                  f"{shift_tag}{fb_tag} "
                                                   f"is_dust={d.is_suspected_dust_or_scratch}")
                                         if not detected:
                                             ok_defect = EdgeDefect(
@@ -4102,10 +4169,19 @@ class CAPIInferencer:
                                             ok_defect.source_inspector = ""  # OK row 不指定 source
                                             ok_defect.pc_anomaly_map = fusion_stats.get("pc_anomaly_map_interior")
                                             ok_defect.pc_fg_mask = fusion_stats.get("interior_mask")
+                                            ok_defect.pc_roi_origin_x = int(pc_origin[0])
+                                            ok_defect.pc_roi_origin_y = int(pc_origin[1])
+                                            ok_defect.pc_roi_shift_dx = int(pc_shift[0])
+                                            ok_defect.pc_roi_shift_dy = int(pc_shift[1])
+                                            ok_defect.pc_roi_fallback_reason = pc_fb
                                             result.edge_defects.append(ok_defect)
                                             fb = fusion_stats.get("fusion_fallback_reason", "")
+                                            shift_tag = f" shift=({pc_shift[0]:+d},{pc_shift[1]:+d})" \
+                                                        if (pc_shift[0] or pc_shift[1]) else ""
+                                            pcfb_tag = f" pcfb={pc_fb}" if pc_fb else ""
                                             print(f"  ✅ AOI Coord Fusion edge ({edef.defect_code}) @ ({img_x},{img_y}): OK"
-                                                  f"{' (fallback=' + fb + ')' if fb else ''}")
+                                                  f"{' (fallback=' + fb + ')' if fb else ''}"
+                                                  f"{shift_tag}{pcfb_tag}")
                                     except Exception as e:
                                         logger.warning(f"AOI Coord Fusion edge 失敗 ({edef.defect_code}): {e}")
                                     continue
@@ -4428,9 +4504,15 @@ class CAPIInferencer:
                         print(f"{log_icon} {img_path.name} Tile@({tx},{ty}) → {detail_text}")
 
             # === 加入 CV Edge 灰塵檢測 (與 OMIT 擷取) ===
+            # 注意：inspector_mode == "fusion" 的 defect 已在 _inspect_roi_fusion
+            # 內透過 _apply_omit_dust_filter_to_edge_defects 完成灰塵判定，
+            # 此處需跳過以免重覆計算並覆寫 fusion 已寫入的欄位 (spec:
+            # docs/superpowers/specs/2026-04-22-aoi-edge-fusion-inspector-design.md)
             if getattr(result, 'edge_defects', []) and omit_image is not None:
                 if omit_overexposed:
                     for ed in result.edge_defects:
+                        if getattr(ed, 'inspector_mode', 'cv') == 'fusion':
+                            continue
                         ed.dust_detail_text = f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> Cannot verify dust, treated as REAL_NG"
                         print(f"⚠️ {img_path.name} Edge@{ed.side} Score:{ed.max_diff:.3f} → OMIT OVEREXPOSED, skip dust check")
                 else:
@@ -4440,6 +4522,8 @@ class CAPIInferencer:
                         orig_for_edge = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
 
                     for ed in result.edge_defects:
+                        if getattr(ed, 'inspector_mode', 'cv') == 'fusion':
+                            continue
                         ex, ey, ew, eh = ed.bbox
                         oh, ow = omit_image.shape[:2]
                         # 使用擴展 ROI (bbox ± 100px)，與 save_edge_defect_image 一致

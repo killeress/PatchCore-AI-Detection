@@ -658,6 +658,12 @@ def results_to_db_data(
                     "source_inspector": str(getattr(edge, 'source_inspector', '')),
                     "d_edge_px": float(getattr(edge, 'd_edge_px', 0.0)),
                     "fusion_fallback_reason": str(getattr(edge, 'fusion_fallback_reason', '')),
+                    # Phase 7 PC ROI 內移欄位
+                    "pc_roi_origin_x": int(getattr(edge, 'pc_roi_origin_x', 0)),
+                    "pc_roi_origin_y": int(getattr(edge, 'pc_roi_origin_y', 0)),
+                    "pc_roi_shift_dx": int(getattr(edge, 'pc_roi_shift_dx', 0)),
+                    "pc_roi_shift_dy": int(getattr(edge, 'pc_roi_shift_dy', 0)),
+                    "pc_roi_fallback_reason": str(getattr(edge, 'pc_roi_fallback_reason', '')),
                     # OMIT dust detail (Phase 6 UI 顯示用，沿用既有 EdgeDefect 欄位，不入 DB)
                     "dust_detail_text": str(getattr(edge, 'dust_detail_text', '')),
                 })

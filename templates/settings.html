@@ -72,6 +72,74 @@
         border-bottom: none;
     }
 
+    /* 依互斥規則鎖定的參數列：灰化 + 鎖頭圖示 + tooltip */
+    .param-row.is-locked {
+        opacity: 0.5;
+        background: repeating-linear-gradient(
+            45deg,
+            transparent,
+            transparent 8px,
+            rgba(148, 163, 184, 0.04) 8px,
+            rgba(148, 163, 184, 0.04) 16px
+        );
+    }
+
+    .param-row.is-locked:hover {
+        background: repeating-linear-gradient(
+            45deg,
+            transparent,
+            transparent 8px,
+            rgba(148, 163, 184, 0.04) 8px,
+            rgba(148, 163, 184, 0.04) 16px
+        );
+    }
+
+    .param-row.is-locked .btn-edit {
+        pointer-events: none;
+        opacity: 0.4;
+        cursor: not-allowed;
+    }
+
+    .param-row.is-locked .switch {
+        pointer-events: none;
+    }
+
+    .param-row.is-locked .switch .slider {
+        cursor: not-allowed;
+    }
+
+    .lock-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 0.72rem;
+        color: #fbbf24;
+        background: rgba(251, 191, 36, 0.1);
+        border: 1px solid rgba(251, 191, 36, 0.3);
+        border-radius: 999px;
+        padding: 2px 8px;
+        cursor: help;
+        user-select: none;
+        white-space: nowrap;
+    }
+
+    .lock-badge:hover {
+        background: rgba(251, 191, 36, 0.18);
+    }
+
+    /* 針對 header 內的開關上鎖 (CV tab 灰塵過濾用) */
+    .header-toggle.is-locked {
+        opacity: 0.5;
+    }
+
+    .header-toggle.is-locked .switch {
+        pointer-events: none;
+    }
+
+    .header-toggle.is-locked .switch .slider {
+        cursor: not-allowed;
+    }
+
     .param-info {
         flex: 1;
         min-width: 0;
@@ -1194,6 +1262,7 @@
         'grid_tiling_enabled', 'aoi_coord_inspection_enabled',
         'aoi_report_path_replace_from', 'aoi_report_path_replace_to',
         'aoi_edge_inspector', 'aoi_edge_boundary_band_px',
+        'aoi_edge_pc_roi_inward_shift_enabled', 'aoi_edge_aoi_margin_px',
         'cv_edge_aoi_threshold', 'cv_edge_aoi_min_area', 'cv_edge_aoi_solidity_min',
         'cv_edge_aoi_polygon_erode_px',
         'cv_edge_aoi_morph_open_kernel', 'cv_edge_aoi_min_max_diff',
@@ -1273,6 +1342,64 @@
             const sideKey = ['left', 'right', 'top', 'bottom'].find(s => p.param_name.startsWith(`cv_edge_${s}_`));
             if (sideKey) sides[sideKey].params.push(p);
         });
+
+        // ── 計算互斥鎖定規則 (AOI tab + CV tab dust filter) ──
+        paramLockMap = {};
+        const readBool = (p) => {
+            if (!p) return false;
+            const v = String(p.param_value).toLowerCase();
+            return v === 'true' || v === '1';
+        };
+        const readStr = (p) => {
+            if (!p) return '';
+            try { return String(JSON.parse(p.param_value)); } catch { return String(p.param_value); }
+        };
+
+        const aoiCoordEnabledParam = aoiCoordParams.find(p => p.param_name === 'aoi_coord_inspection_enabled');
+        const aoiCoordEnabled = readBool(aoiCoordEnabledParam);
+        const inspectorParam = aoiCoordParams.find(p => p.param_name === 'aoi_edge_inspector');
+        const inspectorVal = readStr(inspectorParam).toLowerCase() || 'cv';
+
+        const CV_AOI_DETAIL_PARAMS = [
+            'cv_edge_aoi_threshold', 'cv_edge_aoi_min_area', 'cv_edge_aoi_solidity_min',
+            'cv_edge_aoi_polygon_erode_px', 'cv_edge_aoi_morph_open_kernel',
+            'cv_edge_aoi_min_max_diff', 'cv_edge_aoi_line_min_length', 'cv_edge_aoi_line_max_width'
+        ];
+
+        if (!aoiCoordEnabled) {
+            // AOI 主開關關閉：除主開關與 grid_tiling_enabled 外全部鎖定
+            const reason = 'aoi_coord_inspection_enabled=false 時整個 AOI 座標推論不執行';
+            aoiCoordParams.forEach(p => {
+                if (p.param_name === 'aoi_coord_inspection_enabled') return;
+                if (p.param_name === 'grid_tiling_enabled') return;
+                paramLockMap[p.param_name] = reason;
+            });
+            b0fParams.forEach(p => { paramLockMap[p.param_name] = reason; });
+        } else {
+            // 依 inspector 決定哪些細節參數不生效
+            // 注意：fusion 模式下 inspect_roi 仍會被呼叫（只用 band_mask 過濾結果），
+            // 因此 8 個 cv_edge_aoi_* 參數在 fusion 下全部生效，不可鎖。
+            if (inspectorVal === 'cv') {
+                const reason = 'aoi_edge_inspector=cv 時不使用此參數（僅 fusion 生效）';
+                paramLockMap['aoi_edge_boundary_band_px'] = reason;
+                paramLockMap['aoi_edge_pc_roi_inward_shift_enabled'] = reason;
+                paramLockMap['aoi_edge_aoi_margin_px'] = reason;
+            } else if (inspectorVal === 'patchcore') {
+                const reason = 'aoi_edge_inspector=patchcore 時完全走 PatchCore，CV 細節與 fusion band/shift 均不使用';
+                paramLockMap['aoi_edge_boundary_band_px'] = reason;
+                paramLockMap['aoi_edge_pc_roi_inward_shift_enabled'] = reason;
+                paramLockMap['aoi_edge_aoi_margin_px'] = reason;
+                CV_AOI_DETAIL_PARAMS.forEach(n => { paramLockMap[n] = reason; });
+            }
+            // fusion 下無額外鎖定：cv_edge_aoi_* / aoi_edge_boundary_band_px / shift / margin 皆生效
+        }
+
+        // fusion 下 inspector_mode=="fusion" 的 aoi_edge defect 已在 _inspect_roi_fusion
+        // 內完成 OMIT 灰塵判定，後端 capi_inference.py:4428 段以 inspector_mode 守衛跳過。
+        // 但 cv_edge_dust_filter_enabled 仍會影響四邊 (left/right/top/bottom) 檢測，
+        // 因此 fusion 下「標示但不鎖定」，讓使用者自行決定是否啟用四邊灰塵過濾。
+        const cvDustFilterInfoByFusion = aoiCoordEnabled && inspectorVal === 'fusion';
+        const cvDustFilterInfoReason = 'fusion 下此開關對 fusion 產出的 aoi_edge defect 不生效（已由 fusion 內部統一處理）；四邊 (left/right/top/bottom) 檢測仍受此開關影響';
 
         const tabsContainer = document.getElementById('settings-tabs-container');
         tabsContainer.innerHTML = `
@@ -1395,6 +1522,7 @@
                         <div style="margin-left: auto; display: flex; gap: 16px;">
                             ${dustFilterEnabled ? `
                                 <div style="display:flex; align-items:center; gap:10px; background: rgba(0,0,0,0.2); padding: 4px 12px; border-radius: 20px; border: 1px solid rgba(249, 115, 34, 0.3);">
+                                    ${cvDustFilterInfoByFusion ? `<span class="lock-badge" style="margin-right:4px; color:#93c5fd; background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.35);" title="${escapeAttr(cvDustFilterInfoReason)}">ℹ️ fusion 僅影響四邊</span>` : ''}
                                     <span style="font-size: 0.75rem; color: #fdba74;">灰塵過濾:</span>
                                     <label class="switch" style="transform: scale(0.85);">
                                         <input type="checkbox" ${dustFilterEnabled.param_value === 'true' ? 'checked' : ''} onchange='toggleBoolParam("cv_edge_dust_filter_enabled", this.checked)'>
@@ -1615,8 +1743,22 @@
         'dust_two_stage_fallback_score': '安全網: 找不到特徵但 heatmap 分數 ≥ 此值時保守判 NG',
     };
 
+    // 依互斥規則鎖定某些參數列。key = param_name, value = 不生效原因 (會以 tooltip 顯示)
+    let paramLockMap = {};
+
+    function escapeAttr(s) {
+        return String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function lockBadgeHtml(reason) {
+        return `<span class="lock-badge" title="${escapeAttr(reason)}">🔒 不生效</span>`;
+    }
+
     function paramRow(p) {
         const isDict = p.param_type === 'dict';
+        const lockedReason = paramLockMap[p.param_name] || '';
+        const lockedClass = lockedReason ? ' is-locked' : '';
+        const lockedBadge = lockedReason ? lockBadgeHtml(lockedReason) : '';
 
         if (isDict) {
             try {
@@ -1625,15 +1767,16 @@
                     const entries = Object.entries(parsed);
                     return entries.map(([k, v]) => {
                         const displayVal = String(v);
-                        const editBtnHtml = `<button class="btn-edit" onclick='openEdit(${JSON.stringify(p.param_name)}, ${JSON.stringify(k)})'>✏️ 修改</button>`;
+                        const editBtnHtml = `<button class="btn-edit" ${lockedReason ? 'disabled' : ''} onclick='openEdit(${JSON.stringify(p.param_name)}, ${JSON.stringify(k)})'>✏️ 修改</button>`;
 
                         return `
-                            <div class="param-row">
+                            <div class="param-row${lockedClass}">
                                 <div class="param-info">
                                     <div class="param-name">${p.param_name} <span style="color:#fb923c;">[${k}]</span></div>
                                     <div class="param-desc">${p.description || ''} (子項目: ${k})</div>
                                 </div>
                                 <div class="param-value">
+                                    ${lockedBadge}
                                     <span class="param-value-display" title="${displayVal}">${displayVal}</span>
                                     ${editBtnHtml}
                                 </div>
@@ -1655,25 +1798,26 @@
         } catch { displayVal = p.param_value; }
 
         let valueContent = `<span class="param-value-display" title="${displayVal}">${displayVal}</span>
-                    <button class="btn-edit" onclick='openEdit(${JSON.stringify(p.param_name)})'>✏️ 修改</button>`;
+                    <button class="btn-edit" ${lockedReason ? 'disabled' : ''} onclick='openEdit(${JSON.stringify(p.param_name)})'>✏️ 修改</button>`;
 
         if (isBool) {
             const isChecked = displayVal === 'true';
             valueContent = `
                 <label class="switch">
-                    <input type="checkbox" ${isChecked ? 'checked' : ''} onchange='toggleBoolParam(${JSON.stringify(p.param_name)}, this.checked)'>
+                    <input type="checkbox" ${isChecked ? 'checked' : ''} ${lockedReason ? 'disabled' : ''} onchange='toggleBoolParam(${JSON.stringify(p.param_name)}, this.checked)'>
                     <span class="slider"></span>
                 </label>
             `;
         }
 
         return `
-            <div class="param-row">
+            <div class="param-row${lockedClass}">
                 <div class="param-info">
                     <div class="param-name">${p.param_name}</div>
                     <div class="param-desc">${p.description || PARAM_LABELS[p.param_name] || ''}</div>
                 </div>
                 <div class="param-value">
+                    ${lockedBadge}
                     ${valueContent}
                 </div>
             </div>
@@ -1990,6 +2134,12 @@
             // 更新本地資料狀態以防重新渲染時跳掉
             const p = allParams.find(x => x.param_name === paramName);
             if (p) p.param_value = String(newVal);
+
+            // 會影響互斥鎖定的參數需重新渲染以刷新鎖定狀態
+            const LOCK_AFFECTING_BOOL_PARAMS = new Set(['aoi_coord_inspection_enabled']);
+            if (LOCK_AFFECTING_BOOL_PARAMS.has(paramName)) {
+                renderSettings();
+            }
 
             loadHistory();
         } catch (e) {

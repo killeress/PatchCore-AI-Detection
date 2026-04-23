@@ -2478,6 +2478,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             band_px = int(data.get("boundary_band_px",
                                     getattr(self.inferencer.edge_inspector.config,
                                             "aoi_edge_boundary_band_px", 40)))
+            # Phase 7: shift override（debug 頁可獨立切換，預設沿用 config）
+            cfg = self.inferencer.edge_inspector.config
+            shift_enabled_override = data.get("pc_roi_inward_shift_enabled", None)
+            aoi_margin_override = data.get("aoi_margin_px", None)
 
             image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
             if image is None:
@@ -2498,9 +2502,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             img_prefix = self.inferencer._get_image_prefix(image_path.name)
 
-            # Override band_px on the inspector for this single test
-            orig_band_px = self.inferencer.edge_inspector.config.aoi_edge_boundary_band_px
-            self.inferencer.edge_inspector.config.aoi_edge_boundary_band_px = band_px
+            # Override config on inspector for this single test
+            orig_band_px = cfg.aoi_edge_boundary_band_px
+            orig_shift_enabled = getattr(cfg, "aoi_edge_pc_roi_inward_shift_enabled", True)
+            orig_aoi_margin = getattr(cfg, "aoi_edge_aoi_margin_px", 64)
+            cfg.aoi_edge_boundary_band_px = band_px
+            if shift_enabled_override is not None:
+                cfg.aoi_edge_pc_roi_inward_shift_enabled = bool(shift_enabled_override)
+            if aoi_margin_override is not None:
+                cfg.aoi_edge_aoi_margin_px = int(aoi_margin_override)
             try:
                 defects, stats = self.inferencer._inspect_roi_fusion(
                     image, img_cx, img_cy, img_prefix,
@@ -2509,7 +2519,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     omit_overexposed=False,
                 )
             finally:
-                self.inferencer.edge_inspector.config.aoi_edge_boundary_band_px = orig_band_px
+                cfg.aoi_edge_boundary_band_px = orig_band_px
+                cfg.aoi_edge_pc_roi_inward_shift_enabled = orig_shift_enabled
+                cfg.aoi_edge_aoi_margin_px = orig_aoi_margin
 
             band_mask = stats.get("band_mask")
             interior_mask = stats.get("interior_mask")
@@ -2547,6 +2559,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "inspector": "fusion",
                 "boundary_band_px": band_px,
                 "fusion_fallback_reason": stats.get("fusion_fallback_reason", ""),
+                # Phase 7: shift info
+                "pc_roi_origin": list(stats.get("pc_roi_origin", (0, 0))),
+                "pc_roi_shift": list(stats.get("pc_roi_shift", (0, 0))),
+                "pc_roi_fallback_reason": stats.get("pc_roi_fallback_reason", ""),
                 "defects": [
                     {
                         "area": d.area,
@@ -2559,6 +2575,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         "patchcore_threshold": getattr(d, 'patchcore_threshold', 0.0),
                         "is_dust": bool(getattr(d, 'is_suspected_dust_or_scratch', False)),
                         "dust_detail_text": getattr(d, 'dust_detail_text', ''),
+                        # Phase 7
+                        "pc_roi_origin_x": int(getattr(d, 'pc_roi_origin_x', 0)),
+                        "pc_roi_origin_y": int(getattr(d, 'pc_roi_origin_y', 0)),
+                        "pc_roi_shift_dx": int(getattr(d, 'pc_roi_shift_dx', 0)),
+                        "pc_roi_shift_dy": int(getattr(d, 'pc_roi_shift_dy', 0)),
+                        "pc_roi_fallback_reason": str(getattr(d, 'pc_roi_fallback_reason', '')),
                     } for d in defects
                 ],
                 "summary": {
@@ -3282,6 +3304,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     param_name.startswith("cv_edge")
                     or param_name == "aoi_edge_inspector"
                     or param_name == "aoi_edge_boundary_band_px"
+                    or param_name == "aoi_edge_pc_roi_inward_shift_enabled"
+                    or param_name == "aoi_edge_aoi_margin_px"
                 )
                 if edge_triggers and hasattr(self, 'inferencer') and self.inferencer:
                     try:

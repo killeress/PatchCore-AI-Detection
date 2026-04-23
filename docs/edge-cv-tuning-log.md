@@ -63,6 +63,55 @@ capi_server.py:772  →  EdgeInspectionConfig.from_db_params(db_dict)
 - **Code**：`_detect_thin_lines()` + `_group_true_runs()` in `capi_edge_cv.py`
 - **驗證**：模擬測試：垂直虛線 (30 點, 間距 5) 被抓；1×12 雜訊條紋 (< 30) 被擋；低對比紋理塊 (max_diff=6) 被 min_max_diff 擋。三路各司其職。
 
+### Phase 7 — Fusion PC ROI 內移避開 polygon 邊 (2026-04-23)
+
+- **動機**：Phase 6 上線觀察：fusion 雖在 scoring 層把 band 區從 PC 歸零，但 PC backbone
+  的 feature extraction 仍跑在整張含 polygon edge 的 512×512 上，receptive field
+  ~30-50 px 讓 interior 靠近 band 側的 feature map 殘留「偽邊緣」activation →
+  d_edge 偏小的 PC INTERIOR 命中仍有過檢殘留。
+- **設計決策**：
+  - 把 **PC 跑的 ROI 從 AOI 中心往 panel 內側偏移**，使 PC ROI 距 polygon 邊 ≥ band_px
+  - CV ROI 不變（仍居中於 AOI 座標），band 區覆蓋不變
+  - 偏移方向 = AOI 到最近 polygon 邊的 inward normal（axis-aligned polygon 為水平或垂直）
+  - 偏移量 = `max(0, band_px - (d_edge - roi_size/2))`，clamp 到 `[0, roi_size/2 - aoi_margin_px]`
+  - **AOI margin 約束**：AOI 座標距 PC ROI 邊 ≥ `aoi_edge_aoi_margin_px` (預設 64 px)
+  - **凹角 polygon fallback**：偏移後用 `verify_polygon_clear_of_pc_roi` 檢查，若其他邊
+    仍在 PC ROI 內 < band_px → 退回 Phase 6 centered + band_mask 行為，標
+    `pc_roi_fallback_reason="concave_polygon"`
+  - **Config `aoi_edge_pc_roi_inward_shift_enabled=True`**：總開關，off 時走 Phase 6
+  - **Defect center 強制 = AOI 座標**（Bomb match 一致性沿用 Phase 6）
+- **Trade-off**：
+  - **(+)** PC feature map 完全脫離 polygon 邊 discontinuity，進一步壓抑近邊過檢
+  - **(+)** 算力不變（PC 仍跑 1×，只是輸入裁切位置換了；helper 純幾何計算）
+  - **(+)** CV 覆蓋不變，band 區照跑 → 零漏網
+  - **(−)** UI 需顯示 shift 量（record_detail 加 PC Shift 欄、heatmap badge 加 `[PC dx=+N]`）
+  - **(−)** 凹角 polygon 會 fallback 回 Phase 6（fallback_reason 可追蹤）
+- **Code**：
+  - `capi_edge_cv.py::compute_pc_roi_offset` 純幾何 offset 計算
+  - `capi_edge_cv.py::verify_polygon_clear_of_pc_roi` 偏移後驗證（凹角 fallback）
+  - `capi_inference.py::_inspect_roi_fusion` PC 路徑改走 shifted origin（L3294 附近）
+  - `capi_database.py` migration 加 `pc_roi_origin_x/y`、`pc_roi_shift_dx/dy`、
+    `pc_roi_fallback_reason` 五欄 + seed `aoi_edge_pc_roi_inward_shift_enabled=True`、
+    `aoi_edge_aoi_margin_px=64`
+  - `capi_heatmap.py` fusion PC heatmap badge 擴充：`[PC dx=+192 dy=0]` / `[PC FB:...]`
+  - `capi_server.py` to_dict 加 5 個新欄位
+  - `capi_web.py` debug fusion endpoint 支援 shift / margin override + 回應含 shift 資訊
+  - UI: `/settings` AOI tab 加 `aoi_edge_pc_roi_inward_shift_enabled` / `aoi_edge_aoi_margin_px`；
+    `/record/<id>` edge 表格加 PC Shift 欄
+- **測試**：`tests/test_aoi_edge_pc_roi_shift.py` 22 項：
+  - `compute_pc_roi_offset` 12 項（deep interior / near 4 邊 / corner 取最近邊 / clamped /
+    polygon None / 頂點<3 / AOI 外 / threshold boundary）
+  - `verify_polygon_clear_of_pc_roi` 5 項（clean / polygon inside / too close / 凹角 / None）
+  - `_inspect_roi_fusion` 整合 5 項（deep interior 無 shift / 近邊 shift / defect fields /
+    disabled / fallback concave）
+  - Phase 6 (17 項) + AOI coord (3 項) + CV edge (46 項) regression 全綠
+- **Config 預設值表更新**:
+
+  | Key | 預設 | 角色 |
+  |---|---|---|
+  | `aoi_edge_pc_roi_inward_shift_enabled` | **True** | Phase 7 新增；fusion 下 PC ROI 自動內移 |
+  | `aoi_edge_aoi_margin_px` | **64** | Phase 7 新增；AOI 座標距 PC ROI 邊最小 margin |
+
 ### Phase 6 — CV+PatchCore 空間分權 Fusion Inspector (2026-04-22)
 
 - **動機**：Phase 5 互斥切換實際上線後觀察到：
