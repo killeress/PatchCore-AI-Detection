@@ -3172,6 +3172,7 @@ class CAPIInferencer:
         omit_image: Optional[np.ndarray] = None,
         omit_overexposed: bool = False,
         otsu_bounds: Optional[Tuple[int, int, int, int]] = None,
+        collapse_to_representative: bool = True,
     ) -> Tuple[List[EdgeDefect], Dict[str, Any]]:
         """Phase 6 — AOI 邊緣 CV+PatchCore 空間分權 Fusion。
 
@@ -3390,6 +3391,28 @@ class CAPIInferencer:
             fusion_defects, omit_image, omit_overexposed,
         )
 
+        # Phase 7.1 — collapse 到 1 筆代表 defect：
+        #   real_NG 優先 > dust；real_NG 內 PC > CV；CV 內 max area
+        pre_collapse_count = len(fusion_defects)
+        cv_band_count = len(cv_defects_kept)
+        pc_interior_count = len(pc_defects)
+        if collapse_to_representative and fusion_defects:
+            real_ng = [d for d in fusion_defects if not d.is_suspected_dust_or_scratch]
+            if real_ng:
+                pc_real = [d for d in real_ng if d.source_inspector == "patchcore"]
+                if pc_real:
+                    rep = pc_real[0]
+                else:
+                    rep = max(real_ng, key=lambda d: (d.area, d.max_diff))
+            else:
+                # 全 dust — 以相同優先序挑代表（保留 dust 旗標）
+                pc_dust = [d for d in fusion_defects if d.source_inspector == "patchcore"]
+                if pc_dust:
+                    rep = pc_dust[0]
+                else:
+                    rep = max(fusion_defects, key=lambda d: (d.area, d.max_diff))
+            fusion_defects = [rep]
+
         stats = {
             "band_mask": band_mask,
             "interior_mask": cv2.bitwise_and(fg_mask, cv2.bitwise_not(band_mask)),
@@ -3403,6 +3426,11 @@ class CAPIInferencer:
             "pc_roi_shift": (int(shift_vec[0]), int(shift_vec[1])),
             "pc_roi_fallback_reason": pc_fallback_reason,
             "pc_roi_fg_mask": pc_fg_mask_returned if use_shifted else fg_mask,
+            # Phase 7.1 collapse 診斷（pre_collapse_count = collapse 前的 defect 總數）
+            "pre_collapse_count": pre_collapse_count,
+            "cv_band_count": cv_band_count,
+            "pc_interior_count": pc_interior_count,
+            "collapsed": collapse_to_representative and pre_collapse_count > 1,
         }
         return fusion_defects, stats
 
