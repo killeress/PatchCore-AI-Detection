@@ -1071,15 +1071,15 @@
             <div style="margin-bottom:12px; display:flex; gap:18px; align-items:center;">
                 <span style="color:var(--text); font-weight:600;">Inspector:</span>
                 <label style="display:flex; gap:6px; align-items:center; cursor:pointer;">
-                    <input type="radio" name="edge-corner-inspector" value="fusion" onchange="updateCornerInspectorUI()">
+                    <input type="radio" name="edge-corner-inspector" value="fusion" {{ 'checked' if default_aoi_edge_inspector == 'fusion' else '' }} onchange="updateCornerInspectorUI()">
                     <span>Fusion(內PC邊緣CV)</span>
                 </label>
                 <label style="display:flex; gap:6px; align-items:center; cursor:pointer;">
-                    <input type="radio" name="edge-corner-inspector" value="cv" checked onchange="updateCornerInspectorUI()">
+                    <input type="radio" name="edge-corner-inspector" value="cv" {{ 'checked' if default_aoi_edge_inspector == 'cv' else '' }} onchange="updateCornerInspectorUI()">
                     <span>CV (傳統)</span>
                 </label>
                 <label style="display:flex; gap:6px; align-items:center; cursor:pointer;">
-                    <input type="radio" name="edge-corner-inspector" value="patchcore" onchange="updateCornerInspectorUI()">
+                    <input type="radio" name="edge-corner-inspector" value="patchcore" {{ 'checked' if default_aoi_edge_inspector == 'patchcore' else '' }} onchange="updateCornerInspectorUI()">
                     <span>PatchCore (模型)</span>
                 </label>
                 <span id="edge-corner-inspector-hint" style="color:var(--text-muted); font-size:0.85rem;">
@@ -2049,6 +2049,7 @@
 
     // Load settings on init
     document.addEventListener('DOMContentLoaded', () => {
+        updateCornerInspectorUI();
         fetchEdgeSettings();
     });
 
