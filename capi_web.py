@@ -2631,6 +2631,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "dust_count": sum(1 for d in defects
                                        if getattr(d, 'is_suspected_dust_or_scratch', False)),
                 },
+                # CV band 前置診斷
+                "cv_band_debug": {
+                    "total_found": len(stats.get("cv_defects_all_debug", [])),
+                    "kept_in_band": stats.get("cv_band_count", 0),
+                    "band_mask_pixels": stats.get("band_mask_pixels", 0),
+                    "fg_mask_pixels": stats.get("fg_mask_pixels", 0),
+                    "defects": stats.get("cv_defects_all_debug", []),
+                    "aoi_threshold": getattr(self.inferencer.edge_inspector.config, "aoi_threshold", "?"),
+                    "aoi_min_area": getattr(self.inferencer.edge_inspector.config, "aoi_min_area", "?"),
+                    "aoi_min_max_diff": getattr(self.inferencer.edge_inspector.config, "aoi_min_max_diff", "?"),
+                    "polygon_erode_px": getattr(self.inferencer.edge_inspector.config, "aoi_polygon_erode_px", "?"),
+                },
                 "images": encoded_imgs,
                 "panel_polygon": panel_polygon.astype(int).tolist() if panel_polygon is not None else None,
                 "image_size": [img_w, img_h],

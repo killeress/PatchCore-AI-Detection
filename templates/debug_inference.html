@@ -1160,6 +1160,7 @@
                 style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:16px; margin:24px 0;">
             </div>
             <div id="edge-corner-defect-detail" style="margin:16px 0;"></div>
+            <div id="edge-corner-cv-debug" style="margin:16px 0;"></div>
             <div class="coord-result-grid" id="edge-corner-result-grid"></div>
         </div>
     </div>
@@ -2335,6 +2336,55 @@
                 </div>`;
         } else {
             detail.innerHTML = '';
+        }
+
+        // CV Band 前置診斷
+        const dbg = data.cv_band_debug || {};
+        const dbgEl = document.getElementById('edge-corner-cv-debug');
+        if (dbgEl) {
+            const total = dbg.total_found ?? 0;
+            const kept  = dbg.kept_in_band ?? 0;
+            const bandPx = data.boundary_band_px ?? '?';
+            const paramStr = `thr=${dbg.aoi_threshold} / min_area=${dbg.aoi_min_area} / min_max_diff=${dbg.aoi_min_max_diff} / erode=${dbg.polygon_erode_px}px`;
+            const bandPxStr = `band=${bandPx}px | band_mask=${dbg.band_mask_pixels}px | fg_mask=${dbg.fg_mask_pixels}px`;
+            let rows = '';
+            (dbg.defects || []).forEach((d, i) => {
+                const inBand = d.in_band;
+                const reason = d.reject_reason || '';
+                const rowColor = inBand ? '' : 'color:var(--warn,#f59e0b)';
+                const badge = inBand
+                    ? `<span style="background:#22c55e22;color:#22c55e;padding:1px 6px;border-radius:4px;font-size:0.78rem;">✓ in band</span>`
+                    : `<span style="background:#f59e0b22;color:#f59e0b;padding:1px 6px;border-radius:4px;font-size:0.78rem;">✗ ${reason}</span>`;
+                rows += `<tr style="border-bottom:1px solid var(--border);${rowColor}">
+                    <td style="padding:4px 8px;color:var(--text-muted);">#${i+1}</td>
+                    <td style="padding:4px 8px;font-family:'Fira Code',monospace;">(${d.center[0]}, ${d.center[1]})</td>
+                    <td style="padding:4px 8px;text-align:right;">${d.area}</td>
+                    <td style="padding:4px 8px;text-align:right;">${d.max_diff}</td>
+                    <td style="padding:4px 8px;">${badge}</td>
+                </tr>`;
+            });
+            const bandPxDisplay = `band=${bandPx}px | band_mask_pixels=${dbg.band_mask_pixels} | fg_mask_pixels=${dbg.fg_mask_pixels}`;
+            dbgEl.innerHTML = `
+                <div class="card" style="padding:16px;margin-top:8px;border:1px solid var(--warn,#f59e0b)44;">
+                    <h3 style="margin:0 0 8px 0;font-size:0.95rem;color:var(--text-muted);">
+                        🔍 CV Band 前置診斷 — band 過濾前共 <strong>${total}</strong> 個 component，保留 <strong>${kept}</strong> 個
+                    </h3>
+                    <div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:8px;font-family:'Fira Code',monospace;">
+                        ${paramStr}<br>${bandPxDisplay}
+                    </div>
+                    ${total > 0 ? `
+                    <div style="overflow-x:auto;">
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <thead><tr style="border-bottom:1px solid var(--border);color:var(--text-muted);">
+                            <th style="text-align:left;padding:4px 8px;">#</th>
+                            <th style="text-align:left;padding:4px 8px;">Center</th>
+                            <th style="text-align:right;padding:4px 8px;">Area</th>
+                            <th style="text-align:right;padding:4px 8px;">Max Diff</th>
+                            <th style="text-align:left;padding:4px 8px;">Band 判定</th>
+                        </tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table></div>` : '<div style="color:var(--text-muted);font-size:0.85rem;">inspect_roi 未回傳任何 component（CV 原始輸出為空）</div>'}
+                </div>`;
         }
 
         const grid = document.getElementById('edge-corner-result-grid');
