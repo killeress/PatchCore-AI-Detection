@@ -860,13 +860,13 @@ class HeatmapManager:
                     print(f"⚠️ Edge OMIT dust check failed: {e}")
                     is_dust_detected = False
 
-            # Panel 3: 在 OMIT 上標記偵測到的異物（藍色半透明覆蓋）
+            # Panel 3: 在 OMIT 上標記偵測到的異物（黃色半透明覆蓋）
             if dust_mask_omit is not None and is_dust_detected:
                 dm_for_omit = dust_mask_omit
                 if len(dm_for_omit.shape) == 3:
                     dm_for_omit = cv2.cvtColor(dm_for_omit, cv2.COLOR_BGR2GRAY)
                 dm_vis_omit = cv2.resize(dm_for_omit, (panel_w, panel_h), interpolation=cv2.INTER_NEAREST)
-                _blend_color_on_mask(omit_panel, dm_vis_omit, (255, 100, 0))
+                _blend_color_on_mask(omit_panel, dm_vis_omit, (0, 255, 255))
 
             # Step 2: 計算 defect_mask 與 dust_mask 的 IOU/COV
             if dust_mask_omit is not None and is_dust_detected:
@@ -1131,7 +1131,7 @@ class HeatmapManager:
                         dust_mask_omit = dust_mask_raw
                         if is_dust_detected:
                             _blend_color_on_mask(panel2, dust_mask_omit,
-                                                  (255, 100, 0), alpha=0.5)
+                                                  (0, 255, 255), alpha=0.5)
                 except Exception as e:
                     print(f"⚠️ CV Fusion Panel 2 dust check 失敗: {e}")
         else:
@@ -1164,9 +1164,9 @@ class HeatmapManager:
         # 畫紅色 defect
         if defect_mask_p3 is not None:
             _blend_color_on_mask(panel3, defect_mask_p3, (0, 0, 255), alpha=0.55)
-        # 畫藍色 dust（與 Panel 2 一致：is_dust_detected=True 且 mask 非 None 才畫）
+        # 畫黃色 dust（與 Panel 2 一致：is_dust_detected=True 且 mask 非 None 才畫）
         if dust_mask_omit is not None and is_dust_detected:
-            _blend_color_on_mask(panel3, dust_mask_omit, (255, 100, 0), alpha=0.5)
+            _blend_color_on_mask(panel3, dust_mask_omit, (0, 255, 255), alpha=0.5)
         # 畫紫色交集（純色覆蓋）— 需 defect + is_dust + dust_mask 三者都有
         if (defect_mask_p3 is not None and dust_mask_omit is not None
                 and is_dust_detected):
@@ -1412,7 +1412,7 @@ class HeatmapManager:
                 # 與 CV 路徑 (capi_heatmap.py:806) 一致：要 dust_mask 有值且 is_dust_detected=True 才 overlay
                 if dust_mask_panel is not None and is_dust_detected:
                     _blend_color_on_mask(omit_panel_bgr, dust_mask_panel,
-                                         (255, 100, 0), alpha=0.5)
+                                         (0, 255, 255), alpha=0.5)
                 omit_panel = cv2.resize(omit_panel_bgr, (panel_w, panel_h))
                 panels.append(omit_panel)
                 labels.append("OMIT ROI (shifted)" if (
