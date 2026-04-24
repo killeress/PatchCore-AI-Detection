@@ -28,6 +28,33 @@ def _blend_color_on_mask(image: np.ndarray, mask: np.ndarray, color, alpha: floa
         ).clip(0, 255).astype(np.uint8)
 
 
+def _draw_dashed_contour(
+    img: np.ndarray,
+    fg_inner: np.ndarray,
+    color: tuple,
+    dash_len: int = 6,
+    gap_len: int = 4,
+) -> None:
+    """fg_inner 的輪廓以沿路徑 dash_len on / gap_len off 的虛線畫在 img 上。
+    使用 CHAIN_APPROX_NONE 取每個輪廓像素，確保水平/垂直線都能正確顯示。"""
+    cnts, _ = cv2.findContours(fg_inner, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    for cnt in cnts:
+        pts = cnt[:, 0, :]          # shape (N, 2)
+        n = len(pts)
+        if n < 2:
+            continue
+        draw = True
+        count = 0
+        for i in range(n):
+            j = (i + 1) % n
+            if draw:
+                cv2.line(img, tuple(pts[i]), tuple(pts[j]), color, 1, cv2.LINE_AA)
+            count += 1
+            if count >= (dash_len if draw else gap_len):
+                count = 0
+                draw = not draw
+
+
 def ensure_bgr(img: np.ndarray) -> np.ndarray:
     """將 grayscale / 單通道 ndarray 統一轉為 BGR，多通道直接 copy"""
     if img.ndim == 2 or (img.ndim == 3 and img.shape[2] == 1):
@@ -1103,16 +1130,16 @@ class HeatmapManager:
             # 外線：polygon 邊（實線）
             cv2.polylines(panel1, [poly_local.astype(np.int32)], isClosed=True,
                           color=(255, 100, 0), thickness=1, lineType=cv2.LINE_AA)
-            # 內線：fg_inner 的 1px 輪廓邊緣（虛線），不填充整個 band
-            fg_mask = np.zeros(panel1.shape[:2], dtype=np.uint8)
-            cv2.fillPoly(fg_mask, [poly_local.astype(np.int32)], 255)
+            # 內線：fg_inner 的輪廓虛線（沿路徑 6on/4off），不填充整個 band
+            fg_mask_vis = np.zeros(panel1.shape[:2], dtype=np.uint8)
+            cv2.fillPoly(fg_mask_vis, [poly_local.astype(np.int32)], 255)
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * band_px + 1, 2 * band_px + 1))
-            fg_inner = cv2.erode(fg_mask, kernel)
+            fg_inner = cv2.erode(fg_mask_vis, kernel)
             if fg_inner.any():
-                inner_edge = cv2.subtract(fg_inner,
-                    cv2.erode(fg_inner, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))))
-                dash = np.zeros_like(inner_edge); dash[::4, :] = 255
-                panel1[cv2.bitwise_and(inner_edge, dash) > 0] = (255, 100, 0)
+                _draw_dashed_contour(panel1, fg_inner, (255, 100, 0))
+            else:
+                # panel 在 ROI 內覆蓋 < 2×band_px → 以 polygon 本身輪廓代替內線
+                _draw_dashed_contour(panel1, fg_mask_vis, (255, 100, 0))
 
         # 1-b: 紅色 defect 像素 (cv_filtered_mask)
         cv_mask = getattr(edge_defect, 'cv_filtered_mask', None)
@@ -1357,17 +1384,17 @@ class HeatmapManager:
             # 外線：polygon 邊（實線）
             cv2.polylines(panel_orig, [poly_local.astype(np.int32)], isClosed=True,
                           color=(255, 100, 0), thickness=1, lineType=cv2.LINE_AA)
-            # 內線：CV/PC 分界（fg_inner 的 1px 邊緣虛線），不填充整個 band
+            # 內線：CV/PC 分界虛線（沿 fg_inner 輪廓 6on/4off）
             fg_vis = np.zeros(panel_orig.shape[:2], dtype=np.uint8)
             cv2.fillPoly(fg_vis, [poly_local.astype(np.int32)], 255)
             k_vis = cv2.getStructuringElement(cv2.MORPH_RECT,
                                               (2 * band_px_vis + 1, 2 * band_px_vis + 1))
             fg_inner = cv2.erode(fg_vis, k_vis)
             if fg_inner.any():
-                inner_edge = cv2.subtract(fg_inner,
-                    cv2.erode(fg_inner, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))))
-                dash = np.zeros_like(inner_edge); dash[::4, :] = 255
-                panel_orig[cv2.bitwise_and(inner_edge, dash) > 0] = (255, 100, 0)
+                _draw_dashed_contour(panel_orig, fg_inner, (255, 100, 0))
+            else:
+                # fg_inner 為空：panel 在 ROI 內覆蓋 < 2×band_px → 直接畫 band 外框虛線
+                _draw_dashed_contour(panel_orig, fg_vis, (255, 100, 0))
 
         panel_heatmap = render_pc_overlay(roi_bgr, fg_mask, anomaly_map)
 
