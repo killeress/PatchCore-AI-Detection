@@ -4203,6 +4203,7 @@ class CAPIInferencer:
                                             omit_image=omit_image,
                                             omit_overexposed=omit_overexposed,
                                             otsu_bounds=result.otsu_bounds,
+                                            collapse_to_representative=False,
                                         )
                                         pc_shift = fusion_stats.get("pc_roi_shift", (0, 0))
                                         pc_origin = fusion_stats.get("pc_roi_origin", (rx1, ry1))

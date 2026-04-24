@@ -2530,6 +2530,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     panel_polygon=panel_polygon,
                     omit_image=omit_image,
                     omit_overexposed=False,
+                    collapse_to_representative=False,
                 )
             finally:
                 cfg.aoi_edge_boundary_band_px = orig_band_px
@@ -2564,32 +2565,46 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 encoded_imgs["interior_mask"] = _to_data_url(
                     cv2.cvtColor(interior_mask, cv2.COLOR_GRAY2BGR))
 
-            # 產生 production 同款 composite 圖（帶 header + label bar）
+            # 產生 production 同款 composite 圖（全部 defect 各自一張，collapse 已移除）
             if defects:
-                try:
-                    rep = defects[0]
-                    hm = HeatmapManager(base_dir=".", save_format="png")
-                    ecfg = self.inferencer.edge_inspector.config
-                    src = getattr(rep, 'source_inspector', '')
-                    dust_fn = getattr(self.inferencer, 'check_dust_or_scratch_feature', None)
-                    if src == 'patchcore':
-                        arr = hm._save_patchcore_edge_image(
-                            None, "debug", 0, rep, image,
-                            omit_image=omit_image, dust_check_fn=dust_fn,
-                            edge_config=ecfg, return_array=True,
-                        )
-                    else:
-                        arr = hm._save_cv_fusion_edge_image(
-                            None, "debug", 0, rep, image,
-                            omit_image=omit_image, edge_config=ecfg,
-                            dust_check_fn=dust_fn,
-                            panel_polygon=panel_polygon,
-                            return_array=True,
-                        )
-                    if arr is not None:
-                        encoded_imgs["composite"] = _to_data_url(arr)
-                except Exception as comp_err:
-                    logger.warning(f"[DEBUG Fusion] composite 圖生成失敗: {comp_err}")
+                hm = HeatmapManager(base_dir=".", save_format="png")
+                ecfg = self.inferencer.edge_inspector.config
+                dust_fn = getattr(self.inferencer, 'check_dust_or_scratch_feature', None)
+                per_region_fn = getattr(self.inferencer, 'check_dust_per_region', None)
+                dust_debug_fn = getattr(self.inferencer, 'generate_dust_iou_debug_image', None)
+                top_pct = getattr(self.inferencer.config, 'dust_heatmap_top_percent', 5.0)
+                iou_thr = getattr(self.inferencer.config, 'dust_heatmap_iou_threshold', 0.3)
+                dust_metric = getattr(self.inferencer.config, 'dust_heatmap_metric', 'coverage')
+                composites = []
+                for ei, d in enumerate(defects):
+                    try:
+                        src = getattr(d, 'source_inspector', '')
+                        if src == 'patchcore':
+                            arr = hm._save_patchcore_edge_image(
+                                None, "debug", ei, d, image,
+                                omit_image=omit_image, dust_check_fn=dust_fn,
+                                edge_config=ecfg, return_array=True,
+                                check_dust_per_region_fn=per_region_fn,
+                                generate_dust_debug_fn=dust_debug_fn,
+                                dust_heatmap_top_percent=top_pct,
+                                dust_iou_threshold=iou_thr,
+                                dust_metric=dust_metric,
+                            )
+                        else:
+                            arr = hm._save_cv_fusion_edge_image(
+                                None, "debug", ei, d, image,
+                                omit_image=omit_image, edge_config=ecfg,
+                                dust_check_fn=dust_fn,
+                                panel_polygon=panel_polygon,
+                                return_array=True,
+                            )
+                        if arr is not None:
+                            composites.append(_to_data_url(arr))
+                    except Exception as comp_err:
+                        logger.warning(f"[DEBUG Fusion] composite 圖 #{ei} 生成失敗: {comp_err}")
+                if composites:
+                    encoded_imgs["composite"] = composites[0]       # 向後相容
+                    encoded_imgs["composites"] = composites         # 全部
 
             cv_kept = [d for d in defects if getattr(d, 'source_inspector', '') == 'cv']
             pc_kept = [d for d in defects if getattr(d, 'source_inspector', '') == 'patchcore']

@@ -2389,8 +2389,13 @@
 
         const grid = document.getElementById('edge-corner-result-grid');
         const imgs = data.images || {};
-        if (imgs.composite) {
-            grid.innerHTML = `<div style="width:100%;overflow-x:auto;"><img src="${imgs.composite}" style="max-width:100%;height:auto;cursor:pointer;border-radius:4px;display:block;" onclick="openLightbox(this.src)"></div>`;
+        const composites = imgs.composites || (imgs.composite ? [imgs.composite] : []);
+        if (composites.length > 0) {
+            grid.innerHTML = composites.map((src, i) => `
+                <div style="width:100%;overflow-x:auto;margin-bottom:${i < composites.length-1 ? '12px' : '0'};">
+                    ${composites.length > 1 ? `<div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:4px;">Defect #${i+1} (${(data.defects||[])[i]?.source_inspector||'?'})</div>` : ''}
+                    <img src="${src}" style="max-width:100%;height:auto;cursor:pointer;border-radius:4px;display:block;" onclick="openLightbox(this.src)">
+                </div>`).join('');
         } else {
             grid.innerHTML = '<div style="color:var(--text-muted);padding:16px;">無缺陷，無複合圖</div>';
         }
