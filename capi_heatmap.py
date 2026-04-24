@@ -1091,26 +1091,28 @@ class HeatmapManager:
         # --- Panel 1: Detection ---
         panel1 = roi_bgr.copy()
 
-        # 1-a: 藍虛線畫 band 輪廓（polygon 邊往內縮 band_px 的等距線）
+        # 1-a: 僅畫兩條細邊界線，不填充 band 區域（避免遮蓋缺陷）
+        # 外線 = polygon 實際邊（面板邊緣）
+        # 內線 = 往內縮 band_px 的 CV/PC 分界（虛線）
         band_px = 40
         if edge_config is not None:
             band_px = int(getattr(edge_config, 'aoi_edge_boundary_band_px', 40))
         if panel_polygon is not None and len(panel_polygon) >= 3:
             poly_local = panel_polygon.astype(np.float32).copy()
             poly_local[:, 0] -= rx1; poly_local[:, 1] -= ry1
-            # 原 polygon 邊
+            # 外線：polygon 邊（實線）
             cv2.polylines(panel1, [poly_local.astype(np.int32)], isClosed=True,
                           color=(255, 100, 0), thickness=1, lineType=cv2.LINE_AA)
-            # 內縮 band_px 虛線（純視覺，不影響判定）
+            # 內線：fg_inner 的 1px 輪廓邊緣（虛線），不填充整個 band
             fg_mask = np.zeros(panel1.shape[:2], dtype=np.uint8)
             cv2.fillPoly(fg_mask, [poly_local.astype(np.int32)], 255)
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * band_px + 1, 2 * band_px + 1))
             fg_inner = cv2.erode(fg_mask, kernel)
-            band_contour = cv2.subtract(fg_mask, fg_inner)
-            dash_pattern = np.zeros_like(band_contour)
-            dash_pattern[::4, :] = 255  # 每 4 行取 1 行製造虛線
-            band_dash = cv2.bitwise_and(band_contour, dash_pattern)
-            panel1[band_dash > 0] = (255, 100, 0)
+            if fg_inner.any():
+                inner_edge = cv2.subtract(fg_inner,
+                    cv2.erode(fg_inner, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))))
+                dash = np.zeros_like(inner_edge); dash[::4, :] = 255
+                panel1[cv2.bitwise_and(inner_edge, dash) > 0] = (255, 100, 0)
 
         # 1-b: 紅色 defect 像素 (cv_filtered_mask)
         cv_mask = getattr(edge_defect, 'cv_filtered_mask', None)
@@ -1352,17 +1354,20 @@ class HeatmapManager:
         if panel_polygon_raw is not None and len(panel_polygon_raw) >= 3:
             poly_local = panel_polygon_raw.astype(np.float32).copy()
             poly_local[:, 0] -= roi_orig_x; poly_local[:, 1] -= roi_orig_y
+            # 外線：polygon 邊（實線）
             cv2.polylines(panel_orig, [poly_local.astype(np.int32)], isClosed=True,
                           color=(255, 100, 0), thickness=1, lineType=cv2.LINE_AA)
+            # 內線：CV/PC 分界（fg_inner 的 1px 邊緣虛線），不填充整個 band
             fg_vis = np.zeros(panel_orig.shape[:2], dtype=np.uint8)
             cv2.fillPoly(fg_vis, [poly_local.astype(np.int32)], 255)
             k_vis = cv2.getStructuringElement(cv2.MORPH_RECT,
                                               (2 * band_px_vis + 1, 2 * band_px_vis + 1))
             fg_inner = cv2.erode(fg_vis, k_vis)
-            band_contour = cv2.subtract(fg_vis, fg_inner)
-            dash = np.zeros_like(band_contour)
-            dash[::4, :] = 255
-            panel_orig[cv2.bitwise_and(band_contour, dash) > 0] = (255, 100, 0)
+            if fg_inner.any():
+                inner_edge = cv2.subtract(fg_inner,
+                    cv2.erode(fg_inner, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))))
+                dash = np.zeros_like(inner_edge); dash[::4, :] = 255
+                panel_orig[cv2.bitwise_and(inner_edge, dash) > 0] = (255, 100, 0)
 
         panel_heatmap = render_pc_overlay(roi_bgr, fg_mask, anomaly_map)
 
