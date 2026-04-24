@@ -641,6 +641,8 @@ class HeatmapManager:
         dust_iou_threshold: float = 0.3,
         dust_heatmap_top_percent: float = 5.0,
         dust_metric: str = "coverage",
+        check_dust_per_region_fn: Any = None,
+        generate_dust_debug_fn: Any = None,
     ) -> str:
         """
         儲存 CV 邊緣缺陷比較圖 (Original ROI | Defect Highlight | OMIT ROI | Defect vs OMIT Overlay)
@@ -679,6 +681,11 @@ class HeatmapManager:
                 full_image, omit_image,
                 dust_check_fn=dust_check_fn,
                 edge_config=edge_config,
+                check_dust_per_region_fn=check_dust_per_region_fn,
+                generate_dust_debug_fn=generate_dust_debug_fn,
+                dust_heatmap_top_percent=dust_heatmap_top_percent,
+                dust_iou_threshold=dust_iou_threshold,
+                dust_metric=dust_metric,
             )
         # Phase 7.2-B: fusion 的 CV defect 走新 3 板 renderer
         if inspector_mode == 'fusion' and source_inspector == 'cv':
@@ -1276,6 +1283,11 @@ class HeatmapManager:
         omit_image: np.ndarray = None,
         dust_check_fn: Any = None,
         edge_config: Any = None,
+        check_dust_per_region_fn: Any = None,
+        generate_dust_debug_fn: Any = None,
+        dust_heatmap_top_percent: float = 5.0,
+        dust_iou_threshold: float = 0.3,
+        dust_metric: str = "coverage",
         return_array: bool = False,
     ) -> str:
         """PatchCore inspector 邊緣缺陷比較圖。
@@ -1447,12 +1459,11 @@ class HeatmapManager:
                 panels.append(cv2.resize(omit_dust_panel, (panel_w, panel_h)))
                 labels.append("Dust Detection")
 
-                # Panel 5: Overlap 屏蔽分析 — 與中間區域灰塵屏蔽邏輯一致
-                # 紅=PC anomaly only, 黃=dust only, 紫=overlap; COV = overlap/anomaly
-                overlay_panel = ensure_bgr(omit_canvas).copy()
-                cov_val = 0.0
-                if dust_mask_panel is not None and is_dust_detected and anomaly_map is not None:
-                    # 與 render_pc_overlay 完全一致：先套 fg_mask 清除 panel 外再取 peak
+                # Panel 5: 與中間區域 tile PC 路徑完全相同的灰塵屏蔽分析圖
+                # 使用 check_dust_per_region + generate_dust_iou_debug_image，共用同一套邏輯與參數
+                if (check_dust_per_region_fn is not None and generate_dust_debug_fn is not None
+                        and dust_mask_panel is not None and anomaly_map is not None):
+                    # 先套 fg_mask 清除 panel 外（與 render_pc_overlay 一致）
                     amap_vis = np.asarray(anomaly_map, dtype=np.float32)
                     if fg_mask is not None:
                         fm = cv2.resize(
@@ -1460,47 +1471,39 @@ class HeatmapManager:
                             interpolation=cv2.INTER_NEAREST,
                         ).astype(np.float32) / 255.0
                         amap_vis = amap_vis * fm
-                    peak = float(np.max(amap_vis)) if amap_vis.size > 0 else 0.0
-                    if peak > 0:
-                        anom_bin = (amap_vis > peak * 0.5).astype(np.uint8) * 255
-                        dust_cmp = cv2.resize(
+
+                    try:
+                        metric_name = "COV" if dust_metric == "coverage" else "IOU"
+                        (has_real, _real_peak, overall_cov,
+                         region_details, heatmap_binary, region_labels) = check_dust_per_region_fn(
                             dust_mask_panel,
-                            (anom_bin.shape[1], anom_bin.shape[0]),
-                            interpolation=cv2.INTER_NEAREST,
+                            amap_vis,
+                            top_percent=dust_heatmap_top_percent,
+                            metric=dust_metric,
+                            iou_threshold=dust_iou_threshold,
                         )
-                        anom_b = anom_bin > 0
-                        dust_b = dust_cmp > 0
-                        overlap_b = anom_b & dust_b
-                        anom_area = int(np.sum(anom_b))
-                        cov_val = int(np.sum(overlap_b)) / anom_area if anom_area > 0 else 0.0
-
-                        ch, cw = overlay_panel.shape[:2]
-                        def _rb(mask_bool):
-                            return cv2.resize(
-                                mask_bool.astype(np.uint8) * 255, (cw, ch), cv2.INTER_NEAREST
-                            ) > 0
-
-                        # Anomaly 區用與 Panel 2 相同的 JET heatmap gradient 上色
-                        # 熱點=紅，周邊中等分數=綠，視覺與 PatchCore Heatmap 完全一致
-                        amap_u8 = (amap_vis / peak * 255.0).clip(0, 255).astype(np.uint8)
-                        heatmap_canvas = cv2.resize(
-                            cv2.applyColorMap(amap_u8, cv2.COLORMAP_JET),
-                            (cw, ch), interpolation=cv2.INTER_LINEAR,
+                        is_dust_shield = not has_real
+                        roi_bgr_small = ensure_bgr(
+                            cv2.resize(roi if roi is not None else np.zeros((tile_size, tile_size), dtype=np.uint8),
+                                       (tile_size, tile_size))
                         )
-                        anom_only = _rb(anom_b & ~dust_b)
-                        overlay_panel[anom_only]              = heatmap_canvas[anom_only]  # heatmap gradient
-                        overlay_panel[_rb(dust_b & ~anom_b)] = (0, 255, 255)   # 黃=dust only
-                        overlay_panel[_rb(overlap_b)]         = (220, 0, 180)   # 紫=overlap
-                else:
-                    cv2.putText(overlay_panel, "No Dust", (10, tile_size // 2),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
-
-                overlay_resized = cv2.resize(overlay_panel, (panel_w, panel_h))
-                cov_txt = f"COV:{cov_val:.3f}"
-                cv2.putText(overlay_resized, cov_txt, (8, panel_h - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                panels.append(overlay_resized)
-                labels.append(f"Dust Shield ({cov_txt})")
+                        debug_img = generate_dust_debug_fn(
+                            tile_image=roi_bgr_small,
+                            anomaly_map=amap_vis,
+                            dust_mask=dust_mask_panel,
+                            heatmap_binary=heatmap_binary,
+                            iou=overall_cov,
+                            top_percent=dust_heatmap_top_percent,
+                            is_dust=is_dust_shield,
+                            region_details=region_details,
+                            region_labels=region_labels,
+                        )
+                        panels.append(cv2.resize(debug_img, (panel_w, panel_h)))
+                        labels.append(f"Dust Shield ({metric_name}:{overall_cov:.3f})")
+                    except Exception as e:
+                        print(f"⚠️ PC Panel 5 dust debug 失敗: {e}")
+                        panels.append(np.zeros((panel_h, panel_w, 3), dtype=np.uint8))
+                        labels.append("Dust Shield (err)")
             except Exception as e:
                 print(f"⚠️ PatchCore edge OMIT panel 失敗: {e}")
 
@@ -1686,9 +1689,17 @@ class HeatmapManager:
                             edge_config = inferencer.edge_inspector.config
                         if hasattr(inferencer, 'check_dust_or_scratch_feature'):
                             dust_check_fn = inferencer.check_dust_or_scratch_feature
+                        check_dust_per_region_fn = None
+                        generate_dust_debug_fn = None
+                        dust_heatmap_top_percent = 5.0
                         if hasattr(inferencer, 'config'):
                             dust_iou_threshold = getattr(inferencer.config, 'dust_heatmap_iou_threshold', 0.3)
                             dust_metric = getattr(inferencer.config, 'dust_heatmap_metric', 'coverage')
+                            dust_heatmap_top_percent = getattr(inferencer.config, 'dust_heatmap_top_percent', 5.0)
+                        if hasattr(inferencer, 'check_dust_per_region'):
+                            check_dust_per_region_fn = inferencer.check_dust_per_region
+                        if hasattr(inferencer, 'generate_dust_iou_debug_image'):
+                            generate_dust_debug_fn = inferencer.generate_dust_iou_debug_image
 
                         for ei, edge in enumerate(result.edge_defects):
                             try:
@@ -1703,6 +1714,9 @@ class HeatmapManager:
                                     dust_check_fn=dust_check_fn,
                                     dust_iou_threshold=dust_iou_threshold,
                                     dust_metric=dust_metric,
+                                    dust_heatmap_top_percent=dust_heatmap_top_percent,
+                                    check_dust_per_region_fn=check_dust_per_region_fn,
+                                    generate_dust_debug_fn=generate_dust_debug_fn,
                                 )
                                 saved_files.append(edge_path)
                                 # 回寫路徑到 edge 物件 (供後續 DB 儲存使用)
