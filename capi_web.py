@@ -2624,8 +2624,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     } for d in defects
                 ],
                 "summary": {
-                    "cv_band_count": len(cv_kept),
-                    "pc_interior_count": len(pc_kept),
+                    "cv_band_count": stats.get("cv_band_count", 0),  # pre-collapse 真實數量
+                    "pc_interior_count": stats.get("pc_interior_count", 0),
                     "ng_count": sum(1 for d in defects
                                      if not getattr(d, 'is_suspected_dust_or_scratch', False)),
                     "dust_count": sum(1 for d in defects
