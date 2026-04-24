@@ -1476,9 +1476,17 @@ class HeatmapManager:
                                 mask_bool.astype(np.uint8) * 255, (cw, ch), cv2.INTER_NEAREST
                             ) > 0
 
-                        overlay_panel[_rb(anom_b & ~dust_b)] = (0, 0, 255)    # 紅=PC only
-                        overlay_panel[_rb(dust_b & ~anom_b)] = (0, 255, 255)  # 黃=dust only
-                        overlay_panel[_rb(overlap_b)]         = (220, 0, 180)  # 紫=overlap
+                        # Anomaly 區用與 Panel 2 相同的 JET heatmap gradient 上色
+                        # 熱點=紅，周邊中等分數=綠，視覺與 PatchCore Heatmap 完全一致
+                        amap_u8 = (amap_vis / peak * 255.0).clip(0, 255).astype(np.uint8)
+                        heatmap_canvas = cv2.resize(
+                            cv2.applyColorMap(amap_u8, cv2.COLORMAP_JET),
+                            (cw, ch), interpolation=cv2.INTER_LINEAR,
+                        )
+                        anom_only = _rb(anom_b & ~dust_b)
+                        overlay_panel[anom_only]              = heatmap_canvas[anom_only]  # heatmap gradient
+                        overlay_panel[_rb(dust_b & ~anom_b)] = (0, 255, 255)   # 黃=dust only
+                        overlay_panel[_rb(overlap_b)]         = (220, 0, 180)   # 紫=overlap
                 else:
                     cv2.putText(overlay_panel, "No Dust", (10, tile_size // 2),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
