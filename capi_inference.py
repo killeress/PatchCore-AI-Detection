@@ -2332,12 +2332,24 @@ class CAPIInferencer:
             # 但 heatmap peak 有膨脹偏移問題，高覆蓋率時直接判 dust 不依賴 peak 位置
             peak_in_dust = bool(dust_bool[peak_pos[0], peak_pos[1]])
             high_cov_thr = getattr(self.config, 'dust_high_cov_threshold', 0.5)
-            is_dust_region = region_coverage >= iou_threshold and (peak_in_dust or region_coverage >= high_cov_thr)
 
-            # 殘餘異常檢查：僅在 peak 位於灰塵上時觸發，檢查非灰塵區是否藏有次峰真實缺陷
+            # 灰塵次峰救援：peak 不在灰塵上，但灰塵區內最強分數 >= 區域 peak 的 X%
+            # 代表 heatmap 熱點僅輕微偏移（上採樣/平滑效果），灰塵仍是主要異常來源
+            dust_sub_peak_rescue = False
+            if not peak_in_dust and region_coverage >= iou_threshold:
+                dust_in_region = region_mask & dust_bool
+                if np.any(dust_in_region):
+                    dust_sub_peak = float(np.max(anomaly_map_f[dust_in_region]))
+                    frac_thr = getattr(self.config, 'dust_peak_fraction_threshold', 0.80)
+                    if region_max_score > 0 and dust_sub_peak / region_max_score >= frac_thr:
+                        dust_sub_peak_rescue = True
+
+            is_dust_region = region_coverage >= iou_threshold and (peak_in_dust or dust_sub_peak_rescue or region_coverage >= high_cov_thr)
+
+            # 殘餘異常檢查：僅在實際 peak_in_dust 時觸發，檢查非灰塵區是否藏有次峰真實缺陷
             # 解決「灰塵信號遮蔽同區域內細微真實缺陷」的漏檢問題
             # 注意: peak_in_dust=False 時 peak 本身即在 non_dust 區，residual_ratio 必為 1.0，
-            # 會誤抵消上方 high_cov_thr 的救援，因此必須加上 peak_in_dust 前提
+            # 會誤抵消 dust_sub_peak_rescue / high_cov_thr 的救援，因此必須限定 peak_in_dust
             residual_ratio = 0.0
             if is_dust_region and peak_in_dust:
                 non_dust_in_region = region_mask & (~dust_bool)
@@ -2360,6 +2372,7 @@ class CAPIInferencer:
                 "coverage": region_coverage,
                 "is_dust": is_dust_region,
                 "peak_in_dust": peak_in_dust,
+                "dust_sub_peak_rescue": dust_sub_peak_rescue,
                 "residual_ratio": residual_ratio,
                 "max_score": region_max_score,
                 "peak_yx": peak_pos,

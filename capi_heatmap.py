@@ -87,6 +87,7 @@ def build_region_zoom_panels(
     metric_name: str = "COV",
     iou_threshold: float = 0.01,
     max_panels: int = 3,
+    method_label: str = "",
 ) -> List[Tuple[np.ndarray, str]]:
     """為每個異常區域生成放大面板（二值化 heatmap + 灰塵遮罩疊加 + 計算數值標註）。
 
@@ -168,9 +169,14 @@ def build_region_zoom_panels(
             cv2.putText(panel, f"{metric_name}: {dust_ol}/{area} = {cov:.4f}", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
             peak_in = region.get("peak_in_dust", True)
+            sub_rescue = region.get("dust_sub_peak_rescue", False)
             thr_str = f"Thr:{iou_threshold}"
-            if is_dust:
+            if is_dust and peak_in:
                 reason = f"PeakInDust ({thr_str}) -> DUST"
+            elif is_dust and sub_rescue:
+                reason = f"SubPeakRescue ({thr_str}) -> DUST"
+            elif is_dust:
+                reason = f"HighCOV ({thr_str}) -> DUST"
             elif cov < iou_threshold:
                 reason = f"{metric_name}<{thr_str} -> REAL"
             else:
@@ -178,12 +184,19 @@ def build_region_zoom_panels(
             cv2.putText(panel, reason, (10, 85),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, tag_color, 1)
 
+            # 判定方式 label
+            if method_label:
+                ml_color = (0, 200, 255) if "DUST" in method_label else (0, 100, 255)
+                cv2.putText(panel, f"[{method_label}]", (10, 110),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, ml_color, 1)
+
             # 圖例
             legend_y = tile_size - 15
             cv2.putText(panel, "White=Heat  Yellow=Dust  Green=Overlap", (10, legend_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
 
-            label = f"Region#{region['label_id']} {tag} {metric_name}:{cov:.3f}"
+            method_suffix = f" [{method_label}]" if method_label else ""
+            label = f"Region#{region['label_id']} {tag} {metric_name}:{cov:.3f}{method_suffix}"
             results.append((panel, label))
         except Exception as e:
             print(f"⚠️ Region zoom panel #{region.get('label_id', '?')} failed: {e}")
@@ -522,11 +535,19 @@ class HeatmapManager:
         if has_omit and has_region_details:
             region_details = getattr(tile_info, 'dust_region_details', None)
             heatmap_binary = getattr(tile_info, 'dust_heatmap_binary', None)
+            # 判定判定方式 label
+            ts_features = getattr(tile_info, 'dust_two_stage_features', None)
+            if ts_features is not None:
+                ts_is_dust = getattr(tile_info, 'is_suspected_dust_or_scratch', False)
+                region_method_label = f"TWO_STAGE→{'DUST' if ts_is_dust else 'REAL'}"
+            else:
+                region_method_label = ""
             zoom_results = build_region_zoom_panels(
                 heatmap_binary, dust_mask, region_details,
                 tile_size=tile_size,
                 metric_name=metric_name,
                 iou_threshold=iou_threshold,
+                method_label=region_method_label,
             )
 
         # --- 底部獨立標籤列（不蓋到面板內容）---
@@ -1257,7 +1278,9 @@ class HeatmapManager:
 
         Panel 1: Original ROI (AOI centered raw crop + CV band 藍色輪廓，視覺標示 CV/PC 分界)
         Panel 2: Anomaly Heatmap Overlay (半透明 colormap 疊於 ROI 上)
-        Panel 3: OMIT ROI (shifted) + dust mask 藍色 overlay (如果 dust_check_fn 提供)
+        Panel 3: OMIT ROI (shifted) 原圖，無疊色
+        Panel 4: OMIT + 黃色 dust overlay（dust_check_fn 偵測結果）
+        Panel 5: Dust Shield — 紅=PC anomaly only, 黃=dust only, 紫=overlap; COV metric
 
         Args:
             dust_check_fn: 灰塵偵測函數（通常 CAPIInferencer.check_dust_or_scratch_feature），
@@ -1374,14 +1397,12 @@ class HeatmapManager:
 
         if omit_image is not None:
             try:
-                # Phase 7.2 A2: 先把 OMIT 標準化成 BGR 再擷取（避免 gray vs BGR broadcast 失敗）
+                # 擷取 OMIT 對應 shifted ROI 區域
                 omit_src = ensure_bgr(omit_image)
                 oh, ow = omit_src.shape[:2]
                 tile_size = roi.shape[0]
-                # Phase 7.2 A2: OMIT 擷取改以 shifted ROI origin 為起點（pc_roi_origin_x/y）
                 ox_origin = int(getattr(edge_defect, "pc_roi_origin_x", 0))
                 oy_origin = int(getattr(edge_defect, "pc_roi_origin_y", 0))
-                # 舊 record 無 origin（預設 0,0）→ fallback 用 AOI center
                 if ox_origin == 0 and oy_origin == 0:
                     cx, cy = int(center[0]), int(center[1])
                     ox_origin = cx - tile_size // 2
@@ -1394,8 +1415,11 @@ class HeatmapManager:
                     odx2 = odx1 + (osx2 - osx1); ody2 = ody1 + (osy2 - osy1)
                     omit_canvas[ody1:ody2, odx1:odx2] = omit_src[osy1:osy2, osx1:osx2]
 
-                # Phase 7.2 A3: 套 dust_check_fn 的藍色 overlay（BGR 255,100,0）
-                # 與 CV 路徑（capi_heatmap.py:800）行為一致：直接傳 omit_canvas，由 check_fn 自行處理通道
+                omit_label_base = "OMIT ROI (shifted)" if (
+                    edge_defect.pc_roi_shift_dx or edge_defect.pc_roi_shift_dy
+                ) else "OMIT ROI"
+
+                # dust check
                 dust_mask_panel = None
                 is_dust_detected = False
                 if dust_check_fn is not None:
@@ -1406,18 +1430,57 @@ class HeatmapManager:
                                 dust_mask_raw = cv2.cvtColor(dust_mask_raw, cv2.COLOR_BGR2GRAY)
                             dust_mask_panel = dust_mask_raw
                     except Exception as e:
-                        print(f"⚠️ PC Panel 3 dust check 失敗: {e}")
+                        print(f"⚠️ PC Panel OMIT dust check 失敗: {e}")
 
-                omit_panel_bgr = ensure_bgr(omit_canvas)
-                # 與 CV 路徑 (capi_heatmap.py:806) 一致：要 dust_mask 有值且 is_dust_detected=True 才 overlay
+                # Panel 3: OMIT 原圖 (無疊色)
+                panels.append(cv2.resize(ensure_bgr(omit_canvas).copy(), (panel_w, panel_h)))
+                labels.append(omit_label_base)
+
+                # Panel 4: OMIT + 黃色 dust overlay
+                omit_dust_panel = ensure_bgr(omit_canvas).copy()
                 if dust_mask_panel is not None and is_dust_detected:
-                    _blend_color_on_mask(omit_panel_bgr, dust_mask_panel,
-                                         (0, 255, 255), alpha=0.5)
-                omit_panel = cv2.resize(omit_panel_bgr, (panel_w, panel_h))
-                panels.append(omit_panel)
-                labels.append("OMIT ROI (shifted)" if (
-                    edge_defect.pc_roi_shift_dx or edge_defect.pc_roi_shift_dy
-                ) else "OMIT ROI")
+                    _blend_color_on_mask(omit_dust_panel, dust_mask_panel, (0, 255, 255), alpha=0.5)
+                panels.append(cv2.resize(omit_dust_panel, (panel_w, panel_h)))
+                labels.append("Dust Detection")
+
+                # Panel 5: Overlap 屏蔽分析 — 與中間區域灰塵屏蔽邏輯一致
+                # 紅=PC anomaly only, 黃=dust only, 紫=overlap; COV = overlap/anomaly
+                overlay_panel = ensure_bgr(omit_canvas).copy()
+                cov_val = 0.0
+                if dust_mask_panel is not None and is_dust_detected and anomaly_map is not None:
+                    peak = float(np.max(anomaly_map))
+                    if peak > 0:
+                        anom_bin = (anomaly_map > peak * 0.5).astype(np.uint8) * 255
+                        dust_cmp = cv2.resize(
+                            dust_mask_panel,
+                            (anom_bin.shape[1], anom_bin.shape[0]),
+                            interpolation=cv2.INTER_NEAREST,
+                        )
+                        anom_b = anom_bin > 0
+                        dust_b = dust_cmp > 0
+                        overlap_b = anom_b & dust_b
+                        anom_area = int(np.sum(anom_b))
+                        cov_val = int(np.sum(overlap_b)) / anom_area if anom_area > 0 else 0.0
+
+                        ch, cw = overlay_panel.shape[:2]
+                        def _rb(mask_bool):
+                            return cv2.resize(
+                                mask_bool.astype(np.uint8) * 255, (cw, ch), cv2.INTER_NEAREST
+                            ) > 0
+
+                        overlay_panel[_rb(anom_b & ~dust_b)] = (0, 0, 255)    # 紅=PC only
+                        overlay_panel[_rb(dust_b & ~anom_b)] = (0, 255, 255)  # 黃=dust only
+                        overlay_panel[_rb(overlap_b)]         = (220, 0, 180)  # 紫=overlap
+                else:
+                    cv2.putText(overlay_panel, "No Dust", (10, tile_size // 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
+
+                overlay_resized = cv2.resize(overlay_panel, (panel_w, panel_h))
+                cov_txt = f"COV:{cov_val:.3f}"
+                cv2.putText(overlay_resized, cov_txt, (8, panel_h - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                panels.append(overlay_resized)
+                labels.append(f"Dust Shield ({cov_txt})")
             except Exception as e:
                 print(f"⚠️ PatchCore edge OMIT panel 失敗: {e}")
 
