@@ -3414,8 +3414,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     @classmethod
     def _rerun_worker(cls, record_id: int, detail: dict):
         """背景執行緒：重新推論並覆蓋紀錄"""
+        import sys as _sys
         import time as _time
-        from capi_server import results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment, InferenceLogCapture
+        from capi_server import results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment
+
+        # 直接取 sys.stdout (_TeeStdout 實例)，避免 capi_server 以 __main__ 執行時
+        # 重新 import 得到不同 class 物件導致 _tee = None 的問題
+        _tee = _sys.stdout if hasattr(_sys.stdout, '_local') else None
 
         def _update_status(msg, *_):
             with cls._rerun_lock:
@@ -3443,7 +3448,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             _update_status("正在等待 GPU...")
             start_time = _time.time()
 
-            InferenceLogCapture.start_capture()
+            if _tee:
+                _tee._local.buffer = []
             if cls._gpu_lock:
                 with cls._gpu_lock:
                     _update_status("正在推論中...")
@@ -3472,7 +3478,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             omit_image_raw = panel_result[5] if len(panel_result) > 5 else None
 
             if not results:
-                InferenceLogCapture.stop_capture()
+                if _tee:
+                    _tee._local.buffer = None
                 with cls._rerun_lock:
                     cls._rerun_tasks[record_id] = {"status": "error", "message": "推論完成但無圖片結果"}
                 return
@@ -3510,7 +3517,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             ng_images = sum(1 for d in image_results_data if d.get("is_ng"))
             error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
 
-            inference_log = InferenceLogCapture.stop_capture()
+            if _tee:
+                buf = getattr(_tee._local, 'buffer', None) or []
+                _tee._local.buffer = None
+                inference_log = "\n".join(buf)
+            else:
+                inference_log = ""
 
             cls.db.update_record_for_rerun(
                 record_id=record_id,
@@ -3532,7 +3544,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         except Exception as e:
             import traceback
-            InferenceLogCapture.stop_capture()
+            if _tee:
+                _tee._local.buffer = None
             traceback.print_exc()
             with cls._rerun_lock:
                 cls._rerun_tasks[record_id] = {"status": "error", "message": f"推論失敗: {e}"}
