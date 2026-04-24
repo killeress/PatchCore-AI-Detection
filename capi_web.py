@@ -1029,6 +1029,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             default_aoi_line_max_width=get_val('cv_edge_aoi_line_max_width', 3),
             default_aoi_boundary_padding=15,
             default_aoi_boundary_min_bright=15,
+            default_aoi_edge_inspector=get_val('aoi_edge_inspector', 'cv'),
         )
         self._send_response(200, html)
 
