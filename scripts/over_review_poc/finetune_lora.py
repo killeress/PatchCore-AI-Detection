@@ -39,6 +39,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score
 from torch.utils.data import DataLoader, Dataset
 
+from scratch_classifier import _load_dinov2 as _load_dinov2_offline
 from scripts.over_review_poc.dataset import load_samples, SCRATCH_BINARY, Sample
 from scripts.over_review_poc.evaluate import find_threshold_at_full_recall
 from scripts.over_review_poc.features import (
@@ -123,8 +124,10 @@ class _CropDataset(Dataset):
         return self.transform(img), float(self.labels[i])
 
 
-def _load_dinov2() -> nn.Module:
-    return torch.hub.load(DINOV2_REPO, DINOV2_MODEL, source="github")
+def _load_dinov2(args=None) -> nn.Module:
+    repo_path = getattr(args, "dinov2_repo", None)
+    weights_path = getattr(args, "dinov2_weights", None)
+    return _load_dinov2_offline(DINOV2_REPO, DINOV2_MODEL, weights_path, repo_path)
 
 
 def _extract_cls(model: nn.Module, samples: list[Sample], transform,
@@ -142,7 +145,7 @@ def _extract_cls(model: nn.Module, samples: list[Sample], transform,
 
 
 def _train_fold(samples, train_idx, transform, device, args):
-    model = _load_dinov2()
+    model = _load_dinov2(args)
     n_lora = _apply_lora(model, args.n_lora_blocks, args.rank, args.alpha)
     # Apply LoRA first (adds new submodules), THEN move to device so the
     # freshly-created lora_A / lora_B weights land on CUDA too.

@@ -1,23 +1,58 @@
 """Merge over_review manifest.csv from multiple batch folders into one.
 
-Output: dataset_v2/over_review/manifest_merged.csv where crop_path is
-prefixed with the batch subdir so load_samples() can resolve files
-relative to dataset_v2/over_review/.
+Auto-discovers all subdirs under <base> that contain a manifest.csv,
+sorted by folder name (YYYYMMDD_HHMMSS order = chronological).
+
+Output: <base>/manifest_merged.csv where crop_path is prefixed with the
+batch subdir so load_samples() can resolve files relative to <base>.
+
+Usage:
+    # Local
+    python -m tools.merge_over_review_manifests
+
+    # Server
+    python -m tools.merge_over_review_manifests \
+        --base /data/capi_ai/datasets/over_review
+
+    # Exclude specific batches (e.g. bad labeling / process change)
+    python -m tools.merge_over_review_manifests \
+        --base /data/capi_ai/datasets/over_review \
+        --exclude 20260415_104812 legacy_20260414_000000
 """
 from __future__ import annotations
 
+import argparse
 import csv
 from collections import Counter
 from pathlib import Path
 
 
+def discover_batches(base: Path, exclude: set[str]) -> list[str]:
+    """Return sorted list of batch dir names that have a manifest.csv."""
+    batches = sorted(
+        d.name for d in base.iterdir()
+        if d.is_dir() and (d / "manifest.csv").exists() and d.name not in exclude
+    )
+    return batches
+
+
 def main() -> None:
-    base = Path("dataset_v2/over_review")
-    batches = [
-        "legacy_20260414_000000",
-        "20260415_104812",
-        "20260416_132250",
-    ]
+    p = argparse.ArgumentParser()
+    p.add_argument("--base", type=Path, default=Path("dataset_v2/over_review"),
+                   help="Root folder containing all batch subdirs")
+    p.add_argument("--exclude", nargs="*", default=[],
+                   help="Batch dir names to skip (e.g. batches with wrong labels or process change)")
+    args = p.parse_args()
+
+    base = args.base
+    exclude = set(args.exclude)
+    batches = discover_batches(base, exclude)
+    if not batches:
+        print(f"[error] no batch dirs with manifest.csv found under {base}")
+        return
+    if exclude:
+        print(f"excluded: {sorted(exclude)}")
+    print(f"merging {len(batches)} batches: {batches}")
     out_path = base / "manifest_merged.csv"
 
     all_fields: list[str] = []
