@@ -3300,48 +3300,49 @@ class CAPIInferencer:
                 d.cv_mask_offset = cv_stats.get("roi_offset", (rx1, ry1))
                 cv_defects_kept.append(d)
 
-        # === PC 路徑（Phase 7: 內移 PC ROI 以避開 polygon 邊 discontinuity）===
+        # === PC 路徑（Phase 7.3: 內移 PC ROI 完全避開 CV 管轄 band 區）===
+        # shift 目標：polygon 邊距 PC ROI ≥ band_px（= CV band 寬度），讓 PC ROI
+        # 物理上完全在 band 之外，不需 mask 排除。
+        # 若 needed > roi_size/2 → AOI 會脫離 ROI → 不 shift → fallback="aoi_exit_roi"
         shift_enabled = bool(getattr(
             self.edge_inspector.config, "aoi_edge_pc_roi_inward_shift_enabled", True))
-        aoi_margin_px = int(getattr(
-            self.edge_inspector.config, "aoi_edge_aoi_margin_px", 64))
-        # Phase 7.1c — PC ROI shift 寬帶與 Phase 6 band_mask 脫鉤（config: aoi_edge_pc_shift_band_px）。
-        # 0 = 只要 shift 後 polygon 不再侵入 ROI 即視為可用，最大程度利用 max_shift；
-        # >0 = 要求 shift 後 ROI 邊距 polygon ≥ band_px buffer，清不到時 fallback。
-        # band_mask（line 3269）仍獨立用 band_px=40，保留置中 fallback 的邊緣保護。
-        pc_shift_band_px = int(getattr(
-            self.edge_inspector.config, "aoi_edge_pc_shift_band_px", 0))
 
-        pc_roi_origin_candidate, shift_vec, _d_edge_signed = compute_pc_roi_offset(
+        pc_roi_origin_candidate, shift_vec, d_edge_signed = compute_pc_roi_offset(
             aoi_xy=(img_x, img_y),
             polygon=polygon_int,
-            band_px=pc_shift_band_px,
-            aoi_margin_px=aoi_margin_px,
+            band_px=band_px,
             roi_size=tile_size,
         )
 
         use_shifted = False
         pc_fallback_reason = ""
-        if not shift_enabled and shift_vec != (0, 0):
-            # 明確 disabled 且本該偏移 → 記錄 fallback reason
-            pc_fallback_reason = "shift_disabled"
-            shift_vec = (0, 0)
-        elif shift_enabled and shift_vec != (0, 0):
+        half = tile_size // 2
+        needed_shift = band_px + half - d_edge_signed if d_edge_signed > 0 else 0
+
+        if not shift_enabled:
+            # shift 功能被 config 關閉
+            if needed_shift > 0:
+                pc_fallback_reason = "shift_disabled"
+        elif needed_shift > half:
+            # AOI 距邊太近，shift 量超過 ROI 半徑 → AOI 會脫離 ROI → 不 shift
+            pc_fallback_reason = "aoi_exit_roi"
+        elif shift_vec != (0, 0):
+            # shift 可行，驗證其他邊沒有從側面侵入（凹角 polygon 情境）
             if verify_polygon_clear_of_pc_roi(
                 pc_roi_origin=pc_roi_origin_candidate,
                 roi_size=tile_size,
                 polygon=polygon_int,
-                band_px=pc_shift_band_px,
+                band_px=band_px,
             ):
                 use_shifted = True
             else:
-                # Phase 7.1 — 精細 fallback 原因分類
+                # 其他邊侵入 → concave polygon（Phase 7.3 classify 已簡化為只回此值）
                 pc_fallback_reason = classify_pc_roi_verify_failure(
                     aoi_xy=(img_x, img_y),
                     pc_roi_origin=pc_roi_origin_candidate,
                     roi_size=tile_size,
                     polygon=polygon_int,
-                    band_px=pc_shift_band_px,
+                    band_px=band_px,
                 )
                 shift_vec = (0, 0)
 
@@ -3369,11 +3370,12 @@ class CAPIInferencer:
         if pc_anomaly_map is not None:
             anomaly_map_interior = pc_anomaly_map.copy()
             if use_shifted:
-                # Shifted: 只過 shifted fg_mask，band_mask 不適用（polygon 已 ≥ band_px 外）
+                # Shifted: PC ROI 已物理上在 CV band 外，只排除 polygon 外像素
+                # （band_mask 以 centered ROI 座標計算，套在 shifted map 上座標不對應）
                 if pc_fg_mask_returned is not None:
                     anomaly_map_interior[pc_fg_mask_returned == 0] = 0.0
             else:
-                # Fallback/centered: 沿用 Phase 6 band_mask 排除
+                # Fallback/centered: Phase 6 band_mask 排除 CV 管轄帶 + polygon 外
                 anomaly_map_interior[band_mask > 0] = 0.0
                 anomaly_map_interior[fg_mask == 0] = 0.0
 
@@ -3402,6 +3404,7 @@ class CAPIInferencer:
                 pc_def.pc_roi_shift_dx = int(shift_vec[0])
                 pc_def.pc_roi_shift_dy = int(shift_vec[1])
                 pc_def.pc_roi_fallback_reason = pc_fallback_reason
+                pc_def.panel_polygon = panel_polygon  # 供 heatmap renderer 畫 CV band 輪廓
                 pc_defects.append(pc_def)
 
         # === Merge + OMIT ===
@@ -4195,9 +4198,9 @@ class CAPIInferencer:
                                             detected = True
                                             shift_tag = f" shift=({d.pc_roi_shift_dx:+d},{d.pc_roi_shift_dy:+d})" \
                                                         if (d.pc_roi_shift_dx or d.pc_roi_shift_dy) else ""
-                                            # Phase 7.1 — pcfb 標示改用精確分類
-                                            if d.pc_roi_fallback_reason == "shift_insufficient":
-                                                fb_tag = " PC-FB=shift_insufficient(偏移不足)"
+                                            # Phase 7.3 — PC fallback 原因標示
+                                            if d.pc_roi_fallback_reason == "aoi_exit_roi":
+                                                fb_tag = " PC-FB=aoi_exit_roi(AOI將離開ROI)"
                                             elif d.pc_roi_fallback_reason == "concave_polygon":
                                                 fb_tag = " PC-FB=concave_polygon(凹角)"
                                             elif d.pc_roi_fallback_reason == "shift_disabled":
@@ -4235,9 +4238,9 @@ class CAPIInferencer:
                                             fb = fusion_stats.get("fusion_fallback_reason", "")
                                             shift_tag = f" shift=({pc_shift[0]:+d},{pc_shift[1]:+d})" \
                                                         if (pc_shift[0] or pc_shift[1]) else ""
-                                            # Phase 7.1 — 精確 fallback 分類標記
-                                            if pc_fb == "shift_insufficient":
-                                                pcfb_tag = " PC-FB=shift_insufficient(偏移不足)"
+                                            # Phase 7.3 — PC fallback 原因標示（OK record）
+                                            if pc_fb == "aoi_exit_roi":
+                                                pcfb_tag = " PC-FB=aoi_exit_roi(AOI將離開ROI)"
                                             elif pc_fb == "concave_polygon":
                                                 pcfb_tag = " PC-FB=concave_polygon(凹角)"
                                             elif pc_fb == "shift_disabled":

@@ -657,6 +657,7 @@ class HeatmapManager:
                 save_dir, image_name, edge_index, edge_defect,
                 full_image, omit_image,
                 dust_check_fn=dust_check_fn,
+                edge_config=edge_config,
             )
         # Phase 7.2-B: fusion 的 CV defect 走新 3 板 renderer
         if inspector_mode == 'fusion' and source_inspector == 'cv':
@@ -1250,10 +1251,11 @@ class HeatmapManager:
         full_image: np.ndarray,
         omit_image: np.ndarray = None,
         dust_check_fn: Any = None,
+        edge_config: Any = None,
     ) -> str:
         """PatchCore inspector 邊緣缺陷比較圖。
 
-        Panel 1: Original ROI (AOI centered raw crop，不疊 mask / marker)
+        Panel 1: Original ROI (AOI centered raw crop + CV band 藍色輪廓，視覺標示 CV/PC 分界)
         Panel 2: Anomaly Heatmap Overlay (半透明 colormap 疊於 ROI 上)
         Panel 3: OMIT ROI (shifted) + dust mask 藍色 overlay (如果 dust_check_fn 提供)
 
@@ -1261,6 +1263,7 @@ class HeatmapManager:
             dust_check_fn: 灰塵偵測函數（通常 CAPIInferencer.check_dust_or_scratch_feature），
                            回傳 (is_dust, dust_mask, bright_ratio, detail_text)。
                            None 則跳過 overlay；回傳 is_dust=False 也不 overlay。
+            edge_config: EdgeInspectionConfig，用於取得 aoi_edge_boundary_band_px 等參數。
         """
         side = edge_defect.side
         center = edge_defect.center
@@ -1287,7 +1290,7 @@ class HeatmapManager:
             fg_mask = np.ones(roi.shape[:2], dtype=np.uint8) * 255
 
         roi_bgr = ensure_bgr(roi)
-        # Phase 7.2 A1: Panel 1 改 AOI centered raw crop，不疊 mask / marker
+        # Phase 7.2 A1: Panel 1 = AOI centered raw crop（不疊 mask / marker）
         cx, cy = int(center[0]), int(center[1])
         tile_size = roi.shape[0] if roi is not None else 512
         half = tile_size // 2
@@ -1301,6 +1304,28 @@ class HeatmapManager:
             dx2 = dx1 + (sx2 - sx1); dy2 = dy1 + (sy2 - sy1)
             raw_canvas[dy1:dy2, dx1:dx2] = full_image[sy1:sy2, sx1:sx2]
         panel_orig = ensure_bgr(raw_canvas)
+
+        # Phase 7.3: Panel 1 加藍色 CV band 輪廓，視覺標示 CV 管轄區與 PC interior 分界
+        panel_polygon_raw = getattr(edge_defect, 'panel_polygon', None)
+        band_px_vis = 40
+        if edge_config is not None:
+            band_px_vis = int(getattr(edge_config, 'aoi_edge_boundary_band_px', 40))
+        roi_orig_x = cx - half
+        roi_orig_y = cy - half
+        if panel_polygon_raw is not None and len(panel_polygon_raw) >= 3:
+            poly_local = panel_polygon_raw.astype(np.float32).copy()
+            poly_local[:, 0] -= roi_orig_x; poly_local[:, 1] -= roi_orig_y
+            cv2.polylines(panel_orig, [poly_local.astype(np.int32)], isClosed=True,
+                          color=(255, 100, 0), thickness=1, lineType=cv2.LINE_AA)
+            fg_vis = np.zeros(panel_orig.shape[:2], dtype=np.uint8)
+            cv2.fillPoly(fg_vis, [poly_local.astype(np.int32)], 255)
+            k_vis = cv2.getStructuringElement(cv2.MORPH_RECT,
+                                              (2 * band_px_vis + 1, 2 * band_px_vis + 1))
+            fg_inner = cv2.erode(fg_vis, k_vis)
+            band_contour = cv2.subtract(fg_vis, fg_inner)
+            dash = np.zeros_like(band_contour)
+            dash[::4, :] = 255
+            panel_orig[cv2.bitwise_and(band_contour, dash) > 0] = (255, 100, 0)
 
         panel_heatmap = render_pc_overlay(roi_bgr, fg_mask, anomaly_map)
 
@@ -1321,15 +1346,19 @@ class HeatmapManager:
             if shift_dx or shift_dy:
                 badge_text = f"[PC dx={shift_dx:+d} dy={shift_dy:+d}]"
                 badge_w = 200
-            elif pc_fb == "shift_insufficient":
-                badge_text = "[PC FB: shift_insufficient]"
-                badge_w = 310
+            elif pc_fb == "aoi_exit_roi":
+                badge_text = "[PC FB: aoi_exit_roi]"
+                badge_w = 280
             elif pc_fb == "concave_polygon":
                 badge_text = "[PC FB: concave_polygon]"
                 badge_w = 290
             elif pc_fb == "shift_disabled":
                 badge_text = "[PC FB: shift_disabled]"
                 badge_w = 280
+            elif pc_fb == "shift_insufficient":
+                # 向後相容：舊 record 可能有此值
+                badge_text = "[PC FB: shift_insufficient]"
+                badge_w = 310
             elif pc_fb:
                 badge_text = f"[PC FB: {pc_fb}]"
                 badge_w = 250
@@ -1425,12 +1454,15 @@ class HeatmapManager:
         extra = ""
         if shift_dx or shift_dy:
             extra = f"PC dx={shift_dx:+d} dy={shift_dy:+d}"
-        elif pc_fb == "shift_insufficient":
-            extra = "PC-FB=shift_insufficient(offset short)"
+        elif pc_fb == "aoi_exit_roi":
+            extra = "PC-FB=aoi_exit_roi(AOI將離開ROI)"
         elif pc_fb == "concave_polygon":
             extra = "PC-FB=concave_polygon(concave)"
         elif pc_fb == "shift_disabled":
             extra = "PC-FB=shift_disabled"
+        elif pc_fb == "shift_insufficient":
+            # 向後相容：舊 record
+            extra = "PC-FB=shift_insufficient(offset short)"
         elif pc_fb:
             extra = f"PC-FB={pc_fb}"
 

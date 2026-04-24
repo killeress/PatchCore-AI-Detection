@@ -614,15 +614,15 @@ function copyInferenceLog() {
                         </td>
                         <td>
                             {# Phase 7: PC ROI 內移量 — 僅 fusion 模式有意義 #}
-                            {# Phase 7.1: fallback 改用明確分類 shift_insufficient / concave_polygon / shift_disabled #}
+                            {# Phase 7.3: fallback 分類 aoi_exit_roi / concave_polygon / shift_disabled #}
                             {% if ed_mode == 'fusion' %}
                               {% if pc_shift_dx != 0 or pc_shift_dy != 0 %}
                               <span class="badge" style="background:#DBEAFE;color:#1E3A8A;font-size:0.68rem;font-family:'Fira Code',monospace;">
                                 ({% if pc_shift_dx > 0 %}+{% endif %}{{ pc_shift_dx }}, {% if pc_shift_dy > 0 %}+{% endif %}{{ pc_shift_dy }})
                               </span>
-                              {% elif pc_fb == 'shift_insufficient' %}
-                              <span class="badge" style="background:#FEF3C7;color:#92400E;font-size:0.62rem;" title="AOI 距 polygon 邊極近，max_shift 不足以把邊清到 band_px 之外 → 退回 Phase 6 band_mask">
-                                偏移不足 · shift_insufficient
+                              {% elif pc_fb == 'aoi_exit_roi' %}
+                              <span class="badge" style="background:#FEE2E2;color:#991B1B;font-size:0.62rem;" title="AOI 距 polygon 邊極近，shift 量超過 ROI 半徑 → AOI 會脫離 ROI → 不內移，退回 Phase 6">
+                                AOI將離開ROI · aoi_exit_roi
                               </span>
                               {% elif pc_fb == 'concave_polygon' %}
                               <span class="badge" style="background:#FBCFE8;color:#9D174D;font-size:0.62rem;" title="polygon 形狀導致 shift 沿單一方向無法清場（多邊侵入或侵入的不是最近邊）">
@@ -631,6 +631,10 @@ function copyInferenceLog() {
                               {% elif pc_fb == 'shift_disabled' %}
                               <span class="badge" style="background:#E5E7EB;color:#374151;font-size:0.62rem;" title="aoi_edge_pc_roi_inward_shift_enabled=False">
                                 內移停用 · shift_disabled
+                              </span>
+                              {% elif pc_fb == 'shift_insufficient' %}
+                              <span class="badge" style="background:#FEF3C7;color:#92400E;font-size:0.62rem;" title="舊 record (Phase 7.1b)：max_shift 不足 → 已被 aoi_exit_roi 取代">
+                                偏移不足 · shift_insufficient
                               </span>
                               {% elif pc_fb %}
                               <span class="badge" style="background:#FEF3C7;color:#92400E;font-size:0.62rem;">fallback: {{ pc_fb }}</span>
