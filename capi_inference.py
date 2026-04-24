@@ -4987,11 +4987,7 @@ class CAPIInferencer:
         elif len(vis.shape) == 3 and vis.shape[2] == 1:
             vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
         
-        # Otsu 邊界（藍色）
-        x1, y1, x2, y2 = result.otsu_bounds
-        cv2.rectangle(vis, (x1, y1), (x2, y2), (255, 0, 0), 6)
-
-        # Panel polygon（紅色）
+        # Panel polygon（紅色）— tile 範圍由綠色 grid 呈現，不再重複畫 Otsu 矩形
         if result.panel_polygon is not None:
             poly_int = result.panel_polygon.astype(np.int32).reshape(-1, 1, 2)
             cv2.polylines(vis, [poly_int], True, (0, 0, 255), 6)
