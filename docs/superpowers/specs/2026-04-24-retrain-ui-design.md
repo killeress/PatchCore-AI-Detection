@@ -137,11 +137,33 @@ Log:
   2026-04-24 16:37:34 [INFO]   epoch 1/15  loss=0.3189
   ...
 
-[completed]
-  Output: deployment/scratch_classifier_v3.pkl
-  Conformal threshold: 0.4231
-  Calib NG count: 287 / 1581
+[訓練完成 ✓]
+
+  訓練結果摘要
+  ┌─────────────────────────────────────────────────────┐
+  │ 新模型檔案      deployment/scratch_classifier_v3.pkl │
+  │ 訓練資料筆數    7,688 筆                              │
+  │ 刮痕樣本數      670 筆                               │
+  │                                                     │
+  │ 刮痕判定敏感度  0.47  ████████░░  偏嚴格              │
+  │   → 數字越低越嚴格，漏放率越低但過殺率越高              │
+  │                                                     │
+  │ 不良品保護驗證  287 個已知不良品全數通過校準            │
+  │   → 這些樣本在新模型下皆正確判為 NG，不會漏放           │
+  └─────────────────────────────────────────────────────┘
+
+  部署方式：將「新模型檔案」路徑填入 設定頁面 → scratch_bundle_path
 ```
+
+**對應關係（原始數值 → 作業員顯示）：**
+
+| 原始欄位 | 作業員標籤 | 說明 |
+|----------|-----------|------|
+| `args.output` | 新模型檔案 | 直接顯示路徑 |
+| `len(samples)` | 訓練資料筆數 | 從 manifest 載入時記錄 |
+| `scratch count` | 刮痕樣本數 | label == "over_surface_scratch" 的數量 |
+| `conformal_threshold × safety` | 刮痕判定敏感度 | 附進度條（0.3 以下=嚴格，0.5 以上=寬鬆）+ 文字說明 |
+| `calib_ng_count` | 不良品保護驗證 | "N 個已知不良品全數通過校準" |
 
 JS polls `GET /api/retrain/status` every 3 seconds. Stops polling when `state == "completed"` or `"failed"`. Shows last 100 log lines (scrolled to bottom).
 
