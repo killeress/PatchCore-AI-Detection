@@ -2465,7 +2465,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         import cv2
         import numpy as np
         import base64
-        from capi_heatmap import ensure_bgr, render_pc_masked_roi, render_pc_overlay
+        from capi_heatmap import ensure_bgr, render_pc_masked_roi, render_pc_overlay, HeatmapManager
 
         if self.inferencer is None:
             self._send_json({"error": "推論器尚未載入 (inferencer is None)"})
@@ -2551,6 +2551,32 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if interior_mask is not None:
                 encoded_imgs["interior_mask"] = _to_data_url(
                     cv2.cvtColor(interior_mask, cv2.COLOR_GRAY2BGR))
+
+            # 產生 production 同款 composite 圖（帶 header + label bar）
+            if defects:
+                try:
+                    rep = defects[0]
+                    hm = HeatmapManager(base_dir=".", save_format="png")
+                    ecfg = self.inferencer.edge_inspector.config
+                    src = getattr(rep, 'source_inspector', '')
+                    if src == 'patchcore':
+                        arr = hm._save_patchcore_edge_image(
+                            None, "debug", 0, rep, image,
+                            omit_image=None, dust_check_fn=None,
+                            edge_config=ecfg, return_array=True,
+                        )
+                    else:
+                        arr = hm._save_cv_fusion_edge_image(
+                            None, "debug", 0, rep, image,
+                            omit_image=None, edge_config=ecfg,
+                            dust_check_fn=None,
+                            panel_polygon=panel_polygon,
+                            return_array=True,
+                        )
+                    if arr is not None:
+                        encoded_imgs["composite"] = _to_data_url(arr)
+                except Exception as comp_err:
+                    logger.warning(f"[DEBUG Fusion] composite 圖生成失敗: {comp_err}")
 
             cv_kept = [d for d in defects if getattr(d, 'source_inspector', '') == 'cv']
             pc_kept = [d for d in defects if getattr(d, 'source_inspector', '') == 'patchcore']

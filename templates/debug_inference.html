@@ -1071,16 +1071,16 @@
             <div style="margin-bottom:12px; display:flex; gap:18px; align-items:center;">
                 <span style="color:var(--text); font-weight:600;">Inspector:</span>
                 <label style="display:flex; gap:6px; align-items:center; cursor:pointer;">
+                    <input type="radio" name="edge-corner-inspector" value="fusion" onchange="updateCornerInspectorUI()">
+                    <span>Fusion(內PC邊緣CV)</span>
+                </label>
+                <label style="display:flex; gap:6px; align-items:center; cursor:pointer;">
                     <input type="radio" name="edge-corner-inspector" value="cv" checked onchange="updateCornerInspectorUI()">
                     <span>CV (傳統)</span>
                 </label>
                 <label style="display:flex; gap:6px; align-items:center; cursor:pointer;">
                     <input type="radio" name="edge-corner-inspector" value="patchcore" onchange="updateCornerInspectorUI()">
                     <span>PatchCore (模型)</span>
-                </label>
-                <label style="display:flex; gap:6px; align-items:center; cursor:pointer;">
-                    <input type="radio" name="edge-corner-inspector" value="fusion" onchange="updateCornerInspectorUI()">
-                    <span>Fusion (CV band + PC interior)</span>
                 </label>
                 <span id="edge-corner-inspector-hint" style="color:var(--text-muted); font-size:0.85rem;">
                     傳統 CV 二值化+形狀過濾；PatchCore 走 /predict_tile pipeline；Fusion 同 ROI 雙跑、CV 管 boundary band+PC 管 interior（Phase 6）
@@ -2180,7 +2180,7 @@
             'edge-corner-line-min-length', 'edge-corner-line-max-width',
             'edge-corner-boundary-padding', 'edge-corner-boundary-min-bright',
         ];
-        const disabled = mode === 'patchcore';
+        const disabled = mode === 'patchcore' || mode === 'fusion';
         cvOnlyIds.forEach(id => {
             const el = document.getElementById(id);
             if (el) {
@@ -2245,6 +2245,8 @@
 
             if (data.inspector === 'patchcore') {
                 renderEdgeCornerPatchCoreResult(data);
+            } else if (data.inspector === 'fusion') {
+                renderEdgeCornerFusionResult(data);
             } else {
                 renderEdgeCornerResult(data);
             }
@@ -2254,6 +2256,92 @@
             btn.disabled = false;
             btnText.textContent = '📐 角落測試';
             spinner.classList.remove('active');
+        }
+    }
+
+    function renderEdgeCornerFusionResult(data) {
+        document.getElementById('edge-corner-result-section').classList.remove('hidden');
+        const cards = document.getElementById('edge-corner-info-cards');
+        const summary = data.summary || {};
+        const defects = data.defects || [];
+        const isNG = (summary.ng_count || 0) > 0;
+        const shiftArr = data.pc_roi_shift || [0, 0];
+        const sdx = shiftArr[0], sdy = shiftArr[1];
+        const shiftTag = (sdx || sdy)
+            ? `dx=${sdx >= 0 ? '+' : ''}${sdx} dy=${sdy >= 0 ? '+' : ''}${sdy}`
+            : '—';
+        const fallbackCards = [
+            data.fusion_fallback_reason ? `<div class="summary-card"><div class="label">Fusion Fallback</div><div class="value" style="color:var(--warn,#f59e0b);font-size:0.85rem;">${data.fusion_fallback_reason}</div></div>` : '',
+            data.pc_roi_fallback_reason ? `<div class="summary-card"><div class="label">PC ROI Fallback</div><div class="value" style="color:var(--warn,#f59e0b);font-size:0.85rem;">${data.pc_roi_fallback_reason}</div></div>` : '',
+        ].join('');
+        cards.innerHTML = `
+            <div class="summary-card">
+                <div class="label">判定結果 (Fusion)</div>
+                <div class="value" style="color:${isNG ? 'var(--ng)' : 'var(--ok)'}">
+                    ${isNG ? '❌ NG' : '✅ OK'}
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="label">CV band / PC interior</div>
+                <div class="value">${summary.cv_band_count || 0} / ${summary.pc_interior_count || 0}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">NG / Dust</div>
+                <div class="value">${summary.ng_count || 0} / ${summary.dust_count || 0}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">PC ROI Shift</div>
+                <div class="value" style="font-family:'Fira Code',monospace;font-size:0.9rem;">${shiftTag}</div>
+            </div>
+            ${fallbackCards}
+        `;
+
+        const detail = document.getElementById('edge-corner-defect-detail');
+        if (defects.length > 0) {
+            const rows = defects.map((d, i) => {
+                const src = d.source_inspector || '-';
+                const score = (d.patchcore_score || 0).toFixed(3);
+                const thr = (d.patchcore_threshold || 0).toFixed(3);
+                const cmp = (d.patchcore_score || 0) >= (d.patchcore_threshold || 0) ? '≥' : '<';
+                const judgeLabel = d.is_dust ? 'Dust' : 'NG';
+                const judgeColor = d.is_dust ? 'var(--ok)' : 'var(--ng)';
+                return `
+                    <tr style="border-bottom:1px solid var(--border);">
+                        <td style="padding:6px 10px;color:var(--text-muted);">#${i+1}</td>
+                        <td style="padding:6px 10px;">${src}</td>
+                        <td style="padding:6px 10px;font-family:'Fira Code',monospace;">(${(d.center||[])[0]||0}, ${(d.center||[])[1]||0})</td>
+                        <td style="padding:6px 10px;text-align:right;">${d.area||0}</td>
+                        <td style="padding:6px 10px;text-align:right;font-family:'Fira Code',monospace;">${score} ${cmp} ${thr}</td>
+                        <td style="padding:6px 10px;text-align:center;color:${judgeColor};">${judgeLabel}</td>
+                    </tr>`;
+            }).join('');
+            detail.innerHTML = `
+                <div class="card" style="padding:16px;">
+                    <h3 style="margin:0 0 10px 0;font-size:1rem;">Fusion 缺陷明細 (${defects.length})</h3>
+                    <div style="overflow-x:auto;">
+                    <table style="width:100%;font-size:0.9rem;border-collapse:collapse;">
+                        <thead><tr style="border-bottom:1px solid var(--border);color:var(--text-muted);">
+                            <th style="text-align:left;padding:6px 10px;">#</th>
+                            <th style="text-align:left;padding:6px 10px;">Source</th>
+                            <th style="text-align:left;padding:6px 10px;">Center</th>
+                            <th style="text-align:right;padding:6px 10px;">Area</th>
+                            <th style="text-align:right;padding:6px 10px;">Score / Thr</th>
+                            <th style="text-align:center;padding:6px 10px;">判定</th>
+                        </tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                    </div>
+                </div>`;
+        } else {
+            detail.innerHTML = '';
+        }
+
+        const grid = document.getElementById('edge-corner-result-grid');
+        const imgs = data.images || {};
+        if (imgs.composite) {
+            grid.innerHTML = `<div style="width:100%;"><img src="${imgs.composite}" style="width:100%;cursor:pointer;border-radius:4px;" onclick="openLightbox(this.src)"></div>`;
+        } else {
+            grid.innerHTML = '<div style="color:var(--text-muted);padding:16px;">無缺陷，無複合圖</div>';
         }
     }
 
