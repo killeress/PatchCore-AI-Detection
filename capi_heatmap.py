@@ -1062,6 +1062,7 @@ class HeatmapManager:
         dust_iou_threshold: float = 0.3,
         dust_metric: str = "coverage",
         panel_polygon: Optional[np.ndarray] = None,
+        return_array: bool = False,
     ) -> str:
         """Phase 7.2-B: Fusion 模式 CV defect 3 板組合圖
         (Panel 1: Detection / Panel 2: OMIT+Dust / Panel 3: Overlap)"""
@@ -1258,6 +1259,8 @@ class HeatmapManager:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
 
         final = np.vstack([header, composite, label_bar])
+        if return_array:
+            return final
         filename = f"edge_cvfusion_{image_name}_{side}_{edge_index}.{self.save_format}"
         filepath = save_dir / filename
         cv2.imwrite(str(filepath), final)
@@ -1273,6 +1276,7 @@ class HeatmapManager:
         omit_image: np.ndarray = None,
         dust_check_fn: Any = None,
         edge_config: Any = None,
+        return_array: bool = False,
     ) -> str:
         """PatchCore inspector 邊緣缺陷比較圖。
 
@@ -1558,7 +1562,8 @@ class HeatmapManager:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
 
         final = np.vstack([header, composite, label_bar])
-
+        if return_array:
+            return final
         filename = f"edge_pc_{image_name}_{side}_{edge_index}.{self.save_format}"
         filepath = save_dir / filename
         cv2.imwrite(str(filepath), final)
