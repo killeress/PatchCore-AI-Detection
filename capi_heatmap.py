@@ -566,7 +566,7 @@ class HeatmapManager:
             ts_features = getattr(tile_info, 'dust_two_stage_features', None)
             if ts_features is not None:
                 ts_is_dust = getattr(tile_info, 'is_suspected_dust_or_scratch', False)
-                region_method_label = f"TWO_STAGE→{'DUST' if ts_is_dust else 'REAL'}"
+                region_method_label = f"TWO_STAGE->{'DUST' if ts_is_dust else 'REAL'}"
             else:
                 region_method_label = ""
             zoom_results = build_region_zoom_panels(
