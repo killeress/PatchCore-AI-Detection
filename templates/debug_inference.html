@@ -2340,7 +2340,7 @@
         const grid = document.getElementById('edge-corner-result-grid');
         const imgs = data.images || {};
         if (imgs.composite) {
-            grid.innerHTML = `<div style="width:100%;"><img src="${imgs.composite}" style="width:100%;cursor:pointer;border-radius:4px;" onclick="openLightbox(this.src)"></div>`;
+            grid.innerHTML = `<div style="width:100%;overflow-x:auto;"><img src="${imgs.composite}" style="max-width:100%;height:auto;cursor:pointer;border-radius:4px;display:block;" onclick="openLightbox(this.src)"></div>`;
         } else {
             grid.innerHTML = '<div style="color:var(--text-muted);padding:16px;">無缺陷，無複合圖</div>';
         }

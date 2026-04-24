@@ -2491,6 +2491,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if image.dtype == np.uint16:
                 image = (image / 256).astype(np.uint8)
 
+            # 自動找同目錄的 OMIT 圖（OMIT0000* 或 PINIGBI*）
+            omit_image = None
+            try:
+                for f in image_path.parent.iterdir():
+                    if f.is_file() and (f.stem.startswith("PINIGBI") or "OMIT0000" in f.name):
+                        _omit_raw = cv2.imread(str(f), cv2.IMREAD_UNCHANGED)
+                        if _omit_raw is not None:
+                            omit_image = (_omit_raw / 256).astype(np.uint8) if _omit_raw.dtype == np.uint16 else _omit_raw
+                            break
+            except Exception as omit_err:
+                logger.warning(f"[DEBUG Fusion] OMIT 自動偵測失敗: {omit_err}")
+
             img_h, img_w = image.shape[:2]
             img_cx = roi_x + tile_size // 2
             img_cy = roi_y + tile_size // 2
@@ -2516,9 +2528,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 defects, stats = self.inferencer._inspect_roi_fusion(
                     image, img_cx, img_cy, img_prefix,
                     panel_polygon=panel_polygon,
-                    omit_image=None,           # debug 頁不做 OMIT 屏蔽
+                    omit_image=omit_image,
                     omit_overexposed=False,
-                    # Debug 頁行為與推論紀錄同步：collapse 到 1 筆代表 defect
                 )
             finally:
                 cfg.aoi_edge_boundary_band_px = orig_band_px
@@ -2560,17 +2571,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     hm = HeatmapManager(base_dir=".", save_format="png")
                     ecfg = self.inferencer.edge_inspector.config
                     src = getattr(rep, 'source_inspector', '')
+                    dust_fn = getattr(self.inferencer, 'check_dust_or_scratch_feature', None)
                     if src == 'patchcore':
                         arr = hm._save_patchcore_edge_image(
                             None, "debug", 0, rep, image,
-                            omit_image=None, dust_check_fn=None,
+                            omit_image=omit_image, dust_check_fn=dust_fn,
                             edge_config=ecfg, return_array=True,
                         )
                     else:
                         arr = hm._save_cv_fusion_edge_image(
                             None, "debug", 0, rep, image,
-                            omit_image=None, edge_config=ecfg,
-                            dust_check_fn=None,
+                            omit_image=omit_image, edge_config=ecfg,
+                            dust_check_fn=dust_fn,
                             panel_polygon=panel_polygon,
                             return_array=True,
                         )
