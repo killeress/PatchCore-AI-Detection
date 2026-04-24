@@ -1448,9 +1448,17 @@ class HeatmapManager:
                 overlay_panel = ensure_bgr(omit_canvas).copy()
                 cov_val = 0.0
                 if dust_mask_panel is not None and is_dust_detected and anomaly_map is not None:
-                    peak = float(np.max(anomaly_map))
+                    # 與 render_pc_overlay 完全一致：先套 fg_mask 清除 panel 外再取 peak
+                    amap_vis = np.asarray(anomaly_map, dtype=np.float32)
+                    if fg_mask is not None:
+                        fm = cv2.resize(
+                            fg_mask, (amap_vis.shape[1], amap_vis.shape[0]),
+                            interpolation=cv2.INTER_NEAREST,
+                        ).astype(np.float32) / 255.0
+                        amap_vis = amap_vis * fm
+                    peak = float(np.max(amap_vis)) if amap_vis.size > 0 else 0.0
                     if peak > 0:
-                        anom_bin = (anomaly_map > peak * 0.5).astype(np.uint8) * 255
+                        anom_bin = (amap_vis > peak * 0.5).astype(np.uint8) * 255
                         dust_cmp = cv2.resize(
                             dust_mask_panel,
                             (anom_bin.shape[1], anom_bin.shape[0]),
@@ -1518,14 +1526,13 @@ class HeatmapManager:
         if shift_dx or shift_dy:
             extra = f"PC dx={shift_dx:+d} dy={shift_dy:+d}"
         elif pc_fb == "aoi_exit_roi":
-            extra = "PC-FB=aoi_exit_roi(AOI將離開ROI)"
+            extra = "PC-FB=aoi_exit_roi"
         elif pc_fb == "concave_polygon":
-            extra = "PC-FB=concave_polygon(concave)"
+            extra = "PC-FB=concave_polygon"
         elif pc_fb == "shift_disabled":
             extra = "PC-FB=shift_disabled"
         elif pc_fb == "shift_insufficient":
-            # 向後相容：舊 record
-            extra = "PC-FB=shift_insufficient(offset short)"
+            extra = "PC-FB=shift_insufficient"
         elif pc_fb:
             extra = f"PC-FB={pc_fb}"
 
