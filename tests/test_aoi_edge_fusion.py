@@ -325,9 +325,9 @@ class TestInspectRoiFusion:
         inf._get_threshold_for_prefix = lambda _p: 1.0
         inf.edge_inspector.config.aoi_edge_inspector = "fusion"
         inf.edge_inspector.config.aoi_edge_boundary_band_px = 40
-        # Phase 7.1c: 此 class 專測 Phase 6 band_mask，鎖 shift band=40 重現 pre-7.1c
-        # 行為（近邊 shift verify fail → fallback centered + band_mask 生效）。
-        inf.edge_inspector.config.aoi_edge_pc_shift_band_px = 40
+        # Phase 7.3: 此 class 專測 Phase 6 band_mask（centered ROI + band_mask 排除）
+        # 關閉 shift 讓所有 PC 走 fallback/centered 路徑，保留 band_mask 測試語意。
+        inf.edge_inspector.config.aoi_edge_pc_roi_inward_shift_enabled = False
 
         # default: OMIT 不做 dust check
         inf.check_dust_or_scratch_feature = lambda img, **kwargs: (False, None, 0.0, "")

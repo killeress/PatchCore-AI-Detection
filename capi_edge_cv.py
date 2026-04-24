@@ -117,24 +117,23 @@ def compute_pc_roi_offset(
     aoi_xy: Tuple[int, int],
     polygon: Optional[np.ndarray],
     band_px: int = 40,
-    aoi_margin_px: int = 64,
     roi_size: int = 512,
 ) -> Tuple[Tuple[int, int], Tuple[int, int], float]:
-    """Phase 7 — 計算 PC ROI 應有的內移偏移量。
+    """Phase 7.3 — 計算 PC ROI 應有的內移偏移量。
 
     目標：把 PC ROI 從 centered 位置往 panel 內側偏移，使偏移後 PC ROI 距
     polygon 邊 ≥ `band_px`，讓 backbone feature map 完全脫離 panel 邊
-    discontinuity；同時 AOI 座標必須仍在 PC ROI 內，距邊 ≥ `aoi_margin_px`。
+    discontinuity，**同時完全避開 CV 管轄的 band 區**。
 
     偏移方向 = AOI 座標到最近 polygon 邊的 inward normal（指向 panel 內）。
-    偏移量大小 = max(0, band_px - (d_edge - roi_size/2))
-               然後 clamp 到 [0, roi_size/2 - aoi_margin_px]。
+    偏移量大小 = band_px - (d_edge - roi_size/2)
+    若 `需要量 > roi_size/2` → 不偏移（AOI 會脫離 ROI，交 caller 標為 `aoi_exit_roi`
+    fallback）。不再 clamp 硬偏移部分量 — 要嘛清到位，要嘛不動。
 
     Args:
         aoi_xy: AOI 座標 (x, y) panel 絕對座標
         polygon: panel 邊界 Nx2 np.ndarray，None / 頂點<3 → 不偏移
-        band_px: 希望 PC ROI 距 polygon 的最小距離 (px)
-        aoi_margin_px: AOI 座標距 PC ROI 邊的最小 margin (px)
+        band_px: 希望 PC ROI 距 polygon 的最小距離 (px) — 通常 = CV band 寬度
         roi_size: ROI 邊長 (px)
 
     Returns:
@@ -147,6 +146,7 @@ def compute_pc_roi_offset(
         polygon=None / 頂點<3 → shift=(0,0), origin=centered, d_edge=0
         AOI 在 polygon 外（d_edge<0） → shift=(0,0), origin=centered
         Deep interior (d_edge >= roi_size/2 + band_px) → shift=(0,0)
+        needed > roi_size/2 (AOI 會脫離 ROI) → shift=(0,0)，caller 區分為 aoi_exit_roi
     """
     aoi_x, aoi_y = int(aoi_xy[0]), int(aoi_xy[1])
     half = roi_size // 2
@@ -169,10 +169,12 @@ def compute_pc_roi_offset(
     if needed <= 0:
         return centered_origin, (0, 0), signed_dist
 
-    max_shift = max(0, half - aoi_margin_px)
-    actual = int(min(needed, max_shift))
-    if actual <= 0:
+    # Phase 7.3: needed > half 表示 shift 量會超過 ROI 半徑，AOI 會脫離 ROI → 不偏移
+    # 交由 caller 從 (shift_vec == (0,0) && 0 < signed_dist < half + band_px) 判斷成 aoi_exit_roi
+    if needed > half:
         return centered_origin, (0, 0), signed_dist
+
+    actual = int(needed)
 
     # 找最近 polygon 邊上的點 → inward normal = AOI - closest_pt（指向 panel 內）
     _, cx, cy = _nearest_polygon_edge_info(float(aoi_x), float(aoi_y), polygon_int)
@@ -253,60 +255,25 @@ def classify_pc_roi_verify_failure(
     polygon: np.ndarray,
     band_px: int,
 ) -> str:
-    """Phase 7.1 — fallback 原因分類（verify 失敗時呼叫）。
+    """Phase 7.3 — verify 失敗時的 fallback 原因分類。
 
-    區分兩種常見情境以產生更精確的 UI / log tag：
+    新規則下（Phase 7.3）shift 只有「完全清到 band_px 外」或「完全不動」兩態，
+    verify 失敗代表 shift 量剛好但其他 polygon 邊（非最近邊）從另一側侵入 →
+    典型為凹角 / L 形 polygon → 永遠回 `"concave_polygon"`。
 
-    - `shift_insufficient`：唯一侵入 PC ROI 的 polygon 線段就是「AOI 最近的那條邊」
-      —— 代表 shift 方向正確，只是 max_shift (= roi_size/2 - aoi_margin_px) 不足以
-      把這條邊清到 band_px 之外。常見於 axis-aligned 四邊形 + AOI 距邊極近的情境。
-
-    - `concave_polygon`：有多條邊同時侵入，或唯一侵入的邊不是最近邊 →
-      polygon 形狀導致 shift 沿單一 inward normal 無法清場；典型為凹角 / L 形。
+    保留函式簽章供測試與向後相容。`shift_insufficient` 分類已於 Phase 7.3 作廢
+    （改由 caller 在 `needed > roi_size/2` 時標為 `aoi_exit_roi`）。
 
     Args:
-        aoi_xy: AOI 座標 panel 絕對座標
+        aoi_xy: AOI 座標 panel 絕對座標（保留參數相容性，目前未使用）
         pc_roi_origin: shifted PC ROI 左上角
         roi_size: ROI 邊長
         polygon: panel polygon Nx2
         band_px: 判定門檻（同 fusion band 寬度）
 
     Returns:
-        "shift_insufficient" 或 "concave_polygon"
+        "concave_polygon"
     """
-    if polygon is None or len(polygon) < 2:
-        return "concave_polygon"  # 防呆：理論上 caller 不該在此情況下來
-
-    # 找 AOI 最近邊的 index（與 compute_pc_roi_offset 同演算法，確保一致）
-    n = len(polygon)
-    best_d = float("inf")
-    nearest_edge_idx = 0
-    for i in range(n):
-        ax, ay = float(polygon[i][0]), float(polygon[i][1])
-        bx, by = float(polygon[(i + 1) % n][0]), float(polygon[(i + 1) % n][1])
-        d, _, _ = _point_to_segment_distance(
-            float(aoi_xy[0]), float(aoi_xy[1]), ax, ay, bx, by
-        )
-        if d < best_d:
-            best_d = d
-            nearest_edge_idx = i
-
-    # 找所有違反 band_px 的邊 index
-    ox, oy = pc_roi_origin
-    x1, y1 = float(ox), float(oy)
-    x2, y2 = float(ox + roi_size), float(oy + roi_size)
-    violating_indices = []
-    for i in range(n):
-        ax, ay = float(polygon[i][0]), float(polygon[i][1])
-        bx, by = float(polygon[(i + 1) % n][0]), float(polygon[(i + 1) % n][1])
-        dist = _segment_to_rect_distance(ax, ay, bx, by, x1, y1, x2, y2)
-        if dist < band_px:
-            violating_indices.append(i)
-
-    # 僅 1 條邊違反 且 正好是最近邊 → shift_insufficient
-    # 其他情境（多邊違反 或 違反的不是最近邊）→ concave_polygon
-    if len(violating_indices) == 1 and violating_indices[0] == nearest_edge_idx:
-        return "shift_insufficient"
     return "concave_polygon"
 
 
@@ -517,10 +484,8 @@ class EdgeInspectionConfig:
     aoi_line_min_length: int = 30 # 投影法偵測薄線最小長度 px (垂直/水平連續活化像素投影, 0=停用)
     aoi_line_max_width: int = 3 # 薄線最大寬度 px (超過視為一般 component, 由 CC path 處理)
     aoi_edge_inspector: str = "cv"  # "cv" | "patchcore" | "fusion"
-    aoi_edge_boundary_band_px: int = 40  # Phase 6 fusion 模式 CV 管轄帶寬度 (polygon 邊往 panel 內延伸 px); 0=等同 patchcore
-    aoi_edge_pc_roi_inward_shift_enabled: bool = True  # Phase 7: fusion 模式 PC ROI 自動內移到距 polygon ≥ band_px
-    aoi_edge_aoi_margin_px: int = 64  # Phase 7: PC ROI 內移時 AOI 座標距 PC ROI 邊最小 margin (px)
-    aoi_edge_pc_shift_band_px: int = 0  # Phase 7.1c: PC ROI shift target / verify 寬帶 (0=最大程度利用 shift, >0=留 buffer 避開 polygon 邊 discontinuity，清不到時走 fallback)
+    aoi_edge_boundary_band_px: int = 40  # Phase 6 fusion 模式 CV 管轄帶寬度 (polygon 邊往 panel 內延伸 px); Phase 7.3 同時是 PC ROI shift 目標; 0=等同 patchcore
+    aoi_edge_pc_roi_inward_shift_enabled: bool = True  # Phase 7: fusion 模式 PC ROI 自動內移到距 polygon ≥ band_px，避開 CV 管轄區
     exclude_zones: List[EdgeExclusionZoneConfig] = field(default_factory=list)
     # 儲存完整的按產品分組排除區域 (key=resolution_code, value=list of zones)
     all_exclude_zones_by_product: Dict[str, List[dict]] = field(default_factory=dict)
@@ -620,8 +585,6 @@ class EdgeInspectionConfig:
         cfg.aoi_edge_inspector = inspector_val if inspector_val in ("cv", "patchcore", "fusion") else "cv"
         cfg.aoi_edge_boundary_band_px = int(get("aoi_edge_boundary_band_px", 40))
         cfg.aoi_edge_pc_roi_inward_shift_enabled = bool(get("aoi_edge_pc_roi_inward_shift_enabled", True))
-        cfg.aoi_edge_aoi_margin_px = int(get("aoi_edge_aoi_margin_px", 64))
-        cfg.aoi_edge_pc_shift_band_px = int(get("aoi_edge_pc_shift_band_px", 0))
 
         # 排除區域 (支援按產品解析度碼分組的 dict 格式，或向後相容的 list 格式)
         zones_raw = get("cv_edge_exclude_zones", None)

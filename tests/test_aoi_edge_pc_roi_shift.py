@@ -40,11 +40,11 @@ BIG_SQUARE = np.array([
 
 class TestComputePcRoiOffset:
     """純幾何函式:
-    - 輸入 AOI 座標 + polygon + band_px + aoi_margin_px + roi_size
+    - 輸入 AOI 座標 + polygon + band_px + roi_size
     - 輸出 (pc_roi_origin, shift_vec, d_edge)
     - shift_vec=(0,0) 代表不需偏移或無效 polygon
     - shift_vec 沿 AOI 最近 polygon 邊 inward normal 方向
-    - |shift| ≤ roi_size/2 - aoi_margin_px
+    - Phase 7.3: needed > roi_size/2 → shift=(0,0)（caller 判定 aoi_exit_roi）
     """
 
     def test_deep_interior_no_shift(self):
@@ -53,7 +53,6 @@ class TestComputePcRoiOffset:
             aoi_xy=(1000, 1000),
             polygon=BIG_SQUARE,
             band_px=40,
-            aoi_margin_px=64,
             roi_size=512,
         )
         assert shift == (0, 0)
@@ -64,83 +63,79 @@ class TestComputePcRoiOffset:
         """AOI 距邊 = roi_size/2 + band_px (296) → 剛好不需偏移"""
         origin, shift, d_edge = compute_pc_roi_offset(
             aoi_xy=(296, 1000), polygon=BIG_SQUARE,
-            band_px=40, aoi_margin_px=64, roi_size=512,
+            band_px=40, roi_size=512,
         )
         assert shift == (0, 0)
         assert d_edge == pytest.approx(296.0)
 
     def test_near_left_edge_shifts_right(self):
-        """AOI 近左邊 → inward normal 指向右 → shift=(+N, 0)"""
+        """AOI 近左邊 → inward normal 指向右 → shift=(+needed, 0)，不再 clamp"""
         origin, shift, d_edge = compute_pc_roi_offset(
             aoi_xy=(100, 1000), polygon=BIG_SQUARE,
-            band_px=40, aoi_margin_px=64, roi_size=512,
+            band_px=40, roi_size=512,
         )
-        # needed = max(0, 40 - (100 - 256)) = max(0, 196) = 196
-        # clamped = min(196, 192) = 192
+        # needed = 40 + 256 - 100 = 196 ≤ max_shift=256 → shift 196（不 clamp）
         assert shift[0] > 0 and shift[1] == 0
-        assert shift[0] == 192  # clamped
-        assert origin == (100 + 192 - 256, 1000 - 256)
+        assert shift[0] == 196
+        assert origin == (100 + 196 - 256, 1000 - 256)
         assert d_edge == pytest.approx(100.0)
 
     def test_near_right_edge_shifts_left(self):
         origin, shift, d_edge = compute_pc_roi_offset(
             aoi_xy=(1900, 1000), polygon=BIG_SQUARE,
-            band_px=40, aoi_margin_px=64, roi_size=512,
+            band_px=40, roi_size=512,
         )
         assert shift[0] < 0 and shift[1] == 0
-        assert shift[0] == -192
+        assert shift[0] == -196
         assert d_edge == pytest.approx(100.0)
 
     def test_near_top_edge_shifts_down(self):
         origin, shift, d_edge = compute_pc_roi_offset(
             aoi_xy=(1000, 100), polygon=BIG_SQUARE,
-            band_px=40, aoi_margin_px=64, roi_size=512,
+            band_px=40, roi_size=512,
         )
         assert shift[0] == 0 and shift[1] > 0
-        assert shift[1] == 192
+        assert shift[1] == 196
         assert d_edge == pytest.approx(100.0)
 
     def test_near_bottom_edge_shifts_up(self):
         origin, shift, d_edge = compute_pc_roi_offset(
             aoi_xy=(1000, 1900), polygon=BIG_SQUARE,
-            band_px=40, aoi_margin_px=64, roi_size=512,
+            band_px=40, roi_size=512,
         )
         assert shift[0] == 0 and shift[1] < 0
-        assert shift[1] == -192
+        assert shift[1] == -196
 
     def test_near_corner_uses_nearest_single_edge(self):
-        """AOI (100, 150) → 最近邊是 left (d=100)，取 left 的 normal（水平右）
-        而非對角線方向，避免 AOI margin 在垂直方向又不夠
-        """
+        """AOI (100, 150) → 最近邊是 left (d=100)，shift 只沿 x"""
         origin, shift, d_edge = compute_pc_roi_offset(
             aoi_xy=(100, 150), polygon=BIG_SQUARE,
-            band_px=40, aoi_margin_px=64, roi_size=512,
+            band_px=40, roi_size=512,
         )
-        # 最近是 left (dist=100 < top dist=150) → shift 只沿 x
         assert shift[1] == 0, f"Expected no y-shift, got {shift}"
-        assert shift[0] == 192
+        assert shift[0] == 196
 
     def test_shift_magnitude_smaller_when_closer_to_edge_threshold(self):
-        """AOI 距邊 = 280 (> 256) → 只需 shift 16 (=40+256-280)"""
+        """AOI 距邊 = 280 → 只需 shift 16 (=40+256-280)"""
         origin, shift, d_edge = compute_pc_roi_offset(
             aoi_xy=(280, 1000), polygon=BIG_SQUARE,
-            band_px=40, aoi_margin_px=64, roi_size=512,
+            band_px=40, roi_size=512,
         )
-        # needed = max(0, 40 - (280-256)) = max(0, 16) = 16
         assert shift == (16, 0)
 
-    def test_clamped_to_aoi_margin(self):
-        """極近邊 (d=5) → needed 超過 max_shift=192 → clamp 到 192"""
+    def test_aoi_exit_roi_when_needed_exceeds_half(self):
+        """Phase 7.3: 極近邊 (d=5) → needed=291 > max_shift=256 → shift=(0,0)
+        caller 應標為 aoi_exit_roi"""
         origin, shift, d_edge = compute_pc_roi_offset(
             aoi_xy=(5, 1000), polygon=BIG_SQUARE,
-            band_px=40, aoi_margin_px=64, roi_size=512,
+            band_px=40, roi_size=512,
         )
-        assert shift == (192, 0)
+        assert shift == (0, 0), f"needed>half 應不 shift，但得 {shift}"
 
     def test_polygon_none_returns_zero_shift(self):
         origin, shift, d_edge = compute_pc_roi_offset(
             aoi_xy=(100, 100), polygon=None,
-            band_px=40, aoi_margin_px=64, roi_size=512,
+            band_px=40, roi_size=512,
         )
         assert shift == (0, 0)
         assert origin == (100 - 256, 100 - 256)
@@ -149,7 +144,7 @@ class TestComputePcRoiOffset:
         poly = np.array([[0, 0], [100, 100]], dtype=np.int32)
         origin, shift, d_edge = compute_pc_roi_offset(
             aoi_xy=(100, 100), polygon=poly,
-            band_px=40, aoi_margin_px=64, roi_size=512,
+            band_px=40, roi_size=512,
         )
         assert shift == (0, 0)
 
@@ -157,7 +152,7 @@ class TestComputePcRoiOffset:
         """AOI 在 polygon 外 → d_edge < 0 → 不應偏移"""
         origin, shift, d_edge = compute_pc_roi_offset(
             aoi_xy=(-50, 1000), polygon=BIG_SQUARE,
-            band_px=40, aoi_margin_px=64, roi_size=512,
+            band_px=40, roi_size=512,
         )
         assert shift == (0, 0)
         assert d_edge < 0
@@ -268,8 +263,6 @@ class TestInspectRoiFusionShifted:
         inf.edge_inspector.config.aoi_edge_inspector = "fusion"
         inf.edge_inspector.config.aoi_edge_boundary_band_px = 40
         inf.edge_inspector.config.aoi_edge_pc_roi_inward_shift_enabled = True
-        inf.edge_inspector.config.aoi_edge_aoi_margin_px = 64
-        inf.edge_inspector.config.aoi_edge_pc_shift_band_px = 0
         inf.check_dust_or_scratch_feature = lambda img, **kw: (False, None, 0.0, "")
         # CV 預設回空 defect list
         inf.edge_inspector.inspect_roi = lambda roi, **kw: (
@@ -300,8 +293,8 @@ class TestInspectRoiFusionShifted:
         assert captured["tile_y"] == 744
 
     def test_near_left_edge_shifts_pc_roi_right(self, fusion_inferencer):
-        """AOI (104, 1000) 近左邊；pc_shift_band_px=0 → needed=152 < max_shift=192 →
-        shift 152 → PC ROI 左邊 x=0 貼到 polygon 左邊，verify (dist<0) 通過。
+        """AOI (104, 1000) 近左邊；band_px=40 → needed=192 ≤ max_shift=256 →
+        shift 192 → PC ROI 左邊 x=40，polygon 邊在 ROI 邊外 band_px，verify 通過。
         """
         inf = fusion_inferencer
         img, poly = self._image_and_polygon()
@@ -313,8 +306,8 @@ class TestInspectRoiFusionShifted:
             panel_polygon=poly, omit_image=None, omit_overexposed=False,
         )
 
-        # shifted origin x = 104 + 152 - 256 = 0
-        assert captured["tile_x"] == 0, f"expected 0 (shifted), got {captured.get('tile_x')}"
+        # shifted origin x = 104 + 192 - 256 = 40
+        assert captured["tile_x"] == 40, f"expected 40 (shifted), got {captured.get('tile_x')}"
         assert captured["tile_y"] == 744
 
     def test_shifted_pc_defect_fields_populated(self, fusion_inferencer):
@@ -337,11 +330,11 @@ class TestInspectRoiFusionShifted:
         d = pc_def[0]
         # 中心強制為 AOI 座標
         assert d.center == (104, 1000), f"center should be AOI coord, got {d.center}"
-        # pc_shift_band_px=0 → needed=152, shift_dx=152 (向右), dy=0
-        assert d.pc_roi_shift_dx == 152, f"shift_dx expected 152, got {d.pc_roi_shift_dx}"
+        # band_px=40 → needed=192, shift_dx=192 (向右), dy=0
+        assert d.pc_roi_shift_dx == 192, f"shift_dx expected 192, got {d.pc_roi_shift_dx}"
         assert d.pc_roi_shift_dy == 0
-        # pc_roi_origin = (104+152-256, 1000-256) = (0, 744)
-        assert d.pc_roi_origin_x == 0
+        # pc_roi_origin = (104+192-256, 1000-256) = (40, 744)
+        assert d.pc_roi_origin_x == 40
         assert d.pc_roi_origin_y == 744
         assert d.pc_roi_fallback_reason == ""
 
@@ -364,11 +357,10 @@ class TestInspectRoiFusionShifted:
 
     def test_fallback_concave_polygon_l_shape(self, fusion_inferencer):
         """L 形 polygon：shift 沿內凹口 inward normal → 另一條邊從另一側侵入
-        → classify 回 concave_polygon（兩條邊都在 band_px 內，不只是近邊沒清掉）。
-        需將 pc_shift_band_px 覆寫為 40 以重現 fallback 路徑（預設 0 會讓 verify 放行）。
+        → classify 回 concave_polygon。Phase 7.3: band_px=aoi_edge_boundary_band_px=40，
+        needed=196 ≤ 256 → shift applied，但 verify 失敗（另一邊侵入）→ concave_polygon。
         """
         inf = fusion_inferencer
-        inf.edge_inspector.config.aoi_edge_pc_shift_band_px = 40
         l_shape = np.array([
             [0, 0], [2000, 0], [2000, 2000],
             [1000, 2000], [1000, 1000], [0, 1000],
@@ -394,21 +386,18 @@ class TestInspectRoiFusionShifted:
             assert d.pc_roi_shift_dx == 0 and d.pc_roi_shift_dy == 0, \
                 "concave_polygon fallback 後 shift 應為 0"
 
-    def test_fallback_shift_insufficient_straight_edge(self, fusion_inferencer):
-        """AOI 距邊極近（d_edge=20），max_shift=192 清不掉 polygon edge →
-        classify 回 shift_insufficient（不是 concave — polygon 是普通四邊形）。
-        需將 pc_shift_band_px 覆寫為 40 以重現 fallback 路徑（預設 0 會讓 verify 放行）。
+    def test_aoi_exit_roi_when_aoi_too_close_to_edge(self, fusion_inferencer):
+        """Phase 7.3: AOI 距邊極近（d_edge=20），needed=276 > max_shift=256 →
+        shift 不執行（AOI 會脫離 ROI）→ fallback_reason="aoi_exit_roi"
         """
         inf = fusion_inferencer
-        inf.edge_inspector.config.aoi_edge_pc_shift_band_px = 40
         img, poly = self._image_and_polygon()
         captured = {}
         inf.predict_tile = _capturing_predict_tile(
             captured, score=2.0, hot_region=(240, 280, 240, 280), hot_value=2.0
         )
 
-        # AOI (1000, 20)：距 top edge 20 px；needed shift = 40 + 256 - 20 = 276 > max 192
-        # 即使 shift 192 下去，PC ROI 上緣仍距 polygon top 不到 40 → verify fail
+        # AOI (1000, 20)：距 top edge 20 px；needed=40+256-20=276 > 256=max_shift → aoi_exit_roi
         defects, stats = inf._inspect_roi_fusion(
             img, img_x=1000, img_y=20, img_prefix="W0F",
             panel_polygon=poly, omit_image=None, omit_overexposed=False,
@@ -417,8 +406,8 @@ class TestInspectRoiFusionShifted:
         pc_def = [d for d in defects if d.source_inspector == "patchcore"]
         assert len(pc_def) == 1, "expected 1 PC defect"
         d = pc_def[0]
-        assert d.pc_roi_fallback_reason == "shift_insufficient", \
-            f"straight edge clamped 應為 shift_insufficient，實為 {d.pc_roi_fallback_reason}"
+        assert d.pc_roi_fallback_reason == "aoi_exit_roi", \
+            f"應為 aoi_exit_roi，實為 {d.pc_roi_fallback_reason}"
         assert d.pc_roi_shift_dx == 0 and d.pc_roi_shift_dy == 0
 
 
@@ -452,7 +441,6 @@ class TestFusionCollapseToRepresentative:
         inf.edge_inspector.config.aoi_edge_inspector = "fusion"
         inf.edge_inspector.config.aoi_edge_boundary_band_px = 40
         inf.edge_inspector.config.aoi_edge_pc_roi_inward_shift_enabled = True
-        inf.edge_inspector.config.aoi_edge_pc_shift_band_px = 0
         inf.check_dust_or_scratch_feature = lambda img, **kw: (False, None, 0.0, "")
         return inf
 
