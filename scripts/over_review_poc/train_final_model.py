@@ -83,6 +83,11 @@ def main(argv=None):
     p.add_argument("--default-safety", type=float, default=1.1,
                    help="Default safety multiplier baked into bundle metadata "
                         "(runtime config may override).")
+    p.add_argument("--dinov2-repo", type=Path, default=None,
+                   help="Local path to DINOv2 repo dir (offline servers). "
+                        "E.g. /root/.cache/torch/hub/facebookresearch_dinov2_main")
+    p.add_argument("--dinov2-weights", type=Path, default=None,
+                   help="Local .pth for DINOv2 pretrained weights (offline servers).")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
