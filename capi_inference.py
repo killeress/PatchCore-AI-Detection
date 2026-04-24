@@ -3297,13 +3297,27 @@ class CAPIInferencer:
         )
         cv_defects_kept: List[EdgeDefect] = []
         polygon_int = panel_polygon.astype(np.int32)
+        # 診斷：band 過濾前的完整 CV defect 列表（供 debug UI 顯示用）
+        cv_defects_all_debug = []
         for d in cv_defects_all:
             cx, cy = d.center
             roi_cx = int(cx - rx1)
             roi_cy = int(cy - ry1)
-            if not (0 <= roi_cx < tile_size and 0 <= roi_cy < tile_size):
+            in_roi = 0 <= roi_cx < tile_size and 0 <= roi_cy < tile_size
+            in_band = bool(in_roi and band_mask[roi_cy, roi_cx] > 0)
+            cv_defects_all_debug.append({
+                "center": [int(cx), int(cy)],
+                "area": int(d.area),
+                "max_diff": int(d.max_diff),
+                "in_roi": in_roi,
+                "in_band": in_band,
+                "reject_reason": "" if in_band else (
+                    "roi_out" if not in_roi else "not_in_band"
+                ),
+            })
+            if not in_roi:
                 continue
-            if band_mask[roi_cy, roi_cx] > 0:
+            if in_band:
                 d.source_inspector = "cv"
                 d.inspector_mode = "fusion"
                 d.d_edge_px = float(max(0.0, cv2.pointPolygonTest(
@@ -3450,6 +3464,11 @@ class CAPIInferencer:
             "cv_band_count": cv_band_count,
             "pc_interior_count": pc_interior_count,
             "collapsed": collapse_to_representative and pre_collapse_count > 1,
+            # 診斷：CV band 過濾前完整列表
+            "cv_defects_all_debug": cv_defects_all_debug,
+            "band_mask_pixels": int(np.count_nonzero(band_mask)) if band_mask is not None else 0,
+            "fg_mask_pixels": int(np.count_nonzero(fg_mask)),
+            "cv_fg_mask_pixels": int(cv_stats.get("fg_mask_pixels", 0)) if cv_stats else 0,
         }
         return fusion_defects, stats
 
