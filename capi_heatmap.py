@@ -1115,14 +1115,19 @@ class HeatmapManager:
         # 1-b: 紅色 defect 像素 (cv_filtered_mask)
         cv_mask = getattr(edge_defect, 'cv_filtered_mask', None)
         cv_mask_offset = getattr(edge_defect, 'cv_mask_offset', None)
+        defect_mask = None  # 供 Panel 3 複用
         if cv_mask is not None and cv_mask_offset is not None:
             mo_x, mo_y = cv_mask_offset
-            paste_x = mo_x - rx1; paste_y = mo_y - ry1
             mh, mw = cv_mask.shape[:2]
-            if (0 <= paste_x and 0 <= paste_y
-                    and paste_x + mw <= panel1.shape[1] and paste_y + mh <= panel1.shape[0]):
+            # clipping paste：支援 cv_mask_offset 在顯示 ROI 左/上方（fusion 路徑常見）
+            src_x = max(0, rx1 - mo_x); src_y = max(0, ry1 - mo_y)
+            dst_x = max(0, mo_x - rx1); dst_y = max(0, mo_y - ry1)
+            copy_w = min(mw - src_x, panel1.shape[1] - dst_x)
+            copy_h = min(mh - src_y, panel1.shape[0] - dst_y)
+            if copy_w > 0 and copy_h > 0:
                 defect_mask = np.zeros(panel1.shape[:2], dtype=np.uint8)
-                defect_mask[paste_y:paste_y + mh, paste_x:paste_x + mw] = cv_mask
+                defect_mask[dst_y:dst_y + copy_h, dst_x:dst_x + copy_w] = \
+                    cv_mask[src_y:src_y + copy_h, src_x:src_x + copy_w]
                 vis_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
                 vis_mask = cv2.dilate(defect_mask, vis_kernel, iterations=1)
                 if is_bomb:
@@ -1174,21 +1179,14 @@ class HeatmapManager:
         else:
             panel3 = roi_bgr.copy()
 
-        # 組 defect mask（在 panel3 尺寸）
+        # 組 defect mask（在 panel3 尺寸）— 複用 Panel 1 已計算的 defect_mask
         defect_mask_p3 = None
-        if cv_mask is not None and cv_mask_offset is not None:
-            mo_x, mo_y = cv_mask_offset
-            paste_x = mo_x - rx1; paste_y = mo_y - ry1
-            mh, mw = cv_mask.shape[:2]
-            if (0 <= paste_x and 0 <= paste_y
-                    and paste_x + mw <= panel3.shape[1] and paste_y + mh <= panel3.shape[0]):
-                defect_mask_p3 = np.zeros(panel3.shape[:2], dtype=np.uint8)
-                defect_mask_p3[paste_y:paste_y + mh, paste_x:paste_x + mw] = cv_mask
-                defect_mask_p3 = cv2.dilate(
-                    defect_mask_p3,
-                    cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
-                    iterations=1,
-                )
+        if defect_mask is not None:
+            defect_mask_p3 = cv2.dilate(
+                defect_mask,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+                iterations=1,
+            )
 
         # 畫紅色 defect
         if defect_mask_p3 is not None:
