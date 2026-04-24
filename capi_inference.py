@@ -89,7 +89,7 @@ except Exception as _e:
     )
 
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
-from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff, compute_boundary_band_mask, compute_pc_roi_offset, verify_polygon_clear_of_pc_roi, classify_pc_roi_verify_failure
+from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff, compute_boundary_band_mask, compute_pc_roi_offset
 from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
 from scratch_filter import ScratchFilter
 
@@ -3327,24 +3327,8 @@ class CAPIInferencer:
             # AOI 距邊太近，shift 量超過 ROI 半徑 → AOI 會脫離 ROI → 不 shift
             pc_fallback_reason = "aoi_exit_roi"
         elif shift_vec != (0, 0):
-            # shift 可行，驗證其他邊沒有從側面侵入（凹角 polygon 情境）
-            if verify_polygon_clear_of_pc_roi(
-                pc_roi_origin=pc_roi_origin_candidate,
-                roi_size=tile_size,
-                polygon=polygon_int,
-                band_px=band_px,
-            ):
-                use_shifted = True
-            else:
-                # 其他邊侵入 → concave polygon（Phase 7.3 classify 已簡化為只回此值）
-                pc_fallback_reason = classify_pc_roi_verify_failure(
-                    aoi_xy=(img_x, img_y),
-                    pc_roi_origin=pc_roi_origin_candidate,
-                    roi_size=tile_size,
-                    polygon=polygon_int,
-                    band_px=band_px,
-                )
-                shift_vec = (0, 0)
+            # panel 永遠是矩形，shift 可行即直接套用
+            use_shifted = True
 
         if use_shifted:
             pc_center_x = img_x + shift_vec[0]
