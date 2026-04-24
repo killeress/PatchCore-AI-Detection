@@ -5007,6 +5007,8 @@ class CAPIInferencer:
         elif len(vis.shape) == 3 and vis.shape[2] == 1:
             vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
         
+        x1, y1, x2, y2 = result.otsu_bounds  # 供後續 status 文字定位用
+
         # Panel polygon（紅色）— tile 範圍由綠色 grid 呈現，不再重複畫 Otsu 矩形
         if result.panel_polygon is not None:
             poly_int = result.panel_polygon.astype(np.int32).reshape(-1, 1, 2)
