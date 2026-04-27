@@ -1,0 +1,293 @@
+{% extends "base.html" %}
+
+{% block title %}重訓練刮痕分類器{% endblock %}
+
+{% block content %}
+<div style="max-width:900px;margin:0 auto;padding:24px 16px;">
+
+  <!-- Section 1: Current model info -->
+  <div style="background:#313244;border-radius:10px;padding:20px 24px;margin-bottom:24px;">
+    <h2 style="color:#cdd6f4;margin:0 0 14px 0;font-size:1.1rem;font-weight:600;letter-spacing:.03em;">
+      目前部署模型
+    </h2>
+    <table style="border-collapse:collapse;width:100%;">
+      <tr>
+        <td style="color:#a6adc8;padding:5px 0;width:140px;font-size:.92rem;">模型檔案</td>
+        <td style="color:#cdd6f4;font-family:monospace;font-size:.92rem;word-break:break-all;">{{ current_bundle }}</td>
+      </tr>
+      <tr>
+        <td style="color:#a6adc8;padding:5px 0;font-size:.92rem;">訓練時間</td>
+        <td style="color:#cdd6f4;font-size:.92rem;">{{ trained_at }}</td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- Section 2: Parameters form -->
+  <div style="background:#313244;border-radius:10px;padding:20px 24px;margin-bottom:24px;">
+    <h2 style="color:#cdd6f4;margin:0 0 18px 0;font-size:1.1rem;font-weight:600;letter-spacing:.03em;">
+      訓練參數
+    </h2>
+    <div style="display:grid;gap:14px;">
+
+      <div>
+        <label for="manifest_base" style="display:block;color:#a6adc8;font-size:.88rem;margin-bottom:4px;">
+          資料集目錄 (manifest_base)
+        </label>
+        <input id="manifest_base" type="text" value="{{ default_manifest_base }}"
+          style="width:100%;box-sizing:border-box;background:#1e1e2e;border:1px solid #45475a;border-radius:6px;
+                 color:#cdd6f4;padding:8px 10px;font-size:.92rem;font-family:monospace;outline:none;">
+      </div>
+
+      <div>
+        <label for="output_path" style="display:block;color:#a6adc8;font-size:.88rem;margin-bottom:4px;">
+          輸出路徑 (output_path)
+        </label>
+        <input id="output_path" type="text" value="{{ default_output_path }}"
+          style="width:100%;box-sizing:border-box;background:#1e1e2e;border:1px solid #45475a;border-radius:6px;
+                 color:#cdd6f4;padding:8px 10px;font-size:.92rem;font-family:monospace;outline:none;">
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;">
+        <div>
+          <label for="epochs" style="display:block;color:#a6adc8;font-size:.88rem;margin-bottom:4px;">
+            訓練輪數 (epochs)
+          </label>
+          <input id="epochs" type="number" value="{{ default_epochs }}" min="1" max="200"
+            style="width:100%;box-sizing:border-box;background:#1e1e2e;border:1px solid #45475a;border-radius:6px;
+                   color:#cdd6f4;padding:8px 10px;font-size:.92rem;outline:none;">
+        </div>
+        <div>
+          <label for="rank" style="display:block;color:#a6adc8;font-size:.88rem;margin-bottom:4px;">
+            LoRA 秩 (rank)
+          </label>
+          <input id="rank" type="number" value="{{ default_rank }}" min="1" max="256"
+            style="width:100%;box-sizing:border-box;background:#1e1e2e;border:1px solid #45475a;border-radius:6px;
+                   color:#cdd6f4;padding:8px 10px;font-size:.92rem;outline:none;">
+        </div>
+        <div>
+          <label for="calib_frac" style="display:block;color:#a6adc8;font-size:.88rem;margin-bottom:4px;">
+            校準比例 (calib_frac)
+          </label>
+          <input id="calib_frac" type="number" value="{{ default_calib_frac }}" min="0.0" max="1.0" step="0.05"
+            style="width:100%;box-sizing:border-box;background:#1e1e2e;border:1px solid #45475a;border-radius:6px;
+                   color:#cdd6f4;padding:8px 10px;font-size:.92rem;outline:none;">
+        </div>
+      </div>
+
+      <div>
+        <label for="dinov2_repo" style="display:block;color:#a6adc8;font-size:.88rem;margin-bottom:4px;">
+          DINOv2 本地 repo 路徑 (dinov2_repo)
+        </label>
+        <input id="dinov2_repo" type="text" value="{{ default_dinov2_repo }}"
+          style="width:100%;box-sizing:border-box;background:#1e1e2e;border:1px solid #45475a;border-radius:6px;
+                 color:#cdd6f4;padding:8px 10px;font-size:.92rem;font-family:monospace;outline:none;">
+      </div>
+
+      <div>
+        <label for="dinov2_weights" style="display:block;color:#a6adc8;font-size:.88rem;margin-bottom:4px;">
+          DINOv2 權重檔案 (dinov2_weights)
+        </label>
+        <input id="dinov2_weights" type="text" value="{{ default_dinov2_weights }}"
+          style="width:100%;box-sizing:border-box;background:#1e1e2e;border:1px solid #45475a;border-radius:6px;
+                 color:#cdd6f4;padding:8px 10px;font-size:.92rem;font-family:monospace;outline:none;">
+      </div>
+
+    </div>
+
+    <div style="margin-top:20px;text-align:right;">
+      <button id="start-btn" onclick="startRetrain()"
+        style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:7px;padding:10px 28px;
+               font-size:.97rem;font-weight:700;cursor:pointer;letter-spacing:.02em;transition:opacity .15s;">
+        開始訓練
+      </button>
+    </div>
+  </div>
+
+  <!-- Section 3: Progress area -->
+  <div id="progress-area" style="display:none;">
+
+    <!-- Step indicator + elapsed -->
+    <div style="background:#313244;border-radius:10px;padding:18px 24px;margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <span id="step-merge"
+          style="background:#313244;color:#888;border-radius:20px;padding:6px 16px;font-size:.88rem;font-weight:600;transition:background .3s,color .3s;">
+          ① 合併資料
+        </span>
+        <span style="color:#45475a;">▶</span>
+        <span id="step-train"
+          style="background:#313244;color:#888;border-radius:20px;padding:6px 16px;font-size:.88rem;font-weight:600;transition:background .3s,color .3s;">
+          ② 訓練模型
+        </span>
+        <span style="color:#45475a;">▶</span>
+        <span id="step-done"
+          style="background:#313244;color:#888;border-radius:20px;padding:6px 16px;font-size:.88rem;font-weight:600;transition:background .3s,color .3s;">
+          ③ 完成
+        </span>
+        <div style="flex:1;"></div>
+        <span style="color:#a6adc8;font-size:.88rem;">
+          已耗時：<span id="elapsed" style="color:#cdd6f4;font-family:monospace;font-weight:600;">0:00</span>
+        </span>
+      </div>
+    </div>
+
+    <!-- Log box -->
+    <div style="background:#313244;border-radius:10px;padding:16px 20px;margin-bottom:16px;">
+      <div style="color:#a6adc8;font-size:.85rem;margin-bottom:8px;font-weight:600;">訓練日誌</div>
+      <pre id="log-box"
+        style="background:#1e1e2e;border-radius:6px;padding:12px 14px;margin:0;
+               font-family:monospace;font-size:.82rem;color:#cdd6f4;
+               max-height:320px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;
+               border:1px solid #45475a;"></pre>
+    </div>
+
+    <!-- Summary box -->
+    <div id="summary-box" style="display:none;background:#313244;border-radius:10px;padding:18px 24px;margin-bottom:16px;">
+      <div style="color:#a6e3a1;font-size:1rem;font-weight:700;margin-bottom:14px;">訓練完成</div>
+      <table style="border-collapse:collapse;width:100%;">
+        <tr>
+          <td style="color:#a6adc8;padding:6px 0;width:180px;font-size:.9rem;">新模型檔案</td>
+          <td id="s-output" style="color:#cdd6f4;font-family:monospace;font-size:.9rem;word-break:break-all;"></td>
+        </tr>
+        <tr>
+          <td style="color:#a6adc8;padding:6px 0;font-size:.9rem;">訓練資料筆數</td>
+          <td id="s-total" style="color:#cdd6f4;font-size:.9rem;"></td>
+        </tr>
+        <tr>
+          <td style="color:#a6adc8;padding:6px 0;font-size:.9rem;">刮痕樣本數</td>
+          <td id="s-scratch" style="color:#cdd6f4;font-size:.9rem;"></td>
+        </tr>
+        <tr>
+          <td style="color:#a6adc8;padding:6px 0;font-size:.9rem;">刮痕判定敏感度</td>
+          <td id="s-threshold" style="color:#cdd6f4;font-size:.9rem;font-family:monospace;"></td>
+        </tr>
+        <tr>
+          <td style="color:#a6adc8;padding:6px 0;font-size:.9rem;">不良品保護驗證</td>
+          <td id="s-calib" style="color:#cdd6f4;font-size:.9rem;"></td>
+        </tr>
+      </table>
+      <div style="margin-top:14px;padding:10px 14px;background:#1e1e2e;border-radius:6px;
+                  border-left:3px solid #89b4fa;color:#a6adc8;font-size:.88rem;line-height:1.6;">
+        若要部署新模型，請前往
+        <a href="/settings" style="color:#89b4fa;text-decoration:none;font-weight:600;">設定頁面</a>
+        更新 <code style="background:#313244;padding:1px 5px;border-radius:3px;color:#cdd6f4;">scratch_bundle</code> 路徑後重啟服務。
+      </div>
+    </div>
+
+    <!-- Error box -->
+    <div id="error-box"
+      style="display:none;background:#313244;border-radius:10px;padding:16px 20px;
+             border-left:4px solid #f38ba8;">
+      <div style="color:#f38ba8;font-size:.88rem;font-weight:700;margin-bottom:6px;">訓練失敗</div>
+      <pre style="margin:0;color:#f38ba8;font-family:monospace;font-size:.85rem;white-space:pre-wrap;word-break:break-all;"></pre>
+    </div>
+
+  </div>
+</div>
+
+<script>
+let _pollTimer = null;
+
+function _getParams() {
+  return {
+    manifest_base:  document.getElementById('manifest_base').value.trim(),
+    output_path:    document.getElementById('output_path').value.trim(),
+    epochs:         parseInt(document.getElementById('epochs').value, 10),
+    rank:           parseInt(document.getElementById('rank').value, 10),
+    calib_frac:     parseFloat(document.getElementById('calib_frac').value),
+    dinov2_repo:    document.getElementById('dinov2_repo').value.trim(),
+    dinov2_weights: document.getElementById('dinov2_weights').value.trim(),
+  };
+}
+
+function startRetrain() {
+  const params = _getParams();
+  if (!params.manifest_base || !params.output_path) {
+    alert('請填寫資料集目錄和輸出路徑');
+    return;
+  }
+  document.getElementById('start-btn').disabled = true;
+  document.getElementById('progress-area').style.display = '';
+  document.getElementById('summary-box').style.display  = 'none';
+  document.getElementById('error-box').style.display    = 'none';
+  document.getElementById('log-box').textContent = '';
+  _setStep('merge');
+
+  fetch('/api/retrain/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(params),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) { _showError(data.error); document.getElementById('start-btn').disabled = false; return; }
+    _pollTimer = setInterval(_poll, 3000);
+    _poll();
+  })
+  .catch(e => { _showError(String(e)); document.getElementById('start-btn').disabled = false; });
+}
+
+function _poll() {
+  fetch('/api/retrain/status').then(r => r.json()).then(_updateUI).catch(console.error);
+}
+
+function _setStep(step) {
+  const steps = ['merge', 'train', 'done'];
+  steps.forEach(s => {
+    const el = document.getElementById('step-' + s);
+    if (s === step) {
+      el.style.background = step === 'done' ? '#a6e3a1' : '#89b4fa';
+      el.style.color = '#1e1e2e';
+    } else {
+      el.style.background = '#313244';
+      el.style.color = '#888';
+    }
+  });
+}
+
+function _fmtElapsed(sec) {
+  const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+  return m + ':' + String(s).padStart(2, '0');
+}
+
+function _sensitivityLabel(thresh) {
+  if (thresh < 0.35) return thresh.toFixed(2) + '  ──  嚴格（低漏放率、可能較多過殺）';
+  if (thresh < 0.55) return thresh.toFixed(2) + '  ──  適中';
+  return thresh.toFixed(2) + '  ──  寬鬆（低過殺率、需注意漏放率）';
+}
+
+function _updateUI(data) {
+  if (!data || data.state === 'idle') return;
+  if (data.elapsed_sec !== undefined)
+    document.getElementById('elapsed').textContent = _fmtElapsed(data.elapsed_sec);
+  if (data.step) _setStep(data.step === 'done' ? 'done' : data.step);
+  if (data.log_lines && data.log_lines.length) {
+    const box = document.getElementById('log-box');
+    box.textContent = data.log_lines.join('\n');
+    box.scrollTop = box.scrollHeight;
+  }
+  if (data.state === 'completed') {
+    clearInterval(_pollTimer);
+    document.getElementById('start-btn').disabled = false;
+    _setStep('done');
+    const s = data.summary || {};
+    document.getElementById('s-output').textContent    = s.output_path || '';
+    document.getElementById('s-total').textContent     = (s.total_samples || 0).toLocaleString() + ' 筆';
+    document.getElementById('s-scratch').textContent   = (s.scratch_count || 0).toLocaleString() + ' 筆';
+    document.getElementById('s-threshold').textContent = _sensitivityLabel(s.effective_threshold || 0);
+    document.getElementById('s-calib').textContent     = (s.calib_ng_count || 0) + ' 個已知不良品全數通過校準（共 ' + (s.calib_total || 0) + ' 筆校準樣本）';
+    document.getElementById('summary-box').style.display = '';
+  }
+  if (data.state === 'failed') {
+    clearInterval(_pollTimer);
+    document.getElementById('start-btn').disabled = false;
+    _showError(data.error || '未知錯誤');
+  }
+}
+
+function _showError(msg) {
+  const box = document.getElementById('error-box');
+  box.textContent = msg;
+  box.style.display = '';
+}
+</script>
+{% endblock %}
