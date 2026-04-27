@@ -200,7 +200,7 @@ scratch_safety_multiplier: 1.5
 
 # Bundle 與 DINOv2 base 權重路徑 (相對於 server 啟動目錄；如 systemd
 # 啟動工作目錄可能不是 CAPI root，請改成絕對路徑)
-scratch_bundle_path: "deployment/scratch_classifier_v1.pkl"
+scratch_bundle_path: "deployment/scratch_classifier_v3.pkl"
 scratch_dinov2_weights_path: "deployment/dinov2_vitb14.pth"
 
 # 離線部署：DINOv2 repo code 路徑 (torch.hub source="local")。

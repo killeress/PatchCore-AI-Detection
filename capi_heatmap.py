@@ -231,6 +231,114 @@ def build_region_zoom_panels(
     return results
 
 
+def build_feature_zoom_panels(
+    heatmap_binary: Optional[np.ndarray],
+    dust_mask: Optional[np.ndarray],
+    ts_features: Optional[list],
+    tile_w_orig: int,
+    tile_h_orig: int,
+    tile_size: int = 512,
+    max_panels: int = 3,
+    method_label: str = "",
+) -> List[Tuple[np.ndarray, str]]:
+    """為每個 TWO_STAGE feature 生成放大面板（與 Original 上的 D/R 圈一一對應）。
+
+    輸入的 ts_features 來自 check_dust_two_stage，欄位：
+      - abs_pos: (x, y) tile pixel 座標
+      - area: feature 像素數
+      - type: "bright" / "dark"
+      - dust_ratio: feature 與 dust_mask 的重疊比例
+      - is_dust: dust_ratio 是否達門檻
+
+    Returns:
+        [(panel_image, label_text), ...] 最多 max_panels 筆
+    """
+    if not ts_features:
+        return []
+
+    # 按 area 降序，取前 max_panels 個
+    sorted_feats = sorted(ts_features, key=lambda f: f.get("area", 0), reverse=True)[:max_panels]
+
+    if heatmap_binary is not None:
+        heat_bin = heatmap_binary
+        if len(heat_bin.shape) == 3:
+            heat_bin = heat_bin[:, :, 0]
+        heat_resized = cv2.resize(heat_bin, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+    else:
+        heat_resized = np.zeros((tile_size, tile_size), dtype=np.uint8)
+
+    dm_resized = None
+    if dust_mask is not None:
+        dm = dust_mask
+        if len(dm.shape) == 3:
+            dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
+        dm_resized = cv2.resize(dm, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+
+    sx = tile_size / max(1, tile_w_orig)
+    sy = tile_size / max(1, tile_h_orig)
+    results = []
+
+    for idx, feat in enumerate(sorted_feats, start=1):
+        try:
+            abs_x, abs_y = feat["abs_pos"]
+            cx = int(abs_x * sx)
+            cy = int(abs_y * sy)
+
+            crop_sz = tile_size // 2
+            y1 = max(0, cy - crop_sz // 2)
+            x1 = max(0, cx - crop_sz // 2)
+            y2 = min(tile_size, y1 + crop_sz)
+            x2 = min(tile_size, x1 + crop_sz)
+            if y2 - y1 < crop_sz:
+                y1 = max(0, y2 - crop_sz)
+            if x2 - x1 < crop_sz:
+                x1 = max(0, x2 - crop_sz)
+
+            heat_crop = heat_resized[y1:y2, x1:x2]
+            base = np.zeros((crop_sz, crop_sz, 3), dtype=np.uint8)
+            base[heat_crop > 0] = (255, 255, 255)
+
+            if dm_resized is not None:
+                dm_crop = dm_resized[y1:y2, x1:x2]
+                dust_only = (dm_crop > 0) & (heat_crop == 0)
+                overlap = (heat_crop > 0) & (dm_crop > 0)
+                base[dust_only] = (0, 255, 255)
+                base[overlap] = (0, 255, 0)
+
+            panel = cv2.resize(base, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+
+            is_dust = bool(feat.get("is_dust", False))
+            dust_ratio = float(feat.get("dust_ratio", 0.0))
+            area = int(feat.get("area", 0))
+            spot_type = feat.get("type", "?")
+            tag = "DUST" if is_dust else "REAL"
+            tag_color = (0, 200, 255) if is_dust else (0, 0, 255)
+
+            cv2.putText(panel, tag, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, tag_color, 2)
+            cv2.putText(panel, f"DustRatio: {dust_ratio:.3f}  Area: {area}", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
+            cv2.putText(panel, f"Type: {spot_type}  Pos:({abs_x},{abs_y})", (10, 85),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+
+            if method_label:
+                ml_color = (0, 200, 255) if "DUST" in method_label else (0, 100, 255)
+                cv2.putText(panel, f"[{method_label}]", (10, 110),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, ml_color, 1)
+
+            legend_y = tile_size - 15
+            cv2.putText(panel, "White=Heat  Yellow=Dust  Green=Overlap", (10, legend_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
+
+            method_suffix = f" [{method_label}]" if method_label else ""
+            label = f"Feat#{idx} {tag} ratio:{dust_ratio:.3f}{method_suffix}"
+            results.append((panel, label))
+        except Exception as e:
+            print(f"⚠️ Feature zoom panel #{idx} failed: {e}")
+
+    return results
+
+
 class HeatmapManager:
     """熱力圖生成與儲存管理"""
 
@@ -556,25 +664,31 @@ class HeatmapManager:
         if dust_detail and "IOU:" in dust_detail:
             metric_name = "IOU"
 
-        # --- Panel 6+: Region Zoom (逐區域放大，最多 3 張) ---
+        # --- Panel 6+: Zoom (逐 feature/區域放大，最多 3 張) ---
+        # 優先用 TWO_STAGE features (與 Original 上的 D/R 圈一一對應)；
+        # 沒跑 two_stage 時才退回 PER_REGION region_details。
         zoom_results = []
-        has_region_details = tile_info is not None and getattr(tile_info, 'dust_region_details', None)
-        if has_omit and has_region_details:
+        ts_features = getattr(tile_info, 'dust_two_stage_features', None) if tile_info else None
+        if has_omit and ts_features:
+            heatmap_binary = getattr(tile_info, 'dust_heatmap_binary', None)
+            ts_is_dust = getattr(tile_info, 'is_suspected_dust_or_scratch', False)
+            method_label = f"TWO_STAGE->{'DUST' if ts_is_dust else 'REAL'}"
+            tile_h_orig = getattr(tile_info, 'height', tile_size)
+            tile_w_orig = getattr(tile_info, 'width', tile_size)
+            zoom_results = build_feature_zoom_panels(
+                heatmap_binary, dust_mask, ts_features,
+                tile_w_orig=tile_w_orig, tile_h_orig=tile_h_orig,
+                tile_size=tile_size,
+                method_label=method_label,
+            )
+        elif has_omit and tile_info is not None and getattr(tile_info, 'dust_region_details', None):
             region_details = getattr(tile_info, 'dust_region_details', None)
             heatmap_binary = getattr(tile_info, 'dust_heatmap_binary', None)
-            # 判定判定方式 label
-            ts_features = getattr(tile_info, 'dust_two_stage_features', None)
-            if ts_features is not None:
-                ts_is_dust = getattr(tile_info, 'is_suspected_dust_or_scratch', False)
-                region_method_label = f"TWO_STAGE->{'DUST' if ts_is_dust else 'REAL'}"
-            else:
-                region_method_label = ""
             zoom_results = build_region_zoom_panels(
                 heatmap_binary, dust_mask, region_details,
                 tile_size=tile_size,
                 metric_name=metric_name,
                 iou_threshold=iou_threshold,
-                method_label=region_method_label,
             )
 
         # --- 底部獨立標籤列（不蓋到面板內容）---
