@@ -4365,6 +4365,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "manifest_base and output_path are required"}, status=400)
             return
 
+        # Reject absolute paths and path traversal to keep writes within project dir
+        output_path_str = str(params["output_path"])
+        if Path(output_path_str).is_absolute() or ".." in output_path_str:
+            self._send_json({"error": "output_path must be a relative path within the project"}, status=400)
+            return
+
         state = self._retrain_state
         with state["lock"]:
             job = state["job"]
@@ -4403,23 +4409,25 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         state = self._retrain_state
         with state["lock"]:
             job = state["job"]
-            if not job:
-                self._send_json({"state": "idle"})
-                return
-            log_lock = job["_log_lock"]
-            resp = {
-                "job_id": job["job_id"],
-                "state": job["state"],
-                "step": job["step"],
-                "started_at": job["started_at"],
-                "output_path": job["output_path"],
-                "summary": job["summary"],
-                "error": job["error"],
-            }
+            log_lock = job["_log_lock"] if job else None
+
+        if not job:
+            self._send_json({"state": "idle"})
+            return
 
         with log_lock:
-            resp["log_lines"] = list(job["log_lines"][-100:])
+            log_lines = list(job["log_lines"][-100:])
 
+        resp = {
+            "job_id": job["job_id"],
+            "state": job["state"],
+            "step": job["step"],
+            "started_at": job["started_at"],
+            "output_path": job["output_path"],
+            "summary": job["summary"],
+            "error": job["error"],
+            "log_lines": log_lines,
+        }
         try:
             started = datetime.fromisoformat(resp["started_at"])
             resp["elapsed_sec"] = round((datetime.now() - started).total_seconds(), 1)
