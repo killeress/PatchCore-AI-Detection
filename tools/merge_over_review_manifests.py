@@ -93,6 +93,9 @@ def run(base: Path, exclude: set[str]) -> dict:
                 if r.get("crop_path"):
                     rel = r["crop_path"].replace("\\", "/")
                     r["crop_path"] = f"{b}/{rel}"
+                else:
+                    missing_crop += 1
+                    continue
                 if r.get("heatmap_path"):
                     rel = r["heatmap_path"].replace("\\", "/")
                     r["heatmap_path"] = f"{b}/{rel}"
