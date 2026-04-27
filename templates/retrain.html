@@ -286,7 +286,7 @@ function _updateUI(data) {
 
 function _showError(msg) {
   const box = document.getElementById('error-box');
-  box.textContent = msg;
+  box.querySelector('pre').textContent = msg;
   box.style.display = '';
 }
 </script>
