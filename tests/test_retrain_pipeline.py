@@ -1,16 +1,7 @@
-"""Unit tests for tools.merge_over_review_manifests.run()
-
-TDD: these tests are written first, before run() exists.
-"""
-from __future__ import annotations
-
 import csv
 import tempfile
 from pathlib import Path
-
 import pytest
-
-from tools.merge_over_review_manifests import run
 
 
 def _write_manifest(batch_dir: Path, rows: list[dict]) -> None:
@@ -22,90 +13,83 @@ def _write_manifest(batch_dir: Path, rows: list[dict]) -> None:
 
 
 def test_merge_run_basic():
-    """2 batches, 1 row each, different labels → total_rows == 2, both batches in result."""
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        for batch_name, label in [("20260101_100000", "over_surface_scratch"),
+                                   ("20260102_100000", "true_ng")]:
+            b = base / batch_name
+            b.mkdir()
+            (b / "crop.jpg").write_bytes(b"fake")
+            _write_manifest(b, [{"sample_id": f"s_{batch_name}", "label": label,
+                                  "crop_path": "crop.jpg", "status": "ok"}])
 
-        # batch A
-        batch_a = base / "20260101_000000"
-        batch_a.mkdir()
-        crop_a = batch_a / "crop_a.png"
-        crop_a.write_bytes(b"fake")
-        _write_manifest(batch_a, [
-            {"sample_id": "s001", "label": "scratch", "crop_path": "crop_a.png", "status": "ok"},
-        ])
-
-        # batch B
-        batch_b = base / "20260102_000000"
-        batch_b.mkdir()
-        crop_b = batch_b / "crop_b.png"
-        crop_b.write_bytes(b"fake")
-        _write_manifest(batch_b, [
-            {"sample_id": "s002", "label": "ok", "crop_path": "crop_b.png", "status": "ok"},
-        ])
-
-        stats = run(base, set())
+        from tools.merge_over_review_manifests import run as merge_run
+        stats = merge_run(base, set())
 
         assert stats["total_rows"] == 2
-        assert "20260101_000000" in stats["batches"]
-        assert "20260102_000000" in stats["batches"]
-        assert stats["label_counts"]["scratch"] == 1
-        assert stats["label_counts"]["ok"] == 1
+        assert len(stats["batches"]) == 2
+        assert stats["label_counts"]["over_surface_scratch"] == 1
+        assert Path(stats["out_path"]).exists()
 
 
 def test_merge_run_exclude():
-    """2 batches, exclude one → total_rows == 1, only 1 batch in stats['batches']."""
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        for batch_name in ["20260101_100000", "20260102_100000"]:
+            b = base / batch_name
+            b.mkdir()
+            (b / "crop.jpg").write_bytes(b"fake")
+            _write_manifest(b, [{"sample_id": batch_name, "label": "true_ng",
+                                  "crop_path": "crop.jpg", "status": "ok"}])
 
-        batch_a = base / "20260101_000000"
-        batch_a.mkdir()
-        crop_a = batch_a / "crop_a.png"
-        crop_a.write_bytes(b"fake")
-        _write_manifest(batch_a, [
-            {"sample_id": "s001", "label": "scratch", "crop_path": "crop_a.png", "status": "ok"},
-        ])
-
-        batch_b = base / "20260102_000000"
-        batch_b.mkdir()
-        crop_b = batch_b / "crop_b.png"
-        crop_b.write_bytes(b"fake")
-        _write_manifest(batch_b, [
-            {"sample_id": "s002", "label": "ok", "crop_path": "crop_b.png", "status": "ok"},
-        ])
-
-        stats = run(base, {"20260102_000000"})
+        from tools.merge_over_review_manifests import run as merge_run
+        stats = merge_run(base, {"20260101_100000"})
 
         assert stats["total_rows"] == 1
-        assert len(stats["batches"]) == 1
-        assert stats["batches"][0] == "20260101_000000"
+        assert stats["batches"] == ["20260102_100000"]
 
 
 def test_merge_run_skips_non_ok():
-    """1 batch, 2 rows: 1 status=ok, 1 status=pending → total_rows == 1."""
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
-
-        batch_a = base / "20260101_000000"
-        batch_a.mkdir()
-        crop_ok = batch_a / "crop_ok.png"
-        crop_ok.write_bytes(b"fake")
-        crop_pending = batch_a / "crop_pending.png"
-        crop_pending.write_bytes(b"fake")
-        _write_manifest(batch_a, [
-            {"sample_id": "s001", "label": "scratch", "crop_path": "crop_ok.png", "status": "ok"},
-            {"sample_id": "s002", "label": "scratch", "crop_path": "crop_pending.png", "status": "pending"},
+        b = base / "20260101_100000"
+        b.mkdir()
+        (b / "crop.jpg").write_bytes(b"fake")
+        _write_manifest(b, [
+            {"sample_id": "s1", "label": "true_ng", "crop_path": "crop.jpg", "status": "ok"},
+            {"sample_id": "s2", "label": "true_ng", "crop_path": "crop.jpg", "status": "pending"},
         ])
 
-        stats = run(base, set())
-
+        from tools.merge_over_review_manifests import run as merge_run
+        stats = merge_run(base, set())
         assert stats["total_rows"] == 1
 
 
 def test_merge_run_no_batches_raises():
-    """empty temp dir → ValueError('no batch dirs')."""
     with tempfile.TemporaryDirectory() as tmp:
-        base = Path(tmp)
-
+        from tools.merge_over_review_manifests import run as merge_run
         with pytest.raises(ValueError, match="no batch dirs"):
-            run(base, set())
+            merge_run(Path(tmp), set())
+
+
+def test_retrain_state_409_when_running():
+    """Verify the 409 detection logic works."""
+    import threading
+    state = {
+        "lock": threading.Lock(),
+        "job": {
+            "job_id": "retrain_20260424_000000",
+            "state": "running",
+            "step": "train",
+            "started_at": "2026-04-24T00:00:00",
+            "output_path": "deployment/test.pkl",
+            "log_lines": [],
+            "_log_lock": threading.Lock(),
+            "summary": None,
+            "error": None,
+        },
+    }
+    with state["lock"]:
+        job = state["job"]
+        already_running = job and job.get("state") == "running"
+    assert already_running

@@ -103,6 +103,27 @@ def hm_relative(path_str, base_dir):
         return ""
 
 
+class _ListHandler(logging.Handler):
+    """Captures training log records into a list for the retrain progress UI."""
+
+    def __init__(self, lines: list, lock: threading.Lock):
+        super().__init__()
+        self.lines = lines
+        self.lock = lock
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            with self.lock:
+                self.lines.append(msg)
+        except Exception:
+            pass
+
+
 class CAPIWebHandler(BaseHTTPRequestHandler):
     """CAPI Web 請求處理器"""
 
@@ -171,6 +192,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_logs(query)
             elif path == "/debug":
                 self._handle_debug_page(path)
+            elif path == "/retrain":
+                self._handle_retrain_page()
+            elif path == "/api/retrain/status":
+                self._handle_retrain_status()
             elif path == "/ric":
                 self._handle_ric_page(query, path)
             elif path == "/api/ric/report":
@@ -296,6 +321,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_rerun_trigger(record_id_str)
             elif path == "/api/dataset_export/start":
                 self._handle_dataset_export_start()
+                return
+            elif path == "/api/retrain/start":
+                self._handle_retrain_start()
                 return
             elif path == "/api/dataset_export/cancel":
                 self._handle_dataset_export_cancel()
@@ -4290,6 +4318,198 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
+    def _handle_retrain_page(self):
+        """GET /retrain"""
+        current_bundle = ""
+        trained_at = "未知"
+        server_inst = self._capi_server_instance
+        if server_inst:
+            cfg = getattr(server_inst, "config", None)
+            if cfg:
+                current_bundle = getattr(cfg, "scratch_bundle_path", "")
+        if current_bundle:
+            try:
+                import pickle
+                with open(current_bundle, "rb") as f:
+                    bundle = pickle.load(f)
+                trained_at = bundle.get("metadata", {}).get("trained_at", "未知")
+            except Exception:
+                pass
+
+        template = self.jinja_env.get_template("retrain.html")
+        html = template.render(
+            request_path="/retrain",
+            current_bundle=current_bundle or "(未設定)",
+            trained_at=trained_at,
+            default_manifest_base="/data/capi_ai/datasets/over_review",
+            default_output_path="deployment/scratch_classifier_v3.pkl",
+            default_epochs=15,
+            default_rank=16,
+            default_calib_frac=0.2,
+            default_dinov2_repo="deployment/dinov2_repo",
+            default_dinov2_weights="deployment/dinov2_vitb14.pth",
+        )
+        self._send_response(200, html)
+
+    def _handle_retrain_start(self):
+        """POST /api/retrain/start"""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            params = json.loads(body) if body else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON body"}, status=400)
+            return
+
+        if not params.get("manifest_base") or not params.get("output_path"):
+            self._send_json({"error": "manifest_base and output_path are required"}, status=400)
+            return
+
+        # Reject absolute paths and path traversal to keep writes within project dir
+        output_path_str = str(params["output_path"])
+        if Path(output_path_str).is_absolute() or ".." in output_path_str:
+            self._send_json({"error": "output_path must be a relative path within the project"}, status=400)
+            return
+
+        state = self._retrain_state
+        with state["lock"]:
+            job = state["job"]
+            if job and job.get("state") == "running":
+                self._send_json({
+                    "error": "job_already_running",
+                    "job_id": job["job_id"],
+                }, status=409)
+                return
+
+            job_id = datetime.now().strftime("retrain_%Y%m%d_%H%M%S")
+            new_job = {
+                "job_id": job_id,
+                "state": "running",
+                "step": "merge",
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+                "output_path": params["output_path"],
+                "log_lines": [],
+                "_log_lock": threading.Lock(),
+                "summary": None,
+                "error": None,
+            }
+            state["job"] = new_job
+
+        thread = threading.Thread(
+            target=CAPIWebHandler._retrain_worker,
+            args=(new_job, params),
+            daemon=True,
+            name=f"retrain-{job_id}",
+        )
+        thread.start()
+        self._send_json({"job_id": job_id, "started_at": new_job["started_at"]})
+
+    def _handle_retrain_status(self):
+        """GET /api/retrain/status"""
+        state = self._retrain_state
+        with state["lock"]:
+            job = state["job"]
+            log_lock = job["_log_lock"] if job else None
+
+        if not job:
+            self._send_json({"state": "idle"})
+            return
+
+        with log_lock:
+            log_lines = list(job["log_lines"][-100:])
+
+        resp = {
+            "job_id": job["job_id"],
+            "state": job["state"],
+            "step": job["step"],
+            "started_at": job["started_at"],
+            "output_path": job["output_path"],
+            "summary": job["summary"],
+            "error": job["error"],
+            "log_lines": log_lines,
+        }
+        try:
+            started = datetime.fromisoformat(resp["started_at"])
+            resp["elapsed_sec"] = round((datetime.now() - started).total_seconds(), 1)
+        except Exception:
+            resp["elapsed_sec"] = 0
+
+        self._send_json(resp)
+
+    @staticmethod
+    def _retrain_worker(job: dict, params: dict) -> None:
+        """Background thread: merge manifests → train → update job state."""
+        import traceback
+        from tools.merge_over_review_manifests import run as merge_run
+        from scripts.over_review_poc.train_final_model import main as train_main
+
+        log_lines = job["log_lines"]
+        log_lock = job["_log_lock"]
+
+        handler = _ListHandler(log_lines, log_lock)
+        watched_loggers = [
+            logging.getLogger("scripts.over_review_poc.train_final_model"),
+            logging.getLogger("scripts.over_review_poc.finetune_lora"),
+        ]
+        for lg in watched_loggers:
+            lg.addHandler(handler)
+
+        try:
+            # Step 1: merge manifests
+            with CAPIWebHandler._retrain_state["lock"]:
+                job["step"] = "merge"
+
+            base = Path(params["manifest_base"])
+            with log_lock:
+                log_lines.append(f"[merge] 掃描資料目錄 {base} ...")
+            merge_stats = merge_run(base, set())
+            manifest_path = Path(merge_stats["out_path"])
+            with log_lock:
+                log_lines.append(
+                    f"[merge] 完成：{merge_stats['total_rows']} 筆，"
+                    f"共 {len(merge_stats['batches'])} 批次"
+                )
+
+            # Step 2: train
+            with CAPIWebHandler._retrain_state["lock"]:
+                job["step"] = "train"
+
+            train_argv = [
+                "--manifest", str(manifest_path),
+                "--transform", "clahe",
+                "--clahe-clip", str(params.get("clahe_clip", 4.0)),
+                "--rank", str(params.get("rank", 16)),
+                "--alpha", str(params.get("alpha", params.get("rank", 16))),
+                "--n-lora-blocks", "2",
+                "--epochs", str(params.get("epochs", 15)),
+                "--calib-frac", str(params.get("calib_frac", 0.2)),
+                "--output", str(params["output_path"]),
+            ]
+            if params.get("dinov2_repo"):
+                train_argv += ["--dinov2-repo", str(params["dinov2_repo"])]
+            if params.get("dinov2_weights"):
+                train_argv += ["--dinov2-weights", str(params["dinov2_weights"])]
+
+            summary = train_main(train_argv)
+
+            # Done
+            with CAPIWebHandler._retrain_state["lock"]:
+                job["step"] = "done"
+                job["state"] = "completed"
+                job["summary"] = summary
+
+        except Exception:
+            err = traceback.format_exc()
+            with CAPIWebHandler._retrain_state["lock"]:
+                job["state"] = "failed"
+                job["error"] = err
+            with log_lock:
+                log_lines.append(f"[ERROR] {err}")
+
+        finally:
+            for lg in watched_loggers:
+                lg.removeHandler(handler)
+
 
 def create_web_server(
     host: str,
@@ -4334,6 +4554,10 @@ def create_web_server(
         "cancel_event": threading.Event(),
         "last_summary": None,        # JobSummary instance
         "manifest_lock": threading.Lock(),  # 保護 manifest.csv 手動 curation 的 read-modify-write
+    }
+    CAPIWebHandler._retrain_state = {
+        "lock": threading.Lock(),
+        "job": None,
     }
     CAPIWebHandler.init_jinja()
 
