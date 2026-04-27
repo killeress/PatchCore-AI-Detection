@@ -4409,25 +4409,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         state = self._retrain_state
         with state["lock"]:
             job = state["job"]
-            log_lock = job["_log_lock"] if job else None
-
-        if not job:
-            self._send_json({"state": "idle"})
-            return
+            if not job:
+                self._send_json({"state": "idle"})
+                return
+            snapshot = {k: job[k] for k in
+                        ("job_id", "state", "step", "started_at", "output_path", "summary", "error")}
+            log_lock = job["_log_lock"]
 
         with log_lock:
             log_lines = list(job["log_lines"][-100:])
 
-        resp = {
-            "job_id": job["job_id"],
-            "state": job["state"],
-            "step": job["step"],
-            "started_at": job["started_at"],
-            "output_path": job["output_path"],
-            "summary": job["summary"],
-            "error": job["error"],
-            "log_lines": log_lines,
-        }
+        resp = {**snapshot, "log_lines": log_lines}
         try:
             started = datetime.fromisoformat(resp["started_at"])
             resp["elapsed_sec"] = round((datetime.now() - started).total_seconds(), 1)
