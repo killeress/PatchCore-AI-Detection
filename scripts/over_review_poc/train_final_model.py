@@ -163,8 +163,17 @@ def main(argv=None):
     print(f"Est. eff. thresh:   {min(conformal_threshold * args.default_safety, 0.9999):.4f}")
     print(f"Calib NG count:     {int(calib_ng_mask.sum())} / {len(calib_idx)}")
     print(f"Calib score range:  [{calib_scores.min():.3f}, {calib_scores.max():.3f}]")
-    return 0
+    return {
+        "output_path": str(args.output),
+        "total_samples": len(samples),
+        "scratch_count": int(y.sum()),
+        "conformal_threshold": conformal_threshold,
+        "effective_threshold": float(min(conformal_threshold * args.default_safety, 0.9999)),
+        "calib_ng_count": int(calib_ng_mask.sum()),
+        "calib_total": len(calib_idx),
+    }
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    result = main()
+    sys.exit(0 if isinstance(result, dict) else result)
