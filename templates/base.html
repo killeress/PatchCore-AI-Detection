@@ -351,6 +351,9 @@
                 <a href="/settings" {% if request_path=='/settings' %}class="active" {% endif %}
                     style="display:inline-flex; align-items:center; gap:6px;"><img src="/imgs/nav_stats.png"
                         style="width: 30px; height: 30px; object-fit: contain; border-radius: 4px;"> 參數設定</a>
+                <a href="/retrain" {% if request_path=='/retrain' %}class="active" {% endif %}
+                    style="display:inline-flex; align-items:center; gap:6px;"><img src="/imgs/nav_stats.png"
+                        style="width: 30px; height: 30px; object-fit: contain; border-radius: 4px;"> 模型重訓練</a>
                 <a href="/debug" {% if request_path=='/debug' %}class="active" {% endif %}
                     style="display:inline-flex; align-items:center; gap:6px;"><img src="/imgs/nav_debug.png"
                         style="width: 30px; height: 30px; object-fit: contain; border-radius: 4px;"> Debug 推論
