@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block title %}模型訓練{% endblock %}
+
+{% block content %}
+<div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
+
+  <div style="margin-bottom:24px;">
+    <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.4rem;font-weight:600;">模型訓練</h1>
+    <p style="color:#a6adc8;margin:0;font-size:.92rem;">選擇要重新訓練的模型。</p>
+  </div>
+
+  {% if not model_cards %}
+    <div style="background:#313244;border-radius:10px;padding:40px 24px;text-align:center;color:#a6adc8;">
+      目前沒有可訓練的模型
+    </div>
+  {% else %}
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:18px;">
+      {% for card in model_cards %}
+      <div style="background:#313244;border-radius:10px;padding:20px 22px;display:flex;flex-direction:column;">
+
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;gap:12px;">
+          <div>
+            <h2 style="color:#cdd6f4;margin:0;font-size:1.05rem;font-weight:600;">{{ card.title }}</h2>
+            <div style="color:#7f849c;font-size:.78rem;margin-top:2px;font-family:monospace;">{{ card.subtitle }}</div>
+          </div>
+          {% if card.status == "ok" %}
+            <span style="background:#2d4a3e;color:#a6e3a1;padding:3px 10px;border-radius:12px;font-size:.78rem;white-space:nowrap;">✅ {{ card.status_text }}</span>
+          {% else %}
+            <span style="background:#4a3530;color:#fab387;padding:3px 10px;border-radius:12px;font-size:.78rem;white-space:nowrap;">⚠️ {{ card.status_text }}</span>
+          {% endif %}
+        </div>
+
+        <p style="color:#bac2de;font-size:.88rem;line-height:1.5;margin:0 0 16px 0;">{{ card.description }}</p>
+
+        <div style="margin-bottom:18px;font-size:.82rem;">
+          <div style="color:#a6adc8;margin-bottom:4px;">
+            Bundle： <span style="color:#cdd6f4;font-family:monospace;word-break:break-all;">{{ card.bundle_path }}</span>
+          </div>
+          <div style="color:#a6adc8;">
+            最後訓練： <span style="color:#cdd6f4;">{{ card.trained_at }}</span>
+          </div>
+        </div>
+
+        <a href="{{ card.target_url }}"
+           style="margin-top:auto;display:inline-block;text-align:center;background:#89b4fa;color:#1e1e2e;
+                  padding:9px 16px;border-radius:6px;text-decoration:none;font-weight:600;font-size:.92rem;">
+          開始訓練 →
+        </a>
+      </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+</div>
+{% endblock %}
