@@ -271,6 +271,66 @@ class TestApplyOmitDustFilter:
             f"應判 dust 屏蔽; detail={result[0].dust_detail_text}, ratio={result[0].dust_bright_ratio}"
         assert "Dust detected" in result[0].dust_detail_text
 
+    def test_patchcore_dust_uses_per_region_not_overall_cov(self, pc_inferencer):
+        """PC fusion dust 判定應看 hot region 覆蓋率，不被整張 OMIT 大 dust 面積稀釋。"""
+        pc_inferencer.config.dust_heatmap_metric = "coverage"
+        pc_inferencer.config.dust_heatmap_iou_threshold = 0.5
+        omit = np.full((1080, 1920), 50, dtype=np.uint8)
+        defects = [_make_pc_defect()]
+
+        # 整張 ROI 都是 dust，overall COV=hot_area/dust_area 很低；
+        # 但 hot region 本身 100% 被 dust 覆蓋，應由 per-region 判 DUST。
+        dust_mask = np.full((50, 50), 255, dtype=np.uint8)
+        pc_inferencer.check_dust_or_scratch_feature = lambda img, **kwargs: (
+            True, dust_mask, 0.9, "Large dust mask"
+        )
+
+        result = pc_inferencer._apply_omit_dust_filter_to_edge_defects(
+            defects, omit_image=omit, omit_overexposed=False,
+        )
+
+        assert result[0].is_suspected_dust_or_scratch is True
+        assert getattr(result[0], "dust_heatmap_iou", 1.0) < 0.5, \
+            "fixture 應確認 overall COV 低於門檻，避免測到舊邏輯也會過"
+        assert getattr(result[0], "dust_region_max_cov", 0.0) >= 0.5
+        assert "PER_REGION" in result[0].dust_detail_text
+
+    def test_cv_dust_uses_full_mask_roi_and_defect_coverage(self, pc_inferencer):
+        """CV fusion dust 判定應用 cv_mask_offset 對齊整個 ROI，再算 defect 覆蓋率。"""
+        pc_inferencer.config.dust_heatmap_metric = "coverage"
+        pc_inferencer.config.dust_heatmap_iou_threshold = 0.5
+        omit = np.full((300, 300), 50, dtype=np.uint8)
+
+        d = EdgeDefect(
+            side="aoi_edge", area=100,
+            bbox=(120, 120, 10, 10), center=(125, 125),
+            max_diff=25, inspector_mode="fusion",
+        )
+        d.source_inspector = "cv"
+        cv_mask = np.zeros((50, 50), dtype=np.uint8)
+        cv_mask[20:30, 20:30] = 255
+        d.cv_filtered_mask = cv_mask
+        d.cv_mask_offset = (100, 100)
+
+        seen = {}
+
+        def stub_dust(img, **kwargs):
+            seen["shape"] = img.shape[:2]
+            m = np.zeros(img.shape[:2], dtype=np.uint8)
+            m[20:30, 20:30] = 255
+            return True, m, 0.1, "Aligned dust"
+
+        pc_inferencer.check_dust_or_scratch_feature = stub_dust
+
+        result = pc_inferencer._apply_omit_dust_filter_to_edge_defects(
+            [d], omit_image=omit, omit_overexposed=False,
+        )
+
+        assert seen["shape"] == (50, 50), \
+            "CV dust check 應裁整個 cv_filtered_mask ROI，而不是只裁小 bbox"
+        assert result[0].is_suspected_dust_or_scratch is True
+        assert "CV_COV:1.000" in result[0].dust_detail_text
+
     def test_no_dust_keeps_defects_clean(self, pc_inferencer):
         """OMIT 影像下無 dust 特徵 → defect 不標 is_suspected"""
         omit = np.full((1080, 1920), 50, dtype=np.uint8)

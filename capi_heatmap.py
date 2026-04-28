@@ -1659,7 +1659,10 @@ class HeatmapManager:
                             iou_threshold=dust_iou_threshold,
                         )
                         is_dust_shield = not has_real
-                        dust_shield_value = overall_cov
+                        region_max_cov = max((r["coverage"] for r in region_details), default=overall_cov)
+                        # Header verdict should show the per-region value used for
+                        # the actual dust decision, not the overall dust-area ratio.
+                        dust_shield_value = region_max_cov
                         roi_bgr_small = ensure_bgr(
                             cv2.resize(roi if roi is not None else np.zeros((tile_size, tile_size), dtype=np.uint8),
                                        (tile_size, tile_size))
@@ -1676,7 +1679,7 @@ class HeatmapManager:
                             region_labels=region_labels,
                         )
                         panels.append(cv2.resize(debug_img, (panel_w, panel_h)))
-                        labels.append(f"Dust Shield ({metric_name}:{overall_cov:.3f})")
+                        labels.append(f"Dust Shield (R.{metric_name}:{region_max_cov:.3f})")
                     except Exception as e:
                         print(f"⚠️ PC Panel 5 dust debug 失敗: {e}")
                         panels.append(np.zeros((panel_h, panel_w, 3), dtype=np.uint8))
