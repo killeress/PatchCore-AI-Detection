@@ -93,3 +93,37 @@ def delete_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
         shutil.rmtree(bundle_path, ignore_errors=False)
     db.delete_model_bundle(bundle_id)
     return {"ok": True}
+
+
+def export_bundle_zip(bundle_path: Path, machine_id: str) -> bytes:
+    """打包成 ZIP（內含 README）。回 bytes 給 streaming response。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # 整個 bundle 目錄
+        for p in bundle_path.rglob("*"):
+            if p.is_file():
+                arcname = Path("model") / bundle_path.name / p.relative_to(bundle_path)
+                zf.write(p, str(arcname))
+        # README
+        readme = _build_readme(machine_id, bundle_path)
+        zf.writestr(str(Path("model") / bundle_path.name / "README.txt"), readme)
+    return buf.getvalue()
+
+
+def _build_readme(machine_id: str, bundle_path: Path) -> str:
+    return f"""新機種 PatchCore Bundle 部署說明
+────────────────────────────────────────
+機種：{machine_id}
+Bundle：{bundle_path.name}
+
+部署步驟：
+1. 解壓本 ZIP，保留路徑結構
+2. FTP 上傳整個 bundle 目錄到 production：
+     model/{bundle_path.name}/  → /capi_ai/model/{bundle_path.name}/
+3. 編輯 production 的 server_config.yaml，在 model_configs 列表加入：
+     - model/{bundle_path.name}/machine_config.yaml
+4. （可選）若同機種有舊 bundle 想停用，從 model_configs 移除舊 bundle 的 yaml
+5. 重啟 capi_server 服務
+
+驗證：傳送該機種 panel 給 inference，confirm 走新架構（log 顯示 "load 10 models"）。
+"""
