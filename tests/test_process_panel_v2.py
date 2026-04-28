@@ -38,6 +38,7 @@ def _make_config(tmp_dir: Path) -> CAPIConfig:
         threshold_mapping={
             "G0F00000": {"inner": 0.5, "edge": 0.5},
         },
+        scratch_classifier_enabled=False,
     )
 
 
@@ -57,7 +58,14 @@ def _make_fake_predict_result(score: float = 0.3) -> Any:
     result = MagicMock()
     result.pred_score = score
     amap = np.zeros((512, 512), dtype=np.float32)
-    amap[256, 256] = score
+    # Realistic PatchCore hot-spot: 3x3 peak region + noise floor
+    # Single pixel would trigger concentration check (peak/mean=1.0 → 50% penalty)
+    # This creates: peak=score in center, surrounding pixels at 70%, noise floor at 5%
+    # Result: peak/mean ≈ 20 → passes concentration check (>2.0 threshold)
+    amap[255:258, 255:258] = score * 0.7
+    amap[256, 256] = score  # center peak
+    # Add slight noise floor so concentration ratio isn't degenerate
+    amap[200:300, 200:300] = np.maximum(amap[200:300, 200:300], score * 0.05)
     result.anomaly_map = amap
     return result
 
@@ -160,8 +168,8 @@ def test_process_panel_v2_image_result_fields(tmp_path):
         assert r.tiles is not None
 
 
-def test_process_panel_v2_missing_lighting_skipped(tmp_path):
-    """If lighting image has no matching model_mapping entry, it is skipped gracefully."""
+def test_process_panel_v2_missing_lighting_config_fails(tmp_path):
+    """A configured lighting image without inner/edge models must fail the request."""
     # Write an image with a prefix NOT in model_mapping
     _write_grey_panel_image(tmp_path, "R0F00000")
     cfg = _make_config(tmp_path)  # only G0F00000 in model_mapping
@@ -170,10 +178,90 @@ def test_process_panel_v2_missing_lighting_skipped(tmp_path):
 
     with patch.object(CAPIInferencer, "_get_model_for", return_value=MagicMock()):
         inferencer = CAPIInferencer(cfg)
+        with pytest.raises(RuntimeError, match="model_mapping"):
+            inferencer.process_panel(tmp_path)
+
+
+def test_process_panel_v2_model_failure_fails_request(tmp_path):
+    """Model load/predict failures must not be converted into clean OK results."""
+    _write_grey_panel_image(tmp_path, "G0F00000")
+    cfg = _make_config(tmp_path)
+
+    from capi_inference import CAPIInferencer
+
+    with patch.object(CAPIInferencer, "_get_model_for", side_effect=FileNotFoundError("missing model")):
+        inferencer = CAPIInferencer(cfg)
+        with pytest.raises(RuntimeError, match="推論失敗"):
+            inferencer.process_panel(tmp_path)
+
+
+def test_process_panel_v2_uses_shared_predict_tile_postprocess(tmp_path):
+    """v2 must call predict_tile so edge margin/mask/PatchCore postprocess stays shared with v1."""
+    _write_grey_panel_image(tmp_path, "G0F00000")
+    cfg = _make_config(tmp_path)
+
+    from capi_inference import CAPIInferencer
+
+    amap = np.zeros((512, 512), dtype=np.float32)
+    amap[256, 256] = 0.9
+    fake_model = MagicMock()
+
+    with patch.object(CAPIInferencer, "_get_model_for", return_value=fake_model), \
+         patch.object(CAPIInferencer, "predict_tile", return_value=(0.9, amap)) as pred:
+        inferencer = CAPIInferencer(cfg)
+        inferencer.edge_inspector.config.enabled = False
         results, *_ = inferencer.process_panel(tmp_path)
 
-    # R0F00000 image should be skipped → no results
-    assert results == [], "R0F00000 not in model_mapping → should be skipped"
+    assert results
+    assert pred.called
+
+
+def test_process_panel_v2_runs_cv_edge_inspector(tmp_path):
+    _write_grey_panel_image(tmp_path, "G0F00000")
+    cfg = _make_config(tmp_path)
+
+    from capi_edge_cv import EdgeDefect
+    from capi_inference import CAPIInferencer
+
+    fake_model = MagicMock()
+    fake_model.predict.return_value = _make_fake_predict_result(0.1)
+
+    class FakeEdgeInspector:
+        def __init__(self):
+            self.config = MagicMock()
+            self.config.enabled = True
+            self.config.exclude_zones = []
+            self.config.set_active_zones_for_product = MagicMock()
+
+        def inspect(self, image, raw_bounds):
+            return [EdgeDefect(side="left", area=10, bbox=(1, 2, 3, 4), center=(2, 3))]
+
+    with patch.object(CAPIInferencer, "_get_model_for", return_value=fake_model):
+        inferencer = CAPIInferencer(cfg)
+        inferencer.edge_inspector = FakeEdgeInspector()
+        results, *_ = inferencer.process_panel(tmp_path)
+
+    assert any(r.edge_defects for r in results)
+
+
+def test_process_panel_v2_runs_scratch_filter(tmp_path):
+    _write_grey_panel_image(tmp_path, "G0F00000")
+    cfg = _make_config(tmp_path)
+    cfg.scratch_classifier_enabled = True
+
+    from capi_inference import CAPIInferencer
+
+    fake_model = MagicMock()
+    fake_model.predict.return_value = _make_fake_predict_result(0.9)
+    fake_filter = MagicMock()
+
+    with patch.object(CAPIInferencer, "_get_model_for", return_value=fake_model), \
+         patch.object(CAPIInferencer, "_get_scratch_filter", return_value=fake_filter):
+        inferencer = CAPIInferencer(cfg)
+        inferencer.edge_inspector.config.enabled = False
+        inferencer.process_panel(tmp_path)
+
+    assert fake_filter.apply_to_image_result.called
 
 
 def test_predict_tile_applies_mask(tmp_path):
