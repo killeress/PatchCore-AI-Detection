@@ -91,3 +91,47 @@ def test_train_one_patchcore_smoke(tmp_path, monkeypatch):
     # 回傳路徑要存在
     assert out.exists()
     assert out.name == "model.pt"
+
+
+def test_calibrate_threshold_uses_p10_and_train_max():
+    from capi_train_new import calibrate_threshold
+    # 假設 NG scores 與 train_max
+    ng_scores = sorted([0.5, 0.55, 0.6, 0.7, 0.8, 0.9])  # P10 ≈ 0.5
+    threshold = calibrate_threshold(ng_scores=ng_scores, train_max_score=0.4)
+    # max(P10=0.5, 0.4*1.05=0.42) → 0.5
+    assert threshold == 0.5
+    # train_max_score 較高的情況
+    threshold = calibrate_threshold(ng_scores=ng_scores, train_max_score=0.6)
+    # max(0.5, 0.63) → 0.63
+    assert abs(threshold - 0.63) < 1e-6
+
+
+def test_write_manifest_yaml(tmp_path):
+    from capi_train_new import write_manifest, write_machine_config_yaml
+    bundle = tmp_path / "GN160-20260428"
+    bundle.mkdir()
+
+    write_manifest(bundle, {
+        "machine_id": "GN160", "trained_at": "2026-04-28T15:30:45",
+        "trained_with_job_id": "j1", "panel_count": 5,
+        "panel_glass_ids": ["YQ21KU218E45"],
+        "edge_threshold_px": 768,
+        "patchcore_params": {"batch_size": 8, "image_size": [512, 512],
+                             "coreset_ratio": 0.1, "max_epochs": 1},
+        "tiles_per_unit": {"G0F00000-inner": {"train": 480, "ng": 30}},
+        "model_files": {"G0F00000-inner": {"path": "G0F00000-inner.pt", "size_bytes": 47340000}},
+    })
+
+    import json as _json
+    m = _json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    assert m["machine_id"] == "GN160"
+    assert m["version_schema"] == 1
+
+    write_machine_config_yaml(bundle, "GN160", {
+        "G0F00000": {"inner": 0.62, "edge": 0.71},
+    })
+    import yaml
+    y = yaml.safe_load((bundle / "machine_config.yaml").read_text(encoding="utf-8"))
+    assert y["machine_id"] == "GN160"
+    assert y["model_mapping"]["G0F00000"]["inner"].endswith("G0F00000-inner.pt")
+    assert y["threshold_mapping"]["G0F00000"]["inner"] == 0.62
