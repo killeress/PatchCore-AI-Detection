@@ -286,6 +286,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/api/debug/scratch-batch/export":
                 self._handle_scratch_batch_export(query)
                 return
+            elif path == "/models":
+                self._handle_models_page()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/detail"):
+                self._handle_models_detail()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/export"):
+                self._handle_models_export()
+                return
             elif path == "/favicon.ico":
                 self._send_response(204, "")
             else:
@@ -377,6 +386,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path.startswith("/api/train/new/start_training/"):
                 self._handle_train_new_start_training()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/activate"):
+                self._handle_models_activate()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/deactivate"):
+                self._handle_models_deactivate()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/delete"):
+                self._handle_models_delete()
                 return
             else:
                 self._send_404(path)
@@ -4988,6 +5006,93 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         finally:
             for lg in watched_loggers:
                 lg.removeHandler(handler)
+
+    # ------------------------------------------------------------------ #
+    #  Model registry handlers                                            #
+    # ------------------------------------------------------------------ #
+
+    def _handle_models_page(self):
+        """GET /models"""
+        db = self._capi_server_instance.database
+        from capi_model_registry import list_bundles_grouped
+        grouped = list_bundles_grouped(db)
+        template = self.jinja_env.get_template("models.html")
+        html = template.render(request_path="/models", grouped=grouped)
+        self._send_response(200, html)
+
+    def _handle_models_detail(self):
+        """GET /api/models/<id>/detail"""
+        parts = self.path.split("/")
+        bundle_id = int(parts[3])
+        from capi_model_registry import get_bundle_detail
+        detail = get_bundle_detail(self._capi_server_instance.database, bundle_id)
+        if not detail:
+            self._send_json({"error": "not found"}, status=404)
+            return
+        self._send_json(detail)
+
+    def _handle_models_activate(self):
+        """POST /api/models/<id>/activate"""
+        parts = self.path.split("/")
+        bundle_id = int(parts[3])
+        from capi_model_registry import activate_bundle
+        try:
+            result = activate_bundle(
+                self._capi_server_instance.database,
+                bundle_id,
+                server_config_path=Path(self._capi_server_instance.server_config_path),
+            )
+            self._send_json(result)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+
+    def _handle_models_deactivate(self):
+        """POST /api/models/<id>/deactivate"""
+        parts = self.path.split("/")
+        bundle_id = int(parts[3])
+        from capi_model_registry import deactivate_bundle
+        try:
+            result = deactivate_bundle(
+                self._capi_server_instance.database, bundle_id,
+                server_config_path=Path(self._capi_server_instance.server_config_path),
+            )
+            self._send_json(result)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+
+    def _handle_models_delete(self):
+        """POST /api/models/<id>/delete"""
+        parts = self.path.split("/")
+        bundle_id = int(parts[3])
+        from capi_model_registry import delete_bundle
+        try:
+            result = delete_bundle(
+                self._capi_server_instance.database, bundle_id,
+                server_config_path=Path(self._capi_server_instance.server_config_path),
+            )
+            self._send_json(result)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=409)
+
+    def _handle_models_export(self):
+        """GET /api/models/<id>/export → 串流 ZIP"""
+        parts = self.path.split("/")
+        bundle_id = int(parts[3])
+        from capi_model_registry import export_bundle_zip
+        db = self._capi_server_instance.database
+        bundle = db.get_model_bundle(bundle_id)
+        if not bundle:
+            self._send_response(404, "")
+            return
+
+        zip_bytes = export_bundle_zip(Path(bundle["bundle_path"]), bundle["machine_id"])
+        filename = f"{Path(bundle['bundle_path']).name}.zip"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(zip_bytes)))
+        self.end_headers()
+        self.wfile.write(zip_bytes)
 
 
 def create_web_server(
