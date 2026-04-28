@@ -384,6 +384,12 @@ class CAPIInferencer:
         self.scratch_filter: ScratchFilter | None = None
         self._scratch_load_failed = False
 
+        # 分發器：依架構選擇 v1（舊 5 模型）或 v2（新 C-10）
+        if getattr(config, "is_new_architecture", False):
+            self._dispatch_process_panel = self._process_panel_v2
+        else:
+            self._dispatch_process_panel = self._process_panel_v1
+
     def _get_scratch_filter(self):
         """Lazy-load ScratchFilter (first call only). Thread-safe via _gpu_lock
         (caller responsibility — called inside process_panel)."""
@@ -3889,8 +3895,27 @@ class CAPIInferencer:
         return False, ""
 
     def process_panel(
-        self, 
-        panel_dir: Path, 
+        self,
+        panel_dir: Path,
+        progress_callback=None,
+        cpu_workers: int = 4,
+        product_resolution: Optional[Tuple[int, int]] = None,
+        bomb_info: Optional[Dict[str, Any]] = None,
+        model_id: Optional[str] = None,
+    ):
+        """分發器：依 config.is_new_architecture 路由至 v1 或 v2 實作。"""
+        return self._dispatch_process_panel(
+            panel_dir,
+            progress_callback=progress_callback,
+            cpu_workers=cpu_workers,
+            product_resolution=product_resolution,
+            bomb_info=bomb_info,
+            model_id=model_id,
+        )
+
+    def _process_panel_v1(
+        self,
+        panel_dir: Path,
         progress_callback=None,
         cpu_workers: int = 4,
         product_resolution: Optional[Tuple[int, int]] = None,
@@ -5041,6 +5066,18 @@ class CAPIInferencer:
                 result.client_bomb_info = bomb_info
 
         return results, omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image, aoi_report
+
+    def _process_panel_v2(
+        self,
+        panel_dir: Path,
+        progress_callback=None,
+        cpu_workers: int = 4,
+        product_resolution: Optional[Tuple[int, int]] = None,
+        bomb_info: Optional[Dict[str, Any]] = None,
+        model_id: Optional[str] = None,
+    ):
+        """新架構：依 tile zone routing inner/edge model。(Phase 9.3 實作)"""
+        raise NotImplementedError("Phase 9.3")
 
     def visualize_inference_result(self, image_path: Path, result: ImageResult) -> np.ndarray:
         """視覺化推論結果（含異常標記 與 AOI 標記）"""
