@@ -100,3 +100,76 @@ class TestTrainingSchema:
             "config_params", "config_change_history",
         }
         assert existing.issubset(tables)
+
+
+class TestTrainingJobsCRUD:
+    def test_training_jobs_crud(self, tmp_path):
+        db = _make_db(tmp_path)
+        # create
+        job_id = "train_GN160_20260428_153045"
+        db.create_training_job(
+            job_id=job_id, machine_id="GN160JCEL250S",
+            panel_paths=["/p/a", "/p/b"],
+        )
+        # read
+        job = db.get_training_job(job_id)
+        assert job["machine_id"] == "GN160JCEL250S"
+        assert job["state"] == "preprocess"
+        assert job["panel_paths"] == ["/p/a", "/p/b"]
+        # update state
+        db.update_training_job_state(job_id, "review")
+        assert db.get_training_job(job_id)["state"] == "review"
+        # update with error
+        db.update_training_job_state(job_id, "failed", error_message="OOM")
+        job = db.get_training_job(job_id)
+        assert job["state"] == "failed"
+        assert job["error_message"] == "OOM"
+
+    def test_get_training_job_not_found(self, tmp_path):
+        db = _make_db(tmp_path)
+        assert db.get_training_job("nonexistent") is None
+
+    def test_update_output_bundle(self, tmp_path):
+        db = _make_db(tmp_path)
+        job_id = "train_test_bundle"
+        db.create_training_job(job_id=job_id, machine_id="M1", panel_paths=[])
+        db.update_training_job_state(job_id, "completed", output_bundle="/models/bundle.zip")
+        job = db.get_training_job(job_id)
+        assert job["state"] == "completed"
+        assert job["output_bundle"] == "/models/bundle.zip"
+        assert job["completed_at"] is not None
+
+    def test_get_active_training_job(self, tmp_path):
+        db = _make_db(tmp_path)
+        # No active job initially
+        assert db.get_active_training_job() is None
+        # Create + check
+        db.create_training_job(job_id="j1", machine_id="M", panel_paths=[])
+        active = db.get_active_training_job()
+        assert active["job_id"] == "j1"
+        # After completion → no active
+        db.update_training_job_state("j1", "completed")
+        assert db.get_active_training_job() is None
+
+    def test_active_job_all_active_states(self, tmp_path):
+        """preprocess / review / train 三種 state 都算 active。"""
+        db = _make_db(tmp_path)
+        for state in ("preprocess", "review", "train"):
+            db.create_training_job(job_id=f"j_{state}", machine_id="M", panel_paths=[])
+            db.update_training_job_state(f"j_{state}", state)
+        # 取最新的 active job（started_at DESC）
+        active = db.get_active_training_job()
+        assert active is not None
+        assert active["state"] in ("preprocess", "review", "train")
+
+    def test_panel_paths_empty_list(self, tmp_path):
+        db = _make_db(tmp_path)
+        db.create_training_job(job_id="j_empty", machine_id="M", panel_paths=[])
+        job = db.get_training_job("j_empty")
+        assert job["panel_paths"] == []
+
+    def test_create_returns_rowid(self, tmp_path):
+        db = _make_db(tmp_path)
+        rowid = db.create_training_job(job_id="j_rowid", machine_id="M", panel_paths=[])
+        assert isinstance(rowid, int)
+        assert rowid > 0

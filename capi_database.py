@@ -2334,6 +2334,98 @@ class CAPIDatabase:
         except (json.JSONDecodeError, TypeError, ValueError):
             return value_json
 
+    # ------------------------------------------------------------------
+    # Training Job CRUD
+    # ------------------------------------------------------------------
+
+    def create_training_job(self, job_id: str, machine_id: str, panel_paths: list) -> int:
+        """建立一筆新的訓練 job，初始 state 為 'preprocess'。回傳 rowid。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO training_jobs (job_id, machine_id, state, started_at, panel_paths)
+                   VALUES (?, ?, 'preprocess', datetime('now'), ?)""",
+                (job_id, machine_id, json.dumps(panel_paths)),
+            )
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+    def get_training_job(self, job_id: str) -> Optional[Dict]:
+        """依 job_id 查詢訓練 job，panel_paths 自動 JSON 反序列化。找不到回傳 None。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM training_jobs WHERE job_id = ?", (job_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in cur.description]
+            job = dict(zip(cols, row))
+            if job.get("panel_paths"):
+                job["panel_paths"] = json.loads(job["panel_paths"])
+            else:
+                job["panel_paths"] = []
+            return job
+        finally:
+            conn.close()
+
+    def update_training_job_state(
+        self,
+        job_id: str,
+        state: str,
+        error_message: Optional[str] = None,
+        output_bundle: Optional[str] = None,
+    ) -> None:
+        """更新訓練 job 的 state，並選擇性設定 error_message / output_bundle。
+        state 為 'completed' 或 'failed' 時自動填入 completed_at。
+        """
+        fields = ["state = ?"]
+        args: list = [state]
+        if state in ("completed", "failed"):
+            fields.append("completed_at = datetime('now')")
+        if error_message is not None:
+            fields.append("error_message = ?")
+            args.append(error_message)
+        if output_bundle is not None:
+            fields.append("output_bundle = ?")
+            args.append(output_bundle)
+        args.append(job_id)
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                f"UPDATE training_jobs SET {', '.join(fields)} WHERE job_id = ?",
+                tuple(args),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_active_training_job(self) -> Optional[Dict]:
+        """回傳目前進行中的 job（preprocess / review / train），依 started_at DESC 取最新一筆。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT * FROM training_jobs
+                   WHERE state IN ('preprocess', 'review', 'train')
+                   ORDER BY started_at DESC LIMIT 1"""
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in cur.description]
+            job = dict(zip(cols, row))
+            if job.get("panel_paths"):
+                job["panel_paths"] = json.loads(job["panel_paths"])
+            else:
+                job["panel_paths"] = []
+            return job
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     import tempfile
