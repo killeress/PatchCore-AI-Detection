@@ -1962,6 +1962,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                             tile_info=tile,
                             score_threshold=debug_threshold,
                             iou_threshold=dust_iou_thr_override if dust_iou_thr_override is not None else getattr(self.inferencer.config, 'dust_heatmap_iou_threshold', 0.01),
+                            dust_metric=getattr(self.inferencer.config, 'dust_heatmap_metric', 'coverage'),
+                            dust_high_cov_threshold=getattr(self.inferencer.config, 'dust_high_cov_threshold', None),
                         )
                         tile_url = f"/debug/heatmaps/{Path(composite_path).name}"
                     except Exception as e:
@@ -2979,6 +2981,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         tile_info=tile_info,
                         score_threshold=debug_threshold,
                         iou_threshold=getattr(self.inferencer.config, 'dust_heatmap_iou_threshold', 0.01),
+                        dust_metric=getattr(self.inferencer.config, 'dust_heatmap_metric', 'coverage'),
+                        dust_high_cov_threshold=getattr(self.inferencer.config, 'dust_high_cov_threshold', None),
                     )
                     composite_filename = Path(composite_path).name
                     composite_url = f"/debug/heatmaps/{composite_filename}"

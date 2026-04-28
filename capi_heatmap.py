@@ -113,6 +113,7 @@ def build_region_zoom_panels(
     tile_size: int = 512,
     metric_name: str = "COV",
     iou_threshold: float = 0.01,
+    high_cov_threshold: Optional[float] = None,
     max_panels: int = 3,
     method_label: str = "",
 ) -> List[Tuple[np.ndarray, str]]:
@@ -187,27 +188,36 @@ def build_region_zoom_panels(
             cov = region["coverage"]
             area = region["area"]
             dust_ol = region["dust_overlap"]
+            has_metric_denominator = "metric_denominator" in region
+            metric_denominator = region.get("metric_denominator", area)
             is_dust = region["is_dust"]
             tag = "DUST" if is_dust else "REAL"
             tag_color = (0, 200, 255) if is_dust else (0, 0, 255)
 
             cv2.putText(panel, f"{tag}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, tag_color, 2)
-            cv2.putText(panel, f"{metric_name}: {dust_ol}/{area} = {cov:.4f}", (10, 60),
+            if metric_name == "IOU" and not has_metric_denominator:
+                metric_text = f"{metric_name}: {cov:.4f} (overlap:{dust_ol})"
+            else:
+                metric_text = f"{metric_name}: {dust_ol}/{metric_denominator} = {cov:.4f}"
+            cv2.putText(panel, metric_text, (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
             peak_in = region.get("peak_in_dust", True)
             sub_rescue = region.get("dust_sub_peak_rescue", False)
-            thr_str = f"Thr:{iou_threshold}"
+            thr_str = f"Thr:{iou_threshold:.3f}"
             if is_dust and peak_in:
-                reason = f"PeakInDust ({thr_str}) -> DUST"
+                reason = f"PeakInDust {metric_name}>={thr_str} -> DUST"
             elif is_dust and sub_rescue:
-                reason = f"SubPeakRescue ({thr_str}) -> DUST"
+                reason = f"SubPeakRescue {metric_name}>={thr_str} -> DUST"
             elif is_dust:
-                reason = f"HighCOV ({thr_str}) -> DUST"
+                if high_cov_threshold is not None:
+                    reason = f"HighCOV>=Thr:{high_cov_threshold:.3f} -> DUST"
+                else:
+                    reason = "HighCOV -> DUST"
             elif cov < iou_threshold:
-                reason = f"{metric_name}<{thr_str} -> REAL"
+                reason = f"{metric_name}:{cov:.3f}<Thr:{iou_threshold:.3f} -> REAL"
             else:
-                reason = f"PeakNotInDust ({thr_str}) -> REAL"
+                reason = f"PeakNotInDust {metric_name}:{cov:.3f} -> REAL"
             cv2.putText(panel, reason, (10, 85),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, tag_color, 1)
 
@@ -475,6 +485,8 @@ class HeatmapManager:
         tile_info: Any = None,
         score_threshold: float = 0.5,
         iou_threshold: float = 0.01,
+        dust_metric: str = "coverage",
+        dust_high_cov_threshold: Optional[float] = None,
     ) -> str:
         """
         儲存單一 tile 的組合圖 (Original | Heatmap | OMIT Crop | Dust Mask)
@@ -659,9 +671,11 @@ class HeatmapManager:
             dust_iou = 0.0
 
         # --- 決定 Metric Name ---
-        metric_name = "COV"
+        metric_name = "COV" if str(dust_metric).lower() == "coverage" else "IOU"
         if dust_detail and "IOU:" in dust_detail:
             metric_name = "IOU"
+        elif dust_detail and "COV:" in dust_detail:
+            metric_name = "COV"
 
         # --- Panel 6+: Zoom (逐 feature/區域放大，最多 3 張) ---
         # 優先用 TWO_STAGE features (與 Original 上的 D/R 圈一一對應)；
@@ -688,6 +702,7 @@ class HeatmapManager:
                 tile_size=tile_size,
                 metric_name=metric_name,
                 iou_threshold=iou_threshold,
+                high_cov_threshold=dust_high_cov_threshold,
             )
 
         # --- 底部獨立標籤列（不蓋到面板內容）---
@@ -728,7 +743,15 @@ class HeatmapManager:
             verdict = f"BOMB: {bomb_code} (Filtered as OK)"
             verdict_color = (255, 0, 255)  # 洋紅色
         elif is_dust:
-            verdict = f"DUST (Filtered as OK) | Region{metric_name}:{dust_region_cov:.3f}>={iou_threshold:.3f}"
+            if "TWO_STAGE" in str(dust_detail):
+                verdict = "DUST (Filtered as OK) | TWO_STAGE -> DUST"
+            elif getattr(tile_info, 'dust_region_details', None):
+                verdict = f"DUST (Filtered as OK) | Region{metric_name}:{dust_region_cov:.3f}>={iou_threshold:.3f}"
+            elif dust_detail:
+                compact_detail = str(dust_detail).replace('\u2192', '->').replace('\u2190', '<-')
+                verdict = f"DUST (Filtered as OK) | {compact_detail[:70]}"
+            else:
+                verdict = "DUST (Filtered as OK)"
             verdict_color = (0, 200, 255)
         elif score >= score_threshold:
             verdict = "NG (Detected)"
@@ -750,8 +773,9 @@ class HeatmapManager:
 
         if dust_detail:
             detail_line = str(dust_detail)[:120].replace('\u2192', '->').replace('\u2190', '<-')
-            detail_line = detail_line.replace(f'>={metric_name}_THR', f'>={iou_threshold:.3f}')
-            detail_line = detail_line.replace(f'<{metric_name}_THR', f'<{iou_threshold:.3f}')
+            for metric_token in ("COV", "IOU"):
+                detail_line = detail_line.replace(f'>={metric_token}_THR', f'>={iou_threshold:.3f}')
+                detail_line = detail_line.replace(f'<{metric_token}_THR', f'<{iou_threshold:.3f}')
         else:
             detail_line = f"Tile#{tile_id} | {image_name}"
         if scratch_score_val > 0 and not scratch_filtered_val:
@@ -1118,11 +1142,8 @@ class HeatmapManager:
             panels.extend([omit_panel, overlay_panel])
             labels.extend(["OMIT ROI", f"Overlay ({metric_name}:{surface_iou:.3f})"])
 
-            # 判定結果僅用於 heatmap 顯示，不回寫到 edge_defect
-            # (推論結果的 is_suspected_dust_or_scratch 應在 Phase 3 中設定，
-            #  避免 async heatmap 儲存與同步判定之間的時序不一致)
-            if is_surface and not is_bomb:
-                is_dust = True
+            # 只把重疊值當作顯示資訊；header verdict 必須跟 inference 已寫入的
+            # edge_defect.is_suspected_dust_or_scratch 一致，避免產圖重算改寫判定原因。
 
         # 橫向拼接 (加入明顯深灰間隔，避免相連處被誤認為缺陷線)
         gap_w = 10
@@ -1149,14 +1170,19 @@ class HeatmapManager:
             verdict = f"BOMB: {bomb_code} (Filtered as OK)"
             verdict_color = (255, 0, 255)
         elif is_dust:
-            iou_cmp = ">=" if surface_iou >= dust_iou_threshold else "<"
-            verdict = f"SURFACE ({metric_name}:{surface_iou:.3f}{iou_cmp}Thr:{dust_iou_threshold:.2f}) (Filtered as OK)"
+            if surface_iou >= dust_iou_threshold:
+                verdict = f"SURFACE ({metric_name}:{surface_iou:.3f}>=Thr:{dust_iou_threshold:.3f}) (Filtered as OK)"
+            else:
+                verdict = "SURFACE (Filtered as OK)"
             verdict_color = (0, 200, 255)
         else:
             # 非灰塵 NG：若有 COV/IOU 數值也顯示與閾值的比較
             if surface_iou > 0 or (omit_image is not None and dust_check_fn is not None):
                 iou_cmp = ">=" if surface_iou >= dust_iou_threshold else "<"
-                verdict = f"NG ({metric_name}:{surface_iou:.3f}{iou_cmp}Thr:{dust_iou_threshold:.2f})"
+                if surface_iou >= dust_iou_threshold:
+                    verdict = f"NG (DustFlag=False; {metric_name}:{surface_iou:.3f}{iou_cmp}Thr:{dust_iou_threshold:.3f})"
+                else:
+                    verdict = f"NG ({metric_name}:{surface_iou:.3f}{iou_cmp}Thr:{dust_iou_threshold:.3f})"
             else:
                 verdict = "NG"
             verdict_color = (0, 0, 255)
@@ -1315,7 +1341,7 @@ class HeatmapManager:
             cv2.putText(panel2, "No OMIT", (10, panel2.shape[0] // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-        # --- Panel 3: Overlap (OMIT 底 + 紅 defect + 藍 dust + 紫交集) ---
+        # --- Panel 3: Overlap (OMIT 底 + 紅 defect + 黃 dust + 紫交集) ---
         if omit_image is not None and omit_sub is not None:
             panel3 = ensure_bgr(omit_sub).copy()
         else:
@@ -1377,7 +1403,7 @@ class HeatmapManager:
         else:
             verdict = "NG"; v_color = (0, 0, 255)
 
-        # COV 值（若有跑 dust_check + 有 defect + is_dust_detected）
+        # COV/IOU 值（若有跑 dust_check + 有 defect + is_dust_detected）
         cov_text = ""
         if (defect_mask_p3 is not None
                 and dust_mask_omit is not None
@@ -1388,9 +1414,13 @@ class HeatmapManager:
             else:
                 dust_cmp = dust_mask_omit
             inter = int(np.count_nonzero((defect_mask_p3 > 0) & (dust_cmp > 0)))
-            defect_area = max(1, int(np.count_nonzero(defect_mask_p3 > 0)))
-            cov_val = inter / defect_area
             metric_label = "COV" if dust_metric == "coverage" else "IOU"
+            if dust_metric == "coverage":
+                defect_area = max(1, int(np.count_nonzero(defect_mask_p3 > 0)))
+                cov_val = inter / defect_area
+            else:
+                union = int(np.count_nonzero((defect_mask_p3 > 0) | (dust_cmp > 0)))
+                cov_val = inter / max(1, union)
             cov_text = f" | {metric_label}={cov_val:.2f}"
 
         header_text_info = f"CV Edge: {side} | MaxDiff:{max_diff} | Area:{area}px{cov_text} | "
@@ -1451,6 +1481,7 @@ class HeatmapManager:
         threshold = float(getattr(edge_defect, 'patchcore_threshold', 0.0))
         area = int(edge_defect.area)
         is_cv_ok = bool(getattr(edge_defect, 'is_cv_ok', False))
+        is_dust = bool(getattr(edge_defect, 'is_suspected_dust_or_scratch', False))
         is_bomb = bool(getattr(edge_defect, 'is_bomb', False))
         bomb_code = getattr(edge_defect, 'bomb_defect_code', '')
         ok_reason = getattr(edge_defect, 'patchcore_ok_reason', '')
@@ -1553,6 +1584,8 @@ class HeatmapManager:
 
         panels = [panel_orig, panel_heatmap]
         labels = ["Original ROI (AOI)", "PatchCore Heatmap"]
+        dust_shield_metric_name = "COV" if dust_metric == "coverage" else "IOU"
+        dust_shield_value = None
 
         if omit_image is not None:
             try:
@@ -1616,7 +1649,7 @@ class HeatmapManager:
                         amap_vis = amap_vis * fm
 
                     try:
-                        metric_name = "COV" if dust_metric == "coverage" else "IOU"
+                        metric_name = dust_shield_metric_name
                         (has_real, _real_peak, overall_cov,
                          region_details, heatmap_binary, region_labels) = check_dust_per_region_fn(
                             dust_mask_panel,
@@ -1626,6 +1659,7 @@ class HeatmapManager:
                             iou_threshold=dust_iou_threshold,
                         )
                         is_dust_shield = not has_real
+                        dust_shield_value = overall_cov
                         roi_bgr_small = ensure_bgr(
                             cv2.resize(roi if roi is not None else np.zeros((tile_size, tile_size), dtype=np.uint8),
                                        (tile_size, tile_size))
@@ -1665,6 +1699,16 @@ class HeatmapManager:
         if is_bomb:
             verdict = f"BOMB: {bomb_code} (Filtered as OK)"
             verdict_color = (255, 0, 255)
+        elif is_dust:
+            if dust_shield_value is not None:
+                cmp = ">=" if dust_shield_value >= dust_iou_threshold else "<"
+                verdict = (
+                    f"DUST ({dust_shield_metric_name}:{dust_shield_value:.3f}"
+                    f"{cmp}Thr:{dust_iou_threshold:.3f}) (Filtered as OK)"
+                )
+            else:
+                verdict = "DUST (Filtered as OK)"
+            verdict_color = (0, 200, 255)
         elif is_cv_ok:
             reason_txt = ok_reason if ok_reason else ""
             verdict = f"PC OK ({reason_txt})" if reason_txt else "PC OK"
@@ -1813,6 +1857,8 @@ class HeatmapManager:
                                 tile_info=tile,
                                 score_threshold=active_threshold,
                                 iou_threshold=inferencer.config.dust_heatmap_iou_threshold,
+                                dust_metric=getattr(inferencer.config, 'dust_heatmap_metric', 'coverage'),
+                                dust_high_cov_threshold=getattr(inferencer.config, 'dust_high_cov_threshold', None),
                             )
                             saved_files.append(path)
                         except Exception as e:
