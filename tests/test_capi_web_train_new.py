@@ -234,3 +234,52 @@ def test_handle_train_new_status_not_found():
     h = _make_handler_with_server(server, "/api/train/new/status?job_id=missing")
     h._handle_train_new_status()
     assert h._sent_response[0]["status"] == 404
+
+
+# ── /api/train/new/tiles tests ────────────────────────────────────────────────
+
+def test_handle_train_new_tiles_returns_pool():
+    """正常情境：回傳 tile pool 清單。"""
+    server = MagicMock()
+    server.database.list_tile_pool.return_value = [
+        {"id": 1, "lighting": "G0F00000", "zone": "inner", "source": "ok",
+         "decision": "accept", "thumb_path": "/t/1.png"},
+    ]
+    h = _make_handler_with_server(server, "/api/train/new/tiles?job_id=j1&lighting=G0F00000")
+    h._handle_train_new_tiles()
+    body = json.loads(h._sent_response[0]["body"])
+    assert len(body["tiles"]) == 1
+    server.database.list_tile_pool.assert_called_with("j1", lighting="G0F00000")
+
+
+def test_handle_train_new_tiles_requires_params():
+    """缺少 lighting → 400。"""
+    server = MagicMock()
+    h = _make_handler_with_server(server, "/api/train/new/tiles?job_id=j1")  # missing lighting
+    h._handle_train_new_tiles()
+    assert h._sent_response[0]["status"] == 400
+
+
+def test_handle_train_new_tiles_decision_updates():
+    """正常情境：更新 tile decisions，回傳 ok + updated count。"""
+    server = MagicMock()
+    h = _make_handler_with_server(server, "/api/train/new/tiles/decision")
+    body_bytes = json.dumps({"job_id": "j1", "tile_ids": [1, 2, 3], "decision": "reject"}).encode()
+    h.headers.get = MagicMock(return_value=str(len(body_bytes)))
+    h.rfile = io.BytesIO(body_bytes)
+    h._handle_train_new_tiles_decision()
+    server.database.update_tile_decisions.assert_called_with("j1", [1, 2, 3], "reject")
+    resp_body = json.loads(h._sent_response[0]["body"])
+    assert resp_body["ok"] is True
+    assert resp_body["updated"] == 3
+
+
+def test_handle_train_new_tiles_decision_validates_decision():
+    """decision 不在 accept|reject → 400。"""
+    server = MagicMock()
+    h = _make_handler_with_server(server, "/api/train/new/tiles/decision")
+    body_bytes = json.dumps({"job_id": "j1", "tile_ids": [1], "decision": "maybe"}).encode()
+    h.headers.get = MagicMock(return_value=str(len(body_bytes)))
+    h.rfile = io.BytesIO(body_bytes)
+    h._handle_train_new_tiles_decision()
+    assert h._sent_response[0]["status"] == 400
