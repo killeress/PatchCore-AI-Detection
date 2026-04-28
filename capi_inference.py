@@ -3439,8 +3439,9 @@ class CAPIInferencer:
     ) -> List[EdgeDefect]:
         """Phase 6 fusion — fusion 後對 edge defect list 統一套 OMIT 灰塵屏蔽。
 
-        不分 source_inspector ("cv" / "patchcore") 一套邏輯，沿用既有
-        check_dust_or_scratch_feature + compute_dust_heatmap_iou。
+        依 source_inspector 使用與主路徑一致的空間判定：
+          - patchcore: check_dust_per_region，避免整張 OMIT dust 面積稀釋局部重疊。
+          - cv: 直接比對 CV 實際 defect mask 被 OMIT dust 覆蓋的比例。
 
         Args:
             defects: fusion 產出的 EdgeDefect list (bbox in panel 座標系)
@@ -3464,15 +3465,74 @@ class CAPIInferencer:
         metric = self.config.dust_heatmap_metric
         iou_thr = self.config.dust_heatmap_iou_threshold
 
+        def _crop_omit_canvas(origin_x: int, origin_y: int, width: int, height: int) -> np.ndarray:
+            """Crop OMIT with zero padding so mask/anomaly coordinates stay aligned."""
+            origin_x = int(origin_x)
+            origin_y = int(origin_y)
+            width = int(max(0, width))
+            height = int(max(0, height))
+            if omit_image.ndim == 3:
+                channels = omit_image.shape[2]
+                canvas = np.zeros((height, width, channels), dtype=omit_image.dtype)
+            else:
+                canvas = np.zeros((height, width), dtype=omit_image.dtype)
+
+            sx1 = max(0, origin_x)
+            sy1 = max(0, origin_y)
+            sx2 = min(ow, origin_x + width)
+            sy2 = min(oh, origin_y + height)
+            if sx2 > sx1 and sy2 > sy1:
+                dx1 = sx1 - origin_x
+                dy1 = sy1 - origin_y
+                dx2 = dx1 + (sx2 - sx1)
+                dy2 = dy1 + (sy2 - sy1)
+                canvas[dy1:dy2, dx1:dx2] = omit_image[sy1:sy2, sx1:sx2]
+            return canvas
+
+        def _as_gray_mask(mask: np.ndarray) -> np.ndarray:
+            if mask is not None and mask.ndim == 3:
+                return cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+            return mask
+
         for d in defects:
             bx, by, bw, bh = d.bbox
-            if bx >= ow or by >= oh or bw <= 0 or bh <= 0:
+            source = getattr(d, "source_inspector", "")
+
+            defect_anomaly = None
+            crop_origin = (int(bx), int(by))
+            crop_w = int(bw)
+            crop_h = int(bh)
+            cv_binary_mask = None
+
+            if source == "patchcore" and d.pc_anomaly_map is not None:
+                defect_anomaly = d.pc_anomaly_map.astype(np.float32)
+                crop_h, crop_w = defect_anomaly.shape[:2]
+                crop_origin = (int(bx), int(by))
+            elif source == "cv" and d.cv_filtered_mask is not None:
+                cv_mask_full = _as_gray_mask(d.cv_filtered_mask).astype(np.uint8)
+                mo_x, mo_y = getattr(d, "cv_mask_offset", (int(bx), int(by)))
+                crop_origin = (int(mo_x), int(mo_y))
+                crop_h, crop_w = cv_mask_full.shape[:2]
+
+                # Limit the shared ROI mask to this EdgeDefect's bbox, matching
+                # the non-fusion edge dust path and avoiding unrelated CV pixels.
+                cv_binary_mask = np.zeros_like(cv_mask_full, dtype=np.uint8)
+                rel_x1 = max(0, int(bx) - int(mo_x))
+                rel_y1 = max(0, int(by) - int(mo_y))
+                rel_x2 = min(crop_w, int(bx + bw) - int(mo_x))
+                rel_y2 = min(crop_h, int(by + bh) - int(mo_y))
+                if rel_x2 > rel_x1 and rel_y2 > rel_y1:
+                    cv_binary_mask[rel_y1:rel_y2, rel_x1:rel_x2] = \
+                        cv_mask_full[rel_y1:rel_y2, rel_x1:rel_x2]
+                defect_anomaly = cv_binary_mask.astype(np.float32)
+            else:
+                if bx >= ow or by >= oh or bw <= 0 or bh <= 0:
+                    continue
+
+            if crop_w <= 0 or crop_h <= 0:
                 continue
-            x2 = min(bx + bw, ow)
-            y2 = min(by + bh, oh)
-            if x2 <= bx or y2 <= by:
-                continue
-            omit_crop = omit_image[by:y2, bx:x2]
+
+            omit_crop = _crop_omit_canvas(crop_origin[0], crop_origin[1], crop_w, crop_h)
 
             is_dust, dust_mask, bright_ratio, detail = self.check_dust_or_scratch_feature(omit_crop)
             d.dust_bright_ratio = float(bright_ratio)
@@ -3482,24 +3542,69 @@ class CAPIInferencer:
             if not is_dust or dust_mask is None:
                 continue
 
-            # 取 defect 自己的「熱區 mask / map」與 OMIT dust_mask 比對重疊
-            # PC: pc_anomaly_map (bbox 範圍) — float anomaly
-            # CV: cv_filtered_mask (bbox 範圍) — uint8 binary
-            defect_anomaly = None
-            if getattr(d, "source_inspector", "") == "patchcore" and d.pc_anomaly_map is not None:
-                defect_anomaly = d.pc_anomaly_map.astype(np.float32)
-            elif getattr(d, "source_inspector", "") == "cv" and d.cv_filtered_mask is not None:
-                defect_anomaly = d.cv_filtered_mask.astype(np.float32)
-
             if defect_anomaly is None:
                 continue
 
-            metric_val, _ = self.compute_dust_heatmap_iou(
-                dust_mask, defect_anomaly, top_percent=top_pct, metric=metric,
-            )
-            if metric_val >= iou_thr:
-                d.is_suspected_dust_or_scratch = True
+            dust_mask = _as_gray_mask(dust_mask)
+
+            if source == "patchcore":
+                has_real_defect, _peak, overall_iou, region_details, heatmap_binary, _labels = \
+                    self.check_dust_per_region(
+                        dust_mask, defect_anomaly,
+                        top_percent=top_pct,
+                        metric=metric,
+                        iou_threshold=iou_thr,
+                    )
                 d.dust_mask = dust_mask
+                d.dust_heatmap_iou = overall_iou
+                d.dust_heatmap_binary = heatmap_binary
+                d.dust_region_details = region_details
+                if region_details:
+                    d.dust_region_max_cov = max(r["coverage"] for r in region_details)
+                dust_regions = [r for r in region_details if r["is_dust"]]
+                real_regions = [r for r in region_details if not r["is_dust"]]
+
+                if has_real_defect:
+                    detail += (
+                        f" PER_REGION: {len(real_regions)}real+"
+                        f"{len(dust_regions)}dust -> REAL_NG"
+                    )
+                else:
+                    d.is_suspected_dust_or_scratch = True
+                    detail += (
+                        f" PER_REGION: 0real+"
+                        f"{len(dust_regions)}dust -> DUST"
+                    )
+                d.dust_detail_text = detail
+            elif source == "cv" and cv_binary_mask is not None:
+                if dust_mask.shape != cv_binary_mask.shape:
+                    dust_cmp = cv2.resize(
+                        dust_mask,
+                        (cv_binary_mask.shape[1], cv_binary_mask.shape[0]),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                else:
+                    dust_cmp = dust_mask
+
+                defect_bool = cv_binary_mask > 0
+                dust_bool = dust_cmp > 0
+                intersection = int(np.count_nonzero(defect_bool & dust_bool))
+                metric_name = "COV" if metric == "coverage" else "IOU"
+                if metric == "coverage":
+                    defect_area = int(np.count_nonzero(defect_bool))
+                    metric_val = float(intersection / defect_area) if defect_area > 0 else 0.0
+                else:
+                    union = int(np.count_nonzero(defect_bool | dust_bool))
+                    metric_val = float(intersection / union) if union > 0 else 0.0
+
+                d.dust_mask = dust_cmp
+                d.dust_iou = metric_val
+                if metric_val >= iou_thr:
+                    d.is_suspected_dust_or_scratch = True
+                    detail += f" CV_{metric_name}:{metric_val:.3f}>={iou_thr:.3f} -> DUST"
+                else:
+                    detail += f" CV_{metric_name}:{metric_val:.3f}<{iou_thr:.3f} -> REAL_NG"
+                d.dust_detail_text = detail
 
         return defects
 
