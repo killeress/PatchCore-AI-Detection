@@ -95,3 +95,23 @@ def test_delete_inactive_bundle_removes_dir(tmp_path):
     delete_bundle(db, bid, server_config_path=sc)
     assert not bdir.exists()
     assert db.get_model_bundle(bid) is None
+
+
+def test_export_zip_streams(tmp_path):
+    import zipfile, io
+    from capi_model_registry import export_bundle_zip
+    bundle = tmp_path / "model" / "GN160-20260428"
+    bundle.mkdir(parents=True)
+    (bundle / "manifest.json").write_text('{"machine_id":"GN160"}')
+    (bundle / "machine_config.yaml").write_text("machine_id: GN160")
+    (bundle / "G0F00000-inner.pt").write_bytes(b"\x00" * 1024)
+
+    zip_bytes = export_bundle_zip(bundle, machine_id="GN160")
+    assert isinstance(zip_bytes, bytes)
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+        names = z.namelist()
+        assert any("manifest.json" in n for n in names)
+        assert any("machine_config.yaml" in n for n in names)
+        assert any(n.endswith(".pt") for n in names)
+        assert any("README.txt" in n for n in names)
