@@ -1306,9 +1306,32 @@ class HeatmapManager:
                     highlight = (0, 0, 255)
                 _blend_color_on_mask(panel1, vis_mask, highlight, alpha=0.55)
 
+        # Dust visualization focus: COV 判定只關心 CV defect 附近的重疊，
+        # 因此 OMIT dust 不整片蓋滿 ROI，避免表面雜訊淹沒重點。
+        dust_focus_mask = None
+        if defect_mask is not None and np.any(defect_mask > 0):
+            focus_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (51, 51))
+            dust_focus_mask = cv2.dilate(
+                (defect_mask > 0).astype(np.uint8) * 255,
+                focus_kernel,
+                iterations=1,
+            )
+        else:
+            dust_focus_mask = np.zeros(panel1.shape[:2], dtype=np.uint8)
+            rel_x = int(bx - rx1)
+            rel_y = int(by - ry1)
+            focus_pad = 50
+            fx1 = max(0, rel_x - focus_pad)
+            fy1 = max(0, rel_y - focus_pad)
+            fx2 = min(dust_focus_mask.shape[1], rel_x + bw + focus_pad)
+            fy2 = min(dust_focus_mask.shape[0], rel_y + bh + focus_pad)
+            if fx2 > fx1 and fy2 > fy1:
+                dust_focus_mask[fy1:fy2, fx1:fx2] = 255
+
         # --- Panel 2: OMIT + Dust Overlay ---
         # 變數保留給 B4 Panel 3 / B5 header 使用
         dust_mask_omit = None
+        dust_mask_focus = None
         omit_sub = None
         is_dust_detected = False
         if omit_image is not None:
@@ -1330,10 +1353,27 @@ class HeatmapManager:
                     if dust_mask_raw is not None:
                         if dust_mask_raw.ndim == 3:
                             dust_mask_raw = cv2.cvtColor(dust_mask_raw, cv2.COLOR_BGR2GRAY)
+                        if dust_mask_raw.shape != panel2.shape[:2]:
+                            dust_mask_raw = cv2.resize(
+                                dust_mask_raw,
+                                (panel2.shape[1], panel2.shape[0]),
+                                interpolation=cv2.INTER_NEAREST,
+                            )
                         dust_mask_omit = dust_mask_raw
+                        if dust_focus_mask is not None:
+                            focus = dust_focus_mask
+                            if focus.shape != dust_mask_omit.shape:
+                                focus = cv2.resize(
+                                    focus,
+                                    (dust_mask_omit.shape[1], dust_mask_omit.shape[0]),
+                                    interpolation=cv2.INTER_NEAREST,
+                                )
+                            dust_mask_focus = cv2.bitwise_and(dust_mask_omit, focus)
+                        else:
+                            dust_mask_focus = dust_mask_omit
                         if is_dust_detected:
-                            _blend_color_on_mask(panel2, dust_mask_omit,
-                                                  (0, 255, 255), alpha=0.5)
+                            _blend_color_on_mask(panel2, dust_mask_focus,
+                                                  (0, 255, 255), alpha=0.62)
                 except Exception as e:
                     print(f"⚠️ CV Fusion Panel 2 dust check 失敗: {e}")
         else:
@@ -1356,23 +1396,33 @@ class HeatmapManager:
                 iterations=1,
             )
 
-        # 畫紅色 defect
-        if defect_mask_p3 is not None:
-            _blend_color_on_mask(panel3, defect_mask_p3, (0, 0, 255), alpha=0.55)
-        # 畫黃色 dust（與 Panel 2 一致：is_dust_detected=True 且 mask 非 None 才畫）
-        if dust_mask_omit is not None and is_dust_detected:
-            _blend_color_on_mask(panel3, dust_mask_omit, (0, 255, 255), alpha=0.5)
-        # 畫紫色交集（純色覆蓋）— 需 defect + is_dust + dust_mask 三者都有
-        if (defect_mask_p3 is not None and dust_mask_omit is not None
+        dust_mask_for_viz = dust_mask_focus if dust_mask_focus is not None else dust_mask_omit
+        if (defect_mask_p3 is not None and dust_mask_for_viz is not None
                 and is_dust_detected):
             # 尺寸對齊
-            if dust_mask_omit.shape != panel3.shape[:2]:
-                dust_resized = cv2.resize(dust_mask_omit, (panel3.shape[1], panel3.shape[0]),
+            if dust_mask_for_viz.shape != panel3.shape[:2]:
+                dust_resized = cv2.resize(dust_mask_for_viz, (panel3.shape[1], panel3.shape[0]),
                                            interpolation=cv2.INTER_NEAREST)
             else:
-                dust_resized = dust_mask_omit
-            overlap = cv2.bitwise_and(defect_mask_p3, dust_resized)
-            panel3[overlap > 0] = (220, 0, 180)  # 紫
+                dust_resized = dust_mask_for_viz
+            defect_b = defect_mask_p3 > 0
+            dust_b = dust_resized > 0
+            overlap_b = defect_b & dust_b
+            only_defect = defect_b & ~dust_b
+            only_dust = dust_b & ~defect_b
+            color_layer = np.zeros_like(panel3)
+            color_layer[only_defect] = (0, 0, 255)    # red: CV only
+            color_layer[only_dust] = (0, 255, 255)    # yellow: OMIT dust only
+            color_layer[overlap_b] = (220, 0, 180)    # purple: CV ∩ OMIT dust
+            colored = (only_defect | only_dust | overlap_b)
+            panel3[colored] = cv2.addWeighted(
+                panel3, 0.45, color_layer, 0.55, 0
+            )[colored]
+            panel3[overlap_b] = (220, 0, 180)
+        else:
+            # No dust mask: still show the CV pixels so NG/OK(CV) cases have context.
+            if defect_mask_p3 is not None:
+                _blend_color_on_mask(panel3, defect_mask_p3, (0, 0, 255), alpha=0.55)
 
         panel_h = 400
         scale = panel_h / max(panel1.shape[0], 1)
@@ -1381,7 +1431,7 @@ class HeatmapManager:
         panel2_resized = cv2.resize(panel2, (panel_w, panel_h))
         panel3_resized = cv2.resize(panel3, (panel_w, panel_h))
         panels = [panel1_resized, panel2_resized, panel3_resized]
-        labels = ["CV Detection (band)", "OMIT + Dust", "Overlap"]
+        labels = ["CV Detection (band)", "OMIT Dust (near CV)", "Overlap (near CV)"]
 
         gap_w = 10
         gap = np.full((panel_h, gap_w, 3), 80, dtype=np.uint8)
@@ -1406,13 +1456,13 @@ class HeatmapManager:
         # COV/IOU 值（若有跑 dust_check + 有 defect + is_dust_detected）
         cov_text = ""
         if (defect_mask_p3 is not None
-                and dust_mask_omit is not None
+                and dust_mask_for_viz is not None
                 and is_dust_detected):
-            if dust_mask_omit.shape != defect_mask_p3.shape[:2]:
-                dust_cmp = cv2.resize(dust_mask_omit, defect_mask_p3.shape[::-1],
+            if dust_mask_for_viz.shape != defect_mask_p3.shape[:2]:
+                dust_cmp = cv2.resize(dust_mask_for_viz, defect_mask_p3.shape[::-1],
                                        interpolation=cv2.INTER_NEAREST)
             else:
-                dust_cmp = dust_mask_omit
+                dust_cmp = dust_mask_for_viz
             inter = int(np.count_nonzero((defect_mask_p3 > 0) & (dust_cmp > 0)))
             metric_label = "COV" if dust_metric == "coverage" else "IOU"
             if dust_metric == "coverage":
