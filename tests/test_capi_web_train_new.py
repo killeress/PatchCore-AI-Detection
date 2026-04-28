@@ -283,3 +283,48 @@ def test_handle_train_new_tiles_decision_validates_decision():
     h.rfile = io.BytesIO(body_bytes)
     h._handle_train_new_tiles_decision()
     assert h._sent_response[0]["status"] == 400
+
+
+# ── /api/train/new/start_training/<job_id> tests ──────────────────────────────
+
+def test_handle_train_new_start_training_404_no_job():
+    server = MagicMock()
+    server.database.get_training_job.return_value = None
+    h = _make_handler_with_server(server, "/api/train/new/start_training/missing")
+    h._handle_train_new_start_training()
+    assert h._sent_response[0]["status"] == 404
+
+
+def test_handle_train_new_start_training_409_wrong_state():
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1", "machine_id": "M", "state": "preprocess", "panel_paths": []
+    }
+    h = _make_handler_with_server(server, "/api/train/new/start_training/j1")
+    h._handle_train_new_start_training()
+    assert h._sent_response[0]["status"] == 409
+
+
+def test_handle_train_new_start_training_starts_thread(monkeypatch):
+    """驗證在 review state 時，handler 會 update state + spawn thread。"""
+    import threading
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1", "machine_id": "M", "state": "review", "panel_paths": ["/p"]
+    }
+
+    started_threads = []
+    real_thread = threading.Thread
+    def fake_thread(**kw):
+        t = real_thread(target=lambda: None, daemon=True)
+        started_threads.append(kw)
+        return t
+    monkeypatch.setattr("capi_web.threading.Thread", fake_thread)
+
+    h = _make_handler_with_server(server, "/api/train/new/start_training/j1")
+    h._handle_train_new_start_training()
+
+    server.database.update_training_job_state.assert_called_with("j1", "train")
+    assert len(started_threads) == 1
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["state"] == "train"

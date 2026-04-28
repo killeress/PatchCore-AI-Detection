@@ -367,6 +367,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/api/train/new/tiles/decision":
                 self._handle_train_new_tiles_decision()
                 return
+            elif path.startswith("/api/train/new/start_training/"):
+                self._handle_train_new_start_training()
+                return
             else:
                 self._send_404(path)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -4693,6 +4696,85 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         db = self._capi_server_instance.database
         db.update_tile_decisions(job_id, tile_ids, decision)
         self._send_json({"ok": True, "updated": len(tile_ids)})
+
+    def _handle_train_new_start_training(self):
+        """POST /api/train/new/start_training/<job_id>"""
+        job_id = self.path.rsplit("/", 1)[-1].split("?")[0]
+        db = self._capi_server_instance.database
+        job = db.get_training_job(job_id)
+        if not job:
+            self._send_json({"error": "job not found"}, status=404)
+            return
+        if job["state"] != "review":
+            self._send_json({"error": f"job state must be 'review', currently '{job['state']}'"}, status=409)
+            return
+
+        db.update_training_job_state(job_id, "train")
+
+        thread = threading.Thread(
+            target=CAPIWebHandler._train_new_training_worker,
+            args=(job_id, job["machine_id"], job["panel_paths"], self._capi_server_instance),
+            daemon=True, name=f"train_new-{job_id}",
+        )
+        thread.start()
+        self._send_json({"ok": True, "state": "train"})
+
+    @staticmethod
+    def _train_new_training_worker(job_id, machine_id, panel_paths, server_inst):
+        """背景 thread：跑 10 unit 訓練 + 註冊 bundle。"""
+        import traceback
+        from pathlib import Path as _Path
+        from capi_train_new import TrainingConfig, run_training_pipeline
+
+        db = server_inst.database
+        state = CAPIWebHandler._train_new_state
+
+        def log(msg):
+            with state["log_lock"]:
+                state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+        try:
+            cfg = TrainingConfig(
+                machine_id=machine_id,
+                panel_paths=[_Path(p) for p in panel_paths],
+                over_review_root=_Path("/aidata/capi_ai/datasets/over_review"),
+                output_root=_Path("model"),
+            )
+            bundle_dir = run_training_pipeline(
+                job_id=job_id, cfg=cfg, db=db,
+                gpu_lock=server_inst._gpu_lock,
+                log=log,
+            )
+
+            # 註冊到 model_registry
+            sizes = sum(p.stat().st_size for p in bundle_dir.glob("*.pt"))
+            manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+            inner_count = sum(v["train"] for k, v in manifest["tiles_per_unit"].items() if k.endswith("-inner"))
+            edge_count = sum(v["train"] for k, v in manifest["tiles_per_unit"].items() if k.endswith("-edge"))
+            ng_count = sum(v["ng"] for v in manifest["tiles_per_unit"].values())
+
+            db.register_model_bundle({
+                "machine_id": machine_id,
+                "bundle_path": str(bundle_dir),
+                "trained_at": manifest["trained_at"],
+                "panel_count": manifest["panel_count"],
+                "inner_tile_count": inner_count,
+                "edge_tile_count": edge_count,
+                "ng_tile_count": ng_count,
+                "bundle_size_bytes": sizes,
+                "job_id": job_id,
+            })
+
+            db.update_training_job_state(job_id, "completed", output_bundle=str(bundle_dir))
+            log(f"✓ 訓練完成，bundle={bundle_dir}")
+        except Exception as e:
+            traceback.print_exc()
+            db.update_training_job_state(job_id, "failed", error_message=str(e))
+            log(f"✗ 訓練失敗: {e}")
+        finally:
+            with state["lock"]:
+                if state["active_job_id"] == job_id:
+                    state["active_job_id"] = None
 
     def _handle_train_new_thumb(self):
         """GET /api/train/new/thumb/<rest_of_path>"""
