@@ -2494,6 +2494,94 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    # ------------------------------------------------------------------
+    # model_registry CRUD
+    # ------------------------------------------------------------------
+
+    def register_model_bundle(self, info: dict) -> int:
+        """新增一筆 model_registry 紀錄，is_active 預設為 0，回傳 rowid。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO model_registry
+                   (machine_id, bundle_path, trained_at, panel_count, inner_tile_count,
+                    edge_tile_count, ng_tile_count, bundle_size_bytes, is_active, job_id, notes)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (info["machine_id"], info["bundle_path"], info["trained_at"],
+                 info.get("panel_count"), info.get("inner_tile_count"),
+                 info.get("edge_tile_count"), info.get("ng_tile_count"),
+                 info.get("bundle_size_bytes"), 0, info.get("job_id"), info.get("notes")),
+            )
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+    def list_model_bundles(self, machine_id: str = None) -> list:
+        """列出 model_registry 紀錄，可選擇依 machine_id 過濾，依 trained_at DESC 排序。"""
+        sql = "SELECT * FROM model_registry"
+        args: tuple = ()
+        if machine_id:
+            sql += " WHERE machine_id = ?"
+            args = (machine_id,)
+        sql += " ORDER BY trained_at DESC"
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(sql, args)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def get_model_bundle(self, bundle_id: int) -> Optional[Dict]:
+        """依 id 查詢單筆 model_registry，找不到回傳 None。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM model_registry WHERE id = ?", (bundle_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
+        finally:
+            conn.close()
+
+    def set_bundle_active(self, bundle_id: int, active: bool) -> None:
+        """設定指定 bundle 的 is_active 狀態。"""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE model_registry SET is_active = ? WHERE id = ?",
+                (1 if active else 0, bundle_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def deactivate_other_bundles_for_machine(self, machine_id: str, except_id: int) -> None:
+        """將指定機種下除 except_id 外的所有 bundle 設為 is_active = 0。"""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE model_registry SET is_active = 0 WHERE machine_id = ? AND id != ?",
+                (machine_id, except_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_model_bundle(self, bundle_id: int) -> None:
+        """刪除指定 id 的 model_registry 紀錄。"""
+        conn = self._get_conn()
+        try:
+            conn.execute("DELETE FROM model_registry WHERE id = ?", (bundle_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     import tempfile

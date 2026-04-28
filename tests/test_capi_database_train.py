@@ -210,3 +210,40 @@ class TestTilePoolCRUD:
         assert len(db.list_tile_pool("j1")) == 1
         db.cleanup_tile_pool("j1")
         assert len(db.list_tile_pool("j1")) == 0
+
+
+class TestModelRegistryCRUD:
+    def test_model_registry_crud(self, tmp_path):
+        db = _make_db(tmp_path)
+        # register
+        bid = db.register_model_bundle({
+            "machine_id": "GN160", "bundle_path": "model/GN160-20260428",
+            "trained_at": "2026-04-28T15:30:45",
+            "panel_count": 5, "inner_tile_count": 2400,
+            "edge_tile_count": 900, "ng_tile_count": 150,
+            "bundle_size_bytes": 478_000_000, "job_id": "j1",
+        })
+        # list
+        bundles = db.list_model_bundles(machine_id="GN160")
+        assert len(bundles) == 1
+        assert bundles[0]["bundle_path"] == "model/GN160-20260428"
+        assert bundles[0]["is_active"] == 0
+        # activate
+        db.set_bundle_active(bid, True)
+        assert db.list_model_bundles()[0]["is_active"] == 1
+        # deactivate others when activating new
+        bid2 = db.register_model_bundle({
+            "machine_id": "GN160", "bundle_path": "model/GN160-20260501",
+            "trained_at": "2026-05-01T10:00:00", "panel_count": 5,
+            "inner_tile_count": 2500, "edge_tile_count": 950,
+            "ng_tile_count": 150, "bundle_size_bytes": 480_000_000, "job_id": "j2",
+        })
+        db.deactivate_other_bundles_for_machine("GN160", except_id=bid2)
+        db.set_bundle_active(bid2, True)
+        bundles = db.list_model_bundles(machine_id="GN160")
+        actives = [b for b in bundles if b["is_active"] == 1]
+        assert len(actives) == 1
+        assert actives[0]["id"] == bid2
+        # delete
+        db.delete_model_bundle(bid)
+        assert len(db.list_model_bundles(machine_id="GN160")) == 1
