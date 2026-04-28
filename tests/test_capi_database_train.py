@@ -173,3 +173,40 @@ class TestTrainingJobsCRUD:
         rowid = db.create_training_job(job_id="j_rowid", machine_id="M", panel_paths=[])
         assert isinstance(rowid, int)
         assert rowid > 0
+
+
+class TestTilePoolCRUD:
+    def test_tile_pool_crud(self, tmp_path):
+        db = _make_db(tmp_path)
+        db.create_training_job(job_id="j1", machine_id="M", panel_paths=[])
+        # bulk insert
+        tiles = [
+            {"lighting": "G0F00000", "zone": "inner", "source": "ok",
+             "source_path": "/t/1.png", "thumb_path": "/t/thumb_1.png"},
+            {"lighting": "G0F00000", "zone": "edge", "source": "ok",
+             "source_path": "/t/2.png", "thumb_path": "/t/thumb_2.png"},
+            {"lighting": "G0F00000", "zone": None, "source": "ng",
+             "source_path": "/t/n1.png", "thumb_path": "/t/thumb_n1.png"},
+        ]
+        ids = db.insert_tile_pool("j1", tiles)
+        assert len(ids) == 3
+        # query all
+        all_g0f = db.list_tile_pool("j1", lighting="G0F00000")
+        assert len(all_g0f) == 3
+        # query by zone
+        inner = db.list_tile_pool("j1", lighting="G0F00000", zone="inner")
+        assert len(inner) == 1
+        # update decision
+        db.update_tile_decisions("j1", [ids[0]], "reject")
+        rejected = db.list_tile_pool("j1", decision="reject")
+        assert len(rejected) == 1
+        assert rejected[0]["id"] == ids[0]
+
+    def test_cleanup_tile_pool(self, tmp_path):
+        db = _make_db(tmp_path)
+        db.create_training_job(job_id="j1", machine_id="M", panel_paths=[])
+        db.insert_tile_pool("j1", [{"lighting": "G0F00000", "zone": "inner",
+                                    "source": "ok", "source_path": "/t/1.png"}])
+        assert len(db.list_tile_pool("j1")) == 1
+        db.cleanup_tile_pool("j1")
+        assert len(db.list_tile_pool("j1")) == 0
