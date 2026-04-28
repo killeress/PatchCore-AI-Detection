@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import numpy as np
+import cv2
 from capi_preprocess import PreprocessConfig, TileResult, PanelPreprocessResult
 
 
@@ -55,3 +57,26 @@ def test_filter_panel_lighting_files_partial_panel():
         (base / "STANDARD_x.tif").write_bytes(b"x")
         result = filter_panel_lighting_files(base)
         assert set(result.keys()) == {"G0F00000", "STANDARD"}
+
+
+def test_detect_panel_polygon_simple_rect():
+    from capi_preprocess import detect_panel_polygon, PreprocessConfig
+    img = np.zeros((1000, 1500), np.uint8)
+    cv2.rectangle(img, (200, 100), (1300, 900), 200, -1)  # 白色 panel
+    bbox, poly = detect_panel_polygon(img, PreprocessConfig())
+    assert bbox is not None
+    x1, y1, x2, y2 = bbox
+    assert 195 <= x1 <= 215 and 95 <= y1 <= 115
+    assert 1295 <= x2 <= 1315 and 895 <= y2 <= 915
+    assert poly is not None
+    assert poly.shape == (4, 2)
+
+
+def test_detect_panel_polygon_disabled_returns_no_polygon():
+    from capi_preprocess import detect_panel_polygon, PreprocessConfig
+    img = np.zeros((500, 500), np.uint8)
+    cv2.rectangle(img, (100, 100), (400, 400), 200, -1)
+    cfg = PreprocessConfig(enable_panel_polygon=False)
+    bbox, poly = detect_panel_polygon(img, cfg)
+    assert bbox is not None
+    assert poly is None
