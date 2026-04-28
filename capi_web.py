@@ -210,6 +210,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_train_new_panels()
             elif path.startswith("/api/train/new/status"):
                 self._handle_train_new_status()
+            elif path == "/api/train/new/tiles":
+                self._handle_train_new_tiles()
+            elif path.startswith("/api/train/new/thumb/"):
+                self._handle_train_new_thumb()
             elif path == "/ric":
                 self._handle_ric_page(query, path)
             elif path == "/api/ric/report":
@@ -359,6 +363,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path == "/api/train/new/start":
                 self._handle_train_new_start()
+                return
+            elif path == "/api/train/new/tiles/decision":
+                self._handle_train_new_tiles_decision()
                 return
             else:
                 self._send_404(path)
@@ -4650,6 +4657,57 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "log_lines": log_lines,
         }
         self._send_json(resp)
+
+    def _handle_train_new_tiles(self):
+        """GET /api/train/new/tiles?job_id=X&lighting=Y"""
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        job_id = (qs.get("job_id") or [""])[0]
+        lighting = (qs.get("lighting") or [""])[0]
+        if not job_id or not lighting:
+            self._send_json({"error": "job_id and lighting required"}, status=400)
+            return
+        db = self._capi_server_instance.database
+        tiles = db.list_tile_pool(job_id, lighting=lighting)
+        self._send_json({"tiles": tiles})
+
+    def _handle_train_new_tiles_decision(self):
+        """POST /api/train/new/tiles/decision
+        body: {"job_id": "...", "tile_ids": [int, ...], "decision": "accept"|"reject"}
+        """
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON"}, status=400)
+            return
+
+        job_id = body.get("job_id")
+        tile_ids = body.get("tile_ids", [])
+        decision = body.get("decision")
+
+        if not job_id or not tile_ids or decision not in ("accept", "reject"):
+            self._send_json({"error": "job_id, tile_ids, decision required"}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        db.update_tile_decisions(job_id, tile_ids, decision)
+        self._send_json({"ok": True, "updated": len(tile_ids)})
+
+    def _handle_train_new_thumb(self):
+        """GET /api/train/new/thumb/<rest_of_path>"""
+        from urllib.parse import unquote
+        parts = self.path.split("/api/train/new/thumb/", 1)[1].split("?")[0]
+        parts = unquote(parts)
+        safe = Path(".tmp/train_new_thumbs").resolve()
+        target = (safe / parts).resolve()
+        if not str(target).startswith(str(safe)):
+            self._send_response(403, "")
+            return
+        if not target.exists():
+            self._send_response(404, "")
+            return
+        self._send_binary(str(target))
 
     def _handle_retrain_status(self):
         """GET /api/retrain/status"""
