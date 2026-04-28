@@ -251,3 +251,92 @@ def _point_segment_dist(p, a, b):
     t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / seg_sq))
     qx, qy = ax + t * dx, ay + t * dy
     return ((px - qx) ** 2 + (py - qy) ** 2) ** 0.5
+
+
+def preprocess_panel_image(
+    image_path: Path,
+    lighting: str,
+    config: PreprocessConfig,
+    reference_polygon: Optional[np.ndarray] = None,
+) -> PanelPreprocessResult:
+    """單張 lighting 圖完整前處理。
+
+    1. 讀圖
+    2. 偵測 panel polygon（或沿用 reference_polygon）
+    3. 走 bbox grid 切 tile，分類 zone
+    4. 回傳 PanelPreprocessResult
+    """
+    img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise FileNotFoundError(f"無法讀取圖片: {image_path}")
+
+    if reference_polygon is not None:
+        # 沿用 reference polygon；仍要跑 detect_panel_polygon 取 bbox
+        bbox, _ = detect_panel_polygon(img, config)
+        polygon = reference_polygon
+        polygon_failed = False
+    else:
+        bbox, polygon = detect_panel_polygon(img, config)
+        polygon_failed = config.enable_panel_polygon and polygon is None
+
+    if bbox is None:
+        return PanelPreprocessResult(
+            image_path=image_path,
+            lighting=lighting,
+            foreground_bbox=(0, 0, 0, 0),
+            panel_polygon=None,
+            tiles=[],
+            polygon_detection_failed=True,
+        )
+
+    tiles = _generate_tiles(img, bbox, polygon, config)
+    return PanelPreprocessResult(
+        image_path=image_path,
+        lighting=lighting,
+        foreground_bbox=bbox,
+        panel_polygon=polygon,
+        tiles=tiles,
+        polygon_detection_failed=polygon_failed,
+    )
+
+
+def _generate_tiles(
+    img: np.ndarray,
+    bbox: Tuple[int, int, int, int],
+    polygon: Optional[np.ndarray],
+    config: PreprocessConfig,
+) -> List[TileResult]:
+    """在 bbox 範圍內走格子，切 tile 並分類 zone。outside tile 直接略過。"""
+    x1, y1, x2, y2 = bbox
+    ts = config.tile_size
+
+    def positions(lo: int, hi: int) -> List[int]:
+        if hi - lo < ts:
+            return []
+        out = list(range(lo, hi - ts + 1, config.tile_stride))
+        if out and out[-1] != hi - ts:
+            out.append(hi - ts)
+        return out
+
+    xs = positions(x1, x2)
+    ys = positions(y1, y2)
+    tiles: List[TileResult] = []
+    tid = 0
+    for ty in ys:
+        for tx in xs:
+            tile_rect = (tx, ty, tx + ts, ty + ts)
+            zone, cov, dist, mask = classify_tile_zone(tile_rect, polygon, config)
+            if zone == "outside":
+                continue
+            tile_img = img[ty:ty + ts, tx:tx + ts].copy()
+            tiles.append(TileResult(
+                tile_id=tid,
+                x1=tx, y1=ty, x2=tx + ts, y2=ty + ts,
+                image=tile_img,
+                mask=mask,
+                coverage=cov,
+                zone=zone,
+                center_dist_to_edge=dist,
+            ))
+            tid += 1
+    return tiles
