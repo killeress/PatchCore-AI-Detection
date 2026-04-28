@@ -395,6 +395,7 @@ class CAPIInferencer:
         # 分發器：依架構選擇 v1（舊 5 模型）或 v2（新 C-10）
         if getattr(config, "is_new_architecture", False):
             self._dispatch_process_panel = self._process_panel_v2
+            self._model_cache_v2: Dict[tuple, Any] = {}
         else:
             self._dispatch_process_panel = self._process_panel_v1
 
@@ -5221,9 +5222,6 @@ class CAPIInferencer:
 
         zone: "inner" | "edge"
         """
-        if not hasattr(self, "_model_cache_v2"):
-            self._model_cache_v2: Dict[tuple, Any] = {}
-
         key = (machine_id, lighting, zone)
         if key not in self._model_cache_v2:
             path_raw = self.config.model_mapping[lighting][zone]

@@ -4691,6 +4691,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _train_new_preprocess_worker(job_id, machine_id, panel_paths, server_inst):
         """背景 thread：preprocess + 抽 NG → state=review。"""
         import traceback
+        import yaml as _yaml
         from pathlib import Path as _Path
         from capi_train_new import (
             TrainingConfig, preprocess_panels_to_pool, sample_ng_tiles,
@@ -4705,11 +4706,21 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
         try:
+            # 讀取 training 設定（含 over_review_root）
+            try:
+                _sc = _yaml.safe_load(open(server_inst.server_config_path, encoding="utf-8")) or {}
+                _training_cfg = _sc.get("training", {})
+            except Exception:
+                _training_cfg = {}
+            _over_review_root = _Path(_training_cfg.get(
+                "over_review_root", "/aidata/capi_ai/datasets/over_review"
+            ))
+
             thumb_root = _Path(".tmp/train_new_thumbs") / job_id
             cfg = TrainingConfig(
                 machine_id=machine_id,
                 panel_paths=[_Path(p) for p in panel_paths],
-                over_review_root=_Path("/aidata/capi_ai/datasets/over_review"),
+                over_review_root=_over_review_root,
             )
             pre_cfg = PreprocessConfig()
 
@@ -4841,6 +4852,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _train_new_training_worker(job_id, machine_id, panel_paths, server_inst):
         """背景 thread：跑 10 unit 訓練 + 註冊 bundle。"""
         import traceback
+        import yaml as _yaml
         from pathlib import Path as _Path
         from capi_train_new import TrainingConfig, run_training_pipeline
 
@@ -4852,10 +4864,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
         try:
+            # 讀取 training 設定（含 over_review_root）
+            try:
+                _sc = _yaml.safe_load(open(server_inst.server_config_path, encoding="utf-8")) or {}
+                _training_cfg = _sc.get("training", {})
+            except Exception:
+                _training_cfg = {}
+            _over_review_root = _Path(_training_cfg.get(
+                "over_review_root", "/aidata/capi_ai/datasets/over_review"
+            ))
+
             cfg = TrainingConfig(
                 machine_id=machine_id,
                 panel_paths=[_Path(p) for p in panel_paths],
-                over_review_root=_Path("/aidata/capi_ai/datasets/over_review"),
+                over_review_root=_over_review_root,
                 output_root=_Path("model"),
             )
             bundle_dir = run_training_pipeline(
