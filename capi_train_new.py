@@ -157,5 +157,110 @@ def sample_ng_tiles(
     return {"sampled": sampled, "missing_lightings": missing}
 
 
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """建立 hardlink，跨 filesystem 或不支援時退回 copy2。"""
+    if dst.exists():
+        return
+    try:
+        os.link(src, dst)
+    except (OSError, NotImplementedError):
+        shutil.copy2(src, dst)
+
+
+def stage_dataset(staging_dir: Path, train_paths: List[Path], ng_paths: List[Path]) -> None:
+    """為一個 (lighting, zone) unit 準備訓練 staging。
+
+    結構：
+      staging_dir/
+        train/         (個別 file 的 hardlink/copy)
+        test/anormal/  (個別 file)
+
+    為避免 anomalib Folder 對 symlink 行為不一致，用個別檔案 hardlink / copy
+    （不是整目錄 mklink）。
+    """
+    train_dir = staging_dir / "train"
+    ng_dir = staging_dir / "test" / "anormal"
+    train_dir.mkdir(parents=True, exist_ok=True)
+    ng_dir.mkdir(parents=True, exist_ok=True)
+
+    for src in train_paths:
+        dst = train_dir / src.name
+        _link_or_copy(src, dst)
+    for src in ng_paths:
+        dst = ng_dir / src.name
+        _link_or_copy(src, dst)
+
+
+def _import_anomalib():
+    """延後 import anomalib，方便 unit test monkeypatch。"""
+    from anomalib.data import Folder
+    from anomalib.deploy import ExportType
+    from anomalib.engine import Engine
+    from anomalib.models import Patchcore
+    try:
+        from anomalib.data.utils import ValSplitMode
+        val_mode = ValSplitMode.SAME_AS_TEST
+    except ImportError:
+        val_mode = "same_as_test"
+    return Folder, Patchcore, Engine, ExportType, val_mode
+
+
+def train_one_patchcore(
+    staging_dir: Path,
+    run_root: Path,
+    unit_label: str,
+    cfg: "TrainingConfig" = None,
+) -> Path:
+    """訓練一個 (lighting, zone) unit。回傳 model.pt 路徑。
+
+    mirrors tools/train_bga_all.py train_one() 的 anomalib 呼叫方式：
+    - engine.fit(datamodule=..., model=...)  # 無 model_path
+    - engine.export(model=..., export_type=...)  # 無 model_path
+    - default_root_dir 控制輸出路徑
+    """
+    cfg = cfg or TrainingConfig(
+        machine_id="?", panel_paths=[], over_review_root=Path("?"),
+    )
+    Folder, Patchcore, Engine, ExportType, val_mode = _import_anomalib()
+
+    if run_root.exists():
+        shutil.rmtree(run_root, ignore_errors=True)
+    run_root.mkdir(parents=True, exist_ok=True)
+
+    datamodule = Folder(
+        name=f"unit_{unit_label}",
+        root=staging_dir,
+        normal_dir="train",
+        abnormal_dir="test/anormal",
+        train_batch_size=cfg.batch_size,
+        eval_batch_size=cfg.batch_size,
+        num_workers=0,
+        val_split_mode=val_mode,
+    )
+    try:
+        datamodule.image_size = cfg.image_size
+    except Exception:
+        pass
+
+    model = Patchcore(coreset_sampling_ratio=cfg.coreset_ratio)
+    model.pre_processor = Patchcore.configure_pre_processor(image_size=cfg.image_size)
+
+    engine = Engine(
+        max_epochs=cfg.max_epochs,
+        default_root_dir=str(run_root),
+        callbacks=None,
+    )
+
+    engine.fit(datamodule=datamodule, model=model)
+    engine.export(model=model, export_type=ExportType.TORCH)
+
+    candidates = list(run_root.rglob("weights/torch/model.pt"))
+    if not candidates:
+        candidates = list(run_root.rglob("model.pt"))
+    if not candidates:
+        raise RuntimeError(f"訓練後找不到 model.pt under {run_root}")
+    return candidates[0]
+
+
 def run_training_pipeline(*args, **kwargs):
-    raise NotImplementedError("Phase 4.4-4.6")
+    raise NotImplementedError("Phase 4.5-4.6")
