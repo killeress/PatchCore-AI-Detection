@@ -9,7 +9,7 @@ import yaml
 from capi_config import CAPIConfig
 
 
-def test_capi_config_legacy_yaml_no_machine_id():
+def test_capi_config_legacy_yaml_default_machine_id():
     cfg_data = {
         "model_path": "model.pt",
         "model_mapping": {"G0F00000": "g.pt"},
@@ -19,7 +19,7 @@ def test_capi_config_legacy_yaml_no_machine_id():
         yaml.dump(cfg_data, f)
         path = f.name
     cfg = CAPIConfig.from_yaml(path)
-    assert cfg.machine_id is None
+    assert cfg.machine_id == "CAPI_3F"
     assert cfg.is_new_architecture is False
     assert cfg.model_mapping == {"G0F00000": "g.pt"}
     Path(path).unlink()
@@ -45,4 +45,20 @@ def test_capi_config_new_arch_yaml():
     assert cfg.is_new_architecture is True
     assert cfg.edge_threshold_px == 768
     assert cfg.model_mapping["G0F00000"]["inner"] == "g_inner.pt"
+    Path(path).unlink()
+
+
+def test_capi_config_machine_id_alone_is_not_new_arch():
+    """machine_id 存在但 model_mapping 為 flat dict → 仍視為 legacy。"""
+    cfg_data = {
+        "machine_id": "SOME_MACHINE",
+        "model_mapping": {"G0F00000": "g.pt"},
+        "threshold_mapping": {"G0F00000": 0.75},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        yaml.dump(cfg_data, f)
+        path = f.name
+    cfg = CAPIConfig.from_yaml(path)
+    assert cfg.machine_id == "SOME_MACHINE"
+    assert cfg.is_new_architecture is False  # model_mapping 是 flat
     Path(path).unlink()
