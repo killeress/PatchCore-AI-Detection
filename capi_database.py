@@ -2426,6 +2426,74 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    # ------------------------------------------------------------------
+    # training_tile_pool CRUD
+    # ------------------------------------------------------------------
+
+    def insert_tile_pool(self, job_id: str, tiles: list) -> list:
+        """批次插入 tile pool 紀錄，回傳各列的 lastrowid 清單。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            ids = []
+            for t in tiles:
+                cur.execute(
+                    """INSERT INTO training_tile_pool
+                       (job_id, lighting, zone, source, source_path, thumb_path)
+                       VALUES (?,?,?,?,?,?)""",
+                    (job_id, t["lighting"], t.get("zone"), t["source"],
+                     t["source_path"], t.get("thumb_path")),
+                )
+                ids.append(cur.lastrowid)
+            conn.commit()
+            return ids
+        finally:
+            conn.close()
+
+    def list_tile_pool(self, job_id: str, lighting: str = None, zone: str = None,
+                       source: str = None, decision: str = None) -> list:
+        """查詢 tile pool，支援 lighting / zone / source / decision 任意組合過濾。"""
+        sql = "SELECT * FROM training_tile_pool WHERE job_id = ?"
+        args = [job_id]
+        for fld, val in [("lighting", lighting), ("zone", zone),
+                         ("source", source), ("decision", decision)]:
+            if val is not None:
+                sql += f" AND {fld} = ?"
+                args.append(val)
+        sql += " ORDER BY id"
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(sql, tuple(args))
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def update_tile_decisions(self, job_id: str, tile_ids: list, decision: str) -> None:
+        """批次更新指定 tile id 清單的 decision 欄位（空清單時為 no-op）。"""
+        if not tile_ids:
+            return
+        placeholders = ",".join("?" * len(tile_ids))
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                f"UPDATE training_tile_pool SET decision = ? WHERE job_id = ? AND id IN ({placeholders})",
+                (decision, job_id, *tile_ids),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def cleanup_tile_pool(self, job_id: str) -> None:
+        """刪除 job 的所有 tile pool 紀錄（thumb 檔不刪，由 caller 處理）。"""
+        conn = self._get_conn()
+        try:
+            conn.execute("DELETE FROM training_tile_pool WHERE job_id = ?", (job_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     import tempfile
