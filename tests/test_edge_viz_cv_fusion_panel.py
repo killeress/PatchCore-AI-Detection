@@ -132,7 +132,7 @@ class TestCVFusionPanel1Detection:
 
 
 class TestCVFusionPanel2OMITDust:
-    """Panel 2: OMIT 同 ROI + 藍色 dust overlay"""
+    """Panel 2: OMIT 同 ROI + CV 附近的黃色 dust overlay"""
 
     def test_panel2_shows_omit_gray(self, tmp_path):
         """Panel 2 中心像素應反映 OMIT 原圖灰度（180），不是黑 placeholder (40)"""
@@ -155,14 +155,13 @@ class TestCVFusionPanel2OMITDust:
         assert 120 < px[0] < 200 and 120 < px[1] < 200 and 120 < px[2] < 200, \
             f"Panel 2 應為灰 OMIT (~180)，實 {px.tolist()}"
 
-    def test_panel2_has_blue_dust_overlay(self, tmp_path):
-        """dust_check_fn 回傳 mask + is_dust=True 時 Panel 2 對應區塊偏藍"""
+    def test_panel2_has_focused_yellow_dust_overlay(self, tmp_path):
+        """dust mask 很大時，Panel 2 只在 CV defect 附近顯示黃色 dust"""
         omit = np.full((2000, 2000), 180, dtype=np.uint8)
 
         def stub_dust(img):
             h, w = img.shape[:2]
-            m = np.zeros((h, w), dtype=np.uint8)
-            m[h // 2 - 30:h // 2 + 30, w // 2 - 30:w // 2 + 30] = 255
+            m = np.full((h, w), 255, dtype=np.uint8)
             return True, m, 0.1, ""
 
         ed = _make_cv_fusion_defect()
@@ -180,12 +179,17 @@ class TestCVFusionPanel2OMITDust:
         p2_cx = panel_w_approx + panel_w_approx // 2 + 5
         p2_cy = header_h + panel_h // 2
         px = out[p2_cy, p2_cx]
-        assert px[0] > px[2] + 30, \
-            f"Panel 2 dust 區應偏藍 B>R+30，實 B={px[0]} R={px[2]}"
+        assert px[1] > px[0] + 30 and px[2] > px[0] + 30, \
+            f"Panel 2 CV 附近 dust 區應偏黃 G/R>B+30，實 BGR={px.tolist()}"
+
+        p2_left = panel_w_approx + 10
+        far_px = out[header_h + 20, p2_left + 20]
+        assert abs(int(far_px[0]) - int(far_px[1])) < 15 and abs(int(far_px[1]) - int(far_px[2])) < 15, \
+            f"Panel 2 遠離 CV 的 dust 不應整片上色，實 BGR={far_px.tolist()}"
 
 
 class TestCVFusionPanel3Overlap:
-    """Panel 3: OMIT 底 + 紅 defect + 藍 dust + 紫色交集"""
+    """Panel 3: OMIT 底 + 紅 defect + 黃 dust + 紫色交集"""
 
     def test_panel3_has_purple_intersection(self, tmp_path):
         """defect mask 與 dust mask 交集處出現紫色像素 (B 高 R 高 G 低)"""
@@ -218,7 +222,7 @@ class TestCVFusionPanel3Overlap:
         # 紫色像素：B > 150, G < 80, R > 150
         purple = (panel3[:, :, 0] > 150) & (panel3[:, :, 1] < 80) & (panel3[:, :, 2] > 150)
         assert np.sum(purple) > 5, \
-            f"Panel 3 應有紫色像素 (紅∩藍交集)，實 {np.sum(purple)} px"
+            f"Panel 3 應有紫色像素 (紅∩黃交集)，實 {np.sum(purple)} px"
 
 
 class TestCVFusionHeader:
