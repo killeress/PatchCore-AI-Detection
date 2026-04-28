@@ -133,7 +133,7 @@ def main():
         dm = cv2.resize(dm, (tile_w, tile_h), interpolation=cv2.INTER_NEAREST)
 
     # ================================================================
-    # Per-Region Check (with residual sub-peak rescue)
+    # Per-Region Check
     # ================================================================
     is_dust_full, dust_mask_full, _, detail_full = inferencer.check_dust_or_scratch_feature(omit_crop)
     if is_dust_full and anomaly_map is not None:
@@ -145,11 +145,10 @@ def main():
                 iou_threshold=config.dust_heatmap_iou_threshold,
             )
         print("=" * 60)
-        print(f"PER_REGION (with residual rescue): has_real={has_real}")
+        print(f"PER_REGION: has_real={has_real}")
         for r in region_details:
-            res_info = f" residual={r.get('residual_ratio', 0):.2f}" if r.get('residual_ratio', 0) > 0 else ""
             print(f"  Region {r['label_id']}: area={r['area']} cov={r['coverage']:.3f} "
-                  f"peak_in_dust={r['peak_in_dust']} is_dust={r['is_dust']}{res_info}")
+                  f"peak_in_dust={r['peak_in_dust']} is_dust={r['is_dust']}")
         verdict_pr = "REAL_NG" if has_real else "DUST"
         print(f"  -> {verdict_pr}")
         print("=" * 60)
@@ -249,7 +248,7 @@ def main():
     print("=" * 60)
 
     # ================================================================
-    # Per-Region Residual Rescue (NEW)
+    # Per-Region Verdict
     # ================================================================
     is_dust_full, dust_mask_full, _, _ = inferencer.check_dust_or_scratch_feature(omit_crop)
     pr_has_real = False
@@ -284,8 +283,8 @@ def main():
     hm_rgb = cv2.cvtColor(cv2.applyColorMap(norm, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
 
     fig, axes = plt.subplots(3, 4, figsize=(24, 18))
-    fig.suptitle("Dust Filtering Debug: Two-Stage + Residual Rescue\n"
-                 "Row1: Heatmap & Two-Stage | Row2: Zone Zoom | Row3: Residual Rescue (NEW)",
+    fig.suptitle("Dust Filtering Debug: Two-Stage + Per-Region\n"
+                 "Row1: Heatmap & Two-Stage | Row2: Zone Zoom | Row3: Per-Region Verdict",
                  fontsize=13, fontweight="bold")
 
     # ---- Row 1: Heatmap + Two-Stage ----
@@ -372,7 +371,7 @@ def main():
     for zi in range(len(zones), 4):
         axes[1, zi].axis("off")
 
-    # ---- Row 3: Residual Rescue (NEW) ----
+    # ---- Row 3: Per-Region Verdict ----
     # Col 0: Original heatmap
     ax = axes[2, 0]
     ax.imshow(hm_rgb)
@@ -410,40 +409,29 @@ def main():
         ax.axis("off")
         ax.set_title("Residual Heatmap")
 
-    # Col 3: Residual Rescue Verdict
+    # Col 3: PER_REGION Verdict
     ax = axes[2, 3]
     ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-    ax.text(0.5, 0.90, "Residual Rescue Check", fontsize=14, ha="center", fontweight="bold")
+    ax.text(0.5, 0.90, "PER_REGION Verdict", fontsize=14, ha="center", fontweight="bold")
     if pr_region_details:
         y_pos = 0.75
         for r in pr_region_details:
-            res_r = r.get('residual_ratio', 0)
-            res_thr = config.dust_residual_ratio
-            tag = "RESCUED -> REAL_NG" if (not r['is_dust'] and r['peak_in_dust']) else \
-                  ("DUST" if r['is_dust'] else "REAL_NG")
-            tag_color = "green" if "REAL" in tag else "orange"
+            tag = "DUST" if r['is_dust'] else "REAL_NG"
+            tag_color = "orange" if r['is_dust'] else "red"
             ax.text(0.5, y_pos,
                     f"Region {r['label_id']}: cov={r['coverage']:.2f}  "
                     f"peak_in_dust={r['peak_in_dust']}",
                     fontsize=10, ha="center")
             y_pos -= 0.08
-            if res_r > 0:
-                ax.text(0.5, y_pos,
-                        f"residual={res_r:.2f} (thr={res_thr})  -> {tag}",
-                        fontsize=11, ha="center", fontweight="bold", color=tag_color)
-            else:
-                ax.text(0.5, y_pos, f"-> {tag}",
-                        fontsize=11, ha="center", fontweight="bold", color=tag_color)
+            ax.text(0.5, y_pos, f"-> {tag}",
+                    fontsize=11, ha="center", fontweight="bold", color=tag_color)
             y_pos -= 0.12
     pr_verdict = "REAL_NG" if pr_has_real else "DUST(OK)"
     pr_color = "red" if pr_has_real else "orange"
     ax.text(0.5, 0.25, f"Final: {pr_verdict}", fontsize=26, ha="center",
             fontweight="bold", color=pr_color)
-    if pr_has_real and not real_features:
-        ax.text(0.5, 0.08, "Two-Stage missed it,\nResidual Rescue caught it!",
-                fontsize=11, ha="center", color="green", fontweight="bold")
     ax.axis("off")
-    ax.set_title("Residual Rescue Verdict (NEW)")
+    ax.set_title("PER_REGION Verdict")
 
     plt.tight_layout()
     out_dir = project_root / "test_dust_comparison_output"

@@ -599,12 +599,11 @@ class HeatmapManager:
                 is_dust_feat = feat.get("is_dust", False)
                 color = (0, 200, 0) if is_dust_feat else (0, 0, 255)
                 marker_r = max(8, int(feat.get("area", 5) ** 0.5 * 2))
-                # Draw on both Original and Heatmap panels
-                for panel in [orig, heatmap_panel]:
-                    cv2.circle(panel, (dx, dy), marker_r, color, 2)
-                    label = "D" if is_dust_feat else "R"
-                    cv2.putText(panel, label, (dx + marker_r + 3, dy + 5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                # 只畫在 Heatmap panel；Original 保持乾淨
+                cv2.circle(heatmap_panel, (dx, dy), marker_r, color, 2)
+                label = "D" if is_dust_feat else "R"
+                cv2.putText(heatmap_panel, label, (dx + marker_r + 3, dy + 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         # --- Panel 3 & 4 & 5: OMIT Crop & Dust Mask & IOU Debug (如果有 tile_info) ---
         has_omit = False
