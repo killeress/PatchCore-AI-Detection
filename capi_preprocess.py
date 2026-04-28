@@ -208,18 +208,19 @@ def classify_tile_zone(
         - polygon=None → fallback ("inner", 1.0, inf, None)
     """
     x1, y1, x2, y2 = tile_rect
-    tile_size = max(x2 - x1, y2 - y1)
+    tile_w = x2 - x1
+    tile_h = y2 - y1
 
     if polygon is None:
         return "inner", 1.0, float("inf"), None
 
     # tile 內生成 polygon mask
-    mask = np.zeros((tile_size, tile_size), np.uint8)
+    mask = np.zeros((tile_h, tile_w), np.uint8)
     shifted = polygon.copy()
     shifted[:, 0] -= x1
     shifted[:, 1] -= y1
     cv2.fillPoly(mask, [shifted.astype(np.int32)], 255)
-    coverage = float((mask > 0).sum()) / (tile_size * tile_size)
+    coverage = float((mask > 0).sum()) / (tile_w * tile_h)
 
     if coverage < config.coverage_min:
         return "outside", coverage, 0.0, mask
