@@ -64,3 +64,38 @@ def test_preprocess_panels_to_pool_writes_tiles(tmp_path):
     first_tile = db.tiles[0]
     assert Path(first_tile["source_path"]).exists()
     assert Path(first_tile["thumb_path"]).exists()
+
+
+def test_sample_ng_tiles(tmp_path):
+    from capi_train_new import sample_ng_tiles
+
+    # 模擬 over_review 結構：snapshot/true_ng/<lighting>/crop/<files>.png
+    or_root = tmp_path / "over_review"
+    snap_a = or_root / "20260415_104812" / "true_ng"
+    for lighting in ["G0F00000", "R0F00000", "STANDARD"]:
+        crop_dir = snap_a / lighting / "crop"
+        crop_dir.mkdir(parents=True)
+        for i in range(50):
+            (crop_dir / f"img_{i}.png").write_bytes(b"x")
+
+    class MockDB:
+        def __init__(self): self.tiles = []
+        def insert_tile_pool(self, job_id, tiles):
+            self.tiles.extend(tiles)
+            return list(range(len(tiles)))
+
+    db = MockDB()
+    stats = sample_ng_tiles(
+        job_id="j1", over_review_root=or_root, db=db,
+        per_lighting=10, log=lambda m: None,
+    )
+    assert stats["sampled"] == 30  # 3 lighting × 10
+    assert set(stats["missing_lightings"]) == {"W0F00000", "WGF50500"}
+    by_lighting = {}
+    for t in db.tiles:
+        by_lighting.setdefault(t["lighting"], 0)
+        by_lighting[t["lighting"]] += 1
+    assert by_lighting == {"G0F00000": 10, "R0F00000": 10, "STANDARD": 10}
+    # NG zone 應為 None（不分 inner/edge）
+    assert all(t["zone"] is None for t in db.tiles)
+    assert all(t["source"] == "ng" for t in db.tiles)

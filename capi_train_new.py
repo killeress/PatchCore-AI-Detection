@@ -119,8 +119,42 @@ def preprocess_panels_to_pool(
     }
 
 
-def sample_ng_tiles(*args, **kwargs):
-    raise NotImplementedError("Phase 4.3")
+def sample_ng_tiles(
+    job_id: str,
+    over_review_root: Path,
+    db,
+    per_lighting: int = NG_TILES_PER_LIGHTING,
+    log: Callable[[str], None] = print,
+) -> dict:
+    """從 over_review/{*}/true_ng/{lighting}/crop/ 隨機抽 NG tile。"""
+    if not over_review_root.exists():
+        log(f"⚠ over_review 不存在: {over_review_root}，跳過 NG 抽樣")
+        return {"sampled": 0, "missing_lightings": list(LIGHTINGS)}
+
+    sampled = 0
+    missing = []
+    snapshots = [d for d in over_review_root.iterdir() if d.is_dir() and (d / "true_ng").exists()]
+
+    for lighting in LIGHTINGS:
+        all_files = []
+        for snap in snapshots:
+            crop_dir = snap / "true_ng" / lighting / "crop"
+            if crop_dir.exists():
+                all_files.extend(crop_dir.glob("*.png"))
+        if not all_files:
+            missing.append(lighting)
+            log(f"⚠ {lighting}: 無 NG 樣本")
+            continue
+        chosen = random.sample(all_files, min(per_lighting, len(all_files)))
+        records = [{
+            "lighting": lighting, "zone": None, "source": "ng",
+            "source_path": str(p), "thumb_path": str(p),  # NG 用原圖當縮圖
+        } for p in chosen]
+        db.insert_tile_pool(job_id, records)
+        sampled += len(records)
+        log(f"  ✓ {lighting}: 抽 {len(chosen)} 個 NG")
+
+    return {"sampled": sampled, "missing_lightings": missing}
 
 
 def run_training_pipeline(*args, **kwargs):
