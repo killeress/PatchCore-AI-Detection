@@ -208,6 +208,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_train_new_progress_page()
             elif path.startswith("/train/new/review/"):
                 self._handle_train_new_review_page()
+            elif path.startswith("/train/new/done/"):
+                self._handle_train_new_done_page()
             elif path == "/retrain":
                 self._handle_retrain_page()
             elif path == "/api/retrain/status":
@@ -4431,6 +4433,43 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
         template = self.jinja_env.get_template("train_new/step3_review.html")
         html = template.render(request_path="/train/new/review", job_id=job_id)
+        self._send_response(200, html)
+
+    def _handle_train_new_done_page(self):
+        """GET /train/new/done/<job_id>"""
+        job_id = self.path.split("/")[-1]
+        db = self._capi_server_instance.database
+        job = db.get_training_job(job_id)
+        if not job or job["state"] != "completed":
+            self._send_response(404, "Job not done")
+            return
+
+        bundle_path = Path(job["output_bundle"])
+        try:
+            manifest = json.loads((bundle_path / "manifest.json").read_text(encoding="utf-8"))
+            thresholds = json.loads((bundle_path / "thresholds.json").read_text(encoding="utf-8"))
+        except Exception as e:
+            self._send_response(500, f"Failed to read manifest/thresholds: {str(e)}")
+            return
+
+        units = []
+        for unit_label, tile_info in manifest["tiles_per_unit"].items():
+            lighting, zone = unit_label.rsplit("-", 1)
+            size_bytes = manifest["model_files"][unit_label]["size_bytes"]
+            units.append((unit_label, {
+                "lighting": lighting, "zone": zone,
+                "train": tile_info["train"], "ng": tile_info["ng"],
+                "threshold": thresholds.get(lighting, {}).get(zone, 0.0),
+                "size_mb": size_bytes / 1e6,
+            }))
+
+        template = self.jinja_env.get_template("train_new/step5_done.html")
+        html = template.render(
+            request_path="/train/new/done",
+            machine_id=job["machine_id"],
+            bundle_path=str(bundle_path),
+            job_id=job_id, units=units,
+        )
         self._send_response(200, html)
 
     def _handle_retrain_page(self):
