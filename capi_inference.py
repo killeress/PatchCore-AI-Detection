@@ -3145,6 +3145,7 @@ class CAPIInferencer:
         omit_overexposed: bool = False,
         otsu_bounds: Optional[Tuple[int, int, int, int]] = None,
         collapse_to_representative: bool = True,
+        group_cv_band: bool = False,
     ) -> Tuple[List[EdgeDefect], Dict[str, Any]]:
         """Phase 6 — AOI 邊緣 CV+PatchCore 空間分權 Fusion。
 
@@ -3256,6 +3257,90 @@ class CAPIInferencer:
         )
         cv_defects_kept: List[EdgeDefect] = []
         polygon_int = panel_polygon.astype(np.int32)
+        cv_mask_offset = cv_stats.get("roi_offset", (rx1, ry1)) if cv_stats else (rx1, ry1)
+        cv_mask_all = cv_stats.get("filtered_mask") if cv_stats else None
+        cv_band_mask = None
+        if cv_mask_all is not None:
+            cv_mask_all = np.asarray(cv_mask_all)
+            if cv_mask_all.ndim == 3:
+                cv_mask_all = cv2.cvtColor(cv_mask_all, cv2.COLOR_BGR2GRAY)
+            cv_mask_all = cv_mask_all.astype(np.uint8)
+            if cv_mask_all.shape[:2] == band_mask.shape[:2]:
+                cv_band_mask = cv2.bitwise_and(cv_mask_all, band_mask)
+            else:
+                band_resized = cv2.resize(
+                    band_mask,
+                    (cv_mask_all.shape[1], cv_mask_all.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                cv_band_mask = cv2.bitwise_and(cv_mask_all, band_resized)
+
+        def _defect_intersects_cv_band(defect: EdgeDefect) -> bool:
+            cx, cy = defect.center
+            roi_cx = int(cx - rx1)
+            roi_cy = int(cy - ry1)
+            center_in_band = bool(0 <= roi_cx < tile_size and 0 <= roi_cy < tile_size
+                                  and band_mask[roi_cy, roi_cx] > 0)
+            if cv_band_mask is None:
+                return center_in_band
+
+            bx, by, bw, bh = defect.bbox
+            mo_x, mo_y = cv_mask_offset
+            lx1 = max(0, int(bx - mo_x))
+            ly1 = max(0, int(by - mo_y))
+            lx2 = min(cv_band_mask.shape[1], int(bx + bw - mo_x))
+            ly2 = min(cv_band_mask.shape[0], int(by + bh - mo_y))
+            if lx2 <= lx1 or ly2 <= ly1:
+                return center_in_band
+            return bool(center_in_band or np.any(cv_band_mask[ly1:ly2, lx1:lx2] > 0))
+
+        def _make_grouped_cv_band_defect(src_defects: List[EdgeDefect]) -> Optional[EdgeDefect]:
+            if not src_defects:
+                return None
+
+            if cv_band_mask is not None and np.any(cv_band_mask > 0):
+                ys, xs = np.where(cv_band_mask > 0)
+                x1 = int(xs.min())
+                y1 = int(ys.min())
+                x2 = int(xs.max()) + 1
+                y2 = int(ys.max()) + 1
+                mo_x, mo_y = cv_mask_offset
+                bbox = (int(mo_x + x1), int(mo_y + y1), int(x2 - x1), int(y2 - y1))
+                area = int(np.count_nonzero(cv_band_mask))
+                center = (int(mo_x + round(float(xs.mean()))),
+                          int(mo_y + round(float(ys.mean()))))
+                band_mask_for_defect = cv_band_mask
+            else:
+                x1 = min(int(d.bbox[0]) for d in src_defects)
+                y1 = min(int(d.bbox[1]) for d in src_defects)
+                x2 = max(int(d.bbox[0] + d.bbox[2]) for d in src_defects)
+                y2 = max(int(d.bbox[1] + d.bbox[3]) for d in src_defects)
+                bbox = (x1, y1, x2 - x1, y2 - y1)
+                area = int(sum(int(d.area) for d in src_defects))
+                center = (int(round(sum(d.center[0] for d in src_defects) / len(src_defects))),
+                          int(round(sum(d.center[1] for d in src_defects) / len(src_defects))))
+                band_mask_for_defect = None
+
+            max_diff = max((int(d.max_diff) for d in src_defects), default=0)
+            grouped = EdgeDefect(
+                side="aoi_edge",
+                area=area,
+                bbox=bbox,
+                center=center,
+                max_diff=max_diff,
+                inspector_mode="fusion",
+                threshold_used=int(cv_stats.get("threshold", 0)) if cv_stats else 0,
+                min_area_used=int(cv_stats.get("min_area", 0)) if cv_stats else 0,
+                min_max_diff_used=int(cv_stats.get("min_max_diff", 0)) if cv_stats else 0,
+            )
+            grouped.source_inspector = "cv"
+            grouped.d_edge_px = float(max(0.0, cv2.pointPolygonTest(
+                polygon_int, (float(center[0]), float(center[1])), True)))
+            grouped.cv_filtered_mask = band_mask_for_defect
+            grouped.cv_mask_offset = cv_mask_offset
+            grouped.panel_polygon = panel_polygon
+            return grouped
+
         # 診斷：band 過濾前的完整 CV defect 列表（供 debug UI 顯示用）
         cv_defects_all_debug = []
         for d in cv_defects_all:
@@ -3276,15 +3361,32 @@ class CAPIInferencer:
             })
             if not in_roi:
                 continue
-            if in_band:
+            if _defect_intersects_cv_band(d):
                 d.source_inspector = "cv"
                 d.inspector_mode = "fusion"
                 d.d_edge_px = float(max(0.0, cv2.pointPolygonTest(
                     polygon_int, (float(cx), float(cy)), True)))
                 # Phase 7.2 fix: 補填 cv_filtered_mask / cv_mask_offset 給新 CV fusion renderer
-                d.cv_filtered_mask = cv_stats.get("filtered_mask")
-                d.cv_mask_offset = cv_stats.get("roi_offset", (rx1, ry1))
+                if cv_band_mask is not None:
+                    bx, by, bw, bh = d.bbox
+                    mo_x, mo_y = cv_mask_offset
+                    defect_mask = np.zeros_like(cv_band_mask, dtype=np.uint8)
+                    lx1 = max(0, int(bx - mo_x))
+                    ly1 = max(0, int(by - mo_y))
+                    lx2 = min(cv_band_mask.shape[1], int(bx + bw - mo_x))
+                    ly2 = min(cv_band_mask.shape[0], int(by + bh - mo_y))
+                    if lx2 > lx1 and ly2 > ly1:
+                        defect_mask[ly1:ly2, lx1:lx2] = cv_band_mask[ly1:ly2, lx1:lx2]
+                    d.cv_filtered_mask = defect_mask if np.any(defect_mask > 0) else cv_band_mask
+                else:
+                    d.cv_filtered_mask = cv_stats.get("filtered_mask") if cv_stats else None
+                d.cv_mask_offset = cv_mask_offset
+                d.panel_polygon = panel_polygon
                 cv_defects_kept.append(d)
+
+        if group_cv_band and cv_defects_kept:
+            grouped_cv = _make_grouped_cv_band_defect(cv_defects_kept)
+            cv_defects_kept = [grouped_cv] if grouped_cv is not None else []
 
         # === PC 路徑（Phase 7.3: 內移 PC ROI 完全避開 CV 管轄 band 區）===
         # shift 目標：polygon 邊距 PC ROI ≥ band_px（= CV band 寬度），讓 PC ROI
@@ -4271,6 +4373,7 @@ class CAPIInferencer:
                                             omit_overexposed=omit_overexposed,
                                             otsu_bounds=result.otsu_bounds,
                                             collapse_to_representative=False,
+                                            group_cv_band=True,
                                         )
                                         pc_shift = fusion_stats.get("pc_roi_shift", (0, 0))
                                         pc_origin = fusion_stats.get("pc_roi_origin", (rx1, ry1))

@@ -634,6 +634,68 @@ class TestInspectRoiFusion:
         assert d.cv_mask_offset is not None, \
             "fusion CV defect 應攜帶 cv_mask_offset"
 
+    def test_group_cv_band_outputs_one_cv_and_one_pc_result(self, fusion_inferencer):
+        """production AOI fusion：CV(BAND) 聚合成 1 筆，PC(INTERIOR) 保留 1 筆。
+
+        CV filtered_mask 內同時有 band 與 interior pixels 時，CV 結果只能保留 band
+        pixels；PatchCore 負責的 interior 不應出現在 CV(BAND) mask。
+        """
+        inf = fusion_inferencer
+        image, polygon = self._build_test_image_and_polygon()
+
+        # AOI(160, 540) → centered ROI origin=(-96, 284)
+        # polygon left edge local x=196；band 約為 x=196..235。
+        band_centers = [(115, 540), (135, 540)]
+        interior_center = (300, 540)
+
+        def _cv_stub(roi, offset_x, offset_y, **kwargs):
+            defects = []
+            fm = np.zeros((512, 512), dtype=np.uint8)
+            for cx, cy in band_centers + [interior_center]:
+                defects.append(EdgeDefect(
+                    side="aoi_edge", area=100,
+                    bbox=(cx - 5, cy - 5, 10, 10),
+                    center=(cx, cy),
+                    max_diff=30,
+                ))
+                lx = cx - offset_x
+                ly = cy - offset_y
+                fm[ly - 5:ly + 5, lx - 5:lx + 5] = 255
+            return defects, {
+                "max_diff": 30, "max_area": 100, "threshold": 4,
+                "min_area": 40, "min_max_diff": 20,
+                "filtered_mask": fm,
+                "roi_offset": (int(offset_x), int(offset_y)),
+            }
+
+        inf.edge_inspector.inspect_roi = _cv_stub
+        inf.predict_tile = _stub_predict_tile(
+            score=2.0, hot_region=(250, 270, 250, 270), hot_value=2.0
+        )
+
+        defects, stats = inf._inspect_roi_fusion(
+            image, img_x=160, img_y=540, img_prefix="W0F",
+            panel_polygon=polygon,
+            omit_image=None, omit_overexposed=False,
+            collapse_to_representative=False,
+            group_cv_band=True,
+        )
+
+        assert len(defects) == 2
+        cv_kept = [d for d in defects if d.source_inspector == "cv"]
+        pc_kept = [d for d in defects if d.source_inspector == "patchcore"]
+        assert len(cv_kept) == 1
+        assert len(pc_kept) == 1
+
+        cv_group = cv_kept[0]
+        assert cv_group.cv_filtered_mask is not None
+        assert cv_group.area == int(np.count_nonzero(cv_group.cv_filtered_mask))
+
+        ix = interior_center[0] - cv_group.cv_mask_offset[0]
+        iy = interior_center[1] - cv_group.cv_mask_offset[1]
+        assert cv_group.cv_filtered_mask[iy, ix] == 0, \
+            "CV(BAND) mask 不應包含 PatchCore interior 區域"
+
     def test_fusion_fallback_cv_defect_has_cv_filtered_mask(self, fusion_inferencer):
         """Phase 7.2 fix: polygon_unavailable fallback 分支的 CV defect 亦要攜帶
         cv_filtered_mask / cv_mask_offset。"""
