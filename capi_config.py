@@ -148,7 +148,6 @@ class CAPIConfig:
     dust_two_stage_bg_blur: int = 31          # 局部背景估計的 Gaussian blur kernel size
     dust_two_stage_diff_percentile: float = 90.0  # 取 diff 分布的此百分位作為特徵閾值
     dust_two_stage_min_area: int = 3          # 特徵最小面積 (px)
-    dust_two_stage_fallback_score: float = 0.7    # 找不到特徵時，heatmap 分數高於此值保守判 NG
     dust_detect_dark_particles: bool = True   # 偵測暗色顆粒/圖案 (如偏黑 MARK)，當作表面灰塵過濾
     dust_high_cov_threshold: float = 0.5       # 高覆蓋率門檻：region COV >= 此值時直接判 dust，不要求 peak_in_dust（因 heatmap peak 有膨脹偏移）
     dust_peak_fraction_threshold: float = 0.80 # 次峰救援門檻：peak 不在灰塵上時，若灰塵區內最強分數 >= 區域 peak 的此比例，視為 heatmap 偏移，仍判 dust
@@ -281,7 +280,6 @@ class CAPIConfig:
             dust_two_stage_bg_blur=data.get("dust_two_stage_bg_blur", 31),
             dust_two_stage_diff_percentile=data.get("dust_two_stage_diff_percentile", 90.0),
             dust_two_stage_min_area=data.get("dust_two_stage_min_area", 3),
-            dust_two_stage_fallback_score=data.get("dust_two_stage_fallback_score", 0.7),
             dust_detect_dark_particles=data.get("dust_detect_dark_particles", True),
             dust_high_cov_threshold=data.get("dust_high_cov_threshold", 0.5),
             dust_peak_fraction_threshold=data.get("dust_peak_fraction_threshold", 0.80),
@@ -360,7 +358,6 @@ class CAPIConfig:
             "dust_two_stage_bg_blur": self.dust_two_stage_bg_blur,
             "dust_two_stage_diff_percentile": self.dust_two_stage_diff_percentile,
             "dust_two_stage_min_area": self.dust_two_stage_min_area,
-            "dust_two_stage_fallback_score": self.dust_two_stage_fallback_score,
             "dust_detect_dark_particles": self.dust_detect_dark_particles,
             "dust_high_cov_threshold": self.dust_high_cov_threshold,
             "dust_peak_fraction_threshold": self.dust_peak_fraction_threshold,
@@ -431,7 +428,6 @@ class CAPIConfig:
             "dust_two_stage_bg_blur": self.dust_two_stage_bg_blur,
             "dust_two_stage_diff_percentile": self.dust_two_stage_diff_percentile,
             "dust_two_stage_min_area": self.dust_two_stage_min_area,
-            "dust_two_stage_fallback_score": self.dust_two_stage_fallback_score,
             "dust_detect_dark_particles": self.dust_detect_dark_particles,
             "dust_high_cov_threshold": self.dust_high_cov_threshold,
             "dust_peak_fraction_threshold": self.dust_peak_fraction_threshold,
@@ -560,8 +556,6 @@ class CAPIConfig:
             self.dust_two_stage_diff_percentile = float(param_map["dust_two_stage_diff_percentile"])
         if "dust_two_stage_min_area" in param_map:
             self.dust_two_stage_min_area = int(param_map["dust_two_stage_min_area"])
-        if "dust_two_stage_fallback_score" in param_map:
-            self.dust_two_stage_fallback_score = float(param_map["dust_two_stage_fallback_score"])
         if "dust_detect_dark_particles" in param_map:
             val = param_map["dust_detect_dark_particles"]
             self.dust_detect_dark_particles = str(val).lower() == "true" if isinstance(val, str) else bool(val)
