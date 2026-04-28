@@ -80,3 +80,54 @@ def test_detect_panel_polygon_disabled_returns_no_polygon():
     bbox, poly = detect_panel_polygon(img, cfg)
     assert bbox is not None
     assert poly is None
+
+
+def test_classify_tile_zone_inner():
+    from capi_preprocess import classify_tile_zone, PreprocessConfig
+    poly = np.array([[100, 100], [4000, 100], [4000, 3000], [100, 3000]], np.float32)
+    cfg = PreprocessConfig(tile_size=512, edge_threshold_px=768)
+    # tile fully inside, distance from edge >= 768
+    zone, cov, dist, mask = classify_tile_zone((1500, 1200, 2012, 1712), poly, cfg)
+    assert zone == "inner"
+    assert cov == 1.0
+    assert mask is None
+
+
+def test_classify_tile_zone_edge_close_to_boundary():
+    from capi_preprocess import classify_tile_zone, PreprocessConfig
+    poly = np.array([[100, 100], [4000, 100], [4000, 3000], [100, 3000]], np.float32)
+    cfg = PreprocessConfig(tile_size=512, edge_threshold_px=768)
+    # tile fully inside but center close to top edge
+    zone, cov, dist, mask = classify_tile_zone((1500, 200, 2012, 712), poly, cfg)
+    assert zone == "edge"
+    assert cov == 1.0
+
+
+def test_classify_tile_zone_edge_partial_coverage():
+    from capi_preprocess import classify_tile_zone, PreprocessConfig
+    poly = np.array([[100, 100], [4000, 100], [4000, 3000], [100, 3000]], np.float32)
+    cfg = PreprocessConfig()
+    # tile crosses top boundary
+    zone, cov, dist, mask = classify_tile_zone((1500, 0, 2012, 512), poly, cfg)
+    assert zone == "edge"
+    assert 0.3 < cov < 1.0
+    assert mask is not None
+    assert mask.shape == (512, 512)
+
+
+def test_classify_tile_zone_outside():
+    from capi_preprocess import classify_tile_zone, PreprocessConfig
+    poly = np.array([[100, 100], [4000, 100], [4000, 3000], [100, 3000]], np.float32)
+    cfg = PreprocessConfig()
+    zone, cov, dist, mask = classify_tile_zone((4500, 1500, 5012, 2012), poly, cfg)
+    assert zone == "outside"
+    assert cov < 0.3
+
+
+def test_classify_tile_zone_no_polygon_fallback_inner():
+    from capi_preprocess import classify_tile_zone, PreprocessConfig
+    cfg = PreprocessConfig()
+    zone, cov, dist, mask = classify_tile_zone((0, 0, 512, 512), None, cfg)
+    assert zone == "inner"
+    assert cov == 1.0
+    assert mask is None
