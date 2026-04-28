@@ -300,6 +300,42 @@ def preprocess_panel_image(
     )
 
 
+def preprocess_panel_folder(
+    folder: Path,
+    config: PreprocessConfig,
+) -> Dict[str, "PanelPreprocessResult"]:
+    """處理整個 panel folder 的 5 lighting 圖。
+
+    流程：filter 出 5 lighting → STANDARD 先處理取 reference polygon →
+          其他 4 lighting 套 reference。STANDARD 失敗 fallback G0F00000。
+    """
+    files = filter_panel_lighting_files(folder)
+    if not files:
+        return {}
+
+    # 決定 reference image：STANDARD > G0F00000 > W0F00000 > R0F00000 > WGF50500
+    ref_lighting = None
+    for cand in ("STANDARD", "G0F00000", "W0F00000", "R0F00000", "WGF50500"):
+        if cand in files:
+            ref_lighting = cand
+            break
+    if ref_lighting is None:
+        return {}
+
+    ref_result = preprocess_panel_image(files[ref_lighting], ref_lighting, config)
+    if ref_result.polygon_detection_failed and ref_lighting != "G0F00000" and "G0F00000" in files:
+        ref_lighting = "G0F00000"
+        ref_result = preprocess_panel_image(files[ref_lighting], ref_lighting, config)
+
+    results: Dict[str, PanelPreprocessResult] = {ref_lighting: ref_result}
+    ref_poly = ref_result.panel_polygon
+    for lighting, path in files.items():
+        if lighting == ref_lighting:
+            continue
+        results[lighting] = preprocess_panel_image(path, lighting, config, reference_polygon=ref_poly)
+    return results
+
+
 def _generate_tiles(
     img: np.ndarray,
     bbox: Tuple[int, int, int, int],
