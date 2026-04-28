@@ -198,3 +198,39 @@ def test_handle_train_new_start_rejects_concurrent():
     resp_body = json.loads(h._sent_response[0]["body"])
     assert resp_body.get("error") == "job_already_running"
     assert resp_body.get("active_job_id") == "j_old"
+
+
+# ── /api/train/new/status tests ───────────────────────────────────────────────
+
+def test_handle_train_new_status_idle():
+    """無 active job，未指定 job_id → state: idle。"""
+    server = MagicMock()
+    server.database.get_active_training_job.return_value = None
+    h = _make_handler_with_server(server, "/api/train/new/status")
+    h._handle_train_new_status()
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["state"] == "idle"
+
+
+def test_handle_train_new_status_with_job_id():
+    """指定 job_id，存在 → 回傳該 job 狀態。"""
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1", "machine_id": "M", "state": "review",
+        "started_at": "2026-04-28 10:00:00", "completed_at": None,
+        "output_bundle": None, "error_message": None,
+    }
+    h = _make_handler_with_server(server, "/api/train/new/status?job_id=j1")
+    h._handle_train_new_status()
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["state"] == "review"
+    assert body["job_id"] == "j1"
+
+
+def test_handle_train_new_status_not_found():
+    """指定 job_id，不存在 → 404。"""
+    server = MagicMock()
+    server.database.get_training_job.return_value = None
+    h = _make_handler_with_server(server, "/api/train/new/status?job_id=missing")
+    h._handle_train_new_status()
+    assert h._sent_response[0]["status"] == 404
