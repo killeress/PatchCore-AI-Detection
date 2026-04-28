@@ -341,15 +341,23 @@ class CAPIInferencer:
         self._inferencers: Dict[str, Any] = {}
         
         # 前綴 → 模型路徑映射 (從 config 讀取)
+        # 新架構 (is_new_architecture=True) 的 model_mapping value 為 nested dict
+        # {prefix: {"inner": path, "edge": path}}，不在此處轉換；v2 直接讀 config.model_mapping
         self._model_mapping: Dict[str, Path] = {}
         for prefix, mpath in config.model_mapping.items():
+            if isinstance(mpath, dict):
+                # 新架構：nested dict，跳過舊式 flat mapping；v2 自行處理
+                continue
             p = Path(mpath)
             if not p.is_absolute():
                 p = self.base_dir / p
             self._model_mapping[prefix] = p
-        
+
         # 前綴 → 閾值映射
-        self._threshold_mapping: Dict[str, float] = dict(config.threshold_mapping)
+        self._threshold_mapping: Dict[str, float] = {
+            k: v for k, v in config.threshold_mapping.items()
+            if not isinstance(v, dict)
+        }
         
         # 決定運算裝置
         self.device = self._get_device(device)
@@ -5076,8 +5084,183 @@ class CAPIInferencer:
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
     ):
-        """新架構：依 tile zone routing inner/edge model。(Phase 9.3 實作)"""
-        raise NotImplementedError("Phase 9.3")
+        """新架構：依 tile zone routing inner/edge model。
+
+        最小化實作 (Phase 9.3)：
+          1. capi_preprocess.preprocess_panel_folder 切 tile + inner/edge 分流
+          2. 對每張 tile 呼叫對應 model（inner.pt / edge.pt）
+          3. 回傳與 v1 相同的 tuple：
+               (results, omit_vis, omit_overexposed, omit_overexposure_info,
+                is_duplicate, omit_image, aoi_report)
+             其中 results 為 List[ImageResult]
+
+        TODO(phase 9.3+): integrate dust filter / bomb check / scratch classifier
+        TODO(phase 9.3+): integrate CV edge inspector (edge_defects)
+        TODO(phase 9.3+): integrate edge margin decay scoring
+        """
+        import time
+        from capi_preprocess import preprocess_panel_folder, PreprocessConfig
+
+        t0 = time.time()
+
+        pre_cfg = PreprocessConfig(
+            tile_size=self.config.tile_size,
+            otsu_offset=self.config.otsu_offset,
+            enable_panel_polygon=self.config.enable_panel_polygon,
+            edge_threshold_px=self.config.edge_threshold_px,
+        )
+
+        panel_results = preprocess_panel_folder(Path(panel_dir), pre_cfg)
+        if not panel_results:
+            logger.warning(f"[v2] {panel_dir}: preprocess_panel_folder 回傳空結果")
+            # 回傳與 v1 格式相容的空結果
+            return [], None, False, "", False, None, {}
+
+        results: List[ImageResult] = []
+
+        for lighting, pre_result in panel_results.items():
+            img_path = pre_result.image_path
+            bbox = pre_result.foreground_bbox  # (x1, y1, x2, y2)
+            polygon = pre_result.panel_polygon
+
+            # 取得圖片尺寸
+            raw_img = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+            if raw_img is None:
+                logger.warning(f"[v2] 無法讀取圖片: {img_path}")
+                continue
+            img_h, img_w = raw_img.shape[:2]
+
+            # 取得此 lighting 對應的 inner / edge model 路徑
+            lighting_map = self.config.model_mapping.get(lighting, {})
+            if not isinstance(lighting_map, dict) or "inner" not in lighting_map or "edge" not in lighting_map:
+                logger.warning(f"[v2] {lighting}: model_mapping 缺 inner/edge，跳過")
+                continue
+
+            lighting_thr = self.config.threshold_mapping.get(lighting, {})
+            if isinstance(lighting_thr, dict):
+                inner_thr = float(lighting_thr.get("inner", 0.75))
+                edge_thr = float(lighting_thr.get("edge", 0.75))
+            else:
+                # fallback：舊式 flat float
+                inner_thr = edge_thr = float(lighting_thr) if lighting_thr else 0.75
+
+            # 把 capi_preprocess.TileResult 轉換成 capi_inference.TileInfo
+            tile_infos: List[TileInfo] = []
+            for tr in pre_result.tiles:
+                ts = self.config.tile_size
+                ti = TileInfo(
+                    tile_id=tr.tile_id,
+                    x=tr.x1,
+                    y=tr.y1,
+                    width=ts,
+                    height=ts,
+                    image=tr.image,
+                    mask=tr.mask,
+                )
+                tile_infos.append(ti)
+
+            # 推論
+            t_infer_start = time.time()
+            anomaly_tiles: List[Tuple[TileInfo, float, Optional[np.ndarray]]] = []
+
+            for tr, ti in zip(pre_result.tiles, tile_infos):
+                zone = tr.zone  # "inner" | "edge"
+                threshold = inner_thr if zone == "inner" else edge_thr
+                try:
+                    model = self._get_model_for(self.config.machine_id, lighting, zone)
+                    score, anomaly_map = self._predict_tile(model, ti.image, ti.mask)
+                except Exception as exc:
+                    logger.error(f"[v2] tile({tr.x1},{tr.y1}) 推論失敗: {exc}", exc_info=True)
+                    score, anomaly_map = 0.0, None
+
+                if score > threshold:
+                    # 計算熱力圖峰值座標（圖片絕對座標）
+                    if anomaly_map is not None:
+                        peak_idx = int(np.argmax(anomaly_map))
+                        ah, aw = anomaly_map.shape[:2]
+                        peak_y_rel = peak_idx // aw
+                        peak_x_rel = peak_idx % aw
+                        ti.anomaly_peak_x = tr.x1 + peak_x_rel
+                        ti.anomaly_peak_y = tr.y1 + peak_y_rel
+                    anomaly_tiles.append((ti, score, anomaly_map))
+
+            infer_elapsed = time.time() - t_infer_start
+
+            image_result = ImageResult(
+                image_path=img_path,
+                image_size=(img_w, img_h),
+                otsu_bounds=bbox,
+                exclusion_regions=[],
+                tiles=tile_infos,
+                excluded_tile_count=0,
+                processed_tile_count=len(tile_infos),
+                processing_time=time.time() - t0,
+                anomaly_tiles=anomaly_tiles,
+                raw_bounds=bbox,
+                panel_polygon=polygon,
+                inference_time=infer_elapsed,
+            )
+
+            if bomb_info is not None:
+                image_result.client_bomb_info = bomb_info
+
+            results.append(image_result)
+
+        total_elapsed = time.time() - t0
+        ng_count = sum(1 for r in results if r.anomaly_tiles)
+        print(
+            f"[v2] Panel {Path(panel_dir).name}: "
+            f"{len(results)} lighting(s) 推論完成，{ng_count} NG，耗時 {total_elapsed:.2f}s"
+        )
+
+        # 回傳與 v1 格式相容的 7-tuple
+        return results, None, False, "", False, None, {}
+
+    def _get_model_for(self, machine_id: str, lighting: str, zone: str):
+        """新架構 lazy loading，cache key 含 zone。
+
+        zone: "inner" | "edge"
+        """
+        if not hasattr(self, "_model_cache_v2"):
+            self._model_cache_v2: Dict[tuple, Any] = {}
+
+        key = (machine_id, lighting, zone)
+        if key not in self._model_cache_v2:
+            path_raw = self.config.model_mapping[lighting][zone]
+            model_path = Path(path_raw)
+            if not model_path.is_absolute():
+                model_path = self.base_dir / model_path
+            logger.info(f"[v2] 載入 model: {machine_id}/{lighting}/{zone} → {model_path}")
+            from anomalib.deploy import TorchInferencer
+            self._model_cache_v2[key] = TorchInferencer(path=str(model_path))
+        return self._model_cache_v2[key]
+
+    def _predict_tile(self, model, tile_img: np.ndarray, mask: Optional[np.ndarray] = None):
+        """跑 PatchCore 推論 + 應用 polygon mask（如有）。
+
+        Returns: (score: float, anomaly_map: np.ndarray | None)
+        """
+        # 確保圖片為 BGR 3-channel（anomalib TorchInferencer 預期 BGR uint8）
+        if tile_img.ndim == 2:
+            input_img = cv2.cvtColor(tile_img, cv2.COLOR_GRAY2BGR)
+        elif tile_img.shape[2] == 1:
+            input_img = cv2.cvtColor(tile_img, cv2.COLOR_GRAY2BGR)
+        else:
+            input_img = tile_img
+
+        result = model.predict(input_img)
+        score = float(getattr(result, "pred_score", 0.0))
+        anomaly_map = getattr(result, "anomaly_map", None)
+
+        if mask is not None and anomaly_map is not None:
+            # mask 255=panel 內, 0=panel 外 → 外部分數歸 0
+            mask_f = mask.astype(np.float32) / 255.0
+            if anomaly_map.ndim == 3:
+                mask_f = mask_f[:, :, np.newaxis]
+            anomaly_map = anomaly_map * mask_f
+            score = float(anomaly_map.max())
+
+        return score, anomaly_map
 
     def visualize_inference_result(self, image_path: Path, result: ImageResult) -> np.ndarray:
         """視覺化推論結果（含異常標記 與 AOI 標記）"""
