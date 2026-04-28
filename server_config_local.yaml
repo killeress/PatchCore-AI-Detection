@@ -69,3 +69,4 @@ training:
   backbone_cache_dir: deployment/torch_hub_cache
   required_backbones:
     - wide_resnet50_2-32ee1156.pth
+  over_review_root: D:/dev/over_review

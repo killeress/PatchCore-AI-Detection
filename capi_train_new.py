@@ -14,7 +14,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, Callable, Protocol, runtime_checkable
+from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable
 import cv2
 
 from capi_preprocess import (
@@ -290,18 +290,28 @@ def write_thresholds(bundle_dir: Path, thresholds: Dict[str, Dict[str, float]]) 
 
 
 def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
-                              thresholds: Dict[str, Dict[str, float]]) -> None:
-    """產出 bundle 內的 inference yaml。"""
+                              thresholds: Dict[str, Dict[str, float]],
+                              succeeded_units: Optional[Set[Tuple[str, str]]] = None) -> None:
+    """產出 bundle 內的 inference yaml。
+
+    若提供 succeeded_units，只寫入已成功訓練的 (lighting, zone) 項目；
+    None 表示寫入全部 5×2=10 組（舊行為，測試用）。
+    """
     import yaml
 
     model_mapping = {}
     threshold_mapping = {}
     for lighting in LIGHTINGS:
-        model_mapping[lighting] = {
-            "inner": str(bundle_dir / f"{lighting}-inner.pt"),
-            "edge":  str(bundle_dir / f"{lighting}-edge.pt"),
-        }
-        threshold_mapping[lighting] = thresholds.get(lighting, {"inner": 0.75, "edge": 0.75})
+        unit_paths = {}
+        unit_thr = {}
+        for zone in ("inner", "edge"):
+            if succeeded_units is None or (lighting, zone) in succeeded_units:
+                unit_paths[zone] = str(bundle_dir / f"{lighting}-{zone}.pt")
+                unit_thr[zone] = thresholds.get(lighting, {}).get(zone, 0.75)
+        if unit_paths:
+            model_mapping[lighting] = unit_paths
+        if unit_thr:
+            threshold_mapping[lighting] = unit_thr
 
     cfg = {
         "machine_id": machine_id,
@@ -381,6 +391,7 @@ def run_training_pipeline(
     tiles_per_unit: Dict[str, Dict[str, int]] = {}
     model_files: Dict[str, Dict] = {}
     success_units = 0
+    succeeded_units: Set[Tuple[str, str]] = set()
 
     for idx, (lighting, zone) in enumerate(TRAINING_UNITS, 1):
         unit_label = f"{lighting}-{zone}"
@@ -420,6 +431,7 @@ def run_training_pipeline(
                 tiles_per_unit[unit_label] = {"train": len(train_tiles), "ng": len(ng_tiles)}
                 model_files[unit_label] = {"path": dst_pt.name, "size_bytes": size}
                 success_units += 1
+                succeeded_units.add((lighting, zone))
                 log(f"[{idx}/10] ✓ done, threshold={threshold:.4f}, size={size/1e6:.1f}MB")
             except Exception as e:
                 log(f"[{idx}/10] ✗ 訓練失敗: {e}")
@@ -433,7 +445,7 @@ def run_training_pipeline(
 
     # 寫 bundle metadata
     write_thresholds(bundle_dir, thresholds)
-    write_machine_config_yaml(bundle_dir, cfg.machine_id, thresholds)
+    write_machine_config_yaml(bundle_dir, cfg.machine_id, thresholds, succeeded_units=succeeded_units)
     write_manifest(bundle_dir, {
         "machine_id": cfg.machine_id,
         "trained_at": datetime.now().isoformat(timespec="seconds"),
