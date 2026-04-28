@@ -198,6 +198,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_retrain_page()
             elif path == "/api/retrain/status":
                 self._handle_retrain_status()
+            elif path == "/api/train/new/panels":
+                self._handle_train_new_panels()
             elif path == "/ric":
                 self._handle_ric_page(query, path)
             elif path == "/api/ric/report":
@@ -4449,6 +4451,52 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         )
         thread.start()
         self._send_json({"job_id": job_id, "started_at": new_job["started_at"]})
+
+    def _handle_train_new_panels(self):
+        """GET /api/train/new/panels?machine_id=X&days=7
+
+        回傳指定機種 model_id 在近 N 天內 machine_judgment='OK' 且 ai_judgment='OK'
+        的 inference_records，供訓練 wizard 第一步選擇訓練樣本使用。
+        """
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        machine_id = (qs.get("machine_id") or [""])[0].strip()
+        try:
+            days = int((qs.get("days") or ["7"])[0])
+        except (ValueError, TypeError):
+            days = 7
+
+        if not machine_id:
+            self._send_json({"error": "machine_id required"}, status=400)
+            return
+
+        if not self.db:
+            self._send_json({"error": "database not available"}, status=503)
+            return
+
+        try:
+            import sqlite3 as _sqlite3
+            conn = self.db._get_conn()
+            try:
+                rows = conn.execute(
+                    """SELECT id, glass_id, model_id, machine_no,
+                              machine_judgment, ai_judgment, image_dir,
+                              created_at
+                       FROM inference_records
+                       WHERE model_id = ?
+                         AND machine_judgment = 'OK'
+                         AND ai_judgment = 'OK'
+                         AND created_at >= datetime('now', ? || ' days')
+                       ORDER BY created_at DESC
+                       LIMIT 100""",
+                    (machine_id, f"-{days}"),
+                ).fetchall()
+                panels = [dict(r) for r in rows]
+            finally:
+                conn.close()
+            self._send_json({"panels": panels})
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=500)
 
     def _handle_retrain_status(self):
         """GET /api/retrain/status"""
