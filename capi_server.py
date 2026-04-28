@@ -758,6 +758,9 @@ class CAPIServer:
         self.fallback_config: Optional["CAPIConfig"] = None
         self._load_model_configs(config_path)
 
+        # 向後相容：self.config 為 fallback_config 別名
+        self.config = self.fallback_config
+
     def _load_model_configs(self, server_config_path: str) -> None:
         """載入 server_config 中 model_configs 清單，建立 configs_by_machine dispatcher。
 
@@ -786,6 +789,12 @@ class CAPIServer:
         except Exception as e:
             logger.warning(f"[MultiConfig] Failed to load fallback config {fallback_path}: {e}")
             self.fallback_config = list(self.configs_by_machine.values())[0] if self.configs_by_machine else None
+
+        if self.fallback_config is None:
+            raise RuntimeError(
+                f"無法載入任何有效的模型 config。已嘗試 model_configs={cfg_paths} "
+                f"與 fallback={fallback_path}。Server 無法啟動。"
+            )
 
         print(f"[SERVER] Loaded {loaded} model config(s): {list(self.configs_by_machine.keys())}", flush=True)
 
