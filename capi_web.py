@@ -4386,6 +4386,23 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "status_text": status_text,
             "target_url": "/retrain",
         })
+
+        # 新機種 PatchCore card
+        db = server_inst.database if server_inst else None
+        new_arch_count = len(db.list_model_bundles()) if db else 0
+        active_count = sum(1 for b in db.list_model_bundles() if b.get("is_active")) if db else 0
+
+        cards.append({
+            "title": "新機種 PatchCore",
+            "subtitle": "C-10 (5 lighting × inner+edge)",
+            "description": f"為新機種訓練 10 個模型 bundle。已啟用 {active_count} 個 / 共 {new_arch_count} bundle。",
+            "bundle_path": "model/<機種>-<日期>",
+            "trained_at": "—" if new_arch_count == 0 else "詳見模型庫",
+            "status": "ok" if active_count > 0 else "warning",
+            "status_text": f"{active_count} 啟用" if active_count else "未訓練",
+            "target_url": "/train/new",
+        })
+
         return cards
 
     def _handle_training_page(self):
