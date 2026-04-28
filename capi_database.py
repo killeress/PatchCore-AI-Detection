@@ -251,6 +251,48 @@ class CAPIDatabase:
                     UNIQUE(tile_result_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_scratch_rescue_review_tile ON scratch_rescue_review(tile_result_id);
+
+                -- 訓練 Job 狀態追蹤
+                CREATE TABLE IF NOT EXISTS training_jobs (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id          TEXT UNIQUE,
+                    machine_id      TEXT NOT NULL,
+                    state           TEXT NOT NULL,
+                    started_at      TEXT,
+                    completed_at    TEXT,
+                    panel_paths     TEXT,
+                    output_bundle   TEXT,
+                    error_message   TEXT
+                );
+
+                -- 已訓練模型 bundle 元資料
+                CREATE TABLE IF NOT EXISTS model_registry (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    machine_id        TEXT NOT NULL,
+                    bundle_path       TEXT UNIQUE NOT NULL,
+                    trained_at        TEXT NOT NULL,
+                    panel_count       INTEGER,
+                    inner_tile_count  INTEGER,
+                    edge_tile_count   INTEGER,
+                    ng_tile_count     INTEGER,
+                    bundle_size_bytes INTEGER,
+                    is_active         INTEGER DEFAULT 0,
+                    job_id            TEXT,
+                    notes             TEXT
+                );
+
+                -- Wizard step 3 review 用暫存 tile pool (zone 允許 NULL 以支援 NG tiles)
+                CREATE TABLE IF NOT EXISTS training_tile_pool (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id      TEXT NOT NULL,
+                    lighting    TEXT NOT NULL,
+                    zone        TEXT,
+                    source      TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    thumb_path  TEXT,
+                    decision    TEXT DEFAULT 'accept'
+                );
+                CREATE INDEX IF NOT EXISTS idx_tile_pool_job ON training_tile_pool(job_id, lighting, zone, source);
             """)
             
             # Migration for adding missing columns to existing database
