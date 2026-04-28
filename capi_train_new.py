@@ -315,5 +315,134 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
     )
 
 
-def run_training_pipeline(*args, **kwargs):
-    raise NotImplementedError("Phase 4.6")
+def _setup_offline_env(backbone_cache_dir: Path, log: Callable) -> None:
+    """設定離線推論環境：檢查 backbone 是否存在並設定環境變數。"""
+    backbone_cache_dir = Path(backbone_cache_dir).resolve()
+    required = backbone_cache_dir / "hub" / "checkpoints" / "wide_resnet50_2-32ee1156.pth"
+    if not required.exists():
+        raise RuntimeError(
+            f"backbone 缺檔：{required}（請先在開發機 stage 後 FTP 上傳）"
+        )
+    os.environ["TORCH_HOME"] = str(backbone_cache_dir)
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    log(f"backbone cache: {backbone_cache_dir}")
+
+
+def _compute_train_max_score(model_pt: Path, train_paths: List[Path]) -> float:
+    """對 train tile 取樣推論，回傳 max score（用於 threshold 1.05× 校準）。"""
+    from anomalib.deploy import TorchInferencer
+    inferencer = TorchInferencer(path=str(model_pt))
+    sample = random.sample(train_paths, min(100, len(train_paths)))
+    max_score = 0.0
+    for p in sample:
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        result = inferencer.predict(img)
+        score = float(getattr(result, "pred_score", 0.0))
+        if score > max_score:
+            max_score = score
+    return max_score
+
+
+def _predict_ng_scores(model_pt: Path, ng_paths: List[Path]) -> List[float]:
+    """對 NG tile 逐一推論，回傳 score 列表。"""
+    from anomalib.deploy import TorchInferencer
+    inferencer = TorchInferencer(path=str(model_pt))
+    scores = []
+    for p in ng_paths:
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        result = inferencer.predict(img)
+        scores.append(float(getattr(result, "pred_score", 0.0)))
+    return scores
+
+
+def run_training_pipeline(
+    job_id: str,
+    cfg: TrainingConfig,
+    db,
+    gpu_lock,
+    log: Callable[[str], None] = print,
+) -> Path:
+    """執行 10 unit 訓練，輸出 bundle 目錄。"""
+    # 1. 環境檢查
+    _setup_offline_env(cfg.backbone_cache_dir, log)
+
+    bundle_dir = cfg.output_root / f"{cfg.machine_id}-{datetime.now().strftime('%Y%m%d')}"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    thresholds: Dict[str, Dict[str, float]] = {l: {} for l in LIGHTINGS}
+    tiles_per_unit: Dict[str, Dict[str, int]] = {}
+    model_files: Dict[str, Dict] = {}
+    success_units = 0
+
+    for idx, (lighting, zone) in enumerate(TRAINING_UNITS, 1):
+        unit_label = f"{lighting}-{zone}"
+        log(f"[{idx}/10] {unit_label}: 載 tile")
+
+        train_tiles = db.list_tile_pool(job_id, lighting=lighting, zone=zone,
+                                        source="ok", decision="accept")
+        ng_tiles = db.list_tile_pool(job_id, lighting=lighting,
+                                     source="ng", decision="accept")
+
+        if len(train_tiles) < MIN_TRAIN_TILES:
+            log(f"[{idx}/10] 跳過：tile 不足 ({len(train_tiles)} < {MIN_TRAIN_TILES})")
+            continue
+
+        with gpu_lock:
+            staging = Path(".tmp/training_staging") / job_id / unit_label
+            stage_dataset(staging,
+                          [Path(t["source_path"]) for t in train_tiles],
+                          [Path(t["source_path"]) for t in ng_tiles])
+            run_root = Path(".tmp/training_runs") / job_id / unit_label
+            try:
+                model_pt = train_one_patchcore(staging, run_root, unit_label, cfg)
+
+                train_max = _compute_train_max_score(
+                    model_pt, [Path(t["source_path"]) for t in train_tiles]
+                )
+                ng_scores = _predict_ng_scores(
+                    model_pt, [Path(t["source_path"]) for t in ng_tiles]
+                )
+                threshold = calibrate_threshold(ng_scores, train_max)
+
+                dst_pt = bundle_dir / f"{unit_label}.pt"
+                shutil.copy2(model_pt, dst_pt)
+                size = dst_pt.stat().st_size
+
+                thresholds[lighting][zone] = round(threshold, 4)
+                tiles_per_unit[unit_label] = {"train": len(train_tiles), "ng": len(ng_tiles)}
+                model_files[unit_label] = {"path": dst_pt.name, "size_bytes": size}
+                success_units += 1
+                log(f"[{idx}/10] done, threshold={threshold:.4f}, size={size/1e6:.1f}MB")
+            finally:
+                shutil.rmtree(run_root, ignore_errors=True)
+                shutil.rmtree(staging, ignore_errors=True)
+
+    if success_units < 5:
+        raise RuntimeError(f"成功 unit 數 {success_units} < 5，訓練失敗")
+
+    # 寫 bundle metadata
+    write_thresholds(bundle_dir, thresholds)
+    write_machine_config_yaml(bundle_dir, cfg.machine_id, thresholds)
+    write_manifest(bundle_dir, {
+        "machine_id": cfg.machine_id,
+        "trained_at": datetime.now().isoformat(timespec="seconds"),
+        "trained_with_job_id": job_id,
+        "panel_count": len(cfg.panel_paths),
+        "panel_glass_ids": [p.name for p in cfg.panel_paths],
+        "edge_threshold_px": 768,
+        "patchcore_params": {
+            "batch_size": cfg.batch_size,
+            "image_size": list(cfg.image_size),
+            "coreset_ratio": cfg.coreset_ratio,
+            "max_epochs": cfg.max_epochs,
+        },
+        "tiles_per_unit": tiles_per_unit,
+        "model_files": model_files,
+        "success_units": success_units,
+    })
+    return bundle_dir
