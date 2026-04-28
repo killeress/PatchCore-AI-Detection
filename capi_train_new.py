@@ -262,5 +262,58 @@ def train_one_patchcore(
     return candidates[0]
 
 
+def calibrate_threshold(ng_scores: List[float], train_max_score: float) -> float:
+    """取 max(NG P10, train_max × 1.05)。"""
+    if not ng_scores:
+        return float(train_max_score) * 1.05
+    sorted_scores = sorted(ng_scores)
+    p10_idx = max(0, int(len(sorted_scores) * 0.10))
+    p10 = float(sorted_scores[p10_idx])
+    return float(max(p10, train_max_score * 1.05))
+
+
+def write_manifest(bundle_dir: Path, info: dict) -> None:
+    info_full = dict(info)
+    info_full["version_schema"] = 1
+    (bundle_dir / "manifest.json").write_text(
+        json.dumps(info_full, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def write_thresholds(bundle_dir: Path, thresholds: Dict[str, Dict[str, float]]) -> None:
+    (bundle_dir / "thresholds.json").write_text(
+        json.dumps(thresholds, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
+                              thresholds: Dict[str, Dict[str, float]]) -> None:
+    """產出 bundle 內的 inference yaml。"""
+    import yaml
+
+    model_mapping = {}
+    threshold_mapping = {}
+    for lighting in LIGHTINGS:
+        model_mapping[lighting] = {
+            "inner": str(bundle_dir / f"{lighting}-inner.pt"),
+            "edge":  str(bundle_dir / f"{lighting}-edge.pt"),
+        }
+        threshold_mapping[lighting] = thresholds.get(lighting, {"inner": 0.75, "edge": 0.75})
+
+    cfg = {
+        "machine_id": machine_id,
+        "trained_at": datetime.now().isoformat(timespec="seconds"),
+        "bundle_path": str(bundle_dir),
+        "edge_threshold_px": 768,
+        "otsu_offset": 5,
+        "enable_panel_polygon": True,
+        "model_mapping": model_mapping,
+        "threshold_mapping": threshold_mapping,
+    }
+    (bundle_dir / "machine_config.yaml").write_text(
+        yaml.dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+
+
 def run_training_pipeline(*args, **kwargs):
-    raise NotImplementedError("Phase 4.5-4.6")
+    raise NotImplementedError("Phase 4.6")
