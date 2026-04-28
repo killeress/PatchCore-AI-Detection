@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}模型庫{% endblock %}
+{% block content %}
+<div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+    <h1 style="color:#cdd6f4;margin:0;">模型庫</h1>
+    <a href="/train/new" style="background:#89b4fa;color:#1e1e2e;padding:7px 16px;border-radius:5px;font-weight:700;text-decoration:none;font-size:.85rem;">+ 新機種訓練</a>
+  </div>
+
+  {% for machine_id, bundles in grouped.items() %}
+  <div style="background:#11111b;border-radius:8px;padding:14px;margin-bottom:14px;">
+    <h2 style="color:#cdd6f4;margin:0 0 10px 0;font-size:1rem;">{{ machine_id }} <span style="color:#a6adc8;font-size:.78rem;font-weight:400;">({{ bundles|length }} bundle)</span></h2>
+    {% for b in bundles %}
+    <div style="background:#313244;border-radius:8px;padding:14px 16px;margin-bottom:8px;{% if b.is_active %}border-left:3px solid #a6e3a1;{% endif %}">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:14px;align-items:center;">
+        <div>
+          <h3 style="color:#cdd6f4;margin:0 0 3px 0;font-size:.95rem;font-family:monospace;">{{ b.bundle_path|replace("model/", "") }}</h3>
+          <div style="color:#a6adc8;font-size:.74rem;">{{ b.trained_at }} · job {{ b.job_id }}</div>
+          {% if b.is_active %}<div style="color:#a6e3a1;font-size:.78rem;margin-top:3px;">● 啟用中</div>{% endif %}
+        </div>
+        <div style="font-size:.78rem;color:#a6adc8;line-height:1.5;">
+          <div>Panel：<b style="color:#cdd6f4;">{{ b.panel_count }}</b> · Inner：<b style="color:#cdd6f4;">{{ b.inner_tile_count }}</b> · Edge：<b style="color:#cdd6f4;">{{ b.edge_tile_count }}</b></div>
+          <div>NG：<b style="color:#cdd6f4;">{{ b.ng_tile_count }}</b> · 大小：<b style="color:#cdd6f4;">{{ "%.1f"|format(b.bundle_size_bytes / 1e6) }} MB</b></div>
+        </div>
+        <div style="font-size:.78rem;color:#a6adc8;">
+          <div>路徑：<code style="font-size:.7rem;color:#cdd6f4;">{{ b.bundle_path }}</code></div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <button onclick="showDetail({{ b.id }})" style="background:#1e1e2e;color:#a6adc8;border:1px solid #45475a;padding:5px 10px;border-radius:4px;font-size:.74rem;">📋 細節</button>
+          {% if b.is_active %}
+            <button onclick="doAction({{ b.id }}, 'deactivate')" style="background:#fab387;color:#1e1e2e;border:none;padding:5px 10px;border-radius:4px;font-size:.74rem;font-weight:700;">⏸ 停用</button>
+          {% else %}
+            <button onclick="doAction({{ b.id }}, 'activate')" style="background:#a6e3a1;color:#1e1e2e;border:none;padding:5px 10px;border-radius:4px;font-size:.74rem;font-weight:700;">▶ 啟用</button>
+          {% endif %}
+          <a href="/api/models/{{ b.id }}/export" style="background:#1e1e2e;color:#a6adc8;border:1px solid #45475a;padding:5px 10px;border-radius:4px;font-size:.74rem;text-decoration:none;text-align:center;">📦 匯出 ZIP</a>
+          <button onclick="doDelete({{ b.id }})" style="background:#1e1e2e;color:#f38ba8;border:1px solid #f38ba8;padding:5px 10px;border-radius:4px;font-size:.74rem;">🗑 刪除</button>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+
+  {% if not grouped %}
+  <div style="background:#313244;padding:32px;border-radius:10px;text-align:center;color:#a6adc8;">
+    尚未訓練任何模型。點右上「+ 新機種訓練」開始。
+  </div>
+  {% endif %}
+</div>
+
+<script>
+function doAction(id, action) {
+  fetch(`/api/models/${id}/${action}`, {method:'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) alert(d.error);
+      else { alert(d.message || '已完成'); location.reload(); }
+    });
+}
+
+function doDelete(id) {
+  if (!confirm('確定要刪除這個 bundle？此操作不可恢復。')) return;
+  fetch(`/api/models/${id}/delete`, {method:'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) alert(d.error);
+      else location.reload();
+    });
+}
+
+function showDetail(id) {
+  fetch(`/api/models/${id}/detail`)
+    .then(r => r.json())
+    .then(d => {
+      // 簡化：用 alert 顯示 manifest（後續可改 modal）
+      alert(JSON.stringify(d.manifest, null, 2));
+    });
+}
+</script>
+{% endblock %}
