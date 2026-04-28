@@ -83,7 +83,7 @@ class CAPIConfig:
     """CAPI 推論配置"""
     
     # 機種識別
-    machine_id: Optional[str] = None
+    machine_id: str = "CAPI_3F"
     product_name: str = "CAPI 面板"
     is_new_architecture: bool = False  # 新架構：model_mapping value 為 nested dict（inner/edge）
     edge_threshold_px: int = 768       # 新架構邊緣區域判定門檻（px）
@@ -242,9 +242,10 @@ class CAPIConfig:
         for zone_data in data.get("exclusion_zones", []):
             exclusion_zones.append(ExclusionZone.from_dict(zone_data))
 
-        # 判斷新架構：machine_id 存在且 model_mapping value 為 nested dict（含 inner/edge）
+        # 判斷新架構：model_mapping 任一 value 為含 inner/edge key 的 nested dict
+        # （不依賴 machine_id，因為舊版 yaml 也有 machine_id="CAPI_3F"，不能作為判別依據）
         raw_model_mapping = data.get("model_mapping", {})
-        is_new = bool(data.get("machine_id")) and any(
+        is_new = any(
             isinstance(v, dict) and {"inner", "edge"}.issubset(v.keys())
             for v in raw_model_mapping.values()
         )
@@ -257,7 +258,7 @@ class CAPIConfig:
             threshold_mapping = {k: float(v) for k, v in raw_threshold_mapping.items()}
 
         config = cls(
-            machine_id=data.get("machine_id"),
+            machine_id=data.get("machine_id", "CAPI_3F"),
             product_name=data.get("product_name", "CAPI 面板"),
             mark_template_path=data.get("mark_template_path", "capi_mark.png"),
             mark_match_threshold=data.get("mark_match_threshold", 0.45),
