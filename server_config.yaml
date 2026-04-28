@@ -62,3 +62,14 @@ dataset_export:
   base_dir: "/data/capi_ai/datasets/over_review"
   # 啟動前檢查磁碟剩餘空間 (GB)，小於此值會拒絕啟動 job
   min_free_space_gb: 1
+
+# 新架構：多機種 yaml 並存（legacy capi_3f.yaml 仍維持）
+model_configs:
+  - configs/capi_3f.yaml
+fallback_model_config: configs/capi_3f.yaml
+
+# 訓練 wizard 設定
+training:
+  backbone_cache_dir: deployment/torch_hub_cache
+  required_backbones:
+    - wide_resnet50_2-32ee1156.pth
