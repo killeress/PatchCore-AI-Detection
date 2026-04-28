@@ -208,6 +208,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_retrain_status()
             elif path == "/api/train/new/panels":
                 self._handle_train_new_panels()
+            elif path.startswith("/api/train/new/status"):
+                self._handle_train_new_status()
             elif path == "/ric":
                 self._handle_ric_page(query, path)
             elif path == "/api/ric/report":
@@ -4610,6 +4612,44 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     job = db.get_training_job(job_id)
                     if job and job["state"] in ("failed",):
                         state["active_job_id"] = None
+
+    def _handle_train_new_status(self):
+        """GET /api/train/new/status?job_id=X
+
+        若無 job_id 則回傳最近的 active job；若無 active job 則回傳 idle。
+        若指定 job_id 則查詢該 job；若不存在則回傳 404。
+        """
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        job_id = (qs.get("job_id") or [""])[0]
+
+        db = self._capi_server_instance.database
+        state = self._train_new_state
+
+        if not job_id:
+            # 無 job_id 回最近 active job 狀態
+            job = db.get_active_training_job()
+            if not job:
+                self._send_json({"state": "idle"})
+                return
+            job_id = job["job_id"]
+        else:
+            job = db.get_training_job(job_id)
+            if not job:
+                self._send_json({"error": "job not found"}, status=404)
+                return
+
+        with state["log_lock"]:
+            log_lines = list(state["log_lines"][-100:])
+
+        resp = {
+            "job_id": job["job_id"], "machine_id": job["machine_id"],
+            "state": job["state"],
+            "started_at": job["started_at"], "completed_at": job["completed_at"],
+            "output_bundle": job["output_bundle"], "error_message": job["error_message"],
+            "log_lines": log_lines,
+        }
+        self._send_json(resp)
 
     def _handle_retrain_status(self):
         """GET /api/retrain/status"""
