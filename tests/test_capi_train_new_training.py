@@ -135,3 +135,72 @@ def test_write_manifest_yaml(tmp_path):
     assert y["machine_id"] == "GN160"
     assert y["model_mapping"]["G0F00000"]["inner"].endswith("G0F00000-inner.pt")
     assert y["threshold_mapping"]["G0F00000"]["inner"] == 0.62
+
+
+def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
+    from capi_train_new import run_training_pipeline, TrainingConfig, LIGHTINGS, ZONES
+
+    # 準備假 tile pool
+    pool = []
+    for lighting in LIGHTINGS:
+        for zone in ZONES:
+            for i in range(50):
+                p = tmp_path / "tiles" / f"{lighting}_{zone}_{i}.png"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"x")
+                pool.append({
+                    "id": len(pool), "lighting": lighting, "zone": zone,
+                    "source": "ok", "source_path": str(p), "decision": "accept",
+                })
+        for i in range(30):
+            p = tmp_path / "tiles_ng" / f"{lighting}_ng_{i}.png"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"x")
+            pool.append({
+                "id": len(pool), "lighting": lighting, "zone": None,
+                "source": "ng", "source_path": str(p), "decision": "accept",
+            })
+
+    class MockDB:
+        def list_tile_pool(self, job_id, **filt):
+            res = list(pool)
+            for k, v in filt.items():
+                res = [r for r in res if r.get(k) == v]
+            return res
+
+    db = MockDB()
+
+    trained_units = []
+    def fake_train(staging_dir, run_root, unit_label, cfg=None):
+        trained_units.append(unit_label)
+        out = run_root / "weights" / "torch" / "model.pt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"fakemodel")
+        return out
+    monkeypatch.setattr("capi_train_new.train_one_patchcore", fake_train)
+    monkeypatch.setattr("capi_train_new._compute_train_max_score", lambda *a, **kw: 0.5)
+    monkeypatch.setattr("capi_train_new._predict_ng_scores", lambda *a, **kw: [0.6, 0.7, 0.8])
+
+    # bypass backbone check for test
+    monkeypatch.setattr("capi_train_new._setup_offline_env", lambda *a, **kw: None)
+
+    cfg = TrainingConfig(
+        machine_id="GN160TEST", panel_paths=[Path("p1")],
+        over_review_root=tmp_path / "or",
+        output_root=tmp_path / "model",
+    )
+    bundle_dir = run_training_pipeline(
+        job_id="j1", cfg=cfg, db=db,
+        gpu_lock=__import__("threading").Lock(),
+        log=lambda m: None,
+    )
+
+    assert bundle_dir.exists()
+    assert len(trained_units) == 10
+    # 應有 10 個 .pt
+    pts = list(bundle_dir.glob("*.pt"))
+    assert len(pts) == 10
+    # 應有 manifest + thresholds + yaml
+    assert (bundle_dir / "manifest.json").exists()
+    assert (bundle_dir / "thresholds.json").exists()
+    assert (bundle_dir / "machine_config.yaml").exists()
