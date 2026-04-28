@@ -90,7 +90,7 @@ def _make_real_db():
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 def test_handle_train_new_panels_returns_db_result():
-    """正常情境：回傳指定 machine_id 的 OK 判定 panel 清單。"""
+    """正常情境：回傳指定 machine_id 的 machine_judgment='OK' panel 清單（ai_judgment 不限）。"""
     db = _make_real_db()
     h = _make_handler(db, "/api/train/new/panels?machine_id=GN160&days=7")
     h._handle_train_new_panels()
@@ -100,9 +100,10 @@ def test_handle_train_new_panels_returns_db_result():
     assert resp["status"] == 200
     body = json.loads(resp["body"])
     assert "panels" in body
-    # G001 是 OK；G002 是 NG；G003 是其他 model_id — 只應回傳 G001
-    assert len(body["panels"]) == 1
-    assert body["panels"][0]["glass_id"] == "G001"
+    # G001 是 OK；G002 是 NG (ai_judgment)；G003 是其他 model_id — 應回傳 G001 和 G002
+    assert len(body["panels"]) == 2
+    glass_ids = {p["glass_id"] for p in body["panels"]}
+    assert glass_ids == {"G001", "G002"}
 
 
 def test_handle_train_new_panels_requires_machine_id():
