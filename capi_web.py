@@ -206,6 +206,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_train_new_page()
             elif path == "/train/new/progress":
                 self._handle_train_new_progress_page()
+            elif path.startswith("/train/new/review/"):
+                self._handle_train_new_review_page()
             elif path == "/retrain":
                 self._handle_retrain_page()
             elif path == "/api/retrain/status":
@@ -4417,6 +4419,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """GET /train/new/progress?job_id=X"""
         template = self.jinja_env.get_template("train_new/step2_progress.html")
         html = template.render(request_path="/train/new/progress")
+        self._send_response(200, html)
+
+    def _handle_train_new_review_page(self):
+        """GET /train/new/review/<job_id>"""
+        job_id = self.path.split("/")[-1]
+        db = self._capi_server_instance.database
+        job = db.get_training_job(job_id)
+        if not job:
+            self._send_response(404, "Job not found")
+            return
+        template = self.jinja_env.get_template("train_new/step3_review.html")
+        html = template.render(request_path="/train/new/review", job_id=job_id)
         self._send_response(200, html)
 
     def _handle_retrain_page(self):
