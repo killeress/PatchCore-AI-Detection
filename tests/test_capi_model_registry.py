@@ -84,6 +84,7 @@ def test_delete_inactive_bundle_removes_dir(tmp_path):
     bdir = tmp_path / "model" / "y"
     bdir.mkdir(parents=True)
     (bdir / "x.pt").write_bytes(b"x")
+    (bdir / "machine_config.yaml").write_text("machine_id: G")
     bid = db.register_model_bundle({
         "machine_id": "G", "bundle_path": str(bdir),
         "trained_at": "2026-04-28T15:30:45", "panel_count": 5,
@@ -95,6 +96,29 @@ def test_delete_inactive_bundle_removes_dir(tmp_path):
     delete_bundle(db, bid, server_config_path=sc)
     assert not bdir.exists()
     assert db.get_model_bundle(bid) is None
+
+
+def test_delete_bundle_rejects_path_outside_model_root(tmp_path):
+    import pytest
+    from capi_database import CAPIDatabase
+    from capi_model_registry import delete_bundle
+
+    db = CAPIDatabase(tmp_path / "test.db")
+    outside = tmp_path / "outside_bundle"
+    outside.mkdir()
+    (outside / "machine_config.yaml").write_text("machine_id: G")
+    bid = db.register_model_bundle({
+        "machine_id": "G", "bundle_path": str(outside),
+        "trained_at": "2026-04-28T15:30:45", "panel_count": 5,
+        "inner_tile_count": 0, "edge_tile_count": 0, "ng_tile_count": 0,
+        "bundle_size_bytes": 0, "job_id": "j1",
+    })
+    sc = tmp_path / "server_config.yaml"
+    sc.write_text("model_configs: []")
+
+    with pytest.raises(ValueError, match="outside model root"):
+        delete_bundle(db, bid, server_config_path=sc)
+    assert outside.exists()
 
 
 def test_export_zip_streams(tmp_path):

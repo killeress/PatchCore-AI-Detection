@@ -99,3 +99,35 @@ def test_sample_ng_tiles(tmp_path):
     # NG zone 應為 None（不分 inner/edge）
     assert all(t["zone"] is None for t in db.tiles)
     assert all(t["source"] == "ng" for t in db.tiles)
+
+
+def test_sample_ng_tiles_writes_confined_thumbnails(tmp_path):
+    from pathlib import Path
+    import cv2
+    import numpy as np
+    from capi_train_new import sample_ng_tiles
+
+    or_root = tmp_path / "over_review"
+    crop_dir = or_root / "20260415_104812" / "true_ng" / "G0F00000" / "crop"
+    crop_dir.mkdir(parents=True)
+    for i in range(2):
+        cv2.imwrite(str(crop_dir / f"img_{i}.png"), np.full((32, 32), 128, dtype=np.uint8))
+
+    class MockDB:
+        def __init__(self): self.tiles = []
+        def insert_tile_pool(self, job_id, tiles):
+            self.tiles.extend(tiles)
+            return list(range(len(tiles)))
+
+    db = MockDB()
+    thumb_dir = tmp_path / ".tmp" / "train_new_thumbs" / "j1"
+    sample_ng_tiles(
+        job_id="j1", over_review_root=or_root, db=db,
+        thumb_dir=thumb_dir, per_lighting=2, log=lambda m: None,
+    )
+
+    assert db.tiles
+    for tile in db.tiles:
+        thumb = Path(tile["thumb_path"])
+        assert thumb.exists()
+        thumb.resolve().relative_to(thumb_dir.resolve())

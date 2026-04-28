@@ -72,7 +72,8 @@ function renderPanels(panels) {
   let html = '<div style="background:#313244;border-radius:10px;overflow:hidden;"><table style="width:100%;border-collapse:collapse;">';
   html += '<thead><tr style="background:#11111b;color:#a6adc8;font-size:.78rem;text-align:left;"><th style="padding:8px;width:30px;"></th><th style="padding:8px;">Glass ID</th><th>日期</th><th>機台</th><th>AI 判定</th></tr></thead><tbody>';
   for (const p of panels) {
-    html += `<tr data-path="${p.image_path}" style="border-top:1px solid #1e1e2e;cursor:pointer;" onclick="toggleSelect(this)">
+    const panelPath = p.image_dir || p.image_path || '';
+    html += `<tr data-path="${panelPath}" style="border-top:1px solid #1e1e2e;cursor:pointer;" onclick="toggleSelect(this)">
       <td style="padding:8px;"><span class="chk" style="width:14px;height:14px;border:2px solid #45475a;border-radius:3px;display:inline-block;"></span></td>
       <td style="padding:8px;font-family:monospace;color:#cdd6f4;font-size:.82rem;">${p.glass_id}</td>
       <td style="padding:8px;color:#a6adc8;font-size:.82rem;">${p.timestamp || p.created_at || ''}</td>

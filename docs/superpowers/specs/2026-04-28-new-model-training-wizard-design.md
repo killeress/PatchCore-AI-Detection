@@ -157,7 +157,7 @@ CREATE TABLE training_tile_pool (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   job_id      TEXT NOT NULL,
   lighting    TEXT NOT NULL,              -- G0F00000 / R0F00000 / W0F00000 / WGF50500 / STANDARD
-  zone        TEXT NOT NULL,              -- inner / edge
+  zone        TEXT,                       -- inner / edge；NG tiles 共用時為 NULL
   source      TEXT NOT NULL,              -- ok / ng
   source_path TEXT NOT NULL,              -- 切下來的 tile 檔絕對路徑
   thumb_path  TEXT,                       -- 縮圖
@@ -350,7 +350,7 @@ For 每片 panel folder：
 
 ```
 GET /api/train/new/tiles?job_id=X&lighting=Y
-  → JSON list of tiles，含 thumb_path / decision / source / zone
+  → JSON list of tiles，含 thumb_path / thumb_url / decision / source / zone
 
 POST /api/train/new/tiles/decision
   body: { "tile_ids": [...], "decision": "accept" | "reject" }
