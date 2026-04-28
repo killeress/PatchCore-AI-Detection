@@ -703,6 +703,7 @@ class CAPIServer:
         # 載入伺服器設定
         with open(config_path, "r", encoding="utf-8") as f:
             self.server_config = yaml.safe_load(f)
+        self.base_dir = Path(__file__).parent.resolve()
 
         # 設定日誌
         setup_logging(self.server_config)
@@ -783,20 +784,26 @@ class CAPIServer:
         cfg_paths: list = self.server_config.get("model_configs", [default_cfg_path])
         fallback_path: str = self.server_config.get("fallback_model_config", default_cfg_path)
 
+        def resolve_config_path(raw_path: str) -> Path:
+            path = Path(raw_path)
+            return path if path.is_absolute() else self.base_dir / path
+
         loaded = 0
         for path in cfg_paths:
             try:
-                cfg = CAPIConfig.from_yaml(path)
+                cfg_path = resolve_config_path(path)
+                cfg = CAPIConfig.from_yaml(str(cfg_path))
                 key = cfg.machine_id if cfg.machine_id else "CAPI_3F"
                 self.configs_by_machine[key] = cfg
                 loaded += 1
-                logger.info(f"[MultiConfig] Loaded config for machine '{key}' from {path}")
+                logger.info(f"[MultiConfig] Loaded config for machine '{key}' from {cfg_path}")
             except Exception as e:
                 logger.warning(f"[MultiConfig] Failed to load config {path}: {e}")
 
         try:
-            self.fallback_config = CAPIConfig.from_yaml(fallback_path)
-            logger.info(f"[MultiConfig] Fallback config: {fallback_path} (machine='{self.fallback_config.machine_id}')")
+            resolved_fallback = resolve_config_path(fallback_path)
+            self.fallback_config = CAPIConfig.from_yaml(str(resolved_fallback))
+            logger.info(f"[MultiConfig] Fallback config: {resolved_fallback} (machine='{self.fallback_config.machine_id}')")
         except Exception as e:
             logger.warning(f"[MultiConfig] Failed to load fallback config {fallback_path}: {e}")
             self.fallback_config = list(self.configs_by_machine.values())[0] if self.configs_by_machine else None
@@ -852,7 +859,7 @@ class CAPIServer:
 
         只檢查 is_new_architecture=True 的 config；舊架構 config 不做檢查
         （模型路徑由 _load_inferencer 延遲驗證）。
-        若有缺檔，記錄 WARNING 而非直接 raise（讓 server 仍能啟動服務其他機種）。
+        若有缺檔，直接 raise，避免新架構機種啟用後首次推論才失敗。
         """
         missing = []
         for machine_id, cfg in self.configs_by_machine.items():
@@ -863,14 +870,20 @@ class CAPIServer:
                     continue
                 for zone in ("inner", "edge"):
                     p = mapping.get(zone)
-                    if p and not Path(p).exists():
-                        missing.append(f"  machine={machine_id}, lighting={lighting}, zone={zone}: {p}")
+                    if not p:
+                        missing.append(f"  machine={machine_id}, lighting={lighting}, zone={zone}: <empty>")
+                        continue
+                    model_path = Path(p)
+                    if not model_path.is_absolute():
+                        model_path = self.base_dir / model_path
+                    if not model_path.exists():
+                        missing.append(
+                            f"  machine={machine_id}, lighting={lighting}, zone={zone}: {model_path}"
+                        )
 
         if missing:
             msg = "\n".join(missing)
-            logger.warning(
-                f"[HealthCheck] 以下新架構模型檔案不存在（machine 仍可啟動，首次推論時會報錯）：\n{msg}"
-            )
+            raise RuntimeError(f"[HealthCheck] 以下新架構模型檔案不存在，Server 停止啟動：\n{msg}")
         else:
             new_arch_count = sum(1 for c in self.configs_by_machine.values() if c.is_new_architecture)
             if new_arch_count > 0:
