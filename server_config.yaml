@@ -71,6 +71,8 @@ fallback_model_config: configs/capi_3f.yaml
 # 訓練 wizard 設定
 training:
   backbone_cache_dir: deployment/torch_hub_cache
-  required_backbones:
-    - wide_resnet50_2-32ee1156.pth
+  # Backbone weights cache layout (timm via HuggingFace):
+  #   {backbone_cache_dir}/huggingface/models--timm--wide_resnet50_2.racm_in1k/.../model.safetensors
+  # Pre-stage on internet-connected machine via:
+  #   HF_HOME=deployment/torch_hub_cache python -c "import timm; timm.create_model('wide_resnet50_2', pretrained=True)"
   over_review_root: /aidata/capi_ai/datasets/over_review
