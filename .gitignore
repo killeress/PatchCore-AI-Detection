@@ -80,5 +80,8 @@ log*.txt
 # Deployment bundles (large ML models and pickled classifiers)
 deployment/*.pkl
 deployment/*.pth
+deployment/*.zip
 # DINOv2 repo code copy (4.5MB, copied from ~/.cache/torch/hub for offline deploy)
 deployment/dinov2_repo/
+# Offline backbone cache for new training wizard (~264 MB; rebuilt by scripts/build_deploy_zip.py)
+deployment/torch_hub_cache/
