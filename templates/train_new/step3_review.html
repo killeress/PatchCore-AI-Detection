@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Tile 審核 - Step 3{% endblock %}
+{% block content %}
+<div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
+  <h1 style="color:#cdd6f4;margin:0 0 12px 0;font-size:1.3rem;">Step 3 / 5 · 訓練 tile 審核</h1>
+
+  <div style="display:flex;gap:4px;border-bottom:1px solid #45475a;padding-bottom:8px;margin-bottom:14px;overflow-x:auto;">
+    {% for lighting in ["G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"] %}
+    <span class="lighting-tab" data-lighting="{{ lighting }}" onclick="switchLighting('{{ lighting }}')"
+      style="background:#313244;padding:6px 14px;border-radius:6px 6px 0 0;color:#a6adc8;font-size:.82rem;cursor:pointer;white-space:nowrap;">
+      {{ lighting }} <span class="badge" style="background:#1e1e2e;padding:1px 7px;border-radius:8px;font-size:.72rem;margin-left:3px;">0/0</span>
+    </span>
+    {% endfor %}
+  </div>
+
+  <div id="content-area"></div>
+
+  <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;padding-top:12px;border-top:1px solid #45475a;">
+    <a href="/train/new" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">返回</a>
+    <button onclick="startTraining()"
+      style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:8px 22px;font-weight:700;">
+      開始訓練 →
+    </button>
+  </div>
+</div>
+
+<style>
+  .lighting-tab.active { background:#89b4fa;color:#1e1e2e;font-weight:700; }
+  .grp-head { background:#313244;padding:7px 12px;margin:8px 0 5px 0;border-radius:5px;border-left:3px solid #89b4fa;color:#cdd6f4;font-size:.85rem;display:flex;justify-content:space-between; }
+  .grp-head.edge { border-left-color:#f9e2af; }
+  .grp-head.ng { border-left-color:#f38ba8; }
+  .grid { display:grid;grid-template-columns:repeat(12,1fr);gap:4px; }
+  .tile { aspect-ratio:1;border-radius:3px;background:#3b4257;border:2px solid transparent;cursor:pointer;background-size:cover;background-position:center; }
+  .tile.accept { border-color:#a6e3a1; }
+  .tile.reject { border-color:#f38ba8;opacity:.5; }
+</style>
+
+<script>
+const jobId = "{{ job_id }}";
+let _currentLighting = 'G0F00000';
+let _tilesByLighting = {};  // {lighting: [tile, ...]}
+
+function loadLighting(lighting) {
+  return fetch(`/api/train/new/tiles?job_id=${encodeURIComponent(jobId)}&lighting=${lighting}`)
+    .then(r => r.json())
+    .then(d => { _tilesByLighting[lighting] = d.tiles || []; });
+}
+
+function switchLighting(lighting) {
+  _currentLighting = lighting;
+  document.querySelectorAll('.lighting-tab').forEach(t => t.classList.toggle('active', t.dataset.lighting === lighting));
+  if (!_tilesByLighting[lighting]) {
+    loadLighting(lighting).then(render);
+  } else {
+    render();
+  }
+}
+
+function render() {
+  const tiles = _tilesByLighting[_currentLighting] || [];
+  const groups = {
+    'inner_ok': tiles.filter(t => t.zone === 'inner' && t.source === 'ok'),
+    'inner_ng': tiles.filter(t => t.source === 'ng'),  // NG 不分 zone
+    'edge_ok':  tiles.filter(t => t.zone === 'edge' && t.source === 'ok'),
+  };
+  let html = '';
+  for (const [key, list] of Object.entries(groups)) {
+    if (!list.length) continue;
+    const accept = list.filter(t => t.decision === 'accept').length;
+    const isEdge = key.startsWith('edge'), isNg = key.endsWith('ng');
+    const grpCls = isNg ? 'ng' : (isEdge ? 'edge' : '');
+    const title = {inner_ok:'內部 OK', inner_ng:'NG (來自 over_review)', edge_ok:'邊緣 OK'}[key];
+    html += `<div class="grp-head ${grpCls}"><span>📦 ${title}</span><span style="color:#a6adc8;font-size:.78rem;">${accept}/${list.length} 加入</span></div>`;
+    html += '<div class="grid">';
+    for (const t of list) {
+      const tileCls = t.decision === 'reject' ? 'reject' : 'accept';
+      const thumb = `/api/train/new/thumb${t.thumb_path.replace(/^.*\.tmp\/train_new_thumbs/, '')}`;
+      html += `<div class="tile ${tileCls}" data-id="${t.id}" style="background-image:url('${thumb}');" onclick="toggleTile(this)"></div>`;
+    }
+    html += '</div>';
+  }
+  document.getElementById('content-area').innerHTML = html;
+  updateBadge(_currentLighting);
+}
+
+function toggleTile(el) {
+  const id = parseInt(el.dataset.id);
+  const tile = _tilesByLighting[_currentLighting].find(t => t.id === id);
+  const newDec = tile.decision === 'accept' ? 'reject' : 'accept';
+  fetch('/api/train/new/tiles/decision', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({job_id: jobId, tile_ids: [id], decision: newDec}),
+  }).then(() => {
+    tile.decision = newDec;
+    el.className = 'tile ' + newDec;
+    render();
+  });
+}
+
+function updateBadge(lighting) {
+  const tiles = _tilesByLighting[lighting] || [];
+  const accept = tiles.filter(t => t.decision === 'accept').length;
+  const tab = document.querySelector(`.lighting-tab[data-lighting="${lighting}"] .badge`);
+  if (tab) tab.textContent = `${accept}/${tiles.length}`;
+}
+
+function startTraining() {
+  if (!confirm('開始訓練 10 個 PatchCore 模型？預計 60-120 分鐘。')) return;
+  fetch(`/api/train/new/start_training/${encodeURIComponent(jobId)}`, {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { alert('錯誤: ' + d.error); return; }
+      location.href = `/train/new/progress?job_id=${encodeURIComponent(jobId)}`;
+    });
+}
+
+// 初始載入 5 個 lighting（一次先預載）
+Promise.all(['G0F00000','R0F00000','W0F00000','WGF50500','STANDARD'].map(loadLighting))
+  .then(() => switchLighting('G0F00000'));
+</script>
+{% endblock %}
