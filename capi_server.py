@@ -726,6 +726,8 @@ class CAPIServer:
 
         # 推論器 (延遲載入)
         self.inferencer: Optional[CAPIInferencer] = None
+        # Per-machine inferencer 快取 (machine_id → CAPIInferencer)
+        self.inferencers: Dict[str, CAPIInferencer] = {}
 
         # 資料庫
         db_cfg = self.server_config.get("database", {})
@@ -766,6 +768,9 @@ class CAPIServer:
 
         # 向後相容別名：web routes 用 .database 存取 DB
         self.database = self.db
+
+        # 啟動時驗證新架構模型檔案是否存在
+        self._health_check_models()
 
     def _load_model_configs(self, server_config_path: str) -> None:
         """載入 server_config 中 model_configs 清單，建立 configs_by_machine dispatcher。
@@ -810,6 +815,68 @@ class CAPIServer:
         Phase 9 inference per-request dispatcher 入口。
         """
         return self.configs_by_machine.get(model_id, self.fallback_config)
+
+    def _get_or_create_inferencer(self, model_id: str) -> Optional[CAPIInferencer]:
+        """依 model_id 回傳（或建立）對應的 CAPIInferencer。
+
+        - 新架構機種（is_new_architecture=True）：使用 configs_by_machine 中的 config 建立獨立推論器。
+        - 舊架構機種：直接回傳 self.inferencer（legacy 單一推論器）。
+
+        首次存取時 lazy-create 並快取至 self.inferencers。
+        """
+        # 已在快取中
+        if model_id in self.inferencers:
+            return self.inferencers[model_id]
+
+        cfg = self.configs_by_machine.get(model_id)
+
+        # 新架構機種：建立獨立的 CAPIInferencer
+        if cfg is not None and cfg.is_new_architecture:
+            inf_cfg = self.inference_config
+            device = inf_cfg.get("device", "auto")
+            logger.info(f"[Dispatch] Creating new-arch inferencer for machine='{model_id}' (device={device})")
+            inferencer = CAPIInferencer(
+                config=cfg,
+                model_path=cfg.model_path or None,
+                device=device,
+                threshold=cfg.anomaly_threshold,
+            )
+            self.inferencers[model_id] = inferencer
+            return inferencer
+
+        # 舊架構機種或找不到 config：回傳 legacy inferencer
+        return self.inferencer
+
+    def _health_check_models(self) -> None:
+        """啟動時驗證新架構機種的模型檔案是否存在。
+
+        只檢查 is_new_architecture=True 的 config；舊架構 config 不做檢查
+        （模型路徑由 _load_inferencer 延遲驗證）。
+        若有缺檔，記錄 WARNING 而非直接 raise（讓 server 仍能啟動服務其他機種）。
+        """
+        missing = []
+        for machine_id, cfg in self.configs_by_machine.items():
+            if not cfg.is_new_architecture:
+                continue
+            for lighting, mapping in cfg.model_mapping.items():
+                if not isinstance(mapping, dict):
+                    continue
+                for zone in ("inner", "edge"):
+                    p = mapping.get(zone)
+                    if p and not Path(p).exists():
+                        missing.append(f"  machine={machine_id}, lighting={lighting}, zone={zone}: {p}")
+
+        if missing:
+            msg = "\n".join(missing)
+            logger.warning(
+                f"[HealthCheck] 以下新架構模型檔案不存在（machine 仍可啟動，首次推論時會報錯）：\n{msg}"
+            )
+        else:
+            new_arch_count = sum(1 for c in self.configs_by_machine.values() if c.is_new_architecture)
+            if new_arch_count > 0:
+                logger.info(f"[HealthCheck] 新架構模型檔案驗證通過（{new_arch_count} 個機種）")
+            else:
+                logger.info("[HealthCheck] 無新架構機種，跳過模型檔案驗證")
 
     def _load_inferencer(self):
         """載入 AI 推論模型"""
@@ -1333,8 +1400,12 @@ class CAPIServer:
             (ai_judgment, ng_details_json, inference_results)
             - inference_results: List[ImageResult] 供背景儲存使用
         """
+        # 依 model_id 取得對應推論器（per-machine dispatcher）
+        model_id = parsed.get("model_id", "")
+        inferencer = self._get_or_create_inferencer(model_id)
+
         # 檢查推論器
-        if self.inferencer is None:
+        if inferencer is None:
             return "ERR:MODEL_NOT_LOADED", "[]", [], False, None, {}
 
         # 轉換路徑
@@ -1354,7 +1425,7 @@ class CAPIServer:
         with self._gpu_lock:
             try:
                 # 呼叫 process_panel 進行推論
-                panel_result = self.inferencer.process_panel(
+                panel_result = inferencer.process_panel(
                     panel_dir,
                     cpu_workers=self.cpu_workers,
                     product_resolution=parsed["resolution"],
@@ -1424,10 +1495,12 @@ class CAPIServer:
             heatmap_info = {}
             if results:
                 try:
+                    # 使用與推論時相同的 inferencer（per-machine dispatcher）
+                    heatmap_inferencer = self._get_or_create_inferencer(parsed.get("model_id", ""))
                     heatmap_info = self.heatmap_manager.save_panel_heatmaps(
                         glass_id=parsed["glass_id"],
                         results=results,
-                        inferencer=self.inferencer,
+                        inferencer=heatmap_inferencer,
                         save_overview=self.save_overview,
                         save_tile_detail=self.save_tile_detail,
                         omit_image=omit_image_raw,
