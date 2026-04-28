@@ -2315,11 +2315,13 @@ class CAPIInferencer:
             if metric == "coverage":
                 # 此異常區域被灰塵覆蓋的比例
                 region_coverage = float(region_dust_overlap / region_area) if region_area > 0 else 0.0
+                metric_denominator = region_area
             else:
                 # IOU = 交集 / 聯集 (此異常區域 ∪ 全部灰塵)
                 total_dust = np.count_nonzero(dust_bool)
                 region_union = region_area + total_dust - region_dust_overlap
                 region_coverage = float(region_dust_overlap / region_union) if region_union > 0 else 0.0
+                metric_denominator = region_union
 
             # 此區域內 anomaly_map 的最大值與位置 (無須複製整個陣列)
             region_vals = anomaly_map_f[region_mask]
@@ -2351,6 +2353,7 @@ class CAPIInferencer:
                 "label_id": label_id,
                 "area": region_area,
                 "dust_overlap": region_dust_overlap,
+                "metric_denominator": metric_denominator,
                 "coverage": region_coverage,
                 "is_dust": is_dust_region,
                 "peak_in_dust": peak_in_dust,
@@ -5106,6 +5109,12 @@ class CAPIInferencer:
         # 結果標籤 — 過濾掉 AOI 座標未達閾值的 tile (不影響 NG 判定)
         effective_anomaly_tiles = [t for t in result.anomaly_tiles
                                    if not getattr(t[0], 'is_aoi_coord_below_threshold', False)]
+        real_edge_defects = [
+            ed for ed in getattr(result, 'edge_defects', [])
+            if not getattr(ed, 'is_suspected_dust_or_scratch', False)
+            and not getattr(ed, 'is_bomb', False)
+            and not getattr(ed, 'is_cv_ok', False)
+        ]
         status = "NG" if effective_anomaly_tiles else "OK"
         # 檢查是否所有異常都是疑似灰塵
         all_dust = False
@@ -5129,7 +5138,13 @@ class CAPIInferencer:
             elif all_bomb:
                 status = "BOMB"
 
-        if not effective_anomaly_tiles:
+        if real_edge_defects:
+            status = "NG"
+            all_dust = False
+            all_bomb = False
+            all_excluded = False
+
+        if not effective_anomaly_tiles and not real_edge_defects:
             color = (0, 255, 0)
         elif all_excluded and status == "OK (Excluded)":
             color = (180, 180, 180)  # 灰色
