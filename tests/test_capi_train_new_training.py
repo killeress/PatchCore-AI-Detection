@@ -3,6 +3,8 @@ import platform
 import tempfile
 from pathlib import Path
 
+import pytest
+
 
 def test_stage_dataset_creates_links_or_copies(tmp_path):
     from capi_train_new import stage_dataset
@@ -178,8 +180,7 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
         out.write_bytes(b"fakemodel")
         return out
     monkeypatch.setattr("capi_train_new.train_one_patchcore", fake_train)
-    monkeypatch.setattr("capi_train_new._compute_train_max_score", lambda *a, **kw: 0.5)
-    monkeypatch.setattr("capi_train_new._predict_ng_scores", lambda *a, **kw: [0.6, 0.7, 0.8])
+    monkeypatch.setattr("capi_train_new._calibrate_from_model", lambda *a, **kw: (0.5, [0.6, 0.7, 0.8]))
 
     # bypass backbone check for test
     monkeypatch.setattr("capi_train_new._setup_offline_env", lambda *a, **kw: None)
@@ -196,6 +197,7 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     )
 
     assert bundle_dir.exists()
+    assert "j1" in bundle_dir.name
     assert len(trained_units) == 10
     # 應有 10 個 .pt
     pts = list(bundle_dir.glob("*.pt"))
@@ -204,3 +206,62 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     assert (bundle_dir / "manifest.json").exists()
     assert (bundle_dir / "thresholds.json").exists()
     assert (bundle_dir / "machine_config.yaml").exists()
+
+
+def test_run_training_pipeline_requires_all_units(tmp_path, monkeypatch):
+    from capi_train_new import run_training_pipeline, TrainingConfig, LIGHTINGS, ZONES
+
+    pool = []
+    for lighting in LIGHTINGS:
+        for zone in ZONES:
+            for i in range(50):
+                p = tmp_path / "tiles" / f"{lighting}_{zone}_{i}.png"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"x")
+                pool.append({
+                    "id": len(pool), "lighting": lighting, "zone": zone,
+                    "source": "ok", "source_path": str(p), "decision": "accept",
+                })
+        for i in range(30):
+            p = tmp_path / "tiles_ng" / f"{lighting}_ng_{i}.png"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"x")
+            pool.append({
+                "id": len(pool), "lighting": lighting, "zone": None,
+                "source": "ng", "source_path": str(p), "decision": "accept",
+            })
+
+    class MockDB:
+        def list_tile_pool(self, job_id, **filt):
+            res = list(pool)
+            for k, v in filt.items():
+                res = [r for r in res if r.get(k) == v]
+            return res
+
+    def fake_train(staging_dir, run_root, unit_label, cfg=None):
+        if unit_label == "G0F00000-edge":
+            raise RuntimeError("edge model failed")
+        out = run_root / "weights" / "torch" / "model.pt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"fakemodel")
+        return out
+
+    monkeypatch.setattr("capi_train_new.train_one_patchcore", fake_train)
+    monkeypatch.setattr("capi_train_new._calibrate_from_model", lambda *a, **kw: (0.5, [0.6, 0.7, 0.8]))
+    monkeypatch.setattr("capi_train_new._setup_offline_env", lambda *a, **kw: None)
+
+    output_root = tmp_path / "model"
+    cfg = TrainingConfig(
+        machine_id="GN160TEST", panel_paths=[Path("p1")],
+        over_review_root=tmp_path / "or",
+        output_root=output_root,
+    )
+
+    with pytest.raises(RuntimeError, match="G0F00000-edge"):
+        run_training_pipeline(
+            job_id="j_partial", cfg=cfg, db=MockDB(),
+            gpu_lock=__import__("threading").Lock(),
+            log=lambda m: None,
+        )
+
+    assert not list(output_root.iterdir())

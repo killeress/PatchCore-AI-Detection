@@ -38,13 +38,14 @@ def activate_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
         raise ValueError(f"bundle {bundle_id} not found")
     yaml_rel = str(Path(bundle["bundle_path"]) / "machine_config.yaml")
 
-    # 同 machine 其他 bundle 從 server_config 移除 + 設 inactive
+    # 同 machine 其他 bundle 從 server_config 移除 (yaml path 各不同，仍需逐一處理)
     for other in db.list_model_bundles(machine_id=bundle["machine_id"]):
         if other["id"] == bundle_id:
             continue
         other_yaml = str(Path(other["bundle_path"]) / "machine_config.yaml")
         _remove_from_model_configs(server_config_path, other_yaml)
-        db.set_bundle_active(other["id"], False)
+    # 批次設 inactive（一次 DB UPDATE 取代多次 set_bundle_active 呼叫）
+    db.deactivate_other_bundles_for_machine(bundle["machine_id"], except_id=bundle_id)
 
     # 加入此 bundle 的 yaml 到 server_config.model_configs
     _add_to_model_configs(server_config_path, yaml_rel)
@@ -85,9 +86,25 @@ def delete_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
     if bundle["is_active"]:
         raise ValueError("bundle is active; deactivate first")
 
-    bundle_path = Path(bundle["bundle_path"])
-    yaml_rel = str(bundle_path / "machine_config.yaml")
-    _remove_from_model_configs(server_config_path, yaml_rel)
+    server_config_path = Path(server_config_path).resolve()
+    raw_bundle_path = Path(bundle["bundle_path"])
+    bundle_path = raw_bundle_path if raw_bundle_path.is_absolute() else server_config_path.parent / raw_bundle_path
+    bundle_path = bundle_path.resolve()
+    model_root = (server_config_path.parent / "model").resolve()
+    try:
+        bundle_path.relative_to(model_root)
+    except ValueError:
+        raise ValueError(f"bundle path is outside model root: {bundle_path}")
+    if bundle_path == model_root:
+        raise ValueError("refusing to delete model root")
+    if bundle_path.exists() and not (bundle_path / "machine_config.yaml").is_file():
+        raise ValueError(f"bundle marker missing: {bundle_path / 'machine_config.yaml'}")
+
+    raw_yaml = str(raw_bundle_path / "machine_config.yaml")
+    resolved_yaml = str(bundle_path / "machine_config.yaml")
+    _remove_from_model_configs(server_config_path, raw_yaml)
+    if resolved_yaml != raw_yaml:
+        _remove_from_model_configs(server_config_path, resolved_yaml)
 
     if bundle_path.exists():
         shutil.rmtree(bundle_path, ignore_errors=False)

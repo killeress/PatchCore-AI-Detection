@@ -11,7 +11,7 @@ import json
 import logging
 import random
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable
@@ -45,6 +45,7 @@ class TrainingConfig:
     over_review_root: Path
     output_root: Path = Path("model")
     backbone_cache_dir: Path = Path("deployment/torch_hub_cache")
+    required_backbones: List[str] = field(default_factory=lambda: ["wide_resnet50_2-32ee1156.pth"])
 
     batch_size: int = 8
     image_size: tuple = (512, 512)
@@ -66,6 +67,8 @@ def preprocess_panels_to_pool(
 ) -> dict:
     """將 cfg.panel_paths 全部前處理 + 切 tile + 寫 DB。"""
     thumb_dir.mkdir(parents=True, exist_ok=True)
+    (thumb_dir / "tiles").mkdir(parents=True, exist_ok=True)
+    (thumb_dir / "thumb").mkdir(parents=True, exist_ok=True)
     panel_success = 0
     panel_fail = 0
     total_tiles = 0
@@ -93,11 +96,9 @@ def preprocess_panels_to_pool(
             for tile in result.tiles:
                 tile_filename = f"{job_id}_{panel_dir.name}_{lighting}_t{tile.tile_id:04d}.png"
                 tile_path = thumb_dir / "tiles" / tile_filename
-                tile_path.parent.mkdir(parents=True, exist_ok=True)
                 cv2.imwrite(str(tile_path), tile.image)
 
                 thumb_path = thumb_dir / "thumb" / tile_filename
-                thumb_path.parent.mkdir(parents=True, exist_ok=True)
                 thumb = cv2.resize(tile.image, (96, 96))
                 cv2.imwrite(str(thumb_path), thumb)
 
@@ -105,8 +106,8 @@ def preprocess_panels_to_pool(
                     "lighting": lighting,
                     "zone": tile.zone,
                     "source": "ok",
-                    "source_path": str(tile_path),
-                    "thumb_path": str(thumb_path),
+                    "source_path": str(tile_path.resolve()),
+                    "thumb_path": str(thumb_path.resolve()),
                 })
 
         if tile_records:
@@ -126,6 +127,7 @@ def sample_ng_tiles(
     job_id: str,
     over_review_root: Path,
     db: TrainingDB,
+    thumb_dir: Optional[Path] = None,
     per_lighting: int = NG_TILES_PER_LIGHTING,
     log: Callable[[str], None] = print,
 ) -> dict:
@@ -149,10 +151,21 @@ def sample_ng_tiles(
             log(f"⚠ {lighting}: 無 NG 樣本")
             continue
         chosen = random.sample(all_files, min(per_lighting, len(all_files)))
-        records = [{
-            "lighting": lighting, "zone": None, "source": "ng",
-            "source_path": str(p), "thumb_path": str(p),  # NG 用原圖當縮圖
-        } for p in chosen]
+        records = []
+        for i, p in enumerate(chosen):
+            thumb_path = p
+            if thumb_dir is not None:
+                candidate = thumb_dir / "thumb" / "ng" / lighting / f"{job_id}_{lighting}_ng{i:04d}_{p.name}"
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                img = cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
+                if img is not None:
+                    thumb = cv2.resize(img, (96, 96))
+                    cv2.imwrite(str(candidate), thumb)
+                    thumb_path = candidate
+            records.append({
+                "lighting": lighting, "zone": None, "source": "ng",
+                "source_path": str(p.resolve()), "thumb_path": str(thumb_path.resolve()),
+            })
         db.insert_tile_pool(job_id, records)
         sampled += len(records)
         log(f"  ✓ {lighting}: 抽 {len(chosen)} 個 NG")
@@ -294,7 +307,7 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
                               succeeded_units: Optional[Set[Tuple[str, str]]] = None) -> None:
     """產出 bundle 內的 inference yaml。
 
-    若提供 succeeded_units，只寫入已成功訓練的 (lighting, zone) 項目；
+    若提供 succeeded_units，只寫入 inner/edge 都成功訓練的 lighting；
     None 表示寫入全部 5×2=10 組（舊行為，測試用）。
     """
     import yaml
@@ -302,6 +315,10 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
     model_mapping = {}
     threshold_mapping = {}
     for lighting in LIGHTINGS:
+        if succeeded_units is not None and not all(
+            (lighting, zone) in succeeded_units for zone in ("inner", "edge")
+        ):
+            continue
         unit_paths = {}
         unit_thr = {}
         for zone in ("inner", "edge"):
@@ -328,49 +345,51 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
     )
 
 
-def _setup_offline_env(backbone_cache_dir: Path, log: Callable) -> None:
+def _setup_offline_env(backbone_cache_dir: Path, log: Callable, required_backbones: Optional[List[str]] = None) -> None:
     """設定離線推論環境：檢查 backbone 是否存在並設定環境變數。"""
     backbone_cache_dir = Path(backbone_cache_dir).resolve()
-    required = backbone_cache_dir / "hub" / "checkpoints" / "wide_resnet50_2-32ee1156.pth"
-    if not required.exists():
-        raise RuntimeError(
-            f"backbone 缺檔：{required}（請先在開發機 stage 後 FTP 上傳）"
-        )
+    required_backbones = required_backbones or ["wide_resnet50_2-32ee1156.pth"]
+    missing = [
+        backbone_cache_dir / "hub" / "checkpoints" / name
+        for name in required_backbones
+        if not (backbone_cache_dir / "hub" / "checkpoints" / name).exists()
+    ]
+    if missing:
+        paths = ", ".join(str(p) for p in missing)
+        raise RuntimeError(f"backbone 缺檔：{paths}（請先在開發機 stage 後 FTP 上傳）")
     os.environ["TORCH_HOME"] = str(backbone_cache_dir)
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_HUB_OFFLINE"] = "1"
     log(f"backbone cache: {backbone_cache_dir}")
 
 
-def _compute_train_max_score(model_pt: Path, train_paths: List[Path]) -> float:
-    """對 train tile 取樣推論，回傳 max score（用於 threshold 1.05× 校準）。"""
+def _calibrate_from_model(
+    model_pt: Path, train_paths: List[Path], ng_paths: List[Path]
+) -> Tuple[float, List[float]]:
+    """單次載入模型，回傳 (train_max_score, ng_scores)。"""
     from anomalib.deploy import TorchInferencer
     inferencer = TorchInferencer(path=str(model_pt))
+
     sample = random.sample(train_paths, min(100, len(train_paths)))
-    max_score = 0.0
+    train_max = 0.0
     for p in sample:
         img = cv2.imread(str(p))
         if img is None:
             continue
         result = inferencer.predict(img)
         score = float(getattr(result, "pred_score", 0.0))
-        if score > max_score:
-            max_score = score
-    return max_score
+        if score > train_max:
+            train_max = score
 
-
-def _predict_ng_scores(model_pt: Path, ng_paths: List[Path]) -> List[float]:
-    """對 NG tile 逐一推論，回傳 score 列表。"""
-    from anomalib.deploy import TorchInferencer
-    inferencer = TorchInferencer(path=str(model_pt))
-    scores = []
+    ng_scores = []
     for p in ng_paths:
         img = cv2.imread(str(p))
         if img is None:
             continue
         result = inferencer.predict(img)
-        scores.append(float(getattr(result, "pred_score", 0.0)))
-    return scores
+        ng_scores.append(float(getattr(result, "pred_score", 0.0)))
+
+    return train_max, ng_scores
 
 
 def run_training_pipeline(
@@ -382,9 +401,11 @@ def run_training_pipeline(
 ) -> Path:
     """執行 10 unit 訓練，輸出 bundle 目錄。"""
     # 1. 環境檢查
-    _setup_offline_env(cfg.backbone_cache_dir, log)
+    _setup_offline_env(cfg.backbone_cache_dir, log, cfg.required_backbones)
 
-    bundle_dir = cfg.output_root / f"{cfg.machine_id}-{datetime.now().strftime('%Y%m%d')}"
+    bundle_dir = cfg.output_root / (
+        f"{cfg.machine_id}-{datetime.now().strftime('%Y%m%d_%H%M%S')}-{job_id}"
+    )
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     thresholds: Dict[str, Dict[str, float]] = {l: {} for l in LIGHTINGS}
@@ -403,7 +424,7 @@ def run_training_pipeline(
                                      source="ng", decision="accept")
 
         if len(train_tiles) < MIN_TRAIN_TILES:
-            log(f"[{idx}/10] 跳過：tile 不足 ({len(train_tiles)} < {MIN_TRAIN_TILES})")
+            log(f"[{idx}/10] {unit_label}: 跳過：tile 不足 ({len(train_tiles)} < {MIN_TRAIN_TILES})")
             continue
 
         with gpu_lock:
@@ -415,11 +436,10 @@ def run_training_pipeline(
             try:
                 model_pt = train_one_patchcore(staging, run_root, unit_label, cfg)
 
-                train_max = _compute_train_max_score(
-                    model_pt, [Path(t["source_path"]) for t in train_tiles]
-                )
-                ng_scores = _predict_ng_scores(
-                    model_pt, [Path(t["source_path"]) for t in ng_tiles]
+                train_max, ng_scores = _calibrate_from_model(
+                    model_pt,
+                    [Path(t["source_path"]) for t in train_tiles],
+                    [Path(t["source_path"]) for t in ng_tiles],
                 )
                 threshold = calibrate_threshold(ng_scores, train_max)
 
@@ -432,16 +452,24 @@ def run_training_pipeline(
                 model_files[unit_label] = {"path": dst_pt.name, "size_bytes": size}
                 success_units += 1
                 succeeded_units.add((lighting, zone))
-                log(f"[{idx}/10] ✓ done, threshold={threshold:.4f}, size={size/1e6:.1f}MB")
+                log(f"[{idx}/10] {unit_label}: ✓ done, threshold={threshold:.4f}, size={size/1e6:.1f}MB")
             except Exception as e:
-                log(f"[{idx}/10] ✗ 訓練失敗: {e}")
+                log(f"[{idx}/10] {unit_label}: ✗ 訓練失敗: {e}")
                 # 不增加 success_units，繼續下一個 unit
             finally:
                 shutil.rmtree(run_root, ignore_errors=True)
                 shutil.rmtree(staging, ignore_errors=True)
 
-    if success_units < 5:
-        raise RuntimeError(f"成功 unit 數 {success_units} < 5，訓練失敗")
+    if success_units != len(TRAINING_UNITS):
+        missing = [
+            f"{lighting}-{zone}"
+            for lighting, zone in TRAINING_UNITS
+            if (lighting, zone) not in succeeded_units
+        ]
+        shutil.rmtree(bundle_dir, ignore_errors=True)
+        raise RuntimeError(
+            f"成功 unit 數 {success_units}/{len(TRAINING_UNITS)}，缺少: {', '.join(missing)}"
+        )
 
     # 寫 bundle metadata
     write_thresholds(bundle_dir, thresholds)

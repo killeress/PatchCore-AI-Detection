@@ -5076,6 +5076,256 @@ class CAPIInferencer:
 
         return results, omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image, aoi_report
 
+    def _load_omit_context(self, panel_dir: Path):
+        """Load the panel-level OMIT/PINIGBI image used by dust filtering."""
+        image_files = sorted(
+            list(Path(panel_dir).glob("*.png")) +
+            list(Path(panel_dir).glob("*.jpg")) +
+            list(Path(panel_dir).glob("*.tif")) +
+            list(Path(panel_dir).glob("*.tiff"))
+        )
+        omit_files = [
+            f for f in image_files
+            if f.stem.startswith("PINIGBI") or "OMIT0000" in f.name
+        ]
+        omit_image = None
+        omit_overexposed = False
+        omit_overexposure_info = ""
+        if omit_files:
+            omit_image = cv2.imread(str(omit_files[0]), cv2.IMREAD_UNCHANGED)
+            if omit_image is not None:
+                omit_overexposed, _mean, _ratio, omit_overexposure_info = \
+                    self.check_omit_overexposure(omit_image)
+
+        omit_vis = None
+        if omit_image is not None:
+            omit_vis = omit_image.copy()
+            if len(omit_vis.shape) == 2:
+                omit_vis = cv2.cvtColor(omit_vis, cv2.COLOR_GRAY2BGR)
+            elif len(omit_vis.shape) == 3 and omit_vis.shape[2] == 1:
+                omit_vis = cv2.cvtColor(omit_vis, cv2.COLOR_GRAY2BGR)
+        return omit_vis, omit_overexposed, omit_overexposure_info, omit_image
+
+    def _apply_cv_edge_inspection(self, result: ImageResult, model_id: Optional[str] = None) -> None:
+        """Run the shared CV edge inspector for an ImageResult."""
+        if not (getattr(self, "edge_inspector", None) and self.edge_inspector.config.enabled and result.raw_bounds):
+            return
+        try:
+            resolution_code = "UNKNOWN"
+            if model_id and len(model_id) >= 6:
+                resolution_code = model_id[5].upper()
+            self.edge_inspector.config.set_active_zones_for_product(resolution_code)
+            full_image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+            if full_image is not None:
+                result.edge_defects = self.edge_inspector.inspect(full_image, result.raw_bounds)
+        except Exception as e:
+            logger.error(f"CV 邊緣檢查失敗 {result.image_path.name}: {e}", exc_info=True)
+
+    def _apply_omit_dust_postprocess(
+        self,
+        results: List[ImageResult],
+        omit_image: Optional[np.ndarray],
+        omit_overexposed: bool,
+        omit_overexposure_info: str,
+        cpu_workers: int = 4,
+    ) -> None:
+        """Apply panel-level OMIT dust filtering to PatchCore anomaly tiles."""
+        if omit_image is None:
+            return
+
+        def _dust_check_one(result: ImageResult) -> None:
+            if self.config.should_skip_file(result.image_path.name):
+                return
+            if not result.anomaly_tiles:
+                return
+            if omit_overexposed:
+                for tile, score, _anomaly_map in result.anomaly_tiles:
+                    tile.dust_detail_text = (
+                        f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> "
+                        "Cannot verify dust, treated as REAL_NG"
+                    )
+                return
+
+            oh, ow = omit_image.shape[:2]
+            for tile, score, anomaly_map in result.anomaly_tiles:
+                tx, ty, tw, th = tile.x, tile.y, tile.width, tile.height
+                if tx >= ow or ty >= oh:
+                    continue
+                x2 = min(tx + tw, ow)
+                y2 = min(ty + th, oh)
+                omit_crop = omit_image[ty:y2, tx:x2]
+                tile.omit_crop_image = omit_crop.copy()
+
+                is_dust, dust_mask, bright_ratio, detail_text = \
+                    self.check_dust_or_scratch_feature(omit_crop)
+                tile.dust_mask = dust_mask
+                tile.dust_bright_ratio = bright_ratio
+
+                if is_dust and anomaly_map is not None and dust_mask is not None:
+                    has_real, real_peak_yx, overall_iou, region_details, heatmap_binary, _labels = \
+                        self.check_dust_per_region(
+                            dust_mask,
+                            anomaly_map,
+                            top_percent=self.config.dust_heatmap_top_percent,
+                            metric=self.config.dust_heatmap_metric,
+                            iou_threshold=self.config.dust_heatmap_iou_threshold,
+                        )
+                    tile.dust_heatmap_iou = overall_iou
+                    tile.dust_region_details = region_details
+                    tile.dust_heatmap_binary = heatmap_binary
+                    if region_details:
+                        tile.dust_region_max_cov = max(r["coverage"] for r in region_details)
+                    dust_regions = [r for r in region_details if r["is_dust"]]
+                    real_regions = [r for r in region_details if not r["is_dust"]]
+                    if has_real:
+                        tile.is_suspected_dust_or_scratch = False
+                        detail_text += (
+                            f" PER_REGION: {len(real_regions)}real+"
+                            f"{len(dust_regions)}dust -> REAL_NG"
+                        )
+                        if real_peak_yx is not None:
+                            amap_h, amap_w = anomaly_map.shape[:2]
+                            tile.anomaly_peak_y = tile.y + int(real_peak_yx[0] * tile.height / amap_h)
+                            tile.anomaly_peak_x = tile.x + int(real_peak_yx[1] * tile.width / amap_w)
+                    else:
+                        tile.is_suspected_dust_or_scratch = True
+                        detail_text += (
+                            f" PER_REGION: 0real+{len(dust_regions)}dust -> DUST"
+                        )
+                elif is_dust:
+                    tile.is_suspected_dust_or_scratch = True
+                    detail_text += " (no heatmap, marked as dust)"
+                else:
+                    detail_text += " NO_DUST -> REAL_NG"
+                tile.dust_detail_text = detail_text
+
+        needs_dust = [r for r in results if r.anomaly_tiles]
+        if not needs_dust:
+            return
+        max_workers = max(1, min(cpu_workers, len(needs_dust)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(contextvars.copy_context().run, _dust_check_one, r): r
+                for r in needs_dust
+            }
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.warning("灰塵檢測失敗 (%s): %s", futures[future].image_path.name, e)
+
+    def _apply_bomb_postprocess(
+        self,
+        results: List[ImageResult],
+        bomb_info: Optional[Dict[str, Any]],
+        product_resolution: Optional[Tuple[int, int]],
+    ) -> None:
+        """Mark anomaly tiles and edge defects that match configured/client bomb defects."""
+        active_bombs = []
+        if bomb_info is not None:
+            defect_code = self._match_bomb_defect_code(bomb_info)
+            active_bombs = [BombDefect(
+                image_prefix=bomb_info["image_prefix"],
+                defect_code=defect_code,
+                defect_type=bomb_info["defect_type"],
+                coordinates=bomb_info["coordinates"],
+            )]
+        elif self.config.bomb_defects:
+            active_bombs = self.config.bomb_defects
+        if not active_bombs:
+            return
+
+        for result in results:
+            if result.anomaly_tiles and result.raw_bounds is not None:
+                img_prefix = result.image_path.stem
+                for tile, _score, anomaly_map in result.anomaly_tiles:
+                    if anomaly_map is not None and anomaly_map.size > 0:
+                        try:
+                            amap_h, amap_w = anomaly_map.shape[:2]
+                            peak_local = np.unravel_index(np.argmax(anomaly_map), anomaly_map.shape)
+                            tile.anomaly_peak_y = tile.y + int(peak_local[0] * tile.height / amap_h)
+                            tile.anomaly_peak_x = tile.x + int(peak_local[1] * tile.width / amap_w)
+                        except Exception:
+                            tile.anomaly_peak_x, tile.anomaly_peak_y = tile.center
+                    else:
+                        tile.anomaly_peak_x, tile.anomaly_peak_y = tile.center
+
+                    is_bomb, bomb_code = self.check_bomb_match(
+                        img_prefix,
+                        tile.anomaly_peak_x,
+                        tile.anomaly_peak_y,
+                        result.raw_bounds,
+                        anomaly_map=anomaly_map,
+                        product_resolution=product_resolution,
+                        bomb_list=active_bombs,
+                    )
+                    if is_bomb:
+                        tile.is_bomb = True
+                        tile.bomb_defect_code = bomb_code
+
+            if getattr(result, "edge_defects", None) and result.raw_bounds is not None:
+                img_prefix = result.image_path.stem
+                for ed in result.edge_defects:
+                    if getattr(ed, "is_cv_ok", False):
+                        continue
+                    cx, cy = ed.center
+                    is_bomb, bomb_code = self.check_bomb_match(
+                        img_prefix, cx, cy, result.raw_bounds,
+                        product_resolution=product_resolution,
+                        bomb_list=active_bombs,
+                    )
+                    if is_bomb:
+                        ed.is_bomb = True
+                        ed.bomb_defect_code = bomb_code
+
+    def _apply_exclude_zone_postprocess(
+        self,
+        results: List[ImageResult],
+        model_id: Optional[str],
+    ) -> None:
+        """Mark PatchCore anomaly tiles that fall inside enabled CV exclude zones."""
+        if not getattr(self, "edge_inspector", None):
+            return
+        try:
+            resolution_code = ""
+            if model_id and len(model_id) >= 6:
+                resolution_code = model_id[5].upper()
+            self.edge_inspector.config.set_active_zones_for_product(resolution_code)
+            active_zones = [z for z in self.edge_inspector.config.exclude_zones if z.enabled]
+            if not active_zones:
+                return
+            for result in results:
+                for tile, _score, _anomaly_map in result.anomaly_tiles:
+                    if tile.is_bright_spot_detection:
+                        continue
+                    px = tile.anomaly_peak_x if tile.anomaly_peak_x >= 0 else tile.center[0]
+                    py = tile.anomaly_peak_y if tile.anomaly_peak_y >= 0 else tile.center[1]
+                    for zone in active_zones:
+                        if zone.x <= px <= zone.x + zone.w and zone.y <= py <= zone.y + zone.h:
+                            tile.is_in_exclude_zone = True
+                            break
+        except Exception as e:
+            logger.error(f"排除區域檢查失敗: {e}", exc_info=True)
+
+    def _apply_scratch_postprocess(self, results: List[ImageResult]) -> None:
+        """Apply the optional DINOv2 scratch classifier post-filter."""
+        sf = self._get_scratch_filter()
+        if sf is None:
+            return
+        panel_tiles = panel_filtered = 0
+        panel_ms = 0.0
+        for result in results:
+            if result.anomaly_tiles:
+                sf.apply_to_image_result(result)
+                panel_tiles += len(result.anomaly_tiles)
+                panel_filtered += getattr(result, "scratch_filter_count", 0)
+                panel_ms += getattr(result, "scratch_elapsed_ms", 0.0)
+        if panel_tiles:
+            logger.info(
+                "[scratch] Panel 總計: 檢查 %d tiles, filtered=%d, TT=%.1fms",
+                panel_tiles, panel_filtered, panel_ms,
+            )
+
     def _process_panel_v2(
         self,
         panel_dir: Path,
@@ -5095,14 +5345,15 @@ class CAPIInferencer:
                 is_duplicate, omit_image, aoi_report)
              其中 results 為 List[ImageResult]
 
-        TODO(phase 9.3+): integrate dust filter / bomb check / scratch classifier
-        TODO(phase 9.3+): integrate CV edge inspector (edge_defects)
-        TODO(phase 9.3+): integrate edge margin decay scoring
+        透過既有 predict_tile/postprocess helper 保持 v1 相容：
+        edge margin、dust filter、bomb check、CV edge inspector、scratch classifier。
         """
         import time
         from capi_preprocess import preprocess_panel_folder, PreprocessConfig
 
         t0 = time.time()
+        omit_vis, omit_overexposed, omit_overexposure_info, omit_image = \
+            self._load_omit_context(Path(panel_dir))
 
         pre_cfg = PreprocessConfig(
             tile_size=self.config.tile_size,
@@ -5134,8 +5385,7 @@ class CAPIInferencer:
             # 取得此 lighting 對應的 inner / edge model 路徑
             lighting_map = self.config.model_mapping.get(lighting, {})
             if not isinstance(lighting_map, dict) or "inner" not in lighting_map or "edge" not in lighting_map:
-                logger.warning(f"[v2] {lighting}: model_mapping 缺 inner/edge，跳過")
-                continue
+                raise RuntimeError(f"[v2] {lighting}: model_mapping 必須同時包含 inner/edge")
 
             lighting_thr = self.config.threshold_mapping.get(lighting, {})
             if isinstance(lighting_thr, dict):
@@ -5147,8 +5397,10 @@ class CAPIInferencer:
 
             # 把 capi_preprocess.TileResult 轉換成 capi_inference.TileInfo
             tile_infos: List[TileInfo] = []
+            ts = self.config.tile_size
+            bottom_y_threshold = bbox[3] - ts
+            right_x_threshold = bbox[2] - ts
             for tr in pre_result.tiles:
-                ts = self.config.tile_size
                 ti = TileInfo(
                     tile_id=tr.tile_id,
                     x=tr.x1,
@@ -5157,6 +5409,10 @@ class CAPIInferencer:
                     height=ts,
                     image=tr.image,
                     mask=tr.mask,
+                    is_bottom_edge=tr.y1 >= bottom_y_threshold,
+                    is_top_edge=tr.y1 <= bbox[1],
+                    is_left_edge=tr.x1 <= bbox[0],
+                    is_right_edge=tr.x1 >= right_x_threshold,
                 )
                 tile_infos.append(ti)
 
@@ -5169,12 +5425,17 @@ class CAPIInferencer:
                 threshold = inner_thr if zone == "inner" else edge_thr
                 try:
                     model = self._get_model_for(self.config.machine_id, lighting, zone)
-                    score, anomaly_map = self._predict_tile(model, ti.image, ti.mask)
+                    score, anomaly_map = self.predict_tile(
+                        ti,
+                        inferencer=model,
+                        threshold=threshold,
+                    )
                 except Exception as exc:
-                    logger.error(f"[v2] tile({tr.x1},{tr.y1}) 推論失敗: {exc}", exc_info=True)
-                    score, anomaly_map = 0.0, None
+                    raise RuntimeError(
+                        f"[v2] {lighting}/{zone} tile({tr.x1},{tr.y1}) 推論失敗: {exc}"
+                    ) from exc
 
-                if score > threshold:
+                if score >= threshold:
                     # 計算熱力圖峰值座標（圖片絕對座標）
                     if anomaly_map is not None:
                         peak_idx = int(np.argmax(anomaly_map))
@@ -5204,18 +5465,37 @@ class CAPIInferencer:
 
             if bomb_info is not None:
                 image_result.client_bomb_info = bomb_info
+            self._apply_cv_edge_inspection(image_result, model_id=model_id)
 
             results.append(image_result)
+
+        post_start = time.time()
+        self._apply_omit_dust_postprocess(
+            results,
+            omit_image=omit_image,
+            omit_overexposed=omit_overexposed,
+            omit_overexposure_info=omit_overexposure_info,
+            cpu_workers=cpu_workers,
+        )
+        self._apply_bomb_postprocess(results, bomb_info, product_resolution)
+        self._apply_exclude_zone_postprocess(results, model_id)
+        self._apply_scratch_postprocess(results)
+        post_elapsed = time.time() - post_start
+
+        if bomb_info is not None:
+            for result in results:
+                result.client_bomb_info = bomb_info
 
         total_elapsed = time.time() - t0
         ng_count = sum(1 for r in results if r.anomaly_tiles)
         print(
             f"[v2] Panel {Path(panel_dir).name}: "
-            f"{len(results)} lighting(s) 推論完成，{ng_count} NG，耗時 {total_elapsed:.2f}s"
+            f"{len(results)} lighting(s) 推論完成，{ng_count} NG，"
+            f"後處理 {post_elapsed:.2f}s，耗時 {total_elapsed:.2f}s"
         )
 
         # 回傳與 v1 格式相容的 7-tuple
-        return results, None, False, "", False, None, {}
+        return results, omit_vis, omit_overexposed, omit_overexposure_info, False, omit_image, {}
 
     def _get_model_for(self, machine_id: str, lighting: str, zone: str):
         """新架構 lazy loading，cache key 含 zone。
@@ -5229,8 +5509,7 @@ class CAPIInferencer:
             if not model_path.is_absolute():
                 model_path = self.base_dir / model_path
             logger.info(f"[v2] 載入 model: {machine_id}/{lighting}/{zone} → {model_path}")
-            from anomalib.deploy import TorchInferencer
-            self._model_cache_v2[key] = TorchInferencer(path=str(model_path))
+            self._model_cache_v2[key] = self._load_model_from_path(model_path)
         return self._model_cache_v2[key]
 
     def _predict_tile(self, model, tile_img: np.ndarray, mask: Optional[np.ndarray] = None):

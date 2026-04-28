@@ -3,7 +3,7 @@
 從 capi_inference.py 抽出 Otsu / panel polygon / tile 切分 / zone 分類，
 讓訓練端與推論端走同一套邏輯。
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 import numpy as np
@@ -271,8 +271,9 @@ def preprocess_panel_image(
         raise FileNotFoundError(f"無法讀取圖片: {image_path}")
 
     if reference_polygon is not None:
-        # 沿用 reference polygon；仍要跑 detect_panel_polygon 取 bbox
-        bbox, _ = detect_panel_polygon(img, config)
+        # 沿用 reference polygon；只需 bbox，跳過 polyfit 節省運算
+        bbox_only_cfg = replace(config, enable_panel_polygon=False)
+        bbox, _ = detect_panel_polygon(img, bbox_only_cfg)
         polygon = reference_polygon
         polygon_failed = False
     else:

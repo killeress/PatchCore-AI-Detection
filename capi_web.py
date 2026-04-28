@@ -289,6 +289,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/models":
                 self._handle_models_page()
                 return
+            elif path == "/api/models":
+                self._handle_models_list()
+                return
             elif path.startswith("/api/models/") and path.endswith("/detail"):
                 self._handle_models_detail()
                 return
@@ -4407,8 +4410,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         # 新機種 PatchCore card
         db = server_inst.database if server_inst else None
-        new_arch_count = len(db.list_model_bundles()) if db else 0
-        active_count = sum(1 for b in db.list_model_bundles() if b.get("is_active")) if db else 0
+        bundles = db.list_model_bundles() if db else []
+        new_arch_count = len(bundles)
+        active_count = sum(1 for b in bundles if b.get("is_active"))
 
         cards.append({
             "title": "新機種 PatchCore",
@@ -4454,8 +4458,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _handle_train_new_progress_page(self):
         """GET /train/new/progress?job_id=X"""
-        template = self.jinja_env.get_template("train_new/step2_progress.html")
-        html = template.render(request_path="/train/new/progress")
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        job_id = (qs.get("job_id") or [""])[0]
+        template_name = "train_new/step2_progress.html"
+        if job_id:
+            job = self._capi_server_instance.database.get_training_job(job_id)
+            if job and job.get("state") == "train":
+                template_name = "train_new/step4_progress.html"
+        template = self.jinja_env.get_template(template_name)
+        html = template.render(request_path="/train/new/progress", job_id=job_id)
         self._send_response(200, html)
 
     def _handle_train_new_review_page(self):
@@ -4616,24 +4628,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            import sqlite3 as _sqlite3
-            conn = self.db._get_conn()
-            try:
-                rows = conn.execute(
-                    """SELECT id, glass_id, model_id, machine_no,
-                              machine_judgment, ai_judgment, image_dir,
-                              created_at
-                       FROM inference_records
-                       WHERE model_id = ?
-                         AND machine_judgment = 'OK'
-                         AND created_at >= datetime('now', ? || ' days')
-                       ORDER BY created_at DESC
-                       LIMIT 100""",
-                    (machine_id, f"-{days}"),
-                ).fetchall()
-                panels = [dict(r) for r in rows]
-            finally:
-                conn.close()
+            panels = self.db.list_ok_panels_for_machine(machine_id, days=days)
+            for panel in panels:
+                panel["image_path"] = panel.get("image_dir", "")
             self._send_json({"panels": panels})
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=500)
@@ -4656,8 +4653,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if not machine_id or not panel_paths:
             self._send_json({"error": "machine_id and panel_paths required"}, status=400)
             return
-        if len(panel_paths) > 20:
-            self._send_json({"error": "panel_paths too many (max 20)"}, status=400)
+        if not isinstance(panel_paths, list):
+            self._send_json({"error": "panel_paths must be a list"}, status=400)
+            return
+        clean_panel_paths = []
+        for p in panel_paths:
+            if not isinstance(p, str) or not p.strip() or p.strip() in ("undefined", "null"):
+                self._send_json({"error": "panel_paths contains invalid path"}, status=400)
+                return
+            clean_panel_paths.append(p.strip())
+        if len(clean_panel_paths) != 5:
+            self._send_json({"error": "panel_paths must contain exactly 5 panels"}, status=400)
             return
 
         db = self._capi_server_instance.database
@@ -4674,24 +4680,50 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             from capi_train_new import generate_job_id
             job_id = generate_job_id(machine_id)
-            db.create_training_job(job_id=job_id, machine_id=machine_id, panel_paths=panel_paths)
+            db.create_training_job(job_id=job_id, machine_id=machine_id, panel_paths=clean_panel_paths)
             state["active_job_id"] = job_id
             state["log_lines"] = []
 
         # 起 preprocess thread
         thread = threading.Thread(
             target=CAPIWebHandler._train_new_preprocess_worker,
-            args=(job_id, machine_id, panel_paths, self._capi_server_instance),
+            args=(job_id, machine_id, clean_panel_paths, self._capi_server_instance),
             daemon=True, name=f"train_new_pre-{job_id}",
         )
         thread.start()
         self._send_json({"job_id": job_id, "state": "preprocess"})
 
     @staticmethod
+    def _load_train_new_config(server_inst) -> dict:
+        """Load training wizard config and resolve relative paths from server_config.yaml."""
+        import yaml as _yaml
+        from pathlib import Path as _Path
+
+        server_config_path = _Path(server_inst.server_config_path).resolve()
+        base_dir = server_config_path.parent
+        try:
+            raw = _yaml.safe_load(server_config_path.read_text(encoding="utf-8")) or {}
+            training_cfg = raw.get("training", {}) or {}
+        except Exception:
+            training_cfg = {}
+
+        def resolve_path(key: str, default: str) -> _Path:
+            value = training_cfg.get(key, default)
+            path = _Path(value)
+            return path if path.is_absolute() else base_dir / path
+
+        required_backbones = training_cfg.get("required_backbones") or ["wide_resnet50_2-32ee1156.pth"]
+        return {
+            "over_review_root": resolve_path("over_review_root", "/aidata/capi_ai/datasets/over_review"),
+            "backbone_cache_dir": resolve_path("backbone_cache_dir", "deployment/torch_hub_cache"),
+            "output_root": resolve_path("output_root", "model"),
+            "required_backbones": list(required_backbones),
+        }
+
+    @staticmethod
     def _train_new_preprocess_worker(job_id, machine_id, panel_paths, server_inst):
         """背景 thread：preprocess + 抽 NG → state=review。"""
         import traceback
-        import yaml as _yaml
         from pathlib import Path as _Path
         from capi_train_new import (
             TrainingConfig, preprocess_panels_to_pool, sample_ng_tiles,
@@ -4704,23 +4736,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         def log(msg):
             with state["log_lock"]:
                 state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                if len(state["log_lines"]) > 500:
+                    state["log_lines"] = state["log_lines"][-500:]
 
         try:
-            # 讀取 training 設定（含 over_review_root）
-            try:
-                _sc = _yaml.safe_load(open(server_inst.server_config_path, encoding="utf-8")) or {}
-                _training_cfg = _sc.get("training", {})
-            except Exception:
-                _training_cfg = {}
-            _over_review_root = _Path(_training_cfg.get(
-                "over_review_root", "/aidata/capi_ai/datasets/over_review"
-            ))
+            train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
 
             thumb_root = _Path(".tmp/train_new_thumbs") / job_id
             cfg = TrainingConfig(
                 machine_id=machine_id,
                 panel_paths=[_Path(p) for p in panel_paths],
-                over_review_root=_over_review_root,
+                over_review_root=train_cfg["over_review_root"],
+                backbone_cache_dir=train_cfg["backbone_cache_dir"],
+                output_root=train_cfg["output_root"],
+                required_backbones=train_cfg["required_backbones"],
             )
             pre_cfg = PreprocessConfig()
 
@@ -4735,7 +4764,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             log(f"抽 NG tile（每 lighting 30 個）")
             ng_stats = sample_ng_tiles(
                 job_id=job_id, over_review_root=cfg.over_review_root,
-                db=db, per_lighting=30, log=log,
+                db=db, thumb_dir=thumb_root, per_lighting=30, log=log,
             )
 
             db.update_training_job_state(job_id, "review")
@@ -4801,6 +4830,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
         db = self._capi_server_instance.database
         tiles = db.list_tile_pool(job_id, lighting=lighting)
+        for tile in tiles:
+            tile["thumb_url"] = self._train_new_thumb_url(tile.get("thumb_path"))
         self._send_json({"tiles": tiles})
 
     def _handle_train_new_tiles_decision(self):
@@ -4852,7 +4883,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _train_new_training_worker(job_id, machine_id, panel_paths, server_inst):
         """背景 thread：跑 10 unit 訓練 + 註冊 bundle。"""
         import traceback
-        import yaml as _yaml
         from pathlib import Path as _Path
         from capi_train_new import TrainingConfig, run_training_pipeline
 
@@ -4862,23 +4892,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         def log(msg):
             with state["log_lock"]:
                 state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                if len(state["log_lines"]) > 500:
+                    state["log_lines"] = state["log_lines"][-500:]
 
         try:
-            # 讀取 training 設定（含 over_review_root）
-            try:
-                _sc = _yaml.safe_load(open(server_inst.server_config_path, encoding="utf-8")) or {}
-                _training_cfg = _sc.get("training", {})
-            except Exception:
-                _training_cfg = {}
-            _over_review_root = _Path(_training_cfg.get(
-                "over_review_root", "/aidata/capi_ai/datasets/over_review"
-            ))
+            train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
 
             cfg = TrainingConfig(
                 machine_id=machine_id,
                 panel_paths=[_Path(p) for p in panel_paths],
-                over_review_root=_over_review_root,
-                output_root=_Path("model"),
+                over_review_root=train_cfg["over_review_root"],
+                output_root=train_cfg["output_root"],
+                backbone_cache_dir=train_cfg["backbone_cache_dir"],
+                required_backbones=train_cfg["required_backbones"],
             )
             bundle_dir = run_training_pipeline(
                 job_id=job_id, cfg=cfg, db=db,
@@ -4923,13 +4949,31 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         parts = unquote(parts)
         safe = Path(".tmp/train_new_thumbs").resolve()
         target = (safe / parts).resolve()
-        if not str(target).startswith(str(safe)):
+        try:
+            target.relative_to(safe)
+        except ValueError:
             self._send_response(403, "")
             return
-        if not target.exists():
+        if not target.is_file():
             self._send_response(404, "")
             return
         self._send_binary(str(target))
+
+    def _train_new_thumb_url(self, thumb_path: str) -> str:
+        """Convert a stored thumbnail path to the confined thumbnail route."""
+        if not thumb_path:
+            return ""
+        safe = Path(".tmp/train_new_thumbs").resolve()
+        target = Path(thumb_path)
+        if not target.is_absolute():
+            target = target.resolve()
+        else:
+            target = target.resolve()
+        try:
+            rel = target.relative_to(safe)
+        except ValueError:
+            return ""
+        return "/api/train/new/thumb/" + urllib.parse.quote(rel.as_posix(), safe="/")
 
     def _handle_retrain_status(self):
         """GET /api/retrain/status"""
@@ -5041,6 +5085,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         template = self.jinja_env.get_template("models.html")
         html = template.render(request_path="/models", grouped=grouped)
         self._send_response(200, html)
+
+    def _handle_models_list(self):
+        """GET /api/models?machine_id=X"""
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        machine_id = (qs.get("machine_id") or [""])[0].strip() or None
+        bundles = self._capi_server_instance.database.list_model_bundles(machine_id=machine_id)
+        self._send_json({"bundles": bundles})
 
     def _handle_models_detail(self):
         """GET /api/models/<id>/detail"""
