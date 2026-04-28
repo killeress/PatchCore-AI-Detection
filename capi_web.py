@@ -137,6 +137,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     _debug_heatmap_dir = None  # Debug 推論暫存目錄
     _capi_server_instance = None  # CAPIServer 實例 (用於 hot-reload)
     _log_file = None  # 日誌檔案路徑 (用於 Log Viewer)
+    # 訓練 wizard 新模型狀態（由 create_web_server 完整初始化）
+    _train_new_state: dict = {
+        "lock": threading.Lock(),
+        "active_job_id": None,
+        "thread": None,
+        "log_lines": [],
+        "log_lock": threading.Lock(),
+    }
 
     @classmethod
     def init_jinja(cls):
@@ -194,10 +202,26 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_debug_page(path)
             elif path == "/training":
                 self._handle_training_page()
+            elif path == "/train/new":
+                self._handle_train_new_page()
+            elif path == "/train/new/progress":
+                self._handle_train_new_progress_page()
+            elif path.startswith("/train/new/review/"):
+                self._handle_train_new_review_page()
+            elif path.startswith("/train/new/done/"):
+                self._handle_train_new_done_page()
             elif path == "/retrain":
                 self._handle_retrain_page()
             elif path == "/api/retrain/status":
                 self._handle_retrain_status()
+            elif path == "/api/train/new/panels":
+                self._handle_train_new_panels()
+            elif path.startswith("/api/train/new/status"):
+                self._handle_train_new_status()
+            elif path == "/api/train/new/tiles":
+                self._handle_train_new_tiles()
+            elif path.startswith("/api/train/new/thumb/"):
+                self._handle_train_new_thumb()
             elif path == "/ric":
                 self._handle_ric_page(query, path)
             elif path == "/api/ric/report":
@@ -261,6 +285,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path == "/api/debug/scratch-batch/export":
                 self._handle_scratch_batch_export(query)
+                return
+            elif path == "/models":
+                self._handle_models_page()
+                return
+            elif path == "/api/models":
+                self._handle_models_list()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/detail"):
+                self._handle_models_detail()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/export"):
+                self._handle_models_export()
                 return
             elif path == "/favicon.ico":
                 self._send_response(204, "")
@@ -344,6 +380,24 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path == "/api/debug/scratch-batch/cancel":
                 self._handle_scratch_batch_cancel()
+                return
+            elif path == "/api/train/new/start":
+                self._handle_train_new_start()
+                return
+            elif path == "/api/train/new/tiles/decision":
+                self._handle_train_new_tiles_decision()
+                return
+            elif path.startswith("/api/train/new/start_training/"):
+                self._handle_train_new_start_training()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/activate"):
+                self._handle_models_activate()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/deactivate"):
+                self._handle_models_deactivate()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/delete"):
+                self._handle_models_delete()
                 return
             else:
                 self._send_404(path)
@@ -4353,6 +4407,24 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "status_text": status_text,
             "target_url": "/retrain",
         })
+
+        # 新機種 PatchCore card
+        db = server_inst.database if server_inst else None
+        bundles = db.list_model_bundles() if db else []
+        new_arch_count = len(bundles)
+        active_count = sum(1 for b in bundles if b.get("is_active"))
+
+        cards.append({
+            "title": "新機種 PatchCore",
+            "subtitle": "C-10 (5 lighting × inner+edge)",
+            "description": f"為新機種訓練 10 個模型 bundle。已啟用 {active_count} 個 / 共 {new_arch_count} bundle。",
+            "bundle_path": "model/<機種>-<日期>",
+            "trained_at": "—" if new_arch_count == 0 else "詳見模型庫",
+            "status": "ok" if active_count > 0 else "warning",
+            "status_text": f"{active_count} 啟用" if active_count else "未訓練",
+            "target_url": "/train/new",
+        })
+
         return cards
 
     def _handle_training_page(self):
@@ -4361,6 +4433,89 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         html = template.render(
             request_path="/training",
             model_cards=self._build_training_cards(),
+        )
+        self._send_response(200, html)
+
+    def _handle_train_new_page(self):
+        """GET /train/new"""
+        db = self._capi_server_instance.database
+        active = db.get_active_training_job()
+        if active:
+            if active["state"] == "review":
+                self.send_response(302)
+                self.send_header("Location", f"/train/new/review/{active['job_id']}")
+                self.end_headers()
+                return
+            elif active["state"] in ("preprocess", "train"):
+                self.send_response(302)
+                self.send_header("Location", f"/train/new/progress?job_id={active['job_id']}")
+                self.end_headers()
+                return
+
+        template = self.jinja_env.get_template("train_new/step1_select.html")
+        html = template.render(request_path="/train/new")
+        self._send_response(200, html)
+
+    def _handle_train_new_progress_page(self):
+        """GET /train/new/progress?job_id=X"""
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        job_id = (qs.get("job_id") or [""])[0]
+        template_name = "train_new/step2_progress.html"
+        if job_id:
+            job = self._capi_server_instance.database.get_training_job(job_id)
+            if job and job.get("state") == "train":
+                template_name = "train_new/step4_progress.html"
+        template = self.jinja_env.get_template(template_name)
+        html = template.render(request_path="/train/new/progress", job_id=job_id)
+        self._send_response(200, html)
+
+    def _handle_train_new_review_page(self):
+        """GET /train/new/review/<job_id>"""
+        job_id = self.path.split("/")[-1]
+        db = self._capi_server_instance.database
+        job = db.get_training_job(job_id)
+        if not job:
+            self._send_response(404, "Job not found")
+            return
+        template = self.jinja_env.get_template("train_new/step3_review.html")
+        html = template.render(request_path="/train/new/review", job_id=job_id)
+        self._send_response(200, html)
+
+    def _handle_train_new_done_page(self):
+        """GET /train/new/done/<job_id>"""
+        job_id = self.path.split("/")[-1]
+        db = self._capi_server_instance.database
+        job = db.get_training_job(job_id)
+        if not job or job["state"] != "completed":
+            self._send_response(404, "Job not done")
+            return
+
+        bundle_path = Path(job["output_bundle"])
+        try:
+            manifest = json.loads((bundle_path / "manifest.json").read_text(encoding="utf-8"))
+            thresholds = json.loads((bundle_path / "thresholds.json").read_text(encoding="utf-8"))
+        except Exception as e:
+            self._send_response(500, f"Failed to read manifest/thresholds: {str(e)}")
+            return
+
+        units = []
+        for unit_label, tile_info in manifest["tiles_per_unit"].items():
+            lighting, zone = unit_label.rsplit("-", 1)
+            size_bytes = manifest["model_files"][unit_label]["size_bytes"]
+            units.append((unit_label, {
+                "lighting": lighting, "zone": zone,
+                "train": tile_info["train"], "ng": tile_info["ng"],
+                "threshold": thresholds.get(lighting, {}).get(zone, 0.0),
+                "size_mb": size_bytes / 1e6,
+            }))
+
+        template = self.jinja_env.get_template("train_new/step5_done.html")
+        html = template.render(
+            request_path="/train/new/done",
+            machine_id=job["machine_id"],
+            bundle_path=str(bundle_path),
+            job_id=job_id, units=units,
         )
         self._send_response(200, html)
 
@@ -4449,6 +4604,376 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         )
         thread.start()
         self._send_json({"job_id": job_id, "started_at": new_job["started_at"]})
+
+    def _handle_train_new_panels(self):
+        """GET /api/train/new/panels?machine_id=X&days=7
+
+        回傳指定機種 model_id 在近 N 天內 machine_judgment='OK'
+        的 inference_records，供訓練 wizard 第一步選擇訓練樣本使用。
+        """
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        machine_id = (qs.get("machine_id") or [""])[0].strip()
+        try:
+            days = int((qs.get("days") or ["7"])[0])
+        except (ValueError, TypeError):
+            days = 7
+
+        if not machine_id:
+            self._send_json({"error": "machine_id required"}, status=400)
+            return
+
+        if not self.db:
+            self._send_json({"error": "database not available"}, status=503)
+            return
+
+        try:
+            panels = self.db.list_ok_panels_for_machine(machine_id, days=days)
+            for panel in panels:
+                panel["image_path"] = panel.get("image_dir", "")
+            self._send_json({"panels": panels})
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=500)
+
+    def _handle_train_new_start(self):
+        """POST /api/train/new/start
+
+        body: {"machine_id": "...", "panel_paths": [...]}
+        """
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            params = json.loads(body) if body else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON body"}, status=400)
+            return
+
+        machine_id = params.get("machine_id", "").strip()
+        panel_paths = params.get("panel_paths", [])
+        if not machine_id or not panel_paths:
+            self._send_json({"error": "machine_id and panel_paths required"}, status=400)
+            return
+        if not isinstance(panel_paths, list):
+            self._send_json({"error": "panel_paths must be a list"}, status=400)
+            return
+        clean_panel_paths = []
+        for p in panel_paths:
+            if not isinstance(p, str) or not p.strip() or p.strip() in ("undefined", "null"):
+                self._send_json({"error": "panel_paths contains invalid path"}, status=400)
+                return
+            clean_panel_paths.append(p.strip())
+        if len(clean_panel_paths) != 5:
+            self._send_json({"error": "panel_paths must contain exactly 5 panels"}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        state = self._train_new_state
+        with state["lock"]:
+            existing = db.get_active_training_job()
+            if existing:
+                self._send_json({
+                    "error": "job_already_running",
+                    "active_job_id": existing["job_id"],
+                    "state": existing["state"],
+                }, status=409)
+                return
+
+            from capi_train_new import generate_job_id
+            job_id = generate_job_id(machine_id)
+            db.create_training_job(job_id=job_id, machine_id=machine_id, panel_paths=clean_panel_paths)
+            state["active_job_id"] = job_id
+            state["log_lines"] = []
+
+        # 起 preprocess thread
+        thread = threading.Thread(
+            target=CAPIWebHandler._train_new_preprocess_worker,
+            args=(job_id, machine_id, clean_panel_paths, self._capi_server_instance),
+            daemon=True, name=f"train_new_pre-{job_id}",
+        )
+        thread.start()
+        self._send_json({"job_id": job_id, "state": "preprocess"})
+
+    @staticmethod
+    def _load_train_new_config(server_inst) -> dict:
+        """Load training wizard config and resolve relative paths from server_config.yaml."""
+        import yaml as _yaml
+        from pathlib import Path as _Path
+
+        server_config_path = _Path(server_inst.server_config_path).resolve()
+        base_dir = server_config_path.parent
+        try:
+            raw = _yaml.safe_load(server_config_path.read_text(encoding="utf-8")) or {}
+            training_cfg = raw.get("training", {}) or {}
+        except Exception:
+            training_cfg = {}
+
+        def resolve_path(key: str, default: str) -> _Path:
+            value = training_cfg.get(key, default)
+            path = _Path(value)
+            return path if path.is_absolute() else base_dir / path
+
+        required_backbones = training_cfg.get("required_backbones") or ["wide_resnet50_2-32ee1156.pth"]
+        return {
+            "over_review_root": resolve_path("over_review_root", "/aidata/capi_ai/datasets/over_review"),
+            "backbone_cache_dir": resolve_path("backbone_cache_dir", "deployment/torch_hub_cache"),
+            "output_root": resolve_path("output_root", "model"),
+            "required_backbones": list(required_backbones),
+        }
+
+    @staticmethod
+    def _train_new_preprocess_worker(job_id, machine_id, panel_paths, server_inst):
+        """背景 thread：preprocess + 抽 NG → state=review。"""
+        import traceback
+        from pathlib import Path as _Path
+        from capi_train_new import (
+            TrainingConfig, preprocess_panels_to_pool, sample_ng_tiles,
+        )
+        from capi_preprocess import PreprocessConfig
+
+        db = server_inst.database
+        state = CAPIWebHandler._train_new_state
+
+        def log(msg):
+            with state["log_lock"]:
+                state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                if len(state["log_lines"]) > 500:
+                    state["log_lines"] = state["log_lines"][-500:]
+
+        try:
+            train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
+
+            thumb_root = _Path(".tmp/train_new_thumbs") / job_id
+            cfg = TrainingConfig(
+                machine_id=machine_id,
+                panel_paths=[_Path(p) for p in panel_paths],
+                over_review_root=train_cfg["over_review_root"],
+                backbone_cache_dir=train_cfg["backbone_cache_dir"],
+                output_root=train_cfg["output_root"],
+                required_backbones=train_cfg["required_backbones"],
+            )
+            pre_cfg = PreprocessConfig()
+
+            log(f"開始前處理 {len(panel_paths)} panel")
+            stats = preprocess_panels_to_pool(
+                job_id=job_id, cfg=cfg, preprocess_cfg=pre_cfg,
+                db=db, thumb_dir=thumb_root, log=log,
+            )
+            if stats["panel_success"] < 4:
+                raise RuntimeError(f"成功 panel < 4 ({stats['panel_success']})")
+
+            log(f"抽 NG tile（每 lighting 30 個）")
+            ng_stats = sample_ng_tiles(
+                job_id=job_id, over_review_root=cfg.over_review_root,
+                db=db, thumb_dir=thumb_root, per_lighting=30, log=log,
+            )
+
+            db.update_training_job_state(job_id, "review")
+            log("✓ 進入 review 階段")
+        except Exception as e:
+            traceback.print_exc()
+            db.update_training_job_state(job_id, "failed", error_message=str(e))
+            log(f"✗ 失敗: {e}")
+        finally:
+            with state["lock"]:
+                if state["active_job_id"] == job_id:
+                    # preprocess 完成不解鎖（仍在 review）；失敗才解鎖
+                    job = db.get_training_job(job_id)
+                    if job and job["state"] in ("failed",):
+                        state["active_job_id"] = None
+
+    def _handle_train_new_status(self):
+        """GET /api/train/new/status?job_id=X
+
+        若無 job_id 則回傳最近的 active job；若無 active job 則回傳 idle。
+        若指定 job_id 則查詢該 job；若不存在則回傳 404。
+        """
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        job_id = (qs.get("job_id") or [""])[0]
+
+        db = self._capi_server_instance.database
+        state = self._train_new_state
+
+        if not job_id:
+            # 無 job_id 回最近 active job 狀態
+            job = db.get_active_training_job()
+            if not job:
+                self._send_json({"state": "idle"})
+                return
+            job_id = job["job_id"]
+        else:
+            job = db.get_training_job(job_id)
+            if not job:
+                self._send_json({"error": "job not found"}, status=404)
+                return
+
+        with state["log_lock"]:
+            log_lines = list(state["log_lines"][-100:])
+
+        resp = {
+            "job_id": job["job_id"], "machine_id": job["machine_id"],
+            "state": job["state"],
+            "started_at": job["started_at"], "completed_at": job["completed_at"],
+            "output_bundle": job["output_bundle"], "error_message": job["error_message"],
+            "log_lines": log_lines,
+        }
+        self._send_json(resp)
+
+    def _handle_train_new_tiles(self):
+        """GET /api/train/new/tiles?job_id=X&lighting=Y"""
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        job_id = (qs.get("job_id") or [""])[0]
+        lighting = (qs.get("lighting") or [""])[0]
+        if not job_id or not lighting:
+            self._send_json({"error": "job_id and lighting required"}, status=400)
+            return
+        db = self._capi_server_instance.database
+        tiles = db.list_tile_pool(job_id, lighting=lighting)
+        for tile in tiles:
+            tile["thumb_url"] = self._train_new_thumb_url(tile.get("thumb_path"))
+        self._send_json({"tiles": tiles})
+
+    def _handle_train_new_tiles_decision(self):
+        """POST /api/train/new/tiles/decision
+        body: {"job_id": "...", "tile_ids": [int, ...], "decision": "accept"|"reject"}
+        """
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON"}, status=400)
+            return
+
+        job_id = body.get("job_id")
+        tile_ids = body.get("tile_ids", [])
+        decision = body.get("decision")
+
+        if not job_id or not tile_ids or decision not in ("accept", "reject"):
+            self._send_json({"error": "job_id, tile_ids, decision required"}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        db.update_tile_decisions(job_id, tile_ids, decision)
+        self._send_json({"ok": True, "updated": len(tile_ids)})
+
+    def _handle_train_new_start_training(self):
+        """POST /api/train/new/start_training/<job_id>"""
+        job_id = self.path.rsplit("/", 1)[-1].split("?")[0]
+        db = self._capi_server_instance.database
+        job = db.get_training_job(job_id)
+        if not job:
+            self._send_json({"error": "job not found"}, status=404)
+            return
+        if job["state"] != "review":
+            self._send_json({"error": f"job state must be 'review', currently '{job['state']}'"}, status=409)
+            return
+
+        db.update_training_job_state(job_id, "train")
+
+        thread = threading.Thread(
+            target=CAPIWebHandler._train_new_training_worker,
+            args=(job_id, job["machine_id"], job["panel_paths"], self._capi_server_instance),
+            daemon=True, name=f"train_new-{job_id}",
+        )
+        thread.start()
+        self._send_json({"ok": True, "state": "train"})
+
+    @staticmethod
+    def _train_new_training_worker(job_id, machine_id, panel_paths, server_inst):
+        """背景 thread：跑 10 unit 訓練 + 註冊 bundle。"""
+        import traceback
+        from pathlib import Path as _Path
+        from capi_train_new import TrainingConfig, run_training_pipeline
+
+        db = server_inst.database
+        state = CAPIWebHandler._train_new_state
+
+        def log(msg):
+            with state["log_lock"]:
+                state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                if len(state["log_lines"]) > 500:
+                    state["log_lines"] = state["log_lines"][-500:]
+
+        try:
+            train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
+
+            cfg = TrainingConfig(
+                machine_id=machine_id,
+                panel_paths=[_Path(p) for p in panel_paths],
+                over_review_root=train_cfg["over_review_root"],
+                output_root=train_cfg["output_root"],
+                backbone_cache_dir=train_cfg["backbone_cache_dir"],
+                required_backbones=train_cfg["required_backbones"],
+            )
+            bundle_dir = run_training_pipeline(
+                job_id=job_id, cfg=cfg, db=db,
+                gpu_lock=server_inst._gpu_lock,
+                log=log,
+            )
+
+            # 註冊到 model_registry
+            sizes = sum(p.stat().st_size for p in bundle_dir.glob("*.pt"))
+            manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+            inner_count = sum(v["train"] for k, v in manifest["tiles_per_unit"].items() if k.endswith("-inner"))
+            edge_count = sum(v["train"] for k, v in manifest["tiles_per_unit"].items() if k.endswith("-edge"))
+            ng_count = sum(v["ng"] for v in manifest["tiles_per_unit"].values())
+
+            db.register_model_bundle({
+                "machine_id": machine_id,
+                "bundle_path": str(bundle_dir),
+                "trained_at": manifest["trained_at"],
+                "panel_count": manifest["panel_count"],
+                "inner_tile_count": inner_count,
+                "edge_tile_count": edge_count,
+                "ng_tile_count": ng_count,
+                "bundle_size_bytes": sizes,
+                "job_id": job_id,
+            })
+
+            db.update_training_job_state(job_id, "completed", output_bundle=str(bundle_dir))
+            log(f"✓ 訓練完成，bundle={bundle_dir}")
+        except Exception as e:
+            traceback.print_exc()
+            db.update_training_job_state(job_id, "failed", error_message=str(e))
+            log(f"✗ 訓練失敗: {e}")
+        finally:
+            with state["lock"]:
+                if state["active_job_id"] == job_id:
+                    state["active_job_id"] = None
+
+    def _handle_train_new_thumb(self):
+        """GET /api/train/new/thumb/<rest_of_path>"""
+        from urllib.parse import unquote
+        parts = self.path.split("/api/train/new/thumb/", 1)[1].split("?")[0]
+        parts = unquote(parts)
+        safe = Path(".tmp/train_new_thumbs").resolve()
+        target = (safe / parts).resolve()
+        try:
+            target.relative_to(safe)
+        except ValueError:
+            self._send_response(403, "")
+            return
+        if not target.is_file():
+            self._send_response(404, "")
+            return
+        self._send_binary(str(target))
+
+    def _train_new_thumb_url(self, thumb_path: str) -> str:
+        """Convert a stored thumbnail path to the confined thumbnail route."""
+        if not thumb_path:
+            return ""
+        safe = Path(".tmp/train_new_thumbs").resolve()
+        target = Path(thumb_path)
+        if not target.is_absolute():
+            target = target.resolve()
+        else:
+            target = target.resolve()
+        try:
+            rel = target.relative_to(safe)
+        except ValueError:
+            return ""
+        return "/api/train/new/thumb/" + urllib.parse.quote(rel.as_posix(), safe="/")
 
     def _handle_retrain_status(self):
         """GET /api/retrain/status"""
@@ -4548,6 +5073,101 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             for lg in watched_loggers:
                 lg.removeHandler(handler)
 
+    # ------------------------------------------------------------------ #
+    #  Model registry handlers                                            #
+    # ------------------------------------------------------------------ #
+
+    def _handle_models_page(self):
+        """GET /models"""
+        db = self._capi_server_instance.database
+        from capi_model_registry import list_bundles_grouped
+        grouped = list_bundles_grouped(db)
+        template = self.jinja_env.get_template("models.html")
+        html = template.render(request_path="/models", grouped=grouped)
+        self._send_response(200, html)
+
+    def _handle_models_list(self):
+        """GET /api/models?machine_id=X"""
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        machine_id = (qs.get("machine_id") or [""])[0].strip() or None
+        bundles = self._capi_server_instance.database.list_model_bundles(machine_id=machine_id)
+        self._send_json({"bundles": bundles})
+
+    def _handle_models_detail(self):
+        """GET /api/models/<id>/detail"""
+        parts = self.path.split("/")
+        bundle_id = int(parts[3])
+        from capi_model_registry import get_bundle_detail
+        detail = get_bundle_detail(self._capi_server_instance.database, bundle_id)
+        if not detail:
+            self._send_json({"error": "not found"}, status=404)
+            return
+        self._send_json(detail)
+
+    def _handle_models_activate(self):
+        """POST /api/models/<id>/activate"""
+        parts = self.path.split("/")
+        bundle_id = int(parts[3])
+        from capi_model_registry import activate_bundle
+        try:
+            result = activate_bundle(
+                self._capi_server_instance.database,
+                bundle_id,
+                server_config_path=Path(self._capi_server_instance.server_config_path),
+            )
+            self._send_json(result)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+
+    def _handle_models_deactivate(self):
+        """POST /api/models/<id>/deactivate"""
+        parts = self.path.split("/")
+        bundle_id = int(parts[3])
+        from capi_model_registry import deactivate_bundle
+        try:
+            result = deactivate_bundle(
+                self._capi_server_instance.database, bundle_id,
+                server_config_path=Path(self._capi_server_instance.server_config_path),
+            )
+            self._send_json(result)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+
+    def _handle_models_delete(self):
+        """POST /api/models/<id>/delete"""
+        parts = self.path.split("/")
+        bundle_id = int(parts[3])
+        from capi_model_registry import delete_bundle
+        try:
+            result = delete_bundle(
+                self._capi_server_instance.database, bundle_id,
+                server_config_path=Path(self._capi_server_instance.server_config_path),
+            )
+            self._send_json(result)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=409)
+
+    def _handle_models_export(self):
+        """GET /api/models/<id>/export → 串流 ZIP"""
+        parts = self.path.split("/")
+        bundle_id = int(parts[3])
+        from capi_model_registry import export_bundle_zip
+        db = self._capi_server_instance.database
+        bundle = db.get_model_bundle(bundle_id)
+        if not bundle:
+            self._send_response(404, "")
+            return
+
+        zip_bytes = export_bundle_zip(Path(bundle["bundle_path"]), bundle["machine_id"])
+        filename = f"{Path(bundle['bundle_path']).name}.zip"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(zip_bytes)))
+        self.end_headers()
+        self.wfile.write(zip_bytes)
+
 
 def create_web_server(
     host: str,
@@ -4596,6 +5216,13 @@ def create_web_server(
     CAPIWebHandler._retrain_state = {
         "lock": threading.Lock(),
         "job": None,
+    }
+    CAPIWebHandler._train_new_state = {
+        "lock": threading.Lock(),
+        "active_job_id": None,
+        "thread": None,
+        "log_lines": [],
+        "log_lock": threading.Lock(),
     }
     CAPIWebHandler.init_jinja()
 

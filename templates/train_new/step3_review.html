@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% block title %}Tile 審核 - Step 3{% endblock %}
+{% block content %}
+<div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
+  <h1 style="color:#cdd6f4;margin:0 0 12px 0;font-size:1.3rem;">Step 3 / 5 · 訓練 tile 審核</h1>
+
+  <div style="display:flex;gap:4px;border-bottom:1px solid #45475a;padding-bottom:8px;margin-bottom:14px;overflow-x:auto;">
+    {% for lighting in ["G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"] %}
+    <span class="lighting-tab" data-lighting="{{ lighting }}" onclick="switchLighting('{{ lighting }}')"
+      style="background:#313244;padding:6px 14px;border-radius:6px 6px 0 0;color:#a6adc8;font-size:.82rem;cursor:pointer;white-space:nowrap;">
+      {{ lighting }} <span class="badge" style="background:#1e1e2e;padding:1px 7px;border-radius:8px;font-size:.72rem;margin-left:3px;">0/0</span>
+    </span>
+    {% endfor %}
+  </div>
+
+  <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;">
+    <div style="display:flex;gap:6px;">
+      <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">全部</button>
+      <button class="filter-btn" data-filter="accept" onclick="setFilter('accept')">已加入</button>
+      <button class="filter-btn" data-filter="reject" onclick="setFilter('reject')">已排除</button>
+    </div>
+    <div style="display:flex;gap:6px;">
+      <button class="batch-btn" onclick="setVisibleDecision('accept')">目前可見全部加入</button>
+      <button class="batch-btn danger" onclick="setVisibleDecision('reject')">目前可見全部排除</button>
+    </div>
+  </div>
+
+  <div id="content-area"></div>
+
+  <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;padding-top:12px;border-top:1px solid #45475a;">
+    <a href="/train/new" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">返回</a>
+    <button onclick="startTraining()"
+      style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:8px 22px;font-weight:700;">
+      開始訓練 →
+    </button>
+  </div>
+</div>
+
+<style>
+  .lighting-tab.active { background:#89b4fa;color:#1e1e2e;font-weight:700; }
+  .grp-head { background:#313244;padding:7px 12px;margin:8px 0 5px 0;border-radius:5px;border-left:3px solid #89b4fa;color:#cdd6f4;font-size:.85rem;display:flex;justify-content:space-between; }
+  .grp-head.edge { border-left-color:#f9e2af; }
+  .grp-head.ng { border-left-color:#f38ba8; }
+  .grid { display:grid;grid-template-columns:repeat(12,1fr);gap:4px; }
+  .tile { aspect-ratio:1;border-radius:3px;background:#3b4257;border:2px solid transparent;cursor:pointer;background-size:cover;background-position:center; }
+  .tile.accept { border-color:#a6e3a1; }
+  .tile.reject { border-color:#f38ba8;opacity:.5; }
+  .filter-btn,.batch-btn,.grp-btn { background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:6px 10px;cursor:pointer;font-size:.78rem; }
+  .filter-btn.active { background:#89b4fa;color:#1e1e2e;border-color:#89b4fa;font-weight:700; }
+  .batch-btn.danger,.grp-btn.danger { border-color:#f38ba8;color:#f38ba8; }
+  .grp-actions { display:flex;gap:5px;align-items:center; }
+  .tile.empty { cursor:default;opacity:.35;background:#1e1e2e; }
+</style>
+
+<script>
+const jobId = "{{ job_id }}";
+let _currentLighting = 'G0F00000';
+let _tilesByLighting = {};  // {lighting: [tile, ...]}
+let _filter = 'all';
+let _lastClickedId = null;
+
+function loadLighting(lighting) {
+  return fetch(`/api/train/new/tiles?job_id=${encodeURIComponent(jobId)}&lighting=${lighting}`)
+    .then(r => r.json())
+    .then(d => { _tilesByLighting[lighting] = d.tiles || []; });
+}
+
+function switchLighting(lighting) {
+  _currentLighting = lighting;
+  _lastClickedId = null;
+  document.querySelectorAll('.lighting-tab').forEach(t => t.classList.toggle('active', t.dataset.lighting === lighting));
+  if (!_tilesByLighting[lighting]) {
+    loadLighting(lighting).then(render);
+  } else {
+    render();
+  }
+}
+
+function setFilter(filter) {
+  _filter = filter;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === filter));
+  render();
+}
+
+function groupTiles(tiles) {
+  return {
+    inner_ok: tiles.filter(t => t.zone === 'inner' && t.source === 'ok'),
+    edge_ok: tiles.filter(t => t.zone === 'edge' && t.source === 'ok'),
+    ng: tiles.filter(t => t.source === 'ng'),
+  };
+}
+
+function visibleTiles(list) {
+  if (_filter === 'all') return list;
+  return list.filter(t => t.decision === _filter);
+}
+
+function render() {
+  const tiles = _tilesByLighting[_currentLighting] || [];
+  const groups = groupTiles(tiles);
+  let html = '';
+  for (const [key, list] of Object.entries(groups)) {
+    const displayList = visibleTiles(list);
+    const accept = list.filter(t => t.decision === 'accept').length;
+    const isEdge = key === 'edge_ok', isNg = key === 'ng';
+    const grpCls = isNg ? 'ng' : (isEdge ? 'edge' : '');
+    const title = {
+      inner_ok:'內部 OK',
+      edge_ok:'邊緣 OK',
+      ng:'NG（來自 over_review，inner/edge 共用）',
+    }[key];
+    html += `<div class="grp-head ${grpCls}">
+      <span>${title}</span>
+      <span class="grp-actions">
+        <span style="color:#a6adc8;font-size:.78rem;">${accept}/${list.length} 加入</span>
+        <button class="grp-btn" onclick="setGroupDecision('${key}','accept')">全加入</button>
+        <button class="grp-btn danger" onclick="setGroupDecision('${key}','reject')">全排除</button>
+      </span>
+    </div>`;
+    html += '<div class="grid">';
+    if (!displayList.length) {
+      html += '<div class="tile empty" title="無符合篩選的 tile"></div>';
+    }
+    for (const t of displayList) {
+      const tileCls = t.decision === 'reject' ? 'reject' : 'accept';
+      const thumb = t.thumb_url || '';
+      html += `<div class="tile ${tileCls}" data-id="${t.id}" style="background-image:url('${thumb}');" onclick="toggleTile(this,event)"></div>`;
+    }
+    html += '</div>';
+  }
+  document.getElementById('content-area').innerHTML = html;
+  updateBadge(_currentLighting);
+}
+
+function updateDecision(tileIds, decision) {
+  if (!tileIds.length) return Promise.resolve();
+  return fetch('/api/train/new/tiles/decision', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({job_id: jobId, tile_ids: tileIds, decision}),
+  }).then(r => r.json()).then(d => {
+    if (d.error) { alert('錯誤: ' + d.error); return; }
+    for (const tile of _tilesByLighting[_currentLighting] || []) {
+      if (tileIds.includes(tile.id)) tile.decision = decision;
+    }
+    render();
+  });
+}
+
+function toggleTile(el, event) {
+  const id = parseInt(el.dataset.id);
+  const tile = _tilesByLighting[_currentLighting].find(t => t.id === id);
+  const newDec = tile.decision === 'accept' ? 'reject' : 'accept';
+  let ids = [id];
+  if (event.shiftKey && _lastClickedId !== null) {
+    const visibleIds = Array.from(document.querySelectorAll('.tile[data-id]')).map(e => parseInt(e.dataset.id));
+    const a = visibleIds.indexOf(_lastClickedId);
+    const b = visibleIds.indexOf(id);
+    if (a >= 0 && b >= 0) {
+      const lo = Math.min(a, b);
+      const hi = Math.max(a, b);
+      ids = visibleIds.slice(lo, hi + 1);
+    }
+  }
+  _lastClickedId = id;
+  updateDecision(ids, newDec);
+}
+
+function setGroupDecision(key, decision) {
+  const ids = visibleTiles(groupTiles(_tilesByLighting[_currentLighting] || [])[key]).map(t => t.id);
+  updateDecision(ids, decision);
+}
+
+function setVisibleDecision(decision) {
+  const ids = Array.from(document.querySelectorAll('.tile[data-id]')).map(e => parseInt(e.dataset.id));
+  updateDecision(ids, decision);
+}
+
+function updateBadge(lighting) {
+  const tiles = _tilesByLighting[lighting] || [];
+  const accept = tiles.filter(t => t.decision === 'accept').length;
+  const tab = document.querySelector(`.lighting-tab[data-lighting="${lighting}"] .badge`);
+  if (tab) tab.textContent = `${accept}/${tiles.length}`;
+}
+
+function startTraining() {
+  if (!confirm('開始訓練 10 個 PatchCore 模型？預計 60-120 分鐘。')) return;
+  fetch(`/api/train/new/start_training/${encodeURIComponent(jobId)}`, {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { alert('錯誤: ' + d.error); return; }
+      location.href = `/train/new/progress?job_id=${encodeURIComponent(jobId)}`;
+    });
+}
+
+// 初始載入 5 個 lighting（一次先預載）
+Promise.all(['G0F00000','R0F00000','W0F00000','WGF50500','STANDARD'].map(loadLighting))
+  .then(() => switchLighting('G0F00000'));
+</script>
+{% endblock %}

@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}訓練新機種 - Step 1{% endblock %}
+{% block content %}
+<div style="max-width:900px;margin:0 auto;padding:24px 16px;">
+  <div style="margin-bottom:14px;">
+    <a href="/training" style="color:#a6adc8;text-decoration:none;font-size:.9rem;">← 返回模型訓練</a>
+  </div>
+  <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.4rem;">Step 1 / 5 · 選擇訓練資料</h1>
+  <p style="color:#a6adc8;font-size:.9rem;">勾選 5 片 AOI 判 OK 的 panel 作為 OK 訓練樣本來源</p>
+
+  <div style="background:#313244;border-radius:10px;padding:18px;margin-top:16px;">
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;">
+      <span style="color:#a6adc8;font-size:.85rem;width:90px;">機種 ID</span>
+      <input id="machine-id" type="text" placeholder="例：GN160JCEL250S"
+        style="flex:1;background:#1e1e2e;border:1px solid #45475a;border-radius:5px;color:#cdd6f4;padding:7px 10px;font-family:monospace;">
+      <button id="search-btn" onclick="searchPanels()"
+        style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:7px 16px;font-weight:700;">查詢</button>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;">
+      <span style="color:#a6adc8;font-size:.82rem;">時間範圍</span>
+      <span class="day-pill" data-d="1" onclick="setDays(1)">1 天</span>
+      <span class="day-pill active" data-d="7" onclick="setDays(7)">7 天</span>
+      <span class="day-pill" data-d="30" onclick="setDays(30)">30 天</span>
+    </div>
+  </div>
+
+  <div id="panel-list" style="margin-top:16px;"></div>
+
+  <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;">
+    <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0/5 片</span>
+    <span>
+      <a href="/training" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">取消</a>
+      <button id="next-btn" onclick="submitStart()" disabled
+        style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:8px 22px;font-weight:700;opacity:.4;">
+        下一步：前處理 →
+      </button>
+    </span>
+  </div>
+</div>
+
+<style>
+  .day-pill { background:#313244;padding:5px 11px;border-radius:13px;color:#a6adc8;font-size:.78rem;cursor:pointer; }
+  .day-pill.active { background:#89b4fa;color:#1e1e2e;font-weight:700; }
+</style>
+
+<script>
+let _days = 7;
+let _selected = new Set();
+
+function setDays(d) {
+  _days = d;
+  document.querySelectorAll('.day-pill').forEach(p => p.classList.toggle('active', parseInt(p.dataset.d) === d));
+  if (document.getElementById('machine-id').value.trim()) searchPanels();
+}
+
+function searchPanels() {
+  const mid = document.getElementById('machine-id').value.trim();
+  if (!mid) return;
+  fetch(`/api/train/new/panels?machine_id=${encodeURIComponent(mid)}&days=${_days}`)
+    .then(r => r.json())
+    .then(d => renderPanels(d.panels || []));
+}
+
+function renderPanels(panels) {
+  _selected = new Set();
+  const root = document.getElementById('panel-list');
+  if (!panels.length) {
+    root.innerHTML = '<div style="background:#313244;padding:24px;border-radius:10px;color:#a6adc8;text-align:center;">無符合條件的 panel</div>';
+    updateNext();
+    return;
+  }
+  let html = '<div style="background:#313244;border-radius:10px;overflow:hidden;"><table style="width:100%;border-collapse:collapse;">';
+  html += '<thead><tr style="background:#11111b;color:#a6adc8;font-size:.78rem;text-align:left;"><th style="padding:8px;width:30px;"></th><th style="padding:8px;">Glass ID</th><th>日期</th><th>機台</th><th>AI 判定</th></tr></thead><tbody>';
+  for (const p of panels) {
+    html += `<tr data-path="${p.image_path}" style="border-top:1px solid #1e1e2e;cursor:pointer;" onclick="toggleSelect(this)">
+      <td style="padding:8px;"><span class="chk" style="width:14px;height:14px;border:2px solid #45475a;border-radius:3px;display:inline-block;"></span></td>
+      <td style="padding:8px;font-family:monospace;color:#cdd6f4;font-size:.82rem;">${p.glass_id}</td>
+      <td style="padding:8px;color:#a6adc8;font-size:.82rem;">${p.timestamp || p.created_at || ''}</td>
+      <td style="padding:8px;color:#a6adc8;font-size:.82rem;">${p.machine_no}</td>
+      <td style="padding:8px;font-size:.82rem;color:${p.ai_judgment === 'OK' ? '#a6e3a1' : '#fab387'};">${p.ai_judgment || '-'}</td>
+    </tr>`;
+  }
+  html += '</tbody></table></div>';
+  root.innerHTML = html;
+  updateNext();
+}
+
+function toggleSelect(tr) {
+  const path = tr.dataset.path;
+  if (_selected.has(path)) {
+    _selected.delete(path);
+    tr.style.background = '';
+    tr.querySelector('.chk').style.background = '';
+  } else {
+    if (_selected.size >= 5) return;
+    _selected.add(path);
+    tr.style.background = '#1e3a4d';
+    const chk = tr.querySelector('.chk');
+    chk.style.background = '#89b4fa';
+    chk.style.borderColor = '#89b4fa';
+  }
+  updateNext();
+}
+
+function updateNext() {
+  document.getElementById('sel-count').textContent = `已選 ${_selected.size}/5 片`;
+  const btn = document.getElementById('next-btn');
+  btn.disabled = _selected.size !== 5;
+  btn.style.opacity = btn.disabled ? .4 : 1;
+}
+
+function submitStart() {
+  const mid = document.getElementById('machine-id').value.trim();
+  fetch('/api/train/new/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({machine_id: mid, panel_paths: Array.from(_selected)}),
+  }).then(r => r.json()).then(d => {
+    if (d.error) { alert('錯誤: ' + d.error + (d.active_job_id ? ` (進行中: ${d.active_job_id})` : '')); return; }
+    window.location.href = '/train/new/progress?job_id=' + encodeURIComponent(d.job_id);
+  });
+}
+</script>
+{% endblock %}
