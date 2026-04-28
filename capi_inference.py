@@ -2387,7 +2387,6 @@ class CAPIInferencer:
         bg_blur_k = cfg.dust_two_stage_bg_blur
         diff_pct = cfg.dust_two_stage_diff_percentile
         min_area = cfg.dust_two_stage_min_area
-        fallback_score = cfg.dust_two_stage_fallback_score
 
         if tile_image is None or anomaly_map is None or dust_mask is None:
             return True, None, [], "TWO_STAGE: missing data -> REAL_NG"
@@ -2507,12 +2506,9 @@ class CAPIInferencer:
                       f"-> REAL_NG (best@({bx},{by}) area={best['area']})")
             return True, real_peak_yx, all_features, detail
 
-        elif not all_features and score >= fallback_score:
-            detail = (f"TWO_STAGE: 0features but score={score:.3f}>={fallback_score} "
-                      f"-> REAL_NG (fallback)")
-            return True, None, all_features, detail
-
         else:
+            # 找不到 real feature -> 信任 PER_REGION 的 dust 判定
+            # （MARK 等規則紋理在 OMIT 已被 dust mask 涵蓋；二階段抓不到 feature 屬正常）
             detail = (f"TWO_STAGE: 0real+{len(dust_features)}dust "
                       f"-> DUST")
             return False, None, all_features, detail
