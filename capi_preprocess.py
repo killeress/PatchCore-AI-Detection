@@ -193,3 +193,60 @@ def _polyfit_polygon(
         return None
 
     return polygon
+
+
+def classify_tile_zone(
+    tile_rect: Tuple[int, int, int, int],
+    polygon: Optional[np.ndarray],
+    config: PreprocessConfig,
+) -> Tuple[str, float, float, Optional[np.ndarray]]:
+    """根據 polygon 與 tile 幾何決定 zone + 計算 coverage / center_dist。
+
+    Returns: (zone, coverage, center_dist_to_edge, mask)
+        - zone: "inner" | "edge" | "outside"
+        - mask: tile 內 polygon 的 binary mask（uint8 0/255），fully inside 時 None
+        - polygon=None → fallback ("inner", 1.0, inf, None)
+    """
+    x1, y1, x2, y2 = tile_rect
+    tile_size = max(x2 - x1, y2 - y1)
+
+    if polygon is None:
+        return "inner", 1.0, float("inf"), None
+
+    # tile 內生成 polygon mask
+    mask = np.zeros((tile_size, tile_size), np.uint8)
+    shifted = polygon.copy()
+    shifted[:, 0] -= x1
+    shifted[:, 1] -= y1
+    cv2.fillPoly(mask, [shifted.astype(np.int32)], 255)
+    coverage = float((mask > 0).sum()) / (tile_size * tile_size)
+
+    if coverage < config.coverage_min:
+        return "outside", coverage, 0.0, mask
+
+    # 計算 tile 中心到 polygon 邊的最短距離
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    dists = []
+    for i in range(len(polygon)):
+        p1 = polygon[i]
+        p2 = polygon[(i + 1) % len(polygon)]
+        d = _point_segment_dist((cx, cy), tuple(p1), tuple(p2))
+        dists.append(d)
+    center_dist = float(min(dists))
+
+    # 決定 zone：完全在內 + 距邊 >= threshold → inner，其他 → edge
+    if coverage >= 1.0 - 1e-6 and center_dist >= config.edge_threshold_px:
+        return "inner", 1.0, center_dist, None
+    return "edge", coverage, center_dist, mask if coverage < 1.0 - 1e-6 else None
+
+
+def _point_segment_dist(p, a, b):
+    px, py = p; ax, ay = a; bx, by = b
+    dx, dy = bx - ax, by - ay
+    seg_sq = dx * dx + dy * dy
+    if seg_sq < 1e-9:
+        return ((px - ax) ** 2 + (py - ay) ** 2) ** 0.5
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / seg_sq))
+    qx, qy = ax + t * dx, ay + t * dy
+    return ((px - qx) ** 2 + (py - qy) ** 2) ** 0.5
