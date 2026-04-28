@@ -150,7 +150,6 @@ class CAPIConfig:
     dust_two_stage_min_area: int = 3          # 特徵最小面積 (px)
     dust_two_stage_fallback_score: float = 0.7    # 找不到特徵時，heatmap 分數高於此值保守判 NG
     dust_detect_dark_particles: bool = True   # 偵測暗色顆粒/圖案 (如偏黑 MARK)，當作表面灰塵過濾
-    dust_residual_ratio: float = 0.7          # 殘餘異常比例：非灰塵區 sub-peak / 區域 peak >= 此值時 rescue 為 REAL_NG
     dust_high_cov_threshold: float = 0.5       # 高覆蓋率門檻：region COV >= 此值時直接判 dust，不要求 peak_in_dust（因 heatmap peak 有膨脹偏移）
     dust_peak_fraction_threshold: float = 0.80 # 次峰救援門檻：peak 不在灰塵上時，若灰塵區內最強分數 >= 區域 peak 的此比例，視為 heatmap 偏移，仍判 dust
     
@@ -284,6 +283,8 @@ class CAPIConfig:
             dust_two_stage_min_area=data.get("dust_two_stage_min_area", 3),
             dust_two_stage_fallback_score=data.get("dust_two_stage_fallback_score", 0.7),
             dust_detect_dark_particles=data.get("dust_detect_dark_particles", True),
+            dust_high_cov_threshold=data.get("dust_high_cov_threshold", 0.5),
+            dust_peak_fraction_threshold=data.get("dust_peak_fraction_threshold", 0.80),
             omit_overexposure_mean_threshold=data.get("omit_overexposure_mean_threshold", 200),
             omit_overexposure_ratio_threshold=data.get("omit_overexposure_ratio_threshold", 0.5),
             edge_margin_px=data.get("edge_margin_px", 80),
@@ -361,6 +362,8 @@ class CAPIConfig:
             "dust_two_stage_min_area": self.dust_two_stage_min_area,
             "dust_two_stage_fallback_score": self.dust_two_stage_fallback_score,
             "dust_detect_dark_particles": self.dust_detect_dark_particles,
+            "dust_high_cov_threshold": self.dust_high_cov_threshold,
+            "dust_peak_fraction_threshold": self.dust_peak_fraction_threshold,
             "omit_overexposure_mean_threshold": self.omit_overexposure_mean_threshold,
             "omit_overexposure_ratio_threshold": self.omit_overexposure_ratio_threshold,
             "edge_margin_px": self.edge_margin_px,
@@ -430,6 +433,8 @@ class CAPIConfig:
             "dust_two_stage_min_area": self.dust_two_stage_min_area,
             "dust_two_stage_fallback_score": self.dust_two_stage_fallback_score,
             "dust_detect_dark_particles": self.dust_detect_dark_particles,
+            "dust_high_cov_threshold": self.dust_high_cov_threshold,
+            "dust_peak_fraction_threshold": self.dust_peak_fraction_threshold,
             "omit_overexposure_mean_threshold": self.omit_overexposure_mean_threshold,
             "omit_overexposure_ratio_threshold": self.omit_overexposure_ratio_threshold,
             "edge_margin_px": self.edge_margin_px,
@@ -560,6 +565,10 @@ class CAPIConfig:
         if "dust_detect_dark_particles" in param_map:
             val = param_map["dust_detect_dark_particles"]
             self.dust_detect_dark_particles = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "dust_high_cov_threshold" in param_map:
+            self.dust_high_cov_threshold = float(param_map["dust_high_cov_threshold"])
+        if "dust_peak_fraction_threshold" in param_map:
+            self.dust_peak_fraction_threshold = float(param_map["dust_peak_fraction_threshold"])
         if "grid_tiling_enabled" in param_map:
             val = param_map["grid_tiling_enabled"]
             self.grid_tiling_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)

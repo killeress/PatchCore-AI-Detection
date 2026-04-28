@@ -192,6 +192,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_logs(query)
             elif path == "/debug":
                 self._handle_debug_page(path)
+            elif path == "/training":
+                self._handle_training_page()
             elif path == "/retrain":
                 self._handle_retrain_page()
             elif path == "/api/retrain/status":
@@ -3510,11 +3512,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """背景執行緒：重新推論並覆蓋紀錄"""
         import sys as _sys
         import time as _time
-        from capi_server import results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment
-
-        # 直接取 sys.stdout (_TeeStdout 實例)，避免 capi_server 以 __main__ 執行時
-        # 重新 import 得到不同 class 物件導致 _tee = None 的問題
-        _tee = _sys.stdout if hasattr(_sys.stdout, '_local') else None
+        from capi_server import (
+            results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment,
+            InferenceLogCapture,
+        )
 
         def _update_status(msg, *_):
             with cls._rerun_lock:
@@ -3542,8 +3543,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             _update_status("正在等待 GPU...")
             start_time = _time.time()
 
-            if _tee:
-                _tee._local.buffer = []
+            InferenceLogCapture.start_capture()
             if cls._gpu_lock:
                 with cls._gpu_lock:
                     _update_status("正在推論中...")
@@ -3572,8 +3572,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             omit_image_raw = panel_result[5] if len(panel_result) > 5 else None
 
             if not results:
-                if _tee:
-                    _tee._local.buffer = None
+                InferenceLogCapture.stop_capture()
                 with cls._rerun_lock:
                     cls._rerun_tasks[record_id] = {"status": "error", "message": "推論完成但無圖片結果"}
                 return
@@ -3611,12 +3610,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             ng_images = sum(1 for d in image_results_data if d.get("is_ng"))
             error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
 
-            if _tee:
-                buf = getattr(_tee._local, 'buffer', None) or []
-                _tee._local.buffer = None
-                inference_log = "\n".join(buf)
-            else:
-                inference_log = ""
+            inference_log = InferenceLogCapture.stop_capture()
 
             cls.db.update_record_for_rerun(
                 record_id=record_id,
@@ -3638,8 +3632,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         except Exception as e:
             import traceback
-            if _tee:
-                _tee._local.buffer = None
+            InferenceLogCapture.stop_capture()
             traceback.print_exc()
             with cls._rerun_lock:
                 cls._rerun_tasks[record_id] = {"status": "error", "message": f"推論失敗: {e}"}
@@ -4317,6 +4310,55 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 _time.sleep(0.5)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
+
+    def _build_training_cards(self):
+        """Build list of model card dicts for the /training hub."""
+        cards = []
+        server_inst = self._capi_server_instance
+        cfg = getattr(server_inst, "config", None) if server_inst else None
+
+        bundle_path = ""
+        if cfg:
+            bundle_path = getattr(cfg, "scratch_bundle_path", "") or ""
+
+        status = "warning"
+        status_text = "未設定"
+        trained_at = "—"
+        if bundle_path:
+            p = Path(bundle_path)
+            if not p.exists():
+                status_text = "找不到檔案"
+            else:
+                try:
+                    import pickle
+                    with open(p, "rb") as f:
+                        bundle = pickle.load(f)
+                    trained_at = bundle.get("metadata", {}).get("trained_at") or "未知"
+                    status = "ok"
+                    status_text = "已部署"
+                except Exception:
+                    status_text = "讀取失敗"
+
+        cards.append({
+            "title": "刮痕分類器",
+            "subtitle": "Scratch Classifier",
+            "description": "DINOv2 + LoRA，用於 over-review 的二次刮痕判定。從歷史紀錄收集標註樣本後重訓。",
+            "bundle_path": bundle_path or "(未設定)",
+            "trained_at": trained_at,
+            "status": status,
+            "status_text": status_text,
+            "target_url": "/retrain",
+        })
+        return cards
+
+    def _handle_training_page(self):
+        """GET /training - hub page listing trainable models."""
+        template = self.jinja_env.get_template("training.html")
+        html = template.render(
+            request_path="/training",
+            model_cards=self._build_training_cards(),
+        )
+        self._send_response(200, html)
 
     def _handle_retrain_page(self):
         """GET /retrain"""

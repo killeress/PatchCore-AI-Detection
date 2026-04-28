@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any
 import re
 import time
+import contextvars
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import torch
@@ -2346,25 +2347,6 @@ class CAPIInferencer:
 
             is_dust_region = region_coverage >= iou_threshold and (peak_in_dust or dust_sub_peak_rescue or region_coverage >= high_cov_thr)
 
-            # 殘餘異常檢查：僅在實際 peak_in_dust 時觸發，檢查非灰塵區是否藏有次峰真實缺陷
-            # 解決「灰塵信號遮蔽同區域內細微真實缺陷」的漏檢問題
-            # 注意: peak_in_dust=False 時 peak 本身即在 non_dust 區，residual_ratio 必為 1.0，
-            # 會誤抵消 dust_sub_peak_rescue / high_cov_thr 的救援，因此必須限定 peak_in_dust
-            residual_ratio = 0.0
-            if is_dust_region and peak_in_dust:
-                non_dust_in_region = region_mask & (~dust_bool)
-                if np.any(non_dust_in_region):
-                    sub_peak_score = float(np.max(anomaly_map_f[non_dust_in_region]))
-                    residual_ratio = sub_peak_score / region_max_score if region_max_score > 0 else 0.0
-                    residual_thr = getattr(self.config, 'dust_residual_ratio', 0.7)
-                    if residual_ratio >= residual_thr:
-                        is_dust_region = False
-                        logging.info(
-                            f"    Region {label_id}: DUST->REAL_NG rescue "
-                            f"(residual sub-peak {sub_peak_score:.4f}/{region_max_score:.4f}"
-                            f"={residual_ratio:.2f} >= {residual_thr})"
-                        )
-
             region_details.append({
                 "label_id": label_id,
                 "area": region_area,
@@ -2373,7 +2355,6 @@ class CAPIInferencer:
                 "is_dust": is_dust_region,
                 "peak_in_dust": peak_in_dust,
                 "dust_sub_peak_rescue": dust_sub_peak_rescue,
-                "residual_ratio": residual_ratio,
                 "max_score": region_max_score,
                 "peak_yx": peak_pos,
             })
@@ -2784,38 +2765,17 @@ class CAPIInferencer:
         cv2.putText(panel_tr, "Features (R=Real G=Dust)", (5, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
 
-        # --- 左下: Hot Zone 放大 ---
-        # find bounding box of hot zone in tile space
-        n_labels, labels = cv2.connectedComponents(hot_mask, connectivity=8)
-        if n_labels > 1:
-            ys, xs = np.where(labels > 0)
-            pad = 20
-            zy1 = max(0, int(np.min(ys) * scale_tile) - pad)
-            zy2 = min(tile_h, int((np.max(ys) + 1) * scale_tile) + pad)
-            zx1 = max(0, int(np.min(xs) * scale_tile) - pad)
-            zx2 = min(tile_w, int((np.max(xs) + 1) * scale_tile) + pad)
-        else:
-            zx1, zy1, zx2, zy2 = 0, 0, tile_w, tile_h
-
-        crop = base[zy1:zy2, zx1:zx2].copy()
-        # overlay dust mask on crop
-        crop_dm = dm[zy1:zy2, zx1:zx2]
-        dust_crop_ol = np.zeros_like(crop)
-        dust_crop_ol[crop_dm > 0] = (0, 255, 255)
-        crop = cv2.addWeighted(crop, 0.7, dust_crop_ol, 0.3, 0)
-        # mark features
-        for feat in features:
-            fx, fy = feat["abs_pos"]
-            lx, ly = fx - zx1, fy - zy1
-            if 0 <= lx < crop.shape[1] and 0 <= ly < crop.shape[0]:
-                color = (0, 200, 0) if feat["is_dust"] else (0, 0, 255)
-                cv2.circle(crop, (lx, ly), 6, color, 2)
-                label = f"D{feat['dust_ratio']:.0%}" if feat["is_dust"] else f"R{feat['dust_ratio']:.0%}"
-                cv2.putText(crop, label, (lx + 8, ly + 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        panel_bl = cv2.resize(crop, (sz, sz))
-        cv2.putText(panel_bl, "Zone Zoom (R=Real G=Dust)", (5, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
+        # --- 左下: 熱區二值化 (Top X%) ---
+        panel_bl = np.zeros((sz, sz, 3), dtype=np.uint8)
+        top_percent = self.config.dust_heatmap_top_percent
+        pos_vals = anomaly_f[anomaly_f > 0]
+        if len(pos_vals) > 0:
+            thr = np.percentile(pos_vals, 100 - top_percent)
+            hb = (anomaly_f >= thr).astype(np.uint8) * 255
+            hb_rsz = cv2.resize(hb, (sz, sz), interpolation=cv2.INTER_NEAREST)
+            panel_bl[hb_rsz > 0] = (255, 255, 255)
+        cv2.putText(panel_bl, f"Top {top_percent:g}%", (5, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1)
 
         # --- 右下: 判定結果 ---
         panel_br = np.zeros((sz, sz, 3), dtype=np.uint8)
@@ -4095,9 +4055,12 @@ class CAPIInferencer:
         
         with ThreadPoolExecutor(max_workers=actual_workers) as executor:
             # 提交所有預處理任務，保持原始順序
+            # 每次 submit 都 copy_context()，因為同一 Context 物件不能被多個 worker 同時 enter；
+            # copy_context 會 snapshot 當前 thread 的 ContextVar values 含 InferenceLogCapture buffer
             future_to_path = {}
             for img_path in files_to_process:
-                future = executor.submit(_preprocess_one, img_path)
+                ctx = contextvars.copy_context()
+                future = executor.submit(ctx.run, _preprocess_one, img_path)
                 future_to_path[future] = img_path
             
             # 按提交順序收集結果 (使用 dict 保持對應)
@@ -4714,7 +4677,11 @@ class CAPIInferencer:
         
         if needs_dust_check:
             with ThreadPoolExecutor(max_workers=actual_workers) as executor:
-                dust_futures = {executor.submit(_dust_check_one, r): r for r in needs_dust_check}
+                # 每次 submit 都 copy_context()，避免「Context already entered」錯誤
+                dust_futures = {
+                    executor.submit(contextvars.copy_context().run, _dust_check_one, r): r
+                    for r in needs_dust_check
+                }
                 for future in as_completed(dust_futures):
                     try:
                         future.result()

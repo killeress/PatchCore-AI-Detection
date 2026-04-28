@@ -30,6 +30,7 @@ _warnings.filterwarnings("ignore", message=r".*xFormers is not available.*")
 import sys
 import socket
 import threading
+import contextvars
 from concurrent.futures import ThreadPoolExecutor
 import json
 import time
@@ -120,20 +121,35 @@ server_status = ServerStatusTracker()
 
 # ── 推論日誌擷取器 ──────────────────────────────────────────
 
+_capture_lock = threading.Lock()
+
+
 class _TeeStdout:
     """
-    攔截 sys.stdout.write()，將 print() 輸出同時寫入 thread-local 緩衝區。
-    其他執行緒的 print 不受影響（各執行緒只擷取自己的）。
+    攔截 sys.stdout.write()，將 print() 輸出同時寫入當前 context 的緩衝區。
+    使用 contextvars 而非 threading.local，讓 ThreadPoolExecutor worker thread
+    透過 contextvars.copy_context().run(...) 提交時可繼承主 thread 的 buffer。
+    其他不相關 thread (沒進入此 context 的) 不會被擷取。
+
+    NOTE: ContextVar 綁在 instance attribute (`_capture_var`) 上，而非 module-level，
+    以避開 capi_server 同時是 __main__ 與 capi_server module 兩個身分時，
+    module-level 變數被建立兩份的雙重 import 問題。
+    sys.stdout 是 process global，所有 module 操作的都是同一個 _TeeStdout 實例。
     """
     def __init__(self, original):
         self._original = original
-        self._local = threading.local()
+        self._capture_var = contextvars.ContextVar(
+            "_inference_capture_buffer", default=None
+        )
 
     def write(self, s):
         self._original.write(s)
-        buf = getattr(self._local, 'buffer', None)
-        if buf is not None and s.strip():
-            buf.append(s.rstrip("\n"))
+        if not s.strip():
+            return len(s)
+        buf = self._capture_var.get()
+        if buf is not None:
+            with _capture_lock:
+                buf.append(s.rstrip("\n"))
         return len(s)
 
     def flush(self):
@@ -145,30 +161,31 @@ class _TeeStdout:
 
 class InferenceLogCapture:
     """
-    Thread-local stdout 擷取器：
-    攔截 sys.stdout.write()，收集當前執行緒在推論期間的所有輸出
-    (logger 經 StreamHandler 寫入 stdout 的格式化行 + 純 print() 行)。
+    Context-aware stdout 擷取器：
+    攔截 sys.stdout.write()，收集當前推論的所有輸出（含主 thread 與 ThreadPoolExecutor
+    worker — 前提是提交時用 contextvars.copy_context().run(...) 包裝）。
     保持原始輸出順序。
+
+    NOTE: 直接戳 sys.stdout 上的 _capture_var 而非 cls._tee，避開 capi_server 雙重
+    import (__main__ vs capi_server) 時 cls._tee = None 的陷阱。
     """
-    _tee = None  # _TeeStdout instance
 
     @classmethod
     def install_tee(cls):
         """安裝 stdout 攔截器 (只需呼叫一次)"""
-        if cls._tee is None:
-            cls._tee = _TeeStdout(sys.stdout)
-            sys.stdout = cls._tee
+        if not hasattr(sys.stdout, '_capture_var'):
+            sys.stdout = _TeeStdout(sys.stdout)
 
     @classmethod
     def start_capture(cls):
-        if cls._tee:
-            cls._tee._local.buffer = []
+        if hasattr(sys.stdout, '_capture_var'):
+            sys.stdout._capture_var.set([])
 
     @classmethod
     def stop_capture(cls) -> str:
-        if cls._tee:
-            buf = getattr(cls._tee._local, 'buffer', None) or []
-            cls._tee._local.buffer = None
+        if hasattr(sys.stdout, '_capture_var'):
+            buf = sys.stdout._capture_var.get() or []
+            sys.stdout._capture_var.set(None)
             return "\n".join(buf)
         return ""
 
