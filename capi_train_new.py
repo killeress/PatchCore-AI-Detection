@@ -11,7 +11,7 @@ import json
 import logging
 import random
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable
@@ -45,7 +45,6 @@ class TrainingConfig:
     over_review_root: Path
     output_root: Path = Path("model")
     backbone_cache_dir: Path = Path("deployment/torch_hub_cache")
-    required_backbones: List[str] = field(default_factory=lambda: ["wide_resnet50_2-32ee1156.pth"])
 
     batch_size: int = 8
     image_size: tuple = (512, 512)
@@ -345,22 +344,35 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
     )
 
 
-def _setup_offline_env(backbone_cache_dir: Path, log: Callable, required_backbones: Optional[List[str]] = None) -> None:
-    """設定離線推論環境：檢查 backbone 是否存在並設定環境變數。"""
+def _setup_offline_env(backbone_cache_dir: Path, log: Callable) -> None:
+    """Set torch / huggingface offline env vars + verify backbone is cached.
+
+    anomalib's PatchCore uses `timm.create_model('wide_resnet50_2', pretrained=True)`
+    which downloads from HuggingFace Hub. We redirect both TORCH_HOME and HF cache
+    env vars to deployment/torch_hub_cache/.
+    """
     backbone_cache_dir = Path(backbone_cache_dir).resolve()
-    required_backbones = required_backbones or ["wide_resnet50_2-32ee1156.pth"]
-    missing = [
-        backbone_cache_dir / "hub" / "checkpoints" / name
-        for name in required_backbones
-        if not (backbone_cache_dir / "hub" / "checkpoints" / name).exists()
-    ]
-    if missing:
-        paths = ", ".join(str(p) for p in missing)
-        raise RuntimeError(f"backbone 缺檔：{paths}（請先在開發機 stage 後 FTP 上傳）")
+
+    # Redirect both torch hub and HuggingFace cache to deployment dir
     os.environ["TORCH_HOME"] = str(backbone_cache_dir)
+    os.environ["HF_HOME"] = str(backbone_cache_dir)
+    os.environ["HF_HUB_CACHE"] = str(backbone_cache_dir / "huggingface")
+    # Force offline mode (no network calls during training)
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_HUB_OFFLINE"] = "1"
-    log(f"backbone cache: {backbone_cache_dir}")
+
+    # Verify timm wide_resnet50_2 weights are present in HF cache
+    hf_cache = backbone_cache_dir / "huggingface"
+    timm_dirs = list(hf_cache.glob("models--timm--wide_resnet50_2*"))
+    if not timm_dirs:
+        raise RuntimeError(
+            f"backbone 缺檔：未在 {hf_cache} 找到 timm wide_resnet50_2 模型。\n"
+            f"請在有網路的開發機執行：\n"
+            f"  HF_HOME={backbone_cache_dir} python -c \"import timm; "
+            f"timm.create_model('wide_resnet50_2', pretrained=True)\"\n"
+            f"然後把整個 {backbone_cache_dir} 目錄 FTP 上傳到 production。"
+        )
+    log(f"✓ backbone cache 已就緒: {hf_cache}")
 
 
 def _calibrate_from_model(
@@ -401,7 +413,7 @@ def run_training_pipeline(
 ) -> Path:
     """執行 10 unit 訓練，輸出 bundle 目錄。"""
     # 1. 環境檢查
-    _setup_offline_env(cfg.backbone_cache_dir, log, cfg.required_backbones)
+    _setup_offline_env(cfg.backbone_cache_dir, log)
 
     bundle_dir = cfg.output_root / (
         f"{cfg.machine_id}-{datetime.now().strftime('%Y%m%d_%H%M%S')}-{job_id}"

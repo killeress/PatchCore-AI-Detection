@@ -116,7 +116,7 @@ System now supports two model architectures concurrently:
 
 - **Legacy** (deprecated): `tools/build_bga_tiles.py` + `tools/train_bga_all.py`
 - **New**: Web wizard at `/train/new`, 5 steps (select panels → preprocess → review tiles → train 10 PatchCore → done). Backed by `capi_train_new.py` + `capi_preprocess.py`.
-- **Backbone offline**: Pre-stage `wide_resnet50_2-32ee1156.pth` to `deployment/torch_hub_cache/hub/checkpoints/`.
+- **Backbone offline**: anomalib via timm downloads `wide_resnet50_2` from HuggingFace. Pre-stage on internet machine: `HF_HOME=deployment/torch_hub_cache python -c "import timm; timm.create_model('wide_resnet50_2', pretrained=True)"` then FTP-upload `deployment/torch_hub_cache/` to production.
 
 ## Domain Concepts
 
