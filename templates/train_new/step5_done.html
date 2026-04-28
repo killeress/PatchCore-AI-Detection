@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}訓練完成{% endblock %}
+{% block content %}
+<div style="max-width:900px;margin:0 auto;padding:24px 16px;">
+  <h1 style="color:#a6e3a1;margin:0 0 6px 0;">✓ 訓練完成</h1>
+
+  <div style="background:#313244;border-radius:10px;padding:18px;margin-top:14px;">
+    <table style="width:100%;border-collapse:collapse;font-size:.9rem;">
+      <tr><td style="color:#a6adc8;padding:6px 0;width:140px;">機種</td><td style="color:#cdd6f4;font-family:monospace;">{{ machine_id }}</td></tr>
+      <tr><td style="color:#a6adc8;padding:6px 0;">Bundle</td><td style="color:#cdd6f4;font-family:monospace;font-size:.82rem;">{{ bundle_path }}</td></tr>
+      <tr><td style="color:#a6adc8;padding:6px 0;">訓練 Job</td><td style="color:#cdd6f4;font-family:monospace;font-size:.82rem;">{{ job_id }}</td></tr>
+    </table>
+  </div>
+
+  <h2 style="color:#cdd6f4;margin:18px 0 8px 0;font-size:1.05rem;">10 個子模型摘要</h2>
+  <div style="background:#313244;border-radius:10px;padding:14px;">
+    <table style="width:100%;border-collapse:collapse;font-size:.82rem;">
+      <thead><tr style="background:#11111b;color:#a6adc8;text-align:left;">
+        <th style="padding:6px 8px;">Lighting</th><th>Zone</th><th>Train</th><th>NG</th><th>Threshold</th><th>Size</th>
+      </tr></thead>
+      <tbody>
+        {% for unit_label, info in units %}
+        <tr style="border-top:1px solid #1e1e2e;">
+          <td style="padding:6px 8px;color:#cdd6f4;font-family:monospace;">{{ info.lighting }}</td>
+          <td style="color:#cdd6f4;">{{ info.zone }}</td>
+          <td style="color:#cdd6f4;">{{ info.train }}</td>
+          <td style="color:#cdd6f4;">{{ info.ng }}</td>
+          <td style="color:#cdd6f4;font-family:monospace;">{{ "%.4f"|format(info.threshold) }}</td>
+          <td style="color:#a6adc8;">{{ "%.1f"|format(info.size_mb) }} MB</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div style="margin-top:18px;padding:12px;background:#1e1e2e;border-left:3px solid #89b4fa;border-radius:6px;color:#a6adc8;font-size:.88rem;">
+    部署：到模型庫頁點啟用 + 匯出 ZIP → FTP 上傳到 production
+  </div>
+
+  <div style="margin-top:18px;text-align:right;">
+    <a href="/" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">回首頁</a>
+    <a href="/models" style="background:#89b4fa;color:#1e1e2e;padding:8px 22px;border-radius:5px;text-decoration:none;font-weight:700;margin-left:6px;">前往模型庫 →</a>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}前處理 - Step 2{% endblock %}
+{% block content %}
+<div style="max-width:900px;margin:0 auto;padding:24px 16px;">
+  <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.3rem;">Step 2 / 5 · 前處理 + 切 tile</h1>
+  <p style="color:#a6adc8;font-size:.85rem;">系統正在處理 panel 圖片，這需要幾分鐘。</p>
+
+  <div id="status-pill" style="display:inline-block;background:#fab387;color:#1e1e2e;padding:5px 14px;border-radius:14px;font-weight:700;margin-top:14px;">前處理中</div>
+
+  <div style="background:#313244;border-radius:10px;padding:14px;margin-top:16px;">
+    <div style="color:#a6adc8;font-size:.82rem;margin-bottom:8px;">處理 log</div>
+    <pre id="log-box" style="background:#1e1e2e;border-radius:6px;padding:12px;margin:0;font-size:.78rem;color:#cdd6f4;max-height:420px;overflow-y:auto;white-space:pre-wrap;"></pre>
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const jobId = params.get('job_id');
+let _timer = null;
+
+function poll() {
+  fetch(`/api/train/new/status?job_id=${encodeURIComponent(jobId)}`)
+    .then(r => r.json())
+    .then(d => {
+      if (d.log_lines) document.getElementById('log-box').textContent = d.log_lines.join('\n');
+      const pill = document.getElementById('status-pill');
+      pill.textContent = stateText(d.state);
+      if (d.state === 'review') {
+        clearInterval(_timer);
+        location.href = `/train/new/review/${encodeURIComponent(jobId)}`;
+      } else if (d.state === 'failed') {
+        clearInterval(_timer);
+        pill.style.background = '#f38ba8';
+        pill.textContent = '失敗：' + (d.error_message || '未知');
+      } else if (d.state === 'completed') {
+        clearInterval(_timer);
+        location.href = `/train/new/done/${encodeURIComponent(jobId)}`;
+      }
+    });
+}
+
+function stateText(s) {
+  return {preprocess:'前處理中', review:'準備 review', train:'訓練中', completed:'完成', failed:'失敗'}[s] || s;
+}
+
+_timer = setInterval(poll, 3000);
+poll();
+</script>
+{% endblock %}

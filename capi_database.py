@@ -251,6 +251,48 @@ class CAPIDatabase:
                     UNIQUE(tile_result_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_scratch_rescue_review_tile ON scratch_rescue_review(tile_result_id);
+
+                -- 訓練 Job 狀態追蹤
+                CREATE TABLE IF NOT EXISTS training_jobs (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id          TEXT UNIQUE,
+                    machine_id      TEXT NOT NULL,
+                    state           TEXT NOT NULL,
+                    started_at      TEXT,
+                    completed_at    TEXT,
+                    panel_paths     TEXT,
+                    output_bundle   TEXT,
+                    error_message   TEXT
+                );
+
+                -- 已訓練模型 bundle 元資料
+                CREATE TABLE IF NOT EXISTS model_registry (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    machine_id        TEXT NOT NULL,
+                    bundle_path       TEXT UNIQUE NOT NULL,
+                    trained_at        TEXT NOT NULL,
+                    panel_count       INTEGER,
+                    inner_tile_count  INTEGER,
+                    edge_tile_count   INTEGER,
+                    ng_tile_count     INTEGER,
+                    bundle_size_bytes INTEGER,
+                    is_active         INTEGER DEFAULT 0,
+                    job_id            TEXT,
+                    notes             TEXT
+                );
+
+                -- Wizard step 3 review 用暫存 tile pool (zone 允許 NULL 以支援 NG tiles)
+                CREATE TABLE IF NOT EXISTS training_tile_pool (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id      TEXT NOT NULL,
+                    lighting    TEXT NOT NULL,
+                    zone        TEXT,
+                    source      TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    thumb_path  TEXT,
+                    decision    TEXT DEFAULT 'accept'
+                );
+                CREATE INDEX IF NOT EXISTS idx_tile_pool_job ON training_tile_pool(job_id, lighting, zone, source);
             """)
             
             # Migration for adding missing columns to existing database
@@ -2291,6 +2333,277 @@ class CAPIDatabase:
             return value
         except (json.JSONDecodeError, TypeError, ValueError):
             return value_json
+
+    # ------------------------------------------------------------------
+    # Training Job CRUD
+    # ------------------------------------------------------------------
+
+    def create_training_job(self, job_id: str, machine_id: str, panel_paths: list) -> int:
+        """建立一筆新的訓練 job，初始 state 為 'preprocess'。回傳 rowid。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO training_jobs (job_id, machine_id, state, started_at, panel_paths)
+                   VALUES (?, ?, 'preprocess', datetime('now'), ?)""",
+                (job_id, machine_id, json.dumps(panel_paths)),
+            )
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+    def get_training_job(self, job_id: str) -> Optional[Dict]:
+        """依 job_id 查詢訓練 job，panel_paths 自動 JSON 反序列化。找不到回傳 None。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM training_jobs WHERE job_id = ?", (job_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in cur.description]
+            job = dict(zip(cols, row))
+            if job.get("panel_paths"):
+                job["panel_paths"] = json.loads(job["panel_paths"])
+            else:
+                job["panel_paths"] = []
+            return job
+        finally:
+            conn.close()
+
+    def update_training_job_state(
+        self,
+        job_id: str,
+        state: str,
+        error_message: Optional[str] = None,
+        output_bundle: Optional[str] = None,
+    ) -> None:
+        """更新訓練 job 的 state，並選擇性設定 error_message / output_bundle。
+        state 為 'completed' 或 'failed' 時自動填入 completed_at。
+        """
+        fields = ["state = ?"]
+        args: list = [state]
+        if state in ("completed", "failed"):
+            fields.append("completed_at = datetime('now')")
+        if error_message is not None:
+            fields.append("error_message = ?")
+            args.append(error_message)
+        if output_bundle is not None:
+            fields.append("output_bundle = ?")
+            args.append(output_bundle)
+        args.append(job_id)
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                f"UPDATE training_jobs SET {', '.join(fields)} WHERE job_id = ?",
+                tuple(args),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_active_training_job(self) -> Optional[Dict]:
+        """回傳目前進行中的 job（preprocess / review / train），依 started_at DESC 取最新一筆。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT * FROM training_jobs
+                   WHERE state IN ('preprocess', 'review', 'train')
+                   ORDER BY started_at DESC LIMIT 1"""
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in cur.description]
+            job = dict(zip(cols, row))
+            if job.get("panel_paths"):
+                job["panel_paths"] = json.loads(job["panel_paths"])
+            else:
+                job["panel_paths"] = []
+            return job
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # training_tile_pool CRUD
+    # ------------------------------------------------------------------
+
+    def insert_tile_pool(self, job_id: str, tiles: list) -> list:
+        """批次插入 tile pool 紀錄，回傳各列的 lastrowid 清單。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            ids = []
+            for t in tiles:
+                cur.execute(
+                    """INSERT INTO training_tile_pool
+                       (job_id, lighting, zone, source, source_path, thumb_path)
+                       VALUES (?,?,?,?,?,?)""",
+                    (job_id, t["lighting"], t.get("zone"), t["source"],
+                     t["source_path"], t.get("thumb_path")),
+                )
+                ids.append(cur.lastrowid)
+            conn.commit()
+            return ids
+        finally:
+            conn.close()
+
+    def list_tile_pool(self, job_id: str, lighting: str = None, zone: str = None,
+                       source: str = None, decision: str = None) -> list:
+        """查詢 tile pool，支援 lighting / zone / source / decision 任意組合過濾。"""
+        sql = "SELECT * FROM training_tile_pool WHERE job_id = ?"
+        args = [job_id]
+        for fld, val in [("lighting", lighting), ("zone", zone),
+                         ("source", source), ("decision", decision)]:
+            if val is not None:
+                sql += f" AND {fld} = ?"
+                args.append(val)
+        sql += " ORDER BY id"
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(sql, tuple(args))
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def update_tile_decisions(self, job_id: str, tile_ids: list, decision: str) -> None:
+        """批次更新指定 tile id 清單的 decision 欄位（空清單時為 no-op）。"""
+        if not tile_ids:
+            return
+        placeholders = ",".join("?" * len(tile_ids))
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                f"UPDATE training_tile_pool SET decision = ? WHERE job_id = ? AND id IN ({placeholders})",
+                (decision, job_id, *tile_ids),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def cleanup_tile_pool(self, job_id: str) -> None:
+        """刪除 job 的所有 tile pool 紀錄（thumb 檔不刪，由 caller 處理）。"""
+        conn = self._get_conn()
+        try:
+            conn.execute("DELETE FROM training_tile_pool WHERE job_id = ?", (job_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # model_registry CRUD
+    # ------------------------------------------------------------------
+
+    def register_model_bundle(self, info: dict) -> int:
+        """新增一筆 model_registry 紀錄，is_active 預設為 0，回傳 rowid。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO model_registry
+                   (machine_id, bundle_path, trained_at, panel_count, inner_tile_count,
+                    edge_tile_count, ng_tile_count, bundle_size_bytes, is_active, job_id, notes)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (info["machine_id"], info["bundle_path"], info["trained_at"],
+                 info.get("panel_count"), info.get("inner_tile_count"),
+                 info.get("edge_tile_count"), info.get("ng_tile_count"),
+                 info.get("bundle_size_bytes"), 0, info.get("job_id"), info.get("notes")),
+            )
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+    def list_model_bundles(self, machine_id: str = None) -> list:
+        """列出 model_registry 紀錄，可選擇依 machine_id 過濾，依 trained_at DESC 排序。"""
+        sql = "SELECT * FROM model_registry"
+        args: tuple = ()
+        if machine_id:
+            sql += " WHERE machine_id = ?"
+            args = (machine_id,)
+        sql += " ORDER BY trained_at DESC"
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(sql, args)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def get_model_bundle(self, bundle_id: int) -> Optional[Dict]:
+        """依 id 查詢單筆 model_registry，找不到回傳 None。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM model_registry WHERE id = ?", (bundle_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
+        finally:
+            conn.close()
+
+    def set_bundle_active(self, bundle_id: int, active: bool) -> None:
+        """設定指定 bundle 的 is_active 狀態。"""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE model_registry SET is_active = ? WHERE id = ?",
+                (1 if active else 0, bundle_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def deactivate_other_bundles_for_machine(self, machine_id: str, except_id: int) -> None:
+        """將指定機種下除 except_id 外的所有 bundle 設為 is_active = 0。"""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE model_registry SET is_active = 0 WHERE machine_id = ? AND id != ?",
+                (machine_id, except_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def list_ok_panels_for_machine(self, machine_id: str, days: int = 7, limit: int = 100) -> list:
+        """回傳指定 model_id 近 N 天 machine_judgment='OK' 的 inference_records。
+
+        供訓練 wizard 第一步選擇訓練樣本使用。
+        """
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT id, glass_id, model_id, machine_no,
+                          machine_judgment, ai_judgment, image_dir,
+                          created_at
+                   FROM inference_records
+                   WHERE model_id = ? AND machine_judgment = 'OK'
+                   AND created_at >= datetime('now', ? || ' days')
+                   ORDER BY created_at DESC LIMIT ?""",
+                (machine_id, f"-{days}", limit),
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def delete_model_bundle(self, bundle_id: int) -> None:
+        """刪除指定 id 的 model_registry 紀錄。"""
+        conn = self._get_conn()
+        try:
+            conn.execute("DELETE FROM model_registry WHERE id = ?", (bundle_id,))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

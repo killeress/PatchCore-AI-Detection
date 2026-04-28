@@ -91,6 +91,7 @@ except Exception as _e:
 
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
 from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff, compute_boundary_band_mask, compute_pc_roi_offset
+from capi_preprocess import _polyfit_polygon as _pf_polygon
 from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
 from scratch_filter import ScratchFilter
 
@@ -340,15 +341,23 @@ class CAPIInferencer:
         self._inferencers: Dict[str, Any] = {}
         
         # 前綴 → 模型路徑映射 (從 config 讀取)
+        # 新架構 (is_new_architecture=True) 的 model_mapping value 為 nested dict
+        # {prefix: {"inner": path, "edge": path}}，不在此處轉換；v2 直接讀 config.model_mapping
         self._model_mapping: Dict[str, Path] = {}
         for prefix, mpath in config.model_mapping.items():
+            if isinstance(mpath, dict):
+                # 新架構：nested dict，跳過舊式 flat mapping；v2 自行處理
+                continue
             p = Path(mpath)
             if not p.is_absolute():
                 p = self.base_dir / p
             self._model_mapping[prefix] = p
-        
+
         # 前綴 → 閾值映射
-        self._threshold_mapping: Dict[str, float] = dict(config.threshold_mapping)
+        self._threshold_mapping: Dict[str, float] = {
+            k: v for k, v in config.threshold_mapping.items()
+            if not isinstance(v, dict)
+        }
         
         # 決定運算裝置
         self.device = self._get_device(device)
@@ -382,6 +391,13 @@ class CAPIInferencer:
         # Scratch classifier post-filter (lazy-loaded on first NG tile)
         self.scratch_filter: ScratchFilter | None = None
         self._scratch_load_failed = False
+
+        # 分發器：依架構選擇 v1（舊 5 模型）或 v2（新 C-10）
+        if getattr(config, "is_new_architecture", False):
+            self._dispatch_process_panel = self._process_panel_v2
+            self._model_cache_v2: Dict[tuple, Any] = {}
+        else:
+            self._dispatch_process_panel = self._process_panel_v1
 
     def _get_scratch_filter(self):
         """Lazy-load ScratchFilter (first call only). Thread-safe via _gpu_lock
@@ -611,139 +627,10 @@ class CAPIInferencer:
         binary_mask: np.ndarray,
         bbox: Tuple[int, int, int, int],
     ) -> Optional[np.ndarray]:
-        """
-        在既有 Otsu binary mask 上用逐邊 polyfit 找 4 角 panel polygon。
-
-        演算法:
-          1. 逐邊 (top/bottom/left/right) 取樣前景邊緣點
-          2. 每邊用 np.polyfit 擬合直線 + 3σ robust filter
-          3. 4 線兩兩相交求 4 角 (TL/TR/BR/BL)
-          4. 品質檢查 (面積、邊長、線近乎平行) — 任一失敗回傳 None
-
-        Args:
-            binary_mask: Otsu + morphology close 後的 uint8 前景圖 (255=前景)
-            bbox: 粗略 bbox (x_min, y_min, x_max, y_max)，作為邊緣掃描範圍
-
-        Returns:
-            np.ndarray shape (4,2) float32，順序 [TL, TR, BR, BL]；
-            偵測失敗或品質不足回傳 None。
-        """
-        # 常數 (hardcode，不入 config)
-        EDGE_MARGIN = 20
-        SAMPLE_STEP = 50
-        OUTLIER_SIGMA = 3.0
-        MIN_EDGE_LEN_RATIO = 1.0          # 相對 tile_size
-        MIN_POLYGON_AREA_RATIO = 0.9      # 相對 bbox 面積
-        MIN_SAMPLES_PER_EDGE = 5
-
+        """thin wrapper → capi_preprocess._polyfit_polygon（邏輯完全不變）。"""
         if binary_mask is None or binary_mask.size == 0:
             return None
-
-        H, W = binary_mask.shape[:2]
-        xmin, ymin, xmax, ymax = bbox
-        if xmax - xmin < 2 * EDGE_MARGIN or ymax - ymin < 2 * EDGE_MARGIN:
-            return None
-
-        # --- Step 1: 逐邊掃描 ---
-        tops, bots = [], []
-        for x in range(xmin + EDGE_MARGIN, xmax - EDGE_MARGIN, SAMPLE_STEP):
-            if x < 0 or x >= W:
-                continue
-            col = binary_mask[:, x]
-            ys = np.where(col > 0)[0]
-            if len(ys) > 0:
-                tops.append((x, int(ys[0])))
-                bots.append((x, int(ys[-1])))
-
-        lefts, rights = [], []
-        for y in range(ymin + EDGE_MARGIN, ymax - EDGE_MARGIN, SAMPLE_STEP):
-            if y < 0 or y >= H:
-                continue
-            row = binary_mask[y, :]
-            xs = np.where(row > 0)[0]
-            if len(xs) > 0:
-                lefts.append((int(xs[0]), y))
-                rights.append((int(xs[-1]), y))
-
-        if (len(tops) < MIN_SAMPLES_PER_EDGE or len(bots) < MIN_SAMPLES_PER_EDGE
-                or len(lefts) < MIN_SAMPLES_PER_EDGE or len(rights) < MIN_SAMPLES_PER_EDGE):
-            return None
-
-        # --- Step 2: 每邊 polyfit + 3σ robust filter ---
-        def fit_line_robust(pts, horizontal: bool) -> Optional[Tuple[float, float]]:
-            """horizontal=True: 回傳 (a, b) 代表 y = a*x + b；否則代表 x = a*y + b"""
-            arr = np.array(pts, dtype=float)
-            if horizontal:
-                ind = arr[:, 0]; dep = arr[:, 1]
-            else:
-                ind = arr[:, 1]; dep = arr[:, 0]
-            try:
-                a, b = np.polyfit(ind, dep, 1)
-            except (np.linalg.LinAlgError, ValueError):
-                return None
-            residuals = dep - (a * ind + b)
-            sigma = float(residuals.std())
-            if sigma > 0:
-                keep = np.abs(residuals) < OUTLIER_SIGMA * sigma
-                if keep.sum() >= 3:
-                    try:
-                        a, b = np.polyfit(ind[keep], dep[keep], 1)
-                    except (np.linalg.LinAlgError, ValueError):
-                        pass
-            return (float(a), float(b))
-
-        top_line = fit_line_robust(tops, horizontal=True)
-        bot_line = fit_line_robust(bots, horizontal=True)
-        left_line = fit_line_robust(lefts, horizontal=False)
-        right_line = fit_line_robust(rights, horizontal=False)
-        if None in (top_line, bot_line, left_line, right_line):
-            return None
-
-        # --- Step 3: 4 線相交 ---
-        def intersect_hv(h_line, v_line):
-            # h: y = a_h*x + b_h ; v: x = a_v*y + b_v
-            a_h, b_h = h_line
-            a_v, b_v = v_line
-            denom = 1.0 - a_h * a_v
-            if abs(denom) < 1e-9:
-                return None
-            y = (a_h * b_v + b_h) / denom
-            x = a_v * y + b_v
-            return (x, y)
-
-        TL = intersect_hv(top_line, left_line)
-        TR = intersect_hv(top_line, right_line)
-        BR = intersect_hv(bot_line, right_line)
-        BL = intersect_hv(bot_line, left_line)
-        if None in (TL, TR, BR, BL):
-            return None
-
-        polygon = np.array([TL, TR, BR, BL], dtype=np.float32)
-
-        # --- Step 4: 品質檢查 ---
-        # 4a. 所有角必須大致在 image 範圍內 (容忍 50 px 溢出)
-        tol = 50
-        if (polygon[:, 0].min() < -tol or polygon[:, 0].max() > W + tol or
-                polygon[:, 1].min() < -tol or polygon[:, 1].max() > H + tol):
-            return None
-
-        # 4b. 邊長必須 > tile_size
-        tile_size = self.config.tile_size
-        min_edge_len = tile_size * MIN_EDGE_LEN_RATIO
-        for i in range(4):
-            p1 = polygon[i]
-            p2 = polygon[(i + 1) % 4]
-            edge_len = float(np.linalg.norm(p2 - p1))
-            if edge_len < min_edge_len:
-                return None
-
-        # 4c. polygon 面積必須 >= bbox 面積 * 0.9
-        bbox_area = float((xmax - xmin) * (ymax - ymin))
-        poly_area = float(cv2.contourArea(polygon))
-        if bbox_area <= 0 or poly_area < bbox_area * MIN_POLYGON_AREA_RATIO:
-            return None
-
-        return polygon
+        return _pf_polygon(binary_mask, bbox, self.config.tile_size)
 
     def calculate_otsu_bounds(
         self,
@@ -4017,8 +3904,27 @@ class CAPIInferencer:
         return False, ""
 
     def process_panel(
-        self, 
-        panel_dir: Path, 
+        self,
+        panel_dir: Path,
+        progress_callback=None,
+        cpu_workers: int = 4,
+        product_resolution: Optional[Tuple[int, int]] = None,
+        bomb_info: Optional[Dict[str, Any]] = None,
+        model_id: Optional[str] = None,
+    ):
+        """分發器：依 config.is_new_architecture 路由至 v1 或 v2 實作。"""
+        return self._dispatch_process_panel(
+            panel_dir,
+            progress_callback=progress_callback,
+            cpu_workers=cpu_workers,
+            product_resolution=product_resolution,
+            bomb_info=bomb_info,
+            model_id=model_id,
+        )
+
+    def _process_panel_v1(
+        self,
+        panel_dir: Path,
         progress_callback=None,
         cpu_workers: int = 4,
         product_resolution: Optional[Tuple[int, int]] = None,
@@ -5169,6 +5075,469 @@ class CAPIInferencer:
                 result.client_bomb_info = bomb_info
 
         return results, omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image, aoi_report
+
+    def _load_omit_context(self, panel_dir: Path):
+        """Load the panel-level OMIT/PINIGBI image used by dust filtering."""
+        image_files = sorted(
+            list(Path(panel_dir).glob("*.png")) +
+            list(Path(panel_dir).glob("*.jpg")) +
+            list(Path(panel_dir).glob("*.tif")) +
+            list(Path(panel_dir).glob("*.tiff"))
+        )
+        omit_files = [
+            f for f in image_files
+            if f.stem.startswith("PINIGBI") or "OMIT0000" in f.name
+        ]
+        omit_image = None
+        omit_overexposed = False
+        omit_overexposure_info = ""
+        if omit_files:
+            omit_image = cv2.imread(str(omit_files[0]), cv2.IMREAD_UNCHANGED)
+            if omit_image is not None:
+                omit_overexposed, _mean, _ratio, omit_overexposure_info = \
+                    self.check_omit_overexposure(omit_image)
+
+        omit_vis = None
+        if omit_image is not None:
+            omit_vis = omit_image.copy()
+            if len(omit_vis.shape) == 2:
+                omit_vis = cv2.cvtColor(omit_vis, cv2.COLOR_GRAY2BGR)
+            elif len(omit_vis.shape) == 3 and omit_vis.shape[2] == 1:
+                omit_vis = cv2.cvtColor(omit_vis, cv2.COLOR_GRAY2BGR)
+        return omit_vis, omit_overexposed, omit_overexposure_info, omit_image
+
+    def _apply_cv_edge_inspection(self, result: ImageResult, model_id: Optional[str] = None) -> None:
+        """Run the shared CV edge inspector for an ImageResult."""
+        if not (getattr(self, "edge_inspector", None) and self.edge_inspector.config.enabled and result.raw_bounds):
+            return
+        try:
+            resolution_code = "UNKNOWN"
+            if model_id and len(model_id) >= 6:
+                resolution_code = model_id[5].upper()
+            self.edge_inspector.config.set_active_zones_for_product(resolution_code)
+            full_image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+            if full_image is not None:
+                result.edge_defects = self.edge_inspector.inspect(full_image, result.raw_bounds)
+        except Exception as e:
+            logger.error(f"CV 邊緣檢查失敗 {result.image_path.name}: {e}", exc_info=True)
+
+    def _apply_omit_dust_postprocess(
+        self,
+        results: List[ImageResult],
+        omit_image: Optional[np.ndarray],
+        omit_overexposed: bool,
+        omit_overexposure_info: str,
+        cpu_workers: int = 4,
+    ) -> None:
+        """Apply panel-level OMIT dust filtering to PatchCore anomaly tiles."""
+        if omit_image is None:
+            return
+
+        def _dust_check_one(result: ImageResult) -> None:
+            if self.config.should_skip_file(result.image_path.name):
+                return
+            if not result.anomaly_tiles:
+                return
+            if omit_overexposed:
+                for tile, score, _anomaly_map in result.anomaly_tiles:
+                    tile.dust_detail_text = (
+                        f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> "
+                        "Cannot verify dust, treated as REAL_NG"
+                    )
+                return
+
+            oh, ow = omit_image.shape[:2]
+            for tile, score, anomaly_map in result.anomaly_tiles:
+                tx, ty, tw, th = tile.x, tile.y, tile.width, tile.height
+                if tx >= ow or ty >= oh:
+                    continue
+                x2 = min(tx + tw, ow)
+                y2 = min(ty + th, oh)
+                omit_crop = omit_image[ty:y2, tx:x2]
+                tile.omit_crop_image = omit_crop.copy()
+
+                is_dust, dust_mask, bright_ratio, detail_text = \
+                    self.check_dust_or_scratch_feature(omit_crop)
+                tile.dust_mask = dust_mask
+                tile.dust_bright_ratio = bright_ratio
+
+                if is_dust and anomaly_map is not None and dust_mask is not None:
+                    has_real, real_peak_yx, overall_iou, region_details, heatmap_binary, _labels = \
+                        self.check_dust_per_region(
+                            dust_mask,
+                            anomaly_map,
+                            top_percent=self.config.dust_heatmap_top_percent,
+                            metric=self.config.dust_heatmap_metric,
+                            iou_threshold=self.config.dust_heatmap_iou_threshold,
+                        )
+                    tile.dust_heatmap_iou = overall_iou
+                    tile.dust_region_details = region_details
+                    tile.dust_heatmap_binary = heatmap_binary
+                    if region_details:
+                        tile.dust_region_max_cov = max(r["coverage"] for r in region_details)
+                    dust_regions = [r for r in region_details if r["is_dust"]]
+                    real_regions = [r for r in region_details if not r["is_dust"]]
+                    if has_real:
+                        tile.is_suspected_dust_or_scratch = False
+                        detail_text += (
+                            f" PER_REGION: {len(real_regions)}real+"
+                            f"{len(dust_regions)}dust -> REAL_NG"
+                        )
+                        if real_peak_yx is not None:
+                            amap_h, amap_w = anomaly_map.shape[:2]
+                            tile.anomaly_peak_y = tile.y + int(real_peak_yx[0] * tile.height / amap_h)
+                            tile.anomaly_peak_x = tile.x + int(real_peak_yx[1] * tile.width / amap_w)
+                    else:
+                        tile.is_suspected_dust_or_scratch = True
+                        detail_text += (
+                            f" PER_REGION: 0real+{len(dust_regions)}dust -> DUST"
+                        )
+                elif is_dust:
+                    tile.is_suspected_dust_or_scratch = True
+                    detail_text += " (no heatmap, marked as dust)"
+                else:
+                    detail_text += " NO_DUST -> REAL_NG"
+                tile.dust_detail_text = detail_text
+
+        needs_dust = [r for r in results if r.anomaly_tiles]
+        if not needs_dust:
+            return
+        max_workers = max(1, min(cpu_workers, len(needs_dust)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(contextvars.copy_context().run, _dust_check_one, r): r
+                for r in needs_dust
+            }
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.warning("灰塵檢測失敗 (%s): %s", futures[future].image_path.name, e)
+
+    def _apply_bomb_postprocess(
+        self,
+        results: List[ImageResult],
+        bomb_info: Optional[Dict[str, Any]],
+        product_resolution: Optional[Tuple[int, int]],
+    ) -> None:
+        """Mark anomaly tiles and edge defects that match configured/client bomb defects."""
+        active_bombs = []
+        if bomb_info is not None:
+            defect_code = self._match_bomb_defect_code(bomb_info)
+            active_bombs = [BombDefect(
+                image_prefix=bomb_info["image_prefix"],
+                defect_code=defect_code,
+                defect_type=bomb_info["defect_type"],
+                coordinates=bomb_info["coordinates"],
+            )]
+        elif self.config.bomb_defects:
+            active_bombs = self.config.bomb_defects
+        if not active_bombs:
+            return
+
+        for result in results:
+            if result.anomaly_tiles and result.raw_bounds is not None:
+                img_prefix = result.image_path.stem
+                for tile, _score, anomaly_map in result.anomaly_tiles:
+                    if anomaly_map is not None and anomaly_map.size > 0:
+                        try:
+                            amap_h, amap_w = anomaly_map.shape[:2]
+                            peak_local = np.unravel_index(np.argmax(anomaly_map), anomaly_map.shape)
+                            tile.anomaly_peak_y = tile.y + int(peak_local[0] * tile.height / amap_h)
+                            tile.anomaly_peak_x = tile.x + int(peak_local[1] * tile.width / amap_w)
+                        except Exception:
+                            tile.anomaly_peak_x, tile.anomaly_peak_y = tile.center
+                    else:
+                        tile.anomaly_peak_x, tile.anomaly_peak_y = tile.center
+
+                    is_bomb, bomb_code = self.check_bomb_match(
+                        img_prefix,
+                        tile.anomaly_peak_x,
+                        tile.anomaly_peak_y,
+                        result.raw_bounds,
+                        anomaly_map=anomaly_map,
+                        product_resolution=product_resolution,
+                        bomb_list=active_bombs,
+                    )
+                    if is_bomb:
+                        tile.is_bomb = True
+                        tile.bomb_defect_code = bomb_code
+
+            if getattr(result, "edge_defects", None) and result.raw_bounds is not None:
+                img_prefix = result.image_path.stem
+                for ed in result.edge_defects:
+                    if getattr(ed, "is_cv_ok", False):
+                        continue
+                    cx, cy = ed.center
+                    is_bomb, bomb_code = self.check_bomb_match(
+                        img_prefix, cx, cy, result.raw_bounds,
+                        product_resolution=product_resolution,
+                        bomb_list=active_bombs,
+                    )
+                    if is_bomb:
+                        ed.is_bomb = True
+                        ed.bomb_defect_code = bomb_code
+
+    def _apply_exclude_zone_postprocess(
+        self,
+        results: List[ImageResult],
+        model_id: Optional[str],
+    ) -> None:
+        """Mark PatchCore anomaly tiles that fall inside enabled CV exclude zones."""
+        if not getattr(self, "edge_inspector", None):
+            return
+        try:
+            resolution_code = ""
+            if model_id and len(model_id) >= 6:
+                resolution_code = model_id[5].upper()
+            self.edge_inspector.config.set_active_zones_for_product(resolution_code)
+            active_zones = [z for z in self.edge_inspector.config.exclude_zones if z.enabled]
+            if not active_zones:
+                return
+            for result in results:
+                for tile, _score, _anomaly_map in result.anomaly_tiles:
+                    if tile.is_bright_spot_detection:
+                        continue
+                    px = tile.anomaly_peak_x if tile.anomaly_peak_x >= 0 else tile.center[0]
+                    py = tile.anomaly_peak_y if tile.anomaly_peak_y >= 0 else tile.center[1]
+                    for zone in active_zones:
+                        if zone.x <= px <= zone.x + zone.w and zone.y <= py <= zone.y + zone.h:
+                            tile.is_in_exclude_zone = True
+                            break
+        except Exception as e:
+            logger.error(f"排除區域檢查失敗: {e}", exc_info=True)
+
+    def _apply_scratch_postprocess(self, results: List[ImageResult]) -> None:
+        """Apply the optional DINOv2 scratch classifier post-filter."""
+        sf = self._get_scratch_filter()
+        if sf is None:
+            return
+        panel_tiles = panel_filtered = 0
+        panel_ms = 0.0
+        for result in results:
+            if result.anomaly_tiles:
+                sf.apply_to_image_result(result)
+                panel_tiles += len(result.anomaly_tiles)
+                panel_filtered += getattr(result, "scratch_filter_count", 0)
+                panel_ms += getattr(result, "scratch_elapsed_ms", 0.0)
+        if panel_tiles:
+            logger.info(
+                "[scratch] Panel 總計: 檢查 %d tiles, filtered=%d, TT=%.1fms",
+                panel_tiles, panel_filtered, panel_ms,
+            )
+
+    def _process_panel_v2(
+        self,
+        panel_dir: Path,
+        progress_callback=None,
+        cpu_workers: int = 4,
+        product_resolution: Optional[Tuple[int, int]] = None,
+        bomb_info: Optional[Dict[str, Any]] = None,
+        model_id: Optional[str] = None,
+    ):
+        """新架構：依 tile zone routing inner/edge model。
+
+        最小化實作 (Phase 9.3)：
+          1. capi_preprocess.preprocess_panel_folder 切 tile + inner/edge 分流
+          2. 對每張 tile 呼叫對應 model（inner.pt / edge.pt）
+          3. 回傳與 v1 相同的 tuple：
+               (results, omit_vis, omit_overexposed, omit_overexposure_info,
+                is_duplicate, omit_image, aoi_report)
+             其中 results 為 List[ImageResult]
+
+        透過既有 predict_tile/postprocess helper 保持 v1 相容：
+        edge margin、dust filter、bomb check、CV edge inspector、scratch classifier。
+        """
+        import time
+        from capi_preprocess import preprocess_panel_folder, PreprocessConfig
+
+        t0 = time.time()
+        omit_vis, omit_overexposed, omit_overexposure_info, omit_image = \
+            self._load_omit_context(Path(panel_dir))
+
+        pre_cfg = PreprocessConfig(
+            tile_size=self.config.tile_size,
+            otsu_offset=self.config.otsu_offset,
+            enable_panel_polygon=self.config.enable_panel_polygon,
+            edge_threshold_px=self.config.edge_threshold_px,
+        )
+
+        panel_results = preprocess_panel_folder(Path(panel_dir), pre_cfg)
+        if not panel_results:
+            logger.warning(f"[v2] {panel_dir}: preprocess_panel_folder 回傳空結果")
+            # 回傳與 v1 格式相容的空結果
+            return [], None, False, "", False, None, {}
+
+        results: List[ImageResult] = []
+
+        for lighting, pre_result in panel_results.items():
+            img_path = pre_result.image_path
+            bbox = pre_result.foreground_bbox  # (x1, y1, x2, y2)
+            polygon = pre_result.panel_polygon
+
+            # 取得圖片尺寸
+            raw_img = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+            if raw_img is None:
+                logger.warning(f"[v2] 無法讀取圖片: {img_path}")
+                continue
+            img_h, img_w = raw_img.shape[:2]
+
+            # 取得此 lighting 對應的 inner / edge model 路徑
+            lighting_map = self.config.model_mapping.get(lighting, {})
+            if not isinstance(lighting_map, dict) or "inner" not in lighting_map or "edge" not in lighting_map:
+                raise RuntimeError(f"[v2] {lighting}: model_mapping 必須同時包含 inner/edge")
+
+            lighting_thr = self.config.threshold_mapping.get(lighting, {})
+            if isinstance(lighting_thr, dict):
+                inner_thr = float(lighting_thr.get("inner", 0.75))
+                edge_thr = float(lighting_thr.get("edge", 0.75))
+            else:
+                # fallback：舊式 flat float
+                inner_thr = edge_thr = float(lighting_thr) if lighting_thr else 0.75
+
+            # 把 capi_preprocess.TileResult 轉換成 capi_inference.TileInfo
+            tile_infos: List[TileInfo] = []
+            ts = self.config.tile_size
+            bottom_y_threshold = bbox[3] - ts
+            right_x_threshold = bbox[2] - ts
+            for tr in pre_result.tiles:
+                ti = TileInfo(
+                    tile_id=tr.tile_id,
+                    x=tr.x1,
+                    y=tr.y1,
+                    width=ts,
+                    height=ts,
+                    image=tr.image,
+                    mask=tr.mask,
+                    is_bottom_edge=tr.y1 >= bottom_y_threshold,
+                    is_top_edge=tr.y1 <= bbox[1],
+                    is_left_edge=tr.x1 <= bbox[0],
+                    is_right_edge=tr.x1 >= right_x_threshold,
+                )
+                tile_infos.append(ti)
+
+            # 推論
+            t_infer_start = time.time()
+            anomaly_tiles: List[Tuple[TileInfo, float, Optional[np.ndarray]]] = []
+
+            for tr, ti in zip(pre_result.tiles, tile_infos):
+                zone = tr.zone  # "inner" | "edge"
+                threshold = inner_thr if zone == "inner" else edge_thr
+                try:
+                    model = self._get_model_for(self.config.machine_id, lighting, zone)
+                    score, anomaly_map = self.predict_tile(
+                        ti,
+                        inferencer=model,
+                        threshold=threshold,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"[v2] {lighting}/{zone} tile({tr.x1},{tr.y1}) 推論失敗: {exc}"
+                    ) from exc
+
+                if score >= threshold:
+                    # 計算熱力圖峰值座標（圖片絕對座標）
+                    if anomaly_map is not None:
+                        peak_idx = int(np.argmax(anomaly_map))
+                        ah, aw = anomaly_map.shape[:2]
+                        peak_y_rel = peak_idx // aw
+                        peak_x_rel = peak_idx % aw
+                        ti.anomaly_peak_x = tr.x1 + peak_x_rel
+                        ti.anomaly_peak_y = tr.y1 + peak_y_rel
+                    anomaly_tiles.append((ti, score, anomaly_map))
+
+            infer_elapsed = time.time() - t_infer_start
+
+            image_result = ImageResult(
+                image_path=img_path,
+                image_size=(img_w, img_h),
+                otsu_bounds=bbox,
+                exclusion_regions=[],
+                tiles=tile_infos,
+                excluded_tile_count=0,
+                processed_tile_count=len(tile_infos),
+                processing_time=time.time() - t0,
+                anomaly_tiles=anomaly_tiles,
+                raw_bounds=bbox,
+                panel_polygon=polygon,
+                inference_time=infer_elapsed,
+            )
+
+            if bomb_info is not None:
+                image_result.client_bomb_info = bomb_info
+            self._apply_cv_edge_inspection(image_result, model_id=model_id)
+
+            results.append(image_result)
+
+        post_start = time.time()
+        self._apply_omit_dust_postprocess(
+            results,
+            omit_image=omit_image,
+            omit_overexposed=omit_overexposed,
+            omit_overexposure_info=omit_overexposure_info,
+            cpu_workers=cpu_workers,
+        )
+        self._apply_bomb_postprocess(results, bomb_info, product_resolution)
+        self._apply_exclude_zone_postprocess(results, model_id)
+        self._apply_scratch_postprocess(results)
+        post_elapsed = time.time() - post_start
+
+        if bomb_info is not None:
+            for result in results:
+                result.client_bomb_info = bomb_info
+
+        total_elapsed = time.time() - t0
+        ng_count = sum(1 for r in results if r.anomaly_tiles)
+        print(
+            f"[v2] Panel {Path(panel_dir).name}: "
+            f"{len(results)} lighting(s) 推論完成，{ng_count} NG，"
+            f"後處理 {post_elapsed:.2f}s，耗時 {total_elapsed:.2f}s"
+        )
+
+        # 回傳與 v1 格式相容的 7-tuple
+        return results, omit_vis, omit_overexposed, omit_overexposure_info, False, omit_image, {}
+
+    def _get_model_for(self, machine_id: str, lighting: str, zone: str):
+        """新架構 lazy loading，cache key 含 zone。
+
+        zone: "inner" | "edge"
+        """
+        key = (machine_id, lighting, zone)
+        if key not in self._model_cache_v2:
+            path_raw = self.config.model_mapping[lighting][zone]
+            model_path = Path(path_raw)
+            if not model_path.is_absolute():
+                model_path = self.base_dir / model_path
+            logger.info(f"[v2] 載入 model: {machine_id}/{lighting}/{zone} → {model_path}")
+            self._model_cache_v2[key] = self._load_model_from_path(model_path)
+        return self._model_cache_v2[key]
+
+    def _predict_tile(self, model, tile_img: np.ndarray, mask: Optional[np.ndarray] = None):
+        """跑 PatchCore 推論 + 應用 polygon mask（如有）。
+
+        Returns: (score: float, anomaly_map: np.ndarray | None)
+        """
+        # 確保圖片為 BGR 3-channel（anomalib TorchInferencer 預期 BGR uint8）
+        if tile_img.ndim == 2:
+            input_img = cv2.cvtColor(tile_img, cv2.COLOR_GRAY2BGR)
+        elif tile_img.shape[2] == 1:
+            input_img = cv2.cvtColor(tile_img, cv2.COLOR_GRAY2BGR)
+        else:
+            input_img = tile_img
+
+        result = model.predict(input_img)
+        score = float(getattr(result, "pred_score", 0.0))
+        anomaly_map = getattr(result, "anomaly_map", None)
+
+        if mask is not None and anomaly_map is not None:
+            # mask 255=panel 內, 0=panel 外 → 外部分數歸 0
+            mask_f = mask.astype(np.float32) / 255.0
+            if anomaly_map.ndim == 3:
+                mask_f = mask_f[:, :, np.newaxis]
+            anomaly_map = anomaly_map * mask_f
+            score = float(anomaly_map.max())
+
+        return score, anomaly_map
 
     def visualize_inference_result(self, image_path: Path, result: ImageResult) -> np.ndarray:
         """視覺化推論結果（含異常標記 與 AOI 標記）"""

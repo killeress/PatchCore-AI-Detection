@@ -103,6 +103,21 @@ Main TCP Loop (accept connections)
 
 **Multi-model support:** Up to 5 lighting conditions (Green/Red/White/50°Gray/Standard), each with independent thresholds configured by image prefix (`G0F`, `R0F`, `W0F`, `WGF`, `STANDARD`).
 
+## Multi-Architecture Support
+
+System now supports two model architectures concurrently:
+
+- **Legacy 5-model (CAPI 3F)**: Single model per lighting, MARK/exclusion mask in inference. Config: `configs/capi_3f.yaml`.
+- **New C-10 (per-machine)**: 10 models per machine = 5 lighting × (inner + edge). Config auto-generated at `model/<machine>-<date>/machine_config.yaml`. No MARK template.
+
+`server_config.yaml.model_configs` lists active configs. Inference dispatches by `model_id` from request.
+
+## Training
+
+- **Legacy** (deprecated): `tools/build_bga_tiles.py` + `tools/train_bga_all.py`
+- **New**: Web wizard at `/train/new`, 5 steps (select panels → preprocess → review tiles → train 10 PatchCore → done). Backed by `capi_train_new.py` + `capi_preprocess.py`.
+- **Backbone offline**: anomalib via timm downloads `wide_resnet50_2` from HuggingFace. Pre-stage on internet machine: `HF_HOME=deployment/torch_hub_cache python -c "import timm; timm.create_model('wide_resnet50_2', pretrained=True)"` then FTP-upload `deployment/torch_hub_cache/` to production.
+
 ## Domain Concepts
 
 - **OMIT image**: Parallel light-only capture (no front-light) used to identify dust vs. real defects. Filename prefix: `OMIT0000`. Cross-validated against AI anomaly heatmaps.

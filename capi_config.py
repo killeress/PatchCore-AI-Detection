@@ -85,6 +85,8 @@ class CAPIConfig:
     # 機種識別
     machine_id: str = "CAPI_3F"
     product_name: str = "CAPI 面板"
+    is_new_architecture: bool = False  # 新架構：model_mapping value 為 nested dict（inner/edge）
+    edge_threshold_px: int = 768       # 新架構邊緣區域判定門檻（px）
     
     # MARK 模板設定
     mark_template_path: str = "capi_mark.png"
@@ -111,10 +113,12 @@ class CAPIConfig:
     model_path: str = ""  # 預設模型路徑 (fallback，當 model_mapping 無對應時使用)
     
     # 多模型映射 {image_prefix: model_path} — 依圖片前綴自動選用對應模型
-    model_mapping: Dict[str, str] = field(default_factory=dict)
-    
+    # 新架構格式: {image_prefix: {"inner": path, "edge": path}}
+    model_mapping: Dict[str, Any] = field(default_factory=dict)
+
     # 每個前綴的獨立閾值 {image_prefix: threshold}，未指定則使用 anomaly_threshold
-    threshold_mapping: Dict[str, float] = field(default_factory=dict)
+    # 新架構格式: {image_prefix: {"inner": float, "edge": float}}
+    threshold_mapping: Dict[str, Any] = field(default_factory=dict)
     
     # PatchCore 後處理進階過濾
     patchcore_filter_enabled: bool = False             # 是否啟用後處理過濾
@@ -237,7 +241,22 @@ class CAPIConfig:
         exclusion_zones = []
         for zone_data in data.get("exclusion_zones", []):
             exclusion_zones.append(ExclusionZone.from_dict(zone_data))
-        
+
+        # 判斷新架構：model_mapping 任一 value 為含 inner/edge key 的 nested dict
+        # （不依賴 machine_id，因為舊版 yaml 也有 machine_id="CAPI_3F"，不能作為判別依據）
+        raw_model_mapping = data.get("model_mapping", {})
+        is_new = any(
+            isinstance(v, dict) and {"inner", "edge"}.issubset(v.keys())
+            for v in raw_model_mapping.values()
+        )
+
+        # threshold_mapping：舊架構為 {prefix: float}，新架構為 {prefix: {inner: float, edge: float}}
+        raw_threshold_mapping = data.get("threshold_mapping", {})
+        if is_new:
+            threshold_mapping: Dict[str, Any] = raw_threshold_mapping
+        else:
+            threshold_mapping = {k: float(v) for k, v in raw_threshold_mapping.items()}
+
         config = cls(
             machine_id=data.get("machine_id", "CAPI_3F"),
             product_name=data.get("product_name", "CAPI 面板"),
@@ -253,8 +272,10 @@ class CAPIConfig:
             tile_stride=data.get("tile_stride", 512),
             anomaly_threshold=data.get("anomaly_threshold", 0.5),
             model_path=data.get("model_path", ""),
-            model_mapping=data.get("model_mapping", {}),
-            threshold_mapping={k: float(v) for k, v in data.get("threshold_mapping", {}).items()},
+            model_mapping=raw_model_mapping,
+            threshold_mapping=threshold_mapping,
+            is_new_architecture=is_new,
+            edge_threshold_px=int(data.get("edge_threshold_px", 768)),
             patchcore_filter_enabled=data.get("patchcore_filter_enabled", False),
             patchcore_blur_sigma=data.get("patchcore_blur_sigma", 1.5),
             patchcore_min_area=data.get("patchcore_min_area", 10),
@@ -318,6 +339,8 @@ class CAPIConfig:
         """序列化為 dict（供 round-trip / 測試使用）"""
         return {
             "machine_id": self.machine_id,
+            "is_new_architecture": self.is_new_architecture,
+            "edge_threshold_px": self.edge_threshold_px,
             "product_name": self.product_name,
             "mark_template_path": self.mark_template_path,
             "mark_match_threshold": self.mark_match_threshold,
