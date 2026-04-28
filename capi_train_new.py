@@ -21,6 +21,10 @@ from typing import List, Dict, Optional, Callable
 import numpy as np
 import cv2
 
+from capi_preprocess import (
+    PreprocessConfig, preprocess_panel_folder, PanelPreprocessResult,
+)
+
 logger = logging.getLogger("capi.train_new")
 
 LIGHTINGS = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
@@ -49,8 +53,70 @@ def generate_job_id(machine_id: str) -> str:
     return f"train_{machine_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 
-def preprocess_panels_to_pool(*args, **kwargs):
-    raise NotImplementedError("Phase 4.2")
+def preprocess_panels_to_pool(
+    job_id: str,
+    cfg: "TrainingConfig",
+    preprocess_cfg: "PreprocessConfig",
+    db,
+    thumb_dir: Path,
+    log: Callable[[str], None],
+) -> dict:
+    """將 cfg.panel_paths 全部前處理 + 切 tile + 寫 DB。"""
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+    panel_success = 0
+    panel_fail = 0
+    total_tiles = 0
+
+    for idx, panel_dir in enumerate(cfg.panel_paths, 1):
+        log(f"[{idx}/{len(cfg.panel_paths)}] panel {panel_dir.name}")
+        try:
+            results = preprocess_panel_folder(panel_dir, preprocess_cfg)
+        except Exception as e:
+            log(f"  ✗ 處理失敗: {e}")
+            panel_fail += 1
+            continue
+        if not results:
+            log(f"  ✗ 無有效 lighting 圖")
+            panel_fail += 1
+            continue
+
+        polygon_failed_count = sum(1 for r in results.values() if r.polygon_detection_failed)
+        if polygon_failed_count > 0:
+            log(f"  ⚠ {polygon_failed_count} lighting polygon 偵測失敗")
+
+        # 為每張 tile 存 .png + 縮圖 + 寫 DB
+        tile_records = []
+        for lighting, result in results.items():
+            for tile in result.tiles:
+                tile_filename = f"{job_id}_{panel_dir.name}_{lighting}_t{tile.tile_id:04d}.png"
+                tile_path = thumb_dir / "tiles" / tile_filename
+                tile_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(tile_path), tile.image)
+
+                thumb_path = thumb_dir / "thumb" / tile_filename
+                thumb_path.parent.mkdir(parents=True, exist_ok=True)
+                thumb = cv2.resize(tile.image, (96, 96))
+                cv2.imwrite(str(thumb_path), thumb)
+
+                tile_records.append({
+                    "lighting": lighting,
+                    "zone": tile.zone,
+                    "source": "ok",
+                    "source_path": str(tile_path),
+                    "thumb_path": str(thumb_path),
+                })
+
+        if tile_records:
+            db.insert_tile_pool(job_id, tile_records)
+            total_tiles += len(tile_records)
+            panel_success += 1
+            log(f"  ✓ 切出 {len(tile_records)} tile")
+
+    return {
+        "panel_success": panel_success,
+        "panel_fail": panel_fail,
+        "total_tiles": total_tiles,
+    }
 
 
 def sample_ng_tiles(*args, **kwargs):
