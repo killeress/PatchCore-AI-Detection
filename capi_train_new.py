@@ -9,16 +9,12 @@ from __future__ import annotations
 import os
 import json
 import logging
-import platform
 import random
 import shutil
-import subprocess
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, Callable
-import numpy as np
+from typing import List, Dict, Optional, Callable, Protocol, runtime_checkable
 import cv2
 
 from capi_preprocess import (
@@ -26,6 +22,13 @@ from capi_preprocess import (
 )
 
 logger = logging.getLogger("capi.train_new")
+
+
+@runtime_checkable
+class TrainingDB(Protocol):
+    """Database interface required by train worker."""
+    def insert_tile_pool(self, job_id: str, tiles: List[dict]) -> List[int]: ...
+    def list_tile_pool(self, job_id: str, **filters) -> List[dict]: ...
 
 LIGHTINGS = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
 ZONES = ("inner", "edge")
@@ -57,7 +60,7 @@ def preprocess_panels_to_pool(
     job_id: str,
     cfg: "TrainingConfig",
     preprocess_cfg: "PreprocessConfig",
-    db,
+    db: TrainingDB,
     thumb_dir: Path,
     log: Callable[[str], None],
 ) -> dict:
@@ -122,7 +125,7 @@ def preprocess_panels_to_pool(
 def sample_ng_tiles(
     job_id: str,
     over_review_root: Path,
-    db,
+    db: TrainingDB,
     per_lighting: int = NG_TILES_PER_LIGHTING,
     log: Callable[[str], None] = print,
 ) -> dict:
@@ -363,7 +366,7 @@ def _predict_ng_scores(model_pt: Path, ng_paths: List[Path]) -> List[float]:
 def run_training_pipeline(
     job_id: str,
     cfg: TrainingConfig,
-    db,
+    db: TrainingDB,
     gpu_lock,
     log: Callable[[str], None] = print,
 ) -> Path:
@@ -417,7 +420,10 @@ def run_training_pipeline(
                 tiles_per_unit[unit_label] = {"train": len(train_tiles), "ng": len(ng_tiles)}
                 model_files[unit_label] = {"path": dst_pt.name, "size_bytes": size}
                 success_units += 1
-                log(f"[{idx}/10] done, threshold={threshold:.4f}, size={size/1e6:.1f}MB")
+                log(f"[{idx}/10] ✓ done, threshold={threshold:.4f}, size={size/1e6:.1f}MB")
+            except Exception as e:
+                log(f"[{idx}/10] ✗ 訓練失敗: {e}")
+                # 不增加 success_units，繼續下一個 unit
             finally:
                 shutil.rmtree(run_root, ignore_errors=True)
                 shutil.rmtree(staging, ignore_errors=True)
