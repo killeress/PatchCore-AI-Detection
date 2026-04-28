@@ -41,15 +41,14 @@ class PanelPreprocessResult:
 
 
 LIGHTING_PREFIXES = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
-SKIP_PREFIXES = ("S", "B0F", "PINIGBI", "OMIT")
 SKIP_EXACT = ("Optics.log",)
 
 
 def filter_panel_lighting_files(folder: Path) -> Dict[str, Path]:
     """從 panel folder 過濾出 5 個有效 lighting 圖。
 
-    跳過：S* (側拍) / B0F (黑屏) / PINIGBI (點燈狀態檔) / OMIT (光源圖) /
-          Optics.log。
+    只保留檔名以 5 個 lighting prefix 開頭的圖；其他（S* 側拍 / B0F 黑屏 /
+    PINIGBI / OMIT / Optics.log）自然被忽略。
 
     Returns: {"G0F00000": Path, ...}，缺哪個 lighting 就少哪個 key。
     """
@@ -70,5 +69,4 @@ def filter_panel_lighting_files(folder: Path) -> Dict[str, Path]:
                 break
         if matched:
             continue
-        # 其餘非 lighting 的檔案再套用 skip 規則（可省略，但保留語意清晰）
     return result
