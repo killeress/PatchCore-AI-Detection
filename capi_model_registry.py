@@ -76,3 +76,20 @@ def _remove_from_model_configs(server_config_path: Path, yaml_rel: str) -> None:
     configs = cfg.get("model_configs", [])
     cfg["model_configs"] = [p for p in configs if p != yaml_rel]
     server_config_path.write_text(yaml.dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
+def delete_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
+    bundle = db.get_model_bundle(bundle_id)
+    if not bundle:
+        raise ValueError(f"bundle {bundle_id} not found")
+    if bundle["is_active"]:
+        raise ValueError("bundle is active; deactivate first")
+
+    bundle_path = Path(bundle["bundle_path"])
+    yaml_rel = str(bundle_path / "machine_config.yaml")
+    _remove_from_model_configs(server_config_path, yaml_rel)
+
+    if bundle_path.exists():
+        shutil.rmtree(bundle_path, ignore_errors=False)
+    db.delete_model_bundle(bundle_id)
+    return {"ok": True}
