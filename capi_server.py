@@ -753,6 +753,49 @@ class CAPIServer:
         # 非同步儲存執行緒池 (Heatmap + DB 在背景完成，不阻塞回覆)
         self._async_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="async-save")
 
+        # 多機種 config 字典 (machine_id → CAPIConfig)；由 _load_model_configs 填入
+        self.configs_by_machine: Dict[str, "CAPIConfig"] = {}
+        self.fallback_config: Optional["CAPIConfig"] = None
+        self._load_model_configs(config_path)
+
+    def _load_model_configs(self, server_config_path: str) -> None:
+        """載入 server_config 中 model_configs 清單，建立 configs_by_machine dispatcher。
+
+        向後相容：若 model_configs 不存在，預設使用 inference.config_path 所指向的單一 yaml。
+        """
+        inf_cfg = self.server_config.get("inference", {})
+        default_cfg_path = inf_cfg.get("config_path", "configs/capi_3f.yaml")
+
+        cfg_paths: list = self.server_config.get("model_configs", [default_cfg_path])
+        fallback_path: str = self.server_config.get("fallback_model_config", default_cfg_path)
+
+        loaded = 0
+        for path in cfg_paths:
+            try:
+                cfg = CAPIConfig.from_yaml(path)
+                key = cfg.machine_id if cfg.machine_id else "CAPI_3F"
+                self.configs_by_machine[key] = cfg
+                loaded += 1
+                logger.info(f"[MultiConfig] Loaded config for machine '{key}' from {path}")
+            except Exception as e:
+                logger.warning(f"[MultiConfig] Failed to load config {path}: {e}")
+
+        try:
+            self.fallback_config = CAPIConfig.from_yaml(fallback_path)
+            logger.info(f"[MultiConfig] Fallback config: {fallback_path} (machine='{self.fallback_config.machine_id}')")
+        except Exception as e:
+            logger.warning(f"[MultiConfig] Failed to load fallback config {fallback_path}: {e}")
+            self.fallback_config = list(self.configs_by_machine.values())[0] if self.configs_by_machine else None
+
+        print(f"[SERVER] Loaded {loaded} model config(s): {list(self.configs_by_machine.keys())}", flush=True)
+
+    def get_config_for(self, model_id: str) -> "CAPIConfig":
+        """依 model_id 回傳對應的 CAPIConfig；找不到時回傳 fallback_config。
+
+        Phase 9 inference per-request dispatcher 入口。
+        """
+        return self.configs_by_machine.get(model_id, self.fallback_config)
+
     def _load_inferencer(self):
         """載入 AI 推論模型"""
         inf_cfg = self.inference_config
