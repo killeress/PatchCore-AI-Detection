@@ -4455,7 +4455,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _handle_train_new_panels(self):
         """GET /api/train/new/panels?machine_id=X&days=7
 
-        回傳指定機種 model_id 在近 N 天內 machine_judgment='OK' 且 ai_judgment='OK'
+        回傳指定機種 model_id 在近 N 天內 machine_judgment='OK'
         的 inference_records，供訓練 wizard 第一步選擇訓練樣本使用。
         """
         from urllib.parse import parse_qs, urlparse
@@ -4485,7 +4485,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                        FROM inference_records
                        WHERE model_id = ?
                          AND machine_judgment = 'OK'
-                         AND ai_judgment = 'OK'
                          AND created_at >= datetime('now', ? || ' days')
                        ORDER BY created_at DESC
                        LIMIT 100""",
