@@ -56,3 +56,42 @@ def test_activate_bundle_writes_server_config(tmp_path):
     sc = yaml_mod.safe_load(sc_path.read_text())
     assert not any("GN160-20260428" in p for p in sc["model_configs"])
     assert db.get_model_bundle(bid)["is_active"] == 0
+
+
+def test_delete_active_bundle_rejected(tmp_path):
+    import pytest
+    from capi_database import CAPIDatabase
+    from capi_model_registry import delete_bundle
+    db = CAPIDatabase(tmp_path / "test.db")
+    bid = db.register_model_bundle({
+        "machine_id": "GN160", "bundle_path": str(tmp_path / "model/x"),
+        "trained_at": "2026-04-28T15:30:45", "panel_count": 5,
+        "inner_tile_count": 0, "edge_tile_count": 0, "ng_tile_count": 0,
+        "bundle_size_bytes": 0, "job_id": "j1",
+    })
+    db.set_bundle_active(bid, True)
+    sc = tmp_path / "server_config.yaml"
+    sc.write_text("model_configs: []")
+
+    with pytest.raises(ValueError, match="active"):
+        delete_bundle(db, bid, server_config_path=sc)
+
+
+def test_delete_inactive_bundle_removes_dir(tmp_path):
+    from capi_database import CAPIDatabase
+    from capi_model_registry import delete_bundle
+    db = CAPIDatabase(tmp_path / "test.db")
+    bdir = tmp_path / "model" / "y"
+    bdir.mkdir(parents=True)
+    (bdir / "x.pt").write_bytes(b"x")
+    bid = db.register_model_bundle({
+        "machine_id": "G", "bundle_path": str(bdir),
+        "trained_at": "2026-04-28T15:30:45", "panel_count": 5,
+        "inner_tile_count": 0, "edge_tile_count": 0, "ng_tile_count": 0,
+        "bundle_size_bytes": 0, "job_id": "j1",
+    })
+    sc = tmp_path / "server_config.yaml"
+    sc.write_text("model_configs: []")
+    delete_bundle(db, bid, server_config_path=sc)
+    assert not bdir.exists()
+    assert db.get_model_bundle(bid) is None
