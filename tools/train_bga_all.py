@@ -10,7 +10,17 @@ Uses training_gui_gradio.py defaults:
 After each run: keeps only the .pt file and deletes the full anomalib results/ output.
 """
 
+"""[DEPRECATED] 此腳本將被 capi_train_new 取代。
+新機種訓練請用 web wizard `/train/new`，舊機種（CAPI 3F）遷移完成後此檔可刪除。
+"""
+
 from __future__ import annotations
+
+import warnings
+warnings.warn(
+    "tools/train_bga_all.py is deprecated; use capi_train_new + /train/new wizard",
+    DeprecationWarning, stacklevel=2,
+)
 
 import os
 
