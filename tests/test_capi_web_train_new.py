@@ -110,8 +110,23 @@ def _make_real_db():
     """)
     conn.commit()
 
+    def _list_ok_panels(machine_id, days=7, limit=100):
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id, glass_id, model_id, machine_no,
+                      machine_judgment, ai_judgment, image_dir, created_at
+               FROM inference_records
+               WHERE model_id = ? AND machine_judgment = 'OK'
+               AND created_at >= datetime('now', ? || ' days')
+               ORDER BY created_at DESC LIMIT ?""",
+            (machine_id, f"-{days}", limit),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
     db_mock = MagicMock()
     db_mock._get_conn.return_value = conn
+    db_mock.list_ok_panels_for_machine.side_effect = _list_ok_panels
     return db_mock
 
 
@@ -132,6 +147,7 @@ def test_handle_train_new_panels_returns_db_result():
     assert len(body["panels"]) == 2
     glass_ids = {p["glass_id"] for p in body["panels"]}
     assert glass_ids == {"G001", "G002"}
+    assert all(p["image_path"] == p["image_dir"] for p in body["panels"])
 
 
 def test_handle_train_new_panels_requires_machine_id():
@@ -187,7 +203,7 @@ def test_handle_train_new_start_rejects_concurrent():
     }
 
     h = _make_handler_with_server(server, "/api/train/new/start")
-    body = json.dumps({"machine_id": "M", "panel_paths": ["/p1"]}).encode()
+    body = json.dumps({"machine_id": "M", "panel_paths": [f"/p{i}" for i in range(5)]}).encode()
     h.headers.get = MagicMock(return_value=str(len(body)))
     h.rfile = io.BytesIO(body)
 
@@ -198,6 +214,21 @@ def test_handle_train_new_start_rejects_concurrent():
     resp_body = json.loads(h._sent_response[0]["body"])
     assert resp_body.get("error") == "job_already_running"
     assert resp_body.get("active_job_id") == "j_old"
+
+
+def test_handle_train_new_start_rejects_invalid_panel_path():
+    server = MagicMock()
+    server.database.get_active_training_job.return_value = None
+
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    body = json.dumps({"machine_id": "M", "panel_paths": ["undefined"] * 5}).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 400
+    assert "invalid path" in json.loads(h._sent_response[0]["body"])["error"]
 
 
 # ── /api/train/new/status tests ───────────────────────────────────────────────
@@ -250,6 +281,24 @@ def test_handle_train_new_tiles_returns_pool():
     body = json.loads(h._sent_response[0]["body"])
     assert len(body["tiles"]) == 1
     server.database.list_tile_pool.assert_called_with("j1", lighting="G0F00000")
+
+
+def test_handle_train_new_tiles_adds_confined_thumb_url(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    thumb = tmp_path / ".tmp" / "train_new_thumbs" / "j1" / "thumb" / "a.png"
+    thumb.parent.mkdir(parents=True)
+    thumb.write_bytes(b"x")
+
+    server = MagicMock()
+    server.database.list_tile_pool.return_value = [
+        {"id": 1, "lighting": "G0F00000", "zone": "inner", "source": "ok",
+         "decision": "accept", "thumb_path": str(thumb)},
+    ]
+    h = _make_handler_with_server(server, "/api/train/new/tiles?job_id=j1&lighting=G0F00000")
+    h._handle_train_new_tiles()
+
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["tiles"][0]["thumb_url"] == "/api/train/new/thumb/j1/thumb/a.png"
 
 
 def test_handle_train_new_tiles_requires_params():
@@ -328,3 +377,49 @@ def test_handle_train_new_start_training_starts_thread(monkeypatch):
     assert len(started_threads) == 1
     body = json.loads(h._sent_response[0]["body"])
     assert body["state"] == "train"
+
+
+def test_handle_train_new_thumb_rejects_sibling_prefix_escape(tmp_path, monkeypatch):
+    """Sibling paths such as train_new_thumbs_evil must not pass containment checks."""
+    monkeypatch.chdir(tmp_path)
+    leak_dir = tmp_path / ".tmp" / "train_new_thumbs_evil"
+    leak_dir.mkdir(parents=True)
+    (leak_dir / "leak.png").write_bytes(b"x")
+
+    server = MagicMock()
+    h = _make_handler_with_server(
+        server,
+        "/api/train/new/thumb/../train_new_thumbs_evil/leak.png",
+    )
+    h._send_binary = lambda path: h._sent_response.append({"status": 200, "body": path})
+
+    h._handle_train_new_thumb()
+
+    assert h._sent_response[0]["status"] == 403
+
+
+def test_handle_train_new_progress_page_uses_step4_template_for_train_state():
+    server = MagicMock()
+    server.database.get_training_job.return_value = {"job_id": "j1", "state": "train"}
+    h = _make_handler_with_server(server, "/train/new/progress?job_id=j1")
+    template = MagicMock()
+    template.render.return_value = "<html>step4</html>"
+    h.jinja_env = MagicMock()
+    h.jinja_env.get_template.return_value = template
+
+    h._handle_train_new_progress_page()
+
+    h.jinja_env.get_template.assert_called_with("train_new/step4_progress.html")
+    assert h._sent_response[0]["body"] == "<html>step4</html>"
+
+
+def test_handle_models_list_filters_by_machine_id():
+    server = MagicMock()
+    server.database.list_model_bundles.return_value = [{"id": 1, "machine_id": "M"}]
+    h = _make_handler_with_server(server, "/api/models?machine_id=M")
+
+    h._handle_models_list()
+
+    server.database.list_model_bundles.assert_called_with(machine_id="M")
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["bundles"] == [{"id": 1, "machine_id": "M"}]

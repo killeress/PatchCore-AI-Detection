@@ -13,6 +13,18 @@
     {% endfor %}
   </div>
 
+  <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;">
+    <div style="display:flex;gap:6px;">
+      <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">全部</button>
+      <button class="filter-btn" data-filter="accept" onclick="setFilter('accept')">已加入</button>
+      <button class="filter-btn" data-filter="reject" onclick="setFilter('reject')">已排除</button>
+    </div>
+    <div style="display:flex;gap:6px;">
+      <button class="batch-btn" onclick="setVisibleDecision('accept')">目前可見全部加入</button>
+      <button class="batch-btn danger" onclick="setVisibleDecision('reject')">目前可見全部排除</button>
+    </div>
+  </div>
+
   <div id="content-area"></div>
 
   <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;padding-top:12px;border-top:1px solid #45475a;">
@@ -33,12 +45,19 @@
   .tile { aspect-ratio:1;border-radius:3px;background:#3b4257;border:2px solid transparent;cursor:pointer;background-size:cover;background-position:center; }
   .tile.accept { border-color:#a6e3a1; }
   .tile.reject { border-color:#f38ba8;opacity:.5; }
+  .filter-btn,.batch-btn,.grp-btn { background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:6px 10px;cursor:pointer;font-size:.78rem; }
+  .filter-btn.active { background:#89b4fa;color:#1e1e2e;border-color:#89b4fa;font-weight:700; }
+  .batch-btn.danger,.grp-btn.danger { border-color:#f38ba8;color:#f38ba8; }
+  .grp-actions { display:flex;gap:5px;align-items:center; }
+  .tile.empty { cursor:default;opacity:.35;background:#1e1e2e; }
 </style>
 
 <script>
 const jobId = "{{ job_id }}";
 let _currentLighting = 'G0F00000';
 let _tilesByLighting = {};  // {lighting: [tile, ...]}
+let _filter = 'all';
+let _lastClickedId = null;
 
 function loadLighting(lighting) {
   return fetch(`/api/train/new/tiles?job_id=${encodeURIComponent(jobId)}&lighting=${lighting}`)
@@ -48,6 +67,7 @@ function loadLighting(lighting) {
 
 function switchLighting(lighting) {
   _currentLighting = lighting;
+  _lastClickedId = null;
   document.querySelectorAll('.lighting-tab').forEach(t => t.classList.toggle('active', t.dataset.lighting === lighting));
   if (!_tilesByLighting[lighting]) {
     loadLighting(lighting).then(render);
@@ -56,26 +76,55 @@ function switchLighting(lighting) {
   }
 }
 
+function setFilter(filter) {
+  _filter = filter;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === filter));
+  render();
+}
+
+function groupTiles(tiles) {
+  return {
+    inner_ok: tiles.filter(t => t.zone === 'inner' && t.source === 'ok'),
+    edge_ok: tiles.filter(t => t.zone === 'edge' && t.source === 'ok'),
+    ng: tiles.filter(t => t.source === 'ng'),
+  };
+}
+
+function visibleTiles(list) {
+  if (_filter === 'all') return list;
+  return list.filter(t => t.decision === _filter);
+}
+
 function render() {
   const tiles = _tilesByLighting[_currentLighting] || [];
-  const groups = {
-    'inner_ok': tiles.filter(t => t.zone === 'inner' && t.source === 'ok'),
-    'inner_ng': tiles.filter(t => t.source === 'ng'),  // NG 不分 zone
-    'edge_ok':  tiles.filter(t => t.zone === 'edge' && t.source === 'ok'),
-  };
+  const groups = groupTiles(tiles);
   let html = '';
   for (const [key, list] of Object.entries(groups)) {
-    if (!list.length) continue;
+    const displayList = visibleTiles(list);
     const accept = list.filter(t => t.decision === 'accept').length;
-    const isEdge = key.startsWith('edge'), isNg = key.endsWith('ng');
+    const isEdge = key === 'edge_ok', isNg = key === 'ng';
     const grpCls = isNg ? 'ng' : (isEdge ? 'edge' : '');
-    const title = {inner_ok:'內部 OK', inner_ng:'NG (來自 over_review)', edge_ok:'邊緣 OK'}[key];
-    html += `<div class="grp-head ${grpCls}"><span>📦 ${title}</span><span style="color:#a6adc8;font-size:.78rem;">${accept}/${list.length} 加入</span></div>`;
+    const title = {
+      inner_ok:'內部 OK',
+      edge_ok:'邊緣 OK',
+      ng:'NG（來自 over_review，inner/edge 共用）',
+    }[key];
+    html += `<div class="grp-head ${grpCls}">
+      <span>${title}</span>
+      <span class="grp-actions">
+        <span style="color:#a6adc8;font-size:.78rem;">${accept}/${list.length} 加入</span>
+        <button class="grp-btn" onclick="setGroupDecision('${key}','accept')">全加入</button>
+        <button class="grp-btn danger" onclick="setGroupDecision('${key}','reject')">全排除</button>
+      </span>
+    </div>`;
     html += '<div class="grid">';
-    for (const t of list) {
+    if (!displayList.length) {
+      html += '<div class="tile empty" title="無符合篩選的 tile"></div>';
+    }
+    for (const t of displayList) {
       const tileCls = t.decision === 'reject' ? 'reject' : 'accept';
-      const thumb = `/api/train/new/thumb${t.thumb_path.replace(/^.*\.tmp\/train_new_thumbs/, '')}`;
-      html += `<div class="tile ${tileCls}" data-id="${t.id}" style="background-image:url('${thumb}');" onclick="toggleTile(this)"></div>`;
+      const thumb = t.thumb_url || '';
+      html += `<div class="tile ${tileCls}" data-id="${t.id}" style="background-image:url('${thumb}');" onclick="toggleTile(this,event)"></div>`;
     }
     html += '</div>';
   }
@@ -83,18 +132,47 @@ function render() {
   updateBadge(_currentLighting);
 }
 
-function toggleTile(el) {
+function updateDecision(tileIds, decision) {
+  if (!tileIds.length) return Promise.resolve();
+  return fetch('/api/train/new/tiles/decision', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({job_id: jobId, tile_ids: tileIds, decision}),
+  }).then(r => r.json()).then(d => {
+    if (d.error) { alert('錯誤: ' + d.error); return; }
+    for (const tile of _tilesByLighting[_currentLighting] || []) {
+      if (tileIds.includes(tile.id)) tile.decision = decision;
+    }
+    render();
+  });
+}
+
+function toggleTile(el, event) {
   const id = parseInt(el.dataset.id);
   const tile = _tilesByLighting[_currentLighting].find(t => t.id === id);
   const newDec = tile.decision === 'accept' ? 'reject' : 'accept';
-  fetch('/api/train/new/tiles/decision', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({job_id: jobId, tile_ids: [id], decision: newDec}),
-  }).then(() => {
-    tile.decision = newDec;
-    el.className = 'tile ' + newDec;
-    render();
-  });
+  let ids = [id];
+  if (event.shiftKey && _lastClickedId !== null) {
+    const visibleIds = Array.from(document.querySelectorAll('.tile[data-id]')).map(e => parseInt(e.dataset.id));
+    const a = visibleIds.indexOf(_lastClickedId);
+    const b = visibleIds.indexOf(id);
+    if (a >= 0 && b >= 0) {
+      const lo = Math.min(a, b);
+      const hi = Math.max(a, b);
+      ids = visibleIds.slice(lo, hi + 1);
+    }
+  }
+  _lastClickedId = id;
+  updateDecision(ids, newDec);
+}
+
+function setGroupDecision(key, decision) {
+  const ids = visibleTiles(groupTiles(_tilesByLighting[_currentLighting] || [])[key]).map(t => t.id);
+  updateDecision(ids, decision);
+}
+
+function setVisibleDecision(decision) {
+  const ids = Array.from(document.querySelectorAll('.tile[data-id]')).map(e => parseInt(e.dataset.id));
+  updateDecision(ids, decision);
 }
 
 function updateBadge(lighting) {

@@ -2573,6 +2573,29 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def list_ok_panels_for_machine(self, machine_id: str, days: int = 7, limit: int = 100) -> list:
+        """回傳指定 model_id 近 N 天 machine_judgment='OK' 的 inference_records。
+
+        供訓練 wizard 第一步選擇訓練樣本使用。
+        """
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT id, glass_id, model_id, machine_no,
+                          machine_judgment, ai_judgment, image_dir,
+                          created_at
+                   FROM inference_records
+                   WHERE model_id = ? AND machine_judgment = 'OK'
+                   AND created_at >= datetime('now', ? || ' days')
+                   ORDER BY created_at DESC LIMIT ?""",
+                (machine_id, f"-{days}", limit),
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
     def delete_model_bundle(self, bundle_id: int) -> None:
         """刪除指定 id 的 model_registry 紀錄。"""
         conn = self._get_conn()
