@@ -1,4 +1,4 @@
-"""API 測試：/api/train/new/panels
+"""API 測試：/api/train/new/panels + /api/train/new/start
 
 使用 mock server + 直接呼叫 handler 方法，不需啟動真實 HTTP server。
 """
@@ -6,6 +6,7 @@ import io
 import json
 import sqlite3
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +27,33 @@ def _make_handler(db_inst, path="/api/train/new/panels?machine_id=GN160&days=7")
     h.wfile = io.BytesIO()
 
     # 攔截 _send_json 輸出
+    h._sent_response = []
+
+    def capture_json(payload, status=200):
+        h._sent_response.append({"status": status, "body": json.dumps(payload)})
+
+    def capture_send(status, body, content_type="text/html; charset=utf-8"):
+        h._sent_response.append({"status": status, "body": body})
+
+    h._send_json = capture_json
+    h._send_response = capture_send
+    return h
+
+
+def _make_handler_with_server(server, path="/api/train/new/start"):
+    """建一個 handler，_capi_server_instance 指向 mock server。"""
+    from capi_web import CAPIWebHandler
+
+    h = CAPIWebHandler.__new__(CAPIWebHandler)
+    h._capi_server_instance = server
+    h.db = server.database
+
+    h.path = path
+    h.headers = MagicMock()
+    h.headers.get = MagicMock(return_value="0")
+    h.rfile = io.BytesIO(b"")
+    h.wfile = io.BytesIO()
+
     h._sent_response = []
 
     def capture_json(payload, status=200):
@@ -125,3 +153,48 @@ def test_handle_train_new_panels_db_not_set():
 
     assert len(h._sent_response) == 1
     assert h._sent_response[0]["status"] == 503
+
+
+# ── /api/train/new/start tests ────────────────────────────────────────────────
+
+def test_handle_train_new_start_validates_params():
+    """空 body（無 machine_id）→ 400。"""
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.database.get_active_training_job.return_value = None
+
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    h.headers.get = MagicMock(return_value="0")
+    h.rfile = io.BytesIO(b"")
+
+    h._handle_train_new_start()
+
+    assert len(h._sent_response) == 1
+    assert h._sent_response[0]["status"] == 400
+    body = json.loads(h._sent_response[0]["body"])
+    assert "error" in body
+
+
+def test_handle_train_new_start_rejects_concurrent():
+    """現有 active job → 409。"""
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.database.get_active_training_job.return_value = {
+        "job_id": "j_old",
+        "state": "preprocess",
+    }
+
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    body = json.dumps({"machine_id": "M", "panel_paths": ["/p1"]}).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_start()
+
+    assert len(h._sent_response) == 1
+    assert h._sent_response[0]["status"] == 409
+    resp_body = json.loads(h._sent_response[0]["body"])
+    assert resp_body.get("error") == "job_already_running"
+    assert resp_body.get("active_job_id") == "j_old"

@@ -137,6 +137,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     _debug_heatmap_dir = None  # Debug 推論暫存目錄
     _capi_server_instance = None  # CAPIServer 實例 (用於 hot-reload)
     _log_file = None  # 日誌檔案路徑 (用於 Log Viewer)
+    # 訓練 wizard 新模型狀態（由 create_web_server 完整初始化）
+    _train_new_state: dict = {
+        "lock": threading.Lock(),
+        "active_job_id": None,
+        "thread": None,
+        "log_lines": [],
+        "log_lock": threading.Lock(),
+    }
 
     @classmethod
     def init_jinja(cls):
@@ -346,6 +354,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path == "/api/debug/scratch-batch/cancel":
                 self._handle_scratch_batch_cancel()
+                return
+            elif path == "/api/train/new/start":
+                self._handle_train_new_start()
                 return
             else:
                 self._send_404(path)
@@ -4497,6 +4508,109 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=500)
 
+    def _handle_train_new_start(self):
+        """POST /api/train/new/start
+
+        body: {"machine_id": "...", "panel_paths": [...]}
+        """
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            params = json.loads(body) if body else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON body"}, status=400)
+            return
+
+        machine_id = params.get("machine_id", "").strip()
+        panel_paths = params.get("panel_paths", [])
+        if not machine_id or not panel_paths:
+            self._send_json({"error": "machine_id and panel_paths required"}, status=400)
+            return
+        if len(panel_paths) > 20:
+            self._send_json({"error": "panel_paths too many (max 20)"}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        state = self._train_new_state
+        with state["lock"]:
+            existing = db.get_active_training_job()
+            if existing:
+                self._send_json({
+                    "error": "job_already_running",
+                    "active_job_id": existing["job_id"],
+                    "state": existing["state"],
+                }, status=409)
+                return
+
+            from capi_train_new import generate_job_id
+            job_id = generate_job_id(machine_id)
+            db.create_training_job(job_id=job_id, machine_id=machine_id, panel_paths=panel_paths)
+            state["active_job_id"] = job_id
+            state["log_lines"] = []
+
+        # 起 preprocess thread
+        thread = threading.Thread(
+            target=CAPIWebHandler._train_new_preprocess_worker,
+            args=(job_id, machine_id, panel_paths, self._capi_server_instance),
+            daemon=True, name=f"train_new_pre-{job_id}",
+        )
+        thread.start()
+        self._send_json({"job_id": job_id, "state": "preprocess"})
+
+    @staticmethod
+    def _train_new_preprocess_worker(job_id, machine_id, panel_paths, server_inst):
+        """背景 thread：preprocess + 抽 NG → state=review。"""
+        import traceback
+        from pathlib import Path as _Path
+        from capi_train_new import (
+            TrainingConfig, preprocess_panels_to_pool, sample_ng_tiles,
+        )
+        from capi_preprocess import PreprocessConfig
+
+        db = server_inst.database
+        state = CAPIWebHandler._train_new_state
+
+        def log(msg):
+            with state["log_lock"]:
+                state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+        try:
+            thumb_root = _Path(".tmp/train_new_thumbs") / job_id
+            cfg = TrainingConfig(
+                machine_id=machine_id,
+                panel_paths=[_Path(p) for p in panel_paths],
+                over_review_root=_Path("/aidata/capi_ai/datasets/over_review"),
+            )
+            pre_cfg = PreprocessConfig()
+
+            log(f"開始前處理 {len(panel_paths)} panel")
+            stats = preprocess_panels_to_pool(
+                job_id=job_id, cfg=cfg, preprocess_cfg=pre_cfg,
+                db=db, thumb_dir=thumb_root, log=log,
+            )
+            if stats["panel_success"] < 4:
+                raise RuntimeError(f"成功 panel < 4 ({stats['panel_success']})")
+
+            log(f"抽 NG tile（每 lighting 30 個）")
+            ng_stats = sample_ng_tiles(
+                job_id=job_id, over_review_root=cfg.over_review_root,
+                db=db, per_lighting=30, log=log,
+            )
+
+            db.update_training_job_state(job_id, "review")
+            log("✓ 進入 review 階段")
+        except Exception as e:
+            traceback.print_exc()
+            db.update_training_job_state(job_id, "failed", error_message=str(e))
+            log(f"✗ 失敗: {e}")
+        finally:
+            with state["lock"]:
+                if state["active_job_id"] == job_id:
+                    # preprocess 完成不解鎖（仍在 review）；失敗才解鎖
+                    job = db.get_training_job(job_id)
+                    if job and job["state"] in ("failed",):
+                        state["active_job_id"] = None
+
     def _handle_retrain_status(self):
         """GET /api/retrain/status"""
         state = self._retrain_state
@@ -4643,6 +4757,13 @@ def create_web_server(
     CAPIWebHandler._retrain_state = {
         "lock": threading.Lock(),
         "job": None,
+    }
+    CAPIWebHandler._train_new_state = {
+        "lock": threading.Lock(),
+        "active_job_id": None,
+        "thread": None,
+        "log_lines": [],
+        "log_lock": threading.Lock(),
     }
     CAPIWebHandler.init_jinja()
 
