@@ -38,3 +38,37 @@ class PanelPreprocessResult:
     panel_polygon: Optional[np.ndarray]
     tiles: List[TileResult] = field(default_factory=list)
     polygon_detection_failed: bool = False
+
+
+LIGHTING_PREFIXES = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
+SKIP_PREFIXES = ("S", "B0F", "PINIGBI", "OMIT")
+SKIP_EXACT = ("Optics.log",)
+
+
+def filter_panel_lighting_files(folder: Path) -> Dict[str, Path]:
+    """從 panel folder 過濾出 5 個有效 lighting 圖。
+
+    跳過：S* (側拍) / B0F (黑屏) / PINIGBI (點燈狀態檔) / OMIT (光源圖) /
+          Optics.log。
+
+    Returns: {"G0F00000": Path, ...}，缺哪個 lighting 就少哪個 key。
+    """
+    result: Dict[str, Path] = {}
+    for entry in folder.iterdir():
+        if not entry.is_file():
+            continue
+        name = entry.name
+        if name in SKIP_EXACT:
+            continue
+        # 優先比對 lighting prefix（STANDARD 開頭含 S，須先於 skip 判斷）
+        matched = False
+        for lighting in LIGHTING_PREFIXES:
+            if name.startswith(lighting):
+                if lighting not in result:
+                    result[lighting] = entry
+                matched = True
+                break
+        if matched:
+            continue
+        # 其餘非 lighting 的檔案再套用 skip 規則（可省略，但保留語意清晰）
+    return result
