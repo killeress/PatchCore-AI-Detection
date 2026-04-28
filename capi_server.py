@@ -761,6 +761,12 @@ class CAPIServer:
         # 向後相容：self.config 為 fallback_config 別名
         self.config = self.fallback_config
 
+        # 記憶 config 路徑，供 web routes 執行時讀寫 (e.g. activate_bundle)
+        self.server_config_path = config_path
+
+        # 向後相容別名：web routes 用 .database 存取 DB
+        self.database = self.db
+
     def _load_model_configs(self, server_config_path: str) -> None:
         """載入 server_config 中 model_configs 清單，建立 configs_by_machine dispatcher。
 
