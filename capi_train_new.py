@@ -6,12 +6,12 @@
 - run_training_pipeline: Step 4 訓 10 模型 + 寫 bundle
 """
 from __future__ import annotations
+import gc
 import os
 import json
 import logging
 import random
 import shutil
-import threading
 import time
 import traceback
 from functools import wraps
@@ -290,18 +290,10 @@ def train_one_patchcore(
 
     if log:
         log(f"{unit_label}: engine.fit 開始")
-    _run_with_heartbeat(
-        lambda: engine.fit(datamodule=datamodule, model=model),
-        log=log,
-        message=f"{unit_label}: engine.fit 仍在執行",
-    )
+    engine.fit(datamodule=datamodule, model=model)
     if log:
         log(f"{unit_label}: engine.fit 完成，開始 export")
-    _run_with_heartbeat(
-        lambda: engine.export(model=model, export_type=ExportType.TORCH),
-        log=log,
-        message=f"{unit_label}: export 仍在執行",
-    )
+    engine.export(model=model, export_type=ExportType.TORCH)
 
     candidates = list(run_root.rglob("weights/torch/model.pt"))
     if not candidates:
@@ -309,32 +301,6 @@ def train_one_patchcore(
     if not candidates:
         raise RuntimeError(f"訓練後找不到 model.pt under {run_root}")
     return candidates[0]
-
-
-def _run_with_heartbeat(
-    fn: Callable[[], object],
-    log: Optional[Callable[[str], None]],
-    message: str,
-    interval_sec: int = 30,
-):
-    if log is None:
-        return fn()
-
-    stop_event = threading.Event()
-
-    def heartbeat():
-        started = time.monotonic()
-        while not stop_event.wait(interval_sec):
-            elapsed = int(time.monotonic() - started)
-            log(f"{message}（{elapsed}s）")
-
-    thread = threading.Thread(target=heartbeat, daemon=True)
-    thread.start()
-    try:
-        return fn()
-    finally:
-        stop_event.set()
-        thread.join(timeout=1)
 
 
 def calibrate_threshold(ng_scores: List[float], train_max_score: float) -> float:
@@ -802,6 +768,16 @@ def run_training_pipeline(
             finally:
                 shutil.rmtree(run_root, ignore_errors=True)
                 shutil.rmtree(staging, ignore_errors=True)
+                # 釋放 GPU 記憶體：set_per_process_memory_fraction 切的額度
+                # 跨 unit 不會自動回收，前面 unit 的 model/embedding_store cache
+                # 累積後會把後面 unit 推進 OOM。每 unit 結束強制 reclaim。
+                gc.collect()
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
     if success_units != len(TRAINING_UNITS):
         missing = [

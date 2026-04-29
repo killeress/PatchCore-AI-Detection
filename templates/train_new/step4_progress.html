@@ -35,22 +35,19 @@ const units = ['G0F00000','R0F00000','W0F00000','WGF50500','STANDARD']
 let _timer = null;
 let _lastLogText = '';
 
-function renderUnits(logLines) {
-  const logs = (logLines || []).join('\n');
+const UNIT_STATE_VIEW = {
+  running: { cls: 'running', text: '訓練中' },
+  done:    { cls: 'done',    text: '完成' },
+  failed:  { cls: 'failed',  text: '失敗' },
+  skipped: { cls: 'failed',  text: '跳過' },
+};
+
+function renderUnits(unitStatus) {
+  const status = unitStatus || {};
   const root = document.getElementById('unit-grid');
   root.innerHTML = units.map((u, i) => {
-    let cls = '';
-    let text = '等待中';
-    if (logs.includes(`${u}: 載 tile`)) { cls = 'running'; text = '訓練中'; }
-    if (logs.includes(`${u}`) && logs.includes('✓ done')) {
-      const re = new RegExp(`${u}:[\\s\\S]*?✓ done`);
-      if (re.test(logs)) { cls = 'done'; text = '完成'; }
-    }
-    if (logs.includes(`${u}`) && (logs.includes('✗ 訓練失敗') || logs.includes('跳過：tile 不足'))) {
-      const re = new RegExp(`${u}:[\\s\\S]*?(✗ 訓練失敗|跳過：tile 不足)`);
-      if (re.test(logs)) { cls = 'failed'; text = '失敗'; }
-    }
-    return `<div class="unit-chip ${cls}"><div class="name">${i + 1}. ${u}</div><div class="state">${text}</div></div>`;
+    const view = UNIT_STATE_VIEW[status[u]] || { cls: '', text: '等待中' };
+    return `<div class="unit-chip ${view.cls}"><div class="name">${i + 1}. ${u}</div><div class="state">${view.text}</div></div>`;
   }).join('');
 }
 
@@ -66,7 +63,7 @@ function poll() {
         logBox.scrollTop = logBox.scrollHeight;
         _lastLogText = logText;
       }
-      renderUnits(logLines);
+      renderUnits(d.unit_status);
       const pill = document.getElementById('status-pill');
       pill.textContent = stateText(d.state);
       document.getElementById('cancel-btn').disabled = !['preprocess', 'train', 'review'].includes(d.state);
@@ -85,6 +82,7 @@ function poll() {
 }
 
 function cancelTraining() {
+  if (!confirm('確定要取消訓練？\n已完成的 unit 不會保留，需從 Step 1 重新開始。')) return;
   const btn = document.getElementById('cancel-btn');
   btn.disabled = true;
   fetch(`/api/train/new/cancel/${encodeURIComponent(jobId)}`, { method: 'POST' })
@@ -104,7 +102,7 @@ function stateText(s) {
   return {preprocess:'前處理中', review:'準備 review', train:'訓練中', completed:'完成', failed:'失敗'}[s] || s;
 }
 
-renderUnits([]);
+renderUnits({});
 _timer = setInterval(poll, 3000);
 poll();
 </script>
