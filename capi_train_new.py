@@ -11,7 +11,10 @@ import json
 import logging
 import random
 import shutil
+import threading
+import time
 import traceback
+from functools import wraps
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +57,9 @@ class TrainingConfig:
     image_size: tuple = (512, 512)
     coreset_ratio: float = 0.1
     max_epochs: int = 1
+    # 前 N 片 panel 收 inner+edge tile；超過此索引的 panel 只收 edge tile
+    # 預設 3：前 3 片提供 inner（已足夠 ~450 個樣本）；第 4-5 片補 edge
+    inner_panels: int = 3
 
 
 def generate_job_id(machine_id: str) -> str:
@@ -77,7 +83,9 @@ def preprocess_panels_to_pool(
     total_tiles = 0
 
     for idx, panel_dir in enumerate(cfg.panel_paths, 1):
-        log(f"[{idx}/{len(cfg.panel_paths)}] panel {panel_dir.name}")
+        inner_allowed = idx <= cfg.inner_panels
+        role_label = "inner+edge" if inner_allowed else "edge only"
+        log(f"[{idx}/{len(cfg.panel_paths)}] panel {panel_dir.name} ({role_label})")
         try:
             results = preprocess_panel_folder(panel_dir, preprocess_cfg)
         except Exception as e:
@@ -95,8 +103,12 @@ def preprocess_panels_to_pool(
 
         # 為每張 tile 存 .png + 縮圖 + 寫 DB
         tile_records = []
+        skipped_inner = 0
         for lighting, result in results.items():
             for tile in result.tiles:
+                if tile.zone == "inner" and not inner_allowed:
+                    skipped_inner += 1
+                    continue
                 tile_filename = f"{job_id}_{panel_dir.name}_{lighting}_t{tile.tile_id:04d}.png"
                 tile_path = thumb_dir / "tiles" / tile_filename
                 cv2.imwrite(str(tile_path), tile.image)
@@ -117,7 +129,8 @@ def preprocess_panels_to_pool(
             db.insert_tile_pool(job_id, tile_records)
             total_tiles += len(tile_records)
             panel_success += 1
-            log(f"  ✓ 切出 {len(tile_records)} tile")
+            extra = f"（略過 inner {skipped_inner}）" if skipped_inner else ""
+            log(f"  ✓ 切出 {len(tile_records)} tile {extra}".rstrip())
 
     return {
         "panel_success": panel_success,
@@ -229,6 +242,7 @@ def train_one_patchcore(
     run_root: Path,
     unit_label: str,
     cfg: "TrainingConfig" = None,
+    log: Optional[Callable[[str], None]] = None,
 ) -> Path:
     """訓練一個 (lighting, zone) unit。回傳 model.pt 路徑。
 
@@ -246,6 +260,8 @@ def train_one_patchcore(
         shutil.rmtree(run_root, ignore_errors=True)
     run_root.mkdir(parents=True, exist_ok=True)
 
+    if log:
+        log(f"{unit_label}: 建立 Folder datamodule")
     datamodule = Folder(
         name=f"unit_{unit_label}",
         root=staging_dir,
@@ -261,6 +277,8 @@ def train_one_patchcore(
     except Exception:
         pass
 
+    if log:
+        log(f"{unit_label}: 建立 PatchCore model")
     model = Patchcore(coreset_sampling_ratio=cfg.coreset_ratio)
     model.pre_processor = Patchcore.configure_pre_processor(image_size=cfg.image_size)
 
@@ -270,8 +288,20 @@ def train_one_patchcore(
         callbacks=None,
     )
 
-    engine.fit(datamodule=datamodule, model=model)
-    engine.export(model=model, export_type=ExportType.TORCH)
+    if log:
+        log(f"{unit_label}: engine.fit 開始")
+    _run_with_heartbeat(
+        lambda: engine.fit(datamodule=datamodule, model=model),
+        log=log,
+        message=f"{unit_label}: engine.fit 仍在執行",
+    )
+    if log:
+        log(f"{unit_label}: engine.fit 完成，開始 export")
+    _run_with_heartbeat(
+        lambda: engine.export(model=model, export_type=ExportType.TORCH),
+        log=log,
+        message=f"{unit_label}: export 仍在執行",
+    )
 
     candidates = list(run_root.rglob("weights/torch/model.pt"))
     if not candidates:
@@ -279,6 +309,32 @@ def train_one_patchcore(
     if not candidates:
         raise RuntimeError(f"訓練後找不到 model.pt under {run_root}")
     return candidates[0]
+
+
+def _run_with_heartbeat(
+    fn: Callable[[], object],
+    log: Optional[Callable[[str], None]],
+    message: str,
+    interval_sec: int = 30,
+):
+    if log is None:
+        return fn()
+
+    stop_event = threading.Event()
+
+    def heartbeat():
+        started = time.monotonic()
+        while not stop_event.wait(interval_sec):
+            elapsed = int(time.monotonic() - started)
+            log(f"{message}（{elapsed}s）")
+
+    thread = threading.Thread(target=heartbeat, daemon=True)
+    thread.start()
+    try:
+        return fn()
+    finally:
+        stop_event.set()
+        thread.join(timeout=1)
 
 
 def calibrate_threshold(ng_scores: List[float], train_max_score: float) -> float:
@@ -360,32 +416,31 @@ def _setup_offline_env(
     env vars to deployment/torch_hub_cache/.
     """
     backbone_cache_dir = Path(backbone_cache_dir).resolve()
+    hf_cache = backbone_cache_dir / "huggingface"
 
-    # Redirect both torch hub and HuggingFace cache to deployment dir
-    os.environ["TORCH_HOME"] = str(backbone_cache_dir)
-    os.environ["HF_HOME"] = str(backbone_cache_dir)
-    os.environ["HF_HUB_CACHE"] = str(backbone_cache_dir / "huggingface")
-    # Force offline mode (no network calls during training)
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-    os.environ["HF_HUB_DISABLE_XET"] = "1"
-    os.environ["TRUST_REMOTE_CODE"] = "1"
+    _configure_backbone_cache_runtime(backbone_cache_dir)
+    _repair_hf_snapshot_symlinks(hf_cache, log)
 
     required_backbones = required_backbones or ["wide_resnet50_2-32ee1156.pth"]
 
     # Verify timm wide_resnet50_2 weights are present in HF cache. Older
     # deployments may also stage the raw torch hub checkpoint by filename.
-    hf_cache = backbone_cache_dir / "huggingface"
     missing = []
+    has_raw_cache = False
+    has_hf_cache = False
     for backbone in required_backbones:
-        cache_hits = list(backbone_cache_dir.rglob(backbone))
+        cache_hits = [
+            p for p in backbone_cache_dir.rglob(backbone)
+            if p.is_file() and p.stat().st_size > 1024 * 1024
+        ]
         if cache_hits:
+            has_raw_cache = True
             continue
 
         if backbone.startswith("wide_resnet50_2"):
             timm_dirs = list(hf_cache.glob("models--timm--wide_resnet50_2*"))
-            if timm_dirs:
+            has_hf_cache = any(_has_valid_hf_snapshot_weights(d) for d in timm_dirs)
+            if has_hf_cache:
                 continue
 
         missing.append(backbone)
@@ -400,9 +455,120 @@ def _setup_offline_env(
             f"然後把整個 {backbone_cache_dir} 目錄 FTP 上傳到 production。"
         )
 
-    _repair_hf_snapshot_symlinks(hf_cache, log)
-    _preflight_timm_backbone(log)
+    if has_raw_cache and not has_hf_cache:
+        _enable_timm_old_cache()
+    _patch_hf_hub_local_files_only()
+
+    _preflight_timm_backbone(log, cache_dir=hf_cache if has_hf_cache else None)
     log(f"✓ backbone cache 已就緒: {hf_cache}")
+
+
+def _configure_backbone_cache_runtime(backbone_cache_dir: Path) -> None:
+    """Point torch/timm/HF runtime state at the staged offline cache."""
+    backbone_cache_dir = Path(backbone_cache_dir).resolve()
+    hf_cache = backbone_cache_dir / "huggingface"
+
+    # Redirect both torch hub and HuggingFace cache to deployment dir.
+    os.environ["TORCH_HOME"] = str(backbone_cache_dir)
+    os.environ["HF_HOME"] = str(backbone_cache_dir)
+    os.environ["HF_HUB_CACHE"] = str(hf_cache)
+    os.environ["HUGGINGFACE_HUB_CACHE"] = str(hf_cache)
+    os.environ["HF_XET_CACHE"] = str(backbone_cache_dir / "xet")
+    # Force offline mode (no network calls during training).
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    os.environ["HF_HUB_DISABLE_XET"] = "1"
+    os.environ["TRUST_REMOTE_CODE"] = "1"
+
+    # capi_server imports anomalib for inference before server_config is loaded.
+    # If that already imported huggingface_hub, its constants were frozen from the
+    # process environment at import time. Patch them so later timm calls still use
+    # this staged cache and offline mode.
+    try:
+        import huggingface_hub.constants as hf_constants
+
+        hf_constants.HF_HOME = str(backbone_cache_dir)
+        hf_constants.HF_HUB_CACHE = str(hf_cache)
+        hf_constants.HUGGINGFACE_HUB_CACHE = str(hf_cache)
+        hf_constants.HF_XET_CACHE = str(backbone_cache_dir / "xet")
+        hf_constants.HF_HUB_OFFLINE = True
+    except Exception:
+        pass
+
+
+def _enable_timm_old_cache() -> None:
+    """Allow timm to use TORCH_HOME/hub/checkpoints/*.pth fallback weights."""
+    os.environ["TIMM_USE_OLD_CACHE"] = "1"
+    try:
+        import timm.models._builder as timm_builder
+
+        timm_builder._USE_OLD_CACHE = True
+    except Exception:
+        pass
+
+
+def _make_local_only_hf_download(download_fn: Callable) -> Callable:
+    """Wrap hf_hub_download so timm cannot open an HTTP client during training."""
+    if getattr(download_fn, "_capi_forces_local_files_only", False):
+        return download_fn
+
+    @wraps(download_fn)
+    def _local_only_download(*args, **kwargs):
+        kwargs["local_files_only"] = True
+        return download_fn(*args, **kwargs)
+
+    _local_only_download._capi_forces_local_files_only = True
+    return _local_only_download
+
+
+def _patch_hf_hub_local_files_only() -> None:
+    """Force HF downloads used by timm to resolve only from local cache."""
+    try:
+        import huggingface_hub
+
+        huggingface_hub.hf_hub_download = _make_local_only_hf_download(
+            huggingface_hub.hf_hub_download
+        )
+    except Exception:
+        pass
+
+    try:
+        import huggingface_hub.file_download as hf_file_download
+
+        hf_file_download.hf_hub_download = _make_local_only_hf_download(
+            hf_file_download.hf_hub_download
+        )
+    except Exception:
+        pass
+
+    try:
+        import timm.models._hub as timm_hub
+
+        timm_hub.hf_hub_download = _make_local_only_hf_download(
+            timm_hub.hf_hub_download
+        )
+    except Exception:
+        pass
+
+
+def _has_valid_hf_snapshot_weights(model_dir: Path) -> bool:
+    snapshot_root = model_dir / "snapshots"
+    if not snapshot_root.exists():
+        return False
+
+    for snapshot_file in snapshot_root.rglob("*"):
+        if snapshot_file.suffix not in {".safetensors", ".bin", ".pth"}:
+            continue
+        try:
+            if (
+                (snapshot_file.is_file() or snapshot_file.is_symlink())
+                and snapshot_file.stat().st_size > 1024 * 1024
+            ):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _repair_hf_snapshot_symlinks(hf_cache: Path, log: Callable) -> None:
@@ -411,40 +577,86 @@ def _repair_hf_snapshot_symlinks(hf_cache: Path, log: Callable) -> None:
     HuggingFace snapshots usually store files as symlinks into `blobs/`. Some
     FTP/copy workflows turn those symlinks into zero-byte regular files. timm
     then falls through to HuggingFace Hub loading and can fail with opaque HTTP
-    client errors during every PatchCore unit. If there is exactly one large
-    blob for a model, use it to restore empty snapshot weight files.
+    client errors during every PatchCore unit. Restore empty/broken snapshot
+    weight files from the matching large blob when possible.
     """
     if not hf_cache.exists():
         return
 
     for model_dir in hf_cache.glob("models--timm--*"):
-        blob_candidates = [
-            p for p in (model_dir / "blobs").glob("*")
-            if p.is_file() and p.stat().st_size > 1024 * 1024
-        ]
-        if len(blob_candidates) != 1:
+        blob_candidates = sorted(
+            [
+                p for p in (model_dir / "blobs").glob("*")
+                if p.is_file() and p.stat().st_size > 1024 * 1024
+            ],
+            key=lambda p: p.stat().st_size,
+            reverse=True,
+        )
+        if not blob_candidates:
             continue
 
-        blob = blob_candidates[0]
         for snapshot_file in (model_dir / "snapshots").rglob("*"):
-            if not snapshot_file.is_file() or snapshot_file.suffix not in {".safetensors", ".bin", ".pth"}:
+            if snapshot_file.suffix not in {".safetensors", ".bin", ".pth"}:
                 continue
-            if snapshot_file.is_symlink() or snapshot_file.stat().st_size > 0:
+            if _is_valid_weight_file(snapshot_file):
                 continue
+
+            blob = _select_hf_blob_for_snapshot(snapshot_file, blob_candidates)
+            if blob is None:
+                log(f"  ! 無法自動修復 HF cache 權重檔: {snapshot_file}")
+                continue
+
+            if snapshot_file.is_symlink():
+                snapshot_file.unlink()
+            snapshot_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(blob, snapshot_file)
             log(f"  ✓ 修復 HF cache 權重檔: {snapshot_file}")
 
 
-def _preflight_timm_backbone(log: Callable) -> None:
+def _is_valid_weight_file(path: Path) -> bool:
+    try:
+        return (
+            (path.is_file() or path.is_symlink())
+            and path.stat().st_size > 1024 * 1024
+        )
+    except OSError:
+        return False
+
+
+def _select_hf_blob_for_snapshot(
+    snapshot_file: Path,
+    blob_candidates: List[Path],
+) -> Optional[Path]:
+    if snapshot_file.is_symlink():
+        try:
+            linked_blob = (snapshot_file.parent / snapshot_file.readlink()).resolve()
+            for blob in blob_candidates:
+                if blob.resolve() == linked_blob:
+                    return blob
+        except OSError:
+            pass
+
+    if len(blob_candidates) == 1:
+        return blob_candidates[0]
+
+    # timm weight repositories normally have one large weight blob. If a cache
+    # contains multiple large blobs, use the largest one as a conservative
+    # recovery path instead of leaving an empty snapshot pointer in place.
+    return blob_candidates[0]
+
+
+def _preflight_timm_backbone(log: Callable, cache_dir: Optional[Path] = None) -> None:
     """Verify timm can load the PatchCore backbone from local cache only."""
     try:
         import timm
 
+        kwargs = {"cache_dir": str(cache_dir)} if cache_dir is not None else {}
         timm.create_model(
             "wide_resnet50_2",
             pretrained=True,
             features_only=True,
             exportable=True,
+            **kwargs,
         )
     except Exception as exc:
         raise RuntimeError(
@@ -488,10 +700,18 @@ def run_training_pipeline(
     job_id: str,
     cfg: TrainingConfig,
     db: TrainingDB,
-    gpu_lock,
+    gpu_lock=None,
     log: Callable[[str], None] = print,
+    cancel_event=None,
 ) -> Path:
-    """執行 10 unit 訓練，輸出 bundle 目錄。"""
+    """執行 10 unit 訓練，輸出 bundle 目錄。
+
+    gpu_lock: 同 process 多 thread 共享 GPU 時用於序列化的 lock；subprocess
+        模式下傳 None 即可（VRAM 已透過 set_per_process_memory_fraction 隔離）。
+    cancel_event: 任意提供 .is_set() 的物件（threading.Event 或 file-flag wrapper）。
+    """
+    from contextlib import nullcontext
+    gpu_ctx = gpu_lock if gpu_lock is not None else nullcontext()
     # 1. 環境檢查
     _setup_offline_env(cfg.backbone_cache_dir, log, cfg.required_backbones)
 
@@ -507,6 +727,9 @@ def run_training_pipeline(
     succeeded_units: Set[Tuple[str, str]] = set()
 
     for idx, (lighting, zone) in enumerate(TRAINING_UNITS, 1):
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("training cancelled by user")
+
         unit_label = f"{lighting}-{zone}"
         log(f"[{idx}/10] {unit_label}: 載 tile")
 
@@ -519,14 +742,17 @@ def run_training_pipeline(
             log(f"[{idx}/10] {unit_label}: 跳過：tile 不足 ({len(train_tiles)} < {MIN_TRAIN_TILES})")
             continue
 
-        with gpu_lock:
+        with gpu_ctx:
             staging = Path(".tmp/training_staging") / job_id / unit_label
             stage_dataset(staging,
                           [Path(t["source_path"]) for t in train_tiles],
                           [Path(t["source_path"]) for t in ng_tiles])
             run_root = Path(".tmp/training_runs") / job_id / unit_label
             try:
-                model_pt = train_one_patchcore(staging, run_root, unit_label, cfg)
+                model_pt = train_one_patchcore(staging, run_root, unit_label, cfg, log=log)
+
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("training cancelled by user")
 
                 train_max, ng_scores = _calibrate_from_model(
                     model_pt,

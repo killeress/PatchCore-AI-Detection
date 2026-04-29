@@ -16,6 +16,7 @@ import tempfile
 import json
 import urllib.parse
 import mimetypes
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -124,6 +125,21 @@ class _ListHandler(logging.Handler):
             pass
 
 
+class _CallbackLogHandler(logging.Handler):
+    """Forwards selected library log records into the training wizard log."""
+
+    def __init__(self, callback):
+        super().__init__(level=logging.INFO)
+        self.callback = callback
+        self.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.callback(self.format(record))
+        except Exception:
+            pass
+
+
 class CAPIWebHandler(BaseHTTPRequestHandler):
     """CAPI Web 請求處理器"""
 
@@ -138,10 +154,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     _capi_server_instance = None  # CAPIServer 實例 (用於 hot-reload)
     _log_file = None  # 日誌檔案路徑 (用於 Log Viewer)
     # 訓練 wizard 新模型狀態（由 create_web_server 完整初始化）
+    # thread:        preprocess 用真實 Thread / training 用 supervisor Thread（監看 subprocess）
+    # proc:          training 階段的 subprocess.Popen handle（preprocess 階段為 None）
+    # cancel_flag:   training subprocess 的 cancel flag 檔路徑（觸碰即軟取消）
+    # log_file:      training subprocess 的 log 檔路徑（supervisor 讀此檔轉到 log_lines）
     _train_new_state: dict = {
         "lock": threading.Lock(),
         "active_job_id": None,
         "thread": None,
+        "proc": None,
+        "cancel_flag": None,
+        "log_file": None,
+        "cancel_event": threading.Event(),
         "log_lines": [],
         "log_lock": threading.Lock(),
     }
@@ -159,6 +183,79 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             cls.jinja_env.filters['get_img_stem'] = get_img_stem
             cls.jinja_env.filters['fromjson'] = lambda s: json.loads(s) if s else {}
             cls.jinja_env.globals['hm_relative'] = hm_relative
+
+    @staticmethod
+    def _append_train_new_log(state: dict, msg: str) -> None:
+        with state["log_lock"]:
+            state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            if len(state["log_lines"]) > 500:
+                state["log_lines"] = state["log_lines"][-500:]
+
+    @staticmethod
+    def _train_new_cancel_event(state: dict) -> threading.Event:
+        return state.setdefault("cancel_event", threading.Event())
+
+    @classmethod
+    def _train_new_worker_alive(cls, job_id: str) -> bool:
+        state = cls._train_new_state
+        with state["lock"]:
+            if state.get("active_job_id") != job_id:
+                return False
+            thread = state.get("thread")
+            if thread is not None and thread.is_alive():
+                return True
+            proc = state.get("proc")
+            if proc is not None and proc.poll() is None:
+                return True
+            return False
+
+    @classmethod
+    def _mark_train_new_stale_if_needed(cls, db, job: Optional[dict]) -> Optional[dict]:
+        if not job or job.get("state") not in ("preprocess", "train"):
+            return job
+        if cls._train_new_worker_alive(job["job_id"]):
+            return job
+
+        error = "interrupted: server restarted or training worker is not running"
+        db.update_training_job_state(job["job_id"], "failed", error_message=error)
+        state = cls._train_new_state
+        with state["lock"]:
+            if state.get("active_job_id") == job["job_id"] or not state.get("active_job_id"):
+                state["active_job_id"] = None
+                state["thread"] = None
+                cls._train_new_cancel_event(state).clear()
+        cls._append_train_new_log(state, f"✗ {job['job_id']} 已標記失敗：{error}")
+        updated = dict(job)
+        updated["state"] = "failed"
+        updated["error_message"] = error
+        return updated
+
+    @staticmethod
+    @contextmanager
+    def _capture_train_new_library_logs(log):
+        handler = _CallbackLogHandler(log)
+        logger_names = (
+            "lightning",
+            "lightning_fabric",
+            "pytorch_lightning",
+            "anomalib",
+        )
+        old_levels = []
+        attached = []
+        try:
+            for name in logger_names:
+                lib_logger = logging.getLogger(name)
+                old_levels.append((lib_logger, lib_logger.level))
+                if lib_logger.level == logging.NOTSET or lib_logger.level > logging.INFO:
+                    lib_logger.setLevel(logging.INFO)
+                lib_logger.addHandler(handler)
+                attached.append(lib_logger)
+            yield
+        finally:
+            for lib_logger in attached:
+                lib_logger.removeHandler(handler)
+            for lib_logger, old_level in old_levels:
+                lib_logger.setLevel(old_level)
             
     def log_message(self, format, *args):
         """靜默 Web HTTP 存取日誌，避免污染 server.log 與 CMD"""
@@ -388,6 +485,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path == "/api/train/new/tiles/decision":
                 self._handle_train_new_tiles_decision()
+                return
+            elif path.startswith("/api/train/new/cancel/"):
+                self._handle_train_new_cancel()
                 return
             elif path.startswith("/api/train/new/start_training/"):
                 self._handle_train_new_start_training()
@@ -4443,19 +4543,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         db = self._capi_server_instance.database
         active = db.get_active_training_job()
         if active:
-            if active["state"] == "review":
-                self.send_response(302)
-                self.send_header("Location", f"/train/new/review/{active['job_id']}")
-                self.end_headers()
-                return
-            elif active["state"] in ("preprocess", "train"):
+            active = self._mark_train_new_stale_if_needed(db, active)
+            if active["state"] in ("preprocess", "train"):
                 self.send_response(302)
                 self.send_header("Location", f"/train/new/progress?job_id={active['job_id']}")
                 self.end_headers()
                 return
 
         template = self.jinja_env.get_template("train_new/step1_select.html")
-        html = template.render(request_path="/train/new")
+        html = template.render(
+            request_path="/train/new",
+            active_review_job=active if active and active.get("state") == "review" else None,
+        )
         self._send_response(200, html)
 
     def _handle_train_new_progress_page(self):
@@ -4466,6 +4565,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         template_name = "train_new/step2_progress.html"
         if job_id:
             job = self._capi_server_instance.database.get_training_job(job_id)
+            job = self._mark_train_new_stale_if_needed(
+                self._capi_server_instance.database,
+                job,
+            )
             if job and job.get("state") == "train":
                 template_name = "train_new/step4_progress.html"
         template = self.jinja_env.get_template(template_name)
@@ -4668,9 +4771,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         db = self._capi_server_instance.database
         state = self._train_new_state
+        existing = db.get_active_training_job()
+        existing = self._mark_train_new_stale_if_needed(db, existing)
         with state["lock"]:
-            existing = db.get_active_training_job()
-            if existing:
+            if existing and existing.get("state") in ("preprocess", "review", "train"):
                 self._send_json({
                     "error": "job_already_running",
                     "active_job_id": existing["job_id"],
@@ -4682,6 +4786,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             job_id = generate_job_id(machine_id)
             db.create_training_job(job_id=job_id, machine_id=machine_id, panel_paths=clean_panel_paths)
             state["active_job_id"] = job_id
+            self._train_new_cancel_event(state).clear()
             state["log_lines"] = []
 
         # 起 preprocess thread
@@ -4690,6 +4795,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             args=(job_id, machine_id, clean_panel_paths, self._capi_server_instance),
             daemon=True, name=f"train_new_pre-{job_id}",
         )
+        with state["lock"]:
+            state["thread"] = thread
         thread.start()
         self._send_json({"job_id": job_id, "state": "preprocess"})
 
@@ -4734,10 +4841,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         state = CAPIWebHandler._train_new_state
 
         def log(msg):
-            with state["log_lock"]:
-                state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-                if len(state["log_lines"]) > 500:
-                    state["log_lines"] = state["log_lines"][-500:]
+            CAPIWebHandler._append_train_new_log(state, msg)
 
         try:
             train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
@@ -4780,6 +4884,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     job = db.get_training_job(job_id)
                     if job and job["state"] in ("failed",):
                         state["active_job_id"] = None
+                        state["thread"] = None
+                        CAPIWebHandler._train_new_cancel_event(state).clear()
 
     def _handle_train_new_status(self):
         """GET /api/train/new/status?job_id=X
@@ -4800,12 +4906,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if not job:
                 self._send_json({"state": "idle"})
                 return
+            job = self._mark_train_new_stale_if_needed(db, job)
             job_id = job["job_id"]
         else:
             job = db.get_training_job(job_id)
             if not job:
                 self._send_json({"error": "job not found"}, status=404)
                 return
+            job = self._mark_train_new_stale_if_needed(db, job)
 
         with state["log_lock"]:
             log_lines = list(state["log_lines"][-100:])
@@ -4816,6 +4924,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "started_at": job["started_at"], "completed_at": job["completed_at"],
             "output_bundle": job["output_bundle"], "error_message": job["error_message"],
             "log_lines": log_lines,
+            "worker_alive": self._train_new_worker_alive(job_id),
         }
         self._send_json(resp)
 
@@ -4839,8 +4948,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """GET /api/train/new/preprocess_preview?job_id=X&lighting=Y
 
         Rebuilds a compact visual of the actual preprocessing geometry using the
-        same preprocessing code path: foreground bbox, optional fitted polygon,
-        and generated inner/edge tile rectangles.
+        same preprocessing code path: foreground/panel boundary and generated
+        inner/edge tile rectangles.
         """
         from urllib.parse import parse_qs, urlparse
         import cv2
@@ -4861,7 +4970,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         preview_dir = Path(".tmp/train_new_thumbs") / job_id / "preview"
         preview_dir.mkdir(parents=True, exist_ok=True)
-        preview_path = preview_dir / f"{lighting}_v2.jpg"
+        preview_path = preview_dir / f"{lighting}_v6.jpg"
         if preview_path.exists():
             self._send_binary(str(preview_path))
             return
@@ -4894,9 +5003,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         canvas = cv2.convertScaleAbs(canvas, alpha=0.55, beta=18)
         overlay = canvas.copy()
 
-        x1, y1, x2, y2 = result.foreground_bbox
+        # BGR: edge=peach (#fab387), inner=blue (#89b4fa) — 與 step3 legend 同步
+        edge_color = (135, 179, 250)
+        inner_color = (250, 180, 137)
+
         for tile in result.tiles:
-            color = (60, 190, 255) if tile.zone == "edge" else (80, 245, 120)
+            color = edge_color if tile.zone == "edge" else inner_color
             cv2.rectangle(overlay, (tile.x1, tile.y1), (tile.x2, tile.y2), color, -1)
         canvas = cv2.addWeighted(overlay, 0.18, canvas, 0.82, 0)
 
@@ -4909,16 +5021,21 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             cv2.polylines(canvas, [points], isClosed=True, color=(0, 0, 0), thickness=thickness + 8)
             cv2.polylines(canvas, [points], isClosed=True, color=color, thickness=thickness)
 
-        draw_rect((x1, y1, x2, y2), (255, 120, 60), 10)
         if result.panel_polygon is not None:
             poly = result.panel_polygon.astype("int32").reshape((-1, 1, 2))
             draw_poly(poly, (80, 255, 120), 10)
+            boundary_label = "boundary=green"
+        else:
+            # Polygon detection fallback: bbox becomes the only available foreground boundary.
+            x1, y1, x2, y2 = result.foreground_bbox
+            draw_rect((x1, y1, x2, y2), (80, 255, 120), 10)
+            boundary_label = "boundary=green (bbox fallback)"
 
         for tile in result.tiles:
-            color = (60, 190, 255) if tile.zone == "edge" else (80, 245, 120)
+            color = edge_color if tile.zone == "edge" else inner_color
             draw_rect((tile.x1, tile.y1, tile.x2, tile.y2), color, 4)
 
-        label = f"{panel_name} / {lighting}  bbox=orange  panel=green  inner=green  edge=cyan"
+        label = f"{panel_name} / {lighting}  {boundary_label}  inner=blue  edge=orange"
         cv2.rectangle(canvas, (20, 20), (min(canvas.shape[1] - 20, 1400), 102), (18, 18, 30), -1)
         cv2.rectangle(canvas, (20, 20), (min(canvas.shape[1] - 20, 1400), 102), (137, 180, 250), 3)
         cv2.putText(canvas, label, (40, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (205, 214, 244), 3, cv2.LINE_AA)
@@ -4955,6 +5072,63 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         db.update_tile_decisions(job_id, tile_ids, decision)
         self._send_json({"ok": True, "updated": len(tile_ids)})
 
+    def _handle_train_new_cancel(self):
+        """POST /api/train/new/cancel/<job_id>
+
+        Cancel a review-stage job immediately. Running training jobs are asked
+        to stop cooperatively; if the server was restarted and only a stale DB
+        state remains, mark it failed so a new run can start.
+        """
+        job_id = self.path.rsplit("/", 1)[-1].split("?")[0]
+        db = self._capi_server_instance.database
+        job = db.get_training_job(job_id)
+        if not job:
+            self._send_json({"error": "job not found"}, status=404)
+            return
+        job = self._mark_train_new_stale_if_needed(db, job)
+
+        state = CAPIWebHandler._train_new_state
+        if job["state"] == "failed":
+            self._send_json({"ok": True, "job_id": job_id, "state": "failed"})
+            return
+
+        if job["state"] in ("preprocess", "train"):
+            if not self._train_new_worker_alive(job_id):
+                db.update_training_job_state(job_id, "failed", error_message="cancelled stale job")
+                with state["lock"]:
+                    if state.get("active_job_id") == job_id:
+                        state["active_job_id"] = None
+                        state["thread"] = None
+                        self._train_new_cancel_event(state).clear()
+                self._send_json({"ok": True, "job_id": job_id, "state": "failed"})
+                return
+
+            self._train_new_cancel_event(state).set()
+            # 訓練 subprocess 透過 cancel flag 檔接收訊號（runner 端每 unit 檢查）
+            cancel_flag = state.get("cancel_flag")
+            if cancel_flag:
+                try:
+                    Path(cancel_flag).touch()
+                except Exception:
+                    pass
+            self._append_train_new_log(state, "收到取消要求，會在目前訓練階段結束後停止")
+            self._send_json({"ok": True, "job_id": job_id, "state": job["state"], "cancel_requested": True})
+            return
+
+        if job["state"] != "review":
+            self._send_json({
+                "error": f"job state must be 'review', currently '{job['state']}'"
+            }, status=409)
+            return
+
+        db.update_training_job_state(job_id, "failed", error_message="cancelled by user")
+        with state["lock"]:
+            if state.get("active_job_id") == job_id:
+                state["active_job_id"] = None
+                state["thread"] = None
+                self._train_new_cancel_event(state).clear()
+        self._send_json({"ok": True, "job_id": job_id, "state": "failed"})
+
     def _handle_train_new_start_training(self):
         """POST /api/train/new/start_training/<job_id>"""
         job_id = self.path.rsplit("/", 1)[-1].split("?")[0]
@@ -4963,82 +5137,159 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if not job:
             self._send_json({"error": "job not found"}, status=404)
             return
+        job = self._mark_train_new_stale_if_needed(db, job)
         if job["state"] != "review":
             self._send_json({"error": f"job state must be 'review', currently '{job['state']}'"}, status=409)
             return
 
-        db.update_training_job_state(job_id, "train")
-
+        state = CAPIWebHandler._train_new_state
         thread = threading.Thread(
             target=CAPIWebHandler._train_new_training_worker,
             args=(job_id, job["machine_id"], job["panel_paths"], self._capi_server_instance),
             daemon=True, name=f"train_new-{job_id}",
         )
+        with state["lock"]:
+            state["active_job_id"] = job_id
+            self._train_new_cancel_event(state).clear()
+            state["thread"] = thread
+            state["proc"] = None
+            state["cancel_flag"] = None
+            state["log_file"] = None
+        db.update_training_job_state(job_id, "train")
         thread.start()
         self._send_json({"ok": True, "state": "train"})
 
     @staticmethod
     def _train_new_training_worker(job_id, machine_id, panel_paths, server_inst):
-        """背景 thread：跑 10 unit 訓練 + 註冊 bundle。"""
-        import traceback
-        from pathlib import Path as _Path
-        from capi_train_new import TrainingConfig, run_training_pipeline
+        """Supervisor thread：launch 訓練 subprocess、tail log、偵測退出、清狀態。
 
-        db = server_inst.database
+        實際訓練在 capi_train_runner.py 的獨立 Python process 執行，使其能與
+        推論 server 共用 GPU 而不互鎖（兩邊各自設 set_per_process_memory_fraction）。
+        Subprocess 自行寫 DB（model_registry + training_jobs.state），supervisor
+        只負責把 log 檔尾巴搬到 in-memory log_lines + 退出後清狀態。
+        """
+        import os as _os
+        import subprocess as _subprocess
+        import sys as _sys
+        import time as _time
+        import traceback as _traceback
+        from pathlib import Path as _Path
+
         state = CAPIWebHandler._train_new_state
+        db = server_inst.database
 
         def log(msg):
-            with state["log_lock"]:
-                state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-                if len(state["log_lines"]) > 500:
-                    state["log_lines"] = state["log_lines"][-500:]
+            CAPIWebHandler._append_train_new_log(state, msg)
 
+        proc = None
         try:
             train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
+            output_root = _Path(train_cfg["output_root"])
+            log_dir = output_root / "training_logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / f"{job_id}.log"
+            cancel_flag = log_dir / f"{job_id}.cancel"
+            # 確保 log 檔是新的、cancel flag 不存在
+            log_file.write_text("", encoding="utf-8")
+            try:
+                cancel_flag.unlink()
+            except FileNotFoundError:
+                pass
 
-            cfg = TrainingConfig(
-                machine_id=machine_id,
-                panel_paths=[_Path(p) for p in panel_paths],
-                over_review_root=train_cfg["over_review_root"],
-                output_root=train_cfg["output_root"],
-                backbone_cache_dir=train_cfg["backbone_cache_dir"],
-                required_backbones=train_cfg["required_backbones"],
+            server_cfg_path = _Path(server_inst.server_config_path).resolve()
+            project_root = _Path(__file__).resolve().parent
+
+            cmd = [
+                _sys.executable, "-u", "-m", "capi_train_runner",
+                "--job-id", job_id,
+                "--server-config", str(server_cfg_path),
+                "--log-file", str(log_file),
+                "--cancel-flag", str(cancel_flag),
+            ]
+            log(f"啟動訓練 subprocess（VRAM 隔離模式）")
+
+            env = {**_os.environ, "PYTHONUNBUFFERED": "1"}
+            proc = _subprocess.Popen(
+                cmd,
+                cwd=str(project_root),
+                env=env,
+                stdout=_subprocess.DEVNULL,
+                stderr=_subprocess.STDOUT,
             )
-            bundle_dir = run_training_pipeline(
-                job_id=job_id, cfg=cfg, db=db,
-                gpu_lock=server_inst._gpu_lock,
-                log=log,
-            )
 
-            # 註冊到 model_registry
-            sizes = sum(p.stat().st_size for p in bundle_dir.glob("*.pt"))
-            manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
-            inner_count = sum(v["train"] for k, v in manifest["tiles_per_unit"].items() if k.endswith("-inner"))
-            edge_count = sum(v["train"] for k, v in manifest["tiles_per_unit"].items() if k.endswith("-edge"))
-            ng_count = sum(v["ng"] for v in manifest["tiles_per_unit"].values())
+            with state["lock"]:
+                state["proc"] = proc
+                state["log_file"] = str(log_file)
+                state["cancel_flag"] = str(cancel_flag)
 
-            db.register_model_bundle({
-                "machine_id": machine_id,
-                "bundle_path": str(bundle_dir),
-                "trained_at": manifest["trained_at"],
-                "panel_count": manifest["panel_count"],
-                "inner_tile_count": inner_count,
-                "edge_tile_count": edge_count,
-                "ng_tile_count": ng_count,
-                "bundle_size_bytes": sizes,
-                "job_id": job_id,
-            })
+            log(f"訓練 subprocess pid={proc.pid}，log={log_file}")
 
-            db.update_training_job_state(job_id, "completed", output_bundle=str(bundle_dir))
-            log(f"✓ 訓練完成，bundle={bundle_dir}")
+            # tail 主迴圈：每 1s 讀 log file 增量 + 檢查 proc 是否退出
+            tail_pos = 0
+
+            def _drain_log():
+                nonlocal tail_pos
+                try:
+                    with open(log_file, "rb") as f:
+                        f.seek(tail_pos)
+                        data = f.read()
+                        tail_pos = f.tell()
+                except FileNotFoundError:
+                    return
+                if not data:
+                    return
+                text = data.decode("utf-8", errors="replace")
+                for line in text.splitlines():
+                    line = line.rstrip()
+                    if line:
+                        CAPIWebHandler._append_train_new_log(state, line)
+
+            while True:
+                _drain_log()
+                ret = proc.poll()
+                if ret is not None:
+                    _drain_log()  # 殘餘 log 再撈一次
+                    if ret == 0:
+                        log(f"✓ 訓練 subprocess 結束 (exit=0)")
+                    else:
+                        log(f"✗ 訓練 subprocess 結束 (exit={ret})")
+                    break
+                _time.sleep(1.0)
+
+            # subprocess 異常退出且 DB 還停在 "train" → 補刀標 failed
+            if proc.returncode != 0:
+                try:
+                    job = db.get_training_job(job_id)
+                    if job and job.get("state") == "train":
+                        db.update_training_job_state(
+                            job_id, "failed",
+                            error_message=f"runner exited with code {proc.returncode}",
+                        )
+                except Exception:
+                    pass
+
         except Exception as e:
-            traceback.print_exc()
-            db.update_training_job_state(job_id, "failed", error_message=str(e))
-            log(f"✗ 訓練失敗: {e}")
+            _traceback.print_exc()
+            log(f"✗ 訓練監看失敗: {e}")
+            try:
+                db.update_training_job_state(job_id, "failed", error_message=str(e))
+            except Exception:
+                pass
+            # supervisor 異常時把 subprocess 也收掉
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
         finally:
             with state["lock"]:
                 if state["active_job_id"] == job_id:
                     state["active_job_id"] = None
+                    state["thread"] = None
+                    state["proc"] = None
+                    state["cancel_flag"] = None
+                    state["log_file"] = None
+                    CAPIWebHandler._train_new_cancel_event(state).clear()
 
     def _handle_train_new_thumb(self):
         """GET /api/train/new/thumb/<rest_of_path>"""
@@ -5319,6 +5570,10 @@ def create_web_server(
         "lock": threading.Lock(),
         "active_job_id": None,
         "thread": None,
+        "proc": None,
+        "cancel_flag": None,
+        "log_file": None,
+        "cancel_event": threading.Event(),
         "log_lines": [],
         "log_lock": threading.Lock(),
     }

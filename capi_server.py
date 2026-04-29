@@ -753,6 +753,21 @@ class CAPIServer:
         self.inference_config = self.server_config.get("inference", {})
         self.cpu_workers = self.inference_config.get("cpu_workers", 4)
 
+        # GPU VRAM per-process 上限：留空間給訓練 subprocess 同時跑
+        gpu_frac = self.inference_config.get("gpu_memory_fraction", 0)
+        if gpu_frac and 0 < gpu_frac < 1:
+            try:
+                import torch as _torch
+                if _torch.cuda.is_available():
+                    _torch.cuda.set_per_process_memory_fraction(float(gpu_frac), 0)
+                    total_gb = _torch.cuda.get_device_properties(0).total_memory / 1e9
+                    logger.info(
+                        f"GPU memory fraction = {gpu_frac} "
+                        f"(~{total_gb * gpu_frac:.1f} / {total_gb:.1f} GB)"
+                    )
+            except Exception as e:
+                logger.warning(f"無法套用 gpu_memory_fraction: {e}")
+
         # 非同步儲存執行緒池 (Heatmap + DB 在背景完成，不阻塞回覆)
         self._async_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="async-save")
 

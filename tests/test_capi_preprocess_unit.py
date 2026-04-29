@@ -93,14 +93,26 @@ def test_classify_tile_zone_inner():
     assert mask is None
 
 
-def test_classify_tile_zone_edge_close_to_boundary():
+def test_classify_tile_zone_inner_close_to_boundary():
     from capi_preprocess import classify_tile_zone, PreprocessConfig
     poly = np.array([[100, 100], [4000, 100], [4000, 3000], [100, 3000]], np.float32)
     cfg = PreprocessConfig(tile_size=512, edge_threshold_px=768)
-    # tile fully inside but center close to top edge
+    # tile fully inside remains inner even when close to the panel edge
     zone, cov, dist, mask = classify_tile_zone((1500, 200, 2012, 712), poly, cfg)
+    assert zone == "inner"
+    assert cov == 1.0
+    assert mask is None
+
+
+def test_classify_tile_zone_edge_touching_boundary():
+    from capi_preprocess import classify_tile_zone, PreprocessConfig
+    poly = np.array([[100, 100], [4000, 100], [4000, 3000], [100, 3000]], np.float32)
+    cfg = PreprocessConfig(tile_size=512)
+    # tile is fully covered, but its top side sits on the panel boundary.
+    zone, cov, dist, mask = classify_tile_zone((1500, 100, 2012, 612), poly, cfg)
     assert zone == "edge"
     assert cov == 1.0
+    assert mask is None
 
 
 def test_classify_tile_zone_edge_partial_coverage():

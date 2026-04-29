@@ -53,7 +53,7 @@ def test_preprocess_panels_to_pool_writes_tiles(tmp_path):
 
     assert stats["panel_success"] == 1
     assert stats["total_tiles"] > 0
-    # 應有 inner 和 edge 兩種
+    # grid 最外圈應歸為 edge，其餘完整在 panel 內的 tile 才是 inner。
     zones = {t["zone"] for t in db.tiles}
     assert "inner" in zones and "edge" in zones
     # 5 lighting 都應有 tile
@@ -64,6 +64,55 @@ def test_preprocess_panels_to_pool_writes_tiles(tmp_path):
     first_tile = db.tiles[0]
     assert Path(first_tile["source_path"]).exists()
     assert Path(first_tile["thumb_path"]).exists()
+
+
+def test_preprocess_panels_to_pool_skips_inner_after_inner_panels(tmp_path):
+    """第 inner_panels 之後的 panel 不應寫入任何 inner tile（只保留 edge）。"""
+    from pathlib import Path
+    from capi_preprocess import PreprocessConfig
+    from capi_train_new import preprocess_panels_to_pool, TrainingConfig
+
+    fixture_img = Path("tests/fixtures/preprocess/synthetic_panel.png")
+    panel_dirs = []
+    for i in range(5):
+        d = tmp_path / f"panel_{i + 1}"
+        d.mkdir()
+        for lighting in ["G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"]:
+            (d / f"{lighting}_x.png").write_bytes(fixture_img.read_bytes())
+        panel_dirs.append(d)
+
+    class MockDB:
+        def __init__(self):
+            self.tiles_per_call = []
+
+        def insert_tile_pool(self, job_id, tiles):
+            self.tiles_per_call.append(list(tiles))
+            return list(range(len(tiles)))
+
+    db = MockDB()
+    cfg = TrainingConfig(
+        machine_id="TEST", panel_paths=panel_dirs,
+        over_review_root=tmp_path / "or_unused",
+        inner_panels=3,
+    )
+    pre_cfg = PreprocessConfig(tile_size=256, edge_threshold_px=384, tile_stride=256)
+
+    preprocess_panels_to_pool(
+        job_id="j_split", cfg=cfg, preprocess_cfg=pre_cfg,
+        db=db, thumb_dir=tmp_path / "thumbs", log=lambda m: None,
+    )
+
+    assert len(db.tiles_per_call) == 5
+    # 前 3 片應同時有 inner 和 edge
+    for i in range(3):
+        zones = {t["zone"] for t in db.tiles_per_call[i]}
+        assert "inner" in zones, f"panel {i + 1} 應該包含 inner tile"
+        assert "edge" in zones, f"panel {i + 1} 應該包含 edge tile"
+    # 第 4-5 片不應有 inner
+    for i in range(3, 5):
+        zones = {t["zone"] for t in db.tiles_per_call[i]}
+        assert "inner" not in zones, f"panel {i + 1} 不應該包含 inner tile"
+        assert "edge" in zones, f"panel {i + 1} 應該仍有 edge tile"
 
 
 def test_sample_ng_tiles(tmp_path):

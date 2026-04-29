@@ -108,6 +108,67 @@ def test_calibrate_threshold_uses_p10_and_train_max():
     assert abs(threshold - 0.63) < 1e-6
 
 
+def test_repair_hf_snapshot_symlinks_restores_zero_byte_weight(tmp_path):
+    from capi_train_new import _has_valid_hf_snapshot_weights, _repair_hf_snapshot_symlinks
+
+    model_dir = tmp_path / "huggingface" / "models--timm--wide_resnet50_2.racm_in1k"
+    blob = model_dir / "blobs" / "03b71d65"
+    snapshot = model_dir / "snapshots" / "30f73ace" / "model.safetensors"
+    blob.parent.mkdir(parents=True)
+    snapshot.parent.mkdir(parents=True)
+    blob.write_bytes(b"x" * (1024 * 1024 + 1))
+    snapshot.write_bytes(b"")
+
+    logs = []
+    _repair_hf_snapshot_symlinks(tmp_path / "huggingface", logs.append)
+
+    assert snapshot.read_bytes() == blob.read_bytes()
+    assert _has_valid_hf_snapshot_weights(model_dir)
+    assert any("修復 HF cache 權重檔" in line for line in logs)
+
+
+def test_make_local_only_hf_download_forces_local_files_only():
+    from capi_train_new import _make_local_only_hf_download
+
+    calls = []
+
+    def fake_download(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return "cached"
+
+    wrapped = _make_local_only_hf_download(fake_download)
+
+    assert wrapped("repo", "model.safetensors", local_files_only=False) == "cached"
+    assert calls == [{"local_files_only": True}]
+    assert _make_local_only_hf_download(wrapped) is wrapped
+
+
+def test_setup_offline_env_patches_imported_hf_constants(tmp_path, monkeypatch):
+    from capi_train_new import _setup_offline_env
+    import huggingface_hub.constants as hf_constants
+
+    cache_dir = tmp_path / "torch_hub_cache"
+    model_dir = cache_dir / "huggingface" / "models--timm--wide_resnet50_2.racm_in1k"
+    snapshot = model_dir / "snapshots" / "30f73ace" / "model.safetensors"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_bytes(b"x" * (1024 * 1024 + 1))
+
+    preflight_calls = []
+    monkeypatch.setattr(
+        "capi_train_new._preflight_timm_backbone",
+        lambda log, cache_dir=None: preflight_calls.append(cache_dir),
+    )
+
+    _setup_offline_env(cache_dir, lambda msg: None)
+
+    hf_cache = cache_dir.resolve() / "huggingface"
+    assert os.environ["HF_HUB_CACHE"] == str(hf_cache)
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+    assert hf_constants.HF_HUB_CACHE == str(hf_cache)
+    assert hf_constants.HF_HUB_OFFLINE is True
+    assert preflight_calls == [hf_cache]
+
+
 def test_write_manifest_yaml(tmp_path):
     from capi_train_new import write_manifest, write_machine_config_yaml
     bundle = tmp_path / "GN160-20260428"
@@ -173,7 +234,7 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     db = MockDB()
 
     trained_units = []
-    def fake_train(staging_dir, run_root, unit_label, cfg=None):
+    def fake_train(staging_dir, run_root, unit_label, cfg=None, log=None):
         trained_units.append(unit_label)
         out = run_root / "weights" / "torch" / "model.pt"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -238,7 +299,7 @@ def test_run_training_pipeline_requires_all_units(tmp_path, monkeypatch):
                 res = [r for r in res if r.get(k) == v]
             return res
 
-    def fake_train(staging_dir, run_root, unit_label, cfg=None):
+    def fake_train(staging_dir, run_root, unit_label, cfg=None, log=None):
         if unit_label == "G0F00000-edge":
             raise RuntimeError("edge model failed")
         out = run_root / "weights" / "torch" / "model.pt"

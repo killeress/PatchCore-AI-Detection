@@ -213,10 +213,22 @@ def test_handle_train_new_start_rejects_concurrent():
     """現有 active job → 409。"""
     from capi_web import CAPIWebHandler
 
+    class AliveThread:
+        def is_alive(self):
+            return True
+
     server = MagicMock()
     server.database.get_active_training_job.return_value = {
         "job_id": "j_old",
         "state": "preprocess",
+    }
+    CAPIWebHandler._train_new_state = {
+        "lock": threading.Lock(),
+        "log_lock": threading.Lock(),
+        "active_job_id": "j_old",
+        "thread": AliveThread(),
+        "cancel_event": threading.Event(),
+        "log_lines": [],
     }
 
     h = _make_handler_with_server(server, "/api/train/new/start")
@@ -396,6 +408,88 @@ def test_handle_train_new_start_training_starts_thread(monkeypatch):
     assert body["state"] == "train"
 
 
+def test_handle_train_new_cancel_marks_review_job_failed():
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1", "machine_id": "M", "state": "review", "panel_paths": []
+    }
+    CAPIWebHandler._train_new_state = {
+        "lock": threading.Lock(),
+        "log_lock": threading.Lock(),
+        "active_job_id": "j1",
+        "log_lines": [],
+    }
+
+    h = _make_handler_with_server(server, "/api/train/new/cancel/j1")
+    h._handle_train_new_cancel()
+
+    server.database.update_training_job_state.assert_called_once_with(
+        "j1", "failed", error_message="cancelled by user"
+    )
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["ok"] is True
+    assert CAPIWebHandler._train_new_state["active_job_id"] is None
+
+
+def test_handle_train_new_cancel_marks_stale_running_job_failed():
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1", "machine_id": "M", "state": "train", "panel_paths": []
+    }
+    from capi_web import CAPIWebHandler
+    CAPIWebHandler._train_new_state = {
+        "lock": threading.Lock(),
+        "log_lock": threading.Lock(),
+        "active_job_id": None,
+        "thread": None,
+        "log_lines": [],
+    }
+    h = _make_handler_with_server(server, "/api/train/new/cancel/j1")
+
+    h._handle_train_new_cancel()
+
+    server.database.update_training_job_state.assert_called_with(
+        "j1",
+        "failed",
+        error_message="interrupted: server restarted or training worker is not running",
+    )
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["ok"] is True
+    assert body["state"] == "failed"
+
+
+def test_handle_train_new_cancel_requests_live_training_stop():
+    from capi_web import CAPIWebHandler
+
+    class AliveThread:
+        def is_alive(self):
+            return True
+
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1", "machine_id": "M", "state": "train", "panel_paths": []
+    }
+    cancel_event = threading.Event()
+    CAPIWebHandler._train_new_state = {
+        "lock": threading.Lock(),
+        "log_lock": threading.Lock(),
+        "active_job_id": "j1",
+        "thread": AliveThread(),
+        "cancel_event": cancel_event,
+        "log_lines": [],
+    }
+    h = _make_handler_with_server(server, "/api/train/new/cancel/j1")
+
+    h._handle_train_new_cancel()
+
+    server.database.update_training_job_state.assert_not_called()
+    assert cancel_event.is_set()
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["cancel_requested"] is True
+
+
 def test_handle_train_new_thumb_rejects_sibling_prefix_escape(tmp_path, monkeypatch):
     """Sibling paths such as train_new_thumbs_evil must not pass containment checks."""
     monkeypatch.chdir(tmp_path)
@@ -428,6 +522,26 @@ def test_handle_train_new_progress_page_uses_step4_template_for_train_state():
 
     h.jinja_env.get_template.assert_called_with("train_new/step4_progress.html")
     assert h._sent_response[0]["body"] == "<html>step4</html>"
+
+
+def test_handle_train_new_page_renders_step1_when_active_job_is_review():
+    """review 狀態可以回 Step 1；只有 preprocess/train 需要強制回進度頁。"""
+    server = MagicMock()
+    server.database.get_active_training_job.return_value = {
+        "job_id": "j1", "machine_id": "M", "state": "review"
+    }
+    h = _make_handler_with_server(server, "/train/new")
+    template = MagicMock()
+    template.render.return_value = "<html>step1</html>"
+    h.jinja_env = MagicMock()
+    h.jinja_env.get_template.return_value = template
+
+    h._handle_train_new_page()
+
+    h.jinja_env.get_template.assert_called_with("train_new/step1_select.html")
+    template.render.assert_called_once()
+    assert template.render.call_args.kwargs["active_review_job"]["job_id"] == "j1"
+    assert h._sent_response[0]["body"] == "<html>step1</html>"
 
 
 def test_handle_models_list_filters_by_machine_id():

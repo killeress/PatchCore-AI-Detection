@@ -123,7 +123,7 @@ flowchart LR
 - 對二值 mask 的上下左右邊做線性擬合，產生四角 polygon。
 - 在 bbox 內以 512x512、stride 512 切 tile。
 - coverage 太低的 tile 丟掉。
-- 完全在 polygon 內且中心距離邊界大於 `edge_threshold_px=768` 的 tile 歸為 inner，其餘有效 tile 歸為 edge。
+- 完全在 polygon 內且不在 grid 最外圈的 tile 歸為 inner；切到/貼到 polygon 邊界或位於 grid 最外圈、且 coverage 仍達門檻的 tile 歸為 edge。
 
 這讓訓練時看到的 tile 與推論時送進模型的 tile 規則一致，避免先前訓練端與推論端 bbox、mask、MARK 排除邏輯不同造成的 drift。
 
