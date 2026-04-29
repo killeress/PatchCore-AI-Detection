@@ -258,7 +258,12 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     )
 
     assert bundle_dir.exists()
-    assert "j1" in bundle_dir.name
+    # 路徑格式：<machine_id>-<YYYYMMDD_HHMMSS>，job_id 在 manifest 內
+    assert bundle_dir.name.startswith("GN160TEST-")
+    # job_id 寫入 manifest 而非路徑
+    import json as _json
+    manifest = _json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["trained_with_job_id"] == "j1"
     assert len(trained_units) == 10
     # 應有 10 個 .pt
     pts = list(bundle_dir.glob("*.pt"))

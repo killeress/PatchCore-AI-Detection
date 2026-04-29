@@ -16,6 +16,9 @@ from __future__ import annotations
 import os
 # 必須在 import torch / anomalib 之前設定
 os.environ.setdefault("TRUST_REMOTE_CODE", "1")
+# 把 tqdm 進度刷新間隔拉到 5 秒：搭配 stderr→logging 接管後，每 5 秒一行進度
+# 避免 17 分鐘 coreset 產生上萬筆 log
+os.environ.setdefault("TQDM_MININTERVAL", "5")
 import warnings as _warnings
 _warnings.filterwarnings("ignore", message=r".*xFormers is not available.*")
 
@@ -53,6 +56,41 @@ def _parse_args():
     return p.parse_args()
 
 
+class _StderrTee:
+    """攔 sys.stderr 寫入轉成 logging。
+
+    主要為了接住 anomalib coreset 的 tqdm 進度條（tqdm 寫到 stderr 用 \\r 覆寫
+    同一行）。把 \\r 視為 line break，讓每一筆進度更新成為一行 log，supervisor
+    端的 tail thread 就能同步顯示到前端 log_lines。
+    """
+
+    def __init__(self, logger: logging.Logger):
+        self._logger = logger
+        self._buf = ""
+
+    def write(self, s):
+        if not isinstance(s, str):
+            try:
+                s = s.decode("utf-8", errors="replace")
+            except Exception:
+                return
+        s = s.replace("\r", "\n")
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            line = line.rstrip()
+            if line:
+                self._logger.info(line)
+
+    def flush(self):
+        if self._buf.strip():
+            self._logger.info(self._buf.rstrip())
+            self._buf = ""
+
+    def isatty(self):
+        return False
+
+
 def _setup_logging(log_file: Path) -> None:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter(
@@ -72,6 +110,8 @@ def _setup_logging(log_file: Path) -> None:
         lg = logging.getLogger(name)
         if lg.level == logging.NOTSET or lg.level > logging.INFO:
             lg.setLevel(logging.INFO)
+    # tqdm 寫到 stderr，接住轉 logging（coreset 進度條才能進 log file）
+    sys.stderr = _StderrTee(logging.getLogger("capi.stderr"))
 
 
 def _apply_vram_limit(fraction: float, log: logging.Logger) -> None:
