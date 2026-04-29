@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Optional, Tuple
+import re
 import threading
 import logging
 from jinja2 import Environment, FileSystemLoader
@@ -140,6 +141,20 @@ class _CallbackLogHandler(logging.Handler):
             pass
 
 
+# 解析 train runner log 行抽出 unit 狀態。例：
+#   [16:13:38] INFO [capi.train_runner] [3/10] R0F00000-inner: 載 tile
+#   [15:32:50] INFO [capi.train_runner] [1/10] G0F00000-inner: ✓ done | 360s, ...
+_TRAIN_UNIT_LOG_RE = re.compile(
+    r"\[\d+/10\]\s+(\S+):\s+(✓ done|✗ 訓練失敗|跳過：tile 不足|載 tile)"
+)
+_TRAIN_UNIT_STATUS_MAP = {
+    "✓ done": "done",
+    "✗ 訓練失敗": "failed",
+    "跳過：tile 不足": "skipped",
+    "載 tile": "running",
+}
+
+
 class CAPIWebHandler(BaseHTTPRequestHandler):
     """CAPI Web 請求處理器"""
 
@@ -168,6 +183,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         "cancel_event": threading.Event(),
         "log_lines": [],
         "log_lock": threading.Lock(),
+        # unit_status: {unit_label: "running"|"done"|"failed"|"skipped"}
+        # 由 _append_train_new_log 解析 log 行更新；前端 step4 直接用此 dict
+        # 渲染狀態，避免依賴 ring buffer 內的歷史 log
+        "unit_status": {},
     }
 
     @classmethod
@@ -190,6 +209,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
             if len(state["log_lines"]) > 500:
                 state["log_lines"] = state["log_lines"][-500:]
+            m = _TRAIN_UNIT_LOG_RE.search(msg)
+            if m:
+                state.setdefault("unit_status", {})[m.group(1)] = _TRAIN_UNIT_STATUS_MAP[m.group(2)]
 
     @staticmethod
     def _train_new_cancel_event(state: dict) -> threading.Event:
@@ -4917,6 +4939,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         with state["log_lock"]:
             log_lines = list(state["log_lines"][-100:])
+            unit_status = dict(state.get("unit_status") or {})
 
         resp = {
             "job_id": job["job_id"], "machine_id": job["machine_id"],
@@ -4924,6 +4947,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "started_at": job["started_at"], "completed_at": job["completed_at"],
             "output_bundle": job["output_bundle"], "error_message": job["error_message"],
             "log_lines": log_lines,
+            "unit_status": unit_status,
             "worker_alive": self._train_new_worker_alive(job_id),
         }
         self._send_json(resp)
@@ -5155,6 +5179,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             state["proc"] = None
             state["cancel_flag"] = None
             state["log_file"] = None
+            state["unit_status"] = {}
         db.update_training_job_state(job_id, "train")
         thread.start()
         self._send_json({"ok": True, "state": "train"})

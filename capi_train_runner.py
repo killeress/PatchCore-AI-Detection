@@ -27,6 +27,7 @@ import json
 import logging
 import sys
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 # 確保可以 import 同目錄模組
@@ -38,13 +39,31 @@ class _FileCancelEvent:
 
     web 端寫此檔即等同於對 subprocess 發送取消訊號；run_training_pipeline 在
     每個 unit 開始與訓練後都會檢查。
+
+    第一次偵測到 flag 存在時會 log 一次取證資訊（檔 mtime / runner 啟動時間），
+    幫助事後追查「為什麼訓練被取消」。
     """
 
-    def __init__(self, flag_path: Path):
+    def __init__(self, flag_path: Path, started_at: datetime, logger: logging.Logger):
         self._path = flag_path
+        self._started_at = started_at
+        self._logger = logger
+        self._logged = False
 
     def is_set(self) -> bool:
-        return self._path.exists()
+        try:
+            st = self._path.stat()
+        except FileNotFoundError:
+            return False
+        if not self._logged:
+            self._logged = True
+            mtime = datetime.fromtimestamp(st.st_mtime)
+            self._logger.info(
+                f"偵測到 cancel flag: path={self._path}, "
+                f"flag_mtime={mtime.isoformat(timespec='seconds')}, "
+                f"runner_started_at={self._started_at.isoformat(timespec='seconds')}"
+            )
+        return True
 
 
 def _parse_args():
@@ -172,6 +191,7 @@ def main() -> int:
 
     _setup_logging(Path(args.log_file))
     log = logging.getLogger("capi.train_runner")
+    runner_started_at = datetime.now()
     log.info(f"啟動訓練 runner: job_id={args.job_id}, pid={os.getpid()}")
 
     # HF cache 在 import torch 前設好（_setup_offline_env 之後也會設，這裡提前更穩）
@@ -189,7 +209,11 @@ def main() -> int:
         log.error(f"找不到 job_id={args.job_id}")
         return 2
 
-    cancel_event = _FileCancelEvent(Path(args.cancel_flag))
+    cancel_event = _FileCancelEvent(
+        Path(args.cancel_flag),
+        started_at=runner_started_at,
+        logger=log,
+    )
 
     from capi_train_new import TrainingConfig, run_training_pipeline
 
