@@ -13,6 +13,7 @@ on top of production install. Includes:
 """
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 import zipfile
@@ -151,15 +152,33 @@ README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明
 """
 
 
-def main() -> int:
+CODEONLY_README_NOTE = """\
+
+【本 ZIP 為 code-only 增量包】
+- 不含 deployment/torch_hub_cache/（之前的部署包已含，production 機應已落地）
+- 解壓覆蓋既有檔即可，不會動到 backbone cache 目錄
+"""
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Build CAPI training wizard deploy ZIP")
+    parser.add_argument(
+        "--no-backbone", action="store_true",
+        help="Skip backbone cache (use when production already has it from previous deploy)",
+    )
+    args = parser.parse_args(argv)
+
     output_dir = PROJECT_ROOT / "deployment"
     output_dir.mkdir(exist_ok=True)
 
     today = date.today().isoformat()
-    zip_path = output_dir / f"capi_train_wizard_deploy_{today}.zip"
+    suffix = "_codeonly" if args.no_backbone else ""
+    zip_path = output_dir / f"capi_train_wizard_deploy_{today}{suffix}.zip"
 
     print(f"Building deploy ZIP: {zip_path}")
     print(f"Project root: {PROJECT_ROOT}")
+    if args.no_backbone:
+        print("Mode: code-only (--no-backbone)")
 
     if zip_path.exists():
         zip_path.unlink()
@@ -167,6 +186,7 @@ def main() -> int:
     code_size = 0
     backbone_size = 0
     file_count = 0
+    backbone_files = 0
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         # 1. Application code
@@ -182,22 +202,26 @@ def main() -> int:
             print(f"  + {rel}")
 
         # 2. Backbone cache (skip xet logs — useless on production)
-        backbone_dir = PROJECT_ROOT / BACKBONE_CACHE_DIR
-        if backbone_dir.exists():
-            print(f"\n[2/4] Adding backbone cache ({BACKBONE_CACHE_DIR})...")
-            for src in backbone_dir.rglob("*"):
-                if not src.is_file():
-                    continue
-                rel = src.relative_to(PROJECT_ROOT)
-                rel_str = str(rel).replace("\\", "/")
-                if "xet/logs" in rel_str or rel_str.endswith(".log"):
-                    continue
-                zf.write(src, arcname=str(rel))
-                backbone_size += src.stat().st_size
-                file_count += 1
-            print(f"  + {file_count - len(CODE_FILES)} files in {BACKBONE_CACHE_DIR}")
+        if args.no_backbone:
+            print(f"\n[2/4] Skipping backbone cache (--no-backbone)")
         else:
-            print(f"\n⚠ [2/4] Backbone cache missing at {backbone_dir}")
+            backbone_dir = PROJECT_ROOT / BACKBONE_CACHE_DIR
+            if backbone_dir.exists():
+                print(f"\n[2/4] Adding backbone cache ({BACKBONE_CACHE_DIR})...")
+                for src in backbone_dir.rglob("*"):
+                    if not src.is_file():
+                        continue
+                    rel = src.relative_to(PROJECT_ROOT)
+                    rel_str = str(rel).replace("\\", "/")
+                    if "xet/logs" in rel_str or rel_str.endswith(".log"):
+                        continue
+                    zf.write(src, arcname=str(rel))
+                    backbone_size += src.stat().st_size
+                    file_count += 1
+                    backbone_files += 1
+                print(f"  + {backbone_files} files in {BACKBONE_CACHE_DIR}")
+            else:
+                print(f"\n⚠ [2/4] Backbone cache missing at {backbone_dir}")
 
         # 3. server_config patch example
         print(f"\n[3/4] Adding server_config_patch.yaml.example...")
@@ -206,7 +230,10 @@ def main() -> int:
 
         # 4. README
         print(f"\n[4/4] Adding README.txt...")
-        zf.writestr("README.txt", README_TEXT)
+        readme = README_TEXT
+        if args.no_backbone:
+            readme = readme + CODEONLY_README_NOTE
+        zf.writestr("README.txt", readme)
         file_count += 1
 
     final_size = zip_path.stat().st_size
@@ -215,7 +242,8 @@ def main() -> int:
     print(f"  Output:        {zip_path}")
     print(f"  ZIP size:      {final_size / 1e6:.1f} MB")
     print(f"  Code size:     {code_size / 1e6:.2f} MB ({len(CODE_FILES)} files)")
-    print(f"  Backbone size: {backbone_size / 1e6:.1f} MB")
+    if not args.no_backbone:
+        print(f"  Backbone size: {backbone_size / 1e6:.1f} MB ({backbone_files} files)")
     print(f"  Total files:   {file_count}")
     print(f"{'='*60}")
     return 0
