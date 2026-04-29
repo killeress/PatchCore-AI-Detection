@@ -54,7 +54,8 @@ class TestTrainingSchema:
         db = _make_db(tmp_path)
         cols = _col_names(db, "training_jobs")
         required = {"id", "job_id", "machine_id", "state", "started_at",
-                    "completed_at", "panel_paths", "output_bundle", "error_message"}
+                    "completed_at", "panel_paths", "output_bundle", "error_message",
+                    "training_params"}
         assert required.issubset(cols)
 
     def test_model_registry_columns(self, tmp_path):
@@ -173,6 +174,41 @@ class TestTrainingJobsCRUD:
         rowid = db.create_training_job(job_id="j_rowid", machine_id="M", panel_paths=[])
         assert isinstance(rowid, int)
         assert rowid > 0
+
+    def test_training_params_default_none(self, tmp_path):
+        """無傳 training_params 時，get_training_job 回傳 None。"""
+        db = _make_db(tmp_path)
+        db.create_training_job(job_id="j_no_params", machine_id="M", panel_paths=[])
+        job = db.get_training_job("j_no_params")
+        assert job["training_params"] is None
+
+    def test_training_params_round_trip(self, tmp_path):
+        """create 帶 dict → get 反序列化回 dict。"""
+        db = _make_db(tmp_path)
+        params = {
+            "batch_size": 16,
+            "coreset_ratio": 0.05,
+            "max_epochs": 2,
+            "inner_panels": 4,
+        }
+        db.create_training_job(
+            job_id="j_with_params", machine_id="M", panel_paths=[],
+            training_params=params,
+        )
+        job = db.get_training_job("j_with_params")
+        assert job["training_params"] == params
+
+    def test_active_job_includes_training_params(self, tmp_path):
+        """get_active_training_job 也應該反序列化 training_params。"""
+        db = _make_db(tmp_path)
+        params = {"batch_size": 4}
+        db.create_training_job(
+            job_id="j_active", machine_id="M", panel_paths=[],
+            training_params=params,
+        )
+        active = db.get_active_training_job()
+        assert active is not None
+        assert active["training_params"] == params
 
 
 class TestTilePoolCRUD:

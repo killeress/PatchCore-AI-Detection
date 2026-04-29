@@ -1,6 +1,51 @@
 {% extends "base.html" %}
 {% block title %}模型庫{% endblock %}
 {% block content %}
+<style>
+  .mlib-modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 100;
+    display: none; align-items: flex-start; justify-content: center;
+    overflow-y: auto; padding: 24px 12px;
+  }
+  .mlib-modal-bg.open { display: flex; }
+  .mlib-modal {
+    background: #1e1e2e; border-radius: 10px; padding: 18px 22px;
+    width: 100%; max-width: 1080px; color: #cdd6f4;
+    box-shadow: 0 12px 40px rgba(0,0,0,.6);
+  }
+  .mlib-modal h2 { margin: 0 0 6px 0; font-size: 1.05rem; font-family: monospace; }
+  .mlib-tabs { display: flex; gap: 0; border-bottom: 1px solid #45475a; margin: 14px 0 12px 0; }
+  .mlib-tab {
+    background: transparent; border: 0; color: #a6adc8;
+    padding: 8px 14px; cursor: pointer; font-size: .82rem;
+    border-bottom: 2px solid transparent;
+  }
+  .mlib-tab.active { color: #cdd6f4; border-bottom-color: #89b4fa; }
+  .mlib-pane { display: none; }
+  .mlib-pane.active { display: block; }
+  .mlib-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  .mlib-table th, .mlib-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #313244; }
+  .mlib-table th { color: #a6adc8; font-weight: 600; background: #11111b; }
+  .mlib-table tr.warn td { background: rgba(243,139,168,.08); }
+  .mlib-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr));
+    gap: 6px; max-height: 540px; overflow-y: auto; padding: 4px;
+    background: #11111b; border-radius: 6px;
+  }
+  .mlib-grid img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; background: #000; }
+  .mlib-filter-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .mlib-filter-row label { font-size: .78rem; color: #a6adc8; }
+  .mlib-filter-row select { background: #11111b; color: #cdd6f4; border: 1px solid #45475a; padding: 4px 8px; border-radius: 4px; font-size: .78rem; }
+  .mlib-info dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; font-size: .82rem; }
+  .mlib-info dt { color: #a6adc8; }
+  .mlib-info dd { margin: 0; color: #cdd6f4; font-family: monospace; }
+  .mlib-actions-row { display: flex; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #313244; flex-wrap: wrap; }
+  .mlib-btn { background: #1e1e2e; color: #a6adc8; border: 1px solid #45475a; padding: 7px 14px; border-radius: 4px; font-size: .8rem; cursor: pointer; }
+  .mlib-btn-danger { color: #f38ba8; border-color: #f38ba8; }
+  .mlib-btn-close { background: #45475a; color: #cdd6f4; border: 0; }
+  .mlib-empty { color: #a6adc8; padding: 22px; text-align: center; font-size: .85rem; }
+</style>
+
 <div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
     <h1 style="color:#cdd6f4;margin:0;">模型庫</h1>
@@ -26,7 +71,7 @@
           <div>路徑：<code style="font-size:.7rem;color:#cdd6f4;">{{ b.bundle_path }}</code></div>
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;">
-          <button onclick="showDetail({{ b.id }})" style="background:#1e1e2e;color:#a6adc8;border:1px solid #45475a;padding:5px 10px;border-radius:4px;font-size:.74rem;">📋 細節</button>
+          <button onclick="showDetail({{ b.id }})" style="background:#1e1e2e;color:#a6adc8;border:1px solid #45475a;padding:5px 10px;border-radius:4px;font-size:.74rem;">📋 細節 / 訓練資料</button>
           {% if b.is_active %}
             <button onclick="doAction({{ b.id }}, 'deactivate')" style="background:#fab387;color:#1e1e2e;border:none;padding:5px 10px;border-radius:4px;font-size:.74rem;font-weight:700;">⏸ 停用</button>
           {% else %}
@@ -48,7 +93,75 @@
   {% endif %}
 </div>
 
+<div id="mlibModalBg" class="mlib-modal-bg" onclick="if(event.target===this)closeModal()">
+  <div class="mlib-modal">
+    <h2 id="mlibTitle">—</h2>
+    <div id="mlibSubtitle" style="color:#a6adc8;font-size:.78rem;"></div>
+
+    <div class="mlib-tabs">
+      <button class="mlib-tab active" data-tab="info" onclick="switchTab('info')">資訊</button>
+      <button class="mlib-tab" data-tab="metrics" onclick="switchTab('metrics')">10 unit 品質</button>
+      <button class="mlib-tab" data-tab="ok" onclick="switchTab('ok')">OK tiles</button>
+      <button class="mlib-tab" data-tab="ng" onclick="switchTab('ng')">NG tiles</button>
+    </div>
+
+    <div id="mlibPaneInfo" class="mlib-pane active mlib-info">
+      <dl id="mlibInfoDl"></dl>
+      <div class="mlib-actions-row">
+        <button class="mlib-btn mlib-btn-danger" onclick="deleteTrainingData()">🗑 清除訓練資料</button>
+        <span id="mlibDeleteHint" style="font-size:.74rem;color:#a6adc8;align-self:center;">
+          只清訓練 tile / 縮圖（DB + .tmp/），bundle 本體與 inference 不受影響。
+        </span>
+      </div>
+    </div>
+
+    <div id="mlibPaneMetrics" class="mlib-pane">
+      <div id="mlibMetricsContent"></div>
+    </div>
+
+    <div id="mlibPaneOk" class="mlib-pane">
+      <div class="mlib-filter-row">
+        <label>Lighting：
+          <select id="mlibOkLighting" onchange="loadTiles('ok')">
+            <option value="">全部</option>
+            {% for lighting in lightings %}<option>{{ lighting }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Zone：
+          <select id="mlibOkZone" onchange="loadTiles('ok')">
+            <option value="">全部</option>
+            <option>inner</option><option>edge</option>
+          </select>
+        </label>
+        <span id="mlibOkCount" style="color:#a6adc8;font-size:.78rem;"></span>
+      </div>
+      <div id="mlibOkGrid" class="mlib-grid"></div>
+    </div>
+
+    <div id="mlibPaneNg" class="mlib-pane">
+      <div class="mlib-filter-row">
+        <label>Lighting：
+          <select id="mlibNgLighting" onchange="loadTiles('ng')">
+            <option value="">全部</option>
+            {% for lighting in lightings %}<option>{{ lighting }}</option>{% endfor %}
+          </select>
+        </label>
+        <span id="mlibNgCount" style="color:#a6adc8;font-size:.78rem;"></span>
+      </div>
+      <div id="mlibNgGrid" class="mlib-grid"></div>
+    </div>
+
+    <div class="mlib-actions-row" style="justify-content:flex-end;">
+      <button class="mlib-btn mlib-btn-close" onclick="closeModal()">關閉</button>
+    </div>
+  </div>
+</div>
+
 <script>
+const UNIT_ORDER = {{ unit_labels|tojson }};
+let currentBundleId = null;
+let currentDetail = null;
+
 function doAction(id, action) {
   fetch(`/api/models/${id}/${action}`, {method:'POST'})
     .then(r => r.json())
@@ -69,11 +182,247 @@ function doDelete(id) {
 }
 
 function showDetail(id) {
+  currentBundleId = id;
   fetch(`/api/models/${id}/detail`)
     .then(r => r.json())
     .then(d => {
-      // 簡化：用 alert 顯示 manifest（後續可改 modal）
-      alert(JSON.stringify(d.manifest, null, 2));
+      if (d.error) { alert(d.error); return; }
+      currentDetail = d;
+      renderDetail(d);
+      switchTab('info');
+      document.getElementById('mlibModalBg').classList.add('open');
+    });
+}
+
+function closeModal() {
+  document.getElementById('mlibModalBg').classList.remove('open');
+  currentBundleId = null;
+  currentDetail = null;
+}
+
+function switchTab(name) {
+  ['info','metrics','ok','ng'].forEach(n => {
+    const btn = document.querySelector(`.mlib-tab[data-tab="${n}"]`);
+    const pane = document.getElementById('mlibPane' + n.charAt(0).toUpperCase() + n.slice(1));
+    if (btn) btn.classList.toggle('active', n === name);
+    if (pane) pane.classList.toggle('active', n === name);
+  });
+  if (name === 'ok' || name === 'ng') loadTiles(name);
+}
+
+function fmtBytes(n) {
+  if (!n && n !== 0) return '—';
+  if (n < 1024) return n + ' B';
+  if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+  if (n < 1024*1024*1024) return (n/1024/1024).toFixed(1) + ' MB';
+  return (n/1024/1024/1024).toFixed(2) + ' GB';
+}
+
+function renderDetail(d) {
+  const m = d.manifest || {};
+  document.getElementById('mlibTitle').textContent =
+    (d.bundle_path || '').replace(/^model\//, '');
+  document.getElementById('mlibSubtitle').textContent =
+    `${d.machine_id} · ${m.trained_at || d.trained_at || ''} · job ${d.job_id || '—'}`;
+
+  const td = d.training_data || {};
+  const pp = m.patchcore_params || {};
+  const dl = document.getElementById('mlibInfoDl');
+  const rows = [
+    ['Machine', d.machine_id],
+    ['Bundle path', d.bundle_path],
+    ['Job ID', d.job_id || '—'],
+    ['訓練時間', m.trained_at || d.trained_at || '—'],
+    ['Panel 數', m.panel_count != null ? m.panel_count : (d.panel_count != null ? d.panel_count : '—')],
+    ['成功 unit', (m.success_units != null ? m.success_units : '—') + ' / 10'],
+    ['Bundle 大小', fmtBytes(d.bundle_size_bytes)],
+    ['啟用狀態', d.is_active ? '✅ 啟用中' : '— 未啟用'],
+  ];
+
+  // PatchCore 訓練參數（舊 bundle 沒有 patchcore_params 就整段跳過）
+  if (Object.keys(pp).length) {
+    rows.push(
+      ['─── PatchCore 參數 ───', '─────'],
+      ['batch_size', pp.batch_size != null ? pp.batch_size : '—'],
+      ['coreset_ratio', pp.coreset_ratio != null ? pp.coreset_ratio : '—'],
+      ['max_epochs', pp.max_epochs != null ? pp.max_epochs : '—'],
+      ['inner_panels', pp.inner_panels != null ? pp.inner_panels : '—（更舊 bundle 未記）'],
+      ['image_size', Array.isArray(pp.image_size) ? pp.image_size.join('×') : '—'],
+    );
+  }
+
+  rows.push(
+    ['─── 訓練資料 ───', '─────'],
+    ['訓練資料 OK tile', td.ok_count != null ? td.ok_count : 0],
+    ['訓練資料 NG tile', td.ng_count != null ? td.ng_count : 0],
+    ['訓練資料磁碟用量', td.size_bytes != null ? fmtBytes(td.size_bytes) : '—'],
+    ['訓練資料路徑', td.thumb_dir || '—'],
+  );
+  dl.innerHTML = rows.map(([k, v]) =>
+    `<dt>${k}</dt><dd>${v == null ? '—' : v}</dd>`
+  ).join('');
+
+  const hasTrainingData = (td.ok_count || 0) + (td.ng_count || 0) > 0 || (td.size_bytes || 0) > 0;
+  const delBtn = document.querySelector('#mlibPaneInfo .mlib-btn-danger');
+  delBtn.disabled = !hasTrainingData;
+  delBtn.style.opacity = hasTrainingData ? '1' : '.5';
+  document.getElementById('mlibDeleteHint').textContent = hasTrainingData
+    ? `將清除 ${(td.ok_count||0) + (td.ng_count||0)} 筆 DB 紀錄、約 ${fmtBytes(td.size_bytes)}`
+    : '此 bundle 已無訓練資料可清除（已被刪除或未追蹤）。';
+
+  renderMetrics(d);
+}
+
+function renderMetrics(d) {
+  const m = d.manifest || {};
+  const um = m.unit_metrics || {};
+  const thr = d.thresholds || {};
+  const target = document.getElementById('mlibMetricsContent');
+  if (!um || Object.keys(um).length === 0) {
+    target.innerHTML = `<div class="mlib-empty">此 bundle 無 unit_metrics（舊版本訓練的 bundle）。<br>下次重新訓練即會記錄品質指標。</div>`;
+    return;
+  }
+  // AUROC 評級 → 顏色 + 中文標籤；門檻定義在後端 _auroc_grade，此處只做視覺對映
+  const gradeMap = {
+    excellent: { color: '#a6e3a1', label: '優秀', hint: '幾乎完美區分' },
+    good:      { color: '#94e2d5', label: '良好', hint: '部署可用' },
+    fair:      { color: '#f9e2af', label: '普通', hint: '建議補資料' },
+    poor:      { color: '#fab387', label: '偏弱', hint: '應補 NG 重訓' },
+    fail:      { color: '#f38ba8', label: '不及格', hint: '幾乎沒區分力' },
+    'n/a':     { color: '#6c7086', label: '無',     hint: '舊版 bundle' },
+  };
+
+  const avgAuroc = m.overall_auroc;
+  const overallGrade = gradeMap[m.overall_auroc_grade] || gradeMap['n/a'];
+
+  let rows = '';
+  for (const label of UNIT_ORDER) {
+    const u = um[label];
+    if (!u) {
+      rows += `<tr><td>${label}</td><td colspan="8" style="color:#a6adc8;">未訓練 / 跳過</td></tr>`;
+      continue;
+    }
+    const sep = u.separation;
+    const caught = (u.ng_caught_count != null && u.ng_count != null)
+      ? `${u.ng_caught_count}/${u.ng_count}` : '—';
+    const rate = u.ng_caught_rate != null ? (u.ng_caught_rate * 100).toFixed(0) + '%' : '—';
+    const grade = gradeMap[u.auroc_grade] || gradeMap['n/a'];
+    const aurocCell = u.auroc == null
+      ? `<span style="color:#a6adc8;">—</span>`
+      : `<span style="color:${grade.color};font-weight:600;">${u.auroc.toFixed(3)}</span> `
+        + `<span style="background:${grade.color};color:#1e1e2e;padding:1px 6px;border-radius:8px;font-size:.7rem;font-weight:700;">${grade.label}</span>`;
+    const warn = u.auroc_grade === 'poor' || u.auroc_grade === 'fail'
+      || (sep != null && sep < 0)
+      || (u.ng_caught_rate != null && u.ng_caught_rate < 0.5);
+    const sepCell = sep == null ? '—'
+      : `<span style="color:${sep < 0 ? '#f38ba8' : '#a6e3a1'};">${sep > 0 ? '+' : ''}${sep.toFixed(3)}</span>`;
+    const caughtCell = `${caught} <span style="color:#a6adc8;">(${rate})</span>`;
+    rows += `<tr class="${warn ? 'warn' : ''}">`
+      + `<td><code>${label}</code></td>`
+      + `<td>${u.train_count != null ? u.train_count : '—'}</td>`
+      + `<td>${u.ng_count != null ? u.ng_count : '—'}</td>`
+      + `<td>${aurocCell}</td>`
+      + `<td>${u.train_max != null ? u.train_max : '—'}</td>`
+      + `<td>${u.ng_median != null ? u.ng_median : '—'}</td>`
+      + `<td>${u.threshold != null ? u.threshold : '—'}</td>`
+      + `<td>${caughtCell}</td>`
+      + `<td>${sepCell}</td>`
+      + `</tr>`;
+  }
+
+  const aurocUnitCount = Object.values(um).filter(u => u && u.auroc != null).length;
+  const summaryCard = avgAuroc == null ? '' : `
+    <div style="background:#11111b;border-left:4px solid ${overallGrade.color};
+                padding:10px 14px;margin-bottom:12px;border-radius:4px;
+                display:flex;align-items:center;gap:14px;">
+      <div style="font-size:1.5rem;font-weight:700;color:${overallGrade.color};">
+        ${avgAuroc.toFixed(3)}
+      </div>
+      <div>
+        <div style="font-size:.92rem;color:#cdd6f4;font-weight:600;">
+          整體 AUROC（${aurocUnitCount} unit 平均）
+          <span style="background:${overallGrade.color};color:#1e1e2e;padding:2px 8px;border-radius:10px;font-size:.78rem;margin-left:6px;">${overallGrade.label}</span>
+        </div>
+        <div style="font-size:.78rem;color:#a6adc8;margin-top:2px;">
+          ${overallGrade.hint}
+        </div>
+      </div>
+    </div>
+  `;
+
+  target.innerHTML = summaryCard + `
+    <table class="mlib-table">
+      <thead><tr>
+        <th>Unit</th><th>Train</th><th>NG</th>
+        <th>AUROC（評級）</th>
+        <th>train_max</th><th>ng_median</th><th>threshold</th>
+        <th>NG 抓到</th><th>separation</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div style="font-size:.74rem;color:#a6adc8;margin-top:10px;line-height:1.7;">
+      <b>AUROC 解讀：</b>
+      0–1 之間，越高代表 NG 跟正常分得越開（<span style="color:#a6e3a1;">≥0.95 優秀</span>·
+      <span style="color:#94e2d5;">≥0.85 良好</span>·
+      <span style="color:#f9e2af;">≥0.70 普通</span>·
+      <span style="color:#fab387;">≥0.55 偏弱</span>·
+      <span style="color:#f38ba8;">&lt;0.55 不及格</span>）<br>
+      <b>欄位說明：</b>
+      <code>train_max</code> 訓練樣本最大分數·
+      <code>ng_median</code> NG 分數中位數·
+      <code>threshold</code> = max(ng_p10, train_max×1.05)·
+      <code>NG 抓到</code> NG 中 score≥threshold 的個數·
+      <code>separation</code> = ng_median − train_max。<br>
+      <span style="color:#f38ba8;">紅色列</span>：AUROC 偏弱/不及格、separation 負值、或 NG 抓到率 &lt; 50%，建議補 NG 樣本重訓。
+    </div>
+  `;
+}
+
+function loadTiles(source) {
+  if (!currentBundleId) return;
+  const lighting = document.getElementById(source === 'ok' ? 'mlibOkLighting' : 'mlibNgLighting').value;
+  const zone = source === 'ok' ? document.getElementById('mlibOkZone').value : '';
+  const grid = document.getElementById(source === 'ok' ? 'mlibOkGrid' : 'mlibNgGrid');
+  const cnt = document.getElementById(source === 'ok' ? 'mlibOkCount' : 'mlibNgCount');
+  grid.innerHTML = '<div class="mlib-empty">載入中...</div>';
+
+  const params = new URLSearchParams({source, limit: '500'});
+  if (lighting) params.set('lighting', lighting);
+  if (zone) params.set('zone', zone);
+
+  fetch(`/api/models/${currentBundleId}/training_tiles?${params}`)
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { grid.innerHTML = `<div class="mlib-empty">${d.error}</div>`; return; }
+      cnt.textContent = `共 ${d.total} 個（顯示前 ${Math.min(d.total, d.limit || 500)} 個）`;
+      if (!d.tiles || d.tiles.length === 0) {
+        grid.innerHTML = `<div class="mlib-empty">${d.message || '無資料'}</div>`;
+        return;
+      }
+      grid.innerHTML = d.tiles.map(t =>
+        t.thumb_url
+          ? `<img src="${t.thumb_url}" title="${t.lighting} ${t.zone || ''} #${t.id}" loading="lazy">`
+          : `<div title="${t.lighting} ${t.zone || ''} (no thumb)" style="background:#313244;border-radius:4px;aspect-ratio:1;"></div>`
+      ).join('');
+    })
+    .catch(e => { grid.innerHTML = `<div class="mlib-empty">載入失敗：${e}</div>`; });
+}
+
+function deleteTrainingData() {
+  if (!currentBundleId) return;
+  const td = currentDetail && currentDetail.training_data;
+  const sizeMb = td && td.size_bytes ? (td.size_bytes / 1e6).toFixed(1) : '?';
+  const dbRows = td ? (td.ok_count || 0) + (td.ng_count || 0) : 0;
+  if (!confirm(`確定清除這個 bundle 的訓練資料？\n\n` +
+               `將刪除：${dbRows} 筆 DB 紀錄 + 約 ${sizeMb} MB 縮圖檔\n` +
+               `bundle 本體與 inference 不受影響，但日後重看訓練圖會看不到。`)) return;
+  fetch(`/api/models/${currentBundleId}/training_data/delete`, {method:'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { alert(d.error); return; }
+      alert(d.message || '已清除');
+      // 重新拉 detail 更新顯示
+      showDetail(currentBundleId);
     });
 }
 </script>

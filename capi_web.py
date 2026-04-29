@@ -416,6 +416,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/models/") and path.endswith("/detail"):
                 self._handle_models_detail()
                 return
+            elif path.startswith("/api/models/") and path.endswith("/training_tiles"):
+                self._handle_models_training_tiles()
+                return
             elif path.startswith("/api/models/") and path.endswith("/export"):
                 self._handle_models_export()
                 return
@@ -519,6 +522,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path.startswith("/api/models/") and path.endswith("/deactivate"):
                 self._handle_models_deactivate()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/training_data/delete"):
+                self._handle_models_training_data_delete()
                 return
             elif path.startswith("/api/models/") and path.endswith("/delete"):
                 self._handle_models_delete()
@@ -4760,10 +4766,60 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=500)
 
+    @staticmethod
+    def _validate_training_params(raw):
+        """驗證並 normalize 使用者送上來的 training_params。
+
+        回傳 (params_dict_or_None, error_msg_or_None)。
+        - raw 為 None / 空 dict → params_dict_or_None=None（之後吃 dataclass 預設）
+        - 含未知 key → error
+        - 數值越界 / 型別錯 → error
+        """
+        from capi_train_new import USER_TRAINABLE_PARAM_SPECS
+        if raw is None:
+            return None, None
+        if not isinstance(raw, dict):
+            return None, "training_params must be an object"
+        if not raw:
+            return None, None
+        unknown = set(raw.keys()) - set(USER_TRAINABLE_PARAM_SPECS.keys())
+        if unknown:
+            return None, f"unknown training_params keys: {sorted(unknown)}"
+        cleaned = {}
+        for key, spec in USER_TRAINABLE_PARAM_SPECS.items():
+            if key not in raw:
+                continue
+            val = raw[key]
+            try:
+                if spec["type"] is int:
+                    if isinstance(val, bool):
+                        raise TypeError
+                    val = int(val)
+                else:
+                    val = float(val)
+            except (TypeError, ValueError):
+                return None, f"training_params.{key} must be {spec['type'].__name__}"
+            if val < spec["min"] or val > spec["max"]:
+                return None, (
+                    f"training_params.{key} out of range "
+                    f"[{spec['min']}, {spec['max']}]"
+                )
+            cleaned[key] = val
+        return (cleaned or None), None
+
     def _handle_train_new_start(self):
         """POST /api/train/new/start
 
-        body: {"machine_id": "...", "panel_paths": [...]}
+        body: {
+            "machine_id": "...",
+            "panel_paths": [...],
+            "training_params": {  # optional
+                "batch_size": 8,
+                "coreset_ratio": 0.1,
+                "max_epochs": 1,
+                "inner_panels": 3
+            }
+        }
         """
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -4791,6 +4847,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "panel_paths must contain exactly 5 panels"}, status=400)
             return
 
+        training_params, err = self._validate_training_params(params.get("training_params"))
+        if err:
+            self._send_json({"error": err}, status=400)
+            return
+
         db = self._capi_server_instance.database
         state = self._train_new_state
         existing = db.get_active_training_job()
@@ -4806,15 +4867,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             from capi_train_new import generate_job_id
             job_id = generate_job_id(machine_id)
-            db.create_training_job(job_id=job_id, machine_id=machine_id, panel_paths=clean_panel_paths)
+            db.create_training_job(
+                job_id=job_id, machine_id=machine_id,
+                panel_paths=clean_panel_paths,
+                training_params=training_params,
+            )
             state["active_job_id"] = job_id
             self._train_new_cancel_event(state).clear()
             state["log_lines"] = []
 
-        # 起 preprocess thread
+        # 起 preprocess thread；training_params 直接傳入避免 worker 再 query DB
         thread = threading.Thread(
             target=CAPIWebHandler._train_new_preprocess_worker,
-            args=(job_id, machine_id, clean_panel_paths, self._capi_server_instance),
+            args=(job_id, machine_id, clean_panel_paths,
+                  self._capi_server_instance, training_params),
             daemon=True, name=f"train_new_pre-{job_id}",
         )
         with state["lock"]:
@@ -4850,12 +4916,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         }
 
     @staticmethod
-    def _train_new_preprocess_worker(job_id, machine_id, panel_paths, server_inst):
+    def _train_new_preprocess_worker(
+        job_id, machine_id, panel_paths, server_inst, training_params=None,
+    ):
         """背景 thread：preprocess + 抽 NG → state=review。"""
         import traceback
         from pathlib import Path as _Path
         from capi_train_new import (
-            TrainingConfig, preprocess_panels_to_pool, sample_ng_tiles,
+            TrainingConfig, apply_user_training_params,
+            preprocess_panels_to_pool, sample_ng_tiles,
         )
         from capi_preprocess import PreprocessConfig
 
@@ -4877,6 +4946,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 output_root=train_cfg["output_root"],
                 required_backbones=train_cfg["required_backbones"],
             )
+            apply_user_training_params(cfg, training_params, log_fn=log)
             pre_cfg = PreprocessConfig()
 
             log(f"開始前處理 {len(panel_paths)} panel")
@@ -5455,9 +5525,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """GET /models"""
         db = self._capi_server_instance.database
         from capi_model_registry import list_bundles_grouped
+        from capi_train_new import LIGHTINGS, TRAINING_UNITS
         grouped = list_bundles_grouped(db)
         template = self.jinja_env.get_template("models.html")
-        html = template.render(request_path="/models", grouped=grouped)
+        html = template.render(
+            request_path="/models",
+            grouped=grouped,
+            lightings=list(LIGHTINGS),
+            unit_labels=[f"{l}-{z}" for l, z in TRAINING_UNITS],
+        )
         self._send_response(200, html)
 
     def _handle_models_list(self):
@@ -5541,6 +5617,88 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(zip_bytes)))
         self.end_headers()
         self.wfile.write(zip_bytes)
+
+    def _handle_models_training_tiles(self):
+        """GET /api/models/<id>/training_tiles?source=ok|ng&lighting=X&zone=Y&limit=N&offset=M
+
+        回傳該 bundle 對應 job_id 的 tile pool 縮圖列表。zone 預設不過濾（NG 沒 zone）。
+        """
+        from urllib.parse import parse_qs, urlparse
+        parts = self.path.split("/")
+        try:
+            bundle_id = int(parts[3])
+        except (ValueError, IndexError):
+            self._send_json({"error": "invalid bundle id"}, status=400)
+            return
+
+        qs = parse_qs(urlparse(self.path).query)
+        source = (qs.get("source") or ["ok"])[0]
+        if source not in ("ok", "ng"):
+            self._send_json({"error": "source must be ok or ng"}, status=400)
+            return
+        lighting = (qs.get("lighting") or [""])[0] or None
+        zone = (qs.get("zone") or [""])[0] or None
+        try:
+            limit = max(1, min(int((qs.get("limit") or ["200"])[0]), 1000))
+            offset = max(0, int((qs.get("offset") or ["0"])[0]))
+        except ValueError:
+            self._send_json({"error": "limit/offset must be int"}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        bundle = db.get_model_bundle(bundle_id)
+        if not bundle:
+            self._send_json({"error": "bundle not found"}, status=404)
+            return
+        job_id = bundle.get("job_id") or ""
+        if not job_id:
+            self._send_json({"tiles": [], "total": 0,
+                             "message": "此 bundle 沒有關聯 job_id"})
+            return
+
+        kwargs = {"source": source}
+        if lighting:
+            kwargs["lighting"] = lighting
+        # NG 樣本 zone 為 NULL，不傳 zone 過濾；OK 才依 zone 篩
+        if source == "ok" and zone:
+            kwargs["zone"] = zone
+
+        all_tiles = db.list_tile_pool(job_id, **kwargs)
+        total = len(all_tiles)
+        page = all_tiles[offset:offset + limit]
+        out = []
+        for t in page:
+            out.append({
+                "id": t.get("id"),
+                "lighting": t.get("lighting"),
+                "zone": t.get("zone"),
+                "source": t.get("source"),
+                "decision": t.get("decision"),
+                "thumb_url": self._train_new_thumb_url(t.get("thumb_path")),
+            })
+        self._send_json({"tiles": out, "total": total, "limit": limit, "offset": offset})
+
+    def _handle_models_training_data_delete(self):
+        """POST /api/models/<id>/training_data/delete
+
+        清空此 bundle 對應 job 的訓練資料（DB tile_pool + thumb dir）。
+        bundle 本身與 inference 不受影響。
+        """
+        parts = self.path.split("/")
+        try:
+            bundle_id = int(parts[3])
+        except (ValueError, IndexError):
+            self._send_json({"error": "invalid bundle id"}, status=400)
+            return
+        from capi_model_registry import delete_training_data
+        try:
+            result = delete_training_data(self._capi_server_instance.database, bundle_id)
+            self._send_json(result)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=404)
+        except Exception as e:
+            logger.error(f"delete_training_data error: {e}", exc_info=True)
+            self._send_json({"error": str(e)}, status=500)
 
 
 def create_web_server(

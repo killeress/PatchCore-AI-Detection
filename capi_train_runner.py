@@ -215,7 +215,9 @@ def main() -> int:
         logger=log,
     )
 
-    from capi_train_new import TrainingConfig, run_training_pipeline
+    from capi_train_new import (
+        TrainingConfig, apply_user_training_params, run_training_pipeline,
+    )
 
     cfg = TrainingConfig(
         machine_id=job["machine_id"],
@@ -225,6 +227,7 @@ def main() -> int:
         output_root=train_paths["output_root"],
         required_backbones=train_paths["required_backbones"],
     )
+    apply_user_training_params(cfg, job.get("training_params"), log_fn=log.info)
 
     try:
         bundle_dir = run_training_pipeline(
