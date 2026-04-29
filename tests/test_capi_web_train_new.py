@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-def _make_handler(db_inst, path="/api/train/new/panels?machine_id=GN160&days=7"):
+def _make_handler(db_inst, path="/api/train/new/panels?days=3"):
     """建一個 minimal handler 物件，用於直接呼叫 _handle_* 方法。"""
     from capi_web import CAPIWebHandler
 
@@ -110,16 +110,21 @@ def _make_real_db():
     """)
     conn.commit()
 
-    def _list_ok_panels(machine_id, days=7, limit=100):
+    def _list_ok_panels(machine_id="", days=3, limit=100):
         cur = conn.cursor()
+        where = ["machine_judgment = 'OK'", "created_at >= datetime('now', ? || ' days')"]
+        params = [f"-{days}"]
+        if machine_id:
+            where.insert(0, "model_id = ?")
+            params.insert(0, machine_id)
+        params.append(limit)
         cur.execute(
-            """SELECT id, glass_id, model_id, machine_no,
-                      machine_judgment, ai_judgment, image_dir, created_at
-               FROM inference_records
-               WHERE model_id = ? AND machine_judgment = 'OK'
-               AND created_at >= datetime('now', ? || ' days')
-               ORDER BY created_at DESC LIMIT ?""",
-            (machine_id, f"-{days}", limit),
+            f"""SELECT id, glass_id, model_id, machine_no,
+                       machine_judgment, ai_judgment, image_dir, request_time, created_at
+                FROM inference_records
+                WHERE {' AND '.join(where)}
+                ORDER BY created_at DESC LIMIT ?""",
+            params,
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -150,16 +155,28 @@ def test_handle_train_new_panels_returns_db_result():
     assert all(p["image_path"] == p["image_dir"] for p in body["panels"])
 
 
-def test_handle_train_new_panels_requires_machine_id():
-    """缺少 machine_id 應回 400。"""
-    db = MagicMock()
-    h = _make_handler(db, "/api/train/new/panels?days=7")
+def test_handle_train_new_panels_all_recent_without_machine_id():
+    """未指定 machine_id 時，回傳最近 AOI OK 推論紀錄供前端直接挑選。"""
+    db = _make_real_db()
+    h = _make_handler(db, "/api/train/new/panels?days=3")
     h._handle_train_new_panels()
 
-    assert len(h._sent_response) == 1
-    assert h._sent_response[0]["status"] == 400
     body = json.loads(h._sent_response[0]["body"])
-    assert "error" in body
+    assert h._sent_response[0]["status"] == 200
+    assert {p["glass_id"] for p in body["panels"]} == {"G001", "G002", "G003"}
+    assert body["days"] == 3
+
+
+def test_handle_train_new_panels_clamps_days_to_three():
+    """機台只保留 3 天，API 即使收到更大 days 也只查 3 天。"""
+    db = MagicMock()
+    db.list_ok_panels_for_machine.return_value = []
+    h = _make_handler(db, "/api/train/new/panels?days=30")
+    h._handle_train_new_panels()
+
+    db.list_ok_panels_for_machine.assert_called_once_with("", days=3)
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["days"] == 3
 
 
 def test_handle_train_new_panels_db_not_set():

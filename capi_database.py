@@ -2573,23 +2573,31 @@ class CAPIDatabase:
         finally:
             conn.close()
 
-    def list_ok_panels_for_machine(self, machine_id: str, days: int = 7, limit: int = 100) -> list:
-        """回傳指定 model_id 近 N 天 machine_judgment='OK' 的 inference_records。
+    def list_ok_panels_for_machine(self, machine_id: str = "", days: int = 3, limit: int = 100) -> list:
+        """回傳近 N 天 machine_judgment='OK' 的 inference_records。
 
         供訓練 wizard 第一步選擇訓練樣本使用。
+        machine_id 為空時回傳所有機種，供 UI 從最近推論紀錄直接挑選。
         """
+        days = max(1, min(int(days or 3), 3))
         conn = self._get_conn()
         try:
             cur = conn.cursor()
+            params = []
+            where = ["machine_judgment = 'OK'", "created_at >= datetime('now', ? || ' days')"]
+            params.append(f"-{days}")
+            if machine_id:
+                where.insert(0, "model_id = ?")
+                params.insert(0, machine_id)
+            params.append(limit)
             cur.execute(
-                """SELECT id, glass_id, model_id, machine_no,
-                          machine_judgment, ai_judgment, image_dir,
-                          created_at
-                   FROM inference_records
-                   WHERE model_id = ? AND machine_judgment = 'OK'
-                   AND created_at >= datetime('now', ? || ' days')
-                   ORDER BY created_at DESC LIMIT ?""",
-                (machine_id, f"-{days}", limit),
+                f"""SELECT id, glass_id, model_id, machine_no,
+                           machine_judgment, ai_judgment, image_dir,
+                           request_time, created_at
+                    FROM inference_records
+                    WHERE {' AND '.join(where)}
+                    ORDER BY created_at DESC LIMIT ?""",
+                params,
             )
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]

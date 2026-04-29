@@ -6,21 +6,16 @@
     <a href="/training" style="color:#a6adc8;text-decoration:none;font-size:.9rem;">← 返回模型訓練</a>
   </div>
   <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.4rem;">Step 1 / 5 · 選擇訓練資料</h1>
-  <p style="color:#a6adc8;font-size:.9rem;">勾選 5 片 AOI 判 OK 的 panel 作為 OK 訓練樣本來源</p>
+  <p style="color:#a6adc8;font-size:.9rem;">從最近 3 天 AOI 判 OK 的推論紀錄勾選 5 片 panel 作為 OK 訓練樣本來源</p>
 
   <div style="background:#313244;border-radius:10px;padding:18px;margin-top:16px;">
-    <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;">
-      <span style="color:#a6adc8;font-size:.85rem;width:90px;">機種 ID</span>
-      <input id="machine-id" type="text" placeholder="例：GN160JCEL250S"
-        style="flex:1;background:#1e1e2e;border:1px solid #45475a;border-radius:5px;color:#cdd6f4;padding:7px 10px;font-family:monospace;">
-      <button id="search-btn" onclick="searchPanels()"
-        style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:7px 16px;font-weight:700;">查詢</button>
-    </div>
-    <div style="display:flex;gap:6px;align-items:center;">
-      <span style="color:#a6adc8;font-size:.82rem;">時間範圍</span>
-      <span class="day-pill" data-d="1" onclick="setDays(1)">1 天</span>
-      <span class="day-pill active" data-d="7" onclick="setDays(7)">7 天</span>
-      <span class="day-pill" data-d="30" onclick="setDays(30)">30 天</span>
+    <div style="display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap;">
+      <div>
+        <div style="color:#cdd6f4;font-size:.95rem;font-weight:700;">最近推論紀錄</div>
+        <div style="color:#a6adc8;font-size:.82rem;margin-top:4px;">AOI OK 紀錄只查最近 3 天；選取後會以相同機種 ID 建立訓練 job。</div>
+      </div>
+      <button id="refresh-btn" onclick="loadPanels()"
+        style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:7px 16px;font-weight:700;">重新整理</button>
     </div>
   </div>
 
@@ -39,46 +34,56 @@
 </div>
 
 <style>
-  .day-pill { background:#313244;padding:5px 11px;border-radius:13px;color:#a6adc8;font-size:.78rem;cursor:pointer; }
-  .day-pill.active { background:#89b4fa;color:#1e1e2e;font-weight:700; }
+  .train-panel-table th { padding:8px; }
+  .train-panel-table td { padding:8px; vertical-align:top; }
+  .path-cell { color:#a6adc8;font-family:monospace;font-size:.76rem;word-break:break-all;line-height:1.35; }
 </style>
 
 <script>
-let _days = 7;
 let _selected = new Set();
+let _selectedMachineId = '';
 
-function setDays(d) {
-  _days = d;
-  document.querySelectorAll('.day-pill').forEach(p => p.classList.toggle('active', parseInt(p.dataset.d) === d));
-  if (document.getElementById('machine-id').value.trim()) searchPanels();
-}
-
-function searchPanels() {
-  const mid = document.getElementById('machine-id').value.trim();
-  if (!mid) return;
-  fetch(`/api/train/new/panels?machine_id=${encodeURIComponent(mid)}&days=${_days}`)
+function loadPanels() {
+  const btn = document.getElementById('refresh-btn');
+  btn.disabled = true;
+  btn.style.opacity = .55;
+  document.getElementById('panel-list').innerHTML = '<div style="background:#313244;padding:24px;border-radius:10px;color:#a6adc8;text-align:center;">載入最近推論紀錄中...</div>';
+  fetch('/api/train/new/panels?days=3')
     .then(r => r.json())
-    .then(d => renderPanels(d.panels || []));
+    .then(d => {
+      if (d.error) {
+        document.getElementById('panel-list').innerHTML = `<div style="background:#313244;padding:24px;border-radius:10px;color:#f38ba8;text-align:center;">${escapeHtml(d.error)}</div>`;
+        return;
+      }
+      renderPanels(d.panels || []);
+    })
+    .finally(() => {
+      btn.disabled = false;
+      btn.style.opacity = 1;
+    });
 }
 
 function renderPanels(panels) {
   _selected = new Set();
+  _selectedMachineId = '';
   const root = document.getElementById('panel-list');
   if (!panels.length) {
-    root.innerHTML = '<div style="background:#313244;padding:24px;border-radius:10px;color:#a6adc8;text-align:center;">無符合條件的 panel</div>';
+    root.innerHTML = '<div style="background:#313244;padding:24px;border-radius:10px;color:#a6adc8;text-align:center;">最近 3 天無符合條件的 AOI OK panel</div>';
     updateNext();
     return;
   }
-  let html = '<div style="background:#313244;border-radius:10px;overflow:hidden;"><table style="width:100%;border-collapse:collapse;">';
-  html += '<thead><tr style="background:#11111b;color:#a6adc8;font-size:.78rem;text-align:left;"><th style="padding:8px;width:30px;"></th><th style="padding:8px;">Glass ID</th><th>日期</th><th>機台</th><th>AI 判定</th></tr></thead><tbody>';
+  let html = '<div style="background:#313244;border-radius:10px;overflow:hidden;"><table class="train-panel-table" style="width:100%;border-collapse:collapse;">';
+  html += '<thead><tr style="background:#11111b;color:#a6adc8;font-size:.78rem;text-align:left;"><th style="width:30px;"></th><th>Glass ID</th><th>機種 ID</th><th>日期</th><th>機台</th><th>AI 判定</th><th style="width:34%;">圖片來源路徑</th></tr></thead><tbody>';
   for (const p of panels) {
     const panelPath = p.image_dir || p.image_path || '';
-    html += `<tr data-path="${panelPath}" style="border-top:1px solid #1e1e2e;cursor:pointer;" onclick="toggleSelect(this)">
+    html += `<tr data-path="${escapeAttr(panelPath)}" data-machine-id="${escapeAttr(p.model_id || '')}" style="border-top:1px solid #1e1e2e;cursor:pointer;" onclick="toggleSelect(this)">
       <td style="padding:8px;"><span class="chk" style="width:14px;height:14px;border:2px solid #45475a;border-radius:3px;display:inline-block;"></span></td>
-      <td style="padding:8px;font-family:monospace;color:#cdd6f4;font-size:.82rem;">${p.glass_id}</td>
-      <td style="padding:8px;color:#a6adc8;font-size:.82rem;">${p.timestamp || p.created_at || ''}</td>
-      <td style="padding:8px;color:#a6adc8;font-size:.82rem;">${p.machine_no}</td>
-      <td style="padding:8px;font-size:.82rem;color:${p.ai_judgment === 'OK' ? '#a6e3a1' : '#fab387'};">${p.ai_judgment || '-'}</td>
+      <td style="font-family:monospace;color:#cdd6f4;font-size:.82rem;">${escapeHtml(p.glass_id || '')}</td>
+      <td style="font-family:monospace;color:#cdd6f4;font-size:.82rem;">${escapeHtml(p.model_id || '')}</td>
+      <td style="color:#a6adc8;font-size:.82rem;">${escapeHtml(p.request_time || p.timestamp || p.created_at || '')}</td>
+      <td style="color:#a6adc8;font-size:.82rem;">${escapeHtml(p.machine_no || '')}</td>
+      <td style="font-size:.82rem;color:${p.ai_judgment === 'OK' ? '#a6e3a1' : '#fab387'};">${escapeHtml(p.ai_judgment || '-')}</td>
+      <td class="path-cell">${escapeHtml(panelPath || '-')}</td>
     </tr>`;
   }
   html += '</tbody></table></div>';
@@ -88,12 +93,21 @@ function renderPanels(panels) {
 
 function toggleSelect(tr) {
   const path = tr.dataset.path;
+  const machineId = tr.dataset.machineId || '';
+  if (!path || !machineId) return;
   if (_selected.has(path)) {
     _selected.delete(path);
     tr.style.background = '';
     tr.querySelector('.chk').style.background = '';
+    tr.querySelector('.chk').style.borderColor = '#45475a';
+    if (_selected.size === 0) _selectedMachineId = '';
   } else {
     if (_selected.size >= 5) return;
+    if (_selectedMachineId && machineId !== _selectedMachineId) {
+      alert(`請選擇相同機種 ID 的 panel。目前已選：${_selectedMachineId}`);
+      return;
+    }
+    _selectedMachineId = machineId;
     _selected.add(path);
     tr.style.background = '#1e3a4d';
     const chk = tr.querySelector('.chk');
@@ -104,14 +118,16 @@ function toggleSelect(tr) {
 }
 
 function updateNext() {
-  document.getElementById('sel-count').textContent = `已選 ${_selected.size}/5 片`;
+  const machineText = _selectedMachineId ? `（機種 ${_selectedMachineId}）` : '';
+  document.getElementById('sel-count').textContent = `已選 ${_selected.size}/5 片 ${machineText}`;
   const btn = document.getElementById('next-btn');
   btn.disabled = _selected.size !== 5;
   btn.style.opacity = btn.disabled ? .4 : 1;
 }
 
 function submitStart() {
-  const mid = document.getElementById('machine-id').value.trim();
+  const mid = _selectedMachineId;
+  if (!mid) return;
   fetch('/api/train/new/start', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -121,5 +137,20 @@ function submitStart() {
     window.location.href = '/train/new/progress?job_id=' + encodeURIComponent(d.job_id);
   });
 }
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/`/g, '&#96;');
+}
+
+document.addEventListener('DOMContentLoaded', loadPanels);
 </script>
 {% endblock %}

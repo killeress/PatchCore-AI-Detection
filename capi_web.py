@@ -220,6 +220,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_train_new_status()
             elif path == "/api/train/new/tiles":
                 self._handle_train_new_tiles()
+            elif path == "/api/train/new/preprocess_preview":
+                self._handle_train_new_preprocess_preview()
             elif path.startswith("/api/train/new/thumb/"):
                 self._handle_train_new_thumb()
             elif path == "/ric":
@@ -4606,22 +4608,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self._send_json({"job_id": job_id, "started_at": new_job["started_at"]})
 
     def _handle_train_new_panels(self):
-        """GET /api/train/new/panels?machine_id=X&days=7
+        """GET /api/train/new/panels?machine_id=X&days=3
 
-        回傳指定機種 model_id 在近 N 天內 machine_judgment='OK'
+        回傳近 3 天內 machine_judgment='OK'
         的 inference_records，供訓練 wizard 第一步選擇訓練樣本使用。
+        machine_id 可省略，省略時回傳所有機種的最近紀錄。
         """
         from urllib.parse import parse_qs, urlparse
         qs = parse_qs(urlparse(self.path).query)
         machine_id = (qs.get("machine_id") or [""])[0].strip()
         try:
-            days = int((qs.get("days") or ["7"])[0])
+            days = int((qs.get("days") or ["3"])[0])
         except (ValueError, TypeError):
-            days = 7
-
-        if not machine_id:
-            self._send_json({"error": "machine_id required"}, status=400)
-            return
+            days = 3
+        days = max(1, min(days, 3))
 
         if not self.db:
             self._send_json({"error": "database not available"}, status=503)
@@ -4631,7 +4631,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             panels = self.db.list_ok_panels_for_machine(machine_id, days=days)
             for panel in panels:
                 panel["image_path"] = panel.get("image_dir", "")
-            self._send_json({"panels": panels})
+            self._send_json({"panels": panels, "days": days})
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=500)
 
@@ -4832,7 +4832,105 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         tiles = db.list_tile_pool(job_id, lighting=lighting)
         for tile in tiles:
             tile["thumb_url"] = self._train_new_thumb_url(tile.get("thumb_path"))
+            tile["image_url"] = self._train_new_thumb_url(tile.get("source_path"))
         self._send_json({"tiles": tiles})
+
+    def _handle_train_new_preprocess_preview(self):
+        """GET /api/train/new/preprocess_preview?job_id=X&lighting=Y
+
+        Rebuilds a compact visual of the actual preprocessing geometry using the
+        same preprocessing code path: foreground bbox, optional fitted polygon,
+        and generated inner/edge tile rectangles.
+        """
+        from urllib.parse import parse_qs, urlparse
+        import cv2
+        from capi_preprocess import PreprocessConfig, filter_panel_lighting_files, preprocess_panel_folder
+
+        qs = parse_qs(urlparse(self.path).query)
+        job_id = (qs.get("job_id") or [""])[0]
+        lighting = (qs.get("lighting") or ["G0F00000"])[0]
+        if not job_id:
+            self._send_response(400, "")
+            return
+
+        db = self._capi_server_instance.database
+        job = db.get_training_job(job_id)
+        if not job:
+            self._send_response(404, "")
+            return
+
+        preview_dir = Path(".tmp/train_new_thumbs") / job_id / "preview"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        preview_path = preview_dir / f"{lighting}_v2.jpg"
+        if preview_path.exists():
+            self._send_binary(str(preview_path))
+            return
+
+        preprocess_cfg = PreprocessConfig()
+        panel_paths = [Path(p) for p in job.get("panel_paths", [])]
+
+        result = None
+        panel_name = ""
+        for panel_dir in panel_paths:
+            if not panel_dir.exists():
+                continue
+            files = filter_panel_lighting_files(panel_dir)
+            if lighting not in files:
+                continue
+            results = preprocess_panel_folder(panel_dir, preprocess_cfg)
+            result = results.get(lighting)
+            panel_name = panel_dir.name
+            break
+
+        if result is None:
+            self._send_response(404, "")
+            return
+
+        img = cv2.imread(str(result.image_path), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            self._send_response(404, "")
+            return
+        canvas = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        canvas = cv2.convertScaleAbs(canvas, alpha=0.55, beta=18)
+        overlay = canvas.copy()
+
+        x1, y1, x2, y2 = result.foreground_bbox
+        for tile in result.tiles:
+            color = (60, 190, 255) if tile.zone == "edge" else (80, 245, 120)
+            cv2.rectangle(overlay, (tile.x1, tile.y1), (tile.x2, tile.y2), color, -1)
+        canvas = cv2.addWeighted(overlay, 0.18, canvas, 0.82, 0)
+
+        def draw_rect(rect, color, thickness):
+            xa, ya, xb, yb = rect
+            cv2.rectangle(canvas, (xa, ya), (xb, yb), (0, 0, 0), thickness + 8)
+            cv2.rectangle(canvas, (xa, ya), (xb, yb), color, thickness)
+
+        def draw_poly(points, color, thickness):
+            cv2.polylines(canvas, [points], isClosed=True, color=(0, 0, 0), thickness=thickness + 8)
+            cv2.polylines(canvas, [points], isClosed=True, color=color, thickness=thickness)
+
+        draw_rect((x1, y1, x2, y2), (255, 120, 60), 10)
+        if result.panel_polygon is not None:
+            poly = result.panel_polygon.astype("int32").reshape((-1, 1, 2))
+            draw_poly(poly, (80, 255, 120), 10)
+
+        for tile in result.tiles:
+            color = (60, 190, 255) if tile.zone == "edge" else (80, 245, 120)
+            draw_rect((tile.x1, tile.y1, tile.x2, tile.y2), color, 4)
+
+        label = f"{panel_name} / {lighting}  bbox=orange  panel=green  inner=green  edge=cyan"
+        cv2.rectangle(canvas, (20, 20), (min(canvas.shape[1] - 20, 1400), 102), (18, 18, 30), -1)
+        cv2.rectangle(canvas, (20, 20), (min(canvas.shape[1] - 20, 1400), 102), (137, 180, 250), 3)
+        cv2.putText(canvas, label, (40, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (205, 214, 244), 3, cv2.LINE_AA)
+
+        max_side = 1400
+        h, w = canvas.shape[:2]
+        scale = min(1.0, max_side / max(h, w))
+        if scale < 1.0:
+            canvas = cv2.resize(canvas, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+        cv2.imwrite(str(preview_path), canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        self._send_binary(str(preview_path))
 
     def _handle_train_new_tiles_decision(self):
         """POST /api/train/new/tiles/decision

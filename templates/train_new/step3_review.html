@@ -13,6 +13,20 @@
     {% endfor %}
   </div>
 
+  <div class="process-panel">
+    <div class="process-copy">
+      <div class="process-title">前處理預覽</div>
+      <div class="process-meta">
+        <span class="legend bbox"></span>前景邊界
+        <span class="legend panel"></span>panel 邊界
+        <span class="legend inner"></span>inner tile
+        <span class="legend edge"></span>edge tile
+      </div>
+    </div>
+    <button class="batch-btn" onclick="openProcessPreview()">放大查看</button>
+    <img id="process-preview" alt="preprocess preview" onclick="openProcessPreview()">
+  </div>
+
   <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;">
     <div style="display:flex;gap:6px;">
       <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">全部</button>
@@ -36,39 +50,78 @@
   </div>
 </div>
 
+<div id="image-modal" class="modal" onclick="closePreview(event)">
+  <div class="modal-shell">
+    <div class="modal-top">
+      <div id="modal-title"></div>
+      <button onclick="closePreview()">關閉</button>
+    </div>
+    <img id="modal-img" alt="preview">
+  </div>
+</div>
+
 <style>
   .lighting-tab.active { background:#89b4fa;color:#1e1e2e;font-weight:700; }
-  .grp-head { background:#313244;padding:7px 12px;margin:8px 0 5px 0;border-radius:5px;border-left:3px solid #89b4fa;color:#cdd6f4;font-size:.85rem;display:flex;justify-content:space-between; }
+  .process-panel { position:relative;background:#181c2f;border:1px solid #45475a;border-radius:8px;margin:0 0 14px 0;min-height:260px;overflow:hidden;display:flex;align-items:flex-start;gap:12px;padding:12px;box-shadow:inset 0 0 0 1px rgba(137,180,250,.16); }
+  .process-panel img { position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.96;cursor:zoom-in; }
+  .process-copy,.process-panel .batch-btn { position:relative;z-index:1; }
+  .process-copy { background:rgba(8,12,24,.88);border:1px solid rgba(137,180,250,.42);border-radius:6px;padding:10px 12px;max-width:680px;box-shadow:0 8px 24px rgba(0,0,0,.28); }
+  .process-title { color:#cdd6f4;font-weight:700;font-size:.92rem;margin-bottom:4px; }
+  .process-meta { color:#cdd6f4;font-size:.78rem;line-height:1.8;display:flex;gap:10px;align-items:center;flex-wrap:wrap; }
+  .legend { display:inline-block;width:18px;height:10px;border-radius:2px;margin-right:-6px;border:1px solid rgba(0,0,0,.6);box-shadow:0 0 0 1px rgba(255,255,255,.22); }
+  .legend.bbox { background:#ff783c; }
+  .legend.panel,.legend.inner { background:#50ff78; }
+  .legend.edge { background:#3cbeff; }
+  .grp-head { background:#313244;padding:8px 12px;margin:10px 0 6px 0;border-radius:5px;border-left:3px solid #89b4fa;color:#cdd6f4;font-size:.85rem;display:flex;justify-content:space-between;gap:10px;align-items:center; }
   .grp-head.edge { border-left-color:#f9e2af; }
   .grp-head.ng { border-left-color:#f38ba8; }
-  .grid { display:grid;grid-template-columns:repeat(12,1fr);gap:4px; }
-  .tile { aspect-ratio:1;border-radius:3px;background:#3b4257;border:2px solid transparent;cursor:pointer;background-size:cover;background-position:center; }
+  .grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(82px,1fr));gap:6px; }
+  .tile { aspect-ratio:1;border-radius:4px;background:#3b4257;border:2px solid transparent;cursor:zoom-in;background-size:cover;background-position:center;position:relative;outline:1px solid rgba(255,255,255,.04); }
+  .tile:hover { transform:translateY(-1px);box-shadow:0 0 0 1px rgba(137,180,250,.55); }
   .tile.accept { border-color:#a6e3a1; }
   .tile.reject { border-color:#f38ba8;opacity:.5; }
+  .tile.reject::after { content:"排除";position:absolute;right:4px;bottom:4px;background:rgba(243,139,168,.9);color:#1e1e2e;font-size:.68rem;font-weight:700;padding:2px 5px;border-radius:3px; }
   .filter-btn,.batch-btn,.grp-btn { background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:6px 10px;cursor:pointer;font-size:.78rem; }
   .filter-btn.active { background:#89b4fa;color:#1e1e2e;border-color:#89b4fa;font-weight:700; }
   .batch-btn.danger,.grp-btn.danger { border-color:#f38ba8;color:#f38ba8; }
   .grp-actions { display:flex;gap:5px;align-items:center; }
   .tile.empty { cursor:default;opacity:.35;background:#1e1e2e; }
+  .modal { display:none;position:fixed;inset:0;background:rgba(8,11,24,.86);z-index:1000;align-items:center;justify-content:center;padding:24px; }
+  .modal.open { display:flex; }
+  .modal-shell { max-width:min(96vw,1180px);max-height:94vh;background:#1e1e2e;border:1px solid #45475a;border-radius:8px;overflow:hidden;box-shadow:0 22px 70px rgba(0,0,0,.45); }
+  .modal-top { height:42px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 12px;border-bottom:1px solid #313244;color:#cdd6f4;font-size:.84rem; }
+  .modal-top button { background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:5px 10px;cursor:pointer; }
+  #modal-img { display:block;max-width:96vw;max-height:calc(94vh - 42px);object-fit:contain;background:#111827; }
+  @media (max-width:760px) {
+    .grid { grid-template-columns:repeat(auto-fill,minmax(68px,1fr)); }
+    .process-panel { min-height:180px; }
+    .grp-head { align-items:flex-start;flex-direction:column; }
+  }
 </style>
 
 <script>
 const jobId = "{{ job_id }}";
+const lightings = ['G0F00000','R0F00000','W0F00000','WGF50500','STANDARD'];
 let _currentLighting = 'G0F00000';
 let _tilesByLighting = {};  // {lighting: [tile, ...]}
 let _filter = 'all';
 let _lastClickedId = null;
+let _clickTimer = null;
 
 function loadLighting(lighting) {
   return fetch(`/api/train/new/tiles?job_id=${encodeURIComponent(jobId)}&lighting=${lighting}`)
     .then(r => r.json())
-    .then(d => { _tilesByLighting[lighting] = d.tiles || []; });
+    .then(d => {
+      _tilesByLighting[lighting] = d.tiles || [];
+      updateBadge(lighting);
+    });
 }
 
 function switchLighting(lighting) {
   _currentLighting = lighting;
   _lastClickedId = null;
   document.querySelectorAll('.lighting-tab').forEach(t => t.classList.toggle('active', t.dataset.lighting === lighting));
+  updateProcessPreview();
   if (!_tilesByLighting[lighting]) {
     loadLighting(lighting).then(render);
   } else {
@@ -124,12 +177,18 @@ function render() {
     for (const t of displayList) {
       const tileCls = t.decision === 'reject' ? 'reject' : 'accept';
       const thumb = t.thumb_url || '';
-      html += `<div class="tile ${tileCls}" data-id="${t.id}" style="background-image:url('${thumb}');" onclick="toggleTile(this,event)"></div>`;
+      const label = `${_currentLighting} / ${t.zone || 'NG'} / #${t.id}`;
+      html += `<div class="tile ${tileCls}" data-id="${t.id}" title="單擊放大，雙擊加入/排除" style="background-image:url('${thumb}');" onclick="handleTileClick(this,event)" ondblclick="handleTileDoubleClick(this,event)" aria-label="${label}"></div>`;
     }
     html += '</div>';
   }
   document.getElementById('content-area').innerHTML = html;
   updateBadge(_currentLighting);
+}
+
+function updateProcessPreview() {
+  const img = document.getElementById('process-preview');
+  img.src = `/api/train/new/preprocess_preview?job_id=${encodeURIComponent(jobId)}&lighting=${encodeURIComponent(_currentLighting)}&t=${Date.now()}`;
 }
 
 function updateDecision(tileIds, decision) {
@@ -144,6 +203,23 @@ function updateDecision(tileIds, decision) {
     }
     render();
   });
+}
+
+function handleTileClick(el, event) {
+  if (_clickTimer) clearTimeout(_clickTimer);
+  _clickTimer = setTimeout(() => {
+    _clickTimer = null;
+    openTilePreview(parseInt(el.dataset.id));
+  }, 220);
+}
+
+function handleTileDoubleClick(el, event) {
+  event.preventDefault();
+  if (_clickTimer) {
+    clearTimeout(_clickTimer);
+    _clickTimer = null;
+  }
+  toggleTile(el, event);
 }
 
 function toggleTile(el, event) {
@@ -165,6 +241,32 @@ function toggleTile(el, event) {
   updateDecision(ids, newDec);
 }
 
+function openTilePreview(id) {
+  const tile = (_tilesByLighting[_currentLighting] || []).find(t => t.id === id);
+  if (!tile) return;
+  const src = tile.image_url || tile.thumb_url || '';
+  const zone = tile.source === 'ng' ? 'NG' : (tile.zone || '');
+  openPreview(src, `${_currentLighting} / ${zone} / tile #${tile.id} / ${tile.decision === 'accept' ? '已加入' : '已排除'}`);
+}
+
+function openProcessPreview() {
+  const src = document.getElementById('process-preview').src;
+  openPreview(src, `${_currentLighting} 前處理預覽`);
+}
+
+function openPreview(src, title) {
+  if (!src) return;
+  document.getElementById('modal-img').src = src;
+  document.getElementById('modal-title').textContent = title || '';
+  document.getElementById('image-modal').classList.add('open');
+}
+
+function closePreview(event) {
+  if (event && event.target.id !== 'image-modal') return;
+  document.getElementById('image-modal').classList.remove('open');
+  document.getElementById('modal-img').src = '';
+}
+
 function setGroupDecision(key, decision) {
   const ids = visibleTiles(groupTiles(_tilesByLighting[_currentLighting] || [])[key]).map(t => t.id);
   updateDecision(ids, decision);
@@ -182,6 +284,10 @@ function updateBadge(lighting) {
   if (tab) tab.textContent = `${accept}/${tiles.length}`;
 }
 
+function updateAllBadges() {
+  lightings.forEach(updateBadge);
+}
+
 function startTraining() {
   if (!confirm('開始訓練 10 個 PatchCore 模型？預計 60-120 分鐘。')) return;
   fetch(`/api/train/new/start_training/${encodeURIComponent(jobId)}`, {method: 'POST'})
@@ -193,7 +299,10 @@ function startTraining() {
 }
 
 // 初始載入 5 個 lighting（一次先預載）
-Promise.all(['G0F00000','R0F00000','W0F00000','WGF50500','STANDARD'].map(loadLighting))
-  .then(() => switchLighting('G0F00000'));
+Promise.all(lightings.map(loadLighting))
+  .then(() => {
+    updateAllBadges();
+    switchLighting('G0F00000');
+  });
 </script>
 {% endblock %}

@@ -11,7 +11,8 @@ import json
 import logging
 import random
 import shutil
-from dataclasses import dataclass
+import traceback
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable
@@ -45,6 +46,9 @@ class TrainingConfig:
     over_review_root: Path
     output_root: Path = Path("model")
     backbone_cache_dir: Path = Path("deployment/torch_hub_cache")
+    required_backbones: List[str] = field(
+        default_factory=lambda: ["wide_resnet50_2-32ee1156.pth"]
+    )
 
     batch_size: int = 8
     image_size: tuple = (512, 512)
@@ -344,7 +348,11 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
     )
 
 
-def _setup_offline_env(backbone_cache_dir: Path, log: Callable) -> None:
+def _setup_offline_env(
+    backbone_cache_dir: Path,
+    log: Callable,
+    required_backbones: Optional[List[str]] = None,
+) -> None:
     """Set torch / huggingface offline env vars + verify backbone is cached.
 
     anomalib's PatchCore uses `timm.create_model('wide_resnet50_2', pretrained=True)`
@@ -360,19 +368,91 @@ def _setup_offline_env(backbone_cache_dir: Path, log: Callable) -> None:
     # Force offline mode (no network calls during training)
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    os.environ["HF_HUB_DISABLE_XET"] = "1"
+    os.environ["TRUST_REMOTE_CODE"] = "1"
 
-    # Verify timm wide_resnet50_2 weights are present in HF cache
+    required_backbones = required_backbones or ["wide_resnet50_2-32ee1156.pth"]
+
+    # Verify timm wide_resnet50_2 weights are present in HF cache. Older
+    # deployments may also stage the raw torch hub checkpoint by filename.
     hf_cache = backbone_cache_dir / "huggingface"
-    timm_dirs = list(hf_cache.glob("models--timm--wide_resnet50_2*"))
-    if not timm_dirs:
+    missing = []
+    for backbone in required_backbones:
+        cache_hits = list(backbone_cache_dir.rglob(backbone))
+        if cache_hits:
+            continue
+
+        if backbone.startswith("wide_resnet50_2"):
+            timm_dirs = list(hf_cache.glob("models--timm--wide_resnet50_2*"))
+            if timm_dirs:
+                continue
+
+        missing.append(backbone)
+
+    if missing:
         raise RuntimeError(
-            f"backbone 缺檔：未在 {hf_cache} 找到 timm wide_resnet50_2 模型。\n"
+            f"backbone 缺檔：未找到 {', '.join(missing)}。\n"
+            f"已檢查 cache: {backbone_cache_dir}\n"
             f"請在有網路的開發機執行：\n"
             f"  HF_HOME={backbone_cache_dir} python -c \"import timm; "
             f"timm.create_model('wide_resnet50_2', pretrained=True)\"\n"
             f"然後把整個 {backbone_cache_dir} 目錄 FTP 上傳到 production。"
         )
+
+    _repair_hf_snapshot_symlinks(hf_cache, log)
+    _preflight_timm_backbone(log)
     log(f"✓ backbone cache 已就緒: {hf_cache}")
+
+
+def _repair_hf_snapshot_symlinks(hf_cache: Path, log: Callable) -> None:
+    """Repair HF cache snapshots copied by tools that do not preserve symlinks.
+
+    HuggingFace snapshots usually store files as symlinks into `blobs/`. Some
+    FTP/copy workflows turn those symlinks into zero-byte regular files. timm
+    then falls through to HuggingFace Hub loading and can fail with opaque HTTP
+    client errors during every PatchCore unit. If there is exactly one large
+    blob for a model, use it to restore empty snapshot weight files.
+    """
+    if not hf_cache.exists():
+        return
+
+    for model_dir in hf_cache.glob("models--timm--*"):
+        blob_candidates = [
+            p for p in (model_dir / "blobs").glob("*")
+            if p.is_file() and p.stat().st_size > 1024 * 1024
+        ]
+        if len(blob_candidates) != 1:
+            continue
+
+        blob = blob_candidates[0]
+        for snapshot_file in (model_dir / "snapshots").rglob("*"):
+            if not snapshot_file.is_file() or snapshot_file.suffix not in {".safetensors", ".bin", ".pth"}:
+                continue
+            if snapshot_file.is_symlink() or snapshot_file.stat().st_size > 0:
+                continue
+            shutil.copy2(blob, snapshot_file)
+            log(f"  ✓ 修復 HF cache 權重檔: {snapshot_file}")
+
+
+def _preflight_timm_backbone(log: Callable) -> None:
+    """Verify timm can load the PatchCore backbone from local cache only."""
+    try:
+        import timm
+
+        timm.create_model(
+            "wide_resnet50_2",
+            pretrained=True,
+            features_only=True,
+            exportable=True,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "backbone cache 無法離線載入 wide_resnet50_2。"
+            "請確認 huggingface snapshot 內的 model.safetensors 不是 0 byte，"
+            "且 blobs 目錄已完整上傳。原始錯誤: "
+            f"{exc}"
+        ) from exc
 
 
 def _calibrate_from_model(
@@ -413,7 +493,7 @@ def run_training_pipeline(
 ) -> Path:
     """執行 10 unit 訓練，輸出 bundle 目錄。"""
     # 1. 環境檢查
-    _setup_offline_env(cfg.backbone_cache_dir, log)
+    _setup_offline_env(cfg.backbone_cache_dir, log, cfg.required_backbones)
 
     bundle_dir = cfg.output_root / (
         f"{cfg.machine_id}-{datetime.now().strftime('%Y%m%d_%H%M%S')}-{job_id}"
@@ -467,6 +547,8 @@ def run_training_pipeline(
                 log(f"[{idx}/10] {unit_label}: ✓ done, threshold={threshold:.4f}, size={size/1e6:.1f}MB")
             except Exception as e:
                 log(f"[{idx}/10] {unit_label}: ✗ 訓練失敗: {e}")
+                for line in traceback.format_exc().rstrip().splitlines()[-8:]:
+                    log(f"  {line}")
                 # 不增加 success_units，繼續下一個 unit
             finally:
                 shutil.rmtree(run_root, ignore_errors=True)
