@@ -2,11 +2,15 @@
 from __future__ import annotations
 import io
 import json
+import logging
 import shutil
+import sqlite3
 import zipfile
 import yaml
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 def list_bundles_grouped(db) -> Dict[str, List[dict]]:
@@ -29,7 +33,95 @@ def get_bundle_detail(db, bundle_id: int) -> Optional[dict]:
 
     bundle["manifest"] = json.loads(manifest_p.read_text(encoding="utf-8")) if manifest_p.exists() else None
     bundle["thresholds"] = json.loads(thresholds_p.read_text(encoding="utf-8")) if thresholds_p.exists() else None
+    bundle["training_data"] = get_training_data_summary(db, bundle)
     return bundle
+
+
+def _training_data_dir(job_id: str) -> Path:
+    """job_id 對應的訓練圖片目錄（thumb / tiles / preview / ng 都在底下）。"""
+    return Path(".tmp/train_new_thumbs") / job_id
+
+
+def _dir_walk_stats(path: Path) -> Tuple[int, int]:
+    """遞迴累加目錄大小與檔案數，目錄不存在回 (0, 0)。"""
+    if not path.exists():
+        return 0, 0
+    total_size = 0
+    file_count = 0
+    for p in path.rglob("*"):
+        if p.is_file():
+            file_count += 1
+            try:
+                total_size += p.stat().st_size
+            except OSError:
+                pass
+    return total_size, file_count
+
+
+def _dir_size_bytes(path: Path) -> int:
+    """遞迴累加目錄大小，目錄不存在回 0。"""
+    return _dir_walk_stats(path)[0]
+
+
+def get_training_data_summary(db, bundle: dict) -> dict:
+    """回傳訓練資料概況：DB tile 數量 + 磁碟大小。
+
+    `exists` 由 caller 自行判斷（任何欄位 > 0 即代表有資料）。
+    """
+    job_id = bundle.get("job_id") or ""
+    summary = {
+        "job_id": job_id,
+        "ok_count": 0,
+        "ng_count": 0,
+        "size_bytes": 0,
+        "thumb_dir": "",
+    }
+    if not job_id:
+        return summary
+
+    try:
+        summary["ok_count"] = len(db.list_tile_pool(job_id, source="ok"))
+        summary["ng_count"] = len(db.list_tile_pool(job_id, source="ng"))
+    except sqlite3.Error as e:
+        logger.warning("get_training_data_summary: DB query failed for %s: %s", job_id, e)
+
+    thumb_dir = _training_data_dir(job_id)
+    summary["thumb_dir"] = str(thumb_dir)
+    summary["size_bytes"] = _dir_size_bytes(thumb_dir)
+    return summary
+
+
+def delete_training_data(db, bundle_id: int) -> dict:
+    """清空指定 bundle 對應 job 的訓練資料：DB tile_pool + thumbnails 目錄。
+
+    bundle 本身（model_registry row、bundle_path 內容）不動，inference 不受影響。
+    """
+    bundle = db.get_model_bundle(bundle_id)
+    if not bundle:
+        raise ValueError(f"bundle {bundle_id} not found")
+    job_id = bundle.get("job_id") or ""
+    if not job_id:
+        return {"ok": True, "message": "此 bundle 沒有關聯 job_id，無訓練資料可清",
+                "deleted_files": 0, "freed_bytes": 0, "deleted_tile_rows": 0}
+
+    deleted_rows = (
+        len(db.list_tile_pool(job_id, source="ok"))
+        + len(db.list_tile_pool(job_id, source="ng"))
+    )
+    db.cleanup_tile_pool(job_id)
+
+    thumb_dir = _training_data_dir(job_id)
+    freed, deleted_files = _dir_walk_stats(thumb_dir)
+    shutil.rmtree(thumb_dir, ignore_errors=True)
+
+    return {
+        "ok": True,
+        "message": f"已清除 {deleted_rows} 筆 DB 紀錄、{deleted_files} 個檔案，"
+                   f"釋放 {freed/1e6:.1f} MB",
+        "deleted_tile_rows": deleted_rows,
+        "deleted_files": deleted_files,
+        "freed_bytes": freed,
+    }
 
 
 def activate_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
