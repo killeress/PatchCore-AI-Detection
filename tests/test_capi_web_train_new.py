@@ -260,6 +260,144 @@ def test_handle_train_new_start_rejects_invalid_panel_path():
     assert "invalid path" in json.loads(h._sent_response[0]["body"])["error"]
 
 
+# ── training_params validation ────────────────────────────────────────────────
+
+class TestValidateTrainingParams:
+    def test_none_returns_none(self):
+        from capi_web import CAPIWebHandler
+        params, err = CAPIWebHandler._validate_training_params(None)
+        assert params is None and err is None
+
+    def test_empty_dict_returns_none(self):
+        from capi_web import CAPIWebHandler
+        params, err = CAPIWebHandler._validate_training_params({})
+        assert params is None and err is None
+
+    def test_full_valid_dict(self):
+        from capi_web import CAPIWebHandler
+        raw = {"batch_size": 16, "coreset_ratio": 0.05,
+               "max_epochs": 2, "inner_panels": 4}
+        params, err = CAPIWebHandler._validate_training_params(raw)
+        assert err is None
+        assert params == raw
+
+    def test_partial_dict_keeps_only_supplied_keys(self):
+        from capi_web import CAPIWebHandler
+        params, err = CAPIWebHandler._validate_training_params({"batch_size": 4})
+        assert err is None
+        assert params == {"batch_size": 4}
+
+    def test_unknown_key_rejected(self):
+        from capi_web import CAPIWebHandler
+        params, err = CAPIWebHandler._validate_training_params(
+            {"learning_rate": 0.01}
+        )
+        assert params is None
+        assert "unknown" in err
+
+    def test_out_of_range_rejected(self):
+        from capi_web import CAPIWebHandler
+        for raw in [
+            {"batch_size": 0},
+            {"batch_size": 64},
+            {"coreset_ratio": 0.0},
+            {"coreset_ratio": 0.6},
+            {"max_epochs": 0},
+            {"max_epochs": 100},
+            {"inner_panels": 0},
+            {"inner_panels": 6},
+        ]:
+            _, err = CAPIWebHandler._validate_training_params(raw)
+            assert err and "out of range" in err, f"expected error for {raw}"
+
+    def test_wrong_type_rejected(self):
+        from capi_web import CAPIWebHandler
+        _, err = CAPIWebHandler._validate_training_params({"batch_size": "abc"})
+        assert err and "must be int" in err
+
+    def test_bool_not_treated_as_int(self):
+        """bool 是 int 子類，但 batch_size=True 顯然不合理。"""
+        from capi_web import CAPIWebHandler
+        _, err = CAPIWebHandler._validate_training_params({"batch_size": True})
+        assert err and "must be int" in err
+
+    def test_non_dict_rejected(self):
+        from capi_web import CAPIWebHandler
+        _, err = CAPIWebHandler._validate_training_params([1, 2, 3])
+        assert err and "must be an object" in err
+
+
+def test_handle_train_new_start_rejects_bad_training_params():
+    """training_params 含越界值 → 400。"""
+    server = MagicMock()
+    server.database.get_active_training_job.return_value = None
+
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    body = json.dumps({
+        "machine_id": "M",
+        "panel_paths": [f"/p{i}" for i in range(5)],
+        "training_params": {"batch_size": 999},
+    }).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 400
+    err = json.loads(h._sent_response[0]["body"])["error"]
+    assert "training_params.batch_size" in err
+    assert "out of range" in err
+
+
+def test_handle_train_new_start_persists_training_params(monkeypatch):
+    """有效 training_params → 寫進 create_training_job 呼叫。"""
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.database.get_active_training_job.return_value = None
+    server.database.create_training_job.return_value = 1
+
+    CAPIWebHandler._train_new_state = {
+        "lock": threading.Lock(),
+        "log_lock": threading.Lock(),
+        "active_job_id": None,
+        "thread": None,
+        "cancel_event": threading.Event(),
+        "log_lines": [],
+    }
+
+    started = []
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            started.append(kwargs.get("name", ""))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr("capi_web.threading.Thread", FakeThread)
+
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    payload = {
+        "machine_id": "M",
+        "panel_paths": [f"/p{i}" for i in range(5)],
+        "training_params": {
+            "batch_size": 16, "coreset_ratio": 0.05,
+            "max_epochs": 2, "inner_panels": 4,
+        },
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 200
+    server.database.create_training_job.assert_called_once()
+    call_kwargs = server.database.create_training_job.call_args.kwargs
+    assert call_kwargs["training_params"] == payload["training_params"]
+
+
 # ── /api/train/new/status tests ───────────────────────────────────────────────
 
 def test_handle_train_new_status_idle():

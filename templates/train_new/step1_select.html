@@ -43,15 +43,46 @@
     </div>
   </div>
 
-  <div id="panel-list" style="margin-top:16px;"></div>
+  <details id="train-params" style="margin-top:16px;background:#313244;border-radius:10px;padding:14px 18px;">
+    <summary style="cursor:pointer;color:#cdd6f4;font-weight:600;font-size:.92rem;list-style:none;display:flex;align-items:center;gap:8px;">
+      <span style="display:inline-block;transition:transform .15s ease;" class="caret">▶</span>
+      ⚙ 訓練設定（進階）
+      <span style="color:#a6adc8;font-weight:400;font-size:.8rem;">未調整則用預設值，多數情況不需改</span>
+    </summary>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:14px;">
+      <label class="tp-field">
+        <span class="tp-label">inner_panels <span class="tp-default">預設 3</span></span>
+        <input type="number" id="tp-inner_panels" min="1" max="5" step="1" placeholder="3">
+        <span class="tp-hint">前 N 片收 inner+edge tile，第 N+1~5 片只收 edge</span>
+      </label>
+      <label class="tp-field">
+        <span class="tp-label">batch_size <span class="tp-default">預設 8</span></span>
+        <input type="number" id="tp-batch_size" min="1" max="32" step="1" placeholder="8">
+        <span class="tp-hint">越大訓練越快，但 GPU 記憶體用量也越大</span>
+      </label>
+      <label class="tp-field">
+        <span class="tp-label">coreset_ratio <span class="tp-default">預設 0.1</span></span>
+        <input type="number" id="tp-coreset_ratio" min="0.01" max="0.5" step="0.01" placeholder="0.1">
+        <span class="tp-hint">PatchCore memory bank 抽樣比，越小模型越小、誤判越多</span>
+      </label>
+      <label class="tp-field">
+        <span class="tp-label">max_epochs <span class="tp-default">預設 1</span></span>
+        <input type="number" id="tp-max_epochs" min="1" max="10" step="1" placeholder="1">
+        <span class="tp-hint">PatchCore 是 memory-based，1 個 epoch 即收斂</span>
+      </label>
+    </div>
+  </details>
 
-  <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+  <!-- padding-bottom 預留高度給 sticky 操作條，確保列表最後幾筆不會被遮住 -->
+  <div id="panel-list" style="margin-top:16px;padding-bottom:88px;"></div>
+
+  <div class="step1-actionbar">
     <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0/5 片</span>
     <span id="sel-roles" style="color:#a6adc8;font-size:.78rem;display:none;"></span>
-    <span>
+    <span style="display:flex;gap:8px;align-items:center;margin-left:auto;">
       <a href="/training" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">取消</a>
       <button id="next-btn" onclick="submitStart()" disabled
-        style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:8px 22px;font-weight:700;opacity:.4;">
+        style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:8px 22px;font-weight:700;opacity:.4;cursor:pointer;">
         下一步：前處理 →
       </button>
     </span>
@@ -62,6 +93,38 @@
   .train-panel-table th { padding:8px; }
   .train-panel-table td { padding:8px; vertical-align:top; }
   .path-cell { color:#a6adc8;font-family:monospace;font-size:.76rem;word-break:break-all;line-height:1.35; }
+
+  /* Step1 sticky 操作條：列表多長都看得到下一步按鈕 */
+  .step1-actionbar {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    margin-top: 18px;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    background: rgba(30,30,46,.96);
+    border: 1px solid #45475a;
+    border-radius: 8px;
+    backdrop-filter: blur(6px);
+    box-shadow: 0 -8px 24px rgba(0,0,0,.35);
+  }
+
+  /* 訓練設定摺疊區塊 */
+  details#train-params summary::-webkit-details-marker { display:none; }
+  details#train-params[open] .caret { transform: rotate(90deg); }
+  .tp-field { display:flex;flex-direction:column;gap:4px;color:#cdd6f4;font-size:.82rem; }
+  .tp-label { display:flex;align-items:center;gap:6px;font-weight:600; }
+  .tp-default { color:#7f849c;font-weight:400;font-size:.74rem; }
+  .tp-hint { color:#a6adc8;font-size:.74rem;line-height:1.4; }
+  .tp-field input {
+    background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;
+    padding:6px 10px;font-family:'JetBrains Mono',Consolas,monospace;font-size:.86rem;
+  }
+  .tp-field input:focus { outline:none;border-color:#89b4fa; }
+  .tp-field input.invalid { border-color:#f38ba8; }
 </style>
 
 <script>
@@ -185,13 +248,47 @@ function updateNext() {
   btn.style.opacity = btn.disabled ? .4 : 1;
 }
 
+// 留空欄位不傳 key，由後端套 TrainingConfig dataclass 預設值
+const TRAIN_PARAM_KEYS = [
+  {key: 'inner_panels',  type: 'int',   min: 1,    max: 5},
+  {key: 'batch_size',    type: 'int',   min: 1,    max: 32},
+  {key: 'coreset_ratio', type: 'float', min: 0.01, max: 0.5},
+  {key: 'max_epochs',    type: 'int',   min: 1,    max: 10},
+];
+
+function collectTrainingParams() {
+  // 回傳 {params, error}：params 為非空 dict 才送；任何欄位越界 → error
+  const params = {};
+  for (const spec of TRAIN_PARAM_KEYS) {
+    const el = document.getElementById('tp-' + spec.key);
+    el.classList.remove('invalid');
+    const raw = el.value.trim();
+    if (!raw) continue;
+    const num = spec.type === 'int' ? parseInt(raw, 10) : parseFloat(raw);
+    if (!Number.isFinite(num) || num < spec.min || num > spec.max) {
+      el.classList.add('invalid');
+      return {params: null, error: `${spec.key} 必須是 ${spec.min} ~ ${spec.max} 之間的${spec.type === 'int' ? '整數' : '數字'}`};
+    }
+    params[spec.key] = num;
+  }
+  return {params: Object.keys(params).length ? params : null, error: null};
+}
+
 function submitStart() {
   const mid = _selectedMachineId;
   if (!mid) return;
+  const {params, error} = collectTrainingParams();
+  if (error) {
+    alert('訓練設定錯誤: ' + error);
+    document.getElementById('train-params').setAttribute('open', '');
+    return;
+  }
+  const body = {machine_id: mid, panel_paths: Array.from(_selected)};
+  if (params) body.training_params = params;
   fetch('/api/train/new/start', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({machine_id: mid, panel_paths: Array.from(_selected)}),
+    body: JSON.stringify(body),
   }).then(r => r.json()).then(d => {
     if (d.error) { alert('錯誤: ' + d.error + (d.active_job_id ? ` (進行中: ${d.active_job_id})` : '')); return; }
     window.location.href = '/train/new/progress?job_id=' + encodeURIComponent(d.job_id);

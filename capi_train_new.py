@@ -6,6 +6,7 @@
 - run_training_pipeline: Step 4 訓 10 模型 + 寫 bundle
 """
 from __future__ import annotations
+import bisect
 import gc
 import os
 import json
@@ -60,6 +61,40 @@ class TrainingConfig:
     # 前 N 片 panel 收 inner+edge tile；超過此索引的 panel 只收 edge tile
     # 預設 3：前 3 片提供 inner（已足夠 ~450 個樣本）；第 4-5 片補 edge
     inner_panels: int = 3
+
+
+# 使用者可從 step1 表單覆寫的 PatchCore 超參數，與其合法值範圍。
+# 同時做為前後端的單一資料來源：capi_web 的請求驗證、
+# step1 的前端表單、capi_train_runner 套用、以及未知 key 防呆都讀此表。
+USER_TRAINABLE_PARAM_SPECS: Dict[str, Dict] = {
+    "batch_size":    {"type": int,   "min": 1,    "max": 32},
+    "coreset_ratio": {"type": float, "min": 0.01, "max": 0.5},
+    "max_epochs":    {"type": int,   "min": 1,    "max": 10},
+    "inner_panels":  {"type": int,   "min": 1,    "max": 5},
+}
+USER_TRAINABLE_PARAM_NAMES: Tuple[str, ...] = tuple(USER_TRAINABLE_PARAM_SPECS.keys())
+
+
+def apply_user_training_params(
+    cfg: TrainingConfig,
+    params: Optional[Dict],
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> None:
+    """把 step1 表單覆寫的 PatchCore 超參數套到 TrainingConfig。
+
+    None / 空 dict 直接 return，cfg 維持 dataclass 預設值。
+    含 USER_TRAINABLE_PARAM_SPECS 之外的 key 會 raise，避免 DB 內髒資料 silent
+    fall-through 到訓練（caller 在寫入 DB 前已驗證過，這裡是第二層防線）。
+    """
+    if not params:
+        return
+    unknown = set(params.keys()) - set(USER_TRAINABLE_PARAM_SPECS.keys())
+    if unknown:
+        raise ValueError(f"unknown user training params: {sorted(unknown)}")
+    for key, val in params.items():
+        setattr(cfg, key, val)
+    if log_fn is not None:
+        log_fn(f"使用者覆寫訓練參數: {params}")
 
 
 def generate_job_id(machine_id: str) -> str:
@@ -311,6 +346,99 @@ def calibrate_threshold(ng_scores: List[float], train_max_score: float) -> float
     p10_idx = max(0, int(len(sorted_scores) * 0.10))
     p10 = float(sorted_scores[p10_idx])
     return float(max(p10, train_max_score * 1.05))
+
+
+def _compute_auroc(train_scores: List[float], ng_scores: List[float]) -> Optional[float]:
+    """Mann-Whitney U 計算 AUROC，不引入 sklearn 依賴。
+
+    AUROC = P(NG_score > train_score)，兩任意樣本中 NG 分數較高的機率。
+    平手算 0.5。沒樣本時回 None。
+    """
+    if not train_scores or not ng_scores:
+        return None
+    n_t = len(train_scores)
+    n_n = len(ng_scores)
+    sorted_t = sorted(train_scores)
+    wins = 0.0
+    for s in ng_scores:
+        # 嚴格小於 s 的 train 個數 = bisect_left
+        # 等於 s 的 train 個數 = bisect_right - bisect_left
+        lo = bisect.bisect_left(sorted_t, s)
+        hi = bisect.bisect_right(sorted_t, s)
+        wins += lo + 0.5 * (hi - lo)
+    return round(wins / (n_t * n_n), 4)
+
+
+def _auroc_grade(auroc: Optional[float]) -> str:
+    """把 AUROC 對應到中文簡評。"""
+    if auroc is None:
+        return "n/a"
+    if auroc >= 0.95:
+        return "excellent"
+    if auroc >= 0.85:
+        return "good"
+    if auroc >= 0.70:
+        return "fair"
+    if auroc >= 0.55:
+        return "poor"
+    return "fail"
+
+
+def compute_unit_metrics(
+    train_max: float,
+    ng_scores: List[float],
+    threshold: float,
+    train_scores: List[float],
+) -> Dict[str, float]:
+    """從 calibrate 用的數字算出 unit 品質指標。純函式，沒 I/O。
+
+    回傳欄位：
+      train_max          訓練樣本最大分數（已抽樣 100）
+      train_count_eval   評估時用到的 train sample 數
+      ng_count           實際算到分數的 NG 樣本數
+      ng_min/median/max  NG 分布
+      ng_p10             NG 第 10 百分位
+      threshold          最終 threshold（同 thresholds.json）
+      separation         ng_median - train_max
+      ng_caught_count    NG 中 score >= threshold 的個數
+      ng_caught_rate     ng_caught_count / ng_count
+      auroc              異常檢測 AUROC
+      auroc_grade        excellent / good / fair / poor / fail / n/a
+    """
+    metrics = {
+        "train_max": round(float(train_max), 4),
+        "ng_count": len(ng_scores),
+        "threshold": round(float(threshold), 4),
+        "train_count_eval": len(train_scores),
+    }
+    if not ng_scores:
+        metrics.update({
+            "ng_min": None, "ng_p10": None, "ng_median": None, "ng_max": None,
+            "separation": None, "ng_caught_count": 0, "ng_caught_rate": None,
+            "auroc": None, "auroc_grade": "n/a",
+        })
+        return metrics
+
+    sorted_scores = sorted(ng_scores)
+    n = len(sorted_scores)
+    p10_idx = max(0, int(n * 0.10))
+    median_idx = n // 2
+    ng_median = float(sorted_scores[median_idx])
+
+    caught = sum(1 for s in ng_scores if s >= threshold)
+    auroc = _compute_auroc(train_scores, ng_scores)
+    metrics.update({
+        "ng_min": round(float(sorted_scores[0]), 4),
+        "ng_p10": round(float(sorted_scores[p10_idx]), 4),
+        "ng_median": round(ng_median, 4),
+        "ng_max": round(float(sorted_scores[-1]), 4),
+        "separation": round(ng_median - float(train_max), 4),
+        "ng_caught_count": caught,
+        "ng_caught_rate": round(caught / n, 4),
+        "auroc": auroc,
+        "auroc_grade": _auroc_grade(auroc),
+    })
+    return metrics
 
 
 def write_manifest(bundle_dir: Path, info: dict) -> None:
@@ -635,21 +763,24 @@ def _preflight_timm_backbone(log: Callable, cache_dir: Optional[Path] = None) ->
 
 def _calibrate_from_model(
     model_pt: Path, train_paths: List[Path], ng_paths: List[Path]
-) -> Tuple[float, List[float]]:
-    """單次載入模型，回傳 (train_max_score, ng_scores)。"""
+) -> Tuple[float, List[float], List[float]]:
+    """單次載入模型，回傳 (train_max_score, train_scores, ng_scores)。
+
+    train_scores 是抽樣 100 張訓練圖跑分的完整列表（用於算 AUROC、分布指標）；
+    train_max 是其中最大值（保留供 calibrate_threshold 使用）。
+    """
     from anomalib.deploy import TorchInferencer
     inferencer = TorchInferencer(path=str(model_pt))
 
     sample = random.sample(train_paths, min(100, len(train_paths)))
-    train_max = 0.0
+    train_scores: List[float] = []
     for p in sample:
         img = cv2.imread(str(p))
         if img is None:
             continue
         result = inferencer.predict(img)
-        score = float(getattr(result, "pred_score", 0.0))
-        if score > train_max:
-            train_max = score
+        train_scores.append(float(getattr(result, "pred_score", 0.0)))
+    train_max = max(train_scores) if train_scores else 0.0
 
     ng_scores = []
     for p in ng_paths:
@@ -659,7 +790,7 @@ def _calibrate_from_model(
         result = inferencer.predict(img)
         ng_scores.append(float(getattr(result, "pred_score", 0.0)))
 
-    return train_max, ng_scores
+    return train_max, train_scores, ng_scores
 
 
 def run_training_pipeline(
@@ -690,6 +821,7 @@ def run_training_pipeline(
     thresholds: Dict[str, Dict[str, float]] = {l: {} for l in LIGHTINGS}
     tiles_per_unit: Dict[str, Dict[str, int]] = {}
     model_files: Dict[str, Dict] = {}
+    unit_metrics: Dict[str, Dict] = {}
     success_units = 0
     succeeded_units: Set[Tuple[str, str]] = set()
     completed_durations: List[float] = []  # 已完成 unit 的耗時，用來算 ETA
@@ -735,7 +867,7 @@ def run_training_pipeline(
                 if cancel_event is not None and cancel_event.is_set():
                     raise RuntimeError("training cancelled by user")
 
-                train_max, ng_scores = _calibrate_from_model(
+                train_max, train_scores, ng_scores = _calibrate_from_model(
                     model_pt,
                     [Path(t["source_path"]) for t in train_tiles],
                     [Path(t["source_path"]) for t in ng_tiles],
@@ -749,14 +881,25 @@ def run_training_pipeline(
                 thresholds[lighting][zone] = round(threshold, 4)
                 tiles_per_unit[unit_label] = {"train": len(train_tiles), "ng": len(ng_tiles)}
                 model_files[unit_label] = {"path": dst_pt.name, "size_bytes": size}
+                metrics = compute_unit_metrics(
+                    train_max, ng_scores, threshold, train_scores=train_scores,
+                )
+                metrics["train_count"] = len(train_tiles)
+                unit_elapsed = time.monotonic() - unit_start
+                metrics["elapsed_seconds"] = int(unit_elapsed)
+                unit_metrics[unit_label] = metrics
                 success_units += 1
                 succeeded_units.add((lighting, zone))
-                unit_elapsed = time.monotonic() - unit_start
                 completed_durations.append(unit_elapsed)
                 eta = _eta_text()
+                caught = metrics.get("ng_caught_count", 0)
+                ng_n = metrics.get("ng_count", 0)
+                auroc = metrics.get("auroc")
+                auroc_str = f", AUROC={auroc:.3f}({metrics.get('auroc_grade','')})" if auroc is not None else ""
                 log(
                     f"[{idx}/10] {unit_label}: ✓ done | {int(unit_elapsed)}s, "
-                    f"threshold={threshold:.4f}, size={size/1e6:.1f}MB"
+                    f"threshold={threshold:.4f}, size={size/1e6:.1f}MB, "
+                    f"ng_caught={caught}/{ng_n}{auroc_str}"
                     + (f" | {eta}" if eta else "")
                 )
             except Exception as e:
@@ -790,7 +933,10 @@ def run_training_pipeline(
             f"成功 unit 數 {success_units}/{len(TRAINING_UNITS)}，缺少: {', '.join(missing)}"
         )
 
-    # 寫 bundle metadata
+    auroc_values = [u["auroc"] for u in unit_metrics.values() if u.get("auroc") is not None]
+    overall_auroc = round(sum(auroc_values) / len(auroc_values), 4) if auroc_values else None
+    overall_auroc_grade = _auroc_grade(overall_auroc)
+
     write_thresholds(bundle_dir, thresholds)
     write_machine_config_yaml(bundle_dir, cfg.machine_id, thresholds, succeeded_units=succeeded_units)
     write_manifest(bundle_dir, {
@@ -805,9 +951,13 @@ def run_training_pipeline(
             "image_size": list(cfg.image_size),
             "coreset_ratio": cfg.coreset_ratio,
             "max_epochs": cfg.max_epochs,
+            "inner_panels": cfg.inner_panels,
         },
         "tiles_per_unit": tiles_per_unit,
         "model_files": model_files,
+        "unit_metrics": unit_metrics,
+        "overall_auroc": overall_auroc,
+        "overall_auroc_grade": overall_auroc_grade,
         "success_units": success_units,
     })
     return bundle_dir

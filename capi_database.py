@@ -262,7 +262,8 @@ class CAPIDatabase:
                     completed_at    TEXT,
                     panel_paths     TEXT,
                     output_bundle   TEXT,
-                    error_message   TEXT
+                    error_message   TEXT,
+                    training_params TEXT
                 );
 
                 -- 已訓練模型 bundle 元資料
@@ -344,6 +345,7 @@ class CAPIDatabase:
             add_column_if_not_exists("tile_results", "scratch_score", "REAL DEFAULT 0.0")
             add_column_if_not_exists("tile_results", "scratch_filtered", "INTEGER DEFAULT 0")
             add_column_if_not_exists("image_results", "scratch_filter_count", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("training_jobs", "training_params", "TEXT")
 
             conn.commit()
         finally:
@@ -2338,15 +2340,29 @@ class CAPIDatabase:
     # Training Job CRUD
     # ------------------------------------------------------------------
 
-    def create_training_job(self, job_id: str, machine_id: str, panel_paths: list) -> int:
-        """建立一筆新的訓練 job，初始 state 為 'preprocess'。回傳 rowid。"""
+    def create_training_job(
+        self,
+        job_id: str,
+        machine_id: str,
+        panel_paths: list,
+        training_params: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """建立一筆新的訓練 job，初始 state 為 'preprocess'。回傳 rowid。
+
+        training_params 為 step1 使用者覆寫的 PatchCore 超參數（JSON 序列化後寫入），
+        None 表示完全使用 TrainingConfig 的 dataclass 預設值。
+        """
+        # 用 `is not None` 而非 falsy；空 dict 與 None 語意不同（前者代表
+        # 來源已驗證但無覆寫項，留給呼叫端決定是否要寫入）。
+        params_json = json.dumps(training_params) if training_params is not None else None
         conn = self._get_conn()
         try:
             cur = conn.cursor()
             cur.execute(
-                """INSERT INTO training_jobs (job_id, machine_id, state, started_at, panel_paths)
-                   VALUES (?, ?, 'preprocess', datetime('now'), ?)""",
-                (job_id, machine_id, json.dumps(panel_paths)),
+                """INSERT INTO training_jobs
+                   (job_id, machine_id, state, started_at, panel_paths, training_params)
+                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?)""",
+                (job_id, machine_id, json.dumps(panel_paths), params_json),
             )
             conn.commit()
             return cur.lastrowid
@@ -2354,7 +2370,7 @@ class CAPIDatabase:
             conn.close()
 
     def get_training_job(self, job_id: str) -> Optional[Dict]:
-        """依 job_id 查詢訓練 job，panel_paths 自動 JSON 反序列化。找不到回傳 None。"""
+        """依 job_id 查詢訓練 job，panel_paths / training_params 自動 JSON 反序列化。找不到回傳 None。"""
         conn = self._get_conn()
         try:
             cur = conn.cursor()
@@ -2368,6 +2384,8 @@ class CAPIDatabase:
                 job["panel_paths"] = json.loads(job["panel_paths"])
             else:
                 job["panel_paths"] = []
+            raw_params = job.get("training_params")
+            job["training_params"] = json.loads(raw_params) if raw_params else None
             return job
         finally:
             conn.close()
@@ -2422,6 +2440,8 @@ class CAPIDatabase:
                 job["panel_paths"] = json.loads(job["panel_paths"])
             else:
                 job["panel_paths"] = []
+            raw_params = job.get("training_params")
+            job["training_params"] = json.loads(raw_params) if raw_params else None
             return job
         finally:
             conn.close()

@@ -6,6 +6,166 @@ from pathlib import Path
 import pytest
 
 
+def test_apply_user_training_params_none_is_noop():
+    from capi_train_new import TrainingConfig, apply_user_training_params
+    cfg = TrainingConfig(
+        machine_id="M", panel_paths=[], over_review_root=Path("/r"),
+    )
+    snapshot = (cfg.batch_size, cfg.coreset_ratio, cfg.max_epochs, cfg.inner_panels)
+    apply_user_training_params(cfg, None)
+    apply_user_training_params(cfg, {})
+    assert (cfg.batch_size, cfg.coreset_ratio, cfg.max_epochs, cfg.inner_panels) == snapshot
+
+
+def test_apply_user_training_params_overrides_match_keys():
+    from capi_train_new import TrainingConfig, apply_user_training_params
+    cfg = TrainingConfig(
+        machine_id="M", panel_paths=[], over_review_root=Path("/r"),
+    )
+    apply_user_training_params(cfg, {
+        "batch_size": 16, "coreset_ratio": 0.05,
+        "max_epochs": 2, "inner_panels": 4,
+    })
+    assert cfg.batch_size == 16
+    assert cfg.coreset_ratio == 0.05
+    assert cfg.max_epochs == 2
+    assert cfg.inner_panels == 4
+
+
+def test_apply_user_training_params_unknown_key_raises():
+    """DB 內的髒資料不能 silent fall-through 到訓練。"""
+    from capi_train_new import TrainingConfig, apply_user_training_params
+    cfg = TrainingConfig(
+        machine_id="M", panel_paths=[], over_review_root=Path("/r"),
+    )
+    with pytest.raises(ValueError, match="unknown user training params"):
+        apply_user_training_params(cfg, {"learning_rate": 0.01})
+
+
+def test_apply_user_training_params_logs_only_when_applied():
+    from capi_train_new import TrainingConfig, apply_user_training_params
+    cfg = TrainingConfig(
+        machine_id="M", panel_paths=[], over_review_root=Path("/r"),
+    )
+    msgs = []
+    apply_user_training_params(cfg, None, log_fn=msgs.append)
+    assert msgs == []
+    apply_user_training_params(cfg, {"batch_size": 4}, log_fn=msgs.append)
+    assert len(msgs) == 1 and "batch_size" in msgs[0]
+
+
+def test_compute_unit_metrics_normal_case():
+    from capi_train_new import compute_unit_metrics
+    ng_scores = [0.4 + i * 0.02 for i in range(30)]
+    train_scores = [0.1 + i * 0.004 for i in range(100)]  # 0.1 ~ 0.496
+    m = compute_unit_metrics(0.5, ng_scores, threshold=0.6, train_scores=train_scores)
+    assert m["train_max"] == 0.5
+    assert m["ng_count"] == 30
+    assert m["threshold"] == 0.6
+    assert m["ng_min"] == 0.4
+    assert m["ng_max"] == round(0.4 + 29 * 0.02, 4)
+    assert m["ng_median"] == 0.7
+    assert m["separation"] == 0.2
+    assert m["ng_caught_count"] == 20
+    assert abs(m["ng_caught_rate"] - 20/30) < 1e-3
+    # AUROC：所有 ng (>=0.4) >= 所有 train (<=0.496)，分得很開
+    assert m["auroc"] >= 0.95
+    assert m["auroc_grade"] == "excellent"
+
+
+def test_compute_unit_metrics_no_ng():
+    from capi_train_new import compute_unit_metrics
+    m = compute_unit_metrics(0.5, [], threshold=0.525, train_scores=[0.1, 0.2])
+    assert m["ng_count"] == 0
+    assert m["ng_caught_count"] == 0
+    assert m["ng_min"] is None
+    assert m["separation"] is None
+    assert m["auroc"] is None
+    assert m["auroc_grade"] == "n/a"
+
+
+def test_compute_unit_metrics_negative_separation():
+    from capi_train_new import compute_unit_metrics
+    ng_scores = [0.2, 0.25, 0.3, 0.35]
+    train_scores = [0.4, 0.45, 0.5]
+    m = compute_unit_metrics(0.5, ng_scores, threshold=0.525, train_scores=train_scores)
+    assert m["separation"] < 0
+    assert m["ng_caught_count"] == 0
+    assert m["auroc"] == 0.0  # ng 全部低於 train，AUROC 為 0
+
+
+def test_compute_auroc_perfect_separation():
+    from capi_train_new import _compute_auroc
+    # NG 分數全部 > train 分數 → AUROC = 1
+    auroc = _compute_auroc(train_scores=[0.1, 0.2, 0.3], ng_scores=[0.7, 0.8, 0.9])
+    assert auroc == 1.0
+
+
+def test_compute_auroc_random():
+    from capi_train_new import _compute_auroc
+    # 完全交錯（均勻打散）→ AUROC ≈ 0.5
+    auroc = _compute_auroc(
+        train_scores=[0.1, 0.3, 0.5, 0.7, 0.9],
+        ng_scores=[0.2, 0.4, 0.6, 0.8, 1.0],
+    )
+    # 每個 ng 都剛好「贏」一半略多 train，AUROC 高於 0.5 但接近
+    assert 0.5 < auroc < 0.7
+
+
+def test_compute_auroc_inverted():
+    from capi_train_new import _compute_auroc
+    # NG 比 train 還低 → AUROC = 0（最差）
+    auroc = _compute_auroc(train_scores=[0.7, 0.8, 0.9], ng_scores=[0.1, 0.2, 0.3])
+    assert auroc == 0.0
+
+
+def test_compute_auroc_ties():
+    from capi_train_new import _compute_auroc
+    # 完全打平 → AUROC = 0.5
+    auroc = _compute_auroc(train_scores=[0.5, 0.5], ng_scores=[0.5, 0.5])
+    assert auroc == 0.5
+
+
+def test_compute_auroc_no_data():
+    from capi_train_new import _compute_auroc
+    assert _compute_auroc([], [0.5]) is None
+    assert _compute_auroc([0.5], []) is None
+
+
+def test_auroc_grade_ranges():
+    from capi_train_new import _auroc_grade
+    assert _auroc_grade(0.99) == "excellent"
+    assert _auroc_grade(0.95) == "excellent"
+    assert _auroc_grade(0.90) == "good"
+    assert _auroc_grade(0.85) == "good"
+    assert _auroc_grade(0.75) == "fair"
+    assert _auroc_grade(0.60) == "poor"
+    assert _auroc_grade(0.50) == "fail"
+    assert _auroc_grade(None) == "n/a"
+
+
+def test_compute_unit_metrics_with_auroc():
+    from capi_train_new import compute_unit_metrics
+    m = compute_unit_metrics(
+        train_max=0.5,
+        ng_scores=[0.7, 0.8, 0.9],
+        threshold=0.6,
+        train_scores=[0.1, 0.2, 0.3, 0.4, 0.5],
+    )
+    assert m["auroc"] == 1.0
+    assert m["auroc_grade"] == "excellent"
+    assert m["train_count_eval"] == 5
+
+
+def test_compute_unit_metrics_empty_train_scores():
+    from capi_train_new import compute_unit_metrics
+    # 空 train_scores → AUROC = None / grade = n/a，其他仍正常
+    m = compute_unit_metrics(0.5, [0.6, 0.7, 0.8], 0.55, train_scores=[])
+    assert m["auroc"] is None
+    assert m["auroc_grade"] == "n/a"
+    assert m["ng_caught_count"] == 3
+
+
 def test_stage_dataset_creates_links_or_copies(tmp_path):
     from capi_train_new import stage_dataset
 
@@ -241,7 +401,7 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
         out.write_bytes(b"fakemodel")
         return out
     monkeypatch.setattr("capi_train_new.train_one_patchcore", fake_train)
-    monkeypatch.setattr("capi_train_new._calibrate_from_model", lambda *a, **kw: (0.5, [0.6, 0.7, 0.8]))
+    monkeypatch.setattr("capi_train_new._calibrate_from_model", lambda *a, **kw: (0.5, [0.3, 0.4, 0.5], [0.6, 0.7, 0.8]))
 
     # bypass backbone check for test
     monkeypatch.setattr("capi_train_new._setup_offline_env", lambda *a, **kw: None)
@@ -313,7 +473,7 @@ def test_run_training_pipeline_requires_all_units(tmp_path, monkeypatch):
         return out
 
     monkeypatch.setattr("capi_train_new.train_one_patchcore", fake_train)
-    monkeypatch.setattr("capi_train_new._calibrate_from_model", lambda *a, **kw: (0.5, [0.6, 0.7, 0.8]))
+    monkeypatch.setattr("capi_train_new._calibrate_from_model", lambda *a, **kw: (0.5, [0.3, 0.4, 0.5], [0.6, 0.7, 0.8]))
     monkeypatch.setattr("capi_train_new._setup_offline_env", lambda *a, **kw: None)
 
     output_root = tmp_path / "model"
