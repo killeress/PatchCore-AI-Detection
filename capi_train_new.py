@@ -715,9 +715,10 @@ def run_training_pipeline(
     # 1. 環境檢查
     _setup_offline_env(cfg.backbone_cache_dir, log, cfg.required_backbones)
 
-    bundle_dir = cfg.output_root / (
-        f"{cfg.machine_id}-{datetime.now().strftime('%Y%m%d_%H%M%S')}-{job_id}"
-    )
+    # 路徑格式：<machine_id>-<YYYYMMDD_HHMMSS>。
+    # job_id 已存在 manifest.json.trained_with_job_id 與 DB model_bundles.job_id，
+    # 不再放入路徑（避免 machine_id 在路徑與 job_id 中重複出現）。
+    bundle_dir = cfg.output_root / f"{cfg.machine_id}-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     thresholds: Dict[str, Dict[str, float]] = {l: {} for l in LIGHTINGS}
@@ -725,6 +726,19 @@ def run_training_pipeline(
     model_files: Dict[str, Dict] = {}
     success_units = 0
     succeeded_units: Set[Tuple[str, str]] = set()
+    completed_durations: List[float] = []  # 已完成 unit 的耗時，用來算 ETA
+    pipeline_start = time.monotonic()
+
+    def _eta_text() -> str:
+        if not completed_durations:
+            return ""
+        avg = sum(completed_durations) / len(completed_durations)
+        remaining_units = len(TRAINING_UNITS) - len(completed_durations)
+        if remaining_units <= 0:
+            return ""
+        eta_s = avg * remaining_units
+        m, s = divmod(int(eta_s), 60)
+        return f"預估剩 {m}m{s:02d}s（平均 {int(avg)}s/unit）"
 
     for idx, (lighting, zone) in enumerate(TRAINING_UNITS, 1):
         if cancel_event is not None and cancel_event.is_set():
@@ -732,6 +746,7 @@ def run_training_pipeline(
 
         unit_label = f"{lighting}-{zone}"
         log(f"[{idx}/10] {unit_label}: 載 tile")
+        unit_start = time.monotonic()
 
         train_tiles = db.list_tile_pool(job_id, lighting=lighting, zone=zone,
                                         source="ok", decision="accept")
@@ -770,8 +785,16 @@ def run_training_pipeline(
                 model_files[unit_label] = {"path": dst_pt.name, "size_bytes": size}
                 success_units += 1
                 succeeded_units.add((lighting, zone))
-                log(f"[{idx}/10] {unit_label}: ✓ done, threshold={threshold:.4f}, size={size/1e6:.1f}MB")
+                unit_elapsed = time.monotonic() - unit_start
+                completed_durations.append(unit_elapsed)
+                eta = _eta_text()
+                log(
+                    f"[{idx}/10] {unit_label}: ✓ done | {int(unit_elapsed)}s, "
+                    f"threshold={threshold:.4f}, size={size/1e6:.1f}MB"
+                    + (f" | {eta}" if eta else "")
+                )
             except Exception as e:
+                completed_durations.append(time.monotonic() - unit_start)
                 log(f"[{idx}/10] {unit_label}: ✗ 訓練失敗: {e}")
                 for line in traceback.format_exc().rstrip().splitlines()[-8:]:
                     log(f"  {line}")
