@@ -29,6 +29,7 @@ CODE_FILES = [
     "capi_preprocess.py",
     "capi_server.py",
     "capi_train_new.py",
+    "capi_train_runner.py",
     "capi_web.py",
     "templates/models.html",
     "templates/train_new/step1_select.html",
@@ -45,6 +46,12 @@ BACKBONE_CACHE_DIR = "deployment/torch_hub_cache"
 SERVER_CONFIG_PATCH = """# === 新機種 PatchCore 訓練 wizard 需要在 server_config.yaml 加入以下欄位 ===
 # 將此檔的內容合併進 production 既有的 server_config.yaml（不要整個覆蓋）
 
+# 推論端 GPU VRAM 上限（讓訓練 subprocess 可同時跑而不互搶）
+# 16GB GPU 實測：5 個 model load 完即 ~4.2GB；推論 working set 再 ~1-2GB
+# 0 = 不限制（舊行為）
+inference:
+  gpu_memory_fraction: 0.40
+
 # 多機種 model 配置列表（之後啟用新 bundle 時，從模型庫頁面自動新增）
 model_configs:
   - configs/capi_3f.yaml
@@ -58,6 +65,9 @@ training:
   #   HF_HOME=deployment/torch_hub_cache python -c "import timm; timm.create_model('wide_resnet50_2', pretrained=True)"
   over_review_root: /aidata/capi_ai/datasets/over_review
   output_root: model
+  # 訓練 subprocess GPU VRAM 上限（與 inference.gpu_memory_fraction 配對）
+  # 0.40 + 0.50 = 0.90，剩 ~10% 給桌面/buffer
+  gpu_memory_fraction: 0.50
 """
 
 README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明

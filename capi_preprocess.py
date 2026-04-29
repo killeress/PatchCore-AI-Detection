@@ -16,7 +16,7 @@ class PreprocessConfig:
     tile_stride: int = 512
     otsu_offset: int = 5
     enable_panel_polygon: bool = True
-    edge_threshold_px: int = 768
+    edge_threshold_px: int = 768  # retained for config compatibility; zone split is coverage-based
     coverage_min: float = 0.3
 
 
@@ -236,10 +236,28 @@ def classify_tile_zone(
         dists.append(d)
     center_dist = float(min(dists))
 
-    # 決定 zone：完全在內 + 距邊 >= threshold → inner，其他 → edge
-    if coverage >= 1.0 - 1e-6 and center_dist >= config.edge_threshold_px:
+    # 決定 zone：完整在 panel 內且外框未貼到 panel 邊界才是 inner。
+    if coverage >= 1.0 - 1e-6:
+        if _tile_touches_polygon_boundary(tile_rect, polygon):
+            return "edge", 1.0, center_dist, None
         return "inner", 1.0, center_dist, None
     return "edge", coverage, center_dist, mask if coverage < 1.0 - 1e-6 else None
+
+
+def _tile_touches_polygon_boundary(
+    tile_rect: Tuple[int, int, int, int],
+    polygon: np.ndarray,
+    tolerance_px: float = 1.0,
+) -> bool:
+    """True when the tile rectangle touches the panel polygon boundary."""
+    x1, y1, x2, y2 = tile_rect
+    corners = ((x1, y1), (x2, y1), (x2, y2), (x1, y2))
+    poly = polygon.astype(np.float32)
+    for pt in corners:
+        dist = cv2.pointPolygonTest(poly, (float(pt[0]), float(pt[1])), True)
+        if abs(float(dist)) <= tolerance_px:
+            return True
+    return False
 
 
 def _point_segment_dist(p, a, b):
@@ -365,6 +383,8 @@ def _generate_tiles(
             zone, cov, dist, mask = classify_tile_zone(tile_rect, polygon, config)
             if zone == "outside":
                 continue
+            if zone == "inner" and (tx == xs[0] or tx == xs[-1] or ty == ys[0] or ty == ys[-1]):
+                zone = "edge"
             tile_img = img[ty:ty + ts, tx:tx + ts].copy()
             tiles.append(TileResult(
                 tile_id=tid,

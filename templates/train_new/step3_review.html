@@ -2,7 +2,15 @@
 {% block title %}Tile 審核 - Step 3{% endblock %}
 {% block content %}
 <div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
-  <h1 style="color:#cdd6f4;margin:0 0 12px 0;font-size:1.3rem;">Step 3 / 5 · 訓練 tile 審核</h1>
+  <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 12px 0;">
+    <h1 style="color:#cdd6f4;margin:0;font-size:1.3rem;">Step 3 / 5 · 訓練 tile 審核</h1>
+    <div class="kbd-hint" aria-label="鍵盤捷徑提示">
+      <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd><span>切換</span>
+      <kbd>Enter</kbd><span>放大</span>
+      <kbd>Del</kbd><span>排除</span>
+      <kbd>Esc</kbd><span>關閉</span>
+    </div>
+  </div>
 
   <div style="display:flex;gap:4px;border-bottom:1px solid #45475a;padding-bottom:8px;margin-bottom:14px;overflow-x:auto;">
     {% for lighting in ["G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"] %}
@@ -17,8 +25,7 @@
     <div class="process-copy">
       <div class="process-title">前處理預覽</div>
       <div class="process-meta">
-        <span class="legend bbox"></span>前景邊界
-        <span class="legend panel"></span>panel 邊界
+        <span class="legend panel"></span>前景/panel 邊界
         <span class="legend inner"></span>inner tile
         <span class="legend edge"></span>edge tile
       </div>
@@ -51,12 +58,25 @@
 </div>
 
 <div id="image-modal" class="modal" onclick="closePreview(event)">
-  <div class="modal-shell">
+  <div class="modal-shell" onclick="event.stopPropagation()">
     <div class="modal-top">
       <div id="modal-title"></div>
-      <button onclick="closePreview()">關閉</button>
+      <div class="modal-actions">
+        <span id="modal-decision" class="modal-decision" style="display:none;"></span>
+        <button onclick="modalReject()" id="modal-reject-btn" style="display:none;">排除 (Del)</button>
+        <button onclick="modalAccept()" id="modal-accept-btn" style="display:none;">加入 (A)</button>
+        <button onclick="closePreview()">關閉 (Esc)</button>
+      </div>
     </div>
+    <button class="modal-nav prev" id="modal-prev" onclick="modalNavigate(-1)" aria-label="上一張">‹</button>
+    <button class="modal-nav next" id="modal-next" onclick="modalNavigate(1)" aria-label="下一張">›</button>
     <img id="modal-img" alt="preview">
+    <div class="modal-foot" id="modal-foot">
+      <span><kbd>←</kbd><kbd>→</kbd> 切換</span>
+      <span><kbd>Del</kbd> 排除</span>
+      <span><kbd>A</kbd> 加入</span>
+      <span><kbd>Esc</kbd> 關閉</span>
+    </div>
   </div>
 </div>
 
@@ -69,18 +89,23 @@
   .process-title { color:#cdd6f4;font-weight:700;font-size:.92rem;margin-bottom:4px; }
   .process-meta { color:#cdd6f4;font-size:.78rem;line-height:1.8;display:flex;gap:10px;align-items:center;flex-wrap:wrap; }
   .legend { display:inline-block;width:18px;height:10px;border-radius:2px;margin-right:-6px;border:1px solid rgba(0,0,0,.6);box-shadow:0 0 0 1px rgba(255,255,255,.22); }
-  .legend.bbox { background:#ff783c; }
-  .legend.panel,.legend.inner { background:#50ff78; }
-  .legend.edge { background:#3cbeff; }
+  .legend.panel { background:#50ff78; }
+  .legend.inner { background:#89b4fa; }
+  .legend.edge { background:#fab387; }
   .grp-head { background:#313244;padding:8px 12px;margin:10px 0 6px 0;border-radius:5px;border-left:3px solid #89b4fa;color:#cdd6f4;font-size:.85rem;display:flex;justify-content:space-between;gap:10px;align-items:center; }
   .grp-head.edge { border-left-color:#f9e2af; }
   .grp-head.ng { border-left-color:#f38ba8; }
   .grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(82px,1fr));gap:6px; }
-  .tile { aspect-ratio:1;border-radius:4px;background:#3b4257;border:2px solid transparent;cursor:zoom-in;background-size:cover;background-position:center;position:relative;outline:1px solid rgba(255,255,255,.04); }
+  .tile { aspect-ratio:1;border-radius:4px;background:#3b4257;border:2px solid transparent;cursor:zoom-in;background-size:cover;background-position:center;position:relative;outline:1px solid rgba(255,255,255,.04);transition:transform .12s ease, box-shadow .12s ease; }
   .tile:hover { transform:translateY(-1px);box-shadow:0 0 0 1px rgba(137,180,250,.55); }
   .tile.accept { border-color:#a6e3a1; }
   .tile.reject { border-color:#f38ba8;opacity:.5; }
   .tile.reject::after { content:"排除";position:absolute;right:4px;bottom:4px;background:rgba(243,139,168,.9);color:#1e1e2e;font-size:.68rem;font-weight:700;padding:2px 5px;border-radius:3px; }
+  .tile.focused { outline:3px solid #cba6f7;outline-offset:2px;box-shadow:0 0 0 1px rgba(255,255,255,.04), 0 0 16px rgba(203, 166, 247, .65);z-index:3;transform:translateY(-1px); }
+  .tile.focused.reject { opacity:.8; }
+  .kbd-hint { display:flex;align-items:center;gap:5px;flex-wrap:wrap;padding:6px 10px;background:rgba(49,50,68,.7);border:1px solid #45475a;border-radius:6px;color:#a6adc8;font-size:.74rem; }
+  .kbd-hint span { margin-right:6px; }
+  .kbd-hint kbd { display:inline-block;font-family:'JetBrains Mono','Cascadia Code',Consolas,monospace;font-size:.72rem;color:#cdd6f4;background:#1e1e2e;border:1px solid #45475a;border-bottom-width:2px;border-radius:4px;padding:1px 6px;min-width:20px;text-align:center;line-height:1.4; }
   .filter-btn,.batch-btn,.grp-btn { background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:6px 10px;cursor:pointer;font-size:.78rem; }
   .filter-btn.active { background:#89b4fa;color:#1e1e2e;border-color:#89b4fa;font-weight:700; }
   .batch-btn.danger,.grp-btn.danger { border-color:#f38ba8;color:#f38ba8; }
@@ -88,10 +113,21 @@
   .tile.empty { cursor:default;opacity:.35;background:#1e1e2e; }
   .modal { display:none;position:fixed;inset:0;background:rgba(8,11,24,.86);z-index:1000;align-items:center;justify-content:center;padding:24px; }
   .modal.open { display:flex; }
-  .modal-shell { max-width:min(96vw,1180px);max-height:94vh;background:#1e1e2e;border:1px solid #45475a;border-radius:8px;overflow:hidden;box-shadow:0 22px 70px rgba(0,0,0,.45); }
+  .modal-shell { position:relative;max-width:min(96vw,1180px);max-height:94vh;background:#1e1e2e;border:1px solid #45475a;border-radius:8px;overflow:hidden;box-shadow:0 22px 70px rgba(0,0,0,.45); }
   .modal-top { height:42px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 12px;border-bottom:1px solid #313244;color:#cdd6f4;font-size:.84rem; }
   .modal-top button { background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:5px 10px;cursor:pointer; }
+  .modal-top .modal-actions { display:flex;align-items:center;gap:8px; }
+  .modal-top .modal-decision { font-size:.78rem;padding:2px 8px;border-radius:10px;border:1px solid currentColor; }
+  .modal-top .modal-decision.accept { color:#a6e3a1; }
+  .modal-top .modal-decision.reject { color:#f38ba8; }
   #modal-img { display:block;max-width:96vw;max-height:calc(94vh - 42px);object-fit:contain;background:#111827; }
+  .modal-nav { position:absolute;top:50%;transform:translateY(-50%);width:42px;height:64px;background:rgba(30,30,46,.7);border:1px solid #45475a;color:#cdd6f4;font-size:1.5rem;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none;transition:background .15s ease;border-radius:6px; }
+  .modal-nav:hover { background:rgba(137,180,250,.55);color:#1e1e2e; }
+  .modal-nav.prev { left:10px; }
+  .modal-nav.next { right:10px; }
+  .modal-nav[disabled] { opacity:.3;cursor:not-allowed; }
+  .modal-foot { position:absolute;left:0;right:0;bottom:0;padding:8px 14px;background:linear-gradient(180deg, rgba(8,11,24,0), rgba(8,11,24,.9));color:#a6adc8;font-size:.72rem;display:flex;justify-content:center;gap:14px;flex-wrap:wrap;pointer-events:none; }
+  .modal-foot kbd { background:rgba(30,30,46,.85);border:1px solid #45475a;border-radius:3px;padding:0 5px;color:#cdd6f4;font-family:'JetBrains Mono',Consolas,monospace;font-size:.7rem; }
   @media (max-width:760px) {
     .grid { grid-template-columns:repeat(auto-fill,minmax(68px,1fr)); }
     .process-panel { min-height:180px; }
@@ -107,6 +143,8 @@ let _tilesByLighting = {};  // {lighting: [tile, ...]}
 let _filter = 'all';
 let _lastClickedId = null;
 let _clickTimer = null;
+let _focusedTileId = null;   // 鍵盤焦點所在 tile
+let _modalTileId = null;     // modal 顯示的 tile（null = 顯示前處理預覽 / 已關閉）
 
 function loadLighting(lighting) {
   return fetch(`/api/train/new/tiles?job_id=${encodeURIComponent(jobId)}&lighting=${lighting}`)
@@ -120,12 +158,14 @@ function loadLighting(lighting) {
 function switchLighting(lighting) {
   _currentLighting = lighting;
   _lastClickedId = null;
+  _focusedTileId = null;
   document.querySelectorAll('.lighting-tab').forEach(t => t.classList.toggle('active', t.dataset.lighting === lighting));
   updateProcessPreview();
   if (!_tilesByLighting[lighting]) {
-    loadLighting(lighting).then(render);
+    loadLighting(lighting).then(() => { render(); focusFirstTile(); });
   } else {
     render();
+    focusFirstTile();
   }
 }
 
@@ -133,6 +173,9 @@ function setFilter(filter) {
   _filter = filter;
   document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === filter));
   render();
+  // 焦點若被篩掉就轉到第一個可見
+  if (!visibleTileIds().includes(_focusedTileId)) focusFirstTile();
+  else focusTile(_focusedTileId, { scroll: false });
 }
 
 function groupTiles(tiles) {
@@ -176,9 +219,10 @@ function render() {
     }
     for (const t of displayList) {
       const tileCls = t.decision === 'reject' ? 'reject' : 'accept';
+      const focusCls = t.id === _focusedTileId ? ' focused' : '';
       const thumb = t.thumb_url || '';
       const label = `${_currentLighting} / ${t.zone || 'NG'} / #${t.id}`;
-      html += `<div class="tile ${tileCls}" data-id="${t.id}" title="單擊放大，雙擊加入/排除" style="background-image:url('${thumb}');" onclick="handleTileClick(this,event)" ondblclick="handleTileDoubleClick(this,event)" aria-label="${label}"></div>`;
+      html += `<div class="tile ${tileCls}${focusCls}" data-id="${t.id}" title="單擊放大，雙擊加入/排除" style="background-image:url('${thumb}');" onclick="handleTileClick(this,event)" ondblclick="handleTileDoubleClick(this,event)" aria-label="${label}"></div>`;
     }
     html += '</div>';
   }
@@ -186,13 +230,82 @@ function render() {
   updateBadge(_currentLighting);
 }
 
+// ── 鍵盤導航 ─────────────────────────────────────────
+function visibleTileEls() {
+  return Array.from(document.querySelectorAll('#content-area .tile[data-id]'));
+}
+function visibleTileIds() {
+  return visibleTileEls().map(e => parseInt(e.dataset.id));
+}
+function focusFirstTile() {
+  const els = visibleTileEls();
+  if (!els.length) { _focusedTileId = null; return; }
+  focusTile(parseInt(els[0].dataset.id), { scroll: false });
+}
+function focusTile(id, opts) {
+  opts = opts || {};
+  document.querySelectorAll('#content-area .tile.focused').forEach(e => e.classList.remove('focused'));
+  _focusedTileId = id;
+  if (id == null) return;
+  const el = document.querySelector(`#content-area .tile[data-id="${id}"]`);
+  if (!el) return;
+  el.classList.add('focused');
+  if (opts.scroll !== false) {
+    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+function findNextTile(direction) {
+  const els = visibleTileEls();
+  if (!els.length) return null;
+  if (_focusedTileId == null) return els[0];
+  const cur = els.find(e => parseInt(e.dataset.id) === _focusedTileId);
+  if (!cur) return els[0];
+  const ids = els.map(e => parseInt(e.dataset.id));
+  const curIdx = ids.indexOf(_focusedTileId);
+  if (direction === 'left')  return els[Math.max(0, curIdx - 1)] || null;
+  if (direction === 'right') return els[Math.min(els.length - 1, curIdx + 1)] || null;
+  // up/down 用幾何位置：找縱向最近且 X 中心最接近的 tile
+  const r = cur.getBoundingClientRect();
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  const candidates = els.filter(el => {
+    if (el === cur) return false;
+    const er = el.getBoundingClientRect();
+    const ey = er.top + er.height / 2;
+    if (direction === 'up')   return ey < cy - r.height * 0.4;
+    if (direction === 'down') return ey > cy + r.height * 0.4;
+    return false;
+  });
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => {
+    const ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
+    const ay = ar.top + ar.height / 2, by = br.top + br.height / 2;
+    const dyA = Math.abs(ay - cy), dyB = Math.abs(by - cy);
+    if (Math.abs(dyA - dyB) > 6) return dyA - dyB;
+    const ax = ar.left + ar.width / 2, bx = br.left + br.width / 2;
+    return Math.abs(ax - cx) - Math.abs(bx - cx);
+  });
+  return candidates[0];
+}
+function navigateFocus(direction) {
+  const next = findNextTile(direction);
+  if (!next) return;
+  focusTile(parseInt(next.dataset.id));
+}
+function focusedTile() {
+  if (_focusedTileId == null) return null;
+  return (_tilesByLighting[_currentLighting] || []).find(t => t.id === _focusedTileId) || null;
+}
+
 function updateProcessPreview() {
   const img = document.getElementById('process-preview');
   img.src = `/api/train/new/preprocess_preview?job_id=${encodeURIComponent(jobId)}&lighting=${encodeURIComponent(_currentLighting)}&t=${Date.now()}`;
 }
 
-function updateDecision(tileIds, decision) {
+function updateDecision(tileIds, decision, opts) {
+  opts = opts || {};
   if (!tileIds.length) return Promise.resolve();
+  const preVisibleIds = visibleTileIds();  // 改動前的可見列表（給 advanceFocus 找下一張用）
   return fetch('/api/train/new/tiles/decision', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({job_id: jobId, tile_ids: tileIds, decision}),
@@ -202,14 +315,61 @@ function updateDecision(tileIds, decision) {
       if (tileIds.includes(tile.id)) tile.decision = decision;
     }
     render();
+    const postVisibleIds = visibleTileIds();
+
+    // advanceFocus：仿 Windows Photos 刪除後跳下一張的行為
+    if (opts.advanceFocus && tileIds.length === 1) {
+      const id = tileIds[0];
+      const preIdx = preVisibleIds.indexOf(id);
+      let nextId = null;
+      // 在 pre-list 找比它後面、且 post-list 仍可見的
+      for (let i = preIdx + 1; i < preVisibleIds.length; i++) {
+        if (postVisibleIds.includes(preVisibleIds[i])) { nextId = preVisibleIds[i]; break; }
+      }
+      // 沒有 → 往前找
+      if (nextId === null) {
+        for (let i = preIdx - 1; i >= 0; i--) {
+          if (postVisibleIds.includes(preVisibleIds[i])) { nextId = preVisibleIds[i]; break; }
+        }
+      }
+      // 還沒有 → 第一個可見
+      if (nextId === null && postVisibleIds.length) nextId = postVisibleIds[0];
+
+      focusTile(nextId, { scroll: true });
+      if (_modalTileId !== null) {
+        if (nextId !== null && postVisibleIds.includes(nextId) && nextId !== id) {
+          modalShowTile(nextId);
+        } else if (postVisibleIds.includes(id)) {
+          modalShowTile(id);  // 還在可見列表，更新 decision badge
+        } else {
+          closePreview();
+        }
+      }
+      return;
+    }
+
+    // 沒指定 advanceFocus：留在原 tile（若仍可見）或 fallback
+    if (postVisibleIds.includes(_focusedTileId)) {
+      focusTile(_focusedTileId, { scroll: false });
+    } else if (postVisibleIds.length) {
+      focusTile(postVisibleIds[0], { scroll: false });
+    } else {
+      _focusedTileId = null;
+    }
+    if (_modalTileId !== null && tileIds.includes(_modalTileId)) {
+      if (postVisibleIds.includes(_modalTileId)) modalShowTile(_modalTileId);
+      else closePreview();
+    }
   });
 }
 
 function handleTileClick(el, event) {
+  const id = parseInt(el.dataset.id);
+  focusTile(id, { scroll: false });
   if (_clickTimer) clearTimeout(_clickTimer);
   _clickTimer = setTimeout(() => {
     _clickTimer = null;
-    openTilePreview(parseInt(el.dataset.id));
+    openTilePreview(id);
   }, 220);
 }
 
@@ -219,6 +379,7 @@ function handleTileDoubleClick(el, event) {
     clearTimeout(_clickTimer);
     _clickTimer = null;
   }
+  focusTile(parseInt(el.dataset.id), { scroll: false });
   toggleTile(el, event);
 }
 
@@ -244,9 +405,38 @@ function toggleTile(el, event) {
 function openTilePreview(id) {
   const tile = (_tilesByLighting[_currentLighting] || []).find(t => t.id === id);
   if (!tile) return;
+  modalShowTile(id);
+}
+
+function modalShowTile(id) {
+  const tile = (_tilesByLighting[_currentLighting] || []).find(t => t.id === id);
+  if (!tile) return;
+  _modalTileId = id;
   const src = tile.image_url || tile.thumb_url || '';
   const zone = tile.source === 'ng' ? 'NG' : (tile.zone || '');
-  openPreview(src, `${_currentLighting} / ${zone} / tile #${tile.id} / ${tile.decision === 'accept' ? '已加入' : '已排除'}`);
+  document.getElementById('modal-img').src = src;
+  document.getElementById('modal-title').textContent = `${_currentLighting} / ${zone} / tile #${tile.id}`;
+
+  const dec = document.getElementById('modal-decision');
+  dec.style.display = '';
+  dec.className = 'modal-decision ' + tile.decision;
+  dec.textContent = tile.decision === 'accept' ? '已加入' : '已排除';
+
+  document.getElementById('modal-reject-btn').style.display = '';
+  document.getElementById('modal-accept-btn').style.display = '';
+  document.getElementById('modal-prev').style.display = '';
+  document.getElementById('modal-next').style.display = '';
+  document.getElementById('modal-foot').style.display = '';
+
+  // prev/next 啟用狀態
+  const ids = visibleTileIds();
+  const idx = ids.indexOf(id);
+  document.getElementById('modal-prev').toggleAttribute('disabled', idx <= 0);
+  document.getElementById('modal-next').toggleAttribute('disabled', idx < 0 || idx >= ids.length - 1);
+
+  document.getElementById('image-modal').classList.add('open');
+  // 同步主畫面焦點
+  focusTile(id);
 }
 
 function openProcessPreview() {
@@ -256,15 +446,43 @@ function openProcessPreview() {
 
 function openPreview(src, title) {
   if (!src) return;
+  _modalTileId = null;
   document.getElementById('modal-img').src = src;
   document.getElementById('modal-title').textContent = title || '';
+  document.getElementById('modal-decision').style.display = 'none';
+  document.getElementById('modal-reject-btn').style.display = 'none';
+  document.getElementById('modal-accept-btn').style.display = 'none';
+  document.getElementById('modal-prev').style.display = 'none';
+  document.getElementById('modal-next').style.display = 'none';
+  document.getElementById('modal-foot').style.display = 'none';
   document.getElementById('image-modal').classList.add('open');
 }
 
 function closePreview(event) {
   if (event && event.target.id !== 'image-modal') return;
+  _modalTileId = null;
   document.getElementById('image-modal').classList.remove('open');
   document.getElementById('modal-img').src = '';
+}
+
+function modalNavigate(delta) {
+  if (_modalTileId == null) return;
+  const ids = visibleTileIds();
+  const idx = ids.indexOf(_modalTileId);
+  if (idx < 0) return;
+  const nextIdx = idx + delta;
+  if (nextIdx < 0 || nextIdx >= ids.length) return;
+  modalShowTile(ids[nextIdx]);
+}
+
+function modalReject() {
+  if (_modalTileId == null) return;
+  updateDecision([_modalTileId], 'reject', { advanceFocus: true });
+}
+
+function modalAccept() {
+  if (_modalTileId == null) return;
+  updateDecision([_modalTileId], 'accept');
 }
 
 function setGroupDecision(key, decision) {
@@ -297,6 +515,52 @@ function startTraining() {
       location.href = `/train/new/progress?job_id=${encodeURIComponent(jobId)}`;
     });
 }
+
+// ── 全域鍵盤處理（仿 Windows Photos）────────────────
+document.addEventListener('keydown', (e) => {
+  // 文字輸入欄位優先（避免攔截）
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+
+  const modalOpen = document.getElementById('image-modal').classList.contains('open');
+  const tileModal = modalOpen && _modalTileId !== null;
+
+  // Esc：關 modal
+  if (e.key === 'Escape') {
+    if (modalOpen) { e.preventDefault(); closePreview(); }
+    return;
+  }
+
+  if (tileModal) {
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); modalNavigate(-1); return; }
+    if (e.key === 'ArrowRight') { e.preventDefault(); modalNavigate(1);  return; }
+    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); modalReject(); return; }
+    if (e.key === 'a' || e.key === 'A') { e.preventDefault(); modalAccept(); return; }
+    if (e.key === 'Enter') { e.preventDefault(); closePreview(); return; }
+    return;
+  }
+
+  if (modalOpen) return;  // 前處理預覽 modal 開著，僅 Esc 處理（已在上面）
+
+  // 主畫面鍵盤導航
+  if (e.key === 'ArrowLeft')  { e.preventDefault(); navigateFocus('left');  return; }
+  if (e.key === 'ArrowRight') { e.preventDefault(); navigateFocus('right'); return; }
+  if (e.key === 'ArrowUp')    { e.preventDefault(); navigateFocus('up');    return; }
+  if (e.key === 'ArrowDown')  { e.preventDefault(); navigateFocus('down');  return; }
+
+  if (e.key === 'Enter') {
+    if (_focusedTileId != null) { e.preventDefault(); openTilePreview(_focusedTileId); }
+    return;
+  }
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (_focusedTileId != null) { e.preventDefault(); updateDecision([_focusedTileId], 'reject', { advanceFocus: true }); }
+    return;
+  }
+  if (e.key === 'a' || e.key === 'A') {
+    if (_focusedTileId != null) { e.preventDefault(); updateDecision([_focusedTileId], 'accept'); }
+    return;
+  }
+});
 
 // 初始載入 5 個 lighting（一次先預載）
 Promise.all(lightings.map(loadLighting))

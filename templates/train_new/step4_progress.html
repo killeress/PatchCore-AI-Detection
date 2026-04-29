@@ -5,7 +5,10 @@
   <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.3rem;">Step 4 / 5 · PatchCore 模型訓練</h1>
   <p style="color:#a6adc8;font-size:.85rem;">系統正在依 5 個光源與 inner/edge 區域訓練 10 個模型。</p>
 
-  <div id="status-pill" style="display:inline-block;background:#fab387;color:#1e1e2e;padding:5px 14px;border-radius:14px;font-weight:700;margin-top:14px;">訓練中</div>
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px;">
+    <div id="status-pill" style="display:inline-block;background:#fab387;color:#1e1e2e;padding:5px 14px;border-radius:14px;font-weight:700;">訓練中</div>
+    <button id="cancel-btn" type="button" onclick="cancelTraining()" style="background:#45475a;color:#cdd6f4;border:1px solid #585b70;border-radius:6px;padding:7px 12px;cursor:pointer;">取消訓練</button>
+  </div>
 
   <div id="unit-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:16px;"></div>
 
@@ -30,6 +33,7 @@ const jobId = params.get('job_id') || "{{ job_id }}";
 const units = ['G0F00000','R0F00000','W0F00000','WGF50500','STANDARD']
   .flatMap(l => [`${l}-inner`, `${l}-edge`]);
 let _timer = null;
+let _lastLogText = '';
 
 function renderUnits(logLines) {
   const logs = (logLines || []).join('\n');
@@ -55,10 +59,17 @@ function poll() {
     .then(r => r.json())
     .then(d => {
       const logLines = d.log_lines || [];
-      document.getElementById('log-box').textContent = logLines.join('\n');
+      const logText = logLines.join('\n');
+      const logBox = document.getElementById('log-box');
+      if (logText !== _lastLogText) {
+        logBox.textContent = logText;
+        logBox.scrollTop = logBox.scrollHeight;
+        _lastLogText = logText;
+      }
       renderUnits(logLines);
       const pill = document.getElementById('status-pill');
       pill.textContent = stateText(d.state);
+      document.getElementById('cancel-btn').disabled = !['preprocess', 'train', 'review'].includes(d.state);
       if (d.state === 'failed') {
         clearInterval(_timer);
         pill.style.background = '#f38ba8';
@@ -70,6 +81,22 @@ function poll() {
         clearInterval(_timer);
         location.href = `/train/new/review/${encodeURIComponent(jobId)}`;
       }
+    });
+}
+
+function cancelTraining() {
+  const btn = document.getElementById('cancel-btn');
+  btn.disabled = true;
+  fetch(`/api/train/new/cancel/${encodeURIComponent(jobId)}`, { method: 'POST' })
+    .then(r => r.json().then(d => ({ ok: r.ok, status: r.status, body: d })))
+    .then(({ ok, body }) => {
+      if (!ok) {
+        alert(body.error || '取消失敗');
+      }
+      poll();
+    })
+    .finally(() => {
+      btn.disabled = false;
     });
 }
 

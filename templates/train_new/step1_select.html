@@ -6,7 +6,31 @@
     <a href="/training" style="color:#a6adc8;text-decoration:none;font-size:.9rem;">← 返回模型訓練</a>
   </div>
   <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.4rem;">Step 1 / 5 · 選擇訓練資料</h1>
-  <p style="color:#a6adc8;font-size:.9rem;">從最近 3 天 AOI 判 OK 的推論紀錄勾選 5 片 panel 作為 OK 訓練樣本來源</p>
+  <p style="color:#a6adc8;font-size:.9rem;line-height:1.55;">
+    從最近 3 天 AOI 判 OK 紀錄勾選 5 片 panel。
+    <span style="color:#a6e3a1;font-weight:600;">第 1-3 片</span>提供 inner+edge tile，
+    <span style="color:#fab387;font-weight:600;">第 4-5 片</span>只取 edge tile（強化邊緣樣本）。
+    <span style="color:#cdd6f4;font-size:.82rem;display:block;margin-top:2px;">勾選順序就是 panel 順位 — 取消重選會重排。</span>
+  </p>
+
+  {% if active_review_job %}
+  <div style="background:#2f3347;border:1px solid #89b4fa;border-radius:10px;padding:14px 16px;margin-top:16px;display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;">
+    <div>
+      <div style="color:#cdd6f4;font-weight:700;font-size:.92rem;">已有一筆審核中的訓練 job</div>
+      <div style="color:#a6adc8;font-size:.8rem;margin-top:4px;font-family:monospace;">{{ active_review_job.job_id }} · {{ active_review_job.machine_id }}</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <a href="/train/new/review/{{ active_review_job.job_id }}"
+         style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:8px 14px;font-weight:700;text-decoration:none;font-size:.86rem;">
+        繼續審核 →
+      </a>
+      <button onclick="cancelReviewJob('{{ active_review_job.job_id }}')"
+        style="background:#313244;color:#f38ba8;border:1px solid #f38ba8;border-radius:5px;padding:8px 14px;font-weight:700;font-size:.86rem;cursor:pointer;">
+        取消此 job
+      </button>
+    </div>
+  </div>
+  {% endif %}
 
   <div style="background:#313244;border-radius:10px;padding:18px;margin-top:16px;">
     <div style="display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap;">
@@ -21,8 +45,9 @@
 
   <div id="panel-list" style="margin-top:16px;"></div>
 
-  <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;">
+  <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
     <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0/5 片</span>
+    <span id="sel-roles" style="color:#a6adc8;font-size:.78rem;display:none;"></span>
     <span>
       <a href="/training" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">取消</a>
       <button id="next-btn" onclick="submitStart()" disabled
@@ -77,7 +102,7 @@ function renderPanels(panels) {
   for (const p of panels) {
     const panelPath = p.image_dir || p.image_path || '';
     html += `<tr data-path="${escapeAttr(panelPath)}" data-machine-id="${escapeAttr(p.model_id || '')}" style="border-top:1px solid #1e1e2e;cursor:pointer;" onclick="toggleSelect(this)">
-      <td style="padding:8px;"><span class="chk" style="width:14px;height:14px;border:2px solid #45475a;border-radius:3px;display:inline-block;"></span></td>
+      <td style="padding:8px;"><span class="chk" style="width:20px;height:20px;border:2px solid #45475a;border-radius:4px;display:inline-block;line-height:20px;text-align:center;font-family:'JetBrains Mono',Consolas,monospace;font-size:.78rem;"></span></td>
       <td style="font-family:monospace;color:#cdd6f4;font-size:.82rem;">${escapeHtml(p.glass_id || '')}</td>
       <td style="font-family:monospace;color:#cdd6f4;font-size:.82rem;">${escapeHtml(p.model_id || '')}</td>
       <td style="color:#a6adc8;font-size:.82rem;">${escapeHtml(p.request_time || p.timestamp || p.created_at || '')}</td>
@@ -91,15 +116,16 @@ function renderPanels(panels) {
   updateNext();
 }
 
+// 前 3 片 inner+edge（綠），第 4-5 片只取 edge（橘）
+const INNER_PANELS = 3;
+function _roleColor(idx) { return idx < INNER_PANELS ? '#a6e3a1' : '#fab387'; }
+
 function toggleSelect(tr) {
   const path = tr.dataset.path;
   const machineId = tr.dataset.machineId || '';
   if (!path || !machineId) return;
   if (_selected.has(path)) {
     _selected.delete(path);
-    tr.style.background = '';
-    tr.querySelector('.chk').style.background = '';
-    tr.querySelector('.chk').style.borderColor = '#45475a';
     if (_selected.size === 0) _selectedMachineId = '';
   } else {
     if (_selected.size >= 5) return;
@@ -109,17 +135,51 @@ function toggleSelect(tr) {
     }
     _selectedMachineId = machineId;
     _selected.add(path);
-    tr.style.background = '#1e3a4d';
-    const chk = tr.querySelector('.chk');
-    chk.style.background = '#89b4fa';
-    chk.style.borderColor = '#89b4fa';
   }
+  refreshSelectedVisuals();
   updateNext();
+}
+
+function refreshSelectedVisuals() {
+  // 把所有 row 的選取視覺重設，再依 _selected 順序重畫位置編號
+  document.querySelectorAll('#panel-list tr[data-path]').forEach(tr => {
+    tr.style.background = '';
+    const chk = tr.querySelector('.chk');
+    chk.textContent = '';
+    chk.style.background = '';
+    chk.style.color = '';
+    chk.style.borderColor = '#45475a';
+    chk.style.fontWeight = '';
+  });
+  const ordered = Array.from(_selected);
+  ordered.forEach((path, idx) => {
+    const tr = document.querySelector(`#panel-list tr[data-path="${CSS.escape(path)}"]`);
+    if (!tr) return;
+    const color = _roleColor(idx);
+    tr.style.background = idx < INNER_PANELS ? '#1e3a2d' : '#3a2e1e';
+    const chk = tr.querySelector('.chk');
+    chk.textContent = String(idx + 1);
+    chk.style.background = color;
+    chk.style.color = '#1e1e2e';
+    chk.style.borderColor = color;
+    chk.style.fontWeight = '700';
+  });
 }
 
 function updateNext() {
   const machineText = _selectedMachineId ? `（機種 ${_selectedMachineId}）` : '';
   document.getElementById('sel-count').textContent = `已選 ${_selected.size}/5 片 ${machineText}`;
+  const roles = document.getElementById('sel-roles');
+  if (_selected.size > 0) {
+    const innerN = Math.min(_selected.size, INNER_PANELS);
+    const edgeN = Math.max(0, _selected.size - INNER_PANELS);
+    let txt = `前 ${innerN} 片 inner+edge`;
+    if (edgeN > 0) txt += ` · 後 ${edgeN} 片 edge only`;
+    roles.textContent = txt;
+    roles.style.display = '';
+  } else {
+    roles.style.display = 'none';
+  }
   const btn = document.getElementById('next-btn');
   btn.disabled = _selected.size !== 5;
   btn.style.opacity = btn.disabled ? .4 : 1;
@@ -136,6 +196,19 @@ function submitStart() {
     if (d.error) { alert('錯誤: ' + d.error + (d.active_job_id ? ` (進行中: ${d.active_job_id})` : '')); return; }
     window.location.href = '/train/new/progress?job_id=' + encodeURIComponent(d.job_id);
   });
+}
+
+function cancelReviewJob(jobId) {
+  if (!confirm(`取消審核中的訓練 job？\n${jobId}\n\n取消後可以重新從 Step 1 建立新 job。`)) return;
+  fetch(`/api/train/new/cancel/${encodeURIComponent(jobId)}`, {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) {
+        alert('取消失敗: ' + d.error);
+        return;
+      }
+      location.href = '/train/new';
+    });
 }
 
 function escapeHtml(value) {

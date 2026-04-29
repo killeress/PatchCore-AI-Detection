@@ -22,6 +22,11 @@ inference:
   config_path: "configs/capi_3f.yaml"    # CAPI 推論配置檔 (模型、閾值等皆在此檔)
   device: "auto"                         # auto / cpu / cuda
   cpu_workers: 4                         # 預處理/後處理 CPU 執行緒數
+  # GPU VRAM 上限比例（per-process），讓訓練 subprocess 可同時跑而不互搶顯存
+  # 16GB GPU 實測：5 個 model load 完即 4.2GB；推論 working set 再 ~1-2GB
+  # 推論 0.40 ≈ 6.4GB；訓練 0.50 ≈ 8GB；剩 1.5GB 給桌面/buffer
+  # 設 0 = 不限制（舊行為）
+  gpu_memory_fraction: 0.40
 
 # SQLite 資料庫
 database:
@@ -71,6 +76,9 @@ fallback_model_config: configs/capi_3f.yaml
 # 訓練 wizard 設定
 training:
   backbone_cache_dir: deployment/torch_hub_cache
+  # 訓練 subprocess GPU VRAM 上限。16GB GPU 建議 0.50 ≈ 8GB（與推論 0.40 共存）
+  # 若 coreset OOM 可調降 capi_train_new.TrainingConfig.coreset_ratio 到 0.05
+  gpu_memory_fraction: 0.50
   # Backbone weights cache layout (timm via HuggingFace):
   #   {backbone_cache_dir}/huggingface/models--timm--wide_resnet50_2.racm_in1k/.../model.safetensors
   # Pre-stage on internet-connected machine via:

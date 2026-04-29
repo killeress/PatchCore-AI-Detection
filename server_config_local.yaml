@@ -25,6 +25,8 @@ inference:
   device: "auto"              # auto 會自動選 cuda (如有GPU) 或 cpu
   threshold: 0.6
   cpu_workers: 4
+  # GPU VRAM per-process 上限比例。0 = 不限制
+  gpu_memory_fraction: 0.40
 
 # SQLite 資料庫 — Windows 路徑
 database:
@@ -67,6 +69,8 @@ fallback_model_config: configs/capi_3f.yaml
 # 訓練 wizard 設定
 training:
   backbone_cache_dir: deployment/torch_hub_cache
+  # 訓練 subprocess GPU VRAM 上限。16GB GPU 建議 0.50。0 = 不限制
+  gpu_memory_fraction: 0.50
   # Backbone weights cache layout (timm via HuggingFace):
   #   {backbone_cache_dir}/huggingface/models--timm--wide_resnet50_2.racm_in1k/.../model.safetensors
   # Pre-stage on internet-connected machine via:
