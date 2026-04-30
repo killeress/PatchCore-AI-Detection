@@ -3641,6 +3641,7 @@ class CAPIInferencer:
         omit_image: Optional[np.ndarray],
         omit_overexposed: bool,
         product_resolution: Optional[Tuple[int, int]],
+        aoi_report: Optional[Dict[str, List['AOIReportDefect']]] = None,
     ) -> Dict[str, int]:
         """執行 AOI 機檢座標切塊 + 邊緣 ROI inspection；mutates ``preprocessed_results`` in place。
 
@@ -3656,6 +3657,7 @@ class CAPIInferencer:
             preprocessed_results: 已預處理的 ImageResult list
             omit_image, omit_overexposed: OMIT 灰塵屏蔽參數
             product_resolution: 產品解析度 (w, h)，用於 AOI 座標映射
+            aoi_report: 已解析的 AOI report；None 時由 helper 自行解析
 
         Returns:
             ``{"aoi_tile_count": int, "aoi_edge_count": int}``
@@ -3663,7 +3665,8 @@ class CAPIInferencer:
         if not self.config.aoi_coord_inspection_enabled:
             return {"aoi_tile_count": 0, "aoi_edge_count": 0}
 
-        aoi_report = self._parse_aoi_report_txt(panel_dir)
+        if aoi_report is None:
+            aoi_report = self._parse_aoi_report_txt(panel_dir)
         if not aoi_report:
             return {"aoi_tile_count": 0, "aoi_edge_count": 0}
 
@@ -4557,6 +4560,7 @@ class CAPIInferencer:
                     omit_image=omit_image,
                     omit_overexposed=omit_overexposed,
                     product_resolution=product_resolution,
+                    aoi_report=aoi_report,
                 )
                 print(f"🎯 Phase 1.5 完成: AOI 座標新增 {stats['aoi_tile_count']} 個 tiles, "
                       f"{stats['aoi_edge_count']} 個邊緣 defects")
