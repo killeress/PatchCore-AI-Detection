@@ -105,6 +105,52 @@ def test_helper_calls_patchcore_with_edge_zone(new_arch_inferencer, tmp_path):
         f"new arch 下 helper 應呼叫 _inspect_roi_patchcore(zone='edge')；實際 kwargs={pc_kwargs}"
 
 
+def test_helper_v2_skips_interior_tile_extension(new_arch_inferencer, tmp_path):
+    """新架構：v2 在推論結束後才呼叫 helper，interior tiles 來不及推論，
+    所以不應加進 result.tiles，aoi_tile_count 維持 0。edge defects 仍照常處理。"""
+    img_path = tmp_path / "G0F00000_001.png"
+    img_path.touch()
+
+    fake_result = ImageResult(
+        image_path=img_path,
+        image_size=(1920, 1080),
+        otsu_bounds=(0, 0, 1920, 1080),
+        exclusion_regions=[],
+        tiles=[],
+        excluded_tile_count=0,
+        processed_tile_count=0,
+        processing_time=0.0,
+        anomaly_tiles=[],
+        raw_bounds=(0, 0, 1920, 1080),
+        panel_polygon=np.array([[0, 0], [1920, 0], [1920, 1080], [0, 1080]], dtype=np.float32),
+    )
+
+    interior_tiles = [MagicMock(tile_id=99), MagicMock(tile_id=100)]
+    edge_def = MagicMock(product_x=1900, product_y=540, defect_code="L01")
+
+    with patch.object(new_arch_inferencer, "_parse_aoi_report_txt",
+                      return_value={"G0F00000": [MagicMock()]}), \
+         patch.object(new_arch_inferencer, "_create_aoi_coord_tiles",
+                      return_value=(interior_tiles, [edge_def])), \
+         patch("cv2.imread", return_value=np.ones((1080, 1920, 3), dtype=np.uint8)), \
+         patch.object(new_arch_inferencer, "_inspect_roi_patchcore",
+                      return_value=([], {"score": 0.1, "threshold": 0.65, "area": 0,
+                                          "ok_reason": "", "roi": None, "fg_mask": None,
+                                          "anomaly_map": None})):
+
+        stats = new_arch_inferencer._apply_aoi_coord_inspection(
+            panel_dir=tmp_path,
+            preprocessed_results=[fake_result],
+            omit_image=None, omit_overexposed=False,
+            product_resolution=(1920, 1080),
+        )
+
+    assert fake_result.tiles == [], \
+        f"v2 不該把 AOI interior tiles 加進 result.tiles，實際 {fake_result.tiles}"
+    assert stats["aoi_tile_count"] == 0
+    assert stats["aoi_edge_count"] == 1
+
+
 def test_helper_skips_lighting_without_aoi_report(new_arch_inferencer, tmp_path):
     img_path = tmp_path / "R0F00000_001.png"
     img_path.touch()
