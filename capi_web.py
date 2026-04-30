@@ -4963,7 +4963,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         from pathlib import Path as _Path
         from capi_train_new import (
             TrainingConfig, apply_user_training_params,
-            preprocess_panels_to_pool, sample_ng_tiles,
+            preprocess_panels_to_pool, sample_ng_tiles, NG_TILES_PER_LIGHTING,
         )
         from capi_preprocess import PreprocessConfig
 
@@ -4996,10 +4996,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if stats["panel_success"] < 4:
                 raise RuntimeError(f"成功 panel < 4 ({stats['panel_success']})")
 
-            log(f"抽 NG tile（每 lighting 30 個）")
+            log(f"抽 NG tile（每 lighting 上限 {NG_TILES_PER_LIGHTING} 個）")
             ng_stats = sample_ng_tiles(
                 job_id=job_id, over_review_root=cfg.over_review_root,
-                db=db, thumb_dir=thumb_root, per_lighting=30, log=log,
+                db=db, thumb_dir=thumb_root, log=log,
             )
 
             db.update_training_job_state(job_id, "review")
