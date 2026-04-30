@@ -3686,8 +3686,13 @@ class CAPIInferencer:
             new_tiles, edge_defs = self._create_aoi_coord_tiles(
                 aoi_image, result, aoi_report[img_prefix], product_resolution,
             )
-            result.tiles.extend(new_tiles)
-            aoi_tile_count += len(new_tiles)
+            # 新架構 (C-10) v2 在推論迴圈結束後才呼叫 helper，interior tiles
+            # extend 進去也來不及被推論；且 v2 的 grid tiling + edge.pt 已涵蓋
+            # 整個 panel，AOI 座標中心對齊 tile 的精度增益在新架構下冗餘。
+            # 只在舊架構 (v1，helper 在 Phase 1.5、推論前呼叫) 才 extend。
+            if not getattr(self.config, "is_new_architecture", False):
+                result.tiles.extend(new_tiles)
+                aoi_tile_count += len(new_tiles)
             aoi_edge_count += len(edge_defs)
 
             for edef in edge_defs:
