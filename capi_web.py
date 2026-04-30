@@ -375,6 +375,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_debug_serve_image(query)
             elif path.startswith("/images/"):
                 self._handle_source_image(path)
+            elif path in ("/favicon.ico", "/favicon.svg"):
+                self._handle_static_assets("/static/favicon.svg")
             elif path.startswith("/imgs/"):
                 self._handle_imgs_file(path)
             elif path.startswith("/static/"):

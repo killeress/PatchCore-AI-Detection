@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Inspection Frame">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#111827"/>
+      <stop offset=".55" stop-color="#1d4ed8"/>
+      <stop offset="1" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="heat" x1="16" y1="48" x2="48" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22c55e"/>
+      <stop offset=".5" stop-color="#facc15"/>
+      <stop offset="1" stop-color="#ef4444"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <path fill="none" stroke="#e0f2fe" stroke-width="4" stroke-linecap="round" d="M17 25v-7h7M40 18h7v7M47 40v7h-7M24 47h-7v-7"/>
+  <rect x="21" y="22" width="22" height="22" rx="6" fill="#0f172a" opacity=".75"/>
+  <path fill="none" stroke="url(#heat)" stroke-width="5" stroke-linecap="round" d="M23 39c7-7 11-7 18-14"/>
+  <circle cx="41" cy="24" r="5" fill="#ef4444"/>
+  <circle cx="23" cy="40" r="4" fill="#22c55e"/>
+</svg>

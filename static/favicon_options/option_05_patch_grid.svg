@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Patch Grid">
+  <defs>
+    <linearGradient id="bg" x1="7" y1="5" x2="57" y2="59" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset=".5" stop-color="#1e40af"/>
+      <stop offset="1" stop-color="#15803d"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <rect x="14" y="14" width="36" height="36" rx="9" fill="#020617" opacity=".82"/>
+  <g fill="#38bdf8">
+    <rect x="20" y="20" width="7" height="7" rx="2"/>
+    <rect x="29" y="20" width="7" height="7" rx="2" opacity=".55"/>
+    <rect x="38" y="20" width="7" height="7" rx="2"/>
+    <rect x="20" y="29" width="7" height="7" rx="2" opacity=".55"/>
+    <rect x="29" y="29" width="7" height="7" rx="2" fill="#facc15"/>
+    <rect x="38" y="29" width="7" height="7" rx="2" opacity=".55"/>
+    <rect x="20" y="38" width="7" height="7" rx="2"/>
+    <rect x="29" y="38" width="7" height="7" rx="2" opacity=".55"/>
+    <rect x="38" y="38" width="7" height="7" rx="2" fill="#ef4444"/>
+  </g>
+  <path fill="none" stroke="#f8fafc" stroke-width="3" stroke-linecap="round" d="M19 49c9-5 17-5 26 0"/>
+</svg>
