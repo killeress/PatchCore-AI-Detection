@@ -595,6 +595,19 @@ class CAPIInferencer:
             return self.threshold
         return self._get_threshold_for_prefix(prefix)
 
+    def _resolve_aoi_edge_inspector_mode(self) -> str:
+        """回傳實際使用的 inspector mode。
+
+        新架構 (is_new_architecture=True) 強制 'patchcore'：edge.pt 已專為 edge zone
+        訓練，CV+PC 空間分權的 fusion 失去理論基礎；同步把 cv 路徑停用以統一行為。
+        舊架構讀 ``edge_inspector.config.aoi_edge_inspector`` (cv / patchcore / fusion)。
+        """
+        if getattr(self.config, "is_new_architecture", False):
+            return "patchcore"
+        if not getattr(self, "edge_inspector", None):
+            return "cv"
+        return getattr(self.edge_inspector.config, "aoi_edge_inspector", "cv")
+
     def _load_mark_template(self) -> None:
         """載入 MARK 模板"""
         template_path = self.config.get_mark_template_full_path(self.base_dir)
