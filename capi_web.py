@@ -3595,7 +3595,34 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             success = self.db.update_config_param(param_name, new_value, reason)
             if success:
-                # Hot-reload edge config if a cv_edge_* or aoi_edge_* parameter was updated
+                # Hot-reload 1：把 DB 同步到所有 inferencer.config 屬性（包含單機與
+                # 多機新架構 inferencers）。apply_db_overrides 純 setattr、不重載
+                # 模型，重複呼叫安全。沒這段時，UI 改完 settings 必須重啟 server
+                # 才會生效（aoi_coord_inspection_enabled、grid_tiling_enabled 等
+                # 不在下面 edge hot-reload 名單裡的都會卡）。
+                try:
+                    db_params_list = self.db.get_all_config_params()
+                    synced_inferencers = []
+                    if hasattr(self, 'inferencer') and self.inferencer is not None:
+                        self.inferencer.config.apply_db_overrides(db_params_list)
+                        synced_inferencers.append(self.inferencer)
+                    server_inst = self._capi_server_instance
+                    if server_inst is not None and getattr(server_inst, 'inferencers', None):
+                        for inf in server_inst.inferencers.values():
+                            if inf in synced_inferencers:
+                                continue
+                            inf.config.apply_db_overrides(db_params_list)
+                            synced_inferencers.append(inf)
+                    if synced_inferencers:
+                        logger.info(
+                            f"[Config Hot-Reload] '{param_name}' synced to "
+                            f"{len(synced_inferencers)} inferencer(s)"
+                        )
+                except Exception as e:
+                    logger.warning(f"[Config Hot-Reload] Failed to sync '{param_name}': {e}")
+
+                # Hot-reload 2：Edge inspector 設定有獨立物件樹（EdgeInspectionConfig
+                # → EdgeInspector），apply_db_overrides 涵蓋不到，仍需重建。
                 edge_triggers = (
                     param_name.startswith("cv_edge")
                     or param_name == "aoi_edge_inspector"
