@@ -135,3 +135,54 @@ def test_helper_skips_lighting_without_aoi_report(new_arch_inferencer, tmp_path)
 
     mock_create.assert_not_called()
     assert stats == {"aoi_tile_count": 0, "aoi_edge_count": 0}
+
+
+def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path):
+    """新架構 _process_panel_v2 應呼叫 _apply_aoi_coord_inspection."""
+    import cv2
+    from capi_preprocess import PanelPreprocessResult
+
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    # 建立最小可運行的 panel：一張 G0F00000 圖
+    img_file = panel_dir / "G0F00000_001.png"
+    cv2.imwrite(str(img_file), np.ones((1080, 1920, 3), dtype=np.uint8) * 128)
+
+    new_arch_inferencer.config.tile_size = 512
+    new_arch_inferencer.config.otsu_offset = 5
+    new_arch_inferencer.config.enable_panel_polygon = False
+    new_arch_inferencer.config.edge_threshold_px = 768
+
+    # 回傳有一個 lighting、但 0 tiles 的結果，讓 for 迴圈結束後繼續執行到 helper
+    fake_pre_result = PanelPreprocessResult(
+        image_path=img_file,
+        lighting="G0F00000",
+        foreground_bbox=(0, 0, 1920, 1080),
+        panel_polygon=None,
+        tiles=[],
+    )
+    fake_panel_results = {"G0F00000": fake_pre_result}
+
+        # _process_panel_v2 內部用 local import (`from capi_preprocess import ...`)，
+        # 故 patch 目標是 capi_preprocess 模組而非 capi_inference。若 import 提升到
+        # module-level，patch 路徑需改為 "capi_inference.preprocess_panel_folder"。
+    with patch("capi_preprocess.preprocess_panel_folder", return_value=fake_panel_results), \
+         patch.object(new_arch_inferencer, "_load_omit_context",
+                      return_value=(None, False, "", None)), \
+         patch.object(new_arch_inferencer, "_apply_aoi_coord_inspection",
+                      return_value={"aoi_tile_count": 0, "aoi_edge_count": 0}) as mock_helper, \
+         patch.object(new_arch_inferencer, "_apply_cv_edge_inspection"), \
+         patch.object(new_arch_inferencer, "_apply_omit_dust_postprocess"), \
+         patch.object(new_arch_inferencer, "_apply_bomb_postprocess"), \
+         patch.object(new_arch_inferencer, "_apply_exclude_zone_postprocess"), \
+         patch.object(new_arch_inferencer, "_apply_scratch_postprocess"), \
+         patch("cv2.imread", return_value=np.ones((1080, 1920, 3), dtype=np.uint8)):
+
+        new_arch_inferencer._process_panel_v2(
+            panel_dir=panel_dir,
+            product_resolution=(1920, 1080),
+        )
+
+    assert mock_helper.call_count == 1
+    kwargs = mock_helper.call_args.kwargs
+    assert kwargs["panel_dir"] == panel_dir
