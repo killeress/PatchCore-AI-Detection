@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import numpy as np
 import pytest
 
 from capi_config import CAPIConfig
@@ -116,3 +117,42 @@ def test_inspector_mode_no_edge_inspector_default_cv(legacy_inferencer):
     """舊架構 + edge_inspector 不存在 → 'cv' (與既有 fallback 一致)。"""
     legacy_inferencer.edge_inspector = None
     assert legacy_inferencer._resolve_aoi_edge_inspector_mode() == "cv"
+
+
+def test_inspect_roi_patchcore_new_arch_uses_edge_model(new_arch_inferencer):
+    """_inspect_roi_patchcore(zone='edge') 在新架構下應呼叫 edge.pt 對應的 inferencer。"""
+    edge_model = MagicMock()
+    edge_model.predict.return_value = MagicMock(pred_score=0.1, anomaly_map=np.zeros((512, 512), dtype=np.float32))
+
+    new_arch_inferencer.edge_inspector = MagicMock()
+    new_arch_inferencer.config.patchcore_min_area = 10
+    new_arch_inferencer.config.patchcore_filter_enabled = False
+
+    with patch.object(new_arch_inferencer, "_get_model_for", return_value=edge_model) as mock_for:
+        with patch.object(new_arch_inferencer, "predict_tile", return_value=(0.1, np.zeros((512, 512), dtype=np.float32))):
+            image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+            defects, stats = new_arch_inferencer._inspect_roi_patchcore(
+                image, img_x=200, img_y=200, img_prefix="G0F00000",
+                panel_polygon=None, zone="edge",
+            )
+
+    mock_for.assert_called_with("M1", "G0F00000", "edge")
+    assert stats["threshold"] == 0.65, "新架構應使用 edge_threshold=0.65"
+
+
+def test_inspect_roi_patchcore_legacy_default_zone_unchanged(legacy_inferencer):
+    """舊架構 + 預設 zone='edge'：行為與既有 prefix-only lookup 完全一致。"""
+    legacy_model = MagicMock()
+    legacy_inferencer.edge_inspector = MagicMock()
+    legacy_inferencer.config.patchcore_min_area = 10
+    legacy_inferencer.config.patchcore_filter_enabled = False
+
+    with patch.object(legacy_inferencer, "_get_inferencer_for_prefix", return_value=legacy_model) as mock_p:
+        with patch.object(legacy_inferencer, "predict_tile", return_value=(0.1, np.zeros((512, 512), dtype=np.float32))):
+            image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+            legacy_inferencer._inspect_roi_patchcore(
+                image, img_x=200, img_y=200, img_prefix="G0F00000",
+                panel_polygon=None,  # zone 預設 "edge"
+            )
+
+    mock_p.assert_called_with("G0F00000")

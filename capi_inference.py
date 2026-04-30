@@ -3640,6 +3640,7 @@ class CAPIInferencer:
         img_prefix: str,
         panel_polygon: Optional[np.ndarray] = None,
         return_raw: bool = False,
+        zone: str = "edge",
     ) -> Tuple[List[EdgeDefect], Dict[str, Any]]:
         """用 PatchCore 做 AOI 座標邊緣 ROI 推論。
 
@@ -3651,6 +3652,8 @@ class CAPIInferencer:
             return_raw: Phase 6 fusion 用——True 時跳過 defect 抽取/OK 原因判定，
                 只回 (空 list, stats with anomaly_map+roi+fg_mask)，供 fusion 後
                 外掛 boundary band mask + 自行 thresholding。預設 False (Phase 5 行為)。
+            zone: "inner" | "edge"，新架構 (C-10) 用來路由到對應的 inner.pt / edge.pt。
+                AOI 座標邊緣路徑預設 "edge"。舊架構忽略此值。
 
         Returns:
             (defects, stats)
@@ -3705,9 +3708,9 @@ class CAPIInferencer:
             # 無 polygon 時 fallback: ROI 在 image 內的區塊視為前景
             fg_mask[dy1:dy2, dx1:dx2] = 255
 
-        # 取 inferencer / threshold (沿用中央 tile pipeline 的 prefix 路由)
-        inferencer = self._get_inferencer_for_prefix(img_prefix)
-        threshold = self._get_threshold_for_prefix(img_prefix)
+        # 取 inferencer / threshold：新架構走 zone-aware (走 edge.pt)，舊架構走 prefix-only
+        inferencer = self._get_inferencer_for_zone(img_prefix, zone)
+        threshold = self._get_threshold_for_zone(img_prefix, zone)
 
         if inferencer is None:
             stats = {"score": 0.0, "threshold": threshold, "area": 0, "min_area": 0,
