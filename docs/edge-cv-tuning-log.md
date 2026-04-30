@@ -449,6 +449,22 @@ return defects
 | Log 訊息 `🔲 _inspect_side`、`🔲 _detect_thin_lines` | 追蹤哪個 filter 擋掉 component |
 | 使用者匯出的 log*.txt | 紀錄一次 debug run 的完整 component 明細，便於重現/對比 |
 
+## 新架構 (C-10) AOI 座標邊緣 routing — 2026-04-30
+
+新架構 (`is_new_architecture=True`, 5 lighting × 2 zone = 10 模型) 上線後，AOI
+座標邊緣 ROI 推論強制走該 lighting 的 `edge.pt` (zone='edge') 與
+`edge_threshold`。實作要點：
+
+- `_apply_aoi_coord_inspection` helper 統一 v1 / v2 入口（`_process_panel_v2`
+  原本完全沒呼叫 AOI 座標 inspection，本 patch 補上）。
+- `_resolve_aoi_edge_inspector_mode()` 在新架構下回 `"patchcore"`，
+  忽略 `aoi_edge_inspector` config 值。Settings UI 同步把該選項灰掉。
+- `_inspect_roi_patchcore` / `_inspect_roi_fusion` 加 `zone="edge"` 預設參數，
+  AOI 座標路徑顯式傳遞。
+
+Fusion 模式不再進入新架構執行路徑（理論基礎是「PC 對邊緣訓練不足」，
+edge.pt 已專為邊緣訓練）；保留實作以供舊架構繼續使用。
+
 ## 繼續工作的方法（for future sessions）
 
 每次拿到新 case（使用者貼 log.txt / 截圖）：
