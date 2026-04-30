@@ -359,6 +359,11 @@ def test_write_manifest_yaml(tmp_path):
     assert y["machine_id"] == "GN160"
     assert y["model_mapping"]["G0F00000"]["inner"].endswith("G0F00000-inner.pt")
     assert y["threshold_mapping"]["G0F00000"]["inner"] == 0.62
+    # Scratch classifier 設定要寫進去，否則新架構 server 啟動時 scratch 預設空路徑會撞網路。
+    assert y["scratch_classifier_enabled"] is True
+    assert y["scratch_dinov2_repo_path"] == "deployment/dinov2_repo"
+    assert y["scratch_bundle_path"].endswith(".pkl")
+    assert y["scratch_dinov2_weights_path"].endswith(".pth")
 
 
 def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):

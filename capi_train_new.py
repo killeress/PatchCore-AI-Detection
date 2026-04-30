@@ -562,6 +562,13 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
         "enable_panel_polygon": True,
         "model_mapping": model_mapping,
         "threshold_mapping": threshold_mapping,
+        # Scratch classifier post-filter — 預設承襲 configs/capi_3f.yaml 的 production
+        # 設定，避免新架構 machine_config.yaml 缺欄位走預設空字串、產線載入時撞網路。
+        "scratch_classifier_enabled": True,
+        "scratch_safety_multiplier": 1.5,
+        "scratch_bundle_path": "deployment/scratch_classifier_v3.pkl",
+        "scratch_dinov2_weights_path": "deployment/dinov2_vitb14.pth",
+        "scratch_dinov2_repo_path": "deployment/dinov2_repo",
     }
     (bundle_dir / "machine_config.yaml").write_text(
         yaml.dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8"
