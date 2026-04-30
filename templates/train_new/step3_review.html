@@ -310,7 +310,7 @@ function updateDecision(tileIds, decision, opts) {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({job_id: jobId, tile_ids: tileIds, decision}),
   }).then(r => r.json()).then(d => {
-    if (d.error) { alert('錯誤: ' + d.error); return; }
+    if (d.error) { capAlert(d.error, {type: 'error', title: '更新 tile 決策失敗'}); return; }
     for (const tile of _tilesByLighting[_currentLighting] || []) {
       if (tileIds.includes(tile.id)) tile.decision = decision;
     }
@@ -506,12 +506,16 @@ function updateAllBadges() {
   lightings.forEach(updateBadge);
 }
 
-function startTraining() {
-  if (!confirm('開始訓練 10 個 PatchCore 模型？預計 60-120 分鐘。')) return;
+async function startTraining() {
+  const ok = await capConfirm(
+    '系統將同時訓練 5 光源 × inner/edge 共 10 個 PatchCore 子模型。\n預計耗時 60–120 分鐘，期間可在 Step 4 觀察進度。',
+    {title: '開始訓練 10 個模型？', confirmText: '開始訓練', cancelText: '再想想'}
+  );
+  if (!ok) return;
   fetch(`/api/train/new/start_training/${encodeURIComponent(jobId)}`, {method: 'POST'})
     .then(r => r.json())
     .then(d => {
-      if (d.error) { alert('錯誤: ' + d.error); return; }
+      if (d.error) { capAlert(d.error, {type: 'error', title: '無法啟動訓練'}); return; }
       location.href = `/train/new/progress?job_id=${encodeURIComponent(jobId)}`;
     });
 }
@@ -521,6 +525,9 @@ document.addEventListener('keydown', (e) => {
   // 文字輸入欄位優先（避免攔截）
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  // capModal 開著時讓 modal 自己處理 Esc/Enter，避免 Enter 在背景開 tile preview
+  const capRoot = document.getElementById('cap-modal-root');
+  if (capRoot && capRoot.getAttribute('aria-hidden') === 'false') return;
 
   const modalOpen = document.getElementById('image-modal').classList.contains('open');
   const tileModal = modalOpen && _modalTileId !== null;
@@ -569,4 +576,6 @@ Promise.all(lightings.map(loadLighting))
     switchLighting('G0F00000');
   });
 </script>
+
+{% include "train_new/_modal.html" %}
 {% endblock %}

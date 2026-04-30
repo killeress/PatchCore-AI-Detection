@@ -1,45 +1,534 @@
 {% extends "base.html" %}
-{% block title %}訓練完成{% endblock %}
+{% block title %}訓練完成 · {{ machine_id }}{% endblock %}
 {% block content %}
-<div style="max-width:900px;margin:0 auto;padding:24px 16px;">
-  <h1 style="color:#a6e3a1;margin:0 0 6px 0;">✓ 訓練完成</h1>
-
-  <div style="background:#313244;border-radius:10px;padding:18px;margin-top:14px;">
-    <table style="width:100%;border-collapse:collapse;font-size:.9rem;">
-      <tr><td style="color:#a6adc8;padding:6px 0;width:140px;">機種</td><td style="color:#cdd6f4;font-family:monospace;">{{ machine_id }}</td></tr>
-      <tr><td style="color:#a6adc8;padding:6px 0;">Bundle</td><td style="color:#cdd6f4;font-family:monospace;font-size:.82rem;">{{ bundle_path }}</td></tr>
-      <tr><td style="color:#a6adc8;padding:6px 0;">訓練 Job</td><td style="color:#cdd6f4;font-family:monospace;font-size:.82rem;">{{ job_id }}</td></tr>
-    </table>
+{# 訓練結果報告 — 揭露 manifest.json 中所有有意義的指標：
+   - 整體 AUROC + grade 作為一眼可讀的健康分數
+   - 每 unit 的 AUROC 條 + NG 抓取率 + 分離度（ng_median - train_max）+ 耗時
+   - 訓練設定（panels、patchcore_params）
+#}
+<div class="d5-page">
+  <div class="d5-hero">
+    <div class="d5-hero-tag">// TRAINING REPORT · BUNDLE READY</div>
+    <h1 class="d5-hero-title">
+      <span class="d5-hero-check">▰</span>
+      訓練完成
+    </h1>
+    <div class="d5-hero-machine">
+      <span class="d5-meta-label">MACHINE</span>
+      <span class="d5-meta-machine">{{ machine_id }}</span>
+      <span class="d5-meta-sep">·</span>
+      <span class="d5-meta-time">{{ trained_at }}</span>
+    </div>
   </div>
 
-  <h2 style="color:#cdd6f4;margin:18px 0 8px 0;font-size:1.05rem;">10 個子模型摘要</h2>
-  <div style="background:#313244;border-radius:10px;padding:14px;">
-    <table style="width:100%;border-collapse:collapse;font-size:.82rem;">
-      <thead><tr style="background:#11111b;color:#a6adc8;text-align:left;">
-        <th style="padding:6px 8px;">Lighting</th><th>Zone</th><th>Train</th><th>NG</th><th>Threshold</th><th>Size</th>
-      </tr></thead>
-      <tbody>
-        {% for unit_label, info in units %}
-        <tr style="border-top:1px solid #1e1e2e;">
-          <td style="padding:6px 8px;color:#cdd6f4;font-family:monospace;">{{ info.lighting }}</td>
-          <td style="color:#cdd6f4;">{{ info.zone }}</td>
-          <td style="color:#cdd6f4;">{{ info.train }}</td>
-          <td style="color:#cdd6f4;">{{ info.ng }}</td>
-          <td style="color:#cdd6f4;font-family:monospace;">{{ "%.4f"|format(info.threshold) }}</td>
-          <td style="color:#a6adc8;">{{ "%.1f"|format(info.size_mb) }} MB</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  {# 三大頭條指標：整體 AUROC、訓練時長、Bundle 大小 #}
+  <div class="d5-stats">
+    {# AUROC 卡片：用顏色強烈表達 grade（excellent/good/fair/poor/fail） #}
+    <div class="d5-stat d5-stat-hero d5-grade-{{ overall_auroc_grade_slug }}">
+      <div class="d5-stat-label">OVERALL AUROC</div>
+      <div class="d5-stat-value">
+        {% if overall_auroc is not none %}{{ "%.4f"|format(overall_auroc) }}{% else %}—{% endif %}
+      </div>
+      <div class="d5-stat-sub">
+        <span class="d5-grade-badge">{{ overall_auroc_grade|upper }}</span>
+        <span class="d5-stat-hint">{{ success_units }}/10 子模型平均</span>
+      </div>
+    </div>
+    <div class="d5-stat">
+      <div class="d5-stat-label">TRAINING TIME</div>
+      <div class="d5-stat-value">
+        {% set _m = (total_elapsed_seconds // 60)|int %}
+        {% set _s = (total_elapsed_seconds % 60)|int %}
+        {{ _m }}<span class="d5-stat-unit">m</span> {{ "%02d"|format(_s) }}<span class="d5-stat-unit">s</span>
+      </div>
+      <div class="d5-stat-sub"><span class="d5-stat-hint">10 unit 累計耗時</span></div>
+    </div>
+    <div class="d5-stat">
+      <div class="d5-stat-label">BUNDLE SIZE</div>
+      <div class="d5-stat-value">
+        {{ "%.1f"|format(total_size_mb) }}<span class="d5-stat-unit">MB</span>
+      </div>
+      <div class="d5-stat-sub"><span class="d5-stat-hint">10 個 .pt 模型檔</span></div>
+    </div>
   </div>
 
-  <div style="margin-top:18px;padding:12px;background:#1e1e2e;border-left:3px solid #89b4fa;border-radius:6px;color:#a6adc8;font-size:.88rem;">
-    部署：到模型庫頁點啟用 + 匯出 ZIP → FTP 上傳到 production
+  {# 訓練設定：來源 panel 與 PatchCore 超參數 #}
+  <div class="d5-section">
+    <div class="d5-section-head">
+      <span class="d5-section-tag">// CONFIG</span>
+      <h2 class="d5-section-title">訓練設定</h2>
+    </div>
+    <div class="d5-config-grid">
+      <div class="d5-config-block">
+        <div class="d5-config-label">SOURCE PANELS · {{ panel_count }} 片</div>
+        <div class="d5-glass-list">
+          {% for gid in panel_glass_ids %}
+            <span class="d5-glass-chip">
+              <span class="d5-glass-idx">{{ loop.index }}</span>
+              {{ gid }}
+            </span>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="d5-config-block">
+        <div class="d5-config-label">PATCHCORE PARAMS</div>
+        <dl class="d5-params">
+          <dt>inner_panels</dt><dd>{{ patchcore_params.get("inner_panels", "—") }}</dd>
+          <dt>batch_size</dt><dd>{{ patchcore_params.get("batch_size", "—") }}</dd>
+          <dt>coreset_ratio</dt><dd>{{ patchcore_params.get("coreset_ratio", "—") }}</dd>
+          <dt>max_epochs</dt><dd>{{ patchcore_params.get("max_epochs", "—") }}</dd>
+          <dt>image_size</dt>
+          <dd>
+            {% if patchcore_params.get("image_size") %}
+              {{ patchcore_params["image_size"][0] }}×{{ patchcore_params["image_size"][1] }}
+            {% else %}—{% endif %}
+          </dd>
+        </dl>
+      </div>
+    </div>
   </div>
 
-  <div style="margin-top:18px;text-align:right;">
-    <a href="/" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">回首頁</a>
-    <a href="/models" style="background:#89b4fa;color:#1e1e2e;padding:8px 22px;border-radius:5px;text-decoration:none;font-weight:700;margin-left:6px;">前往模型庫 →</a>
+  {# 10 子模型詳細報告 — 加 AUROC 視覺化條、NG 抓取率、分離度 #}
+  <div class="d5-section">
+    <div class="d5-section-head">
+      <span class="d5-section-tag">// MODELS · 10 UNITS</span>
+      <h2 class="d5-section-title">子模型品質明細</h2>
+    </div>
+    <div class="d5-table-wrap">
+      <table class="d5-table">
+        <thead>
+          <tr>
+            <th class="d5-th-num">#</th>
+            <th>Lighting</th>
+            <th>Zone</th>
+            <th>AUROC</th>
+            <th>NG 攔截率</th>
+            <th class="d5-th-num">分離度</th>
+            <th class="d5-th-num">Threshold</th>
+            <th class="d5-th-num">Train tiles</th>
+            <th class="d5-th-num">耗時</th>
+            <th class="d5-th-num">Size</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for unit_label, info in units %}
+          {% set zone_cls = "edge" if info.zone == "edge" else "inner" %}
+          <tr class="d5-row d5-zone-{{ zone_cls }}">
+            <td class="d5-td-num d5-cell-idx">{{ "%02d"|format(loop.index) }}</td>
+            <td class="d5-cell-mono">{{ info.lighting }}</td>
+            <td><span class="d5-zone-tag d5-zone-tag-{{ zone_cls }}">{{ info.zone }}</span></td>
+            <td>
+              {% if info.auroc is not none %}
+                <div class="d5-auroc-cell">
+                  <div class="d5-auroc-bar">
+                    <div class="d5-auroc-fill d5-grade-{{ info.auroc_grade_slug }}-fill"
+                         style="width: {{ (info.auroc * 100)|round(1) }}%"></div>
+                  </div>
+                  <span class="d5-auroc-val">{{ "%.3f"|format(info.auroc) }}</span>
+                  <span class="d5-mini-grade d5-grade-{{ info.auroc_grade_slug }}">{{ info.auroc_grade }}</span>
+                </div>
+              {% else %}
+                <span class="d5-na">n/a</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if info.ng > 0 %}
+                <div class="d5-catch-cell">
+                  <span class="d5-catch-frac">{{ info.ng_caught_count }}/{{ info.ng }}</span>
+                  {% if info.ng_caught_rate is not none %}
+                    {% set rate_pct = (info.ng_caught_rate * 100)|round(0)|int %}
+                    {% set catch_cls = "ok" if rate_pct >= 90 else ("warn" if rate_pct >= 70 else "fail") %}
+                    <span class="d5-catch-pct d5-catch-{{ catch_cls }}">{{ rate_pct }}%</span>
+                  {% endif %}
+                  {% if info.ng_fallback %}
+                    <span class="d5-catch-tag" title="該 zone NG 樣本不足，退回該 lighting 全部 NG（含他 zone 樣本）">FB</span>
+                  {% endif %}
+                </div>
+              {% else %}
+                <span class="d5-na">無 NG 樣本</span>
+              {% endif %}
+            </td>
+            <td class="d5-td-num d5-cell-mono">
+              {% if info.separation is not none %}
+                <span class="d5-sep {{ 'd5-sep-good' if info.separation > 0 else 'd5-sep-bad' }}">
+                  {{ "%+.3f"|format(info.separation) }}
+                </span>
+              {% else %}<span class="d5-na">—</span>{% endif %}
+            </td>
+            <td class="d5-td-num d5-cell-mono">{{ "%.4f"|format(info.threshold) }}</td>
+            <td class="d5-td-num">{{ info.train }}</td>
+            <td class="d5-td-num d5-cell-muted">
+              {% if info.elapsed_seconds %}
+                {{ (info.elapsed_seconds // 60)|int }}m{{ "%02d"|format((info.elapsed_seconds % 60)|int) }}s
+              {% else %}—{% endif %}
+            </td>
+            <td class="d5-td-num d5-cell-muted">{{ "%.1f"|format(info.size_mb) }} MB</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="d5-legend">
+      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-excellent"></span>excellent ≥ .95</span>
+      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-good"></span>good ≥ .85</span>
+      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-fair"></span>fair ≥ .75</span>
+      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-poor"></span>poor ≥ .60</span>
+      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-fail"></span>fail &lt; .60</span>
+      <span class="d5-legend-sep">·</span>
+      <span class="d5-legend-hint">分離度 = NG 中位數 − Train max；越大表示模型越能區分異常</span>
+    </div>
+  </div>
+
+  {# 部署提示 + 操作 #}
+  <div class="d5-deploy">
+    <div class="d5-deploy-tag">// DEPLOY</div>
+    <div class="d5-deploy-body">
+      <ol class="d5-deploy-steps">
+        <li>到 <strong>模型庫</strong> 頁面把此 bundle 設為啟用</li>
+        <li>於模型庫匯出 ZIP（保留目錄結構）</li>
+        <li>FTP 上傳 ZIP 至 production 對應目錄</li>
+      </ol>
+      <div class="d5-deploy-bundle">
+        <span class="d5-meta-label">BUNDLE</span>
+        <code>{{ bundle_path }}</code>
+      </div>
+    </div>
+  </div>
+
+  <div class="d5-actions">
+    <a href="/" class="d5-btn">回首頁</a>
+    <a href="/training" class="d5-btn">回模型訓練</a>
+    <a href="/models" class="d5-btn d5-btn-primary">前往模型庫 →</a>
   </div>
 </div>
+
+<style>
+  /* ── Layout ─────────────────────────────────────────────── */
+  .d5-page {
+    max-width: 1180px; margin: 0 auto; padding: 28px 16px 48px;
+    font-family: 'Fira Sans', 'Segoe UI', system-ui, sans-serif;
+    color: #cdd6f4;
+  }
+
+  /* ── Hero ───────────────────────────────────────────────── */
+  .d5-hero {
+    position: relative; padding: 24px 28px;
+    background:
+      radial-gradient(circle at 12% 0%, rgba(166,227,161,.10), transparent 55%),
+      linear-gradient(180deg, #1c1c2a 0%, #15151f 100%);
+    border: 1px solid #313244;
+    border-left: 3px solid #a6e3a1;
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .d5-hero::before {
+    content: ""; position: absolute; inset: 0;
+    background-image:
+      linear-gradient(0deg, transparent 95%, rgba(166,227,161,.06) 95%),
+      linear-gradient(90deg, transparent 95%, rgba(166,227,161,.06) 95%);
+    background-size: 24px 24px; pointer-events: none;
+  }
+  .d5-hero-tag {
+    font-family: 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+    font-size: .7rem; letter-spacing: 1.6px; color: #a6e3a1; opacity: .75;
+    margin-bottom: 6px;
+  }
+  .d5-hero-title {
+    font-size: 1.85rem; font-weight: 700; color: #f5e0dc; margin: 0;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .d5-hero-check {
+    color: #a6e3a1; font-size: 1.4rem; line-height: 1;
+    text-shadow: 0 0 12px rgba(166,227,161,.45);
+  }
+  .d5-hero-machine {
+    margin-top: 10px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  }
+  .d5-meta-label {
+    font-family: 'Fira Code', monospace;
+    font-size: .68rem; letter-spacing: 1.2px; color: #6c7086;
+  }
+  .d5-meta-machine {
+    font-family: 'Fira Code', monospace;
+    font-size: 1.05rem; font-weight: 700; color: #cdd6f4;
+  }
+  .d5-meta-sep { color: #45475a; }
+  .d5-meta-time { font-family: 'Fira Code', monospace; font-size: .82rem; color: #a6adc8; }
+
+  /* ── Stats row (3 hero cards) ───────────────────────────── */
+  .d5-stats {
+    display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 12px;
+    margin-top: 16px;
+  }
+  .d5-stat {
+    background: #1a1a26; border: 1px solid #313244;
+    border-radius: 10px; padding: 16px 18px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .d5-stat-label {
+    font-family: 'Fira Code', monospace;
+    font-size: .68rem; letter-spacing: 1.4px; color: #6c7086;
+  }
+  .d5-stat-value {
+    font-family: 'Fira Code', monospace;
+    font-size: 2.1rem; font-weight: 700; color: #f5e0dc; line-height: 1.05;
+  }
+  .d5-stat-unit { font-size: 1rem; color: #6c7086; margin-left: 4px; font-weight: 500; }
+  .d5-stat-sub { display: flex; align-items: center; gap: 8px; min-height: 22px; }
+  .d5-stat-hint { color: #6c7086; font-size: .76rem; }
+
+  /* AUROC hero card 變色（依 grade） */
+  .d5-stat-hero {
+    border-left: 3px solid #585b70;
+    background:
+      linear-gradient(135deg, rgba(255,255,255,0.012) 0%, transparent 60%),
+      #1a1a26;
+  }
+  .d5-stat-hero.d5-grade-excellent { border-left-color: #a6e3a1; }
+  .d5-stat-hero.d5-grade-good      { border-left-color: #94e2d5; }
+  .d5-stat-hero.d5-grade-fair      { border-left-color: #f9e2af; }
+  .d5-stat-hero.d5-grade-poor      { border-left-color: #fab387; }
+  .d5-stat-hero.d5-grade-fail      { border-left-color: #f38ba8; }
+
+  .d5-grade-badge {
+    display: inline-block;
+    font-family: 'Fira Code', monospace;
+    font-size: .7rem; font-weight: 700; letter-spacing: 1.2px;
+    padding: 2px 8px; border-radius: 3px;
+    background: #313244; color: #a6adc8; border: 1px solid #45475a;
+  }
+  .d5-stat-hero.d5-grade-excellent .d5-grade-badge { background: rgba(166,227,161,.16); color: #a6e3a1; border-color: rgba(166,227,161,.4); }
+  .d5-stat-hero.d5-grade-good      .d5-grade-badge { background: rgba(148,226,213,.16); color: #94e2d5; border-color: rgba(148,226,213,.4); }
+  .d5-stat-hero.d5-grade-fair      .d5-grade-badge { background: rgba(249,226,175,.16); color: #f9e2af; border-color: rgba(249,226,175,.4); }
+  .d5-stat-hero.d5-grade-poor      .d5-grade-badge { background: rgba(250,179,135,.16); color: #fab387; border-color: rgba(250,179,135,.4); }
+  .d5-stat-hero.d5-grade-fail      .d5-grade-badge { background: rgba(243,139,168,.16); color: #f38ba8; border-color: rgba(243,139,168,.4); }
+
+  /* ── Section frame ──────────────────────────────────────── */
+  .d5-section {
+    margin-top: 22px;
+    background: #1a1a26;
+    border: 1px solid #313244; border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .d5-section-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+  .d5-section-tag {
+    font-family: 'Fira Code', monospace; font-size: .7rem;
+    letter-spacing: 1.4px; color: #6c7086;
+  }
+  .d5-section-title {
+    margin: 0; font-size: 1rem; font-weight: 700; color: #cdd6f4; letter-spacing: .3px;
+  }
+
+  /* ── Config grid ────────────────────────────────────────── */
+  .d5-config-grid {
+    display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px;
+  }
+  .d5-config-block {
+    background: #11111b; border: 1px solid #2a2b3c;
+    border-radius: 8px; padding: 12px 14px;
+  }
+  .d5-config-label {
+    font-family: 'Fira Code', monospace;
+    font-size: .68rem; letter-spacing: 1.2px; color: #6c7086;
+    margin-bottom: 8px;
+  }
+  .d5-glass-list { display: flex; flex-wrap: wrap; gap: 6px; }
+  .d5-glass-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #1a1a26; border: 1px solid #45475a;
+    padding: 4px 10px 4px 4px; border-radius: 4px;
+    font-family: 'Fira Code', monospace; font-size: .78rem; color: #cdd6f4;
+  }
+  .d5-glass-idx {
+    background: #313244; color: #a6adc8;
+    padding: 2px 6px; border-radius: 2px;
+    font-size: .68rem; font-weight: 700;
+  }
+  .d5-params { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; }
+  .d5-params dt {
+    font-family: 'Fira Code', monospace; font-size: .76rem;
+    color: #6c7086; letter-spacing: .3px;
+  }
+  .d5-params dd {
+    margin: 0;
+    font-family: 'Fira Code', monospace; font-size: .82rem; color: #cdd6f4;
+    text-align: right;
+  }
+
+  /* ── Models table ───────────────────────────────────────── */
+  .d5-table-wrap { overflow-x: auto; }
+  .d5-table {
+    width: 100%; border-collapse: collapse;
+    font-family: 'Fira Sans', 'Segoe UI', system-ui, sans-serif;
+    font-size: .82rem;
+  }
+  .d5-table thead th {
+    background: #11111b;
+    padding: 9px 10px; text-align: left;
+    font-family: 'Fira Code', monospace;
+    font-size: .68rem; letter-spacing: 1.1px;
+    color: #6c7086; font-weight: 600;
+    border-bottom: 1px solid #2a2b3c;
+    text-transform: uppercase;
+  }
+  .d5-table tbody td {
+    padding: 9px 10px;
+    border-bottom: 1px solid #21222e;
+    color: #cdd6f4;
+  }
+  .d5-table tbody tr:last-child td { border-bottom: none; }
+  .d5-table tbody tr:hover { background: rgba(137,180,250,.04); }
+  .d5-table .d5-th-num, .d5-table .d5-td-num { text-align: right; white-space: nowrap; }
+  .d5-cell-mono { font-family: 'Fira Code', monospace; font-size: .8rem; }
+  .d5-cell-idx {
+    font-family: 'Fira Code', monospace; font-size: .72rem;
+    color: #585b70; font-weight: 600;
+  }
+  .d5-cell-muted { color: #a6adc8; }
+  .d5-zone-edge .d5-cell-idx { color: #fab387; }
+  .d5-zone-inner .d5-cell-idx { color: #89b4fa; }
+
+  .d5-zone-tag {
+    display: inline-block;
+    font-family: 'Fira Code', monospace;
+    font-size: .72rem; font-weight: 600; letter-spacing: .4px;
+    padding: 2px 7px; border-radius: 3px;
+  }
+  .d5-zone-tag-inner { background: rgba(137,180,250,.14); color: #89b4fa; }
+  .d5-zone-tag-edge  { background: rgba(250,179,135,.14); color: #fab387; }
+
+  /* AUROC bar */
+  .d5-auroc-cell {
+    display: flex; align-items: center; gap: 8px; min-width: 200px;
+  }
+  .d5-auroc-bar {
+    flex: 1; height: 6px; min-width: 80px;
+    background: #11111b; border-radius: 1px; overflow: hidden;
+    position: relative;
+  }
+  .d5-auroc-bar::before {
+    content: ""; position: absolute; left: 50%; top: 0; bottom: 0;
+    width: 1px; background: rgba(255,255,255,.06);
+  }
+  .d5-auroc-fill { height: 100%; transition: width .4s ease; }
+  .d5-grade-excellent-fill { background: linear-gradient(90deg, #94e2d5, #a6e3a1); }
+  .d5-grade-good-fill      { background: linear-gradient(90deg, #74c7ec, #94e2d5); }
+  .d5-grade-fair-fill      { background: linear-gradient(90deg, #f9e2af, #fab387); }
+  .d5-grade-poor-fill      { background: linear-gradient(90deg, #fab387, #f38ba8); }
+  .d5-grade-fail-fill      { background: linear-gradient(90deg, #f38ba8, #eba0ac); }
+  .d5-auroc-val {
+    font-family: 'Fira Code', monospace; font-size: .78rem; color: #f5e0dc;
+    min-width: 44px; text-align: right;
+  }
+  .d5-mini-grade {
+    font-family: 'Fira Code', monospace;
+    font-size: .62rem; font-weight: 700; letter-spacing: .8px;
+    padding: 1px 5px; border-radius: 2px; text-transform: uppercase;
+  }
+  .d5-grade-excellent { color: #a6e3a1; background: rgba(166,227,161,.12); }
+  .d5-grade-good      { color: #94e2d5; background: rgba(148,226,213,.12); }
+  .d5-grade-fair      { color: #f9e2af; background: rgba(249,226,175,.12); }
+  .d5-grade-poor      { color: #fab387; background: rgba(250,179,135,.12); }
+  .d5-grade-fail      { color: #f38ba8; background: rgba(243,139,168,.12); }
+  .d5-grade-na        { color: #6c7086; background: rgba(108,112,134,.12); }
+
+  /* NG catch */
+  .d5-catch-cell { display: flex; align-items: center; gap: 8px; }
+  .d5-catch-frac {
+    font-family: 'Fira Code', monospace; font-size: .8rem; color: #cdd6f4;
+  }
+  .d5-catch-pct {
+    font-family: 'Fira Code', monospace;
+    font-size: .7rem; font-weight: 700;
+    padding: 1px 7px; border-radius: 3px;
+  }
+  .d5-catch-ok   { color: #a6e3a1; background: rgba(166,227,161,.12); }
+  .d5-catch-warn { color: #f9e2af; background: rgba(249,226,175,.12); }
+  .d5-catch-fail { color: #f38ba8; background: rgba(243,139,168,.12); }
+  .d5-catch-tag {
+    font-family: 'Fira Code', monospace;
+    font-size: .62rem; font-weight: 700; letter-spacing: .8px;
+    padding: 1px 5px; border-radius: 2px;
+    color: #cba6f7; background: rgba(203,166,247,.14);
+    cursor: help;
+  }
+
+  .d5-sep-good { color: #a6e3a1; }
+  .d5-sep-bad  { color: #f38ba8; }
+  .d5-na { color: #6c7086; font-style: italic; font-size: .76rem; }
+
+  /* Legend */
+  .d5-legend {
+    margin-top: 12px;
+    display: flex; flex-wrap: wrap; gap: 12px;
+    font-family: 'Fira Code', monospace;
+    font-size: .7rem; color: #6c7086;
+    padding-top: 10px; border-top: 1px dashed #2a2b3c;
+    align-items: center;
+  }
+  .d5-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+  .d5-legend-sw {
+    display: inline-block; width: 16px; height: 4px; border-radius: 1px;
+  }
+  .d5-legend-sw.d5-grade-excellent { background: linear-gradient(90deg, #94e2d5, #a6e3a1); }
+  .d5-legend-sw.d5-grade-good      { background: linear-gradient(90deg, #74c7ec, #94e2d5); }
+  .d5-legend-sw.d5-grade-fair      { background: linear-gradient(90deg, #f9e2af, #fab387); }
+  .d5-legend-sw.d5-grade-poor      { background: linear-gradient(90deg, #fab387, #f38ba8); }
+  .d5-legend-sw.d5-grade-fail      { background: linear-gradient(90deg, #f38ba8, #eba0ac); }
+  .d5-legend-sep { color: #45475a; }
+  .d5-legend-hint { color: #6c7086; }
+
+  /* ── Deploy hint ────────────────────────────────────────── */
+  .d5-deploy {
+    margin-top: 22px;
+    background: #1a1a26;
+    border: 1px solid #313244; border-left: 3px solid #89b4fa;
+    border-radius: 10px; padding: 16px 18px;
+  }
+  .d5-deploy-tag {
+    font-family: 'Fira Code', monospace; font-size: .7rem;
+    letter-spacing: 1.4px; color: #89b4fa; margin-bottom: 8px;
+  }
+  .d5-deploy-steps {
+    margin: 0; padding-left: 22px; color: #bac2de; font-size: .88rem;
+    line-height: 1.7;
+  }
+  .d5-deploy-steps strong { color: #cdd6f4; }
+  .d5-deploy-bundle {
+    margin-top: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .d5-deploy-bundle code {
+    font-family: 'Fira Code', monospace; font-size: .78rem; color: #cdd6f4;
+    background: #11111b; padding: 4px 8px; border-radius: 4px;
+    border: 1px solid #2a2b3c;
+    word-break: break-all;
+  }
+
+  /* ── Actions ────────────────────────────────────────────── */
+  .d5-actions {
+    margin-top: 22px; display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap;
+  }
+  .d5-btn {
+    background: transparent; color: #a6adc8;
+    border: 1px solid #45475a; border-radius: 5px;
+    padding: 9px 18px;
+    font-family: 'Fira Code', monospace;
+    font-size: .82rem; font-weight: 600; letter-spacing: .4px;
+    text-decoration: none;
+    transition: background-color .14s ease, color .14s ease, border-color .14s ease;
+  }
+  .d5-btn:hover { background: #313244; color: #cdd6f4; border-color: #585b70; text-decoration: none; }
+  /* base.html a:hover 的 specificity 蓋過 .d5-btn-primary，所以 hover 也要明寫 color */
+  .d5-btn-primary,
+  .d5-btn-primary:hover { color: #11111b; }
+  .d5-btn-primary { background: #89b4fa; border-color: #89b4fa; }
+  .d5-btn-primary:hover { background: #b4befe; border-color: #b4befe; }
+
+  /* ── Responsive ─────────────────────────────────────────── */
+  @media (max-width: 900px) {
+    .d5-stats { grid-template-columns: 1fr; }
+    .d5-config-grid { grid-template-columns: 1fr; }
+    .d5-stat-value { font-size: 1.7rem; }
+  }
+</style>
 {% endblock %}

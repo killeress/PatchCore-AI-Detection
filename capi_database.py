@@ -2593,6 +2593,18 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def deactivate_all_bundles(self, except_id: int) -> None:
+        """將除 except_id 外的所有 bundle 設為 is_active = 0（跨 machine_id）。"""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE model_registry SET is_active = 0 WHERE id != ?",
+                (except_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def list_ok_panels_for_machine(self, machine_id: str = "", days: int = 3, limit: int = 100) -> list:
         """回傳近 N 天 machine_judgment='OK' 的 inference_records。
 

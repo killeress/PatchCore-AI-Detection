@@ -1,47 +1,517 @@
 {% extends "base.html" %}
 {% block title %}前處理 - Step 2{% endblock %}
 {% block content %}
-<div style="max-width:900px;margin:0 auto;padding:24px 16px;">
-  <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.3rem;">Step 2 / 5 · 前處理 + 切 tile</h1>
-  <p style="color:#a6adc8;font-size:.85rem;">系統正在處理 panel 圖片，這需要幾分鐘。</p>
+{# Step 2 前處理進度頁。
+   後端 log 由 capi_train_new.py 寫，可解析的訊號：
+     [N/M] panel <id> (inner+edge|edge only)   ← panel 進度
+     ✓ 切出 N tile                              ← tile 累加
+     ⚠ ... polygon 偵測失敗                     ← 警告計數
+     ✗ 處理失敗                                  ← 失敗計數
+     ✓ <LIGHTING>: 抽 N 個 NG                   ← NG 抽樣（階段 2）
+   全部前端解析，不動後端 #}
 
-  <div id="status-pill" style="display:inline-block;background:#fab387;color:#1e1e2e;padding:5px 14px;border-radius:14px;font-weight:700;margin-top:14px;">前處理中</div>
+<div class="d2-page">
+  <div class="d2-hero">
+    <div class="d2-hero-meta">
+      <span class="d2-hero-tag">// PREPROCESS · STEP 2 / 5</span>
+      <h1 class="d2-hero-title">切割訓練 tile</h1>
+      <p class="d2-hero-sub">執行 Otsu 二值化與 panel 切割，輸出 512×512 tile 至訓練池。預估 1–3 分鐘。</p>
+    </div>
 
-  <div style="background:#313244;border-radius:10px;padding:14px;margin-top:16px;">
-    <div style="color:#a6adc8;font-size:.82rem;margin-bottom:8px;">處理 log</div>
-    <pre id="log-box" style="background:#1e1e2e;border-radius:6px;padding:12px;margin:0;font-size:.78rem;color:#cdd6f4;max-height:420px;overflow-y:auto;white-space:pre-wrap;"></pre>
+    <div class="d2-viz" aria-hidden="true">
+      <svg viewBox="0 0 240 180" xmlns="http://www.w3.org/2000/svg" class="d2-grid">
+        {% for r in range(8) %}
+          {% for c in range(12) %}
+            <rect x="{{ c * 20 }}" y="{{ r * 22 + 2 }}" width="18" height="20"
+                  rx="1.5" class="d2-cell"
+                  style="--d: {{ ((r + c) * 90) % 1800 }}ms"></rect>
+          {% endfor %}
+        {% endfor %}
+      </svg>
+      <div class="d2-viz-overlay">
+        <div class="d2-viz-num" id="d2-num">—</div>
+        <div class="d2-viz-num-label">TILES CUT</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="d2-pipeline">
+    <div class="d2-step is-active" id="d2-step-1">
+      <span class="d2-step-num">01</span>
+      <div class="d2-step-body">
+        <div class="d2-step-title">PANEL SLICE</div>
+        <div class="d2-step-hint">Otsu 切割 + 切 tile</div>
+      </div>
+    </div>
+    <div class="d2-step-link"></div>
+    <div class="d2-step" id="d2-step-2">
+      <span class="d2-step-num">02</span>
+      <div class="d2-step-body">
+        <div class="d2-step-title">NG SAMPLING</div>
+        <div class="d2-step-hint">over_review 抽樣</div>
+      </div>
+    </div>
+    <div class="d2-step-link"></div>
+    <div class="d2-step" id="d2-step-3">
+      <span class="d2-step-num">03</span>
+      <div class="d2-step-body">
+        <div class="d2-step-title">READY · REVIEW</div>
+        <div class="d2-step-hint">跳轉 Step 3</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="d2-stats">
+    <div class="d2-stat">
+      <div class="d2-stat-label">PANELS</div>
+      <div class="d2-stat-row">
+        <span class="d2-stat-value" id="d2-panel-cur">0</span>
+        <span class="d2-stat-divider">/</span>
+        <span class="d2-stat-total" id="d2-panel-total">—</span>
+      </div>
+      <div class="d2-stat-bar">
+        <div class="d2-stat-bar-fill d2-bar-blue" id="d2-panel-bar" style="width:0%"></div>
+      </div>
+    </div>
+    <div class="d2-stat">
+      <div class="d2-stat-label">TILES</div>
+      <div class="d2-stat-row">
+        <span class="d2-stat-value" id="d2-tile-cur">0</span>
+      </div>
+      <div class="d2-stat-meta">累積 OK tile</div>
+    </div>
+    <div class="d2-stat">
+      <div class="d2-stat-label">NG SAMPLES</div>
+      <div class="d2-stat-row">
+        <span class="d2-stat-value" id="d2-ng-cur">0</span>
+        <span class="d2-stat-divider d2-stat-divider-mute">·</span>
+        <span class="d2-stat-mini" id="d2-ng-lightings">0 / 5 lighting</span>
+      </div>
+      <div class="d2-stat-meta">over_review true_ng 抽樣</div>
+    </div>
+    <div class="d2-stat">
+      <div class="d2-stat-label">STATUS</div>
+      <div class="d2-stat-row">
+        <span id="d2-status-pill" class="d2-pill d2-pill-running">
+          <span class="d2-pill-dot"></span>
+          <span id="d2-status-text">前處理中</span>
+        </span>
+      </div>
+      <div class="d2-stat-meta" id="d2-elapsed">啟動中…</div>
+    </div>
+  </div>
+
+  <div class="d2-warn" id="d2-warn" style="display:none;">
+    <span class="d2-warn-tag">// WARNINGS</span>
+    <span id="d2-warn-text"></span>
+  </div>
+
+  <div class="d2-log-card">
+    <div class="d2-log-head">
+      <span class="d2-log-tag">// LIVE LOG</span>
+      <span class="d2-log-meta" id="d2-log-meta">0 行</span>
+    </div>
+    <pre id="log-box" class="d2-log-box"></pre>
   </div>
 </div>
+
+<style>
+  /* ── Layout ─────────────────────────────────────────────── */
+  .d2-page {
+    max-width: 1080px; margin: 0 auto; padding: 24px 16px 40px;
+    color: #cdd6f4;
+    font-family: 'Fira Sans', 'Segoe UI', system-ui, sans-serif;
+  }
+
+  /* ── Hero card with grid viz ────────────────────────────── */
+  .d2-hero {
+    display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px;
+    background: linear-gradient(180deg, #1c1c2a 0%, #15151f 100%);
+    border: 1px solid #313244;
+    border-left: 3px solid #fab387;
+    border-radius: 10px;
+    padding: 22px 24px;
+    align-items: center;
+    overflow: hidden;
+    position: relative;
+  }
+  .d2-hero-tag {
+    display: block;
+    font-family: 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+    font-size: .7rem; letter-spacing: 1.6px;
+    color: #fab387; opacity: .8; margin-bottom: 6px;
+  }
+  .d2-hero-title {
+    margin: 0 0 8px;
+    font-size: 1.6rem; font-weight: 700; color: #f5e0dc;
+    letter-spacing: -.2px;
+  }
+  .d2-hero-sub {
+    margin: 0; font-size: .88rem; color: #a6adc8; line-height: 1.55;
+  }
+
+  /* SVG tile grid + animation */
+  .d2-viz {
+    position: relative;
+    background: #11111b; border-radius: 8px;
+    border: 1px solid #2a2b3c;
+    padding: 14px;
+    aspect-ratio: 240/180;
+  }
+  .d2-grid { width: 100%; height: 100%; display: block; }
+  .d2-cell {
+    fill: #21222e;
+    transition: fill .3s ease;
+    animation: d2-cell-pulse 1.8s ease-in-out infinite;
+    animation-delay: var(--d, 0ms);
+  }
+  @keyframes d2-cell-pulse {
+    0%, 100% { fill: #21222e; }
+    35%      { fill: #fab387; }
+    60%      { fill: #45475a; }
+  }
+  .d2-viz.is-done .d2-cell {
+    animation: none;
+    fill: #a6e3a1;
+    transition: fill .6s ease;
+  }
+  .d2-viz.is-failed .d2-cell {
+    animation: none;
+    fill: #45475a;
+  }
+  .d2-viz-overlay {
+    position: absolute; right: 14px; bottom: 14px;
+    background: rgba(11,12,24,.78);
+    backdrop-filter: blur(2px);
+    padding: 8px 14px;
+    border-radius: 6px;
+    border: 1px solid rgba(250,179,135,.25);
+    text-align: right;
+  }
+  .d2-viz-num {
+    font-family: 'Fira Code', monospace;
+    font-size: 1.4rem; font-weight: 700; color: #f5e0dc; line-height: 1;
+  }
+  .d2-viz-num-label {
+    font-family: 'Fira Code', monospace;
+    font-size: .62rem; letter-spacing: 1.2px; color: #fab387;
+    margin-top: 2px;
+  }
+
+  /* ── Pipeline / phase indicator ─────────────────────────── */
+  .d2-pipeline {
+    display: flex; align-items: stretch; gap: 0;
+    margin-top: 16px;
+    background: #1a1a26;
+    border: 1px solid #313244;
+    border-radius: 10px;
+    padding: 12px;
+    overflow: hidden;
+  }
+  .d2-step {
+    flex: 1;
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    transition: background-color .2s ease;
+  }
+  .d2-step-num {
+    font-family: 'Fira Code', monospace;
+    font-size: 1.4rem; font-weight: 700; color: #45475a;
+    line-height: 1; min-width: 32px;
+  }
+  .d2-step-body { display: flex; flex-direction: column; gap: 2px; }
+  .d2-step-title {
+    font-family: 'Fira Code', monospace;
+    font-size: .76rem; letter-spacing: 1px; color: #6c7086; font-weight: 600;
+  }
+  .d2-step-hint { font-size: .72rem; color: #585b70; }
+  .d2-step.is-active { background: rgba(250,179,135,.06); }
+  .d2-step.is-active .d2-step-num { color: #fab387; }
+  .d2-step.is-active .d2-step-title { color: #fab387; }
+  .d2-step.is-active .d2-step-hint { color: #cdd6f4; }
+  .d2-step.is-done .d2-step-num { color: #a6e3a1; }
+  .d2-step.is-done .d2-step-title { color: #a6e3a1; }
+  .d2-step.is-done .d2-step-hint { color: #a6adc8; }
+
+  .d2-step-link {
+    width: 24px; align-self: center;
+    height: 1px; background: #45475a;
+    position: relative;
+  }
+  .d2-step-link::after {
+    content: "▸"; color: #45475a;
+    position: absolute; right: -7px; top: -8px; font-size: .7rem;
+  }
+
+  /* ── Stats grid ─────────────────────────────────────────── */
+  .d2-stats {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+    margin-top: 14px;
+  }
+  .d2-stat {
+    background: #1a1a26;
+    border: 1px solid #313244;
+    border-radius: 8px;
+    padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .d2-stat-label {
+    font-family: 'Fira Code', monospace;
+    font-size: .66rem; letter-spacing: 1.4px; color: #6c7086;
+  }
+  .d2-stat-row { display: flex; align-items: baseline; gap: 6px; }
+  .d2-stat-value {
+    font-family: 'Fira Code', monospace;
+    font-size: 1.5rem; font-weight: 700; color: #f5e0dc; line-height: 1;
+  }
+  .d2-stat-divider { color: #45475a; font-family: monospace; font-size: 1.1rem; }
+  .d2-stat-divider-mute { color: #313244; }
+  .d2-stat-total {
+    font-family: 'Fira Code', monospace;
+    font-size: 1rem; color: #6c7086;
+  }
+  .d2-stat-mini { font-family: 'Fira Code', monospace; font-size: .72rem; color: #a6adc8; }
+  .d2-stat-meta {
+    font-family: 'Fira Code', monospace;
+    font-size: .68rem; color: #585b70; letter-spacing: .3px;
+  }
+  .d2-stat-bar {
+    margin-top: 2px;
+    height: 4px; background: #11111b; border-radius: 1px; overflow: hidden;
+  }
+  .d2-stat-bar-fill {
+    height: 100%;
+    transition: width .4s cubic-bezier(.21,.67,.27,1.01);
+  }
+  .d2-bar-blue { background: linear-gradient(90deg, #89b4fa, #74c7ec); }
+
+  /* Status pill */
+  .d2-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 12px;
+    font-family: 'Fira Code', monospace;
+    font-size: .76rem; font-weight: 700; letter-spacing: .4px;
+  }
+  .d2-pill-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .d2-pill-running { color: #fab387; background: rgba(250,179,135,.12); }
+  .d2-pill-running .d2-pill-dot { animation: d2-dot-pulse 1.2s ease-in-out infinite; }
+  @keyframes d2-dot-pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50%      { transform: scale(1.25); opacity: .55; }
+  }
+  .d2-pill-done    { color: #a6e3a1; background: rgba(166,227,161,.14); }
+  .d2-pill-failed  { color: #f38ba8; background: rgba(243,139,168,.14); }
+  .d2-pill-failed .d2-pill-dot { animation: none; }
+
+  /* ── Warning banner ─────────────────────────────────────── */
+  .d2-warn {
+    margin-top: 12px;
+    background: rgba(249,226,175,.08);
+    border: 1px solid rgba(249,226,175,.3);
+    border-left: 3px solid #f9e2af;
+    border-radius: 6px;
+    padding: 10px 14px;
+    color: #f9e2af; font-size: .82rem;
+    display: flex; gap: 10px; align-items: baseline;
+  }
+  .d2-warn-tag {
+    font-family: 'Fira Code', monospace;
+    font-size: .68rem; letter-spacing: 1.2px; flex-shrink: 0;
+  }
+
+  /* ── Log box ────────────────────────────────────────────── */
+  .d2-log-card {
+    margin-top: 16px;
+    background: #11111b;
+    border: 1px solid #2a2b3c;
+    border-radius: 8px; overflow: hidden;
+  }
+  .d2-log-head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 14px;
+    background: #1a1a26;
+    border-bottom: 1px solid #2a2b3c;
+  }
+  .d2-log-tag {
+    font-family: 'Fira Code', monospace;
+    font-size: .68rem; letter-spacing: 1.2px; color: #a6adc8;
+  }
+  .d2-log-meta { font-family: 'Fira Code', monospace; font-size: .7rem; color: #585b70; }
+  .d2-log-box {
+    margin: 0; padding: 12px 14px;
+    font-family: 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+    font-size: .76rem; color: #cdd6f4; line-height: 1.55;
+    max-height: 360px; overflow-y: auto;
+    background: #11111b;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .d2-log-box .ok    { color: #a6e3a1; }
+  .d2-log-box .warn  { color: #f9e2af; }
+  .d2-log-box .err   { color: #f38ba8; }
+  .d2-log-box .panel { color: #89b4fa; font-weight: 600; }
+  .d2-log-box .dim   { color: #585b70; }
+
+  /* ── Responsive ─────────────────────────────────────────── */
+  @media (max-width: 880px) {
+    .d2-hero { grid-template-columns: 1fr; }
+    .d2-stats { grid-template-columns: repeat(2, 1fr); }
+    .d2-pipeline { flex-direction: column; align-items: stretch; }
+    .d2-step-link { width: 1px; height: 16px; align-self: center; }
+    .d2-step-link::after { display: none; }
+  }
+</style>
 
 <script>
 const params = new URLSearchParams(location.search);
 const jobId = params.get('job_id');
 let _timer = null;
+let _startedAt = Date.now();
+
+// 解析後端 log（capi_train_new.preprocess_panels + sample_ng_tiles）
+const RE_PANEL = /^\s*\[(\d+)\/(\d+)\]\s+panel\s+(\S+)\s+\((inner\+edge|edge only)\)/;
+const RE_TILES = /✓\s*切出\s+(\d+)\s+tile/;
+const RE_NG    = /✓\s*([A-Z0-9]+):\s*抽\s+(\d+)\s+個\s+NG/;
+const RE_FAIL  = /✗/;
+const RE_WARN  = /⚠/;
+
+function parseLog(lines) {
+  const stats = {
+    panelCur: 0, panelTotal: null,
+    tiles: 0, ng: 0, ngLightings: 0,
+    warnLines: [], failLines: [],
+    sawNgPhase: false,
+  };
+  for (const line of lines) {
+    const mp = line.match(RE_PANEL);
+    if (mp) { stats.panelCur = parseInt(mp[1]); stats.panelTotal = parseInt(mp[2]); continue; }
+    const mt = line.match(RE_TILES);
+    if (mt) { stats.tiles += parseInt(mt[1]); continue; }
+    const mn = line.match(RE_NG);
+    if (mn) { stats.ng += parseInt(mn[2]); stats.ngLightings += 1; stats.sawNgPhase = true; continue; }
+    if (line.includes('over_review')) { stats.sawNgPhase = true; }
+    if (RE_FAIL.test(line)) stats.failLines.push(line);
+    if (RE_WARN.test(line)) stats.warnLines.push(line);
+  }
+  return stats;
+}
+
+function colorizeLog(lines) {
+  return lines.map(line => {
+    let cls = '';
+    if (line.includes('✗')) cls = 'err';
+    else if (line.includes('⚠')) cls = 'warn';
+    else if (line.includes('✓')) cls = 'ok';
+    else if (RE_PANEL.test(line)) cls = 'panel';
+    else if (line.startsWith('  ')) cls = 'dim';
+    const escaped = line
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return cls ? `<span class="${cls}">${escaped}</span>` : escaped;
+  }).join('\n');
+}
+
+function setStat(id, val) { document.getElementById(id).textContent = val; }
+
+let _lastLogText = '';
+
+function updateUi(state, logLines) {
+  const lines = logLines || [];
+  const logText = lines.join('\n');
+  const logChanged = logText !== _lastLogText;
+
+  // log 沒變就不解析、不重 colorize、不寫 DOM —— state pill 仍要更新
+  if (logChanged) {
+    const stats = parseLog(lines);
+    setStat('d2-panel-cur', stats.panelCur);
+    setStat('d2-panel-total', stats.panelTotal === null ? '—' : stats.panelTotal);
+    setStat('d2-tile-cur', stats.tiles.toLocaleString());
+    setStat('d2-ng-cur', stats.ng);
+    setStat('d2-ng-lightings', `${stats.ngLightings} / 5 lighting`);
+    document.getElementById('d2-num').textContent = stats.tiles ? stats.tiles.toLocaleString() : '—';
+
+    const pct = (stats.panelTotal && stats.panelTotal > 0)
+      ? Math.min(100, (stats.panelCur / stats.panelTotal) * 100) : 0;
+    document.getElementById('d2-panel-bar').style.width = pct + '%';
+
+    const step1El = document.getElementById('d2-step-1');
+    const step2El = document.getElementById('d2-step-2');
+    const step3El = document.getElementById('d2-step-3');
+    const isDone = state === 'review' || state === 'completed';
+    step1El.classList.toggle('is-done', stats.sawNgPhase || isDone);
+    step1El.classList.toggle('is-active', !stats.sawNgPhase && !isDone);
+    step2El.classList.toggle('is-active', stats.sawNgPhase && !isDone);
+    step2El.classList.toggle('is-done', isDone);
+    step3El.classList.toggle('is-active', isDone);
+
+    const warns = stats.warnLines.length;
+    const fails = stats.failLines.length;
+    const banner = document.getElementById('d2-warn');
+    if (warns + fails > 0) {
+      const parts = [];
+      if (fails > 0) parts.push(`${fails} 個失敗`);
+      if (warns > 0) parts.push(`${warns} 個警告`);
+      document.getElementById('d2-warn-text').textContent =
+        parts.join(' · ') + '（詳見下方 log）';
+      banner.style.display = '';
+    } else {
+      banner.style.display = 'none';
+    }
+
+    const lb = document.getElementById('log-box');
+    const wasNearBottom = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
+    lb.innerHTML = colorizeLog(lines);
+    if (wasNearBottom) lb.scrollTop = lb.scrollHeight;
+    document.getElementById('d2-log-meta').textContent = `${lines.length} 行`;
+
+    _lastLogText = logText;
+  }
+
+  const pill = document.getElementById('d2-status-pill');
+  const txt = document.getElementById('d2-status-text');
+  if (state === 'failed') {
+    pill.className = 'd2-pill d2-pill-failed';
+    txt.textContent = '前處理失敗';
+    document.querySelector('.d2-viz').classList.add('is-failed');
+  } else if (state === 'review' || state === 'completed') {
+    pill.className = 'd2-pill d2-pill-done';
+    txt.textContent = '完成 · 跳轉中';
+    document.querySelector('.d2-viz').classList.add('is-done');
+  } else {
+    pill.className = 'd2-pill d2-pill-running';
+    txt.textContent = '前處理中';
+  }
+  // d2-elapsed 由 1s tick interval 獨佔，這裡不寫避免兩個 source 互相蓋
+}
 
 function poll() {
   fetch(`/api/train/new/status?job_id=${encodeURIComponent(jobId)}`)
     .then(r => r.json())
     .then(d => {
-      if (d.log_lines) document.getElementById('log-box').textContent = d.log_lines.join('\n');
-      const pill = document.getElementById('status-pill');
-      pill.textContent = stateText(d.state);
+      updateUi(d.state, d.log_lines || []);
       if (d.state === 'review') {
         clearInterval(_timer);
-        location.href = `/train/new/review/${encodeURIComponent(jobId)}`;
+        setTimeout(() => location.href = `/train/new/review/${encodeURIComponent(jobId)}`, 600);
       } else if (d.state === 'failed') {
         clearInterval(_timer);
-        pill.style.background = '#f38ba8';
-        pill.textContent = '失敗：' + (d.error_message || '未知');
       } else if (d.state === 'completed') {
         clearInterval(_timer);
-        location.href = `/train/new/done/${encodeURIComponent(jobId)}`;
+        setTimeout(() => location.href = `/train/new/done/${encodeURIComponent(jobId)}`, 600);
       }
     });
 }
 
-function stateText(s) {
-  return {preprocess:'前處理中', review:'準備 review', train:'訓練中', completed:'完成', failed:'失敗'}[s] || s;
-}
+// 經過時間每秒刷新一次（poll 是 3s）
+setInterval(() => {
+  const elapsedSec = Math.floor((Date.now() - _startedAt) / 1000);
+  const m = Math.floor(elapsedSec / 60);
+  const s = String(elapsedSec % 60).padStart(2, '0');
+  const el = document.getElementById('d2-elapsed');
+  // 只在 running 狀態下更新（避免覆蓋失敗/完成訊息）
+  const pill = document.getElementById('d2-status-pill');
+  if (pill && pill.classList.contains('d2-pill-running')) {
+    el.textContent = `已執行 ${m}m${s}s`;
+  }
+}, 1000);
 
 _timer = setInterval(poll, 3000);
 poll();

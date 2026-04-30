@@ -7,16 +7,15 @@
 
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px;">
     <div id="status-pill" style="display:inline-block;background:#fab387;color:#1e1e2e;padding:5px 14px;border-radius:14px;font-weight:700;">訓練中</div>
+    <div id="eta-chip" class="eta-chip" style="display:none;">
+      <span class="eta-icon" aria-hidden="true">⏱</span>
+      <span class="eta-text" id="eta-text">--</span>
+      <span class="eta-avg" id="eta-avg"></span>
+    </div>
     <button id="cancel-btn" type="button" onclick="cancelTraining()" style="background:#45475a;color:#cdd6f4;border:1px solid #585b70;border-radius:6px;padding:7px 12px;cursor:pointer;">取消訓練</button>
   </div>
 
   <div id="unit-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:16px;"></div>
-
-  <div style="background:#313244;border-radius:10px;padding:14px;margin-top:16px;">
-    <div style="color:#a6adc8;font-size:.82rem;margin-bottom:8px;">訓練 log</div>
-    <pre id="log-box" style="background:#1e1e2e;border-radius:6px;padding:12px;margin:0;font-size:.78rem;color:#cdd6f4;max-height:420px;overflow-y:auto;white-space:pre-wrap;"></pre>
-  </div>
-</div>
 
 <style>
   .unit-chip { background:#313244;border:1px solid #45475a;border-radius:6px;padding:10px;min-height:58px; }
@@ -25,7 +24,39 @@
   .unit-chip.running { border-color:#fab387; }
   .unit-chip.done { border-color:#a6e3a1; }
   .unit-chip.failed { border-color:#f38ba8; }
+
+  /* ETA chip：與 status pill 並排，⏱ 圖示呼吸動畫 + 倒數 ticking */
+  .eta-chip {
+    display:inline-flex;align-items:center;gap:6px;
+    background:#1e1e2e;border:1px solid #fab387;
+    color:#fab387;padding:4px 12px;border-radius:14px;
+    font-size:.82rem;font-weight:600;
+    animation: eta-fade-in .3s ease-out;
+  }
+  .eta-chip .eta-icon {
+    display:inline-block;font-size:.95rem;line-height:1;
+    animation: eta-pulse 1.5s ease-in-out infinite;
+  }
+  .eta-chip .eta-text { font-family:'JetBrains Mono',Consolas,monospace;letter-spacing:.5px; }
+  .eta-chip .eta-avg { color:#a6adc8;font-weight:400;font-size:.74rem;margin-left:2px; }
+  .eta-chip.warn { border-color:#f9e2af;color:#f9e2af; }
+  .eta-chip.warn .eta-icon { animation-duration:1s; }
+  @keyframes eta-pulse {
+    0%, 100% { transform:scale(1);   opacity:1;   }
+    50%      { transform:scale(1.18); opacity:.6; }
+  }
+  @keyframes eta-fade-in {
+    from { opacity:0; transform:translateY(-2px); }
+    to   { opacity:1; transform:translateY(0); }
+  }
 </style>
+
+  <div style="background:#313244;border-radius:10px;padding:14px;margin-top:16px;">
+    <div style="color:#a6adc8;font-size:.82rem;margin-bottom:8px;">訓練 log</div>
+    <pre id="log-box" style="background:#1e1e2e;border-radius:6px;padding:12px;margin:0;font-size:.78rem;color:#cdd6f4;max-height:420px;overflow-y:auto;white-space:pre-wrap;"></pre>
+  </div>
+</div>
+
 
 <script>
 const params = new URLSearchParams(location.search);
@@ -34,6 +65,14 @@ const units = ['G0F00000','R0F00000','W0F00000','WGF50500','STANDARD']
   .flatMap(l => [`${l}-inner`, `${l}-edge`]);
 let _timer = null;
 let _lastLogText = '';
+
+// ETA 來自後端 log（_eta_text()），格式：「預估剩 Xm YYs（平均 Zs/unit）」
+// 全形括號是後端 f-string 寫死的，所以 regex 也用全形
+const ETA_REGEX = /預估剩\s*(\d+)m(\d+)s（平均\s*(\d+)s\/unit）/;
+let _etaSeconds = null;   // 上次 sync 時的剩餘秒數
+let _etaAvgSec = null;
+let _etaSyncedAt = 0;     // performance.now()
+let _etaTickTimer = null;
 
 const UNIT_STATE_VIEW = {
   running: { cls: 'running', text: '訓練中' },
@@ -64,6 +103,7 @@ function poll() {
         _lastLogText = logText;
       }
       renderUnits(d.unit_status);
+      syncEta(d.state, logLines);
       const pill = document.getElementById('status-pill');
       pill.textContent = stateText(d.state);
       document.getElementById('cancel-btn').disabled = !['preprocess', 'train', 'review'].includes(d.state);
@@ -81,15 +121,19 @@ function poll() {
     });
 }
 
-function cancelTraining() {
-  if (!confirm('確定要取消訓練？\n已完成的 unit 不會保留，需從 Step 1 重新開始。')) return;
+async function cancelTraining() {
+  const ok = await capConfirm(
+    '已完成的 unit 不會保留，需從 Step 1 重新開始整個訓練流程。',
+    {title: '確定要取消訓練？', confirmText: '取消訓練', cancelText: '繼續訓練', danger: true}
+  );
+  if (!ok) return;
   const btn = document.getElementById('cancel-btn');
   btn.disabled = true;
   fetch(`/api/train/new/cancel/${encodeURIComponent(jobId)}`, { method: 'POST' })
     .then(r => r.json().then(d => ({ ok: r.ok, status: r.status, body: d })))
     .then(({ ok, body }) => {
       if (!ok) {
-        alert(body.error || '取消失敗');
+        capAlert(body.error || '伺服器未提供原因', {type: 'error', title: '取消失敗'});
       }
       poll();
     })
@@ -102,8 +146,48 @@ function stateText(s) {
   return {preprocess:'前處理中', review:'準備 review', train:'訓練中', completed:'完成', failed:'失敗'}[s] || s;
 }
 
+function syncEta(jobState, logLines) {
+  const chip = document.getElementById('eta-chip');
+  if (jobState !== 'train') {
+    chip.style.display = 'none';
+    _etaSeconds = null;
+    return;
+  }
+  // 從後往前找最後一行 ETA（後端只在 unit done 那行附 ETA）
+  let parsed = null;
+  for (let i = logLines.length - 1; i >= 0; i--) {
+    const m = logLines[i].match(ETA_REGEX);
+    if (m) { parsed = { sec: parseInt(m[1]) * 60 + parseInt(m[2]), avg: parseInt(m[3]) }; break; }
+  }
+  if (!parsed) {
+    // 第一個 unit 還在跑，後端尚未產生 ETA
+    chip.style.display = 'none';
+    _etaSeconds = null;
+    return;
+  }
+  _etaSeconds = parsed.sec;
+  _etaAvgSec = parsed.avg;
+  _etaSyncedAt = performance.now();
+  chip.style.display = '';
+  renderEta();
+}
+
+function renderEta() {
+  if (_etaSeconds == null) return;
+  const elapsed = (performance.now() - _etaSyncedAt) / 1000;
+  const remain = Math.max(0, Math.round(_etaSeconds - elapsed));
+  const m = Math.floor(remain / 60);
+  const s = remain % 60;
+  document.getElementById('eta-text').textContent = `預估剩 ${m}m${String(s).padStart(2, '0')}s`;
+  document.getElementById('eta-avg').textContent = _etaAvgSec ? ` · 平均 ${_etaAvgSec}s/unit` : '';
+  document.getElementById('eta-chip').classList.toggle('warn', remain > 0 && remain < 30);
+}
+
 renderUnits({});
 _timer = setInterval(poll, 3000);
+_etaTickTimer = setInterval(renderEta, 1000);
 poll();
 </script>
+
+{% include "train_new/_modal.html" %}
 {% endblock %}

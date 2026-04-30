@@ -512,10 +512,25 @@
                 const val = thMapping[prefix];
                 const color = prefixColors[prefix] || 'var(--accent)';
                 const shortName = prefix.length > 5 ? prefix.substring(0, 5) : prefix;
+                let valHtml;
+                if (val !== null && typeof val === 'object') {
+                    const inner = val.inner != null ? val.inner : '—';
+                    const edge = val.edge != null ? val.edge : '—';
+                    const diff = val.inner !== val.edge;
+                    const innerColor = diff ? '#f9e2af' : '#e2e8f0';
+                    const edgeColor = diff ? '#fab387' : '#e2e8f0';
+                    valHtml = `<span title="inner / edge thresholds" style="font-family:var(--tech-font);font-weight:600;font-size:0.85rem;">`
+                        + `<span style="color:${innerColor};">${inner}</span>`
+                        + `<span style="color:var(--text-muted);margin:0 2px;">/</span>`
+                        + `<span style="color:${edgeColor};">${edge}</span>`
+                        + `</span>`;
+                } else {
+                    valHtml = `<span style="font-family:var(--tech-font);font-weight:600;color:#e2e8f0;font-size:0.85rem;">${val}</span>`;
+                }
                 return `<div style="display:flex;align-items:center;gap:5px;background:rgba(15,23,42,0.8);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:4px 10px;">
                     <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block;box-shadow:0 0 6px ${color};"></span>
                     <span style="font-size:0.75rem;color:var(--text-muted);letter-spacing:0.5px;">${shortName}</span>
-                    <span style="font-family:var(--tech-font);font-weight:600;color:#e2e8f0;font-size:0.85rem;">${val}</span>
+                    ${valHtml}
                 </div>`;
             }).join('');
         } else {
