@@ -5580,6 +5580,18 @@ class CAPIInferencer:
 
             results.append(image_result)
 
+        # AOI 機檢座標 inspection（v1 / v2 共用 helper；新架構 PC half 走 edge.pt）
+        aoi_stats = self._apply_aoi_coord_inspection(
+            panel_dir=Path(panel_dir),
+            preprocessed_results=results,
+            omit_image=omit_image,
+            omit_overexposed=omit_overexposed,
+            product_resolution=product_resolution,
+        )
+        if self.config.aoi_coord_inspection_enabled:
+            print(f"[v2] AOI 座標 inspection: {aoi_stats['aoi_tile_count']} tiles, "
+                  f"{aoi_stats['aoi_edge_count']} edge defects")
+
         post_start = time.time()
         self._apply_omit_dust_postprocess(
             results,
