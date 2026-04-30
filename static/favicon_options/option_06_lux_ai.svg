@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Lux AI">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0c4a6e"/>
+      <stop offset=".45" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#65a30d"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#f8fafc"/>
+  <path fill="url(#bg)" d="M12 47 20 15h12l-8 32z"/>
+  <path fill="#dc2626" d="M32 47 40 15h12l-8 32z"/>
+  <path fill="#16a34a" d="M34 47 18 15h12l16 32z" opacity=".94"/>
+  <circle cx="49" cy="18" r="4" fill="#facc15"/>
+  <path fill="none" stroke="#0f172a" stroke-width="3" stroke-linecap="round" opacity=".85" d="M14 51h37"/>
+</svg>

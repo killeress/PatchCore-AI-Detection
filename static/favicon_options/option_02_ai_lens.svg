@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AI Lens">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#172554"/>
+      <stop offset=".55" stop-color="#0f766e"/>
+      <stop offset="1" stop-color="#84cc16"/>
+    </linearGradient>
+    <radialGradient id="lens" cx="50%" cy="40%" r="55%">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset=".34" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#1e3a8a"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <rect x="13" y="18" width="38" height="30" rx="8" fill="#0f172a" opacity=".9"/>
+  <rect x="18" y="14" width="14" height="7" rx="3" fill="#0f172a" opacity=".9"/>
+  <circle cx="33" cy="33" r="14" fill="url(#lens)" stroke="#e2e8f0" stroke-width="3"/>
+  <circle cx="29" cy="28" r="4" fill="#f8fafc" opacity=".9"/>
+  <path fill="none" stroke="#facc15" stroke-width="3" stroke-linecap="round" d="M45 22h7m-4-3v7"/>
+  <text x="32" y="39" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="800" fill="#f8fafc">AI</text>
+</svg>

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AI Chip">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset=".5" stop-color="#334155"/>
+      <stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+    <linearGradient id="core" x1="20" y1="20" x2="44" y2="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#a3e635"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <g stroke="#94a3b8" stroke-width="3" stroke-linecap="round">
+    <path d="M19 10v8M29 10v8M39 10v8M49 24h6M49 34h6M49 44h6M19 46v8M29 46v8M39 46v8M9 24h6M9 34h6M9 44h6"/>
+  </g>
+  <rect x="16" y="16" width="32" height="32" rx="8" fill="#0f172a" stroke="#e2e8f0" stroke-width="3"/>
+  <rect x="23" y="23" width="18" height="18" rx="5" fill="url(#core)"/>
+  <text x="32" y="37" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" font-weight="900" fill="#0f172a">C</text>
+</svg>
