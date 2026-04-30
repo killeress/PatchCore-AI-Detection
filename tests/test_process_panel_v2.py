@@ -216,7 +216,9 @@ def test_process_panel_v2_uses_shared_predict_tile_postprocess(tmp_path):
     assert pred.called
 
 
-def test_process_panel_v2_runs_cv_edge_inspector(tmp_path):
+def test_process_panel_v2_skips_cv_edge_inspector(tmp_path):
+    """新架構不應再跑傳統 CV 邊緣檢測：edge.pt 已專責 edge zone。
+    若仍呼叫 edge_inspector.inspect，視為 regression。"""
     _write_grey_panel_image(tmp_path, "G0F00000")
     cfg = _make_config(tmp_path)
 
@@ -232,16 +234,22 @@ def test_process_panel_v2_runs_cv_edge_inspector(tmp_path):
             self.config.enabled = True
             self.config.exclude_zones = []
             self.config.set_active_zones_for_product = MagicMock()
+            self.inspect_calls = 0
 
         def inspect(self, image, raw_bounds):
+            self.inspect_calls += 1
             return [EdgeDefect(side="left", area=10, bbox=(1, 2, 3, 4), center=(2, 3))]
 
     with patch.object(CAPIInferencer, "_get_model_for", return_value=fake_model):
         inferencer = CAPIInferencer(cfg)
-        inferencer.edge_inspector = FakeEdgeInspector()
+        fake_inspector = FakeEdgeInspector()
+        inferencer.edge_inspector = fake_inspector
         results, *_ = inferencer.process_panel(tmp_path)
 
-    assert any(r.edge_defects for r in results)
+    assert fake_inspector.inspect_calls == 0, \
+        f"新架構 v2 不應呼叫 edge_inspector.inspect，實際 {fake_inspector.inspect_calls} 次"
+    assert all(not r.edge_defects for r in results), \
+        "新架構不應產生 edge_defects（不跑 CV、不跑 AOI ROI PC）"
 
 
 def test_process_panel_v2_runs_scratch_filter(tmp_path):

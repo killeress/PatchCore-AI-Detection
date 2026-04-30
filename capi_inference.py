@@ -3670,6 +3670,17 @@ class CAPIInferencer:
         if not aoi_report:
             return {"aoi_tile_count": 0, "aoi_edge_count": 0}
 
+        # 新架構：grid tile 已涵蓋整個 panel 且 edge.pt 已為 edge zone 推論過，
+        # AOI 座標只需找出包含它的既存 grid tile 並打上 AOI 屬性，不再切新 tile、
+        # 也不再對 edge defect 跑第二次 PC ROI 推論（避免重複工作 + 不再產生
+        # CV/PC edge_defects 寫入記錄）。
+        if getattr(self.config, "is_new_architecture", False):
+            return self._attribute_aoi_coords_to_grid_tiles(
+                preprocessed_results=preprocessed_results,
+                aoi_report=aoi_report,
+                product_resolution=product_resolution,
+            )
+
         inspector_mode = self._resolve_aoi_edge_inspector_mode()
         aoi_tile_count = 0
         aoi_edge_count = 0
@@ -3686,13 +3697,8 @@ class CAPIInferencer:
             new_tiles, edge_defs = self._create_aoi_coord_tiles(
                 aoi_image, result, aoi_report[img_prefix], product_resolution,
             )
-            # 新架構 (C-10) v2 在推論迴圈結束後才呼叫 helper，interior tiles
-            # extend 進去也來不及被推論；且 v2 的 grid tiling + edge.pt 已涵蓋
-            # 整個 panel，AOI 座標中心對齊 tile 的精度增益在新架構下冗餘。
-            # 只在舊架構 (v1，helper 在 Phase 1.5、推論前呼叫) 才 extend。
-            if not getattr(self.config, "is_new_architecture", False):
-                result.tiles.extend(new_tiles)
-                aoi_tile_count += len(new_tiles)
+            result.tiles.extend(new_tiles)
+            aoi_tile_count += len(new_tiles)
             aoi_edge_count += len(edge_defs)
 
             for edef in edge_defs:
@@ -3708,6 +3714,53 @@ class CAPIInferencer:
                 )
 
         return {"aoi_tile_count": aoi_tile_count, "aoi_edge_count": aoi_edge_count}
+
+    def _attribute_aoi_coords_to_grid_tiles(
+        self,
+        preprocessed_results: List[Any],
+        aoi_report: Dict[str, List['AOIReportDefect']],
+        product_resolution: Optional[Tuple[int, int]],
+    ) -> Dict[str, int]:
+        """新架構專用：把 AOI 機台報告座標打到已存在的 grid tile 上。
+
+        對每筆 AOI defect 計算圖片座標，找出包含它的 grid tile，
+        標記 ``is_aoi_coord_tile / aoi_defect_code / aoi_product_x / aoi_product_y``。
+        若同一 grid tile 已被先前的 defect 標記，後到的 defect 不覆蓋（保留第一筆）。
+        """
+        aoi_tile_count = 0
+        aoi_unmatched = 0
+        for result in preprocessed_results:
+            img_prefix = self._get_image_prefix(result.image_path.name)
+            if img_prefix not in aoi_report:
+                continue
+            if result.raw_bounds is None or not result.tiles:
+                aoi_unmatched += len(aoi_report[img_prefix])
+                continue
+            for defect in aoi_report[img_prefix]:
+                img_x, img_y = self._map_aoi_coords(
+                    defect.product_x, defect.product_y,
+                    result.raw_bounds, product_resolution,
+                )
+                matched_tile = None
+                for tile in result.tiles:
+                    if (tile.x <= img_x < tile.x + tile.width and
+                            tile.y <= img_y < tile.y + tile.height):
+                        matched_tile = tile
+                        break
+                if matched_tile is None:
+                    aoi_unmatched += 1
+                    continue
+                if not matched_tile.is_aoi_coord_tile:
+                    matched_tile.is_aoi_coord_tile = True
+                    matched_tile.aoi_defect_code = defect.defect_code
+                    matched_tile.aoi_product_x = defect.product_x
+                    matched_tile.aoi_product_y = defect.product_y
+                    aoi_tile_count += 1
+        return {
+            "aoi_tile_count": aoi_tile_count,
+            "aoi_edge_count": 0,
+            "aoi_unmatched": aoi_unmatched,
+        }
 
     def _inspect_aoi_edge_defect(
         self,
@@ -5466,7 +5519,8 @@ class CAPIInferencer:
              其中 results 為 List[ImageResult]
 
         透過既有 predict_tile/postprocess helper 保持 v1 相容：
-        edge margin、dust filter、bomb check、CV edge inspector、scratch classifier。
+        edge margin、dust filter、bomb check、scratch classifier。
+        新架構 edge.pt 已專責 edge zone，故不再呼叫傳統 CV 邊緣檢測。
         """
         import time
         from capi_preprocess import preprocess_panel_folder, PreprocessConfig
@@ -5474,6 +5528,9 @@ class CAPIInferencer:
         t0 = time.time()
         omit_vis, omit_overexposed, omit_overexposure_info, omit_image = \
             self._load_omit_context(Path(panel_dir))
+        if omit_image is not None:
+            tag = "OVEREXPOSED" if omit_overexposed else "OK"
+            print(f"[v2] OMIT {tag}: {omit_overexposure_info}")
 
         pre_cfg = PreprocessConfig(
             tile_size=self.config.tile_size,
@@ -5567,6 +5624,13 @@ class CAPIInferencer:
                     anomaly_tiles.append((ti, score, anomaly_map))
 
             infer_elapsed = time.time() - t_infer_start
+            inner_count = sum(1 for tr in pre_result.tiles if tr.zone == "inner")
+            edge_count = sum(1 for tr in pre_result.tiles if tr.zone == "edge")
+            print(
+                f"[v2] {lighting}: tiles={len(tile_infos)} "
+                f"(inner={inner_count}, edge={edge_count}), "
+                f"NG={len(anomaly_tiles)}, infer {infer_elapsed:.2f}s"
+            )
 
             image_result = ImageResult(
                 image_path=img_path,
@@ -5585,11 +5649,12 @@ class CAPIInferencer:
 
             if bomb_info is not None:
                 image_result.client_bomb_info = bomb_info
-            self._apply_cv_edge_inspection(image_result, model_id=model_id)
+            # 新架構不再跑傳統 CV 邊緣檢測（edge.pt 已專責 edge zone）
 
             results.append(image_result)
 
-        # AOI 機檢座標 inspection（v1 / v2 共用 helper；新架構 PC half 走 edge.pt）
+        # AOI 機檢座標 attribution（新架構：找包含座標的既存 grid tile 並標屬性，
+        # 不再切新 tile，也不再對 edge defect 跑 PC ROI 推論）
         aoi_stats = self._apply_aoi_coord_inspection(
             panel_dir=Path(panel_dir),
             preprocessed_results=results,
@@ -5598,8 +5663,12 @@ class CAPIInferencer:
             product_resolution=product_resolution,
         )
         if self.config.aoi_coord_inspection_enabled:
-            print(f"[v2] AOI 座標 inspection: {aoi_stats['aoi_tile_count']} tiles, "
-                  f"{aoi_stats['aoi_edge_count']} edge defects")
+            unmatched = aoi_stats.get("aoi_unmatched", 0)
+            unmatched_tag = f", unmatched={unmatched}" if unmatched else ""
+            print(
+                f"[v2] AOI 座標 attribution: 標記 {aoi_stats['aoi_tile_count']} 個 grid tiles"
+                f"{unmatched_tag}"
+            )
 
         post_start = time.time()
         self._apply_omit_dust_postprocess(

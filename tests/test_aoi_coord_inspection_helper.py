@@ -61,82 +61,41 @@ def test_helper_returns_zero_when_no_aoi_report(new_arch_inferencer, tmp_path):
     assert stats == {"aoi_tile_count": 0, "aoi_edge_count": 0}
 
 
-def test_helper_calls_patchcore_with_edge_zone(new_arch_inferencer, tmp_path):
-    """新架構下 helper 對 AOI 邊緣 defect 呼叫 _inspect_roi_patchcore(zone='edge')。"""
-    img_path = tmp_path / "G0F00000_001.png"
-    np.ones((1080, 1920, 3), dtype=np.uint8).tofile(img_path)  # placeholder file
+def test_helper_new_arch_attributes_existing_grid_tile(new_arch_inferencer, tmp_path):
+    """新架構：helper 把 AOI 座標映射到包含它的既存 grid tile，
+    並標記 is_aoi_coord_tile / aoi_defect_code / aoi_product_x / aoi_product_y。
+    不應呼叫 _create_aoi_coord_tiles 或 _inspect_roi_patchcore。"""
+    from capi_inference import TileInfo
 
-    fake_result = ImageResult(
-        image_path=img_path,
-        image_size=(1920, 1080),
-        otsu_bounds=(0, 0, 1920, 1080),
-        exclusion_regions=[],
-        tiles=[],
-        excluded_tile_count=0,
-        processed_tile_count=0,
-        processing_time=0.0,
-        anomaly_tiles=[],
-        raw_bounds=(0, 0, 1920, 1080),
-        panel_polygon=np.array([[0, 0], [1920, 0], [1920, 1080], [0, 1080]], dtype=np.float32),
-    )
-
-    fake_edge_def = MagicMock(product_x=1900, product_y=540, defect_code="L01")
-
-    with patch.object(new_arch_inferencer, "_parse_aoi_report_txt",
-                      return_value={"G0F00000": [fake_edge_def]}), \
-         patch.object(new_arch_inferencer, "_create_aoi_coord_tiles",
-                      return_value=([], [fake_edge_def])), \
-         patch("cv2.imread", return_value=np.ones((1080, 1920, 3), dtype=np.uint8)), \
-         patch.object(new_arch_inferencer, "_inspect_roi_patchcore",
-                      return_value=([], {"score": 0.1, "threshold": 0.65, "area": 0,
-                                          "ok_reason": "", "roi": None, "fg_mask": None,
-                                          "anomaly_map": None})) as mock_pc:
-
-        stats = new_arch_inferencer._apply_aoi_coord_inspection(
-            panel_dir=tmp_path,
-            preprocessed_results=[fake_result],
-            omit_image=None, omit_overexposed=False,
-            product_resolution=(1920, 1080),
-        )
-
-    assert stats["aoi_edge_count"] == 1
-    pc_kwargs = mock_pc.call_args.kwargs
-    assert pc_kwargs.get("zone") == "edge", \
-        f"new arch 下 helper 應呼叫 _inspect_roi_patchcore(zone='edge')；實際 kwargs={pc_kwargs}"
-
-
-def test_helper_v2_skips_interior_tile_extension(new_arch_inferencer, tmp_path):
-    """新架構：v2 在推論結束後才呼叫 helper，interior tiles 來不及推論，
-    所以不應加進 result.tiles，aoi_tile_count 維持 0。edge defects 仍照常處理。"""
     img_path = tmp_path / "G0F00000_001.png"
     img_path.touch()
 
+    # 製造一個包含 (img_x=960, img_y=540) 的 grid tile (768, 256, 1280, 768)
+    tile = TileInfo(
+        tile_id=0, x=768, y=256, width=512, height=512,
+        image=np.zeros((512, 512), dtype=np.uint8),
+    )
     fake_result = ImageResult(
         image_path=img_path,
         image_size=(1920, 1080),
         otsu_bounds=(0, 0, 1920, 1080),
         exclusion_regions=[],
-        tiles=[],
+        tiles=[tile],
         excluded_tile_count=0,
-        processed_tile_count=0,
+        processed_tile_count=1,
         processing_time=0.0,
         anomaly_tiles=[],
         raw_bounds=(0, 0, 1920, 1080),
-        panel_polygon=np.array([[0, 0], [1920, 0], [1920, 1080], [0, 1080]], dtype=np.float32),
+        panel_polygon=None,
     )
 
-    interior_tiles = [MagicMock(tile_id=99), MagicMock(tile_id=100)]
-    edge_def = MagicMock(product_x=1900, product_y=540, defect_code="L01")
+    fake_defect = MagicMock(product_x=960, product_y=540, defect_code="L01")
 
     with patch.object(new_arch_inferencer, "_parse_aoi_report_txt",
-                      return_value={"G0F00000": [MagicMock()]}), \
-         patch.object(new_arch_inferencer, "_create_aoi_coord_tiles",
-                      return_value=(interior_tiles, [edge_def])), \
-         patch("cv2.imread", return_value=np.ones((1080, 1920, 3), dtype=np.uint8)), \
-         patch.object(new_arch_inferencer, "_inspect_roi_patchcore",
-                      return_value=([], {"score": 0.1, "threshold": 0.65, "area": 0,
-                                          "ok_reason": "", "roi": None, "fg_mask": None,
-                                          "anomaly_map": None})):
+                      return_value={"G0F00000": [fake_defect]}), \
+         patch.object(new_arch_inferencer, "_create_aoi_coord_tiles") as mock_create, \
+         patch.object(new_arch_inferencer, "_inspect_roi_patchcore") as mock_pc, \
+         patch.object(new_arch_inferencer, "_inspect_aoi_edge_defect") as mock_inspect:
 
         stats = new_arch_inferencer._apply_aoi_coord_inspection(
             panel_dir=tmp_path,
@@ -145,10 +104,57 @@ def test_helper_v2_skips_interior_tile_extension(new_arch_inferencer, tmp_path):
             product_resolution=(1920, 1080),
         )
 
-    assert fake_result.tiles == [], \
-        f"v2 不該把 AOI interior tiles 加進 result.tiles，實際 {fake_result.tiles}"
+    mock_create.assert_not_called()
+    mock_pc.assert_not_called()
+    mock_inspect.assert_not_called()
+    assert stats["aoi_tile_count"] == 1
+    assert stats["aoi_edge_count"] == 0
+    assert tile.is_aoi_coord_tile is True
+    assert tile.aoi_defect_code == "L01"
+    assert tile.aoi_product_x == 960
+    assert tile.aoi_product_y == 540
+
+
+def test_helper_new_arch_unmatched_when_no_tile_contains_coord(new_arch_inferencer, tmp_path):
+    """AOI 座標落在所有 grid tile 之外時，回 unmatched 統計，不丟例外。"""
+    from capi_inference import TileInfo
+
+    img_path = tmp_path / "G0F00000_001.png"
+    img_path.touch()
+
+    # tile 在左上角；AOI 座標在右下，落在 tile 外
+    tile = TileInfo(
+        tile_id=0, x=0, y=0, width=512, height=512,
+        image=np.zeros((512, 512), dtype=np.uint8),
+    )
+    fake_result = ImageResult(
+        image_path=img_path,
+        image_size=(1920, 1080),
+        otsu_bounds=(0, 0, 1920, 1080),
+        exclusion_regions=[],
+        tiles=[tile],
+        excluded_tile_count=0,
+        processed_tile_count=1,
+        processing_time=0.0,
+        anomaly_tiles=[],
+        raw_bounds=(0, 0, 1920, 1080),
+        panel_polygon=None,
+    )
+    fake_defect = MagicMock(product_x=1900, product_y=1000, defect_code="L01")
+
+    with patch.object(new_arch_inferencer, "_parse_aoi_report_txt",
+                      return_value={"G0F00000": [fake_defect]}):
+        stats = new_arch_inferencer._apply_aoi_coord_inspection(
+            panel_dir=tmp_path,
+            preprocessed_results=[fake_result],
+            omit_image=None, omit_overexposed=False,
+            product_resolution=(1920, 1080),
+        )
+
     assert stats["aoi_tile_count"] == 0
-    assert stats["aoi_edge_count"] == 1
+    assert stats["aoi_edge_count"] == 0
+    assert stats.get("aoi_unmatched", 0) == 1
+    assert tile.is_aoi_coord_tile is False
 
 
 def test_helper_skips_lighting_without_aoi_report(new_arch_inferencer, tmp_path):
@@ -180,7 +186,8 @@ def test_helper_skips_lighting_without_aoi_report(new_arch_inferencer, tmp_path)
         )
 
     mock_create.assert_not_called()
-    assert stats == {"aoi_tile_count": 0, "aoi_edge_count": 0}
+    assert stats["aoi_tile_count"] == 0
+    assert stats["aoi_edge_count"] == 0
 
 
 def test_v1_process_panel_reuses_parsed_aoi_report(tmp_path):
@@ -304,10 +311,10 @@ def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path
     assert kwargs["panel_dir"] == panel_dir
 
 
-def test_v2_e2e_aoi_edge_routes_through_edge_pt(new_arch_inferencer, tmp_path):
-    """E2E：新架構下，AOI 座標邊緣 defect → _apply_aoi_coord_inspection
-    → _inspect_aoi_edge_defect → _inspect_roi_patchcore(zone='edge')
-    → _get_inferencer_for_zone → _get_model_for(_, _, 'edge')。"""
+def test_v2_helper_does_not_invoke_edge_pt_for_aoi_coords(new_arch_inferencer, tmp_path):
+    """新架構 helper 不應再對 AOI 座標 ROI 跑 edge.pt（避免重複 PC 推論 +
+    避免寫入 edge_defects 讓記錄頁出現「CV 邊緣檢測」區塊）。
+    edge.pt 已由 grid tiling 在 _process_panel_v2 內為 edge zone 推論過。"""
     panel_dir = tmp_path / "panel"
     panel_dir.mkdir()
 
@@ -326,16 +333,11 @@ def test_v2_e2e_aoi_edge_routes_through_edge_pt(new_arch_inferencer, tmp_path):
     )
 
     fake_edge_def = MagicMock(product_x=1900, product_y=540, defect_code="L01")
-    edge_model = MagicMock()
 
     with patch.object(new_arch_inferencer, "_parse_aoi_report_txt",
                       return_value={"G0F00000": [fake_edge_def]}), \
-         patch.object(new_arch_inferencer, "_create_aoi_coord_tiles",
-                      return_value=([], [fake_edge_def])), \
-         patch("cv2.imread", return_value=np.ones((1080, 1920, 3), dtype=np.uint8)), \
-         patch.object(new_arch_inferencer, "_get_model_for", return_value=edge_model) as mock_for, \
-         patch.object(new_arch_inferencer, "predict_tile",
-                      return_value=(0.1, np.zeros((512, 512), dtype=np.float32))):
+         patch.object(new_arch_inferencer, "_get_model_for") as mock_for, \
+         patch.object(new_arch_inferencer, "predict_tile") as mock_pred:
 
         new_arch_inferencer._apply_aoi_coord_inspection(
             panel_dir=panel_dir,
@@ -344,9 +346,6 @@ def test_v2_e2e_aoi_edge_routes_through_edge_pt(new_arch_inferencer, tmp_path):
             product_resolution=(1920, 1080),
         )
 
-    # 串通驗證：_get_model_for 被叫，且 zone='edge'
-    assert mock_for.called, "_get_model_for 應被呼叫（新架構走 edge.pt 路徑）"
-    args = mock_for.call_args.args
-    assert args[0] == "M1"
-    assert args[1] == "G0F00000"
-    assert args[2] == "edge", f"zone 應為 'edge'，實際 {args[2]!r}"
+    mock_for.assert_not_called()
+    mock_pred.assert_not_called()
+    assert fake_result.edge_defects == [], "新架構 helper 不應寫入 edge_defects"
