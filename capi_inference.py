@@ -3662,12 +3662,18 @@ class CAPIInferencer:
         Returns:
             ``{"aoi_tile_count": int, "aoi_edge_count": int}``
         """
+        is_new_arch = bool(getattr(self.config, "is_new_architecture", False))
+
         if not self.config.aoi_coord_inspection_enabled:
+            if is_new_arch:
+                print("[v2] AOI 座標 attribution: 已停用（aoi_coord_inspection_enabled=False）")
             return {"aoi_tile_count": 0, "aoi_edge_count": 0}
 
         if aoi_report is None:
             aoi_report = self._parse_aoi_report_txt(panel_dir)
         if not aoi_report:
+            if is_new_arch:
+                print("[v2] AOI 座標 attribution: AOI report 解析為空（report 不存在或無 NG 條目）")
             return {"aoi_tile_count": 0, "aoi_edge_count": 0}
 
         # 新架構：grid tile 已涵蓋整個 panel 且 edge.pt 已為 edge zone 推論過，
@@ -3756,6 +3762,11 @@ class CAPIInferencer:
                     matched_tile.aoi_product_x = defect.product_x
                     matched_tile.aoi_product_y = defect.product_y
                     aoi_tile_count += 1
+        unmatched_tag = f", unmatched={aoi_unmatched}" if aoi_unmatched else ""
+        print(
+            f"[v2] AOI 座標 attribution: 標記 {aoi_tile_count} 個 grid tiles"
+            f"{unmatched_tag}"
+        )
         return {
             "aoi_tile_count": aoi_tile_count,
             "aoi_edge_count": 0,
@@ -5655,20 +5666,14 @@ class CAPIInferencer:
 
         # AOI 機檢座標 attribution（新架構：找包含座標的既存 grid tile 並標屬性，
         # 不再切新 tile，也不再對 edge defect 跑 PC ROI 推論）
-        aoi_stats = self._apply_aoi_coord_inspection(
+        # log 由 helper 內部負責印（disabled / empty / attribution 三種情境統一處理）
+        self._apply_aoi_coord_inspection(
             panel_dir=Path(panel_dir),
             preprocessed_results=results,
             omit_image=omit_image,
             omit_overexposed=omit_overexposed,
             product_resolution=product_resolution,
         )
-        if self.config.aoi_coord_inspection_enabled:
-            unmatched = aoi_stats.get("aoi_unmatched", 0)
-            unmatched_tag = f", unmatched={unmatched}" if unmatched else ""
-            print(
-                f"[v2] AOI 座標 attribution: 標記 {aoi_stats['aoi_tile_count']} 個 grid tiles"
-                f"{unmatched_tag}"
-            )
 
         post_start = time.time()
         self._apply_omit_dust_postprocess(

@@ -364,6 +364,10 @@ def test_write_manifest_yaml(tmp_path):
     assert y["scratch_dinov2_repo_path"] == "deployment/dinov2_repo"
     assert y["scratch_bundle_path"].endswith(".pkl")
     assert y["scratch_dinov2_weights_path"].endswith(".pth")
+    # AOI 機檢座標 attribution 預設開啟，否則 helper 早退、記錄頁的 🎯 AOI 區塊永遠不會出現。
+    assert y["aoi_coord_inspection_enabled"] is True
+    assert y["aoi_report_path_replace_from"] == "yuantu"
+    assert y["aoi_report_path_replace_to"] == "Report"
 
 
 def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
