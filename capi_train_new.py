@@ -562,6 +562,12 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
         "enable_panel_polygon": True,
         "model_mapping": model_mapping,
         "threshold_mapping": threshold_mapping,
+        # AOI 機檢座標 attribution — 新架構 helper 改走「找既存 grid tile 標屬性」
+        # 而非切新 tile 推論，幾乎零成本，預設開啟。bundle yaml 缺此欄會走 CAPIConfig
+        # 預設 False，記錄頁的 🎯 AOI 機檢座標推論 區塊永遠不出現。
+        "aoi_coord_inspection_enabled": True,
+        "aoi_report_path_replace_from": "yuantu",
+        "aoi_report_path_replace_to": "Report",
         # Scratch classifier post-filter — 預設承襲 configs/capi_3f.yaml 的 production
         # 設定，避免新架構 machine_config.yaml 缺欄位走預設空字串、產線載入時撞網路。
         "scratch_classifier_enabled": True,
