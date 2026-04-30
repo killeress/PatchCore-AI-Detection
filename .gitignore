@@ -39,7 +39,9 @@ test_dust_comparison_output/
 static/heatmaps/
 temp/
 tmp/
+.tmp/
 .superpowers/
+.worktrees/
 
 # Data files and screenshots
 *.xls
