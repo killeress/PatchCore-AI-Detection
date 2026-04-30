@@ -572,7 +572,29 @@ class CAPIInferencer:
     def _get_threshold_for_prefix(self, prefix: str) -> float:
         """根據圖片前綴取得對應的閾值"""
         return self._threshold_mapping.get(prefix, self.threshold)
-    
+
+    def _get_inferencer_for_zone(self, prefix: str, zone: str) -> Optional[Any]:
+        """新架構：依 (prefix, zone) 走 nested model_mapping；舊架構：fallback 到 prefix。
+
+        新架構 (is_new_architecture=True) 的 model_mapping 是
+        ``{prefix: {"inner": path, "edge": path}}``，需要 zone 才能解析。
+        舊架構 ``{prefix: path}``，zone 參數忽略。
+        """
+        if getattr(self.config, "is_new_architecture", False):
+            return self._get_model_for(self.config.machine_id, prefix, zone)
+        return self._get_inferencer_for_prefix(prefix)
+
+    def _get_threshold_for_zone(self, prefix: str, zone: str) -> float:
+        """同上，threshold 版本。新架構 threshold_mapping 是 ``{prefix: {inner, edge}}``。"""
+        if getattr(self.config, "is_new_architecture", False):
+            thr_map = self.config.threshold_mapping.get(prefix)
+            if isinstance(thr_map, dict):
+                return float(thr_map.get(zone, self.threshold))
+            if thr_map is not None:
+                return float(thr_map)
+            return self.threshold
+        return self._get_threshold_for_prefix(prefix)
+
     def _load_mark_template(self) -> None:
         """載入 MARK 模板"""
         template_path = self.config.get_mark_template_full_path(self.base_dir)
