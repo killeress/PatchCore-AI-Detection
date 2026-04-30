@@ -231,6 +231,20 @@ class CAPIConfig:
         config.config_path = path
         return config
 
+    @staticmethod
+    def _normalize_threshold_mapping(raw_threshold_mapping: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize legacy flat and v2 nested threshold mappings to numeric values."""
+        normalized: Dict[str, Any] = {}
+        for prefix, value in (raw_threshold_mapping or {}).items():
+            if isinstance(value, dict):
+                normalized[prefix] = {
+                    zone: float(zone_value)
+                    for zone, zone_value in value.items()
+                }
+            else:
+                normalized[prefix] = float(value)
+        return normalized
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "CAPIConfig":
         """從 dict 建立 CAPIConfig（供 round-trip / 測試使用）"""
@@ -252,10 +266,7 @@ class CAPIConfig:
 
         # threshold_mapping：舊架構為 {prefix: float}，新架構為 {prefix: {inner: float, edge: float}}
         raw_threshold_mapping = data.get("threshold_mapping", {})
-        if is_new:
-            threshold_mapping: Dict[str, Any] = raw_threshold_mapping
-        else:
-            threshold_mapping = {k: float(v) for k, v in raw_threshold_mapping.items()}
+        threshold_mapping = cls._normalize_threshold_mapping(raw_threshold_mapping)
 
         config = cls(
             machine_id=data.get("machine_id", "CAPI_3F"),
@@ -527,7 +538,7 @@ class CAPIConfig:
         if "model_mapping" in param_map and isinstance(param_map["model_mapping"], dict):
             self.model_mapping = param_map["model_mapping"]
         if "threshold_mapping" in param_map and isinstance(param_map["threshold_mapping"], dict):
-            self.threshold_mapping = {k: float(v) for k, v in param_map["threshold_mapping"].items()}
+            self.threshold_mapping = self._normalize_threshold_mapping(param_map["threshold_mapping"])
         if "patchcore_filter_enabled" in param_map:
             val = param_map["patchcore_filter_enabled"]
             self.patchcore_filter_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)

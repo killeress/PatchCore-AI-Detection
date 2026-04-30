@@ -862,15 +862,54 @@ class CAPIServer:
             logger.info(f"[Dispatch] Creating new-arch inferencer for machine='{model_id}' (device={device})")
             inferencer = CAPIInferencer(
                 config=cfg,
-                model_path=cfg.model_path or None,
+                model_path=None,
                 device=device,
                 threshold=cfg.anomaly_threshold,
             )
+            loaded, total = inferencer.preload_v2_models()
+            logger.info(f"[Dispatch] Preloaded new-arch models for machine='{model_id}' ({loaded}/{total})")
             self.inferencers[model_id] = inferencer
             return inferencer
 
         # 舊架構機種或找不到 config：回傳 legacy inferencer
         return self.inferencer
+
+    @staticmethod
+    def _count_new_arch_model_units(cfg: "CAPIConfig") -> int:
+        """計算新架構 nested model_mapping 內實際模型數。"""
+        total = 0
+        for mapping in cfg.model_mapping.values():
+            if not isinstance(mapping, dict):
+                continue
+            total += sum(1 for zone in ("inner", "edge") if mapping.get(zone))
+        return total
+
+    def _prewarm_configured_new_arch_inferencers(self) -> None:
+        """啟動時建立並預熱所有已配置的新架構 per-machine inferencer。"""
+        for machine_id, cfg in self.configs_by_machine.items():
+            if not getattr(cfg, "is_new_architecture", False):
+                continue
+            if machine_id in self.inferencers:
+                continue
+            self._get_or_create_inferencer(machine_id)
+
+    def _adopt_loaded_config(self, capi_config: "CAPIConfig") -> None:
+        """讓 dispatcher/status 與實際 inferencer 共用同一份 loaded config。"""
+        existing = self.configs_by_machine.get(capi_config.machine_id)
+        if existing is None:
+            return
+
+        was_fallback = (
+            self.fallback_config is existing
+            or (
+                self.fallback_config is not None
+                and self.fallback_config.machine_id == capi_config.machine_id
+            )
+        )
+        self.configs_by_machine[capi_config.machine_id] = capi_config
+        if was_fallback:
+            self.fallback_config = capi_config
+            self.config = capi_config
 
     def _health_check_models(self) -> None:
         """啟動時驗證新架構機種的模型檔案是否存在。
@@ -936,8 +975,11 @@ class CAPIServer:
             logger.warning(f"Failed to load DB config, using YAML values: {e}")
             db_dict = {}
 
-        # model_path 和 threshold 統一由 config 管理 (DB 優先, YAML fallback)
-        model_path = capi_config.model_path or "./model.pt"
+        self._adopt_loaded_config(capi_config)
+
+        # model_path 和 threshold 統一由 config 管理 (DB 優先, YAML fallback)。
+        # 新架構使用 nested model_mapping，舊版 model.pt 不再作為 fallback 載入。
+        model_path = None if capi_config.is_new_architecture else (capi_config.model_path or "./model.pt")
         threshold = capi_config.anomaly_threshold
 
         # 多模型模式: 當 capi_config 有 model_mapping 時，model_path 僅作為 fallback
@@ -955,6 +997,11 @@ class CAPIServer:
             device=device,
             threshold=threshold,
         )
+
+        if capi_config.is_new_architecture:
+            loaded, total = self.inferencer.preload_v2_models()
+            self.inferencers[capi_config.machine_id] = self.inferencer
+            logger.info(f"[Startup] Preloaded new-arch models for machine='{capi_config.machine_id}' ({loaded}/{total})")
         
         # 同步 CV Edge 設定到 Inferencer
         try:
@@ -963,10 +1010,16 @@ class CAPIServer:
             self.inferencer.update_edge_config(edge_cfg)
         except Exception as e:
             logger.warning(f"Failed to load CV Edge config from DB: {e}")
+
+        self._prewarm_configured_new_arch_inferencers()
         
         # 更新全域狀態的模型資訊
         with server_status.lock:
-            if capi_config.model_mapping:
+            if capi_config.is_new_architecture:
+                loaded_count = len(getattr(self.inferencer, "_model_cache_v2", {}))
+                total_count = self._count_new_arch_model_units(capi_config)
+                server_status.model_version = f"New-Arch ({loaded_count}/{total_count} loaded)"
+            elif capi_config.model_mapping:
                 # 多模型模式：顯示已載入數量
                 loaded_count = len(self.inferencer._inferencers)
                 total_count = len(capi_config.model_mapping)
@@ -1008,12 +1061,20 @@ class CAPIServer:
         cfg = self.fallback_config
         if cfg is None or not cfg.is_new_architecture:
             return
+        if not cfg.model_mapping:
+            return
         first_unit = next(iter(cfg.model_mapping.values()))
         bundle_name = Path(first_unit["inner"]).parent.name
+        inferencer = getattr(self, "inferencers", {}).get(cfg.machine_id)
+        loaded_units = len(getattr(inferencer, "_model_cache_v2", {})) if inferencer else 0
+        total_units = self._count_new_arch_model_units(cfg)
 
         with server_status.lock:
             server_status.threshold_mapping = cfg.threshold_mapping
-            server_status.model_version = f"Bundle {bundle_name} ({len(cfg.model_mapping)} lighting × inner/edge)"
+            server_status.model_version = (
+                f"Bundle {bundle_name} "
+                f"({len(cfg.model_mapping)} lighting × inner/edge, {loaded_units}/{total_units} loaded)"
+            )
 
     def apply_threshold_inplace(
         self, machine_id: str, lighting: str, zone: str, value: float,

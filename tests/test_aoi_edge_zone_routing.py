@@ -80,6 +80,23 @@ def test_zone_inferencer_new_arch_routes_to_inner(new_arch_inferencer):
         assert loaded_path.name == "G0F-inner.pt"
 
 
+def test_preload_v2_models_loads_all_units_once(new_arch_inferencer):
+    """新架構 startup prewarm 應載入所有 inner/edge，並重用 v2 cache。"""
+    with patch.object(
+        new_arch_inferencer,
+        "_load_model_from_path",
+        side_effect=lambda path: f"MODEL:{path.name}",
+    ) as mock_load:
+        loaded, total = new_arch_inferencer.preload_v2_models()
+        loaded_again, total_again = new_arch_inferencer.preload_v2_models()
+
+    assert (loaded, total) == (2, 2)
+    assert (loaded_again, total_again) == (2, 2)
+    assert mock_load.call_count == 2
+    assert new_arch_inferencer._model_cache_v2[("M1", "G0F00000", "inner")] == "MODEL:G0F-inner.pt"
+    assert new_arch_inferencer._model_cache_v2[("M1", "G0F00000", "edge")] == "MODEL:G0F-edge.pt"
+
+
 def test_zone_threshold_legacy_returns_flat(legacy_inferencer):
     assert legacy_inferencer._get_threshold_for_zone("G0F00000", "edge") == 0.55
     assert legacy_inferencer._get_threshold_for_zone("G0F00000", "inner") == 0.55

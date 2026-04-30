@@ -45,7 +45,29 @@ def test_capi_config_new_arch_yaml():
     assert cfg.is_new_architecture is True
     assert cfg.edge_threshold_px == 768
     assert cfg.model_mapping["G0F00000"]["inner"] == "g_inner.pt"
+    assert cfg.threshold_mapping["G0F00000"]["inner"] == 0.62
     Path(path).unlink()
+
+
+def test_apply_db_overrides_new_arch_threshold_mapping_keeps_nested_values():
+    cfg = CAPIConfig(
+        is_new_architecture=True,
+        threshold_mapping={"G0F00000": {"inner": 0.5, "edge": 0.5}},
+    )
+    cfg.apply_db_overrides([
+        {
+            "param_name": "threshold_mapping",
+            "decoded_value": {
+                "G0F00000": {"inner": "0.42", "edge": "0.73"},
+                "STANDARD": {"inner": 0.61, "edge": 0.82},
+            },
+        }
+    ])
+
+    assert cfg.threshold_mapping == {
+        "G0F00000": {"inner": 0.42, "edge": 0.73},
+        "STANDARD": {"inner": 0.61, "edge": 0.82},
+    }
 
 
 def test_capi_config_machine_id_alone_is_not_new_arch():
