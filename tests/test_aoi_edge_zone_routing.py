@@ -92,3 +92,27 @@ def test_zone_threshold_new_arch_picks_zone_value(new_arch_inferencer):
 def test_zone_threshold_new_arch_unknown_prefix_falls_back(new_arch_inferencer):
     """新架構：prefix 不在 mapping → fallback 到 self.threshold。"""
     assert new_arch_inferencer._get_threshold_for_zone("UNKNOWN", "edge") == 0.5
+
+
+def test_inspector_mode_legacy_reads_config(legacy_inferencer):
+    """舊架構：照舊讀 edge_inspector.config.aoi_edge_inspector。"""
+    legacy_inferencer.edge_inspector = MagicMock()
+    legacy_inferencer.edge_inspector.config.aoi_edge_inspector = "fusion"
+    assert legacy_inferencer._resolve_aoi_edge_inspector_mode() == "fusion"
+
+
+def test_inspector_mode_new_arch_forces_patchcore(new_arch_inferencer):
+    """新架構：無視 config，強制回 'patchcore'（edge.pt 已專為 edge 訓練，
+    fusion / cv 不再有理論基礎）。"""
+    new_arch_inferencer.edge_inspector = MagicMock()
+    new_arch_inferencer.edge_inspector.config.aoi_edge_inspector = "fusion"
+    assert new_arch_inferencer._resolve_aoi_edge_inspector_mode() == "patchcore"
+
+    new_arch_inferencer.edge_inspector.config.aoi_edge_inspector = "cv"
+    assert new_arch_inferencer._resolve_aoi_edge_inspector_mode() == "patchcore"
+
+
+def test_inspector_mode_no_edge_inspector_default_cv(legacy_inferencer):
+    """舊架構 + edge_inspector 不存在 → 'cv' (與既有 fallback 一致)。"""
+    legacy_inferencer.edge_inspector = None
+    assert legacy_inferencer._resolve_aoi_edge_inspector_mode() == "cv"
