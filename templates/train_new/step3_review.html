@@ -68,15 +68,15 @@
         <button onclick="closePreview()">關閉 (Esc)</button>
       </div>
     </div>
-    <button class="modal-nav prev" id="modal-prev" onclick="modalNavigate(-1)" aria-label="上一張">‹</button>
-    <button class="modal-nav next" id="modal-next" onclick="modalNavigate(1)" aria-label="下一張">›</button>
     <img id="modal-img" alt="preview">
-    <div class="modal-foot" id="modal-foot">
-      <span><kbd>←</kbd><kbd>→</kbd> 切換</span>
-      <span><kbd>Del</kbd> 排除</span>
-      <span><kbd>A</kbd> 加入</span>
-      <span><kbd>Esc</kbd> 關閉</span>
-    </div>
+  </div>
+  <button class="modal-nav prev" id="modal-prev" onclick="modalNavigate(-1)" aria-label="上一張">‹</button>
+  <button class="modal-nav next" id="modal-next" onclick="modalNavigate(1)" aria-label="下一張">›</button>
+  <div class="modal-foot" id="modal-foot">
+    <span><kbd>←</kbd><kbd>→</kbd> 切換</span>
+    <span><kbd>Del</kbd> 排除</span>
+    <span><kbd>A</kbd> 加入</span>
+    <span><kbd>Esc</kbd> 關閉</span>
   </div>
 </div>
 
@@ -113,20 +113,20 @@
   .tile.empty { cursor:default;opacity:.35;background:#1e1e2e; }
   .modal { display:none;position:fixed;inset:0;background:rgba(8,11,24,.86);z-index:1000;align-items:center;justify-content:center;padding:24px; }
   .modal.open { display:flex; }
-  .modal-shell { position:relative;max-width:min(96vw,1180px);max-height:94vh;background:#1e1e2e;border:1px solid #45475a;border-radius:8px;overflow:hidden;box-shadow:0 22px 70px rgba(0,0,0,.45); }
+  .modal-shell { position:relative;max-width:min(96vw,1180px);max-height:calc(94vh - 44px);background:#1e1e2e;border:1px solid #45475a;border-radius:8px;overflow:hidden;box-shadow:0 22px 70px rgba(0,0,0,.45); }
   .modal-top { height:42px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 12px;border-bottom:1px solid #313244;color:#cdd6f4;font-size:.84rem; }
   .modal-top button { background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:5px 10px;cursor:pointer; }
   .modal-top .modal-actions { display:flex;align-items:center;gap:8px; }
   .modal-top .modal-decision { font-size:.78rem;padding:2px 8px;border-radius:10px;border:1px solid currentColor; }
   .modal-top .modal-decision.accept { color:#a6e3a1; }
   .modal-top .modal-decision.reject { color:#f38ba8; }
-  #modal-img { display:block;max-width:96vw;max-height:calc(94vh - 42px);object-fit:contain;background:#111827; }
-  .modal-nav { position:absolute;top:50%;transform:translateY(-50%);width:42px;height:64px;background:rgba(30,30,46,.7);border:1px solid #45475a;color:#cdd6f4;font-size:1.5rem;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none;transition:background .15s ease;border-radius:6px; }
-  .modal-nav:hover { background:rgba(137,180,250,.55);color:#1e1e2e; }
-  .modal-nav.prev { left:10px; }
-  .modal-nav.next { right:10px; }
+  #modal-img { display:block;max-width:min(96vw,1180px);max-height:calc(94vh - 86px);object-fit:contain;background:#111827; }
+  .modal-nav { position:absolute;top:50%;transform:translateY(-50%);width:42px;height:64px;background:rgba(30,30,46,.85);border:1px solid #45475a;color:#cdd6f4;font-size:1.5rem;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none;transition:background .15s ease;border-radius:6px;z-index:2; }
+  .modal-nav:hover { background:rgba(137,180,250,.7);color:#1e1e2e; }
+  .modal-nav.prev { left:14px; }
+  .modal-nav.next { right:14px; }
   .modal-nav[disabled] { opacity:.3;cursor:not-allowed; }
-  .modal-foot { position:absolute;left:0;right:0;bottom:0;padding:8px 14px;background:linear-gradient(180deg, rgba(8,11,24,0), rgba(8,11,24,.9));color:#a6adc8;font-size:.72rem;display:flex;justify-content:center;gap:14px;flex-wrap:wrap;pointer-events:none; }
+  .modal-foot { position:absolute;left:50%;bottom:10px;transform:translateX(-50%);padding:6px 14px;background:rgba(8,11,24,.85);border:1px solid #45475a;border-radius:6px;color:#a6adc8;font-size:.72rem;display:flex;justify-content:center;gap:14px;flex-wrap:wrap;pointer-events:none;z-index:2; }
   .modal-foot kbd { background:rgba(30,30,46,.85);border:1px solid #45475a;border-radius:3px;padding:0 5px;color:#cdd6f4;font-family:'JetBrains Mono',Consolas,monospace;font-size:.7rem; }
   @media (max-width:760px) {
     .grid { grid-template-columns:repeat(auto-fill,minmax(68px,1fr)); }
