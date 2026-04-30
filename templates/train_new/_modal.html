@@ -1,0 +1,240 @@
+{# 訓練精靈共用 modal 元件 — 提供 capAlert / capConfirm 取代瀏覽器原生 alert/confirm。
+   include 在 step1/step3/step4 的 content block 末尾即可使用。
+   API：
+     capAlert(message, opts?) -> Promise<true>
+       opts: {title?, type?='info'|'error'|'warn'|'success', okText?='確定'}
+     capConfirm(message, opts?) -> Promise<bool>
+       opts: {title?, confirmText?='確定', cancelText?='取消', danger?=false}
+   鍵盤：Esc 關閉（confirm 視為取消），Enter 觸發目前 focus 的按鈕（瀏覽器預設）。
+#}
+
+<div id="cap-modal-root" class="cap-modal-root" aria-hidden="true">
+  <div class="cap-modal-backdrop" data-cap-dismiss="backdrop"></div>
+  <div class="cap-modal-stack" role="presentation"></div>
+</div>
+
+<style>
+  .cap-modal-root { position: fixed; inset: 0; z-index: 5000; pointer-events: none; }
+  .cap-modal-root[aria-hidden="false"] { pointer-events: auto; }
+  .cap-modal-backdrop {
+    position: absolute; inset: 0;
+    background: radial-gradient(ellipse at center, rgba(11,12,24,.72) 0%, rgba(8,9,18,.94) 100%);
+    backdrop-filter: blur(7px);
+    opacity: 0;
+    transition: opacity .2s ease;
+  }
+  .cap-modal-root[aria-hidden="false"] .cap-modal-backdrop { opacity: 1; }
+  .cap-modal-stack {
+    position: relative; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+
+  .cap-modal {
+    position: relative;
+    min-width: 340px; max-width: 520px; width: 100%;
+    background: #1a1a26;
+    border: 1px solid #313244;
+    border-left: 3px solid #89b4fa;
+    border-radius: 8px;
+    box-shadow:
+      0 32px 80px -12px rgba(0,0,0,.7),
+      0 0 0 1px rgba(137,180,250,.06),
+      inset 0 1px 0 rgba(255,255,255,.04);
+    color: #cdd6f4;
+    font-family: 'Fira Sans', 'Segoe UI', system-ui, sans-serif;
+    overflow: hidden;
+    transform: translateY(8px); opacity: 0;
+    transition: transform .22s cubic-bezier(.21,.67,.27,1.01), opacity .18s ease;
+  }
+  .cap-modal.entering { transform: translateY(0); opacity: 1; }
+  .cap-modal.leaving { transform: translateY(4px); opacity: 0; }
+  .cap-modal[data-type="error"]   { border-left-color: #f38ba8; }
+  .cap-modal[data-type="warn"]    { border-left-color: #fab387; }
+  .cap-modal[data-type="success"] { border-left-color: #a6e3a1; }
+  .cap-modal[data-type="confirm"] { border-left-color: #f9e2af; }
+
+  .cap-modal-tag {
+    font-family: 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+    font-size: .68rem; letter-spacing: 1.4px;
+    color: #6c7086;
+    padding: 12px 20px 0 20px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .cap-modal-tag::before {
+    content: ""; display: inline-block; width: 6px; height: 6px;
+    background: currentColor;
+  }
+  .cap-modal[data-type="error"]   .cap-modal-tag { color: #f38ba8; }
+  .cap-modal[data-type="warn"]    .cap-modal-tag,
+  .cap-modal[data-type="confirm"] .cap-modal-tag { color: #fab387; }
+  .cap-modal[data-type="success"] .cap-modal-tag { color: #a6e3a1; }
+
+  .cap-modal-header {
+    padding: 4px 20px 14px;
+    border-bottom: 1px solid #2a2b3c;
+  }
+  .cap-modal-title {
+    font-size: 1.02rem; font-weight: 700;
+    color: #f5e0dc; line-height: 1.35;
+    margin: 0;
+  }
+  .cap-modal-body {
+    padding: 16px 20px 18px;
+    color: #bac2de;
+    font-size: .9rem; line-height: 1.6;
+    white-space: pre-line;
+    max-height: 52vh; overflow-y: auto;
+  }
+  .cap-modal-body code {
+    font-family: 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+    background: #11111b; color: #cdd6f4;
+    padding: 1px 6px; border-radius: 3px; font-size: .82em;
+  }
+  .cap-modal-actions {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 16px;
+    background: rgba(0,0,0,.18);
+    border-top: 1px solid #2a2b3c;
+  }
+  .cap-modal-btn {
+    background: transparent; color: #a6adc8;
+    border: 1px solid #45475a; border-radius: 5px;
+    padding: 7px 18px;
+    font-family: 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+    font-size: .78rem; font-weight: 600; letter-spacing: .5px;
+    cursor: pointer;
+    transition: background-color .14s ease, color .14s ease, border-color .14s ease;
+  }
+  .cap-modal-btn:hover { background: #313244; color: #cdd6f4; border-color: #585b70; }
+  .cap-modal-btn:focus-visible { outline: 2px solid #89b4fa; outline-offset: 2px; }
+  .cap-modal-btn.primary { background: #89b4fa; color: #11111b; border-color: #89b4fa; }
+  .cap-modal-btn.primary:hover { background: #b4befe; border-color: #b4befe; color: #11111b; }
+  .cap-modal-btn.danger  { background: #f38ba8; color: #11111b; border-color: #f38ba8; }
+  .cap-modal-btn.danger:hover  { background: #eba0ac; border-color: #eba0ac; color: #11111b; }
+</style>
+
+<script>
+(function(){
+  const root = document.getElementById('cap-modal-root');
+  const stack = root.querySelector('.cap-modal-stack');
+  const backdrop = root.querySelector('.cap-modal-backdrop');
+  const openModals = [];
+
+  const TAG_TEXT = {
+    info:    '// NOTICE',
+    error:   '// ERROR',
+    warn:    '// WARNING',
+    confirm: '// CONFIRM',
+    success: '// OK',
+  };
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function _close(entry, value) {
+    const idx = openModals.indexOf(entry);
+    if (idx < 0) return;
+    openModals.splice(idx, 1);
+    entry.el.classList.remove('entering');
+    entry.el.classList.add('leaving');
+    setTimeout(() => {
+      entry.el.remove();
+      if (openModals.length === 0) root.setAttribute('aria-hidden', 'true');
+      if (entry.prevFocus && typeof entry.prevFocus.focus === 'function') {
+        try { entry.prevFocus.focus(); } catch (_) {}
+      }
+    }, 200);
+    entry.resolve(value);
+  }
+
+  function capModalShow({type='info', title, message, actions, dismissOnBackdrop=false, dismissValue=null}) {
+    return new Promise(resolve => {
+      const el = document.createElement('div');
+      el.className = 'cap-modal';
+      el.setAttribute('data-type', type);
+      el.setAttribute('role', 'alertdialog');
+      el.setAttribute('aria-modal', 'true');
+      const titleHtml = title
+        ? `<div class="cap-modal-header"><h2 class="cap-modal-title">${escapeHtml(title)}</h2></div>` : '';
+      el.innerHTML =
+        `<div class="cap-modal-tag">${escapeHtml(TAG_TEXT[type] || TAG_TEXT.info)}</div>` +
+        titleHtml +
+        `<div class="cap-modal-body">${escapeHtml(message)}</div>` +
+        `<div class="cap-modal-actions"></div>`;
+
+      const actionsBar = el.querySelector('.cap-modal-actions');
+      const entry = {
+        el, resolve, dismissOnBackdrop, dismissValue,
+        prevFocus: document.activeElement,
+      };
+
+      let focusTarget = null;
+      actions.forEach(act => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'cap-modal-btn' + (act.kind ? ' ' + act.kind : '');
+        btn.textContent = act.label;
+        btn.addEventListener('click', () => _close(entry, act.value));
+        actionsBar.appendChild(btn);
+        if (act.kind === 'primary' || act.kind === 'danger') focusTarget = btn;
+      });
+      if (!focusTarget && actionsBar.lastElementChild) focusTarget = actionsBar.lastElementChild;
+
+      stack.appendChild(el);
+      openModals.push(entry);
+      // 強制 reflow 確保 transition 觸發
+      void el.offsetWidth;
+      el.classList.add('entering');
+      root.setAttribute('aria-hidden', 'false');
+      if (focusTarget) setTimeout(() => focusTarget.focus(), 60);
+    });
+  }
+
+  backdrop.addEventListener('click', () => {
+    const top = openModals[openModals.length - 1];
+    if (top && top.dismissOnBackdrop) _close(top, top.dismissValue);
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (openModals.length === 0) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      const top = openModals[openModals.length - 1];
+      _close(top, top.dismissValue);
+    }
+    // Enter 由瀏覽器預設觸發 focused button click，不另處理
+  });
+
+  window.capAlert = function(message, opts) {
+    opts = opts || {};
+    return capModalShow({
+      type: opts.type || 'info',
+      title: opts.title,
+      message: String(message),
+      actions: [{label: opts.okText || '確定', value: true, kind: 'primary'}],
+      dismissOnBackdrop: opts.dismissOnBackdrop !== false,
+      dismissValue: true,
+    });
+  };
+
+  window.capConfirm = function(message, opts) {
+    opts = opts || {};
+    const danger = !!opts.danger;
+    return capModalShow({
+      type: opts.type || (danger ? 'warn' : 'confirm'),
+      title: opts.title,
+      message: String(message),
+      actions: [
+        {label: opts.cancelText || '取消', value: false, kind: ''},
+        {label: opts.confirmText || '確定', value: true, kind: danger ? 'danger' : 'primary'},
+      ],
+      dismissOnBackdrop: false,
+      dismissValue: false,
+    });
+  };
+})();
+</script>

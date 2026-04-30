@@ -58,6 +58,56 @@ def test_activate_bundle_writes_server_config(tmp_path):
     assert db.get_model_bundle(bid)["is_active"] == 0
 
 
+def test_activate_bundle_deactivates_across_machine_ids(tmp_path):
+    """全域單一 active：啟用 B 機種 bundle 時，A 機種 active bundle 也要被下架。"""
+    import yaml as yaml_mod
+    from capi_database import CAPIDatabase
+    from capi_model_registry import activate_bundle
+
+    sc_path = tmp_path / "server_config.yaml"
+    # 預設只有 legacy；待會兒兩個 bundle 都 activate 後 legacy 應該還在
+    sc_path.write_text(yaml_mod.dump({"model_configs": ["configs/capi_3f.yaml"]}))
+
+    a_dir = tmp_path / "model" / "MACHINE_A-20260428"
+    a_dir.mkdir(parents=True)
+    (a_dir / "machine_config.yaml").write_text(yaml_mod.dump({"machine_id": "MACHINE_A"}))
+    b_dir = tmp_path / "model" / "MACHINE_B-20260429"
+    b_dir.mkdir(parents=True)
+    (b_dir / "machine_config.yaml").write_text(yaml_mod.dump({"machine_id": "MACHINE_B"}))
+
+    db = CAPIDatabase(tmp_path / "test.db")
+    a_id = db.register_model_bundle({
+        "machine_id": "MACHINE_A", "bundle_path": str(a_dir),
+        "trained_at": "2026-04-28T15:30:45", "panel_count": 5,
+        "inner_tile_count": 0, "edge_tile_count": 0, "ng_tile_count": 0,
+        "bundle_size_bytes": 0, "job_id": "ja",
+    })
+    b_id = db.register_model_bundle({
+        "machine_id": "MACHINE_B", "bundle_path": str(b_dir),
+        "trained_at": "2026-04-29T15:30:45", "panel_count": 5,
+        "inner_tile_count": 0, "edge_tile_count": 0, "ng_tile_count": 0,
+        "bundle_size_bytes": 0, "job_id": "jb",
+    })
+
+    # 先啟用 A
+    activate_bundle(db, a_id, server_config_path=sc_path)
+    assert db.get_model_bundle(a_id)["is_active"] == 1
+    assert db.get_model_bundle(b_id)["is_active"] == 0
+    sc = yaml_mod.safe_load(sc_path.read_text())
+    assert any("MACHINE_A-20260428" in p for p in sc["model_configs"])
+
+    # 再啟用 B → A 應該被自動下架（跨 machine_id），legacy capi_3f.yaml 仍保留
+    activate_bundle(db, b_id, server_config_path=sc_path)
+    assert db.get_model_bundle(a_id)["is_active"] == 0
+    assert db.get_model_bundle(b_id)["is_active"] == 1
+    sc = yaml_mod.safe_load(sc_path.read_text())
+    assert not any("MACHINE_A-20260428" in p for p in sc["model_configs"]), \
+        "MACHINE_A 的 yaml 應該被自動移出 model_configs"
+    assert any("MACHINE_B-20260429" in p for p in sc["model_configs"])
+    assert "configs/capi_3f.yaml" in sc["model_configs"], \
+        "legacy capi_3f.yaml 不在 DB，不應被踢掉，留作最後 fallback"
+
+
 def test_delete_active_bundle_rejected(tmp_path):
     import pytest
     from capi_database import CAPIDatabase
@@ -233,6 +283,81 @@ def test_delete_training_data_unknown_bundle(tmp_path):
     db = CAPIDatabase(tmp_path / "test.db")
     with pytest.raises(ValueError, match="not found"):
         delete_training_data(db, 9999)
+
+
+def test_update_threshold_writes_yaml_and_json(tmp_path):
+    import json as _json
+    import yaml as yaml_mod
+    from capi_database import CAPIDatabase
+    from capi_model_registry import update_threshold
+
+    bundle_dir = tmp_path / "model" / "MX-20260430"
+    bundle_dir.mkdir(parents=True)
+    yaml_mod_text = yaml_mod.dump({
+        "machine_id": "MX",
+        "model_mapping": {"G0F00000": {"inner": "x.pt", "edge": "y.pt"}},
+        "threshold_mapping": {"G0F00000": {"inner": 0.5, "edge": 0.5}},
+    })
+    (bundle_dir / "machine_config.yaml").write_text(yaml_mod_text)
+    (bundle_dir / "thresholds.json").write_text(
+        _json.dumps({"G0F00000": {"inner": 0.5, "edge": 0.5}})
+    )
+
+    db = CAPIDatabase(tmp_path / "test.db")
+    bid = db.register_model_bundle({
+        "machine_id": "MX", "bundle_path": str(bundle_dir),
+        "trained_at": "2026-04-30T10:00:00", "panel_count": 1,
+        "inner_tile_count": 0, "edge_tile_count": 0, "ng_tile_count": 0,
+        "bundle_size_bytes": 0, "job_id": "j1",
+    })
+
+    res = update_threshold(db, bid, lighting="G0F00000", zone="inner", value=0.78)
+    assert res["ok"] is True
+    cfg = yaml_mod.safe_load((bundle_dir / "machine_config.yaml").read_text())
+    assert cfg["threshold_mapping"]["G0F00000"]["inner"] == 0.78
+    assert cfg["threshold_mapping"]["G0F00000"]["edge"] == 0.5    # 不動其他
+    thr_json = _json.loads((bundle_dir / "thresholds.json").read_text())
+    assert thr_json["G0F00000"]["inner"] == 0.78
+
+
+def test_update_threshold_rejects_bad_zone(tmp_path):
+    import pytest, yaml as yaml_mod
+    from capi_database import CAPIDatabase
+    from capi_model_registry import update_threshold
+
+    bundle_dir = tmp_path / "model" / "MX-20260430"
+    bundle_dir.mkdir(parents=True)
+    (bundle_dir / "machine_config.yaml").write_text(yaml_mod.dump({"threshold_mapping": {}}))
+    db = CAPIDatabase(tmp_path / "test.db")
+    bid = db.register_model_bundle({
+        "machine_id": "MX", "bundle_path": str(bundle_dir),
+        "trained_at": "2026-04-30T10:00:00", "panel_count": 1,
+        "inner_tile_count": 0, "edge_tile_count": 0, "ng_tile_count": 0,
+        "bundle_size_bytes": 0, "job_id": "j1",
+    })
+    with pytest.raises(ValueError, match="zone"):
+        update_threshold(db, bid, lighting="G0F00000", zone="middle", value=0.5)
+
+
+def test_update_threshold_rejects_unknown_unit(tmp_path):
+    import pytest, yaml as yaml_mod
+    from capi_database import CAPIDatabase
+    from capi_model_registry import update_threshold
+
+    bundle_dir = tmp_path / "model" / "MX-20260430"
+    bundle_dir.mkdir(parents=True)
+    (bundle_dir / "machine_config.yaml").write_text(yaml_mod.dump({
+        "threshold_mapping": {"G0F00000": {"inner": 0.5, "edge": 0.5}}
+    }))
+    db = CAPIDatabase(tmp_path / "test.db")
+    bid = db.register_model_bundle({
+        "machine_id": "MX", "bundle_path": str(bundle_dir),
+        "trained_at": "2026-04-30T10:00:00", "panel_count": 1,
+        "inner_tile_count": 0, "edge_tile_count": 0, "ng_tile_count": 0,
+        "bundle_size_bytes": 0, "job_id": "j1",
+    })
+    with pytest.raises(ValueError, match="找不到"):
+        update_threshold(db, bid, lighting="UNKNOWN", zone="inner", value=0.5)
 
 
 def test_export_zip_streams(tmp_path):

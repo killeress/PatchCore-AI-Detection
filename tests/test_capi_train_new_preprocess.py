@@ -145,9 +145,50 @@ def test_sample_ng_tiles(tmp_path):
         by_lighting.setdefault(t["lighting"], 0)
         by_lighting[t["lighting"]] += 1
     assert by_lighting == {"G0F00000": 10, "R0F00000": 10, "STANDARD": 10}
-    # NG zone 應為 None（不分 inner/edge）
+    # 沒有 manifest.csv → zone heuristic 全部回 None（不分 inner/edge）
     assert all(t["zone"] is None for t in db.tiles)
     assert all(t["source"] == "ng" for t in db.tiles)
+
+
+def test_sample_ng_tiles_classifies_zone_from_manifest(tmp_path):
+    """有 manifest.csv 時依 defect_y 標 zone：< EDGE_BAND_PX → edge，否則 inner。"""
+    import csv
+    from pathlib import Path
+    from capi_train_new import sample_ng_tiles, EDGE_BAND_PX
+
+    or_root = tmp_path / "over_review"
+    snap = or_root / "20260420_120000"
+    crop_dir = snap / "true_ng" / "G0F00000" / "crop"
+    crop_dir.mkdir(parents=True)
+    rows = []
+    for i in range(6):
+        fname = f"img_{i}.png"
+        (crop_dir / fname).write_bytes(b"x")
+        # 前 3 張落在 top edge band，後 3 張在 inner
+        defect_y = 100 if i < 3 else EDGE_BAND_PX + 500
+        rows.append({"sample_id": f"s{i}",
+                     "crop_path": f"true_ng/G0F00000/crop/{fname}",
+                     "defect_y": str(defect_y)})
+    with open(snap / "manifest.csv", "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["sample_id", "crop_path", "defect_y"])
+        w.writeheader()
+        w.writerows(rows)
+
+    class MockDB:
+        def __init__(self): self.tiles = []
+        def insert_tile_pool(self, job_id, tiles):
+            self.tiles.extend(tiles)
+            return list(range(len(tiles)))
+
+    db = MockDB()
+    sample_ng_tiles(job_id="j2", over_review_root=or_root, db=db,
+                    per_lighting=10, log=lambda m: None)
+
+    zones = {Path(t["source_path"]).name: t["zone"] for t in db.tiles}
+    for i in range(3):
+        assert zones[f"img_{i}.png"] == "edge", f"img_{i} 應為 edge"
+    for i in range(3, 6):
+        assert zones[f"img_{i}.png"] == "inner", f"img_{i} 應為 inner"
 
 
 def test_sample_ng_tiles_writes_confined_thumbnails(tmp_path):

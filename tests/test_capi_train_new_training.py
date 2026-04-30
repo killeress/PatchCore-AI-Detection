@@ -255,17 +255,18 @@ def test_train_one_patchcore_smoke(tmp_path, monkeypatch):
     assert out.name == "model.pt"
 
 
-def test_calibrate_threshold_uses_p10_and_train_max():
-    from capi_train_new import calibrate_threshold
-    # 假設 NG scores 與 train_max
-    ng_scores = sorted([0.5, 0.55, 0.6, 0.7, 0.8, 0.9])  # P10 ≈ 0.5
-    threshold = calibrate_threshold(ng_scores=ng_scores, train_max_score=0.4)
-    # max(P10=0.5, 0.4*1.05=0.42) → 0.5
-    assert threshold == 0.5
-    # train_max_score 較高的情況
-    threshold = calibrate_threshold(ng_scores=ng_scores, train_max_score=0.6)
-    # max(0.5, 0.63) → 0.63
-    assert abs(threshold - 0.63) < 1e-6
+def test_calibrate_threshold_returns_default():
+    """新版固定回 DEFAULT_THRESHOLD（不再依 NG/train_max 校準）。
+
+    舊邏輯 max(NG P10, train_max × 1.05) 因 NG 抽樣未分 zone 不準，
+    改為使用者在 UI 微調。
+    """
+    from capi_train_new import calibrate_threshold, DEFAULT_THRESHOLD
+    assert DEFAULT_THRESHOLD == 0.5
+    # 不論 NG / train_max 多少，都回固定值
+    assert calibrate_threshold(ng_scores=[0.5, 0.7, 0.9], train_max_score=0.4) == DEFAULT_THRESHOLD
+    assert calibrate_threshold(ng_scores=[], train_max_score=0.95) == DEFAULT_THRESHOLD
+    assert calibrate_threshold(ng_scores=[0.1], train_max_score=0.0) == DEFAULT_THRESHOLD
 
 
 def test_repair_hf_snapshot_symlinks_restores_zero_byte_weight(tmp_path):

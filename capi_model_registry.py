@@ -8,9 +8,19 @@ import sqlite3
 import zipfile
 import yaml
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
+
+from capi_train_new import ZONES
 
 logger = logging.getLogger(__name__)
+
+
+def _load_yaml(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _dump_yaml(path: Path, data: dict) -> None:
+    path.write_text(yaml.dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
 def list_bundles_grouped(db) -> Dict[str, List[dict]]:
@@ -130,17 +140,18 @@ def activate_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
         raise ValueError(f"bundle {bundle_id} not found")
     yaml_rel = str(Path(bundle["bundle_path"]) / "machine_config.yaml")
 
-    # 同 machine 其他 bundle 從 server_config 移除 (yaml path 各不同，仍需逐一處理)
-    for other in db.list_model_bundles(machine_id=bundle["machine_id"]):
-        if other["id"] == bundle_id:
-            continue
-        other_yaml = str(Path(other["bundle_path"]) / "machine_config.yaml")
-        _remove_from_model_configs(server_config_path, other_yaml)
-    # 批次設 inactive（一次 DB UPDATE 取代多次 set_bundle_active 呼叫）
-    db.deactivate_other_bundles_for_machine(bundle["machine_id"], except_id=bundle_id)
-
-    # 加入此 bundle 的 yaml 到 server_config.model_configs
-    _add_to_model_configs(server_config_path, yaml_rel)
+    # 全域單一 active：一次讀寫 server_config，移除所有其他 bundle 的 yaml。
+    # configs/capi_3f.yaml 不在 DB 內，不會被踢掉，保留作為最後 fallback。
+    other_yamls = {
+        str(Path(o["bundle_path"]) / "machine_config.yaml")
+        for o in db.list_model_bundles() if o["id"] != bundle_id
+    }
+    _rewrite_model_configs(
+        server_config_path,
+        keep=lambda p: p not in other_yamls,
+        ensure_present=yaml_rel,
+    )
+    db.deactivate_all_bundles(except_id=bundle_id)
     db.set_bundle_active(bundle_id, True)
 
     return {"ok": True, "message": "啟用成功，請重啟 server 才會生效"}
@@ -156,19 +167,25 @@ def deactivate_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
     return {"ok": True, "message": "已停用，請重啟 server 才會生效"}
 
 
-def _add_to_model_configs(server_config_path: Path, yaml_rel: str) -> None:
-    cfg = yaml.safe_load(server_config_path.read_text(encoding="utf-8")) or {}
-    configs = cfg.setdefault("model_configs", [])
-    if yaml_rel not in configs:
-        configs.append(yaml_rel)
-    server_config_path.write_text(yaml.dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+def _rewrite_model_configs(
+    server_config_path: Path,
+    keep: Callable[[str], bool],
+    ensure_present: Optional[str] = None,
+) -> None:
+    """單次讀寫 server_config.yaml 的 model_configs。
+
+    keep(p) → True 保留；ensure_present 為非 None 時保證該 path 在清單中。
+    """
+    cfg = _load_yaml(server_config_path)
+    configs = [p for p in cfg.get("model_configs", []) if keep(p)]
+    if ensure_present is not None and ensure_present not in configs:
+        configs.append(ensure_present)
+    cfg["model_configs"] = configs
+    _dump_yaml(server_config_path, cfg)
 
 
 def _remove_from_model_configs(server_config_path: Path, yaml_rel: str) -> None:
-    cfg = yaml.safe_load(server_config_path.read_text(encoding="utf-8")) or {}
-    configs = cfg.get("model_configs", [])
-    cfg["model_configs"] = [p for p in configs if p != yaml_rel]
-    server_config_path.write_text(yaml.dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    _rewrite_model_configs(server_config_path, keep=lambda p: p != yaml_rel)
 
 
 def delete_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
@@ -202,6 +219,54 @@ def delete_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
         shutil.rmtree(bundle_path, ignore_errors=False)
     db.delete_model_bundle(bundle_id)
     return {"ok": True}
+
+
+def update_threshold(db, bundle_id: int, lighting: str, zone: str, value: float) -> dict:
+    """改 bundle 的 machine_config.yaml + thresholds.json 內某個 (lighting, zone) 的 threshold。
+
+    回傳 dict 包含 machine_id，呼叫端用以觸發 server in-place reload。
+    thresholds.json 必須同步更新——它是模型庫細節 modal 顯示的來源
+    （capi_model_registry.get_bundle_detail / capi_web step5_done 都會讀）。
+    """
+    if zone not in ZONES:
+        raise ValueError(f"zone 必須是 {ZONES}，收到 {zone!r}")
+    if not (0.0 <= value <= 10.0):
+        raise ValueError(f"threshold 範圍應在 0.0~10.0，收到 {value}")
+
+    bundle = db.get_model_bundle(bundle_id)
+    if not bundle:
+        raise ValueError(f"bundle {bundle_id} not found")
+
+    bundle_dir = Path(bundle["bundle_path"])
+    yaml_path = bundle_dir / "machine_config.yaml"
+    thr_path = bundle_dir / "thresholds.json"
+    rounded = round(float(value), 4)
+
+    try:
+        cfg = _load_yaml(yaml_path)
+    except FileNotFoundError:
+        raise ValueError(f"machine_config.yaml 不存在: {yaml_path}")
+    light_map = cfg.setdefault("threshold_mapping", {}).get(lighting)
+    if not isinstance(light_map, dict) or zone not in light_map:
+        raise ValueError(f"yaml 中找不到 threshold_mapping[{lighting}][{zone}]")
+    light_map[zone] = rounded
+    _dump_yaml(yaml_path, cfg)
+
+    try:
+        thresholds = json.loads(thr_path.read_text(encoding="utf-8"))
+        thresholds.setdefault(lighting, {})[zone] = rounded
+        thr_path.write_text(json.dumps(thresholds, indent=2, ensure_ascii=False), encoding="utf-8")
+    except FileNotFoundError:
+        pass
+    except json.JSONDecodeError as e:
+        logger.warning("update_threshold: thresholds.json 解析失敗，跳過同步: %s", e)
+
+    return {
+        "ok": True,
+        "machine_id": bundle["machine_id"],
+        "lighting": lighting, "zone": zone, "value": rounded,
+        "message": "已更新 threshold，請重啟 server 才會生效",
+    }
 
 
 def export_bundle_zip(bundle_path: Path, machine_id: str) -> bytes:

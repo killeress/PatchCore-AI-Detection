@@ -193,7 +193,7 @@ function toggleSelect(tr) {
   } else {
     if (_selected.size >= 5) return;
     if (_selectedMachineId && machineId !== _selectedMachineId) {
-      alert(`請選擇相同機種 ID 的 panel。目前已選：${_selectedMachineId}`);
+      capAlert(`請選擇相同機種 ID 的 panel。\n目前已選：${_selectedMachineId}`, {type: 'warn', title: '機種不一致'});
       return;
     }
     _selectedMachineId = machineId;
@@ -279,8 +279,8 @@ function submitStart() {
   if (!mid) return;
   const {params, error} = collectTrainingParams();
   if (error) {
-    alert('訓練設定錯誤: ' + error);
     document.getElementById('train-params').setAttribute('open', '');
+    capAlert(error, {type: 'error', title: '訓練設定錯誤'});
     return;
   }
   const body = {machine_id: mid, panel_paths: Array.from(_selected)};
@@ -290,18 +290,26 @@ function submitStart() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body),
   }).then(r => r.json()).then(d => {
-    if (d.error) { alert('錯誤: ' + d.error + (d.active_job_id ? ` (進行中: ${d.active_job_id})` : '')); return; }
+    if (d.error) {
+      const msg = d.error + (d.active_job_id ? `\n\n進行中 job：${d.active_job_id}` : '');
+      capAlert(msg, {type: 'error', title: '無法建立訓練 job'});
+      return;
+    }
     window.location.href = '/train/new/progress?job_id=' + encodeURIComponent(d.job_id);
   });
 }
 
-function cancelReviewJob(jobId) {
-  if (!confirm(`取消審核中的訓練 job？\n${jobId}\n\n取消後可以重新從 Step 1 建立新 job。`)) return;
+async function cancelReviewJob(jobId) {
+  const ok = await capConfirm(
+    `Job ID: ${jobId}\n\n取消後可重新從 Step 1 建立新 job。`,
+    {title: '取消審核中的訓練 job？', confirmText: '取消此 job', cancelText: '保留', danger: true}
+  );
+  if (!ok) return;
   fetch(`/api/train/new/cancel/${encodeURIComponent(jobId)}`, {method: 'POST'})
     .then(r => r.json())
     .then(d => {
       if (d.error) {
-        alert('取消失敗: ' + d.error);
+        capAlert(d.error, {type: 'error', title: '取消失敗'});
         return;
       }
       location.href = '/train/new';
@@ -323,4 +331,6 @@ function escapeAttr(value) {
 
 document.addEventListener('DOMContentLoaded', loadPanels);
 </script>
+
+{% include "train_new/_modal.html" %}
 {% endblock %}

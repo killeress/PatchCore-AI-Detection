@@ -797,7 +797,6 @@ class CAPIServer:
         default_cfg_path = inf_cfg.get("config_path", "configs/capi_3f.yaml")
 
         cfg_paths: list = self.server_config.get("model_configs", [default_cfg_path])
-        fallback_path: str = self.server_config.get("fallback_model_config", default_cfg_path)
 
         def resolve_config_path(raw_path: str) -> Path:
             path = Path(raw_path)
@@ -815,18 +814,22 @@ class CAPIServer:
             except Exception as e:
                 logger.warning(f"[MultiConfig] Failed to load config {path}: {e}")
 
-        try:
-            resolved_fallback = resolve_config_path(fallback_path)
-            self.fallback_config = CAPIConfig.from_yaml(str(resolved_fallback))
-            logger.info(f"[MultiConfig] Fallback config: {resolved_fallback} (machine='{self.fallback_config.machine_id}')")
-        except Exception as e:
-            logger.warning(f"[MultiConfig] Failed to load fallback config {fallback_path}: {e}")
-            self.fallback_config = list(self.configs_by_machine.values())[0] if self.configs_by_machine else None
+        # Fallback 選擇：優先用唯一 active bundle (is_new_architecture=True)；
+        # 否則退回 legacy capi_3f.yaml；都沒有就拿 configs_by_machine 第一筆。
+        new_arch_cfgs = [c for c in self.configs_by_machine.values() if c.is_new_architecture]
+        if new_arch_cfgs:
+            self.fallback_config = new_arch_cfgs[0]
+            logger.info(f"[MultiConfig] Fallback = active bundle '{self.fallback_config.machine_id}'")
+        elif "CAPI_3F" in self.configs_by_machine:
+            self.fallback_config = self.configs_by_machine["CAPI_3F"]
+            logger.info("[MultiConfig] Fallback = legacy CAPI_3F (no active bundle)")
+        else:
+            self.fallback_config = next(iter(self.configs_by_machine.values()), None)
 
         if self.fallback_config is None:
             raise RuntimeError(
-                f"無法載入任何有效的模型 config。已嘗試 model_configs={cfg_paths} "
-                f"與 fallback={fallback_path}。Server 無法啟動。"
+                f"無法載入任何有效的模型 config。已嘗試 model_configs={cfg_paths}。"
+                f"Server 無法啟動。"
             )
 
         print(f"[SERVER] Loaded {loaded} model config(s): {list(self.configs_by_machine.keys())}", flush=True)
@@ -989,9 +992,50 @@ class CAPIServer:
                 
             server_status.device = display_device
             server_status.threshold = threshold
-            server_status.threshold_mapping = dict(capi_config.threshold_mapping)
-            
+            if not (self.fallback_config and self.fallback_config.is_new_architecture):
+                server_status.threshold_mapping = dict(capi_config.threshold_mapping)
+
+        self._publish_active_bundle_status()
+
         logger.info("Model loaded successfully")
+
+    def _publish_active_bundle_status(self) -> None:
+        """把 active bundle 的資訊寫進 server_status 供 dashboard 顯示。
+
+        舊架構（legacy capi_3f.yaml 沒被任何 bundle 取代）：保留 _load_inferencer
+        寫入的 flat dict，此處 no-op。
+        """
+        cfg = self.fallback_config
+        if cfg is None or not cfg.is_new_architecture:
+            return
+        first_unit = next(iter(cfg.model_mapping.values()))
+        bundle_name = Path(first_unit["inner"]).parent.name
+
+        with server_status.lock:
+            server_status.threshold_mapping = cfg.threshold_mapping
+            server_status.model_version = f"Bundle {bundle_name} ({len(cfg.model_mapping)} lighting × inner/edge)"
+
+    def apply_threshold_inplace(
+        self, machine_id: str, lighting: str, zone: str, value: float,
+    ) -> bool:
+        """即時更新 active config 的 threshold（不重啟、不重載 model）。
+
+        因 process_panel_v2 每次推論從 self.config.threshold_mapping 即時讀取，
+        改 dict 即生效。同步更新 server_status 讓 dashboard 反映。
+
+        Returns:
+            True  → 找到對應 active config 並已套用
+            False → 無對應（可能 bundle 未 activate，或 lighting/zone 不存在）
+        """
+        cfg = self.configs_by_machine.get(machine_id)
+        if cfg is None or not getattr(cfg, "is_new_architecture", False):
+            return False
+        light_map = cfg.threshold_mapping.get(lighting)
+        if not isinstance(light_map, dict) or zone not in light_map:
+            return False
+        light_map[zone] = round(float(value), 4)
+        self._publish_active_bundle_status()
+        return True
 
     def start(self):
         """啟動伺服器"""

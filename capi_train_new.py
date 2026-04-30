@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable
 import cv2
 
+from capi_dataset_export import read_manifest
 from capi_preprocess import (
     PreprocessConfig, preprocess_panel_folder, PanelPreprocessResult,
 )
@@ -36,11 +37,22 @@ class TrainingDB(Protocol):
     def list_tile_pool(self, job_id: str, **filters) -> List[dict]: ...
 
 LIGHTINGS = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
-ZONES = ("inner", "edge")
+ZONE_INNER = "inner"
+ZONE_EDGE = "edge"
+ZONES = (ZONE_INNER, ZONE_EDGE)
 TRAINING_UNITS = [(l, z) for l in LIGHTINGS for z in ZONES]  # 10 個
 
 MIN_TRAIN_TILES = 30
-NG_TILES_PER_LIGHTING = 30
+NG_TILES_PER_LIGHTING = 100
+
+# 與 PreprocessConfig.edge_threshold_px 同一單一來源（避免兩處飄移）。
+# NG zone heuristic：讀 over_review snapshot 的 manifest.csv，
+# defect_y < EDGE_BAND_PX → edge（top band），否則 → inner。
+# TODO: manifest 加 panel_height 欄後改成 min(y, h-y) < EDGE_BAND_PX，可同時抓 bottom edge。
+EDGE_BAND_PX = PreprocessConfig().edge_threshold_px  # 768
+
+# 該 zone 的 NG 樣本少於此閾值時，訓練端退回該 lighting 全部 NG（避免 calibration 失準）。
+MIN_NG_PER_ZONE = 5
 
 
 @dataclass
@@ -174,6 +186,49 @@ def preprocess_panels_to_pool(
     }
 
 
+def _make_ng_zone_classifier(log: Callable[[str], None]):
+    """回傳 zone_for(file_path) -> ZONE_EDGE | ZONE_INNER | None。
+
+    每個 snapshot 讀一次 manifest.csv（capi_dataset_export.read_manifest，BOM 容錯），
+    建 {filename: defect_y} 索引。defect_y < EDGE_BAND_PX 視為 edge（top）。
+    """
+    cache: Dict[Path, Dict[str, int]] = {}
+
+    def _load(snap_dir: Path) -> Dict[str, int]:
+        if snap_dir in cache:
+            return cache[snap_dir]
+        index: Dict[str, int] = {}
+        try:
+            rows = read_manifest(snap_dir / "manifest.csv")
+        except Exception as e:
+            log(f"  ⚠ 讀取 manifest 失敗 {snap_dir}: {e}")
+            rows = {}
+        for r in rows.values():
+            crop_rel = r.get("crop_path") or ""
+            if not crop_rel:
+                continue
+            try:
+                index[Path(crop_rel).name] = int(r.get("defect_y") or 0)
+            except (TypeError, ValueError):
+                continue
+        cache[snap_dir] = index
+        return index
+
+    def zone_for(file_path: Path) -> Optional[str]:
+        # 路徑慣例（與 capi_dataset_export 寫入結構對齊）：
+        # <over_review_root>/<snapshot>/true_ng/<lighting>/crop/<filename>
+        try:
+            snap_dir = file_path.parents[3]
+        except IndexError:
+            return None
+        defect_y = _load(snap_dir).get(file_path.name)
+        if defect_y is None:
+            return None
+        return ZONE_EDGE if defect_y < EDGE_BAND_PX else ZONE_INNER
+
+    return zone_for
+
+
 def sample_ng_tiles(
     job_id: str,
     over_review_root: Path,
@@ -182,7 +237,7 @@ def sample_ng_tiles(
     per_lighting: int = NG_TILES_PER_LIGHTING,
     log: Callable[[str], None] = print,
 ) -> dict:
-    """從 over_review/{*}/true_ng/{lighting}/crop/ 隨機抽 NG tile。"""
+    """從 over_review/{*}/true_ng/{lighting}/crop/ 隨機抽 NG tile，並依 manifest defect_y heuristic 標記 zone。"""
     if not over_review_root.exists():
         log(f"⚠ over_review 不存在: {over_review_root}，跳過 NG 抽樣")
         return {"sampled": 0, "missing_lightings": list(LIGHTINGS)}
@@ -190,6 +245,7 @@ def sample_ng_tiles(
     sampled = 0
     missing = []
     snapshots = [d for d in over_review_root.iterdir() if d.is_dir() and (d / "true_ng").exists()]
+    zone_for = _make_ng_zone_classifier(log)
 
     for lighting in LIGHTINGS:
         all_files = []
@@ -203,6 +259,7 @@ def sample_ng_tiles(
             continue
         chosen = random.sample(all_files, min(per_lighting, len(all_files)))
         records = []
+        edge_n = inner_n = unknown_n = 0
         for i, p in enumerate(chosen):
             thumb_path = p
             if thumb_dir is not None:
@@ -213,13 +270,20 @@ def sample_ng_tiles(
                     thumb = cv2.resize(img, (96, 96))
                     cv2.imwrite(str(candidate), thumb)
                     thumb_path = candidate
+            zone = zone_for(p)
+            if zone == ZONE_EDGE:
+                edge_n += 1
+            elif zone == ZONE_INNER:
+                inner_n += 1
+            else:
+                unknown_n += 1
             records.append({
-                "lighting": lighting, "zone": None, "source": "ng",
+                "lighting": lighting, "zone": zone, "source": "ng",
                 "source_path": str(p.resolve()), "thumb_path": str(thumb_path.resolve()),
             })
         db.insert_tile_pool(job_id, records)
         sampled += len(records)
-        log(f"  ✓ {lighting}: 抽 {len(chosen)} 個 NG")
+        log(f"  ✓ {lighting}: 抽 {len(chosen)} 個 NG (edge={edge_n} / inner={inner_n} / 未分類={unknown_n})")
 
     return {"sampled": sampled, "missing_lightings": missing}
 
@@ -338,14 +402,20 @@ def train_one_patchcore(
     return candidates[0]
 
 
+DEFAULT_THRESHOLD = 0.5
+
+
 def calibrate_threshold(ng_scores: List[float], train_max_score: float) -> float:
-    """取 max(NG P10, train_max × 1.05)。"""
-    if not ng_scores:
-        return float(train_max_score) * 1.05
-    sorted_scores = sorted(ng_scores)
-    p10_idx = max(0, int(len(sorted_scores) * 0.10))
-    p10 = float(sorted_scores[p10_idx])
-    return float(max(p10, train_max_score * 1.05))
+    """所有 unit 統一回傳 DEFAULT_THRESHOLD。
+
+    舊版用 max(NG P10, train_max × 1.05) 但 NG 抽樣未分 zone（inner/edge
+    共用同一批），導致校準不準（見 docs）。改為固定預設值，由使用者在
+    模型庫頁面依誤判情況微調。
+
+    參數保留是因為呼叫端仍傳入這兩個值，且 ng_scores 仍用於計算 metrics
+    （AUROC、ng_caught_rate）給 UI 顯示。
+    """
+    return DEFAULT_THRESHOLD
 
 
 def _compute_auroc(train_scores: List[float], ng_scores: List[float]) -> Optional[float]:
@@ -477,7 +547,7 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
         for zone in ("inner", "edge"):
             if succeeded_units is None or (lighting, zone) in succeeded_units:
                 unit_paths[zone] = str(bundle_dir / f"{lighting}-{zone}.pt")
-                unit_thr[zone] = thresholds.get(lighting, {}).get(zone, 0.75)
+                unit_thr[zone] = thresholds.get(lighting, {}).get(zone, DEFAULT_THRESHOLD)
         if unit_paths:
             model_mapping[lighting] = unit_paths
         if unit_thr:
@@ -848,8 +918,19 @@ def run_training_pipeline(
 
         train_tiles = db.list_tile_pool(job_id, lighting=lighting, zone=zone,
                                         source="ok", decision="accept")
-        ng_tiles = db.list_tile_pool(job_id, lighting=lighting,
-                                     source="ng", decision="accept")
+        # NG: 同 zone + heuristic 未分類者一起給此 unit；分類錯歸到他 zone 的就略過。
+        # 該 zone 的 NG 太少（heuristic 失準導致）就退回全部 NG，保 calibration 穩定。
+        ng_all = db.list_tile_pool(job_id, lighting=lighting,
+                                   source="ng", decision="accept")
+        ng_for_zone = [t for t in ng_all if t.get("zone") in (zone, None)]
+        if len(ng_for_zone) < MIN_NG_PER_ZONE:
+            log(f"[{idx}/10] {unit_label}: zone NG 僅 {len(ng_for_zone)} (<{MIN_NG_PER_ZONE})，"
+                f"退回全部 NG ({len(ng_all)})")
+            ng_tiles = ng_all
+            ng_used = "fallback"
+        else:
+            ng_tiles = ng_for_zone
+            ng_used = "zone"
 
         if len(train_tiles) < MIN_TRAIN_TILES:
             log(f"[{idx}/10] {unit_label}: 跳過：tile 不足 ({len(train_tiles)} < {MIN_TRAIN_TILES})")
@@ -885,6 +966,7 @@ def run_training_pipeline(
                     train_max, ng_scores, threshold, train_scores=train_scores,
                 )
                 metrics["train_count"] = len(train_tiles)
+                metrics["ng_used"] = ng_used  # "zone" 或 "fallback"，幫助 step5 判讀 ng_count 是否被退回
                 unit_elapsed = time.monotonic() - unit_start
                 metrics["elapsed_seconds"] = int(unit_elapsed)
                 unit_metrics[unit_label] = metrics

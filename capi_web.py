@@ -528,6 +528,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/models/") and path.endswith("/training_data/delete"):
                 self._handle_models_training_data_delete()
                 return
+            elif path.startswith("/api/models/") and path.endswith("/threshold"):
+                self._handle_models_update_threshold()
+                return
             elif path.startswith("/api/models/") and path.endswith("/delete"):
                 self._handle_models_delete()
                 return
@@ -4634,23 +4637,57 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_response(500, f"Failed to read manifest/thresholds: {str(e)}")
             return
 
+        # AUROC grade 可能是 "n/a"，斜線不能當 CSS class；slugify 給模板用
+        def _grade_slug(g):
+            return (g or "n/a").replace("/", "")
+
+        unit_metrics = manifest.get("unit_metrics", {}) or {}
         units = []
+        total_size_bytes = 0
+        total_elapsed = 0
         for unit_label, tile_info in manifest["tiles_per_unit"].items():
             lighting, zone = unit_label.rsplit("-", 1)
             size_bytes = manifest["model_files"][unit_label]["size_bytes"]
+            total_size_bytes += size_bytes
+            m = unit_metrics.get(unit_label, {}) or {}
+            elapsed = int(m.get("elapsed_seconds") or 0)
+            total_elapsed += elapsed
+            grade = m.get("auroc_grade") or "n/a"
             units.append((unit_label, {
                 "lighting": lighting, "zone": zone,
                 "train": tile_info["train"], "ng": tile_info["ng"],
                 "threshold": thresholds.get(lighting, {}).get(zone, 0.0),
                 "size_mb": size_bytes / 1e6,
+                "auroc": m.get("auroc"),
+                "auroc_grade": grade,
+                "auroc_grade_slug": _grade_slug(grade),
+                "ng_caught_count": int(m.get("ng_caught_count") or 0),
+                "ng_caught_rate": m.get("ng_caught_rate"),
+                "ng_fallback": m.get("ng_used") == "fallback",
+                "separation": m.get("separation"),
+                "train_max": m.get("train_max"),
+                "ng_median": m.get("ng_median"),
+                "ng_max": m.get("ng_max"),
+                "elapsed_seconds": elapsed,
             }))
 
+        overall_grade = manifest.get("overall_auroc_grade") or "n/a"
         template = self.jinja_env.get_template("train_new/step5_done.html")
         html = template.render(
             request_path="/train/new/done",
             machine_id=job["machine_id"],
             bundle_path=str(bundle_path),
             job_id=job_id, units=units,
+            overall_auroc=manifest.get("overall_auroc"),
+            overall_auroc_grade=overall_grade,
+            overall_auroc_grade_slug=_grade_slug(overall_grade),
+            trained_at=manifest.get("trained_at") or "",
+            panel_count=manifest.get("panel_count") or 0,
+            panel_glass_ids=manifest.get("panel_glass_ids") or [],
+            patchcore_params=manifest.get("patchcore_params") or {},
+            total_size_mb=total_size_bytes / 1e6,
+            total_elapsed_seconds=total_elapsed,
+            success_units=manifest.get("success_units") or len(units),
         )
         self._send_response(200, html)
 
@@ -5581,6 +5618,41 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             result = deactivate_bundle(
                 self._capi_server_instance.database, bundle_id,
                 server_config_path=Path(self._capi_server_instance.server_config_path),
+            )
+            self._send_json(result)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+
+    def _handle_models_update_threshold(self):
+        """POST /api/models/<id>/threshold  body: {lighting, zone, value}"""
+        bundle_id = int(self.path.split("/")[3])
+        content_length = int(self.headers.get("Content-Length", 0))
+        try:
+            payload = json.loads(self.rfile.read(content_length).decode("utf-8") or "{}")
+        except json.JSONDecodeError as e:
+            self._send_json({"error": f"無效 JSON: {e}"}, status=400)
+            return
+        lighting = str(payload.get("lighting", ""))
+        zone = str(payload.get("zone", ""))
+        try:
+            value = float(payload.get("value"))
+        except (TypeError, ValueError):
+            self._send_json({"error": "value 必須是數字"}, status=400)
+            return
+        from capi_model_registry import update_threshold
+        try:
+            result = update_threshold(
+                self._capi_server_instance.database,
+                bundle_id, lighting=lighting, zone=zone, value=value,
+            )
+            # active bundle 才能 in-place reload；未 active 只寫檔
+            applied = self._capi_server_instance.apply_threshold_inplace(
+                machine_id=result["machine_id"], lighting=lighting, zone=zone, value=value,
+            )
+            result["hot_reloaded"] = applied
+            result["message"] = (
+                "已即時生效（無需重啟）" if applied
+                else "已寫入 yaml；此 bundle 未 active，下次啟用後生效"
             )
             self._send_json(result)
         except ValueError as e:
