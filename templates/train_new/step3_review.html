@@ -179,10 +179,14 @@ function setFilter(filter) {
 }
 
 function groupTiles(tiles) {
+  // NG 依 manifest defect_y heuristic 已在後端標 zone（"inner"/"edge"/null）。
+  // 未分類者（zone=null）兩 unit 都會收，所以獨立一組顯示。
   return {
     inner_ok: tiles.filter(t => t.zone === 'inner' && t.source === 'ok'),
-    edge_ok: tiles.filter(t => t.zone === 'edge' && t.source === 'ok'),
-    ng: tiles.filter(t => t.source === 'ng'),
+    edge_ok:  tiles.filter(t => t.zone === 'edge'  && t.source === 'ok'),
+    inner_ng: tiles.filter(t => t.zone === 'inner' && t.source === 'ng'),
+    edge_ng:  tiles.filter(t => t.zone === 'edge'  && t.source === 'ng'),
+    shared_ng: tiles.filter(t => (t.zone === null || t.zone === undefined) && t.source === 'ng'),
   };
 }
 
@@ -196,14 +200,19 @@ function render() {
   const groups = groupTiles(tiles);
   let html = '';
   for (const [key, list] of Object.entries(groups)) {
+    // 整組為空就不渲染；尤其新版 heuristic 通常 shared_ng = 0，不該佔版面
+    if (!list.length) continue;
     const displayList = visibleTiles(list);
     const accept = list.filter(t => t.decision === 'accept').length;
-    const isEdge = key === 'edge_ok', isNg = key === 'ng';
-    const grpCls = isNg ? 'ng' : (isEdge ? 'edge' : '');
+    const grpCls = (key === 'edge_ok') ? 'edge'
+                 : (key === 'inner_ng' || key === 'edge_ng' || key === 'shared_ng') ? 'ng'
+                 : '';
     const title = {
-      inner_ok:'內部 OK',
-      edge_ok:'邊緣 OK',
-      ng:'NG（來自 over_review，inner/edge 共用）',
+      inner_ok:  '內部 OK',
+      edge_ok:   '邊緣 OK',
+      inner_ng:  'NG · 內部（餵 inner unit）',
+      edge_ng:   'NG · 邊緣（餵 edge unit）',
+      shared_ng: 'NG · 未分類（兩 unit 共用）',
     }[key];
     html += `<div class="grp-head ${grpCls}">
       <span>${title}</span>
@@ -221,7 +230,8 @@ function render() {
       const tileCls = t.decision === 'reject' ? 'reject' : 'accept';
       const focusCls = t.id === _focusedTileId ? ' focused' : '';
       const thumb = t.thumb_url || '';
-      const label = `${_currentLighting} / ${t.zone || 'NG'} / #${t.id}`;
+      const zoneLabel = t.source === 'ng' ? `NG${t.zone ? '·' + t.zone : ''}` : (t.zone || '');
+      const label = `${_currentLighting} / ${zoneLabel} / #${t.id}`;
       html += `<div class="tile ${tileCls}${focusCls}" data-id="${t.id}" title="單擊放大，雙擊加入/排除" style="background-image:url('${thumb}');" onclick="handleTileClick(this,event)" ondblclick="handleTileDoubleClick(this,event)" aria-label="${label}"></div>`;
     }
     html += '</div>';
@@ -413,7 +423,9 @@ function modalShowTile(id) {
   if (!tile) return;
   _modalTileId = id;
   const src = tile.image_url || tile.thumb_url || '';
-  const zone = tile.source === 'ng' ? 'NG' : (tile.zone || '');
+  const zone = tile.source === 'ng'
+    ? (tile.zone ? `NG·${tile.zone}` : 'NG·共用')
+    : (tile.zone || '');
   document.getElementById('modal-img').src = src;
   document.getElementById('modal-title').textContent = `${_currentLighting} / ${zone} / tile #${tile.id}`;
 
