@@ -2012,30 +2012,70 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         try:
             total_start = _time.time()
 
-            # 1. 預處理（不需要 GPU，也不用 threshold）
-            result = self.inferencer.preprocess_image(image_path, otsu_offset_override=otsu_offset_override)
-            if result is None:
-                self._send_json({"error": f"無法載入或預處理圖片: {image_path}"})
-                return
-
-            # 2. 多模型路由：依圖片前綴選擇對應的 inferencer
             img_prefix = self.inferencer._get_image_prefix(image_path.name)
-            target_inferencer = self.inferencer._get_inferencer_for_prefix(img_prefix)
-            
-            model_name = "預設模型"
-            if img_prefix in self.inferencer._model_mapping:
-                model_name = self.inferencer._model_mapping[img_prefix].name
+            is_v2 = getattr(self.inferencer.config, "is_new_architecture", False)
 
-            if target_inferencer is None:
-                self._send_json({"error": f"找不到 {image_path.name} 對應的模型"})
-                return
+            if is_v2:
+                # 新架構：單圖 zone-aware 推論 (preprocess + per-tile inner/edge model 由 helper 內部處理)
+                lighting_map = self.inferencer.config.model_mapping.get(img_prefix, {})
+                if not isinstance(lighting_map, dict) or "inner" not in lighting_map or "edge" not in lighting_map:
+                    self._send_json({"error": f"找不到 {image_path.name} 對應的模型 (新架構: model_mapping 缺 {img_prefix} 的 inner/edge)"})
+                    return
 
-            # 3. 推論 — 若有 GPU lock 則排隊
-            # model_id: 從 POST 資料取得（可選），用於推導產品解析度
-            debug_model_id = data.get("model_id")
+                if hasattr(self, '_gpu_lock') and self._gpu_lock:
+                    with self._gpu_lock:
+                        result = self.inferencer.run_inference_v2_single_image(
+                            image_path,
+                            threshold=debug_threshold,
+                            edge_margin_override=edge_margin_override,
+                            patchcore_overrides=patchcore_overrides if patchcore_overrides else None,
+                            otsu_offset_override=otsu_offset_override,
+                        )
+                else:
+                    result = self.inferencer.run_inference_v2_single_image(
+                        image_path,
+                        threshold=debug_threshold,
+                        edge_margin_override=edge_margin_override,
+                        patchcore_overrides=patchcore_overrides if patchcore_overrides else None,
+                        otsu_offset_override=otsu_offset_override,
+                    )
 
-            if hasattr(self, '_gpu_lock') and self._gpu_lock:
-                with self._gpu_lock:
+                if result is None:
+                    self._send_json({"error": f"無法載入或預處理圖片: {image_path}"})
+                    return
+
+                model_name = f"{img_prefix} (inner+edge)"
+            else:
+                # 舊架構：單一 inferencer 路由 (preprocess + run_inference)
+                result = self.inferencer.preprocess_image(image_path, otsu_offset_override=otsu_offset_override)
+                if result is None:
+                    self._send_json({"error": f"無法載入或預處理圖片: {image_path}"})
+                    return
+
+                target_inferencer = self.inferencer._get_inferencer_for_prefix(img_prefix)
+
+                model_name = "預設模型"
+                if img_prefix in self.inferencer._model_mapping:
+                    model_name = self.inferencer._model_mapping[img_prefix].name
+
+                if target_inferencer is None:
+                    self._send_json({"error": f"找不到 {image_path.name} 對應的模型"})
+                    return
+
+                # model_id: 從 POST 資料取得（可選），用於推導產品解析度
+                debug_model_id = data.get("model_id")
+
+                if hasattr(self, '_gpu_lock') and self._gpu_lock:
+                    with self._gpu_lock:
+                        result = self.inferencer.run_inference(
+                            result,
+                            inferencer=target_inferencer,
+                            threshold=debug_threshold,
+                            edge_margin_override=edge_margin_override,
+                            patchcore_overrides=patchcore_overrides if patchcore_overrides else None,
+                            model_id=debug_model_id,
+                        )
+                else:
                     result = self.inferencer.run_inference(
                         result,
                         inferencer=target_inferencer,
@@ -2044,15 +2084,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         patchcore_overrides=patchcore_overrides if patchcore_overrides else None,
                         model_id=debug_model_id,
                     )
-            else:
-                result = self.inferencer.run_inference(
-                    result,
-                    inferencer=target_inferencer,
-                    threshold=debug_threshold,
-                    edge_margin_override=edge_margin_override,
-                    patchcore_overrides=patchcore_overrides if patchcore_overrides else None,
-                    model_id=debug_model_id,
-                )
 
             total_time = _time.time() - total_start
 
@@ -2987,16 +3018,52 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 image=tile_image,
             )
 
-            # 多模型路由
+            # 多模型路由：v1 走 prefix lookup；v2 依 polygon 分類 zone 後走 (lighting, zone) 取模型
             img_prefix = self.inferencer._get_image_prefix(image_path.name)
-            target_inferencer = self.inferencer._get_inferencer_for_prefix(img_prefix)
-            model_name = "預設模型"
-            if img_prefix in self.inferencer._model_mapping:
-                model_name = self.inferencer._model_mapping[img_prefix].name
+            is_v2 = getattr(self.inferencer.config, "is_new_architecture", False)
 
-            if target_inferencer is None:
-                self._send_json({"error": f"找不到 {image_path.name} 對應的模型"})
-                return
+            if is_v2:
+                lighting_map = self.inferencer.config.model_mapping.get(img_prefix, {})
+                if not isinstance(lighting_map, dict) or "inner" not in lighting_map or "edge" not in lighting_map:
+                    self._send_json({"error": f"找不到 {image_path.name} 對應的模型 (新架構: model_mapping 缺 {img_prefix} 的 inner/edge)"})
+                    return
+
+                from capi_preprocess import classify_tile_zone, detect_panel_polygon, PreprocessConfig
+                pre_cfg = PreprocessConfig(
+                    tile_size=self.inferencer.config.tile_size,
+                    otsu_offset=self.inferencer.config.otsu_offset,
+                    enable_panel_polygon=self.inferencer.config.enable_panel_polygon,
+                    edge_threshold_px=self.inferencer.config.edge_threshold_px,
+                )
+                _, polygon = detect_panel_polygon(image, pre_cfg)
+                tile_rect = (crop_x1, crop_y1, crop_x1 + tile_size, crop_y1 + tile_size)
+                zone, _, _, _ = classify_tile_zone(tile_rect, polygon, pre_cfg)
+                if zone == "outside":
+                    zone = "edge"  # debug fallback：邊外座標仍用 edge model 看一下分數
+                tile_info.zone = zone
+
+                try:
+                    target_inferencer = self.inferencer._get_model_for(
+                        self.inferencer.config.machine_id, img_prefix, zone,
+                    )
+                except Exception as exc:
+                    self._send_json({"error": f"新架構模型載入失敗 ({img_prefix}/{zone}): {exc}"})
+                    return
+
+                if target_inferencer is None:
+                    self._send_json({"error": f"找不到 {image_path.name} ({img_prefix}/{zone}) 對應的模型"})
+                    return
+
+                model_name = f"{img_prefix}/{zone}"
+            else:
+                target_inferencer = self.inferencer._get_inferencer_for_prefix(img_prefix)
+                model_name = "預設模型"
+                if img_prefix in self.inferencer._model_mapping:
+                    model_name = self.inferencer._model_mapping[img_prefix].name
+
+                if target_inferencer is None:
+                    self._send_json({"error": f"找不到 {image_path.name} 對應的模型"})
+                    return
 
             # 推論 (含 GPU lock)
             if hasattr(self, '_gpu_lock') and self._gpu_lock:

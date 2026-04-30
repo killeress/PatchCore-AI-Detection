@@ -61,26 +61,67 @@ def test_helper_returns_zero_when_no_aoi_report(new_arch_inferencer, tmp_path):
     assert stats == {"aoi_tile_count": 0, "aoi_edge_count": 0}
 
 
-def test_helper_new_arch_attributes_existing_grid_tile(new_arch_inferencer, tmp_path):
-    """新架構：helper 把 AOI 座標映射到包含它的既存 grid tile，
-    並標記 is_aoi_coord_tile / aoi_defect_code / aoi_product_x / aoi_product_y。
-    不應呼叫 _create_aoi_coord_tiles 或 _inspect_roi_patchcore。"""
+def test_parse_aoi_report_uses_nested_new_arch_model_mapping_prefixes(new_arch_inferencer, tmp_path):
+    """新架構 nested model_mapping 的 prefix 也必須參與 AOI report 解析。
+
+    Regression: WGF50500 不在舊 hard-coded WGF00000 清單內，且新架構
+    _model_mapping 為空，曾導致 PCDK2...WGF50500 連續記錄整串解析失敗。
+    """
+    panel_dir = tmp_path / "yuantu" / "GN160JCEL250S" / "panel"
+    report_dir = tmp_path / "Report" / "GN160JCEL250S" / "panel"
+    panel_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+
+    new_arch_inferencer.config.aoi_report_path_replace_from = "yuantu"
+    new_arch_inferencer.config.aoi_report_path_replace_to = "Report"
+    new_arch_inferencer.config.model_mapping = {
+        "G0F00000": {"inner": "/fake/g-inner.pt", "edge": "/fake/g-edge.pt"},
+        "WGF50500": {"inner": "/fake/wgf-inner.pt", "edge": "/fake/wgf-edge.pt"},
+    }
+    new_arch_inferencer._model_mapping = {}
+
+    (report_dir / "151525.TXT").write_text(
+        "header\n"
+        "@;OK;NG"
+        "PCDK20035200136WGF50500"
+        "PCDK20156500325WGF50500"
+        "PCDK20028900553WGF50500;\n",
+        encoding="utf-8",
+    )
+
+    parsed = new_arch_inferencer._parse_aoi_report_txt(panel_dir)
+
+    assert set(parsed) == {"WGF50500"}
+    defects = parsed["WGF50500"]
+    assert [d.defect_code for d in defects] == ["PCDK2", "PCDK2", "PCDK2"]
+    assert [(d.product_x, d.product_y) for d in defects] == [
+        (352, 136),
+        (1565, 325),
+        (289, 553),
+    ]
+
+
+def test_helper_new_arch_creates_centered_tile(new_arch_inferencer, tmp_path):
+    """新架構：helper 以 AOI 座標為中心建 512x512 centered tile（黑邊 zero-pad），
+    既存 grid tile 不被動到。AOI 座標永遠在 tile 中心 (256, 256)。"""
+    import cv2
     from capi_inference import TileInfo
 
     img_path = tmp_path / "G0F00000_001.png"
-    img_path.touch()
+    cv2.imwrite(str(img_path), np.full((1080, 1920), 128, dtype=np.uint8))
 
-    # 製造一個包含 (img_x=960, img_y=540) 的 grid tile (768, 256, 1280, 768)
-    tile = TileInfo(
+    # 既存 grid tile (768, 256, 1280, 768) — 同樣覆蓋 AOI 座標 (960, 540)
+    grid_tile = TileInfo(
         tile_id=0, x=768, y=256, width=512, height=512,
         image=np.zeros((512, 512), dtype=np.uint8),
+        zone="inner",
     )
     fake_result = ImageResult(
         image_path=img_path,
         image_size=(1920, 1080),
         otsu_bounds=(0, 0, 1920, 1080),
         exclusion_regions=[],
-        tiles=[tile],
+        tiles=[grid_tile],
         excluded_tile_count=0,
         processed_tile_count=1,
         processing_time=0.0,
@@ -93,7 +134,7 @@ def test_helper_new_arch_attributes_existing_grid_tile(new_arch_inferencer, tmp_
 
     with patch.object(new_arch_inferencer, "_parse_aoi_report_txt",
                       return_value={"G0F00000": [fake_defect]}), \
-         patch.object(new_arch_inferencer, "_create_aoi_coord_tiles") as mock_create, \
+         patch.object(new_arch_inferencer, "_create_aoi_coord_tiles") as mock_v1_create, \
          patch.object(new_arch_inferencer, "_inspect_roi_patchcore") as mock_pc, \
          patch.object(new_arch_inferencer, "_inspect_aoi_edge_defect") as mock_inspect:
 
@@ -104,35 +145,48 @@ def test_helper_new_arch_attributes_existing_grid_tile(new_arch_inferencer, tmp_
             product_resolution=(1920, 1080),
         )
 
-    mock_create.assert_not_called()
+    # v2 不再走 v1 helper / fusion / patchcore inspector
+    mock_v1_create.assert_not_called()
     mock_pc.assert_not_called()
     mock_inspect.assert_not_called()
+
     assert stats["aoi_tile_count"] == 1
     assert stats["aoi_edge_count"] == 0
-    assert tile.is_aoi_coord_tile is True
-    assert tile.aoi_defect_code == "L01"
-    assert tile.aoi_product_x == 960
-    assert tile.aoi_product_y == 540
+
+    # 既存 grid tile 不被動：tile_id=0, is_aoi_coord_tile 仍為 False
+    assert grid_tile.is_aoi_coord_tile is False
+    # 新加的 centered tile：以 (960, 540) 為中心，左上角 (704, 284)
+    assert len(fake_result.tiles) == 2
+    centered = fake_result.tiles[-1]
+    assert centered.is_aoi_coord_tile is True
+    assert centered.aoi_defect_code == "L01"
+    assert centered.aoi_product_x == 960
+    assert centered.aoi_product_y == 540
+    assert centered.x == 960 - 256
+    assert centered.y == 540 - 256
+    assert centered.image.shape == (512, 512)
 
 
-def test_helper_new_arch_unmatched_when_no_tile_contains_coord(new_arch_inferencer, tmp_path):
-    """AOI 座標落在所有 grid tile 之外時，回 unmatched 統計，不丟例外。"""
+def test_helper_new_arch_creates_tile_even_at_image_corner(new_arch_inferencer, tmp_path):
+    """AOI 座標靠近圖片邊緣時，centered tile 用黑邊 zero-pad 填補 OOB，
+    AOI 座標仍在 tile (256, 256)（不往內推）。"""
+    import cv2
     from capi_inference import TileInfo
 
     img_path = tmp_path / "G0F00000_001.png"
-    img_path.touch()
+    cv2.imwrite(str(img_path), np.full((1080, 1920), 128, dtype=np.uint8))
 
-    # tile 在左上角；AOI 座標在右下，落在 tile 外
-    tile = TileInfo(
+    grid_tile = TileInfo(
         tile_id=0, x=0, y=0, width=512, height=512,
         image=np.zeros((512, 512), dtype=np.uint8),
+        zone="inner",
     )
     fake_result = ImageResult(
         image_path=img_path,
         image_size=(1920, 1080),
         otsu_bounds=(0, 0, 1920, 1080),
         exclusion_regions=[],
-        tiles=[tile],
+        tiles=[grid_tile],
         excluded_tile_count=0,
         processed_tile_count=1,
         processing_time=0.0,
@@ -140,6 +194,8 @@ def test_helper_new_arch_unmatched_when_no_tile_contains_coord(new_arch_inferenc
         raw_bounds=(0, 0, 1920, 1080),
         panel_polygon=None,
     )
+    # AOI 座標貼右下角 (1900, 1000) → centered tile 從 (1644, 744) 起，
+    # 右側 236px / 下側 176px 超出圖片，必須 zero-pad
     fake_defect = MagicMock(product_x=1900, product_y=1000, defect_code="L01")
 
     with patch.object(new_arch_inferencer, "_parse_aoi_report_txt",
@@ -151,10 +207,19 @@ def test_helper_new_arch_unmatched_when_no_tile_contains_coord(new_arch_inferenc
             product_resolution=(1920, 1080),
         )
 
-    assert stats["aoi_tile_count"] == 0
+    assert stats["aoi_tile_count"] == 1
     assert stats["aoi_edge_count"] == 0
-    assert stats.get("aoi_unmatched", 0) == 1
-    assert tile.is_aoi_coord_tile is False
+    assert len(fake_result.tiles) == 2
+
+    centered = fake_result.tiles[-1]
+    assert centered.is_aoi_coord_tile is True
+    assert centered.x == 1900 - 256
+    assert centered.y == 1000 - 256
+    # 圖片內中央灰階 128，OOB 區域應為 0（黑邊）
+    # tile 內座標 (256, 256) 對應圖片 (1900, 1000)，仍在圖片內
+    assert centered.image[256, 256] == 128
+    # tile 內座標 (500, 500) 對應圖片 (1888, 1244)，超出圖片下緣 → 應為 0
+    assert centered.image[500, 500] == 0
 
 
 def test_helper_skips_lighting_without_aoi_report(new_arch_inferencer, tmp_path):

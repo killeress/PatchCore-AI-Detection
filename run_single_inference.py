@@ -220,7 +220,7 @@ def generate_tile_combined_image(
         verdict = "NG (Detected)"
         verdict_color = (0, 0, 255)
     else:
-        verdict = "Score < THR"
+        verdict = f"Score < THR ({score_threshold:.4f})"
         verdict_color = (0, 255, 255)
 
     header_text = f"Score: {score:.4f} | {verdict}"

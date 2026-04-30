@@ -737,6 +737,7 @@
                         <thead>
                             <tr>
                                 <th style="width: 80px;">區域</th>
+                                <th style="width: 90px;">推論模型</th>
                                 <th>AOI 座標</th>
                                 <th>位置 (x, y)</th>
                                 <th>大小 (w x h)</th>
@@ -748,9 +749,21 @@
                             {% for t in img.tiles %}
                             {% set t_badge, t_info = t | tile_info %}
                             {% set is_scratch = t.get("scratch_filtered") %}
+                            {% set t_zone = t.get("zone", "") %}
                             <tr>
                                 <td style="color: #64748B;">
                                     {% if t.get("is_aoi_coord") %}🎯{% endif %}{% if is_scratch %}🧽{% endif %}#{{ t.tile_id }}
+                                </td>
+                                <td>
+                                    {% if t_zone == "edge" %}
+                                    <span style="display:inline-block;padding:2px 8px;border-radius:6px;background:#FEF3C7;color:#92400E;font-size:11px;font-family:'Fira Code',monospace;">edge.pt</span>
+                                    {% elif t_zone == "inner" %}
+                                    <span style="display:inline-block;padding:2px 8px;border-radius:6px;background:#DBEAFE;color:#1E40AF;font-size:11px;font-family:'Fira Code',monospace;">inner.pt</span>
+                                    {% elif t_zone == "bright_spot" %}
+                                    <span style="display:inline-block;padding:2px 8px;border-radius:6px;background:#FEE2E2;color:#991B1B;font-size:11px;font-family:'Fira Code',monospace;">亮點偵測</span>
+                                    {% else %}
+                                    <span style="color: #CBD5E1;">—</span>
+                                    {% endif %}
                                 </td>
                                 <td>
                                     {% if t.get("aoi_product_x", -1) >= 0 and t.get("aoi_product_y", -1) >= 0 %}

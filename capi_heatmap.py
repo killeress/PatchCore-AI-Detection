@@ -757,7 +757,7 @@ class HeatmapManager:
             verdict = "NG (Detected)"
             verdict_color = (0, 0, 255)
         else:
-            verdict = f"Score < THR"
+            verdict = f"Score < THR ({score_threshold:.4f})"
             verdict_color = (0, 255, 255)
 
         scratch_score_val = float(getattr(tile_info, 'scratch_score', 0.0) or 0.0) if tile_info else 0.0
