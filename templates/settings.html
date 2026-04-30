@@ -1309,6 +1309,7 @@
 
             allParams = data.params || [];
             modelResolutionMap = data.model_resolution_map || {};
+            window.isNewArchitecture = !!data.is_new_architecture;
             renderSettings();
             populateFilter();
         } catch (e) {
@@ -1365,6 +1366,14 @@
             'cv_edge_aoi_polygon_erode_px', 'cv_edge_aoi_morph_open_kernel',
             'cv_edge_aoi_min_max_diff', 'cv_edge_aoi_line_min_length', 'cv_edge_aoi_line_max_width'
         ];
+
+        // 新架構：edge.pt 已專為 edge zone 訓練，CV+PC fusion 失去理論基礎；
+        // 強制 inspector_mode = 'patchcore'，UI 把其他選項灰掉。
+        if (window.isNewArchitecture) {
+            paramLockMap['aoi_edge_inspector'] =
+                '新架構 (C-10) 強制 patchcore：edge.pt 已專為邊緣訓練，' +
+                'CV / fusion 在新架構下不再使用';
+        }
 
         if (!aoiCoordEnabled) {
             // AOI 主開關關閉：除主開關與 grid_tiling_enabled 外全部鎖定
