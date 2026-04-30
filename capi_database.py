@@ -2288,7 +2288,9 @@ class CAPIDatabase:
             ("bright_spot_diff_threshold", 10, "int", "局部對比差異閾值"),
             # AOI 機檢座標設定
             ("grid_tiling_enabled", True, "bool", "啟用全面板 Grid Tiling 推論"),
-            ("aoi_coord_inspection_enabled", False, "bool", "啟用 AOI 機檢座標推論"),
+            # 新架構 attribution 模式（找包含 AOI 座標的既存 grid tile 標屬性）成本近零，
+            # 預設開啟，否則記錄頁的 🎯 AOI 機檢座標推論 區塊永遠不會出現。
+            ("aoi_coord_inspection_enabled", True, "bool", "啟用 AOI 機檢座標推論"),
             ("aoi_report_path_replace_from", "yuantu", "string", "報告路徑替換來源字串"),
             ("aoi_report_path_replace_to", "Report", "string", "報告路徑替換目標字串"),
         ]
