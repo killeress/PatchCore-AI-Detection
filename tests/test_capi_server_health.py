@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import patch
 
 
 def test_health_check_new_arch_resolves_relative_model_paths(tmp_path):
@@ -37,6 +38,59 @@ def test_health_check_new_arch_fails_fast_on_missing_model(tmp_path):
 
     with pytest.raises(RuntimeError, match="Server 停止啟動"):
         server._health_check_models()
+
+
+def test_get_or_create_new_arch_prewarms_and_skips_legacy_model_path():
+    from capi_config import CAPIConfig
+    from capi_server import CAPIServer
+
+    cfg = CAPIConfig(
+        machine_id="M",
+        is_new_architecture=True,
+        model_mapping={"G0F00000": {"inner": "inner.pt", "edge": "edge.pt"}},
+    )
+    server = CAPIServer.__new__(CAPIServer)
+    server.configs_by_machine = {"M": cfg}
+    server.inferencers = {}
+    server.inference_config = {"device": "cpu"}
+    server.inferencer = "LEGACY"
+
+    with patch("capi_server.CAPIInferencer") as mock_cls:
+        mock_inf = mock_cls.return_value
+        mock_inf.preload_v2_models.return_value = (2, 2)
+
+        result = server._get_or_create_inferencer("M")
+
+    assert result is mock_inf
+    assert server.inferencers["M"] is mock_inf
+    assert mock_cls.call_args.kwargs["model_path"] is None
+    mock_inf.preload_v2_models.assert_called_once_with()
+
+
+def test_adopt_loaded_config_replaces_fallback_object():
+    from capi_config import CAPIConfig
+    from capi_server import CAPIServer
+
+    old_cfg = CAPIConfig(
+        machine_id="MX",
+        is_new_architecture=True,
+        threshold_mapping={"G0F00000": {"inner": 0.5, "edge": 0.5}},
+    )
+    loaded_cfg = CAPIConfig(
+        machine_id="MX",
+        is_new_architecture=True,
+        threshold_mapping={"G0F00000": {"inner": 0.7, "edge": 0.8}},
+    )
+    server = CAPIServer.__new__(CAPIServer)
+    server.configs_by_machine = {"MX": old_cfg}
+    server.fallback_config = old_cfg
+    server.config = old_cfg
+
+    server._adopt_loaded_config(loaded_cfg)
+
+    assert server.configs_by_machine["MX"] is loaded_cfg
+    assert server.fallback_config is loaded_cfg
+    assert server.config is loaded_cfg
 
 
 def test_apply_threshold_inplace_updates_config_and_status():

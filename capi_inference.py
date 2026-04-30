@@ -584,6 +584,37 @@ class CAPIInferencer:
             return self._get_model_for(self.config.machine_id, prefix, zone)
         return self._get_inferencer_for_prefix(prefix)
 
+    def preload_v2_models(self) -> Tuple[int, int]:
+        """新架構啟動預熱：載入所有 lighting × zone 模型到 v2 cache。"""
+        if not getattr(self.config, "is_new_architecture", False):
+            return 0, 0
+        if not hasattr(self, "_model_cache_v2"):
+            self._model_cache_v2 = {}
+
+        total = 0
+        loaded = 0
+        for lighting, mapping in self.config.model_mapping.items():
+            if not isinstance(mapping, dict):
+                continue
+            for zone in ("inner", "edge"):
+                if not mapping.get(zone):
+                    continue
+                total += 1
+                model = self._get_model_for(self.config.machine_id, lighting, zone)
+                if model is None:
+                    raise RuntimeError(
+                        f"[v2] 模型預熱失敗: {self.config.machine_id}/{lighting}/{zone}"
+                    )
+                loaded += 1
+
+        logger.info(
+            "[v2] Preloaded %s/%s model units for machine=%s",
+            loaded,
+            total,
+            self.config.machine_id,
+        )
+        return loaded, total
+
     def _get_threshold_for_zone(self, prefix: str, zone: str) -> float:
         """同上，threshold 版本。新架構 threshold_mapping 是 ``{prefix: {inner, edge}}``。"""
         if getattr(self.config, "is_new_architecture", False):
