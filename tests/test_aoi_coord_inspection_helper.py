@@ -137,6 +137,76 @@ def test_helper_skips_lighting_without_aoi_report(new_arch_inferencer, tmp_path)
     assert stats == {"aoi_tile_count": 0, "aoi_edge_count": 0}
 
 
+def test_v1_process_panel_reuses_parsed_aoi_report(tmp_path):
+    """v1 Phase 1.5 解析 AOI report 後，helper 應直接重用同一份資料。"""
+    import cv2
+
+    cfg = CAPIConfig()
+    cfg.is_new_architecture = False
+    cfg.aoi_coord_inspection_enabled = True
+    cfg.enable_panel_polygon = False
+    cfg.scratch_classifier_enabled = False
+
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+    inferencer.threshold = 0.5
+    inferencer.base_dir = tmp_path
+    inferencer.mark_template = None
+    inferencer.inferencer = MagicMock()
+    inferencer.edge_inspector = None
+    inferencer._model_mapping = {}
+    inferencer._threshold_mapping = {}
+    inferencer._inferencers = {}
+
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    img_path = panel_dir / "G0F00000_001.png"
+    cv2.imwrite(str(img_path), np.ones((64, 64, 3), dtype=np.uint8) * 128)
+
+    fake_result = ImageResult(
+        image_path=img_path,
+        image_size=(64, 64),
+        otsu_bounds=(0, 0, 64, 64),
+        exclusion_regions=[],
+        tiles=[],
+        excluded_tile_count=0,
+        processed_tile_count=0,
+        processing_time=0.0,
+        anomaly_tiles=[],
+        raw_bounds=(0, 0, 64, 64),
+        panel_polygon=None,
+    )
+    fake_defect = MagicMock()
+    fake_defect.defect_code = "L01"
+    fake_defect.product_x = 32
+    fake_defect.product_y = 32
+    fake_defect.image_prefix = "G0F00000"
+    parsed_report = {"G0F00000": [fake_defect]}
+
+    def _run_inference_passthrough(result, **_kwargs):
+        return result
+
+    with patch.object(inferencer, "_parse_defect_txt", return_value={}), \
+         patch.object(inferencer, "_find_raw_object_bounds",
+                      return_value=((0, 0, 64, 64), np.ones((64, 64), dtype=np.uint8))), \
+         patch.object(inferencer, "preprocess_image", return_value=fake_result), \
+         patch.object(inferencer, "_parse_aoi_report_txt",
+                      return_value=parsed_report) as mock_parse, \
+         patch.object(inferencer, "_create_aoi_coord_tiles",
+                      return_value=([], [])) as mock_create_tiles, \
+         patch.object(inferencer, "run_inference",
+                      side_effect=_run_inference_passthrough):
+        *_, returned_report = inferencer._process_panel_v1(
+            panel_dir,
+            cpu_workers=1,
+            product_resolution=(64, 64),
+        )
+
+    assert returned_report is parsed_report
+    assert mock_parse.call_count == 1
+    mock_create_tiles.assert_called_once()
+
+
 def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path):
     """新架構 _process_panel_v2 應呼叫 _apply_aoi_coord_inspection."""
     import cv2
