@@ -156,3 +156,30 @@ def test_inspect_roi_patchcore_legacy_default_zone_unchanged(legacy_inferencer):
             )
 
     mock_p.assert_called_with("G0F00000")
+
+
+def test_inspect_roi_fusion_new_arch_pc_half_uses_edge_model(new_arch_inferencer):
+    """新架構下 fusion (理論上不會走到，但行為要正確) PC half 應走 edge.pt。"""
+    edge_model = MagicMock()
+    new_arch_inferencer.edge_inspector = MagicMock()
+    new_arch_inferencer.edge_inspector.config.aoi_edge_boundary_band_px = 40
+    new_arch_inferencer.edge_inspector.config.aoi_edge_pc_roi_inward_shift_enabled = False
+    new_arch_inferencer.edge_inspector.inspect_roi.return_value = ([], {})
+
+    with patch.object(new_arch_inferencer, "_inspect_roi_patchcore") as mock_pc:
+        mock_pc.return_value = ([], {"score": 0.1, "threshold": 0.65,
+                                      "anomaly_map": np.zeros((512, 512), np.float32),
+                                      "fg_mask": np.zeros((512, 512), np.uint8),
+                                      "roi": np.zeros((512, 512, 3), np.uint8),
+                                      "area": 0, "min_area": 10})
+        new_arch_inferencer._inspect_roi_fusion(
+            image=np.zeros((1080, 1920, 3), np.uint8),
+            img_x=200, img_y=200, img_prefix="G0F00000",
+            panel_polygon=np.array([[0, 0], [1920, 0], [1920, 1080], [0, 1080]], dtype=np.float32),
+            zone="edge",
+        )
+
+    # 確認 fusion 內部呼叫 _inspect_roi_patchcore 時帶上 zone="edge"
+    pc_kwargs = mock_pc.call_args.kwargs
+    assert pc_kwargs.get("zone") == "edge", \
+        f"fusion 內部 _inspect_roi_patchcore 未帶 zone='edge'，實際 kwargs={pc_kwargs}"

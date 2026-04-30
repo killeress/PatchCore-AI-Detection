@@ -3068,6 +3068,7 @@ class CAPIInferencer:
         otsu_bounds: Optional[Tuple[int, int, int, int]] = None,
         collapse_to_representative: bool = True,
         group_cv_band: bool = False,
+        zone: str = "edge",
     ) -> Tuple[List[EdgeDefect], Dict[str, Any]]:
         """Phase 6 — AOI 邊緣 CV+PatchCore 空間分權 Fusion。
 
@@ -3354,6 +3355,7 @@ class CAPIInferencer:
         _, pc_stats = self._inspect_roi_patchcore(
             image, pc_center_x, pc_center_y, img_prefix,
             panel_polygon=panel_polygon, return_raw=True,
+            zone=zone,
         )
         pc_anomaly_map = pc_stats.get("anomaly_map")
         pc_threshold = float(pc_stats.get("threshold", 0.0))
