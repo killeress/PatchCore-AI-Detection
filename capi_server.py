@@ -643,6 +643,7 @@ def results_to_db_data(
                 "aoi_product_y": tile.aoi_product_y,
                 "scratch_score": tile.scratch_score,
                 "scratch_filtered": tile.scratch_filtered,
+                "zone": getattr(tile, "zone", "") or "",
             })
 
         # CV 邊緣缺陷 — 獨立儲存 (不放入 tiles)

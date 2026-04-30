@@ -346,6 +346,8 @@ class CAPIDatabase:
             add_column_if_not_exists("tile_results", "scratch_filtered", "INTEGER DEFAULT 0")
             add_column_if_not_exists("image_results", "scratch_filter_count", "INTEGER DEFAULT 0")
             add_column_if_not_exists("training_jobs", "training_params", "TEXT")
+            # 新架構 (C-10) per-tile model routing 紀錄："inner" / "edge" / "bright_spot"；v1 為 ""
+            add_column_if_not_exists("tile_results", "zone", "TEXT DEFAULT ''")
 
             conn.commit()
         finally:
@@ -458,8 +460,8 @@ class CAPIDatabase:
                                     bomb_code, peak_x, peak_y, heatmap_path,
                                     is_exclude_zone, is_aoi_coord, aoi_defect_code,
                                     aoi_product_x, aoi_product_y,
-                                    scratch_score, scratch_filtered)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    scratch_score, scratch_filtered, zone)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  tile_data.get("tile_id", 0),
                                  tile_data.get("x", 0),
@@ -481,7 +483,8 @@ class CAPIDatabase:
                                  tile_data.get("aoi_product_x", -1),
                                  tile_data.get("aoi_product_y", -1),
                                  tile_data.get("scratch_score", 0.0),
-                                 int(tile_data.get("scratch_filtered", 0)))
+                                 int(tile_data.get("scratch_filtered", 0)),
+                                 tile_data.get("zone", ""))
                             )
 
                         # 儲存 CV 邊緣缺陷結果
@@ -631,8 +634,8 @@ class CAPIDatabase:
                                     bomb_code, peak_x, peak_y, heatmap_path,
                                     is_exclude_zone, is_aoi_coord, aoi_defect_code,
                                     aoi_product_x, aoi_product_y,
-                                    scratch_score, scratch_filtered)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    scratch_score, scratch_filtered, zone)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  tile_data.get("tile_id", 0),
                                  tile_data.get("x", 0),
@@ -654,7 +657,8 @@ class CAPIDatabase:
                                  tile_data.get("aoi_product_x", -1),
                                  tile_data.get("aoi_product_y", -1),
                                  tile_data.get("scratch_score", 0.0),
-                                 int(tile_data.get("scratch_filtered", 0)))
+                                 int(tile_data.get("scratch_filtered", 0)),
+                                 tile_data.get("zone", ""))
                             )
 
                         for edge_data in img_data.get("edge_defects", []):

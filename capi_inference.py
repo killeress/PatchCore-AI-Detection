@@ -182,6 +182,7 @@ class TileInfo:
     aoi_defect_code: str = ""        # AOI 異常代碼 (PCDK2, C1111, PTMD6)
     aoi_product_x: int = -1         # AOI 產品座標 X (-1=非 AOI 座標 tile)
     aoi_product_y: int = -1         # AOI 產品座標 Y (-1=非 AOI 座標 tile)
+    zone: str = ""                  # 新架構推論 zone："inner" / "edge" / "bright_spot"；v1 為 ""
     is_bright_spot_detection: bool = False  # 是否為二值化亮點偵測（非 PatchCore）
     bright_spot_max_diff: int = 0           # B0F 偵測：最大局部差異值
     bright_spot_diff_threshold: int = 0     # B0F 偵測：使用的差異閾值
@@ -1776,7 +1777,140 @@ class CAPIInferencer:
         result.inference_time = time.time() - inference_start
 
         return result
-    
+
+    def run_inference_v2_single_image(
+        self,
+        image_path: Path,
+        threshold: Optional[float] = None,
+        edge_margin_override: Optional[int] = None,
+        patchcore_overrides: Optional[Dict[str, Any]] = None,
+        otsu_offset_override: Optional[int] = None,
+    ) -> Optional[ImageResult]:
+        """新架構單圖預處理 + per-tile zone-aware 推論 (debug 用)。
+
+        對應 v1 的 preprocess_image + run_inference 雙呼叫，新架構單圖路徑用此。
+        Tile zone 來自 capi_preprocess.preprocess_panel_image 的 polygon 分類，
+        每個 tile 依 zone (inner/edge) 走 _get_model_for(machine_id, lighting, zone)。
+
+        Args:
+            image_path: 圖片絕對路徑
+            threshold: 若 None，inner/edge 各自走 config.threshold_mapping；
+                       若指定則 inner/edge 同用此值 (debug UI 拖拉)
+            edge_margin_override / patchcore_overrides / otsu_offset_override:
+                與 v1 run_inference 同義
+
+        Returns:
+            ImageResult (與 v1 同格式)；若 model_mapping 缺對應 lighting 之 inner/edge
+            或圖片載入/前處理失敗，回傳 None。
+        """
+        from capi_preprocess import preprocess_panel_image, PreprocessConfig
+
+        lighting = self._get_image_prefix(image_path.name)
+
+        lighting_map = self.config.model_mapping.get(lighting, {})
+        if not isinstance(lighting_map, dict) or "inner" not in lighting_map or "edge" not in lighting_map:
+            return None
+
+        pre_cfg = PreprocessConfig(
+            tile_size=self.config.tile_size,
+            otsu_offset=otsu_offset_override if otsu_offset_override is not None else self.config.otsu_offset,
+            enable_panel_polygon=self.config.enable_panel_polygon,
+            edge_threshold_px=self.config.edge_threshold_px,
+        )
+        pre_result = preprocess_panel_image(image_path, lighting, pre_cfg)
+
+        if pre_result.foreground_bbox == (0, 0, 0, 0):
+            return None
+
+        raw_img = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+        if raw_img is None:
+            return None
+        img_h, img_w = raw_img.shape[:2]
+
+        bbox = pre_result.foreground_bbox
+        polygon = pre_result.panel_polygon
+
+        lighting_thr = self.config.threshold_mapping.get(lighting, {})
+        if isinstance(lighting_thr, dict):
+            cfg_inner_thr = float(lighting_thr.get("inner", 0.75))
+            cfg_edge_thr = float(lighting_thr.get("edge", 0.75))
+        else:
+            cfg_inner_thr = cfg_edge_thr = float(lighting_thr) if lighting_thr else 0.75
+
+        if threshold is not None:
+            inner_thr = float(threshold)
+            edge_thr = float(threshold)
+        else:
+            inner_thr = cfg_inner_thr
+            edge_thr = cfg_edge_thr
+
+        ts = self.config.tile_size
+        bottom_y_threshold = bbox[3] - ts
+        right_x_threshold = bbox[2] - ts
+        tile_infos: List[TileInfo] = []
+        for tr in pre_result.tiles:
+            ti = TileInfo(
+                tile_id=tr.tile_id,
+                x=tr.x1,
+                y=tr.y1,
+                width=ts,
+                height=ts,
+                image=tr.image,
+                mask=tr.mask,
+                is_bottom_edge=tr.y1 >= bottom_y_threshold,
+                is_top_edge=tr.y1 <= bbox[1],
+                is_left_edge=tr.x1 <= bbox[0],
+                is_right_edge=tr.x1 >= right_x_threshold,
+                zone=tr.zone,
+            )
+            tile_infos.append(ti)
+
+        image_result = ImageResult(
+            image_path=image_path,
+            image_size=(img_w, img_h),
+            otsu_bounds=bbox,
+            exclusion_regions=[],
+            tiles=tile_infos,
+            excluded_tile_count=0,
+            processed_tile_count=len(tile_infos),
+            processing_time=0.0,
+            anomaly_tiles=[],
+            raw_bounds=bbox,
+            panel_polygon=polygon,
+            inference_time=0.0,
+        )
+
+        t_infer_start = time.time()
+        anomaly_tiles: List[Tuple[TileInfo, float, Optional[np.ndarray]]] = []
+        for ti in tile_infos:
+            zone = ti.zone if ti.zone in ("inner", "edge") else "inner"
+            active_thr = inner_thr if zone == "inner" else edge_thr
+            try:
+                model = self._get_model_for(self.config.machine_id, lighting, zone)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"[v2-debug] {lighting}/{zone} 模型載入失敗: {exc}"
+                ) from exc
+
+            score, anomaly_map = self.predict_tile(
+                ti,
+                inferencer=model,
+                edge_margin_override=edge_margin_override,
+                patchcore_overrides=patchcore_overrides,
+                threshold=active_thr,
+            )
+            if score >= active_thr:
+                if anomaly_map is not None:
+                    peak_idx = int(np.argmax(anomaly_map))
+                    ah, aw = anomaly_map.shape[:2]
+                    ti.anomaly_peak_x = ti.x + peak_idx % aw
+                    ti.anomaly_peak_y = ti.y + peak_idx // aw
+                anomaly_tiles.append((ti, score, anomaly_map))
+
+        image_result.anomaly_tiles = anomaly_tiles
+        image_result.inference_time = time.time() - t_infer_start
+        return image_result
+
     def get_anomaly_summary(self, result: ImageResult) -> Dict[str, Any]:
         """取得異常摘要"""
         # 計算真實的 CV 邊緣異常數 (排除疑似灰塵)
@@ -2825,12 +2959,14 @@ class CAPIInferencer:
     def _get_known_image_prefixes(self) -> List[str]:
         """取得所有已知的圖片前綴 (來自 model_mapping + skip_files)"""
         prefixes = set()
+        if getattr(self.config, "model_mapping", None):
+            prefixes.update(self.config.model_mapping.keys())
         if self._model_mapping:
             prefixes.update(self._model_mapping.keys())
         for sf in self.config.skip_files:
             prefixes.add(sf)
         # 常見固定前綴
-        for p in ['G0F00000', 'R0F00000', 'W0F00000', 'WGF00000', 'B0F00000', 'STANDARD']:
+        for p in ['G0F00000', 'R0F00000', 'W0F00000', 'WGF50500', 'WGF00000', 'B0F00000', 'STANDARD']:
             prefixes.add(p)
         return sorted(prefixes, key=len, reverse=True)
 
@@ -3056,6 +3192,7 @@ class CAPIInferencer:
                 aoi_defect_code=defect.defect_code,
                 aoi_product_x=defect.product_x,
                 aoi_product_y=defect.product_y,
+                zone="bright_spot" if is_skip_file else "",
             )
 
             patchcore_tiles.append(tile)
@@ -3707,16 +3844,37 @@ class CAPIInferencer:
                 print("[v2] AOI 座標 attribution: AOI report 解析為空（report 不存在或無 NG 條目）")
             return {"aoi_tile_count": 0, "aoi_edge_count": 0}
 
-        # 新架構：grid tile 已涵蓋整個 panel 且 edge.pt 已為 edge zone 推論過，
-        # AOI 座標只需找出包含它的既存 grid tile 並打上 AOI 屬性，不再切新 tile、
-        # 也不再對 edge defect 跑第二次 PC ROI 推論（避免重複工作 + 不再產生
-        # CV/PC edge_defects 寫入記錄）。
+        # 新架構：以 AOI 機檢座標為中心建 512x512 centered tile（黑邊 zero-pad），
+        # 不在邊緣 bail 到 CV、也不 clamp 內推。對齊 training capi_dataset_export
+        # 的 BORDER_CONSTANT value=0 切法，AOI 座標永遠在 tile (256, 256)。
         if getattr(self.config, "is_new_architecture", False):
-            return self._attribute_aoi_coords_to_grid_tiles(
-                preprocessed_results=preprocessed_results,
-                aoi_report=aoi_report,
-                product_resolution=product_resolution,
+            from capi_preprocess import PreprocessConfig
+            pre_cfg = PreprocessConfig(
+                tile_size=self.config.tile_size,
+                otsu_offset=self.config.otsu_offset,
+                enable_panel_polygon=self.config.enable_panel_polygon,
+                edge_threshold_px=self.config.edge_threshold_px,
             )
+            aoi_tile_count = 0
+            for result in preprocessed_results:
+                img_prefix = self._get_image_prefix(result.image_path.name)
+                if img_prefix not in aoi_report:
+                    continue
+                image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+                if image is None:
+                    logger.warning(f"[v2] AOI Coord: 無法讀取圖片 {result.image_path}")
+                    continue
+                is_skip_file = self.config.should_skip_file(result.image_path.name)
+                aoi_tile_count += self._create_aoi_centered_tiles_v2(
+                    image=image,
+                    result=result,
+                    defects=aoi_report[img_prefix],
+                    product_resolution=product_resolution,
+                    pre_cfg=pre_cfg,
+                    is_skip_file=is_skip_file,
+                )
+            print(f"[v2] AOI 座標中心切塊: 建立 {aoi_tile_count} 個 centered tiles")
+            return {"aoi_tile_count": aoi_tile_count, "aoi_edge_count": 0}
 
         inspector_mode = self._resolve_aoi_edge_inspector_mode()
         aoi_tile_count = 0
@@ -3752,57 +3910,116 @@ class CAPIInferencer:
 
         return {"aoi_tile_count": aoi_tile_count, "aoi_edge_count": aoi_edge_count}
 
-    def _attribute_aoi_coords_to_grid_tiles(
+    def _create_aoi_centered_tiles_v2(
         self,
-        preprocessed_results: List[Any],
-        aoi_report: Dict[str, List['AOIReportDefect']],
+        image: np.ndarray,
+        result: 'ImageResult',
+        defects: List['AOIReportDefect'],
         product_resolution: Optional[Tuple[int, int]],
-    ) -> Dict[str, int]:
-        """新架構專用：把 AOI 機台報告座標打到已存在的 grid tile 上。
+        pre_cfg: 'PreprocessConfig',
+        is_skip_file: bool = False,
+    ) -> int:
+        """v2 新架構：以 AOI 機檢座標為中心建 512x512 tile（黑邊 zero-pad，不往內推）。
 
-        對每筆 AOI defect 計算圖片座標，找出包含它的 grid tile，
-        標記 ``is_aoi_coord_tile / aoi_defect_code / aoi_product_x / aoi_product_y``。
-        若同一 grid tile 已被先前的 defect 標記，後到的 defect 不覆蓋（保留第一筆）。
+        對齊 training ``capi_dataset_export._pad_to_size`` 的 BORDER_CONSTANT value=0
+        切法。與 v1 ``_create_aoi_coord_tiles`` 的差異：
+          - 邊緣不 bail 到 CV，每筆 AOI 座標都建立 PatchCore tile
+          - 邊緣不做 clamp 內推，OOB 區域以 ``cv2.copyMakeBorder`` 黑邊填補，
+            AOI 座標永遠在 tile (256, 256) 中心
+          - zone 由 ``capi_preprocess.classify_tile_zone`` 依 panel polygon 判定
+            （outside fallback edge）；skip_file 強制 zone="bright_spot"
+
+        Args:
+            image: 原始圖片（cv2.imread 結果）
+            result: 已預處理的 ImageResult；新 tile 直接 append 進 ``result.tiles``
+            defects: 該圖片對應的 AOI 報告缺陷列表
+            product_resolution: 產品解析度
+            pre_cfg: PreprocessConfig（傳給 classify_tile_zone）
+            is_skip_file: 是否為 skip_file（B0F00000 等黑圖）→ 強制 bright_spot zone
+
+        Returns: 新建立的 tile 數
         """
-        aoi_tile_count = 0
-        aoi_unmatched = 0
-        for result in preprocessed_results:
-            img_prefix = self._get_image_prefix(result.image_path.name)
-            if img_prefix not in aoi_report:
-                continue
-            if result.raw_bounds is None or not result.tiles:
-                aoi_unmatched += len(aoi_report[img_prefix])
-                continue
-            for defect in aoi_report[img_prefix]:
-                img_x, img_y = self._map_aoi_coords(
-                    defect.product_x, defect.product_y,
-                    result.raw_bounds, product_resolution,
+        from capi_preprocess import classify_tile_zone
+
+        if result.raw_bounds is None:
+            logger.warning("[v2] AOI Coord: raw_bounds 為 None，無法建立切塊")
+            return 0
+
+        tile_size = self.config.tile_size
+        half = tile_size // 2
+        img_h, img_w = image.shape[:2]
+        polygon = result.panel_polygon
+        next_tile_id = max((t.tile_id for t in result.tiles), default=-1) + 1
+        otsu_x1, otsu_y1, otsu_x2, otsu_y2 = result.raw_bounds
+        created = 0
+
+        for defect in defects:
+            img_x, img_y = self._map_aoi_coords(
+                defect.product_x, defect.product_y,
+                result.raw_bounds, product_resolution,
+            )
+            tx, ty = img_x - half, img_y - half
+            tx2, ty2 = tx + tile_size, ty + tile_size
+
+            src_x1 = max(0, tx)
+            src_y1 = max(0, ty)
+            src_x2 = min(img_w, tx2)
+            src_y2 = min(img_h, ty2)
+
+            if src_x2 > src_x1 and src_y2 > src_y1:
+                crop = image[src_y1:src_y2, src_x1:src_x2]
+                pad_top = src_y1 - ty
+                pad_left = src_x1 - tx
+                pad_bottom = tile_size - crop.shape[0] - pad_top
+                pad_right = tile_size - crop.shape[1] - pad_left
+                tile_img = cv2.copyMakeBorder(
+                    crop, pad_top, pad_bottom, pad_left, pad_right,
+                    cv2.BORDER_CONSTANT, value=0,
                 )
-                matched_tile = None
-                for tile in result.tiles:
-                    if (tile.x <= img_x < tile.x + tile.width and
-                            tile.y <= img_y < tile.y + tile.height):
-                        matched_tile = tile
-                        break
-                if matched_tile is None:
-                    aoi_unmatched += 1
-                    continue
-                if not matched_tile.is_aoi_coord_tile:
-                    matched_tile.is_aoi_coord_tile = True
-                    matched_tile.aoi_defect_code = defect.defect_code
-                    matched_tile.aoi_product_x = defect.product_x
-                    matched_tile.aoi_product_y = defect.product_y
-                    aoi_tile_count += 1
-        unmatched_tag = f", unmatched={aoi_unmatched}" if aoi_unmatched else ""
-        print(
-            f"[v2] AOI 座標 attribution: 標記 {aoi_tile_count} 個 grid tiles"
-            f"{unmatched_tag}"
-        )
-        return {
-            "aoi_tile_count": aoi_tile_count,
-            "aoi_edge_count": 0,
-            "aoi_unmatched": aoi_unmatched,
-        }
+            else:
+                shape = (tile_size, tile_size, image.shape[2]) if image.ndim == 3 else (tile_size, tile_size)
+                tile_img = np.zeros(shape, dtype=image.dtype)
+
+            if is_skip_file:
+                zone = "bright_spot"
+            else:
+                zone, _cov, _dist, _mask = classify_tile_zone(
+                    (tx, ty, tx2, ty2), polygon, pre_cfg,
+                )
+                if zone == "outside":
+                    zone = "edge"
+
+            is_top = img_y - otsu_y1 < half
+            is_bottom = otsu_y2 - img_y < half
+            is_left = img_x - otsu_x1 < half
+            is_right = otsu_x2 - img_x < half
+
+            tile = TileInfo(
+                tile_id=next_tile_id,
+                x=tx, y=ty,
+                width=tile_size, height=tile_size,
+                image=tile_img,
+                mask=None,
+                is_aoi_coord_tile=True,
+                aoi_defect_code=defect.defect_code,
+                aoi_product_x=defect.product_x,
+                aoi_product_y=defect.product_y,
+                zone=zone,
+                is_top_edge=is_top,
+                is_bottom_edge=is_bottom,
+                is_left_edge=is_left,
+                is_right_edge=is_right,
+            )
+            result.tiles.append(tile)
+            next_tile_id += 1
+            created += 1
+
+            logger.debug(
+                f"  🎯 [v2] AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}) "
+                f"→ Tile ({tx},{ty}) zone={zone}"
+            )
+
+        return created
 
     def _inspect_aoi_edge_defect(
         self,
@@ -5359,6 +5576,11 @@ class CAPIInferencer:
                         f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> "
                         "Cannot verify dust, treated as REAL_NG"
                     )
+                    zone_tag = f" [{tile.zone}]" if tile.zone else ""
+                    print(
+                        f"⚠️ {result.image_path.name} Tile@({tile.x},{tile.y}){zone_tag} "
+                        f"Score:{score:.3f} → OMIT OVEREXPOSED, skip dust check"
+                    )
                 return
 
             oh, ow = omit_image.shape[:2]
@@ -5377,7 +5599,7 @@ class CAPIInferencer:
                 tile.dust_bright_ratio = bright_ratio
 
                 if is_dust and anomaly_map is not None and dust_mask is not None:
-                    has_real, real_peak_yx, overall_iou, region_details, heatmap_binary, _labels = \
+                    has_real, real_peak_yx, overall_iou, region_details, heatmap_binary, region_labels = \
                         self.check_dust_per_region(
                             dust_mask,
                             anomaly_map,
@@ -5407,12 +5629,31 @@ class CAPIInferencer:
                         detail_text += (
                             f" PER_REGION: 0real+{len(dust_regions)}dust -> DUST"
                         )
+
+                    try:
+                        tile.dust_iou_debug_image = self.generate_dust_iou_debug_image(
+                            tile.image, anomaly_map, dust_mask,
+                            heatmap_binary, overall_iou,
+                            self.config.dust_heatmap_top_percent,
+                            tile.is_suspected_dust_or_scratch,
+                            region_details=region_details,
+                            region_labels=region_labels,
+                        )
+                    except Exception as dbg_err:
+                        print(f"⚠️ [v2] Debug image generation failed: {dbg_err}")
                 elif is_dust:
                     tile.is_suspected_dust_or_scratch = True
                     detail_text += " (no heatmap, marked as dust)"
                 else:
                     detail_text += " NO_DUST -> REAL_NG"
                 tile.dust_detail_text = detail_text
+
+                log_icon = "🧹" if tile.is_suspected_dust_or_scratch else "🔴"
+                zone_tag = f" [{tile.zone}]" if tile.zone else ""
+                print(
+                    f"{log_icon} {result.image_path.name} Tile@({tx},{ty}){zone_tag} "
+                    f"Score:{score:.3f} → {detail_text}"
+                )
 
         needs_dust = [r for r in results if r.anomaly_tiles]
         if not needs_dust:
@@ -5474,6 +5715,49 @@ class CAPIInferencer:
                         product_resolution=product_resolution,
                         bomb_list=active_bombs,
                     )
+                    # AOI coord tile fallback: 若 heatmap peak 偏到 tile 邊緣超出 tolerance，
+                    # 改用 tile.center 重試 — AOI tile 的中心就是機檢座標，可信度更高
+                    if not is_bomb and tile.is_aoi_coord_tile:
+                        tile_cx, tile_cy = tile.center
+                        is_bomb, bomb_code = self.check_bomb_match(
+                            img_prefix, tile_cx, tile_cy, result.raw_bounds,
+                            anomaly_map=anomaly_map,
+                            product_resolution=product_resolution,
+                            bomb_list=active_bombs,
+                        )
+                    # AOI coord tile 保護: peak 可能被鄰近炸彈亮點吸引而誤判，
+                    # 需驗證原始 AOI 產品座標本身也在炸彈容忍範圍內
+                    if is_bomb and tile.is_aoi_coord_tile and tile.aoi_product_x >= 0:
+                        aoi_matches_bomb = False
+                        tolerance = self.config.bomb_match_tolerance
+                        for bomb in active_bombs:
+                            if not (img_prefix == bomb.image_prefix or
+                                    img_prefix.startswith(bomb.image_prefix + "_")):
+                                continue
+                            if bomb.defect_type == "point":
+                                for coord in bomb.coordinates:
+                                    if (abs(tile.aoi_product_x - coord[0]) <= tolerance and
+                                        abs(tile.aoi_product_y - coord[1]) <= tolerance):
+                                        aoi_matches_bomb = True
+                                        break
+                            elif bomb.defect_type == "line" and len(bomb.coordinates) >= 2:
+                                pt1, pt2 = bomb.coordinates[0], bomb.coordinates[1]
+                                min_x = min(pt1[0], pt2[0]) - tolerance
+                                max_x = max(pt1[0], pt2[0]) + tolerance
+                                min_y = min(pt1[1], pt2[1])
+                                max_y = max(pt1[1], pt2[1])
+                                if (min_x <= tile.aoi_product_x <= max_x and
+                                    min_y <= tile.aoi_product_y <= max_y):
+                                    aoi_matches_bomb = True
+                            if aoi_matches_bomb:
+                                break
+                        if not aoi_matches_bomb:
+                            is_bomb = False
+                            print(
+                                f"🛡️ [v2] {result.image_path.name} Tile@({tile.x},{tile.y}) "
+                                f"Peak 匹配炸彈但 AOI 座標 ({tile.aoi_product_x},{tile.aoi_product_y}) "
+                                f"距離炸彈超過容忍度，保留為真實缺陷"
+                            )
                     if is_bomb:
                         tile.is_bomb = True
                         tile.bomb_defect_code = bomb_code
@@ -5492,6 +5776,22 @@ class CAPIInferencer:
                     if is_bomb:
                         ed.is_bomb = True
                         ed.bomb_defect_code = bomb_code
+
+        # Per-image bomb 匹配摘要 log（對齊 v1 line 5236）
+        from collections import Counter
+        for result in results:
+            edge_bombs = [
+                ed for ed in getattr(result, "edge_defects", []) or []
+                if getattr(ed, "is_bomb", False)
+            ]
+            summary = Counter(
+                t.bomb_defect_code for t, _, _ in result.anomaly_tiles if t.is_bomb
+            )
+            summary.update(ed.bomb_defect_code for ed in edge_bombs)
+            if summary:
+                parts = [f"{c}×{n}" for c, n in summary.items()]
+                suffix = f" (含 edge {len(edge_bombs)})" if edge_bombs else ""
+                print(f"💣 {result.image_path.name} BOMB match: {', '.join(parts)}{suffix}")
 
     def _apply_exclude_zone_postprocess(
         self,
@@ -5518,6 +5818,11 @@ class CAPIInferencer:
                     for zone in active_zones:
                         if zone.x <= px <= zone.x + zone.w and zone.y <= py <= zone.y + zone.h:
                             tile.is_in_exclude_zone = True
+                            zone_tag = f" [{tile.zone}]" if tile.zone else ""
+                            print(
+                                f"🚫 {result.image_path.name} Tile@({tile.x},{tile.y}){zone_tag} "
+                                f"peak@({px},{py}) 落在不檢測區 ({zone.x},{zone.y},{zone.w}x{zone.h})"
+                            )
                             break
         except Exception as e:
             logger.error(f"排除區域檢查失敗: {e}", exc_info=True)
@@ -5581,13 +5886,23 @@ class CAPIInferencer:
             edge_threshold_px=self.config.edge_threshold_px,
         )
 
+        preprocess_start = time.time()
         panel_results = preprocess_panel_folder(Path(panel_dir), pre_cfg)
         if not panel_results:
             logger.warning(f"[v2] {panel_dir}: preprocess_panel_folder 回傳空結果")
             # 回傳與 v1 格式相容的空結果
             return [], None, False, "", False, None, {}
+        preprocess_elapsed = time.time() - preprocess_start
+        print(
+            f"⚡ Phase 1 完成: {len(panel_results)} 個 lighting 預處理耗時 "
+            f"{preprocess_elapsed:.2f}s"
+        )
 
         results: List[ImageResult] = []
+        v2_entries: List[Dict[str, Any]] = []
+        aoi_report: Optional[Dict[str, List['AOIReportDefect']]] = None
+        if self.config.aoi_coord_inspection_enabled:
+            aoi_report = self._parse_aoi_report_txt(Path(panel_dir))
 
         for lighting, pre_result in panel_results.items():
             img_path = pre_result.image_path
@@ -5619,6 +5934,7 @@ class CAPIInferencer:
             ts = self.config.tile_size
             bottom_y_threshold = bbox[3] - ts
             right_x_threshold = bbox[2] - ts
+            zone_by_tile_id: Dict[int, str] = {}
             for tr in pre_result.tiles:
                 ti = TileInfo(
                     tile_id=tr.tile_id,
@@ -5632,47 +5948,10 @@ class CAPIInferencer:
                     is_top_edge=tr.y1 <= bbox[1],
                     is_left_edge=tr.x1 <= bbox[0],
                     is_right_edge=tr.x1 >= right_x_threshold,
+                    zone=tr.zone,
                 )
                 tile_infos.append(ti)
-
-            # 推論
-            t_infer_start = time.time()
-            anomaly_tiles: List[Tuple[TileInfo, float, Optional[np.ndarray]]] = []
-
-            for tr, ti in zip(pre_result.tiles, tile_infos):
-                zone = tr.zone  # "inner" | "edge"
-                threshold = inner_thr if zone == "inner" else edge_thr
-                try:
-                    model = self._get_model_for(self.config.machine_id, lighting, zone)
-                    score, anomaly_map = self.predict_tile(
-                        ti,
-                        inferencer=model,
-                        threshold=threshold,
-                    )
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"[v2] {lighting}/{zone} tile({tr.x1},{tr.y1}) 推論失敗: {exc}"
-                    ) from exc
-
-                if score >= threshold:
-                    # 計算熱力圖峰值座標（圖片絕對座標）
-                    if anomaly_map is not None:
-                        peak_idx = int(np.argmax(anomaly_map))
-                        ah, aw = anomaly_map.shape[:2]
-                        peak_y_rel = peak_idx // aw
-                        peak_x_rel = peak_idx % aw
-                        ti.anomaly_peak_x = tr.x1 + peak_x_rel
-                        ti.anomaly_peak_y = tr.y1 + peak_y_rel
-                    anomaly_tiles.append((ti, score, anomaly_map))
-
-            infer_elapsed = time.time() - t_infer_start
-            inner_count = sum(1 for tr in pre_result.tiles if tr.zone == "inner")
-            edge_count = sum(1 for tr in pre_result.tiles if tr.zone == "edge")
-            print(
-                f"[v2] {lighting}: tiles={len(tile_infos)} "
-                f"(inner={inner_count}, edge={edge_count}), "
-                f"NG={len(anomaly_tiles)}, infer {infer_elapsed:.2f}s"
-            )
+                zone_by_tile_id[ti.tile_id] = tr.zone
 
             image_result = ImageResult(
                 image_path=img_path,
@@ -5683,10 +5962,10 @@ class CAPIInferencer:
                 excluded_tile_count=0,
                 processed_tile_count=len(tile_infos),
                 processing_time=time.time() - t0,
-                anomaly_tiles=anomaly_tiles,
+                anomaly_tiles=[],
                 raw_bounds=bbox,
                 panel_polygon=polygon,
-                inference_time=infer_elapsed,
+                inference_time=0.0,
             )
 
             if bomb_info is not None:
@@ -5694,6 +5973,15 @@ class CAPIInferencer:
             # 新架構不再跑傳統 CV 邊緣檢測（edge.pt 已專責 edge zone）
 
             results.append(image_result)
+            v2_entries.append({
+                "lighting": lighting,
+                "result": image_result,
+                "zone_by_tile_id": zone_by_tile_id,
+                "inner_thr": inner_thr,
+                "edge_thr": edge_thr,
+                "inner_path": str(lighting_map.get("inner", "")),
+                "edge_path": str(lighting_map.get("edge", "")),
+            })
 
         # AOI 機檢座標 attribution（新架構：找包含座標的既存 grid tile 並標屬性，
         # 不再切新 tile，也不再對 edge defect 跑 PC ROI 推論）
@@ -5704,7 +5992,200 @@ class CAPIInferencer:
             omit_image=omit_image,
             omit_overexposed=omit_overexposed,
             product_resolution=product_resolution,
+            aoi_report=aoi_report,
         )
+
+        # v1 相容：B0F00000 等 skip_files 沒有 PatchCore 模型，不屬於 5-lighting
+        # grid；若 AOI report 指到這些黑圖，仍要建立 AOI-centered tiles，後續走
+        # _detect_bright_spots() 二值化亮點偵測。
+        if aoi_report:
+            existing_prefixes = {
+                self._get_image_prefix(result.image_path.name)
+                for result in results
+            }
+            image_files = sorted(
+                list(Path(panel_dir).glob("*.png")) +
+                list(Path(panel_dir).glob("*.jpg")) +
+                list(Path(panel_dir).glob("*.tif")) +
+                list(Path(panel_dir).glob("*.tiff"))
+            )
+            ref_result = next((r for r in results if r.raw_bounds), None)
+            ref_bounds = ref_result.raw_bounds if ref_result else None
+            ref_polygon = ref_result.panel_polygon if ref_result else None
+
+            for report_prefix, defects in aoi_report.items():
+                if report_prefix in existing_prefixes:
+                    continue
+
+                matched_file = next(
+                    (
+                        f for f in image_files
+                        if self.config.should_skip_file(f.name)
+                        and self._get_image_prefix(f.name) == report_prefix
+                    ),
+                    None,
+                )
+                if matched_file is None:
+                    continue
+
+                black_image = cv2.imread(str(matched_file), cv2.IMREAD_UNCHANGED)
+                if black_image is None:
+                    logger.warning(f"[v2] 無法讀取 skip_file 圖片: {matched_file}")
+                    continue
+
+                img_h, img_w = black_image.shape[:2]
+                bounds = ref_bounds or (0, 0, img_w, img_h)
+                skip_result = ImageResult(
+                    image_path=matched_file,
+                    image_size=(img_w, img_h),
+                    otsu_bounds=bounds,
+                    exclusion_regions=[],
+                    tiles=[],
+                    excluded_tile_count=0,
+                    processed_tile_count=0,
+                    processing_time=time.time() - t0,
+                    anomaly_tiles=[],
+                    raw_bounds=bounds,
+                    panel_polygon=ref_polygon.copy() if ref_polygon is not None else None,
+                    inference_time=0.0,
+                )
+
+                created = self._create_aoi_centered_tiles_v2(
+                    image=black_image,
+                    result=skip_result,
+                    defects=defects,
+                    product_resolution=product_resolution,
+                    pre_cfg=pre_cfg,
+                    is_skip_file=True,
+                )
+                skip_result.processed_tile_count = len(skip_result.tiles)
+                if bomb_info is not None:
+                    skip_result.client_bomb_info = bomb_info
+
+                results.append(skip_result)
+                v2_entries.append({
+                    "lighting": report_prefix,
+                    "result": skip_result,
+                    "zone_by_tile_id": {t.tile_id: "bright_spot" for t in skip_result.tiles},
+                    "inner_thr": 1.0,
+                    "edge_thr": 1.0,
+                    "skip_file": True,
+                })
+                existing_prefixes.add(report_prefix)
+                print(
+                    f"[v2] skip_file AOI: {matched_file.name} "
+                    f"建立 {created} 個 bright-spot tiles"
+                )
+
+        # 同步 zone_by_tile_id 與 result.tiles —— 把 _apply_aoi_coord_inspection
+        # 跟 skip_file 路徑新增的 AOI centered tiles 的 zone 補進來，
+        # 避免 inference loop 落到 fallback "inner"。
+        for entry in v2_entries:
+            entry["zone_by_tile_id"] = {
+                ti.tile_id: (ti.zone or "inner")
+                for ti in entry["result"].tiles
+            }
+
+        # grid_tiling_enabled=False 代表 AOI 座標目標模式：只推論已標記的 AOI tiles。
+        # v2 的 AOI attribution 必須在模型推論前完成，否則會退化成整片 grid 推論。
+        if not self.config.grid_tiling_enabled:
+            for entry in v2_entries:
+                result = entry["result"]
+                original_count = len(result.tiles)
+                result.tiles = [t for t in result.tiles if t.is_aoi_coord_tile]
+                result.processed_tile_count = len(result.tiles)
+                removed = original_count - len(result.tiles)
+                if removed > 0:
+                    print(
+                        f"[v2] Grid Tiling 關閉: {result.image_path.name} "
+                        f"移除 {removed} 個 grid tiles，保留 {len(result.tiles)} 個 AOI tiles"
+                    )
+
+        # 推論：只對目前 result.tiles 內保留的 tiles 跑模型。
+        inference_start = time.time()
+        for entry in v2_entries:
+            lighting = entry["lighting"]
+            result = entry["result"]
+            zone_by_tile_id = entry["zone_by_tile_id"]
+            inner_thr = entry["inner_thr"]
+            edge_thr = entry["edge_thr"]
+
+            t_infer_start = time.time()
+            anomaly_tiles: List[Tuple[TileInfo, float, Optional[np.ndarray]]] = []
+
+            if entry.get("skip_file") or self.config.should_skip_file(result.image_path.name):
+                print(f"💡 {result.image_path.name} (skip_file) → 使用二值化偵測亮點")
+                for ti in result.tiles:
+                    score, anomaly_map = self._detect_bright_spots(ti)
+                    if score <= 0:
+                        ti.is_aoi_coord_below_threshold = True
+                    anomaly_tiles.append((ti, score, anomaly_map))
+
+                infer_elapsed = time.time() - t_infer_start
+                result.anomaly_tiles = anomaly_tiles
+                result.inference_time = infer_elapsed
+                result.processing_time = time.time() - t0
+                bright_ng_count = sum(1 for _t, score, _m in anomaly_tiles if score > 0)
+                print(
+                    f"[v2] {lighting}: bright_spot tiles={len(result.tiles)}, "
+                    f"NG={bright_ng_count}, infer {infer_elapsed:.2f}s"
+                )
+                continue
+
+            inner_path = entry.get("inner_path", "")
+            edge_path = entry.get("edge_path", "")
+            print(
+                f"🎯 {result.image_path.name} → "
+                f"inner: {inner_path or '?'} (thr={inner_thr:.3f}), "
+                f"edge: {edge_path or '?'} (thr={edge_thr:.3f})"
+            )
+
+            for ti in result.tiles:
+                zone = zone_by_tile_id.get(ti.tile_id, "inner")
+                threshold = inner_thr if zone == "inner" else edge_thr
+                try:
+                    model = self._get_model_for(self.config.machine_id, lighting, zone)
+                    score, anomaly_map = self.predict_tile(
+                        ti,
+                        inferencer=model,
+                        threshold=threshold,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"[v2] {lighting}/{zone} tile({ti.x},{ti.y}) 推論失敗: {exc}"
+                    ) from exc
+
+                if score >= threshold:
+                    # 計算熱力圖峰值座標（圖片絕對座標）
+                    if anomaly_map is not None:
+                        peak_idx = int(np.argmax(anomaly_map))
+                        ah, aw = anomaly_map.shape[:2]
+                        peak_y_rel = peak_idx // aw
+                        peak_x_rel = peak_idx % aw
+                        ti.anomaly_peak_x = ti.x + peak_x_rel
+                        ti.anomaly_peak_y = ti.y + peak_y_rel
+                    anomaly_tiles.append((ti, score, anomaly_map))
+                elif ti.is_aoi_coord_tile:
+                    # AOI 座標 tile 即使低於閾值也保留，供紀錄頁追蹤查看。
+                    ti.is_aoi_coord_below_threshold = True
+                    anomaly_tiles.append((ti, score, anomaly_map))
+
+            infer_elapsed = time.time() - t_infer_start
+            result.anomaly_tiles = anomaly_tiles
+            result.inference_time = infer_elapsed
+            result.processing_time = time.time() - t0
+
+            active_zones = [zone_by_tile_id.get(t.tile_id, "inner") for t in result.tiles]
+            inner_count = sum(1 for z in active_zones if z == "inner")
+            edge_count = sum(1 for z in active_zones if z == "edge")
+            print(
+                f"[v2] {lighting}: tiles={len(result.tiles)} "
+                f"(inner={inner_count}, edge={edge_count}), "
+                f"NG={len(anomaly_tiles)}, infer {infer_elapsed:.2f}s"
+            )
+
+        inference_elapsed = time.time() - inference_start
+        print(f"🔥 Phase 2 完成: GPU 推論耗時 {inference_elapsed:.2f}s")
 
         post_start = time.time()
         self._apply_omit_dust_postprocess(
@@ -5718,6 +6199,7 @@ class CAPIInferencer:
         self._apply_exclude_zone_postprocess(results, model_id)
         self._apply_scratch_postprocess(results)
         post_elapsed = time.time() - post_start
+        print(f"🧹 Phase 3 完成: 後處理耗時 {post_elapsed:.2f}s")
 
         if bomb_info is not None:
             for result in results:
@@ -5726,13 +6208,15 @@ class CAPIInferencer:
         total_elapsed = time.time() - t0
         ng_count = sum(1 for r in results if r.anomaly_tiles)
         print(
-            f"[v2] Panel {Path(panel_dir).name}: "
-            f"{len(results)} lighting(s) 推論完成，{ng_count} NG，"
-            f"後處理 {post_elapsed:.2f}s，耗時 {total_elapsed:.2f}s"
+            f"📊 Panel {Path(panel_dir).name} 總計: "
+            f"預處理 {preprocess_elapsed:.2f}s + "
+            f"推論 {inference_elapsed:.2f}s + "
+            f"後處理 {post_elapsed:.2f}s = {total_elapsed:.2f}s "
+            f"({len(results)} lighting(s), {ng_count} NG)"
         )
 
         # 回傳與 v1 格式相容的 7-tuple
-        return results, omit_vis, omit_overexposed, omit_overexposure_info, False, omit_image, {}
+        return results, omit_vis, omit_overexposed, omit_overexposure_info, False, omit_image, aoi_report or {}
 
     def _get_model_for(self, machine_id: str, lighting: str, zone: str):
         """新架構 lazy loading，cache key 含 zone。
