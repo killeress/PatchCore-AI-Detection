@@ -572,7 +572,42 @@ class CAPIInferencer:
     def _get_threshold_for_prefix(self, prefix: str) -> float:
         """根據圖片前綴取得對應的閾值"""
         return self._threshold_mapping.get(prefix, self.threshold)
-    
+
+    def _get_inferencer_for_zone(self, prefix: str, zone: str) -> Optional[Any]:
+        """新架構：依 (prefix, zone) 走 nested model_mapping；舊架構：fallback 到 prefix。
+
+        新架構 (is_new_architecture=True) 的 model_mapping 是
+        ``{prefix: {"inner": path, "edge": path}}``，需要 zone 才能解析。
+        舊架構 ``{prefix: path}``，zone 參數忽略。
+        """
+        if getattr(self.config, "is_new_architecture", False):
+            return self._get_model_for(self.config.machine_id, prefix, zone)
+        return self._get_inferencer_for_prefix(prefix)
+
+    def _get_threshold_for_zone(self, prefix: str, zone: str) -> float:
+        """同上，threshold 版本。新架構 threshold_mapping 是 ``{prefix: {inner, edge}}``。"""
+        if getattr(self.config, "is_new_architecture", False):
+            thr_map = self.config.threshold_mapping.get(prefix)
+            if isinstance(thr_map, dict):
+                return float(thr_map.get(zone, self.threshold))
+            if thr_map is not None:
+                return float(thr_map)
+            return self.threshold
+        return self._get_threshold_for_prefix(prefix)
+
+    def _resolve_aoi_edge_inspector_mode(self) -> str:
+        """回傳實際使用的 inspector mode。
+
+        新架構 (is_new_architecture=True) 強制 'patchcore'：edge.pt 已專為 edge zone
+        訓練，CV+PC 空間分權的 fusion 失去理論基礎；同步把 cv 路徑停用以統一行為。
+        舊架構讀 ``edge_inspector.config.aoi_edge_inspector`` (cv / patchcore / fusion)。
+        """
+        if getattr(self.config, "is_new_architecture", False):
+            return "patchcore"
+        if not getattr(self, "edge_inspector", None):
+            return "cv"
+        return getattr(self.edge_inspector.config, "aoi_edge_inspector", "cv")
+
     def _load_mark_template(self) -> None:
         """載入 MARK 模板"""
         template_path = self.config.get_mark_template_full_path(self.base_dir)
@@ -3033,6 +3068,7 @@ class CAPIInferencer:
         otsu_bounds: Optional[Tuple[int, int, int, int]] = None,
         collapse_to_representative: bool = True,
         group_cv_band: bool = False,
+        zone: str = "edge",
     ) -> Tuple[List[EdgeDefect], Dict[str, Any]]:
         """Phase 6 — AOI 邊緣 CV+PatchCore 空間分權 Fusion。
 
@@ -3319,6 +3355,7 @@ class CAPIInferencer:
         _, pc_stats = self._inspect_roi_patchcore(
             image, pc_center_x, pc_center_y, img_prefix,
             panel_polygon=panel_polygon, return_raw=True,
+            zone=zone,
         )
         pc_anomaly_map = pc_stats.get("anomaly_map")
         pc_threshold = float(pc_stats.get("threshold", 0.0))
@@ -3597,6 +3634,291 @@ class CAPIInferencer:
 
         return defects
 
+    def _apply_aoi_coord_inspection(
+        self,
+        panel_dir: Path,
+        preprocessed_results: List[Any],  # ImageResult
+        omit_image: Optional[np.ndarray],
+        omit_overexposed: bool,
+        product_resolution: Optional[Tuple[int, int]],
+        aoi_report: Optional[Dict[str, List['AOIReportDefect']]] = None,
+    ) -> Dict[str, int]:
+        """執行 AOI 機檢座標切塊 + 邊緣 ROI inspection；mutates ``preprocessed_results`` in place。
+
+        v1 / v2 共用入口。Inspector mode 由 ``_resolve_aoi_edge_inspector_mode``
+        決定（新架構強制 'patchcore'）。新架構下 PC ROI 走 zone='edge' → edge.pt。
+
+        **Note**：v1 在呼叫此 helper 之前還會做「skip-file 重新 preprocess」的分支
+        （把 should_skip_file 的圖片補進 preprocessed_results 以便對它跑 AOI coord
+        inspection），那是 v1 專屬流程，不在此 helper 內。
+
+        Args:
+            panel_dir: 面板目錄（用來找 aoi_report.txt）
+            preprocessed_results: 已預處理的 ImageResult list
+            omit_image, omit_overexposed: OMIT 灰塵屏蔽參數
+            product_resolution: 產品解析度 (w, h)，用於 AOI 座標映射
+            aoi_report: 已解析的 AOI report；None 時由 helper 自行解析
+
+        Returns:
+            ``{"aoi_tile_count": int, "aoi_edge_count": int}``
+        """
+        if not self.config.aoi_coord_inspection_enabled:
+            return {"aoi_tile_count": 0, "aoi_edge_count": 0}
+
+        if aoi_report is None:
+            aoi_report = self._parse_aoi_report_txt(panel_dir)
+        if not aoi_report:
+            return {"aoi_tile_count": 0, "aoi_edge_count": 0}
+
+        inspector_mode = self._resolve_aoi_edge_inspector_mode()
+        aoi_tile_count = 0
+        aoi_edge_count = 0
+
+        for result in preprocessed_results:
+            img_prefix = self._get_image_prefix(result.image_path.name)
+            if img_prefix not in aoi_report:
+                continue
+
+            aoi_image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+            if aoi_image is None:
+                continue
+
+            new_tiles, edge_defs = self._create_aoi_coord_tiles(
+                aoi_image, result, aoi_report[img_prefix], product_resolution,
+            )
+            # 新架構 (C-10) v2 在推論迴圈結束後才呼叫 helper，interior tiles
+            # extend 進去也來不及被推論；且 v2 的 grid tiling + edge.pt 已涵蓋
+            # 整個 panel，AOI 座標中心對齊 tile 的精度增益在新架構下冗餘。
+            # 只在舊架構 (v1，helper 在 Phase 1.5、推論前呼叫) 才 extend。
+            if not getattr(self.config, "is_new_architecture", False):
+                result.tiles.extend(new_tiles)
+                aoi_tile_count += len(new_tiles)
+            aoi_edge_count += len(edge_defs)
+
+            for edef in edge_defs:
+                self._inspect_aoi_edge_defect(
+                    edef=edef,
+                    aoi_image=aoi_image,
+                    result=result,
+                    product_resolution=product_resolution,
+                    inspector_mode=inspector_mode,
+                    img_prefix=img_prefix,
+                    omit_image=omit_image,
+                    omit_overexposed=omit_overexposed,
+                )
+
+        return {"aoi_tile_count": aoi_tile_count, "aoi_edge_count": aoi_edge_count}
+
+    def _inspect_aoi_edge_defect(
+        self,
+        edef,
+        aoi_image: np.ndarray,
+        result,  # ImageResult
+        product_resolution: Optional[Tuple[int, int]],
+        inspector_mode: str,
+        img_prefix: str,
+        omit_image: Optional[np.ndarray],
+        omit_overexposed: bool,
+    ) -> None:
+        """對單一 AOI 座標 edge defect 跑 fusion / patchcore / cv 任一 inspector。
+
+        把 result.edge_defects mutate（append NG 或 OK record）。新架構走 zone='edge'。
+        """
+        img_x, img_y = self._map_aoi_coords(
+            edef.product_x, edef.product_y,
+            result.raw_bounds, product_resolution
+        )
+        roi_size = self.config.tile_size
+        roi_half = roi_size // 2
+        img_h, img_w = aoi_image.shape[:2]
+        rx1 = max(0, img_x - roi_half)
+        ry1 = max(0, img_y - roi_half)
+        rx2 = min(img_w, img_x + roi_half)
+        ry2 = min(img_h, img_y + roi_half)
+
+        detected = False
+
+        if inspector_mode == "fusion":
+            try:
+                fusion_defects, fusion_stats = self._inspect_roi_fusion(
+                    aoi_image, img_x, img_y, img_prefix,
+                    panel_polygon=result.panel_polygon,
+                    omit_image=omit_image,
+                    omit_overexposed=omit_overexposed,
+                    otsu_bounds=result.otsu_bounds,
+                    collapse_to_representative=False,
+                    group_cv_band=True,
+                    zone="edge",
+                )
+                pc_shift = fusion_stats.get("pc_roi_shift", (0, 0))
+                pc_origin = fusion_stats.get("pc_roi_origin", (rx1, ry1))
+                pc_fb = str(fusion_stats.get("pc_roi_fallback_reason", ""))
+                # Force defect center to AOI 座標確保 BOMB 比對一致
+                for d in fusion_defects:
+                    d.center = (img_x, img_y)
+                    result.edge_defects.append(d)
+                    detected = True
+                    shift_tag = f" shift=({d.pc_roi_shift_dx:+d},{d.pc_roi_shift_dy:+d})" \
+                                if (d.pc_roi_shift_dx or d.pc_roi_shift_dy) else ""
+                    # Phase 7.3 — PC fallback 原因標示
+                    if d.pc_roi_fallback_reason == "aoi_exit_roi":
+                        fb_tag = " PC-FB=aoi_exit_roi(AOI將離開ROI)"
+                    elif d.pc_roi_fallback_reason == "concave_polygon":
+                        fb_tag = " PC-FB=concave_polygon(凹角)"
+                    elif d.pc_roi_fallback_reason == "shift_disabled":
+                        fb_tag = " PC-FB=shift_disabled(內移停用)"
+                    elif d.pc_roi_fallback_reason:
+                        fb_tag = f" PC-FB={d.pc_roi_fallback_reason}"
+                    else:
+                        fb_tag = ""
+                    print(f"  🔍 AOI Coord Fusion edge ({edef.defect_code}) "
+                          f"@ ({img_x},{img_y}): src={d.source_inspector} "
+                          f"score={d.patchcore_score:.3f} max_diff={d.max_diff} "
+                          f"d_edge={d.d_edge_px:.1f}px"
+                          f"{shift_tag}{fb_tag} "
+                          f"is_dust={d.is_suspected_dust_or_scratch}")
+                if not detected:
+                    ok_defect = EdgeDefect(
+                        side="aoi_coord_ok",
+                        area=0,
+                        bbox=(rx1, ry1, rx2 - rx1, ry2 - ry1),
+                        center=(img_x, img_y),
+                        max_diff=0,
+                        is_cv_ok=True,
+                        inspector_mode="fusion",
+                        fusion_fallback_reason=str(fusion_stats.get("fusion_fallback_reason", "")),
+                    )
+                    ok_defect.source_inspector = ""  # OK row 不指定 source
+                    ok_defect.pc_anomaly_map = fusion_stats.get("pc_anomaly_map_interior")
+                    ok_defect.pc_fg_mask = fusion_stats.get("interior_mask")
+                    ok_defect.pc_roi_origin_x = int(pc_origin[0])
+                    ok_defect.pc_roi_origin_y = int(pc_origin[1])
+                    ok_defect.pc_roi_shift_dx = int(pc_shift[0])
+                    ok_defect.pc_roi_shift_dy = int(pc_shift[1])
+                    ok_defect.pc_roi_fallback_reason = pc_fb
+                    result.edge_defects.append(ok_defect)
+                    fb = fusion_stats.get("fusion_fallback_reason", "")
+                    shift_tag = f" shift=({pc_shift[0]:+d},{pc_shift[1]:+d})" \
+                                if (pc_shift[0] or pc_shift[1]) else ""
+                    # Phase 7.3 — PC fallback 原因標示（OK record）
+                    if pc_fb == "aoi_exit_roi":
+                        pcfb_tag = " PC-FB=aoi_exit_roi(AOI將離開ROI)"
+                    elif pc_fb == "concave_polygon":
+                        pcfb_tag = " PC-FB=concave_polygon(凹角)"
+                    elif pc_fb == "shift_disabled":
+                        pcfb_tag = " PC-FB=shift_disabled(內移停用)"
+                    elif pc_fb:
+                        pcfb_tag = f" PC-FB={pc_fb}"
+                    else:
+                        pcfb_tag = ""
+                    print(f"  ✅ AOI Coord Fusion edge ({edef.defect_code}) @ ({img_x},{img_y}): OK"
+                          f"{' (fallback=' + fb + ')' if fb else ''}"
+                          f"{shift_tag}{pcfb_tag}")
+            except Exception as e:
+                logger.warning(f"AOI Coord Fusion edge 失敗 ({edef.defect_code}): {e}")
+            return
+
+        if inspector_mode == "patchcore":
+            try:
+                pc_defects, pc_stats = self._inspect_roi_patchcore(
+                    aoi_image, img_x, img_y, img_prefix,
+                    panel_polygon=result.panel_polygon,
+                    zone="edge",
+                )
+                if pc_defects:
+                    merged = pc_defects[0]
+                    # 強制 center 為 AOI 座標以確保 BOMB 比對一致
+                    merged.center = (img_x, img_y)
+                    result.edge_defects.append(merged)
+                    detected = True
+                    print(f"  🔍 AOI Coord PatchCore edge ({edef.defect_code}) "
+                          f"@ ({img_x},{img_y}): score={pc_stats.get('score', 0):.3f} "
+                          f">= thr={pc_stats.get('threshold', 0):.3f}, "
+                          f"area={pc_stats.get('area', 0)}")
+                if not detected:
+                    ok_defect = EdgeDefect(
+                        side="aoi_coord_ok",
+                        area=int(pc_stats.get("area", 0)),
+                        bbox=(rx1, ry1, rx2 - rx1, ry2 - ry1),
+                        center=(img_x, img_y),
+                        max_diff=0,
+                        is_cv_ok=True,
+                        inspector_mode="patchcore",
+                        patchcore_score=float(pc_stats.get("score", 0.0)),
+                        patchcore_threshold=float(pc_stats.get("threshold", 0.0)),
+                        patchcore_ok_reason=str(pc_stats.get("ok_reason", "")),
+                    )
+                    ok_defect.pc_roi = pc_stats.get("roi")
+                    ok_defect.pc_fg_mask = pc_stats.get("fg_mask")
+                    ok_defect.pc_anomaly_map = pc_stats.get("anomaly_map")
+                    result.edge_defects.append(ok_defect)
+                    print(f"  ✅ AOI Coord PatchCore edge ({edef.defect_code}) "
+                          f"@ ({img_x},{img_y}): OK "
+                          f"(score={pc_stats.get('score', 0):.3f}, "
+                          f"thr={pc_stats.get('threshold', 0):.3f}, "
+                          f"reason={pc_stats.get('ok_reason', '')})")
+            except Exception as e:
+                logger.warning(f"AOI Coord PatchCore edge 失敗 ({edef.defect_code}): {e}")
+            return
+
+        # CV 路徑 (現行)
+        roi = aoi_image[ry1:ry2, rx1:rx2]
+        roi_stats = {"max_diff": 0, "max_area": 0, "threshold": 0, "min_area": 0, "min_max_diff": 0}
+        if roi.size > 0 and getattr(self, 'edge_inspector', None):
+            try:
+                edge_results, roi_stats = self.edge_inspector.inspect_roi(
+                    roi, offset_x=rx1, offset_y=ry1,
+                    otsu_bounds=result.otsu_bounds,
+                    panel_polygon=result.panel_polygon,
+                )
+                if edge_results:
+                    # 合併為單一 EdgeDefect (以 AOI 座標為中心)
+                    # 避免拆成多筆小 defect 導致 BOMB 比對時部分 center 偏離
+                    unified_bbox = (rx1, ry1, rx2 - rx1, ry2 - ry1)
+                    total_area = sum(ed.area for ed in edge_results)
+                    worst_diff = max(ed.max_diff for ed in edge_results)
+                    merged = EdgeDefect(
+                        side="aoi_edge",
+                        area=total_area,
+                        bbox=unified_bbox,
+                        center=(img_x, img_y),  # 使用 AOI 座標中心，確保 BOMB 比對一致
+                        max_diff=worst_diff,
+                        threshold_used=roi_stats.get("threshold", 0),
+                        min_area_used=roi_stats.get("min_area", 0),
+                        min_max_diff_used=roi_stats.get("min_max_diff", 0),
+                        inspector_mode="cv",
+                        cv_mask_offset=roi_stats.get("roi_offset", (rx1, ry1)),
+                    )
+                    merged.cv_filtered_mask = roi_stats.get("filtered_mask")
+                    result.edge_defects.append(merged)
+                    detected = True
+                    print(f"  🔍 AOI Coord CV edge ({edef.defect_code}) @ ({img_x},{img_y}): "
+                          f"偵測到 {len(edge_results)} 個缺陷 → 合併為 1 筆 (area={total_area}, diff={worst_diff})")
+            except Exception as e:
+                logger.warning(f"AOI Coord CV edge 檢測失敗 ({edef.defect_code}): {e}")
+
+        if not detected:
+            # 建立 OK 記錄，帶入實際計算的 max_diff / max_area
+            ok_defect = EdgeDefect(
+                side="aoi_coord_ok",
+                area=roi_stats.get("max_area", 0),
+                bbox=(rx1, ry1, rx2 - rx1, ry2 - ry1),
+                center=(img_x, img_y),
+                max_diff=roi_stats.get("max_diff", 0),
+                is_cv_ok=True,
+                threshold_used=roi_stats.get("threshold", 0),
+                min_area_used=roi_stats.get("min_area", 0),
+                min_max_diff_used=roi_stats.get("min_max_diff", 0),
+                inspector_mode="cv",
+                cv_mask_offset=roi_stats.get("roi_offset", (rx1, ry1)),
+            )
+            ok_defect.cv_filtered_mask = roi_stats.get("filtered_mask")
+            result.edge_defects.append(ok_defect)
+            print(f"  ✅ AOI Coord edge ({edef.defect_code}) @ ({img_x},{img_y}): CV 未偵測到缺陷，判定 OK"
+                  f"（max_diff={roi_stats.get('max_diff', 0)}, max_area={roi_stats.get('max_area', 0)}, "
+                  f"thr={roi_stats.get('threshold', 0)}, min_area={roi_stats.get('min_area', 0)}, "
+                  f"min_max_diff={roi_stats.get('min_max_diff', 0)}）")
+
     def _inspect_roi_patchcore(
         self,
         image: np.ndarray,
@@ -3605,6 +3927,7 @@ class CAPIInferencer:
         img_prefix: str,
         panel_polygon: Optional[np.ndarray] = None,
         return_raw: bool = False,
+        zone: str = "edge",
     ) -> Tuple[List[EdgeDefect], Dict[str, Any]]:
         """用 PatchCore 做 AOI 座標邊緣 ROI 推論。
 
@@ -3616,6 +3939,8 @@ class CAPIInferencer:
             return_raw: Phase 6 fusion 用——True 時跳過 defect 抽取/OK 原因判定，
                 只回 (空 list, stats with anomaly_map+roi+fg_mask)，供 fusion 後
                 外掛 boundary band mask + 自行 thresholding。預設 False (Phase 5 行為)。
+            zone: "inner" | "edge"，新架構 (C-10) 用來路由到對應的 inner.pt / edge.pt。
+                AOI 座標邊緣路徑預設 "edge"。舊架構忽略此值。
 
         Returns:
             (defects, stats)
@@ -3670,9 +3995,9 @@ class CAPIInferencer:
             # 無 polygon 時 fallback: ROI 在 image 內的區塊視為前景
             fg_mask[dy1:dy2, dx1:dx2] = 255
 
-        # 取 inferencer / threshold (沿用中央 tile pipeline 的 prefix 路由)
-        inferencer = self._get_inferencer_for_prefix(img_prefix)
-        threshold = self._get_threshold_for_prefix(img_prefix)
+        # 取 inferencer / threshold：新架構走 zone-aware (走 edge.pt)，舊架構走 prefix-only
+        inferencer = self._get_inferencer_for_zone(img_prefix, zone)
+        threshold = self._get_threshold_for_zone(img_prefix, zone)
 
         if inferencer is None:
             stats = {"score": 0.0, "threshold": threshold, "area": 0, "min_area": 0,
@@ -4202,27 +4527,25 @@ class CAPIInferencer:
         if self.config.aoi_coord_inspection_enabled:
             aoi_report = self._parse_aoi_report_txt(panel_dir)
             if aoi_report:
-                aoi_tile_count = 0
-                aoi_edge_count = 0
-
                 # 收集已有的圖片前綴
                 existing_prefixes = set()
                 for result in preprocessed_results:
                     existing_prefixes.add(self._get_image_prefix(result.image_path.name))
 
-                # 對 skip_files 中有 AOI 報告的圖片，預處理後加入（僅保留 AOI coord tiles）
+                # v1-only: 對 skip_files 中有 AOI 報告的圖片，預處理後加入
                 for report_prefix in aoi_report:
                     if report_prefix not in existing_prefixes:
-                        # 在所有圖片檔（含被 skip 的）中找對應圖片
                         matched_file = None
-                        skipped_files = [f for f in image_files if self.config.should_skip_file(f.name) and not is_dust_check_image(f)]
+                        skipped_files = [f for f in image_files
+                                         if self.config.should_skip_file(f.name)
+                                         and not is_dust_check_image(f)]
                         for f in skipped_files:
                             if self._get_image_prefix(f.name) == report_prefix:
                                 matched_file = f
                                 break
                         if matched_file is not None:
-                            print(f"🎯 AOI Coord: 為跳過的圖片 {matched_file.name} 建立預處理 (有 {len(aoi_report[report_prefix])} 筆 AOI 座標)")
-                            # 套用統一參考邊界 (若計算成功)
+                            print(f"🎯 AOI Coord: 為跳過的圖片 {matched_file.name} 建立預處理 "
+                                  f"(有 {len(aoi_report[report_prefix])} 筆 AOI 座標)")
                             skip_result = self.preprocess_image(
                                 matched_file,
                                 cached_mark=cached_mark,
@@ -4230,225 +4553,22 @@ class CAPIInferencer:
                                 reference_polygon=panel_reference_polygon,
                             )
                             if skip_result is not None:
-                                # 清除 grid tiles，只保留結構供 AOI coord 使用
                                 skip_result.tiles = []
                                 skip_result.excluded_tile_count = 0
                                 skip_result.processed_tile_count = 0
                                 preprocessed_results.append(skip_result)
                                 existing_prefixes.add(report_prefix)
 
-                for result in preprocessed_results:
-                    img_prefix = self._get_image_prefix(result.image_path.name)
-                    if img_prefix in aoi_report:
-                        aoi_image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
-                        if aoi_image is not None:
-                            new_tiles, edge_defs = self._create_aoi_coord_tiles(
-                                aoi_image, result, aoi_report[img_prefix], product_resolution
-                            )
-                            result.tiles.extend(new_tiles)
-                            aoi_tile_count += len(new_tiles)
-                            aoi_edge_count += len(edge_defs)
-                            # 邊緣 defects: AOI 座標落在產品邊緣，無法切 512x512 tile
-                            # 無論 CV edge inspection 是否啟用，都要建立 EdgeDefect 以追蹤判定
-                            inspector_mode = getattr(
-                                self.edge_inspector.config, "aoi_edge_inspector", "cv"
-                            ) if getattr(self, 'edge_inspector', None) else "cv"
-                            img_prefix = self._get_image_prefix(result.image_path.name)
-
-                            for edef in edge_defs:
-                                img_x, img_y = self._map_aoi_coords(
-                                    edef.product_x, edef.product_y,
-                                    result.raw_bounds, product_resolution
-                                )
-                                roi_size = self.config.tile_size
-                                roi_half = roi_size // 2
-                                img_h, img_w = aoi_image.shape[:2]
-                                rx1 = max(0, img_x - roi_half)
-                                ry1 = max(0, img_y - roi_half)
-                                rx2 = min(img_w, img_x + roi_half)
-                                ry2 = min(img_h, img_y + roi_half)
-
-                                detected = False
-
-                                if inspector_mode == "fusion":
-                                    try:
-                                        fusion_defects, fusion_stats = self._inspect_roi_fusion(
-                                            aoi_image, img_x, img_y, img_prefix,
-                                            panel_polygon=result.panel_polygon,
-                                            omit_image=omit_image,
-                                            omit_overexposed=omit_overexposed,
-                                            otsu_bounds=result.otsu_bounds,
-                                            collapse_to_representative=False,
-                                            group_cv_band=True,
-                                        )
-                                        pc_shift = fusion_stats.get("pc_roi_shift", (0, 0))
-                                        pc_origin = fusion_stats.get("pc_roi_origin", (rx1, ry1))
-                                        pc_fb = str(fusion_stats.get("pc_roi_fallback_reason", ""))
-                                        # Force defect center to AOI 座標確保 BOMB 比對一致
-                                        for d in fusion_defects:
-                                            d.center = (img_x, img_y)
-                                            result.edge_defects.append(d)
-                                            detected = True
-                                            shift_tag = f" shift=({d.pc_roi_shift_dx:+d},{d.pc_roi_shift_dy:+d})" \
-                                                        if (d.pc_roi_shift_dx or d.pc_roi_shift_dy) else ""
-                                            # Phase 7.3 — PC fallback 原因標示
-                                            if d.pc_roi_fallback_reason == "aoi_exit_roi":
-                                                fb_tag = " PC-FB=aoi_exit_roi(AOI將離開ROI)"
-                                            elif d.pc_roi_fallback_reason == "concave_polygon":
-                                                fb_tag = " PC-FB=concave_polygon(凹角)"
-                                            elif d.pc_roi_fallback_reason == "shift_disabled":
-                                                fb_tag = " PC-FB=shift_disabled(內移停用)"
-                                            elif d.pc_roi_fallback_reason:
-                                                fb_tag = f" PC-FB={d.pc_roi_fallback_reason}"
-                                            else:
-                                                fb_tag = ""
-                                            print(f"  🔍 AOI Coord Fusion edge ({edef.defect_code}) "
-                                                  f"@ ({img_x},{img_y}): src={d.source_inspector} "
-                                                  f"score={d.patchcore_score:.3f} max_diff={d.max_diff} "
-                                                  f"d_edge={d.d_edge_px:.1f}px"
-                                                  f"{shift_tag}{fb_tag} "
-                                                  f"is_dust={d.is_suspected_dust_or_scratch}")
-                                        if not detected:
-                                            ok_defect = EdgeDefect(
-                                                side="aoi_coord_ok",
-                                                area=0,
-                                                bbox=(rx1, ry1, rx2 - rx1, ry2 - ry1),
-                                                center=(img_x, img_y),
-                                                max_diff=0,
-                                                is_cv_ok=True,
-                                                inspector_mode="fusion",
-                                                fusion_fallback_reason=str(fusion_stats.get("fusion_fallback_reason", "")),
-                                            )
-                                            ok_defect.source_inspector = ""  # OK row 不指定 source
-                                            ok_defect.pc_anomaly_map = fusion_stats.get("pc_anomaly_map_interior")
-                                            ok_defect.pc_fg_mask = fusion_stats.get("interior_mask")
-                                            ok_defect.pc_roi_origin_x = int(pc_origin[0])
-                                            ok_defect.pc_roi_origin_y = int(pc_origin[1])
-                                            ok_defect.pc_roi_shift_dx = int(pc_shift[0])
-                                            ok_defect.pc_roi_shift_dy = int(pc_shift[1])
-                                            ok_defect.pc_roi_fallback_reason = pc_fb
-                                            result.edge_defects.append(ok_defect)
-                                            fb = fusion_stats.get("fusion_fallback_reason", "")
-                                            shift_tag = f" shift=({pc_shift[0]:+d},{pc_shift[1]:+d})" \
-                                                        if (pc_shift[0] or pc_shift[1]) else ""
-                                            # Phase 7.3 — PC fallback 原因標示（OK record）
-                                            if pc_fb == "aoi_exit_roi":
-                                                pcfb_tag = " PC-FB=aoi_exit_roi(AOI將離開ROI)"
-                                            elif pc_fb == "concave_polygon":
-                                                pcfb_tag = " PC-FB=concave_polygon(凹角)"
-                                            elif pc_fb == "shift_disabled":
-                                                pcfb_tag = " PC-FB=shift_disabled(內移停用)"
-                                            elif pc_fb:
-                                                pcfb_tag = f" PC-FB={pc_fb}"
-                                            else:
-                                                pcfb_tag = ""
-                                            print(f"  ✅ AOI Coord Fusion edge ({edef.defect_code}) @ ({img_x},{img_y}): OK"
-                                                  f"{' (fallback=' + fb + ')' if fb else ''}"
-                                                  f"{shift_tag}{pcfb_tag}")
-                                    except Exception as e:
-                                        logger.warning(f"AOI Coord Fusion edge 失敗 ({edef.defect_code}): {e}")
-                                    continue
-
-                                if inspector_mode == "patchcore":
-                                    try:
-                                        pc_defects, pc_stats = self._inspect_roi_patchcore(
-                                            aoi_image, img_x, img_y, img_prefix,
-                                            panel_polygon=result.panel_polygon,
-                                        )
-                                        if pc_defects:
-                                            merged = pc_defects[0]
-                                            # 強制 center 為 AOI 座標以確保 BOMB 比對一致
-                                            merged.center = (img_x, img_y)
-                                            result.edge_defects.append(merged)
-                                            detected = True
-                                            print(f"  🔍 AOI Coord PatchCore edge ({edef.defect_code}) "
-                                                  f"@ ({img_x},{img_y}): score={pc_stats.get('score', 0):.3f} "
-                                                  f">= thr={pc_stats.get('threshold', 0):.3f}, "
-                                                  f"area={pc_stats.get('area', 0)}")
-                                        if not detected:
-                                            ok_defect = EdgeDefect(
-                                                side="aoi_coord_ok",
-                                                area=int(pc_stats.get("area", 0)),
-                                                bbox=(rx1, ry1, rx2 - rx1, ry2 - ry1),
-                                                center=(img_x, img_y),
-                                                max_diff=0,
-                                                is_cv_ok=True,
-                                                inspector_mode="patchcore",
-                                                patchcore_score=float(pc_stats.get("score", 0.0)),
-                                                patchcore_threshold=float(pc_stats.get("threshold", 0.0)),
-                                                patchcore_ok_reason=str(pc_stats.get("ok_reason", "")),
-                                            )
-                                            ok_defect.pc_roi = pc_stats.get("roi")
-                                            ok_defect.pc_fg_mask = pc_stats.get("fg_mask")
-                                            ok_defect.pc_anomaly_map = pc_stats.get("anomaly_map")
-                                            result.edge_defects.append(ok_defect)
-                                            print(f"  ✅ AOI Coord PatchCore edge ({edef.defect_code}) "
-                                                  f"@ ({img_x},{img_y}): OK "
-                                                  f"(score={pc_stats.get('score', 0):.3f}, "
-                                                  f"thr={pc_stats.get('threshold', 0):.3f}, "
-                                                  f"reason={pc_stats.get('ok_reason', '')})")
-                                    except Exception as e:
-                                        logger.warning(f"AOI Coord PatchCore edge 失敗 ({edef.defect_code}): {e}")
-                                    continue
-
-                                # CV 路徑 (現行)
-                                roi = aoi_image[ry1:ry2, rx1:rx2]
-                                roi_stats = {"max_diff": 0, "max_area": 0, "threshold": 0, "min_area": 0, "min_max_diff": 0}
-                                if roi.size > 0 and getattr(self, 'edge_inspector', None):
-                                    try:
-                                        edge_results, roi_stats = self.edge_inspector.inspect_roi(
-                                            roi, offset_x=rx1, offset_y=ry1,
-                                            otsu_bounds=result.otsu_bounds,
-                                            panel_polygon=result.panel_polygon,
-                                        )
-                                        if edge_results:
-                                            # 合併為單一 EdgeDefect (以 AOI 座標為中心)
-                                            # 避免拆成多筆小 defect 導致 BOMB 比對時部分 center 偏離
-                                            unified_bbox = (rx1, ry1, rx2 - rx1, ry2 - ry1)
-                                            total_area = sum(ed.area for ed in edge_results)
-                                            worst_diff = max(ed.max_diff for ed in edge_results)
-                                            merged = EdgeDefect(
-                                                side="aoi_edge",
-                                                area=total_area,
-                                                bbox=unified_bbox,
-                                                center=(img_x, img_y),  # 使用 AOI 座標中心，確保 BOMB 比對一致
-                                                max_diff=worst_diff,
-                                                threshold_used=roi_stats.get("threshold", 0),
-                                                min_area_used=roi_stats.get("min_area", 0),
-                                                min_max_diff_used=roi_stats.get("min_max_diff", 0),
-                                                inspector_mode="cv",
-                                                cv_mask_offset=roi_stats.get("roi_offset", (rx1, ry1)),
-                                            )
-                                            merged.cv_filtered_mask = roi_stats.get("filtered_mask")
-                                            result.edge_defects.append(merged)
-                                            detected = True
-                                            print(f"  🔍 AOI Coord CV edge ({edef.defect_code}) @ ({img_x},{img_y}): "
-                                                  f"偵測到 {len(edge_results)} 個缺陷 → 合併為 1 筆 (area={total_area}, diff={worst_diff})")
-                                    except Exception as e:
-                                        logger.warning(f"AOI Coord CV edge 檢測失敗 ({edef.defect_code}): {e}")
-
-                                if not detected:
-                                    # 建立 OK 記錄，帶入實際計算的 max_diff / max_area
-                                    ok_defect = EdgeDefect(
-                                        side="aoi_coord_ok",
-                                        area=roi_stats.get("max_area", 0),
-                                        bbox=(rx1, ry1, rx2 - rx1, ry2 - ry1),
-                                        center=(img_x, img_y),
-                                        max_diff=roi_stats.get("max_diff", 0),
-                                        is_cv_ok=True,
-                                        threshold_used=roi_stats.get("threshold", 0),
-                                        min_area_used=roi_stats.get("min_area", 0),
-                                        min_max_diff_used=roi_stats.get("min_max_diff", 0),
-                                        inspector_mode="cv",
-                                        cv_mask_offset=roi_stats.get("roi_offset", (rx1, ry1)),
-                                    )
-                                    ok_defect.cv_filtered_mask = roi_stats.get("filtered_mask")
-                                    result.edge_defects.append(ok_defect)
-                                    print(f"  ✅ AOI Coord edge ({edef.defect_code}) @ ({img_x},{img_y}): CV 未偵測到缺陷，判定 OK"
-                                          f"（max_diff={roi_stats.get('max_diff', 0)}, max_area={roi_stats.get('max_area', 0)}, "
-                                          f"thr={roi_stats.get('threshold', 0)}, min_area={roi_stats.get('min_area', 0)}, "
-                                          f"min_max_diff={roi_stats.get('min_max_diff', 0)}）")
-                print(f"🎯 Phase 1.5 完成: AOI 座標新增 {aoi_tile_count} 個 tiles, {aoi_edge_count} 個邊緣 defects")
+                stats = self._apply_aoi_coord_inspection(
+                    panel_dir=panel_dir,
+                    preprocessed_results=preprocessed_results,
+                    omit_image=omit_image,
+                    omit_overexposed=omit_overexposed,
+                    product_resolution=product_resolution,
+                    aoi_report=aoi_report,
+                )
+                print(f"🎯 Phase 1.5 完成: AOI 座標新增 {stats['aoi_tile_count']} 個 tiles, "
+                      f"{stats['aoi_edge_count']} 個邊緣 defects")
 
         # === Grid Tiling 開關控制 ===
         # 如果 grid_tiling_enabled=False，移除非 AOI coord 的 tiles (只推論 AOI 座標 tiles)
@@ -5468,6 +5588,18 @@ class CAPIInferencer:
             self._apply_cv_edge_inspection(image_result, model_id=model_id)
 
             results.append(image_result)
+
+        # AOI 機檢座標 inspection（v1 / v2 共用 helper；新架構 PC half 走 edge.pt）
+        aoi_stats = self._apply_aoi_coord_inspection(
+            panel_dir=Path(panel_dir),
+            preprocessed_results=results,
+            omit_image=omit_image,
+            omit_overexposed=omit_overexposed,
+            product_resolution=product_resolution,
+        )
+        if self.config.aoi_coord_inspection_enabled:
+            print(f"[v2] AOI 座標 inspection: {aoi_stats['aoi_tile_count']} tiles, "
+                  f"{aoi_stats['aoi_edge_count']} edge defects")
 
         post_start = time.time()
         self._apply_omit_dust_postprocess(

@@ -3560,9 +3560,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     })
             # 附帶 model_resolution_map 給前端產品選擇器使用
             resolution_map = {}
+            is_new_arch = False
             if self.inferencer and hasattr(self.inferencer, 'config') and self.inferencer.config:
                 resolution_map = getattr(self.inferencer.config, 'model_resolution_map', {})
-            self._send_json({"params": params, "model_resolution_map": resolution_map})
+                is_new_arch = bool(getattr(self.inferencer.config, 'is_new_architecture', False))
+            self._send_json({
+                "params": params,
+                "model_resolution_map": resolution_map,
+                "is_new_architecture": is_new_arch,
+            })
         except Exception as e:
             self._send_json({"error": str(e)})
 
