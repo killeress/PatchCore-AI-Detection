@@ -186,3 +186,51 @@ def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path
     assert mock_helper.call_count == 1
     kwargs = mock_helper.call_args.kwargs
     assert kwargs["panel_dir"] == panel_dir
+
+
+def test_v2_e2e_aoi_edge_routes_through_edge_pt(new_arch_inferencer, tmp_path):
+    """E2E：新架構下，AOI 座標邊緣 defect → _apply_aoi_coord_inspection
+    → _inspect_aoi_edge_defect → _inspect_roi_patchcore(zone='edge')
+    → _get_inferencer_for_zone → _get_model_for(_, _, 'edge')。"""
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+
+    fake_result = ImageResult(
+        image_path=panel_dir / "G0F00000_001.png",
+        image_size=(1920, 1080),
+        otsu_bounds=(0, 0, 1920, 1080),
+        exclusion_regions=[],
+        tiles=[],
+        excluded_tile_count=0,
+        processed_tile_count=0,
+        processing_time=0.0,
+        anomaly_tiles=[],
+        raw_bounds=(0, 0, 1920, 1080),
+        panel_polygon=np.array([[0, 0], [1920, 0], [1920, 1080], [0, 1080]], dtype=np.float32),
+    )
+
+    fake_edge_def = MagicMock(product_x=1900, product_y=540, defect_code="L01")
+    edge_model = MagicMock()
+
+    with patch.object(new_arch_inferencer, "_parse_aoi_report_txt",
+                      return_value={"G0F00000": [fake_edge_def]}), \
+         patch.object(new_arch_inferencer, "_create_aoi_coord_tiles",
+                      return_value=([], [fake_edge_def])), \
+         patch("cv2.imread", return_value=np.ones((1080, 1920, 3), dtype=np.uint8)), \
+         patch.object(new_arch_inferencer, "_get_model_for", return_value=edge_model) as mock_for, \
+         patch.object(new_arch_inferencer, "predict_tile",
+                      return_value=(0.1, np.zeros((512, 512), dtype=np.float32))):
+
+        new_arch_inferencer._apply_aoi_coord_inspection(
+            panel_dir=panel_dir,
+            preprocessed_results=[fake_result],
+            omit_image=None, omit_overexposed=False,
+            product_resolution=(1920, 1080),
+        )
+
+    # 串通驗證：_get_model_for 被叫，且 zone='edge'
+    assert mock_for.called, "_get_model_for 應被呼叫（新架構走 edge.pt 路徑）"
+    args = mock_for.call_args.args
+    assert args[0] == "M1"
+    assert args[1] == "G0F00000"
+    assert args[2] == "edge", f"zone 應為 'edge'，實際 {args[2]!r}"
