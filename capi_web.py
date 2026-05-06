@@ -528,6 +528,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/models/") and path.endswith("/training_data/delete"):
                 self._handle_models_training_data_delete()
                 return
+            elif path.startswith("/api/models/") and path.endswith("/tiles/decision"):
+                self._handle_models_tiles_decision()
+                return
             elif path.startswith("/api/models/") and path.endswith("/threshold"):
                 self._handle_models_update_threshold()
                 return
@@ -5909,6 +5912,58 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"delete_training_data error: {e}", exc_info=True)
             self._send_json({"error": str(e)}, status=500)
+
+    def _handle_models_tiles_decision(self):
+        """POST /api/models/<id>/tiles/decision
+        body: {"tile_ids": [int, ...], "decision": "accept"|"reject"}
+
+        只允許切換 OK tile 的 decision；NG tile 嘗試操作 → 400。
+        """
+        parts = self.path.split("/")
+        try:
+            bundle_id = int(parts[3])
+        except (ValueError, IndexError):
+            self._send_json({"error": "invalid bundle id"}, status=400)
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON"}, status=400)
+            return
+
+        tile_ids = body.get("tile_ids", [])
+        decision = body.get("decision")
+        if not tile_ids or decision not in ("accept", "reject"):
+            self._send_json({"error": "tile_ids 與 decision 必填"}, status=400)
+            return
+        try:
+            tile_ids = [int(x) for x in tile_ids]
+        except (TypeError, ValueError):
+            self._send_json({"error": "tile_ids 必須為整數陣列"}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        bundle = db.get_model_bundle(bundle_id)
+        if not bundle:
+            self._send_json({"error": "bundle not found"}, status=404)
+            return
+        job_id = bundle.get("job_id") or ""
+        if not job_id:
+            self._send_json({"error": "此 bundle 無關聯 job_id"}, status=400)
+            return
+
+        # 只允許動 OK tile：用 source='ok' 撈一次當前 job 的所有 OK tile id 做白名單
+        ok_ids = {int(t["id"]) for t in db.list_tile_pool(job_id, source="ok")}
+        bad = [i for i in tile_ids if i not in ok_ids]
+        if bad:
+            self._send_json({"error": f"tile_ids 含非 OK tile（NG tile 不可動）: {bad[:5]}"},
+                            status=400)
+            return
+
+        db.update_tile_decisions(job_id, tile_ids, decision)
+        self._send_json({"ok": True, "updated": len(tile_ids)})
 
 
 def create_web_server(
