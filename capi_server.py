@@ -698,15 +698,19 @@ def results_to_db_data(
 class CAPIServer:
     """CAPI AI TCP Socket 推論伺服器"""
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, training_only: bool = False):
         """
         Args:
             config_path: server_config.yaml 路徑
+            training_only: 訓練專用模式 — 不載入推論模型、不開 TCP 監聽，
+                只起 web 讓 /train/new 可用。給訓練時把 GPU 全部留給訓練
+                subprocess 用。
         """
         # 載入伺服器設定
         with open(config_path, "r", encoding="utf-8") as f:
             self.server_config = yaml.safe_load(f)
         self.base_dir = Path(__file__).parent.resolve()
+        self.training_only = training_only
 
         # 設定日誌
         setup_logging(self.server_config)
@@ -1108,18 +1112,25 @@ class CAPIServer:
         """啟動伺服器"""
         print("[SERVER] Starting...", flush=True)
         logger.info("=" * 60)
-        logger.info("CAPI AI Inference Server Starting")
+        if self.training_only:
+            logger.info("CAPI AI Server Starting (TRAINING-ONLY mode: no inference, no TCP)")
+        else:
+            logger.info("CAPI AI Inference Server Starting")
         logger.info("=" * 60)
 
-        # 載入模型
-        print("[SERVER] Loading model...", flush=True)
-        try:
-            self._load_inferencer()
-            print("[SERVER] Model loaded OK", flush=True)
-        except Exception as e:
-            print(f"[SERVER] Model load FAILED: {e}", flush=True)
-            logger.error(f"Failed to load model: {e}")
-            logger.warning("Server will start without model (ERR for all requests)")
+        # 載入模型（training-only 模式跳過，把 GPU 留給訓練 subprocess）
+        if self.training_only:
+            print("[SERVER] TRAINING-ONLY mode: skipping model load", flush=True)
+            logger.info("Skipping inferencer load (training-only mode)")
+        else:
+            print("[SERVER] Loading model...", flush=True)
+            try:
+                self._load_inferencer()
+                print("[SERVER] Model loaded OK", flush=True)
+            except Exception as e:
+                print(f"[SERVER] Model load FAILED: {e}", flush=True)
+                logger.error(f"Failed to load model: {e}")
+                logger.warning("Server will start without model (ERR for all requests)")
 
         # 啟動 Web 伺服器
         web_cfg = self.server_config.get("web", {})
@@ -1146,18 +1157,32 @@ class CAPIServer:
         # 啟動清理排程
         self._start_cleanup_scheduler()
 
+        self._running = True
+
+        with server_status.lock:
+            server_status.is_running = True
+            server_status.start_time = time.time()
+
+        if self.training_only:
+            # TRAINING-ONLY：不開 TCP 監聽，主執行緒 idle 等 signal_handler 把
+            # _running 設 False 後優雅退出。
+            print(f"[SERVER] TRAINING-ONLY mode active. Web UI only on web port.", flush=True)
+            logger.info("TRAINING-ONLY mode — TCP listener disabled.")
+            logger.info("=" * 60)
+            try:
+                while self._running:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                pass
+            logger.info("Server stopped")
+            return
+
         # 建立 TCP Socket
         self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server_socket.bind((self.host, self.port))
         self._server_socket.listen(self.max_connections)
         self._server_socket.settimeout(1.0)  # 讓主迴圈可以定期檢查 _running
-
-        self._running = True
-        
-        with server_status.lock:
-            server_status.is_running = True
-            server_status.start_time = time.time()
 
         print(f"[SERVER] TCP listening on {self.host}:{self.port}", flush=True)
         logger.info(f"TCP server listening on {self.host}:{self.port}")
@@ -1742,6 +1767,12 @@ def main():
         action="store_true",
         help="Run protocol parsing tests and exit"
     )
+    parser.add_argument(
+        "--training-only",
+        action="store_true",
+        help="Training-only mode: skip inferencer load and TCP listener, "
+             "leave full GPU available for the training subprocess."
+    )
     args = parser.parse_args()
 
     if args.test_protocol:
@@ -1754,7 +1785,7 @@ def main():
         sys.exit(1)
 
     # 建立伺服器
-    server = CAPIServer(args.config)
+    server = CAPIServer(args.config, training_only=args.training_only)
 
     # Signal handlers
     def signal_handler(signum, frame):
