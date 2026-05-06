@@ -18,10 +18,15 @@ class PreprocessConfig:
     enable_panel_polygon: bool = True
     edge_threshold_px: int = 768  # retained for config compatibility; zone split is coverage-based
     coverage_min: float = 0.3
-    # Edge tile 中心可往 panel bbox 邊外推的最大距離（px）。預設 256（= half tile_size），
-    # 讓「中心位於 panel 邊」的 tile 進入訓練集。0 = 關閉外推（向後相容舊行為）。
-    # 實際 push 距離會夾到 image 邊界，使 tile 始終落在 image 內。
-    outer_edge_extend: int = 256
+    # 推論 ROI 切塊可能跨在 panel 邊界外側、含真實黑邊像素；訓練資料若只走原 bbox grid
+    # 拿不到這種樣本，邊緣 tile 會被當異常。每邊往外推到中心剛好在 panel 邊，補進該情境。
+    # None → tile_size // 2（中心剛好落在 panel 邊）；0 → 關閉。實際 push 距離會夾到
+    # image 邊界，使 tile 始終落在 image 內。
+    outer_edge_extend: Optional[int] = None
+
+    def __post_init__(self):
+        if self.outer_edge_extend is None:
+            self.outer_edge_extend = self.tile_size // 2
 
 
 @dataclass
@@ -406,6 +411,8 @@ def _generate_tiles(
     if right_tx is not None:
         extra_xs.append(right_tx)
 
+    # 各來源（top/bottom 行、left/right 列）的位置集合天生互斥（top/bottom 用 top_ty
+     # / bottom_ty；left/right 用 ys 的內圈 y），所以不需要去重。
     extension_positions: List[Tuple[int, int]] = []
     if top_ty is not None:
         extension_positions.extend((tx, top_ty) for tx in extra_xs)
@@ -415,47 +422,36 @@ def _generate_tiles(
         extension_positions.extend((left_tx, ty) for ty in ys)
     if right_tx is not None:
         extension_positions.extend((right_tx, ty) for ty in ys)
-    extension_positions = list(dict.fromkeys(extension_positions))
 
     tiles: List[TileResult] = []
     tid = 0
 
-    # 1) 內圈 grid（原邏輯）
+    def _emit(tx: int, ty: int, zone: str, cov: float, dist: float, mask) -> None:
+        nonlocal tid
+        tiles.append(TileResult(
+            tile_id=tid,
+            x1=tx, y1=ty, x2=tx + ts, y2=ty + ts,
+            image=img[ty:ty + ts, tx:tx + ts].copy(),
+            mask=mask,
+            coverage=cov,
+            zone=zone,
+            center_dist_to_edge=dist,
+        ))
+        tid += 1
+
     for ty in ys:
         for tx in xs:
-            tile_rect = (tx, ty, tx + ts, ty + ts)
-            zone, cov, dist, mask = classify_tile_zone(tile_rect, polygon, config)
+            zone, cov, dist, mask = classify_tile_zone((tx, ty, tx + ts, ty + ts), polygon, config)
             if zone == "outside":
                 continue
             if zone == "inner" and (tx == xs[0] or tx == xs[-1] or ty == ys[0] or ty == ys[-1]):
                 zone = "edge"
-            tile_img = img[ty:ty + ts, tx:tx + ts].copy()
-            tiles.append(TileResult(
-                tile_id=tid,
-                x1=tx, y1=ty, x2=tx + ts, y2=ty + ts,
-                image=tile_img,
-                mask=mask,
-                coverage=cov,
-                zone=zone,
-                center_dist_to_edge=dist,
-            ))
-            tid += 1
+            _emit(tx, ty, zone, cov, dist, mask)
 
-    # 2) 外圈外推 tile（強制 zone="edge"）
+    # 外推 tile 強制 edge：角落 coverage<coverage_min 否則會被歸 outside 跳掉。
+    # push 已夾到 image 內，img 切片必為 ts × ts。
     for tx, ty in extension_positions:
-        tile_rect = (tx, ty, tx + ts, ty + ts)
-        _zone, cov, dist, mask = classify_tile_zone(tile_rect, polygon, config)
-        # push 已夾到 image 內，img 切片必為 ts × ts
-        tile_img = img[ty:ty + ts, tx:tx + ts].copy()
-        tiles.append(TileResult(
-            tile_id=tid,
-            x1=tx, y1=ty, x2=tx + ts, y2=ty + ts,
-            image=tile_img,
-            mask=mask,
-            coverage=cov,
-            zone="edge",  # 強制：corner tile coverage<0.3 也算 edge
-            center_dist_to_edge=dist,
-        ))
-        tid += 1
+        _zone, cov, dist, mask = classify_tile_zone((tx, ty, tx + ts, ty + ts), polygon, config)
+        _emit(tx, ty, "edge", cov, dist, mask)
 
     return tiles

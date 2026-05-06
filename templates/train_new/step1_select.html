@@ -73,7 +73,6 @@
 
   <div class="step1-actionbar">
     <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0/3 片</span>
-    <span id="sel-roles" style="color:#a6adc8;font-size:.78rem;display:none;"></span>
     <span style="display:flex;gap:8px;align-items:center;margin-left:auto;">
       <a href="/training" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">取消</a>
       <button id="next-btn" onclick="submitStart()" disabled
@@ -174,7 +173,6 @@ function renderPanels(panels) {
   updateNext();
 }
 
-// 全部 panel 都收 inner+edge，不再依順位分色
 const PANEL_LIMIT = 3;
 const PANEL_COLOR = '#a6e3a1';
 
@@ -226,8 +224,6 @@ function refreshSelectedVisuals() {
 function updateNext() {
   const machineText = _selectedMachineId ? `（機種 ${_selectedMachineId}）` : '';
   document.getElementById('sel-count').textContent = `已選 ${_selected.size}/${PANEL_LIMIT} 片 ${machineText}`;
-  // 不再依 inner/edge 分組顯示
-  document.getElementById('sel-roles').style.display = 'none';
   const btn = document.getElementById('next-btn');
   btn.disabled = _selected.size !== PANEL_LIMIT;
   btn.style.opacity = btn.disabled ? .4 : 1;

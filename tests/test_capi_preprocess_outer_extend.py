@@ -1,8 +1,6 @@
 """capi_preprocess.outer_edge_extend：訓練 edge tile 外推取樣。"""
 from __future__ import annotations
 import numpy as np
-import cv2
-import pytest
 
 from capi_preprocess import (
     PreprocessConfig,
@@ -25,9 +23,9 @@ def _detect(img, cfg=None):
     return bbox, polygon
 
 
-def test_default_outer_edge_extend_is_256():
+def test_default_outer_edge_extend_is_half_tile_size():
     cfg = PreprocessConfig()
-    assert cfg.outer_edge_extend == 256
+    assert cfg.outer_edge_extend == cfg.tile_size // 2
 
 
 def test_outer_edge_extend_adds_extension_tiles_for_centered_panel():
