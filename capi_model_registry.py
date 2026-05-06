@@ -79,6 +79,7 @@ def get_bundle_detail(db, bundle_id: int) -> Optional[dict]:
         bundle["thresholds"] = thresholds_json or None
 
     bundle["training_data"] = get_training_data_summary(db, bundle)
+    bundle["pending_changes"] = get_pending_change_summary_for_bundle(db, bundle)
     return bundle
 
 
@@ -302,6 +303,111 @@ def update_threshold(db, bundle_id: int, lighting: str, zone: str, value: float)
         "lighting": lighting, "zone": zone, "value": rounded,
         "message": "已更新 threshold，請重啟 server 才會生效",
     }
+
+
+def _read_manifest(bundle_dir: Path) -> dict:
+    """讀 bundle 的 manifest.json；不存在或解析錯誤回空 dict。"""
+    p = bundle_dir / "manifest.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        logger.warning("manifest.json 解析失敗：%s", p)
+        return {}
+
+
+def _write_manifest(bundle_dir: Path, data: dict) -> None:
+    p = bundle_dir / "manifest.json"
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    import os
+    os.replace(tmp, p)
+
+
+def append_submodel_history(
+    bundle_dir: Path, lighting: str, zone: str, entry: dict,
+) -> None:
+    """把單次訓練 entry 追加到 manifest.submodel_history[lighting-zone]。
+
+    若 manifest 不存在 submodel_history 欄位則新建。entry 預期至少包含：
+    trained_at、tile_count_used、auroc、used_tile_ids、kind。
+    """
+    unit_label = f"{lighting}-{zone}"
+    manifest = _read_manifest(bundle_dir)
+    history = manifest.setdefault("submodel_history", {})
+    history.setdefault(unit_label, []).append(entry)
+    manifest["last_retrained_at"] = entry.get("trained_at", manifest.get("last_retrained_at"))
+    _write_manifest(bundle_dir, manifest)
+
+
+def get_used_tile_ids(bundle_dir: Path, lighting: str, zone: str) -> Optional[set]:
+    """讀 manifest 取得該 unit「上次訓練時使用的 tile_pool.id 集合」。
+
+    優先順序：
+    1. submodel_history[unit_label] 最新 entry 的 used_tile_ids
+    2. 退回 manifest.unit_metrics[unit_label].used_tile_ids（初次訓練的記錄）
+    3. 都沒有 → None（表示舊 bundle，無法判斷差異）
+    """
+    unit_label = f"{lighting}-{zone}"
+    manifest = _read_manifest(bundle_dir)
+
+    history = (manifest.get("submodel_history") or {}).get(unit_label) or []
+    if history:
+        ids = history[-1].get("used_tile_ids")
+        if ids is not None:
+            return set(int(x) for x in ids)
+
+    unit_metrics = (manifest.get("unit_metrics") or {}).get(unit_label) or {}
+    ids = unit_metrics.get("used_tile_ids")
+    if ids is not None:
+        return set(int(x) for x in ids)
+    return None
+
+
+def get_pending_change_count(
+    db, bundle: dict, lighting: str, zone: str,
+) -> int:
+    """回傳該 unit 目前「decision=accept」tile id 集合與上次訓練集合的差異數。
+
+    差異 = (新增 accept 的) ∪ (上次訓練用過但現在被 reject 的)。
+    舊 bundle（manifest 沒記錄 used_tile_ids）退化策略：回傳目前 reject 的 tile 數。
+    無 job_id（訓練資料已刪）回 0。
+    """
+    job_id = bundle.get("job_id") or ""
+    if not job_id:
+        return 0
+    bundle_dir = Path(bundle["bundle_path"])
+
+    current_accept = {
+        int(t["id"]) for t in db.list_tile_pool(
+            job_id, lighting=lighting, zone=zone, source="ok", decision="accept",
+        )
+    }
+    last_used = get_used_tile_ids(bundle_dir, lighting, zone)
+
+    if last_used is None:
+        # 舊 bundle 退化路徑：用「現在被 reject 的數量」當差異訊號
+        rejected = db.list_tile_pool(
+            job_id, lighting=lighting, zone=zone, source="ok", decision="reject",
+        )
+        return len(rejected)
+
+    return len(current_accept.symmetric_difference(last_used))
+
+
+def get_pending_change_summary_for_bundle(db, bundle: dict) -> dict:
+    """所有 lighting+zone 的 pending change 數量，給列表頁徽章用。
+
+    回傳 {(lighting, zone): count, ...}，過濾掉 count == 0 的。
+    """
+    out = {}
+    for lighting in ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"):
+        for zone in ("inner", "edge"):
+            n = get_pending_change_count(db, bundle, lighting, zone)
+            if n > 0:
+                out[(lighting, zone)] = n
+    return out
 
 
 def export_bundle_zip(bundle_path: Path, machine_id: str) -> bytes:
