@@ -105,6 +105,21 @@ def hm_relative(path_str, base_dir):
         return ""
 
 
+def _serialize_pending_changes(pc) -> list:
+    """把 {(lighting, zone): count} 轉為 [{lighting, zone, count}] 給 JSON 用。
+
+    無項目或 None 時回 []。
+    """
+    if not pc:
+        return []
+    out = []
+    for key, count in pc.items():
+        if isinstance(key, tuple) and len(key) == 2:
+            lighting, zone = key
+            out.append({"lighting": lighting, "zone": zone, "count": int(count)})
+    return out
+
+
 class _ListHandler(logging.Handler):
     """Captures training log records into a list for the retrain progress UI."""
 
@@ -5755,6 +5770,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if not detail:
             self._send_json({"error": "not found"}, status=404)
             return
+        detail["pending_changes"] = _serialize_pending_changes(detail.get("pending_changes"))
         self._send_json(detail)
 
     def _handle_models_activate(self):
