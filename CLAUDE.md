@@ -112,6 +112,10 @@ System now supports two model architectures concurrently:
 
 `server_config.yaml.model_configs` lists active configs. Inference dispatches by `model_id` from request.
 
+- bundle detail 頁支援單子模型重訓：標記 OK tile 為 reject → 「重訓此子模型」按鈕觸發後台訓練 →
+  就地覆蓋 `<lighting>-<zone>.pt`、寫 manifest history、reload inferencer cache。
+  threshold 與 yaml 完全不動（threshold 由使用者在模型庫手動調整）。
+
 ## Training
 
 - **Legacy** (deprecated): `tools/build_bga_tiles.py` + `tools/train_bga_all.py`
