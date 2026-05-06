@@ -70,9 +70,6 @@ class TrainingConfig:
     image_size: tuple = (512, 512)
     coreset_ratio: float = 0.1
     max_epochs: int = 1
-    # 前 N 片 panel 收 inner+edge tile；超過此索引的 panel 只收 edge tile
-    # 預設 3：前 3 片提供 inner（已足夠 ~450 個樣本）；第 4-5 片補 edge
-    inner_panels: int = 3
 
 
 # 使用者可從 step1 表單覆寫的 PatchCore 超參數，與其合法值範圍。
@@ -82,7 +79,6 @@ USER_TRAINABLE_PARAM_SPECS: Dict[str, Dict] = {
     "batch_size":    {"type": int,   "min": 1,    "max": 32},
     "coreset_ratio": {"type": float, "min": 0.01, "max": 0.5},
     "max_epochs":    {"type": int,   "min": 1,    "max": 10},
-    "inner_panels":  {"type": int,   "min": 1,    "max": 5},
 }
 USER_TRAINABLE_PARAM_NAMES: Tuple[str, ...] = tuple(USER_TRAINABLE_PARAM_SPECS.keys())
 
@@ -876,6 +872,119 @@ def _calibrate_from_model(
     return train_max, train_scores, ng_scores
 
 
+def train_single_submodel(
+    db: TrainingDB,
+    job_id: str,
+    lighting: str,
+    zone: str,
+    cfg: TrainingConfig,
+    output_pt_path: Path,
+    gpu_lock=None,
+    log: Callable[[str], None] = print,
+    cancel_event=None,
+) -> Dict:
+    """訓練單一 (lighting, zone) unit。
+
+    回傳 dict 包含：
+      - threshold: float (永遠 = DEFAULT_THRESHOLD = 0.5，calibrate 寫死)
+      - metrics: dict (compute_unit_metrics 結果)
+      - tile_count: int (訓練用 tile 數)
+      - ng_count: int (NG 數)
+      - ng_used: "zone" | "fallback"
+      - used_tile_ids: list[int] (該次訓練實際送進的 tile_pool.id)
+      - elapsed_seconds: int
+      - size_bytes: int (.pt 檔大小)
+
+    output_pt_path 會被原子覆蓋（同目錄 .pt.tmp → os.replace）。失敗時不動到原檔。
+    """
+    from contextlib import nullcontext
+    import os
+    gpu_ctx = gpu_lock if gpu_lock is not None else nullcontext()
+    unit_label = f"{lighting}-{zone}"
+
+    train_tiles = db.list_tile_pool(job_id, lighting=lighting, zone=zone,
+                                    source="ok", decision="accept")
+    ng_all = db.list_tile_pool(job_id, lighting=lighting,
+                               source="ng", decision="accept")
+    ng_for_zone = [t for t in ng_all if t.get("zone") in (zone, None)]
+    if len(ng_for_zone) < MIN_NG_PER_ZONE:
+        log(f"{unit_label}: zone NG 僅 {len(ng_for_zone)} (<{MIN_NG_PER_ZONE})，"
+            f"退回全部 NG ({len(ng_all)})")
+        ng_tiles = ng_all
+        ng_used = "fallback"
+    else:
+        ng_tiles = ng_for_zone
+        ng_used = "zone"
+
+    if len(train_tiles) < MIN_TRAIN_TILES:
+        raise RuntimeError(
+            f"{unit_label}: tile 不足 ({len(train_tiles)} < {MIN_TRAIN_TILES})"
+        )
+
+    used_tile_ids = sorted(int(t["id"]) for t in train_tiles)
+    unit_start = time.monotonic()
+
+    with gpu_ctx:
+        staging = Path(".tmp/training_staging") / job_id / unit_label
+        run_root = Path(".tmp/training_runs") / job_id / unit_label
+        try:
+            stage_dataset(staging,
+                          [Path(t["source_path"]) for t in train_tiles],
+                          [Path(t["source_path"]) for t in ng_tiles])
+            model_pt = train_one_patchcore(staging, run_root, unit_label, cfg, log=log)
+
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("training cancelled by user")
+
+            train_max, train_scores, ng_scores = _calibrate_from_model(
+                model_pt,
+                [Path(t["source_path"]) for t in train_tiles],
+                [Path(t["source_path"]) for t in ng_tiles],
+            )
+            threshold = calibrate_threshold(ng_scores, train_max)
+
+            output_pt_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = output_pt_path.with_suffix(output_pt_path.suffix + ".tmp")
+            shutil.copy2(model_pt, tmp_path)
+            os.replace(tmp_path, output_pt_path)
+            size = output_pt_path.stat().st_size
+
+            metrics = compute_unit_metrics(
+                train_max, ng_scores, threshold, train_scores=train_scores,
+            )
+            metrics["train_count"] = len(train_tiles)
+            metrics["ng_used"] = ng_used
+            elapsed = time.monotonic() - unit_start
+            metrics["elapsed_seconds"] = int(elapsed)
+
+            return {
+                "threshold": round(threshold, 4),
+                "metrics": metrics,
+                "tile_count": len(train_tiles),
+                "ng_count": len(ng_tiles),
+                "ng_used": ng_used,
+                "used_tile_ids": used_tile_ids,
+                "elapsed_seconds": int(elapsed),
+                "size_bytes": size,
+            }
+        finally:
+            shutil.rmtree(run_root, ignore_errors=True)
+            shutil.rmtree(staging, ignore_errors=True)
+            tmp_leftover = output_pt_path.with_suffix(output_pt_path.suffix + ".tmp")
+            if tmp_leftover.exists():
+                try:
+                    tmp_leftover.unlink()
+                except OSError:
+                    pass
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+
 def run_training_pipeline(
     job_id: str,
     cfg: TrainingConfig,
@@ -890,8 +999,6 @@ def run_training_pipeline(
         模式下傳 None 即可（VRAM 已透過 set_per_process_memory_fraction 隔離）。
     cancel_event: 任意提供 .is_set() 的物件（threading.Event 或 file-flag wrapper）。
     """
-    from contextlib import nullcontext
-    gpu_ctx = gpu_lock if gpu_lock is not None else nullcontext()
     # 1. 環境檢查
     _setup_offline_env(cfg.backbone_cache_dir, log, cfg.required_backbones)
 
@@ -931,91 +1038,46 @@ def run_training_pipeline(
 
         train_tiles = db.list_tile_pool(job_id, lighting=lighting, zone=zone,
                                         source="ok", decision="accept")
-        # NG: 同 zone + heuristic 未分類者一起給此 unit；分類錯歸到他 zone 的就略過。
-        # 該 zone 的 NG 太少（heuristic 失準導致）就退回全部 NG，保 calibration 穩定。
-        ng_all = db.list_tile_pool(job_id, lighting=lighting,
-                                   source="ng", decision="accept")
-        ng_for_zone = [t for t in ng_all if t.get("zone") in (zone, None)]
-        if len(ng_for_zone) < MIN_NG_PER_ZONE:
-            log(f"[{idx}/10] {unit_label}: zone NG 僅 {len(ng_for_zone)} (<{MIN_NG_PER_ZONE})，"
-                f"退回全部 NG ({len(ng_all)})")
-            ng_tiles = ng_all
-            ng_used = "fallback"
-        else:
-            ng_tiles = ng_for_zone
-            ng_used = "zone"
-
         if len(train_tiles) < MIN_TRAIN_TILES:
             log(f"[{idx}/10] {unit_label}: 跳過：tile 不足 ({len(train_tiles)} < {MIN_TRAIN_TILES})")
             continue
 
-        with gpu_ctx:
-            staging = Path(".tmp/training_staging") / job_id / unit_label
-            stage_dataset(staging,
-                          [Path(t["source_path"]) for t in train_tiles],
-                          [Path(t["source_path"]) for t in ng_tiles])
-            run_root = Path(".tmp/training_runs") / job_id / unit_label
-            try:
-                model_pt = train_one_patchcore(staging, run_root, unit_label, cfg, log=log)
+        try:
+            output_pt = bundle_dir / f"{unit_label}.pt"
+            result = train_single_submodel(
+                db=db, job_id=job_id, lighting=lighting, zone=zone,
+                cfg=cfg, output_pt_path=output_pt,
+                gpu_lock=gpu_lock, log=log, cancel_event=cancel_event,
+            )
 
-                if cancel_event is not None and cancel_event.is_set():
-                    raise RuntimeError("training cancelled by user")
+            thresholds[lighting][zone] = result["threshold"]
+            tiles_per_unit[unit_label] = {"train": result["tile_count"], "ng": result["ng_count"]}
+            model_files[unit_label] = {"path": output_pt.name, "size_bytes": result["size_bytes"]}
 
-                train_max, train_scores, ng_scores = _calibrate_from_model(
-                    model_pt,
-                    [Path(t["source_path"]) for t in train_tiles],
-                    [Path(t["source_path"]) for t in ng_tiles],
-                )
-                threshold = calibrate_threshold(ng_scores, train_max)
+            metrics = result["metrics"]
+            metrics["used_tile_ids"] = result["used_tile_ids"]
+            unit_metrics[unit_label] = metrics
 
-                dst_pt = bundle_dir / f"{unit_label}.pt"
-                shutil.copy2(model_pt, dst_pt)
-                size = dst_pt.stat().st_size
-
-                thresholds[lighting][zone] = round(threshold, 4)
-                tiles_per_unit[unit_label] = {"train": len(train_tiles), "ng": len(ng_tiles)}
-                model_files[unit_label] = {"path": dst_pt.name, "size_bytes": size}
-                metrics = compute_unit_metrics(
-                    train_max, ng_scores, threshold, train_scores=train_scores,
-                )
-                metrics["train_count"] = len(train_tiles)
-                metrics["ng_used"] = ng_used  # "zone" 或 "fallback"，幫助 step5 判讀 ng_count 是否被退回
-                unit_elapsed = time.monotonic() - unit_start
-                metrics["elapsed_seconds"] = int(unit_elapsed)
-                unit_metrics[unit_label] = metrics
-                success_units += 1
-                succeeded_units.add((lighting, zone))
-                completed_durations.append(unit_elapsed)
-                eta = _eta_text()
-                caught = metrics.get("ng_caught_count", 0)
-                ng_n = metrics.get("ng_count", 0)
-                auroc = metrics.get("auroc")
-                auroc_str = f", AUROC={auroc:.3f}({metrics.get('auroc_grade','')})" if auroc is not None else ""
-                log(
-                    f"[{idx}/10] {unit_label}: ✓ done | {int(unit_elapsed)}s, "
-                    f"threshold={threshold:.4f}, size={size/1e6:.1f}MB, "
-                    f"ng_caught={caught}/{ng_n}{auroc_str}"
-                    + (f" | {eta}" if eta else "")
-                )
-            except Exception as e:
-                completed_durations.append(time.monotonic() - unit_start)
-                log(f"[{idx}/10] {unit_label}: ✗ 訓練失敗: {e}")
-                for line in traceback.format_exc().rstrip().splitlines()[-8:]:
-                    log(f"  {line}")
-                # 不增加 success_units，繼續下一個 unit
-            finally:
-                shutil.rmtree(run_root, ignore_errors=True)
-                shutil.rmtree(staging, ignore_errors=True)
-                # 釋放 GPU 記憶體：set_per_process_memory_fraction 切的額度
-                # 跨 unit 不會自動回收，前面 unit 的 model/embedding_store cache
-                # 累積後會把後面 unit 推進 OOM。每 unit 結束強制 reclaim。
-                gc.collect()
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except Exception:
-                    pass
+            success_units += 1
+            succeeded_units.add((lighting, zone))
+            completed_durations.append(result["elapsed_seconds"])
+            eta = _eta_text()
+            caught = metrics.get("ng_caught_count", 0)
+            ng_n = metrics.get("ng_count", 0)
+            auroc = metrics.get("auroc")
+            auroc_str = f", AUROC={auroc:.3f}({metrics.get('auroc_grade','')})" if auroc is not None else ""
+            log(
+                f"[{idx}/10] {unit_label}: ✓ done | {result['elapsed_seconds']}s, "
+                f"threshold={result['threshold']:.4f}, size={result['size_bytes']/1e6:.1f}MB, "
+                f"ng_caught={caught}/{ng_n}{auroc_str}"
+                + (f" | {eta}" if eta else "")
+            )
+        except Exception as e:
+            completed_durations.append(time.monotonic() - unit_start)
+            log(f"[{idx}/10] {unit_label}: ✗ 訓練失敗: {e}")
+            for line in traceback.format_exc().rstrip().splitlines()[-8:]:
+                log(f"  {line}")
+            # 不增加 success_units，繼續下一個 unit
 
     if success_units != len(TRAINING_UNITS):
         missing = [
