@@ -6069,9 +6069,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """
         import traceback
         from capi_train_new import train_single_submodel, TrainingConfig
-        from capi_model_registry import (
-            append_submodel_history, get_used_tile_ids, _read_manifest,
-        )
+        from capi_model_registry import append_submodel_history, _read_manifest
 
         state = CAPIWebHandler._submodel_retrain_state
 
