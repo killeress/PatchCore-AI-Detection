@@ -5029,7 +5029,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         body: {
             "machine_id": "...",
-            "panel_paths": [...],
+            "panel_paths": [...],   # 必須是 3 片
             "training_params": {  # optional
                 "batch_size": 8,
                 "coreset_ratio": 0.1,
@@ -5059,8 +5059,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "panel_paths contains invalid path"}, status=400)
                 return
             clean_panel_paths.append(p.strip())
-        if len(clean_panel_paths) != 5:
-            self._send_json({"error": "panel_paths must contain exactly 5 panels"}, status=400)
+        if len(clean_panel_paths) != 3:
+            self._send_json({"error": "panel_paths must contain exactly 3 panels"}, status=400)
             return
 
         training_params, err = self._validate_training_params(params.get("training_params"))

@@ -189,7 +189,6 @@ class TestTrainingJobsCRUD:
             "batch_size": 16,
             "coreset_ratio": 0.05,
             "max_epochs": 2,
-            "inner_panels": 4,
         }
         db.create_training_job(
             job_id="j_with_params", machine_id="M", panel_paths=[],

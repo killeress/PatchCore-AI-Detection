@@ -232,7 +232,7 @@ def test_handle_train_new_start_rejects_concurrent():
     }
 
     h = _make_handler_with_server(server, "/api/train/new/start")
-    body = json.dumps({"machine_id": "M", "panel_paths": [f"/p{i}" for i in range(5)]}).encode()
+    body = json.dumps({"machine_id": "M", "panel_paths": [f"/p{i}" for i in range(3)]}).encode()
     h.headers.get = MagicMock(return_value=str(len(body)))
     h.rfile = io.BytesIO(body)
 
@@ -333,7 +333,7 @@ def test_handle_train_new_start_rejects_bad_training_params():
     h = _make_handler_with_server(server, "/api/train/new/start")
     body = json.dumps({
         "machine_id": "M",
-        "panel_paths": [f"/p{i}" for i in range(5)],
+        "panel_paths": [f"/p{i}" for i in range(3)],
         "training_params": {"batch_size": 999},
     }).encode()
     h.headers.get = MagicMock(return_value=str(len(body)))
@@ -378,7 +378,7 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
     h = _make_handler_with_server(server, "/api/train/new/start")
     payload = {
         "machine_id": "M",
-        "panel_paths": [f"/p{i}" for i in range(5)],
+        "panel_paths": [f"/p{i}" for i in range(3)],
         "training_params": {
             "batch_size": 16, "coreset_ratio": 0.05,
             "max_epochs": 2,
@@ -690,3 +690,21 @@ def test_handle_models_list_filters_by_machine_id():
     server.database.list_model_bundles.assert_called_with(machine_id="M")
     body = json.loads(h._sent_response[0]["body"])
     assert body["bundles"] == [{"id": 1, "machine_id": "M"}]
+
+
+def test_handle_train_new_start_rejects_wrong_panel_count():
+    """非 3 片 panel 一律拒絕。"""
+    server = MagicMock()
+    server.database.get_active_training_job.return_value = None
+
+    for n in (0, 1, 2, 4, 5, 6):
+        h = _make_handler_with_server(server, "/api/train/new/start")
+        body = json.dumps({"machine_id": "M", "panel_paths": [f"/p{i}" for i in range(n)]}).encode()
+        h.headers.get = MagicMock(return_value=str(len(body)))
+        h.rfile = io.BytesIO(body)
+
+        h._handle_train_new_start()
+        assert h._sent_response[0]["status"] == 400, f"n={n} 應該被拒"
+        if n > 0:
+            err_body = json.loads(h._sent_response[0]["body"])
+            assert "exactly 3" in err_body.get("error", ""), f"n={n} error: {err_body}"
