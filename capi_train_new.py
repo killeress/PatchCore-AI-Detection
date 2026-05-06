@@ -875,6 +875,7 @@ def train_single_submodel(
     gpu_lock=None,
     log: Callable[[str], None] = print,
     cancel_event=None,
+    unit_prefix: str = "",
 ) -> Dict:
     """訓練單一 (lighting, zone) unit。
 
@@ -901,7 +902,7 @@ def train_single_submodel(
                                source="ng", decision="accept")
     ng_for_zone = [t for t in ng_all if t.get("zone") in (zone, None)]
     if len(ng_for_zone) < MIN_NG_PER_ZONE:
-        log(f"{unit_label}: zone NG 僅 {len(ng_for_zone)} (<{MIN_NG_PER_ZONE})，"
+        log(f"{unit_prefix}{unit_label}: zone NG 僅 {len(ng_for_zone)} (<{MIN_NG_PER_ZONE})，"
             f"退回全部 NG ({len(ng_all)})")
         ng_tiles = ng_all
         ng_used = "fallback"
@@ -1041,6 +1042,7 @@ def run_training_pipeline(
                 db=db, job_id=job_id, lighting=lighting, zone=zone,
                 cfg=cfg, output_pt_path=output_pt,
                 gpu_lock=gpu_lock, log=log, cancel_event=cancel_event,
+                unit_prefix=f"[{idx}/10] ",
             )
 
             thresholds[lighting][zone] = result["threshold"]
