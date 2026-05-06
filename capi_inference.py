@@ -6240,6 +6240,19 @@ class CAPIInferencer:
             self._model_cache_v2[key] = self._load_model_from_path(model_path)
         return self._model_cache_v2[key]
 
+    def reload_submodel(self, machine_id: str, lighting: str, zone: str) -> bool:
+        """重訓完成後丟掉 cache 中的舊 model，下次 inference 自動 lazy reload。
+
+        回 True 表示有被踢掉舊 cache；False 代表本來就沒載入過（也不需要 reload）。
+        """
+        key = (machine_id, lighting, zone)
+        if key in self._model_cache_v2:
+            del self._model_cache_v2[key]
+            logger.info("[v2] 已將 cache key %s pop，下次推論會 lazy reload", key)
+            return True
+        logger.info("[v2] cache 中無 key %s，不需要 reload", key)
+        return False
+
     def _predict_tile(self, model, tile_img: np.ndarray, mask: Optional[np.ndarray] = None):
         """跑 PatchCore 推論 + 應用 polygon mask（如有）。
 
