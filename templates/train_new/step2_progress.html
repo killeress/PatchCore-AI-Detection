@@ -3,7 +3,7 @@
 {% block content %}
 {# Step 2 前處理進度頁。
    後端 log 由 capi_train_new.py 寫，可解析的訊號：
-     [N/M] panel <id> (inner+edge|edge only)   ← panel 進度
+     [N/M] panel <id>                           ← panel 進度
      ✓ 切出 N tile                              ← tile 累加
      ⚠ ... polygon 偵測失敗                     ← 警告計數
      ✗ 處理失敗                                  ← 失敗計數
@@ -369,7 +369,7 @@ let _timer = null;
 let _startedAt = Date.now();
 
 // 解析後端 log（capi_train_new.preprocess_panels + sample_ng_tiles）
-const RE_PANEL = /^\s*\[(\d+)\/(\d+)\]\s+panel\s+(\S+)\s+\((inner\+edge|edge only)\)/;
+const RE_PANEL = /^\s*\[(\d+)\/(\d+)\]\s+panel\s+(\S+)/;
 const RE_TILES = /✓\s*切出\s+(\d+)\s+tile/;
 const RE_NG    = /✓\s*([A-Z0-9]+):\s*抽\s+(\d+)\s+個\s+NG/;
 const RE_FAIL  = /✗/;
