@@ -276,7 +276,7 @@ class TestValidateTrainingParams:
     def test_full_valid_dict(self):
         from capi_web import CAPIWebHandler
         raw = {"batch_size": 16, "coreset_ratio": 0.05,
-               "max_epochs": 2, "inner_panels": 4}
+               "max_epochs": 2}
         params, err = CAPIWebHandler._validate_training_params(raw)
         assert err is None
         assert params == raw
@@ -304,8 +304,6 @@ class TestValidateTrainingParams:
             {"coreset_ratio": 0.6},
             {"max_epochs": 0},
             {"max_epochs": 100},
-            {"inner_panels": 0},
-            {"inner_panels": 6},
         ]:
             _, err = CAPIWebHandler._validate_training_params(raw)
             assert err and "out of range" in err, f"expected error for {raw}"
@@ -383,7 +381,7 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
         "panel_paths": [f"/p{i}" for i in range(5)],
         "training_params": {
             "batch_size": 16, "coreset_ratio": 0.05,
-            "max_epochs": 2, "inner_panels": 4,
+            "max_epochs": 2,
         },
     }
     body = json.dumps(payload).encode()

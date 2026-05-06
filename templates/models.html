@@ -346,8 +346,7 @@ function renderDetail(d) {
       ['batch_size', pp.batch_size != null ? pp.batch_size : '—'],
       ['coreset_ratio', pp.coreset_ratio != null ? pp.coreset_ratio : '—'],
       ['max_epochs', pp.max_epochs != null ? pp.max_epochs : '—'],
-      ['inner_panels', pp.inner_panels != null ? pp.inner_panels : '—（更舊 bundle 未記）'],
-      ['image_size', Array.isArray(pp.image_size) ? pp.image_size.join('×') : '—'],
+['image_size', Array.isArray(pp.image_size) ? pp.image_size.join('×') : '—'],
     );
   }
 

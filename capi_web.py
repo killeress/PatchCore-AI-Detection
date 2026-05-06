@@ -5033,8 +5033,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "training_params": {  # optional
                 "batch_size": 8,
                 "coreset_ratio": 0.1,
-                "max_epochs": 1,
-                "inner_panels": 3
+                "max_epochs": 1
             }
         }
         """
@@ -6137,7 +6136,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 panel_paths=[],
                 over_review_root=Path(".tmp/_unused"),
                 batch_size=patchcore_params.get("batch_size", 32),
-                image_size=tuple(patchcore_params.get("image_size", (256, 256))),
+                image_size=tuple(patchcore_params.get("image_size", (512, 512))),
                 coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
                 max_epochs=patchcore_params.get("max_epochs", 1),
             )
