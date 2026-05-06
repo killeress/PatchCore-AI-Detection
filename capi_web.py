@@ -5741,9 +5741,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _handle_models_page(self):
         """GET /models"""
         db = self._capi_server_instance.database
-        from capi_model_registry import list_bundles_grouped
+        from capi_model_registry import list_bundles_grouped, get_pending_change_summary_for_bundle
         from capi_train_new import LIGHTINGS, TRAINING_UNITS
         grouped = list_bundles_grouped(db)
+        for bundles in grouped.values():
+            for b in bundles:
+                pc = get_pending_change_summary_for_bundle(db, b)
+                b["pending_unit_count"] = len(pc)
         template = self.jinja_env.get_template("models.html")
         html = template.render(
             request_path="/models",
