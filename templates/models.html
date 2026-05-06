@@ -46,8 +46,9 @@
   .mlib-thr-edit { background: transparent; border: 1px solid #45475a; color: #a6adc8; padding: 0 5px; border-radius: 3px; font-size: .72rem; cursor: pointer; margin-left: 4px; }
   .mlib-thr-edit:hover { background: #45475a; color: #cdd6f4; }
   .mlib-empty { color: #a6adc8; padding: 22px; text-align: center; font-size: .85rem; }
-  /* tile accept/reject 切換 */
+  /* tile accept/reject 切換（NG tile 唯讀） */
   .tile-thumb { position: relative; cursor: pointer; }
+  #mlibNgGrid .tile-thumb { cursor: default; pointer-events: none; }
   .tile-thumb[data-decision="reject"] img {
     filter: brightness(0.4) saturate(0.5);
     outline: 2px solid #f38ba8;
