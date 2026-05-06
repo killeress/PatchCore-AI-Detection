@@ -21,7 +21,7 @@
 - bundle detail 頁的訓練 tile 檢視介面新增 OK tile 的 accept/reject 切換能力
 - 新增 API：批次更新 tile decision、觸發單子模型重訓、查重訓進度
 - 重訓單一 lighting+zone 的 PatchCore，重算 AUROC 與其他 metrics
-- 就地覆蓋 `bundle_dir/<lighting>_<zone>/.../model.pt`
+- 就地覆蓋 `bundle_dir/<lighting>-<zone>.pt`（bundle 內為平面結構，每個 unit 一個 `.pt`）
 - 通知執行中的 inferencer reload 該子模型
 
 **Threshold 處理：刻意不動。** `calibrate_threshold` 已硬寫回 `DEFAULT_THRESHOLD = 0.5`（`capi_train_new.py:405-418`），threshold 是使用者在模型庫頁面依誤判情況**手動微調**的。重訓覆蓋使用者調過的值會破壞他們的工作成果，因此重訓只動 model.pt 與 metrics，**threshold 與 yaml 完全不動**。
@@ -74,19 +74,17 @@ _retrain_submodel_worker(bundle_id, lighting, zone)
 ├─ 1. 讀 bundle、找到 job_id 與 bundle_dir
 ├─ 2. 從 training_tile_pool 撈出 (job_id, lighting, zone, source=ok, decision=accept) 的 tile 路徑
 │     若 tile 數 < 最低門檻（沿用 train_new 的下限）→ 失敗
-├─ 3. stage_dataset 到 bundle_dir/_tmp/<lighting>_<zone>/staging/
+├─ 3. stage_dataset 到 .tmp/training_staging/<job_id>/<unit_label>/（沿用 train_new 約定）
 ├─ 4. 取得 GPU lock（與 inference 共用 _gpu_lock）
-│     train_one_patchcore(...) 產出在 bundle_dir/_tmp/<lighting>_<zone>/run/
-│       └─ rglob 找到 model.pt（通常在 weights/torch/model.pt）
-│     用新模型對 NG 樣本打分 → 算 AUROC、ng_caught_rate 等 metrics
+│     train_one_patchcore(...) → run_root = .tmp/training_runs/<job_id>/<unit_label>/
+│       → rglob 找出 model.pt（通常在 run_root/.../weights/torch/model.pt）
+│     用新模型對 NG 樣本打分 → 算 AUROC、ng_caught_rate 等 metrics（沿用 _calibrate_from_model）
 │     釋放 GPU lock
-├─ 5. atomic 替換：
-│     - 找到 bundle_dir/<lighting>_<zone>/ 內既有 model.pt 路徑
-│     - 將 _tmp 內新產出的 model.pt 連同其週邊產物一起 rename 到正式位置
-│       （anomalib export 會帶整個 weights/torch/ 結構，整目錄替換）
-│     - 沿用「先 rename 舊目錄為 .replacing → mv 新目錄 → 刪 .replacing」做近 atomic 切換
-│     - 失敗時用 .replacing 還原
-│     - 成功後刪除 _tmp 目錄
+├─ 5. atomic 單檔替換：
+│     - target = bundle_dir/<lighting>-<zone>.pt
+│     - shutil.copy2(model_pt, target.with_suffix('.pt.tmp'))   # 寫到同目錄暫存
+│     - os.replace(target.with_suffix('.pt.tmp'), target)        # atomic rename
+│     - 清理 staging / run_root（沿用 finally 邏輯）
 ├─ 6. 更新 bundle manifest（不動 yaml threshold）：
 │     submodel_history 追加新 entry（trained_at、tile_count_used、auroc、used_tile_ids）
 │     last_retrained_at 更新
@@ -95,8 +93,8 @@ _retrain_submodel_worker(bundle_id, lighting, zone)
 │     新增 `reload_submodel(bundle_id, lighting, zone)` API
 │     （只 reload .pt，threshold 維持原值不需更新）
 └─ 失敗時：
-    - _tmp 目錄整個刪除
-    - 原 model.pt 與原 yaml 完全不動
+    - staging / run_root / .pt.tmp 都清掉
+    - 原 bundle_dir/<lighting>-<zone>.pt 與 yaml 完全不動
     - DB 中 tile decision 變更保留
     - job state 標 failed，UI 顯示 traceback
 ```
@@ -109,9 +107,9 @@ _retrain_submodel_worker(bundle_id, lighting, zone)
 
 ### 失敗回滾
 
-採用「`_tmp` 暫存 → atomic rename」設計，失敗時：
-- `_tmp/` 整個刪除
-- 原 bundle 內 model.pt 與 manifest.json 完全不動
+採用「同目錄 `.pt.tmp` 暫存 → `os.replace` atomic rename」設計，失敗時：
+- staging / run_root / `.pt.tmp` 全部清乾淨
+- 原 bundle 內 `<lighting>-<zone>.pt` 與 manifest.json 完全不動
 - machine_config.yaml 本來就不會被動到（threshold 永不被重訓覆蓋）
 - DB 中的 tile decision 變更**保留**（使用者下次修正後可再試）
 
@@ -164,7 +162,7 @@ _retrain_submodel_worker(bundle_id, lighting, zone)
 {
   ...既有欄位...,
   "submodel_history": {
-    "G0F00000_edge": [
+    "G0F00000-edge": [
       {
         "trained_at": "2026-05-06T14:32:00",
         "tile_count_used": 1856,
@@ -252,7 +250,7 @@ _submodel_retrain_state = {
    - 在 tile 縮圖隨意排除幾張
    - 確認「有未訓練的修改」指示與「重訓 G0F-edge」按鈕出現
    - 按下重訓，確認進度面板更新、最終顯示新舊 AUROC 對照與 tile 數變化
-   - 檢查 `bundle_dir/G0F00000_edge/...` 內 `model.pt`（rglob 找到的那個）修改時間更新
+   - 檢查 `bundle_dir/G0F00000-edge.pt` 修改時間更新
    - 檢查 `bundle_dir/machine_config.yaml` **完全沒動**（含 mtime 不變）
    - 檢查 `bundle_dir/manifest.json` 新增 `kind: "retrain"` 的 history entry，`used_tile_ids` 反映排除後的集合
 
