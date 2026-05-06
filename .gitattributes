@@ -1,0 +1,2 @@
+# 強制 shell 腳本與 bash hook 用 LF，避免 Windows checkout 後 Linux 跑不起來
+*.sh text eol=lf
