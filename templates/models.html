@@ -102,8 +102,10 @@
   .tile-modal .modal-decision.accept { color: #a6e3a1; }
   .tile-modal .modal-decision.reject { color: #f38ba8; }
   .tile-modal #tileModalImg { display: block;
-    max-width: min(96vw,1180px); max-height: calc(94vh - 86px);
-    object-fit: contain; background: #111827; }
+    width: min(80vw, 800px); height: auto;
+    max-width: min(96vw, 1180px); max-height: calc(94vh - 86px);
+    object-fit: contain; background: #111827;
+    image-rendering: pixelated;  /* tile 是 1:1 像素資訊，stretch 時不要過度模糊 */ }
   .tile-modal .modal-nav { position: absolute; top: 50%; transform: translateY(-50%);
     width: 42px; height: 64px; background: rgba(30,30,46,.85);
     border: 1px solid #45475a; color: #cdd6f4; font-size: 1.5rem; line-height: 1;
