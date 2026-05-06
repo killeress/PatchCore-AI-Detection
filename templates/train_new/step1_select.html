@@ -7,9 +7,9 @@
   </div>
   <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.4rem;">Step 1 / 5 · 選擇訓練資料</h1>
   <p style="color:#a6adc8;font-size:.9rem;line-height:1.55;">
-    從最近 3 天 AOI 判 OK 紀錄勾選 5 片 panel。
-    <span style="color:#a6e3a1;font-weight:600;">第 1-3 片</span>提供 inner+edge tile，
-    <span style="color:#fab387;font-weight:600;">第 4-5 片</span>只取 edge tile（強化邊緣樣本）。
+    從最近 3 天 AOI 判 OK 紀錄勾選
+    <span style="color:#a6e3a1;font-weight:600;">3 片 panel</span>，皆收 inner + edge tile。
+    Edge 取樣會自動往 panel 邊緣外推（涵蓋邊緣鄰近的 ROI 切塊情境）。
     <span style="color:#cdd6f4;font-size:.82rem;display:block;margin-top:2px;">勾選順序就是 panel 順位 — 取消重選會重排。</span>
   </p>
 
@@ -72,7 +72,7 @@
   <div id="panel-list" style="margin-top:16px;padding-bottom:88px;"></div>
 
   <div class="step1-actionbar">
-    <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0/5 片</span>
+    <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0/3 片</span>
     <span id="sel-roles" style="color:#a6adc8;font-size:.78rem;display:none;"></span>
     <span style="display:flex;gap:8px;align-items:center;margin-left:auto;">
       <a href="/training" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">取消</a>
@@ -174,9 +174,9 @@ function renderPanels(panels) {
   updateNext();
 }
 
-// 前 3 片 inner+edge（綠），第 4-5 片只取 edge（橘）
-const INNER_PANELS = 3;
-function _roleColor(idx) { return idx < INNER_PANELS ? '#a6e3a1' : '#fab387'; }
+// 全部 panel 都收 inner+edge，不再依順位分色
+const PANEL_LIMIT = 3;
+const PANEL_COLOR = '#a6e3a1';
 
 function toggleSelect(tr) {
   const path = tr.dataset.path;
@@ -186,7 +186,7 @@ function toggleSelect(tr) {
     _selected.delete(path);
     if (_selected.size === 0) _selectedMachineId = '';
   } else {
-    if (_selected.size >= 5) return;
+    if (_selected.size >= PANEL_LIMIT) return;
     if (_selectedMachineId && machineId !== _selectedMachineId) {
       capAlert(`請選擇相同機種 ID 的 panel。\n目前已選：${_selectedMachineId}`, {type: 'warn', title: '機種不一致'});
       return;
@@ -213,33 +213,23 @@ function refreshSelectedVisuals() {
   ordered.forEach((path, idx) => {
     const tr = document.querySelector(`#panel-list tr[data-path="${CSS.escape(path)}"]`);
     if (!tr) return;
-    const color = _roleColor(idx);
-    tr.style.background = idx < INNER_PANELS ? '#1e3a2d' : '#3a2e1e';
+    tr.style.background = '#1e3a2d';
     const chk = tr.querySelector('.chk');
     chk.textContent = String(idx + 1);
-    chk.style.background = color;
+    chk.style.background = PANEL_COLOR;
     chk.style.color = '#1e1e2e';
-    chk.style.borderColor = color;
+    chk.style.borderColor = PANEL_COLOR;
     chk.style.fontWeight = '700';
   });
 }
 
 function updateNext() {
   const machineText = _selectedMachineId ? `（機種 ${_selectedMachineId}）` : '';
-  document.getElementById('sel-count').textContent = `已選 ${_selected.size}/5 片 ${machineText}`;
-  const roles = document.getElementById('sel-roles');
-  if (_selected.size > 0) {
-    const innerN = Math.min(_selected.size, INNER_PANELS);
-    const edgeN = Math.max(0, _selected.size - INNER_PANELS);
-    let txt = `前 ${innerN} 片 inner+edge`;
-    if (edgeN > 0) txt += ` · 後 ${edgeN} 片 edge only`;
-    roles.textContent = txt;
-    roles.style.display = '';
-  } else {
-    roles.style.display = 'none';
-  }
+  document.getElementById('sel-count').textContent = `已選 ${_selected.size}/${PANEL_LIMIT} 片 ${machineText}`;
+  // 不再依 inner/edge 分組顯示
+  document.getElementById('sel-roles').style.display = 'none';
   const btn = document.getElementById('next-btn');
-  btn.disabled = _selected.size !== 5;
+  btn.disabled = _selected.size !== PANEL_LIMIT;
   btn.style.opacity = btn.disabled ? .4 : 1;
 }
 
