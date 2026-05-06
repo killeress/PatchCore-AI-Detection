@@ -5931,6 +5931,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "source": t.get("source"),
                 "decision": t.get("decision"),
                 "thumb_url": self._train_new_thumb_url(t.get("thumb_path")),
+                "image_url": self._train_new_thumb_url(t.get("source_path")),
             })
         self._send_json({"tiles": out, "total": total, "limit": limit, "offset": offset})
 
