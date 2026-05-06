@@ -384,6 +384,12 @@ async function showDetail(id) {
 }
 
 function closeModal() {
+  // 關閉內層放大 modal（若開著）並清掉鍵盤導航狀態
+  const previewModal = document.getElementById('tilePreviewModal');
+  if (previewModal && previewModal.classList.contains('open')) {
+    closeTilePreview();
+  }
+  if (_focusedTileEl) { _focusedTileEl.classList.remove('focused'); _focusedTileEl = null; }
   document.getElementById('mlibModalBg').classList.remove('open');
   currentBundleId = null;
   currentDetail = null;
@@ -392,6 +398,8 @@ function closeModal() {
 }
 
 function switchTab(name) {
+  // 切換 tab 時清掉前一個 tab 的焦點（避免殘留紫色 outline）
+  if (_focusedTileEl) { _focusedTileEl.classList.remove('focused'); _focusedTileEl = null; }
   ['info','metrics','ok','ng'].forEach(n => {
     const btn = document.querySelector(`.mlib-tab[data-tab="${n}"]`);
     const pane = document.getElementById('mlibPane' + n.charAt(0).toUpperCase() + n.slice(1));
@@ -639,32 +647,6 @@ function deleteTrainingData() {
       // 重新拉 detail 更新顯示
       showDetail(currentBundleId);
     });
-}
-
-async function toggleTileDecision(bundleId, tileEl) {
-  const id = parseInt(tileEl.dataset.tileId, 10);
-  const cur = tileEl.dataset.decision || 'accept';
-  const next = cur === 'accept' ? 'reject' : 'accept';
-
-  try {
-    const resp = await fetch(`/api/models/${bundleId}/tiles/decision`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({tile_ids: [id], decision: next}),
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      alert('切換失敗：' + (err.error || resp.status));
-      return;
-    }
-    tileEl.dataset.decision = next;
-    tileEl.classList.add('modified');
-    if (typeof refreshPendingIndicator === 'function') {
-      refreshPendingIndicator(bundleId);
-    }
-  } catch (e) {
-    alert('切換失敗：' + e);
-  }
 }
 
 // ── 變更指示條 + 重訓子模型 ──────────────────────────────────────────
