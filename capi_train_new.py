@@ -126,9 +126,7 @@ def preprocess_panels_to_pool(
     total_tiles = 0
 
     for idx, panel_dir in enumerate(cfg.panel_paths, 1):
-        inner_allowed = idx <= cfg.inner_panels
-        role_label = "inner+edge" if inner_allowed else "edge only"
-        log(f"[{idx}/{len(cfg.panel_paths)}] panel {panel_dir.name} ({role_label})")
+        log(f"[{idx}/{len(cfg.panel_paths)}] panel {panel_dir.name}")
         try:
             results = preprocess_panel_folder(panel_dir, preprocess_cfg)
         except Exception as e:
@@ -146,12 +144,8 @@ def preprocess_panels_to_pool(
 
         # 為每張 tile 存 .png + 縮圖 + 寫 DB
         tile_records = []
-        skipped_inner = 0
         for lighting, result in results.items():
             for tile in result.tiles:
-                if tile.zone == "inner" and not inner_allowed:
-                    skipped_inner += 1
-                    continue
                 tile_filename = f"{job_id}_{panel_dir.name}_{lighting}_t{tile.tile_id:04d}.png"
                 tile_path = thumb_dir / "tiles" / tile_filename
                 cv2.imwrite(str(tile_path), tile.image)
@@ -172,8 +166,7 @@ def preprocess_panels_to_pool(
             db.insert_tile_pool(job_id, tile_records)
             total_tiles += len(tile_records)
             panel_success += 1
-            extra = f"（略過 inner {skipped_inner}）" if skipped_inner else ""
-            log(f"  ✓ 切出 {len(tile_records)} tile {extra}".rstrip())
+            log(f"  ✓ 切出 {len(tile_records)} tile")
 
     return {
         "panel_success": panel_success,
@@ -1108,7 +1101,6 @@ def run_training_pipeline(
             "image_size": list(cfg.image_size),
             "coreset_ratio": cfg.coreset_ratio,
             "max_epochs": cfg.max_epochs,
-            "inner_panels": cfg.inner_panels,
         },
         "tiles_per_unit": tiles_per_unit,
         "model_files": model_files,

@@ -66,15 +66,15 @@ def test_preprocess_panels_to_pool_writes_tiles(tmp_path):
     assert Path(first_tile["thumb_path"]).exists()
 
 
-def test_preprocess_panels_to_pool_skips_inner_after_inner_panels(tmp_path):
-    """第 inner_panels 之後的 panel 不應寫入任何 inner tile（只保留 edge）。"""
+def test_preprocess_panels_to_pool_all_panels_have_inner_and_edge(tmp_path):
+    """每片 panel 都應同時有 inner + edge tile（移除 inner_panels 條件分支後）。"""
     from pathlib import Path
     from capi_preprocess import PreprocessConfig
     from capi_train_new import preprocess_panels_to_pool, TrainingConfig
 
     fixture_img = Path("tests/fixtures/preprocess/synthetic_panel.png")
     panel_dirs = []
-    for i in range(5):
+    for i in range(3):
         d = tmp_path / f"panel_{i + 1}"
         d.mkdir()
         for lighting in ["G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"]:
@@ -93,7 +93,6 @@ def test_preprocess_panels_to_pool_skips_inner_after_inner_panels(tmp_path):
     cfg = TrainingConfig(
         machine_id="TEST", panel_paths=panel_dirs,
         over_review_root=tmp_path / "or_unused",
-        inner_panels=3,
     )
     pre_cfg = PreprocessConfig(tile_size=256, edge_threshold_px=384, tile_stride=256)
 
@@ -102,17 +101,11 @@ def test_preprocess_panels_to_pool_skips_inner_after_inner_panels(tmp_path):
         db=db, thumb_dir=tmp_path / "thumbs", log=lambda m: None,
     )
 
-    assert len(db.tiles_per_call) == 5
-    # 前 3 片應同時有 inner 和 edge
-    for i in range(3):
-        zones = {t["zone"] for t in db.tiles_per_call[i]}
+    assert len(db.tiles_per_call) == 3
+    for i, batch in enumerate(db.tiles_per_call):
+        zones = {t["zone"] for t in batch}
         assert "inner" in zones, f"panel {i + 1} 應該包含 inner tile"
         assert "edge" in zones, f"panel {i + 1} 應該包含 edge tile"
-    # 第 4-5 片不應有 inner
-    for i in range(3, 5):
-        zones = {t["zone"] for t in db.tiles_per_call[i]}
-        assert "inner" not in zones, f"panel {i + 1} 不應該包含 inner tile"
-        assert "edge" in zones, f"panel {i + 1} 應該仍有 edge tile"
 
 
 def test_sample_ng_tiles(tmp_path):

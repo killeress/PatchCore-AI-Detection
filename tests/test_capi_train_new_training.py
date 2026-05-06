@@ -11,10 +11,10 @@ def test_apply_user_training_params_none_is_noop():
     cfg = TrainingConfig(
         machine_id="M", panel_paths=[], over_review_root=Path("/r"),
     )
-    snapshot = (cfg.batch_size, cfg.coreset_ratio, cfg.max_epochs, cfg.inner_panels)
+    snapshot = (cfg.batch_size, cfg.coreset_ratio, cfg.max_epochs)
     apply_user_training_params(cfg, None)
     apply_user_training_params(cfg, {})
-    assert (cfg.batch_size, cfg.coreset_ratio, cfg.max_epochs, cfg.inner_panels) == snapshot
+    assert (cfg.batch_size, cfg.coreset_ratio, cfg.max_epochs) == snapshot
 
 
 def test_apply_user_training_params_overrides_match_keys():
@@ -23,13 +23,11 @@ def test_apply_user_training_params_overrides_match_keys():
         machine_id="M", panel_paths=[], over_review_root=Path("/r"),
     )
     apply_user_training_params(cfg, {
-        "batch_size": 16, "coreset_ratio": 0.05,
-        "max_epochs": 2, "inner_panels": 4,
+        "batch_size": 16, "coreset_ratio": 0.05, "max_epochs": 2,
     })
     assert cfg.batch_size == 16
     assert cfg.coreset_ratio == 0.05
     assert cfg.max_epochs == 2
-    assert cfg.inner_panels == 4
 
 
 def test_apply_user_training_params_unknown_key_raises():
