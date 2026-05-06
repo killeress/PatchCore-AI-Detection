@@ -46,6 +46,19 @@
   .mlib-thr-edit { background: transparent; border: 1px solid #45475a; color: #a6adc8; padding: 0 5px; border-radius: 3px; font-size: .72rem; cursor: pointer; margin-left: 4px; }
   .mlib-thr-edit:hover { background: #45475a; color: #cdd6f4; }
   .mlib-empty { color: #a6adc8; padding: 22px; text-align: center; font-size: .85rem; }
+  /* tile accept/reject 切換 */
+  .tile-thumb { position: relative; cursor: pointer; }
+  .tile-thumb[data-decision="reject"] img {
+    filter: brightness(0.4) saturate(0.5);
+    outline: 2px solid #f38ba8;
+  }
+  .tile-thumb.modified::after {
+    content: "\270E"; position: absolute; top: 2px; right: 4px;
+    background: rgba(243,139,168,0.9); color: #1e1e2e;
+    border-radius: 50%; width: 16px; height: 16px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px;
+  }
 </style>
 
 <div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
@@ -137,7 +150,7 @@
         </label>
         <span id="mlibOkCount" style="color:#a6adc8;font-size:.78rem;"></span>
       </div>
-      <div id="mlibOkGrid" class="mlib-grid"></div>
+      <div id="mlibOkGrid" class="mlib-grid" data-bundle-id=""></div>
     </div>
 
     <div id="mlibPaneNg" class="mlib-pane">
@@ -150,7 +163,7 @@
         </label>
         <span id="mlibNgCount" style="color:#a6adc8;font-size:.78rem;"></span>
       </div>
-      <div id="mlibNgGrid" class="mlib-grid"></div>
+      <div id="mlibNgGrid" class="mlib-grid" data-bundle-id=""></div>
     </div>
 
     <div class="mlib-actions-row" style="justify-content:flex-end;">
@@ -440,6 +453,7 @@ function loadTiles(source) {
   const zone = source === 'ok' ? document.getElementById('mlibOkZone').value : '';
   const grid = document.getElementById(source === 'ok' ? 'mlibOkGrid' : 'mlibNgGrid');
   const cnt = document.getElementById(source === 'ok' ? 'mlibOkCount' : 'mlibNgCount');
+  grid.dataset.bundleId = currentBundleId;
   grid.innerHTML = '<div class="mlib-empty">載入中...</div>';
 
   const params = new URLSearchParams({source, limit: '500'});
@@ -457,7 +471,9 @@ function loadTiles(source) {
       }
       grid.innerHTML = d.tiles.map(t =>
         t.thumb_url
-          ? `<img src="${t.thumb_url}" title="${t.lighting} ${t.zone || ''} #${t.id}" loading="lazy">`
+          ? `<div class="tile-thumb" data-tile-id="${t.id}" data-decision="${t.decision || 'accept'}">`
+            + `<img src="${t.thumb_url}" title="${t.lighting} ${t.zone || ''} #${t.id}" loading="lazy">`
+            + `</div>`
           : `<div title="${t.lighting} ${t.zone || ''} (no thumb)" style="background:#313244;border-radius:4px;aspect-ratio:1;"></div>`
       ).join('');
     })
@@ -481,5 +497,42 @@ function deleteTrainingData() {
       showDetail(currentBundleId);
     });
 }
+
+async function toggleTileDecision(bundleId, tileEl) {
+  const id = parseInt(tileEl.dataset.tileId, 10);
+  const cur = tileEl.dataset.decision || 'accept';
+  const next = cur === 'accept' ? 'reject' : 'accept';
+
+  try {
+    const resp = await fetch(`/api/models/${bundleId}/tiles/decision`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({tile_ids: [id], decision: next}),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert('切換失敗：' + (err.error || resp.status));
+      return;
+    }
+    tileEl.dataset.decision = next;
+    tileEl.classList.add('modified');
+    if (typeof refreshPendingIndicator === 'function') {
+      refreshPendingIndicator(bundleId);
+    }
+  } catch (e) {
+    alert('切換失敗：' + e);
+  }
+}
+
+// 全域點擊綁定：tile accept/reject 切換
+document.addEventListener('click', (e) => {
+  const tile = e.target.closest('.tile-thumb');
+  if (!tile) return;
+  const container = tile.closest('[data-bundle-id]');
+  if (!container) return;
+  const bundleId = parseInt(container.dataset.bundleId, 10);
+  if (!bundleId) return;
+  toggleTileDecision(bundleId, tile);
+});
 </script>
 {% endblock %}
