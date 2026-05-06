@@ -354,9 +354,15 @@ function renderMetrics(d) {
       : `<span style="color:${sep < 0 ? '#f38ba8' : '#a6e3a1'};">${sep > 0 ? '+' : ''}${sep.toFixed(3)}</span>`;
     const caughtCell = `${caught} <span style="color:#a6adc8;">(${rate})</span>`;
     const [lighting, zone] = label.split('-');
-    const thrCell = u.threshold != null
-      ? `<span id="thr-${label}">${u.threshold}</span>`
-        + ` <button class="mlib-thr-edit" onclick="editThreshold(${currentBundleId},'${lighting}','${zone}',${u.threshold})"`
+    // threshold 顯示優先用 thr（後端 get_bundle_detail 已從 machine_config.yaml 讀；
+    // yaml 是 inference 引擎讀的 source of truth）。manifest.unit_metrics[].threshold
+    // 是訓練當下凍結的快照，update 後不會更新，只能當最後 fallback。
+    const currentThr = (thr[lighting] && thr[lighting][zone] != null)
+      ? thr[lighting][zone]
+      : u.threshold;
+    const thrCell = currentThr != null
+      ? `<span id="thr-${label}">${currentThr}</span>`
+        + ` <button class="mlib-thr-edit" onclick="editThreshold(${currentBundleId},'${lighting}','${zone}',${currentThr})"`
         + ` title="編輯 threshold">✏</button>`
       : '—';
     rows += `<tr class="${warn ? 'warn' : ''}">`
@@ -392,7 +398,15 @@ function renderMetrics(d) {
     </div>
   `;
 
+  // threshold 來源徽章：machine_config.yaml 是 inference 真值來源；thresholds.json 為 fallback
+  const thrSource = d.thresholds_source || 'thresholds.json';
+  const sourceBadgeColor = thrSource === 'machine_config.yaml' ? '#a6e3a1' : '#fab387';
+  const sourceBadge = `<span style="background:${sourceBadgeColor};color:#1e1e2e;padding:2px 8px;border-radius:6px;font-size:.7rem;font-weight:700;margin-left:8px;" title="threshold 來源；inference 引擎讀的真值就是 machine_config.yaml">${thrSource}</span>`;
+
   target.innerHTML = summaryCard + `
+    <div style="display:flex;align-items:center;font-size:.78rem;color:#a6adc8;margin-bottom:6px;">
+      <span>threshold 來源：</span>${sourceBadge}
+    </div>
     <table class="mlib-table">
       <thead><tr>
         <th>Unit</th><th>Train</th><th>NG</th>
@@ -412,7 +426,7 @@ function renderMetrics(d) {
       <b>欄位說明：</b>
       <code>train_max</code> 訓練樣本最大分數·
       <code>ng_median</code> NG 分數中位數·
-      <code>threshold</code> 預設 0.5（可點 ✏ 編輯）·
+      <code>threshold</code> 來自 <code>machine_config.yaml</code>（可點 ✏ 編輯，自動同步寫 yaml + thresholds.json）·
       <code>NG 抓到</code> NG 中 score≥threshold 的個數·
       <code>separation</code> = ng_median − train_max。<br>
       <span style="color:#f38ba8;">紅色列</span>：AUROC 偏弱/不及格、separation 負值、或 NG 抓到率 &lt; 50%，建議補 NG 樣本重訓。

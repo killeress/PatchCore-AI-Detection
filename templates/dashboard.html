@@ -501,6 +501,11 @@
         const thContainer = document.getElementById('ui-threshold-container');
         const thMapping = data.server.threshold_mapping || {};
         const prefixKeys = Object.keys(thMapping);
+        // 顯示資料來源提示，下次撞到「yaml 改了 dashboard 沒變」能立刻看出是 yaml 還是 DB override
+        const isNewArch = !!data.server.is_new_architecture;
+        const sourceHint = isNewArch
+            ? 'Source: machine_config.yaml (bundle yaml 直接管理；改 /models 或編輯 yaml 重啟)'
+            : 'Source: capi_3f.yaml + DB config_params override (可從 /settings 改)';
 
         if (prefixKeys.length > 0) {
             // 多模型模式：顯示各前綴閥值
@@ -527,15 +532,20 @@
                 } else {
                     valHtml = `<span style="font-family:var(--tech-font);font-weight:600;color:#e2e8f0;font-size:0.85rem;">${val}</span>`;
                 }
-                return `<div style="display:flex;align-items:center;gap:5px;background:rgba(15,23,42,0.8);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:4px 10px;">
+                const tipText = `${prefix} inner/edge thresholds\n${sourceHint}`;
+                return `<div title="${tipText.replace(/"/g, '&quot;')}" style="display:flex;align-items:center;gap:5px;background:rgba(15,23,42,0.8);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:4px 10px;cursor:help;">
                     <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block;box-shadow:0 0 6px ${color};"></span>
                     <span style="font-size:0.75rem;color:var(--text-muted);letter-spacing:0.5px;">${shortName}</span>
                     ${valHtml}
                 </div>`;
             }).join('');
+            // 在右側補一個小標籤指出資料來源
+            const badgeColor = isNewArch ? '#7dd3fc' : '#fbbf24';
+            const badgeText = isNewArch ? 'yaml' : 'DB';
+            thContainer.innerHTML += `<span title="${sourceHint.replace(/"/g, '&quot;')}" style="display:inline-flex;align-items:center;gap:4px;font-size:0.65rem;letter-spacing:0.5px;color:${badgeColor};border:1px solid ${badgeColor}40;padding:2px 6px;border-radius:4px;cursor:help;text-transform:uppercase;">${badgeText}</span>`;
         } else {
             // 單一模型模式：顯示全局門檻
-            thContainer.innerHTML = `<span style="font-family:var(--tech-font);font-weight:600;color:#e2e8f0;">${data.server.threshold}</span>`;
+            thContainer.innerHTML = `<span title="${sourceHint.replace(/"/g, '&quot;')}" style="font-family:var(--tech-font);font-weight:600;color:#e2e8f0;cursor:help;">${data.server.threshold}</span>`;
         }
 
         // 2. Active Inferences

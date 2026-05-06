@@ -535,10 +535,14 @@ class CAPIConfig:
 
         if "anomaly_threshold" in param_map:
             self.anomaly_threshold = float(param_map["anomaly_threshold"])
-        if "model_mapping" in param_map and isinstance(param_map["model_mapping"], dict):
-            self.model_mapping = param_map["model_mapping"]
-        if "threshold_mapping" in param_map and isinstance(param_map["threshold_mapping"], dict):
-            self.threshold_mapping = self._normalize_threshold_mapping(param_map["threshold_mapping"])
+        # 新架構：threshold_mapping / model_mapping 永遠以 yaml 為唯一來源，
+        # 不接受 DB override。否則 yaml 改完重啟會被首次 init 灌進 DB 的舊值蓋掉
+        # （bug 案例：machine_config.yaml 改 0.5→0.4，重啟後 DB 殘留 0.5 把 yaml 蓋回去）
+        if not self.is_new_architecture:
+            if "model_mapping" in param_map and isinstance(param_map["model_mapping"], dict):
+                self.model_mapping = param_map["model_mapping"]
+            if "threshold_mapping" in param_map and isinstance(param_map["threshold_mapping"], dict):
+                self.threshold_mapping = self._normalize_threshold_mapping(param_map["threshold_mapping"])
         if "patchcore_filter_enabled" in param_map:
             val = param_map["patchcore_filter_enabled"]
             self.patchcore_filter_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)

@@ -33,16 +33,51 @@ def list_bundles_grouped(db) -> Dict[str, List[dict]]:
 
 
 def get_bundle_detail(db, bundle_id: int) -> Optional[dict]:
-    """讀 manifest.json + thresholds.json 並合併 DB row。"""
+    """讀 manifest.json + machine_config.yaml + thresholds.json 並合併 DB row。
+
+    threshold 顯示優先順序：machine_config.yaml > thresholds.json > manifest 快照。
+    inference 引擎只讀 yaml，所以 yaml 就是 source of truth；thresholds.json 退化成
+    向後相容 fallback（手動改 yaml 沒同步 thresholds.json 時，UI 仍能顯示真值）。
+    """
     bundle = db.get_model_bundle(bundle_id)
     if not bundle:
         return None
     bundle_path = Path(bundle["bundle_path"])
     manifest_p = bundle_path / "manifest.json"
     thresholds_p = bundle_path / "thresholds.json"
+    yaml_p = bundle_path / "machine_config.yaml"
 
     bundle["manifest"] = json.loads(manifest_p.read_text(encoding="utf-8")) if manifest_p.exists() else None
-    bundle["thresholds"] = json.loads(thresholds_p.read_text(encoding="utf-8")) if thresholds_p.exists() else None
+    thresholds_json = json.loads(thresholds_p.read_text(encoding="utf-8")) if thresholds_p.exists() else {}
+    bundle["thresholds_json"] = thresholds_json or None  # 留給 debug / 對比用
+    bundle["thresholds_source"] = "thresholds.json"
+
+    # yaml 優先：解析 threshold_mapping 並覆蓋顯示值
+    if yaml_p.exists():
+        try:
+            cfg = _load_yaml(yaml_p)
+            yaml_thr = cfg.get("threshold_mapping") or {}
+            if isinstance(yaml_thr, dict) and yaml_thr:
+                # 正規化成 {lighting: {inner: float, edge: float}} 格式（與 thresholds.json 同型）
+                normalized = {}
+                for lighting, val in yaml_thr.items():
+                    if isinstance(val, dict):
+                        normalized[lighting] = {
+                            zone: float(zv) for zone, zv in val.items()
+                        }
+                    else:
+                        # legacy flat 格式：把單值同時當 inner / edge 顯示
+                        normalized[lighting] = {"inner": float(val), "edge": float(val)}
+                bundle["thresholds"] = normalized
+                bundle["thresholds_source"] = "machine_config.yaml"
+            else:
+                bundle["thresholds"] = thresholds_json or None
+        except Exception as e:
+            logger.warning("get_bundle_detail: 讀 machine_config.yaml 失敗，fallback 到 thresholds.json: %s", e)
+            bundle["thresholds"] = thresholds_json or None
+    else:
+        bundle["thresholds"] = thresholds_json or None
+
     bundle["training_data"] = get_training_data_summary(db, bundle)
     return bundle
 
