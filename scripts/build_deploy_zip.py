@@ -117,8 +117,8 @@ README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明
 
 訓練新機種 PatchCore 模型：
   1. http://<server>:8080/training → 點「新機種 PatchCore」卡的「開始訓練」
-  2. Step 1: 輸入機種 ID，從 DB 列出 AOI 判 OK panel，勾選 5 片
-  3. Step 2: 系統自動前處理 + 切 tile（5 panel × 5 lighting × ~150 tile）
+  2. Step 1: 輸入機種 ID，從 DB 列出 AOI 判 OK panel，勾選 3 片
+  3. Step 2: 系統自動前處理 + 切 tile（3 panel × 5 lighting × ~150 tile，含 edge 外推取樣）
   4. Step 3: 審核 tile pool（5 個 lighting tab × inner/edge × OK/NG 4 group）
   5. Step 4: 開始訓練 10 個 PatchCore 模型（GPU lock 序列跑，~80 分鐘）
   6. Step 5: 完成頁顯示子模型摘要
