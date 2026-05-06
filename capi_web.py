@@ -6157,15 +6157,21 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             _log("manifest history 已更新")
 
             _set_step("reload")
+            # reload 失敗不能讓整個 job 標 failed：.pt 與 manifest 已成功落地，
+            # 下次推論本來就會 lazy-load 新模型；reload 只是即時生效的優化。
             inferencer = self._capi_server_instance.inferencers.get(machine_id)
             if inferencer is None:
                 _log(f"[v2] 機台 {machine_id} 無 inferencer cache，跳過 reload（下次首次推論會載入新模型）")
             else:
-                inferencer.reload_submodel(machine_id, lighting, zone)
-                _log(f"[v2] 已通知 inferencer reload {machine_id}/{lighting}/{zone}")
+                try:
+                    inferencer.reload_submodel(machine_id, lighting, zone)
+                    _log(f"[v2] 已通知 inferencer reload {machine_id}/{lighting}/{zone}")
+                except Exception as reload_err:
+                    _log(f"[v2] reload 失敗（不影響重訓結果）：{reload_err}")
+                    logger.warning("reload_submodel raised: %s", reload_err, exc_info=True)
 
-            _set_step("done")
             with state["lock"]:
+                state["job"]["step"] = "done"
                 state["job"]["state"] = "completed"
                 state["job"]["summary"] = {
                     "auroc_old": old_auroc,
