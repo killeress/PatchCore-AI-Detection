@@ -67,7 +67,7 @@ def test_preprocess_panels_to_pool_writes_tiles(tmp_path):
 
 
 def test_preprocess_panels_to_pool_all_panels_have_inner_and_edge(tmp_path):
-    """每片 panel 都應同時有 inner + edge tile（移除 inner_panels 條件分支後）。"""
+    """每片 panel 都應同時有 inner + edge tile。"""
     from pathlib import Path
     from capi_preprocess import PreprocessConfig
     from capi_train_new import preprocess_panels_to_pool, TrainingConfig
