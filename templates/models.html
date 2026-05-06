@@ -284,6 +284,8 @@ async function showDetail(id) {
   if (progress) progress.style.display = 'none';
   const summary = document.getElementById('retrain-summary');
   if (summary) summary.style.display = 'none';
+  document.querySelectorAll('.step-pill').forEach(el =>
+    el.classList.remove('active', 'done', 'failed'));
   document.getElementById('mlibModalBg').classList.add('open');
   // 初始化 pending indicator（OK tab 開啟時才真正觸發顯示）
   _bundleDetail = d;
@@ -663,6 +665,8 @@ let _retrainPollTimer = null;
 function startRetrainStatusPolling(bundleId) {
   document.getElementById('retrain-progress').style.display = 'block';
   document.getElementById('retrain-summary').style.display = 'none';
+  document.querySelectorAll('.step-pill').forEach(el =>
+    el.classList.remove('active', 'done', 'failed'));
 
   if (_retrainPollTimer) clearInterval(_retrainPollTimer);
   _retrainPollTimer = setInterval(() => pollRetrainStatus(bundleId), 2000);
@@ -670,7 +674,13 @@ function startRetrainStatusPolling(bundleId) {
 }
 
 async function pollRetrainStatus(bundleId) {
-  const resp = await fetch(`/api/models/${bundleId}/retrain_status?tail=200`);
+  let resp;
+  try {
+    resp = await fetch(`/api/models/${bundleId}/retrain_status?tail=200`);
+  } catch (e) {
+    console.warn('retrain poll fetch error', e);
+    return;
+  }
   if (!resp.ok) return;
   const { job } = await resp.json();
   if (!job) {
