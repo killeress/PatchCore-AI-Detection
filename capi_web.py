@@ -189,6 +189,24 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         "unit_status": {},
     }
 
+    # 單子模型重訓 state（一次只允許一個 job）
+    _submodel_retrain_state: dict = {
+        "lock": threading.Lock(),
+        "job": None,
+        # job dict 結構（running 中時）：
+        # {
+        #   bundle_id: int,
+        #   lighting: str,
+        #   zone: str,
+        #   state: "running" | "completed" | "failed",
+        #   step: "stage" | "train" | "metrics" | "swap" | "reload" | "done",
+        #   started_at: str (ISO),
+        #   log_lines: list[str],
+        #   summary: dict | None,    # {auroc_old, auroc_new, tile_count_old, tile_count_new}
+        #   error: str | None,
+        # }
+    }
+
     @classmethod
     def init_jinja(cls):
         if cls.jinja_env is None:
@@ -424,6 +442,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/models/") and path.endswith("/export"):
                 self._handle_models_export()
                 return
+            elif path.startswith("/api/models/") and path.endswith("/retrain_status"):
+                self._handle_models_retrain_status()
+                return
             elif path == "/favicon.ico":
                 self._send_response(204, "")
             else:
@@ -530,6 +551,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path.startswith("/api/models/") and path.endswith("/tiles/decision"):
                 self._handle_models_tiles_decision()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/retrain_submodel"):
+                self._handle_models_retrain_submodel()
                 return
             elif path.startswith("/api/models/") and path.endswith("/threshold"):
                 self._handle_models_update_threshold()
@@ -5964,6 +5988,112 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         db.update_tile_decisions(job_id, tile_ids, decision)
         self._send_json({"ok": True, "updated": len(tile_ids)})
+
+    def _handle_models_retrain_submodel(self):
+        """POST /api/models/<id>/retrain_submodel
+        body: {"lighting": str, "zone": "inner"|"edge"}
+
+        啟動 worker thread 重訓單一子模型。已有 retrain job 跑 → 409。
+        """
+        from capi_train_new import LIGHTINGS, ZONES
+
+        parts = self.path.split("/")
+        try:
+            bundle_id = int(parts[3])
+        except (ValueError, IndexError):
+            self._send_json({"error": "invalid bundle id"}, status=400)
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON"}, status=400)
+            return
+
+        lighting = body.get("lighting")
+        zone = body.get("zone")
+        if lighting not in LIGHTINGS:
+            self._send_json({"error": f"lighting 必須為 {LIGHTINGS}"}, status=400)
+            return
+        if zone not in ZONES:
+            self._send_json({"error": f"zone 必須為 {ZONES}"}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        bundle = db.get_model_bundle(bundle_id)
+        if not bundle:
+            self._send_json({"error": "bundle not found"}, status=404)
+            return
+        if not bundle.get("job_id"):
+            self._send_json({"error": "此 bundle 無關聯 job_id（訓練資料已刪），無法重訓"},
+                            status=400)
+            return
+
+        state = CAPIWebHandler._submodel_retrain_state
+        with state["lock"]:
+            current = state.get("job")
+            if current and current.get("state") == "running":
+                self._send_json({"error": "已有重訓 job 進行中，請等待完成",
+                                 "job": current}, status=409)
+                return
+
+            state["job"] = {
+                "bundle_id": bundle_id,
+                "lighting": lighting,
+                "zone": zone,
+                "state": "running",
+                "step": "stage",
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+                "log_lines": [],
+                "summary": None,
+                "error": None,
+            }
+
+        thread = threading.Thread(
+            target=self._submodel_retrain_worker,
+            args=(bundle_id, lighting, zone),
+            daemon=True,
+            name=f"submodel-retrain-{bundle_id}-{lighting}-{zone}",
+        )
+        thread.start()
+
+        self._send_json({"ok": True, "bundle_id": bundle_id,
+                         "lighting": lighting, "zone": zone})
+
+    def _submodel_retrain_worker(self, bundle_id: int, lighting: str, zone: str):
+        """背景 thread：執行單子模型重訓全流程。Task 6 會完整實作。"""
+        # Stub - Task 6 implement
+        state = CAPIWebHandler._submodel_retrain_state
+        with state["lock"]:
+            if state["job"] is not None:
+                state["job"]["state"] = "failed"
+                state["job"]["error"] = "worker not implemented yet (placeholder)"
+        logger.warning("submodel retrain worker called but not yet implemented")
+
+    def _handle_models_retrain_status(self):
+        """GET /api/models/<id>/retrain_status?tail=200
+
+        回目前 retrain job 的狀態與末 N 行 log。job 為空時回 {"job": null}。
+        """
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        try:
+            tail = max(0, min(int((qs.get("tail") or ["200"])[0]), 1000))
+        except ValueError:
+            tail = 200
+
+        state = CAPIWebHandler._submodel_retrain_state
+        with state["lock"]:
+            job = state.get("job")
+            if job is None:
+                self._send_json({"job": None})
+                return
+            # 淺拷貝 + 截斷 log
+            out = dict(job)
+            out["log_lines"] = list(job["log_lines"][-tail:])
+
+        self._send_json({"job": out})
 
 
 def create_web_server(
