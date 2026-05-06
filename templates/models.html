@@ -46,6 +46,13 @@
   .mlib-thr-edit { background: transparent; border: 1px solid #45475a; color: #a6adc8; padding: 0 5px; border-radius: 3px; font-size: .72rem; cursor: pointer; margin-left: 4px; }
   .mlib-thr-edit:hover { background: #45475a; color: #cdd6f4; }
   .mlib-empty { color: #a6adc8; padding: 22px; text-align: center; font-size: .85rem; }
+  .step-pill {
+    padding: 4px 10px; background: #313244; color: #6c7086;
+    border-radius: 12px; font-size: .78rem;
+  }
+  .step-pill.active { background: #89b4fa; color: #1e1e2e; font-weight: 700; }
+  .step-pill.done { background: #a6e3a1; color: #1e1e2e; }
+  .step-pill.failed { background: #f38ba8; color: #1e1e2e; }
   /* tile accept/reject 切換（NG tile 唯讀） */
   .tile-thumb { position: relative; cursor: pointer; }
   #mlibNgGrid .tile-thumb { cursor: default; pointer-events: none; }
@@ -153,6 +160,22 @@
           重訓此子模型 →
         </button>
       </div>
+      <div id="retrain-progress" style="display:none; margin-top:12px;
+           padding:12px; background:#1e1e2e; border:1px solid #45475a; border-radius:6px;">
+        <div style="display:flex; gap:8px; margin-bottom:10px;">
+          <span class="step-pill" data-step="stage">Stage</span>
+          <span class="step-pill" data-step="train">Train</span>
+          <span class="step-pill" data-step="metrics">Metrics</span>
+          <span class="step-pill" data-step="swap">Swap</span>
+          <span class="step-pill" data-step="reload">Reload</span>
+          <span class="step-pill" data-step="done">Done</span>
+        </div>
+        <pre id="retrain-log" style="max-height:200px; overflow:auto;
+             background:#11111b; color:#cdd6f4; padding:8px; border-radius:4px;
+             font-size:.82rem; margin:0;"></pre>
+        <div id="retrain-summary" style="display:none; margin-top:12px;
+             padding:10px; background:#313244; border-radius:5px;"></div>
+      </div>
       <div class="mlib-filter-row">
         <label>Lighting：
           <select id="mlibOkLighting" onchange="loadTiles('ok')">
@@ -256,6 +279,11 @@ async function showDetail(id) {
   currentDetail = d;
   renderDetail(d);
   switchTab('info');
+  // 重置進度面板（避免上次開啟殘留的狀態）
+  const progress = document.getElementById('retrain-progress');
+  if (progress) progress.style.display = 'none';
+  const summary = document.getElementById('retrain-summary');
+  if (summary) summary.style.display = 'none';
   document.getElementById('mlibModalBg').classList.add('open');
   // 初始化 pending indicator（OK tab 開啟時才真正觸發顯示）
   _bundleDetail = d;
@@ -267,6 +295,7 @@ function closeModal() {
   currentBundleId = null;
   currentDetail = null;
   _bundleDetail = null;
+  if (_retrainPollTimer) { clearInterval(_retrainPollTimer); _retrainPollTimer = null; }
 }
 
 function switchTab(name) {
@@ -627,6 +656,78 @@ async function startSubmodelRetrain() {
   if (typeof startRetrainStatusPolling === 'function') {
     startRetrainStatusPolling(bundleId);
   }
+}
+// ── 重訓進度輪詢 ──────────────────────────────────────────────────────
+let _retrainPollTimer = null;
+
+function startRetrainStatusPolling(bundleId) {
+  document.getElementById('retrain-progress').style.display = 'block';
+  document.getElementById('retrain-summary').style.display = 'none';
+
+  if (_retrainPollTimer) clearInterval(_retrainPollTimer);
+  _retrainPollTimer = setInterval(() => pollRetrainStatus(bundleId), 2000);
+  pollRetrainStatus(bundleId);
+}
+
+async function pollRetrainStatus(bundleId) {
+  const resp = await fetch(`/api/models/${bundleId}/retrain_status?tail=200`);
+  if (!resp.ok) return;
+  const { job } = await resp.json();
+  if (!job) {
+    clearInterval(_retrainPollTimer);
+    return;
+  }
+
+  // 步驟高亮
+  const STEPS = ['stage', 'train', 'metrics', 'swap', 'reload', 'done'];
+  const curIdx = STEPS.indexOf(job.step);
+  document.querySelectorAll('.step-pill').forEach(el => {
+    const idx = STEPS.indexOf(el.dataset.step);
+    el.classList.remove('active', 'done', 'failed');
+    if (job.state === 'failed' && idx === curIdx) el.classList.add('failed');
+    else if (idx < curIdx) el.classList.add('done');
+    else if (idx === curIdx) el.classList.add('active');
+  });
+
+  // log
+  const logEl = document.getElementById('retrain-log');
+  logEl.textContent = (job.log_lines || []).join('\n');
+  logEl.scrollTop = logEl.scrollHeight;
+
+  if (job.state === 'completed' || job.state === 'failed') {
+    clearInterval(_retrainPollTimer);
+    _retrainPollTimer = null;
+    // 重啟用重訓按鈕，使用者可重新編輯 tile 後再試
+    const btn = document.getElementById('retrain-btn');
+    if (btn) btn.disabled = false;
+    showRetrainSummary(job);
+    if (job.state === 'completed') {
+      // 重新拉 detail 更新 pending bar（應該變空）
+      refreshPendingIndicator(bundleId);
+    }
+  }
+}
+
+function showRetrainSummary(job) {
+  const el = document.getElementById('retrain-summary');
+  el.style.display = 'block';
+  if (job.state === 'failed') {
+    el.style.background = '#3d1c25';
+    el.innerHTML = `<strong style="color:#f38ba8;">✗ 失敗</strong><br>
+      <span style="color:#cdd6f4;">${(job.error || '').replace(/</g, '&lt;')}</span>`;
+    return;
+  }
+  const s = job.summary || {};
+  el.style.background = '#1e3025';
+  el.innerHTML = `
+    <strong style="color:#a6e3a1;">✓ 重訓完成</strong>
+    <table style="width:100%; margin-top:8px; color:#cdd6f4;">
+      <tr><td>AUROC</td><td>${s.auroc_old ?? '-'} → <strong>${s.auroc_new ?? '-'}</strong></td></tr>
+      <tr><td>訓練 tile 數</td><td>${s.tile_count_old ?? '-'} → <strong>${s.tile_count_new ?? '-'}</strong></td></tr>
+    </table>
+    <p style="color:#fab387; margin:8px 0 0; font-size:.82rem;">
+      Threshold 維持原值（沿用模型庫頁面手動調整的設定）。
+    </p>`;
 }
 // ────────────────────────────────────────────────────────────────────
 
