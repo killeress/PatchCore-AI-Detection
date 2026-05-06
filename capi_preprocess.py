@@ -18,6 +18,10 @@ class PreprocessConfig:
     enable_panel_polygon: bool = True
     edge_threshold_px: int = 768  # retained for config compatibility; zone split is coverage-based
     coverage_min: float = 0.3
+    # Edge tile 中心可往 panel bbox 邊外推的最大距離（px）。預設 256（= half tile_size），
+    # 讓「中心位於 panel 邊」的 tile 進入訓練集。0 = 關閉外推（向後相容舊行為）。
+    # 實際 push 距離會夾到 image 邊界，使 tile 始終落在 image 內。
+    outer_edge_extend: int = 256
 
 
 @dataclass
@@ -361,9 +365,16 @@ def _generate_tiles(
     polygon: Optional[np.ndarray],
     config: PreprocessConfig,
 ) -> List[TileResult]:
-    """在 bbox 範圍內走格子，切 tile 並分類 zone。outside tile 直接略過。"""
+    """在 bbox 範圍內走格子 + 外推一圈，切 tile 並分類 zone。
+
+    內圈 tile 走原本邏輯（outside 跳掉，最外圈 inner 改 edge）。
+    外圈 tile 來自 ``outer_edge_extend``：每邊往外推到 image 邊界內，
+    強制 zone="edge"（避免角落 coverage<0.3 被歸 outside 跳掉），
+    讓「中心位於 panel 邊」的 tile 進入訓練集。
+    """
     x1, y1, x2, y2 = bbox
     ts = config.tile_size
+    img_h, img_w = img.shape[:2]
 
     def positions(lo: int, hi: int) -> List[int]:
         if hi - lo < ts:
@@ -375,8 +386,41 @@ def _generate_tiles(
 
     xs = positions(x1, x2)
     ys = positions(y1, y2)
+
+    # 外推：push 距離夾到 image 邊界，確保 tile 完全在 image 內。
+    extend = max(0, int(config.outer_edge_extend))
+    push_top    = min(extend, max(0, y1))
+    push_bottom = min(extend, max(0, img_h - y2))
+    push_left   = min(extend, max(0, x1))
+    push_right  = min(extend, max(0, img_w - x2))
+
+    top_ty    = (y1 - push_top)             if push_top > 0    else None
+    bottom_ty = (y2 - ts + push_bottom)     if push_bottom > 0 else None
+    left_tx   = (x1 - push_left)            if push_left > 0   else None
+    right_tx  = (x2 - ts + push_right)      if push_right > 0  else None
+
+    extra_xs = []
+    if left_tx is not None:
+        extra_xs.append(left_tx)
+    extra_xs.extend(xs)
+    if right_tx is not None:
+        extra_xs.append(right_tx)
+
+    extension_positions: List[Tuple[int, int]] = []
+    if top_ty is not None:
+        extension_positions.extend((tx, top_ty) for tx in extra_xs)
+    if bottom_ty is not None:
+        extension_positions.extend((tx, bottom_ty) for tx in extra_xs)
+    if left_tx is not None:
+        extension_positions.extend((left_tx, ty) for ty in ys)
+    if right_tx is not None:
+        extension_positions.extend((right_tx, ty) for ty in ys)
+    extension_positions = list(dict.fromkeys(extension_positions))
+
     tiles: List[TileResult] = []
     tid = 0
+
+    # 1) 內圈 grid（原邏輯）
     for ty in ys:
         for tx in xs:
             tile_rect = (tx, ty, tx + ts, ty + ts)
@@ -396,4 +440,22 @@ def _generate_tiles(
                 center_dist_to_edge=dist,
             ))
             tid += 1
+
+    # 2) 外圈外推 tile（強制 zone="edge"）
+    for tx, ty in extension_positions:
+        tile_rect = (tx, ty, tx + ts, ty + ts)
+        _zone, cov, dist, mask = classify_tile_zone(tile_rect, polygon, config)
+        # push 已夾到 image 內，img 切片必為 ts × ts
+        tile_img = img[ty:ty + ts, tx:tx + ts].copy()
+        tiles.append(TileResult(
+            tile_id=tid,
+            x1=tx, y1=ty, x2=tx + ts, y2=ty + ts,
+            image=tile_img,
+            mask=mask,
+            coverage=cov,
+            zone="edge",  # 強制：corner tile coverage<0.3 也算 edge
+            center_dist_to_edge=dist,
+        ))
+        tid += 1
+
     return tiles
