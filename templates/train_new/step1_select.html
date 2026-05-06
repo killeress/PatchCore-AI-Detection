@@ -51,11 +51,6 @@
     </summary>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:14px;">
       <label class="tp-field">
-        <span class="tp-label">inner_panels <span class="tp-default">預設 3</span></span>
-        <input type="number" id="tp-inner_panels" min="1" max="5" step="1" placeholder="3">
-        <span class="tp-hint">前 N 片收 inner+edge tile，第 N+1~5 片只收 edge</span>
-      </label>
-      <label class="tp-field">
         <span class="tp-label">batch_size <span class="tp-default">預設 8</span></span>
         <input type="number" id="tp-batch_size" min="1" max="32" step="1" placeholder="8">
         <span class="tp-hint">越大訓練越快，但 GPU 記憶體用量也越大</span>
@@ -250,7 +245,6 @@ function updateNext() {
 
 // 留空欄位不傳 key，由後端套 TrainingConfig dataclass 預設值
 const TRAIN_PARAM_KEYS = [
-  {key: 'inner_panels',  type: 'int',   min: 1,    max: 5},
   {key: 'batch_size',    type: 'int',   min: 1,    max: 32},
   {key: 'coreset_ratio', type: 'float', min: 0.01, max: 0.5},
   {key: 'max_epochs',    type: 'int',   min: 1,    max: 10},

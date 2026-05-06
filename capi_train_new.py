@@ -937,12 +937,6 @@ def train_single_submodel(
             )
             threshold = calibrate_threshold(ng_scores, train_max)
 
-            output_pt_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = output_pt_path.with_suffix(output_pt_path.suffix + ".tmp")
-            shutil.copy2(model_pt, tmp_path)
-            os.replace(tmp_path, output_pt_path)
-            size = output_pt_path.stat().st_size
-
             metrics = compute_unit_metrics(
                 train_max, ng_scores, threshold, train_scores=train_scores,
             )
@@ -950,6 +944,12 @@ def train_single_submodel(
             metrics["ng_used"] = ng_used
             elapsed = time.monotonic() - unit_start
             metrics["elapsed_seconds"] = int(elapsed)
+
+            output_pt_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = output_pt_path.with_suffix(output_pt_path.suffix + ".tmp")
+            shutil.copy2(model_pt, tmp_path)
+            os.replace(tmp_path, output_pt_path)
+            size = output_pt_path.stat().st_size
 
             return {
                 "threshold": round(threshold, 4),
