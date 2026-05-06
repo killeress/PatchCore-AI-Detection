@@ -681,10 +681,16 @@ async function pollRetrainStatus(bundleId) {
     console.warn('retrain poll fetch error', e);
     return;
   }
-  if (!resp.ok) return;
+  if (!resp.ok) {
+    // 連續 server error 不該無限輪詢轟炸
+    clearInterval(_retrainPollTimer);
+    _retrainPollTimer = null;
+    return;
+  }
   const { job } = await resp.json();
   if (!job) {
     clearInterval(_retrainPollTimer);
+    _retrainPollTimer = null;
     return;
   }
 
