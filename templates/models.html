@@ -621,7 +621,7 @@ function loadTiles(source) {
       }
       grid.innerHTML = d.tiles.map(t =>
         t.thumb_url
-          ? `<div class="tile-thumb" data-tile-id="${t.id}" data-decision="${t.decision || 'accept'}">`
+          ? `<div class="tile-thumb" data-tile-id="${t.id}" data-decision="${t.decision || 'accept'}" data-image-url="${t.image_url || t.thumb_url}">`
             + `<img src="${t.thumb_url}" title="${t.lighting} ${t.zone || ''} #${t.id}" loading="lazy">`
             + `</div>`
           : `<div title="${t.lighting} ${t.zone || ''} (no thumb)" style="background:#313244;border-radius:4px;aspect-ratio:1;"></div>`
@@ -886,7 +886,8 @@ function _showTileInModal(el) {
   if (!el) return;
   _modalTileEl = el;
   const img = el.querySelector('img');
-  const src = img ? img.src : '';
+  // 優先用 image_url（原始尺寸）；fallback 才用 thumb 的 src（小縮圖會看不清）
+  const src = el.dataset.imageUrl || (img ? img.src : '');
   const title = img ? (img.title || '') : '';
   const isOkGrid = !!el.closest('#mlibOkGrid');
   const decision = el.dataset.decision || 'accept';
