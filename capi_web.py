@@ -5170,8 +5170,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 job_id=job_id, cfg=cfg, preprocess_cfg=pre_cfg,
                 db=db, thumb_dir=thumb_root, log=log,
             )
-            if stats["panel_success"] < 4:
-                raise RuntimeError(f"成功 panel < 4 ({stats['panel_success']})")
+            if stats["panel_success"] < 3:
+                raise RuntimeError(f"成功 panel < 3 ({stats['panel_success']})")
 
             log(f"抽 NG tile（每 lighting 上限 {NG_TILES_PER_LIGHTING} 個）")
             ng_stats = sample_ng_tiles(
