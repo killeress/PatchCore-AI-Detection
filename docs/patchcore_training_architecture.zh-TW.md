@@ -81,7 +81,7 @@ flowchart LR
 
 ## 功能流程
 
-1. **Step 1 選 panel**：`/api/train/new/panels` 從 `inference_records` 找指定 `model_id` 且 `machine_judgment='OK'` 的 panel，Wizard 要求選滿 5 片。
+1. **Step 1 選 panel**：`/api/train/new/panels` 從 `inference_records` 找指定 `model_id` 且 `machine_judgment='OK'` 的 panel，Wizard 要求選滿 3 片，每片皆收 inner + edge tile（含 edge 外推取樣）。
 2. **Step 2 前處理**：`/api/train/new/start` 建立 `training_jobs`，背景 thread 呼叫 `preprocess_panels_to_pool()`。每片 panel 會過濾出 `G0F00000`、`R0F00000`、`W0F00000`、`WGF50500`、`STANDARD` 五種 lighting，切成 OK tile 與縮圖後寫入 `training_tile_pool`。
 3. **NG 樣本補充**：`sample_ng_tiles()` 從 `over_review/*/true_ng/{lighting}/crop/` 每種 lighting 抽 NG tile，作為 threshold 校準與驗證用。
 4. **Step 3 tile review**：操作員可將不適合訓練的 tile 設成 `reject`；訓練只吃 `decision='accept'` 的 tile。
