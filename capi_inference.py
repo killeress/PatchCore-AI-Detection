@@ -5586,11 +5586,18 @@ class CAPIInferencer:
             oh, ow = omit_image.shape[:2]
             for tile, score, anomaly_map in result.anomaly_tiles:
                 tx, ty, tw, th = tile.x, tile.y, tile.width, tile.height
-                if tx >= ow or ty >= oh:
-                    continue
-                x2 = min(tx + tw, ow)
-                y2 = min(ty + th, oh)
-                omit_crop = omit_image[ty:y2, tx:x2]
+                # AOI centered tile 可能在影像外 (tx<0 或 ty<0)，必須用零填補
+                # 對齊 cv2.copyMakeBorder 切 tile.image 的行為，否則 omit_crop 會
+                # 變成空陣列導致下游 cv2.resize 在 save_tile_heatmap 拋例外，heatmap 不會被寫出。
+                sx1, sy1 = max(0, tx), max(0, ty)
+                sx2 = min(ow, tx + tw)
+                sy2 = min(oh, ty + th)
+                if omit_image.ndim == 3:
+                    omit_crop = np.zeros((th, tw, omit_image.shape[2]), dtype=omit_image.dtype)
+                else:
+                    omit_crop = np.zeros((th, tw), dtype=omit_image.dtype)
+                if sx2 > sx1 and sy2 > sy1:
+                    omit_crop[sy1 - ty:sy2 - ty, sx1 - tx:sx2 - tx] = omit_image[sy1:sy2, sx1:sx2]
                 tile.omit_crop_image = omit_crop.copy()
 
                 is_dust, dust_mask, bright_ratio, detail_text = \
