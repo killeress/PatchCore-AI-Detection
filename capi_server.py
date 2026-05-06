@@ -66,6 +66,7 @@ class ServerStatusTracker:
         self.model_version = "Unknown"
         self.threshold = 0.6
         self.threshold_mapping = {}  # {prefix: threshold}
+        self.is_new_architecture = False  # active config 是否為 v2 新架構（決定 dashboard/settings UX）
         self.device = "CPU"
         
         # 連線與推論狀態
@@ -100,6 +101,7 @@ class ServerStatusTracker:
                     "device": self.device,
                     "threshold": self.threshold,
                     "threshold_mapping": dict(self.threshold_mapping),
+                    "is_new_architecture": self.is_new_architecture,
                 },
                 "traffic": {
                     "active_connections": self.active_connections,
@@ -1046,6 +1048,9 @@ class CAPIServer:
                 
             server_status.device = display_device
             server_status.threshold = threshold
+            server_status.is_new_architecture = bool(
+                self.fallback_config and self.fallback_config.is_new_architecture
+            )
             if not (self.fallback_config and self.fallback_config.is_new_architecture):
                 server_status.threshold_mapping = dict(capi_config.threshold_mapping)
 

@@ -1373,6 +1373,14 @@
             paramLockMap['aoi_edge_inspector'] =
                 '新架構 (C-10) 強制 patchcore：edge.pt 已專為邊緣訓練，' +
                 'CV / fusion 在新架構下不再使用';
+            // 新架構：threshold_mapping / model_mapping 的唯一來源是 bundle 內
+            // machine_config.yaml。從這裡改 DB 重啟後會被 yaml 蓋掉（且後端 API 也擋）。
+            // 請改 /models 介面或直接編輯 yaml。
+            paramLockMap['threshold_mapping'] =
+                '新架構 (C-10) 由 bundle yaml 直接管理；請到 /models 介面修改，' +
+                '或直接編輯 model/<bundle>/machine_config.yaml';
+            paramLockMap['model_mapping'] =
+                '新架構 (C-10) 由 bundle yaml 直接管理；不應從 /settings 修改';
         }
 
         if (!aoiCoordEnabled) {
@@ -1427,6 +1435,17 @@
                         <div class="icon">⚡</div>
                         <span>推論設定</span>
                     </div>
+                    ${window.isNewArchitecture ? `
+                    <div style="margin: 12px 16px; padding: 12px 14px; border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.08); border-radius: 6px; font-size: 0.85rem; line-height: 1.5; color: #bae6fd;">
+                        <div style="font-weight: 600; color: #7dd3fc; margin-bottom: 4px;">ℹ️ 新架構 (C-10) 模型</div>
+                        <code style="background: rgba(0,0,0,0.3); padding: 1px 6px; border-radius: 3px; color: #fde68a;">threshold_mapping</code> 與
+                        <code style="background: rgba(0,0,0,0.3); padding: 1px 6px; border-radius: 3px; color: #fde68a;">model_mapping</code>
+                        由 bundle 內的 <code style="color: #c4b5fd;">machine_config.yaml</code> 直接管理，不從這裡修改。
+                        <div style="margin-top: 6px; color: #94a3b8;">請到
+                            <a href="/models" style="color: #7dd3fc; text-decoration: underline;">/models</a> 介面調整 threshold，
+                            或直接編輯 <code style="color: #fbbf24;">model/&lt;bundle&gt;/machine_config.yaml</code> 後重啟。
+                        </div>
+                    </div>` : ''}
                     ${inferenceParams.map(p => paramRow(p)).join('')}
                 </div>
             </div>

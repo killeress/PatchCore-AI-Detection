@@ -2299,6 +2299,12 @@ class CAPIDatabase:
             ("aoi_report_path_replace_to", "Report", "string", "報告路徑替換目標字串"),
         ]
 
+        # 新架構：threshold_mapping / model_mapping 不灌進 DB，避免「首次啟動灌
+        # 舊值 → 後續 yaml 改動被 DB 蓋掉」這條漏水路徑。這兩個 key 對 v2 而言
+        # 屬於 bundle 內 yaml 自包含的設定，唯一來源就是 machine_config.yaml。
+        if getattr(config, "is_new_architecture", False):
+            params_def = [p for p in params_def if p[0] not in ("threshold_mapping", "model_mapping")]
+
         count = 0
         with self._lock:
             conn = self._get_conn()

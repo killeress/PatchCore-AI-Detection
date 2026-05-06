@@ -904,7 +904,12 @@
             document.getElementById('ui-uptime').textContent = data.server.uptime || '-';
             document.getElementById('ui-model').textContent = data.server.model_version || '-';
             document.getElementById('ui-device').textContent = data.server.device || '-';
-            document.getElementById('ui-threshold').textContent = data.server.threshold || '-';
+            const _thrEl = document.getElementById('ui-threshold');
+            _thrEl.textContent = data.server.threshold || '-';
+            _thrEl.style.cursor = 'help';
+            _thrEl.title = data.server.is_new_architecture
+                ? 'Source: machine_config.yaml (bundle yaml 直接管理；改 /models 或編輯 yaml 重啟)'
+                : 'Source: capi_3f.yaml + DB config_params override (可從 /settings 改)';
 
             // ── Active Tasks (badge only, no counter element) ──
             const tasks = data.traffic.active_inferences || 0;

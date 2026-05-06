@@ -3660,6 +3660,23 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "請填寫修改原因"})
                 return
 
+            # 新架構：threshold_mapping / model_mapping 屬於 bundle yaml 自包含設定，
+            # 不接受 /settings 介面動 DB（避免重啟時被 DB 蓋掉 yaml）。請改 /models
+            # 介面或直接編輯 machine_config.yaml。
+            if param_name in ("threshold_mapping", "model_mapping"):
+                is_new_arch = bool(
+                    self.inferencer
+                    and getattr(self.inferencer.config, "is_new_architecture", False)
+                )
+                if is_new_arch:
+                    self._send_json({
+                        "error": (
+                            f"新架構 (v2) 不支援透過 /settings 修改 {param_name}。"
+                            f"請改 /models 介面，或直接編輯 model/<bundle>/machine_config.yaml。"
+                        )
+                    })
+                    return
+
             success = self.db.update_config_param(param_name, new_value, reason)
             if success:
                 # Hot-reload 1：把 DB 同步到所有 inferencer.config 屬性（包含單機與
@@ -4736,6 +4753,25 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_response(500, f"Failed to read manifest/thresholds: {str(e)}")
             return
+
+        # threshold 顯示以 machine_config.yaml 為準（inference 引擎讀的 source of truth）；
+        # thresholds.json 退化成 fallback。手動改 yaml 沒同步 json 時也能正確顯示。
+        yaml_p = bundle_path / "machine_config.yaml"
+        if yaml_p.exists():
+            try:
+                import yaml as _yaml
+                _cfg = _yaml.safe_load(yaml_p.read_text(encoding="utf-8")) or {}
+                _yaml_thr = _cfg.get("threshold_mapping") or {}
+                if isinstance(_yaml_thr, dict) and _yaml_thr:
+                    _norm = {}
+                    for _lt, _v in _yaml_thr.items():
+                        if isinstance(_v, dict):
+                            _norm[_lt] = {_z: float(_zv) for _z, _zv in _v.items()}
+                        else:
+                            _norm[_lt] = {"inner": float(_v), "edge": float(_v)}
+                    thresholds = _norm
+            except Exception as _e:
+                logger.warning("[train/done] 讀 machine_config.yaml 失敗，fallback thresholds.json: %s", _e)
 
         # AUROC grade 可能是 "n/a"，斜線不能當 CSS class；slugify 給模板用
         def _grade_slug(g):
