@@ -49,6 +49,7 @@
   /* tile accept/reject 切換（NG tile 唯讀） */
   .tile-thumb { position: relative; cursor: pointer; }
   #mlibNgGrid .tile-thumb { cursor: default; pointer-events: none; }
+  #mlibOkGrid.readonly, #mlibNgGrid.readonly { pointer-events: none; opacity: 0.6; }
   .tile-thumb[data-decision="reject"] img {
     filter: brightness(0.4) saturate(0.5);
     outline: 2px solid #f38ba8;
@@ -136,6 +137,22 @@
     </div>
 
     <div id="mlibPaneOk" class="mlib-pane">
+      <div id="training-data-missing" style="display:none; padding:10px 14px;
+           background:#3d1c25; border:1px solid #f38ba8; border-radius:6px;
+           color:#f9e2af; margin:8px 0;">
+        此 bundle 的訓練資料已清除，無法在此重訓。
+        <a href="/train/new" style="color:#89dceb;">→ 至 /train/new 重新訓練</a>
+      </div>
+      <div class="pending-bar" id="pending-bar" style="display:none;
+           padding:8px 12px; background:#313244; border-radius:6px;
+           margin:8px 0; justify-content:space-between; align-items:center;">
+        <span id="pending-text" style="color:#f9e2af;"></span>
+        <button id="retrain-btn" onclick="startSubmodelRetrain()"
+                style="background:#89b4fa; color:#1e1e2e; border:none;
+                       border-radius:5px; padding:6px 14px; font-weight:700; cursor:pointer;">
+          重訓此子模型 →
+        </button>
+      </div>
       <div class="mlib-filter-row">
         <label>Lighting：
           <select id="mlibOkLighting" onchange="loadTiles('ok')">
@@ -231,23 +248,25 @@ function doDelete(id) {
     });
 }
 
-function showDetail(id) {
+async function showDetail(id) {
   currentBundleId = id;
-  fetch(`/api/models/${id}/detail`)
-    .then(r => r.json())
-    .then(d => {
-      if (d.error) { alert(d.error); return; }
-      currentDetail = d;
-      renderDetail(d);
-      switchTab('info');
-      document.getElementById('mlibModalBg').classList.add('open');
-    });
+  const r = await fetch(`/api/models/${id}/detail`);
+  const d = await r.json();
+  if (d.error) { alert(d.error); return; }
+  currentDetail = d;
+  renderDetail(d);
+  switchTab('info');
+  document.getElementById('mlibModalBg').classList.add('open');
+  // 初始化 pending indicator（OK tab 開啟時才真正觸發顯示）
+  _bundleDetail = d;
+  checkTrainingDataAvailability();
 }
 
 function closeModal() {
   document.getElementById('mlibModalBg').classList.remove('open');
   currentBundleId = null;
   currentDetail = null;
+  _bundleDetail = null;
 }
 
 function switchTab(name) {
@@ -468,6 +487,7 @@ function loadTiles(source) {
       cnt.textContent = `共 ${d.total} 個（顯示前 ${Math.min(d.total, d.limit || 500)} 個）`;
       if (!d.tiles || d.tiles.length === 0) {
         grid.innerHTML = `<div class="mlib-empty">${d.message || '無資料'}</div>`;
+        updatePendingBar();
         return;
       }
       grid.innerHTML = d.tiles.map(t =>
@@ -477,6 +497,7 @@ function loadTiles(source) {
             + `</div>`
           : `<div title="${t.lighting} ${t.zone || ''} (no thumb)" style="background:#313244;border-radius:4px;aspect-ratio:1;"></div>`
       ).join('');
+      if (source === 'ok') updatePendingBar();
     })
     .catch(e => { grid.innerHTML = `<div class="mlib-empty">載入失敗：${e}</div>`; });
 }
@@ -524,6 +545,90 @@ async function toggleTileDecision(bundleId, tileEl) {
     alert('切換失敗：' + e);
   }
 }
+
+// ── 變更指示條 + 重訓子模型 ──────────────────────────────────────────
+let _bundleDetail = null;
+
+function currentLighting() {
+  return document.getElementById('mlibOkLighting').value || null;
+}
+function currentZone() {
+  return document.getElementById('mlibOkZone').value || null;
+}
+
+async function refreshPendingIndicator(bundleId) {
+  const resp = await fetch(`/api/models/${bundleId}/detail`);
+  if (!resp.ok) return;
+  _bundleDetail = await resp.json();
+  updatePendingBar();
+  checkTrainingDataAvailability();
+}
+
+function updatePendingBar() {
+  const bar = document.getElementById('pending-bar');
+  const text = document.getElementById('pending-text');
+  if (!_bundleDetail) { bar.style.display = 'none'; return; }
+
+  // 訓練資料已刪 → checkTrainingDataAvailability 已處理，bar 不出現
+  const td = _bundleDetail.training_data || {};
+  if ((td.ok_count || 0) === 0) { bar.style.display = 'none'; return; }
+
+  const lighting = currentLighting();
+  const zone = currentZone();
+  const pc = (_bundleDetail.pending_changes || []).find(
+    p => p.lighting === lighting && p.zone === zone
+  );
+  if (!pc) { bar.style.display = 'none'; return; }
+
+  text.textContent = `${lighting}-${zone}：有 ${pc.count} 張 tile 修改未訓練`;
+  bar.style.display = 'flex';
+  bar.dataset.lighting = lighting;
+  bar.dataset.zone = zone;
+  bar.dataset.bundleId = _bundleDetail.id;
+}
+
+function checkTrainingDataAvailability() {
+  const td = (_bundleDetail && _bundleDetail.training_data) || {};
+  const ok = (td.ok_count || 0) > 0;
+  const missing = document.getElementById('training-data-missing');
+  const pendingBar = document.getElementById('pending-bar');
+  const grids = document.querySelectorAll('#mlibOkGrid, #mlibNgGrid');
+
+  if (ok) {
+    missing.style.display = 'none';
+    grids.forEach(g => g.classList.remove('readonly'));
+  } else {
+    missing.style.display = 'block';
+    pendingBar.style.display = 'none';
+    grids.forEach(g => g.classList.add('readonly'));
+  }
+}
+
+async function startSubmodelRetrain() {
+  const bar = document.getElementById('pending-bar');
+  const bundleId = parseInt(bar.dataset.bundleId, 10);
+  const lighting = bar.dataset.lighting;
+  const zone = bar.dataset.zone;
+
+  if (!confirm(`確認重訓 ${lighting}-${zone}？\n（threshold 不會被改動）`)) return;
+
+  const resp = await fetch(`/api/models/${bundleId}/retrain_submodel`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({lighting, zone}),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    alert('啟動失敗：' + (err.error || resp.status));
+    return;
+  }
+  document.getElementById('retrain-btn').disabled = true;
+  // Task 10 會實作 startRetrainStatusPolling
+  if (typeof startRetrainStatusPolling === 'function') {
+    startRetrainStatusPolling(bundleId);
+  }
+}
+// ────────────────────────────────────────────────────────────────────
 
 // 全域點擊綁定：tile accept/reject 切換
 document.addEventListener('click', (e) => {
