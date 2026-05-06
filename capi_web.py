@@ -6062,21 +6062,146 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                          "lighting": lighting, "zone": zone})
 
     def _submodel_retrain_worker(self, bundle_id: int, lighting: str, zone: str):
-        """背景 thread：執行單子模型重訓全流程。Task 6 會完整實作。"""
-        # Stub - Task 6 implement
+        """背景 thread：執行單子模型重訓全流程。
+
+        步驟：stage → train → metrics → swap → reload → done。任一步失敗
+        都更新 state["job"] state="failed" + error，並保留 .pt 與 manifest 不動。
+        """
+        import traceback
+        from capi_train_new import train_single_submodel, TrainingConfig
+        from capi_model_registry import (
+            append_submodel_history, get_used_tile_ids, _read_manifest,
+        )
+
         state = CAPIWebHandler._submodel_retrain_state
-        with state["lock"]:
-            if state["job"] is not None:
-                state["job"]["state"] = "failed"
-                state["job"]["error"] = "worker not implemented yet (placeholder)"
-        logger.warning("submodel retrain worker called but not yet implemented")
+
+        def _set_step(step: str):
+            with state["lock"]:
+                if state["job"] is not None:
+                    state["job"]["step"] = step
+
+        def _log(msg: str):
+            ts = datetime.now().strftime("%H:%M:%S")
+            with state["lock"]:
+                if state["job"] is not None:
+                    state["job"]["log_lines"].append(f"[{ts}] {msg}")
+                    if len(state["job"]["log_lines"]) > 500:
+                        state["job"]["log_lines"] = state["job"]["log_lines"][-500:]
+
+        try:
+            db = self._capi_server_instance.database
+            bundle = db.get_model_bundle(bundle_id)
+            if not bundle:
+                raise RuntimeError(f"bundle {bundle_id} 已不存在")
+            job_id = bundle["job_id"]
+            bundle_dir = Path(bundle["bundle_path"])
+            machine_id = bundle["machine_id"]
+            unit_label = f"{lighting}-{zone}"
+            output_pt = bundle_dir / f"{unit_label}.pt"
+
+            _log(f"開始重訓 {unit_label} (bundle_id={bundle_id})")
+
+            # 取舊 AUROC / tile 數做 summary 比對
+            old_manifest = _read_manifest(bundle_dir)
+            old_unit_metrics = (old_manifest.get("unit_metrics") or {}).get(unit_label) or {}
+            old_history = (old_manifest.get("submodel_history") or {}).get(unit_label) or []
+            if old_history:
+                old_auroc = old_history[-1].get("auroc")
+                old_tile_count = old_history[-1].get("tile_count_used")
+            else:
+                old_auroc = old_unit_metrics.get("auroc")
+                old_tile_count = old_unit_metrics.get("train_count")
+
+            # 取 TrainingConfig：用既有 bundle 訓練時的 patchcore_params
+            patchcore_params = (old_manifest.get("patchcore_params") or {})
+            cfg = TrainingConfig(
+                machine_id=machine_id,
+                panel_paths=[],
+                over_review_root=Path(".tmp/_unused"),
+                batch_size=patchcore_params.get("batch_size", 32),
+                image_size=tuple(patchcore_params.get("image_size", (256, 256))),
+                coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
+                max_epochs=patchcore_params.get("max_epochs", 1),
+            )
+            # backbone_cache_dir / required_backbones / output_root 沿用 dataclass 預設值
+
+            _set_step("stage")
+            _log("準備訓練資料...")
+
+            _set_step("train")
+            _log("訓練中（含 stage_dataset → train_one_patchcore → calibrate）...")
+            gpu_lock = self._capi_server_instance._gpu_lock
+            result = train_single_submodel(
+                db=db, job_id=job_id, lighting=lighting, zone=zone,
+                cfg=cfg, output_pt_path=output_pt,
+                gpu_lock=gpu_lock, log=_log,
+            )
+
+            _set_step("metrics")
+            new_auroc = result["metrics"].get("auroc")
+            new_tile_count = result["tile_count"]
+            _log(f"訓練完成：tile={new_tile_count}, AUROC={new_auroc}")
+
+            _set_step("swap")
+            # train_single_submodel 已 atomic 寫好 output_pt，不需另做 swap
+            _log(f"已替換 {output_pt}")
+
+            # 寫 manifest history
+            entry = {
+                "trained_at": datetime.now().isoformat(timespec="seconds"),
+                "tile_count_used": new_tile_count,
+                "auroc": new_auroc,
+                "used_tile_ids": result["used_tile_ids"],
+                "kind": "retrain",
+                "ng_used": result["ng_used"],
+            }
+            append_submodel_history(bundle_dir, lighting, zone, entry)
+            _log("manifest history 已更新")
+
+            _set_step("reload")
+            inferencer = self._capi_server_instance.inferencers.get(machine_id)
+            if inferencer is None:
+                _log(f"[v2] 機台 {machine_id} 無 inferencer cache，跳過 reload（下次首次推論會載入新模型）")
+            else:
+                inferencer.reload_submodel(machine_id, lighting, zone)
+                _log(f"[v2] 已通知 inferencer reload {machine_id}/{lighting}/{zone}")
+
+            _set_step("done")
+            with state["lock"]:
+                state["job"]["state"] = "completed"
+                state["job"]["summary"] = {
+                    "auroc_old": old_auroc,
+                    "auroc_new": new_auroc,
+                    "tile_count_old": old_tile_count,
+                    "tile_count_new": new_tile_count,
+                }
+            _log(f"✓ 重訓完成")
+
+        except Exception as e:
+            tb = traceback.format_exc()
+            _log(f"✗ 失敗: {e}")
+            for line in tb.rstrip().splitlines()[-8:]:
+                _log(f"  {line}")
+            with state["lock"]:
+                if state["job"] is not None:
+                    state["job"]["state"] = "failed"
+                    state["job"]["error"] = str(e)
+            logger.error("submodel retrain worker failed: %s", e, exc_info=True)
 
     def _handle_models_retrain_status(self):
         """GET /api/models/<id>/retrain_status?tail=200
 
-        回目前 retrain job 的狀態與末 N 行 log。job 為空時回 {"job": null}。
+        回目前 retrain job 的狀態與末 N 行 log。
+        若沒有 job，或 job 對應的 bundle_id 與 path 中的 id 不符，回 {"job": null}。
         """
         from urllib.parse import parse_qs, urlparse
+        parts = self.path.split("/")
+        try:
+            bundle_id = int(parts[3])
+        except (ValueError, IndexError):
+            self._send_json({"error": "invalid bundle id"}, status=400)
+            return
+
         qs = parse_qs(urlparse(self.path).query)
         try:
             tail = max(0, min(int((qs.get("tail") or ["200"])[0]), 1000))
@@ -6086,7 +6211,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         state = CAPIWebHandler._submodel_retrain_state
         with state["lock"]:
             job = state.get("job")
-            if job is None:
+            if job is None or job.get("bundle_id") != bundle_id:
+                # 沒有 job 或別的 bundle 的 job 跑著 → 對目前頁面而言視為無 job
                 self._send_json({"job": None})
                 return
             # 淺拷貝 + 截斷 log
