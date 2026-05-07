@@ -6486,8 +6486,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "is_active": bool(b.get("is_active")),
                 "label": label,
             })
-        # 排序：active 優先 → trained_at asc
-        out.sort(key=lambda x: (not x["is_active"], x["trained_at"] or ""), reverse=False)
+        # Active 優先；同一組內 trained_at 由新到舊
+        out.sort(key=lambda x: x["trained_at"] or "", reverse=True)
+        out.sort(key=lambda x: not x["is_active"])  # stable sort: active group first
         self._send_json({"bundles": out})
 
     def _handle_models_retrain_status(self):
