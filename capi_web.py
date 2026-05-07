@@ -222,6 +222,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         # }
     }
 
+    # 全 server 同時只能一個 score scan job（共用 GPU，序列化）
+    _scan_state = {
+        "lock": threading.Lock(),
+        "job": None,  # Optional[dict]，欄位見 _start_scan_job
+    }
+
     @classmethod
     def init_jinja(cls):
         if cls.jinja_env is None:
@@ -6218,6 +6224,100 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     state["job"]["state"] = "failed"
                     state["job"]["error"] = str(e)
             logger.error("submodel retrain worker failed: %s", e, exc_info=True)
+
+    @classmethod
+    def _start_scan_job(
+        cls,
+        kind: str,                     # "self" | "prefilter"
+        scoring_bundle_id: int,
+        bundle_dir: "Path",
+        tile_pool_job_id: str,
+        lighting: str,
+        zone: str,
+        tile_ids: list,
+        server_inst,
+    ) -> tuple:
+        """嘗試啟動 scan job。回傳 (started: bool, response_dict)。"""
+        import uuid
+        state = cls._scan_state
+        with state["lock"]:
+            current = state["job"]
+            if current and current.get("state") == "running":
+                return False, {"error": "已有 scan job 進行中", "job": current}
+            scan_id = "scan_" + uuid.uuid4().hex[:12]
+            cancel_event = threading.Event()
+            state["job"] = {
+                "scan_id": scan_id,
+                "kind": kind,
+                "scoring_bundle_id": scoring_bundle_id,
+                "tile_pool_job_id": tile_pool_job_id,
+                "lighting": lighting,
+                "zone": zone,
+                "total": len(tile_ids),
+                "done": 0,
+                "skipped": 0,
+                "state": "running",
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+                "error": None,
+                "cancel_event": cancel_event,
+            }
+
+        thread = threading.Thread(
+            target=cls._scan_worker,
+            args=(scan_id, scoring_bundle_id, bundle_dir, tile_pool_job_id,
+                  lighting, zone, tile_ids, cancel_event, server_inst),
+            daemon=True,
+            name=f"scan-{scan_id}",
+        )
+        thread.start()
+        return True, {"scan_id": scan_id, "total": len(tile_ids)}
+
+    @classmethod
+    def _scan_worker(cls, scan_id, scoring_bundle_id, bundle_dir,
+                      tile_pool_job_id, lighting, zone, tile_ids,
+                      cancel_event, server_inst):
+        from capi_inference import SubmodelScorer
+        state = cls._scan_state
+
+        def _progress(done, total):
+            with state["lock"]:
+                if state["job"] and state["job"]["scan_id"] == scan_id:
+                    state["job"]["done"] = done
+
+        def _log(msg):
+            logger.info("[scan %s] %s", scan_id, msg)
+
+        try:
+            scorer = SubmodelScorer(
+                gpu_lock=server_inst._gpu_lock,
+                db=server_inst.database,
+                log_fn=_log,
+            )
+            result = scorer.score_tiles(
+                scoring_bundle_id=scoring_bundle_id,
+                bundle_dir=bundle_dir,
+                lighting=lighting, zone=zone,
+                tile_pool_job_id=tile_pool_job_id,
+                tile_ids=tile_ids,
+                cancel_event=cancel_event,
+                progress_cb=_progress,
+            )
+            with state["lock"]:
+                if state["job"] and state["job"]["scan_id"] == scan_id:
+                    state["job"]["state"] = "cancelled" if result["cancelled"] else "done"
+                    state["job"]["done"] = result["scanned"] + result["skipped"]
+                    state["job"]["skipped"] = result["skipped"]
+        except FileNotFoundError as e:
+            with state["lock"]:
+                if state["job"] and state["job"]["scan_id"] == scan_id:
+                    state["job"]["state"] = "failed"
+                    state["job"]["error"] = str(e)
+        except Exception as e:
+            logger.exception("scan worker crashed")
+            with state["lock"]:
+                if state["job"] and state["job"]["scan_id"] == scan_id:
+                    state["job"]["state"] = "failed"
+                    state["job"]["error"] = str(e)
 
     def _handle_models_retrain_status(self):
         """GET /api/models/<id>/retrain_status?tail=200
