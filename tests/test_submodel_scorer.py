@@ -59,7 +59,8 @@ def test_scorer_writes_cache_for_all_tiles(fake_tile_pool, tmp_path):
     assert result["scanned"] == 5
     assert result["cancelled"] is False
     cache = db.get_score_cache(99, tile_ids)
-    assert len(cache) == 5
+    assert cache == dict(zip(tile_ids, fake_scores)), \
+        "cache 應該把 fake_scores 對到對應的 tile_id（順序與值都正確）"
     assert progress[-1] == (5, 5)
 
 
@@ -137,3 +138,27 @@ def test_scorer_skips_missing_tile_image(fake_tile_pool, tmp_path):
         )
     assert result["scanned"] == 4
     assert result["skipped"] == 1
+
+
+def test_score_one_tile_converts_grayscale_to_bgr():
+    """_score_one_tile 必須把灰階圖轉 BGR 才丟給 anomalib（anomalib 需要 3-channel）。"""
+    from capi_inference import SubmodelScorer
+
+    scorer = SubmodelScorer(
+        gpu_lock=threading.Lock(), db=MagicMock(), log_fn=lambda m: None,
+    )
+
+    captured = {}
+    fake_inferencer = MagicMock()
+    def capture(image):
+        captured["shape"] = image.shape
+        result = MagicMock()
+        result.pred_score = 0.42
+        return result
+    fake_inferencer.predict = capture
+
+    gray = np.full((512, 512), 100, dtype=np.uint8)
+    score = scorer._score_one_tile(gray, fake_inferencer)
+    assert score == pytest.approx(0.42)
+    assert captured["shape"] == (512, 512, 3), \
+        f"_score_one_tile 應將 grayscale 轉成 (H,W,3) BGR，實際傳入 {captured['shape']}"

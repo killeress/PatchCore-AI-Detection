@@ -6782,7 +6782,14 @@ class SubmodelScorer:
         return inf
 
     def _score_one_tile(self, image: np.ndarray, inferencer) -> float:
-        """跑一張 tile，回 raw pred_score（anomalib normalized score, 不做 production post-processing）。"""
+        """跑一張 tile，回 raw pred_score（anomalib normalized score, 不做 production post-processing）。
+
+        Anomalib 的 TorchInferencer 需要 3-channel BGR；單通道輸入要先轉。
+        """
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.ndim == 3 and image.shape[2] == 1:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         pred = inferencer.predict(image=image)
         score = float(pred.pred_score.item()) if hasattr(pred.pred_score, "item") \
                 else float(pred.pred_score)
@@ -6849,7 +6856,7 @@ class SubmodelScorer:
                     rows_to_write = []
                 progress_cb(scanned + skipped, total)
             except Exception as e:
-                self.log(f"[scorer] tile {tile_id} 跑分失敗：{e}")
+                self.log(f"[scorer] tile {tile_id} 跑分失敗：{type(e).__name__}: {e}")
                 skipped += 1
                 progress_cb(scanned + skipped, total)
 
