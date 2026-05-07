@@ -5260,11 +5260,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self._send_json(resp)
 
     def _handle_train_new_tiles(self):
-        """GET /api/train/new/tiles?job_id=X&lighting=Y"""
+        """GET /api/train/new/tiles?job_id=X&lighting=Y[&score_from_bundle=N&sort_by=score_desc]"""
         from urllib.parse import parse_qs, urlparse
         qs = parse_qs(urlparse(self.path).query)
         job_id = (qs.get("job_id") or [""])[0]
         lighting = (qs.get("lighting") or [""])[0]
+        score_from = qs.get("score_from_bundle", [None])[0]
+        sort_by = qs.get("sort_by", ["default"])[0]
         if not job_id or not lighting:
             self._send_json({"error": "job_id and lighting required"}, status=400)
             return
@@ -5273,6 +5275,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         for tile in tiles:
             tile["thumb_url"] = self._train_new_thumb_url(tile.get("thumb_path"))
             tile["image_url"] = self._train_new_thumb_url(tile.get("source_path"))
+        if score_from:
+            CAPIWebHandler._decorate_tiles_with_scores(tiles, db, score_from, sort_by)
         self._send_json({"tiles": tiles})
 
     def _handle_train_new_preprocess_preview(self):
@@ -5656,6 +5660,42 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return ""
         return "/api/train/new/thumb/" + urllib.parse.quote(rel.as_posix(), safe="/")
 
+    @staticmethod
+    def _decorate_tiles_with_scores(tiles: list, db, score_from_bundle_id, sort_by: str) -> list:
+        """In-place 為 tile dict 加 score / score_quartile，並依 sort_by 排序。"""
+        try:
+            score_from_bundle_id = int(score_from_bundle_id) if score_from_bundle_id else None
+        except (TypeError, ValueError):
+            return tiles
+        if not score_from_bundle_id:
+            return tiles
+        tile_ids = [t["id"] for t in tiles]
+        scores = db.get_score_cache(score_from_bundle_id, tile_ids)
+        present = sorted(
+            [s for tid, s in scores.items()], reverse=True,
+        )
+        if present:
+            top5_idx = max(0, int(len(present) * 0.05) - 1)
+            top20_idx = max(0, int(len(present) * 0.20) - 1)
+            top5_cut = present[top5_idx]
+            top20_cut = present[top20_idx]
+        else:
+            top5_cut = top20_cut = float("inf")
+        for tile in tiles:
+            s = scores.get(tile["id"])
+            tile["score"] = s
+            if s is None:
+                tile["score_quartile"] = None
+            elif s >= top5_cut:
+                tile["score_quartile"] = "top5"
+            elif s >= top20_cut:
+                tile["score_quartile"] = "top20"
+            else:
+                tile["score_quartile"] = "rest"
+        if sort_by == "score_desc":
+            tiles.sort(key=lambda t: (t.get("score") is None, -(t.get("score") or 0)))
+        return tiles
+
     def _handle_retrain_status(self):
         """GET /api/retrain/status"""
         state = self._retrain_state
@@ -5896,7 +5936,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self.wfile.write(zip_bytes)
 
     def _handle_models_training_tiles(self):
-        """GET /api/models/<id>/training_tiles?source=ok|ng&lighting=X&zone=Y&limit=N&offset=M
+        """GET /api/models/<id>/training_tiles?source=ok|ng&lighting=X&zone=Y&limit=N&offset=M[&score_from_bundle=N&sort_by=score_desc]
 
         回傳該 bundle 對應 job_id 的 tile pool 縮圖列表。zone 預設不過濾（NG 沒 zone）。
         """
@@ -5915,6 +5955,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
         lighting = (qs.get("lighting") or [""])[0] or None
         zone = (qs.get("zone") or [""])[0] or None
+        score_from = qs.get("score_from_bundle", [None])[0]
+        sort_by = qs.get("sort_by", ["default"])[0]
         try:
             limit = max(1, min(int((qs.get("limit") or ["200"])[0]), 1000))
             offset = max(0, int((qs.get("offset") or ["0"])[0]))
@@ -5941,6 +5983,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             kwargs["zone"] = zone
 
         all_tiles = db.list_tile_pool(job_id, **kwargs)
+        # 加 score 並排序（在分頁前，確保排序後再取 page）
+        if score_from:
+            CAPIWebHandler._decorate_tiles_with_scores(all_tiles, db, score_from, sort_by)
         total = len(all_tiles)
         page = all_tiles[offset:offset + limit]
         out = []
@@ -5951,6 +5996,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "zone": t.get("zone"),
                 "source": t.get("source"),
                 "decision": t.get("decision"),
+                "score": t.get("score"),
+                "score_quartile": t.get("score_quartile"),
                 "thumb_url": self._train_new_thumb_url(t.get("thumb_path")),
                 "image_url": self._train_new_thumb_url(t.get("source_path")),
             })
