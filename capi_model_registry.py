@@ -23,6 +23,23 @@ def _dump_yaml(path: Path, data: dict) -> None:
     path.write_text(yaml.dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
+def invalidate_score_cache(db, scoring_bundle_id: int = None,
+                            tile_ids: list = None,
+                            lighting: str = None, zone: str = None) -> int:
+    """tile_score_cache 失效統一入口。回傳刪除筆數。
+
+    用例：
+    - 重訓 submodel 完成 → invalidate(scoring_bundle_id=B, lighting=L, zone=Z)
+    - 刪訓練資料 → invalidate(tile_ids=[...])
+    - 刪 bundle → invalidate(scoring_bundle_id=B)
+    """
+    return db.delete_score_cache(
+        scoring_bundle_id=scoring_bundle_id,
+        tile_ids=tile_ids,
+        lighting=lighting, zone=zone,
+    )
+
+
 def list_bundles_grouped(db) -> Dict[str, List[dict]]:
     """所有 bundle 依 machine_id 分組。"""
     bundles = db.list_model_bundles()
@@ -150,10 +167,13 @@ def delete_training_data(db, bundle_id: int) -> dict:
         return {"ok": True, "message": "此 bundle 沒有關聯 job_id，無訓練資料可清",
                 "deleted_files": 0, "freed_bytes": 0, "deleted_tile_rows": 0}
 
-    deleted_rows = (
-        len(db.list_tile_pool(job_id, source="ok"))
-        + len(db.list_tile_pool(job_id, source="ng"))
-    )
+    pool_ok = db.list_tile_pool(job_id, source="ok")
+    pool_ng = db.list_tile_pool(job_id, source="ng")
+    deleted_rows = len(pool_ok) + len(pool_ng)
+    tile_ids_to_clean = [t["id"] for t in pool_ok] + [t["id"] for t in pool_ng]
+
+    # 先清 score cache 再砍 tile_pool（順序很重要：cleanup 後 list_tile_pool 會回空）
+    invalidate_score_cache(db, tile_ids=tile_ids_to_clean)
     db.cleanup_tile_pool(job_id)
 
     thumb_dir = _training_data_dir(job_id)
@@ -253,6 +273,8 @@ def delete_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
 
     if bundle_path.exists():
         shutil.rmtree(bundle_path, ignore_errors=False)
+    # 該 bundle 作為 scoring bundle 算過的所有分都失效
+    invalidate_score_cache(db, scoring_bundle_id=bundle_id)
     db.delete_model_bundle(bundle_id)
     return {"ok": True}
 
