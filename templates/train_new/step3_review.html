@@ -12,6 +12,17 @@
     </div>
   </div>
 
+  <div class="prefilter-bar">
+    <span>預篩模型：</span>
+    <select id="prefilterBundleSelect" onchange="onPrefilterBundleChange()">
+      <option value="">不啟用（手動 review）</option>
+    </select>
+    <span id="prefilterStatus" style="color:#a6adc8;"></span>
+    <span id="prefilterCrossWarn" class="prefilter-cross-warn" style="display:none;">
+      ⚠ 跨 machine 模型，分數僅當相對排序參考
+    </span>
+  </div>
+
   <div style="display:flex;gap:4px;border-bottom:1px solid #45475a;padding-bottom:8px;margin-bottom:14px;overflow-x:auto;">
     {% for lighting in ["G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"] %}
     <span class="lighting-tab" data-lighting="{{ lighting }}" onclick="switchLighting('{{ lighting }}')"
@@ -133,6 +144,30 @@
     .process-panel { min-height:180px; }
     .grp-head { align-items:flex-start;flex-direction:column; }
   }
+  /* Score badge for prefilter scoring */
+  .tile { position: relative; }
+  .tile .score-badge {
+    position: absolute; top: 4px; right: 4px;
+    padding: 2px 6px; border-radius: 8px;
+    font-size: 0.7rem; font-family: 'JetBrains Mono', Consolas, monospace;
+    background: rgba(69, 71, 90, 0.85); color: #cdd6f4; pointer-events: none;
+    z-index: 2; line-height: 1.2;
+  }
+  .tile[data-score-quartile="top5"]  .score-badge {
+    background: #f38ba8; color: #1e1e2e; font-weight: 700;
+  }
+  .tile[data-score-quartile="top20"] .score-badge {
+    background: #fab387; color: #1e1e2e;
+  }
+  .prefilter-bar {
+    background: #313244; padding: 8px 12px; border-radius: 6px;
+    margin-bottom: 10px; display: flex; align-items: center; gap: 10px;
+    color: #cdd6f4; font-size: .82rem;
+  }
+  .prefilter-bar select { background: #1e1e2e; color: #cdd6f4;
+    border: 1px solid #45475a; border-radius: 4px; padding: 4px 8px;
+    font-size: .82rem; }
+  .prefilter-cross-warn { color: #f9e2af; font-size: .76rem; }
 </style>
 
 <script>
@@ -145,6 +180,146 @@ let _lastClickedId = null;
 let _clickTimer = null;
 let _focusedTileId = null;   // 鍵盤焦點所在 tile
 let _modalTileId = null;     // modal 顯示的 tile（null = 顯示前處理預覽 / 已關閉）
+
+// ── Prefilter (用既有 bundle 對當前 tile pool 算分) ─────────────
+let _prefilterBundleId = null;
+let _prefilterScanCache = {};  // key=`${lighting}|${zone}` → "done"
+let _prefilterPollTimer = null;
+let _prefilterPollCancelFn = null;
+const _machineId = "{{ machine_id|default('') }}";  // Jinja-injected
+
+async function loadEligibleScoringBundles() {
+  const sel = document.getElementById('prefilterBundleSelect');
+  try {
+    const r = await fetch('/api/train/new/eligible_scoring_bundles').then(r => r.json());
+    if (!r.bundles || r.bundles.length === 0) {
+      sel.disabled = true;
+      sel.options[0].textContent = '目前無可用模型';
+      return;
+    }
+    for (const b of r.bundles) {
+      const opt = document.createElement('option');
+      opt.value = b.id;
+      opt.dataset.machine = b.machine_id;
+      opt.textContent = b.label;
+      sel.appendChild(opt);
+    }
+  } catch (e) {
+    sel.disabled = true;
+    sel.options[0].textContent = '載入失敗';
+  }
+}
+
+function onPrefilterBundleChange() {
+  // 切換 bundle → 取消正在跑的 poll、清除 lazy cache 記憶、重載當前 lighting
+  cancelPrefilterPolling();
+  const sel = document.getElementById('prefilterBundleSelect');
+  _prefilterBundleId = sel.value ? parseInt(sel.value, 10) : null;
+  _prefilterScanCache = {};
+  // 跨 machine 警示
+  const opt = sel.options[sel.selectedIndex];
+  const cross = !!_prefilterBundleId && opt && opt.dataset.machine
+                && opt.dataset.machine !== _machineId;
+  document.getElementById('prefilterCrossWarn').style.display = cross ? '' : 'none';
+  // 重載當前 lighting
+  reloadLightingWithPrefilter(_currentLighting);
+}
+
+function cancelPrefilterPolling() {
+  if (_prefilterPollCancelFn) { _prefilterPollCancelFn(); _prefilterPollCancelFn = null; }
+}
+
+async function ensurePrefilterScoreForLightingZone(lighting, zone) {
+  // 對 (lighting, zone) 觸發 prefilter scan，等到結果寫進 cache 才 resolve。
+  // 如已有 lazy cache 記憶 → 立即 resolve。
+  if (!_prefilterBundleId) return false;
+  const key = `${lighting}|${zone}`;
+  if (_prefilterScanCache[key] === 'done') return true;
+
+  const status = document.getElementById('prefilterStatus');
+  status.textContent = `預篩 ${lighting}/${zone}...`;
+
+  let resp;
+  try {
+    resp = await fetch('/api/train/new/scan_prefilter_score', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        job_id: jobId, scoring_bundle_id: _prefilterBundleId,
+        lighting, zone,
+      }),
+    }).then(r => r.json());
+  } catch (e) {
+    status.textContent = `預篩失敗: ${e}`;
+    return false;
+  }
+  if (resp.error) { status.textContent = `預篩失敗: ${resp.error}`; return false; }
+  if (resp.cached_hit || resp.state === 'empty') {
+    _prefilterScanCache[key] = 'done';
+    status.textContent = '';
+    return true;
+  }
+
+  // 進入輪詢直到該 scan 結束（done/cancelled/failed）
+  return await new Promise(resolve => {
+    let cancelled = false;
+    _prefilterPollCancelFn = () => {
+      cancelled = true;
+      if (_prefilterPollTimer) { clearInterval(_prefilterPollTimer); _prefilterPollTimer = null; }
+      resolve(false);
+    };
+    _prefilterPollTimer = setInterval(async () => {
+      if (cancelled) return;
+      let s;
+      try { s = await fetch('/api/scan/status').then(r => r.json()); }
+      catch { return; }
+      if (cancelled) return;
+      if (s.state === 'running') {
+        status.textContent = `預篩 ${lighting}/${zone} ${s.done || 0}/${s.total || 0}`;
+        return;
+      }
+      // 終止狀態
+      cancelled = true;
+      if (_prefilterPollTimer) { clearInterval(_prefilterPollTimer); _prefilterPollTimer = null; }
+      _prefilterPollCancelFn = null;
+      if (s.state === 'failed') {
+        status.textContent = `預篩失敗: ${s.error || ''}`;
+        resolve(false);
+      } else {
+        _prefilterScanCache[key] = 'done';
+        status.textContent = '';
+        resolve(true);
+      }
+    }, 800);
+  });
+}
+
+async function reloadLightingWithPrefilter(lighting) {
+  // 沒選 bundle → 走原本的 loadLighting 流程
+  if (!_prefilterBundleId) {
+    await loadLightingWithOptionalScore(lighting, null);
+    render();
+    return;
+  }
+  // 依序確保 inner 與 edge 都有分數（GPU lock 會把它們序列化）
+  const okInner = await ensurePrefilterScoreForLightingZone(lighting, 'inner');
+  const okEdge  = await ensurePrefilterScoreForLightingZone(lighting, 'edge');
+  // 即使其中一個失敗，也用目前可拿到的分數重 fetch tiles
+  const fromBundle = (okInner || okEdge) ? _prefilterBundleId : null;
+  await loadLightingWithOptionalScore(lighting, fromBundle);
+  render();
+}
+
+async function loadLightingWithOptionalScore(lighting, scoreFromBundle) {
+  let url = `/api/train/new/tiles?job_id=${encodeURIComponent(jobId)}&lighting=${lighting}`;
+  if (scoreFromBundle) {
+    url += `&score_from_bundle=${scoreFromBundle}&sort_by=score_desc`;
+  }
+  const r = await fetch(url).then(r => r.json());
+  _tilesByLighting[lighting] = r.tiles || [];
+  updateBadge(lighting);
+}
+
+document.addEventListener('DOMContentLoaded', loadEligibleScoringBundles);
 
 function loadLighting(lighting) {
   return fetch(`/api/train/new/tiles?job_id=${encodeURIComponent(jobId)}&lighting=${lighting}`)
@@ -161,12 +336,10 @@ function switchLighting(lighting) {
   _focusedTileId = null;
   document.querySelectorAll('.lighting-tab').forEach(t => t.classList.toggle('active', t.dataset.lighting === lighting));
   updateProcessPreview();
-  if (!_tilesByLighting[lighting]) {
-    loadLighting(lighting).then(() => { render(); focusFirstTile(); });
-  } else {
-    render();
-    focusFirstTile();
-  }
+  // 切 lighting 取消任何正在跑的 prefilter polling
+  cancelPrefilterPolling();
+  // 有選 bundle 或沒選都走統一流程
+  reloadLightingWithPrefilter(lighting).then(() => focusFirstTile());
 }
 
 function setFilter(filter) {
@@ -232,7 +405,9 @@ function render() {
       const thumb = t.thumb_url || '';
       const zoneLabel = t.source === 'ng' ? `NG${t.zone ? '·' + t.zone : ''}` : (t.zone || '');
       const label = `${_currentLighting} / ${zoneLabel} / #${t.id}`;
-      html += `<div class="tile ${tileCls}${focusCls}" data-id="${t.id}" title="單擊放大，雙擊加入/排除" style="background-image:url('${thumb}');" onclick="handleTileClick(this,event)" ondblclick="handleTileDoubleClick(this,event)" aria-label="${label}"></div>`;
+      const quartile = t.score_quartile || '';
+      const scoreLabel = (t.score != null) ? `<span class="score-badge">${t.score.toFixed(2)}</span>` : '';
+      html += `<div class="tile ${tileCls}${focusCls}" data-id="${t.id}" data-score-quartile="${quartile}" title="單擊放大，雙擊加入/排除" style="background-image:url('${thumb}');" onclick="handleTileClick(this,event)" ondblclick="handleTileDoubleClick(this,event)" aria-label="${label}">${scoreLabel}</div>`;
     }
     html += '</div>';
   }

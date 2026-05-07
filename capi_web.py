@@ -4797,7 +4797,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_response(404, "Job not found")
             return
         template = self.jinja_env.get_template("train_new/step3_review.html")
-        html = template.render(request_path="/train/new/review", job_id=job_id)
+        html = template.render(
+            request_path="/train/new/review",
+            job_id=job_id,
+            machine_id=job.get("machine_id", ""),
+        )
         self._send_response(200, html)
 
     def _handle_train_new_done_page(self):
