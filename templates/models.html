@@ -256,13 +256,13 @@
       </div>
       <div class="mlib-filter-row">
         <label>Lighting：
-          <select id="mlibOkLighting" onchange="_activeScoreBundleId = null; loadTiles('ok')">
+          <select id="mlibOkLighting" onchange="cancelActiveScan(); resetScanBtn(); _activeScoreBundleId = null; loadTiles('ok')">
             <option value="">全部</option>
             {% for lighting in lightings %}<option>{{ lighting }}</option>{% endfor %}
           </select>
         </label>
         <label>Zone：
-          <select id="mlibOkZone" onchange="_activeScoreBundleId = null; loadTiles('ok')">
+          <select id="mlibOkZone" onchange="cancelActiveScan(); resetScanBtn(); _activeScoreBundleId = null; loadTiles('ok')">
             <option value="">全部</option>
             <option>inner</option><option>edge</option>
           </select>
@@ -626,6 +626,7 @@ function renderMetrics(d) {
 
 let _scanPollTimer = null;
 let _activeScoreBundleId = null;  // grid 目前用哪個 bundle 的分數排序
+let _scanCancelFn = null;  // 取消當前 polling 的閉包（含 cancellation flag）
 
 async function startSelfScan() {
   if (!currentBundleId) return;
@@ -660,18 +661,35 @@ function resetScanBtn() {
 }
 
 function pollScanStatus(bundleId) {
-  if (_scanPollTimer) clearInterval(_scanPollTimer);
+  // 取消舊的 polling（包含 in-flight async callback）
+  cancelActiveScan();
+  let cancelled = false;
+  _scanCancelFn = () => {
+    cancelled = true;
+    if (_scanPollTimer) { clearInterval(_scanPollTimer); _scanPollTimer = null; }
+  };
   _scanPollTimer = setInterval(async () => {
-    const s = await fetch('/api/scan/status').then(r => r.json());
+    if (cancelled) return;
+    let s;
+    try {
+      s = await fetch('/api/scan/status').then(r => r.json());
+    } catch (e) {
+      return;  // 暫時失敗等下一輪
+    }
+    if (cancelled) return;
     const status = document.getElementById('scanSelfStatus');
-    if (s.state === 'idle') { clearInterval(_scanPollTimer); resetScanBtn(); return; }
+    if (s.state === 'idle') { _scanCancelFn && _scanCancelFn(); resetScanBtn(); return; }
     status.textContent = `${s.done || 0}/${s.total || 0}`;
     if (s.state === 'done' || s.state === 'cancelled' || s.state === 'failed') {
-      clearInterval(_scanPollTimer);
+      _scanCancelFn && _scanCancelFn();
       if (s.state === 'failed') { alert("掃描失敗: " + s.error); resetScanBtn(); return; }
       onScanFinished(bundleId);
     }
   }, 800);
+}
+
+function cancelActiveScan() {
+  if (_scanCancelFn) { _scanCancelFn(); _scanCancelFn = null; }
 }
 
 function onScanFinished(bundleId) {
