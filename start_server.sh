@@ -1,18 +1,17 @@
 #!/bin/bash
 # ============================================================
-# CAPI AI 推論伺服器啟動腳本（含 stop + restart）
+# CAPI AI 推論伺服器啟動腳本（含 stop + restart + log）
 # ============================================================
 #
 # 使用方式:
 #   chmod +x start_server.sh
-#   ./start_server.sh                    # 重啟（自動 stop 舊的 + start 新的）
-#   ./start_server.sh start               # 啟動（若已在跑會拒絕）
-#   ./start_server.sh stop                # 只停止
-#   ./start_server.sh status              # 看目前狀態
-#   ./start_server.sh -c my_config.yaml   # 指定設定檔（搭配上面任一動作）
+#   ./start_server.sh                    # 重啟（自動 stop 舊的 + start 新的，並顯示 log）
+#   ./start_server.sh start              # 啟動（若已在跑會拒絕，啟動後顯示 log）
+#   ./start_server.sh stop               # 只停止
+#   ./start_server.sh status             # 看目前狀態
+#   ./start_server.sh log                # 實時查看伺服器 Log
+#   ./start_server.sh -c my_config.yaml  # 指定設定檔（搭配上面任一動作）
 #
-# 停止流程：
-#   先 SIGTERM 等 10 秒；還沒停就 SIGKILL。
 # ============================================================
 
 set -e
@@ -23,9 +22,10 @@ cd "$SCRIPT_DIR"
 
 # 預設值
 PID_FILE="/tmp/capi_server.pid"
-LOG_DIR="/data/capi_ai/logs"
-HEATMAP_DIR="/data/capi_ai/heatmaps"
+LOG_DIR="/aidata/capi_ai/logs"
+HEATMAP_DIR="/aidata/capi_ai/heatmaps"
 CONFIG_FILE="server_config.yaml"
+SERVER_LOG_LATEST="$LOG_DIR/server_output.log"   # symlink → 當天那份 server_output_YYYY-MM-DD.log
 ACTION="restart"
 
 # ----- 解析參數 -----
@@ -35,17 +35,17 @@ while [ $# -gt 0 ]; do
             CONFIG_FILE="$2"
             shift 2
             ;;
-        start|stop|restart|status)
+        start|stop|restart|status|log)
             ACTION="$1"
             shift
             ;;
         -h|--help)
-            sed -n '2,15p' "$0"
+            sed -n '2,16p' "$0"
             exit 0
             ;;
         *)
             echo "Unknown argument: $1"
-            echo "Usage: $0 [start|stop|restart|status] [-c config.yaml]"
+            echo "Usage: $0 [start|stop|restart|status|log] [-c config.yaml]"
             exit 1
             ;;
     esac
@@ -59,7 +59,6 @@ check_status() {
     if [ -f "$PID_FILE" ]; then
         pid=$(cat "$PID_FILE" 2>/dev/null)
     fi
-    # 退而求其次 — 用 pgrep 找
     if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
         pid=$(pgrep -f "capi_server.py" | head -1)
     fi
@@ -80,7 +79,7 @@ check_status() {
     fi
 }
 
-# Graceful stop：SIGTERM → 等 10s → SIGKILL
+# Graceful stop
 stop_server() {
     local pid=""
     if [ -f "$PID_FILE" ]; then
@@ -151,15 +150,49 @@ start_server() {
     $PYTHON -c "import numpy" 2>/dev/null || { echo "ERROR: NumPy not installed. Run: pip install numpy"; exit 1; }
     echo "Dependencies OK"
 
-    # 清掉舊的 .pyc 確保載入新 code
-    # （曾經發生 update .py 後 server 仍跑舊 module 的情況）
     find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
+    local TODAY
+    TODAY=$(date +%Y-%m-%d)
+    local SERVER_LOG_DAILY="$LOG_DIR/server_output_${TODAY}.log"
+
+    # 舊版 server_output.log 是 regular file，先搬開避免被下方 ln -sfn 蓋掉舊內容
+    if [ -f "$SERVER_LOG_LATEST" ] && [ ! -L "$SERVER_LOG_LATEST" ]; then
+        mv "$SERVER_LOG_LATEST" "$LOG_DIR/server_output_legacy.log"
+        echo "  Migrated old log: server_output.log → server_output_legacy.log"
+    fi
+
+    # 用相對路徑，LOG_DIR 整體搬移時 symlink 不會壞；
+    # 在 nohup 之前先建好，避免 tail_logs 看到舊 target
+    ln -sfn "$(basename "$SERVER_LOG_DAILY")" "$SERVER_LOG_LATEST"
+
     echo ""
-    echo "Starting server..."
-    # exec 後 bash 變 python，$$ 會是接管後的 python pid
-    echo $$ > "$PID_FILE"
-    exec $PYTHON capi_server.py --config "$CONFIG_FILE"
+    echo "Starting server in background..."
+
+    nohup "$PYTHON" capi_server.py --config "$CONFIG_FILE" >> "$SERVER_LOG_DAILY" 2>&1 &
+
+    local NEW_PID=$!
+    echo $NEW_PID > "$PID_FILE"
+
+    echo "  Server successfully started with PID: $NEW_PID"
+    echo "  Log file    : $SERVER_LOG_DAILY"
+    echo "  Latest link : $SERVER_LOG_LATEST"
+    echo "============================================================"
+}
+
+# 實時顯示 Log
+tail_logs() {
+    if [ ! -e "$SERVER_LOG_LATEST" ]; then
+        echo "Log file does not exist yet: $SERVER_LOG_LATEST"
+        return
+    fi
+    echo ">> 正在即時顯示 Log 輸出..."
+    echo ">> (提示: 按下 Ctrl+C 退出日誌檢視，伺服器仍會在背景繼續執行)"
+    echo ">> (跨日重啟後 symlink 會自動指向新檔，tail -F 會跟著切換)"
+    echo "------------------------------------------------------------"
+    sleep 1 # 等待 Python 啟動並寫入第一行 log
+    # -F = --follow=name --retry，跨日 symlink 換指向時會 reopen 新檔
+    tail -F "$SERVER_LOG_LATEST"
 }
 
 # ----- main -----
@@ -174,6 +207,10 @@ case "$ACTION" in
         stop_server
         ;;
 
+    log)
+        tail_logs
+        ;;
+
     start)
         if check_status >/dev/null 2>&1; then
             echo "Server already running. Use 'restart' or 'stop' first."
@@ -181,6 +218,7 @@ case "$ACTION" in
             exit 1
         fi
         start_server
+        tail_logs
         ;;
 
     restart)
@@ -188,5 +226,6 @@ case "$ACTION" in
         stop_server
         sleep 1
         start_server
+        tail_logs
         ;;
 esac
