@@ -78,3 +78,15 @@ def test_invalidate_on_delete_bundle(db_with_pool, tmp_path, monkeypatch):
 
     # 該 bundle 為 scoring_bundle_id 的所有 row 應該被清
     assert db.get_score_cache(bid, [ids[0]]) == {}
+
+
+def test_invalidate_score_cache_rejects_partial_lighting_zone(db_with_pool):
+    """缺一半的 lighting/zone 應該 raise，不能默默變成「清整個 bundle」。"""
+    from capi_model_registry import invalidate_score_cache
+    db, _, _ = db_with_pool
+    with pytest.raises(ValueError):
+        invalidate_score_cache(db, scoring_bundle_id=10, lighting="W0F00000")
+    with pytest.raises(ValueError):
+        invalidate_score_cache(db, scoring_bundle_id=10, zone="inner")
+    with pytest.raises(ValueError):
+        invalidate_score_cache(db, lighting="W0F00000", zone="inner")  # 沒 bundle_id

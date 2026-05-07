@@ -32,7 +32,15 @@ def invalidate_score_cache(db, scoring_bundle_id: int = None,
     - 重訓 submodel 完成 → invalidate(scoring_bundle_id=B, lighting=L, zone=Z)
     - 刪訓練資料 → invalidate(tile_ids=[...])
     - 刪 bundle → invalidate(scoring_bundle_id=B)
+
+    為避免誤操作意外擴大刪除範圍，此 helper 拒絕模糊的參數組合：
+    - lighting 與 zone 必須同時提供或同時省略
+    - 指定 lighting/zone 時必須同時指定 scoring_bundle_id
     """
+    if (lighting is None) != (zone is None):
+        raise ValueError("lighting 與 zone 必須同時提供或同時省略")
+    if lighting is not None and scoring_bundle_id is None:
+        raise ValueError("指定 lighting+zone 時必須同時指定 scoring_bundle_id")
     return db.delete_score_cache(
         scoring_bundle_id=scoring_bundle_id,
         tile_ids=tile_ids,
@@ -172,7 +180,7 @@ def delete_training_data(db, bundle_id: int) -> dict:
     deleted_rows = len(pool_ok) + len(pool_ng)
     tile_ids_to_clean = [t["id"] for t in pool_ok] + [t["id"] for t in pool_ng]
 
-    # 先清 score cache 再砍 tile_pool（順序很重要：cleanup 後 list_tile_pool 會回空）
+    # 先把要刪的 tile_ids 撈出來再清 score cache，避免之後找不到對照
     invalidate_score_cache(db, tile_ids=tile_ids_to_clean)
     db.cleanup_tile_pool(job_id)
 
