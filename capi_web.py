@@ -6457,6 +6457,39 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             job["cancel_event"].set()
         self._send_json({"cancelled": True})
 
+    def _handle_eligible_scoring_bundles(self):
+        """GET /api/train/new/eligible_scoring_bundles
+        回所有「.pt 檔健全的 trained bundle」清單，給 step3 prefilter 下拉用。
+        """
+        db = self._capi_server_instance.database
+        bundles = db.list_model_bundles() or []
+        from capi_train_new import LIGHTINGS, ZONES
+        out = []
+        for b in bundles:
+            bundle_dir = Path(b["bundle_path"])
+            # 至少要存在 1 個 .pt 才算可用（細項 lighting+zone 由 frontend 切 tab 才知）
+            has_any_pt = any(
+                (bundle_dir / f"{l}-{z}.pt").exists()
+                for l in LIGHTINGS for z in ZONES
+            )
+            if not has_any_pt:
+                continue
+            label = (
+                f"{b['machine_id']} / "
+                f"{Path(b['bundle_path']).name}"
+                f"{' ●active' if b.get('is_active') else ''}"
+            )
+            out.append({
+                "id": b["id"],
+                "machine_id": b["machine_id"],
+                "trained_at": b.get("trained_at"),
+                "is_active": bool(b.get("is_active")),
+                "label": label,
+            })
+        # 排序：active 優先 → trained_at asc
+        out.sort(key=lambda x: (not x["is_active"], x["trained_at"] or ""), reverse=False)
+        self._send_json({"bundles": out})
+
     def _handle_models_retrain_status(self):
         """GET /api/models/<id>/retrain_status?tail=200
 
