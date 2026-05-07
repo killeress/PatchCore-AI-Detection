@@ -294,6 +294,15 @@ class CAPIDatabase:
                     decision    TEXT DEFAULT 'accept'
                 );
                 CREATE INDEX IF NOT EXISTS idx_tile_pool_job ON training_tile_pool(job_id, lighting, zone, source);
+                CREATE TABLE IF NOT EXISTS tile_score_cache (
+                    tile_id           INTEGER NOT NULL,
+                    scoring_bundle_id INTEGER NOT NULL,
+                    score             REAL    NOT NULL,
+                    computed_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (tile_id, scoring_bundle_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_score_cache_bundle
+                    ON tile_score_cache(scoring_bundle_id);
             """)
             
             # Migration for adding missing columns to existing database
@@ -2523,6 +2532,85 @@ class CAPIDatabase:
         try:
             conn.execute("DELETE FROM training_tile_pool WHERE job_id = ?", (job_id,))
             conn.commit()
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # tile_score_cache CRUD
+    # ------------------------------------------------------------------
+
+    def insert_score_cache(self, rows: list) -> None:
+        """批次 UPSERT (tile_id, scoring_bundle_id) → score。空清單 no-op。"""
+        if not rows:
+            return
+        conn = self._get_conn()
+        try:
+            conn.executemany(
+                """INSERT INTO tile_score_cache
+                       (tile_id, scoring_bundle_id, score, computed_at)
+                   VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(tile_id, scoring_bundle_id)
+                   DO UPDATE SET score = excluded.score,
+                                 computed_at = CURRENT_TIMESTAMP""",
+                [(r["tile_id"], r["scoring_bundle_id"], r["score"]) for r in rows],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_score_cache(self, scoring_bundle_id: int, tile_ids: list) -> dict:
+        """回傳 {tile_id: score}，只包含 cache 中存在的 row。空 tile_ids → 空 dict。"""
+        if not tile_ids:
+            return {}
+        placeholders = ",".join("?" * len(tile_ids))
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                f"""SELECT tile_id, score FROM tile_score_cache
+                    WHERE scoring_bundle_id = ? AND tile_id IN ({placeholders})""",
+                (scoring_bundle_id, *tile_ids),
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+        finally:
+            conn.close()
+
+    def delete_score_cache(self, scoring_bundle_id: int = None,
+                           tile_ids: list = None,
+                           lighting: str = None, zone: str = None) -> int:
+        """彈性刪除 cache。回傳刪除筆數。
+
+        - scoring_bundle_id only: 清該 bundle 全部
+        - tile_ids only: 清這些 tile 在所有 bundle 的分
+        - scoring_bundle_id + lighting + zone: 清該 bundle 對該 lighting+zone tile 的分
+          （join training_tile_pool 過濾）
+        """
+        conn = self._get_conn()
+        try:
+            if scoring_bundle_id is not None and lighting is not None and zone is not None:
+                cur = conn.execute(
+                    """DELETE FROM tile_score_cache
+                       WHERE scoring_bundle_id = ?
+                         AND tile_id IN (
+                           SELECT id FROM training_tile_pool
+                           WHERE lighting = ? AND zone = ?
+                         )""",
+                    (scoring_bundle_id, lighting, zone),
+                )
+            elif tile_ids:
+                placeholders = ",".join("?" * len(tile_ids))
+                cur = conn.execute(
+                    f"DELETE FROM tile_score_cache WHERE tile_id IN ({placeholders})",
+                    tuple(tile_ids),
+                )
+            elif scoring_bundle_id is not None:
+                cur = conn.execute(
+                    "DELETE FROM tile_score_cache WHERE scoring_bundle_id = ?",
+                    (scoring_bundle_id,),
+                )
+            else:
+                return 0
+            conn.commit()
+            return cur.rowcount
         finally:
             conn.close()
 
