@@ -1,86 +1,138 @@
 # ============================================================
-# CAPI AI 推論伺服器設定
+# CAPI AI 推論伺服器設定 — Production (Linux)
 # ============================================================
+# 此檔案直接放在 production 主機，由 ./start_server.sh 載入。
+# 同層級可放多份 yaml（例如 server_config_local.yaml），透過
+# `python capi_server.py --config <檔名>` 切換。
 
-# TCP Socket Server
+# ------------------------------------------------------------
+# TCP Socket Server — 接收 AOI 機台請求
+# ------------------------------------------------------------
+# host           : 監聽介面，0.0.0.0 = 所有網卡
+# port           : 對外 port，與 AOI 機台設定一致 (production 使用 7907)
+# max_connections: 同時可掛載的 AOI 連線數上限 (per-client persistent thread)
+# recv_timeout   : 連線閒置超時秒數，0 = 永不超時 (長連線模式)
+# recv_buffer_size: socket recv 緩衝區大小 (bytes)
 server:
-  host: "0.0.0.0"
-  port: 7890
-  max_connections: 10       # 最大同時連線數
-  recv_timeout: 0             # 空閒超時 (秒), 長連線模式: 0=永不超時, >0=idle 超過此秒數斷開
-  recv_buffer_size: 4096    # 接收緩衝區大小 (bytes)
+  host: 0.0.0.0
+  port: 7907
+  max_connections: 10
+  recv_timeout: 0
+  recv_buffer_size: 4096
 
-# UNC 路徑 → Linux 路徑映射
-# 格式: "\\\\IP\\share" → "/linux/mount/point"
-# 注意: 客戶端傳送的是 Windows UNC 路徑，需轉換為 Linux 掛載路徑
+# ------------------------------------------------------------
+# 路徑映射 — Windows UNC 轉 Linux 掛載點
+# ------------------------------------------------------------
+# AOI 機台送來的 ImageDir 通常是 Windows UNC 路徑，
+# server 端要轉成 Linux 實際掛載路徑才讀得到圖片。
+# 格式: <UNC 前綴>: <Linux 掛載點>
 path_mapping:
-  "\\\\192.168.2.101\\d": "/capi01"
+  \\192.168.2.101\d: /capi01
 
-# 推論設定 (引用 CAPI 配置)
-# 模型路徑 (model_path) 與閾值 (anomaly_threshold) 統一在 capi_3f.yaml 中管理
+# ------------------------------------------------------------
+# 推論設定
+# ------------------------------------------------------------
+# gpu_memory_fraction: per-process GPU VRAM 上限比例 (0~1)，
+#                      0 = 不限制；訓練 subprocess 同時跑時建議留 0.4~0.5
+# config_path        : legacy fallback，當下方 model_configs 全部讀取失敗
+#                      時，server 會回退載入此 yaml (舊架構 capi_3f.yaml)
 inference:
-  config_path: "configs/capi_3f.yaml"    # CAPI 推論配置檔 (模型、閾值等皆在此檔)
-  device: "auto"                         # auto / cpu / cuda
-  cpu_workers: 4                         # 預處理/後處理 CPU 執行緒數
-  # GPU VRAM 上限比例（per-process），讓訓練 subprocess 可同時跑而不互搶顯存
-  # 16GB GPU 實測：5 個 model load 完即 4.2GB；推論 working set 再 ~1-2GB
-  # 推論 0.40 ≈ 6.4GB；訓練 0.50 ≈ 8GB；剩 1.5GB 給桌面/buffer
-  # 設 0 = 不限制（舊行為）
-  gpu_memory_fraction: 0.40
+  gpu_memory_fraction: 0
+  config_path: /root/Code/CAPI_AD/model/GN160JCEL250S-20260430_111505/machine_config.yaml
 
-# SQLite 資料庫
+# ------------------------------------------------------------
+# SQLite 資料庫 — 三層追溯紀錄 (inference_records / image_results / tile_results)
+# ------------------------------------------------------------
+# WAL 模式，併發友善；建議放在永久儲存，不要放 tmpfs
 database:
-  path: "/data/capi_ai/capi_results.db"
+  path: /aidata/capi_ai/capi_results.db
 
+# ------------------------------------------------------------
 # 熱力圖儲存
+# ------------------------------------------------------------
+# base_dir         : 熱力圖根目錄，按 yyyy/mm/dd 分層
+# save_format      : png / jpg
+# save_overview    : 是否保存整 panel 總覽圖
+# save_tile_detail : 是否保存每個 NG tile 的細節圖
 heatmap:
-  base_dir: "/data/capi_ai/heatmaps"
-  save_format: "png"           # png 或 jpg
-  save_overview: true          # 儲存全圖異常總覽
-  save_tile_detail: true       # 儲存單一 tile 熱力圖
+  base_dir: /aidata/capi_ai/heatmaps
+  save_format: png
+  save_overview: true
+  save_tile_detail: true
 
-# Web 查閱服務
+# ------------------------------------------------------------
+# Web Dashboard — 即時監控、推論紀錄、設定管理
+# ------------------------------------------------------------
+# enabled: 是否啟用 web，false 時走純 TCP server
+# host   : 0.0.0.0 = 對外開放；127.0.0.1 = 僅本機
+# port   : production 用 80 直出，方便產線瀏覽
 web:
   enabled: true
-  host: "0.0.0.0"
-  port: 8080
+  host: 0.0.0.0
+  port: 80
 
-# 日誌設定
+# ------------------------------------------------------------
+# 日誌
+# ------------------------------------------------------------
+# level       : DEBUG / INFO / WARNING / ERROR
+# file        : 日誌輸出檔；空字串 = 只輸出到 console
+# max_bytes   : 單檔最大 bytes (10 MB)，超過就 rotate
+# backup_count: rotate 後保留幾份歷史檔
 logging:
-  level: "INFO"                          # DEBUG / INFO / WARNING / ERROR
-  file: "/data/capi_ai/logs/server.log"
-  max_bytes: 10485760                    # 單檔上限 10MB
-  backup_count: 5                        # 保留 5 個備份
+  level: INFO
+  file: /aidata/capi_ai/logs/server.log
+  max_bytes: 10485760
+  backup_count: 5
 
-# 定時清除舊資料
+# ------------------------------------------------------------
+# 定時清除舊資料 — 由 server 內建 scheduler 觸發
+# ------------------------------------------------------------
+# enabled             : 是否啟用排程清除
+# schedule_time       : 每日執行時間 (24h, HH:MM)
+# ok_retain_days      : OK 紀錄保留天數
+# ng_retain_days      : NG 紀錄保留天數 (通常比 OK 久，方便回追)
+# tile_retain_days    : 每張 tile heatmap 保留天數 (磁碟最大宗)
+# heatmap_retain_days : 整 panel 總覽 heatmap 保留天數
+# vacuum_after_cleanup: 清除後是否做 SQLite VACUUM 釋放空間
 cleanup:
   enabled: true
-  schedule_time: "02:00"       # 每日執行時間 (HH:MM)
-  ok_retain_days: 14            # OK 記錄保留天數
-  ng_retain_days: 90            # NG / ERR 記錄保留天數
-  tile_retain_days: 7           # tile_results 保留天數 (獨立、最短)
-  heatmap_retain_days: 90       # heatmap 圖檔保留天數 (0=不清除)
+  schedule_time: 02:00
+  ok_retain_days: 30
+  ng_retain_days: 90
+  tile_retain_days: 15
+  heatmap_retain_days: 90
   vacuum_after_cleanup: true
 
-# 過檢訓練資料集蒐集
+# ------------------------------------------------------------
+# 過檢資料集匯出 — 給訓練 wizard 取樣使用
+# ------------------------------------------------------------
+# base_dir         : 過檢匯出根目錄；訓練 wizard 預設從這裡讀 panel
+# min_free_space_gb: 匯出前檢查剩餘空間，低於此值停止匯出避免塞爆磁碟
 dataset_export:
-  base_dir: "/data/capi_ai/datasets/over_review"
-  # 啟動前檢查磁碟剩餘空間 (GB)，小於此值會拒絕啟動 job
+  base_dir: /aidata/capi_ai/datasets/over_review
   min_free_space_gb: 1
 
-# 新架構：多機種 yaml 並存（legacy capi_3f.yaml 仍維持）
+# ------------------------------------------------------------
+# 多機種模型清單 — 新架構主要載入點
+# ------------------------------------------------------------
+# 每個 yaml 對應一個 machine_id，server 啟動時依序載入；
+# 推論時依 AOI 請求中的 ModelID dispatch 到對應 inferencer。
+# Active bundle (is_new_architecture: true) 會被選為 fallback。
+# 切換 active bundle 由 web /train/new 流程或手動編輯此清單。
 model_configs:
-  - configs/capi_3f.yaml
-fallback_model_config: configs/capi_3f.yaml
+- /root/Code/CAPI_AD/model/GN160JCEL250S-20260507_112444/machine_config.yaml
 
-# 訓練 wizard 設定
+# ------------------------------------------------------------
+# 訓練 wizard 設定 — /train/new 流程使用
+# ------------------------------------------------------------
+# backbone_cache_dir : timm/HuggingFace backbone 權重快取
+#                      (內網無法連網，需事先 FTP 上傳完整目錄)
+# over_review_root   : 過檢資料集根目錄，與 dataset_export.base_dir 一致
+# output_root        : 訓練出的 bundle 輸出根目錄
+#                      實際 bundle 位置: <output_root>/<machine_id>-<timestamp>/
+# gpu_memory_fraction: 訓練 subprocess GPU VRAM 上限；0 = 不限制
 training:
   backbone_cache_dir: deployment/torch_hub_cache
-  # 訓練 subprocess GPU VRAM 上限。16GB GPU 建議 0.50 ≈ 8GB（與推論 0.40 共存）
-  # 若 coreset OOM 可調降 capi_train_new.TrainingConfig.coreset_ratio 到 0.05
-  gpu_memory_fraction: 0.50
-  # Backbone weights cache layout (timm via HuggingFace):
-  #   {backbone_cache_dir}/huggingface/models--timm--wide_resnet50_2.racm_in1k/.../model.safetensors
-  # Pre-stage on internet-connected machine via:
-  #   HF_HOME=deployment/torch_hub_cache python -c "import timm; timm.create_model('wide_resnet50_2', pretrained=True)"
   over_review_root: /aidata/capi_ai/datasets/over_review
+  output_root: model
+  gpu_memory_fraction: 0

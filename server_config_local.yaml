@@ -1,78 +1,114 @@
 # ============================================================
 # CAPI AI 推論伺服器設定 — Windows 本地測試用
 # ============================================================
-# 複製此檔案並重命名為 server_config.yaml 之後修改路徑
-# 或者直接指定: python capi_server.py --config server_config_local.yaml
+# 用法：python capi_server.py --config server_config_local.yaml
+# 與 production 的 server_config.yaml 結構對齊，差異只在路徑/port/開關。
 
-# TCP Socket Server
+# ------------------------------------------------------------
+# TCP Socket Server — 接收 AOI 機台請求 (本地用 test_client.py 模擬)
+# ------------------------------------------------------------
+# port        : 本機測試使用 7891，避免與 production 7907 混淆
+# recv_timeout: 600 秒閒置超時 (本地 debug 較長)；production 用 0 不超時
 server:
   host: "0.0.0.0"
   port: 7891
   max_connections: 10
-  recv_timeout: 600           # 空閒超時 (秒), 長連線模式: 0=永不超時
+  recv_timeout: 600
   recv_buffer_size: 4096
 
-# 路徑映射 — Windows 本地測試不需要 UNC 轉換
-# 若測試用的圖片在本機，可以直接填寫路徑不用映射
+# ------------------------------------------------------------
+# 路徑映射 — Windows 本地測試一般不用
+# ------------------------------------------------------------
+# 圖片放本機時直接給絕對路徑即可，不用映射。
+# 若要模擬 production UNC → mount 行為，再取消註解填入。
 path_mapping: {}
-  # 如需測試 UNC 映射，取消註解以下行:
   # "\\\\192.168.2.101\\d": "D:"
 
+# ------------------------------------------------------------
 # 推論設定
+# ------------------------------------------------------------
+# config_path        : legacy fallback yaml；當下方 model_configs 全失敗時退回此檔
+# gpu_memory_fraction: 本地 16GB 卡建議 0.4，留空間給 IDE / 訓練 subprocess
+# cpu_workers        : tile preprocess CPU 平行度
 inference:
   config_path: "configs/capi_3f.yaml"
-  model_path: "./model.pt"
-  device: "auto"              # auto 會自動選 cuda (如有GPU) 或 cpu
-  threshold: 0.6
-  cpu_workers: 4
-  # GPU VRAM per-process 上限比例。0 = 不限制
   gpu_memory_fraction: 0.40
+  cpu_workers: 4
 
-# SQLite 資料庫 — Windows 路徑
+# ------------------------------------------------------------
+# SQLite 資料庫 — 本地測試用相對路徑
+# ------------------------------------------------------------
 database:
   path: "./test_results.db"
 
-# 熱力圖儲存 — Windows 路徑
+# ------------------------------------------------------------
+# 熱力圖儲存 — 本地測試輸出到專案內 ./test_heatmaps
+# ------------------------------------------------------------
 heatmap:
   base_dir: "./test_heatmaps"
   save_format: "png"
   save_overview: true
   save_tile_detail: true
 
-# Web 查閱服務
+# ------------------------------------------------------------
+# Web Dashboard — 本地用 8080 (production 用 80)
+# ------------------------------------------------------------
 web:
   enabled: true
   host: "0.0.0.0"
   port: 8080
 
-# 日誌
+# ------------------------------------------------------------
+# 日誌 — 本地預設只印 console，方便看即時輸出
+# ------------------------------------------------------------
+# level: 本地用 DEBUG 看詳細推論流程；production 用 INFO 控量
+# file : 空字串 = 不寫檔
 logging:
-  level: "DEBUG"              # 本地測試用 DEBUG
-  file: ""                    # 空值 = 只輸出到 console
+  level: "DEBUG"
+  file: ""
   max_bytes: 10485760
   backup_count: 5
 
-# 定時清除舊資料
+# ------------------------------------------------------------
+# 定時清除舊資料 — 本地測試預設關閉
+# ------------------------------------------------------------
+# 開啟時可參考下方欄位 (與 production 同 schema)：
+#   schedule_time / ok_retain_days / ng_retain_days /
+#   tile_retain_days / heatmap_retain_days / vacuum_after_cleanup
 cleanup:
-  enabled: false   # 本地測試不自動清除
+  enabled: false
+  schedule_time: "03:00"
+  ok_retain_days: 7
+  ng_retain_days: 30
+  tile_retain_days: 3
+  heatmap_retain_days: 30
+  vacuum_after_cleanup: true
 
-# 過檢訓練資料集蒐集
+# ------------------------------------------------------------
+# 過檢資料集匯出
+# ------------------------------------------------------------
 dataset_export:
   base_dir: "./datasets/over_review"
   min_free_space_gb: 1
 
-# 新架構：多機種 yaml 並存（legacy capi_3f.yaml 仍維持）
+# ------------------------------------------------------------
+# 多機種模型清單
+# ------------------------------------------------------------
+# 本地預設只掛 legacy capi_3f.yaml；若要測新架構，
+# 加上 ./model/<machine_id>-<timestamp>/machine_config.yaml 的相對路徑即可。
 model_configs:
   - configs/capi_3f.yaml
-fallback_model_config: configs/capi_3f.yaml
 
+# ------------------------------------------------------------
 # 訓練 wizard 設定
+# ------------------------------------------------------------
+# backbone_cache_dir : timm/HuggingFace backbone 權重快取
+#                      (首次需連網下載 wide_resnet50_2，之後就走本地)
+# over_review_root   : 本地過檢資料集根目錄 (test_client.py 可模擬寫入)
+# output_root        : 訓練 bundle 輸出根目錄；產出 ./model/<machine>-<timestamp>/
+# gpu_memory_fraction: 訓練 subprocess VRAM 上限；本地 16GB 卡建議 0.5
 training:
   backbone_cache_dir: deployment/torch_hub_cache
-  # 訓練 subprocess GPU VRAM 上限。16GB GPU 建議 0.50。0 = 不限制
-  gpu_memory_fraction: 0.50
-  # Backbone weights cache layout (timm via HuggingFace):
-  #   {backbone_cache_dir}/huggingface/models--timm--wide_resnet50_2.racm_in1k/.../model.safetensors
-  # Pre-stage on internet-connected machine via:
-  #   HF_HOME=deployment/torch_hub_cache python -c "import timm; timm.create_model('wide_resnet50_2', pretrained=True)"
   over_review_root: D:/dev/over_review
+  output_root: model
+  gpu_memory_fraction: 0.50
