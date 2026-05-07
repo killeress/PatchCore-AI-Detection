@@ -3919,19 +3919,21 @@ class CAPIInferencer:
         pre_cfg: 'PreprocessConfig',
         is_skip_file: bool = False,
     ) -> int:
-        """v2 新架構：以 AOI 機檢座標為中心建 512x512 tile（黑邊 zero-pad，不往內推）。
+        """v2 新架構：以 AOI 機檢座標為中心建 512x512 tile，OOB 時往內推（不 zero-pad）。
 
-        對齊 training ``capi_dataset_export._pad_to_size`` 的 BORDER_CONSTANT value=0
-        切法。與 v1 ``_create_aoi_coord_tiles`` 的差異：
+        切法對齊 ``capi_web._handle_debug_coord_inference``（DEBUG 座標推論）：
+        AOI 落在圖片邊緣時 tile 往左/上 push 保持 512x512，AOI 不一定在 tile 中心。
+        推論記錄頁顯示的 ROI 因此跟 DEBUG 推論完全一致。
+
+        差異重點：
           - 邊緣不 bail 到 CV，每筆 AOI 座標都建立 PatchCore tile
-          - 邊緣不做 clamp 內推，OOB 區域以 ``cv2.copyMakeBorder`` 黑邊填補，
-            AOI 座標永遠在 tile (256, 256) 中心
+          - OOB 用 clamp 內推，不再 ``cv2.copyMakeBorder`` zero-pad
           - zone 由 ``capi_preprocess.classify_tile_zone`` 依 panel polygon 判定
             （outside fallback edge）；skip_file 強制 zone="bright_spot"
 
         Args:
             image: 原始圖片（cv2.imread 結果）
-            result: 已預處理的 ImageResult；新 tile 直接 append 進 ``result.tiles``
+            result: 已預處理的 ImageResult;新 tile 直接 append 進 ``result.tiles``
             defects: 該圖片對應的 AOI 報告缺陷列表
             product_resolution: 產品解析度
             pre_cfg: PreprocessConfig（傳給 classify_tile_zone）
@@ -3958,27 +3960,22 @@ class CAPIInferencer:
                 defect.product_x, defect.product_y,
                 result.raw_bounds, product_resolution,
             )
-            tx, ty = img_x - half, img_y - half
-            tx2, ty2 = tx + tile_size, ty + tile_size
 
-            src_x1 = max(0, tx)
-            src_y1 = max(0, ty)
-            src_x2 = min(img_w, tx2)
-            src_y2 = min(img_h, ty2)
+            # DEBUG-aligned clamp：保持 512x512，OOB 時往內推；不 zero-pad。
+            tx = max(0, img_x - half)
+            ty = max(0, img_y - half)
+            tx2 = tx + tile_size
+            ty2 = ty + tile_size
+            if tx2 > img_w:
+                tx2 = img_w
+                tx = max(0, tx2 - tile_size)
+            if ty2 > img_h:
+                ty2 = img_h
+                ty = max(0, ty2 - tile_size)
 
-            if src_x2 > src_x1 and src_y2 > src_y1:
-                crop = image[src_y1:src_y2, src_x1:src_x2]
-                pad_top = src_y1 - ty
-                pad_left = src_x1 - tx
-                pad_bottom = tile_size - crop.shape[0] - pad_top
-                pad_right = tile_size - crop.shape[1] - pad_left
-                tile_img = cv2.copyMakeBorder(
-                    crop, pad_top, pad_bottom, pad_left, pad_right,
-                    cv2.BORDER_CONSTANT, value=0,
-                )
-            else:
-                shape = (tile_size, tile_size, image.shape[2]) if image.ndim == 3 else (tile_size, tile_size)
-                tile_img = np.zeros(shape, dtype=image.dtype)
+            crop_w = tx2 - tx
+            crop_h = ty2 - ty
+            tile_img = image[ty:ty2, tx:tx2].copy()
 
             if is_skip_file:
                 zone = "bright_spot"
@@ -3989,6 +3986,7 @@ class CAPIInferencer:
                 if zone == "outside":
                     zone = "edge"
 
+            # 邊緣旗標以 AOI 中心相對 otsu_bounds 判定（與 tile 位置無關）
             is_top = img_y - otsu_y1 < half
             is_bottom = otsu_y2 - img_y < half
             is_left = img_x - otsu_x1 < half
@@ -3997,7 +3995,7 @@ class CAPIInferencer:
             tile = TileInfo(
                 tile_id=next_tile_id,
                 x=tx, y=ty,
-                width=tile_size, height=tile_size,
+                width=crop_w, height=crop_h,
                 image=tile_img,
                 mask=None,
                 is_aoi_coord_tile=True,
@@ -5923,6 +5921,13 @@ class CAPIInferencer:
                 continue
             img_h, img_w = raw_img.shape[:2]
 
+            # raw_bounds 必須是「物件原始邊界」（不含 otsu_offset 內推），用於
+            # AOI 機檢座標 ↔ 圖片座標映射；對齊 v1 / DEBUG 路徑的 _find_raw_object_bounds
+            # 語意。pre_result.foreground_bbox 已套 +/-offset，作為 otsu_bounds 用。
+            raw_bounds_unoffset, _ = self._find_raw_object_bounds(raw_img)
+            if raw_bounds_unoffset is None:
+                raw_bounds_unoffset = bbox
+
             # 取得此 lighting 對應的 inner / edge model 路徑
             lighting_map = self.config.model_mapping.get(lighting, {})
             if not isinstance(lighting_map, dict) or "inner" not in lighting_map or "edge" not in lighting_map:
@@ -5970,7 +5975,7 @@ class CAPIInferencer:
                 processed_tile_count=len(tile_infos),
                 processing_time=time.time() - t0,
                 anomaly_tiles=[],
-                raw_bounds=bbox,
+                raw_bounds=raw_bounds_unoffset,
                 panel_polygon=polygon,
                 inference_time=0.0,
             )
@@ -6024,11 +6029,17 @@ class CAPIInferencer:
                 if report_prefix in existing_prefixes:
                     continue
 
+                # 只對 B 開頭（B = Black）的黑畫面走 bright_spot 補丁邏輯。
+                # 新架構 machine_config.yaml 預設沒有 skip_files 欄位，因此這裡
+                # 不依賴 should_skip_file，直接以 prefix 判斷；OMIT/PINIGBI/側拍
+                # 開頭都不是 B，不會誤匹配。
+                if not report_prefix.upper().startswith("B0"):
+                    continue
+
                 matched_file = next(
                     (
                         f for f in image_files
-                        if self.config.should_skip_file(f.name)
-                        and self._get_image_prefix(f.name) == report_prefix
+                        if self._get_image_prefix(f.name) == report_prefix
                     ),
                     None,
                 )

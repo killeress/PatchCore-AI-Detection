@@ -551,6 +551,9 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
         "enable_panel_polygon": True,
         "model_mapping": model_mapping,
         "threshold_mapping": threshold_mapping,
+        # B0F00000（黑畫面）沒有 PatchCore 模型，AOI report 指到時改走二值化亮點偵測。
+        # 新架構雖然有 prefix-based fallback，但寫入 yaml 仍是 source of truth。
+        "skip_files": ["B0F00000"],
         # AOI 機檢座標 attribution — 新架構 helper 改走「找既存 grid tile 標屬性」
         # 而非切新 tile 推論，幾乎零成本，預設開啟。bundle yaml 缺此欄會走 CAPIConfig
         # 預設 False，記錄頁的 🎯 AOI 機檢座標推論 區塊永遠不出現。

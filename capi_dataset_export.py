@@ -431,30 +431,33 @@ def is_overexposed_crop(crop: np.ndarray) -> bool:
 
 
 def crop_edge_defect(img: np.ndarray, cx: int, cy: int) -> np.ndarray:
-    """以 (cx, cy) 為中心切出 CROP_SIZE × CROP_SIZE，clamp 後再 pad 保持中心對齐。
+    """以 (cx, cy) 為中心切 CROP_SIZE × CROP_SIZE，OOB 時往內推保持尺寸（不 zero-pad）。
+
+    切法對齊 inference 端（``capi_inference._create_aoi_centered_tiles_v2`` /
+    ``_create_aoi_coord_tiles``）與 ``capi_web._handle_debug_coord_inference`` 的
+    DEBUG 座標推論：靠近 image 邊緣時 crop 框往內推保持 CROP_SIZE，defect 中心
+    可能不在 (half, half)。
 
     Args:
         img: 原圖
         cx, cy: edge_defect_results.center_x / center_y
 
     Returns:
-        CROP_SIZE × CROP_SIZE 的 crop
+        CROP_SIZE × CROP_SIZE 的 crop（image 比 CROP_SIZE 小的極端 case 才會 < 該尺寸）
     """
     half = CROP_SIZE // 2
     H, W = img.shape[:2]
-    x1, y1 = cx - half, cy - half
-    x2, y2 = cx + half, cy + half
-
-    x1_c = max(0, x1)
-    y1_c = max(0, y1)
-    x2_c = min(W, x2)
-    y2_c = min(H, y2)
-    crop = img[y1_c:y2_c, x1_c:x2_c]
-
-    # 以 clamp 掉的量當 top/left pad，確保 defect 中心在 crop 的 (half, half)
-    pad_top = y1_c - y1
-    pad_left = x1_c - x1
-    return _pad_to_size(crop, CROP_SIZE, pad_top=pad_top, pad_left=pad_left)
+    x1 = max(0, cx - half)
+    y1 = max(0, cy - half)
+    x2 = x1 + CROP_SIZE
+    y2 = y1 + CROP_SIZE
+    if x2 > W:
+        x2 = W
+        x1 = max(0, x2 - CROP_SIZE)
+    if y2 > H:
+        y2 = H
+        y1 = max(0, y2 - CROP_SIZE)
+    return img[y1:y2, x1:x2].copy()
 
 
 # ---- Dataclasses ----
