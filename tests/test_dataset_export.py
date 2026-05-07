@@ -65,15 +65,17 @@ def test_crop_edge_defect_center_interior():
 
 
 def test_crop_edge_defect_near_top_left_corner():
-    """center=(50,50)，上/左會 clamp + pad 黑邊；紅點中心保持在 crop 的 (256,256)"""
+    """center=(50,50)，crop 框 clamp 內推到 (0,0)→(512,512)；紅點落在 crop[50,50]，
+    不再黑邊填補。對齊 inference 端 clamp 切法。"""
     img = np.full((1024, 1024, 3), 100, dtype=np.uint8)
     img[50, 50] = [0, 255, 0]
     crop = crop_edge_defect(img, cx=50, cy=50)
     assert crop.shape == (512, 512, 3)
-    # center 經 pad 後仍在 (256,256)
-    assert tuple(crop[256, 256]) == (0, 255, 0)
-    # 左上角 (0,0) 在 pad 黑邊區
-    assert tuple(crop[0, 0]) == (0, 0, 0)
+    # 內推後 crop 從原圖 (0,0) 取，紅點位於 crop[50,50] 而非中心
+    assert tuple(crop[50, 50]) == (0, 255, 0)
+    # crop 全部都是真實 panel 內容（值=100），沒有黑邊
+    assert tuple(crop[0, 0]) == (100, 100, 100)
+    assert tuple(crop[511, 511]) == (100, 100, 100)
 
 
 from capi_dataset_export import (
