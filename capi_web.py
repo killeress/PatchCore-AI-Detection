@@ -466,6 +466,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/models/") and path.endswith("/retrain_status"):
                 self._handle_models_retrain_status()
                 return
+            elif path == "/api/scan/status":
+                self._handle_scan_status()
+                return
+            elif path == "/api/train/new/eligible_scoring_bundles":
+                self._handle_eligible_scoring_bundles()
+                return
             elif path == "/favicon.ico":
                 self._send_response(204, "")
             else:
@@ -575,6 +581,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path.startswith("/api/models/") and path.endswith("/retrain_submodel"):
                 self._handle_models_retrain_submodel()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/scan_self_score"):
+                self._handle_scan_self_score()
+                return
+            elif path == "/api/train/new/scan_prefilter_score":
+                self._handle_scan_prefilter_score()
+                return
+            elif path == "/api/scan/cancel":
+                self._handle_scan_cancel()
                 return
             elif path.startswith("/api/models/") and path.endswith("/threshold"):
                 self._handle_models_update_threshold()
@@ -6318,6 +6333,125 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if state["job"] and state["job"]["scan_id"] == scan_id:
                     state["job"]["state"] = "failed"
                     state["job"]["error"] = str(e)
+
+    def _handle_scan_self_score(self):
+        """POST /api/models/<bundle_id>/scan_self_score
+        body: {"lighting": str, "zone": "inner"|"edge"}
+        """
+        from capi_train_new import LIGHTINGS, ZONES
+        parts = self.path.split("/")
+        try:
+            bundle_id = int(parts[3])
+        except (ValueError, IndexError):
+            self._send_json({"error": "invalid bundle id"}, status=400); return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON"}, status=400); return
+
+        lighting = body.get("lighting"); zone = body.get("zone")
+        if lighting not in LIGHTINGS or zone not in ZONES:
+            self._send_json({"error": "lighting/zone 不合法"}, status=400); return
+
+        db = self._capi_server_instance.database
+        bundle = db.get_model_bundle(bundle_id)
+        if not bundle:
+            self._send_json({"error": "bundle not found"}, status=404); return
+        if not bundle.get("job_id"):
+            self._send_json({"error": "此 bundle 無關聯 job_id（訓練資料已刪）"}, status=400)
+            return
+
+        # 自掃 = 該 bundle 對「自己訓練資料」算分
+        pool = db.list_tile_pool(
+            bundle["job_id"], lighting=lighting, zone=zone, source="ok",
+        )
+        if not pool:
+            self._send_json({"state": "empty", "scanned": 0}); return
+        tile_ids = [t["id"] for t in pool]
+
+        # 已有 cache 全命中？告知前端不需重算
+        cached = db.get_score_cache(bundle_id, tile_ids)
+        if len(cached) == len(tile_ids):
+            self._send_json({"cached_hit": True, "total": len(tile_ids)})
+            return
+
+        started, resp = CAPIWebHandler._start_scan_job(
+            kind="self",
+            scoring_bundle_id=bundle_id,
+            bundle_dir=Path(bundle["bundle_path"]),
+            tile_pool_job_id=bundle["job_id"],
+            lighting=lighting, zone=zone, tile_ids=tile_ids,
+            server_inst=self._capi_server_instance,
+        )
+        self._send_json(resp, status=200 if started else 409)
+
+    def _handle_scan_prefilter_score(self):
+        """POST /api/train/new/scan_prefilter_score
+        body: {"job_id", "scoring_bundle_id", "lighting", "zone"}
+        """
+        from capi_train_new import LIGHTINGS, ZONES
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON"}, status=400); return
+
+        tile_pool_job_id = body.get("job_id")
+        scoring_bundle_id = body.get("scoring_bundle_id")
+        lighting = body.get("lighting"); zone = body.get("zone")
+        if not all([tile_pool_job_id, scoring_bundle_id, lighting, zone]):
+            self._send_json({"error": "missing required fields"}, status=400); return
+        if lighting not in LIGHTINGS or zone not in ZONES:
+            self._send_json({"error": "lighting/zone 不合法"}, status=400); return
+
+        db = self._capi_server_instance.database
+        scoring_bundle = db.get_model_bundle(int(scoring_bundle_id))
+        if not scoring_bundle:
+            self._send_json({"error": "scoring bundle not found"}, status=404); return
+
+        pool = db.list_tile_pool(tile_pool_job_id, lighting=lighting, zone=zone, source="ok")
+        if not pool:
+            self._send_json({"state": "empty"}); return
+        tile_ids = [t["id"] for t in pool]
+
+        cached = db.get_score_cache(int(scoring_bundle_id), tile_ids)
+        if len(cached) == len(tile_ids):
+            self._send_json({"cached_hit": True, "total": len(tile_ids)})
+            return
+
+        started, resp = CAPIWebHandler._start_scan_job(
+            kind="prefilter",
+            scoring_bundle_id=int(scoring_bundle_id),
+            bundle_dir=Path(scoring_bundle["bundle_path"]),
+            tile_pool_job_id=tile_pool_job_id,
+            lighting=lighting, zone=zone, tile_ids=tile_ids,
+            server_inst=self._capi_server_instance,
+        )
+        self._send_json(resp, status=200 if started else 409)
+
+    def _handle_scan_status(self):
+        """GET /api/scan/status — 回目前唯一 scan job 狀態（沒有則 idle）。"""
+        state = CAPIWebHandler._scan_state
+        with state["lock"]:
+            job = state["job"]
+            if job is None:
+                self._send_json({"state": "idle"})
+                return
+            # 不回傳 cancel_event 物件
+            payload = {k: v for k, v in job.items() if k != "cancel_event"}
+            self._send_json(payload)
+
+    def _handle_scan_cancel(self):
+        """POST /api/scan/cancel — 對當前 running job 設 cancel_event。"""
+        state = CAPIWebHandler._scan_state
+        with state["lock"]:
+            job = state["job"]
+            if not job or job["state"] != "running":
+                self._send_json({"cancelled": False, "reason": "no running job"})
+                return
+            job["cancel_event"].set()
+        self._send_json({"cancelled": True})
 
     def _handle_models_retrain_status(self):
         """GET /api/models/<id>/retrain_status?tail=200
