@@ -124,6 +124,28 @@
   .tile-modal .modal-foot kbd { background: rgba(30,30,46,.85);
     border: 1px solid #45475a; border-radius: 3px; padding: 0 5px;
     color: #cdd6f4; font-family: 'JetBrains Mono',Consolas,monospace; font-size: .7rem; }
+  /* Score badge for self-scoring */
+  .tile-thumb { position: relative; }
+  .tile-thumb .score-badge {
+    position: absolute; top: 4px; right: 4px;
+    padding: 2px 6px; border-radius: 8px;
+    font-size: 0.7rem; font-family: 'JetBrains Mono', Consolas, monospace;
+    background: #45475a; color: #cdd6f4; pointer-events: none;
+    z-index: 2;
+  }
+  .tile-thumb[data-score-quartile="top5"]  .score-badge {
+    background: #f38ba8; color: #1e1e2e; font-weight: 700;
+  }
+  .tile-thumb[data-score-quartile="top20"] .score-badge {
+    background: #fab387; color: #1e1e2e;
+  }
+  /* Scan button + progress */
+  .scan-self-btn {
+    background: #89b4fa; color: #1e1e2e; border: none;
+    padding: 5px 12px; border-radius: 4px; font-size: .78rem;
+    font-weight: 700; cursor: pointer; margin-left: 8px;
+  }
+  .scan-self-btn[disabled] { background: #45475a; color: #6c7086; cursor: wait; }
 </style>
 
 <div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
@@ -234,18 +256,22 @@
       </div>
       <div class="mlib-filter-row">
         <label>Lighting：
-          <select id="mlibOkLighting" onchange="loadTiles('ok')">
+          <select id="mlibOkLighting" onchange="_activeScoreBundleId = null; loadTiles('ok')">
             <option value="">全部</option>
             {% for lighting in lightings %}<option>{{ lighting }}</option>{% endfor %}
           </select>
         </label>
         <label>Zone：
-          <select id="mlibOkZone" onchange="loadTiles('ok')">
+          <select id="mlibOkZone" onchange="_activeScoreBundleId = null; loadTiles('ok')">
             <option value="">全部</option>
             <option>inner</option><option>edge</option>
           </select>
         </label>
         <span id="mlibOkCount" style="color:#a6adc8;font-size:.78rem;"></span>
+        <button id="scanSelfBtn" class="scan-self-btn" onclick="startSelfScan()">
+          🔍 掃描可疑 tile
+        </button>
+        <span id="scanSelfStatus" style="margin-left:8px;color:#a6adc8;font-size:.78rem;"></span>
       </div>
       <div class="tile-kbd-hint" aria-label="鍵盤捷徑提示">
         <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd><span>切換</span>
@@ -598,6 +624,62 @@ function renderMetrics(d) {
   `;
 }
 
+let _scanPollTimer = null;
+let _activeScoreBundleId = null;  // grid 目前用哪個 bundle 的分數排序
+
+async function startSelfScan() {
+  if (!currentBundleId) return;
+  const lighting = document.getElementById('mlibOkLighting').value;
+  const zone = document.getElementById('mlibOkZone').value;
+  if (!lighting || !zone) { alert("請先選 lighting/zone"); return; }
+
+  const btn = document.getElementById('scanSelfBtn');
+  btn.disabled = true; btn.textContent = '掃描中...';
+
+  let resp;
+  try {
+    resp = await fetch(`/api/models/${currentBundleId}/scan_self_score`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({lighting, zone}),
+    }).then(r => r.json());
+  } catch (e) { alert("啟動失敗: " + e); resetScanBtn(); return; }
+
+  if (resp.error) { alert(resp.error); resetScanBtn(); return; }
+  if (resp.cached_hit || resp.state === 'empty') {
+    onScanFinished(currentBundleId);
+    return;
+  }
+  // 進入輪詢
+  pollScanStatus(currentBundleId);
+}
+
+function resetScanBtn() {
+  const btn = document.getElementById('scanSelfBtn');
+  btn.disabled = false; btn.textContent = '🔍 掃描可疑 tile';
+  document.getElementById('scanSelfStatus').textContent = '';
+}
+
+function pollScanStatus(bundleId) {
+  if (_scanPollTimer) clearInterval(_scanPollTimer);
+  _scanPollTimer = setInterval(async () => {
+    const s = await fetch('/api/scan/status').then(r => r.json());
+    const status = document.getElementById('scanSelfStatus');
+    if (s.state === 'idle') { clearInterval(_scanPollTimer); resetScanBtn(); return; }
+    status.textContent = `${s.done || 0}/${s.total || 0}`;
+    if (s.state === 'done' || s.state === 'cancelled' || s.state === 'failed') {
+      clearInterval(_scanPollTimer);
+      if (s.state === 'failed') { alert("掃描失敗: " + s.error); resetScanBtn(); return; }
+      onScanFinished(bundleId);
+    }
+  }, 800);
+}
+
+function onScanFinished(bundleId) {
+  _activeScoreBundleId = bundleId;  // 自掃結果用該 bundle 自己的分
+  resetScanBtn();
+  loadTiles('ok');  // 重 fetch 帶 score_from_bundle
+}
+
 function loadTiles(source) {
   if (!currentBundleId) return;
   const lighting = document.getElementById(source === 'ok' ? 'mlibOkLighting' : 'mlibNgLighting').value;
@@ -610,6 +692,10 @@ function loadTiles(source) {
   const params = new URLSearchParams({source, limit: '500'});
   if (lighting) params.set('lighting', lighting);
   if (zone) params.set('zone', zone);
+  if (source === 'ok' && _activeScoreBundleId === currentBundleId) {
+    params.set('score_from_bundle', String(currentBundleId));
+    params.set('sort_by', 'score_desc');
+  }
 
   fetch(`/api/models/${currentBundleId}/training_tiles?${params}`)
     .then(r => r.json())
@@ -623,8 +709,9 @@ function loadTiles(source) {
       }
       grid.innerHTML = d.tiles.map(t =>
         t.thumb_url
-          ? `<div class="tile-thumb" data-tile-id="${t.id}" data-decision="${t.decision || 'accept'}" data-image-url="${t.image_url || t.thumb_url}">`
-            + `<img src="${t.thumb_url}" title="${t.lighting} ${t.zone || ''} #${t.id}" loading="lazy">`
+          ? `<div class="tile-thumb" data-tile-id="${t.id}" data-decision="${t.decision || 'accept'}" data-image-url="${t.image_url || t.thumb_url}" data-score-quartile="${t.score_quartile || ''}">`
+            + `<img src="${t.thumb_url}" title="${t.lighting} ${t.zone || ''} #${t.id}${t.score != null ? ' score=' + t.score.toFixed(3) : ''}" loading="lazy">`
+            + (t.score != null ? `<span class="score-badge">${t.score.toFixed(2)}</span>` : '')
             + `</div>`
           : `<div title="${t.lighting} ${t.zone || ''} (no thumb)" style="background:#313244;border-radius:4px;aspect-ratio:1;"></div>`
       ).join('');
