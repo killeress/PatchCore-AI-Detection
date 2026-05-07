@@ -6755,3 +6755,110 @@ def test_inferencer():
 
 if __name__ == "__main__":
     test_inferencer()
+
+
+class SubmodelScorer:
+    """對既有 PatchCore .pt + 一批 tile 跑分，結果寫進 tile_score_cache。
+
+    純跑分 + 寫 cache，不做 reject 判斷、不動 anomaly map 後處理（用線上預設）。
+    """
+
+    def __init__(self, gpu_lock, db, log_fn):
+        self.gpu_lock = gpu_lock
+        self.db = db
+        self.log = log_fn
+        self._inferencer_cache = {}  # path_str → TorchInferencer
+
+    def _load_inferencer_for_pt(self, pt_path: Path):
+        """Lazy load TorchInferencer，路徑為 key 做 cache。"""
+        key = str(pt_path)
+        if key in self._inferencer_cache:
+            return self._inferencer_cache[key]
+        if not pt_path.exists():
+            raise FileNotFoundError(f"模型檔不存在: {pt_path}")
+        from anomalib.deploy import TorchInferencer
+        inf = TorchInferencer(path=str(pt_path), device="auto")
+        self._inferencer_cache[key] = inf
+        return inf
+
+    def _score_one_tile(self, image: np.ndarray, inferencer) -> float:
+        """跑一張 tile，回 raw pred_score（anomalib normalized score, 不做 production post-processing）。"""
+        pred = inferencer.predict(image=image)
+        score = float(pred.pred_score.item()) if hasattr(pred.pred_score, "item") \
+                else float(pred.pred_score)
+        return score
+
+    def score_tiles(
+        self,
+        scoring_bundle_id: int,
+        bundle_dir: Path,
+        lighting: str,
+        zone: str,
+        tile_pool_job_id: str,
+        tile_ids: list,
+        cancel_event,
+        progress_cb,
+    ) -> dict:
+        """主 entry。回 {scanned, skipped, cancelled, total}。
+
+        Raises FileNotFoundError 如果 <lighting>-<zone>.pt 不存在。
+        """
+        pt_path = bundle_dir / f"{lighting}-{zone}.pt"
+        inferencer = self._load_inferencer_for_pt(pt_path)
+
+        # 一次性查 source_path
+        pool = self.db.list_tile_pool(tile_pool_job_id, lighting=lighting, zone=zone)
+        path_by_id = {row["id"]: row["source_path"] for row in pool}
+
+        total = len(tile_ids)
+        scanned = 0
+        skipped = 0
+        cancelled = False
+        progress_cb(0, total)
+
+        rows_to_write = []
+        BATCH_FLUSH = 20
+
+        for tile_id in tile_ids:
+            if cancel_event.is_set():
+                cancelled = True
+                break
+            src = path_by_id.get(tile_id)
+            if not src or not Path(src).exists():
+                self.log(f"[scorer] tile {tile_id} source 失效，跳過")
+                skipped += 1
+                progress_cb(scanned + skipped, total)
+                continue
+            try:
+                img = cv2.imread(src, cv2.IMREAD_GRAYSCALE)
+                if img is None:
+                    self.log(f"[scorer] tile {tile_id} 讀圖失敗，跳過")
+                    skipped += 1
+                    progress_cb(scanned + skipped, total)
+                    continue
+                with self.gpu_lock:
+                    score = self._score_one_tile(img, inferencer)
+                rows_to_write.append({
+                    "tile_id": tile_id,
+                    "scoring_bundle_id": scoring_bundle_id,
+                    "score": score,
+                })
+                scanned += 1
+                if len(rows_to_write) >= BATCH_FLUSH:
+                    self.db.insert_score_cache(rows_to_write)
+                    rows_to_write = []
+                progress_cb(scanned + skipped, total)
+            except Exception as e:
+                self.log(f"[scorer] tile {tile_id} 跑分失敗：{e}")
+                skipped += 1
+                progress_cb(scanned + skipped, total)
+
+        if rows_to_write:
+            self.db.insert_score_cache(rows_to_write)
+
+        return {
+            "scanned": scanned,
+            "skipped": skipped,
+            "cancelled": cancelled,
+            "total": total,
+        }
