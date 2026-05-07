@@ -6402,11 +6402,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         lighting = body.get("lighting"); zone = body.get("zone")
         if not all([tile_pool_job_id, scoring_bundle_id, lighting, zone]):
             self._send_json({"error": "missing required fields"}, status=400); return
+        try:
+            scoring_bundle_id = int(scoring_bundle_id)
+        except (TypeError, ValueError):
+            self._send_json({"error": "scoring_bundle_id 必須是整數"}, status=400); return
         if lighting not in LIGHTINGS or zone not in ZONES:
             self._send_json({"error": "lighting/zone 不合法"}, status=400); return
 
         db = self._capi_server_instance.database
-        scoring_bundle = db.get_model_bundle(int(scoring_bundle_id))
+        scoring_bundle = db.get_model_bundle(scoring_bundle_id)
         if not scoring_bundle:
             self._send_json({"error": "scoring bundle not found"}, status=404); return
 
@@ -6415,14 +6419,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"state": "empty"}); return
         tile_ids = [t["id"] for t in pool]
 
-        cached = db.get_score_cache(int(scoring_bundle_id), tile_ids)
+        cached = db.get_score_cache(scoring_bundle_id, tile_ids)
         if len(cached) == len(tile_ids):
             self._send_json({"cached_hit": True, "total": len(tile_ids)})
             return
 
         started, resp = CAPIWebHandler._start_scan_job(
             kind="prefilter",
-            scoring_bundle_id=int(scoring_bundle_id),
+            scoring_bundle_id=scoring_bundle_id,
             bundle_dir=Path(scoring_bundle["bundle_path"]),
             tile_pool_job_id=tile_pool_job_id,
             lighting=lighting, zone=zone, tile_ids=tile_ids,
