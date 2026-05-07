@@ -230,11 +230,15 @@ function cancelPrefilterPolling() {
 }
 
 async function ensurePrefilterScoreForLightingZone(lighting, zone) {
-  // 對 (lighting, zone) 觸發 prefilter scan，等到結果寫進 cache 才 resolve。
-  // 如已有 lazy cache 記憶 → 立即 resolve。
   if (!_prefilterBundleId) return false;
   const key = `${lighting}|${zone}`;
   if (_prefilterScanCache[key] === 'done') return true;
+
+  // Capture state at entry to detect stale work after each await
+  const myBundleId = _prefilterBundleId;
+  const myLighting = lighting;
+  const isStale = () =>
+    _prefilterBundleId !== myBundleId || _currentLighting !== myLighting;
 
   const status = document.getElementById('prefilterStatus');
   status.textContent = `預篩 ${lighting}/${zone}...`;
@@ -252,6 +256,7 @@ async function ensurePrefilterScoreForLightingZone(lighting, zone) {
     status.textContent = `預篩失敗: ${e}`;
     return false;
   }
+  if (isStale()) return false;
   if (resp.error) { status.textContent = `預篩失敗: ${resp.error}`; return false; }
   if (resp.cached_hit || resp.state === 'empty') {
     _prefilterScanCache[key] = 'done';
@@ -259,7 +264,6 @@ async function ensurePrefilterScoreForLightingZone(lighting, zone) {
     return true;
   }
 
-  // 進入輪詢直到該 scan 結束（done/cancelled/failed）
   return await new Promise(resolve => {
     let cancelled = false;
     _prefilterPollCancelFn = () => {
@@ -268,16 +272,25 @@ async function ensurePrefilterScoreForLightingZone(lighting, zone) {
       resolve(false);
     };
     _prefilterPollTimer = setInterval(async () => {
-      if (cancelled) return;
+      if (cancelled || isStale()) {
+        if (_prefilterPollTimer) { clearInterval(_prefilterPollTimer); _prefilterPollTimer = null; }
+        cancelled = true;
+        resolve(false);
+        return;
+      }
       let s;
       try { s = await fetch('/api/scan/status').then(r => r.json()); }
       catch { return; }
-      if (cancelled) return;
+      if (cancelled || isStale()) {
+        if (_prefilterPollTimer) { clearInterval(_prefilterPollTimer); _prefilterPollTimer = null; }
+        cancelled = true;
+        resolve(false);
+        return;
+      }
       if (s.state === 'running') {
         status.textContent = `預篩 ${lighting}/${zone} ${s.done || 0}/${s.total || 0}`;
         return;
       }
-      // 終止狀態
       cancelled = true;
       if (_prefilterPollTimer) { clearInterval(_prefilterPollTimer); _prefilterPollTimer = null; }
       _prefilterPollCancelFn = null;
@@ -294,9 +307,11 @@ async function ensurePrefilterScoreForLightingZone(lighting, zone) {
 }
 
 async function reloadLightingWithPrefilter(lighting) {
-  // 沒選 bundle → 走原本的 loadLighting 流程
   if (!_prefilterBundleId) {
-    await loadLightingWithOptionalScore(lighting, null);
+    // 無 prefilter：沿用既有 lazy cache
+    if (!_tilesByLighting[lighting]) {
+      await loadLightingWithOptionalScore(lighting, null);
+    }
     render();
     return;
   }
