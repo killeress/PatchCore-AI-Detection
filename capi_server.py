@@ -958,19 +958,26 @@ class CAPIServer:
     def _load_inferencer(self):
         """載入 AI 推論模型"""
         inf_cfg = self.inference_config
-        config_path = inf_cfg.get("config_path", "configs/capi_3f.yaml")
         device = inf_cfg.get("device", "auto")
 
-        logger.info(f"Loading inference config: {config_path}")
-        capi_config = CAPIConfig.from_yaml(config_path)
+        # 不要在這裡讀 inference.config_path——active bundle 的 source of truth
+        # 是 model_configs[]，由 _load_model_configs 挑出 fallback_config，重讀
+        # 會蓋掉「啟用」剛切過去的新 bundle。
+        capi_config = self.fallback_config
+
+        logger.info(
+            f"Loading inferencer: machine='{capi_config.machine_id}' "
+            f"from {capi_config.config_path}"
+        )
 
         # DB 設定覆蓋: 首次啟動自動從 YAML 匯入, 後續以 DB 為主
+        db_dict = {}
         try:
             # 優先從 YAML 同步新增的參數至 DB (會自動跳過已存在的)
             count = self.db.init_config_from_yaml(capi_config)
             if count > 0:
                 logger.info(f"Seeded {count} new config params from YAML to DB")
-            
+
             # 從 DB 讀取最終設定實體
             db_params = self.db.get_all_config_params()
             if db_params:
@@ -980,9 +987,6 @@ class CAPIServer:
                 logger.info(f"Applied {len(db_params)} config overrides from DB")
         except Exception as e:
             logger.warning(f"Failed to load DB config, using YAML values: {e}")
-            db_dict = {}
-
-        self._adopt_loaded_config(capi_config)
 
         # model_path 和 threshold 統一由 config 管理 (DB 優先, YAML fallback)。
         # 新架構使用 nested model_mapping，舊版 model.pt 不再作為 fallback 載入。
