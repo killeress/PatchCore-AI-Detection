@@ -6176,6 +6176,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             append_submodel_history(bundle_dir, lighting, zone, entry)
             _log("manifest history 已更新")
 
+            # 該 bundle 對該 lighting+zone 的舊分全失效
+            from capi_model_registry import invalidate_score_cache
+            cleared = invalidate_score_cache(
+                db, scoring_bundle_id=bundle_id, lighting=lighting, zone=zone,
+            )
+            _log(f"清除 {cleared} 筆 score cache（lighting={lighting}, zone={zone}）")
+
             _set_step("reload")
             # reload 失敗不能讓整個 job 標 failed：.pt 與 manifest 已成功落地，
             # 下次推論本來就會 lazy-load 新模型；reload 只是即時生效的優化。
