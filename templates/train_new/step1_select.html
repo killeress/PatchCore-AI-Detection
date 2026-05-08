@@ -13,22 +13,35 @@
     <span style="color:#cdd6f4;font-size:.82rem;display:block;margin-top:2px;">勾選順序就是 panel 順位 — 取消重選會重排。</span>
   </p>
 
-  {% if active_review_job %}
-  <div style="background:#2f3347;border:1px solid #89b4fa;border-radius:10px;padding:14px 16px;margin-top:16px;display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;">
-    <div>
-      <div style="color:#cdd6f4;font-weight:700;font-size:.92rem;">已有一筆審核中的訓練 job</div>
-      <div style="color:#a6adc8;font-size:.8rem;margin-top:4px;font-family:monospace;">{{ active_review_job.job_id }} · {{ active_review_job.machine_id }}</div>
+  {% if active_jobs %}
+  <div style="background:#2f3347;border:1px solid #89b4fa;border-radius:10px;padding:14px 16px;margin-top:16px;">
+    <div style="color:#cdd6f4;font-weight:700;font-size:.92rem;margin-bottom:6px;">進行中的訓練 job ({{ active_jobs|length }})</div>
+    {% for j in active_jobs %}
+    <div style="display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 0;border-top:1px solid #45475a;">
+      <div>
+        <div style="color:#cdd6f4;font-size:.86rem;">
+          <span style="font-family:monospace;">{{ j.job_id }}</span>
+          <span style="margin-left:8px;color:#a6adc8;">{{ j.machine_id }}</span>
+        </div>
+        <div style="color:#a6adc8;font-size:.78rem;margin-top:2px;">
+          state: <span style="color:{% if j.state == 'review' %}#a6e3a1{% elif j.state == 'train' %}#fab387{% else %}#89b4fa{% endif %};font-weight:600;">{{ j.state }}</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        {% if j.state == 'review' %}
+        <a href="/train/new/review/{{ j.job_id }}"
+           style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:6px 12px;font-weight:700;text-decoration:none;font-size:.82rem;">繼續審核 →</a>
+        {% elif j.state in ('preprocess', 'train') %}
+        <a href="/train/new/progress?job_id={{ j.job_id }}"
+           style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:6px 12px;font-weight:700;text-decoration:none;font-size:.82rem;">查看進度 →</a>
+        {% endif %}
+        <button onclick="cancelReviewJob('{{ j.job_id }}')"
+          style="background:#313244;color:#f38ba8;border:1px solid #f38ba8;border-radius:5px;padding:6px 12px;font-weight:700;font-size:.82rem;cursor:pointer;">
+          取消
+        </button>
+      </div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center;">
-      <a href="/train/new/review/{{ active_review_job.job_id }}"
-         style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:8px 14px;font-weight:700;text-decoration:none;font-size:.86rem;">
-        繼續審核 →
-      </a>
-      <button onclick="cancelReviewJob('{{ active_review_job.job_id }}')"
-        style="background:#313244;color:#f38ba8;border:1px solid #f38ba8;border-radius:5px;padding:8px 14px;font-weight:700;font-size:.86rem;cursor:pointer;">
-        取消此 job
-      </button>
-    </div>
+    {% endfor %}
   </div>
   {% endif %}
 
