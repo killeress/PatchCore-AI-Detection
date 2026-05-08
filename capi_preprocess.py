@@ -38,6 +38,9 @@ class TileResult:
     coverage: float
     zone: str  # "inner" | "edge" | "outside"
     center_dist_to_edge: float
+    # 4 個 outer-extension 角 + 4 個 inner-edge 角；訓練 wizard 的「corners-only」
+    # panel 模式只收 is_corner=True 的 tile（只給 edge 模型補強用）。
+    is_corner: bool = False
 
 
 @dataclass
@@ -426,6 +429,18 @@ def _generate_tiles(
     tiles: List[TileResult] = []
     tid = 0
 
+    # 角落判定：4 個 inner-edge 角（grid 最外圈交點）+ 4 個 outer-extension 角
+    # （延伸 row × 延伸 column 的交點）。訓練 wizard 的 corners-only panel 模式
+    # 只挑 is_corner=True 的 tile 餵 edge 模型，不收任何長邊或 inner tile。
+    inner_corner_xs = {xs[0], xs[-1]} if xs else set()
+    inner_corner_ys = {ys[0], ys[-1]} if ys else set()
+    outer_corner_xs = {x for x in (left_tx, right_tx) if x is not None}
+    outer_corner_ys = {y for y in (top_ty, bottom_ty) if y is not None}
+
+    def _is_corner(tx: int, ty: int) -> bool:
+        return ((tx in inner_corner_xs and ty in inner_corner_ys)
+                or (tx in outer_corner_xs and ty in outer_corner_ys))
+
     def _emit(tx: int, ty: int, zone: str, cov: float, dist: float, mask) -> None:
         nonlocal tid
         tiles.append(TileResult(
@@ -436,6 +451,7 @@ def _generate_tiles(
             coverage=cov,
             zone=zone,
             center_dist_to_edge=dist,
+            is_corner=_is_corner(tx, ty),
         ))
         tid += 1
 

@@ -45,6 +45,23 @@ TRAINING_UNITS = [(l, z) for l in LIGHTINGS for z in ZONES]  # 10 個
 MIN_TRAIN_TILES = 30
 NG_TILES_PER_LIGHTING = 100
 
+PANEL_MODE_FULL = "full"
+PANEL_MODE_CORNERS_ONLY = "corners_only"
+
+# 訓練 wizard step1 的 panel 選擇：前 3 片完整切 tile（inner+edge），
+# 後 5 片只保留 4 個尖角（補強 edge 模型）。前後端共用同一組常數。
+WIZARD_FULL_PANEL_COUNT = 3
+WIZARD_CORNERS_ONLY_PANEL_COUNT = 5
+WIZARD_TOTAL_PANEL_COUNT = WIZARD_FULL_PANEL_COUNT + WIZARD_CORNERS_ONLY_PANEL_COUNT  # 8
+
+
+def derive_panel_modes(panel_count: int) -> List[str]:
+    """依順位推 panel_modes：前 WIZARD_FULL_PANEL_COUNT 片 full、其餘 corners_only。"""
+    return (
+        [PANEL_MODE_FULL] * min(panel_count, WIZARD_FULL_PANEL_COUNT)
+        + [PANEL_MODE_CORNERS_ONLY] * max(0, panel_count - WIZARD_FULL_PANEL_COUNT)
+    )
+
 # 與 PreprocessConfig.edge_threshold_px 同一單一來源（避免兩處飄移）。
 # NG zone heuristic：讀 over_review snapshot 的 manifest.csv，
 # defect_y < EDGE_BAND_PX → edge（top band），否則 → inner。
@@ -120,17 +137,31 @@ def preprocess_panels_to_pool(
     db: TrainingDB,
     thumb_dir: Path,
     log: Callable[[str], None],
+    panel_modes: Optional[List[str]] = None,
 ) -> dict:
-    """將 cfg.panel_paths 全部前處理 + 切 tile + 寫 DB。"""
+    """將 cfg.panel_paths 全部前處理 + 切 tile + 寫 DB。
+
+    panel_modes 與 cfg.panel_paths 同長度：
+      - "full"          : 收所有 inner / edge tile（原行為）
+      - "corners_only"  : 只收 is_corner=True 的 tile（4 outer-extension 角 +
+                          4 inner-edge 角 / lighting）。長邊與 inner 不取樣，
+                          目的是補強 edge 模型的角落樣本。
+    None 視同全 full，與舊呼叫者相容。
+    """
+    if panel_modes is None:
+        panel_modes = [PANEL_MODE_FULL] * len(cfg.panel_paths)
+
     thumb_dir.mkdir(parents=True, exist_ok=True)
     (thumb_dir / "tiles").mkdir(parents=True, exist_ok=True)
     (thumb_dir / "thumb").mkdir(parents=True, exist_ok=True)
-    panel_success = 0
+    panel_success_full = 0
+    panel_success_corner = 0
     panel_fail = 0
     total_tiles = 0
 
-    for idx, panel_dir in enumerate(cfg.panel_paths, 1):
-        log(f"[{idx}/{len(cfg.panel_paths)}] panel {panel_dir.name}")
+    for idx, (panel_dir, mode) in enumerate(zip(cfg.panel_paths, panel_modes), 1):
+        mode_label = "完整" if mode == PANEL_MODE_FULL else "僅 4 角"
+        log(f"[{idx}/{len(cfg.panel_paths)}] panel {panel_dir.name} ({mode_label})")
         try:
             results = preprocess_panel_folder(panel_dir, preprocess_cfg)
         except Exception as e:
@@ -146,10 +177,13 @@ def preprocess_panels_to_pool(
         if polygon_failed_count > 0:
             log(f"  ⚠ {polygon_failed_count} lighting polygon 偵測失敗")
 
-        # 為每張 tile 存 .png + 縮圖 + 寫 DB
+        # 為每張 tile 存 .png + 縮圖 + 寫 DB；corners_only 模式下先過濾掉非角落 tile，
+        # 避免浪費 IO 寫不會用到的 PNG。
         tile_records = []
         for lighting, result in results.items():
             for tile in result.tiles:
+                if mode == PANEL_MODE_CORNERS_ONLY and not tile.is_corner:
+                    continue
                 tile_filename = f"{job_id}_{panel_dir.name}_{lighting}_t{tile.tile_id:04d}.png"
                 tile_path = thumb_dir / "tiles" / tile_filename
                 cv2.imwrite(str(tile_path), tile.image)
@@ -169,11 +203,20 @@ def preprocess_panels_to_pool(
         if tile_records:
             db.insert_tile_pool(job_id, tile_records)
             total_tiles += len(tile_records)
-            panel_success += 1
+            if mode == PANEL_MODE_FULL:
+                panel_success_full += 1
+            else:
+                panel_success_corner += 1
             log(f"  ✓ 切出 {len(tile_records)} tile")
+        else:
+            panel_fail += 1
+            log("  ✗ 無 tile 寫入")
 
     return {
-        "panel_success": panel_success,
+        # panel_success 維持原 key 給舊呼叫者用（= full + corner）
+        "panel_success": panel_success_full + panel_success_corner,
+        "panel_success_full": panel_success_full,
+        "panel_success_corner": panel_success_corner,
         "panel_fail": panel_fail,
         "total_tiles": total_tiles,
     }

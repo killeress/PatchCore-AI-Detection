@@ -253,6 +253,8 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_scratch_rescue_review_tile ON scratch_rescue_review(tile_result_id);
 
                 -- 訓練 Job 狀態追蹤
+                -- panel_modes: JSON array，元素 "full" / "corners_only"，與 panel_paths 同長度。
+                --   NULL 視同 ["full"] * len(panel_paths)（向下相容舊 job）。
                 CREATE TABLE IF NOT EXISTS training_jobs (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id          TEXT UNIQUE,
@@ -261,6 +263,7 @@ class CAPIDatabase:
                     started_at      TEXT,
                     completed_at    TEXT,
                     panel_paths     TEXT,
+                    panel_modes     TEXT,
                     output_bundle   TEXT,
                     error_message   TEXT,
                     training_params TEXT
@@ -355,6 +358,8 @@ class CAPIDatabase:
             add_column_if_not_exists("tile_results", "scratch_filtered", "INTEGER DEFAULT 0")
             add_column_if_not_exists("image_results", "scratch_filter_count", "INTEGER DEFAULT 0")
             add_column_if_not_exists("training_jobs", "training_params", "TEXT")
+            # 8 panel wizard：前 3 = full（收 inner+edge），後 5 = corners_only（只收 4 角給 edge 模型補強）
+            add_column_if_not_exists("training_jobs", "panel_modes", "TEXT")
             # 新架構 (C-10) per-tile model routing 紀錄："inner" / "edge" / "bright_spot"；v1 為 ""
             add_column_if_not_exists("tile_results", "zone", "TEXT DEFAULT ''")
 
@@ -2367,31 +2372,54 @@ class CAPIDatabase:
         machine_id: str,
         panel_paths: list,
         training_params: Optional[Dict[str, Any]] = None,
+        panel_modes: Optional[list] = None,
     ) -> int:
         """建立一筆新的訓練 job，初始 state 為 'preprocess'。回傳 rowid。
 
         training_params 為 step1 使用者覆寫的 PatchCore 超參數（JSON 序列化後寫入），
         None 表示完全使用 TrainingConfig 的 dataclass 預設值。
+
+        panel_modes 為與 panel_paths 等長的 list，元素 "full" / "corners_only"。
+        None 寫入 NULL，由 caller / get_*_training_job 視同全 full 處理。
         """
         # 用 `is not None` 而非 falsy；空 dict 與 None 語意不同（前者代表
         # 來源已驗證但無覆寫項，留給呼叫端決定是否要寫入）。
         params_json = json.dumps(training_params) if training_params is not None else None
+        modes_json = json.dumps(panel_modes) if panel_modes is not None else None
         conn = self._get_conn()
         try:
             cur = conn.cursor()
             cur.execute(
                 """INSERT INTO training_jobs
-                   (job_id, machine_id, state, started_at, panel_paths, training_params)
-                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?)""",
-                (job_id, machine_id, json.dumps(panel_paths), params_json),
+                   (job_id, machine_id, state, started_at, panel_paths, panel_modes, training_params)
+                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?)""",
+                (job_id, machine_id, json.dumps(panel_paths), modes_json, params_json),
             )
             conn.commit()
             return cur.lastrowid
         finally:
             conn.close()
 
+    @staticmethod
+    def _decode_training_job_row(cols: list, row: tuple) -> Dict:
+        """共用解碼：JSON 欄位反序列化、舊 job 的 panel_modes 補成全 full。"""
+        job = dict(zip(cols, row))
+        if job.get("panel_paths"):
+            job["panel_paths"] = json.loads(job["panel_paths"])
+        else:
+            job["panel_paths"] = []
+        raw_modes = job.get("panel_modes")
+        if raw_modes:
+            job["panel_modes"] = json.loads(raw_modes)
+        else:
+            # 舊 job 沒有 panel_modes 欄位 → 視同全 full（與 8-panel wizard 前的行為一致）
+            job["panel_modes"] = ["full"] * len(job["panel_paths"])
+        raw_params = job.get("training_params")
+        job["training_params"] = json.loads(raw_params) if raw_params else None
+        return job
+
     def get_training_job(self, job_id: str) -> Optional[Dict]:
-        """依 job_id 查詢訓練 job，panel_paths / training_params 自動 JSON 反序列化。找不到回傳 None。"""
+        """依 job_id 查詢訓練 job，panel_paths / panel_modes / training_params 自動 JSON 反序列化。找不到回傳 None。"""
         conn = self._get_conn()
         try:
             cur = conn.cursor()
@@ -2400,14 +2428,7 @@ class CAPIDatabase:
             if not row:
                 return None
             cols = [d[0] for d in cur.description]
-            job = dict(zip(cols, row))
-            if job.get("panel_paths"):
-                job["panel_paths"] = json.loads(job["panel_paths"])
-            else:
-                job["panel_paths"] = []
-            raw_params = job.get("training_params")
-            job["training_params"] = json.loads(raw_params) if raw_params else None
-            return job
+            return self._decode_training_job_row(cols, row)
         finally:
             conn.close()
 
@@ -2456,14 +2477,7 @@ class CAPIDatabase:
             if not row:
                 return None
             cols = [d[0] for d in cur.description]
-            job = dict(zip(cols, row))
-            if job.get("panel_paths"):
-                job["panel_paths"] = json.loads(job["panel_paths"])
-            else:
-                job["panel_paths"] = []
-            raw_params = job.get("training_params")
-            job["training_params"] = json.loads(raw_params) if raw_params else None
-            return job
+            return self._decode_training_job_row(cols, row)
         finally:
             conn.close()
 

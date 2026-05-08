@@ -5083,14 +5083,22 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         body: {
             "machine_id": "...",
-            "panel_paths": [...],   # 必須是 3 片
+            "panel_paths": [...],   # 必須是 8 片：前 3 完整、後 5 僅 4 角
             "training_params": {  # optional
                 "batch_size": 8,
                 "coreset_ratio": 0.1,
                 "max_epochs": 1
             }
         }
+
+        panel_modes 由順位推導（前 WIZARD_FULL_PANEL_COUNT 片 full、其餘 corners_only），
+        使用者不需顯式傳入；前端只要保證選取順序與表單顯示一致即可。
         """
+        from capi_train_new import (
+            generate_job_id, derive_panel_modes,
+            WIZARD_TOTAL_PANEL_COUNT,
+        )
+
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length).decode("utf-8") if length else "{}"
@@ -5113,9 +5121,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "panel_paths contains invalid path"}, status=400)
                 return
             clean_panel_paths.append(p.strip())
-        if len(clean_panel_paths) != 3:
-            self._send_json({"error": "panel_paths must contain exactly 3 panels"}, status=400)
+        if len(clean_panel_paths) != WIZARD_TOTAL_PANEL_COUNT:
+            self._send_json({
+                "error": f"panel_paths must contain exactly {WIZARD_TOTAL_PANEL_COUNT} panels"
+            }, status=400)
             return
+
+        panel_modes = derive_panel_modes(len(clean_panel_paths))
 
         training_params, err = self._validate_training_params(params.get("training_params"))
         if err:
@@ -5123,7 +5135,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         db = self._capi_server_instance.database
-        from capi_train_new import generate_job_id
         job_id = generate_job_id(machine_id)
 
         # 註冊 runtime + 寫 DB（沒有 wizard singleton 檢查；多 job 可共存）。
@@ -5134,6 +5145,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 job_id=job_id, machine_id=machine_id,
                 panel_paths=clean_panel_paths,
                 training_params=training_params,
+                panel_modes=panel_modes,
             )
         except Exception:
             CAPIWebHandler._drop_job_runtime(job_id)
@@ -5142,7 +5154,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         thread = threading.Thread(
             target=CAPIWebHandler._train_new_preprocess_worker,
             args=(job_id, machine_id, clean_panel_paths,
-                  self._capi_server_instance, training_params),
+                  self._capi_server_instance, training_params, panel_modes),
             daemon=True, name=f"train_new_pre-{job_id}",
         )
         runtime["thread"] = thread
@@ -5179,13 +5191,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _train_new_preprocess_worker(
         job_id, machine_id, panel_paths, server_inst, training_params=None,
+        panel_modes=None,
     ):
-        """背景 thread：preprocess + 抽 NG → state=review。"""
+        """背景 thread：preprocess + 抽 NG → state=review。
+
+        panel_modes 與 panel_paths 同長度；None 視同全 full（向下相容舊呼叫者）。
+        失敗條件 (A2)：成功的 full panel 少於 WIZARD_FULL_PANEL_COUNT 即整個 job 失敗，
+        corners_only panel 失敗不擋訓練（屬補強樣本）。
+        """
         import traceback
         from pathlib import Path as _Path
         from capi_train_new import (
             TrainingConfig, apply_user_training_params,
             preprocess_panels_to_pool, sample_ng_tiles, NG_TILES_PER_LIGHTING,
+            WIZARD_FULL_PANEL_COUNT,
         )
         from capi_preprocess import PreprocessConfig
 
@@ -5217,9 +5236,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             stats = preprocess_panels_to_pool(
                 job_id=job_id, cfg=cfg, preprocess_cfg=pre_cfg,
                 db=db, thumb_dir=thumb_root, log=log,
+                panel_modes=panel_modes,
             )
-            if stats["panel_success"] < 3:
-                raise RuntimeError(f"成功 panel < 3 ({stats['panel_success']})")
+            if stats["panel_success_full"] < WIZARD_FULL_PANEL_COUNT:
+                raise RuntimeError(
+                    f"成功 full panel {stats['panel_success_full']} < "
+                    f"{WIZARD_FULL_PANEL_COUNT}（corners_only 失敗不擋訓練）"
+                )
 
             log(f"抽 NG tile（每 lighting 上限 {NG_TILES_PER_LIGHTING} 個）")
             ng_stats = sample_ng_tiles(
@@ -5336,10 +5359,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         preprocess_cfg = PreprocessConfig()
         panel_paths = [Path(p) for p in job.get("panel_paths", [])]
+        panel_modes = job.get("panel_modes") or ["full"] * len(panel_paths)
+        # corners_only panel 只有 4 個尖角 tile，畫前處理預覽會缺長邊與 inner，
+        # 改只挑 full panel 當預覽來源；長度不齊或沒 full 時 fallback 全部 panel。
+        full_panel_paths = [
+            p for p, m in zip(panel_paths, panel_modes) if m == "full"
+        ] or panel_paths
 
         result = None
         panel_name = ""
-        for panel_dir in panel_paths:
+        for panel_dir in full_panel_paths:
             if not panel_dir.exists():
                 continue
             files = filter_panel_lighting_files(panel_dir)
