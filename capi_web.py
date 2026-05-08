@@ -5172,38 +5172,29 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         db = self._capi_server_instance.database
-        state = self._train_new_state
-        existing = db.get_active_training_job()
-        existing = self._mark_train_new_stale_if_needed(db, existing)
-        with state["lock"]:
-            if existing and existing.get("state") in ("preprocess", "review", "train"):
-                self._send_json({
-                    "error": "job_already_running",
-                    "active_job_id": existing["job_id"],
-                    "state": existing["state"],
-                }, status=409)
-                return
+        from capi_train_new import generate_job_id
+        job_id = generate_job_id(machine_id)
 
-            from capi_train_new import generate_job_id
-            job_id = generate_job_id(machine_id)
+        # 註冊 runtime + 寫 DB（沒有 wizard singleton 檢查；多 job 可共存）。
+        # GPU singleton 留給 _handle_train_new_start_training 用 _train_slot 把關。
+        runtime = CAPIWebHandler._make_job_runtime(job_id, "preprocess")
+        try:
             db.create_training_job(
                 job_id=job_id, machine_id=machine_id,
                 panel_paths=clean_panel_paths,
                 training_params=training_params,
             )
-            state["active_job_id"] = job_id
-            self._train_new_cancel_event(state).clear()
-            state["log_lines"] = []
+        except Exception:
+            CAPIWebHandler._drop_job_runtime(job_id)
+            raise
 
-        # 起 preprocess thread；training_params 直接傳入避免 worker 再 query DB
         thread = threading.Thread(
             target=CAPIWebHandler._train_new_preprocess_worker,
             args=(job_id, machine_id, clean_panel_paths,
                   self._capi_server_instance, training_params),
             daemon=True, name=f"train_new_pre-{job_id}",
         )
-        with state["lock"]:
-            state["thread"] = thread
+        runtime["thread"] = thread
         thread.start()
         self._send_json({"job_id": job_id, "state": "preprocess"})
 
