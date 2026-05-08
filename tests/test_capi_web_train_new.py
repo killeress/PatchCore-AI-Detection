@@ -553,10 +553,15 @@ def test_handle_train_new_start_training_409_wrong_state():
 def test_handle_train_new_start_training_starts_thread(monkeypatch):
     """驗證在 review state 時，handler 會 update state + spawn thread。"""
     import threading
+    from capi_web import CAPIWebHandler
+
     server = MagicMock()
     server.database.get_training_job.return_value = {
         "job_id": "j1", "machine_id": "M", "state": "review", "panel_paths": ["/p"]
     }
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    CAPIWebHandler._train_slot = {"lock": threading.Lock(), "active_job_id": None}
 
     started_threads = []
     real_thread = threading.Thread
@@ -573,6 +578,33 @@ def test_handle_train_new_start_training_starts_thread(monkeypatch):
     assert len(started_threads) == 1
     body = json.loads(h._sent_response[0]["body"])
     assert body["state"] == "train"
+    assert CAPIWebHandler._train_slot["active_job_id"] == "j1"
+
+
+def test_handle_train_new_start_training_rejects_when_slot_held():
+    """另一個 job 已在 train → 第二個 start_training 收 409。"""
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j2", "machine_id": "M", "state": "review", "panel_paths": []
+    }
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    CAPIWebHandler._train_slot = {
+        "lock": threading.Lock(),
+        "active_job_id": "j1",
+    }
+
+    h = _make_handler_with_server(server, "/api/train/new/start_training/j2")
+    h._handle_train_new_start_training()
+
+    assert h._sent_response[0]["status"] == 409
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["error"] == "another_job_training"
+    assert body["training_job_id"] == "j1"
+    # slot 不應被改寫
+    assert CAPIWebHandler._train_slot["active_job_id"] == "j1"
 
 
 def test_handle_train_new_cancel_marks_review_job_failed():
