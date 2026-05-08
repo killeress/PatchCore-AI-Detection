@@ -7,9 +7,10 @@
   </div>
   <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.4rem;">Step 1 / 5 · 選擇訓練資料</h1>
   <p style="color:#a6adc8;font-size:.9rem;line-height:1.55;">
-    從最近 3 天 AOI 判 OK 紀錄勾選
-    <span style="color:#a6e3a1;font-weight:600;">3 片 panel</span>，皆收 inner + edge tile。
-    Edge 取樣會自動往 panel 邊緣外推（涵蓋邊緣鄰近的 ROI 切塊情境）。
+    從最近 3 天 AOI 判 OK 紀錄依序勾選
+    <span style="color:#cdd6f4;font-weight:600;">8 片 panel</span>：
+    順位 <span style="color:#a6e3a1;font-weight:600;">1-3 完整</span>（收 inner + edge tile），
+    順位 <span style="color:#fab387;font-weight:600;">4-8 僅 4 角</span>（補強 edge 模型，inner 與長邊不取樣）。
     <span style="color:#cdd6f4;font-size:.82rem;display:block;margin-top:2px;">勾選順序就是 panel 順位 — 取消重選會重排。</span>
   </p>
 
@@ -85,7 +86,7 @@
   <div id="panel-list" style="margin-top:16px;padding-bottom:88px;"></div>
 
   <div class="step1-actionbar">
-    <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0/3 片</span>
+    <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0/8 片</span>
     <span style="display:flex;gap:8px;align-items:center;margin-left:auto;">
       <a href="/training" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">取消</a>
       <button id="next-btn" onclick="submitStart()" disabled
@@ -186,8 +187,18 @@ function renderPanels(panels) {
   updateNext();
 }
 
-const PANEL_LIMIT = 3;
-const PANEL_COLOR = '#a6e3a1';
+// 與 capi_train_new.WIZARD_FULL_PANEL_COUNT / WIZARD_TOTAL_PANEL_COUNT 對齊。
+// 改了這裡也記得同步那邊（後端會用 derive_panel_modes 推 panel_modes）。
+const FULL_PANEL_COUNT = 3;
+const PANEL_LIMIT = 8;
+const FULL_PANEL_COLOR = '#a6e3a1';      // 完整 panel：catppuccin green
+const CORNER_PANEL_COLOR = '#fab387';    // corners-only：catppuccin peach
+const FULL_ROW_BG = '#1e3a2d';
+const CORNER_ROW_BG = '#3a2d1e';
+
+function panelModeOfIdx(idx) {
+  return idx < FULL_PANEL_COUNT ? 'full' : 'corners_only';
+}
 
 function toggleSelect(tr) {
   const path = tr.dataset.path;
@@ -199,7 +210,7 @@ function toggleSelect(tr) {
   } else {
     if (_selected.size >= PANEL_LIMIT) return;
     if (_selectedMachineId && machineId !== _selectedMachineId) {
-      capAlert(`請選擇相同機種 ID 的 panel。\n目前已選：${_selectedMachineId}`, {type: 'warn', title: '機種不一致'});
+      capAlert(`請選擇相同機種 ID 的 panel。\n目前已選:${_selectedMachineId}`, {type: 'warn', title: '機種不一致'});
       return;
     }
     _selectedMachineId = machineId;
@@ -210,7 +221,7 @@ function toggleSelect(tr) {
 }
 
 function refreshSelectedVisuals() {
-  // 把所有 row 的選取視覺重設，再依 _selected 順序重畫位置編號
+  // 把所有 row 的選取視覺重設，再依 _selected 順序重畫位置編號 + 模式色
   document.querySelectorAll('#panel-list tr[data-path]').forEach(tr => {
     tr.style.background = '';
     const chk = tr.querySelector('.chk');
@@ -224,19 +235,24 @@ function refreshSelectedVisuals() {
   ordered.forEach((path, idx) => {
     const tr = document.querySelector(`#panel-list tr[data-path="${CSS.escape(path)}"]`);
     if (!tr) return;
-    tr.style.background = '#1e3a2d';
+    const isFull = idx < FULL_PANEL_COUNT;
+    const color = isFull ? FULL_PANEL_COLOR : CORNER_PANEL_COLOR;
+    tr.style.background = isFull ? FULL_ROW_BG : CORNER_ROW_BG;
     const chk = tr.querySelector('.chk');
     chk.textContent = String(idx + 1);
-    chk.style.background = PANEL_COLOR;
+    chk.style.background = color;
     chk.style.color = '#1e1e2e';
-    chk.style.borderColor = PANEL_COLOR;
+    chk.style.borderColor = color;
     chk.style.fontWeight = '700';
   });
 }
 
 function updateNext() {
   const machineText = _selectedMachineId ? `（機種 ${_selectedMachineId}）` : '';
-  document.getElementById('sel-count').textContent = `已選 ${_selected.size}/${PANEL_LIMIT} 片 ${machineText}`;
+  const fullSelected = Math.min(_selected.size, FULL_PANEL_COUNT);
+  const cornerSelected = Math.max(0, _selected.size - FULL_PANEL_COUNT);
+  document.getElementById('sel-count').textContent =
+    `已選 ${_selected.size}/${PANEL_LIMIT} 片 (完整 ${fullSelected}/${FULL_PANEL_COUNT}、僅 4 角 ${cornerSelected}/${PANEL_LIMIT - FULL_PANEL_COUNT}) ${machineText}`;
   const btn = document.getElementById('next-btn');
   btn.disabled = _selected.size !== PANEL_LIMIT;
   btn.style.opacity = btn.disabled ? .4 : 1;
