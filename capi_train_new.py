@@ -106,7 +106,11 @@ def apply_user_training_params(
 
 
 def generate_job_id(machine_id: str) -> str:
-    return f"train_{machine_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # 加 4-char 隨機後綴避免兩個並行 start 在同一秒撞 id（多 job 共存後是真的會發生；
+    # Windows datetime resolution 不足以保證微秒唯一）
+    import secrets
+    suffix = secrets.token_hex(2)
+    return f"train_{machine_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{suffix}"
 
 
 def preprocess_panels_to_pool(

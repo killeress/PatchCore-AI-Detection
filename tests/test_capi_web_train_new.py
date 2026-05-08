@@ -209,40 +209,71 @@ def test_handle_train_new_start_validates_params():
     assert "error" in body
 
 
-def test_handle_train_new_start_rejects_concurrent():
-    """現有 active job → 409。"""
+def test_handle_train_new_start_allows_concurrent_with_review_job():
+    """有別人在 review state 不再阻擋新 start（多 job 共存）。"""
     from capi_web import CAPIWebHandler
 
-    class AliveThread:
-        def is_alive(self):
-            return True
-
     server = MagicMock()
-    server.database.get_active_training_job.return_value = {
-        "job_id": "j_old",
-        "state": "preprocess",
-    }
-    CAPIWebHandler._train_new_state = {
-        "lock": threading.Lock(),
-        "log_lock": threading.Lock(),
-        "active_job_id": "j_old",
-        "thread": AliveThread(),
-        "cancel_event": threading.Event(),
-        "log_lines": [],
-    }
+    server.database.list_active_training_jobs.return_value = [
+        {"job_id": "j_old", "state": "review"},
+    ]
+    server.database.create_training_job = MagicMock()
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
 
     h = _make_handler_with_server(server, "/api/train/new/start")
     body = json.dumps({"machine_id": "M", "panel_paths": [f"/p{i}" for i in range(3)]}).encode()
     h.headers.get = MagicMock(return_value=str(len(body)))
     h.rfile = io.BytesIO(body)
 
-    h._handle_train_new_start()
+    with patch("capi_web.threading.Thread") as MockThread:
+        MockThread.return_value.start = MagicMock()
+        h._handle_train_new_start()
 
-    assert len(h._sent_response) == 1
-    assert h._sent_response[0]["status"] == 409
-    resp_body = json.loads(h._sent_response[0]["body"])
-    assert resp_body.get("error") == "job_already_running"
-    assert resp_body.get("active_job_id") == "j_old"
+    assert h._sent_response[0]["status"] == 200
+    body_json = json.loads(h._sent_response[0]["body"])
+    assert body_json["state"] == "preprocess"
+    assert body_json["job_id"]
+    server.database.create_training_job.assert_called_once()
+
+
+def test_handle_train_new_start_parallel_creates_two_jobs():
+    """TOCTOU race regression：兩個 thread 同時 start 都成功。"""
+    from concurrent.futures import ThreadPoolExecutor
+    from capi_web import CAPIWebHandler
+
+    created = []
+    db_lock = threading.Lock()
+
+    server = MagicMock()
+    server.database.list_active_training_jobs.return_value = []
+
+    def record_create(job_id, machine_id, panel_paths, training_params=None):
+        with db_lock:
+            created.append(job_id)
+
+    server.database.create_training_job = MagicMock(side_effect=record_create)
+
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+
+    def run_start():
+        h = _make_handler_with_server(server, "/api/train/new/start")
+        body = json.dumps({"machine_id": "M", "panel_paths": [f"/p{i}" for i in range(3)]}).encode()
+        h.headers.get = MagicMock(return_value=str(len(body)))
+        h.rfile = io.BytesIO(body)
+        with patch("capi_web.threading.Thread") as MockThread:
+            MockThread.return_value.start = MagicMock()
+            h._handle_train_new_start()
+        return h._sent_response[0]
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futs = [ex.submit(run_start) for _ in range(2)]
+        results = [f.result() for f in futs]
+
+    statuses = sorted(r["status"] for r in results)
+    assert statuses == [200, 200]
+    assert len(set(created)) == 2  # 兩個不同 job_id
 
 
 def test_handle_train_new_start_rejects_invalid_panel_path():
