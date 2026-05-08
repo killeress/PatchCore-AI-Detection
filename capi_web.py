@@ -204,6 +204,27 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         "unit_status": {},
     }
 
+    # ── 多 job 註冊表（refactor：取代 _train_new_state） ──────────────────────
+    # _train_new_jobs key = job_id；value = per-job runtime dict，欄位：
+    #   thread:        Thread (preprocess supervisor / training supervisor)
+    #   proc:          Optional[Popen] (only training)
+    #   cancel_flag:   Optional[str] (training subprocess 的 cancel flag 檔路徑)
+    #   log_file:      Optional[str] (training subprocess 的 log 檔路徑)
+    #   cancel_event:  threading.Event
+    #   log_lines:     List[str] (ring buffer 500)
+    #   log_lock:      threading.Lock
+    #   unit_status:   Dict[unit_label, status]
+    #   phase:         "preprocess" | "review" | "train"  (last known)
+    _train_new_jobs: dict = {}
+    _train_new_jobs_lock: threading.Lock = threading.Lock()
+
+    # 訓練槽（單機 GPU 序列化）：active_job_id 不為 None 即代表槽被佔用。
+    # lock 只保護「進入 train phase 的關鍵段落」，worker 不長期持鎖。
+    _train_slot: dict = {
+        "lock": threading.Lock(),
+        "active_job_id": None,
+    }
+
     # 單子模型重訓 state（一次只允許一個 job）
     _submodel_retrain_state: dict = {
         "lock": threading.Lock(),
@@ -241,6 +262,33 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             cls.jinja_env.filters['get_img_stem'] = get_img_stem
             cls.jinja_env.filters['fromjson'] = lambda s: json.loads(s) if s else {}
             cls.jinja_env.globals['hm_relative'] = hm_relative
+
+    @classmethod
+    def _make_job_runtime(cls, job_id: str, phase: str) -> dict:
+        runtime = {
+            "thread": None,
+            "proc": None,
+            "cancel_flag": None,
+            "log_file": None,
+            "cancel_event": threading.Event(),
+            "log_lines": [],
+            "log_lock": threading.Lock(),
+            "unit_status": {},
+            "phase": phase,
+        }
+        with cls._train_new_jobs_lock:
+            cls._train_new_jobs[job_id] = runtime
+        return runtime
+
+    @classmethod
+    def _get_job_runtime(cls, job_id: str) -> Optional[dict]:
+        with cls._train_new_jobs_lock:
+            return cls._train_new_jobs.get(job_id)
+
+    @classmethod
+    def _drop_job_runtime(cls, job_id: str) -> None:
+        with cls._train_new_jobs_lock:
+            cls._train_new_jobs.pop(job_id, None)
 
     @staticmethod
     def _append_train_new_log(state: dict, msg: str) -> None:
@@ -6634,6 +6682,12 @@ def create_web_server(
         "cancel_event": threading.Event(),
         "log_lines": [],
         "log_lock": threading.Lock(),
+    }
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    CAPIWebHandler._train_slot = {
+        "lock": threading.Lock(),
+        "active_job_id": None,
     }
     CAPIWebHandler.init_jinja()
 
