@@ -5541,6 +5541,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             slot["active_job_id"] = job_id
 
+        # 先把 prefilter scan 收掉並釋放 server process 的 GPU cache，避免
+        # PatchCore prefilter 用過的 VRAM 仍被 caching allocator 占住，使
+        # 訓練 subprocess（自己 set fraction）擠不出物理 VRAM 而 OOM。
+        CAPIWebHandler._cancel_and_wait_scan_idle(timeout_s=15.0)
+        CAPIWebHandler._free_server_gpu_cache()
+
         # 確保 runtime 存在（從 review 接續，多半已存在；server 重啟後可能沒有）
         runtime = CAPIWebHandler._get_job_runtime(job_id)
         if runtime is None:
@@ -6352,6 +6358,50 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     state["job"]["error"] = str(e)
             logger.error("submodel retrain worker failed: %s", e, exc_info=True)
 
+    @staticmethod
+    def _free_server_gpu_cache() -> None:
+        """主動釋放 server process 內 PyTorch caching allocator 的閒置 VRAM。
+
+        prefilter / self-scan 用過的 TorchInferencer 即使被 GC，PyTorch 仍把
+        freed blocks 留在 cache 裡不還給 driver；後續訓練 subprocess 因此擠
+        不出 fraction 上限的 VRAM。呼叫 empty_cache() 把這些閒置 block 還回去。
+        """
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    @classmethod
+    def _cancel_and_wait_scan_idle(cls, timeout_s: float = 15.0) -> None:
+        """若有 prefilter/self scan 還在跑，cancel 它並等 worker thread 結束。
+
+        worker 的 finally 會清 _inferencer_cache + empty_cache；join 確保這段
+        跑完再進訓練 subprocess，避免兩 process 同時搶 GPU。
+        """
+        import time
+        state = cls._scan_state
+        with state["lock"]:
+            job = state["job"]
+            cancel_event = job.get("cancel_event") if job else None
+            thread = job.get("thread") if job else None
+            running = bool(job and job.get("state") == "running")
+        if running and cancel_event is not None:
+            cancel_event.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout_s)
+        # polling fallback：worker 可能還在寫 state，等到非 running 為止
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            with state["lock"]:
+                job = state["job"]
+                if not job or job.get("state") != "running":
+                    return
+            time.sleep(0.2)
+
     @classmethod
     def _start_scan_job(
         cls,
@@ -6396,6 +6446,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             daemon=True,
             name=f"scan-{scan_id}",
         )
+        # 存 thread 物件，讓 _cancel_and_wait_scan_idle 可以 join，確保
+        # finally 區塊（含 GPU cache 清理）跑完再進訓練 subprocess。
+        with state["lock"]:
+            if state["job"] and state["job"].get("scan_id") == scan_id:
+                state["job"]["thread"] = thread
         thread.start()
         return True, {"scan_id": scan_id, "total": len(tile_ids)}
 
@@ -6414,6 +6469,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         def _log(msg):
             logger.info("[scan %s] %s", scan_id, msg)
 
+        scorer = None
         try:
             scorer = SubmodelScorer(
                 gpu_lock=server_inst._gpu_lock,
@@ -6445,6 +6501,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if state["job"] and state["job"]["scan_id"] == scan_id:
                     state["job"]["state"] = "failed"
                     state["job"]["error"] = str(e)
+        finally:
+            # 釋放 SubmodelScorer 載入的 TorchInferencer，避免 PyTorch caching
+            # allocator 把 prefilter 用過的 VRAM 留在 server process 裡，
+            # 影響後續訓練 subprocess 的 GPU 配額。
+            if scorer is not None:
+                try:
+                    scorer._inferencer_cache.clear()
+                except Exception:
+                    pass
+            scorer = None
+            cls._free_server_gpu_cache()
 
     def _handle_scan_self_score(self):
         """POST /api/models/<bundle_id>/scan_self_score
@@ -6554,8 +6621,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if job is None:
                 self._send_json({"state": "idle"})
                 return
-            # 不回傳 cancel_event 物件
-            payload = {k: v for k, v in job.items() if k != "cancel_event"}
+            # 不回傳 cancel_event / thread 等不可序列化物件
+            payload = {k: v for k, v in job.items()
+                       if k not in ("cancel_event", "thread")}
             self._send_json(payload)
 
     def _handle_scan_cancel(self):
