@@ -637,6 +637,8 @@ async function startSelfScan() {
   const btn = document.getElementById('scanSelfBtn');
   btn.disabled = true; btn.textContent = '掃描中...';
 
+  await ensureBackendScanIdle();
+
   let resp;
   try {
     resp = await fetch(`/api/models/${currentBundleId}/scan_self_score`, {
@@ -690,6 +692,22 @@ function pollScanStatus(bundleId) {
 
 function cancelActiveScan() {
   if (_scanCancelFn) { _scanCancelFn(); _scanCancelFn = null; }
+}
+
+async function ensureBackendScanIdle() {
+  // 確保後端 scan 已停。已 idle 立即返回；若 running 則送 cancel 並輪詢直到 idle。
+  let s;
+  try { s = await fetch('/api/scan/status').then(r => r.json()); }
+  catch { return; }
+  if (!s || s.state !== 'running') return;
+  try { await fetch('/api/scan/cancel', {method: 'POST'}); } catch {}
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 200));
+    try {
+      const s2 = await fetch('/api/scan/status').then(r => r.json());
+      if (!s2 || s2.state !== 'running') return;
+    } catch { return; }
+  }
 }
 
 function onScanFinished(bundleId) {

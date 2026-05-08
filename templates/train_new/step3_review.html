@@ -229,6 +229,22 @@ function cancelPrefilterPolling() {
   if (_prefilterPollCancelFn) { _prefilterPollCancelFn(); _prefilterPollCancelFn = null; }
 }
 
+async function ensureBackendScanIdle() {
+  // 確保後端 scan 已停。已 idle 立即返回；若 running 則送 cancel 並輪詢直到 idle。
+  let s;
+  try { s = await fetch('/api/scan/status').then(r => r.json()); }
+  catch { return; }
+  if (!s || s.state !== 'running') return;
+  try { await fetch('/api/scan/cancel', {method: 'POST'}); } catch {}
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 200));
+    try {
+      const s2 = await fetch('/api/scan/status').then(r => r.json());
+      if (!s2 || s2.state !== 'running') return;
+    } catch { return; }
+  }
+}
+
 async function ensurePrefilterScoreForLightingZone(lighting, zone) {
   if (!_prefilterBundleId) return false;
   const key = `${lighting}|${zone}`;
@@ -315,6 +331,8 @@ async function reloadLightingWithPrefilter(lighting) {
     render();
     return;
   }
+  // 進新 scan 前，確保後端先前 scan 已 idle（解決切換 tab 太快的 409 問題）
+  await ensureBackendScanIdle();
   // 依序確保 inner 與 edge 都有分數（GPU lock 會把它們序列化）
   const okInner = await ensurePrefilterScoreForLightingZone(lighting, 'inner');
   const okEdge  = await ensurePrefilterScoreForLightingZone(lighting, 'edge');
