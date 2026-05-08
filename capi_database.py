@@ -2467,6 +2467,34 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def list_active_training_jobs(self) -> List[Dict]:
+        """回傳所有 state 在 (preprocess, review, train) 的 job，依 started_at DESC 排序。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT * FROM training_jobs
+                   WHERE state IN ('preprocess', 'review', 'train')
+                   ORDER BY started_at DESC"""
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return []
+            cols = [d[0] for d in cur.description]
+            jobs = []
+            for row in rows:
+                job = dict(zip(cols, row))
+                if job.get("panel_paths"):
+                    job["panel_paths"] = json.loads(job["panel_paths"])
+                else:
+                    job["panel_paths"] = []
+                raw_params = job.get("training_params")
+                job["training_params"] = json.loads(raw_params) if raw_params else None
+                jobs.append(job)
+            return jobs
+        finally:
+            conn.close()
+
     # ------------------------------------------------------------------
     # training_tile_pool CRUD
     # ------------------------------------------------------------------
