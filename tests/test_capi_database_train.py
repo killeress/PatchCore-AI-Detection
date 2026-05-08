@@ -282,3 +282,24 @@ class TestModelRegistryCRUD:
         # delete
         db.delete_model_bundle(bid)
         assert len(db.list_model_bundles(machine_id="GN160")) == 1
+
+
+def test_list_active_training_jobs_returns_all_open(tmp_path):
+    """preprocess + review 共存時都應該被列出，completed/failed 不算。"""
+    db = _make_db(tmp_path)
+    db.create_training_job(job_id="j_pre", machine_id="M", panel_paths=["/a", "/b", "/c"])
+    db.create_training_job(job_id="j_rev", machine_id="M", panel_paths=["/a", "/b", "/c"])
+    db.update_training_job_state("j_rev", "review")
+    db.create_training_job(job_id="j_done", machine_id="M", panel_paths=["/a", "/b", "/c"])
+    db.update_training_job_state("j_done", "completed")
+    db.create_training_job(job_id="j_failed", machine_id="M", panel_paths=["/a", "/b", "/c"])
+    db.update_training_job_state("j_failed", "failed")
+
+    rows = db.list_active_training_jobs()
+    ids = sorted(r["job_id"] for r in rows)
+    assert ids == ["j_pre", "j_rev"]
+
+
+def test_list_active_training_jobs_empty(tmp_path):
+    db = _make_db(tmp_path)
+    assert db.list_active_training_jobs() == []
