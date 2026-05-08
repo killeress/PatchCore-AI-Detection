@@ -5580,7 +5580,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         實際訓練在 capi_train_runner.py 的獨立 Python process 執行，使其能與
         推論 server 共用 GPU 而不互鎖（兩邊各自設 set_per_process_memory_fraction）。
         Subprocess 自行寫 DB（model_registry + training_jobs.state），supervisor
-        只負責把 log 檔尾巴搬到 in-memory log_lines + 退出後清狀態。
+        只負責把 log 檔尾巴搬到 per-job log_lines + 退出後釋放 train slot。
         """
         import os as _os
         import subprocess as _subprocess
@@ -5589,11 +5589,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         import traceback as _traceback
         from pathlib import Path as _Path
 
-        state = CAPIWebHandler._train_new_state
+        runtime = CAPIWebHandler._get_job_runtime(job_id)
+        if runtime is None:
+            runtime = CAPIWebHandler._make_job_runtime(job_id, "train")
+        runtime["phase"] = "train"
         db = server_inst.database
 
         def log(msg):
-            CAPIWebHandler._append_train_new_log(state, msg)
+            CAPIWebHandler._append_train_new_log(job_id, msg)
 
         proc = None
         try:
@@ -5603,7 +5606,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             log_dir.mkdir(parents=True, exist_ok=True)
             log_file = log_dir / f"{job_id}.log"
             cancel_flag = log_dir / f"{job_id}.cancel"
-            # 確保 log 檔是新的、cancel flag 不存在
             log_file.write_text("", encoding="utf-8")
             try:
                 cancel_flag.unlink()
@@ -5631,14 +5633,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 stderr=_subprocess.STDOUT,
             )
 
-            with state["lock"]:
-                state["proc"] = proc
-                state["log_file"] = str(log_file)
-                state["cancel_flag"] = str(cancel_flag)
+            runtime["proc"] = proc
+            runtime["log_file"] = str(log_file)
+            runtime["cancel_flag"] = str(cancel_flag)
 
             log(f"訓練 subprocess pid={proc.pid}，log={log_file}")
 
-            # tail 主迴圈：每 1s 讀 log file 增量 + 檢查 proc 是否退出
             tail_pos = 0
 
             def _drain_log():
@@ -5656,13 +5656,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 for line in text.splitlines():
                     line = line.rstrip()
                     if line:
-                        CAPIWebHandler._append_train_new_log(state, line)
+                        CAPIWebHandler._append_train_new_log(job_id, line)
 
             while True:
                 _drain_log()
                 ret = proc.poll()
                 if ret is not None:
-                    _drain_log()  # 殘餘 log 再撈一次
+                    _drain_log()
                     if ret == 0:
                         log(f"✓ 訓練 subprocess 結束 (exit=0)")
                     else:
@@ -5670,7 +5670,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     break
                 _time.sleep(1.0)
 
-            # subprocess 異常退出且 DB 還停在 "train" → 補刀標 failed
             if proc.returncode != 0:
                 try:
                     job = db.get_training_job(job_id)
@@ -5689,21 +5688,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 db.update_training_job_state(job_id, "failed", error_message=str(e))
             except Exception:
                 pass
-            # supervisor 異常時把 subprocess 也收掉
             if proc is not None and proc.poll() is None:
                 try:
                     proc.terminate()
                 except Exception:
                     pass
         finally:
-            with state["lock"]:
-                if state["active_job_id"] == job_id:
-                    state["active_job_id"] = None
-                    state["thread"] = None
-                    state["proc"] = None
-                    state["cancel_flag"] = None
-                    state["log_file"] = None
-                    CAPIWebHandler._train_new_cancel_event(state).clear()
+            # 釋放訓練槽（讓下一個排隊的 job 能進入 train）
+            slot = CAPIWebHandler._train_slot
+            with slot["lock"]:
+                if slot.get("active_job_id") == job_id:
+                    slot["active_job_id"] = None
+            # 訓練 done/failed 都把 runtime 清掉
+            CAPIWebHandler._drop_job_runtime(job_id)
 
     def _handle_train_new_thumb(self):
         """GET /api/train/new/thumb/<rest_of_path>"""
