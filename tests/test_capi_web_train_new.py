@@ -691,6 +691,45 @@ def test_handle_train_new_cancel_requests_live_training_stop():
     assert body["cancel_requested"] is True
 
 
+def test_handle_train_new_status_returns_per_job_log():
+    """兩個 job 的 log 不應互串。"""
+    from capi_web import CAPIWebHandler
+
+    CAPIWebHandler._train_new_jobs = {
+        "jA": {
+            "thread": None, "proc": None, "cancel_flag": None,
+            "log_file": None, "cancel_event": threading.Event(),
+            "log_lines": ["[hh:mm:ss] A line"], "log_lock": threading.Lock(),
+            "unit_status": {}, "phase": "review",
+        },
+        "jB": {
+            "thread": None, "proc": None, "cancel_flag": None,
+            "log_file": None, "cancel_event": threading.Event(),
+            "log_lines": ["[hh:mm:ss] B line"], "log_lock": threading.Lock(),
+            "unit_status": {}, "phase": "review",
+        },
+    }
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+
+    server = MagicMock()
+    server.database.get_training_job.side_effect = lambda jid: {
+        "job_id": jid, "machine_id": "M", "state": "review",
+        "started_at": None, "completed_at": None,
+        "output_bundle": None, "error_message": None,
+        "panel_paths": [],
+    }
+
+    h = _make_handler_with_server(server, "/api/train/new/status?job_id=jA")
+    h._handle_train_new_status()
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["log_lines"] == ["[hh:mm:ss] A line"]
+
+    h2 = _make_handler_with_server(server, "/api/train/new/status?job_id=jB")
+    h2._handle_train_new_status()
+    body2 = json.loads(h2._sent_response[0]["body"])
+    assert body2["log_lines"] == ["[hh:mm:ss] B line"]
+
+
 def test_handle_train_new_cancel_isolates_flags(tmp_path):
     """取消 j1 不應 touch j2 的 cancel flag 檔（事故 root cause regression）。"""
     from capi_web import CAPIWebHandler
@@ -772,12 +811,13 @@ def test_handle_train_new_progress_page_uses_step4_template_for_train_state():
     assert h._sent_response[0]["body"] == "<html>step4</html>"
 
 
-def test_handle_train_new_page_renders_step1_when_active_job_is_review():
-    """review 狀態可以回 Step 1；只有 preprocess/train 需要強制回進度頁。"""
+def test_handle_train_new_page_lists_all_active_jobs():
+    """Step 1 banner 應列出所有 open job（preprocess / review / train），不再只有最新一筆。"""
     server = MagicMock()
-    server.database.get_active_training_job.return_value = {
-        "job_id": "j1", "machine_id": "M", "state": "review"
-    }
+    server.database.list_active_training_jobs.return_value = [
+        {"job_id": "j_pre", "machine_id": "M", "state": "preprocess", "panel_paths": []},
+        {"job_id": "j_rev", "machine_id": "M", "state": "review", "panel_paths": []},
+    ]
     h = _make_handler_with_server(server, "/train/new")
     template = MagicMock()
     template.render.return_value = "<html>step1</html>"
@@ -788,7 +828,10 @@ def test_handle_train_new_page_renders_step1_when_active_job_is_review():
 
     h.jinja_env.get_template.assert_called_with("train_new/step1_select.html")
     template.render.assert_called_once()
-    assert template.render.call_args.kwargs["active_review_job"]["job_id"] == "j1"
+    active_jobs = template.render.call_args.kwargs["active_jobs"]
+    ids = [j["job_id"] for j in active_jobs]
+    assert "j_rev" in ids
+    # j_pre 在 preprocess 狀態：worker 不存在 → _mark_train_new_stale_if_needed 會把它標 failed → 從清單剔除
     assert h._sent_response[0]["body"] == "<html>step1</html>"
 
 

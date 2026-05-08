@@ -4830,21 +4830,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self._send_response(200, html)
 
     def _handle_train_new_page(self):
-        """GET /train/new"""
+        """GET /train/new — Step 1 with optional list of all open jobs."""
         db = self._capi_server_instance.database
-        active = db.get_active_training_job()
-        if active:
-            active = self._mark_train_new_stale_if_needed(db, active)
-            if active["state"] in ("preprocess", "train"):
-                self.send_response(302)
-                self.send_header("Location", f"/train/new/progress?job_id={active['job_id']}")
-                self.end_headers()
-                return
+        all_active = db.list_active_training_jobs()
+        # 把 stale job 補刀（preprocess/train 但 worker 已死）
+        cleaned = []
+        for j in all_active:
+            j = self._mark_train_new_stale_if_needed(db, j)
+            if j and j["state"] in ("preprocess", "review", "train"):
+                cleaned.append(j)
 
         template = self.jinja_env.get_template("train_new/step1_select.html")
         html = template.render(
             request_path="/train/new",
-            active_review_job=active if active and active.get("state") == "review" else None,
+            active_jobs=cleaned,
         )
         self._send_response(200, html)
 
@@ -5296,7 +5295,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         job_id = (qs.get("job_id") or [""])[0]
 
         db = self._capi_server_instance.database
-        state = self._train_new_state
 
         if not job_id:
             # 無 job_id 回最近 active job 狀態
@@ -5313,9 +5311,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             job = self._mark_train_new_stale_if_needed(db, job)
 
-        with state["log_lock"]:
-            log_lines = list(state["log_lines"][-100:])
-            unit_status = dict(state.get("unit_status") or {})
+        runtime = CAPIWebHandler._get_job_runtime(job_id)
+        if runtime is None:
+            log_lines = []
+            unit_status = {}
+        else:
+            with runtime["log_lock"]:
+                log_lines = list(runtime["log_lines"][-100:])
+                unit_status = dict(runtime.get("unit_status") or {})
 
         resp = {
             "job_id": job["job_id"], "machine_id": job["machine_id"],
