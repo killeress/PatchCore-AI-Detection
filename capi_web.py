@@ -5479,9 +5479,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _handle_train_new_cancel(self):
         """POST /api/train/new/cancel/<job_id>
 
-        Cancel a review-stage job immediately. Running training jobs are asked
-        to stop cooperatively; if the server was restarted and only a stale DB
-        state remains, mark it failed so a new run can start.
+        Cancel by job_id：訓練中 job 透過該 job 自己的 cancel flag 檔通知 runner；
+        review 階段 job 直接 mark failed；server restart 後 stale job 也標 failed。
+        cancel flag 的路徑從 per-job runtime 取，不讀全域，避免跨 job 互打。
         """
         job_id = self.path.rsplit("/", 1)[-1].split("?")[0]
         db = self._capi_server_instance.database
@@ -5491,31 +5491,35 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
         job = self._mark_train_new_stale_if_needed(db, job)
 
-        state = CAPIWebHandler._train_new_state
         if job["state"] == "failed":
             self._send_json({"ok": True, "job_id": job_id, "state": "failed"})
             return
 
+        runtime = CAPIWebHandler._get_job_runtime(job_id)
+
         if job["state"] in ("preprocess", "train"):
             if not self._train_new_worker_alive(job_id):
                 db.update_training_job_state(job_id, "failed", error_message="cancelled stale job")
-                with state["lock"]:
-                    if state.get("active_job_id") == job_id:
-                        state["active_job_id"] = None
-                        state["thread"] = None
-                        self._train_new_cancel_event(state).clear()
+                CAPIWebHandler._drop_job_runtime(job_id)
+                slot = CAPIWebHandler._train_slot
+                with slot["lock"]:
+                    if slot.get("active_job_id") == job_id:
+                        slot["active_job_id"] = None
                 self._send_json({"ok": True, "job_id": job_id, "state": "failed"})
                 return
 
-            self._train_new_cancel_event(state).set()
-            # 訓練 subprocess 透過 cancel flag 檔接收訊號（runner 端每 unit 檢查）
-            cancel_flag = state.get("cancel_flag")
-            if cancel_flag:
-                try:
-                    Path(cancel_flag).touch()
-                except Exception:
-                    pass
-            self._append_train_new_log(state, "收到取消要求，會在目前訓練階段結束後停止")
+            # 觸發該 job 的 cancel event 並 touch 該 job 的 cancel flag 檔
+            if runtime is not None:
+                runtime["cancel_event"].set()
+                cancel_flag = runtime.get("cancel_flag")
+                if cancel_flag:
+                    try:
+                        Path(cancel_flag).touch()
+                    except Exception:
+                        pass
+                CAPIWebHandler._append_train_new_log(
+                    job_id, "收到取消要求，會在目前訓練階段結束後停止"
+                )
             self._send_json({"ok": True, "job_id": job_id, "state": job["state"], "cancel_requested": True})
             return
 
@@ -5526,11 +5530,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         db.update_training_job_state(job_id, "failed", error_message="cancelled by user")
-        with state["lock"]:
-            if state.get("active_job_id") == job_id:
-                state["active_job_id"] = None
-                state["thread"] = None
-                self._train_new_cancel_event(state).clear()
+        CAPIWebHandler._drop_job_runtime(job_id)
         self._send_json({"ok": True, "job_id": job_id, "state": "failed"})
 
     def _handle_train_new_start_training(self):
