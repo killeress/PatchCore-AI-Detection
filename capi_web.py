@@ -5248,10 +5248,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         from capi_preprocess import PreprocessConfig
 
         db = server_inst.database
-        state = CAPIWebHandler._train_new_state
+        runtime = CAPIWebHandler._get_job_runtime(job_id)
+        if runtime is None:
+            # 防呆：理論上 _handle_train_new_start 已建好
+            runtime = CAPIWebHandler._make_job_runtime(job_id, "preprocess")
 
         def log(msg):
-            CAPIWebHandler._append_train_new_log(state, msg)
+            CAPIWebHandler._append_train_new_log(job_id, msg)
 
         try:
             train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
@@ -5283,20 +5286,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             )
 
             db.update_training_job_state(job_id, "review")
+            runtime["phase"] = "review"
             log("✓ 進入 review 階段")
         except Exception as e:
             traceback.print_exc()
             db.update_training_job_state(job_id, "failed", error_message=str(e))
             log(f"✗ 失敗: {e}")
-        finally:
-            with state["lock"]:
-                if state["active_job_id"] == job_id:
-                    # preprocess 完成不解鎖（仍在 review）；失敗才解鎖
-                    job = db.get_training_job(job_id)
-                    if job and job["state"] in ("failed",):
-                        state["active_job_id"] = None
-                        state["thread"] = None
-                        CAPIWebHandler._train_new_cancel_event(state).clear()
+            CAPIWebHandler._drop_job_runtime(job_id)
 
     def _handle_train_new_status(self):
         """GET /api/train/new/status?job_id=X
