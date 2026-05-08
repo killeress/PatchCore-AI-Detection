@@ -290,8 +290,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         with cls._train_new_jobs_lock:
             cls._train_new_jobs.pop(job_id, None)
 
-    @staticmethod
-    def _append_train_new_log(state: dict, msg: str) -> None:
+    @classmethod
+    def _append_train_new_log(cls, state_or_job_id, msg: str) -> None:
+        """寫一行 log + 解析 unit_status。
+
+        state_or_job_id 可以是 legacy state dict 或新 job_id (str)。過渡期支援兩種，
+        全部 caller 切完後改為只接受 str。
+        """
+        if isinstance(state_or_job_id, str):
+            runtime = cls._get_job_runtime(state_or_job_id)
+            if runtime is None:
+                return
+            state = runtime
+        else:
+            state = state_or_job_id
         with state["log_lock"]:
             state["log_lines"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
             if len(state["log_lines"]) > 500:
@@ -300,23 +312,38 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if m:
                 state.setdefault("unit_status", {})[m.group(1)] = _TRAIN_UNIT_STATUS_MAP[m.group(2)]
 
-    @staticmethod
-    def _train_new_cancel_event(state: dict) -> threading.Event:
-        return state.setdefault("cancel_event", threading.Event())
+    @classmethod
+    def _train_new_cancel_event(cls, state_or_job_id) -> threading.Event:
+        if isinstance(state_or_job_id, str):
+            runtime = cls._get_job_runtime(state_or_job_id)
+            if runtime is None:
+                return threading.Event()
+            return runtime.setdefault("cancel_event", threading.Event())
+        return state_or_job_id.setdefault("cancel_event", threading.Event())
 
     @classmethod
     def _train_new_worker_alive(cls, job_id: str) -> bool:
-        state = cls._train_new_state
-        with state["lock"]:
-            if state.get("active_job_id") != job_id:
+        runtime = cls._get_job_runtime(job_id)
+        if runtime is None:
+            # legacy fallback：在切換完成前還會被既有舊路徑 caller 呼叫
+            state = cls._train_new_state
+            with state["lock"]:
+                if state.get("active_job_id") != job_id:
+                    return False
+                thread = state.get("thread")
+                if thread is not None and thread.is_alive():
+                    return True
+                proc = state.get("proc")
+                if proc is not None and proc.poll() is None:
+                    return True
                 return False
-            thread = state.get("thread")
-            if thread is not None and thread.is_alive():
-                return True
-            proc = state.get("proc")
-            if proc is not None and proc.poll() is None:
-                return True
-            return False
+        thread = runtime.get("thread")
+        if thread is not None and thread.is_alive():
+            return True
+        proc = runtime.get("proc")
+        if proc is not None and proc.poll() is None:
+            return True
+        return False
 
     @classmethod
     def _mark_train_new_stale_if_needed(cls, db, job: Optional[dict]) -> Optional[dict]:
@@ -327,6 +354,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         error = "interrupted: server restarted or training worker is not running"
         db.update_training_job_state(job["job_id"], "failed", error_message=error)
+        # 若 runtime 還在註冊表（且沒 thread）→ 順手清掉
+        cls._drop_job_runtime(job["job_id"])
+        # legacy 路徑相容
         state = cls._train_new_state
         with state["lock"]:
             if state.get("active_job_id") == job["job_id"] or not state.get("active_job_id"):
