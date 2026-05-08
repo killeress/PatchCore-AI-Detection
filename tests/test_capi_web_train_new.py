@@ -614,12 +614,16 @@ def test_handle_train_new_cancel_marks_review_job_failed():
     server.database.get_training_job.return_value = {
         "job_id": "j1", "machine_id": "M", "state": "review", "panel_paths": []
     }
-    CAPIWebHandler._train_new_state = {
-        "lock": threading.Lock(),
-        "log_lock": threading.Lock(),
-        "active_job_id": "j1",
-        "log_lines": [],
+    CAPIWebHandler._train_new_jobs = {
+        "j1": {
+            "thread": None, "proc": None, "cancel_flag": None,
+            "log_file": None, "cancel_event": threading.Event(),
+            "log_lines": [], "log_lock": threading.Lock(),
+            "unit_status": {}, "phase": "review",
+        }
     }
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    CAPIWebHandler._train_slot = {"lock": threading.Lock(), "active_job_id": None}
 
     h = _make_handler_with_server(server, "/api/train/new/cancel/j1")
     h._handle_train_new_cancel()
@@ -629,7 +633,7 @@ def test_handle_train_new_cancel_marks_review_job_failed():
     )
     body = json.loads(h._sent_response[0]["body"])
     assert body["ok"] is True
-    assert CAPIWebHandler._train_new_state["active_job_id"] is None
+    assert "j1" not in CAPIWebHandler._train_new_jobs
 
 
 def test_handle_train_new_cancel_marks_stale_running_job_failed():
@@ -638,13 +642,9 @@ def test_handle_train_new_cancel_marks_stale_running_job_failed():
         "job_id": "j1", "machine_id": "M", "state": "train", "panel_paths": []
     }
     from capi_web import CAPIWebHandler
-    CAPIWebHandler._train_new_state = {
-        "lock": threading.Lock(),
-        "log_lock": threading.Lock(),
-        "active_job_id": None,
-        "thread": None,
-        "log_lines": [],
-    }
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    CAPIWebHandler._train_slot = {"lock": threading.Lock(), "active_job_id": None}
     h = _make_handler_with_server(server, "/api/train/new/cancel/j1")
 
     h._handle_train_new_cancel()
@@ -671,14 +671,16 @@ def test_handle_train_new_cancel_requests_live_training_stop():
         "job_id": "j1", "machine_id": "M", "state": "train", "panel_paths": []
     }
     cancel_event = threading.Event()
-    CAPIWebHandler._train_new_state = {
-        "lock": threading.Lock(),
-        "log_lock": threading.Lock(),
-        "active_job_id": "j1",
-        "thread": AliveThread(),
-        "cancel_event": cancel_event,
-        "log_lines": [],
+    CAPIWebHandler._train_new_jobs = {
+        "j1": {
+            "thread": AliveThread(), "proc": None, "cancel_flag": None,
+            "log_file": None, "cancel_event": cancel_event,
+            "log_lines": [], "log_lock": threading.Lock(),
+            "unit_status": {}, "phase": "train",
+        }
     }
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    CAPIWebHandler._train_slot = {"lock": threading.Lock(), "active_job_id": "j1"}
     h = _make_handler_with_server(server, "/api/train/new/cancel/j1")
 
     h._handle_train_new_cancel()
@@ -687,6 +689,53 @@ def test_handle_train_new_cancel_requests_live_training_stop():
     assert cancel_event.is_set()
     body = json.loads(h._sent_response[0]["body"])
     assert body["cancel_requested"] is True
+
+
+def test_handle_train_new_cancel_isolates_flags(tmp_path):
+    """取消 j1 不應 touch j2 的 cancel flag 檔（事故 root cause regression）。"""
+    from capi_web import CAPIWebHandler
+
+    flag_a = tmp_path / "a.cancel"
+    flag_b = tmp_path / "b.cancel"
+
+    class AliveProc:
+        def poll(self):
+            return None
+
+    class AliveThread:
+        def is_alive(self):
+            return True
+
+    CAPIWebHandler._train_new_jobs = {
+        "j1": {
+            "thread": AliveThread(), "proc": AliveProc(),
+            "cancel_flag": str(flag_a), "log_file": None,
+            "cancel_event": threading.Event(),
+            "log_lines": [], "log_lock": threading.Lock(),
+            "unit_status": {}, "phase": "train",
+        },
+        "j2": {
+            "thread": AliveThread(), "proc": AliveProc(),
+            "cancel_flag": str(flag_b), "log_file": None,
+            "cancel_event": threading.Event(),
+            "log_lines": [], "log_lock": threading.Lock(),
+            "unit_status": {}, "phase": "train",
+        },
+    }
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    CAPIWebHandler._train_slot = {"lock": threading.Lock(), "active_job_id": "j1"}
+
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1", "machine_id": "M", "state": "train", "panel_paths": []
+    }
+    h = _make_handler_with_server(server, "/api/train/new/cancel/j1")
+    h._handle_train_new_cancel()
+
+    assert flag_a.exists()
+    assert not flag_b.exists()
+    assert CAPIWebHandler._train_new_jobs["j1"]["cancel_event"].is_set()
+    assert not CAPIWebHandler._train_new_jobs["j2"]["cancel_event"].is_set()
 
 
 def test_handle_train_new_thumb_rejects_sibling_prefix_escape(tmp_path, monkeypatch):
