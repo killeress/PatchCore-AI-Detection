@@ -5546,20 +5546,35 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"job state must be 'review', currently '{job['state']}'"}, status=409)
             return
 
-        state = CAPIWebHandler._train_new_state
+        # GPU singleton：拿不到 train slot 就 409 並回對方 job_id
+        slot = CAPIWebHandler._train_slot
+        with slot["lock"]:
+            if slot.get("active_job_id") is not None:
+                self._send_json({
+                    "error": "another_job_training",
+                    "training_job_id": slot["active_job_id"],
+                }, status=409)
+                return
+            slot["active_job_id"] = job_id
+
+        # 確保 runtime 存在（從 review 接續，多半已存在；server 重啟後可能沒有）
+        runtime = CAPIWebHandler._get_job_runtime(job_id)
+        if runtime is None:
+            runtime = CAPIWebHandler._make_job_runtime(job_id, "train")
+        runtime["phase"] = "train"
+        runtime["proc"] = None
+        runtime["cancel_flag"] = None
+        runtime["log_file"] = None
+        runtime["unit_status"] = {}
+        runtime["cancel_event"].clear()
+
         thread = threading.Thread(
             target=CAPIWebHandler._train_new_training_worker,
             args=(job_id, job["machine_id"], job["panel_paths"], self._capi_server_instance),
             daemon=True, name=f"train_new-{job_id}",
         )
-        with state["lock"]:
-            state["active_job_id"] = job_id
-            self._train_new_cancel_event(state).clear()
-            state["thread"] = thread
-            state["proc"] = None
-            state["cancel_flag"] = None
-            state["log_file"] = None
-            state["unit_status"] = {}
+        runtime["thread"] = thread
+
         db.update_training_job_state(job_id, "train")
         thread.start()
         self._send_json({"ok": True, "state": "train"})
