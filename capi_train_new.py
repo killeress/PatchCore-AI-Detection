@@ -1032,6 +1032,13 @@ def train_single_submodel(
     """
     from contextlib import nullcontext
     import os
+
+    # train_single_submodel 同時被 wizard run_training_pipeline 與子模型
+    # retrain worker（同 process thread）呼叫，後者不會先設離線 env；
+    # 在此 ensure，避免 PatchCore 建立時 timm 走線上 huggingface_hub
+    # 撞到 server process 殘留的已關閉 httpx client。內部冪等。
+    _setup_offline_env(cfg.backbone_cache_dir, log, cfg.required_backbones)
+
     gpu_ctx = gpu_lock if gpu_lock is not None else nullcontext()
     unit_label = f"{lighting}-{zone}"
 
