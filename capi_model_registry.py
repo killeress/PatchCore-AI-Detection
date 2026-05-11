@@ -226,6 +226,7 @@ def deactivate_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
     if not bundle:
         raise ValueError(f"bundle {bundle_id} not found")
     yaml_rel = str(Path(bundle["bundle_path"]) / "machine_config.yaml")
+    _ensure_model_configs_remains_non_empty(server_config_path, removing={yaml_rel})
     _remove_from_model_configs(server_config_path, yaml_rel)
     db.set_bundle_active(bundle_id, False)
     return {"ok": True, "message": "已停用，請重啟 server 才會生效"}
@@ -252,6 +253,24 @@ def _remove_from_model_configs(server_config_path: Path, yaml_rel: str) -> None:
     _rewrite_model_configs(server_config_path, keep=lambda p: p != yaml_rel)
 
 
+def _ensure_model_configs_remains_non_empty(
+    server_config_path: Path, removing: set
+) -> None:
+    """擋住會把 model_configs 清空的 deactivate / delete。
+
+    server 啟動時 model_configs=[] 會直接 raise（capi_server.py:836），
+    在這裡先擋；若呼叫端要移除的 yaml 被移走後仍至少剩一個 entry 就放行。
+    """
+    cfg = _load_yaml(server_config_path)
+    remaining = [p for p in cfg.get("model_configs", []) if p not in removing]
+    if not remaining:
+        raise ValueError(
+            "不能停用 / 刪除最後一個 active bundle —— "
+            "server 重啟後將找不到任何模型可載入。"
+            "請先啟用其他 bundle 再執行此操作。"
+        )
+
+
 def delete_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
     bundle = db.get_model_bundle(bundle_id)
     if not bundle:
@@ -275,6 +294,9 @@ def delete_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
 
     raw_yaml = str(raw_bundle_path / "machine_config.yaml")
     resolved_yaml = str(bundle_path / "machine_config.yaml")
+    _ensure_model_configs_remains_non_empty(
+        server_config_path, removing={raw_yaml, resolved_yaml}
+    )
     _remove_from_model_configs(server_config_path, raw_yaml)
     if resolved_yaml != raw_yaml:
         _remove_from_model_configs(server_config_path, resolved_yaml)
