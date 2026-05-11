@@ -161,9 +161,9 @@ class CAPIConfig:
     omit_overexposure_ratio_threshold: float = 0.5 # 高亮像素(>230)佔比超過此值視為過曝
     
     # 邊緣衰減設定 (過濾光影假陽性)
-    edge_margin_px: int = 80                  # 邊緣衰減寬度 (px)，0=停用
+    edge_margin_px: int = 0                   # 邊緣衰減寬度 (px)，0=停用
     edge_margin_sides: Dict[str, bool] = field(default_factory=lambda: {
-        'top': False, 'bottom': True, 'left': False, 'right': False
+        'top': False, 'bottom': False, 'left': False, 'right': False
     })  # 各邊是否啟用衰減
     
     # 跳過檔案二值化偵測設定 (B0F00000 等無模型圖片)
@@ -183,7 +183,7 @@ class CAPIConfig:
     
     # 炸彈系統設定 (機台模擬缺陷)
     bomb_defects: List[BombDefect] = field(default_factory=list)
-    bomb_match_tolerance: int = 100  # 座標匹配容忍度 (產品座標系像素)
+    bomb_match_tolerance: int = 50  # 座標匹配容忍度 (產品座標系像素)
     bomb_line_min_aspect_ratio: float = 3.0  # Line 型炸彈 heatmap 最小長寬比
     
     # 機種第六碼 → 產品解析度映射表 (寬, 高)
@@ -317,7 +317,7 @@ class CAPIConfig:
             dust_peak_fraction_threshold=data.get("dust_peak_fraction_threshold", 0.80),
             omit_overexposure_mean_threshold=data.get("omit_overexposure_mean_threshold", 200),
             omit_overexposure_ratio_threshold=data.get("omit_overexposure_ratio_threshold", 0.5),
-            edge_margin_px=data.get("edge_margin_px", 80),
+            edge_margin_px=data.get("edge_margin_px", 0),
             edge_margin_sides=data.get("edge_margin_sides", cls._migrate_edge_margin(data)),
             bright_spot_threshold=data.get("bright_spot_threshold", 200),
             bright_spot_min_area=data.get("bright_spot_min_area", 5),
@@ -327,7 +327,7 @@ class CAPIConfig:
             side_shot_prefixes=data.get("side_shot_prefixes", []),
             max_images_per_panel=data.get("max_images_per_panel", 7),
             bomb_defects=[BombDefect.from_dict(b) for b in data.get("bomb_defects", [])],
-            bomb_match_tolerance=data.get("bomb_match_tolerance", 100),
+            bomb_match_tolerance=data.get("bomb_match_tolerance", 50),
             bomb_line_min_aspect_ratio=data.get("bomb_line_min_aspect_ratio", 3.0),
             model_resolution_map=data.get("model_resolution_map", {
                 'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200],
@@ -517,7 +517,11 @@ class CAPIConfig:
     
     @classmethod
     def _migrate_edge_margin(cls, data: Dict[str, Any]) -> Dict[str, bool]:
-        """向後相容：將舊版 edge_margin_bottom_only 轉換為新版 edge_margin_sides"""
+        """向後相容：將舊版 edge_margin_bottom_only 轉換為新版 edge_margin_sides
+
+        注意：edge_margin_px 預設 0 = 衰減停用，此函式回傳的 sides 沒實際作用；
+        留作 yaml 內顯式設 px>0 時的 sides fallback 行為。
+        """
         bottom_only = data.get("edge_margin_bottom_only", True)
         if bottom_only:
             return {'top': False, 'bottom': True, 'left': False, 'right': False}
