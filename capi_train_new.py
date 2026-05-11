@@ -589,26 +589,115 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
         if unit_thr:
             threshold_mapping[lighting] = unit_thr
 
+    # ⚠️ 維護注意：此處所有 production 值對齊 configs/capi_3f.yaml。
+    # yaml 沒寫的欄位會 fallback 到 CAPIConfig.from_dict 的預設值；
+    # 多數預設與 production 不同（過去曾因 patchcore_concentration_enabled、
+    # edge_margin_px、otsu_bottom_crop 等漏寫導致分數異常偏低）。
+    # 改 configs/capi_3f.yaml 時請同步檢查此處。
     cfg = {
         "machine_id": machine_id,
         "trained_at": datetime.now().isoformat(timespec="seconds"),
         "bundle_path": str(bundle_dir),
+
+        # === 切塊與面板偵測 ===
+        "tile_size": 512,
+        "tile_stride": 512,
         "edge_threshold_px": 768,
         "otsu_offset": 5,
+        # ⚠️ default=1000 會切掉 panel 底部 1000px，新架構 panel polygon 完全失準
+        "otsu_bottom_crop": 0,
         "enable_panel_polygon": True,
+
+        # === 模型映射 ===
         "model_mapping": model_mapping,
         "threshold_mapping": threshold_mapping,
-        # B0F00000（黑畫面）沒有 PatchCore 模型，AOI report 指到時改走二值化亮點偵測。
-        # 新架構雖然有 prefix-based fallback，但寫入 yaml 仍是 source of truth。
+
+        # === PatchCore 後處理過濾 ===
+        # ⚠️ 兩個 enabled 的 default 是 True，每個 tile score 被乘 ≤1.0 兩次
+        # → production 分數偏低；configs/capi_3f.yaml 全關
+        "patchcore_concentration_enabled": False,
+        "patchcore_concentration_min_ratio": 2.0,
+        "patchcore_concentration_penalty": 0.5,
+        "patchcore_diffuse_area_enabled": False,
+        "patchcore_diffuse_area_threshold": 0.3,
+        "patchcore_diffuse_area_penalty": 0.5,
+
+        # === 邊緣衰減 ===
+        # px=0 → capi_inference.py:1569 整段衰減邏輯 short-circuit，
+        # 衰減完全停用。產線實測 4 邊全開 + 衰減反而造成邊緣 NG 漏檢/分數偏低，
+        # 改為 yaml 顯式標註停用。需要重新啟用時改 px>0 並設定 sides。
+        "edge_margin_px": 0,
+        "edge_margin_sides": {
+            "top": False,
+            "bottom": False,
+            "left": False,
+            "right": False,
+        },
+
+        # === OMIT 灰塵偵測 ===
+        "dust_brightness_threshold": 40,
+        "dust_threshold_floor": 25,
+        "dust_bright_rescue_threshold": 180,
+        "dust_area_min": 5,
+        "dust_area_max": 50000,
+        "dust_extension": 3,
+        # default 0.02/5.0 比 production 寬鬆很多，dust 判定會跑掉
+        "dust_heatmap_iou_threshold": 0.007,
+        "dust_heatmap_top_percent": 0.4,
+        "dust_heatmap_metric": "coverage",
+
+        # === OMIT 過曝偵測 ===
+        "omit_overexposure_mean_threshold": 200,
+        "omit_overexposure_ratio_threshold": 0.5,
+
+        # === B0F 黑畫面亮點偵測（無模型，走二值化） ===
+        "bright_spot_threshold": 200,
+        "bright_spot_min_area": 5,
+        "bright_spot_median_kernel": 21,
+        "bright_spot_diff_threshold": 10,
+
+        # === 檔案過濾 ===
+        # B0F00000 改走亮點偵測；side_shot S* 自動跳過（無模型訓練資料）
         "skip_files": ["B0F00000"],
-        # AOI 機檢座標 attribution — 新架構 helper 改走「找既存 grid tile 標屬性」
-        # 而非切新 tile 推論，幾乎零成本，預設開啟。bundle yaml 缺此欄會走 CAPIConfig
-        # 預設 False，記錄頁的 🎯 AOI 機檢座標推論 區塊永遠不出現。
+        "side_shot_prefixes": [
+            "SG0F00000",
+            "SR0F00000",
+            "SW0F00000",
+            "SB0F00000",
+            "SWGF50500",
+            "SSTANDARD",
+            "SPINIGBI ",
+        ],
+        # ⚠️ from_dict default=7（與 dataclass default=20 不一致），不寫會把 panel
+        # 圖片數限制砍到 7 張
+        "max_images_per_panel": 20,
+
+        # === AOI 機檢座標 attribution ===
+        # 新架構 helper 改走「找既存 grid tile 標屬性」，幾乎零成本，預設開啟。
+        # 缺此欄會走 CAPIConfig 預設 False，記錄頁的 🎯 區塊永遠不出現。
         "aoi_coord_inspection_enabled": True,
         "aoi_report_path_replace_from": "yuantu",
         "aoi_report_path_replace_to": "Report",
-        # Scratch classifier post-filter — 預設承襲 configs/capi_3f.yaml 的 production
-        # 設定，避免新架構 machine_config.yaml 缺欄位走預設空字串、產線載入時撞網路。
+
+        # === 炸彈匹配 ===
+        # tolerance 過大會吃掉鄰近 AOI 真實缺陷（曾發生 dx=67/dy=98 兩顆獨立缺陷
+        # 被同一炸彈座標吸住）。bomb_line_min_aspect_ratio default=3.0 太嚴，
+        # line bomb 抓不到。
+        "bomb_match_tolerance": 50,
+        "bomb_line_min_aspect_ratio": 1.2,
+
+        # === 機種第六碼 → 產品解析度（本地工具如 diagnose_bomb 備用）===
+        "model_resolution_map": {
+            "B": [1366, 768],
+            "H": [1920, 1080],
+            "J": [1920, 1200],
+            "K": [2560, 1440],
+            "G": [2560, 1600],
+        },
+
+        # === Scratch classifier 後濾 ===
+        # 預設承襲 configs/capi_3f.yaml 的 production 設定，
+        # 避免缺欄位走 dataclass 預設空字串、產線載入時撞網路。
         "scratch_classifier_enabled": True,
         "scratch_safety_multiplier": 1.5,
         "scratch_bundle_path": "deployment/scratch_classifier_v3.pkl",
