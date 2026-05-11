@@ -346,6 +346,13 @@ function doAction(id, action) {
       ? `啟用此 bundle 將自動停用目前 active 的：\n  • ${others.join('\n  • ')}\n\n確定？`
       : '確定要啟用此 bundle？啟用後需重啟 server 才會生效。';
     if (!confirm(msg)) return;
+  } else if (action === 'deactivate') {
+    const activeCount = document.querySelectorAll('[data-bundle-active="1"]').length;
+    if (activeCount <= 1) {
+      alert('不能停用最後一個 active bundle ——\nserver 重啟後將找不到任何模型可載入。\n\n請先啟用其他 bundle 再停用此版本。');
+      return;
+    }
+    if (!confirm('確定要停用此 bundle？\n停用後需重啟 server 才會生效。')) return;
   }
   fetch(`/api/models/${id}/${action}`, {method:'POST'})
     .then(r => r.json())
