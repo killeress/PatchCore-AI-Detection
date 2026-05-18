@@ -4772,12 +4772,62 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         return cards
 
+    def _build_submodel_retrain_choices(self):
+        """Build bundle/unit choices for single PatchCore submodel retraining."""
+        from capi_train_new import TRAINING_UNITS
+
+        server_inst = self._capi_server_instance
+        db = server_inst.database if server_inst else None
+
+        bundles = []
+        if db:
+            for b in db.list_model_bundles():
+                # 單一子模型重訓需要原始 tile_pool job_id；已清訓練資料的 bundle 無法重訓。
+                if not b.get("job_id"):
+                    continue
+
+                bundle_path = str(b.get("bundle_path") or "")
+                bundle_name = Path(bundle_path).name or f"bundle-{b.get('id')}"
+                is_active = bool(b.get("is_active"))
+                bundles.append({
+                    "id": b.get("id"),
+                    "machine_id": b.get("machine_id") or "",
+                    "bundle_path": bundle_path,
+                    "bundle_name": bundle_name,
+                    "trained_at": b.get("trained_at") or "",
+                    "panel_count": b.get("panel_count") or 0,
+                    "inner_tile_count": b.get("inner_tile_count") or 0,
+                    "edge_tile_count": b.get("edge_tile_count") or 0,
+                    "ng_tile_count": b.get("ng_tile_count") or 0,
+                    "is_active": is_active,
+                    "job_id": b.get("job_id") or "",
+                    "label": (
+                        f"{b.get('machine_id') or '(unknown)'} / {bundle_name}"
+                        + (" (啟用中)" if is_active else "")
+                    ),
+                })
+
+        # 保持 DB 的 trained_at DESC，再把 active bundle 穩定排到前面。
+        bundles.sort(key=lambda x: x["trained_at"] or "", reverse=True)
+        bundles.sort(key=lambda x: not x["is_active"])
+
+        return {
+            "bundles": bundles,
+            "units": [
+                {"lighting": lighting, "zone": zone, "label": f"{lighting}-{zone}"}
+                for lighting, zone in TRAINING_UNITS
+            ],
+        }
+
     def _handle_training_page(self):
         """GET /training - hub page listing trainable models."""
         template = self.jinja_env.get_template("training.html")
+        submodel_choices = self._build_submodel_retrain_choices()
         html = template.render(
             request_path="/training",
             model_cards=self._build_training_cards(),
+            submodel_bundles=submodel_choices["bundles"],
+            submodel_units=submodel_choices["units"],
         )
         self._send_response(200, html)
 
