@@ -847,6 +847,60 @@ def test_handle_models_list_filters_by_machine_id():
     assert body["bundles"] == [{"id": 1, "machine_id": "M"}]
 
 
+def test_handle_training_page_exposes_submodel_retrain_choices():
+    server = MagicMock()
+    server.config = None
+    server.database.list_model_bundles.return_value = [
+        {
+            "id": 2,
+            "machine_id": "M2",
+            "bundle_path": "model/M2-old",
+            "trained_at": "2026-05-01T10:00:00",
+            "panel_count": 3,
+            "inner_tile_count": 30,
+            "edge_tile_count": 12,
+            "ng_tile_count": 4,
+            "is_active": 0,
+            "job_id": "job2",
+        },
+        {
+            "id": 1,
+            "machine_id": "M1",
+            "bundle_path": "model/M1-latest",
+            "trained_at": "2026-05-02T10:00:00",
+            "panel_count": 5,
+            "inner_tile_count": 50,
+            "edge_tile_count": 20,
+            "ng_tile_count": 8,
+            "is_active": 1,
+            "job_id": "job1",
+        },
+        {
+            "id": 3,
+            "machine_id": "M3",
+            "bundle_path": "model/M3-no-data",
+            "trained_at": "2026-05-03T10:00:00",
+            "is_active": 0,
+            "job_id": "",
+        },
+    ]
+    h = _make_handler_with_server(server, "/training")
+    template = MagicMock()
+    template.render.return_value = "<html>training</html>"
+    h.jinja_env = MagicMock()
+    h.jinja_env.get_template.return_value = template
+
+    h._handle_training_page()
+
+    h.jinja_env.get_template.assert_called_with("training.html")
+    kwargs = template.render.call_args.kwargs
+    assert [b["id"] for b in kwargs["submodel_bundles"]] == [1, 2]
+    assert kwargs["submodel_bundles"][0]["bundle_name"] == "M1-latest"
+    assert kwargs["submodel_bundles"][0]["is_active"] is True
+    assert "G0F00000-inner" in [u["label"] for u in kwargs["submodel_units"]]
+    assert h._sent_response[0]["body"] == "<html>training</html>"
+
+
 def test_handle_train_new_start_rejects_wrong_panel_count():
     """非 3 片 panel 一律拒絕。"""
     server = MagicMock()

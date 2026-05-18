@@ -3,6 +3,153 @@
 {% block title %}模型訓練{% endblock %}
 
 {% block content %}
+<style>
+  .train-submodel-panel {
+    margin-top: 26px;
+    background: #11111b;
+    border: 1px solid #313244;
+    border-radius: 8px;
+    padding: 18px 20px;
+    color: #cdd6f4;
+  }
+  .train-submodel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .train-submodel-title {
+    color: #cdd6f4;
+    margin: 0 0 5px 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+  .train-submodel-subtitle {
+    color: #a6adc8;
+    margin: 0;
+    font-size: .86rem;
+    line-height: 1.45;
+  }
+  .train-submodel-form {
+    display: grid;
+    grid-template-columns: minmax(260px, 1.4fr) minmax(190px, .8fr) auto;
+    gap: 12px;
+    align-items: end;
+  }
+  .train-field label {
+    display: block;
+    color: #a6adc8;
+    font-size: .78rem;
+    margin-bottom: 5px;
+    font-weight: 600;
+  }
+  .train-field select {
+    width: 100%;
+    background: #1e1e2e;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 5px;
+    padding: 8px 10px;
+    font-size: .86rem;
+  }
+  .train-primary-btn {
+    background: #89b4fa;
+    color: #1e1e2e;
+    border: none;
+    border-radius: 5px;
+    padding: 9px 16px;
+    font-weight: 700;
+    cursor: pointer;
+    min-width: 132px;
+  }
+  .train-primary-btn:disabled {
+    background: #45475a;
+    color: #a6adc8;
+    cursor: wait;
+  }
+  .train-submodel-info {
+    margin-top: 12px;
+    color: #bac2de;
+    font-size: .82rem;
+    line-height: 1.5;
+  }
+  .train-submodel-empty {
+    background: #313244;
+    border-radius: 6px;
+    padding: 18px;
+    color: #a6adc8;
+    text-align: center;
+    font-size: .88rem;
+  }
+  .train-progress {
+    display: none;
+    margin-top: 16px;
+    padding: 12px;
+    background: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+  }
+  .train-step-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+  .train-step-pill {
+    padding: 4px 10px;
+    background: #313244;
+    color: #6c7086;
+    border-radius: 12px;
+    font-size: .78rem;
+  }
+  .train-step-pill.active {
+    background: #89b4fa;
+    color: #1e1e2e;
+    font-weight: 700;
+  }
+  .train-step-pill.done {
+    background: #a6e3a1;
+    color: #1e1e2e;
+  }
+  .train-step-pill.failed {
+    background: #f38ba8;
+    color: #1e1e2e;
+  }
+  .train-log {
+    max-height: 220px;
+    overflow: auto;
+    background: #11111b;
+    color: #cdd6f4;
+    padding: 8px;
+    border-radius: 4px;
+    font-size: .82rem;
+    margin: 0;
+    white-space: pre-wrap;
+  }
+  .train-summary {
+    display: none;
+    margin-top: 12px;
+    padding: 10px;
+    background: #313244;
+    border-radius: 5px;
+    color: #cdd6f4;
+    font-size: .84rem;
+  }
+  @media (max-width: 820px) {
+    .train-submodel-head,
+    .train-submodel-form {
+      display: block;
+    }
+    .train-field {
+      margin-bottom: 10px;
+    }
+    .train-primary-btn {
+      width: 100%;
+    }
+  }
+</style>
+
 <div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
 
   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:24px;">
@@ -59,5 +206,321 @@
     </div>
   {% endif %}
 
+  <section class="train-submodel-panel">
+    <div class="train-submodel-head">
+      <div>
+        <h2 class="train-submodel-title">單一 PatchCore 子模型重訓</h2>
+        <p class="train-submodel-subtitle">針對指定 bundle 的 lighting / zone 重訓，其他子模型不會重跑。</p>
+      </div>
+      <a href="/models"
+         style="background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a;padding:7px 12px;border-radius:5px;
+                font-weight:600;text-decoration:none;font-size:.82rem;white-space:nowrap;">
+        管理訓練資料
+      </a>
+    </div>
+
+    {% if not submodel_bundles %}
+      <div class="train-submodel-empty">
+        尚無可單獨重訓的 PatchCore bundle。需要先完成一次新機種訓練並保留訓練資料。
+      </div>
+    {% else %}
+      <div class="train-submodel-form">
+        <div class="train-field">
+          <label for="submodelBundleSelect">Bundle</label>
+          <select id="submodelBundleSelect" onchange="handleSubmodelBundleChange()">
+            {% for bundle in submodel_bundles %}
+              <option value="{{ bundle.id }}">{{ bundle.label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="train-field">
+          <label for="submodelUnitSelect">子模型</label>
+          <select id="submodelUnitSelect">
+            {% for unit in submodel_units %}
+              <option value="{{ unit.lighting }}|{{ unit.zone }}">{{ unit.label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button id="submodelRetrainBtn" class="train-primary-btn" onclick="startSubmodelRetrainFromTraining()">
+          開始單一重訓
+        </button>
+      </div>
+
+      <div id="submodelBundleInfo" class="train-submodel-info"></div>
+
+      <div id="submodelRetrainProgress" class="train-progress">
+        <div class="train-step-row">
+          <span class="train-step-pill" data-step="stage">Stage</span>
+          <span class="train-step-pill" data-step="train">Train</span>
+          <span class="train-step-pill" data-step="metrics">Metrics</span>
+          <span class="train-step-pill" data-step="swap">Swap</span>
+          <span class="train-step-pill" data-step="reload">Reload</span>
+          <span class="train-step-pill" data-step="done">Done</span>
+        </div>
+        <pre id="submodelRetrainLog" class="train-log"></pre>
+        <div id="submodelRetrainSummary" class="train-summary"></div>
+      </div>
+    {% endif %}
+  </section>
+
 </div>
+
+<script>
+const SUBMODEL_BUNDLES = {{ submodel_bundles|tojson }};
+const SUBMODEL_UNITS = {{ submodel_units|tojson }};
+const SUBMODEL_RETRAIN_STEPS = ['stage', 'train', 'metrics', 'swap', 'reload', 'done'];
+let submodelRetrainPollTimer = null;
+
+function escapeTrainingHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
+    return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch];
+  });
+}
+
+function getSelectedSubmodelBundle() {
+  const select = document.getElementById('submodelBundleSelect');
+  if (!select) return null;
+  const id = parseInt(select.value, 10);
+  return SUBMODEL_BUNDLES.find(function(bundle) {
+    return Number(bundle.id) === id;
+  }) || null;
+}
+
+function getSelectedSubmodelUnit() {
+  const select = document.getElementById('submodelUnitSelect');
+  if (!select || !select.value) return null;
+  const parts = select.value.split('|');
+  const lighting = parts[0];
+  const zone = parts[1];
+  return SUBMODEL_UNITS.find(function(unit) {
+    return unit.lighting === lighting && unit.zone === zone;
+  }) || {lighting: lighting, zone: zone, label: lighting + '-' + zone};
+}
+
+function setSubmodelRetrainBusy(isBusy) {
+  const btn = document.getElementById('submodelRetrainBtn');
+  if (!btn) return;
+  btn.disabled = isBusy || !getSelectedSubmodelBundle() || !getSelectedSubmodelUnit();
+  btn.textContent = isBusy ? '重訓中...' : '開始單一重訓';
+}
+
+function renderSubmodelBundleInfo() {
+  const bundle = getSelectedSubmodelBundle();
+  const info = document.getElementById('submodelBundleInfo');
+  if (!info) return;
+  if (!bundle) {
+    info.textContent = '';
+    setSubmodelRetrainBusy(false);
+    return;
+  }
+  const active = bundle.is_active ? ' · 啟用中' : '';
+  info.textContent =
+    bundle.machine_id + ' / ' + bundle.bundle_name + active +
+    ' · 最後訓練：' + (bundle.trained_at || '未知') +
+    ' · Panel：' + (bundle.panel_count || 0) +
+    ' · Inner：' + (bundle.inner_tile_count || 0) +
+    ' · Edge：' + (bundle.edge_tile_count || 0) +
+    ' · NG：' + (bundle.ng_tile_count || 0);
+  setSubmodelRetrainBusy(false);
+}
+
+function resetSubmodelRetrainProgress() {
+  document.querySelectorAll('#submodelRetrainProgress .train-step-pill').forEach(function(el) {
+    el.classList.remove('active', 'done', 'failed');
+  });
+  const log = document.getElementById('submodelRetrainLog');
+  const summary = document.getElementById('submodelRetrainSummary');
+  if (log) log.textContent = '';
+  if (summary) {
+    summary.style.display = 'none';
+    summary.innerHTML = '';
+  }
+}
+
+function handleSubmodelBundleChange() {
+  if (submodelRetrainPollTimer) {
+    clearInterval(submodelRetrainPollTimer);
+    submodelRetrainPollTimer = null;
+  }
+  const progress = document.getElementById('submodelRetrainProgress');
+  if (progress) progress.style.display = 'none';
+  resetSubmodelRetrainProgress();
+  renderSubmodelBundleInfo();
+  checkRunningSubmodelRetrain();
+}
+
+async function checkRunningSubmodelRetrain() {
+  const bundle = getSelectedSubmodelBundle();
+  if (!bundle) return;
+  try {
+    const resp = await fetch('/api/models/' + bundle.id + '/retrain_status?tail=200');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data.job && data.job.state === 'running') {
+      beginSubmodelRetrainPolling(bundle.id);
+    }
+  } catch (e) {
+    console.warn('retrain status check failed', e);
+  }
+}
+
+async function startSubmodelRetrainFromTraining() {
+  const bundle = getSelectedSubmodelBundle();
+  const unit = getSelectedSubmodelUnit();
+  if (!bundle || !unit) {
+    alert('請選擇 bundle 與子模型');
+    return;
+  }
+
+  if (!confirm('確認重訓 ' + bundle.machine_id + ' / ' + unit.label + '？\n其他子模型不會重新訓練，threshold 維持原值。')) {
+    return;
+  }
+
+  setSubmodelRetrainBusy(true);
+  const progress = document.getElementById('submodelRetrainProgress');
+  if (progress) progress.style.display = 'block';
+  resetSubmodelRetrainProgress();
+
+  let resp;
+  try {
+    resp = await fetch('/api/models/' + bundle.id + '/retrain_submodel', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({lighting: unit.lighting, zone: unit.zone}),
+    });
+  } catch (e) {
+    alert('啟動失敗：' + e);
+    setSubmodelRetrainBusy(false);
+    return;
+  }
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(function() { return {}; });
+    if (resp.status === 409 && err.job && Number(err.job.bundle_id) === Number(bundle.id)) {
+      beginSubmodelRetrainPolling(bundle.id);
+      return;
+    }
+    alert('啟動失敗：' + (err.error || resp.status));
+    setSubmodelRetrainBusy(false);
+    return;
+  }
+
+  beginSubmodelRetrainPolling(bundle.id);
+}
+
+function beginSubmodelRetrainPolling(bundleId) {
+  const progress = document.getElementById('submodelRetrainProgress');
+  if (progress) progress.style.display = 'block';
+  setSubmodelRetrainBusy(true);
+
+  if (submodelRetrainPollTimer) clearInterval(submodelRetrainPollTimer);
+  submodelRetrainPollTimer = setInterval(function() {
+    pollSubmodelRetrainStatus(bundleId);
+  }, 2000);
+  pollSubmodelRetrainStatus(bundleId);
+}
+
+async function pollSubmodelRetrainStatus(bundleId) {
+  const selected = getSelectedSubmodelBundle();
+  if (!selected || Number(selected.id) !== Number(bundleId)) {
+    clearInterval(submodelRetrainPollTimer);
+    submodelRetrainPollTimer = null;
+    return;
+  }
+
+  let resp;
+  try {
+    resp = await fetch('/api/models/' + bundleId + '/retrain_status?tail=200');
+  } catch (e) {
+    console.warn('retrain poll failed', e);
+    return;
+  }
+
+  if (!resp.ok) {
+    clearInterval(submodelRetrainPollTimer);
+    submodelRetrainPollTimer = null;
+    setSubmodelRetrainBusy(false);
+    return;
+  }
+
+  const data = await resp.json();
+  if (!data.job) {
+    clearInterval(submodelRetrainPollTimer);
+    submodelRetrainPollTimer = null;
+    setSubmodelRetrainBusy(false);
+    return;
+  }
+
+  renderSubmodelRetrainJob(data.job);
+
+  if (data.job.state === 'completed' || data.job.state === 'failed') {
+    clearInterval(submodelRetrainPollTimer);
+    submodelRetrainPollTimer = null;
+    setSubmodelRetrainBusy(false);
+  }
+}
+
+function renderSubmodelRetrainJob(job) {
+  const curIdx = SUBMODEL_RETRAIN_STEPS.indexOf(job.step);
+  document.querySelectorAll('#submodelRetrainProgress .train-step-pill').forEach(function(el) {
+    const idx = SUBMODEL_RETRAIN_STEPS.indexOf(el.dataset.step);
+    el.classList.remove('active', 'done', 'failed');
+    if (job.state === 'completed' && idx <= curIdx) {
+      el.classList.add('done');
+    } else if (job.state === 'failed' && idx === curIdx) {
+      el.classList.add('failed');
+    } else if (idx < curIdx) {
+      el.classList.add('done');
+    } else if (idx === curIdx) {
+      el.classList.add('active');
+    }
+  });
+
+  const logEl = document.getElementById('submodelRetrainLog');
+  if (logEl) {
+    logEl.textContent = (job.log_lines || []).join('\n');
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  if (job.state === 'completed' || job.state === 'failed') {
+    renderSubmodelRetrainSummary(job);
+  }
+}
+
+function renderSubmodelRetrainSummary(job) {
+  const el = document.getElementById('submodelRetrainSummary');
+  if (!el) return;
+  el.style.display = 'block';
+
+  if (job.state === 'failed') {
+    el.style.background = '#3d1c25';
+    el.innerHTML = '<strong style="color:#f38ba8;">重訓失敗</strong><br>' +
+      '<span>' + escapeTrainingHtml(job.error || '') + '</span>';
+    return;
+  }
+
+  const s = job.summary || {};
+  el.style.background = '#1e3025';
+  el.innerHTML =
+    '<strong style="color:#a6e3a1;">重訓完成</strong>' +
+    '<table style="width:100%;margin-top:8px;color:#cdd6f4;">' +
+    '<tr><td>AUROC</td><td>' + escapeTrainingHtml(s.auroc_old == null ? '-' : s.auroc_old) +
+    ' -> <strong>' + escapeTrainingHtml(s.auroc_new == null ? '-' : s.auroc_new) + '</strong></td></tr>' +
+    '<tr><td>訓練 tile 數</td><td>' + escapeTrainingHtml(s.tile_count_old == null ? '-' : s.tile_count_old) +
+    ' -> <strong>' + escapeTrainingHtml(s.tile_count_new == null ? '-' : s.tile_count_new) + '</strong></td></tr>' +
+    '</table>' +
+    '<p style="color:#fab387;margin:8px 0 0;font-size:.82rem;">Threshold 維持原值。</p>';
+}
+
+function initSubmodelRetrainPanel() {
+  renderSubmodelBundleInfo();
+  checkRunningSubmodelRetrain();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initSubmodelRetrainPanel);
+} else {
+  initSubmodelRetrainPanel();
+}
+</script>
 {% endblock %}
