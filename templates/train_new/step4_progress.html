@@ -1,9 +1,15 @@
 {% extends "base.html" %}
-{% block title %}模型訓練 - Step 4{% endblock %}
+{% block title %}模型訓練 - Step 5{% endblock %}
 {% block content %}
 <div style="max-width:980px;margin:0 auto;padding:24px 16px;">
-  <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.3rem;">Step 4 / 5 · PatchCore 模型訓練</h1>
-  <p style="color:#a6adc8;font-size:.85rem;">系統正在依 5 個光源與 inner/edge 區域訓練 10 個模型。</p>
+  <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.3rem;">Step 5 / 6 · PatchCore 模型訓練</h1>
+  <p style="color:#a6adc8;font-size:.85rem;">
+    {% if training_scope and training_scope.mode == "partial" %}
+      系統正在局部重訓 selected PT：{{ training_scope.selected_units|join(", ") }}。
+    {% else %}
+      系統正在依 5 個光源與 inner/edge 區域訓練 10 個模型。
+    {% endif %}
+  </p>
 
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px;">
     <div id="status-pill" style="display:inline-block;background:#fab387;color:#1e1e2e;padding:5px 14px;border-radius:14px;font-weight:700;">訓練中</div>
@@ -61,8 +67,7 @@
 <script>
 const params = new URLSearchParams(location.search);
 const jobId = params.get('job_id') || "{{ job_id }}";
-const units = ['G0F00000','R0F00000','W0F00000','WGF50500','STANDARD']
-  .flatMap(l => [`${l}-inner`, `${l}-edge`]);
+const units = {{ unit_labels|tojson }};
 let _timer = null;
 let _lastLogText = '';
 

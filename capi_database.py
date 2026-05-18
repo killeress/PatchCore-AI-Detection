@@ -266,7 +266,8 @@ class CAPIDatabase:
                     panel_modes     TEXT,
                     output_bundle   TEXT,
                     error_message   TEXT,
-                    training_params TEXT
+                    training_params TEXT,
+                    training_scope  TEXT
                 );
 
                 -- 已訓練模型 bundle 元資料
@@ -360,6 +361,8 @@ class CAPIDatabase:
             add_column_if_not_exists("training_jobs", "training_params", "TEXT")
             # 8 panel wizard：前 3 = full（收 inner+edge），後 5 = corners_only（只收 4 角給 edge 模型補強）
             add_column_if_not_exists("training_jobs", "panel_modes", "TEXT")
+            # 6-step wizard：完整訓練或局部重訓 scope（mode / selected_units / target_bundle_id）
+            add_column_if_not_exists("training_jobs", "training_scope", "TEXT")
             # 新架構 (C-10) per-tile model routing 紀錄："inner" / "edge" / "bright_spot"；v1 為 ""
             add_column_if_not_exists("tile_results", "zone", "TEXT DEFAULT ''")
 
@@ -2373,6 +2376,7 @@ class CAPIDatabase:
         panel_paths: list,
         training_params: Optional[Dict[str, Any]] = None,
         panel_modes: Optional[list] = None,
+        training_scope: Optional[Dict[str, Any]] = None,
     ) -> int:
         """建立一筆新的訓練 job，初始 state 為 'preprocess'。回傳 rowid。
 
@@ -2386,14 +2390,15 @@ class CAPIDatabase:
         # 來源已驗證但無覆寫項，留給呼叫端決定是否要寫入）。
         params_json = json.dumps(training_params) if training_params is not None else None
         modes_json = json.dumps(panel_modes) if panel_modes is not None else None
+        scope_json = json.dumps(training_scope) if training_scope is not None else None
         conn = self._get_conn()
         try:
             cur = conn.cursor()
             cur.execute(
                 """INSERT INTO training_jobs
-                   (job_id, machine_id, state, started_at, panel_paths, panel_modes, training_params)
-                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?)""",
-                (job_id, machine_id, json.dumps(panel_paths), modes_json, params_json),
+                   (job_id, machine_id, state, started_at, panel_paths, panel_modes, training_params, training_scope)
+                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?, ?)""",
+                (job_id, machine_id, json.dumps(panel_paths), modes_json, params_json, scope_json),
             )
             conn.commit()
             return cur.lastrowid
@@ -2416,6 +2421,8 @@ class CAPIDatabase:
             job["panel_modes"] = ["full"] * len(job["panel_paths"])
         raw_params = job.get("training_params")
         job["training_params"] = json.loads(raw_params) if raw_params else None
+        raw_scope = job.get("training_scope")
+        job["training_scope"] = json.loads(raw_scope) if raw_scope else None
         return job
 
     def get_training_job(self, job_id: str) -> Optional[Dict]:
@@ -2495,17 +2502,7 @@ class CAPIDatabase:
             if not rows:
                 return []
             cols = [d[0] for d in cur.description]
-            jobs = []
-            for row in rows:
-                job = dict(zip(cols, row))
-                if job.get("panel_paths"):
-                    job["panel_paths"] = json.loads(job["panel_paths"])
-                else:
-                    job["panel_paths"] = []
-                raw_params = job.get("training_params")
-                job["training_params"] = json.loads(raw_params) if raw_params else None
-                jobs.append(job)
-            return jobs
+            return [self._decode_training_job_row(cols, row) for row in rows]
         finally:
             conn.close()
 

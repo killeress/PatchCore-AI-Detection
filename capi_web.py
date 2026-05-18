@@ -160,7 +160,7 @@ class _CallbackLogHandler(logging.Handler):
 #   [16:13:38] INFO [capi.train_runner] [3/10] R0F00000-inner: 載 tile
 #   [15:32:50] INFO [capi.train_runner] [1/10] G0F00000-inner: ✓ done | 360s, ...
 _TRAIN_UNIT_LOG_RE = re.compile(
-    r"\[\d+/10\]\s+(\S+):\s+(✓ done|✗ 訓練失敗|跳過：tile 不足|載 tile)"
+    r"\[\d+/\d+\]\s+(\S+):\s+(✓ done|✗ 訓練失敗|跳過：tile 不足|載 tile)"
 )
 _TRAIN_UNIT_STATUS_MAP = {
     "✓ done": "done",
@@ -391,7 +391,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/training":
                 self._handle_training_page()
             elif path == "/train/new":
-                self._handle_train_new_page()
+                self._handle_train_new_scope_page()
+            elif path == "/train/new/select":
+                self._handle_train_new_select_page()
             elif path == "/train/new/progress":
                 self._handle_train_new_progress_page()
             elif path.startswith("/train/new/review/"):
@@ -4765,7 +4767,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         cards.append({
             "title": "新機種 PatchCore",
             "subtitle": "C-10 (5 lighting × inner+edge)",
-            "description": f"為新機種訓練 10 個模型 bundle。已啟用 {active_count} 個 / 共 {new_arch_count} bundle。",
+            "description": f"訓練完整 10 個 PT，或針對既有 bundle 選擇指定 PT 重新選圖重訓。已啟用 {active_count} 個 / 共 {new_arch_count} bundle。",
             "bundle_path": "model/<機種>-<日期>",
             "trained_at": "—" if new_arch_count == 0 else "詳見模型庫",
             "status": "ok" if active_count > 0 else "warning",
@@ -4824,22 +4826,93 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "total_panel_count": WIZARD_TOTAL_PANEL_COUNT,
         }
 
+    @staticmethod
+    def _all_train_unit_labels() -> list:
+        from capi_train_new import TRAINING_UNITS
+        return [f"{lighting}-{zone}" for lighting, zone in TRAINING_UNITS]
+
+    @classmethod
+    def _normalize_train_new_scope(cls, raw, db=None) -> tuple:
+        """Validate and normalize train scope for the 6-step wizard.
+
+        Returns (scope, error).  The default is full 10-unit training.
+        """
+        all_units = cls._all_train_unit_labels()
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            return None, "training_scope must be an object"
+
+        mode = str(raw.get("mode") or raw.get("training_mode") or "full")
+        if mode not in ("full", "partial"):
+            return None, "training_scope.mode must be 'full' or 'partial'"
+
+        if mode == "full":
+            return {
+                "mode": "full",
+                "selected_units": all_units,
+                "target_bundle_id": None,
+            }, None
+
+        selected = raw.get("selected_units")
+        if not isinstance(selected, list) or not selected:
+            return None, "training_scope.selected_units must be a non-empty list"
+
+        clean_units = []
+        for unit in selected:
+            unit = str(unit)
+            if unit not in all_units:
+                return None, f"invalid selected unit: {unit}"
+            if unit not in clean_units:
+                clean_units.append(unit)
+
+        try:
+            target_bundle_id = int(raw.get("target_bundle_id"))
+        except (TypeError, ValueError):
+            return None, "training_scope.target_bundle_id is required for partial training"
+
+        if db is not None and not db.get_model_bundle(target_bundle_id):
+            return None, "target bundle not found"
+
+        return {
+            "mode": "partial",
+            "selected_units": clean_units,
+            "target_bundle_id": target_bundle_id,
+        }, None
+
+    @staticmethod
+    def _scope_selected_units(scope: Optional[dict]) -> list:
+        from capi_train_new import TRAINING_UNITS
+        labels = (scope or {}).get("selected_units") or [
+            f"{lighting}-{zone}" for lighting, zone in TRAINING_UNITS
+        ]
+        out = []
+        for label in labels:
+            try:
+                lighting, zone = str(label).rsplit("-", 1)
+            except ValueError:
+                continue
+            out.append((lighting, zone))
+        return out
+
+    @classmethod
+    def _scope_selected_lightings(cls, scope: Optional[dict]) -> list:
+        out = []
+        for lighting, _zone in cls._scope_selected_units(scope):
+            if lighting not in out:
+                out.append(lighting)
+        return out
+
     def _handle_training_page(self):
         """GET /training - hub page listing trainable models."""
         template = self.jinja_env.get_template("training.html")
-        submodel_choices = self._build_submodel_retrain_choices()
         html = template.render(
             request_path="/training",
             model_cards=self._build_training_cards(),
-            submodel_bundles=submodel_choices["bundles"],
-            submodel_units=submodel_choices["units"],
-            submodel_full_panel_count=submodel_choices["full_panel_count"],
-            submodel_total_panel_count=submodel_choices["total_panel_count"],
         )
         self._send_response(200, html)
 
-    def _handle_train_new_page(self):
-        """GET /train/new — Step 1 with optional list of all open jobs."""
+    def _list_open_train_new_jobs(self):
         db = self._capi_server_instance.database
         all_active = db.list_active_training_jobs()
         # 把 stale job 補刀（preprocess/train 但 worker 已死）
@@ -4848,11 +4921,53 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             j = self._mark_train_new_stale_if_needed(db, j)
             if j and j["state"] in ("preprocess", "review", "train"):
                 cleaned.append(j)
+        return cleaned
+
+    def _handle_train_new_scope_page(self):
+        """GET /train/new — Step 1 / 6: choose full training or selected PTs."""
+        choices = self._build_submodel_retrain_choices()
+        template = self.jinja_env.get_template("train_new/step1_scope.html")
+        html = template.render(
+            request_path="/train/new",
+            active_jobs=self._list_open_train_new_jobs(),
+            bundles=choices["bundles"],
+            units=choices["units"],
+        )
+        self._send_response(200, html)
+
+    def _handle_train_new_page(self):
+        """Backward-compatible alias for tests/callers that still invoke the old method."""
+        self._handle_train_new_scope_page()
+
+    def _handle_train_new_select_page(self):
+        """GET /train/new/select — Step 2 / 6: choose panel training data."""
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        mode = (qs.get("mode") or ["full"])[0]
+        target_bundle_id = (qs.get("target_bundle_id") or [""])[0]
+        units_raw = (qs.get("units") or [""])[0]
+        scope_raw = {"mode": mode}
+        if target_bundle_id:
+            scope_raw["target_bundle_id"] = target_bundle_id
+        if units_raw:
+            scope_raw["selected_units"] = [u for u in units_raw.split(",") if u]
+
+        scope, err = self._normalize_train_new_scope(scope_raw, self._capi_server_instance.database)
+        if err:
+            self._send_response(400, f"Invalid training scope: {err}")
+            return
+
+        target_bundle = None
+        if scope["mode"] == "partial":
+            target_bundle = self._capi_server_instance.database.get_model_bundle(scope["target_bundle_id"])
 
         template = self.jinja_env.get_template("train_new/step1_select.html")
         html = template.render(
-            request_path="/train/new",
-            active_jobs=cleaned,
+            request_path="/train/new/select",
+            active_jobs=self._list_open_train_new_jobs(),
+            training_scope=scope,
+            target_bundle=target_bundle,
+            selected_lightings=self._scope_selected_lightings(scope),
         )
         self._send_response(200, html)
 
@@ -4862,6 +4977,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         qs = parse_qs(urlparse(self.path).query)
         job_id = (qs.get("job_id") or [""])[0]
         template_name = "train_new/step2_progress.html"
+        job = None
         if job_id:
             job = self._capi_server_instance.database.get_training_job(job_id)
             job = self._mark_train_new_stale_if_needed(
@@ -4871,7 +4987,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if job and job.get("state") == "train":
                 template_name = "train_new/step4_progress.html"
         template = self.jinja_env.get_template(template_name)
-        html = template.render(request_path="/train/new/progress", job_id=job_id)
+        scope = (job or {}).get("training_scope") if job else None
+        html = template.render(
+            request_path="/train/new/progress",
+            job_id=job_id,
+            training_scope=scope,
+            unit_labels=[f"{l}-{z}" for l, z in self._scope_selected_units(scope)],
+            selected_lightings=self._scope_selected_lightings(scope),
+        )
         self._send_response(200, html)
 
     def _handle_train_new_review_page(self):
@@ -4883,10 +5006,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_response(404, "Job not found")
             return
         template = self.jinja_env.get_template("train_new/step3_review.html")
+        scope = job.get("training_scope")
         html = template.render(
             request_path="/train/new/review",
             job_id=job_id,
             machine_id=job.get("machine_id", ""),
+            training_scope=scope,
+            selected_lightings=self._scope_selected_lightings(scope),
         )
         self._send_response(200, html)
 
@@ -5145,6 +5271,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "batch_size": 8,
                 "coreset_ratio": 0.1,
                 "max_epochs": 1
+            },
+            "training_scope": {   # optional; omitted means full 10-unit training
+                "mode": "full" | "partial",
+                "target_bundle_id": 123,            # partial only
+                "selected_units": ["G0F00000-inner"] # partial only
             }
         }
 
@@ -5192,6 +5323,24 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         db = self._capi_server_instance.database
+        training_scope, err = self._normalize_train_new_scope(params.get("training_scope"), db)
+        if err:
+            self._send_json({"error": err}, status=400)
+            return
+        if training_scope["mode"] == "partial":
+            target_bundle = db.get_model_bundle(training_scope["target_bundle_id"])
+            if not target_bundle:
+                self._send_json({"error": "target bundle not found"}, status=404)
+                return
+            if str(target_bundle.get("machine_id") or "") != machine_id:
+                self._send_json({
+                    "error": (
+                        "partial training machine_id must match target bundle "
+                        f"({target_bundle.get('machine_id')})"
+                    )
+                }, status=400)
+                return
+
         job_id = generate_job_id(machine_id)
 
         # 註冊 runtime + 寫 DB（沒有 wizard singleton 檢查；多 job 可共存）。
@@ -5203,6 +5352,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 panel_paths=clean_panel_paths,
                 training_params=training_params,
                 panel_modes=panel_modes,
+                training_scope=training_scope,
             )
         except Exception:
             CAPIWebHandler._drop_job_runtime(job_id)
@@ -5211,7 +5361,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         thread = threading.Thread(
             target=CAPIWebHandler._train_new_preprocess_worker,
             args=(job_id, machine_id, clean_panel_paths,
-                  self._capi_server_instance, training_params, panel_modes),
+                  self._capi_server_instance, training_params, panel_modes, training_scope),
             daemon=True, name=f"train_new_pre-{job_id}",
         )
         runtime["thread"] = thread
@@ -5248,7 +5398,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _train_new_preprocess_worker(
         job_id, machine_id, panel_paths, server_inst, training_params=None,
-        panel_modes=None,
+        panel_modes=None, training_scope=None,
     ):
         """背景 thread：preprocess + 抽 NG → state=review。
 
@@ -5288,12 +5438,23 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             )
             apply_user_training_params(cfg, training_params, log_fn=log)
             pre_cfg = PreprocessConfig()
+            target_lightings = None
+            target_units = None
+            if training_scope and training_scope.get("mode") == "partial":
+                target_lightings = CAPIWebHandler._scope_selected_lightings(training_scope)
+                target_units = training_scope.get("selected_units") or None
+                log(
+                    "局部重訓 scope: "
+                    + ", ".join(training_scope.get("selected_units") or [])
+                )
 
             log(f"開始前處理 {len(panel_paths)} panel")
             stats = preprocess_panels_to_pool(
                 job_id=job_id, cfg=cfg, preprocess_cfg=pre_cfg,
                 db=db, thumb_dir=thumb_root, log=log,
                 panel_modes=panel_modes,
+                target_lightings=target_lightings,
+                target_units=target_units,
             )
             if stats["panel_success_full"] < WIZARD_FULL_PANEL_COUNT:
                 raise RuntimeError(
@@ -5305,6 +5466,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             ng_stats = sample_ng_tiles(
                 job_id=job_id, over_review_root=cfg.over_review_root,
                 db=db, thumb_dir=thumb_root, log=log,
+                lightings=target_lightings,
             )
 
             db.update_training_job_state(job_id, "review")
@@ -5357,6 +5519,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "state": job["state"],
             "started_at": job["started_at"], "completed_at": job["completed_at"],
             "output_bundle": job["output_bundle"], "error_message": job["error_message"],
+            "training_scope": job.get("training_scope"),
             "log_lines": log_lines,
             "unit_status": unit_status,
             "worker_alive": self._train_new_worker_alive(job_id),
@@ -5615,16 +5778,202 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         runtime["unit_status"] = {}
         runtime["cancel_event"].clear()
 
+        scope = job.get("training_scope") or {}
+        if scope.get("mode") == "partial":
+            target = CAPIWebHandler._train_new_partial_training_worker
+            args = (job_id, self._capi_server_instance)
+            thread_name = f"train_new_partial-{job_id}"
+        else:
+            target = CAPIWebHandler._train_new_training_worker
+            args = (job_id, job["machine_id"], job["panel_paths"], self._capi_server_instance)
+            thread_name = f"train_new-{job_id}"
+
         thread = threading.Thread(
-            target=CAPIWebHandler._train_new_training_worker,
-            args=(job_id, job["machine_id"], job["panel_paths"], self._capi_server_instance),
-            daemon=True, name=f"train_new-{job_id}",
+            target=target,
+            args=args,
+            daemon=True, name=thread_name,
         )
         runtime["thread"] = thread
 
         db.update_training_job_state(job_id, "train")
         thread.start()
         self._send_json({"ok": True, "state": "train"})
+
+    @staticmethod
+    def _train_new_partial_training_worker(job_id, server_inst):
+        """Train selected PTs for an existing bundle using the reviewed tile pool."""
+        import traceback as _traceback
+        from capi_train_new import TrainingConfig, apply_user_training_params, train_single_submodel, _auroc_grade
+        from capi_model_registry import append_submodel_history, _read_manifest, _write_manifest, invalidate_score_cache
+
+        db = server_inst.database
+        runtime = CAPIWebHandler._get_job_runtime(job_id)
+        if runtime is None:
+            runtime = CAPIWebHandler._make_job_runtime(job_id, "train")
+        runtime["phase"] = "train"
+
+        def log(msg):
+            CAPIWebHandler._append_train_new_log(job_id, msg)
+
+        try:
+            job = db.get_training_job(job_id)
+            if not job:
+                raise RuntimeError(f"找不到 job_id={job_id}")
+            scope = job.get("training_scope") or {}
+            if scope.get("mode") != "partial":
+                raise RuntimeError("partial training worker received non-partial job")
+
+            bundle_id = int(scope["target_bundle_id"])
+            bundle = db.get_model_bundle(bundle_id)
+            if not bundle:
+                raise RuntimeError(f"target bundle {bundle_id} 已不存在")
+
+            bundle_dir = Path(bundle["bundle_path"])
+            manifest = _read_manifest(bundle_dir)
+            patchcore_params = manifest.get("patchcore_params") or {}
+            train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
+            cfg = TrainingConfig(
+                machine_id=job["machine_id"],
+                panel_paths=[Path(p) for p in job.get("panel_paths", [])],
+                over_review_root=train_cfg["over_review_root"],
+                output_root=train_cfg["output_root"],
+                backbone_cache_dir=train_cfg["backbone_cache_dir"],
+                required_backbones=train_cfg["required_backbones"],
+                batch_size=patchcore_params.get("batch_size", 8),
+                image_size=tuple(patchcore_params.get("image_size", (512, 512))),
+                coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
+                max_epochs=patchcore_params.get("max_epochs", 1),
+            )
+            apply_user_training_params(cfg, job.get("training_params"), log_fn=log)
+
+            selected_units = CAPIWebHandler._scope_selected_units(scope)
+            if not selected_units:
+                raise RuntimeError("selected_units is empty")
+
+            log(
+                f"局部重訓開始：bundle_id={bundle_id}, units="
+                + ", ".join(f"{l}-{z}" for l, z in selected_units)
+            )
+
+            summaries = {}
+            total = len(selected_units)
+            for idx, (lighting, zone) in enumerate(selected_units, 1):
+                if runtime["cancel_event"].is_set():
+                    raise RuntimeError("training cancelled by user")
+
+                unit_label = f"{lighting}-{zone}"
+                output_pt = bundle_dir / f"{unit_label}.pt"
+                old_manifest = _read_manifest(bundle_dir)
+                old_unit_metrics = (old_manifest.get("unit_metrics") or {}).get(unit_label) or {}
+                old_history = (old_manifest.get("submodel_history") or {}).get(unit_label) or []
+                if old_history:
+                    old_auroc = old_history[-1].get("auroc")
+                    old_tile_count = old_history[-1].get("tile_count_used")
+                else:
+                    old_auroc = old_unit_metrics.get("auroc")
+                    old_tile_count = old_unit_metrics.get("train_count")
+
+                log(f"[{idx}/{total}] {unit_label}: 載 tile")
+                result = train_single_submodel(
+                    db=db,
+                    job_id=job_id,
+                    lighting=lighting,
+                    zone=zone,
+                    cfg=cfg,
+                    output_pt_path=output_pt,
+                    gpu_lock=server_inst._gpu_lock,
+                    log=log,
+                    cancel_event=runtime["cancel_event"],
+                    unit_prefix=f"[{idx}/{total}] ",
+                )
+
+                metrics = result["metrics"]
+                metrics["used_tile_ids"] = result["used_tile_ids"]
+                new_auroc = metrics.get("auroc")
+                new_tile_count = result["tile_count"]
+                entry = {
+                    "trained_at": datetime.now().isoformat(timespec="seconds"),
+                    "job_id": job_id,
+                    "trained_with_job_id": job_id,
+                    "tile_count_used": new_tile_count,
+                    "auroc": new_auroc,
+                    "used_tile_ids": result["used_tile_ids"],
+                    "kind": "partial_retrain",
+                    "ng_used": result["ng_used"],
+                    "panel_count": len(job.get("panel_paths") or []),
+                    "panel_glass_ids": [Path(p).name for p in job.get("panel_paths", [])],
+                }
+                append_submodel_history(bundle_dir, lighting, zone, entry)
+                refreshed_manifest = _read_manifest(bundle_dir)
+                refreshed_manifest.setdefault("unit_metrics", {})[unit_label] = metrics
+                refreshed_manifest.setdefault("tiles_per_unit", {})[unit_label] = {
+                    "train": result["tile_count"],
+                    "ng": result["ng_count"],
+                }
+                refreshed_manifest.setdefault("model_files", {})[unit_label] = {
+                    "path": output_pt.name,
+                    "size_bytes": result["size_bytes"],
+                }
+                auroc_values = [
+                    m.get("auroc") for m in refreshed_manifest.get("unit_metrics", {}).values()
+                    if m.get("auroc") is not None
+                ]
+                overall_auroc = round(sum(auroc_values) / len(auroc_values), 4) if auroc_values else None
+                refreshed_manifest["overall_auroc"] = overall_auroc
+                refreshed_manifest["overall_auroc_grade"] = _auroc_grade(overall_auroc)
+                _write_manifest(bundle_dir, refreshed_manifest)
+                cleared = invalidate_score_cache(
+                    db, scoring_bundle_id=bundle_id, lighting=lighting, zone=zone,
+                )
+                log(f"[{idx}/{total}] {unit_label}: 清除 {cleared} 筆 score cache")
+
+                summaries[unit_label] = {
+                    "auroc_old": old_auroc,
+                    "auroc_new": new_auroc,
+                    "tile_count_old": old_tile_count,
+                    "tile_count_new": new_tile_count,
+                }
+
+                caught = metrics.get("ng_caught_count", 0)
+                ng_n = metrics.get("ng_count", 0)
+                auroc_str = f", AUROC={new_auroc:.3f}({metrics.get('auroc_grade','')})" if new_auroc is not None else ""
+                log(
+                    f"[{idx}/{total}] {unit_label}: ✓ done | {result['elapsed_seconds']}s, "
+                    f"threshold={result['threshold']:.4f}, size={result['size_bytes']/1e6:.1f}MB, "
+                    f"ng_caught={caught}/{ng_n}{auroc_str}"
+                )
+
+            inferencer = server_inst.inferencers.get(job["machine_id"])
+            if inferencer is None:
+                log(f"[v2] 機台 {job['machine_id']} 無 inferencer cache，跳過 reload")
+            else:
+                for lighting, zone in selected_units:
+                    try:
+                        inferencer.reload_submodel(job["machine_id"], lighting, zone)
+                        log(f"[v2] 已通知 inferencer reload {job['machine_id']}/{lighting}/{zone}")
+                    except Exception as reload_err:
+                        log(f"[v2] reload 失敗（不影響重訓結果）：{reload_err}")
+                        logger.warning("reload_submodel raised: %s", reload_err, exc_info=True)
+
+            db.update_training_job_state(job_id, "completed", output_bundle=str(bundle_dir))
+            log(f"✓ 局部重訓完成，bundle={bundle_dir}")
+
+        except Exception as e:
+            _traceback.print_exc()
+            msg = "取消" if runtime["cancel_event"].is_set() else str(e)
+            try:
+                db.update_training_job_state(job_id, "failed", error_message=msg)
+            except Exception:
+                pass
+            log(f"✗ 局部重訓失敗: {msg}")
+            for line in _traceback.format_exc().rstrip().splitlines()[-8:]:
+                log(f"  {line}")
+        finally:
+            slot = CAPIWebHandler._train_slot
+            with slot["lock"]:
+                if slot.get("active_job_id") == job_id:
+                    slot["active_job_id"] = None
+            CAPIWebHandler._drop_job_runtime(job_id)
 
     @staticmethod
     def _train_new_training_worker(job_id, machine_id, panel_paths, server_inst):

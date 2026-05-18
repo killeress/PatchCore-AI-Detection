@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}Tile 審核 - Step 3{% endblock %}
+{% block title %}Tile 審核 - Step 4{% endblock %}
 {% block content %}
 <div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
   <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 12px 0;">
-    <h1 style="color:#cdd6f4;margin:0;font-size:1.3rem;">Step 3 / 5 · 訓練 tile 審核</h1>
+    <h1 style="color:#cdd6f4;margin:0;font-size:1.3rem;">Step 4 / 6 · 訓練 tile 審核</h1>
     <div class="kbd-hint" aria-label="鍵盤捷徑提示">
       <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd><span>切換</span>
       <kbd>Enter</kbd><span>放大</span>
@@ -24,7 +24,7 @@
   </div>
 
   <div style="display:flex;gap:4px;border-bottom:1px solid #45475a;padding-bottom:8px;margin-bottom:14px;overflow-x:auto;">
-    {% for lighting in ["G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"] %}
+    {% for lighting in selected_lightings %}
     <span class="lighting-tab" data-lighting="{{ lighting }}" onclick="switchLighting('{{ lighting }}')"
       style="background:#313244;padding:6px 14px;border-radius:6px 6px 0 0;color:#a6adc8;font-size:.82rem;cursor:pointer;white-space:nowrap;">
       {{ lighting }} <span class="badge" style="background:#1e1e2e;padding:1px 7px;border-radius:8px;font-size:.72rem;margin-left:3px;">0/0</span>
@@ -172,8 +172,9 @@
 
 <script>
 const jobId = "{{ job_id }}";
-const lightings = ['G0F00000','R0F00000','W0F00000','WGF50500','STANDARD'];
-let _currentLighting = 'G0F00000';
+const lightings = {{ selected_lightings|tojson }};
+const trainingScope = {{ training_scope|tojson }};
+let _currentLighting = lightings[0] || 'G0F00000';
 let _tilesByLighting = {};  // {lighting: [tile, ...]}
 let _filter = 'all';
 let _lastClickedId = null;
@@ -728,8 +729,14 @@ function updateAllBadges() {
 
 async function startTraining() {
   const ok = await capConfirm(
-    '系統將同時訓練 5 光源 × inner/edge 共 10 個 PatchCore 子模型。\n預計耗時 60–120 分鐘，期間可在 Step 4 觀察進度。',
-    {title: '開始訓練 10 個模型？', confirmText: '開始訓練', cancelText: '再想想'}
+    (trainingScope && trainingScope.mode === 'partial'
+      ? `系統只會訓練 selected PT：${(trainingScope.selected_units || []).join(', ')}。\n其他 PT 不會重新訓練。`
+      : '系統將同時訓練 5 光源 × inner/edge 共 10 個 PatchCore 子模型。\n預計耗時 60–120 分鐘，期間可在 Step 5 觀察進度。'),
+    {
+      title: trainingScope && trainingScope.mode === 'partial' ? '開始局部重訓？' : '開始訓練 10 個模型？',
+      confirmText: '開始訓練',
+      cancelText: '再想想'
+    }
   );
   if (!ok) return;
   fetch(`/api/train/new/start_training/${encodeURIComponent(jobId)}`, {method: 'POST'})
@@ -789,11 +796,11 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// 初始載入 5 個 lighting（一次先預載）
+// 初始載入 scope 內的 lighting（一次先預載）
 Promise.all(lightings.map(loadLighting))
   .then(() => {
     updateAllBadges();
-    switchLighting('G0F00000');
+    if (lightings.length) switchLighting(lightings[0]);
   });
 </script>
 

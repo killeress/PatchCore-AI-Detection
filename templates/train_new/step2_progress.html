@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}前處理 - Step 2{% endblock %}
+{% block title %}前處理 - Step 3{% endblock %}
 {% block content %}
-{# Step 2 前處理進度頁。
+{# Step 3 前處理進度頁。
    後端 log 由 capi_train_new.py 寫，可解析的訊號：
      [N/M] panel <id>                           ← panel 進度
      ✓ 切出 N tile                              ← tile 累加
@@ -13,7 +13,7 @@
 <div class="d2-page">
   <div class="d2-hero">
     <div class="d2-hero-meta">
-      <span class="d2-hero-tag">// PREPROCESS · STEP 2 / 5</span>
+      <span class="d2-hero-tag">// PREPROCESS · STEP 3 / 6</span>
       <h1 class="d2-hero-title">切割訓練 tile</h1>
       <p class="d2-hero-sub">執行 Otsu 二值化與 panel 切割，輸出 512×512 tile 至訓練池。預估 1–3 分鐘。</p>
     </div>
@@ -56,7 +56,7 @@
       <span class="d2-step-num">03</span>
       <div class="d2-step-body">
         <div class="d2-step-title">READY · REVIEW</div>
-        <div class="d2-step-hint">跳轉 Step 3</div>
+        <div class="d2-step-hint">跳轉 Step 4</div>
       </div>
     </div>
   </div>
@@ -85,7 +85,7 @@
       <div class="d2-stat-row">
         <span class="d2-stat-value" id="d2-ng-cur">0</span>
         <span class="d2-stat-divider d2-stat-divider-mute">·</span>
-        <span class="d2-stat-mini" id="d2-ng-lightings">0 / 5 lighting</span>
+        <span class="d2-stat-mini" id="d2-ng-lightings">0 / {{ selected_lightings|length }} lighting</span>
       </div>
       <div class="d2-stat-meta">over_review true_ng 抽樣</div>
     </div>
@@ -365,6 +365,7 @@
 <script>
 const params = new URLSearchParams(location.search);
 const jobId = params.get('job_id');
+const targetLightingCount = {{ (selected_lightings|length)|tojson }};
 let _timer = null;
 let _startedAt = Date.now();
 
@@ -426,7 +427,7 @@ function updateUi(state, logLines) {
     setStat('d2-panel-total', stats.panelTotal === null ? '—' : stats.panelTotal);
     setStat('d2-tile-cur', stats.tiles.toLocaleString());
     setStat('d2-ng-cur', stats.ng);
-    setStat('d2-ng-lightings', `${stats.ngLightings} / 5 lighting`);
+    setStat('d2-ng-lightings', `${stats.ngLightings} / ${targetLightingCount || 5} lighting`);
     document.getElementById('d2-num').textContent = stats.tiles ? stats.tiles.toLocaleString() : '—';
 
     const pct = (stats.panelTotal && stats.panelTotal > 0)

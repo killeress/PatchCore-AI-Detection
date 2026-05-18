@@ -139,6 +139,7 @@ def preprocess_panels_to_pool(
     log: Callable[[str], None],
     panel_modes: Optional[List[str]] = None,
     target_lightings: Optional[Iterable[str]] = None,
+    target_units: Optional[Iterable[str]] = None,
 ) -> dict:
     """將 cfg.panel_paths 全部前處理 + 切 tile + 寫 DB。
 
@@ -152,6 +153,7 @@ def preprocess_panels_to_pool(
     if panel_modes is None:
         panel_modes = [PANEL_MODE_FULL] * len(cfg.panel_paths)
     target_lighting_set = set(target_lightings) if target_lightings is not None else None
+    target_unit_set = set(target_units) if target_units is not None else None
 
     thumb_dir.mkdir(parents=True, exist_ok=True)
     (thumb_dir / "tiles").mkdir(parents=True, exist_ok=True)
@@ -186,6 +188,8 @@ def preprocess_panels_to_pool(
             if target_lighting_set is not None and lighting not in target_lighting_set:
                 continue
             for tile in result.tiles:
+                if target_unit_set is not None and f"{lighting}-{tile.zone}" not in target_unit_set:
+                    continue
                 if mode == PANEL_MODE_CORNERS_ONLY and not tile.is_corner:
                     continue
                 tile_filename = f"{job_id}_{panel_dir.name}_{lighting}_t{tile.tile_id:04d}.png"
