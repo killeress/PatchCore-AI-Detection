@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}訓練新機種 - Step 1{% endblock %}
+{% block content %}
+<div style="max-width:920px;margin:0 auto;padding:24px 16px;">
+  <div style="margin-bottom:14px;">
+    <a href="/training" style="color:#a6adc8;text-decoration:none;font-size:.9rem;">← 返回模型訓練</a>
+  </div>
+
+  <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.4rem;">Step 1 / 6 · 選擇訓練模型</h1>
+  <p style="color:#a6adc8;font-size:.9rem;line-height:1.55;margin:0;">
+    選擇要訓練全部 10 個 PT，或只針對既有 bundle 的指定 PT 重新選圖重訓。
+  </p>
+
+  {% if active_jobs %}
+  <div style="background:#2f3347;border:1px solid #89b4fa;border-radius:10px;padding:14px 16px;margin-top:16px;">
+    <div style="color:#cdd6f4;font-weight:700;font-size:.92rem;margin-bottom:6px;">進行中的訓練 job ({{ active_jobs|length }})</div>
+    {% for j in active_jobs %}
+    <div style="display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 0;border-top:1px solid #45475a;">
+      <div>
+        <div style="color:#cdd6f4;font-size:.86rem;">
+          <span style="font-family:monospace;">{{ j.job_id }}</span>
+          <span style="margin-left:8px;color:#a6adc8;">{{ j.machine_id }}</span>
+        </div>
+        <div style="color:#a6adc8;font-size:.78rem;margin-top:2px;">
+          state: <span style="color:{% if j.state == 'review' %}#a6e3a1{% elif j.state == 'train' %}#fab387{% else %}#89b4fa{% endif %};font-weight:600;">{{ j.state }}</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        {% if j.state == 'review' %}
+        <a href="/train/new/review/{{ j.job_id }}"
+           style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:6px 12px;font-weight:700;text-decoration:none;font-size:.82rem;">繼續審核 →</a>
+        {% elif j.state in ('preprocess', 'train') %}
+        <a href="/train/new/progress?job_id={{ j.job_id }}"
+           style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:6px 12px;font-weight:700;text-decoration:none;font-size:.82rem;">查看進度 →</a>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:18px;">
+    <label class="scope-card active" data-mode="full" onclick="selectMode('full')">
+      <input type="radio" name="mode" value="full" checked>
+      <span class="scope-title">完整訓練</span>
+      <span class="scope-desc">重新選圖並訓練 5 光源 × inner/edge，共 10 個 PT，產生新的 bundle。</span>
+    </label>
+    <label class="scope-card" data-mode="partial" onclick="selectMode('partial')">
+      <input type="radio" name="mode" value="partial">
+      <span class="scope-title">局部重訓</span>
+      <span class="scope-desc">選擇既有 bundle 與一個或多個 PT，重新選圖後只覆蓋指定 PT。</span>
+    </label>
+  </div>
+
+  <div id="partialOptions" style="display:none;background:#313244;border-radius:10px;padding:16px;margin-top:16px;">
+    {% if not bundles %}
+      <div style="color:#f38ba8;font-size:.88rem;">目前沒有可局部重訓的 bundle。請先完成一次完整訓練。</div>
+    {% else %}
+      <label style="display:block;color:#a6adc8;font-size:.78rem;font-weight:700;margin-bottom:6px;">目標 bundle</label>
+      <select id="targetBundle" style="width:100%;background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:8px 10px;font-size:.86rem;">
+        {% for b in bundles %}
+        <option value="{{ b.id }}" data-machine="{{ b.machine_id }}">{{ b.label }}</option>
+        {% endfor %}
+      </select>
+
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px;margin-bottom:8px;">
+        <div style="color:#a6adc8;font-size:.78rem;font-weight:700;">要重訓的 PT</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button type="button" class="mini-btn" onclick="setUnitPreset('all')">全選</button>
+          <button type="button" class="mini-btn" onclick="setUnitPreset('inner')">Inner</button>
+          <button type="button" class="mini-btn" onclick="setUnitPreset('edge')">Edge</button>
+          <button type="button" class="mini-btn" onclick="setUnitPreset('none')">清除</button>
+        </div>
+      </div>
+
+      <div class="unit-grid">
+        {% for unit in units %}
+        <label class="unit-check">
+          <input type="checkbox" value="{{ unit.label }}">
+          <span>{{ unit.label }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </div>
+
+  <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:10px;align-items:center;">
+    <a href="/training" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">取消</a>
+    <button id="nextBtn" onclick="goNext()"
+      style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:8px 22px;font-weight:700;cursor:pointer;">
+      下一步：選擇訓練資料 →
+    </button>
+  </div>
+</div>
+
+<style>
+  .scope-card {
+    display:flex;flex-direction:column;gap:8px;background:#313244;border:1px solid #45475a;
+    border-radius:10px;padding:16px;cursor:pointer;color:#cdd6f4;
+  }
+  .scope-card.active { border-color:#89b4fa;box-shadow:0 0 0 1px rgba(137,180,250,.35); }
+  .scope-card input { align-self:flex-start; }
+  .scope-title { font-weight:700;font-size:.98rem; }
+  .scope-desc { color:#a6adc8;font-size:.84rem;line-height:1.5; }
+  .unit-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px; }
+  .unit-check { display:flex;align-items:center;gap:8px;background:#1e1e2e;border:1px solid #45475a;border-radius:6px;padding:8px 10px;color:#cdd6f4;font-family:monospace;font-size:.8rem;cursor:pointer; }
+  .mini-btn { background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:5px 10px;cursor:pointer;font-size:.76rem; }
+</style>
+
+<script>
+function selectedMode() {
+  return document.querySelector('input[name="mode"]:checked').value;
+}
+
+function selectMode(mode) {
+  document.querySelectorAll('.scope-card').forEach(el => {
+    el.classList.toggle('active', el.dataset.mode === mode);
+  });
+  document.querySelector(`input[name="mode"][value="${mode}"]`).checked = true;
+  document.getElementById('partialOptions').style.display = mode === 'partial' ? '' : 'none';
+}
+
+function setUnitPreset(kind) {
+  document.querySelectorAll('.unit-check input').forEach(cb => {
+    if (kind === 'all') cb.checked = true;
+    else if (kind === 'inner') cb.checked = cb.value.endsWith('-inner');
+    else if (kind === 'edge') cb.checked = cb.value.endsWith('-edge');
+    else cb.checked = false;
+  });
+}
+
+function goNext() {
+  const mode = selectedMode();
+  const params = new URLSearchParams();
+  params.set('mode', mode);
+  if (mode === 'partial') {
+    const bundle = document.getElementById('targetBundle');
+    if (!bundle) {
+      alert('目前沒有可局部重訓的 bundle');
+      return;
+    }
+    const units = Array.from(document.querySelectorAll('.unit-check input:checked')).map(cb => cb.value);
+    if (!units.length) {
+      alert('請至少選擇一個 PT');
+      return;
+    }
+    params.set('target_bundle_id', bundle.value);
+    params.set('units', units.join(','));
+  }
+  location.href = '/train/new/select?' + params.toString();
+}
+</script>
+{% endblock %}

@@ -222,7 +222,7 @@ def test_handle_train_new_start_allows_concurrent_with_review_job():
     CAPIWebHandler._train_new_jobs_lock = threading.Lock()
 
     h = _make_handler_with_server(server, "/api/train/new/start")
-    body = json.dumps({"machine_id": "M", "panel_paths": [f"/p{i}" for i in range(3)]}).encode()
+    body = json.dumps({"machine_id": "M", "panel_paths": [f"/p{i}" for i in range(8)]}).encode()
     h.headers.get = MagicMock(return_value=str(len(body)))
     h.rfile = io.BytesIO(body)
 
@@ -248,7 +248,7 @@ def test_handle_train_new_start_parallel_creates_two_jobs():
     server = MagicMock()
     server.database.list_active_training_jobs.return_value = []
 
-    def record_create(job_id, machine_id, panel_paths, training_params=None):
+    def record_create(job_id, machine_id, panel_paths, training_params=None, **_kwargs):
         with db_lock:
             created.append(job_id)
 
@@ -259,7 +259,7 @@ def test_handle_train_new_start_parallel_creates_two_jobs():
 
     def run_start():
         h = _make_handler_with_server(server, "/api/train/new/start")
-        body = json.dumps({"machine_id": "M", "panel_paths": [f"/p{i}" for i in range(3)]}).encode()
+        body = json.dumps({"machine_id": "M", "panel_paths": [f"/p{i}" for i in range(8)]}).encode()
         h.headers.get = MagicMock(return_value=str(len(body)))
         h.rfile = io.BytesIO(body)
         with patch("capi_web.threading.Thread") as MockThread:
@@ -364,7 +364,7 @@ def test_handle_train_new_start_rejects_bad_training_params():
     h = _make_handler_with_server(server, "/api/train/new/start")
     body = json.dumps({
         "machine_id": "M",
-        "panel_paths": [f"/p{i}" for i in range(3)],
+        "panel_paths": [f"/p{i}" for i in range(8)],
         "training_params": {"batch_size": 999},
     }).encode()
     h.headers.get = MagicMock(return_value=str(len(body)))
@@ -409,7 +409,7 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
     h = _make_handler_with_server(server, "/api/train/new/start")
     payload = {
         "machine_id": "M",
-        "panel_paths": [f"/p{i}" for i in range(3)],
+        "panel_paths": [f"/p{i}" for i in range(8)],
         "training_params": {
             "batch_size": 16, "coreset_ratio": 0.05,
             "max_epochs": 2,
@@ -814,6 +814,8 @@ def test_handle_train_new_progress_page_uses_step4_template_for_train_state():
 def test_handle_train_new_page_lists_all_active_jobs():
     """Step 1 banner 應列出所有 open job（preprocess / review / train），不再只有最新一筆。"""
     server = MagicMock()
+    server.config = None
+    server.database.list_model_bundles.return_value = []
     server.database.list_active_training_jobs.return_value = [
         {"job_id": "j_pre", "machine_id": "M", "state": "preprocess", "panel_paths": []},
         {"job_id": "j_rev", "machine_id": "M", "state": "review", "panel_paths": []},
@@ -826,7 +828,7 @@ def test_handle_train_new_page_lists_all_active_jobs():
 
     h._handle_train_new_page()
 
-    h.jinja_env.get_template.assert_called_with("train_new/step1_select.html")
+    h.jinja_env.get_template.assert_called_with("train_new/step1_scope.html")
     template.render.assert_called_once()
     active_jobs = template.render.call_args.kwargs["active_jobs"]
     ids = [j["job_id"] for j in active_jobs]
@@ -847,9 +849,10 @@ def test_handle_models_list_filters_by_machine_id():
     assert body["bundles"] == [{"id": 1, "machine_id": "M"}]
 
 
-def test_handle_training_page_exposes_submodel_retrain_choices():
+def test_handle_train_new_scope_page_exposes_submodel_retrain_choices():
     server = MagicMock()
     server.config = None
+    server.database.list_active_training_jobs.return_value = []
     server.database.list_model_bundles.return_value = [
         {
             "id": 2,
@@ -884,23 +887,21 @@ def test_handle_training_page_exposes_submodel_retrain_choices():
             "job_id": "",
         },
     ]
-    h = _make_handler_with_server(server, "/training")
+    h = _make_handler_with_server(server, "/train/new")
     template = MagicMock()
-    template.render.return_value = "<html>training</html>"
+    template.render.return_value = "<html>scope</html>"
     h.jinja_env = MagicMock()
     h.jinja_env.get_template.return_value = template
 
-    h._handle_training_page()
+    h._handle_train_new_scope_page()
 
-    h.jinja_env.get_template.assert_called_with("training.html")
+    h.jinja_env.get_template.assert_called_with("train_new/step1_scope.html")
     kwargs = template.render.call_args.kwargs
-    assert [b["id"] for b in kwargs["submodel_bundles"]] == [1, 3, 2]
-    assert kwargs["submodel_bundles"][0]["bundle_name"] == "M1-latest"
-    assert kwargs["submodel_bundles"][0]["is_active"] is True
-    assert "G0F00000-inner" in [u["label"] for u in kwargs["submodel_units"]]
-    assert kwargs["submodel_full_panel_count"] == 3
-    assert kwargs["submodel_total_panel_count"] == 8
-    assert h._sent_response[0]["body"] == "<html>training</html>"
+    assert [b["id"] for b in kwargs["bundles"]] == [1, 3, 2]
+    assert kwargs["bundles"][0]["bundle_name"] == "M1-latest"
+    assert kwargs["bundles"][0]["is_active"] is True
+    assert "G0F00000-inner" in [u["label"] for u in kwargs["units"]]
+    assert h._sent_response[0]["body"] == "<html>scope</html>"
 
 
 def test_handle_models_retrain_submodel_with_panels_creates_job():
@@ -946,12 +947,54 @@ def test_handle_models_retrain_submodel_with_panels_creates_job():
     MockThread.return_value.start.assert_called_once()
 
 
+def test_handle_train_new_start_persists_partial_training_scope():
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.database.get_model_bundle.return_value = {
+        "id": 7,
+        "machine_id": "M",
+        "bundle_path": "model/M-bundle",
+    }
+    server.database.create_training_job = MagicMock()
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    payload = {
+        "machine_id": "M",
+        "panel_paths": [f"/p{i}" for i in range(8)],
+        "training_scope": {
+            "mode": "partial",
+            "target_bundle_id": 7,
+            "selected_units": ["G0F00000-inner", "R0F00000-edge"],
+        },
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    with patch("capi_train_new.generate_job_id", return_value="train_M_20260518_abcd"):
+        with patch("capi_web.threading.Thread") as MockThread:
+            MockThread.return_value.start = MagicMock()
+            h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 200
+    kwargs = server.database.create_training_job.call_args.kwargs
+    assert kwargs["training_scope"] == {
+        "mode": "partial",
+        "selected_units": ["G0F00000-inner", "R0F00000-edge"],
+        "target_bundle_id": 7,
+    }
+    assert kwargs["panel_modes"] == ["full", "full", "full", "corners_only", "corners_only", "corners_only", "corners_only", "corners_only"]
+
+
 def test_handle_train_new_start_rejects_wrong_panel_count():
-    """非 3 片 panel 一律拒絕。"""
+    """非 8 片 panel 一律拒絕。"""
     server = MagicMock()
     server.database.get_active_training_job.return_value = None
 
-    for n in (0, 1, 2, 4, 5, 6):
+    for n in (0, 1, 2, 3, 4, 5, 6, 7, 9):
         h = _make_handler_with_server(server, "/api/train/new/start")
         body = json.dumps({"machine_id": "M", "panel_paths": [f"/p{i}" for i in range(n)]}).encode()
         h.headers.get = MagicMock(return_value=str(len(body)))
@@ -961,4 +1004,4 @@ def test_handle_train_new_start_rejects_wrong_panel_count():
         assert h._sent_response[0]["status"] == 400, f"n={n} 應該被拒"
         if n > 0:
             err_body = json.loads(h._sent_response[0]["body"])
-            assert "exactly 3" in err_body.get("error", ""), f"n={n} error: {err_body}"
+            assert "exactly 8" in err_body.get("error", ""), f"n={n} error: {err_body}"

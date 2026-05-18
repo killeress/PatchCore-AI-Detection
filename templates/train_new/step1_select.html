@@ -1,17 +1,24 @@
 {% extends "base.html" %}
-{% block title %}訓練新機種 - Step 1{% endblock %}
+{% block title %}訓練新機種 - Step 2{% endblock %}
 {% block content %}
 <div style="max-width:900px;margin:0 auto;padding:24px 16px;">
   <div style="margin-bottom:14px;">
-    <a href="/training" style="color:#a6adc8;text-decoration:none;font-size:.9rem;">← 返回模型訓練</a>
+    <a href="/train/new" style="color:#a6adc8;text-decoration:none;font-size:.9rem;">← 返回 Step 1</a>
   </div>
-  <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.4rem;">Step 1 / 5 · 選擇訓練資料</h1>
+  <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.4rem;">Step 2 / 6 · 選擇訓練資料</h1>
   <p style="color:#a6adc8;font-size:.9rem;line-height:1.55;">
+    {% if training_scope.mode == "partial" %}
+    局部重訓：
+    <span style="color:#cdd6f4;font-weight:600;">{{ target_bundle.machine_id }} / {{ target_bundle.bundle_path|replace("model/", "") }}</span>，
+    PT：<span style="color:#89b4fa;font-weight:600;">{{ training_scope.selected_units|join(", ") }}</span>。
+    <span style="display:block;margin-top:2px;">請重新選擇此機種的訓練 panel，後續只會訓練選定 PT。</span>
+    {% else %}
     從最近 3 天 AOI 判 OK 紀錄依序勾選
     <span style="color:#cdd6f4;font-weight:600;">8 片 panel</span>：
     順位 <span style="color:#a6e3a1;font-weight:600;">1-3 完整</span>（收 inner + edge tile），
     順位 <span style="color:#fab387;font-weight:600;">4-8 僅 4 角</span>（補強 edge 模型，inner 與長邊不取樣）。
     <span style="color:#cdd6f4;font-size:.82rem;display:block;margin-top:2px;">勾選順序就是 panel 順位 — 取消重選會重排。</span>
+    {% endif %}
   </p>
 
   {% if active_jobs %}
@@ -88,7 +95,7 @@
   <div class="step1-actionbar">
     <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0/8 片</span>
     <span style="display:flex;gap:8px;align-items:center;margin-left:auto;">
-      <a href="/training" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">取消</a>
+      <a href="/train/new" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">返回</a>
       <button id="next-btn" onclick="submitStart()" disabled
         style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:8px 22px;font-weight:700;opacity:.4;cursor:pointer;">
         下一步：前處理 →
@@ -136,6 +143,9 @@
 </style>
 
 <script>
+const TRAINING_SCOPE = {{ training_scope|tojson }};
+const TARGET_BUNDLE = {{ target_bundle|tojson }};
+const SELECTED_LIGHTINGS = {{ selected_lightings|tojson }};
 let _selected = new Set();
 let _selectedMachineId = '';
 
@@ -144,7 +154,11 @@ function loadPanels() {
   btn.disabled = true;
   btn.style.opacity = .55;
   document.getElementById('panel-list').innerHTML = '<div style="background:#313244;padding:24px;border-radius:10px;color:#a6adc8;text-align:center;">載入最近推論紀錄中...</div>';
-  fetch('/api/train/new/panels?days=3')
+  let url = '/api/train/new/panels?days=3';
+  if (TRAINING_SCOPE.mode === 'partial' && TARGET_BUNDLE && TARGET_BUNDLE.machine_id) {
+    url += '&machine_id=' + encodeURIComponent(TARGET_BUNDLE.machine_id);
+  }
+  fetch(url)
     .then(r => r.json())
     .then(d => {
       if (d.error) {
@@ -286,13 +300,17 @@ function collectTrainingParams() {
 function submitStart() {
   const mid = _selectedMachineId;
   if (!mid) return;
+  if (TRAINING_SCOPE.mode === 'partial' && TARGET_BUNDLE && mid !== TARGET_BUNDLE.machine_id) {
+    capAlert(`局部重訓只能選擇目標 bundle 的機種：${TARGET_BUNDLE.machine_id}`, {type: 'error', title: '機種不一致'});
+    return;
+  }
   const {params, error} = collectTrainingParams();
   if (error) {
     document.getElementById('train-params').setAttribute('open', '');
     capAlert(error, {type: 'error', title: '訓練設定錯誤'});
     return;
   }
-  const body = {machine_id: mid, panel_paths: Array.from(_selected)};
+  const body = {machine_id: mid, panel_paths: Array.from(_selected), training_scope: TRAINING_SCOPE};
   if (params) body.training_params = params;
   fetch('/api/train/new/start', {
     method: 'POST',

@@ -427,9 +427,17 @@ def get_pending_change_count(
     無 job_id（訓練資料已刪）回 0。
     """
     job_id = bundle.get("job_id") or ""
+    bundle_dir = Path(bundle["bundle_path"])
+    manifest = _read_manifest(bundle_dir)
+    unit_label = f"{lighting}-{zone}"
+    history = (manifest.get("submodel_history") or {}).get(unit_label) or []
+    if history:
+        history_job_id = history[-1].get("job_id") or history[-1].get("trained_with_job_id")
+        if history_job_id:
+            job_id = history_job_id
+
     if not job_id:
         return 0
-    bundle_dir = Path(bundle["bundle_path"])
 
     current_accept = {
         int(t["id"]) for t in db.list_tile_pool(
