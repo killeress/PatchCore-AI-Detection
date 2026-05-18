@@ -609,6 +609,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/models/") and path.endswith("/tiles/decision"):
                 self._handle_models_tiles_decision()
                 return
+            elif path.startswith("/api/models/") and path.endswith("/retrain_submodel_with_panels"):
+                self._handle_models_retrain_submodel_with_panels()
+                return
             elif path.startswith("/api/models/") and path.endswith("/retrain_submodel"):
                 self._handle_models_retrain_submodel()
                 return
@@ -4774,7 +4777,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _build_submodel_retrain_choices(self):
         """Build bundle/unit choices for single PatchCore submodel retraining."""
-        from capi_train_new import TRAINING_UNITS
+        from capi_train_new import (
+            TRAINING_UNITS,
+            WIZARD_FULL_PANEL_COUNT,
+            WIZARD_TOTAL_PANEL_COUNT,
+        )
 
         server_inst = self._capi_server_instance
         db = server_inst.database if server_inst else None
@@ -4782,10 +4789,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         bundles = []
         if db:
             for b in db.list_model_bundles():
-                # 單一子模型重訓需要原始 tile_pool job_id；已清訓練資料的 bundle 無法重訓。
-                if not b.get("job_id"):
-                    continue
-
                 bundle_path = str(b.get("bundle_path") or "")
                 bundle_name = Path(bundle_path).name or f"bundle-{b.get('id')}"
                 is_active = bool(b.get("is_active"))
@@ -4817,6 +4820,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 {"lighting": lighting, "zone": zone, "label": f"{lighting}-{zone}"}
                 for lighting, zone in TRAINING_UNITS
             ],
+            "full_panel_count": WIZARD_FULL_PANEL_COUNT,
+            "total_panel_count": WIZARD_TOTAL_PANEL_COUNT,
         }
 
     def _handle_training_page(self):
@@ -4828,6 +4833,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             model_cards=self._build_training_cards(),
             submodel_bundles=submodel_choices["bundles"],
             submodel_units=submodel_choices["units"],
+            submodel_full_panel_count=submodel_choices["full_panel_count"],
+            submodel_total_panel_count=submodel_choices["total_panel_count"],
         )
         self._send_response(200, html)
 
@@ -6197,6 +6204,347 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         db.update_tile_decisions(job_id, tile_ids, decision)
         self._send_json({"ok": True, "updated": len(tile_ids)})
+
+    def _handle_models_retrain_submodel_with_panels(self):
+        """POST /api/models/<id>/retrain_submodel_with_panels
+        body: {
+            "lighting": str,
+            "zone": "inner"|"edge",
+            "panel_paths": [str, ...]  # 3 到 8 片；前 3 full，其餘 corners_only
+            "training_params": {...}   # optional
+        }
+
+        重新選圖後只重訓單一子模型，不跑完整 10-unit pipeline。
+        """
+        from capi_train_new import (
+            LIGHTINGS, ZONES,
+            WIZARD_FULL_PANEL_COUNT, WIZARD_TOTAL_PANEL_COUNT,
+            derive_panel_modes, generate_job_id,
+        )
+
+        parts = self.path.split("/")
+        try:
+            bundle_id = int(parts[3])
+        except (ValueError, IndexError):
+            self._send_json({"error": "invalid bundle id"}, status=400)
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON"}, status=400)
+            return
+
+        lighting = body.get("lighting")
+        zone = body.get("zone")
+        if lighting not in LIGHTINGS:
+            self._send_json({"error": f"lighting 必須為 {LIGHTINGS}"}, status=400)
+            return
+        if zone not in ZONES:
+            self._send_json({"error": f"zone 必須為 {ZONES}"}, status=400)
+            return
+
+        panel_paths = body.get("panel_paths", [])
+        if not isinstance(panel_paths, list):
+            self._send_json({"error": "panel_paths must be a list"}, status=400)
+            return
+        clean_panel_paths = []
+        for p in panel_paths:
+            if not isinstance(p, str) or not p.strip() or p.strip() in ("undefined", "null"):
+                self._send_json({"error": "panel_paths contains invalid path"}, status=400)
+                return
+            clean_panel_paths.append(p.strip())
+        if len(clean_panel_paths) < WIZARD_FULL_PANEL_COUNT or len(clean_panel_paths) > WIZARD_TOTAL_PANEL_COUNT:
+            self._send_json({
+                "error": (
+                    f"panel_paths must contain {WIZARD_FULL_PANEL_COUNT} to "
+                    f"{WIZARD_TOTAL_PANEL_COUNT} panels"
+                )
+            }, status=400)
+            return
+
+        training_params, err = self._validate_training_params(body.get("training_params"))
+        if err:
+            self._send_json({"error": err}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        bundle = db.get_model_bundle(bundle_id)
+        if not bundle:
+            self._send_json({"error": "bundle not found"}, status=404)
+            return
+
+        machine_id = str(bundle.get("machine_id") or "").strip()
+        if not machine_id:
+            self._send_json({"error": "bundle missing machine_id"}, status=400)
+            return
+
+        job_id = generate_job_id(machine_id).replace("train_", "subtrain_", 1)
+        panel_modes = derive_panel_modes(len(clean_panel_paths))
+
+        state = CAPIWebHandler._submodel_retrain_state
+        with state["lock"]:
+            current = state.get("job")
+            if current and current.get("state") == "running":
+                self._send_json({
+                    "error": "已有重訓 job 進行中，請等待完成",
+                    "job": current,
+                }, status=409)
+                return
+
+            state["job"] = {
+                "bundle_id": bundle_id,
+                "job_id": job_id,
+                "machine_id": machine_id,
+                "lighting": lighting,
+                "zone": zone,
+                "state": "running",
+                "step": "preprocess",
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+                "log_lines": [],
+                "summary": None,
+                "error": None,
+                "source": "panels",
+                "panel_count": len(clean_panel_paths),
+            }
+
+        try:
+            db.create_training_job(
+                job_id=job_id,
+                machine_id=machine_id,
+                panel_paths=clean_panel_paths,
+                training_params=training_params,
+                panel_modes=panel_modes,
+            )
+        except Exception:
+            with state["lock"]:
+                state["job"] = None
+            raise
+
+        thread = threading.Thread(
+            target=self._submodel_retrain_with_panels_worker,
+            args=(bundle_id, lighting, zone, job_id, clean_panel_paths, training_params, panel_modes),
+            daemon=True,
+            name=f"submodel-retrain-panels-{bundle_id}-{lighting}-{zone}",
+        )
+        thread.start()
+
+        self._send_json({
+            "ok": True,
+            "bundle_id": bundle_id,
+            "job_id": job_id,
+            "lighting": lighting,
+            "zone": zone,
+        })
+
+    def _submodel_retrain_with_panels_worker(
+        self,
+        bundle_id: int,
+        lighting: str,
+        zone: str,
+        job_id: str,
+        panel_paths: list,
+        training_params=None,
+        panel_modes=None,
+    ):
+        """背景 thread：重新選 panel 後，只訓練單一子模型並覆蓋原 .pt。"""
+        import traceback
+        from capi_preprocess import PreprocessConfig
+        from capi_train_new import (
+            TrainingConfig, apply_user_training_params,
+            preprocess_panels_to_pool, sample_ng_tiles, train_single_submodel,
+            NG_TILES_PER_LIGHTING, WIZARD_FULL_PANEL_COUNT,
+        )
+        from capi_model_registry import append_submodel_history, _read_manifest
+
+        state = CAPIWebHandler._submodel_retrain_state
+        server_inst = self._capi_server_instance
+        db = server_inst.database
+        slot_acquired = False
+
+        def _set_step(step: str):
+            with state["lock"]:
+                if state["job"] is not None:
+                    state["job"]["step"] = step
+
+        def _log(msg: str):
+            ts = datetime.now().strftime("%H:%M:%S")
+            with state["lock"]:
+                if state["job"] is not None:
+                    state["job"]["log_lines"].append(f"[{ts}] {msg}")
+                    if len(state["job"]["log_lines"]) > 500:
+                        state["job"]["log_lines"] = state["job"]["log_lines"][-500:]
+
+        try:
+            bundle = db.get_model_bundle(bundle_id)
+            if not bundle:
+                raise RuntimeError(f"bundle {bundle_id} 已不存在")
+
+            bundle_dir = Path(bundle["bundle_path"])
+            machine_id = bundle["machine_id"]
+            unit_label = f"{lighting}-{zone}"
+            output_pt = bundle_dir / f"{unit_label}.pt"
+
+            _log(f"開始單一重訓 {unit_label} (bundle_id={bundle_id}, job_id={job_id})")
+            _log(f"重新選圖 panel 數: {len(panel_paths)}")
+
+            old_manifest = _read_manifest(bundle_dir)
+            old_unit_metrics = (old_manifest.get("unit_metrics") or {}).get(unit_label) or {}
+            old_history = (old_manifest.get("submodel_history") or {}).get(unit_label) or []
+            if old_history:
+                old_auroc = old_history[-1].get("auroc")
+                old_tile_count = old_history[-1].get("tile_count_used")
+            else:
+                old_auroc = old_unit_metrics.get("auroc")
+                old_tile_count = old_unit_metrics.get("train_count")
+
+            train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
+            patchcore_params = old_manifest.get("patchcore_params") or {}
+            cfg = TrainingConfig(
+                machine_id=machine_id,
+                panel_paths=[Path(p) for p in panel_paths],
+                over_review_root=train_cfg["over_review_root"],
+                output_root=train_cfg["output_root"],
+                backbone_cache_dir=train_cfg["backbone_cache_dir"],
+                required_backbones=train_cfg["required_backbones"],
+                batch_size=patchcore_params.get("batch_size", 8),
+                image_size=tuple(patchcore_params.get("image_size", (512, 512))),
+                coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
+                max_epochs=patchcore_params.get("max_epochs", 1),
+            )
+            apply_user_training_params(cfg, training_params, log_fn=_log)
+
+            _set_step("preprocess")
+            thumb_root = Path(".tmp/train_new_thumbs") / job_id
+            _log(f"前處理 selected panels（只保留 lighting={lighting}）")
+            stats = preprocess_panels_to_pool(
+                job_id=job_id,
+                cfg=cfg,
+                preprocess_cfg=PreprocessConfig(),
+                db=db,
+                thumb_dir=thumb_root,
+                log=_log,
+                panel_modes=panel_modes,
+                target_lightings=(lighting,),
+            )
+            if stats["panel_success_full"] < WIZARD_FULL_PANEL_COUNT:
+                raise RuntimeError(
+                    f"成功 full panel {stats['panel_success_full']} < {WIZARD_FULL_PANEL_COUNT}"
+                )
+            _log(f"OK tile 寫入完成：{stats['total_tiles']} tiles")
+
+            _set_step("ng")
+            _log(f"抽 NG tile（lighting={lighting}，上限 {NG_TILES_PER_LIGHTING} 個）")
+            sample_ng_tiles(
+                job_id=job_id,
+                over_review_root=cfg.over_review_root,
+                db=db,
+                thumb_dir=thumb_root,
+                per_lighting=NG_TILES_PER_LIGHTING,
+                log=_log,
+                lightings=(lighting,),
+            )
+
+            db.update_training_job_state(job_id, "train")
+
+            _set_step("train")
+            slot = CAPIWebHandler._train_slot
+            with slot["lock"]:
+                if slot.get("active_job_id") is not None:
+                    raise RuntimeError(f"另一個訓練 job 正在執行: {slot['active_job_id']}")
+                slot["active_job_id"] = job_id
+                slot_acquired = True
+
+            CAPIWebHandler._cancel_and_wait_scan_idle(timeout_s=15.0)
+            CAPIWebHandler._free_server_gpu_cache()
+            _log("訓練中（只訓練選定子模型）...")
+            result = train_single_submodel(
+                db=db,
+                job_id=job_id,
+                lighting=lighting,
+                zone=zone,
+                cfg=cfg,
+                output_pt_path=output_pt,
+                gpu_lock=server_inst._gpu_lock,
+                log=_log,
+            )
+
+            _set_step("metrics")
+            new_auroc = result["metrics"].get("auroc")
+            new_tile_count = result["tile_count"]
+            _log(f"訓練完成：tile={new_tile_count}, AUROC={new_auroc}")
+
+            _set_step("swap")
+            _log(f"已替換 {output_pt}")
+
+            entry = {
+                "trained_at": datetime.now().isoformat(timespec="seconds"),
+                "job_id": job_id,
+                "trained_with_job_id": job_id,
+                "tile_count_used": new_tile_count,
+                "auroc": new_auroc,
+                "used_tile_ids": result["used_tile_ids"],
+                "kind": "retrain_from_panels",
+                "ng_used": result["ng_used"],
+                "panel_count": len(panel_paths),
+                "panel_glass_ids": [Path(p).name for p in panel_paths],
+            }
+            append_submodel_history(bundle_dir, lighting, zone, entry)
+            _log("manifest history 已更新")
+
+            from capi_model_registry import invalidate_score_cache
+            cleared = invalidate_score_cache(
+                db, scoring_bundle_id=bundle_id, lighting=lighting, zone=zone,
+            )
+            _log(f"清除 {cleared} 筆 score cache（lighting={lighting}, zone={zone}）")
+
+            _set_step("reload")
+            inferencer = server_inst.inferencers.get(machine_id)
+            if inferencer is None:
+                _log(f"[v2] 機台 {machine_id} 無 inferencer cache，跳過 reload")
+            else:
+                try:
+                    inferencer.reload_submodel(machine_id, lighting, zone)
+                    _log(f"[v2] 已通知 inferencer reload {machine_id}/{lighting}/{zone}")
+                except Exception as reload_err:
+                    _log(f"[v2] reload 失敗（不影響重訓結果）：{reload_err}")
+                    logger.warning("reload_submodel raised: %s", reload_err, exc_info=True)
+
+            db.update_training_job_state(job_id, "completed", output_bundle=str(bundle_dir))
+            with state["lock"]:
+                state["job"]["step"] = "done"
+                state["job"]["state"] = "completed"
+                state["job"]["summary"] = {
+                    "auroc_old": old_auroc,
+                    "auroc_new": new_auroc,
+                    "tile_count_old": old_tile_count,
+                    "tile_count_new": new_tile_count,
+                    "job_id": job_id,
+                    "panel_count": len(panel_paths),
+                }
+            _log("✓ 單一子模型重訓完成")
+
+        except Exception as e:
+            tb = traceback.format_exc()
+            _log(f"✗ 失敗: {e}")
+            for line in tb.rstrip().splitlines()[-8:]:
+                _log(f"  {line}")
+            try:
+                db.update_training_job_state(job_id, "failed", error_message=str(e))
+            except Exception:
+                pass
+            with state["lock"]:
+                if state["job"] is not None:
+                    state["job"]["state"] = "failed"
+                    state["job"]["error"] = str(e)
+            logger.error("submodel retrain with panels worker failed: %s", e, exc_info=True)
+        finally:
+            if slot_acquired:
+                slot = CAPIWebHandler._train_slot
+                with slot["lock"]:
+                    if slot.get("active_job_id") == job_id:
+                        slot["active_job_id"] = None
 
     def _handle_models_retrain_submodel(self):
         """POST /api/models/<id>/retrain_submodel
