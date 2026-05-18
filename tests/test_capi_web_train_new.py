@@ -894,11 +894,56 @@ def test_handle_training_page_exposes_submodel_retrain_choices():
 
     h.jinja_env.get_template.assert_called_with("training.html")
     kwargs = template.render.call_args.kwargs
-    assert [b["id"] for b in kwargs["submodel_bundles"]] == [1, 2]
+    assert [b["id"] for b in kwargs["submodel_bundles"]] == [1, 3, 2]
     assert kwargs["submodel_bundles"][0]["bundle_name"] == "M1-latest"
     assert kwargs["submodel_bundles"][0]["is_active"] is True
     assert "G0F00000-inner" in [u["label"] for u in kwargs["submodel_units"]]
+    assert kwargs["submodel_full_panel_count"] == 3
+    assert kwargs["submodel_total_panel_count"] == 8
     assert h._sent_response[0]["body"] == "<html>training</html>"
+
+
+def test_handle_models_retrain_submodel_with_panels_creates_job():
+    from capi_web import CAPIWebHandler
+
+    CAPIWebHandler._submodel_retrain_state = {"lock": threading.Lock(), "job": None}
+
+    server = MagicMock()
+    server.database.get_model_bundle.return_value = {
+        "id": 1,
+        "machine_id": "M1",
+        "bundle_path": "model/M1-bundle",
+    }
+    server.database.create_training_job = MagicMock()
+
+    h = _make_handler_with_server(server, "/api/models/1/retrain_submodel_with_panels")
+    payload = {
+        "lighting": "G0F00000",
+        "zone": "inner",
+        "panel_paths": [f"/panel/{i}" for i in range(4)],
+        "training_params": {"batch_size": 8},
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    with patch("capi_train_new.generate_job_id", return_value="train_M1_20260518_abcd"):
+        with patch("capi_web.threading.Thread") as MockThread:
+            MockThread.return_value.start = MagicMock()
+            h._handle_models_retrain_submodel_with_panels()
+
+    assert h._sent_response[0]["status"] == 200
+    resp = json.loads(h._sent_response[0]["body"])
+    assert resp["job_id"] == "subtrain_M1_20260518_abcd"
+    server.database.create_training_job.assert_called_once()
+    kwargs = server.database.create_training_job.call_args.kwargs
+    assert kwargs["job_id"] == "subtrain_M1_20260518_abcd"
+    assert kwargs["machine_id"] == "M1"
+    assert kwargs["panel_paths"] == payload["panel_paths"]
+    assert kwargs["panel_modes"] == ["full", "full", "full", "corners_only"]
+    assert kwargs["training_params"] == {"batch_size": 8}
+    assert CAPIWebHandler._submodel_retrain_state["job"]["step"] == "preprocess"
+    MockThread.return_value.start.assert_called_once()
 
 
 def test_handle_train_new_start_rejects_wrong_panel_count():

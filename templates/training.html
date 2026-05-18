@@ -29,7 +29,7 @@
     color: #a6adc8;
     margin: 0;
     font-size: .86rem;
-    line-height: 1.45;
+    line-height: 1.5;
   }
   .train-submodel-form {
     display: grid;
@@ -53,20 +53,30 @@
     padding: 8px 10px;
     font-size: .86rem;
   }
-  .train-primary-btn {
-    background: #89b4fa;
-    color: #1e1e2e;
+  .train-primary-btn,
+  .train-secondary-btn {
     border: none;
     border-radius: 5px;
     padding: 9px 16px;
     font-weight: 700;
     cursor: pointer;
-    min-width: 132px;
+    white-space: nowrap;
   }
-  .train-primary-btn:disabled {
+  .train-primary-btn {
+    background: #89b4fa;
+    color: #1e1e2e;
+  }
+  .train-secondary-btn {
+    background: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+  }
+  .train-primary-btn:disabled,
+  .train-secondary-btn:disabled {
     background: #45475a;
     color: #a6adc8;
     cursor: wait;
+    border-color: #45475a;
   }
   .train-submodel-info {
     margin-top: 12px;
@@ -81,6 +91,74 @@
     color: #a6adc8;
     text-align: center;
     font-size: .88rem;
+  }
+  .train-panel-toolbar {
+    margin-top: 16px;
+    padding: 12px 14px;
+    background: #313244;
+    border-radius: 8px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .train-panel-list {
+    margin-top: 12px;
+    max-height: 520px;
+    overflow: auto;
+    border-radius: 8px;
+    background: #313244;
+  }
+  .train-panel-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .8rem;
+  }
+  .train-panel-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: #11111b;
+    color: #a6adc8;
+    padding: 8px;
+    text-align: left;
+  }
+  .train-panel-table td {
+    padding: 8px;
+    vertical-align: top;
+    border-top: 1px solid #1e1e2e;
+  }
+  .train-panel-table tr[data-path] {
+    cursor: pointer;
+  }
+  .train-panel-table .path-cell {
+    color: #a6adc8;
+    font-family: monospace;
+    font-size: .74rem;
+    word-break: break-all;
+    line-height: 1.35;
+  }
+  .train-panel-check {
+    width: 20px;
+    height: 20px;
+    border: 2px solid #45475a;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-family: monospace;
+    font-size: .78rem;
+  }
+  .train-actionbar {
+    margin-top: 12px;
+    padding: 12px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    background: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 8px;
   }
   .train-progress {
     display: none;
@@ -144,7 +222,8 @@
     .train-field {
       margin-bottom: 10px;
     }
-    .train-primary-btn {
+    .train-primary-btn,
+    .train-secondary-btn {
       width: 100%;
     }
   }
@@ -209,24 +288,26 @@
   <section class="train-submodel-panel">
     <div class="train-submodel-head">
       <div>
-        <h2 class="train-submodel-title">單一 PatchCore 子模型重訓</h2>
-        <p class="train-submodel-subtitle">針對指定 bundle 的 lighting / zone 重訓，其他子模型不會重跑。</p>
+        <h2 class="train-submodel-title">單一 PatchCore 子模型重訓（重新選圖）</h2>
+        <p class="train-submodel-subtitle">
+          先選要覆蓋的 bundle 與 lighting / zone，再從同機種最近 OK panel 重新挑圖；完成後只訓練該子模型。
+        </p>
       </div>
       <a href="/models"
          style="background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a;padding:7px 12px;border-radius:5px;
                 font-weight:600;text-decoration:none;font-size:.82rem;white-space:nowrap;">
-        管理訓練資料
+        模型庫
       </a>
     </div>
 
     {% if not submodel_bundles %}
       <div class="train-submodel-empty">
-        尚無可單獨重訓的 PatchCore bundle。需要先完成一次新機種訓練並保留訓練資料。
+        尚無可單獨重訓的 PatchCore bundle。需要先完成一次新機種訓練。
       </div>
     {% else %}
       <div class="train-submodel-form">
         <div class="train-field">
-          <label for="submodelBundleSelect">Bundle</label>
+          <label for="submodelBundleSelect">目標 Bundle</label>
           <select id="submodelBundleSelect" onchange="handleSubmodelBundleChange()">
             {% for bundle in submodel_bundles %}
               <option value="{{ bundle.id }}">{{ bundle.label }}</option>
@@ -234,23 +315,39 @@
           </select>
         </div>
         <div class="train-field">
-          <label for="submodelUnitSelect">子模型</label>
-          <select id="submodelUnitSelect">
+          <label for="submodelUnitSelect">目標子模型</label>
+          <select id="submodelUnitSelect" onchange="handleSubmodelUnitChange()">
             {% for unit in submodel_units %}
               <option value="{{ unit.lighting }}|{{ unit.zone }}">{{ unit.label }}</option>
             {% endfor %}
           </select>
         </div>
-        <button id="submodelRetrainBtn" class="train-primary-btn" onclick="startSubmodelRetrainFromTraining()">
-          開始單一重訓
+        <button id="reloadPanelsBtn" class="train-secondary-btn" onclick="loadSubmodelPanels()">
+          重新載入圖片
         </button>
       </div>
 
       <div id="submodelBundleInfo" class="train-submodel-info"></div>
 
+      <div class="train-panel-toolbar">
+        <span id="panelSelectionHint" style="color:#a6adc8;font-size:.82rem;"></span>
+        <span style="color:#7f849c;font-size:.78rem;">前 3 片完整取樣；第 4 到第 8 片只取角落，主要補 edge。</span>
+      </div>
+
+      <div id="submodelPanelList" class="train-panel-list"></div>
+
+      <div class="train-actionbar">
+        <span id="submodelPanelCount" style="color:#a6e3a1;font-weight:700;font-size:.86rem;">已選 0</span>
+        <button class="train-secondary-btn" onclick="clearSubmodelPanelSelection()" style="margin-left:auto;">清除選取</button>
+        <button id="submodelRetrainBtn" class="train-primary-btn" onclick="startSubmodelRetrainFromPanels()">
+          開始重訓選定子模型
+        </button>
+      </div>
+
       <div id="submodelRetrainProgress" class="train-progress">
         <div class="train-step-row">
-          <span class="train-step-pill" data-step="stage">Stage</span>
+          <span class="train-step-pill" data-step="preprocess">Preprocess</span>
+          <span class="train-step-pill" data-step="ng">NG</span>
           <span class="train-step-pill" data-step="train">Train</span>
           <span class="train-step-pill" data-step="metrics">Metrics</span>
           <span class="train-step-pill" data-step="swap">Swap</span>
@@ -268,13 +365,25 @@
 <script>
 const SUBMODEL_BUNDLES = {{ submodel_bundles|tojson }};
 const SUBMODEL_UNITS = {{ submodel_units|tojson }};
-const SUBMODEL_RETRAIN_STEPS = ['stage', 'train', 'metrics', 'swap', 'reload', 'done'];
+const SUBMODEL_FULL_PANEL_COUNT = {{ submodel_full_panel_count|tojson }};
+const SUBMODEL_TOTAL_PANEL_COUNT = {{ submodel_total_panel_count|tojson }};
+const SUBMODEL_RETRAIN_STEPS = ['preprocess', 'ng', 'train', 'metrics', 'swap', 'reload', 'done'];
+const FULL_PANEL_COLOR = '#a6e3a1';
+const CORNER_PANEL_COLOR = '#fab387';
+const FULL_ROW_BG = '#1e3a2d';
+const CORNER_ROW_BG = '#3a2d1e';
 let submodelRetrainPollTimer = null;
+let submodelSelectedPanels = new Set();
+let submodelPanels = [];
 
 function escapeTrainingHtml(value) {
   return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
     return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch];
   });
+}
+
+function escapeTrainingAttr(value) {
+  return escapeTrainingHtml(value).replace(/`/g, '&#96;');
 }
 
 function getSelectedSubmodelBundle() {
@@ -299,9 +408,15 @@ function getSelectedSubmodelUnit() {
 
 function setSubmodelRetrainBusy(isBusy) {
   const btn = document.getElementById('submodelRetrainBtn');
+  const reloadBtn = document.getElementById('reloadPanelsBtn');
+  if (reloadBtn) reloadBtn.disabled = isBusy;
   if (!btn) return;
-  btn.disabled = isBusy || !getSelectedSubmodelBundle() || !getSelectedSubmodelUnit();
-  btn.textContent = isBusy ? '重訓中...' : '開始單一重訓';
+  const canStart = getSelectedSubmodelBundle()
+    && getSelectedSubmodelUnit()
+    && submodelSelectedPanels.size >= SUBMODEL_FULL_PANEL_COUNT
+    && submodelSelectedPanels.size <= SUBMODEL_TOTAL_PANEL_COUNT;
+  btn.disabled = isBusy || !canStart;
+  btn.textContent = isBusy ? '重訓中...' : '開始重訓選定子模型';
 }
 
 function renderSubmodelBundleInfo() {
@@ -321,7 +436,7 @@ function renderSubmodelBundleInfo() {
     ' · Inner：' + (bundle.inner_tile_count || 0) +
     ' · Edge：' + (bundle.edge_tile_count || 0) +
     ' · NG：' + (bundle.ng_tile_count || 0);
-  setSubmodelRetrainBusy(false);
+  updateSubmodelPanelCount();
 }
 
 function resetSubmodelRetrainProgress() {
@@ -346,7 +461,138 @@ function handleSubmodelBundleChange() {
   if (progress) progress.style.display = 'none';
   resetSubmodelRetrainProgress();
   renderSubmodelBundleInfo();
+  clearSubmodelPanelSelection(false);
+  loadSubmodelPanels();
   checkRunningSubmodelRetrain();
+}
+
+function handleSubmodelUnitChange() {
+  resetSubmodelRetrainProgress();
+  const progress = document.getElementById('submodelRetrainProgress');
+  if (progress) progress.style.display = 'none';
+  updateSubmodelPanelCount();
+}
+
+async function loadSubmodelPanels() {
+  const bundle = getSelectedSubmodelBundle();
+  const root = document.getElementById('submodelPanelList');
+  if (!bundle || !root) return;
+
+  const btn = document.getElementById('reloadPanelsBtn');
+  if (btn) btn.disabled = true;
+  root.innerHTML = '<div class="train-submodel-empty">載入最近推論紀錄中...</div>';
+  submodelPanels = [];
+  submodelSelectedPanels = new Set();
+  updateSubmodelPanelCount();
+
+  try {
+    const url = '/api/train/new/panels?days=3&machine_id=' + encodeURIComponent(bundle.machine_id || '');
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      root.innerHTML = '<div class="train-submodel-empty" style="color:#f38ba8;">' +
+        escapeTrainingHtml(data.error || resp.status) + '</div>';
+      return;
+    }
+    submodelPanels = data.panels || [];
+    renderSubmodelPanels();
+  } catch (e) {
+    root.innerHTML = '<div class="train-submodel-empty" style="color:#f38ba8;">載入失敗：' +
+      escapeTrainingHtml(e) + '</div>';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function renderSubmodelPanels() {
+  const root = document.getElementById('submodelPanelList');
+  if (!root) return;
+  if (!submodelPanels.length) {
+    root.innerHTML = '<div class="train-submodel-empty">最近 3 天沒有此機種的 AOI OK panel</div>';
+    updateSubmodelPanelCount();
+    return;
+  }
+
+  let html = '<table class="train-panel-table">';
+  html += '<thead><tr><th style="width:34px;"></th><th>Glass ID</th><th>機種 ID</th><th>日期</th><th>機台</th><th>AI 判定</th><th style="width:34%;">圖片來源路徑</th></tr></thead><tbody>';
+  for (const p of submodelPanels) {
+    const panelPath = p.image_dir || p.image_path || '';
+    html += '<tr data-path="' + escapeTrainingAttr(panelPath) + '" onclick="toggleSubmodelPanel(this)">' +
+      '<td><span class="train-panel-check"></span></td>' +
+      '<td style="font-family:monospace;color:#cdd6f4;">' + escapeTrainingHtml(p.glass_id || '') + '</td>' +
+      '<td style="font-family:monospace;color:#cdd6f4;">' + escapeTrainingHtml(p.model_id || '') + '</td>' +
+      '<td style="color:#a6adc8;">' + escapeTrainingHtml(p.request_time || p.timestamp || p.created_at || '') + '</td>' +
+      '<td style="color:#a6adc8;">' + escapeTrainingHtml(p.machine_no || '') + '</td>' +
+      '<td style="color:' + (p.ai_judgment === 'OK' ? '#a6e3a1' : '#fab387') + ';">' + escapeTrainingHtml(p.ai_judgment || '-') + '</td>' +
+      '<td class="path-cell">' + escapeTrainingHtml(panelPath || '-') + '</td>' +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+  root.innerHTML = html;
+  refreshSubmodelSelectedVisuals();
+  updateSubmodelPanelCount();
+}
+
+function toggleSubmodelPanel(tr) {
+  const path = tr.dataset.path;
+  if (!path) return;
+  if (submodelSelectedPanels.has(path)) {
+    submodelSelectedPanels.delete(path);
+  } else {
+    if (submodelSelectedPanels.size >= SUBMODEL_TOTAL_PANEL_COUNT) return;
+    submodelSelectedPanels.add(path);
+  }
+  refreshSubmodelSelectedVisuals();
+  updateSubmodelPanelCount();
+}
+
+function refreshSubmodelSelectedVisuals() {
+  document.querySelectorAll('#submodelPanelList tr[data-path]').forEach(function(tr) {
+    tr.style.background = '';
+    const chk = tr.querySelector('.train-panel-check');
+    chk.textContent = '';
+    chk.style.background = '';
+    chk.style.color = '';
+    chk.style.borderColor = '#45475a';
+    chk.style.fontWeight = '';
+  });
+
+  Array.from(submodelSelectedPanels).forEach(function(path, idx) {
+    const tr = document.querySelector('#submodelPanelList tr[data-path="' + CSS.escape(path) + '"]');
+    if (!tr) return;
+    const isFull = idx < SUBMODEL_FULL_PANEL_COUNT;
+    const color = isFull ? FULL_PANEL_COLOR : CORNER_PANEL_COLOR;
+    tr.style.background = isFull ? FULL_ROW_BG : CORNER_ROW_BG;
+    const chk = tr.querySelector('.train-panel-check');
+    chk.textContent = String(idx + 1);
+    chk.style.background = color;
+    chk.style.color = '#1e1e2e';
+    chk.style.borderColor = color;
+    chk.style.fontWeight = '700';
+  });
+}
+
+function updateSubmodelPanelCount() {
+  const count = submodelSelectedPanels.size;
+  const fullSelected = Math.min(count, SUBMODEL_FULL_PANEL_COUNT);
+  const cornerSelected = Math.max(0, count - SUBMODEL_FULL_PANEL_COUNT);
+  const countEl = document.getElementById('submodelPanelCount');
+  if (countEl) {
+    countEl.textContent = '已選 ' + count + '/' + SUBMODEL_TOTAL_PANEL_COUNT +
+      ' 片（完整 ' + fullSelected + '/' + SUBMODEL_FULL_PANEL_COUNT +
+      '，角落 ' + cornerSelected + '/' + (SUBMODEL_TOTAL_PANEL_COUNT - SUBMODEL_FULL_PANEL_COUNT) + '）';
+  }
+  const hint = document.getElementById('panelSelectionHint');
+  if (hint) {
+    hint.textContent = '至少選 ' + SUBMODEL_FULL_PANEL_COUNT + ' 片，最多 ' + SUBMODEL_TOTAL_PANEL_COUNT + ' 片。';
+  }
+  setSubmodelRetrainBusy(false);
+}
+
+function clearSubmodelPanelSelection(updateVisuals) {
+  submodelSelectedPanels = new Set();
+  if (updateVisuals !== false) refreshSubmodelSelectedVisuals();
+  updateSubmodelPanelCount();
 }
 
 async function checkRunningSubmodelRetrain() {
@@ -364,17 +610,24 @@ async function checkRunningSubmodelRetrain() {
   }
 }
 
-async function startSubmodelRetrainFromTraining() {
+async function startSubmodelRetrainFromPanels() {
   const bundle = getSelectedSubmodelBundle();
   const unit = getSelectedSubmodelUnit();
   if (!bundle || !unit) {
     alert('請選擇 bundle 與子模型');
     return;
   }
-
-  if (!confirm('確認重訓 ' + bundle.machine_id + ' / ' + unit.label + '？\n其他子模型不會重新訓練，threshold 維持原值。')) {
+  if (submodelSelectedPanels.size < SUBMODEL_FULL_PANEL_COUNT) {
+    alert('至少需要選 ' + SUBMODEL_FULL_PANEL_COUNT + ' 片 panel');
     return;
   }
+
+  const selected = Array.from(submodelSelectedPanels);
+  const ok = confirm(
+    '確認重新選圖並重訓 ' + bundle.machine_id + ' / ' + unit.label + '？\n\n' +
+    '已選 ' + selected.length + ' 片 panel。只會重訓這一個子模型，其他 9 個不會重跑。'
+  );
+  if (!ok) return;
 
   setSubmodelRetrainBusy(true);
   const progress = document.getElementById('submodelRetrainProgress');
@@ -383,10 +636,14 @@ async function startSubmodelRetrainFromTraining() {
 
   let resp;
   try {
-    resp = await fetch('/api/models/' + bundle.id + '/retrain_submodel', {
+    resp = await fetch('/api/models/' + bundle.id + '/retrain_submodel_with_panels', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({lighting: unit.lighting, zone: unit.zone}),
+      body: JSON.stringify({
+        lighting: unit.lighting,
+        zone: unit.zone,
+        panel_paths: selected,
+      }),
     });
   } catch (e) {
     alert('啟動失敗：' + e);
@@ -504,6 +761,8 @@ function renderSubmodelRetrainSummary(job) {
   el.innerHTML =
     '<strong style="color:#a6e3a1;">重訓完成</strong>' +
     '<table style="width:100%;margin-top:8px;color:#cdd6f4;">' +
+    '<tr><td>Job</td><td><code>' + escapeTrainingHtml(s.job_id || job.job_id || '-') + '</code></td></tr>' +
+    '<tr><td>Panel</td><td>' + escapeTrainingHtml(s.panel_count == null ? '-' : s.panel_count) + '</td></tr>' +
     '<tr><td>AUROC</td><td>' + escapeTrainingHtml(s.auroc_old == null ? '-' : s.auroc_old) +
     ' -> <strong>' + escapeTrainingHtml(s.auroc_new == null ? '-' : s.auroc_new) + '</strong></td></tr>' +
     '<tr><td>訓練 tile 數</td><td>' + escapeTrainingHtml(s.tile_count_old == null ? '-' : s.tile_count_old) +
@@ -514,7 +773,10 @@ function renderSubmodelRetrainSummary(job) {
 
 function initSubmodelRetrainPanel() {
   renderSubmodelBundleInfo();
-  checkRunningSubmodelRetrain();
+  if (SUBMODEL_BUNDLES.length) {
+    loadSubmodelPanels();
+    checkRunningSubmodelRetrain();
+  }
 }
 
 if (document.readyState === 'loading') {

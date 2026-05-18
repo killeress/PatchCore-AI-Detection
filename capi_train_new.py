@@ -19,7 +19,7 @@ from functools import wraps
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable
+from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable, Iterable
 import cv2
 
 from capi_dataset_export import read_manifest
@@ -138,6 +138,7 @@ def preprocess_panels_to_pool(
     thumb_dir: Path,
     log: Callable[[str], None],
     panel_modes: Optional[List[str]] = None,
+    target_lightings: Optional[Iterable[str]] = None,
 ) -> dict:
     """將 cfg.panel_paths 全部前處理 + 切 tile + 寫 DB。
 
@@ -150,6 +151,7 @@ def preprocess_panels_to_pool(
     """
     if panel_modes is None:
         panel_modes = [PANEL_MODE_FULL] * len(cfg.panel_paths)
+    target_lighting_set = set(target_lightings) if target_lightings is not None else None
 
     thumb_dir.mkdir(parents=True, exist_ok=True)
     (thumb_dir / "tiles").mkdir(parents=True, exist_ok=True)
@@ -181,6 +183,8 @@ def preprocess_panels_to_pool(
         # 避免浪費 IO 寫不會用到的 PNG。
         tile_records = []
         for lighting, result in results.items():
+            if target_lighting_set is not None and lighting not in target_lighting_set:
+                continue
             for tile in result.tiles:
                 if mode == PANEL_MODE_CORNERS_ONLY and not tile.is_corner:
                     continue
@@ -272,18 +276,20 @@ def sample_ng_tiles(
     thumb_dir: Optional[Path] = None,
     per_lighting: int = NG_TILES_PER_LIGHTING,
     log: Callable[[str], None] = print,
+    lightings: Optional[Iterable[str]] = None,
 ) -> dict:
     """從 over_review/{*}/true_ng/{lighting}/crop/ 隨機抽 NG tile，並依 manifest defect_y heuristic 標記 zone。"""
+    target_lightings = tuple(lightings) if lightings is not None else LIGHTINGS
     if not over_review_root.exists():
         log(f"⚠ over_review 不存在: {over_review_root}，跳過 NG 抽樣")
-        return {"sampled": 0, "missing_lightings": list(LIGHTINGS)}
+        return {"sampled": 0, "missing_lightings": list(target_lightings)}
 
     sampled = 0
     missing = []
     snapshots = [d for d in over_review_root.iterdir() if d.is_dir() and (d / "true_ng").exists()]
     zone_for = _make_ng_zone_classifier(log)
 
-    for lighting in LIGHTINGS:
+    for lighting in target_lightings:
         all_files = []
         for snap in snapshots:
             crop_dir = snap / "true_ng" / lighting / "crop"
