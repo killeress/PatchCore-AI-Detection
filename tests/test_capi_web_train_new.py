@@ -355,6 +355,30 @@ class TestValidateTrainingParams:
         _, err = CAPIWebHandler._validate_training_params([1, 2, 3])
         assert err and "must be an object" in err
 
+    def test_precision_choice_accepted(self):
+        from capi_web import CAPIWebHandler
+        for val in ("float16", "float32"):
+            params, err = CAPIWebHandler._validate_training_params(
+                {"precision": val}
+            )
+            assert err is None
+            assert params == {"precision": val}
+
+    def test_precision_invalid_choice_rejected(self):
+        from capi_web import CAPIWebHandler
+        for raw in [{"precision": "float8"}, {"precision": 16},
+                    {"precision": "fp16"}]:
+            _, err = CAPIWebHandler._validate_training_params(raw)
+            assert err and "must be one of" in err, f"expected error for {raw}"
+
+    def test_precision_mixed_with_numeric_params(self):
+        from capi_web import CAPIWebHandler
+        raw = {"batch_size": 16, "coreset_ratio": 0.05,
+               "precision": "float32"}
+        params, err = CAPIWebHandler._validate_training_params(raw)
+        assert err is None
+        assert params == raw
+
 
 def test_handle_train_new_start_rejects_bad_training_params():
     """training_params 含越界值 → 400。"""
