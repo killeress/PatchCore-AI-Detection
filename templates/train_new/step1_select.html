@@ -82,9 +82,11 @@
         <span class="tp-hint">PatchCore memory bank 抽樣比，越小模型越小、誤判越多</span>
       </label>
       <label class="tp-field">
-        <span class="tp-label">max_epochs <span class="tp-default">預設 1</span></span>
-        <input type="number" id="tp-max_epochs" min="1" max="10" step="1" placeholder="1">
-        <span class="tp-hint">PatchCore 是 memory-based，1 個 epoch 即收斂</span>
+        <span class="tp-label">max_epochs <span class="tp-default">固定 1</span></span>
+        <input type="number" id="tp-max_epochs" value="1" disabled
+               title="PatchCore 為 memory-based，epoch 數無法調整"
+               style="opacity:.5;cursor:not-allowed;">
+        <span class="tp-hint">🔒 PatchCore 為 memory-based，anomalib 內部強制 1 epoch，調整此值無效</span>
       </label>
     </div>
   </details>
@@ -273,10 +275,11 @@ function updateNext() {
 }
 
 // 留空欄位不傳 key，由後端套 TrainingConfig dataclass 預設值
+// max_epochs 不列入：PatchCore 為 memory-based，anomalib 強制 1 epoch，
+// 不送 key 讓後端維持預設 1，manifest 也才會誠實記錄實際 epoch 數
 const TRAIN_PARAM_KEYS = [
   {key: 'batch_size',    type: 'int',   min: 1,    max: 32},
   {key: 'coreset_ratio', type: 'float', min: 0.01, max: 0.5},
-  {key: 'max_epochs',    type: 'int',   min: 1,    max: 10},
 ];
 
 function collectTrainingParams() {
