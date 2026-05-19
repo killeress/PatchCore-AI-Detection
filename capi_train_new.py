@@ -87,15 +87,20 @@ class TrainingConfig:
     image_size: tuple = (512, 512)
     coreset_ratio: float = 0.1
     max_epochs: int = 1
+    precision: str = "float16"
 
 
-# 使用者可從 step1 表單覆寫的 PatchCore 超參數，與其合法值範圍。
+# 使用者可從 step1 表單覆寫的 PatchCore 超參數。
 # 同時做為前後端的單一資料來源：capi_web 的請求驗證、
 # step1 的前端表單、capi_train_runner 套用、以及未知 key 防呆都讀此表。
+# spec 兩種形態：
+#   數值型 → {"type": int/float, "min": x, "max": y}
+#   選項型 → {"type": str, "choices": [...]}
 USER_TRAINABLE_PARAM_SPECS: Dict[str, Dict] = {
     "batch_size":    {"type": int,   "min": 1,    "max": 32},
     "coreset_ratio": {"type": float, "min": 0.01, "max": 0.5},
     "max_epochs":    {"type": int,   "min": 1,    "max": 10},
+    "precision":     {"type": str,   "choices": ["float32", "float16"]},
 }
 USER_TRAINABLE_PARAM_NAMES: Tuple[str, ...] = tuple(USER_TRAINABLE_PARAM_SPECS.keys())
 
@@ -424,7 +429,7 @@ def train_one_patchcore(
 
     if log:
         log(f"{unit_label}: 建立 PatchCore model")
-    model = Patchcore(coreset_sampling_ratio=cfg.coreset_ratio)
+    model = Patchcore(coreset_sampling_ratio=cfg.coreset_ratio, precision=cfg.precision)
     model.pre_processor = Patchcore.configure_pre_processor(image_size=cfg.image_size)
 
     engine = Engine(
@@ -1278,6 +1283,7 @@ def run_training_pipeline(
             "image_size": list(cfg.image_size),
             "coreset_ratio": cfg.coreset_ratio,
             "max_epochs": cfg.max_epochs,
+            "precision": cfg.precision,
         },
         "tiles_per_unit": tiles_per_unit,
         "model_files": model_files,
