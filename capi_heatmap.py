@@ -249,7 +249,7 @@ def build_feature_zoom_panels(
     tile_h_orig: int,
     tile_size: int = 512,
     max_panels: int = 3,
-    method_label: str = "",
+    final_label: str = "",
 ) -> List[Tuple[np.ndarray, str]]:
     """為每個 TWO_STAGE feature 生成放大面板（與 Original 上的 D/R 圈一一對應）。
 
@@ -266,8 +266,18 @@ def build_feature_zoom_panels(
     if not ts_features:
         return []
 
-    # 按 area 降序，取前 max_panels 個
-    sorted_feats = sorted(ts_features, key=lambda f: f.get("area", 0), reverse=True)[:max_panels]
+    # REAL feature 是最終保留 NG 的依據，debug 顯示時優先排在前面；
+    # 同類 feature 內再按 area 降序，避免大面積 dust 把 real feature 擠掉。
+    sorted_feats = [
+        feat for _orig_idx, feat in sorted(
+            enumerate(ts_features),
+            key=lambda item: (
+                bool(item[1].get("is_dust", False)),
+                -int(item[1].get("area", 0)),
+                item[0],
+            ),
+        )
+    ][:max_panels]
 
     if heatmap_binary is not None:
         heat_bin = heatmap_binary
@@ -324,24 +334,24 @@ def build_feature_zoom_panels(
             tag = "DUST" if is_dust else "REAL"
             tag_color = (0, 200, 255) if is_dust else (0, 0, 255)
 
-            cv2.putText(panel, tag, (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, tag_color, 2)
+            cv2.putText(panel, f"Feature: {tag}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, tag_color, 2)
             cv2.putText(panel, f"DustRatio: {dust_ratio:.3f}  Area: {area}", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
             cv2.putText(panel, f"Type: {spot_type}  Pos:({abs_x},{abs_y})", (10, 85),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
 
-            if method_label:
-                ml_color = (0, 200, 255) if "DUST" in method_label else (0, 100, 255)
-                cv2.putText(panel, f"[{method_label}]", (10, 110),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, ml_color, 1)
+            if final_label:
+                final_color = (0, 200, 255) if "DUST" in final_label else (0, 100, 255)
+                cv2.putText(panel, f"Final: {final_label}", (10, 110),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, final_color, 1)
 
             legend_y = tile_size - 15
             cv2.putText(panel, "White=Heat  Yellow=Dust  Green=Overlap", (10, legend_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
 
-            method_suffix = f" [{method_label}]" if method_label else ""
-            label = f"Feat#{idx} {tag} ratio:{dust_ratio:.3f}{method_suffix}"
+            final_suffix = f" Final:{final_label}" if final_label else ""
+            label = f"Feat#{idx} Feature:{tag} ratio:{dust_ratio:.3f}{final_suffix}"
             results.append((panel, label))
         except Exception as e:
             print(f"⚠️ Feature zoom panel #{idx} failed: {e}")
@@ -685,14 +695,14 @@ class HeatmapManager:
         if has_omit and ts_features:
             heatmap_binary = getattr(tile_info, 'dust_heatmap_binary', None)
             ts_is_dust = getattr(tile_info, 'is_suspected_dust_or_scratch', False)
-            method_label = f"TWO_STAGE->{'DUST' if ts_is_dust else 'REAL'}"
+            final_label = "DUST_OK" if ts_is_dust else "REAL_NG"
             tile_h_orig = getattr(tile_info, 'height', tile_size)
             tile_w_orig = getattr(tile_info, 'width', tile_size)
             zoom_results = build_feature_zoom_panels(
                 heatmap_binary, dust_mask, ts_features,
                 tile_w_orig=tile_w_orig, tile_h_orig=tile_h_orig,
                 tile_size=tile_size,
-                method_label=method_label,
+                final_label=final_label,
             )
         elif has_omit and tile_info is not None and getattr(tile_info, 'dust_region_details', None):
             region_details = getattr(tile_info, 'dust_region_details', None)
@@ -709,7 +719,7 @@ class HeatmapManager:
         if has_omit:
             is_two_stage = "TWO_STAGE" in dust_detail
             if is_two_stage:
-                debug_label = "TwoStage Debug (G=Dust R=RealNG B=DustMask)"
+                debug_label = "TwoStage Debug (G=Dust R=Real B=DustMask)"
             else:
                 debug_label = f"{metric_name} Debug (G=Dust R=RealNG B=DustOnly)"
             labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask (Overall{metric_name}:{dust_iou:.3f})", debug_label]
