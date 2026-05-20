@@ -182,6 +182,8 @@ class TileInfo:
     aoi_defect_code: str = ""        # AOI 異常代碼 (PCDK2, C1111, PTMD6)
     aoi_product_x: int = -1         # AOI 產品座標 X (-1=非 AOI 座標 tile)
     aoi_product_y: int = -1         # AOI 產品座標 Y (-1=非 AOI 座標 tile)
+    aoi_image_x: int = -1           # AOI 映射後圖片座標 X (-1=非 AOI 座標 tile)
+    aoi_image_y: int = -1           # AOI 映射後圖片座標 Y (-1=非 AOI 座標 tile)
     zone: str = ""                  # 新架構推論 zone："inner" / "edge" / "bright_spot"；v1 為 ""
     is_bright_spot_detection: bool = False  # 是否為二值化亮點偵測（非 PatchCore）
     bright_spot_max_diff: int = 0           # B0F 偵測：最大局部差異值
@@ -2309,6 +2311,51 @@ class CAPIInferencer:
             
         return metric_val, heatmap_binary
 
+    def _aoi_center_seed_for_tile(
+        self,
+        tile_info: Optional[TileInfo],
+        anomaly_map: Optional[np.ndarray],
+    ) -> tuple:
+        """
+        AOI 座標 tile 的中心點是機檢指定的缺陷 seed。回傳 anomaly_map 座標系
+        的小型 seed，供 top% heatmap 二值化後額外納入，避免中心弱熱區被
+        極少量 top% 排除。
+        """
+        if (
+            tile_info is None
+            or anomaly_map is None
+            or not getattr(tile_info, "is_aoi_coord_tile", False)
+        ):
+            return None, 0, None
+
+        amap = np.asarray(anomaly_map, dtype=np.float32)
+        if amap.ndim < 2 or amap.size == 0 or float(np.max(amap)) <= 0:
+            return None, 0, None
+
+        amap_h, amap_w = amap.shape[:2]
+        tile_w = max(1, int(getattr(tile_info, "width", 0) or 1))
+        tile_h = max(1, int(getattr(tile_info, "height", 0) or 1))
+
+        center_img_x = int(getattr(tile_info, "aoi_image_x", -1))
+        center_img_y = int(getattr(tile_info, "aoi_image_y", -1))
+        if center_img_x < 0 or center_img_y < 0:
+            center_img_x = int(getattr(tile_info, "x", 0)) + tile_w // 2
+            center_img_y = int(getattr(tile_info, "y", 0)) + tile_h // 2
+
+        local_x = min(max(center_img_x - int(getattr(tile_info, "x", 0)), 0), tile_w - 1)
+        local_y = min(max(center_img_y - int(getattr(tile_info, "y", 0)), 0), tile_h - 1)
+        seed_x = int(round(local_x * (amap_w - 1) / max(tile_w - 1, 1)))
+        seed_y = int(round(local_y * (amap_h - 1) / max(tile_h - 1, 1)))
+
+        radius_tile_px = float(getattr(self.config, "aoi_heatmap_center_seed_radius_px", 12.0))
+        scale = min(amap_w / tile_w, amap_h / tile_h)
+        seed_radius = max(1, int(round(radius_tile_px * scale)))
+
+        min_peak_ratio = float(getattr(self.config, "aoi_heatmap_center_seed_min_peak_ratio", 0.10))
+        min_score = float(np.max(amap)) * max(0.0, min_peak_ratio)
+
+        return (seed_y, seed_x), seed_radius, min_score
+
     def check_dust_per_region(
         self,
         dust_mask: np.ndarray,
@@ -2316,6 +2363,9 @@ class CAPIInferencer:
         top_percent: float = 5.0,
         metric: str = "coverage",
         iou_threshold: float = 0.01,
+        force_include_yx: Optional[Tuple[int, int]] = None,
+        force_include_radius: int = 0,
+        force_include_min_score: Optional[float] = None,
     ) -> tuple:
         """
         逐區域灰塵判定 — 將 anomaly_map 的熱區拆成獨立連通區域，
@@ -2328,6 +2378,7 @@ class CAPIInferencer:
             - overall_iou: 整體 coverage/iou (向後相容)
             - region_details: list of dict，每個區域的判定詳情
             - heatmap_binary: 二值化後的熱區遮罩 (向後相容)
+            - force_include_yx: 額外納入的 seed 中心 (row, col)，用於 AOI center rescue
         """
         if dust_mask is None or anomaly_map is None:
             return True, None, 0.0, [], None, None
@@ -2371,6 +2422,23 @@ class CAPIInferencer:
                 return True, None, 0.0, [], None, None
             threshold = np.percentile(positive_values, 100 - top_percent)
             heat_bool = anomaly_map_f >= threshold
+
+        if force_include_yx is not None:
+            seed_y, seed_x = int(force_include_yx[0]), int(force_include_yx[1])
+            if 0 <= seed_y < heat_bool.shape[0] and 0 <= seed_x < heat_bool.shape[1]:
+                seed_radius = max(0, int(force_include_radius))
+                yy, xx = np.ogrid[:heat_bool.shape[0], :heat_bool.shape[1]]
+                if seed_radius > 0:
+                    seed_mask = (yy - seed_y) ** 2 + (xx - seed_x) ** 2 <= seed_radius ** 2
+                else:
+                    seed_mask = np.zeros_like(heat_bool, dtype=bool)
+                    seed_mask[seed_y, seed_x] = True
+
+                if force_include_min_score is None:
+                    seed_score_mask = anomaly_map_f > 0
+                else:
+                    seed_score_mask = anomaly_map_f >= float(force_include_min_score)
+                heat_bool = heat_bool | (seed_mask & seed_score_mask)
 
         heatmap_binary = (heat_bool.astype(np.uint8)) * 255
 
@@ -3192,6 +3260,8 @@ class CAPIInferencer:
                 aoi_defect_code=defect.defect_code,
                 aoi_product_x=defect.product_x,
                 aoi_product_y=defect.product_y,
+                aoi_image_x=img_x,
+                aoi_image_y=img_y,
                 zone="bright_spot" if is_skip_file else "",
             )
 
@@ -4002,6 +4072,8 @@ class CAPIInferencer:
                 aoi_defect_code=defect.defect_code,
                 aoi_product_x=defect.product_x,
                 aoi_product_y=defect.product_y,
+                aoi_image_x=img_x,
+                aoi_image_y=img_y,
                 zone=zone,
                 is_top_edge=is_top,
                 is_bottom_edge=is_bottom,
@@ -4988,12 +5060,17 @@ class CAPIInferencer:
 
                         if is_dust and anomaly_map is not None:
                             # 逐區域判定：拆開異常連通區域，各自與灰塵比對
+                            aoi_seed_yx, aoi_seed_radius, aoi_seed_min_score = \
+                                self._aoi_center_seed_for_tile(tile, anomaly_map)
                             has_real_defect, real_peak_yx, overall_iou, region_details, heatmap_binary, region_labels = \
                                 self.check_dust_per_region(
                                     dust_mask, anomaly_map,
                                     top_percent=top_pct,
                                     metric=metric_mode,
                                     iou_threshold=self.config.dust_heatmap_iou_threshold,
+                                    force_include_yx=aoi_seed_yx,
+                                    force_include_radius=aoi_seed_radius,
+                                    force_include_min_score=aoi_seed_min_score,
                                 )
                             iou = overall_iou
                             tile.dust_heatmap_iou = iou
@@ -5604,13 +5681,20 @@ class CAPIInferencer:
                 tile.dust_bright_ratio = bright_ratio
 
                 if is_dust and anomaly_map is not None and dust_mask is not None:
+                    top_pct = self.config.dust_heatmap_top_percent
+                    metric_mode = self.config.dust_heatmap_metric
+                    aoi_seed_yx, aoi_seed_radius, aoi_seed_min_score = \
+                        self._aoi_center_seed_for_tile(tile, anomaly_map)
                     has_real, real_peak_yx, overall_iou, region_details, heatmap_binary, region_labels = \
                         self.check_dust_per_region(
                             dust_mask,
                             anomaly_map,
-                            top_percent=self.config.dust_heatmap_top_percent,
-                            metric=self.config.dust_heatmap_metric,
+                            top_percent=top_pct,
+                            metric=metric_mode,
                             iou_threshold=self.config.dust_heatmap_iou_threshold,
+                            force_include_yx=aoi_seed_yx,
+                            force_include_radius=aoi_seed_radius,
+                            force_include_min_score=aoi_seed_min_score,
                         )
                     tile.dust_heatmap_iou = overall_iou
                     tile.dust_region_details = region_details
@@ -5619,6 +5703,11 @@ class CAPIInferencer:
                         tile.dust_region_max_cov = max(r["coverage"] for r in region_details)
                     dust_regions = [r for r in region_details if r["is_dust"]]
                     real_regions = [r for r in region_details if not r["is_dust"]]
+
+                    _two_stage_ran = False
+                    _ts_features = []
+                    _ts_dust_mask_no_ext = None
+
                     if has_real:
                         tile.is_suspected_dust_or_scratch = False
                         detail_text += (
@@ -5630,20 +5719,65 @@ class CAPIInferencer:
                             tile.anomaly_peak_y = tile.y + int(real_peak_yx[0] * tile.height / amap_h)
                             tile.anomaly_peak_x = tile.x + int(real_peak_yx[1] * tile.width / amap_w)
                     else:
-                        tile.is_suspected_dust_or_scratch = True
-                        detail_text += (
-                            f" PER_REGION: 0real+{len(dust_regions)}dust -> DUST"
-                        )
+                        if self.config.dust_two_stage_enabled:
+                            dust_mask_no_ext = None
+                            if omit_crop is not None:
+                                _, dust_mask_no_ext, _, _ = self.check_dust_or_scratch_feature(
+                                    omit_crop, extension_override=0
+                                )
+                            ts_has_real, ts_peak_yx, ts_features, ts_detail = \
+                                self.check_dust_two_stage(
+                                    tile.image,
+                                    anomaly_map,
+                                    dust_mask_no_ext if dust_mask_no_ext is not None else dust_mask,
+                                    score,
+                                )
+                            _two_stage_ran = True
+                            _ts_features = ts_features
+                            _ts_dust_mask_no_ext = dust_mask_no_ext
+                            tile.dust_two_stage_features = ts_features
+
+                            if ts_has_real:
+                                tile.is_suspected_dust_or_scratch = False
+                                detail_text += (
+                                    f" PER_REGION: 0real+{len(dust_regions)}dust"
+                                    f" -> {ts_detail}"
+                                )
+                                if ts_peak_yx is not None:
+                                    amap_h, amap_w = anomaly_map.shape[:2]
+                                    tile.anomaly_peak_y = tile.y + int(ts_peak_yx[0] * tile.height / amap_h)
+                                    tile.anomaly_peak_x = tile.x + int(ts_peak_yx[1] * tile.width / amap_w)
+                            else:
+                                tile.is_suspected_dust_or_scratch = True
+                                detail_text += (
+                                    f" PER_REGION: 0real+{len(dust_regions)}dust"
+                                    f" -> {ts_detail}"
+                                )
+                        else:
+                            tile.is_suspected_dust_or_scratch = True
+                            detail_text += (
+                                f" PER_REGION: 0real+{len(dust_regions)}dust -> DUST"
+                            )
 
                     try:
-                        tile.dust_iou_debug_image = self.generate_dust_iou_debug_image(
-                            tile.image, anomaly_map, dust_mask,
-                            heatmap_binary, overall_iou,
-                            self.config.dust_heatmap_top_percent,
-                            tile.is_suspected_dust_or_scratch,
-                            region_details=region_details,
-                            region_labels=region_labels,
-                        )
+                        if _two_stage_ran:
+                            dm_for_debug = _ts_dust_mask_no_ext if _ts_dust_mask_no_ext is not None else dust_mask
+                            tile.dust_iou_debug_image = self.generate_two_stage_debug_image(
+                                tile.image,
+                                anomaly_map,
+                                dm_for_debug,
+                                _ts_features,
+                                tile.is_suspected_dust_or_scratch,
+                            )
+                        else:
+                            tile.dust_iou_debug_image = self.generate_dust_iou_debug_image(
+                                tile.image, anomaly_map, dust_mask,
+                                heatmap_binary, overall_iou,
+                                top_pct,
+                                tile.is_suspected_dust_or_scratch,
+                                region_details=region_details,
+                                region_labels=region_labels,
+                            )
                     except Exception as dbg_err:
                         print(f"⚠️ [v2] Debug image generation failed: {dbg_err}")
                 elif is_dust:

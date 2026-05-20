@@ -1517,15 +1517,14 @@
                         </div>
                     </div>
 
-                    <!-- Mode-specific params -->
-                    ${activeMode !== 'two_stage' ? `
+                    <!-- Heatmap COV params are still used as the first-stage gate in two-stage mode. -->
                     <div class="settings-section" style="border-left: 3px solid #f59e0b; margin-top: 12px;">
                         <div class="settings-section-header" style="background: rgba(245, 158, 11, 0.1); border-bottom: 1px solid rgba(245, 158, 11, 0.2);">
                             <div class="icon" style="background: rgba(245, 158, 11, 0.2); color: #fbbf24;">📊</div>
-                            <span style="color: #fbbf24;">Heatmap COV 參數</span>
+                            <span style="color: #fbbf24;">${activeMode === 'two_stage' ? 'Heatmap COV 前置參數' : 'Heatmap COV 參數'}</span>
                         </div>
                         ${heatmapParams.map(p => paramRow(p)).join('')}
-                    </div>` : ''}
+                    </div>
                     ${activeMode === 'two_stage' ? `
                     <div class="settings-section" style="border-left: 3px solid #ef4444; margin-top: 12px;">
                         <div class="settings-section-header" style="background: rgba(239, 68, 68, 0.1); border-bottom: 1px solid rgba(239, 68, 68, 0.2);">
