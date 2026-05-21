@@ -40,6 +40,8 @@ class ScratchFilter:
             tile = entry[0]
             if getattr(tile, "is_bomb", False):
                 continue
+            if getattr(tile, "is_aoi_coord_below_threshold", False):
+                continue
             t0 = time.perf_counter()
             try:
                 score = float(self._classifier.predict(tile.image))

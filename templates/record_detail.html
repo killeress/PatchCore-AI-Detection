@@ -442,7 +442,7 @@ function copyInferenceLog() {
                             {% if 'BOMB' in t_info or '炸彈' in t_info %}
                             <span style="color: #DC2626; font-size: 0.8rem;"> | 炸彈</span>
                             {% endif %}
-                            {% if aoi_scr_score > 0 and not aoi_is_scratch %}
+                            {% if aoi_scr_score >= 0.001 and not aoi_is_scratch %}
                             <span style="color: var(--text-muted); font-size: 0.8rem;"> | SCR:{{ aoi_scr_score | round(3) }}</span>
                             {% endif %}
                         </td>
@@ -471,7 +471,7 @@ function copyInferenceLog() {
                         <span style="color: #22C55E;">[AI: OK]</span>
                         {% endif %}
                         {% set aoi_sc = t.get("scratch_score", 0) or 0 %}
-                        {% if aoi_sc > 0 and not t.get("scratch_filtered") %}
+                        {% if aoi_sc >= 0.001 and not t.get("scratch_filtered") %}
                         <span style="color: var(--text-muted); font-size: 0.75rem;">SCR:{{ aoi_sc | round(3) }}</span>
                         {% endif %}
                     </h4>

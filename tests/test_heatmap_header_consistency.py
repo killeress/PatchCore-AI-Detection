@@ -68,6 +68,52 @@ def test_tile_header_prefers_two_stage_reason_over_region_text(tmp_path, monkeyp
     assert "RegionCOV" not in all_text
 
 
+def test_below_threshold_aoi_tile_header_marks_dust_result_as_diagnostic(tmp_path, monkeypatch):
+    captured = _capture_put_text(monkeypatch)
+
+    tile_img = np.full((512, 512, 3), 128, dtype=np.uint8)
+    anomaly_map = np.zeros((512, 512), dtype=np.float32)
+    anomaly_map[200:240, 200:240] = 1.0
+    tile = SimpleNamespace(
+        is_bright_spot_detection=False,
+        omit_crop_image=np.full((512, 512), 128, dtype=np.uint8),
+        dust_mask=np.zeros((512, 512), dtype=np.uint8),
+        dust_heatmap_iou=0.0,
+        dust_detail_text="PER_REGION: 1real+4dust -> REAL_NG",
+        is_suspected_dust_or_scratch=False,
+        is_bomb=False,
+        bomb_defect_code="",
+        dust_iou_debug_image=None,
+        dust_region_max_cov=0.0,
+        dust_region_details=None,
+        dust_heatmap_binary=(anomaly_map > 0).astype(np.uint8) * 255,
+        dust_two_stage_features=None,
+        height=512,
+        width=512,
+        scratch_score=0.0,
+        scratch_filtered=False,
+        is_aoi_coord_below_threshold=True,
+    )
+
+    saver = HeatmapManager(base_dir=str(tmp_path), save_format="png")
+    saver.save_tile_heatmap(
+        save_dir=tmp_path,
+        image_name="tile_below_thr",
+        tile_id=1,
+        tile_image=tile_img,
+        anomaly_map=anomaly_map,
+        score=0.2644,
+        tile_info=tile,
+        score_threshold=0.35,
+        iou_threshold=0.35,
+        dust_metric="coverage",
+    )
+
+    all_text = " ".join(captured)
+    assert "AI OK | Score < THR (0.3500)" in all_text
+    assert "TRACK_ONLY Score<THR; dust diagnostic:" in all_text
+
+
 def test_cv_edge_header_uses_inference_dust_flag_not_render_overlap(tmp_path, monkeypatch):
     captured = _capture_put_text(monkeypatch)
 
