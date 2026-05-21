@@ -207,3 +207,32 @@ def test_filter_skips_bomb_tile():
     assert ir.scratch_filter_count == 1
     # anomaly_tiles 仍保留兩顆 tile（C1 不變性）
     assert len(ir.anomaly_tiles) == 2
+
+
+def test_filter_skips_below_threshold_aoi_tracking_tile():
+    """AOI 追蹤用、低於閾值的 tile 本來就是 OK，不應產生 SCR 分數。"""
+    from scratch_filter import ScratchFilter
+
+    class _CountingClassifier(_MockClassifier):
+        def __init__(self):
+            super().__init__(fixed_score=0.99, conformal_threshold=0.7)
+            self.calls = 0
+
+        def predict(self, image):
+            self.calls += 1
+            return super().predict(image)
+
+    clf = _CountingClassifier()
+    sf = ScratchFilter(clf, safety_multiplier=1.0)
+    ir = _fake_image_result_with_tiles(2)
+    ir.tiles[0].is_aoi_coord_tile = True
+    ir.tiles[0].is_aoi_coord_below_threshold = True
+
+    sf.apply_to_image_result(ir)
+
+    assert clf.calls == 1
+    assert ir.tiles[0].scratch_score == 0.0
+    assert ir.tiles[0].scratch_filtered is False
+    assert ir.tiles[1].scratch_score == pytest.approx(0.99)
+    assert ir.tiles[1].scratch_filtered is True
+    assert ir.scratch_filter_count == 1

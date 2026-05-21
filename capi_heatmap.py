@@ -134,8 +134,16 @@ def build_region_zoom_panels(
     if not region_details or heatmap_binary is None:
         return []
 
-    # 按 max_score 降序，取前 max_panels 個
-    sorted_regions = sorted(region_details, key=lambda r: r["max_score"], reverse=True)[:max_panels]
+    # REAL_NG region 是最終 NG 的依據，debug 顯示時優先排在前面；
+    # 同類 region 內再按 max_score 降序，避免高分 dust 把 real region 擠掉。
+    sorted_regions = sorted(
+        region_details,
+        key=lambda r: (
+            bool(r.get("is_dust", False)),
+            -float(r.get("max_score", 0.0)),
+            int(r.get("label_id", 0)),
+        ),
+    )[:max_panels]
 
     # 準備 tile_size 尺寸的二值化圖與灰塵遮罩
     heat_bin = heatmap_binary
@@ -191,7 +199,8 @@ def build_region_zoom_panels(
             has_metric_denominator = "metric_denominator" in region
             metric_denominator = region.get("metric_denominator", area)
             is_dust = region["is_dust"]
-            tag = "DUST" if is_dust else "REAL"
+            score = float(region.get("max_score", 0.0))
+            tag = "DUST" if is_dust else "REAL_NG"
             tag_color = (0, 200, 255) if is_dust else (0, 0, 255)
 
             cv2.putText(panel, f"{tag}", (10, 30),
@@ -202,6 +211,8 @@ def build_region_zoom_panels(
                 metric_text = f"{metric_name}: {dust_ol}/{metric_denominator} = {cov:.4f}"
             cv2.putText(panel, metric_text, (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
+            cv2.putText(panel, f"Score: {score:.4f}", (10, 85),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
             peak_in = region.get("peak_in_dust", True)
             sub_rescue = region.get("dust_sub_peak_rescue", False)
             thr_str = f"Thr:{iou_threshold:.3f}"
@@ -215,16 +226,16 @@ def build_region_zoom_panels(
                 else:
                     reason = "HighCOV -> DUST"
             elif cov < iou_threshold:
-                reason = f"{metric_name}:{cov:.3f}<Thr:{iou_threshold:.3f} -> REAL"
+                reason = f"{metric_name}:{cov:.3f}<Thr:{iou_threshold:.3f} -> REAL_NG"
             else:
-                reason = f"PeakNotInDust {metric_name}:{cov:.3f} -> REAL"
-            cv2.putText(panel, reason, (10, 85),
+                reason = f"PeakNotInDust {metric_name}:{cov:.3f} -> REAL_NG"
+            cv2.putText(panel, reason, (10, 110),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, tag_color, 1)
 
             # 判定方式 label
             if method_label:
                 ml_color = (0, 200, 255) if "DUST" in method_label else (0, 100, 255)
-                cv2.putText(panel, f"[{method_label}]", (10, 110),
+                cv2.putText(panel, f"[{method_label}]", (10, 135),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, ml_color, 1)
 
             # 圖例
@@ -233,7 +244,10 @@ def build_region_zoom_panels(
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
 
             method_suffix = f" [{method_label}]" if method_label else ""
-            label = f"Region#{region['label_id']} {tag} {metric_name}:{cov:.3f}{method_suffix}"
+            label = (
+                f"Region#{region['label_id']} {tag} "
+                f"Score:{score:.4f} {metric_name}:{cov:.3f}{method_suffix}"
+            )
             results.append((panel, label))
         except Exception as e:
             print(f"⚠️ Region zoom panel #{region.get('label_id', '?')} failed: {e}")
@@ -259,6 +273,8 @@ def build_feature_zoom_panels(
       - type: "bright" / "dark"
       - dust_ratio: feature 與 dust_mask 的重疊比例
       - is_dust: dust_ratio 是否達門檻
+      - zone_dust_cov: feature 所屬 hot zone 與 dust_mask 的覆蓋率
+      - dust_reason: "feature_overlap" / "zone_dominated" / "clean"
 
     Returns:
         [(panel_image, label_text), ...] 最多 max_panels 筆
@@ -331,7 +347,11 @@ def build_feature_zoom_panels(
             dust_ratio = float(feat.get("dust_ratio", 0.0))
             area = int(feat.get("area", 0))
             spot_type = feat.get("type", "?")
+            zone_dust_cov = feat.get("zone_dust_cov", None)
+            dust_reason = str(feat.get("dust_reason", ""))
             tag = "DUST" if is_dust else "REAL"
+            if is_dust and dust_reason == "zone_dominated":
+                tag = "DUST-ZONE"
             tag_color = (0, 200, 255) if is_dust else (0, 0, 255)
 
             cv2.putText(panel, f"Feature: {tag}", (10, 30),
@@ -340,10 +360,15 @@ def build_feature_zoom_panels(
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
             cv2.putText(panel, f"Type: {spot_type}  Pos:({abs_x},{abs_y})", (10, 85),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+            text_y = 110
+            if zone_dust_cov is not None:
+                cv2.putText(panel, f"ZoneDustCOV: {float(zone_dust_cov):.3f}", (10, text_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+                text_y += 25
 
             if final_label:
                 final_color = (0, 200, 255) if "DUST" in final_label else (0, 100, 255)
-                cv2.putText(panel, f"Final: {final_label}", (10, 110),
+                cv2.putText(panel, f"Final: {final_label}", (10, text_y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, final_color, 1)
 
             legend_y = tile_size - 15
@@ -749,6 +774,9 @@ class HeatmapManager:
 
         dust_region_cov = getattr(tile_info, 'dust_region_max_cov', 0.0) if tile_info else 0.0
 
+        is_below_threshold = score < score_threshold
+        is_aoi_track_only = bool(getattr(tile_info, 'is_aoi_coord_below_threshold', False)) if tile_info else False
+
         if is_bomb:
             verdict = f"BOMB: {bomb_code} (Filtered as OK)"
             verdict_color = (255, 0, 255)  # 洋紅色
@@ -763,12 +791,12 @@ class HeatmapManager:
             else:
                 verdict = "DUST (Filtered as OK)"
             verdict_color = (0, 200, 255)
-        elif score >= score_threshold:
+        elif is_below_threshold:
+            verdict = f"AI OK | Score < THR ({score_threshold:.4f})"
+            verdict_color = (0, 255, 255)
+        else:
             verdict = "NG (Detected)"
             verdict_color = (0, 0, 255)
-        else:
-            verdict = f"Score < THR ({score_threshold:.4f})"
-            verdict_color = (0, 255, 255)
 
         scratch_score_val = float(getattr(tile_info, 'scratch_score', 0.0) or 0.0) if tile_info else 0.0
         scratch_filtered_val = bool(getattr(tile_info, 'scratch_filtered', False)) if tile_info else False
@@ -786,9 +814,11 @@ class HeatmapManager:
             for metric_token in ("COV", "IOU"):
                 detail_line = detail_line.replace(f'>={metric_token}_THR', f'>={iou_threshold:.3f}')
                 detail_line = detail_line.replace(f'<{metric_token}_THR', f'<{iou_threshold:.3f}')
+            if is_aoi_track_only or is_below_threshold:
+                detail_line = f"TRACK_ONLY Score<THR; dust diagnostic: {detail_line}"[:120]
         else:
             detail_line = f"Tile#{tile_id} | {image_name}"
-        if scratch_score_val > 0 and not scratch_filtered_val:
+        if scratch_score_val >= 0.001 and not scratch_filtered_val:
             detail_line = f"{detail_line} | SCR:{scratch_score_val:.3f}"
         cv2.putText(header, detail_line, (10, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)

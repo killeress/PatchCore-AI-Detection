@@ -2545,6 +2545,11 @@ class CAPIInferencer:
         bg_blur_k = cfg.dust_two_stage_bg_blur
         diff_pct = cfg.dust_two_stage_diff_percentile
         min_area = cfg.dust_two_stage_min_area
+        hot_zone_dust_thr = getattr(
+            cfg,
+            "dust_two_stage_hot_zone_dust_cov_threshold",
+            getattr(cfg, "dust_high_cov_threshold", 0.5),
+        )
 
         if tile_image is None or anomaly_map is None or dust_mask is None:
             return True, None, [], "TWO_STAGE: missing data -> REAL_NG"
@@ -2565,6 +2570,7 @@ class CAPIInferencer:
             dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
         if dm.shape != (tile_h, tile_w):
             dm = cv2.resize(dm, (tile_w, tile_h), interpolation=cv2.INTER_NEAREST)
+        dust_bool_tile = dm > 0
 
         # --- Stage 1: Heatmap -> hot zones ---
         pos_vals = anomaly_f[anomaly_f > 0]
@@ -2588,6 +2594,16 @@ class CAPIInferencer:
             ys, xs = np.where(rm)
             y1, y2 = int(np.min(ys)), int(np.max(ys))
             x1, x2 = int(np.min(xs)), int(np.max(xs))
+
+            zone_mask_tile = cv2.resize(
+                rm.astype(np.uint8),
+                (tile_w, tile_h),
+                interpolation=cv2.INTER_NEAREST,
+            ) > 0
+            zone_area = int(np.count_nonzero(zone_mask_tile))
+            zone_dust_overlap = int(np.count_nonzero(zone_mask_tile & dust_bool_tile))
+            zone_dust_cov = float(zone_dust_overlap / zone_area) if zone_area > 0 else 0.0
+            zone_dust_dominated = zone_dust_cov >= hot_zone_dust_thr
 
             # convert to tile space with padding
             ty1 = max(0, int(y1 * scale) - pad)
@@ -2638,6 +2654,13 @@ class CAPIInferencer:
                     feat_dust = crop_dust[fm]
                     dust_overlap = int(np.count_nonzero(feat_dust > 0))
                     feat_dust_ratio = dust_overlap / farea
+                    feature_on_dust = feat_dust_ratio >= dust_ratio_thr
+                    feature_is_dust = feature_on_dust or zone_dust_dominated
+                    dust_reason = (
+                        "feature_overlap" if feature_on_dust
+                        else "zone_dominated" if zone_dust_dominated
+                        else "clean"
+                    )
 
                     abs_x = tx1 + fcx
                     abs_y = ty1 + fcy
@@ -2647,7 +2670,11 @@ class CAPIInferencer:
                         "area": farea,
                         "type": spot_type,
                         "dust_ratio": feat_dust_ratio,
-                        "is_dust": feat_dust_ratio >= dust_ratio_thr,
+                        "is_dust": feature_is_dust,
+                        "dust_reason": dust_reason,
+                        "zone_id": lid,
+                        "zone_dust_cov": zone_dust_cov,
+                        "zone_dust_dominated": zone_dust_dominated,
                     })
 
         # --- Verdict ---
