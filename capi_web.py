@@ -5154,6 +5154,46 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         )
         self._send_response(200, html)
 
+    @staticmethod
+    def _normalize_project_path(path_value) -> str:
+        raw = str(path_value or "").strip()
+        if not raw:
+            return ""
+        path = Path(raw)
+        if path.is_absolute():
+            try:
+                path = path.resolve().relative_to(Path.cwd().resolve())
+            except Exception:
+                pass
+        norm = path.as_posix()
+        while norm.startswith("./"):
+            norm = norm[2:]
+        return norm.rstrip("/")
+
+    @staticmethod
+    def _same_project_path(path_a, path_b) -> bool:
+        return CAPIWebHandler._normalize_project_path(path_a) == \
+               CAPIWebHandler._normalize_project_path(path_b)
+
+    @staticmethod
+    def _next_scratch_bundle_path(current_bundle="", deployment_dir="deployment") -> str:
+        deployment_dir = Path(deployment_dir)
+        version_re = re.compile(r"^scratch_classifier_v(\d+)\.pkl$", re.IGNORECASE)
+        versions = []
+        if deployment_dir.exists():
+            for path in deployment_dir.glob("scratch_classifier_v*.pkl"):
+                m = version_re.match(path.name)
+                if m:
+                    versions.append(int(m.group(1)))
+
+        current_norm = CAPIWebHandler._normalize_project_path(current_bundle)
+        current_name = current_norm.replace("\\", "/").rsplit("/", 1)[-1]
+        m = version_re.match(current_name)
+        if m:
+            versions.append(int(m.group(1)))
+
+        next_version = max(versions, default=0) + 1
+        return (deployment_dir / f"scratch_classifier_v{next_version}.pkl").as_posix()
     def _handle_retrain_page(self):
         """GET /retrain"""
         current_bundle = ""
@@ -5177,8 +5217,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             request_path="/retrain",
             current_bundle=current_bundle or "(未設定)",
             trained_at=trained_at,
-            default_manifest_base="/data/capi_ai/datasets/over_review",
-            default_output_path="deployment/scratch_classifier_v3.pkl",
+            default_manifest_base="/aidata/capi_ai/datasets/over_review/",
+            default_output_path=self._next_scratch_bundle_path(current_bundle),
             default_epochs=15,
             default_rank=16,
             default_calib_frac=0.2,
@@ -5207,6 +5247,29 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "output_path must be a relative path within the project"}, status=400)
             return
 
+        current_bundle = ""
+        server_inst = self._capi_server_instance
+        if server_inst:
+            cfg = getattr(server_inst, "config", None)
+            if cfg:
+                current_bundle = getattr(cfg, "scratch_bundle_path", "")
+        suggested_output = self._next_scratch_bundle_path(current_bundle)
+        if current_bundle and self._same_project_path(output_path_str, current_bundle):
+            self._send_json({
+                "error": (
+                    "output_path points to the currently deployed scratch bundle; "
+                    f"choose a new versioned path such as {suggested_output}"
+                )
+            }, status=400)
+            return
+        if Path(output_path_str).exists():
+            self._send_json({
+                "error": (
+                    f"output_path already exists: {output_path_str}; "
+                    f"choose a new versioned path such as {suggested_output}"
+                )
+            }, status=400)
+            return
         state = self._retrain_state
         with state["lock"]:
             job = state["job"]
@@ -6268,8 +6331,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         watched_loggers = [
             logging.getLogger("scripts.over_review_poc.train_final_model"),
             logging.getLogger("scripts.over_review_poc.finetune_lora"),
+            logging.getLogger("scripts.over_review_poc.dataset"),
         ]
+        previous_logger_levels = [(lg, lg.level) for lg in watched_loggers]
         for lg in watched_loggers:
+            lg.setLevel(logging.INFO)
             lg.addHandler(handler)
 
         try:
@@ -6308,6 +6374,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if params.get("dinov2_weights"):
                 train_argv += ["--dinov2-weights", str(params["dinov2_weights"])]
 
+            with log_lock:
+                log_lines.append(
+                    f"[train] 開始訓練：epochs={params.get('epochs', 15)}, "
+                    f"rank={params.get('rank', 16)}, output={params['output_path']}"
+                )
             summary = train_main(train_argv)
 
             # Done
@@ -6325,8 +6396,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 log_lines.append(f"[ERROR] {err}")
 
         finally:
-            for lg in watched_loggers:
+            for lg, previous_level in previous_logger_levels:
                 lg.removeHandler(handler)
+                lg.setLevel(previous_level)
 
     # ------------------------------------------------------------------ #
     #  Model registry handlers                                            #

@@ -93,3 +93,25 @@ def test_retrain_state_409_when_running():
         job = state["job"]
         already_running = job and job.get("state") == "running"
     assert already_running
+
+
+def test_next_scratch_bundle_path_uses_current_and_existing_versions(tmp_path):
+    from capi_web import CAPIWebHandler
+
+    deployment = tmp_path / "deployment"
+    deployment.mkdir()
+    (deployment / "scratch_classifier_v2.pkl").write_bytes(b"old")
+    (deployment / "scratch_classifier_v4.pkl").write_bytes(b"old")
+
+    assert CAPIWebHandler._next_scratch_bundle_path(
+        "deployment/scratch_classifier_v3.pkl", deployment
+    ) == (deployment / "scratch_classifier_v5.pkl").as_posix()
+
+
+def test_same_project_path_treats_dot_relative_as_same():
+    from capi_web import CAPIWebHandler
+
+    assert CAPIWebHandler._same_project_path(
+        "deployment/scratch_classifier_v3.pkl",
+        "./deployment/scratch_classifier_v3.pkl",
+    )
