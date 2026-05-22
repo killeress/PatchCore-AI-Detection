@@ -268,6 +268,33 @@ def _clamp_tile_origin(tx: int, ty: int, img_w: int, img_h: int,
     return max(0, min(int(tx), max_x)), max(0, min(int(ty), max_y))
 
 
+def _clamp_tile_origin_keep_anchor(
+    tx: int,
+    ty: int,
+    anchor_xy: Tuple[int, int],
+    img_w: int,
+    img_h: int,
+    tile_size: int,
+) -> Tuple[int, int]:
+    """Clamp tile origin to image bounds while keeping anchor inside when possible."""
+    tx, ty = _clamp_tile_origin(tx, ty, img_w, img_h, tile_size)
+    ax, ay = int(anchor_xy[0]), int(anchor_xy[1])
+    max_x = max(0, img_w - tile_size)
+    max_y = max(0, img_h - tile_size)
+
+    lo_x = max(0, ax - tile_size + 1)
+    hi_x = min(max_x, ax)
+    if lo_x <= hi_x:
+        tx = max(lo_x, min(tx, hi_x))
+
+    lo_y = max(0, ay - tile_size + 1)
+    hi_y = min(max_y, ay)
+    if lo_y <= hi_y:
+        ty = max(lo_y, min(ty, hi_y))
+
+    return tx, ty
+
+
 def _tile_polygon_coverage(
     tile_rect: Tuple[int, int, int, int],
     polygon: Optional[np.ndarray],
@@ -312,6 +339,7 @@ def resolve_inward_polygon_tile(
     tile_size: int,
     initial_origin: Optional[Tuple[int, int]] = None,
     target_coverage: float = 0.999,
+    keep_anchor_inside: bool = False,
 ) -> Tuple[int, int, float, bool]:
     """Resolve a tile origin that stays inside the product polygon when possible.
 
@@ -320,6 +348,8 @@ def resolve_inward_polygon_tile(
     the polygon centroid until its corners are inside the polygon. If the panel
     geometry cannot fit a full tile, the best-coverage origin found so far is
     returned instead of padding or masking black background into the sample.
+    When ``keep_anchor_inside`` is True, movement is constrained so the AOI
+    anchor remains inside the tile whenever image bounds make that possible.
 
     Returns: ``(tx, ty, coverage, shifted)``.
     """
@@ -330,7 +360,10 @@ def resolve_inward_polygon_tile(
         ty = int(anchor_xy[1]) - half
     else:
         tx, ty = int(initial_origin[0]), int(initial_origin[1])
-    tx, ty = _clamp_tile_origin(tx, ty, img_w, img_h, tile_size)
+    if keep_anchor_inside:
+        tx, ty = _clamp_tile_origin_keep_anchor(tx, ty, anchor_xy, img_w, img_h, tile_size)
+    else:
+        tx, ty = _clamp_tile_origin(tx, ty, img_w, img_h, tile_size)
     original = (tx, ty)
 
     if polygon is None or len(polygon) < 3:
@@ -380,7 +413,12 @@ def resolve_inward_polygon_tile(
         if dy == 0 and abs(delta[1]) > 1e-6:
             dy = 1 if delta[1] > 0 else -1
 
-        ntx, nty = _clamp_tile_origin(tx + dx, ty + dy, img_w, img_h, tile_size)
+        if keep_anchor_inside:
+            ntx, nty = _clamp_tile_origin_keep_anchor(
+                tx + dx, ty + dy, anchor_xy, img_w, img_h, tile_size
+            )
+        else:
+            ntx, nty = _clamp_tile_origin(tx + dx, ty + dy, img_w, img_h, tile_size)
         if (ntx, nty) == (tx, ty):
             break
         tx, ty = ntx, nty

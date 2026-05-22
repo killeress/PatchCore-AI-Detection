@@ -3091,8 +3091,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             # 4. 以 (img_cx, img_cy) 為 anchor 裁切 tile，v2 會再依 polygon 往內推
             tile_size = self.inferencer.config.tile_size
             half = tile_size // 2
-            crop_x1 = max(0, img_cx - half)
-            crop_y1 = max(0, img_cy - half)
+            centered_crop_x1 = img_cx - half
+            centered_crop_y1 = img_cy - half
+            crop_x1 = max(0, centered_crop_x1)
+            crop_y1 = max(0, centered_crop_y1)
             crop_x2 = crop_x1 + tile_size
             crop_y2 = crop_y1 + tile_size
 
@@ -3107,6 +3109,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             crop_w = crop_x2 - crop_x1
             crop_h = crop_y2 - crop_y1
             tile_image = image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+            crop_shift_dx = crop_x1 - centered_crop_x1
+            crop_shift_dy = crop_y1 - centered_crop_y1
 
             # 5. 建立 TileInfo + 推論
             tile_info = TileInfo(
@@ -3114,6 +3118,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 x=crop_x1, y=crop_y1,
                 width=crop_w, height=crop_h,
                 image=tile_image,
+                is_aoi_coord_tile=True,
+                aoi_product_x=product_x,
+                aoi_product_y=product_y,
+                aoi_image_x=img_cx,
+                aoi_image_y=img_cy,
+                aoi_tile_shift_dx=crop_shift_dx,
+                aoi_tile_shift_dy=crop_shift_dy,
             )
 
             # 多模型路由：v1 走 prefix lookup；v2 依 polygon 分類 zone 後走 (lighting, zone) 取模型
@@ -3137,6 +3148,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     edge_threshold_px=self.inferencer.config.edge_threshold_px,
                 )
                 _, polygon = detect_panel_polygon(image, pre_cfg)
+                if polygon is None and hasattr(self.inferencer, "_rect_polygon_from_bounds"):
+                    polygon = self.inferencer._rect_polygon_from_bounds(raw_bounds)
                 if polygon is not None:
                     crop_x1, crop_y1, _cov, _shifted = resolve_inward_polygon_tile(
                         anchor_xy=(img_cx, img_cy),
@@ -3144,20 +3157,25 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         image_shape=(img_h, img_w),
                         tile_size=tile_size,
                         initial_origin=(crop_x1, crop_y1),
+                        keep_anchor_inside=True,
                     )
                     crop_x2 = min(img_w, crop_x1 + tile_size)
                     crop_y2 = min(img_h, crop_y1 + tile_size)
                     crop_w = crop_x2 - crop_x1
                     crop_h = crop_y2 - crop_y1
                     tile_image = image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+                    crop_shift_dx = crop_x1 - centered_crop_x1
+                    crop_shift_dy = crop_y1 - centered_crop_y1
                     tile_info.x = crop_x1
                     tile_info.y = crop_y1
                     tile_info.width = crop_w
                     tile_info.height = crop_h
                     tile_info.image = tile_image
+                    tile_info.aoi_tile_shift_dx = crop_shift_dx
+                    tile_info.aoi_tile_shift_dy = crop_shift_dy
 
                 tile_rect = (crop_x1, crop_y1, crop_x2, crop_y2)
-                zone, _, _, _ = classify_tile_zone(tile_rect, polygon, pre_cfg)
+                zone, _, _, tile_mask = classify_tile_zone(tile_rect, polygon, pre_cfg)
                 if zone == "outside":
                     zone = "edge"  # debug fallback：邊外座標仍用 edge model 看一下分數
                 if polygon is not None:
@@ -3168,6 +3186,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     if d_edge <= tile_size // 2:
                         zone = "edge"
                 tile_info.zone = zone
+                tile_info.mask = tile_mask
 
                 try:
                     target_inferencer = self.inferencer._get_model_for(
@@ -3381,6 +3400,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "product_coord": [product_x, product_y],
                 "product_resolution": [product_w, product_h],
                 "image_coord": [img_cx, img_cy],
+                "centered_crop_origin": [centered_crop_x1, centered_crop_y1],
+                "tile_shift": [crop_shift_dx, crop_shift_dy],
                 "crop_region": [crop_x1, crop_y1, crop_x2, crop_y2],
                 "raw_bounds": list(raw_bounds),
                 "scale": [round(scale_x, 4), round(scale_y, 4)],
@@ -3401,6 +3422,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             self._send_json(response_data)
             logger.info(f"[DEBUG-COORD] ({product_x},{product_y})→({img_cx},{img_cy}) "
+                        f"shift=({crop_shift_dx:+d},{crop_shift_dy:+d}) "
                         f"Score={score:.4f} {judgment} ({total_time:.2f}s)")
 
         except Exception as e:

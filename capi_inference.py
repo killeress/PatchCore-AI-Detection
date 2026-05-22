@@ -188,6 +188,8 @@ class TileInfo:
     aoi_product_y: int = -1         # AOI 產品座標 Y (-1=非 AOI 座標 tile)
     aoi_image_x: int = -1           # AOI 映射後圖片座標 X (-1=非 AOI 座標 tile)
     aoi_image_y: int = -1           # AOI 映射後圖片座標 Y (-1=非 AOI 座標 tile)
+    aoi_tile_shift_dx: int = 0      # AOI tile 最終左上角相對「AOI 置中」左上角的修正量
+    aoi_tile_shift_dy: int = 0
     zone: str = ""                  # 新架構推論 zone："inner" / "edge" / "bright_spot"；v1 為 ""
     is_bright_spot_detection: bool = False  # 是否為二值化亮點偵測（非 PatchCore）
     bright_spot_max_diff: int = 0           # B0F 偵測：最大局部差異值
@@ -645,6 +647,41 @@ class CAPIInferencer:
         if not getattr(self, "edge_inspector", None):
             return "cv"
         return getattr(self.edge_inspector.config, "aoi_edge_inspector", "cv")
+
+    @staticmethod
+    def _rect_polygon_from_bounds(bounds: Optional[Tuple[int, int, int, int]]) -> Optional[np.ndarray]:
+        """Build a rectangular panel polygon from raw bounds for AOI inward clamping."""
+        if bounds is None:
+            return None
+        x1, y1, x2, y2 = (int(v) for v in bounds)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return np.array(
+            [[x1, y1], [x2 - 1, y1], [x2 - 1, y2 - 1], [x1, y2 - 1]],
+            dtype=np.float32,
+        )
+
+    @staticmethod
+    def _format_aoi_tile_log_suffix(tile: 'TileInfo') -> str:
+        if not getattr(tile, "is_aoi_coord_tile", False):
+            return ""
+        parts = []
+        code = getattr(tile, "aoi_defect_code", "") or ""
+        px = int(getattr(tile, "aoi_product_x", -1))
+        py = int(getattr(tile, "aoi_product_y", -1))
+        if px >= 0 and py >= 0:
+            label = f"AOI({px},{py})"
+            if code:
+                label = f"AOI({code}:{px},{py})"
+            parts.append(label)
+        ix = int(getattr(tile, "aoi_image_x", -1))
+        iy = int(getattr(tile, "aoi_image_y", -1))
+        if ix >= 0 and iy >= 0:
+            parts.append(f"img@({ix},{iy})")
+        dx = int(getattr(tile, "aoi_tile_shift_dx", 0))
+        dy = int(getattr(tile, "aoi_tile_shift_dy", 0))
+        parts.append(f"shift=({dx:+d},{dy:+d})")
+        return " " + " ".join(parts) if parts else ""
 
     def _load_mark_template(self) -> None:
         """載入 MARK 模板"""
@@ -1700,12 +1737,13 @@ class CAPIInferencer:
         max_diff_val = int(diff.max())
         bright_pixel_count = int(np.sum(filtered_binary > 0))
         raw_bright_count = int(np.sum(binary > 0))
+        aoi_suffix = self._format_aoi_tile_log_suffix(tile)
         if has_bright_spot:
-            print(f"  💡 B0F 偵測 Tile@({tile.x},{tile.y}): 發現亮點 ({bright_pixel_count} px), "
+            print(f"  💡 B0F 偵測 Tile@({tile.x},{tile.y}){aoi_suffix}: 發現亮點 ({bright_pixel_count} px), "
                   f"max_diff={max_diff_val}, diff_thr={diff_threshold}, abs_thr={abs_threshold}, "
                   f"max_pixel={max_pixel_val}, median_k={mk}")
         else:
-            print(f"  💡 B0F 偵測 Tile@({tile.x},{tile.y}): 未發現亮點, "
+            print(f"  💡 B0F 偵測 Tile@({tile.x},{tile.y}){aoi_suffix}: 未發現亮點, "
                   f"max_diff={max_diff_val}, diff_thr={diff_threshold}, abs_thr={abs_threshold}, "
                   f"max_pixel={max_pixel_val}, raw_bright={raw_bright_count} px, "
                   f"max_component={max_component_area} px (min_area={min_area})")
@@ -3252,8 +3290,10 @@ class CAPIInferencer:
             )
 
             # 計算 tile 起點 (以座標為中心)
-            tx = img_x - half
-            ty = img_y - half
+            centered_tx = img_x - half
+            centered_ty = img_y - half
+            tx = centered_tx
+            ty = centered_ty
 
             # 檢查是否能完整放入 Otsu bounds 內
             otsu_width = otsu_x2 - otsu_x1
@@ -3318,12 +3358,18 @@ class CAPIInferencer:
                 aoi_product_y=defect.product_y,
                 aoi_image_x=img_x,
                 aoi_image_y=img_y,
+                aoi_tile_shift_dx=tx - centered_tx,
+                aoi_tile_shift_dy=ty - centered_ty,
                 zone="bright_spot" if is_skip_file else "",
             )
 
             patchcore_tiles.append(tile)
             next_tile_id += 1
-            logger.debug(f"  🎯 AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}) → Tile ({tx},{ty}) {tile_size}x{tile_size}")
+            logger.debug(
+                f"  🎯 AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}) "
+                f"→ Tile ({tx},{ty}) {tile_size}x{tile_size} "
+                f"shift=({tile.aoi_tile_shift_dx},{tile.aoi_tile_shift_dy})"
+            )
 
         return patchcore_tiles, edge_defects
 
@@ -4089,6 +4135,8 @@ class CAPIInferencer:
         half = tile_size // 2
         img_h, img_w = image.shape[:2]
         polygon = result.panel_polygon
+        if polygon is None:
+            polygon = self._rect_polygon_from_bounds(result.raw_bounds)
         next_tile_id = max((t.tile_id for t in result.tiles), default=-1) + 1
         otsu_x1, otsu_y1, otsu_x2, otsu_y2 = result.raw_bounds
         created = 0
@@ -4101,8 +4149,10 @@ class CAPIInferencer:
 
             # Inference/training aligned inward ROI：先用 AOI-centered origin，
             # 若跨出 polygon 則往產品內側推；不 zero-pad、不帶黑背景進 edge.pt。
-            tx = max(0, img_x - half)
-            ty = max(0, img_y - half)
+            centered_tx = img_x - half
+            centered_ty = img_y - half
+            tx = max(0, centered_tx)
+            ty = max(0, centered_ty)
             tx2 = tx + tile_size
             ty2 = ty + tile_size
             if tx2 > img_w:
@@ -4119,6 +4169,7 @@ class CAPIInferencer:
                     image_shape=(img_h, img_w),
                     tile_size=tile_size,
                     initial_origin=(tx, ty),
+                    keep_anchor_inside=True,
                 )
 
             tx2 = min(img_w, tx + tile_size)
@@ -4130,7 +4181,7 @@ class CAPIInferencer:
             if is_skip_file:
                 zone = "bright_spot"
             else:
-                zone, _cov, _dist, _mask = classify_tile_zone(
+                zone, _cov, _dist, tile_mask = classify_tile_zone(
                     (tx, ty, tx2, ty2), polygon, pre_cfg,
                 )
                 if zone == "outside":
@@ -4154,13 +4205,15 @@ class CAPIInferencer:
                 x=tx, y=ty,
                 width=crop_w, height=crop_h,
                 image=tile_img,
-                mask=None,
+                mask=tile_mask,
                 is_aoi_coord_tile=True,
                 aoi_defect_code=defect.defect_code,
                 aoi_product_x=defect.product_x,
                 aoi_product_y=defect.product_y,
                 aoi_image_x=img_x,
                 aoi_image_y=img_y,
+                aoi_tile_shift_dx=tx - centered_tx,
+                aoi_tile_shift_dy=ty - centered_ty,
                 zone=zone,
                 is_top_edge=is_top,
                 is_bottom_edge=is_bottom,
@@ -4173,7 +4226,8 @@ class CAPIInferencer:
 
             logger.debug(
                 f"  🎯 [v2] AOI Coord ({defect.defect_code}) @ ({img_x},{img_y}) "
-                f"→ Tile ({tx},{ty}) zone={zone}"
+                f"→ Tile ({tx},{ty}) zone={zone} "
+                f"shift=({tile.aoi_tile_shift_dx},{tile.aoi_tile_shift_dy})"
             )
 
         return created
@@ -5100,7 +5154,8 @@ class CAPIInferencer:
                 # OMIT 過曝：無法進行灰塵檢測，記錄但不判定
                 for tile, score, anomaly_map in result.anomaly_tiles:
                     tile.dust_detail_text = f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> Cannot verify dust, treated as REAL_NG"
-                    print(f"⚠️ {img_path.name} Tile@({tile.x},{tile.y}) Score:{score:.3f} → OMIT OVEREXPOSED, skip dust check")
+                    aoi_suffix = self._format_aoi_tile_log_suffix(tile)
+                    print(f"⚠️ {img_path.name} Tile@({tile.x},{tile.y}){aoi_suffix} Score:{score:.3f} → OMIT OVEREXPOSED, skip dust check")
             elif result.anomaly_tiles and omit_image is not None and not omit_overexposed:
                 for tile, score, anomaly_map in result.anomaly_tiles:
                     # 在 OMIT 圖片上裁切相同區域
@@ -5240,7 +5295,8 @@ class CAPIInferencer:
                         tile.dust_detail_text = detail_text
                         
                         log_icon = "🧹" if tile.is_suspected_dust_or_scratch else "🔴"
-                        print(f"{log_icon} {img_path.name} Tile@({tx},{ty}) → {detail_text}")
+                        aoi_suffix = self._format_aoi_tile_log_suffix(tile)
+                        print(f"{log_icon} {img_path.name} Tile@({tx},{ty}){aoi_suffix} → {detail_text}")
 
             # === 加入 CV Edge 灰塵檢測 (與 OMIT 擷取) ===
             # 注意：inspector_mode == "fusion" 的 defect 已在 _inspect_roi_fusion
@@ -5519,7 +5575,8 @@ class CAPIInferencer:
                                     break
                             if not aoi_matches_bomb:
                                 is_bomb = False
-                                print(f"🛡️ {result.image_path.name} Tile@({tile.x},{tile.y}) Peak 匹配炸彈但 AOI 座標 ({tile.aoi_product_x},{tile.aoi_product_y}) 距離炸彈超過容忍度，保留為真實缺陷")
+                                aoi_suffix = self._format_aoi_tile_log_suffix(tile)
+                                print(f"🛡️ {result.image_path.name} Tile@({tile.x},{tile.y}){aoi_suffix} Peak 匹配炸彈但 AOI 座標 ({tile.aoi_product_x},{tile.aoi_product_y}) 距離炸彈超過容忍度，保留為真實缺陷")
                         if is_bomb:
                             tile.is_bomb = True
                             tile.bomb_defect_code = bomb_code
@@ -5717,8 +5774,9 @@ class CAPIInferencer:
                         "Cannot verify dust, treated as REAL_NG"
                     )
                     zone_tag = f" [{tile.zone}]" if tile.zone else ""
+                    aoi_suffix = self._format_aoi_tile_log_suffix(tile)
                     print(
-                        f"⚠️ {result.image_path.name} Tile@({tile.x},{tile.y}){zone_tag} "
+                        f"⚠️ {result.image_path.name} Tile@({tile.x},{tile.y}){zone_tag}{aoi_suffix} "
                         f"Score:{score:.3f} → OMIT OVEREXPOSED, skip dust check"
                     )
                 return
@@ -5854,8 +5912,9 @@ class CAPIInferencer:
 
                 log_icon = "🧹" if tile.is_suspected_dust_or_scratch else "🔴"
                 zone_tag = f" [{tile.zone}]" if tile.zone else ""
+                aoi_suffix = self._format_aoi_tile_log_suffix(tile)
                 print(
-                    f"{log_icon} {result.image_path.name} Tile@({tx},{ty}){zone_tag} "
+                    f"{log_icon} {result.image_path.name} Tile@({tx},{ty}){zone_tag}{aoi_suffix} "
                     f"Score:{score:.3f} → {detail_text}"
                 )
 
@@ -5957,8 +6016,9 @@ class CAPIInferencer:
                                 break
                         if not aoi_matches_bomb:
                             is_bomb = False
+                            aoi_suffix = self._format_aoi_tile_log_suffix(tile)
                             print(
-                                f"🛡️ [v2] {result.image_path.name} Tile@({tile.x},{tile.y}) "
+                                f"🛡️ [v2] {result.image_path.name} Tile@({tile.x},{tile.y}){aoi_suffix} "
                                 f"Peak 匹配炸彈但 AOI 座標 ({tile.aoi_product_x},{tile.aoi_product_y}) "
                                 f"距離炸彈超過容忍度，保留為真實缺陷"
                             )
@@ -6023,8 +6083,9 @@ class CAPIInferencer:
                         if zone.x <= px <= zone.x + zone.w and zone.y <= py <= zone.y + zone.h:
                             tile.is_in_exclude_zone = True
                             zone_tag = f" [{tile.zone}]" if tile.zone else ""
+                            aoi_suffix = self._format_aoi_tile_log_suffix(tile)
                             print(
-                                f"🚫 {result.image_path.name} Tile@({tile.x},{tile.y}){zone_tag} "
+                                f"🚫 {result.image_path.name} Tile@({tile.x},{tile.y}){zone_tag}{aoi_suffix} "
                                 f"peak@({px},{py}) 落在不檢測區 ({zone.x},{zone.y},{zone.w}x{zone.h})"
                             )
                             break

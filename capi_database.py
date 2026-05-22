@@ -114,6 +114,18 @@ class CAPIDatabase:
                     peak_x INTEGER DEFAULT -1,
                     peak_y INTEGER DEFAULT -1,
                     heatmap_path TEXT DEFAULT '',
+                    is_exclude_zone INTEGER DEFAULT 0,
+                    is_aoi_coord INTEGER DEFAULT 0,
+                    aoi_defect_code TEXT DEFAULT '',
+                    aoi_product_x INTEGER DEFAULT -1,
+                    aoi_product_y INTEGER DEFAULT -1,
+                    aoi_image_x INTEGER DEFAULT -1,
+                    aoi_image_y INTEGER DEFAULT -1,
+                    aoi_tile_shift_dx INTEGER DEFAULT 0,
+                    aoi_tile_shift_dy INTEGER DEFAULT 0,
+                    scratch_score REAL DEFAULT 0.0,
+                    scratch_filtered INTEGER DEFAULT 0,
+                    zone TEXT DEFAULT '',
                     FOREIGN KEY (image_result_id) REFERENCES image_results(id) ON DELETE CASCADE
                 );
 
@@ -351,6 +363,10 @@ class CAPIDatabase:
             add_column_if_not_exists("tile_results", "aoi_defect_code", "TEXT DEFAULT ''")
             add_column_if_not_exists("tile_results", "aoi_product_x", "INTEGER DEFAULT -1")
             add_column_if_not_exists("tile_results", "aoi_product_y", "INTEGER DEFAULT -1")
+            add_column_if_not_exists("tile_results", "aoi_image_x", "INTEGER DEFAULT -1")
+            add_column_if_not_exists("tile_results", "aoi_image_y", "INTEGER DEFAULT -1")
+            add_column_if_not_exists("tile_results", "aoi_tile_shift_dx", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("tile_results", "aoi_tile_shift_dy", "INTEGER DEFAULT 0")
             add_column_if_not_exists("inference_records", "inference_log", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "omit_overexposed", "INTEGER DEFAULT 0")
             add_column_if_not_exists("inference_records", "omit_overexposure_info", "TEXT DEFAULT ''")
@@ -477,8 +493,10 @@ class CAPIDatabase:
                                     bomb_code, peak_x, peak_y, heatmap_path,
                                     is_exclude_zone, is_aoi_coord, aoi_defect_code,
                                     aoi_product_x, aoi_product_y,
+                                    aoi_image_x, aoi_image_y,
+                                    aoi_tile_shift_dx, aoi_tile_shift_dy,
                                     scratch_score, scratch_filtered, zone)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  tile_data.get("tile_id", 0),
                                  tile_data.get("x", 0),
@@ -499,6 +517,10 @@ class CAPIDatabase:
                                  tile_data.get("aoi_defect_code", ""),
                                  tile_data.get("aoi_product_x", -1),
                                  tile_data.get("aoi_product_y", -1),
+                                 tile_data.get("aoi_image_x", -1),
+                                 tile_data.get("aoi_image_y", -1),
+                                 tile_data.get("aoi_tile_shift_dx", 0),
+                                 tile_data.get("aoi_tile_shift_dy", 0),
                                  tile_data.get("scratch_score", 0.0),
                                  int(tile_data.get("scratch_filtered", 0)),
                                  tile_data.get("zone", ""))
@@ -651,8 +673,10 @@ class CAPIDatabase:
                                     bomb_code, peak_x, peak_y, heatmap_path,
                                     is_exclude_zone, is_aoi_coord, aoi_defect_code,
                                     aoi_product_x, aoi_product_y,
+                                    aoi_image_x, aoi_image_y,
+                                    aoi_tile_shift_dx, aoi_tile_shift_dy,
                                     scratch_score, scratch_filtered, zone)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  tile_data.get("tile_id", 0),
                                  tile_data.get("x", 0),
@@ -673,6 +697,10 @@ class CAPIDatabase:
                                  tile_data.get("aoi_defect_code", ""),
                                  tile_data.get("aoi_product_x", -1),
                                  tile_data.get("aoi_product_y", -1),
+                                 tile_data.get("aoi_image_x", -1),
+                                 tile_data.get("aoi_image_y", -1),
+                                 tile_data.get("aoi_tile_shift_dx", 0),
+                                 tile_data.get("aoi_tile_shift_dy", 0),
                                  tile_data.get("scratch_score", 0.0),
                                  int(tile_data.get("scratch_filtered", 0)),
                                  tile_data.get("zone", ""))

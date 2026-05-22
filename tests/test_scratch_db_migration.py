@@ -19,6 +19,10 @@ def test_fresh_db_has_scratch_columns(tmp_path):
     tile_cols = _get_columns(db_path, "tile_results")
     assert "scratch_score" in tile_cols
     assert "scratch_filtered" in tile_cols
+    assert "aoi_image_x" in tile_cols
+    assert "aoi_image_y" in tile_cols
+    assert "aoi_tile_shift_dx" in tile_cols
+    assert "aoi_tile_shift_dy" in tile_cols
 
     image_cols = _get_columns(db_path, "image_results")
     assert "scratch_filter_count" in image_cols
@@ -67,8 +71,56 @@ def test_existing_db_migrated(tmp_path):
     tile_cols = _get_columns(db_path, "tile_results")
     assert "scratch_score" in tile_cols
     assert "scratch_filtered" in tile_cols
+    assert "aoi_image_x" in tile_cols
+    assert "aoi_image_y" in tile_cols
+    assert "aoi_tile_shift_dx" in tile_cols
+    assert "aoi_tile_shift_dy" in tile_cols
     image_cols = _get_columns(db_path, "image_results")
     assert "scratch_filter_count" in image_cols
+
+
+def test_aoi_coord_fields_persist(tmp_path):
+    db = CAPIDatabase(str(tmp_path / "aoi_persist.db"))
+    db.save_inference_record(
+        glass_id="G1", model_id="M1", machine_no="1",
+        resolution=(1920, 1080),
+        machine_judgment="NG", ai_judgment="NG",
+        image_dir="/fake",
+        total_images=1, ng_images=1, ng_details="",
+        request_time="2026-05-22T10:00:00",
+        response_time="2026-05-22T10:00:05",
+        processing_seconds=5.0,
+        image_results_data=[{
+            "image_path": "/fake/R0F00000.jpg",
+            "image_name": "R0F00000.jpg",
+            "image_width": 4096, "image_height": 4096,
+            "otsu_bounds": "",
+            "tile_count": 1, "excluded_tiles": 0, "anomaly_count": 1,
+            "max_score": 1.0,
+            "is_ng": 1, "is_dust_only": 0, "is_bomb": 0,
+            "inference_time_ms": 100.0,
+            "heatmap_path": "",
+            "tiles": [{
+                "tile_id": 126, "x": 630, "y": 3198,
+                "width": 512, "height": 512,
+                "score": 1.0, "is_anomaly": 1, "is_dust": 0, "dust_iou": 0.0,
+                "is_bomb": 0, "bomb_code": "",
+                "peak_x": -1, "peak_y": -1,
+                "heatmap_path": "",
+                "is_exclude_zone": 0, "is_aoi_coord": 1,
+                "aoi_defect_code": "C1111",
+                "aoi_product_x": 70, "aoi_product_y": 1080,
+                "aoi_image_x": 630, "aoi_image_y": 3198,
+                "aoi_tile_shift_dx": 560, "aoi_tile_shift_dy": -12,
+            }],
+        }],
+    )
+    with sqlite3.connect(tmp_path / "aoi_persist.db") as c:
+        row = c.execute(
+            "SELECT aoi_image_x, aoi_image_y, aoi_tile_shift_dx, aoi_tile_shift_dy "
+            "FROM tile_results"
+        ).fetchone()
+        assert row == (630, 3198, 560, -12)
 
 
 def test_scratch_fields_persist(tmp_path):
