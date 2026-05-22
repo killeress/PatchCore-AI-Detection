@@ -3,6 +3,7 @@ tests/test_process_panel_v2.py
 Smoke tests for _process_panel_v2 — uses MagicMock so no real GPU / model files needed.
 """
 import tempfile
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -42,16 +43,19 @@ def _make_config(tmp_dir: Path) -> CAPIConfig:
     )
 
 
-def _write_grey_panel_image(folder: Path, prefix: str = "G0F00000") -> Path:
+def _write_grey_panel_image_at(path: Path) -> Path:
     """Write a small grayscale PNG that Otsu can binarize sensibly."""
     import cv2
     h, w = 1024, 1024
     img = np.zeros((h, w), dtype=np.uint8)
     # bright panel region in the centre
     img[100:900, 100:900] = 200
-    path = folder / f"{prefix}_test.png"
     cv2.imwrite(str(path), img)
     return path
+
+
+def _write_grey_panel_image(folder: Path, prefix: str = "G0F00000") -> Path:
+    return _write_grey_panel_image_at(folder / f"{prefix}_test.png")
 
 
 def _make_fake_predict_result(score: float = 0.3) -> Any:
@@ -93,6 +97,29 @@ def test_process_panel_v2_returns_compatible_tuple(tmp_path):
 
     results, omit_vis, omit_oe, omit_info, is_dup, omit_img, aoi_report = ret
     assert isinstance(results, list), "results should be List[ImageResult]"
+
+
+def test_process_panel_v2_duplicate_panel_uses_latest_lighting_file(tmp_path):
+    old_img = _write_grey_panel_image_at(tmp_path / "G0F00000_010000.png")
+    latest_img = _write_grey_panel_image_at(tmp_path / "G0F00000_020000.png")
+    os.utime(old_img, (1000, 1000))
+    os.utime(latest_img, (2000, 2000))
+
+    cfg = _make_config(tmp_path)
+    cfg.max_images_per_panel = 1
+
+    from capi_inference import CAPIInferencer
+
+    fake_model = MagicMock()
+    fake_model.predict.return_value = _make_fake_predict_result(0.1)
+
+    with patch.object(CAPIInferencer, "_get_model_for", return_value=fake_model):
+        inferencer = CAPIInferencer(cfg)
+        results, _omit_vis, _omit_oe, _omit_info, is_dup, _omit_img, _report = \
+            inferencer.process_panel(tmp_path)
+
+    assert is_dup is True
+    assert [r.image_path.name for r in results] == ["G0F00000_020000.png"]
 
 
 def test_process_panel_v2_no_anomaly_when_score_below_threshold(tmp_path):
@@ -353,6 +380,69 @@ def test_process_panel_v2_runs_b0f_skip_file_with_bright_spot_logic(tmp_path):
     assert b0f.tiles[0].is_aoi_coord_tile is True
     assert b0f.tiles[0].is_bright_spot_detection is True
     assert len(b0f.anomaly_tiles) == 1
+    bright.assert_called_once()
+    get_model.assert_not_called()
+
+
+def test_process_panel_v2_duplicate_panel_uses_latest_b0f_skip_file(tmp_path):
+    import cv2
+
+    _write_grey_panel_image(tmp_path, "G0F00000")
+    old_b0f = tmp_path / "B0F00000_010000.png"
+    latest_b0f = tmp_path / "B0F00000_020000.png"
+    cv2.imwrite(str(old_b0f), np.zeros((1024, 1024), dtype=np.uint8))
+    cv2.imwrite(str(latest_b0f), np.zeros((1024, 1024), dtype=np.uint8))
+    os.utime(old_b0f, (1000, 1000))
+    os.utime(latest_b0f, (2000, 2000))
+
+    cfg = _make_config(tmp_path)
+    cfg.max_images_per_panel = 1
+    cfg.aoi_coord_inspection_enabled = True
+    cfg.grid_tiling_enabled = False
+    cfg.skip_files = ["B0F00000"]
+
+    from capi_inference import CAPIInferencer, AOIReportDefect
+    from capi_preprocess import PanelPreprocessResult
+
+    fake_pre_result = PanelPreprocessResult(
+        image_path=tmp_path / "G0F00000_test.png",
+        lighting="G0F00000",
+        foreground_bbox=(0, 0, 1024, 1024),
+        panel_polygon=None,
+        tiles=[],
+    )
+    parsed_report = {
+        "B0F00000": [
+            AOIReportDefect(
+                defect_code="B01",
+                product_x=100,
+                product_y=100,
+                image_prefix="B0F00000",
+            )
+        ]
+    }
+    amap = np.ones((512, 512), dtype=np.float32)
+
+    def _fake_bright(tile):
+        tile.is_bright_spot_detection = True
+        return 1.0, amap
+
+    with patch("capi_preprocess.preprocess_panel_folder",
+               return_value={"G0F00000": fake_pre_result}), \
+         patch.object(CAPIInferencer, "_parse_aoi_report_txt",
+                      return_value=parsed_report), \
+         patch.object(CAPIInferencer, "_get_model_for") as get_model, \
+         patch.object(CAPIInferencer, "_detect_bright_spots",
+                      side_effect=_fake_bright) as bright:
+        inferencer = CAPIInferencer(cfg)
+        results, _omit_vis, _omit_oe, _omit_info, is_dup, _omit_img, returned_report = \
+            inferencer.process_panel(tmp_path, product_resolution=(1024, 1024))
+
+    assert is_dup is True
+    assert returned_report is parsed_report
+    b0f_results = [r for r in results if r.image_path.name.startswith("B0F00000")]
+    assert len(b0f_results) == 1
+    assert b0f_results[0].image_path.name == "B0F00000_020000.png"
     bright.assert_called_once()
     get_model.assert_not_called()
 
