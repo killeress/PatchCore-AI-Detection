@@ -13,6 +13,14 @@ def _fake_image_result_with_scratch_data() -> ImageResult:
                     image=np.zeros((512, 512, 3), dtype=np.uint8))
     tile.scratch_score = 0.87
     tile.scratch_filtered = True
+    tile.is_aoi_coord_tile = True
+    tile.aoi_defect_code = "C1111"
+    tile.aoi_product_x = 70
+    tile.aoi_product_y = 1080
+    tile.aoi_image_x = 630
+    tile.aoi_image_y = 3198
+    tile.aoi_tile_shift_dx = 560
+    tile.aoi_tile_shift_dy = -12
 
     ir = ImageResult(
         image_path=Path("/fake/img.jpg"),
@@ -67,6 +75,10 @@ def test_results_to_db_data_includes_scratch():
         "scratch_score missing from tile dict"
     assert data[0]["tiles"][0]["scratch_filtered"] is True, \
         "scratch_filtered missing from tile dict"
+    assert data[0]["tiles"][0]["aoi_image_x"] == 630
+    assert data[0]["tiles"][0]["aoi_image_y"] == 3198
+    assert data[0]["tiles"][0]["aoi_tile_shift_dx"] == 560
+    assert data[0]["tiles"][0]["aoi_tile_shift_dy"] == -12
 
 
 def test_scratch_fields_round_trip_through_full_save_path(tmp_path):

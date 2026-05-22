@@ -162,6 +162,10 @@ def test_helper_new_arch_creates_centered_tile(new_arch_inferencer, tmp_path):
     assert centered.aoi_defect_code == "L01"
     assert centered.aoi_product_x == 960
     assert centered.aoi_product_y == 540
+    assert centered.aoi_image_x == 960
+    assert centered.aoi_image_y == 540
+    assert centered.aoi_tile_shift_dx == 0
+    assert centered.aoi_tile_shift_dy == 0
     assert centered.x == 960 - 256
     assert centered.y == 540 - 256
     assert centered.image.shape == (512, 512)
@@ -214,6 +218,10 @@ def test_helper_new_arch_creates_tile_even_at_image_corner(new_arch_inferencer, 
     assert centered.is_aoi_coord_tile is True
     assert centered.x == 1920 - 512
     assert centered.y == 1080 - 512
+    assert centered.aoi_image_x == 1900
+    assert centered.aoi_image_y == 1000
+    assert centered.aoi_tile_shift_dx == (1920 - 512) - (1900 - 256)
+    assert centered.aoi_tile_shift_dy == (1080 - 512) - (1000 - 256)
     assert centered.image.shape == (512, 512)
     # 整張測試圖都是 128；若仍走 zero-pad，右下角會變 0。
     assert centered.image[256, 256] == 128

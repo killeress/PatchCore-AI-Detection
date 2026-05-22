@@ -739,6 +739,8 @@
                                 <th style="width: 80px;">區域</th>
                                 <th style="width: 90px;">推論模型</th>
                                 <th>AOI 座標</th>
+                                <th>圖片座標</th>
+                                <th>修正量</th>
                                 <th>位置 (x, y)</th>
                                 <th>大小 (w x h)</th>
                                 <th>異常分數</th>
@@ -773,6 +775,22 @@
                                     {% else %}
                                     <span style="color: #CBD5E1;">—</span>
                                     {% endif %}
+                                </td>
+                                <td>
+                                    {% if t.get("aoi_image_x", -1) >= 0 and t.get("aoi_image_y", -1) >= 0 %}
+                                    <span style="color: #2563EB; font-family: 'Fira Code', monospace; font-size: 12px;">
+                                        ({{ t.aoi_image_x }}, {{ t.aoi_image_y }})
+                                    </span>
+                                    {% else %}
+                                    <span style="color: #CBD5E1;">—</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% set aoi_dx = t.get("aoi_tile_shift_dx", 0) or 0 %}
+                                    {% set aoi_dy = t.get("aoi_tile_shift_dy", 0) or 0 %}
+                                    <span style="color: {% if aoi_dx or aoi_dy %}#0284C7{% else %}#CBD5E1{% endif %}; font-family: 'Fira Code', monospace; font-size: 12px;">
+                                        ({% if aoi_dx > 0 %}+{% endif %}{{ aoi_dx }}, {% if aoi_dy > 0 %}+{% endif %}{{ aoi_dy }})
+                                    </span>
                                 </td>
                                 <td>({{ t.x }}, {{ t.y }})</td>
                                 <td>{{ t.width }}x{{ t.height }}</td>

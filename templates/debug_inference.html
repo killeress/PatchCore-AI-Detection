@@ -1690,6 +1690,8 @@
         const isNG = data.judgment === 'NG';
         const jColor = isNG ? 'var(--ng)' : 'var(--ok)';
         const jIcon = isNG ? '🔴' : '🟢';
+        const shift = data.tile_shift || [0, 0];
+        const shiftText = `(${shift[0] > 0 ? '+' : ''}${shift[0]}, ${shift[1] > 0 ? '+' : ''}${shift[1]})`;
 
         // Info cards
         const cards = document.getElementById('coord-info-cards');
@@ -1721,6 +1723,10 @@
             <div class="summary-card">
                 <div class="label">裁切區域</div>
                 <div class="value" style="color:var(--text-muted);font-size:0.85rem;">(${data.crop_region[0]},${data.crop_region[1]}) → (${data.crop_region[2]},${data.crop_region[3]})</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">座標修正量</div>
+                <div class="value" style="color:${shift[0] || shift[1] ? 'var(--accent)' : 'var(--text-muted)'};font-size:0.9rem;">${shiftText}</div>
             </div>
             <div class="summary-card">
                 <div class="label">使用模型</div>

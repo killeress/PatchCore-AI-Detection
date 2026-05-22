@@ -403,7 +403,9 @@ function copyInferenceLog() {
                         <th>區域</th>
                         <th>異常代碼</th>
                         <th>AOI 座標</th>
-                        <th>圖片位置</th>
+                        <th>圖片座標</th>
+                        <th>Tile 位置</th>
+                        <th>修正量</th>
                         <th>大小</th>
                         <th>AI 分數</th>
                         <th>AI 判定</th>
@@ -424,7 +426,21 @@ function copyInferenceLog() {
                             <span style="color: var(--text-muted);">—</span>
                             {% endif %}
                         </td>
+                        <td>
+                            {% if t.get("aoi_image_x", -1) >= 0 and t.get("aoi_image_y", -1) >= 0 %}
+                            <span style="color: #93C5FD; font-family: 'Fira Code', monospace;">({{ t.aoi_image_x }}, {{ t.aoi_image_y }})</span>
+                            {% else %}
+                            <span style="color: var(--text-muted);">—</span>
+                            {% endif %}
+                        </td>
                         <td>({{ t.x }}, {{ t.y }})</td>
+                        <td>
+                            {% set aoi_dx = t.get("aoi_tile_shift_dx", 0) or 0 %}
+                            {% set aoi_dy = t.get("aoi_tile_shift_dy", 0) or 0 %}
+                            <span style="color: {% if aoi_dx or aoi_dy %}#38BDF8{% else %}var(--text-muted){% endif %}; font-family: 'Fira Code', monospace;">
+                                ({% if aoi_dx > 0 %}+{% endif %}{{ aoi_dx }}, {% if aoi_dy > 0 %}+{% endif %}{{ aoi_dy }})
+                            </span>
+                        </td>
                         <td>{{ t.width }}x{{ t.height }}</td>
                         <td><span class="badge {{ t_badge }}">{{ t.score | round(3) }}</span></td>
                         <td>
@@ -463,6 +479,12 @@ function copyInferenceLog() {
                         {% if t.get("aoi_product_x", -1) >= 0 %}
                         <span style="color: #F59E0B;">AOI({{ t.aoi_product_x }},{{ t.aoi_product_y }})</span>
                         {% endif %}
+                        {% if t.get("aoi_image_x", -1) >= 0 %}
+                        <span style="color: #93C5FD;">img({{ t.aoi_image_x }},{{ t.aoi_image_y }})</span>
+                        {% endif %}
+                        {% set aoi_dx = t.get("aoi_tile_shift_dx", 0) or 0 %}
+                        {% set aoi_dy = t.get("aoi_tile_shift_dy", 0) or 0 %}
+                        <span style="color: #38BDF8;">shift({% if aoi_dx > 0 %}+{% endif %}{{ aoi_dx }},{% if aoi_dy > 0 %}+{% endif %}{{ aoi_dy }})</span>
                         {% if t.get("scratch_filtered") %}
                         <span style="color: #0D9488;">[🧽 Scratch 救回 OK]</span>
                         {% elif t.get("is_anomaly") %}
