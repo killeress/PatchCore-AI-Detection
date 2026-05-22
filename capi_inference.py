@@ -1193,7 +1193,8 @@ class CAPIInferencer:
         
         return result
 
-    def _fix_legacy_precision(self, inferencer) -> None:
+    @staticmethod
+    def _fix_legacy_precision(inferencer) -> None:
         """
         修補舊版/跨版本 anomalib checkpoint 的 fp16 precision 問題。
 
@@ -2985,6 +2986,15 @@ class CAPIInferencer:
         bottom_row = np.hstack([panel_bl, panel_br])
         return np.vstack([top_row, bottom_row])
 
+    _PANEL_IMAGE_EXTENSIONS = (".png", ".jpg", ".tif", ".tiff")
+
+    @classmethod
+    def _list_panel_image_files(cls, panel_dir: Path) -> List[Path]:
+        return sorted(
+            f for f in Path(panel_dir).iterdir()
+            if f.is_file() and f.suffix.lower() in cls._PANEL_IMAGE_EXTENSIONS
+        )
+
     @staticmethod
     def _select_latest_panel_images(image_files: List[Path]) -> List[Path]:
         """
@@ -3014,6 +3024,21 @@ class CAPIInferencer:
             selected.append(latest)
 
         return sorted(selected)
+
+    def _prepare_panel_image_files(self, panel_dir: Path) -> Tuple[List[Path], bool]:
+        """Return image files for inference, applying duplicate-panel selection."""
+        image_files = self._list_panel_image_files(panel_dir)
+        max_imgs = self.config.max_images_per_panel
+        if len(image_files) <= max_imgs:
+            return image_files, False
+
+        selected = self._select_latest_panel_images(image_files)
+        print(
+            f"⚠️ 重複投片偵測: {Path(panel_dir).name} 共 {len(image_files)} 張圖片 "
+            f"(上限 {max_imgs})，依建立時間選出最新 {len(selected)} 張繼續推論"
+        )
+        print(f"   ✅ 選用: {', '.join(f.name for f in selected)}")
+        return selected, True
 
 
     def _parse_defect_txt(self, defect_file: Path) -> Dict[str, List[Dict]]:
@@ -4681,27 +4706,9 @@ class CAPIInferencer:
         Returns:
             (該面板所有圖片的推論結果, OMIT 視覺化圖片(可選))
         """
-        image_files = sorted(
-            list(panel_dir.glob("*.png")) + 
-            list(panel_dir.glob("*.jpg")) + 
-            list(panel_dir.glob("*.tif")) + 
-            list(panel_dir.glob("*.tiff"))
-        )
+        image_files, is_duplicate = self._prepare_panel_image_files(panel_dir)
         results = []
-        
-        # === 重複投片檢查 ===
-        max_imgs = self.config.max_images_per_panel
-        is_duplicate = False
-        if len(image_files) > max_imgs:
-            is_duplicate = True
-            original_count = len(image_files)
-            image_files = self._select_latest_panel_images(image_files)
-            print(
-                f"⚠️ 重複投片偵測: {panel_dir.name} 共 {original_count} 張圖片 (上限 {max_imgs})，"
-                f"依建立時間選出最新 {len(image_files)} 張繼續推論"
-            )
-            print(f"   ✅ 選用: {', '.join(f.name for f in image_files)}")
-        
+
         # 如果有的話，解析 Defect.txt
         defect_map = self._parse_defect_txt(panel_dir / "Defect.txt")
         
@@ -5610,14 +5617,10 @@ class CAPIInferencer:
 
         return results, omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image, aoi_report
 
-    def _load_omit_context(self, panel_dir: Path):
+    def _load_omit_context(self, panel_dir: Path, image_files: Optional[List[Path]] = None):
         """Load the panel-level OMIT/PINIGBI image used by dust filtering."""
-        image_files = sorted(
-            list(Path(panel_dir).glob("*.png")) +
-            list(Path(panel_dir).glob("*.jpg")) +
-            list(Path(panel_dir).glob("*.tif")) +
-            list(Path(panel_dir).glob("*.tiff"))
-        )
+        if image_files is None:
+            image_files = self._list_panel_image_files(panel_dir)
         omit_files = [
             f for f in image_files
             if f.stem.startswith("PINIGBI") or "OMIT0000" in f.name
@@ -6038,9 +6041,11 @@ class CAPIInferencer:
         import time
         from capi_preprocess import preprocess_panel_folder, PreprocessConfig
 
+        panel_path = Path(panel_dir)
         t0 = time.time()
+        image_files, is_duplicate = self._prepare_panel_image_files(panel_path)
         omit_vis, omit_overexposed, omit_overexposure_info, omit_image = \
-            self._load_omit_context(Path(panel_dir))
+            self._load_omit_context(panel_path, image_files=image_files)
         if omit_image is not None:
             tag = "OVEREXPOSED" if omit_overexposed else "OK"
             print(f"[v2] OMIT {tag}: {omit_overexposure_info}")
@@ -6053,11 +6058,11 @@ class CAPIInferencer:
         )
 
         preprocess_start = time.time()
-        panel_results = preprocess_panel_folder(Path(panel_dir), pre_cfg)
+        panel_results = preprocess_panel_folder(panel_path, pre_cfg, image_files=image_files)
         if not panel_results:
-            logger.warning(f"[v2] {panel_dir}: preprocess_panel_folder 回傳空結果")
+            logger.warning(f"[v2] {panel_path}: preprocess_panel_folder 回傳空結果")
             # 回傳與 v1 格式相容的空結果
-            return [], None, False, "", False, None, {}
+            return [], omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image, {}
         preprocess_elapsed = time.time() - preprocess_start
         print(
             f"⚡ Phase 1 完成: {len(panel_results)} 個 lighting 預處理耗時 "
@@ -6176,12 +6181,6 @@ class CAPIInferencer:
                 self._get_image_prefix(result.image_path.name)
                 for result in results
             }
-            image_files = sorted(
-                list(Path(panel_dir).glob("*.png")) +
-                list(Path(panel_dir).glob("*.jpg")) +
-                list(Path(panel_dir).glob("*.tif")) +
-                list(Path(panel_dir).glob("*.tiff"))
-            )
             ref_result = next((r for r in results if r.raw_bounds), None)
             ref_bounds = ref_result.raw_bounds if ref_result else None
             ref_polygon = ref_result.panel_polygon if ref_result else None
@@ -6395,7 +6394,7 @@ class CAPIInferencer:
         )
 
         # 回傳與 v1 格式相容的 7-tuple
-        return results, omit_vis, omit_overexposed, omit_overexposure_info, False, omit_image, aoi_report or {}
+        return results, omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image, aoi_report or {}
 
     def _get_model_for(self, machine_id: str, lighting: str, zone: str):
         """新架構 lazy loading，cache key 含 zone。
@@ -6939,6 +6938,7 @@ class SubmodelScorer:
             raise FileNotFoundError(f"模型檔不存在: {pt_path}")
         from anomalib.deploy import TorchInferencer
         inf = TorchInferencer(path=str(pt_path), device="auto")
+        CAPIInferencer._fix_legacy_precision(inf)
         self._inferencer_cache[key] = inf
         return inf
 

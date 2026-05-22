@@ -5,7 +5,7 @@
 """
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Iterable
 import numpy as np
 import cv2
 
@@ -64,7 +64,10 @@ MIN_POLYGON_AREA_RATIO = 0.9
 MIN_SAMPLES_PER_EDGE = 5
 
 
-def filter_panel_lighting_files(folder: Path) -> Dict[str, Path]:
+def filter_panel_lighting_files(
+    folder: Path,
+    image_files: Optional[Iterable[Path]] = None,
+) -> Dict[str, Path]:
     """從 panel folder 過濾出 5 個有效 lighting 圖。
 
     只保留檔名以 5 個 lighting prefix 開頭的圖；其他（S* 側拍 / B0F 黑屏 /
@@ -73,7 +76,9 @@ def filter_panel_lighting_files(folder: Path) -> Dict[str, Path]:
     Returns: {"G0F00000": Path, ...}，缺哪個 lighting 就少哪個 key。
     """
     result: Dict[str, Path] = {}
-    for entry in folder.iterdir():
+    entries = image_files if image_files is not None else folder.iterdir()
+    for entry in entries:
+        entry = Path(entry)
         if not entry.is_file():
             continue
         name = entry.name
@@ -334,13 +339,14 @@ def preprocess_panel_image(
 def preprocess_panel_folder(
     folder: Path,
     config: PreprocessConfig,
+    image_files: Optional[Iterable[Path]] = None,
 ) -> Dict[str, "PanelPreprocessResult"]:
     """處理整個 panel folder 的 5 lighting 圖。
 
     流程：filter 出 5 lighting → STANDARD 先處理取 reference polygon →
           其他 4 lighting 套 reference。STANDARD 失敗 fallback G0F00000。
     """
-    files = filter_panel_lighting_files(folder)
+    files = filter_panel_lighting_files(folder, image_files=image_files)
     if not files:
         return {}
 

@@ -3878,7 +3878,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"status": "error", "message": "invalid record_id"})
             return
 
-        if not self.inferencer:
+        if not self.inferencer and not self._capi_server_instance:
             self._send_json({"status": "error", "message": "推論器未載入"})
             return
 
@@ -3937,6 +3937,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         try:
             panel_dir = Path(detail["image_dir"])
             model_id = detail.get("model_id", "")
+            inferencer = cls.inferencer
+            server_inst = cls._capi_server_instance
+            if server_inst is not None and hasattr(server_inst, "_get_or_create_inferencer"):
+                inferencer = server_inst._get_or_create_inferencer(model_id) or inferencer
+            if inferencer is None:
+                raise RuntimeError("推論器未載入")
+
             resolution = None
             if detail.get("resolution_x") and detail.get("resolution_y"):
                 resolution = (detail["resolution_x"], detail["resolution_y"])
@@ -3955,7 +3962,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if cls._gpu_lock:
                 with cls._gpu_lock:
                     _update_status("正在推論中...")
-                    panel_result = cls.inferencer.process_panel(
+                    panel_result = inferencer.process_panel(
                         panel_dir,
                         progress_callback=_update_status,
                         product_resolution=resolution,
@@ -3964,7 +3971,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     )
             else:
                 _update_status("正在推論中...")
-                panel_result = cls.inferencer.process_panel(
+                panel_result = inferencer.process_panel(
                     panel_dir,
                     progress_callback=_update_status,
                     product_resolution=resolution,
@@ -3977,7 +3984,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             results = panel_result[0]
             omit_overexposed = panel_result[2] if len(panel_result) > 2 else False
             omit_overexposure_info = panel_result[3] if len(panel_result) > 3 else ""
+            is_duplicate = panel_result[4] if len(panel_result) > 4 else False
             omit_image_raw = panel_result[5] if len(panel_result) > 5 else None
+
+            if is_duplicate:
+                logger.warning(
+                    f"[RERUN] [DUPLICATE_PANEL] record_id={record_id} "
+                    f"重複投片，已依建立時間選取最新圖片推論"
+                )
 
             if not results:
                 InferenceLogCapture.stop_capture()
@@ -4006,7 +4020,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 heatmap_info = cls.heatmap_manager.save_panel_heatmaps(
                     glass_id=detail["glass_id"],
                     results=results,
-                    inferencer=cls.inferencer,
+                    inferencer=inferencer,
                     save_overview=True,
                     save_tile_detail=True,
                     omit_image=omit_image_raw,
@@ -4016,7 +4030,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             image_results_data = results_to_db_data(results, heatmap_info) if results else []
             total_images = len(image_results_data)
             ng_images = sum(1 for d in image_results_data if d.get("is_ng"))
-            error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
+            if is_duplicate:
+                dup_note = "[DUPLICATE_PANEL] 重複投片，已依建立時間選取最新圖片推論"
+                err_suffix = ai_judgment if ai_judgment.startswith("ERR") else ""
+                error_message = f"{dup_note}\n{err_suffix}".strip()
+            else:
+                error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
 
             inference_log = InferenceLogCapture.stop_capture()
 
