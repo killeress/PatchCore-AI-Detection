@@ -18,10 +18,9 @@ class PreprocessConfig:
     enable_panel_polygon: bool = True
     edge_threshold_px: int = 768  # retained for config compatibility; zone split is coverage-based
     coverage_min: float = 0.3
-    # 推論 ROI 切塊可能跨在 panel 邊界外側、含真實黑邊像素；訓練資料若只走原 bbox grid
-    # 拿不到這種樣本，邊緣 tile 會被當異常。每邊往外推到中心剛好在 panel 邊，補進該情境。
-    # None → tile_size // 2（中心剛好落在 panel 邊）；0 → 關閉。實際 push 距離會夾到
-    # image 邊界，使 tile 始終落在 image 內。
+    # Edge 取樣 anchor 仍可往 panel 外推半個 tile，但實際 ROI 會再依 polygon 往產品
+    # 內側推回來，避免 edge.pt 學到黑色背景邊界。
+    # None → tile_size // 2；0 → 關閉額外 edge anchor。
     outer_edge_extend: Optional[int] = None
 
     def __post_init__(self):
@@ -261,6 +260,139 @@ def classify_tile_zone(
     return "edge", coverage, center_dist, mask if coverage < 1.0 - 1e-6 else None
 
 
+def _clamp_tile_origin(tx: int, ty: int, img_w: int, img_h: int,
+                       tile_size: int) -> Tuple[int, int]:
+    """Clamp a tile origin so the tile stays inside the image when possible."""
+    max_x = max(0, img_w - tile_size)
+    max_y = max(0, img_h - tile_size)
+    return max(0, min(int(tx), max_x)), max(0, min(int(ty), max_y))
+
+
+def _tile_polygon_coverage(
+    tile_rect: Tuple[int, int, int, int],
+    polygon: Optional[np.ndarray],
+) -> float:
+    """Return polygon coverage ratio inside a tile rectangle."""
+    if polygon is None:
+        return 1.0
+    x1, y1, x2, y2 = tile_rect
+    tile_w = max(0, x2 - x1)
+    tile_h = max(0, y2 - y1)
+    if tile_w <= 0 or tile_h <= 0:
+        return 0.0
+    mask = np.zeros((tile_h, tile_w), np.uint8)
+    shifted = np.asarray(polygon, dtype=np.float32).copy()
+    shifted[:, 0] -= x1
+    shifted[:, 1] -= y1
+    cv2.fillPoly(mask, [shifted.astype(np.int32)], 255)
+    return float(np.count_nonzero(mask)) / float(tile_w * tile_h)
+
+
+def _tile_corner_signed_distances(
+    tx: int,
+    ty: int,
+    tile_size: int,
+    polygon: np.ndarray,
+) -> List[float]:
+    poly = np.asarray(polygon, dtype=np.float32)
+    # Use inclusive pixel corners. A tile ending on the polygon boundary is valid.
+    x2 = tx + tile_size - 1
+    y2 = ty + tile_size - 1
+    corners = ((tx, ty), (x2, ty), (x2, y2), (tx, y2))
+    return [
+        float(cv2.pointPolygonTest(poly, (float(x), float(y)), True))
+        for x, y in corners
+    ]
+
+
+def resolve_inward_polygon_tile(
+    anchor_xy: Tuple[int, int],
+    polygon: Optional[np.ndarray],
+    image_shape: Tuple[int, int],
+    tile_size: int,
+    initial_origin: Optional[Tuple[int, int]] = None,
+    target_coverage: float = 0.999,
+) -> Tuple[int, int, float, bool]:
+    """Resolve a tile origin that stays inside the product polygon when possible.
+
+    ``anchor_xy`` is the AOI point or the synthetic edge-sampling center. The
+    returned tile is first clamped to the image, then iteratively pushed toward
+    the polygon centroid until its corners are inside the polygon. If the panel
+    geometry cannot fit a full tile, the best-coverage origin found so far is
+    returned instead of padding or masking black background into the sample.
+
+    Returns: ``(tx, ty, coverage, shifted)``.
+    """
+    img_h, img_w = image_shape[:2]
+    half = tile_size // 2
+    if initial_origin is None:
+        tx = int(anchor_xy[0]) - half
+        ty = int(anchor_xy[1]) - half
+    else:
+        tx, ty = int(initial_origin[0]), int(initial_origin[1])
+    tx, ty = _clamp_tile_origin(tx, ty, img_w, img_h, tile_size)
+    original = (tx, ty)
+
+    if polygon is None or len(polygon) < 3:
+        return tx, ty, 1.0, False
+
+    poly = np.asarray(polygon, dtype=np.float32)
+    centroid = poly.mean(axis=0)
+
+    def _score(origin: Tuple[int, int]) -> Tuple[float, float]:
+        ox, oy = origin
+        cov = _tile_polygon_coverage((ox, oy, ox + tile_size, oy + tile_size), poly)
+        min_dist = min(_tile_corner_signed_distances(ox, oy, tile_size, poly))
+        return cov, min_dist
+
+    best = (tx, ty)
+    best_cov, best_dist = _score(best)
+    if best_cov >= target_coverage and best_dist >= -0.5:
+        return tx, ty, best_cov, best != original
+
+    for _ in range(64):
+        distances = _tile_corner_signed_distances(tx, ty, tile_size, poly)
+        min_dist = min(distances)
+        if min_dist >= -0.5:
+            cov = _tile_polygon_coverage((tx, ty, tx + tile_size, ty + tile_size), poly)
+            if cov >= target_coverage:
+                return tx, ty, cov, (tx, ty) != original
+
+        x2 = tx + tile_size - 1
+        y2 = ty + tile_size - 1
+        corners = np.array(((tx, ty), (x2, ty), (x2, y2), (tx, y2)), dtype=np.float32)
+        bad = [corners[i] for i, dist in enumerate(distances) if dist < 0.5]
+        if not bad:
+            bad = [corners[int(np.argmin(distances))]]
+        direction = np.zeros(2, dtype=np.float32)
+        for corner in bad:
+            direction += centroid - corner
+        norm = float(np.linalg.norm(direction))
+        if norm <= 1e-6:
+            break
+
+        step = max(1.0, min(float(tile_size), 1.0 - min_dist))
+        delta = direction / norm * step
+        dx = int(round(float(delta[0])))
+        dy = int(round(float(delta[1])))
+        if dx == 0 and abs(delta[0]) > 1e-6:
+            dx = 1 if delta[0] > 0 else -1
+        if dy == 0 and abs(delta[1]) > 1e-6:
+            dy = 1 if delta[1] > 0 else -1
+
+        ntx, nty = _clamp_tile_origin(tx + dx, ty + dy, img_w, img_h, tile_size)
+        if (ntx, nty) == (tx, ty):
+            break
+        tx, ty = ntx, nty
+
+        cov, dist = _score((tx, ty))
+        if (cov, dist) > (best_cov, best_dist):
+            best = (tx, ty)
+            best_cov, best_dist = cov, dist
+
+    return best[0], best[1], best_cov, best != original
+
+
 def _tile_touches_polygon_boundary(
     tile_rect: Tuple[int, int, int, int],
     polygon: np.ndarray,
@@ -379,15 +511,15 @@ def _generate_tiles(
     polygon: Optional[np.ndarray],
     config: PreprocessConfig,
 ) -> List[TileResult]:
-    """在 bbox 範圍內走格子 + 外推一圈，切 tile 並分類 zone。
+    """在 bbox 範圍內走格子 + edge anchors，切 tile 並分類 zone。
 
-    內圈 tile 走原本邏輯（outside 跳掉，最外圈 inner 改 edge）。
-    外圈 tile 來自 ``outer_edge_extend``：每邊往外推到 image 邊界內，
-    強制 zone="edge"（避免角落 coverage<0.3 被歸 outside 跳掉），
-    讓「中心位於 panel 邊」的 tile 進入訓練集。
+    內圈 tile 仍以 bbox grid 為基礎；任何 edge tile 若有 polygon，會先往產品
+    內側推到完整落在 polygon 內。``outer_edge_extend`` 現在只提供額外 edge
+    anchor，不再讓訓練樣本看見 panel 外黑色背景。
     """
     x1, y1, x2, y2 = bbox
     ts = config.tile_size
+    half = ts // 2
     img_h, img_w = img.shape[:2]
 
     def positions(lo: int, hi: int) -> List[int]:
@@ -401,17 +533,16 @@ def _generate_tiles(
     xs = positions(x1, x2)
     ys = positions(y1, y2)
 
-    # 外推：push 距離夾到 image 邊界，確保 tile 完全在 image 內。
     extend = max(0, int(config.outer_edge_extend))
-    push_top    = min(extend, max(0, y1))
+    push_top = min(extend, max(0, y1))
     push_bottom = min(extend, max(0, img_h - y2))
-    push_left   = min(extend, max(0, x1))
-    push_right  = min(extend, max(0, img_w - x2))
+    push_left = min(extend, max(0, x1))
+    push_right = min(extend, max(0, img_w - x2))
 
-    top_ty    = (y1 - push_top)             if push_top > 0    else None
-    bottom_ty = (y2 - ts + push_bottom)     if push_bottom > 0 else None
-    left_tx   = (x1 - push_left)            if push_left > 0   else None
-    right_tx  = (x2 - ts + push_right)      if push_right > 0  else None
+    top_ty = (y1 - push_top) if push_top > 0 else None
+    bottom_ty = (y2 - ts + push_bottom) if push_bottom > 0 else None
+    left_tx = (x1 - push_left) if push_left > 0 else None
+    right_tx = (x2 - ts + push_right) if push_right > 0 else None
 
     extra_xs = []
     if left_tx is not None:
@@ -420,24 +551,10 @@ def _generate_tiles(
     if right_tx is not None:
         extra_xs.append(right_tx)
 
-    # 各來源（top/bottom 行、left/right 列）的位置集合天生互斥（top/bottom 用 top_ty
-     # / bottom_ty；left/right 用 ys 的內圈 y），所以不需要去重。
-    extension_positions: List[Tuple[int, int]] = []
-    if top_ty is not None:
-        extension_positions.extend((tx, top_ty) for tx in extra_xs)
-    if bottom_ty is not None:
-        extension_positions.extend((tx, bottom_ty) for tx in extra_xs)
-    if left_tx is not None:
-        extension_positions.extend((left_tx, ty) for ty in ys)
-    if right_tx is not None:
-        extension_positions.extend((right_tx, ty) for ty in ys)
-
     tiles: List[TileResult] = []
+    emitted_positions = set()
     tid = 0
 
-    # 角落判定：4 個 inner-edge 角（grid 最外圈交點）+ 4 個 outer-extension 角
-    # （延伸 row × 延伸 column 的交點）。訓練 wizard 的 corners-only panel 模式
-    # 只挑 is_corner=True 的 tile 餵 edge 模型，不收任何長邊或 inner tile。
     inner_corner_xs = {xs[0], xs[-1]} if xs else set()
     inner_corner_ys = {ys[0], ys[-1]} if ys else set()
     outer_corner_xs = {x for x in (left_tx, right_tx) if x is not None}
@@ -447,8 +564,25 @@ def _generate_tiles(
         return ((tx in inner_corner_xs and ty in inner_corner_ys)
                 or (tx in outer_corner_xs and ty in outer_corner_ys))
 
-    def _emit(tx: int, ty: int, zone: str, cov: float, dist: float, mask) -> None:
+    def _resolve_edge_origin(tx: int, ty: int) -> Tuple[int, int]:
+        if polygon is None:
+            return tx, ty
+        anchor = (tx + half, ty + half)
+        rx, ry, _cov, _shifted = resolve_inward_polygon_tile(
+            anchor_xy=anchor,
+            polygon=polygon,
+            image_shape=(img_h, img_w),
+            tile_size=ts,
+            initial_origin=(tx, ty),
+        )
+        return rx, ry
+
+    def _emit(tx: int, ty: int, zone: str, cov: float, dist: float, mask,
+              is_corner_override: Optional[bool] = None) -> None:
         nonlocal tid
+        if (tx, ty) in emitted_positions:
+            return
+        emitted_positions.add((tx, ty))
         tiles.append(TileResult(
             tile_id=tid,
             x1=tx, y1=ty, x2=tx + ts, y2=ty + ts,
@@ -457,23 +591,55 @@ def _generate_tiles(
             coverage=cov,
             zone=zone,
             center_dist_to_edge=dist,
-            is_corner=_is_corner(tx, ty),
+            is_corner=_is_corner(tx, ty) if is_corner_override is None else is_corner_override,
         ))
         tid += 1
 
-    for ty in ys:
-        for tx in xs:
-            zone, cov, dist, mask = classify_tile_zone((tx, ty, tx + ts, ty + ts), polygon, config)
+    for ty0 in ys:
+        for tx0 in xs:
+            zone, cov, dist, mask = classify_tile_zone((tx0, ty0, tx0 + ts, ty0 + ts), polygon, config)
             if zone == "outside":
                 continue
-            if zone == "inner" and (tx == xs[0] or tx == xs[-1] or ty == ys[0] or ty == ys[-1]):
+            force_edge = zone == "edge" or (
+                zone == "inner" and (tx0 == xs[0] or tx0 == xs[-1] or ty0 == ys[0] or ty0 == ys[-1])
+            )
+            tx, ty = tx0, ty0
+            is_corner = _is_corner(tx0, ty0)
+            if force_edge:
+                tx, ty = _resolve_edge_origin(tx0, ty0)
+                zone, cov, dist, mask = classify_tile_zone((tx, ty, tx + ts, ty + ts), polygon, config)
                 zone = "edge"
-            _emit(tx, ty, zone, cov, dist, mask)
+                if cov >= 1.0 - 1e-6:
+                    mask = None
+            _emit(tx, ty, zone, cov, dist, mask, is_corner_override=is_corner)
 
-    # 外推 tile 強制 edge：角落 coverage<coverage_min 否則會被歸 outside 跳掉。
-    # push 已夾到 image 內，img 切片必為 ts × ts。
-    for tx, ty in extension_positions:
+    extension_positions: List[Tuple[int, int, bool]] = []
+    if top_ty is not None:
+        extension_positions.extend(
+            (tx, top_ty, tx in outer_corner_xs and top_ty in outer_corner_ys)
+            for tx in extra_xs
+        )
+    if bottom_ty is not None:
+        extension_positions.extend(
+            (tx, bottom_ty, tx in outer_corner_xs and bottom_ty in outer_corner_ys)
+            for tx in extra_xs
+        )
+    if left_tx is not None:
+        extension_positions.extend(
+            (left_tx, ty, left_tx in outer_corner_xs and ty in outer_corner_ys)
+            for ty in ys
+        )
+    if right_tx is not None:
+        extension_positions.extend(
+            (right_tx, ty, right_tx in outer_corner_xs and ty in outer_corner_ys)
+            for ty in ys
+        )
+
+    for tx0, ty0, is_corner in extension_positions:
+        tx, ty = _resolve_edge_origin(tx0, ty0)
         _zone, cov, dist, mask = classify_tile_zone((tx, ty, tx + ts, ty + ts), polygon, config)
-        _emit(tx, ty, "edge", cov, dist, mask)
+        if cov >= 1.0 - 1e-6:
+            mask = None
+        _emit(tx, ty, "edge", cov, dist, mask, is_corner_override=is_corner)
 
     return tiles

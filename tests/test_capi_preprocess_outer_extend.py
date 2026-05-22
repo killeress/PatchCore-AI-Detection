@@ -1,5 +1,10 @@
-"""capi_preprocess.outer_edge_extend：訓練 edge tile 外推取樣。"""
+"""capi_preprocess.outer_edge_extend：edge anchor 外推 + polygon 內推取樣。"""
 from __future__ import annotations
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import numpy as np
 
 from capi_preprocess import (
@@ -110,22 +115,17 @@ def test_outer_edge_extend_zero_matches_legacy_behavior():
         assert t.x2 <= x2 and t.y2 <= y2
 
 
-def test_outer_edge_extend_corner_tile_forced_to_edge_zone():
-    """角落外推 tile coverage 約 25%（小於 coverage_min=0.3),
-    若不強制 edge 會被歸 outside 跳掉；本測驗證強制成功。"""
+def test_outer_edge_extend_corner_tile_shifted_inside_polygon():
+    """polygon 開啟時，外推角落 anchor 只用來決定 edge 取樣位置；
+    實際 tile 必須被推回產品內，不應再含黑色背景。"""
     img = _make_panel_image(2000, 2400, (500, 500, 1900, 1500))
     cfg = PreprocessConfig(enable_panel_polygon=True, outer_edge_extend=256)
     bbox, polygon = _detect(img, cfg)
     assert polygon is not None, "fixture 應能 fit polygon"
 
     tiles = _generate_tiles(img, bbox, polygon=polygon, config=cfg)
-    x1, y1, x2, y2 = bbox
-    ts = cfg.tile_size
-    corner_tl = (x1 - cfg.outer_edge_extend, y1 - cfg.outer_edge_extend)
-    corner_tile = next((t for t in tiles if (t.x1, t.y1) == corner_tl), None)
-    assert corner_tile is not None, "缺左上角外推 tile"
-    assert corner_tile.zone == "edge"
-    assert corner_tile.coverage < cfg.coverage_min, (
-        f"corner coverage {corner_tile.coverage} 應小於 coverage_min "
-        f"才能驗證 zone 強制 edge 的 bypass"
-    )
+    corner_edges = [t for t in tiles if t.is_corner and t.zone == "edge"]
+    assert corner_edges, "外推角落 anchor 應保留為 edge corner 樣本"
+    assert all(t.coverage >= 0.999 for t in corner_edges)
+    assert all(t.mask is None for t in corner_edges)
+    assert all(int(t.image.min()) > 0 for t in corner_edges), "edge corner tile 不應包含黑色背景"

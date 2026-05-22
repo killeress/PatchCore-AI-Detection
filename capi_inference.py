@@ -90,7 +90,11 @@ except Exception as _e:
     )
 
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
-from capi_edge_cv import CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel, compute_fg_aware_diff, compute_boundary_band_mask, compute_pc_roi_offset
+from capi_edge_cv import (
+    CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel,
+    compute_fg_aware_diff, compute_boundary_band_mask, compute_pc_roi_offset,
+    verify_polygon_clear_of_pc_roi, classify_pc_roi_verify_failure,
+)
 from capi_preprocess import _polyfit_polygon as _pf_polygon
 from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
 from scratch_filter import ScratchFilter
@@ -3628,8 +3632,22 @@ class CAPIInferencer:
             # AOI 距邊太近，shift 量超過 ROI 半徑 → AOI 會脫離 ROI → 不 shift
             pc_fallback_reason = "aoi_exit_roi"
         elif shift_vec != (0, 0):
-            # panel 永遠是矩形，shift 可行即直接套用
-            use_shifted = True
+            if verify_polygon_clear_of_pc_roi(
+                pc_roi_origin=pc_roi_origin_candidate,
+                roi_size=tile_size,
+                polygon=polygon_int,
+                band_px=band_px,
+            ):
+                use_shifted = True
+            else:
+                pc_fallback_reason = classify_pc_roi_verify_failure(
+                    aoi_xy=(img_x, img_y),
+                    pc_roi_origin=pc_roi_origin_candidate,
+                    roi_size=tile_size,
+                    polygon=polygon_int,
+                    band_px=band_px,
+                )
+                shift_vec = (0, 0)
 
         if use_shifted:
             pc_center_x = img_x + shift_vec[0]
@@ -3966,9 +3984,8 @@ class CAPIInferencer:
                 print("[v2] AOI 座標 attribution: AOI report 解析為空（report 不存在或無 NG 條目）")
             return {"aoi_tile_count": 0, "aoi_edge_count": 0}
 
-        # 新架構：以 AOI 機檢座標為中心建 512x512 centered tile（黑邊 zero-pad），
-        # 不在邊緣 bail 到 CV、也不 clamp 內推。對齊 training capi_dataset_export
-        # 的 BORDER_CONSTANT value=0 切法，AOI 座標永遠在 tile (256, 256)。
+        # 新架構：以 AOI 機檢座標為 anchor 建 512x512 tile；靠 polygon 邊時
+        # 往產品內側推，讓 edge.pt 的訓練與推論都只看產品本體，不看黑背景。
         if getattr(self.config, "is_new_architecture", False):
             from capi_preprocess import PreprocessConfig
             pre_cfg = PreprocessConfig(
@@ -4041,17 +4058,16 @@ class CAPIInferencer:
         pre_cfg: 'PreprocessConfig',
         is_skip_file: bool = False,
     ) -> int:
-        """v2 新架構：以 AOI 機檢座標為中心建 512x512 tile，OOB 時往內推（不 zero-pad）。
+        """v2 新架構：以 AOI 機檢座標為 anchor 建 512x512 tile。
 
-        切法對齊 ``capi_web._handle_debug_coord_inference``（DEBUG 座標推論）：
-        AOI 落在圖片邊緣時 tile 往左/上 push 保持 512x512，AOI 不一定在 tile 中心。
-        推論記錄頁顯示的 ROI 因此跟 DEBUG 推論完全一致。
+        若 AOI 靠近 panel polygon 邊，ROI 會往產品內側推到完整落在 polygon
+        內，避免 edge.pt 看到黑色背景邊界；AOI 不一定在 tile 中心。
 
         差異重點：
           - 邊緣不 bail 到 CV，每筆 AOI 座標都建立 PatchCore tile
-          - OOB 用 clamp 內推，不再 ``cv2.copyMakeBorder`` zero-pad
-          - zone 由 ``capi_preprocess.classify_tile_zone`` 依 panel polygon 判定
-            （outside fallback edge）；skip_file 強制 zone="bright_spot"
+          - OOB / polygon edge 用 inward clamp，不再 ``cv2.copyMakeBorder`` zero-pad
+          - zone 由 ``capi_preprocess.classify_tile_zone`` 依 panel polygon 判定，
+            AOI 點靠邊時強制 zone="edge"；skip_file 強制 zone="bright_spot"
 
         Args:
             image: 原始圖片（cv2.imread 結果）
@@ -4063,7 +4079,7 @@ class CAPIInferencer:
 
         Returns: 新建立的 tile 數
         """
-        from capi_preprocess import classify_tile_zone
+        from capi_preprocess import classify_tile_zone, resolve_inward_polygon_tile
 
         if result.raw_bounds is None:
             logger.warning("[v2] AOI Coord: raw_bounds 為 None，無法建立切塊")
@@ -4083,7 +4099,8 @@ class CAPIInferencer:
                 result.raw_bounds, product_resolution,
             )
 
-            # DEBUG-aligned clamp：保持 512x512，OOB 時往內推；不 zero-pad。
+            # Inference/training aligned inward ROI：先用 AOI-centered origin，
+            # 若跨出 polygon 則往產品內側推；不 zero-pad、不帶黑背景進 edge.pt。
             tx = max(0, img_x - half)
             ty = max(0, img_y - half)
             tx2 = tx + tile_size
@@ -4095,6 +4112,17 @@ class CAPIInferencer:
                 ty2 = img_h
                 ty = max(0, ty2 - tile_size)
 
+            if not is_skip_file and polygon is not None:
+                tx, ty, _cov, _shifted = resolve_inward_polygon_tile(
+                    anchor_xy=(img_x, img_y),
+                    polygon=polygon,
+                    image_shape=(img_h, img_w),
+                    tile_size=tile_size,
+                    initial_origin=(tx, ty),
+                )
+
+            tx2 = min(img_w, tx + tile_size)
+            ty2 = min(img_h, ty + tile_size)
             crop_w = tx2 - tx
             crop_h = ty2 - ty
             tile_img = image[ty:ty2, tx:tx2].copy()
@@ -4107,6 +4135,13 @@ class CAPIInferencer:
                 )
                 if zone == "outside":
                     zone = "edge"
+                if polygon is not None:
+                    d_edge = float(cv2.pointPolygonTest(
+                        np.asarray(polygon, dtype=np.float32),
+                        (float(img_x), float(img_y)), True,
+                    ))
+                    if d_edge <= half:
+                        zone = "edge"
 
             # 邊緣旗標以 AOI 中心相對 otsu_bounds 判定（與 tile 位置無關）
             is_top = img_y - otsu_y1 < half
