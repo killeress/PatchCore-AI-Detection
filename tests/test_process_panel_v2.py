@@ -306,11 +306,11 @@ def test_process_panel_v2_grid_disabled_infers_only_aoi_tiles(tmp_path):
     assert len(results[0].tiles) == 1
     assert results[0].processed_tile_count == 1
     kept_tile = results[0].tiles[0]
-    # 新行為：v2 以 AOI 座標 (100,100) 為中心切 512x512 tile（左上角 -156,-156）
-    # 不再 attribute 既存 grid tile
+    # v2 以 AOI 座標 (100,100) 為 anchor 建 tile；沒有 polygon 時退回 image clamp。
+    # 不再 attribute 既存 grid tile。
     assert kept_tile.is_aoi_coord_tile is True
-    assert kept_tile.x == -156
-    assert kept_tile.y == -156
+    assert kept_tile.x == 0
+    assert kept_tile.y == 0
     assert kept_tile.aoi_product_x == 100
     assert kept_tile.aoi_product_y == 100
     assert kept_tile.image.shape == (512, 512)

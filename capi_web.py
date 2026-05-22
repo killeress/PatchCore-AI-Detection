@@ -3088,8 +3088,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             img_cx = int(product_x * scale_x + x_start)
             img_cy = int(product_y * scale_y + y_start)
 
-            # 4. 以 (img_cx, img_cy) 為中心裁切 512x512，邊界 clamp
-            tile_size = 512
+            # 4. 以 (img_cx, img_cy) 為 anchor 裁切 tile，v2 會再依 polygon 往內推
+            tile_size = self.inferencer.config.tile_size
             half = tile_size // 2
             crop_x1 = max(0, img_cx - half)
             crop_y1 = max(0, img_cy - half)
@@ -3126,7 +3126,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     self._send_json({"error": f"找不到 {image_path.name} 對應的模型 (新架構: model_mapping 缺 {img_prefix} 的 inner/edge)"})
                     return
 
-                from capi_preprocess import classify_tile_zone, detect_panel_polygon, PreprocessConfig
+                from capi_preprocess import (
+                    classify_tile_zone, detect_panel_polygon, PreprocessConfig,
+                    resolve_inward_polygon_tile,
+                )
                 pre_cfg = PreprocessConfig(
                     tile_size=self.inferencer.config.tile_size,
                     otsu_offset=self.inferencer.config.otsu_offset,
@@ -3134,10 +3137,36 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     edge_threshold_px=self.inferencer.config.edge_threshold_px,
                 )
                 _, polygon = detect_panel_polygon(image, pre_cfg)
-                tile_rect = (crop_x1, crop_y1, crop_x1 + tile_size, crop_y1 + tile_size)
+                if polygon is not None:
+                    crop_x1, crop_y1, _cov, _shifted = resolve_inward_polygon_tile(
+                        anchor_xy=(img_cx, img_cy),
+                        polygon=polygon,
+                        image_shape=(img_h, img_w),
+                        tile_size=tile_size,
+                        initial_origin=(crop_x1, crop_y1),
+                    )
+                    crop_x2 = min(img_w, crop_x1 + tile_size)
+                    crop_y2 = min(img_h, crop_y1 + tile_size)
+                    crop_w = crop_x2 - crop_x1
+                    crop_h = crop_y2 - crop_y1
+                    tile_image = image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+                    tile_info.x = crop_x1
+                    tile_info.y = crop_y1
+                    tile_info.width = crop_w
+                    tile_info.height = crop_h
+                    tile_info.image = tile_image
+
+                tile_rect = (crop_x1, crop_y1, crop_x2, crop_y2)
                 zone, _, _, _ = classify_tile_zone(tile_rect, polygon, pre_cfg)
                 if zone == "outside":
                     zone = "edge"  # debug fallback：邊外座標仍用 edge model 看一下分數
+                if polygon is not None:
+                    d_edge = float(cv2.pointPolygonTest(
+                        np.asarray(polygon, dtype=np.float32),
+                        (float(img_cx), float(img_cy)), True,
+                    ))
+                    if d_edge <= tile_size // 2:
+                        zone = "edge"
                 tile_info.zone = zone
 
                 try:

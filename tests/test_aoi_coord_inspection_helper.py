@@ -102,8 +102,8 @@ def test_parse_aoi_report_uses_nested_new_arch_model_mapping_prefixes(new_arch_i
 
 
 def test_helper_new_arch_creates_centered_tile(new_arch_inferencer, tmp_path):
-    """新架構：helper 以 AOI 座標為中心建 512x512 centered tile（黑邊 zero-pad），
-    既存 grid tile 不被動到。AOI 座標永遠在 tile 中心 (256, 256)。"""
+    """新架構：helper 以 AOI 座標為 anchor 建 512x512 tile；
+    既存 grid tile 不被動到。遠離邊界時 AOI 座標仍在 tile 中心。"""
     import cv2
     from capi_inference import TileInfo
 
@@ -168,8 +168,8 @@ def test_helper_new_arch_creates_centered_tile(new_arch_inferencer, tmp_path):
 
 
 def test_helper_new_arch_creates_tile_even_at_image_corner(new_arch_inferencer, tmp_path):
-    """AOI 座標靠近圖片邊緣時，centered tile 用黑邊 zero-pad 填補 OOB，
-    AOI 座標仍在 tile (256, 256)（不往內推）。"""
+    """AOI 座標靠近圖片邊緣時，tile 往圖片內 clamp，
+    不使用 zero-pad，也不把黑邊補進 PatchCore 輸入。"""
     import cv2
     from capi_inference import TileInfo
 
@@ -194,8 +194,7 @@ def test_helper_new_arch_creates_tile_even_at_image_corner(new_arch_inferencer, 
         raw_bounds=(0, 0, 1920, 1080),
         panel_polygon=None,
     )
-    # AOI 座標貼右下角 (1900, 1000) → centered tile 從 (1644, 744) 起，
-    # 右側 236px / 下側 176px 超出圖片，必須 zero-pad
+    # AOI 座標貼右下角 (1900, 1000) → tile 往左上 clamp 成完整 512x512。
     fake_defect = MagicMock(product_x=1900, product_y=1000, defect_code="L01")
 
     with patch.object(new_arch_inferencer, "_parse_aoi_report_txt",
@@ -213,13 +212,12 @@ def test_helper_new_arch_creates_tile_even_at_image_corner(new_arch_inferencer, 
 
     centered = fake_result.tiles[-1]
     assert centered.is_aoi_coord_tile is True
-    assert centered.x == 1900 - 256
-    assert centered.y == 1000 - 256
-    # 圖片內中央灰階 128，OOB 區域應為 0（黑邊）
-    # tile 內座標 (256, 256) 對應圖片 (1900, 1000)，仍在圖片內
+    assert centered.x == 1920 - 512
+    assert centered.y == 1080 - 512
+    assert centered.image.shape == (512, 512)
+    # 整張測試圖都是 128；若仍走 zero-pad，右下角會變 0。
     assert centered.image[256, 256] == 128
-    # tile 內座標 (500, 500) 對應圖片 (1888, 1244)，超出圖片下緣 → 應為 0
-    assert centered.image[500, 500] == 0
+    assert centered.image[500, 500] == 128
 
 
 def test_helper_skips_lighting_without_aoi_report(new_arch_inferencer, tmp_path):
