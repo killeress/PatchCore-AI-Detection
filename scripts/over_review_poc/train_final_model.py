@@ -98,10 +98,14 @@ def main(argv=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     transform = build_transform_clahe(args.clahe_clip, args.clahe_tile)
     transform_id = f"v3_clahe_cl{args.clahe_clip}_tg{args.clahe_tile}"
+    logger.info("Device: %s | transform: %s | batch_size=%d",
+                device, transform_id, args.batch_size)
 
     samples = load_samples(args.manifest)
     is_true_ng = np.array([s.original_label == "true_ng" for s in samples])
     y = np.array([1 if s.label == SCRATCH_BINARY else 0 for s in samples])
+    logger.info("Label counts: scratch=%d | not_scratch=%d | true_ng=%d",
+                int(y.sum()), int(len(y) - y.sum()), int(is_true_ng.sum()))
     all_idx = np.arange(len(samples))
     proper_idx, calib_idx = _group_aware_split(all_idx, samples, args.calib_frac, args.seed)
     logger.info("Total=%d | proper_train=%d | calibration=%d",
@@ -155,12 +159,18 @@ def main(argv=None):
         calib_scores,
     )
 
+    effective_threshold = float(min(conformal_threshold * args.default_safety, 0.9999))
+    logger.info(
+        "Training complete: output=%s | conformal_threshold=%.4f | effective_threshold=%.4f | calib_ng=%d/%d",
+        args.output, conformal_threshold, effective_threshold,
+        int(calib_ng_mask.sum()), len(calib_idx),
+    )
     print()
     print("=== train_final_model summary ===")
     print(f"Bundle:             {args.output}")
     print(f"Conformal thresh:   {conformal_threshold:.4f}")
     print(f"Default safety:     {args.default_safety}")
-    print(f"Est. eff. thresh:   {min(conformal_threshold * args.default_safety, 0.9999):.4f}")
+    print(f"Est. eff. thresh:   {effective_threshold:.4f}")
     print(f"Calib NG count:     {int(calib_ng_mask.sum())} / {len(calib_idx)}")
     print(f"Calib score range:  [{calib_scores.min():.3f}, {calib_scores.max():.3f}]")
     return {
@@ -168,7 +178,7 @@ def main(argv=None):
         "total_samples": len(samples),
         "scratch_count": int(y.sum()),
         "conformal_threshold": conformal_threshold,
-        "effective_threshold": float(min(conformal_threshold * args.default_safety, 0.9999)),
+        "effective_threshold": effective_threshold,
         "calib_ng_count": int(calib_ng_mask.sum()),
         "calib_total": len(calib_idx),
     }

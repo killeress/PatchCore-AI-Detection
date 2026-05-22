@@ -127,7 +127,12 @@ class _CropDataset(Dataset):
 def _load_dinov2(args=None) -> nn.Module:
     repo_path = getattr(args, "dinov2_repo", None)
     weights_path = getattr(args, "dinov2_weights", None)
-    return _load_dinov2_offline(DINOV2_REPO, DINOV2_MODEL, weights_path, repo_path)
+    repo_label = str(repo_path) if repo_path else "torch.hub cache/github"
+    weights_label = str(weights_path) if weights_path else "torch.hub pretrained"
+    logger.info("Loading DINOv2 model: repo=%s, weights=%s", repo_label, weights_label)
+    model = _load_dinov2_offline(DINOV2_REPO, DINOV2_MODEL, weights_path, repo_path)
+    logger.info("DINOv2 model loaded")
+    return model
 
 
 def _extract_cls(model: nn.Module, samples: list[Sample], transform,
@@ -135,12 +140,25 @@ def _extract_cls(model: nn.Module, samples: list[Sample], transform,
     model.eval()
     ds = _CropDataset(samples, transform, np.zeros(len(samples)))
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    total_batches = len(loader)
+    progress_every = max(1, min(50, max(1, total_batches // 20)))
+    logger.info(
+        "Extracting CLS features: samples=%d, batches=%d, batch_size=%d, device=%s",
+        len(samples), total_batches, batch_size, device,
+    )
     all_feats = []
     with torch.no_grad():
-        for x, _ in loader:
+        for batch_idx, (x, _) in enumerate(loader, start=1):
             x = x.to(device)
             feat = model(x)   # CLS token (B, 768)
             all_feats.append(feat.cpu().numpy())
+            if (batch_idx == 1 or batch_idx == total_batches
+                    or batch_idx % progress_every == 0):
+                logger.info(
+                    "  feature batch %d/%d (%d/%d samples)",
+                    batch_idx, total_batches,
+                    min(batch_idx * batch_size, len(samples)), len(samples),
+                )
     return np.concatenate(all_feats, axis=0)
 
 
@@ -162,16 +180,22 @@ def _train_fold(samples, train_idx, transform, device, args):
                        for i in train_idx])
     ds = _CropDataset([samples[i] for i in train_idx], transform, labels)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    total_batches = len(loader)
+    progress_every = max(1, min(50, max(1, total_batches // 20)))
 
     trainable = [p for p in model.parameters() if p.requires_grad] + list(head.parameters())
     optim = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=0.01)
     logger.info("LoRA trainable params: %s (ViT base frozen); head: %s; pos_weight=%.2f",
                 f"{n_lora:,}", sum(p.numel() for p in head.parameters()), pos_weight.item())
+    logger.info(
+        "LoRA training data: samples=%d, positives=%d, negatives=%d, batch_size=%d, batches/epoch=%d, device=%s",
+        len(train_idx), n_pos, n_neg, args.batch_size, total_batches, device,
+    )
 
     for epoch in range(args.epochs):
         model.train()
         total_loss, n_batches = 0.0, 0
-        for x, y in loader:
+        for batch_idx, (x, y) in enumerate(loader, start=1):
             x, y = x.to(device), y.to(device)
             feat = model(x)              # (B, 768)
             logits = head(feat).squeeze(-1)
@@ -181,10 +205,16 @@ def _train_fold(samples, train_idx, transform, device, args):
             optim.step()
             total_loss += loss.item()
             n_batches += 1
-        logger.info("  epoch %d/%d  loss=%.4f", epoch + 1, args.epochs,
+            if (batch_idx == 1 or batch_idx == total_batches
+                    or batch_idx % progress_every == 0):
+                logger.info(
+                    "  epoch %d/%d batch %d/%d loss=%.4f",
+                    epoch + 1, args.epochs, batch_idx, total_batches,
+                    total_loss / max(n_batches, 1),
+                )
+        logger.info("  epoch %d/%d done loss=%.4f", epoch + 1, args.epochs,
                     total_loss / max(n_batches, 1))
     return model
-
 
 def main(argv=None):
     p = argparse.ArgumentParser()
