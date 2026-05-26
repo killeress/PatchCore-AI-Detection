@@ -306,11 +306,11 @@ def test_process_panel_v2_grid_disabled_infers_only_aoi_tiles(tmp_path):
     assert len(results[0].tiles) == 1
     assert results[0].processed_tile_count == 1
     kept_tile = results[0].tiles[0]
-    # v2 以 AOI 座標 (100,100) 為 anchor 建 tile；沒有 polygon 時退回 image clamp。
-    # 不再 attribute 既存 grid tile。
+    # v2 以 AOI 座標 (100,100) 為 anchor 建 tile；沒有偵測到 polygon 時
+    # 使用 raw_bounds 的矩形 fallback，靠邊 tile 仍會往 panel 內側推。
     assert kept_tile.is_aoi_coord_tile is True
-    assert kept_tile.x == 0
-    assert kept_tile.y == 0
+    assert abs(kept_tile.x - results[0].raw_bounds[0]) <= 1
+    assert abs(kept_tile.y - results[0].raw_bounds[1]) <= 1
     assert kept_tile.aoi_product_x == 100
     assert kept_tile.aoi_product_y == 100
     assert kept_tile.image.shape == (512, 512)
@@ -377,8 +377,12 @@ def test_process_panel_v2_runs_b0f_skip_file_with_bright_spot_logic(tmp_path):
     assert len(b0f_results) == 1
     b0f = b0f_results[0]
     assert len(b0f.tiles) == 1
-    assert b0f.tiles[0].is_aoi_coord_tile is True
-    assert b0f.tiles[0].is_bright_spot_detection is True
+    tile = b0f.tiles[0]
+    assert tile.is_aoi_coord_tile is True
+    assert tile.mask is not None
+    assert tile.mask.shape == tile.image.shape[:2]
+    assert tile.mask.dtype == np.uint8
+    assert tile.is_bright_spot_detection is True
     assert len(b0f.anomaly_tiles) == 1
     bright.assert_called_once()
     get_model.assert_not_called()
