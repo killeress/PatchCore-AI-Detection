@@ -203,6 +203,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         "lock": threading.Lock(),
         "active_job_id": None,
     }
+    TRAIN_NEW_MACHINE_PREFIX_LEN = 8
 
     # 單子模型重訓 state（一次只允許一個 job）
     _submodel_retrain_state: dict = {
@@ -4902,6 +4903,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         return [f"{lighting}-{zone}" for lighting, zone in TRAINING_UNITS]
 
     @classmethod
+    def _machine_id_prefix(cls, machine_id: str) -> str:
+        return str(machine_id or "").strip()[:cls.TRAIN_NEW_MACHINE_PREFIX_LEN]
+
+    @classmethod
+    def _same_machine_family(cls, machine_a: str, machine_b: str) -> bool:
+        prefix_a = cls._machine_id_prefix(machine_a)
+        prefix_b = cls._machine_id_prefix(machine_b)
+        return bool(prefix_a and prefix_a == prefix_b)
+
+    @classmethod
     def _normalize_train_new_scope(cls, raw, db=None) -> tuple:
         """Validate and normalize train scope for the 6-step wizard.
 
@@ -5038,6 +5049,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             training_scope=scope,
             target_bundle=target_bundle,
             selected_lightings=self._scope_selected_lightings(scope),
+            machine_prefix_len=self.TRAIN_NEW_MACHINE_PREFIX_LEN,
         )
         self._send_response(200, html)
 
@@ -5331,10 +5343,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         回傳近 3 天內 machine_judgment='OK'
         的 inference_records，供訓練 wizard 第一步選擇訓練樣本使用。
         machine_id 可省略，省略時回傳所有機種的最近紀錄。
+        machine_id_prefix 可省略，局部重訓用來查同前綴料號。
         """
         from urllib.parse import parse_qs, urlparse
         qs = parse_qs(urlparse(self.path).query)
         machine_id = (qs.get("machine_id") or [""])[0].strip()
+        machine_id_prefix = (qs.get("machine_id_prefix") or [""])[0].strip()
         try:
             days = int((qs.get("days") or ["3"])[0])
         except (ValueError, TypeError):
@@ -5346,7 +5360,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            panels = self.db.list_ok_panels_for_machine(machine_id, days=days)
+            if machine_id_prefix:
+                panels = self.db.list_ok_panels_for_machine(
+                    machine_id,
+                    days=days,
+                    machine_id_prefix=machine_id_prefix,
+                )
+            else:
+                panels = self.db.list_ok_panels_for_machine(machine_id, days=days)
             for panel in panels:
                 panel["image_path"] = panel.get("image_dir", "")
             self._send_json({"panels": panels, "days": days})
@@ -5473,14 +5494,24 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if not target_bundle:
                 self._send_json({"error": "target bundle not found"}, status=404)
                 return
-            if str(target_bundle.get("machine_id") or "") != machine_id:
+            target_machine_id = str(target_bundle.get("machine_id") or "")
+            if not target_machine_id:
                 self._send_json({
-                    "error": (
-                        "partial training machine_id must match target bundle "
-                        f"({target_bundle.get('machine_id')})"
-                    )
+                    "error": "partial training target bundle has empty machine_id"
                 }, status=400)
                 return
+            if target_machine_id != machine_id:
+                if self._same_machine_family(target_machine_id, machine_id):
+                    machine_id = target_machine_id
+                else:
+                    target_prefix = self._machine_id_prefix(target_machine_id)
+                    self._send_json({
+                        "error": (
+                            "partial training machine_id must match target bundle "
+                            f"prefix ({target_prefix})"
+                        )
+                    }, status=400)
+                    return
 
         job_id = generate_job_id(machine_id)
 
