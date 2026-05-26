@@ -1228,7 +1228,7 @@ class CAPIDatabase:
             conn.close()
 
     def get_dust_affected_record_ids(self, record_ids: list) -> set:
-        """返回有灰塵過濾影響的 inference record IDs (is_dust_only 或 edge is_dust)"""
+        """返回有灰塵過濾影響的 inference record IDs (image/tile/edge dust flags)."""
         if not record_ids:
             return set()
         conn = self._get_conn()
@@ -1243,10 +1243,15 @@ class CAPIDatabase:
                     f"WHERE record_id IN ({ph}) AND is_dust_only = 1 "
                     f"UNION "
                     f"SELECT DISTINCT img.record_id "
+                    f"FROM tile_results t "
+                    f"JOIN image_results img ON img.id = t.image_result_id "
+                    f"WHERE img.record_id IN ({ph}) AND t.is_dust = 1 "
+                    f"UNION "
+                    f"SELECT DISTINCT img.record_id "
                     f"FROM edge_defect_results edr "
                     f"JOIN image_results img ON img.id = edr.image_result_id "
                     f"WHERE img.record_id IN ({ph}) AND img.is_ng = 0 AND edr.is_dust = 1",
-                    chunk + chunk
+                    chunk + chunk + chunk
                 ).fetchall()
                 result_ids.update(r["record_id"] for r in rows)
             return result_ids

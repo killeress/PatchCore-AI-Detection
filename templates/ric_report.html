@@ -1113,8 +1113,12 @@
         let overReviewReviewedPieChart = null;
 
         // ── Ignore OMIT helpers ──
+        function isOmitSuppressedByDust(rec) {
+            return !!rec.has_dust_filtering;
+        }
+
         function getEffectiveAI(rec) {
-            if (ignoreOmit && rec.has_dust_filtering && rec.result_ai === 'OK') return 'NG';
+            if (ignoreOmit && isOmitSuppressedByDust(rec) && rec.result_ai === 'OK') return 'NG';
             return rec.result_ai;
         }
 
@@ -1620,7 +1624,7 @@
                 const effectiveAI = getEffectiveAI(row);
                 const aoiMatch = row.result_eqp === ric;
                 const aiMatch = effectiveAI === ric;
-                const dustOverride = (ignoreOmit && row.has_dust_filtering && row.result_ai === 'OK');
+                const dustOverride = (ignoreOmit && isOmitSuppressedByDust(row) && row.result_ai === 'OK');
 
                 const eqpBadge = row.result_eqp === 'OK'
                     ? '<span class="badge badge-ok">OK</span>'
@@ -2159,7 +2163,7 @@
             const missRecords = rawRecords.filter(r => getEffectiveAI(r) === 'OK' && deriveJudgment(r.datastr) === 'NG');
             const total = missRecords.length;
             let reviewed = 0;
-            const byCategory = { dust_misfilter: 0, threshold_high: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
+            const byCategory = { dust_misfilter: 0, data_error_actually_ok: 0, threshold_high: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
 
             missRecords.forEach(r => {
                 if (r.miss_review && r.miss_review.category) {
