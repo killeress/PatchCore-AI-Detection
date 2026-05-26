@@ -108,15 +108,28 @@ def _make_real_db():
             ('G003', 'OTHER_MODEL', 'CAPI07', 'OK', 'OK',
              '/data/G003', datetime('now'), datetime('now'))
     """)
+    conn.execute("""
+        INSERT INTO inference_records
+            (glass_id, model_id, machine_no, machine_judgment, ai_judgment,
+             image_dir, request_time, created_at)
+        VALUES
+            ('G004', 'GN160A', 'CAPI07', 'OK', 'OK',
+             '/data/G004', datetime('now'), datetime('now'))
+    """)
     conn.commit()
 
-    def _list_ok_panels(machine_id="", days=3, limit=100):
+    def _list_ok_panels(machine_id="", days=3, limit=100, machine_id_prefix=""):
         cur = conn.cursor()
-        where = ["machine_judgment = 'OK'", "created_at >= datetime('now', ? || ' days')"]
-        params = [f"-{days}"]
-        if machine_id:
-            where.insert(0, "model_id = ?")
-            params.insert(0, machine_id)
+        where = []
+        params = []
+        if machine_id_prefix:
+            where.append("substr(model_id, 1, ?) = ?")
+            params.extend([len(machine_id_prefix), machine_id_prefix])
+        elif machine_id:
+            where.append("model_id = ?")
+            params.append(machine_id)
+        where.extend(["machine_judgment = 'OK'", "created_at >= datetime('now', ? || ' days')"])
+        params.append(f"-{days}")
         params.append(limit)
         cur.execute(
             f"""SELECT id, glass_id, model_id, machine_no,
@@ -148,11 +161,22 @@ def test_handle_train_new_panels_returns_db_result():
     assert resp["status"] == 200
     body = json.loads(resp["body"])
     assert "panels" in body
-    # G001 是 OK；G002 是 NG (ai_judgment)；G003 是其他 model_id — 應回傳 G001 和 G002
+    # G001/G002 是精準 GN160；G003/G004 非精準 GN160，應排除。
     assert len(body["panels"]) == 2
     glass_ids = {p["glass_id"] for p in body["panels"]}
     assert glass_ids == {"G001", "G002"}
     assert all(p["image_path"] == p["image_dir"] for p in body["panels"])
+
+
+def test_handle_train_new_panels_supports_machine_id_prefix():
+    """局部重訓可用料號前綴找同 family panel。"""
+    db = _make_real_db()
+    h = _make_handler(db, "/api/train/new/panels?machine_id_prefix=GN160&days=3")
+    h._handle_train_new_panels()
+
+    body = json.loads(h._sent_response[0]["body"])
+    assert h._sent_response[0]["status"] == 200
+    assert {p["glass_id"] for p in body["panels"]} == {"G001", "G002", "G004"}
 
 
 def test_handle_train_new_panels_all_recent_without_machine_id():
@@ -163,7 +187,7 @@ def test_handle_train_new_panels_all_recent_without_machine_id():
 
     body = json.loads(h._sent_response[0]["body"])
     assert h._sent_response[0]["status"] == 200
-    assert {p["glass_id"] for p in body["panels"]} == {"G001", "G002", "G003"}
+    assert {p["glass_id"] for p in body["panels"]} == {"G001", "G002", "G003", "G004"}
     assert body["days"] == 3
 
 
@@ -977,8 +1001,8 @@ def test_handle_train_new_start_persists_partial_training_scope():
     server = MagicMock()
     server.database.get_model_bundle.return_value = {
         "id": 7,
-        "machine_id": "M",
-        "bundle_path": "model/M-bundle",
+        "machine_id": "GN156HRAA280S",
+        "bundle_path": "model/GN156HRAA280S-bundle",
     }
     server.database.create_training_job = MagicMock()
     CAPIWebHandler._train_new_jobs = {}
@@ -986,7 +1010,7 @@ def test_handle_train_new_start_persists_partial_training_scope():
 
     h = _make_handler_with_server(server, "/api/train/new/start")
     payload = {
-        "machine_id": "M",
+        "machine_id": "GN156HRAA2L0S",
         "panel_paths": [f"/p{i}" for i in range(8)],
         "training_scope": {
             "mode": "partial",
@@ -998,13 +1022,14 @@ def test_handle_train_new_start_persists_partial_training_scope():
     h.headers.get = MagicMock(return_value=str(len(body)))
     h.rfile = io.BytesIO(body)
 
-    with patch("capi_train_new.generate_job_id", return_value="train_M_20260518_abcd"):
+    with patch("capi_train_new.generate_job_id", return_value="train_GN156HRAA280S_20260518_abcd"):
         with patch("capi_web.threading.Thread") as MockThread:
             MockThread.return_value.start = MagicMock()
             h._handle_train_new_start()
 
     assert h._sent_response[0]["status"] == 200
     kwargs = server.database.create_training_job.call_args.kwargs
+    assert kwargs["machine_id"] == "GN156HRAA280S"
     assert kwargs["training_scope"] == {
         "mode": "partial",
         "selected_units": ["G0F00000-inner", "R0F00000-edge"],

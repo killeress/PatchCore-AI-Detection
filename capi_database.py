@@ -2777,22 +2777,35 @@ class CAPIDatabase:
         finally:
             conn.close()
 
-    def list_ok_panels_for_machine(self, machine_id: str = "", days: int = 3, limit: int = 100) -> list:
+    def list_ok_panels_for_machine(
+        self,
+        machine_id: str = "",
+        days: int = 3,
+        limit: int = 100,
+        machine_id_prefix: str = "",
+    ) -> list:
         """回傳近 N 天 machine_judgment='OK' 的 inference_records。
 
         供訓練 wizard 第一步選擇訓練樣本使用。
         machine_id 為空時回傳所有機種，供 UI 從最近推論紀錄直接挑選。
+        machine_id_prefix 用於局部重訓：依料號前綴找同 family panel。
         """
         days = max(1, min(int(days or 3), 3))
+        machine_id = str(machine_id or "").strip()
+        machine_id_prefix = str(machine_id_prefix or "").strip()
         conn = self._get_conn()
         try:
             cur = conn.cursor()
             params = []
-            where = ["machine_judgment = 'OK'", "created_at >= datetime('now', ? || ' days')"]
+            where = []
+            if machine_id_prefix:
+                where.append("substr(model_id, 1, ?) = ?")
+                params.extend([len(machine_id_prefix), machine_id_prefix])
+            elif machine_id:
+                where.append("model_id = ?")
+                params.append(machine_id)
+            where.extend(["machine_judgment = 'OK'", "created_at >= datetime('now', ? || ' days')"])
             params.append(f"-{days}")
-            if machine_id:
-                where.insert(0, "model_id = ?")
-                params.insert(0, machine_id)
             params.append(limit)
             cur.execute(
                 f"""SELECT id, glass_id, model_id, machine_no,
