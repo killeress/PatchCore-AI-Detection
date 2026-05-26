@@ -99,3 +99,62 @@ def test_v2_omit_postprocess_runs_two_stage_before_suppressing_dust():
     assert tile.anomaly_peak_y == 8
     assert tile.dust_two_stage_features == [{"abs_pos": (10, 8), "area": 4, "is_dust": False}]
     assert tile.dust_iou_debug_image is not None
+
+
+def test_v2_omit_postprocess_does_not_promote_track_only_tile_to_real_ng():
+    config = CAPIConfig()
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+
+    tile = TileInfo(
+        tile_id=1,
+        x=0,
+        y=0,
+        width=16,
+        height=16,
+        image=np.full((16, 16), 64, dtype=np.uint8),
+        is_aoi_coord_tile=True,
+        aoi_image_x=8,
+        aoi_image_y=8,
+    )
+    tile.is_aoi_coord_below_threshold = True
+    tile.score_threshold = 0.3
+
+    result = ImageResult(
+        image_path=Path("W0F00000_000000.tif"),
+        image_size=(16, 16),
+        otsu_bounds=(0, 0, 16, 16),
+        exclusion_regions=[],
+        tiles=[tile],
+        excluded_tile_count=0,
+        processed_tile_count=1,
+        processing_time=0.0,
+        anomaly_tiles=[(tile, 0.0, np.zeros((8, 8), dtype=np.float32))],
+    )
+
+    calls = {"per_region": False}
+
+    def fake_check_dust_or_scratch_feature(image, extension_override=None):
+        return True, np.full((16, 16), 255, dtype=np.uint8), 0.1, "OMIT"
+
+    def fake_check_dust_per_region(*args, **kwargs):
+        calls["per_region"] = True
+        raise AssertionError("track-only AOI tiles must not run per-region dust")
+
+    inferencer.check_dust_or_scratch_feature = fake_check_dust_or_scratch_feature
+    inferencer.check_dust_per_region = fake_check_dust_per_region
+
+    inferencer._apply_omit_dust_postprocess(
+        [result],
+        omit_image=np.zeros((16, 16), dtype=np.uint8),
+        omit_overexposed=False,
+        omit_overexposure_info="",
+        cpu_workers=1,
+    )
+
+    assert calls["per_region"] is False
+    assert tile.is_suspected_dust_or_scratch is False
+    assert tile.dust_mask is not None
+    assert "TRACK_ONLY Score<THR -> AI_OK" in tile.dust_detail_text
+    assert "REAL_NG" not in tile.dust_detail_text

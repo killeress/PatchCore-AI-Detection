@@ -196,6 +196,13 @@ class TileInfo:
     bright_spot_diff_threshold: int = 0     # B0F 偵測：使用的差異閾值
     bright_spot_area: int = 0               # B0F 偵測：偵測到的亮點面積 (px)
     bright_spot_min_area: int = 0           # B0F 偵測：使用的最小面積
+    score_threshold: Optional[float] = None # 此 tile 推論時實際使用的門檻（v2 依 zone 不同）
+    raw_pred_score: float = 0.0             # 模型原始 pred_score，未經 mask/edge margin 比率調整
+    pre_decay_map_max: float = 0.0          # mask/edge margin 前 anomaly_map max
+    post_decay_map_max: float = 0.0         # mask/edge margin 後 anomaly_map max
+    score_decay_ratio: float = 1.0          # post_decay_map_max / pre_decay_map_max
+    score_edge_margin_sides: str = ""       # 此 tile 實際套用的 edge margin sides
+    score_mask_valid_ratio: float = 1.0     # tile.mask 中有效區域比例
     # Scratch classifier post-filter (over-review reduction)
     scratch_score: float = 0.0              # 0 = 未跑 classifier
     scratch_filtered: bool = False          # True = 被翻回 OK
@@ -1474,7 +1481,15 @@ class CAPIInferencer:
             anomaly_map = None
             if hasattr(predictions, 'anomaly_map') and predictions.anomaly_map is not None:
                 anomaly_map = predictions.anomaly_map.squeeze().cpu().numpy() if hasattr(predictions.anomaly_map, 'cpu') else predictions.anomaly_map.squeeze()
-            
+
+        raw_pred_score = float(pred_score)
+        tile.raw_pred_score = raw_pred_score
+        tile.pre_decay_map_max = 0.0
+        tile.post_decay_map_max = 0.0
+        tile.score_decay_ratio = 1.0
+        tile.score_edge_margin_sides = ""
+        tile.score_mask_valid_ratio = tile.valid_ratio
+
         # === 以下為 anomaly_map 後處理 (batch 和 fallback 共用) ===
         if anomaly_map is not None:
             # 記錄衰減/遮罩處理前的 anomaly_map max (用於後續比率計算)
@@ -1597,6 +1612,7 @@ class CAPIInferencer:
 
             # 記錄 mask/邊緣衰減前的 max (用於 decay ratio，統一使用 max 避免 metric 不一致)
             pre_decay_max = float(np.max(anomaly_map))
+            edge_margin_sides = []
 
             # 如果有遮罩，將排除區域的熱圖值設為 0
             if tile.mask is not None:
@@ -1624,10 +1640,13 @@ class CAPIInferencer:
                     sides.append('right')
 
                 if sides:
+                    edge_margin_sides = sides
                     # 將 margin_px 按 anomaly_map 實際尺寸縮放
                     scale = anomaly_map.shape[0] / tile.height
                     scaled_margin = int(edge_margin * scale)
                     anomaly_map = self._apply_edge_margin(anomaly_map, scaled_margin, sides=sides)
+            tile.pre_decay_map_max = pre_decay_max
+            tile.score_edge_margin_sides = ",".join(edge_margin_sides)
         
         # 如果有遮罩或邊緣衰減，使用衰減比率調整分數（保持與 anomalib pred_score 相同尺度）
         actual_edge_margin = self.config.edge_margin_px if edge_margin_override is None else edge_margin_override
@@ -1646,7 +1665,13 @@ class CAPIInferencer:
                 decay_ratio = post_decay_max / pre_decay_max
                 pred_score = pred_score * decay_ratio
             else:
+                decay_ratio = 0.0
                 pred_score = 0.0
+            tile.post_decay_map_max = post_decay_max
+            tile.score_decay_ratio = decay_ratio
+        elif anomaly_map is not None:
+            tile.post_decay_map_max = float(np.max(anomaly_map))
+            tile.score_decay_ratio = 1.0
         
         return pred_score, anomaly_map
 
@@ -1785,6 +1810,14 @@ class CAPIInferencer:
                 progress_callback(i + 1, total)
 
             score, anomaly_map = self.predict_tile(tile, inferencer=active_inferencer, edge_margin_override=edge_margin_override, patchcore_overrides=patchcore_overrides, threshold=active_threshold)
+            tile.score_threshold = active_threshold
+            if tile.is_aoi_coord_tile and score <= 1e-9:
+                print(
+                    f"    [score_diag] AOI Tile@({tile.x},{tile.y}) "
+                    f"raw={tile.raw_pred_score:.4f} preMax={tile.pre_decay_map_max:.4f} "
+                    f"postMax={tile.post_decay_map_max:.4f} decay={tile.score_decay_ratio:.4f} "
+                    f"mask={tile.score_mask_valid_ratio:.3f} edge={tile.score_edge_margin_sides or '-'}"
+                )
 
             if score >= active_threshold:
                 anomaly_tiles.append((tile, score, anomaly_map))
@@ -1930,6 +1963,7 @@ class CAPIInferencer:
         for ti in tile_infos:
             zone = ti.zone if ti.zone in ("inner", "edge") else "inner"
             active_thr = inner_thr if zone == "inner" else edge_thr
+            ti.score_threshold = active_thr
             try:
                 model = self._get_model_for(self.config.machine_id, lighting, zone)
             except Exception as exc:
@@ -5101,6 +5135,7 @@ class CAPIInferencer:
                 anomaly_tiles = []
                 for tile in result.tiles:
                     score, anomaly_map = self._detect_bright_spots(tile)
+                    tile.score_threshold = 0.5
                     if score <= 0:
                         # 未偵測到亮點，標記為 below_threshold 不影響判定，但仍保留以便查看原圖
                         tile.is_aoi_coord_below_threshold = True
@@ -5154,7 +5189,13 @@ class CAPIInferencer:
             if result.anomaly_tiles and omit_image is not None and omit_overexposed:
                 # OMIT 過曝：無法進行灰塵檢測，記錄但不判定
                 for tile, score, anomaly_map in result.anomaly_tiles:
-                    tile.dust_detail_text = f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> Cannot verify dust, treated as REAL_NG"
+                    if getattr(tile, 'is_aoi_coord_below_threshold', False):
+                        tile.dust_detail_text = (
+                            f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> "
+                            "TRACK_ONLY Score<THR, dust check skipped"
+                        )
+                    else:
+                        tile.dust_detail_text = f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> Cannot verify dust, treated as REAL_NG"
                     aoi_suffix = self._format_aoi_tile_log_suffix(tile)
                     print(f"⚠️ {img_path.name} Tile@({tile.x},{tile.y}){aoi_suffix} Score:{score:.3f} → OMIT OVEREXPOSED, skip dust check")
             elif result.anomaly_tiles and omit_image is not None and not omit_overexposed:
@@ -5175,6 +5216,17 @@ class CAPIInferencer:
                         is_dust, dust_mask, bright_ratio, detail_text = self.check_dust_or_scratch_feature(omit_crop)
                         tile.dust_mask = dust_mask
                         tile.dust_bright_ratio = bright_ratio
+
+                        if getattr(tile, 'is_aoi_coord_below_threshold', False):
+                            tile.is_suspected_dust_or_scratch = False
+                            detail_text += " TRACK_ONLY Score<THR -> AI_OK"
+                            tile.dust_detail_text = detail_text
+                            aoi_suffix = self._format_aoi_tile_log_suffix(tile)
+                            print(
+                                f"🟡 {img_path.name} Tile@({tx},{ty}){aoi_suffix} "
+                                f"Score:{score:.3f} → {detail_text}"
+                            )
+                            continue
                         
                         # Step B: 逐區域灰塵交叉驗證 (Per-Region Dust Filtering)
                         iou = 0.0
@@ -5770,10 +5822,16 @@ class CAPIInferencer:
                 return
             if omit_overexposed:
                 for tile, score, _anomaly_map in result.anomaly_tiles:
-                    tile.dust_detail_text = (
-                        f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> "
-                        "Cannot verify dust, treated as REAL_NG"
-                    )
+                    if getattr(tile, 'is_aoi_coord_below_threshold', False):
+                        tile.dust_detail_text = (
+                            f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> "
+                            "TRACK_ONLY Score<THR, dust check skipped"
+                        )
+                    else:
+                        tile.dust_detail_text = (
+                            f"OMIT_OVEREXPOSED ({omit_overexposure_info}) -> "
+                            "Cannot verify dust, treated as REAL_NG"
+                        )
                     zone_tag = f" [{tile.zone}]" if tile.zone else ""
                     aoi_suffix = self._format_aoi_tile_log_suffix(tile)
                     print(
@@ -5803,6 +5861,20 @@ class CAPIInferencer:
                     self.check_dust_or_scratch_feature(omit_crop)
                 tile.dust_mask = dust_mask
                 tile.dust_bright_ratio = bright_ratio
+
+                if getattr(tile, 'is_aoi_coord_below_threshold', False):
+                    tile.is_suspected_dust_or_scratch = False
+                    detail_text += " TRACK_ONLY Score<THR -> AI_OK"
+                    tile.dust_detail_text = detail_text
+
+                    log_icon = "🟡"
+                    zone_tag = f" [{tile.zone}]" if tile.zone else ""
+                    aoi_suffix = self._format_aoi_tile_log_suffix(tile)
+                    print(
+                        f"{log_icon} {result.image_path.name} Tile@({tx},{ty}){zone_tag}{aoi_suffix} "
+                        f"Score:{score:.3f} → {detail_text}"
+                    )
+                    continue
 
                 if is_dust and anomaly_map is not None and dust_mask is not None:
                     top_pct = self.config.dust_heatmap_top_percent
@@ -6392,6 +6464,7 @@ class CAPIInferencer:
                 print(f"💡 {result.image_path.name} (skip_file) → 使用二值化偵測亮點")
                 for ti in result.tiles:
                     score, anomaly_map = self._detect_bright_spots(ti)
+                    ti.score_threshold = 0.5
                     if score <= 0:
                         ti.is_aoi_coord_below_threshold = True
                     anomaly_tiles.append((ti, score, anomaly_map))
@@ -6418,6 +6491,7 @@ class CAPIInferencer:
             for ti in result.tiles:
                 zone = zone_by_tile_id.get(ti.tile_id, "inner")
                 threshold = inner_thr if zone == "inner" else edge_thr
+                ti.score_threshold = threshold
                 try:
                     model = self._get_model_for(self.config.machine_id, lighting, zone)
                     score, anomaly_map = self.predict_tile(
@@ -6425,6 +6499,13 @@ class CAPIInferencer:
                         inferencer=model,
                         threshold=threshold,
                     )
+                    if ti.is_aoi_coord_tile and score <= 1e-9:
+                        print(
+                            f"    [v2 score_diag] {lighting}/{zone} Tile@({ti.x},{ti.y}) "
+                            f"raw={ti.raw_pred_score:.4f} preMax={ti.pre_decay_map_max:.4f} "
+                            f"postMax={ti.post_decay_map_max:.4f} decay={ti.score_decay_ratio:.4f} "
+                            f"mask={ti.score_mask_valid_ratio:.3f} edge={ti.score_edge_margin_sides or '-'}"
+                        )
                 except Exception as exc:
                     raise RuntimeError(
                         f"[v2] {lighting}/{zone} tile({ti.x},{ti.y}) 推論失敗: {exc}"
@@ -6453,10 +6534,16 @@ class CAPIInferencer:
             active_zones = [zone_by_tile_id.get(t.tile_id, "inner") for t in result.tiles]
             inner_count = sum(1 for z in active_zones if z == "inner")
             edge_count = sum(1 for z in active_zones if z == "edge")
+            model_ng_count = sum(
+                1 for t, _score, _map in anomaly_tiles
+                if not getattr(t, "is_aoi_coord_below_threshold", False)
+            )
+            track_count = len(anomaly_tiles) - model_ng_count
+            track_suffix = f", track={track_count}" if track_count else ""
             print(
                 f"[v2] {lighting}: tiles={len(result.tiles)} "
                 f"(inner={inner_count}, edge={edge_count}), "
-                f"NG={len(anomaly_tiles)}, infer {infer_elapsed:.2f}s"
+                f"NG={model_ng_count}{track_suffix}, infer {infer_elapsed:.2f}s"
             )
 
         inference_elapsed = time.time() - inference_start
@@ -6481,7 +6568,24 @@ class CAPIInferencer:
                 result.client_bomb_info = bomb_info
 
         total_elapsed = time.time() - t0
-        ng_count = sum(1 for r in results if r.anomaly_tiles)
+        def _has_effective_ng(result: ImageResult) -> bool:
+            real_tiles = [
+                t for t, _s, _m in result.anomaly_tiles
+                if not getattr(t, "is_aoi_coord_below_threshold", False)
+                and not t.is_suspected_dust_or_scratch
+                and not t.is_bomb
+                and not t.is_in_exclude_zone
+                and not t.scratch_filtered
+            ]
+            real_edges = [
+                ed for ed in getattr(result, "edge_defects", []) or []
+                if not getattr(ed, "is_suspected_dust_or_scratch", False)
+                and not getattr(ed, "is_bomb", False)
+                and not getattr(ed, "is_cv_ok", False)
+            ]
+            return bool(real_tiles or real_edges)
+
+        ng_count = sum(1 for r in results if _has_effective_ng(r))
         print(
             f"📊 Panel {Path(panel_dir).name} 總計: "
             f"預處理 {preprocess_elapsed:.2f}s + "
@@ -6626,8 +6730,16 @@ class CAPIInferencer:
             cv2.line(vis, (x, otsu_y1), (x, otsu_y2), (0, 255, 0), 1, cv2.LINE_AA)
         
         # 異常 tiles（紅色粗框 + 分數）
-        if result.anomaly_tiles:
-            print(f"🔍 發現異常 tiles，共 {len(result.anomaly_tiles)} 個")
+        effective_anomaly_tiles = [
+            t for t in result.anomaly_tiles
+            if not getattr(t[0], 'is_aoi_coord_below_threshold', False)
+        ]
+        track_only_count = len(result.anomaly_tiles) - len(effective_anomaly_tiles)
+        if effective_anomaly_tiles:
+            suffix = f"，另 {track_only_count} 個 track-only" if track_only_count else ""
+            print(f"🔍 發現異常 tiles，共 {len(effective_anomaly_tiles)} 個{suffix}")
+        elif track_only_count:
+            print(f"🟡 AOI track-only tiles，共 {track_only_count} 個 (Score<THR，不列 NG)")
         for tile, score, _ in result.anomaly_tiles:
             # AOI 座標 tile 但 AI 判定未達閾值：綠色框標 OK（不算 NG）
             if getattr(tile, 'is_aoi_coord_below_threshold', False):
@@ -6693,8 +6805,6 @@ class CAPIInferencer:
                 print(f"❌ 繪製 Tile {tile.tile_id} 失敗: {e}, 座標: ({x1_clip},{y1_clip})->({x2_clip},{y2_clip})")
         
         # 結果標籤 — 過濾掉 AOI 座標未達閾值的 tile (不影響 NG 判定)
-        effective_anomaly_tiles = [t for t in result.anomaly_tiles
-                                   if not getattr(t[0], 'is_aoi_coord_below_threshold', False)]
         real_edge_defects = [
             ed for ed in getattr(result, 'edge_defects', [])
             if not getattr(ed, 'is_suspected_dust_or_scratch', False)
