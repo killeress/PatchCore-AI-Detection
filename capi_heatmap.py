@@ -539,6 +539,12 @@ class HeatmapManager:
         """
         tile_size = 512
         is_bright_spot = getattr(tile_info, 'is_bright_spot_detection', False) if tile_info else False
+        tile_score_threshold = getattr(tile_info, 'score_threshold', None) if tile_info else None
+        if tile_score_threshold is not None:
+            try:
+                score_threshold = float(tile_score_threshold)
+            except (TypeError, ValueError):
+                pass
 
         # --- Panel 1: Original Tile ---
         orig = tile_image.copy()
@@ -1944,11 +1950,17 @@ class HeatmapManager:
                 for tile, score, anomaly_map in result.anomaly_tiles:
                     if anomaly_map is not None:
                         try:
+                            tile_threshold = getattr(tile, "score_threshold", None)
+                            score_threshold = (
+                                float(tile_threshold)
+                                if tile_threshold is not None
+                                else active_threshold
+                            )
                             path = self.save_tile_heatmap(
                                 save_dir, image_name, tile.tile_id,
                                 tile.image, anomaly_map, score,
                                 tile_info=tile,
-                                score_threshold=active_threshold,
+                                score_threshold=score_threshold,
                                 iou_threshold=inferencer.config.dust_heatmap_iou_threshold,
                                 dust_metric=getattr(inferencer.config, 'dust_heatmap_metric', 'coverage'),
                                 dust_high_cov_threshold=getattr(inferencer.config, 'dust_high_cov_threshold', None),
