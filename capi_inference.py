@@ -4177,13 +4177,14 @@ class CAPIInferencer:
             crop_w = tx2 - tx
             crop_h = ty2 - ty
             tile_img = image[ty:ty2, tx:tx2].copy()
+            tile_zone, _cov, _dist, tile_mask = classify_tile_zone(
+                (tx, ty, tx2, ty2), polygon, pre_cfg,
+            )
 
             if is_skip_file:
                 zone = "bright_spot"
             else:
-                zone, _cov, _dist, tile_mask = classify_tile_zone(
-                    (tx, ty, tx2, ty2), polygon, pre_cfg,
-                )
+                zone = tile_zone
                 if zone == "outside":
                     zone = "edge"
                 if polygon is not None:
