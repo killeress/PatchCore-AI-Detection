@@ -527,6 +527,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/debug/inference":
                 self._handle_debug_inference_run()
+            elif path == "/api/debug/preprocess-lab":
+                self._handle_debug_preprocess_lab()
             elif path == "/api/debug/coord-inference":
                 self._handle_debug_coord_inference()
             elif path == "/api/debug/edge-inspect":
@@ -1300,8 +1302,105 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.error(f"Error serving debug image: {e}")
             self._send_error(500, str(e))
 
+    def _handle_debug_preprocess_lab(self):
+        """API: Debug image preprocessing lab."""
+        import time as _time
+        import uuid
+
+        import cv2
+
+        from capi_image_preprocess_lab import apply_preprocess_method, make_diff_image
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except Exception:
+            self._send_json({"error": "Invalid JSON body"})
+            return
+
+        image_path_str = data.get("image_path", "").strip()
+        if not image_path_str:
+            self._send_json({"error": "請提供圖片路徑 (image_path)"})
+            return
+
+        image_path = Path(image_path_str)
+        if not image_path.exists():
+            self._send_json({"error": f"檔案不存在: {image_path}"})
+            return
+        if not image_path.is_file():
+            self._send_json({"error": f"不是檔案: {image_path}"})
+            return
+
+        method = str(data.get("method", "median")).strip()
+        params = data.get("params") or {}
+        if not isinstance(params, dict):
+            self._send_json({"error": "params 必須是物件"})
+            return
+
+        try:
+            start = _time.time()
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            if image is None:
+                self._send_json({"error": f"無法讀取圖片: {image_path}"})
+                return
+
+            result = apply_preprocess_method(image, method, params)
+            processed = result["image"]
+            diff = make_diff_image(image, processed)
+
+            if CAPIWebHandler._debug_heatmap_dir is None:
+                CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
+            debug_dir = CAPIWebHandler._debug_heatmap_dir
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", image_path.stem)[:80] or "image"
+            token = uuid.uuid4().hex[:8]
+            safe_method = result["method"]
+            processed_filename = f"preprocess_lab_{safe_stem}_{safe_method}_{token}.png"
+            diff_filename = f"preprocess_lab_{safe_stem}_{safe_method}_{token}_diff.png"
+            processed_path = debug_dir / processed_filename
+            diff_path = debug_dir / diff_filename
+
+            if not cv2.imwrite(str(processed_path), processed):
+                self._send_json({"error": "處理後圖片寫入失敗"})
+                return
+            if not cv2.imwrite(str(diff_path), diff):
+                self._send_json({"error": "差異圖寫入失敗"})
+                return
+
+            elapsed = _time.time() - start
+            h, w = image.shape[:2]
+            channels = 1 if image.ndim == 2 else image.shape[2]
+
+            self._send_json({
+                "success": True,
+                "image_path": str(image_path),
+                "image_name": image_path.name,
+                "image_size": [w, h],
+                "channels": channels,
+                "input_dtype": str(image.dtype),
+                "method": result["method"],
+                "method_label": result["method_label"],
+                "applied_params": result["applied_params"],
+                "notes": result["notes"],
+                "conversion": result["conversion"],
+                "stats": result["stats"],
+                "processing_time": round(elapsed, 3),
+                "original_url": "/api/debug/serve-image?path=" + urllib.parse.quote(str(image_path)),
+                "processed_url": f"/debug/heatmaps/{processed_filename}",
+                "diff_url": f"/debug/heatmaps/{diff_filename}",
+                "output_path": str(processed_path),
+                "diff_path": str(diff_path),
+            })
+        except Exception as e:
+            logger.error(f"[DEBUG] Preprocess lab error: {e}", exc_info=True)
+            self._send_json({"error": f"影像前處理失敗: {str(e)}"})
+
     def _handle_debug_page(self, path: str):
         """Debug 推論頁面"""
+        from capi_image_preprocess_lab import get_method_specs
+
         # 從 DB 讀取最新設定，若無則 fallback 到推論器的 config
         db_params = {}
         if self.db:
@@ -1348,6 +1447,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             default_aoi_boundary_padding=15,
             default_aoi_boundary_min_bright=15,
             default_aoi_edge_inspector=get_val('aoi_edge_inspector', 'cv'),
+            preprocess_methods=get_method_specs(),
         )
         self._send_response(200, html)
 

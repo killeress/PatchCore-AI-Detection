@@ -461,6 +461,131 @@
         margin-top: 16px;
     }
 
+    .lab-param-panel {
+        display: none;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 12px;
+        margin-top: 16px;
+        padding-top: 16px;
+        border-top: 1px solid var(--border);
+    }
+
+    .lab-param-panel.active {
+        display: grid;
+    }
+
+    .lab-note {
+        margin-top: 12px;
+        padding: 12px 14px;
+        background: rgba(59, 130, 246, 0.06);
+        border: 1px solid rgba(59, 130, 246, 0.18);
+        border-radius: 8px;
+        color: var(--text-muted);
+        font-size: 0.84rem;
+        line-height: 1.6;
+    }
+
+    .lab-result-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 16px;
+        margin-top: 18px;
+    }
+
+    .lab-result-grid .img-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+    }
+
+    .lab-result-grid .img-card h4 {
+        padding: 10px 14px;
+        margin: 0;
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        font-family: 'Fira Code', monospace;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .lab-result-grid .img-card img {
+        width: 100%;
+        max-height: 70vh;
+        object-fit: contain;
+        display: block;
+        cursor: pointer;
+        background: #0a0f1a;
+    }
+
+    .lab-output-path {
+        margin-top: 12px;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.55);
+        color: var(--text-muted);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.78rem;
+        word-break: break-all;
+    }
+
+    .lab-method-detail {
+        display: none;
+        margin-top: 14px;
+        padding: 14px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 10px;
+        background: rgba(15, 23, 42, 0.45);
+    }
+
+    .lab-method-detail.active {
+        display: block;
+    }
+
+    .lab-method-detail h4 {
+        margin: 0 0 10px;
+        color: var(--text);
+        font-size: 0.98rem;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .lab-detail-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 10px;
+    }
+
+    .lab-detail-block {
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: rgba(2, 6, 23, 0.25);
+        color: var(--text-muted);
+        font-size: 0.82rem;
+        line-height: 1.55;
+    }
+
+    .lab-detail-block .lab-detail-label {
+        margin-bottom: 5px;
+        color: var(--text);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .lab-param-desc {
+        margin: 10px 0 0;
+        padding-left: 18px;
+        color: var(--text-muted);
+        font-size: 0.82rem;
+        line-height: 1.6;
+    }
+
+    .lab-param-desc code {
+        color: #93c5fd;
+    }
+
     /* Tabs */
     .tabs-nav {
         display: flex;
@@ -650,6 +775,7 @@
     <!-- Tabs Navigation -->
     <div class="tabs-nav">
         <button class="tab-btn active" onclick="switchTab('tab-single', this)">📸 單圖推論</button>
+        <button class="tab-btn" onclick="switchTab('tab-preprocess-lab', this)">🧪 影像預處理實驗室</button>
         <button class="tab-btn" onclick="switchTab('tab-coord', this)">📍 座標推論</button>
         <button class="tab-btn" onclick="switchTab('tab-edge', this)">📐 邊緣檢測 (整邊)</button>
         <button class="tab-btn" onclick="switchTab('tab-edge-corner', this)">📐 邊緣檢測 (角落)</button>
@@ -859,6 +985,170 @@
             <div id="ok-message" class="ok-message hidden">
                 ✅ 此圖片未偵測到異常，判定為 OK
             </div>
+        </div>
+    </div>
+
+    <!-- ═══ 影像預處理實驗室 ═══ -->
+    <div id="tab-preprocess-lab" class="tab-content">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+            <div>
+                <h2 style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
+                    🧪 影像預處理實驗室
+                    <span class="debug-badge">FAB EXPERIMENT</span>
+                </h2>
+                <p style="color:var(--text-muted); font-size:0.9rem; margin-top:4px;">
+                    對單張圖片套用前處理，輸出處理後影像與差異圖，人工確認雜訊是否降低且 defect 沒被抹除
+                </p>
+            </div>
+        </div>
+
+        <div class="card" style="padding:20px;">
+            <div class="coord-input-row">
+                <input type="text" id="lab-image-path" placeholder="圖片絕對路徑" autocomplete="off" spellcheck="false"
+                    style="flex:1; min-width:320px; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.95rem; outline:none;">
+                <div class="coord-group" style="min-width:220px;">
+                    <label for="lab-method">處理方法</label>
+                    <select id="lab-method" onchange="updateLabParamVisibility()">
+                        {% for method in preprocess_methods %}
+                        <option value="{{ method.id }}" data-purpose="{{ method.purpose | e }}">{{ method.label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <button class="btn-run" id="btn-lab-run" onclick="runPreprocessLab()"
+                    style="background:linear-gradient(135deg,#14b8a6,#0f766e);">
+                    <span class="spinner" id="lab-spinner"></span>
+                    <span id="lab-btn-text">🧪 套用處理</span>
+                </button>
+            </div>
+
+            <div id="lab-method-note" class="lab-note"></div>
+
+            <div id="lab-method-details">
+                {% for method in preprocess_methods %}
+                <div class="lab-method-detail{% if loop.first %} active{% endif %}" data-lab-detail="{{ method.id }}">
+                    <h4>{{ method.label }}</h4>
+                    <div class="lab-detail-grid">
+                        <div class="lab-detail-block">
+                            <div class="lab-detail-label">適用雜訊</div>
+                            {{ method.noise_types | join('、') }}
+                        </div>
+                        <div class="lab-detail-block">
+                            <div class="lab-detail-label">漏檢風險</div>
+                            {{ method.risk }}
+                        </div>
+                        <div class="lab-detail-block">
+                            <div class="lab-detail-label">建議初始值</div>
+                            {{ method.suggested }}
+                        </div>
+                        <div class="lab-detail-block">
+                            <div class="lab-detail-label">混用建議</div>
+                            {{ method.mix }}
+                        </div>
+                    </div>
+                    <ul class="lab-param-desc">
+                        {% for param in method.params %}
+                        <li><code>{{ param.name }}</code>：{{ param.detail }}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% endfor %}
+            </div>
+
+            <div class="lab-param-panel active" data-lab-panel="median">
+                <div class="coord-group">
+                    <label for="lab-median-kernel">窗口大小</label>
+                    <input type="number" id="lab-median-kernel" value="5" min="3" max="31" step="2">
+                </div>
+            </div>
+
+            <div class="lab-param-panel" data-lab-panel="mean">
+                <div class="coord-group">
+                    <label for="lab-mean-kernel">窗口大小</label>
+                    <input type="number" id="lab-mean-kernel" value="5" min="3" max="99" step="2">
+                </div>
+            </div>
+
+            <div class="lab-param-panel" data-lab-panel="gaussian">
+                <div class="coord-group">
+                    <label for="lab-gaussian-kernel">窗口大小</label>
+                    <input type="number" id="lab-gaussian-kernel" value="5" min="3" max="99" step="2">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-gaussian-sigma">Sigma</label>
+                    <input type="number" id="lab-gaussian-sigma" value="1.0" min="0" max="20" step="0.1">
+                </div>
+            </div>
+
+            <div class="lab-param-panel" data-lab-panel="bilateral">
+                <div class="coord-group">
+                    <label for="lab-bilateral-diameter">Diameter</label>
+                    <input type="number" id="lab-bilateral-diameter" value="9" min="1" max="31" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-bilateral-color">Sigma Color</label>
+                    <input type="number" id="lab-bilateral-color" value="35" min="1" max="200" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-bilateral-space">Sigma Space</label>
+                    <input type="number" id="lab-bilateral-space" value="35" min="1" max="200" step="1">
+                </div>
+            </div>
+
+            <div class="lab-param-panel" data-lab-panel="laplace_sharpen">
+                <div class="coord-group">
+                    <label for="lab-laplace-kernel">Kernel Size</label>
+                    <input type="number" id="lab-laplace-kernel" value="3" min="1" max="31" step="2">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-laplace-strength">Strength</label>
+                    <input type="number" id="lab-laplace-strength" value="0.5" min="0" max="3" step="0.1">
+                </div>
+            </div>
+
+            <div class="lab-param-panel" data-lab-panel="nlm">
+                <div class="coord-group">
+                    <label for="lab-nlm-h">H</label>
+                    <input type="number" id="lab-nlm-h" value="7" min="1" max="50" step="0.5">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-nlm-h-color">H Color</label>
+                    <input type="number" id="lab-nlm-h-color" value="7" min="1" max="50" step="0.5">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-nlm-template">Template</label>
+                    <input type="number" id="lab-nlm-template" value="7" min="3" max="21" step="2">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-nlm-search">Search</label>
+                    <input type="number" id="lab-nlm-search" value="21" min="7" max="41" step="2">
+                </div>
+            </div>
+
+            <div class="lab-param-panel" data-lab-panel="stripe_profile">
+                <div class="coord-group">
+                    <label for="lab-stripe-orientation">條紋方向</label>
+                    <select id="lab-stripe-orientation">
+                        <option value="vertical" selected>垂直條紋</option>
+                        <option value="horizontal">水平條紋</option>
+                    </select>
+                </div>
+                <div class="coord-group">
+                    <label for="lab-stripe-smooth">Profile 平滑窗口</label>
+                    <input type="number" id="lab-stripe-smooth" value="61" min="7" max="501" step="2">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-stripe-strength">校正強度</label>
+                    <input type="number" id="lab-stripe-strength" value="1.0" min="0" max="1.5" step="0.05">
+                </div>
+            </div>
+        </div>
+
+        <div id="lab-error-box" class="error-box hidden"></div>
+
+        <div id="lab-result-section" class="hidden">
+            <div class="coord-info-cards" id="lab-info-cards"></div>
+            <div class="lab-output-path" id="lab-output-path"></div>
+            <div class="lab-result-grid" id="lab-result-grid"></div>
         </div>
     </div>
 
@@ -1339,11 +1629,16 @@
     const btn = document.getElementById('btn-run');
     const btnText = document.getElementById('btn-text');
     const spinner = document.getElementById('spinner');
+    const labInput = document.getElementById('lab-image-path');
 
     // Enter key to submit
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') runInference();
     });
+    labInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') runPreprocessLab();
+    });
+    updateLabParamVisibility();
 
     // 自動帶入 URL 的 ?path= 參數
     (function () {
@@ -1357,6 +1652,9 @@
 
             const cornerPathInput = document.getElementById('edge-corner-image-path');
             if (cornerPathInput) cornerPathInput.value = pathParam;
+
+            const labPathInput = document.getElementById('lab-image-path');
+            if (labPathInput) labPathInput.value = pathParam;
         }
 
         // 從 record_detail 帶 ROI 座標自動填入角落 tab 並切換
@@ -1379,8 +1677,177 @@
         if (tabParam === 'edge-corner') {
             const targetBtn = document.querySelector('.tab-btn[onclick*="tab-edge-corner"]');
             if (targetBtn) switchTab('tab-edge-corner', targetBtn);
+        } else if (tabParam === 'preprocess') {
+            const targetBtn = document.querySelector('.tab-btn[onclick*="tab-preprocess-lab"]');
+            if (targetBtn) switchTab('tab-preprocess-lab', targetBtn);
         }
     })();
+
+    function updateLabParamVisibility() {
+        const methodSelect = document.getElementById('lab-method');
+        const method = methodSelect.value;
+        document.querySelectorAll('.lab-param-panel').forEach(panel => {
+            panel.classList.toggle('active', panel.dataset.labPanel === method);
+        });
+        document.querySelectorAll('.lab-method-detail').forEach(panel => {
+            panel.classList.toggle('active', panel.dataset.labDetail === method);
+        });
+        const selected = methodSelect.options[methodSelect.selectedIndex];
+        document.getElementById('lab-method-note').textContent = selected ? selected.dataset.purpose : '';
+    }
+
+    function collectLabParams(method) {
+        if (method === 'median') {
+            return { kernel_size: parseInt(document.getElementById('lab-median-kernel').value, 10) };
+        }
+        if (method === 'mean') {
+            return { kernel_size: parseInt(document.getElementById('lab-mean-kernel').value, 10) };
+        }
+        if (method === 'gaussian') {
+            return {
+                kernel_size: parseInt(document.getElementById('lab-gaussian-kernel').value, 10),
+                sigma: parseFloat(document.getElementById('lab-gaussian-sigma').value),
+            };
+        }
+        if (method === 'bilateral') {
+            return {
+                diameter: parseInt(document.getElementById('lab-bilateral-diameter').value, 10),
+                sigma_color: parseFloat(document.getElementById('lab-bilateral-color').value),
+                sigma_space: parseFloat(document.getElementById('lab-bilateral-space').value),
+            };
+        }
+        if (method === 'laplace_sharpen') {
+            return {
+                kernel_size: parseInt(document.getElementById('lab-laplace-kernel').value, 10),
+                strength: parseFloat(document.getElementById('lab-laplace-strength').value),
+            };
+        }
+        if (method === 'nlm') {
+            return {
+                h: parseFloat(document.getElementById('lab-nlm-h').value),
+                h_color: parseFloat(document.getElementById('lab-nlm-h-color').value),
+                template_window: parseInt(document.getElementById('lab-nlm-template').value, 10),
+                search_window: parseInt(document.getElementById('lab-nlm-search').value, 10),
+            };
+        }
+        if (method === 'stripe_profile') {
+            return {
+                orientation: document.getElementById('lab-stripe-orientation').value,
+                smooth_kernel: parseInt(document.getElementById('lab-stripe-smooth').value, 10),
+                strength: parseFloat(document.getElementById('lab-stripe-strength').value),
+            };
+        }
+        return {};
+    }
+
+    async function runPreprocessLab() {
+        const imagePath = labInput.value.trim();
+        if (!imagePath) {
+            showError('請輸入圖片路徑', 'lab-error-box');
+            return;
+        }
+
+        const method = document.getElementById('lab-method').value;
+        const runBtn = document.getElementById('btn-lab-run');
+        const spinnerEl = document.getElementById('lab-spinner');
+        const textEl = document.getElementById('lab-btn-text');
+        runBtn.disabled = true;
+        spinnerEl.classList.add('active');
+        textEl.textContent = '處理中...';
+        hideError('lab-error-box');
+        document.getElementById('lab-result-section').classList.add('hidden');
+
+        try {
+            const resp = await fetch('/api/debug/preprocess-lab', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    image_path: imagePath,
+                    method,
+                    params: collectLabParams(method),
+                }),
+            });
+            const data = await resp.json();
+            if (data.error) {
+                showError(data.error, 'lab-error-box');
+                return;
+            }
+            renderPreprocessLab(data);
+        } catch (err) {
+            showError('請求失敗: ' + err.message, 'lab-error-box');
+        } finally {
+            runBtn.disabled = false;
+            spinnerEl.classList.remove('active');
+            textEl.textContent = '🧪 套用處理';
+        }
+    }
+
+    function renderPreprocessLab(data) {
+        document.getElementById('lab-result-section').classList.remove('hidden');
+        const stats = data.stats || {};
+        const params = Object.entries(data.applied_params || {})
+            .map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(String(v))}`)
+            .join(', ');
+        const conversion = data.conversion && data.conversion.converted
+            ? `${escapeHtml(data.conversion.input_dtype)} → uint8`
+            : escapeHtml(data.input_dtype || 'uint8');
+
+        document.getElementById('lab-info-cards').innerHTML = `
+            <div class="summary-card">
+                <div class="label">方法</div>
+                <div class="value" style="font-size:1rem;color:var(--text);">${escapeHtml(data.method_label)}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">處理時間</div>
+                <div class="value" style="color:var(--accent);">${data.processing_time}s</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">影像</div>
+                <div class="value" style="font-size:0.95rem;color:var(--text-muted);">${data.image_size[0]}×${data.image_size[1]} / ${conversion}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">Mean Abs Diff</div>
+                <div class="value" style="color:var(--err);">${stats.mean_abs_diff ?? '-'}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">Std 變化</div>
+                <div class="value" style="color:${(stats.std_delta_pct || 0) < 0 ? 'var(--ok)' : 'var(--text)'};">${stats.std_delta_pct ?? '-'}%</div>
+            </div>
+            <div class="summary-card" style="grid-column:span 2;">
+                <div class="label">參數</div>
+                <div class="value" style="font-size:0.9rem;color:var(--text-muted);word-break:break-all;">${params || '-'}</div>
+            </div>
+        `;
+
+        const noteText = (data.notes || []).map(escapeHtml).join(' ');
+        document.getElementById('lab-output-path').innerHTML =
+            `輸出: ${escapeHtml(data.output_path)}<br>差異圖: ${escapeHtml(data.diff_path)}${noteText ? '<br>備註: ' + noteText : ''}`;
+
+        const ts = Date.now();
+        document.getElementById('lab-result-grid').innerHTML = `
+            <div class="img-card">
+                <h4>原圖</h4>
+                <img src="${data.original_url}&t=${ts}" onclick="openLightbox(this.src)">
+            </div>
+            <div class="img-card">
+                <h4>處理後</h4>
+                <img src="${data.processed_url}?t=${ts}" onclick="openLightbox(this.src)">
+            </div>
+            <div class="img-card">
+                <h4>差異圖 (AbsDiff × 4)</h4>
+                <img src="${data.diff_url}?t=${ts}" onclick="openLightbox(this.src)">
+            </div>
+        `;
+    }
+
+    function escapeHtml(value) {
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
 
     async function runInference() {
         const imagePath = input.value.trim();
@@ -1579,6 +2046,8 @@
         if (!coordPathInput.value) coordPathInput.value = input.value;
         const edgePathInput = document.getElementById('edge-image-path');
         if (edgePathInput && !edgePathInput.value) edgePathInput.value = input.value;
+        const labPathInput = document.getElementById('lab-image-path');
+        if (labPathInput && !labPathInput.value) labPathInput.value = input.value;
         const bsInput = document.getElementById('bs-image-path');
         if (bsInput && !bsInput.value) bsInput.value = input.value;
     });
