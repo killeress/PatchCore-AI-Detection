@@ -6168,14 +6168,50 @@ class CAPIInferencer:
             active_zones = [z for z in self.edge_inspector.config.exclude_zones if z.enabled]
             if not active_zones:
                 return
+
+            def _zone_contains(zone, x: int, y: int) -> bool:
+                return zone.x <= x <= zone.x + zone.w and zone.y <= y <= zone.y + zone.h
+
             for result in results:
                 for tile, _score, _anomaly_map in result.anomaly_tiles:
                     if tile.is_bright_spot_detection:
                         continue
                     px = tile.anomaly_peak_x if tile.anomaly_peak_x >= 0 else tile.center[0]
                     py = tile.anomaly_peak_y if tile.anomaly_peak_y >= 0 else tile.center[1]
+
+                    if (
+                        getattr(tile, "is_aoi_coord_tile", False)
+                        and getattr(tile, "aoi_image_x", -1) >= 0
+                        and getattr(tile, "aoi_image_y", -1) >= 0
+                    ):
+                        ax = int(tile.aoi_image_x)
+                        ay = int(tile.aoi_image_y)
+                        aoi_zone = next((z for z in active_zones if _zone_contains(z, ax, ay)), None)
+                        peak_zone = next((z for z in active_zones if _zone_contains(z, px, py)), None)
+
+                        if aoi_zone is None:
+                            if peak_zone is not None:
+                                zone_tag = f" [{tile.zone}]" if tile.zone else ""
+                                aoi_suffix = self._format_aoi_tile_log_suffix(tile)
+                                print(
+                                    f"🔴 {result.image_path.name} Tile@({tile.x},{tile.y}){zone_tag}{aoi_suffix} "
+                                    f"AOI@({ax},{ay}) 不在不檢測區，peak@({px},{py}) 落在不檢測區 "
+                                    f"({peak_zone.x},{peak_zone.y},{peak_zone.w}x{peak_zone.h})，保留 NG"
+                                )
+                            continue
+
+                        tile.is_in_exclude_zone = True
+                        zone_tag = f" [{tile.zone}]" if tile.zone else ""
+                        aoi_suffix = self._format_aoi_tile_log_suffix(tile)
+                        print(
+                            f"🚫 {result.image_path.name} Tile@({tile.x},{tile.y}){zone_tag}{aoi_suffix} "
+                            f"AOI@({ax},{ay}) 落在不檢測區 "
+                            f"({aoi_zone.x},{aoi_zone.y},{aoi_zone.w}x{aoi_zone.h})"
+                        )
+                        continue
+
                     for zone in active_zones:
-                        if zone.x <= px <= zone.x + zone.w and zone.y <= py <= zone.y + zone.h:
+                        if _zone_contains(zone, px, py):
                             tile.is_in_exclude_zone = True
                             zone_tag = f" [{tile.zone}]" if tile.zone else ""
                             aoi_suffix = self._format_aoi_tile_log_suffix(tile)
