@@ -3152,6 +3152,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if polygon is None and hasattr(self.inferencer, "_rect_polygon_from_bounds"):
                     polygon = self.inferencer._rect_polygon_from_bounds(raw_bounds)
                 if polygon is not None:
+                    shift_axes = self.inferencer._resolve_aoi_inward_shift_axes(
+                        img_cx, img_cy, raw_bounds, tile_size,
+                    )
                     crop_x1, crop_y1, _cov, _shifted = resolve_inward_polygon_tile(
                         anchor_xy=(img_cx, img_cy),
                         polygon=polygon,
@@ -3159,6 +3162,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         tile_size=tile_size,
                         initial_origin=(crop_x1, crop_y1),
                         keep_anchor_inside=True,
+                        shift_axes=shift_axes,
                     )
                     crop_x2 = min(img_w, crop_x1 + tile_size)
                     crop_y2 = min(img_h, crop_y1 + tile_size)

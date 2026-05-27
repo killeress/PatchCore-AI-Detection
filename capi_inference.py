@@ -669,6 +669,24 @@ class CAPIInferencer:
         )
 
     @staticmethod
+    def _resolve_aoi_inward_shift_axes(
+        img_x: int,
+        img_y: int,
+        bounds: Tuple[int, int, int, int],
+        tile_size: int,
+    ) -> str:
+        """Limit AOI inward ROI correction to the axis implied by the nearest edge."""
+        half = tile_size // 2
+        x1, y1, x2, y2 = (int(v) for v in bounds)
+        near_top_or_bottom = (img_y - y1 < half) or (y2 - img_y < half)
+        near_left_or_right = (img_x - x1 < half) or (x2 - img_x < half)
+        if near_top_or_bottom and not near_left_or_right:
+            return "y"
+        if near_left_or_right and not near_top_or_bottom:
+            return "x"
+        return "xy"
+
+    @staticmethod
     def _format_aoi_tile_log_suffix(tile: 'TileInfo') -> str:
         if not getattr(tile, "is_aoi_coord_tile", False):
             return ""
@@ -4196,6 +4214,9 @@ class CAPIInferencer:
                 ty2 = img_h
                 ty = max(0, ty2 - tile_size)
 
+            shift_axes = self._resolve_aoi_inward_shift_axes(
+                img_x, img_y, result.raw_bounds, tile_size,
+            )
             if not is_skip_file and polygon is not None:
                 tx, ty, _cov, _shifted = resolve_inward_polygon_tile(
                     anchor_xy=(img_x, img_y),
@@ -4204,6 +4225,7 @@ class CAPIInferencer:
                     tile_size=tile_size,
                     initial_origin=(tx, ty),
                     keep_anchor_inside=True,
+                    shift_axes=shift_axes,
                 )
 
             tx2 = min(img_w, tx + tile_size)
