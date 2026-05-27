@@ -1614,6 +1614,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         _empty_miss_cats = lambda: {c: 0 for c in CAPIDatabase.VALID_MISS_CATEGORIES}
         _empty_over_cats = lambda: {c: 0 for c in CAPIDatabase.VALID_OVER_CATEGORIES}
+        actual_ok_review_categories = {"ric_misjudge", "data_error_actually_ok"}
         total = len(records)
         if total == 0:
             return {
@@ -1627,6 +1628,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "missReviewStats": {
                     "total": 0, "reviewed": 0, "unreviewed": 0,
                     "byCategory": _empty_miss_cats(),
+                },
+                "manualTruthAdjustments": {
+                    "total": 0,
+                    "byCategory": {c: 0 for c in actual_ok_review_categories},
                 },
                 "overReviewStats": {
                     "total": 0, "reviewed": 0, "unreviewed": 0,
@@ -1643,7 +1648,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         revival = 0
         combos = {}
         daily = {}
+        manual_adjustments = 0
+        manual_adjustments_by_cat = {c: 0 for c in actual_ok_review_categories}
         miss_reviewed = 0
+        miss_total = 0
         miss_by_cat = _empty_miss_cats()
         over_reviewed = 0
         over_by_cat = _empty_over_cats()
@@ -1656,7 +1664,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         for rec in records:
             eqp = rec["result_eqp"] or "OK"
             ai = rec["result_ai"] or "OK"
-            ric = CAPIDatabase.parse_ric_judgment(rec.get("datastr", ""))
+            raw_ric = CAPIDatabase.parse_ric_judgment(rec.get("datastr", ""))
+            review_cat = rec.get("review_category")
+            manual_actual_ok = (
+                ai == "OK"
+                and raw_ric == "NG"
+                and review_cat in actual_ok_review_categories
+            )
+            ric = "OK" if manual_actual_ok else raw_ric
 
             # Build formatted output record in the same pass
             out_rec = {
@@ -1668,6 +1683,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "result_ai": ai,
                 "result_ric": rec["result_ric"],
                 "datastr": rec["datastr"] or "",
+                "actual_judgment": ric,
+                "truth_adjusted_by_review": manual_actual_ok,
                 "inference_record_id": rec.get("inference_record_id"),
                 "has_dust_filtering": bool(
                     dust_affected_ids
@@ -1707,6 +1724,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 aiNG += 1
             if ric == "NG":
                 ricNG += 1
+            if manual_actual_ok:
+                manual_adjustments += 1
+                manual_adjustments_by_cat[review_cat] += 1
 
             if eqp == ric:
                 aoiCorrect += 1
@@ -1722,13 +1742,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     cat = rec["over_review_category"]
                     if cat in over_by_cat:
                         over_by_cat[cat] += 1
-            if ai == "OK" and ric == "NG":
-                aiMiss += 1
+            if ai == "OK" and raw_ric == "NG":
+                miss_total += 1
                 if rec.get("review_category"):
                     miss_reviewed += 1
-                    cat = rec["review_category"]
-                    if cat in miss_by_cat:
-                        miss_by_cat[cat] += 1
+                    if review_cat in miss_by_cat:
+                        miss_by_cat[review_cat] += 1
+            if ai == "OK" and ric == "NG":
+                aiMiss += 1
             if eqp == "NG" and ai == "OK" and ric == "OK":
                 revival += 1
 
@@ -1765,10 +1786,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "revival": revival, "revivalRate": revivalRate,
             "combos": combos, "daily": daily,
             "missReviewStats": {
-                "total": aiMiss,
+                "total": miss_total,
                 "reviewed": miss_reviewed,
-                "unreviewed": aiMiss - miss_reviewed,
+                "unreviewed": miss_total - miss_reviewed,
                 "byCategory": miss_by_cat,
+            },
+            "manualTruthAdjustments": {
+                "total": manual_adjustments,
+                "byCategory": manual_adjustments_by_cat,
             },
             "overReviewStats": {
                 "total": aiOver,
