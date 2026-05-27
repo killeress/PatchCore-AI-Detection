@@ -176,8 +176,10 @@ class CAPIDatabase:
                 -- 索引
                 CREATE INDEX IF NOT EXISTS idx_records_glass_id ON inference_records(glass_id);
                 CREATE INDEX IF NOT EXISTS idx_records_created_at ON inference_records(created_at);
+                CREATE INDEX IF NOT EXISTS idx_records_request_time ON inference_records(request_time);
                 CREATE INDEX IF NOT EXISTS idx_records_machine_no ON inference_records(machine_no);
                 CREATE INDEX IF NOT EXISTS idx_records_ai_judgment ON inference_records(ai_judgment);
+                CREATE INDEX IF NOT EXISTS idx_records_glass_request_time ON inference_records(glass_id, request_time DESC);
                 CREATE INDEX IF NOT EXISTS idx_image_results_record_id ON image_results(record_id);
                 CREATE INDEX IF NOT EXISTS idx_tile_results_image_id ON tile_results(image_result_id);
                 CREATE INDEX IF NOT EXISTS idx_edge_defects_image_id ON edge_defect_results(image_result_id);
@@ -381,6 +383,17 @@ class CAPIDatabase:
             add_column_if_not_exists("training_jobs", "training_scope", "TEXT")
             # 新架構 (C-10) per-tile model routing 紀錄："inner" / "edge" / "bright_spot"；v1 為 ""
             add_column_if_not_exists("tile_results", "zone", "TEXT DEFAULT ''")
+
+            conn.executescript("""
+                CREATE INDEX IF NOT EXISTS idx_image_results_dust_record
+                    ON image_results(record_id) WHERE is_dust_only = 1;
+                CREATE INDEX IF NOT EXISTS idx_tile_results_dust_image
+                    ON tile_results(image_result_id) WHERE is_dust = 1;
+                CREATE INDEX IF NOT EXISTS idx_tile_results_scratch_image
+                    ON tile_results(image_result_id) WHERE scratch_filtered = 1;
+                CREATE INDEX IF NOT EXISTS idx_edge_defects_dust_image
+                    ON edge_defect_results(image_result_id) WHERE is_dust = 1;
+            """)
 
             conn.commit()
         finally:
@@ -1025,13 +1038,17 @@ class CAPIDatabase:
             params.append(f"%{ai_judgment}%")
 
         if cross_filter:
-            # 使用 DATE(request_time) 與 get_inference_stats 一致，確保數字對得上
+            def _next_date_str(date_str: str) -> str:
+                from datetime import timedelta
+                return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+
+            # 使用 request_time 與 get_inference_stats 一致，確保數字對得上
             if start_date:
-                conditions.append("DATE(request_time) >= ?")
+                conditions.append("request_time >= ?")
                 params.append(start_date)
             if end_date:
-                conditions.append("DATE(request_time) <= ?")
-                params.append(end_date)
+                conditions.append("request_time < ?")
+                params.append(_next_date_str(end_date))
         else:
             if start_date:
                 conditions.append("created_at >= ?")
@@ -1192,16 +1209,20 @@ class CAPIDatabase:
         if end_date and not _DATE_RE.match(end_date):
             raise ValueError(f"Invalid end_date format: {end_date}")
 
+        def _next_date_str(date_str: str) -> str:
+            from datetime import timedelta
+            return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+
         conn = self._get_conn()
         try:
             where_clauses = []
             params = []
             if start_date:
-                where_clauses.append("DATE(c.time_stamp) >= ?")
+                where_clauses.append("c.time_stamp >= ?")
                 params.append(start_date)
             if end_date:
-                where_clauses.append("DATE(c.time_stamp) <= ?")
-                params.append(end_date)
+                where_clauses.append("c.time_stamp < ?")
+                params.append(_next_date_str(end_date))
             where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
             rows = conn.execute(
@@ -1213,7 +1234,8 @@ class CAPIDatabase:
                            ovr.note as over_review_note, ovr.updated_at as over_review_updated_at,
                            (SELECT ir.id FROM inference_records ir
                             WHERE ir.glass_id = c.pnl_id
-                              AND DATE(ir.request_time) = DATE(c.time_stamp)
+                              AND ir.request_time >= substr(c.time_stamp, 1, 10)
+                              AND ir.request_time < date(substr(c.time_stamp, 1, 10), '+1 day')
                             ORDER BY ir.request_time DESC LIMIT 1
                            ) as inference_record_id
                     FROM client_accuracy_records c
@@ -2014,17 +2036,21 @@ class CAPIDatabase:
         if end_date and not _DATE_RE.match(end_date):
             return {"success": False, "error": f"Invalid end_date format: {end_date}"}
 
+        def _next_date_str(date_str: str) -> str:
+            from datetime import timedelta
+            return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+
         conn = self._get_conn()
         try:
             # 建立日期篩選條件
             where_clauses = []
             params = []
             if start_date:
-                where_clauses.append("DATE(request_time) >= ?")
+                where_clauses.append("request_time >= ?")
                 params.append(start_date)
             if end_date:
-                where_clauses.append("DATE(request_time) <= ?")
-                params.append(end_date)
+                where_clauses.append("request_time < ?")
+                params.append(_next_date_str(end_date))
             where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
             _aoi_ng = self._AOI_NG_COND

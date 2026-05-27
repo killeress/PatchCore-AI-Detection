@@ -422,6 +422,28 @@
         margin-top: 2px;
     }
 
+    .manual-adjust-banner {
+        background: rgba(34, 197, 94, 0.1);
+        border: 1px solid rgba(34, 197, 94, 0.28);
+        border-radius: 10px;
+        padding: 10px 16px;
+        margin-bottom: 16px;
+        font-size: 0.84rem;
+        color: #86efac;
+        line-height: 1.6;
+    }
+
+    .manual-adjust-tag {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 2px 7px;
+        border-radius: 8px;
+        background: rgba(34, 197, 94, 0.14);
+        color: #86efac;
+        font-size: 0.68rem;
+        font-weight: 700;
+    }
+
     /* ── Top-level Tab Bar ── */
     .top-tab-bar {
         display: flex;
@@ -814,6 +836,7 @@
                 但 <strong>AOI=NG 的 case 有參考價值</strong>，AOI 過檢率仍可做為參考指標。
             </div>
         </div>
+        <div class="manual-adjust-banner" id="client_manualAdjustBanner" style="display:none;"></div>
         <div class="stats-grid" id="client_statsGrid1"></div>
         <div class="stats-grid" id="client_statsGrid2"></div>
         <div class="charts-row">
@@ -822,7 +845,7 @@
                 <div class="chart-container"><canvas id="client_resultChart"></canvas></div>
             </div>
             <div class="chart-card">
-                <h3>🧩 判定組合分佈 (AOI/AI/RIC)</h3>
+                <h3>🧩 判定組合分佈 (AOI/AI/實際)</h3>
                 <div class="chart-container"><canvas id="client_comboChart"></canvas></div>
             </div>
         </div>
@@ -865,10 +888,10 @@
                             <th>AOI (RESULT_EQP)</th>
                             <th>AI (RESULT_AI)</th>
                             <th>RIC (原始)</th>
-                            <th>DATASTR 判定</th>
+                            <th>實際判定</th>
                             <th>DATASTR 內容</th>
-                            <th>AOI vs DATASTR <span style="color:#f59e0b;font-size:0.65rem;">⚠僅參考NG</span></th>
-                            <th>AI vs DATASTR</th>
+                            <th>AOI vs 實際 <span style="color:#f59e0b;font-size:0.65rem;">⚠僅參考NG</span></th>
+                            <th>AI vs 實際</th>
                         </tr>
                     </thead>
                     <tbody id="client_detailBody"></tbody>
@@ -1122,12 +1145,42 @@
             return rec.result_ai;
         }
 
+        const ACTUAL_OK_REVIEW_CATEGORIES = new Set(['ric_misjudge', 'data_error_actually_ok']);
+        const ACTUAL_OK_REVIEW_LABELS = {
+            ric_misjudge: 'RIC 誤判',
+            data_error_actually_ok: '資料有誤、實際OK',
+        };
+
+        function isTruthAdjustedByReview(rec) {
+            const rawAI = rec.result_ai || 'OK';
+            const rawRic = deriveJudgment(rec.datastr);
+            const category = rec.miss_review && rec.miss_review.category;
+            return rawAI === 'OK' && rawRic === 'NG' && ACTUAL_OK_REVIEW_CATEGORIES.has(category);
+        }
+
+        function getEffectiveRIC(rec) {
+            return isTruthAdjustedByReview(rec) ? 'OK' : deriveJudgment(rec.datastr);
+        }
+
+        function formatManualAdjustmentText(adjustments) {
+            const total = adjustments && adjustments.total ? adjustments.total : 0;
+            if (total <= 0) return '';
+            const byCategory = adjustments.byCategory || {};
+            const parts = Object.entries(ACTUAL_OK_REVIEW_LABELS)
+                .map(([key, label]) => {
+                    const count = byCategory[key] || 0;
+                    return count > 0 ? `${label} ${count} 筆` : '';
+                })
+                .filter(Boolean);
+            return parts.length ? parts.join('、') : `${total} 筆`;
+        }
+
         function applyFilter(records) {
             if (!currentFilter) return records;
             return records.filter(row => {
                 const eqp = row.result_eqp;
                 const ai = getEffectiveAI(row);
-                const ric = deriveJudgment(row.datastr);
+                const ric = getEffectiveRIC(row);
                 switch (currentFilter) {
                     case 'aoi_correct': return eqp === ric;
                     case 'ai_correct': return ai === ric;
@@ -1151,19 +1204,38 @@
             let revival = 0;
             const combos = {};
             const daily = {};
+            let manualAdjustments = 0;
+            const manualAdjustmentsByCat = { ric_misjudge: 0, data_error_actually_ok: 0 };
             let missReviewed = 0;
+            let missTotal = 0;
             const missByCat = { dust_misfilter: 0, data_error_actually_ok: 0, threshold_high: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
             let overReviewed = 0;
             const overByCat = { edge_false_positive: 0, within_spec: 0, overexposure: 0, surface_scratch: 0, surface_dirt: 0, bubble: 0, aoi_ai_false_positive: 0, dust_mask_incomplete: 0, other: 0 };
+            let scratchPanels = 0;
+            let scratchImages = 0;
+            let scratchTiles = 0;
 
             records.forEach(rec => {
                 const eqp = rec.result_eqp || 'OK';
                 const ai = getEffectiveAI(rec);
-                const ric = deriveJudgment(rec.datastr);
+                const rawRic = deriveJudgment(rec.datastr);
+                const ric = getEffectiveRIC(rec);
+                const adjusted = isTruthAdjustedByReview(rec);
+
+                if (rec.scratch_rescue) {
+                    scratchPanels++;
+                    scratchImages += rec.scratch_rescue.images || 0;
+                    scratchTiles += rec.scratch_rescue.tiles || 0;
+                }
 
                 if (eqp === 'NG') aoiNG++;
                 if (ai === 'NG') aiNG++;
                 if (ric === 'NG') ricNG++;
+                if (adjusted) {
+                    manualAdjustments++;
+                    const cat = rec.miss_review.category;
+                    if (cat in manualAdjustmentsByCat) manualAdjustmentsByCat[cat]++;
+                }
                 if (eqp === ric) aoiCorrect++;
                 if (ai === ric) aiCorrect++;
                 if (eqp === 'NG' && ric === 'OK') aoiOver++;
@@ -1175,14 +1247,15 @@
                         if (cat in overByCat) overByCat[cat]++;
                     }
                 }
-                if (ai === 'OK' && ric === 'NG') {
-                    aiMiss++;
+                if (ai === 'OK' && rawRic === 'NG') {
+                    missTotal++;
                     if (rec.miss_review && rec.miss_review.category) {
                         missReviewed++;
                         const cat = rec.miss_review.category;
                         if (cat in missByCat) missByCat[cat]++;
                     }
                 }
+                if (ai === 'OK' && ric === 'NG') aiMiss++;
                 if (eqp === 'NG' && ai === 'OK' && ric === 'OK') revival++;
 
                 const combo = `${eqp}/${ai}/${ric}`;
@@ -1215,16 +1288,25 @@
                 revival, revivalRate,
                 combos, daily,
                 missReviewStats: {
-                    total: aiMiss,
+                    total: missTotal,
                     reviewed: missReviewed,
-                    unreviewed: aiMiss - missReviewed,
+                    unreviewed: missTotal - missReviewed,
                     byCategory: missByCat,
+                },
+                manualTruthAdjustments: {
+                    total: manualAdjustments,
+                    byCategory: manualAdjustmentsByCat,
                 },
                 overReviewStats: {
                     total: aiOver,
                     reviewed: overReviewed,
                     unreviewed: aiOver - overReviewed,
                     byCategory: overByCat,
+                },
+                scratchRescueStats: {
+                    panels: scratchPanels,
+                    images: scratchImages,
+                    tiles: scratchTiles,
                 },
             };
         }
@@ -1526,7 +1608,26 @@
         }
 
         // ── Render Stats Cards ──
+        function renderManualAdjustBanner(s) {
+            const el = document.getElementById('client_manualAdjustBanner');
+            if (!el) return;
+            const adjustments = s.manualTruthAdjustments || { total: 0, byCategory: {} };
+            const total = adjustments.total || 0;
+            if (total <= 0) {
+                el.style.display = 'none';
+                el.innerHTML = '';
+                return;
+            }
+            el.style.display = 'block';
+            el.innerHTML = `<strong>人工回填修正：</strong>${total} 筆漏檢候選已改視為實際 OK（${formatManualAdjustmentText(adjustments)}）。下方統計已套用此修正。`;
+        }
+
         function renderStatsCards(s) {
+            renderManualAdjustBanner(s);
+            const manualAdjustments = s.manualTruthAdjustments || { total: 0, byCategory: {} };
+            const manualAdjustNote = manualAdjustments.total > 0
+                ? `<div class="detail" style="color:#86efac;">人工回填改判：-${manualAdjustments.total} 筆</div>`
+                : '';
             const grid1 = document.getElementById('client_statsGrid1');
             grid1.innerHTML = `
             <div class="stat-card total" data-client-filter="total" onclick="clientComp.filterByCard('total')">
@@ -1538,14 +1639,14 @@
             <div class="stat-card aoi" data-client-filter="aoi_correct" onclick="clientComp.filterByCard('aoi_correct')">
                 <div class="label">AOI 準確率</div>
                 <div class="value">${s.total > 0 ? (s.aoiCorrect / s.total * 100).toFixed(1) : 0}%</div>
-                <div class="detail">${s.aoiCorrect} / ${s.total} 筆與 DATASTR 判定一致</div>
-                <div class="filter-hint">🔍 篩選 AOI 與 DATASTR 一致</div>
+                <div class="detail">${s.aoiCorrect} / ${s.total} 筆與實際判定一致</div>
+                <div class="filter-hint">🔍 篩選 AOI 與實際一致</div>
             </div>
             <div class="stat-card ai" data-client-filter="ai_correct" onclick="clientComp.filterByCard('ai_correct')">
                 <div class="label">AI 準確率</div>
                 <div class="value">${s.total > 0 ? (s.aiCorrect / s.total * 100).toFixed(1) : 0}%</div>
-                <div class="detail">${s.aiCorrect} / ${s.total} 筆與 DATASTR 判定一致</div>
-                <div class="filter-hint">🔍 篩選 AI 與 DATASTR 一致</div>
+                <div class="detail">${s.aiCorrect} / ${s.total} 筆與實際判定一致</div>
+                <div class="filter-hint">🔍 篩選 AI 與實際一致</div>
             </div>
             <div class="stat-card match" data-client-filter="ai_ng" onclick="clientComp.filterByCard('ai_ng')">
                 <div class="label">AI 判 NG 數</div>
@@ -1561,25 +1662,26 @@
                 <div class="label">AOI 過檢率</div>
                 <div class="value">${s.aoiOverRate}%</div>
                 <div class="detail">${s.aoiOver} / ${s.total} 筆 AOI判NG中為過檢</div>
-                <div class="filter-hint">🔍 AOI=NG, RIC=OK</div>
+                <div class="filter-hint">🔍 AOI=NG, 實際=OK</div>
             </div>
             <div class="stat-card over" data-client-filter="ai_over" onclick="clientComp.filterByCard('ai_over')">
                 <div class="label">AI 過檢率</div>
                 <div class="value">${s.aiOverRate}%</div>
                 <div class="detail">${s.aiOver} / ${s.total} 筆 AI判NG中為過檢</div>
-                <div class="filter-hint">🔍 AI=NG, RIC=OK</div>
+                <div class="filter-hint">🔍 AI=NG, 實際=OK</div>
             </div>
             <div class="stat-card miss" data-client-filter="ai_miss" onclick="clientComp.filterByCard('ai_miss')">
                 <div class="label">AI 漏檢率</div>
                 <div class="value">${s.aiMissRate}%</div>
                 <div class="detail">${s.aiMiss} / ${s.total} 筆真實NG被AI漏檢</div>
-                <div class="filter-hint">🔍 AI=OK, RIC=NG</div>
+                ${manualAdjustNote}
+                <div class="filter-hint">🔍 AI=OK, 實際=NG</div>
             </div>
             <div class="stat-card revival" data-client-filter="revival" onclick="clientComp.filterByCard('revival')">
                 <div class="label">復活率</div>
                 <div class="value">${s.revivalRate}%</div>
-                <div class="detail">${s.revival} / ${s.total} 筆 AOI判NG被AI復活且RIC=OK</div>
-                <div class="filter-hint">🔍 AOI=NG, AI=OK, RIC=OK</div>
+                <div class="detail">${s.revival} / ${s.total} 筆 AOI判NG被AI復活且實際OK</div>
+                <div class="filter-hint">🔍 AOI=NG, AI=OK, 實際=OK</div>
             </div>
             `;
         }
@@ -1601,9 +1703,9 @@
             const filtered = applyFilter(rawRecords);
 
             const labels = {
-                total: '全部', aoi_correct: 'AOI 與 DATASTR 判定一致', ai_correct: 'AI 與 DATASTR 判定一致',
-                ai_ng: 'AI 判 NG', aoi_over: 'AOI 過檢 (AOI=NG 且 DATASTR=OK)',
-                ai_over: 'AI 過檢', ai_miss: 'AI 漏檢', revival: '復活 (AOI=NG, AI=OK, RIC=OK)',
+                total: '全部', aoi_correct: 'AOI 與實際判定一致', ai_correct: 'AI 與實際判定一致',
+                ai_ng: 'AI 判 NG', aoi_over: 'AOI 過檢 (AOI=NG 且實際=OK)',
+                ai_over: 'AI 過檢', ai_miss: 'AI 漏檢', revival: '復活 (AOI=NG, AI=OK, 實際=OK)',
             };
 
             const labelEl = document.getElementById('client_filterLabel');
@@ -1620,7 +1722,9 @@
             tbody.innerHTML = '';
 
             data.forEach((row, i) => {
-                const ric = deriveJudgment(row.datastr);
+                const rawRic = deriveJudgment(row.datastr);
+                const ric = getEffectiveRIC(row);
+                const truthAdjusted = isTruthAdjustedByReview(row);
                 const effectiveAI = getEffectiveAI(row);
                 const aoiMatch = row.result_eqp === ric;
                 const aiMatch = effectiveAI === ric;
@@ -1641,9 +1745,10 @@
                         ? '<span class="badge badge-ok">OK</span>'
                         : '<span class="badge badge-ng">NG</span>';
 
-                const actualBadge = ric === 'OK'
+                const actualBadge = (ric === 'OK'
                     ? '<span class="badge badge-ok">OK</span>'
-                    : '<span class="badge badge-ng">NG</span>';
+                    : '<span class="badge badge-ng">NG</span>')
+                    + (truthAdjusted ? ` <span class="manual-adjust-tag" title="原 DATASTR=${rawRic}，漏檢 Review 回填為${ACTUAL_OK_REVIEW_LABELS[row.miss_review.category]}">Review修正</span>` : '');
 
                 const aoiComp = aoiMatch
                     ? '<span class="badge badge-match">✓ 一致</span>'
@@ -1687,7 +1792,7 @@
                 type: 'bar',
                 plugins: [window.ChartDataLabels],
                 data: {
-                    labels: ['AOI (RESULT_EQP)', 'AI', 'RIC'],
+                    labels: ['AOI (RESULT_EQP)', 'AI', '實際'],
                     datasets: [
                         { label: 'OK', data: [eqpOK, aiOK, ricOK], backgroundColor: 'rgba(34,197,94,0.7)', borderRadius: 4 },
                         { label: 'NG', data: [eqpNG, aiNG, ricNG], backgroundColor: 'rgba(239,68,68,0.7)', borderRadius: 4 },
@@ -1723,7 +1828,7 @@
                 type: 'bar',
                 plugins: [window.ChartDataLabels],
                 data: {
-                    labels: comboLabels.map(k => `AOI/AI/RIC: ${k}`),
+                    labels: comboLabels.map(k => `AOI/AI/實際: ${k}`),
                     datasets: [{ label: '筆數', data: comboValues, backgroundColor: comboColors, borderRadius: 4 }]
                 },
                 options: {
@@ -1899,7 +2004,7 @@
             const rows = tbody.querySelectorAll('tr');
             if (rows.length === 0) { alert('無資料可導出'); return; }
 
-            const headers = ['#', '檢測時間', 'Panel ID', '機台', 'RESULT_EQP', 'RESULT_AI', 'RIC_RAW', 'DATASTR_JUDGE', 'DATASTR_RAW', 'AOI vs DATASTR', 'AI vs DATASTR'];
+            const headers = ['#', '檢測時間', 'Panel ID', '機台', 'RESULT_EQP', 'RESULT_AI', 'RIC_RAW', 'ACTUAL_JUDGE', 'DATASTR_RAW', 'AOI vs ACTUAL', 'AI vs ACTUAL'];
             const modeNote = ignoreOmit ? '# 模式：忽略 OMIT 灰塵過濾 (純 PatchCore)\n' : '';
             let csv = '\ufeff' + modeNote + headers.join(',') + '\n';
 
@@ -1954,9 +2059,9 @@
             const completionRate = mrs.total > 0 ? (mrs.reviewed / mrs.total * 100).toFixed(1) : 0;
             grid.innerHTML = `
             <div class="stat-card miss">
-                <div class="label">漏檢總數</div>
+                <div class="label">漏檢候選總數</div>
                 <div class="value">${mrs.total}</div>
-                <div class="detail">AI=OK, RIC=NG</div>
+                <div class="detail">原始 AI=OK, RIC=NG</div>
             </div>
             <div class="stat-card ai">
                 <div class="label">已 Review</div>
@@ -2099,6 +2204,16 @@
             actionCell.innerHTML = `<button class="review-btn-save" onclick="clientComp._saveReview(${recordId})">儲存</button>`;
         }
 
+        function refreshReportFromRawRecords() {
+            const s = recomputeSummary(rawRecords);
+            currentSummary = s;
+            renderStatsCards(s);
+            renderCharts(s);
+            renderDetails(applyFilter(rawRecords));
+            renderReviewTab(s, rawRecords);
+            renderOverReviewTab(s, rawRecords);
+        }
+
         function _saveReview(recordId) {
             const category = document.getElementById(`review_cat_${recordId}`).value;
             if (!category) { alert('請選擇分類'); return; }
@@ -2121,7 +2236,7 @@
                     const rec = rawRecords.find(r => r.id === recordId);
                     if (rec) rec.miss_review = { id: data.id, category, note, updated_at: new Date().toISOString() };
                     // Re-render stats (lightweight, no full reload)
-                    _updateReviewStats();
+                    refreshReportFromRawRecords();
                 } else {
                     alert('❌ ' + (data.error || '儲存失敗'));
                     if (btn) { btn.disabled = false; btn.textContent = '儲存'; }
@@ -2150,7 +2265,7 @@
                     actionCell.innerHTML = `<button class="review-btn-save" onclick="clientComp._saveReview(${recordId})">儲存</button>`;
                     const rec = rawRecords.find(r => r.id === recordId);
                     if (rec) rec.miss_review = null;
-                    _updateReviewStats();
+                    refreshReportFromRawRecords();
                 } else {
                     alert('❌ ' + (data.error || '刪除失敗'));
                 }
@@ -2159,24 +2274,7 @@
         }
 
         function _updateReviewStats() {
-            // Recompute missReviewStats from local rawRecords
-            const missRecords = rawRecords.filter(r => getEffectiveAI(r) === 'OK' && deriveJudgment(r.datastr) === 'NG');
-            const total = missRecords.length;
-            let reviewed = 0;
-            const byCategory = { dust_misfilter: 0, data_error_actually_ok: 0, threshold_high: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
-
-            missRecords.forEach(r => {
-                if (r.miss_review && r.miss_review.category) {
-                    reviewed++;
-                    const cat = r.miss_review.category;
-                    if (cat in byCategory) byCategory[cat]++;
-                }
-            });
-
-            const mrs = { total, reviewed, unreviewed: total - reviewed, byCategory };
-            renderReviewStats(mrs);
-            renderReviewPieChart(mrs);
-            renderReviewTable(rawRecords);
+            refreshReportFromRawRecords();
         }
 
         // ── Over Review Tab ──
@@ -2225,7 +2323,7 @@
             <div class="stat-card over">
                 <div class="label">過檢總數</div>
                 <div class="value">${ors.total}</div>
-                <div class="detail">AI=NG, RIC=OK</div>
+                <div class="detail">AI=NG, 實際=OK</div>
             </div>
             <div class="stat-card ai">
                 <div class="label">已 Review</div>
@@ -2343,7 +2441,7 @@
         }
 
         function renderOverReviewTable(records) {
-            const overRecords = records.filter(r => getEffectiveAI(r) === 'NG' && deriveJudgment(r.datastr) === 'OK');
+            const overRecords = records.filter(r => getEffectiveAI(r) === 'NG' && getEffectiveRIC(r) === 'OK');
             const pending = overRecords.filter(r => !r.over_review || !r.over_review.category);
             const done = overRecords.filter(r => r.over_review && r.over_review.category);
 
@@ -2433,7 +2531,7 @@
                     actionCell.innerHTML = `<span class="review-saved">已儲存 ✓</span><button class="review-btn-delete" onclick="clientComp._deleteOverReview(${recordId})">刪除</button>`;
                     const rec = rawRecords.find(r => r.id === recordId);
                     if (rec) rec.over_review = { id: data.id, category, note, updated_at: new Date().toISOString() };
-                    _updateOverReviewStats();
+                    refreshReportFromRawRecords();
                 } else {
                     alert('❌ ' + (data.error || '儲存失敗'));
                     if (btn) { btn.disabled = false; btn.textContent = '儲存'; }
@@ -2462,7 +2560,7 @@
                     actionCell.innerHTML = `<button class="review-btn-save" onclick="clientComp._saveOverReview(${recordId})">儲存</button>`;
                     const rec = rawRecords.find(r => r.id === recordId);
                     if (rec) rec.over_review = null;
-                    _updateOverReviewStats();
+                    refreshReportFromRawRecords();
                 } else {
                     alert('❌ ' + (data.error || '刪除失敗'));
                 }
@@ -2471,24 +2569,7 @@
         }
 
         function _updateOverReviewStats() {
-            const overRecords = rawRecords.filter(r => getEffectiveAI(r) === 'NG' && deriveJudgment(r.datastr) === 'OK');
-            const total = overRecords.length;
-            let reviewed = 0;
-            const byCategory = { edge_false_positive: 0, within_spec: 0, overexposure: 0, surface_scratch: 0, surface_dirt: 0, bubble: 0, aoi_ai_false_positive: 0, dust_mask_incomplete: 0, other: 0 };
-
-            overRecords.forEach(r => {
-                if (r.over_review && r.over_review.category) {
-                    reviewed++;
-                    const cat = r.over_review.category;
-                    if (cat in byCategory) byCategory[cat]++;
-                }
-            });
-
-            const ors = { total, reviewed, unreviewed: total - reviewed, byCategory };
-            renderOverReviewStats(ors);
-            renderOverReviewPieChart(ors);
-            renderOverReviewReviewedPieChart(ors);
-            renderOverReviewTable(rawRecords);
+            refreshReportFromRawRecords();
         }
 
         // ── Init ──
