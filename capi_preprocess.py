@@ -340,6 +340,7 @@ def resolve_inward_polygon_tile(
     initial_origin: Optional[Tuple[int, int]] = None,
     target_coverage: float = 0.999,
     keep_anchor_inside: bool = False,
+    shift_axes: str = "xy",
 ) -> Tuple[int, int, float, bool]:
     """Resolve a tile origin that stays inside the product polygon when possible.
 
@@ -351,8 +352,17 @@ def resolve_inward_polygon_tile(
     When ``keep_anchor_inside`` is True, movement is constrained so the AOI
     anchor remains inside the tile whenever image bounds make that possible.
 
+    ``shift_axes`` can be "xy", "x", or "y". AOI single-edge samples use this
+    to avoid correcting the unrelated axis when only one panel edge is close.
+
     Returns: ``(tx, ty, coverage, shifted)``.
     """
+    allowed_axes = set(shift_axes or "xy")
+    if not allowed_axes or allowed_axes - {"x", "y"}:
+        raise ValueError("shift_axes must be one of 'xy', 'x', or 'y'")
+    allow_x = "x" in allowed_axes
+    allow_y = "y" in allowed_axes
+
     img_h, img_w = image_shape[:2]
     half = tile_size // 2
     if initial_origin is None:
@@ -412,6 +422,12 @@ def resolve_inward_polygon_tile(
             dx = 1 if delta[0] > 0 else -1
         if dy == 0 and abs(delta[1]) > 1e-6:
             dy = 1 if delta[1] > 0 else -1
+        if not allow_x:
+            dx = 0
+        if not allow_y:
+            dy = 0
+        if dx == 0 and dy == 0:
+            break
 
         if keep_anchor_inside:
             ntx, nty = _clamp_tile_origin_keep_anchor(

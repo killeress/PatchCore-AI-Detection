@@ -104,6 +104,59 @@ def test_v2_aoi_coord_tile_uses_inward_polygon_roi():
     assert tile.aoi_tile_shift_dx > 0
 
 
+def test_v2_aoi_top_edge_locks_inward_shift_to_y_axis():
+    cfg = CAPIConfig()
+    cfg.is_new_architecture = True
+    cfg.tile_size = 512
+    cfg.enable_panel_polygon = True
+
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+
+    image = np.full((2600, 5000), 180, dtype=np.uint8)
+    polygon = np.array(
+        [[500, 450], [4500, 350], [4500, 2300], [500, 2300]],
+        dtype=np.float32,
+    )
+    result = ImageResult(
+        image_path=Path("W0F00000_test.png"),
+        image_size=(5000, 2600),
+        otsu_bounds=(500, 300, 4500, 2300),
+        exclusion_regions=[],
+        tiles=[],
+        excluded_tile_count=0,
+        processed_tile_count=0,
+        processing_time=0.0,
+        raw_bounds=(500, 300, 4500, 2300),
+        panel_polygon=polygon,
+    )
+
+    created = inferencer._create_aoi_centered_tiles_v2(
+        image=image,
+        result=result,
+        defects=[
+            AOIReportDefect(
+                defect_code="PCDK2",
+                product_x=3000,
+                product_y=100,
+                image_prefix="W0F00000",
+            )
+        ],
+        product_resolution=(4000, 2000),
+        pre_cfg=PreprocessConfig(tile_size=512),
+    )
+
+    assert created == 1
+    tile = result.tiles[0]
+    assert tile.zone == "edge"
+    assert tile.aoi_image_x == 3500
+    assert tile.aoi_image_y == 400
+    assert tile.aoi_tile_shift_dx == 0
+    assert tile.aoi_tile_shift_dy > 0
+    assert tile.x == tile.aoi_image_x - cfg.tile_size // 2
+    assert tile.y <= tile.aoi_image_y <= tile.y + tile.height - 1
+
+
 def test_v2_aoi_coord_tile_keeps_anchor_inside_when_inward_conflicts():
     cfg = CAPIConfig()
     cfg.is_new_architecture = True
