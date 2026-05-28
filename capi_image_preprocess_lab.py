@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+import json
+import time
 from typing import Any, Dict, List, Tuple
 
 import cv2
@@ -105,8 +108,222 @@ METHOD_SPECS: List[Dict[str, Any]] = [
 ]
 
 
+PARAM_SPECS: Dict[str, List[Dict[str, Any]]] = {
+    "median": [
+        {"key": "kernel_size", "type": "int", "default": 5, "min": 3, "max": 31, "step": 2},
+    ],
+    "mean": [
+        {"key": "kernel_size", "type": "int", "default": 5, "min": 3, "max": 99, "step": 2},
+    ],
+    "gaussian": [
+        {"key": "kernel_size", "type": "int", "default": 5, "min": 3, "max": 99, "step": 2},
+        {"key": "sigma", "type": "float", "default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1},
+    ],
+    "bilateral": [
+        {"key": "diameter", "type": "int", "default": 9, "min": 1, "max": 31, "step": 1},
+        {"key": "sigma_color", "type": "float", "default": 35.0, "min": 1.0, "max": 200.0, "step": 1.0},
+        {"key": "sigma_space", "type": "float", "default": 35.0, "min": 1.0, "max": 200.0, "step": 1.0},
+    ],
+    "laplace_sharpen": [
+        {"key": "kernel_size", "type": "int", "default": 3, "min": 1, "max": 31, "step": 2},
+        {"key": "strength", "type": "float", "default": 0.5, "min": 0.0, "max": 3.0, "step": 0.1},
+    ],
+    "nlm": [
+        {"key": "h", "type": "float", "default": 7.0, "min": 1.0, "max": 50.0, "step": 0.5},
+        {"key": "h_color", "type": "float", "default": 7.0, "min": 1.0, "max": 50.0, "step": 0.5},
+        {"key": "template_window", "type": "int", "default": 7, "min": 3, "max": 21, "step": 2},
+        {"key": "search_window", "type": "int", "default": 21, "min": 7, "max": 41, "step": 2},
+    ],
+    "stripe_profile": [
+        {
+            "key": "orientation", "type": "select", "default": "vertical",
+            "choices": [
+                {"value": "vertical", "label": "垂直條紋"},
+                {"value": "horizontal", "label": "水平條紋"},
+            ],
+        },
+        {"key": "smooth_kernel", "type": "int", "default": 61, "min": 7, "max": 501, "step": 2},
+        {"key": "strength", "type": "float", "default": 1.0, "min": 0.0, "max": 1.5, "step": 0.05},
+    ],
+}
+
+DEFAULT_PREPROCESS_PIPELINE: List[Dict[str, Any]] = [
+    {
+        "method": "bilateral",
+        "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0},
+    },
+    {
+        "method": "gaussian",
+        "params": {"kernel_size": 5, "sigma": 1.0},
+    },
+    {
+        "method": "laplace_sharpen",
+        "params": {"kernel_size": 3, "strength": 0.5},
+    },
+]
+
+
 def get_method_specs() -> List[Dict[str, Any]]:
-    return [dict(spec) for spec in METHOD_SPECS]
+    specs = deepcopy(METHOD_SPECS)
+    for spec in specs:
+        param_meta = PARAM_SPECS.get(spec["id"], [])
+        for idx, meta in enumerate(param_meta):
+            if idx < len(spec.get("params", [])):
+                spec["params"][idx].update(meta)
+    return specs
+
+
+def get_default_pipeline() -> List[Dict[str, Any]]:
+    return deepcopy(DEFAULT_PREPROCESS_PIPELINE)
+
+
+def sanitize_preprocess_params(method: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Validate one method's params and return the clamped params actually used."""
+    params = params or {}
+    method = str(method or "").strip().lower()
+    if method == "median":
+        return {"kernel_size": _odd_int(params.get("kernel_size"), 3, 31, 5)}
+    if method == "mean":
+        return {"kernel_size": _odd_int(params.get("kernel_size"), 3, 99, 5)}
+    if method == "gaussian":
+        return {
+            "kernel_size": _odd_int(params.get("kernel_size"), 3, 99, 5),
+            "sigma": _float_param(params.get("sigma"), 0.0, 20.0, 1.0),
+        }
+    if method == "bilateral":
+        return {
+            "diameter": _int_param(params.get("diameter"), 1, 31, 9),
+            "sigma_color": _float_param(params.get("sigma_color"), 1.0, 200.0, 35.0),
+            "sigma_space": _float_param(params.get("sigma_space"), 1.0, 200.0, 35.0),
+        }
+    if method == "laplace_sharpen":
+        return {
+            "kernel_size": _odd_int(params.get("kernel_size"), 1, 31, 3),
+            "strength": _float_param(params.get("strength"), 0.0, 3.0, 0.5),
+        }
+    if method == "nlm":
+        return {
+            "h": _float_param(params.get("h"), 1.0, 50.0, 7.0),
+            "h_color": _float_param(params.get("h_color"), 1.0, 50.0, 7.0),
+            "template_window": _odd_int(params.get("template_window"), 3, 21, 7),
+            "search_window": _odd_int(params.get("search_window"), 7, 41, 21),
+        }
+    if method == "stripe_profile":
+        orientation = str(params.get("orientation") or "vertical").strip().lower()
+        if orientation not in ("vertical", "horizontal"):
+            orientation = "vertical"
+        return {
+            "orientation": orientation,
+            "smooth_kernel": _odd_int(params.get("smooth_kernel"), 7, 501, 61),
+            "strength": _float_param(params.get("strength"), 0.0, 1.5, 1.0),
+        }
+    raise ValueError(f"unsupported preprocess method: {method}")
+
+
+def normalize_preprocess_pipeline(pipeline: Any) -> List[Dict[str, Any]]:
+    """Normalize a frontend/YAML pipeline into [{method, params}, ...]."""
+    if pipeline is None:
+        return []
+    if isinstance(pipeline, dict):
+        if pipeline.get("enabled") is False:
+            return []
+        pipeline = pipeline.get("steps", [])
+    if not isinstance(pipeline, list):
+        raise ValueError("image_preprocess_pipeline must be a list")
+
+    normalized: List[Dict[str, Any]] = []
+    for raw_step in pipeline:
+        if not isinstance(raw_step, dict):
+            raise ValueError("each preprocess step must be an object")
+        if raw_step.get("enabled") is False:
+            continue
+        method = str(raw_step.get("method", "")).strip().lower()
+        if not method:
+            continue
+        params = raw_step.get("params") or {}
+        if not isinstance(params, dict):
+            raise ValueError(f"params for preprocess method {method} must be an object")
+        normalized.append({
+            "method": method,
+            "params": sanitize_preprocess_params(method, params),
+        })
+    return normalized
+
+
+def apply_preprocess_pipeline(image: np.ndarray, pipeline: Any) -> Dict[str, Any]:
+    """Apply a sequence of preprocessing steps to an image."""
+    normalized = normalize_preprocess_pipeline(pipeline)
+    processed = image
+    step_results: List[Dict[str, Any]] = []
+    for idx, step in enumerate(normalized, 1):
+        t0 = time.perf_counter()
+        result = apply_preprocess_method(processed, step["method"], step["params"])
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        processed = result["image"]
+        step_results.append({
+            "index": idx,
+            "method": result["method"],
+            "method_label": result["method_label"],
+            "applied_params": result["applied_params"],
+            "elapsed_ms": elapsed_ms,
+            "stats": result["stats"],
+        })
+    return {
+        "image": processed,
+        "pipeline": normalized,
+        "steps": step_results,
+        "total_elapsed_ms": sum(float(s.get("elapsed_ms") or 0.0) for s in step_results),
+    }
+
+
+def summarize_preprocess_timings(step_groups: Any) -> Dict[str, Any]:
+    """Aggregate preprocessing step timings across images/ROI preprocessing runs."""
+    buckets: Dict[Tuple[int, str, str], Dict[str, Any]] = {}
+    for steps in step_groups or []:
+        if not steps:
+            continue
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            method = str(step.get("method") or "")
+            if not method:
+                continue
+            params = step.get("applied_params") or step.get("params") or {}
+            try:
+                params_key = json.dumps(params, ensure_ascii=False, sort_keys=True)
+            except TypeError:
+                params_key = str(params)
+            key = (int(step.get("index") or 0), method, params_key)
+            bucket = buckets.setdefault(key, {
+                "index": int(step.get("index") or 0),
+                "method": method,
+                "method_label": step.get("method_label") or _method_label(method),
+                "applied_params": params,
+                "calls": 0,
+                "elapsed_ms_total": 0.0,
+            })
+            bucket["calls"] += 1
+            bucket["elapsed_ms_total"] += float(step.get("elapsed_ms") or 0.0)
+
+    steps = sorted(buckets.values(), key=lambda s: (s["index"], s["method"]))
+    for step in steps:
+        calls = max(1, int(step["calls"]))
+        step["elapsed_ms_avg"] = step["elapsed_ms_total"] / calls
+    return {
+        "steps": steps,
+        "total_elapsed_ms": sum(float(s["elapsed_ms_total"]) for s in steps),
+    }
+
+
+def describe_preprocess_pipeline(pipeline: Any) -> str:
+    normalized = normalize_preprocess_pipeline(pipeline)
+    if not normalized:
+        return "disabled"
+    parts = []
+    for idx, step in enumerate(normalized, 1):
+        params = ", ".join(f"{k}={v}" for k, v in step["params"].items())
+        parts.append(f"{idx}.{_method_label(step['method'])}({params})")
+    return " -> ".join(parts)
 
 
 def apply_preprocess_method(
@@ -128,48 +345,39 @@ def apply_preprocess_method(
         alpha = None
 
     method = str(method or "").strip().lower()
-    applied_params: Dict[str, Any] = {}
+    applied_params = sanitize_preprocess_params(method, params)
     notes: List[str] = []
 
     if method == "median":
-        ksize = _odd_int(params.get("kernel_size"), 3, 31, 5)
+        ksize = applied_params["kernel_size"]
         processed = cv2.medianBlur(work, ksize)
-        applied_params["kernel_size"] = ksize
         notes.append("中值濾波適合抑制孤立脈衝/顆粒噪點。")
     elif method == "mean":
-        ksize = _odd_int(params.get("kernel_size"), 3, 99, 5)
+        ksize = applied_params["kernel_size"]
         processed = cv2.blur(work, (ksize, ksize))
-        applied_params["kernel_size"] = ksize
         notes.append("空間鄰域平均會降低隨機雜訊，也會同步降低細節對比。")
     elif method == "gaussian":
-        ksize = _odd_int(params.get("kernel_size"), 3, 99, 5)
-        sigma = _float_param(params.get("sigma"), 0.0, 20.0, 1.0)
+        ksize = applied_params["kernel_size"]
+        sigma = applied_params["sigma"]
         processed = cv2.GaussianBlur(work, (ksize, ksize), sigmaX=sigma)
-        applied_params.update({"kernel_size": ksize, "sigma": sigma})
         notes.append("高斯平滑適合近似高斯分布的 sensor/光電轉換雜訊。")
     elif method == "bilateral":
-        diameter = _int_param(params.get("diameter"), 1, 31, 9)
-        sigma_color = _float_param(params.get("sigma_color"), 1.0, 200.0, 35.0)
-        sigma_space = _float_param(params.get("sigma_space"), 1.0, 200.0, 35.0)
+        diameter = applied_params["diameter"]
+        sigma_color = applied_params["sigma_color"]
+        sigma_space = applied_params["sigma_space"]
         processed = cv2.bilateralFilter(work, diameter, sigma_color, sigma_space)
-        applied_params.update({
-            "diameter": diameter,
-            "sigma_color": sigma_color,
-            "sigma_space": sigma_space,
-        })
         notes.append("雙邊濾波會依亮度差異降低跨邊界平均，通常比均值/高斯更保邊。")
     elif method == "laplace_sharpen":
-        ksize = _odd_int(params.get("kernel_size"), 1, 31, 3)
-        strength = _float_param(params.get("strength"), 0.0, 3.0, 0.5)
+        ksize = applied_params["kernel_size"]
+        strength = applied_params["strength"]
         laplace = cv2.Laplacian(work.astype(np.float32), cv2.CV_32F, ksize=ksize)
         processed = np.clip(work.astype(np.float32) - strength * laplace, 0, 255).astype(np.uint8)
-        applied_params.update({"kernel_size": ksize, "strength": strength})
         notes.append("Laplace 銳化會強化邊緣，也會放大噪點；建議放在去噪後並使用低 strength。")
     elif method == "nlm":
-        h = _float_param(params.get("h"), 1.0, 50.0, 7.0)
-        h_color = _float_param(params.get("h_color"), 1.0, 50.0, 7.0)
-        template_window = _odd_int(params.get("template_window"), 3, 21, 7)
-        search_window = _odd_int(params.get("search_window"), 7, 41, 21)
+        h = applied_params["h"]
+        h_color = applied_params["h_color"]
+        template_window = applied_params["template_window"]
+        search_window = applied_params["search_window"]
         if work.ndim == 2:
             processed = cv2.fastNlMeansDenoising(
                 work,
@@ -187,25 +395,12 @@ def apply_preprocess_method(
                 templateWindowSize=template_window,
                 searchWindowSize=search_window,
             )
-        applied_params.update({
-            "h": h,
-            "h_color": h_color,
-            "template_window": template_window,
-            "search_window": search_window,
-        })
         notes.append("NLM 的 h 越大去噪越強，但也越可能移除低對比細節。")
     elif method == "stripe_profile":
-        orientation = str(params.get("orientation") or "vertical").strip().lower()
-        if orientation not in ("vertical", "horizontal"):
-            orientation = "vertical"
-        smooth_kernel = _odd_int(params.get("smooth_kernel"), 7, 501, 61)
-        strength = _float_param(params.get("strength"), 0.0, 1.5, 1.0)
+        orientation = applied_params["orientation"]
+        smooth_kernel = applied_params["smooth_kernel"]
+        strength = applied_params["strength"]
         processed = _stripe_profile_correction(work, orientation, smooth_kernel, strength)
-        applied_params.update({
-            "orientation": orientation,
-            "smooth_kernel": smooth_kernel,
-            "strength": strength,
-        })
         notes.append("條紋校正會扣除整行/整列亮度偏移，先用低 strength 確認 defect 不被削弱。")
     else:
         raise ValueError(f"unsupported preprocess method: {method}")

@@ -100,6 +100,7 @@ class CAPIConfig:
 
     # 面板 4 角 polygon 偵測（新增）
     enable_panel_polygon: bool = True  # 啟用後在 tile.mask 上套用 polygon 做精準裁切
+    image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
 
     # 排除區域
     exclusion_zones: List[ExclusionZone] = field(default_factory=list)
@@ -250,6 +251,7 @@ class CAPIConfig:
         """從 dict 建立 CAPIConfig（供 round-trip / 測試使用）"""
         if data is None:
             data = {}
+        from capi_image_preprocess_lab import normalize_preprocess_pipeline
 
         # 解析排除區域
         exclusion_zones = []
@@ -278,6 +280,9 @@ class CAPIConfig:
             otsu_offset=data.get("otsu_offset", 5),
             otsu_bottom_crop=data.get("otsu_bottom_crop", 1000),
             enable_panel_polygon=data.get("enable_panel_polygon", True),
+            image_preprocess_pipeline=normalize_preprocess_pipeline(
+                data.get("image_preprocess_pipeline", [])
+            ),
             exclusion_zones=exclusion_zones,
             tile_size=data.get("tile_size", 512),
             tile_stride=data.get("tile_stride", 512),
@@ -360,6 +365,7 @@ class CAPIConfig:
             "otsu_offset": self.otsu_offset,
             "otsu_bottom_crop": self.otsu_bottom_crop,
             "enable_panel_polygon": self.enable_panel_polygon,
+            "image_preprocess_pipeline": self.image_preprocess_pipeline,
             "exclusion_zones": [zone.to_dict() for zone in self.exclusion_zones],
             "tile_size": self.tile_size,
             "tile_stride": self.tile_stride,
@@ -433,6 +439,7 @@ class CAPIConfig:
             "otsu_offset": self.otsu_offset,
             "otsu_bottom_crop": self.otsu_bottom_crop,
             "enable_panel_polygon": self.enable_panel_polygon,
+            "image_preprocess_pipeline": self.image_preprocess_pipeline,
             "exclusion_zones": [zone.to_dict() for zone in self.exclusion_zones],
             "tile_size": self.tile_size,
             "tile_stride": self.tile_stride,

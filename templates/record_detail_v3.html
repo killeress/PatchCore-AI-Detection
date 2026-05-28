@@ -455,6 +455,39 @@
                                 </td>
                             </tr>
                             <tr>
+                                <td class="label">影像前處理</td>
+                                <td class="value" style="text-align: left;">
+                                    {% if detail.image_preprocess_pipeline_recorded %}
+                                        {% if detail.image_preprocess_pipeline_steps %}
+                                        <div style="display:flex;flex-direction:column;gap:6px;">
+                                            <div style="color:#64748B;font-size:12px;">
+                                                本次推論使用 {{ detail.image_preprocess_pipeline_steps|length }} 個前處理步驟
+                                                {% if detail.image_preprocess_total_seconds_text %}
+                                                ｜前處理總耗時 {{ detail.image_preprocess_total_seconds_text }}
+                                                {% endif %}
+                                            </div>
+                                            {% for step in detail.image_preprocess_pipeline_steps %}
+                                            <div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;">
+                                                <span style="display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;border-radius:6px;background:#DBEAFE;color:#1D4ED8;font-family:'Fira Code',monospace;font-size:11px;font-weight:700;">{{ step.index }}</span>
+                                                <span style="font-weight:600;color:#1E293B;">{{ step.method_label }}</span>
+                                                {% if step.params_text %}
+                                                <code style="font-size:11px;color:#475569;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px;padding:3px 6px;white-space:normal;word-break:break-all;">{{ step.params_text }}</code>
+                                                {% endif %}
+                                                {% if step.timing_text %}
+                                                <span style="font-size:11px;color:#047857;background:#ECFDF5;border:1px solid #A7F3D0;border-radius:6px;padding:3px 6px;">{{ step.timing_text }}</span>
+                                                {% endif %}
+                                            </div>
+                                            {% endfor %}
+                                        </div>
+                                        {% else %}
+                                        <span style="color:#64748B;">未啟用</span>
+                                        {% endif %}
+                                    {% else %}
+                                    <span style="color:#64748B;">舊紀錄未記錄</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            <tr>
                                 <td class="label">圖片總數</td>
                                 <td class="value">{{ detail.total_images }}</td>
                             </tr>

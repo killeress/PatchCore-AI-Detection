@@ -66,6 +66,7 @@ def test_tile_header_prefers_two_stage_reason_over_region_text(tmp_path, monkeyp
     all_text = " ".join(captured)
     assert "TWO_STAGE -> DUST" in all_text
     assert "RegionCOV" not in all_text
+    assert "Preprocessed" in all_text
 
 
 def test_below_threshold_aoi_tile_header_marks_dust_result_as_diagnostic(tmp_path, monkeypatch):

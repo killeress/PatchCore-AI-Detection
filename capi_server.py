@@ -1665,14 +1665,15 @@ class CAPIServer:
         try:
             # 儲存熱力圖
             heatmap_info = {}
+            record_inferencer = None
             if results:
                 try:
                     # 使用與推論時相同的 inferencer（per-machine dispatcher）
-                    heatmap_inferencer = self._get_or_create_inferencer(parsed.get("model_id", ""))
+                    record_inferencer = self._get_or_create_inferencer(parsed.get("model_id", ""))
                     heatmap_info = self.heatmap_manager.save_panel_heatmaps(
                         glass_id=parsed["glass_id"],
                         results=results,
-                        inferencer=heatmap_inferencer,
+                        inferencer=record_inferencer,
                         save_overview=self.save_overview,
                         save_tile_detail=self.save_tile_detail,
                         omit_image=omit_image_raw,
@@ -1696,6 +1697,15 @@ class CAPIServer:
                 error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
 
             client_bomb_info_str = json.dumps(parsed["bomb_info"], ensure_ascii=False) if parsed.get("bomb_info") else ""
+            preprocess_pipeline = getattr(
+                getattr(record_inferencer, "config", None),
+                "image_preprocess_pipeline",
+                [],
+            )
+            from capi_image_preprocess_lab import summarize_preprocess_timings
+            preprocess_timing = summarize_preprocess_timings(
+                getattr(r, "preprocess_steps", []) for r in results
+            )
 
             # 序列化 AOI 機台檢測座標 (TXT 報告解析結果)
             aoi_machine_coords_str = ""
@@ -1730,6 +1740,8 @@ class CAPIServer:
                 inference_log=inference_log,
                 omit_overexposed=int(omit_overexposed),
                 omit_overexposure_info=omit_overexposure_info,
+                image_preprocess_pipeline=preprocess_pipeline,
+                image_preprocess_timing=preprocess_timing,
             )
 
             dup_tag = " [DUPLICATE]" if is_duplicate else ""

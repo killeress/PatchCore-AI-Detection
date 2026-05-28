@@ -524,10 +524,10 @@ class HeatmapManager:
         dust_high_cov_threshold: Optional[float] = None,
     ) -> str:
         """
-        儲存單一 tile 的組合圖 (Original | Heatmap | OMIT Crop | Dust Mask)
+        儲存單一 tile 的組合圖 (Original | Preprocessed | Heatmap | OMIT Crop | Dust Mask)
 
         完全參照 capi_missed_detection_analyzer.py 的四面板格式。
-        如果沒有 OMIT/Dust 資料，則退化為 2-panel (Original | Heatmap)。
+        如果沒有 OMIT/Dust 資料，則退化為 3-panel (Original | Preprocessed | Heatmap)。
 
         Args:
             tile_info: TileInfo 物件 (可選)，含 omit_crop_image, dust_mask 等
@@ -546,13 +546,20 @@ class HeatmapManager:
             except (TypeError, ValueError):
                 pass
 
-        # --- Panel 1: Original Tile ---
-        orig = tile_image.copy()
-        if len(orig.shape) == 2:
-            orig = cv2.cvtColor(orig, cv2.COLOR_GRAY2BGR)
-        elif len(orig.shape) == 3 and orig.shape[2] == 1:
-            orig = cv2.cvtColor(orig, cv2.COLOR_GRAY2BGR)
-        orig = cv2.resize(orig, (tile_size, tile_size))
+        def _to_bgr_panel(img: np.ndarray) -> np.ndarray:
+            panel = img.copy()
+            if len(panel.shape) == 2:
+                panel = cv2.cvtColor(panel, cv2.COLOR_GRAY2BGR)
+            elif len(panel.shape) == 3 and panel.shape[2] == 1:
+                panel = cv2.cvtColor(panel, cv2.COLOR_GRAY2BGR)
+            return cv2.resize(panel, (tile_size, tile_size))
+
+        original_src = getattr(tile_info, "original_image", None) if tile_info else None
+        if original_src is None:
+            original_src = tile_image
+
+        orig = _to_bgr_panel(original_src)
+        preprocessed = _to_bgr_panel(tile_image)
 
         # === B0F 二值化偵測模式：2-panel (Original + Binarization Overlay) ===
         if is_bright_spot:
@@ -561,21 +568,21 @@ class HeatmapManager:
 
             # Panel 2: 二值化結果疊加在原圖上（紅色標記亮點）
             if anomaly_map is not None:
-                binary_vis = orig.copy()
+                binary_vis = preprocessed.copy()
                 binary_resized = cv2.resize(
                     (anomaly_map * 255).astype(np.uint8), (tile_size, tile_size)
                 )
                 # 紅色高亮標記偵測到的亮點區域
                 binary_vis[binary_resized > 0] = (0, 0, 255)
                 # 半透明混合
-                binary_panel = cv2.addWeighted(orig, 0.5, binary_vis, 0.5, 0)
+                binary_panel = cv2.addWeighted(preprocessed, 0.5, binary_vis, 0.5, 0)
             else:
-                binary_panel = orig.copy()
+                binary_panel = preprocessed.copy()
                 cv2.putText(binary_panel, "No Binary", (150, 260),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)
 
-            labels = ["Original", "Binarization"]
-            panels = [orig, binary_panel]
+            labels = ["Original", "Preprocessed", "Binarization"]
+            panels = [orig, preprocessed, binary_panel]
 
             # --- 橫向拼接 ---
             composite = np.hstack(panels)
@@ -628,9 +635,9 @@ class HeatmapManager:
             norm_map = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             heatmap_color = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
             heatmap_color = cv2.resize(heatmap_color, (tile_size, tile_size))
-            heatmap_panel = cv2.addWeighted(orig, 0.5, heatmap_color, 0.5, 0)
+            heatmap_panel = cv2.addWeighted(preprocessed, 0.5, heatmap_color, 0.5, 0)
         else:
-            heatmap_panel = orig.copy()
+            heatmap_panel = preprocessed.copy()
             cv2.putText(heatmap_panel, "No Heatmap", (150, 260),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)
 
@@ -753,14 +760,14 @@ class HeatmapManager:
                 debug_label = "TwoStage Debug (G=Dust R=Real B=DustMask)"
             else:
                 debug_label = f"{metric_name} Debug (G=Dust R=RealNG B=DustOnly)"
-            labels = ["Original", "Heatmap", "OMIT Crop", f"Dust Mask (Overall{metric_name}:{dust_iou:.3f})", debug_label]
-            panels = [orig, heatmap_panel, omit_panel, dust_panel, iou_debug_panel]
+            labels = ["Original", "Preprocessed", "Heatmap", "OMIT Crop", f"Dust Mask (Overall{metric_name}:{dust_iou:.3f})", debug_label]
+            panels = [orig, preprocessed, heatmap_panel, omit_panel, dust_panel, iou_debug_panel]
             for zoom_img, zoom_label in zoom_results:
                 panels.append(zoom_img)
                 labels.append(zoom_label)
         else:
-            labels = ["Original", "Heatmap"]
-            panels = [orig, heatmap_panel]
+            labels = ["Original", "Preprocessed", "Heatmap"]
+            panels = [orig, preprocessed, heatmap_panel]
 
         # --- 橫向拼接 ---
         composite = np.hstack(panels)

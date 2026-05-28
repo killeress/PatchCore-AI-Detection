@@ -99,6 +99,52 @@
     </div>
   </details>
 
+  <details id="preprocess-params" open style="margin-top:16px;background:#313244;border-radius:10px;padding:14px 18px;">
+    <summary style="cursor:pointer;color:#cdd6f4;font-weight:600;font-size:.92rem;list-style:none;display:flex;align-items:center;gap:8px;">
+      <span style="display:inline-block;transition:transform .15s ease;" class="pp-caret">▶</span>
+      🧪 影像前處理（先套用，再切片）
+      <span style="color:#a6adc8;font-weight:400;font-size:.8rem;">可調整順序、參數，或清空為不啟用</span>
+    </summary>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;">
+      <button type="button" id="pp-add-step" style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:7px 14px;font-weight:700;">新增步驟</button>
+      <button type="button" id="pp-reset-default" style="background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:7px 14px;font-weight:700;">重設預設</button>
+      <button type="button" id="pp-clear-all" style="background:#313244;color:#f38ba8;border:1px solid #f38ba8;border-radius:5px;padding:7px 14px;font-weight:700;">清空</button>
+    </div>
+    <div id="pipeline-builder" style="margin-top:14px;display:flex;flex-direction:column;gap:10px;"></div>
+    <div class="pp-preview">
+      <div class="pp-preview-head">
+        <div>
+          <div class="pp-preview-title">用一張圖片跑一次當前流程</div>
+          <div class="pp-preview-hint">預設使用目前第一個已選 panel；也可改成指定圖片或 panel 資料夾。</div>
+        </div>
+        <button type="button" id="pp-run-preview" class="pp-preview-btn">執行預覽</button>
+      </div>
+      <div class="pp-preview-row">
+        <input id="pp-preview-path" class="pp-preview-input" placeholder="選取 panel 後自動帶入，或手動輸入圖片 / 資料夾路徑">
+        <button type="button" id="pp-use-selected" class="pp-preview-secondary">使用已選 panel</button>
+      </div>
+      <div id="pp-preview-status" class="pp-preview-status"></div>
+      <div id="pp-preview-result" class="pp-preview-result" style="display:none;">
+        <figure>
+          <figcaption>原圖</figcaption>
+          <img id="pp-preview-original" alt="原圖預覽">
+        </figure>
+        <figure>
+          <figcaption>前處理後</figcaption>
+          <img id="pp-preview-processed" alt="前處理後預覽">
+        </figure>
+        <figure>
+          <figcaption class="pp-caption-with-help">
+            <span>差異圖</span>
+            <button type="button" class="pp-help-icon" onclick="showDiffMapHelp()" title="差異圖怎麼看" aria-label="差異圖怎麼看">?</button>
+          </figcaption>
+          <img id="pp-preview-diff" alt="差異圖預覽">
+        </figure>
+      </div>
+      <div id="pp-preview-meta" class="pp-preview-meta"></div>
+    </div>
+  </details>
+
   <!-- padding-bottom 預留高度給 sticky 操作條，確保列表最後幾筆不會被遮住 -->
   <div id="panel-list" style="margin-top:16px;padding-bottom:88px;"></div>
 
@@ -150,6 +196,141 @@
   }
   .tp-field input:focus, .tp-field select:focus { outline:none;border-color:#89b4fa; }
   .tp-field input.invalid, .tp-field select.invalid { border-color:#f38ba8; }
+
+  .pp-step {
+    background:#1e1e2e;
+    border:1px solid #45475a;
+    border-radius:8px;
+    padding:12px;
+  }
+  .pp-step-head {
+    display:flex;
+    gap:10px;
+    align-items:center;
+    flex-wrap:wrap;
+  }
+  .pp-step-index {
+    min-width:32px;
+    height:32px;
+    border-radius:6px;
+    background:#89b4fa;
+    color:#1e1e2e;
+    font-weight:700;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-family:'JetBrains Mono',Consolas,monospace;
+  }
+  .pp-step-select, .pp-param-input, .pp-param-select {
+    background:#11111b;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;
+    padding:6px 10px;font-family:'JetBrains Mono',Consolas,monospace;font-size:.86rem;
+  }
+  .pp-param-field {
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+    color:#cdd6f4;
+    font-size:.8rem;
+  }
+  .pp-param-grid {
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+    gap:10px;
+    margin-top:10px;
+  }
+  .pp-note { color:#a6adc8;font-size:.76rem;line-height:1.45;margin-top:8px; }
+  .pp-step-actions { display:flex;gap:6px;margin-left:auto;flex-wrap:wrap; }
+  .pp-step-actions button {
+    border-radius:5px;border:1px solid #45475a;background:#313244;color:#cdd6f4;
+    padding:5px 10px;font-weight:700;font-size:.8rem;cursor:pointer;
+  }
+  .pp-step-actions button.danger { color:#f38ba8;border-color:#f38ba8; }
+  .pp-step-hint { color:#a6adc8;font-size:.75rem;line-height:1.4;margin-top:6px; }
+  .pp-preview {
+    margin-top:14px;
+    border-top:1px solid #45475a;
+    padding-top:14px;
+  }
+  .pp-preview-head {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px;
+    flex-wrap:wrap;
+  }
+  .pp-preview-title { color:#cdd6f4;font-weight:700;font-size:.9rem; }
+  .pp-preview-hint { color:#a6adc8;font-size:.76rem;margin-top:3px;line-height:1.45; }
+  .pp-preview-row { display:flex;gap:8px;margin-top:10px;align-items:center; }
+  .pp-preview-input {
+    flex:1;
+    min-width:0;
+    background:#11111b;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;
+    padding:8px 10px;font-family:'JetBrains Mono',Consolas,monospace;font-size:.8rem;
+  }
+  .pp-preview-input:focus { outline:none;border-color:#89b4fa; }
+  .pp-preview-btn {
+    background:#a6e3a1;color:#1e1e2e;border:none;border-radius:5px;
+    padding:7px 14px;font-weight:700;cursor:pointer;
+  }
+  .pp-preview-secondary {
+    background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;
+    padding:8px 12px;font-weight:700;cursor:pointer;white-space:nowrap;
+  }
+  .pp-preview-status { color:#a6adc8;font-size:.78rem;margin-top:8px;min-height:1.2em; }
+  .pp-preview-status.error { color:#f38ba8; }
+  .pp-preview-status.ok { color:#a6e3a1; }
+  .pp-preview-result {
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:10px;
+    margin-top:10px;
+  }
+  .pp-preview-result figure {
+    margin:0;
+    background:#11111b;
+    border:1px solid #45475a;
+    border-radius:8px;
+    overflow:hidden;
+  }
+  .pp-preview-result figcaption {
+    color:#cdd6f4;
+    font-size:.78rem;
+    padding:8px 10px;
+    border-bottom:1px solid #313244;
+  }
+  .pp-caption-with-help {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:8px;
+  }
+  .pp-help-icon {
+    width:20px;
+    height:20px;
+    border-radius:50%;
+    border:1px solid #89b4fa;
+    background:#1e1e2e;
+    color:#89b4fa;
+    font-weight:700;
+    font-size:.76rem;
+    line-height:18px;
+    text-align:center;
+    cursor:pointer;
+    padding:0;
+  }
+  .pp-help-icon:hover { background:#89b4fa;color:#1e1e2e; }
+  .pp-preview-result img {
+    width:100%;
+    aspect-ratio:1/1;
+    object-fit:contain;
+    background:#05050a;
+    display:block;
+  }
+  .pp-preview-meta { color:#a6adc8;font-size:.74rem;line-height:1.45;margin-top:8px;word-break:break-all; }
+  @media (max-width: 760px) {
+    .pp-preview-row { flex-direction:column;align-items:stretch; }
+    .pp-preview-result { grid-template-columns:1fr; }
+  }
 </style>
 
 <script>
@@ -157,9 +338,290 @@ const TRAINING_SCOPE = {{ training_scope|tojson }};
 const TARGET_BUNDLE = {{ target_bundle|tojson }};
 const SELECTED_LIGHTINGS = {{ selected_lightings|tojson }};
 const MACHINE_PREFIX_LEN = {{ machine_prefix_len|default(8)|tojson }};
+const PREPROCESS_METHOD_SPECS = {{ preprocess_methods|tojson }};
+const DEFAULT_PREPROCESS_PIPELINE = {{ default_preprocess_pipeline|tojson }};
 let _selected = new Set();
 let _selectedMachineId = '';
 let _selectedMachineKey = '';
+let _pipelineSteps = [];
+let _pipelineSeq = 0;
+let _previewPathEdited = false;
+let _previewPathByPanel = new Map();
+
+const PREPROCESS_METHOD_MAP = Object.fromEntries(PREPROCESS_METHOD_SPECS.map(spec => [spec.id, spec]));
+
+function clonePipeline(pipeline) {
+  return JSON.parse(JSON.stringify(pipeline || []));
+}
+
+function defaultParamsForMethod(methodId) {
+  const spec = PREPROCESS_METHOD_MAP[methodId] || PREPROCESS_METHOD_SPECS[0];
+  const params = {};
+  for (const param of (spec && spec.params) || []) {
+    if (param.type === 'select') {
+      params[param.key] = param.default;
+    } else {
+      params[param.key] = param.default;
+    }
+  }
+  return params;
+}
+
+function makePipelineStep(methodId, params) {
+  const method = methodId && PREPROCESS_METHOD_MAP[methodId] ? methodId : 'bilateral';
+  return {
+    id: `pp-${++_pipelineSeq}`,
+    method,
+    params: Object.assign(defaultParamsForMethod(method), params || {}),
+  };
+}
+
+function initPipelineSteps(rawPipeline) {
+  _pipelineSteps = clonePipeline(rawPipeline).map(step => makePipelineStep(step.method, step.params));
+  if (!_pipelineSteps.length) {
+    _pipelineSteps = DEFAULT_PREPROCESS_PIPELINE.map(step => makePipelineStep(step.method, step.params));
+  }
+  renderPipelineBuilder();
+}
+
+function addPipelineStep(methodId) {
+  _pipelineSteps.push(makePipelineStep(methodId || 'bilateral'));
+  renderPipelineBuilder();
+}
+
+function removePipelineStep(stepId) {
+  _pipelineSteps = _pipelineSteps.filter(step => step.id !== stepId);
+  renderPipelineBuilder();
+}
+
+function movePipelineStep(stepId, delta) {
+  const idx = _pipelineSteps.findIndex(step => step.id === stepId);
+  const next = idx + delta;
+  if (idx < 0 || next < 0 || next >= _pipelineSteps.length) return;
+  const swapped = _pipelineSteps.slice();
+  const tmp = swapped[idx];
+  swapped[idx] = swapped[next];
+  swapped[next] = tmp;
+  _pipelineSteps = swapped;
+  renderPipelineBuilder();
+}
+
+function changePipelineMethod(stepId, methodId) {
+  const step = _pipelineSteps.find(item => item.id === stepId);
+  if (!step) return;
+  step.method = methodId;
+  step.params = defaultParamsForMethod(methodId);
+  renderPipelineBuilder();
+}
+
+function changePipelineParam(stepId, paramKey, rawValue) {
+  const step = _pipelineSteps.find(item => item.id === stepId);
+  if (!step) return;
+  step.params[paramKey] = rawValue;
+}
+
+function renderPipelineBuilder() {
+  const root = document.getElementById('pipeline-builder');
+  if (!root) return;
+  if (!_pipelineSteps.length) {
+    root.innerHTML = '<div style="color:#a6adc8;font-size:.82rem;padding:10px 0;">目前沒有任何前處理步驟，送出後會直接使用原圖切片。</div>';
+    return;
+  }
+  root.innerHTML = _pipelineSteps.map((step, idx) => renderPipelineStep(step, idx)).join('');
+}
+
+function renderPipelineStep(step, idx) {
+  const spec = PREPROCESS_METHOD_MAP[step.method] || PREPROCESS_METHOD_SPECS[0];
+  const paramsHtml = (spec.params || []).map(param => renderPipelineParam(step, spec, param)).join('');
+  const optionsHtml = PREPROCESS_METHOD_SPECS.map(item =>
+    `<option value="${escapeAttr(item.id)}" ${item.id === step.method ? 'selected' : ''}>${escapeHtml(item.label)}</option>`
+  ).join('');
+  return `
+    <div class="pp-step" data-step-id="${escapeAttr(step.id)}">
+      <div class="pp-step-head">
+        <div class="pp-step-index">${idx + 1}</div>
+        <select class="pp-step-select" onchange="changePipelineMethod('${escapeAttr(step.id)}', this.value)">
+          ${optionsHtml}
+        </select>
+        <div class="pp-step-actions">
+          <button type="button" onclick="movePipelineStep('${escapeAttr(step.id)}', -1)">↑</button>
+          <button type="button" onclick="movePipelineStep('${escapeAttr(step.id)}', 1)">↓</button>
+          <button type="button" class="danger" onclick="removePipelineStep('${escapeAttr(step.id)}')">刪除</button>
+        </div>
+      </div>
+      <div class="pp-step-hint">${escapeHtml(spec.purpose || '')}</div>
+      <div class="pp-param-grid">${paramsHtml}</div>
+      <div class="pp-note">${escapeHtml(spec.mix || '')}</div>
+    </div>
+  `;
+}
+
+function renderPipelineParam(step, spec, param) {
+  const current = step.params && Object.prototype.hasOwnProperty.call(step.params, param.key)
+    ? step.params[param.key]
+    : param.default;
+  const label = `${param.name}${param.default !== undefined ? ` (預設 ${param.default})` : ''}`;
+  if (param.type === 'select') {
+    const options = (param.choices || []).map(choice => {
+      const value = typeof choice === 'string' ? choice : choice.value;
+      const text = typeof choice === 'string' ? choice : choice.label;
+      return `<option value="${escapeAttr(value)}" ${String(current) === String(value) ? 'selected' : ''}>${escapeHtml(text)}</option>`;
+    }).join('');
+    return `
+      <label class="pp-param-field">
+        <span>${escapeHtml(label)}</span>
+        <select class="pp-param-select" onchange="changePipelineParam('${escapeAttr(step.id)}', '${escapeAttr(param.key)}', this.value)">
+          ${options}
+        </select>
+        <span class="pp-step-hint">${escapeHtml(param.detail || '')}</span>
+      </label>
+    `;
+  }
+  const stepAttr = param.step !== undefined ? ` step="${escapeAttr(param.step)}"` : '';
+  return `
+    <label class="pp-param-field">
+      <span>${escapeHtml(label)}</span>
+      <input class="pp-param-input" type="number"
+             min="${escapeAttr(param.min)}" max="${escapeAttr(param.max)}"${stepAttr}
+             value="${escapeAttr(current)}"
+             oninput="changePipelineParam('${escapeAttr(step.id)}', '${escapeAttr(param.key)}', this.value)">
+      <span class="pp-step-hint">${escapeHtml(param.detail || '')}</span>
+    </label>
+  `;
+}
+
+function collectImagePreprocessPipeline() {
+  const pipeline = [];
+  for (const step of _pipelineSteps) {
+    const spec = PREPROCESS_METHOD_MAP[step.method];
+    if (!spec) continue;
+    const params = {};
+    for (const param of spec.params || []) {
+      const raw = step.params ? step.params[param.key] : undefined;
+      if (param.type === 'select') {
+        const validChoices = (param.choices || []).map(choice => typeof choice === 'string' ? choice : choice.value);
+        const value = String(raw || param.default);
+        if (!validChoices.includes(value)) {
+          return {pipeline: null, error: `${spec.label} 的 ${param.name} 必須是 ${validChoices.join(' / ')} 其中之一`};
+        }
+        params[param.key] = value;
+        continue;
+      }
+      const num = param.type === 'int' ? parseInt(raw, 10) : parseFloat(raw);
+      if (!Number.isFinite(num) || num < param.min || num > param.max) {
+        return {pipeline: null, error: `${spec.label} 的 ${param.name} 必須是 ${param.min} ~ ${param.max} 之間的${param.type === 'int' ? '整數' : '數字'}`};
+      }
+      params[param.key] = num;
+    }
+    pipeline.push({method: step.method, params});
+  }
+  return {pipeline, error: null};
+}
+
+function resetPipelineDefault() {
+  initPipelineSteps(DEFAULT_PREPROCESS_PIPELINE);
+}
+
+function clearPipeline() {
+  _pipelineSteps = [];
+  renderPipelineBuilder();
+}
+
+function showDiffMapHelp() {
+  capAlert(
+    [
+      '差異圖是把「原圖」和「前處理後圖」每個像素相減後的絕對差，再用熱力圖顯示。',
+      '',
+      '顏色解讀：',
+      '藍色 / 深藍：差異很小，前處理幾乎沒改到這些像素。',
+      '綠 / 黃：中等差異，通常代表背景雜訊、細紋或亮度起伏被平滑或修正。',
+      '橘 / 紅：差異很大，代表前處理大幅改變該區域。',
+      '',
+      '如果整張幾乎都是藍色，通常代表這組參數對這張圖影響很小，不一定是壞事。',
+      '',
+      '判斷重點：背景雜訊可以被壓掉，但 defect 在「前處理後」仍要保留；如果 defect 位置在差異圖出現明顯黃紅，代表它可能被前處理削弱或改變。'
+    ].join('\n'),
+    {title: '差異圖怎麼看', type: 'info', okText: '知道了'}
+  );
+}
+
+function selectedPreviewPath() {
+  const panelPath = Array.from(_selected)[0] || '';
+  return _previewPathByPanel.get(panelPath) || panelPath;
+}
+
+function syncPreviewPath(force=false) {
+  const input = document.getElementById('pp-preview-path');
+  if (!input) return;
+  const selectedPath = selectedPreviewPath();
+  if (force || !_previewPathEdited || !input.value.trim()) {
+    input.value = selectedPath;
+    _previewPathEdited = false;
+  }
+}
+
+async function runPreprocessPreview() {
+  const pathInput = document.getElementById('pp-preview-path');
+  const status = document.getElementById('pp-preview-status');
+  const resultRoot = document.getElementById('pp-preview-result');
+  const meta = document.getElementById('pp-preview-meta');
+  const btn = document.getElementById('pp-run-preview');
+  const rawPath = (pathInput && pathInput.value || '').trim();
+  if (!rawPath) {
+    status.className = 'pp-preview-status error';
+    status.textContent = '請先選擇 panel，或手動輸入圖片 / 資料夾路徑。';
+    return;
+  }
+
+  const {pipeline, error} = collectImagePreprocessPipeline();
+  if (error) {
+    status.className = 'pp-preview-status error';
+    status.textContent = error;
+    return;
+  }
+
+  btn.disabled = true;
+  btn.style.opacity = .55;
+  status.className = 'pp-preview-status';
+  status.textContent = '正在執行目前前處理流程...';
+  meta.textContent = '';
+  resultRoot.style.display = 'none';
+
+  try {
+    const resp = await fetch('/api/train/new/preprocess_pipeline_preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({image_path: rawPath, image_preprocess_pipeline: pipeline}),
+    });
+    const responseText = await resp.text();
+    let data = null;
+    try {
+      data = responseText ? JSON.parse(responseText) : {};
+    } catch (parseErr) {
+      throw new Error(`伺服器回傳非 JSON 內容，請確認服務已更新並重新啟動。HTTP ${resp.status}`);
+    }
+    if (!resp.ok || data.error) {
+      status.className = 'pp-preview-status error';
+      status.textContent = data.error || '前處理預覽失敗';
+      return;
+    }
+
+    document.getElementById('pp-preview-original').src = data.original_url;
+    document.getElementById('pp-preview-processed').src = data.processed_url;
+    document.getElementById('pp-preview-diff').src = data.diff_url;
+    resultRoot.style.display = '';
+    status.className = 'pp-preview-status ok';
+    status.textContent = `完成：${data.image_name}，耗時 ${data.processing_time}s`;
+    const steps = (data.steps || []).map(s => `${s.index}.${s.method_label}`).join(' → ') || '未啟用前處理';
+    meta.textContent = `實際圖片：${data.image_path} ｜ 流程：${steps}`;
+  } catch (err) {
+    status.className = 'pp-preview-status error';
+    status.textContent = '前處理預覽失敗：' + err;
+  } finally {
+    btn.disabled = false;
+    btn.style.opacity = 1;
+  }
+}
 
 function isPartialTraining() {
   return TRAINING_SCOPE.mode === 'partial' && TARGET_BUNDLE && TARGET_BUNDLE.machine_id;
@@ -209,29 +671,82 @@ function renderPanels(panels) {
   _selected = new Set();
   _selectedMachineId = '';
   _selectedMachineKey = '';
+  _previewPathByPanel = new Map();
   const root = document.getElementById('panel-list');
   if (!panels.length) {
     root.innerHTML = '<div style="background:#313244;padding:24px;border-radius:10px;color:#a6adc8;text-align:center;">最近 3 天無符合條件的 AOI OK panel</div>';
     updateNext();
     return;
   }
-  let html = '<div style="background:#313244;border-radius:10px;overflow:hidden;"><table class="train-panel-table" style="width:100%;border-collapse:collapse;">';
-  html += '<thead><tr style="background:#11111b;color:#a6adc8;font-size:.78rem;text-align:left;"><th style="width:30px;"></th><th>Glass ID</th><th>機種 ID</th><th>日期</th><th>機台</th><th>AI 判定</th><th style="width:34%;">圖片來源路徑</th></tr></thead><tbody>';
+
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'background:#313244;border-radius:10px;overflow:hidden;';
+  const table = document.createElement('table');
+  table.className = 'train-panel-table';
+  table.style.cssText = 'width:100%;border-collapse:collapse;';
+
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  headRow.style.cssText = 'background:#11111b;color:#a6adc8;font-size:.78rem;text-align:left;';
+  [
+    {text: '', width: '30px'},
+    {text: 'Glass ID'},
+    {text: '機種 ID'},
+    {text: '日期'},
+    {text: '機台'},
+    {text: 'AI 判定'},
+    {text: '圖片來源路徑', width: '34%'},
+  ].forEach(col => {
+    const th = document.createElement('th');
+    th.textContent = col.text;
+    if (col.width) th.style.width = col.width;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
   for (const p of panels) {
     const panelPath = p.image_dir || p.image_path || '';
-    html += `<tr data-path="${escapeAttr(panelPath)}" data-machine-id="${escapeAttr(p.model_id || '')}" style="border-top:1px solid #1e1e2e;cursor:pointer;" onclick="toggleSelect(this)">
-      <td style="padding:8px;"><span class="chk" style="width:20px;height:20px;border:2px solid #45475a;border-radius:4px;display:inline-block;line-height:20px;text-align:center;font-family:'JetBrains Mono',Consolas,monospace;font-size:.78rem;"></span></td>
-      <td style="font-family:monospace;color:#cdd6f4;font-size:.82rem;">${escapeHtml(p.glass_id || '')}</td>
-      <td style="font-family:monospace;color:#cdd6f4;font-size:.82rem;">${escapeHtml(p.model_id || '')}</td>
-      <td style="color:#a6adc8;font-size:.82rem;">${escapeHtml(p.request_time || p.timestamp || p.created_at || '')}</td>
-      <td style="color:#a6adc8;font-size:.82rem;">${escapeHtml(p.machine_no || '')}</td>
-      <td style="font-size:.82rem;color:${p.ai_judgment === 'OK' ? '#a6e3a1' : '#fab387'};">${escapeHtml(p.ai_judgment || '-')}</td>
-      <td class="path-cell">${escapeHtml(panelPath || '-')}</td>
-    </tr>`;
+    const previewPath = p.preview_image_path || '';
+    if (panelPath && previewPath) {
+      _previewPathByPanel.set(panelPath, previewPath);
+    }
+    const tr = document.createElement('tr');
+    tr.dataset.path = panelPath;
+    tr.dataset.machineId = p.model_id || '';
+    tr.dataset.previewPath = previewPath;
+    tr.style.cssText = 'border-top:1px solid #1e1e2e;cursor:pointer;';
+    tr.onclick = () => toggleSelect(tr);
+
+    const checkTd = document.createElement('td');
+    checkTd.style.padding = '8px';
+    const check = document.createElement('span');
+    check.className = 'chk';
+    check.style.cssText = "width:20px;height:20px;border:2px solid #45475a;border-radius:4px;display:inline-block;line-height:20px;text-align:center;font-family:'JetBrains Mono',Consolas,monospace;font-size:.78rem;";
+    checkTd.appendChild(check);
+    tr.appendChild(checkTd);
+
+    appendTextCell(tr, p.glass_id || '', 'font-family:monospace;color:#cdd6f4;font-size:.82rem;');
+    appendTextCell(tr, p.model_id || '', 'font-family:monospace;color:#cdd6f4;font-size:.82rem;');
+    appendTextCell(tr, p.request_time || p.timestamp || p.created_at || '', 'color:#a6adc8;font-size:.82rem;');
+    appendTextCell(tr, p.machine_no || '', 'color:#a6adc8;font-size:.82rem;');
+    appendTextCell(tr, p.ai_judgment || '-', `font-size:.82rem;color:${p.ai_judgment === 'OK' ? '#a6e3a1' : '#fab387'};`);
+    appendTextCell(tr, panelPath || '-', '', 'path-cell');
+    tbody.appendChild(tr);
   }
-  html += '</tbody></table></div>';
-  root.innerHTML = html;
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  root.replaceChildren(wrap);
   updateNext();
+}
+
+function appendTextCell(row, value, styleText, className) {
+  const td = document.createElement('td');
+  if (styleText) td.style.cssText = styleText;
+  if (className) td.className = className;
+  td.textContent = String(value);
+  row.appendChild(td);
 }
 
 // 與 capi_train_new.WIZARD_FULL_PANEL_COUNT / WIZARD_TOTAL_PANEL_COUNT 對齊。
@@ -275,6 +790,7 @@ function toggleSelect(tr) {
   }
   refreshSelectedVisuals();
   updateNext();
+  syncPreviewPath(false);
 }
 
 function refreshSelectedVisuals() {
@@ -370,8 +886,15 @@ function submitStart() {
     capAlert(error, {type: 'error', title: '訓練設定錯誤'});
     return;
   }
+  const {pipeline, error: pipelineError} = collectImagePreprocessPipeline();
+  if (pipelineError) {
+    document.getElementById('preprocess-params').setAttribute('open', '');
+    capAlert(pipelineError, {type: 'error', title: '前處理設定錯誤'});
+    return;
+  }
   const body = {machine_id: mid, panel_paths: Array.from(_selected), training_scope: TRAINING_SCOPE};
   if (params) body.training_params = params;
+  body.image_preprocess_pipeline = pipeline;
   fetch('/api/train/new/start', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -417,6 +940,21 @@ function escapeAttr(value) {
 }
 
 document.addEventListener('DOMContentLoaded', loadPanels);
+document.addEventListener('DOMContentLoaded', () => {
+  initPipelineSteps(DEFAULT_PREPROCESS_PIPELINE);
+  const addBtn = document.getElementById('pp-add-step');
+  const resetBtn = document.getElementById('pp-reset-default');
+  const clearBtn = document.getElementById('pp-clear-all');
+  const previewPath = document.getElementById('pp-preview-path');
+  const previewBtn = document.getElementById('pp-run-preview');
+  const useSelectedBtn = document.getElementById('pp-use-selected');
+  if (addBtn) addBtn.onclick = () => addPipelineStep('bilateral');
+  if (resetBtn) resetBtn.onclick = () => resetPipelineDefault();
+  if (clearBtn) clearBtn.onclick = () => clearPipeline();
+  if (previewPath) previewPath.addEventListener('input', () => { _previewPathEdited = true; });
+  if (previewBtn) previewBtn.onclick = () => runPreprocessPreview();
+  if (useSelectedBtn) useSelectedBtn.onclick = () => syncPreviewPath(true);
+});
 </script>
 
 {% include "train_new/_modal.html" %}

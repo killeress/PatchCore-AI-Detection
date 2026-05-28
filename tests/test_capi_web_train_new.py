@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import numpy as np
+import cv2
 
 
 def _make_handler(db_inst, path="/api/train/new/panels?days=3"):
@@ -166,6 +168,35 @@ def test_handle_train_new_panels_returns_db_result():
     glass_ids = {p["glass_id"] for p in body["panels"]}
     assert glass_ids == {"G001", "G002"}
     assert all(p["image_path"] == p["image_dir"] for p in body["panels"])
+
+
+def test_handle_train_new_panels_adds_w0_preview_image_path(tmp_path):
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    w0_path = panel_dir / "W0F00000_084027.tif"
+    g0_path = panel_dir / "G0F00000_084027.tif"
+    w0_path.write_bytes(b"w0")
+    g0_path.write_bytes(b"g0")
+
+    db = MagicMock()
+    db.list_ok_panels_for_machine.return_value = [{
+        "id": 1,
+        "glass_id": "G001",
+        "model_id": "GN160",
+        "machine_no": "CAPI07",
+        "machine_judgment": "OK",
+        "ai_judgment": "OK",
+        "image_dir": str(panel_dir),
+        "request_time": "2026-05-28 08:40:00",
+        "created_at": "2026-05-28 08:40:00",
+    }]
+    h = _make_handler(db, "/api/train/new/panels?machine_id=GN160&days=3")
+
+    h._handle_train_new_panels()
+
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["panels"][0]["image_path"] == str(panel_dir)
+    assert body["panels"][0]["preview_image_path"] == str(w0_path)
 
 
 def test_handle_train_new_panels_supports_machine_id_prefix():
@@ -462,6 +493,10 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
             "batch_size": 16, "coreset_ratio": 0.05,
             "max_epochs": 2,
         },
+        "image_preprocess_pipeline": [
+            {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
+            {"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}},
+        ],
     }
     body = json.dumps(payload).encode()
     h.headers.get = MagicMock(return_value=str(len(body)))
@@ -473,6 +508,7 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
     server.database.create_training_job.assert_called_once()
     call_kwargs = server.database.create_training_job.call_args.kwargs
     assert call_kwargs["training_params"] == payload["training_params"]
+    assert call_kwargs["image_preprocess_pipeline"][0]["method"] == "bilateral"
 
 
 # ── /api/train/new/status tests ───────────────────────────────────────────────
@@ -857,6 +893,161 @@ def test_handle_train_new_progress_page_uses_step4_template_for_train_state():
 
     h.jinja_env.get_template.assert_called_with("train_new/step4_progress.html")
     assert h._sent_response[0]["body"] == "<html>step4</html>"
+
+
+def test_train_new_step4_progress_template_exists():
+    template_path = Path(__file__).resolve().parent.parent / "templates" / "train_new" / "step4_progress.html"
+    assert template_path.exists()
+
+
+def test_train_new_done_template_uses_chinese_summary_labels():
+    template_path = Path(__file__).resolve().parent.parent / "templates" / "train_new" / "step5_done.html"
+    text = template_path.read_text(encoding="utf-8")
+    assert "<th>光源</th>" in text
+    assert "<th>區域</th>" in text
+    assert "訓練 tile" in text
+    assert "模型包" in text
+    assert "<th>Lighting</th>" not in text
+    assert "<th>Zone</th>" not in text
+    assert "BUNDLE</span>" not in text
+
+
+def test_train_new_select_panel_renderer_uses_text_content():
+    template_path = Path(__file__).resolve().parent.parent / "templates" / "train_new" / "step1_select.html"
+    text = template_path.read_text(encoding="utf-8")
+    assert "function appendTextCell" in text
+    assert "td.textContent = String(value);" in text
+    assert "${escapeHtml(p.glass_id" not in text
+    assert "${escapeHtml(p.machine_no" not in text
+
+
+def test_train_new_select_has_pipeline_preview_controls():
+    template_path = Path(__file__).resolve().parent.parent / "templates" / "train_new" / "step1_select.html"
+    text = template_path.read_text(encoding="utf-8")
+    assert "用一張圖片跑一次當前流程" in text
+    assert "preprocess_pipeline_preview" in text
+    assert "runPreprocessPreview" in text
+    assert "showDiffMapHelp" in text
+    assert "差異圖怎麼看" in text
+    assert "_previewPathByPanel" in text
+    assert "p.preview_image_path" in text
+    assert "responseText ? JSON.parse(responseText)" in text
+
+
+def test_record_detail_templates_show_preprocess_pipeline():
+    base = Path(__file__).resolve().parent.parent / "templates"
+    for name in ("record_detail.html", "record_detail_v3.html"):
+        text = (base / name).read_text(encoding="utf-8")
+        assert "影像前處理" in text
+        assert "image_preprocess_pipeline_steps" in text
+        assert "前處理總耗時" in text
+        assert "step.timing_text" in text
+        assert "舊紀錄未記錄" in text
+
+
+def test_record_preprocess_info_decoration_formats_steps():
+    from capi_web import CAPIWebHandler
+
+    detail = {
+        "image_preprocess_pipeline": json.dumps([
+            {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
+            {"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}},
+        ]),
+        "image_preprocess_timing": json.dumps({
+            "total_elapsed_ms": 30.0,
+            "steps": [
+                {
+                    "index": 1,
+                    "method": "bilateral",
+                    "method_label": "雙邊濾波",
+                    "applied_params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0},
+                    "calls": 3,
+                    "elapsed_ms_total": 21.0,
+                    "elapsed_ms_avg": 7.0,
+                },
+                {
+                    "index": 2,
+                    "method": "gaussian",
+                    "method_label": "高斯平滑",
+                    "applied_params": {"kernel_size": 5, "sigma": 1.0},
+                    "calls": 3,
+                    "elapsed_ms_total": 9.0,
+                    "elapsed_ms_avg": 3.0,
+                },
+            ],
+        }),
+    }
+
+    CAPIWebHandler._decorate_record_preprocess_info(detail)
+
+    assert detail["image_preprocess_pipeline_recorded"] is True
+    assert detail["image_preprocess_pipeline_steps"][0]["method_label"] == "雙邊濾波"
+    assert "Diameter=9" in detail["image_preprocess_pipeline_steps"][0]["params_text"]
+    assert detail["image_preprocess_pipeline_steps"][0]["timing_text"] == "耗時 0.021s / 3 次 / 平均 7.00ms"
+    assert detail["image_preprocess_total_seconds_text"] == "0.030s"
+    assert "高斯平滑" in detail["image_preprocess_pipeline_summary"]
+
+
+def test_do_post_routes_train_new_preprocess_pipeline_preview(monkeypatch):
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    h = _make_handler_with_server(server, "/api/train/new/preprocess_pipeline_preview")
+    called = []
+
+    def fake_preview(self):
+        called.append(self.path)
+        self._send_json({"ok": True})
+
+    monkeypatch.setattr(
+        CAPIWebHandler,
+        "_handle_train_new_preprocess_pipeline_preview",
+        fake_preview,
+    )
+
+    h.do_POST()
+
+    assert called == ["/api/train/new/preprocess_pipeline_preview"]
+    assert json.loads(h._sent_response[0]["body"]) == {"ok": True}
+
+
+def test_handle_train_new_preprocess_pipeline_preview_uses_panel_folder(tmp_path, monkeypatch):
+    from capi_web import CAPIWebHandler
+
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    img = np.full((64, 64), 128, dtype=np.uint8)
+    img[16:48, 16:48] = 200
+    image_path = panel_dir / "W0F00000_084027.tif"
+    other_path = panel_dir / "G0F00000_084027.tif"
+    assert cv2.imwrite(str(image_path), img)
+    assert cv2.imwrite(str(other_path), img)
+
+    debug_dir = tmp_path / "debug"
+    monkeypatch.setattr(CAPIWebHandler, "_debug_heatmap_dir", debug_dir)
+
+    server = MagicMock()
+    h = _make_handler_with_server(server, "/api/train/new/preprocess_pipeline_preview")
+    payload = {
+        "image_path": str(panel_dir),
+        "image_preprocess_pipeline": [
+            {"method": "gaussian", "params": {"kernel_size": 3, "sigma": 1.0}},
+        ],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_preprocess_pipeline_preview()
+
+    assert h._sent_response[0]["status"] == 200
+    resp = json.loads(h._sent_response[0]["body"])
+    assert resp["success"] is True
+    assert resp["image_path"] == str(image_path)
+    assert resp["pipeline"][0]["method"] == "gaussian"
+    assert resp["processed_url"].startswith("/debug/heatmaps/train_preprocess_preview_")
+    assert Path(resp["output_path"]).exists()
+    assert Path(resp["diff_path"]).exists()
 
 
 def test_handle_train_new_page_lists_all_active_jobs():

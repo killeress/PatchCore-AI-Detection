@@ -411,6 +411,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_train_new_status()
             elif path == "/api/train/new/tiles":
                 self._handle_train_new_tiles()
+            elif path == "/api/train/new/preprocess_pipeline_preview":
+                self._handle_train_new_preprocess_pipeline_preview()
             elif path == "/api/train/new/preprocess_preview":
                 self._handle_train_new_preprocess_preview()
             elif path.startswith("/api/train/new/thumb/"):
@@ -592,6 +594,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path == "/api/train/new/start":
                 self._handle_train_new_start()
+                return
+            elif path == "/api/train/new/preprocess_pipeline_preview":
+                self._handle_train_new_preprocess_pipeline_preview()
                 return
             elif path == "/api/train/new/tiles/decision":
                 self._handle_train_new_tiles_decision()
@@ -792,6 +797,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if not detail:
             self._send_404(path)
             return
+        self._decorate_record_preprocess_info(detail)
 
         template = self.jinja_env.get_template("record_detail.html")
         html = template.render(
@@ -953,6 +959,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if not detail:
             self._send_404(path)
             return
+        self._decorate_record_preprocess_info(detail)
 
         template = self.jinja_env.get_template("record_detail_v3.html")
         html = template.render(
@@ -961,6 +968,104 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             request_path=path
         )
         self._send_response(200, html)
+
+    @staticmethod
+    def _decorate_record_preprocess_info(detail: dict) -> None:
+        """Add display-ready preprocessing metadata to an inference record."""
+        raw = detail.get("image_preprocess_pipeline")
+        detail["image_preprocess_pipeline_recorded"] = False
+        detail["image_preprocess_pipeline_steps"] = []
+        detail["image_preprocess_pipeline_summary"] = "舊紀錄未記錄"
+        detail["image_preprocess_timing_recorded"] = False
+        detail["image_preprocess_total_seconds_text"] = ""
+
+        if raw is None or raw == "":
+            return
+
+        try:
+            pipeline = json.loads(raw) if isinstance(raw, str) else raw
+            from capi_image_preprocess_lab import get_method_specs, normalize_preprocess_pipeline
+            normalized = normalize_preprocess_pipeline(pipeline)
+            specs = {spec["id"]: spec for spec in get_method_specs()}
+        except Exception:
+            detail["image_preprocess_pipeline_recorded"] = True
+            detail["image_preprocess_pipeline_summary"] = "前處理設定解析失敗"
+            return
+
+        detail["image_preprocess_pipeline_recorded"] = True
+        if not normalized:
+            detail["image_preprocess_pipeline_summary"] = "未啟用"
+            return
+
+        timing_by_key = {}
+        timing_raw = detail.get("image_preprocess_timing")
+        if timing_raw:
+            try:
+                timing = json.loads(timing_raw) if isinstance(timing_raw, str) else timing_raw
+                detail["image_preprocess_timing_recorded"] = True
+                total_ms = float((timing or {}).get("total_elapsed_ms") or 0.0)
+                detail["image_preprocess_total_seconds_text"] = f"{total_ms / 1000.0:.3f}s"
+                for item in (timing or {}).get("steps", []) or []:
+                    method = str(item.get("method") or "")
+                    try:
+                        params_key = json.dumps(
+                            item.get("applied_params") or {},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                    except TypeError:
+                        params_key = str(item.get("applied_params") or {})
+                    timing_by_key[(int(item.get("index") or 0), method, params_key)] = item
+            except Exception:
+                detail["image_preprocess_timing_recorded"] = False
+
+        steps = []
+        summary_parts = []
+        for idx, step in enumerate(normalized, 1):
+            method = step["method"]
+            spec = specs.get(method, {})
+            label = spec.get("label") or method
+            param_labels = {
+                p.get("key"): p.get("name") or p.get("key")
+                for p in spec.get("params", [])
+                if p.get("key")
+            }
+            params = []
+            for key, value in step.get("params", {}).items():
+                params.append({
+                    "key": key,
+                    "label": param_labels.get(key, key),
+                    "value": value,
+                })
+            params_text = ", ".join(f"{p['label']}={p['value']}" for p in params)
+            try:
+                params_key = json.dumps(step.get("params", {}), ensure_ascii=False, sort_keys=True)
+            except TypeError:
+                params_key = str(step.get("params", {}))
+            timing_info = timing_by_key.get((idx, method, params_key), {})
+            elapsed_ms = float(timing_info.get("elapsed_ms_total") or 0.0)
+            avg_ms = float(timing_info.get("elapsed_ms_avg") or 0.0)
+            calls = int(timing_info.get("calls") or 0)
+            timing_text = ""
+            if calls:
+                timing_text = f"耗時 {elapsed_ms / 1000.0:.3f}s"
+                if calls > 1:
+                    timing_text += f" / {calls} 次 / 平均 {avg_ms:.2f}ms"
+            steps.append({
+                "index": idx,
+                "method": method,
+                "method_label": label,
+                "params": params,
+                "params_text": params_text,
+                "timing_text": timing_text,
+                "elapsed_ms_total": elapsed_ms,
+                "elapsed_ms_avg": avg_ms,
+                "calls": calls,
+            })
+            summary_parts.append(f"{idx}.{label}({params_text})")
+
+        detail["image_preprocess_pipeline_steps"] = steps
+        detail["image_preprocess_pipeline_summary"] = " -> ".join(summary_parts)
         
     def _handle_logs_page(self, query: dict, path: str):
         """Log Viewer 頁面"""
@@ -3272,6 +3377,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     otsu_offset=self.inferencer.config.otsu_offset,
                     enable_panel_polygon=self.inferencer.config.enable_panel_polygon,
                     edge_threshold_px=self.inferencer.config.edge_threshold_px,
+                    image_preprocess_pipeline=getattr(self.inferencer.config, "image_preprocess_pipeline", []),
                 )
                 _, polygon = detect_panel_polygon(image, pre_cfg)
                 if polygon is None and hasattr(self.inferencer, "_rect_polygon_from_bounds"):
@@ -4219,6 +4325,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
 
             inference_log = InferenceLogCapture.stop_capture()
+            from capi_image_preprocess_lab import summarize_preprocess_timings
+            preprocess_timing = summarize_preprocess_timings(
+                getattr(r, "preprocess_steps", []) for r in results
+            )
 
             cls.db.update_record_for_rerun(
                 record_id=record_id,
@@ -4233,6 +4343,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 inference_log=inference_log,
                 omit_overexposed=int(omit_overexposed),
                 omit_overexposure_info=omit_overexposure_info if omit_overexposure_info else "",
+                image_preprocess_pipeline=getattr(
+                    getattr(inferencer, "config", None),
+                    "image_preprocess_pipeline",
+                    [],
+                ),
+                image_preprocess_timing=preprocess_timing,
             )
 
             with cls._rerun_lock:
@@ -5152,6 +5268,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _handle_train_new_select_page(self):
         """GET /train/new/select — Step 2 / 6: choose panel training data."""
         from urllib.parse import parse_qs, urlparse
+        from capi_image_preprocess_lab import get_default_pipeline, get_method_specs
         qs = parse_qs(urlparse(self.path).query)
         mode = (qs.get("mode") or ["full"])[0]
         target_bundle_id = (qs.get("target_bundle_id") or [""])[0]
@@ -5179,6 +5296,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             target_bundle=target_bundle,
             selected_lightings=self._scope_selected_lightings(scope),
             machine_prefix_len=self.TRAIN_NEW_MACHINE_PREFIX_LEN,
+            preprocess_methods=get_method_specs(),
+            default_preprocess_pipeline=get_default_pipeline(),
         )
         self._send_response(200, html)
 
@@ -5498,10 +5617,39 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             else:
                 panels = self.db.list_ok_panels_for_machine(machine_id, days=days)
             for panel in panels:
-                panel["image_path"] = panel.get("image_dir", "")
+                image_dir = panel.get("image_dir", "")
+                panel["image_path"] = image_dir
+                panel["preview_image_path"] = self._resolve_train_new_preview_image_path(image_dir)
             self._send_json({"panels": panels, "days": days})
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=500)
+
+    @staticmethod
+    def _resolve_train_new_preview_image_path(path_value) -> str:
+        """Resolve a panel folder to the W0F00000_* image used by Step 2 preview."""
+        raw = str(path_value or "").strip()
+        if not raw:
+            return ""
+        path = Path(raw)
+        if path.is_file():
+            return str(path)
+        if not path.is_dir():
+            return ""
+
+        for candidate in sorted(path.iterdir(), key=lambda p: p.name):
+            if candidate.is_file() and candidate.name.upper().startswith("W0F00000_"):
+                return str(candidate)
+
+        try:
+            from capi_preprocess import filter_panel_lighting_files
+            files = filter_panel_lighting_files(path)
+            preferred = ("W0F00000", "STANDARD", "G0F00000", "R0F00000", "WGF50500")
+            for lighting in preferred:
+                if lighting in files:
+                    return str(files[lighting])
+        except Exception:
+            return ""
+        return ""
 
     @staticmethod
     def _validate_training_params(raw):
@@ -5552,6 +5700,21 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             cleaned[key] = val
         return (cleaned or None), None
 
+    @staticmethod
+    def _validate_image_preprocess_pipeline(raw):
+        """Normalize image preprocessing pipeline from Step 2.
+
+        Missing value means the current recommended default pipeline. An empty
+        list is valid and explicitly disables image preprocessing.
+        """
+        from capi_image_preprocess_lab import get_default_pipeline, normalize_preprocess_pipeline
+        try:
+            if raw is None:
+                return normalize_preprocess_pipeline(get_default_pipeline()), None
+            return normalize_preprocess_pipeline(raw), None
+        except Exception as exc:
+            return None, f"image_preprocess_pipeline invalid: {exc}"
+
     def _handle_train_new_start(self):
         """POST /api/train/new/start
 
@@ -5563,6 +5726,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "coreset_ratio": 0.1,
                 "max_epochs": 1
             },
+            "image_preprocess_pipeline": [  # optional; omitted means recommended default
+                {"method": "bilateral", "params": {"diameter": 9}}
+            ],
             "training_scope": {   # optional; omitted means full 10-unit training
                 "mode": "full" | "partial",
                 "target_bundle_id": 123,            # partial only
@@ -5612,6 +5778,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if err:
             self._send_json({"error": err}, status=400)
             return
+        image_preprocess_pipeline, err = self._validate_image_preprocess_pipeline(
+            params.get("image_preprocess_pipeline")
+        )
+        if err:
+            self._send_json({"error": err}, status=400)
+            return
 
         db = self._capi_server_instance.database
         training_scope, err = self._normalize_train_new_scope(params.get("training_scope"), db)
@@ -5654,6 +5826,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 training_params=training_params,
                 panel_modes=panel_modes,
                 training_scope=training_scope,
+                image_preprocess_pipeline=image_preprocess_pipeline,
             )
         except Exception:
             CAPIWebHandler._drop_job_runtime(job_id)
@@ -5662,7 +5835,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         thread = threading.Thread(
             target=CAPIWebHandler._train_new_preprocess_worker,
             args=(job_id, machine_id, clean_panel_paths,
-                  self._capi_server_instance, training_params, panel_modes, training_scope),
+                  self._capi_server_instance, training_params, panel_modes,
+                  training_scope, image_preprocess_pipeline),
             daemon=True, name=f"train_new_pre-{job_id}",
         )
         runtime["thread"] = thread
@@ -5699,7 +5873,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _train_new_preprocess_worker(
         job_id, machine_id, panel_paths, server_inst, training_params=None,
-        panel_modes=None, training_scope=None,
+        panel_modes=None, training_scope=None, image_preprocess_pipeline=None,
     ):
         """背景 thread：preprocess + 抽 NG → state=review。
 
@@ -5736,9 +5910,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 backbone_cache_dir=train_cfg["backbone_cache_dir"],
                 output_root=train_cfg["output_root"],
                 required_backbones=train_cfg["required_backbones"],
+                image_preprocess_pipeline=image_preprocess_pipeline or [],
             )
             apply_user_training_params(cfg, training_params, log_fn=log)
-            pre_cfg = PreprocessConfig()
+            pre_cfg = PreprocessConfig(
+                image_preprocess_pipeline=cfg.image_preprocess_pipeline,
+            )
             target_lightings = None
             target_units = None
             if training_scope and training_scope.get("mode") == "partial":
@@ -5847,6 +6024,112 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             CAPIWebHandler._decorate_tiles_with_scores(tiles, db, score_from, sort_by)
         self._send_json({"tiles": tiles})
 
+    def _handle_train_new_preprocess_pipeline_preview(self):
+        """POST /api/train/new/preprocess_pipeline_preview
+
+        Run the Step 2 image preprocessing pipeline once against either an image
+        path or the first training lighting image in a panel folder.
+        """
+        import time as _time
+        import uuid
+
+        import cv2
+
+        from capi_image_preprocess_lab import (
+            apply_preprocess_pipeline,
+            make_diff_image,
+            normalize_preprocess_pipeline,
+        )
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            data = json.loads(body) if body else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON body"}, status=400)
+            return
+
+        raw_path = str(data.get("image_path") or data.get("panel_path") or "").strip()
+        if not raw_path:
+            self._send_json({"error": "請提供圖片路徑或 panel 資料夾路徑"}, status=400)
+            return
+
+        try:
+            pipeline = normalize_preprocess_pipeline(data.get("image_preprocess_pipeline", []))
+        except Exception as exc:
+            self._send_json({"error": f"前處理流程無效: {exc}"}, status=400)
+            return
+
+        source_path = Path(raw_path)
+        if not source_path.exists():
+            self._send_json({"error": f"路徑不存在: {source_path}"}, status=400)
+            return
+
+        if source_path.is_dir():
+            resolved_preview = self._resolve_train_new_preview_image_path(source_path)
+            if not resolved_preview:
+                self._send_json({"error": f"資料夾內找不到可訓練 lighting 圖: {source_path}"}, status=400)
+                return
+            image_path = Path(resolved_preview)
+        elif source_path.is_file():
+            image_path = source_path
+        else:
+            self._send_json({"error": f"不是圖片檔或資料夾: {source_path}"}, status=400)
+            return
+
+        try:
+            start = _time.time()
+            image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+            if image is None:
+                self._send_json({"error": f"無法讀取圖片: {image_path}"}, status=400)
+                return
+
+            result = apply_preprocess_pipeline(image, pipeline)
+            processed = result["image"]
+            diff = make_diff_image(image, processed)
+
+            if CAPIWebHandler._debug_heatmap_dir is None:
+                CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
+            debug_dir = CAPIWebHandler._debug_heatmap_dir
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", image_path.stem)[:80] or "image"
+            token = uuid.uuid4().hex[:8]
+            processed_filename = f"train_preprocess_preview_{safe_stem}_{token}.png"
+            diff_filename = f"train_preprocess_preview_{safe_stem}_{token}_diff.png"
+            processed_path = debug_dir / processed_filename
+            diff_path = debug_dir / diff_filename
+
+            if not cv2.imwrite(str(processed_path), processed):
+                self._send_json({"error": "處理後圖片寫入失敗"}, status=500)
+                return
+            if not cv2.imwrite(str(diff_path), diff):
+                self._send_json({"error": "差異圖寫入失敗"}, status=500)
+                return
+
+            h, w = image.shape[:2]
+            channels = 1 if image.ndim == 2 else image.shape[2]
+            self._send_json({
+                "success": True,
+                "input_path": str(source_path),
+                "image_path": str(image_path),
+                "image_name": image_path.name,
+                "image_size": [w, h],
+                "channels": channels,
+                "input_dtype": str(image.dtype),
+                "pipeline": result["pipeline"],
+                "steps": result["steps"],
+                "processing_time": round(_time.time() - start, 3),
+                "original_url": "/api/debug/serve-image?path=" + urllib.parse.quote(str(image_path)),
+                "processed_url": f"/debug/heatmaps/{processed_filename}",
+                "diff_url": f"/debug/heatmaps/{diff_filename}",
+                "output_path": str(processed_path),
+                "diff_path": str(diff_path),
+            })
+        except Exception as exc:
+            logger.error("[train/new] preprocessing pipeline preview failed: %s", exc, exc_info=True)
+            self._send_json({"error": f"前處理預覽失敗: {exc}"}, status=500)
+
     def _handle_train_new_preprocess_preview(self):
         """GET /api/train/new/preprocess_preview?job_id=X&lighting=Y
 
@@ -5878,7 +6161,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_binary(str(preview_path))
             return
 
-        preprocess_cfg = PreprocessConfig()
+        preprocess_cfg = PreprocessConfig(
+            image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
+        )
         panel_paths = [Path(p) for p in job.get("panel_paths", [])]
         panel_modes = job.get("panel_modes") or ["full"] * len(panel_paths)
         # corners_only panel 只有 4 個尖角 tile，畫前處理預覽會缺長邊與 inner，
@@ -6140,6 +6425,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 output_root=train_cfg["output_root"],
                 backbone_cache_dir=train_cfg["backbone_cache_dir"],
                 required_backbones=train_cfg["required_backbones"],
+                image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
                 batch_size=patchcore_params.get("batch_size", 8),
                 image_size=tuple(patchcore_params.get("image_size", (512, 512))),
                 coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
@@ -7068,6 +7354,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 output_root=train_cfg["output_root"],
                 backbone_cache_dir=train_cfg["backbone_cache_dir"],
                 required_backbones=train_cfg["required_backbones"],
+                image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
                 batch_size=patchcore_params.get("batch_size", 8),
                 image_size=tuple(patchcore_params.get("image_size", (512, 512))),
                 coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
@@ -7082,7 +7369,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             stats = preprocess_panels_to_pool(
                 job_id=job_id,
                 cfg=cfg,
-                preprocess_cfg=PreprocessConfig(),
+                preprocess_cfg=PreprocessConfig(
+                    image_preprocess_pipeline=cfg.image_preprocess_pipeline,
+                ),
                 db=db,
                 thumb_dir=thumb_root,
                 log=_log,
@@ -7334,6 +7623,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 machine_id=machine_id,
                 panel_paths=[],
                 over_review_root=Path(".tmp/_unused"),
+                image_preprocess_pipeline=old_manifest.get("image_preprocess_pipeline") or [],
                 batch_size=patchcore_params.get("batch_size", 32),
                 image_size=tuple(patchcore_params.get("image_size", (512, 512))),
                 coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),

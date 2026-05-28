@@ -5,9 +5,13 @@
 """
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Iterable
+from typing import Optional, Tuple, List, Dict, Iterable, Any
+import logging
 import numpy as np
 import cv2
+
+
+logger = logging.getLogger("capi.preprocess")
 
 
 @dataclass
@@ -22,6 +26,7 @@ class PreprocessConfig:
     # 內側推回來，避免 edge.pt 學到黑色背景邊界。
     # None → tile_size // 2；0 → 關閉額外 edge anchor。
     outer_edge_extend: Optional[int] = None
+    image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self):
         if self.outer_edge_extend is None:
@@ -37,6 +42,8 @@ class TileResult:
     coverage: float
     zone: str  # "inner" | "edge" | "outside"
     center_dist_to_edge: float
+    original_image: Optional[np.ndarray] = field(default=None, repr=False)
+    preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
     # 4 個 outer-extension 角 + 4 個 inner-edge 角；訓練 wizard 的「corners-only」
     # panel 模式只收 is_corner=True 的 tile（只給 edge 模型補強用）。
     is_corner: bool = False
@@ -50,6 +57,8 @@ class PanelPreprocessResult:
     panel_polygon: Optional[np.ndarray]
     tiles: List[TileResult] = field(default_factory=list)
     polygon_detection_failed: bool = False
+    preprocess_steps: List[Dict[str, Any]] = field(default_factory=list)
+    preprocess_total_ms: float = 0.0
 
 
 LIGHTING_PREFIXES = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
@@ -490,6 +499,24 @@ def preprocess_panel_image(
     img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise FileNotFoundError(f"無法讀取圖片: {image_path}")
+    original_img = img.copy()
+    normalized_pipeline: List[Dict[str, Any]] = []
+    preprocess_steps: List[Dict[str, Any]] = []
+    preprocess_total_ms = 0.0
+    if config.image_preprocess_pipeline:
+        from capi_image_preprocess_lab import apply_preprocess_pipeline, describe_preprocess_pipeline
+        logger.info("[preprocess] pipeline: %s", describe_preprocess_pipeline(config.image_preprocess_pipeline))
+        pipeline_result = apply_preprocess_pipeline(img, config.image_preprocess_pipeline)
+        img = pipeline_result["image"]
+        normalized_pipeline = pipeline_result["pipeline"]
+        preprocess_steps = pipeline_result["steps"]
+        preprocess_total_ms = float(pipeline_result.get("total_elapsed_ms") or 0.0)
+        for step in pipeline_result["steps"]:
+            logger.info(
+                "[preprocess] step %d %s params=%s elapsed=%.3fms stats=%s",
+                step["index"], step["method_label"], step["applied_params"],
+                float(step.get("elapsed_ms") or 0.0), step["stats"],
+            )
 
     if reference_polygon is not None:
         # 沿用 reference polygon；只需 bbox，跳過 polyfit 節省運算
@@ -509,9 +536,18 @@ def preprocess_panel_image(
             panel_polygon=None,
             tiles=[],
             polygon_detection_failed=True,
+            preprocess_steps=preprocess_steps,
+            preprocess_total_ms=preprocess_total_ms,
         )
 
-    tiles = _generate_tiles(img, bbox, polygon, config)
+    tiles = _generate_tiles(
+        img,
+        bbox,
+        polygon,
+        config,
+        original_img=original_img,
+        preprocess_pipeline=normalized_pipeline,
+    )
     return PanelPreprocessResult(
         image_path=image_path,
         lighting=lighting,
@@ -519,6 +555,8 @@ def preprocess_panel_image(
         panel_polygon=polygon,
         tiles=tiles,
         polygon_detection_failed=polygon_failed,
+        preprocess_steps=preprocess_steps,
+        preprocess_total_ms=preprocess_total_ms,
     )
 
 
@@ -564,6 +602,8 @@ def _generate_tiles(
     bbox: Tuple[int, int, int, int],
     polygon: Optional[np.ndarray],
     config: PreprocessConfig,
+    original_img: Optional[np.ndarray] = None,
+    preprocess_pipeline: Optional[List[Dict[str, Any]]] = None,
 ) -> List[TileResult]:
     """在 bbox 範圍內走格子 + edge anchors，切 tile 並分類 zone。
 
@@ -645,6 +685,11 @@ def _generate_tiles(
             coverage=cov,
             zone=zone,
             center_dist_to_edge=dist,
+            original_image=(
+                original_img[ty:ty + ts, tx:tx + ts].copy()
+                if original_img is not None else None
+            ),
+            preprocess_pipeline=list(preprocess_pipeline or []),
             is_corner=_is_corner(tx, ty) if is_corner_override is None else is_corner_override,
         ))
         tid += 1
