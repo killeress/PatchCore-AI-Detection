@@ -33,6 +33,44 @@ def test_preprocess_panel_image_with_reference_polygon():
     np.testing.assert_array_almost_equal(result.panel_polygon, ref)
 
 
+def test_preprocess_panel_image_keeps_original_tiles_when_pipeline_enabled():
+    cfg = PreprocessConfig(
+        tile_size=256,
+        image_preprocess_pipeline=[
+            {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
+            {"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}},
+        ],
+    )
+    result = preprocess_panel_image(FIXTURE, "STANDARD", cfg)
+    assert result.tiles
+    tile = result.tiles[0]
+    assert tile.original_image is not None
+    assert tile.preprocess_pipeline
+    assert tile.original_image.shape == tile.image.shape
+    assert len(result.preprocess_steps) == 2
+    assert result.preprocess_total_ms >= 0.0
+    assert all("elapsed_ms" in step for step in result.preprocess_steps)
+
+
+def test_preprocess_timing_summary_aggregates_steps():
+    from capi_image_preprocess_lab import summarize_preprocess_timings
+
+    summary = summarize_preprocess_timings([
+        [
+            {"index": 1, "method": "gaussian", "method_label": "高斯平滑", "applied_params": {"kernel_size": 5, "sigma": 1.0}, "elapsed_ms": 2.0},
+            {"index": 2, "method": "laplace_sharpen", "method_label": "Laplace 銳化", "applied_params": {"kernel_size": 3, "strength": 0.5}, "elapsed_ms": 3.0},
+        ],
+        [
+            {"index": 1, "method": "gaussian", "method_label": "高斯平滑", "applied_params": {"kernel_size": 5, "sigma": 1.0}, "elapsed_ms": 4.0},
+        ],
+    ])
+
+    assert summary["total_elapsed_ms"] == pytest.approx(9.0)
+    assert summary["steps"][0]["calls"] == 2
+    assert summary["steps"][0]["elapsed_ms_total"] == pytest.approx(6.0)
+    assert summary["steps"][0]["elapsed_ms_avg"] == pytest.approx(3.0)
+
+
 def test_preprocess_panel_folder_uses_reference_polygon(tmp_path):
     # 複製 fixture 5 份模擬不同 lighting
     for lighting in ["STANDARD", "G0F00000", "R0F00000", "W0F00000", "WGF50500"]:

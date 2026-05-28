@@ -1,6 +1,14 @@
 {% extends "base.html" %}
 {% block title %}訓練完成 · {{ machine_id }}{% endblock %}
 {% block content %}
+{% set grade_labels = {
+  "excellent": "優秀",
+  "good": "良好",
+  "fair": "普通",
+  "poor": "偏弱",
+  "fail": "失敗",
+  "n/a": "無資料"
+} %}
 {# 訓練結果報告 — 揭露 manifest.json 中所有有意義的指標：
    - 整體 AUROC + grade 作為一眼可讀的健康分數
    - 每 unit 的 AUROC 條 + NG 抓取率 + 分離度（ng_median - train_max）+ 耗時
@@ -8,13 +16,13 @@
 #}
 <div class="d5-page">
   <div class="d5-hero">
-    <div class="d5-hero-tag">// TRAINING REPORT · STEP 6 / 6</div>
+    <div class="d5-hero-tag">// 訓練報告 · Step 6 / 6</div>
     <h1 class="d5-hero-title">
       <span class="d5-hero-check">▰</span>
       訓練完成
     </h1>
     <div class="d5-hero-machine">
-      <span class="d5-meta-label">MACHINE</span>
+      <span class="d5-meta-label">機種</span>
       <span class="d5-meta-machine">{{ machine_id }}</span>
       <span class="d5-meta-sep">·</span>
       <span class="d5-meta-time">{{ trained_at }}</span>
@@ -25,26 +33,26 @@
   <div class="d5-stats">
     {# AUROC 卡片：用顏色強烈表達 grade（excellent/good/fair/poor/fail） #}
     <div class="d5-stat d5-stat-hero d5-grade-{{ overall_auroc_grade_slug }}">
-      <div class="d5-stat-label">OVERALL AUROC</div>
+      <div class="d5-stat-label">整體 AUROC</div>
       <div class="d5-stat-value">
         {% if overall_auroc is not none %}{{ "%.4f"|format(overall_auroc) }}{% else %}—{% endif %}
       </div>
       <div class="d5-stat-sub">
-        <span class="d5-grade-badge">{{ overall_auroc_grade|upper }}</span>
+        <span class="d5-grade-badge">{{ grade_labels.get((overall_auroc_grade or "n/a")|lower, overall_auroc_grade|upper) }}</span>
         <span class="d5-stat-hint">{{ success_units }}/10 子模型平均</span>
       </div>
     </div>
     <div class="d5-stat">
-      <div class="d5-stat-label">TRAINING TIME</div>
+      <div class="d5-stat-label">訓練耗時</div>
       <div class="d5-stat-value">
         {% set _m = (total_elapsed_seconds // 60)|int %}
         {% set _s = (total_elapsed_seconds % 60)|int %}
-        {{ _m }}<span class="d5-stat-unit">m</span> {{ "%02d"|format(_s) }}<span class="d5-stat-unit">s</span>
+        {{ _m }}<span class="d5-stat-unit">分</span> {{ "%02d"|format(_s) }}<span class="d5-stat-unit">秒</span>
       </div>
-      <div class="d5-stat-sub"><span class="d5-stat-hint">10 unit 累計耗時</span></div>
+      <div class="d5-stat-sub"><span class="d5-stat-hint">10 個子模型累計耗時</span></div>
     </div>
     <div class="d5-stat">
-      <div class="d5-stat-label">BUNDLE SIZE</div>
+      <div class="d5-stat-label">模型包大小</div>
       <div class="d5-stat-value">
         {{ "%.1f"|format(total_size_mb) }}<span class="d5-stat-unit">MB</span>
       </div>
@@ -55,12 +63,12 @@
   {# 訓練設定：來源 panel 與 PatchCore 超參數 #}
   <div class="d5-section">
     <div class="d5-section-head">
-      <span class="d5-section-tag">// CONFIG</span>
+      <span class="d5-section-tag">// 訓練設定</span>
       <h2 class="d5-section-title">訓練設定</h2>
     </div>
     <div class="d5-config-grid">
       <div class="d5-config-block">
-        <div class="d5-config-label">SOURCE PANELS · {{ panel_count }} 片</div>
+        <div class="d5-config-label">來源 panel · {{ panel_count }} 片</div>
         <div class="d5-glass-list">
           {% for gid in panel_glass_ids %}
             <span class="d5-glass-chip">
@@ -71,7 +79,7 @@
         </div>
       </div>
       <div class="d5-config-block">
-        <div class="d5-config-label">PATCHCORE PARAMS</div>
+        <div class="d5-config-label">PatchCore 參數</div>
         <dl class="d5-params">
           <dt>batch_size</dt><dd>{{ patchcore_params.get("batch_size", "—") }}</dd>
           <dt>coreset_ratio</dt><dd>{{ patchcore_params.get("coreset_ratio", "—") }}</dd>
@@ -90,7 +98,7 @@
   {# 10 子模型詳細報告 — 加 AUROC 視覺化條、NG 抓取率、分離度 #}
   <div class="d5-section">
     <div class="d5-section-head">
-      <span class="d5-section-tag">// MODELS · 10 UNITS</span>
+      <span class="d5-section-tag">// 子模型 · 10 組</span>
       <h2 class="d5-section-title">子模型品質明細</h2>
     </div>
     <div class="d5-table-wrap">
@@ -98,15 +106,15 @@
         <thead>
           <tr>
             <th class="d5-th-num">#</th>
-            <th>Lighting</th>
-            <th>Zone</th>
+            <th>光源</th>
+            <th>區域</th>
             <th>AUROC</th>
             <th>NG 攔截率</th>
             <th class="d5-th-num">分離度</th>
-            <th class="d5-th-num">Threshold</th>
-            <th class="d5-th-num">Train tiles</th>
+            <th class="d5-th-num">門檻</th>
+            <th class="d5-th-num">訓練 tile</th>
             <th class="d5-th-num">耗時</th>
-            <th class="d5-th-num">Size</th>
+            <th class="d5-th-num">大小</th>
           </tr>
         </thead>
         <tbody>
@@ -124,10 +132,10 @@
                          style="width: {{ (info.auroc * 100)|round(1) }}%"></div>
                   </div>
                   <span class="d5-auroc-val">{{ "%.3f"|format(info.auroc) }}</span>
-                  <span class="d5-mini-grade d5-grade-{{ info.auroc_grade_slug }}">{{ info.auroc_grade }}</span>
+                  <span class="d5-mini-grade d5-grade-{{ info.auroc_grade_slug }}">{{ grade_labels.get((info.auroc_grade or "n/a")|lower, info.auroc_grade) }}</span>
                 </div>
               {% else %}
-                <span class="d5-na">n/a</span>
+                <span class="d5-na">無資料</span>
               {% endif %}
             </td>
             <td>
@@ -140,7 +148,7 @@
                     <span class="d5-catch-pct d5-catch-{{ catch_cls }}">{{ rate_pct }}%</span>
                   {% endif %}
                   {% if info.ng_fallback %}
-                    <span class="d5-catch-tag" title="該 zone NG 樣本不足，退回該 lighting 全部 NG（含他 zone 樣本）">FB</span>
+                    <span class="d5-catch-tag" title="該區域 NG 樣本不足，退回該光源全部 NG（含其他區域樣本）">回退</span>
                   {% endif %}
                 </div>
               {% else %}
@@ -158,7 +166,7 @@
             <td class="d5-td-num">{{ info.train }}</td>
             <td class="d5-td-num d5-cell-muted">
               {% if info.elapsed_seconds %}
-                {{ (info.elapsed_seconds // 60)|int }}m{{ "%02d"|format((info.elapsed_seconds % 60)|int) }}s
+                {{ (info.elapsed_seconds // 60)|int }}分{{ "%02d"|format((info.elapsed_seconds % 60)|int) }}秒
               {% else %}—{% endif %}
             </td>
             <td class="d5-td-num d5-cell-muted">{{ "%.1f"|format(info.size_mb) }} MB</td>
@@ -168,19 +176,19 @@
       </table>
     </div>
     <div class="d5-legend">
-      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-excellent"></span>excellent ≥ .95</span>
-      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-good"></span>good ≥ .85</span>
-      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-fair"></span>fair ≥ .75</span>
-      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-poor"></span>poor ≥ .60</span>
-      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-fail"></span>fail &lt; .60</span>
+      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-excellent"></span>優秀 ≥ .95</span>
+      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-good"></span>良好 ≥ .85</span>
+      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-fair"></span>普通 ≥ .75</span>
+      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-poor"></span>偏弱 ≥ .60</span>
+      <span class="d5-legend-item"><span class="d5-legend-sw d5-grade-fail"></span>失敗 &lt; .60</span>
       <span class="d5-legend-sep">·</span>
-      <span class="d5-legend-hint">分離度 = NG 中位數 − Train max；越大表示模型越能區分異常</span>
+      <span class="d5-legend-hint">分離度 = NG 中位數 − 訓練最大分；越大表示模型越能區分異常</span>
     </div>
   </div>
 
   {# 部署提示 + 操作 #}
   <div class="d5-deploy">
-    <div class="d5-deploy-tag">// DEPLOY</div>
+    <div class="d5-deploy-tag">// 部署</div>
     <div class="d5-deploy-body">
       <ol class="d5-deploy-steps">
         <li>到 <strong>模型庫</strong> 頁面把此 bundle 設為啟用</li>
@@ -188,7 +196,7 @@
         <li>FTP 上傳 ZIP 至 production 對應目錄</li>
       </ol>
       <div class="d5-deploy-bundle">
-        <span class="d5-meta-label">BUNDLE</span>
+        <span class="d5-meta-label">模型包</span>
         <code>{{ bundle_path }}</code>
       </div>
     </div>

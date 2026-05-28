@@ -1,4 +1,5 @@
 """Verify schema migration adds scratch columns to existing DB."""
+import json
 import sqlite3
 from pathlib import Path
 
@@ -26,6 +27,10 @@ def test_fresh_db_has_scratch_columns(tmp_path):
 
     image_cols = _get_columns(db_path, "image_results")
     assert "scratch_filter_count" in image_cols
+
+    record_cols = _get_columns(db_path, "inference_records")
+    assert "image_preprocess_pipeline" in record_cols
+    assert "image_preprocess_timing" in record_cols
 
 
 def test_existing_db_migrated(tmp_path):
@@ -170,6 +175,48 @@ def test_scratch_fields_persist(tmp_path):
         assert row[1] == 1
 
 
+def test_record_preprocess_pipeline_persists(tmp_path):
+    db = CAPIDatabase(str(tmp_path / "preprocess_record.db"))
+    pipeline = [
+        {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
+        {"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}},
+    ]
+    timing = {
+        "total_elapsed_ms": 12.5,
+        "steps": [
+            {
+                "index": 1,
+                "method": "bilateral",
+                "method_label": "雙邊濾波",
+                "applied_params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0},
+                "calls": 1,
+                "elapsed_ms_total": 12.5,
+                "elapsed_ms_avg": 12.5,
+            }
+        ],
+    }
+
+    db.save_inference_record(
+        glass_id="G1", model_id="M1", machine_no="1",
+        resolution=(1920, 1080),
+        machine_judgment="OK", ai_judgment="OK",
+        image_dir="/fake",
+        total_images=1, ng_images=0, ng_details="",
+        request_time="2026-05-28T10:00:00",
+        response_time="2026-05-28T10:00:05",
+        processing_seconds=5.0,
+        image_preprocess_pipeline=pipeline,
+        image_preprocess_timing=timing,
+    )
+
+    with sqlite3.connect(tmp_path / "preprocess_record.db") as c:
+        raw_pipeline, raw_timing = c.execute(
+            "SELECT image_preprocess_pipeline, image_preprocess_timing FROM inference_records"
+        ).fetchone()
+    assert json.loads(raw_pipeline) == pipeline
+    assert json.loads(raw_timing)["total_elapsed_ms"] == pytest.approx(12.5)
+
+
 def test_scratch_fields_persist_on_rerun(tmp_path):
     """update_record_for_rerun must also write scratch fields."""
     db = CAPIDatabase(str(tmp_path / "rerun.db"))
@@ -190,6 +237,21 @@ def test_scratch_fields_persist_on_rerun(tmp_path):
         ai_judgment="OK",
         total_images=1, ng_images=0, ng_details="",
         processing_seconds=3.0,
+        image_preprocess_pipeline=[
+            {"method": "laplace_sharpen", "params": {"kernel_size": 3, "strength": 0.5}},
+        ],
+        image_preprocess_timing={
+            "total_elapsed_ms": 7.5,
+            "steps": [{
+                "index": 1,
+                "method": "laplace_sharpen",
+                "method_label": "Laplace 銳化",
+                "applied_params": {"kernel_size": 3, "strength": 0.5},
+                "calls": 1,
+                "elapsed_ms_total": 7.5,
+                "elapsed_ms_avg": 7.5,
+            }],
+        },
         image_results_data=[{
             "image_path": "/fake/x.jpg", "image_name": "x.jpg",
             "image_width": 512, "image_height": 512,
@@ -217,3 +279,8 @@ def test_scratch_fields_persist_on_rerun(tmp_path):
         ).fetchone()
         assert row[0] == pytest.approx(0.77)
         assert row[1] == 1
+        raw_pipeline, raw_timing = c.execute(
+            "SELECT image_preprocess_pipeline, image_preprocess_timing FROM inference_records"
+        ).fetchone()
+        assert json.loads(raw_pipeline)[0]["method"] == "laplace_sharpen"
+        assert json.loads(raw_timing)["total_elapsed_ms"] == pytest.approx(7.5)

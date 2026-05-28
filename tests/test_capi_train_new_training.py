@@ -17,6 +17,17 @@ def test_apply_user_training_params_none_is_noop():
     assert (cfg.batch_size, cfg.coreset_ratio, cfg.max_epochs) == snapshot
 
 
+def test_training_config_accepts_required_backbones():
+    from capi_train_new import TrainingConfig
+    cfg = TrainingConfig(
+        machine_id="M",
+        panel_paths=[],
+        over_review_root=Path("/r"),
+        required_backbones=["custom_backbone.pth"],
+    )
+    assert cfg.required_backbones == ["custom_backbone.pth"]
+
+
 def test_apply_user_training_params_overrides_match_keys():
     from capi_train_new import TrainingConfig, apply_user_training_params
     cfg = TrainingConfig(
@@ -338,6 +349,9 @@ def test_write_manifest_yaml(tmp_path):
         "trained_with_job_id": "j1", "panel_count": 5,
         "panel_glass_ids": ["YQ21KU218E45"],
         "edge_threshold_px": 768,
+        "image_preprocess_pipeline": [
+            {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
+        ],
         "patchcore_params": {"batch_size": 8, "image_size": [512, 512],
                              "coreset_ratio": 0.1, "max_epochs": 1},
         "tiles_per_unit": {"G0F00000-inner": {"train": 480, "ng": 30}},
@@ -348,15 +362,19 @@ def test_write_manifest_yaml(tmp_path):
     m = _json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
     assert m["machine_id"] == "GN160"
     assert m["version_schema"] == 1
+    assert m["image_preprocess_pipeline"][0]["method"] == "bilateral"
 
     write_machine_config_yaml(bundle, "GN160", {
         "G0F00000": {"inner": 0.62, "edge": 0.71},
-    })
+    }, image_preprocess_pipeline=[
+        {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
+    ])
     import yaml
     y = yaml.safe_load((bundle / "machine_config.yaml").read_text(encoding="utf-8"))
     assert y["machine_id"] == "GN160"
     assert y["model_mapping"]["G0F00000"]["inner"].endswith("G0F00000-inner.pt")
     assert y["threshold_mapping"]["G0F00000"]["inner"] == 0.62
+    assert y["image_preprocess_pipeline"][0]["method"] == "bilateral"
     # Scratch classifier 設定要寫進去，否則新架構 server 啟動時 scratch 預設空路徑會撞網路。
     assert y["scratch_classifier_enabled"] is True
     assert y["scratch_dinov2_repo_path"] == "deployment/dinov2_repo"
@@ -418,6 +436,9 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
         machine_id="GN160TEST", panel_paths=[Path("p1")],
         over_review_root=tmp_path / "or",
         output_root=tmp_path / "model",
+        image_preprocess_pipeline=[
+            {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
+        ],
     )
     bundle_dir = run_training_pipeline(
         job_id="j1", cfg=cfg, db=db,
@@ -432,6 +453,7 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     import json as _json
     manifest = _json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["trained_with_job_id"] == "j1"
+    assert manifest["image_preprocess_pipeline"][0]["method"] == "bilateral"
     assert len(trained_units) == 10
     # 應有 10 個 .pt
     pts = list(bundle_dir.glob("*.pt"))
@@ -489,6 +511,9 @@ def test_run_training_pipeline_requires_all_units(tmp_path, monkeypatch):
         machine_id="GN160TEST", panel_paths=[Path("p1")],
         over_review_root=tmp_path / "or",
         output_root=output_root,
+        image_preprocess_pipeline=[
+            {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
+        ],
     )
 
     with pytest.raises(RuntimeError, match="G0F00000-edge"):

@@ -226,6 +226,7 @@ def main() -> int:
         backbone_cache_dir=train_paths["backbone_cache_dir"],
         output_root=train_paths["output_root"],
         required_backbones=train_paths["required_backbones"],
+        image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
     )
     apply_user_training_params(cfg, job.get("training_params"), log_fn=log.info)
 

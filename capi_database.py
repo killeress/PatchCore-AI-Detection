@@ -74,6 +74,8 @@ class CAPIDatabase:
                     error_message TEXT DEFAULT '',
                     client_bomb_info TEXT DEFAULT '',
                     aoi_machine_coords TEXT DEFAULT '',
+                    image_preprocess_pipeline TEXT DEFAULT '',
+                    image_preprocess_timing TEXT DEFAULT '',
                     created_at TEXT DEFAULT (datetime('now', 'localtime'))
                 );
 
@@ -281,7 +283,8 @@ class CAPIDatabase:
                     output_bundle   TEXT,
                     error_message   TEXT,
                     training_params TEXT,
-                    training_scope  TEXT
+                    training_scope  TEXT,
+                    image_preprocess_pipeline TEXT
                 );
 
                 -- 已訓練模型 bundle 元資料
@@ -333,6 +336,8 @@ class CAPIDatabase:
             add_column_if_not_exists("inference_records", "error_message", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "client_bomb_info", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "aoi_machine_coords", "TEXT DEFAULT ''")
+            add_column_if_not_exists("inference_records", "image_preprocess_pipeline", "TEXT DEFAULT ''")
+            add_column_if_not_exists("inference_records", "image_preprocess_timing", "TEXT DEFAULT ''")
             add_column_if_not_exists("image_results", "is_bomb", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "is_bomb", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "bomb_code", "TEXT DEFAULT ''")
@@ -381,6 +386,7 @@ class CAPIDatabase:
             add_column_if_not_exists("training_jobs", "panel_modes", "TEXT")
             # 6-step wizard：完整訓練或局部重訓 scope（mode / selected_units / target_bundle_id）
             add_column_if_not_exists("training_jobs", "training_scope", "TEXT")
+            add_column_if_not_exists("training_jobs", "image_preprocess_pipeline", "TEXT")
             # 新架構 (C-10) per-tile model routing 紀錄："inner" / "edge" / "bright_spot"；v1 為 ""
             add_column_if_not_exists("tile_results", "zone", "TEXT DEFAULT ''")
 
@@ -422,6 +428,8 @@ class CAPIDatabase:
         inference_log: str = "",
         omit_overexposed: int = 0,
         omit_overexposure_info: str = "",
+        image_preprocess_pipeline: Optional[list] = None,
+        image_preprocess_timing: Optional[dict] = None,
     ) -> int:
         """
         儲存一筆完整推論記錄
@@ -452,19 +460,29 @@ class CAPIDatabase:
         with self._lock:
             conn = self._get_conn()
             try:
+                preprocess_json = (
+                    json.dumps(image_preprocess_pipeline, ensure_ascii=False)
+                    if image_preprocess_pipeline is not None else ""
+                )
+                preprocess_timing_json = (
+                    json.dumps(image_preprocess_timing, ensure_ascii=False)
+                    if image_preprocess_timing is not None else ""
+                )
                 cursor = conn.execute(
                     """INSERT INTO inference_records
                        (glass_id, model_id, machine_no, resolution_x, resolution_y,
                         machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                         ng_details, request_time, response_time, processing_seconds,
                         heatmap_dir, error_message, client_bomb_info, aoi_machine_coords,
-                        inference_log, omit_overexposed, omit_overexposure_info)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        inference_log, omit_overexposed, omit_overexposure_info,
+                        image_preprocess_pipeline, image_preprocess_timing)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (glass_id, model_id, machine_no, resolution[0], resolution[1],
                      machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                      ng_details, request_time, response_time, processing_seconds,
                      heatmap_dir, error_message, client_bomb_info, aoi_machine_coords,
-                     inference_log, omit_overexposed, omit_overexposure_info)
+                     inference_log, omit_overexposed, omit_overexposure_info,
+                     preprocess_json, preprocess_timing_json)
                 )
                 record_id = cursor.lastrowid
 
@@ -608,6 +626,8 @@ class CAPIDatabase:
         inference_log: str = "",
         omit_overexposed: int = 0,
         omit_overexposure_info: str = "",
+        image_preprocess_pipeline: Optional[list] = None,
+        image_preprocess_timing: Optional[dict] = None,
     ) -> None:
         """
         重新推論後覆蓋更新紀錄 (同一 record_id)
@@ -627,6 +647,14 @@ class CAPIDatabase:
 
                 # --- 更新主紀錄 ---
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                preprocess_json = (
+                    json.dumps(image_preprocess_pipeline, ensure_ascii=False)
+                    if image_preprocess_pipeline is not None else ""
+                )
+                preprocess_timing_json = (
+                    json.dumps(image_preprocess_timing, ensure_ascii=False)
+                    if image_preprocess_timing is not None else ""
+                )
                 cursor = conn.execute(
                     """UPDATE inference_records SET
                            ai_judgment = ?,
@@ -639,11 +667,14 @@ class CAPIDatabase:
                            error_message = ?,
                            inference_log = ?,
                            omit_overexposed = ?,
-                           omit_overexposure_info = ?
+                           omit_overexposure_info = ?,
+                           image_preprocess_pipeline = ?,
+                           image_preprocess_timing = ?
                        WHERE id = ?""",
                     (ai_judgment, total_images, ng_images, ng_details,
                      now_str, processing_seconds, heatmap_dir, error_message,
                      inference_log, omit_overexposed, omit_overexposure_info,
+                     preprocess_json, preprocess_timing_json,
                      record_id),
                 )
                 if cursor.rowcount == 0:
@@ -2436,6 +2467,7 @@ class CAPIDatabase:
         training_params: Optional[Dict[str, Any]] = None,
         panel_modes: Optional[list] = None,
         training_scope: Optional[Dict[str, Any]] = None,
+        image_preprocess_pipeline: Optional[list] = None,
     ) -> int:
         """建立一筆新的訓練 job，初始 state 為 'preprocess'。回傳 rowid。
 
@@ -2450,14 +2482,22 @@ class CAPIDatabase:
         params_json = json.dumps(training_params) if training_params is not None else None
         modes_json = json.dumps(panel_modes) if panel_modes is not None else None
         scope_json = json.dumps(training_scope) if training_scope is not None else None
+        preprocess_json = (
+            json.dumps(image_preprocess_pipeline, ensure_ascii=False)
+            if image_preprocess_pipeline is not None else None
+        )
         conn = self._get_conn()
         try:
             cur = conn.cursor()
             cur.execute(
                 """INSERT INTO training_jobs
-                   (job_id, machine_id, state, started_at, panel_paths, panel_modes, training_params, training_scope)
-                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?, ?)""",
-                (job_id, machine_id, json.dumps(panel_paths), modes_json, params_json, scope_json),
+                   (job_id, machine_id, state, started_at, panel_paths, panel_modes,
+                    training_params, training_scope, image_preprocess_pipeline)
+                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?, ?, ?)""",
+                (
+                    job_id, machine_id, json.dumps(panel_paths), modes_json,
+                    params_json, scope_json, preprocess_json,
+                ),
             )
             conn.commit()
             return cur.lastrowid
@@ -2482,6 +2522,8 @@ class CAPIDatabase:
         job["training_params"] = json.loads(raw_params) if raw_params else None
         raw_scope = job.get("training_scope")
         job["training_scope"] = json.loads(raw_scope) if raw_scope else None
+        raw_preprocess = job.get("image_preprocess_pipeline")
+        job["image_preprocess_pipeline"] = json.loads(raw_preprocess) if raw_preprocess else []
         return job
 
     def get_training_job(self, job_id: str) -> Optional[Dict]:

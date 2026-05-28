@@ -160,6 +160,7 @@ class TileInfo:
     width: int
     height: int
     image: np.ndarray = field(repr=False)
+    original_image: Optional[np.ndarray] = field(default=None, repr=False)
     mask: Optional[np.ndarray] = field(default=None, repr=False)  # 遮罩: 255=panel 內, 0=panel 外 (tile 完全在 polygon 內時為 None)
     has_exclusion: bool = False  # 是否包含排除區域
     is_bottom_edge: bool = False # 是否為底部邊緣切塊
@@ -319,6 +320,10 @@ class ImageResult:
     
     # CV 邊緣檢查結果
     edge_defects: List[EdgeDefect] = field(default_factory=list)
+
+    # Image preprocessing timing metadata for record traceability.
+    preprocess_steps: List[Dict[str, Any]] = field(default_factory=list)
+    preprocess_total_ms: float = 0.0
     
     @property
     def total_tiles(self) -> int:
@@ -1007,6 +1012,7 @@ class CAPIInferencer:
         exclusion_regions: List[ExclusionRegion],
         panel_polygon: Optional[np.ndarray] = None,
         exclusion_threshold: float = 0.0,  # 重疊比例超過此值則跳過 (0.0 = 任何重疊都跳過)
+        original_image: Optional[np.ndarray] = None,
     ) -> Tuple[List[TileInfo], int]:
         """
         將圖片切成 tile，完全跳過與排除區域重疊的 tile
@@ -1100,6 +1106,9 @@ class CAPIInferencer:
                 
                 # 擷取 tile 圖片
                 tile_img = image[y:tile_y2, x:tile_x2].copy()
+                original_tile = None
+                if original_image is not None:
+                    original_tile = original_image[y:tile_y2, x:tile_x2].copy()
 
                 # 計算 tile 的 panel mask (polygon 交集)
                 # 注意: .copy() 是必要的 — 不 copy 的話 tile.mask 會是
@@ -1125,6 +1134,7 @@ class CAPIInferencer:
                     width=tile_size,
                     height=tile_size,
                     image=tile_img,
+                    original_image=original_tile,
                     mask=tile_mask,
                     has_exclusion=False,  # 保留此欄位以免影響其他程式碼
                     is_bottom_edge=is_bottom,
@@ -1162,12 +1172,30 @@ class CAPIInferencer:
         start_time = time.time()
 
         # 載入圖片 (保持原始深度，例如 8-bit 灰階)
-        image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
-        if image is None:
+        raw_image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+        if raw_image is None:
             print(f"⚠️ 無法載入: {image_path}")
             return None
 
-        img_h, img_w = image.shape[:2]
+        img_h, img_w = raw_image.shape[:2]
+
+        processed_image = raw_image
+        preprocess_steps: List[Dict[str, Any]] = []
+        preprocess_total_ms = 0.0
+        if getattr(self.config, "image_preprocess_pipeline", None):
+            from capi_image_preprocess_lab import apply_preprocess_pipeline, describe_preprocess_pipeline
+            pipeline = self.config.image_preprocess_pipeline
+            logger.info(f"[preprocess] pipeline: {describe_preprocess_pipeline(pipeline)}")
+            pipeline_result = apply_preprocess_pipeline(raw_image, pipeline)
+            processed_image = pipeline_result["image"]
+            preprocess_steps = pipeline_result["steps"]
+            preprocess_total_ms = float(pipeline_result.get("total_elapsed_ms") or 0.0)
+            for step in pipeline_result["steps"]:
+                logger.info(
+                    "[preprocess] step %d %s params=%s elapsed=%.3fms stats=%s",
+                    step["index"], step["method_label"], step["applied_params"],
+                    float(step.get("elapsed_ms") or 0.0), step["stats"],
+                )
 
         # 計算原始物件邊界 (用於 AOI 座標映射，只算一次)
         # 黑圖 (B0F) 使用參考邊界，因為 OTSU 無法正確偵測全黑畫面的邊界
@@ -1175,11 +1203,11 @@ class CAPIInferencer:
             raw_bounds = reference_raw_bounds
             print(f"📐 {image_path.name}: 使用參考邊界 (來自白圖) → {raw_bounds}")
         else:
-            raw_bounds, _raw_binary = self._find_raw_object_bounds(image)
+            raw_bounds, _raw_binary = self._find_raw_object_bounds(raw_image)
 
         # Otsu 裁切 (同樣使用參考邊界)
         otsu_bounds, original_y2, panel_polygon = self.calculate_otsu_bounds(
-            image,
+            processed_image,
             otsu_offset_override=otsu_offset_override,
             reference_raw_bounds=reference_raw_bounds,
             reference_polygon=reference_polygon,
@@ -1193,15 +1221,16 @@ class CAPIInferencer:
         
         # 計算排除區域（使用快取的 MARK 位置）
         exclusion_regions = self.calculate_exclusion_regions(
-            image, otsu_bounds,
+            processed_image, otsu_bounds,
             cached_mark=cached_mark,
             panel_polygon=panel_polygon,
         )
         
         # 切塊
         tiles, excluded_count = self.tile_image(
-            image, otsu_bounds, exclusion_regions,
+            processed_image, otsu_bounds, exclusion_regions,
             panel_polygon=panel_polygon,
+            original_image=raw_image,
         )
         
         elapsed = time.time() - start_time
@@ -1218,6 +1247,8 @@ class CAPIInferencer:
             processing_time=elapsed,
             raw_bounds=raw_bounds,
             panel_polygon=panel_polygon,
+            preprocess_steps=preprocess_steps,
+            preprocess_total_ms=preprocess_total_ms,
         )
     
     def _apply_edge_margin(self, anomaly_map: np.ndarray, margin_px: int,
@@ -1912,6 +1943,7 @@ class CAPIInferencer:
             otsu_offset=otsu_offset_override if otsu_offset_override is not None else self.config.otsu_offset,
             enable_panel_polygon=self.config.enable_panel_polygon,
             edge_threshold_px=self.config.edge_threshold_px,
+            image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
         )
         pre_result = preprocess_panel_image(image_path, lighting, pre_cfg)
 
@@ -1952,6 +1984,7 @@ class CAPIInferencer:
                 width=ts,
                 height=ts,
                 image=tr.image,
+                original_image=tr.original_image,
                 mask=tr.mask,
                 is_bottom_edge=tr.y1 >= bottom_y_threshold,
                 is_top_edge=tr.y1 <= bbox[1],
@@ -1974,6 +2007,8 @@ class CAPIInferencer:
             raw_bounds=bbox,
             panel_polygon=polygon,
             inference_time=0.0,
+            preprocess_steps=list(getattr(pre_result, "preprocess_steps", []) or []),
+            preprocess_total_ms=float(getattr(pre_result, "preprocess_total_ms", 0.0) or 0.0),
         )
 
         t_infer_start = time.time()
@@ -4185,7 +4220,30 @@ class CAPIInferencer:
 
         tile_size = self.config.tile_size
         half = tile_size // 2
-        img_h, img_w = image.shape[:2]
+        raw_image = image
+        processed_image = raw_image
+        preprocess_steps: List[Dict[str, Any]] = []
+        preprocess_total_ms = 0.0
+        if getattr(pre_cfg, "image_preprocess_pipeline", None):
+            from capi_image_preprocess_lab import apply_preprocess_pipeline, describe_preprocess_pipeline
+            logger.info(
+                "[v2][AOI] pipeline: %s",
+                describe_preprocess_pipeline(pre_cfg.image_preprocess_pipeline),
+            )
+            pipeline_result = apply_preprocess_pipeline(raw_image, pre_cfg.image_preprocess_pipeline)
+            processed_image = pipeline_result["image"]
+            preprocess_steps = pipeline_result["steps"]
+            preprocess_total_ms = float(pipeline_result.get("total_elapsed_ms") or 0.0)
+            for step in pipeline_result["steps"]:
+                logger.info(
+                    "[v2][AOI] step %d %s params=%s elapsed=%.3fms stats=%s",
+                    step["index"], step["method_label"], step["applied_params"],
+                    float(step.get("elapsed_ms") or 0.0), step["stats"],
+                )
+        if preprocess_steps:
+            result.preprocess_steps.extend(preprocess_steps)
+            result.preprocess_total_ms += preprocess_total_ms
+        img_h, img_w = processed_image.shape[:2]
         polygon = result.panel_polygon
         if polygon is None:
             polygon = self._rect_polygon_from_bounds(result.raw_bounds)
@@ -4232,7 +4290,8 @@ class CAPIInferencer:
             ty2 = min(img_h, ty + tile_size)
             crop_w = tx2 - tx
             crop_h = ty2 - ty
-            tile_img = image[ty:ty2, tx:tx2].copy()
+            tile_img = processed_image[ty:ty2, tx:tx2].copy()
+            original_tile = raw_image[ty:ty2, tx:tx2].copy()
             tile_zone, _cov, _dist, tile_mask = classify_tile_zone(
                 (tx, ty, tx2, ty2), polygon, pre_cfg,
             )
@@ -4262,6 +4321,7 @@ class CAPIInferencer:
                 x=tx, y=ty,
                 width=crop_w, height=crop_h,
                 image=tile_img,
+                original_image=original_tile,
                 mask=tile_mask,
                 is_aoi_coord_tile=True,
                 aoi_defect_code=defect.defect_code,
@@ -6282,6 +6342,7 @@ class CAPIInferencer:
             otsu_offset=self.config.otsu_offset,
             enable_panel_polygon=self.config.enable_panel_polygon,
             edge_threshold_px=self.config.edge_threshold_px,
+            image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
         )
 
         preprocess_start = time.time()
@@ -6371,6 +6432,8 @@ class CAPIInferencer:
                 raw_bounds=raw_bounds_unoffset,
                 panel_polygon=polygon,
                 inference_time=0.0,
+                preprocess_steps=list(getattr(pre_result, "preprocess_steps", []) or []),
+                preprocess_total_ms=float(getattr(pre_result, "preprocess_total_ms", 0.0) or 0.0),
             )
 
             if bomb_info is not None:

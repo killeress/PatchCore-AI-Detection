@@ -19,7 +19,7 @@ from functools import wraps
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable, Iterable
+from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable, Iterable, Any
 import cv2
 
 from capi_dataset_export import read_manifest
@@ -88,6 +88,7 @@ class TrainingConfig:
     coreset_ratio: float = 0.1
     max_epochs: int = 1
     precision: str = "float16"
+    image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # 使用者可從 step1 表單覆寫的 PatchCore 超參數。
@@ -167,6 +168,9 @@ def preprocess_panels_to_pool(
     panel_success_corner = 0
     panel_fail = 0
     total_tiles = 0
+    if preprocess_cfg.image_preprocess_pipeline:
+        from capi_image_preprocess_lab import describe_preprocess_pipeline
+        log(f"影像前處理流程: {describe_preprocess_pipeline(preprocess_cfg.image_preprocess_pipeline)}")
 
     for idx, (panel_dir, mode) in enumerate(zip(cfg.panel_paths, panel_modes), 1):
         mode_label = "完整" if mode == PANEL_MODE_FULL else "僅 4 角"
@@ -578,16 +582,19 @@ def write_thresholds(bundle_dir: Path, thresholds: Dict[str, Dict[str, float]]) 
 
 def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
                               thresholds: Dict[str, Dict[str, float]],
-                              succeeded_units: Optional[Set[Tuple[str, str]]] = None) -> None:
+                              succeeded_units: Optional[Set[Tuple[str, str]]] = None,
+                              image_preprocess_pipeline: Optional[List[Dict[str, Any]]] = None) -> None:
     """產出 bundle 內的 inference yaml。
 
     若提供 succeeded_units，只寫入 inner/edge 都成功訓練的 lighting；
     None 表示寫入全部 5×2=10 組（舊行為，測試用）。
     """
     import yaml
+    from capi_image_preprocess_lab import normalize_preprocess_pipeline
 
     model_mapping = {}
     threshold_mapping = {}
+    image_preprocess_pipeline = normalize_preprocess_pipeline(image_preprocess_pipeline or [])
     for lighting in LIGHTINGS:
         if succeeded_units is not None and not all(
             (lighting, zone) in succeeded_units for zone in ("inner", "edge")
@@ -623,6 +630,7 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
     })
     model_mapping_block = _emit({"model_mapping": model_mapping})
     threshold_mapping_block = _emit({"threshold_mapping": threshold_mapping})
+    image_preprocess_block = _emit({"image_preprocess_pipeline": image_preprocess_pipeline})
 
     content = f"""\
 # ============================================================================
@@ -643,6 +651,9 @@ otsu_offset: 5
 # default=1000 會切掉 panel 底部 1000px，新架構 panel polygon 完全失準
 otsu_bottom_crop: 0
 enable_panel_polygon: true
+
+# === 影像前處理（先套用，再切 tile / 推論）===
+{image_preprocess_block}
 
 # === 模型映射（lighting → inner/edge 模型路徑 + threshold）===
 {model_mapping_block}
@@ -1270,7 +1281,13 @@ def run_training_pipeline(
     overall_auroc_grade = _auroc_grade(overall_auroc)
 
     write_thresholds(bundle_dir, thresholds)
-    write_machine_config_yaml(bundle_dir, cfg.machine_id, thresholds, succeeded_units=succeeded_units)
+    write_machine_config_yaml(
+        bundle_dir,
+        cfg.machine_id,
+        thresholds,
+        succeeded_units=succeeded_units,
+        image_preprocess_pipeline=cfg.image_preprocess_pipeline,
+    )
     write_manifest(bundle_dir, {
         "machine_id": cfg.machine_id,
         "trained_at": datetime.now().isoformat(timespec="seconds"),
@@ -1285,6 +1302,7 @@ def run_training_pipeline(
             "max_epochs": cfg.max_epochs,
             "precision": cfg.precision,
         },
+        "image_preprocess_pipeline": cfg.image_preprocess_pipeline,
         "tiles_per_unit": tiles_per_unit,
         "model_files": model_files,
         "unit_metrics": unit_metrics,
