@@ -185,6 +185,7 @@ def test_client_summary_applies_manual_actual_ok_reviews_to_analysis_stats():
     assert summary["revival"] == 1
     assert summary["missReviewStats"]["total"] == 3
     assert summary["missReviewStats"]["reviewed"] == 2
+    assert summary["daily"]["2026-05-26"]["ricMisjudge"] == 2
     assert summary["manualTruthAdjustments"] == {
         "total": 2,
         "byCategory": {

@@ -1963,7 +1963,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             day = (rec.get("time_stamp") or "unknown")[:10]
             if day not in daily:
-                daily[day] = {"total": 0, "aoiCorrect": 0, "aiCorrect": 0, "aiMiss": 0, "aiOver": 0, "aoiOver": 0}
+                daily[day] = {
+                    "total": 0, "aoiCorrect": 0, "aiCorrect": 0,
+                    "aiMiss": 0, "aiOver": 0, "aoiOver": 0,
+                    "ricMisjudge": 0,
+                }
             daily[day]["total"] += 1
             if eqp == ric:
                 daily[day]["aoiCorrect"] += 1
@@ -1975,6 +1979,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 daily[day]["aiOver"] += 1
             if eqp == "NG" and ric == "OK":
                 daily[day]["aoiOver"] += 1
+            if manual_actual_ok:
+                daily[day]["ricMisjudge"] += 1
 
         aoiOverRate = round(aoiOver / total * 100, 1) if total > 0 else 0
         aiOverRate = round(aiOver / total * 100, 1) if total > 0 else 0
