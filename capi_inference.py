@@ -4126,6 +4126,7 @@ class CAPIInferencer:
                 otsu_offset=self.config.otsu_offset,
                 enable_panel_polygon=self.config.enable_panel_polygon,
                 edge_threshold_px=self.config.edge_threshold_px,
+                image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
             )
             aoi_tile_count = 0
             for result in preprocessed_results:
@@ -6409,6 +6410,7 @@ class CAPIInferencer:
                     width=ts,
                     height=ts,
                     image=tr.image,
+                    original_image=tr.original_image,
                     mask=tr.mask,
                     is_bottom_edge=tr.y1 >= bottom_y_threshold,
                     is_top_edge=tr.y1 <= bbox[1],

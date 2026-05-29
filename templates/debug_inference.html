@@ -1094,6 +1094,32 @@
                 </div>
             </div>
 
+            <div class="lab-param-panel" data-lab-panel="gray_band_shift">
+                <div class="coord-group">
+                    <label for="lab-gray-band-low">下界灰階</label>
+                    <input type="number" id="lab-gray-band-low" value="105" min="0" max="255" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-gray-band-high">上界灰階</label>
+                    <input type="number" id="lab-gray-band-high" value="110" min="0" max="255" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-gray-band-dark-shift">下拉灰階</label>
+                    <input type="number" id="lab-gray-band-dark-shift" value="10" min="0" max="255" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-gray-band-bright-shift">上拉灰階</label>
+                    <input type="number" id="lab-gray-band-bright-shift" value="10" min="0" max="255" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-gray-band-mode">區間內處理</label>
+                    <select id="lab-gray-band-mode">
+                        <option value="keep" selected>保持不變</option>
+                        <option value="to_high">拉到上界</option>
+                    </select>
+                </div>
+            </div>
+
             <div class="lab-param-panel" data-lab-panel="laplace_sharpen">
                 <div class="coord-group">
                     <label for="lab-laplace-kernel">Kernel Size</label>
@@ -1714,6 +1740,15 @@
                 diameter: parseInt(document.getElementById('lab-bilateral-diameter').value, 10),
                 sigma_color: parseFloat(document.getElementById('lab-bilateral-color').value),
                 sigma_space: parseFloat(document.getElementById('lab-bilateral-space').value),
+            };
+        }
+        if (method === 'gray_band_shift') {
+            return {
+                low_threshold: parseInt(document.getElementById('lab-gray-band-low').value, 10),
+                high_threshold: parseInt(document.getElementById('lab-gray-band-high').value, 10),
+                dark_shift: parseInt(document.getElementById('lab-gray-band-dark-shift').value, 10),
+                bright_shift: parseInt(document.getElementById('lab-gray-band-bright-shift').value, 10),
+                band_mode: document.getElementById('lab-gray-band-mode').value,
             };
         }
         if (method === 'laplace_sharpen') {

@@ -98,6 +98,33 @@ def test_filter_keeps_low_score():
         assert t.scratch_score == pytest.approx(0.2)
 
 
+def test_filter_prefers_original_image_for_classifier():
+    from scratch_filter import ScratchFilter
+
+    class _RecordingClassifier(_MockClassifier):
+        def __init__(self):
+            super().__init__(fixed_score=0.95, conformal_threshold=0.7)
+            self.images = []
+
+        def predict(self, image):
+            self.images.append(image)
+            return super().predict(image)
+
+    clf = _RecordingClassifier()
+    sf = ScratchFilter(clf, safety_multiplier=1.0)
+    ir = _fake_image_result_with_tiles(1)
+    processed_img = np.full((512, 512, 3), 23, dtype=np.uint8)
+    original_img = np.full((512, 512, 3), 17, dtype=np.uint8)
+    ir.tiles[0].image = processed_img
+    ir.tiles[0].original_image = original_img
+
+    sf.apply_to_image_result(ir)
+
+    assert len(clf.images) == 1
+    np.testing.assert_array_equal(clf.images[0], original_img)
+    assert ir.tiles[0].scratch_filtered is True
+
+
 def test_filter_no_anomaly_is_noop():
     from scratch_filter import ScratchFilter
     clf = _MockClassifier(fixed_score=0.99, conformal_threshold=0.7)

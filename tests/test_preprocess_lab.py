@@ -31,6 +31,37 @@ def test_gaussian_filter_returns_diff_image_with_color_map():
     assert diff.dtype == np.uint8
 
 
+def test_gray_band_shift_pushes_values_outside_band_and_can_fill_band():
+    image = np.array([[0, 104, 105, 108, 110, 111, 250]], dtype=np.uint8)
+
+    keep = apply_preprocess_method(
+        image,
+        "gray_band_shift",
+        {
+            "low_threshold": 105,
+            "high_threshold": 110,
+            "dark_shift": 10,
+            "bright_shift": 10,
+            "band_mode": "keep",
+        },
+    )
+    fill = apply_preprocess_method(
+        image,
+        "gray_band_shift",
+        {
+            "low_threshold": 105,
+            "high_threshold": 110,
+            "dark_shift": 10,
+            "bright_shift": 10,
+            "band_mode": "to_high",
+        },
+    )
+
+    np.testing.assert_array_equal(keep["image"], np.array([[0, 94, 105, 108, 110, 121, 255]], dtype=np.uint8))
+    np.testing.assert_array_equal(fill["image"], np.array([[0, 94, 110, 110, 110, 121, 255]], dtype=np.uint8))
+    assert keep["method_label"] == "分段灰階映射"
+
+
 def test_stripe_profile_correction_reduces_vertical_profile_variation():
     base = np.full((64, 96), 128, dtype=np.float32)
     stripe = (np.sin(np.arange(96) / 2.0) * 18).astype(np.float32)

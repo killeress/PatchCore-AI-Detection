@@ -44,7 +44,10 @@ class ScratchFilter:
                 continue
             t0 = time.perf_counter()
             try:
-                score = float(self._classifier.predict(tile.image))
+                classifier_image = getattr(tile, "original_image", None)
+                if classifier_image is None:
+                    classifier_image = tile.image
+                score = float(self._classifier.predict(classifier_image))
             except Exception as e:
                 logger.warning("[scratch] %s tile#%s classifier failed: %s",
                                img_name, getattr(tile, "tile_id", "?"), e)
