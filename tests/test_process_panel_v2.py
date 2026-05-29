@@ -195,6 +195,117 @@ def test_process_panel_v2_image_result_fields(tmp_path):
         assert r.tiles is not None
 
 
+def test_process_panel_v2_preserves_original_tile_for_heatmap(tmp_path):
+    """v2 should infer on preprocessed tile.image while preserving raw original_image for debug panels."""
+    img_path = _write_grey_panel_image(tmp_path, "G0F00000")
+    cfg = _make_config(tmp_path)
+
+    from capi_inference import CAPIInferencer
+    from capi_preprocess import PanelPreprocessResult, TileResult
+
+    processed_tile = np.full((512, 512), 23, dtype=np.uint8)
+    original_tile = np.full((512, 512), 17, dtype=np.uint8)
+    fake_pre_result = PanelPreprocessResult(
+        image_path=img_path,
+        lighting="G0F00000",
+        foreground_bbox=(0, 0, 1024, 1024),
+        panel_polygon=None,
+        tiles=[
+            TileResult(
+                tile_id=0,
+                x1=0, y1=0, x2=512, y2=512,
+                image=processed_tile,
+                original_image=original_tile,
+                mask=None,
+                coverage=1.0,
+                zone="inner",
+                center_dist_to_edge=999.0,
+            )
+        ],
+    )
+    amap = np.zeros((512, 512), dtype=np.float32)
+
+    with patch("capi_preprocess.preprocess_panel_folder",
+               return_value={"G0F00000": fake_pre_result}), \
+         patch.object(CAPIInferencer, "_get_model_for",
+                      return_value=MagicMock()), \
+         patch.object(CAPIInferencer, "predict_tile",
+                      return_value=(0.1, amap)) as pred:
+        inferencer = CAPIInferencer(cfg)
+        results, *_ = inferencer.process_panel(tmp_path)
+
+    assert len(results) == 1
+    assert len(results[0].tiles) == 1
+    tile = results[0].tiles[0]
+    np.testing.assert_array_equal(tile.image, processed_tile)
+    np.testing.assert_array_equal(tile.original_image, original_tile)
+    np.testing.assert_array_equal(pred.call_args.args[0].image, processed_tile)
+
+
+def test_process_panel_v2_aoi_centered_tiles_use_preprocess_pipeline(tmp_path):
+    """AOI-centered v2 tiles must infer on the same preprocessed image pipeline as grid tiles."""
+    img_path = _write_grey_panel_image(tmp_path, "G0F00000")
+    cfg = _make_config(tmp_path)
+    cfg.aoi_coord_inspection_enabled = True
+    cfg.grid_tiling_enabled = False
+    cfg.image_preprocess_pipeline = [
+        {"method": "mean", "params": {"kernel_size": 3}},
+    ]
+
+    from capi_inference import AOIReportDefect, CAPIInferencer
+    from capi_preprocess import PanelPreprocessResult
+
+    fake_pre_result = PanelPreprocessResult(
+        image_path=img_path,
+        lighting="G0F00000",
+        foreground_bbox=(0, 0, 1024, 1024),
+        panel_polygon=None,
+        tiles=[],
+    )
+    parsed_report = {
+        "G0F00000": [
+            AOIReportDefect(
+                defect_code="L01",
+                product_x=512,
+                product_y=512,
+                image_prefix="G0F00000",
+            )
+        ]
+    }
+
+    def _fake_apply_preprocess(image, pipeline):
+        return {
+            "image": np.full_like(image, 23),
+            "pipeline": pipeline,
+            "steps": [],
+            "total_elapsed_ms": 0.0,
+        }
+
+    amap = np.zeros((512, 512), dtype=np.float32)
+    with patch("capi_preprocess.preprocess_panel_folder",
+               return_value={"G0F00000": fake_pre_result}), \
+         patch("capi_image_preprocess_lab.apply_preprocess_pipeline",
+               side_effect=_fake_apply_preprocess) as apply_preprocess, \
+         patch.object(CAPIInferencer, "_parse_aoi_report_txt",
+                      return_value=parsed_report), \
+         patch.object(CAPIInferencer, "_get_model_for",
+                      return_value=MagicMock()), \
+         patch.object(CAPIInferencer, "predict_tile",
+                      return_value=(0.1, amap)) as pred:
+        inferencer = CAPIInferencer(cfg)
+        results, *_ = inferencer.process_panel(
+            tmp_path,
+            product_resolution=(1024, 1024),
+        )
+
+    apply_preprocess.assert_called_once()
+    tile = results[0].tiles[0]
+    np.testing.assert_array_equal(pred.call_args.args[0].image, np.full((512, 512), 23, dtype=np.uint8))
+    np.testing.assert_array_equal(tile.image, np.full((512, 512), 23, dtype=np.uint8))
+    assert tile.original_image is not None
+    assert np.max(tile.original_image) == 200
+
+
 def test_process_panel_v2_missing_lighting_config_fails(tmp_path):
     """A configured lighting image without inner/edge models must fail the request."""
     # Write an image with a prefix NOT in model_mapping

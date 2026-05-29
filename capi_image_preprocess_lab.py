@@ -64,6 +64,22 @@ METHOD_SPECS: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "gray_band_shift",
+        "label": "分段灰階映射",
+        "purpose": "針對指定灰階區間做階調分離：低於下界往暗處推，高於上界往亮處拉。",
+        "noise_types": ["低對比灰階差異", "背景灰階集中在窄區間", "需要凸顯區間外亮暗差的影像"],
+        "risk": "會直接改變像素灰階分布；shift 太大可能讓暗部/亮部飽和，或讓模型看到不同於訓練資料的對比。",
+        "suggested": "初始值 low=105、high=110、dark_shift=10、bright_shift=10；區間內先保持不變，再比較拉到上界的效果。",
+        "mix": "通常放在去噪前後都可實驗；正式管線前要確認 defect 沒被推到飽和或被區間壓平。",
+        "params": [
+            {"name": "下界灰階", "detail": "低於此灰階的像素會往下拉。"},
+            {"name": "上界灰階", "detail": "高於此灰階的像素會往上拉；區間內拉到上界時也會使用此值。"},
+            {"name": "下拉灰階", "detail": "低於下界時扣除的灰階數，結果會限制在 0~255。"},
+            {"name": "上拉灰階", "detail": "高於上界時增加的灰階數，結果會限制在 0~255。"},
+            {"name": "區間內處理", "detail": "下界到上界之間可保持不變，或全部拉到上界灰階。"},
+        ],
+    },
+    {
         "id": "laplace_sharpen",
         "label": "Laplace 銳化",
         "purpose": "強化邊緣與細節對比；會同步放大顆粒噪點與條紋雜訊。",
@@ -123,6 +139,19 @@ PARAM_SPECS: Dict[str, List[Dict[str, Any]]] = {
         {"key": "diameter", "type": "int", "default": 9, "min": 1, "max": 31, "step": 1},
         {"key": "sigma_color", "type": "float", "default": 35.0, "min": 1.0, "max": 200.0, "step": 1.0},
         {"key": "sigma_space", "type": "float", "default": 35.0, "min": 1.0, "max": 200.0, "step": 1.0},
+    ],
+    "gray_band_shift": [
+        {"key": "low_threshold", "type": "int", "default": 105, "min": 0, "max": 255, "step": 1},
+        {"key": "high_threshold", "type": "int", "default": 110, "min": 0, "max": 255, "step": 1},
+        {"key": "dark_shift", "type": "int", "default": 10, "min": 0, "max": 255, "step": 1},
+        {"key": "bright_shift", "type": "int", "default": 10, "min": 0, "max": 255, "step": 1},
+        {
+            "key": "band_mode", "type": "select", "default": "keep",
+            "choices": [
+                {"value": "keep", "label": "保持不變"},
+                {"value": "to_high", "label": "拉到上界"},
+            ],
+        },
     ],
     "laplace_sharpen": [
         {"key": "kernel_size", "type": "int", "default": 3, "min": 1, "max": 31, "step": 2},
@@ -195,6 +224,21 @@ def sanitize_preprocess_params(method: str, params: Dict[str, Any] | None = None
             "diameter": _int_param(params.get("diameter"), 1, 31, 9),
             "sigma_color": _float_param(params.get("sigma_color"), 1.0, 200.0, 35.0),
             "sigma_space": _float_param(params.get("sigma_space"), 1.0, 200.0, 35.0),
+        }
+    if method == "gray_band_shift":
+        low_threshold = _int_param(params.get("low_threshold"), 0, 255, 105)
+        high_threshold = _int_param(params.get("high_threshold"), 0, 255, 110)
+        if low_threshold > high_threshold:
+            low_threshold, high_threshold = high_threshold, low_threshold
+        band_mode = str(params.get("band_mode") or "keep").strip().lower()
+        if band_mode not in ("keep", "to_high"):
+            band_mode = "keep"
+        return {
+            "low_threshold": low_threshold,
+            "high_threshold": high_threshold,
+            "dark_shift": _int_param(params.get("dark_shift"), 0, 255, 10),
+            "bright_shift": _int_param(params.get("bright_shift"), 0, 255, 10),
+            "band_mode": band_mode,
         }
     if method == "laplace_sharpen":
         return {
@@ -367,6 +411,16 @@ def apply_preprocess_method(
         sigma_space = applied_params["sigma_space"]
         processed = cv2.bilateralFilter(work, diameter, sigma_color, sigma_space)
         notes.append("雙邊濾波會依亮度差異降低跨邊界平均，通常比均值/高斯更保邊。")
+    elif method == "gray_band_shift":
+        processed = _gray_band_shift(
+            work,
+            applied_params["low_threshold"],
+            applied_params["high_threshold"],
+            applied_params["dark_shift"],
+            applied_params["bright_shift"],
+            applied_params["band_mode"],
+        )
+        notes.append("分段灰階映射會擴大指定區間外的亮暗差，結果會限制在 0~255。")
     elif method == "laplace_sharpen":
         ksize = applied_params["kernel_size"]
         strength = applied_params["strength"]
@@ -465,6 +519,25 @@ def _stripe_profile_correction(
         ]
         corrected = np.dstack(channels)
     return np.clip(corrected, 0, 255).astype(np.uint8)
+
+
+def _gray_band_shift(
+    image: np.ndarray,
+    low_threshold: int,
+    high_threshold: int,
+    dark_shift: int,
+    bright_shift: int,
+    band_mode: str,
+) -> np.ndarray:
+    arr = image.astype(np.int16)
+    low_mask = arr < int(low_threshold)
+    high_mask = arr > int(high_threshold)
+    if band_mode == "to_high":
+        band_mask = (arr >= int(low_threshold)) & (arr <= int(high_threshold))
+        arr[band_mask] = int(high_threshold)
+    arr[low_mask] -= int(dark_shift)
+    arr[high_mask] += int(bright_shift)
+    return np.clip(arr, 0, 255).astype(np.uint8)
 
 
 def _stripe_plane(
