@@ -529,6 +529,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/debug/inference":
                 self._handle_debug_inference_run()
+            elif path == "/api/debug/mark-detection":
+                self._handle_debug_mark_detection()
             elif path == "/api/debug/preprocess-lab":
                 self._handle_debug_preprocess_lab()
             elif path == "/api/debug/coord-inference":
@@ -2286,7 +2288,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         import time as _time
         import cv2
         import numpy as np
-        from capi_mark_detector import detect_panel_mark_from_path
 
         # 讀取 POST body
         content_length = int(self.headers.get('Content-Length', 0))
@@ -2430,18 +2431,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             debug_dir.mkdir(parents=True, exist_ok=True)
 
             image_name = image_path.stem
-            mark_detection = {"found": False}
-            try:
-                mark_detection = detect_panel_mark_from_path(image_path, include_debug=True)
-                mark_debug_images = mark_detection.pop("_debug_images", None)
-                if mark_debug_images:
-                    for key, image in mark_debug_images.items():
-                        mark_filename = f"debug_mark_{key}_{image_name}.png"
-                        cv2.imwrite(str(debug_dir / mark_filename), image)
-                        mark_detection[f"{key}_url"] = f"/debug/heatmaps/{mark_filename}"
-            except Exception as e:
-                logger.warning(f"[DEBUG] Mark detection failed for {image_path.name}: {e}")
-                mark_detection = {"found": False, "error": str(e)}
 
             # 4. 產生 Overview 圖
             overview_img = self.inferencer.visualize_inference_result(image_path, result)
@@ -2614,7 +2603,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "tiles": tiles_data,
                 "image_prefix": img_prefix,
                 "model_name": model_name,
-                "mark_detection": mark_detection,
             }
 
             self._send_json(response_data)
@@ -2623,6 +2611,69 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"[DEBUG] Inference error: {e}", exc_info=True)
             self._send_json({"error": f"推論失敗: {str(e)}"})
+
+    def _handle_debug_mark_detection(self):
+        """API: 執行 Debug Mark 檢測（不跑 PatchCore 推論）"""
+        import time as _time
+        import cv2
+        from capi_mark_detector import detect_panel_mark_from_path
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except Exception:
+            self._send_json({"error": "Invalid JSON body"})
+            return
+
+        image_path_str = data.get("image_path", "").strip()
+        if not image_path_str:
+            self._send_json({"error": "請提供圖片路徑 (image_path)"})
+            return
+
+        image_path = Path(image_path_str)
+        if not image_path.exists():
+            self._send_json({"error": f"檔案不存在: {image_path}"})
+            return
+        if not image_path.is_file():
+            self._send_json({"error": f"不是檔案: {image_path}"})
+            return
+
+        try:
+            start = _time.time()
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            if image is None:
+                self._send_json({"error": f"無法讀取圖片: {image_path}"})
+                return
+
+            if CAPIWebHandler._debug_heatmap_dir is None:
+                CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
+            debug_dir = CAPIWebHandler._debug_heatmap_dir
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            mark_detection = detect_panel_mark_from_path(image_path, include_debug=True)
+            mark_debug_images = mark_detection.pop("_debug_images", None)
+            if mark_debug_images:
+                image_name = image_path.stem
+                ts = int(_time.time() * 1000)
+                for key, debug_image in mark_debug_images.items():
+                    mark_filename = f"debug_mark_{key}_{image_name}_{ts}.png"
+                    cv2.imwrite(str(debug_dir / mark_filename), debug_image)
+                    mark_detection[f"{key}_url"] = f"/debug/heatmaps/{mark_filename}"
+
+            h, w = image.shape[:2]
+            mark_detection.update({
+                "success": True,
+                "image_path": str(image_path),
+                "image_name": image_path.name,
+                "image_size": [w, h],
+                "processing_time": round(_time.time() - start, 3),
+            })
+            self._send_json(mark_detection)
+            logger.info(f"[DEBUG] Mark detection {image_path.name}: {mark_detection.get('text', 'NOT_FOUND')}")
+        except Exception as e:
+            logger.error(f"[DEBUG] Mark detection error: {e}", exc_info=True)
+            self._send_json({"error": f"Mark 檢測失敗: {str(e)}"})
 
     def _handle_api_debug_edge_inspect(self):
         """API: 測試單邊 CV 邊緣檢測"""

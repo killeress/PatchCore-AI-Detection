@@ -960,8 +960,27 @@
             </div>
         </div>
 
+        <div class="card"
+            style="padding: 18px 20px; margin-top: 16px; background: rgba(20, 184, 166, 0.04); border: 1px solid rgba(20, 184, 166, 0.18); display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
+            <div style="color: #5eead4; font-size: 1rem; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+                <span>🔠 Mark檢測</span>
+            </div>
+            <button class="btn-run" id="btn-mark-run" onclick="runMarkDetection()"
+                style="width: 160px; height: 44px; font-size: 1.02rem; background: linear-gradient(135deg,#14b8a6,#0f766e); box-shadow: 0 4px 15px rgba(20, 184, 166, 0.35);">
+                <span class="spinner" id="mark-spinner"></span>
+                <span id="mark-btn-text">🔠 Mark檢測</span>
+            </button>
+        </div>
+
         <!-- Error -->
         <div id="error-box" class="error-box hidden"></div>
+
+        <!-- Mark Detection -->
+        <div class="overview-section hidden" id="mark-section">
+            <h3>🔠 Mark檢測</h3>
+            <div class="coord-info-cards" id="mark-info-cards"></div>
+            <div class="coord-result-grid" id="mark-result-grid"></div>
+        </div>
 
         <!-- Result Summary -->
         <div id="result-section" class="hidden">
@@ -973,13 +992,6 @@
                 <div class="overview-img-wrapper">
                     <img id="overview-img" src="" alt="Overview" onclick="openLightbox(this.src)">
                 </div>
-            </div>
-
-            <!-- Mark Detection -->
-            <div class="overview-section" id="mark-section">
-                <h3>🔠 Mark檢測</h3>
-                <div class="coord-info-cards" id="mark-info-cards"></div>
-                <div class="coord-result-grid" id="mark-result-grid"></div>
             </div>
 
             <!-- Anomaly Tiles -->
@@ -1098,6 +1110,17 @@
                 <div class="coord-group">
                     <label for="lab-bilateral-space">Sigma Space</label>
                     <input type="number" id="lab-bilateral-space" value="35" min="1" max="200" step="1">
+                </div>
+            </div>
+
+            <div class="lab-param-panel" data-lab-panel="clahe">
+                <div class="coord-group">
+                    <label for="lab-clahe-clip-limit">Clip Limit</label>
+                    <input type="number" id="lab-clahe-clip-limit" value="2.0" min="0.1" max="20" step="0.1">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-clahe-tile-grid-size">Tile Grid Size</label>
+                    <input type="number" id="lab-clahe-tile-grid-size" value="8" min="2" max="64" step="1">
                 </div>
             </div>
 
@@ -1662,6 +1685,9 @@
     const btn = document.getElementById('btn-run');
     const btnText = document.getElementById('btn-text');
     const spinner = document.getElementById('spinner');
+    const markBtn = document.getElementById('btn-mark-run');
+    const markBtnText = document.getElementById('mark-btn-text');
+    const markSpinner = document.getElementById('mark-spinner');
     const labInput = document.getElementById('lab-image-path');
 
     // Enter key to submit
@@ -1747,6 +1773,12 @@
                 diameter: parseInt(document.getElementById('lab-bilateral-diameter').value, 10),
                 sigma_color: parseFloat(document.getElementById('lab-bilateral-color').value),
                 sigma_space: parseFloat(document.getElementById('lab-bilateral-space').value),
+            };
+        }
+        if (method === 'clahe') {
+            return {
+                clip_limit: parseFloat(document.getElementById('lab-clahe-clip-limit').value),
+                tile_grid_size: parseInt(document.getElementById('lab-clahe-tile-grid-size').value, 10),
             };
         }
         if (method === 'gray_band_shift') {
@@ -1960,6 +1992,42 @@
         }
     }
 
+    async function runMarkDetection() {
+        const imagePath = input.value.trim();
+        if (!imagePath) {
+            showError('請輸入圖片路徑');
+            return;
+        }
+
+        markBtn.disabled = true;
+        markBtnText.textContent = '檢測中...';
+        markSpinner.classList.add('active');
+        hideError();
+        document.getElementById('mark-section').classList.add('hidden');
+
+        try {
+            const resp = await fetch('/api/debug/mark-detection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image_path: imagePath }),
+            });
+
+            const data = await resp.json();
+            if (data.error) {
+                showError(data.error);
+                return;
+            }
+
+            renderMarkDetection(data);
+        } catch (err) {
+            showError('Mark 檢測請求失敗: ' + err.message);
+        } finally {
+            markBtn.disabled = false;
+            markBtnText.textContent = '🔠 Mark檢測';
+            markSpinner.classList.remove('active');
+        }
+    }
+
     function showError(msg, elementId = 'error-box') {
         const box = document.getElementById(elementId);
         if (box) {
@@ -2028,7 +2096,6 @@
         const overviewImg = document.getElementById('overview-img');
         overviewImg.src = data.overview_url + '?t=' + Date.now();
         document.getElementById('overview-section').classList.remove('hidden');
-        renderMarkDetection(data.mark_detection || {});
 
         // Tiles
         const tilesGrid = document.getElementById('tiles-grid');
@@ -2124,7 +2191,7 @@
             </div>
             <div class="summary-card">
                 <div class="label">位置 ROI</div>
-                <div class="value" style="color:var(--text);font-size:1rem;">${escapeHtml(mark.roi || '-')}</div>
+                <div class="value" style="color:var(--text);font-size:1rem;">${escapeHtml(mark.roi || '-')}<br><span style="color:var(--text-muted);font-size:0.82rem;">${escapeHtml(mark.orientation || 'normal')}</span></div>
             </div>
             <div class="summary-card">
                 <div class="label">BBox</div>
