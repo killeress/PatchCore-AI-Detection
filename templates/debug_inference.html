@@ -975,6 +975,13 @@
                 </div>
             </div>
 
+            <!-- Mark Detection -->
+            <div class="overview-section" id="mark-section">
+                <h3>🔠 Mark檢測</h3>
+                <div class="coord-info-cards" id="mark-info-cards"></div>
+                <div class="coord-result-grid" id="mark-result-grid"></div>
+            </div>
+
             <!-- Anomaly Tiles -->
             <div class="tiles-section" id="tiles-section">
                 <h3 id="tiles-header">🔍 異常 Tiles</h3>
@@ -2021,6 +2028,7 @@
         const overviewImg = document.getElementById('overview-img');
         overviewImg.src = data.overview_url + '?t=' + Date.now();
         document.getElementById('overview-section').classList.remove('hidden');
+        renderMarkDetection(data.mark_detection || {});
 
         // Tiles
         const tilesGrid = document.getElementById('tiles-grid');
@@ -2071,6 +2079,84 @@
             tilesSection.classList.add('hidden');
             okMessage.classList.remove('hidden');
         }
+    }
+
+    function renderMarkDetection(mark) {
+        const section = document.getElementById('mark-section');
+        const cards = document.getElementById('mark-info-cards');
+        const grid = document.getElementById('mark-result-grid');
+
+        section.classList.remove('hidden');
+        if (!mark || !mark.found) {
+            cards.innerHTML = `
+                <div class="summary-card">
+                    <div class="label">Mark 狀態</div>
+                    <div class="value" style="color:var(--text-muted);font-size:1rem;">未偵測到</div>
+                </div>
+                ${mark && mark.error ? `
+                <div class="summary-card" style="grid-column:span 2;">
+                    <div class="label">錯誤</div>
+                    <div class="value" style="color:var(--err);font-size:0.9rem;word-break:break-all;">${escapeHtml(mark.error)}</div>
+                </div>` : ''}
+            `;
+            grid.innerHTML = '';
+            return;
+        }
+
+        const bbox = mark.bbox || {};
+        const charInfo = (mark.chars || []).map(ch => {
+            const alts = (ch.alternatives || []).slice(0, 3).map(alt => `${escapeHtml(alt.char)}:${alt.score}`).join(' / ');
+            return `${escapeHtml(ch.char)} (${ch.score})${alts ? `<br><span style="color:var(--text-muted);font-size:0.75rem;">${alts}</span>` : ''}`;
+        }).join('<br>');
+        const charBoxesInfo = (mark.char_boxes || []).map((box, idx) => {
+            const label = mark.text && mark.text[idx] ? mark.text[idx] : `#${idx + 1}`;
+            return `${escapeHtml(label)}: (${box.x}, ${box.y}) ${box.width}×${box.height}`;
+        }).join('<br>');
+
+        cards.innerHTML = `
+            <div class="summary-card judgment-ok">
+                <div class="label">Mark 字符</div>
+                <div class="value" style="color:var(--ok);font-size:1.5rem;">${escapeHtml(mark.text || '')}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">信心分數</div>
+                <div class="value" style="color:var(--accent);">${mark.confidence ?? '-'}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">位置 ROI</div>
+                <div class="value" style="color:var(--text);font-size:1rem;">${escapeHtml(mark.roi || '-')}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">BBox</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.9rem;">(${bbox.x ?? '-'}, ${bbox.y ?? '-'}) ${bbox.width ?? '-'}×${bbox.height ?? '-'}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">點陣元件</div>
+                <div class="value" style="color:var(--text);">${mark.component_count ?? '-'}</div>
+            </div>
+            <div class="summary-card" style="grid-column:span 2;">
+                <div class="label">字元比對</div>
+                <div class="value" style="color:var(--text);font-size:0.9rem;line-height:1.5;">${charInfo}</div>
+            </div>
+            <div class="summary-card" style="grid-column:span 2;">
+                <div class="label">字元 BBox</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.85rem;line-height:1.5;">${charBoxesInfo || '-'}</div>
+            </div>
+        `;
+
+        const images = [
+            ['overview_url', 'Mark Overview'],
+            ['crop_url', 'Mark Crop'],
+            ['binary_url', 'Mark Binary'],
+        ];
+        grid.innerHTML = images
+            .filter(([key]) => mark[key])
+            .map(([key, title]) => `
+                <div class="img-card">
+                    <h4>${title}</h4>
+                    <img src="${mark[key]}?t=${Date.now()}" alt="${title}" onclick="openLightbox(this.src)">
+                </div>
+            `).join('');
     }
 
     // ═══ 座標推論 ═══════════════════════════════
