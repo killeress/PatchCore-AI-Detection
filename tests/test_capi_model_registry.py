@@ -320,6 +320,59 @@ def test_update_threshold_writes_yaml_and_json(tmp_path):
     assert thr_json["G0F00000"]["inner"] == 0.78
 
 
+def test_update_threshold_preserves_machine_config_comments(tmp_path):
+    import json as _json
+    import yaml as yaml_mod
+    from capi_database import CAPIDatabase
+    from capi_model_registry import update_threshold
+
+    bundle_dir = tmp_path / "model" / "MX-20260430"
+    bundle_dir.mkdir(parents=True)
+    (bundle_dir / "machine_config.yaml").write_text("""\
+# ============================================================================
+# CAPI 新架構 bundle 推論設定（machine_config.yaml）
+# 由 capi_train_new.write_machine_config_yaml 自動產生
+# ============================================================================
+
+machine_id: MX
+
+# === 模型映射（lighting → inner/edge 模型路徑 + threshold）===
+model_mapping:
+  G0F00000:
+    inner: x.pt
+    edge: y.pt
+
+threshold_mapping:
+  G0F00000:
+    inner: 0.5  # 保留 inner 註解
+    edge: 0.5
+
+# === OMIT 過曝偵測 ===
+omit_overexposure_mean_threshold: 82
+""", encoding="utf-8")
+    (bundle_dir / "thresholds.json").write_text(
+        _json.dumps({"G0F00000": {"inner": 0.5, "edge": 0.5}})
+    )
+
+    db = CAPIDatabase(tmp_path / "test.db")
+    bid = db.register_model_bundle({
+        "machine_id": "MX", "bundle_path": str(bundle_dir),
+        "trained_at": "2026-04-30T10:00:00", "panel_count": 1,
+        "inner_tile_count": 0, "edge_tile_count": 0, "ng_tile_count": 0,
+        "bundle_size_bytes": 0, "job_id": "j1",
+    })
+
+    update_threshold(db, bid, lighting="G0F00000", zone="edge", value=0.66)
+
+    yaml_text = (bundle_dir / "machine_config.yaml").read_text(encoding="utf-8")
+    assert "# CAPI 新架構 bundle 推論設定" in yaml_text
+    assert "# === OMIT 過曝偵測 ===" in yaml_text
+    assert "inner: 0.5  # 保留 inner 註解" in yaml_text
+    cfg = yaml_mod.safe_load(yaml_text)
+    assert cfg["threshold_mapping"]["G0F00000"]["inner"] == 0.5
+    assert cfg["threshold_mapping"]["G0F00000"]["edge"] == 0.66
+
+
 def test_update_threshold_rejects_bad_zone(tmp_path):
     import pytest, yaml as yaml_mod
     from capi_database import CAPIDatabase

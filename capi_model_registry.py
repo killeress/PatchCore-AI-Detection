@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import shutil
 import sqlite3
 import zipfile
@@ -21,6 +22,90 @@ def _load_yaml(path: Path) -> dict:
 
 def _dump_yaml(path: Path, data: dict) -> None:
     path.write_text(yaml.dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
+def _line_body_and_ending(line: str) -> Tuple[str, str]:
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith("\n"):
+        return line[:-1], "\n"
+    return line, ""
+
+
+def _yaml_indent(body: str) -> int:
+    return len(body) - len(body.lstrip(" "))
+
+
+def _is_yaml_blank_or_comment(body: str) -> bool:
+    stripped = body.strip()
+    return not stripped or stripped.startswith("#")
+
+
+def _replace_yaml_scalar_line(body: str, key: str, value: float) -> str:
+    m = re.match(rf"^(?P<prefix>\s*{re.escape(key)}\s*:\s*)(?P<rest>.*)$", body)
+    if not m:
+        raise ValueError(f"yaml 中找不到 threshold_mapping 對應行: {key}")
+
+    value_text = str(value)
+    rest = m.group("rest")
+    comment_idx = rest.find("#")
+    if comment_idx >= 0:
+        before_comment = rest[:comment_idx]
+        trailing_spaces = re.search(r"\s*$", before_comment).group(0)
+        if not trailing_spaces:
+            trailing_spaces = " "
+        rest = value_text + trailing_spaces + rest[comment_idx:]
+    else:
+        trailing_spaces = re.search(r"\s*$", rest).group(0)
+        rest = value_text + trailing_spaces
+    return m.group("prefix") + rest
+
+
+def _update_threshold_mapping_text(text: str, lighting: str, zone: str, value: float) -> str:
+    """只替換 threshold_mapping 內指定值，避免 yaml.dump 洗掉註解。"""
+    lines = text.splitlines(keepends=True)
+    threshold_idx = -1
+    threshold_indent = 0
+
+    for idx, line in enumerate(lines):
+        body, _ = _line_body_and_ending(line)
+        if re.match(r"^\s*threshold_mapping\s*:\s*(?:#.*)?$", body):
+            threshold_idx = idx
+            threshold_indent = _yaml_indent(body)
+            break
+    if threshold_idx < 0:
+        raise ValueError("yaml 中找不到 threshold_mapping")
+
+    lighting_idx = -1
+    lighting_indent = 0
+    lighting_pat = re.compile(rf"^\s*{re.escape(lighting)}\s*:\s*(?:#.*)?$")
+    for idx in range(threshold_idx + 1, len(lines)):
+        body, _ = _line_body_and_ending(lines[idx])
+        if _is_yaml_blank_or_comment(body):
+            continue
+        indent = _yaml_indent(body)
+        if indent <= threshold_indent:
+            break
+        if lighting_pat.match(body):
+            lighting_idx = idx
+            lighting_indent = indent
+            break
+    if lighting_idx < 0:
+        raise ValueError(f"yaml 中找不到 threshold_mapping[{lighting}][{zone}]")
+
+    zone_pat = re.compile(rf"^\s*{re.escape(zone)}\s*:")
+    for idx in range(lighting_idx + 1, len(lines)):
+        body, ending = _line_body_and_ending(lines[idx])
+        if _is_yaml_blank_or_comment(body):
+            continue
+        indent = _yaml_indent(body)
+        if indent <= lighting_indent:
+            break
+        if zone_pat.match(body):
+            lines[idx] = _replace_yaml_scalar_line(body, zone, value) + ending
+            return "".join(lines)
+
+    raise ValueError(f"yaml 中找不到 threshold_mapping[{lighting}][{zone}]")
 
 
 def invalidate_score_cache(db, scoring_bundle_id: int = None,
@@ -334,11 +419,14 @@ def update_threshold(db, bundle_id: int, lighting: str, zone: str, value: float)
         cfg = _load_yaml(yaml_path)
     except FileNotFoundError:
         raise ValueError(f"machine_config.yaml 不存在: {yaml_path}")
-    light_map = cfg.setdefault("threshold_mapping", {}).get(lighting)
+    light_map = (cfg.get("threshold_mapping") or {}).get(lighting)
     if not isinstance(light_map, dict) or zone not in light_map:
         raise ValueError(f"yaml 中找不到 threshold_mapping[{lighting}][{zone}]")
-    light_map[zone] = rounded
-    _dump_yaml(yaml_path, cfg)
+    yaml_text = yaml_path.read_text(encoding="utf-8")
+    yaml_path.write_text(
+        _update_threshold_mapping_text(yaml_text, lighting, zone, rounded),
+        encoding="utf-8",
+    )
 
     try:
         thresholds = json.loads(thr_path.read_text(encoding="utf-8"))

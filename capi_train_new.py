@@ -457,7 +457,7 @@ def train_one_patchcore(
     return candidates[0]
 
 
-DEFAULT_THRESHOLD = 0.5
+DEFAULT_THRESHOLD = 0.35
 
 
 def calibrate_threshold(ng_scores: List[float], train_max_score: float) -> float:
@@ -694,8 +694,8 @@ dust_heatmap_top_percent: 0.4
 dust_heatmap_metric: coverage
 
 # === OMIT 過曝偵測 ===
-omit_overexposure_mean_threshold: 200
-omit_overexposure_ratio_threshold: 0.5
+omit_overexposure_mean_threshold: 82
+omit_overexposure_ratio_threshold: 0.05
 
 # === B0F 黑畫面亮點偵測（無 PatchCore 模型，走二值化）===
 bright_spot_threshold: 200
@@ -1064,7 +1064,7 @@ def train_single_submodel(
     """訓練單一 (lighting, zone) unit。
 
     回傳 dict 包含：
-      - threshold: float (永遠 = DEFAULT_THRESHOLD = 0.5，calibrate 寫死)
+      - threshold: float (永遠 = DEFAULT_THRESHOLD = 0.35，calibrate 寫死)
       - metrics: dict (compute_unit_metrics 結果)
       - tile_count: int (訓練用 tile 數)
       - ng_count: int (NG 數)

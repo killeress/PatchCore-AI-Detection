@@ -271,7 +271,7 @@ def test_calibrate_threshold_returns_default():
     改為使用者在 UI 微調。
     """
     from capi_train_new import calibrate_threshold, DEFAULT_THRESHOLD
-    assert DEFAULT_THRESHOLD == 0.5
+    assert DEFAULT_THRESHOLD == 0.35
     # 不論 NG / train_max 多少，都回固定值
     assert calibrate_threshold(ng_scores=[0.5, 0.7, 0.9], train_max_score=0.4) == DEFAULT_THRESHOLD
     assert calibrate_threshold(ng_scores=[], train_max_score=0.95) == DEFAULT_THRESHOLD
@@ -374,6 +374,8 @@ def test_write_manifest_yaml(tmp_path):
     assert y["machine_id"] == "GN160"
     assert y["model_mapping"]["G0F00000"]["inner"].endswith("G0F00000-inner.pt")
     assert y["threshold_mapping"]["G0F00000"]["inner"] == 0.62
+    assert y["omit_overexposure_mean_threshold"] == 82
+    assert y["omit_overexposure_ratio_threshold"] == 0.05
     assert y["image_preprocess_pipeline"][0]["method"] == "bilateral"
     # Scratch classifier 設定要寫進去，否則新架構 server 啟動時 scratch 預設空路徑會撞網路。
     assert y["scratch_classifier_enabled"] is True
