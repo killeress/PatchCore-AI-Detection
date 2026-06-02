@@ -42,10 +42,18 @@ OVER_LABEL_MAP = {
 }
 
 TRUE_NG_LABEL = "true_ng"
+TRUE_BLACK_SPOT_LABEL = "true_black_spot"
+TRUE_WHITE_SPOT_LABEL = "true_white_spot"
+TRUE_DEFECT_LABELS = [
+    TRUE_BLACK_SPOT_LABEL,
+    TRUE_WHITE_SPOT_LABEL,
+]
 
 # Label 中文說明（供 web UI 呈現與翻圖時快速理解類別）
 LABEL_ZH = {
     "true_ng": "真實 NG",
+    "true_black_spot": "黑點",
+    "true_white_spot": "白點",
     "over_edge_false_positive": "邊緣誤判",
     "over_within_spec": "規格內",
     "over_overexposure": "曝光過度",
@@ -88,6 +96,15 @@ OVEREXPOSURE_FG_THRESHOLD = 30
 OVEREXPOSURE_MIN_FG_FRAC = 0.20
 OVEREXPOSURE_FG_MEAN = 200.0
 OVEREXPOSURE_BRIGHT200_RATIO = 0.65
+
+# true_ng 初步點狀缺陷分類。這是資料蒐集用的保守 CV 預分類：
+# 不明確就保留 true_ng，後續人工可在 dataset_gallery 轉類別。
+SPOT_MIN_AREA = 3
+SPOT_MAX_AREA = 3000
+SPOT_MAX_ASPECT = 3.0
+SPOT_MIN_CONTRAST = 12.0
+SPOT_DECISION_RATIO = 1.25
+SPOT_BG_KERNEL = 31
 
 
 def parse_datastr_per_prefix(datastr: str) -> Dict[str, str]:
@@ -294,7 +311,7 @@ def move_sample_files(
 
 def get_valid_labels() -> List[str]:
     """回傳所有合法 label 目錄名（for 手動 relabel 驗證 + 前端下拉）"""
-    return [TRUE_NG_LABEL] + sorted(OVER_LABEL_MAP.values())
+    return [TRUE_NG_LABEL] + TRUE_DEFECT_LABELS + sorted(OVER_LABEL_MAP.values())
 
 
 def delete_sample(
@@ -428,6 +445,77 @@ def is_overexposed_crop(crop: np.ndarray) -> bool:
         return False
     bright_ratio = float((fg >= 200).sum()) / fg_cnt
     return bright_ratio >= OVEREXPOSURE_BRIGHT200_RATIO
+
+
+def _spot_bg_kernel(crop_shape: Tuple[int, int]) -> int:
+    """Return an odd Gaussian kernel valid for the crop size."""
+    h, w = crop_shape[:2]
+    k = min(SPOT_BG_KERNEL, h - 1, w - 1)
+    if k % 2 == 0:
+        k -= 1
+    return max(3, k)
+
+
+def _spot_score(diff: np.ndarray) -> float:
+    """Score point-like connected components in a local contrast image."""
+    pos = diff[diff > 0]
+    if pos.size < 20:
+        return 0.0
+    peak = float(pos.max())
+    adaptive = min(float(np.percentile(pos, 95.0)), peak * 0.55)
+    threshold = max(adaptive, SPOT_MIN_CONTRAST)
+    binary = (diff >= threshold).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    best = 0.0
+    for i in range(1, num_labels):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < SPOT_MIN_AREA or area > SPOT_MAX_AREA:
+            continue
+        w = int(stats[i, cv2.CC_STAT_WIDTH])
+        h = int(stats[i, cv2.CC_STAT_HEIGHT])
+        aspect = max(w, h) / (min(w, h) + 1e-5)
+        if aspect > SPOT_MAX_ASPECT:
+            continue
+        mask = labels == i
+        contrast = float(np.mean(diff[mask])) if np.any(mask) else 0.0
+        if contrast < SPOT_MIN_CONTRAST:
+            continue
+        best = max(best, area * contrast)
+    return best
+
+
+def classify_true_ng_spot(crop: np.ndarray) -> str:
+    """Classify a true_ng crop into white/black spot when CV evidence is clear.
+
+    Returns one of true_ng / true_white_spot / true_black_spot. This is only an
+    initial collection label; ambiguous samples intentionally remain true_ng.
+    """
+    if crop is None or crop.size == 0:
+        return TRUE_NG_LABEL
+    if crop.ndim == 3:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = crop.copy()
+    if min(gray.shape[:2]) < 5:
+        return TRUE_NG_LABEL
+
+    bg_kernel = _spot_bg_kernel(gray.shape)
+    bg = cv2.GaussianBlur(gray, (bg_kernel, bg_kernel), 0)
+    gray_f = gray.astype(np.float32)
+    bg_f = bg.astype(np.float32)
+    bright_score = _spot_score(gray_f - bg_f)
+    dark_score = _spot_score(bg_f - gray_f)
+
+    if bright_score <= 0 and dark_score <= 0:
+        return TRUE_NG_LABEL
+    if bright_score >= max(dark_score * SPOT_DECISION_RATIO, SPOT_MIN_AREA * SPOT_MIN_CONTRAST):
+        return TRUE_WHITE_SPOT_LABEL
+    if dark_score >= max(bright_score * SPOT_DECISION_RATIO, SPOT_MIN_AREA * SPOT_MIN_CONTRAST):
+        return TRUE_BLACK_SPOT_LABEL
+    return TRUE_NG_LABEL
 
 
 def crop_edge_defect(img: np.ndarray, cx: int, cy: int) -> np.ndarray:
@@ -878,17 +966,22 @@ class DatasetExporter:
             defect_y = cand.edge_center_y
             sample_key = f"edge{cand.edge_defect_id}"
 
+        final_label = cand.label
+
         # true_ng 才做過曝過濾：crop 近乎全白（邊緣強光照射或整體曝光過度）
         # 對分類訓練沒有幫助，直接丟棄。
         if cand.label == TRUE_NG_LABEL and is_overexposed_crop(crop):
             row["status"] = "skipped_overexposure"
             return row
+        if cand.label == TRUE_NG_LABEL:
+            final_label = classify_true_ng_spot(crop)
+            row["label"] = final_label
 
         filename = build_sample_filename(
             glass_id=cand.glass_id, image_name=cand.image_name,
             sample_key=sample_key, inference_timestamp=cand.inference_timestamp,
         )
-        crop_rel = f"{cand.label}/{cand.prefix}/crop/{filename}"
+        crop_rel = f"{final_label}/{cand.prefix}/crop/{filename}"
         crop_dst = job_dir / crop_rel
         crop_dst.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(crop_dst), crop)
