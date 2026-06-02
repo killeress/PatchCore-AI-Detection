@@ -2486,6 +2486,95 @@ class CAPIInferencer:
 
         return (seed_y, seed_x), seed_radius, min_score
 
+    def _mask_aoi_exclude_zones_for_dust(
+        self,
+        tile_info: Optional[TileInfo],
+        anomaly_map: Optional[np.ndarray],
+        model_id: Optional[str] = None,
+    ) -> tuple:
+        """
+        AOI tile 的缺陷 seed 若不在不檢測區，dust 判定不應被不檢測區內
+        的強 heatmap 主導。回傳供 dust/COV/two-stage 使用的 anomaly_map copy。
+        """
+        if (
+            tile_info is None
+            or anomaly_map is None
+            or not getattr(tile_info, "is_aoi_coord_tile", False)
+        ):
+            return anomaly_map, False
+
+        edge_inspector = getattr(self, "edge_inspector", None)
+        edge_config = getattr(edge_inspector, "config", None) if edge_inspector else None
+        if edge_config is None:
+            return anomaly_map, False
+
+        try:
+            if model_id and hasattr(edge_config, "set_active_zones_for_product"):
+                resolution_code = model_id[5].upper() if len(model_id) >= 6 else ""
+                edge_config.set_active_zones_for_product(resolution_code)
+            active_zones = [
+                z for z in getattr(edge_config, "exclude_zones", [])
+                if getattr(z, "enabled", False)
+            ]
+        except Exception as e:
+            logger.error(f"取得不檢測區失敗: {e}", exc_info=True)
+            return anomaly_map, False
+
+        if not active_zones:
+            return anomaly_map, False
+
+        def _zone_contains(zone, x: int, y: int) -> bool:
+            return zone.x <= x <= zone.x + zone.w and zone.y <= y <= zone.y + zone.h
+
+        aoi_x = int(getattr(tile_info, "aoi_image_x", -1))
+        aoi_y = int(getattr(tile_info, "aoi_image_y", -1))
+        if aoi_x >= 0 and aoi_y >= 0:
+            if any(_zone_contains(z, aoi_x, aoi_y) for z in active_zones):
+                return anomaly_map, False
+
+        amap = np.asarray(anomaly_map)
+        if amap.ndim < 2 or amap.size == 0:
+            return anomaly_map, False
+
+        tile_x = int(getattr(tile_info, "x", 0))
+        tile_y = int(getattr(tile_info, "y", 0))
+        tile_w = max(1, int(getattr(tile_info, "width", 0) or 1))
+        tile_h = max(1, int(getattr(tile_info, "height", 0) or 1))
+        amap_h, amap_w = amap.shape[:2]
+
+        masked = amap.copy()
+        changed = False
+        for zone in active_zones:
+            zx1 = int(getattr(zone, "x", 0))
+            zy1 = int(getattr(zone, "y", 0))
+            zx2 = zx1 + int(getattr(zone, "w", 0))
+            zy2 = zy1 + int(getattr(zone, "h", 0))
+
+            ox1 = max(tile_x, zx1)
+            oy1 = max(tile_y, zy1)
+            ox2 = min(tile_x + tile_w, zx2)
+            oy2 = min(tile_y + tile_h, zy2)
+            if ox2 <= ox1 or oy2 <= oy1:
+                continue
+
+            lx1 = ox1 - tile_x
+            ly1 = oy1 - tile_y
+            lx2 = ox2 - tile_x
+            ly2 = oy2 - tile_y
+            mx1 = max(0, min(amap_w, int(np.floor(lx1 * amap_w / tile_w))))
+            my1 = max(0, min(amap_h, int(np.floor(ly1 * amap_h / tile_h))))
+            mx2 = max(0, min(amap_w, int(np.ceil(lx2 * amap_w / tile_w))))
+            my2 = max(0, min(amap_h, int(np.ceil(ly2 * amap_h / tile_h))))
+            if mx2 <= mx1 or my2 <= my1:
+                continue
+
+            masked[my1:my2, mx1:mx2] = 0
+            changed = True
+
+        if not changed:
+            return anomaly_map, False
+        return masked, True
+
     def check_dust_per_region(
         self,
         dust_mask: np.ndarray,
@@ -5893,6 +5982,7 @@ class CAPIInferencer:
         omit_overexposed: bool,
         omit_overexposure_info: str,
         cpu_workers: int = 4,
+        model_id: Optional[str] = None,
     ) -> None:
         """Apply panel-level OMIT dust filtering to PatchCore anomaly tiles."""
         if omit_image is None:
@@ -5962,12 +6052,16 @@ class CAPIInferencer:
                 if is_dust and anomaly_map is not None and dust_mask is not None:
                     top_pct = self.config.dust_heatmap_top_percent
                     metric_mode = self.config.dust_heatmap_metric
+                    anomaly_map_for_dust, exclude_zone_masked = \
+                        self._mask_aoi_exclude_zones_for_dust(tile, anomaly_map, model_id)
+                    if exclude_zone_masked:
+                        detail_text += " EXCLUDE_ZONE_HEATMAP_ZEROED"
                     aoi_seed_yx, aoi_seed_radius, aoi_seed_min_score = \
-                        self._aoi_center_seed_for_tile(tile, anomaly_map)
+                        self._aoi_center_seed_for_tile(tile, anomaly_map_for_dust)
                     has_real, real_peak_yx, overall_iou, region_details, heatmap_binary, region_labels = \
                         self.check_dust_per_region(
                             dust_mask,
-                            anomaly_map,
+                            anomaly_map_for_dust,
                             top_percent=top_pct,
                             metric=metric_mode,
                             iou_threshold=self.config.dust_heatmap_iou_threshold,
@@ -5994,7 +6088,7 @@ class CAPIInferencer:
                             f"{len(dust_regions)}dust -> REAL_NG"
                         )
                         if real_peak_yx is not None:
-                            amap_h, amap_w = anomaly_map.shape[:2]
+                            amap_h, amap_w = anomaly_map_for_dust.shape[:2]
                             tile.anomaly_peak_y = tile.y + int(real_peak_yx[0] * tile.height / amap_h)
                             tile.anomaly_peak_x = tile.x + int(real_peak_yx[1] * tile.width / amap_w)
                     else:
@@ -6007,7 +6101,7 @@ class CAPIInferencer:
                             ts_has_real, ts_peak_yx, ts_features, ts_detail = \
                                 self.check_dust_two_stage(
                                     tile.image,
-                                    anomaly_map,
+                                    anomaly_map_for_dust,
                                     dust_mask_no_ext if dust_mask_no_ext is not None else dust_mask,
                                     score,
                                 )
@@ -6023,7 +6117,7 @@ class CAPIInferencer:
                                     f" -> {ts_detail}"
                                 )
                                 if ts_peak_yx is not None:
-                                    amap_h, amap_w = anomaly_map.shape[:2]
+                                    amap_h, amap_w = anomaly_map_for_dust.shape[:2]
                                     tile.anomaly_peak_y = tile.y + int(ts_peak_yx[0] * tile.height / amap_h)
                                     tile.anomaly_peak_x = tile.x + int(ts_peak_yx[1] * tile.width / amap_w)
                             else:
@@ -6043,14 +6137,14 @@ class CAPIInferencer:
                             dm_for_debug = _ts_dust_mask_no_ext if _ts_dust_mask_no_ext is not None else dust_mask
                             tile.dust_iou_debug_image = self.generate_two_stage_debug_image(
                                 tile.image,
-                                anomaly_map,
+                                anomaly_map_for_dust,
                                 dm_for_debug,
                                 _ts_features,
                                 tile.is_suspected_dust_or_scratch,
                             )
                         else:
                             tile.dust_iou_debug_image = self.generate_dust_iou_debug_image(
-                                tile.image, anomaly_map, dust_mask,
+                                tile.image, anomaly_map_for_dust, dust_mask,
                                 heatmap_binary, overall_iou,
                                 top_pct,
                                 tile.is_suspected_dust_or_scratch,
@@ -6679,6 +6773,7 @@ class CAPIInferencer:
             omit_overexposed=omit_overexposed,
             omit_overexposure_info=omit_overexposure_info,
             cpu_workers=cpu_workers,
+            model_id=model_id,
         )
         self._apply_bomb_postprocess(results, bomb_info, product_resolution)
         self._apply_exclude_zone_postprocess(results, model_id)
