@@ -2286,6 +2286,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         import time as _time
         import cv2
         import numpy as np
+        from capi_mark_detector import detect_panel_mark_from_path
 
         # 讀取 POST body
         content_length = int(self.headers.get('Content-Length', 0))
@@ -2429,6 +2430,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             debug_dir.mkdir(parents=True, exist_ok=True)
 
             image_name = image_path.stem
+            mark_detection = {"found": False}
+            try:
+                mark_detection = detect_panel_mark_from_path(image_path, include_debug=True)
+                mark_debug_images = mark_detection.pop("_debug_images", None)
+                if mark_debug_images:
+                    for key, image in mark_debug_images.items():
+                        mark_filename = f"debug_mark_{key}_{image_name}.png"
+                        cv2.imwrite(str(debug_dir / mark_filename), image)
+                        mark_detection[f"{key}_url"] = f"/debug/heatmaps/{mark_filename}"
+            except Exception as e:
+                logger.warning(f"[DEBUG] Mark detection failed for {image_path.name}: {e}")
+                mark_detection = {"found": False, "error": str(e)}
 
             # 4. 產生 Overview 圖
             overview_img = self.inferencer.visualize_inference_result(image_path, result)
@@ -2601,6 +2614,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "tiles": tiles_data,
                 "image_prefix": img_prefix,
                 "model_name": model_name,
+                "mark_detection": mark_detection,
             }
 
             self._send_json(response_data)
