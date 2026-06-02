@@ -15,6 +15,7 @@ import pytest
 
 from capi_dataset_export import (
     CROP_SIZE, OVER_LABEL_MAP, TRUE_NG_LABEL, MANIFEST_FIELDS,
+    TRUE_BLACK_SPOT_LABEL, TRUE_WHITE_SPOT_LABEL,
     SampleCandidate, DatasetExporter,
 )
 
@@ -80,11 +81,32 @@ def test_crop_edge_defect_near_top_left_corner():
 
 from capi_dataset_export import (
     determine_label, extract_prefix, build_sample_filename, build_sample_id,
+    classify_true_ng_spot, get_valid_labels,
 )
 
 
 def test_determine_label_true_ng():
     assert determine_label(ric="NG", over_category=None) == "true_ng"
+
+
+def test_valid_labels_include_true_spot_classes():
+    labels = get_valid_labels()
+    assert TRUE_BLACK_SPOT_LABEL in labels
+    assert TRUE_WHITE_SPOT_LABEL in labels
+
+
+def test_classify_true_ng_spot_white_black_and_unknown():
+    import cv2
+
+    base = np.full((CROP_SIZE, CROP_SIZE, 3), 128, dtype=np.uint8)
+    white = base.copy()
+    cv2.circle(white, (256, 256), 8, (240, 240, 240), -1)
+    black = base.copy()
+    cv2.circle(black, (256, 256), 8, (30, 30, 30), -1)
+
+    assert classify_true_ng_spot(white) == TRUE_WHITE_SPOT_LABEL
+    assert classify_true_ng_spot(black) == TRUE_BLACK_SPOT_LABEL
+    assert classify_true_ng_spot(base) == TRUE_NG_LABEL
 
 
 def test_determine_label_over_review_category():
@@ -467,6 +489,45 @@ def test_exporter_run_end_to_end(tmp_path):
     # 7. 驗證 summary
     assert summary.total == 2
     assert summary.labels.get("over_edge_false_positive") == 2
+
+
+def test_exporter_run_preclassifies_true_ng_white_spot(tmp_path):
+    """RIC=NG 的 true_ng crop 若有明顯白點，輸出到 true_white_spot label。"""
+    import cv2
+
+    panel_dir = tmp_path / "panels" / "GLS123"
+    panel_dir.mkdir(parents=True)
+    fake_img_path = panel_dir / "G0F00000_114438.tif"
+    fake_img = np.full((1024, 1024, 3), 128, dtype=np.uint8)
+    cv2.circle(fake_img, (256, 256), 8, (240, 240, 240), -1)
+    cv2.imwrite(str(fake_img_path), fake_img)
+
+    row = _make_accuracy_row(
+        result_ric="NG",
+        over_review_id=None,
+        over_review_category=None,
+        datastr="G0F00000,NG;1;",
+    )
+    detail = _make_record_detail()
+    detail["images"][0]["image_path"] = str(fake_img_path)
+    detail["images"][0]["edge_defects"] = []
+    detail["images"].pop(1)
+
+    db = FakeDB(accuracy_rows=[row], record_details={1001: detail})
+    output = tmp_path / "out"
+    exporter = DatasetExporter(db, base_dir=str(output), path_mapping={})
+
+    summary = exporter.run(days=3, include_true_ng=True, skip_existing=True)
+
+    from capi_dataset_export import read_manifest, list_job_dirs
+    job_dir = list_job_dirs(output)[0]
+    manifest = read_manifest(job_dir / "manifest.csv")
+    sample = manifest["GLS123_G0F00000_114438_tile3"]
+
+    assert summary.labels.get(TRUE_WHITE_SPOT_LABEL) == 1
+    assert sample["label"] == TRUE_WHITE_SPOT_LABEL
+    assert sample["crop_path"].startswith(f"{TRUE_WHITE_SPOT_LABEL}/G0F00000/crop/")
+    assert (job_dir / sample["crop_path"]).exists()
 
 
 def test_exporter_run_skip_missing_source(tmp_path):
