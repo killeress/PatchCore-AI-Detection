@@ -64,6 +64,19 @@ METHOD_SPECS: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "clahe",
+        "label": "CLAHE 局部對比增強",
+        "purpose": "強化低對比局部 defect；適合背景亮度不均或缺陷灰階差很小的影像。",
+        "noise_types": ["低對比 defect", "局部亮度不均", "背景灰階集中導致 defect 不明顯"],
+        "risk": "會同步放大局部噪點與髒污紋理；clip limit 或 tile grid 太強時可能增加過檢。",
+        "suggested": "初始值 clip_limit=2.0、tile_grid_size=8；若噪點被放大，先降低 clip limit。",
+        "mix": "通常放在去噪後或弱平滑前實驗；若後面接銳化，需特別確認過檢是否增加。",
+        "params": [
+            {"name": "Clip Limit", "detail": "局部直方圖裁切強度；越大局部對比越強，也越容易放大噪點。"},
+            {"name": "Tile Grid Size", "detail": "CLAHE 分區大小；越小越局部，越容易產生區塊感或局部噪點。"},
+        ],
+    },
+    {
         "id": "gray_band_shift",
         "label": "分段灰階映射",
         "purpose": "針對指定灰階區間做階調分離：低於下界往暗處推，高於上界往亮處拉。",
@@ -139,6 +152,10 @@ PARAM_SPECS: Dict[str, List[Dict[str, Any]]] = {
         {"key": "diameter", "type": "int", "default": 9, "min": 1, "max": 31, "step": 1},
         {"key": "sigma_color", "type": "float", "default": 35.0, "min": 1.0, "max": 200.0, "step": 1.0},
         {"key": "sigma_space", "type": "float", "default": 35.0, "min": 1.0, "max": 200.0, "step": 1.0},
+    ],
+    "clahe": [
+        {"key": "clip_limit", "type": "float", "default": 2.0, "min": 0.1, "max": 20.0, "step": 0.1},
+        {"key": "tile_grid_size", "type": "int", "default": 8, "min": 2, "max": 64, "step": 1},
     ],
     "gray_band_shift": [
         {"key": "low_threshold", "type": "int", "default": 105, "min": 0, "max": 255, "step": 1},
@@ -224,6 +241,11 @@ def sanitize_preprocess_params(method: str, params: Dict[str, Any] | None = None
             "diameter": _int_param(params.get("diameter"), 1, 31, 9),
             "sigma_color": _float_param(params.get("sigma_color"), 1.0, 200.0, 35.0),
             "sigma_space": _float_param(params.get("sigma_space"), 1.0, 200.0, 35.0),
+        }
+    if method == "clahe":
+        return {
+            "clip_limit": _float_param(params.get("clip_limit"), 0.1, 20.0, 2.0),
+            "tile_grid_size": _int_param(params.get("tile_grid_size"), 2, 64, 8),
         }
     if method == "gray_band_shift":
         low_threshold = _int_param(params.get("low_threshold"), 0, 255, 105)
@@ -411,6 +433,13 @@ def apply_preprocess_method(
         sigma_space = applied_params["sigma_space"]
         processed = cv2.bilateralFilter(work, diameter, sigma_color, sigma_space)
         notes.append("雙邊濾波會依亮度差異降低跨邊界平均，通常比均值/高斯更保邊。")
+    elif method == "clahe":
+        processed = _apply_clahe(
+            work,
+            applied_params["clip_limit"],
+            applied_params["tile_grid_size"],
+        )
+        notes.append("CLAHE 會強化局部對比，也可能同步放大局部噪點與背景紋理。")
     elif method == "gray_band_shift":
         processed = _gray_band_shift(
             work,
@@ -538,6 +567,21 @@ def _gray_band_shift(
     arr[low_mask] -= int(dark_shift)
     arr[high_mask] += int(bright_shift)
     return np.clip(arr, 0, 255).astype(np.uint8)
+
+
+def _apply_clahe(image: np.ndarray, clip_limit: float, tile_grid_size: int) -> np.ndarray:
+    clahe = cv2.createCLAHE(
+        clipLimit=float(clip_limit),
+        tileGridSize=(int(tile_grid_size), int(tile_grid_size)),
+    )
+    if image.ndim == 2:
+        return clahe.apply(image)
+    if image.ndim == 3 and image.shape[2] == 1:
+        return clahe.apply(image[:, :, 0])[:, :, np.newaxis]
+
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
 
 def _stripe_plane(
