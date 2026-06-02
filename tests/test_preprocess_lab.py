@@ -119,3 +119,15 @@ def test_each_method_has_frontend_explanation_fields():
         assert required <= set(spec)
         assert spec["noise_types"]
         assert spec["params"]
+
+
+def test_debug_preprocess_lab_exposes_clahe_params():
+    template = (Path(__file__).resolve().parent.parent / "templates" / "debug_inference.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'data-lab-panel="clahe"' in template
+    assert 'id="lab-clahe-clip-limit"' in template
+    assert 'id="lab-clahe-tile-grid-size"' in template
+    assert "clip_limit: parseFloat" in template
+    assert "tile_grid_size: parseInt" in template

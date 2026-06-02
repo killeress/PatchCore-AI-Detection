@@ -55,3 +55,16 @@ def test_detect_panel_mark_bottom_left():
     assert result["roi"] == "bottom_left"
     assert result["bbox"]["x"] >= 70
     assert result["bbox"]["y"] >= 510
+
+
+def test_detect_panel_mark_bottom_left_rotated_180_reads_canonical_text():
+    image = np.full((768, 1024), 160, dtype=np.uint8)
+    _draw_mark(image, "EJ", 790, 150)
+    rotated = cv2.rotate(image, cv2.ROTATE_180)
+
+    result = detect_panel_mark(rotated)
+
+    assert result["found"] is True
+    assert result["text"] == "EJ"
+    assert result["roi"] == "bottom_left"
+    assert result["orientation"] == "rot180"

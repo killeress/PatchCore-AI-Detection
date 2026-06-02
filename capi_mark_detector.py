@@ -134,22 +134,19 @@ def _detect_roi(
 
     best: Optional[Dict[str, Any]] = None
     for group in groups:
-        recognized = _recognize_group(group["mask"])
-        if recognized is None:
-            continue
-
-        char_scores = [ch["score"] for ch in recognized["chars"]]
-        mean_score = float(np.mean(char_scores)) if char_scores else 0.0
-        candidate_score = mean_score + min(group["component_count"] / 40.0, 1.0) * 0.08
-        candidate = {
-            **group,
-            **recognized,
-            "roi": roi_name,
-            "candidate_score": candidate_score,
-            "confidence": float(np.clip((mean_score - 0.05) / 0.25, 0.0, 1.0)),
-        }
-        if best is None or candidate["candidate_score"] > best["candidate_score"]:
-            best = candidate
+        for recognized in _recognize_group_variants(group["mask"]):
+            char_scores = [ch["score"] for ch in recognized["chars"]]
+            mean_score = float(np.mean(char_scores)) if char_scores else 0.0
+            candidate_score = mean_score + min(group["component_count"] / 40.0, 1.0) * 0.08
+            candidate = {
+                **group,
+                **recognized,
+                "roi": roi_name,
+                "candidate_score": candidate_score,
+                "confidence": float(np.clip((mean_score - 0.05) / 0.25, 0.0, 1.0)),
+            }
+            if best is None or candidate["candidate_score"] > best["candidate_score"]:
+                best = candidate
 
     return best
 
@@ -273,6 +270,37 @@ def _recognize_group(mask: np.ndarray) -> Optional[Dict[str, Any]]:
         "text": "".join(text_parts),
         "chars": chars,
         "char_boxes": char_boxes,
+    }
+
+
+def _recognize_group_variants(mask: np.ndarray) -> List[Dict[str, Any]]:
+    variants: List[Dict[str, Any]] = []
+    for orientation, oriented_mask in (
+        ("normal", mask),
+        ("rot180", cv2.rotate(mask, cv2.ROTATE_180)),
+    ):
+        recognized = _recognize_group(oriented_mask)
+        if recognized is None:
+            continue
+
+        if orientation == "rot180":
+            recognized["char_boxes"] = [
+                _rotate_box_180(box, mask.shape[1], mask.shape[0])
+                for box in recognized["char_boxes"]
+            ]
+
+        recognized["orientation"] = orientation
+        recognized["mask"] = oriented_mask
+        variants.append(recognized)
+    return variants
+
+
+def _rotate_box_180(box: Dict[str, int], width: int, height: int) -> Dict[str, int]:
+    return {
+        "x": int(width - box["x"] - box["width"]),
+        "y": int(height - box["y"] - box["height"]),
+        "width": int(box["width"]),
+        "height": int(box["height"]),
     }
 
 
@@ -408,6 +436,7 @@ def _public_result(best: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Di
         "bbox": bbox,
         "char_boxes": char_boxes,
         "roi": best["roi"],
+        "orientation": best.get("orientation", "normal"),
         "component_count": best["component_count"],
         "chars": best["chars"],
         "candidate_score": round(float(best["candidate_score"]), 4),
@@ -415,6 +444,7 @@ def _public_result(best: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Di
             {
                 "text": item.get("text", ""),
                 "roi": item.get("roi", ""),
+                "orientation": item.get("orientation", "normal"),
                 "bbox": item.get("bbox"),
                 "confidence": round(float(item.get("confidence", 0.0)), 3),
                 "candidate_score": round(float(item.get("candidate_score", 0.0)), 4),
