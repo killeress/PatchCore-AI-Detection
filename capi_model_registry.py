@@ -317,6 +317,15 @@ def deactivate_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
     return {"ok": True, "message": "已停用，請重啟 server 才會生效"}
 
 
+def update_bundle_notes(db, bundle_id: int, notes: str) -> dict:
+    """更新 bundle 的使用者備註。"""
+    if not isinstance(notes, str):
+        raise ValueError("notes 必須是文字")
+    if not db.update_model_bundle_notes(bundle_id, notes):
+        raise ValueError(f"bundle {bundle_id} not found")
+    return {"ok": True, "notes": notes, "message": "備註已儲存"}
+
+
 def _rewrite_model_configs(
     server_config_path: Path,
     keep: Callable[[str], bool],

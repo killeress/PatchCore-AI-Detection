@@ -387,6 +387,7 @@ class CAPIDatabase:
             # 6-step wizard：完整訓練或局部重訓 scope（mode / selected_units / target_bundle_id）
             add_column_if_not_exists("training_jobs", "training_scope", "TEXT")
             add_column_if_not_exists("training_jobs", "image_preprocess_pipeline", "TEXT")
+            add_column_if_not_exists("model_registry", "notes", "TEXT")
             # 新架構 (C-10) per-tile model routing 紀錄："inner" / "edge" / "bright_spot"；v1 為 ""
             add_column_if_not_exists("tile_results", "zone", "TEXT DEFAULT ''")
 
@@ -2818,6 +2819,19 @@ class CAPIDatabase:
                 (1 if active else 0, bundle_id),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def update_model_bundle_notes(self, bundle_id: int, notes: str) -> bool:
+        """更新指定 bundle 的使用者備註，回傳是否有更新到資料列。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                "UPDATE model_registry SET notes = ? WHERE id = ?",
+                (notes, bundle_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
 
