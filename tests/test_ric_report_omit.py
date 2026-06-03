@@ -179,7 +179,7 @@ def test_client_summary_applies_manual_actual_ok_reviews_to_analysis_stats():
 
     assert summary["ricNG"] == 1
     assert summary["aiCorrect"] == 2
-    assert summary["aiMiss"] == 1
+    assert summary["aiMiss"] == 0
     assert summary["aoiOver"] == 2
     assert summary["aiOver"] == 1
     assert summary["revival"] == 1
@@ -195,3 +195,23 @@ def test_client_summary_applies_manual_actual_ok_reviews_to_analysis_stats():
     }
     assert out_records[0]["actual_judgment"] == "OK"
     assert out_records[0]["truth_adjusted_by_review"] is True
+
+
+def test_client_summary_counts_only_selected_review_categories_as_ai_miss():
+    records = [
+        _client_record(1, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="threshold_high"),
+        _client_record(2, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="dust_misfilter"),
+        _client_record(3, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="outside_aoi_area"),
+        _client_record(4, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="other"),
+        _client_record(5, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="ric_misjudge"),
+        _client_record(6, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="data_error_actually_ok"),
+        _client_record(7, eqp="OK", ai="OK", datastr="DEFECT,NG;1;"),
+    ]
+
+    summary, _ = CAPIWebHandler._compute_client_summary(None, records)
+
+    assert summary["aiMiss"] == 2
+    assert summary["aiMissRate"] == 28.6
+    assert summary["daily"]["2026-05-26"]["aiMiss"] == 2
+    assert summary["missReviewStats"]["total"] == 7
+    assert summary["missReviewStats"]["reviewed"] == 6

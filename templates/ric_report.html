@@ -864,7 +864,7 @@
                 <h3>📅 每日過漏檢率與 RIC 誤判率追蹤 (分母為當日總數量)</h3>
                 <div class="chart-container"><canvas id="client_dailyMetricsChart"></canvas></div>
                 <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 8px;">
-                    📌 備註：過檢率、漏檢率與 RIC 誤判率分母皆為「當日影像總數量」；RIC 誤判率分子為漏檢 Review 中分類為「RIC 誤判」或「資料有誤、實際OK」的筆數。
+                    📌 備註：過檢率、漏檢率與 RIC 誤判率分母皆為「當日影像總數量」；漏檢率分子為漏檢 Review 中分類為「AI漏放」或「Dust 誤濾」的筆數；RIC 誤判率分子為漏檢 Review 中分類為「RIC 誤判」或「資料有誤、實際OK」的筆數。
                 </div>
             </div>
         </div>
@@ -1146,6 +1146,7 @@
         }
 
         const ACTUAL_OK_REVIEW_CATEGORIES = new Set(['ric_misjudge', 'data_error_actually_ok']);
+        const COUNTED_AI_MISS_CATEGORIES = new Set(['threshold_high', 'dust_misfilter']);
         const ACTUAL_OK_REVIEW_LABELS = {
             ric_misjudge: 'RIC 誤判',
             data_error_actually_ok: '資料有誤、實際OK',
@@ -1160,6 +1161,13 @@
 
         function getEffectiveRIC(rec) {
             return isTruthAdjustedByReview(rec) ? 'OK' : deriveJudgment(rec.datastr);
+        }
+
+        function isCountedAiMiss(rec) {
+            const ai = getEffectiveAI(rec) || 'OK';
+            const rawRic = deriveJudgment(rec.datastr);
+            const category = rec.miss_review && rec.miss_review.category;
+            return ai === 'OK' && rawRic === 'NG' && COUNTED_AI_MISS_CATEGORIES.has(category);
         }
 
         function formatManualAdjustmentText(adjustments) {
@@ -1187,7 +1195,7 @@
                     case 'ai_ng': return ai === 'NG';
                     case 'aoi_over': return eqp === 'NG' && ric === 'OK';
                     case 'ai_over': return ai === 'NG' && ric === 'OK';
-                    case 'ai_miss': return ai === 'OK' && ric === 'NG';
+                    case 'ai_miss': return isCountedAiMiss(row);
                     case 'revival': return eqp === 'NG' && ai === 'OK' && ric === 'OK';
                     default: return true;
                 }
@@ -1221,6 +1229,7 @@
                 const rawRic = deriveJudgment(rec.datastr);
                 const ric = getEffectiveRIC(rec);
                 const adjusted = isTruthAdjustedByReview(rec);
+                const countedAiMiss = isCountedAiMiss(rec);
 
                 if (rec.scratch_rescue) {
                     scratchPanels++;
@@ -1255,7 +1264,7 @@
                         if (cat in missByCat) missByCat[cat]++;
                     }
                 }
-                if (ai === 'OK' && ric === 'NG') aiMiss++;
+                if (countedAiMiss) aiMiss++;
                 if (eqp === 'NG' && ai === 'OK' && ric === 'OK') revival++;
 
                 const combo = `${eqp}/${ai}/${ric}`;
@@ -1266,7 +1275,7 @@
                 daily[day].total++;
                 if (eqp === ric) daily[day].aoiCorrect++;
                 if (ai === ric) daily[day].aiCorrect++;
-                if (ai === 'OK' && ric === 'NG') daily[day].aiMiss++;
+                if (countedAiMiss) daily[day].aiMiss++;
                 if (ai === 'NG' && ric === 'OK') daily[day].aiOver++;
                 if (eqp === 'NG' && ric === 'OK') daily[day].aoiOver++;
                 if (adjusted) daily[day].ricMisjudge++;
@@ -1350,7 +1359,7 @@
             ];
 
             // Miss category breakdown
-            const catLabels = { dust_misfilter: 'Dust 誤濾', data_error_actually_ok: '資料有誤', ric_misjudge: 'RIC 誤判', threshold_high: '閾值偏高', outside_aoi_area: 'AOI 區域外', other: '其他' };
+            const catLabels = { dust_misfilter: 'Dust 誤濾', data_error_actually_ok: '資料有誤', ric_misjudge: 'RIC 誤判', threshold_high: 'AI漏放', outside_aoi_area: 'AOI 區域外', other: '其他' };
             const prevCat = prev.missReviewStats ? prev.missReviewStats.byCategory : {};
             const currCat = curr.missReviewStats ? curr.missReviewStats.byCategory : {};
             const catRows = [];
@@ -1674,9 +1683,9 @@
             <div class="stat-card miss" data-client-filter="ai_miss" onclick="clientComp.filterByCard('ai_miss')">
                 <div class="label">AI 漏檢率</div>
                 <div class="value">${s.aiMissRate}%</div>
-                <div class="detail">${s.aiMiss} / ${s.total} 筆真實NG被AI漏檢</div>
+                <div class="detail">${s.aiMiss} / ${s.total} 筆分類為 AI漏放 或 Dust 誤濾</div>
                 ${manualAdjustNote}
-                <div class="filter-hint">🔍 AI=OK, 實際=NG</div>
+                <div class="filter-hint">🔍 Review=AI漏放 / Dust誤濾</div>
             </div>
             <div class="stat-card revival" data-client-filter="revival" onclick="clientComp.filterByCard('revival')">
                 <div class="label">復活率</div>
@@ -2039,7 +2048,7 @@
         const CATEGORY_LABELS = {
             'dust_misfilter': 'Dust 誤濾',
             'data_error_actually_ok': '資料有誤、實際OK',
-            'threshold_high': '閾值偏高',
+            'threshold_high': 'AI漏放',
             'ric_misjudge': 'RIC 誤判',
             'outside_aoi_area': '漏檢區域不在 AOI 提供區域',
             'other': '其他',
