@@ -204,6 +204,9 @@ class TileInfo:
     score_decay_ratio: float = 1.0          # post_decay_map_max / pre_decay_map_max
     score_edge_margin_sides: str = ""       # 此 tile 實際套用的 edge margin sides
     score_mask_valid_ratio: float = 1.0     # tile.mask 中有效區域比例
+    mark_exclusion_regions: List[Any] = field(default_factory=list, repr=False)  # MARK binary 不檢測區域
+    mark_exclusion_masked: bool = False      # 此 tile 的 heatmap 是否被 MARK binary 區域遮罩
+    mark_exclusion_region_count: int = 0
     # Scratch classifier post-filter (over-review reduction)
     scratch_score: float = 0.0              # 0 = 未跑 classifier
     scratch_filtered: bool = False          # True = 被翻回 OK
@@ -321,6 +324,14 @@ class ImageResult:
     # CV 邊緣檢查結果
     edge_defects: List[EdgeDefect] = field(default_factory=list)
 
+    # Dot-matrix MARK binary detection metadata (detected from W0F0000 image)
+    mark_text: str = ""
+    mark_confidence: float = 0.0
+    mark_bbox: Optional[Tuple[int, int, int, int]] = None  # (x, y, width, height)
+    mark_roi: str = ""
+    mark_orientation: str = ""
+    mark_source_image: str = ""
+    mark_exclusion_regions: List[ExclusionRegion] = field(default_factory=list)
     # Image preprocessing timing metadata for record traceability.
     preprocess_steps: List[Dict[str, Any]] = field(default_factory=list)
     preprocess_total_ms: float = 0.0
@@ -561,6 +572,88 @@ class CAPIInferencer:
         else:
             prefix = stem
         return prefix
+
+    @staticmethod
+    def _is_mark_binary_source(filename: str) -> bool:
+        """正式推論只從 W0F0000 畫面讀 dot-matrix MARK。"""
+        return Path(filename).name.upper().startswith("W0F0000")
+
+    def _detect_panel_mark_binary_region(
+        self,
+        image_files: List[Path],
+    ) -> Tuple[Optional[Dict[str, Any]], List[ExclusionRegion]]:
+        source_path = next(
+            (f for f in image_files if self._is_mark_binary_source(f.name)),
+            None,
+        )
+        if source_path is None:
+            return None, []
+
+        try:
+            from capi_mark_detector import detect_panel_mark_from_path
+
+            detection = detect_panel_mark_from_path(source_path, include_debug=False)
+        except Exception as exc:
+            print(f"MARK Binary 偵測失敗 ({source_path.name}): {exc}")
+            return None, []
+
+        if not detection.get("found"):
+            message = detection.get("message") or detection.get("error") or "not found"
+            print(f"MARK Binary 未偵測到 ({source_path.name}): {message}")
+            return detection, []
+
+        bbox = detection.get("bbox") or {}
+        try:
+            x = int(bbox["x"])
+            y = int(bbox["y"])
+            width = int(bbox["width"])
+            height = int(bbox["height"])
+        except Exception:
+            print(f"MARK Binary bbox 格式錯誤 ({source_path.name}): {bbox}")
+            return detection, []
+
+        region = ExclusionRegion(
+            name="mark_binary",
+            x1=x,
+            y1=y,
+            x2=x + width,
+            y2=y + height,
+        )
+        detection["source_image"] = source_path.name
+        detection["mark_bbox_tuple"] = (x, y, width, height)
+        print(
+            f"MARK Binary {source_path.name}: text={detection.get('text', '')} "
+            f"conf={float(detection.get('confidence') or 0.0):.3f} "
+            f"roi={detection.get('roi', '')} "
+            f"orientation={detection.get('orientation', '')} "
+            f"bbox=({x},{y},{width},{height})"
+        )
+        return detection, [region]
+
+    def _attach_panel_mark_binary_to_results(
+        self,
+        results: List[ImageResult],
+        mark_detection: Optional[Dict[str, Any]],
+        mark_regions: List[ExclusionRegion],
+    ) -> None:
+        if not results or not mark_detection:
+            return
+
+        bbox_tuple = mark_detection.get("mark_bbox_tuple")
+        for result in results:
+            result.mark_exclusion_regions = list(mark_regions)
+            result.mark_source_image = str(mark_detection.get("source_image", ""))
+            if bbox_tuple is not None:
+                result.mark_bbox = tuple(int(v) for v in bbox_tuple)
+            if mark_detection.get("found"):
+                result.mark_text = str(mark_detection.get("text", ""))
+                result.mark_confidence = float(mark_detection.get("confidence") or 0.0)
+                result.mark_roi = str(mark_detection.get("roi", ""))
+                result.mark_orientation = str(mark_detection.get("orientation", ""))
+
+            for tile in result.tiles:
+                tile.mark_exclusion_regions = list(mark_regions)
+                tile.mark_exclusion_region_count = len(mark_regions)
     
     def _get_inferencer_for_prefix(self, prefix: str) -> Optional[Any]:
         """根據圖片前綴取得對應的 inferencer (含 lazy loading)
@@ -1290,6 +1383,59 @@ class CAPIInferencer:
         
         return result
 
+    def _mask_tile_mark_exclusion_regions(
+        self,
+        tile: TileInfo,
+        anomaly_map: Optional[np.ndarray],
+    ) -> Tuple[Optional[np.ndarray], bool]:
+        regions = getattr(tile, "mark_exclusion_regions", None) or []
+        if anomaly_map is None or not regions:
+            return anomaly_map, False
+
+        amap = np.asarray(anomaly_map)
+        if amap.ndim < 2 or amap.size == 0:
+            return anomaly_map, False
+
+        tile_x = int(getattr(tile, "x", 0))
+        tile_y = int(getattr(tile, "y", 0))
+        tile_w = max(1, int(getattr(tile, "width", 0) or 1))
+        tile_h = max(1, int(getattr(tile, "height", 0) or 1))
+        amap_h, amap_w = amap.shape[:2]
+
+        masked = amap.copy()
+        changed = False
+        for region in regions:
+            rx1 = int(getattr(region, "x1", 0))
+            ry1 = int(getattr(region, "y1", 0))
+            rx2 = int(getattr(region, "x2", 0))
+            ry2 = int(getattr(region, "y2", 0))
+
+            ox1 = max(tile_x, rx1)
+            oy1 = max(tile_y, ry1)
+            ox2 = min(tile_x + tile_w, rx2)
+            oy2 = min(tile_y + tile_h, ry2)
+            if ox2 <= ox1 or oy2 <= oy1:
+                continue
+
+            lx1 = ox1 - tile_x
+            ly1 = oy1 - tile_y
+            lx2 = ox2 - tile_x
+            ly2 = oy2 - tile_y
+            mx1 = max(0, min(amap_w, int(np.floor(lx1 * amap_w / tile_w))))
+            my1 = max(0, min(amap_h, int(np.floor(ly1 * amap_h / tile_h))))
+            mx2 = max(0, min(amap_w, int(np.ceil(lx2 * amap_w / tile_w))))
+            my2 = max(0, min(amap_h, int(np.ceil(ly2 * amap_h / tile_h))))
+            if mx2 <= mx1 or my2 <= my1:
+                continue
+
+            masked[my1:my2, mx1:mx2] = 0
+            changed = True
+
+        if changed:
+            tile.mark_exclusion_masked = True
+            return masked, True
+        return anomaly_map, False
+
     @staticmethod
     def _fix_legacy_precision(inferencer) -> None:
         """
@@ -1538,7 +1684,8 @@ class CAPIInferencer:
         tile.score_decay_ratio = 1.0
         tile.score_edge_margin_sides = ""
         tile.score_mask_valid_ratio = tile.valid_ratio
-
+        tile.mark_exclusion_masked = False
+        mark_masked = False
         # === 以下為 anomaly_map 後處理 (batch 和 fallback 共用) ===
         if anomaly_map is not None:
             # 記錄衰減/遮罩處理前的 anomaly_map max (用於後續比率計算)
@@ -1673,6 +1820,8 @@ class CAPIInferencer:
                 # 將排除區域設為 0
                 anomaly_map = anomaly_map * (mask_resized / 255.0)
 
+            # MARK binary 區域屬於不檢測區域，只遮掉 tile 內重疊的 heatmap 像素。
+            anomaly_map, mark_masked = self._mask_tile_mark_exclusion_regions(tile, anomaly_map)
             # 邊緣衰減：過濾光影假陽性 (debug 模式可覆寫數值)
             edge_margin = self.config.edge_margin_px if edge_margin_override is None else edge_margin_override
             if edge_margin > 0:
@@ -1705,7 +1854,7 @@ class CAPIInferencer:
             tile.is_left_edge and self.config.edge_margin_sides.get('left', False),
             tile.is_right_edge and self.config.edge_margin_sides.get('right', False),
         ])
-        need_recalc = (tile.mask is not None) or has_edge_margin
+        need_recalc = (tile.mask is not None) or has_edge_margin or mark_masked
         if need_recalc and anomaly_map is not None:
             post_decay_max = float(np.max(anomaly_map))
 
@@ -5013,7 +5162,8 @@ class CAPIInferencer:
             return f.stem.startswith("PINIGBI") or "OMIT0000" in f.name
         omit_files = [f for f in image_files if is_dust_check_image(f)]
         normal_files = [f for f in image_files if not is_dust_check_image(f)]
-        
+        panel_mark_detection, panel_mark_regions = self._detect_panel_mark_binary_region(normal_files)
+
         # 載入 OMIT 圖片 (如果有)
         omit_image = None
         omit_overexposed = False
@@ -5281,6 +5431,12 @@ class CAPIInferencer:
                 )
                 print(f"🎯 Phase 1.5 完成: AOI 座標新增 {stats['aoi_tile_count']} 個 tiles, "
                       f"{stats['aoi_edge_count']} 個邊緣 defects")
+
+        self._attach_panel_mark_binary_to_results(
+            preprocessed_results,
+            panel_mark_detection,
+            panel_mark_regions,
+        )
 
         # === Grid Tiling 開關控制 ===
         # 如果 grid_tiling_enabled=False，移除非 AOI coord 的 tiles (只推論 AOI 座標 tiles)
@@ -6426,6 +6582,7 @@ class CAPIInferencer:
         panel_path = Path(panel_dir)
         t0 = time.time()
         image_files, is_duplicate = self._prepare_panel_image_files(panel_path)
+        panel_mark_detection, panel_mark_regions = self._detect_panel_mark_binary_region(image_files)
         omit_vis, omit_overexposed, omit_overexposure_info, omit_image = \
             self._load_omit_context(panel_path, image_files=image_files)
         if omit_image is not None:
@@ -6640,6 +6797,12 @@ class CAPIInferencer:
                     f"[v2] skip_file AOI: {matched_file.name} "
                     f"建立 {created} 個 bright-spot tiles"
                 )
+
+        self._attach_panel_mark_binary_to_results(
+            results,
+            panel_mark_detection,
+            panel_mark_regions,
+        )
 
         # 同步 zone_by_tile_id 與 result.tiles —— 把 _apply_aoi_coord_inspection
         # 跟 skip_file 路徑新增的 AOI centered tiles 的 zone 補進來，
