@@ -142,7 +142,7 @@ def test_delete_inactive_bundle_removes_dir(tmp_path):
         "bundle_size_bytes": 0, "job_id": "j1",
     })
     sc = tmp_path / "server_config.yaml"
-    sc.write_text("model_configs: []")
+    sc.write_text("model_configs:\n  - configs/capi_3f.yaml\n")
     delete_bundle(db, bid, server_config_path=sc)
     assert not bdir.exists()
     assert db.get_model_bundle(bid) is None
@@ -283,6 +283,29 @@ def test_delete_training_data_unknown_bundle(tmp_path):
     db = CAPIDatabase(tmp_path / "test.db")
     with pytest.raises(ValueError, match="not found"):
         delete_training_data(db, 9999)
+
+
+def test_update_bundle_notes_persists_free_text(tmp_path):
+    import pytest
+    from capi_database import CAPIDatabase
+    from capi_model_registry import update_bundle_notes
+
+    db = CAPIDatabase(tmp_path / "test.db")
+    bid = db.register_model_bundle({
+        "machine_id": "GN160", "bundle_path": "model/GN160-20260428",
+        "trained_at": "2026-04-28T15:30:45", "panel_count": 5,
+        "inner_tile_count": 0, "edge_tile_count": 0, "ng_tile_count": 0,
+        "bundle_size_bytes": 0, "job_id": "j1",
+    })
+    notes = "用途：量產驗證\n<script>text only</script>"
+
+    result = update_bundle_notes(db, bid, notes)
+
+    assert result["ok"] is True
+    assert result["notes"] == notes
+    assert db.get_model_bundle(bid)["notes"] == notes
+    with pytest.raises(ValueError, match="not found"):
+        update_bundle_notes(db, 9999, "missing")
 
 
 def test_update_threshold_writes_yaml_and_json(tmp_path):
