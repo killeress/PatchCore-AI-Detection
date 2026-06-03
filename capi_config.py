@@ -93,6 +93,7 @@ class CAPIConfig:
     mark_fallback_position: Optional[Dict[str, int]] = None  # Fallback MARK 位置 {x, y, width, height}
     mark_match_threshold: float = 0.45
     mark_min_y_ratio: float = 0.6
+    mark_exclusion_padding_px: int = 32  # MARK 不檢測區外擴，吸收 PatchCore heatmap 擴散
     
     # Otsu 裁剪設定
     otsu_offset: int = 5
@@ -277,6 +278,7 @@ class CAPIConfig:
             mark_match_threshold=data.get("mark_match_threshold", 0.45),
             mark_fallback_position=data.get("mark_fallback_position", None),
             mark_min_y_ratio=data.get("mark_min_y_ratio", 0.6),
+            mark_exclusion_padding_px=int(data.get("mark_exclusion_padding_px", 32)),
             otsu_offset=data.get("otsu_offset", 5),
             otsu_bottom_crop=data.get("otsu_bottom_crop", 1000),
             enable_panel_polygon=data.get("enable_panel_polygon", True),
@@ -361,6 +363,7 @@ class CAPIConfig:
             "mark_template_path": self.mark_template_path,
             "mark_match_threshold": self.mark_match_threshold,
             "mark_min_y_ratio": self.mark_min_y_ratio,
+            "mark_exclusion_padding_px": self.mark_exclusion_padding_px,
             "mark_fallback_position": self.mark_fallback_position,
             "otsu_offset": self.otsu_offset,
             "otsu_bottom_crop": self.otsu_bottom_crop,
@@ -435,6 +438,7 @@ class CAPIConfig:
             "mark_template_path": self.mark_template_path,
             "mark_match_threshold": self.mark_match_threshold,
             "mark_min_y_ratio": self.mark_min_y_ratio,
+            "mark_exclusion_padding_px": self.mark_exclusion_padding_px,
             "mark_fallback_position": self.mark_fallback_position,
             "otsu_offset": self.otsu_offset,
             "otsu_bottom_crop": self.otsu_bottom_crop,
