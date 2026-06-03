@@ -960,8 +960,27 @@
             </div>
         </div>
 
+        <div class="card"
+            style="padding: 18px 20px; margin-top: 16px; background: rgba(20, 184, 166, 0.04); border: 1px solid rgba(20, 184, 166, 0.18); display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
+            <div style="color: #5eead4; font-size: 1rem; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+                <span>🔠 Mark檢測</span>
+            </div>
+            <button class="btn-run" id="btn-mark-run" onclick="runMarkDetection()"
+                style="width: 160px; height: 44px; font-size: 1.02rem; background: linear-gradient(135deg,#14b8a6,#0f766e); box-shadow: 0 4px 15px rgba(20, 184, 166, 0.35);">
+                <span class="spinner" id="mark-spinner"></span>
+                <span id="mark-btn-text">🔠 Mark檢測</span>
+            </button>
+        </div>
+
         <!-- Error -->
         <div id="error-box" class="error-box hidden"></div>
+
+        <!-- Mark Detection -->
+        <div class="overview-section hidden" id="mark-section">
+            <h3>🔠 Mark檢測</h3>
+            <div class="coord-info-cards" id="mark-info-cards"></div>
+            <div class="coord-result-grid" id="mark-result-grid"></div>
+        </div>
 
         <!-- Result Summary -->
         <div id="result-section" class="hidden">
@@ -1091,6 +1110,17 @@
                 <div class="coord-group">
                     <label for="lab-bilateral-space">Sigma Space</label>
                     <input type="number" id="lab-bilateral-space" value="35" min="1" max="200" step="1">
+                </div>
+            </div>
+
+            <div class="lab-param-panel" data-lab-panel="clahe">
+                <div class="coord-group">
+                    <label for="lab-clahe-clip-limit">Clip Limit</label>
+                    <input type="number" id="lab-clahe-clip-limit" value="2.0" min="0.1" max="20" step="0.1">
+                </div>
+                <div class="coord-group">
+                    <label for="lab-clahe-tile-grid-size">Tile Grid Size</label>
+                    <input type="number" id="lab-clahe-tile-grid-size" value="8" min="2" max="64" step="1">
                 </div>
             </div>
 
@@ -1655,6 +1685,9 @@
     const btn = document.getElementById('btn-run');
     const btnText = document.getElementById('btn-text');
     const spinner = document.getElementById('spinner');
+    const markBtn = document.getElementById('btn-mark-run');
+    const markBtnText = document.getElementById('mark-btn-text');
+    const markSpinner = document.getElementById('mark-spinner');
     const labInput = document.getElementById('lab-image-path');
 
     // Enter key to submit
@@ -1740,6 +1773,12 @@
                 diameter: parseInt(document.getElementById('lab-bilateral-diameter').value, 10),
                 sigma_color: parseFloat(document.getElementById('lab-bilateral-color').value),
                 sigma_space: parseFloat(document.getElementById('lab-bilateral-space').value),
+            };
+        }
+        if (method === 'clahe') {
+            return {
+                clip_limit: parseFloat(document.getElementById('lab-clahe-clip-limit').value),
+                tile_grid_size: parseInt(document.getElementById('lab-clahe-tile-grid-size').value, 10),
             };
         }
         if (method === 'gray_band_shift') {
@@ -1953,6 +1992,42 @@
         }
     }
 
+    async function runMarkDetection() {
+        const imagePath = input.value.trim();
+        if (!imagePath) {
+            showError('請輸入圖片路徑');
+            return;
+        }
+
+        markBtn.disabled = true;
+        markBtnText.textContent = '檢測中...';
+        markSpinner.classList.add('active');
+        hideError();
+        document.getElementById('mark-section').classList.add('hidden');
+
+        try {
+            const resp = await fetch('/api/debug/mark-detection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image_path: imagePath }),
+            });
+
+            const data = await resp.json();
+            if (data.error) {
+                showError(data.error);
+                return;
+            }
+
+            renderMarkDetection(data);
+        } catch (err) {
+            showError('Mark 檢測請求失敗: ' + err.message);
+        } finally {
+            markBtn.disabled = false;
+            markBtnText.textContent = '🔠 Mark檢測';
+            markSpinner.classList.remove('active');
+        }
+    }
+
     function showError(msg, elementId = 'error-box') {
         const box = document.getElementById(elementId);
         if (box) {
@@ -2071,6 +2146,84 @@
             tilesSection.classList.add('hidden');
             okMessage.classList.remove('hidden');
         }
+    }
+
+    function renderMarkDetection(mark) {
+        const section = document.getElementById('mark-section');
+        const cards = document.getElementById('mark-info-cards');
+        const grid = document.getElementById('mark-result-grid');
+
+        section.classList.remove('hidden');
+        if (!mark || !mark.found) {
+            cards.innerHTML = `
+                <div class="summary-card">
+                    <div class="label">Mark 狀態</div>
+                    <div class="value" style="color:var(--text-muted);font-size:1rem;">未偵測到</div>
+                </div>
+                ${mark && mark.error ? `
+                <div class="summary-card" style="grid-column:span 2;">
+                    <div class="label">錯誤</div>
+                    <div class="value" style="color:var(--err);font-size:0.9rem;word-break:break-all;">${escapeHtml(mark.error)}</div>
+                </div>` : ''}
+            `;
+            grid.innerHTML = '';
+            return;
+        }
+
+        const bbox = mark.bbox || {};
+        const charInfo = (mark.chars || []).map(ch => {
+            const alts = (ch.alternatives || []).slice(0, 3).map(alt => `${escapeHtml(alt.char)}:${alt.score}`).join(' / ');
+            return `${escapeHtml(ch.char)} (${ch.score})${alts ? `<br><span style="color:var(--text-muted);font-size:0.75rem;">${alts}</span>` : ''}`;
+        }).join('<br>');
+        const charBoxesInfo = (mark.char_boxes || []).map((box, idx) => {
+            const label = mark.text && mark.text[idx] ? mark.text[idx] : `#${idx + 1}`;
+            return `${escapeHtml(label)}: (${box.x}, ${box.y}) ${box.width}×${box.height}`;
+        }).join('<br>');
+
+        cards.innerHTML = `
+            <div class="summary-card judgment-ok">
+                <div class="label">Mark 字符</div>
+                <div class="value" style="color:var(--ok);font-size:1.5rem;">${escapeHtml(mark.text || '')}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">信心分數</div>
+                <div class="value" style="color:var(--accent);">${mark.confidence ?? '-'}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">位置 ROI</div>
+                <div class="value" style="color:var(--text);font-size:1rem;">${escapeHtml(mark.roi || '-')}<br><span style="color:var(--text-muted);font-size:0.82rem;">${escapeHtml(mark.orientation || 'normal')}</span></div>
+            </div>
+            <div class="summary-card">
+                <div class="label">BBox</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.9rem;">(${bbox.x ?? '-'}, ${bbox.y ?? '-'}) ${bbox.width ?? '-'}×${bbox.height ?? '-'}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">點陣元件</div>
+                <div class="value" style="color:var(--text);">${mark.component_count ?? '-'}</div>
+            </div>
+            <div class="summary-card" style="grid-column:span 2;">
+                <div class="label">字元比對</div>
+                <div class="value" style="color:var(--text);font-size:0.9rem;line-height:1.5;">${charInfo}</div>
+            </div>
+            <div class="summary-card" style="grid-column:span 2;">
+                <div class="label">字元 BBox</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.85rem;line-height:1.5;">${charBoxesInfo || '-'}</div>
+            </div>
+        `;
+
+        const images = [
+            ['overview_url', 'Mark Overview'],
+            ['crop_url', 'Mark Crop'],
+            ['binary_url', 'Mark Binary'],
+        ];
+        grid.innerHTML = images
+            .filter(([key]) => mark[key])
+            .map(([key, title]) => `
+                <div class="img-card">
+                    <h4>${title}</h4>
+                    <img src="${mark[key]}?t=${Date.now()}" alt="${title}" onclick="openLightbox(this.src)">
+                </div>
+            `).join('');
     }
 
     // ═══ 座標推論 ═══════════════════════════════
