@@ -18,6 +18,7 @@ def test_mark_exclusion_masks_tile_heatmap_and_recalculates_score():
     config.patchcore_concentration_enabled = False
     config.patchcore_diffuse_area_enabled = False
     config.edge_margin_px = 0
+    config.mark_exclusion_padding_px = 0
 
     inferencer = object.__new__(CAPIInferencer)
     inferencer.config = config
@@ -46,6 +47,54 @@ def test_mark_exclusion_masks_tile_heatmap_and_recalculates_score():
     assert np.all(masked_map[:, 4:] == 0)
     assert masked_map[4, 2] == pytest.approx(0.25)
     assert score == pytest.approx(0.25)
+
+
+def test_mark_exclusion_padding_masks_heatmap_bleed_outside_bbox():
+    config = CAPIConfig()
+    config.patchcore_filter_enabled = False
+    config.patchcore_concentration_enabled = False
+    config.patchcore_diffuse_area_enabled = False
+    config.edge_margin_px = 0
+    config.mark_exclusion_padding_px = 10
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+    inferencer.threshold = 0.5
+
+    tile = TileInfo(
+        tile_id=1,
+        x=0,
+        y=0,
+        width=100,
+        height=100,
+        image=np.zeros((100, 100), dtype=np.uint8),
+        mark_exclusion_regions=[ExclusionRegion("mark_binary", 60, 20, 80, 80)],
+    )
+    anomaly_map = np.zeros((10, 10), dtype=np.float32)
+    anomaly_map[5, 6] = 1.0   # inside MARK bbox
+    anomaly_map[5, 4] = 0.9   # heatmap bleed just outside bbox, inside padding
+    anomaly_map[5, 3] = 0.33  # outside padded MARK area
+
+    score, masked_map = inferencer.predict_tile(
+        tile,
+        threshold=0.5,
+        raw_prediction=(1.0, anomaly_map),
+    )
+
+    assert tile.mark_exclusion_masked is True
+    assert masked_map[5, 6] == 0
+    assert masked_map[5, 4] == 0
+    assert masked_map[5, 3] == pytest.approx(0.33)
+    assert score == pytest.approx(0.33)
+
+
+def test_mark_exclusion_padding_roundtrips_config():
+    cfg = CAPIConfig()
+    cfg.mark_exclusion_padding_px = 48
+
+    reloaded = CAPIConfig.from_dict(cfg.to_dict())
+
+    assert reloaded.mark_exclusion_padding_px == 48
 
 
 def test_mark_detection_metadata_is_serialized_to_db_data():

@@ -1405,14 +1405,16 @@ class CAPIInferencer:
         tile_w = max(1, int(getattr(tile, "width", 0) or 1))
         tile_h = max(1, int(getattr(tile, "height", 0) or 1))
         amap_h, amap_w = amap.shape[:2]
+        padding_px = max(0, int(getattr(self.config, "mark_exclusion_padding_px", 32)))
+        padding_map_px = 1 if padding_px > 0 else 0
 
         masked = amap.copy()
         changed = False
         for region in regions:
-            rx1 = int(getattr(region, "x1", 0))
-            ry1 = int(getattr(region, "y1", 0))
-            rx2 = int(getattr(region, "x2", 0))
-            ry2 = int(getattr(region, "y2", 0))
+            rx1 = int(getattr(region, "x1", 0)) - padding_px
+            ry1 = int(getattr(region, "y1", 0)) - padding_px
+            rx2 = int(getattr(region, "x2", 0)) + padding_px
+            ry2 = int(getattr(region, "y2", 0)) + padding_px
 
             ox1 = max(tile_x, rx1)
             oy1 = max(tile_y, ry1)
@@ -1425,10 +1427,14 @@ class CAPIInferencer:
             ly1 = oy1 - tile_y
             lx2 = ox2 - tile_x
             ly2 = oy2 - tile_y
-            mx1 = max(0, min(amap_w, int(np.floor(lx1 * amap_w / tile_w))))
-            my1 = max(0, min(amap_h, int(np.floor(ly1 * amap_h / tile_h))))
-            mx2 = max(0, min(amap_w, int(np.ceil(lx2 * amap_w / tile_w))))
-            my2 = max(0, min(amap_h, int(np.ceil(ly2 * amap_h / tile_h))))
+            mx1 = int(np.floor(lx1 * amap_w / tile_w)) - padding_map_px
+            my1 = int(np.floor(ly1 * amap_h / tile_h)) - padding_map_px
+            mx2 = int(np.ceil(lx2 * amap_w / tile_w)) + padding_map_px
+            my2 = int(np.ceil(ly2 * amap_h / tile_h)) + padding_map_px
+            mx1 = max(0, min(amap_w, mx1))
+            my1 = max(0, min(amap_h, my1))
+            mx2 = max(0, min(amap_w, mx2))
+            my2 = max(0, min(amap_h, my2))
             if mx2 <= mx1 or my2 <= my1:
                 continue
 
