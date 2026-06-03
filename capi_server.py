@@ -613,6 +613,15 @@ def results_to_db_data(
             "inference_time_ms": result.inference_time * 1000,
             "heatmap_path": overview_path,
             "scratch_filter_count": result.scratch_filter_count,
+            "mark_text": getattr(result, "mark_text", ""),
+            "mark_confidence": float(getattr(result, "mark_confidence", 0.0) or 0.0),
+            "mark_bbox": (
+                ",".join(str(int(v)) for v in result.mark_bbox)
+                if getattr(result, "mark_bbox", None) else ""
+            ),
+            "mark_roi": getattr(result, "mark_roi", ""),
+            "mark_orientation": getattr(result, "mark_orientation", ""),
+            "mark_source_image": getattr(result, "mark_source_image", ""),
             "tiles": [],
         }
 

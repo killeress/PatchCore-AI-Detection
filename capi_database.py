@@ -96,6 +96,12 @@ class CAPIDatabase:
                     is_bomb INTEGER DEFAULT 0,
                     inference_time_ms REAL DEFAULT 0.0,
                     heatmap_path TEXT DEFAULT '',
+                    mark_text TEXT DEFAULT '',
+                    mark_confidence REAL DEFAULT 0.0,
+                    mark_bbox TEXT DEFAULT '',
+                    mark_roi TEXT DEFAULT '',
+                    mark_orientation TEXT DEFAULT '',
+                    mark_source_image TEXT DEFAULT '',
                     FOREIGN KEY (record_id) REFERENCES inference_records(id) ON DELETE CASCADE
                 );
 
@@ -339,6 +345,12 @@ class CAPIDatabase:
             add_column_if_not_exists("inference_records", "image_preprocess_pipeline", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "image_preprocess_timing", "TEXT DEFAULT ''")
             add_column_if_not_exists("image_results", "is_bomb", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("image_results", "mark_text", "TEXT DEFAULT ''")
+            add_column_if_not_exists("image_results", "mark_confidence", "REAL DEFAULT 0.0")
+            add_column_if_not_exists("image_results", "mark_bbox", "TEXT DEFAULT ''")
+            add_column_if_not_exists("image_results", "mark_roi", "TEXT DEFAULT ''")
+            add_column_if_not_exists("image_results", "mark_orientation", "TEXT DEFAULT ''")
+            add_column_if_not_exists("image_results", "mark_source_image", "TEXT DEFAULT ''")
             add_column_if_not_exists("tile_results", "is_bomb", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "bomb_code", "TEXT DEFAULT ''")
             add_column_if_not_exists("tile_results", "peak_x", "INTEGER DEFAULT -1")
@@ -495,8 +507,10 @@ class CAPIDatabase:
                                (record_id, image_path, image_name, image_width, image_height,
                                 otsu_bounds, tile_count, excluded_tiles, anomaly_count,
                                 max_score, is_ng, is_dust_only, is_bomb, inference_time_ms,
-                                heatmap_path, scratch_filter_count)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                heatmap_path, scratch_filter_count,
+                                mark_text, mark_confidence, mark_bbox, mark_roi,
+                                mark_orientation, mark_source_image)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (record_id,
                              img_data.get("image_path", ""),
                              img_data.get("image_name", ""),
@@ -512,7 +526,13 @@ class CAPIDatabase:
                              img_data.get("is_bomb", 0),
                              img_data.get("inference_time_ms", 0.0),
                              img_data.get("heatmap_path", ""),
-                             img_data.get("scratch_filter_count", 0))
+                             img_data.get("scratch_filter_count", 0),
+                             img_data.get("mark_text", ""),
+                             img_data.get("mark_confidence", 0.0),
+                             img_data.get("mark_bbox", ""),
+                             img_data.get("mark_roi", ""),
+                             img_data.get("mark_orientation", ""),
+                             img_data.get("mark_source_image", ""))
                         )
                         image_result_id = img_cursor.lastrowid
 
@@ -689,8 +709,10 @@ class CAPIDatabase:
                                (record_id, image_path, image_name, image_width, image_height,
                                 otsu_bounds, tile_count, excluded_tiles, anomaly_count,
                                 max_score, is_ng, is_dust_only, is_bomb, inference_time_ms,
-                                heatmap_path, scratch_filter_count)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                heatmap_path, scratch_filter_count,
+                                mark_text, mark_confidence, mark_bbox, mark_roi,
+                                mark_orientation, mark_source_image)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (record_id,
                              img_data.get("image_path", ""),
                              img_data.get("image_name", ""),
@@ -706,7 +728,13 @@ class CAPIDatabase:
                              img_data.get("is_bomb", 0),
                              img_data.get("inference_time_ms", 0.0),
                              img_data.get("heatmap_path", ""),
-                             img_data.get("scratch_filter_count", 0))
+                             img_data.get("scratch_filter_count", 0),
+                             img_data.get("mark_text", ""),
+                             img_data.get("mark_confidence", 0.0),
+                             img_data.get("mark_bbox", ""),
+                             img_data.get("mark_roi", ""),
+                             img_data.get("mark_orientation", ""),
+                             img_data.get("mark_source_image", ""))
                         )
                         image_result_id = img_cursor.lastrowid
 

@@ -333,6 +333,10 @@ function copyInferenceLog() {
             {% if img.edge_defects %} | <strong style="color: #0891B2;">邊緣缺陷: {{ img.edge_defects | length }}</strong>{%
             endif %} |
             最高分: {{ img.max_score | round(3) }} |
+            {% if img.mark_text %}
+            <strong style="color:#7C3AED;">MARK: {{ img.mark_text }}</strong>
+            {% if img.mark_bbox %}<span style="color:var(--text-muted);">({{ img.mark_bbox }})</span>{% endif %} |
+            {% endif %}
             {% if img.scratch_filter_count %}
             <strong style="color: #0D9488;">🧽 DINOv2 救回: {{ img.scratch_filter_count }} tile</strong> |
             {% endif %}

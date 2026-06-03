@@ -753,6 +753,15 @@
                         <span style="color: #CBD5E1;">|</span>
                         <span><strong style="color: #475569; font-weight: 500;">最高分:</strong> <strong
                                 style="color: #0F172A;">{{ img.max_score | round(3) }}</strong></span>
+                        {% if img.mark_text %}
+                        <span style="color: #CBD5E1;">|</span>
+                        <span><strong style="color: #7C3AED; font-weight: 500;">MARK:</strong>
+                            <strong style="color: #7C3AED;">{{ img.mark_text }}</strong>
+                            {% if img.mark_bbox %}
+                            <span style="color: #64748B; font-family: 'Fira Code', monospace;">({{ img.mark_bbox }})</span>
+                            {% endif %}
+                        </span>
+                        {% endif %}
                         {% if img.scratch_filter_count %}
                         <span style="color: #CBD5E1;">|</span>
                         <span><strong style="color: #0D9488; font-weight: 500;">🧽 DINOv2 救回:</strong>
