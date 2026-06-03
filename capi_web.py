@@ -615,6 +615,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/models/") and path.endswith("/deactivate"):
                 self._handle_models_deactivate()
                 return
+            elif path.startswith("/api/models/") and path.endswith("/notes"):
+                self._handle_models_update_notes()
+                return
             elif path.startswith("/api/models/") and path.endswith("/training_data/delete"):
                 self._handle_models_training_data_delete()
                 return
@@ -7010,6 +7013,27 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json(result)
         except ValueError as e:
             self._send_json({"error": str(e)}, status=400)
+
+    def _handle_models_update_notes(self):
+        """POST /api/models/<id>/notes  body: {notes}"""
+        bundle_id = int(self.path.split("/")[3])
+        content_length = int(self.headers.get("Content-Length", 0))
+        try:
+            payload = json.loads(self.rfile.read(content_length).decode("utf-8") or "{}")
+        except json.JSONDecodeError as e:
+            self._send_json({"error": f"無效 JSON: {e}"}, status=400)
+            return
+        notes = payload.get("notes", "")
+        if not isinstance(notes, str):
+            self._send_json({"error": "notes 必須是文字"}, status=400)
+            return
+        from capi_model_registry import update_bundle_notes
+        try:
+            self._send_json(update_bundle_notes(
+                self._capi_server_instance.database, bundle_id, notes,
+            ))
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=404)
 
     def _handle_models_update_threshold(self):
         """POST /api/models/<id>/threshold  body: {lighting, zone, value}"""

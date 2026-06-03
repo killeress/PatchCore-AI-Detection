@@ -46,6 +46,27 @@
   .mlib-thr-edit { background: transparent; border: 1px solid #45475a; color: #a6adc8; padding: 0 5px; border-radius: 3px; font-size: .72rem; cursor: pointer; margin-left: 4px; }
   .mlib-thr-edit:hover { background: #45475a; color: #cdd6f4; }
   .mlib-empty { color: #a6adc8; padding: 22px; text-align: center; font-size: .85rem; }
+  .mlib-note-row {
+    display: grid; grid-template-columns: 42px 1fr auto minmax(70px, auto);
+    gap: 8px; align-items: center; margin-top: 10px;
+  }
+  .mlib-note-row label { color: #a6adc8; font-size: .78rem; }
+  .mlib-note-input {
+    width: 100%; min-height: 38px; max-height: 180px; resize: vertical;
+    background: #1e1e2e; color: #cdd6f4; border: 1px solid #45475a;
+    border-radius: 4px; padding: 6px 8px; font-size: .78rem; line-height: 1.45;
+  }
+  .mlib-note-input:focus { outline: 2px solid #89b4fa; outline-offset: 1px; }
+  .mlib-note-save {
+    background: #89b4fa; color: #1e1e2e; border: none; padding: 6px 12px;
+    border-radius: 4px; font-size: .74rem; font-weight: 700; cursor: pointer;
+  }
+  .mlib-note-save[disabled] { opacity: .6; cursor: wait; }
+  .mlib-note-status { color: #a6adc8; font-size: .72rem; min-width: 70px; }
+  @media (max-width: 760px) {
+    .mlib-note-row { grid-template-columns: 1fr; align-items: stretch; }
+    .mlib-note-status { min-width: 0; }
+  }
   .step-pill {
     padding: 4px 10px; background: #313244; color: #6c7086;
     border-radius: 12px; font-size: .78rem;
@@ -182,6 +203,12 @@
           <a href="/api/models/{{ b.id }}/export" style="background:#1e1e2e;color:#a6adc8;border:1px solid #45475a;padding:5px 10px;border-radius:4px;font-size:.74rem;text-decoration:none;text-align:center;">📦 匯出 ZIP</a>
           <button onclick="doDelete({{ b.id }})" style="background:#1e1e2e;color:#f38ba8;border:1px solid #f38ba8;padding:5px 10px;border-radius:4px;font-size:.74rem;">🗑 刪除</button>
         </div>
+      </div>
+      <div class="mlib-note-row">
+        <label for="bundleNotes{{ b.id }}">備註</label>
+        <textarea id="bundleNotes{{ b.id }}" class="mlib-note-input" rows="2" spellcheck="false" placeholder="用途、版本差異或注意事項">{{ (b.notes or '')|e }}</textarea>
+        <button id="bundleNotesSave{{ b.id }}" class="mlib-note-save" onclick="saveBundleNotes({{ b.id }})">儲存</button>
+        <span id="bundleNotesStatus{{ b.id }}" class="mlib-note-status"></span>
       </div>
     </div>
     {% endfor %}
@@ -337,6 +364,16 @@ const UNIT_ORDER = {{ unit_labels|tojson }};
 let currentBundleId = null;
 let currentDetail = null;
 
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
+
+function renderText(value) {
+  return escapeHtml(value == null ? '—' : value).replace(/\n/g, '<br>');
+}
+
 function doAction(id, action) {
   if (action === 'activate') {
     const others = Array.from(document.querySelectorAll('[data-bundle-id]'))
@@ -385,6 +422,40 @@ function editThreshold(bundleId, lighting, zone, current) {
       alert(d.message || '已更新');
       showDetail(bundleId);
     });
+}
+
+async function saveBundleNotes(id) {
+  const textarea = document.getElementById(`bundleNotes${id}`);
+  const button = document.getElementById(`bundleNotesSave${id}`);
+  const status = document.getElementById(`bundleNotesStatus${id}`);
+  if (!textarea) return;
+
+  if (button) button.disabled = true;
+  if (status) status.textContent = '儲存中...';
+  try {
+    const resp = await fetch(`/api/models/${id}/notes`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({notes: textarea.value}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `HTTP ${resp.status}`);
+    }
+    textarea.value = data.notes || '';
+    if (currentDetail && currentDetail.id === id) currentDetail.notes = data.notes || '';
+    if (status) {
+      status.textContent = '已儲存';
+      setTimeout(() => {
+        if (status.textContent === '已儲存') status.textContent = '';
+      }, 1800);
+    }
+  } catch (e) {
+    if (status) status.textContent = '儲存失敗';
+    alert('備註儲存失敗：' + e.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 function doDelete(id) {
@@ -466,6 +537,7 @@ function renderDetail(d) {
     ['Machine', d.machine_id],
     ['Bundle path', d.bundle_path],
     ['Job ID', d.job_id || '—'],
+    ['備註', d.notes || '—'],
     ['訓練時間', m.trained_at || d.trained_at || '—'],
     ['Panel 數', m.panel_count != null ? m.panel_count : (d.panel_count != null ? d.panel_count : '—')],
     ['成功 unit', (m.success_units != null ? m.success_units : '—') + ' / 10'],
@@ -492,7 +564,7 @@ function renderDetail(d) {
     ['訓練資料路徑', td.thumb_dir || '—'],
   );
   dl.innerHTML = rows.map(([k, v]) =>
-    `<dt>${k}</dt><dd>${v == null ? '—' : v}</dd>`
+    `<dt>${renderText(k)}</dt><dd>${renderText(v)}</dd>`
   ).join('');
 
   const hasTrainingData = (td.ok_count || 0) + (td.ng_count || 0) > 0 || (td.size_bytes || 0) > 0;
