@@ -52,6 +52,23 @@ def test_preprocess_panel_image_keeps_original_tiles_when_pipeline_enabled():
     assert all("elapsed_ms" in step for step in result.preprocess_steps)
 
 
+def test_preprocess_panel_image_can_skip_grid_tiles_and_cache_image():
+    cfg = PreprocessConfig(
+        tile_size=256,
+        cache_processed_image=True,
+        generate_grid_tiles=False,
+        image_preprocess_pipeline=[
+            {"method": "mean", "params": {"kernel_size": 3}},
+        ],
+    )
+    result = preprocess_panel_image(FIXTURE, "STANDARD", cfg)
+    assert result.foreground_bbox != (0, 0, 0, 0)
+    assert result.panel_polygon is not None
+    assert result.tiles == []
+    assert result.processed_image is not None
+    assert len(result.preprocess_steps) == 1
+
+
 def test_preprocess_timing_summary_aggregates_steps():
     from capi_image_preprocess_lab import summarize_preprocess_timings
 

@@ -312,6 +312,9 @@ class ImageResult:
     # None 代表 polygon 偵測失敗或未啟用，下游應 fallback 回 axis-aligned bbox
     panel_polygon: Optional[np.ndarray] = field(default=None, repr=False)
 
+    # Optional full preprocessed image cache for AOI-only v2 tile creation.
+    processed_image: Optional[np.ndarray] = field(default=None, repr=False)
+
     # 推論耗時 (秒)
     inference_time: float = 0.0
 
@@ -332,6 +335,7 @@ class ImageResult:
     mark_orientation: str = ""
     mark_source_image: str = ""
     mark_exclusion_regions: List[ExclusionRegion] = field(default_factory=list)
+
     # Image preprocessing timing metadata for record traceability.
     preprocess_steps: List[Dict[str, Any]] = field(default_factory=list)
     preprocess_total_ms: float = 0.0
@@ -1318,7 +1322,7 @@ class CAPIInferencer:
             cached_mark=cached_mark,
             panel_polygon=panel_polygon,
         )
-        
+
         # 切塊
         tiles, excluded_count = self.tile_image(
             processed_image, otsu_bounds, exclusion_regions,
@@ -1380,7 +1384,7 @@ class CAPIInferencer:
         
         if 'left' in sides and margin_px < w:
             result[:, :margin_px] *= gradient[None, ::-1]  # 反向：左側邊緣 0 → 1
-        
+
         return result
 
     def _mask_tile_mark_exclusion_regions(
@@ -1686,6 +1690,7 @@ class CAPIInferencer:
         tile.score_mask_valid_ratio = tile.valid_ratio
         tile.mark_exclusion_masked = False
         mark_masked = False
+
         # === 以下為 anomaly_map 後處理 (batch 和 fallback 共用) ===
         if anomaly_map is not None:
             # 記錄衰減/遮罩處理前的 anomaly_map max (用於後續比率計算)
@@ -1822,6 +1827,7 @@ class CAPIInferencer:
 
             # MARK binary 區域屬於不檢測區域，只遮掉 tile 內重疊的 heatmap 像素。
             anomaly_map, mark_masked = self._mask_tile_mark_exclusion_regions(tile, anomaly_map)
+
             # 邊緣衰減：過濾光影假陽性 (debug 模式可覆寫數值)
             edge_margin = self.config.edge_margin_px if edge_margin_override is None else edge_margin_override
             if edge_margin > 0:
@@ -4460,10 +4466,18 @@ class CAPIInferencer:
         tile_size = self.config.tile_size
         half = tile_size // 2
         raw_image = image
-        processed_image = raw_image
+        cached_processed = getattr(result, "processed_image", None)
+        if (
+            cached_processed is not None
+            and getattr(cached_processed, "shape", None) is not None
+            and cached_processed.shape[:2] == raw_image.shape[:2]
+        ):
+            processed_image = cached_processed
+        else:
+            processed_image = raw_image
         preprocess_steps: List[Dict[str, Any]] = []
         preprocess_total_ms = 0.0
-        if getattr(pre_cfg, "image_preprocess_pipeline", None):
+        if processed_image is raw_image and getattr(pre_cfg, "image_preprocess_pipeline", None):
             from capi_image_preprocess_lab import apply_preprocess_pipeline, describe_preprocess_pipeline
             logger.info(
                 "[v2][AOI] pipeline: %s",
@@ -6589,17 +6603,47 @@ class CAPIInferencer:
             tag = "OVEREXPOSED" if omit_overexposed else "OK"
             print(f"[v2] OMIT {tag}: {omit_overexposure_info}")
 
+        aoi_report: Optional[Dict[str, List['AOIReportDefect']]] = None
+        if self.config.aoi_coord_inspection_enabled:
+            aoi_report = self._parse_aoi_report_txt(Path(panel_dir))
+
+        aoi_only_mode = bool(
+            not self.config.grid_tiling_enabled
+            and self.config.aoi_coord_inspection_enabled
+            and aoi_report
+        )
+        preprocess_image_files = image_files
+        if aoi_only_mode:
+            report_prefixes = set(aoi_report.keys())
+            preprocess_prefixes = {
+                prefix for prefix in report_prefixes
+                if not prefix.upper().startswith("B0")
+            }
+            preprocess_image_files = [
+                f for f in image_files
+                if self._get_image_prefix(f.name) in preprocess_prefixes
+            ]
+            skipped = len(image_files) - len(preprocess_image_files)
+            print(
+                f"[v2] AOI-only: report prefixes="
+                f"{','.join(sorted(report_prefixes)) or '-'}; "
+                f"Phase 1 僅處理 {len(preprocess_image_files)} 張 AOI 相關 lighting"
+                + (f"，跳過 {skipped} 張非 AOI lighting" if skipped > 0 else "")
+            )
+
         pre_cfg = PreprocessConfig(
             tile_size=self.config.tile_size,
             otsu_offset=self.config.otsu_offset,
             enable_panel_polygon=self.config.enable_panel_polygon,
             edge_threshold_px=self.config.edge_threshold_px,
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
+            cache_processed_image=aoi_only_mode,
+            generate_grid_tiles=not aoi_only_mode,
         )
 
         preprocess_start = time.time()
-        panel_results = preprocess_panel_folder(panel_path, pre_cfg, image_files=image_files)
-        if not panel_results:
+        panel_results = preprocess_panel_folder(panel_path, pre_cfg, image_files=preprocess_image_files)
+        if not panel_results and not aoi_only_mode:
             logger.warning(f"[v2] {panel_path}: preprocess_panel_folder 回傳空結果")
             # 回傳與 v1 格式相容的空結果
             return [], omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image, {}
@@ -6611,9 +6655,6 @@ class CAPIInferencer:
 
         results: List[ImageResult] = []
         v2_entries: List[Dict[str, Any]] = []
-        aoi_report: Optional[Dict[str, List['AOIReportDefect']]] = None
-        if self.config.aoi_coord_inspection_enabled:
-            aoi_report = self._parse_aoi_report_txt(Path(panel_dir))
 
         for lighting, pre_result in panel_results.items():
             img_path = pre_result.image_path
@@ -6684,6 +6725,7 @@ class CAPIInferencer:
                 anomaly_tiles=[],
                 raw_bounds=raw_bounds_unoffset,
                 panel_polygon=polygon,
+                processed_image=getattr(pre_result, "processed_image", None),
                 inference_time=0.0,
                 preprocess_steps=list(getattr(pre_result, "preprocess_steps", []) or []),
                 preprocess_total_ms=float(getattr(pre_result, "preprocess_total_ms", 0.0) or 0.0),

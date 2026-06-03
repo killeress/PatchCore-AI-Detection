@@ -27,6 +27,8 @@ class PreprocessConfig:
     # None → tile_size // 2；0 → 關閉額外 edge anchor。
     outer_edge_extend: Optional[int] = None
     image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
+    cache_processed_image: bool = False
+    generate_grid_tiles: bool = True
 
     def __post_init__(self):
         if self.outer_edge_extend is None:
@@ -59,6 +61,7 @@ class PanelPreprocessResult:
     polygon_detection_failed: bool = False
     preprocess_steps: List[Dict[str, Any]] = field(default_factory=list)
     preprocess_total_ms: float = 0.0
+    processed_image: Optional[np.ndarray] = field(default=None, repr=False)
 
 
 LIGHTING_PREFIXES = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
@@ -538,16 +541,19 @@ def preprocess_panel_image(
             polygon_detection_failed=True,
             preprocess_steps=preprocess_steps,
             preprocess_total_ms=preprocess_total_ms,
+            processed_image=img if config.cache_processed_image else None,
         )
 
-    tiles = _generate_tiles(
-        img,
-        bbox,
-        polygon,
-        config,
-        original_img=original_img,
-        preprocess_pipeline=normalized_pipeline,
-    )
+    tiles = []
+    if config.generate_grid_tiles:
+        tiles = _generate_tiles(
+            img,
+            bbox,
+            polygon,
+            config,
+            original_img=original_img,
+            preprocess_pipeline=normalized_pipeline,
+        )
     return PanelPreprocessResult(
         image_path=image_path,
         lighting=lighting,
@@ -557,6 +563,7 @@ def preprocess_panel_image(
         polygon_detection_failed=polygon_failed,
         preprocess_steps=preprocess_steps,
         preprocess_total_ms=preprocess_total_ms,
+        processed_image=img if config.cache_processed_image else None,
     )
 
 
