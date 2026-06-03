@@ -283,6 +283,21 @@ class TestModelRegistryCRUD:
         db.delete_model_bundle(bid)
         assert len(db.list_model_bundles(machine_id="GN160")) == 1
 
+    def test_update_model_bundle_notes(self, tmp_path):
+        db = _make_db(tmp_path)
+        bid = db.register_model_bundle({
+            "machine_id": "GN160", "bundle_path": "model/GN160-20260428",
+            "trained_at": "2026-04-28T15:30:45",
+            "panel_count": 5, "inner_tile_count": 2400,
+            "edge_tile_count": 900, "ng_tile_count": 150,
+            "bundle_size_bytes": 478_000_000, "job_id": "j1",
+        })
+        notes = "量產用\n低誤報 threshold"
+
+        assert db.update_model_bundle_notes(bid, notes) is True
+        assert db.get_model_bundle(bid)["notes"] == notes
+        assert db.update_model_bundle_notes(9999, "missing") is False
+
 
 def test_list_active_training_jobs_returns_all_open(tmp_path):
     """preprocess + review 共存時都應該被列出，completed/failed 不算。"""

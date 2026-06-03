@@ -1088,6 +1088,33 @@ def test_handle_models_list_filters_by_machine_id():
     assert body["bundles"] == [{"id": 1, "machine_id": "M"}]
 
 
+def test_handle_models_update_notes_persists_free_text(tmp_path):
+    from capi_database import CAPIDatabase
+
+    db = CAPIDatabase(tmp_path / "test.db")
+    bid = db.register_model_bundle({
+        "machine_id": "GN160", "bundle_path": "model/GN160-20260428",
+        "trained_at": "2026-04-28T15:30:45",
+        "panel_count": 5, "inner_tile_count": 2400,
+        "edge_tile_count": 900, "ng_tile_count": 150,
+        "bundle_size_bytes": 478_000_000, "job_id": "j1",
+    })
+    server = MagicMock()
+    server.database = db
+    h = _make_handler_with_server(server, f"/api/models/{bid}/notes")
+    notes = "量產 A 線\n<script>text only</script>"
+    payload = json.dumps({"notes": notes}, ensure_ascii=False).encode("utf-8")
+    h.rfile = io.BytesIO(payload)
+    h.headers.get = MagicMock(return_value=str(len(payload)))
+
+    h._handle_models_update_notes()
+
+    body = json.loads(h._sent_response[0]["body"])
+    assert h._sent_response[0]["status"] == 200
+    assert body["notes"] == notes
+    assert db.get_model_bundle(bid)["notes"] == notes
+
+
 def test_handle_train_new_scope_page_exposes_submodel_retrain_choices():
     server = MagicMock()
     server.config = None
