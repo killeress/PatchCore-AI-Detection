@@ -429,6 +429,115 @@ def test_process_panel_v2_grid_disabled_infers_only_aoi_tiles(tmp_path):
     assert len(results[0].anomaly_tiles) == 1
 
 
+def test_process_panel_v2_aoi_only_preprocesses_only_report_prefixes(tmp_path):
+    """AOI-only mode should not preprocess lighting images absent from the AOI report."""
+    for prefix in ["STANDARD", "G0F00000", "R0F00000", "W0F00000", "WGF50500"]:
+        _write_grey_panel_image(tmp_path, prefix)
+    cfg = _make_config(tmp_path)
+    cfg.aoi_coord_inspection_enabled = True
+    cfg.grid_tiling_enabled = False
+
+    from capi_inference import CAPIInferencer, AOIReportDefect
+    from capi_preprocess import PanelPreprocessResult
+
+    img_path = tmp_path / "G0F00000_test.png"
+    fake_pre_result = PanelPreprocessResult(
+        image_path=img_path,
+        lighting="G0F00000",
+        foreground_bbox=(0, 0, 1024, 1024),
+        panel_polygon=None,
+        tiles=[],
+    )
+    parsed_report = {
+        "G0F00000": [
+            AOIReportDefect(
+                defect_code="L01",
+                product_x=512,
+                product_y=512,
+                image_prefix="G0F00000",
+            )
+        ]
+    }
+
+    amap = np.zeros((512, 512), dtype=np.float32)
+    with patch("capi_preprocess.preprocess_panel_folder",
+               return_value={"G0F00000": fake_pre_result}) as pre_folder, \
+         patch.object(CAPIInferencer, "_parse_aoi_report_txt",
+                      return_value=parsed_report), \
+         patch.object(CAPIInferencer, "_get_model_for",
+                      return_value=MagicMock()), \
+         patch.object(CAPIInferencer, "predict_tile",
+                      return_value=(0.1, amap)):
+        inferencer = CAPIInferencer(cfg)
+        results, *_ = inferencer.process_panel(
+            tmp_path,
+            product_resolution=(1024, 1024),
+        )
+
+    assert len(results) == 1
+    pre_cfg = pre_folder.call_args.args[1]
+    selected_names = [p.name for p in pre_folder.call_args.kwargs["image_files"]]
+    assert pre_cfg.cache_processed_image is True
+    assert pre_cfg.generate_grid_tiles is False
+    assert selected_names == ["G0F00000_test.png"]
+
+
+def test_process_panel_v2_aoi_tiles_reuse_cached_processed_image(tmp_path):
+    """AOI-centered tiles should reuse Phase 1 processed image when it is cached."""
+    _write_grey_panel_image(tmp_path, "G0F00000")
+    cfg = _make_config(tmp_path)
+    cfg.aoi_coord_inspection_enabled = True
+    cfg.grid_tiling_enabled = False
+    cfg.image_preprocess_pipeline = [
+        {"method": "mean", "params": {"kernel_size": 3}},
+    ]
+
+    from capi_inference import AOIReportDefect, CAPIInferencer
+    from capi_preprocess import PanelPreprocessResult
+
+    img_path = tmp_path / "G0F00000_test.png"
+    cached_processed = np.full((1024, 1024), 23, dtype=np.uint8)
+    fake_pre_result = PanelPreprocessResult(
+        image_path=img_path,
+        lighting="G0F00000",
+        foreground_bbox=(0, 0, 1024, 1024),
+        panel_polygon=None,
+        tiles=[],
+        processed_image=cached_processed,
+    )
+    parsed_report = {
+        "G0F00000": [
+            AOIReportDefect(
+                defect_code="L01",
+                product_x=512,
+                product_y=512,
+                image_prefix="G0F00000",
+            )
+        ]
+    }
+
+    amap = np.zeros((512, 512), dtype=np.float32)
+    with patch("capi_preprocess.preprocess_panel_folder",
+               return_value={"G0F00000": fake_pre_result}), \
+         patch("capi_image_preprocess_lab.apply_preprocess_pipeline") as apply_preprocess, \
+         patch.object(CAPIInferencer, "_parse_aoi_report_txt",
+                      return_value=parsed_report), \
+         patch.object(CAPIInferencer, "_get_model_for",
+                      return_value=MagicMock()), \
+         patch.object(CAPIInferencer, "predict_tile",
+                      return_value=(0.1, amap)) as pred:
+        inferencer = CAPIInferencer(cfg)
+        results, *_ = inferencer.process_panel(
+            tmp_path,
+            product_resolution=(1024, 1024),
+        )
+
+    apply_preprocess.assert_not_called()
+    tile = results[0].tiles[0]
+    np.testing.assert_array_equal(tile.image, np.full((512, 512), 23, dtype=np.uint8))
+    np.testing.assert_array_equal(pred.call_args.args[0].image, tile.image)
+
+
 def test_process_panel_v2_runs_b0f_skip_file_with_bright_spot_logic(tmp_path):
     """B0F skip_files stay on the legacy bright-spot path instead of model routing."""
     import cv2
