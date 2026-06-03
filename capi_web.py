@@ -1825,6 +1825,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         _empty_miss_cats = lambda: {c: 0 for c in CAPIDatabase.VALID_MISS_CATEGORIES}
         _empty_over_cats = lambda: {c: 0 for c in CAPIDatabase.VALID_OVER_CATEGORIES}
         actual_ok_review_categories = {"ric_misjudge", "data_error_actually_ok"}
+        counted_ai_miss_categories = {"threshold_high", "dust_misfilter"}
         total = len(records)
         if total == 0:
             return {
@@ -1880,6 +1881,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 ai == "OK"
                 and raw_ric == "NG"
                 and review_cat in actual_ok_review_categories
+            )
+            counted_ai_miss = (
+                ai == "OK"
+                and raw_ric == "NG"
+                and review_cat in counted_ai_miss_categories
             )
             ric = "OK" if manual_actual_ok else raw_ric
 
@@ -1958,7 +1964,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     miss_reviewed += 1
                     if review_cat in miss_by_cat:
                         miss_by_cat[review_cat] += 1
-            if ai == "OK" and ric == "NG":
+            if counted_ai_miss:
                 aiMiss += 1
             if eqp == "NG" and ai == "OK" and ric == "OK":
                 revival += 1
@@ -1978,7 +1984,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 daily[day]["aoiCorrect"] += 1
             if ai == ric:
                 daily[day]["aiCorrect"] += 1
-            if ai == "OK" and ric == "NG":
+            if counted_ai_miss:
                 daily[day]["aiMiss"] += 1
             if ai == "NG" and ric == "OK":
                 daily[day]["aiOver"] += 1
