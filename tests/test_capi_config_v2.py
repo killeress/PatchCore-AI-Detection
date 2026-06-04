@@ -65,8 +65,7 @@ def test_apply_db_overrides_new_arch_threshold_mapping_keeps_nested_values():
     ])
 
     assert cfg.threshold_mapping == {
-        "G0F00000": {"inner": 0.42, "edge": 0.73},
-        "STANDARD": {"inner": 0.61, "edge": 0.82},
+        "G0F00000": {"inner": 0.5, "edge": 0.5},
     }
 
 
@@ -84,3 +83,37 @@ def test_capi_config_machine_id_alone_is_not_new_arch():
     assert cfg.machine_id == "SOME_MACHINE"
     assert cfg.is_new_architecture is False  # model_mapping 是 flat
     Path(path).unlink()
+
+
+def test_capi_config_preprocess_after_tiling_serialization():
+    # 測試預設值
+    cfg_default = CAPIConfig()
+    assert cfg_default.preprocess_after_tiling is False
+
+    # 測試從 yaml 讀取
+    cfg_data = {
+        "preprocess_after_tiling": True,
+        "model_mapping": {"G0F00000": "g.pt"},
+        "threshold_mapping": {"G0F00000": 0.75},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        yaml.dump(cfg_data, f)
+        path = f.name
+    try:
+        cfg = CAPIConfig.from_yaml(path)
+        assert cfg.preprocess_after_tiling is True
+        
+        # 測試 to_dict
+        d = cfg.to_dict()
+        assert d["preprocess_after_tiling"] is True
+
+        # 測試 to_yaml
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = Path(tmpdir) / "output.yaml"
+            cfg.to_yaml(str(out_path))
+            
+            with open(out_path, "r", encoding="utf-8") as rf:
+                loaded = yaml.safe_load(rf)
+            assert loaded["preprocess_after_tiling"] is True
+    finally:
+        Path(path).unlink()

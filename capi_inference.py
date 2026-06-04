@@ -1224,6 +1224,11 @@ class CAPIInferencer:
                     else:
                         tile_mask = mask
 
+                if getattr(self.config, "preprocess_after_tiling", False) and getattr(self.config, "image_preprocess_pipeline", None):
+                    from capi_image_preprocess_lab import apply_preprocess_pipeline
+                    pipeline_result = apply_preprocess_pipeline(tile_img, self.config.image_preprocess_pipeline)
+                    tile_img = pipeline_result["image"]
+
                 tiles.append(TileInfo(
                     tile_id=tile_id,
                     x=x,
@@ -1279,7 +1284,7 @@ class CAPIInferencer:
         processed_image = raw_image
         preprocess_steps: List[Dict[str, Any]] = []
         preprocess_total_ms = 0.0
-        if getattr(self.config, "image_preprocess_pipeline", None):
+        if getattr(self.config, "image_preprocess_pipeline", None) and not getattr(self.config, "preprocess_after_tiling", False):
             from capi_image_preprocess_lab import apply_preprocess_pipeline, describe_preprocess_pipeline
             pipeline = self.config.image_preprocess_pipeline
             logger.info(f"[preprocess] pipeline: {describe_preprocess_pipeline(pipeline)}")
@@ -2105,6 +2110,7 @@ class CAPIInferencer:
             enable_panel_polygon=self.config.enable_panel_polygon,
             edge_threshold_px=self.config.edge_threshold_px,
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
+            preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
         )
         pre_result = preprocess_panel_image(image_path, lighting, pre_cfg)
 
@@ -4377,6 +4383,7 @@ class CAPIInferencer:
                 enable_panel_polygon=self.config.enable_panel_polygon,
                 edge_threshold_px=self.config.edge_threshold_px,
                 image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
+                preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
             )
             aoi_tile_count = 0
             for result in preprocessed_results:
@@ -4483,7 +4490,7 @@ class CAPIInferencer:
             processed_image = raw_image
         preprocess_steps: List[Dict[str, Any]] = []
         preprocess_total_ms = 0.0
-        if processed_image is raw_image and getattr(pre_cfg, "image_preprocess_pipeline", None):
+        if processed_image is raw_image and getattr(pre_cfg, "image_preprocess_pipeline", None) and not getattr(pre_cfg, "preprocess_after_tiling", False):
             from capi_image_preprocess_lab import apply_preprocess_pipeline, describe_preprocess_pipeline
             logger.info(
                 "[v2][AOI] pipeline: %s",
@@ -4550,6 +4557,10 @@ class CAPIInferencer:
             crop_w = tx2 - tx
             crop_h = ty2 - ty
             tile_img = processed_image[ty:ty2, tx:tx2].copy()
+            if getattr(pre_cfg, "preprocess_after_tiling", False) and getattr(pre_cfg, "image_preprocess_pipeline", None):
+                from capi_image_preprocess_lab import apply_preprocess_pipeline
+                pipeline_result = apply_preprocess_pipeline(tile_img, pre_cfg.image_preprocess_pipeline)
+                tile_img = pipeline_result["image"]
             original_tile = raw_image[ty:ty2, tx:tx2].copy()
             tile_zone, _cov, _dist, tile_mask = classify_tile_zone(
                 (tx, ty, tx2, ty2), polygon, pre_cfg,
@@ -6651,6 +6662,7 @@ class CAPIInferencer:
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
             cache_processed_image=aoi_only_mode,
             generate_grid_tiles=not aoi_only_mode,
+            preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
         )
 
         preprocess_start = time.time()

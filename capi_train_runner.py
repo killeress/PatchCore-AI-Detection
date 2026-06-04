@@ -227,6 +227,7 @@ def main() -> int:
         output_root=train_paths["output_root"],
         required_backbones=train_paths["required_backbones"],
         image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
+        preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
     )
     apply_user_training_params(cfg, job.get("training_params"), log_fn=log.info)
 

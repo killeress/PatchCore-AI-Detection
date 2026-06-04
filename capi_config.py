@@ -102,6 +102,7 @@ class CAPIConfig:
     # 面板 4 角 polygon 偵測（新增）
     enable_panel_polygon: bool = True  # 啟用後在 tile.mask 上套用 polygon 做精準裁切
     image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
+    preprocess_after_tiling: bool = False  # 先切塊後前處理選項
 
     # 排除區域
     exclusion_zones: List[ExclusionZone] = field(default_factory=list)
@@ -285,6 +286,7 @@ class CAPIConfig:
             image_preprocess_pipeline=normalize_preprocess_pipeline(
                 data.get("image_preprocess_pipeline", [])
             ),
+            preprocess_after_tiling=data.get("preprocess_after_tiling", False),
             exclusion_zones=exclusion_zones,
             tile_size=data.get("tile_size", 512),
             tile_stride=data.get("tile_stride", 512),
@@ -369,6 +371,7 @@ class CAPIConfig:
             "otsu_bottom_crop": self.otsu_bottom_crop,
             "enable_panel_polygon": self.enable_panel_polygon,
             "image_preprocess_pipeline": self.image_preprocess_pipeline,
+            "preprocess_after_tiling": self.preprocess_after_tiling,
             "exclusion_zones": [zone.to_dict() for zone in self.exclusion_zones],
             "tile_size": self.tile_size,
             "tile_stride": self.tile_stride,
@@ -444,6 +447,7 @@ class CAPIConfig:
             "otsu_bottom_crop": self.otsu_bottom_crop,
             "enable_panel_polygon": self.enable_panel_polygon,
             "image_preprocess_pipeline": self.image_preprocess_pipeline,
+            "preprocess_after_tiling": self.preprocess_after_tiling,
             "exclusion_zones": [zone.to_dict() for zone in self.exclusion_zones],
             "tile_size": self.tile_size,
             "tile_stride": self.tile_stride,

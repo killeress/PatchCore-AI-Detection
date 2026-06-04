@@ -7631,6 +7631,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "bundle not found"}, status=404)
             return
 
+        from pathlib import Path
+        from capi_model_registry import _read_manifest
+        bundle_dir = Path(bundle["bundle_path"])
+        try:
+            old_manifest = _read_manifest(bundle_dir)
+        except Exception:
+            old_manifest = {}
+        image_preprocess_pipeline = old_manifest.get("image_preprocess_pipeline") or []
+        preprocess_after_tiling = bool(old_manifest.get("preprocess_after_tiling", False))
+
         machine_id = str(bundle.get("machine_id") or "").strip()
         if not machine_id:
             self._send_json({"error": "bundle missing machine_id"}, status=400)
@@ -7672,6 +7682,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 panel_paths=clean_panel_paths,
                 training_params=training_params,
                 panel_modes=panel_modes,
+                image_preprocess_pipeline=image_preprocess_pipeline,
+                preprocess_after_tiling=preprocess_after_tiling,
             )
         except Exception:
             with state["lock"]:
@@ -7736,6 +7748,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             bundle = db.get_model_bundle(bundle_id)
             if not bundle:
                 raise RuntimeError(f"bundle {bundle_id} 已不存在")
+
+            job = db.get_training_job(job_id)
+            if not job:
+                raise RuntimeError(f"job {job_id} 已不存在")
 
             bundle_dir = Path(bundle["bundle_path"])
             machine_id = bundle["machine_id"]

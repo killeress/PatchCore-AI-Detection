@@ -89,6 +89,7 @@ class TrainingConfig:
     max_epochs: int = 1
     precision: str = "float16"
     image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
+    preprocess_after_tiling: bool = False
 
 
 # 使用者可從 step1 表單覆寫的 PatchCore 超參數。
@@ -583,7 +584,8 @@ def write_thresholds(bundle_dir: Path, thresholds: Dict[str, Dict[str, float]]) 
 def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
                               thresholds: Dict[str, Dict[str, float]],
                               succeeded_units: Optional[Set[Tuple[str, str]]] = None,
-                              image_preprocess_pipeline: Optional[List[Dict[str, Any]]] = None) -> None:
+                              image_preprocess_pipeline: Optional[List[Dict[str, Any]]] = None,
+                              preprocess_after_tiling: bool = False) -> None:
     """產出 bundle 內的 inference yaml。
 
     若提供 succeeded_units，只寫入 inner/edge 都成功訓練的 lighting；
@@ -654,6 +656,7 @@ enable_panel_polygon: true
 
 # === 影像前處理（先套用，再切 tile / 推論）===
 {image_preprocess_block}
+preprocess_after_tiling: {str(preprocess_after_tiling).lower()}
 
 # === 模型映射（lighting → inner/edge 模型路徑 + threshold）===
 {model_mapping_block}
@@ -1287,6 +1290,7 @@ def run_training_pipeline(
         thresholds,
         succeeded_units=succeeded_units,
         image_preprocess_pipeline=cfg.image_preprocess_pipeline,
+        preprocess_after_tiling=cfg.preprocess_after_tiling,
     )
     write_manifest(bundle_dir, {
         "machine_id": cfg.machine_id,
@@ -1295,6 +1299,7 @@ def run_training_pipeline(
         "panel_count": len(cfg.panel_paths),
         "panel_glass_ids": [p.name for p in cfg.panel_paths],
         "edge_threshold_px": 768,
+        "preprocess_after_tiling": cfg.preprocess_after_tiling,
         "patchcore_params": {
             "batch_size": cfg.batch_size,
             "image_size": list(cfg.image_size),

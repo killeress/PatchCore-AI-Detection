@@ -29,6 +29,7 @@ class PreprocessConfig:
     image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
     cache_processed_image: bool = False
     generate_grid_tiles: bool = True
+    preprocess_after_tiling: bool = False
 
     def __post_init__(self):
         if self.outer_edge_extend is None:
@@ -506,7 +507,7 @@ def preprocess_panel_image(
     normalized_pipeline: List[Dict[str, Any]] = []
     preprocess_steps: List[Dict[str, Any]] = []
     preprocess_total_ms = 0.0
-    if config.image_preprocess_pipeline:
+    if config.image_preprocess_pipeline and not getattr(config, "preprocess_after_tiling", False):
         from capi_image_preprocess_lab import apply_preprocess_pipeline, describe_preprocess_pipeline
         logger.info("[preprocess] pipeline: %s", describe_preprocess_pipeline(config.image_preprocess_pipeline))
         pipeline_result = apply_preprocess_pipeline(img, config.image_preprocess_pipeline)
@@ -684,10 +685,16 @@ def _generate_tiles(
         if (tx, ty) in emitted_positions:
             return
         emitted_positions.add((tx, ty))
+        tile_img = img[ty:ty + ts, tx:tx + ts].copy()
+        if getattr(config, "preprocess_after_tiling", False) and config.image_preprocess_pipeline:
+            from capi_image_preprocess_lab import apply_preprocess_pipeline
+            pipeline_result = apply_preprocess_pipeline(tile_img, config.image_preprocess_pipeline)
+            tile_img = pipeline_result["image"]
+
         tiles.append(TileResult(
             tile_id=tid,
             x1=tx, y1=ty, x2=tx + ts, y2=ty + ts,
-            image=img[ty:ty + ts, tx:tx + ts].copy(),
+            image=tile_img,
             mask=mask,
             coverage=cov,
             zone=zone,

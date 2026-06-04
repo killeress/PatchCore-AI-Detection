@@ -99,3 +99,24 @@ def test_preprocess_panel_folder_uses_reference_polygon(tmp_path):
     ref_poly = results["STANDARD"].panel_polygon
     for lighting, r in results.items():
         np.testing.assert_array_almost_equal(r.panel_polygon, ref_poly)
+
+
+def test_preprocess_panel_image_with_preprocess_after_tiling():
+    cfg = PreprocessConfig(
+        tile_size=256,
+        preprocess_after_tiling=True,
+        image_preprocess_pipeline=[
+            {"method": "gaussian", "params": {"kernel_size": 5, "sigma": 2.0}},
+        ],
+    )
+    result = preprocess_panel_image(FIXTURE, "STANDARD", cfg)
+    assert result.tiles
+    
+    # 驗證大圖的前處理步驟被跳過
+    assert len(result.preprocess_steps) == 0
+    
+    # 驗證每個 tile 的 image 確實套用了前處理，而 original_image 是原來的
+    tile = result.tiles[0]
+    assert tile.original_image is not None
+    # 由於套用了模糊，處理後的 image 應與 original_image 不同
+    assert not np.array_equal(tile.image, tile.original_image)
