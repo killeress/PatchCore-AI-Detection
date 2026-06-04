@@ -589,34 +589,29 @@
     /* Tabs */
     .tabs-nav {
         display: flex;
-        gap: 8px;
+        gap: 8px 10px;
         margin-bottom: 24px;
         border-bottom: 1px solid var(--border);
-        padding-bottom: 2px;
-        overflow-x: auto;
-        flex-wrap: nowrap;
-        scrollbar-width: none;
-        -ms-overflow-style: none;
-    }
-
-    .tabs-nav::-webkit-scrollbar {
-        display: none;
+        padding-bottom: 10px;
+        overflow: visible;
+        flex-wrap: wrap;
+        align-items: center;
     }
 
     .tab-btn {
         background: transparent;
-        border: none;
+        border: 1px solid transparent;
         color: var(--text-muted);
-        padding: 12px 20px;
+        padding: 9px 14px;
         font-family: 'Fira Code', monospace;
-        font-size: 1rem;
+        font-size: 0.9rem;
         font-weight: 600;
         cursor: pointer;
-        border-bottom: 3px solid transparent;
         transition: all 0.2s;
-        border-radius: 8px 8px 0 0;
+        border-radius: 8px;
         white-space: nowrap;
-        flex-shrink: 0;
+        flex: 0 0 auto;
+        line-height: 1.2;
     }
 
     .tab-btn:hover {
@@ -626,8 +621,19 @@
 
     .tab-btn.active {
         color: var(--accent);
-        border-bottom-color: var(--accent);
+        border-color: rgba(59, 130, 246, 0.55);
         background: rgba(59, 130, 246, 0.1);
+    }
+
+    @media (max-width: 720px) {
+        .tabs-nav {
+            gap: 6px;
+        }
+
+        .tab-btn {
+            padding: 8px 10px;
+            font-size: 0.82rem;
+        }
     }
 
     .tab-content {
@@ -775,6 +781,7 @@
     <!-- Tabs Navigation -->
     <div class="tabs-nav">
         <button class="tab-btn active" onclick="switchTab('tab-single', this)">📸 單圖推論</button>
+        <button class="tab-btn" onclick="switchTab('tab-dot-detection', this)">⚫ 點圖偵測</button>
         <button class="tab-btn" onclick="switchTab('tab-preprocess-lab', this)">🧪 影像預處理實驗室</button>
         <button class="tab-btn" onclick="switchTab('tab-coord', this)">📍 座標推論</button>
         <button class="tab-btn" onclick="switchTab('tab-edge', this)">📐 邊緣檢測 (整邊)</button>
@@ -1659,11 +1666,145 @@
         </div>
     </div>
 
+    <!-- ═══ 點圖偵測頁籤 ═══ -->
+    <div id="tab-dot-detection" class="tab-content">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+            <div>
+                <h2 style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
+                    ⚫ 點圖偵測
+                    <span class="debug-badge">EXPERIMENT</span>
+                </h2>
+                <p style="color:var(--text-muted); font-size:0.85rem; margin-top:4px;">
+                    預設載入 templates/imgs/black 與 templates/imgs/white 樣本，使用局部背景差異量測點尺寸
+                </p>
+            </div>
+        </div>
+
+        <div class="card" style="padding:20px;">
+            <div class="coord-input-row">
+                <div class="coord-group">
+                    <label for="dot-polarity">點類型</label>
+                    <select id="dot-polarity" onchange="populateDotSamples(); syncDotThresholdDefault();">
+                        <option value="black" selected>黑點</option>
+                        <option value="white">白點</option>
+                    </select>
+                </div>
+                <div class="coord-group" style="min-width:220px;">
+                    <label for="dot-sample-select">預設樣本</label>
+                    <select id="dot-sample-select" onchange="syncDotSamplePath()"></select>
+                </div>
+                <input type="text" id="dot-image-path" placeholder="圖片絕對路徑，可用預設樣本或貼實際物品影像"
+                    autocomplete="off" spellcheck="false"
+                    style="flex:1; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.95rem; outline:none;">
+                <button class="btn-run" id="btn-dot-run" onclick="runDotDetection()"
+                    style="background:linear-gradient(135deg,#64748b,#475569);">
+                    <span class="spinner" id="dot-spinner"></span>
+                    <span id="dot-btn-text">⚫ 偵測點</span>
+                </button>
+            </div>
+
+            <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
+                <div class="coord-input-row">
+                    <div class="coord-group">
+                        <label for="dot-diff-threshold">diff_threshold</label>
+                        <input type="number" id="dot-diff-threshold" value="8" min="0" max="255" step="1"
+                            title="局部背景差異閾值；小黑點建議先從 8 開始">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-bg-kernel">背景 kernel</label>
+                        <input type="number" id="dot-bg-kernel" value="31" min="3" max="199" step="2"
+                            title="median blur 背景估計 kernel，會自動修正為奇數">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-min-area">最小面積 px</label>
+                        <input type="number" id="dot-min-area" value="2" min="1" max="10000" step="1">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-max-area">最大面積 px</label>
+                        <input type="number" id="dot-max-area" value="5000" min="0" max="1000000" step="1">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-morph-open">open kernel</label>
+                        <input type="number" id="dot-morph-open" value="3" min="0" max="15" step="1"
+                            title=">1 時做 morphological opening 去除孤立雜訊">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-size-metric">尺寸算法</label>
+                        <select id="dot-size-metric">
+                            <option value="bbox_max" selected>外接框最大徑</option>
+                            <option value="equivalent">等效圓直徑</option>
+                            <option value="enclosing">最小外接圓</option>
+                        </select>
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-unit-per-px">單位 / px</label>
+                        <input type="number" id="dot-unit-per-px" value="0" min="0" step="0.0001"
+                            title="尚未校正時填 0，只顯示 px 尺寸；各機種確認比例後再填">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-unit-label">單位</label>
+                        <input type="text" id="dot-unit-label" value="mm" style="text-align:center;">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-defect-threshold">Defect 門檻</label>
+                        <input type="number" id="dot-defect-threshold" value="0.3" min="0" step="0.01"
+                            onchange="computeDotCalibration();"
+                            title="實物尺寸門檻；單位依上方單位/px 換算">
+                    </div>
+                </div>
+            </div>
+
+            <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
+                <div class="coord-input-row">
+                    <div class="coord-group">
+                        <label for="dot-calibration-value">點線規值</label>
+                        <input type="number" id="dot-calibration-value" value="0.3" min="0" step="0.01"
+                            onchange="computeDotCalibration();">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-calibration-px">對應影像 px</label>
+                        <input type="number" id="dot-calibration-px" value="" min="0" step="0.01"
+                            onchange="computeDotCalibration();" placeholder="從候選點套用">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-calibration-unit">校正單位 / px</label>
+                        <input type="number" id="dot-calibration-unit" value="" min="0" step="0.0001" readonly
+                            style="color:var(--accent);">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-calibration-threshold-px">推論 px 門檻</label>
+                        <input type="number" id="dot-calibration-threshold-px" value="" min="0" step="0.01" readonly
+                            style="color:var(--ok);">
+                    </div>
+                    <button class="btn-copy" id="dot-btn-apply-calibration" onclick="applyDotCalibration(true)"
+                        style="align-self:flex-end; height:42px; padding:8px 14px;">套用校正</button>
+                    <button class="btn-copy" id="dot-btn-copy-calibration" onclick="copyDotCalibration()"
+                        style="align-self:flex-end; height:42px; padding:8px 14px;">複製參數</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="dot-error-box" class="error-box hidden"></div>
+
+        <div id="dot-result-section" class="hidden">
+            <div class="coord-info-cards" id="dot-info-cards"></div>
+            <div class="coord-result-grid" id="dot-result-grid"></div>
+            <div class="card" id="dot-candidates-card" style="padding:16px; margin-top:16px;">
+                <div style="color:var(--text-muted); font-size:0.85rem; font-family:'Fira Code',monospace; margin-bottom:10px;">候選點 Top 20</div>
+                <div style="overflow:auto;">
+                    <table id="dot-candidates-table"></table>
+                </div>
+            </div>
+        </div>
+    </div>
+
 </div>
 {% endblock %}
 
 {% block extra_js %}
 <script>
+    const dotSamples = {{ dot_samples|tojson }};
+
     // Tab switching logic
     function switchTab(tabId, btn) {
         // Hide all tab contents
@@ -1689,6 +1830,7 @@
     const markBtnText = document.getElementById('mark-btn-text');
     const markSpinner = document.getElementById('mark-spinner');
     const labInput = document.getElementById('lab-image-path');
+    const dotPathInput = document.getElementById('dot-image-path');
 
     // Enter key to submit
     input.addEventListener('keydown', (e) => {
@@ -1697,6 +1839,10 @@
     labInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') runPreprocessLab();
     });
+    dotPathInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') runDotDetection();
+    });
+    populateDotSamples();
     updateLabParamVisibility();
 
     // 自動帶入 URL 的 ?path= 參數
@@ -1714,6 +1860,8 @@
 
             const labPathInput = document.getElementById('lab-image-path');
             if (labPathInput) labPathInput.value = pathParam;
+
+            if (dotPathInput) dotPathInput.value = pathParam;
         }
 
         // 從 record_detail 帶 ROI 座標自動填入角落 tab 並切換
@@ -1739,6 +1887,9 @@
         } else if (tabParam === 'preprocess') {
             const targetBtn = document.querySelector('.tab-btn[onclick*="tab-preprocess-lab"]');
             if (targetBtn) switchTab('tab-preprocess-lab', targetBtn);
+        } else if (tabParam === 'dot') {
+            const targetBtn = document.querySelector('.tab-btn[onclick*="tab-dot-detection"]');
+            if (targetBtn) switchTab('tab-dot-detection', targetBtn);
         }
     })();
 
@@ -1921,6 +2072,282 @@
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#039;');
+    }
+
+    function populateDotSamples() {
+        const polarity = document.getElementById('dot-polarity').value;
+        const select = document.getElementById('dot-sample-select');
+        const samples = dotSamples[polarity] || [];
+        if (samples.length === 0) {
+            select.innerHTML = '<option value="">無預設樣本</option>';
+            return;
+        }
+        select.innerHTML = samples.map(item =>
+            `<option value="${escapeHtml(item.path)}">${escapeHtml(item.name)}</option>`
+        ).join('');
+        syncDotSamplePath();
+    }
+
+    function syncDotSamplePath() {
+        const select = document.getElementById('dot-sample-select');
+        if (select && select.value) {
+            dotPathInput.value = select.value;
+        }
+    }
+
+    function syncDotThresholdDefault() {
+        const threshold = document.getElementById('dot-diff-threshold');
+        if (!threshold.value || threshold.value === '8' || threshold.value === '12') {
+            threshold.value = '8';
+        }
+    }
+
+    function computeDotCalibration() {
+        const gaugeValue = parseFloat(document.getElementById('dot-calibration-value').value) || 0;
+        const gaugePx = parseFloat(document.getElementById('dot-calibration-px').value) || 0;
+        const defectThreshold = parseFloat(document.getElementById('dot-defect-threshold').value) || 0;
+        const unitEl = document.getElementById('dot-calibration-unit');
+        const thresholdPxEl = document.getElementById('dot-calibration-threshold-px');
+        if (gaugeValue <= 0 || gaugePx <= 0) {
+            unitEl.value = '';
+            thresholdPxEl.value = '';
+            return null;
+        }
+
+        const unitPerPx = gaugeValue / gaugePx;
+        const thresholdPx = defectThreshold > 0 ? defectThreshold / unitPerPx : 0;
+        unitEl.value = unitPerPx.toFixed(6);
+        thresholdPxEl.value = thresholdPx > 0 ? thresholdPx.toFixed(2) : '';
+        document.getElementById('dot-unit-per-px').value = unitPerPx.toFixed(6);
+        return { unitPerPx, thresholdPx };
+    }
+
+    function applyDotCalibration(rerun) {
+        const computed = computeDotCalibration();
+        if (!computed) {
+            showDotError('請先填入點線規值與對應影像 px');
+            return;
+        }
+        hideDotError();
+        if (rerun) {
+            runDotDetection();
+        }
+    }
+
+    function useDotCandidateForCalibration(sizePx) {
+        document.getElementById('dot-calibration-px').value = Number(sizePx).toFixed(2);
+        applyDotCalibration(true);
+    }
+
+    function copyDotCalibration() {
+        const computed = computeDotCalibration();
+        if (!computed) {
+            showDotError('請先完成校正再複製參數');
+            return;
+        }
+        const unitLabel = document.getElementById('dot-unit-label').value || 'unit';
+        const lines = [
+            `polarity=${document.getElementById('dot-polarity').value}`,
+            `size_metric=${document.getElementById('dot-size-metric').value}`,
+            `diff_threshold=${document.getElementById('dot-diff-threshold').value}`,
+            `background_kernel=${document.getElementById('dot-bg-kernel').value}`,
+            `min_area=${document.getElementById('dot-min-area').value}`,
+            `max_area=${document.getElementById('dot-max-area').value}`,
+            `morph_open=${document.getElementById('dot-morph-open').value}`,
+            `unit_per_px=${computed.unitPerPx.toFixed(6)} ${unitLabel}/px`,
+            `defect_threshold=${document.getElementById('dot-defect-threshold').value} ${unitLabel}`,
+            `defect_threshold_px=${computed.thresholdPx.toFixed(2)} px`,
+        ];
+        cvCopyToClipboard(lines.join('\n'), 'dot-btn-copy-calibration');
+    }
+
+    async function runDotDetection() {
+        const imagePath = dotPathInput.value.trim();
+        if (!imagePath) {
+            showDotError('請輸入圖片路徑或選擇預設樣本');
+            return;
+        }
+        computeDotCalibration();
+
+        let bgKernel = parseInt(document.getElementById('dot-bg-kernel').value, 10) || 31;
+        if (bgKernel % 2 === 0) {
+            bgKernel += 1;
+            document.getElementById('dot-bg-kernel').value = bgKernel;
+        }
+
+        const btnRun = document.getElementById('btn-dot-run');
+        const btnText = document.getElementById('dot-btn-text');
+        const spn = document.getElementById('dot-spinner');
+        btnRun.disabled = true;
+        btnText.textContent = '偵測中...';
+        spn.classList.add('active');
+        hideDotError();
+        document.getElementById('dot-result-section').classList.add('hidden');
+
+        try {
+            const resp = await fetch('/api/debug/dot-detection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    image_path: imagePath,
+                    polarity: document.getElementById('dot-polarity').value,
+                    diff_threshold: parseInt(document.getElementById('dot-diff-threshold').value, 10) || 8,
+                    background_kernel: bgKernel,
+                    min_area: parseInt(document.getElementById('dot-min-area').value, 10) || 2,
+                    max_area: parseInt(document.getElementById('dot-max-area').value, 10) || 0,
+                    morph_open: parseInt(document.getElementById('dot-morph-open').value, 10) || 0,
+                    size_metric: document.getElementById('dot-size-metric').value,
+                    unit_per_px: parseFloat(document.getElementById('dot-unit-per-px').value) || 0,
+                    unit_label: document.getElementById('dot-unit-label').value || 'unit',
+                    defect_threshold: parseFloat(document.getElementById('dot-defect-threshold').value) || 0.3,
+                }),
+            });
+
+            const data = await resp.json();
+            if (data.error) {
+                showDotError(data.error);
+                return;
+            }
+            renderDotResults(data);
+        } catch (err) {
+            showDotError('請求失敗: ' + err.message);
+        } finally {
+            btnRun.disabled = false;
+            btnText.textContent = '⚫ 偵測點';
+            spn.classList.remove('active');
+        }
+    }
+
+    function showDotError(msg) {
+        const box = document.getElementById('dot-error-box');
+        box.textContent = '❌ ' + msg;
+        box.classList.remove('hidden');
+    }
+
+    function hideDotError() {
+        document.getElementById('dot-error-box').classList.add('hidden');
+    }
+
+    function renderDotResults(data) {
+        document.getElementById('dot-result-section').classList.remove('hidden');
+        const p = data.params_used || {};
+        const calibrated = !!data.calibrated;
+        const unitLabel = escapeHtml(data.unit_label || 'unit');
+        const polarityLabel = data.polarity === 'white' ? '白點' : '黑點';
+        const maxUnitText = calibrated ? `${data.max_size_units} ${unitLabel}` : '未校正';
+        const defectText = calibrated ? data.defect_count : '未校正';
+        const thresholdText = calibrated ? `${p.defect_threshold} ${unitLabel}` : '需先填單位/px';
+        const thresholdPxText = calibrated && data.defect_threshold_px !== null && data.defect_threshold_px !== undefined
+            ? `${data.defect_threshold_px} px`
+            : '-';
+
+        document.getElementById('dot-info-cards').innerHTML = `
+            <div class="summary-card">
+                <div class="label">點類型</div>
+                <div class="value" style="color:var(--text);font-size:1rem;">${polarityLabel}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">候選點</div>
+                <div class="value" style="color:${data.count > 0 ? 'var(--accent)' : 'var(--text-muted)'}">${data.count}</div>
+            </div>
+            <div class="summary-card" style="border-color:${calibrated && data.defect_count > 0 ? 'rgba(239,68,68,0.3)' : 'var(--border)'}">
+                <div class="label">Defect 數</div>
+                <div class="value" style="color:${calibrated && data.defect_count > 0 ? 'var(--ng)' : 'var(--text-muted)'};font-size:${calibrated ? '1.5rem' : '1rem'};">${defectText}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">最大尺寸 px</div>
+                <div class="value" style="color:var(--accent)">${data.max_size_px}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">最大尺寸</div>
+                <div class="value" style="color:${calibrated ? 'var(--accent)' : 'var(--err)'};font-size:1rem;">${maxUnitText}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">Defect 門檻</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.9rem;">${thresholdText}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">推論 px 門檻</div>
+                <div class="value" style="color:${calibrated ? 'var(--ok)' : 'var(--text-muted)'};font-size:1rem;">${thresholdPxText}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">尺寸算法</div>
+                <div class="value" style="color:var(--text);font-size:0.85rem;">${escapeHtml(p.size_metric || '-')}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">耗時</div>
+                <div class="value" style="color:var(--accent)">${data.processing_time}s</div>
+            </div>
+        `;
+
+        const t = Date.now();
+        document.getElementById('dot-result-grid').innerHTML = `
+            <div class="img-card">
+                <h4>原圖</h4>
+                <img src="${data.source_url}&t=${t}" alt="Dot source" onclick="openLightbox(this.src)">
+            </div>
+            <div class="img-card">
+                <h4>偵測 Overlay</h4>
+                <img src="${data.overlay_url}?t=${t}" alt="Dot overlay" onclick="openLightbox(this.src)">
+            </div>
+            <div class="img-card">
+                <h4>二值 Mask</h4>
+                <img src="${data.mask_url}?t=${t}" alt="Dot mask" onclick="openLightbox(this.src)">
+            </div>
+            <div class="img-card">
+                <h4>Diff Heatmap</h4>
+                <img src="${data.diff_url}?t=${t}" alt="Dot diff" onclick="openLightbox(this.src)">
+            </div>
+        `;
+
+        renderDotCandidates(data.candidates || [], calibrated, unitLabel);
+    }
+
+    function renderDotCandidates(candidates, calibrated, unitLabel) {
+        const card = document.getElementById('dot-candidates-card');
+        const table = document.getElementById('dot-candidates-table');
+        if (candidates.length === 0) {
+            card.classList.add('hidden');
+            table.innerHTML = '';
+            return;
+        }
+        card.classList.remove('hidden');
+        const rows = candidates.slice(0, 20).map(c => {
+            const unitValue = calibrated && c.size_units !== null && c.size_units !== undefined
+                ? `${c.size_units} ${unitLabel}`
+                : '-';
+            return `
+                <tr>
+                    <td style="color:${c.is_defect ? 'var(--ng)' : 'var(--ok)'};font-weight:700;">#${c.id}</td>
+                    <td>${c.is_defect ? 'NG' : 'OK'}</td>
+                    <td>(${c.center_x}, ${c.center_y})</td>
+                    <td>${c.w}×${c.h}</td>
+                    <td>${c.area_px}</td>
+                    <td>${c.size_px}</td>
+                    <td>${unitValue}</td>
+                    <td>${c.max_diff}</td>
+                    <td>${c.mean_diff}</td>
+                    <td><button class="btn-copy" style="padding:4px 10px;font-size:0.78rem;" onclick="useDotCandidateForCalibration(${c.size_px})">校正</button></td>
+                </tr>
+            `;
+        }).join('');
+        table.innerHTML = `
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>判定</th>
+                    <th>中心</th>
+                    <th>BBox</th>
+                    <th>面積</th>
+                    <th>尺寸 px</th>
+                    <th>尺寸</th>
+                    <th>Max Diff</th>
+                    <th>Mean Diff</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+        `;
     }
 
     async function runInference() {

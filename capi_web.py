@@ -80,7 +80,7 @@ def tile_info(t):
     elif t.get("is_dust"):
         badge = "badge-err"
         info += f" | 灰塵 Region COV: {t.get('dust_iou',0):.3f}"
-    if t.get("is_bomb"):
+    if t.get("is_bomb") and t.get("is_anomaly"):
         badge = "badge-err"
         info += f" | 炸彈代碼: {t.get('bomb_code','')}"
     if t.get("scratch_filtered") and not t.get("is_bomb") and not t.get("is_dust"):
@@ -118,6 +118,165 @@ def _serialize_pending_changes(pc) -> list:
             lighting, zone = key
             out.append({"lighting": lighting, "zone": zone, "count": int(count)})
     return out
+
+
+_DOT_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+
+def _list_debug_dot_samples(base_dir: Path) -> dict:
+    """List bundled black/white dot samples for the debug page."""
+    samples = {}
+    for polarity in ("black", "white"):
+        folder = base_dir / polarity
+        items = []
+        if folder.exists() and folder.is_dir():
+            for path in sorted(folder.iterdir(), key=lambda p: p.name.lower()):
+                if path.is_file() and path.suffix.lower() in _DOT_IMAGE_EXTS:
+                    items.append({"name": path.name, "path": str(path)})
+        samples[polarity] = items
+    return samples
+
+
+def _odd_kernel(value, default: int = 31, min_value: int = 3) -> int:
+    try:
+        kernel = int(value)
+    except (TypeError, ValueError):
+        kernel = default
+    kernel = max(min_value, kernel)
+    if kernel % 2 == 0:
+        kernel += 1
+    return kernel
+
+
+def _detect_dot_components(
+    image_bgr,
+    *,
+    polarity: str,
+    diff_threshold: int,
+    background_kernel: int,
+    min_area: int,
+    max_area: int,
+    morph_open: int,
+    size_metric: str,
+    unit_per_px: float,
+    defect_threshold: float,
+) -> dict:
+    """Detect dot-like dark/bright components and measure their visible size."""
+    import cv2
+    import numpy as np
+
+    if image_bgr.ndim == 2:
+        gray = image_bgr
+        overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    else:
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        overlay = image_bgr.copy()
+
+    background_kernel = _odd_kernel(background_kernel)
+    bg = cv2.medianBlur(gray, background_kernel)
+    if polarity == "white":
+        diff = cv2.subtract(gray, bg)
+    else:
+        diff = cv2.subtract(bg, gray)
+
+    diff_threshold = max(0, int(diff_threshold))
+    mask = (diff >= diff_threshold).astype("uint8") * 255
+
+    morph_open = int(morph_open or 0)
+    if morph_open > 1:
+        kernel = np.ones((morph_open, morph_open), dtype=np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+    min_area = max(1, int(min_area))
+    max_area = int(max_area or 0)
+    if max_area <= 0:
+        max_area = gray.shape[0] * gray.shape[1]
+
+    candidates = []
+    calibrated = unit_per_px > 0
+    for label in range(1, num_labels):
+        x, y, w, h, area = [int(v) for v in stats[label]]
+        if area < min_area or area > max_area:
+            continue
+
+        component_mask = (labels[y:y + h, x:x + w] == label).astype("uint8") * 255
+        contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        enclosing_diameter = float(max(w, h))
+        if contours:
+            contour = max(contours, key=cv2.contourArea)
+            _, radius = cv2.minEnclosingCircle(contour)
+            enclosing_diameter = float(radius * 2.0)
+
+        bbox_max = float(max(w, h))
+        equivalent_diameter = float((4.0 * area / np.pi) ** 0.5)
+        if size_metric == "equivalent":
+            size_px = equivalent_diameter
+        elif size_metric == "enclosing":
+            size_px = enclosing_diameter
+        else:
+            size_px = bbox_max
+
+        size_units = float(size_px * unit_per_px) if calibrated else None
+        candidates.append({
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+            "area_px": area,
+            "center_x": round(float(centroids[label][0]), 2),
+            "center_y": round(float(centroids[label][1]), 2),
+            "bbox_max_diameter_px": round(bbox_max, 2),
+            "equivalent_diameter_px": round(equivalent_diameter, 2),
+            "enclosing_diameter_px": round(enclosing_diameter, 2),
+            "size_px": round(float(size_px), 2),
+            "size_units": round(size_units, 4) if size_units is not None else None,
+            "max_diff": int(diff[labels == label].max()),
+            "mean_diff": round(float(diff[labels == label].mean()), 2),
+            "is_defect": bool(calibrated and size_units >= defect_threshold),
+        })
+
+    candidates.sort(key=lambda c: (c["is_defect"], c["size_px"]), reverse=True)
+    for idx, candidate in enumerate(candidates, 1):
+        candidate["id"] = idx
+        color = (0, 0, 255) if candidate["is_defect"] else (0, 200, 0)
+        x, y, w, h = candidate["x"], candidate["y"], candidate["w"], candidate["h"]
+        cv2.rectangle(overlay, (x, y), (x + w, y + h), color, 1)
+        cv2.circle(
+            overlay,
+            (int(round(candidate["center_x"])), int(round(candidate["center_y"]))),
+            3,
+            color,
+            -1,
+        )
+        label = f"#{idx} {candidate['size_px']:.1f}px"
+        if candidate["size_units"] is not None:
+            label = f"#{idx} {candidate['size_units']:.3g}"
+        cv2.putText(
+            overlay,
+            label,
+            (x, max(12, y - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+
+    diff_norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
+    diff_color = cv2.applyColorMap(diff_norm.astype("uint8"), cv2.COLORMAP_JET)
+    mask_color = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
+    return {
+        "gray": gray,
+        "diff": diff,
+        "mask": mask,
+        "overlay": overlay,
+        "diff_color": diff_color,
+        "mask_color": mask_color,
+        "candidates": candidates,
+        "calibrated": calibrated,
+    }
 
 
 class _ListHandler(logging.Handler):
@@ -541,6 +700,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_debug_edge_inspect_corner()
             elif path == "/api/debug/bright-spot-inference":
                 self._handle_debug_bright_spot_inference()
+            elif path == "/api/debug/dot-detection":
+                self._handle_debug_dot_detection()
             elif path == "/api/ric/upload":
                 self._handle_ric_upload()
             elif path == "/api/ric/delete":
@@ -1527,6 +1688,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return getattr(self.inferencer.config, name)
             return default_val
         
+        dot_sample_dir = Path(__file__).resolve().parent / "templates" / "imgs"
         template = self.jinja_env.get_template("debug_inference.html")
         html = template.render(
             request_path=path,
@@ -1558,6 +1720,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             default_aoi_boundary_min_bright=15,
             default_aoi_edge_inspector=get_val('aoi_edge_inspector', 'cv'),
             preprocess_methods=get_method_specs(),
+            dot_samples=_list_debug_dot_samples(dot_sample_dir),
         )
         self._send_response(200, html)
 
@@ -4036,6 +4199,145 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.error(f"[DEBUG-BS] Error: {e}", exc_info=True)
             self._send_json({"error": f"黑畫面推論失敗: {str(e)}"})
 
+    def _handle_debug_dot_detection(self):
+        """API: 點圖偵測實驗，量測黑點/白點在影像中的可見尺寸。"""
+        import time as _time
+        import cv2
+
+        data = self._read_json_body()
+        if data is None:
+            return
+
+        image_path_str = (data.get("image_path") or "").strip()
+        if not image_path_str:
+            self._send_json({"error": "請提供圖片路徑 (image_path)"}, status=400)
+            return
+
+        image_path = Path(image_path_str)
+        if not image_path.exists():
+            self._send_json({"error": f"檔案不存在: {image_path}"}, status=400)
+            return
+        if not image_path.is_file():
+            self._send_json({"error": f"不是檔案: {image_path}"}, status=400)
+            return
+
+        polarity = (data.get("polarity") or "black").strip().lower()
+        if polarity not in ("black", "white"):
+            self._send_json({"error": "polarity 必須是 black 或 white"}, status=400)
+            return
+
+        size_metric = (data.get("size_metric") or "bbox_max").strip().lower()
+        if size_metric not in ("bbox_max", "equivalent", "enclosing"):
+            self._send_json({"error": "size_metric 必須是 bbox_max、equivalent 或 enclosing"}, status=400)
+            return
+
+        def as_int(name, default):
+            try:
+                return int(data.get(name, default))
+            except (TypeError, ValueError):
+                return default
+
+        def as_float(name, default):
+            try:
+                return float(data.get(name, default))
+            except (TypeError, ValueError):
+                return default
+
+        diff_threshold = as_int("diff_threshold", 8)
+        background_kernel = _odd_kernel(as_int("background_kernel", 31))
+        min_area = max(1, as_int("min_area", 2))
+        max_area = max(0, as_int("max_area", 5000))
+        morph_open = max(0, as_int("morph_open", 3))
+        unit_per_px = max(0.0, as_float("unit_per_px", 0.0))
+        defect_threshold = max(0.0, as_float("defect_threshold", 0.3))
+        unit_label = str(data.get("unit_label") or "unit").strip()[:16] or "unit"
+
+        try:
+            started = _time.time()
+            image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            if image is None:
+                self._send_json({"error": f"無法讀取圖片: {image_path}"}, status=400)
+                return
+
+            detected = _detect_dot_components(
+                image,
+                polarity=polarity,
+                diff_threshold=diff_threshold,
+                background_kernel=background_kernel,
+                min_area=min_area,
+                max_area=max_area,
+                morph_open=morph_open,
+                size_metric=size_metric,
+                unit_per_px=unit_per_px,
+                defect_threshold=defect_threshold,
+            )
+
+            if CAPIWebHandler._debug_heatmap_dir is None:
+                CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
+            debug_dir = CAPIWebHandler._debug_heatmap_dir
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", image_path.stem)[:80]
+            overlay_filename = f"debug_dot_overlay_{safe_name}_{ts}.png"
+            mask_filename = f"debug_dot_mask_{safe_name}_{ts}.png"
+            diff_filename = f"debug_dot_diff_{safe_name}_{ts}.png"
+            cv2.imwrite(str(debug_dir / overlay_filename), detected["overlay"])
+            cv2.imwrite(str(debug_dir / mask_filename), detected["mask_color"])
+            cv2.imwrite(str(debug_dir / diff_filename), detected["diff_color"])
+
+            candidates = detected["candidates"]
+            defect_count = sum(1 for c in candidates if c["is_defect"])
+            max_size_px = max((c["size_px"] for c in candidates), default=0.0)
+            max_size_units = None
+            defect_threshold_px = None
+            if detected["calibrated"]:
+                max_size_units = max((c["size_units"] or 0.0 for c in candidates), default=0.0)
+                defect_threshold_px = defect_threshold / unit_per_px if unit_per_px > 0 else None
+
+            response_data = {
+                "success": True,
+                "image_path": str(image_path),
+                "image_shape": [int(image.shape[1]), int(image.shape[0])],
+                "polarity": polarity,
+                "method": "local_median_residual",
+                "calibrated": detected["calibrated"],
+                "count": len(candidates),
+                "defect_count": defect_count,
+                "max_size_px": round(float(max_size_px), 2),
+                "max_size_units": round(float(max_size_units), 4) if max_size_units is not None else None,
+                "defect_threshold_px": round(float(defect_threshold_px), 2) if defect_threshold_px is not None else None,
+                "unit_label": unit_label,
+                "processing_time": round(_time.time() - started, 3),
+                "params_used": {
+                    "diff_threshold": diff_threshold,
+                    "background_kernel": background_kernel,
+                    "min_area": min_area,
+                    "max_area": max_area,
+                    "morph_open": morph_open,
+                    "size_metric": size_metric,
+                    "unit_per_px": unit_per_px,
+                    "defect_threshold": defect_threshold,
+                },
+                "candidates": candidates[:100],
+                "source_url": "/api/debug/serve-image?path=" + urllib.parse.quote(str(image_path)),
+                "overlay_url": f"/debug/heatmaps/{overlay_filename}",
+                "mask_url": f"/debug/heatmaps/{mask_filename}",
+                "diff_url": f"/debug/heatmaps/{diff_filename}",
+            }
+            self._send_json(response_data)
+            logger.info(
+                "[DEBUG-DOT] %s polarity=%s count=%s defects=%s max_px=%.2f",
+                image_path.name,
+                polarity,
+                len(candidates),
+                defect_count,
+                max_size_px,
+            )
+        except Exception as e:
+            logger.error(f"[DEBUG-DOT] Error: {e}", exc_info=True)
+            self._send_json({"error": f"點圖偵測失敗: {str(e)}"}, status=500)
+
     def _handle_debug_heatmap_file(self, path: str):
         """靜態檔案服務 (Debug 推論熱力圖)"""
         if self._debug_heatmap_dir is None:
@@ -5865,6 +6167,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": err}, status=400)
             return
 
+        preprocess_after_tiling = bool(params.get("preprocess_after_tiling", False))
+
         db = self._capi_server_instance.database
         training_scope, err = self._normalize_train_new_scope(params.get("training_scope"), db)
         if err:
@@ -5907,6 +6211,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 panel_modes=panel_modes,
                 training_scope=training_scope,
                 image_preprocess_pipeline=image_preprocess_pipeline,
+                preprocess_after_tiling=preprocess_after_tiling,
             )
         except Exception:
             CAPIWebHandler._drop_job_runtime(job_id)
@@ -5916,7 +6221,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             target=CAPIWebHandler._train_new_preprocess_worker,
             args=(job_id, machine_id, clean_panel_paths,
                   self._capi_server_instance, training_params, panel_modes,
-                  training_scope, image_preprocess_pipeline),
+                  training_scope, image_preprocess_pipeline, preprocess_after_tiling),
             daemon=True, name=f"train_new_pre-{job_id}",
         )
         runtime["thread"] = thread
@@ -5954,6 +6259,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _train_new_preprocess_worker(
         job_id, machine_id, panel_paths, server_inst, training_params=None,
         panel_modes=None, training_scope=None, image_preprocess_pipeline=None,
+        preprocess_after_tiling=False,
     ):
         """背景 thread：preprocess + 抽 NG → state=review。
 
@@ -5991,10 +6297,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 output_root=train_cfg["output_root"],
                 required_backbones=train_cfg["required_backbones"],
                 image_preprocess_pipeline=image_preprocess_pipeline or [],
+                preprocess_after_tiling=preprocess_after_tiling,
             )
             apply_user_training_params(cfg, training_params, log_fn=log)
             pre_cfg = PreprocessConfig(
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
+                preprocess_after_tiling=cfg.preprocess_after_tiling,
             )
             target_lightings = None
             target_units = None
@@ -6243,6 +6551,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         preprocess_cfg = PreprocessConfig(
             image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
+            preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
         )
         panel_paths = [Path(p) for p in job.get("panel_paths", [])]
         panel_modes = job.get("panel_modes") or ["full"] * len(panel_paths)
@@ -7456,6 +7765,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 backbone_cache_dir=train_cfg["backbone_cache_dir"],
                 required_backbones=train_cfg["required_backbones"],
                 image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
+                preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
                 batch_size=patchcore_params.get("batch_size", 8),
                 image_size=tuple(patchcore_params.get("image_size", (512, 512))),
                 coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
@@ -7472,6 +7782,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 cfg=cfg,
                 preprocess_cfg=PreprocessConfig(
                     image_preprocess_pipeline=cfg.image_preprocess_pipeline,
+                    preprocess_after_tiling=cfg.preprocess_after_tiling,
                 ),
                 db=db,
                 thumb_dir=thumb_root,
