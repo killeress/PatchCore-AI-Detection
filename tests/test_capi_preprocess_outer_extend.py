@@ -129,3 +129,55 @@ def test_outer_edge_extend_corner_tile_shifted_inside_polygon():
     assert all(t.coverage >= 0.999 for t in corner_edges)
     assert all(t.mask is None for t in corner_edges)
     assert all(int(t.image.min()) > 0 for t in corner_edges), "edge corner tile 不應包含黑色背景"
+
+
+def test_inward_shifted_outer_edge_tiles_skip_overlap_duplicates():
+    """外推 tile 若被 polygon 推回到既有 edge tile 上，不應產生第二層 edge 框。"""
+    img = np.zeros((4480, 6720), dtype=np.uint8)
+    bbox = (723, 674, 6217, 3758)
+    polygon = np.array([
+        [716.7, 694.5],
+        [6222.0, 668.2],
+        [6218.3, 3740.8],
+        [740.3, 3755.7],
+    ], dtype=np.float32)
+
+    base_cfg = PreprocessConfig(tile_size=512, tile_stride=512, outer_edge_extend=0)
+    ext_cfg = PreprocessConfig(tile_size=512, tile_stride=512, outer_edge_extend=256)
+
+    base_tiles = _generate_tiles(img, bbox, polygon=polygon, config=base_cfg)
+    ext_tiles = _generate_tiles(img, bbox, polygon=polygon, config=ext_cfg)
+
+    base_positions = {(t.x1, t.y1) for t in base_tiles}
+    duplicate_layer_edges = [
+        t for t in ext_tiles
+        if t.zone == "edge" and (t.x1, t.y1) not in base_positions
+    ]
+
+    assert not duplicate_layer_edges
+    assert sum(t.zone == "edge" for t in ext_tiles) == sum(t.zone == "edge" for t in base_tiles)
+
+
+def test_tile_positions_distribute_remainder_without_skinny_last_column():
+    """bbox 寬度非 stride 整數倍時，不應在右側擠出一條窄重疊 tile。"""
+    img = np.zeros((1200, 1600), dtype=np.uint8)
+    bbox = (100, 100, 1500, 1100)
+    polygon = np.array([
+        [100, 100],
+        [1500, 100],
+        [1500, 1100],
+        [100, 1100],
+    ], dtype=np.float32)
+    cfg = PreprocessConfig(tile_size=256, tile_stride=256, outer_edge_extend=0)
+
+    tiles = _generate_tiles(img, bbox, polygon=polygon, config=cfg)
+    top_edge_xs = sorted({
+        t.x1 for t in tiles
+        if t.zone == "edge" and t.y1 == bbox[1]
+    })
+
+    assert len(top_edge_xs) >= 2
+    gaps = [b - a for a, b in zip(top_edge_xs, top_edge_xs[1:])]
+    assert min(gaps) >= int(cfg.tile_size * 0.75), top_edge_xs
+    assert top_edge_xs[0] == bbox[0]
+    assert top_edge_xs[-1] == bbox[2] - cfg.tile_size

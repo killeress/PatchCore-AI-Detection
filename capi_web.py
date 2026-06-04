@@ -5533,6 +5533,35 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _machine_id_prefix(cls, machine_id: str) -> str:
         return str(machine_id or "").strip()[:cls.TRAIN_NEW_MACHINE_PREFIX_LEN]
 
+    @staticmethod
+    def _product_resolution_for_machine(machine_id: str, server_inst=None) -> Tuple[int, int]:
+        from capi_inference import resolve_product_resolution
+
+        resolution_map = None
+        if server_inst is not None:
+            inferencer = getattr(server_inst, "inferencers", {}).get(machine_id)
+            if inferencer is not None:
+                resolution_map = getattr(inferencer.config, "model_resolution_map", None)
+        return resolve_product_resolution(machine_id, resolution_map)
+
+    @staticmethod
+    def _sample_ng_tiles_compat(sample_ng_tiles_fn, preprocess_cfg=None, log=print, **kwargs):
+        """Call sample_ng_tiles across mixed capi_web/capi_train_new deployments."""
+        import inspect
+
+        call_kwargs = dict(kwargs)
+        call_kwargs["log"] = log
+        supports_preprocess_cfg = False
+        try:
+            supports_preprocess_cfg = "preprocess_cfg" in inspect.signature(sample_ng_tiles_fn).parameters
+        except (TypeError, ValueError):
+            supports_preprocess_cfg = False
+        if supports_preprocess_cfg:
+            call_kwargs["preprocess_cfg"] = preprocess_cfg
+        elif preprocess_cfg is not None and getattr(preprocess_cfg, "image_preprocess_pipeline", None):
+            log("⚠ NG 前處理略過：capi_train_new.sample_ng_tiles 版本不支援 preprocess_cfg，請同步更新 capi_train_new.py")
+        return sample_ng_tiles_fn(**call_kwargs)
+
     @classmethod
     def _same_machine_family(cls, machine_a: str, machine_b: str) -> bool:
         prefix_a = cls._machine_id_prefix(machine_a)
@@ -6303,6 +6332,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             pre_cfg = PreprocessConfig(
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
                 preprocess_after_tiling=cfg.preprocess_after_tiling,
+                product_resolution=CAPIWebHandler._product_resolution_for_machine(machine_id, server_inst),
             )
             target_lightings = None
             target_units = None
@@ -6329,7 +6359,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 )
 
             log(f"抽 NG tile（每 lighting 上限 {NG_TILES_PER_LIGHTING} 個）")
-            ng_stats = sample_ng_tiles(
+            ng_stats = CAPIWebHandler._sample_ng_tiles_compat(
+                sample_ng_tiles,
                 job_id=job_id, over_review_root=cfg.over_review_root,
                 db=db, thumb_dir=thumb_root, log=log,
                 lightings=target_lightings,
@@ -6449,6 +6480,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"前處理流程無效: {exc}"}, status=400)
             return
         preprocess_after_tiling = bool(data.get("preprocess_after_tiling", False))
+        machine_id = str(data.get("machine_id") or "").strip()
 
         source_path = Path(raw_path)
         if not source_path.exists():
@@ -6502,6 +6534,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 pre_cfg = PreprocessConfig(
                     image_preprocess_pipeline=pipeline,
                     preprocess_after_tiling=True,
+                    product_resolution=self._product_resolution_for_machine(
+                        machine_id,
+                        self._capi_server_instance,
+                    ),
                 )
                 panel_result = preprocess_panel_image(image_path, lighting, pre_cfg)
                 if not panel_result.tiles:
@@ -6603,7 +6639,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         preview_dir = Path(".tmp/train_new_thumbs") / job_id / "preview"
         preview_dir.mkdir(parents=True, exist_ok=True)
-        preview_path = preview_dir / f"{lighting}_v6.jpg"
+        preview_path = preview_dir / f"{lighting}_v11.jpg"
         if preview_path.exists():
             self._send_binary(str(preview_path))
             return
@@ -6611,6 +6647,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         preprocess_cfg = PreprocessConfig(
             image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
             preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
+            product_resolution=self._product_resolution_for_machine(
+                job.get("machine_id", ""),
+                self._capi_server_instance,
+            ),
         )
         panel_paths = [Path(p) for p in job.get("panel_paths", [])]
         panel_modes = job.get("panel_modes") or ["full"] * len(panel_paths)
@@ -7855,6 +7895,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             preprocess_cfg = PreprocessConfig(
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
                 preprocess_after_tiling=cfg.preprocess_after_tiling,
+                product_resolution=CAPIWebHandler._product_resolution_for_machine(machine_id, server_inst),
             )
             stats = preprocess_panels_to_pool(
                 job_id=job_id,
@@ -7874,7 +7915,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             _set_step("ng")
             _log(f"抽 NG tile（lighting={lighting}，上限 {NG_TILES_PER_LIGHTING} 個）")
-            sample_ng_tiles(
+            CAPIWebHandler._sample_ng_tiles_compat(
+                sample_ng_tiles,
                 job_id=job_id,
                 over_review_root=cfg.over_review_root,
                 db=db,

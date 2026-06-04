@@ -122,6 +122,26 @@ def test_process_panel_v2_duplicate_panel_uses_latest_lighting_file(tmp_path):
     assert [r.image_path.name for r in results] == ["G0F00000_020000.png"]
 
 
+def test_process_panel_v2_passes_requested_product_resolution_to_preprocess(tmp_path, monkeypatch):
+    _write_grey_panel_image(tmp_path, "G0F00000")
+    cfg = _make_config(tmp_path)
+    cfg.machine_id = "UNKNOWN_SIZE_CODE"
+    captured = {}
+
+    def fake_preprocess_panel_folder(_panel_path, pre_cfg, image_files=None):
+        captured["product_resolution"] = pre_cfg.product_resolution
+        return {}
+
+    monkeypatch.setattr("capi_preprocess.preprocess_panel_folder", fake_preprocess_panel_folder)
+
+    from capi_inference import CAPIInferencer
+
+    inferencer = CAPIInferencer(cfg)
+    inferencer.process_panel(tmp_path, product_resolution=(1366, 768))
+
+    assert captured["product_resolution"] == (1366, 768)
+
+
 def test_process_panel_v2_no_anomaly_when_score_below_threshold(tmp_path):
     """All tiles below threshold → no anomaly_tiles in results."""
     _write_grey_panel_image(tmp_path, "G0F00000")

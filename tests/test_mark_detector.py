@@ -13,8 +13,10 @@ from capi_mark_detector import detect_panel_mark
 _ROOT = Path(__file__).resolve().parent.parent
 
 _PATTERNS = {
+    "B": ("01110", "11111", "11010", "11110", "11011", "11111", "11110"),
     "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
     "J": ("01111", "01111", "00110", "00110", "00110", "11110", "11100"),
+    "O": ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
 }
 
 
@@ -45,6 +47,19 @@ def test_detect_panel_mark_top_right():
     assert result["roi"] == "top_right"
     assert result["bbox"]["x"] >= 780
     assert result["bbox"]["y"] >= 140
+
+
+def test_detect_panel_mark_top_right_bo_low_contrast():
+    image = np.full((768, 1024), 120, dtype=np.uint8)
+    _draw_mark(image, "BO", 790, 150, cell=10, gap=8, radius=3)
+    image = cv2.GaussianBlur(image, (3, 3), 0)
+
+    result = detect_panel_mark(image)
+
+    assert result["found"] is True
+    assert result["text"] == "BO"
+    assert result["roi"] == "top_right"
+    assert result["orientation"] == "normal"
 
 
 def test_detect_panel_mark_bottom_left():

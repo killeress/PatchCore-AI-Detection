@@ -49,7 +49,7 @@ def test_config_yaml_loads_enable_panel_polygon():
 
 import cv2
 from capi_inference import CAPIInferencer
-from capi_preprocess import _polyfit_polygon  # 直接測試 polygon 數學邏輯
+from capi_preprocess import PreprocessConfig, detect_panel_polygon, _polyfit_polygon  # 直接測試 polygon 數學邏輯
 
 
 def _make_inferencer():
@@ -104,6 +104,30 @@ def test_polygon_detect_degenerate_tiny_noise():
     print("✅ test_polygon_detect_degenerate_tiny_noise")
 
 
+def test_polygon_stabilizes_near_vertical_sides_with_bad_top_rows():
+    """左右邊上端局部缺角時，小尺寸 robust polygon 不應被拉成斜邊。"""
+    binary = np.zeros((800, 1000), dtype=np.uint8)
+    binary[100:700, 100:900] = 255
+    binary[120:220, 100:260] = 0
+    binary[120:220, 740:900] = 0
+    bbox = (100, 100, 900, 700)
+
+    polygon = _polyfit_polygon(
+        binary,
+        bbox,
+        tile_size=512,
+        stabilize_near_vertical_edges=True,
+    )
+
+    assert polygon is not None
+    left_delta = abs(float(polygon[0, 0] - polygon[3, 0]))
+    right_delta = abs(float(polygon[1, 0] - polygon[2, 0]))
+    assert left_delta <= 2.0, f"左邊仍被上端缺角拉歪: {polygon.round(1).tolist()}"
+    assert right_delta <= 2.0, f"右邊仍被上端缺角拉歪: {polygon.round(1).tolist()}"
+    assert abs(float(polygon[:, 0].min()) - 100.0) <= 2.0
+    assert abs(float(polygon[:, 0].max()) - 899.0) <= 2.0
+
+
 def test_polygon_detect_real_W0F():
     """真實影像 W0F00000_110022.tif 的 4 角誤差應該符合 spec 預期值"""
     img_path = Path(__file__).resolve().parent.parent / "test_images" / "W0F00000_110022.tif"
@@ -154,6 +178,130 @@ def test_polygon_detect_real_G0F():
     assert diff < 2.0, \
         f"G0F 4 角誤差與 spec 不符: expected {expected}, got {errs}, max diff {diff:.2f}px"
     print(f"✅ test_polygon_detect_real_G0F (errs={errs.round(1).tolist()})")
+
+
+def test_detect_panel_polygon_keeps_upper_band_connected():
+    """上緣若被細小黑縫切開，detect_panel_polygon 仍應抓到完整外框。"""
+    img = np.full((768, 1366), 18, dtype=np.uint8)
+    img[72:112, 110:1256] = 180
+    img[120:720, 100:1266] = 210
+    img[112:120, 100:1266] = 18
+
+    bbox, polygon = detect_panel_polygon(
+        img,
+        PreprocessConfig(tile_size=512, product_resolution=(1366, 768)),
+    )
+    assert bbox is not None
+    assert polygon is not None
+    x1, y1, x2, y2 = bbox
+    assert x1 <= 110
+    assert y1 <= 80, f"top band 被吃掉了: bbox={bbox}"
+    assert x2 >= 1250
+    assert y2 >= 710
+    assert polygon[:, 1].min() <= 80, f"polygon top edge 太低: {polygon.round(1).tolist()}"
+    print(f"✅ test_detect_panel_polygon_keeps_upper_band_connected (bbox={bbox})")
+
+
+def test_detect_panel_polygon_includes_low_contrast_upper_band():
+    """小尺寸產品上緣為暗帶時，不能只抓到下方亮區邊界。"""
+    img = np.full((768, 1366), 18, dtype=np.uint8)
+    img[72:120, 100:1266] = 28
+    img[120:720, 100:1266] = 210
+
+    bbox, polygon = detect_panel_polygon(
+        img,
+        PreprocessConfig(tile_size=512, product_resolution=(1366, 768)),
+    )
+
+    assert bbox is not None
+    assert polygon is not None
+    assert bbox[1] <= 80, f"低對比上緣被吃掉了: bbox={bbox}"
+    assert polygon[:, 1].min() <= 80, f"polygon top edge 太低: {polygon.round(1).tolist()}"
+
+
+def test_detect_panel_polygon_includes_low_contrast_side_bands():
+    """小尺寸產品左右為暗帶時，不能只抓到中間亮區邊界。"""
+    img = np.full((768, 1366), 18, dtype=np.uint8)
+    img[100:720, 72:120] = 28
+    img[100:720, 120:1266] = 210
+    img[100:720, 1266:1314] = 28
+
+    bbox, polygon = detect_panel_polygon(
+        img,
+        PreprocessConfig(tile_size=512, product_resolution=(1366, 768)),
+    )
+
+    assert bbox is not None
+    assert polygon is not None
+    assert bbox[0] <= 80, f"低對比左緣被吃掉了: bbox={bbox}"
+    assert bbox[2] >= 1306, f"低對比右緣被吃掉了: bbox={bbox}"
+    assert polygon[:, 0].min() <= 80, f"polygon left edge 太靠內: {polygon.round(1).tolist()}"
+    assert polygon[:, 0].max() >= 1306, f"polygon right edge 太靠內: {polygon.round(1).tolist()}"
+
+
+def test_detect_panel_polygon_rejects_wide_outer_side_shadow():
+    """外側大塊陰影不應被當作低對比產品側邊。"""
+    img = np.full((768, 1366), 18, dtype=np.uint8)
+    img[100:720, 120:1000] = 210
+    img[100:720, 1000:1160] = 50
+
+    bbox, polygon = detect_panel_polygon(
+        img,
+        PreprocessConfig(tile_size=512, product_resolution=(1366, 768)),
+    )
+
+    assert bbox is not None
+    assert polygon is not None
+    assert bbox[2] <= 1025, f"右側外部陰影被誤當產品: bbox={bbox}"
+    assert polygon[:, 0].max() <= 1025, f"polygon right 吃到外部陰影: {polygon.round(1).tolist()}"
+
+
+def test_detect_panel_polygon_uses_gray_band_shift_for_boundary_preprocess(monkeypatch):
+    """灰階分段映射若有配置，邊界偵測應先吃這一步。"""
+    img = np.full((768, 1366), 18, dtype=np.uint8)
+    cfg = PreprocessConfig(
+        tile_size=512,
+        product_resolution=(1366, 768),
+        image_preprocess_pipeline=[
+            {
+                "method": "gray_band_shift",
+                "params": {
+                    "low_threshold": 105,
+                    "high_threshold": 110,
+                    "dark_shift": 10,
+                    "bright_shift": 10,
+                    "band_mode": "keep",
+                },
+            },
+        ],
+    )
+
+    calls = []
+
+    def fake_apply_preprocess_method(image, method, params=None):
+        calls.append((method, params))
+        processed = np.full_like(image, 18)
+        processed[72:120, 100:1266] = 28
+        processed[120:720, 100:1266] = 210
+        return {
+            "image": processed,
+            "method": method,
+            "method_label": "分段灰階映射",
+            "applied_params": params or {},
+            "notes": [],
+            "conversion": {},
+            "stats": {},
+        }
+
+    monkeypatch.setattr("capi_preprocess.apply_preprocess_method", fake_apply_preprocess_method)
+
+    bbox, polygon = detect_panel_polygon(img, cfg)
+
+    assert calls == [("gray_band_shift", cfg.image_preprocess_pipeline[0]["params"])]
+    assert bbox is not None
+    assert polygon is not None
+    assert bbox[1] <= 80, f"邊界前處理未被套用: bbox={bbox}"
+    assert polygon[:, 1].min() <= 80, f"polygon top edge 太低: {polygon.round(1).tolist()}"
 
 
 def test_polygon_corner_ordering():
@@ -214,12 +362,12 @@ def test_preprocess_image_polygon_disabled_when_toggle_off():
 
 def test_reference_polygon_not_double_shrunk():
     """
-    回歸 I1: 傳入 reference_polygon 時，calculate_otsu_bounds 不應再次內縮。
+    回歸 I1: 傳入 reference_polygon 時，calculate_otsu_bounds 不應改動 polygon。
     Task 6 的 B0F 路徑會依賴這個保證。
     """
     cfg = CAPIConfig()
     cfg.tile_size = 512
-    cfg.otsu_offset = 10  # 明顯的 offset，雙重內縮會產生明顯差異
+    cfg.otsu_offset = 10
     cfg.otsu_bottom_crop = 0
     inf = CAPIInferencer(cfg)
 
@@ -227,12 +375,11 @@ def test_reference_polygon_not_double_shrunk():
     synthetic = np.zeros((3000, 4000), dtype=np.uint8)
     synthetic[200:2800, 300:3700] = 200  # 亮度 200 > OTSU threshold
 
-    # 第一次: 讓 calculate_otsu_bounds 自己算 polygon (會經過 offset 內縮)
+    # 第一次: 讓 calculate_otsu_bounds 自己算 polygon。
     bounds1, _, polygon1 = inf.calculate_otsu_bounds(synthetic)
     assert polygon1 is not None, "第一次必須算出 polygon"
 
     # 第二次: 傳入 polygon1 當 reference_polygon，結果應該跟 polygon1 相同
-    # (reference_polygon 已經是內縮過的，不應被再次內縮)
     _, _, polygon2 = inf.calculate_otsu_bounds(
         synthetic,
         reference_polygon=polygon1,
@@ -242,6 +389,76 @@ def test_reference_polygon_not_double_shrunk():
     assert diff < 0.01, \
         f"reference_polygon 被雙重內縮: max diff={diff:.3f}px (應為 0)"
     print(f"✅ test_reference_polygon_not_double_shrunk (max diff={diff:.4f}px)")
+
+
+def test_calculate_otsu_bounds_keeps_polygon_on_raw_boundary():
+    """推論紀錄紅框應畫產品外框；otsu_offset 只內縮 tile bounds。"""
+    cfg = CAPIConfig()
+    cfg.machine_id = "ABCDEB"
+    cfg.tile_size = 512
+    cfg.otsu_offset = 20
+    cfg.otsu_bottom_crop = 0
+    inf = CAPIInferencer(cfg)
+
+    synthetic = np.zeros((768, 1366), dtype=np.uint8)
+    synthetic[72:720, 100:1266] = 200
+
+    bounds, _, polygon = inf.calculate_otsu_bounds(synthetic)
+
+    assert bounds == (120, 92, 1246, 700)
+    assert polygon is not None
+    assert polygon[:, 0].min() <= 102, f"polygon left edge 被 offset 內縮: {polygon.round(1).tolist()}"
+    assert polygon[:, 1].min() <= 74, f"polygon top edge 被 offset 內縮: {polygon.round(1).tolist()}"
+    assert polygon[:, 0].max() >= 1264, f"polygon right edge 被 offset 內縮: {polygon.round(1).tolist()}"
+    assert polygon[:, 1].max() >= 718, f"polygon bottom edge 被 offset 內縮: {polygon.round(1).tolist()}"
+    print(f"✅ test_calculate_otsu_bounds_keeps_polygon_on_raw_boundary (bounds={bounds})")
+
+
+def test_calculate_otsu_bounds_includes_low_contrast_outer_bands():
+    """推論總覽 polygon 也要抓到小尺寸產品的低對比外框。"""
+    cfg = CAPIConfig()
+    cfg.machine_id = "ABCDEB"
+    cfg.tile_size = 512
+    cfg.otsu_offset = 20
+    cfg.otsu_bottom_crop = 0
+    inf = CAPIInferencer(cfg)
+
+    synthetic = np.full((768, 1366), 18, dtype=np.uint8)
+    synthetic[72:120, 72:1314] = 28
+    synthetic[120:720, 72:120] = 28
+    synthetic[120:720, 120:1266] = 210
+    synthetic[120:720, 1266:1314] = 28
+
+    bounds, _, polygon = inf.calculate_otsu_bounds(synthetic)
+
+    assert bounds[0] <= 100, f"推論 bounds 左緣太靠內: {bounds}"
+    assert bounds[1] <= 100, f"推論 bounds 上緣太靠內: {bounds}"
+    assert bounds[2] >= 1290, f"推論 bounds 右緣太靠內: {bounds}"
+    assert polygon is not None
+    assert polygon[:, 0].min() <= 80, f"推論 polygon left 太靠內: {polygon.round(1).tolist()}"
+    assert polygon[:, 1].min() <= 80, f"推論 polygon top 太靠內: {polygon.round(1).tolist()}"
+    assert polygon[:, 0].max() >= 1306, f"推論 polygon right 太靠內: {polygon.round(1).tolist()}"
+
+
+def test_calculate_otsu_bounds_legacy_machine_still_shrinks_polygon():
+    """舊尺寸機種維持原本 polygon offset 行為，避免影響既有模型。"""
+    cfg = CAPIConfig()
+    cfg.machine_id = "ABCDEH"
+    cfg.tile_size = 512
+    cfg.otsu_offset = 20
+    cfg.otsu_bottom_crop = 0
+    inf = CAPIInferencer(cfg)
+
+    synthetic = np.zeros((768, 1366), dtype=np.uint8)
+    synthetic[72:720, 100:1266] = 200
+
+    bounds, _, polygon = inf.calculate_otsu_bounds(synthetic)
+
+    assert bounds == (120, 92, 1246, 700)
+    assert polygon is not None
+    assert polygon[:, 0].min() > 110, f"legacy polygon 未維持 offset 內縮: {polygon.round(1).tolist()}"
+    assert polygon[:, 1].min() > 78, f"legacy polygon 未維持 offset 內縮: {polygon.round(1).tolist()}"
+    print(f"✅ test_calculate_otsu_bounds_legacy_machine_still_shrinks_polygon (bounds={bounds})")
 
 
 def test_bottom_crop_preserves_polygon_tilt():
