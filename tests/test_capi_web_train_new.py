@@ -932,6 +932,7 @@ def test_train_new_select_has_pipeline_preview_controls():
     assert "_previewPathByPanel" in text
     assert "p.preview_image_path" in text
     assert "responseText ? JSON.parse(responseText)" in text
+    assert "preprocess_after_tiling: afterTiling" in text
 
 
 def test_record_detail_templates_show_preprocess_pipeline():
@@ -1046,6 +1047,50 @@ def test_handle_train_new_preprocess_pipeline_preview_uses_panel_folder(tmp_path
     assert resp["image_path"] == str(image_path)
     assert resp["pipeline"][0]["method"] == "gaussian"
     assert resp["processed_url"].startswith("/debug/heatmaps/train_preprocess_preview_")
+    assert Path(resp["output_path"]).exists()
+    assert Path(resp["diff_path"]).exists()
+
+
+def test_handle_train_new_preprocess_pipeline_preview_after_tiling_uses_tile(tmp_path, monkeypatch):
+    from capi_web import CAPIWebHandler
+
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    fixture = Path(__file__).resolve().parent / "fixtures" / "preprocess" / "synthetic_panel.png"
+    img = cv2.imread(str(fixture), cv2.IMREAD_GRAYSCALE)
+    assert img is not None
+    image_path = panel_dir / "W0F00000_084027.png"
+    assert cv2.imwrite(str(image_path), img)
+
+    debug_dir = tmp_path / "debug"
+    monkeypatch.setattr(CAPIWebHandler, "_debug_heatmap_dir", debug_dir)
+
+    server = MagicMock()
+    h = _make_handler_with_server(server, "/api/train/new/preprocess_pipeline_preview")
+    payload = {
+        "image_path": str(panel_dir),
+        "preprocess_after_tiling": True,
+        "image_preprocess_pipeline": [
+            {"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}},
+        ],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_preprocess_pipeline_preview()
+
+    assert h._sent_response[0]["status"] == 200
+    resp = json.loads(h._sent_response[0]["body"])
+    assert resp["success"] is True
+    assert resp["preprocess_after_tiling"] is True
+    assert resp["preview_mode"] == "tile"
+    assert resp["preview_size"] == [512, 512]
+    assert resp["pipeline"][0]["method"] == "gaussian"
+    assert resp["steps"][0]["method"] == "gaussian"
+    assert len(resp["tile_rect"]) == 4
+    assert resp["original_url"].startswith("/debug/heatmaps/train_preprocess_preview_")
+    assert Path(resp["original_path"]).exists()
     assert Path(resp["output_path"]).exists()
     assert Path(resp["diff_path"]).exists()
 

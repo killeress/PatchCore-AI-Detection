@@ -6447,6 +6447,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"error": f"前處理流程無效: {exc}"}, status=400)
             return
+        preprocess_after_tiling = bool(data.get("preprocess_after_tiling", False))
 
         source_path = Path(raw_path)
         if not source_path.exists():
@@ -6472,10 +6473,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": f"無法讀取圖片: {image_path}"}, status=400)
                 return
 
-            result = apply_preprocess_pipeline(image, pipeline)
-            processed = result["image"]
-            diff = make_diff_image(image, processed)
-
             if CAPIWebHandler._debug_heatmap_dir is None:
                 CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
             debug_dir = CAPIWebHandler._debug_heatmap_dir
@@ -6483,11 +6480,68 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", image_path.stem)[:80] or "image"
             token = uuid.uuid4().hex[:8]
-            processed_filename = f"train_preprocess_preview_{safe_stem}_{token}.png"
-            diff_filename = f"train_preprocess_preview_{safe_stem}_{token}_diff.png"
+            original_filename = None
+            original_path = None
+            original_url = "/api/debug/serve-image?path=" + urllib.parse.quote(str(image_path))
+            preview_mode = "image"
+            extra_payload = {
+                "preprocess_after_tiling": False,
+                "preview_mode": preview_mode,
+                "preview_size": None,
+            }
+
+            if preprocess_after_tiling:
+                from capi_preprocess import PreprocessConfig, preprocess_panel_image
+
+                lighting = next(
+                    (prefix for prefix in ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
+                     if image_path.name.startswith(prefix)),
+                    "STANDARD",
+                )
+                pre_cfg = PreprocessConfig(
+                    image_preprocess_pipeline=pipeline,
+                    preprocess_after_tiling=True,
+                )
+                panel_result = preprocess_panel_image(image_path, lighting, pre_cfg)
+                if not panel_result.tiles:
+                    self._send_json({"error": "先切分後處理預覽無法產生 tile"}, status=400)
+                    return
+
+                tile = next((t for t in panel_result.tiles if t.zone == "inner"), panel_result.tiles[0])
+                original = tile.original_image
+                if original is None:
+                    original = image[tile.y1:tile.y2, tile.x1:tile.x2].copy()
+                result = apply_preprocess_pipeline(original, pipeline)
+                processed = result["image"]
+                diff = make_diff_image(original, processed)
+
+                preview_mode = "tile"
+                original_filename = f"train_preprocess_preview_{safe_stem}_{token}_tile_orig.png"
+                processed_filename = f"train_preprocess_preview_{safe_stem}_{token}_tile.png"
+                diff_filename = f"train_preprocess_preview_{safe_stem}_{token}_tile_diff.png"
+                original_path = debug_dir / original_filename
+                original_url = f"/debug/heatmaps/{original_filename}"
+                extra_payload = {
+                    "preprocess_after_tiling": True,
+                    "preview_mode": preview_mode,
+                    "preview_size": [int(original.shape[1]), int(original.shape[0])],
+                    "tile_id": int(tile.tile_id),
+                    "tile_rect": [int(tile.x1), int(tile.y1), int(tile.x2), int(tile.y2)],
+                    "tile_zone": tile.zone,
+                }
+            else:
+                result = apply_preprocess_pipeline(image, pipeline)
+                processed = result["image"]
+                diff = make_diff_image(image, processed)
+                processed_filename = f"train_preprocess_preview_{safe_stem}_{token}.png"
+                diff_filename = f"train_preprocess_preview_{safe_stem}_{token}_diff.png"
+
             processed_path = debug_dir / processed_filename
             diff_path = debug_dir / diff_filename
 
+            if original_path is not None and not cv2.imwrite(str(original_path), original):
+                self._send_json({"error": "原始 tile 圖片寫入失敗"}, status=500)
+                return
             if not cv2.imwrite(str(processed_path), processed):
                 self._send_json({"error": "處理後圖片寫入失敗"}, status=500)
                 return
@@ -6497,7 +6551,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             h, w = image.shape[:2]
             channels = 1 if image.ndim == 2 else image.shape[2]
-            self._send_json({
+            payload = {
                 "success": True,
                 "input_path": str(source_path),
                 "image_path": str(image_path),
@@ -6508,12 +6562,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "pipeline": result["pipeline"],
                 "steps": result["steps"],
                 "processing_time": round(_time.time() - start, 3),
-                "original_url": "/api/debug/serve-image?path=" + urllib.parse.quote(str(image_path)),
+                "original_url": original_url,
                 "processed_url": f"/debug/heatmaps/{processed_filename}",
                 "diff_url": f"/debug/heatmaps/{diff_filename}",
                 "output_path": str(processed_path),
                 "diff_path": str(diff_path),
-            })
+            }
+            if original_path is not None:
+                payload["original_path"] = str(original_path)
+            payload.update(extra_payload)
+            self._send_json(payload)
         except Exception as exc:
             logger.error("[train/new] preprocessing pipeline preview failed: %s", exc, exc_info=True)
             self._send_json({"error": f"前處理預覽失敗: {exc}"}, status=500)

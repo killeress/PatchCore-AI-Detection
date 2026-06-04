@@ -68,7 +68,7 @@ LABEL_ZH = {
 # Manifest CSV 欄位順序（固定，避免 DictWriter 亂序）
 MANIFEST_FIELDS = [
     "sample_id", "collected_at", "label", "source_type", "prefix",
-    "glass_id", "image_name",
+    "glass_id", "image_name", "image_width", "image_height",
     "inference_record_id", "image_result_id",
     "tile_idx", "edge_defect_id",
     "crop_path", "heatmap_path",
@@ -947,6 +947,9 @@ class DatasetExporter:
             return row
         if img.ndim == 2:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        H, W = img.shape[:2]
+        row["image_width"] = str(W)
+        row["image_height"] = str(H)
 
         if cand.source_type == "patchcore_tile":
             crop = crop_patchcore_tile(img, cand.tile_x, cand.tile_y, cand.tile_w, cand.tile_h)
@@ -954,7 +957,6 @@ class DatasetExporter:
             defect_y = cand.tile_y + cand.tile_h // 2
             sample_key = f"tile{cand.tile_idx}"
         else:  # edge_defect
-            H, W = img.shape[:2]
             half = CROP_SIZE // 2
             valid_w = min(W, cand.edge_center_x + half) - max(0, cand.edge_center_x - half)
             valid_h = min(H, cand.edge_center_y + half) - max(0, cand.edge_center_y - half)
@@ -1003,6 +1005,8 @@ class DatasetExporter:
             "prefix": cand.prefix,
             "glass_id": cand.glass_id,
             "image_name": cand.image_name,
+            "image_width": "",
+            "image_height": "",
             "inference_record_id": str(cand.inference_record_id or ""),
             "image_result_id": str(cand.image_result_id or ""),
             "tile_idx": str(cand.tile_idx) if cand.tile_idx is not None else "",

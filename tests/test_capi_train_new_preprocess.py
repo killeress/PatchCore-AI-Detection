@@ -108,6 +108,43 @@ def test_preprocess_panels_to_pool_all_panels_have_inner_and_edge(tmp_path):
         assert "edge" in zones, f"panel {i + 1} 應該包含 edge tile"
 
 
+def test_preprocess_panels_to_pool_logs_after_tiling_mode(tmp_path, monkeypatch):
+    from capi_preprocess import PreprocessConfig
+    from capi_train_new import preprocess_panels_to_pool, TrainingConfig
+
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    monkeypatch.setattr("capi_train_new.preprocess_panel_folder", lambda _panel, _cfg: {})
+
+    class MockDB:
+        def insert_tile_pool(self, job_id, tiles):
+            return []
+
+    logs = []
+    cfg = TrainingConfig(
+        machine_id="TEST",
+        panel_paths=[panel_dir],
+        over_review_root=tmp_path / "or_unused",
+    )
+    pre_cfg = PreprocessConfig(
+        image_preprocess_pipeline=[
+            {"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}},
+        ],
+        preprocess_after_tiling=True,
+    )
+
+    preprocess_panels_to_pool(
+        job_id="j_log",
+        cfg=cfg,
+        preprocess_cfg=pre_cfg,
+        db=MockDB(),
+        thumb_dir=tmp_path / "thumbs",
+        log=logs.append,
+    )
+
+    assert any("影像前處理模式: 先切分後處理" in msg for msg in logs)
+
+
 def test_sample_ng_tiles(tmp_path):
     from capi_train_new import sample_ng_tiles
 
@@ -182,6 +219,49 @@ def test_sample_ng_tiles_classifies_zone_from_manifest(tmp_path):
         assert zones[f"img_{i}.png"] == "edge", f"img_{i} 應為 edge"
     for i in range(3, 6):
         assert zones[f"img_{i}.png"] == "inner", f"img_{i} 應為 inner"
+
+
+def test_sample_ng_tiles_classifies_zone_with_manifest_height_768(tmp_path):
+    """1366x768 機種不應因 EDGE_BAND_PX=768 導致全部 NG 都被標成 edge。"""
+    import csv
+    from pathlib import Path
+    from capi_train_new import sample_ng_tiles
+
+    or_root = tmp_path / "over_review"
+    snap = or_root / "20260420_130000"
+    crop_dir = snap / "true_ng" / "G0F00000" / "crop"
+    crop_dir.mkdir(parents=True)
+    rows = [
+        ("top.png", 100, "edge"),
+        ("middle.png", 384, "inner"),
+        ("bottom.png", 760, "edge"),
+    ]
+    manifest_rows = []
+    for fname, defect_y, _zone in rows:
+        (crop_dir / fname).write_bytes(b"x")
+        manifest_rows.append({
+            "sample_id": fname,
+            "crop_path": f"true_ng/G0F00000/crop/{fname}",
+            "defect_y": str(defect_y),
+            "image_height": "768",
+        })
+    with open(snap / "manifest.csv", "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["sample_id", "crop_path", "defect_y", "image_height"])
+        w.writeheader()
+        w.writerows(manifest_rows)
+
+    class MockDB:
+        def __init__(self): self.tiles = []
+        def insert_tile_pool(self, job_id, tiles):
+            self.tiles.extend(tiles)
+            return list(range(len(tiles)))
+
+    db = MockDB()
+    sample_ng_tiles(job_id="j3", over_review_root=or_root, db=db,
+                    per_lighting=10, log=lambda m: None)
+
+    zones = {Path(t["source_path"]).name: t["zone"] for t in db.tiles}
+    assert zones == {fname: zone for fname, _y, zone in rows}
 
 
 def test_sample_ng_tiles_writes_confined_thumbnails(tmp_path):

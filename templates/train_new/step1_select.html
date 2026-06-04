@@ -102,7 +102,7 @@
   <details id="preprocess-params" open style="margin-top:16px;background:#313244;border-radius:10px;padding:14px 18px;">
     <summary style="cursor:pointer;color:#cdd6f4;font-weight:600;font-size:.92rem;list-style:none;display:flex;align-items:center;gap:8px;">
       <span style="display:inline-block;transition:transform .15s ease;" class="pp-caret">▶</span>
-      🧪 影像前處理（先套用，再切片）
+      🧪 影像前處理
       <span style="color:#a6adc8;font-weight:400;font-size:.8rem;">可調整順序、參數，或清空為不啟用</span>
     </summary>
     <div style="display:flex;align-items:center;gap:10px;margin-top:14px;padding:8px 12px;background:#1e1e2e;border-radius:8px;border:1px solid #45475a;">
@@ -587,6 +587,7 @@ async function runPreprocessPreview() {
     return;
   }
 
+  const afterTiling = document.getElementById('pp-after-tiling')?.checked || false;
   btn.disabled = true;
   btn.style.opacity = .55;
   status.className = 'pp-preview-status';
@@ -598,7 +599,11 @@ async function runPreprocessPreview() {
     const resp = await fetch('/api/train/new/preprocess_pipeline_preview', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({image_path: rawPath, image_preprocess_pipeline: pipeline}),
+      body: JSON.stringify({
+        image_path: rawPath,
+        image_preprocess_pipeline: pipeline,
+        preprocess_after_tiling: afterTiling,
+      }),
     });
     const responseText = await resp.text();
     let data = null;
@@ -620,7 +625,10 @@ async function runPreprocessPreview() {
     status.className = 'pp-preview-status ok';
     status.textContent = `完成：${data.image_name}，耗時 ${data.processing_time}s`;
     const steps = (data.steps || []).map(s => `${s.index}.${s.method_label}`).join(' → ') || '未啟用前處理';
-    meta.textContent = `實際圖片：${data.image_path} ｜ 流程：${steps}`;
+    const mode = data.preview_mode === 'tile'
+      ? `先切分後處理 tile ${data.tile_rect ? data.tile_rect.join(',') : ''}`
+      : '整張圖先處理';
+    meta.textContent = `實際圖片：${data.image_path} ｜ 模式：${mode} ｜ 流程：${steps}`;
   } catch (err) {
     status.className = 'pp-preview-status error';
     status.textContent = '前處理預覽失敗：' + err;
