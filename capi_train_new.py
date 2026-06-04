@@ -332,6 +332,7 @@ def sample_ng_tiles(
     per_lighting: int = NG_TILES_PER_LIGHTING,
     log: Callable[[str], None] = print,
     lightings: Optional[Iterable[str]] = None,
+    preprocess_cfg: Optional[PreprocessConfig] = None,
 ) -> dict:
     """從 over_review/{*}/true_ng/{lighting}/crop/ 隨機抽 NG tile，並依 manifest defect_y heuristic 標記 zone。"""
     target_lightings = tuple(lightings) if lightings is not None else LIGHTINGS
@@ -343,6 +344,14 @@ def sample_ng_tiles(
     missing = []
     snapshots = [d for d in over_review_root.iterdir() if d.is_dir() and (d / "true_ng").exists()]
     zone_for = _make_ng_zone_classifier(log)
+    apply_preprocess_pipeline = None
+    if (
+        preprocess_cfg is not None
+        and preprocess_cfg.image_preprocess_pipeline
+        and thumb_dir is not None
+    ):
+        from capi_image_preprocess_lab import apply_preprocess_pipeline as _apply_preprocess_pipeline
+        apply_preprocess_pipeline = _apply_preprocess_pipeline
 
     for lighting in target_lightings:
         all_files = []
@@ -357,14 +366,32 @@ def sample_ng_tiles(
         chosen = random.sample(all_files, min(per_lighting, len(all_files)))
         records = []
         edge_n = inner_n = unknown_n = 0
+        preprocessed_n = 0
         for i, p in enumerate(chosen):
+            source_path = p
+            thumb_img = None
+            if apply_preprocess_pipeline is not None:
+                img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+                if img is not None:
+                    try:
+                        result = apply_preprocess_pipeline(img, preprocess_cfg.image_preprocess_pipeline)
+                        processed = result["image"]
+                        candidate = thumb_dir / "tiles" / "ng" / lighting / f"{job_id}_{lighting}_ng{i:04d}_{p.name}"
+                        candidate.parent.mkdir(parents=True, exist_ok=True)
+                        if cv2.imwrite(str(candidate), processed):
+                            source_path = candidate
+                            thumb_img = processed
+                            preprocessed_n += 1
+                    except Exception as e:
+                        log(f"  ⚠ {lighting}: NG 前處理失敗 {p.name}: {e}")
             thumb_path = p
             if thumb_dir is not None:
                 candidate = thumb_dir / "thumb" / "ng" / lighting / f"{job_id}_{lighting}_ng{i:04d}_{p.name}"
                 candidate.parent.mkdir(parents=True, exist_ok=True)
-                img = cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
-                if img is not None:
-                    thumb = cv2.resize(img, (96, 96))
+                if thumb_img is None:
+                    thumb_img = cv2.imread(str(source_path), cv2.IMREAD_UNCHANGED)
+                if thumb_img is not None:
+                    thumb = cv2.resize(thumb_img, (96, 96))
                     cv2.imwrite(str(candidate), thumb)
                     thumb_path = candidate
             zone = zone_for(p)
@@ -376,11 +403,12 @@ def sample_ng_tiles(
                 unknown_n += 1
             records.append({
                 "lighting": lighting, "zone": zone, "source": "ng",
-                "source_path": str(p.resolve()), "thumb_path": str(thumb_path.resolve()),
+                "source_path": str(source_path.resolve()), "thumb_path": str(thumb_path.resolve()),
             })
         db.insert_tile_pool(job_id, records)
         sampled += len(records)
-        log(f"  ✓ {lighting}: 抽 {len(chosen)} 個 NG (edge={edge_n} / inner={inner_n} / 未分類={unknown_n})")
+        preprocess_text = f" / 前處理={preprocessed_n}" if preprocessed_n else ""
+        log(f"  ✓ {lighting}: 抽 {len(chosen)} 個 NG (edge={edge_n} / inner={inner_n} / 未分類={unknown_n}{preprocess_text})")
 
     return {"sampled": sampled, "missing_lightings": missing}
 
