@@ -180,6 +180,56 @@ def test_sample_ng_tiles(tmp_path):
     assert all(t["source"] == "ng" for t in db.tiles)
 
 
+def test_sample_ng_tiles_applies_preprocess_pipeline_to_ng_crops(tmp_path):
+    import cv2
+    import numpy as np
+    from pathlib import Path
+    from capi_preprocess import PreprocessConfig
+    from capi_train_new import sample_ng_tiles
+
+    or_root = tmp_path / "over_review"
+    crop_dir = or_root / "20260415_104812" / "true_ng" / "G0F00000" / "crop"
+    crop_dir.mkdir(parents=True)
+    original = np.zeros((512, 512), dtype=np.uint8)
+    original[:, 256:] = 255
+    source = crop_dir / "img_0.png"
+    assert cv2.imwrite(str(source), original)
+
+    class MockDB:
+        def __init__(self): self.tiles = []
+        def insert_tile_pool(self, job_id, tiles):
+            self.tiles.extend(tiles)
+            return list(range(len(tiles)))
+
+    db = MockDB()
+    logs = []
+    thumb_dir = tmp_path / "thumbs"
+    sample_ng_tiles(
+        job_id="j_ng_pre",
+        over_review_root=or_root,
+        db=db,
+        thumb_dir=thumb_dir,
+        per_lighting=1,
+        log=logs.append,
+        lightings=("G0F00000",),
+        preprocess_cfg=PreprocessConfig(
+            preprocess_after_tiling=True,
+            image_preprocess_pipeline=[
+                {"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}},
+            ],
+        ),
+    )
+
+    assert len(db.tiles) == 1
+    processed_path = Path(db.tiles[0]["source_path"])
+    assert processed_path.exists()
+    assert processed_path != source.resolve()
+    processed = cv2.imread(str(processed_path), cv2.IMREAD_GRAYSCALE)
+    assert processed is not None
+    assert not np.array_equal(processed, original)
+    assert any("前處理=1" in msg for msg in logs)
+
+
 def test_sample_ng_tiles_classifies_zone_from_manifest(tmp_path):
     """有 manifest.csv 時依 defect_y 標 zone：< EDGE_BAND_PX → edge，否則 inner。"""
     import csv

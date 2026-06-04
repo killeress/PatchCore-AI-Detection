@@ -6333,6 +6333,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 job_id=job_id, over_review_root=cfg.over_review_root,
                 db=db, thumb_dir=thumb_root, log=log,
                 lightings=target_lightings,
+                preprocess_cfg=pre_cfg,
             )
 
             db.update_training_job_state(job_id, "review")
@@ -7851,13 +7852,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             _set_step("preprocess")
             thumb_root = Path(".tmp/train_new_thumbs") / job_id
             _log(f"前處理 selected panels（只保留 lighting={lighting}）")
+            preprocess_cfg = PreprocessConfig(
+                image_preprocess_pipeline=cfg.image_preprocess_pipeline,
+                preprocess_after_tiling=cfg.preprocess_after_tiling,
+            )
             stats = preprocess_panels_to_pool(
                 job_id=job_id,
                 cfg=cfg,
-                preprocess_cfg=PreprocessConfig(
-                    image_preprocess_pipeline=cfg.image_preprocess_pipeline,
-                    preprocess_after_tiling=cfg.preprocess_after_tiling,
-                ),
+                preprocess_cfg=preprocess_cfg,
                 db=db,
                 thumb_dir=thumb_root,
                 log=_log,
@@ -7880,6 +7882,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 per_lighting=NG_TILES_PER_LIGHTING,
                 log=_log,
                 lightings=(lighting,),
+                preprocess_cfg=preprocess_cfg,
             )
 
             db.update_training_job_state(job_id, "train")
