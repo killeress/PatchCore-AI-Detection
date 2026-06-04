@@ -109,12 +109,24 @@ def test_preprocess_panels_to_pool_all_panels_have_inner_and_edge(tmp_path):
 
 
 def test_preprocess_panels_to_pool_logs_after_tiling_mode(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import numpy as np
     from capi_preprocess import PreprocessConfig
     from capi_train_new import preprocess_panels_to_pool, TrainingConfig
 
     panel_dir = tmp_path / "panel"
     panel_dir.mkdir()
-    monkeypatch.setattr("capi_train_new.preprocess_panel_folder", lambda _panel, _cfg: {})
+    tile = SimpleNamespace(
+        tile_id=1,
+        image=np.zeros((16, 16), dtype=np.uint8),
+        zone="inner",
+        is_corner=False,
+    )
+    result = SimpleNamespace(polygon_detection_failed=False, tiles=[tile])
+    monkeypatch.setattr(
+        "capi_train_new.preprocess_panel_folder",
+        lambda _panel, _cfg: {"G0F00000": result},
+    )
 
     class MockDB:
         def insert_tile_pool(self, job_id, tiles):
@@ -143,6 +155,7 @@ def test_preprocess_panels_to_pool_logs_after_tiling_mode(tmp_path, monkeypatch)
     )
 
     assert any("影像前處理模式: 先切分後處理" in msg for msg in logs)
+    assert any("已對這 1 個 tile 套用 1.高斯平滑" in msg for msg in logs)
 
 
 def test_sample_ng_tiles(tmp_path):
@@ -227,7 +240,7 @@ def test_sample_ng_tiles_applies_preprocess_pipeline_to_ng_crops(tmp_path):
     processed = cv2.imread(str(processed_path), cv2.IMREAD_GRAYSCALE)
     assert processed is not None
     assert not np.array_equal(processed, original)
-    assert any("前處理=1" in msg for msg in logs)
+    assert any("前處理=1: 1.高斯平滑" in msg for msg in logs)
 
 
 def test_sample_ng_tiles_classifies_zone_from_manifest(tmp_path):
