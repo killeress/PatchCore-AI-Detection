@@ -199,16 +199,19 @@ def preprocess_panels_to_pool(
     panel_success_corner = 0
     panel_fail = 0
     total_tiles = 0
+    preprocess_desc = ""
+    preprocess_after_tiling = bool(getattr(preprocess_cfg, "preprocess_after_tiling", False))
     if preprocess_cfg.image_preprocess_pipeline:
         from capi_image_preprocess_lab import describe_preprocess_pipeline
+        preprocess_desc = describe_preprocess_pipeline(preprocess_cfg.image_preprocess_pipeline)
         preprocess_mode = (
             "先切分後處理（每個 tile 套用）"
-            if getattr(preprocess_cfg, "preprocess_after_tiling", False)
+            if preprocess_after_tiling
             else "先處理整張圖再切片"
         )
         log(
             f"影像前處理模式: {preprocess_mode}；流程: "
-            f"{describe_preprocess_pipeline(preprocess_cfg.image_preprocess_pipeline)}"
+            f"{preprocess_desc}"
         )
 
     for idx, (panel_dir, mode) in enumerate(zip(cfg.panel_paths, panel_modes), 1):
@@ -264,6 +267,11 @@ def preprocess_panels_to_pool(
             else:
                 panel_success_corner += 1
             log(f"  ✓ 切出 {len(tile_records)} tile")
+            if preprocess_desc:
+                if preprocess_after_tiling:
+                    log(f"  ↳ 前處理: 已對這 {len(tile_records)} 個 tile 套用 {preprocess_desc}")
+                else:
+                    log(f"  ↳ 前處理: 已先對原圖套用 {preprocess_desc}，再切出這批 tile")
         else:
             panel_fail += 1
             log("  ✗ 無 tile 寫入")
@@ -345,13 +353,18 @@ def sample_ng_tiles(
     snapshots = [d for d in over_review_root.iterdir() if d.is_dir() and (d / "true_ng").exists()]
     zone_for = _make_ng_zone_classifier(log)
     apply_preprocess_pipeline = None
+    preprocess_desc = ""
     if (
         preprocess_cfg is not None
         and preprocess_cfg.image_preprocess_pipeline
         and thumb_dir is not None
     ):
-        from capi_image_preprocess_lab import apply_preprocess_pipeline as _apply_preprocess_pipeline
+        from capi_image_preprocess_lab import (
+            apply_preprocess_pipeline as _apply_preprocess_pipeline,
+            describe_preprocess_pipeline,
+        )
         apply_preprocess_pipeline = _apply_preprocess_pipeline
+        preprocess_desc = describe_preprocess_pipeline(preprocess_cfg.image_preprocess_pipeline)
 
     for lighting in target_lightings:
         all_files = []
@@ -407,7 +420,10 @@ def sample_ng_tiles(
             })
         db.insert_tile_pool(job_id, records)
         sampled += len(records)
-        preprocess_text = f" / 前處理={preprocessed_n}" if preprocessed_n else ""
+        preprocess_text = (
+            f" / 前處理={preprocessed_n}: {preprocess_desc}"
+            if preprocessed_n else ""
+        )
         log(f"  ✓ {lighting}: 抽 {len(chosen)} 個 NG (edge={edge_n} / inner={inner_n} / 未分類={unknown_n}{preprocess_text})")
 
     return {"sampled": sampled, "missing_lightings": missing}
