@@ -105,6 +105,13 @@
       🧪 影像前處理（先套用，再切片）
       <span style="color:#a6adc8;font-weight:400;font-size:.8rem;">可調整順序、參數，或清空為不啟用</span>
     </summary>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:14px;padding:8px 12px;background:#1e1e2e;border-radius:8px;border:1px solid #45475a;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:#cdd6f4;font-size:.88rem;">
+        <input type="checkbox" id="pp-after-tiling" style="width:18px;height:18px;accent-color:#89b4fa;cursor:pointer;">
+        <span><strong>先切分後處理</strong>（勾選後，前處理會套用在每個 512×512 tile 上，而非整張大圖）</span>
+      </label>
+      <span style="color:#a6adc8;font-size:.78rem;">⚠ 訓練與推論必須一致，此設定會記錄至模型配置檔</span>
+    </div>
     <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;">
       <button type="button" id="pp-add-step" style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:7px 14px;font-weight:700;">新增步驟</button>
       <button type="button" id="pp-reset-default" style="background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:7px 14px;font-weight:700;">重設預設</button>
@@ -895,6 +902,7 @@ function submitStart() {
   const body = {machine_id: mid, panel_paths: Array.from(_selected), training_scope: TRAINING_SCOPE};
   if (params) body.training_params = params;
   body.image_preprocess_pipeline = pipeline;
+  body.preprocess_after_tiling = document.getElementById('pp-after-tiling').checked;
   fetch('/api/train/new/start', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},

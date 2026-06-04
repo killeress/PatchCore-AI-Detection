@@ -290,7 +290,8 @@ class CAPIDatabase:
                     error_message   TEXT,
                     training_params TEXT,
                     training_scope  TEXT,
-                    image_preprocess_pipeline TEXT
+                    image_preprocess_pipeline TEXT,
+                    preprocess_after_tiling   INTEGER DEFAULT 0
                 );
 
                 -- 已訓練模型 bundle 元資料
@@ -399,6 +400,7 @@ class CAPIDatabase:
             # 6-step wizard：完整訓練或局部重訓 scope（mode / selected_units / target_bundle_id）
             add_column_if_not_exists("training_jobs", "training_scope", "TEXT")
             add_column_if_not_exists("training_jobs", "image_preprocess_pipeline", "TEXT")
+            add_column_if_not_exists("training_jobs", "preprocess_after_tiling", "INTEGER DEFAULT 0")
             add_column_if_not_exists("model_registry", "notes", "TEXT")
             # 新架構 (C-10) per-tile model routing 紀錄："inner" / "edge" / "bright_spot"；v1 為 ""
             add_column_if_not_exists("tile_results", "zone", "TEXT DEFAULT ''")
@@ -2497,6 +2499,7 @@ class CAPIDatabase:
         panel_modes: Optional[list] = None,
         training_scope: Optional[Dict[str, Any]] = None,
         image_preprocess_pipeline: Optional[list] = None,
+        preprocess_after_tiling: bool = False,
     ) -> int:
         """建立一筆新的訓練 job，初始 state 為 'preprocess'。回傳 rowid。
 
@@ -2521,11 +2524,13 @@ class CAPIDatabase:
             cur.execute(
                 """INSERT INTO training_jobs
                    (job_id, machine_id, state, started_at, panel_paths, panel_modes,
-                    training_params, training_scope, image_preprocess_pipeline)
-                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?, ?, ?)""",
+                    training_params, training_scope, image_preprocess_pipeline,
+                    preprocess_after_tiling)
+                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id, machine_id, json.dumps(panel_paths), modes_json,
                     params_json, scope_json, preprocess_json,
+                    1 if preprocess_after_tiling else 0,
                 ),
             )
             conn.commit()
@@ -2553,6 +2558,7 @@ class CAPIDatabase:
         job["training_scope"] = json.loads(raw_scope) if raw_scope else None
         raw_preprocess = job.get("image_preprocess_pipeline")
         job["image_preprocess_pipeline"] = json.loads(raw_preprocess) if raw_preprocess else []
+        job["preprocess_after_tiling"] = bool(job.get("preprocess_after_tiling", 0))
         return job
 
     def get_training_job(self, job_id: str) -> Optional[Dict]:
