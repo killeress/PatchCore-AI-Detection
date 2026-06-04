@@ -596,10 +596,12 @@ async function runPreprocessPreview() {
   resultRoot.style.display = 'none';
 
   try {
+    const previewMachineId = isPartialTraining() ? TARGET_BUNDLE.machine_id : _selectedMachineId;
     const resp = await fetch('/api/train/new/preprocess_pipeline_preview', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
+        machine_id: previewMachineId || '',
         image_path: rawPath,
         image_preprocess_pipeline: pipeline,
         preprocess_after_tiling: afterTiling,

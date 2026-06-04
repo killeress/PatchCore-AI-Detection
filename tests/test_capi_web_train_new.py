@@ -1317,3 +1317,30 @@ def test_handle_train_new_start_rejects_wrong_panel_count():
         if n > 0:
             err_body = json.loads(h._sent_response[0]["body"])
             assert "exactly 8" in err_body.get("error", ""), f"n={n} error: {err_body}"
+
+
+def test_sample_ng_tiles_compat_supports_legacy_signature():
+    from types import SimpleNamespace
+    from capi_web import CAPIWebHandler
+
+    captured = {}
+
+    def legacy_sample_ng_tiles(**kwargs):
+        captured.update(kwargs)
+        return {"sampled": 0}
+
+    logs = []
+    result = CAPIWebHandler._sample_ng_tiles_compat(
+        legacy_sample_ng_tiles,
+        job_id="j1",
+        over_review_root=Path("/tmp/or"),
+        db=object(),
+        thumb_dir=Path("/tmp/thumb"),
+        lightings=("G0F00000",),
+        log=logs.append,
+        preprocess_cfg=SimpleNamespace(image_preprocess_pipeline=[{"method": "gaussian"}]),
+    )
+
+    assert result == {"sampled": 0}
+    assert "preprocess_cfg" not in captured
+    assert any("不支援 preprocess_cfg" in msg for msg in logs)

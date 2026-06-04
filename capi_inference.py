@@ -95,7 +95,12 @@ from capi_edge_cv import (
     compute_fg_aware_diff, compute_boundary_band_mask, compute_pc_roi_offset,
     verify_polygon_clear_of_pc_roi, classify_pc_roi_verify_failure,
 )
-from capi_preprocess import _polyfit_polygon as _pf_polygon
+from capi_preprocess import (
+    PreprocessConfig,
+    detect_panel_polygon,
+    _polyfit_polygon as _pf_polygon,
+    is_small_product_resolution,
+)
 from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
 from scratch_filter import ScratchFilter
 
@@ -869,6 +874,34 @@ class CAPIInferencer:
             return None
         return _pf_polygon(binary_mask, bbox, self.config.tile_size)
 
+    def _find_robust_object_bounds(
+        self,
+        image: np.ndarray,
+    ) -> Tuple[Tuple[int, int, int, int], Optional[np.ndarray]]:
+        """Use training preprocess boundary logic for small-product inference."""
+        pre_cfg = PreprocessConfig(
+            tile_size=self.config.tile_size,
+            tile_stride=getattr(self.config, "tile_stride", self.config.tile_size),
+            otsu_offset=0,
+            enable_panel_polygon=self.config.enable_panel_polygon,
+            product_resolution=self._product_resolution(),
+        )
+        bbox, polygon = detect_panel_polygon(image, pre_cfg)
+        if bbox is None:
+            h, w = image.shape[:2]
+            return (0, 0, w, h), None
+        return bbox, polygon
+
+    def _product_resolution(self) -> Tuple[int, int]:
+        return resolve_product_resolution(
+            self.config.machine_id,
+            getattr(self.config, "model_resolution_map", None),
+        )
+
+    def _use_robust_panel_boundary(self) -> bool:
+        product_resolution = self._product_resolution()
+        return is_small_product_resolution(product_resolution)
+
     def calculate_otsu_bounds(
         self,
         image: np.ndarray,
@@ -890,8 +923,12 @@ class CAPIInferencer:
         img_height, img_width = image.shape[:2]
 
         # 取得原始物件邊界與 binary mask
+        precomputed_polygon: Optional[np.ndarray] = None
         if reference_raw_bounds is not None:
             x_min, y_min, x_max, y_max = reference_raw_bounds
+            binary_mask = None
+        elif self._use_robust_panel_boundary():
+            (x_min, y_min, x_max, y_max), precomputed_polygon = self._find_robust_object_bounds(image)
             binary_mask = None
         else:
             (x_min, y_min, x_max, y_max), binary_mask = self._find_raw_object_bounds(image)
@@ -924,19 +961,19 @@ class CAPIInferencer:
         if self.config.enable_panel_polygon:
             if reference_polygon is not None:
                 panel_polygon = reference_polygon.copy()
+            elif precomputed_polygon is not None:
+                panel_polygon = precomputed_polygon.copy()
             elif binary_mask is not None:
                 # 使用原始 (未內縮) bbox 做邊緣掃描
                 raw_bbox = (int(x_min), int(y_min), int(x_max), int(y_max))
                 panel_polygon = self._find_panel_polygon(binary_mask, raw_bbox)
 
-            # 對「新鮮偵測出的 polygon」做 offset 內縮 (reference_polygon 已由來源 caller
-            # 處理過 offset，不可在這裡再縮一次，否則 B0F 路徑會雙重內縮)
-            # 數學: 朝 centroid 沿對角線方向縮 offset px。對 axis-aligned 矩形而言
-            # 結果會比 bbox 的 4-edge inset 略大一點 (長寬比越懸殊差異越明顯)，但因
-            # Task 4 的 tile grid 是以 bbox 為界，差距的那幾個 px 不會真的出現在 mask 上。
+            # 舊機種維持原本 polygon offset 內縮；小尺寸面板用 raw polygon
+            # 畫推論紀錄外框，避免色差造成的邊界已偏內又再次內縮。
             if (panel_polygon is not None
                     and offset != 0
-                    and reference_polygon is None):
+                    and reference_polygon is None
+                    and not self._use_robust_panel_boundary()):
                 cx = (panel_polygon[:, 0].mean())
                 cy = (panel_polygon[:, 1].mean())
                 for i in range(4):
@@ -2111,6 +2148,7 @@ class CAPIInferencer:
             edge_threshold_px=self.config.edge_threshold_px,
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
+            product_resolution=self._product_resolution(),
         )
         pre_result = preprocess_panel_image(image_path, lighting, pre_cfg)
 
@@ -4384,6 +4422,7 @@ class CAPIInferencer:
                 edge_threshold_px=self.config.edge_threshold_px,
                 image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
                 preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
+                product_resolution=product_resolution or self._product_resolution(),
             )
             aoi_tile_count = 0
             for result in preprocessed_results:
@@ -5305,11 +5344,18 @@ class CAPIInferencer:
                 ref_img = cv2.imread(str(ref_path), cv2.IMREAD_UNCHANGED)
                 if ref_img is None:
                     continue
-                ref_bounds, ref_binary = self._find_raw_object_bounds(ref_img)
+                if self._use_robust_panel_boundary():
+                    ref_bounds, ref_polygon = self._find_robust_object_bounds(ref_img)
+                    ref_binary = None
+                else:
+                    ref_bounds, ref_binary = self._find_raw_object_bounds(ref_img)
+                    ref_polygon = None
                 panel_reference_raw_bounds = ref_bounds
                 if self.config.enable_panel_polygon:
-                    panel_reference_polygon = self._find_panel_polygon(
-                        ref_binary, ref_bounds
+                    panel_reference_polygon = (
+                        ref_polygon.copy()
+                        if ref_polygon is not None
+                        else self._find_panel_polygon(ref_binary, ref_bounds)
                     )
                     poly_str = "有" if panel_reference_polygon is not None else "品質不足"
                 else:
@@ -6663,6 +6709,7 @@ class CAPIInferencer:
             cache_processed_image=aoi_only_mode,
             generate_grid_tiles=not aoi_only_mode,
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
+            product_resolution=product_resolution or self._product_resolution(),
         )
 
         preprocess_start = time.time()

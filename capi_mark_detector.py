@@ -66,6 +66,10 @@ _PATTERNS: Dict[str, List[Tuple[str, ...]]] = {
     "Z": [("11111", "00001", "00010", "00100", "01000", "10000", "11111")],
 }
 
+_POSITIONAL_PATTERNS: Dict[Tuple[str, int], List[Tuple[str, ...]]] = {
+    ("B", 0): [("01110", "11111", "11010", "11110", "11011", "11111", "11110")],
+}
+
 _FIRST_CHARS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 _SECOND_CHARS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 
@@ -256,6 +260,8 @@ def _plausible_mark_size(mark_width: int, mark_height: int, full_width: int, ful
 
 
 def _orientation_prior(roi_name: str, orientation: str) -> float:
+    if roi_name == "top_right" and orientation == "normal":
+        return 0.03
     if roi_name == "bottom_left" and orientation == "rot180":
         return 0.03
     return 0.0
@@ -281,7 +287,7 @@ def _recognize_group(mask: np.ndarray) -> Optional[Dict[str, Any]]:
     char_boxes = []
     for idx, (char_mask, box) in enumerate(split):
         allowed = _FIRST_CHARS if idx == 0 else _SECOND_CHARS
-        recognized = _recognize_char(char_mask, allowed)
+        recognized = _recognize_char(char_mask, allowed, char_index=idx)
         if recognized is None:
             return None
         chars.append(recognized)
@@ -391,11 +397,14 @@ def _trim_mask(mask: np.ndarray, margin: int = 0) -> Optional[Tuple[np.ndarray, 
     return mask[y1:y2, x1:x2], {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
 
 
-def _recognize_char(mask: np.ndarray, allowed: Iterable[str]) -> Optional[Dict[str, Any]]:
+def _recognize_char(mask: np.ndarray, allowed: Iterable[str], char_index: Optional[int] = None) -> Optional[Dict[str, Any]]:
     densities = _grid_densities(mask)
     scores = []
     for char in allowed:
-        char_score = max(_pattern_score(densities, pattern) for pattern in _PATTERNS[char])
+        patterns = list(_PATTERNS[char])
+        if char_index is not None:
+            patterns.extend(_POSITIONAL_PATTERNS.get((char, char_index), []))
+        char_score = max(_pattern_score(densities, pattern) for pattern in patterns)
         scores.append((char_score, char))
 
     scores.sort(reverse=True)

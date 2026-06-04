@@ -9,6 +9,7 @@ from typing import Optional, Tuple, List, Dict, Iterable, Any
 import logging
 import numpy as np
 import cv2
+from capi_image_preprocess_lab import apply_preprocess_method, normalize_preprocess_pipeline
 
 
 logger = logging.getLogger("capi.preprocess")
@@ -30,6 +31,7 @@ class PreprocessConfig:
     cache_processed_image: bool = False
     generate_grid_tiles: bool = True
     preprocess_after_tiling: bool = False
+    product_resolution: Optional[Tuple[int, int]] = None
 
     def __post_init__(self):
         if self.outer_edge_extend is None:
@@ -74,6 +76,179 @@ OUTLIER_SIGMA = 3.0
 MIN_EDGE_LEN_RATIO = 1.0
 MIN_POLYGON_AREA_RATIO = 0.9
 MIN_SAMPLES_PER_EDGE = 5
+SMALL_PRODUCT_MAX_RESOLUTION = (1366, 768)
+# Half-tile edge extension has IoU ~= 1/3 with the original edge row. If
+# polygon inward-shift makes it overlap more than this, it is not a new sample.
+EDGE_EXTENSION_DUPLICATE_IOU = 0.36
+LOW_CONTRAST_SIDE_MAX_EXTEND_PX = 128
+SIDE_EDGE_STABILIZE_SPAN_PX = 32
+
+
+def is_small_product_resolution(product_resolution: Optional[Tuple[int, int]]) -> bool:
+    """True for the small-panel family that needs robust boundary detection."""
+    if not product_resolution:
+        return False
+    try:
+        width, height = product_resolution
+        return int(width) <= SMALL_PRODUCT_MAX_RESOLUTION[0] and int(height) <= SMALL_PRODUCT_MAX_RESOLUTION[1]
+    except Exception:
+        return False
+
+
+def _use_robust_panel_boundary(config: PreprocessConfig) -> bool:
+    return is_small_product_resolution(getattr(config, "product_resolution", None))
+
+
+def _boundary_detection_gray(
+    image: np.ndarray,
+    config: PreprocessConfig,
+) -> np.ndarray:
+    """Boundary detection only needs the gray-band-shift step, if present."""
+    gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    pipeline = getattr(config, "image_preprocess_pipeline", None) or []
+    if not pipeline:
+        return gray
+
+    try:
+        normalized = normalize_preprocess_pipeline(pipeline)
+    except Exception:
+        return gray
+
+    for step in normalized:
+        if step.get("method") != "gray_band_shift":
+            continue
+        result = apply_preprocess_method(gray, "gray_band_shift", step.get("params") or {})
+        return result["image"]
+    return gray
+
+
+def _find_low_contrast_upper_boundary(
+    gray: np.ndarray,
+    bbox: Tuple[int, int, int, int],
+    tile_size: int,
+) -> int:
+    """Find a dim top band missed by Otsu but attached to the bright panel area."""
+    x1, y1, x2, _y2 = bbox
+    if y1 <= 0 or x2 - x1 < 32:
+        return y1
+
+    search_px = min(max(80, int(tile_size) // 2), y1)
+    y0 = y1 - search_px
+    width = x2 - x1
+    pad = max(20, width // 20)
+    xl = min(x2 - 1, x1 + pad)
+    xr = max(xl + 1, x2 - pad)
+    roi = gray[y0:y1, xl:xr]
+    if roi.shape[0] < 16 or roi.shape[1] < 32:
+        return y1
+
+    profile = np.median(roi, axis=1).astype(np.float32)
+    bg_count = max(5, min(30, len(profile) // 4))
+    bg_rows = profile[:bg_count]
+    bg = float(np.median(bg_rows))
+    mad = float(np.median(np.abs(bg_rows - bg)))
+    delta = max(3.0, min(16.0, 3.0 * mad + 2.0))
+
+    above = (profile > bg + delta).astype(np.uint8)
+    if not np.any(above):
+        return y1
+    kernel = np.ones((1, 5), np.uint8)
+    closed = cv2.morphologyEx(above.reshape(1, -1), cv2.MORPH_CLOSE, kernel).ravel() > 0
+
+    runs: List[Tuple[int, int]] = []
+    start: Optional[int] = None
+    for idx, val in enumerate(closed):
+        if val and start is None:
+            start = idx
+        elif not val and start is not None:
+            runs.append((start, idx))
+            start = None
+    if start is not None:
+        runs.append((start, len(closed)))
+
+    min_run = max(8, min(24, len(profile) // 12))
+    max_gap = max(12, min(24, len(profile) // 10))
+    for run_start, run_end in runs:
+        if run_end - run_start < min_run:
+            continue
+        if len(profile) - run_end <= max_gap:
+            return y0 + run_start
+    return y1
+
+
+def _find_low_contrast_side_boundary(
+    gray: np.ndarray,
+    bbox: Tuple[int, int, int, int],
+    tile_size: int,
+    side: str,
+) -> int:
+    """Find a dim left/right band missed by Otsu but attached to the panel."""
+    x1, y1, x2, y2 = bbox
+    img_w = gray.shape[1]
+    if y2 - y1 < 32 or x2 <= x1:
+        return x1 if side == "left" else x2
+
+    if side == "left":
+        search_px = min(max(80, int(tile_size) // 2), x1)
+        if search_px <= 0:
+            return x1
+        x0, x_end = x1 - search_px, x1
+    elif side == "right":
+        search_px = min(max(80, int(tile_size) // 2), img_w - x2)
+        if search_px <= 0:
+            return x2
+        x0, x_end = x2, x2 + search_px
+    else:
+        raise ValueError("side must be 'left' or 'right'")
+
+    height = y2 - y1
+    pad = max(20, height // 20)
+    yt = min(y2 - 1, y1 + pad)
+    yb = max(yt + 1, y2 - pad)
+    roi = gray[yt:yb, x0:x_end]
+    if roi.shape[0] < 32 or roi.shape[1] < 16:
+        return x1 if side == "left" else x2
+
+    profile = np.median(roi, axis=0).astype(np.float32)
+    bg_count = max(5, min(30, len(profile) // 4))
+    bg_cols = profile[:bg_count] if side == "left" else profile[-bg_count:]
+    bg = float(np.median(bg_cols))
+    mad = float(np.median(np.abs(bg_cols - bg)))
+    delta = max(3.0, min(16.0, 3.0 * mad + 2.0))
+
+    above = (profile > bg + delta).astype(np.uint8)
+    if not np.any(above):
+        return x1 if side == "left" else x2
+    kernel = np.ones((1, 5), np.uint8)
+    closed = cv2.morphologyEx(above.reshape(1, -1), cv2.MORPH_CLOSE, kernel).ravel() > 0
+
+    runs: List[Tuple[int, int]] = []
+    start: Optional[int] = None
+    for idx, val in enumerate(closed):
+        if val and start is None:
+            start = idx
+        elif not val and start is not None:
+            runs.append((start, idx))
+            start = None
+    if start is not None:
+        runs.append((start, len(closed)))
+
+    min_run = max(8, min(24, len(profile) // 12))
+    max_gap = max(12, min(24, len(profile) // 10))
+    for run_start, run_end in runs:
+        if run_end - run_start < min_run:
+            continue
+        if side == "left" and len(profile) - run_end <= max_gap:
+            candidate = x0 + run_start
+            if x1 - candidate > LOW_CONTRAST_SIDE_MAX_EXTEND_PX:
+                return x1
+            return candidate
+        if side == "right" and run_start <= max_gap:
+            candidate = x0 + run_end
+            if candidate - x2 > LOW_CONTRAST_SIDE_MAX_EXTEND_PX:
+                return x2
+            return candidate
+    return x1 if side == "left" else x2
 
 
 def filter_panel_lighting_files(
@@ -123,21 +298,88 @@ def detect_panel_polygon(
     if image is None or image.size == 0:
         return None, None
 
-    gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    gray = _boundary_detection_gray(image, config)
+    if _use_robust_panel_boundary(config):
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        kernel = np.ones((15, 15), np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None, None
-    c = max(contours, key=cv2.contourArea)
-    x, y, w, h = cv2.boundingRect(c)
-    offset = config.otsu_offset
-    bbox = (x + offset, y + offset, x + w - offset, y + h - offset)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None, None
+        min_area = 1000
+        xs = []
+        ys = []
+        for c in contours:
+            if cv2.contourArea(c) <= min_area:
+                continue
+            x, y, w, h = cv2.boundingRect(c)
+            xs.extend((x, x + w))
+            ys.extend((y, y + h))
+        if not xs or not ys:
+            return None, None
+
+        img_h, img_w = binary.shape[:2]
+        raw_x1 = max(0, min(xs))
+        raw_y1 = max(0, min(ys))
+        raw_x2 = min(img_w, max(xs))
+        raw_y2 = min(img_h, max(ys))
+        top_y = _find_low_contrast_upper_boundary(
+            gray,
+            (raw_x1, raw_y1, raw_x2, raw_y2),
+            config.tile_size,
+        )
+        left_x = _find_low_contrast_side_boundary(
+            gray,
+            (raw_x1, raw_y1, raw_x2, raw_y2),
+            config.tile_size,
+            "left",
+        )
+        right_x = _find_low_contrast_side_boundary(
+            gray,
+            (raw_x1, raw_y1, raw_x2, raw_y2),
+            config.tile_size,
+            "right",
+        )
+        if top_y < raw_y1:
+            binary[top_y:raw_y1, left_x:right_x] = 255
+        if left_x < raw_x1:
+            binary[top_y:raw_y2, left_x:raw_x1] = 255
+        if right_x > raw_x2:
+            binary[top_y:raw_y2, raw_x2:right_x] = 255
+        raw_x1 = left_x
+        raw_y1 = top_y
+        raw_x2 = right_x
+
+        offset = max(0, int(config.otsu_offset))
+        x1 = max(0, raw_x1 + offset)
+        y1 = max(0, raw_y1 + offset)
+        x2 = min(img_w, raw_x2 - offset)
+        y2 = min(img_h, raw_y2 - offset)
+        if x1 >= x2 or y1 >= y2:
+            x1, y1, x2, y2 = 0, 0, img_w, img_h
+    else:
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None, None
+        c = max(contours, key=cv2.contourArea)
+        x, y, w, h = cv2.boundingRect(c)
+        offset = config.otsu_offset
+        x1, y1, x2, y2 = x + offset, y + offset, x + w - offset, y + h - offset
+    bbox = (x1, y1, x2, y2)
 
     if not config.enable_panel_polygon:
         return bbox, None
 
-    polygon = _polyfit_polygon(binary, bbox, config.tile_size)
+    polygon = _polyfit_polygon(
+        binary,
+        bbox,
+        config.tile_size,
+        stabilize_near_vertical_edges=_use_robust_panel_boundary(config),
+    )
     return bbox, polygon
 
 
@@ -145,6 +387,7 @@ def _polyfit_polygon(
     binary_mask: np.ndarray,
     bbox: Tuple[int, int, int, int],
     tile_size: int,
+    stabilize_near_vertical_edges: bool = False,
 ) -> Optional[np.ndarray]:
     """從 capi_inference._find_panel_polygon 抽出，邏輯不變。"""
     H, W = binary_mask.shape[:2]
@@ -169,9 +412,20 @@ def _polyfit_polygon(
     if min(len(tops), len(bots), len(lefts), len(rights)) < MIN_SAMPLES_PER_EDGE:
         return None
 
+    def _trim_side_points(pts):
+        if not stabilize_near_vertical_edges:
+            return pts
+        trim = min(max(64, int(tile_size) // 4), max(0, (ymax - ymin) // 4))
+        trimmed = [p for p in pts if ymin + trim <= p[1] <= ymax - trim]
+        return trimmed if len(trimmed) >= MIN_SAMPLES_PER_EDGE else pts
+
     def fit(pts, horizontal):
         arr = np.array(pts, dtype=float)
         ind, dep = (arr[:, 0], arr[:, 1]) if horizontal else (arr[:, 1], arr[:, 0])
+        if stabilize_near_vertical_edges and not horizontal:
+            q10, q90 = np.percentile(dep, [10, 90])
+            if q90 - q10 <= SIDE_EDGE_STABILIZE_SPAN_PX:
+                return 0.0, float(np.median(dep))
         try:
             a, b = np.polyfit(ind, dep, 1)
         except (np.linalg.LinAlgError, ValueError):
@@ -187,7 +441,10 @@ def _polyfit_polygon(
                     pass
         return float(a), float(b)
 
-    top_l, bot_l, left_l, right_l = fit(tops, True), fit(bots, True), fit(lefts, False), fit(rights, False)
+    side_lefts = _trim_side_points(lefts)
+    side_rights = _trim_side_points(rights)
+    top_l, bot_l = fit(tops, True), fit(bots, True)
+    left_l, right_l = fit(side_lefts, False), fit(side_rights, False)
     if None in (top_l, bot_l, left_l, right_l):
         return None
 
@@ -625,12 +882,17 @@ def _generate_tiles(
     img_h, img_w = img.shape[:2]
 
     def positions(lo: int, hi: int) -> List[int]:
-        if hi - lo < ts:
+        span = hi - lo - ts
+        if span < 0:
             return []
-        out = list(range(lo, hi - ts + 1, config.tile_stride))
-        if out and out[-1] != hi - ts:
-            out.append(hi - ts)
-        return out
+        if span == 0:
+            return [lo]
+        stride = max(1, int(config.tile_stride))
+        count = int(np.ceil(span / stride)) + 1
+        return [
+            int(round(lo + span * i / (count - 1)))
+            for i in range(count)
+        ]
 
     xs = positions(x1, x2)
     ys = positions(y1, y2)
@@ -655,6 +917,7 @@ def _generate_tiles(
 
     tiles: List[TileResult] = []
     emitted_positions = set()
+    emitted_edge_rects: List[Tuple[int, int, int, int]] = []
     tid = 0
 
     inner_corner_xs = {xs[0], xs[-1]} if xs else set()
@@ -666,24 +929,30 @@ def _generate_tiles(
         return ((tx in inner_corner_xs and ty in inner_corner_ys)
                 or (tx in outer_corner_xs and ty in outer_corner_ys))
 
-    def _resolve_edge_origin(tx: int, ty: int) -> Tuple[int, int]:
+    def _resolve_edge_origin(tx: int, ty: int) -> Tuple[int, int, bool]:
         if polygon is None:
-            return tx, ty
+            return tx, ty, False
         anchor = (tx + half, ty + half)
-        rx, ry, _cov, _shifted = resolve_inward_polygon_tile(
+        rx, ry, _cov, shifted = resolve_inward_polygon_tile(
             anchor_xy=anchor,
             polygon=polygon,
             image_shape=(img_h, img_w),
             tile_size=ts,
             initial_origin=(tx, ty),
         )
-        return rx, ry
+        return rx, ry, shifted
 
     def _emit(tx: int, ty: int, zone: str, cov: float, dist: float, mask,
-              is_corner_override: Optional[bool] = None) -> None:
+              is_corner_override: Optional[bool] = None,
+              dedupe_edge_overlap: bool = False) -> None:
         nonlocal tid
         if (tx, ty) in emitted_positions:
             return
+        rect = (tx, ty, tx + ts, ty + ts)
+        if zone == "edge" and dedupe_edge_overlap:
+            if any(_rect_iou(rect, prev) >= EDGE_EXTENSION_DUPLICATE_IOU
+                   for prev in emitted_edge_rects):
+                return
         emitted_positions.add((tx, ty))
         tile_img = img[ty:ty + ts, tx:tx + ts].copy()
         if getattr(config, "preprocess_after_tiling", False) and config.image_preprocess_pipeline:
@@ -706,7 +975,25 @@ def _generate_tiles(
             preprocess_pipeline=list(preprocess_pipeline or []),
             is_corner=_is_corner(tx, ty) if is_corner_override is None else is_corner_override,
         ))
+        if zone == "edge":
+            emitted_edge_rects.append(rect)
         tid += 1
+
+    def _rect_iou(
+        a: Tuple[int, int, int, int],
+        b: Tuple[int, int, int, int],
+    ) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        iw = max(0, min(ax2, bx2) - max(ax1, bx1))
+        ih = max(0, min(ay2, by2) - max(ay1, by1))
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+        area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+        denom = area_a + area_b - inter
+        return float(inter) / float(denom) if denom > 0 else 0.0
 
     for ty0 in ys:
         for tx0 in xs:
@@ -719,7 +1006,7 @@ def _generate_tiles(
             tx, ty = tx0, ty0
             is_corner = _is_corner(tx0, ty0)
             if force_edge:
-                tx, ty = _resolve_edge_origin(tx0, ty0)
+                tx, ty, _shifted = _resolve_edge_origin(tx0, ty0)
                 zone, cov, dist, mask = classify_tile_zone((tx, ty, tx + ts, ty + ts), polygon, config)
                 zone = "edge"
                 if cov >= 1.0 - 1e-6:
@@ -749,10 +1036,14 @@ def _generate_tiles(
         )
 
     for tx0, ty0, is_corner in extension_positions:
-        tx, ty = _resolve_edge_origin(tx0, ty0)
+        tx, ty, shifted = _resolve_edge_origin(tx0, ty0)
         _zone, cov, dist, mask = classify_tile_zone((tx, ty, tx + ts, ty + ts), polygon, config)
         if cov >= 1.0 - 1e-6:
             mask = None
-        _emit(tx, ty, "edge", cov, dist, mask, is_corner_override=is_corner)
+        _emit(
+            tx, ty, "edge", cov, dist, mask,
+            is_corner_override=is_corner,
+            dedupe_edge_overlap=shifted,
+        )
 
     return tiles
