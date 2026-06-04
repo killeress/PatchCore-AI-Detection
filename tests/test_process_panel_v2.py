@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from capi_config import CAPIConfig
+from capi_config import BombDefect, CAPIConfig
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +606,71 @@ def test_process_panel_v2_runs_b0f_skip_file_with_bright_spot_logic(tmp_path):
     assert len(b0f.anomaly_tiles) == 1
     bright.assert_called_once()
     get_model.assert_not_called()
+
+
+def test_bomb_postprocess_skips_b0f_aoi_track_only_tile(tmp_path):
+    """B0F AOI track-only tiles are AI OK, so bomb matching must not mark them."""
+    from capi_inference import CAPIInferencer, ImageResult, TileInfo
+
+    cfg = _make_config(tmp_path)
+    cfg.bomb_defects = [
+        BombDefect(
+            image_prefix="B0F00000",
+            defect_code="B01",
+            defect_type="point",
+            coordinates=[(0, 0)],
+        )
+    ]
+    inferencer = CAPIInferencer(cfg)
+
+    track_tile = TileInfo(
+        tile_id=1,
+        x=0,
+        y=0,
+        width=512,
+        height=512,
+        image=np.zeros((512, 512), dtype=np.uint8),
+        zone="bright_spot",
+    )
+    track_tile.is_aoi_coord_tile = True
+    track_tile.is_aoi_coord_below_threshold = True
+    track_tile.is_bright_spot_detection = True
+    track_tile.aoi_product_x = 0
+    track_tile.aoi_product_y = 0
+
+    ng_tile = TileInfo(
+        tile_id=2,
+        x=0,
+        y=0,
+        width=512,
+        height=512,
+        image=np.zeros((512, 512), dtype=np.uint8),
+        zone="bright_spot",
+    )
+    ng_tile.is_bright_spot_detection = True
+
+    track_map = np.zeros((512, 512), dtype=np.float32)
+    ng_map = np.zeros((512, 512), dtype=np.float32)
+    ng_map[0, 0] = 1.0
+    result = ImageResult(
+        image_path=Path("B0F00000_test.png"),
+        image_size=(1024, 1024),
+        otsu_bounds=(0, 0, 1024, 1024),
+        exclusion_regions=[],
+        tiles=[track_tile, ng_tile],
+        excluded_tile_count=0,
+        processed_tile_count=2,
+        processing_time=0.0,
+        anomaly_tiles=[(track_tile, 0.0, track_map), (ng_tile, 1.0, ng_map)],
+        raw_bounds=(0, 0, 1024, 1024),
+    )
+
+    inferencer._apply_bomb_postprocess([result], None, (1024, 1024))
+
+    assert track_tile.is_bomb is False
+    assert track_tile.bomb_defect_code == ""
+    assert ng_tile.is_bomb is True
+    assert ng_tile.bomb_defect_code == "B01"
 
 
 def test_process_panel_v2_duplicate_panel_uses_latest_b0f_skip_file(tmp_path):

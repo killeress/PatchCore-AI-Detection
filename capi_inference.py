@@ -5904,6 +5904,8 @@ class CAPIInferencer:
                 if result.anomaly_tiles and result.raw_bounds is not None:
                     img_prefix = result.image_path.stem
                     for tile, score, anomaly_map in result.anomaly_tiles:
+                        if getattr(tile, "is_aoi_coord_below_threshold", False):
+                            continue
                         # 計算熱力圖峰值位置 (更精確的缺陷位置)
                         if anomaly_map is not None and anomaly_map.size > 0:
                             try:
@@ -6004,6 +6006,8 @@ class CAPIInferencer:
                         continue
                     # 對未匹配的 tile 做位置-only 第二輪檢查
                     for tile, score, anomaly_map in result.anomaly_tiles:
+                        if getattr(tile, "is_aoi_coord_below_threshold", False):
+                            continue
                         if tile.is_bomb:
                             continue
                         peak_x = getattr(tile, 'anomaly_peak_x', tile.center[0])
@@ -6384,6 +6388,8 @@ class CAPIInferencer:
             if result.anomaly_tiles and result.raw_bounds is not None:
                 img_prefix = result.image_path.stem
                 for tile, _score, anomaly_map in result.anomaly_tiles:
+                    if getattr(tile, "is_aoi_coord_below_threshold", False):
+                        continue
                     if anomaly_map is not None and anomaly_map.size > 0:
                         try:
                             amap_h, amap_w = anomaly_map.shape[:2]
