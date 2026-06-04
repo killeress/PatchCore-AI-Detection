@@ -63,13 +63,43 @@ def derive_panel_modes(panel_count: int) -> List[str]:
     )
 
 # 與 PreprocessConfig.edge_threshold_px 同一單一來源（避免兩處飄移）。
-# NG zone heuristic：讀 over_review snapshot 的 manifest.csv，
-# defect_y < EDGE_BAND_PX → edge（top band），否則 → inner。
-# TODO: manifest 加 panel_height 欄後改成 min(y, h-y) < EDGE_BAND_PX，可同時抓 bottom edge。
+# NG zone heuristic：讀 over_review snapshot 的 manifest.csv；若有影像高度，
+# edge band 會依高度縮小，避免 768 高度機種全被固定 768px top band 吃掉。
+# 舊 manifest 沒高度時保留 legacy top-band 行為。
 EDGE_BAND_PX = PreprocessConfig().edge_threshold_px  # 768
+_NG_HEIGHT_KEYS = ("panel_height", "product_height", "resolution_y", "image_height", "height")
 
 # 該 zone 的 NG 樣本少於此閾值時，訓練端退回該 lighting 全部 NG（避免 calibration 失準）。
 MIN_NG_PER_ZONE = 5
+
+
+def _parse_positive_int(value: Any) -> Optional[int]:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _ng_edge_band_for_height(panel_height: Optional[int]) -> int:
+    if panel_height is None:
+        return EDGE_BAND_PX
+    return max(1, min(EDGE_BAND_PX, int(panel_height) // 4))
+
+
+def _classify_ng_zone(defect_y: int, panel_height: Optional[int] = None) -> str:
+    band = _ng_edge_band_for_height(panel_height)
+    if panel_height is not None:
+        return ZONE_EDGE if defect_y < band or defect_y >= panel_height - band else ZONE_INNER
+    return ZONE_EDGE if defect_y < band else ZONE_INNER
+
+
+def _manifest_panel_height(row: Dict[str, str]) -> Optional[int]:
+    for key in _NG_HEIGHT_KEYS:
+        height = _parse_positive_int(row.get(key))
+        if height is not None:
+            return height
+    return None
 
 
 @dataclass
@@ -171,7 +201,15 @@ def preprocess_panels_to_pool(
     total_tiles = 0
     if preprocess_cfg.image_preprocess_pipeline:
         from capi_image_preprocess_lab import describe_preprocess_pipeline
-        log(f"影像前處理流程: {describe_preprocess_pipeline(preprocess_cfg.image_preprocess_pipeline)}")
+        preprocess_mode = (
+            "先切分後處理（每個 tile 套用）"
+            if getattr(preprocess_cfg, "preprocess_after_tiling", False)
+            else "先處理整張圖再切片"
+        )
+        log(
+            f"影像前處理模式: {preprocess_mode}；流程: "
+            f"{describe_preprocess_pipeline(preprocess_cfg.image_preprocess_pipeline)}"
+        )
 
     for idx, (panel_dir, mode) in enumerate(zip(cfg.panel_paths, panel_modes), 1):
         mode_label = "完整" if mode == PANEL_MODE_FULL else "僅 4 角"
@@ -244,14 +282,15 @@ def _make_ng_zone_classifier(log: Callable[[str], None]):
     """回傳 zone_for(file_path) -> ZONE_EDGE | ZONE_INNER | None。
 
     每個 snapshot 讀一次 manifest.csv（capi_dataset_export.read_manifest，BOM 容錯），
-    建 {filename: defect_y} 索引。defect_y < EDGE_BAND_PX 視為 edge（top）。
+    建 {filename: (defect_y, panel_height)} 索引；有高度時用上下 edge band，
+    無高度時保留 legacy top-band 判斷。
     """
-    cache: Dict[Path, Dict[str, int]] = {}
+    cache: Dict[Path, Dict[str, Tuple[int, Optional[int]]]] = {}
 
-    def _load(snap_dir: Path) -> Dict[str, int]:
+    def _load(snap_dir: Path) -> Dict[str, Tuple[int, Optional[int]]]:
         if snap_dir in cache:
             return cache[snap_dir]
-        index: Dict[str, int] = {}
+        index: Dict[str, Tuple[int, Optional[int]]] = {}
         try:
             rows = read_manifest(snap_dir / "manifest.csv")
         except Exception as e:
@@ -262,9 +301,10 @@ def _make_ng_zone_classifier(log: Callable[[str], None]):
             if not crop_rel:
                 continue
             try:
-                index[Path(crop_rel).name] = int(r.get("defect_y") or 0)
+                defect_y = int(r.get("defect_y") or 0)
             except (TypeError, ValueError):
                 continue
+            index[Path(crop_rel).name] = (defect_y, _manifest_panel_height(r))
         cache[snap_dir] = index
         return index
 
@@ -275,10 +315,11 @@ def _make_ng_zone_classifier(log: Callable[[str], None]):
             snap_dir = file_path.parents[3]
         except IndexError:
             return None
-        defect_y = _load(snap_dir).get(file_path.name)
-        if defect_y is None:
+        meta = _load(snap_dir).get(file_path.name)
+        if meta is None:
             return None
-        return ZONE_EDGE if defect_y < EDGE_BAND_PX else ZONE_INNER
+        defect_y, panel_height = meta
+        return _classify_ng_zone(defect_y, panel_height)
 
     return zone_for
 

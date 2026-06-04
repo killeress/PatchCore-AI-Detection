@@ -27,7 +27,7 @@ def test_constants_aligned_with_db_enum():
 
 
 def test_manifest_fields_contains_required_columns():
-    required = {"sample_id", "label", "crop_path", "heatmap_path", "status"}
+    required = {"sample_id", "label", "image_width", "image_height", "crop_path", "heatmap_path", "status"}
     assert required.issubset(set(MANIFEST_FIELDS))
 
 
@@ -312,6 +312,8 @@ def test_manifest_roundtrip(tmp_path):
             "prefix": "G0F0001",
             "glass_id": "GLS123",
             "image_name": "G0F0001.bmp",
+            "image_width": "2048",
+            "image_height": "2048",
             "inference_record_id": "1001",
             "image_result_id": "5001",
             "tile_idx": "3",
@@ -485,6 +487,8 @@ def test_exporter_run_end_to_end(tmp_path):
     assert "GLS123_G0F00000_114438_edge7001" in manifest
     assert manifest["GLS123_G0F00000_114438_tile3"]["label"] == "over_edge_false_positive"
     assert manifest["GLS123_G0F00000_114438_tile3"]["status"] == "ok"
+    assert manifest["GLS123_G0F00000_114438_tile3"]["image_width"] == "2048"
+    assert manifest["GLS123_G0F00000_114438_tile3"]["image_height"] == "2048"
 
     # 7. 驗證 summary
     assert summary.total == 2
