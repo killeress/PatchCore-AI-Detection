@@ -1147,6 +1147,7 @@ class CAPIInferencer:
         panel_polygon: Optional[np.ndarray] = None,
         exclusion_threshold: float = 0.0,  # 重疊比例超過此值則跳過 (0.0 = 任何重疊都跳過)
         original_image: Optional[np.ndarray] = None,
+        skip_preprocess: bool = False,
     ) -> Tuple[List[TileInfo], int]:
         """
         將圖片切成 tile，完全跳過與排除區域重疊的 tile
@@ -1261,7 +1262,11 @@ class CAPIInferencer:
                     else:
                         tile_mask = mask
 
-                if getattr(self.config, "preprocess_after_tiling", False) and getattr(self.config, "image_preprocess_pipeline", None):
+                if (
+                    not skip_preprocess
+                    and getattr(self.config, "preprocess_after_tiling", False)
+                    and getattr(self.config, "image_preprocess_pipeline", None)
+                ):
                     from capi_image_preprocess_lab import apply_preprocess_pipeline
                     pipeline_result = apply_preprocess_pipeline(tile_img, self.config.image_preprocess_pipeline)
                     tile_img = pipeline_result["image"]
@@ -1318,10 +1323,15 @@ class CAPIInferencer:
 
         img_h, img_w = raw_image.shape[:2]
 
+        is_skip_file = self.config.should_skip_file(image_path.name)
         processed_image = raw_image
         preprocess_steps: List[Dict[str, Any]] = []
         preprocess_total_ms = 0.0
-        if getattr(self.config, "image_preprocess_pipeline", None) and not getattr(self.config, "preprocess_after_tiling", False):
+        if (
+            not is_skip_file
+            and getattr(self.config, "image_preprocess_pipeline", None)
+            and not getattr(self.config, "preprocess_after_tiling", False)
+        ):
             from capi_image_preprocess_lab import apply_preprocess_pipeline, describe_preprocess_pipeline
             pipeline = self.config.image_preprocess_pipeline
             logger.info(f"[preprocess] pipeline: {describe_preprocess_pipeline(pipeline)}")
@@ -1370,6 +1380,7 @@ class CAPIInferencer:
             processed_image, otsu_bounds, exclusion_regions,
             panel_polygon=panel_polygon,
             original_image=raw_image,
+            skip_preprocess=is_skip_file,
         )
         
         elapsed = time.time() - start_time
@@ -4529,7 +4540,12 @@ class CAPIInferencer:
             processed_image = raw_image
         preprocess_steps: List[Dict[str, Any]] = []
         preprocess_total_ms = 0.0
-        if processed_image is raw_image and getattr(pre_cfg, "image_preprocess_pipeline", None) and not getattr(pre_cfg, "preprocess_after_tiling", False):
+        if (
+            not is_skip_file
+            and processed_image is raw_image
+            and getattr(pre_cfg, "image_preprocess_pipeline", None)
+            and not getattr(pre_cfg, "preprocess_after_tiling", False)
+        ):
             from capi_image_preprocess_lab import apply_preprocess_pipeline, describe_preprocess_pipeline
             logger.info(
                 "[v2][AOI] pipeline: %s",
@@ -4596,7 +4612,11 @@ class CAPIInferencer:
             crop_w = tx2 - tx
             crop_h = ty2 - ty
             tile_img = processed_image[ty:ty2, tx:tx2].copy()
-            if getattr(pre_cfg, "preprocess_after_tiling", False) and getattr(pre_cfg, "image_preprocess_pipeline", None):
+            if (
+                not is_skip_file
+                and getattr(pre_cfg, "preprocess_after_tiling", False)
+                and getattr(pre_cfg, "image_preprocess_pipeline", None)
+            ):
                 from capi_image_preprocess_lab import apply_preprocess_pipeline
                 pipeline_result = apply_preprocess_pipeline(tile_img, pre_cfg.image_preprocess_pipeline)
                 tile_img = pipeline_result["image"]
@@ -6688,6 +6708,15 @@ class CAPIInferencer:
                 prefix for prefix in report_prefixes
                 if not prefix.upper().startswith("B0")
             }
+            has_black_image = any(p.upper().startswith("B0") for p in report_prefixes)
+            if has_black_image:
+                from capi_preprocess import BOUNDARY_REFERENCE_PRIORITY
+                folder_prefixes = {self._get_image_prefix(f.name) for f in image_files}
+                for cand in BOUNDARY_REFERENCE_PRIORITY:
+                    if cand in folder_prefixes:
+                        preprocess_prefixes.add(cand)
+                        break
+
             preprocess_image_files = [
                 f for f in image_files
                 if self._get_image_prefix(f.name) in preprocess_prefixes
@@ -6748,8 +6777,8 @@ class CAPIInferencer:
 
             # 取得此 lighting 對應的 inner / edge model 路徑
             lighting_map = self.config.model_mapping.get(lighting, {})
-            if not isinstance(lighting_map, dict) or "inner" not in lighting_map or "edge" not in lighting_map:
-                raise RuntimeError(f"[v2] {lighting}: model_mapping 必須同時包含 inner/edge")
+            if not isinstance(lighting_map, dict):
+                lighting_map = {}
 
             lighting_thr = self.config.threshold_mapping.get(lighting, {})
             if isinstance(lighting_thr, dict):
@@ -6783,6 +6812,11 @@ class CAPIInferencer:
                 )
                 tile_infos.append(ti)
                 zone_by_tile_id[ti.tile_id] = tr.zone
+
+            # 如果此 lighting 有任何需要推論的 tiles，才驗證 model_mapping 必須存在
+            if len(tile_infos) > 0:
+                if "inner" not in lighting_map or "edge" not in lighting_map:
+                    raise RuntimeError(f"[v2] {lighting}: model_mapping 必須同時包含 inner/edge")
 
             image_result = ImageResult(
                 image_path=img_path,
