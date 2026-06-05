@@ -11,13 +11,10 @@
     局部重訓：
     <span style="color:#cdd6f4;font-weight:600;">{{ target_bundle.machine_id }} / {{ target_bundle.bundle_path|replace("model/", "") }}</span>，
     PT：<span style="color:#89b4fa;font-weight:600;">{{ training_scope.selected_units|join(", ") }}</span>。
-    <span style="display:block;margin-top:2px;">請重新選擇此機種的訓練 panel，後續只會訓練選定 PT。</span>
+    <span style="display:block;margin-top:2px;">請重新選擇此機種的訓練 panel；所有已選 panel 都會完整切 tile，後續只會訓練選定 PT。</span>
     {% else %}
-    從最近 3 天 AOI 判 OK 紀錄依序勾選
-    <span style="color:#cdd6f4;font-weight:600;">8 片 panel</span>：
-    順位 <span style="color:#a6e3a1;font-weight:600;">1-3 完整</span>（收 inner + edge tile），
-    順位 <span style="color:#fab387;font-weight:600;">4-8 僅 4 角</span>（補強 edge 模型，inner 與長邊不取樣）。
-    <span style="color:#cdd6f4;font-size:.82rem;display:block;margin-top:2px;">勾選順序就是 panel 順位 — 取消重選會重排。</span>
+    從最近 3 天 AOI 判 OK 紀錄勾選訓練 panel；所有已選 panel 都會完整切 tile（inner + edge）。
+    <span style="color:#cdd6f4;font-size:.82rem;display:block;margin-top:2px;">至少選 1 片；片數越多，訓練資料越多、前處理與訓練時間也越長。</span>
     {% endif %}
   </p>
 
@@ -156,7 +153,7 @@
   <div id="panel-list" style="margin-top:16px;padding-bottom:88px;"></div>
 
   <div class="step1-actionbar">
-    <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0/8 片</span>
+    <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0 片</span>
     <span style="display:flex;gap:8px;align-items:center;margin-left:auto;">
       <a href="/train/new" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">返回</a>
       <button id="next-btn" onclick="submitStart()" disabled
@@ -766,18 +763,8 @@ function appendTextCell(row, value, styleText, className) {
   row.appendChild(td);
 }
 
-// 與 capi_train_new.WIZARD_FULL_PANEL_COUNT / WIZARD_TOTAL_PANEL_COUNT 對齊。
-// 改了這裡也記得同步那邊（後端會用 derive_panel_modes 推 panel_modes）。
-const FULL_PANEL_COUNT = 3;
-const PANEL_LIMIT = 8;
-const FULL_PANEL_COLOR = '#a6e3a1';      // 完整 panel：catppuccin green
-const CORNER_PANEL_COLOR = '#fab387';    // corners-only：catppuccin peach
-const FULL_ROW_BG = '#1e3a2d';
-const CORNER_ROW_BG = '#3a2d1e';
-
-function panelModeOfIdx(idx) {
-  return idx < FULL_PANEL_COUNT ? 'full' : 'corners_only';
-}
+const SELECTED_PANEL_COLOR = '#a6e3a1';
+const SELECTED_ROW_BG = '#1e3a2d';
 
 function toggleSelect(tr) {
   const path = tr.dataset.path;
@@ -791,7 +778,6 @@ function toggleSelect(tr) {
       _selectedMachineKey = '';
     }
   } else {
-    if (_selected.size >= PANEL_LIMIT) return;
     if (isPartialTraining() && machineKey !== targetMachinePrefix()) {
       capAlert(`局部重訓只能選擇料號前 ${MACHINE_PREFIX_LEN} 碼為 ${targetMachinePrefix()} 的 panel。`, {type: 'warn', title: '料號不一致'});
       return;
@@ -825,14 +811,12 @@ function refreshSelectedVisuals() {
   ordered.forEach((path, idx) => {
     const tr = document.querySelector(`#panel-list tr[data-path="${CSS.escape(path)}"]`);
     if (!tr) return;
-    const isFull = idx < FULL_PANEL_COUNT;
-    const color = isFull ? FULL_PANEL_COLOR : CORNER_PANEL_COLOR;
-    tr.style.background = isFull ? FULL_ROW_BG : CORNER_ROW_BG;
+    tr.style.background = SELECTED_ROW_BG;
     const chk = tr.querySelector('.chk');
     chk.textContent = String(idx + 1);
-    chk.style.background = color;
+    chk.style.background = SELECTED_PANEL_COLOR;
     chk.style.color = '#1e1e2e';
-    chk.style.borderColor = color;
+    chk.style.borderColor = SELECTED_PANEL_COLOR;
     chk.style.fontWeight = '700';
   });
 }
@@ -843,12 +827,10 @@ function updateNext() {
         ? `（目標機種 ${_selectedMachineId}，前 ${MACHINE_PREFIX_LEN} 碼 ${_selectedMachineKey}）`
         : `（機種 ${_selectedMachineId}）`)
     : '';
-  const fullSelected = Math.min(_selected.size, FULL_PANEL_COUNT);
-  const cornerSelected = Math.max(0, _selected.size - FULL_PANEL_COUNT);
   document.getElementById('sel-count').textContent =
-    `已選 ${_selected.size}/${PANEL_LIMIT} 片 (完整 ${fullSelected}/${FULL_PANEL_COUNT}、僅 4 角 ${cornerSelected}/${PANEL_LIMIT - FULL_PANEL_COUNT}) ${machineText}`;
+    `已選 ${_selected.size} 片（全部完整切 tile） ${machineText}`;
   const btn = document.getElementById('next-btn');
-  btn.disabled = _selected.size !== PANEL_LIMIT;
+  btn.disabled = _selected.size === 0;
   btn.style.opacity = btn.disabled ? .4 : 1;
 }
 
