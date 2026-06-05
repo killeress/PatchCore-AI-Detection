@@ -4,6 +4,7 @@
 """
 import io
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -1093,6 +1094,55 @@ def test_handle_train_new_preprocess_pipeline_preview_after_tiling_uses_tile(tmp
     assert Path(resp["original_path"]).exists()
     assert Path(resp["output_path"]).exists()
     assert Path(resp["diff_path"]).exists()
+
+
+def test_handle_train_new_preprocess_preview_cache_depends_on_source_mtime(tmp_path, monkeypatch):
+    panel_dir = tmp_path / "YQ42ZD001C16"
+    panel_dir.mkdir()
+    img = np.full((768, 1366), 18, dtype=np.uint8)
+    img[100:720, 100:1266] = 200
+    image_path = panel_dir / "G0F00000_084027.tif"
+    assert cv2.imwrite(str(image_path), img)
+    os.utime(image_path, (1000, 1000))
+
+    monkeypatch.chdir(tmp_path)
+
+    server = MagicMock()
+    server.inferencers = {}
+    server.database.get_training_job.return_value = {
+        "job_id": "j1",
+        "machine_id": "GN140BGAAN80S",
+        "state": "review",
+        "started_at": None,
+        "completed_at": None,
+        "output_bundle": None,
+        "error_message": None,
+        "panel_paths": [str(panel_dir)],
+        "panel_modes": ["full"],
+        "image_preprocess_pipeline": [],
+        "preprocess_after_tiling": False,
+    }
+
+    sent_paths = []
+
+    def make_handler():
+        h = _make_handler_with_server(
+            server,
+            "/api/train/new/preprocess_preview?job_id=j1&lighting=G0F00000",
+        )
+        h._send_binary = lambda path: sent_paths.append(Path(path))
+        return h
+
+    make_handler()._handle_train_new_preprocess_preview()
+    img[100, 100] = 210
+    assert cv2.imwrite(str(image_path), img)
+    os.utime(image_path, (2000, 2000))
+    make_handler()._handle_train_new_preprocess_preview()
+
+    assert len(sent_paths) == 2
+    assert sent_paths[0].name != sent_paths[1].name
+    assert sent_paths[0].exists()
+    assert sent_paths[1].exists()
 
 
 def test_handle_train_new_page_lists_all_active_jobs():

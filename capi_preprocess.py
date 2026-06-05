@@ -262,6 +262,15 @@ def filter_panel_lighting_files(
 
     Returns: {"G0F00000": Path, ...}，缺哪個 lighting 就少哪個 key。
     """
+    def _is_newer(candidate: Path, current: Path) -> bool:
+        try:
+            cand_key = (candidate.stat().st_mtime_ns, candidate.name)
+            curr_key = (current.stat().st_mtime_ns, current.name)
+        except OSError:
+            cand_key = (0, candidate.name)
+            curr_key = (0, current.name)
+        return cand_key > curr_key
+
     result: Dict[str, Path] = {}
     entries = image_files if image_files is not None else folder.iterdir()
     for entry in entries:
@@ -275,7 +284,7 @@ def filter_panel_lighting_files(
         matched = False
         for lighting in LIGHTING_PREFIXES:
             if name.startswith(lighting):
-                if lighting not in result:
+                if lighting not in result or _is_newer(entry, result[lighting]):
                     result[lighting] = entry
                 matched = True
                 break
