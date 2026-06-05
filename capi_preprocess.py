@@ -68,6 +68,14 @@ class PanelPreprocessResult:
 
 
 LIGHTING_PREFIXES = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
+BOUNDARY_REFERENCE_PRIORITY = ("W0F00000", "STANDARD", "G0F00000", "R0F00000", "WGF50500")
+BOUNDARY_GRAY_BAND_SHIFT_PARAMS = {
+    "low_threshold": 105,
+    "high_threshold": 110,
+    "dark_shift": 10,
+    "bright_shift": 10,
+    "band_mode": "keep",
+}
 SKIP_EXACT = ("Optics.log",)
 
 EDGE_MARGIN = 20
@@ -103,23 +111,27 @@ def _boundary_detection_gray(
     image: np.ndarray,
     config: PreprocessConfig,
 ) -> np.ndarray:
-    """Boundary detection only needs the gray-band-shift step, if present."""
+    """Boundary detection uses a gray-band-shift contrast split only for edge finding."""
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     pipeline = getattr(config, "image_preprocess_pipeline", None) or []
-    if not pipeline:
-        return gray
+    params = BOUNDARY_GRAY_BAND_SHIFT_PARAMS
 
     try:
         normalized = normalize_preprocess_pipeline(pipeline)
     except Exception:
-        return gray
+        normalized = []
 
     for step in normalized:
         if step.get("method") != "gray_band_shift":
             continue
-        result = apply_preprocess_method(gray, "gray_band_shift", step.get("params") or {})
+        params = step.get("params") or params
+        break
+
+    try:
+        result = apply_preprocess_method(gray, "gray_band_shift", params)
         return result["image"]
-    return gray
+    except Exception:
+        return gray
 
 
 def _find_low_contrast_upper_boundary(
@@ -848,9 +860,9 @@ def preprocess_panel_folder(
     if not files:
         return {}
 
-    # 決定 reference image：STANDARD > G0F00000 > W0F00000 > R0F00000 > WGF50500
+    # 決定 reference image：W0F00000 對低對比前後景較穩，找邊優先用它。
     ref_lighting = None
-    for cand in ("STANDARD", "G0F00000", "W0F00000", "R0F00000", "WGF50500"):
+    for cand in BOUNDARY_REFERENCE_PRIORITY:
         if cand in files:
             ref_lighting = cand
             break
@@ -858,9 +870,15 @@ def preprocess_panel_folder(
         return {}
 
     ref_result = preprocess_panel_image(files[ref_lighting], ref_lighting, config)
-    if ref_result.polygon_detection_failed and ref_lighting != "G0F00000" and "G0F00000" in files:
-        ref_lighting = "G0F00000"
-        ref_result = preprocess_panel_image(files[ref_lighting], ref_lighting, config)
+    if ref_result.polygon_detection_failed:
+        for cand in BOUNDARY_REFERENCE_PRIORITY:
+            if cand == ref_lighting or cand not in files:
+                continue
+            fallback_result = preprocess_panel_image(files[cand], cand, config)
+            if not fallback_result.polygon_detection_failed:
+                ref_lighting = cand
+                ref_result = fallback_result
+                break
 
     results: Dict[str, PanelPreprocessResult] = {ref_lighting: ref_result}
     ref_poly = ref_result.panel_polygon

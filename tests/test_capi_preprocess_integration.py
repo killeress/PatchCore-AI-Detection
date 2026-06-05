@@ -6,7 +6,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import pytest
-from capi_preprocess import preprocess_panel_image, preprocess_panel_folder, PreprocessConfig
+import capi_preprocess
+from capi_preprocess import (
+    PanelPreprocessResult,
+    PreprocessConfig,
+    preprocess_panel_folder,
+    preprocess_panel_image,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "preprocess" / "synthetic_panel.png"
 
@@ -96,9 +102,42 @@ def test_preprocess_panel_folder_uses_reference_polygon(tmp_path):
     results = preprocess_panel_folder(tmp_path, cfg)
     assert set(results.keys()) == {"STANDARD", "G0F00000", "R0F00000", "W0F00000", "WGF50500"}
     # 所有 lighting 應共用同一 polygon
-    ref_poly = results["STANDARD"].panel_polygon
+    ref_poly = results["W0F00000"].panel_polygon
     for lighting, r in results.items():
         np.testing.assert_array_almost_equal(r.panel_polygon, ref_poly)
+
+
+def test_preprocess_panel_folder_prioritizes_w0f_reference(monkeypatch, tmp_path):
+    for lighting in ["STANDARD", "G0F00000", "R0F00000", "W0F00000", "WGF50500"]:
+        (tmp_path / f"{lighting}_x.png").write_bytes(b"stub")
+
+    calls = []
+    polygons = {
+        lighting: np.array([[idx, 0], [idx + 10, 0], [idx + 10, 10], [idx, 10]], np.float32)
+        for idx, lighting in enumerate(["STANDARD", "G0F00000", "R0F00000", "W0F00000", "WGF50500"], 1)
+    }
+
+    def fake_preprocess_panel_image(image_path, lighting, config, reference_polygon=None):
+        calls.append((lighting, reference_polygon is not None))
+        polygon = reference_polygon if reference_polygon is not None else polygons[lighting]
+        return PanelPreprocessResult(
+            image_path=Path(image_path),
+            lighting=lighting,
+            foreground_bbox=(0, 0, 10, 10),
+            panel_polygon=polygon,
+            tiles=[],
+            polygon_detection_failed=False,
+        )
+
+    monkeypatch.setattr(capi_preprocess, "preprocess_panel_image", fake_preprocess_panel_image)
+
+    results = preprocess_panel_folder(tmp_path, PreprocessConfig(tile_size=256))
+
+    assert calls[0] == ("W0F00000", False)
+    np.testing.assert_array_equal(results["W0F00000"].panel_polygon, polygons["W0F00000"])
+    for lighting, result in results.items():
+        if lighting != "W0F00000":
+            np.testing.assert_array_equal(result.panel_polygon, polygons["W0F00000"])
 
 
 def test_preprocess_panel_image_with_preprocess_after_tiling():
