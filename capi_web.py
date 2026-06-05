@@ -5536,14 +5536,31 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _product_resolution_for_machine(machine_id: str, server_inst=None) -> Tuple[int, int]:
-        from capi_inference import resolve_product_resolution
-
-        resolution_map = None
+        default_resolution = (1920, 1080)
+        resolution_map = {
+            "B": (1366, 768),
+            "H": (1920, 1080),
+            "J": (1920, 1200),
+            "K": (2560, 1440),
+            "G": (2560, 1600),
+        }
         if server_inst is not None:
-            inferencer = getattr(server_inst, "inferencers", {}).get(machine_id)
+            inferencers = getattr(server_inst, "inferencers", None)
+            inferencer = inferencers.get(machine_id) if hasattr(inferencers, "get") else None
             if inferencer is not None:
-                resolution_map = getattr(inferencer.config, "model_resolution_map", None)
-        return resolve_product_resolution(machine_id, resolution_map)
+                configured_map = getattr(inferencer.config, "model_resolution_map", None)
+                if configured_map:
+                    resolution_map = configured_map
+
+        if machine_id and len(machine_id) >= 6:
+            code = machine_id[5].upper()
+            try:
+                res = resolution_map.get(code)
+            except AttributeError:
+                res = None
+            if isinstance(res, (list, tuple)) and len(res) >= 2:
+                return int(res[0]), int(res[1])
+        return default_resolution
 
     @staticmethod
     def _sample_ng_tiles_compat(sample_ng_tiles_fn, preprocess_cfg=None, log=print, **kwargs):
@@ -6132,7 +6149,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         body: {
             "machine_id": "...",
-            "panel_paths": [...],   # 必須是 8 片：前 3 完整、後 5 僅 4 角
+            "panel_paths": [...],   # 至少 1 片；所有 panel 都完整切 tile
             "training_params": {  # optional
                 "batch_size": 8,
                 "coreset_ratio": 0.1,
@@ -6148,12 +6165,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             }
         }
 
-        panel_modes 由順位推導（前 WIZARD_FULL_PANEL_COUNT 片 full、其餘 corners_only），
-        使用者不需顯式傳入；前端只要保證選取順序與表單顯示一致即可。
+        panel_modes 由後端推導；目前所有選到的 panel 都是 full。
         """
         from capi_train_new import (
             generate_job_id, derive_panel_modes,
-            WIZARD_TOTAL_PANEL_COUNT,
         )
 
         try:
@@ -6178,12 +6193,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "panel_paths contains invalid path"}, status=400)
                 return
             clean_panel_paths.append(p.strip())
-        if len(clean_panel_paths) != WIZARD_TOTAL_PANEL_COUNT:
-            self._send_json({
-                "error": f"panel_paths must contain exactly {WIZARD_TOTAL_PANEL_COUNT} panels"
-            }, status=400)
-            return
-
         panel_modes = derive_panel_modes(len(clean_panel_paths))
 
         training_params, err = self._validate_training_params(params.get("training_params"))
@@ -6294,15 +6303,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """背景 thread：preprocess + 抽 NG → state=review。
 
         panel_modes 與 panel_paths 同長度；None 視同全 full（向下相容舊呼叫者）。
-        失敗條件 (A2)：成功的 full panel 少於 WIZARD_FULL_PANEL_COUNT 即整個 job 失敗，
-        corners_only panel 失敗不擋訓練（屬補強樣本）。
+        失敗條件：至少要有 1 片 full panel 成功前處理。
         """
         import traceback
         from pathlib import Path as _Path
         from capi_train_new import (
             TrainingConfig, apply_user_training_params,
             preprocess_panels_to_pool, sample_ng_tiles, NG_TILES_PER_LIGHTING,
-            WIZARD_FULL_PANEL_COUNT,
         )
         from capi_preprocess import PreprocessConfig
 
@@ -6353,11 +6360,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 target_lightings=target_lightings,
                 target_units=target_units,
             )
-            if stats["panel_success_full"] < WIZARD_FULL_PANEL_COUNT:
-                raise RuntimeError(
-                    f"成功 full panel {stats['panel_success_full']} < "
-                    f"{WIZARD_FULL_PANEL_COUNT}（corners_only 失敗不擋訓練）"
-                )
+            if stats["panel_success_full"] <= 0:
+                raise RuntimeError("沒有任何 full panel 前處理成功")
 
             log(f"抽 NG tile（每 lighting 上限 {NG_TILES_PER_LIGHTING} 個）")
             ng_stats = CAPIWebHandler._sample_ng_tiles_compat(
@@ -7705,7 +7709,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         body: {
             "lighting": str,
             "zone": "inner"|"edge",
-            "panel_paths": [str, ...]  # 3 到 8 片；前 3 full，其餘 corners_only
+            "panel_paths": [str, ...]  # 至少 1 片；所有 panel 都完整切 tile
             "training_params": {...}   # optional
         }
 
@@ -7713,7 +7717,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """
         from capi_train_new import (
             LIGHTINGS, ZONES,
-            WIZARD_FULL_PANEL_COUNT, WIZARD_TOTAL_PANEL_COUNT,
             derive_panel_modes, generate_job_id,
         )
 
@@ -7750,13 +7753,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "panel_paths contains invalid path"}, status=400)
                 return
             clean_panel_paths.append(p.strip())
-        if len(clean_panel_paths) < WIZARD_FULL_PANEL_COUNT or len(clean_panel_paths) > WIZARD_TOTAL_PANEL_COUNT:
-            self._send_json({
-                "error": (
-                    f"panel_paths must contain {WIZARD_FULL_PANEL_COUNT} to "
-                    f"{WIZARD_TOTAL_PANEL_COUNT} panels"
-                )
-            }, status=400)
+        if not clean_panel_paths:
+            self._send_json({"error": "panel_paths must contain at least 1 panel"}, status=400)
             return
 
         training_params, err = self._validate_training_params(body.get("training_params"))
@@ -7861,7 +7859,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         from capi_train_new import (
             TrainingConfig, apply_user_training_params,
             preprocess_panels_to_pool, sample_ng_tiles, train_single_submodel,
-            NG_TILES_PER_LIGHTING, WIZARD_FULL_PANEL_COUNT,
+            NG_TILES_PER_LIGHTING,
         )
         from capi_model_registry import append_submodel_history, _read_manifest
 
@@ -7947,10 +7945,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 panel_modes=panel_modes,
                 target_lightings=(lighting,),
             )
-            if stats["panel_success_full"] < WIZARD_FULL_PANEL_COUNT:
-                raise RuntimeError(
-                    f"成功 full panel {stats['panel_success_full']} < {WIZARD_FULL_PANEL_COUNT}"
-                )
+            if stats["panel_success_full"] <= 0:
+                raise RuntimeError("沒有任何 full panel 前處理成功")
             _log(f"OK tile 寫入完成：{stats['total_tiles']} tiles")
 
             _set_step("ng")

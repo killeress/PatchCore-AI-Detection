@@ -1302,7 +1302,7 @@ def test_handle_models_retrain_submodel_with_panels_creates_job():
     assert kwargs["job_id"] == "subtrain_M1_20260518_abcd"
     assert kwargs["machine_id"] == "M1"
     assert kwargs["panel_paths"] == payload["panel_paths"]
-    assert kwargs["panel_modes"] == ["full", "full", "full", "corners_only"]
+    assert kwargs["panel_modes"] == ["full", "full", "full", "full"]
     assert kwargs["training_params"] == {"batch_size": 8}
     assert CAPIWebHandler._submodel_retrain_state["job"]["step"] == "preprocess"
     MockThread.return_value.start.assert_called_once()
@@ -1348,25 +1348,57 @@ def test_handle_train_new_start_persists_partial_training_scope():
         "selected_units": ["G0F00000-inner", "R0F00000-edge"],
         "target_bundle_id": 7,
     }
-    assert kwargs["panel_modes"] == ["full", "full", "full", "corners_only", "corners_only", "corners_only", "corners_only", "corners_only"]
+    assert kwargs["panel_modes"] == ["full"] * 8
 
 
-def test_handle_train_new_start_rejects_wrong_panel_count():
-    """非 8 片 panel 一律拒絕。"""
+def test_handle_train_new_start_accepts_variable_panel_count_as_full():
+    from capi_web import CAPIWebHandler
+
     server = MagicMock()
-    server.database.get_active_training_job.return_value = None
+    server.database.create_training_job = MagicMock()
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
 
-    for n in (0, 1, 2, 3, 4, 5, 6, 7, 9):
-        h = _make_handler_with_server(server, "/api/train/new/start")
-        body = json.dumps({"machine_id": "M", "panel_paths": [f"/p{i}" for i in range(n)]}).encode()
-        h.headers.get = MagicMock(return_value=str(len(body)))
-        h.rfile = io.BytesIO(body)
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    body = json.dumps({"machine_id": "M", "panel_paths": ["/p0", "/p1"]}).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
 
-        h._handle_train_new_start()
-        assert h._sent_response[0]["status"] == 400, f"n={n} 應該被拒"
-        if n > 0:
-            err_body = json.loads(h._sent_response[0]["body"])
-            assert "exactly 8" in err_body.get("error", ""), f"n={n} error: {err_body}"
+    with patch("capi_train_new.generate_job_id", return_value="train_M_20260518_abcd"):
+        with patch("capi_web.threading.Thread") as MockThread:
+            MockThread.return_value.start = MagicMock()
+            h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 200
+    kwargs = server.database.create_training_job.call_args.kwargs
+    assert kwargs["panel_paths"] == ["/p0", "/p1"]
+    assert kwargs["panel_modes"] == ["full", "full"]
+    MockThread.return_value.start.assert_called_once()
+
+
+def test_handle_train_new_start_rejects_empty_panel_paths():
+    server = MagicMock()
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    body = json.dumps({"machine_id": "M", "panel_paths": []}).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 400
+    err_body = json.loads(h._sent_response[0]["body"])
+    assert "required" in err_body.get("error", "")
+
+
+def test_train_new_select_page_no_fixed_panel_limit_text():
+    template_path = Path(__file__).resolve().parent.parent / "templates" / "train_new" / "step1_select.html"
+    text = template_path.read_text(encoding="utf-8")
+
+    assert "已選 0 片" in text
+    assert "全部完整切 tile" in text
+    assert "PANEL_LIMIT" not in text
+    assert "已選 0/8" not in text
+    assert "僅 4 角" not in text
 
 
 def test_sample_ng_tiles_compat_supports_legacy_signature():

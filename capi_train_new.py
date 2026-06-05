@@ -48,19 +48,16 @@ NG_TILES_PER_LIGHTING = 100
 PANEL_MODE_FULL = "full"
 PANEL_MODE_CORNERS_ONLY = "corners_only"
 
-# 訓練 wizard step1 的 panel 選擇：前 3 片完整切 tile（inner+edge），
-# 後 5 片只保留 4 個尖角（補強 edge 模型）。前後端共用同一組常數。
+# 舊版訓練 wizard 曾使用固定 3 full + 5 corners-only 的選片策略。
+# 目前改為使用者自行選片，所有選到的 panel 都完整切 tile。
 WIZARD_FULL_PANEL_COUNT = 3
 WIZARD_CORNERS_ONLY_PANEL_COUNT = 5
 WIZARD_TOTAL_PANEL_COUNT = WIZARD_FULL_PANEL_COUNT + WIZARD_CORNERS_ONLY_PANEL_COUNT  # 8
 
 
 def derive_panel_modes(panel_count: int) -> List[str]:
-    """依順位推 panel_modes：前 WIZARD_FULL_PANEL_COUNT 片 full、其餘 corners_only。"""
-    return (
-        [PANEL_MODE_FULL] * min(panel_count, WIZARD_FULL_PANEL_COUNT)
-        + [PANEL_MODE_CORNERS_ONLY] * max(0, panel_count - WIZARD_FULL_PANEL_COUNT)
-    )
+    """依目前 wizard 行為推 panel_modes：所有使用者選到的 panel 都完整切 tile。"""
+    return [PANEL_MODE_FULL] * max(0, panel_count)
 
 # 與 PreprocessConfig.edge_threshold_px 同一單一來源（避免兩處飄移）。
 # NG zone heuristic：讀 over_review snapshot 的 manifest.csv；若有影像高度，
