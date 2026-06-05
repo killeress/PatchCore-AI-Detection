@@ -49,7 +49,12 @@ def test_config_yaml_loads_enable_panel_polygon():
 
 import cv2
 from capi_inference import CAPIInferencer
-from capi_preprocess import PreprocessConfig, detect_panel_polygon, _polyfit_polygon  # 直接測試 polygon 數學邏輯
+from capi_preprocess import (
+    BOUNDARY_GRAY_BAND_SHIFT_PARAMS,
+    PreprocessConfig,
+    detect_panel_polygon,
+    _polyfit_polygon,
+)  # 直接測試 polygon 數學邏輯
 
 
 def _make_inferencer():
@@ -302,6 +307,43 @@ def test_detect_panel_polygon_uses_gray_band_shift_for_boundary_preprocess(monke
     assert polygon is not None
     assert bbox[1] <= 80, f"邊界前處理未被套用: bbox={bbox}"
     assert polygon[:, 1].min() <= 80, f"polygon top edge 太低: {polygon.round(1).tolist()}"
+
+
+def test_detect_panel_polygon_uses_default_boundary_gray_band_shift(monkeypatch):
+    """未設定使用者前處理時，找邊仍應套 boundary-only 分段灰階映射。"""
+    img = np.full((768, 1366), 18, dtype=np.uint8)
+    cfg = PreprocessConfig(
+        tile_size=512,
+        product_resolution=(1366, 768),
+        preprocess_after_tiling=True,
+        image_preprocess_pipeline=[],
+    )
+
+    calls = []
+
+    def fake_apply_preprocess_method(image, method, params=None):
+        calls.append((method, params))
+        processed = np.full_like(image, 18)
+        processed[72:120, 100:1266] = 28
+        processed[120:720, 100:1266] = 210
+        return {
+            "image": processed,
+            "method": method,
+            "method_label": "分段灰階映射",
+            "applied_params": params or {},
+            "notes": [],
+            "conversion": {},
+            "stats": {},
+        }
+
+    monkeypatch.setattr("capi_preprocess.apply_preprocess_method", fake_apply_preprocess_method)
+
+    bbox, polygon = detect_panel_polygon(img, cfg)
+
+    assert calls == [("gray_band_shift", BOUNDARY_GRAY_BAND_SHIFT_PARAMS)]
+    assert bbox is not None
+    assert polygon is not None
+    assert bbox[1] <= 80, f"預設邊界前處理未被套用: bbox={bbox}"
 
 
 def test_polygon_corner_ordering():
