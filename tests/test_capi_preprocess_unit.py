@@ -1,4 +1,5 @@
 """capi_preprocess 模組的單元測試"""
+import os
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -57,6 +58,22 @@ def test_filter_panel_lighting_files_partial_panel():
         (base / "STANDARD_x.tif").write_bytes(b"x")
         result = filter_panel_lighting_files(base)
         assert set(result.keys()) == {"G0F00000", "STANDARD"}
+
+
+def test_filter_panel_lighting_files_uses_latest_duplicate_lighting():
+    from capi_preprocess import filter_panel_lighting_files
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        old_path = base / "G0F00000_010000.tif"
+        latest_path = base / "G0F00000_020000.tif"
+        old_path.write_bytes(b"old")
+        latest_path.write_bytes(b"latest")
+        os.utime(old_path, (1000, 1000))
+        os.utime(latest_path, (2000, 2000))
+
+        result = filter_panel_lighting_files(base)
+
+        assert result["G0F00000"] == latest_path
 
 
 def test_detect_panel_polygon_simple_rect():

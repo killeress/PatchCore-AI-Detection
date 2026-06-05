@@ -14,6 +14,7 @@ CAPI AI Web 查閱介面
 import os
 import tempfile
 import json
+import hashlib
 import urllib.parse
 import mimetypes
 from contextlib import contextmanager
@@ -6637,13 +6638,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_response(404, "")
             return
 
-        preview_dir = Path(".tmp/train_new_thumbs") / job_id / "preview"
-        preview_dir.mkdir(parents=True, exist_ok=True)
-        preview_path = preview_dir / f"{lighting}_v11.jpg"
-        if preview_path.exists():
-            self._send_binary(str(preview_path))
-            return
-
         preprocess_cfg = PreprocessConfig(
             image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
             preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
@@ -6660,18 +6654,64 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             p for p, m in zip(panel_paths, panel_modes) if m == "full"
         ] or panel_paths
 
-        result = None
-        panel_name = ""
+        preview_panel_dir = None
+        preview_files = None
         for panel_dir in full_panel_paths:
             if not panel_dir.exists():
                 continue
             files = filter_panel_lighting_files(panel_dir)
             if lighting not in files:
                 continue
-            results = preprocess_panel_folder(panel_dir, preprocess_cfg)
-            result = results.get(lighting)
-            panel_name = panel_dir.name
+            preview_panel_dir = panel_dir
+            preview_files = files
             break
+
+        if preview_panel_dir is None or preview_files is None:
+            self._send_response(404, "")
+            return
+
+        def _file_fingerprint(path: Path) -> dict:
+            try:
+                st = path.stat()
+                return {
+                    "name": path.name,
+                    "mtime_ns": int(st.st_mtime_ns),
+                    "size": int(st.st_size),
+                }
+            except OSError:
+                return {"name": path.name, "mtime_ns": 0, "size": 0}
+
+        cache_payload = {
+            "version": 12,
+            "lighting": lighting,
+            "panel_dir": str(preview_panel_dir.resolve()),
+            "files": {
+                key: _file_fingerprint(path)
+                for key, path in sorted(preview_files.items())
+            },
+            "image_preprocess_pipeline": job.get("image_preprocess_pipeline") or [],
+            "preprocess_after_tiling": bool(job.get("preprocess_after_tiling", False)),
+            "product_resolution": preprocess_cfg.product_resolution,
+        }
+        cache_key = hashlib.sha1(
+            json.dumps(cache_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()[:12]
+
+        preview_dir = Path(".tmp/train_new_thumbs") / job_id / "preview"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        preview_path = preview_dir / f"{lighting}_v12_{cache_key}.jpg"
+        if preview_path.exists():
+            self._send_binary(str(preview_path))
+            return
+
+        result = None
+        panel_name = preview_panel_dir.name
+        results = preprocess_panel_folder(
+            preview_panel_dir,
+            preprocess_cfg,
+            image_files=preview_files.values(),
+        )
+        result = results.get(lighting)
 
         if result is None:
             self._send_response(404, "")
