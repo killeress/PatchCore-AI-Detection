@@ -201,17 +201,19 @@ def test_client_summary_counts_only_selected_review_categories_as_ai_miss():
     records = [
         _client_record(1, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="threshold_high"),
         _client_record(2, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="dust_misfilter"),
-        _client_record(3, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="outside_aoi_area"),
-        _client_record(4, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="other"),
-        _client_record(5, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="ric_misjudge"),
-        _client_record(6, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="data_error_actually_ok"),
-        _client_record(7, eqp="OK", ai="OK", datastr="DEFECT,NG;1;"),
+        _client_record(3, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="ai_miss_within_spec"),
+        _client_record(4, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="outside_aoi_area"),
+        _client_record(5, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="other"),
+        _client_record(6, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="ric_misjudge"),
+        _client_record(7, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="data_error_actually_ok"),
+        _client_record(8, eqp="OK", ai="OK", datastr="DEFECT,NG;1;"),
     ]
 
     summary, _ = CAPIWebHandler._compute_client_summary(None, records)
 
     assert summary["aiMiss"] == 2
-    assert summary["aiMissRate"] == 28.6
+    assert summary["aiMissRate"] == 25.0
     assert summary["daily"]["2026-05-26"]["aiMiss"] == 2
-    assert summary["missReviewStats"]["total"] == 7
-    assert summary["missReviewStats"]["reviewed"] == 6
+    assert summary["missReviewStats"]["total"] == 8
+    assert summary["missReviewStats"]["reviewed"] == 7
+    assert summary["missReviewStats"]["byCategory"]["ai_miss_within_spec"] == 1
