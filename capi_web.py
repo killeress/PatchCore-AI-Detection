@@ -4320,7 +4320,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "unit_per_px": unit_per_px,
                     "defect_threshold": defect_threshold,
                 },
-                "candidates": candidates[:100],
+                "candidates": candidates[:300],
                 "source_url": "/api/debug/serve-image?path=" + urllib.parse.quote(str(image_path)),
                 "overlay_url": f"/debug/heatmaps/{overlay_filename}",
                 "mask_url": f"/debug/heatmaps/{mask_filename}",
