@@ -122,6 +122,8 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
         margin-bottom: 16px;
     }
 
@@ -647,6 +649,46 @@
         width: 100%;
     }
 
+    .review-filter-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-left: auto;
+        color: var(--text-muted);
+        font-size: 0.82rem;
+    }
+
+    .review-filter-select {
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 5px 8px;
+        font-size: 0.82rem;
+        min-width: 150px;
+    }
+
+    .review-filter-chip {
+        background: rgba(59, 130, 246, 0.14);
+        color: #93c5fd;
+        border: 1px solid rgba(59, 130, 246, 0.35);
+        border-radius: 999px;
+        padding: 5px 10px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        cursor: pointer;
+    }
+
+    .review-filter-chip:hover {
+        background: rgba(59, 130, 246, 0.22);
+    }
+
+    .review-filter-count {
+        color: var(--accent);
+        font-size: 0.78rem;
+    }
+
     .review-btn-save {
         background: linear-gradient(135deg, var(--accent), #6366f1);
         border: none;
@@ -945,6 +987,20 @@
         <div class="card" id="review_panel_done" style="display:none;">
             <div class="detail-header">
                 <h3>✅ 已處理</h3>
+                <div class="review-filter-bar">
+                    <label for="review_doneCategoryFilter">分類：</label>
+                    <select id="review_doneCategoryFilter" class="review-filter-select" onchange="clientComp.filterReviewDoneCategory(this.value)">
+                        <option value="">全部分類</option>
+                        <option value="threshold_high">AI漏放</option>
+                        <option value="dust_misfilter">Dust 誤濾</option>
+                        <option value="data_error_actually_ok">資料有誤、實際OK</option>
+                        <option value="ric_misjudge">RIC 誤判</option>
+                        <option value="outside_aoi_area">漏檢區域不在 AOI 提供區域</option>
+                        <option value="other">其他</option>
+                    </select>
+                    <button type="button" class="review-filter-chip" onclick="clientComp.filterReviewDoneCategory('threshold_high')">只看 AI漏放</button>
+                    <span id="review_doneFilterCount" class="review-filter-count"></span>
+                </div>
             </div>
             <div class="table-wrap" id="review_tableWrap_done">
                 <table>
@@ -1027,6 +1083,22 @@
         <div class="card" id="over_review_panel_done" style="display:none;">
             <div class="detail-header">
                 <h3>✅ 已處理</h3>
+                <div class="review-filter-bar">
+                    <label for="over_review_doneCategoryFilter">分類：</label>
+                    <select id="over_review_doneCategoryFilter" class="review-filter-select" onchange="clientComp.filterOverReviewDoneCategory(this.value)">
+                        <option value="">全部分類</option>
+                        <option value="edge_false_positive">邊緣過檢</option>
+                        <option value="within_spec">規格內</option>
+                        <option value="overexposure">過曝</option>
+                        <option value="surface_scratch">表面划痕</option>
+                        <option value="surface_dirt">表面汙</option>
+                        <option value="bubble">氣泡</option>
+                        <option value="aoi_ai_false_positive">AOI & AI 過檢</option>
+                        <option value="dust_mask_incomplete">灰塵屏蔽需完善</option>
+                        <option value="other">其他</option>
+                    </select>
+                    <span id="over_review_doneFilterCount" class="review-filter-count"></span>
+                </div>
             </div>
             <div class="table-wrap" id="over_review_tableWrap_done">
                 <table>
@@ -1129,6 +1201,8 @@
         let rawRecords = [];     // API 回傳的 records
         let currentSummary = {}; // API 回傳的 summary
         let currentFilter = null;
+        let reviewDoneCategoryFilter = '';
+        let overReviewDoneCategoryFilter = '';
         let ignoreOmit = false;  // 忽略 OMIT 灰塵過濾模式
         let resultChart = null, comboChart = null, trendChart = null, confusionChart = null, dailyMetricsChart = null;
         let reviewPieChart = null;
@@ -2062,6 +2136,7 @@
             'data_error_actually_ok': '#ec4899',
             'other': '#64748b',
         };
+        const PENDING_REVIEW_SLICE = '__pending__';
 
         function renderReviewTab(summary, records) {
             const mrs = summary.missReviewStats || { total: 0, reviewed: 0, unreviewed: 0, byCategory: {} };
@@ -2104,12 +2179,14 @@
             const labels = [];
             const data = [];
             const colors = [];
+            const categoryKeys = [];
 
             Object.entries(mrs.byCategory).forEach(([key, count]) => {
                 if (count > 0) {
                     labels.push(CATEGORY_LABELS[key] || key);
                     data.push(count);
                     colors.push(CATEGORY_COLORS[key] || '#64748b');
+                    categoryKeys.push(key);
                 }
             });
 
@@ -2117,6 +2194,7 @@
                 labels.push('未 Review');
                 data.push(mrs.unreviewed);
                 colors.push('rgba(148,163,184,0.4)');
+                categoryKeys.push(PENDING_REVIEW_SLICE);
             }
 
             if (data.length === 0) {
@@ -2124,6 +2202,7 @@
                 labels.push('無漏檢');
                 data.push(1);
                 colors.push('rgba(148,163,184,0.2)');
+                categoryKeys.push('');
             }
 
             reviewPieChart = new Chart(ctx, {
@@ -2135,8 +2214,16 @@
                 },
                 options: {
                     responsive: true, maintainAspectRatio: false,
+                    onClick: (event, elements) => {
+                        if (!elements.length) return;
+                        handleReviewPieCategory(categoryKeys[elements[0].index]);
+                    },
                     plugins: {
-                        legend: { position: 'bottom', labels: { color: '#94a3b8', padding: 16 } },
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: '#94a3b8', padding: 16 },
+                            onClick: (event, legendItem) => handleReviewPieCategory(categoryKeys[legendItem.index]),
+                        },
                         datalabels: {
                             color: '#e2e8f0', font: { size: 12, weight: 600 },
                             formatter: (v, ctx) => {
@@ -2149,16 +2236,56 @@
             });
         }
 
+        function filterReviewDoneCategory(category) {
+            reviewDoneCategoryFilter = category || '';
+            const select = document.getElementById('review_doneCategoryFilter');
+            if (select) select.value = reviewDoneCategoryFilter;
+            renderReviewTable(rawRecords);
+            switchReviewTab('done');
+            const wrap = document.getElementById('review_tableWrap_done');
+            if (wrap) wrap.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        function handleReviewPieCategory(category) {
+            if (!category) return;
+            if (category === PENDING_REVIEW_SLICE) {
+                reviewDoneCategoryFilter = '';
+                renderReviewTable(rawRecords);
+                switchReviewTab('pending');
+                return;
+            }
+            filterReviewDoneCategory(category);
+        }
+
+        function updateReviewDoneFilterUI(totalDone, shownDone) {
+            const select = document.getElementById('review_doneCategoryFilter');
+            if (select) select.value = reviewDoneCategoryFilter;
+            const countEl = document.getElementById('review_doneFilterCount');
+            if (!countEl) return;
+            if (!reviewDoneCategoryFilter) {
+                countEl.textContent = `全部 ${totalDone} 筆`;
+                return;
+            }
+            const label = CATEGORY_LABELS[reviewDoneCategoryFilter] || reviewDoneCategoryFilter;
+            countEl.textContent = `篩選：${label} ${shownDone} / ${totalDone} 筆`;
+        }
+
         function renderReviewTable(records) {
             const missRecords = records.filter(r => getEffectiveAI(r) === 'OK' && deriveJudgment(r.datastr) === 'NG');
             const pending = missRecords.filter(r => !r.miss_review || !r.miss_review.category);
             const done = missRecords.filter(r => r.miss_review && r.miss_review.category);
+            const filteredDone = reviewDoneCategoryFilter
+                ? done.filter(r => r.miss_review.category === reviewDoneCategoryFilter)
+                : done;
 
             document.getElementById('review_pendingCount').textContent = `(${pending.length})`;
-            document.getElementById('review_doneCount').textContent = `(${done.length})`;
+            document.getElementById('review_doneCount').textContent = reviewDoneCategoryFilter
+                ? `(${filteredDone.length}/${done.length})`
+                : `(${done.length})`;
+            updateReviewDoneFilterUI(done.length, filteredDone.length);
 
             _fillReviewRows(document.getElementById('review_detailBody_pending'), pending, true);
-            _fillReviewRows(document.getElementById('review_detailBody_done'), done, false);
+            _fillReviewRows(document.getElementById('review_detailBody_done'), filteredDone, false);
         }
 
         function _fillReviewRows(tbody, rows, editable) {
@@ -2367,12 +2494,14 @@
             const labels = [];
             const data = [];
             const colors = [];
+            const categoryKeys = [];
 
             Object.entries(ors.byCategory).forEach(([key, count]) => {
                 if (count > 0) {
                     labels.push(OVER_CATEGORY_LABELS[key] || key);
                     data.push(count);
                     colors.push(OVER_CATEGORY_COLORS[key] || '#64748b');
+                    categoryKeys.push(key);
                 }
             });
 
@@ -2380,12 +2509,14 @@
                 labels.push('未 Review');
                 data.push(ors.unreviewed);
                 colors.push('rgba(148,163,184,0.4)');
+                categoryKeys.push(PENDING_REVIEW_SLICE);
             }
 
             if (data.length === 0) {
                 labels.push('無過檢');
                 data.push(1);
                 colors.push('rgba(148,163,184,0.2)');
+                categoryKeys.push('');
             }
 
             overReviewPieChart = new Chart(ctx, {
@@ -2397,8 +2528,16 @@
                 },
                 options: {
                     responsive: true, maintainAspectRatio: false,
+                    onClick: (event, elements) => {
+                        if (!elements.length) return;
+                        handleOverReviewPieCategory(categoryKeys[elements[0].index]);
+                    },
                     plugins: {
-                        legend: { position: 'bottom', labels: { color: '#94a3b8', padding: 16 } },
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: '#94a3b8', padding: 16 },
+                            onClick: (event, legendItem) => handleOverReviewPieCategory(categoryKeys[legendItem.index]),
+                        },
                         datalabels: {
                             color: '#e2e8f0', font: { size: 12, weight: 600 },
                             formatter: (v, ctx) => {
@@ -2418,12 +2557,14 @@
             const labels = [];
             const data = [];
             const colors = [];
+            const categoryKeys = [];
 
             Object.entries(ors.byCategory || {}).forEach(([key, count]) => {
                 if (count > 0) {
                     labels.push(OVER_CATEGORY_LABELS[key] || key);
                     data.push(count);
                     colors.push(OVER_CATEGORY_COLORS[key] || '#64748b');
+                    categoryKeys.push(key);
                 }
             });
 
@@ -2431,6 +2572,7 @@
                 labels.push('尚無回填');
                 data.push(1);
                 colors.push('rgba(148,163,184,0.2)');
+                categoryKeys.push('');
             }
 
             overReviewReviewedPieChart = new Chart(ctx, {
@@ -2442,8 +2584,16 @@
                 },
                 options: {
                     responsive: true, maintainAspectRatio: false,
+                    onClick: (event, elements) => {
+                        if (!elements.length) return;
+                        handleOverReviewPieCategory(categoryKeys[elements[0].index]);
+                    },
                     plugins: {
-                        legend: { position: 'bottom', labels: { color: '#94a3b8', padding: 16 } },
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: '#94a3b8', padding: 16 },
+                            onClick: (event, legendItem) => handleOverReviewPieCategory(categoryKeys[legendItem.index]),
+                        },
                         datalabels: {
                             color: '#e2e8f0', font: { size: 12, weight: 600 },
                             formatter: (v, ctx) => {
@@ -2456,16 +2606,56 @@
             });
         }
 
+        function filterOverReviewDoneCategory(category) {
+            overReviewDoneCategoryFilter = category || '';
+            const select = document.getElementById('over_review_doneCategoryFilter');
+            if (select) select.value = overReviewDoneCategoryFilter;
+            renderOverReviewTable(rawRecords);
+            switchOverReviewTab('done');
+            const wrap = document.getElementById('over_review_tableWrap_done');
+            if (wrap) wrap.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        function handleOverReviewPieCategory(category) {
+            if (!category) return;
+            if (category === PENDING_REVIEW_SLICE) {
+                overReviewDoneCategoryFilter = '';
+                renderOverReviewTable(rawRecords);
+                switchOverReviewTab('pending');
+                return;
+            }
+            filterOverReviewDoneCategory(category);
+        }
+
+        function updateOverReviewDoneFilterUI(totalDone, shownDone) {
+            const select = document.getElementById('over_review_doneCategoryFilter');
+            if (select) select.value = overReviewDoneCategoryFilter;
+            const countEl = document.getElementById('over_review_doneFilterCount');
+            if (!countEl) return;
+            if (!overReviewDoneCategoryFilter) {
+                countEl.textContent = `全部 ${totalDone} 筆`;
+                return;
+            }
+            const label = OVER_CATEGORY_LABELS[overReviewDoneCategoryFilter] || overReviewDoneCategoryFilter;
+            countEl.textContent = `篩選：${label} ${shownDone} / ${totalDone} 筆`;
+        }
+
         function renderOverReviewTable(records) {
             const overRecords = records.filter(r => getEffectiveAI(r) === 'NG' && getEffectiveRIC(r) === 'OK');
             const pending = overRecords.filter(r => !r.over_review || !r.over_review.category);
             const done = overRecords.filter(r => r.over_review && r.over_review.category);
+            const filteredDone = overReviewDoneCategoryFilter
+                ? done.filter(r => r.over_review.category === overReviewDoneCategoryFilter)
+                : done;
 
             document.getElementById('over_review_pendingCount').textContent = `(${pending.length})`;
-            document.getElementById('over_review_doneCount').textContent = `(${done.length})`;
+            document.getElementById('over_review_doneCount').textContent = overReviewDoneCategoryFilter
+                ? `(${filteredDone.length}/${done.length})`
+                : `(${done.length})`;
+            updateOverReviewDoneFilterUI(done.length, filteredDone.length);
 
             _fillOverReviewRows(document.getElementById('over_review_detailBody_pending'), pending, true);
-            _fillOverReviewRows(document.getElementById('over_review_detailBody_done'), done, false);
+            _fillOverReviewRows(document.getElementById('over_review_detailBody_done'), filteredDone, false);
         }
 
         function _fillOverReviewRows(tbody, rows, editable) {
@@ -2595,6 +2785,7 @@
 
         return {
             switchTab, switchReviewTab, switchOverReviewTab, filterByCard, exportCSV, clearDB,
+            filterReviewDoneCategory, filterOverReviewDoneCategory,
             quickFilter, customFilter, loadData, toggleUpload, toggleIgnoreOmit,
             _saveReview, _deleteReview, _markDirty,
             _saveOverReview, _deleteOverReview, _markOverDirty,

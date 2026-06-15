@@ -1757,14 +1757,37 @@
             <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
                 <div class="coord-input-row">
                     <div class="coord-group">
-                        <label for="dot-calibration-value">點線規值</label>
-                        <input type="number" id="dot-calibration-value" value="0.3" min="0" step="0.01"
-                            onchange="computeDotCalibration();">
+                        <label for="dot-calibration-value">點線規值 (mm)</label>
+                        <div style="display:flex; gap:6px; align-items:center;">
+                            <input type="number" id="dot-calibration-value" value="0.3" min="0" step="0.01"
+                                onchange="computeDotCalibration();" style="width:75px; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); outline:none;">
+                            <select id="dot-calibration-quick" onchange="document.getElementById('dot-calibration-value').value = this.value; computeDotCalibration();" style="height:42px; background:var(--surface); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:0 10px; font-size:0.9rem; outline:none; cursor:pointer;">
+                                <option value="0.3" selected>0.3</option>
+                                <option value="0.05">0.05</option>
+                                <option value="0.10">0.10</option>
+                                <option value="0.15">0.15</option>
+                                <option value="0.20">0.20</option>
+                                <option value="0.25">0.25</option>
+                                <option value="0.30">0.30</option>
+                                <option value="0.35">0.35</option>
+                                <option value="0.40">0.40</option>
+                                <option value="0.45">0.45</option>
+                                <option value="0.50">0.50</option>
+                                <option value="0.60">0.60</option>
+                                <option value="0.70">0.70</option>
+                                <option value="0.80">0.80</option>
+                                <option value="0.90">0.90</option>
+                                <option value="1.00">1.00</option>
+                                <option value="1.50">1.50</option>
+                                <option value="2.00">2.00</option>
+                                <option value="3.00">3.00</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="coord-group">
                         <label for="dot-calibration-px">對應影像 px</label>
                         <input type="number" id="dot-calibration-px" value="" min="0" step="0.01"
-                            onchange="computeDotCalibration();" placeholder="從候選點套用">
+                            onchange="computeDotCalibration();" placeholder="從候選點或點擊影像套用">
                     </div>
                     <div class="coord-group">
                         <label for="dot-calibration-unit">校正單位 / px</label>
@@ -1804,6 +1827,7 @@
 {% block extra_js %}
 <script>
     const dotSamples = {{ dot_samples|tojson }};
+    let lastDotResponseData = null;
 
     // Tab switching logic
     function switchTab(tabId, btn) {
@@ -2208,6 +2232,7 @@
                 showDotError(data.error);
                 return;
             }
+            lastDotResponseData = data;
             renderDotResults(data);
         } catch (err) {
             showDotError('請求失敗: ' + err.message);
@@ -2287,8 +2312,13 @@
                 <img src="${data.source_url}&t=${t}" alt="Dot source" onclick="openLightbox(this.src)">
             </div>
             <div class="img-card">
-                <h4>偵測 Overlay</h4>
-                <img src="${data.overlay_url}?t=${t}" alt="Dot overlay" onclick="openLightbox(this.src)">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                    <h4 style="margin:0;">偵測 Overlay</h4>
+                    <label style="font-size:0.75rem; color:var(--text-muted); display:flex; align-items:center; gap:4px; cursor:pointer;">
+                        <input type="checkbox" id="dot-click-calibrate-enable" checked style="cursor:pointer;"> 點擊影像校正
+                    </label>
+                </div>
+                <img src="${data.overlay_url}?t=${t}" alt="Dot overlay" style="cursor:crosshair;" onclick="handleOverlayImageClick(event, this)">
             </div>
             <div class="img-card">
                 <h4>二值 Mask</h4>
@@ -2348,6 +2378,91 @@
             </thead>
             <tbody>${rows}</tbody>
         `;
+    }
+
+    function handleOverlayImageClick(event, imgEl) {
+        const enableCheck = document.getElementById('dot-click-calibrate-enable');
+        if (!enableCheck || !enableCheck.checked) {
+            openLightbox(imgEl.src);
+            return;
+        }
+
+        const rect = imgEl.getBoundingClientRect();
+        const clickX = event.clientX - rect.left;
+        const clickY = event.clientY - rect.top;
+
+        if (!lastDotResponseData || !lastDotResponseData.image_shape) return;
+        const origW = lastDotResponseData.image_shape[0];
+        const origH = lastDotResponseData.image_shape[1];
+
+        const x = clickX * (origW / rect.width);
+        const y = clickY * (origH / rect.height);
+
+        const candidates = lastDotResponseData.candidates || [];
+        if (candidates.length === 0) return;
+
+        let closest = null;
+        let minDist = Infinity;
+        for (const c of candidates) {
+            const dist = Math.hypot(c.center_x - x, c.center_y - y);
+            if (dist < minDist) {
+                minDist = dist;
+                closest = c;
+            }
+        }
+
+        if (closest && minDist < 200) {
+            highlightDotCandidateRow(closest.id);
+            document.getElementById('dot-calibration-px').value = closest.size_px.toFixed(2);
+            showDotToast(`已選中點 #${closest.id} (尺寸: ${closest.size_px} px)`);
+            computeDotCalibration();
+        }
+    }
+
+    function highlightDotCandidateRow(id) {
+        const table = document.getElementById('dot-candidates-table');
+        if (!table) return;
+
+        const rows = table.querySelectorAll('tbody tr');
+        rows.forEach(r => r.style.backgroundColor = '');
+
+        for (const row of rows) {
+            const firstCell = row.cells[0];
+            if (firstCell && firstCell.textContent.trim() === `#${id}`) {
+                row.style.backgroundColor = 'rgba(234, 179, 8, 0.25)';
+                row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                break;
+            }
+        }
+    }
+
+    function showDotToast(msg) {
+        let toast = document.getElementById('dot-toast-notification');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'dot-toast-notification';
+            toast.style.position = 'fixed';
+            toast.style.bottom = '20px';
+            toast.style.right = '20px';
+            toast.style.backgroundColor = 'var(--surface)';
+            toast.style.border = '1px solid var(--accent)';
+            toast.style.color = 'var(--text)';
+            toast.style.padding = '10px 16px';
+            toast.style.borderRadius = '8px';
+            toast.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
+            toast.style.zIndex = '9999';
+            toast.style.fontFamily = 'sans-serif';
+            toast.style.fontSize = '0.9rem';
+            toast.style.transition = 'opacity 0.3s ease';
+            document.body.appendChild(toast);
+        }
+        toast.textContent = msg;
+        toast.style.opacity = '1';
+
+        clearTimeout(toast._timeout);
+        toast._timeout = setTimeout(() => {
+            toast.style.opacity = '0';
+        }, 2500);
     }
 
     async function runInference() {
