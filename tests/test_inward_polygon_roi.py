@@ -157,6 +157,55 @@ def test_v2_aoi_top_edge_locks_inward_shift_to_y_axis():
     assert tile.y <= tile.aoi_image_y <= tile.y + tile.height - 1
 
 
+def test_v2_aoi_outer_ring_tile_routes_to_edge_even_when_anchor_just_outside_half_tile():
+    cfg = CAPIConfig()
+    cfg.is_new_architecture = True
+    cfg.tile_size = 512
+    cfg.otsu_offset = 5
+    cfg.enable_panel_polygon = True
+
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+
+    image = np.full((4384, 6576), 180, dtype=np.uint8)
+    raw_bounds = (344, 631, 5837, 3706)
+    result = ImageResult(
+        image_path=Path("R0F00000_test.png"),
+        image_size=(6576, 4384),
+        otsu_bounds=raw_bounds,
+        exclusion_regions=[],
+        tiles=[],
+        excluded_tile_count=0,
+        processed_tile_count=0,
+        processing_time=0.0,
+        raw_bounds=raw_bounds,
+        panel_polygon=None,
+    )
+
+    created = inferencer._create_aoi_centered_tiles_v2(
+        image=image,
+        result=result,
+        defects=[
+            AOIReportDefect(
+                defect_code="PCE07",
+                product_x=565,
+                product_y=259,
+                image_prefix="R0F00000",
+            )
+        ],
+        product_resolution=(raw_bounds[2] - raw_bounds[0], raw_bounds[3] - raw_bounds[1]),
+        pre_cfg=PreprocessConfig(tile_size=512),
+    )
+
+    assert created == 1
+    tile = result.tiles[0]
+    assert tile.aoi_image_x == 909
+    assert tile.aoi_image_y == 890
+    assert tile.x == 653
+    assert tile.y == 634
+    assert tile.zone == "edge"
+
+
 def test_v2_aoi_coord_tile_keeps_anchor_inside_when_inward_conflicts():
     cfg = CAPIConfig()
     cfg.is_new_architecture = True
