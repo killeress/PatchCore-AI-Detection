@@ -1626,7 +1626,7 @@ class CAPIDatabase:
             finally:
                 conn.close()
 
-    VALID_MISS_CATEGORIES = {'dust_misfilter', 'threshold_high', 'ric_misjudge', 'outside_aoi_area', 'data_error_actually_ok', 'other'}
+    VALID_MISS_CATEGORIES = {'dust_misfilter', 'threshold_high', 'ai_miss_within_spec', 'ric_misjudge', 'outside_aoi_area', 'data_error_actually_ok', 'other'}
     VALID_OVER_CATEGORIES = {'edge_false_positive', 'within_spec', 'overexposure', 'surface_scratch', 'surface_dirt', 'bubble', 'aoi_ai_false_positive', 'dust_mask_incomplete', 'other'}
 
     def _save_review(self, table: str, valid_categories: set, client_record_id: int, category: str, note: str = '') -> int:

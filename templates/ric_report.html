@@ -906,7 +906,7 @@
                 <h3>📅 每日過漏檢率與 RIC 誤判率追蹤 (分母為當日總數量)</h3>
                 <div class="chart-container"><canvas id="client_dailyMetricsChart"></canvas></div>
                 <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 8px;">
-                    📌 備註：過檢率、漏檢率與 RIC 誤判率分母皆為「當日影像總數量」；漏檢率分子為漏檢 Review 中分類為「AI漏放」或「Dust 誤濾」的筆數；RIC 誤判率分子為漏檢 Review 中分類為「RIC 誤判」或「資料有誤、實際OK」的筆數。
+                    📌 備註：過檢率、漏檢率與 RIC 誤判率分母皆為「當日影像總數量」；漏檢率分子為漏檢 Review 中分類為「AI漏放」或「Dust 誤濾」的筆數；「AI漏檢(規格內)」不納入漏檢率；RIC 誤判率分子為漏檢 Review 中分類為「RIC 誤判」或「資料有誤、實際OK」的筆數。
                 </div>
             </div>
         </div>
@@ -992,6 +992,7 @@
                     <select id="review_doneCategoryFilter" class="review-filter-select" onchange="clientComp.filterReviewDoneCategory(this.value)">
                         <option value="">全部分類</option>
                         <option value="threshold_high">AI漏放</option>
+                        <option value="ai_miss_within_spec">AI漏檢(規格內)</option>
                         <option value="dust_misfilter">Dust 誤濾</option>
                         <option value="data_error_actually_ok">資料有誤、實際OK</option>
                         <option value="ric_misjudge">RIC 誤判</option>
@@ -1290,7 +1291,7 @@
             const manualAdjustmentsByCat = { ric_misjudge: 0, data_error_actually_ok: 0 };
             let missReviewed = 0;
             let missTotal = 0;
-            const missByCat = { dust_misfilter: 0, data_error_actually_ok: 0, threshold_high: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
+            const missByCat = { dust_misfilter: 0, data_error_actually_ok: 0, threshold_high: 0, ai_miss_within_spec: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
             let overReviewed = 0;
             const overByCat = { edge_false_positive: 0, within_spec: 0, overexposure: 0, surface_scratch: 0, surface_dirt: 0, bubble: 0, aoi_ai_false_positive: 0, dust_mask_incomplete: 0, other: 0 };
             let scratchPanels = 0;
@@ -1433,7 +1434,7 @@
             ];
 
             // Miss category breakdown
-            const catLabels = { dust_misfilter: 'Dust 誤濾', data_error_actually_ok: '資料有誤', ric_misjudge: 'RIC 誤判', threshold_high: 'AI漏放', outside_aoi_area: 'AOI 區域外', other: '其他' };
+            const catLabels = { dust_misfilter: 'Dust 誤濾', data_error_actually_ok: '資料有誤', ric_misjudge: 'RIC 誤判', threshold_high: 'AI漏放', ai_miss_within_spec: 'AI漏檢(規格內)', outside_aoi_area: 'AOI 區域外', other: '其他' };
             const prevCat = prev.missReviewStats ? prev.missReviewStats.byCategory : {};
             const currCat = curr.missReviewStats ? curr.missReviewStats.byCategory : {};
             const catRows = [];
@@ -2123,6 +2124,7 @@
             'dust_misfilter': 'Dust 誤濾',
             'data_error_actually_ok': '資料有誤、實際OK',
             'threshold_high': 'AI漏放',
+            'ai_miss_within_spec': 'AI漏檢(規格內)',
             'ric_misjudge': 'RIC 誤判',
             'outside_aoi_area': '漏檢區域不在 AOI 提供區域',
             'other': '其他',
@@ -2131,6 +2133,7 @@
         const CATEGORY_COLORS = {
             'dust_misfilter': '#f59e0b',
             'threshold_high': '#3b82f6',
+            'ai_miss_within_spec': '#06b6d4',
             'ric_misjudge': '#22c55e',
             'outside_aoi_area': '#a855f7',
             'data_error_actually_ok': '#ec4899',
