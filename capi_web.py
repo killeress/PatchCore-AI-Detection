@@ -122,6 +122,24 @@ def _serialize_pending_changes(pc) -> list:
 
 
 _DOT_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+DOT_RULER_MM_PER_PX = 0.0245
+DOT_RULER_CALIBRATION_POINTS = []
+DOT_RULER_CALIBRATION_SOURCE = "default mm/px ratio 0.0245"
+DOT_PREPROCESS_METHOD = "gaussian"
+DOT_PREPROCESS_PARAMS = {"kernel_size": 7, "sigma": 1.0}
+
+
+def _preprocess_dot_image_for_detection(image_bgr) -> tuple:
+    """Apply the fixed dot-detection preprocessing used before residual detection."""
+    from capi_image_preprocess_lab import apply_preprocess_method
+
+    result = apply_preprocess_method(image_bgr, DOT_PREPROCESS_METHOD, DOT_PREPROCESS_PARAMS)
+    return result["image"], {
+        "method": result["method"],
+        "method_label": result["method_label"],
+        "applied_params": result["applied_params"],
+        "notes": result.get("notes", []),
+    }
 
 
 def _list_debug_dot_samples(base_dir: Path) -> dict:
@@ -134,6 +152,13 @@ def _list_debug_dot_samples(base_dir: Path) -> dict:
             for path in sorted(folder.iterdir(), key=lambda p: p.name.lower()):
                 if path.is_file() and path.suffix.lower() in _DOT_IMAGE_EXTS:
                     items.append({"name": path.name, "path": str(path)})
+        if polarity == "black":
+            ruler_path = base_dir.parent.parent / "dot_size.png"
+            if ruler_path.is_file():
+                items.insert(0, {
+                    "name": f"{ruler_path.name} (點線規)",
+                    "path": str(ruler_path),
+                })
         samples[polarity] = items
     return samples
 
@@ -210,15 +235,24 @@ def _detect_dot_components(
             enclosing_diameter = float(radius * 2.0)
 
         bbox_max = float(max(w, h))
+        aspect_ratio = float(min(w, h) / bbox_max) if bbox_max > 0 else 0.0
         equivalent_diameter = float((4.0 * area / np.pi) ** 0.5)
+        bbox_diagonal = float(np.hypot(w, h))
         if size_metric == "equivalent":
             size_px = equivalent_diameter
+            size_mode = "equivalent"
         elif size_metric == "enclosing":
             size_px = enclosing_diameter
+            size_mode = "enclosing"
+        elif size_metric == "bbox_diagonal":
+            size_px = bbox_diagonal
+            size_mode = "bbox_diagonal"
         else:
             size_px = bbox_max
+            size_mode = "bbox_max"
 
         size_units = float(size_px * unit_per_px) if calibrated else None
+        size_mm = size_units if calibrated else None
         candidates.append({
             "x": x,
             "y": y,
@@ -227,11 +261,15 @@ def _detect_dot_components(
             "area_px": area,
             "center_x": round(float(centroids[label][0]), 2),
             "center_y": round(float(centroids[label][1]), 2),
+            "aspect_ratio": round(aspect_ratio, 3),
             "bbox_max_diameter_px": round(bbox_max, 2),
+            "bbox_diagonal_px": round(bbox_diagonal, 2),
             "equivalent_diameter_px": round(equivalent_diameter, 2),
             "enclosing_diameter_px": round(enclosing_diameter, 2),
+            "size_mode": size_mode,
             "size_px": round(float(size_px), 2),
             "size_units": round(size_units, 4) if size_units is not None else None,
+            "size_mm": round(size_mm, 4) if size_mm is not None else None,
             "max_diff": int(diff[labels == label].max()),
             "mean_diff": round(float(diff[labels == label].mean()), 2),
             "is_defect": bool(calibrated and size_units >= defect_threshold),
@@ -252,7 +290,7 @@ def _detect_dot_components(
         )
         label = f"#{idx} {candidate['size_px']:.1f}px"
         if candidate["size_units"] is not None:
-            label = f"#{idx} {candidate['size_units']:.3g}"
+            label = f"#{idx} {candidate['size_units']:.3g}mm"
         cv2.putText(
             overlay,
             label,
@@ -1722,6 +1760,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             default_aoi_edge_inspector=get_val('aoi_edge_inspector', 'cv'),
             preprocess_methods=get_method_specs(),
             dot_samples=_list_debug_dot_samples(dot_sample_dir),
+            dot_default_mm_per_px=DOT_RULER_MM_PER_PX,
+            dot_calibration_points=DOT_RULER_CALIBRATION_POINTS,
+            dot_calibration_source=DOT_RULER_CALIBRATION_SOURCE,
         )
         self._send_response(200, html)
 
@@ -4227,9 +4268,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "polarity 必須是 black 或 white"}, status=400)
             return
 
-        size_metric = (data.get("size_metric") or "bbox_max").strip().lower()
-        if size_metric not in ("bbox_max", "equivalent", "enclosing"):
-            self._send_json({"error": "size_metric 必須是 bbox_max、equivalent 或 enclosing"}, status=400)
+        size_metric = (data.get("size_metric") or "bbox_diagonal").strip().lower()
+        if size_metric not in ("bbox_diagonal", "bbox_max", "equivalent", "enclosing"):
+            self._send_json({"error": "size_metric 必須是 bbox_diagonal、bbox_max、equivalent 或 enclosing"}, status=400)
             return
 
         def as_int(name, default):
@@ -4244,14 +4285,25 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 return default
 
-        diff_threshold = as_int("diff_threshold", 8)
-        background_kernel = _odd_kernel(as_int("background_kernel", 31))
+        def as_bool(name, default):
+            value = data.get(name, default)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() not in ("0", "false", "no", "off")
+            return bool(value)
+
+        diff_threshold = as_int("diff_threshold", 7)
+        background_kernel = _odd_kernel(as_int("background_kernel", 33))
         min_area = max(1, as_int("min_area", 2))
-        max_area = max(0, as_int("max_area", 5000))
-        morph_open = max(0, as_int("morph_open", 3))
-        unit_per_px = max(0.0, as_float("unit_per_px", 0.0))
+        max_area = max(0, as_int("max_area", 50000))
+        morph_open = max(0, as_int("morph_open", 2))
+        use_default_calibration = as_bool("use_default_calibration", True)
+        unit_per_px = max(0.0, as_float("unit_per_px", DOT_RULER_MM_PER_PX))
+        if unit_per_px <= 0 and use_default_calibration:
+            unit_per_px = DOT_RULER_MM_PER_PX
         defect_threshold = max(0.0, as_float("defect_threshold", 0.3))
-        unit_label = str(data.get("unit_label") or "unit").strip()[:16] or "unit"
+        unit_label = str(data.get("unit_label") or "mm").strip()[:16] or "mm"
 
         try:
             started = _time.time()
@@ -4259,9 +4311,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if image is None:
                 self._send_json({"error": f"無法讀取圖片: {image_path}"}, status=400)
                 return
+            processed_image, preprocess_info = _preprocess_dot_image_for_detection(image)
 
             detected = _detect_dot_components(
-                image,
+                processed_image,
                 polarity=polarity,
                 diff_threshold=diff_threshold,
                 background_kernel=background_kernel,
@@ -4280,9 +4333,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", image_path.stem)[:80]
+            preprocessed_filename = f"debug_dot_preprocessed_{safe_name}_{ts}.png"
             overlay_filename = f"debug_dot_overlay_{safe_name}_{ts}.png"
             mask_filename = f"debug_dot_mask_{safe_name}_{ts}.png"
             diff_filename = f"debug_dot_diff_{safe_name}_{ts}.png"
+            cv2.imwrite(str(debug_dir / preprocessed_filename), processed_image)
             cv2.imwrite(str(debug_dir / overlay_filename), detected["overlay"])
             cv2.imwrite(str(debug_dir / mask_filename), detected["mask_color"])
             cv2.imwrite(str(debug_dir / diff_filename), detected["diff_color"])
@@ -4295,6 +4350,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if detected["calibrated"]:
                 max_size_units = max((c["size_units"] or 0.0 for c in candidates), default=0.0)
                 defect_threshold_px = defect_threshold / unit_per_px if unit_per_px > 0 else None
+            max_size_mm = max_size_units if unit_label.lower() == "mm" else None
 
             response_data = {
                 "success": True,
@@ -4302,13 +4358,22 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "image_shape": [int(image.shape[1]), int(image.shape[0])],
                 "polarity": polarity,
                 "method": "local_median_residual",
+                "preprocess": preprocess_info,
                 "calibrated": detected["calibrated"],
                 "count": len(candidates),
                 "defect_count": defect_count,
                 "max_size_px": round(float(max_size_px), 2),
                 "max_size_units": round(float(max_size_units), 4) if max_size_units is not None else None,
+                "max_size_mm": round(float(max_size_mm), 4) if max_size_mm is not None else None,
                 "defect_threshold_px": round(float(defect_threshold_px), 2) if defect_threshold_px is not None else None,
                 "unit_label": unit_label,
+                "calibration": {
+                    "unit_per_px": round(float(unit_per_px), 6),
+                    "mm_per_px": round(float(unit_per_px), 6) if unit_label.lower() == "mm" else None,
+                    "source": DOT_RULER_CALIBRATION_SOURCE if use_default_calibration else "manual mm/px input",
+                    "points": DOT_RULER_CALIBRATION_POINTS if use_default_calibration else [],
+                    "formula": f"size_mm = {size_metric}_px * {unit_per_px:.6f}",
+                },
                 "processing_time": round(_time.time() - started, 3),
                 "params_used": {
                     "diff_threshold": diff_threshold,
@@ -4319,9 +4384,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "size_metric": size_metric,
                     "unit_per_px": unit_per_px,
                     "defect_threshold": defect_threshold,
+                    "use_default_calibration": use_default_calibration,
                 },
                 "candidates": candidates[:300],
                 "source_url": "/api/debug/serve-image?path=" + urllib.parse.quote(str(image_path)),
+                "preprocessed_url": f"/debug/heatmaps/{preprocessed_filename}",
                 "overlay_url": f"/debug/heatmaps/{overlay_filename}",
                 "mask_url": f"/debug/heatmaps/{mask_filename}",
                 "diff_url": f"/debug/heatmaps/{diff_filename}",
