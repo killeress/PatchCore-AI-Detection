@@ -6,7 +6,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from capi_config import CAPIConfig
-from capi_inference import CAPIInferencer
+from capi_inference import CAPIInferencer, TileInfo
 
 
 def test_high_coverage_region_is_dust_even_when_peak_is_outside_dust_mask():
@@ -91,3 +91,26 @@ def test_force_include_seed_keeps_aoi_center_from_being_dropped_by_top_percent()
     assert real_peak == (49, 49)
     assert any(not r["is_dust"] for r in details_with_seed)
     assert heat_binary[50, 50] == 255
+
+
+def test_aoi_center_seed_can_be_disabled_by_config():
+    config = CAPIConfig()
+    config.aoi_heatmap_center_seed_enabled = False
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+
+    tile = TileInfo(
+        tile_id=1,
+        x=0,
+        y=0,
+        width=100,
+        height=100,
+        image=np.zeros((100, 100), dtype=np.uint8),
+        is_aoi_coord_tile=True,
+        aoi_image_x=50,
+        aoi_image_y=50,
+    )
+    anomaly_map = np.ones((100, 100), dtype=np.float32)
+
+    assert inferencer._aoi_center_seed_for_tile(tile, anomaly_map) == (None, 0, None)

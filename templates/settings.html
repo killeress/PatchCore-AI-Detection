@@ -1260,6 +1260,7 @@
     ];
     const AOI_COORD_PARAMS = [
         'grid_tiling_enabled', 'aoi_coord_inspection_enabled',
+        'aoi_heatmap_center_seed_enabled',
         'aoi_report_path_replace_from', 'aoi_report_path_replace_to',
         'aoi_edge_inspector', 'aoi_edge_boundary_band_px',
         'aoi_edge_pc_roi_inward_shift_enabled', 'aoi_edge_aoi_margin_px',
@@ -1768,6 +1769,8 @@
         'dust_two_stage_diff_percentile': '特徵偵測靈敏度 (取 diff 分布的此百分位, 越低越敏感)',
         'dust_two_stage_min_area': '特徵最小面積，低於此值視為雜訊 (px)',
         'dust_two_stage_fallback_score': '安全網: 找不到特徵但 heatmap 分數 ≥ 此值時保守判 NG',
+        // AOI coordinate inference
+        'aoi_heatmap_center_seed_enabled': 'Top% heatmap 額外保留 AOI 座標附近弱熱區',
     };
 
     // 依互斥規則鎖定某些參數列。key = param_name, value = 不生效原因 (會以 tooltip 顯示)
