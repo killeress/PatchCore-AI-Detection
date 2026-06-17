@@ -3025,6 +3025,8 @@ class CAPIInferencer:
 
         # --- Stage 2: Find features on original ---
         all_features = []
+        ignored_border_features = 0
+        feature_border_margin_px = 8
 
         for lid in range(1, n_labels):
             rm = labels == lid
@@ -3086,6 +3088,38 @@ class CAPIInferencer:
 
                     fys, fxs = np.where(fm)
                     fcy, fcx = int(np.mean(fys)), int(np.mean(fxs))
+                    fmin_x = int(np.min(fxs))
+                    fmax_x = int(np.max(fxs))
+                    fmin_y = int(np.min(fys))
+                    fmax_y = int(np.max(fys))
+                    feature_bbox = (
+                        int(tx1 + fmin_x),
+                        int(ty1 + fmin_y),
+                        int(fmax_x - fmin_x + 1),
+                        int(fmax_y - fmin_y + 1),
+                    )
+                    fb_x, fb_y, fb_w, fb_h = feature_bbox
+                    if (
+                        fb_x <= feature_border_margin_px
+                        or fb_y <= feature_border_margin_px
+                        or fb_x + fb_w >= tile_w - feature_border_margin_px
+                        or fb_y + fb_h >= tile_h - feature_border_margin_px
+                    ):
+                        ignored_border_features += 1
+                        continue
+
+                    contours, _ = cv2.findContours(
+                        (fm.astype(np.uint8)) * 255,
+                        cv2.RETR_EXTERNAL,
+                        cv2.CHAIN_APPROX_SIMPLE,
+                    )
+                    feature_contour = []
+                    if contours:
+                        contour = max(contours, key=cv2.contourArea)
+                        feature_contour = [
+                            [int(tx1 + pt[0][0]), int(ty1 + pt[0][1])]
+                            for pt in contour
+                        ]
 
                     # dust check: use ALL feature pixels
                     feat_dust = crop_dust[fm]
@@ -3106,6 +3140,9 @@ class CAPIInferencer:
                         "abs_pos": (abs_x, abs_y),
                         "area": farea,
                         "type": spot_type,
+                        "feature_bbox": feature_bbox,
+                        "feature_contour": feature_contour,
+                        "dust_overlap": dust_overlap,
                         "dust_ratio": feat_dust_ratio,
                         "is_dust": feature_is_dust,
                         "dust_reason": dust_reason,
@@ -3124,15 +3161,17 @@ class CAPIInferencer:
             bx, by = best["abs_pos"]
             # convert to anomaly_map space for peak_yx
             real_peak_yx = (int(by / scale), int(bx / scale))
-            detail = (f"TWO_STAGE: {len(real_features)}real+{len(dust_features)}dust "
-                      f"-> REAL_NG (best@({bx},{by}) area={best['area']})")
+            ignored_hint = f" ignored_border={ignored_border_features}" if ignored_border_features else ""
+            detail = (f"TWO_STAGE: {len(real_features)}real+{len(dust_features)}dust"
+                      f"{ignored_hint} -> REAL_NG (best@({bx},{by}) area={best['area']})")
             return True, real_peak_yx, all_features, detail
 
         else:
             # 找不到 real feature -> 信任 PER_REGION 的 dust 判定
             # （MARK 等規則紋理在 OMIT 已被 dust mask 涵蓋；二階段抓不到 feature 屬正常）
-            detail = (f"TWO_STAGE: 0real+{len(dust_features)}dust "
-                      f"-> DUST")
+            ignored_hint = f" ignored_border={ignored_border_features}" if ignored_border_features else ""
+            detail = (f"TWO_STAGE: 0real+{len(dust_features)}dust"
+                      f"{ignored_hint} -> DUST")
             return False, None, all_features, detail
 
     def generate_dust_iou_debug_image(
@@ -3372,15 +3411,51 @@ class CAPIInferencer:
         dust_ol[dm_sm > 0] = (0, 255, 255)
         panel_tr = cv2.addWeighted(panel_tr, 0.6, dust_ol, 0.4, 0)
         sx, sy = sz / tile_w, sz / tile_h
-        for feat in features:
+
+        def _feature_color(feat):
+            return (255, 255, 0) if feat["is_dust"] else (0, 0, 255)
+
+        def _feature_contour_small(feat):
+            contour_points = feat.get("feature_contour") or []
+            if not contour_points:
+                return None
+            pts = [
+                [int(round(float(px) * sx)), int(round(float(py) * sy))]
+                for px, py in contour_points
+            ]
+            if len(pts) < 2:
+                return None
+            return np.asarray(pts, dtype=np.int32).reshape((-1, 1, 2))
+
+        def _draw_feature(panel, feat, fill=False):
             fx, fy = feat["abs_pos"]
-            dx, dy = int(fx * sx), int(fy * sy)
-            color = (0, 200, 0) if feat["is_dust"] else (0, 0, 255)
-            cv2.circle(panel_tr, (dx, dy), 5, color, 2)
+            dx, dy = int(round(float(fx) * sx)), int(round(float(fy) * sy))
+            color = _feature_color(feat)
+            contour = _feature_contour_small(feat)
+            if contour is not None:
+                if fill:
+                    overlay = panel.copy()
+                    cv2.drawContours(overlay, [contour], -1, color, -1)
+                    cv2.addWeighted(overlay, 0.65, panel, 0.35, 0, dst=panel)
+                    cv2.drawContours(panel, [contour], -1, (255, 255, 255), 1)
+                else:
+                    cv2.drawContours(panel, [contour], -1, (0, 0, 0), 3)
+                    cv2.drawContours(panel, [contour], -1, color, 2)
+            else:
+                cv2.circle(panel, (dx, dy), 5, color, -1 if fill else 2)
+                if fill:
+                    cv2.circle(panel, (dx, dy), 6, (255, 255, 255), 1)
+
+            cv2.drawMarker(panel, (dx, dy), (0, 0, 0), cv2.MARKER_CROSS, 10, 3)
+            cv2.drawMarker(panel, (dx, dy), color, cv2.MARKER_CROSS, 10, 1)
+            return dx, dy, color
+
+        for feat in features:
+            dx, dy, color = _draw_feature(panel_tr, feat, fill=False)
             label = "D" if feat["is_dust"] else "R"
             cv2.putText(panel_tr, label, (dx + 7, dy + 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
-        cv2.putText(panel_tr, "Features (R=Real G=Dust)", (5, 20),
+        cv2.putText(panel_tr, "Feature contour (R=Real C=Dust)", (5, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
 
         # --- 左下: 熱區二值化 (Top X%) ---
@@ -3403,18 +3478,13 @@ class CAPIInferencer:
         real_count = sum(1 for f in features if not f["is_dust"])
         dust_count = sum(1 for f in features if f["is_dust"])
         for feat in features:
-            fx, fy = feat["abs_pos"]
-            dx, dy = int(fx * sx), int(fy * sy)
-            r = max(3, int(feat["area"] ** 0.5))
-            color = (0, 0, 255) if not feat["is_dust"] else (0, 200, 0)
-            cv2.circle(panel_br, (dx, dy), r, color, -1)
-            cv2.circle(panel_br, (dx, dy), r + 1, (255, 255, 255), 1)
+            _draw_feature(panel_br, feat, fill=True)
 
         verdict_color = (0, 0, 255) if not is_dust else (0, 200, 255)
         verdict_text = f"R:{real_count} D:{dust_count}"
         cv2.putText(panel_br, f"TwoStage {verdict_text}", (5, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, verdict_color, 1)
-        cv2.putText(panel_br, "B=DustMask R=Real G=Dust", (5, sz - 8),
+        cv2.putText(panel_br, "B=DustMask R=Real C=Dust", (5, sz - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (128, 128, 128), 1)
 
         # --- 組合 2x2 ---

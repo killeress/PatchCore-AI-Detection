@@ -271,6 +271,8 @@ def build_feature_zoom_panels(
       - abs_pos: (x, y) tile pixel 座標
       - area: feature 像素數
       - type: "bright" / "dark"
+      - feature_contour: 實際 feature mask 輪廓（tile pixel 座標）
+      - dust_overlap: feature mask 內落在 dust_mask 的像素數
       - dust_ratio: feature 與 dust_mask 的重疊比例
       - is_dust: dust_ratio 是否達門檻
       - zone_dust_cov: feature 所屬 hot zone 與 dust_mask 的覆蓋率
@@ -346,6 +348,7 @@ def build_feature_zoom_panels(
             is_dust = bool(feat.get("is_dust", False))
             dust_ratio = float(feat.get("dust_ratio", 0.0))
             area = int(feat.get("area", 0))
+            dust_overlap = int(feat.get("dust_overlap", round(dust_ratio * area)))
             spot_type = feat.get("type", "?")
             zone_dust_cov = feat.get("zone_dust_cov", None)
             dust_reason = str(feat.get("dust_reason", ""))
@@ -353,10 +356,42 @@ def build_feature_zoom_panels(
             if is_dust and dust_reason == "zone_dominated":
                 tag = "DUST-ZONE"
             tag_color = (0, 200, 255) if is_dust else (0, 0, 255)
+            outline_color = (255, 255, 0) if is_dust else (0, 0, 255)
+            zoom_scale = tile_size / max(1, crop_sz)
+            contour_points = feat.get("feature_contour") or []
+            if contour_points:
+                pts = []
+                for px, py in contour_points:
+                    panel_x = int(round((float(px) * sx - x1) * zoom_scale))
+                    panel_y = int(round((float(py) * sy - y1) * zoom_scale))
+                    pts.append([panel_x, panel_y])
+                contour = np.asarray(pts, dtype=np.int32).reshape((-1, 1, 2))
+                if len(contour) >= 2:
+                    cv2.drawContours(panel, [contour], -1, (0, 0, 0), 5)
+                    cv2.drawContours(panel, [contour], -1, outline_color, 3)
+
+            marker_x = int(round((cx - x1) * zoom_scale))
+            marker_y = int(round((cy - y1) * zoom_scale))
+            cv2.drawMarker(
+                panel,
+                (marker_x, marker_y),
+                (0, 0, 0),
+                cv2.MARKER_CROSS,
+                18,
+                4,
+            )
+            cv2.drawMarker(
+                panel,
+                (marker_x, marker_y),
+                outline_color,
+                cv2.MARKER_CROSS,
+                18,
+                2,
+            )
 
             cv2.putText(panel, f"Feature: {tag}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, tag_color, 2)
-            cv2.putText(panel, f"DustRatio: {dust_ratio:.3f}  Area: {area}", (10, 60),
+            cv2.putText(panel, f"FeatureDust: {dust_overlap}/{area} = {dust_ratio:.3f}", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
             cv2.putText(panel, f"Type: {spot_type}  Pos:({abs_x},{abs_y})", (10, 85),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
@@ -372,8 +407,10 @@ def build_feature_zoom_panels(
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, final_color, 1)
 
             legend_y = tile_size - 15
-            cv2.putText(panel, "White=Heat  Yellow=Dust  Green=Overlap", (10, legend_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
+            cv2.putText(panel, "BG: W=Heat Y=Dust G=Heat&Dust", (10, legend_y - 18),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
+            cv2.putText(panel, "Feature outline: Red=REAL Cyan=DUST", (10, legend_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
 
             final_suffix = f" Final:{final_label}" if final_label else ""
             label = f"Feat#{idx} Feature:{tag} ratio:{dust_ratio:.3f}{final_suffix}"
