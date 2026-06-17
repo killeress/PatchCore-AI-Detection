@@ -2035,12 +2035,12 @@ class CAPIDatabase:
             if ric_j == "NG":
                 ric_ng_total += 1
                 
-        aoi_over_rate = round((aoi_over / total * 100), 1) if total > 0 else 0
-        aoi_miss_rate = round((aoi_miss / total * 100), 1) if total > 0 else 0
+        aoi_over_rate = round((aoi_over / total * 100), 2) if total > 0 else 0
+        aoi_miss_rate = round((aoi_miss / total * 100), 2) if total > 0 else 0
 
         # AI 過檢率 / 漏檢率
-        ai_over_rate = round(ai_over / total * 100, 1) if total > 0 else 0
-        ai_miss_rate = round(ai_miss / total * 100, 1) if total > 0 else 0
+        ai_over_rate = round(ai_over / total * 100, 2) if total > 0 else 0
+        ai_miss_rate = round(ai_miss / total * 100, 2) if total > 0 else 0
 
         by_day = []
         for date_str in sorted(day_stats.keys()):
@@ -2048,8 +2048,8 @@ class CAPIDatabase:
             by_day.append({
                 "date": date_str,
                 "total": s["total"],
-                "aoi_acc": round(s["aoi_correct"] / s["total"] * 100, 1) if s["total"] > 0 else 0,
-                "ai_acc": round(s["ai_correct"] / s["total"] * 100, 1) if s["total"] > 0 else 0,
+                "aoi_acc": round(s["aoi_correct"] / s["total"] * 100, 2) if s["total"] > 0 else 0,
+                "ai_acc": round(s["ai_correct"] / s["total"] * 100, 2) if s["total"] > 0 else 0,
             })
 
         by_machine = []
@@ -2058,14 +2058,14 @@ class CAPIDatabase:
             by_machine.append({
                 "machine": machine,
                 "total": s["total"],
-                "aoi_acc": round(s["aoi_correct"] / s["total"] * 100, 1) if s["total"] > 0 else 0,
-                "ai_acc": round(s["ai_correct"] / s["total"] * 100, 1) if s["total"] > 0 else 0,
+                "aoi_acc": round(s["aoi_correct"] / s["total"] * 100, 2) if s["total"] > 0 else 0,
+                "ai_acc": round(s["ai_correct"] / s["total"] * 100, 2) if s["total"] > 0 else 0,
             })
 
         return {
             "total": total,
-            "aoi_accuracy": round(aoi_accuracy, 1),
-            "ai_accuracy": round(ai_accuracy, 1),
+            "aoi_accuracy": round(aoi_accuracy, 2),
+            "ai_accuracy": round(ai_accuracy, 2),
             "aoi_ng_correct": aoi_correct_count,
             "ai_correct": ai_correct_count,
             # 過檢/漏檢
@@ -2154,8 +2154,8 @@ class CAPIDatabase:
             machine_rows = conn.execute(
                 f"""SELECT machine_no as machine,
                            COUNT(*) as total,
-                           ROUND(SUM(CASE WHEN {_aoi_ng} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as aoi_ng_rate,
-                           ROUND(SUM(CASE WHEN {_ai_ng} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as ai_ng_rate
+                           ROUND(SUM(CASE WHEN {_aoi_ng} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as aoi_ng_rate,
+                           ROUND(SUM(CASE WHEN {_ai_ng} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as ai_ng_rate
                     FROM inference_records{where_sql}
                     GROUP BY machine_no
                     ORDER BY total DESC""",

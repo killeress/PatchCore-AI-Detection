@@ -2157,10 +2157,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if manual_actual_ok:
                 daily[day]["ricMisjudge"] += 1
 
-        aoiOverRate = round(aoiOver / total * 100, 1) if total > 0 else 0
-        aiOverRate = round(aiOver / total * 100, 1) if total > 0 else 0
-        aiMissRate = round(aiMiss / total * 100, 1) if total > 0 else 0
-        revivalRate = round(revival / total * 100, 1) if total > 0 else 0
+        aoiOverRate = round(aoiOver / total * 100, 2) if total > 0 else 0
+        aiOverRate = round(aiOver / total * 100, 2) if total > 0 else 0
+        aiMissRate = round(aiMiss / total * 100, 2) if total > 0 else 0
+        revivalRate = round(revival / aoiOver * 100, 2) if aoiOver > 0 else 0
 
         return {
             "total": total,
