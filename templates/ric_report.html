@@ -1374,13 +1374,14 @@
                 if (ric === 'NG') daily[day].ricNG++;
             });
 
+            const aoiOK = total - aoiNG;
             const aoiOverRate = total > 0 ? Math.round(aoiOver / total * 10000) / 100 : 0;
             const aiOverRate = total > 0 ? Math.round(aiOver / total * 10000) / 100 : 0;
             const aiMissRate = total > 0 ? Math.round(aiMiss / total * 10000) / 100 : 0;
             const revivalRate = aoiOver > 0 ? Math.round(revival / aoiOver * 10000) / 100 : 0;
 
             return {
-                total, aoiNG, aiNG, ricNG,
+                total, aoiOK, aoiNG, aiNG, ricNG,
                 aoiCorrect, aiCorrect,
                 aoiOver, aoiOverRate,
                 aiOver, aiOverRate,
@@ -1730,14 +1731,16 @@
             const manualAdjustNote = manualAdjustments.total > 0
                 ? `<div class="detail" style="color:#86efac;">人工回填改判：-${manualAdjustments.total} 筆</div>`
                 : '';
+            const total = Number(s.total) || 0;
             const actualNG = Number(s.ricNG) || 0;
-            const actualOK = Math.max(0, (Number(s.total) || 0) - actualNG);
+            const actualOK = Math.max(0, total - actualNG);
+            const aoiOK = Math.max(0, Number(s.aoiOK) || 0);
             const grid1 = document.getElementById('client_statsGrid1');
             grid1.innerHTML = `
             <div class="stat-card total" data-client-filter="total" onclick="clientComp.filterByCard('total')">
                 <div class="label">檢測總數</div>
                 <div class="value">${s.total}</div>
-                <div class="detail">實際OK: ${actualOK} 筆 / 實際NG: ${actualNG} 筆</div>
+                <div class="detail">實際OK: ${actualOK} 筆（${aoiOK} 筆是 AOI判OK）/ 實際NG: ${actualNG} 筆</div>
                 <div class="filter-hint">🔍 顯示全部</div>
             </div>
             <div class="stat-card aoi" data-client-filter="aoi_correct" onclick="clientComp.filterByCard('aoi_correct')">
