@@ -4633,11 +4633,12 @@ class CAPIInferencer:
                     zone = "edge"
                 outer_x1, outer_y1, outer_x2, outer_y2 = result.otsu_bounds or result.raw_bounds
                 outer_tol = max(2, int(getattr(self.config, "otsu_offset", 0)))
+                outer_ring_px = half + outer_tol
                 is_outer_ring_tile = (
-                    tx <= outer_x1 + outer_tol
-                    or ty <= outer_y1 + outer_tol
-                    or tx + tile_size >= outer_x2 - outer_tol
-                    or ty + tile_size >= outer_y2 - outer_tol
+                    tx <= outer_x1 + outer_ring_px
+                    or ty <= outer_y1 + outer_ring_px
+                    or tx + tile_size >= outer_x2 - outer_ring_px
+                    or ty + tile_size >= outer_y2 - outer_ring_px
                 )
                 if is_outer_ring_tile:
                     zone = "edge"
