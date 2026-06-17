@@ -1210,6 +1210,21 @@
         let overReviewPieChart = null;
         let overReviewReviewedPieChart = null;
 
+        function formatPercent(value) {
+            const num = Number(value);
+            return Number.isFinite(num) ? `${num.toFixed(2)}%` : '0.00%';
+        }
+
+        function ratioPercent(numerator, denominator) {
+            const denom = Number(denominator) || 0;
+            return formatPercent(denom > 0 ? (Number(numerator) || 0) / denom * 100 : 0);
+        }
+
+        function ratioPercentValue(numerator, denominator) {
+            const denom = Number(denominator) || 0;
+            return denom > 0 ? ((Number(numerator) || 0) / denom * 100).toFixed(2) : null;
+        }
+
         // ── Ignore OMIT helpers ──
         function isOmitSuppressedByDust(rec) {
             return !!rec.has_dust_filtering;
@@ -1359,10 +1374,10 @@
                 if (ric === 'NG') daily[day].ricNG++;
             });
 
-            const aoiOverRate = total > 0 ? Math.round(aoiOver / total * 1000) / 10 : 0;
-            const aiOverRate = total > 0 ? Math.round(aiOver / total * 1000) / 10 : 0;
-            const aiMissRate = total > 0 ? Math.round(aiMiss / total * 1000) / 10 : 0;
-            const revivalRate = total > 0 ? Math.round(revival / total * 1000) / 10 : 0;
+            const aoiOverRate = total > 0 ? Math.round(aoiOver / total * 10000) / 100 : 0;
+            const aiOverRate = total > 0 ? Math.round(aiOver / total * 10000) / 100 : 0;
+            const aiMissRate = total > 0 ? Math.round(aiMiss / total * 10000) / 100 : 0;
+            const revivalRate = aoiOver > 0 ? Math.round(revival / aoiOver * 10000) / 100 : 0;
 
             return {
                 total, aoiNG, aiNG, ricNG,
@@ -1417,18 +1432,20 @@
 
             function fmtDiff(oldVal, newVal, suffix) {
                 const d = Math.round((newVal - oldVal) * 100) / 100;
-                if (d === 0) return `<span class="omit-toast-val same">${newVal}${suffix || ''}</span>`;
+                const valueText = suffix === '%' ? Number(newVal).toFixed(2) : newVal;
+                if (d === 0) return `<span class="omit-toast-val same">${valueText}${suffix || ''}</span>`;
                 const cls = d > 0 ? 'up' : 'down';
                 const sign = d > 0 ? '+' : '';
-                return `<span class="omit-toast-val ${cls}">${newVal}${suffix || ''} (${sign}${d})</span>`;
+                const diffText = suffix === '%' ? d.toFixed(2) : d;
+                return `<span class="omit-toast-val ${cls}">${valueText}${suffix || ''} (${sign}${diffText})</span>`;
             }
 
             const rows = [
                 ['漏檢數', fmtDiff(prev.aiMiss, curr.aiMiss, ' 筆')],
                 ['過檢數', fmtDiff(prev.aiOver, curr.aiOver, ' 筆')],
                 ['AI 準確率', fmtDiff(
-                    prev.total > 0 ? Math.round(prev.aiCorrect / prev.total * 1000) / 10 : 0,
-                    curr.total > 0 ? Math.round(curr.aiCorrect / curr.total * 1000) / 10 : 0,
+                    prev.total > 0 ? Math.round(prev.aiCorrect / prev.total * 10000) / 100 : 0,
+                    curr.total > 0 ? Math.round(curr.aiCorrect / curr.total * 10000) / 100 : 0,
                     '%')],
                 ['AI NG 數', fmtDiff(prev.aiNG, curr.aiNG, ' 筆')],
             ];
@@ -1713,23 +1730,25 @@
             const manualAdjustNote = manualAdjustments.total > 0
                 ? `<div class="detail" style="color:#86efac;">人工回填改判：-${manualAdjustments.total} 筆</div>`
                 : '';
+            const actualNG = Number(s.ricNG) || 0;
+            const actualOK = Math.max(0, (Number(s.total) || 0) - actualNG);
             const grid1 = document.getElementById('client_statsGrid1');
             grid1.innerHTML = `
             <div class="stat-card total" data-client-filter="total" onclick="clientComp.filterByCard('total')">
                 <div class="label">檢測總數</div>
                 <div class="value">${s.total}</div>
-                <div class="detail">${s.total} 筆資料 (已排除 CCD)</div>
+                <div class="detail">實際OK: ${actualOK} 筆 / 實際NG: ${actualNG} 筆</div>
                 <div class="filter-hint">🔍 顯示全部</div>
             </div>
             <div class="stat-card aoi" data-client-filter="aoi_correct" onclick="clientComp.filterByCard('aoi_correct')">
                 <div class="label">AOI 準確率</div>
-                <div class="value">${s.total > 0 ? (s.aoiCorrect / s.total * 100).toFixed(1) : 0}%</div>
+                <div class="value">${ratioPercent(s.aoiCorrect, s.total)}</div>
                 <div class="detail">${s.aoiCorrect} / ${s.total} 筆與實際判定一致</div>
                 <div class="filter-hint">🔍 篩選 AOI 與實際一致</div>
             </div>
             <div class="stat-card ai" data-client-filter="ai_correct" onclick="clientComp.filterByCard('ai_correct')">
                 <div class="label">AI 準確率</div>
-                <div class="value">${s.total > 0 ? (s.aiCorrect / s.total * 100).toFixed(1) : 0}%</div>
+                <div class="value">${ratioPercent(s.aiCorrect, s.total)}</div>
                 <div class="detail">${s.aiCorrect} / ${s.total} 筆與實際判定一致</div>
                 <div class="filter-hint">🔍 篩選 AI 與實際一致</div>
             </div>
@@ -1745,27 +1764,27 @@
             grid2.innerHTML = `
             <div class="stat-card over" data-client-filter="aoi_over" onclick="clientComp.filterByCard('aoi_over')">
                 <div class="label">AOI 過檢率</div>
-                <div class="value">${s.aoiOverRate}%</div>
+                <div class="value">${formatPercent(s.aoiOverRate)}</div>
                 <div class="detail">${s.aoiOver} / ${s.total} 筆 AOI判NG中為過檢</div>
                 <div class="filter-hint">🔍 AOI=NG, 實際=OK</div>
             </div>
             <div class="stat-card over" data-client-filter="ai_over" onclick="clientComp.filterByCard('ai_over')">
                 <div class="label">AI 過檢率</div>
-                <div class="value">${s.aiOverRate}%</div>
+                <div class="value">${formatPercent(s.aiOverRate)}</div>
                 <div class="detail">${s.aiOver} / ${s.total} 筆 AI判NG中為過檢</div>
                 <div class="filter-hint">🔍 AI=NG, 實際=OK</div>
             </div>
             <div class="stat-card miss" data-client-filter="ai_miss" onclick="clientComp.filterByCard('ai_miss')">
                 <div class="label">AI 漏檢率</div>
-                <div class="value">${s.aiMissRate}%</div>
+                <div class="value">${formatPercent(s.aiMissRate)}</div>
                 <div class="detail">${s.aiMiss} / ${s.total} 筆分類為 AI漏放 或 Dust 誤濾</div>
                 ${manualAdjustNote}
                 <div class="filter-hint">🔍 Review=AI漏放 / Dust誤濾</div>
             </div>
             <div class="stat-card revival" data-client-filter="revival" onclick="clientComp.filterByCard('revival')">
                 <div class="label">復活率</div>
-                <div class="value">${s.revivalRate}%</div>
-                <div class="detail">${s.revival} / ${s.total} 筆 AOI判NG被AI復活且實際OK</div>
+                <div class="value">${formatPercent(s.revivalRate)}</div>
+                <div class="detail">${s.revival} / ${s.aoiOver} 筆實際OK但被AOI判NG</div>
                 <div class="filter-hint">🔍 AOI=NG, AI=OK, 實際=OK</div>
             </div>
             `;
@@ -1942,12 +1961,12 @@
                     datasets: [
                         {
                             label: 'AOI 準確率 (%)',
-                            data: dateKeys.map(k => { const d = s.daily[k]; return d.total > 0 ? (d.aoiCorrect / d.total * 100).toFixed(1) : null; }),
+                            data: dateKeys.map(k => { const d = s.daily[k]; return ratioPercentValue(d.aoiCorrect, d.total); }),
                             borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: '#f59e0b',
                         },
                         {
                             label: 'AI 準確率 (%)',
-                            data: dateKeys.map(k => { const d = s.daily[k]; return d.total > 0 ? (d.aiCorrect / d.total * 100).toFixed(1) : null; }),
+                            data: dateKeys.map(k => { const d = s.daily[k]; return ratioPercentValue(d.aiCorrect, d.total); }),
                             borderColor: '#818cf8', backgroundColor: 'rgba(129,140,248,0.1)', tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: '#818cf8',
                         },
                         {
@@ -1964,13 +1983,13 @@
                             font: { size: 10, weight: 600 },
                             align: ctx => ctx.dataset.type === 'bar' ? 'end' : 'top',
                             anchor: ctx => ctx.dataset.type === 'bar' ? 'end' : 'center',
-                            formatter: (v, ctx) => { if (v === null || v === '0.0' || v === 0) return ''; return ctx.dataset.type === 'bar' ? v : v + '%'; }
+                            formatter: (v, ctx) => { if (v === null || Number(v) === 0) return ''; return ctx.dataset.type === 'bar' ? v : v + '%'; }
                         },
                         legend: { labels: { color: '#94a3b8' } }
                     },
                     scales: {
                         x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
-                        y: { min: 0, max: 100, ticks: { color: '#64748b', callback: v => v + '%' }, grid: { color: 'rgba(51,65,85,0.5)' } },
+                        y: { min: 0, max: 100, ticks: { color: '#64748b', callback: v => formatPercent(v) }, grid: { color: 'rgba(51,65,85,0.5)' } },
                         y1: { position: 'right', min: 0, ticks: { color: '#475569' }, grid: { display: false } },
                     }
                 }
@@ -2025,22 +2044,22 @@
                     datasets: [
                         {
                             label: 'AI 漏檢率 (%)',
-                            data: dateKeys.map(k => { const d = s.daily[k]; return d.total > 0 ? (d.aiMiss / d.total * 100).toFixed(1) : null; }),
+                            data: dateKeys.map(k => { const d = s.daily[k]; return ratioPercentValue(d.aiMiss, d.total); }),
                             borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', borderDash: [5, 5], tension: 0.3, fill: false, pointRadius: 4, pointBackgroundColor: '#ef4444',
                         },
                         {
                             label: 'AI 過檢率 (%)',
-                            data: dateKeys.map(k => { const d = s.daily[k]; return d.total > 0 ? (d.aiOver / d.total * 100).toFixed(1) : null; }),
+                            data: dateKeys.map(k => { const d = s.daily[k]; return ratioPercentValue(d.aiOver, d.total); }),
                             borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.3, fill: false, pointRadius: 4, pointBackgroundColor: '#3b82f6',
                         },
                         {
                             label: 'AOI 過檢率 (%)',
-                            data: dateKeys.map(k => { const d = s.daily[k]; return d.total > 0 ? (d.aoiOver / d.total * 100).toFixed(1) : null; }),
+                            data: dateKeys.map(k => { const d = s.daily[k]; return ratioPercentValue(d.aoiOver, d.total); }),
                             borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.3, fill: false, pointRadius: 4, pointBackgroundColor: '#f59e0b',
                         },
                         {
                             label: 'RIC 誤判率 (%)',
-                            data: dateKeys.map(k => { const d = s.daily[k]; return d.total > 0 ? ((d.ricMisjudge || 0) / d.total * 100).toFixed(1) : null; }),
+                            data: dateKeys.map(k => { const d = s.daily[k]; return ratioPercentValue(d.ricMisjudge || 0, d.total); }),
                             borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.1)', tension: 0.3, fill: false, pointRadius: 4, pointBackgroundColor: '#22c55e',
                         },
                         {
@@ -2057,7 +2076,7 @@
                             font: { size: 10, weight: 600 },
                             align: ctx => ctx.dataset.type === 'bar' ? 'end' : 'top',
                             anchor: ctx => ctx.dataset.type === 'bar' ? 'end' : 'center',
-                            formatter: (v, ctx) => { if (v === null || v === '0.0' || v === 0) return ''; return ctx.dataset.type === 'bar' ? v : v + '%'; }
+                            formatter: (v, ctx) => { if (v === null || Number(v) === 0) return ''; return ctx.dataset.type === 'bar' ? v : v + '%'; }
                         },
                         legend: { labels: { color: '#94a3b8' } },
                         tooltip: {
@@ -2066,8 +2085,9 @@
                                     let label = context.dataset.label || '';
                                     if (label) label += ': ';
                                     if (context.parsed.y !== null) {
-                                        label += context.parsed.y;
-                                        if (context.dataset.yAxisID !== 'y1') label += '%';
+                                        const isPercent = context.dataset.yAxisID !== 'y1';
+                                        label += isPercent ? Number(context.parsed.y).toFixed(2) : context.parsed.y;
+                                        if (isPercent) label += '%';
                                     }
                                     const day = context.chart.data.labels[context.dataIndex];
                                     const d = s.daily[day];
@@ -2082,7 +2102,7 @@
                     },
                     scales: {
                         x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(51,65,85,0.3)' } },
-                        y: { min: 0, title: { display: true, text: '百分比 (%)', color: '#64748b' }, ticks: { color: '#64748b', callback: v => v + '%' }, grid: { color: 'rgba(51,65,85,0.5)' } },
+                        y: { min: 0, title: { display: true, text: '百分比 (%)', color: '#64748b' }, ticks: { color: '#64748b', callback: v => formatPercent(v) }, grid: { color: 'rgba(51,65,85,0.5)' } },
                         y1: { position: 'right', min: 0, title: { display: true, text: '數量', color: '#64748b' }, ticks: { color: '#475569' }, grid: { display: false } },
                     }
                 }
@@ -2150,7 +2170,7 @@
 
         function renderReviewStats(mrs) {
             const grid = document.getElementById('review_statsGrid');
-            const completionRate = mrs.total > 0 ? (mrs.reviewed / mrs.total * 100).toFixed(1) : 0;
+            const completionRate = ratioPercent(mrs.reviewed, mrs.total);
             grid.innerHTML = `
             <div class="stat-card miss">
                 <div class="label">漏檢候選總數</div>
@@ -2160,16 +2180,16 @@
             <div class="stat-card ai">
                 <div class="label">已 Review</div>
                 <div class="value">${mrs.reviewed}</div>
-                <div class="detail">${mrs.total > 0 ? (mrs.reviewed / mrs.total * 100).toFixed(1) : 0}%</div>
+                <div class="detail">${ratioPercent(mrs.reviewed, mrs.total)}</div>
             </div>
             <div class="stat-card over">
                 <div class="label">未 Review</div>
                 <div class="value">${mrs.unreviewed}</div>
-                <div class="detail">${mrs.total > 0 ? (mrs.unreviewed / mrs.total * 100).toFixed(1) : 0}%</div>
+                <div class="detail">${ratioPercent(mrs.unreviewed, mrs.total)}</div>
             </div>
             <div class="stat-card match">
                 <div class="label">完成率</div>
-                <div class="value">${completionRate}%</div>
+                <div class="value">${completionRate}</div>
                 <div class="detail">${mrs.reviewed} / ${mrs.total}</div>
             </div>
             `;
@@ -2231,7 +2251,7 @@
                             color: '#e2e8f0', font: { size: 12, weight: 600 },
                             formatter: (v, ctx) => {
                                 const total = ctx.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
-                                return total > 0 && v > 0 ? v + ' (' + (v / total * 100).toFixed(0) + '%)' : '';
+                                return total > 0 && v > 0 ? v + ' (' + (v / total * 100).toFixed(2) + '%)' : '';
                             }
                         }
                     }
@@ -2461,7 +2481,7 @@
 
         function renderOverReviewStats(ors, srs) {
             const grid = document.getElementById('over_review_statsGrid');
-            const completionRate = ors.total > 0 ? (ors.reviewed / ors.total * 100).toFixed(1) : 0;
+            const completionRate = ratioPercent(ors.reviewed, ors.total);
             srs = srs || { panels: 0, images: 0, tiles: 0 };
             const scratchCard = (label, value, detail) =>
                 `<div class="stat-card scratch"><div class="label">🩹 ${label}</div><div class="value">${value}</div><div class="detail">${detail}</div></div>`;
@@ -2474,16 +2494,16 @@
             <div class="stat-card ai">
                 <div class="label">已 Review</div>
                 <div class="value">${ors.reviewed}</div>
-                <div class="detail">${ors.total > 0 ? (ors.reviewed / ors.total * 100).toFixed(1) : 0}%</div>
+                <div class="detail">${ratioPercent(ors.reviewed, ors.total)}</div>
             </div>
             <div class="stat-card miss">
                 <div class="label">未 Review</div>
                 <div class="value">${ors.unreviewed}</div>
-                <div class="detail">${ors.total > 0 ? (ors.unreviewed / ors.total * 100).toFixed(1) : 0}%</div>
+                <div class="detail">${ratioPercent(ors.unreviewed, ors.total)}</div>
             </div>
             <div class="stat-card match">
                 <div class="label">完成率</div>
-                <div class="value">${completionRate}%</div>
+                <div class="value">${completionRate}</div>
                 <div class="detail">${ors.reviewed} / ${ors.total}</div>
             </div>
             ${scratchCard('救回片數（刮痕）', srs.panels, '被刮痕濾網翻為 OK 的 panel')}
@@ -2545,7 +2565,7 @@
                             color: '#e2e8f0', font: { size: 12, weight: 600 },
                             formatter: (v, ctx) => {
                                 const total = ctx.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
-                                return total > 0 && v > 0 ? v + ' (' + (v / total * 100).toFixed(0) + '%)' : '';
+                                return total > 0 && v > 0 ? v + ' (' + (v / total * 100).toFixed(2) + '%)' : '';
                             }
                         }
                     }
@@ -2601,7 +2621,7 @@
                             color: '#e2e8f0', font: { size: 12, weight: 600 },
                             formatter: (v, ctx) => {
                                 const total = ctx.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
-                                return total > 0 && v > 0 ? v + ' (' + (v / total * 100).toFixed(0) + '%)' : '';
+                                return total > 0 && v > 0 ? v + ' (' + (v / total * 100).toFixed(2) + '%)' : '';
                             }
                         }
                     }
@@ -2897,7 +2917,7 @@
 
         function renderCards(s) {
             const total = s.total || 1;
-            const pct = v => (v / total * 100).toFixed(1) + '%';
+            const pct = v => (v / total * 100).toFixed(2) + '%';
             document.getElementById('inf_statsGrid').innerHTML = `
                 <div class="inf-stat-card">
                     <div class="label">總推論次數</div>
@@ -2916,7 +2936,7 @@
                 <div class="inf-stat-card revival">
                     <div class="label">AI 救回 (AOI NG→AI OK)</div>
                     <div class="value">${s.ai_revival.toLocaleString()}</div>
-                    <div class="pct">${s.aoi_ng ? (s.ai_revival / s.aoi_ng * 100).toFixed(1) + '% of AOI NG' : '-'}</div>
+                    <div class="pct">${s.aoi_ng ? (s.ai_revival / s.aoi_ng * 100).toFixed(2) + '% of AOI NG' : '-'}</div>
                 </div>
                 <div class="inf-stat-card err">
                     <div class="label">ERR 錯誤</div>
