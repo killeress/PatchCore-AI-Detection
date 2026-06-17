@@ -1,11 +1,12 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from capi_heatmap import build_feature_zoom_panels, build_region_zoom_panels
+from capi_heatmap import HeatmapManager, build_feature_zoom_panels, build_region_zoom_panels
 
 
 def test_two_stage_feature_zoom_prioritizes_real_features_over_larger_dust():
@@ -119,3 +120,58 @@ def test_region_zoom_prioritizes_real_ng_regions_over_higher_score_dust():
     assert labels[0].startswith("Region#2 REAL_NG Score:0.2000")
     assert labels[1].startswith("Region#1 DUST Score:0.9000")
     assert labels[2].startswith("Region#3 DUST Score:0.8000")
+
+
+def test_save_tile_heatmap_uses_two_stage_mask_for_feature_zoom(tmp_path, monkeypatch):
+    extended_mask = np.full((16, 16), 255, dtype=np.uint8)
+    two_stage_mask = np.zeros((16, 16), dtype=np.uint8)
+    captured = {}
+
+    def fake_build_feature_zoom_panels(
+        heatmap_binary,
+        dust_mask,
+        ts_features,
+        tile_w_orig,
+        tile_h_orig,
+        tile_size=512,
+        max_panels=3,
+        final_label="",
+    ):
+        captured["dust_mask"] = dust_mask
+        return []
+
+    monkeypatch.setattr(
+        "capi_heatmap.build_feature_zoom_panels",
+        fake_build_feature_zoom_panels,
+    )
+
+    tile_img = np.zeros((16, 16), dtype=np.uint8)
+    tile_info = SimpleNamespace(
+        original_image=tile_img,
+        height=16,
+        width=16,
+        x=0,
+        y=0,
+        omit_crop_image=tile_img,
+        dust_mask=extended_mask,
+        dust_two_stage_dust_mask=two_stage_mask,
+        dust_two_stage_features=[{"abs_pos": (8, 8), "area": 1, "is_dust": False}],
+        dust_heatmap_binary=np.zeros((4, 4), dtype=np.uint8),
+        dust_heatmap_iou=0.0,
+        dust_detail_text="TWO_STAGE: 1real+0dust -> REAL_NG",
+        is_suspected_dust_or_scratch=False,
+        is_bomb=False,
+        bomb_defect_code="",
+    )
+
+    HeatmapManager(tmp_path).save_tile_heatmap(
+        tmp_path,
+        "sample.tif",
+        1,
+        tile_img,
+        np.zeros((4, 4), dtype=np.float32),
+        0.5,
+        tile_info=tile_info,
+    )
+
+    assert captured["dust_mask"] is two_stage_mask

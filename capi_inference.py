@@ -183,6 +183,7 @@ class TileInfo:
     dust_detail_text: str = ""  # 灰塵判定詳細資訊
     dust_iou_debug_image: Optional[np.ndarray] = field(default=None, repr=False)  # IOU debug 可視化圖
     dust_two_stage_features: Optional[list] = field(default=None, repr=False)  # 兩階段特徵點列表
+    dust_two_stage_dust_mask: Optional[np.ndarray] = field(default=None, repr=False)  # two-stage 實際使用的 dust mask
     is_bomb: bool = False       # 是否為炸彈系統模擬缺陷
     bomb_defect_code: str = ""  # 匹配到的炸彈 Defect Code
     is_in_exclude_zone: bool = False  # 是否位於不檢測排除區域內
@@ -5804,6 +5805,7 @@ class CAPIInferencer:
                                     _ts_features = ts_features
                                     _ts_dust_mask_no_ext = dust_mask_no_ext
                                     tile.dust_two_stage_features = ts_features
+                                    tile.dust_two_stage_dust_mask = dust_mask_no_ext if dust_mask_no_ext is not None else dust_mask
                                     if ts_has_real:
                                         tile.is_suspected_dust_or_scratch = False
                                         detail_text += (
@@ -6449,6 +6451,7 @@ class CAPIInferencer:
                             _ts_features = ts_features
                             _ts_dust_mask_no_ext = dust_mask_no_ext
                             tile.dust_two_stage_features = ts_features
+                            tile.dust_two_stage_dust_mask = dust_mask_no_ext if dust_mask_no_ext is not None else dust_mask
 
                             if ts_has_real:
                                 tile.is_suspected_dust_or_scratch = False
