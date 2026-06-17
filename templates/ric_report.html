@@ -413,6 +413,7 @@
         font-size: 0.88rem;
         color: #fbbf24;
         display: flex;
+        flex-wrap: wrap;
         align-items: flex-start;
         gap: 10px;
         line-height: 1.6;
@@ -870,8 +871,15 @@
     <!-- Sub-Tab 1: Analysis (unchanged) -->
     <div class="client-tab-panel active" id="client_panel-analysis">
         <div class="no-ref-banner">
+            <span style="display:inline-flex; align-items:center; gap:6px; margin-right:10px; white-space:nowrap;">
+                <label class="omit-toggle" title="開啟後，RESULT_EQP=OK 的資料會納入下方統計">
+                    <input type="checkbox" id="client_includeEqpOK" onchange="clientComp.toggleIncludeEqpOK(this.checked)">
+                    <span class="omit-toggle-slider"></span>
+                </label>
+                <span style="font-size:0.82rem; font-weight:700; color:#fbbf24;">RESULT_EQP=OK 納入計算</span>
+            </span>
             <span class="icon">⚠️</span>
-            <div>
+            <div style="flex:1; min-width:260px;">
                 <strong>RESULT_EQP=OK 無參考價值：</strong>
                 RESULT_EQP=OK 表示外觀檢 (AOI) 判成 NG 後，由人員 (RIC) 目視複檢外觀覆判為 OK（非看 AI 畫面）。
                 因此 <strong>AOI=OK 的資料不代表 AOI 真正判 OK</strong>，AOI 漏檢率無參考價值。
@@ -1205,6 +1213,7 @@
         let reviewDoneCategoryFilter = '';
         let overReviewDoneCategoryFilter = '';
         let ignoreOmit = false;  // 忽略 OMIT 灰塵過濾模式
+        let includeResultEqpOK = false;  // 預設排除 RESULT_EQP=OK
         let resultChart = null, comboChart = null, trendChart = null, confusionChart = null, dailyMetricsChart = null;
         let reviewPieChart = null;
         let overReviewPieChart = null;
@@ -1223,6 +1232,36 @@
         function ratioPercentValue(numerator, denominator) {
             const denom = Number(denominator) || 0;
             return denom > 0 ? ((Number(numerator) || 0) / denom * 100).toFixed(2) : null;
+        }
+
+        function emptySummary() {
+            return {
+                total: 0, aoiOK: 0, aoiNG: 0, aiNG: 0, ricNG: 0,
+                aoiCorrect: 0, aiCorrect: 0,
+                aoiOver: 0, aoiOverRate: 0,
+                aiOver: 0, aiOverRate: 0,
+                aiMiss: 0, aiMissRate: 0,
+                revival: 0, revivalRate: 0,
+                combos: {}, daily: {},
+                missReviewStats: {
+                    total: 0, reviewed: 0, unreviewed: 0,
+                    byCategory: { dust_misfilter: 0, data_error_actually_ok: 0, threshold_high: 0, ai_miss_within_spec: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 },
+                },
+                manualTruthAdjustments: {
+                    total: 0,
+                    byCategory: { ric_misjudge: 0, data_error_actually_ok: 0 },
+                },
+                overReviewStats: {
+                    total: 0, reviewed: 0, unreviewed: 0,
+                    byCategory: { edge_false_positive: 0, within_spec: 0, overexposure: 0, surface_scratch: 0, surface_dirt: 0, bubble: 0, aoi_ai_false_positive: 0, dust_mask_incomplete: 0, other: 0 },
+                },
+                scratchRescueStats: { panels: 0, images: 0, tiles: 0 },
+            };
+        }
+
+        function getReportRecords() {
+            if (includeResultEqpOK) return rawRecords;
+            return rawRecords.filter(r => (r.result_eqp || 'OK') !== 'OK');
         }
 
         // ── Ignore OMIT helpers ──
@@ -1294,7 +1333,7 @@
 
         function recomputeSummary(records) {
             const total = records.length;
-            if (total === 0) return currentSummary;
+            if (total === 0) return emptySummary();
 
             let aoiNG = 0, aiNG = 0, ricNG = 0;
             let aoiCorrect = 0, aiCorrect = 0;
@@ -1417,14 +1456,20 @@
             ignoreOmit = checked;
             document.getElementById('client_omitBadge').style.display = checked ? 'inline' : 'none';
             if (!rawRecords.length) return;
-            const s = recomputeSummary(rawRecords);
+            const reportRecords = getReportRecords();
+            const s = recomputeSummary(reportRecords);
             currentSummary = s;
             renderStatsCards(s);
             renderCharts(s);
-            renderDetails(applyFilter(rawRecords));
-            renderReviewTab(s, rawRecords);
-            renderOverReviewTab(s, rawRecords);
+            renderDetails(applyFilter(reportRecords));
+            renderReviewTab(s, reportRecords);
+            renderOverReviewTab(s, reportRecords);
             if (prevSummary) showOmitToast(prevSummary, s, checked);
+        }
+
+        function toggleIncludeEqpOK(checked) {
+            includeResultEqpOK = checked;
+            refreshReportFromRawRecords();
         }
 
         function showOmitToast(prev, curr, isOn) {
@@ -1686,14 +1731,15 @@
                     }
 
                     rawRecords = data.records;
-                    currentSummary = ignoreOmit ? recomputeSummary(rawRecords) : data.summary;
+                    const reportRecords = getReportRecords();
+                    currentSummary = recomputeSummary(reportRecords);
                     report.style.display = 'block';
 
                     renderStatsCards(currentSummary);
                     renderCharts(currentSummary);
-                    renderDetails(rawRecords);
-                    renderReviewTab(currentSummary, rawRecords);
-                    renderOverReviewTab(currentSummary, rawRecords);
+                    renderDetails(reportRecords);
+                    renderReviewTab(currentSummary, reportRecords);
+                    renderOverReviewTab(currentSummary, reportRecords);
                 })
                 .catch(err => {
                     loading.style.display = 'none';
@@ -1807,7 +1853,7 @@
                 if (active) active.classList.add('active');
             }
 
-            const filtered = applyFilter(rawRecords);
+            const filtered = applyFilter(getReportRecords());
 
             const labels = {
                 total: '全部', aoi_correct: 'AOI 與實際判定一致', ai_correct: 'AI 與實際判定一致',
@@ -2266,7 +2312,7 @@
             reviewDoneCategoryFilter = category || '';
             const select = document.getElementById('review_doneCategoryFilter');
             if (select) select.value = reviewDoneCategoryFilter;
-            renderReviewTable(rawRecords);
+            renderReviewTable(getReportRecords());
             switchReviewTab('done');
             const wrap = document.getElementById('review_tableWrap_done');
             if (wrap) wrap.scrollTo({ top: 0, behavior: 'smooth' });
@@ -2276,7 +2322,7 @@
             if (!category) return;
             if (category === PENDING_REVIEW_SLICE) {
                 reviewDoneCategoryFilter = '';
-                renderReviewTable(rawRecords);
+                renderReviewTable(getReportRecords());
                 switchReviewTab('pending');
                 return;
             }
@@ -2374,13 +2420,14 @@
         }
 
         function refreshReportFromRawRecords() {
-            const s = recomputeSummary(rawRecords);
+            const reportRecords = getReportRecords();
+            const s = recomputeSummary(reportRecords);
             currentSummary = s;
             renderStatsCards(s);
             renderCharts(s);
-            renderDetails(applyFilter(rawRecords));
-            renderReviewTab(s, rawRecords);
-            renderOverReviewTab(s, rawRecords);
+            renderDetails(applyFilter(reportRecords));
+            renderReviewTab(s, reportRecords);
+            renderOverReviewTab(s, reportRecords);
         }
 
         function _saveReview(recordId) {
@@ -2636,7 +2683,7 @@
             overReviewDoneCategoryFilter = category || '';
             const select = document.getElementById('over_review_doneCategoryFilter');
             if (select) select.value = overReviewDoneCategoryFilter;
-            renderOverReviewTable(rawRecords);
+            renderOverReviewTable(getReportRecords());
             switchOverReviewTab('done');
             const wrap = document.getElementById('over_review_tableWrap_done');
             if (wrap) wrap.scrollTo({ top: 0, behavior: 'smooth' });
@@ -2646,7 +2693,7 @@
             if (!category) return;
             if (category === PENDING_REVIEW_SLICE) {
                 overReviewDoneCategoryFilter = '';
-                renderOverReviewTable(rawRecords);
+                renderOverReviewTable(getReportRecords());
                 switchOverReviewTab('pending');
                 return;
             }
@@ -2812,7 +2859,7 @@
         return {
             switchTab, switchReviewTab, switchOverReviewTab, filterByCard, exportCSV, clearDB,
             filterReviewDoneCategory, filterOverReviewDoneCategory,
-            quickFilter, customFilter, loadData, toggleUpload, toggleIgnoreOmit,
+            quickFilter, customFilter, loadData, toggleUpload, toggleIgnoreOmit, toggleIncludeEqpOK,
             _saveReview, _deleteReview, _markDirty,
             _saveOverReview, _deleteOverReview, _markOverDirty,
         };

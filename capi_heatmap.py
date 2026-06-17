@@ -769,12 +769,15 @@ class HeatmapManager:
         ts_features = getattr(tile_info, 'dust_two_stage_features', None) if tile_info else None
         if has_omit and ts_features:
             heatmap_binary = getattr(tile_info, 'dust_heatmap_binary', None)
+            ts_dust_mask = getattr(tile_info, 'dust_two_stage_dust_mask', None)
+            if ts_dust_mask is None:
+                ts_dust_mask = dust_mask
             ts_is_dust = getattr(tile_info, 'is_suspected_dust_or_scratch', False)
             final_label = "DUST_OK" if ts_is_dust else "REAL_NG"
             tile_h_orig = getattr(tile_info, 'height', tile_size)
             tile_w_orig = getattr(tile_info, 'width', tile_size)
             zoom_results = build_feature_zoom_panels(
-                heatmap_binary, dust_mask, ts_features,
+                heatmap_binary, ts_dust_mask, ts_features,
                 tile_w_orig=tile_w_orig, tile_h_orig=tile_h_orig,
                 tile_size=tile_size,
                 final_label=final_label,
