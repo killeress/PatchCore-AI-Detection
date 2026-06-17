@@ -1675,7 +1675,7 @@
                     <span class="debug-badge">EXPERIMENT</span>
                 </h2>
                 <p style="color:var(--text-muted); font-size:0.85rem; margin-top:4px;">
-                    預設載入 templates/imgs/black 與 templates/imgs/white 樣本，使用局部背景差異量測點尺寸
+                    預設以 dot_size.png 的 0.30 mm 小點作為判定校正基準，將偵測到的點換算成 mm
                 </p>
             </div>
         </div>
@@ -1706,13 +1706,32 @@
             <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
                 <div class="coord-input-row">
                     <div class="coord-group">
-                        <label for="dot-diff-threshold">diff_threshold</label>
-                        <input type="number" id="dot-diff-threshold" value="8" min="0" max="255" step="1"
-                            title="局部背景差異閾值；小黑點建議先從 8 開始">
+                        <label for="dot-defect-threshold">規格門檻 mm</label>
+                        <input type="number" id="dot-defect-threshold" value="0.3" min="0" step="0.01"
+                            title="目前只用於 debug 標示超過門檻，尚未接正式規格判定">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-unit-per-px">點規比例 mm/px</label>
+                        <input type="number" id="dot-unit-per-px" value="{{ dot_default_mm_per_px }}" min="0" step="0.0001"
+                            style="color:var(--accent);"
+                            title="預設 0.0245 mm/px，可自行修改測試">
+                    </div>
+                    <input type="hidden" id="dot-size-metric" value="bbox_diagonal">
+                    <input type="hidden" id="dot-unit-label" value="mm">
+                    <div class="coord-group" style="min-width:260px;">
+                        <label>比例來源</label>
+                        <div style="height:42px; display:flex; align-items:center; padding:0 12px; border:1px solid var(--border); border-radius:8px; color:var(--text-muted); background:var(--surface); font-size:0.82rem;">
+                            尺寸 mm = BBox 對角線 √(W²+H²) × mm/px
+                        </div>
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-diff-threshold">diff 閾值</label>
+                        <input type="number" id="dot-diff-threshold" value="7" min="0" max="255" step="1"
+                            title="局部背景差異閾值；小黑點預設 7">
                     </div>
                     <div class="coord-group">
                         <label for="dot-bg-kernel">背景 kernel</label>
-                        <input type="number" id="dot-bg-kernel" value="31" min="3" max="199" step="2"
+                        <input type="number" id="dot-bg-kernel" value="33" min="3" max="199" step="2"
                             title="median blur 背景估計 kernel，會自動修正為奇數">
                     </div>
                     <div class="coord-group">
@@ -1721,88 +1740,13 @@
                     </div>
                     <div class="coord-group">
                         <label for="dot-max-area">最大面積 px</label>
-                        <input type="number" id="dot-max-area" value="5000" min="0" max="1000000" step="1">
+                        <input type="number" id="dot-max-area" value="50000" min="0" max="1000000" step="1">
                     </div>
                     <div class="coord-group">
                         <label for="dot-morph-open">open kernel</label>
-                        <input type="number" id="dot-morph-open" value="3" min="0" max="15" step="1"
+                        <input type="number" id="dot-morph-open" value="2" min="0" max="15" step="1"
                             title=">1 時做 morphological opening 去除孤立雜訊">
                     </div>
-                    <div class="coord-group">
-                        <label for="dot-size-metric">尺寸算法</label>
-                        <select id="dot-size-metric">
-                            <option value="bbox_max" selected>外接框最大徑</option>
-                            <option value="equivalent">等效圓直徑</option>
-                            <option value="enclosing">最小外接圓</option>
-                        </select>
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-unit-per-px">單位 / px</label>
-                        <input type="number" id="dot-unit-per-px" value="0" min="0" step="0.0001"
-                            title="尚未校正時填 0，只顯示 px 尺寸；各機種確認比例後再填">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-unit-label">單位</label>
-                        <input type="text" id="dot-unit-label" value="mm" style="text-align:center;">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-defect-threshold">Defect 門檻</label>
-                        <input type="number" id="dot-defect-threshold" value="0.3" min="0" step="0.01"
-                            onchange="computeDotCalibration();"
-                            title="實物尺寸門檻；單位依上方單位/px 換算">
-                    </div>
-                </div>
-            </div>
-
-            <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
-                <div class="coord-input-row">
-                    <div class="coord-group">
-                        <label for="dot-calibration-value">點線規值 (mm)</label>
-                        <div style="display:flex; gap:6px; align-items:center;">
-                            <input type="number" id="dot-calibration-value" value="0.3" min="0" step="0.01"
-                                onchange="computeDotCalibration();" style="width:75px; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); outline:none;">
-                            <select id="dot-calibration-quick" onchange="document.getElementById('dot-calibration-value').value = this.value; computeDotCalibration();" style="height:42px; background:var(--surface); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:0 10px; font-size:0.9rem; outline:none; cursor:pointer;">
-                                <option value="0.3" selected>0.3</option>
-                                <option value="0.05">0.05</option>
-                                <option value="0.10">0.10</option>
-                                <option value="0.15">0.15</option>
-                                <option value="0.20">0.20</option>
-                                <option value="0.25">0.25</option>
-                                <option value="0.30">0.30</option>
-                                <option value="0.35">0.35</option>
-                                <option value="0.40">0.40</option>
-                                <option value="0.45">0.45</option>
-                                <option value="0.50">0.50</option>
-                                <option value="0.60">0.60</option>
-                                <option value="0.70">0.70</option>
-                                <option value="0.80">0.80</option>
-                                <option value="0.90">0.90</option>
-                                <option value="1.00">1.00</option>
-                                <option value="1.50">1.50</option>
-                                <option value="2.00">2.00</option>
-                                <option value="3.00">3.00</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-calibration-px">對應影像 px</label>
-                        <input type="number" id="dot-calibration-px" value="" min="0" step="0.01"
-                            onchange="computeDotCalibration();" placeholder="從候選點或點擊影像套用">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-calibration-unit">校正單位 / px</label>
-                        <input type="number" id="dot-calibration-unit" value="" min="0" step="0.0001" readonly
-                            style="color:var(--accent);">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-calibration-threshold-px">推論 px 門檻</label>
-                        <input type="number" id="dot-calibration-threshold-px" value="" min="0" step="0.01" readonly
-                            style="color:var(--ok);">
-                    </div>
-                    <button class="btn-copy" id="dot-btn-apply-calibration" onclick="applyDotCalibration(true)"
-                        style="align-self:flex-end; height:42px; padding:8px 14px;">套用校正</button>
-                    <button class="btn-copy" id="dot-btn-copy-calibration" onclick="copyDotCalibration()"
-                        style="align-self:flex-end; height:42px; padding:8px 14px;">複製參數</button>
                 </div>
             </div>
         </div>
@@ -1827,7 +1771,9 @@
 {% block extra_js %}
 <script>
     const dotSamples = {{ dot_samples|tojson }};
-    let lastDotResponseData = null;
+    const dotDefaultMmPerPx = {{ dot_default_mm_per_px|tojson }};
+    const dotCalibrationPoints = {{ dot_calibration_points|tojson }};
+    const dotCalibrationSource = {{ dot_calibration_source|tojson }};
 
     // Tab switching logic
     function switchTab(tabId, btn) {
@@ -2122,67 +2068,17 @@
     function syncDotThresholdDefault() {
         const threshold = document.getElementById('dot-diff-threshold');
         if (!threshold.value || threshold.value === '8' || threshold.value === '12') {
-            threshold.value = '8';
+            threshold.value = '7';
         }
     }
 
     function computeDotCalibration() {
-        const gaugeValue = parseFloat(document.getElementById('dot-calibration-value').value) || 0;
-        const gaugePx = parseFloat(document.getElementById('dot-calibration-px').value) || 0;
+        const unitInput = document.getElementById('dot-unit-per-px');
+        let unitPerPx = parseFloat(unitInput.value) || dotDefaultMmPerPx;
         const defectThreshold = parseFloat(document.getElementById('dot-defect-threshold').value) || 0;
-        const unitEl = document.getElementById('dot-calibration-unit');
-        const thresholdPxEl = document.getElementById('dot-calibration-threshold-px');
-        if (gaugeValue <= 0 || gaugePx <= 0) {
-            unitEl.value = '';
-            thresholdPxEl.value = '';
-            return null;
-        }
-
-        const unitPerPx = gaugeValue / gaugePx;
         const thresholdPx = defectThreshold > 0 ? defectThreshold / unitPerPx : 0;
-        unitEl.value = unitPerPx.toFixed(6);
-        thresholdPxEl.value = thresholdPx > 0 ? thresholdPx.toFixed(2) : '';
-        document.getElementById('dot-unit-per-px').value = unitPerPx.toFixed(6);
+        unitInput.value = unitPerPx.toFixed(6);
         return { unitPerPx, thresholdPx };
-    }
-
-    function applyDotCalibration(rerun) {
-        const computed = computeDotCalibration();
-        if (!computed) {
-            showDotError('請先填入點線規值與對應影像 px');
-            return;
-        }
-        hideDotError();
-        if (rerun) {
-            runDotDetection();
-        }
-    }
-
-    function useDotCandidateForCalibration(sizePx) {
-        document.getElementById('dot-calibration-px').value = Number(sizePx).toFixed(2);
-        applyDotCalibration(true);
-    }
-
-    function copyDotCalibration() {
-        const computed = computeDotCalibration();
-        if (!computed) {
-            showDotError('請先完成校正再複製參數');
-            return;
-        }
-        const unitLabel = document.getElementById('dot-unit-label').value || 'unit';
-        const lines = [
-            `polarity=${document.getElementById('dot-polarity').value}`,
-            `size_metric=${document.getElementById('dot-size-metric').value}`,
-            `diff_threshold=${document.getElementById('dot-diff-threshold').value}`,
-            `background_kernel=${document.getElementById('dot-bg-kernel').value}`,
-            `min_area=${document.getElementById('dot-min-area').value}`,
-            `max_area=${document.getElementById('dot-max-area').value}`,
-            `morph_open=${document.getElementById('dot-morph-open').value}`,
-            `unit_per_px=${computed.unitPerPx.toFixed(6)} ${unitLabel}/px`,
-            `defect_threshold=${document.getElementById('dot-defect-threshold').value} ${unitLabel}`,
-            `defect_threshold_px=${computed.thresholdPx.toFixed(2)} px`,
-        ];
-        cvCopyToClipboard(lines.join('\n'), 'dot-btn-copy-calibration');
     }
 
     async function runDotDetection() {
@@ -2193,7 +2089,7 @@
         }
         computeDotCalibration();
 
-        let bgKernel = parseInt(document.getElementById('dot-bg-kernel').value, 10) || 31;
+        let bgKernel = parseInt(document.getElementById('dot-bg-kernel').value, 10) || 33;
         if (bgKernel % 2 === 0) {
             bgKernel += 1;
             document.getElementById('dot-bg-kernel').value = bgKernel;
@@ -2209,21 +2105,24 @@
         document.getElementById('dot-result-section').classList.add('hidden');
 
         try {
+            const unitPerPx = parseFloat(document.getElementById('dot-unit-per-px').value) || dotDefaultMmPerPx;
+            const usesDefaultCalibration = Math.abs(unitPerPx - dotDefaultMmPerPx) < 0.0000005;
             const resp = await fetch('/api/debug/dot-detection', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     image_path: imagePath,
                     polarity: document.getElementById('dot-polarity').value,
-                    diff_threshold: parseInt(document.getElementById('dot-diff-threshold').value, 10) || 8,
+                    diff_threshold: parseInt(document.getElementById('dot-diff-threshold').value, 10) || 7,
                     background_kernel: bgKernel,
                     min_area: parseInt(document.getElementById('dot-min-area').value, 10) || 2,
                     max_area: parseInt(document.getElementById('dot-max-area').value, 10) || 0,
                     morph_open: parseInt(document.getElementById('dot-morph-open').value, 10) || 0,
                     size_metric: document.getElementById('dot-size-metric').value,
-                    unit_per_px: parseFloat(document.getElementById('dot-unit-per-px').value) || 0,
-                    unit_label: document.getElementById('dot-unit-label').value || 'unit',
+                    unit_per_px: unitPerPx,
+                    unit_label: 'mm',
                     defect_threshold: parseFloat(document.getElementById('dot-defect-threshold').value) || 0.3,
+                    use_default_calibration: usesDefaultCalibration,
                 }),
             });
 
@@ -2232,7 +2131,6 @@
                 showDotError(data.error);
                 return;
             }
-            lastDotResponseData = data;
             renderDotResults(data);
         } catch (err) {
             showDotError('請求失敗: ' + err.message);
@@ -2257,14 +2155,29 @@
         document.getElementById('dot-result-section').classList.remove('hidden');
         const p = data.params_used || {};
         const calibrated = !!data.calibrated;
-        const unitLabel = escapeHtml(data.unit_label || 'unit');
+        const unitLabel = escapeHtml(data.unit_label || 'mm');
         const polarityLabel = data.polarity === 'white' ? '白點' : '黑點';
-        const maxUnitText = calibrated ? `${data.max_size_units} ${unitLabel}` : '未校正';
-        const defectText = calibrated ? data.defect_count : '未校正';
-        const thresholdText = calibrated ? `${p.defect_threshold} ${unitLabel}` : '需先填單位/px';
+        const calibration = data.calibration || {};
+        const mmPerPx = calibration.mm_per_px ?? p.unit_per_px ?? dotDefaultMmPerPx;
+        const maxMm = data.max_size_mm ?? data.max_size_units;
+        const maxUnitText = calibrated && maxMm !== null && maxMm !== undefined ? `${maxMm} ${unitLabel}` : '-';
+        const defectText = calibrated ? data.defect_count : '-';
+        const thresholdText = `${p.defect_threshold} ${unitLabel}`;
         const thresholdPxText = calibrated && data.defect_threshold_px !== null && data.defect_threshold_px !== undefined
             ? `${data.defect_threshold_px} px`
             : '-';
+        const preprocess = data.preprocess || {};
+        const preprocessParams = preprocess.applied_params || {};
+        const preprocessText = preprocess.method
+            ? `${escapeHtml(preprocess.method_label || preprocess.method)} ${Object.entries(preprocessParams).map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(String(v))}`).join(', ')}`
+            : '-';
+        const calibrationSource = escapeHtml(calibration.source || dotCalibrationSource);
+        const calibrationPoints = (calibration.points && calibration.points.length)
+            ? calibration.points
+            : dotCalibrationPoints;
+        const calibrationPointText = calibrationPoints
+            .map(pt => `${pt.diameter_mm}mm≈${pt.diameter_px}px`)
+            .join(' / ');
 
         document.getElementById('dot-info-cards').innerHTML = `
             <div class="summary-card">
@@ -2276,28 +2189,36 @@
                 <div class="value" style="color:${data.count > 0 ? 'var(--accent)' : 'var(--text-muted)'}">${data.count}</div>
             </div>
             <div class="summary-card" style="border-color:${calibrated && data.defect_count > 0 ? 'rgba(239,68,68,0.3)' : 'var(--border)'}">
-                <div class="label">Defect 數</div>
+                <div class="label">超門檻數</div>
                 <div class="value" style="color:${calibrated && data.defect_count > 0 ? 'var(--ng)' : 'var(--text-muted)'};font-size:${calibrated ? '1.5rem' : '1rem'};">${defectText}</div>
             </div>
             <div class="summary-card">
-                <div class="label">最大尺寸 px</div>
-                <div class="value" style="color:var(--accent)">${data.max_size_px}</div>
-            </div>
-            <div class="summary-card">
                 <div class="label">最大尺寸</div>
-                <div class="value" style="color:${calibrated ? 'var(--accent)' : 'var(--err)'};font-size:1rem;">${maxUnitText}</div>
+                <div class="value" style="color:var(--accent)">${maxUnitText}</div>
             </div>
             <div class="summary-card">
-                <div class="label">Defect 門檻</div>
-                <div class="value" style="color:var(--text-muted);font-size:0.9rem;">${thresholdText}</div>
+                <div class="label">最大尺寸 px</div>
+                <div class="value" style="color:var(--text)">${data.max_size_px}</div>
             </div>
             <div class="summary-card">
-                <div class="label">推論 px 門檻</div>
+                <div class="label">點規比例</div>
+                <div class="value" style="color:var(--ok);font-size:0.95rem;">${Number(mmPerPx).toFixed(4)} mm/px</div>
+            </div>
+            <div class="summary-card" style="grid-column:span 2;">
+                <div class="label">偵測前處理</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.82rem;line-height:1.45;">${preprocessText}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">規格門檻</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.95rem;">${thresholdText}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">門檻換算</div>
                 <div class="value" style="color:${calibrated ? 'var(--ok)' : 'var(--text-muted)'};font-size:1rem;">${thresholdPxText}</div>
             </div>
-            <div class="summary-card">
-                <div class="label">尺寸算法</div>
-                <div class="value" style="color:var(--text);font-size:0.85rem;">${escapeHtml(p.size_metric || '-')}</div>
+            <div class="summary-card" style="grid-column:span 2;">
+                <div class="label">校正來源</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.82rem;line-height:1.45;">${calibrationSource}${calibrationPointText ? '<br>' + escapeHtml(calibrationPointText) : ''}</div>
             </div>
             <div class="summary-card">
                 <div class="label">耗時</div>
@@ -2311,14 +2232,15 @@
                 <h4>原圖</h4>
                 <img src="${data.source_url}&t=${t}" alt="Dot source" onclick="openLightbox(this.src)">
             </div>
+            ${data.preprocessed_url ? `
             <div class="img-card">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-                    <h4 style="margin:0;">偵測 Overlay</h4>
-                    <label style="font-size:0.75rem; color:var(--text-muted); display:flex; align-items:center; gap:4px; cursor:pointer;">
-                        <input type="checkbox" id="dot-click-calibrate-enable" checked style="cursor:pointer;"> 點擊影像校正
-                    </label>
-                </div>
-                <img src="${data.overlay_url}?t=${t}" alt="Dot overlay" style="cursor:crosshair;" onclick="handleOverlayImageClick(event, this)">
+                <h4>高斯平滑後</h4>
+                <img src="${data.preprocessed_url}?t=${t}" alt="Dot preprocessed" onclick="openLightbox(this.src)">
+            </div>
+            ` : ''}
+            <div class="img-card">
+                <h4>偵測 Overlay</h4>
+                <img src="${data.overlay_url}?t=${t}" alt="Dot overlay" onclick="openLightbox(this.src)">
             </div>
             <div class="img-card">
                 <h4>二值 Mask</h4>
@@ -2343,21 +2265,23 @@
         }
         card.classList.remove('hidden');
         const rows = candidates.slice(0, 20).map(c => {
-            const unitValue = calibrated && c.size_units !== null && c.size_units !== undefined
-                ? `${c.size_units} ${unitLabel}`
+            const unitValue = calibrated && c.size_mm !== null && c.size_mm !== undefined
+                ? `${c.size_mm} ${unitLabel}`
+                : calibrated && c.size_units !== null && c.size_units !== undefined
+                    ? `${c.size_units} ${unitLabel}`
                 : '-';
             return `
                 <tr>
                     <td style="color:${c.is_defect ? 'var(--ng)' : 'var(--ok)'};font-weight:700;">#${c.id}</td>
-                    <td>${c.is_defect ? 'NG' : 'OK'}</td>
+                    <td>${c.is_defect ? '超門檻' : 'OK'}</td>
                     <td>(${c.center_x}, ${c.center_y})</td>
                     <td>${c.w}×${c.h}</td>
                     <td>${c.area_px}</td>
                     <td>${c.size_px}</td>
                     <td>${unitValue}</td>
+                    <td>${c.aspect_ratio ?? '-'}</td>
                     <td>${c.max_diff}</td>
                     <td>${c.mean_diff}</td>
-                    <td><button class="btn-copy" style="padding:4px 10px;font-size:0.78rem;" onclick="useDotCandidateForCalibration(${c.size_px})">校正</button></td>
                 </tr>
             `;
         }).join('');
@@ -2370,99 +2294,14 @@
                     <th>BBox</th>
                     <th>面積</th>
                     <th>尺寸 px</th>
-                    <th>尺寸</th>
+                    <th>預估 mm</th>
+                    <th>長寬比</th>
                     <th>Max Diff</th>
                     <th>Mean Diff</th>
-                    <th>操作</th>
                 </tr>
             </thead>
             <tbody>${rows}</tbody>
         `;
-    }
-
-    function handleOverlayImageClick(event, imgEl) {
-        const enableCheck = document.getElementById('dot-click-calibrate-enable');
-        if (!enableCheck || !enableCheck.checked) {
-            openLightbox(imgEl.src);
-            return;
-        }
-
-        const rect = imgEl.getBoundingClientRect();
-        const clickX = event.clientX - rect.left;
-        const clickY = event.clientY - rect.top;
-
-        if (!lastDotResponseData || !lastDotResponseData.image_shape) return;
-        const origW = lastDotResponseData.image_shape[0];
-        const origH = lastDotResponseData.image_shape[1];
-
-        const x = clickX * (origW / rect.width);
-        const y = clickY * (origH / rect.height);
-
-        const candidates = lastDotResponseData.candidates || [];
-        if (candidates.length === 0) return;
-
-        let closest = null;
-        let minDist = Infinity;
-        for (const c of candidates) {
-            const dist = Math.hypot(c.center_x - x, c.center_y - y);
-            if (dist < minDist) {
-                minDist = dist;
-                closest = c;
-            }
-        }
-
-        if (closest && minDist < 200) {
-            highlightDotCandidateRow(closest.id);
-            document.getElementById('dot-calibration-px').value = closest.size_px.toFixed(2);
-            showDotToast(`已選中點 #${closest.id} (尺寸: ${closest.size_px} px)`);
-            computeDotCalibration();
-        }
-    }
-
-    function highlightDotCandidateRow(id) {
-        const table = document.getElementById('dot-candidates-table');
-        if (!table) return;
-
-        const rows = table.querySelectorAll('tbody tr');
-        rows.forEach(r => r.style.backgroundColor = '');
-
-        for (const row of rows) {
-            const firstCell = row.cells[0];
-            if (firstCell && firstCell.textContent.trim() === `#${id}`) {
-                row.style.backgroundColor = 'rgba(234, 179, 8, 0.25)';
-                row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                break;
-            }
-        }
-    }
-
-    function showDotToast(msg) {
-        let toast = document.getElementById('dot-toast-notification');
-        if (!toast) {
-            toast = document.createElement('div');
-            toast.id = 'dot-toast-notification';
-            toast.style.position = 'fixed';
-            toast.style.bottom = '20px';
-            toast.style.right = '20px';
-            toast.style.backgroundColor = 'var(--surface)';
-            toast.style.border = '1px solid var(--accent)';
-            toast.style.color = 'var(--text)';
-            toast.style.padding = '10px 16px';
-            toast.style.borderRadius = '8px';
-            toast.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
-            toast.style.zIndex = '9999';
-            toast.style.fontFamily = 'sans-serif';
-            toast.style.fontSize = '0.9rem';
-            toast.style.transition = 'opacity 0.3s ease';
-            document.body.appendChild(toast);
-        }
-        toast.textContent = msg;
-        toast.style.opacity = '1';
-
-        clearTimeout(toast._timeout);
-        toast._timeout = setTimeout(() => {
-            toast.style.opacity = '0';
-        }, 2500);
     }
 
     async function runInference() {
