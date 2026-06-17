@@ -2673,6 +2673,8 @@ class CAPIInferencer:
             or not getattr(tile_info, "is_aoi_coord_tile", False)
         ):
             return None, 0, None
+        if not getattr(self.config, "aoi_heatmap_center_seed_enabled", True):
+            return None, 0, None
 
         amap = np.asarray(anomaly_map, dtype=np.float32)
         if amap.ndim < 2 or amap.size == 0 or float(np.max(amap)) <= 0:

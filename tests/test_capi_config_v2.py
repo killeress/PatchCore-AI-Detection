@@ -117,3 +117,20 @@ def test_capi_config_preprocess_after_tiling_serialization():
             assert loaded["preprocess_after_tiling"] is True
     finally:
         Path(path).unlink()
+
+
+def test_aoi_heatmap_center_seed_enabled_serialization():
+    cfg = CAPIConfig.from_dict({
+        "aoi_heatmap_center_seed_enabled": False,
+    })
+
+    assert cfg.aoi_heatmap_center_seed_enabled is False
+    assert cfg.to_dict()["aoi_heatmap_center_seed_enabled"] is False
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = Path(tmpdir) / "output.yaml"
+        cfg.to_yaml(str(out_path))
+
+        with open(out_path, "r", encoding="utf-8") as rf:
+            loaded = yaml.safe_load(rf)
+        assert loaded["aoi_heatmap_center_seed_enabled"] is False

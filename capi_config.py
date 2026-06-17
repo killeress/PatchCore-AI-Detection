@@ -204,6 +204,7 @@ class CAPIConfig:
 
     # AOI 機檢座標推論設定
     aoi_coord_inspection_enabled: bool = False
+    aoi_heatmap_center_seed_enabled: bool = True  # AOI 座標 tile 在 Top% heatmap 中額外保留 AOI 中心弱熱區
     aoi_report_path_replace_from: str = "yuantu"    # 報告路徑替換來源
     aoi_report_path_replace_to: str = "Report"      # 報告路徑替換目標
 
@@ -344,6 +345,7 @@ class CAPIConfig:
             }),
             grid_tiling_enabled=data.get("grid_tiling_enabled", True),
             aoi_coord_inspection_enabled=data.get("aoi_coord_inspection_enabled", False),
+            aoi_heatmap_center_seed_enabled=data.get("aoi_heatmap_center_seed_enabled", True),
             aoi_report_path_replace_from=data.get("aoi_report_path_replace_from", "yuantu"),
             aoi_report_path_replace_to=data.get("aoi_report_path_replace_to", "Report"),
             scratch_classifier_enabled=data.get("scratch_classifier_enabled", True),
@@ -424,6 +426,7 @@ class CAPIConfig:
             "model_resolution_map": self.model_resolution_map,
             "grid_tiling_enabled": self.grid_tiling_enabled,
             "aoi_coord_inspection_enabled": self.aoi_coord_inspection_enabled,
+            "aoi_heatmap_center_seed_enabled": self.aoi_heatmap_center_seed_enabled,
             "aoi_report_path_replace_from": self.aoi_report_path_replace_from,
             "aoi_report_path_replace_to": self.aoi_report_path_replace_to,
             "scratch_classifier_enabled": self.scratch_classifier_enabled,
@@ -496,6 +499,7 @@ class CAPIConfig:
             "model_resolution_map": self.model_resolution_map,
             "grid_tiling_enabled": self.grid_tiling_enabled,
             "aoi_coord_inspection_enabled": self.aoi_coord_inspection_enabled,
+            "aoi_heatmap_center_seed_enabled": self.aoi_heatmap_center_seed_enabled,
             "aoi_report_path_replace_from": self.aoi_report_path_replace_from,
             "aoi_report_path_replace_to": self.aoi_report_path_replace_to,
             "scratch_classifier_enabled": self.scratch_classifier_enabled,
@@ -626,6 +630,9 @@ class CAPIConfig:
         if "aoi_coord_inspection_enabled" in param_map:
             val = param_map["aoi_coord_inspection_enabled"]
             self.aoi_coord_inspection_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "aoi_heatmap_center_seed_enabled" in param_map:
+            val = param_map["aoi_heatmap_center_seed_enabled"]
+            self.aoi_heatmap_center_seed_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
         if "bright_spot_threshold" in param_map:
             self.bright_spot_threshold = int(param_map["bright_spot_threshold"])
         if "bright_spot_min_area" in param_map:
