@@ -2034,7 +2034,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         total = len(records)
         if total == 0:
             return {
-                "total": 0, "aoiNG": 0, "aiNG": 0, "ricNG": 0,
+                "total": 0, "aoiOK": 0, "aoiNG": 0, "aiNG": 0, "ricNG": 0,
                 "aoiCorrect": 0, "aiCorrect": 0,
                 "aoiOver": 0, "aoiOverRate": 0,
                 "aiOver": 0, "aiOverRate": 0,
@@ -2198,6 +2198,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if manual_actual_ok:
                 daily[day]["ricMisjudge"] += 1
 
+        aoiOK = total - aoiNG
         aoiOverRate = round(aoiOver / total * 100, 2) if total > 0 else 0
         aiOverRate = round(aiOver / total * 100, 2) if total > 0 else 0
         aiMissRate = round(aiMiss / total * 100, 2) if total > 0 else 0
@@ -2205,7 +2206,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         return {
             "total": total,
-            "aoiNG": aoiNG, "aiNG": aiNG, "ricNG": ricNG,
+            "aoiOK": aoiOK, "aoiNG": aoiNG, "aiNG": aiNG, "ricNG": ricNG,
             "aoiCorrect": aoiCorrect, "aiCorrect": aiCorrect,
             "aoiOver": aoiOver, "aoiOverRate": aoiOverRate,
             "aiOver": aiOver, "aiOverRate": aiOverRate,

@@ -178,6 +178,7 @@ def test_client_summary_applies_manual_actual_ok_reviews_to_analysis_stats():
     summary, out_records = CAPIWebHandler._compute_client_summary(None, records)
 
     assert summary["ricNG"] == 1
+    assert summary["aoiOK"] == 2
     assert summary["aiCorrect"] == 2
     assert summary["aiMiss"] == 0
     assert summary["aoiOver"] == 2
