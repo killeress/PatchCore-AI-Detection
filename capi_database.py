@@ -26,6 +26,7 @@ class CAPIDatabase:
 
     # 共用 SQL 條件片段（search_records 與 get_inference_stats 共用）
     _AOI_NG_COND = "machine_judgment != '' AND machine_judgment != 'OK'"
+    _AI_OK_COND = "ai_judgment = 'OK' OR ai_judgment = 'OK-i'"
     _AI_NG_COND = "ai_judgment LIKE 'NG%'"
     _ERR_COND = "ai_judgment LIKE 'ERR%'"
 
@@ -264,13 +265,14 @@ class CAPIDatabase:
                 -- Within-spec suggestion calculation logs (過檢 Review 規格內建議)
                 CREATE TABLE IF NOT EXISTS within_spec_review_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    client_record_id INTEGER NOT NULL,
+                    client_record_id INTEGER,
                     inference_record_id INTEGER NOT NULL,
                     suggested INTEGER NOT NULL DEFAULT 0,
                     category TEXT DEFAULT '',
                     reason TEXT DEFAULT '',
                     detail_json TEXT NOT NULL DEFAULT '{}',
                     error_message TEXT DEFAULT '',
+                    source TEXT DEFAULT 'review',
                     processing_seconds REAL DEFAULT 0.0,
                     created_at TEXT DEFAULT (datetime('now', 'localtime')),
                     FOREIGN KEY (client_record_id) REFERENCES client_accuracy_records(id) ON DELETE CASCADE,
@@ -359,6 +361,52 @@ class CAPIDatabase:
                 columns = [row[1] for row in cursor.fetchall()]
                 if column not in columns:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {def_type}")
+
+            def ensure_within_spec_log_schema():
+                cursor = conn.execute("PRAGMA table_info(within_spec_review_log)")
+                columns = {row[1]: row for row in cursor.fetchall()}
+                client_col = columns.get("client_record_id")
+                needs_rebuild = bool(client_col and client_col[3])
+                if needs_rebuild:
+                    conn.execute("ALTER TABLE within_spec_review_log RENAME TO within_spec_review_log_old")
+                    conn.executescript("""
+                        CREATE TABLE within_spec_review_log (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            client_record_id INTEGER,
+                            inference_record_id INTEGER NOT NULL,
+                            suggested INTEGER NOT NULL DEFAULT 0,
+                            category TEXT DEFAULT '',
+                            reason TEXT DEFAULT '',
+                            detail_json TEXT NOT NULL DEFAULT '{}',
+                            error_message TEXT DEFAULT '',
+                            source TEXT DEFAULT 'review',
+                            processing_seconds REAL DEFAULT 0.0,
+                            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                            FOREIGN KEY (client_record_id) REFERENCES client_accuracy_records(id) ON DELETE CASCADE,
+                            FOREIGN KEY (inference_record_id) REFERENCES inference_records(id) ON DELETE CASCADE
+                        );
+                    """)
+                    conn.execute(
+                        """INSERT INTO within_spec_review_log
+                           (id, client_record_id, inference_record_id, suggested, category, reason,
+                            detail_json, error_message, source, processing_seconds, created_at)
+                           SELECT id, client_record_id, inference_record_id, suggested, category, reason,
+                                  detail_json, error_message, 'review', processing_seconds, created_at
+                             FROM within_spec_review_log_old"""
+                    )
+                    conn.execute("DROP TABLE within_spec_review_log_old")
+
+                add_column_if_not_exists("within_spec_review_log", "source", "TEXT DEFAULT 'review'")
+                conn.executescript("""
+                    CREATE INDEX IF NOT EXISTS idx_within_spec_log_client
+                        ON within_spec_review_log(client_record_id, id DESC);
+                    CREATE INDEX IF NOT EXISTS idx_within_spec_log_inference
+                        ON within_spec_review_log(inference_record_id);
+                    CREATE INDEX IF NOT EXISTS idx_within_spec_log_source
+                        ON within_spec_review_log(source, id DESC);
+                """)
+
+            ensure_within_spec_log_schema()
 
             add_column_if_not_exists("inference_records", "error_message", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "client_bomb_info", "TEXT DEFAULT ''")
@@ -1003,7 +1051,7 @@ class CAPIDatabase:
             row = conn.execute(
                 """SELECT
                      COUNT(*) as total,
-                     SUM(CASE WHEN ai_judgment = 'OK' THEN 1 ELSE 0 END) as ok_count,
+                     SUM(CASE WHEN ai_judgment = 'OK' OR ai_judgment = 'OK-i' THEN 1 ELSE 0 END) as ok_count,
                      SUM(CASE WHEN ai_judgment = 'NG' OR ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ng_count,
                      SUM(CASE WHEN ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END) as err_count,
                      AVG(processing_seconds) as avg_time,
@@ -1019,7 +1067,7 @@ class CAPIDatabase:
             rows = conn.execute(
                 """SELECT machine_no,
                      COUNT(*) as total,
-                     SUM(CASE WHEN ai_judgment = 'OK' THEN 1 ELSE 0 END) as ok_count,
+                     SUM(CASE WHEN ai_judgment = 'OK' OR ai_judgment = 'OK-i' THEN 1 ELSE 0 END) as ok_count,
                      SUM(CASE WHEN ai_judgment = 'NG' OR ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ng_count
                    FROM inference_records
                    WHERE created_at >= datetime('now', 'localtime', ?)
@@ -1064,7 +1112,7 @@ class CAPIDatabase:
             row = conn.execute(
                 """SELECT
                      COUNT(*) as total,
-                     SUM(CASE WHEN ai_judgment = 'OK' THEN 1 ELSE 0 END) as ok_count,
+                     SUM(CASE WHEN ai_judgment = 'OK' OR ai_judgment = 'OK-i' THEN 1 ELSE 0 END) as ok_count,
                      SUM(CASE WHEN ai_judgment = 'NG' OR ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ng_count,
                      SUM(CASE WHEN ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END) as err_count,
                      AVG(processing_seconds) as avg_time,
@@ -1726,34 +1774,44 @@ class CAPIDatabase:
 
     def save_within_spec_review_log(
         self,
-        client_record_id: int,
+        client_record_id: Optional[int],
         inference_record_id: int,
         suggestion: Optional[Dict[str, Any]],
         detail: Dict[str, Any],
         processing_seconds: float,
         error_message: str = "",
+        source: str = "review",
     ) -> Dict[str, Any]:
         """保存一筆規格內建議計算紀錄，保留歷史供反查。"""
         suggested = bool(suggestion and suggestion.get("suggested"))
         category = str((suggestion or {}).get("category") or "")
         reason = str((suggestion or {}).get("reason") or "")
         detail_json = json.dumps(detail or {}, ensure_ascii=False)
+        log_source = "inference" if source == "inference" else "review"
 
         with self._lock:
             conn = self._get_conn()
             try:
+                if client_record_id is not None:
+                    row = conn.execute(
+                        "SELECT id FROM client_accuracy_records WHERE id = ?",
+                        (client_record_id,)
+                    ).fetchone()
+                    if not row:
+                        raise ValueError(f"Record not found: {client_record_id}")
+
                 row = conn.execute(
-                    "SELECT id FROM client_accuracy_records WHERE id = ?",
-                    (client_record_id,)
+                    "SELECT id FROM inference_records WHERE id = ?",
+                    (inference_record_id,)
                 ).fetchone()
                 if not row:
-                    raise ValueError(f"Record not found: {client_record_id}")
+                    raise ValueError(f"Inference record not found: {inference_record_id}")
 
                 cursor = conn.execute(
                     """INSERT INTO within_spec_review_log
                        (client_record_id, inference_record_id, suggested, category, reason,
-                        detail_json, error_message, processing_seconds)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        detail_json, error_message, source, processing_seconds)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         client_record_id,
                         inference_record_id,
@@ -1762,6 +1820,7 @@ class CAPIDatabase:
                         reason,
                         detail_json,
                         error_message or "",
+                        log_source,
                         float(processing_seconds or 0.0),
                     )
                 )
@@ -1797,6 +1856,7 @@ class CAPIDatabase:
             "suggestion": suggestion,
             "detail": detail,
             "error_message": data.get("error_message") or "",
+            "source": data.get("source") or "review",
             "processing_seconds": data.get("processing_seconds") or 0.0,
             "created_at": data.get("created_at"),
         }
@@ -2069,7 +2129,7 @@ class CAPIDatabase:
                 # Step 2: 清除過期 inference_records (cascade 自動刪子表)
                 cur = conn.execute("""
                     DELETE FROM inference_records
-                    WHERE (ai_judgment = 'OK' AND created_at < ?)
+                    WHERE ((ai_judgment = 'OK' OR ai_judgment = 'OK-i') AND created_at < ?)
                        OR (ai_judgment != 'OK'  AND created_at < ?)
                 """, (ok_cutoff, ng_cutoff))
                 stats["inference_records_deleted"] = cur.rowcount
@@ -2223,7 +2283,7 @@ class CAPIDatabase:
 
         for rec in comparisons:
             ric_j = rec["ric_judgment"]
-            ai_j = "OK" if rec["ai_judgment"] == "OK" else "NG"
+            ai_j = "OK" if rec["ai_judgment"] in ("OK", "OK-i") else "NG"
             aoi_j = "OK" if rec["machine_judgment"] == "OK" else "NG"
 
             # AOI 準確率: AOI 判定與 RIC 一致
@@ -2376,7 +2436,7 @@ class CAPIDatabase:
                 f"""SELECT COUNT(*) as total,
                            SUM(CASE WHEN {_aoi_ng} THEN 1 ELSE 0 END) as aoi_ng,
                            SUM(CASE WHEN {_ai_ng} THEN 1 ELSE 0 END) as ai_ng,
-                           SUM(CASE WHEN ({_aoi_ng}) AND ai_judgment = 'OK' THEN 1 ELSE 0 END) as ai_revival,
+                           SUM(CASE WHEN ({_aoi_ng}) AND (ai_judgment = 'OK' OR ai_judgment = 'OK-i') THEN 1 ELSE 0 END) as ai_revival,
                            SUM(CASE WHEN {_err} THEN 1 ELSE 0 END) as err_count,
                            SUM(CASE WHEN NOT ({_aoi_ng}) AND NOT ({_ai_ng}) AND NOT ({_err}) THEN 1 ELSE 0 END) as ok_ok,
                            SUM(CASE WHEN ({_aoi_ng}) AND NOT ({_ai_ng}) AND NOT ({_err}) THEN 1 ELSE 0 END) as ng_ok,

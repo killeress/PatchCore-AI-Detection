@@ -214,5 +214,10 @@ def test_within_spec_detail_saves_visuals_and_panel_totals(tmp_path):
     assert detail["suggestion"] is not None
     assert detail["panel_summary"]["total_dot_count"] == 1
     assert detail["panel_totals"][0]["dot_type"] == "black_dot"
+    assert detail["parameter_snapshot"]["matched_machine_key"] == "default"
+    assert detail["parameter_snapshot"]["dot_detection"]["effective"]["diff_threshold"] == 8
+    assert detail["parameter_snapshot"]["preprocess"]["params"]["kernel_size"] == 7
+    assert detail["parameter_snapshot"]["screen_rules_used"]["W0F00000"]["black_dot"]["area_threshold_mm"] == 0.3
+    assert detail["parameter_snapshot"]["full_rules"]["default"]["dot_detection"]["size_metric"] == "bbox_max"
     assert detail["visuals"][0]["urls"]["overlay_url"].startswith("/heatmaps/test/within_spec/")
     assert any(p.name.endswith("_overlay.png") for p in visual_dir.iterdir())
