@@ -10,9 +10,75 @@ CAPI 配置管理模組
 """
 
 import yaml
+import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
+
+
+def _default_within_spec_judgment_rules() -> Dict[str, Any]:
+    """Default within-spec dot judgment settings, keyed by machine id."""
+    dot_detection = {
+        "preprocess_method": "gaussian",
+        "preprocess_params": {"kernel_size": 7, "sigma": 1.0},
+        "diff_threshold": 7,
+        "background_kernel": 33,
+        "min_area_px": 2,
+        "max_area_px": 50000,
+        "morph_open": 2,
+        "size_metric": "bbox_diagonal",
+        "unit_per_px": 0.0245,
+    }
+
+    def standard_screen(label: str) -> Dict[str, Any]:
+        return {
+            "label": label,
+            "black_dot": {
+                "enabled": True,
+                "defect_code": "C1111",
+                "area_threshold_mm": 0.3,
+                "screen_count_limit": 3,
+                "tile_count_threshold": 2,
+            },
+            "white_dot": {
+                "enabled": True,
+                "defect_code": "C1111",
+                "area_threshold_mm": 0.3,
+                "screen_count_limit": 1,
+                "tile_count_threshold": 2,
+            },
+        }
+
+    return {
+        "default": {
+            "display_name": "預設機種",
+            "dot_detection": dot_detection,
+            "screens": {
+                "STANDARD": standard_screen("STANDARD(標準)"),
+                "WGF50500": standard_screen("WGF50500(50灰)"),
+                "G0F00000": standard_screen("G0F00000(綠畫面)"),
+                "R0F00000": standard_screen("R0F00000(紅畫面)"),
+                "W0F00000": standard_screen("W0F00000(白畫面)"),
+                "B0F00000": {
+                    "label": "B0F00000(黑畫面)",
+                    "black_dot": {
+                        "enabled": False,
+                        "defect_code": "C1111",
+                        "area_threshold_mm": 0.2,
+                        "screen_count_limit": 1,
+                        "tile_count_threshold": 1,
+                    },
+                    "white_dot": {
+                        "enabled": True,
+                        "defect_code": "C1111",
+                        "area_threshold_mm": 0.2,
+                        "screen_count_limit": 1,
+                        "tile_count_threshold": 1,
+                    },
+                },
+            },
+        }
+    }
 
 
 @dataclass
@@ -174,6 +240,7 @@ class CAPIConfig:
     bright_spot_min_area: int = 5             # 亮點最小連通面積 (px, 小於此視為雜訊)
     bright_spot_median_kernel: int = 21       # 背景估計 median filter 核大小
     bright_spot_diff_threshold: int = 10      # 局部對比差異閾值 (與背景差值超過此值為異常)
+    within_spec_judgment_rules: Dict[str, Any] = field(default_factory=_default_within_spec_judgment_rules)
 
     # 跳過檔案設定 (不進行推論的檔案名稱)
     skip_files: List[str] = field(default_factory=list)
@@ -247,6 +314,68 @@ class CAPIConfig:
                 }
             else:
                 normalized[prefix] = float(value)
+        return normalized
+
+    @staticmethod
+    def _normalize_within_spec_judgment_rules(raw_rules: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge saved within-spec rules with the current default schema."""
+        defaults = _default_within_spec_judgment_rules()
+        if not isinstance(raw_rules, dict) or not raw_rules:
+            return copy.deepcopy(defaults)
+
+        rules = copy.deepcopy(raw_rules)
+        rules.pop("CAPI_3F", None)
+        if not rules:
+            rules = {"default": copy.deepcopy(defaults["default"])}
+        if "default" not in rules:
+            rules["default"] = copy.deepcopy(defaults["default"])
+
+        normalized = {}
+        for machine_id, machine_raw in rules.items():
+            if not isinstance(machine_raw, dict):
+                machine_raw = {}
+
+            machine_defaults = copy.deepcopy(defaults["default"])
+            if machine_id != "default":
+                machine_defaults["display_name"] = machine_id
+
+            machine_cfg = copy.deepcopy(machine_defaults)
+            for key, value in machine_raw.items():
+                if key not in ("dot_detection", "screens"):
+                    machine_cfg[key] = value
+
+            raw_dot_detection = machine_raw.get("dot_detection", {})
+            if isinstance(raw_dot_detection, dict):
+                for key, value in raw_dot_detection.items():
+                    if key != "preprocess_params":
+                        machine_cfg["dot_detection"][key] = value
+                raw_preprocess = raw_dot_detection.get("preprocess_params", {})
+                if isinstance(raw_preprocess, dict):
+                    machine_cfg["dot_detection"]["preprocess_params"].update(raw_preprocess)
+
+            raw_screens = machine_raw.get("screens", {})
+            if isinstance(raw_screens, dict):
+                for screen_code, screen_raw in raw_screens.items():
+                    if not isinstance(screen_raw, dict):
+                        continue
+                    if screen_code not in machine_cfg["screens"]:
+                        machine_cfg["screens"][screen_code] = copy.deepcopy(screen_raw)
+                    else:
+                        if "label" in screen_raw:
+                            machine_cfg["screens"][screen_code]["label"] = screen_raw["label"]
+                        for dot_type in ("black_dot", "white_dot"):
+                            raw_rule = screen_raw.get(dot_type)
+                            if not isinstance(raw_rule, dict):
+                                continue
+                            machine_cfg["screens"][screen_code].setdefault(dot_type, {})
+                            machine_cfg["screens"][screen_code][dot_type].update(raw_rule)
+
+                    for dot_type in ("black_dot", "white_dot"):
+                        if isinstance(machine_cfg["screens"][screen_code].get(dot_type), dict):
+                            machine_cfg["screens"][screen_code][dot_type].setdefault("defect_code", "C1111")
+
+            normalized[machine_id] = machine_cfg
+
         return normalized
 
     @classmethod
@@ -333,6 +462,9 @@ class CAPIConfig:
             bright_spot_min_area=data.get("bright_spot_min_area", 5),
             bright_spot_median_kernel=data.get("bright_spot_median_kernel", 21),
             bright_spot_diff_threshold=data.get("bright_spot_diff_threshold", 10),
+            within_spec_judgment_rules=cls._normalize_within_spec_judgment_rules(
+                data.get("within_spec_judgment_rules", {})
+            ),
             skip_files=data.get("skip_files", []),
             side_shot_prefixes=data.get("side_shot_prefixes", []),
             max_images_per_panel=data.get("max_images_per_panel", 7),
@@ -417,6 +549,7 @@ class CAPIConfig:
             "bright_spot_min_area": self.bright_spot_min_area,
             "bright_spot_median_kernel": self.bright_spot_median_kernel,
             "bright_spot_diff_threshold": self.bright_spot_diff_threshold,
+            "within_spec_judgment_rules": self.within_spec_judgment_rules,
             "skip_files": self.skip_files,
             "side_shot_prefixes": self.side_shot_prefixes,
             "max_images_per_panel": self.max_images_per_panel,
@@ -491,6 +624,7 @@ class CAPIConfig:
             "bright_spot_min_area": self.bright_spot_min_area,
             "bright_spot_median_kernel": self.bright_spot_median_kernel,
             "bright_spot_diff_threshold": self.bright_spot_diff_threshold,
+            "within_spec_judgment_rules": self.within_spec_judgment_rules,
             "skip_files": self.skip_files,
             "max_images_per_panel": self.max_images_per_panel,
             "bomb_defects": [b.to_dict() for b in self.bomb_defects],
@@ -641,6 +775,10 @@ class CAPIConfig:
             self.bright_spot_median_kernel = int(param_map["bright_spot_median_kernel"])
         if "bright_spot_diff_threshold" in param_map:
             self.bright_spot_diff_threshold = int(param_map["bright_spot_diff_threshold"])
+        if "within_spec_judgment_rules" in param_map and isinstance(param_map["within_spec_judgment_rules"], dict):
+            self.within_spec_judgment_rules = self._normalize_within_spec_judgment_rules(
+                param_map["within_spec_judgment_rules"]
+            )
         if "aoi_report_path_replace_from" in param_map:
             self.aoi_report_path_replace_from = str(param_map["aoi_report_path_replace_from"])
         if "aoi_report_path_replace_to" in param_map:
