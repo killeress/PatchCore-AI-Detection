@@ -1,0 +1,309 @@
+{% extends "base.html" %}
+
+{% block title %}規格內計算清單{% endblock %}
+
+{% block content %}
+<style>
+    .ws-report-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 16px;
+        margin-bottom: 18px;
+    }
+
+    .ws-report-title {
+        font-size: 1.35rem;
+        font-weight: 800;
+        color: #f8fafc;
+    }
+
+    .ws-report-subtitle {
+        margin-top: 4px;
+        color: var(--text-muted);
+        font-size: 0.86rem;
+    }
+
+    .ws-link {
+        display: inline-flex;
+        align-items: center;
+        padding: 8px 12px;
+        border: 1px solid rgba(59, 130, 246, 0.35);
+        border-radius: 6px;
+        background: rgba(59, 130, 246, 0.14);
+        color: #bfdbfe;
+        text-decoration: none;
+        font-weight: 700;
+        font-size: 0.82rem;
+        white-space: nowrap;
+    }
+
+    .ws-band {
+        border: 1px solid var(--border);
+        background: rgba(30, 41, 59, 0.72);
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 16px;
+    }
+
+    .ws-filter {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: end;
+        gap: 10px;
+    }
+
+    .ws-field {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+    }
+
+    .ws-field label {
+        color: var(--text-muted);
+        font-size: 0.76rem;
+        font-weight: 700;
+    }
+
+    .ws-field input,
+    .ws-field select {
+        min-height: 34px;
+        padding: 7px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: rgba(15, 23, 42, 0.82);
+        color: var(--text);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.82rem;
+    }
+
+    .ws-btn {
+        min-height: 34px;
+        padding: 7px 14px;
+        border: 1px solid rgba(59, 130, 246, 0.4);
+        border-radius: 6px;
+        background: rgba(59, 130, 246, 0.18);
+        color: #dbeafe;
+        font-weight: 800;
+        cursor: pointer;
+    }
+
+    .ws-metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 10px;
+        margin-top: 12px;
+    }
+
+    .ws-metric {
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.5);
+        padding: 11px 12px;
+    }
+
+    .ws-metric .label {
+        color: var(--text-muted);
+        font-size: 0.75rem;
+        margin-bottom: 4px;
+    }
+
+    .ws-metric .value {
+        color: #f8fafc;
+        font-size: 1.05rem;
+        font-weight: 800;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .ws-table-wrap {
+        overflow-x: auto;
+    }
+
+    .ws-table {
+        width: 100%;
+        min-width: 1180px;
+        border-collapse: collapse;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.78rem;
+    }
+
+    .ws-table th,
+    .ws-table td {
+        padding: 10px 11px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+        vertical-align: top;
+    }
+
+    .ws-table th {
+        color: #93c5fd;
+        background: rgba(15, 23, 42, 0.48);
+        font-weight: 800;
+        white-space: nowrap;
+    }
+
+    .ws-badge {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        padding: 3px 8px;
+        font-size: 0.72rem;
+        font-weight: 800;
+        white-space: nowrap;
+    }
+
+    .ws-badge.ok {
+        border: 1px solid rgba(34, 197, 94, 0.38);
+        background: rgba(34, 197, 94, 0.14);
+        color: #86efac;
+    }
+
+    .ws-badge.neutral {
+        border: 1px solid rgba(148, 163, 184, 0.32);
+        background: rgba(148, 163, 184, 0.12);
+        color: #cbd5e1;
+    }
+
+    .ws-muted {
+        color: var(--text-muted);
+    }
+
+    .ws-reason {
+        max-width: 360px;
+        white-space: normal;
+        word-break: break-word;
+        color: #cbd5e1;
+    }
+
+    .ws-actions {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+    }
+
+    .ws-empty {
+        padding: 24px;
+        text-align: center;
+        color: var(--text-muted);
+    }
+</style>
+
+<div class="ws-report-head">
+    <div>
+        <div class="ws-report-title">規格內計算清單</div>
+        <div class="ws-report-subtitle">查閱每次手動計算的規格內建議、設定來源與明細連結</div>
+    </div>
+    <a class="ws-link" href="/ric">返回 RIC Report</a>
+</div>
+
+<section class="ws-band">
+    <form class="ws-filter" method="get" action="/ric/within-spec-logs">
+        <div class="ws-field">
+            <label for="start_date">起始日期</label>
+            <input id="start_date" type="date" name="start_date" value="{{ filters.start_date }}">
+        </div>
+        <div class="ws-field">
+            <label for="end_date">結束日期</label>
+            <input id="end_date" type="date" name="end_date" value="{{ filters.end_date }}">
+        </div>
+        <div class="ws-field">
+            <label for="keyword">關鍵字</label>
+            <input id="keyword" type="text" name="keyword" value="{{ filters.keyword|e }}" placeholder="Panel / 機台 / 機種 / 原因">
+        </div>
+        <div class="ws-field">
+            <label for="status">結果</label>
+            <select id="status" name="status">
+                <option value="all" {% if filters.status == "all" %}selected{% endif %}>全部</option>
+                <option value="suggested" {% if filters.status == "suggested" %}selected{% endif %}>建議規格內</option>
+                <option value="not_suggested" {% if filters.status == "not_suggested" %}selected{% endif %}>未建議</option>
+            </select>
+        </div>
+        <div class="ws-field">
+            <label for="limit">筆數</label>
+            <input id="limit" type="number" min="1" max="500" name="limit" value="{{ filters.limit }}">
+        </div>
+        <button class="ws-btn" type="submit">查詢</button>
+    </form>
+
+    <div class="ws-metrics">
+        <div class="ws-metric">
+            <div class="label">顯示筆數</div>
+            <div class="value">{{ summary.total }}</div>
+        </div>
+        <div class="ws-metric">
+            <div class="label">建議規格內</div>
+            <div class="value">{{ summary.suggested }}</div>
+        </div>
+        <div class="ws-metric">
+            <div class="label">未建議</div>
+            <div class="value">{{ summary.not_suggested }}</div>
+        </div>
+        <div class="ws-metric">
+            <div class="label">Fallback Default</div>
+            <div class="value">{{ summary.fallback }}</div>
+        </div>
+    </div>
+</section>
+
+<section class="ws-band">
+    <div class="ws-table-wrap">
+        <table class="ws-table">
+            <thead>
+                <tr>
+                    <th>Log</th>
+                    <th>計算時間</th>
+                    <th>Panel</th>
+                    <th>機台 / 機種</th>
+                    <th>設定來源</th>
+                    <th>結果</th>
+                    <th>Panel 點數</th>
+                    <th>Tile</th>
+                    <th>原因</th>
+                    <th>耗時</th>
+                    <th>連結</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                <tr>
+                    <td>#{{ row.id }}</td>
+                    <td>{{ (row.created_at or "")|e }}</td>
+                    <td>
+                        <div>{{ (row.pnl_id or "-")|e }}</div>
+                        <div class="ws-muted">{{ (row.client_time_stamp or "")|e }}</div>
+                    </td>
+                    <td>
+                        <div>{{ (row.mach_id or row.machine_no or "-")|e }}</div>
+                        <div class="ws-muted">{{ (row.model_id or "-")|e }}</div>
+                    </td>
+                    <td>
+                        <div>{{ (row.matched_machine_key or "default")|e }}</div>
+                        {% if row.fallback_used %}<div class="ws-muted">fallback default</div>{% endif %}
+                    </td>
+                    <td>
+                        {% if row.suggested %}
+                        <span class="ws-badge ok">建議規格內</span>
+                        {% else %}
+                        <span class="ws-badge neutral">未建議</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ row.total_dot_count }}</td>
+                    <td>{{ row.evaluated_tile_count }} / {{ row.target_tile_count }}</td>
+                    <td class="ws-reason">{{ (row.reason or row.error_message or "-")|e }}</td>
+                    <td>{{ "%.3f"|format(row.processing_seconds or 0) }} s</td>
+                    <td>
+                        <div class="ws-actions">
+                            <a class="ws-link" href="/ric/within-spec-log/{{ row.id }}" target="_blank" rel="noopener">明細</a>
+                            <a class="ws-link" href="/record/{{ row.inference_record_id }}" target="_blank" rel="noopener">推論</a>
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="11" class="ws-empty">目前沒有符合條件的規格內計算紀錄</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

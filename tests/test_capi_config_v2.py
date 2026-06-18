@@ -148,7 +148,7 @@ def test_within_spec_judgment_rules_defaults_and_overrides():
     assert default_rules["screens"]["B0F00000"]["black_dot"]["enabled"] is False
     assert default_rules["screens"]["B0F00000"]["white_dot"]["area_threshold_mm"] == 0.2
     assert default_rules["screens"]["B0F00000"]["white_dot"]["screen_count_limit"] == 1
-    assert default_rules["dot_detection"]["diff_threshold"] == 7
+    assert default_rules["dot_detection"]["diff_threshold"] == 4
     assert default_rules["dot_detection"]["background_kernel"] == 33
 
     custom_rules = {

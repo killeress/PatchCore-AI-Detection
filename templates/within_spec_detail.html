@@ -1,0 +1,377 @@
+{% extends "base.html" %}
+
+{% block title %}規格內計算明細 #{{ log.id }}{% endblock %}
+
+{% block content %}
+{% set detail = log.detail or {} %}
+{% set summary = detail.panel_summary or {} %}
+{% set rule_selection = detail.rule_selection or {} %}
+<style>
+    .ws-page-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 16px;
+        margin-bottom: 18px;
+    }
+
+    .ws-title {
+        font-size: 1.35rem;
+        font-weight: 800;
+        color: #f8fafc;
+    }
+
+    .ws-subtitle {
+        margin-top: 4px;
+        color: var(--text-muted);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.82rem;
+    }
+
+    .ws-link {
+        display: inline-flex;
+        align-items: center;
+        padding: 8px 12px;
+        border: 1px solid rgba(59, 130, 246, 0.35);
+        border-radius: 6px;
+        background: rgba(59, 130, 246, 0.14);
+        color: #bfdbfe;
+        text-decoration: none;
+        font-weight: 700;
+        font-size: 0.82rem;
+        white-space: nowrap;
+    }
+
+    .ws-band {
+        border: 1px solid var(--border);
+        background: rgba(30, 41, 59, 0.72);
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 16px;
+    }
+
+    .ws-section-title {
+        font-size: 1rem;
+        font-weight: 800;
+        color: #e2e8f0;
+        margin-bottom: 12px;
+    }
+
+    .ws-metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 10px;
+    }
+
+    .ws-metric {
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 6px;
+        padding: 10px;
+        background: rgba(15, 23, 42, 0.45);
+    }
+
+    .ws-metric .label {
+        color: var(--text-muted);
+        font-size: 0.74rem;
+    }
+
+    .ws-metric .value {
+        margin-top: 4px;
+        font-family: 'Fira Code', monospace;
+        font-size: 1rem;
+        color: #f8fafc;
+        word-break: break-word;
+    }
+
+    .ws-badge {
+        display: inline-flex;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 800;
+    }
+
+    .ws-badge.ok {
+        color: #86efac;
+        background: rgba(34, 197, 94, 0.14);
+        border: 1px solid rgba(34, 197, 94, 0.35);
+    }
+
+    .ws-badge.neutral {
+        color: #cbd5e1;
+        background: rgba(148, 163, 184, 0.12);
+        border: 1px solid rgba(148, 163, 184, 0.24);
+    }
+
+    .ws-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.82rem;
+    }
+
+    .ws-table th,
+    .ws-table td {
+        border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+        padding: 8px;
+        text-align: left;
+        vertical-align: top;
+    }
+
+    .ws-table th {
+        color: #cbd5e1;
+        font-weight: 800;
+        background: rgba(15, 23, 42, 0.42);
+    }
+
+    .ws-visual-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+        gap: 14px;
+    }
+
+    .ws-visual {
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 8px;
+        padding: 12px;
+        background: rgba(15, 23, 42, 0.42);
+    }
+
+    .ws-visual-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 10px;
+        color: #e2e8f0;
+        font-size: 0.82rem;
+    }
+
+    .ws-main-img {
+        width: 100%;
+        max-height: 420px;
+        object-fit: contain;
+        background: #020617;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 6px;
+    }
+
+    .ws-thumbs {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+        margin-top: 8px;
+    }
+
+    .ws-thumb img {
+        width: 100%;
+        aspect-ratio: 1;
+        object-fit: contain;
+        background: #020617;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 6px;
+    }
+
+    .ws-thumb div {
+        margin-top: 3px;
+        color: var(--text-muted);
+        font-size: 0.7rem;
+    }
+
+    .ws-steps {
+        max-height: 520px;
+        overflow: auto;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.42);
+    }
+
+    .ws-step {
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+    }
+
+    .ws-step:last-child {
+        border-bottom: none;
+    }
+
+    .ws-step-title {
+        color: #f8fafc;
+        font-weight: 800;
+        font-size: 0.82rem;
+    }
+
+    .ws-step-data {
+        margin-top: 6px;
+        color: #93c5fd;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.72rem;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+</style>
+
+<div class="ws-page-head">
+    <div>
+        <div class="ws-title">規格內計算明細 #{{ log.id }}</div>
+        <div class="ws-subtitle">Client {{ log.client_record_id }} / Inference {{ log.inference_record_id }} / {{ log.created_at }}</div>
+    </div>
+    <a class="ws-link" href="/ric">返回 RIC Report</a>
+</div>
+
+<section class="ws-band">
+    <div class="ws-section-title">計算摘要</div>
+    <div class="ws-metrics">
+        <div class="ws-metric">
+            <div class="label">判定結果</div>
+            <div class="value">
+                {% if log.suggested %}
+                <span class="ws-badge ok">建議規格內</span>
+                {% else %}
+                <span class="ws-badge neutral">未建議</span>
+                {% endif %}
+            </div>
+        </div>
+        <div class="ws-metric">
+            <div class="label">原因</div>
+            <div class="value">{{ log.reason or log.error_message or "無" }}</div>
+        </div>
+        <div class="ws-metric">
+            <div class="label">設定來源</div>
+            <div class="value">
+                {{ rule_selection.matched_machine_key or "default" }}
+                {% if rule_selection.fallback_used %}<span class="ws-muted">(fallback default)</span>{% endif %}
+            </div>
+        </div>
+        <div class="ws-metric">
+            <div class="label">耗時</div>
+            <div class="value">{{ "%.3f"|format(log.processing_seconds or 0) }} s</div>
+        </div>
+        <div class="ws-metric">
+            <div class="label">目標 / 已判定 Tile</div>
+            <div class="value">{{ summary.target_tile_count or 0 }} / {{ summary.evaluated_tile_count or 0 }}</div>
+        </div>
+        <div class="ws-metric">
+            <div class="label">Panel 點數加總</div>
+            <div class="value">{{ summary.total_dot_count or 0 }}</div>
+        </div>
+        <div class="ws-metric">
+            <div class="label">跳過 Tile</div>
+            <div class="value">{{ summary.skipped_tiles or {} }}</div>
+        </div>
+    </div>
+</section>
+
+<section class="ws-band">
+    <div class="ws-section-title">Panel 點數加總</div>
+    {% if detail.panel_totals %}
+    <table class="ws-table">
+        <thead>
+            <tr>
+                <th>Screen</th>
+                <th>點類型</th>
+                <th>總點數</th>
+                <th>最大尺寸 mm</th>
+                <th>尺寸門檻 mm</th>
+                <th>每畫面 ≤</th>
+                <th>Tile 內 ≤</th>
+                <th>判定 Tile</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in detail.panel_totals %}
+            <tr>
+                <td>{{ item.screen }}</td>
+                <td>{{ item.dot_label }} / {{ item.dot_type }}</td>
+                <td>{{ item.total_count }}</td>
+                <td>{{ "%.4f"|format(item.max_size_mm or 0) }}</td>
+                <td>{{ "%.4f"|format(item.threshold_mm or 0) }}</td>
+                <td>{{ item.screen_count_limit }}</td>
+                <td>{{ item.tile_count_threshold }}</td>
+                <td>{{ item.evaluated_tiles }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div style="color:var(--text-muted);">沒有可加總的點偵測結果。</div>
+    {% endif %}
+</section>
+
+<section class="ws-band">
+    <div class="ws-section-title">點偵測結果圖片</div>
+    {% if detail.visuals %}
+    <div class="ws-visual-grid">
+        {% for visual in detail.visuals %}
+        <div class="ws-visual">
+            <div class="ws-visual-head">
+                <div>{{ visual.image_name }} / Tile {{ visual.tile_id }} / {{ visual.dot_label }}</div>
+                <div>{{ visual.count }} 點，max {{ "%.4f"|format(visual.max_size_mm or 0) }} mm</div>
+            </div>
+            <a href="{{ visual.urls.overlay_url }}" target="_blank">
+                <img class="ws-main-img" src="{{ visual.urls.overlay_url }}" alt="dot overlay">
+            </a>
+            <div class="ws-thumbs">
+                <a class="ws-thumb" href="{{ visual.urls.crop_url }}" target="_blank">
+                    <img src="{{ visual.urls.crop_url }}" alt="crop">
+                    <div>原始 tile</div>
+                </a>
+                <a class="ws-thumb" href="{{ visual.urls.diff_url }}" target="_blank">
+                    <img src="{{ visual.urls.diff_url }}" alt="diff">
+                    <div>diff</div>
+                </a>
+                <a class="ws-thumb" href="{{ visual.urls.mask_url }}" target="_blank">
+                    <img src="{{ visual.urls.mask_url }}" alt="mask">
+                    <div>mask</div>
+                </a>
+            </div>
+            {% if visual.candidates %}
+            <table class="ws-table" style="margin-top:10px;">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>size mm</th>
+                        <th>size px</th>
+                        <th>bbox</th>
+                        <th>diff</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for c in visual.candidates[:12] %}
+                    <tr>
+                        <td>{{ c.id }}</td>
+                        <td>{{ "%.4f"|format(c.size_mm or 0) }}</td>
+                        <td>{{ "%.2f"|format(c.size_px or 0) }}</td>
+                        <td>{{ c.x }},{{ c.y }},{{ c.w }}x{{ c.h }}</td>
+                        <td>{{ c.max_diff }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div style="color:var(--text-muted);">這筆 log 沒有保存偵測圖片。請重新按「計算」產生新版明細。</div>
+    {% endif %}
+</section>
+
+<section class="ws-band">
+    <div class="ws-section-title">計算過程 Log</div>
+    {% if detail.steps %}
+    <div class="ws-steps">
+        {% for step in detail.steps %}
+        {% set data = step.copy() %}
+        {% set _ = data.pop("message", None) %}
+        <div class="ws-step">
+            <div class="ws-step-title">{{ loop.index }}. {{ step.message }}</div>
+            {% if data %}
+            <div class="ws-step-data">{{ data | tojson(indent=2) }}</div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div style="color:var(--text-muted);">沒有計算步驟。</div>
+    {% endif %}
+</section>
+{% endblock %}

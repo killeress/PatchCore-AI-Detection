@@ -973,6 +973,64 @@
         padding: 2px 6px;
     }
 
+    .within-spec-param-input {
+        width: 72px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        border: 1px solid rgba(250, 204, 21, 0.32);
+        background: rgba(15, 23, 42, 0.85);
+        color: #fde68a;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .within-spec-param-select {
+        padding: 2px 6px;
+        border-radius: 4px;
+        border: 1px solid rgba(250, 204, 21, 0.32);
+        background: rgba(15, 23, 42, 0.85);
+        color: #fde68a;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .within-spec-param-field {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        color: #fde68a;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .within-spec-param-help {
+        padding: 0 16px 14px;
+        color: var(--text-muted);
+        font-size: 0.78rem;
+        line-height: 1.6;
+    }
+
+    .within-spec-param-help-title {
+        color: #93c5fd;
+        font-weight: 700;
+        margin-bottom: 4px;
+    }
+
+    .within-spec-metric-help {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 4px 14px;
+    }
+
+    .within-spec-metric-help code {
+        color: #fde68a;
+        background: rgba(15, 23, 42, 0.75);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 4px;
+        padding: 1px 5px;
+    }
+
     /* Toggle Switch */
     .switch {
         position: relative;
@@ -1931,7 +1989,7 @@
         const dotDetection = {
             preprocess_method: 'gaussian',
             preprocess_params: { kernel_size: 7, sigma: 1.0 },
-            diff_threshold: 7,
+            diff_threshold: 4,
             background_kernel: 33,
             min_area_px: 2,
             max_area_px: 50000,
@@ -2065,8 +2123,8 @@
                                     <th>Defect Code</th>
                                     <th>點類型</th>
                                     <th>面積門檻 mm</th>
-                                    <th>每畫面 ≥ 數量</th>
-                                    <th>Tile 內 ≥ 數量</th>
+                                    <th>每畫面 ≤ 數量</th>
+                                    <th>Tile 內 ≤ 數量</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -2089,7 +2147,7 @@
                                     <th>Defect Code</th>
                                     <th>點類型</th>
                                     <th>面積門檻 mm</th>
-                                    <th>白點數量 ≥</th>
+                                    <th>白點數量 ≤</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -2099,13 +2157,53 @@
                     </div>
                     <div class="within-spec-param-strip">
                         <span>點圖偵測參數</span>
-                        <code>preprocess=${escapeHtml(d.preprocess_method || 'gaussian')}(${escapeHtml(preprocess.kernel_size || 7)}, ${escapeHtml(preprocess.sigma || 1)})</code>
-                        <code>diff=${escapeHtml(d.diff_threshold ?? 7)}</code>
-                        <code>bg=${escapeHtml(d.background_kernel ?? 33)}</code>
-                        <code>area=${escapeHtml(d.min_area_px ?? 2)}-${escapeHtml(d.max_area_px ?? 50000)}px</code>
-                        <code>open=${escapeHtml(d.morph_open ?? 2)}</code>
-                        <code>metric=${escapeHtml(d.size_metric || 'bbox_diagonal')}</code>
-                        <code>mm/px=${escapeHtml(d.unit_per_px ?? 0.0245)}</code>
+                        <code title="前處理流程目前固定，不在此頁編輯">preprocess=${escapeHtml(d.preprocess_method || 'gaussian')}(${escapeHtml(preprocess.kernel_size || 7)}, ${escapeHtml(preprocess.sigma || 1)}) 只讀</code>
+                        <label class="within-spec-param-field">
+                            diff=<input class="within-spec-param-input" type="number" min="0" step="1"
+                                value="${formatWithinSpecNumber(d.diff_threshold, 4)}"
+                                oninput="updateWithinSpecDotDetection('diff_threshold', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            bg=<input class="within-spec-param-input" type="number" min="1" step="2"
+                                value="${formatWithinSpecNumber(d.background_kernel, 33)}"
+                                oninput="updateWithinSpecDotDetection('background_kernel', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            min=<input class="within-spec-param-input" type="number" min="1" step="1"
+                                value="${formatWithinSpecNumber(d.min_area_px, 2)}"
+                                oninput="updateWithinSpecDotDetection('min_area_px', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            max=<input class="within-spec-param-input" type="number" min="0" step="1"
+                                value="${formatWithinSpecNumber(d.max_area_px, 50000)}"
+                                oninput="updateWithinSpecDotDetection('max_area_px', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            open=<input class="within-spec-param-input" type="number" min="0" step="1"
+                                value="${formatWithinSpecNumber(d.morph_open, 2)}"
+                                oninput="updateWithinSpecDotDetection('morph_open', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            metric=<select class="within-spec-param-select" onchange="updateWithinSpecDotDetection('size_metric', this.value)">
+                                ${['bbox_diagonal', 'bbox_max', 'equivalent', 'enclosing'].map(metric =>
+                                    `<option value="${metric}" ${(d.size_metric || 'bbox_diagonal') === metric ? 'selected' : ''}>${metric}</option>`
+                                ).join('')}
+                            </select>
+                        </label>
+                        <label class="within-spec-param-field">
+                            mm/px=<input class="within-spec-param-input" type="number" min="0" step="0.0001"
+                                value="${formatWithinSpecNumber(d.unit_per_px, 0.0245)}"
+                                oninput="updateWithinSpecDotDetection('unit_per_px', this.value)">
+                        </label>
+                    </div>
+                    <div class="within-spec-param-help">
+                        <div class="within-spec-param-help-title">metric 用來選擇點大小的量測方式；目前建議固定使用 <code>bbox_diagonal</code>。</div>
+                        <div class="within-spec-metric-help">
+                            <div><code>bbox_diagonal</code>：用偵測框對角線，較保守。</div>
+                            <div><code>bbox_max</code>：用偵測框寬或高中較大的邊。</div>
+                            <div><code>equivalent</code>：用面積換算等效圓直徑。</div>
+                            <div><code>enclosing</code>：用輪廓外接圓直徑，對不規則形狀較敏感。</div>
+                        </div>
                     </div>
                     <div class="within-spec-actions">
                         <button class="btn-save" onclick="saveWithinSpecSettings()">💾 儲存規格內判定</button>
@@ -2188,6 +2286,33 @@
         }
         const n = Number(rawValue);
         machineCfg.screens[screenCode][dotType][field] = Number.isFinite(n) ? n : 0;
+    }
+
+    function updateWithinSpecDotDetection(field, rawValue) {
+        if (!withinSpecRules[currentWithinSpecMachine]) {
+            withinSpecRules[currentWithinSpecMachine] = defaultWithinSpecMachine(currentWithinSpecMachine);
+        }
+        const machineCfg = withinSpecRules[currentWithinSpecMachine];
+        if (!machineCfg.dot_detection) {
+            machineCfg.dot_detection = cloneJson(defaultWithinSpecMachine(currentWithinSpecMachine).dot_detection);
+        }
+        if (field === 'size_metric') {
+            const allowed = ['bbox_diagonal', 'bbox_max', 'equivalent', 'enclosing'];
+            machineCfg.dot_detection[field] = allowed.includes(rawValue) ? rawValue : 'bbox_diagonal';
+            return;
+        }
+        const n = Number(rawValue);
+        if (!Number.isFinite(n)) {
+            machineCfg.dot_detection[field] = 0;
+            return;
+        }
+        if (field === 'background_kernel') {
+            const kernel = Math.max(1, Math.round(n));
+            machineCfg.dot_detection[field] = kernel % 2 === 0 ? kernel + 1 : kernel;
+            return;
+        }
+        const integerFields = new Set(['diff_threshold', 'min_area_px', 'max_area_px', 'morph_open']);
+        machineCfg.dot_detection[field] = integerFields.has(field) ? Math.max(0, Math.round(n)) : Math.max(0, n);
     }
 
     async function saveWithinSpecSettings() {
