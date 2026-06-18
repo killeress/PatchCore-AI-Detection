@@ -845,6 +845,134 @@
         }
     }
 
+    .within-spec-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding: 16px;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .within-spec-toolbar select,
+    .within-spec-toolbar input {
+        min-width: 240px;
+        background: #0f172a;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 12px;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.86rem;
+    }
+
+    .within-spec-table-wrap {
+        overflow-x: auto;
+    }
+
+    .within-spec-table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 860px;
+    }
+
+    .within-spec-table th,
+    .within-spec-table td {
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(51, 65, 85, 0.65);
+        text-align: left;
+        vertical-align: middle;
+    }
+
+    .within-spec-table th {
+        color: var(--text-muted);
+        font-size: 0.78rem;
+        font-weight: 600;
+        background: rgba(15, 23, 42, 0.5);
+        white-space: nowrap;
+    }
+
+    .within-spec-table td {
+        font-size: 0.84rem;
+        color: var(--text);
+    }
+
+    .within-spec-code {
+        font-family: 'Fira Code', monospace;
+        color: #93c5fd;
+        white-space: nowrap;
+    }
+
+    .within-spec-dot {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: #cbd5e1;
+        white-space: nowrap;
+    }
+
+    .within-spec-dot-swatch {
+        width: 12px;
+        height: 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, 0.8);
+        flex: 0 0 auto;
+    }
+
+    .within-spec-dot-swatch.black {
+        background: #020617;
+    }
+
+    .within-spec-dot-swatch.white {
+        background: #f8fafc;
+    }
+
+    .within-spec-input {
+        width: 96px;
+        background: #0f172a;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 7px 9px;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.84rem;
+    }
+
+    .within-spec-input:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    .within-spec-muted {
+        color: var(--text-muted);
+        font-size: 0.78rem;
+    }
+
+    .within-spec-actions {
+        display: flex;
+        justify-content: flex-end;
+        padding: 16px;
+        border-top: 1px solid rgba(51, 65, 85, 0.65);
+    }
+
+    .within-spec-param-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 12px 16px;
+        border-top: 1px solid rgba(51, 65, 85, 0.45);
+        color: var(--text-muted);
+        font-size: 0.78rem;
+    }
+
+    .within-spec-param-strip code {
+        color: #fde68a;
+        background: rgba(15, 23, 42, 0.75);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 4px;
+        padding: 2px 6px;
+    }
+
     /* Toggle Switch */
     .switch {
         position: relative;
@@ -1273,9 +1401,24 @@
         'bright_spot_diff_threshold', 'bright_spot_median_kernel',
         'bright_spot_min_area', 'bright_spot_threshold'
     ];
+    const WITHIN_SPEC_PARAM = 'within_spec_judgment_rules';
+    const WITHIN_SPEC_STANDARD_SCREENS = [
+        ['STANDARD', 'STANDARD(標準)'],
+        ['WGF50500', 'WGF50500(50灰)'],
+        ['G0F00000', 'G0F00000(綠畫面)'],
+        ['R0F00000', 'R0F00000(紅畫面)'],
+        ['W0F00000', 'W0F00000(白畫面)'],
+    ];
+    const WITHIN_SPEC_DOT_TYPES = [
+        ['black_dot', '黑點', 'black'],
+        ['white_dot', '白點', 'white'],
+    ];
 
     // ── Init ──
     let currentTab = 'inference';
+    let withinSpecRules = null;
+    let withinSpecRulesSource = '';
+    let currentWithinSpecMachine = '';
 
     window.switchTab = function (tabId) {
         currentTab = tabId;
@@ -1327,6 +1470,7 @@
         const cvEdgeParams = CV_EDGE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const aoiCoordParams = AOI_COORD_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const b0fParams = B0F_BRIGHT_SPOT_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
+        const withinSpecParam = allParams.find(p => p.param_name === WITHIN_SPEC_PARAM);
 
         // Group CV Edge Parameters
         const edgeEnabled = cvEdgeParams.find(p => p.param_name === 'cv_edge_enabled');
@@ -1426,6 +1570,7 @@
             <button class="settings-tab-btn ${currentTab === 'dust' ? 'active' : ''}" data-target="dust" onclick="switchTab('dust')">🧹 灰塵偵測</button>
             <button class="settings-tab-btn ${currentTab === 'cv-edge' ? 'active' : ''}" data-target="cv-edge" onclick="switchTab('cv-edge')">📐 CV 邊緣檢測</button>
             <button class="settings-tab-btn ${currentTab === 'aoi-coord' ? 'active' : ''}" data-target="aoi-coord" onclick="switchTab('aoi-coord')">🎯 AOI 機檢座標</button>
+            <button class="settings-tab-btn ${currentTab === 'within-spec' ? 'active' : ''}" data-target="within-spec" onclick="switchTab('within-spec')">📏 規格內判定</button>
             <button class="settings-tab-btn ${currentTab === 'history' ? 'active' : ''}" data-target="history" onclick="switchTab('history')">📋 修改紀錄</button>
         `;
 
@@ -1740,6 +1885,7 @@
                 </div>
                 ` : ''}
             </div>
+            ${renderWithinSpecPane(withinSpecParam)}
         `;
 
         // 延遲初始化可視化工具
@@ -1747,6 +1893,323 @@
             if (typeof initExZoneData === 'function') initExZoneData();
             if (typeof updateEdgeVisualizer === 'function') updateEdgeVisualizer();
         }, 50);
+    }
+
+    function cloneJson(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+
+    function escapeHtml(s) {
+        return String(s || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    function parseJsonLoose(raw, fallback) {
+        if (raw === undefined || raw === null || raw === '') return cloneJson(fallback);
+        let parsed = raw;
+        for (let i = 0; i < 2; i++) {
+            if (typeof parsed !== 'string') break;
+            try { parsed = JSON.parse(parsed); } catch { break; }
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            return cloneJson(fallback);
+        }
+        return parsed;
+    }
+
+    function getPlainParamValue(name, fallback = '') {
+        const p = allParams.find(x => x.param_name === name);
+        if (!p) return fallback;
+        try { return String(JSON.parse(p.param_value)); } catch { return String(p.param_value || fallback); }
+    }
+
+    function defaultWithinSpecRules() {
+        const dotDetection = {
+            preprocess_method: 'gaussian',
+            preprocess_params: { kernel_size: 7, sigma: 1.0 },
+            diff_threshold: 7,
+            background_kernel: 33,
+            min_area_px: 2,
+            max_area_px: 50000,
+            morph_open: 2,
+            size_metric: 'bbox_diagonal',
+            unit_per_px: 0.0245,
+        };
+        const standardScreen = (label) => ({
+            label,
+            black_dot: { enabled: true, defect_code: 'C1111', area_threshold_mm: 0.3, screen_count_limit: 3, tile_count_threshold: 2 },
+            white_dot: { enabled: true, defect_code: 'C1111', area_threshold_mm: 0.3, screen_count_limit: 1, tile_count_threshold: 2 },
+        });
+        return {
+            default: {
+                display_name: '預設機種',
+                dot_detection: dotDetection,
+                screens: {
+                    STANDARD: standardScreen('STANDARD(標準)'),
+                    WGF50500: standardScreen('WGF50500(50灰)'),
+                    G0F00000: standardScreen('G0F00000(綠畫面)'),
+                    R0F00000: standardScreen('R0F00000(紅畫面)'),
+                    W0F00000: standardScreen('W0F00000(白畫面)'),
+                    B0F00000: {
+                        label: 'B0F00000(黑畫面)',
+                        black_dot: { enabled: false, defect_code: 'C1111', area_threshold_mm: 0.2, screen_count_limit: 1, tile_count_threshold: 1 },
+                        white_dot: { enabled: true, defect_code: 'C1111', area_threshold_mm: 0.2, screen_count_limit: 1, tile_count_threshold: 1 },
+                    },
+                },
+            },
+        };
+    }
+
+    function defaultWithinSpecMachine(machineId = 'default') {
+        const cfg = cloneJson(defaultWithinSpecRules().default);
+        cfg.display_name = machineId === 'default' ? '預設機種' : machineId;
+        return cfg;
+    }
+
+    function normalizeWithinSpecMachine(cfg, machineId) {
+        const base = defaultWithinSpecMachine(machineId);
+        const normalized = { ...base, ...(cfg || {}) };
+        normalized.display_name = normalized.display_name || base.display_name;
+        normalized.dot_detection = {
+            ...base.dot_detection,
+            ...((cfg && cfg.dot_detection) || {}),
+            preprocess_params: {
+                ...base.dot_detection.preprocess_params,
+                ...((cfg && cfg.dot_detection && cfg.dot_detection.preprocess_params) || {}),
+            },
+        };
+        normalized.screens = cloneJson(base.screens);
+        const incomingScreens = (cfg && cfg.screens) || {};
+        Object.keys(normalized.screens).forEach(code => {
+            const incomingScreen = incomingScreens[code] || {};
+            normalized.screens[code] = { ...normalized.screens[code], ...incomingScreen };
+            WITHIN_SPEC_DOT_TYPES.forEach(([dotType]) => {
+                normalized.screens[code][dotType] = {
+                    ...base.screens[code][dotType],
+                    ...((incomingScreen && incomingScreen[dotType]) || {}),
+                };
+            });
+        });
+        return normalized;
+    }
+
+    function normalizeWithinSpecRules(rawRules) {
+        const fallback = defaultWithinSpecRules();
+        let rules = rawRules && typeof rawRules === 'object' && !Array.isArray(rawRules)
+            ? cloneJson(rawRules)
+            : cloneJson(fallback);
+        if (Object.keys(rules).length === 0) rules = cloneJson(fallback);
+        delete rules.CAPI_3F;
+
+        Object.keys(rules).forEach(machineId => {
+            rules[machineId] = normalizeWithinSpecMachine(rules[machineId], machineId);
+        });
+
+        if (!rules.default) {
+            rules.default = normalizeWithinSpecMachine(fallback.default, 'default');
+        }
+        return rules;
+    }
+
+    function formatWithinSpecNumber(value, fallback = 0) {
+        const n = Number(value);
+        return Number.isFinite(n) ? String(n) : String(fallback);
+    }
+
+    function renderWithinSpecPane(param) {
+        const sourceValue = param ? String(param.param_value || '') : '';
+        if (!withinSpecRules || withinSpecRulesSource !== sourceValue) {
+            const rawRules = parseJsonLoose(param ? param.param_value : null, defaultWithinSpecRules());
+            withinSpecRules = normalizeWithinSpecRules(rawRules);
+            withinSpecRulesSource = sourceValue;
+        } else {
+            withinSpecRules = normalizeWithinSpecRules(withinSpecRules);
+        }
+
+        const machineIds = Object.keys(withinSpecRules);
+        if (!currentWithinSpecMachine || !withinSpecRules[currentWithinSpecMachine]) {
+            currentWithinSpecMachine = machineIds.includes('default') ? 'default' : machineIds[0];
+        }
+
+        const machineCfg = withinSpecRules[currentWithinSpecMachine];
+        const d = machineCfg.dot_detection || {};
+        const preprocess = d.preprocess_params || {};
+
+        return `
+            <div id="pane-within-spec" class="settings-tab-pane-block ${currentTab === 'within-spec' ? 'active' : ''}" style="grid-column: 1 / -1;">
+                <div class="settings-section" style="border-left: 3px solid #22c55e;">
+                    <div class="settings-section-header">
+                        <div class="icon" style="background: rgba(34, 197, 94, 0.14); color: #86efac;">📏</div>
+                        <span>規格內判定</span>
+                    </div>
+                    <div class="within-spec-toolbar">
+                        <span class="within-spec-muted">機種</span>
+                        <select onchange="switchWithinSpecMachine(this.value)">
+                            ${machineIds.map(id => `<option value="${escapeAttr(id)}" ${id === currentWithinSpecMachine ? 'selected' : ''}>${escapeHtml(id)}</option>`).join('')}
+                        </select>
+                        <input id="within-spec-machine-input" type="text" placeholder="輸入機種 ID" onkeydown="if(event.key === 'Enter') addWithinSpecMachineFromInput()">
+                        <button class="btn-edit" onclick="addWithinSpecMachineFromInput()">新增機種</button>
+                    </div>
+                    <div class="settings-section-header" style="background: rgba(34, 197, 94, 0.08); border-top: 1px solid rgba(34,197,94,0.18); border-bottom-color: rgba(34,197,94,0.18);">
+                        <span style="color:#86efac;">標準/灰/綠/紅/白畫面</span>
+                    </div>
+                    <div class="within-spec-table-wrap">
+                        <table class="within-spec-table">
+                            <thead>
+                                <tr>
+                                    <th>畫面</th>
+                                    <th>Defect Code</th>
+                                    <th>點類型</th>
+                                    <th>面積門檻 mm</th>
+                                    <th>每畫面 ≥ 數量</th>
+                                    <th>Tile 內 ≥ 數量</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${WITHIN_SPEC_STANDARD_SCREENS.map(([code, label]) =>
+                                    WITHIN_SPEC_DOT_TYPES.map(([dotType, dotLabel, swatch]) =>
+                                        renderWithinSpecStandardRow(machineCfg, code, label, dotType, dotLabel, swatch)
+                                    ).join('')
+                                ).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="settings-section-header" style="background: rgba(59, 130, 246, 0.08); border-top: 1px solid rgba(59,130,246,0.18); border-bottom-color: rgba(59,130,246,0.18);">
+                        <span style="color:#93c5fd;">B0F00000(黑畫面)</span>
+                    </div>
+                    <div class="within-spec-table-wrap">
+                        <table class="within-spec-table" style="min-width: 620px;">
+                            <thead>
+                                <tr>
+                                    <th>畫面</th>
+                                    <th>Defect Code</th>
+                                    <th>點類型</th>
+                                    <th>面積門檻 mm</th>
+                                    <th>白點數量 ≥</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${renderWithinSpecB0FRow(machineCfg)}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="within-spec-param-strip">
+                        <span>點圖偵測參數</span>
+                        <code>preprocess=${escapeHtml(d.preprocess_method || 'gaussian')}(${escapeHtml(preprocess.kernel_size || 7)}, ${escapeHtml(preprocess.sigma || 1)})</code>
+                        <code>diff=${escapeHtml(d.diff_threshold ?? 7)}</code>
+                        <code>bg=${escapeHtml(d.background_kernel ?? 33)}</code>
+                        <code>area=${escapeHtml(d.min_area_px ?? 2)}-${escapeHtml(d.max_area_px ?? 50000)}px</code>
+                        <code>open=${escapeHtml(d.morph_open ?? 2)}</code>
+                        <code>metric=${escapeHtml(d.size_metric || 'bbox_diagonal')}</code>
+                        <code>mm/px=${escapeHtml(d.unit_per_px ?? 0.0245)}</code>
+                    </div>
+                    <div class="within-spec-actions">
+                        <button class="btn-save" onclick="saveWithinSpecSettings()">💾 儲存規格內判定</button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderWithinSpecStandardRow(machineCfg, screenCode, screenLabel, dotType, dotLabel, swatch) {
+        const screen = machineCfg.screens[screenCode] || {};
+        const rule = screen[dotType] || {};
+        return `
+            <tr>
+                <td><span class="within-spec-code">${escapeHtml(screenLabel)}</span></td>
+                <td><input class="within-spec-input" type="text" value="${escapeAttr(rule.defect_code || 'C1111')}" oninput='updateWithinSpecRule(${JSON.stringify(screenCode)}, ${JSON.stringify(dotType)}, "defect_code", this.value)'></td>
+                <td><span class="within-spec-dot"><span class="within-spec-dot-swatch ${swatch}"></span>${escapeHtml(dotLabel)}</span></td>
+                <td><input class="within-spec-input" type="number" min="0" step="0.01" value="${formatWithinSpecNumber(rule.area_threshold_mm, 0.3)}" oninput='updateWithinSpecRule(${JSON.stringify(screenCode)}, ${JSON.stringify(dotType)}, "area_threshold_mm", this.value)'></td>
+                <td><input class="within-spec-input" type="number" min="0" step="1" value="${formatWithinSpecNumber(rule.screen_count_limit, dotType === 'white_dot' ? 1 : 3)}" oninput='updateWithinSpecRule(${JSON.stringify(screenCode)}, ${JSON.stringify(dotType)}, "screen_count_limit", this.value)'></td>
+                <td><input class="within-spec-input" type="number" min="0" step="1" value="${formatWithinSpecNumber(rule.tile_count_threshold, 2)}" oninput='updateWithinSpecRule(${JSON.stringify(screenCode)}, ${JSON.stringify(dotType)}, "tile_count_threshold", this.value)'></td>
+            </tr>
+        `;
+    }
+
+    function renderWithinSpecB0FRow(machineCfg) {
+        const screenCode = 'B0F00000';
+        const dotType = 'white_dot';
+        const screen = machineCfg.screens[screenCode] || {};
+        const rule = screen[dotType] || {};
+        return `
+            <tr>
+                <td><span class="within-spec-code">B0F00000(黑畫面)</span></td>
+                <td><input class="within-spec-input" type="text" value="${escapeAttr(rule.defect_code || 'C1111')}" oninput='updateWithinSpecRule(${JSON.stringify(screenCode)}, ${JSON.stringify(dotType)}, "defect_code", this.value)'></td>
+                <td><span class="within-spec-dot"><span class="within-spec-dot-swatch white"></span>白點</span></td>
+                <td><input class="within-spec-input" type="number" min="0" step="0.01" value="${formatWithinSpecNumber(rule.area_threshold_mm, 0.2)}" oninput='updateWithinSpecRule(${JSON.stringify(screenCode)}, ${JSON.stringify(dotType)}, "area_threshold_mm", this.value)'></td>
+                <td><input class="within-spec-input" type="number" min="0" step="1" value="${formatWithinSpecNumber(rule.screen_count_limit, 1)}" oninput='updateWithinSpecRule(${JSON.stringify(screenCode)}, ${JSON.stringify(dotType)}, "screen_count_limit", this.value)'></td>
+            </tr>
+        `;
+    }
+
+    function switchWithinSpecMachine(machineId) {
+        currentWithinSpecMachine = machineId;
+        renderSettings();
+    }
+
+    function addWithinSpecMachineFromInput() {
+        const input = document.getElementById('within-spec-machine-input');
+        const machineId = input ? input.value : '';
+        if (!machineId) return;
+        const key = machineId.trim();
+        if (!key) return;
+        if (withinSpecRules[key]) {
+            currentWithinSpecMachine = key;
+            renderSettings();
+            return;
+        }
+        const source = withinSpecRules[currentWithinSpecMachine] || defaultWithinSpecMachine(key);
+        withinSpecRules[key] = normalizeWithinSpecMachine(cloneJson(source), key);
+        withinSpecRules[key].display_name = key;
+        currentWithinSpecMachine = key;
+        if (input) input.value = '';
+        renderSettings();
+    }
+
+    function updateWithinSpecRule(screenCode, dotType, field, rawValue) {
+        if (!withinSpecRules[currentWithinSpecMachine]) {
+            withinSpecRules[currentWithinSpecMachine] = defaultWithinSpecMachine(currentWithinSpecMachine);
+        }
+        const machineCfg = withinSpecRules[currentWithinSpecMachine];
+        if (!machineCfg.screens) machineCfg.screens = {};
+        if (!machineCfg.screens[screenCode]) {
+            machineCfg.screens[screenCode] = defaultWithinSpecMachine(currentWithinSpecMachine).screens[screenCode];
+        }
+        if (!machineCfg.screens[screenCode][dotType]) {
+            machineCfg.screens[screenCode][dotType] = {};
+        }
+        if (field === 'defect_code') {
+            machineCfg.screens[screenCode][dotType][field] = String(rawValue || '').trim() || 'C1111';
+            return;
+        }
+        const n = Number(rawValue);
+        machineCfg.screens[screenCode][dotType][field] = Number.isFinite(n) ? n : 0;
+    }
+
+    async function saveWithinSpecSettings() {
+        const payload = normalizeWithinSpecRules(withinSpecRules);
+        try {
+            const res = await fetch('/api/settings/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    param_name: WITHIN_SPEC_PARAM,
+                    new_value: payload,
+                    reason: '更新規格內判定設定',
+                }),
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            showToast('✅ 規格內判定已更新', 'success');
+            loadSettings();
+            loadHistory();
+        } catch (e) {
+            showToast(`❌ ${e.message}`, 'error');
+        }
     }
 
     const PARAM_LABELS = {

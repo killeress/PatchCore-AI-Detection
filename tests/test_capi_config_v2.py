@@ -134,3 +134,46 @@ def test_aoi_heatmap_center_seed_enabled_serialization():
         with open(out_path, "r", encoding="utf-8") as rf:
             loaded = yaml.safe_load(rf)
         assert loaded["aoi_heatmap_center_seed_enabled"] is False
+
+
+def test_within_spec_judgment_rules_defaults_and_overrides():
+    cfg = CAPIConfig()
+    default_rules = cfg.within_spec_judgment_rules["default"]
+
+    assert default_rules["screens"]["STANDARD"]["black_dot"]["area_threshold_mm"] == 0.3
+    assert default_rules["screens"]["STANDARD"]["black_dot"]["defect_code"] == "C1111"
+    assert default_rules["screens"]["STANDARD"]["white_dot"]["defect_code"] == "C1111"
+    assert default_rules["screens"]["STANDARD"]["white_dot"]["screen_count_limit"] == 1
+    assert default_rules["screens"]["STANDARD"]["black_dot"]["tile_count_threshold"] == 2
+    assert default_rules["screens"]["B0F00000"]["black_dot"]["enabled"] is False
+    assert default_rules["screens"]["B0F00000"]["white_dot"]["area_threshold_mm"] == 0.2
+    assert default_rules["screens"]["B0F00000"]["white_dot"]["screen_count_limit"] == 1
+    assert default_rules["dot_detection"]["diff_threshold"] == 7
+    assert default_rules["dot_detection"]["background_kernel"] == 33
+
+    custom_rules = {
+        "CAPI_3F": {},
+        "MACHINE_A": {
+            "screens": {
+                "STANDARD": {
+                    "black_dot": {
+                        "enabled": True,
+                        "area_threshold_mm": 0.45,
+                        "screen_count_limit": 4,
+                        "tile_count_threshold": 3,
+                    },
+                },
+            },
+        },
+    }
+    cfg2 = CAPIConfig.from_dict({"within_spec_judgment_rules": custom_rules})
+    assert "CAPI_3F" not in cfg2.within_spec_judgment_rules
+    assert "default" in cfg2.within_spec_judgment_rules
+    assert cfg2.within_spec_judgment_rules["MACHINE_A"]["screens"]["STANDARD"]["black_dot"]["area_threshold_mm"] == 0.45
+    assert cfg2.within_spec_judgment_rules["MACHINE_A"]["screens"]["STANDARD"]["black_dot"]["defect_code"] == "C1111"
+    assert cfg2.to_dict()["within_spec_judgment_rules"]["MACHINE_A"]["screens"]["STANDARD"]["black_dot"]["defect_code"] == "C1111"
+
+    cfg2.apply_db_overrides([
+        {"param_name": "within_spec_judgment_rules", "decoded_value": cfg.within_spec_judgment_rules}
+    ])
+    assert cfg2.within_spec_judgment_rules["default"]["screens"]["W0F00000"]["white_dot"]["area_threshold_mm"] == 0.3
