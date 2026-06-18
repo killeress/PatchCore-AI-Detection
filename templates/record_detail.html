@@ -90,7 +90,14 @@
         </tr>
         <tr>
             <th>AI 判定</th>
-            <td><strong>{{ detail.ai_judgment }}</strong></td>
+            <td>
+                <strong>{{ detail.ai_judgment }}</strong>
+                {% if detail.ai_judgment == 'OK-i' %}
+                <a href="/ric/within-spec-logs"
+                   style="margin-left:10px;font-size:0.82rem;color:#2dd4bf;text-decoration:none;"
+                   title="原始 AI=NG，符合規格內後轉 OK；查看規格內計算明細">規格內明細</a>
+                {% endif %}
+            </td>
         </tr>
         <tr>
             <th>影像前處理</th>

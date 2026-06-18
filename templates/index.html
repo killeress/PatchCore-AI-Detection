@@ -106,7 +106,15 @@
                 <td>{{ r.model_id }}</td>
                 <td>{{ r.machine_no }}</td>
                 <td><span class="badge {{ r.machine_judgment | mj_badge }}">{{ r.machine_judgment }}</span></td>
-                <td><span class="badge {{ r.ai_judgment | ai_badge }}">{{ r.ai_judgment | ai_simple }}</span></td>
+                <td>
+                    {% if r.ai_judgment == 'OK-i' %}
+                    <a href="/ric/within-spec-logs" title="原始 AI=NG，符合規格內後轉 OK；查看規格內計算明細">
+                        <span class="badge {{ r.ai_judgment | ai_badge }}">{{ r.ai_judgment | ai_simple }}</span>
+                    </a>
+                    {% else %}
+                    <span class="badge {{ r.ai_judgment | ai_badge }}">{{ r.ai_judgment | ai_simple }}</span>
+                    {% endif %}
+                </td>
                 <td>{{ r.processing_seconds | round(1) }}s</td>
                 <td>{{ r.created_at }}</td>
             </tr>

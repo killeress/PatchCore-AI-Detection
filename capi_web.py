@@ -45,11 +45,11 @@ logger = logging.getLogger("capi.web")
 # 幫 Jinja2 準備一些好用的過濾器
 def ai_simple(ai_judgment):
     if not ai_judgment: return ""
-    return "OK" if ai_judgment == "OK" else ("NG" if ai_judgment.startswith("NG") else ("ERR" if ai_judgment.startswith("ERR") else ai_judgment))
+    return "OK-i" if ai_judgment == "OK-i" else ("OK" if ai_judgment == "OK" else ("NG" if ai_judgment.startswith("NG") else ("ERR" if ai_judgment.startswith("ERR") else ai_judgment)))
 
 def ai_badge(ai_judgment):
     simple = ai_simple(ai_judgment)
-    return "badge-ok" if simple == "OK" else ("badge-ng" if simple == "NG" else "badge-err")
+    return "badge-ok-i" if simple == "OK-i" else ("badge-ok" if simple == "OK" else ("badge-ng" if simple == "NG" else "badge-err"))
 
 def mj_badge(machine_judgment):
     if machine_judgment == "OK":
@@ -343,6 +343,13 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _json_safe_snapshot(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    except Exception:
+        return str(value)
+
+
 def _within_spec_screen_code(image_name: str, screens: Dict[str, Any]) -> Optional[str]:
     stem = Path(str(image_name or "")).stem
     if stem.startswith("overview_"):
@@ -518,6 +525,7 @@ def _evaluate_within_spec_suggestion_detail(
         "panel_summary": {},
         "visuals": [],
         "rule_selection": {},
+        "parameter_snapshot": {},
     }
     if not detail or not isinstance(rules, dict):
         add_step("缺少推論 detail 或規格內規則，停止判定")
@@ -541,11 +549,36 @@ def _evaluate_within_spec_suggestion_detail(
     )
     screens = machine_rules.get("screens") or {}
     dot_cfg = machine_rules.get("dot_detection") or {}
+    preprocess_params = dot_cfg.get("preprocess_params") if isinstance(dot_cfg.get("preprocess_params"), dict) else DOT_PREPROCESS_PARAMS
+    result["parameter_snapshot"] = {
+        "captured_at": datetime.now().isoformat(timespec="seconds"),
+        "candidate_keys": machine_candidates,
+        "matched_machine_key": machine_key or "",
+        "fallback_used": fallback_used,
+        "full_rules": _json_safe_snapshot(rules),
+        "matched_machine_rules": _json_safe_snapshot(machine_rules),
+        "dot_detection": {
+            "raw": _json_safe_snapshot(dot_cfg),
+            "effective": {
+                "diff_threshold": _as_int(dot_cfg.get("diff_threshold"), 4),
+                "background_kernel": _odd_kernel(_as_int(dot_cfg.get("background_kernel"), 33)),
+                "min_area_px": max(1, _as_int(dot_cfg.get("min_area_px"), 2)),
+                "max_area_px": max(0, _as_int(dot_cfg.get("max_area_px"), 50000)),
+                "morph_open": max(0, _as_int(dot_cfg.get("morph_open"), 2)),
+                "size_metric": str(dot_cfg.get("size_metric") or "bbox_diagonal"),
+                "unit_per_px": max(0.0, _as_float(dot_cfg.get("unit_per_px"), DOT_RULER_MM_PER_PX)),
+            },
+        },
+        "preprocess": {
+            "method": str(dot_cfg.get("preprocess_method") or DOT_PREPROCESS_METHOD),
+            "params": _json_safe_snapshot(preprocess_params),
+        },
+        "screen_rules_used": {},
+    }
     if not screens:
         add_step("找不到 screen 規則，停止判定", machine=machine_key or "default")
         return result
 
-    preprocess_params = dot_cfg.get("preprocess_params") if isinstance(dot_cfg.get("preprocess_params"), dict) else DOT_PREPROCESS_PARAMS
     dot_types = (
         ("black_dot", "black", "黑點"),
         ("white_dot", "white", "白點"),
@@ -558,6 +591,7 @@ def _evaluate_within_spec_suggestion_detail(
             add_step("略過圖片：找不到對應 screen 規則", image=image.get("image_name") or image.get("image_path") or "")
             continue
         screen_rules = screens.get(screen_code) or {}
+        result["parameter_snapshot"]["screen_rules_used"][screen_code] = _json_safe_snapshot(screen_rules)
 
         target_tiles = []
         skipped = {}
@@ -699,6 +733,7 @@ def _evaluate_within_spec_suggestion_detail(
                 "image_name": image.get("image_name") or image_path.name,
                 "dot_type": chosen["dot_type"],
                 "dot_label": chosen["label"],
+                "rule": _json_safe_snapshot(chosen["rule"]),
                 "threshold_mm": chosen["threshold_mm"],
                 "screen_count_limit": chosen["screen_limit"],
                 "tile_count_threshold": chosen["tile_limit"],
@@ -757,12 +792,14 @@ def _evaluate_within_spec_suggestion_detail(
             "threshold_mm": round(float(state["threshold_mm"]), 4),
             "screen_count_limit": int(state["screen_count_limit"]),
             "tile_count_threshold": int(state["tile_count_threshold"]),
+            "rule": state["rule"],
         })
         within = (
             state["max_size_mm"] <= state["threshold_mm"]
             and state["screen_count"] <= state["screen_count_limit"]
             and state["max_tile_count"] <= state["tile_count_threshold"]
         )
+        panel_totals[-1]["within"] = within
         add_step(
             "規格內規則比對",
             screen=state["screen"],
@@ -791,6 +828,7 @@ def _evaluate_within_spec_suggestion_detail(
             "tile_count_threshold": int(state["tile_count_threshold"]),
             "target_tile_count": int(state["target_tile_count"]),
             "aoi_defect_codes": sorted(state["aoi_defect_codes"]),
+            "rule": state["rule"],
             "tiles": state["tiles"][:20],
         })
 

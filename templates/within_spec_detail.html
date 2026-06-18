@@ -6,6 +6,7 @@
 {% set detail = log.detail or {} %}
 {% set summary = detail.panel_summary or {} %}
 {% set rule_selection = detail.rule_selection or {} %}
+{% set parameter_snapshot = detail.parameter_snapshot or {} %}
 <style>
     .ws-page-head {
         display: flex;
@@ -207,6 +208,22 @@
         white-space: pre-wrap;
         word-break: break-word;
     }
+
+    .ws-json {
+        max-height: 520px;
+        overflow: auto;
+        margin: 0;
+        padding: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.42);
+        color: #93c5fd;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.72rem;
+        line-height: 1.55;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
 </style>
 
 <div class="ws-page-head">
@@ -258,6 +275,29 @@
             <div class="value">{{ summary.skipped_tiles or {} }}</div>
         </div>
     </div>
+</section>
+
+<section class="ws-band">
+    <div class="ws-section-title">參數快照</div>
+    {% if parameter_snapshot %}
+    <div class="ws-metrics" style="margin-bottom:12px;">
+        <div class="ws-metric">
+            <div class="label">擷取時間</div>
+            <div class="value">{{ parameter_snapshot.captured_at or "未記錄" }}</div>
+        </div>
+        <div class="ws-metric">
+            <div class="label">命中機種</div>
+            <div class="value">{{ parameter_snapshot.matched_machine_key or "default" }}</div>
+        </div>
+        <div class="ws-metric">
+            <div class="label">fallback</div>
+            <div class="value">{{ parameter_snapshot.fallback_used }}</div>
+        </div>
+    </div>
+    <pre class="ws-json">{{ parameter_snapshot | tojson(indent=2) }}</pre>
+    {% else %}
+    <div style="color:var(--text-muted);">此筆紀錄尚未保存參數快照。</div>
+    {% endif %}
 </section>
 
 <section class="ws-band">

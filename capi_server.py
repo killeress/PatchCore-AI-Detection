@@ -50,7 +50,7 @@ from capi_config import CAPIConfig
 from capi_inference import CAPIInferencer, ImageResult
 from capi_database import CAPIDatabase
 from capi_heatmap import HeatmapManager
-from capi_web import start_web_server_thread
+from capi_web import _evaluate_within_spec_suggestion_detail, start_web_server_thread
 
 
 # ── 伺服器狀態追蹤 ──────────────────────────────────────────
@@ -119,6 +119,8 @@ class ServerStatusTracker:
 
 # 全域狀態單例
 server_status = ServerStatusTracker()
+
+WITHIN_SPEC_LOGS_URL = "http://10.174.37.81/ric/within-spec-logs"
 
 
 # ── 推論日誌擷取器 ──────────────────────────────────────────
@@ -1510,7 +1512,7 @@ class CAPIServer:
                     # 執行推論（不含 Heatmap 儲存，快速回覆）
                     start_time = time.time()
                     InferenceLogCapture.start_capture()
-                    ai_judgment, ng_details, inference_results, is_duplicate, omit_image_raw, aoi_report, omit_overexposed, omit_overexposure_info = self._process_request(parsed)
+                    ai_judgment, ng_details, inference_results, is_duplicate, omit_image_raw, aoi_report, omit_overexposed, omit_overexposure_info, within_spec_info = self._process_request(parsed)
                     processing_seconds = time.time() - start_time
 
                     # 重複投片時在 LOG 標記
@@ -1518,12 +1520,13 @@ class CAPIServer:
                         logger.warning(f"[{client_addr}] [DUPLICATE_PANEL] 重複投片，已選取最新圖片推論，判定={ai_judgment}")
 
                     # 組裝回覆
+                    response_ai_judgment = "OK" if ai_judgment == "OK-i" else ai_judgment
                     response = build_response(
                         parsed["glass_id"],
                         parsed["model_id"],
                         parsed["machine_no"],
                         parsed["machine_judgment"],
-                        ai_judgment,
+                        response_ai_judgment,
                     )
 
                     response_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -1532,7 +1535,7 @@ class CAPIServer:
                     logger.info(f"[{client_addr}] >> {response} ({processing_seconds:.2f}s){dup_tag}")
                     
                     # 更新全域狀態 - 判定結果與推論結束
-                    j_simple = "OK" if ai_judgment == "OK" else ("NG" if ai_judgment.startswith("NG") else "ERR")
+                    j_simple = "OK" if ai_judgment in ("OK", "OK-i") else ("NG" if ai_judgment.startswith("NG") else "ERR")
                     with server_status.lock:
                         server_status.active_inferences = max(0, server_status.active_inferences - 1)
                         server_status.last_inference_time = response_time
@@ -1544,7 +1547,7 @@ class CAPIServer:
                             "glass_id": parsed["glass_id"],
                             "machine_no": parsed["machine_no"],
                             "judgment": j_simple,
-                            "detail": ai_judgment if j_simple != "OK" else "OK",
+                            "detail": ai_judgment if ai_judgment == "OK-i" or j_simple != "OK" else "OK",
                             "time": datetime.now().strftime("%H:%M:%S"),
                             "duration": f"{processing_seconds:.2f}s"
                         }
@@ -1566,6 +1569,7 @@ class CAPIServer:
                         omit_image_raw,
                         captured_log,
                         omit_overexposed, omit_overexposure_info,
+                        within_spec_info,
                     )
 
                 except ProtocolError as e:
@@ -1633,12 +1637,90 @@ class CAPIServer:
                     
             logger.info(f"[{client_addr}] Connection closed (handled {request_count} request(s))")
 
-    def _process_request(self, parsed: Dict) -> Tuple[str, str, List]:
+    def _load_within_spec_rules_for_inference(self, inferencer: Optional[CAPIInferencer]) -> Dict[str, Any]:
+        rules = None
+        try:
+            raw = self.db.get_config_param("within_spec_judgment_rules") if self.db else None
+            if isinstance(raw, dict) and "decoded_value" in raw:
+                rules = raw.get("decoded_value")
+            elif isinstance(raw, dict) and "param_value" in raw:
+                try:
+                    rules = json.loads(raw.get("param_value") or "{}")
+                except Exception:
+                    rules = None
+            elif isinstance(raw, str) and raw.strip():
+                try:
+                    rules = json.loads(raw)
+                except Exception:
+                    rules = None
+            elif isinstance(raw, dict):
+                rules = raw
+        except Exception as e:
+            logger.warning("Failed to load within-spec rules from DB: %s", e)
+
+        if not rules and inferencer is not None:
+            rules = getattr(getattr(inferencer, "config", None), "within_spec_judgment_rules", None)
+        if not rules:
+            rules = CAPIConfig().within_spec_judgment_rules
+        return CAPIConfig._normalize_within_spec_judgment_rules(rules)
+
+    def _evaluate_within_spec_for_inference(
+        self,
+        parsed: Dict[str, Any],
+        results: List[ImageResult],
+        inferencer: Optional[CAPIInferencer],
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            started = time.time()
+            detail = {
+                "model_id": parsed.get("model_id", ""),
+                "machine_id": parsed.get("model_id", ""),
+                "machine_no": parsed.get("machine_no", ""),
+                "images": results_to_db_data(results, {}),
+                "source": "inference",
+            }
+            eval_result = _evaluate_within_spec_suggestion_detail(
+                detail,
+                self._load_within_spec_rules_for_inference(inferencer),
+                parsed.get("model_id", ""),
+            )
+            suggestion = eval_result.get("suggestion")
+            panel_totals = eval_result.get("panel_totals") or []
+            panel_within = bool(panel_totals) and all(bool(item.get("within")) for item in panel_totals)
+            if not (suggestion and suggestion.get("suggested")):
+                return None
+            if not panel_within:
+                return None
+            eval_result["source"] = "inference"
+            eval_result["inference_context"] = {
+                "glass_id": parsed.get("glass_id", ""),
+                "model_id": parsed.get("model_id", ""),
+                "machine_no": parsed.get("machine_no", ""),
+                "machine_judgment": parsed.get("machine_judgment", ""),
+            }
+            return {
+                "suggestion": suggestion,
+                "detail": eval_result,
+                "processing_seconds": time.time() - started,
+            }
+        except Exception as e:
+            logger.warning(
+                "Within-spec inference check failed for glass=%s: %s",
+                parsed.get("glass_id", ""),
+                e,
+                exc_info=True,
+            )
+            return None
+
+    def _process_request(
+        self,
+        parsed: Dict,
+    ) -> Tuple[str, str, List, bool, Any, Dict, bool, str, Optional[Dict[str, Any]]]:
         """
         處理推論請求（僅推論，不含 Heatmap 儲存）
 
         Returns:
-            (ai_judgment, ng_details_json, inference_results)
+            (ai_judgment, ng_details_json, inference_results, ..., within_spec_info)
             - inference_results: List[ImageResult] 供背景儲存使用
         """
         # 依 model_id 取得對應推論器（per-machine dispatcher）
@@ -1647,17 +1729,17 @@ class CAPIServer:
 
         # 檢查推論器
         if inferencer is None:
-            return "ERR:MODEL_NOT_LOADED", "[]", [], False, None, {}
+            return "ERR:MODEL_NOT_LOADED", "[]", [], False, None, {}, False, "", None
 
         # 轉換路徑
         image_dir = resolve_unc_path(parsed["image_dir"], self.path_mapping)
         panel_dir = Path(image_dir)
 
         if not panel_dir.exists():
-            return f"ERR:DIR_NOT_FOUND ({image_dir})", "[]", [], False, None
+            return f"ERR:DIR_NOT_FOUND ({image_dir})", "[]", [], False, None, {}, False, "", None
 
         if not panel_dir.is_dir():
-            return f"ERR:NOT_A_DIR ({image_dir})", "[]", [], False, None
+            return f"ERR:NOT_A_DIR ({image_dir})", "[]", [], False, None, {}, False, "", None
 
         logger.info(f"Inference directory: {panel_dir}")
 
@@ -1689,7 +1771,7 @@ class CAPIServer:
                     )
 
                 if not results:
-                    return "ERR:NO_IMAGES_FOUND", "[]", [], False, None, {}, False, ""
+                    return "ERR:NO_IMAGES_FOUND", "[]", [], False, None, {}, False, "", None
 
                 # 彙總判定
                 ai_judgment, ng_details = aggregate_judgment(results)
@@ -1701,11 +1783,23 @@ class CAPIServer:
                             ai_judgment, ng_details, result.edge_defects, result.image_path.stem
                         )
 
-                return ai_judgment, ng_details, results, is_duplicate, omit_image_raw, aoi_report, omit_overexposed, omit_overexposure_info
+                within_spec_info = None
+                if ai_judgment.startswith("NG"):
+                    within_spec_info = self._evaluate_within_spec_for_inference(parsed, results, inferencer)
+                    if within_spec_info:
+                        reason = within_spec_info["suggestion"].get("reason", "")
+                        logger.info(
+                            "[WITHIN_SPEC_INFERENCE] Glass=%s 原始 AI=NG，符合規格內，轉為 OK-i: %s",
+                            parsed.get("glass_id", ""),
+                            reason,
+                        )
+                        ai_judgment = "OK-i"
+
+                return ai_judgment, ng_details, results, is_duplicate, omit_image_raw, aoi_report, omit_overexposed, omit_overexposure_info, within_spec_info
 
             except Exception as e:
                 logger.error(f"Inference error: {e}", exc_info=True)
-                return f"ERR:INFERENCE_FAILED ({type(e).__name__}: {str(e)[:100]})", "[]", [], False, None, {}, False, ""
+                return f"ERR:INFERENCE_FAILED ({type(e).__name__}: {str(e)[:100]})", "[]", [], False, None, {}, False, "", None
 
 
     def _save_results_async(
@@ -1724,6 +1818,7 @@ class CAPIServer:
         inference_log: str = "",
         omit_overexposed: bool = False,
         omit_overexposure_info: str = "",
+        within_spec_info: Optional[Dict[str, Any]] = None,
     ):
         """
         非同步儲存 Heatmap 和 DB 記錄（在背景執行緒中執行）
@@ -1765,6 +1860,14 @@ class CAPIServer:
             else:
                 error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
 
+            if within_spec_info:
+                reason = within_spec_info.get("suggestion", {}).get("reason", "")
+                within_spec_note = (
+                    f"[WITHIN_SPEC_INFERENCE] 原始 AI=NG，符合規格內，最終判定 OK-i；"
+                    f"{reason}；明細：{WITHIN_SPEC_LOGS_URL}"
+                )
+                inference_log = f"{(inference_log or '').rstrip()}\n{within_spec_note}".strip()
+
             client_bomb_info_str = json.dumps(parsed["bomb_info"], ensure_ascii=False) if parsed.get("bomb_info") else ""
             preprocess_pipeline = getattr(
                 getattr(record_inferencer, "config", None),
@@ -1787,7 +1890,7 @@ class CAPIServer:
                     ]
                 aoi_machine_coords_str = json.dumps(aoi_coords_data, ensure_ascii=False)
 
-            self.db.save_inference_record(
+            record_id = self.db.save_inference_record(
                 glass_id=parsed["glass_id"],
                 model_id=parsed["model_id"],
                 machine_no=parsed["machine_no"],
@@ -1812,6 +1915,16 @@ class CAPIServer:
                 image_preprocess_pipeline=preprocess_pipeline,
                 image_preprocess_timing=preprocess_timing,
             )
+
+            if within_spec_info:
+                self.db.save_within_spec_review_log(
+                    client_record_id=None,
+                    inference_record_id=record_id,
+                    suggestion=within_spec_info.get("suggestion"),
+                    detail=within_spec_info.get("detail") or {},
+                    processing_seconds=within_spec_info.get("processing_seconds", 0.0),
+                    source="inference",
+                )
 
             dup_tag = " [DUPLICATE]" if is_duplicate else ""
             save_time = time.time() - save_start
