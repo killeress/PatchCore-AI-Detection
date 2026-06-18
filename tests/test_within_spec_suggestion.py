@@ -1,7 +1,12 @@
 import cv2
 import numpy as np
 
-from capi_web import _evaluate_within_spec_suggestion, _evaluate_within_spec_suggestion_detail
+from capi_web import (
+    _evaluate_within_spec_suggestion,
+    _evaluate_within_spec_suggestion_detail,
+    _format_within_spec_panel_summary,
+    _within_spec_auto_visual_output,
+)
 
 
 def _rules(*, screen_limit=1, tile_limit=1, threshold_mm=0.3, white_enabled=False):
@@ -221,3 +226,46 @@ def test_within_spec_detail_saves_visuals_and_panel_totals(tmp_path):
     assert detail["parameter_snapshot"]["full_rules"]["default"]["dot_detection"]["size_metric"] == "bbox_max"
     assert detail["visuals"][0]["urls"]["overlay_url"].startswith("/heatmaps/test/within_spec/")
     assert any(p.name.endswith("_overlay.png") for p in visual_dir.iterdir())
+
+
+def test_within_spec_auto_visual_output_uses_heatmap_url(tmp_path):
+    visual_dir, visual_prefix = _within_spec_auto_visual_output(str(tmp_path), "PANEL:001")
+
+    assert visual_dir.parent.name == "within_spec_inference"
+    assert visual_dir.name.startswith("PANEL_001_")
+    assert visual_prefix.startswith("/heatmaps/within_spec_inference/PANEL_001_")
+
+
+def test_within_spec_panel_summary_lists_all_screens():
+    detail = {
+        "panel_totals": [
+            {
+                "screen": "W0F00000",
+                "dot_label": "黑點",
+                "max_size_mm": 0.1952,
+                "threshold_mm": 0.3,
+                "total_count": 1,
+                "screen_count_limit": 3,
+                "max_tile_count": 1,
+                "tile_count_threshold": 2,
+                "within": True,
+            },
+            {
+                "screen": "WGF50500",
+                "dot_label": "黑點",
+                "max_size_mm": 0.18,
+                "threshold_mm": 0.3,
+                "total_count": 1,
+                "screen_count_limit": 3,
+                "max_tile_count": 1,
+                "tile_count_threshold": 2,
+                "within": True,
+            },
+        ],
+    }
+
+    summary = _format_within_spec_panel_summary(detail)
+
+    assert "W0F00000 黑點" in summary
+    assert "WGF50500 黑點" in summary
+    assert summary.count("(OK)") == 2

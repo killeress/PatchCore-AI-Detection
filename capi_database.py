@@ -994,6 +994,13 @@ class CAPIDatabase:
                 return None
 
             result = dict(record)
+            latest_within_spec_log = conn.execute(
+                """SELECT id FROM within_spec_review_log
+                   WHERE inference_record_id = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (record_id,)
+            ).fetchone()
+            result["within_spec_log_id"] = latest_within_spec_log["id"] if latest_within_spec_log else None
 
             # 取得圖片結果
             images = conn.execute(
@@ -1707,7 +1714,7 @@ class CAPIDatabase:
             finally:
                 conn.close()
 
-    VALID_MISS_CATEGORIES = {'dust_misfilter', 'threshold_high', 'ai_miss_within_spec', 'ric_misjudge', 'outside_aoi_area', 'data_error_actually_ok', 'other'}
+    VALID_MISS_CATEGORIES = {'dust_misfilter', 'threshold_high', 'ai_miss_within_spec', 'within_spec_misjudge', 'ric_misjudge', 'outside_aoi_area', 'data_error_actually_ok', 'other'}
     VALID_OVER_CATEGORIES = {'edge_false_positive', 'within_spec', 'overexposure', 'surface_scratch', 'surface_dirt', 'bubble', 'aoi_ai_false_positive', 'dust_mask_incomplete', 'other'}
 
     def _save_review(self, table: str, valid_categories: set, client_record_id: int, category: str, note: str = '') -> int:

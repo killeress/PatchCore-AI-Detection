@@ -131,9 +131,11 @@ def test_within_spec_detail_template_renders():
     )
 
     assert "規格內計算明細 #1" in html
+    assert "/record/3" in html
     assert "MODEL_A" in html
     assert "點偵測結果圖片" in html
     assert "/heatmaps/ws/overlay.png" in html
+    assert "重新產生偵測圖片" in html
 
 
 def test_within_spec_report_template_renders():

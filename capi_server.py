@@ -50,7 +50,12 @@ from capi_config import CAPIConfig
 from capi_inference import CAPIInferencer, ImageResult
 from capi_database import CAPIDatabase
 from capi_heatmap import HeatmapManager
-from capi_web import _evaluate_within_spec_suggestion_detail, start_web_server_thread
+from capi_web import (
+    _evaluate_within_spec_suggestion_detail,
+    _within_spec_auto_visual_output,
+    _format_within_spec_panel_summary,
+    start_web_server_thread,
+)
 
 
 # ── 伺服器狀態追蹤 ──────────────────────────────────────────
@@ -1685,10 +1690,16 @@ class CAPIServer:
                 "images": results_to_db_data(results, {}),
                 "source": "inference",
             }
+            visual_dir, visual_prefix = _within_spec_auto_visual_output(
+                str(getattr(getattr(self, "heatmap_manager", None), "base_dir", "") or ""),
+                parsed.get("glass_id", ""),
+            )
             eval_result = _evaluate_within_spec_suggestion_detail(
                 detail,
                 self._load_within_spec_rules_for_inference(inferencer),
                 parsed.get("model_id", ""),
+                visual_output_dir=visual_dir,
+                visual_url_prefix=visual_prefix,
             )
             suggestion = eval_result.get("suggestion")
             panel_totals = eval_result.get("panel_totals") or []
@@ -1696,18 +1707,23 @@ class CAPIServer:
             eval_result["source"] = "inference"
             eval_result["inference_context"] = context
             converted = bool(suggestion and suggestion.get("suggested") and panel_within)
+            panel_reason = _format_within_spec_panel_summary(eval_result)
             if converted:
-                reason = suggestion.get("reason", "")
+                reason = panel_reason or suggestion.get("reason", "")
                 status = "within_spec"
             elif suggestion and suggestion.get("suggested"):
-                reason = "部分項目符合規格內，但整片 PANEL 尚有項目未符合"
+                reason = panel_reason or "部分項目符合規格內，但整片 PANEL 尚有項目未符合"
                 status = "not_within_spec"
             elif panel_totals:
-                reason = "未符合規格內條件"
+                reason = panel_reason or "未符合規格內條件"
                 status = "not_within_spec"
             else:
                 reason = "未取得可比對的規格內點數結果"
                 status = "not_evaluable"
+            saved_suggestion = suggestion if converted else None
+            if saved_suggestion and reason:
+                saved_suggestion = dict(saved_suggestion)
+                saved_suggestion["reason"] = reason
             eval_result["inference_auto_decision"] = {
                 "converted_to_ok_i": converted,
                 "status": status,
@@ -1716,7 +1732,7 @@ class CAPIServer:
             }
 
             return {
-                "suggestion": suggestion if converted else None,
+                "suggestion": saved_suggestion,
                 "raw_suggestion": suggestion,
                 "detail": eval_result,
                 "processing_seconds": time.time() - started,

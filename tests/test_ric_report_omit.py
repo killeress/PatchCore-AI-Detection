@@ -171,6 +171,7 @@ def test_client_summary_applies_manual_actual_ok_reviews_to_analysis_stats():
     records = [
         _client_record(1, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="ric_misjudge"),
         _client_record(2, eqp="NG", ai="OK", datastr="DEFECT,NG;1;", review_category="data_error_actually_ok"),
+        _client_record(5, eqp="OK", ai="OK", datastr="DEFECT,NG;1;", review_category="within_spec_misjudge"),
         _client_record(3, eqp="OK", ai="OK", datastr="DEFECT,NG;1;"),
         _client_record(4, eqp="NG", ai="NG", datastr="DEFECT,OK;1;"),
     ]
@@ -178,25 +179,28 @@ def test_client_summary_applies_manual_actual_ok_reviews_to_analysis_stats():
     summary, out_records = CAPIWebHandler._compute_client_summary(None, records)
 
     assert summary["ricNG"] == 1
-    assert summary["aoiOK"] == 2
-    assert summary["aiCorrect"] == 2
+    assert summary["aoiOK"] == 3
+    assert summary["aiCorrect"] == 3
     assert summary["aiMiss"] == 0
     assert summary["aoiOver"] == 2
     assert summary["aiOver"] == 1
     assert summary["revival"] == 1
     assert summary["revivalRate"] == 50.0
-    assert summary["missReviewStats"]["total"] == 3
-    assert summary["missReviewStats"]["reviewed"] == 2
-    assert summary["daily"]["2026-05-26"]["ricMisjudge"] == 2
+    assert summary["missReviewStats"]["total"] == 4
+    assert summary["missReviewStats"]["reviewed"] == 3
+    assert summary["daily"]["2026-05-26"]["ricMisjudge"] == 3
     assert summary["manualTruthAdjustments"] == {
-        "total": 2,
+        "total": 3,
         "byCategory": {
             "ric_misjudge": 1,
+            "within_spec_misjudge": 1,
             "data_error_actually_ok": 1,
         },
     }
     assert out_records[0]["actual_judgment"] == "OK"
     assert out_records[0]["truth_adjusted_by_review"] is True
+    assert out_records[2]["actual_judgment"] == "OK"
+    assert out_records[2]["truth_adjusted_by_review"] is True
 
 
 def test_client_summary_counts_only_selected_review_categories_as_ai_miss():
