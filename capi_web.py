@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import re
 import threading
 import logging
@@ -127,13 +127,18 @@ DOT_RULER_CALIBRATION_POINTS = []
 DOT_RULER_CALIBRATION_SOURCE = "default mm/px ratio 0.0245"
 DOT_PREPROCESS_METHOD = "gaussian"
 DOT_PREPROCESS_PARAMS = {"kernel_size": 7, "sigma": 1.0}
+WITHIN_SPEC_PARAM = "within_spec_judgment_rules"
 
 
-def _preprocess_dot_image_for_detection(image_bgr) -> tuple:
-    """Apply the fixed dot-detection preprocessing used before residual detection."""
+def _preprocess_dot_image_for_detection(image_bgr, method: str = None, params: dict = None) -> tuple:
+    """Apply dot-detection preprocessing used before residual detection."""
     from capi_image_preprocess_lab import apply_preprocess_method
 
-    result = apply_preprocess_method(image_bgr, DOT_PREPROCESS_METHOD, DOT_PREPROCESS_PARAMS)
+    result = apply_preprocess_method(
+        image_bgr,
+        method or DOT_PREPROCESS_METHOD,
+        params or DOT_PREPROCESS_PARAMS,
+    )
     return result["image"], {
         "method": result["method"],
         "method_label": result["method_label"],
@@ -186,6 +191,7 @@ def _detect_dot_components(
     size_metric: str,
     unit_per_px: float,
     defect_threshold: float,
+    include_visuals: bool = True,
 ) -> dict:
     """Detect dot-like dark/bright components and measure their visible size."""
     import cv2
@@ -193,10 +199,10 @@ def _detect_dot_components(
 
     if image_bgr.ndim == 2:
         gray = image_bgr
-        overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) if include_visuals else None
     else:
         gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-        overlay = image_bgr.copy()
+        overlay = image_bgr.copy() if include_visuals else None
 
     background_kernel = _odd_kernel(background_kernel)
     bg = cv2.medianBlur(gray, background_kernel)
@@ -226,7 +232,8 @@ def _detect_dot_components(
         if area < min_area or area > max_area:
             continue
 
-        component_mask = (labels[y:y + h, x:x + w] == label).astype("uint8") * 255
+        component_labels = labels[y:y + h, x:x + w]
+        component_mask = (component_labels == label).astype("uint8") * 255
         contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         enclosing_diameter = float(max(w, h))
         if contours:
@@ -253,6 +260,7 @@ def _detect_dot_components(
 
         size_units = float(size_px * unit_per_px) if calibrated else None
         size_mm = size_units if calibrated else None
+        component_diff = diff[y:y + h, x:x + w][component_mask > 0]
         candidates.append({
             "x": x,
             "y": y,
@@ -270,14 +278,16 @@ def _detect_dot_components(
             "size_px": round(float(size_px), 2),
             "size_units": round(size_units, 4) if size_units is not None else None,
             "size_mm": round(size_mm, 4) if size_mm is not None else None,
-            "max_diff": int(diff[labels == label].max()),
-            "mean_diff": round(float(diff[labels == label].mean()), 2),
+            "max_diff": int(component_diff.max()),
+            "mean_diff": round(float(component_diff.mean()), 2),
             "is_defect": bool(calibrated and size_units >= defect_threshold),
         })
 
     candidates.sort(key=lambda c: (c["is_defect"], c["size_px"]), reverse=True)
     for idx, candidate in enumerate(candidates, 1):
         candidate["id"] = idx
+        if not include_visuals:
+            continue
         color = (0, 0, 255) if candidate["is_defect"] else (0, 200, 0)
         x, y, w, h = candidate["x"], candidate["y"], candidate["w"], candidate["h"]
         cv2.rectangle(overlay, (x, y), (x + w, y + h), color, 1)
@@ -302,20 +312,519 @@ def _detect_dot_components(
             cv2.LINE_AA,
         )
 
-    diff_norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
-    diff_color = cv2.applyColorMap(diff_norm.astype("uint8"), cv2.COLORMAP_JET)
-    mask_color = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-
-    return {
+    result = {
         "gray": gray,
         "diff": diff,
         "mask": mask,
-        "overlay": overlay,
-        "diff_color": diff_color,
-        "mask_color": mask_color,
         "candidates": candidates,
         "calibrated": calibrated,
     }
+    if include_visuals:
+        diff_norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
+        result.update({
+            "overlay": overlay,
+            "diff_color": cv2.applyColorMap(diff_norm.astype("uint8"), cv2.COLORMAP_JET),
+            "mask_color": cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR),
+        })
+    return result
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _within_spec_screen_code(image_name: str, screens: Dict[str, Any]) -> Optional[str]:
+    stem = Path(str(image_name or "")).stem
+    if stem.startswith("overview_"):
+        stem = stem[len("overview_"):]
+    if stem in screens:
+        return stem
+    for code in screens:
+        if stem.startswith(code):
+            return code
+    return "STANDARD" if "STANDARD" in screens else None
+
+
+def _within_spec_tile_skip_reason(tile: Dict[str, Any]) -> str:
+    if not tile.get("is_anomaly"):
+        return "not_ng_tile"
+    if tile.get("is_bomb"):
+        return "bomb"
+    if tile.get("is_dust"):
+        return "dust"
+    if tile.get("is_exclude_zone"):
+        return "exclude_zone"
+    if tile.get("scratch_filtered"):
+        return "scratch_filtered"
+    return ""
+
+
+def _target_tiles_for_within_spec(image: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        tile for tile in (image.get("tiles") or [])
+        if not _within_spec_tile_skip_reason(tile)
+    ]
+
+
+def _crop_tile(image_bgr, tile: Dict[str, Any]):
+    h, w = image_bgr.shape[:2]
+    x1 = max(0, _as_int(tile.get("x"), 0))
+    y1 = max(0, _as_int(tile.get("y"), 0))
+    x2 = min(w, x1 + max(0, _as_int(tile.get("width"), 0)))
+    y2 = min(h, y1 + max(0, _as_int(tile.get("height"), 0)))
+    if x2 <= x1 or y2 <= y1:
+        return None, (x1, y1, x2, y2)
+    return image_bgr[y1:y2, x1:x2].copy(), (x1, y1, x2, y2)
+
+
+def _dot_rule_limits(rule: Dict[str, Any]) -> Tuple[float, int, int]:
+    threshold_mm = _as_float(rule.get("area_threshold_mm"), 0.0)
+    screen_limit = _as_int(rule.get("screen_count_limit"), 0)
+    tile_limit = _as_int(rule.get("tile_count_threshold"), screen_limit)
+    return threshold_mm, screen_limit, tile_limit
+
+
+def _within_spec_machine_candidates(detail: Dict[str, Any], machine_id: str = "") -> List[str]:
+    candidates: List[str] = []
+    for value in (
+        detail.get("model_id"),
+        machine_id,
+        detail.get("machine_id"),
+        detail.get("machine_no"),
+    ):
+        key = str(value or "").strip()
+        if key and key not in candidates:
+            candidates.append(key)
+    return candidates
+
+
+def _select_within_spec_machine_rules(
+    detail: Dict[str, Any],
+    rules: Dict[str, Any],
+    machine_id: str = "",
+) -> Tuple[str, Dict[str, Any], List[str], bool]:
+    candidates = _within_spec_machine_candidates(detail, machine_id)
+    for key in candidates:
+        machine_rules = rules.get(key)
+        if isinstance(machine_rules, dict):
+            return key, machine_rules, candidates, False
+
+    default_rules = rules.get("default")
+    if isinstance(default_rules, dict):
+        return "default", default_rules, candidates, bool(candidates)
+    return "", {}, candidates, False
+
+
+def _save_within_spec_dot_visuals(
+    *,
+    tile_crop,
+    processed_crop,
+    chosen: Dict[str, Any],
+    dot_cfg: Dict[str, Any],
+    output_dir: Optional[Path],
+    url_prefix: str,
+    image_name: str,
+    tile_id: Any,
+    crop_box: Tuple[int, int, int, int],
+) -> Optional[Dict[str, Any]]:
+    if not output_dir or not url_prefix:
+        return None
+
+    import cv2
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_image = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(str(image_name or "image")).stem)[:80]
+    safe_tile = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(tile_id if tile_id is not None else "tile"))
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    prefix = f"within_spec_{safe_image}_tile{safe_tile}_{chosen['dot_type']}_{ts}"
+
+    detected = _detect_dot_components(
+        processed_crop,
+        polarity=chosen["polarity"],
+        diff_threshold=_as_int(dot_cfg.get("diff_threshold"), 4),
+        background_kernel=_odd_kernel(_as_int(dot_cfg.get("background_kernel"), 33)),
+        min_area=max(1, _as_int(dot_cfg.get("min_area_px"), 2)),
+        max_area=max(0, _as_int(dot_cfg.get("max_area_px"), 50000)),
+        morph_open=max(0, _as_int(dot_cfg.get("morph_open"), 2)),
+        size_metric=str(dot_cfg.get("size_metric") or "bbox_diagonal"),
+        unit_per_px=max(0.0, _as_float(dot_cfg.get("unit_per_px"), DOT_RULER_MM_PER_PX)),
+        defect_threshold=chosen["threshold_mm"],
+        include_visuals=True,
+    )
+
+    files = {
+        "crop_url": f"{prefix}_crop.png",
+        "preprocessed_url": f"{prefix}_preprocessed.png",
+        "overlay_url": f"{prefix}_overlay.png",
+        "mask_url": f"{prefix}_mask.png",
+        "diff_url": f"{prefix}_diff.png",
+    }
+    cv2.imwrite(str(output_dir / files["crop_url"]), tile_crop)
+    cv2.imwrite(str(output_dir / files["preprocessed_url"]), processed_crop)
+    cv2.imwrite(str(output_dir / files["overlay_url"]), detected["overlay"])
+    cv2.imwrite(str(output_dir / files["mask_url"]), detected["mask_color"])
+    cv2.imwrite(str(output_dir / files["diff_url"]), detected["diff_color"])
+
+    return {
+        "image_name": image_name,
+        "tile_id": tile_id,
+        "dot_type": chosen["dot_type"],
+        "dot_label": chosen["label"],
+        "crop_box": crop_box,
+        "count": len(detected["candidates"]),
+        "max_size_mm": max((_as_float(c.get("size_mm"), 0.0) for c in detected["candidates"]), default=0.0),
+        "threshold_mm": chosen["threshold_mm"],
+        "candidates": detected["candidates"][:30],
+        "urls": {key: f"{url_prefix}/{filename}" for key, filename in files.items()},
+    }
+
+
+def _evaluate_within_spec_suggestion_detail(
+    detail: Dict[str, Any],
+    rules: Dict[str, Any],
+    machine_id: str = "",
+    visual_output_dir: Optional[Path] = None,
+    visual_url_prefix: str = "",
+) -> Dict[str, Any]:
+    """Evaluate within-spec suggestion on NG tiles only and collect traceable steps."""
+    import cv2
+
+    steps: List[Dict[str, Any]] = []
+
+    def add_step(message: str, **data):
+        if len(steps) < 1000:
+            item = {"message": message}
+            item.update(data)
+            steps.append(item)
+
+    result = {
+        "suggestion": None,
+        "matches": [],
+        "steps": steps,
+        "skipped_tiles": {},
+        "target_tile_count": 0,
+        "evaluated_tile_count": 0,
+        "panel_totals": [],
+        "panel_summary": {},
+        "visuals": [],
+        "rule_selection": {},
+    }
+    if not detail or not isinstance(rules, dict):
+        add_step("缺少推論 detail 或規格內規則，停止判定")
+        return result
+
+    machine_key, machine_rules, machine_candidates, fallback_used = _select_within_spec_machine_rules(
+        detail,
+        rules,
+        machine_id,
+    )
+    result["rule_selection"] = {
+        "candidate_keys": machine_candidates,
+        "matched_machine_key": machine_key or "",
+        "fallback_used": fallback_used,
+    }
+    add_step(
+        "選擇規格內設定",
+        candidate_keys=machine_candidates,
+        matched_machine=machine_key or "",
+        fallback_default=fallback_used,
+    )
+    screens = machine_rules.get("screens") or {}
+    dot_cfg = machine_rules.get("dot_detection") or {}
+    if not screens:
+        add_step("找不到 screen 規則，停止判定", machine=machine_key or "default")
+        return result
+
+    preprocess_params = dot_cfg.get("preprocess_params") if isinstance(dot_cfg.get("preprocess_params"), dict) else DOT_PREPROCESS_PARAMS
+    dot_types = (
+        ("black_dot", "black", "黑點"),
+        ("white_dot", "white", "白點"),
+    )
+    aggregates: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+    for image in detail.get("images") or []:
+        screen_code = _within_spec_screen_code(image.get("image_name") or image.get("image_path"), screens)
+        if not screen_code:
+            add_step("略過圖片：找不到對應 screen 規則", image=image.get("image_name") or image.get("image_path") or "")
+            continue
+        screen_rules = screens.get(screen_code) or {}
+
+        target_tiles = []
+        skipped = {}
+        for tile in image.get("tiles") or []:
+            reason = _within_spec_tile_skip_reason(tile)
+            if reason:
+                skipped[reason] = skipped.get(reason, 0) + 1
+                if reason == "bomb":
+                    add_step(
+                        "略過 bomb tile",
+                        image=image.get("image_name") or "",
+                        tile_id=tile.get("tile_id"),
+                        defect_code=tile.get("bomb_code") or tile.get("aoi_defect_code") or "",
+                    )
+                continue
+            target_tiles.append(tile)
+        for reason, count in skipped.items():
+            result["skipped_tiles"][reason] = result["skipped_tiles"].get(reason, 0) + count
+
+        if not target_tiles:
+            add_step(
+                "圖片沒有需要判定的 NG tile",
+                image=image.get("image_name") or "",
+                skipped=skipped,
+            )
+            continue
+        result["target_tile_count"] += len(target_tiles)
+
+        image_path = Path(str(image.get("image_path") or ""))
+        if not image_path.is_file():
+            add_step("原圖不存在，略過圖片", image=image.get("image_name") or "", path=str(image_path))
+            continue
+        image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image_bgr is None:
+            add_step("原圖讀取失敗，略過圖片", image=image.get("image_name") or "", path=str(image_path))
+            continue
+
+        add_step(
+            "開始判定圖片",
+            image=image.get("image_name") or image_path.name,
+            screen=screen_code,
+            target_tiles=len(target_tiles),
+            skipped=skipped,
+        )
+
+        for tile in target_tiles:
+            tile_crop, crop_box = _crop_tile(image_bgr, tile)
+            if tile_crop is None:
+                add_step(
+                    "略過 tile：座標無效",
+                    image=image.get("image_name") or "",
+                    tile_id=tile.get("tile_id"),
+                    crop_box=crop_box,
+                )
+                continue
+
+            processed_crop, _ = _preprocess_dot_image_for_detection(
+                tile_crop,
+                method=str(dot_cfg.get("preprocess_method") or DOT_PREPROCESS_METHOD),
+                params=preprocess_params,
+            )
+
+            detections = []
+            for dot_type, polarity, label in dot_types:
+                rule = screen_rules.get(dot_type) or {}
+                threshold_mm, screen_limit, tile_limit = _dot_rule_limits(rule)
+                if rule.get("enabled") is False:
+                    continue
+                if threshold_mm <= 0 or screen_limit <= 0 or tile_limit <= 0:
+                    add_step(
+                        "略過點類規則：門檻或數量設定無效",
+                        screen=screen_code,
+                        dot_type=dot_type,
+                        threshold_mm=threshold_mm,
+                        screen_limit=screen_limit,
+                        tile_limit=tile_limit,
+                    )
+                    continue
+
+                detected = _detect_dot_components(
+                    processed_crop,
+                    polarity=polarity,
+                    diff_threshold=_as_int(dot_cfg.get("diff_threshold"), 4),
+                    background_kernel=_odd_kernel(_as_int(dot_cfg.get("background_kernel"), 33)),
+                    min_area=max(1, _as_int(dot_cfg.get("min_area_px"), 2)),
+                    max_area=max(0, _as_int(dot_cfg.get("max_area_px"), 50000)),
+                    morph_open=max(0, _as_int(dot_cfg.get("morph_open"), 2)),
+                    size_metric=str(dot_cfg.get("size_metric") or "bbox_diagonal"),
+                    unit_per_px=max(0.0, _as_float(dot_cfg.get("unit_per_px"), DOT_RULER_MM_PER_PX)),
+                    defect_threshold=threshold_mm,
+                    include_visuals=False,
+                )
+                candidates = detected["candidates"]
+                max_size_mm = max((_as_float(c.get("size_mm"), 0.0) for c in candidates), default=0.0)
+                detections.append({
+                    "dot_type": dot_type,
+                    "polarity": polarity,
+                    "label": label,
+                    "rule": rule,
+                    "threshold_mm": threshold_mm,
+                    "screen_limit": screen_limit,
+                    "tile_limit": tile_limit,
+                    "candidates": candidates,
+                    "count": len(candidates),
+                    "max_size_mm": max_size_mm,
+                })
+
+            if not detections:
+                add_step(
+                    "略過 tile：沒有可用的黑點/白點規則",
+                    image=image.get("image_name") or "",
+                    tile_id=tile.get("tile_id"),
+                    crop_box=crop_box,
+                )
+                continue
+
+            chosen = max(detections, key=lambda d: (d["max_size_mm"], d["count"]))
+            detection_summary = {
+                d["dot_type"]: {
+                    "count": d["count"],
+                    "max_size_mm": round(float(d["max_size_mm"]), 4),
+                }
+                for d in detections
+            }
+            if chosen["count"] <= 0:
+                add_step(
+                    "tile 判定完成：未偵測到黑點/白點候選",
+                    image=image.get("image_name") or "",
+                    tile_id=tile.get("tile_id"),
+                    crop_box=crop_box,
+                    detection=detection_summary,
+                )
+                continue
+
+            result["evaluated_tile_count"] += 1
+            key = (screen_code, chosen["dot_type"])
+            state = aggregates.setdefault(key, {
+                "screen": screen_code,
+                "image_name": image.get("image_name") or image_path.name,
+                "dot_type": chosen["dot_type"],
+                "dot_label": chosen["label"],
+                "threshold_mm": chosen["threshold_mm"],
+                "screen_count_limit": chosen["screen_limit"],
+                "tile_count_threshold": chosen["tile_limit"],
+                "screen_count": 0,
+                "max_tile_count": 0,
+                "max_size_mm": 0.0,
+                "target_tile_count": 0,
+                "aoi_defect_codes": set(),
+                "tiles": [],
+            })
+            state["screen_count"] += chosen["count"]
+            state["max_tile_count"] = max(state["max_tile_count"], chosen["count"])
+            state["max_size_mm"] = max(state["max_size_mm"], chosen["max_size_mm"])
+            state["target_tile_count"] += 1
+            if tile.get("aoi_defect_code"):
+                state["aoi_defect_codes"].add(str(tile.get("aoi_defect_code")))
+            state["tiles"].append({
+                "tile_id": tile.get("tile_id"),
+                "count": chosen["count"],
+                "max_size_mm": round(float(chosen["max_size_mm"]), 4),
+                "crop_box": crop_box,
+            })
+            visual = _save_within_spec_dot_visuals(
+                tile_crop=tile_crop,
+                processed_crop=processed_crop,
+                chosen=chosen,
+                dot_cfg=dot_cfg,
+                output_dir=visual_output_dir,
+                url_prefix=visual_url_prefix,
+                image_name=image.get("image_name") or image_path.name,
+                tile_id=tile.get("tile_id"),
+                crop_box=crop_box,
+            )
+            if visual:
+                state["tiles"][-1]["visual"] = visual
+                result["visuals"].append(visual)
+            add_step(
+                "tile 點類分類完成",
+                image=image.get("image_name") or "",
+                tile_id=tile.get("tile_id"),
+                crop_box=crop_box,
+                classified_as=chosen["dot_type"],
+                detection=detection_summary,
+            )
+
+    matches = []
+    panel_totals = []
+    for state in aggregates.values():
+        panel_totals.append({
+            "screen": state["screen"],
+            "dot_type": state["dot_type"],
+            "dot_label": state["dot_label"],
+            "total_count": int(state["screen_count"]),
+            "max_size_mm": round(float(state["max_size_mm"]), 4),
+            "evaluated_tiles": int(state["target_tile_count"]),
+            "threshold_mm": round(float(state["threshold_mm"]), 4),
+            "screen_count_limit": int(state["screen_count_limit"]),
+            "tile_count_threshold": int(state["tile_count_threshold"]),
+        })
+        within = (
+            state["max_size_mm"] <= state["threshold_mm"]
+            and state["screen_count"] <= state["screen_count_limit"]
+            and state["max_tile_count"] <= state["tile_count_threshold"]
+        )
+        add_step(
+            "規格內規則比對",
+            screen=state["screen"],
+            dot_type=state["dot_type"],
+            max_size_mm=round(float(state["max_size_mm"]), 4),
+            threshold_mm=round(float(state["threshold_mm"]), 4),
+            screen_count=state["screen_count"],
+            screen_count_limit=state["screen_count_limit"],
+            max_tile_count=state["max_tile_count"],
+            tile_count_threshold=state["tile_count_threshold"],
+            within=within,
+        )
+        if not within:
+            continue
+
+        matches.append({
+            "screen": state["screen"],
+            "image_name": state["image_name"],
+            "dot_type": state["dot_type"],
+            "dot_label": state["dot_label"],
+            "max_size_mm": round(float(state["max_size_mm"]), 4),
+            "threshold_mm": round(float(state["threshold_mm"]), 4),
+            "screen_count": int(state["screen_count"]),
+            "screen_count_limit": int(state["screen_count_limit"]),
+            "max_tile_count": int(state["max_tile_count"]),
+            "tile_count_threshold": int(state["tile_count_threshold"]),
+            "target_tile_count": int(state["target_tile_count"]),
+            "aoi_defect_codes": sorted(state["aoi_defect_codes"]),
+            "tiles": state["tiles"][:20],
+        })
+
+    result["panel_totals"] = panel_totals
+    result["panel_summary"] = {
+        "total_dot_count": sum(item["total_count"] for item in panel_totals),
+        "total_visuals": len(result["visuals"]),
+        "target_tile_count": result["target_tile_count"],
+        "evaluated_tile_count": result["evaluated_tile_count"],
+        "skipped_tiles": result["skipped_tiles"],
+    }
+    result["matches"] = matches[:5]
+    if not matches:
+        add_step("判定結果：未符合規格內建議條件")
+        return result
+
+    first = matches[0]
+    result["suggestion"] = {
+        "suggested": True,
+        "category": "within_spec",
+        "reason": (
+            f"{first['screen']} {first['dot_label']} "
+            f"{first['max_size_mm']:.4g}mm <= {first['threshold_mm']:.4g}mm，"
+            f"畫面 {first['screen_count']} <= {first['screen_count_limit']}，"
+            f"Tile {first['max_tile_count']} <= {first['tile_count_threshold']}"
+        ),
+        "matches": matches[:5],
+    }
+    add_step("判定結果：建議規格內", reason=result["suggestion"]["reason"])
+    return result
+
+
+def _evaluate_within_spec_suggestion(detail: Dict[str, Any], rules: Dict[str, Any], machine_id: str = "") -> Optional[Dict[str, Any]]:
+    return _evaluate_within_spec_suggestion_detail(detail, rules, machine_id).get("suggestion")
 
 
 class _ListHandler(logging.Handler):
@@ -617,10 +1126,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_train_new_thumb()
             elif path == "/ric":
                 self._handle_ric_page(query, path)
+            elif path == "/ric/within-spec-logs":
+                self._handle_within_spec_report_page(query, path)
+            elif path.startswith("/ric/within-spec-log/"):
+                self._handle_within_spec_log_page(path)
             elif path == "/api/ric/report":
                 self._handle_ric_report_api(query)
             elif path == "/api/ric/client-data":
                 self._handle_client_data_api(query)
+            elif path == "/api/ric/within-spec-suggestion":
+                self._handle_within_spec_suggestion_api(query)
+            elif path == "/api/ric/within-spec-suggestion/log":
+                self._handle_within_spec_suggestion_log_api(query)
             elif path == "/api/ric/inference-stats":
                 self._handle_inference_stats_api(query)
             elif path == "/scratch-review":
@@ -757,6 +1274,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_over_review_save()
             elif path == "/api/ric/over-review/delete":
                 self._handle_over_review_delete()
+            elif path == "/api/ric/within-spec-suggestion/run":
+                self._handle_within_spec_suggestion_run()
             elif path == "/api/scratch-review/mark":
                 self._handle_scratch_review_mark()
             elif path == "/api/scratch-review/unmark":
@@ -1775,6 +2294,53 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         html = template.render(request_path=path, batches=batches)
         self._send_response(200, html)
 
+    def _handle_within_spec_report_page(self, query: dict, path: str):
+        """規格內建議計算紀錄清單。"""
+        try:
+            start_date = query.get("start_date", [""])[0] or None
+            end_date = query.get("end_date", [""])[0] or None
+            keyword = query.get("keyword", [""])[0] or ""
+            status = query.get("status", ["all"])[0] or "all"
+            limit = _as_int(query.get("limit", ["200"])[0], 200)
+            suggested = None
+            if status == "suggested":
+                suggested = True
+            elif status == "not_suggested":
+                suggested = False
+
+            rows = self.db.list_within_spec_review_log_report(
+                start_date=start_date,
+                end_date=end_date,
+                keyword=keyword,
+                suggested=suggested,
+                limit=limit,
+            ) if self.db else []
+            summary = {
+                "total": len(rows),
+                "suggested": sum(1 for row in rows if row.get("suggested")),
+                "not_suggested": sum(1 for row in rows if not row.get("suggested")),
+                "fallback": sum(1 for row in rows if row.get("fallback_used")),
+            }
+            template = self.jinja_env.get_template("within_spec_report.html")
+            html = template.render(
+                request_path=path,
+                rows=rows,
+                summary=summary,
+                filters={
+                    "start_date": start_date or "",
+                    "end_date": end_date or "",
+                    "keyword": keyword,
+                    "status": status,
+                    "limit": max(1, min(limit, 500)),
+                },
+            )
+            self._send_response(200, html)
+        except ValueError as ve:
+            self._send_response(400, str(ve))
+        except Exception as e:
+            logger.error("Within-spec report page error: %s", e, exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
     def _handle_ric_upload(self):
         """上傳 XLS 檔案並匯入 RIC 資料"""
         import cgi
@@ -2021,6 +2587,162 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.error(f"Client data API error: {e}", exc_info=True)
             self._send_json({"success": False, "error": str(e)})
 
+    def _load_within_spec_rules_for_review(self) -> Dict[str, Any]:
+        rules = None
+        if self.db:
+            try:
+                param = self.db.get_config_param(WITHIN_SPEC_PARAM)
+                if param:
+                    rules = param.get("decoded_value")
+            except Exception as e:
+                logger.warning("Failed to load within-spec rules from DB: %s", e)
+        if rules is None and self.inferencer and getattr(self.inferencer, "config", None):
+            rules = getattr(self.inferencer.config, "within_spec_judgment_rules", None)
+        if rules is None:
+            from capi_config import CAPIConfig
+            rules = CAPIConfig().within_spec_judgment_rules
+        from capi_config import CAPIConfig
+        return CAPIConfig._normalize_within_spec_judgment_rules(rules)
+
+    def _within_spec_visual_output(self, detail: Dict[str, Any], client_record_id: int, inference_record_id: int) -> Tuple[Optional[Path], str]:
+        if not self.heatmap_base_dir:
+            return None, ""
+        base_dir = Path(self.heatmap_base_dir)
+        heatmap_dir = Path(str(detail.get("heatmap_dir") or ""))
+        if heatmap_dir and hm_relative(str(heatmap_dir), base_dir):
+            root = heatmap_dir / "within_spec_review"
+        else:
+            root = base_dir / "within_spec_review" / f"record_{inference_record_id}"
+        run_dir = root / f"client_{client_record_id}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        rel = hm_relative(str(run_dir), base_dir)
+        if not rel:
+            return None, ""
+        return run_dir, f"/heatmaps/{rel}"
+
+    def _handle_within_spec_log_page(self, path: str):
+        try:
+            log_id = _as_int(path.rstrip("/").split("/")[-1], 0)
+            if log_id <= 0:
+                self._send_404(path)
+                return
+            log = self.db.get_within_spec_review_log(log_id) if self.db else None
+            if not log:
+                self._send_404(path)
+                return
+            template = self.jinja_env.get_template("within_spec_detail.html")
+            html = template.render(log=log, request_path=path)
+            self._send_response(200, html)
+        except Exception as e:
+            logger.error("Within-spec log page error: %s", e, exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
+    def _handle_within_spec_suggestion_api(self, query: dict):
+        """API: preview one non-mutating within-spec suggestion without saving a log."""
+        import time as _time
+
+        started = _time.time()
+        try:
+            record_id = _as_int((query.get("inference_record_id") or [""])[0], 0)
+            if record_id <= 0:
+                self._send_json({"success": False, "error": "missing inference_record_id"})
+                return
+
+            detail = self.db.get_record_detail(record_id) if self.db else None
+            eval_result = {"suggestion": None, "steps": []}
+            if detail:
+                eval_result = _evaluate_within_spec_suggestion_detail(
+                    detail,
+                    self._load_within_spec_rules_for_review(),
+                    machine_id=(query.get("mach_id") or [""])[0] or "",
+                )
+
+            elapsed = _time.time() - started
+            if elapsed > 5:
+                logger.warning("Within-spec suggestion %s took %.2fs", record_id, elapsed)
+            self._send_json({
+                "success": True,
+                "suggestion": eval_result.get("suggestion"),
+                "detail": eval_result,
+                "processing_time": round(elapsed, 3),
+            })
+        except Exception as e:
+            logger.error("Within-spec suggestion API error: %s", e, exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
+    def _handle_within_spec_suggestion_run(self):
+        """API: manually calculate and save one within-spec suggestion log."""
+        import time as _time
+
+        started = _time.time()
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8')) if body else {}
+
+            client_record_id = _as_int(data.get("client_record_id"), 0)
+            inference_record_id = _as_int(data.get("inference_record_id"), 0)
+            mach_id = str(data.get("mach_id") or "")
+            if client_record_id <= 0:
+                self._send_json({"success": False, "error": "缺少 client_record_id"})
+                return
+            if inference_record_id <= 0:
+                self._send_json({"success": False, "error": "缺少 inference_record_id"})
+                return
+
+            detail = self.db.get_record_detail(inference_record_id) if self.db else None
+            if not detail:
+                self._send_json({"success": False, "error": f"找不到推論紀錄: {inference_record_id}"})
+                return
+
+            visual_dir, visual_prefix = self._within_spec_visual_output(detail, client_record_id, inference_record_id)
+            eval_result = _evaluate_within_spec_suggestion_detail(
+                detail,
+                self._load_within_spec_rules_for_review(),
+                machine_id=mach_id,
+                visual_output_dir=visual_dir,
+                visual_url_prefix=visual_prefix,
+            )
+            elapsed = _time.time() - started
+            log = self.db.save_within_spec_review_log(
+                client_record_id=client_record_id,
+                inference_record_id=inference_record_id,
+                suggestion=eval_result.get("suggestion"),
+                detail=eval_result,
+                processing_seconds=elapsed,
+                error_message="",
+            )
+            if elapsed > 5:
+                logger.warning("Within-spec suggestion run client=%s inference=%s took %.2fs", client_record_id, inference_record_id, elapsed)
+            self._send_json({
+                "success": True,
+                "suggestion": eval_result.get("suggestion"),
+                "log": log,
+                "processing_time": round(elapsed, 3),
+            })
+        except ValueError as ve:
+            self._send_json({"success": False, "error": str(ve)})
+        except Exception as e:
+            logger.error("Within-spec suggestion run error: %s", e, exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
+    def _handle_within_spec_suggestion_log_api(self, query: dict):
+        """API: fetch saved within-spec suggestion logs for one client record."""
+        try:
+            client_record_id = _as_int((query.get("client_record_id") or [""])[0], 0)
+            if client_record_id <= 0:
+                self._send_json({"success": False, "error": "missing client_record_id"})
+                return
+            limit = _as_int((query.get("limit") or ["10"])[0], 10)
+            logs = self.db.get_within_spec_review_logs(client_record_id, limit=limit) if self.db else []
+            self._send_json({
+                "success": True,
+                "log": logs[0] if logs else None,
+                "logs": logs,
+            })
+        except Exception as e:
+            logger.error("Within-spec suggestion log API error: %s", e, exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
     def _compute_client_summary(self, records: list, dust_affected_ids: set = None, scratch_stats: dict = None):
         """從 client accuracy records 計算統計摘要並格式化 records，單次遍歷。
         Returns: (summary_dict, out_records_list)
@@ -2115,6 +2837,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "miss_review": None,
                 "over_review": None,
                 "scratch_rescue": None,
+                "within_spec_log": None,
             }
             rid = rec.get("inference_record_id")
             sr = scratch_stats.get(rid) if rid else None
@@ -2136,6 +2859,25 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "category": rec["over_review_category"],
                     "note": rec["over_review_note"] or "",
                     "updated_at": rec["over_review_updated_at"],
+                }
+            if rec.get("within_spec_log_id"):
+                suggestion = None
+                if rec.get("within_spec_suggested"):
+                    suggestion = {
+                        "suggested": True,
+                        "category": rec.get("within_spec_category") or "within_spec",
+                        "reason": rec.get("within_spec_reason") or "",
+                    }
+                    out_rec["within_spec_suggestion"] = suggestion
+                out_rec["within_spec_log"] = {
+                    "id": rec["within_spec_log_id"],
+                    "suggested": bool(rec.get("within_spec_suggested")),
+                    "category": rec.get("within_spec_category") or "",
+                    "reason": rec.get("within_spec_reason") or "",
+                    "error_message": rec.get("within_spec_error") or "",
+                    "processing_seconds": rec.get("within_spec_processing_seconds") or 0,
+                    "created_at": rec.get("within_spec_created_at"),
+                    "suggestion": suggestion,
                 }
             out_records.append(out_rec)
 
@@ -4294,7 +5036,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return value.strip().lower() not in ("0", "false", "no", "off")
             return bool(value)
 
-        diff_threshold = as_int("diff_threshold", 7)
+        diff_threshold = as_int("diff_threshold", 4)
         background_kernel = _odd_kernel(as_int("background_kernel", 33))
         min_area = max(1, as_int("min_area", 2))
         max_area = max(0, as_int("max_area", 50000))

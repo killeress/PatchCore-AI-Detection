@@ -261,6 +261,26 @@ class CAPIDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_over_review_client ON over_review(client_record_id);
 
+                -- Within-spec suggestion calculation logs (過檢 Review 規格內建議)
+                CREATE TABLE IF NOT EXISTS within_spec_review_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_record_id INTEGER NOT NULL,
+                    inference_record_id INTEGER NOT NULL,
+                    suggested INTEGER NOT NULL DEFAULT 0,
+                    category TEXT DEFAULT '',
+                    reason TEXT DEFAULT '',
+                    detail_json TEXT NOT NULL DEFAULT '{}',
+                    error_message TEXT DEFAULT '',
+                    processing_seconds REAL DEFAULT 0.0,
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    FOREIGN KEY (client_record_id) REFERENCES client_accuracy_records(id) ON DELETE CASCADE,
+                    FOREIGN KEY (inference_record_id) REFERENCES inference_records(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_within_spec_log_client
+                    ON within_spec_review_log(client_record_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_within_spec_log_inference
+                    ON within_spec_review_log(inference_record_id);
+
                 -- Scratch 誤救標記 (以 tile 為單位，供 DINOv2 再訓練負樣本收集)
                 CREATE TABLE IF NOT EXISTS scratch_rescue_review (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1294,6 +1314,13 @@ class CAPIDatabase:
                            mr.note as review_note, mr.updated_at as review_updated_at,
                            ovr.id as over_review_id, ovr.category as over_review_category,
                            ovr.note as over_review_note, ovr.updated_at as over_review_updated_at,
+                           wsl.id as within_spec_log_id,
+                           wsl.suggested as within_spec_suggested,
+                           wsl.category as within_spec_category,
+                           wsl.reason as within_spec_reason,
+                           wsl.error_message as within_spec_error,
+                           wsl.processing_seconds as within_spec_processing_seconds,
+                           wsl.created_at as within_spec_created_at,
                            (SELECT ir.id FROM inference_records ir
                             WHERE ir.glass_id = c.pnl_id
                               AND ir.request_time >= substr(c.time_stamp, 1, 10)
@@ -1303,6 +1330,12 @@ class CAPIDatabase:
                     FROM client_accuracy_records c
                     LEFT JOIN miss_review mr ON mr.client_record_id = c.id
                     LEFT JOIN over_review ovr ON ovr.client_record_id = c.id
+                    LEFT JOIN within_spec_review_log wsl
+                      ON wsl.id = (
+                          SELECT id FROM within_spec_review_log
+                          WHERE client_record_id = c.id
+                          ORDER BY id DESC LIMIT 1
+                      )
                     {where_sql}
                     ORDER BY c.time_stamp DESC""",
                 params
@@ -1690,6 +1723,225 @@ class CAPIDatabase:
 
     def delete_over_review(self, client_record_id: int) -> bool:
         return self._delete_review('over_review', client_record_id)
+
+    def save_within_spec_review_log(
+        self,
+        client_record_id: int,
+        inference_record_id: int,
+        suggestion: Optional[Dict[str, Any]],
+        detail: Dict[str, Any],
+        processing_seconds: float,
+        error_message: str = "",
+    ) -> Dict[str, Any]:
+        """保存一筆規格內建議計算紀錄，保留歷史供反查。"""
+        suggested = bool(suggestion and suggestion.get("suggested"))
+        category = str((suggestion or {}).get("category") or "")
+        reason = str((suggestion or {}).get("reason") or "")
+        detail_json = json.dumps(detail or {}, ensure_ascii=False)
+
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                row = conn.execute(
+                    "SELECT id FROM client_accuracy_records WHERE id = ?",
+                    (client_record_id,)
+                ).fetchone()
+                if not row:
+                    raise ValueError(f"Record not found: {client_record_id}")
+
+                cursor = conn.execute(
+                    """INSERT INTO within_spec_review_log
+                       (client_record_id, inference_record_id, suggested, category, reason,
+                        detail_json, error_message, processing_seconds)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        client_record_id,
+                        inference_record_id,
+                        1 if suggested else 0,
+                        category,
+                        reason,
+                        detail_json,
+                        error_message or "",
+                        float(processing_seconds or 0.0),
+                    )
+                )
+                conn.commit()
+                return self.get_within_spec_review_log(int(cursor.lastrowid)) or {}
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+
+    def _format_within_spec_review_log(self, row) -> Dict[str, Any]:
+        data = dict(row)
+        try:
+            detail = json.loads(data.get("detail_json") or "{}")
+        except Exception:
+            detail = {}
+        suggestion = None
+        if data.get("suggested"):
+            suggestion = {
+                "suggested": True,
+                "category": data.get("category") or "within_spec",
+                "reason": data.get("reason") or "",
+                "matches": detail.get("matches") or [],
+            }
+        return {
+            "id": data["id"],
+            "client_record_id": data["client_record_id"],
+            "inference_record_id": data["inference_record_id"],
+            "suggested": bool(data.get("suggested")),
+            "category": data.get("category") or "",
+            "reason": data.get("reason") or "",
+            "suggestion": suggestion,
+            "detail": detail,
+            "error_message": data.get("error_message") or "",
+            "processing_seconds": data.get("processing_seconds") or 0.0,
+            "created_at": data.get("created_at"),
+        }
+
+    def get_within_spec_review_log(self, log_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM within_spec_review_log WHERE id = ?",
+                (log_id,)
+            ).fetchone()
+            return self._format_within_spec_review_log(row) if row else None
+        finally:
+            conn.close()
+
+    def get_latest_within_spec_review_log(self, client_record_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                """SELECT * FROM within_spec_review_log
+                   WHERE client_record_id = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (client_record_id,)
+            ).fetchone()
+            return self._format_within_spec_review_log(row) if row else None
+        finally:
+            conn.close()
+
+    def get_within_spec_review_logs(self, client_record_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit or 10), 50))
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM within_spec_review_log
+                   WHERE client_record_id = ?
+                   ORDER BY id DESC LIMIT ?""",
+                (client_record_id, limit)
+            ).fetchall()
+            return [self._format_within_spec_review_log(r) for r in rows]
+        finally:
+            conn.close()
+
+    def list_within_spec_review_log_report(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        keyword: str = "",
+        suggested: Optional[bool] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """列出規格內建議計算紀錄，供報表頁快速查閱。"""
+        if start_date and not _DATE_RE.match(start_date):
+            raise ValueError(f"Invalid start_date format: {start_date}")
+        if end_date and not _DATE_RE.match(end_date):
+            raise ValueError(f"Invalid end_date format: {end_date}")
+
+        def _next_date_str(date_str: str) -> str:
+            from datetime import timedelta
+            return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        limit = max(1, min(int(limit or 200), 500))
+        where = []
+        params: List[Any] = []
+        if start_date:
+            where.append("wsl.created_at >= ?")
+            params.append(start_date)
+        if end_date:
+            where.append("wsl.created_at < ?")
+            params.append(_next_date_str(end_date))
+        if suggested is not None:
+            where.append("wsl.suggested = ?")
+            params.append(1 if suggested else 0)
+
+        keyword = str(keyword or "").strip()
+        if keyword:
+            like = f"%{keyword}%"
+            where.append(
+                "(c.pnl_id LIKE ? OR c.mach_id LIKE ? OR ir.model_id LIKE ? "
+                "OR ir.machine_no LIKE ? OR wsl.reason LIKE ?)"
+            )
+            params.extend([like, like, like, like, like])
+
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"""SELECT wsl.*,
+                           c.time_stamp AS client_time_stamp,
+                           c.pnl_id AS pnl_id,
+                           c.mach_id AS mach_id,
+                           c.result_eqp AS result_eqp,
+                           c.result_ai AS result_ai,
+                           c.result_ric AS result_ric,
+                           ir.model_id AS model_id,
+                           ir.machine_no AS machine_no,
+                           ir.ai_judgment AS inference_ai_judgment,
+                           ir.machine_judgment AS inference_machine_judgment
+                    FROM within_spec_review_log wsl
+                    LEFT JOIN client_accuracy_records c ON c.id = wsl.client_record_id
+                    LEFT JOIN inference_records ir ON ir.id = wsl.inference_record_id
+                    {where_sql}
+                    ORDER BY wsl.id DESC
+                    LIMIT ?""",
+                (*params, limit),
+            ).fetchall()
+
+            report_rows = []
+            for row in rows:
+                data = dict(row)
+                try:
+                    detail = json.loads(data.get("detail_json") or "{}")
+                except Exception:
+                    detail = {}
+                summary = detail.get("panel_summary") or {}
+                rule_selection = detail.get("rule_selection") or {}
+                first_match = (detail.get("matches") or [{}])[0] or {}
+                report_rows.append({
+                    "id": data["id"],
+                    "client_record_id": data["client_record_id"],
+                    "inference_record_id": data["inference_record_id"],
+                    "created_at": data.get("created_at"),
+                    "client_time_stamp": data.get("client_time_stamp") or "",
+                    "pnl_id": data.get("pnl_id") or "",
+                    "mach_id": data.get("mach_id") or "",
+                    "model_id": data.get("model_id") or "",
+                    "machine_no": data.get("machine_no") or "",
+                    "result_eqp": data.get("result_eqp") or "",
+                    "result_ai": data.get("result_ai") or "",
+                    "result_ric": data.get("result_ric") or "",
+                    "suggested": bool(data.get("suggested")),
+                    "category": data.get("category") or "",
+                    "reason": data.get("reason") or "",
+                    "error_message": data.get("error_message") or "",
+                    "processing_seconds": data.get("processing_seconds") or 0.0,
+                    "matched_machine_key": rule_selection.get("matched_machine_key") or "",
+                    "fallback_used": bool(rule_selection.get("fallback_used")),
+                    "total_dot_count": int(summary.get("total_dot_count") or 0),
+                    "target_tile_count": int(summary.get("target_tile_count") or 0),
+                    "evaluated_tile_count": int(summary.get("evaluated_tile_count") or 0),
+                    "screen": first_match.get("screen") or "",
+                    "dot_label": first_match.get("dot_label") or "",
+                })
+            return report_rows
+        finally:
+            conn.close()
 
     def get_client_accuracy_count(self) -> int:
         """取得 client accuracy records 總數"""

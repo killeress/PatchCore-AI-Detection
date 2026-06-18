@@ -463,6 +463,7 @@
         font-size: 1rem;
         font-weight: 600;
         color: var(--text-muted);
+        text-decoration: none;
         cursor: pointer;
         border-bottom: 3px solid transparent;
         margin-bottom: -2px;
@@ -690,6 +691,46 @@
         font-size: 0.78rem;
     }
 
+    .within-spec-suggestion {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: rgba(34, 197, 94, 0.14);
+        border: 1px solid rgba(34, 197, 94, 0.35);
+        color: #86efac;
+        font-size: 0.74rem;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+
+    .within-spec-suggestion-detail {
+        margin-top: 4px;
+        color: var(--text-muted);
+        font-size: 0.7rem;
+        line-height: 1.35;
+        max-width: 180px;
+    }
+
+    .within-spec-btn {
+        background: rgba(59, 130, 246, 0.16);
+        border: 1px solid rgba(59, 130, 246, 0.35);
+        color: #bfdbfe;
+        border-radius: 6px;
+        padding: 4px 8px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        cursor: pointer;
+        margin-right: 4px;
+        white-space: nowrap;
+    }
+
+    .within-spec-btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+    }
+
     .review-btn-save {
         background: linear-gradient(135deg, var(--accent), #6366f1);
         border: none;
@@ -794,6 +835,7 @@
     <div class="top-tab active" data-top-tab="ric" onclick="switchTopTab('ric')">📊 RIC Report</div>
     <div class="top-tab" data-top-tab="inference" onclick="switchTopTab('inference')">🤖 AI 推論紀錄</div>
     <div class="top-tab" data-top-tab="scratch" onclick="switchTopTab('scratch')">🩹 Scratch 審查</div>
+    <a class="top-tab" href="/ric/within-spec-logs">📏 規格內明細</a>
 </div>
 
 <!-- Tab 1: RIC Report (existing content) -->
@@ -982,6 +1024,7 @@
                             <th>RIC</th>
                             <th>DATASTR</th>
                             <th>推論紀錄</th>
+                            <th style="min-width:150px;">建議</th>
                             <th style="min-width:160px;">分類</th>
                             <th style="min-width:200px;">備註</th>
                             <th style="min-width:100px;">操作</th>
@@ -1024,6 +1067,7 @@
                             <th>RIC</th>
                             <th>DATASTR</th>
                             <th>推論紀錄</th>
+                            <th>建議</th>
                             <th>分類</th>
                             <th>備註</th>
                             <th style="min-width:100px;">操作</th>
@@ -1232,6 +1276,15 @@
         function ratioPercentValue(numerator, denominator) {
             const denom = Number(denominator) || 0;
             return denom > 0 ? ((Number(numerator) || 0) / denom * 100).toFixed(2) : null;
+        }
+
+        function escapeClientHtml(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
         }
 
         function emptySummary() {
@@ -2713,6 +2766,77 @@
             countEl.textContent = `篩選：${label} ${shownDone} / ${totalDone} 筆`;
         }
 
+        function renderWithinSpecSuggestion(row) {
+            if (row.within_spec_loading) {
+                return '<span style="color:var(--text-muted); font-size:0.75rem;">計算中...</span>';
+            }
+            if (row.within_spec_error) {
+                return `
+                    <span style="color:#fbbf24; font-size:0.75rem;" title="${escapeClientHtml(row.within_spec_error)}">計算失敗</span>
+                    <button type="button" class="within-spec-btn" onclick="clientComp._runWithinSpecSuggestion(${row.id})">重算</button>
+                `;
+            }
+            const log = row.within_spec_log;
+            const suggestion = row.within_spec_suggestion || (log && log.suggestion);
+            let html = '';
+            if (suggestion && suggestion.suggested) {
+                const reason = escapeClientHtml(suggestion.reason || '符合規格內設定');
+                html += `
+                    <span class="within-spec-suggestion" title="${reason}">建議規格內</span>
+                    <div class="within-spec-suggestion-detail">${reason}</div>
+                `;
+            } else if (log) {
+                html += `<span style="color:var(--text-muted); font-size:0.75rem;">已計算：未建議</span>`;
+            } else if (!row.inference_record_id) {
+                html += '<span style="color:var(--text-muted); font-size:0.75rem;">無推論紀錄</span>';
+                return html;
+            } else {
+                html += '<span style="color:var(--text-muted); font-size:0.75rem;">未計算</span>';
+            }
+            html += `<div style="margin-top:5px;">
+                <button type="button" class="within-spec-btn" onclick="clientComp._runWithinSpecSuggestion(${row.id})">${log ? '重算' : '計算'}</button>
+                ${log ? `<a class="within-spec-btn" href="/ric/within-spec-log/${log.id}" target="_blank" rel="noopener" style="text-decoration:none;">明細</a>` : ''}
+            </div>`;
+            return html;
+        }
+
+        function updateWithinSpecSuggestionCell(row) {
+            const cell = document.getElementById(`within_spec_suggestion_${row.id}`);
+            if (cell) cell.innerHTML = renderWithinSpecSuggestion(row);
+        }
+
+        async function runWithinSpecSuggestion(row) {
+            if (!row.inference_record_id || row.within_spec_loading) return;
+            row.within_spec_loading = true;
+            row.within_spec_error = '';
+            updateWithinSpecSuggestionCell(row);
+
+            try {
+                const resp = await fetch('/api/ric/within-spec-suggestion/run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        client_record_id: row.id,
+                        inference_record_id: row.inference_record_id,
+                        mach_id: row.mach_id || '',
+                    }),
+                });
+                const data = await resp.json();
+                if (!data.success) {
+                    row.within_spec_error = data.error || '計算失敗';
+                    return;
+                }
+                row.within_spec_log = data.log || null;
+                row.within_spec_suggestion = data.suggestion || null;
+            } catch (err) {
+                row.within_spec_suggestion = null;
+                row.within_spec_error = err.message;
+            } finally {
+                row.within_spec_loading = false;
+                updateWithinSpecSuggestionCell(row);
+            }
+        }
+
         function renderOverReviewTable(records) {
             const overRecords = records.filter(r => getEffectiveAI(r) === 'NG' && getEffectiveRIC(r) === 'OK');
             const pending = overRecords.filter(r => !r.over_review || !r.over_review.category);
@@ -2756,6 +2880,7 @@
                     ? `<a href="/record/${row.inference_record_id}" target="_blank" style="color:var(--accent); font-size:0.82rem; text-decoration:underline;">🔗 查看</a>`
                     : `<span style="color:var(--text-muted); font-size:0.78rem;">無紀錄</span>`
                 }</td>
+                <td id="within_spec_suggestion_${row.id}">${renderWithinSpecSuggestion(row)}</td>
                 <td>
                     <select class="review-select" id="over_review_cat_${row.id}" onchange="clientComp._markOverDirty(${row.id})">
                         <option value="">請選擇</option>
@@ -2862,6 +2987,10 @@
             quickFilter, customFilter, loadData, toggleUpload, toggleIgnoreOmit, toggleIncludeEqpOK,
             _saveReview, _deleteReview, _markDirty,
             _saveOverReview, _deleteOverReview, _markOverDirty,
+            _runWithinSpecSuggestion: (recordId) => {
+                const row = rawRecords.find(r => r.id === recordId);
+                if (row) runWithinSpecSuggestion(row);
+            },
         };
     })();
 
