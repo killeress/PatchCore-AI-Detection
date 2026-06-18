@@ -5451,7 +5451,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         import time as _time
         from capi_server import (
             results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment,
-            InferenceLogCapture,
+            InferenceLogCapture, WITHIN_SPEC_LOGS_URL,
         )
 
         def _update_status(msg, *_):
@@ -5535,6 +5535,76 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         ai_judgment, ng_details, result.edge_defects, result.image_path.stem
                     )
 
+            within_spec_info = None
+            if ai_judgment.startswith("NG"):
+                parsed_for_within_spec = {
+                    "glass_id": detail.get("glass_id", ""),
+                    "model_id": model_id,
+                    "machine_no": detail.get("machine_no", ""),
+                    "machine_judgment": detail.get("machine_judgment", ""),
+                }
+                if server_inst is not None and hasattr(server_inst, "_evaluate_within_spec_for_inference"):
+                    within_spec_info = server_inst._evaluate_within_spec_for_inference(
+                        parsed_for_within_spec,
+                        results,
+                        inferencer,
+                    )
+                else:
+                    from capi_config import CAPIConfig
+
+                    started = _time.time()
+                    eval_detail = {
+                        "model_id": model_id,
+                        "machine_id": model_id,
+                        "machine_no": detail.get("machine_no", ""),
+                        "images": results_to_db_data(results, {}),
+                        "source": "inference",
+                    }
+                    rules = getattr(getattr(inferencer, "config", None), "within_spec_judgment_rules", None)
+                    if not rules:
+                        rules = CAPIConfig().within_spec_judgment_rules
+                    eval_result = _evaluate_within_spec_suggestion_detail(
+                        eval_detail,
+                        CAPIConfig._normalize_within_spec_judgment_rules(rules),
+                        model_id,
+                    )
+                    suggestion = eval_result.get("suggestion")
+                    panel_totals = eval_result.get("panel_totals") or []
+                    panel_within = bool(panel_totals) and all(bool(item.get("within")) for item in panel_totals)
+                    converted = bool(suggestion and suggestion.get("suggested") and panel_within)
+                    if converted:
+                        status = "within_spec"
+                        reason = suggestion.get("reason", "")
+                    elif suggestion and suggestion.get("suggested"):
+                        status = "not_within_spec"
+                        reason = "部分項目符合規格內，但整片 PANEL 尚有項目未符合"
+                    elif panel_totals:
+                        status = "not_within_spec"
+                        reason = "未符合規格內條件"
+                    else:
+                        status = "not_evaluable"
+                        reason = "未取得可比對的規格內點數結果"
+                    eval_result["source"] = "inference"
+                    eval_result["inference_context"] = parsed_for_within_spec
+                    eval_result["inference_auto_decision"] = {
+                        "converted_to_ok_i": converted,
+                        "status": status,
+                        "reason": reason,
+                        "requires_all_panel_totals_within": True,
+                    }
+                    within_spec_info = {
+                        "suggestion": suggestion if converted else None,
+                        "raw_suggestion": suggestion,
+                        "detail": eval_result,
+                        "processing_seconds": _time.time() - started,
+                        "converted": converted,
+                        "status": status,
+                        "reason": reason,
+                    }
+
+                if within_spec_info and within_spec_info.get("converted"):
+                    ai_judgment = "OK-i"
+
             _update_status("正在儲存 heatmap...")
             heatmap_info = {}
             if cls.heatmap_manager:
@@ -5567,6 +5637,25 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
 
             inference_log = InferenceLogCapture.stop_capture()
+            if within_spec_info:
+                ws_detail = within_spec_info.get("detail") or {}
+                summary = ws_detail.get("panel_summary") or {}
+                rule_selection = ws_detail.get("rule_selection") or {}
+                status = within_spec_info.get("status", "unknown")
+                reason = within_spec_info.get("reason", "")
+                result_text = (
+                    "符合規格內，最終判定 OK-i"
+                    if within_spec_info.get("converted")
+                    else f"已執行規格內檢查，結果={status}"
+                )
+                within_spec_note = (
+                    f"[WITHIN_SPEC_INFERENCE] 原始 AI=NG，{result_text}；"
+                    f"matched_machine={rule_selection.get('matched_machine_key') or 'N/A'}；"
+                    f"target_tiles={summary.get('target_tile_count', 0)}；"
+                    f"evaluated_tiles={summary.get('evaluated_tile_count', 0)}；"
+                    f"{reason}；明細：{WITHIN_SPEC_LOGS_URL}"
+                )
+                inference_log = f"{(inference_log or '').rstrip()}\n{within_spec_note}".strip()
             from capi_image_preprocess_lab import summarize_preprocess_timings
             preprocess_timing = summarize_preprocess_timings(
                 getattr(r, "preprocess_steps", []) for r in results
@@ -5592,6 +5681,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 ),
                 image_preprocess_timing=preprocess_timing,
             )
+
+            if within_spec_info:
+                cls.db.save_within_spec_review_log(
+                    client_record_id=None,
+                    inference_record_id=record_id,
+                    suggestion=within_spec_info.get("suggestion"),
+                    detail=within_spec_info.get("detail") or {},
+                    processing_seconds=within_spec_info.get("processing_seconds", 0.0),
+                    error_message=within_spec_info.get("error_message", ""),
+                    source="inference",
+                )
 
             with cls._rerun_lock:
                 cls._rerun_tasks[record_id] = {"status": "done", "message": "完成"}

@@ -1670,8 +1670,14 @@ class CAPIServer:
         results: List[ImageResult],
         inferencer: Optional[CAPIInferencer],
     ) -> Optional[Dict[str, Any]]:
+        started = time.time()
+        context = {
+            "glass_id": parsed.get("glass_id", ""),
+            "model_id": parsed.get("model_id", ""),
+            "machine_no": parsed.get("machine_no", ""),
+            "machine_judgment": parsed.get("machine_judgment", ""),
+        }
         try:
-            started = time.time()
             detail = {
                 "model_id": parsed.get("model_id", ""),
                 "machine_id": parsed.get("model_id", ""),
@@ -1687,21 +1693,36 @@ class CAPIServer:
             suggestion = eval_result.get("suggestion")
             panel_totals = eval_result.get("panel_totals") or []
             panel_within = bool(panel_totals) and all(bool(item.get("within")) for item in panel_totals)
-            if not (suggestion and suggestion.get("suggested")):
-                return None
-            if not panel_within:
-                return None
             eval_result["source"] = "inference"
-            eval_result["inference_context"] = {
-                "glass_id": parsed.get("glass_id", ""),
-                "model_id": parsed.get("model_id", ""),
-                "machine_no": parsed.get("machine_no", ""),
-                "machine_judgment": parsed.get("machine_judgment", ""),
+            eval_result["inference_context"] = context
+            converted = bool(suggestion and suggestion.get("suggested") and panel_within)
+            if converted:
+                reason = suggestion.get("reason", "")
+                status = "within_spec"
+            elif suggestion and suggestion.get("suggested"):
+                reason = "部分項目符合規格內，但整片 PANEL 尚有項目未符合"
+                status = "not_within_spec"
+            elif panel_totals:
+                reason = "未符合規格內條件"
+                status = "not_within_spec"
+            else:
+                reason = "未取得可比對的規格內點數結果"
+                status = "not_evaluable"
+            eval_result["inference_auto_decision"] = {
+                "converted_to_ok_i": converted,
+                "status": status,
+                "reason": reason,
+                "requires_all_panel_totals_within": True,
             }
+
             return {
-                "suggestion": suggestion,
+                "suggestion": suggestion if converted else None,
+                "raw_suggestion": suggestion,
                 "detail": eval_result,
                 "processing_seconds": time.time() - started,
+                "converted": converted,
+                "status": status,
+                "reason": reason,
             }
         except Exception as e:
             logger.warning(
@@ -1710,7 +1731,27 @@ class CAPIServer:
                 e,
                 exc_info=True,
             )
-            return None
+            return {
+                "suggestion": None,
+                "raw_suggestion": None,
+                "detail": {
+                    "source": "inference",
+                    "inference_context": context,
+                    "inference_auto_decision": {
+                        "converted_to_ok_i": False,
+                        "status": "check_failed",
+                        "reason": f"規格內檢查失敗：{type(e).__name__}",
+                        "requires_all_panel_totals_within": True,
+                    },
+                    "error_message": str(e),
+                    "steps": [{"message": "推論階段規格內檢查失敗", "error": str(e)}],
+                },
+                "processing_seconds": time.time() - started,
+                "converted": False,
+                "status": "check_failed",
+                "reason": f"規格內檢查失敗：{type(e).__name__}",
+                "error_message": str(e),
+            }
 
     def _process_request(
         self,
@@ -1786,14 +1827,21 @@ class CAPIServer:
                 within_spec_info = None
                 if ai_judgment.startswith("NG"):
                     within_spec_info = self._evaluate_within_spec_for_inference(parsed, results, inferencer)
-                    if within_spec_info:
-                        reason = within_spec_info["suggestion"].get("reason", "")
+                    if within_spec_info and within_spec_info.get("converted"):
+                        reason = within_spec_info.get("reason", "")
                         logger.info(
                             "[WITHIN_SPEC_INFERENCE] Glass=%s 原始 AI=NG，符合規格內，轉為 OK-i: %s",
                             parsed.get("glass_id", ""),
                             reason,
                         )
                         ai_judgment = "OK-i"
+                    elif within_spec_info:
+                        logger.info(
+                            "[WITHIN_SPEC_INFERENCE] Glass=%s 原始 AI=NG，已執行規格內檢查，結果=%s: %s",
+                            parsed.get("glass_id", ""),
+                            within_spec_info.get("status", "unknown"),
+                            within_spec_info.get("reason", ""),
+                        )
 
                 return ai_judgment, ng_details, results, is_duplicate, omit_image_raw, aoi_report, omit_overexposed, omit_overexposure_info, within_spec_info
 
@@ -1861,9 +1909,23 @@ class CAPIServer:
                 error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
 
             if within_spec_info:
-                reason = within_spec_info.get("suggestion", {}).get("reason", "")
+                detail = within_spec_info.get("detail") or {}
+                summary = detail.get("panel_summary") or {}
+                rule_selection = detail.get("rule_selection") or {}
+                reason = within_spec_info.get("reason", "")
+                status = within_spec_info.get("status", "unknown")
+                result_text = (
+                    "符合規格內，最終判定 OK-i"
+                    if within_spec_info.get("converted")
+                    else f"已執行規格內檢查，結果={status}"
+                )
+                machine_key = rule_selection.get("matched_machine_key") or ""
+                target_tiles = summary.get("target_tile_count", 0)
+                evaluated_tiles = summary.get("evaluated_tile_count", 0)
                 within_spec_note = (
-                    f"[WITHIN_SPEC_INFERENCE] 原始 AI=NG，符合規格內，最終判定 OK-i；"
+                    f"[WITHIN_SPEC_INFERENCE] 原始 AI=NG，{result_text}；"
+                    f"matched_machine={machine_key or 'N/A'}；"
+                    f"target_tiles={target_tiles}；evaluated_tiles={evaluated_tiles}；"
                     f"{reason}；明細：{WITHIN_SPEC_LOGS_URL}"
                 )
                 inference_log = f"{(inference_log or '').rstrip()}\n{within_spec_note}".strip()
@@ -1923,6 +1985,7 @@ class CAPIServer:
                     suggestion=within_spec_info.get("suggestion"),
                     detail=within_spec_info.get("detail") or {},
                     processing_seconds=within_spec_info.get("processing_seconds", 0.0),
+                    error_message=within_spec_info.get("error_message", ""),
                     source="inference",
                 )
 
