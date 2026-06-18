@@ -106,6 +106,20 @@ def hm_relative(path_str, base_dir):
         return ""
 
 
+def _within_spec_auto_visual_output(base_dir: str, glass_id: str = "", inference_record_id: int = 0) -> Tuple[Optional[Path], str]:
+    if not base_dir:
+        return None, ""
+    base = Path(base_dir)
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(glass_id or "").strip())[:80]
+    if not safe_key:
+        safe_key = f"record_{inference_record_id or 'unknown'}"
+    run_dir = base / "within_spec_inference" / f"{safe_key}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+    rel = hm_relative(str(run_dir), base)
+    if not rel:
+        return None, ""
+    return run_dir, f"/heatmaps/{rel}"
+
+
 def _serialize_pending_changes(pc) -> list:
     """把 {(lighting, zone): count} 轉為 [{lighting, zone, count}] 給 JSON 用。
 
@@ -399,6 +413,26 @@ def _dot_rule_limits(rule: Dict[str, Any]) -> Tuple[float, int, int]:
     screen_limit = _as_int(rule.get("screen_count_limit"), 0)
     tile_limit = _as_int(rule.get("tile_count_threshold"), screen_limit)
     return threshold_mm, screen_limit, tile_limit
+
+
+def _format_within_spec_panel_summary(detail: Dict[str, Any], fallback: str = "") -> str:
+    parts = []
+    for item in (detail.get("panel_totals") or []):
+        screen = item.get("screen") or "UNKNOWN"
+        dot_label = item.get("dot_label") or item.get("dot_type") or "點"
+        max_size = _as_float(item.get("max_size_mm"), 0.0)
+        threshold = _as_float(item.get("threshold_mm"), 0.0)
+        total_count = _as_int(item.get("total_count"), 0)
+        screen_limit = _as_int(item.get("screen_count_limit"), 0)
+        max_tile_count = _as_int(item.get("max_tile_count"), 0)
+        tile_limit = _as_int(item.get("tile_count_threshold"), 0)
+        status = "OK" if item.get("within") else "NG"
+        parts.append(
+            f"{screen} {dot_label} {max_size:.4g}mm <= {threshold:.4g}mm，"
+            f"畫面 {total_count} <= {screen_limit}，"
+            f"Tile {max_tile_count} <= {tile_limit} ({status})"
+        )
+    return "；".join(parts) if parts else fallback
 
 
 def _within_spec_machine_candidates(detail: Dict[str, Any], machine_id: str = "") -> List[str]:
@@ -791,6 +825,7 @@ def _evaluate_within_spec_suggestion_detail(
             "evaluated_tiles": int(state["target_tile_count"]),
             "threshold_mm": round(float(state["threshold_mm"]), 4),
             "screen_count_limit": int(state["screen_count_limit"]),
+            "max_tile_count": int(state["max_tile_count"]),
             "tile_count_threshold": int(state["tile_count_threshold"]),
             "rule": state["rule"],
         })
@@ -1312,6 +1347,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_over_review_save()
             elif path == "/api/ric/over-review/delete":
                 self._handle_over_review_delete()
+            elif path == "/api/ric/within-spec-log/regenerate":
+                self._handle_within_spec_log_regenerate()
             elif path == "/api/ric/within-spec-suggestion/run":
                 self._handle_within_spec_suggestion_run()
             elif path == "/api/scratch-review/mark":
@@ -2674,6 +2711,114 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.error("Within-spec log page error: %s", e, exc_info=True)
             self._send_json({"success": False, "error": str(e)})
 
+    def _handle_within_spec_log_regenerate(self):
+        """API: regenerate a saved within-spec log with persisted dot-detection visuals."""
+        import time as _time
+
+        started = _time.time()
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8')) if body else {}
+
+            log_id = _as_int(data.get("log_id"), 0)
+            if log_id <= 0:
+                self._send_json({"success": False, "error": "缺少 log_id"})
+                return
+            log = self.db.get_within_spec_review_log(log_id) if self.db else None
+            if not log:
+                self._send_json({"success": False, "error": f"找不到規格內明細: {log_id}"})
+                return
+
+            inference_record_id = _as_int(log.get("inference_record_id"), 0)
+            if inference_record_id <= 0:
+                self._send_json({"success": False, "error": "這筆 log 沒有對應推論紀錄"})
+                return
+            detail = self.db.get_record_detail(inference_record_id) if self.db else None
+            if not detail:
+                self._send_json({"success": False, "error": f"找不到推論紀錄: {inference_record_id}"})
+                return
+
+            client_record_id = _as_int(log.get("client_record_id"), 0)
+            if client_record_id > 0:
+                visual_dir, visual_prefix = self._within_spec_visual_output(detail, client_record_id, inference_record_id)
+            else:
+                visual_dir, visual_prefix = _within_spec_auto_visual_output(
+                    str(self.heatmap_base_dir or ""),
+                    detail.get("glass_id") or "",
+                    inference_record_id,
+                )
+
+            eval_result = _evaluate_within_spec_suggestion_detail(
+                detail,
+                self._load_within_spec_rules_for_review(),
+                machine_id=str(detail.get("model_id") or detail.get("machine_no") or ""),
+                visual_output_dir=visual_dir,
+                visual_url_prefix=visual_prefix,
+            )
+
+            source = "inference" if log.get("source") == "inference" else "review"
+            suggestion = eval_result.get("suggestion")
+            error_message = ""
+            if source == "inference":
+                panel_totals = eval_result.get("panel_totals") or []
+                panel_within = bool(panel_totals) and all(bool(item.get("within")) for item in panel_totals)
+                converted = bool(suggestion and suggestion.get("suggested") and panel_within)
+                panel_reason = _format_within_spec_panel_summary(eval_result)
+                if converted:
+                    status = "within_spec"
+                    reason = panel_reason or suggestion.get("reason", "")
+                    if suggestion and reason:
+                        suggestion = dict(suggestion)
+                        suggestion["reason"] = reason
+                elif suggestion and suggestion.get("suggested"):
+                    status = "not_within_spec"
+                    reason = panel_reason or "部分項目符合規格內，但整片 PANEL 尚有項目未符合"
+                    suggestion = None
+                    error_message = reason
+                elif panel_totals:
+                    status = "not_within_spec"
+                    reason = panel_reason or "未符合規格內條件"
+                    error_message = reason
+                else:
+                    status = "not_evaluable"
+                    reason = "未取得可比對的規格內點數結果"
+                    error_message = reason
+                eval_result["source"] = "inference"
+                eval_result["inference_context"] = {
+                    "glass_id": detail.get("glass_id", ""),
+                    "model_id": detail.get("model_id", ""),
+                    "machine_no": detail.get("machine_no", ""),
+                    "machine_judgment": detail.get("machine_judgment", ""),
+                }
+                eval_result["inference_auto_decision"] = {
+                    "converted_to_ok_i": converted,
+                    "status": status,
+                    "reason": reason,
+                    "requires_all_panel_totals_within": True,
+                }
+
+            saved = self.db.save_within_spec_review_log(
+                client_record_id=client_record_id if client_record_id > 0 else None,
+                inference_record_id=inference_record_id,
+                suggestion=suggestion,
+                detail=eval_result,
+                processing_seconds=_time.time() - started,
+                error_message=error_message,
+                source=source,
+            )
+            self._send_json({
+                "success": True,
+                "log": saved,
+                "redirect_url": f"/ric/within-spec-log/{saved.get('id')}",
+                "visuals_saved": len(eval_result.get("visuals") or []),
+            })
+        except ValueError as ve:
+            self._send_json({"success": False, "error": str(ve)})
+        except Exception as e:
+            logger.error("Within-spec log regenerate error: %s", e, exc_info=True)
+            self._send_json({"success": False, "error": str(e)})
+
     def _handle_within_spec_suggestion_api(self, query: dict):
         """API: preview one non-mutating within-spec suggestion without saving a log."""
         import time as _time
@@ -2789,7 +2934,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         _empty_miss_cats = lambda: {c: 0 for c in CAPIDatabase.VALID_MISS_CATEGORIES}
         _empty_over_cats = lambda: {c: 0 for c in CAPIDatabase.VALID_OVER_CATEGORIES}
-        actual_ok_review_categories = {"ric_misjudge", "data_error_actually_ok"}
+        actual_ok_review_categories = {"ric_misjudge", "data_error_actually_ok", "within_spec_misjudge"}
         counted_ai_miss_categories = {"threshold_high", "dust_misfilter"}
         total = len(records)
         if total == 0:
@@ -5563,27 +5708,39 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     rules = getattr(getattr(inferencer, "config", None), "within_spec_judgment_rules", None)
                     if not rules:
                         rules = CAPIConfig().within_spec_judgment_rules
+                    visual_dir, visual_prefix = _within_spec_auto_visual_output(
+                        str(getattr(getattr(cls, "heatmap_manager", None), "base_dir", "") or cls.heatmap_base_dir or ""),
+                        detail.get("glass_id", ""),
+                        record_id,
+                    )
                     eval_result = _evaluate_within_spec_suggestion_detail(
                         eval_detail,
                         CAPIConfig._normalize_within_spec_judgment_rules(rules),
                         model_id,
+                        visual_output_dir=visual_dir,
+                        visual_url_prefix=visual_prefix,
                     )
                     suggestion = eval_result.get("suggestion")
                     panel_totals = eval_result.get("panel_totals") or []
                     panel_within = bool(panel_totals) and all(bool(item.get("within")) for item in panel_totals)
                     converted = bool(suggestion and suggestion.get("suggested") and panel_within)
+                    panel_reason = _format_within_spec_panel_summary(eval_result)
                     if converted:
                         status = "within_spec"
-                        reason = suggestion.get("reason", "")
+                        reason = panel_reason or suggestion.get("reason", "")
                     elif suggestion and suggestion.get("suggested"):
                         status = "not_within_spec"
-                        reason = "部分項目符合規格內，但整片 PANEL 尚有項目未符合"
+                        reason = panel_reason or "部分項目符合規格內，但整片 PANEL 尚有項目未符合"
                     elif panel_totals:
                         status = "not_within_spec"
-                        reason = "未符合規格內條件"
+                        reason = panel_reason or "未符合規格內條件"
                     else:
                         status = "not_evaluable"
                         reason = "未取得可比對的規格內點數結果"
+                    saved_suggestion = suggestion if converted else None
+                    if saved_suggestion and reason:
+                        saved_suggestion = dict(saved_suggestion)
+                        saved_suggestion["reason"] = reason
                     eval_result["source"] = "inference"
                     eval_result["inference_context"] = parsed_for_within_spec
                     eval_result["inference_auto_decision"] = {
@@ -5593,7 +5750,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         "requires_all_panel_totals_within": True,
                     }
                     within_spec_info = {
-                        "suggestion": suggestion if converted else None,
+                        "suggestion": saved_suggestion,
                         "raw_suggestion": suggestion,
                         "detail": eval_result,
                         "processing_seconds": _time.time() - started,

@@ -43,6 +43,23 @@
         white-space: nowrap;
     }
 
+    .ws-button {
+        cursor: pointer;
+        font-family: inherit;
+    }
+
+    .ws-button:disabled {
+        cursor: wait;
+        opacity: 0.65;
+    }
+
+    .ws-action-status {
+        width: 100%;
+        color: var(--text-muted);
+        font-size: 0.76rem;
+        text-align: right;
+    }
+
     .ws-band {
         border: 1px solid var(--border);
         background: rgba(30, 41, 59, 0.72);
@@ -231,7 +248,14 @@
         <div class="ws-title">規格內計算明細 #{{ log.id }}</div>
         <div class="ws-subtitle">Client {{ log.client_record_id }} / Inference {{ log.inference_record_id }} / {{ log.created_at }}</div>
     </div>
-    <a class="ws-link" href="/ric">返回 RIC Report</a>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+        {% if log.inference_record_id %}
+        <button id="wsRegenVisualsBtn" class="ws-link ws-button" type="button">重新產生偵測圖片</button>
+        <a class="ws-link" href="/record/{{ log.inference_record_id }}">返回推論紀錄</a>
+        {% endif %}
+        <a class="ws-link" href="/ric">返回 RIC Report</a>
+        <div id="wsRegenStatus" class="ws-action-status"></div>
+    </div>
 </div>
 
 <section class="ws-band">
@@ -312,7 +336,7 @@
                 <th>最大尺寸 mm</th>
                 <th>尺寸門檻 mm</th>
                 <th>每畫面 ≤</th>
-                <th>Tile 內 ≤</th>
+                <th>Tile 最大 / 上限</th>
                 <th>判定 Tile</th>
             </tr>
         </thead>
@@ -325,7 +349,7 @@
                 <td>{{ "%.4f"|format(item.max_size_mm or 0) }}</td>
                 <td>{{ "%.4f"|format(item.threshold_mm or 0) }}</td>
                 <td>{{ item.screen_count_limit }}</td>
-                <td>{{ item.tile_count_threshold }}</td>
+                <td>{{ item.max_tile_count or 0 }} / {{ item.tile_count_threshold }}</td>
                 <td>{{ item.evaluated_tiles }}</td>
             </tr>
             {% endfor %}
@@ -391,7 +415,13 @@
         {% endfor %}
     </div>
     {% else %}
-    <div style="color:var(--text-muted);">這筆 log 沒有保存偵測圖片。請重新按「計算」產生新版明細。</div>
+    <div style="color:var(--text-muted);">
+        {% if log.inference_record_id %}
+        這筆 log 沒有保存偵測圖片。請按上方「重新產生偵測圖片」產生新版明細。
+        {% else %}
+        這筆 log 沒有保存偵測圖片。請重新按「計算」產生新版明細。
+        {% endif %}
+    </div>
     {% endif %}
 </section>
 
@@ -414,4 +444,28 @@
     <div style="color:var(--text-muted);">沒有計算步驟。</div>
     {% endif %}
 </section>
+<script>
+(() => {
+    const button = document.getElementById('wsRegenVisualsBtn');
+    if (!button) return;
+    const status = document.getElementById('wsRegenStatus');
+    button.addEventListener('click', async () => {
+        button.disabled = true;
+        if (status) status.textContent = '正在重新產生偵測圖片...';
+        try {
+            const resp = await fetch('/api/ric/within-spec-log/regenerate', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({log_id: {{ log.id }}})
+            });
+            const data = await resp.json();
+            if (!data.success) throw new Error(data.error || '重新產生失敗');
+            window.location.href = data.redirect_url || `/ric/within-spec-log/${data.log.id}`;
+        } catch (err) {
+            if (status) status.textContent = err.message || String(err);
+            button.disabled = false;
+        }
+    });
+})();
+</script>
 {% endblock %}

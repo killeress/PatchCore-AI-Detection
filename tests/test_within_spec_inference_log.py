@@ -36,6 +36,7 @@ def test_within_spec_inference_log_allows_missing_client_record(tmp_path):
     assert saved["inference_record_id"] == inference_id
     assert saved["source"] == "inference"
     assert saved["suggested"] is True
+    assert db.get_record_detail(inference_id)["within_spec_log_id"] == saved["id"]
 
 
 def test_within_spec_report_uses_inference_glass_id_without_client_record(tmp_path):
