@@ -1934,7 +1934,7 @@ class CAPIDatabase:
         if keyword:
             like = f"%{keyword}%"
             where.append(
-                "(c.pnl_id LIKE ? OR c.mach_id LIKE ? OR ir.model_id LIKE ? "
+                "(COALESCE(c.pnl_id, ir.glass_id, '') LIKE ? OR c.mach_id LIKE ? OR ir.model_id LIKE ? "
                 "OR ir.machine_no LIKE ? OR wsl.reason LIKE ?)"
             )
             params.extend([like, like, like, like, like])
@@ -1945,7 +1945,7 @@ class CAPIDatabase:
             rows = conn.execute(
                 f"""SELECT wsl.*,
                            c.time_stamp AS client_time_stamp,
-                           c.pnl_id AS pnl_id,
+                           COALESCE(c.pnl_id, ir.glass_id, '') AS pnl_id,
                            c.mach_id AS mach_id,
                            c.result_eqp AS result_eqp,
                            c.result_ai AS result_ai,
