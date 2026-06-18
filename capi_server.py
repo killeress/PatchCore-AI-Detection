@@ -1079,6 +1079,66 @@ class CAPIServer:
 
         logger.info("Model loaded successfully")
 
+    def reload_runtime_config_from_db(self) -> int:
+        """同步 DB runtime 參數，不重建 PatchCore 模型或清空模型 cache。"""
+        db = getattr(self, "db", None) or getattr(self, "database", None)
+        if db is None:
+            raise RuntimeError("Database not initialized")
+
+        db_params = db.get_all_config_params()
+        db_dict = {p["param_name"]: p for p in db_params}
+
+        configs = []
+
+        def sync_config(cfg: Optional["CAPIConfig"]) -> None:
+            if cfg is None or any(cfg is existing for existing in configs):
+                return
+            cfg.apply_db_overrides(db_params)
+            configs.append(cfg)
+
+        for cfg in getattr(self, "configs_by_machine", {}).values():
+            sync_config(cfg)
+        sync_config(getattr(self, "fallback_config", None))
+        sync_config(getattr(self, "config", None))
+
+        inferencers = []
+
+        def collect_inferencer(inferencer: Optional[CAPIInferencer]) -> None:
+            if inferencer is None or any(inferencer is existing for existing in inferencers):
+                return
+            sync_config(getattr(inferencer, "config", None))
+            inferencers.append(inferencer)
+
+        collect_inferencer(getattr(self, "inferencer", None))
+        for inferencer in getattr(self, "inferencers", {}).values():
+            collect_inferencer(inferencer)
+
+        if inferencers:
+            try:
+                from capi_edge_cv import EdgeInspectionConfig
+                edge_cfg = EdgeInspectionConfig.from_db_params(db_dict)
+                for inferencer in inferencers:
+                    if hasattr(inferencer, "update_edge_config"):
+                        inferencer.update_edge_config(edge_cfg)
+            except Exception as e:
+                logger.warning(f"Failed to reload CV Edge config from DB: {e}")
+
+        fallback_cfg = getattr(self, "fallback_config", None)
+        if fallback_cfg is not None:
+            with server_status.lock:
+                server_status.threshold = fallback_cfg.anomaly_threshold
+                server_status.is_new_architecture = bool(fallback_cfg.is_new_architecture)
+                if not fallback_cfg.is_new_architecture:
+                    server_status.threshold_mapping = dict(fallback_cfg.threshold_mapping)
+
+        self._publish_active_bundle_status()
+        logger.info(
+            "Runtime config reloaded from DB: %s config(s), %s inferencer(s)",
+            len(configs),
+            len(inferencers),
+        )
+        return len(inferencers)
+
     def _publish_active_bundle_status(self) -> None:
         """把 active bundle 的資訊寫進 server_status 供 dashboard 顯示。
 

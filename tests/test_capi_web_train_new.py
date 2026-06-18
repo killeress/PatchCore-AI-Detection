@@ -1013,6 +1013,31 @@ def test_do_post_routes_train_new_preprocess_pipeline_preview(monkeypatch):
     assert json.loads(h._sent_response[0]["body"]) == {"ok": True}
 
 
+def test_handle_settings_reload_new_arch_does_not_rebuild_inferencer(monkeypatch):
+    from types import SimpleNamespace
+    from capi_web import CAPIWebHandler
+
+    monkeypatch.setattr(CAPIWebHandler, "inferencer", None)
+
+    server = MagicMock()
+    server.database = MagicMock()
+    server.fallback_config = SimpleNamespace(is_new_architecture=True)
+    server.inferencer = "ACTIVE_INFERENCER"
+    server.reload_runtime_config_from_db.return_value = 1
+
+    h = _make_handler_with_server(server, "/api/settings/reload")
+    h._gpu_lock = threading.Lock()
+
+    h._handle_api_settings_reload()
+
+    server.reload_runtime_config_from_db.assert_called_once_with()
+    server._load_inferencer.assert_not_called()
+    assert CAPIWebHandler.inferencer == "ACTIVE_INFERENCER"
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["success"] is True
+    assert "模型未重載" in body["message"]
+
+
 def test_handle_train_new_preprocess_pipeline_preview_uses_panel_folder(tmp_path, monkeypatch):
     from capi_web import CAPIWebHandler
 

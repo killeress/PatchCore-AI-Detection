@@ -1,5 +1,6 @@
 import pytest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 
 def test_health_check_new_arch_resolves_relative_model_paths(tmp_path):
@@ -124,6 +125,52 @@ def test_apply_threshold_inplace_returns_false_when_no_active_bundle():
     server.fallback_config = None
 
     assert server.apply_threshold_inplace("UNKNOWN", "G0F00000", "inner", 0.7) is False
+
+
+def test_reload_runtime_config_from_db_keeps_new_arch_model_cache():
+    from capi_config import CAPIConfig
+    from capi_server import CAPIServer
+
+    cfg = CAPIConfig(
+        machine_id="MX",
+        is_new_architecture=True,
+        model_mapping={"G0F00000": {"inner": "x.pt", "edge": "y.pt"}},
+        threshold_mapping={"G0F00000": {"inner": 0.5, "edge": 0.6}},
+        dust_area_min=15,
+    )
+    model_cache = {("MX", "G0F00000", "inner"): object()}
+    inferencer = SimpleNamespace(
+        config=cfg,
+        _model_cache_v2=model_cache,
+        update_edge_config=MagicMock(),
+    )
+
+    server = CAPIServer.__new__(CAPIServer)
+    server.configs_by_machine = {"MX": cfg}
+    server.fallback_config = cfg
+    server.config = cfg
+    server.inferencer = inferencer
+    server.inferencers = {"MX": inferencer}
+    server.db = MagicMock()
+    server.db.get_all_config_params.return_value = [
+        {"param_name": "dust_area_min", "decoded_value": 123},
+        {
+            "param_name": "threshold_mapping",
+            "decoded_value": {"G0F00000": {"inner": 0.1, "edge": 0.2}},
+        },
+    ]
+
+    edge_cfg = object()
+    with patch("capi_edge_cv.EdgeInspectionConfig.from_db_params", return_value=edge_cfg):
+        synced = server.reload_runtime_config_from_db()
+
+    assert synced == 1
+    assert inferencer._model_cache_v2 is model_cache
+    assert server.inferencer is inferencer
+    assert server.inferencers["MX"] is inferencer
+    assert cfg.dust_area_min == 123
+    assert cfg.threshold_mapping == {"G0F00000": {"inner": 0.5, "edge": 0.6}}
+    inferencer.update_edge_config.assert_called_once_with(edge_cfg)
 
 
 def test_apply_threshold_inplace_rejects_bad_unit():
