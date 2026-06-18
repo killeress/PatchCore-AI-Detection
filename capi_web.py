@@ -5328,18 +5328,29 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             server_inst = self._capi_server_instance
             gpu_lock = self._gpu_lock
 
-            logger.info("Settings reload: re-initializing inferencer from DB config...")
+            is_new_arch = bool(
+                getattr(getattr(server_inst, "fallback_config", None), "is_new_architecture", False)
+            )
+            logger.info(
+                "Settings reload: %s",
+                "syncing runtime config from DB" if is_new_arch else "re-initializing inferencer from DB config",
+            )
 
             # 使用 GPU lock 阻止推論期間重建
             if gpu_lock:
                 gpu_lock.acquire()
 
             try:
-                server_inst._load_inferencer()
+                if is_new_arch:
+                    synced = server_inst.reload_runtime_config_from_db()
+                    message = f"設定已重新載入，已同步 {synced} 個推論器（模型未重載）"
+                else:
+                    server_inst._load_inferencer()
+                    message = "設定已重新載入，推論器已重建"
                 # 更新 Web handler 的 inferencer 參照
                 CAPIWebHandler.inferencer = server_inst.inferencer
-                logger.info("Settings reload: inferencer re-initialized successfully")
-                self._send_json({"success": True, "message": "設定已重新載入，推論器已重建"})
+                logger.info("Settings reload completed")
+                self._send_json({"success": True, "message": message})
             finally:
                 if gpu_lock:
                     gpu_lock.release()
