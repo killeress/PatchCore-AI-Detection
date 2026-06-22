@@ -416,6 +416,11 @@ def _dot_rule_limits(rule: Dict[str, Any]) -> Tuple[float, int, int]:
 
 
 def _format_within_spec_panel_summary(detail: Dict[str, Any], fallback: str = "") -> str:
+    parts = _format_within_spec_panel_summary_parts(detail)
+    return "；".join(parts) if parts else fallback
+
+
+def _format_within_spec_panel_summary_parts(detail: Dict[str, Any]) -> List[str]:
     parts = []
 
     def cmp_text(label: str, value: Any, limit: Any, ok: bool, suffix: str = "") -> str:
@@ -445,7 +450,37 @@ def _format_within_spec_panel_summary(detail: Dict[str, Any], fallback: str = ""
             f"{cmp_text('單Tile最大點數', max_tile_count, tile_limit, tile_count_ok)}；"
             f"結果={status}"
         )
-    return "；".join(parts) if parts else fallback
+    return parts
+
+
+def _format_within_spec_inference_note(within_spec_info: Dict[str, Any], detail_url: str) -> str:
+    detail = within_spec_info.get("detail") or {}
+    summary = detail.get("panel_summary") or {}
+    rule_selection = detail.get("rule_selection") or {}
+    status = within_spec_info.get("status", "unknown")
+    reason = within_spec_info.get("reason", "")
+    result_text = (
+        "符合規格內，最終判定 OK-i"
+        if within_spec_info.get("converted")
+        else f"已執行規格內檢查，結果={status}"
+    )
+
+    lines = [
+        f"[WITHIN_SPEC_INFERENCE] 原始 AI=NG，{result_text}",
+        (
+            f"  matched_machine={rule_selection.get('matched_machine_key') or 'N/A'}；"
+            f"target_tiles={summary.get('target_tile_count', 0)}；"
+            f"evaluated_tiles={summary.get('evaluated_tile_count', 0)}"
+        ),
+    ]
+
+    panel_parts = _format_within_spec_panel_summary_parts(detail)
+    if panel_parts:
+        lines.extend(f"  - {part}" for part in panel_parts)
+    elif reason:
+        lines.append(f"  reason：{reason}")
+    lines.append(f"  明細：{detail_url}")
+    return "\n".join(lines)
 
 
 def _within_spec_machine_candidates(detail: Dict[str, Any], machine_id: str = "") -> List[str]:
@@ -5808,23 +5843,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             inference_log = InferenceLogCapture.stop_capture()
             if within_spec_info:
-                ws_detail = within_spec_info.get("detail") or {}
-                summary = ws_detail.get("panel_summary") or {}
-                rule_selection = ws_detail.get("rule_selection") or {}
-                status = within_spec_info.get("status", "unknown")
-                reason = within_spec_info.get("reason", "")
-                result_text = (
-                    "符合規格內，最終判定 OK-i"
-                    if within_spec_info.get("converted")
-                    else f"已執行規格內檢查，結果={status}"
-                )
-                within_spec_note = (
-                    f"[WITHIN_SPEC_INFERENCE] 原始 AI=NG，{result_text}；"
-                    f"matched_machine={rule_selection.get('matched_machine_key') or 'N/A'}；"
-                    f"target_tiles={summary.get('target_tile_count', 0)}；"
-                    f"evaluated_tiles={summary.get('evaluated_tile_count', 0)}；"
-                    f"{reason}；明細：{WITHIN_SPEC_LOGS_URL}"
-                )
+                within_spec_note = _format_within_spec_inference_note(within_spec_info, WITHIN_SPEC_LOGS_URL)
                 inference_log = f"{(inference_log or '').rstrip()}\n{within_spec_note}".strip()
             from capi_image_preprocess_lab import summarize_preprocess_timings
             preprocess_timing = summarize_preprocess_timings(
