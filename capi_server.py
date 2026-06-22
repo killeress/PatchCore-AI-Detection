@@ -54,6 +54,7 @@ from capi_web import (
     _evaluate_within_spec_suggestion_detail,
     _within_spec_auto_visual_output,
     _format_within_spec_panel_summary,
+    _format_within_spec_inference_note,
     start_web_server_thread,
 )
 
@@ -1925,25 +1926,7 @@ class CAPIServer:
                 error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
 
             if within_spec_info:
-                detail = within_spec_info.get("detail") or {}
-                summary = detail.get("panel_summary") or {}
-                rule_selection = detail.get("rule_selection") or {}
-                reason = within_spec_info.get("reason", "")
-                status = within_spec_info.get("status", "unknown")
-                result_text = (
-                    "符合規格內，最終判定 OK-i"
-                    if within_spec_info.get("converted")
-                    else f"已執行規格內檢查，結果={status}"
-                )
-                machine_key = rule_selection.get("matched_machine_key") or ""
-                target_tiles = summary.get("target_tile_count", 0)
-                evaluated_tiles = summary.get("evaluated_tile_count", 0)
-                within_spec_note = (
-                    f"[WITHIN_SPEC_INFERENCE] 原始 AI=NG，{result_text}；"
-                    f"matched_machine={machine_key or 'N/A'}；"
-                    f"target_tiles={target_tiles}；evaluated_tiles={evaluated_tiles}；"
-                    f"{reason}；明細：{WITHIN_SPEC_LOGS_URL}"
-                )
+                within_spec_note = _format_within_spec_inference_note(within_spec_info, WITHIN_SPEC_LOGS_URL)
                 inference_log = f"{(inference_log or '').rstrip()}\n{within_spec_note}".strip()
 
             client_bomb_info_str = json.dumps(parsed["bomb_info"], ensure_ascii=False) if parsed.get("bomb_info") else ""

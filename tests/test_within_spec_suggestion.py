@@ -4,6 +4,7 @@ import numpy as np
 from capi_web import (
     _evaluate_within_spec_suggestion,
     _evaluate_within_spec_suggestion_detail,
+    _format_within_spec_inference_note,
     _format_within_spec_panel_summary,
     _within_spec_auto_visual_output,
 )
@@ -294,3 +295,49 @@ def test_within_spec_panel_summary_shows_failed_comparison_operator():
     assert "畫面總點數 7 > 2 [NG]" in summary
     assert "單Tile最大點數 7 > 1 [NG]" in summary
     assert "結果=NG" in summary
+
+
+def test_within_spec_inference_note_formats_panel_results_on_separate_lines():
+    within_spec_info = {
+        "converted": False,
+        "status": "not_within_spec",
+        "reason": "",
+        "detail": {
+            "rule_selection": {"matched_machine_key": "GN156HRAAPF0S"},
+            "panel_summary": {"target_tile_count": 2, "evaluated_tile_count": 2},
+            "panel_totals": [
+                {
+                    "screen": "W0F00000",
+                    "dot_label": "黑點",
+                    "max_size_mm": 0.2113,
+                    "threshold_mm": 0.35,
+                    "total_count": 1,
+                    "screen_count_limit": 2,
+                    "max_tile_count": 1,
+                    "tile_count_threshold": 1,
+                    "within": True,
+                },
+                {
+                    "screen": "R0F00000",
+                    "dot_label": "黑點",
+                    "max_size_mm": 0.2817,
+                    "threshold_mm": 0.35,
+                    "total_count": 7,
+                    "screen_count_limit": 2,
+                    "max_tile_count": 7,
+                    "tile_count_threshold": 1,
+                    "within": False,
+                },
+            ],
+        },
+    }
+
+    note = _format_within_spec_inference_note(within_spec_info, "http://example/within-spec-logs")
+    lines = note.splitlines()
+
+    assert lines[0] == "[WITHIN_SPEC_INFERENCE] 原始 AI=NG，已執行規格內檢查，結果=not_within_spec"
+    assert lines[1] == "  matched_machine=GN156HRAAPF0S；target_tiles=2；evaluated_tiles=2"
+    assert lines[2].startswith("  - W0F00000 黑點：")
+    assert lines[3].startswith("  - R0F00000 黑點：")
+    assert "畫面總點數 7 > 2 [NG]" in lines[3]
+    assert lines[4] == "  明細：http://example/within-spec-logs"
