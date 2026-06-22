@@ -417,6 +417,12 @@ def _dot_rule_limits(rule: Dict[str, Any]) -> Tuple[float, int, int]:
 
 def _format_within_spec_panel_summary(detail: Dict[str, Any], fallback: str = "") -> str:
     parts = []
+
+    def cmp_text(label: str, value: Any, limit: Any, ok: bool, suffix: str = "") -> str:
+        op = "<=" if ok else ">"
+        status = "OK" if ok else "NG"
+        return f"{label} {value}{suffix} {op} {limit}{suffix} [{status}]"
+
     for item in (detail.get("panel_totals") or []):
         screen = item.get("screen") or "UNKNOWN"
         dot_label = item.get("dot_label") or item.get("dot_type") or "點"
@@ -426,11 +432,18 @@ def _format_within_spec_panel_summary(detail: Dict[str, Any], fallback: str = ""
         screen_limit = _as_int(item.get("screen_count_limit"), 0)
         max_tile_count = _as_int(item.get("max_tile_count"), 0)
         tile_limit = _as_int(item.get("tile_count_threshold"), 0)
+        size_ok = max_size <= threshold
+        screen_count_ok = total_count <= screen_limit
+        tile_count_ok = max_tile_count <= tile_limit
+        max_size_text = f"{max_size:.4f}"
+        threshold_text = f"{threshold:.4f}"
         status = "OK" if item.get("within") else "NG"
         parts.append(
-            f"{screen} {dot_label} {max_size:.4g}mm <= {threshold:.4g}mm，"
-            f"畫面 {total_count} <= {screen_limit}，"
-            f"Tile {max_tile_count} <= {tile_limit} ({status})"
+            f"{screen} {dot_label}："
+            f"{cmp_text('最大尺寸', max_size_text, threshold_text, size_ok, 'mm')}；"
+            f"{cmp_text('畫面總點數', total_count, screen_limit, screen_count_ok)}；"
+            f"{cmp_text('單Tile最大點數', max_tile_count, tile_limit, tile_count_ok)}；"
+            f"結果={status}"
         )
     return "；".join(parts) if parts else fallback
 
