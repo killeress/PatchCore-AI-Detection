@@ -268,4 +268,29 @@ def test_within_spec_panel_summary_lists_all_screens():
 
     assert "W0F00000 黑點" in summary
     assert "WGF50500 黑點" in summary
-    assert summary.count("(OK)") == 2
+    assert summary.count("結果=OK") == 2
+
+
+def test_within_spec_panel_summary_shows_failed_comparison_operator():
+    detail = {
+        "panel_totals": [
+            {
+                "screen": "R0F00000",
+                "dot_label": "黑點",
+                "max_size_mm": 0.2817,
+                "threshold_mm": 0.3,
+                "total_count": 7,
+                "screen_count_limit": 2,
+                "max_tile_count": 7,
+                "tile_count_threshold": 1,
+                "within": False,
+            },
+        ],
+    }
+
+    summary = _format_within_spec_panel_summary(detail)
+
+    assert "最大尺寸 0.2817mm <= 0.3000mm [OK]" in summary
+    assert "畫面總點數 7 > 2 [NG]" in summary
+    assert "單Tile最大點數 7 > 1 [NG]" in summary
+    assert "結果=NG" in summary
