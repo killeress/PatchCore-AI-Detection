@@ -13,6 +13,7 @@ def _save_record(
     *,
     tile_is_dust: int,
     request_time: str = "2026-05-26T10:00:00",
+    ai_judgment: str = "OK",
 ) -> int:
     image_results_data = [{
         "image_path": f"/fake/{glass_id}.jpg",
@@ -57,7 +58,7 @@ def _save_record(
         machine_no="1",
         resolution=(1920, 1080),
         machine_judgment="NG",
-        ai_judgment="OK",
+        ai_judgment=ai_judgment,
         image_dir="/fake",
         total_images=1,
         ng_images=0,
@@ -127,7 +128,7 @@ def test_inference_stats_date_filter_is_end_date_inclusive(tmp_path):
 
 def test_client_accuracy_records_link_inference_by_same_day_range(tmp_path):
     db = CAPIDatabase(str(tmp_path / "ric_inference_link.db"))
-    inference_record_id = _save_record(db, "LINK_DATE", tile_is_dust=0)
+    inference_record_id = _save_record(db, "LINK_DATE", tile_is_dust=0, ai_judgment="OK-i")
     db.save_client_accuracy_records([{
         "time_stamp": "2026-05-26 18:30:00",
         "pnl_id": "LINK_DATE",
@@ -141,6 +142,7 @@ def test_client_accuracy_records_link_inference_by_same_day_range(tmp_path):
     rows = db.get_client_accuracy_records("2026-05-26", "2026-05-26")
 
     assert rows[0]["inference_record_id"] == inference_record_id
+    assert rows[0]["inference_ai_judgment"] == "OK-i"
 
 
 def _client_record(
@@ -150,6 +152,7 @@ def _client_record(
     ai: str,
     datastr: str,
     review_category=None,
+    inference_ai_judgment=None,
 ) -> dict:
     return {
         "id": record_id,
@@ -164,7 +167,26 @@ def _client_record(
         "review_category": review_category,
         "review_note": "",
         "review_updated_at": "2026-05-26T10:05:00" if review_category else None,
+        "inference_ai_judgment": inference_ai_judgment,
     }
+
+
+def test_client_summary_marks_within_spec_share_of_revival_cases():
+    records = [
+        _client_record(1, eqp="NG", ai="OK", datastr="DEFECT,OK;1;", inference_ai_judgment="OK-i"),
+        _client_record(2, eqp="NG", ai="OK-i", datastr="DEFECT,OK;1;"),
+        _client_record(3, eqp="NG", ai="OK", datastr="DEFECT,OK;1;"),
+    ]
+
+    summary, out_records = CAPIWebHandler._compute_client_summary(None, records)
+
+    assert summary["revival"] == 3
+    assert summary["revivalRate"] == 100.0
+    assert summary["revivalWithinSpec"] == 2
+    assert summary["revivalWithinSpecRate"] == 66.67
+    assert out_records[0]["within_spec_converted_to_ok"] is True
+    assert out_records[1]["result_ai"] == "OK-i"
+    assert out_records[1]["within_spec_converted_to_ok"] is True
 
 
 def test_client_summary_applies_manual_actual_ok_reviews_to_analysis_stats():
@@ -189,6 +211,7 @@ def test_client_summary_applies_manual_actual_ok_reviews_to_analysis_stats():
     assert summary["missReviewStats"]["total"] == 4
     assert summary["missReviewStats"]["reviewed"] == 3
     assert summary["daily"]["2026-05-26"]["ricMisjudge"] == 3
+    assert summary["daily"]["2026-05-26"]["withinSpecMisjudge"] == 1
     assert summary["manualTruthAdjustments"] == {
         "total": 3,
         "byCategory": {

@@ -953,10 +953,10 @@
         </div>
         <div class="charts-row">
             <div class="chart-card" style="grid-column: 1 / -1;">
-                <h3>📅 每日過漏檢率與 RIC 誤判率追蹤 (分母為當日總數量)</h3>
+                <h3>📅 每日過漏檢率、RIC 誤判率與規格內誤判率追蹤 (分母為當日總數量)</h3>
                 <div class="chart-container"><canvas id="client_dailyMetricsChart"></canvas></div>
                 <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 8px;">
-                    📌 備註：過檢率、漏檢率與 RIC 誤判率分母皆為「當日影像總數量」；漏檢率分子為漏檢 Review 中分類為「AI漏放」或「Dust 誤濾」的筆數；「AI漏檢(規格內)」不納入漏檢率；RIC 誤判率分子為漏檢 Review 中分類為「RIC 誤判」、「規格內誤判」或「資料有誤、實際OK」的筆數。
+                    📌 備註：過檢率、漏檢率、RIC 誤判率與規格內誤判率分母皆為「當日影像總數量」；漏檢率分子為漏檢 Review 中分類為「AI漏放」或「Dust 誤濾」的筆數；「AI漏檢(規格內)」不納入漏檢率；RIC 誤判率分子為漏檢 Review 中分類為「RIC 誤判」、「規格內誤判」或「資料有誤、實際OK」的筆數；規格內誤判率分子為其中分類為「規格內誤判」的筆數。
                 </div>
             </div>
         </div>
@@ -1296,6 +1296,7 @@
                 aiOver: 0, aiOverRate: 0,
                 aiMiss: 0, aiMissRate: 0,
                 revival: 0, revivalRate: 0,
+                revivalWithinSpec: 0, revivalWithinSpecRate: 0,
                 combos: {}, daily: {},
                 missReviewStats: {
                     total: 0, reviewed: 0, unreviewed: 0,
@@ -1323,9 +1324,19 @@
             return !!rec.has_dust_filtering;
         }
 
+        function normalizeAIForStats(ai) {
+            return ai === 'OK-i' ? 'OK' : ai;
+        }
+
         function getEffectiveAI(rec) {
             if (ignoreOmit && isOmitSuppressedByDust(rec) && rec.result_ai === 'OK') return 'NG';
-            return rec.result_ai;
+            return normalizeAIForStats(rec.result_ai);
+        }
+
+        function isWithinSpecConvertedOk(rec) {
+            return !!rec.within_spec_converted_to_ok
+                || rec.result_ai === 'OK-i'
+                || rec.inference_ai_judgment === 'OK-i';
         }
 
         const ACTUAL_OK_REVIEW_CATEGORIES = new Set(['ric_misjudge', 'within_spec_misjudge', 'data_error_actually_ok']);
@@ -1337,7 +1348,7 @@
         };
 
         function isTruthAdjustedByReview(rec) {
-            const rawAI = rec.result_ai || 'OK';
+            const rawAI = normalizeAIForStats(rec.result_ai || 'OK');
             const rawRic = deriveJudgment(rec.datastr);
             const category = rec.miss_review && rec.miss_review.category;
             return rawAI === 'OK' && rawRic === 'NG' && ACTUAL_OK_REVIEW_CATEGORIES.has(category);
@@ -1394,6 +1405,7 @@
             let aoiCorrect = 0, aiCorrect = 0;
             let aoiOver = 0, aiOver = 0, aiMiss = 0;
             let revival = 0;
+            let revivalWithinSpec = 0;
             const combos = {};
             const daily = {};
             let manualAdjustments = 0;
@@ -1414,6 +1426,7 @@
                 const ric = getEffectiveRIC(rec);
                 const adjusted = isTruthAdjustedByReview(rec);
                 const countedAiMiss = isCountedAiMiss(rec);
+                const withinSpecConvertedOk = isWithinSpecConvertedOk(rec);
 
                 if (rec.scratch_rescue) {
                     scratchPanels++;
@@ -1449,20 +1462,26 @@
                     }
                 }
                 if (countedAiMiss) aiMiss++;
-                if (eqp === 'NG' && ai === 'OK' && ric === 'OK') revival++;
+                if (eqp === 'NG' && ai === 'OK' && ric === 'OK') {
+                    revival++;
+                    if (withinSpecConvertedOk) revivalWithinSpec++;
+                }
 
                 const combo = `${eqp}/${ai}/${ric}`;
                 combos[combo] = (combos[combo] || 0) + 1;
 
                 const day = (rec.time_stamp || 'unknown').substring(0, 10);
-                if (!daily[day]) daily[day] = { total: 0, aoiCorrect: 0, aiCorrect: 0, aiMiss: 0, aiOver: 0, aoiOver: 0, ricMisjudge: 0, aiNG: 0, aoiNG: 0, ricNG: 0 };
+                if (!daily[day]) daily[day] = { total: 0, aoiCorrect: 0, aiCorrect: 0, aiMiss: 0, aiOver: 0, aoiOver: 0, ricMisjudge: 0, withinSpecMisjudge: 0, aiNG: 0, aoiNG: 0, ricNG: 0 };
                 daily[day].total++;
                 if (eqp === ric) daily[day].aoiCorrect++;
                 if (ai === ric) daily[day].aiCorrect++;
                 if (countedAiMiss) daily[day].aiMiss++;
                 if (ai === 'NG' && ric === 'OK') daily[day].aiOver++;
                 if (eqp === 'NG' && ric === 'OK') daily[day].aoiOver++;
-                if (adjusted) daily[day].ricMisjudge++;
+                if (adjusted) {
+                    daily[day].ricMisjudge++;
+                    if (rec.miss_review && rec.miss_review.category === 'within_spec_misjudge') daily[day].withinSpecMisjudge++;
+                }
                 if (ai === 'NG') daily[day].aiNG++;
                 if (eqp === 'NG') daily[day].aoiNG++;
                 if (ric === 'NG') daily[day].ricNG++;
@@ -1473,6 +1492,7 @@
             const aiOverRate = total > 0 ? Math.round(aiOver / total * 10000) / 100 : 0;
             const aiMissRate = total > 0 ? Math.round(aiMiss / total * 10000) / 100 : 0;
             const revivalRate = aoiOver > 0 ? Math.round(revival / aoiOver * 10000) / 100 : 0;
+            const revivalWithinSpecRate = revival > 0 ? Math.round(revivalWithinSpec / revival * 10000) / 100 : 0;
 
             return {
                 total, aoiOK, aoiNG, aiNG, ricNG,
@@ -1481,6 +1501,7 @@
                 aiOver, aiOverRate,
                 aiMiss, aiMissRate,
                 revival, revivalRate,
+                revivalWithinSpec, revivalWithinSpecRate,
                 combos, daily,
                 missReviewStats: {
                     total: missTotal,
@@ -1889,6 +1910,7 @@
                 <div class="label">復活率</div>
                 <div class="value">${formatPercent(s.revivalRate)}</div>
                 <div class="detail">${s.revival} / ${s.aoiOver} 筆實際OK但被AOI判NG</div>
+                <div class="detail">規格內轉OK占復活: ${formatPercent(s.revivalWithinSpecRate || 0)} (${s.revivalWithinSpec || 0} / ${s.revival || 0})</div>
                 <div class="filter-hint">🔍 AOI=NG, AI=OK, 實際=OK</div>
             </div>
             `;
@@ -2167,6 +2189,11 @@
                             borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.1)', tension: 0.3, fill: false, pointRadius: 4, pointBackgroundColor: '#22c55e',
                         },
                         {
+                            label: '規格內誤判率 (%)',
+                            data: dateKeys.map(k => { const d = s.daily[k]; return ratioPercentValue(d.withinSpecMisjudge || 0, d.total); }),
+                            borderColor: '#14b8a6', backgroundColor: 'rgba(20,184,166,0.1)', tension: 0.3, fill: false, pointRadius: 4, pointBackgroundColor: '#14b8a6',
+                        },
+                        {
                             label: '當日總數量', data: dateKeys.map(k => s.daily[k].total),
                             type: 'bar', backgroundColor: 'rgba(148,163,184,0.15)', borderRadius: 4, yAxisID: 'y1',
                         }
@@ -2176,7 +2203,7 @@
                     responsive: true, maintainAspectRatio: false,
                     plugins: {
                         datalabels: {
-                            color: ctx => ['#ef4444', '#3b82f6', '#f59e0b', '#22c55e', '#94a3b8'][ctx.datasetIndex],
+                            color: ctx => ['#ef4444', '#3b82f6', '#f59e0b', '#22c55e', '#14b8a6', '#94a3b8'][ctx.datasetIndex],
                             font: { size: 10, weight: 600 },
                             align: ctx => ctx.dataset.type === 'bar' ? 'end' : 'top',
                             anchor: ctx => ctx.dataset.type === 'bar' ? 'end' : 'center',
@@ -2199,6 +2226,7 @@
                                     if (context.datasetIndex === 1) label += ` (${d.aiOver} / ${d.total})`;
                                     if (context.datasetIndex === 2) label += ` (${d.aoiOver} / ${d.total})`;
                                     if (context.datasetIndex === 3) label += ` (${d.ricMisjudge || 0} / ${d.total})`;
+                                    if (context.datasetIndex === 4) label += ` (${d.withinSpecMisjudge || 0} / ${d.total})`;
                                     return label;
                                 }
                             }
