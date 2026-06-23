@@ -1744,13 +1744,58 @@
                     </div>
                     <div class="coord-group">
                         <label for="dot-hysteresis-low">low 閾值</label>
-                        <input type="number" id="dot-hysteresis-low" value="4" min="0" max="255" step="1"
+                        <input type="number" id="dot-hysteresis-low" value="2" min="0" max="255" step="1"
                             title="hysteresis 模式使用：補回與 high 核心連通的低對比邊界">
                     </div>
                     <div class="coord-group">
                         <label for="dot-hysteresis-high">high 閾值</label>
-                        <input type="number" id="dot-hysteresis-high" value="8" min="0" max="255" step="1"
+                        <input type="number" id="dot-hysteresis-high" value="4" min="0" max="255" step="1"
                             title="hysteresis 模式使用：確定 defect 核心門檻">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-hysteresis-edge-width">edgeW %</label>
+                        <input type="number" id="dot-hysteresis-edge-width" value="3" min="0" max="50" step="0.5"
+                            title="Group1 邊緣加嚴寬度百分比">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-hysteresis-edge-extra">edge+</label>
+                        <input type="number" id="dot-hysteresis-edge-extra" value="2" min="0" max="255" step="1"
+                            title="Group1 邊緣區域額外增加 high/low 門檻">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-hysteresis-low2">low2 閾值</label>
+                        <input type="number" id="dot-hysteresis-low2" value="3" min="0" max="255" step="1"
+                            title="Group2 low 閾值；Group1 無結果或過多時才試用">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-hysteresis-high2">high2 閾值</label>
+                        <input type="number" id="dot-hysteresis-high2" value="4" min="0" max="255" step="1"
+                            title="Group2 high 閾值；Group1 無結果或過多時才試用">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-hysteresis-edge-width2">edgeW2 %</label>
+                        <input type="number" id="dot-hysteresis-edge-width2" value="9.5" min="0" max="50" step="0.5"
+                            title="Group2 邊緣加嚴寬度百分比">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-hysteresis-edge-extra2">edge+2</label>
+                        <input type="number" id="dot-hysteresis-edge-extra2" value="2" min="0" max="255" step="1"
+                            title="Group2 邊緣區域額外增加 high/low 門檻">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-hysteresis-switch-count">sw count</label>
+                        <input type="number" id="dot-hysteresis-switch-count" value="5" min="0" max="999" step="1"
+                            title="Group1 候選數為 0 或大於此值時試 Group2">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-hysteresis-second-max">max2 count</label>
+                        <input type="number" id="dot-hysteresis-second-max" value="5" min="0" max="999" step="1"
+                            title="Group2 候選數不超過此值才採用 Group2">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-hysteresis-edge-suppress">suppress %</label>
+                        <input type="number" id="dot-hysteresis-edge-suppress" value="0" min="0" max="50" step="0.1"
+                            title="hysteresis 後處理排除外圈百分比，0 表示不排除">
                     </div>
                     <div class="coord-group">
                         <label for="dot-bg-kernel">背景 kernel</label>
@@ -2131,6 +2176,10 @@
             const value = parseInt(document.getElementById(id).value, 10);
             return Number.isFinite(value) ? value : fallback;
         };
+        const readFloat = (id, fallback) => {
+            const value = parseFloat(document.getElementById(id).value);
+            return Number.isFinite(value) ? value : fallback;
+        };
         let bgKernel = readInt('dot-bg-kernel', 33);
         if (bgKernel % 2 === 0) {
             bgKernel += 1;
@@ -2157,8 +2206,17 @@
                     polarity: document.getElementById('dot-polarity').value,
                     segmentation_method: document.getElementById('dot-segmentation-method').value,
                     diff_threshold: readInt('dot-diff-threshold', 7),
-                    hysteresis_low_threshold: readInt('dot-hysteresis-low', 4),
-                    hysteresis_high_threshold: readInt('dot-hysteresis-high', 8),
+                    hysteresis_low_threshold: readInt('dot-hysteresis-low', 2),
+                    hysteresis_high_threshold: readInt('dot-hysteresis-high', 4),
+                    hysteresis_edge_width_percent: readFloat('dot-hysteresis-edge-width', 3.0),
+                    hysteresis_edge_extra_threshold: readInt('dot-hysteresis-edge-extra', 2),
+                    hysteresis_second_low_threshold: readInt('dot-hysteresis-low2', 3),
+                    hysteresis_second_high_threshold: readInt('dot-hysteresis-high2', 4),
+                    hysteresis_second_edge_width_percent: readFloat('dot-hysteresis-edge-width2', 9.5),
+                    hysteresis_second_edge_extra_threshold: readInt('dot-hysteresis-edge-extra2', 2),
+                    hysteresis_switch_count_threshold: readInt('dot-hysteresis-switch-count', 5),
+                    hysteresis_second_max_count: readInt('dot-hysteresis-second-max', 5),
+                    hysteresis_edge_suppress_percent: readFloat('dot-hysteresis-edge-suppress', 0.0),
                     background_kernel: bgKernel,
                     min_area: readInt('dot-min-area', 2),
                     max_area: readInt('dot-max-area', 0),
@@ -2214,10 +2272,13 @@
         const defectText = calibrated ? data.defect_count : '-';
         const thresholdText = `${p.defect_threshold} ${unitLabel}`;
         const segmentationMethod = p.segmentation_method || data.segmentation_method || 'background_diff';
+        const hysteresisGroupText = p.hysteresis_selected_group
+            ? ` G${p.hysteresis_selected_group}(${p.hysteresis_group1_count ?? 0}/${p.hysteresis_group2_count ?? 0})`
+            : '';
         const modeText = segmentationMethod === 'off'
             ? 'OFF'
             : segmentationMethod === 'hysteresis'
-                ? `hysteresis low=${p.hysteresis_low_threshold} high=${p.hysteresis_high_threshold}`
+                ? `hysteresis${hysteresisGroupText} low/high=${p.hysteresis_low_threshold}/${p.hysteresis_high_threshold} low2/high2=${p.hysteresis_second_low_threshold}/${p.hysteresis_second_high_threshold}`
                 : segmentationMethod === 'morph_hat'
                     ? `morph_hat low=${p.hysteresis_low_threshold} high=${p.hysteresis_high_threshold}`
                     : segmentationMethod === 'adaptive_mean'

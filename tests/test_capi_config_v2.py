@@ -150,8 +150,17 @@ def test_within_spec_judgment_rules_defaults_and_overrides():
     assert default_rules["screens"]["B0F00000"]["white_dot"]["screen_count_limit"] == 1
     assert default_rules["dot_detection"]["diff_threshold"] == 4
     assert default_rules["dot_detection"]["segmentation_method"] == "background_diff"
-    assert default_rules["dot_detection"]["hysteresis_low_threshold"] == 4
-    assert default_rules["dot_detection"]["hysteresis_high_threshold"] == 8
+    assert default_rules["dot_detection"]["hysteresis_low_threshold"] == 2
+    assert default_rules["dot_detection"]["hysteresis_high_threshold"] == 4
+    assert default_rules["dot_detection"]["hysteresis_edge_width_percent"] == 3.0
+    assert default_rules["dot_detection"]["hysteresis_edge_extra_threshold"] == 2
+    assert default_rules["dot_detection"]["hysteresis_second_low_threshold"] == 3
+    assert default_rules["dot_detection"]["hysteresis_second_high_threshold"] == 4
+    assert default_rules["dot_detection"]["hysteresis_second_edge_width_percent"] == 9.5
+    assert default_rules["dot_detection"]["hysteresis_second_edge_extra_threshold"] == 2
+    assert default_rules["dot_detection"]["hysteresis_switch_count_threshold"] == 5
+    assert default_rules["dot_detection"]["hysteresis_second_max_count"] == 5
+    assert default_rules["dot_detection"]["hysteresis_edge_suppress_percent"] == 0.0
     assert default_rules["dot_detection"]["background_kernel"] == 33
     assert default_rules["dot_detection"]["morph_open"] == 0
     assert default_rules["dot_detection"]["min_aspect_ratio"] == 0.45
