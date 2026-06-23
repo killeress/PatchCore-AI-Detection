@@ -1004,6 +1004,91 @@
         font-family: 'Fira Code', monospace;
     }
 
+    .within-spec-param-panel {
+        margin: 14px 16px;
+        padding: 14px;
+        border: 1px solid rgba(51, 65, 85, 0.72);
+        border-radius: 10px;
+        background: rgba(15, 23, 42, 0.34);
+    }
+
+    .within-spec-param-panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid rgba(51, 65, 85, 0.55);
+    }
+
+    .within-spec-param-panel-head > div {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        min-width: 0;
+    }
+
+    .within-spec-panel-title {
+        color: #cbd5e1;
+        font-size: 0.85rem;
+        font-weight: 700;
+    }
+
+    .within-spec-param-card-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 12px;
+        margin-top: 12px;
+    }
+
+    .within-spec-param-card {
+        min-width: 0;
+        padding: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.13);
+        border-radius: 8px;
+        background: rgba(2, 6, 23, 0.22);
+    }
+
+    .within-spec-param-card.muted {
+        background: rgba(100, 116, 139, 0.08);
+    }
+
+    .within-spec-param-card-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 10px;
+    }
+
+    .within-spec-param-card-head span {
+        color: #93c5fd;
+        font-size: 0.82rem;
+        font-weight: 700;
+    }
+
+    .within-spec-param-card-head small {
+        color: var(--text-muted);
+        font-size: 0.72rem;
+        line-height: 1.4;
+        text-align: right;
+    }
+
+    .within-spec-param-grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .within-spec-param-field.mode-field {
+        flex: 0 0 auto;
+    }
+
+    .within-spec-param-field.wide .within-spec-param-select {
+        min-width: 134px;
+    }
+
     .within-spec-param-help {
         margin: 0 16px 16px;
         padding: 14px;
@@ -2165,6 +2250,138 @@
         return Number.isFinite(n) ? String(n) : String(fallback);
     }
 
+    function renderWithinSpecDotNumberField(label, field, value, fallback, opts = {}) {
+        const min = opts.min ?? 0;
+        const step = opts.step ?? 1;
+        const maxAttr = opts.max === undefined ? '' : ` max="${escapeAttr(opts.max)}"`;
+        const titleAttr = opts.title ? ` title="${escapeAttr(opts.title)}"` : '';
+        return `
+            <label class="within-spec-param-field">
+                <span>${escapeHtml(label)}</span>
+                <input class="within-spec-param-input" type="number" min="${escapeAttr(min)}"${maxAttr} step="${escapeAttr(step)}"
+                    value="${formatWithinSpecNumber(value, fallback)}"${titleAttr}
+                    oninput="updateWithinSpecDotDetection('${field}', this.value)">
+            </label>
+        `;
+    }
+
+    function renderWithinSpecDotMetricField(d) {
+        return `
+            <label class="within-spec-param-field wide">
+                <span>metric</span>
+                <select class="within-spec-param-select" onchange="updateWithinSpecDotDetection('size_metric', this.value)">
+                    ${['bbox_diagonal', 'bbox_max', 'equivalent', 'enclosing'].map(metric =>
+                        `<option value="${metric}" ${(d.size_metric || 'bbox_diagonal') === metric ? 'selected' : ''}>${metric}</option>`
+                    ).join('')}
+                </select>
+            </label>
+        `;
+    }
+
+    function renderWithinSpecDotSection(title, note, fields) {
+        return `
+            <div class="within-spec-param-card">
+                <div class="within-spec-param-card-head">
+                    <span>${escapeHtml(title)}</span>
+                    ${note ? `<small>${escapeHtml(note)}</small>` : ''}
+                </div>
+                <div class="within-spec-param-grid">
+                    ${fields.join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    function renderWithinSpecDotParamPanel(d, preprocess) {
+        const mode = d.segmentation_method || 'background_diff';
+        const diffField = renderWithinSpecDotNumberField('diff', 'diff_threshold', d.diff_threshold, 4, { min: 0, step: 1 });
+        const bgField = renderWithinSpecDotNumberField('bg kernel', 'background_kernel', d.background_kernel, 33, { min: 1, step: 2 });
+        const lowField = renderWithinSpecDotNumberField('low', 'hysteresis_low_threshold', d.hysteresis_low_threshold, 2, { min: 0, step: 1 });
+        const highField = renderWithinSpecDotNumberField('high', 'hysteresis_high_threshold', d.hysteresis_high_threshold, 4, { min: 0, step: 1 });
+        const v2Fields = [
+            lowField,
+            highField,
+            renderWithinSpecDotNumberField('edgeW %', 'hysteresis_edge_width_percent', d.hysteresis_edge_width_percent, 3.0, { min: 0, step: 0.5 }),
+            renderWithinSpecDotNumberField('edge+', 'hysteresis_edge_extra_threshold', d.hysteresis_edge_extra_threshold, 2, { min: 0, step: 1 }),
+            renderWithinSpecDotNumberField('low2', 'hysteresis_second_low_threshold', d.hysteresis_second_low_threshold, 3, { min: 0, step: 1 }),
+            renderWithinSpecDotNumberField('high2', 'hysteresis_second_high_threshold', d.hysteresis_second_high_threshold, 4, { min: 0, step: 1 }),
+            renderWithinSpecDotNumberField('edgeW2 %', 'hysteresis_second_edge_width_percent', d.hysteresis_second_edge_width_percent, 9.5, { min: 0, step: 0.5 }),
+            renderWithinSpecDotNumberField('edge+2', 'hysteresis_second_edge_extra_threshold', d.hysteresis_second_edge_extra_threshold, 2, { min: 0, step: 1 }),
+            renderWithinSpecDotNumberField('sw count', 'hysteresis_switch_count_threshold', d.hysteresis_switch_count_threshold, 5, { min: 0, step: 1 }),
+            renderWithinSpecDotNumberField('max2 count', 'hysteresis_second_max_count', d.hysteresis_second_max_count, 5, { min: 0, step: 1 }),
+            renderWithinSpecDotNumberField('suppress %', 'hysteresis_edge_suppress_percent', d.hysteresis_edge_suppress_percent, 0, { min: 0, step: 0.1 }),
+        ];
+        const filterFields = [
+            renderWithinSpecDotNumberField('min area', 'min_area_px', d.min_area_px, 2, { min: 1, step: 1 }),
+            renderWithinSpecDotNumberField('max area', 'max_area_px', d.max_area_px, 50000, { min: 0, step: 1 }),
+            renderWithinSpecDotNumberField('open', 'morph_open', d.morph_open, 0, { min: 0, step: 1 }),
+            renderWithinSpecDotNumberField('aspect', 'min_aspect_ratio', d.min_aspect_ratio, 0.45, { min: 0, max: 1, step: 0.05 }),
+            renderWithinSpecDotNumberField('edge margin', 'edge_margin_px', d.edge_margin_px, 4, { min: 0, step: 1 }),
+        ];
+        const sizeFields = [
+            renderWithinSpecDotMetricField(d),
+            renderWithinSpecDotNumberField('mm/px', 'unit_per_px', d.unit_per_px, 0.0245, { min: 0, step: 0.0001 }),
+        ];
+        const sections = [];
+        if (mode === 'background_diff') {
+            sections.push(renderWithinSpecDotSection('Background Diff', '局部背景差分 mask', [diffField, bgField]));
+        } else if (mode === 'hysteresis') {
+            sections.push(renderWithinSpecDotSection('Hysteresis V2', '雙參數組、邊緣加嚴與自動切換', v2Fields));
+        } else if (mode === 'morph_hat') {
+            sections.push(renderWithinSpecDotSection('Morph Hat', 'black-hat/top-hat 後用 low/high 連通', [bgField, lowField, highField]));
+        } else if (mode === 'adaptive_mean') {
+            sections.push(renderWithinSpecDotSection('Adaptive Mean', 'bg kernel 為局部視窗，diff 為均值偏移', [diffField, bgField]));
+        } else if (mode === 'halo') {
+            sections.push(renderWithinSpecDotSection('Halo', '白點白丸模式；黑點仍以背景差分處理', [diffField, bgField]));
+        } else if (mode === 'auto') {
+            sections.push(renderWithinSpecDotSection('Auto 比較', '會跑 background_diff、hysteresis V2、adaptive_mean；黑點加 morph_hat，白點加 halo', [diffField, bgField]));
+            sections.push(renderWithinSpecDotSection('Hysteresis V2 參數', 'auto 內的 hysteresis 候選會使用這些值', v2Fields));
+        } else if (mode === 'off') {
+            sections.push(`
+                <div class="within-spec-param-card muted">
+                    <div class="within-spec-param-card-head">
+                        <span>OFF</span>
+                        <small>規格內判定關閉；AI=NG 不會因規格內規則轉為 OK-i。</small>
+                    </div>
+                </div>
+            `);
+        }
+        if (mode !== 'off') {
+            sections.push(renderWithinSpecDotSection('候選過濾', '所有偵測模式都會套用', filterFields));
+            sections.push(renderWithinSpecDotSection('尺寸換算', '用於判斷是否超過 mm 門檻', sizeFields));
+        }
+
+        return `
+            <div class="within-spec-param-panel">
+                <div class="within-spec-param-panel-head">
+                    <div>
+                        <span class="within-spec-panel-title">點圖偵測參數</span>
+                        <code title="前處理流程目前固定，不在此頁編輯">preprocess=${escapeHtml(d.preprocess_method || 'gaussian')}(${escapeHtml(preprocess.kernel_size || 7)}, ${escapeHtml(preprocess.sigma || 1)}) 只讀</code>
+                    </div>
+                    <label class="within-spec-param-field mode-field">
+                        <span>mode</span>
+                        <select class="within-spec-param-select" onchange="updateWithinSpecDotDetection('segmentation_method', this.value)">
+                            ${[
+                                ['background_diff', 'background_diff'],
+                                ['hysteresis', 'hysteresis'],
+                                ['morph_hat', 'morph_hat'],
+                                ['adaptive_mean', 'adaptive_mean'],
+                                ['halo', 'halo'],
+                                ['auto', 'auto'],
+                                ['off', 'OFF'],
+                            ].map(([method, label]) =>
+                                `<option value="${method}" ${mode === method ? 'selected' : ''}>${label}</option>`
+                            ).join('')}
+                        </select>
+                    </label>
+                </div>
+                <div class="within-spec-param-card-grid">
+                    ${sections.join('')}
+                </div>
+            </div>
+        `;
+    }
+
     function renderWithinSpecPane(param) {
         const sourceValue = param ? String(param.param_value || '') : '';
         if (!withinSpecRules || withinSpecRulesSource !== sourceValue) {
@@ -2242,127 +2459,7 @@
                             </tbody>
                         </table>
                     </div>
-                    <div class="within-spec-param-strip">
-                        <span>點圖偵測參數</span>
-                        <code title="前處理流程目前固定，不在此頁編輯">preprocess=${escapeHtml(d.preprocess_method || 'gaussian')}(${escapeHtml(preprocess.kernel_size || 7)}, ${escapeHtml(preprocess.sigma || 1)}) 只讀</code>
-                        <label class="within-spec-param-field">
-                            mode=<select class="within-spec-param-select" onchange="updateWithinSpecDotDetection('segmentation_method', this.value)">
-                                ${[
-                                    ['background_diff', 'background_diff'],
-                                    ['hysteresis', 'hysteresis'],
-                                    ['morph_hat', 'morph_hat'],
-                                    ['adaptive_mean', 'adaptive_mean'],
-                                    ['halo', 'halo'],
-                                    ['auto', 'auto'],
-                                    ['off', 'OFF'],
-                                ].map(([method, label]) =>
-                                    `<option value="${method}" ${(d.segmentation_method || 'background_diff') === method ? 'selected' : ''}>${label}</option>`
-                                ).join('')}
-                            </select>
-                        </label>
-                        <label class="within-spec-param-field">
-                            diff=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.diff_threshold, 4)}"
-                                oninput="updateWithinSpecDotDetection('diff_threshold', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            low=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.hysteresis_low_threshold, 2)}"
-                                oninput="updateWithinSpecDotDetection('hysteresis_low_threshold', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            high=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.hysteresis_high_threshold, 4)}"
-                                oninput="updateWithinSpecDotDetection('hysteresis_high_threshold', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            edgeW=<input class="within-spec-param-input" type="number" min="0" step="0.5"
-                                value="${formatWithinSpecNumber(d.hysteresis_edge_width_percent, 3.0)}"
-                                oninput="updateWithinSpecDotDetection('hysteresis_edge_width_percent', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            edge+=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.hysteresis_edge_extra_threshold, 2)}"
-                                oninput="updateWithinSpecDotDetection('hysteresis_edge_extra_threshold', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            low2=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.hysteresis_second_low_threshold, 3)}"
-                                oninput="updateWithinSpecDotDetection('hysteresis_second_low_threshold', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            high2=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.hysteresis_second_high_threshold, 4)}"
-                                oninput="updateWithinSpecDotDetection('hysteresis_second_high_threshold', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            edgeW2=<input class="within-spec-param-input" type="number" min="0" step="0.5"
-                                value="${formatWithinSpecNumber(d.hysteresis_second_edge_width_percent, 9.5)}"
-                                oninput="updateWithinSpecDotDetection('hysteresis_second_edge_width_percent', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            edge+2=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.hysteresis_second_edge_extra_threshold, 2)}"
-                                oninput="updateWithinSpecDotDetection('hysteresis_second_edge_extra_threshold', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            sw=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.hysteresis_switch_count_threshold, 5)}"
-                                oninput="updateWithinSpecDotDetection('hysteresis_switch_count_threshold', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            max2=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.hysteresis_second_max_count, 5)}"
-                                oninput="updateWithinSpecDotDetection('hysteresis_second_max_count', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            suppress=<input class="within-spec-param-input" type="number" min="0" step="0.1"
-                                value="${formatWithinSpecNumber(d.hysteresis_edge_suppress_percent, 0)}"
-                                oninput="updateWithinSpecDotDetection('hysteresis_edge_suppress_percent', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            bg=<input class="within-spec-param-input" type="number" min="1" step="2"
-                                value="${formatWithinSpecNumber(d.background_kernel, 33)}"
-                                oninput="updateWithinSpecDotDetection('background_kernel', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            min=<input class="within-spec-param-input" type="number" min="1" step="1"
-                                value="${formatWithinSpecNumber(d.min_area_px, 2)}"
-                                oninput="updateWithinSpecDotDetection('min_area_px', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            max=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.max_area_px, 50000)}"
-                                oninput="updateWithinSpecDotDetection('max_area_px', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            open=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.morph_open, 0)}"
-                                oninput="updateWithinSpecDotDetection('morph_open', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            aspect=<input class="within-spec-param-input" type="number" min="0" max="1" step="0.05"
-                                value="${formatWithinSpecNumber(d.min_aspect_ratio, 0.45)}"
-                                oninput="updateWithinSpecDotDetection('min_aspect_ratio', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            edge=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.edge_margin_px, 4)}"
-                                oninput="updateWithinSpecDotDetection('edge_margin_px', this.value)">
-                        </label>
-                        <label class="within-spec-param-field">
-                            metric=<select class="within-spec-param-select" onchange="updateWithinSpecDotDetection('size_metric', this.value)">
-                                ${['bbox_diagonal', 'bbox_max', 'equivalent', 'enclosing'].map(metric =>
-                                    `<option value="${metric}" ${(d.size_metric || 'bbox_diagonal') === metric ? 'selected' : ''}>${metric}</option>`
-                                ).join('')}
-                            </select>
-                        </label>
-                        <label class="within-spec-param-field">
-                            mm/px=<input class="within-spec-param-input" type="number" min="0" step="0.0001"
-                                value="${formatWithinSpecNumber(d.unit_per_px, 0.0245)}"
-                                oninput="updateWithinSpecDotDetection('unit_per_px', this.value)">
-                        </label>
-                    </div>
+                    ${renderWithinSpecDotParamPanel(d, preprocess)}
                     <div class="within-spec-param-help">
                         <div class="within-spec-help-header">
                             <span class="within-spec-help-kicker">參數說明</span>
@@ -2495,6 +2592,7 @@
         if (field === 'segmentation_method') {
             const allowed = ['background_diff', 'hysteresis', 'morph_hat', 'adaptive_mean', 'halo', 'auto', 'off'];
             machineCfg.dot_detection[field] = allowed.includes(rawValue) ? rawValue : 'background_diff';
+            renderSettings();
             return;
         }
         const n = Number(rawValue);
