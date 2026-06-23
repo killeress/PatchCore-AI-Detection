@@ -4,6 +4,7 @@ import numpy as np
 from capi_web import (
     _detect_dot_components,
     _detect_dot_components_auto,
+    _detect_dot_components_debug_polarity,
     _detect_white_halo_components,
     _evaluate_within_spec_suggestion,
     _evaluate_within_spec_suggestion_detail,
@@ -443,6 +444,37 @@ def test_dot_detection_auto_selects_white_halo_around_dark_seed():
     assert auto["candidates"]
     assert auto["candidates"][0]["size_px"] > 30
     assert any(item["segmentation_method"] == "halo" for item in auto["auto_candidates"])
+
+
+def test_dot_detection_debug_auto_polarity_selects_white_halo():
+    image = np.full((128, 128, 3), 80, dtype=np.uint8)
+    cv2.circle(image, (64, 64), 28, (83, 83, 83), -1)
+    cv2.circle(image, (64, 64), 3, (55, 55, 55), -1)
+
+    detected = _detect_dot_components_debug_polarity(
+        image,
+        polarity="auto",
+        segmentation_method="auto",
+        diff_threshold=4,
+        background_kernel=31,
+        min_area=20,
+        max_area=10000,
+        morph_open=0,
+        size_metric="bbox_max",
+        unit_per_px=1.0,
+        defect_threshold=0.0,
+        min_aspect_ratio=0.45,
+        edge_margin=4,
+        hysteresis_low_threshold=2,
+        hysteresis_high_threshold=4,
+        include_visuals=False,
+    )
+
+    assert detected["detected_polarity"] == "white"
+    assert detected["segmentation_method"] == "auto:white:halo"
+    assert detected["candidates"]
+    assert detected["candidates"][0]["polarity"] == "white"
+    assert any(item["segmentation_method"] == "white:halo" for item in detected["auto_candidates"])
 
 
 def test_within_spec_auto_visual_output_uses_heatmap_url(tmp_path):

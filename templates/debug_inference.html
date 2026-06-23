@@ -1685,7 +1685,8 @@
                 <div class="coord-group">
                     <label for="dot-polarity">點類型</label>
                     <select id="dot-polarity" onchange="populateDotSamples(); syncDotThresholdDefault();">
-                        <option value="black" selected>黑點</option>
+                        <option value="auto" selected>自動(黑/白)</option>
+                        <option value="black">黑點</option>
                         <option value="white">白點</option>
                     </select>
                 </div>
@@ -2079,7 +2080,12 @@
     function populateDotSamples() {
         const polarity = document.getElementById('dot-polarity').value;
         const select = document.getElementById('dot-sample-select');
-        const samples = dotSamples[polarity] || [];
+        const samples = polarity === 'auto'
+            ? [
+                ...(dotSamples.black || []).map(item => ({ ...item, name: `黑點 / ${item.name}` })),
+                ...(dotSamples.white || []).map(item => ({ ...item, name: `白點 / ${item.name}` })),
+            ]
+            : (dotSamples[polarity] || []);
         if (samples.length === 0) {
             select.innerHTML = '<option value="">無預設樣本</option>';
             return;
@@ -2197,7 +2203,10 @@
         const p = data.params_used || {};
         const calibrated = !!data.calibrated;
         const unitLabel = escapeHtml(data.unit_label || 'mm');
-        const polarityLabel = data.polarity === 'white' ? '白點' : '黑點';
+        const detectedPolarity = data.detected_polarity || data.polarity;
+        const polarityLabel = data.polarity === 'auto'
+            ? `自動→${detectedPolarity === 'white' ? '白點' : detectedPolarity === 'black' ? '黑點' : '-'}`
+            : data.polarity === 'white' ? '白點' : '黑點';
         const calibration = data.calibration || {};
         const mmPerPx = calibration.mm_per_px ?? p.unit_per_px ?? dotDefaultMmPerPx;
         const maxMm = data.max_size_mm ?? data.max_size_units;
