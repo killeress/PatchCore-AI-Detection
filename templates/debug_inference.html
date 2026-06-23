@@ -1683,12 +1683,11 @@
         <div class="card" style="padding:20px;">
             <div class="coord-input-row">
                 <div class="coord-group">
-                    <label for="dot-polarity">點類型</label>
-                    <select id="dot-polarity" onchange="populateDotSamples(); syncDotThresholdDefault();">
-                        <option value="auto" selected>自動(黑/白)</option>
-                        <option value="black">黑點</option>
-                        <option value="white">白點</option>
-                    </select>
+                    <label>點類型</label>
+                    <input type="hidden" id="dot-polarity" value="auto">
+                    <div style="height:42px; display:flex; align-items:center; padding:0 12px; border:1px solid var(--border); border-radius:8px; color:var(--text); background:var(--surface); font-weight:700;">
+                        自動判定黑點/白點
+                    </div>
                 </div>
                 <div class="coord-group" style="min-width:220px;">
                     <label for="dot-sample-select">預設樣本</label>
