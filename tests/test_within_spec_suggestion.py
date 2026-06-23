@@ -22,8 +22,17 @@ def _rules(*, screen_limit=1, tile_limit=1, threshold_mm=0.3, white_enabled=Fals
                 "preprocess_params": {"kernel_size": 7, "sigma": 1.0},
                 "segmentation_method": segmentation_method,
                 "diff_threshold": 8,
-                "hysteresis_low_threshold": 4,
-                "hysteresis_high_threshold": 8,
+                "hysteresis_low_threshold": 2,
+                "hysteresis_high_threshold": 4,
+                "hysteresis_edge_width_percent": 3.0,
+                "hysteresis_edge_extra_threshold": 2,
+                "hysteresis_second_low_threshold": 3,
+                "hysteresis_second_high_threshold": 4,
+                "hysteresis_second_edge_width_percent": 9.5,
+                "hysteresis_second_edge_extra_threshold": 2,
+                "hysteresis_switch_count_threshold": 5,
+                "hysteresis_second_max_count": 5,
+                "hysteresis_edge_suppress_percent": 0.0,
                 "background_kernel": 31,
                 "min_area_px": 2,
                 "max_area_px": 1000,
@@ -292,6 +301,43 @@ def test_dot_detection_hysteresis_expands_low_contrast_boundary():
     assert hysteresis["candidates"][0]["size_px"] > strict["candidates"][0]["size_px"]
     assert hysteresis["thresholds"]["hysteresis_low_threshold"] == 4
     assert hysteresis["thresholds"]["hysteresis_high_threshold"] == 20
+
+
+def test_dot_detection_hysteresis_v2_switches_to_second_group_when_group1_empty():
+    image = np.full((96, 96, 3), 128, dtype=np.uint8)
+    cv2.circle(image, (48, 48), 6, (120, 120, 120), -1)
+
+    detected = _detect_dot_components(
+        image,
+        polarity="black",
+        diff_threshold=30,
+        background_kernel=31,
+        min_area=5,
+        max_area=5000,
+        morph_open=0,
+        size_metric="bbox_max",
+        unit_per_px=1.0,
+        defect_threshold=0.0,
+        segmentation_method="hysteresis",
+        hysteresis_low_threshold=20,
+        hysteresis_high_threshold=30,
+        hysteresis_edge_width_percent=3.0,
+        hysteresis_edge_extra_threshold=2,
+        hysteresis_second_low_threshold=3,
+        hysteresis_second_high_threshold=4,
+        hysteresis_second_edge_width_percent=9.5,
+        hysteresis_second_edge_extra_threshold=2,
+        hysteresis_switch_count_threshold=5,
+        hysteresis_second_max_count=5,
+        hysteresis_edge_suppress_percent=0.0,
+        include_visuals=False,
+    )
+
+    assert detected["candidates"]
+    assert detected["candidates"][0]["polarity"] == "black"
+    assert detected["thresholds"]["hysteresis_group1_count"] == 0
+    assert detected["thresholds"]["hysteresis_group2_count"] >= 1
+    assert detected["thresholds"]["hysteresis_selected_group"] == 2
 
 
 def test_dot_detection_morph_hat_expands_low_contrast_dark_dot():

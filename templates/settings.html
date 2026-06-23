@@ -2064,8 +2064,17 @@
             preprocess_params: { kernel_size: 7, sigma: 1.0 },
             segmentation_method: 'background_diff',
             diff_threshold: 4,
-            hysteresis_low_threshold: 4,
-            hysteresis_high_threshold: 8,
+            hysteresis_low_threshold: 2,
+            hysteresis_high_threshold: 4,
+            hysteresis_edge_width_percent: 3.0,
+            hysteresis_edge_extra_threshold: 2,
+            hysteresis_second_low_threshold: 3,
+            hysteresis_second_high_threshold: 4,
+            hysteresis_second_edge_width_percent: 9.5,
+            hysteresis_second_edge_extra_threshold: 2,
+            hysteresis_switch_count_threshold: 5,
+            hysteresis_second_max_count: 5,
+            hysteresis_edge_suppress_percent: 0.0,
             background_kernel: 33,
             min_area_px: 2,
             max_area_px: 50000,
@@ -2258,13 +2267,58 @@
                         </label>
                         <label class="within-spec-param-field">
                             low=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.hysteresis_low_threshold, 4)}"
+                                value="${formatWithinSpecNumber(d.hysteresis_low_threshold, 2)}"
                                 oninput="updateWithinSpecDotDetection('hysteresis_low_threshold', this.value)">
                         </label>
                         <label class="within-spec-param-field">
                             high=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.hysteresis_high_threshold, 8)}"
+                                value="${formatWithinSpecNumber(d.hysteresis_high_threshold, 4)}"
                                 oninput="updateWithinSpecDotDetection('hysteresis_high_threshold', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            edgeW=<input class="within-spec-param-input" type="number" min="0" step="0.5"
+                                value="${formatWithinSpecNumber(d.hysteresis_edge_width_percent, 3.0)}"
+                                oninput="updateWithinSpecDotDetection('hysteresis_edge_width_percent', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            edge+=<input class="within-spec-param-input" type="number" min="0" step="1"
+                                value="${formatWithinSpecNumber(d.hysteresis_edge_extra_threshold, 2)}"
+                                oninput="updateWithinSpecDotDetection('hysteresis_edge_extra_threshold', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            low2=<input class="within-spec-param-input" type="number" min="0" step="1"
+                                value="${formatWithinSpecNumber(d.hysteresis_second_low_threshold, 3)}"
+                                oninput="updateWithinSpecDotDetection('hysteresis_second_low_threshold', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            high2=<input class="within-spec-param-input" type="number" min="0" step="1"
+                                value="${formatWithinSpecNumber(d.hysteresis_second_high_threshold, 4)}"
+                                oninput="updateWithinSpecDotDetection('hysteresis_second_high_threshold', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            edgeW2=<input class="within-spec-param-input" type="number" min="0" step="0.5"
+                                value="${formatWithinSpecNumber(d.hysteresis_second_edge_width_percent, 9.5)}"
+                                oninput="updateWithinSpecDotDetection('hysteresis_second_edge_width_percent', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            edge+2=<input class="within-spec-param-input" type="number" min="0" step="1"
+                                value="${formatWithinSpecNumber(d.hysteresis_second_edge_extra_threshold, 2)}"
+                                oninput="updateWithinSpecDotDetection('hysteresis_second_edge_extra_threshold', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            sw=<input class="within-spec-param-input" type="number" min="0" step="1"
+                                value="${formatWithinSpecNumber(d.hysteresis_switch_count_threshold, 5)}"
+                                oninput="updateWithinSpecDotDetection('hysteresis_switch_count_threshold', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            max2=<input class="within-spec-param-input" type="number" min="0" step="1"
+                                value="${formatWithinSpecNumber(d.hysteresis_second_max_count, 5)}"
+                                oninput="updateWithinSpecDotDetection('hysteresis_second_max_count', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            suppress=<input class="within-spec-param-input" type="number" min="0" step="0.1"
+                                value="${formatWithinSpecNumber(d.hysteresis_edge_suppress_percent, 0)}"
+                                oninput="updateWithinSpecDotDetection('hysteresis_edge_suppress_percent', this.value)">
                         </label>
                         <label class="within-spec-param-field">
                             bg=<input class="within-spec-param-input" type="number" min="1" step="2"
@@ -2319,7 +2373,7 @@
                                 <div class="within-spec-help-group-title">Mask 模式</div>
                                 <div class="within-spec-help-list">
                                     <div class="within-spec-help-item"><code>background_diff</code><span>現行模式，局部背景差分後用 <code>diff</code> 單一門檻產生 mask。</span></div>
-                                    <div class="within-spec-help-item"><code>hysteresis</code><span>雙門檻模式，<code>high</code> 抓確定核心，<code>low</code> 補回與核心連通的低對比邊界。</span></div>
+                                    <div class="within-spec-help-item"><code>hysteresis</code><span>V2 雙參數組；大尺度 Gaussian 背景差分後用 <code>high/low</code> 連通補邊，Group1 數量為 0 或超過 <code>sw</code> 時試 Group2，Group2 數量不超過 <code>max2</code> 才採用。</span></div>
                                     <div class="within-spec-help-item"><code>morph_hat</code><span>形態學模式，黑點用 black-hat、白點用 top-hat；適合低對比點與週期性網格背景。</span></div>
                                     <div class="within-spec-help-item"><code>adaptive_mean</code><span>自適應均值二值化；<code>bg</code> 是局部視窗大小，<code>diff</code> 是相對局部均值的偏移量。</span></div>
                                     <div class="within-spec-help-item"><code>halo</code><span>白點模式專用，以黑點中心為 seed 量測周圍淡白光暈/白丸範圍。</span></div>
@@ -2327,6 +2381,8 @@
                                     <div class="within-spec-help-item"><code>OFF</code><span>關閉規格內判定；推論原始 AI=NG 時不會因規格內規則轉為 OK-i。</span></div>
                                     <div class="within-spec-help-item"><code>aspect</code><span>候選框短邊/長邊下限，用來排除細長條紋；0 表示不過濾。</span></div>
                                     <div class="within-spec-help-item"><code>edge</code><span>排除距離影像邊界太近的 component，降低邊界亮暗帶干擾。</span></div>
+                                    <div class="within-spec-help-item"><code>edgeW/edge+</code><span>hysteresis 邊緣加嚴：在影像邊緣寬度百分比內，把 high/low 門檻加上 edge+；<code>edgeW2/edge+2</code> 為 Group2。</span></div>
+                                    <div class="within-spec-help-item"><code>suppress</code><span>hysteresis 後處理排除外圈百分比；預設 0 表示不額外排除。</span></div>
                                 </div>
                             </div>
                             <div class="within-spec-help-group">
@@ -2455,6 +2511,12 @@
             'diff_threshold',
             'hysteresis_low_threshold',
             'hysteresis_high_threshold',
+            'hysteresis_edge_extra_threshold',
+            'hysteresis_second_low_threshold',
+            'hysteresis_second_high_threshold',
+            'hysteresis_second_edge_extra_threshold',
+            'hysteresis_switch_count_threshold',
+            'hysteresis_second_max_count',
             'min_area_px',
             'max_area_px',
             'morph_open',

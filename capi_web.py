@@ -193,6 +193,27 @@ def _odd_kernel(value, default: int = 31, min_value: int = 3) -> int:
     return kernel
 
 
+def _dot_hysteresis_kwargs(dot_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    dot_cfg = dot_cfg or {}
+    low = max(0, _as_int(dot_cfg.get("hysteresis_low_threshold"), 2))
+    high = max(low, max(0, _as_int(dot_cfg.get("hysteresis_high_threshold"), 4)))
+    second_low = max(0, _as_int(dot_cfg.get("hysteresis_second_low_threshold"), 3))
+    second_high = max(second_low, max(0, _as_int(dot_cfg.get("hysteresis_second_high_threshold"), 4)))
+    return {
+        "hysteresis_low_threshold": low,
+        "hysteresis_high_threshold": high,
+        "hysteresis_edge_width_percent": max(0.0, _as_float(dot_cfg.get("hysteresis_edge_width_percent"), 3.0)),
+        "hysteresis_edge_extra_threshold": max(0, _as_int(dot_cfg.get("hysteresis_edge_extra_threshold"), 2)),
+        "hysteresis_second_low_threshold": second_low,
+        "hysteresis_second_high_threshold": second_high,
+        "hysteresis_second_edge_width_percent": max(0.0, _as_float(dot_cfg.get("hysteresis_second_edge_width_percent"), 9.5)),
+        "hysteresis_second_edge_extra_threshold": max(0, _as_int(dot_cfg.get("hysteresis_second_edge_extra_threshold"), 2)),
+        "hysteresis_switch_count_threshold": max(0, _as_int(dot_cfg.get("hysteresis_switch_count_threshold"), 5)),
+        "hysteresis_second_max_count": max(0, _as_int(dot_cfg.get("hysteresis_second_max_count"), 5)),
+        "hysteresis_edge_suppress_percent": max(0.0, _as_float(dot_cfg.get("hysteresis_edge_suppress_percent"), 0.0)),
+    }
+
+
 def _detect_dot_components(
     image_bgr,
     *,
@@ -210,6 +231,15 @@ def _detect_dot_components(
     segmentation_method: str = "background_diff",
     hysteresis_low_threshold: Optional[int] = None,
     hysteresis_high_threshold: Optional[int] = None,
+    hysteresis_edge_width_percent: float = 3.0,
+    hysteresis_edge_extra_threshold: int = 2,
+    hysteresis_second_low_threshold: Optional[int] = None,
+    hysteresis_second_high_threshold: Optional[int] = None,
+    hysteresis_second_edge_width_percent: float = 9.5,
+    hysteresis_second_edge_extra_threshold: int = 2,
+    hysteresis_switch_count_threshold: int = 5,
+    hysteresis_second_max_count: int = 5,
+    hysteresis_edge_suppress_percent: float = 0.0,
     include_visuals: bool = True,
 ) -> dict:
     """Detect dot-like dark/bright components and measure their visible size."""
@@ -260,7 +290,111 @@ def _detect_dot_components(
             background_kernel,
             adaptive_c,
         )
-    elif segmentation_method in ("hysteresis", "morph_hat"):
+    elif segmentation_method == "hysteresis":
+        import math
+
+        high_threshold = diff_threshold if hysteresis_high_threshold is None else int(hysteresis_high_threshold)
+        low_threshold = diff_threshold if hysteresis_low_threshold is None else int(hysteresis_low_threshold)
+        low_threshold = max(0, low_threshold)
+        high_threshold = max(low_threshold, max(0, high_threshold))
+
+        second_low_threshold = low_threshold if hysteresis_second_low_threshold is None else int(hysteresis_second_low_threshold)
+        second_high_threshold = high_threshold if hysteresis_second_high_threshold is None else int(hysteresis_second_high_threshold)
+        second_low_threshold = max(0, second_low_threshold)
+        second_high_threshold = max(second_low_threshold, max(0, second_high_threshold))
+        hysteresis_switch_count_threshold = max(0, int(hysteresis_switch_count_threshold or 0))
+        hysteresis_second_max_count = max(0, int(hysteresis_second_max_count or 0))
+        hysteresis_edge_suppress_percent = max(0.0, float(hysteresis_edge_suppress_percent or 0.0))
+
+        min_dim = max(1, min(gray.shape[:2]))
+        sigma_bg = max(2.0, float(min_dim) / 25.0)
+        bg_kernel = max(3, int(math.ceil(sigma_bg * 6.0 + 1.0)))
+        if bg_kernel % 2 == 0:
+            bg_kernel += 1
+        bg = cv2.GaussianBlur(gray, (bg_kernel, bg_kernel), sigma_bg)
+        diff = cv2.absdiff(gray, bg)
+        diff = cv2.medianBlur(diff, 3)
+
+        def hysteresis_mask_for_params(
+            high: int,
+            low: int,
+            edge_width_percent: float,
+            edge_extra_threshold: int,
+        ):
+            edge_width_percent = max(0.0, float(edge_width_percent or 0.0))
+            edge_extra_threshold = max(0, int(edge_extra_threshold or 0))
+            h, w = gray.shape[:2]
+            border_x = int(w * edge_width_percent / 100.0)
+            border_y = int(h * edge_width_percent / 100.0)
+            threshold_extra = np.zeros_like(diff, dtype=np.uint8)
+            if edge_extra_threshold > 0 and (border_x > 0 or border_y > 0):
+                if border_x > 0:
+                    threshold_extra[:, :border_x] = edge_extra_threshold
+                    threshold_extra[:, w - border_x:] = edge_extra_threshold
+                if border_y > 0:
+                    threshold_extra[:border_y, :] = edge_extra_threshold
+                    threshold_extra[h - border_y:, :] = edge_extra_threshold
+            high_map = np.minimum(255, int(high) + threshold_extra.astype(np.uint16)).astype(np.uint8)
+            low_map = np.minimum(255, int(low) + threshold_extra.astype(np.uint16)).astype(np.uint8)
+            low_mask = (diff >= low_map).astype("uint8") * 255
+            high_mask = (diff >= high_map).astype("uint8") * 255
+            low_count, low_labels = cv2.connectedComponents(low_mask, 8)
+            if low_count <= 1 or not np.any(high_mask):
+                return np.zeros_like(low_mask)
+            keep_labels = np.unique(low_labels[high_mask > 0])
+            keep_labels = keep_labels[keep_labels != 0]
+            chosen = np.zeros_like(low_mask)
+            if keep_labels.size:
+                chosen[np.isin(low_labels, keep_labels)] = 255
+            return chosen
+
+        def count_mask_components(mask_to_count):
+            count, _, stats_to_count, _ = cv2.connectedComponentsWithStats(mask_to_count, 8)
+            total = 0
+            min_area_for_count = max(1, int(min_area))
+            max_area_for_count = int(max_area or 0)
+            for idx in range(1, count):
+                area = int(stats_to_count[idx, cv2.CC_STAT_AREA])
+                if area < min_area_for_count:
+                    continue
+                if max_area_for_count > 0 and area > max_area_for_count:
+                    continue
+                total += 1
+            return total
+
+        group1_mask = hysteresis_mask_for_params(
+            high_threshold,
+            low_threshold,
+            hysteresis_edge_width_percent,
+            hysteresis_edge_extra_threshold,
+        )
+        group1_count = count_mask_components(group1_mask)
+        group2_count = 0
+        selected_group = 1
+        mask = group1_mask
+        if group1_count == 0 or group1_count > hysteresis_switch_count_threshold:
+            group2_mask = hysteresis_mask_for_params(
+                second_high_threshold,
+                second_low_threshold,
+                hysteresis_second_edge_width_percent,
+                hysteresis_second_edge_extra_threshold,
+            )
+            group2_count = count_mask_components(group2_mask)
+            if group2_count <= hysteresis_second_max_count:
+                mask = group2_mask
+                selected_group = 2
+
+        if hysteresis_edge_suppress_percent > 0:
+            h, w = gray.shape[:2]
+            border_x = int(w * hysteresis_edge_suppress_percent / 100.0)
+            border_y = int(h * hysteresis_edge_suppress_percent / 100.0)
+            if border_x > 0:
+                mask[:, :border_x] = 0
+                mask[:, w - border_x:] = 0
+            if border_y > 0:
+                mask[:border_y, :] = 0
+                mask[h - border_y:, :] = 0
+    elif segmentation_method == "morph_hat":
         high_threshold = diff_threshold if hysteresis_high_threshold is None else int(hysteresis_high_threshold)
         low_threshold = diff_threshold if hysteresis_low_threshold is None else int(hysteresis_low_threshold)
         low_threshold = max(0, low_threshold)
@@ -297,6 +431,7 @@ def _detect_dot_components(
 
     candidates = []
     calibrated = unit_per_px > 0
+    background_gray = float(np.mean(bg)) if segmentation_method == "hysteresis" else 0.0
     for label in range(1, num_labels):
         x, y, w, h, area = [int(v) for v in stats[label]]
         if area < min_area or area > max_area:
@@ -316,6 +451,13 @@ def _detect_dot_components(
 
         component_labels = labels[y:y + h, x:x + w]
         component_mask = (component_labels == label).astype("uint8") * 255
+        if segmentation_method == "hysteresis":
+            component_values = gray[y:y + h, x:x + w][component_mask > 0]
+            component_polarity = "black" if float(component_values.mean()) < background_gray else "white"
+            if component_polarity != polarity:
+                continue
+        else:
+            component_polarity = polarity
         contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         enclosing_diameter = float(max(w, h))
         if contours:
@@ -360,6 +502,7 @@ def _detect_dot_components(
             "size_mm": round(size_mm, 4) if size_mm is not None else None,
             "max_diff": int(component_diff.max()),
             "mean_diff": round(float(component_diff.mean()), 2),
+            "polarity": component_polarity,
             "is_defect": bool(calibrated and size_units >= defect_threshold),
         })
 
@@ -405,6 +548,21 @@ def _detect_dot_components(
             "hysteresis_high_threshold": high_threshold,
         },
     }
+    if segmentation_method == "hysteresis":
+        result["thresholds"].update({
+            "hysteresis_second_low_threshold": second_low_threshold,
+            "hysteresis_second_high_threshold": second_high_threshold,
+            "hysteresis_edge_width_percent": round(float(hysteresis_edge_width_percent), 4),
+            "hysteresis_edge_extra_threshold": int(hysteresis_edge_extra_threshold),
+            "hysteresis_second_edge_width_percent": round(float(hysteresis_second_edge_width_percent), 4),
+            "hysteresis_second_edge_extra_threshold": int(hysteresis_second_edge_extra_threshold),
+            "hysteresis_switch_count_threshold": int(hysteresis_switch_count_threshold),
+            "hysteresis_second_max_count": int(hysteresis_second_max_count),
+            "hysteresis_edge_suppress_percent": round(float(hysteresis_edge_suppress_percent), 4),
+            "hysteresis_selected_group": int(selected_group),
+            "hysteresis_group1_count": int(group1_count),
+            "hysteresis_group2_count": int(group2_count),
+        })
     if include_visuals:
         diff_norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
         result.update({
@@ -632,6 +790,15 @@ def _detect_dot_components_auto(
     edge_margin: int = 0,
     hysteresis_low_threshold: Optional[int] = None,
     hysteresis_high_threshold: Optional[int] = None,
+    hysteresis_edge_width_percent: float = 3.0,
+    hysteresis_edge_extra_threshold: int = 2,
+    hysteresis_second_low_threshold: Optional[int] = None,
+    hysteresis_second_high_threshold: Optional[int] = None,
+    hysteresis_second_edge_width_percent: float = 9.5,
+    hysteresis_second_edge_extra_threshold: int = 2,
+    hysteresis_switch_count_threshold: int = 5,
+    hysteresis_second_max_count: int = 5,
+    hysteresis_edge_suppress_percent: float = 0.0,
     include_visuals: bool = True,
 ) -> dict:
     """Select the best dot detector for the configured mode."""
@@ -649,6 +816,19 @@ def _detect_dot_components_auto(
         "edge_margin": edge_margin,
         "include_visuals": include_visuals,
     }
+    hysteresis_common = {
+        "hysteresis_low_threshold": hysteresis_low_threshold,
+        "hysteresis_high_threshold": hysteresis_high_threshold,
+        "hysteresis_edge_width_percent": hysteresis_edge_width_percent,
+        "hysteresis_edge_extra_threshold": hysteresis_edge_extra_threshold,
+        "hysteresis_second_low_threshold": hysteresis_second_low_threshold,
+        "hysteresis_second_high_threshold": hysteresis_second_high_threshold,
+        "hysteresis_second_edge_width_percent": hysteresis_second_edge_width_percent,
+        "hysteresis_second_edge_extra_threshold": hysteresis_second_edge_extra_threshold,
+        "hysteresis_switch_count_threshold": hysteresis_switch_count_threshold,
+        "hysteresis_second_max_count": hysteresis_second_max_count,
+        "hysteresis_edge_suppress_percent": hysteresis_edge_suppress_percent,
+    }
 
     if polarity == "white" and mode == "halo":
         return _detect_white_halo_components(image_bgr, **common)
@@ -657,8 +837,7 @@ def _detect_dot_components_auto(
             image_bgr,
             polarity=polarity,
             segmentation_method=mode,
-            hysteresis_low_threshold=hysteresis_low_threshold,
-            hysteresis_high_threshold=hysteresis_high_threshold,
+            **hysteresis_common,
             **common,
         )
 
@@ -671,8 +850,7 @@ def _detect_dot_components_auto(
             image_bgr,
             polarity=polarity,
             segmentation_method=candidate_mode,
-            hysteresis_low_threshold=hysteresis_low_threshold,
-            hysteresis_high_threshold=hysteresis_high_threshold,
+            **hysteresis_common,
             **common,
         )
         candidates.append(detected)
@@ -734,9 +912,31 @@ def _detect_dot_components_debug_polarity(
     edge_margin: int = 0,
     hysteresis_low_threshold: Optional[int] = None,
     hysteresis_high_threshold: Optional[int] = None,
+    hysteresis_edge_width_percent: float = 3.0,
+    hysteresis_edge_extra_threshold: int = 2,
+    hysteresis_second_low_threshold: Optional[int] = None,
+    hysteresis_second_high_threshold: Optional[int] = None,
+    hysteresis_second_edge_width_percent: float = 9.5,
+    hysteresis_second_edge_extra_threshold: int = 2,
+    hysteresis_switch_count_threshold: int = 5,
+    hysteresis_second_max_count: int = 5,
+    hysteresis_edge_suppress_percent: float = 0.0,
     include_visuals: bool = True,
 ) -> dict:
     """Run dot debug detection for one polarity or auto-select black/white."""
+    hysteresis_common = {
+        "hysteresis_low_threshold": hysteresis_low_threshold,
+        "hysteresis_high_threshold": hysteresis_high_threshold,
+        "hysteresis_edge_width_percent": hysteresis_edge_width_percent,
+        "hysteresis_edge_extra_threshold": hysteresis_edge_extra_threshold,
+        "hysteresis_second_low_threshold": hysteresis_second_low_threshold,
+        "hysteresis_second_high_threshold": hysteresis_second_high_threshold,
+        "hysteresis_second_edge_width_percent": hysteresis_second_edge_width_percent,
+        "hysteresis_second_edge_extra_threshold": hysteresis_second_edge_extra_threshold,
+        "hysteresis_switch_count_threshold": hysteresis_switch_count_threshold,
+        "hysteresis_second_max_count": hysteresis_second_max_count,
+        "hysteresis_edge_suppress_percent": hysteresis_edge_suppress_percent,
+    }
     if polarity != "auto":
         result = _detect_dot_components_auto(
             image_bgr,
@@ -752,8 +952,7 @@ def _detect_dot_components_debug_polarity(
             defect_threshold=defect_threshold,
             min_aspect_ratio=min_aspect_ratio,
             edge_margin=edge_margin,
-            hysteresis_low_threshold=hysteresis_low_threshold,
-            hysteresis_high_threshold=hysteresis_high_threshold,
+            **hysteresis_common,
             include_visuals=include_visuals,
         )
         result["detected_polarity"] = polarity
@@ -777,8 +976,7 @@ def _detect_dot_components_debug_polarity(
             defect_threshold=defect_threshold,
             min_aspect_ratio=min_aspect_ratio,
             edge_margin=edge_margin,
-            hysteresis_low_threshold=hysteresis_low_threshold,
-            hysteresis_high_threshold=hysteresis_high_threshold,
+            **hysteresis_common,
             include_visuals=include_visuals,
         )
         detected["detected_polarity"] = candidate_polarity
@@ -1028,8 +1226,7 @@ def _save_within_spec_dot_visuals(
         defect_threshold=chosen["threshold_mm"],
         min_aspect_ratio=max(0.0, _as_float(dot_cfg.get("min_aspect_ratio"), 0.45)),
         edge_margin=max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
-        hysteresis_low_threshold=_as_int(dot_cfg.get("hysteresis_low_threshold"), 4),
-        hysteresis_high_threshold=_as_int(dot_cfg.get("hysteresis_high_threshold"), 8),
+        **_dot_hysteresis_kwargs(dot_cfg),
         include_visuals=True,
     )
 
@@ -1119,11 +1316,7 @@ def _evaluate_within_spec_suggestion_detail(
     effective_segmentation_method = str(dot_cfg.get("segmentation_method") or "background_diff").strip().lower()
     if effective_segmentation_method not in ("background_diff", "hysteresis", "morph_hat", "adaptive_mean", "halo", "auto", "off"):
         effective_segmentation_method = "background_diff"
-    effective_hysteresis_low = max(0, _as_int(dot_cfg.get("hysteresis_low_threshold"), 4))
-    effective_hysteresis_high = max(
-        effective_hysteresis_low,
-        max(0, _as_int(dot_cfg.get("hysteresis_high_threshold"), 8)),
-    )
+    effective_hysteresis = _dot_hysteresis_kwargs(dot_cfg)
     result["parameter_snapshot"] = {
         "captured_at": datetime.now().isoformat(timespec="seconds"),
         "candidate_keys": machine_candidates,
@@ -1136,8 +1329,7 @@ def _evaluate_within_spec_suggestion_detail(
             "effective": {
                 "diff_threshold": _as_int(dot_cfg.get("diff_threshold"), 4),
                 "segmentation_method": effective_segmentation_method,
-                "hysteresis_low_threshold": effective_hysteresis_low,
-                "hysteresis_high_threshold": effective_hysteresis_high,
+                **effective_hysteresis,
                 "background_kernel": _odd_kernel(_as_int(dot_cfg.get("background_kernel"), 33)),
                 "min_area_px": max(1, _as_int(dot_cfg.get("min_area_px"), 2)),
                 "max_area_px": max(0, _as_int(dot_cfg.get("max_area_px"), 50000)),
@@ -1267,8 +1459,7 @@ def _evaluate_within_spec_suggestion_detail(
                     defect_threshold=threshold_mm,
                     min_aspect_ratio=max(0.0, _as_float(dot_cfg.get("min_aspect_ratio"), 0.45)),
                     edge_margin=max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
-                    hysteresis_low_threshold=_as_int(dot_cfg.get("hysteresis_low_threshold"), 4),
-                    hysteresis_high_threshold=_as_int(dot_cfg.get("hysteresis_high_threshold"), 8),
+                    **_dot_hysteresis_kwargs(dot_cfg),
                     include_visuals=False,
                 )
                 candidates = detected["candidates"]
@@ -5798,11 +5989,23 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return bool(value)
 
         diff_threshold = as_int("diff_threshold", 4)
-        hysteresis_low_threshold = max(0, as_int("hysteresis_low_threshold", 4))
+        hysteresis_low_threshold = max(0, as_int("hysteresis_low_threshold", 2))
         hysteresis_high_threshold = max(
             hysteresis_low_threshold,
-            max(0, as_int("hysteresis_high_threshold", 8)),
+            max(0, as_int("hysteresis_high_threshold", 4)),
         )
+        hysteresis_second_low_threshold = max(0, as_int("hysteresis_second_low_threshold", 3))
+        hysteresis_second_high_threshold = max(
+            hysteresis_second_low_threshold,
+            max(0, as_int("hysteresis_second_high_threshold", 4)),
+        )
+        hysteresis_edge_width_percent = max(0.0, as_float("hysteresis_edge_width_percent", 3.0))
+        hysteresis_edge_extra_threshold = max(0, as_int("hysteresis_edge_extra_threshold", 2))
+        hysteresis_second_edge_width_percent = max(0.0, as_float("hysteresis_second_edge_width_percent", 9.5))
+        hysteresis_second_edge_extra_threshold = max(0, as_int("hysteresis_second_edge_extra_threshold", 2))
+        hysteresis_switch_count_threshold = max(0, as_int("hysteresis_switch_count_threshold", 5))
+        hysteresis_second_max_count = max(0, as_int("hysteresis_second_max_count", 5))
+        hysteresis_edge_suppress_percent = max(0.0, as_float("hysteresis_edge_suppress_percent", 0.0))
         background_kernel = _odd_kernel(as_int("background_kernel", 33))
         min_area = max(1, as_int("min_area", 2))
         max_area = max(0, as_int("max_area", 50000))
@@ -5841,6 +6044,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         "diff_threshold": diff_threshold,
                         "hysteresis_low_threshold": hysteresis_low_threshold,
                         "hysteresis_high_threshold": hysteresis_high_threshold,
+                        "hysteresis_second_low_threshold": hysteresis_second_low_threshold,
+                        "hysteresis_second_high_threshold": hysteresis_second_high_threshold,
+                        "hysteresis_edge_width_percent": hysteresis_edge_width_percent,
+                        "hysteresis_edge_extra_threshold": hysteresis_edge_extra_threshold,
+                        "hysteresis_second_edge_width_percent": hysteresis_second_edge_width_percent,
+                        "hysteresis_second_edge_extra_threshold": hysteresis_second_edge_extra_threshold,
+                        "hysteresis_switch_count_threshold": hysteresis_switch_count_threshold,
+                        "hysteresis_second_max_count": hysteresis_second_max_count,
+                        "hysteresis_edge_suppress_percent": hysteresis_edge_suppress_percent,
                     },
                 }
             else:
@@ -5860,6 +6072,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     edge_margin=edge_margin,
                     hysteresis_low_threshold=hysteresis_low_threshold,
                     hysteresis_high_threshold=hysteresis_high_threshold,
+                    hysteresis_edge_width_percent=hysteresis_edge_width_percent,
+                    hysteresis_edge_extra_threshold=hysteresis_edge_extra_threshold,
+                    hysteresis_second_low_threshold=hysteresis_second_low_threshold,
+                    hysteresis_second_high_threshold=hysteresis_second_high_threshold,
+                    hysteresis_second_edge_width_percent=hysteresis_second_edge_width_percent,
+                    hysteresis_second_edge_extra_threshold=hysteresis_second_edge_extra_threshold,
+                    hysteresis_switch_count_threshold=hysteresis_switch_count_threshold,
+                    hysteresis_second_max_count=hysteresis_second_max_count,
+                    hysteresis_edge_suppress_percent=hysteresis_edge_suppress_percent,
                 )
 
             if CAPIWebHandler._debug_heatmap_dir is None:
@@ -5887,6 +6108,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 max_size_units = max((c["size_units"] or 0.0 for c in candidates), default=0.0)
                 defect_threshold_px = defect_threshold / unit_per_px if unit_per_px > 0 else None
             max_size_mm = max_size_units if unit_label.lower() == "mm" else None
+            detected_thresholds = detected.get("thresholds", {})
 
             response_data = {
                 "success": True,
@@ -5916,8 +6138,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "params_used": {
                     "segmentation_method": detected.get("segmentation_method", segmentation_method),
                     "diff_threshold": diff_threshold,
-                    "hysteresis_low_threshold": detected.get("thresholds", {}).get("hysteresis_low_threshold", hysteresis_low_threshold),
-                    "hysteresis_high_threshold": detected.get("thresholds", {}).get("hysteresis_high_threshold", hysteresis_high_threshold),
+                    "hysteresis_low_threshold": detected_thresholds.get("hysteresis_low_threshold", hysteresis_low_threshold),
+                    "hysteresis_high_threshold": detected_thresholds.get("hysteresis_high_threshold", hysteresis_high_threshold),
+                    "hysteresis_second_low_threshold": detected_thresholds.get("hysteresis_second_low_threshold", hysteresis_second_low_threshold),
+                    "hysteresis_second_high_threshold": detected_thresholds.get("hysteresis_second_high_threshold", hysteresis_second_high_threshold),
+                    "hysteresis_edge_width_percent": detected_thresholds.get("hysteresis_edge_width_percent", hysteresis_edge_width_percent),
+                    "hysteresis_edge_extra_threshold": detected_thresholds.get("hysteresis_edge_extra_threshold", hysteresis_edge_extra_threshold),
+                    "hysteresis_second_edge_width_percent": detected_thresholds.get("hysteresis_second_edge_width_percent", hysteresis_second_edge_width_percent),
+                    "hysteresis_second_edge_extra_threshold": detected_thresholds.get("hysteresis_second_edge_extra_threshold", hysteresis_second_edge_extra_threshold),
+                    "hysteresis_switch_count_threshold": detected_thresholds.get("hysteresis_switch_count_threshold", hysteresis_switch_count_threshold),
+                    "hysteresis_second_max_count": detected_thresholds.get("hysteresis_second_max_count", hysteresis_second_max_count),
+                    "hysteresis_edge_suppress_percent": detected_thresholds.get("hysteresis_edge_suppress_percent", hysteresis_edge_suppress_percent),
+                    "hysteresis_selected_group": detected_thresholds.get("hysteresis_selected_group"),
+                    "hysteresis_group1_count": detected_thresholds.get("hysteresis_group1_count"),
+                    "hysteresis_group2_count": detected_thresholds.get("hysteresis_group2_count"),
                     "background_kernel": background_kernel,
                     "min_area": min_area,
                     "max_area": max_area,
