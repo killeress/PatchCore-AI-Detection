@@ -717,6 +717,109 @@ def _detect_dot_components_auto(
     return best
 
 
+def _detect_dot_components_debug_polarity(
+    image_bgr,
+    *,
+    polarity: str,
+    segmentation_method: str,
+    diff_threshold: int,
+    background_kernel: int,
+    min_area: int,
+    max_area: int,
+    morph_open: int,
+    size_metric: str,
+    unit_per_px: float,
+    defect_threshold: float,
+    min_aspect_ratio: float = 0.0,
+    edge_margin: int = 0,
+    hysteresis_low_threshold: Optional[int] = None,
+    hysteresis_high_threshold: Optional[int] = None,
+    include_visuals: bool = True,
+) -> dict:
+    """Run dot debug detection for one polarity or auto-select black/white."""
+    if polarity != "auto":
+        result = _detect_dot_components_auto(
+            image_bgr,
+            polarity=polarity,
+            segmentation_method=segmentation_method,
+            diff_threshold=diff_threshold,
+            background_kernel=background_kernel,
+            min_area=min_area,
+            max_area=max_area,
+            morph_open=morph_open,
+            size_metric=size_metric,
+            unit_per_px=unit_per_px,
+            defect_threshold=defect_threshold,
+            min_aspect_ratio=min_aspect_ratio,
+            edge_margin=edge_margin,
+            hysteresis_low_threshold=hysteresis_low_threshold,
+            hysteresis_high_threshold=hysteresis_high_threshold,
+            include_visuals=include_visuals,
+        )
+        result["detected_polarity"] = polarity
+        return result
+
+    detected_by_polarity = []
+    for candidate_polarity in ("black", "white"):
+        if segmentation_method == "halo" and candidate_polarity != "white":
+            continue
+        detected = _detect_dot_components_auto(
+            image_bgr,
+            polarity=candidate_polarity,
+            segmentation_method=segmentation_method,
+            diff_threshold=diff_threshold,
+            background_kernel=background_kernel,
+            min_area=min_area,
+            max_area=max_area,
+            morph_open=morph_open,
+            size_metric=size_metric,
+            unit_per_px=unit_per_px,
+            defect_threshold=defect_threshold,
+            min_aspect_ratio=min_aspect_ratio,
+            edge_margin=edge_margin,
+            hysteresis_low_threshold=hysteresis_low_threshold,
+            hysteresis_high_threshold=hysteresis_high_threshold,
+            include_visuals=include_visuals,
+        )
+        detected["detected_polarity"] = candidate_polarity
+        detected_by_polarity.append(detected)
+
+    def score(result: Dict[str, Any]) -> Tuple[int, float, int]:
+        top = (result.get("candidates") or [{}])[0]
+        return (
+            1 if top.get("is_defect") else 0,
+            float(top.get("size_px") or 0.0),
+            len(result.get("candidates") or []),
+        )
+
+    best = max(detected_by_polarity, key=score)
+    chosen_polarity = best.get("detected_polarity", "")
+    if best.get("segmentation_method", "").startswith("auto:"):
+        best["segmentation_method"] = f"auto:{chosen_polarity}:{best['segmentation_method'][5:]}"
+    else:
+        best["segmentation_method"] = f"auto:{chosen_polarity}:{best.get('segmentation_method', '')}"
+
+    merged_auto_candidates = []
+    for item in detected_by_polarity:
+        item_polarity = item.get("detected_polarity", "")
+        source_candidates = item.get("auto_candidates") or [{
+            "segmentation_method": item.get("segmentation_method", ""),
+            "count": len(item.get("candidates") or []),
+            "max_size_px": max((float(c.get("size_px") or 0.0) for c in item.get("candidates") or []), default=0.0),
+            "max_size_mm": max((float(c.get("size_mm") or 0.0) for c in item.get("candidates") or []), default=0.0),
+            "defect_count": sum(1 for c in item.get("candidates") or [] if c.get("is_defect")),
+        }]
+        for candidate in source_candidates:
+            merged = dict(candidate)
+            merged["polarity"] = item_polarity
+            merged["segmentation_method"] = f"{item_polarity}:{candidate.get('segmentation_method', '')}"
+            merged_auto_candidates.append(merged)
+    best["auto_candidates"] = merged_auto_candidates
+    for candidate in best.get("candidates") or []:
+        candidate["polarity"] = chosen_polarity
+    return best
+
+
 def _as_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
@@ -5660,8 +5763,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         polarity = (data.get("polarity") or "black").strip().lower()
-        if polarity not in ("black", "white"):
-            self._send_json({"error": "polarity 必須是 black 或 white"}, status=400)
+        if polarity not in ("black", "white", "auto"):
+            self._send_json({"error": "polarity 必須是 black、white 或 auto"}, status=400)
             return
 
         size_metric = (data.get("size_metric") or "bbox_diagonal").strip().lower()
@@ -5733,6 +5836,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "candidates": [],
                     "calibrated": unit_per_px > 0,
                     "segmentation_method": "off",
+                    "detected_polarity": polarity,
                     "thresholds": {
                         "diff_threshold": diff_threshold,
                         "hysteresis_low_threshold": hysteresis_low_threshold,
@@ -5740,7 +5844,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     },
                 }
             else:
-                detected = _detect_dot_components_auto(
+                detected = _detect_dot_components_debug_polarity(
                     processed_image,
                     polarity=polarity,
                     segmentation_method=segmentation_method,
@@ -5789,6 +5893,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "image_path": str(image_path),
                 "image_shape": [int(image.shape[1]), int(image.shape[0])],
                 "polarity": polarity,
+                "detected_polarity": detected.get("detected_polarity", polarity),
                 "method": "dot_detection",
                 "segmentation_method": detected.get("segmentation_method", segmentation_method),
                 "preprocess": preprocess_info,
