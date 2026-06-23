@@ -21,11 +21,16 @@ def _default_within_spec_judgment_rules() -> Dict[str, Any]:
     dot_detection = {
         "preprocess_method": "gaussian",
         "preprocess_params": {"kernel_size": 7, "sigma": 1.0},
+        "segmentation_method": "background_diff",
         "diff_threshold": 4,
+        "hysteresis_low_threshold": 4,
+        "hysteresis_high_threshold": 8,
         "background_kernel": 33,
         "min_area_px": 2,
         "max_area_px": 50000,
-        "morph_open": 2,
+        "morph_open": 0,
+        "min_aspect_ratio": 0.45,
+        "edge_margin_px": 4,
         "size_metric": "bbox_diagonal",
         "unit_per_px": 0.0245,
     }

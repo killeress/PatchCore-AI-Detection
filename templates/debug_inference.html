@@ -1725,9 +1725,31 @@
                         </div>
                     </div>
                     <div class="coord-group">
+                        <label for="dot-segmentation-method">偵測模式</label>
+                        <select id="dot-segmentation-method" title="同步規格內判定 mode：background_diff / hysteresis / morph_hat / adaptive_mean / halo / auto / OFF">
+                            <option value="background_diff" selected>background_diff</option>
+                            <option value="hysteresis">hysteresis</option>
+                            <option value="morph_hat">morph_hat</option>
+                            <option value="adaptive_mean">adaptive_mean</option>
+                            <option value="halo">halo</option>
+                            <option value="auto">auto</option>
+                            <option value="off">OFF</option>
+                        </select>
+                    </div>
+                    <div class="coord-group">
                         <label for="dot-diff-threshold">diff 閾值</label>
                         <input type="number" id="dot-diff-threshold" value="7" min="0" max="255" step="1"
                             title="局部背景差異閾值；小黑點預設 7">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-hysteresis-low">low 閾值</label>
+                        <input type="number" id="dot-hysteresis-low" value="4" min="0" max="255" step="1"
+                            title="hysteresis 模式使用：補回與 high 核心連通的低對比邊界">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-hysteresis-high">high 閾值</label>
+                        <input type="number" id="dot-hysteresis-high" value="8" min="0" max="255" step="1"
+                            title="hysteresis 模式使用：確定 defect 核心門檻">
                     </div>
                     <div class="coord-group">
                         <label for="dot-bg-kernel">背景 kernel</label>
@@ -1744,8 +1766,18 @@
                     </div>
                     <div class="coord-group">
                         <label for="dot-morph-open">open kernel</label>
-                        <input type="number" id="dot-morph-open" value="2" min="0" max="15" step="1"
+                        <input type="number" id="dot-morph-open" value="0" min="0" max="15" step="1"
                             title=">1 時做 morphological opening 去除孤立雜訊">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-min-aspect-ratio">aspect 下限</label>
+                        <input type="number" id="dot-min-aspect-ratio" value="0.45" min="0" max="1" step="0.05"
+                            title="短邊/長邊下限；用來排除細長條紋，0 表示不過濾">
+                    </div>
+                    <div class="coord-group">
+                        <label for="dot-edge-margin">edge margin</label>
+                        <input type="number" id="dot-edge-margin" value="4" min="0" max="128" step="1"
+                            title="排除貼近影像邊界的 component，0 表示不過濾">
                     </div>
                 </div>
             </div>
@@ -2089,7 +2121,11 @@
         }
         computeDotCalibration();
 
-        let bgKernel = parseInt(document.getElementById('dot-bg-kernel').value, 10) || 33;
+        const readInt = (id, fallback) => {
+            const value = parseInt(document.getElementById(id).value, 10);
+            return Number.isFinite(value) ? value : fallback;
+        };
+        let bgKernel = readInt('dot-bg-kernel', 33);
         if (bgKernel % 2 === 0) {
             bgKernel += 1;
             document.getElementById('dot-bg-kernel').value = bgKernel;
@@ -2113,11 +2149,16 @@
                 body: JSON.stringify({
                     image_path: imagePath,
                     polarity: document.getElementById('dot-polarity').value,
-                    diff_threshold: parseInt(document.getElementById('dot-diff-threshold').value, 10) || 7,
+                    segmentation_method: document.getElementById('dot-segmentation-method').value,
+                    diff_threshold: readInt('dot-diff-threshold', 7),
+                    hysteresis_low_threshold: readInt('dot-hysteresis-low', 4),
+                    hysteresis_high_threshold: readInt('dot-hysteresis-high', 8),
                     background_kernel: bgKernel,
-                    min_area: parseInt(document.getElementById('dot-min-area').value, 10) || 2,
-                    max_area: parseInt(document.getElementById('dot-max-area').value, 10) || 0,
-                    morph_open: parseInt(document.getElementById('dot-morph-open').value, 10) || 0,
+                    min_area: readInt('dot-min-area', 2),
+                    max_area: readInt('dot-max-area', 0),
+                    morph_open: readInt('dot-morph-open', 0),
+                    min_aspect_ratio: parseFloat(document.getElementById('dot-min-aspect-ratio').value) || 0,
+                    edge_margin: readInt('dot-edge-margin', 0),
                     size_metric: document.getElementById('dot-size-metric').value,
                     unit_per_px: unitPerPx,
                     unit_label: 'mm',
@@ -2163,6 +2204,21 @@
         const maxUnitText = calibrated && maxMm !== null && maxMm !== undefined ? `${maxMm} ${unitLabel}` : '-';
         const defectText = calibrated ? data.defect_count : '-';
         const thresholdText = `${p.defect_threshold} ${unitLabel}`;
+        const segmentationMethod = p.segmentation_method || data.segmentation_method || 'background_diff';
+        const modeText = segmentationMethod === 'off'
+            ? 'OFF'
+            : segmentationMethod === 'hysteresis'
+                ? `hysteresis low=${p.hysteresis_low_threshold} high=${p.hysteresis_high_threshold}`
+                : segmentationMethod === 'morph_hat'
+                    ? `morph_hat low=${p.hysteresis_low_threshold} high=${p.hysteresis_high_threshold}`
+                    : segmentationMethod === 'adaptive_mean'
+                        ? `adaptive_mean block=${p.background_kernel} c=${p.diff_threshold}`
+                    : segmentationMethod === 'halo'
+                        ? `halo diff=${p.diff_threshold}`
+                        : segmentationMethod.startsWith('auto:')
+                            ? segmentationMethod
+                    : `background_diff diff=${p.diff_threshold}`;
+        const filterText = `aspect>=${p.min_aspect_ratio ?? 0} edge=${p.edge_margin ?? 0}`;
         const thresholdPxText = calibrated && data.defect_threshold_px !== null && data.defect_threshold_px !== undefined
             ? `${data.defect_threshold_px} px`
             : '-';
@@ -2178,11 +2234,27 @@
         const calibrationPointText = calibrationPoints
             .map(pt => `${pt.diameter_mm}mm≈${pt.diameter_px}px`)
             .join(' / ');
+        const autoCandidates = Array.isArray(data.auto_candidates) ? data.auto_candidates : [];
+        const autoCandidateText = autoCandidates.length
+            ? autoCandidates.map(c => {
+                const mm = Number(c.max_size_mm || 0);
+                const mmText = calibrated && mm > 0 ? ` / ${mm.toFixed(4)}${unitLabel}` : '';
+                return `${c.segmentation_method}: ${c.count}個 / ${Number(c.max_size_px || 0).toFixed(2)}px${mmText}`;
+            }).join('　')
+            : '';
 
         document.getElementById('dot-info-cards').innerHTML = `
             <div class="summary-card">
                 <div class="label">點類型</div>
                 <div class="value" style="color:var(--text);font-size:1rem;">${polarityLabel}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">偵測模式</div>
+                <div class="value" style="color:${segmentationMethod === 'off' ? 'var(--text-muted)' : 'var(--accent)'};font-size:0.9rem;">${escapeHtml(modeText)}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">候選過濾</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.9rem;">${escapeHtml(filterText)}</div>
             </div>
             <div class="summary-card">
                 <div class="label">候選點</div>
@@ -2220,6 +2292,12 @@
                 <div class="label">校正來源</div>
                 <div class="value" style="color:var(--text-muted);font-size:0.82rem;line-height:1.45;">${calibrationSource}${calibrationPointText ? '<br>' + escapeHtml(calibrationPointText) : ''}</div>
             </div>
+            ${autoCandidateText ? `
+            <div class="summary-card" style="grid-column:span 2;">
+                <div class="label">auto 候選比較</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.82rem;line-height:1.45;">${escapeHtml(autoCandidateText)}</div>
+            </div>
+            ` : ''}
             <div class="summary-card">
                 <div class="label">耗時</div>
                 <div class="value" style="color:var(--accent)">${data.processing_time}s</div>
