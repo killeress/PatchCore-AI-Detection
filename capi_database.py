@@ -1381,7 +1381,13 @@ class CAPIDatabase:
                               AND ir.request_time >= substr(c.time_stamp, 1, 10)
                               AND ir.request_time < date(substr(c.time_stamp, 1, 10), '+1 day')
                             ORDER BY ir.request_time DESC LIMIT 1
-                           ) as inference_record_id
+                           ) as inference_record_id,
+                           (SELECT ir.ai_judgment FROM inference_records ir
+                            WHERE ir.glass_id = c.pnl_id
+                              AND ir.request_time >= substr(c.time_stamp, 1, 10)
+                              AND ir.request_time < date(substr(c.time_stamp, 1, 10), '+1 day')
+                            ORDER BY ir.request_time DESC LIMIT 1
+                           ) as inference_ai_judgment
                     FROM client_accuracy_records c
                     LEFT JOIN miss_review mr ON mr.client_record_id = c.id
                     LEFT JOIN over_review ovr ON ovr.client_record_id = c.id
@@ -2751,7 +2757,7 @@ class CAPIDatabase:
             ("bright_spot_min_area", 5, "int", "亮點最小連通面積 (px)"),
             ("bright_spot_median_kernel", 21, "int", "背景估計 median filter 核大小"),
             ("bright_spot_diff_threshold", 10, "int", "局部對比差異閾值"),
-            ("within_spec_judgment_rules", config.within_spec_judgment_rules, "dict", "規格內點狀不良判定條件（依機種/畫面/黑白點分開設定）"),
+            ("within_spec_judgment_rules", config.within_spec_judgment_rules, "dict", "規格內點狀不良判定條件（依機種/畫面/黑白點分開設定；dot_detection.segmentation_method 可選 background_diff、hysteresis、morph_hat、adaptive_mean、halo、auto 或 off 關閉）"),
             # AOI 機檢座標設定
             ("grid_tiling_enabled", True, "bool", "啟用全面板 Grid Tiling 推論"),
             # 新架構 attribution 模式（找包含 AOI 座標的既存 grid tile 標屬性）成本近零，

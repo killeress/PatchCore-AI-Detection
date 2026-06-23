@@ -149,7 +149,13 @@ def test_within_spec_judgment_rules_defaults_and_overrides():
     assert default_rules["screens"]["B0F00000"]["white_dot"]["area_threshold_mm"] == 0.2
     assert default_rules["screens"]["B0F00000"]["white_dot"]["screen_count_limit"] == 1
     assert default_rules["dot_detection"]["diff_threshold"] == 4
+    assert default_rules["dot_detection"]["segmentation_method"] == "background_diff"
+    assert default_rules["dot_detection"]["hysteresis_low_threshold"] == 4
+    assert default_rules["dot_detection"]["hysteresis_high_threshold"] == 8
     assert default_rules["dot_detection"]["background_kernel"] == 33
+    assert default_rules["dot_detection"]["morph_open"] == 0
+    assert default_rules["dot_detection"]["min_aspect_ratio"] == 0.45
+    assert default_rules["dot_detection"]["edge_margin_px"] == 4
 
     custom_rules = {
         "CAPI_3F": {},

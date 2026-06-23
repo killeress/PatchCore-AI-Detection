@@ -1005,30 +1005,103 @@
     }
 
     .within-spec-param-help {
-        padding: 0 16px 14px;
+        margin: 0 16px 16px;
+        padding: 14px;
         color: var(--text-muted);
         font-size: 0.78rem;
-        line-height: 1.6;
+        line-height: 1.55;
+        background: rgba(15, 23, 42, 0.38);
+        border: 1px solid rgba(51, 65, 85, 0.72);
+        border-radius: 10px;
     }
 
-    .within-spec-param-help-title {
+    .within-spec-help-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 12px;
+        color: #cbd5e1;
+    }
+
+    .within-spec-help-kicker {
+        flex: 0 0 auto;
+        color: #86efac;
+        background: rgba(34, 197, 94, 0.12);
+        border: 1px solid rgba(34, 197, 94, 0.25);
+        border-radius: 999px;
+        padding: 3px 9px;
+        font-size: 0.72rem;
+        font-weight: 700;
+    }
+
+    .within-spec-help-layout {
+        display: grid;
+        grid-template-columns: minmax(280px, 1fr) minmax(360px, 1.35fr);
+        gap: 12px;
+    }
+
+    .within-spec-help-group {
+        min-width: 0;
+        background: rgba(2, 6, 23, 0.22);
+        border: 1px solid rgba(148, 163, 184, 0.12);
+        border-radius: 8px;
+        padding: 10px;
+    }
+
+    .within-spec-help-group-title {
         color: #93c5fd;
         font-weight: 700;
-        margin-bottom: 4px;
+        margin-bottom: 8px;
+        font-size: 0.78rem;
     }
 
-    .within-spec-metric-help {
+    .within-spec-help-list {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-        gap: 4px 14px;
+        gap: 7px;
     }
 
-    .within-spec-metric-help code {
+    .within-spec-help-item {
+        display: grid;
+        grid-template-columns: minmax(112px, max-content) minmax(0, 1fr);
+        align-items: start;
+        gap: 10px;
+        min-height: 28px;
+    }
+
+    .within-spec-help-item code {
+        justify-self: start;
         color: #fde68a;
-        background: rgba(15, 23, 42, 0.75);
-        border: 1px solid rgba(148, 163, 184, 0.2);
-        border-radius: 4px;
-        padding: 1px 5px;
+        background: rgba(15, 23, 42, 0.88);
+        border: 1px solid rgba(250, 204, 21, 0.24);
+        border-radius: 6px;
+        padding: 3px 7px;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.72rem;
+        line-height: 1.25;
+        white-space: nowrap;
+    }
+
+    .within-spec-help-item span {
+        min-width: 0;
+        color: #94a3b8;
+    }
+
+    @media (max-width: 980px) {
+        .within-spec-help-layout {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    @media (max-width: 640px) {
+        .within-spec-help-header {
+            align-items: flex-start;
+            flex-direction: column;
+        }
+
+        .within-spec-help-item {
+            grid-template-columns: 1fr;
+            gap: 4px;
+        }
     }
 
     /* Toggle Switch */
@@ -1989,11 +2062,16 @@
         const dotDetection = {
             preprocess_method: 'gaussian',
             preprocess_params: { kernel_size: 7, sigma: 1.0 },
+            segmentation_method: 'background_diff',
             diff_threshold: 4,
+            hysteresis_low_threshold: 4,
+            hysteresis_high_threshold: 8,
             background_kernel: 33,
             min_area_px: 2,
             max_area_px: 50000,
-            morph_open: 2,
+            morph_open: 0,
+            min_aspect_ratio: 0.45,
+            edge_margin_px: 4,
             size_metric: 'bbox_diagonal',
             unit_per_px: 0.0245,
         };
@@ -2159,9 +2237,34 @@
                         <span>點圖偵測參數</span>
                         <code title="前處理流程目前固定，不在此頁編輯">preprocess=${escapeHtml(d.preprocess_method || 'gaussian')}(${escapeHtml(preprocess.kernel_size || 7)}, ${escapeHtml(preprocess.sigma || 1)}) 只讀</code>
                         <label class="within-spec-param-field">
+                            mode=<select class="within-spec-param-select" onchange="updateWithinSpecDotDetection('segmentation_method', this.value)">
+                                ${[
+                                    ['background_diff', 'background_diff'],
+                                    ['hysteresis', 'hysteresis'],
+                                    ['morph_hat', 'morph_hat'],
+                                    ['adaptive_mean', 'adaptive_mean'],
+                                    ['halo', 'halo'],
+                                    ['auto', 'auto'],
+                                    ['off', 'OFF'],
+                                ].map(([method, label]) =>
+                                    `<option value="${method}" ${(d.segmentation_method || 'background_diff') === method ? 'selected' : ''}>${label}</option>`
+                                ).join('')}
+                            </select>
+                        </label>
+                        <label class="within-spec-param-field">
                             diff=<input class="within-spec-param-input" type="number" min="0" step="1"
                                 value="${formatWithinSpecNumber(d.diff_threshold, 4)}"
                                 oninput="updateWithinSpecDotDetection('diff_threshold', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            low=<input class="within-spec-param-input" type="number" min="0" step="1"
+                                value="${formatWithinSpecNumber(d.hysteresis_low_threshold, 4)}"
+                                oninput="updateWithinSpecDotDetection('hysteresis_low_threshold', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            high=<input class="within-spec-param-input" type="number" min="0" step="1"
+                                value="${formatWithinSpecNumber(d.hysteresis_high_threshold, 8)}"
+                                oninput="updateWithinSpecDotDetection('hysteresis_high_threshold', this.value)">
                         </label>
                         <label class="within-spec-param-field">
                             bg=<input class="within-spec-param-input" type="number" min="1" step="2"
@@ -2180,8 +2283,18 @@
                         </label>
                         <label class="within-spec-param-field">
                             open=<input class="within-spec-param-input" type="number" min="0" step="1"
-                                value="${formatWithinSpecNumber(d.morph_open, 2)}"
+                                value="${formatWithinSpecNumber(d.morph_open, 0)}"
                                 oninput="updateWithinSpecDotDetection('morph_open', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            aspect=<input class="within-spec-param-input" type="number" min="0" max="1" step="0.05"
+                                value="${formatWithinSpecNumber(d.min_aspect_ratio, 0.45)}"
+                                oninput="updateWithinSpecDotDetection('min_aspect_ratio', this.value)">
+                        </label>
+                        <label class="within-spec-param-field">
+                            edge=<input class="within-spec-param-input" type="number" min="0" step="1"
+                                value="${formatWithinSpecNumber(d.edge_margin_px, 4)}"
+                                oninput="updateWithinSpecDotDetection('edge_margin_px', this.value)">
                         </label>
                         <label class="within-spec-param-field">
                             metric=<select class="within-spec-param-select" onchange="updateWithinSpecDotDetection('size_metric', this.value)">
@@ -2197,12 +2310,34 @@
                         </label>
                     </div>
                     <div class="within-spec-param-help">
-                        <div class="within-spec-param-help-title">metric 用來選擇點大小的量測方式；目前建議固定使用 <code>bbox_diagonal</code>。</div>
-                        <div class="within-spec-metric-help">
-                            <div><code>bbox_diagonal</code>：用偵測框對角線，較保守。</div>
-                            <div><code>bbox_max</code>：用偵測框寬或高中較大的邊。</div>
-                            <div><code>equivalent</code>：用面積換算等效圓直徑。</div>
-                            <div><code>enclosing</code>：用輪廓外接圓直徑，對不規則形狀較敏感。</div>
+                        <div class="within-spec-help-header">
+                            <span class="within-spec-help-kicker">參數說明</span>
+                            <span>mode 決定 mask 產生方式；metric 決定點大小的量測方式。</span>
+                        </div>
+                        <div class="within-spec-help-layout">
+                            <div class="within-spec-help-group">
+                                <div class="within-spec-help-group-title">Mask 模式</div>
+                                <div class="within-spec-help-list">
+                                    <div class="within-spec-help-item"><code>background_diff</code><span>現行模式，局部背景差分後用 <code>diff</code> 單一門檻產生 mask。</span></div>
+                                    <div class="within-spec-help-item"><code>hysteresis</code><span>雙門檻模式，<code>high</code> 抓確定核心，<code>low</code> 補回與核心連通的低對比邊界。</span></div>
+                                    <div class="within-spec-help-item"><code>morph_hat</code><span>形態學模式，黑點用 black-hat、白點用 top-hat；適合低對比點與週期性網格背景。</span></div>
+                                    <div class="within-spec-help-item"><code>adaptive_mean</code><span>自適應均值二值化；<code>bg</code> 是局部視窗大小，<code>diff</code> 是相對局部均值的偏移量。</span></div>
+                                    <div class="within-spec-help-item"><code>halo</code><span>白點模式專用，以黑點中心為 seed 量測周圍淡白光暈/白丸範圍。</span></div>
+                                    <div class="within-spec-help-item"><code>auto</code><span>自動比較背景差、雙門檻、自適應均值與白丸候選，選擇最可信且尺寸最大的結果。</span></div>
+                                    <div class="within-spec-help-item"><code>OFF</code><span>關閉規格內判定；推論原始 AI=NG 時不會因規格內規則轉為 OK-i。</span></div>
+                                    <div class="within-spec-help-item"><code>aspect</code><span>候選框短邊/長邊下限，用來排除細長條紋；0 表示不過濾。</span></div>
+                                    <div class="within-spec-help-item"><code>edge</code><span>排除距離影像邊界太近的 component，降低邊界亮暗帶干擾。</span></div>
+                                </div>
+                            </div>
+                            <div class="within-spec-help-group">
+                                <div class="within-spec-help-group-title">尺寸量測</div>
+                                <div class="within-spec-help-list">
+                                    <div class="within-spec-help-item"><code>bbox_diagonal</code><span>用偵測框對角線，較保守。</span></div>
+                                    <div class="within-spec-help-item"><code>bbox_max</code><span>用偵測框寬或高中較大的邊。</span></div>
+                                    <div class="within-spec-help-item"><code>equivalent</code><span>用面積換算等效圓直徑。</span></div>
+                                    <div class="within-spec-help-item"><code>enclosing</code><span>用輪廓外接圓直徑，對不規則形狀較敏感。</span></div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                     <div class="within-spec-actions">
@@ -2301,6 +2436,11 @@
             machineCfg.dot_detection[field] = allowed.includes(rawValue) ? rawValue : 'bbox_diagonal';
             return;
         }
+        if (field === 'segmentation_method') {
+            const allowed = ['background_diff', 'hysteresis', 'morph_hat', 'adaptive_mean', 'halo', 'auto', 'off'];
+            machineCfg.dot_detection[field] = allowed.includes(rawValue) ? rawValue : 'background_diff';
+            return;
+        }
         const n = Number(rawValue);
         if (!Number.isFinite(n)) {
             machineCfg.dot_detection[field] = 0;
@@ -2311,7 +2451,15 @@
             machineCfg.dot_detection[field] = kernel % 2 === 0 ? kernel + 1 : kernel;
             return;
         }
-        const integerFields = new Set(['diff_threshold', 'min_area_px', 'max_area_px', 'morph_open']);
+        const integerFields = new Set([
+            'diff_threshold',
+            'hysteresis_low_threshold',
+            'hysteresis_high_threshold',
+            'min_area_px',
+            'max_area_px',
+            'morph_open',
+            'edge_margin_px',
+        ]);
         machineCfg.dot_detection[field] = integerFields.has(field) ? Math.max(0, Math.round(n)) : Math.max(0, n);
     }
 

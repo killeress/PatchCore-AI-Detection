@@ -205,6 +205,11 @@ def _detect_dot_components(
     size_metric: str,
     unit_per_px: float,
     defect_threshold: float,
+    min_aspect_ratio: float = 0.0,
+    edge_margin: int = 0,
+    segmentation_method: str = "background_diff",
+    hysteresis_low_threshold: Optional[int] = None,
+    hysteresis_high_threshold: Optional[int] = None,
     include_visuals: bool = True,
 ) -> dict:
     """Detect dot-like dark/bright components and measure their visible size."""
@@ -225,8 +230,57 @@ def _detect_dot_components(
     else:
         diff = cv2.subtract(bg, gray)
 
+    segmentation_method = str(segmentation_method or "background_diff").strip().lower()
+    if segmentation_method not in ("background_diff", "hysteresis", "morph_hat", "adaptive_mean"):
+        segmentation_method = "background_diff"
+
+    if segmentation_method == "morph_hat":
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (background_kernel, background_kernel),
+        )
+        if polarity == "white":
+            bg = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
+            diff = cv2.subtract(gray, bg)
+        else:
+            bg = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+            diff = cv2.subtract(bg, gray)
+
     diff_threshold = max(0, int(diff_threshold))
-    mask = (diff >= diff_threshold).astype("uint8") * 255
+    if segmentation_method == "adaptive_mean":
+        low_threshold = diff_threshold
+        high_threshold = diff_threshold
+        threshold_type = cv2.THRESH_BINARY if polarity == "white" else cv2.THRESH_BINARY_INV
+        adaptive_c = -diff_threshold if polarity == "white" else diff_threshold
+        mask = cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_MEAN_C,
+            threshold_type,
+            background_kernel,
+            adaptive_c,
+        )
+    elif segmentation_method in ("hysteresis", "morph_hat"):
+        high_threshold = diff_threshold if hysteresis_high_threshold is None else int(hysteresis_high_threshold)
+        low_threshold = diff_threshold if hysteresis_low_threshold is None else int(hysteresis_low_threshold)
+        low_threshold = max(0, low_threshold)
+        high_threshold = max(low_threshold, max(0, high_threshold))
+
+        low_mask = (diff >= low_threshold).astype("uint8") * 255
+        high_mask = (diff >= high_threshold).astype("uint8") * 255
+        low_count, low_labels = cv2.connectedComponents(low_mask, 8)
+        if low_count <= 1 or not np.any(high_mask):
+            mask = np.zeros_like(low_mask)
+        else:
+            keep_labels = np.unique(low_labels[high_mask > 0])
+            keep_labels = keep_labels[keep_labels != 0]
+            mask = np.zeros_like(low_mask)
+            if keep_labels.size:
+                mask[np.isin(low_labels, keep_labels)] = 255
+    else:
+        low_threshold = diff_threshold
+        high_threshold = diff_threshold
+        mask = (diff >= diff_threshold).astype("uint8") * 255
 
     morph_open = int(morph_open or 0)
     if morph_open > 1:
@@ -238,6 +292,8 @@ def _detect_dot_components(
     max_area = int(max_area or 0)
     if max_area <= 0:
         max_area = gray.shape[0] * gray.shape[1]
+    min_aspect_ratio = max(0.0, float(min_aspect_ratio or 0.0))
+    edge_margin = max(0, int(edge_margin or 0))
 
     candidates = []
     calibrated = unit_per_px > 0
@@ -245,6 +301,18 @@ def _detect_dot_components(
         x, y, w, h, area = [int(v) for v in stats[label]]
         if area < min_area or area > max_area:
             continue
+        bbox_max = float(max(w, h))
+        aspect_ratio = float(min(w, h) / bbox_max) if bbox_max > 0 else 0.0
+        if min_aspect_ratio > 0 and aspect_ratio < min_aspect_ratio:
+            continue
+        if edge_margin > 0:
+            if (
+                x < edge_margin
+                or y < edge_margin
+                or x + w > gray.shape[1] - edge_margin
+                or y + h > gray.shape[0] - edge_margin
+            ):
+                continue
 
         component_labels = labels[y:y + h, x:x + w]
         component_mask = (component_labels == label).astype("uint8") * 255
@@ -255,8 +323,6 @@ def _detect_dot_components(
             _, radius = cv2.minEnclosingCircle(contour)
             enclosing_diameter = float(radius * 2.0)
 
-        bbox_max = float(max(w, h))
-        aspect_ratio = float(min(w, h) / bbox_max) if bbox_max > 0 else 0.0
         equivalent_diameter = float((4.0 * area / np.pi) ** 0.5)
         bbox_diagonal = float(np.hypot(w, h))
         if size_metric == "equivalent":
@@ -332,6 +398,12 @@ def _detect_dot_components(
         "mask": mask,
         "candidates": candidates,
         "calibrated": calibrated,
+        "segmentation_method": segmentation_method,
+        "thresholds": {
+            "diff_threshold": diff_threshold,
+            "hysteresis_low_threshold": low_threshold,
+            "hysteresis_high_threshold": high_threshold,
+        },
     }
     if include_visuals:
         diff_norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
@@ -341,6 +413,308 @@ def _detect_dot_components(
             "mask_color": cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR),
         })
     return result
+
+
+def _detect_white_halo_components(
+    image_bgr,
+    *,
+    diff_threshold: int,
+    background_kernel: int,
+    min_area: int,
+    max_area: int,
+    morph_open: int,
+    size_metric: str,
+    unit_per_px: float,
+    defect_threshold: float,
+    min_aspect_ratio: float = 0.0,
+    edge_margin: int = 0,
+    include_visuals: bool = True,
+) -> dict:
+    """Detect broad bright halo around the strongest dark seed."""
+    import cv2
+    import numpy as np
+
+    dark = _detect_dot_components(
+        image_bgr,
+        polarity="black",
+        diff_threshold=max(4, int(diff_threshold)),
+        background_kernel=background_kernel,
+        min_area=5,
+        max_area=max_area,
+        morph_open=0,
+        size_metric=size_metric,
+        unit_per_px=unit_per_px,
+        defect_threshold=defect_threshold,
+        min_aspect_ratio=max(0.45, min_aspect_ratio),
+        edge_margin=edge_margin,
+        include_visuals=False,
+    )
+    if image_bgr.ndim == 2:
+        gray = image_bgr
+        overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) if include_visuals else None
+    else:
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        overlay = image_bgr.copy() if include_visuals else None
+
+    blank = np.zeros(gray.shape, dtype=np.uint8)
+    if not dark["candidates"]:
+        result = {
+            "gray": gray,
+            "diff": blank,
+            "mask": blank,
+            "candidates": [],
+            "calibrated": unit_per_px > 0,
+            "segmentation_method": "halo",
+            "thresholds": {
+                "diff_threshold": int(diff_threshold),
+                "hysteresis_low_threshold": int(diff_threshold),
+                "hysteresis_high_threshold": int(diff_threshold),
+            },
+        }
+        if include_visuals:
+            result.update({
+                "overlay": overlay,
+                "diff_color": cv2.cvtColor(blank, cv2.COLOR_GRAY2BGR),
+                "mask_color": cv2.cvtColor(blank, cv2.COLOR_GRAY2BGR),
+            })
+        return result
+
+    seed = dark["candidates"][0]
+    cx = float(seed["center_x"])
+    cy = float(seed["center_y"])
+    yy, xx = np.ogrid[:gray.shape[0], :gray.shape[1]]
+    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+    outer_radius = max(18.0, min(96.0, float(max(seed["w"], seed["h"])) * 8.0))
+    inner_radius = max(2.0, float(max(seed["w"], seed["h"])) * 0.7)
+    search_mask = (dist <= outer_radius) & (dist >= inner_radius)
+    background_mask = (dist > outer_radius * 0.75) & (dist <= outer_radius)
+    if not np.any(search_mask) or not np.any(background_mask):
+        background_level = float(np.median(gray))
+    else:
+        background_level = float(np.median(gray[background_mask]))
+    halo_threshold = int(round(background_level + max(1, int(diff_threshold))))
+    mask = np.zeros_like(gray, dtype=np.uint8)
+    mask[search_mask & (gray >= halo_threshold)] = 255
+    if morph_open > 1:
+        kernel = np.ones((int(morph_open), int(morph_open)), dtype=np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+    min_area = max(1, int(min_area))
+    max_area = int(max_area or 0)
+    if max_area <= 0:
+        max_area = gray.shape[0] * gray.shape[1]
+    min_aspect_ratio = max(0.0, float(min_aspect_ratio or 0.0))
+    edge_margin = max(0, int(edge_margin or 0))
+    calibrated = unit_per_px > 0
+    candidates = []
+    diff = np.zeros_like(gray, dtype=np.uint8)
+    brighter = gray.astype(np.int16) - int(round(background_level))
+    diff[brighter > 0] = np.clip(brighter[brighter > 0], 0, 255).astype(np.uint8)
+
+    for label in range(1, num_labels):
+        x, y, w, h, area = [int(v) for v in stats[label]]
+        if area < min_area or area > max_area:
+            continue
+        if not (x <= cx <= x + w and y <= cy <= y + h):
+            continue
+        bbox_max = float(max(w, h))
+        aspect_ratio = float(min(w, h) / bbox_max) if bbox_max > 0 else 0.0
+        if min_aspect_ratio > 0 and aspect_ratio < min_aspect_ratio:
+            continue
+        if edge_margin > 0:
+            if (
+                x < edge_margin
+                or y < edge_margin
+                or x + w > gray.shape[1] - edge_margin
+                or y + h > gray.shape[0] - edge_margin
+            ):
+                continue
+
+        component_labels = labels[y:y + h, x:x + w]
+        component_mask = (component_labels == label).astype("uint8") * 255
+        contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        enclosing_diameter = float(max(w, h))
+        if contours:
+            contour = max(contours, key=cv2.contourArea)
+            _, radius = cv2.minEnclosingCircle(contour)
+            enclosing_diameter = float(radius * 2.0)
+
+        equivalent_diameter = float((4.0 * area / np.pi) ** 0.5)
+        bbox_diagonal = float(np.hypot(w, h))
+        if size_metric == "equivalent":
+            size_px = equivalent_diameter
+            size_mode = "equivalent"
+        elif size_metric == "enclosing":
+            size_px = enclosing_diameter
+            size_mode = "enclosing"
+        elif size_metric == "bbox_diagonal":
+            size_px = bbox_diagonal
+            size_mode = "bbox_diagonal"
+        else:
+            size_px = bbox_max
+            size_mode = "bbox_max"
+
+        size_units = float(size_px * unit_per_px) if calibrated else None
+        component_values = gray[y:y + h, x:x + w][component_mask > 0]
+        candidates.append({
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+            "area_px": area,
+            "center_x": round(float(centroids[label][0]), 2),
+            "center_y": round(float(centroids[label][1]), 2),
+            "aspect_ratio": round(aspect_ratio, 3),
+            "bbox_max_diameter_px": round(bbox_max, 2),
+            "bbox_diagonal_px": round(bbox_diagonal, 2),
+            "equivalent_diameter_px": round(equivalent_diameter, 2),
+            "enclosing_diameter_px": round(enclosing_diameter, 2),
+            "size_mode": size_mode,
+            "size_px": round(float(size_px), 2),
+            "size_units": round(size_units, 4) if size_units is not None else None,
+            "size_mm": round(size_units, 4) if size_units is not None else None,
+            "max_diff": int(max(0, int(component_values.max()) - int(round(background_level)))),
+            "mean_diff": round(float(component_values.mean() - background_level), 2),
+            "halo_seed_x": round(cx, 2),
+            "halo_seed_y": round(cy, 2),
+            "is_defect": bool(calibrated and size_units >= defect_threshold),
+        })
+
+    candidates.sort(key=lambda c: (c["is_defect"], c["size_px"]), reverse=True)
+    for idx, candidate in enumerate(candidates, 1):
+        candidate["id"] = idx
+        if not include_visuals:
+            continue
+        color = (0, 0, 255) if candidate["is_defect"] else (0, 200, 0)
+        x, y, w, h = candidate["x"], candidate["y"], candidate["w"], candidate["h"]
+        cv2.rectangle(overlay, (x, y), (x + w, y + h), color, 1)
+        cv2.circle(overlay, (int(round(cx)), int(round(cy))), 3, (255, 0, 0), -1)
+        cv2.putText(overlay, f"#{idx} {candidate['size_px']:.1f}px", (x, max(12, y - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+
+    result = {
+        "gray": gray,
+        "diff": diff,
+        "mask": mask,
+        "candidates": candidates,
+        "calibrated": calibrated,
+        "segmentation_method": "halo",
+        "thresholds": {
+            "diff_threshold": int(diff_threshold),
+            "hysteresis_low_threshold": int(diff_threshold),
+            "hysteresis_high_threshold": int(diff_threshold),
+        },
+    }
+    if include_visuals:
+        diff_norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
+        result.update({
+            "overlay": overlay,
+            "diff_color": cv2.applyColorMap(diff_norm.astype("uint8"), cv2.COLORMAP_JET),
+            "mask_color": cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR),
+        })
+    return result
+
+
+def _detect_dot_components_auto(
+    image_bgr,
+    *,
+    polarity: str,
+    segmentation_method: str,
+    diff_threshold: int,
+    background_kernel: int,
+    min_area: int,
+    max_area: int,
+    morph_open: int,
+    size_metric: str,
+    unit_per_px: float,
+    defect_threshold: float,
+    min_aspect_ratio: float = 0.0,
+    edge_margin: int = 0,
+    hysteresis_low_threshold: Optional[int] = None,
+    hysteresis_high_threshold: Optional[int] = None,
+    include_visuals: bool = True,
+) -> dict:
+    """Select the best dot detector for the configured mode."""
+    mode = str(segmentation_method or "background_diff").strip().lower()
+    common = {
+        "diff_threshold": diff_threshold,
+        "background_kernel": background_kernel,
+        "min_area": min_area,
+        "max_area": max_area,
+        "morph_open": morph_open,
+        "size_metric": size_metric,
+        "unit_per_px": unit_per_px,
+        "defect_threshold": defect_threshold,
+        "min_aspect_ratio": min_aspect_ratio,
+        "edge_margin": edge_margin,
+        "include_visuals": include_visuals,
+    }
+
+    if polarity == "white" and mode == "halo":
+        return _detect_white_halo_components(image_bgr, **common)
+    if mode != "auto":
+        return _detect_dot_components(
+            image_bgr,
+            polarity=polarity,
+            segmentation_method=mode,
+            hysteresis_low_threshold=hysteresis_low_threshold,
+            hysteresis_high_threshold=hysteresis_high_threshold,
+            **common,
+        )
+
+    candidates = []
+    base_modes = ["background_diff", "hysteresis", "adaptive_mean"]
+    if polarity == "black":
+        base_modes.append("morph_hat")
+    for candidate_mode in base_modes:
+        detected = _detect_dot_components(
+            image_bgr,
+            polarity=polarity,
+            segmentation_method=candidate_mode,
+            hysteresis_low_threshold=hysteresis_low_threshold,
+            hysteresis_high_threshold=hysteresis_high_threshold,
+            **common,
+        )
+        candidates.append(detected)
+
+    if polarity == "white":
+        halo = _detect_white_halo_components(
+            image_bgr,
+            diff_threshold=max(1, int(diff_threshold // 2) if diff_threshold > 2 else int(diff_threshold)),
+            background_kernel=background_kernel,
+            min_area=max(min_area, 50),
+            max_area=max_area,
+            morph_open=morph_open,
+            size_metric=size_metric,
+            unit_per_px=unit_per_px,
+            defect_threshold=defect_threshold,
+            min_aspect_ratio=min(min_aspect_ratio, 0.25) if min_aspect_ratio > 0 else 0.25,
+            edge_margin=edge_margin,
+            include_visuals=include_visuals,
+        )
+        candidates.append(halo)
+
+    def score(result: Dict[str, Any]) -> Tuple[int, float, int]:
+        top = (result.get("candidates") or [{}])[0]
+        return (
+            1 if top.get("is_defect") else 0,
+            float(top.get("size_px") or 0.0),
+            len(result.get("candidates") or []),
+        )
+
+    best = max(candidates, key=score)
+    best["auto_candidates"] = [
+        {
+            "segmentation_method": item.get("segmentation_method", ""),
+            "count": len(item.get("candidates") or []),
+            "max_size_px": max((float(c.get("size_px") or 0.0) for c in item.get("candidates") or []), default=0.0),
+            "max_size_mm": max((float(c.get("size_mm") or 0.0) for c in item.get("candidates") or []), default=0.0),
+            "defect_count": sum(1 for c in item.get("candidates") or [] if c.get("is_defect")),
+        }
+        for item in candidates
+    ]
+    best["segmentation_method"] = f"auto:{best.get('segmentation_method', '')}"
+    return best
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -537,17 +911,22 @@ def _save_within_spec_dot_visuals(
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     prefix = f"within_spec_{safe_image}_tile{safe_tile}_{chosen['dot_type']}_{ts}"
 
-    detected = _detect_dot_components(
+    detected = _detect_dot_components_auto(
         processed_crop,
         polarity=chosen["polarity"],
+        segmentation_method=str(dot_cfg.get("segmentation_method") or "background_diff"),
         diff_threshold=_as_int(dot_cfg.get("diff_threshold"), 4),
         background_kernel=_odd_kernel(_as_int(dot_cfg.get("background_kernel"), 33)),
         min_area=max(1, _as_int(dot_cfg.get("min_area_px"), 2)),
         max_area=max(0, _as_int(dot_cfg.get("max_area_px"), 50000)),
-        morph_open=max(0, _as_int(dot_cfg.get("morph_open"), 2)),
+        morph_open=max(0, _as_int(dot_cfg.get("morph_open"), 0)),
         size_metric=str(dot_cfg.get("size_metric") or "bbox_diagonal"),
         unit_per_px=max(0.0, _as_float(dot_cfg.get("unit_per_px"), DOT_RULER_MM_PER_PX)),
         defect_threshold=chosen["threshold_mm"],
+        min_aspect_ratio=max(0.0, _as_float(dot_cfg.get("min_aspect_ratio"), 0.45)),
+        edge_margin=max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
+        hysteresis_low_threshold=_as_int(dot_cfg.get("hysteresis_low_threshold"), 4),
+        hysteresis_high_threshold=_as_int(dot_cfg.get("hysteresis_high_threshold"), 8),
         include_visuals=True,
     )
 
@@ -569,6 +948,8 @@ def _save_within_spec_dot_visuals(
         "tile_id": tile_id,
         "dot_type": chosen["dot_type"],
         "dot_label": chosen["label"],
+        "segmentation_method": detected.get("segmentation_method", ""),
+        "auto_candidates": detected.get("auto_candidates", []),
         "crop_box": crop_box,
         "count": len(detected["candidates"]),
         "max_size_mm": max((_as_float(c.get("size_mm"), 0.0) for c in detected["candidates"]), default=0.0),
@@ -632,6 +1013,14 @@ def _evaluate_within_spec_suggestion_detail(
     screens = machine_rules.get("screens") or {}
     dot_cfg = machine_rules.get("dot_detection") or {}
     preprocess_params = dot_cfg.get("preprocess_params") if isinstance(dot_cfg.get("preprocess_params"), dict) else DOT_PREPROCESS_PARAMS
+    effective_segmentation_method = str(dot_cfg.get("segmentation_method") or "background_diff").strip().lower()
+    if effective_segmentation_method not in ("background_diff", "hysteresis", "morph_hat", "adaptive_mean", "halo", "auto", "off"):
+        effective_segmentation_method = "background_diff"
+    effective_hysteresis_low = max(0, _as_int(dot_cfg.get("hysteresis_low_threshold"), 4))
+    effective_hysteresis_high = max(
+        effective_hysteresis_low,
+        max(0, _as_int(dot_cfg.get("hysteresis_high_threshold"), 8)),
+    )
     result["parameter_snapshot"] = {
         "captured_at": datetime.now().isoformat(timespec="seconds"),
         "candidate_keys": machine_candidates,
@@ -643,10 +1032,15 @@ def _evaluate_within_spec_suggestion_detail(
             "raw": _json_safe_snapshot(dot_cfg),
             "effective": {
                 "diff_threshold": _as_int(dot_cfg.get("diff_threshold"), 4),
+                "segmentation_method": effective_segmentation_method,
+                "hysteresis_low_threshold": effective_hysteresis_low,
+                "hysteresis_high_threshold": effective_hysteresis_high,
                 "background_kernel": _odd_kernel(_as_int(dot_cfg.get("background_kernel"), 33)),
                 "min_area_px": max(1, _as_int(dot_cfg.get("min_area_px"), 2)),
                 "max_area_px": max(0, _as_int(dot_cfg.get("max_area_px"), 50000)),
-                "morph_open": max(0, _as_int(dot_cfg.get("morph_open"), 2)),
+                "morph_open": max(0, _as_int(dot_cfg.get("morph_open"), 0)),
+                "min_aspect_ratio": max(0.0, _as_float(dot_cfg.get("min_aspect_ratio"), 0.45)),
+                "edge_margin_px": max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
                 "size_metric": str(dot_cfg.get("size_metric") or "bbox_diagonal"),
                 "unit_per_px": max(0.0, _as_float(dot_cfg.get("unit_per_px"), DOT_RULER_MM_PER_PX)),
             },
@@ -657,6 +1051,9 @@ def _evaluate_within_spec_suggestion_detail(
         },
         "screen_rules_used": {},
     }
+    if effective_segmentation_method == "off":
+        add_step("規格內判定已關閉，停止判定", segmentation_method=effective_segmentation_method)
+        return result
     if not screens:
         add_step("找不到 screen 規則，停止判定", machine=machine_key or "default")
         return result
@@ -753,17 +1150,22 @@ def _evaluate_within_spec_suggestion_detail(
                     )
                     continue
 
-                detected = _detect_dot_components(
+                detected = _detect_dot_components_auto(
                     processed_crop,
                     polarity=polarity,
+                    segmentation_method=str(dot_cfg.get("segmentation_method") or "background_diff"),
                     diff_threshold=_as_int(dot_cfg.get("diff_threshold"), 4),
                     background_kernel=_odd_kernel(_as_int(dot_cfg.get("background_kernel"), 33)),
                     min_area=max(1, _as_int(dot_cfg.get("min_area_px"), 2)),
                     max_area=max(0, _as_int(dot_cfg.get("max_area_px"), 50000)),
-                    morph_open=max(0, _as_int(dot_cfg.get("morph_open"), 2)),
+                    morph_open=max(0, _as_int(dot_cfg.get("morph_open"), 0)),
                     size_metric=str(dot_cfg.get("size_metric") or "bbox_diagonal"),
                     unit_per_px=max(0.0, _as_float(dot_cfg.get("unit_per_px"), DOT_RULER_MM_PER_PX)),
                     defect_threshold=threshold_mm,
+                    min_aspect_ratio=max(0.0, _as_float(dot_cfg.get("min_aspect_ratio"), 0.45)),
+                    edge_margin=max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
+                    hysteresis_low_threshold=_as_int(dot_cfg.get("hysteresis_low_threshold"), 4),
+                    hysteresis_high_threshold=_as_int(dot_cfg.get("hysteresis_high_threshold"), 8),
                     include_visuals=False,
                 )
                 candidates = detected["candidates"]
@@ -772,6 +1174,8 @@ def _evaluate_within_spec_suggestion_detail(
                     "dot_type": dot_type,
                     "polarity": polarity,
                     "label": label,
+                    "segmentation_method": detected.get("segmentation_method", ""),
+                    "auto_candidates": detected.get("auto_candidates", []),
                     "rule": rule,
                     "threshold_mm": threshold_mm,
                     "screen_limit": screen_limit,
@@ -795,6 +1199,7 @@ def _evaluate_within_spec_suggestion_detail(
                 d["dot_type"]: {
                     "count": d["count"],
                     "max_size_mm": round(float(d["max_size_mm"]), 4),
+                    "segmentation_method": d["segmentation_method"],
                 }
                 for d in detections
             }
@@ -836,6 +1241,8 @@ def _evaluate_within_spec_suggestion_detail(
                 "tile_id": tile.get("tile_id"),
                 "count": chosen["count"],
                 "max_size_mm": round(float(chosen["max_size_mm"]), 4),
+                "segmentation_method": chosen["segmentation_method"],
+                "auto_candidates": chosen["auto_candidates"],
                 "crop_box": crop_box,
             })
             visual = _save_within_spec_dot_visuals(
@@ -2993,6 +3400,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "aiOver": 0, "aiOverRate": 0,
                 "aiMiss": 0, "aiMissRate": 0,
                 "revival": 0, "revivalRate": 0,
+                "revivalWithinSpec": 0, "revivalWithinSpecRate": 0,
                 "combos": {}, "daily": {},
                 "missReviewStats": {
                     "total": 0, "reviewed": 0, "unreviewed": 0,
@@ -3015,6 +3423,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         aoiCorrect = aiCorrect = 0
         aoiOver = aiOver = aiMiss = 0
         revival = 0
+        revival_within_spec = 0
         combos = {}
         daily = {}
         manual_adjustments = 0
@@ -3032,7 +3441,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         for rec in records:
             eqp = rec["result_eqp"] or "OK"
-            ai = rec["result_ai"] or "OK"
+            raw_ai = rec["result_ai"] or "OK"
+            inference_ai = rec.get("inference_ai_judgment") or ""
+            ai = "OK" if raw_ai == "OK-i" else raw_ai
+            within_spec_converted_ok = raw_ai == "OK-i" or inference_ai == "OK-i"
             raw_ric = CAPIDatabase.parse_ric_judgment(rec.get("datastr", ""))
             review_cat = rec.get("review_category")
             manual_actual_ok = (
@@ -3054,7 +3466,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "pnl_id": rec["pnl_id"],
                 "mach_id": rec["mach_id"],
                 "result_eqp": eqp,
-                "result_ai": ai,
+                "result_ai": raw_ai,
+                "inference_ai_judgment": inference_ai,
+                "within_spec_converted_to_ok": within_spec_converted_ok,
                 "result_ric": rec["result_ric"],
                 "datastr": rec["datastr"] or "",
                 "actual_judgment": ric,
@@ -3146,6 +3560,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 aiMiss += 1
             if eqp == "NG" and ai == "OK" and ric == "OK":
                 revival += 1
+                if within_spec_converted_ok:
+                    revival_within_spec += 1
 
             combo = f"{eqp}/{ai}/{ric}"
             combos[combo] = combos.get(combo, 0) + 1
@@ -3155,7 +3571,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 daily[day] = {
                     "total": 0, "aoiCorrect": 0, "aiCorrect": 0,
                     "aiMiss": 0, "aiOver": 0, "aoiOver": 0,
-                    "ricMisjudge": 0,
+                    "ricMisjudge": 0, "withinSpecMisjudge": 0,
                 }
             daily[day]["total"] += 1
             if eqp == ric:
@@ -3170,12 +3586,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 daily[day]["aoiOver"] += 1
             if manual_actual_ok:
                 daily[day]["ricMisjudge"] += 1
+                if review_cat == "within_spec_misjudge":
+                    daily[day]["withinSpecMisjudge"] += 1
 
         aoiOK = total - aoiNG
         aoiOverRate = round(aoiOver / total * 100, 2) if total > 0 else 0
         aiOverRate = round(aiOver / total * 100, 2) if total > 0 else 0
         aiMissRate = round(aiMiss / total * 100, 2) if total > 0 else 0
         revivalRate = round(revival / aoiOver * 100, 2) if aoiOver > 0 else 0
+        revivalWithinSpecRate = round(revival_within_spec / revival * 100, 2) if revival > 0 else 0
 
         return {
             "total": total,
@@ -3185,6 +3604,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "aiOver": aiOver, "aiOverRate": aiOverRate,
             "aiMiss": aiMiss, "aiMissRate": aiMissRate,
             "revival": revival, "revivalRate": revivalRate,
+            "revivalWithinSpec": revival_within_spec,
+            "revivalWithinSpecRate": revivalWithinSpecRate,
             "combos": combos, "daily": daily,
             "missReviewStats": {
                 "total": miss_total,
@@ -5219,6 +5640,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """API: 點圖偵測實驗，量測黑點/白點在影像中的可見尺寸。"""
         import time as _time
         import cv2
+        import numpy as np
 
         data = self._read_json_body()
         if data is None:
@@ -5247,6 +5669,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "size_metric 必須是 bbox_diagonal、bbox_max、equivalent 或 enclosing"}, status=400)
             return
 
+        segmentation_method = (data.get("segmentation_method") or "background_diff").strip().lower()
+        if segmentation_method not in ("background_diff", "hysteresis", "morph_hat", "adaptive_mean", "halo", "auto", "off"):
+            self._send_json({"error": "segmentation_method 必須是 background_diff、hysteresis、morph_hat、adaptive_mean、halo、auto 或 off"}, status=400)
+            return
+
         def as_int(name, default):
             try:
                 return int(data.get(name, default))
@@ -5268,10 +5695,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return bool(value)
 
         diff_threshold = as_int("diff_threshold", 4)
+        hysteresis_low_threshold = max(0, as_int("hysteresis_low_threshold", 4))
+        hysteresis_high_threshold = max(
+            hysteresis_low_threshold,
+            max(0, as_int("hysteresis_high_threshold", 8)),
+        )
         background_kernel = _odd_kernel(as_int("background_kernel", 33))
         min_area = max(1, as_int("min_area", 2))
         max_area = max(0, as_int("max_area", 50000))
-        morph_open = max(0, as_int("morph_open", 2))
+        morph_open = max(0, as_int("morph_open", 0))
+        min_aspect_ratio = max(0.0, as_float("min_aspect_ratio", 0.45))
+        edge_margin = max(0, as_int("edge_margin", 4))
         use_default_calibration = as_bool("use_default_calibration", True)
         unit_per_px = max(0.0, as_float("unit_per_px", DOT_RULER_MM_PER_PX))
         if unit_per_px <= 0 and use_default_calibration:
@@ -5287,18 +5721,42 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             processed_image, preprocess_info = _preprocess_dot_image_for_detection(image)
 
-            detected = _detect_dot_components(
-                processed_image,
-                polarity=polarity,
-                diff_threshold=diff_threshold,
-                background_kernel=background_kernel,
-                min_area=min_area,
-                max_area=max_area,
-                morph_open=morph_open,
-                size_metric=size_metric,
-                unit_per_px=unit_per_px,
-                defect_threshold=defect_threshold,
-            )
+            if segmentation_method == "off":
+                blank = np.zeros(processed_image.shape[:2], dtype=np.uint8)
+                overlay = processed_image.copy()
+                if overlay.ndim == 2:
+                    overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
+                detected = {
+                    "overlay": overlay,
+                    "mask_color": cv2.cvtColor(blank, cv2.COLOR_GRAY2BGR),
+                    "diff_color": cv2.cvtColor(blank, cv2.COLOR_GRAY2BGR),
+                    "candidates": [],
+                    "calibrated": unit_per_px > 0,
+                    "segmentation_method": "off",
+                    "thresholds": {
+                        "diff_threshold": diff_threshold,
+                        "hysteresis_low_threshold": hysteresis_low_threshold,
+                        "hysteresis_high_threshold": hysteresis_high_threshold,
+                    },
+                }
+            else:
+                detected = _detect_dot_components_auto(
+                    processed_image,
+                    polarity=polarity,
+                    segmentation_method=segmentation_method,
+                    diff_threshold=diff_threshold,
+                    background_kernel=background_kernel,
+                    min_area=min_area,
+                    max_area=max_area,
+                    morph_open=morph_open,
+                    size_metric=size_metric,
+                    unit_per_px=unit_per_px,
+                    defect_threshold=defect_threshold,
+                    min_aspect_ratio=min_aspect_ratio,
+                    edge_margin=edge_margin,
+                    hysteresis_low_threshold=hysteresis_low_threshold,
+                    hysteresis_high_threshold=hysteresis_high_threshold,
+                )
 
             if CAPIWebHandler._debug_heatmap_dir is None:
                 CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
@@ -5331,7 +5789,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "image_path": str(image_path),
                 "image_shape": [int(image.shape[1]), int(image.shape[0])],
                 "polarity": polarity,
-                "method": "local_median_residual",
+                "method": "dot_detection",
+                "segmentation_method": detected.get("segmentation_method", segmentation_method),
                 "preprocess": preprocess_info,
                 "calibrated": detected["calibrated"],
                 "count": len(candidates),
@@ -5350,16 +5809,22 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 },
                 "processing_time": round(_time.time() - started, 3),
                 "params_used": {
+                    "segmentation_method": detected.get("segmentation_method", segmentation_method),
                     "diff_threshold": diff_threshold,
+                    "hysteresis_low_threshold": detected.get("thresholds", {}).get("hysteresis_low_threshold", hysteresis_low_threshold),
+                    "hysteresis_high_threshold": detected.get("thresholds", {}).get("hysteresis_high_threshold", hysteresis_high_threshold),
                     "background_kernel": background_kernel,
                     "min_area": min_area,
                     "max_area": max_area,
                     "morph_open": morph_open,
+                    "min_aspect_ratio": min_aspect_ratio,
+                    "edge_margin": edge_margin,
                     "size_metric": size_metric,
                     "unit_per_px": unit_per_px,
                     "defect_threshold": defect_threshold,
                     "use_default_calibration": use_default_calibration,
                 },
+                "auto_candidates": detected.get("auto_candidates", []),
                 "candidates": candidates[:300],
                 "source_url": "/api/debug/serve-image?path=" + urllib.parse.quote(str(image_path)),
                 "preprocessed_url": f"/debug/heatmaps/{preprocessed_filename}",
