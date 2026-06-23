@@ -412,6 +412,79 @@
         box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
     }
 
+    .dot-param-panel {
+        margin-top: 16px;
+        padding-top: 16px;
+        border-top: 1px solid var(--border);
+    }
+
+    .dot-param-head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+    }
+
+    .dot-param-title {
+        color: var(--text);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.92rem;
+        font-weight: 700;
+    }
+
+    .dot-param-note {
+        color: var(--text-muted);
+        font-size: 0.78rem;
+        margin-top: 4px;
+    }
+
+    .dot-param-sections {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 12px;
+    }
+
+    .dot-param-section {
+        background: rgba(15, 23, 42, 0.36);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px;
+    }
+
+    .dot-param-section.hidden {
+        display: none;
+    }
+
+    .dot-param-section h3 {
+        color: #93c5fd;
+        font-size: 0.84rem;
+        margin: 0 0 4px;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .dot-param-section p {
+        color: var(--text-muted);
+        font-size: 0.76rem;
+        line-height: 1.45;
+        margin: 0 0 12px;
+    }
+
+    .dot-param-section .coord-input-row {
+        gap: 10px;
+    }
+
+    .dot-param-section .coord-group {
+        min-width: 112px;
+    }
+
+    .dot-param-off-note {
+        color: var(--text-muted);
+        line-height: 1.55;
+        font-size: 0.85rem;
+    }
+
     .coord-result-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -1703,30 +1776,15 @@
                 </button>
             </div>
 
-            <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
-                <div class="coord-input-row">
-                    <div class="coord-group">
-                        <label for="dot-defect-threshold">規格門檻 mm</label>
-                        <input type="number" id="dot-defect-threshold" value="0.3" min="0" step="0.01"
-                            title="目前只用於 debug 標示超過門檻，尚未接正式規格判定">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-unit-per-px">點規比例 mm/px</label>
-                        <input type="number" id="dot-unit-per-px" value="{{ dot_default_mm_per_px }}" min="0" step="0.0001"
-                            style="color:var(--accent);"
-                            title="預設 0.0245 mm/px，可自行修改測試">
-                    </div>
-                    <input type="hidden" id="dot-size-metric" value="bbox_diagonal">
-                    <input type="hidden" id="dot-unit-label" value="mm">
-                    <div class="coord-group" style="min-width:260px;">
-                        <label>比例來源</label>
-                        <div style="height:42px; display:flex; align-items:center; padding:0 12px; border:1px solid var(--border); border-radius:8px; color:var(--text-muted); background:var(--surface); font-size:0.82rem;">
-                            尺寸 mm = BBox 對角線 √(W²+H²) × mm/px
-                        </div>
+            <div class="dot-param-panel">
+                <div class="dot-param-head">
+                    <div>
+                        <div class="dot-param-title">點圖偵測參數</div>
+                        <div class="dot-param-note">依 mode 顯示實際會用到的參數；hidden 欄位仍保留目前值供切換回來使用。</div>
                     </div>
                     <div class="coord-group">
                         <label for="dot-segmentation-method">偵測模式</label>
-                        <select id="dot-segmentation-method" title="同步規格內判定 mode：background_diff / hysteresis / morph_hat / adaptive_mean / halo / auto / OFF">
+                        <select id="dot-segmentation-method" onchange="updateDotModeParams()" title="同步規格內判定 mode：background_diff / hysteresis / morph_hat / adaptive_mean / halo / auto / OFF">
                             <option value="background_diff" selected>background_diff</option>
                             <option value="hysteresis">hysteresis</option>
                             <option value="morph_hat">morph_hat</option>
@@ -1736,93 +1794,150 @@
                             <option value="off">OFF</option>
                         </select>
                     </div>
-                    <div class="coord-group">
-                        <label for="dot-diff-threshold">diff 閾值</label>
-                        <input type="number" id="dot-diff-threshold" value="7" min="0" max="255" step="1"
-                            title="局部背景差異閾值；小黑點預設 7">
+                </div>
+
+                <input type="hidden" id="dot-size-metric" value="bbox_diagonal">
+                <input type="hidden" id="dot-unit-label" value="mm">
+
+                <div class="dot-param-sections">
+                    <div class="dot-param-section" data-dot-modes="background_diff morph_hat adaptive_mean halo auto">
+                        <h3>背景 / 閾值</h3>
+                        <p>background_diff、adaptive_mean、halo 與 auto 會用 diff；bg kernel 用於局部背景或 adaptive 視窗。</p>
+                        <div class="coord-input-row">
+                            <div class="coord-group" data-dot-field-modes="background_diff adaptive_mean halo auto">
+                                <label for="dot-diff-threshold">diff 閾值</label>
+                                <input type="number" id="dot-diff-threshold" value="7" min="0" max="255" step="1"
+                                    title="局部背景差異閾值；小黑點預設 7">
+                            </div>
+                            <div class="coord-group" data-dot-field-modes="background_diff morph_hat adaptive_mean halo auto">
+                                <label for="dot-bg-kernel">背景 kernel</label>
+                                <input type="number" id="dot-bg-kernel" value="33" min="3" max="199" step="2"
+                                    title="背景估計或 adaptive 視窗 kernel，會自動修正為奇數">
+                            </div>
+                        </div>
                     </div>
-                    <div class="coord-group">
-                        <label for="dot-hysteresis-low">low 閾值</label>
-                        <input type="number" id="dot-hysteresis-low" value="2" min="0" max="255" step="1"
-                            title="hysteresis 模式使用：補回與 high 核心連通的低對比邊界">
+
+                    <div class="dot-param-section" data-dot-modes="hysteresis morph_hat auto">
+                        <h3>Hysteresis / Low-High</h3>
+                        <p>hysteresis V2 與 morph_hat 會用 low/high；auto 內的 hysteresis 候選也會使用這組 V2 參數。</p>
+                        <div class="coord-input-row">
+                            <div class="coord-group">
+                                <label for="dot-hysteresis-low">low 閾值</label>
+                                <input type="number" id="dot-hysteresis-low" value="2" min="0" max="255" step="1"
+                                    title="hysteresis/morph_hat 使用：補回與 high 核心連通的低對比邊界">
+                            </div>
+                            <div class="coord-group">
+                                <label for="dot-hysteresis-high">high 閾值</label>
+                                <input type="number" id="dot-hysteresis-high" value="4" min="0" max="255" step="1"
+                                    title="hysteresis/morph_hat 使用：確定 defect 核心門檻">
+                            </div>
+                            <div class="coord-group" data-dot-field-modes="hysteresis auto">
+                                <label for="dot-hysteresis-edge-width">edgeW %</label>
+                                <input type="number" id="dot-hysteresis-edge-width" value="3" min="0" max="50" step="0.5"
+                                    title="Group1 邊緣加嚴寬度百分比">
+                            </div>
+                            <div class="coord-group" data-dot-field-modes="hysteresis auto">
+                                <label for="dot-hysteresis-edge-extra">edge+</label>
+                                <input type="number" id="dot-hysteresis-edge-extra" value="2" min="0" max="255" step="1"
+                                    title="Group1 邊緣區域額外增加 high/low 門檻">
+                            </div>
+                            <div class="coord-group" data-dot-field-modes="hysteresis auto">
+                                <label for="dot-hysteresis-low2">low2 閾值</label>
+                                <input type="number" id="dot-hysteresis-low2" value="3" min="0" max="255" step="1"
+                                    title="Group2 low 閾值；Group1 無結果或過多時才試用">
+                            </div>
+                            <div class="coord-group" data-dot-field-modes="hysteresis auto">
+                                <label for="dot-hysteresis-high2">high2 閾值</label>
+                                <input type="number" id="dot-hysteresis-high2" value="4" min="0" max="255" step="1"
+                                    title="Group2 high 閾值；Group1 無結果或過多時才試用">
+                            </div>
+                            <div class="coord-group" data-dot-field-modes="hysteresis auto">
+                                <label for="dot-hysteresis-edge-width2">edgeW2 %</label>
+                                <input type="number" id="dot-hysteresis-edge-width2" value="9.5" min="0" max="50" step="0.5"
+                                    title="Group2 邊緣加嚴寬度百分比">
+                            </div>
+                            <div class="coord-group" data-dot-field-modes="hysteresis auto">
+                                <label for="dot-hysteresis-edge-extra2">edge+2</label>
+                                <input type="number" id="dot-hysteresis-edge-extra2" value="2" min="0" max="255" step="1"
+                                    title="Group2 邊緣區域額外增加 high/low 門檻">
+                            </div>
+                            <div class="coord-group" data-dot-field-modes="hysteresis auto">
+                                <label for="dot-hysteresis-switch-count">sw count</label>
+                                <input type="number" id="dot-hysteresis-switch-count" value="5" min="0" max="999" step="1"
+                                    title="Group1 候選數為 0 或大於此值時試 Group2">
+                            </div>
+                            <div class="coord-group" data-dot-field-modes="hysteresis auto">
+                                <label for="dot-hysteresis-second-max">max2 count</label>
+                                <input type="number" id="dot-hysteresis-second-max" value="5" min="0" max="999" step="1"
+                                    title="Group2 候選數不超過此值才採用 Group2">
+                            </div>
+                            <div class="coord-group" data-dot-field-modes="hysteresis auto">
+                                <label for="dot-hysteresis-edge-suppress">suppress %</label>
+                                <input type="number" id="dot-hysteresis-edge-suppress" value="0" min="0" max="50" step="0.1"
+                                    title="hysteresis 後處理排除外圈百分比，0 表示不排除">
+                            </div>
+                        </div>
                     </div>
-                    <div class="coord-group">
-                        <label for="dot-hysteresis-high">high 閾值</label>
-                        <input type="number" id="dot-hysteresis-high" value="4" min="0" max="255" step="1"
-                            title="hysteresis 模式使用：確定 defect 核心門檻">
+
+                    <div class="dot-param-section" data-dot-modes="background_diff hysteresis morph_hat adaptive_mean halo auto">
+                        <h3>候選過濾</h3>
+                        <p>mask 產生後共用的 component 過濾條件。</p>
+                        <div class="coord-input-row">
+                            <div class="coord-group">
+                                <label for="dot-min-area">最小面積 px</label>
+                                <input type="number" id="dot-min-area" value="2" min="1" max="10000" step="1">
+                            </div>
+                            <div class="coord-group">
+                                <label for="dot-max-area">最大面積 px</label>
+                                <input type="number" id="dot-max-area" value="50000" min="0" max="1000000" step="1">
+                            </div>
+                            <div class="coord-group">
+                                <label for="dot-morph-open">open kernel</label>
+                                <input type="number" id="dot-morph-open" value="0" min="0" max="15" step="1"
+                                    title=">1 時做 morphological opening 去除孤立雜訊">
+                            </div>
+                            <div class="coord-group">
+                                <label for="dot-min-aspect-ratio">aspect 下限</label>
+                                <input type="number" id="dot-min-aspect-ratio" value="0.45" min="0" max="1" step="0.05"
+                                    title="短邊/長邊下限；用來排除細長條紋，0 表示不過濾">
+                            </div>
+                            <div class="coord-group">
+                                <label for="dot-edge-margin">edge margin</label>
+                                <input type="number" id="dot-edge-margin" value="4" min="0" max="128" step="1"
+                                    title="排除貼近影像邊界的 component，0 表示不過濾">
+                            </div>
+                        </div>
                     </div>
-                    <div class="coord-group">
-                        <label for="dot-hysteresis-edge-width">edgeW %</label>
-                        <input type="number" id="dot-hysteresis-edge-width" value="3" min="0" max="50" step="0.5"
-                            title="Group1 邊緣加嚴寬度百分比">
+
+                    <div class="dot-param-section" data-dot-modes="background_diff hysteresis morph_hat adaptive_mean halo auto">
+                        <h3>尺寸換算</h3>
+                        <p>debug 標示是否超過規格門檻；正式規格內判定也使用同一個 mm/px 概念。</p>
+                        <div class="coord-input-row">
+                            <div class="coord-group">
+                                <label for="dot-defect-threshold">規格門檻 mm</label>
+                                <input type="number" id="dot-defect-threshold" value="0.3" min="0" step="0.01"
+                                    title="目前只用於 debug 標示超過門檻，尚未接正式規格判定">
+                            </div>
+                            <div class="coord-group">
+                                <label for="dot-unit-per-px">點規比例 mm/px</label>
+                                <input type="number" id="dot-unit-per-px" value="{{ dot_default_mm_per_px }}" min="0" step="0.0001"
+                                    style="color:var(--accent);"
+                                    title="預設 0.0245 mm/px，可自行修改測試">
+                            </div>
+                            <div class="coord-group" style="min-width:260px;">
+                                <label>比例來源</label>
+                                <div style="height:42px; display:flex; align-items:center; padding:0 12px; border:1px solid var(--border); border-radius:8px; color:var(--text-muted); background:var(--surface); font-size:0.82rem;">
+                                    尺寸 mm = BBox 對角線 √(W²+H²) × mm/px
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <div class="coord-group">
-                        <label for="dot-hysteresis-edge-extra">edge+</label>
-                        <input type="number" id="dot-hysteresis-edge-extra" value="2" min="0" max="255" step="1"
-                            title="Group1 邊緣區域額外增加 high/low 門檻">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-hysteresis-low2">low2 閾值</label>
-                        <input type="number" id="dot-hysteresis-low2" value="3" min="0" max="255" step="1"
-                            title="Group2 low 閾值；Group1 無結果或過多時才試用">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-hysteresis-high2">high2 閾值</label>
-                        <input type="number" id="dot-hysteresis-high2" value="4" min="0" max="255" step="1"
-                            title="Group2 high 閾值；Group1 無結果或過多時才試用">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-hysteresis-edge-width2">edgeW2 %</label>
-                        <input type="number" id="dot-hysteresis-edge-width2" value="9.5" min="0" max="50" step="0.5"
-                            title="Group2 邊緣加嚴寬度百分比">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-hysteresis-edge-extra2">edge+2</label>
-                        <input type="number" id="dot-hysteresis-edge-extra2" value="2" min="0" max="255" step="1"
-                            title="Group2 邊緣區域額外增加 high/low 門檻">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-hysteresis-switch-count">sw count</label>
-                        <input type="number" id="dot-hysteresis-switch-count" value="5" min="0" max="999" step="1"
-                            title="Group1 候選數為 0 或大於此值時試 Group2">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-hysteresis-second-max">max2 count</label>
-                        <input type="number" id="dot-hysteresis-second-max" value="5" min="0" max="999" step="1"
-                            title="Group2 候選數不超過此值才採用 Group2">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-hysteresis-edge-suppress">suppress %</label>
-                        <input type="number" id="dot-hysteresis-edge-suppress" value="0" min="0" max="50" step="0.1"
-                            title="hysteresis 後處理排除外圈百分比，0 表示不排除">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-bg-kernel">背景 kernel</label>
-                        <input type="number" id="dot-bg-kernel" value="33" min="3" max="199" step="2"
-                            title="median blur 背景估計 kernel，會自動修正為奇數">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-min-area">最小面積 px</label>
-                        <input type="number" id="dot-min-area" value="2" min="1" max="10000" step="1">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-max-area">最大面積 px</label>
-                        <input type="number" id="dot-max-area" value="50000" min="0" max="1000000" step="1">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-morph-open">open kernel</label>
-                        <input type="number" id="dot-morph-open" value="0" min="0" max="15" step="1"
-                            title=">1 時做 morphological opening 去除孤立雜訊">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-min-aspect-ratio">aspect 下限</label>
-                        <input type="number" id="dot-min-aspect-ratio" value="0.45" min="0" max="1" step="0.05"
-                            title="短邊/長邊下限；用來排除細長條紋，0 表示不過濾">
-                    </div>
-                    <div class="coord-group">
-                        <label for="dot-edge-margin">edge margin</label>
-                        <input type="number" id="dot-edge-margin" value="4" min="0" max="128" step="1"
-                            title="排除貼近影像邊界的 component，0 表示不過濾">
+
+                    <div class="dot-param-section" data-dot-modes="off">
+                        <h3>OFF</h3>
+                        <div class="dot-param-off-note">
+                            規格內判定關閉。debug 會輸出空 mask 與空候選點，不會執行點圖偵測參數。
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1890,6 +2005,7 @@
         if (e.key === 'Enter') runDotDetection();
     });
     populateDotSamples();
+    updateDotModeParams();
     updateLabParamVisibility();
 
     // 自動帶入 URL 的 ?path= 參數
@@ -2152,6 +2268,24 @@
         if (!threshold.value || threshold.value === '8' || threshold.value === '12') {
             threshold.value = '7';
         }
+    }
+
+    function dotModeMatches(modeList, mode) {
+        return String(modeList || '')
+            .split(/\s+/)
+            .filter(Boolean)
+            .includes(mode);
+    }
+
+    function updateDotModeParams() {
+        const modeEl = document.getElementById('dot-segmentation-method');
+        const mode = modeEl ? modeEl.value : 'background_diff';
+        document.querySelectorAll('[data-dot-modes]').forEach(section => {
+            section.classList.toggle('hidden', !dotModeMatches(section.dataset.dotModes, mode));
+        });
+        document.querySelectorAll('[data-dot-field-modes]').forEach(field => {
+            field.classList.toggle('hidden', !dotModeMatches(field.dataset.dotFieldModes, mode));
+        });
     }
 
     function computeDotCalibration() {
