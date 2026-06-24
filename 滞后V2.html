@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>滞后阈值异常检测（双参数组切换增强）</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #f5f5f5;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            padding: 24px;
+            max-width: 1300px;
+            width: 100%;
+        }
+        h1 {
+            margin-top: 0;
+            color: #333;
+            font-weight: 600;
+            font-size: 1.8em;
+            text-align: center;
+        }
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-top: -10px;
+            margin-bottom: 24px;
+        }
+        .canvas-panel {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+            margin-bottom: 24px;
+        }
+        .canvas-box {
+            flex: 1;
+            min-width: 280px;
+            text-align: center;
+            background: #fafafa;
+            border-radius: 12px;
+            padding: 12px;
+            border: 1px solid #eee;
+        }
+        .canvas-box h3 {
+            margin: 0 0 8px 0;
+            color: #555;
+            font-weight: 500;
+        }
+        canvas {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            background: #000;
+        }
+        .controls {
+            background: #f9f9f9;
+            border-radius: 12px;
+            padding: 16px 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            align-items: flex-end;
+            justify-content: center;
+            margin-bottom: 16px;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 140px;
+        }
+        .control-group label {
+            font-weight: 500;
+            font-size: 0.9em;
+            color: #444;
+            margin-bottom: 4px;
+            text-align: center;
+        }
+        .slider-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .slider-row button {
+            background: #e0e0e0;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            width: 32px;
+            height: 32px;
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #333;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s;
+            padding: 0;
+            line-height: 1;
+        }
+        .slider-row button:hover {
+            background: #d0d0d0;
+        }
+        .slider-row button:active {
+            background: #bdbdbd;
+        }
+        .slider-row input[type="range"] {
+            width: 100px;
+        }
+        .value-display {
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 2px 8px;
+            font-size: 0.85em;
+            color: #333;
+            text-align: center;
+            margin-top: 4px;
+            min-width: 40px;
+        }
+        .auto-bg-box {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #e8f5e9;
+            border-radius: 8px;
+            padding: 8px 14px;
+            font-weight: 500;
+            color: #2e7d32;
+        }
+        button#detectBtn {
+            background: #4f46e5;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 10px 24px;
+            font-weight: 600;
+            font-size: 1em;
+            cursor: pointer;
+            transition: background 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+        }
+        button#detectBtn:hover {
+            background: #4338ca;
+        }
+        button#detectBtn:active {
+            transform: scale(0.98);
+        }
+        .file-area {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        input[type="file"] {
+            font-size: 0.9em;
+        }
+        .coefficient-input {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 4px 8px;
+        }
+        .coefficient-input input {
+            width: 70px;
+            border: none;
+            font-size: 0.9em;
+            text-align: center;
+            outline: none;
+        }
+        .coefficient-input span {
+            font-size: 0.85em;
+            color: #888;
+        }
+        .params-section {
+            background: #f9f9f9;
+            border-radius: 12px;
+            padding: 12px 16px;
+            margin-bottom: 16px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            align-items: flex-end;
+            justify-content: center;
+        }
+        .params-section h4 {
+            width: 100%;
+            margin: 0 0 8px 0;
+            color: #555;
+            font-size: 1em;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 4px;
+        }
+        .switch-rule {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: #fff;
+            padding: 6px 12px;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+            flex-wrap: wrap;
+        }
+        .switch-rule input {
+            width: 60px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            text-align: center;
+            padding: 4px;
+        }
+        .stats-panel {
+            background: #f0f8ff;
+            border-radius: 12px;
+            padding: 12px 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 16px;
+            font-size: 0.95em;
+            color: #333;
+        }
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .color-swatch {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+            display: inline-block;
+        }
+        .table-wrapper {
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            margin-top: 10px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85em;
+            white-space: nowrap;
+        }
+        th, td {
+            padding: 6px 10px;
+            text-align: center;
+            border-bottom: 1px solid #eee;
+        }
+        th {
+            background: #f5f5f5;
+            position: sticky;
+            top: 0;
+            font-weight: 600;
+            color: #444;
+        }
+        tr:hover {
+            background: #fafafa;
+        }
+        .example-note {
+            color: #777;
+            font-size: 0.85em;
+            text-align: center;
+            margin-top: 8px;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>🔍 滞后阈值异常检测（双参数组切换增强）</h1>
+    <p class="subtitle">组1无检出时自动启用组2 · 组2仍受上限约束</p>
+
+    <div class="controls">
+        <div class="file-area">
+            <input type="file" id="upload" accept="image/*">
+            <button id="detectBtn">🚀 开始检测</button>
+        </div>
+        <div class="auto-bg-box">
+            <span>📊 背景平均灰度：</span>
+            <span id="autoBgDisplay" style="font-weight:700;">--</span>
+        </div>
+        <div class="control-group">
+            <label>边缘抑制 (%)</label>
+            <div class="slider-row">
+                <button id="edgeDec">◀</button>
+                <input type="range" id="edgeSuppress" min="0" max="10" value="0" step="0.1">
+                <button id="edgeInc">▶</button>
+            </div>
+            <span class="value-display" id="edgeSuppressVal">0.0</span>
+        </div>
+        <div class="control-group">
+            <label>直径系数</label>
+            <div class="coefficient-input">
+                <input type="number" id="diameterCoeff" value="1.0" step="0.01" min="0">
+                <span>像素→实际</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- 参数组 1 -->
+    <div class="params-section">
+        <h4>📋 参数组 1（默认）</h4>
+        <div class="control-group">
+            <label>高阈值</label>
+            <div class="slider-row">
+                <button id="high1Dec">◀</button>
+                <input type="range" id="highThresh1" min="0" max="255" value="45" step="1">
+                <button id="high1Inc">▶</button>
+            </div>
+            <span class="value-display" id="highThresh1Val">45</span>
+        </div>
+        <div class="control-group">
+            <label>低阈值</label>
+            <div class="slider-row">
+                <button id="low1Dec">◀</button>
+                <input type="range" id="lowThresh1" min="0" max="255" value="20" step="1">
+                <button id="low1Inc">▶</button>
+            </div>
+            <span class="value-display" id="lowThresh1Val">20</span>
+        </div>
+        <div class="control-group">
+            <label>边缘宽度 (%)</label>
+            <div class="slider-row">
+                <button id="ew1Dec">◀</button>
+                <input type="range" id="edgeWidth1" min="0" max="20" value="2" step="0.5">
+                <button id="ew1Inc">▶</button>
+            </div>
+            <span class="value-display" id="edgeWidth1Val">2.0</span>
+        </div>
+        <div class="control-group">
+            <label>边缘额外阈值</label>
+            <div class="slider-row">
+                <button id="ee1Dec">◀</button>
+                <input type="range" id="edgeExtra1" min="0" max="100" value="10" step="1">
+                <button id="ee1Inc">▶</button>
+            </div>
+            <span class="value-display" id="edgeExtra1Val">10</span>
+        </div>
+    </div>
+
+    <!-- 参数组 2 -->
+    <div class="params-section">
+        <h4>📋 参数组 2（组1无异常或超量时启用）</h4>
+        <div class="control-group">
+            <label>高阈值</label>
+            <div class="slider-row">
+                <button id="high2Dec">◀</button>
+                <input type="range" id="highThresh2" min="0" max="255" value="55" step="1">
+                <button id="high2Inc">▶</button>
+            </div>
+            <span class="value-display" id="highThresh2Val">55</span>
+        </div>
+        <div class="control-group">
+            <label>低阈值</label>
+            <div class="slider-row">
+                <button id="low2Dec">◀</button>
+                <input type="range" id="lowThresh2" min="0" max="255" value="30" step="1">
+                <button id="low2Inc">▶</button>
+            </div>
+            <span class="value-display" id="lowThresh2Val">30</span>
+        </div>
+        <div class="control-group">
+            <label>边缘宽度 (%)</label>
+            <div class="slider-row">
+                <button id="ew2Dec">◀</button>
+                <input type="range" id="edgeWidth2" min="0" max="20" value="2" step="0.5">
+                <button id="ew2Inc">▶</button>
+            </div>
+            <span class="value-display" id="edgeWidth2Val">2.0</span>
+        </div>
+        <div class="control-group">
+            <label>边缘额外阈值</label>
+            <div class="slider-row">
+                <button id="ee2Dec">◀</button>
+                <input type="range" id="edgeExtra2" min="0" max="100" value="15" step="1">
+                <button id="ee2Inc">▶</button>
+            </div>
+            <span class="value-display" id="edgeExtra2Val">15</span>
+        </div>
+    </div>
+
+    <!-- 切换规则 -->
+    <div class="controls" style="justify-content:center;">
+        <div class="switch-rule">
+            <span>组1异常数 &gt;</span>
+            <input type="number" id="switchTriggerCount" value="20" min="1" step="1">
+            <span>或组1异常数 = 0 时启用组2；若组2异常数 ≤</span>
+            <input type="number" id="switchUseGroup2Max" value="5" min="0" step="1">
+            <span>则采用组2，否则采用组1</span>
+        </div>
+    </div>
+
+    <div class="canvas-panel">
+        <div class="canvas-box">
+            <h3>📷 原始灰度图像</h3>
+            <canvas id="originalCanvas"></canvas>
+        </div>
+        <div class="canvas-box">
+            <h3>✨ 检测结果 (红:黑色异常, 蓝:白色异常)</h3>
+            <canvas id="resultCanvas"></canvas>
+        </div>
+    </div>
+
+    <div class="stats-panel" id="statsPanel">
+        <div class="stat-item">最终采用：<strong id="activeGroupLabel">组1</strong></div>
+        <div class="stat-item">异常总数：<strong id="totalCount">0</strong></div>
+        <div class="stat-item"><span class="color-swatch" style="background:#ff4444;"></span> 黑色异常：<strong id="blackCount">0</strong></div>
+        <div class="stat-item"><span class="color-swatch" style="background:#4488ff;"></span> 白色异常：<strong id="whiteCount">0</strong></div>
+        <div class="stat-item">最大外切框：<strong id="maxBBoxSize">--</strong></div>
+        <div class="stat-item">对角线：<strong id="maxDiag">--</strong> 像素</div>
+        <div class="stat-item">最大实际直径：<strong id="maxRealDiameter">--</strong></div>
+        <div class="stat-item">最大异常类型：<strong id="maxType">--</strong></div>
+    </div>
+
+    <div class="table-wrapper">
+        <table id="detailTable">
+            <thead>
+                <tr>
+                    <th>编号</th>
+                    <th>类型</th>
+                    <th>质心 X</th>
+                    <th>质心 Y</th>
+                    <th>有效面积</th>
+                    <th>外接框宽</th>
+                    <th>外接框高</th>
+                    <th>对角线 (像素)</th>
+                    <th>实际直径</th>
+                    <th>平均灰度</th>
+                </tr>
+            </thead>
+            <tbody id="tableBody">
+                <tr><td colspan="10" style="color:#999;">暂无异常数据</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="example-note">
+        💡 切换规则：<br>① 若组1异常数 &gt; 触发值 <strong>或</strong> 组1异常数 = 0，则启用组2重新检测。<br>② 组2检测后：若组2异常数 ≤ 上限，则最终采用组2结果；否则仍采用组1结果（即使组1结果为0）。
+    </div>
+</div>
+
+<script>
+    (function() {
+        // ---------- DOM 元素 ----------
+        const uploadInput = document.getElementById('upload');
+        const detectBtn = document.getElementById('detectBtn');
+        const originalCanvas = document.getElementById('originalCanvas');
+        const resultCanvas = document.getElementById('resultCanvas');
+        const ctxOriginal = originalCanvas.getContext('2d');
+        const ctxResult = resultCanvas.getContext('2d');
+
+        // 公共参数
+        const edgeSuppressSlider = document.getElementById('edgeSuppress');
+        const diameterCoeffInput = document.getElementById('diameterCoeff');
+
+        // 组1
+        const high1Slider = document.getElementById('highThresh1');
+        const low1Slider = document.getElementById('lowThresh1');
+        const edgeWidth1Slider = document.getElementById('edgeWidth1');
+        const edgeExtra1Slider = document.getElementById('edgeExtra1');
+
+        // 组2
+        const high2Slider = document.getElementById('highThresh2');
+        const low2Slider = document.getElementById('lowThresh2');
+        const edgeWidth2Slider = document.getElementById('edgeWidth2');
+        const edgeExtra2Slider = document.getElementById('edgeExtra2');
+
+        // 切换规则
+        const switchTriggerCountInput = document.getElementById('switchTriggerCount');
+        const switchUseGroup2MaxInput = document.getElementById('switchUseGroup2Max');
+
+        // 显示值
+        const high1Val = document.getElementById('highThresh1Val');
+        const low1Val = document.getElementById('lowThresh1Val');
+        const edgeWidth1Val = document.getElementById('edgeWidth1Val');
+        const edgeExtra1Val = document.getElementById('edgeExtra1Val');
+        const high2Val = document.getElementById('highThresh2Val');
+        const low2Val = document.getElementById('lowThresh2Val');
+        const edgeWidth2Val = document.getElementById('edgeWidth2Val');
+        const edgeExtra2Val = document.getElementById('edgeExtra2Val');
+        const edgeSuppressVal = document.getElementById('edgeSuppressVal');
+        const autoBgDisplay = document.getElementById('autoBgDisplay');
+
+        // 统计与表格
+        const activeGroupLabel = document.getElementById('activeGroupLabel');
+        const totalCountEl = document.getElementById('totalCount');
+        const blackCountEl = document.getElementById('blackCount');
+        const whiteCountEl = document.getElementById('whiteCount');
+        const maxBBoxSizeEl = document.getElementById('maxBBoxSize');
+        const maxDiagEl = document.getElementById('maxDiag');
+        const maxRealDiameterEl = document.getElementById('maxRealDiameter');
+        const maxTypeEl = document.getElementById('maxType');
+        const tableBody = document.getElementById('tableBody');
+
+        // 中间数据缓存
+        let denoisedImageData = null;
+        let backgroundEstimate = null;
+        let autoBackgroundGray = null;
+
+        // ---------- 显示更新 ----------
+        function updateDisplays() {
+            high1Val.textContent = high1Slider.value;
+            low1Val.textContent = low1Slider.value;
+            edgeWidth1Val.textContent = parseFloat(edgeWidth1Slider.value).toFixed(1);
+            edgeExtra1Val.textContent = edgeExtra1Slider.value;
+            high2Val.textContent = high2Slider.value;
+            low2Val.textContent = low2Slider.value;
+            edgeWidth2Val.textContent = parseFloat(edgeWidth2Slider.value).toFixed(1);
+            edgeExtra2Val.textContent = edgeExtra2Slider.value;
+            edgeSuppressVal.textContent = parseFloat(edgeSuppressSlider.value).toFixed(1);
+        }
+
+        [high1Slider, low1Slider, edgeWidth1Slider, edgeExtra1Slider,
+         high2Slider, low2Slider, edgeWidth2Slider, edgeExtra2Slider,
+         edgeSuppressSlider].forEach(s => s.addEventListener('input', updateDisplays));
+        updateDisplays();
+
+        // ---------- 箭头按钮 ----------
+        function setupArrowButtons(decId, incId, slider, delta) {
+            document.getElementById(decId).addEventListener('click', () => {
+                let value = parseFloat(slider.value) - delta;
+                value = Math.max(parseFloat(slider.min), value);
+                if (slider.step.includes('.')) {
+                    const decimals = slider.step.split('.')[1].length;
+                    value = parseFloat(value.toFixed(decimals));
+                }
+                slider.value = value;
+                slider.dispatchEvent(new Event('input', { bubbles: true }));
+            });
+            document.getElementById(incId).addEventListener('click', () => {
+                let value = parseFloat(slider.value) + delta;
+                value = Math.min(parseFloat(slider.max), value);
+                if (slider.step.includes('.')) {
+                    const decimals = slider.step.split('.')[1].length;
+                    value = parseFloat(value.toFixed(decimals));
+                }
+                slider.value = value;
+                slider.dispatchEvent(new Event('input', { bubbles: true }));
+            });
+        }
+
+        setupArrowButtons('high1Dec', 'high1Inc', high1Slider, 1);
+        setupArrowButtons('low1Dec', 'low1Inc', low1Slider, 1);
+        setupArrowButtons('ew1Dec', 'ew1Inc', edgeWidth1Slider, 0.5);
+        setupArrowButtons('ee1Dec', 'ee1Inc', edgeExtra1Slider, 1);
+        setupArrowButtons('high2Dec', 'high2Inc', high2Slider, 1);
+        setupArrowButtons('low2Dec', 'low2Inc', low2Slider, 1);
+        setupArrowButtons('ew2Dec', 'ew2Inc', edgeWidth2Slider, 0.5);
+        setupArrowButtons('ee2Dec', 'ee2Inc', edgeExtra2Slider, 1);
+        setupArrowButtons('edgeDec', 'edgeInc', edgeSuppressSlider, 0.1);
+
+        // ---------- 图片加载 ----------
+        function loadImageFromFile(file) {
+            return new Promise((resolve, reject) => {
+                if (!file || !file.type.startsWith('image/')) {
+                    return reject(new Error('请选择有效的图片文件'));
+                }
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.onload = () => resolve(img);
+                    img.onerror = () => reject(new Error('图片加载失败'));
+                    img.src = e.target.result;
+                };
+                reader.onerror = () => reject(new Error('文件读取失败'));
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function drawImageToCanvas(img, canvas, ctx) {
+            const maxWidth = 512;
+            const maxHeight = 512;
+            let width = img.width;
+            let height = img.height;
+            if (width > maxWidth || height > maxHeight) {
+                const ratio = Math.min(maxWidth / width, maxHeight / height);
+                width = Math.round(width * ratio);
+                height = Math.round(height * ratio);
+            }
+            canvas.width = width;
+            canvas.height = height;
+            ctx.clearRect(0, 0, width, height);
+            ctx.drawImage(img, 0, 0, width, height);
+            return { width, height };
+        }
+
+        // ---------- 彩色转灰度 ----------
+        function convertToGrayscale(imageData) {
+            const { data, width, height } = imageData;
+            const grayData = new Uint8ClampedArray(data.length);
+            for (let i = 0; i < data.length; i += 4) {
+                const gray = Math.round(0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2]);
+                grayData[i] = gray;
+                grayData[i+1] = gray;
+                grayData[i+2] = gray;
+                grayData[i+3] = 255;
+            }
+            return new ImageData(grayData, width, height);
+        }
+
+        // ---------- 可分离高斯模糊 ----------
+        function gaussianBlurGray(imageData, sigma) {
+            const { data, width, height } = imageData;
+            const radius = Math.ceil(3 * sigma);
+            const kernelSize = 2 * radius + 1;
+            const kernel = new Float32Array(kernelSize);
+            let sum = 0;
+            for (let i = 0; i < kernelSize; i++) {
+                const x = i - radius;
+                kernel[i] = Math.exp(-(x * x) / (2 * sigma * sigma));
+                sum += kernel[i];
+            }
+            for (let i = 0; i < kernelSize; i++) kernel[i] /= sum;
+
+            const temp = new Float32Array(width * height);
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let val = 0;
+                    for (let k = 0; k < kernelSize; k++) {
+                        const srcX = Math.min(width - 1, Math.max(0, x + k - radius));
+                        const idx = (y * width + srcX) * 4;
+                        val += data[idx] * kernel[k];
+                    }
+                    temp[y * width + x] = val;
+                }
+            }
+
+            const output = new Uint8ClampedArray(data.length);
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let val = 0;
+                    for (let k = 0; k < kernelSize; k++) {
+                        const srcY = Math.min(height - 1, Math.max(0, y + k - radius));
+                        val += temp[srcY * width + x] * kernel[k];
+                    }
+                    const gray = Math.round(Math.min(255, Math.max(0, val)));
+                    const idx = (y * width + x) * 4;
+                    output[idx] = gray;
+                    output[idx+1] = gray;
+                    output[idx+2] = gray;
+                    output[idx+3] = 255;
+                }
+            }
+            return new ImageData(output, width, height);
+        }
+
+        // ---------- 3x3中值滤波 ----------
+        function medianFilter3x3(imageData) {
+            const { data, width, height } = imageData;
+            const output = new Uint8ClampedArray(data.length);
+            const window = new Array(9);
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let idx = 0;
+                    for (let dy = -1; dy <= 1; dy++) {
+                        for (let dx = -1; dx <= 1; dx++) {
+                            const ny = Math.min(height-1, Math.max(0, y + dy));
+                            const nx = Math.min(width-1, Math.max(0, x + dx));
+                            const srcIdx = (ny * width + nx) * 4;
+                            window[idx++] = data[srcIdx];
+                        }
+                    }
+                    window.sort((a,b)=>a-b);
+                    const median = window[4];
+                    const outIdx = (y * width + x) * 4;
+                    output[outIdx] = median;
+                    output[outIdx+1] = median;
+                    output[outIdx+2] = median;
+                    output[outIdx+3] = 255;
+                }
+            }
+            return new ImageData(output, width, height);
+        }
+
+        // ---------- 滞后阈值（支持边缘额外阈值） ----------
+        function applyHysteresisThreshold(diffImageData, baseHigh, baseLow, edgeMask, extraThreshold) {
+            const { data, width, height } = diffImageData;
+            const labels = new Uint8Array(width * height);
+            for (let i = 0; i < data.length; i += 4) {
+                const diff = data[i];
+                const pixelIndex = i / 4;
+                const x = pixelIndex % width;
+                const y = Math.floor(pixelIndex / width);
+                const isEdge = edgeMask[y * width + x] === 1;
+                const highThresh = Math.min(255, baseHigh + (isEdge ? extraThreshold : 0));
+                const lowThresh = Math.min(255, baseLow + (isEdge ? extraThreshold : 0));
+
+                if (diff >= highThresh) {
+                    labels[pixelIndex] = 2;
+                } else if (diff >= lowThresh) {
+                    labels[pixelIndex] = 1;
+                }
+            }
+            let changed = true;
+            while (changed) {
+                changed = false;
+                for (let y = 0; y < height; y++) {
+                    for (let x = 0; x < width; x++) {
+                        const idx = y * width + x;
+                        if (labels[idx] === 1 && hasStrongNeighbor(labels, width, height, x, y)) {
+                            labels[idx] = 2;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            return labels;
+        }
+
+        function hasStrongNeighbor(labels, width, height, x, y) {
+            const dirs = [[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
+            for (const [dx, dy] of dirs) {
+                const nx = x + dx, ny = y + dy;
+                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                    if (labels[ny * width + nx] === 2) return true;
+                }
+            }
+            return false;
+        }
+
+        // ---------- 生成边缘掩膜 ----------
+        function createEdgeMask(width, height, edgePercent) {
+            const mask = new Uint8Array(width * height);
+            const borderX = Math.floor(width * edgePercent / 100);
+            const borderY = Math.floor(height * edgePercent / 100);
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    if (x < borderX || x >= width - borderX || y < borderY || y >= height - borderY) {
+                        mask[y * width + x] = 1;
+                    }
+                }
+            }
+            return mask;
+        }
+
+        // ---------- 提取连通区域 ----------
+        function extractRegions(labels, width, height, minArea = 9) {
+            const visited = new Uint8Array(width * height);
+            const regions = [];
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const idx = y * width + x;
+                    if (labels[idx] === 2 && !visited[idx]) {
+                        const queue = [[x, y]];
+                        visited[idx] = 1;
+                        const pixels = [];
+                        let head = 0;
+                        while (head < queue.length) {
+                            const [cx, cy] = queue[head++];
+                            pixels.push([cx, cy]);
+                            for (const [dx, dy] of [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]]) {
+                                const nx = cx + dx, ny = cy + dy;
+                                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                                    const nidx = ny * width + nx;
+                                    if (!visited[nidx] && labels[nidx] === 2) {
+                                        visited[nidx] = 1;
+                                        queue.push([nx, ny]);
+                                    }
+                                }
+                            }
+                        }
+                        if (queue.length >= minArea) {
+                            regions.push({ pixels, area: queue.length });
+                        }
+                    }
+                }
+            }
+            return regions;
+        }
+
+        // ---------- 边缘抑制掩膜 ----------
+        function applyEdgeSuppressionMask(width, height, suppressPercent) {
+            const mask = new Uint8Array(width * height);
+            if (suppressPercent <= 0) {
+                mask.fill(1);
+                return mask;
+            }
+            const borderX = Math.floor(width * suppressPercent / 100);
+            const borderY = Math.floor(height * suppressPercent / 100);
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    if (x < borderX || x >= width - borderX || y < borderY || y >= height - borderY) {
+                        mask[y * width + x] = 0;
+                    } else {
+                        mask[y * width + x] = 1;
+                    }
+                }
+            }
+            return mask;
+        }
+
+        // ---------- 分析、分类、提取详细信息并绘制结果图 ----------
+        function analyzeAndDraw(regions, denoisedData, bgGray, width, height, suppressPercent, coeff) {
+            const edgeMask = applyEdgeSuppressionMask(width, height, suppressPercent);
+            const resultData = new Uint8ClampedArray(width * height * 4);
+            for (let i = 0; i < resultData.length; i += 4) {
+                resultData[i] = 0;
+                resultData[i+1] = 0;
+                resultData[i+2] = 0;
+                resultData[i+3] = 255;
+            }
+
+            let blackCount = 0, whiteCount = 0;
+            let maxDiag = 0;
+            let maxBBox = null;
+            const regionDetails = [];
+
+            for (const region of regions) {
+                let sumGray = 0, validPixels = 0;
+                let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+                let sumX = 0, sumY = 0;
+                for (const [px, py] of region.pixels) {
+                    if (edgeMask[py * width + px] === 0) continue;
+                    const idx = (py * width + px) * 4;
+                    const gray = denoisedData[idx];
+                    sumGray += gray;
+                    sumX += px;
+                    sumY += py;
+                    validPixels++;
+                    if (px < minX) minX = px;
+                    if (px > maxX) maxX = px;
+                    if (py < minY) minY = py;
+                    if (py > maxY) maxY = py;
+                }
+                if (validPixels === 0) continue;
+
+                const avgGray = Math.round(sumGray / validPixels);
+                const isBlack = avgGray < bgGray;
+                const color = isBlack ? [255, 68, 68] : [68, 136, 255];
+                const typeStr = isBlack ? '黑色' : '白色';
+
+                for (const [px, py] of region.pixels) {
+                    if (edgeMask[py * width + px] === 0) continue;
+                    const idx = (py * width + px) * 4;
+                    resultData[idx] = color[0];
+                    resultData[idx+1] = color[1];
+                    resultData[idx+2] = color[2];
+                }
+
+                if (isBlack) blackCount++;
+                else whiteCount++;
+
+                const bboxWidth = maxX - minX + 1;
+                const bboxHeight = maxY - minY + 1;
+                const diag = Math.sqrt(bboxWidth * bboxWidth + bboxHeight * bboxHeight);
+                const centroidX = Math.round(sumX / validPixels);
+                const centroidY = Math.round(sumY / validPixels);
+                const realDiameter = diag * coeff;
+
+                regionDetails.push({
+                    type: typeStr,
+                    centroidX,
+                    centroidY,
+                    area: validPixels,
+                    bboxWidth,
+                    bboxHeight,
+                    diag: diag.toFixed(1),
+                    realDiameter: realDiameter.toFixed(2),
+                    avgGray
+                });
+
+                if (diag > maxDiag) {
+                    maxDiag = diag;
+                    maxBBox = { width: bboxWidth, height: bboxHeight, diag, realDiameter, type: typeStr };
+                }
+            }
+
+            const totalCount = blackCount + whiteCount;
+            return {
+                imageData: new ImageData(resultData, width, height),
+                totalCount,
+                blackCount,
+                whiteCount,
+                maxBBox,
+                maxDiag,
+                regionDetails
+            };
+        }
+
+        // ---------- 使用给定参数检测 ----------
+        function detectWithParams(baseHigh, baseLow, edgePercent, extraThresh, suppressPercent, coeff) {
+            if (!denoisedImageData || !backgroundEstimate || autoBackgroundGray === null) return null;
+            const width = denoisedImageData.width;
+            const height = denoisedImageData.height;
+
+            const diffData = new Uint8ClampedArray(width * height * 4);
+            for (let i = 0; i < denoisedImageData.data.length; i += 4) {
+                const diff = Math.abs(denoisedImageData.data[i] - backgroundEstimate.data[i]);
+                diffData[i] = diff;
+                diffData[i+1] = diff;
+                diffData[i+2] = diff;
+                diffData[i+3] = 255;
+            }
+            let diffImage = new ImageData(diffData, width, height);
+            diffImage = medianFilter3x3(diffImage);
+
+            const edgeMask = createEdgeMask(width, height, edgePercent);
+            const labels = applyHysteresisThreshold(diffImage, baseHigh, baseLow, edgeMask, extraThresh);
+            const regions = extractRegions(labels, width, height, 9);
+            return analyzeAndDraw(regions, denoisedImageData.data, autoBackgroundGray, width, height, suppressPercent, coeff);
+        }
+
+        // ---------- 更新统计与表格 ----------
+        function updateStatsAndTable(result, groupLabel) {
+            activeGroupLabel.textContent = groupLabel;
+            totalCountEl.textContent = result.totalCount;
+            blackCountEl.textContent = result.blackCount;
+            whiteCountEl.textContent = result.whiteCount;
+            if (result.maxBBox) {
+                maxBBoxSizeEl.textContent = `${result.maxBBox.width} × ${result.maxBBox.height}`;
+                maxDiagEl.textContent = result.maxBBox.diag.toFixed(1);
+                maxRealDiameterEl.textContent = result.maxBBox.realDiameter.toFixed(2);
+                maxTypeEl.textContent = result.maxBBox.type;
+            } else {
+                maxBBoxSizeEl.textContent = '--';
+                maxDiagEl.textContent = '--';
+                maxRealDiameterEl.textContent = '--';
+                maxTypeEl.textContent = '--';
+            }
+
+            if (result.regionDetails.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="10" style="color:#999;">暂无异常数据</td></tr>';
+                return;
+            }
+            let html = '';
+            result.regionDetails.forEach((d, i) => {
+                html += `<tr>
+                    <td>${i + 1}</td>
+                    <td style="color:${d.type === '黑色' ? '#ff4444' : '#4488ff'}; font-weight:500;">${d.type}</td>
+                    <td>${d.centroidX}</td>
+                    <td>${d.centroidY}</td>
+                    <td>${d.area}</td>
+                    <td>${d.bboxWidth}</td>
+                    <td>${d.bboxHeight}</td>
+                    <td>${d.diag}</td>
+                    <td>${d.realDiameter}</td>
+                    <td>${d.avgGray}</td>
+                </tr>`;
+            });
+            tableBody.innerHTML = html;
+        }
+
+        // ---------- 获取系数 ----------
+        function getCoeff() {
+            const val = parseFloat(diameterCoeffInput.value);
+            return isNaN(val) || val < 0 ? 1.0 : val;
+        }
+
+        // ---------- 主检测（含双组切换） ----------
+        async function runFullDetection() {
+            const file = uploadInput.files[0];
+            if (!file) {
+                alert('请先选择一张图片');
+                return;
+            }
+            try {
+                const img = await loadImageFromFile(file);
+                const { width, height } = drawImageToCanvas(img, originalCanvas, ctxOriginal);
+                const colorData = ctxOriginal.getImageData(0, 0, width, height);
+                const grayData = convertToGrayscale(colorData);
+                ctxOriginal.putImageData(grayData, 0, 0);
+
+                denoisedImageData = gaussianBlurGray(grayData, 1.0);
+                const minDim = Math.min(width, height);
+                const sigmaBg = Math.max(2.0, minDim / 25);
+                backgroundEstimate = gaussianBlurGray(denoisedImageData, sigmaBg);
+
+                let sumBg = 0;
+                for (let i = 0; i < backgroundEstimate.data.length; i += 4) sumBg += backgroundEstimate.data[i];
+                autoBackgroundGray = Math.round(sumBg / (width * height));
+                autoBgDisplay.textContent = autoBackgroundGray;
+
+                const suppressPercent = parseFloat(edgeSuppressSlider.value);
+                const coeff = getCoeff();
+
+                // 组1参数
+                const baseHigh1 = parseInt(high1Slider.value, 10);
+                const baseLow1 = parseInt(low1Slider.value, 10);
+                const edgePercent1 = parseFloat(edgeWidth1Slider.value);
+                const extraThresh1 = parseInt(edgeExtra1Slider.value, 10);
+
+                // 组2参数
+                const baseHigh2 = parseInt(high2Slider.value, 10);
+                const baseLow2 = parseInt(low2Slider.value, 10);
+                const edgePercent2 = parseFloat(edgeWidth2Slider.value);
+                const extraThresh2 = parseInt(edgeExtra2Slider.value, 10);
+
+                const triggerCount = parseInt(switchTriggerCountInput.value, 10) || 20;
+                const useGroup2Max = parseInt(switchUseGroup2MaxInput.value, 10) || 5;
+
+                // 组1检测
+                const result1 = detectWithParams(baseHigh1, baseLow1, edgePercent1, extraThresh1, suppressPercent, coeff);
+                let finalResult = result1;
+                let groupLabel = '组1';
+
+                // 切换判断：组1异常数 > 触发值 或 组1异常数 === 0
+                if (result1 && (result1.totalCount > triggerCount || result1.totalCount === 0)) {
+                    const result2 = detectWithParams(baseHigh2, baseLow2, edgePercent2, extraThresh2, suppressPercent, coeff);
+                    if (result2 && result2.totalCount <= useGroup2Max) {
+                        finalResult = result2;
+                        groupLabel = '组2';
+                    }
+                    // 否则保持组1结果
+                }
+
+                resultCanvas.width = width;
+                resultCanvas.height = height;
+                ctxResult.putImageData(finalResult.imageData, 0, 0);
+                updateStatsAndTable(finalResult, groupLabel);
+
+            } catch (error) {
+                alert('处理出错: ' + error.message);
+                console.error(error);
+            }
+        }
+
+        // 实时更新
+        function autoRedetect() {
+            if (!denoisedImageData || !backgroundEstimate || autoBackgroundGray === null) return;
+            const suppressPercent = parseFloat(edgeSuppressSlider.value);
+            const coeff = getCoeff();
+
+            const baseHigh1 = parseInt(high1Slider.value, 10);
+            const baseLow1 = parseInt(low1Slider.value, 10);
+            const edgePercent1 = parseFloat(edgeWidth1Slider.value);
+            const extraThresh1 = parseInt(edgeExtra1Slider.value, 10);
+
+            const baseHigh2 = parseInt(high2Slider.value, 10);
+            const baseLow2 = parseInt(low2Slider.value, 10);
+            const edgePercent2 = parseFloat(edgeWidth2Slider.value);
+            const extraThresh2 = parseInt(edgeExtra2Slider.value, 10);
+
+            const triggerCount = parseInt(switchTriggerCountInput.value, 10) || 20;
+            const useGroup2Max = parseInt(switchUseGroup2MaxInput.value, 10) || 5;
+
+            const result1 = detectWithParams(baseHigh1, baseLow1, edgePercent1, extraThresh1, suppressPercent, coeff);
+            let finalResult = result1;
+            let groupLabel = '组1';
+
+            if (result1 && (result1.totalCount > triggerCount || result1.totalCount === 0)) {
+                const result2 = detectWithParams(baseHigh2, baseLow2, edgePercent2, extraThresh2, suppressPercent, coeff);
+                if (result2 && result2.totalCount <= useGroup2Max) {
+                    finalResult = result2;
+                    groupLabel = '组2';
+                }
+            }
+
+            resultCanvas.width = denoisedImageData.width;
+            resultCanvas.height = denoisedImageData.height;
+            ctxResult.putImageData(finalResult.imageData, 0, 0);
+            updateStatsAndTable(finalResult, groupLabel);
+        }
+
+        // 绑定事件
+        [
+            high1Slider, low1Slider, edgeWidth1Slider, edgeExtra1Slider,
+            high2Slider, low2Slider, edgeWidth2Slider, edgeExtra2Slider,
+            edgeSuppressSlider, diameterCoeffInput,
+            switchTriggerCountInput, switchUseGroup2MaxInput
+        ].forEach(el => el.addEventListener('input', autoRedetect));
+
+        detectBtn.addEventListener('click', runFullDetection);
+        uploadInput.addEventListener('change', () => {
+            if (uploadInput.files.length > 0) runFullDetection();
+        });
+
+        console.log('✅ 滞后阈值异常检测（双参数组切换增强）已就绪。');
+    })();
+</script>
+</body>
+</html>
