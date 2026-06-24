@@ -92,10 +92,10 @@
             <th>AI 判定</th>
             <td>
                 <strong>{{ detail.ai_judgment }}</strong>
-                {% if detail.ai_judgment == 'OK-i' %}
+                {% if detail.within_spec_log_id or detail.ai_judgment == 'OK-i' %}
                 <a href="{% if detail.within_spec_log_id %}/ric/within-spec-log/{{ detail.within_spec_log_id }}{% else %}/ric/within-spec-logs{% endif %}"
                    style="margin-left:10px;font-size:0.82rem;color:#2dd4bf;text-decoration:none;"
-                   title="原始 AI=NG，符合規格內後轉 OK；查看規格內計算明細">規格內明細</a>
+                   title="查看本次規格內計算明細">規格內明細</a>
                 {% endif %}
             </td>
         </tr>

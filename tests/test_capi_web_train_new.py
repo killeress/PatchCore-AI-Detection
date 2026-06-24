@@ -947,6 +947,15 @@ def test_record_detail_templates_show_preprocess_pipeline():
         assert "舊紀錄未記錄" in text
 
 
+def test_record_detail_templates_link_within_spec_log_for_ng_records():
+    base = Path(__file__).resolve().parent.parent / "templates"
+    for name in ("record_detail.html", "record_detail_v3.html"):
+        text = (base / name).read_text(encoding="utf-8")
+        assert "detail.within_spec_log_id or detail.ai_judgment == 'OK-i'" in text
+        assert "/ric/within-spec-log/{{ detail.within_spec_log_id }}" in text
+        assert "查看本次規格內計算明細" in text
+
+
 def test_record_preprocess_info_decoration_formats_steps():
     from capi_web import CAPIWebHandler
 
