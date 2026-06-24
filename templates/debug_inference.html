@@ -1910,6 +1910,37 @@
                     </div>
 
                     <div class="dot-param-section" data-dot-modes="background_diff hysteresis morph_hat adaptive_mean halo auto">
+                        <h3>非點狀阻擋</h3>
+                        <p>被點狀條件過濾、但面積/長邊/diff 夠大的殘留會阻止 OK-i。</p>
+                        <div class="coord-input-row">
+                            <div class="coord-group">
+                                <label for="dot-non-dot-enabled">啟用</label>
+                                <div style="height:42px; display:flex; align-items:center; gap:8px; padding:0 12px; border:1px solid var(--border); border-radius:8px; background:var(--surface);">
+                                    <input type="checkbox" id="dot-non-dot-enabled" {% if dot_detection_defaults.get('non_dot_residue_enabled', true) %}checked{% endif %}
+                                        style="width:18px; height:18px;">
+                                    <span style="color:var(--text); font-size:0.85rem;">阻擋 OK-i</span>
+                                </div>
+                            </div>
+                            <div class="coord-group">
+                                <label for="dot-non-dot-min-area">min area</label>
+                                <input type="number" id="dot-non-dot-min-area" value="{{ dot_detection_defaults.get('non_dot_residue_min_area_px', 500) }}" min="0" step="1">
+                            </div>
+                            <div class="coord-group">
+                                <label for="dot-non-dot-long-px">long px</label>
+                                <input type="number" id="dot-non-dot-long-px" value="{{ dot_detection_defaults.get('non_dot_residue_min_long_side_px', 80) }}" min="0" step="1">
+                            </div>
+                            <div class="coord-group">
+                                <label for="dot-non-dot-long-ratio">long ratio</label>
+                                <input type="number" id="dot-non-dot-long-ratio" value="{{ dot_detection_defaults.get('non_dot_residue_min_long_side_ratio', 0.15) }}" min="0" step="0.01">
+                            </div>
+                            <div class="coord-group">
+                                <label for="dot-non-dot-max-diff">max diff</label>
+                                <input type="number" id="dot-non-dot-max-diff" value="{{ dot_detection_defaults.get('non_dot_residue_min_max_diff', 12) }}" min="0" step="1">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="dot-param-section" data-dot-modes="background_diff hysteresis morph_hat adaptive_mean halo auto">
                         <h3>尺寸換算</h3>
                         <p>debug 標示是否超過規格門檻；正式規格內判定也使用同一個 mm/px 概念。</p>
                         <div class="coord-input-row">
@@ -1952,6 +1983,12 @@
                 <div style="color:var(--text-muted); font-size:0.85rem; font-family:'Fira Code',monospace; margin-bottom:10px;">候選點 Top 20</div>
                 <div style="overflow:auto;">
                     <table id="dot-candidates-table"></table>
+                </div>
+            </div>
+            <div class="card hidden" id="dot-non-dot-card" style="padding:16px; margin-top:16px;">
+                <div style="color:var(--ng); font-size:0.85rem; font-family:'Fira Code',monospace; margin-bottom:10px;">非點狀阻擋 Top 20</div>
+                <div style="overflow:auto;">
+                    <table id="dot-non-dot-table"></table>
                 </div>
             </div>
         </div>
@@ -2361,6 +2398,11 @@
                     unit_label: 'mm',
                     defect_threshold: parseFloat(document.getElementById('dot-defect-threshold').value) || 0.3,
                     use_default_calibration: usesDefaultCalibration,
+                    non_dot_residue_enabled: document.getElementById('dot-non-dot-enabled').checked,
+                    non_dot_residue_min_area_px: readInt('dot-non-dot-min-area', 500),
+                    non_dot_residue_min_long_side_px: readInt('dot-non-dot-long-px', 80),
+                    non_dot_residue_min_long_side_ratio: readFloat('dot-non-dot-long-ratio', 0.15),
+                    non_dot_residue_min_max_diff: readInt('dot-non-dot-max-diff', 12),
                 }),
             });
 
@@ -2425,6 +2467,12 @@
         const thresholdPxText = calibrated && data.defect_threshold_px !== null && data.defect_threshold_px !== undefined
             ? `${data.defect_threshold_px} px`
             : '-';
+        const nonDot = data.non_dot_residue || {};
+        const nonDotParams = nonDot.params || {};
+        const nonDotCount = Number(nonDot.count || 0);
+        const nonDotText = nonDot.enabled === false
+            ? 'OFF'
+            : `area>=${nonDotParams.min_area_px ?? p.non_dot_residue_min_area_px ?? 0} long>=${nonDotParams.min_long_side_px ?? p.non_dot_residue_min_long_side_px ?? 0}px ratio>=${nonDotParams.min_long_side_ratio ?? p.non_dot_residue_min_long_side_ratio ?? 0} diff>=${nonDotParams.min_max_diff ?? p.non_dot_residue_min_max_diff ?? 0}`;
         const preprocess = data.preprocess || {};
         const preprocessParams = preprocess.applied_params || {};
         const preprocessText = preprocess.method
@@ -2463,6 +2511,10 @@
                 <div class="label">候選點</div>
                 <div class="value" style="color:${data.count > 0 ? 'var(--accent)' : 'var(--text-muted)'}">${data.count}</div>
             </div>
+            <div class="summary-card" style="border-color:${nonDotCount > 0 ? 'rgba(239,68,68,0.45)' : 'var(--border)'}">
+                <div class="label">非點狀阻擋</div>
+                <div class="value" style="color:${nonDotCount > 0 ? 'var(--ng)' : 'var(--text-muted)'};font-size:${nonDotCount > 0 ? '1.5rem' : '1rem'};">${nonDot.enabled === false ? 'OFF' : nonDotCount}</div>
+            </div>
             <div class="summary-card" style="border-color:${calibrated && data.defect_count > 0 ? 'rgba(239,68,68,0.3)' : 'var(--border)'}">
                 <div class="label">超門檻數</div>
                 <div class="value" style="color:${calibrated && data.defect_count > 0 ? 'var(--ng)' : 'var(--text-muted)'};font-size:${calibrated ? '1.5rem' : '1rem'};">${defectText}</div>
@@ -2482,6 +2534,10 @@
             <div class="summary-card" style="grid-column:span 2;">
                 <div class="label">偵測前處理</div>
                 <div class="value" style="color:var(--text-muted);font-size:0.82rem;line-height:1.45;">${preprocessText}</div>
+            </div>
+            <div class="summary-card" style="grid-column:span 2;">
+                <div class="label">非點狀參數</div>
+                <div class="value" style="color:${nonDotCount > 0 ? 'var(--ng)' : 'var(--text-muted)'};font-size:0.82rem;line-height:1.45;">${escapeHtml(nonDotText)}</div>
             </div>
             <div class="summary-card">
                 <div class="label">規格門檻</div>
@@ -2534,6 +2590,7 @@
         `;
 
         renderDotCandidates(data.candidates || [], calibrated, unitLabel);
+        renderDotNonDotResidues(data.non_dot_residue || {});
     }
 
     function renderDotCandidates(candidates, calibrated, unitLabel) {
@@ -2579,6 +2636,49 @@
                     <th>長寬比</th>
                     <th>Max Diff</th>
                     <th>Mean Diff</th>
+                </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+        `;
+    }
+
+    function renderDotNonDotResidues(nonDot) {
+        const card = document.getElementById('dot-non-dot-card');
+        const table = document.getElementById('dot-non-dot-table');
+        const residues = Array.isArray(nonDot.residues) ? nonDot.residues : [];
+        if (!residues.length) {
+            card.classList.add('hidden');
+            table.innerHTML = '';
+            return;
+        }
+        card.classList.remove('hidden');
+        const rows = residues.slice(0, 20).map((r, idx) => `
+            <tr>
+                <td style="color:var(--ng);font-weight:700;">#${idx + 1}</td>
+                <td>${escapeHtml(r.reason || '-')}</td>
+                <td>${r.x ?? '-'}, ${r.y ?? '-'}</td>
+                <td>${r.w ?? '-'}×${r.h ?? '-'}</td>
+                <td>${r.area_px ?? '-'}</td>
+                <td>${r.long_side_px ?? '-'}</td>
+                <td>${r.long_side_ratio ?? '-'}</td>
+                <td>${r.max_diff ?? '-'}</td>
+                <td>${r.aspect_ratio ?? '-'}</td>
+                <td>${escapeHtml(r.detected_polarity || r.expected_polarity || '-')}</td>
+            </tr>
+        `).join('');
+        table.innerHTML = `
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>原因</th>
+                    <th>左上</th>
+                    <th>BBox</th>
+                    <th>面積</th>
+                    <th>長邊</th>
+                    <th>長邊比例</th>
+                    <th>Max Diff</th>
+                    <th>Aspect</th>
+                    <th>Polarity</th>
                 </tr>
             </thead>
             <tbody>${rows}</tbody>

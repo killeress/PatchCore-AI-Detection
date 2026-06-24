@@ -2166,6 +2166,12 @@
             morph_open: 0,
             min_aspect_ratio: 0.45,
             edge_margin_px: 4,
+            non_dot_residue_enabled: true,
+            non_dot_residue_min_area_px: 500,
+            non_dot_residue_min_long_side_px: 80,
+            non_dot_residue_min_long_side_ratio: 0.15,
+            non_dot_residue_min_max_diff: 12,
+            non_dot_residue_reasons: ['aspect_ratio_below_min', 'edge_margin', 'area_too_large'],
             size_metric: 'bbox_diagonal',
             unit_per_px: 0.0245,
         };
@@ -2322,6 +2328,12 @@
             renderWithinSpecDotMetricField(d),
             renderWithinSpecDotNumberField('mm/px', 'unit_per_px', d.unit_per_px, 0.0245, { min: 0, step: 0.0001 }),
         ];
+        const residueFields = [
+            renderWithinSpecDotNumberField('min area', 'non_dot_residue_min_area_px', d.non_dot_residue_min_area_px, 500, { min: 0, step: 1 }),
+            renderWithinSpecDotNumberField('long px', 'non_dot_residue_min_long_side_px', d.non_dot_residue_min_long_side_px, 80, { min: 0, step: 1 }),
+            renderWithinSpecDotNumberField('long ratio', 'non_dot_residue_min_long_side_ratio', d.non_dot_residue_min_long_side_ratio, 0.15, { min: 0, step: 0.01 }),
+            renderWithinSpecDotNumberField('max diff', 'non_dot_residue_min_max_diff', d.non_dot_residue_min_max_diff, 12, { min: 0, step: 1 }),
+        ];
         const sections = [];
         if (mode === 'background_diff') {
             sections.push(renderWithinSpecDotSection('Background Diff', '局部背景差分 mask', [diffField, bgField]));
@@ -2348,6 +2360,7 @@
         }
         if (mode !== 'off') {
             sections.push(renderWithinSpecDotSection('候選過濾', '所有偵測模式都會套用', filterFields));
+            sections.push(renderWithinSpecDotSection('非點狀阻擋', '被點狀條件過濾、但面積/長邊/diff 夠大的殘留會阻止 OK-i', residueFields));
             sections.push(renderWithinSpecDotSection('尺寸換算', '用於判斷是否超過 mm 門檻', sizeFields));
         }
 
@@ -2619,6 +2632,9 @@
             'max_area_px',
             'morph_open',
             'edge_margin_px',
+            'non_dot_residue_min_area_px',
+            'non_dot_residue_min_long_side_px',
+            'non_dot_residue_min_max_diff',
         ]);
         machineCfg.dot_detection[field] = integerFields.has(field) ? Math.max(0, Math.round(n)) : Math.max(0, n);
     }

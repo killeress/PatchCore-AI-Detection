@@ -40,6 +40,12 @@ def _default_within_spec_judgment_rules() -> Dict[str, Any]:
         "morph_open": 0,
         "min_aspect_ratio": 0.45,
         "edge_margin_px": 4,
+        "non_dot_residue_enabled": True,
+        "non_dot_residue_min_area_px": 500,
+        "non_dot_residue_min_long_side_px": 80,
+        "non_dot_residue_min_long_side_ratio": 0.15,
+        "non_dot_residue_min_max_diff": 12,
+        "non_dot_residue_reasons": ["aspect_ratio_below_min", "edge_margin", "area_too_large"],
         "size_metric": "bbox_diagonal",
         "unit_per_px": 0.0245,
     }

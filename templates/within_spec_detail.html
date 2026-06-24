@@ -7,6 +7,7 @@
 {% set summary = detail.panel_summary or {} %}
 {% set rule_selection = detail.rule_selection or {} %}
 {% set parameter_snapshot = detail.parameter_snapshot or {} %}
+{% set auto_decision = detail.inference_auto_decision or {} %}
 <style>
     .ws-page-head {
         display: flex;
@@ -249,6 +250,7 @@
         <div class="ws-subtitle">Client {{ log.client_record_id }} / Inference {{ log.inference_record_id }} / {{ log.created_at }}</div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+        <button id="wsCopyDebugLogBtn" class="ws-link ws-button" type="button">複製排查 Log</button>
         {% if log.inference_record_id %}
         <button id="wsRegenVisualsBtn" class="ws-link ws-button" type="button">重新產生偵測圖片</button>
         <a class="ws-link" href="/record/{{ log.inference_record_id }}">返回推論紀錄</a>
@@ -273,7 +275,7 @@
         </div>
         <div class="ws-metric">
             <div class="label">原因</div>
-            <div class="value">{{ log.reason or log.error_message or "無" }}</div>
+            <div class="value">{{ log.reason or auto_decision.reason or log.error_message or "無" }}</div>
         </div>
         <div class="ws-metric">
             <div class="label">設定來源</div>
@@ -360,6 +362,40 @@
     {% endif %}
 </section>
 
+{% if detail.non_dot_residues %}
+<section class="ws-band">
+    <div class="ws-section-title">非點狀殘留</div>
+    <table class="ws-table">
+        <thead>
+            <tr>
+                <th>Screen</th>
+                <th>Image / Tile</th>
+                <th>Reason</th>
+                <th>bbox</th>
+                <th>area</th>
+                <th>aspect</th>
+                <th>long side</th>
+                <th>diff</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in detail.non_dot_residues[:20] %}
+            <tr>
+                <td>{{ item.screen }}</td>
+                <td>{{ item.image }} / {{ item.tile_id }}</td>
+                <td>{{ item.reason }}</td>
+                <td>{{ item.x }},{{ item.y }},{{ item.w }}x{{ item.h }}</td>
+                <td>{{ item.area_px }}</td>
+                <td>{{ "%.3f"|format(item.aspect_ratio or 0) }}</td>
+                <td>{{ item.long_side_px }} ({{ "%.3f"|format(item.long_side_ratio or 0) }})</td>
+                <td>{{ item.max_diff }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endif %}
+
 <section class="ws-band">
     <div class="ws-section-title">點偵測結果圖片</div>
     {% if detail.visuals %}
@@ -368,7 +404,10 @@
         <div class="ws-visual">
             <div class="ws-visual-head">
                 <div>{{ visual.image_name }} / Tile {{ visual.tile_id }} / {{ visual.dot_label }}</div>
-                <div>{{ visual.count }} 點，max {{ "%.4f"|format(visual.max_size_mm or 0) }} mm</div>
+                <div>
+                    {{ visual.count }} 點，max {{ "%.4f"|format(visual.max_size_mm or 0) }} mm
+                    {% if visual.non_dot_residues %}，非點狀NG {{ visual.non_dot_residues|length }}{% endif %}
+                </div>
             </div>
             <a href="{{ visual.urls.overlay_url }}" target="_blank">
                 <img class="ws-main-img" src="{{ visual.urls.overlay_url }}" alt="dot overlay">
@@ -387,6 +426,16 @@
                     <div>mask</div>
                 </a>
             </div>
+            {% if visual.thresholds and visual.thresholds.hysteresis_selected_group %}
+            <div style="margin-top:8px;color:var(--text-muted);font-size:0.82rem;line-height:1.6;">
+                Hysteresis group {{ visual.thresholds.hysteresis_selected_group }}
+                ｜G1 {{ visual.thresholds.hysteresis_group1_count }}
+                ｜G2 {{ visual.thresholds.hysteresis_group2_count }}
+                ｜attempt {{ visual.thresholds.hysteresis_group2_attempted }}
+                {% if visual.thresholds.hysteresis_switch_reason %}｜{{ visual.thresholds.hysteresis_switch_reason }}{% endif %}
+                {% if visual.thresholds.hysteresis_group2_reject_reason %}｜{{ visual.thresholds.hysteresis_group2_reject_reason }}{% endif %}
+            </div>
+            {% endif %}
             {% if visual.candidates %}
             <table class="ws-table" style="margin-top:10px;">
                 <thead>
@@ -406,6 +455,32 @@
                         <td>{{ "%.2f"|format(c.size_px or 0) }}</td>
                         <td>{{ c.x }},{{ c.y }},{{ c.w }}x{{ c.h }}</td>
                         <td>{{ c.max_diff }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+            {% if visual.non_dot_residues %}
+            <table class="ws-table" style="margin-top:10px;">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>非點狀原因</th>
+                        <th>bbox</th>
+                        <th>area</th>
+                        <th>aspect</th>
+                        <th>diff</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in visual.non_dot_residues[:12] %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ r.reason }}</td>
+                        <td>{{ r.x }},{{ r.y }},{{ r.w }}x{{ r.h }}</td>
+                        <td>{{ r.area_px }}</td>
+                        <td>{{ "%.3f"|format(r.aspect_ratio or 0) }}</td>
+                        <td>{{ r.max_diff }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -446,9 +521,71 @@
 </section>
 <script>
 (() => {
+    const status = document.getElementById('wsRegenStatus');
+    const debugPayload = {
+        copied_at: new Date().toISOString(),
+        page: 'within_spec_detail',
+        log: {
+            id: {{ log.id | tojson }},
+            client_record_id: {{ log.client_record_id | tojson }},
+            inference_record_id: {{ log.inference_record_id | tojson }},
+            suggested: {{ log.suggested | tojson }},
+            reason: {{ (log.reason or "") | tojson }},
+            error_message: {{ (log.error_message or "") | tojson }},
+            processing_seconds: {{ (log.processing_seconds or 0) | tojson }},
+            created_at: {{ log.created_at | tojson }},
+        },
+        rule_selection: {{ rule_selection | tojson }},
+        panel_summary: {{ summary | tojson }},
+        panel_totals: {{ (detail.panel_totals or []) | tojson }},
+        matches: {{ (detail.matches or []) | tojson }},
+        steps: {{ (detail.steps or []) | tojson }},
+        parameter_snapshot: {{ parameter_snapshot | tojson }},
+        non_dot_residues: {{ (detail.non_dot_residues or []) | tojson }},
+        skipped_tiles: {{ (detail.skipped_tiles or {}) | tojson }},
+        visuals: {{ (detail.visuals or []) | tojson }},
+        inference_context: {{ (detail.inference_context or {}) | tojson }},
+        inference_auto_decision: {{ (detail.inference_auto_decision or {}) | tojson }},
+        source: {{ (detail.source or "") | tojson }},
+    };
+
+    async function copyText(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+            return;
+        }
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', 'readonly');
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+            document.execCommand('copy');
+        } finally {
+            document.body.removeChild(textarea);
+        }
+    }
+
+    const copyButton = document.getElementById('wsCopyDebugLogBtn');
+    if (copyButton) {
+        copyButton.addEventListener('click', async () => {
+            copyButton.disabled = true;
+            if (status) status.textContent = '正在複製排查 Log...';
+            try {
+                await copyText(JSON.stringify(debugPayload, null, 2));
+                if (status) status.textContent = '已複製排查 Log（含參數快照）';
+            } catch (err) {
+                if (status) status.textContent = `複製失敗：${err.message || String(err)}`;
+            } finally {
+                copyButton.disabled = false;
+            }
+        });
+    }
+
     const button = document.getElementById('wsRegenVisualsBtn');
     if (!button) return;
-    const status = document.getElementById('wsRegenStatus');
     button.addEventListener('click', async () => {
         button.disabled = true;
         if (status) status.textContent = '正在重新產生偵測圖片...';

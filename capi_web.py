@@ -311,7 +311,12 @@ def _detect_dot_components(
         bg_kernel = max(3, int(math.ceil(sigma_bg * 6.0 + 1.0)))
         if bg_kernel % 2 == 0:
             bg_kernel += 1
-        bg = cv2.GaussianBlur(gray, (bg_kernel, bg_kernel), sigma_bg)
+        bg = cv2.GaussianBlur(
+            gray,
+            (bg_kernel, bg_kernel),
+            sigma_bg,
+            borderType=cv2.BORDER_REPLICATE,
+        )
         diff = cv2.absdiff(gray, bg)
         diff = cv2.medianBlur(diff, 3)
 
@@ -348,16 +353,61 @@ def _detect_dot_components(
                 chosen[np.isin(low_labels, keep_labels)] = 255
             return chosen
 
+        def _hysteresis_count_mask(mask_to_count):
+            count_mask = mask_to_count.copy()
+            open_size = int(morph_open or 0)
+            if open_size > 1:
+                open_kernel = np.ones((open_size, open_size), dtype=np.uint8)
+                count_mask = cv2.morphologyEx(count_mask, cv2.MORPH_OPEN, open_kernel)
+            if hysteresis_edge_suppress_percent > 0:
+                h, w = gray.shape[:2]
+                border_x = int(w * hysteresis_edge_suppress_percent / 100.0)
+                border_y = int(h * hysteresis_edge_suppress_percent / 100.0)
+                if border_x > 0:
+                    count_mask[:, :border_x] = 0
+                    count_mask[:, w - border_x:] = 0
+                if border_y > 0:
+                    count_mask[:border_y, :] = 0
+                    count_mask[h - border_y:, :] = 0
+            return count_mask
+
         def count_mask_components(mask_to_count):
-            count, _, stats_to_count, _ = cv2.connectedComponentsWithStats(mask_to_count, 8)
+            count_mask = _hysteresis_count_mask(mask_to_count)
+            count, labels_to_count, stats_to_count, _ = cv2.connectedComponentsWithStats(count_mask, 8)
             total = 0
             min_area_for_count = max(1, int(min_area))
             max_area_for_count = int(max_area or 0)
+            if max_area_for_count <= 0:
+                max_area_for_count = gray.shape[0] * gray.shape[1]
+            min_aspect_for_count = max(0.0, float(min_aspect_ratio or 0.0))
+            edge_margin_for_count = max(0, int(edge_margin or 0))
+            background_gray_for_count = float(np.mean(bg))
             for idx in range(1, count):
-                area = int(stats_to_count[idx, cv2.CC_STAT_AREA])
+                x, y, w, h, area = [int(v) for v in stats_to_count[idx]]
                 if area < min_area_for_count:
                     continue
-                if max_area_for_count > 0 and area > max_area_for_count:
+                if area > max_area_for_count:
+                    continue
+                bbox_max = float(max(w, h))
+                aspect_ratio = float(min(w, h) / bbox_max) if bbox_max > 0 else 0.0
+                if min_aspect_for_count > 0 and aspect_ratio < min_aspect_for_count:
+                    continue
+                if edge_margin_for_count > 0:
+                    if (
+                        x < edge_margin_for_count
+                        or y < edge_margin_for_count
+                        or x + w > gray.shape[1] - edge_margin_for_count
+                        or y + h > gray.shape[0] - edge_margin_for_count
+                    ):
+                        continue
+                component_labels = labels_to_count[y:y + h, x:x + w]
+                component_mask = component_labels == idx
+                component_values = gray[y:y + h, x:x + w][component_mask]
+                if component_values.size:
+                    component_polarity = "black" if float(component_values.mean()) < background_gray_for_count else "white"
+                    if component_polarity != polarity:
+                        continue
+                else:
                     continue
                 total += 1
             return total
@@ -371,8 +421,17 @@ def _detect_dot_components(
         group1_count = count_mask_components(group1_mask)
         group2_count = 0
         selected_group = 1
+        group2_attempted = False
+        switch_reason = ""
+        group2_reject_reason = ""
         mask = group1_mask
         if group1_count == 0 or group1_count > hysteresis_switch_count_threshold:
+            group2_attempted = True
+            switch_reason = (
+                "group1_empty"
+                if group1_count == 0
+                else "group1_count_above_switch"
+            )
             group2_mask = hysteresis_mask_for_params(
                 second_high_threshold,
                 second_low_threshold,
@@ -383,6 +442,8 @@ def _detect_dot_components(
             if group2_count <= hysteresis_second_max_count:
                 mask = group2_mask
                 selected_group = 2
+            else:
+                group2_reject_reason = "group2_count_above_max2"
 
         if hysteresis_edge_suppress_percent > 0:
             h, w = gray.shape[:2]
@@ -430,15 +491,80 @@ def _detect_dot_components(
     edge_margin = max(0, int(edge_margin or 0))
 
     candidates = []
+    rejected_candidates = []
     calibrated = unit_per_px > 0
     background_gray = float(np.mean(bg)) if segmentation_method == "hysteresis" else 0.0
+
+    def add_rejected(
+        *,
+        reason: str,
+        label: int,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        area: int,
+        aspect_ratio: float,
+        detected_polarity: str = "",
+    ):
+        if len(rejected_candidates) >= 50:
+            return
+        component_labels = labels[y:y + h, x:x + w]
+        component_mask = component_labels == label
+        component_diff = diff[y:y + h, x:x + w][component_mask]
+        rejected_candidates.append({
+            "reason": reason,
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+            "area_px": area,
+            "aspect_ratio": round(float(aspect_ratio), 3),
+            "max_diff": int(component_diff.max()) if component_diff.size else 0,
+            "mean_diff": round(float(component_diff.mean()), 2) if component_diff.size else 0.0,
+            "expected_polarity": polarity,
+            "detected_polarity": detected_polarity,
+        })
+
     for label in range(1, num_labels):
         x, y, w, h, area = [int(v) for v in stats[label]]
-        if area < min_area or area > max_area:
-            continue
         bbox_max = float(max(w, h))
         aspect_ratio = float(min(w, h) / bbox_max) if bbox_max > 0 else 0.0
+        if area < min_area:
+            add_rejected(
+                reason="area_too_small",
+                label=label,
+                x=x,
+                y=y,
+                w=w,
+                h=h,
+                area=area,
+                aspect_ratio=aspect_ratio,
+            )
+            continue
+        if area > max_area:
+            add_rejected(
+                reason="area_too_large",
+                label=label,
+                x=x,
+                y=y,
+                w=w,
+                h=h,
+                area=area,
+                aspect_ratio=aspect_ratio,
+            )
+            continue
         if min_aspect_ratio > 0 and aspect_ratio < min_aspect_ratio:
+            add_rejected(
+                reason="aspect_ratio_below_min",
+                label=label,
+                x=x,
+                y=y,
+                w=w,
+                h=h,
+                area=area,
+                aspect_ratio=aspect_ratio,
+            )
             continue
         if edge_margin > 0:
             if (
@@ -447,6 +573,16 @@ def _detect_dot_components(
                 or x + w > gray.shape[1] - edge_margin
                 or y + h > gray.shape[0] - edge_margin
             ):
+                add_rejected(
+                    reason="edge_margin",
+                    label=label,
+                    x=x,
+                    y=y,
+                    w=w,
+                    h=h,
+                    area=area,
+                    aspect_ratio=aspect_ratio,
+                )
                 continue
 
         component_labels = labels[y:y + h, x:x + w]
@@ -455,6 +591,17 @@ def _detect_dot_components(
             component_values = gray[y:y + h, x:x + w][component_mask > 0]
             component_polarity = "black" if float(component_values.mean()) < background_gray else "white"
             if component_polarity != polarity:
+                add_rejected(
+                    reason="polarity_mismatch",
+                    label=label,
+                    x=x,
+                    y=y,
+                    w=w,
+                    h=h,
+                    area=area,
+                    aspect_ratio=aspect_ratio,
+                    detected_polarity=component_polarity,
+                )
                 continue
         else:
             component_polarity = polarity
@@ -507,6 +654,7 @@ def _detect_dot_components(
         })
 
     candidates.sort(key=lambda c: (c["is_defect"], c["size_px"]), reverse=True)
+    rejected_candidates.sort(key=lambda c: (c["area_px"], c["max_diff"]), reverse=True)
     for idx, candidate in enumerate(candidates, 1):
         candidate["id"] = idx
         if not include_visuals:
@@ -540,6 +688,7 @@ def _detect_dot_components(
         "diff": diff,
         "mask": mask,
         "candidates": candidates,
+        "rejected_candidates": rejected_candidates,
         "calibrated": calibrated,
         "segmentation_method": segmentation_method,
         "thresholds": {
@@ -562,6 +711,10 @@ def _detect_dot_components(
             "hysteresis_selected_group": int(selected_group),
             "hysteresis_group1_count": int(group1_count),
             "hysteresis_group2_count": int(group2_count),
+            "hysteresis_group2_attempted": bool(group2_attempted),
+            "hysteresis_group2_adopted": bool(selected_group == 2),
+            "hysteresis_switch_reason": switch_reason,
+            "hysteresis_group2_reject_reason": group2_reject_reason,
         })
     if include_visuals:
         diff_norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
@@ -666,6 +819,7 @@ def _detect_white_halo_components(
     edge_margin = max(0, int(edge_margin or 0))
     calibrated = unit_per_px > 0
     candidates = []
+    rejected_candidates = []
     diff = np.zeros_like(gray, dtype=np.uint8)
     brighter = gray.astype(np.int16) - int(round(background_level))
     diff[brighter > 0] = np.clip(brighter[brighter > 0], 0, 255).astype(np.uint8)
@@ -740,6 +894,7 @@ def _detect_white_halo_components(
         })
 
     candidates.sort(key=lambda c: (c["is_defect"], c["size_px"]), reverse=True)
+    rejected_candidates.sort(key=lambda c: (c["area_px"], c["max_diff"]), reverse=True)
     for idx, candidate in enumerate(candidates, 1):
         candidate["id"] = idx
         if not include_visuals:
@@ -755,6 +910,7 @@ def _detect_white_halo_components(
         "diff": diff,
         "mask": mask,
         "candidates": candidates,
+        "rejected_candidates": rejected_candidates,
         "calibrated": calibrated,
         "segmentation_method": "halo",
         "thresholds": {
@@ -1090,6 +1246,120 @@ def _dot_rule_limits(rule: Dict[str, Any]) -> Tuple[float, int, int]:
     return threshold_mm, screen_limit, tile_limit
 
 
+def _aoi_coord_fallback_candidate(
+    tile: Dict[str, Any],
+    crop_box: Tuple[int, int, int, int],
+    polarity: str,
+) -> Optional[Dict[str, Any]]:
+    if not tile.get("is_aoi_coord"):
+        return None
+    product_x = _as_int(tile.get("aoi_product_x"), -1)
+    product_y = _as_int(tile.get("aoi_product_y"), -1)
+    if product_x < 0 or product_y < 0:
+        return None
+
+    x1, y1, x2, y2 = crop_box
+    crop_w = max(1, x2 - x1)
+    crop_h = max(1, y2 - y1)
+    ref_x = _as_int(tile.get("aoi_image_x"), -1)
+    ref_y = _as_int(tile.get("aoi_image_y"), -1)
+    if not (x1 <= ref_x < x2 and y1 <= ref_y < y2):
+        ref_x = _as_int(tile.get("peak_x"), -1)
+        ref_y = _as_int(tile.get("peak_y"), -1)
+    if not (x1 <= ref_x < x2 and y1 <= ref_y < y2):
+        ref_x = x1 + crop_w // 2
+        ref_y = y1 + crop_h // 2
+
+    cx = max(0, min(crop_w - 1, ref_x - x1))
+    cy = max(0, min(crop_h - 1, ref_y - y1))
+    return {
+        "id": 1,
+        "x": max(0, int(cx) - 1),
+        "y": max(0, int(cy) - 1),
+        "w": 3,
+        "h": 3,
+        "area_px": 0,
+        "center_x": round(float(cx), 2),
+        "center_y": round(float(cy), 2),
+        "aspect_ratio": 1.0,
+        "bbox_max_diameter_px": 0.0,
+        "bbox_diagonal_px": 0.0,
+        "equivalent_diameter_px": 0.0,
+        "enclosing_diameter_px": 0.0,
+        "size_mode": "aoi_coord_fallback",
+        "size_px": 0.0,
+        "size_units": 0.0,
+        "size_mm": 0.0,
+        "max_diff": 0,
+        "mean_diff": 0.0,
+        "polarity": polarity,
+        "is_defect": False,
+        "fallback_source": "aoi_coord",
+        "aoi_product_x": product_x,
+        "aoi_product_y": product_y,
+    }
+
+
+def _non_dot_residue_config(dot_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    reasons = dot_cfg.get("non_dot_residue_reasons")
+    if not isinstance(reasons, list):
+        reasons = ["aspect_ratio_below_min", "edge_margin", "area_too_large"]
+    reason_set = {
+        str(reason).strip()
+        for reason in reasons
+        if str(reason or "").strip()
+    }
+    return {
+        "enabled": bool(dot_cfg.get("non_dot_residue_enabled", True)),
+        "min_area_px": max(0, _as_int(dot_cfg.get("non_dot_residue_min_area_px"), 500)),
+        "min_long_side_px": max(0, _as_int(dot_cfg.get("non_dot_residue_min_long_side_px"), 80)),
+        "min_long_side_ratio": max(0.0, _as_float(dot_cfg.get("non_dot_residue_min_long_side_ratio"), 0.15)),
+        "min_max_diff": max(0, _as_int(dot_cfg.get("non_dot_residue_min_max_diff"), 12)),
+        "reasons": sorted(reason_set),
+    }
+
+
+def _non_dot_residue_match(
+    rejected: Dict[str, Any],
+    cfg: Dict[str, Any],
+    crop_box: Tuple[int, int, int, int],
+) -> Optional[Dict[str, Any]]:
+    if not cfg.get("enabled"):
+        return None
+    reason = str(rejected.get("reason") or "")
+    if reason not in set(cfg.get("reasons") or []):
+        return None
+
+    area_px = _as_int(rejected.get("area_px"), 0)
+    max_diff = _as_int(rejected.get("max_diff"), 0)
+    w = _as_int(rejected.get("w"), 0)
+    h = _as_int(rejected.get("h"), 0)
+    long_side = max(w, h)
+    x1, y1, x2, y2 = crop_box
+    crop_long_side = max(1, max(x2 - x1, y2 - y1))
+    long_side_ratio = float(long_side / crop_long_side)
+
+    if area_px < _as_int(cfg.get("min_area_px"), 0):
+        return None
+    if max_diff < _as_int(cfg.get("min_max_diff"), 0):
+        return None
+    if long_side < _as_int(cfg.get("min_long_side_px"), 0):
+        return None
+    if long_side_ratio < _as_float(cfg.get("min_long_side_ratio"), 0.0):
+        return None
+
+    item = dict(rejected)
+    item["long_side_px"] = int(long_side)
+    item["long_side_ratio"] = round(long_side_ratio, 4)
+    item["thresholds"] = {
+        "min_area_px": int(cfg.get("min_area_px", 0)),
+        "min_long_side_px": int(cfg.get("min_long_side_px", 0)),
+        "min_long_side_ratio": round(float(cfg.get("min_long_side_ratio", 0.0)), 4),
+        "min_max_diff": int(cfg.get("min_max_diff", 0)),
+    }
+    return item
+
+
 def _format_within_spec_panel_summary(detail: Dict[str, Any], fallback: str = "") -> str:
     parts = _format_within_spec_panel_summary_parts(detail)
     return "；".join(parts) if parts else fallback
@@ -1124,6 +1394,21 @@ def _format_within_spec_panel_summary_parts(detail: Dict[str, Any]) -> List[str]
             f"{cmp_text('畫面總點數', total_count, screen_limit, screen_count_ok)}；"
             f"{cmp_text('單Tile最大點數', max_tile_count, tile_limit, tile_count_ok)}；"
             f"結果={status}"
+        )
+
+    residues_by_screen: Dict[str, List[Dict[str, Any]]] = {}
+    for item in detail.get("non_dot_residues") or []:
+        screen = item.get("screen") or "UNKNOWN"
+        residues_by_screen.setdefault(screen, []).append(item)
+    for screen, items in residues_by_screen.items():
+        max_area = max((_as_int(item.get("area_px"), 0) for item in items), default=0)
+        max_long_side = max((_as_int(item.get("long_side_px"), 0) for item in items), default=0)
+        max_diff = max((_as_int(item.get("max_diff"), 0) for item in items), default=0)
+        parts.append(
+            f"{screen} 非點狀殘留："
+            f"數量 {len(items)} > 0 [NG]；"
+            f"最大面積 {max_area}px；最大長邊 {max_long_side}px；"
+            f"最大diff {max_diff}；結果=NG"
         )
     return parts
 
@@ -1195,6 +1480,7 @@ def _save_within_spec_dot_visuals(
     processed_crop,
     chosen: Dict[str, Any],
     dot_cfg: Dict[str, Any],
+    non_dot_residues: Optional[List[Dict[str, Any]]] = None,
     output_dir: Optional[Path],
     url_prefix: str,
     image_name: str,
@@ -1229,6 +1515,62 @@ def _save_within_spec_dot_visuals(
         **_dot_hysteresis_kwargs(dot_cfg),
         include_visuals=True,
     )
+    fallback_candidate = chosen.get("fallback_candidate")
+    if fallback_candidate:
+        detected["candidates"] = [fallback_candidate]
+        cx = int(round(_as_float(fallback_candidate.get("center_x"), 0.0)))
+        cy = int(round(_as_float(fallback_candidate.get("center_y"), 0.0)))
+        cv2.drawMarker(
+            detected["overlay"],
+            (cx, cy),
+            (0, 255, 255),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=24,
+            thickness=2,
+            line_type=cv2.LINE_AA,
+        )
+        cv2.circle(detected["overlay"], (cx, cy), 8, (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(
+            detected["overlay"],
+            "AOI fallback",
+            (max(0, cx - 42), max(14, cy - 14)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (0, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    visual_residues = [
+        {k: v for k, v in residue.items() if k != "_key"}
+        for residue in (non_dot_residues or [])
+    ]
+    if visual_residues and detected.get("overlay") is not None:
+        h_img, w_img = detected["overlay"].shape[:2]
+        for idx, residue in enumerate(visual_residues, 1):
+            x = max(0, min(w_img - 1, _as_int(residue.get("x"), 0)))
+            y = max(0, min(h_img - 1, _as_int(residue.get("y"), 0)))
+            w = max(1, _as_int(residue.get("w"), 1))
+            h = max(1, _as_int(residue.get("h"), 1))
+            x2 = max(x + 1, min(w_img - 1, x + w))
+            y2 = max(y + 1, min(h_img - 1, y + h))
+            label_y = max(13, min(h_img - 5, y + 14))
+            label = f"NG residue #{idx}"
+            for key in ("overlay", "mask_color", "diff_color"):
+                canvas = detected.get(key)
+                if canvas is None:
+                    continue
+                cv2.rectangle(canvas, (x, y), (x2, y2), (0, 0, 255), 2)
+                cv2.putText(
+                    canvas,
+                    label,
+                    (x + 4, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42,
+                    (0, 0, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
 
     files = {
         "crop_url": f"{prefix}_crop.png",
@@ -1250,11 +1592,14 @@ def _save_within_spec_dot_visuals(
         "dot_label": chosen["label"],
         "segmentation_method": detected.get("segmentation_method", ""),
         "auto_candidates": detected.get("auto_candidates", []),
+        "fallback_source": chosen.get("fallback_source", ""),
         "crop_box": crop_box,
         "count": len(detected["candidates"]),
         "max_size_mm": max((_as_float(c.get("size_mm"), 0.0) for c in detected["candidates"]), default=0.0),
         "threshold_mm": chosen["threshold_mm"],
         "candidates": detected["candidates"][:30],
+        "non_dot_residues": visual_residues[:20],
+        "thresholds": detected.get("thresholds", {}),
         "urls": {key: f"{url_prefix}/{filename}" for key, filename in files.items()},
     }
 
@@ -1287,6 +1632,7 @@ def _evaluate_within_spec_suggestion_detail(
         "panel_totals": [],
         "panel_summary": {},
         "visuals": [],
+        "non_dot_residues": [],
         "rule_selection": {},
         "parameter_snapshot": {},
     }
@@ -1317,6 +1663,7 @@ def _evaluate_within_spec_suggestion_detail(
     if effective_segmentation_method not in ("background_diff", "hysteresis", "morph_hat", "adaptive_mean", "halo", "auto", "off"):
         effective_segmentation_method = "background_diff"
     effective_hysteresis = _dot_hysteresis_kwargs(dot_cfg)
+    non_dot_cfg = _non_dot_residue_config(dot_cfg)
     result["parameter_snapshot"] = {
         "captured_at": datetime.now().isoformat(timespec="seconds"),
         "candidate_keys": machine_candidates,
@@ -1336,6 +1683,7 @@ def _evaluate_within_spec_suggestion_detail(
                 "morph_open": max(0, _as_int(dot_cfg.get("morph_open"), 0)),
                 "min_aspect_ratio": max(0.0, _as_float(dot_cfg.get("min_aspect_ratio"), 0.45)),
                 "edge_margin_px": max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
+                "non_dot_residue": _json_safe_snapshot(non_dot_cfg),
                 "size_metric": str(dot_cfg.get("size_metric") or "bbox_diagonal"),
                 "unit_per_px": max(0.0, _as_float(dot_cfg.get("unit_per_px"), DOT_RULER_MM_PER_PX)),
             },
@@ -1358,6 +1706,8 @@ def _evaluate_within_spec_suggestion_detail(
         ("white_dot", "white", "白點"),
     )
     aggregates: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    non_dot_residues: List[Dict[str, Any]] = []
+    non_dot_keys = set()
 
     for image in detail.get("images") or []:
         screen_code = _within_spec_screen_code(image.get("image_name") or image.get("image_path"), screens)
@@ -1434,7 +1784,7 @@ def _evaluate_within_spec_suggestion_detail(
                 threshold_mm, screen_limit, tile_limit = _dot_rule_limits(rule)
                 if rule.get("enabled") is False:
                     continue
-                if threshold_mm <= 0 or screen_limit <= 0 or tile_limit <= 0:
+                if threshold_mm <= 0 or screen_limit < 0 or tile_limit < 0:
                     add_step(
                         "略過點類規則：門檻或數量設定無效",
                         screen=screen_code,
@@ -1470,11 +1820,13 @@ def _evaluate_within_spec_suggestion_detail(
                     "label": label,
                     "segmentation_method": detected.get("segmentation_method", ""),
                     "auto_candidates": detected.get("auto_candidates", []),
+                    "thresholds": detected.get("thresholds", {}),
                     "rule": rule,
                     "threshold_mm": threshold_mm,
                     "screen_limit": screen_limit,
                     "tile_limit": tile_limit,
                     "candidates": candidates,
+                    "rejected_candidates": detected.get("rejected_candidates", []),
                     "count": len(candidates),
                     "max_size_mm": max_size_mm,
                 })
@@ -1489,23 +1841,104 @@ def _evaluate_within_spec_suggestion_detail(
                 continue
 
             chosen = max(detections, key=lambda d: (d["max_size_mm"], d["count"]))
+            tile_non_dot_residues: List[Dict[str, Any]] = []
+            tile_non_dot_keys = set()
             detection_summary = {
                 d["dot_type"]: {
                     "count": d["count"],
                     "max_size_mm": round(float(d["max_size_mm"]), 4),
                     "segmentation_method": d["segmentation_method"],
+                    "rejected_count": len(d.get("rejected_candidates") or []),
+                    "thresholds": d.get("thresholds", {}),
                 }
                 for d in detections
             }
-            if chosen["count"] <= 0:
+            rejected_summary = {
+                d["dot_type"]: (d.get("rejected_candidates") or [])[:12]
+                for d in detections
+                if d.get("rejected_candidates")
+            }
+            if rejected_summary:
                 add_step(
-                    "tile 判定完成：未偵測到黑點/白點候選",
+                    "點候選被過濾",
                     image=image.get("image_name") or "",
                     tile_id=tile.get("tile_id"),
                     crop_box=crop_box,
-                    detection=detection_summary,
+                    rejected=rejected_summary,
                 )
-                continue
+                for detection in detections:
+                    dot_type = detection["dot_type"]
+                    for rejected in detection.get("rejected_candidates") or []:
+                        matched = _non_dot_residue_match(rejected, non_dot_cfg, crop_box)
+                        if not matched:
+                            continue
+                        key = (
+                            image.get("image_name") or image_path.name,
+                            tile.get("tile_id"),
+                            matched.get("reason"),
+                            matched.get("x"),
+                            matched.get("y"),
+                            matched.get("w"),
+                            matched.get("h"),
+                        )
+                        if key in non_dot_keys:
+                            for item in non_dot_residues:
+                                if item.get("_key") == key and dot_type not in item["dot_types"]:
+                                    item["dot_types"].append(dot_type)
+                                if item.get("_key") == key and key not in tile_non_dot_keys:
+                                    tile_non_dot_keys.add(key)
+                                    tile_non_dot_residues.append(item)
+                            continue
+                        non_dot_keys.add(key)
+                        matched.update({
+                            "_key": key,
+                            "image": image.get("image_name") or image_path.name,
+                            "screen": screen_code,
+                            "tile_id": tile.get("tile_id"),
+                            "crop_box": crop_box,
+                            "dot_types": [dot_type],
+                        })
+                        non_dot_residues.append(matched)
+                        tile_non_dot_keys.add(key)
+                        tile_non_dot_residues.append(matched)
+            if chosen["count"] <= 0:
+                fallback_candidate = (
+                    _aoi_coord_fallback_candidate(tile, crop_box, chosen["polarity"])
+                    if len(detections) == 1 else None
+                )
+                if fallback_candidate:
+                    chosen = dict(chosen)
+                    chosen["count"] = 1
+                    chosen["max_size_mm"] = 0.0
+                    chosen["candidates"] = [fallback_candidate]
+                    chosen["fallback_source"] = "aoi_coord"
+                    chosen["fallback_candidate"] = fallback_candidate
+                    detection_summary[chosen["dot_type"]].update({
+                        "raw_count": 0,
+                        "count": 1,
+                        "fallback_source": "aoi_coord",
+                        "aoi_product_x": fallback_candidate["aoi_product_x"],
+                        "aoi_product_y": fallback_candidate["aoi_product_y"],
+                    })
+                    add_step(
+                        "tile 點偵測未命中，使用 AOI 座標作為 1 點",
+                        image=image.get("image_name") or "",
+                        tile_id=tile.get("tile_id"),
+                        crop_box=crop_box,
+                        classified_as=chosen["dot_type"],
+                        aoi_product_x=fallback_candidate["aoi_product_x"],
+                        aoi_product_y=fallback_candidate["aoi_product_y"],
+                        detection=detection_summary,
+                    )
+                else:
+                    add_step(
+                        "tile 判定完成：未偵測到黑點/白點候選",
+                        image=image.get("image_name") or "",
+                        tile_id=tile.get("tile_id"),
+                        crop_box=crop_box,
+                        detection=detection_summary,
+                    )
+                    continue
 
             result["evaluated_tile_count"] += 1
             key = (screen_code, chosen["dot_type"])
@@ -1522,6 +1955,7 @@ def _evaluate_within_spec_suggestion_detail(
                 "max_tile_count": 0,
                 "max_size_mm": 0.0,
                 "target_tile_count": 0,
+                "fallback_count": 0,
                 "aoi_defect_codes": set(),
                 "tiles": [],
             })
@@ -1529,21 +1963,32 @@ def _evaluate_within_spec_suggestion_detail(
             state["max_tile_count"] = max(state["max_tile_count"], chosen["count"])
             state["max_size_mm"] = max(state["max_size_mm"], chosen["max_size_mm"])
             state["target_tile_count"] += 1
+            if chosen.get("fallback_source"):
+                state["fallback_count"] += 1
             if tile.get("aoi_defect_code"):
                 state["aoi_defect_codes"].add(str(tile.get("aoi_defect_code")))
-            state["tiles"].append({
+            tile_detail = {
                 "tile_id": tile.get("tile_id"),
                 "count": chosen["count"],
                 "max_size_mm": round(float(chosen["max_size_mm"]), 4),
                 "segmentation_method": chosen["segmentation_method"],
                 "auto_candidates": chosen["auto_candidates"],
+                "thresholds": chosen.get("thresholds", {}),
                 "crop_box": crop_box,
-            })
+            }
+            if chosen.get("fallback_source"):
+                tile_detail.update({
+                    "fallback_source": chosen["fallback_source"],
+                    "aoi_product_x": fallback_candidate["aoi_product_x"],
+                    "aoi_product_y": fallback_candidate["aoi_product_y"],
+                })
+            state["tiles"].append(tile_detail)
             visual = _save_within_spec_dot_visuals(
                 tile_crop=tile_crop,
                 processed_crop=processed_crop,
                 chosen=chosen,
                 dot_cfg=dot_cfg,
+                non_dot_residues=tile_non_dot_residues,
                 output_dir=visual_output_dir,
                 url_prefix=visual_url_prefix,
                 image_name=image.get("image_name") or image_path.name,
@@ -1576,6 +2021,7 @@ def _evaluate_within_spec_suggestion_detail(
             "screen_count_limit": int(state["screen_count_limit"]),
             "max_tile_count": int(state["max_tile_count"]),
             "tile_count_threshold": int(state["tile_count_threshold"]),
+            "fallback_count": int(state["fallback_count"]),
             "rule": state["rule"],
         })
         within = (
@@ -1611,20 +2057,34 @@ def _evaluate_within_spec_suggestion_detail(
             "max_tile_count": int(state["max_tile_count"]),
             "tile_count_threshold": int(state["tile_count_threshold"]),
             "target_tile_count": int(state["target_tile_count"]),
+            "fallback_count": int(state["fallback_count"]),
             "aoi_defect_codes": sorted(state["aoi_defect_codes"]),
             "rule": state["rule"],
             "tiles": state["tiles"][:20],
         })
 
     result["panel_totals"] = panel_totals
+    result["non_dot_residues"] = [
+        {k: v for k, v in item.items() if k != "_key"}
+        for item in non_dot_residues[:50]
+    ]
     result["panel_summary"] = {
         "total_dot_count": sum(item["total_count"] for item in panel_totals),
         "total_visuals": len(result["visuals"]),
         "target_tile_count": result["target_tile_count"],
         "evaluated_tile_count": result["evaluated_tile_count"],
+        "fallback_count": sum(item.get("fallback_count", 0) for item in panel_totals),
+        "non_dot_residue_count": len(non_dot_residues),
         "skipped_tiles": result["skipped_tiles"],
     }
     result["matches"] = matches[:5]
+    if non_dot_residues:
+        add_step(
+            "非點狀殘留命中：不建議規格內",
+            count=len(non_dot_residues),
+            residues=result["non_dot_residues"][:12],
+        )
+        return result
     if not matches:
         add_step("判定結果：未符合規格內建議條件")
         return result
@@ -3069,6 +3529,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if self.inferencer and hasattr(self.inferencer.config, name):
                 return getattr(self.inferencer.config, name)
             return default_val
+
+        from capi_config import CAPIConfig
+
+        try:
+            within_spec_rules = CAPIConfig._normalize_within_spec_judgment_rules(
+                get_val(WITHIN_SPEC_PARAM, CAPIConfig().within_spec_judgment_rules)
+            )
+            dot_detection_defaults = (
+                within_spec_rules.get("default", {}).get("dot_detection", {})
+                if isinstance(within_spec_rules, dict)
+                else {}
+            )
+        except Exception:
+            dot_detection_defaults = CAPIConfig().within_spec_judgment_rules["default"]["dot_detection"]
         
         dot_sample_dir = Path(__file__).resolve().parent / "templates" / "imgs"
         template = self.jinja_env.get_template("debug_inference.html")
@@ -3103,6 +3577,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             default_aoi_edge_inspector=get_val('aoi_edge_inspector', 'cv'),
             preprocess_methods=get_method_specs(),
             dot_samples=_list_debug_dot_samples(dot_sample_dir),
+            dot_detection_defaults=dot_detection_defaults,
             dot_default_mm_per_px=DOT_RULER_MM_PER_PX,
             dot_calibration_points=DOT_RULER_CALIBRATION_POINTS,
             dot_calibration_source=DOT_RULER_CALIBRATION_SOURCE,
@@ -6018,6 +6493,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             unit_per_px = DOT_RULER_MM_PER_PX
         defect_threshold = max(0.0, as_float("defect_threshold", 0.3))
         unit_label = str(data.get("unit_label") or "mm").strip()[:16] or "mm"
+        non_dot_cfg = _non_dot_residue_config({
+            "non_dot_residue_enabled": as_bool("non_dot_residue_enabled", True),
+            "non_dot_residue_min_area_px": as_int("non_dot_residue_min_area_px", 500),
+            "non_dot_residue_min_long_side_px": as_int("non_dot_residue_min_long_side_px", 80),
+            "non_dot_residue_min_long_side_ratio": as_float("non_dot_residue_min_long_side_ratio", 0.15),
+            "non_dot_residue_min_max_diff": as_int("non_dot_residue_min_max_diff", 12),
+            "non_dot_residue_reasons": data.get(
+                "non_dot_residue_reasons",
+                ["aspect_ratio_below_min", "edge_margin", "area_too_large"],
+            ),
+        })
 
         try:
             started = _time.time()
@@ -6037,6 +6523,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "mask_color": cv2.cvtColor(blank, cv2.COLOR_GRAY2BGR),
                     "diff_color": cv2.cvtColor(blank, cv2.COLOR_GRAY2BGR),
                     "candidates": [],
+                    "rejected_candidates": [],
                     "calibrated": unit_per_px > 0,
                     "segmentation_method": "off",
                     "detected_polarity": polarity,
@@ -6082,6 +6569,54 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     hysteresis_second_max_count=hysteresis_second_max_count,
                     hysteresis_edge_suppress_percent=hysteresis_edge_suppress_percent,
                 )
+
+            non_dot_residues = []
+            if non_dot_cfg.get("enabled"):
+                h_img, w_img = processed_image.shape[:2]
+                crop_box = (0, 0, int(w_img), int(h_img))
+                seen_residues = set()
+                for rejected in detected.get("rejected_candidates") or []:
+                    matched = _non_dot_residue_match(rejected, non_dot_cfg, crop_box)
+                    if not matched:
+                        continue
+                    key = (
+                        matched.get("reason"),
+                        matched.get("x"),
+                        matched.get("y"),
+                        matched.get("w"),
+                        matched.get("h"),
+                    )
+                    if key in seen_residues:
+                        continue
+                    seen_residues.add(key)
+                    non_dot_residues.append(matched)
+
+            if non_dot_residues:
+                h_img, w_img = detected["overlay"].shape[:2]
+                for idx, residue in enumerate(non_dot_residues[:20], 1):
+                    x = max(0, min(w_img - 1, _as_int(residue.get("x"), 0)))
+                    y = max(0, min(h_img - 1, _as_int(residue.get("y"), 0)))
+                    w = max(1, _as_int(residue.get("w"), 1))
+                    h = max(1, _as_int(residue.get("h"), 1))
+                    x2 = max(x + 1, min(w_img - 1, x + w))
+                    y2 = max(y + 1, min(h_img - 1, y + h))
+                    label_y = max(13, min(h_img - 5, y + 14))
+                    label = f"NG residue #{idx}"
+                    for key in ("overlay", "mask_color", "diff_color"):
+                        canvas = detected.get(key)
+                        if canvas is None:
+                            continue
+                        cv2.rectangle(canvas, (x, y), (x2, y2), (0, 0, 255), 2)
+                        cv2.putText(
+                            canvas,
+                            label,
+                            (x + 4, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.42,
+                            (0, 0, 255),
+                            1,
+                            cv2.LINE_AA,
+                        )
 
             if CAPIWebHandler._debug_heatmap_dir is None:
                 CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
@@ -6162,6 +6697,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "unit_per_px": unit_per_px,
                     "defect_threshold": defect_threshold,
                     "use_default_calibration": use_default_calibration,
+                    "non_dot_residue_enabled": bool(non_dot_cfg.get("enabled")),
+                    "non_dot_residue_min_area_px": int(non_dot_cfg.get("min_area_px", 0)),
+                    "non_dot_residue_min_long_side_px": int(non_dot_cfg.get("min_long_side_px", 0)),
+                    "non_dot_residue_min_long_side_ratio": float(non_dot_cfg.get("min_long_side_ratio", 0.0)),
+                    "non_dot_residue_min_max_diff": int(non_dot_cfg.get("min_max_diff", 0)),
+                },
+                "non_dot_residue": {
+                    "enabled": bool(non_dot_cfg.get("enabled")),
+                    "count": len(non_dot_residues),
+                    "blocks_within_spec": bool(non_dot_residues),
+                    "params": non_dot_cfg,
+                    "residues": non_dot_residues[:50],
                 },
                 "auto_candidates": detected.get("auto_candidates", []),
                 "candidates": candidates[:300],
