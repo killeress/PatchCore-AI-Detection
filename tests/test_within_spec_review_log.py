@@ -124,8 +124,33 @@ def test_within_spec_detail_template_renders():
                         "mask_url": "/heatmaps/ws/mask.png",
                     },
                     "candidates": [{"id": 1, "size_mm": 0.13, "size_px": 6.0, "x": 1, "y": 2, "w": 3, "h": 4, "max_diff": 10}],
+                    "thresholds": {
+                        "hysteresis_selected_group": 1,
+                        "hysteresis_group1_count": 6,
+                        "hysteresis_group2_count": 4,
+                        "hysteresis_group2_attempted": True,
+                        "hysteresis_switch_reason": "group1_count_above_switch",
+                        "hysteresis_group2_reject_reason": "group2_count_above_max2",
+                    },
+                }],
+                "non_dot_residues": [{
+                    "screen": "W0F00000",
+                    "image": "W0F00000.png",
+                    "tile_id": 1,
+                    "reason": "aspect_ratio_below_min",
+                    "x": 0,
+                    "y": 0,
+                    "w": 128,
+                    "h": 5,
+                    "area_px": 640,
+                    "aspect_ratio": 0.039,
+                    "long_side_px": 128,
+                    "long_side_ratio": 1.0,
+                    "max_diff": 20,
                 }],
                 "steps": [{"message": "開始判定圖片", "screen": "W0F00000"}],
+                "parameter_snapshot": {"matched_machine_key": "MODEL_A"},
+                "inference_auto_decision": {"reason": "非點狀殘留"},
             },
         },
     )
@@ -134,7 +159,14 @@ def test_within_spec_detail_template_renders():
     assert "/record/3" in html
     assert "MODEL_A" in html
     assert "點偵測結果圖片" in html
+    assert "非點狀殘留" in html
+    assert "aspect_ratio_below_min" in html
     assert "/heatmaps/ws/overlay.png" in html
+    assert "複製排查 Log" in html
+    assert "parameter_snapshot" in html
+    assert "non_dot_residues" in html
+    assert "Hysteresis group 1" in html
+    assert "group2_count_above_max2" in html
     assert "重新產生偵測圖片" in html
 
 

@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from pathlib import Path
 
 from capi_web import (
     _detect_dot_components,
@@ -237,6 +238,34 @@ def test_within_spec_suggestion_classifies_white_dot_tile(tmp_path):
     assert suggestion["matches"][0]["dot_type"] == "white_dot"
 
 
+def test_within_spec_zero_white_dot_limit_means_not_allowed(tmp_path):
+    image_path = tmp_path / "W0F00000.png"
+    _write_white_dot_image(image_path, [(48, 48)])
+
+    rules = _rules(white_enabled=True)
+    white_rule = rules["default"]["screens"]["W0F00000"]["white_dot"]
+    white_rule["screen_count_limit"] = 0
+    white_rule["tile_count_threshold"] = 0
+
+    detail = _evaluate_within_spec_suggestion_detail(
+        _detail(image_path),
+        rules,
+    )
+
+    assert detail["suggestion"] is None
+    assert detail["panel_summary"]["total_dot_count"] == 1
+    assert detail["panel_totals"][0]["dot_type"] == "white_dot"
+    assert detail["panel_totals"][0]["total_count"] == 1
+    assert detail["panel_totals"][0]["screen_count_limit"] == 0
+    assert detail["panel_totals"][0]["tile_count_threshold"] == 0
+    assert detail["panel_totals"][0]["within"] is False
+    assert not any(
+        step.get("dot_type") == "white_dot"
+        and step["message"] == "略過點類規則：門檻或數量設定無效"
+        for step in detail["steps"]
+    )
+
+
 def test_within_spec_detail_saves_visuals_and_panel_totals(tmp_path):
     image_path = tmp_path / "W0F00000.png"
     visual_dir = tmp_path / "visuals"
@@ -259,6 +288,135 @@ def test_within_spec_detail_saves_visuals_and_panel_totals(tmp_path):
     assert detail["parameter_snapshot"]["full_rules"]["default"]["dot_detection"]["size_metric"] == "bbox_max"
     assert detail["visuals"][0]["urls"]["overlay_url"].startswith("/heatmaps/test/within_spec/")
     assert any(p.name.endswith("_overlay.png") for p in visual_dir.iterdir())
+
+
+def test_within_spec_counts_aoi_ng_tile_when_dot_detector_misses(tmp_path):
+    image_path = tmp_path / "WGF50500.png"
+    visual_dir = tmp_path / "visuals"
+    image = np.full((64, 128, 3), 128, dtype=np.uint8)
+    cv2.circle(image, (96, 32), 3, (60, 60, 60), -1)
+    cv2.imwrite(str(image_path), image)
+
+    rules = _rules(screen_limit=2, tile_limit=1)
+    rules["default"]["screens"]["WGF50500"] = rules["default"]["screens"].pop("W0F00000")
+    detail = {
+        "model_id": "GN156HRAAPF0S",
+        "images": [
+            {
+                "image_name": "WGF50500.png",
+                "image_path": str(image_path),
+                "tiles": [
+                    {
+                        "tile_id": 0,
+                        "x": 0,
+                        "y": 0,
+                        "width": 64,
+                        "height": 64,
+                        "is_anomaly": 1,
+                        "is_dust": 0,
+                        "is_bomb": 0,
+                        "is_exclude_zone": 0,
+                        "scratch_filtered": 0,
+                        "is_aoi_coord": 1,
+                        "aoi_defect_code": "C1111",
+                        "aoi_product_x": 1444,
+                        "aoi_product_y": 724,
+                        "aoi_image_x": 32,
+                        "aoi_image_y": 32,
+                    },
+                    {
+                        "tile_id": 1,
+                        "x": 64,
+                        "y": 0,
+                        "width": 64,
+                        "height": 64,
+                        "is_anomaly": 1,
+                        "is_dust": 0,
+                        "is_bomb": 0,
+                        "is_exclude_zone": 0,
+                        "scratch_filtered": 0,
+                        "is_aoi_coord": 1,
+                        "aoi_defect_code": "C1111",
+                        "aoi_product_x": 1545,
+                        "aoi_product_y": 933,
+                        "aoi_image_x": 96,
+                        "aoi_image_y": 32,
+                    },
+                ],
+            }
+        ],
+    }
+
+    result = _evaluate_within_spec_suggestion_detail(
+        detail,
+        rules,
+        visual_output_dir=visual_dir,
+        visual_url_prefix="/heatmaps/test/within_spec",
+    )
+
+    assert result["suggestion"] is not None
+    assert result["panel_summary"]["target_tile_count"] == 2
+    assert result["panel_summary"]["evaluated_tile_count"] == 2
+    assert result["panel_summary"]["total_dot_count"] == 2
+    assert result["panel_summary"]["fallback_count"] == 1
+    assert result["panel_totals"][0]["screen"] == "WGF50500"
+    assert result["panel_totals"][0]["total_count"] == 2
+    assert result["matches"][0]["screen_count"] == 2
+    assert result["matches"][0]["tiles"][0]["fallback_source"] == "aoi_coord"
+    assert any(
+        v.get("fallback_source") == "aoi_coord" and v["count"] == 1
+        for v in result["visuals"]
+    )
+    assert any(
+        step["message"] == "tile 點偵測未命中，使用 AOI 座標作為 1 點"
+        for step in result["steps"]
+    )
+
+
+def test_within_spec_rejects_large_non_dot_residue(tmp_path):
+    image_path = tmp_path / "W0F00000.png"
+    image = np.full((128, 128, 3), 128, dtype=np.uint8)
+    cv2.rectangle(image, (0, 0), (127, 5), (60, 60, 60), -1)
+    cv2.circle(image, (64, 64), 3, (60, 60, 60), -1)
+    cv2.imwrite(str(image_path), image)
+
+    rules = _rules(screen_limit=2, tile_limit=1, threshold_mm=0.5, segmentation_method="hysteresis")
+    rules["default"]["dot_detection"]["max_area_px"] = 50000
+
+    detail = _evaluate_within_spec_suggestion_detail(
+        _detail(image_path, tile_size=128),
+        rules,
+        visual_output_dir=tmp_path / "visuals",
+        visual_url_prefix="/visuals",
+    )
+
+    assert detail["suggestion"] is None
+    assert detail["panel_totals"][0]["within"] is True
+    assert detail["panel_summary"]["non_dot_residue_count"] == 1
+    residue = detail["non_dot_residues"][0]
+    assert residue["screen"] == "W0F00000"
+    assert residue["reason"] == "aspect_ratio_below_min"
+    assert residue["area_px"] >= 500
+    assert residue["long_side_px"] >= 80
+    assert detail["visuals"][0]["non_dot_residues"][0]["reason"] == "aspect_ratio_below_min"
+    assert detail["visuals"][0]["thresholds"]["hysteresis_selected_group"] in (1, 2)
+    classified_step = next(
+        step for step in detail["steps"]
+        if step["message"] == "tile 點類分類完成"
+    )
+    assert "hysteresis_group2_attempted" in classified_step["detection"]["black_dot"]["thresholds"]
+    overlay_name = Path(detail["visuals"][0]["urls"]["overlay_url"]).name
+    overlay = cv2.imread(str(tmp_path / "visuals" / overlay_name))
+    assert overlay is not None
+    red_pixels = (overlay[:, :, 2] > 180) & (overlay[:, :, 1] < 80) & (overlay[:, :, 0] < 80)
+    assert int(red_pixels.sum()) > 0
+    summary = _format_within_spec_panel_summary(detail)
+    assert "非點狀殘留" in summary
+    assert "結果=NG" in summary
+    assert any(
+        step["message"] == "非點狀殘留命中：不建議規格內"
+        for step in detail["steps"]
+    )
 
 
 def test_dot_detection_hysteresis_expands_low_contrast_boundary():
@@ -338,6 +496,94 @@ def test_dot_detection_hysteresis_v2_switches_to_second_group_when_group1_empty(
     assert detected["thresholds"]["hysteresis_group1_count"] == 0
     assert detected["thresholds"]["hysteresis_group2_count"] >= 1
     assert detected["thresholds"]["hysteresis_selected_group"] == 2
+    assert detected["thresholds"]["hysteresis_group2_attempted"] is True
+    assert detected["thresholds"]["hysteresis_group2_adopted"] is True
+    assert detected["thresholds"]["hysteresis_switch_reason"] == "group1_empty"
+    assert detected["thresholds"]["hysteresis_group2_reject_reason"] == ""
+
+
+def test_dot_detection_hysteresis_v2_records_second_group_reject_reason():
+    image = np.full((128, 128, 3), 128, dtype=np.uint8)
+    for center in ((24, 24), (64, 24), (104, 24), (24, 64), (64, 64), (104, 64)):
+        cv2.circle(image, center, 5, (118, 118, 118), -1)
+
+    detected = _detect_dot_components(
+        image,
+        polarity="black",
+        diff_threshold=4,
+        background_kernel=31,
+        min_area=5,
+        max_area=5000,
+        morph_open=0,
+        size_metric="bbox_max",
+        unit_per_px=1.0,
+        defect_threshold=0.0,
+        segmentation_method="hysteresis",
+        hysteresis_low_threshold=2,
+        hysteresis_high_threshold=3,
+        hysteresis_edge_width_percent=3.0,
+        hysteresis_edge_extra_threshold=2,
+        hysteresis_second_low_threshold=3,
+        hysteresis_second_high_threshold=4,
+        hysteresis_second_edge_width_percent=3.0,
+        hysteresis_second_edge_extra_threshold=2,
+        hysteresis_switch_count_threshold=2,
+        hysteresis_second_max_count=1,
+        hysteresis_edge_suppress_percent=0.0,
+        include_visuals=False,
+    )
+
+    assert detected["thresholds"]["hysteresis_group1_count"] > 2
+    assert detected["thresholds"]["hysteresis_group2_count"] > 1
+    assert detected["thresholds"]["hysteresis_selected_group"] == 1
+    assert detected["thresholds"]["hysteresis_group2_attempted"] is True
+    assert detected["thresholds"]["hysteresis_group2_adopted"] is False
+    assert detected["thresholds"]["hysteresis_switch_reason"] == "group1_count_above_switch"
+    assert detected["thresholds"]["hysteresis_group2_reject_reason"] == "group2_count_above_max2"
+
+
+def test_dot_detection_hysteresis_v2_switch_count_uses_filtered_candidates():
+    image = np.full((128, 128, 3), 128, dtype=np.uint8)
+    cv2.circle(image, (64, 64), 5, (105, 105, 105), -1)
+    for y in (5, 30, 55, 80, 105):
+        cv2.rectangle(image, (124, y), (127, min(127, y + 12)), (118, 118, 118), -1)
+
+    detected = _detect_dot_components(
+        image,
+        polarity="black",
+        diff_threshold=4,
+        background_kernel=31,
+        min_area=5,
+        max_area=5000,
+        morph_open=0,
+        size_metric="bbox_max",
+        unit_per_px=1.0,
+        defect_threshold=0.0,
+        min_aspect_ratio=0.45,
+        edge_margin=8,
+        segmentation_method="hysteresis",
+        hysteresis_low_threshold=2,
+        hysteresis_high_threshold=3,
+        hysteresis_edge_width_percent=0.0,
+        hysteresis_edge_extra_threshold=0,
+        hysteresis_second_low_threshold=3,
+        hysteresis_second_high_threshold=4,
+        hysteresis_second_edge_width_percent=0.0,
+        hysteresis_second_edge_extra_threshold=0,
+        hysteresis_switch_count_threshold=0,
+        hysteresis_second_max_count=1,
+        hysteresis_edge_suppress_percent=0.0,
+        include_visuals=False,
+    )
+
+    thresholds = detected["thresholds"]
+    assert thresholds["hysteresis_group1_count"] == 1
+    assert thresholds["hysteresis_group2_count"] == 1
+    assert thresholds["hysteresis_selected_group"] == 2
+    assert thresholds["hysteresis_group2_adopted"] is True
+    assert len(detected["candidates"]) == 1
+    assert detected["candidates"][0]["aspect_ratio"] == 1.0
+    assert any(r["reason"] == "aspect_ratio_below_min" for r in detected["rejected_candidates"])
 
 
 def test_dot_detection_morph_hat_expands_low_contrast_dark_dot():
@@ -435,6 +681,11 @@ def test_dot_detection_filters_line_and_edge_components():
     candidate = detected["candidates"][0]
     assert 43 <= candidate["x"] <= 49
     assert candidate["aspect_ratio"] >= 0.45
+    assert any(
+        rejected["reason"] == "aspect_ratio_below_min"
+        and rejected["x"] == 0
+        for rejected in detected["rejected_candidates"]
+    )
 
 
 def test_white_halo_detection_measures_area_around_dark_seed():
