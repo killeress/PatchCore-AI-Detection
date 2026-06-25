@@ -3542,7 +3542,21 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 else {}
             )
         except Exception:
-            dot_detection_defaults = CAPIConfig().within_spec_judgment_rules["default"]["dot_detection"]
+            within_spec_rules = CAPIConfig().within_spec_judgment_rules
+            dot_detection_defaults = within_spec_rules["default"]["dot_detection"]
+
+        dot_machine_configs = {}
+        if isinstance(within_spec_rules, dict):
+            for machine_key, machine_cfg in within_spec_rules.items():
+                if not isinstance(machine_cfg, dict):
+                    continue
+                dot_cfg = machine_cfg.get("dot_detection") or {}
+                if not isinstance(dot_cfg, dict):
+                    continue
+                dot_machine_configs[str(machine_key)] = {
+                    "display_name": str(machine_cfg.get("display_name") or machine_key),
+                    "dot_detection": _json_safe_snapshot(dot_cfg),
+                }
         
         dot_sample_dir = Path(__file__).resolve().parent / "templates" / "imgs"
         template = self.jinja_env.get_template("debug_inference.html")
@@ -3581,6 +3595,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             dot_default_mm_per_px=DOT_RULER_MM_PER_PX,
             dot_calibration_points=DOT_RULER_CALIBRATION_POINTS,
             dot_calibration_source=DOT_RULER_CALIBRATION_SOURCE,
+            dot_machine_configs=dot_machine_configs,
         )
         self._send_response(200, html)
 
@@ -6496,6 +6511,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         non_dot_cfg = _non_dot_residue_config({
             "non_dot_residue_enabled": as_bool("non_dot_residue_enabled", True),
             "non_dot_residue_min_area_px": as_int("non_dot_residue_min_area_px", 500),
+        preprocess_method = str(data.get("preprocess_method") or DOT_PREPROCESS_METHOD).strip() or DOT_PREPROCESS_METHOD
+        preprocess_params = data.get("preprocess_params")
+        if not isinstance(preprocess_params, dict):
+            preprocess_params = DOT_PREPROCESS_PARAMS
             "non_dot_residue_min_long_side_px": as_int("non_dot_residue_min_long_side_px", 80),
             "non_dot_residue_min_long_side_ratio": as_float("non_dot_residue_min_long_side_ratio", 0.15),
             "non_dot_residue_min_max_diff": as_int("non_dot_residue_min_max_diff", 12),
@@ -6511,7 +6530,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if image is None:
                 self._send_json({"error": f"無法讀取圖片: {image_path}"}, status=400)
                 return
-            processed_image, preprocess_info = _preprocess_dot_image_for_detection(image)
+            processed_image, preprocess_info = _preprocess_dot_image_for_detection(
+                image,
+                method=preprocess_method,
+                params=preprocess_params,
+            )
 
             if segmentation_method == "off":
                 blank = np.zeros(processed_image.shape[:2], dtype=np.uint8)
