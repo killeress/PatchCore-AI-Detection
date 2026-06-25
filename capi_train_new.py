@@ -47,6 +47,16 @@ NG_TILES_PER_LIGHTING = 100
 
 PANEL_MODE_FULL = "full"
 PANEL_MODE_CORNERS_ONLY = "corners_only"
+PATCHCORE_FEATURE_LAYERS_DEFAULT = "layer2_layer3"
+PATCHCORE_FEATURE_LAYERS_LAYER3 = "layer3"
+PATCHCORE_FEATURE_LAYERS_CHOICES = (
+    PATCHCORE_FEATURE_LAYERS_DEFAULT,
+    PATCHCORE_FEATURE_LAYERS_LAYER3,
+)
+PATCHCORE_FEATURE_LAYER_MAP = {
+    PATCHCORE_FEATURE_LAYERS_DEFAULT: ("layer2", "layer3"),
+    PATCHCORE_FEATURE_LAYERS_LAYER3: ("layer3",),
+}
 
 # 舊版訓練 wizard 曾使用固定 3 full + 5 corners-only 的選片策略。
 # 目前改為使用者自行選片，所有選到的 panel 都完整切 tile。
@@ -115,6 +125,7 @@ class TrainingConfig:
     coreset_ratio: float = 0.1
     max_epochs: int = 1
     precision: str = "float16"
+    feature_layers: str = PATCHCORE_FEATURE_LAYERS_DEFAULT
     image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
     preprocess_after_tiling: bool = False
 
@@ -130,8 +141,17 @@ USER_TRAINABLE_PARAM_SPECS: Dict[str, Dict] = {
     "coreset_ratio": {"type": float, "min": 0.01, "max": 0.5},
     "max_epochs":    {"type": int,   "min": 1,    "max": 10},
     "precision":     {"type": str,   "choices": ["float32", "float16"]},
+    "feature_layers": {"type": str,   "choices": list(PATCHCORE_FEATURE_LAYERS_CHOICES)},
 }
 USER_TRAINABLE_PARAM_NAMES: Tuple[str, ...] = tuple(USER_TRAINABLE_PARAM_SPECS.keys())
+
+
+def _patchcore_layers_for_mode(feature_layers: Optional[str]) -> Tuple[str, ...]:
+    mode = feature_layers or PATCHCORE_FEATURE_LAYERS_DEFAULT
+    try:
+        return PATCHCORE_FEATURE_LAYER_MAP[mode]
+    except KeyError as exc:
+        raise ValueError(f"unsupported PatchCore feature_layers: {mode}") from exc
 
 
 def apply_user_training_params(
@@ -516,7 +536,14 @@ def train_one_patchcore(
 
     if log:
         log(f"{unit_label}: 建立 PatchCore model")
-    model = Patchcore(coreset_sampling_ratio=cfg.coreset_ratio, precision=cfg.precision)
+    feature_layers = _patchcore_layers_for_mode(cfg.feature_layers)
+    if log:
+        log(f"{unit_label}: PatchCore feature layers={'+'.join(feature_layers)}")
+    model = Patchcore(
+        layers=feature_layers,
+        coreset_sampling_ratio=cfg.coreset_ratio,
+        precision=cfg.precision,
+    )
     model.pre_processor = Patchcore.configure_pre_processor(image_size=cfg.image_size)
 
     engine = Engine(
@@ -1388,6 +1415,7 @@ def run_training_pipeline(
             "coreset_ratio": cfg.coreset_ratio,
             "max_epochs": cfg.max_epochs,
             "precision": cfg.precision,
+            "feature_layers": cfg.feature_layers,
         },
         "image_preprocess_pipeline": cfg.image_preprocess_pipeline,
         "tiles_per_unit": tiles_per_unit,

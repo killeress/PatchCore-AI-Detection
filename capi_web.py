@@ -9485,6 +9485,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
                 max_epochs=patchcore_params.get("max_epochs", 1),
                 precision=patchcore_params.get("precision", "float32"),
+                feature_layers=patchcore_params.get("feature_layers", "layer2_layer3"),
             )
             apply_user_training_params(cfg, job.get("training_params"), log_fn=log)
 
@@ -10446,6 +10447,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
                 max_epochs=patchcore_params.get("max_epochs", 1),
                 precision=patchcore_params.get("precision", "float32"),
+                feature_layers=patchcore_params.get("feature_layers", "layer2_layer3"),
             )
             apply_user_training_params(cfg, training_params, log_fn=_log)
 
@@ -10718,6 +10720,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
                 max_epochs=patchcore_params.get("max_epochs", 1),
                 precision=patchcore_params.get("precision", "float32"),
+                feature_layers=patchcore_params.get("feature_layers", "layer2_layer3"),
             )
             # backbone_cache_dir / required_backbones / output_root 沿用 dataclass 預設值
 

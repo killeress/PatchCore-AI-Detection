@@ -363,7 +363,7 @@ class TestValidateTrainingParams:
     def test_full_valid_dict(self):
         from capi_web import CAPIWebHandler
         raw = {"batch_size": 16, "coreset_ratio": 0.05,
-               "max_epochs": 2}
+               "max_epochs": 2, "feature_layers": "layer3"}
         params, err = CAPIWebHandler._validate_training_params(raw)
         assert err is None
         assert params == raw
@@ -435,6 +435,22 @@ class TestValidateTrainingParams:
         assert err is None
         assert params == raw
 
+    def test_feature_layers_choice_accepted(self):
+        from capi_web import CAPIWebHandler
+        for val in ("layer2_layer3", "layer3"):
+            params, err = CAPIWebHandler._validate_training_params(
+                {"feature_layers": val}
+            )
+            assert err is None
+            assert params == {"feature_layers": val}
+
+    def test_feature_layers_invalid_choice_rejected(self):
+        from capi_web import CAPIWebHandler
+        for raw in [{"feature_layers": "layer2"}, {"feature_layers": "layer4"},
+                    {"feature_layers": ["layer3"]}]:
+            _, err = CAPIWebHandler._validate_training_params(raw)
+            assert err and "must be one of" in err, f"expected error for {raw}"
+
 
 def test_handle_train_new_start_rejects_bad_training_params():
     """training_params 含越界值 → 400。"""
@@ -493,6 +509,7 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
         "training_params": {
             "batch_size": 16, "coreset_ratio": 0.05,
             "max_epochs": 2,
+            "feature_layers": "layer3",
         },
         "image_preprocess_pipeline": [
             {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},

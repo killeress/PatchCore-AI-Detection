@@ -35,10 +35,21 @@ def test_apply_user_training_params_overrides_match_keys():
     )
     apply_user_training_params(cfg, {
         "batch_size": 16, "coreset_ratio": 0.05, "max_epochs": 2,
+        "feature_layers": "layer3",
     })
     assert cfg.batch_size == 16
     assert cfg.coreset_ratio == 0.05
     assert cfg.max_epochs == 2
+    assert cfg.feature_layers == "layer3"
+
+
+def test_patchcore_layers_for_mode():
+    from capi_train_new import _patchcore_layers_for_mode
+    assert _patchcore_layers_for_mode(None) == ("layer2", "layer3")
+    assert _patchcore_layers_for_mode("layer2_layer3") == ("layer2", "layer3")
+    assert _patchcore_layers_for_mode("layer3") == ("layer3",)
+    with pytest.raises(ValueError, match="feature_layers"):
+        _patchcore_layers_for_mode("layer4")
 
 
 def test_apply_user_training_params_unknown_key_raises():
@@ -259,9 +270,64 @@ def test_train_one_patchcore_smoke(tmp_path, monkeypatch):
     assert "export" in call_names
     # fit 必須在 export 之前
     assert call_names.index("fit") < call_names.index("export")
+    patchcore_call = next(c for c in calls if c[0] == "Patchcore")
+    assert patchcore_call[1]["layers"] == ("layer2", "layer3")
     # 回傳路徑要存在
     assert out.exists()
     assert out.name == "model.pt"
+
+
+def test_train_one_patchcore_layer3_only(tmp_path, monkeypatch):
+    from capi_train_new import TrainingConfig, train_one_patchcore
+
+    staging = tmp_path / "staging"
+    (staging / "train").mkdir(parents=True)
+    (staging / "test" / "anormal").mkdir(parents=True)
+    calls = []
+
+    class FakeEngine:
+        def __init__(self, *a, **kw):
+            self._default_root_dir = kw.get("default_root_dir", "")
+
+        def fit(self, **kw):
+            pass
+
+        def export(self, **kw):
+            run_root = Path(self._default_root_dir)
+            (run_root / "weights" / "torch").mkdir(parents=True, exist_ok=True)
+            (run_root / "weights" / "torch" / "model.pt").write_bytes(b"fake")
+
+    class FakePatchcore:
+        def __init__(self, *a, **kw):
+            calls.append(kw)
+
+        @staticmethod
+        def configure_pre_processor(image_size):
+            return None
+
+        pre_processor = None
+
+    class FakeFolder:
+        def __init__(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr("capi_train_new._import_anomalib", lambda: (
+        FakeFolder,
+        FakePatchcore,
+        FakeEngine,
+        type("ExportType", (), {"TORCH": "torch"}),
+        "same_as_test",
+    ))
+
+    cfg = TrainingConfig(
+        machine_id="M",
+        panel_paths=[],
+        over_review_root=Path("/r"),
+        feature_layers="layer3",
+    )
+    train_one_patchcore(staging, tmp_path / "run", "G0F-inner", cfg=cfg)
+
+    assert calls[0]["layers"] == ("layer3",)
 
 
 def test_calibrate_threshold_returns_default():
@@ -455,6 +521,7 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     import json as _json
     manifest = _json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["trained_with_job_id"] == "j1"
+    assert manifest["patchcore_params"]["feature_layers"] == "layer2_layer3"
     assert manifest["image_preprocess_pipeline"][0]["method"] == "bilateral"
     assert len(trained_units) == 10
     # 應有 10 個 .pt
