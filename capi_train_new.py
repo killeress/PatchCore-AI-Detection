@@ -47,6 +47,8 @@ NG_TILES_PER_LIGHTING = 100
 
 PANEL_MODE_FULL = "full"
 PANEL_MODE_CORNERS_ONLY = "corners_only"
+DEFAULT_TRAIN_TILE_STRIDE = 256
+LEGACY_TRAIN_TILE_STRIDE = 512
 PATCHCORE_FEATURE_LAYERS_DEFAULT = "layer2_layer3"
 PATCHCORE_FEATURE_LAYERS_LAYER3 = "layer3"
 PATCHCORE_FEATURE_LAYERS_CHOICES = (
@@ -122,6 +124,7 @@ class TrainingConfig:
 
     batch_size: int = 8
     image_size: tuple = (512, 512)
+    tile_stride: int = DEFAULT_TRAIN_TILE_STRIDE
     coreset_ratio: float = 0.1
     max_epochs: int = 1
     precision: str = "float16"
@@ -694,7 +697,8 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
                               thresholds: Dict[str, Dict[str, float]],
                               succeeded_units: Optional[Set[Tuple[str, str]]] = None,
                               image_preprocess_pipeline: Optional[List[Dict[str, Any]]] = None,
-                              preprocess_after_tiling: bool = False) -> None:
+                              preprocess_after_tiling: bool = False,
+                              tile_stride: int = LEGACY_TRAIN_TILE_STRIDE) -> None:
     """產出 bundle 內的 inference yaml。
 
     若提供 succeeded_units，只寫入 inner/edge 都成功訓練的 lighting；
@@ -706,6 +710,7 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
     model_mapping = {}
     threshold_mapping = {}
     image_preprocess_pipeline = normalize_preprocess_pipeline(image_preprocess_pipeline or [])
+    tile_stride = int(tile_stride or LEGACY_TRAIN_TILE_STRIDE)
     for lighting in LIGHTINGS:
         if succeeded_units is not None and not all(
             (lighting, zone) in succeeded_units for zone in ("inner", "edge")
@@ -756,7 +761,7 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
 
 # === 切塊與面板偵測 ===
 tile_size: 512
-tile_stride: 512
+tile_stride: {tile_stride}
 edge_threshold_px: 768
 otsu_offset: 5
 # default=1000 會切掉 panel 底部 1000px，新架構 panel polygon 完全失準
@@ -1400,6 +1405,7 @@ def run_training_pipeline(
         succeeded_units=succeeded_units,
         image_preprocess_pipeline=cfg.image_preprocess_pipeline,
         preprocess_after_tiling=cfg.preprocess_after_tiling,
+        tile_stride=cfg.tile_stride,
     )
     write_manifest(bundle_dir, {
         "machine_id": cfg.machine_id,
@@ -1408,6 +1414,7 @@ def run_training_pipeline(
         "panel_count": len(cfg.panel_paths),
         "panel_glass_ids": [p.name for p in cfg.panel_paths],
         "edge_threshold_px": 768,
+        "tile_stride": cfg.tile_stride,
         "preprocess_after_tiling": cfg.preprocess_after_tiling,
         "patchcore_params": {
             "batch_size": cfg.batch_size,

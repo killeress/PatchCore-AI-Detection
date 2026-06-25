@@ -55,7 +55,7 @@ class TestTrainingSchema:
         cols = _col_names(db, "training_jobs")
         required = {"id", "job_id", "machine_id", "state", "started_at",
                     "completed_at", "panel_paths", "output_bundle", "error_message",
-                    "training_params"}
+                    "training_params", "tile_stride"}
         assert required.issubset(cols)
 
     def test_model_registry_columns(self, tmp_path):
@@ -197,6 +197,17 @@ class TestTrainingJobsCRUD:
         job = db.get_training_job("j_with_params")
         assert job["training_params"] == params
 
+    def test_tile_stride_default_and_round_trip(self, tmp_path):
+        db = _make_db(tmp_path)
+        db.create_training_job(job_id="j_default_stride", machine_id="M", panel_paths=[])
+        assert db.get_training_job("j_default_stride")["tile_stride"] == 256
+
+        db.create_training_job(
+            job_id="j_custom_stride", machine_id="M", panel_paths=[],
+            tile_stride=128,
+        )
+        assert db.get_training_job("j_custom_stride")["tile_stride"] == 128
+
     def test_active_job_includes_training_params(self, tmp_path):
         """get_active_training_job 也應該反序列化 training_params。"""
         db = _make_db(tmp_path)
@@ -208,6 +219,7 @@ class TestTrainingJobsCRUD:
         active = db.get_active_training_job()
         assert active is not None
         assert active["training_params"] == params
+        assert active["tile_stride"] == 256
 
 
 class TestTilePoolCRUD:
