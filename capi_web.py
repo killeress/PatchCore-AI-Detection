@@ -2193,6 +2193,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         "active_job_id": None,
     }
     TRAIN_NEW_MACHINE_PREFIX_LEN = 8
+    TRAIN_NEW_DEFAULT_TILE_STRIDE = 256
+    TRAIN_NEW_MIN_TILE_STRIDE = 64
+    TRAIN_NEW_MAX_TILE_STRIDE = 512
 
     # 單子模型重訓 state（一次只允許一個 job）
     _submodel_retrain_state: dict = {
@@ -6508,13 +6511,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             unit_per_px = DOT_RULER_MM_PER_PX
         defect_threshold = max(0.0, as_float("defect_threshold", 0.3))
         unit_label = str(data.get("unit_label") or "mm").strip()[:16] or "mm"
-        non_dot_cfg = _non_dot_residue_config({
-            "non_dot_residue_enabled": as_bool("non_dot_residue_enabled", True),
-            "non_dot_residue_min_area_px": as_int("non_dot_residue_min_area_px", 500),
         preprocess_method = str(data.get("preprocess_method") or DOT_PREPROCESS_METHOD).strip() or DOT_PREPROCESS_METHOD
         preprocess_params = data.get("preprocess_params")
         if not isinstance(preprocess_params, dict):
             preprocess_params = DOT_PREPROCESS_PARAMS
+        non_dot_cfg = _non_dot_residue_config({
+            "non_dot_residue_enabled": as_bool("non_dot_residue_enabled", True),
+            "non_dot_residue_min_area_px": as_int("non_dot_residue_min_area_px", 500),
             "non_dot_residue_min_long_side_px": as_int("non_dot_residue_min_long_side_px", 80),
             "non_dot_residue_min_long_side_ratio": as_float("non_dot_residue_min_long_side_ratio", 0.15),
             "non_dot_residue_min_max_diff": as_int("non_dot_residue_min_max_diff", 12),
@@ -8666,12 +8669,39 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             return None, f"image_preprocess_pipeline invalid: {exc}"
 
+    @staticmethod
+    def _validate_train_tile_stride(raw):
+        """Validate training tile step/stride. 512 keeps legacy non-overlap tiling."""
+        if raw is None or raw == "":
+            return CAPIWebHandler.TRAIN_NEW_DEFAULT_TILE_STRIDE, None
+        if isinstance(raw, bool):
+            return None, "tile_stride must be an integer"
+        try:
+            parsed = float(raw)
+        except (TypeError, ValueError):
+            return None, "tile_stride must be an integer"
+        if not parsed.is_integer():
+            return None, "tile_stride must be an integer"
+        value = int(parsed)
+        if not (
+            CAPIWebHandler.TRAIN_NEW_MIN_TILE_STRIDE
+            <= value
+            <= CAPIWebHandler.TRAIN_NEW_MAX_TILE_STRIDE
+        ):
+            return None, (
+                "tile_stride out of range "
+                f"({CAPIWebHandler.TRAIN_NEW_MIN_TILE_STRIDE}.."
+                f"{CAPIWebHandler.TRAIN_NEW_MAX_TILE_STRIDE})"
+            )
+        return value, None
+
     def _handle_train_new_start(self):
         """POST /api/train/new/start
 
         body: {
             "machine_id": "...",
             "panel_paths": [...],   # 至少 1 片；所有 panel 都完整切 tile
+            "tile_stride": 256,     # optional; 512 means legacy non-overlap
             "training_params": {  # optional
                 "batch_size": 8,
                 "coreset_ratio": 0.1,
@@ -8729,6 +8759,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         preprocess_after_tiling = bool(params.get("preprocess_after_tiling", False))
+        tile_stride, err = self._validate_train_tile_stride(params.get("tile_stride"))
+        if err:
+            self._send_json({"error": err}, status=400)
+            return
 
         db = self._capi_server_instance.database
         training_scope, err = self._normalize_train_new_scope(params.get("training_scope"), db)
@@ -8773,6 +8807,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 training_scope=training_scope,
                 image_preprocess_pipeline=image_preprocess_pipeline,
                 preprocess_after_tiling=preprocess_after_tiling,
+                tile_stride=tile_stride,
             )
         except Exception:
             CAPIWebHandler._drop_job_runtime(job_id)
@@ -8782,7 +8817,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             target=CAPIWebHandler._train_new_preprocess_worker,
             args=(job_id, machine_id, clean_panel_paths,
                   self._capi_server_instance, training_params, panel_modes,
-                  training_scope, image_preprocess_pipeline, preprocess_after_tiling),
+                  training_scope, image_preprocess_pipeline, preprocess_after_tiling,
+                  tile_stride),
             daemon=True, name=f"train_new_pre-{job_id}",
         )
         runtime["thread"] = thread
@@ -8820,7 +8856,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _train_new_preprocess_worker(
         job_id, machine_id, panel_paths, server_inst, training_params=None,
         panel_modes=None, training_scope=None, image_preprocess_pipeline=None,
-        preprocess_after_tiling=False,
+        preprocess_after_tiling=False, tile_stride=None,
     ):
         """背景 thread：preprocess + 抽 NG → state=review。
 
@@ -8857,9 +8893,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 required_backbones=train_cfg["required_backbones"],
                 image_preprocess_pipeline=image_preprocess_pipeline or [],
                 preprocess_after_tiling=preprocess_after_tiling,
+                tile_stride=int(tile_stride or CAPIWebHandler.TRAIN_NEW_DEFAULT_TILE_STRIDE),
             )
             apply_user_training_params(cfg, training_params, log_fn=log)
             pre_cfg = PreprocessConfig(
+                tile_stride=cfg.tile_stride,
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
                 preprocess_after_tiling=cfg.preprocess_after_tiling,
                 product_resolution=CAPIWebHandler._product_resolution_for_machine(machine_id, server_inst),
@@ -8874,7 +8912,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     + ", ".join(training_scope.get("selected_units") or [])
                 )
 
-            log(f"開始前處理 {len(panel_paths)} panel")
+            log(f"開始前處理 {len(panel_paths)} panel（tile=512, stride={cfg.tile_stride}）")
             stats = preprocess_panels_to_pool(
                 job_id=job_id, cfg=cfg, preprocess_cfg=pre_cfg,
                 db=db, thumb_dir=thumb_root, log=log,
@@ -8945,6 +8983,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "started_at": job["started_at"], "completed_at": job["completed_at"],
             "output_bundle": job["output_bundle"], "error_message": job["error_message"],
             "training_scope": job.get("training_scope"),
+            "tile_stride": job.get("tile_stride"),
             "log_lines": log_lines,
             "unit_status": unit_status,
             "worker_alive": self._train_new_worker_alive(job_id),
@@ -9007,6 +9046,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"前處理流程無效: {exc}"}, status=400)
             return
         preprocess_after_tiling = bool(data.get("preprocess_after_tiling", False))
+        tile_stride, err = self._validate_train_tile_stride(data.get("tile_stride"))
+        if err:
+            self._send_json({"error": err}, status=400)
+            return
         machine_id = str(data.get("machine_id") or "").strip()
 
         source_path = Path(raw_path)
@@ -9059,6 +9102,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "STANDARD",
                 )
                 pre_cfg = PreprocessConfig(
+                    tile_stride=tile_stride,
                     image_preprocess_pipeline=pipeline,
                     preprocess_after_tiling=True,
                     product_resolution=self._product_resolution_for_machine(
@@ -9165,6 +9209,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         preprocess_cfg = PreprocessConfig(
+            tile_stride=int(job.get("tile_stride") or 512),
             image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
             preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
             product_resolution=self._product_resolution_for_machine(
@@ -9208,7 +9253,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return {"name": path.name, "mtime_ns": 0, "size": 0}
 
         cache_payload = {
-            "version": 12,
+            "version": 13,
             "lighting": lighting,
             "panel_dir": str(preview_panel_dir.resolve()),
             "files": {
@@ -9217,6 +9262,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             },
             "image_preprocess_pipeline": job.get("image_preprocess_pipeline") or [],
             "preprocess_after_tiling": bool(job.get("preprocess_after_tiling", False)),
+            "tile_stride": preprocess_cfg.tile_stride,
             "product_resolution": preprocess_cfg.product_resolution,
         }
         cache_key = hashlib.sha1(
@@ -9225,7 +9271,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         preview_dir = Path(".tmp/train_new_thumbs") / job_id / "preview"
         preview_dir.mkdir(parents=True, exist_ok=True)
-        preview_path = preview_dir / f"{lighting}_v12_{cache_key}.jpg"
+        preview_path = preview_dir / f"{lighting}_v13_{cache_key}.jpg"
         if preview_path.exists():
             self._send_binary(str(preview_path))
             return
@@ -9480,6 +9526,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 backbone_cache_dir=train_cfg["backbone_cache_dir"],
                 required_backbones=train_cfg["required_backbones"],
                 image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
+                tile_stride=int(job.get("tile_stride") or 512),
                 batch_size=patchcore_params.get("batch_size", 8),
                 image_size=tuple(patchcore_params.get("image_size", (512, 512))),
                 coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
@@ -10300,6 +10347,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             old_manifest = {}
         image_preprocess_pipeline = old_manifest.get("image_preprocess_pipeline") or []
         preprocess_after_tiling = bool(old_manifest.get("preprocess_after_tiling", False))
+        tile_stride = int(old_manifest.get("tile_stride") or 512)
 
         machine_id = str(bundle.get("machine_id") or "").strip()
         if not machine_id:
@@ -10344,6 +10392,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 panel_modes=panel_modes,
                 image_preprocess_pipeline=image_preprocess_pipeline,
                 preprocess_after_tiling=preprocess_after_tiling,
+                tile_stride=tile_stride,
             )
         except Exception:
             with state["lock"]:
@@ -10442,6 +10491,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 required_backbones=train_cfg["required_backbones"],
                 image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
                 preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
+                tile_stride=int(job.get("tile_stride") or 512),
                 batch_size=patchcore_params.get("batch_size", 8),
                 image_size=tuple(patchcore_params.get("image_size", (512, 512))),
                 coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
@@ -10455,6 +10505,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             thumb_root = Path(".tmp/train_new_thumbs") / job_id
             _log(f"前處理 selected panels（只保留 lighting={lighting}）")
             preprocess_cfg = PreprocessConfig(
+                tile_stride=cfg.tile_stride,
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
                 preprocess_after_tiling=cfg.preprocess_after_tiling,
                 product_resolution=CAPIWebHandler._product_resolution_for_machine(machine_id, server_inst),

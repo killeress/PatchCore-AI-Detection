@@ -228,6 +228,7 @@ def main() -> int:
         required_backbones=train_paths["required_backbones"],
         image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
         preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
+        tile_stride=int(job.get("tile_stride") or 512),
     )
     apply_user_training_params(cfg, job.get("training_params"), log_fn=log.info)
 

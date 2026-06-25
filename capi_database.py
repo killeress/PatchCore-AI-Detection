@@ -313,7 +313,8 @@ class CAPIDatabase:
                     training_params TEXT,
                     training_scope  TEXT,
                     image_preprocess_pipeline TEXT,
-                    preprocess_after_tiling   INTEGER DEFAULT 0
+                    preprocess_after_tiling   INTEGER DEFAULT 0,
+                    tile_stride     INTEGER
                 );
 
                 -- 已訓練模型 bundle 元資料
@@ -469,6 +470,7 @@ class CAPIDatabase:
             add_column_if_not_exists("training_jobs", "training_scope", "TEXT")
             add_column_if_not_exists("training_jobs", "image_preprocess_pipeline", "TEXT")
             add_column_if_not_exists("training_jobs", "preprocess_after_tiling", "INTEGER DEFAULT 0")
+            add_column_if_not_exists("training_jobs", "tile_stride", "INTEGER")
             add_column_if_not_exists("model_registry", "notes", "TEXT")
             # 新架構 (C-10) per-tile model routing 紀錄："inner" / "edge" / "bright_spot"；v1 為 ""
             add_column_if_not_exists("tile_results", "zone", "TEXT DEFAULT ''")
@@ -2831,6 +2833,7 @@ class CAPIDatabase:
         training_scope: Optional[Dict[str, Any]] = None,
         image_preprocess_pipeline: Optional[list] = None,
         preprocess_after_tiling: bool = False,
+        tile_stride: Optional[int] = 256,
     ) -> int:
         """建立一筆新的訓練 job，初始 state 為 'preprocess'。回傳 rowid。
 
@@ -2849,6 +2852,7 @@ class CAPIDatabase:
             json.dumps(image_preprocess_pipeline, ensure_ascii=False)
             if image_preprocess_pipeline is not None else None
         )
+        tile_stride_value = int(tile_stride) if tile_stride is not None else None
         conn = self._get_conn()
         try:
             cur = conn.cursor()
@@ -2856,12 +2860,12 @@ class CAPIDatabase:
                 """INSERT INTO training_jobs
                    (job_id, machine_id, state, started_at, panel_paths, panel_modes,
                     training_params, training_scope, image_preprocess_pipeline,
-                    preprocess_after_tiling)
-                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?, ?, ?, ?)""",
+                    preprocess_after_tiling, tile_stride)
+                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id, machine_id, json.dumps(panel_paths), modes_json,
                     params_json, scope_json, preprocess_json,
-                    1 if preprocess_after_tiling else 0,
+                    1 if preprocess_after_tiling else 0, tile_stride_value,
                 ),
             )
             conn.commit()
@@ -2890,6 +2894,8 @@ class CAPIDatabase:
         raw_preprocess = job.get("image_preprocess_pipeline")
         job["image_preprocess_pipeline"] = json.loads(raw_preprocess) if raw_preprocess else []
         job["preprocess_after_tiling"] = bool(job.get("preprocess_after_tiling", 0))
+        raw_tile_stride = job.get("tile_stride")
+        job["tile_stride"] = int(raw_tile_stride) if raw_tile_stride else 512
         return job
 
     def get_training_job(self, job_id: str) -> Optional[Dict]:

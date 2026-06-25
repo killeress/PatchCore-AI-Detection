@@ -101,6 +101,11 @@
         </select>
         <span class="tp-hint">layer3 only 可能降低過檢，但小缺陷敏感度會下降</span>
       </label>
+      <label class="tp-field">
+        <span class="tp-label">tile step <span class="tp-default">預設 256</span></span>
+        <input type="number" id="tile-stride" min="64" max="512" step="64" value="256">
+        <span class="tp-hint">512 為原本不重疊切法；256 會讓 512×512 tile 產生 50% overlap</span>
+      </label>
     </div>
   </details>
 
@@ -591,6 +596,12 @@ async function runPreprocessPreview() {
     status.textContent = error;
     return;
   }
+  const {tileStride, error: tileStrideError} = collectTileStride();
+  if (tileStrideError) {
+    status.className = 'pp-preview-status error';
+    status.textContent = tileStrideError;
+    return;
+  }
 
   const afterTiling = document.getElementById('pp-after-tiling')?.checked || false;
   btn.disabled = true;
@@ -610,6 +621,7 @@ async function runPreprocessPreview() {
         image_path: rawPath,
         image_preprocess_pipeline: pipeline,
         preprocess_after_tiling: afterTiling,
+        tile_stride: tileStride,
       }),
     });
     const responseText = await resp.text();
@@ -881,6 +893,18 @@ function collectTrainingParams() {
   return {params: Object.keys(params).length ? params : null, error: null};
 }
 
+function collectTileStride() {
+  const el = document.getElementById('tile-stride');
+  const raw = (el && el.value || '').trim();
+  const value = raw ? Number(raw) : 256;
+  if (!Number.isInteger(value) || value < 64 || value > 512) {
+    if (el) el.classList.add('invalid');
+    return {tileStride: null, error: 'tile step 必須是 64 ~ 512 之間的整數'};
+  }
+  if (el) el.classList.remove('invalid');
+  return {tileStride: value, error: null};
+}
+
 function submitStart() {
   const mid = isPartialTraining() ? TARGET_BUNDLE.machine_id : _selectedMachineId;
   if (!mid) return;
@@ -894,6 +918,12 @@ function submitStart() {
     capAlert(error, {type: 'error', title: '訓練設定錯誤'});
     return;
   }
+  const {tileStride, error: tileStrideError} = collectTileStride();
+  if (tileStrideError) {
+    document.getElementById('train-params').setAttribute('open', '');
+    capAlert(tileStrideError, {type: 'error', title: '切塊設定錯誤'});
+    return;
+  }
   const {pipeline, error: pipelineError} = collectImagePreprocessPipeline();
   if (pipelineError) {
     document.getElementById('preprocess-params').setAttribute('open', '');
@@ -902,6 +932,7 @@ function submitStart() {
   }
   const body = {machine_id: mid, panel_paths: Array.from(_selected), training_scope: TRAINING_SCOPE};
   if (params) body.training_params = params;
+  body.tile_stride = tileStride;
   body.image_preprocess_pipeline = pipeline;
   body.preprocess_after_tiling = document.getElementById('pp-after-tiling').checked;
   fetch('/api/train/new/start', {

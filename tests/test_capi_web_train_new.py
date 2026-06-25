@@ -452,6 +452,27 @@ class TestValidateTrainingParams:
             assert err and "must be one of" in err, f"expected error for {raw}"
 
 
+class TestValidateTrainTileStride:
+    def test_default_is_256(self):
+        from capi_web import CAPIWebHandler
+        value, err = CAPIWebHandler._validate_train_tile_stride(None)
+        assert err is None
+        assert value == 256
+
+    def test_accepts_valid_integer_values(self):
+        from capi_web import CAPIWebHandler
+        for raw in (64, 128, 256, 512, "256"):
+            value, err = CAPIWebHandler._validate_train_tile_stride(raw)
+            assert err is None
+            assert value == int(raw)
+
+    def test_rejects_invalid_values(self):
+        from capi_web import CAPIWebHandler
+        for raw in (0, 63, 513, "abc", 256.5, True):
+            _, err = CAPIWebHandler._validate_train_tile_stride(raw)
+            assert err
+
+
 def test_handle_train_new_start_rejects_bad_training_params():
     """training_params 含越界值 → 400。"""
     server = MagicMock()
@@ -472,6 +493,26 @@ def test_handle_train_new_start_rejects_bad_training_params():
     err = json.loads(h._sent_response[0]["body"])["error"]
     assert "training_params.batch_size" in err
     assert "out of range" in err
+
+
+def test_handle_train_new_start_rejects_bad_tile_stride():
+    server = MagicMock()
+    server.database.get_active_training_job.return_value = None
+
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    body = json.dumps({
+        "machine_id": "M",
+        "panel_paths": ["/p0"],
+        "tile_stride": 32,
+    }).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 400
+    err = json.loads(h._sent_response[0]["body"])["error"]
+    assert "tile_stride" in err
 
 
 def test_handle_train_new_start_persists_training_params(monkeypatch):
@@ -511,6 +552,7 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
             "max_epochs": 2,
             "feature_layers": "layer3",
         },
+        "tile_stride": 128,
         "image_preprocess_pipeline": [
             {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
             {"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}},
@@ -526,6 +568,7 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
     server.database.create_training_job.assert_called_once()
     call_kwargs = server.database.create_training_job.call_args.kwargs
     assert call_kwargs["training_params"] == payload["training_params"]
+    assert call_kwargs["tile_stride"] == 128
     assert call_kwargs["image_preprocess_pipeline"][0]["method"] == "bilateral"
 
 
@@ -1424,6 +1467,7 @@ def test_handle_train_new_start_accepts_variable_panel_count_as_full():
     kwargs = server.database.create_training_job.call_args.kwargs
     assert kwargs["panel_paths"] == ["/p0", "/p1"]
     assert kwargs["panel_modes"] == ["full", "full"]
+    assert kwargs["tile_stride"] == 256
     MockThread.return_value.start.assert_called_once()
 
 

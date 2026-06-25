@@ -438,6 +438,7 @@ def test_write_manifest_yaml(tmp_path):
     import yaml
     y = yaml.safe_load((bundle / "machine_config.yaml").read_text(encoding="utf-8"))
     assert y["machine_id"] == "GN160"
+    assert y["tile_stride"] == 512
     assert y["model_mapping"]["G0F00000"]["inner"].endswith("G0F00000-inner.pt")
     assert y["threshold_mapping"]["G0F00000"]["inner"] == 0.62
     assert y["omit_overexposure_mean_threshold"] == 82
@@ -504,6 +505,7 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
         machine_id="GN160TEST", panel_paths=[Path("p1")],
         over_review_root=tmp_path / "or",
         output_root=tmp_path / "model",
+        tile_stride=256,
         image_preprocess_pipeline=[
             {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
         ],
@@ -521,8 +523,12 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     import json as _json
     manifest = _json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["trained_with_job_id"] == "j1"
-    assert manifest["patchcore_params"]["feature_layers"] == "layer2_layer3"
+    assert manifest["tile_stride"] == 256
     assert manifest["image_preprocess_pipeline"][0]["method"] == "bilateral"
+    assert manifest["patchcore_params"]["feature_layers"] == "layer2_layer3"
+    import yaml
+    y = yaml.safe_load((bundle_dir / "machine_config.yaml").read_text(encoding="utf-8"))
+    assert y["tile_stride"] == 256
     assert len(trained_units) == 10
     # 應有 10 個 .pt
     pts = list(bundle_dir.glob("*.pt"))
