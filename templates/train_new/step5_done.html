@@ -84,6 +84,14 @@
           <dt>batch_size</dt><dd>{{ patchcore_params.get("batch_size", "—") }}</dd>
           <dt>coreset_ratio</dt><dd>{{ patchcore_params.get("coreset_ratio", "—") }}</dd>
           <dt>max_epochs</dt><dd>{{ patchcore_params.get("max_epochs", "—") }}</dd>
+          <dt>feature_layers</dt>
+          <dd>
+            {% if patchcore_params.get("feature_layers") == "layer3" %}
+              layer3 only
+            {% else %}
+              layer2 + layer3
+            {% endif %}
+          </dd>
           <dt>image_size</dt>
           <dd>
             {% if patchcore_params.get("image_size") %}

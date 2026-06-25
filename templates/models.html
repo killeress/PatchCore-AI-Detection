@@ -532,6 +532,7 @@ function renderDetail(d) {
 
   const td = d.training_data || {};
   const pp = m.patchcore_params || {};
+  const featureLayers = pp.feature_layers === 'layer3' ? 'layer3 only' : 'layer2 + layer3';
   const dl = document.getElementById('mlibInfoDl');
   const rows = [
     ['Machine', d.machine_id],
@@ -552,7 +553,8 @@ function renderDetail(d) {
       ['batch_size', pp.batch_size != null ? pp.batch_size : '—'],
       ['coreset_ratio', pp.coreset_ratio != null ? pp.coreset_ratio : '—'],
       ['max_epochs', pp.max_epochs != null ? pp.max_epochs : '—'],
-['image_size', Array.isArray(pp.image_size) ? pp.image_size.join('×') : '—'],
+      ['feature_layers', featureLayers],
+      ['image_size', Array.isArray(pp.image_size) ? pp.image_size.join('×') : '—'],
     );
   }
 

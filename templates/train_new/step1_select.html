@@ -93,6 +93,14 @@
         </select>
         <span class="tp-hint">float16 memory bank 體積／推論記憶體減半、推論較快，準確度通常幾乎不損</span>
       </label>
+      <label class="tp-field">
+        <span class="tp-label">feature layers <span class="tp-default">預設 layer2+layer3</span></span>
+        <select id="tp-feature_layers">
+          <option value="layer2_layer3" selected>layer2 + layer3（現有作法）</option>
+          <option value="layer3">layer3 only（降低小紋理敏感度）</option>
+        </select>
+        <span class="tp-hint">layer3 only 可能降低過檢，但小缺陷敏感度會下降</span>
+      </label>
     </div>
   </details>
 
@@ -841,6 +849,7 @@ const TRAIN_PARAM_KEYS = [
   {key: 'batch_size',    type: 'int',    min: 1,    max: 32},
   {key: 'coreset_ratio', type: 'float',  min: 0.01, max: 0.5},
   {key: 'precision',     type: 'select', choices: ['float32','float16'], default: 'float16'},
+  {key: 'feature_layers', type: 'select', choices: ['layer2_layer3','layer3'], default: 'layer2_layer3'},
 ];
 
 function collectTrainingParams() {
