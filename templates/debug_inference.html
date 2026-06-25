@@ -440,6 +440,22 @@
         margin-top: 4px;
     }
 
+    .dot-param-actions {
+        display: flex;
+        align-items: flex-end;
+        justify-content: flex-end;
+        gap: 12px;
+        flex-wrap: wrap;
+    }
+
+    .dot-machine-status {
+        color: var(--text-muted);
+        font-size: 0.72rem;
+        min-height: 1rem;
+        margin-top: 4px;
+        font-family: 'Fira Code', monospace;
+    }
+
     .dot-param-sections {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -1782,17 +1798,24 @@
                         <div class="dot-param-title">點圖偵測參數</div>
                         <div class="dot-param-note">依 mode 顯示實際會用到的參數；hidden 欄位仍保留目前值供切換回來使用。</div>
                     </div>
-                    <div class="coord-group">
-                        <label for="dot-segmentation-method">偵測模式</label>
-                        <select id="dot-segmentation-method" onchange="updateDotModeParams()" title="同步規格內判定 mode：background_diff / hysteresis / morph_hat / adaptive_mean / halo / auto / OFF">
-                            <option value="background_diff" selected>background_diff</option>
-                            <option value="hysteresis">hysteresis</option>
-                            <option value="morph_hat">morph_hat</option>
-                            <option value="adaptive_mean">adaptive_mean</option>
-                            <option value="halo">halo</option>
-                            <option value="auto">auto</option>
-                            <option value="off">OFF</option>
-                        </select>
+                    <div class="dot-param-actions">
+                        <div class="coord-group" style="min-width:220px;">
+                            <label for="dot-machine-config">載入機種參數</label>
+                            <select id="dot-machine-config" onchange="applyDotMachineConfig(this.value)" title="套用參數設定頁的規格內判定 dot_detection 設定"></select>
+                            <div class="dot-machine-status" id="dot-machine-status"></div>
+                        </div>
+                        <div class="coord-group">
+                            <label for="dot-segmentation-method">偵測模式</label>
+                            <select id="dot-segmentation-method" onchange="updateDotModeParams()" title="同步規格內判定 mode：background_diff / hysteresis / morph_hat / adaptive_mean / halo / auto / OFF">
+                                <option value="background_diff" selected>background_diff</option>
+                                <option value="hysteresis">hysteresis</option>
+                                <option value="morph_hat">morph_hat</option>
+                                <option value="adaptive_mean">adaptive_mean</option>
+                                <option value="halo">halo</option>
+                                <option value="auto">auto</option>
+                                <option value="off">OFF</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
 
@@ -2000,9 +2023,11 @@
 {% block extra_js %}
 <script>
     const dotSamples = {{ dot_samples|tojson }};
+    const dotMachineConfigs = {{ (dot_machine_configs or {})|tojson }};
     const dotDefaultMmPerPx = {{ dot_default_mm_per_px|tojson }};
     const dotCalibrationPoints = {{ dot_calibration_points|tojson }};
     const dotCalibrationSource = {{ dot_calibration_source|tojson }};
+    let dotActiveDetectionConfig = {};
 
     // Tab switching logic
     function switchTab(tabId, btn) {
@@ -2042,6 +2067,7 @@
         if (e.key === 'Enter') runDotDetection();
     });
     populateDotSamples();
+    populateDotMachineConfigs();
     updateDotModeParams();
     updateLabParamVisibility();
 
@@ -2307,6 +2333,94 @@
         }
     }
 
+    function dotMachineLabel(machineKey, cfg) {
+        const display = cfg && cfg.display_name ? String(cfg.display_name) : machineKey;
+        return display === machineKey ? machineKey : `${machineKey} / ${display}`;
+    }
+
+    function dotMachineKeys() {
+        return Object.keys(dotMachineConfigs || {}).sort((a, b) => {
+            if (a === 'default') return -1;
+            if (b === 'default') return 1;
+            return a.localeCompare(b);
+        });
+    }
+
+    function setDotInputValue(id, value, fallback) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const next = value !== undefined && value !== null ? value : fallback;
+        if (next !== undefined && next !== null) {
+            el.value = String(next);
+        }
+    }
+
+    function populateDotMachineConfigs() {
+        const select = document.getElementById('dot-machine-config');
+        if (!select) return;
+        const keys = dotMachineKeys();
+        if (keys.length === 0) {
+            select.innerHTML = '<option value="">無機種設定</option>';
+            select.disabled = true;
+            return;
+        }
+        select.innerHTML = keys.map(key =>
+            `<option value="${escapeHtml(key)}">${escapeHtml(dotMachineLabel(key, dotMachineConfigs[key]))}</option>`
+        ).join('');
+        select.value = keys.includes('default') ? 'default' : keys[0];
+        applyDotMachineConfig(select.value);
+    }
+
+    function applyDotMachineConfig(machineKey) {
+        const machineCfg = (dotMachineConfigs || {})[machineKey];
+        if (!machineCfg) return;
+        const d = machineCfg.dot_detection || {};
+        dotActiveDetectionConfig = d;
+
+        const allowedModes = ['background_diff', 'hysteresis', 'morph_hat', 'adaptive_mean', 'halo', 'auto', 'off'];
+        const mode = allowedModes.includes(String(d.segmentation_method || '').toLowerCase())
+            ? String(d.segmentation_method).toLowerCase()
+            : 'background_diff';
+        setDotInputValue('dot-segmentation-method', mode, 'background_diff');
+        setDotInputValue('dot-diff-threshold', d.diff_threshold, 7);
+        setDotInputValue('dot-bg-kernel', d.background_kernel, 33);
+        setDotInputValue('dot-hysteresis-low', d.hysteresis_low_threshold, 2);
+        setDotInputValue('dot-hysteresis-high', d.hysteresis_high_threshold, 4);
+        setDotInputValue('dot-hysteresis-edge-width', d.hysteresis_edge_width_percent, 3);
+        setDotInputValue('dot-hysteresis-edge-extra', d.hysteresis_edge_extra_threshold, 2);
+        setDotInputValue('dot-hysteresis-low2', d.hysteresis_second_low_threshold, 3);
+        setDotInputValue('dot-hysteresis-high2', d.hysteresis_second_high_threshold, 4);
+        setDotInputValue('dot-hysteresis-edge-width2', d.hysteresis_second_edge_width_percent, 9.5);
+        setDotInputValue('dot-hysteresis-edge-extra2', d.hysteresis_second_edge_extra_threshold, 2);
+        setDotInputValue('dot-hysteresis-switch-count', d.hysteresis_switch_count_threshold, 5);
+        setDotInputValue('dot-hysteresis-second-max', d.hysteresis_second_max_count, 5);
+        setDotInputValue('dot-hysteresis-edge-suppress', d.hysteresis_edge_suppress_percent, 0);
+        setDotInputValue('dot-min-area', d.min_area_px, 2);
+        setDotInputValue('dot-max-area', d.max_area_px, 50000);
+        setDotInputValue('dot-morph-open', d.morph_open, 0);
+        setDotInputValue('dot-min-aspect-ratio', d.min_aspect_ratio, 0.45);
+        setDotInputValue('dot-edge-margin', d.edge_margin_px, 4);
+        setDotInputValue('dot-size-metric', d.size_metric, 'bbox_diagonal');
+        setDotInputValue('dot-unit-per-px', d.unit_per_px, dotDefaultMmPerPx);
+        const enabled = document.getElementById('dot-non-dot-enabled');
+        if (enabled) {
+            enabled.checked = d.non_dot_residue_enabled !== false;
+        }
+        setDotInputValue('dot-non-dot-min-area', d.non_dot_residue_min_area_px, 500);
+        setDotInputValue('dot-non-dot-long-px', d.non_dot_residue_min_long_side_px, 80);
+        setDotInputValue('dot-non-dot-long-ratio', d.non_dot_residue_min_long_side_ratio, 0.15);
+        setDotInputValue('dot-non-dot-max-diff', d.non_dot_residue_min_max_diff, 12);
+
+        const status = document.getElementById('dot-machine-status');
+        if (status) {
+            const preprocess = d.preprocess_method
+                ? `preprocess=${d.preprocess_method}`
+                : 'preprocess=default';
+            status.textContent = `${machineKey} 已載入 / ${preprocess}`;
+        }
+        updateDotModeParams();
+    }
+
     function dotModeMatches(modeList, mode) {
         return String(modeList || '')
             .split(/\s+/)
@@ -2374,6 +2488,8 @@
                 body: JSON.stringify({
                     image_path: imagePath,
                     polarity: document.getElementById('dot-polarity').value,
+                    preprocess_method: dotActiveDetectionConfig.preprocess_method || 'gaussian',
+                    preprocess_params: dotActiveDetectionConfig.preprocess_params || { kernel_size: 7, sigma: 1 },
                     segmentation_method: document.getElementById('dot-segmentation-method').value,
                     diff_threshold: readInt('dot-diff-threshold', 7),
                     hysteresis_low_threshold: readInt('dot-hysteresis-low', 2),
