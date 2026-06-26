@@ -1246,60 +1246,6 @@ def _dot_rule_limits(rule: Dict[str, Any]) -> Tuple[float, int, int]:
     return threshold_mm, screen_limit, tile_limit
 
 
-def _aoi_coord_fallback_candidate(
-    tile: Dict[str, Any],
-    crop_box: Tuple[int, int, int, int],
-    polarity: str,
-) -> Optional[Dict[str, Any]]:
-    if not tile.get("is_aoi_coord"):
-        return None
-    product_x = _as_int(tile.get("aoi_product_x"), -1)
-    product_y = _as_int(tile.get("aoi_product_y"), -1)
-    if product_x < 0 or product_y < 0:
-        return None
-
-    x1, y1, x2, y2 = crop_box
-    crop_w = max(1, x2 - x1)
-    crop_h = max(1, y2 - y1)
-    ref_x = _as_int(tile.get("aoi_image_x"), -1)
-    ref_y = _as_int(tile.get("aoi_image_y"), -1)
-    if not (x1 <= ref_x < x2 and y1 <= ref_y < y2):
-        ref_x = _as_int(tile.get("peak_x"), -1)
-        ref_y = _as_int(tile.get("peak_y"), -1)
-    if not (x1 <= ref_x < x2 and y1 <= ref_y < y2):
-        ref_x = x1 + crop_w // 2
-        ref_y = y1 + crop_h // 2
-
-    cx = max(0, min(crop_w - 1, ref_x - x1))
-    cy = max(0, min(crop_h - 1, ref_y - y1))
-    return {
-        "id": 1,
-        "x": max(0, int(cx) - 1),
-        "y": max(0, int(cy) - 1),
-        "w": 3,
-        "h": 3,
-        "area_px": 0,
-        "center_x": round(float(cx), 2),
-        "center_y": round(float(cy), 2),
-        "aspect_ratio": 1.0,
-        "bbox_max_diameter_px": 0.0,
-        "bbox_diagonal_px": 0.0,
-        "equivalent_diameter_px": 0.0,
-        "enclosing_diameter_px": 0.0,
-        "size_mode": "aoi_coord_fallback",
-        "size_px": 0.0,
-        "size_units": 0.0,
-        "size_mm": 0.0,
-        "max_diff": 0,
-        "mean_diff": 0.0,
-        "polarity": polarity,
-        "is_defect": False,
-        "fallback_source": "aoi_coord",
-        "aoi_product_x": product_x,
-        "aoi_product_y": product_y,
-    }
-
-
 def _non_dot_residue_config(dot_cfg: Dict[str, Any]) -> Dict[str, Any]:
     reasons = dot_cfg.get("non_dot_residue_reasons")
     if not isinstance(reasons, list):
@@ -1410,6 +1356,31 @@ def _format_within_spec_panel_summary_parts(detail: Dict[str, Any]) -> List[str]
             f"最大面積 {max_area}px；最大長邊 {max_long_side}px；"
             f"最大diff {max_diff}；結果=NG"
         )
+
+    missed_by_screen: Dict[str, List[Dict[str, Any]]] = {}
+    for item in detail.get("missed_dot_tiles") or []:
+        screen = item.get("screen") or "UNKNOWN"
+        missed_by_screen.setdefault(screen, []).append(item)
+    for screen, items in missed_by_screen.items():
+        aoi_count = sum(1 for item in items if item.get("is_aoi_coord"))
+        label = "AOI點未檢出" if aoi_count else "NG Tile未檢出點"
+        details = []
+        for item in items[:5]:
+            tile_id = item.get("tile_id")
+            tile_text = f"tile {tile_id}" if tile_id is not None else "tile ?"
+            if item.get("is_aoi_coord"):
+                ax = _as_int(item.get("aoi_product_x"), -1)
+                ay = _as_int(item.get("aoi_product_y"), -1)
+                if ax >= 0 and ay >= 0:
+                    tile_text = f"{tile_text} AOI({ax},{ay})"
+            details.append(tile_text)
+        if len(items) > 5:
+            details.append(f"...共{len(items)}個")
+        detail_text = f"；{', '.join(details)}" if details else ""
+        parts.append(
+            f"{screen} {label}："
+            f"數量 {len(items)} > 0 [NG]{detail_text}；結果=NG"
+        )
     return parts
 
 
@@ -1515,31 +1486,6 @@ def _save_within_spec_dot_visuals(
         **_dot_hysteresis_kwargs(dot_cfg),
         include_visuals=True,
     )
-    fallback_candidate = chosen.get("fallback_candidate")
-    if fallback_candidate:
-        detected["candidates"] = [fallback_candidate]
-        cx = int(round(_as_float(fallback_candidate.get("center_x"), 0.0)))
-        cy = int(round(_as_float(fallback_candidate.get("center_y"), 0.0)))
-        cv2.drawMarker(
-            detected["overlay"],
-            (cx, cy),
-            (0, 255, 255),
-            markerType=cv2.MARKER_CROSS,
-            markerSize=24,
-            thickness=2,
-            line_type=cv2.LINE_AA,
-        )
-        cv2.circle(detected["overlay"], (cx, cy), 8, (0, 255, 255), 1, cv2.LINE_AA)
-        cv2.putText(
-            detected["overlay"],
-            "AOI fallback",
-            (max(0, cx - 42), max(14, cy - 14)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.42,
-            (0, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
 
     visual_residues = [
         {k: v for k, v in residue.items() if k != "_key"}
@@ -1633,6 +1579,7 @@ def _evaluate_within_spec_suggestion_detail(
         "panel_summary": {},
         "visuals": [],
         "non_dot_residues": [],
+        "missed_dot_tiles": [],
         "rule_selection": {},
         "parameter_snapshot": {},
     }
@@ -1902,43 +1849,30 @@ def _evaluate_within_spec_suggestion_detail(
                         tile_non_dot_keys.add(key)
                         tile_non_dot_residues.append(matched)
             if chosen["count"] <= 0:
-                fallback_candidate = (
-                    _aoi_coord_fallback_candidate(tile, crop_box, chosen["polarity"])
-                    if len(detections) == 1 else None
+                missed_tile = {
+                    "image": image.get("image_name") or image_path.name,
+                    "screen": screen_code,
+                    "tile_id": tile.get("tile_id"),
+                    "crop_box": crop_box,
+                    "is_aoi_coord": bool(tile.get("is_aoi_coord")),
+                    "aoi_defect_code": tile.get("aoi_defect_code") or "",
+                    "aoi_product_x": _as_int(tile.get("aoi_product_x"), -1),
+                    "aoi_product_y": _as_int(tile.get("aoi_product_y"), -1),
+                    "aoi_image_x": _as_int(tile.get("aoi_image_x"), -1),
+                    "aoi_image_y": _as_int(tile.get("aoi_image_y"), -1),
+                }
+                result["missed_dot_tiles"].append(missed_tile)
+                add_step(
+                    "tile 點偵測未命中：不符合規格內",
+                    image=image.get("image_name") or "",
+                    tile_id=tile.get("tile_id"),
+                    crop_box=crop_box,
+                    is_aoi_coord=missed_tile["is_aoi_coord"],
+                    aoi_product_x=missed_tile["aoi_product_x"],
+                    aoi_product_y=missed_tile["aoi_product_y"],
+                    detection=detection_summary,
                 )
-                if fallback_candidate:
-                    chosen = dict(chosen)
-                    chosen["count"] = 1
-                    chosen["max_size_mm"] = 0.0
-                    chosen["candidates"] = [fallback_candidate]
-                    chosen["fallback_source"] = "aoi_coord"
-                    chosen["fallback_candidate"] = fallback_candidate
-                    detection_summary[chosen["dot_type"]].update({
-                        "raw_count": 0,
-                        "count": 1,
-                        "fallback_source": "aoi_coord",
-                        "aoi_product_x": fallback_candidate["aoi_product_x"],
-                        "aoi_product_y": fallback_candidate["aoi_product_y"],
-                    })
-                    add_step(
-                        "tile 點偵測未命中，使用 AOI 座標作為 1 點",
-                        image=image.get("image_name") or "",
-                        tile_id=tile.get("tile_id"),
-                        crop_box=crop_box,
-                        classified_as=chosen["dot_type"],
-                        aoi_product_x=fallback_candidate["aoi_product_x"],
-                        aoi_product_y=fallback_candidate["aoi_product_y"],
-                        detection=detection_summary,
-                    )
-                else:
-                    add_step(
-                        "tile 判定完成：未偵測到黑點/白點候選",
-                        image=image.get("image_name") or "",
-                        tile_id=tile.get("tile_id"),
-                        crop_box=crop_box,
-                        detection=detection_summary,
-                    )
-                    continue
+                continue
 
             result["evaluated_tile_count"] += 1
             key = (screen_code, chosen["dot_type"])
@@ -1963,8 +1897,6 @@ def _evaluate_within_spec_suggestion_detail(
             state["max_tile_count"] = max(state["max_tile_count"], chosen["count"])
             state["max_size_mm"] = max(state["max_size_mm"], chosen["max_size_mm"])
             state["target_tile_count"] += 1
-            if chosen.get("fallback_source"):
-                state["fallback_count"] += 1
             if tile.get("aoi_defect_code"):
                 state["aoi_defect_codes"].add(str(tile.get("aoi_defect_code")))
             tile_detail = {
@@ -1976,12 +1908,6 @@ def _evaluate_within_spec_suggestion_detail(
                 "thresholds": chosen.get("thresholds", {}),
                 "crop_box": crop_box,
             }
-            if chosen.get("fallback_source"):
-                tile_detail.update({
-                    "fallback_source": chosen["fallback_source"],
-                    "aoi_product_x": fallback_candidate["aoi_product_x"],
-                    "aoi_product_y": fallback_candidate["aoi_product_y"],
-                })
             state["tiles"].append(tile_detail)
             visual = _save_within_spec_dot_visuals(
                 tile_crop=tile_crop,
@@ -2075,6 +2001,7 @@ def _evaluate_within_spec_suggestion_detail(
         "evaluated_tile_count": result["evaluated_tile_count"],
         "fallback_count": sum(item.get("fallback_count", 0) for item in panel_totals),
         "non_dot_residue_count": len(non_dot_residues),
+        "missed_dot_tile_count": len(result["missed_dot_tiles"]),
         "skipped_tiles": result["skipped_tiles"],
     }
     result["matches"] = matches[:5]
@@ -2084,6 +2011,13 @@ def _evaluate_within_spec_suggestion_detail(
             count=len(non_dot_residues),
             residues=result["non_dot_residues"][:12],
         )
+    if result["missed_dot_tiles"]:
+        add_step(
+            "點偵測未命中：不建議規格內",
+            count=len(result["missed_dot_tiles"]),
+            tiles=result["missed_dot_tiles"][:12],
+        )
+    if non_dot_residues or result["missed_dot_tiles"]:
         return result
     if not matches:
         add_step("判定結果：未符合規格內建議條件")
