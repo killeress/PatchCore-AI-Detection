@@ -5289,6 +5289,7 @@ class CAPIInferencer:
         product_resolution: Optional[Tuple[int, int]] = None,
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
+        aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
     ):
         """分發器：依 config.is_new_architecture 路由至 v1 或 v2 實作。"""
         return self._dispatch_process_panel(
@@ -5298,6 +5299,7 @@ class CAPIInferencer:
             product_resolution=product_resolution,
             bomb_info=bomb_info,
             model_id=model_id,
+            aoi_report_override=aoi_report_override,
         )
 
     def _process_panel_v1(
@@ -5308,6 +5310,7 @@ class CAPIInferencer:
         product_resolution: Optional[Tuple[int, int]] = None,
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
+        aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
     ) -> List[ImageResult]:
         """
         處理整個面板的圖片 (包含 PINIGBI 灰塵檢查 和 AOI Defect 整合)
@@ -5568,7 +5571,7 @@ class CAPIInferencer:
         # ================================================================
         aoi_report = {}
         if self.config.aoi_coord_inspection_enabled:
-            aoi_report = self._parse_aoi_report_txt(panel_dir)
+            aoi_report = aoi_report_override if aoi_report_override is not None else self._parse_aoi_report_txt(panel_dir)
             if aoi_report:
                 # 收集已有的圖片前綴
                 existing_prefixes = set()
@@ -6750,6 +6753,7 @@ class CAPIInferencer:
         product_resolution: Optional[Tuple[int, int]] = None,
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
+        aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
     ):
         """新架構：依 tile zone routing inner/edge model。
 
@@ -6780,7 +6784,11 @@ class CAPIInferencer:
 
         aoi_report: Optional[Dict[str, List['AOIReportDefect']]] = None
         if self.config.aoi_coord_inspection_enabled:
-            aoi_report = self._parse_aoi_report_txt(Path(panel_dir))
+            aoi_report = (
+                aoi_report_override
+                if aoi_report_override is not None
+                else self._parse_aoi_report_txt(Path(panel_dir))
+            )
 
         aoi_only_mode = bool(
             not self.config.grid_tiling_enabled

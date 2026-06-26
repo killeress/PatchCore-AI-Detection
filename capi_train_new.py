@@ -814,6 +814,23 @@ dust_heatmap_metric: coverage
 omit_overexposure_mean_threshold: 82
 omit_overexposure_ratio_threshold: 0.05
 
+# === 畫異預檢 ===
+# 推論前依 AOI Report 涉及畫面檢查平均亮度；低於下限或高於上限時跳過 AI 推論並回報 PCO05。
+# 預設關閉，避免未校準門檻造成產線誤擋。
+image_abnormal_detection_enabled: false
+image_abnormal_standard_mean_lower: 47
+image_abnormal_standard_mean_upper: 67
+image_abnormal_wgf50500_mean_lower: 50
+image_abnormal_wgf50500_mean_upper: 70
+image_abnormal_g0f00000_mean_lower: 46
+image_abnormal_g0f00000_mean_upper: 66
+image_abnormal_r0f00000_mean_lower: 50
+image_abnormal_r0f00000_mean_upper: 70
+image_abnormal_w0f00000_mean_lower: 49
+image_abnormal_w0f00000_mean_upper: 69
+image_abnormal_b0f00000_mean_lower: 0
+image_abnormal_b0f00000_mean_upper: 12
+
 # === B0F 黑畫面亮點偵測（無 PatchCore 模型，走二值化）===
 bright_spot_threshold: 200
 bright_spot_min_area: 5

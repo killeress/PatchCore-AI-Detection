@@ -443,6 +443,11 @@ def test_write_manifest_yaml(tmp_path):
     assert y["threshold_mapping"]["G0F00000"]["inner"] == 0.62
     assert y["omit_overexposure_mean_threshold"] == 82
     assert y["omit_overexposure_ratio_threshold"] == 0.05
+    assert y["image_abnormal_detection_enabled"] is False
+    assert y["image_abnormal_w0f00000_mean_lower"] == 49
+    assert y["image_abnormal_w0f00000_mean_upper"] == 69
+    assert y["image_abnormal_b0f00000_mean_lower"] == 0
+    assert y["image_abnormal_b0f00000_mean_upper"] == 12
     assert y["image_preprocess_pipeline"][0]["method"] == "bilateral"
     # Scratch classifier 設定要寫進去，否則新架構 server 啟動時 scratch 預設空路徑會撞網路。
     assert y["scratch_classifier_enabled"] is True

@@ -7,12 +7,12 @@ TCP/IP Socket Server，接收 Testing 客戶端的推論請求，
 通訊協議:
     [Request]  無炸彈: AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片目錄路徑
                有炸彈: AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片前綴;(座標);圖片目錄路徑
-               機檢判定: OK / NG / HY (畫異，HY 時跳過推論直接回傳 ERR:HY)
-    [Response] AOI@玻璃ID;機種ID;機台編號;機檢判定;AI判定
+               機檢判定: OK / NG / HY (畫異，HY 時跳過推論)
+    [Response] @QJPG-玻璃ID;MARK判定;MARK字;Defect判定+Defect清單,
 
 AI 判定:
     OK                           — 正常
-    NG@圖片名(X,Y)|圖片名(X,Y)  — 異常，附帶座標
+    NG{defectcode}{5碼產品X}{5碼產品Y}{畫面名}... — 異常，附帶最終 AI NG 點
     ERR:錯誤描述                 — 錯誤
 
 啟動方式:
@@ -39,6 +39,7 @@ import logging.handlers
 import argparse
 import signal
 import yaml
+import cv2
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple, List, Any
@@ -426,6 +427,371 @@ def build_response(
     格式: AOI@玻璃ID;機種ID;機台編號;機檢判定;AI判定
     """
     return f"AOI@{glass_id};{model_id};{machine_no};{machine_judgment};{ai_judgment}"
+
+
+def _image_prefix_for_report(image_name: str) -> str:
+    stem = Path(str(image_name)).stem
+    return stem.rsplit("_", 1)[0] if "_" in stem else stem
+
+
+_REPORT_SCREEN_PREFIXES = (
+    "STANDARD",
+    "WGF50500",
+    "WGF00000",
+    "W0F00000",
+    "G0F00000",
+    "R0F00000",
+    "B0F00000",
+)
+
+_IMAGE_ABNORMAL_SCREEN_FIELDS = (
+    ("STANDARD", "image_abnormal_standard_mean_lower", "image_abnormal_standard_mean_upper"),
+    ("WGF50500", "image_abnormal_wgf50500_mean_lower", "image_abnormal_wgf50500_mean_upper"),
+    ("G0F00000", "image_abnormal_g0f00000_mean_lower", "image_abnormal_g0f00000_mean_upper"),
+    ("R0F00000", "image_abnormal_r0f00000_mean_lower", "image_abnormal_r0f00000_mean_upper"),
+    ("W0F00000", "image_abnormal_w0f00000_mean_lower", "image_abnormal_w0f00000_mean_upper"),
+    ("B0F00000", "image_abnormal_b0f00000_mean_lower", "image_abnormal_b0f00000_mean_upper"),
+)
+
+
+def _screen_prefix_from_text(value: str) -> str:
+    upper_value = str(value or "").upper()
+    for prefix in _REPORT_SCREEN_PREFIXES:
+        if prefix in upper_value:
+            return prefix
+    return ""
+
+
+def _image_abnormal_screen_from_filename(filename: str) -> str:
+    stem = Path(str(filename)).stem.upper()
+    for screen, _lower_field, _upper_field in _IMAGE_ABNORMAL_SCREEN_FIELDS:
+        if stem == screen or stem.startswith(screen + "_"):
+            return screen
+    return ""
+
+
+def _image_abnormal_screen_name(
+    parsed: Optional[Dict[str, Any]],
+    ai_judgment: str = "",
+) -> str:
+    judgment_screen = _screen_prefix_from_text(str(ai_judgment or ""))
+    if judgment_screen:
+        return judgment_screen
+
+    parsed = parsed or {}
+
+    bomb_info = parsed.get("bomb_info") or {}
+    screen = _screen_prefix_from_text(bomb_info.get("image_prefix", ""))
+    if screen:
+        return screen
+
+    image_dir = str(parsed.get("image_dir", "") or "")
+    screen = _screen_prefix_from_text(image_dir)
+    if screen:
+        return screen
+
+    try:
+        path = Path(image_dir)
+        if path.is_file():
+            candidates = [path]
+        elif path.is_dir():
+            candidates = list(path.iterdir())
+        else:
+            candidates = []
+    except Exception:
+        candidates = []
+
+    screens = {
+        screen
+        for candidate in candidates
+        for screen in [_screen_prefix_from_text(candidate.name)]
+        if screen
+    }
+    if len(screens) == 1:
+        return next(iter(screens))
+    return "UNKNOWN"
+
+
+def _image_mean_brightness(image: Any) -> float:
+    if image is None or image.size == 0:
+        return 0.0
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    elif len(image.shape) == 2:
+        gray = image
+    else:
+        gray = image.reshape(image.shape[0], image.shape[1])
+    return float(gray.mean())
+
+
+def _image_abnormal_limits(config: CAPIConfig) -> Dict[str, Tuple[int, int]]:
+    return {
+        screen: (
+            int(getattr(config, lower_field)),
+            int(getattr(config, upper_field)),
+        )
+        for screen, lower_field, upper_field in _IMAGE_ABNORMAL_SCREEN_FIELDS
+    }
+
+
+def check_image_abnormal_precheck(
+    panel_dir: Path,
+    config: CAPIConfig,
+    image_files: Optional[List[Path]] = None,
+    report_prefixes: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    if not getattr(config, "image_abnormal_detection_enabled", False):
+        return None
+
+    target_prefixes = {
+        prefix
+        for prefix in (report_prefixes or [])
+        if prefix in _image_abnormal_limits(config)
+    }
+    if not target_prefixes:
+        logger.info("畫異預檢: AOI Report 無需檢查的畫面前綴，跳過")
+        return None
+
+    try:
+        candidates = list(image_files) if image_files is not None else list(Path(panel_dir).iterdir())
+    except Exception as exc:
+        logger.warning("畫異預檢無法列出圖片 (%s): %s", panel_dir, exc)
+        return None
+
+    limits = _image_abnormal_limits(config)
+    checked_screens = set()
+    logger.info(
+        "畫異預檢: AOI Report 涉及 %d 種可檢查畫面前綴 [%s]",
+        len(target_prefixes),
+        ", ".join(sorted(target_prefixes)),
+    )
+    for image_path in sorted(candidates, key=lambda p: str(p.name)):
+        screen = _image_abnormal_screen_from_filename(image_path.name)
+        if screen not in target_prefixes or screen in checked_screens:
+            continue
+        checked_screens.add(screen)
+
+        image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+        if image is None:
+            logger.warning("畫異預檢無法讀取圖片: %s", image_path)
+            continue
+
+        mean_brightness = _image_mean_brightness(image)
+        lower, upper = limits[screen]
+        detail = f"Mean:{mean_brightness:.1f}(range={lower}-{upper})"
+        if mean_brightness < lower or mean_brightness > upper:
+            logger.warning("[IMAGE_ABNORMAL] %s: %s", image_path.name, detail)
+            return {
+                "screen": screen,
+                "image_name": image_path.name,
+                "mean_brightness": mean_brightness,
+                "lower": lower,
+                "upper": upper,
+                "detail": detail,
+            }
+
+        logger.info("[IMAGE_ABNORMAL OK] %s: %s", image_path.name, detail)
+
+    missing_screens = target_prefixes - checked_screens
+    if missing_screens:
+        logger.warning(
+            "畫異預檢: AOI Report 涉及但資料夾找不到對應圖片 [%s]",
+            ", ".join(sorted(missing_screens)),
+        )
+
+    return None
+
+
+def _format_report_coord(value: int) -> str:
+    return f"{max(0, min(99999, int(round(value)))):05d}"
+
+
+def _image_to_product_coords(
+    image_x: int,
+    image_y: int,
+    raw_bounds: Optional[Tuple[int, int, int, int]],
+    product_resolution: Optional[Tuple[int, int]],
+) -> Tuple[int, int]:
+    if not raw_bounds:
+        return int(image_x), int(image_y)
+
+    product_w, product_h = product_resolution or (0, 0)
+    x_start, y_start, x_end, y_end = raw_bounds
+    panel_w = max(1, x_end - x_start)
+    panel_h = max(1, y_end - y_start)
+
+    if product_w <= 0 or product_h <= 0:
+        return int(image_x), int(image_y)
+
+    product_x = (float(image_x) - x_start) * product_w / panel_w
+    product_y = (float(image_y) - y_start) * product_h / panel_h
+    return (
+        max(0, min(product_w, int(round(product_x)))),
+        max(0, min(product_h, int(round(product_y)))),
+    )
+
+
+def _report_defect_code(config: Optional[CAPIConfig], defect_kind: str) -> str:
+    if defect_kind == "image_abnormal":
+        fallback = "PCO05"
+        value = getattr(config, "report_image_abnormal_defect_code", fallback)
+    elif defect_kind == "bomb":
+        fallback = "PCDK3"
+        value = getattr(config, "report_bomb_defect_code", fallback)
+    elif defect_kind == "white":
+        fallback = "PTMD6"
+        value = getattr(config, "report_white_dot_defect_code", fallback)
+    elif defect_kind == "black":
+        fallback = "PCDK2"
+        value = getattr(config, "report_black_dot_defect_code", fallback)
+    else:
+        fallback = getattr(config, "report_black_dot_defect_code", "PCDK2")
+        value = getattr(config, "report_unknown_dot_defect_code", fallback)
+    return str(value or fallback).strip() or fallback
+
+
+def _tile_report_defect_kind(tile: Any, image_prefix: str) -> str:
+    if getattr(tile, "is_bomb", False):
+        return "bomb"
+    if getattr(tile, "is_bright_spot_detection", False):
+        return "white"
+    if image_prefix.upper().startswith("B0F"):
+        return "white"
+    return "black"
+
+
+def _is_reportable_tile(tile: Any) -> bool:
+    if getattr(tile, "is_bomb", False):
+        return not getattr(tile, "is_aoi_coord_below_threshold", False)
+    return not (
+        getattr(tile, "is_suspected_dust_or_scratch", False)
+        or getattr(tile, "is_in_exclude_zone", False)
+        or getattr(tile, "scratch_filtered", False)
+        or getattr(tile, "is_aoi_coord_below_threshold", False)
+    )
+
+
+def _is_reportable_edge_defect(edge: Any) -> bool:
+    if getattr(edge, "is_bomb", False):
+        return not getattr(edge, "is_cv_ok", False)
+    return not (
+        getattr(edge, "is_suspected_dust_or_scratch", False)
+        or getattr(edge, "is_cv_ok", False)
+    )
+
+
+def _format_qjpg_defect_record(
+    defect_code: str,
+    image_x: int,
+    image_y: int,
+    image_prefix: str,
+    raw_bounds: Optional[Tuple[int, int, int, int]],
+    product_resolution: Optional[Tuple[int, int]],
+) -> str:
+    product_x, product_y = _image_to_product_coords(
+        image_x,
+        image_y,
+        raw_bounds,
+        product_resolution,
+    )
+    return (
+        f"{defect_code}"
+        f"{_format_report_coord(product_x)}"
+        f"{_format_report_coord(product_y)}"
+        f"{image_prefix}"
+    )
+
+
+def _iter_qjpg_defect_records(
+    results: List[ImageResult],
+    product_resolution: Optional[Tuple[int, int]],
+    config: Optional[CAPIConfig],
+) -> List[str]:
+    records: List[str] = []
+    for result in results or []:
+        image_prefix = _image_prefix_for_report(result.image_path.name)
+        raw_bounds = getattr(result, "raw_bounds", None) or getattr(result, "otsu_bounds", None)
+
+        for tile, _score, _anomaly_map in getattr(result, "anomaly_tiles", []) or []:
+            if not _is_reportable_tile(tile):
+                continue
+            if getattr(tile, "anomaly_peak_x", -1) >= 0 and getattr(tile, "anomaly_peak_y", -1) >= 0:
+                image_x, image_y = int(tile.anomaly_peak_x), int(tile.anomaly_peak_y)
+            else:
+                image_x, image_y = tile.center
+            defect_kind = _tile_report_defect_kind(tile, image_prefix)
+            records.append(
+                _format_qjpg_defect_record(
+                    _report_defect_code(config, defect_kind),
+                    image_x,
+                    image_y,
+                    image_prefix,
+                    raw_bounds,
+                    product_resolution,
+                )
+            )
+
+        for edge in getattr(result, "edge_defects", []) or []:
+            if not _is_reportable_edge_defect(edge):
+                continue
+            center = getattr(edge, "center", (0, 0))
+            defect_kind = "bomb" if getattr(edge, "is_bomb", False) else "unknown"
+            records.append(
+                _format_qjpg_defect_record(
+                    _report_defect_code(config, defect_kind),
+                    int(center[0]),
+                    int(center[1]),
+                    image_prefix,
+                    raw_bounds,
+                    product_resolution,
+                )
+            )
+
+    return records
+
+
+def _first_mark_text(results: List[ImageResult]) -> str:
+    for result in results or []:
+        mark_text = str(getattr(result, "mark_text", "") or "").strip()
+        if mark_text:
+            return mark_text
+    return ""
+
+
+def build_qjpg_response(
+    parsed: Optional[Dict[str, Any]],
+    ai_judgment: str,
+    results: Optional[List[ImageResult]] = None,
+    config: Optional[CAPIConfig] = None,
+) -> str:
+    glass_id = str((parsed or {}).get("glass_id", "") or "")
+    product_resolution = (parsed or {}).get("resolution")
+    detected_mark_text = _first_mark_text(results or [])
+    mark_status = "OK" if detected_mark_text else "NG"
+    mark_text = detected_mark_text or "00"
+    records = _iter_qjpg_defect_records(results or [], product_resolution, config)
+
+    if ai_judgment.startswith("ERR:HY"):
+        defect_field = "NG" + _format_qjpg_defect_record(
+            _report_defect_code(config, "image_abnormal"),
+            0,
+            0,
+            _image_abnormal_screen_name(parsed, ai_judgment),
+            None,
+            product_resolution,
+        )
+    elif records:
+        defect_field = "NG" + "".join(records)
+    elif ai_judgment == "OK-i":
+        defect_field = "OK"
+    elif ai_judgment == "OK":
+        defect_field = "OK"
+    elif ai_judgment.startswith("NG"):
+        defect_field = "NG"
+    else:
+        defect_field = ai_judgment or "ERR:UNKNOWN"
+
+    return f"@QJPG-{glass_id};{mark_status};{mark_text};{defect_field},"
 
 
 def resolve_unc_path(unc_path: str, path_mapping: Dict[str, str]) -> str:
@@ -1395,6 +1761,7 @@ class CAPIServer:
                 request_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 request_data = None
                 parsed = None
+                request_config = None
                 raw_data = b""
 
                 # ── 優先從 pending_buffer 取出下一筆請求 ──
@@ -1465,6 +1832,7 @@ class CAPIServer:
                 try:
                     # 解析請求
                     parsed = parse_request(request_data)
+                    request_config = self.get_config_for(parsed.get("model_id", ""))
                     machine_label = f"{client_addr[0]} ({parsed['machine_no']})"
 
                     with server_status.lock:
@@ -1482,15 +1850,11 @@ class CAPIServer:
                         f"MJ={parsed['machine_judgment']} Dir={parsed['image_dir']}"
                     )
 
-                    # 畫異 (HY) — 跳過推論，直接回傳 ERR:HY
+                    # 畫異 (HY) — 跳過推論，client 回覆轉成 QJPG 畫異 defect code
                     if parsed["machine_judgment"] == "HY":
                         logger.info(f"[{client_addr}] 機檢判定=HY (畫異)，跳過推論")
                         ai_judgment = "ERR:HY"
-                        response = build_response(
-                            parsed["glass_id"], parsed["model_id"],
-                            parsed["machine_no"], parsed["machine_judgment"],
-                            ai_judgment,
-                        )
+                        response = build_qjpg_response(parsed, ai_judgment, [], request_config)
                         response_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                         logger.info(f"[{client_addr}] >> {response} (skipped)")
                         with server_status.lock:
@@ -1527,13 +1891,11 @@ class CAPIServer:
                         logger.warning(f"[{client_addr}] [DUPLICATE_PANEL] 重複投片，已選取最新圖片推論，判定={ai_judgment}")
 
                     # 組裝回覆
-                    response_ai_judgment = "OK" if ai_judgment == "OK-i" else ai_judgment
-                    response = build_response(
-                        parsed["glass_id"],
-                        parsed["model_id"],
-                        parsed["machine_no"],
-                        parsed["machine_judgment"],
-                        response_ai_judgment,
+                    response = build_qjpg_response(
+                        parsed,
+                        ai_judgment,
+                        inference_results,
+                        request_config,
                     )
 
                     response_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -1587,13 +1949,9 @@ class CAPIServer:
                     logger.error(f"[{client_addr}] Protocol error: {e}")
                     error_msg = f"ERR:PROTOCOL_ERROR ({str(e)[:80]})"
                     if parsed:
-                        response = build_response(
-                            parsed["glass_id"], parsed["model_id"],
-                            parsed["machine_no"], parsed["machine_judgment"],
-                            error_msg,
-                        )
+                        response = build_qjpg_response(parsed, error_msg, [], request_config)
                     else:
-                        response = f"AOI@;;;;{error_msg}"
+                        response = build_qjpg_response(None, error_msg, [], None)
                     try:
                         client_socket.sendall((response + "\r\n").encode("utf-8"))
                     except Exception:
@@ -1609,13 +1967,9 @@ class CAPIServer:
                     logger.error(f"[{client_addr}] Unexpected error: {e}", exc_info=True)
                     error_msg = f"ERR:INTERNAL_ERROR ({type(e).__name__})"
                     if parsed:
-                        response = build_response(
-                            parsed["glass_id"], parsed["model_id"],
-                            parsed["machine_no"], parsed["machine_judgment"],
-                            error_msg,
-                        )
+                        response = build_qjpg_response(parsed, error_msg, [], request_config)
                     else:
-                        response = f"AOI@;;;;{error_msg}"
+                        response = build_qjpg_response(None, error_msg, [], None)
                     try:
                         client_socket.sendall((response + "\r\n").encode("utf-8"))
                     except Exception:
@@ -1803,6 +2157,26 @@ class CAPIServer:
 
         logger.info(f"Inference directory: {panel_dir}")
 
+        aoi_report_override = None
+        if getattr(inferencer.config, "image_abnormal_detection_enabled", False):
+            aoi_report_override = inferencer._parse_aoi_report_txt(panel_dir)
+            image_abnormal = check_image_abnormal_precheck(
+                panel_dir,
+                inferencer.config,
+                report_prefixes=list(aoi_report_override.keys()),
+            )
+            if image_abnormal:
+                screen = image_abnormal["screen"]
+                detail = image_abnormal["detail"]
+                logger.warning(
+                    "畫異預檢命中: Glass=%s Screen=%s Image=%s %s",
+                    parsed.get("glass_id", ""),
+                    screen,
+                    image_abnormal.get("image_name", ""),
+                    detail,
+                )
+                return f"ERR:HY:{screen}", "[]", [], False, None, {}, False, "", None
+
         # GPU 排隊 — 確保同一時刻只有一個推論任務使用 GPU
         # 注意：Heatmap 儲存已移至背景執行，GPU lock 只保護推論
         with self._gpu_lock:
@@ -1814,6 +2188,7 @@ class CAPIServer:
                     product_resolution=parsed["resolution"],
                     bomb_info=parsed.get("bomb_info"),
                     model_id=parsed.get("model_id"),
+                    aoi_report_override=aoi_report_override,
                 )
 
                 # process_panel 回傳: (results, omit_vis, omit_overexposed, omit_info, is_duplicate, omit_image, aoi_report)
@@ -2088,17 +2463,17 @@ def _run_protocol_tests():
     print(f"✅ Test 2 PASSED: UNC → {linux_path}")
 
     # Test 3: 回覆組裝
-    response = build_response("GLASS001", "MODEL01", "CAPI1403", "OK", "NG@G0F00000(1024,512)")
-    expected = "AOI@GLASS001;MODEL01;CAPI1403;OK;NG@G0F00000(1024,512)"
+    response = build_qjpg_response({"glass_id": "GLASS001", "resolution": (1920, 1080)}, "OK", [], CAPIConfig())
+    expected = "@QJPG-GLASS001;NG;00;OK,"
     assert response == expected, f"Response mismatch: {response}"
     print(f"✅ Test 3 PASSED: {response}")
 
     # Test 4: NG 判定回覆
-    response = build_response("GLASS002", "MODEL01", "CAPI1403", "NG", "OK")
+    response = build_qjpg_response({"glass_id": "GLASS002", "resolution": (1920, 1080)}, "NG", [], CAPIConfig())
     print(f"✅ Test 4 PASSED: {response}")
 
     # Test 5: ERR 回覆
-    response = build_response("GLASS003", "MODEL01", "CAPI1403", "OK", "ERR:MODEL_NOT_LOADED")
+    response = build_qjpg_response({"glass_id": "GLASS003", "resolution": (1920, 1080)}, "ERR:MODEL_NOT_LOADED", [], CAPIConfig())
     print(f"✅ Test 5 PASSED: {response}")
 
     # Test 6: 無效格式
