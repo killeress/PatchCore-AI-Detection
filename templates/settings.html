@@ -1617,6 +1617,28 @@
         'bright_spot_diff_threshold', 'bright_spot_median_kernel',
         'bright_spot_min_area', 'bright_spot_threshold'
     ];
+    const IMAGE_ABNORMAL_PARAMS = [
+        'image_abnormal_detection_enabled',
+        'image_abnormal_standard_mean_lower',
+        'image_abnormal_standard_mean_upper',
+        'image_abnormal_wgf50500_mean_lower',
+        'image_abnormal_wgf50500_mean_upper',
+        'image_abnormal_g0f00000_mean_lower',
+        'image_abnormal_g0f00000_mean_upper',
+        'image_abnormal_r0f00000_mean_lower',
+        'image_abnormal_r0f00000_mean_upper',
+        'image_abnormal_w0f00000_mean_lower',
+        'image_abnormal_w0f00000_mean_upper',
+        'image_abnormal_b0f00000_mean_lower',
+        'image_abnormal_b0f00000_mean_upper'
+    ];
+    const REPORT_RESULT_PARAMS = [
+        'report_black_dot_defect_code',
+        'report_white_dot_defect_code',
+        'report_unknown_dot_defect_code',
+        'report_bomb_defect_code',
+        'report_image_abnormal_defect_code'
+    ];
     const WITHIN_SPEC_PARAM = 'within_spec_judgment_rules';
     const WITHIN_SPEC_STANDARD_SCREENS = [
         ['STANDARD', 'STANDARD(標準)'],
@@ -1686,6 +1708,8 @@
         const cvEdgeParams = CV_EDGE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const aoiCoordParams = AOI_COORD_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const b0fParams = B0F_BRIGHT_SPOT_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
+        const imageAbnormalParams = IMAGE_ABNORMAL_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
+        const reportResultParams = REPORT_RESULT_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const withinSpecParam = allParams.find(p => p.param_name === WITHIN_SPEC_PARAM);
 
         // Group CV Edge Parameters
@@ -1786,6 +1810,8 @@
             <button class="settings-tab-btn ${currentTab === 'dust' ? 'active' : ''}" data-target="dust" onclick="switchTab('dust')">🧹 灰塵偵測</button>
             <button class="settings-tab-btn ${currentTab === 'cv-edge' ? 'active' : ''}" data-target="cv-edge" onclick="switchTab('cv-edge')">📐 CV 邊緣檢測</button>
             <button class="settings-tab-btn ${currentTab === 'aoi-coord' ? 'active' : ''}" data-target="aoi-coord" onclick="switchTab('aoi-coord')">🎯 AOI 機檢座標</button>
+            <button class="settings-tab-btn ${currentTab === 'image-abnormal' ? 'active' : ''}" data-target="image-abnormal" onclick="switchTab('image-abnormal')">🖼️ 畫異設定</button>
+            <button class="settings-tab-btn ${currentTab === 'report-result' ? 'active' : ''}" data-target="report-result" onclick="switchTab('report-result')">📤 回報結果設定</button>
             <button class="settings-tab-btn ${currentTab === 'within-spec' ? 'active' : ''}" data-target="within-spec" onclick="switchTab('within-spec')">📏 規格內判定</button>
             <button class="settings-tab-btn ${currentTab === 'history' ? 'active' : ''}" data-target="history" onclick="switchTab('history')">📋 修改紀錄</button>
         `;
@@ -2101,6 +2127,8 @@
                 </div>
                 ` : ''}
             </div>
+            ${renderReportResultPane(reportResultParams)}
+            ${renderImageAbnormalPane(imageAbnormalParams)}
             ${renderWithinSpecPane(withinSpecParam)}
         `;
 
@@ -2109,6 +2137,74 @@
             if (typeof initExZoneData === 'function') initExZoneData();
             if (typeof updateEdgeVisualizer === 'function') updateEdgeVisualizer();
         }, 50);
+    }
+
+    function paramStringValue(p, fallback) {
+        if (!p) return fallback;
+        try {
+            const parsed = JSON.parse(p.param_value);
+            return String(parsed || fallback);
+        } catch {
+            return String(p.param_value || fallback);
+        }
+    }
+
+    function renderReportResultPane(params) {
+        const blackCode = paramStringValue(params.find(p => p.param_name === 'report_black_dot_defect_code'), 'PCDK2');
+        const whiteCode = paramStringValue(params.find(p => p.param_name === 'report_white_dot_defect_code'), 'PTMD6');
+        const unknownCode = paramStringValue(params.find(p => p.param_name === 'report_unknown_dot_defect_code'), blackCode);
+        const bombCode = paramStringValue(params.find(p => p.param_name === 'report_bomb_defect_code'), 'PCDK3');
+        const hyCode = paramStringValue(params.find(p => p.param_name === 'report_image_abnormal_defect_code'), 'PCO05');
+        const sampleNg = `@QJPG-T863BF29AH44;OK;EJ;NG${blackCode}0063900018W0F00000${whiteCode}0035500234B0F00000${bombCode}0036100533STANDARD,`;
+        const sampleOk = '@QJPG-T863BF29AH44;OK;EJ;OK,';
+        const sampleNoMark = `@QJPG-T863BF29AH44;NG;00;NG${unknownCode}0063900018STANDARD,`;
+        const sampleHy = `@QJPG-T863BF29AH44;NG;00;NG${hyCode}0000000000W0F00000,`;
+        return `
+            <div id="pane-report-result" class="settings-tab-pane ${currentTab === 'report-result' ? 'active' : ''}">
+                <div class="settings-section" style="border-left: 3px solid #14b8a6;">
+                    <div class="settings-section-header" style="background: rgba(20, 184, 166, 0.1); border-bottom: 1px solid rgba(20, 184, 166, 0.2);">
+                        <div class="icon" style="background: rgba(20, 184, 166, 0.18); color: #5eead4;">📤</div>
+                        <span style="color: #5eead4; font-weight: 600;">回報結果設定</span>
+                    </div>
+                    <div style="padding: 14px 16px; color: #94a3b8; font-size: 0.82rem; line-height: 1.7; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        <div style="font-weight: 600; color: #ccfbf1; margin-bottom: 8px;">目前 TCP 回報格式（不可配置）</div>
+                        <div style="font-family: 'Fira Code', monospace; color: #e2e8f0; background: #0f172a; border: 1px solid rgba(20,184,166,0.25); border-radius: 8px; padding: 10px 12px; overflow-x: auto; white-space: nowrap;">@QJPG-玻璃ID;MARK判定;MARK字;Defect判定+Defect清單,</div>
+                        <div style="margin-top: 10px;">
+                            MARK 字直接回傳偵測結果；有 MARK 字為 OK，沒有 MARK 字為 NG，MARK 字欄位回 00。QJPG 回報會先收集真實 NG 點與 bomb 點；只要有可回報點，第 4 欄就回 NG 與清單。
+                            Defect 清單每筆固定為 <code>defectcode + 5碼產品X + 5碼產品Y + 畫面名</code>。
+                            座標會用推論時 product→image 的 raw_bounds 反推回產品座標。
+                            HY 畫異不跑推論，回報時使用畫異 defect code，座標固定 00000,00000，畫面名使用 request/資料夾可推得的畫面前綴。
+                        </div>
+                        <div style="margin-top: 10px; display: grid; gap: 6px;">
+                            <div><span style="color:#5eead4;">NG 範例</span> <code style="color:#e2e8f0;">${escapeHtml(sampleNg)}</code></div>
+                            <div><span style="color:#5eead4;">OK 範例</span> <code style="color:#e2e8f0;">${escapeHtml(sampleOk)}</code></div>
+                            <div><span style="color:#5eead4;">MARK 未偵測範例</span> <code style="color:#e2e8f0;">${escapeHtml(sampleNoMark)}</code></div>
+                            <div><span style="color:#5eead4;">畫異 HY 範例</span> <code style="color:#e2e8f0;">${escapeHtml(sampleHy)}</code></div>
+                        </div>
+                    </div>
+                    ${params.map(p => paramRow(p)).join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    function renderImageAbnormalPane(params) {
+        return `
+            <div id="pane-image-abnormal" class="settings-tab-pane ${currentTab === 'image-abnormal' ? 'active' : ''}">
+                <div class="settings-section" style="border-left: 3px solid #f97316;">
+                    <div class="settings-section-header" style="background: rgba(249, 115, 22, 0.1); border-bottom: 1px solid rgba(249, 115, 22, 0.2);">
+                        <div class="icon" style="background: rgba(249, 115, 22, 0.18); color: #fdba74;">🖼️</div>
+                        <span style="color: #fdba74; font-weight: 600;">畫異設定</span>
+                    </div>
+                    <div style="padding: 14px 16px; color: #94a3b8; font-size: 0.82rem; line-height: 1.7; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        推論前會先解析 AOI Report，只檢查該片報告中實際涉及的畫面前綴，例如 W0F00000、B0F00000。
+                        啟用後，任一涉及畫面的平均亮度低於下限或高於上限，就跳過 AI 推論並以 QJPG 回報畫異；落在上下限內不算畫異：
+                        <code style="color:#e2e8f0;">NG + PCO05 + 00000 + 00000 + 畫面名</code>。
+                    </div>
+                    ${params.map(p => paramRow(p)).join('')}
+                </div>
+            </div>
+        `;
     }
 
     function cloneJson(value) {
@@ -2681,6 +2777,20 @@
         'dust_two_stage_diff_percentile': '特徵偵測靈敏度 (取 diff 分布的此百分位, 越低越敏感)',
         'dust_two_stage_min_area': '特徵最小面積，低於此值視為雜訊 (px)',
         'dust_two_stage_fallback_score': '安全網: 找不到特徵但 heatmap 分數 ≥ 此值時保守判 NG',
+        // Image abnormal precheck
+        'image_abnormal_detection_enabled': '啟用畫異預檢',
+        'image_abnormal_standard_mean_lower': 'STANDARD 平均亮度下限',
+        'image_abnormal_standard_mean_upper': 'STANDARD 平均亮度上限',
+        'image_abnormal_wgf50500_mean_lower': 'WGF50500 平均亮度下限',
+        'image_abnormal_wgf50500_mean_upper': 'WGF50500 平均亮度上限',
+        'image_abnormal_g0f00000_mean_lower': 'G0F00000 平均亮度下限',
+        'image_abnormal_g0f00000_mean_upper': 'G0F00000 平均亮度上限',
+        'image_abnormal_r0f00000_mean_lower': 'R0F00000 平均亮度下限',
+        'image_abnormal_r0f00000_mean_upper': 'R0F00000 平均亮度上限',
+        'image_abnormal_w0f00000_mean_lower': 'W0F00000 平均亮度下限',
+        'image_abnormal_w0f00000_mean_upper': 'W0F00000 平均亮度上限',
+        'image_abnormal_b0f00000_mean_lower': 'B0F00000 平均亮度下限',
+        'image_abnormal_b0f00000_mean_upper': 'B0F00000 平均亮度上限',
         // AOI coordinate inference
         'aoi_heatmap_center_seed_enabled': 'Top% heatmap 額外保留 AOI 座標附近弱熱區',
     };

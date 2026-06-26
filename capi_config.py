@@ -248,6 +248,21 @@ class CAPIConfig:
     # OMIT 過曝偵測設定 (曝光過高的 OMIT 圖無法檢測灰塵，需記錄供工程追蹤)
     omit_overexposure_mean_threshold: int = 200    # 平均亮度超過此值視為過曝
     omit_overexposure_ratio_threshold: float = 0.5 # 高亮像素(>230)佔比超過此值視為過曝
+
+    # 畫異預檢設定 (推論前依 AOI Report 涉及畫面檢查平均亮度，異常時回報 PCO05)
+    image_abnormal_detection_enabled: bool = False
+    image_abnormal_standard_mean_lower: int = 47
+    image_abnormal_standard_mean_upper: int = 67
+    image_abnormal_wgf50500_mean_lower: int = 50
+    image_abnormal_wgf50500_mean_upper: int = 70
+    image_abnormal_g0f00000_mean_lower: int = 46
+    image_abnormal_g0f00000_mean_upper: int = 66
+    image_abnormal_r0f00000_mean_lower: int = 50
+    image_abnormal_r0f00000_mean_upper: int = 70
+    image_abnormal_w0f00000_mean_lower: int = 49
+    image_abnormal_w0f00000_mean_upper: int = 69
+    image_abnormal_b0f00000_mean_lower: int = 0
+    image_abnormal_b0f00000_mean_upper: int = 12
     
     # 邊緣衰減設定 (過濾光影假陽性)
     edge_margin_px: int = 0                   # 邊緣衰減寬度 (px)，0=停用
@@ -261,6 +276,13 @@ class CAPIConfig:
     bright_spot_median_kernel: int = 21       # 背景估計 median filter 核大小
     bright_spot_diff_threshold: int = 10      # 局部對比差異閾值 (與背景差值超過此值為異常)
     within_spec_judgment_rules: Dict[str, Any] = field(default_factory=_default_within_spec_judgment_rules)
+
+    # 回報結果設定
+    report_black_dot_defect_code: str = "PCDK2"
+    report_white_dot_defect_code: str = "PTMD6"
+    report_unknown_dot_defect_code: str = "PCDK2"
+    report_bomb_defect_code: str = "PCDK3"
+    report_image_abnormal_defect_code: str = "PCO05"
 
     # 跳過檔案設定 (不進行推論的檔案名稱)
     skip_files: List[str] = field(default_factory=list)
@@ -476,6 +498,37 @@ class CAPIConfig:
             dust_peak_fraction_threshold=data.get("dust_peak_fraction_threshold", 0.80),
             omit_overexposure_mean_threshold=data.get("omit_overexposure_mean_threshold", 200),
             omit_overexposure_ratio_threshold=data.get("omit_overexposure_ratio_threshold", 0.5),
+            image_abnormal_detection_enabled=data.get("image_abnormal_detection_enabled", False),
+            image_abnormal_standard_mean_lower=data.get("image_abnormal_standard_mean_lower", 47),
+            image_abnormal_standard_mean_upper=data.get(
+                "image_abnormal_standard_mean_upper",
+                data.get("image_abnormal_standard_mean_threshold", 67),
+            ),
+            image_abnormal_wgf50500_mean_lower=data.get("image_abnormal_wgf50500_mean_lower", 50),
+            image_abnormal_wgf50500_mean_upper=data.get(
+                "image_abnormal_wgf50500_mean_upper",
+                data.get("image_abnormal_wgf50500_mean_threshold", 70),
+            ),
+            image_abnormal_g0f00000_mean_lower=data.get("image_abnormal_g0f00000_mean_lower", 46),
+            image_abnormal_g0f00000_mean_upper=data.get(
+                "image_abnormal_g0f00000_mean_upper",
+                data.get("image_abnormal_g0f00000_mean_threshold", 66),
+            ),
+            image_abnormal_r0f00000_mean_lower=data.get("image_abnormal_r0f00000_mean_lower", 50),
+            image_abnormal_r0f00000_mean_upper=data.get(
+                "image_abnormal_r0f00000_mean_upper",
+                data.get("image_abnormal_r0f00000_mean_threshold", 70),
+            ),
+            image_abnormal_w0f00000_mean_lower=data.get("image_abnormal_w0f00000_mean_lower", 49),
+            image_abnormal_w0f00000_mean_upper=data.get(
+                "image_abnormal_w0f00000_mean_upper",
+                data.get("image_abnormal_w0f00000_mean_threshold", 69),
+            ),
+            image_abnormal_b0f00000_mean_lower=data.get("image_abnormal_b0f00000_mean_lower", 0),
+            image_abnormal_b0f00000_mean_upper=data.get(
+                "image_abnormal_b0f00000_mean_upper",
+                data.get("image_abnormal_b0f00000_mean_threshold", 12),
+            ),
             edge_margin_px=data.get("edge_margin_px", 0),
             edge_margin_sides=data.get("edge_margin_sides", cls._migrate_edge_margin(data)),
             bright_spot_threshold=data.get("bright_spot_threshold", 200),
@@ -485,6 +538,11 @@ class CAPIConfig:
             within_spec_judgment_rules=cls._normalize_within_spec_judgment_rules(
                 data.get("within_spec_judgment_rules", {})
             ),
+            report_black_dot_defect_code=data.get("report_black_dot_defect_code", "PCDK2"),
+            report_white_dot_defect_code=data.get("report_white_dot_defect_code", "PTMD6"),
+            report_unknown_dot_defect_code=data.get("report_unknown_dot_defect_code", "PCDK2"),
+            report_bomb_defect_code=data.get("report_bomb_defect_code", "PCDK3"),
+            report_image_abnormal_defect_code=data.get("report_image_abnormal_defect_code", "PCO05"),
             skip_files=data.get("skip_files", []),
             side_shot_prefixes=data.get("side_shot_prefixes", []),
             max_images_per_panel=data.get("max_images_per_panel", 7),
@@ -563,6 +621,19 @@ class CAPIConfig:
             "dust_peak_fraction_threshold": self.dust_peak_fraction_threshold,
             "omit_overexposure_mean_threshold": self.omit_overexposure_mean_threshold,
             "omit_overexposure_ratio_threshold": self.omit_overexposure_ratio_threshold,
+            "image_abnormal_detection_enabled": self.image_abnormal_detection_enabled,
+            "image_abnormal_standard_mean_lower": self.image_abnormal_standard_mean_lower,
+            "image_abnormal_standard_mean_upper": self.image_abnormal_standard_mean_upper,
+            "image_abnormal_wgf50500_mean_lower": self.image_abnormal_wgf50500_mean_lower,
+            "image_abnormal_wgf50500_mean_upper": self.image_abnormal_wgf50500_mean_upper,
+            "image_abnormal_g0f00000_mean_lower": self.image_abnormal_g0f00000_mean_lower,
+            "image_abnormal_g0f00000_mean_upper": self.image_abnormal_g0f00000_mean_upper,
+            "image_abnormal_r0f00000_mean_lower": self.image_abnormal_r0f00000_mean_lower,
+            "image_abnormal_r0f00000_mean_upper": self.image_abnormal_r0f00000_mean_upper,
+            "image_abnormal_w0f00000_mean_lower": self.image_abnormal_w0f00000_mean_lower,
+            "image_abnormal_w0f00000_mean_upper": self.image_abnormal_w0f00000_mean_upper,
+            "image_abnormal_b0f00000_mean_lower": self.image_abnormal_b0f00000_mean_lower,
+            "image_abnormal_b0f00000_mean_upper": self.image_abnormal_b0f00000_mean_upper,
             "edge_margin_px": self.edge_margin_px,
             "edge_margin_sides": self.edge_margin_sides,
             "bright_spot_threshold": self.bright_spot_threshold,
@@ -570,6 +641,11 @@ class CAPIConfig:
             "bright_spot_median_kernel": self.bright_spot_median_kernel,
             "bright_spot_diff_threshold": self.bright_spot_diff_threshold,
             "within_spec_judgment_rules": self.within_spec_judgment_rules,
+            "report_black_dot_defect_code": self.report_black_dot_defect_code,
+            "report_white_dot_defect_code": self.report_white_dot_defect_code,
+            "report_unknown_dot_defect_code": self.report_unknown_dot_defect_code,
+            "report_bomb_defect_code": self.report_bomb_defect_code,
+            "report_image_abnormal_defect_code": self.report_image_abnormal_defect_code,
             "skip_files": self.skip_files,
             "side_shot_prefixes": self.side_shot_prefixes,
             "max_images_per_panel": self.max_images_per_panel,
@@ -638,6 +714,19 @@ class CAPIConfig:
             "dust_peak_fraction_threshold": self.dust_peak_fraction_threshold,
             "omit_overexposure_mean_threshold": self.omit_overexposure_mean_threshold,
             "omit_overexposure_ratio_threshold": self.omit_overexposure_ratio_threshold,
+            "image_abnormal_detection_enabled": self.image_abnormal_detection_enabled,
+            "image_abnormal_standard_mean_lower": self.image_abnormal_standard_mean_lower,
+            "image_abnormal_standard_mean_upper": self.image_abnormal_standard_mean_upper,
+            "image_abnormal_wgf50500_mean_lower": self.image_abnormal_wgf50500_mean_lower,
+            "image_abnormal_wgf50500_mean_upper": self.image_abnormal_wgf50500_mean_upper,
+            "image_abnormal_g0f00000_mean_lower": self.image_abnormal_g0f00000_mean_lower,
+            "image_abnormal_g0f00000_mean_upper": self.image_abnormal_g0f00000_mean_upper,
+            "image_abnormal_r0f00000_mean_lower": self.image_abnormal_r0f00000_mean_lower,
+            "image_abnormal_r0f00000_mean_upper": self.image_abnormal_r0f00000_mean_upper,
+            "image_abnormal_w0f00000_mean_lower": self.image_abnormal_w0f00000_mean_lower,
+            "image_abnormal_w0f00000_mean_upper": self.image_abnormal_w0f00000_mean_upper,
+            "image_abnormal_b0f00000_mean_lower": self.image_abnormal_b0f00000_mean_lower,
+            "image_abnormal_b0f00000_mean_upper": self.image_abnormal_b0f00000_mean_upper,
             "edge_margin_px": self.edge_margin_px,
             "edge_margin_sides": self.edge_margin_sides,
             "bright_spot_threshold": self.bright_spot_threshold,
@@ -645,6 +734,11 @@ class CAPIConfig:
             "bright_spot_median_kernel": self.bright_spot_median_kernel,
             "bright_spot_diff_threshold": self.bright_spot_diff_threshold,
             "within_spec_judgment_rules": self.within_spec_judgment_rules,
+            "report_black_dot_defect_code": self.report_black_dot_defect_code,
+            "report_white_dot_defect_code": self.report_white_dot_defect_code,
+            "report_unknown_dot_defect_code": self.report_unknown_dot_defect_code,
+            "report_bomb_defect_code": self.report_bomb_defect_code,
+            "report_image_abnormal_defect_code": self.report_image_abnormal_defect_code,
             "skip_files": self.skip_files,
             "max_images_per_panel": self.max_images_per_panel,
             "bomb_defects": [b.to_dict() for b in self.bomb_defects],
@@ -778,6 +872,36 @@ class CAPIConfig:
             self.dust_high_cov_threshold = float(param_map["dust_high_cov_threshold"])
         if "dust_peak_fraction_threshold" in param_map:
             self.dust_peak_fraction_threshold = float(param_map["dust_peak_fraction_threshold"])
+        if "image_abnormal_detection_enabled" in param_map:
+            val = param_map["image_abnormal_detection_enabled"]
+            self.image_abnormal_detection_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        for name in (
+            "image_abnormal_standard_mean_lower",
+            "image_abnormal_standard_mean_upper",
+            "image_abnormal_wgf50500_mean_lower",
+            "image_abnormal_wgf50500_mean_upper",
+            "image_abnormal_g0f00000_mean_lower",
+            "image_abnormal_g0f00000_mean_upper",
+            "image_abnormal_r0f00000_mean_lower",
+            "image_abnormal_r0f00000_mean_upper",
+            "image_abnormal_w0f00000_mean_lower",
+            "image_abnormal_w0f00000_mean_upper",
+            "image_abnormal_b0f00000_mean_lower",
+            "image_abnormal_b0f00000_mean_upper",
+        ):
+            if name in param_map:
+                setattr(self, name, int(param_map[name]))
+        legacy_image_abnormal_upper_fields = {
+            "image_abnormal_standard_mean_threshold": "image_abnormal_standard_mean_upper",
+            "image_abnormal_wgf50500_mean_threshold": "image_abnormal_wgf50500_mean_upper",
+            "image_abnormal_g0f00000_mean_threshold": "image_abnormal_g0f00000_mean_upper",
+            "image_abnormal_r0f00000_mean_threshold": "image_abnormal_r0f00000_mean_upper",
+            "image_abnormal_w0f00000_mean_threshold": "image_abnormal_w0f00000_mean_upper",
+            "image_abnormal_b0f00000_mean_threshold": "image_abnormal_b0f00000_mean_upper",
+        }
+        for legacy_name, upper_name in legacy_image_abnormal_upper_fields.items():
+            if upper_name not in param_map and legacy_name in param_map:
+                setattr(self, upper_name, int(param_map[legacy_name]))
         if "grid_tiling_enabled" in param_map:
             val = param_map["grid_tiling_enabled"]
             self.grid_tiling_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
@@ -799,6 +923,16 @@ class CAPIConfig:
             self.within_spec_judgment_rules = self._normalize_within_spec_judgment_rules(
                 param_map["within_spec_judgment_rules"]
             )
+        if "report_black_dot_defect_code" in param_map:
+            self.report_black_dot_defect_code = str(param_map["report_black_dot_defect_code"]).strip() or "PCDK2"
+        if "report_white_dot_defect_code" in param_map:
+            self.report_white_dot_defect_code = str(param_map["report_white_dot_defect_code"]).strip() or "PTMD6"
+        if "report_unknown_dot_defect_code" in param_map:
+            self.report_unknown_dot_defect_code = str(param_map["report_unknown_dot_defect_code"]).strip() or self.report_black_dot_defect_code
+        if "report_bomb_defect_code" in param_map:
+            self.report_bomb_defect_code = str(param_map["report_bomb_defect_code"]).strip() or "PCDK3"
+        if "report_image_abnormal_defect_code" in param_map:
+            self.report_image_abnormal_defect_code = str(param_map["report_image_abnormal_defect_code"]).strip() or "PCO05"
         if "aoi_report_path_replace_from" in param_map:
             self.aoi_report_path_replace_from = str(param_map["aoi_report_path_replace_from"])
         if "aoi_report_path_replace_to" in param_map:

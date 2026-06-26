@@ -136,6 +136,68 @@ def test_aoi_heatmap_center_seed_enabled_serialization():
         assert loaded["aoi_heatmap_center_seed_enabled"] is False
 
 
+def test_report_result_defect_codes_defaults_and_db_overrides():
+    cfg = CAPIConfig()
+    assert cfg.report_black_dot_defect_code == "PCDK2"
+    assert cfg.report_white_dot_defect_code == "PTMD6"
+    assert cfg.report_unknown_dot_defect_code == "PCDK2"
+    assert cfg.report_bomb_defect_code == "PCDK3"
+    assert cfg.report_image_abnormal_defect_code == "PCO05"
+
+    cfg.apply_db_overrides([
+        {"param_name": "report_black_dot_defect_code", "decoded_value": "B1234"},
+        {"param_name": "report_white_dot_defect_code", "decoded_value": "W1234"},
+        {"param_name": "report_unknown_dot_defect_code", "decoded_value": "U1234"},
+        {"param_name": "report_bomb_defect_code", "decoded_value": "X1234"},
+        {"param_name": "report_image_abnormal_defect_code", "decoded_value": "H1234"},
+    ])
+
+    assert cfg.report_black_dot_defect_code == "B1234"
+    assert cfg.report_white_dot_defect_code == "W1234"
+    assert cfg.report_unknown_dot_defect_code == "U1234"
+    assert cfg.report_bomb_defect_code == "X1234"
+    assert cfg.report_image_abnormal_defect_code == "H1234"
+    assert cfg.to_dict()["report_white_dot_defect_code"] == "W1234"
+    assert cfg.to_dict()["report_bomb_defect_code"] == "X1234"
+
+
+def test_image_abnormal_settings_defaults_fallback_and_db_overrides():
+    cfg = CAPIConfig.from_dict({"omit_overexposure_mean_threshold": 82})
+
+    assert cfg.image_abnormal_detection_enabled is False
+    assert cfg.image_abnormal_standard_mean_lower == 47
+    assert cfg.image_abnormal_standard_mean_upper == 67
+    assert cfg.image_abnormal_wgf50500_mean_lower == 50
+    assert cfg.image_abnormal_wgf50500_mean_upper == 70
+    assert cfg.image_abnormal_g0f00000_mean_lower == 46
+    assert cfg.image_abnormal_g0f00000_mean_upper == 66
+    assert cfg.image_abnormal_r0f00000_mean_lower == 50
+    assert cfg.image_abnormal_r0f00000_mean_upper == 70
+    assert cfg.image_abnormal_w0f00000_mean_lower == 49
+    assert cfg.image_abnormal_w0f00000_mean_upper == 69
+    assert cfg.image_abnormal_b0f00000_mean_lower == 0
+    assert cfg.image_abnormal_b0f00000_mean_upper == 12
+
+    legacy = CAPIConfig.from_dict({"image_abnormal_w0f00000_mean_threshold": 91})
+    assert legacy.image_abnormal_w0f00000_mean_lower == 49
+    assert legacy.image_abnormal_w0f00000_mean_upper == 91
+
+    cfg.apply_db_overrides([
+        {"param_name": "image_abnormal_detection_enabled", "decoded_value": True},
+        {"param_name": "image_abnormal_w0f00000_mean_lower", "decoded_value": 51},
+        {"param_name": "image_abnormal_w0f00000_mean_upper", "decoded_value": 91},
+        {"param_name": "image_abnormal_b0f00000_mean_lower", "decoded_value": 1},
+        {"param_name": "image_abnormal_b0f00000_mean_upper", "decoded_value": 77},
+    ])
+
+    assert cfg.image_abnormal_detection_enabled is True
+    assert cfg.image_abnormal_w0f00000_mean_lower == 51
+    assert cfg.image_abnormal_w0f00000_mean_upper == 91
+    assert cfg.image_abnormal_b0f00000_mean_lower == 1
+    assert cfg.image_abnormal_b0f00000_mean_upper == 77
+    assert cfg.to_dict()["image_abnormal_w0f00000_mean_upper"] == 91
+
+
 def test_within_spec_judgment_rules_defaults_and_overrides():
     cfg = CAPIConfig()
     default_rules = cfg.within_spec_judgment_rules["default"]

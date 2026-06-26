@@ -2760,6 +2760,26 @@ class CAPIDatabase:
             ("bright_spot_median_kernel", 21, "int", "背景估計 median filter 核大小"),
             ("bright_spot_diff_threshold", 10, "int", "局部對比差異閾值"),
             ("within_spec_judgment_rules", config.within_spec_judgment_rules, "dict", "規格內點狀不良判定條件（依機種/畫面/黑白點分開設定；dot_detection.segmentation_method 可選 background_diff、hysteresis(V2 雙參數組)、morph_hat、adaptive_mean、halo、auto 或 off 關閉）"),
+            # 畫異設定
+            ("image_abnormal_detection_enabled", config.image_abnormal_detection_enabled, "bool", "啟用推論前畫異預檢（只檢查 AOI Report 涉及畫面的平均亮度，低於下限或高於上限時回報 PCO05）"),
+            ("image_abnormal_standard_mean_lower", config.image_abnormal_standard_mean_lower, "int", "STANDARD 畫面平均亮度下限"),
+            ("image_abnormal_standard_mean_upper", config.image_abnormal_standard_mean_upper, "int", "STANDARD 畫面平均亮度上限"),
+            ("image_abnormal_wgf50500_mean_lower", config.image_abnormal_wgf50500_mean_lower, "int", "WGF50500 畫面平均亮度下限"),
+            ("image_abnormal_wgf50500_mean_upper", config.image_abnormal_wgf50500_mean_upper, "int", "WGF50500 畫面平均亮度上限"),
+            ("image_abnormal_g0f00000_mean_lower", config.image_abnormal_g0f00000_mean_lower, "int", "G0F00000 畫面平均亮度下限"),
+            ("image_abnormal_g0f00000_mean_upper", config.image_abnormal_g0f00000_mean_upper, "int", "G0F00000 畫面平均亮度上限"),
+            ("image_abnormal_r0f00000_mean_lower", config.image_abnormal_r0f00000_mean_lower, "int", "R0F00000 畫面平均亮度下限"),
+            ("image_abnormal_r0f00000_mean_upper", config.image_abnormal_r0f00000_mean_upper, "int", "R0F00000 畫面平均亮度上限"),
+            ("image_abnormal_w0f00000_mean_lower", config.image_abnormal_w0f00000_mean_lower, "int", "W0F00000 畫面平均亮度下限"),
+            ("image_abnormal_w0f00000_mean_upper", config.image_abnormal_w0f00000_mean_upper, "int", "W0F00000 畫面平均亮度上限"),
+            ("image_abnormal_b0f00000_mean_lower", config.image_abnormal_b0f00000_mean_lower, "int", "B0F00000 畫面平均亮度下限"),
+            ("image_abnormal_b0f00000_mean_upper", config.image_abnormal_b0f00000_mean_upper, "int", "B0F00000 畫面平均亮度上限"),
+            # 回報結果設定
+            ("report_black_dot_defect_code", config.report_black_dot_defect_code, "string", "QJPG 回報格式：黑點 defect code"),
+            ("report_white_dot_defect_code", config.report_white_dot_defect_code, "string", "QJPG 回報格式：白點 defect code"),
+            ("report_unknown_dot_defect_code", config.report_unknown_dot_defect_code, "string", "QJPG 回報格式：無法判斷黑/白點時使用的 defect code"),
+            ("report_bomb_defect_code", config.report_bomb_defect_code, "string", "QJPG 回報格式：炸彈 defect code"),
+            ("report_image_abnormal_defect_code", config.report_image_abnormal_defect_code, "string", "QJPG 回報格式：畫異 defect code"),
             # AOI 機檢座標設定
             ("grid_tiling_enabled", True, "bool", "啟用全面板 Grid Tiling 推論"),
             # 新架構 attribution 模式（找包含 AOI 座標的既存 grid tile 標屬性）成本近零，
