@@ -1306,6 +1306,127 @@ def _non_dot_residue_match(
     return item
 
 
+def _attach_runtime_dust_masks_to_within_spec_detail(detail: Dict[str, Any], results: List[Any]) -> Dict[str, Any]:
+    """Attach in-memory dust masks to live within-spec detail; masks are not persisted."""
+    if not detail or not results:
+        return detail
+
+    result_by_name = {}
+    for result in results:
+        image_path = Path(str(getattr(result, "image_path", "")))
+        if image_path.name:
+            result_by_name[image_path.name] = result
+        if image_path.stem:
+            result_by_name[image_path.stem] = result
+
+    for image in detail.get("images") or []:
+        image_name = str(image.get("image_name") or image.get("image_path") or "")
+        image_path = Path(image_name)
+        result = (
+            result_by_name.get(image_path.name)
+            or result_by_name.get(image_path.stem)
+            or result_by_name.get(Path(str(image.get("image_path") or "")).name)
+            or result_by_name.get(Path(str(image.get("image_path") or "")).stem)
+        )
+        if result is None:
+            continue
+
+        runtime_tiles = [item[0] for item in (getattr(result, "anomaly_tiles", []) or [])]
+        by_id = {getattr(tile, "tile_id", None): tile for tile in runtime_tiles}
+        by_xy = {
+            (getattr(tile, "x", None), getattr(tile, "y", None)): tile
+            for tile in runtime_tiles
+        }
+        for tile_data in image.get("tiles") or []:
+            runtime_tile = by_id.get(tile_data.get("tile_id"))
+            if runtime_tile is None:
+                runtime_tile = by_xy.get((tile_data.get("x"), tile_data.get("y")))
+            if runtime_tile is None:
+                continue
+
+            dust_mask = getattr(runtime_tile, "dust_mask", None)
+            if dust_mask is None:
+                dust_mask = getattr(runtime_tile, "dust_two_stage_dust_mask", None)
+            if dust_mask is not None:
+                tile_data["_runtime_dust_mask"] = dust_mask
+                tile_data["dust_detail_text"] = getattr(runtime_tile, "dust_detail_text", "")
+    return detail
+
+
+def _runtime_dust_mask_for_tile(tile: Dict[str, Any], shape: Tuple[int, int]) -> Optional[Any]:
+    mask = tile.get("_runtime_dust_mask")
+    if mask is None:
+        return None
+
+    import cv2
+    import numpy as np
+
+    dust_mask = np.asarray(mask)
+    if dust_mask.ndim == 3:
+        dust_mask = cv2.cvtColor(dust_mask, cv2.COLOR_BGR2GRAY)
+    target_h, target_w = int(shape[0]), int(shape[1])
+    if dust_mask.shape[:2] != (target_h, target_w):
+        dust_mask = cv2.resize(dust_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+    return dust_mask > 0
+
+
+def _candidate_dust_overlap(candidate: Dict[str, Any], dust_mask) -> Optional[Dict[str, Any]]:
+    import numpy as np
+
+    if dust_mask is None:
+        return None
+    mask_h, mask_w = dust_mask.shape[:2]
+    x = max(0, min(mask_w - 1, _as_int(candidate.get("x"), 0)))
+    y = max(0, min(mask_h - 1, _as_int(candidate.get("y"), 0)))
+    w = max(1, _as_int(candidate.get("w"), 1))
+    h = max(1, _as_int(candidate.get("h"), 1))
+    x2 = max(x + 1, min(mask_w, x + w))
+    y2 = max(y + 1, min(mask_h, y + h))
+    patch = dust_mask[y:y2, x:x2]
+    if patch.size <= 0:
+        return None
+
+    overlap_ratio = float(np.count_nonzero(patch) / patch.size)
+    cx = max(0, min(mask_w - 1, int(round(_as_float(candidate.get("center_x"), x + w / 2.0)))))
+    cy = max(0, min(mask_h - 1, int(round(_as_float(candidate.get("center_y"), y + h / 2.0)))))
+    center_in_dust = bool(dust_mask[cy, cx])
+    if not center_in_dust and overlap_ratio < 0.25:
+        return None
+
+    rejected = {
+        k: v for k, v in candidate.items()
+        if k not in {"is_defect", "id"}
+    }
+    rejected.update({
+        "reason": "dust_mask_overlap",
+        "dust_overlap_ratio": round(overlap_ratio, 4),
+        "center_in_dust": center_in_dust,
+    })
+    return rejected
+
+
+def _remove_dust_overlap_candidates(detected: Dict[str, Any], dust_mask) -> Dict[str, Any]:
+    if dust_mask is None:
+        return detected
+
+    kept = []
+    rejected = list(detected.get("rejected_candidates") or [])
+    original_count = len(detected.get("candidates") or [])
+    for candidate in detected.get("candidates") or []:
+        dust_rejected = _candidate_dust_overlap(candidate, dust_mask)
+        if dust_rejected:
+            rejected.append(dust_rejected)
+        else:
+            kept.append(candidate)
+
+    for idx, candidate in enumerate(kept, 1):
+        candidate["id"] = idx
+    detected["candidates"] = kept
+    detected["rejected_candidates"] = rejected[:50]
+    detected["dust_mask_filtered_count"] = original_count - len(kept)
+    return detected
+
+
 def _format_within_spec_panel_summary(detail: Dict[str, Any], fallback: str = "") -> str:
     parts = _format_within_spec_panel_summary_parts(detail)
     return "；".join(parts) if parts else fallback
@@ -1451,6 +1572,7 @@ def _save_within_spec_dot_visuals(
     processed_crop,
     chosen: Dict[str, Any],
     dot_cfg: Dict[str, Any],
+    runtime_dust_mask=None,
     non_dot_residues: Optional[List[Dict[str, Any]]] = None,
     output_dir: Optional[Path],
     url_prefix: str,
@@ -1486,6 +1608,27 @@ def _save_within_spec_dot_visuals(
         **_dot_hysteresis_kwargs(dot_cfg),
         include_visuals=True,
     )
+    detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask)
+    dust_mask_color = None
+    dust_overlay = None
+    if runtime_dust_mask is not None:
+        import numpy as np
+
+        dust_mask_u8 = (np.asarray(runtime_dust_mask).astype("uint8") * 255)
+        dust_mask_color = cv2.cvtColor(dust_mask_u8, cv2.COLOR_GRAY2BGR)
+        dust_mask_color[runtime_dust_mask > 0] = (0, 255, 255)
+        base_overlay = detected.get("overlay")
+        if base_overlay is not None:
+            dust_overlay = base_overlay.copy()
+            yellow = np.zeros_like(dust_overlay)
+            yellow[:, :] = (0, 255, 255)
+            dust_overlay[runtime_dust_mask > 0] = cv2.addWeighted(
+                dust_overlay[runtime_dust_mask > 0],
+                0.45,
+                yellow[runtime_dust_mask > 0],
+                0.55,
+                0,
+            )
 
     visual_residues = [
         {k: v for k, v in residue.items() if k != "_key"}
@@ -1525,11 +1668,19 @@ def _save_within_spec_dot_visuals(
         "mask_url": f"{prefix}_mask.png",
         "diff_url": f"{prefix}_diff.png",
     }
+    if dust_mask_color is not None:
+        files["dust_mask_url"] = f"{prefix}_dust_mask.png"
+    if dust_overlay is not None:
+        files["dust_overlay_url"] = f"{prefix}_dust_overlay.png"
     cv2.imwrite(str(output_dir / files["crop_url"]), tile_crop)
     cv2.imwrite(str(output_dir / files["preprocessed_url"]), processed_crop)
     cv2.imwrite(str(output_dir / files["overlay_url"]), detected["overlay"])
     cv2.imwrite(str(output_dir / files["mask_url"]), detected["mask_color"])
     cv2.imwrite(str(output_dir / files["diff_url"]), detected["diff_color"])
+    if dust_mask_color is not None:
+        cv2.imwrite(str(output_dir / files["dust_mask_url"]), dust_mask_color)
+    if dust_overlay is not None:
+        cv2.imwrite(str(output_dir / files["dust_overlay_url"]), dust_overlay)
 
     return {
         "image_name": image_name,
@@ -1545,6 +1696,7 @@ def _save_within_spec_dot_visuals(
         "threshold_mm": chosen["threshold_mm"],
         "candidates": detected["candidates"][:30],
         "non_dot_residues": visual_residues[:20],
+        "dust_mask_filtered_count": _as_int(detected.get("dust_mask_filtered_count"), 0),
         "thresholds": detected.get("thresholds", {}),
         "urls": {key: f"{url_prefix}/{filename}" for key, filename in files.items()},
     }
@@ -1724,6 +1876,7 @@ def _evaluate_within_spec_suggestion_detail(
                 method=str(dot_cfg.get("preprocess_method") or DOT_PREPROCESS_METHOD),
                 params=preprocess_params,
             )
+            runtime_dust_mask = _runtime_dust_mask_for_tile(tile, processed_crop.shape[:2])
 
             detections = []
             for dot_type, polarity, label in dot_types:
@@ -1759,6 +1912,7 @@ def _evaluate_within_spec_suggestion_detail(
                     **_dot_hysteresis_kwargs(dot_cfg),
                     include_visuals=False,
                 )
+                detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask)
                 candidates = detected["candidates"]
                 max_size_mm = max((_as_float(c.get("size_mm"), 0.0) for c in candidates), default=0.0)
                 detections.append({
@@ -1774,6 +1928,7 @@ def _evaluate_within_spec_suggestion_detail(
                     "tile_limit": tile_limit,
                     "candidates": candidates,
                     "rejected_candidates": detected.get("rejected_candidates", []),
+                    "dust_mask_filtered_count": detected.get("dust_mask_filtered_count", 0),
                     "count": len(candidates),
                     "max_size_mm": max_size_mm,
                 })
@@ -1796,6 +1951,7 @@ def _evaluate_within_spec_suggestion_detail(
                     "max_size_mm": round(float(d["max_size_mm"]), 4),
                     "segmentation_method": d["segmentation_method"],
                     "rejected_count": len(d.get("rejected_candidates") or []),
+                    "dust_mask_filtered_count": _as_int(d.get("dust_mask_filtered_count"), 0),
                     "thresholds": d.get("thresholds", {}),
                 }
                 for d in detections
@@ -1872,6 +2028,22 @@ def _evaluate_within_spec_suggestion_detail(
                     aoi_product_y=missed_tile["aoi_product_y"],
                     detection=detection_summary,
                 )
+                visual = _save_within_spec_dot_visuals(
+                    tile_crop=tile_crop,
+                    processed_crop=processed_crop,
+                    chosen=chosen,
+                    dot_cfg=dot_cfg,
+                    runtime_dust_mask=runtime_dust_mask,
+                    non_dot_residues=tile_non_dot_residues,
+                    output_dir=visual_output_dir,
+                    url_prefix=visual_url_prefix,
+                    image_name=image.get("image_name") or image_path.name,
+                    tile_id=tile.get("tile_id"),
+                    crop_box=crop_box,
+                )
+                if visual:
+                    missed_tile["visual"] = visual
+                    result["visuals"].append(visual)
                 continue
 
             result["evaluated_tile_count"] += 1
@@ -1914,6 +2086,7 @@ def _evaluate_within_spec_suggestion_detail(
                 processed_crop=processed_crop,
                 chosen=chosen,
                 dot_cfg=dot_cfg,
+                runtime_dust_mask=runtime_dust_mask,
                 non_dot_residues=tile_non_dot_residues,
                 output_dir=visual_output_dir,
                 url_prefix=visual_url_prefix,
@@ -7064,6 +7237,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         "images": results_to_db_data(results, {}),
                         "source": "inference",
                     }
+                    _attach_runtime_dust_masks_to_within_spec_detail(eval_detail, results)
                     rules = getattr(getattr(inferencer, "config", None), "within_spec_judgment_rules", None)
                     if not rules:
                         rules = CAPIConfig().within_spec_judgment_rules

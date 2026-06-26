@@ -51,6 +51,7 @@ from capi_inference import CAPIInferencer, ImageResult
 from capi_database import CAPIDatabase
 from capi_heatmap import HeatmapManager
 from capi_web import (
+    _attach_runtime_dust_masks_to_within_spec_detail,
     _evaluate_within_spec_suggestion_detail,
     _within_spec_auto_visual_output,
     _format_within_spec_panel_summary,
@@ -1691,6 +1692,7 @@ class CAPIServer:
                 "images": results_to_db_data(results, {}),
                 "source": "inference",
             }
+            _attach_runtime_dust_masks_to_within_spec_detail(detail, results)
             visual_dir, visual_prefix = _within_spec_auto_visual_output(
                 str(getattr(getattr(self, "heatmap_manager", None), "base_dir", "") or ""),
                 parsed.get("glass_id", ""),

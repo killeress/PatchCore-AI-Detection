@@ -407,10 +407,11 @@
                 <div>
                     {{ visual.count }} 點，max {{ "%.4f"|format(visual.max_size_mm or 0) }} mm
                     {% if visual.non_dot_residues %}，非點狀NG {{ visual.non_dot_residues|length }}{% endif %}
+                    {% if visual.dust_mask_filtered_count %}，灰塵排除 {{ visual.dust_mask_filtered_count }}{% endif %}
                 </div>
             </div>
-            <a href="{{ visual.urls.overlay_url }}" target="_blank">
-                <img class="ws-main-img" src="{{ visual.urls.overlay_url }}" alt="dot overlay">
+            <a href="{{ visual.urls.dust_overlay_url or visual.urls.overlay_url }}" target="_blank">
+                <img class="ws-main-img" src="{{ visual.urls.dust_overlay_url or visual.urls.overlay_url }}" alt="dot overlay">
             </a>
             <div class="ws-thumbs">
                 <a class="ws-thumb" href="{{ visual.urls.crop_url }}" target="_blank">
@@ -425,6 +426,18 @@
                     <img src="{{ visual.urls.mask_url }}" alt="mask">
                     <div>mask</div>
                 </a>
+                {% if visual.urls.dust_mask_url %}
+                <a class="ws-thumb" href="{{ visual.urls.dust_mask_url }}" target="_blank">
+                    <img src="{{ visual.urls.dust_mask_url }}" alt="dust mask">
+                    <div>灰塵遮罩</div>
+                </a>
+                {% endif %}
+                {% if visual.urls.dust_overlay_url %}
+                <a class="ws-thumb" href="{{ visual.urls.dust_overlay_url }}" target="_blank">
+                    <img src="{{ visual.urls.dust_overlay_url }}" alt="dust overlay">
+                    <div>灰塵疊圖</div>
+                </a>
+                {% endif %}
             </div>
             {% if visual.thresholds and visual.thresholds.hysteresis_selected_group %}
             <div style="margin-top:8px;color:var(--text-muted);font-size:0.82rem;line-height:1.6;">
