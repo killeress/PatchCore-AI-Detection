@@ -117,11 +117,14 @@ def test_within_spec_detail_template_renders():
                     "dot_label": "黑點",
                     "count": 1,
                     "max_size_mm": 0.13,
+                    "dust_mask_filtered_count": 1,
                     "urls": {
                         "overlay_url": "/heatmaps/ws/overlay.png",
                         "crop_url": "/heatmaps/ws/crop.png",
                         "diff_url": "/heatmaps/ws/diff.png",
                         "mask_url": "/heatmaps/ws/mask.png",
+                        "dust_mask_url": "/heatmaps/ws/dust_mask.png",
+                        "dust_overlay_url": "/heatmaps/ws/dust_overlay.png",
                     },
                     "candidates": [{"id": 1, "size_mm": 0.13, "size_px": 6.0, "x": 1, "y": 2, "w": 3, "h": 4, "max_diff": 10}],
                     "thresholds": {
@@ -158,6 +161,8 @@ def test_within_spec_detail_template_renders():
     assert "規格內計算明細 #1" in html
     assert "/record/3" in html
     assert "MODEL_A" in html
+    assert "灰塵遮罩" in html
+    assert "灰塵疊圖" in html
     assert "點偵測結果圖片" in html
     assert "非點狀殘留" in html
     assert "aspect_ratio_below_min" in html
