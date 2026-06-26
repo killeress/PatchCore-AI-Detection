@@ -290,14 +290,14 @@ def test_within_spec_detail_saves_visuals_and_panel_totals(tmp_path):
     assert any(p.name.endswith("_overlay.png") for p in visual_dir.iterdir())
 
 
-def test_within_spec_counts_aoi_ng_tile_when_dot_detector_misses(tmp_path):
+def test_within_spec_rejects_aoi_ng_tile_when_dot_detector_misses(tmp_path):
     image_path = tmp_path / "WGF50500.png"
     visual_dir = tmp_path / "visuals"
     image = np.full((64, 128, 3), 128, dtype=np.uint8)
     cv2.circle(image, (96, 32), 3, (60, 60, 60), -1)
     cv2.imwrite(str(image_path), image)
 
-    rules = _rules(screen_limit=2, tile_limit=1)
+    rules = _rules(screen_limit=2, tile_limit=1, white_enabled=True)
     rules["default"]["screens"]["WGF50500"] = rules["default"]["screens"].pop("W0F00000")
     detail = {
         "model_id": "GN156HRAAPF0S",
@@ -354,21 +354,24 @@ def test_within_spec_counts_aoi_ng_tile_when_dot_detector_misses(tmp_path):
         visual_url_prefix="/heatmaps/test/within_spec",
     )
 
-    assert result["suggestion"] is not None
+    assert result["suggestion"] is None
     assert result["panel_summary"]["target_tile_count"] == 2
-    assert result["panel_summary"]["evaluated_tile_count"] == 2
-    assert result["panel_summary"]["total_dot_count"] == 2
-    assert result["panel_summary"]["fallback_count"] == 1
+    assert result["panel_summary"]["evaluated_tile_count"] == 1
+    assert result["panel_summary"]["total_dot_count"] == 1
+    assert result["panel_summary"]["fallback_count"] == 0
+    assert result["panel_summary"]["missed_dot_tile_count"] == 1
+    assert result["missed_dot_tiles"][0]["screen"] == "WGF50500"
+    assert result["missed_dot_tiles"][0]["tile_id"] == 0
+    assert result["missed_dot_tiles"][0]["is_aoi_coord"] is True
     assert result["panel_totals"][0]["screen"] == "WGF50500"
-    assert result["panel_totals"][0]["total_count"] == 2
-    assert result["matches"][0]["screen_count"] == 2
-    assert result["matches"][0]["tiles"][0]["fallback_source"] == "aoi_coord"
+    assert result["panel_totals"][0]["total_count"] == 1
+    assert result["matches"][0]["screen_count"] == 1
     assert any(
-        v.get("fallback_source") == "aoi_coord" and v["count"] == 1
-        for v in result["visuals"]
+        step["message"] == "tile 點偵測未命中：不符合規格內"
+        for step in result["steps"]
     )
     assert any(
-        step["message"] == "tile 點偵測未命中，使用 AOI 座標作為 1 點"
+        step["message"] == "點偵測未命中：不建議規格內"
         for step in result["steps"]
     )
 
@@ -886,3 +889,42 @@ def test_within_spec_inference_note_formats_panel_results_on_separate_lines():
     assert lines[3].startswith("  - R0F00000 黑點：")
     assert "畫面總點數 7 > 2 [NG]" in lines[3]
     assert lines[4] == "  明細：http://example/within-spec-logs"
+
+
+def test_within_spec_inference_note_includes_missed_aoi_dot_tiles():
+    within_spec_info = {
+        "converted": False,
+        "status": "not_within_spec",
+        "reason": "",
+        "detail": {
+            "rule_selection": {"matched_machine_key": "GN156HRAAPF0S"},
+            "panel_summary": {"target_tile_count": 3, "evaluated_tile_count": 2},
+            "panel_totals": [
+                {
+                    "screen": "WGF50500",
+                    "dot_label": "黑點",
+                    "max_size_mm": 0.2347,
+                    "threshold_mm": 0.3,
+                    "total_count": 1,
+                    "screen_count_limit": 2,
+                    "max_tile_count": 1,
+                    "tile_count_threshold": 1,
+                    "within": True,
+                },
+            ],
+            "missed_dot_tiles": [
+                {
+                    "screen": "WGF50500",
+                    "tile_id": 0,
+                    "is_aoi_coord": True,
+                    "aoi_product_x": 704,
+                    "aoi_product_y": 120,
+                },
+            ],
+        },
+    }
+
+    note = _format_within_spec_inference_note(within_spec_info, "http://example/within-spec-logs")
+
+    assert "[WITHIN_SPEC_INFERENCE]" in note
+    assert "WGF50500 AOI點未檢出：數量 1 > 0 [NG]；tile 0 AOI(704,120)；結果=NG" in note
