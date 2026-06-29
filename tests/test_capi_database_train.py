@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from capi_config import CAPIConfig
 from capi_database import CAPIDatabase
 
 
@@ -101,6 +102,51 @@ class TestTrainingSchema:
             "config_params", "config_change_history",
         }
         assert existing.issubset(tables)
+
+
+class TestConfigParamDefaults:
+    def test_image_abnormal_threshold_migration_preserves_manual_values(self, tmp_path):
+        db = _make_db(tmp_path)
+        with _conn(db) as conn:
+            conn.execute(
+                """INSERT INTO config_params
+                   (param_name, param_value, param_type, description)
+                   VALUES (?, ?, ?, ?)""",
+                ("image_abnormal_w0f00000_mean_lower", "49", "int", "old desc"),
+            )
+            conn.execute(
+                """INSERT INTO config_params
+                   (param_name, param_value, param_type, description)
+                   VALUES (?, ?, ?, ?)""",
+                ("image_abnormal_w0f00000_mean_upper", "85", "int", "old desc"),
+            )
+            conn.commit()
+
+        db.init_config_from_yaml(CAPIConfig())
+
+        with _conn(db) as conn:
+            lower = conn.execute(
+                "SELECT param_value, description FROM config_params WHERE param_name = ?",
+                ("image_abnormal_w0f00000_mean_lower",),
+            ).fetchone()
+            upper = conn.execute(
+                "SELECT param_value, description FROM config_params WHERE param_name = ?",
+                ("image_abnormal_w0f00000_mean_upper",),
+            ).fetchone()
+            history_count = conn.execute(
+                """SELECT COUNT(*) FROM config_change_history
+                   WHERE param_name = ? AND change_reason = ?""",
+                (
+                    "image_abnormal_w0f00000_mean_lower",
+                    "自動更新畫異 polygon mean 預設門檻",
+                ),
+            ).fetchone()[0]
+
+        assert lower["param_value"] == "70"
+        assert "產品區平均亮度" in lower["description"]
+        assert upper["param_value"] == "85"
+        assert "產品區平均亮度" in upper["description"]
+        assert history_count == 1
 
 
 class TestTrainingJobsCRUD:

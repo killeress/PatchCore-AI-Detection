@@ -116,9 +116,11 @@ def test_image_abnormal_precheck_detects_mean_brightness(monkeypatch):
 
     assert result["screen"] == "W0F00000"
     assert result["mean_brightness"] == 90.0
+    assert result["mean_source"] == "full_image"
+    assert result["mean_pixels"] == 16
     assert result["lower"] == 40
     assert result["upper"] == 82
-    assert result["detail"] == "Mean:90.0(range=40-82)"
+    assert result["detail"] == "Mean:90.000(range=40-82, source=full_image, pixels=16)"
 
     cfg_low = CAPIConfig(
         image_abnormal_detection_enabled=True,
@@ -134,6 +136,35 @@ def test_image_abnormal_precheck_detects_mean_brightness(monkeypatch):
     assert low_result["screen"] == "W0F00000"
     assert low_result["lower"] == 95
     assert low_result["upper"] == 110
+
+
+def test_image_abnormal_precheck_uses_polygon_mean_for_judgment(monkeypatch):
+    image = np.full((6, 6), 250, dtype=np.uint8)
+    image[1:5, 1:5] = 60
+    polygon = np.array([[1, 1], [4, 1], [4, 4], [1, 4]], dtype=np.float32)
+
+    def fake_imread(path, flags):
+        return image.copy()
+
+    def fake_detect_panel_polygon(img, cfg):
+        return (0, 0, 6, 6), polygon
+
+    monkeypatch.setattr("capi_server.cv2.imread", fake_imread)
+    monkeypatch.setattr("capi_server.detect_panel_polygon", fake_detect_panel_polygon)
+    cfg = CAPIConfig(
+        image_abnormal_detection_enabled=True,
+        image_abnormal_w0f00000_mean_lower=50,
+        image_abnormal_w0f00000_mean_upper=70,
+    )
+
+    result = check_image_abnormal_precheck(
+        Path("unused"),
+        cfg,
+        [Path("W0F00000_113600.tif")],
+        report_prefixes=["W0F00000"],
+    )
+
+    assert result is None
 
 
 def test_image_abnormal_precheck_only_checks_aoi_report_prefixes(monkeypatch):
@@ -173,7 +204,7 @@ def test_image_abnormal_precheck_only_checks_aoi_report_prefixes(monkeypatch):
     )
 
     assert result["screen"] == "B0F00000"
-    assert read_paths == ["B0F00000_113600.tif"]
+    assert read_paths == ["W0F00000_113600.tif", "B0F00000_113600.tif"]
 
 
 def test_qjpg_response_ok_i_reports_detected_points_and_missing_mark_is_00():

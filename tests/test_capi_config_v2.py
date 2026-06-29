@@ -165,21 +165,21 @@ def test_image_abnormal_settings_defaults_fallback_and_db_overrides():
     cfg = CAPIConfig.from_dict({"omit_overexposure_mean_threshold": 82})
 
     assert cfg.image_abnormal_detection_enabled is False
-    assert cfg.image_abnormal_standard_mean_lower == 47
-    assert cfg.image_abnormal_standard_mean_upper == 67
-    assert cfg.image_abnormal_wgf50500_mean_lower == 50
-    assert cfg.image_abnormal_wgf50500_mean_upper == 70
-    assert cfg.image_abnormal_g0f00000_mean_lower == 46
-    assert cfg.image_abnormal_g0f00000_mean_upper == 66
-    assert cfg.image_abnormal_r0f00000_mean_lower == 50
-    assert cfg.image_abnormal_r0f00000_mean_upper == 70
-    assert cfg.image_abnormal_w0f00000_mean_lower == 49
-    assert cfg.image_abnormal_w0f00000_mean_upper == 69
+    assert cfg.image_abnormal_standard_mean_lower == 68
+    assert cfg.image_abnormal_standard_mean_upper == 88
+    assert cfg.image_abnormal_wgf50500_mean_lower == 72
+    assert cfg.image_abnormal_wgf50500_mean_upper == 92
+    assert cfg.image_abnormal_g0f00000_mean_lower == 67
+    assert cfg.image_abnormal_g0f00000_mean_upper == 87
+    assert cfg.image_abnormal_r0f00000_mean_lower == 71
+    assert cfg.image_abnormal_r0f00000_mean_upper == 91
+    assert cfg.image_abnormal_w0f00000_mean_lower == 70
+    assert cfg.image_abnormal_w0f00000_mean_upper == 90
     assert cfg.image_abnormal_b0f00000_mean_lower == 0
-    assert cfg.image_abnormal_b0f00000_mean_upper == 12
+    assert cfg.image_abnormal_b0f00000_mean_upper == 13
 
     legacy = CAPIConfig.from_dict({"image_abnormal_w0f00000_mean_threshold": 91})
-    assert legacy.image_abnormal_w0f00000_mean_lower == 49
+    assert legacy.image_abnormal_w0f00000_mean_lower == 70
     assert legacy.image_abnormal_w0f00000_mean_upper == 91
 
     cfg.apply_db_overrides([
