@@ -552,34 +552,57 @@
         font-family: 'Fira Code', monospace;
         font-size: 0.78rem;
         display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+    }
+
+    .diff-row {
+        display: flex;
+        align-items: flex-start;
         gap: 8px;
         flex-wrap: wrap;
+        max-width: 100%;
+    }
+
+    .diff-path {
+        color: #cbd5e1;
+        background: rgba(148, 163, 184, 0.08);
+        padding: 2px 8px;
+        border-radius: 4px;
+        overflow-wrap: anywhere;
+    }
+
+    .diff-old,
+    .diff-new {
+        padding: 2px 8px;
+        border-radius: 4px;
+        max-width: 100%;
+        min-width: 0;
+        overflow-wrap: anywhere;
+        white-space: normal;
+        line-height: 1.45;
+    }
+
+    .diff-arrow {
+        color: var(--text-muted);
+        padding-top: 2px;
     }
 
     .diff-old {
         color: #fca5a5;
         background: rgba(239, 68, 68, 0.08);
-        padding: 2px 8px;
-        border-radius: 4px;
-        max-width: 300px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
-    .diff-arrow {
-        color: var(--text-muted);
     }
 
     .diff-new {
         color: #86efac;
         background: rgba(34, 197, 94, 0.08);
-        padding: 2px 8px;
-        border-radius: 4px;
-        max-width: 300px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+    }
+
+    .diff-more,
+    .diff-empty {
+        color: var(--text-muted);
+        font-size: 0.76rem;
     }
 
     .history-empty {
@@ -3117,6 +3140,94 @@
         }
     }
 
+    function parseHistoryValue(raw) {
+        if (raw === undefined || raw === null) return { ok: false, value: '' };
+        try {
+            return { ok: true, value: JSON.parse(raw) };
+        } catch {
+            return { ok: false, value: String(raw) };
+        }
+    }
+
+    function isHistoryObject(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+
+    function historyValueLabel(value) {
+        if (value === undefined) return '(未設定)';
+        if (value === null) return 'null';
+        if (typeof value === 'string') return value === '' ? '""' : JSON.stringify(value);
+        const text = JSON.stringify(value);
+        if (text === undefined) return String(value);
+        return text.length > 180 ? `${text.slice(0, 177)}...` : text;
+    }
+
+    function historyValuesEqual(a, b) {
+        if (Object.is(a, b)) return true;
+        if (Array.isArray(a) || Array.isArray(b)) {
+            return JSON.stringify(a) === JSON.stringify(b);
+        }
+        if (isHistoryObject(a) && isHistoryObject(b)) {
+            const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+            for (const key of keys) {
+                if (!historyValuesEqual(a[key], b[key])) return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    function collectHistoryDiffs(oldValue, newValue, path = '', diffs = []) {
+        if (historyValuesEqual(oldValue, newValue)) return diffs;
+        if (isHistoryObject(oldValue) && isHistoryObject(newValue)) {
+            const keys = new Set([...Object.keys(oldValue), ...Object.keys(newValue)]);
+            for (const key of keys) {
+                collectHistoryDiffs(oldValue[key], newValue[key], path ? `${path}.${key}` : key, diffs);
+            }
+            return diffs;
+        }
+        diffs.push({
+            path: path || '整體值',
+            oldValue,
+            newValue,
+        });
+        return diffs;
+    }
+
+    function buildHistoryDiffHtml(oldRaw, newRaw) {
+        const oldParsed = parseHistoryValue(oldRaw);
+        const newParsed = parseHistoryValue(newRaw);
+        const diffs = oldParsed.ok && newParsed.ok
+            ? collectHistoryDiffs(oldParsed.value, newParsed.value)
+            : [{
+                path: '整體值',
+                oldValue: oldParsed.value,
+                newValue: newParsed.value,
+            }];
+
+        if (!diffs.length) {
+            return '<div class="diff-empty">未偵測到數值差異</div>';
+        }
+
+        const visibleDiffs = diffs.slice(0, 12);
+        const rows = visibleDiffs.map(d => {
+            const oldText = historyValueLabel(d.oldValue);
+            const newText = historyValueLabel(d.newValue);
+            return `
+                <div class="diff-row">
+                    <span class="diff-path">${escapeHtml(d.path)}</span>
+                    <span class="diff-old" title="${escapeAttr(oldText)}">- ${escapeHtml(oldText)}</span>
+                    <span class="diff-arrow">→</span>
+                    <span class="diff-new" title="${escapeAttr(newText)}">+ ${escapeHtml(newText)}</span>
+                </div>
+            `;
+        });
+        if (diffs.length > visibleDiffs.length) {
+            rows.push(`<div class="diff-more">另有 ${diffs.length - visibleDiffs.length} 項變更</div>`);
+        }
+        return rows.join('');
+    }
+
     function renderHistory(list) {
         const el = document.getElementById('history-list');
         if (!list.length) {
@@ -3124,22 +3235,18 @@
             return;
         }
         el.innerHTML = list.map(h => {
-            let oldDisp = h.old_value, newDisp = h.new_value;
-            try { oldDisp = JSON.stringify(JSON.parse(h.old_value)); } catch { }
-            try { newDisp = JSON.stringify(JSON.parse(h.new_value)); } catch { }
+            const diffHtml = buildHistoryDiffHtml(h.old_value, h.new_value);
             return `
                 <div class="history-item">
                     <div class="history-dot"></div>
                     <div class="history-content">
                         <div class="history-meta">
-                            <span class="history-time">${h.changed_at}</span>
-                            <span class="history-param">${h.param_name}</span>
+                            <span class="history-time">${escapeHtml(h.changed_at)}</span>
+                            <span class="history-param">${escapeHtml(h.param_name)}</span>
                         </div>
-                        <div class="history-reason">${h.change_reason || '（未填寫原因）'}</div>
+                        <div class="history-reason">${escapeHtml(h.change_reason || '（未填寫原因）')}</div>
                         <div class="history-diff">
-                            <span class="diff-old" title="${oldDisp}">− ${oldDisp}</span>
-                            <span class="diff-arrow">→</span>
-                            <span class="diff-new" title="${newDisp}">+ ${newDisp}</span>
+                            ${diffHtml}
                         </div>
                     </div>
                 </div>
