@@ -103,17 +103,26 @@ def test_build_patch_zip_includes_only_deployable_changes(monkeypatch):
         with zipfile.ZipFile(zip_path) as zf:
             names = set(zf.namelist())
             manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
+            scripts = {
+                script_name: zf.read(script_name)
+                for script_name in ("start_server.sh", "install_patch.sh", "rollback_patch.sh")
+            }
 
         assert manifest["package_type"] == "patch"
         assert "capi_web.py" in names
         assert "templates/base.html" in names
         assert "install_patch.sh" in names
         assert "rollback_patch.sh" in names
+        assert "start_server.sh" in names
         assert "VERSION" in names
         assert "CHANGELOG.md" in names
         assert "tests/test_release_version.py" not in names
         assert "scripts/build_deploy_zip.py" not in names
         assert "Sample/ignore.py" not in names
         assert "capi_config.py" not in names
+
+        for data in scripts.values():
+            assert data.startswith(b"#!/bin/bash\n")
+            assert b"\r\n" not in data
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
