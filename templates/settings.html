@@ -845,6 +845,153 @@
         }
     }
 
+    .image-abnormal-pane.active {
+        display: block;
+    }
+
+    .image-abnormal-help {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        padding: 14px 16px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .image-abnormal-help-item {
+        min-width: 0;
+        background: rgba(15, 23, 42, 0.42);
+        border: 1px solid rgba(249, 115, 22, 0.16);
+        border-radius: 8px;
+        padding: 10px 12px;
+    }
+
+    .image-abnormal-help-label {
+        display: block;
+        margin-bottom: 4px;
+        color: #fdba74;
+        font-size: 0.76rem;
+        font-weight: 600;
+    }
+
+    .image-abnormal-help-text {
+        color: #94a3b8;
+        font-size: 0.8rem;
+        line-height: 1.45;
+    }
+
+    .image-abnormal-enable-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 12px 16px;
+        border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+        background: rgba(249, 115, 22, 0.04);
+    }
+
+    .image-abnormal-enable-title {
+        color: #fdba74;
+        font-weight: 600;
+        font-size: 0.88rem;
+    }
+
+    .image-abnormal-enable-desc {
+        margin-top: 3px;
+        color: #94a3b8;
+        font-size: 0.78rem;
+        line-height: 1.45;
+    }
+
+    .image-abnormal-limits {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(320px, 1fr));
+        gap: 10px;
+        padding: 14px 16px 16px;
+    }
+
+    .image-abnormal-screen-row {
+        display: grid;
+        grid-template-columns: minmax(112px, 0.85fr) minmax(0, 2fr);
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+        padding: 10px 12px;
+        background: rgba(15, 23, 42, 0.36);
+        border: 1px solid rgba(51, 65, 85, 0.65);
+        border-radius: 8px;
+    }
+
+    .image-abnormal-screen-code {
+        font-family: 'Fira Code', monospace;
+        color: #e2e8f0;
+        font-size: 0.86rem;
+    }
+
+    .image-abnormal-screen-label {
+        margin-top: 2px;
+        color: #94a3b8;
+        font-size: 0.72rem;
+    }
+
+    .image-abnormal-limit-pair {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        min-width: 0;
+    }
+
+    .image-abnormal-limit {
+        display: grid;
+        grid-template-columns: auto minmax(2ch, 1fr) 28px;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        padding: 7px 8px;
+        background: rgba(30, 41, 59, 0.72);
+        border: 1px solid rgba(71, 85, 105, 0.75);
+        border-radius: 6px;
+    }
+
+    .image-abnormal-limit-label {
+        color: #94a3b8;
+        font-size: 0.72rem;
+        white-space: nowrap;
+    }
+
+    .image-abnormal-limit-value {
+        min-width: 0;
+        color: #f8fafc;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.92rem;
+        text-align: right;
+    }
+
+    .image-abnormal-edit {
+        width: 28px;
+        height: 26px;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    @media (max-width: 1100px) {
+        .image-abnormal-help,
+        .image-abnormal-limits {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    @media (max-width: 640px) {
+        .image-abnormal-enable-row {
+            align-items: flex-start;
+        }
+
+        .image-abnormal-screen-row {
+            grid-template-columns: 1fr;
+        }
+    }
+
     .within-spec-toolbar {
         display: flex;
         align-items: center;
@@ -2189,19 +2336,83 @@
     }
 
     function renderImageAbnormalPane(params) {
+        const byName = Object.fromEntries(params.map(p => [p.param_name, p]));
+        const enabledParam = byName.image_abnormal_detection_enabled;
+        const readDisplay = (p) => {
+            if (!p) return '';
+            try { return String(JSON.parse(p.param_value)); } catch { return String(p.param_value); }
+        };
+        const isEnabled = String(readDisplay(enabledParam)).toLowerCase() === 'true';
+        const screens = [
+            ['STANDARD', '標準畫面', 'image_abnormal_standard_mean_lower', 'image_abnormal_standard_mean_upper'],
+            ['WGF50500', '50 灰畫面', 'image_abnormal_wgf50500_mean_lower', 'image_abnormal_wgf50500_mean_upper'],
+            ['G0F00000', '綠畫面', 'image_abnormal_g0f00000_mean_lower', 'image_abnormal_g0f00000_mean_upper'],
+            ['R0F00000', '紅畫面', 'image_abnormal_r0f00000_mean_lower', 'image_abnormal_r0f00000_mean_upper'],
+            ['W0F00000', '白畫面', 'image_abnormal_w0f00000_mean_lower', 'image_abnormal_w0f00000_mean_upper'],
+            ['B0F00000', '黑畫面', 'image_abnormal_b0f00000_mean_lower', 'image_abnormal_b0f00000_mean_upper'],
+        ];
+        const limitCell = (p, label) => {
+            if (!p) {
+                return `<div class="image-abnormal-limit"><span class="image-abnormal-limit-label">${label}</span><span class="image-abnormal-limit-value">--</span><span></span></div>`;
+            }
+            const value = readDisplay(p);
+            const title = PARAM_LABELS[p.param_name] || p.param_name;
+            return `
+                <div class="image-abnormal-limit">
+                    <span class="image-abnormal-limit-label">${label}</span>
+                    <span class="image-abnormal-limit-value" title="${escapeAttr(p.param_name)}">${escapeHtml(value)}</span>
+                    <button class="btn-edit-mini image-abnormal-edit" title="修改 ${escapeAttr(title)}" onclick='openEdit(${JSON.stringify(p.param_name)})'>✏️</button>
+                </div>
+            `;
+        };
+        const screenRows = screens.map(([code, label, lowerName, upperName]) => `
+            <div class="image-abnormal-screen-row">
+                <div>
+                    <div class="image-abnormal-screen-code">${code}</div>
+                    <div class="image-abnormal-screen-label">${label}</div>
+                </div>
+                <div class="image-abnormal-limit-pair">
+                    ${limitCell(byName[lowerName], '下限')}
+                    ${limitCell(byName[upperName], '上限')}
+                </div>
+            </div>
+        `).join('');
+
         return `
-            <div id="pane-image-abnormal" class="settings-tab-pane ${currentTab === 'image-abnormal' ? 'active' : ''}">
+            <div id="pane-image-abnormal" class="settings-tab-pane image-abnormal-pane ${currentTab === 'image-abnormal' ? 'active' : ''}">
                 <div class="settings-section" style="border-left: 3px solid #f97316;">
                     <div class="settings-section-header" style="background: rgba(249, 115, 22, 0.1); border-bottom: 1px solid rgba(249, 115, 22, 0.2);">
                         <div class="icon" style="background: rgba(249, 115, 22, 0.18); color: #fdba74;">🖼️</div>
                         <span style="color: #fdba74; font-weight: 600;">畫異設定</span>
                     </div>
-                    <div style="padding: 14px 16px; color: #94a3b8; font-size: 0.82rem; line-height: 1.7; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                        推論前會先解析 AOI Report，只檢查該片報告中實際涉及的畫面前綴，例如 W0F00000、B0F00000。
-                        啟用後，任一涉及畫面的平均亮度低於下限或高於上限，就跳過 AI 推論並以 QJPG 回報畫異；落在上下限內不算畫異：
-                        <code style="color:#e2e8f0;">NG + PCO05 + 00000 + 00000 + 畫面名</code>。
+                    <div class="image-abnormal-help">
+                        <div class="image-abnormal-help-item">
+                            <span class="image-abnormal-help-label">檢查範圍</span>
+                            <div class="image-abnormal-help-text">只看 AOI Report 實際提到的畫面前綴。</div>
+                        </div>
+                        <div class="image-abnormal-help-item">
+                            <span class="image-abnormal-help-label">判定方式</span>
+                            <div class="image-abnormal-help-text">產品 polygon 內平均亮度低於下限或高於上限時，判為畫異。</div>
+                        </div>
+                        <div class="image-abnormal-help-item">
+                            <span class="image-abnormal-help-label">回報內容</span>
+                            <div class="image-abnormal-help-text">跳過 AI 推論，QJPG 回報畫異 defect code 與 00000,00000。</div>
+                        </div>
                     </div>
-                    ${params.map(p => paramRow(p)).join('')}
+                    ${enabledParam ? `
+                    <div class="image-abnormal-enable-row">
+                        <div>
+                            <div class="image-abnormal-enable-title">啟用畫異預檢</div>
+                            <div class="image-abnormal-enable-desc">${escapeHtml(enabledParam.description || PARAM_LABELS[enabledParam.param_name] || '')}</div>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" ${isEnabled ? 'checked' : ''} onchange='toggleBoolParam(${JSON.stringify(enabledParam.param_name)}, this.checked)'>
+                            <span class="slider"></span>
+                        </label>
+                    </div>` : ''}
+                    <div class="image-abnormal-limits">
+                        ${screenRows}
+                    </div>
                 </div>
             </div>
         `;
@@ -2779,18 +2990,18 @@
         'dust_two_stage_fallback_score': '安全網: 找不到特徵但 heatmap 分數 ≥ 此值時保守判 NG',
         // Image abnormal precheck
         'image_abnormal_detection_enabled': '啟用畫異預檢',
-        'image_abnormal_standard_mean_lower': 'STANDARD 平均亮度下限',
-        'image_abnormal_standard_mean_upper': 'STANDARD 平均亮度上限',
-        'image_abnormal_wgf50500_mean_lower': 'WGF50500 平均亮度下限',
-        'image_abnormal_wgf50500_mean_upper': 'WGF50500 平均亮度上限',
-        'image_abnormal_g0f00000_mean_lower': 'G0F00000 平均亮度下限',
-        'image_abnormal_g0f00000_mean_upper': 'G0F00000 平均亮度上限',
-        'image_abnormal_r0f00000_mean_lower': 'R0F00000 平均亮度下限',
-        'image_abnormal_r0f00000_mean_upper': 'R0F00000 平均亮度上限',
-        'image_abnormal_w0f00000_mean_lower': 'W0F00000 平均亮度下限',
-        'image_abnormal_w0f00000_mean_upper': 'W0F00000 平均亮度上限',
-        'image_abnormal_b0f00000_mean_lower': 'B0F00000 平均亮度下限',
-        'image_abnormal_b0f00000_mean_upper': 'B0F00000 平均亮度上限',
+        'image_abnormal_standard_mean_lower': 'STANDARD 產品區平均亮度下限',
+        'image_abnormal_standard_mean_upper': 'STANDARD 產品區平均亮度上限',
+        'image_abnormal_wgf50500_mean_lower': 'WGF50500 產品區平均亮度下限',
+        'image_abnormal_wgf50500_mean_upper': 'WGF50500 產品區平均亮度上限',
+        'image_abnormal_g0f00000_mean_lower': 'G0F00000 產品區平均亮度下限',
+        'image_abnormal_g0f00000_mean_upper': 'G0F00000 產品區平均亮度上限',
+        'image_abnormal_r0f00000_mean_lower': 'R0F00000 產品區平均亮度下限',
+        'image_abnormal_r0f00000_mean_upper': 'R0F00000 產品區平均亮度上限',
+        'image_abnormal_w0f00000_mean_lower': 'W0F00000 產品區平均亮度下限',
+        'image_abnormal_w0f00000_mean_upper': 'W0F00000 產品區平均亮度上限',
+        'image_abnormal_b0f00000_mean_lower': 'B0F00000 產品區平均亮度下限',
+        'image_abnormal_b0f00000_mean_upper': 'B0F00000 產品區平均亮度上限',
         // AOI coordinate inference
         'aoi_heatmap_center_seed_enabled': 'Top% heatmap 額外保留 AOI 座標附近弱熱區',
     };

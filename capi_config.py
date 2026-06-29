@@ -251,18 +251,18 @@ class CAPIConfig:
 
     # 畫異預檢設定 (推論前依 AOI Report 涉及畫面檢查平均亮度，異常時回報 PCO05)
     image_abnormal_detection_enabled: bool = False
-    image_abnormal_standard_mean_lower: int = 47
-    image_abnormal_standard_mean_upper: int = 67
-    image_abnormal_wgf50500_mean_lower: int = 50
-    image_abnormal_wgf50500_mean_upper: int = 70
-    image_abnormal_g0f00000_mean_lower: int = 46
-    image_abnormal_g0f00000_mean_upper: int = 66
-    image_abnormal_r0f00000_mean_lower: int = 50
-    image_abnormal_r0f00000_mean_upper: int = 70
-    image_abnormal_w0f00000_mean_lower: int = 49
-    image_abnormal_w0f00000_mean_upper: int = 69
+    image_abnormal_standard_mean_lower: int = 68
+    image_abnormal_standard_mean_upper: int = 88
+    image_abnormal_wgf50500_mean_lower: int = 72
+    image_abnormal_wgf50500_mean_upper: int = 92
+    image_abnormal_g0f00000_mean_lower: int = 67
+    image_abnormal_g0f00000_mean_upper: int = 87
+    image_abnormal_r0f00000_mean_lower: int = 71
+    image_abnormal_r0f00000_mean_upper: int = 91
+    image_abnormal_w0f00000_mean_lower: int = 70
+    image_abnormal_w0f00000_mean_upper: int = 90
     image_abnormal_b0f00000_mean_lower: int = 0
-    image_abnormal_b0f00000_mean_upper: int = 12
+    image_abnormal_b0f00000_mean_upper: int = 13
     
     # 邊緣衰減設定 (過濾光影假陽性)
     edge_margin_px: int = 0                   # 邊緣衰減寬度 (px)，0=停用
@@ -499,35 +499,35 @@ class CAPIConfig:
             omit_overexposure_mean_threshold=data.get("omit_overexposure_mean_threshold", 200),
             omit_overexposure_ratio_threshold=data.get("omit_overexposure_ratio_threshold", 0.5),
             image_abnormal_detection_enabled=data.get("image_abnormal_detection_enabled", False),
-            image_abnormal_standard_mean_lower=data.get("image_abnormal_standard_mean_lower", 47),
+            image_abnormal_standard_mean_lower=data.get("image_abnormal_standard_mean_lower", 68),
             image_abnormal_standard_mean_upper=data.get(
                 "image_abnormal_standard_mean_upper",
-                data.get("image_abnormal_standard_mean_threshold", 67),
+                data.get("image_abnormal_standard_mean_threshold", 88),
             ),
-            image_abnormal_wgf50500_mean_lower=data.get("image_abnormal_wgf50500_mean_lower", 50),
+            image_abnormal_wgf50500_mean_lower=data.get("image_abnormal_wgf50500_mean_lower", 72),
             image_abnormal_wgf50500_mean_upper=data.get(
                 "image_abnormal_wgf50500_mean_upper",
-                data.get("image_abnormal_wgf50500_mean_threshold", 70),
+                data.get("image_abnormal_wgf50500_mean_threshold", 92),
             ),
-            image_abnormal_g0f00000_mean_lower=data.get("image_abnormal_g0f00000_mean_lower", 46),
+            image_abnormal_g0f00000_mean_lower=data.get("image_abnormal_g0f00000_mean_lower", 67),
             image_abnormal_g0f00000_mean_upper=data.get(
                 "image_abnormal_g0f00000_mean_upper",
-                data.get("image_abnormal_g0f00000_mean_threshold", 66),
+                data.get("image_abnormal_g0f00000_mean_threshold", 87),
             ),
-            image_abnormal_r0f00000_mean_lower=data.get("image_abnormal_r0f00000_mean_lower", 50),
+            image_abnormal_r0f00000_mean_lower=data.get("image_abnormal_r0f00000_mean_lower", 71),
             image_abnormal_r0f00000_mean_upper=data.get(
                 "image_abnormal_r0f00000_mean_upper",
-                data.get("image_abnormal_r0f00000_mean_threshold", 70),
+                data.get("image_abnormal_r0f00000_mean_threshold", 91),
             ),
-            image_abnormal_w0f00000_mean_lower=data.get("image_abnormal_w0f00000_mean_lower", 49),
+            image_abnormal_w0f00000_mean_lower=data.get("image_abnormal_w0f00000_mean_lower", 70),
             image_abnormal_w0f00000_mean_upper=data.get(
                 "image_abnormal_w0f00000_mean_upper",
-                data.get("image_abnormal_w0f00000_mean_threshold", 69),
+                data.get("image_abnormal_w0f00000_mean_threshold", 90),
             ),
             image_abnormal_b0f00000_mean_lower=data.get("image_abnormal_b0f00000_mean_lower", 0),
             image_abnormal_b0f00000_mean_upper=data.get(
                 "image_abnormal_b0f00000_mean_upper",
-                data.get("image_abnormal_b0f00000_mean_threshold", 12),
+                data.get("image_abnormal_b0f00000_mean_threshold", 13),
             ),
             edge_margin_px=data.get("edge_margin_px", 0),
             edge_margin_sides=data.get("edge_margin_sides", cls._migrate_edge_margin(data)),

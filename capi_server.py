@@ -40,6 +40,7 @@ import argparse
 import signal
 import yaml
 import cv2
+import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple, List, Any
@@ -48,7 +49,8 @@ from typing import Dict, Optional, Tuple, List, Any
 sys.path.insert(0, str(Path(__file__).parent))
 
 from capi_config import CAPIConfig
-from capi_inference import CAPIInferencer, ImageResult
+from capi_inference import CAPIInferencer, ImageResult, resolve_product_resolution
+from capi_preprocess import BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_polygon
 from capi_database import CAPIDatabase
 from capi_heatmap import HeatmapManager
 from capi_web import (
@@ -512,16 +514,111 @@ def _image_abnormal_screen_name(
     return "UNKNOWN"
 
 
-def _image_mean_brightness(image: Any) -> float:
+def _image_gray(image: Any) -> np.ndarray:
     if image is None or image.size == 0:
-        return 0.0
+        return np.zeros((0, 0), dtype=np.uint8)
     if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    elif len(image.shape) == 2:
-        gray = image
-    else:
-        gray = image.reshape(image.shape[0], image.shape[1])
-    return float(gray.mean())
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    if len(image.shape) == 2:
+        return image
+    return image.reshape(image.shape[0], image.shape[1])
+
+
+def _rect_polygon_from_bbox(bbox: Optional[Tuple[int, int, int, int]]) -> Optional[np.ndarray]:
+    if not bbox:
+        return None
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return np.array(
+        [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
+        dtype=np.float32,
+    )
+
+
+def _image_abnormal_preprocess_config(
+    config: CAPIConfig,
+    product_resolution: Optional[Tuple[int, int]] = None,
+) -> PreprocessConfig:
+    if product_resolution is None:
+        product_resolution = resolve_product_resolution(
+            getattr(config, "machine_id", ""),
+            getattr(config, "model_resolution_map", None),
+        )
+    return PreprocessConfig(
+        tile_size=int(getattr(config, "tile_size", 512)),
+        tile_stride=int(getattr(config, "tile_stride", 512)),
+        otsu_offset=int(getattr(config, "otsu_offset", 5)),
+        enable_panel_polygon=bool(getattr(config, "enable_panel_polygon", True)),
+        image_preprocess_pipeline=getattr(config, "image_preprocess_pipeline", []) or [],
+        generate_grid_tiles=False,
+        product_resolution=product_resolution,
+    )
+
+
+def _detect_image_abnormal_product_polygon(
+    image: Any,
+    pre_cfg: PreprocessConfig,
+) -> Tuple[Optional[np.ndarray], str]:
+    bbox, polygon = detect_panel_polygon(image, pre_cfg)
+    if polygon is not None:
+        return np.asarray(polygon, dtype=np.float32), "polygon"
+    rect_polygon = _rect_polygon_from_bbox(bbox)
+    if rect_polygon is not None:
+        return rect_polygon, "bbox"
+    return None, "full_image"
+
+
+def _image_mean_brightness(
+    image: Any,
+    product_polygon: Optional[np.ndarray] = None,
+    source: str = "full_image",
+) -> Tuple[float, str, int]:
+    gray = _image_gray(image)
+    if gray.size == 0:
+        return 0.0, "empty", 0
+
+    if product_polygon is not None:
+        polygon = np.asarray(product_polygon, dtype=np.float32).reshape(-1, 2)
+        if polygon.shape[0] >= 3:
+            mask = np.zeros(gray.shape[:2], dtype=np.uint8)
+            cv2.fillPoly(mask, [np.rint(polygon).astype(np.int32)], 255)
+            values = gray[mask > 0]
+            if values.size > 0:
+                return float(values.mean()), source, int(values.size)
+
+    return float(gray.mean()), "full_image", int(gray.size)
+
+
+def _image_abnormal_screen_path_map(candidates: List[Path]) -> Dict[str, Path]:
+    by_screen: Dict[str, Path] = {}
+    for image_path in sorted(candidates, key=lambda p: str(p.name)):
+        screen = _image_abnormal_screen_from_filename(image_path.name)
+        if screen and screen not in by_screen:
+            by_screen[screen] = image_path
+    return by_screen
+
+
+def _image_abnormal_reference_polygon(
+    screen_paths: Dict[str, Path],
+    pre_cfg: PreprocessConfig,
+    image_cache: Dict[str, Any],
+) -> Tuple[Optional[np.ndarray], str, Optional[Tuple[int, int]]]:
+    for screen in BOUNDARY_REFERENCE_PRIORITY:
+        image_path = screen_paths.get(screen)
+        if not image_path:
+            continue
+        cache_key = str(image_path)
+        image = image_cache.get(cache_key)
+        if image is None:
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            image_cache[cache_key] = image
+        if image is None:
+            continue
+        polygon, source = _detect_image_abnormal_product_polygon(image, pre_cfg)
+        if polygon is not None:
+            return polygon, f"reference_{screen}_{source}", image.shape[:2]
+    return None, "full_image", None
 
 
 def _image_abnormal_limits(config: CAPIConfig) -> Dict[str, Tuple[int, int]]:
@@ -539,6 +636,7 @@ def check_image_abnormal_precheck(
     config: CAPIConfig,
     image_files: Optional[List[Path]] = None,
     report_prefixes: Optional[List[str]] = None,
+    product_resolution: Optional[Tuple[int, int]] = None,
 ) -> Optional[Dict[str, Any]]:
     if not getattr(config, "image_abnormal_detection_enabled", False):
         return None
@@ -559,6 +657,14 @@ def check_image_abnormal_precheck(
         return None
 
     limits = _image_abnormal_limits(config)
+    image_cache: Dict[str, Any] = {}
+    pre_cfg = _image_abnormal_preprocess_config(config, product_resolution)
+    screen_paths = _image_abnormal_screen_path_map(candidates)
+    reference_polygon, reference_source, reference_shape = _image_abnormal_reference_polygon(
+        screen_paths,
+        pre_cfg,
+        image_cache,
+    )
     checked_screens = set()
     logger.info(
         "畫異預檢: AOI Report 涉及 %d 種可檢查畫面前綴 [%s]",
@@ -571,20 +677,38 @@ def check_image_abnormal_precheck(
             continue
         checked_screens.add(screen)
 
-        image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+        cache_key = str(image_path)
+        image = image_cache.get(cache_key)
+        if image is None:
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            image_cache[cache_key] = image
         if image is None:
             logger.warning("畫異預檢無法讀取圖片: %s", image_path)
             continue
 
-        mean_brightness = _image_mean_brightness(image)
+        product_polygon = reference_polygon
+        mean_source = reference_source
+        if product_polygon is None or reference_shape != image.shape[:2]:
+            product_polygon, mean_source = _detect_image_abnormal_product_polygon(image, pre_cfg)
+
+        mean_brightness, mean_source, mean_pixels = _image_mean_brightness(
+            image,
+            product_polygon,
+            mean_source,
+        )
         lower, upper = limits[screen]
-        detail = f"Mean:{mean_brightness:.1f}(range={lower}-{upper})"
+        detail = (
+            f"Mean:{mean_brightness:.3f}"
+            f"(range={lower}-{upper}, source={mean_source}, pixels={mean_pixels})"
+        )
         if mean_brightness < lower or mean_brightness > upper:
             logger.warning("[IMAGE_ABNORMAL] %s: %s", image_path.name, detail)
             return {
                 "screen": screen,
                 "image_name": image_path.name,
                 "mean_brightness": mean_brightness,
+                "mean_source": mean_source,
+                "mean_pixels": mean_pixels,
                 "lower": lower,
                 "upper": upper,
                 "detail": detail,
@@ -2164,6 +2288,7 @@ class CAPIServer:
                 panel_dir,
                 inferencer.config,
                 report_prefixes=list(aoi_report_override.keys()),
+                product_resolution=parsed["resolution"],
             )
             if image_abnormal:
                 screen = image_abnormal["screen"]

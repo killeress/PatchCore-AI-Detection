@@ -2761,19 +2761,19 @@ class CAPIDatabase:
             ("bright_spot_diff_threshold", 10, "int", "局部對比差異閾值"),
             ("within_spec_judgment_rules", config.within_spec_judgment_rules, "dict", "規格內點狀不良判定條件（依機種/畫面/黑白點分開設定；dot_detection.segmentation_method 可選 background_diff、hysteresis(V2 雙參數組)、morph_hat、adaptive_mean、halo、auto 或 off 關閉）"),
             # 畫異設定
-            ("image_abnormal_detection_enabled", config.image_abnormal_detection_enabled, "bool", "啟用推論前畫異預檢（只檢查 AOI Report 涉及畫面的平均亮度，低於下限或高於上限時回報 PCO05）"),
-            ("image_abnormal_standard_mean_lower", config.image_abnormal_standard_mean_lower, "int", "STANDARD 畫面平均亮度下限"),
-            ("image_abnormal_standard_mean_upper", config.image_abnormal_standard_mean_upper, "int", "STANDARD 畫面平均亮度上限"),
-            ("image_abnormal_wgf50500_mean_lower", config.image_abnormal_wgf50500_mean_lower, "int", "WGF50500 畫面平均亮度下限"),
-            ("image_abnormal_wgf50500_mean_upper", config.image_abnormal_wgf50500_mean_upper, "int", "WGF50500 畫面平均亮度上限"),
-            ("image_abnormal_g0f00000_mean_lower", config.image_abnormal_g0f00000_mean_lower, "int", "G0F00000 畫面平均亮度下限"),
-            ("image_abnormal_g0f00000_mean_upper", config.image_abnormal_g0f00000_mean_upper, "int", "G0F00000 畫面平均亮度上限"),
-            ("image_abnormal_r0f00000_mean_lower", config.image_abnormal_r0f00000_mean_lower, "int", "R0F00000 畫面平均亮度下限"),
-            ("image_abnormal_r0f00000_mean_upper", config.image_abnormal_r0f00000_mean_upper, "int", "R0F00000 畫面平均亮度上限"),
-            ("image_abnormal_w0f00000_mean_lower", config.image_abnormal_w0f00000_mean_lower, "int", "W0F00000 畫面平均亮度下限"),
-            ("image_abnormal_w0f00000_mean_upper", config.image_abnormal_w0f00000_mean_upper, "int", "W0F00000 畫面平均亮度上限"),
-            ("image_abnormal_b0f00000_mean_lower", config.image_abnormal_b0f00000_mean_lower, "int", "B0F00000 畫面平均亮度下限"),
-            ("image_abnormal_b0f00000_mean_upper", config.image_abnormal_b0f00000_mean_upper, "int", "B0F00000 畫面平均亮度上限"),
+            ("image_abnormal_detection_enabled", config.image_abnormal_detection_enabled, "bool", "啟用推論前畫異預檢（只檢查 AOI Report 涉及畫面的產品 polygon 內平均亮度，低於下限或高於上限時回報 PCO05）"),
+            ("image_abnormal_standard_mean_lower", config.image_abnormal_standard_mean_lower, "int", "STANDARD 產品區平均亮度下限"),
+            ("image_abnormal_standard_mean_upper", config.image_abnormal_standard_mean_upper, "int", "STANDARD 產品區平均亮度上限"),
+            ("image_abnormal_wgf50500_mean_lower", config.image_abnormal_wgf50500_mean_lower, "int", "WGF50500 產品區平均亮度下限"),
+            ("image_abnormal_wgf50500_mean_upper", config.image_abnormal_wgf50500_mean_upper, "int", "WGF50500 產品區平均亮度上限"),
+            ("image_abnormal_g0f00000_mean_lower", config.image_abnormal_g0f00000_mean_lower, "int", "G0F00000 產品區平均亮度下限"),
+            ("image_abnormal_g0f00000_mean_upper", config.image_abnormal_g0f00000_mean_upper, "int", "G0F00000 產品區平均亮度上限"),
+            ("image_abnormal_r0f00000_mean_lower", config.image_abnormal_r0f00000_mean_lower, "int", "R0F00000 產品區平均亮度下限"),
+            ("image_abnormal_r0f00000_mean_upper", config.image_abnormal_r0f00000_mean_upper, "int", "R0F00000 產品區平均亮度上限"),
+            ("image_abnormal_w0f00000_mean_lower", config.image_abnormal_w0f00000_mean_lower, "int", "W0F00000 產品區平均亮度下限"),
+            ("image_abnormal_w0f00000_mean_upper", config.image_abnormal_w0f00000_mean_upper, "int", "W0F00000 產品區平均亮度上限"),
+            ("image_abnormal_b0f00000_mean_lower", config.image_abnormal_b0f00000_mean_lower, "int", "B0F00000 產品區平均亮度下限"),
+            ("image_abnormal_b0f00000_mean_upper", config.image_abnormal_b0f00000_mean_upper, "int", "B0F00000 產品區平均亮度上限"),
             # 回報結果設定
             ("report_black_dot_defect_code", config.report_black_dot_defect_code, "string", "QJPG 回報格式：黑點 defect code"),
             ("report_white_dot_defect_code", config.report_white_dot_defect_code, "string", "QJPG 回報格式：白點 defect code"),
@@ -2796,6 +2796,25 @@ class CAPIDatabase:
         if getattr(config, "is_new_architecture", False):
             params_def = [p for p in params_def if p[0] not in ("threshold_mapping", "model_mapping")]
 
+        image_abnormal_default_migrations = {
+            "image_abnormal_standard_mean_lower": (47, config.image_abnormal_standard_mean_lower),
+            "image_abnormal_standard_mean_upper": (67, config.image_abnormal_standard_mean_upper),
+            "image_abnormal_wgf50500_mean_lower": (50, config.image_abnormal_wgf50500_mean_lower),
+            "image_abnormal_wgf50500_mean_upper": (70, config.image_abnormal_wgf50500_mean_upper),
+            "image_abnormal_g0f00000_mean_lower": (46, config.image_abnormal_g0f00000_mean_lower),
+            "image_abnormal_g0f00000_mean_upper": (66, config.image_abnormal_g0f00000_mean_upper),
+            "image_abnormal_r0f00000_mean_lower": (50, config.image_abnormal_r0f00000_mean_lower),
+            "image_abnormal_r0f00000_mean_upper": (70, config.image_abnormal_r0f00000_mean_upper),
+            "image_abnormal_w0f00000_mean_lower": (49, config.image_abnormal_w0f00000_mean_lower),
+            "image_abnormal_w0f00000_mean_upper": (69, config.image_abnormal_w0f00000_mean_upper),
+            "image_abnormal_b0f00000_mean_lower": (0, config.image_abnormal_b0f00000_mean_lower),
+            "image_abnormal_b0f00000_mean_upper": (12, config.image_abnormal_b0f00000_mean_upper),
+        }
+        image_abnormal_param_names = {
+            name for name, _value, _ptype, _desc in params_def
+            if name.startswith("image_abnormal_")
+        }
+
         count = 0
         with self._lock:
             conn = self._get_conn()
@@ -2804,7 +2823,7 @@ class CAPIDatabase:
                 for name, value, ptype, desc in params_def:
                     # 只在 DB 中尚無此參數時才新增
                     existing = conn.execute(
-                        "SELECT id FROM config_params WHERE param_name = ?",
+                        "SELECT id, param_value, param_type FROM config_params WHERE param_name = ?",
                         (name,)
                     ).fetchone()
                     if not existing:
@@ -2816,6 +2835,38 @@ class CAPIDatabase:
                             (name, value_json, ptype, desc, now)
                         )
                         count += 1
+                    else:
+                        if name in image_abnormal_param_names:
+                            conn.execute(
+                                "UPDATE config_params SET description = ? WHERE param_name = ?",
+                                (desc, name)
+                            )
+                        if name in image_abnormal_default_migrations:
+                            old_default, new_default = image_abnormal_default_migrations[name]
+                            current_value = self._decode_config_value(
+                                existing["param_value"],
+                                existing["param_type"],
+                            )
+                            if current_value == old_default:
+                                new_value_json = json.dumps(new_default, ensure_ascii=False)
+                                conn.execute(
+                                    """UPDATE config_params
+                                       SET param_value = ?, description = ?, updated_at = ?
+                                       WHERE param_name = ?""",
+                                    (new_value_json, desc, now, name)
+                                )
+                                conn.execute(
+                                    """INSERT INTO config_change_history
+                                       (param_name, old_value, new_value, change_reason, changed_at)
+                                       VALUES (?, ?, ?, ?, ?)""",
+                                    (
+                                        name,
+                                        existing["param_value"],
+                                        new_value_json,
+                                        "自動更新畫異 polygon mean 預設門檻",
+                                        now,
+                                    )
+                                )
                 conn.commit()
                 return count
             except Exception as e:
