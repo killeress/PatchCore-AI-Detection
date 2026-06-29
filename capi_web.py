@@ -15,6 +15,7 @@ import os
 import tempfile
 import json
 import hashlib
+import html
 import urllib.parse
 import mimetypes
 from contextlib import contextmanager
@@ -39,6 +40,7 @@ from capi_scratch_batch import (
     POSITIVE_LABEL as SCRATCH_POSITIVE_LABEL,
     STATE_RUNNING as SCRATCH_STATE_RUNNING,
 )
+from capi_version import get_version_info, read_changelog
 
 logger = logging.getLogger("capi.web")
 
@@ -2341,6 +2343,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             cls.jinja_env.filters['get_img_stem'] = get_img_stem
             cls.jinja_env.filters['fromjson'] = lambda s: json.loads(s) if s else {}
             cls.jinja_env.globals['hm_relative'] = hm_relative
+            cls.jinja_env.globals['app_version'] = get_version_info()
 
     @classmethod
     def _make_job_runtime(cls, job_id: str, phase: str) -> dict:
@@ -2486,6 +2489,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_logs_page(query, path)
             elif path == "/api/logs":
                 self._handle_api_logs(query)
+            elif path == "/release-notes":
+                self._handle_release_notes_page(path)
             elif path == "/debug":
                 self._handle_debug_page(path)
             elif path == "/training":
@@ -2540,6 +2545,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_stats(query)
             elif path == "/api/status":
                 self._handle_api_status()
+            elif path == "/api/version":
+                self._handle_api_version()
             elif path == "/settings":
                 self._handle_settings_page(path)
             elif path == "/settings_v2":
@@ -2872,6 +2879,53 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             total_pages=total_pages,
         )
         self._send_response(200, html)
+
+    @staticmethod
+    def _render_changelog_html(markdown_text: str) -> str:
+        lines = markdown_text.splitlines()
+        parts = []
+        in_list = False
+
+        def close_list():
+            nonlocal in_list
+            if in_list:
+                parts.append("</ul>")
+                in_list = False
+
+        for raw in lines:
+            line = raw.strip()
+            if not line:
+                close_list()
+                continue
+            if line.startswith("### "):
+                close_list()
+                parts.append(f"<h3>{html.escape(line[4:])}</h3>")
+            elif line.startswith("## "):
+                close_list()
+                parts.append(f"<h2>{html.escape(line[3:])}</h2>")
+            elif line.startswith("# "):
+                close_list()
+                parts.append(f"<h1>{html.escape(line[2:])}</h1>")
+            elif line.startswith("- "):
+                if not in_list:
+                    parts.append("<ul>")
+                    in_list = True
+                parts.append(f"<li>{html.escape(line[2:])}</li>")
+            else:
+                close_list()
+                parts.append(f"<p>{html.escape(line)}</p>")
+
+        close_list()
+        return "\n".join(parts)
+
+    def _handle_release_notes_page(self, path: str):
+        template = self.jinja_env.get_template("release_notes.html")
+        html_text = self._render_changelog_html(read_changelog())
+        rendered = template.render(
+            request_path=path,
+            release_notes_html=html_text,
+        )
+        self._send_response(200, rendered)
 
     def _handle_overexposed(self, query: dict, path: str):
         """過曝記錄列表"""
@@ -3387,6 +3441,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_error(500, f"Cannot get server status: {e}")
 
+    def _handle_api_version(self):
+        """API: deployed release version."""
+        self._send_json(get_version_info())
 
     def _handle_api_stats(self, query: dict):
         """API: 統計資料"""

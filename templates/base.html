@@ -68,6 +68,78 @@
             padding: 20px;
         }
 
+        .app-version-footer {
+            color: var(--text-muted);
+            font-family: 'Fira Code', monospace;
+            font-size: 0.78rem;
+            padding-top: 0;
+            text-align: right;
+        }
+
+        .release-notice-backdrop {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 1100;
+            align-items: center;
+            justify-content: center;
+            background: rgba(2, 6, 23, 0.72);
+            backdrop-filter: blur(6px);
+            padding: 20px;
+        }
+
+        .release-notice-backdrop.show {
+            display: flex;
+        }
+
+        .release-notice-dialog {
+            width: min(460px, 100%);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            box-shadow: 0 24px 64px rgba(0, 0, 0, 0.36);
+            padding: 22px;
+        }
+
+        .release-notice-dialog h2 {
+            margin: 0 0 10px;
+            font-size: 1.25rem;
+            color: var(--text);
+        }
+
+        .release-notice-dialog p {
+            margin: 0 0 16px;
+            color: var(--text-muted);
+            line-height: 1.65;
+        }
+
+        .release-notice-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        .release-notice-actions a,
+        .release-notice-actions button {
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px 14px;
+            font: inherit;
+            cursor: pointer;
+            text-decoration: none;
+        }
+
+        .release-notice-actions a {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: #fff;
+        }
+
+        .release-notice-actions button {
+            background: transparent;
+            color: var(--text-muted);
+        }
+
         header {
             background: linear-gradient(135deg, #1e293b, #0f172a);
             padding: 20px 0;
@@ -383,6 +455,22 @@
         {% block content %}{% endblock %}
     </div>
 
+    <div class="container app-version-footer">
+        版本：{{ app_version.version }} ｜ <a href="/release-notes">更新內容</a>
+    </div>
+
+    <div id="release-notice" class="release-notice-backdrop" role="dialog" aria-modal="true"
+        aria-labelledby="release-notice-title">
+        <div class="release-notice-dialog">
+            <h2 id="release-notice-title">系統已更新</h2>
+            <p>目前版本：{{ app_version.version }}。本次更新內容可以在「更新內容」頁查看。</p>
+            <div class="release-notice-actions">
+                <button type="button" id="release-notice-close">知道了</button>
+                <a href="/release-notes">查看更新內容</a>
+            </div>
+        </div>
+    </div>
+
     <!-- About Logic Modal -->
     <div id="about-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center p-4 sm:p-6"
         style="background-color: rgba(2, 6, 23, 0.8); backdrop-filter: blur(10px);"
@@ -562,6 +650,33 @@
                         <span class="text-yellow-500">IOU:</span> <span class="text-slate-400">重疊率</span>
                     </div>
                 </div>
+
+                <script>
+                    (function () {
+                        const version = "{{ app_version.version|e }}";
+                        const storageKey = "capi_seen_release_version";
+                        const notice = document.getElementById("release-notice");
+                        const closeBtn = document.getElementById("release-notice-close");
+                        if (!version || version === "unknown" || !notice) return;
+
+                        try {
+                            if (window.localStorage.getItem(storageKey) === version) return;
+                            window.localStorage.setItem(storageKey, version);
+                            notice.classList.add("show");
+                        } catch (e) {
+                            return;
+                        }
+
+                        function closeNotice() {
+                            notice.classList.remove("show");
+                        }
+
+                        if (closeBtn) closeBtn.addEventListener("click", closeNotice);
+                        notice.addEventListener("click", function (event) {
+                            if (event.target === notice) closeNotice();
+                        });
+                    })();
+                </script>
 
                 {% block extra_js %}{% endblock %}
 </body>
