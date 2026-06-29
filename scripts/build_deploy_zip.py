@@ -61,6 +61,7 @@ CODE_FILES = [
 ]
 
 PATCH_UTILITY_FILES = [
+    "start_server.sh",
     "install_patch.sh",
     "rollback_patch.sh",
 ]
@@ -217,8 +218,8 @@ PATCH_README_TEXT = """CAPI AI Patch 更新包
 若設備上尚未有 install_patch.sh，先解出更新腳本：
 
   cd /root/Code/CAPI_AD
-  unzip -o /path/to/patchcore_ai_patch_<version>.zip install_patch.sh rollback_patch.sh
-  chmod +x install_patch.sh rollback_patch.sh
+  unzip -o /path/to/patchcore_ai_patch_<version>.zip start_server.sh install_patch.sh rollback_patch.sh
+  chmod +x start_server.sh install_patch.sh rollback_patch.sh
   ./install_patch.sh /path/to/patchcore_ai_patch_<version>.zip
 
 之後再次更新
