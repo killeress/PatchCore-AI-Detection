@@ -1,12 +1,13 @@
-"""Build production deployment ZIP for new model training wizard feature.
+"""Build production deployment ZIP for CAPI AI release updates.
 
-Output: deployment/capi_train_wizard_deploy_<date>.zip
+Output:
+  deployment/patchcore_ai_release_<version>.zip
+  deployment/patchcore_ai_patch_<version>.zip when --patch-only is used
 
 ZIP layout preserves project-root relative paths so operator just unzips
 on top of production install. Includes:
-  - 8 modified/new .py files
-  - 6 new templates
-  - 2 deprecated tools (with deprecation header)
+  - application files listed in CODE_FILES
+  - VERSION / CHANGELOG.md / release_manifest.json / checksums.txt
   - deployment/torch_hub_cache/ (offline backbone cache, ~264 MB)
   - server_config_patch.yaml.example (showing fields to merge)
   - README.txt with deployment steps
@@ -14,15 +15,22 @@ on top of production install. Includes:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import shutil
+import subprocess
 import zipfile
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+VERSION_FILE = PROJECT_ROOT / "VERSION"
+CHANGELOG_FILE = PROJECT_ROOT / "CHANGELOG.md"
+GIT_SAFE_DIR = PROJECT_ROOT.as_posix()
 
 CODE_FILES = [
+    "capi_version.py",
     "capi_config.py",
     "capi_database.py",
     "capi_inference.py",
@@ -35,6 +43,7 @@ CODE_FILES = [
     "templates/base.html",
     "templates/dashboard.html",
     "templates/training.html",
+    "templates/release_notes.html",
     "templates/models.html",
     "templates/settings.html",
     "templates/train_new/_modal.html",
@@ -46,7 +55,34 @@ CODE_FILES = [
     "static/favicon.svg",
     "tools/build_bga_tiles.py",
     "tools/train_bga_all.py",
+    "start_server.sh",
+    "install_patch.sh",
+    "rollback_patch.sh",
 ]
+
+PATCH_UTILITY_FILES = [
+    "install_patch.sh",
+    "rollback_patch.sh",
+]
+
+PATCH_DEPLOY_ROOT_FILES = {
+    "VERSION",
+    "CHANGELOG.md",
+    "start_server.sh",
+    "install_patch.sh",
+    "rollback_patch.sh",
+}
+
+PATCH_DEPLOY_PREFIXES = (
+    "templates/",
+    "static/",
+    "tools/",
+)
+
+GENERATED_METADATA_FILES = {
+    "VERSION",
+    "CHANGELOG.md",
+}
 
 BACKBONE_CACHE_DIR = "deployment/torch_hub_cache"
 
@@ -166,24 +202,207 @@ CODEONLY_README_NOTE = """\
 """
 
 
+PATCH_README_TEXT = """CAPI AI Patch 更新包
+================================================================
+
+用途
+----------------------------------------------------------------
+
+本 ZIP 是 patch-only 更新包，只包含本次 Git 變更中可部署到現場的檔案，
+以及 VERSION、CHANGELOG.md、release_manifest.json、checksums.txt。
+
+第一次使用 install_patch.sh 的設備
+----------------------------------------------------------------
+
+若設備上尚未有 install_patch.sh，先解出更新腳本：
+
+  cd /root/Code/CAPI_AD
+  unzip -o /path/to/patchcore_ai_patch_<version>.zip install_patch.sh rollback_patch.sh
+  chmod +x install_patch.sh rollback_patch.sh
+  ./install_patch.sh /path/to/patchcore_ai_patch_<version>.zip
+
+之後再次更新
+----------------------------------------------------------------
+
+  cd /root/Code/CAPI_AD
+  ./install_patch.sh /path/to/patchcore_ai_patch_<version>.zip
+
+更新腳本會執行：
+  1. 檢查 checksums.txt
+  2. 備份即將被覆蓋的檔案到 .patch_backups/
+  3. 解壓 patch ZIP
+  4. 執行 ./start_server.sh restart --no-tail
+  5. 使用 /api/version 做健康檢查
+
+回滾
+----------------------------------------------------------------
+
+install_patch.sh 完成後會顯示 rollback 指令，例如：
+
+  ./rollback_patch.sh ".patch_backups/2026.06.29.1_20260629_150000"
+
+注意事項
+----------------------------------------------------------------
+
+- 此包只更新程式檔與版本資訊，不應包含 DB、模型權重、heatmap、現場設定檔。
+- 若更新包內包含 start_server.sh，會一併更新現場啟動腳本。
+"""
+
+
+def _default_version() -> str:
+    if VERSION_FILE.exists():
+        version = VERSION_FILE.read_text(encoding="utf-8").strip()
+        if version:
+            return version
+    return date.today().strftime("%Y.%m.%d.1")
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _bytes_sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _git_commit() -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "-c", f"safe.directory={GIT_SAFE_DIR}", "rev-parse", "--short", "HEAD"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except Exception:
+        return ""
+    return proc.stdout.strip()
+
+
+def _git_file_list(args: list[str]) -> list[str]:
+    try:
+        proc = subprocess.run(
+            ["git", "-c", f"safe.directory={GIT_SAFE_DIR}", *args],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except Exception:
+        return []
+    return [line.strip().replace("\\", "/") for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _git_changed_files() -> list[str]:
+    changed = set(_git_file_list(["diff", "--name-only", "HEAD"]))
+    changed.update(_git_file_list(["ls-files", "--others", "--exclude-standard"]))
+    return sorted(changed)
+
+
+def _is_patch_deploy_file(rel: str) -> bool:
+    rel = rel.replace("\\", "/")
+    if rel in PATCH_DEPLOY_ROOT_FILES:
+        return True
+    if rel.endswith(".py") and "/" not in rel:
+        return True
+    return rel.startswith(PATCH_DEPLOY_PREFIXES)
+
+
+def _patch_files() -> tuple[list[str], list[str]]:
+    selected = []
+    skipped = []
+    seen = set()
+
+    for rel in [*_git_changed_files(), *PATCH_UTILITY_FILES]:
+        rel = rel.replace("\\", "/")
+        if rel in seen:
+            continue
+        seen.add(rel)
+        if rel in GENERATED_METADATA_FILES:
+            continue
+        src = PROJECT_ROOT / rel
+        if not src.is_file():
+            skipped.append(rel)
+            continue
+        if _is_patch_deploy_file(rel):
+            selected.append(rel)
+        else:
+            skipped.append(rel)
+
+    return sorted(selected), sorted(skipped)
+
+
+def _add_file(zf: zipfile.ZipFile, src: Path, arcname: str, entries: list[dict]) -> None:
+    zf.write(src, arcname=arcname)
+    entries.append({
+        "path": arcname,
+        "size_bytes": src.stat().st_size,
+        "sha256": _file_sha256(src),
+    })
+
+
+def _add_text(zf: zipfile.ZipFile, arcname: str, text: str, entries=None) -> None:
+    data = text.encode("utf-8")
+    zf.writestr(arcname, data)
+    if entries is not None:
+        entries.append({
+            "path": arcname,
+            "size_bytes": len(data),
+            "sha256": _bytes_sha256(data),
+        })
+
+
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Build CAPI training wizard deploy ZIP")
+    parser = argparse.ArgumentParser(description="Build CAPI AI release deploy ZIP")
+    parser.add_argument(
+        "--version",
+        default=None,
+        help="Release version. Defaults to VERSION file or YYYY.MM.DD.1.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=PROJECT_ROOT / "deployment",
+        help="Directory for the generated ZIP.",
+    )
     parser.add_argument(
         "--no-backbone", action="store_true",
         help="Skip backbone cache (use when production already has it from previous deploy)",
     )
+    parser.add_argument(
+        "--patch-only", action="store_true",
+        help="Build a small patch ZIP from deployable Git changes only",
+    )
     args = parser.parse_args(argv)
 
-    output_dir = PROJECT_ROOT / "deployment"
+    version = (args.version or _default_version()).strip()
+    if not version:
+        raise ValueError("release version cannot be empty")
+
+    built_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    git_commit = _git_commit()
+
+    output_dir = args.output_dir
+    if not output_dir.is_absolute():
+        output_dir = PROJECT_ROOT / output_dir
     output_dir.mkdir(exist_ok=True)
 
-    today = date.today().isoformat()
-    suffix = "_codeonly" if args.no_backbone else ""
-    zip_path = output_dir / f"capi_train_wizard_deploy_{today}{suffix}.zip"
+    if args.patch_only:
+        args.no_backbone = True
+
+    suffix = "_codeonly" if args.no_backbone and not args.patch_only else ""
+    package_name = "patchcore_ai_patch" if args.patch_only else "patchcore_ai_release"
+    zip_path = output_dir / f"{package_name}_{version}{suffix}.zip"
 
     print(f"Building deploy ZIP: {zip_path}")
     print(f"Project root: {PROJECT_ROOT}")
-    if args.no_backbone:
+    if args.patch_only:
+        print("Mode: patch-only (--patch-only)")
+    if args.no_backbone and not args.patch_only:
         print("Mode: code-only (--no-backbone)")
 
     if zip_path.exists():
@@ -191,29 +410,39 @@ def main(argv=None) -> int:
 
     code_size = 0
     backbone_size = 0
-    file_count = 0
     backbone_files = 0
+    entries = []
+
+    if args.patch_only:
+        package_files, skipped_files = _patch_files()
+        if not package_files:
+            raise RuntimeError("no deployable changed files found for --patch-only")
+    else:
+        package_files, skipped_files = list(CODE_FILES), []
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         # 1. Application code
-        print(f"\n[1/4] Adding {len(CODE_FILES)} code files...")
-        for rel in CODE_FILES:
+        print(f"\n[1/5] Adding {len(package_files)} code files...")
+        for rel in package_files:
             src = PROJECT_ROOT / rel
             if not src.exists():
                 print(f"  ⚠ MISSING: {rel}")
                 continue
-            zf.write(src, arcname=rel)
+            _add_file(zf, src, rel.replace("\\", "/"), entries)
             code_size += src.stat().st_size
-            file_count += 1
             print(f"  + {rel}")
+        if args.patch_only and skipped_files:
+            print("\nSkipped non-deployable changed files:")
+            for rel in skipped_files:
+                print(f"  - {rel}")
 
         # 2. Backbone cache (skip xet logs — useless on production)
         if args.no_backbone:
-            print(f"\n[2/4] Skipping backbone cache (--no-backbone)")
+            print(f"\n[2/5] Skipping backbone cache (--no-backbone)")
         else:
             backbone_dir = PROJECT_ROOT / BACKBONE_CACHE_DIR
             if backbone_dir.exists():
-                print(f"\n[2/4] Adding backbone cache ({BACKBONE_CACHE_DIR})...")
+                print(f"\n[2/5] Adding backbone cache ({BACKBONE_CACHE_DIR})...")
                 for src in backbone_dir.rglob("*"):
                     if not src.is_file():
                         continue
@@ -221,36 +450,70 @@ def main(argv=None) -> int:
                     rel_str = str(rel).replace("\\", "/")
                     if "xet/logs" in rel_str or rel_str.endswith(".log"):
                         continue
-                    zf.write(src, arcname=str(rel))
+                    _add_file(zf, src, rel.as_posix(), entries)
                     backbone_size += src.stat().st_size
-                    file_count += 1
                     backbone_files += 1
                 print(f"  + {backbone_files} files in {BACKBONE_CACHE_DIR}")
             else:
-                print(f"\n⚠ [2/4] Backbone cache missing at {backbone_dir}")
+                print(f"\n⚠ [2/5] Backbone cache missing at {backbone_dir}")
 
         # 3. server_config patch example
-        print(f"\n[3/4] Adding server_config_patch.yaml.example...")
-        zf.writestr("server_config_patch.yaml.example", SERVER_CONFIG_PATCH)
-        file_count += 1
+        if args.patch_only:
+            print(f"\n[3/5] Skipping server_config_patch.yaml.example (--patch-only)")
+        else:
+            print(f"\n[3/5] Adding server_config_patch.yaml.example...")
+            _add_text(zf, "server_config_patch.yaml.example", SERVER_CONFIG_PATCH, entries)
 
-        # 4. README
-        print(f"\n[4/4] Adding README.txt...")
-        readme = README_TEXT
-        if args.no_backbone:
+        # 4. Release metadata
+        print(f"\n[4/5] Adding release metadata...")
+        changelog = (
+            CHANGELOG_FILE.read_text(encoding="utf-8")
+            if CHANGELOG_FILE.exists()
+            else f"# Changelog\n\n## {version}\n\n- Release notes not provided.\n"
+        )
+        _add_text(zf, "VERSION", f"{version}\n", entries)
+        _add_text(zf, "CHANGELOG.md", changelog, entries)
+
+        # 5. README + generated manifest/checksums
+        print(f"\n[5/5] Adding README.txt, release_manifest.json, checksums.txt...")
+        base_readme = PATCH_README_TEXT if args.patch_only else README_TEXT
+        readme = (
+            f"Release version: {version}\n"
+            f"Git commit: {git_commit or 'unknown'}\n"
+            f"Built at: {built_at}\n\n"
+            + base_readme
+        )
+        if args.no_backbone and not args.patch_only:
             readme = readme + CODEONLY_README_NOTE
-        zf.writestr("README.txt", readme)
-        file_count += 1
+        _add_text(zf, "README.txt", readme, entries)
+
+        manifest = {
+            "version": version,
+            "git_commit": git_commit,
+            "built_at": built_at,
+            "artifact": zip_path.name,
+            "requires_restart": True,
+            "package_type": "patch" if args.patch_only else ("codeonly" if args.no_backbone else "full"),
+            "files": sorted(entries, key=lambda item: item["path"]),
+        }
+        manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+        _add_text(zf, "release_manifest.json", manifest_text, entries)
+
+        checksums = "".join(
+            f"{entry['sha256']}  {entry['path']}\n"
+            for entry in sorted(entries, key=lambda item: item["path"])
+        )
+        _add_text(zf, "checksums.txt", checksums)
 
     final_size = zip_path.stat().st_size
     print(f"\n{'='*60}")
     print(f"Done!")
     print(f"  Output:        {zip_path}")
     print(f"  ZIP size:      {final_size / 1e6:.1f} MB")
-    print(f"  Code size:     {code_size / 1e6:.2f} MB ({len(CODE_FILES)} files)")
+    print(f"  Code size:     {code_size / 1e6:.2f} MB ({len(package_files)} files)")
     if not args.no_backbone:
         print(f"  Backbone size: {backbone_size / 1e6:.1f} MB ({backbone_files} files)")
-    print(f"  Total files:   {file_count}")
+    print(f"  Total files:   {len(entries) + 1}")
     print(f"{'='*60}")
     return 0
 

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}更新內容 - CAPI AI{% endblock %}
+
+{% block extra_css %}
+<style>
+    .release-notes {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 24px;
+        max-width: 980px;
+        margin: 0 auto 24px;
+    }
+
+    .release-notes h1 {
+        font-size: 1.65rem;
+        margin-bottom: 18px;
+        color: var(--text);
+    }
+
+    .release-notes h2 {
+        font-size: 1.25rem;
+        margin: 22px 0 12px;
+        color: #e2e8f0;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 8px;
+    }
+
+    .release-notes h3 {
+        font-size: 1.05rem;
+        margin: 18px 0 8px;
+        color: #93c5fd;
+    }
+
+    .release-notes p {
+        color: var(--text-muted);
+        margin: 8px 0;
+        line-height: 1.7;
+    }
+
+    .release-notes ul {
+        margin: 0 0 14px 22px;
+        padding: 0;
+    }
+
+    .release-notes li {
+        margin: 7px 0;
+        line-height: 1.65;
+        color: var(--text);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="release-notes">
+    {{ release_notes_html|safe }}
+</div>
+{% endblock %}

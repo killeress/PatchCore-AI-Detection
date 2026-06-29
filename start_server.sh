@@ -10,6 +10,7 @@
 #   ./start_server.sh stop               # 只停止
 #   ./start_server.sh status             # 看目前狀態
 #   ./start_server.sh log                # 實時查看伺服器 Log
+#   ./start_server.sh restart --no-tail  # 重啟後不進入 log tail（給更新腳本用）
 #   ./start_server.sh -c my_config.yaml  # 指定設定檔（搭配上面任一動作）
 #
 # ============================================================
@@ -27,6 +28,7 @@ HEATMAP_DIR="/aidata/capi_ai/heatmaps"
 CONFIG_FILE="server_config.yaml"
 SERVER_LOG_LATEST="$LOG_DIR/server_output.log"   # symlink → 當天那份 server_output_YYYY-MM-DD.log
 ACTION="restart"
+TAIL_AFTER_START=1
 
 # ----- 解析參數 -----
 while [ $# -gt 0 ]; do
@@ -39,13 +41,17 @@ while [ $# -gt 0 ]; do
             ACTION="$1"
             shift
             ;;
+        --no-tail)
+            TAIL_AFTER_START=0
+            shift
+            ;;
         -h|--help)
             sed -n '2,16p' "$0"
             exit 0
             ;;
         *)
             echo "Unknown argument: $1"
-            echo "Usage: $0 [start|stop|restart|status|log] [-c config.yaml]"
+            echo "Usage: $0 [start|stop|restart|status|log] [-c config.yaml] [--no-tail]"
             exit 1
             ;;
     esac
@@ -218,7 +224,11 @@ case "$ACTION" in
             exit 1
         fi
         start_server
-        tail_logs
+        if [ "$TAIL_AFTER_START" -eq 1 ]; then
+            tail_logs
+        else
+            check_status
+        fi
         ;;
 
     restart)
@@ -226,6 +236,10 @@ case "$ACTION" in
         stop_server
         sleep 1
         start_server
-        tail_logs
+        if [ "$TAIL_AFTER_START" -eq 1 ]; then
+            tail_logs
+        else
+            check_status
+        fi
         ;;
 esac
