@@ -9,6 +9,7 @@ TCP/IP Socket Server，接收 Testing 客戶端的推論請求，
                有炸彈: AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片前綴;(座標);圖片目錄路徑
                機檢判定: OK / NG / HY (畫異，HY 時跳過推論)
     [Response] @QJPG-玻璃ID;MARK判定;MARK字;Defect判定+Defect清單,
+               AOI@玻璃ID;機種ID;機台編號;機檢判定;AI判定
 
 AI 判定:
     OK                           — 正常
@@ -429,6 +430,22 @@ def build_response(
     格式: AOI@玻璃ID;機種ID;機台編號;機檢判定;AI判定
     """
     return f"AOI@{glass_id};{model_id};{machine_no};{machine_judgment};{ai_judgment}"
+
+
+def build_legacy_response(
+    parsed: Optional[Dict[str, Any]],
+    ai_judgment: str,
+) -> str:
+    response_ai_judgment = "OK" if ai_judgment == "OK-i" else (ai_judgment or "ERR:UNKNOWN")
+    if not parsed:
+        return f"AOI@;;;;{response_ai_judgment}"
+    return build_response(
+        str(parsed.get("glass_id", "") or ""),
+        str(parsed.get("model_id", "") or ""),
+        str(parsed.get("machine_no", "") or ""),
+        str(parsed.get("machine_judgment", "") or ""),
+        response_ai_judgment,
+    )
 
 
 def _image_prefix_for_report(image_name: str) -> str:
@@ -916,6 +933,22 @@ def build_qjpg_response(
         defect_field = ai_judgment or "ERR:UNKNOWN"
 
     return f"@QJPG-{glass_id};{mark_status};{mark_text};{defect_field},"
+
+
+def build_dual_protocol_response(
+    parsed: Optional[Dict[str, Any]],
+    ai_judgment: str,
+    results: Optional[List[ImageResult]] = None,
+    config: Optional[CAPIConfig] = None,
+) -> str:
+    return "\r\n".join([
+        build_qjpg_response(parsed, ai_judgment, results, config),
+        build_legacy_response(parsed, ai_judgment),
+    ])
+
+
+def _response_log_text(response: str) -> str:
+    return response.replace("\r\n", " | ")
 
 
 def resolve_unc_path(unc_path: str, path_mapping: Dict[str, str]) -> str:
@@ -1978,9 +2011,9 @@ class CAPIServer:
                     if parsed["machine_judgment"] == "HY":
                         logger.info(f"[{client_addr}] 機檢判定=HY (畫異)，跳過推論")
                         ai_judgment = "ERR:HY"
-                        response = build_qjpg_response(parsed, ai_judgment, [], request_config)
+                        response = build_dual_protocol_response(parsed, ai_judgment, [], request_config)
                         response_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                        logger.info(f"[{client_addr}] >> {response} (skipped)")
+                        logger.info(f"[{client_addr}] >> {_response_log_text(response)} (skipped)")
                         with server_status.lock:
                             server_status.active_inferences = max(0, server_status.active_inferences - 1)
                             server_status.total_err += 1
@@ -2015,7 +2048,7 @@ class CAPIServer:
                         logger.warning(f"[{client_addr}] [DUPLICATE_PANEL] 重複投片，已選取最新圖片推論，判定={ai_judgment}")
 
                     # 組裝回覆
-                    response = build_qjpg_response(
+                    response = build_dual_protocol_response(
                         parsed,
                         ai_judgment,
                         inference_results,
@@ -2025,7 +2058,7 @@ class CAPIServer:
                     response_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
                     dup_tag = " [DUPLICATE]" if is_duplicate else ""
-                    logger.info(f"[{client_addr}] >> {response} ({processing_seconds:.2f}s){dup_tag}")
+                    logger.info(f"[{client_addr}] >> {_response_log_text(response)} ({processing_seconds:.2f}s){dup_tag}")
                     
                     # 更新全域狀態 - 判定結果與推論結束
                     j_simple = "OK" if ai_judgment in ("OK", "OK-i") else ("NG" if ai_judgment.startswith("NG") else "ERR")
@@ -2073,9 +2106,9 @@ class CAPIServer:
                     logger.error(f"[{client_addr}] Protocol error: {e}")
                     error_msg = f"ERR:PROTOCOL_ERROR ({str(e)[:80]})"
                     if parsed:
-                        response = build_qjpg_response(parsed, error_msg, [], request_config)
+                        response = build_dual_protocol_response(parsed, error_msg, [], request_config)
                     else:
-                        response = build_qjpg_response(None, error_msg, [], None)
+                        response = build_dual_protocol_response(None, error_msg, [], None)
                     try:
                         client_socket.sendall((response + "\r\n").encode("utf-8"))
                     except Exception:
@@ -2091,9 +2124,9 @@ class CAPIServer:
                     logger.error(f"[{client_addr}] Unexpected error: {e}", exc_info=True)
                     error_msg = f"ERR:INTERNAL_ERROR ({type(e).__name__})"
                     if parsed:
-                        response = build_qjpg_response(parsed, error_msg, [], request_config)
+                        response = build_dual_protocol_response(parsed, error_msg, [], request_config)
                     else:
-                        response = build_qjpg_response(None, error_msg, [], None)
+                        response = build_dual_protocol_response(None, error_msg, [], None)
                     try:
                         client_socket.sendall((response + "\r\n").encode("utf-8"))
                     except Exception:
