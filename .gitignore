@@ -74,6 +74,7 @@ reports/
 # Training datasets and artifacts (large, local-only)
 BGA_Train/
 dataset_v2/
+Sample/
 
 # Crash dumps and training logs (txt, not caught by *.log)
 *.stackdump
