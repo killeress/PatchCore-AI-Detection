@@ -53,6 +53,7 @@ from capi_config import CAPIConfig
 from capi_inference import CAPIInferencer, ImageResult, resolve_product_resolution
 from capi_preprocess import BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_polygon
 from capi_database import CAPIDatabase
+from capi_auto_model_switch import bundle_label, select_target_bundle
 from capi_heatmap import HeatmapManager
 from capi_web import (
     _attach_runtime_dust_masks_to_within_spec_detail,
@@ -1272,6 +1273,7 @@ class CAPIServer:
 
         # GPU 推論鎖 (確保 GPU 不被同時存取)
         self._gpu_lock = threading.Lock()
+        self._model_switch_lock = threading.Lock()
 
         # 停止旗標
         self._running = False
@@ -1425,6 +1427,158 @@ class CAPIServer:
 
         # 舊架構機種或找不到 config：回傳 legacy inferencer
         return self.inferencer
+
+    def _bundle_config_path(self, bundle: Dict[str, Any]) -> Path:
+        path = Path(str(bundle["bundle_path"])) / "machine_config.yaml"
+        return path if path.is_absolute() else self.base_dir / path
+
+    def _is_bundle_loaded(self, bundle: Dict[str, Any]) -> bool:
+        cfg = getattr(self, "fallback_config", None)
+        if cfg is None or not getattr(cfg, "config_path", None):
+            return False
+        try:
+            return Path(cfg.config_path).resolve() == self._bundle_config_path(bundle).resolve()
+        except OSError:
+            return False
+
+    def _build_inferencer_for_bundle(self, bundle: Dict[str, Any]) -> Tuple["CAPIConfig", CAPIInferencer]:
+        cfg_path = self._bundle_config_path(bundle)
+        cfg = CAPIConfig.from_yaml(str(cfg_path))
+
+        try:
+            count = self.db.init_config_from_yaml(cfg)
+            if count > 0:
+                logger.info("[AutoModelSwitch] Seeded %s config params from %s", count, cfg_path)
+            db_params = self.db.get_all_config_params()
+            if db_params:
+                cfg.apply_db_overrides(db_params)
+        except Exception as e:
+            logger.warning("[AutoModelSwitch] DB config sync failed for %s: %s", cfg_path, e)
+
+        device = self.inference_config.get("device", "auto")
+        model_path = None if cfg.is_new_architecture else (cfg.model_path or "./model.pt")
+        inferencer = CAPIInferencer(
+            config=cfg,
+            model_path=model_path,
+            device=device,
+            threshold=cfg.anomaly_threshold,
+        )
+        if cfg.is_new_architecture:
+            loaded, total = inferencer.preload_v2_models()
+            logger.info(
+                "[AutoModelSwitch] Preloaded %s/%s model units for bundle=%s",
+                loaded,
+                total,
+                bundle_label(bundle),
+            )
+        return cfg, inferencer
+
+    def _adopt_active_bundle_runtime(self, cfg: "CAPIConfig", inferencer: CAPIInferencer) -> None:
+        old_inferencers = getattr(self, "inferencers", {})
+        self.configs_by_machine = {cfg.machine_id: cfg}
+        self.fallback_config = cfg
+        self.config = cfg
+        self.inferencer = inferencer
+        self.inferencers = {cfg.machine_id: inferencer}
+        old_inferencers.clear()
+        self._publish_active_bundle_status()
+
+    def _record_auto_model_switch_history(
+        self,
+        decision: Dict[str, Any],
+        previous_bundle: Optional[Dict[str, Any]],
+        action: str,
+        status: str,
+        message: str,
+    ) -> None:
+        target_bundle = decision.get("bundle")
+        try:
+            self.db.add_auto_model_switch_history({
+                "requested_model_id": decision.get("requested_model_id", ""),
+                "series_prefix": decision.get("series_prefix", ""),
+                "previous_bundle_id": previous_bundle.get("id") if previous_bundle else None,
+                "previous_bundle_label": bundle_label(previous_bundle),
+                "target_bundle_id": target_bundle.get("id") if target_bundle else None,
+                "target_bundle_label": bundle_label(target_bundle),
+                "action": action,
+                "status": status,
+                "message": message,
+            })
+        except Exception as e:
+            logger.warning("[AutoModelSwitch] Failed to write history: %s", e)
+
+    def _ensure_auto_model_switch_for_request(self, parsed: Dict[str, Any]) -> "CAPIConfig":
+        """依 Client 機種前 8 碼，必要時切換成唯一 active bundle。"""
+        with self._model_switch_lock:
+            decision = select_target_bundle(self.db, parsed.get("model_id", ""))
+            target_bundle = decision.get("bundle")
+            current_bundle = self.db.get_active_model_bundle()
+
+            if not target_bundle:
+                if decision.get("reason") == "bundle_missing":
+                    self._record_auto_model_switch_history(
+                        decision,
+                        current_bundle,
+                        "failed",
+                        "failed",
+                        decision.get("message", "自動切換目標不存在"),
+                    )
+                    raise RuntimeError(decision.get("message", "自動切換目標不存在"))
+                return self.get_config_for(parsed.get("model_id", ""))
+
+            current_id = int(current_bundle["id"]) if current_bundle else None
+            target_id = int(target_bundle["id"])
+            loaded = self._is_bundle_loaded(target_bundle)
+            if current_id == target_id and loaded:
+                return self.fallback_config
+
+            action = "fallback_default" if decision.get("used_default") else "switched"
+            message_prefix = (
+                f"{decision.get('series_prefix', '')} 使用預設模型"
+                if decision.get("used_default")
+                else f"{decision.get('series_prefix', '')} 命中系列模型"
+            )
+
+            logger.info(
+                "[AutoModelSwitch] Switching active bundle: requested=%s series=%s current=%s target=%s",
+                decision.get("requested_model_id", ""),
+                decision.get("series_prefix", ""),
+                bundle_label(current_bundle),
+                bundle_label(target_bundle),
+            )
+
+            try:
+                with self._gpu_lock:
+                    cfg, inferencer = self._build_inferencer_for_bundle(target_bundle)
+                    from capi_model_registry import activate_bundle
+                    activate_bundle(
+                        self.db,
+                        target_id,
+                        server_config_path=Path(self.server_config_path),
+                    )
+                    self._adopt_active_bundle_runtime(cfg, inferencer)
+            except Exception as e:
+                message = f"{message_prefix}，切換失敗: {e}"
+                self._record_auto_model_switch_history(
+                    decision,
+                    current_bundle,
+                    action,
+                    "failed",
+                    message,
+                )
+                logger.error("[AutoModelSwitch] %s", message, exc_info=True)
+                raise RuntimeError(message)
+
+            message = f"{message_prefix}，已切換為 {bundle_label(target_bundle)}"
+            self._record_auto_model_switch_history(
+                decision,
+                current_bundle,
+                action,
+                "success",
+                message,
+            )
+            logger.info("[AutoModelSwitch] %s", message)
+            return self.fallback_config
 
     @staticmethod
     def _count_new_arch_model_units(cfg: "CAPIConfig") -> int:
@@ -1989,7 +2143,7 @@ class CAPIServer:
                 try:
                     # 解析請求
                     parsed = parse_request(request_data)
-                    request_config = self.get_config_for(parsed.get("model_id", ""))
+                    request_config = self._ensure_auto_model_switch_for_request(parsed)
                     machine_label = f"{client_addr[0]} ({parsed['machine_no']})"
 
                     with server_status.lock:
