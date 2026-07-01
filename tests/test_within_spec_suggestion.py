@@ -467,6 +467,61 @@ def test_within_spec_rejects_dot_candidate_on_runtime_dust_mask(tmp_path):
     assert (visual_dir / Path(urls["dust_overlay_url"]).name).is_file()
 
 
+def test_within_spec_all_zero_runtime_dust_mask_does_not_break_visuals(tmp_path):
+    image_path = tmp_path / "WGF50500.png"
+    visual_dir = tmp_path / "visuals"
+    image = np.full((64, 64, 3), 128, dtype=np.uint8)
+    cv2.circle(image, (32, 32), 3, (60, 60, 60), -1)
+    cv2.imwrite(str(image_path), image)
+
+    rules = _rules(screen_limit=1, tile_limit=1, white_enabled=True)
+    rules["default"]["screens"]["WGF50500"] = rules["default"]["screens"].pop("W0F00000")
+    detail = {
+        "model_id": "GN156HRAAPF0S",
+        "images": [
+            {
+                "image_name": "WGF50500.png",
+                "image_path": str(image_path),
+                "tiles": [
+                    {
+                        "tile_id": 0,
+                        "x": 0,
+                        "y": 0,
+                        "width": 64,
+                        "height": 64,
+                        "is_anomaly": 1,
+                        "is_dust": 0,
+                        "is_bomb": 0,
+                        "is_exclude_zone": 0,
+                        "scratch_filtered": 0,
+                        "is_aoi_coord": 1,
+                        "aoi_defect_code": "C1111",
+                        "aoi_product_x": 704,
+                        "aoi_product_y": 120,
+                        "aoi_image_x": 32,
+                        "aoi_image_y": 32,
+                        "_runtime_dust_mask": np.zeros((64, 64), dtype=np.uint8),
+                    },
+                ],
+            }
+        ],
+    }
+
+    result = _evaluate_within_spec_suggestion_detail(
+        detail,
+        rules,
+        visual_output_dir=visual_dir,
+        visual_url_prefix="/visuals",
+    )
+
+    assert result["panel_summary"]["evaluated_tile_count"] == 1
+    assert result["panel_summary"]["total_dot_count"] == 1
+    visual = result["visuals"][0]
+    assert visual["dust_mask_filtered_count"] == 0
+    assert "dust_mask_url" not in visual["urls"]
+    assert "dust_overlay_url" not in visual["urls"]
+
+
 def test_within_spec_rejects_large_non_dot_residue(tmp_path):
     image_path = tmp_path / "W0F00000.png"
     image = np.full((128, 128, 3), 128, dtype=np.uint8)

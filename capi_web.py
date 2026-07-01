@@ -1618,21 +1618,23 @@ def _save_within_spec_dot_visuals(
     if runtime_dust_mask is not None:
         import numpy as np
 
-        dust_mask_u8 = (np.asarray(runtime_dust_mask).astype("uint8") * 255)
-        dust_mask_color = cv2.cvtColor(dust_mask_u8, cv2.COLOR_GRAY2BGR)
-        dust_mask_color[runtime_dust_mask > 0] = (0, 255, 255)
-        base_overlay = detected.get("overlay")
-        if base_overlay is not None:
-            dust_overlay = base_overlay.copy()
-            yellow = np.zeros_like(dust_overlay)
-            yellow[:, :] = (0, 255, 255)
-            dust_overlay[runtime_dust_mask > 0] = cv2.addWeighted(
-                dust_overlay[runtime_dust_mask > 0],
-                0.45,
-                yellow[runtime_dust_mask > 0],
-                0.55,
-                0,
-            )
+        dust_pixels = np.asarray(runtime_dust_mask) > 0
+        if np.any(dust_pixels):
+            dust_mask_u8 = (dust_pixels.astype("uint8") * 255)
+            dust_mask_color = cv2.cvtColor(dust_mask_u8, cv2.COLOR_GRAY2BGR)
+            dust_mask_color[dust_pixels] = (0, 255, 255)
+            base_overlay = detected.get("overlay")
+            if base_overlay is not None:
+                dust_overlay = base_overlay.copy()
+                yellow = np.zeros_like(dust_overlay)
+                yellow[:, :] = (0, 255, 255)
+                dust_overlay[dust_pixels] = cv2.addWeighted(
+                    dust_overlay[dust_pixels],
+                    0.45,
+                    yellow[dust_pixels],
+                    0.55,
+                    0,
+                )
 
     visual_residues = [
         {k: v for k, v in residue.items() if k != "_key"}
