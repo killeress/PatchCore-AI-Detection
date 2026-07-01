@@ -3861,6 +3861,19 @@ class CAPIInferencer:
         
         return img_x, img_y
 
+    def _map_image_to_product_coords(self, img_x: int, img_y: int, raw_bounds: Tuple[int, int, int, int],
+                                     product_resolution: Optional[Tuple[int, int]] = None) -> Tuple[int, int]:
+        """將圖片座標映射回產品座標"""
+        if product_resolution is None:
+            product_resolution = DEFAULT_PRODUCT_RESOLUTION
+        product_width, product_height = product_resolution
+        x_start, y_start, x_end, y_end = raw_bounds
+        image_width = max(1, x_end - x_start)
+        image_height = max(1, y_end - y_start)
+        product_x = int(round((img_x - x_start) * product_width / image_width))
+        product_y = int(round((img_y - y_start) * product_height / image_height))
+        return product_x, product_y
+
     def _inspect_roi_fusion(
         self,
         image: np.ndarray,
@@ -6550,6 +6563,35 @@ class CAPIInferencer:
         if not active_bombs:
             return
 
+        client_point_bombs = bomb_info is not None and any(
+            bomb.defect_type == "point" for bomb in active_bombs
+        )
+        point_candidates = []
+
+        def collect_client_point_candidates(kind: str, obj: Any, img_prefix: str,
+                                            product_x: int, product_y: int) -> None:
+            tolerance = self.config.bomb_match_tolerance
+            for bomb_index, bomb in enumerate(active_bombs):
+                if bomb.defect_type != "point":
+                    continue
+                if not (img_prefix == bomb.image_prefix or
+                        img_prefix.startswith(bomb.image_prefix + "_")):
+                    continue
+                for coord_index, coord in enumerate(bomb.coordinates):
+                    dx = abs(product_x - coord[0])
+                    dy = abs(product_y - coord[1])
+                    if dx <= tolerance and dy <= tolerance:
+                        point_candidates.append((
+                            dx * dx + dy * dy,
+                            dx,
+                            dy,
+                            len(point_candidates),
+                            kind,
+                            obj,
+                            bomb.defect_code,
+                            (bomb_index, coord_index),
+                        ))
+
         for result in results:
             if result.anomaly_tiles and result.raw_bounds is not None:
                 img_prefix = result.image_path.stem
@@ -6566,6 +6608,21 @@ class CAPIInferencer:
                             tile.anomaly_peak_x, tile.anomaly_peak_y = tile.center
                     else:
                         tile.anomaly_peak_x, tile.anomaly_peak_y = tile.center
+
+                    if client_point_bombs:
+                        if tile.is_aoi_coord_tile and tile.aoi_product_x >= 0:
+                            product_x, product_y = tile.aoi_product_x, tile.aoi_product_y
+                        else:
+                            product_x, product_y = self._map_image_to_product_coords(
+                                tile.anomaly_peak_x,
+                                tile.anomaly_peak_y,
+                                result.raw_bounds,
+                                product_resolution,
+                            )
+                        collect_client_point_candidates(
+                            "tile", tile, img_prefix, product_x, product_y
+                        )
+                        continue
 
                     is_bomb, bomb_code = self.check_bomb_match(
                         img_prefix,
@@ -6630,6 +6687,15 @@ class CAPIInferencer:
                     if getattr(ed, "is_cv_ok", False):
                         continue
                     cx, cy = ed.center
+                    if client_point_bombs:
+                        product_x, product_y = self._map_image_to_product_coords(
+                            int(cx), int(cy), result.raw_bounds, product_resolution
+                        )
+                        collect_client_point_candidates(
+                            "edge", ed, img_prefix, product_x, product_y
+                        )
+                        continue
+
                     is_bomb, bomb_code = self.check_bomb_match(
                         img_prefix, cx, cy, result.raw_bounds,
                         product_resolution=product_resolution,
@@ -6638,6 +6704,18 @@ class CAPIInferencer:
                     if is_bomb:
                         ed.is_bomb = True
                         ed.bomb_defect_code = bomb_code
+
+        if client_point_bombs:
+            used_entities = set()
+            used_bombs = set()
+            for _dist2, _dx, _dy, _seq, kind, obj, bomb_code, bomb_key in sorted(point_candidates):
+                entity_key = (kind, id(obj))
+                if entity_key in used_entities or bomb_key in used_bombs:
+                    continue
+                obj.is_bomb = True
+                obj.bomb_defect_code = bomb_code
+                used_entities.add(entity_key)
+                used_bombs.add(bomb_key)
 
         # Per-image bomb 匹配摘要 log（對齊 v1 line 5236）
         from collections import Counter

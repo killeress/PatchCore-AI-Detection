@@ -701,6 +701,69 @@ def test_bomb_postprocess_skips_b0f_aoi_track_only_tile(tmp_path):
     assert ng_tile.bomb_defect_code == "B01"
 
 
+def test_client_point_bomb_matches_only_nearest_aoi_tile(tmp_path):
+    from capi_inference import CAPIInferencer, ImageResult, TileInfo
+
+    cfg = _make_config(tmp_path)
+    cfg.bomb_match_tolerance = 50
+    inferencer = CAPIInferencer(cfg)
+
+    far_tile = TileInfo(
+        tile_id=1,
+        x=100,
+        y=100,
+        width=512,
+        height=512,
+        image=np.zeros((512, 512), dtype=np.uint8),
+        zone="bright_spot",
+    )
+    far_tile.is_aoi_coord_tile = True
+    far_tile.is_bright_spot_detection = True
+    far_tile.aoi_product_x = 627
+    far_tile.aoi_product_y = 336
+
+    near_tile = TileInfo(
+        tile_id=2,
+        x=200,
+        y=200,
+        width=512,
+        height=512,
+        image=np.zeros((512, 512), dtype=np.uint8),
+        zone="bright_spot",
+    )
+    near_tile.is_aoi_coord_tile = True
+    near_tile.is_bright_spot_detection = True
+    near_tile.aoi_product_x = 660
+    near_tile.aoi_product_y = 310
+
+    anomaly_map = np.zeros((512, 512), dtype=np.float32)
+    anomaly_map[256, 256] = 1.0
+    result = ImageResult(
+        image_path=Path("B0F00000_test.png"),
+        image_size=(2000, 1000),
+        otsu_bounds=(0, 0, 2000, 1000),
+        exclusion_regions=[],
+        tiles=[far_tile, near_tile],
+        excluded_tile_count=0,
+        processed_tile_count=2,
+        processing_time=0.0,
+        anomaly_tiles=[(far_tile, 1.0, anomaly_map), (near_tile, 1.0, anomaly_map)],
+        raw_bounds=(0, 0, 2000, 1000),
+    )
+    bomb_info = {
+        "image_prefix": "B0F00000",
+        "defect_type": "point",
+        "coordinates": [(656, 309)],
+    }
+
+    inferencer._apply_bomb_postprocess([result], bomb_info, (2000, 1000))
+
+    assert far_tile.is_bomb is False
+    assert far_tile.bomb_defect_code == ""
+    assert near_tile.is_bomb is True
+    assert near_tile.bomb_defect_code == "UNKNOWN"
+
+
 def test_process_panel_v2_duplicate_panel_uses_latest_b0f_skip_file(tmp_path):
     import cv2
 
