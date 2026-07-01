@@ -17,6 +17,15 @@
         font-size: 1.65rem;
         margin-bottom: 18px;
         color: var(--text);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .release-notes h1::before {
+        content: "▣";
+        color: var(--accent);
+        font-size: 1.1rem;
     }
 
     .release-notes h2 {
@@ -25,12 +34,31 @@
         color: #e2e8f0;
         border-bottom: 1px solid var(--border);
         padding-bottom: 8px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+    }
+
+    .release-notes h2::before {
+        content: "◆";
+        color: #38bdf8;
+        font-size: 0.85rem;
     }
 
     .release-notes h3 {
         font-size: 1.05rem;
         margin: 18px 0 8px;
         color: #93c5fd;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .release-notes h3::before {
+        content: "›";
+        color: #f59e0b;
+        font-size: 1.15rem;
+        line-height: 1;
     }
 
     .release-notes p {
@@ -40,14 +68,26 @@
     }
 
     .release-notes ul {
-        margin: 0 0 14px 22px;
+        margin: 0 0 14px 0;
         padding: 0;
+        list-style: none;
     }
 
     .release-notes li {
+        position: relative;
         margin: 7px 0;
+        padding-left: 22px;
         line-height: 1.65;
         color: var(--text);
+    }
+
+    .release-notes li::before {
+        content: "•";
+        position: absolute;
+        left: 4px;
+        top: 0;
+        color: var(--ok);
+        font-weight: 700;
     }
 </style>
 {% endblock %}

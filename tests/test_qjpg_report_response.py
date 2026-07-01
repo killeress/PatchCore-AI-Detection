@@ -4,7 +4,11 @@ import numpy as np
 
 from capi_config import CAPIConfig
 from capi_inference import ImageResult, TileInfo
-from capi_server import build_qjpg_response, check_image_abnormal_precheck
+from capi_server import (
+    build_dual_protocol_response,
+    build_qjpg_response,
+    check_image_abnormal_precheck,
+)
 
 
 def _image_result(image_name: str, *, mark_text: str = "EJ") -> ImageResult:
@@ -50,6 +54,59 @@ def test_qjpg_response_uses_final_ng_points_and_product_coordinates():
     )
 
     assert response == "@QJPG-T863BF29AH44;OK;EJ;NGPCDK20100000500W0F00000,"
+
+
+def test_dual_protocol_response_sends_qjpg_then_legacy_aoi():
+    result = _image_result("W0F00000_114438.tif")
+    tile = _tile(1, 600, 450)
+    result.tiles = [tile]
+    result.anomaly_tiles = [(tile, 0.91, None)]
+
+    response = build_dual_protocol_response(
+        {
+            "glass_id": "T863BF29AH44",
+            "model_id": "GN156HCAB6G0S",
+            "machine_no": "CAPI1403",
+            "machine_judgment": "OK",
+            "resolution": (2000, 1000),
+        },
+        "NG",
+        [result],
+        CAPIConfig(),
+    )
+
+    assert response == (
+        "@QJPG-T863BF29AH44;OK;EJ;NGPCDK20100000500W0F00000,"
+        "\r\n"
+        "AOI@T863BF29AH44;GN156HCAB6G0S;CAPI1403;OK;NG"
+    )
+
+
+def test_dual_protocol_legacy_response_maps_ok_i_to_ok():
+    response = build_dual_protocol_response(
+        {
+            "glass_id": "G1",
+            "model_id": "M1",
+            "machine_no": "CAPI1403",
+            "machine_judgment": "OK",
+            "resolution": (2000, 1000),
+        },
+        "OK-i",
+        [],
+        CAPIConfig(),
+    )
+
+    assert response == "@QJPG-G1;NG;00;OK,\r\nAOI@G1;M1;CAPI1403;OK;OK"
+
+
+def test_dual_protocol_response_without_parsed_data_keeps_legacy_error_shape():
+    response = build_dual_protocol_response(None, "ERR:PROTOCOL_ERROR (bad)", [], None)
+
+    assert response == (
+        "@QJPG-;NG;00;ERR:PROTOCOL_ERROR (bad),"
+        "\r\n"
+        "AOI@;;;;ERR:PROTOCOL_ERROR (bad)"
+    )
 
 
 def test_qjpg_response_uses_white_dot_code_for_b0f_defect():
