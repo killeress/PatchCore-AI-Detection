@@ -56,7 +56,7 @@ def test_qjpg_response_uses_final_ng_points_and_product_coordinates():
     assert response == "@QJPG-T863BF29AH44;OK;EJ;NGPCDK20100000500W0F00000,"
 
 
-def test_dual_protocol_response_sends_qjpg_then_legacy_aoi():
+def test_dual_protocol_response_sends_legacy_aoi_then_qjpg():
     result = _image_result("W0F00000_114438.tif")
     tile = _tile(1, 600, 450)
     result.tiles = [tile]
@@ -76,9 +76,9 @@ def test_dual_protocol_response_sends_qjpg_then_legacy_aoi():
     )
 
     assert response == (
-        "@QJPG-T863BF29AH44;OK;EJ;NGPCDK20100000500W0F00000,"
-        "\r\n"
         "AOI@T863BF29AH44;GN156HCAB6G0S;CAPI1403;OK;NG"
+        "\r\n"
+        "@QJPG-T863BF29AH44;OK;EJ;NGPCDK20100000500W0F00000,"
     )
 
 
@@ -96,16 +96,16 @@ def test_dual_protocol_legacy_response_maps_ok_i_to_ok():
         CAPIConfig(),
     )
 
-    assert response == "@QJPG-G1;NG;00;OK,\r\nAOI@G1;M1;CAPI1403;OK;OK"
+    assert response == "AOI@G1;M1;CAPI1403;OK;OK\r\n@QJPG-G1;NG;00;OK,"
 
 
 def test_dual_protocol_response_without_parsed_data_keeps_legacy_error_shape():
     response = build_dual_protocol_response(None, "ERR:PROTOCOL_ERROR (bad)", [], None)
 
     assert response == (
-        "@QJPG-;NG;00;ERR:PROTOCOL_ERROR (bad),"
-        "\r\n"
         "AOI@;;;;ERR:PROTOCOL_ERROR (bad)"
+        "\r\n"
+        "@QJPG-;NG;00;ERR:PROTOCOL_ERROR (bad),"
     )
 
 
