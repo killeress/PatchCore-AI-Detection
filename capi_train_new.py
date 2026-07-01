@@ -861,10 +861,9 @@ aoi_report_path_replace_from: yuantu
 aoi_report_path_replace_to: Report
 
 # === 炸彈匹配 ===
-# tolerance 過大會把鄰近 AOI 真實缺陷誤吸成 bomb（曾發生 dx=67 / dy=98
-# 兩顆獨立缺陷被同一炸彈座標吸住）。
+# 新訓練 bundle 預設使用較窄距離，避免鄰近 AOI 真實缺陷被同一炸彈座標吸住。
 # bomb_line_min_aspect_ratio default=3.0 太嚴，line bomb 熱力圖抓不到。
-bomb_match_tolerance: 50
+bomb_match_tolerance: 20
 bomb_line_min_aspect_ratio: 1.2
 
 # === 機種第六碼 → 產品解析度（本地工具如 diagnose_bomb 備用）===
