@@ -14,6 +14,9 @@ import sqlite3
 import threading
 import json
 import re
+import os
+import hashlib
+import hmac
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Tuple
@@ -213,12 +216,24 @@ class CAPIDatabase:
                     old_value TEXT DEFAULT '',
                     new_value TEXT DEFAULT '',
                     change_reason TEXT DEFAULT '',
+                    changed_by TEXT DEFAULT '',
                     changed_at TEXT DEFAULT (datetime('now', 'localtime'))
+                );
+
+                -- 參數設定登入帳號
+                CREATE TABLE IF NOT EXISTS settings_users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_config_param_name ON config_params(param_name);
                 CREATE INDEX IF NOT EXISTS idx_config_history_param ON config_change_history(param_name);
                 CREATE INDEX IF NOT EXISTS idx_config_history_time ON config_change_history(changed_at);
+                CREATE INDEX IF NOT EXISTS idx_settings_users_username ON settings_users(username);
 
                 -- Client accuracy records (TIME_STAMP + PNL_ID 為複合唯一鍵)
                 CREATE TABLE IF NOT EXISTS client_accuracy_records (
@@ -439,6 +454,20 @@ class CAPIDatabase:
                 """)
 
             ensure_within_spec_log_schema()
+
+            add_column_if_not_exists("config_change_history", "changed_by", "TEXT DEFAULT ''")
+
+            if not conn.execute(
+                "SELECT id FROM settings_users WHERE username = ?",
+                ("admin",),
+            ).fetchone():
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                conn.execute(
+                    """INSERT INTO settings_users
+                       (username, password_hash, is_admin, created_at, updated_at)
+                       VALUES (?, ?, 1, ?, ?)""",
+                    ("admin", self._hash_settings_password("INXCAPI"), now, now),
+                )
 
             add_column_if_not_exists("inference_records", "error_message", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "client_bomb_info", "TEXT DEFAULT ''")
@@ -2573,6 +2602,217 @@ class CAPIDatabase:
 
     # ── 設定參數管理方法 ─────────────────────────────────
 
+    @staticmethod
+    def _hash_settings_password(password: str, salt: Optional[bytes] = None) -> str:
+        salt = salt or os.urandom(16)
+        iterations = 120000
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            str(password).encode("utf-8"),
+            salt,
+            iterations,
+        )
+        return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+
+    @staticmethod
+    def _verify_settings_password(password: str, password_hash: str) -> bool:
+        try:
+            algo, iter_text, salt_hex, digest_hex = str(password_hash).split("$", 3)
+            if algo != "pbkdf2_sha256":
+                return False
+            expected = hashlib.pbkdf2_hmac(
+                "sha256",
+                str(password).encode("utf-8"),
+                bytes.fromhex(salt_hex),
+                int(iter_text),
+            ).hex()
+            return hmac.compare_digest(expected, digest_hex)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _validate_settings_username(username: str) -> str:
+        username = str(username or "").strip()
+        if not username:
+            raise ValueError("帳號不可空白")
+        if len(username) > 32:
+            raise ValueError("帳號長度不可超過 32 字")
+        if any(ch.isspace() for ch in username):
+            raise ValueError("帳號不可包含空白")
+        return username
+
+    @staticmethod
+    def _validate_settings_password(password: str) -> str:
+        password = str(password or "")
+        if not password:
+            raise ValueError("密碼不可空白")
+        if len(password) > 128:
+            raise ValueError("密碼長度不可超過 128 字")
+        return password
+
+    @staticmethod
+    def _format_settings_user(row) -> Dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "username": row["username"],
+            "is_admin": bool(row["is_admin"]),
+            "can_manage_accounts": bool(row["is_admin"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def get_settings_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        username = str(username or "").strip()
+        if not username:
+            return None
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                """SELECT id, username, is_admin, created_at, updated_at
+                   FROM settings_users
+                   WHERE username = ?""",
+                (username,),
+            ).fetchone()
+            return self._format_settings_user(row) if row else None
+        finally:
+            conn.close()
+
+    def verify_settings_user(self, username: str, password: str) -> Optional[Dict[str, Any]]:
+        username = str(username or "").strip()
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM settings_users WHERE username = ?",
+                (username,),
+            ).fetchone()
+            if not row or not self._verify_settings_password(password, row["password_hash"]):
+                return None
+            return self._format_settings_user(row)
+        finally:
+            conn.close()
+
+    def list_settings_users(self) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT id, username, is_admin, created_at, updated_at
+                   FROM settings_users
+                   ORDER BY is_admin DESC, username"""
+            ).fetchall()
+            return [self._format_settings_user(row) for row in rows]
+        finally:
+            conn.close()
+
+    def create_settings_user(
+        self, username: str, password: str, is_admin: bool = False
+    ) -> Dict[str, Any]:
+        username = self._validate_settings_username(username)
+        password = self._validate_settings_password(password)
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                cur = conn.execute(
+                    """INSERT INTO settings_users
+                       (username, password_hash, is_admin, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        username,
+                        self._hash_settings_password(password),
+                        1 if is_admin else 0,
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+                row = conn.execute(
+                    """SELECT id, username, is_admin, created_at, updated_at
+                       FROM settings_users WHERE id = ?""",
+                    (cur.lastrowid,),
+                ).fetchone()
+                return self._format_settings_user(row)
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                raise ValueError("帳號已存在")
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def update_settings_user(
+        self,
+        user_id: int,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM settings_users WHERE id = ?",
+                    (int(user_id),),
+                ).fetchone()
+                if not row:
+                    return None
+
+                updates = []
+                params: List[Any] = []
+                if username is not None:
+                    new_username = self._validate_settings_username(username)
+                    if row["username"] == "admin" and new_username != "admin":
+                        raise ValueError("admin 帳號名稱不可修改")
+                    updates.append("username = ?")
+                    params.append(new_username)
+                if password is not None and password != "":
+                    updates.append("password_hash = ?")
+                    params.append(self._hash_settings_password(self._validate_settings_password(password)))
+                if updates:
+                    updates.append("updated_at = ?")
+                    params.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    params.append(int(user_id))
+                    conn.execute(
+                        f"UPDATE settings_users SET {', '.join(updates)} WHERE id = ?",
+                        params,
+                    )
+                    conn.commit()
+
+                new_row = conn.execute(
+                    """SELECT id, username, is_admin, created_at, updated_at
+                       FROM settings_users WHERE id = ?""",
+                    (int(user_id),),
+                ).fetchone()
+                return self._format_settings_user(new_row)
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                raise ValueError("帳號已存在")
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def delete_settings_user(self, user_id: int) -> bool:
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                row = conn.execute(
+                    "SELECT username, is_admin FROM settings_users WHERE id = ?",
+                    (int(user_id),),
+                ).fetchone()
+                if not row:
+                    return False
+                if row["username"] == "admin" or int(row["is_admin"]):
+                    raise ValueError("admin 帳號不可刪除")
+                conn.execute("DELETE FROM settings_users WHERE id = ?", (int(user_id),))
+                conn.commit()
+                return True
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
     def get_config_param(self, param_name: str) -> Optional[Dict]:
         """取得單一設定參數"""
         conn = self._get_conn()
@@ -2610,7 +2850,7 @@ class CAPIDatabase:
             conn.close()
 
     def update_config_param(
-        self, param_name: str, new_value: Any, reason: str = ""
+        self, param_name: str, new_value: Any, reason: str = "", changed_by: str = ""
     ) -> bool:
         """
         更新設定參數並記錄修改歷史
@@ -2619,10 +2859,12 @@ class CAPIDatabase:
             param_name: 參數名稱
             new_value: 新值 (Python 原生型別)
             reason: 修改原因
+            changed_by: 修改帳號
 
         Returns:
             是否更新成功
         """
+        changed_by = str(changed_by or "").strip()[:64]
         with self._lock:
             conn = self._get_conn()
             try:
@@ -2669,9 +2911,9 @@ class CAPIDatabase:
                 # 記錄修改歷史
                 conn.execute(
                     """INSERT INTO config_change_history
-                       (param_name, old_value, new_value, change_reason, changed_at)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (param_name, old_value, new_value_json, reason, now)
+                       (param_name, old_value, new_value, change_reason, changed_by, changed_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (param_name, old_value, new_value_json, reason, changed_by, now)
                 )
 
                 conn.commit()
@@ -2888,13 +3130,14 @@ class CAPIDatabase:
                                 )
                                 conn.execute(
                                     """INSERT INTO config_change_history
-                                       (param_name, old_value, new_value, change_reason, changed_at)
-                                       VALUES (?, ?, ?, ?, ?)""",
+                                       (param_name, old_value, new_value, change_reason, changed_by, changed_at)
+                                       VALUES (?, ?, ?, ?, ?, ?)""",
                                     (
                                         name,
                                         existing["param_value"],
                                         new_value_json,
                                         "自動更新畫異 polygon mean 預設門檻",
+                                        "system",
                                         now,
                                     )
                                 )

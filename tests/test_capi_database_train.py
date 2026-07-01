@@ -118,6 +118,47 @@ class TestTrainingSchema:
         assert existing.issubset(tables)
 
 
+class TestSettingsUsers:
+    def test_default_admin_account_exists_and_verifies(self, tmp_path):
+        db = _make_db(tmp_path)
+
+        user = db.verify_settings_user("admin", "INXCAPI")
+
+        assert user is not None
+        assert user["username"] == "admin"
+        assert user["is_admin"] is True
+        assert user["can_manage_accounts"] is True
+        assert db.verify_settings_user("admin", "wrong") is None
+
+    def test_config_history_records_changed_by(self, tmp_path):
+        db = _make_db(tmp_path)
+        assert db.update_config_param(
+            "sample_threshold",
+            0.7,
+            "測試修改",
+            changed_by="operator01",
+        )
+
+        history = db.get_config_change_history("sample_threshold", limit=1)
+
+        assert history[0]["changed_by"] == "operator01"
+
+    def test_non_admin_account_crud(self, tmp_path):
+        db = _make_db(tmp_path)
+
+        created = db.create_settings_user("operator01", "pw1")
+        assert created["is_admin"] is False
+        assert db.verify_settings_user("operator01", "pw1") is not None
+
+        updated = db.update_settings_user(created["id"], username="operator02", password="pw2")
+        assert updated["username"] == "operator02"
+        assert db.verify_settings_user("operator01", "pw1") is None
+        assert db.verify_settings_user("operator02", "pw2") is not None
+
+        assert db.delete_settings_user(created["id"]) is True
+        assert db.verify_settings_user("operator02", "pw2") is None
+
+
 class TestConfigParamDefaults:
     def test_image_abnormal_threshold_migration_preserves_manual_values(self, tmp_path):
         db = _make_db(tmp_path)

@@ -542,6 +542,99 @@
         border-radius: 4px;
     }
 
+    .history-user {
+        font-family: 'Fira Code', monospace;
+        font-size: 0.78rem;
+        color: #86efac;
+        background: rgba(34, 197, 94, 0.13);
+        padding: 2px 8px;
+        border-radius: 4px;
+    }
+
+    .settings-user-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        background: rgba(15, 23, 42, 0.72);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin-bottom: 16px;
+    }
+
+    .settings-user-bar .user-name {
+        color: #e2e8f0;
+        font-family: 'Fira Code', monospace;
+        font-weight: 700;
+    }
+
+    .settings-user-bar .user-role {
+        display: inline-flex;
+        margin-left: 8px;
+        padding: 2px 8px;
+        border-radius: 4px;
+        background: rgba(59, 130, 246, 0.16);
+        color: #93c5fd;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .settings-logout-btn,
+    .account-btn {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: #0f172a;
+        color: var(--text);
+        cursor: pointer;
+        font: inherit;
+        font-size: 0.84rem;
+        padding: 7px 12px;
+    }
+
+    .settings-logout-btn:hover,
+    .account-btn:hover {
+        border-color: #60a5fa;
+        color: #bfdbfe;
+    }
+
+    .account-btn.primary {
+        background: #2563eb;
+        border-color: #2563eb;
+        color: #fff;
+    }
+
+    .account-btn.danger {
+        color: #fca5a5;
+        border-color: rgba(239, 68, 68, 0.45);
+    }
+
+    .account-btn:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
+    }
+
+    .account-input {
+        width: 100%;
+        background: #0f172a;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        font: inherit;
+        font-size: 0.84rem;
+    }
+
+    .account-table-wrap {
+        padding: 16px;
+        overflow-x: auto;
+    }
+
+    .account-table {
+        min-width: 760px;
+        font-size: 0.84rem;
+    }
+
     .history-reason {
         font-size: 0.82rem;
         color: var(--text);
@@ -1602,6 +1695,17 @@
 {% block content %}
 <h1 class="page-title">⚙ 參數設定管理</h1>
 
+<div class="settings-user-bar">
+    <div>
+        目前登入帳號：
+        <span class="user-name">{{ settings_user.username if settings_user else '' }}</span>
+        {% if settings_user and settings_user.is_admin %}
+        <span class="user-role">admin</span>
+        {% endif %}
+    </div>
+    <button class="settings-logout-btn" onclick="logoutSettings()">登出</button>
+</div>
+
 <!-- Reload Bar -->
 <div class="reload-bar">
     <div class="info">
@@ -1848,7 +1952,6 @@
 <script>
     // ── State ──
     let allParams = [];
-    const INFERENCE_PARAMS = ['threshold_mapping', 'model_mapping', 'anomaly_threshold'];
     const PATCHCORE_PARAMS = ['patchcore_filter_enabled', 'patchcore_blur_sigma', 'patchcore_min_area', 'patchcore_score_metric'];
     const DUST_PARAMS = [
         'dust_brightness_threshold', 'dust_area_min', 'dust_area_max',
@@ -1935,9 +2038,10 @@
         ['black_dot', '黑點', 'black'],
         ['white_dot', '白點', 'white'],
     ];
+    const SETTINGS_USER = {{ settings_user|tojson }};
 
     // ── Init ──
-    let currentTab = 'inference';
+    let currentTab = 'patchcore';
     let withinSpecRules = null;
     let withinSpecRulesSource = '';
     let currentWithinSpecMachine = '';
@@ -1945,6 +2049,7 @@
     let autoSwitchRules = [];
     let autoSwitchHistory = [];
     let autoSwitchActiveBundleId = null;
+    let settingsUsers = [];
 
     window.switchTab = function (tabId) {
         currentTab = tabId;
@@ -1965,6 +2070,9 @@
         loadSettings();
         loadHistory();
         loadAutoModelSwitch();
+        if (SETTINGS_USER && SETTINGS_USER.can_manage_accounts) {
+            loadSettingsUsers();
+        }
     });
 
     // ── Load Settings ──
@@ -2012,6 +2120,139 @@
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         autoSwitchHistory = data.history || [];
+    }
+
+    async function loadSettingsUsers() {
+        if (!SETTINGS_USER || !SETTINGS_USER.can_manage_accounts) return;
+        try {
+            const res = await fetch('/api/settings/users');
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            settingsUsers = data.users || [];
+            renderSettings();
+        } catch (e) {
+            showToast(`❌ 帳號列表載入失敗: ${e.message}`, 'error');
+        }
+    }
+
+    async function logoutSettings() {
+        try {
+            await fetch('/api/settings/logout', { method: 'POST' });
+        } finally {
+            window.location.href = '/settings/login';
+        }
+    }
+
+    async function saveSettingsUserRequest(url, payload) {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || '帳號操作失敗');
+        return data;
+    }
+
+    async function createSettingsUser() {
+        const usernameEl = document.getElementById('account-new-username');
+        const passwordEl = document.getElementById('account-new-password');
+        try {
+            await saveSettingsUserRequest('/api/settings/users/create', {
+                username: usernameEl.value.trim(),
+                password: passwordEl.value,
+            });
+            usernameEl.value = '';
+            passwordEl.value = '';
+            showToast('✅ 帳號已新增', 'success');
+            await loadSettingsUsers();
+        } catch (e) {
+            showToast(`❌ ${e.message}`, 'error');
+        }
+    }
+
+    async function updateSettingsUser(userId) {
+        const usernameEl = document.getElementById(`account-username-${userId}`);
+        const passwordEl = document.getElementById(`account-password-${userId}`);
+        try {
+            await saveSettingsUserRequest('/api/settings/users/update', {
+                id: userId,
+                username: usernameEl.value.trim(),
+                password: passwordEl.value,
+            });
+            passwordEl.value = '';
+            showToast('✅ 帳號已更新', 'success');
+            await loadSettingsUsers();
+        } catch (e) {
+            showToast(`❌ ${e.message}`, 'error');
+        }
+    }
+
+    async function deleteSettingsUser(userId, username) {
+        if (!confirm(`確定刪除帳號 ${username}？`)) return;
+        try {
+            await saveSettingsUserRequest('/api/settings/users/delete', { id: userId });
+            showToast('✅ 帳號已刪除', 'success');
+            await loadSettingsUsers();
+        } catch (e) {
+            showToast(`❌ ${e.message}`, 'error');
+        }
+    }
+
+    function renderAccountsPane() {
+        if (!SETTINGS_USER || !SETTINGS_USER.can_manage_accounts) return '';
+        const rows = settingsUsers.length ? settingsUsers.map(u => {
+            const isAdmin = !!u.is_admin;
+            const fixedAdmin = u.username === 'admin';
+            return `
+                <tr>
+                    <td>${escapeHtml(String(u.id))}</td>
+                    <td>
+                        <input id="account-username-${u.id}" class="account-input" value="${escapeAttr(u.username)}" ${fixedAdmin ? 'disabled' : ''}>
+                    </td>
+                    <td>${isAdmin ? 'admin / 帳號管理' : '可修改參數'}</td>
+                    <td><input id="account-password-${u.id}" class="account-input" type="password" placeholder="留空不變"></td>
+                    <td class="auto-switch-muted">${escapeHtml(u.updated_at || '')}</td>
+                    <td>
+                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                            <button class="account-btn primary" onclick="updateSettingsUser(${u.id})">儲存</button>
+                            <button class="account-btn danger" ${isAdmin ? 'disabled' : ''} onclick='deleteSettingsUser(${u.id}, ${JSON.stringify(u.username)})'>刪除</button>
+                        </div>
+                    </td>
+                </tr>
+            `;
+        }).join('') : '<tr><td colspan="6" class="auto-switch-muted">尚無帳號資料</td></tr>';
+        return `
+            <div id="pane-accounts" class="settings-tab-pane-block ${currentTab === 'accounts' ? 'active' : ''}" style="grid-column:1/-1;">
+                <div class="settings-section" style="border-left:3px solid #22c55e;">
+                    <div class="settings-section-header">
+                        <div class="icon" style="background:rgba(34,197,94,.18);color:#86efac;">👤</div>
+                        <span>帳號管理</span>
+                        <button class="account-btn" style="margin-left:auto;" onclick="loadSettingsUsers()">重新整理</button>
+                    </div>
+                    <div style="display:grid; grid-template-columns:minmax(160px,1fr) minmax(160px,1fr) auto; gap:10px; padding:16px; border-bottom:1px solid var(--border);">
+                        <input id="account-new-username" class="account-input" placeholder="新帳號">
+                        <input id="account-new-password" class="account-input" type="password" placeholder="密碼">
+                        <button class="account-btn primary" onclick="createSettingsUser()">新增帳號</button>
+                    </div>
+                    <div class="account-table-wrap">
+                        <table class="account-table">
+                            <thead>
+                                <tr>
+                                    <th style="width:72px;">ID</th>
+                                    <th>帳號</th>
+                                    <th style="width:150px;">權限</th>
+                                    <th>新密碼</th>
+                                    <th style="width:160px;">更新時間</th>
+                                    <th style="width:150px;">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        `;
     }
 
     function renderAutoSwitchBundleOptions(selectedId) {
@@ -2221,7 +2462,6 @@
 
     function renderSettings() {
         const grid = document.getElementById('settings-grid');
-        const inferenceParams = INFERENCE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const patchcoreParams = PATCHCORE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const dustParams = DUST_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const cvEdgeParams = CV_EDGE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
@@ -2321,10 +2561,24 @@
         // 因此 fusion 下「標示但不鎖定」，讓使用者自行決定是否啟用四邊灰塵過濾。
         const cvDustFilterInfoByFusion = aoiCoordEnabled && inspectorVal === 'fusion';
         const cvDustFilterInfoReason = 'fusion 下此開關對 fusion 產出的 aoi_edge defect 不生效（已由 fusion 內部統一處理）；四邊 (left/right/top/bottom) 檢測仍受此開關影響';
+        const visibleTabs = [
+            patchcoreParams.length > 0 ? 'patchcore' : null,
+            'dust',
+            'cv-edge',
+            'aoi-coord',
+            'image-abnormal',
+            'report-result',
+            'within-spec',
+            'auto-model-switch',
+            SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? 'accounts' : null,
+            'history',
+        ].filter(Boolean);
+        if (!visibleTabs.includes(currentTab)) {
+            currentTab = visibleTabs[0] || 'history';
+        }
 
         const tabsContainer = document.getElementById('settings-tabs-container');
         tabsContainer.innerHTML = `
-            <button class="settings-tab-btn ${currentTab === 'inference' ? 'active' : ''}" data-target="inference" onclick="switchTab('inference')">⚡ 推論設定</button>
             ${patchcoreParams.length > 0 ? `<button class="settings-tab-btn ${currentTab === 'patchcore' ? 'active' : ''}" data-target="patchcore" onclick="switchTab('patchcore')">🔍 PatchCore</button>` : ''}
             <button class="settings-tab-btn ${currentTab === 'dust' ? 'active' : ''}" data-target="dust" onclick="switchTab('dust')">🧹 灰塵偵測</button>
             <button class="settings-tab-btn ${currentTab === 'cv-edge' ? 'active' : ''}" data-target="cv-edge" onclick="switchTab('cv-edge')">📐 CV 邊緣檢測</button>
@@ -2333,30 +2587,11 @@
             <button class="settings-tab-btn ${currentTab === 'report-result' ? 'active' : ''}" data-target="report-result" onclick="switchTab('report-result')">📤 回報結果設定</button>
             <button class="settings-tab-btn ${currentTab === 'within-spec' ? 'active' : ''}" data-target="within-spec" onclick="switchTab('within-spec')">📏 規格內判定</button>
             <button class="settings-tab-btn ${currentTab === 'auto-model-switch' ? 'active' : ''}" data-target="auto-model-switch" onclick="switchTab('auto-model-switch')">↔ 自動切換模型</button>
+            ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'accounts' ? 'active' : ''}" data-target="accounts" onclick="switchTab('accounts')">👤 帳號管理</button>` : ''}
             <button class="settings-tab-btn ${currentTab === 'history' ? 'active' : ''}" data-target="history" onclick="switchTab('history')">📋 修改紀錄</button>
         `;
 
         grid.innerHTML = `
-            <div id="pane-inference" class="settings-tab-pane ${currentTab === 'inference' ? 'active' : ''}">
-                <div class="settings-section section-inference">
-                    <div class="settings-section-header">
-                        <div class="icon">⚡</div>
-                        <span>推論設定</span>
-                    </div>
-                    ${window.isNewArchitecture ? `
-                    <div style="margin: 12px 16px; padding: 12px 14px; border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.08); border-radius: 6px; font-size: 0.85rem; line-height: 1.5; color: #bae6fd;">
-                        <div style="font-weight: 600; color: #7dd3fc; margin-bottom: 4px;">ℹ️ 新架構 (C-10) 模型</div>
-                        <code style="background: rgba(0,0,0,0.3); padding: 1px 6px; border-radius: 3px; color: #fde68a;">threshold_mapping</code> 與
-                        <code style="background: rgba(0,0,0,0.3); padding: 1px 6px; border-radius: 3px; color: #fde68a;">model_mapping</code>
-                        由 bundle 內的 <code style="color: #c4b5fd;">machine_config.yaml</code> 直接管理，不從這裡修改。
-                        <div style="margin-top: 6px; color: #94a3b8;">請到
-                            <a href="/models" style="color: #7dd3fc; text-decoration: underline;">/models</a> 介面調整 threshold，
-                            或直接編輯 <code style="color: #fbbf24;">model/&lt;bundle&gt;/machine_config.yaml</code> 後重啟。
-                        </div>
-                    </div>` : ''}
-                    ${inferenceParams.map(p => paramRow(p)).join('')}
-                </div>
-            </div>
             ${patchcoreParams.length > 0 ? `
             <div id="pane-patchcore" class="settings-tab-pane ${currentTab === 'patchcore' ? 'active' : ''}">
                 <div class="settings-section section-patchcore" style="border-left: 3px solid #8b5cf6;">
@@ -3192,6 +3427,7 @@
                 </div>
             </div>
             ${renderAutoModelSwitchPane()}
+            ${renderAccountsPane()}
         `;
     }
 
@@ -3594,6 +3830,7 @@
                         <div class="history-meta">
                             <span class="history-time">${escapeHtml(h.changed_at)}</span>
                             <span class="history-param">${escapeHtml(h.param_name)}</span>
+                            <span class="history-user">${escapeHtml(h.changed_by || 'system')}</span>
                         </div>
                         <div class="history-reason">${escapeHtml(h.change_reason || '（未填寫原因）')}</div>
                         <div class="history-diff">

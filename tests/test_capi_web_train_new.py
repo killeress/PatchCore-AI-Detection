@@ -1107,6 +1107,44 @@ def test_handle_settings_reload_new_arch_does_not_rebuild_inferencer(monkeypatch
     assert "模型未重載" in body["message"]
 
 
+def test_settings_update_records_logged_in_user(tmp_path, monkeypatch):
+    from capi_database import CAPIDatabase
+    from capi_web import CAPIWebHandler
+
+    db = CAPIDatabase(str(tmp_path / "settings.db"))
+    monkeypatch.setattr(CAPIWebHandler, "inferencer", None)
+    monkeypatch.setattr(CAPIWebHandler, "_settings_sessions", {})
+    monkeypatch.setattr(CAPIWebHandler, "_settings_session_lock", threading.Lock())
+
+    h = _make_handler(db, "/api/settings/update")
+    h.inferencer = None
+    h._capi_server_instance = None
+    user = db.verify_settings_user("admin", "INXCAPI")
+    token = h._create_settings_session(user)
+    payload = json.dumps({
+        "param_name": "unit_test_param",
+        "new_value": 123,
+        "reason": "unit test",
+    }).encode("utf-8")
+    h.rfile = io.BytesIO(payload)
+
+    def get_header(name, default=None):
+        if name == "Content-Length":
+            return str(len(payload))
+        if name == "Cookie":
+            return f"{h._settings_session_cookie}={token}"
+        return default
+
+    h.headers.get = MagicMock(side_effect=get_header)
+
+    h._handle_api_settings_update()
+
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["success"] is True
+    history = db.get_config_change_history("unit_test_param", limit=1)
+    assert history[0]["changed_by"] == "admin"
+
+
 def test_handle_train_new_preprocess_pipeline_preview_uses_panel_folder(tmp_path, monkeypatch):
     from capi_web import CAPIWebHandler
 

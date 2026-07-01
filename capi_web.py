@@ -16,10 +16,12 @@ import tempfile
 import json
 import hashlib
 import html
+import secrets
 import urllib.parse
 import mimetypes
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from http.cookies import SimpleCookie
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -2281,6 +2283,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     _debug_heatmap_dir = None  # Debug 推論暫存目錄
     _capi_server_instance = None  # CAPIServer 實例 (用於 hot-reload)
     _log_file = None  # 日誌檔案路徑 (用於 Log Viewer)
+    _settings_session_cookie = "capi_settings_session"
+    _settings_session_ttl_seconds = 12 * 60 * 60
+    _settings_sessions: Dict[str, Dict[str, Any]] = {}
+    _settings_session_lock: threading.Lock = threading.Lock()
     # ── 訓練 wizard 多 job 註冊表（由 create_web_server 完整初始化） ─────────
     # _train_new_jobs key = job_id；value = per-job runtime dict，欄位：
     #   thread:        Thread (preprocess supervisor / training supervisor)
@@ -2547,19 +2553,36 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_status()
             elif path == "/api/version":
                 self._handle_api_version()
+            elif path == "/settings/login":
+                self._handle_settings_login_page(path)
+            elif path == "/settings/logout":
+                self._handle_settings_logout()
+            elif path == "/api/settings/me":
+                user = self._require_settings_user(api=True)
+                if user:
+                    self._send_json({"user": user})
+            elif path == "/api/settings/users":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_settings_users()
             elif path == "/settings":
-                self._handle_settings_page(path)
+                if self._require_settings_user(next_path=path):
+                    self._handle_settings_page(path)
             elif path == "/settings_v2":
-                self._handle_settings_v2_page(path)
+                if self._require_settings_user(next_path=path):
+                    self._handle_settings_v2_page(path)
             elif path == "/api/settings":
-                self._handle_api_settings()
+                if self._require_settings_user(api=True):
+                    self._handle_api_settings()
             elif path == "/api/settings/history":
-                self._handle_api_settings_history(query)
+                if self._require_settings_user(api=True):
+                    self._handle_api_settings_history(query)
             elif path == "/api/auto-model-switch":
-                self._handle_auto_model_switch_api()
+                if self._require_settings_user(api=True):
+                    self._handle_auto_model_switch_api()
                 return
             elif path == "/api/auto-model-switch/history":
-                self._handle_auto_model_switch_history_api(query)
+                if self._require_settings_user(api=True):
+                    self._handle_auto_model_switch_history_api(query)
                 return
             elif path.startswith("/heatmaps/"):
                 self._handle_static_file(path)
@@ -2689,15 +2712,32 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_scratch_review_unmark()
             elif path == "/api/scratch-review/export":
                 self._handle_scratch_review_export()
+            elif path == "/api/settings/login":
+                self._handle_api_settings_login()
+            elif path == "/api/settings/logout":
+                self._handle_api_settings_logout()
+            elif path == "/api/settings/users/create":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_settings_user_create()
+            elif path == "/api/settings/users/update":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_settings_user_update()
+            elif path == "/api/settings/users/delete":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_settings_user_delete()
             elif path == "/api/settings/update":
-                self._handle_api_settings_update()
+                if self._require_settings_user(api=True):
+                    self._handle_api_settings_update()
             elif path == "/api/settings/reload":
-                self._handle_api_settings_reload()
+                if self._require_settings_user(api=True):
+                    self._handle_api_settings_reload()
             elif path == "/api/auto-model-switch/rules/upsert":
-                self._handle_auto_model_switch_rule_upsert()
+                if self._require_settings_user(api=True):
+                    self._handle_auto_model_switch_rule_upsert()
                 return
             elif path == "/api/auto-model-switch/rules/delete":
-                self._handle_auto_model_switch_rule_delete()
+                if self._require_settings_user(api=True):
+                    self._handle_auto_model_switch_rule_delete()
                 return
             elif path.startswith("/api/record/") and path.endswith("/rerun"):
                 record_id_str = path.split("/api/record/")[1].split("/rerun")[0]
@@ -2788,21 +2828,123 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
-    def _send_response(self, code: int, content: str, content_type: str = "text/html; charset=utf-8"):
+    def _send_response(
+        self,
+        code: int,
+        content: str,
+        content_type: str = "text/html; charset=utf-8",
+        headers: Optional[Dict[str, str]] = None,
+    ):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content.encode("utf-8"))))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(content.encode("utf-8"))
 
-    def _send_json(self, data, status=200):
+    def _send_json(self, data, status=200, headers: Optional[Dict[str, str]] = None):
         content = json.dumps(data, ensure_ascii=False, indent=2, default=str)
         content_bytes = content.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(content_bytes)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(content_bytes)
+
+    def _redirect(self, location: str, headers: Optional[Dict[str, str]] = None):
+        body = f"<html><body>Redirecting to {html.escape(location)}</body></html>"
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body.encode("utf-8"))))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body.encode("utf-8"))
+
+    def _settings_cookie_token(self) -> str:
+        raw_cookie = self.headers.get("Cookie", "") if self.headers else ""
+        try:
+            cookie = SimpleCookie(raw_cookie)
+            morsel = cookie.get(self._settings_session_cookie)
+            return morsel.value if morsel else ""
+        except Exception:
+            return ""
+
+    def _settings_cookie_header(self, token: str) -> str:
+        return (
+            f"{self._settings_session_cookie}={token}; Path=/; HttpOnly; "
+            f"SameSite=Lax; Max-Age={self._settings_session_ttl_seconds}"
+        )
+
+    def _settings_clear_cookie_header(self) -> str:
+        return (
+            f"{self._settings_session_cookie}=; Path=/; HttpOnly; "
+            "SameSite=Lax; Max-Age=0"
+        )
+
+    @staticmethod
+    def _safe_settings_next_path(next_path: str) -> str:
+        next_path = str(next_path or "/settings")
+        if not next_path.startswith("/") or next_path.startswith("//"):
+            return "/settings"
+        return next_path
+
+    def _current_settings_user(self) -> Optional[Dict[str, Any]]:
+        token = self._settings_cookie_token()
+        if not token:
+            return None
+        now = datetime.now()
+        with self._settings_session_lock:
+            session = self._settings_sessions.get(token)
+            if not session or session.get("expires_at", now) < now:
+                self._settings_sessions.pop(token, None)
+                return None
+            username = session.get("username", "")
+            user = self.db.get_settings_user_by_username(username) if self.db else None
+            if not user:
+                self._settings_sessions.pop(token, None)
+                return None
+            session["expires_at"] = now + timedelta(seconds=self._settings_session_ttl_seconds)
+            return user
+
+    def _create_settings_session(self, user: Dict[str, Any]) -> str:
+        token = secrets.token_urlsafe(32)
+        with self._settings_session_lock:
+            self._settings_sessions[token] = {
+                "username": user["username"],
+                "expires_at": datetime.now() + timedelta(seconds=self._settings_session_ttl_seconds),
+            }
+        return token
+
+    def _drop_settings_session(self) -> None:
+        token = self._settings_cookie_token()
+        if token:
+            with self._settings_session_lock:
+                self._settings_sessions.pop(token, None)
+
+    def _require_settings_user(
+        self,
+        *,
+        api: bool = False,
+        admin: bool = False,
+        next_path: str = "/settings",
+    ) -> Optional[Dict[str, Any]]:
+        user = self._current_settings_user()
+        if not user:
+            if api:
+                self._send_json({"error": "請先登入參數設定"}, status=401)
+            else:
+                next_qs = urllib.parse.quote(next_path or "/settings", safe="")
+                self._redirect(f"/settings/login?next={next_qs}")
+            return None
+        if admin and not user.get("can_manage_accounts"):
+            self._send_json({"error": "只有 admin 可管理帳號"}, status=403)
+            return None
+        return user
 
     def _send_404(self, path=""):
         self._send_error(404, "Page Not Found", path)
@@ -6948,10 +7090,121 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     # ── 設定管理功能 ─────────────────────────────────────
 
+    def _handle_settings_login_page(self, path: str):
+        """參數設定登入頁。"""
+        if self._current_settings_user():
+            self._redirect("/settings")
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query)
+        next_path = self._safe_settings_next_path(query.get("next", ["/settings"])[0])
+        template = self.jinja_env.get_template("settings_login.html")
+        html = template.render(request_path=path, next_path=next_path)
+        self._send_response(200, html)
+
+    def _handle_settings_logout(self):
+        self._drop_settings_session()
+        self._redirect(
+            "/settings/login",
+            headers={"Set-Cookie": self._settings_clear_cookie_header()},
+        )
+
+    def _handle_api_settings_login(self):
+        try:
+            data = self._read_json_body()
+            if data is None:
+                return
+            username = str(data.get("username", "") or "").strip()
+            password = str(data.get("password", "") or "")
+            next_path = self._safe_settings_next_path(data.get("next", "") or "/settings")
+            user = self.db.verify_settings_user(username, password) if self.db else None
+            if not user:
+                self._send_json({"error": "帳號或密碼錯誤"}, status=401)
+                return
+            token = self._create_settings_session(user)
+            self._send_json(
+                {"success": True, "user": user, "redirect": next_path or "/settings"},
+                headers={"Set-Cookie": self._settings_cookie_header(token)},
+            )
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+
+    def _handle_api_settings_logout(self):
+        self._drop_settings_session()
+        self._send_json(
+            {"success": True},
+            headers={"Set-Cookie": self._settings_clear_cookie_header()},
+        )
+
+    def _handle_api_settings_users(self):
+        users = self.db.list_settings_users() if self.db else []
+        self._send_json({"users": users})
+
+    def _handle_api_settings_user_create(self):
+        try:
+            data = self._read_json_body()
+            if data is None:
+                return
+            user = self.db.create_settings_user(
+                data.get("username", ""),
+                data.get("password", ""),
+                is_admin=False,
+            )
+            self._send_json({"success": True, "user": user})
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+
+    def _handle_api_settings_user_update(self):
+        try:
+            data = self._read_json_body()
+            if data is None:
+                return
+            user_id = int(data.get("id") or 0)
+            if not user_id:
+                self._send_json({"error": "缺少帳號 id"}, status=400)
+                return
+            password = data.get("password")
+            user = self.db.update_settings_user(
+                user_id,
+                username=data.get("username"),
+                password=password if password not in (None, "") else None,
+            )
+            if not user:
+                self._send_json({"error": "找不到帳號"}, status=404)
+                return
+            self._send_json({"success": True, "user": user})
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+
+    def _handle_api_settings_user_delete(self):
+        try:
+            data = self._read_json_body()
+            if data is None:
+                return
+            user_id = int(data.get("id") or 0)
+            if not user_id:
+                self._send_json({"error": "缺少帳號 id"}, status=400)
+                return
+            if not self.db.delete_settings_user(user_id):
+                self._send_json({"error": "找不到帳號"}, status=404)
+                return
+            self._send_json({"success": True})
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+
     def _handle_settings_page(self, path: str):
         """設定管理頁面 (舊版)"""
         template = self.jinja_env.get_template("settings.html")
-        html = template.render(request_path=path)
+        html = template.render(
+            request_path=path,
+            settings_user=self._current_settings_user(),
+        )
         self._send_response(200, html)
 
     def _handle_settings_v2_page(self, path: str):
@@ -6997,6 +7250,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "params": params,
                 "model_resolution_map": resolution_map,
                 "is_new_architecture": is_new_arch,
+                "user": self._current_settings_user(),
             })
         except Exception as e:
             self._send_json({"error": str(e)})
@@ -7039,7 +7293,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     })
                     return
 
-            success = self.db.update_config_param(param_name, new_value, reason)
+            user = self._current_settings_user() or {}
+            success = self.db.update_config_param(
+                param_name,
+                new_value,
+                reason,
+                changed_by=user.get("username", ""),
+            )
             if success:
                 # Hot-reload 1：把 DB 同步到所有 inferencer.config 屬性（包含單機與
                 # 多機新架構 inferencers）。apply_db_overrides 純 setattr、不重載
@@ -11517,6 +11777,8 @@ def create_web_server(
         "lock": threading.Lock(),
         "job": None,
     }
+    CAPIWebHandler._settings_sessions = {}
+    CAPIWebHandler._settings_session_lock = threading.Lock()
     CAPIWebHandler._train_new_jobs = {}
     CAPIWebHandler._train_new_jobs_lock = threading.Lock()
     CAPIWebHandler._train_slot = {
