@@ -701,7 +701,7 @@ def test_bomb_postprocess_skips_b0f_aoi_track_only_tile(tmp_path):
     assert ng_tile.bomb_defect_code == "B01"
 
 
-def test_client_point_bomb_matches_only_nearest_aoi_tile(tmp_path):
+def test_client_point_bomb_can_match_multiple_aoi_tiles_within_tolerance(tmp_path):
     from capi_inference import CAPIInferencer, ImageResult, TileInfo
 
     cfg = _make_config(tmp_path)
@@ -710,7 +710,7 @@ def test_client_point_bomb_matches_only_nearest_aoi_tile(tmp_path):
 
     far_tile = TileInfo(
         tile_id=1,
-        x=100,
+        x=400,
         y=100,
         width=512,
         height=512,
@@ -724,8 +724,8 @@ def test_client_point_bomb_matches_only_nearest_aoi_tile(tmp_path):
 
     near_tile = TileInfo(
         tile_id=2,
-        x=200,
-        y=200,
+        x=400,
+        y=100,
         width=512,
         height=512,
         image=np.zeros((512, 512), dtype=np.uint8),
@@ -737,7 +737,7 @@ def test_client_point_bomb_matches_only_nearest_aoi_tile(tmp_path):
     near_tile.aoi_product_y = 310
 
     anomaly_map = np.zeros((512, 512), dtype=np.float32)
-    anomaly_map[256, 256] = 1.0
+    anomaly_map[209, 256] = 1.0
     result = ImageResult(
         image_path=Path("B0F00000_test.png"),
         image_size=(2000, 1000),
@@ -758,8 +758,8 @@ def test_client_point_bomb_matches_only_nearest_aoi_tile(tmp_path):
 
     inferencer._apply_bomb_postprocess([result], bomb_info, (2000, 1000))
 
-    assert far_tile.is_bomb is False
-    assert far_tile.bomb_defect_code == ""
+    assert far_tile.is_bomb is True
+    assert far_tile.bomb_defect_code == "UNKNOWN"
     assert near_tile.is_bomb is True
     assert near_tile.bomb_defect_code == "UNKNOWN"
 

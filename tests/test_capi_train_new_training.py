@@ -448,6 +448,7 @@ def test_write_manifest_yaml(tmp_path):
     assert y["image_abnormal_w0f00000_mean_upper"] == 90
     assert y["image_abnormal_b0f00000_mean_lower"] == 0
     assert y["image_abnormal_b0f00000_mean_upper"] == 13
+    assert y["bomb_match_tolerance"] == 20
     assert y["image_preprocess_pipeline"][0]["method"] == "bilateral"
     # Scratch classifier 設定要寫進去，否則新架構 server 啟動時 scratch 預設空路徑會撞網路。
     assert y["scratch_classifier_enabled"] is True
