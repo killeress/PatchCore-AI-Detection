@@ -2555,6 +2555,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_settings()
             elif path == "/api/settings/history":
                 self._handle_api_settings_history(query)
+            elif path == "/api/auto-model-switch":
+                self._handle_auto_model_switch_api()
+                return
+            elif path == "/api/auto-model-switch/history":
+                self._handle_auto_model_switch_history_api(query)
+                return
             elif path.startswith("/heatmaps/"):
                 self._handle_static_file(path)
             elif path.startswith("/debug/heatmaps/"):
@@ -2687,6 +2693,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_settings_update()
             elif path == "/api/settings/reload":
                 self._handle_api_settings_reload()
+            elif path == "/api/auto-model-switch/rules/upsert":
+                self._handle_auto_model_switch_rule_upsert()
+                return
+            elif path == "/api/auto-model-switch/rules/delete":
+                self._handle_auto_model_switch_rule_delete()
+                return
             elif path.startswith("/api/record/") and path.endswith("/rerun"):
                 record_id_str = path.split("/api/record/")[1].split("/rerun")[0]
                 self._handle_rerun_trigger(record_id_str)
@@ -7089,6 +7101,100 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"history": history})
         except Exception as e:
             self._send_json({"error": str(e)})
+
+    @staticmethod
+    def _bundle_payload(bundle: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(bundle)
+        payload["label"] = Path(str(bundle.get("bundle_path", "") or "")).name or str(bundle.get("machine_id", "") or "")
+        return payload
+
+    def _handle_auto_model_switch_api(self):
+        """GET /api/auto-model-switch"""
+        try:
+            db = self._capi_server_instance.database
+            bundles = [self._bundle_payload(b) for b in db.list_model_bundles()]
+            rules = [dict(r) for r in db.list_auto_model_switch_rules()]
+            for rule in rules:
+                rule["bundle_label"] = Path(str(rule.get("bundle_path", "") or "")).name
+            active = db.get_active_model_bundle()
+            self._send_json({
+                "bundles": bundles,
+                "rules": rules,
+                "active_bundle_id": active["id"] if active else None,
+            })
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+
+    def _handle_auto_model_switch_history_api(self, query: dict):
+        """GET /api/auto-model-switch/history"""
+        try:
+            db = self._capi_server_instance.database
+            limit = max(1, min(500, int(query.get("limit", [100])[0])))
+            series_prefix = (query.get("series_prefix", [""])[0] or "").strip().upper()
+            status = (query.get("status", [""])[0] or "").strip().lower()
+            history = db.list_auto_model_switch_history(
+                limit=limit,
+                series_prefix=series_prefix,
+                status=status,
+            )
+            self._send_json({"history": history})
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+
+    def _handle_auto_model_switch_rule_upsert(self):
+        """POST /api/auto-model-switch/rules/upsert"""
+        try:
+            from capi_auto_model_switch import DEFAULT_SERIES_PREFIX, normalize_series_prefix
+
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            rule_id = payload.get("id")
+            series_prefix = str(payload.get("series_prefix", "") or "").strip()
+            if payload.get("is_default"):
+                series_prefix = DEFAULT_SERIES_PREFIX
+            series_prefix = normalize_series_prefix(series_prefix)
+            bundle_id = int(payload.get("bundle_id") or 0)
+            notes = str(payload.get("notes", "") or "")
+
+            db = self._capi_server_instance.database
+            rule = db.upsert_auto_model_switch_rule(
+                series_prefix=series_prefix,
+                bundle_id=bundle_id,
+                notes=notes,
+                rule_id=int(rule_id) if rule_id else None,
+            )
+            rule["bundle_label"] = Path(str(rule.get("bundle_path", "") or "")).name
+            self._send_json({"success": True, "rule": rule})
+        except json.JSONDecodeError:
+            self._send_json({"error": "無效的 JSON 格式"}, status=400)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+
+    def _handle_auto_model_switch_rule_delete(self):
+        """POST /api/auto-model-switch/rules/delete"""
+        try:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            rule_id = int(payload.get("id") or 0)
+            if not rule_id:
+                self._send_json({"error": "缺少規則 id"}, status=400)
+                return
+            db = self._capi_server_instance.database
+            deleted = db.delete_auto_model_switch_rule(rule_id)
+            if not deleted:
+                self._send_json({"error": "找不到規則"}, status=404)
+                return
+            self._send_json({"success": True})
+        except json.JSONDecodeError:
+            self._send_json({"error": "無效的 JSON 格式"}, status=400)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
 
     def _handle_api_settings_reload(self):
         """API: 重新載入設定 (Hot-reload inferencer)"""

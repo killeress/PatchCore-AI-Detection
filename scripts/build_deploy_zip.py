@@ -31,6 +31,7 @@ GIT_SAFE_DIR = PROJECT_ROOT.as_posix()
 
 CODE_FILES = [
     "capi_version.py",
+    "capi_auto_model_switch.py",
     "capi_config.py",
     "capi_database.py",
     "capi_inference.py",

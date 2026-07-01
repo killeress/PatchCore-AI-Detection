@@ -333,6 +333,37 @@ class CAPIDatabase:
                     notes             TEXT
                 );
 
+                -- Client 機種前 8 碼 → 模型 bundle 自動切換規則
+                CREATE TABLE IF NOT EXISTS auto_model_switch_rules (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    series_prefix TEXT NOT NULL UNIQUE,
+                    bundle_id     INTEGER NOT NULL,
+                    notes         TEXT DEFAULT '',
+                    created_at    TEXT DEFAULT (datetime('now', 'localtime')),
+                    updated_at    TEXT DEFAULT (datetime('now', 'localtime')),
+                    FOREIGN KEY (bundle_id) REFERENCES model_registry(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_auto_model_switch_rules_series
+                    ON auto_model_switch_rules(series_prefix);
+
+                CREATE TABLE IF NOT EXISTS auto_model_switch_history (
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    checked_at            TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                    requested_model_id    TEXT NOT NULL DEFAULT '',
+                    series_prefix         TEXT NOT NULL DEFAULT '',
+                    previous_bundle_id    INTEGER,
+                    previous_bundle_label TEXT DEFAULT '',
+                    target_bundle_id      INTEGER,
+                    target_bundle_label   TEXT DEFAULT '',
+                    action                TEXT NOT NULL,
+                    status                TEXT NOT NULL,
+                    message               TEXT DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_auto_model_switch_history_checked
+                    ON auto_model_switch_history(checked_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_auto_model_switch_history_series
+                    ON auto_model_switch_history(series_prefix, checked_at DESC);
+
                 -- Wizard step 3 review 用暫存 tile pool (zone 允許 NULL 以支援 NG tiles)
                 CREATE TABLE IF NOT EXISTS training_tile_pool (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3238,6 +3269,22 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def get_active_model_bundle(self) -> Optional[Dict]:
+        """取得目前 active bundle；若資料異常有多筆，取最後啟用的一筆。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM model_registry WHERE is_active = 1 ORDER BY id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
+        finally:
+            conn.close()
+
     def get_model_bundle(self, bundle_id: int) -> Optional[Dict]:
         """依 id 查詢單筆 model_registry，找不到回傳 None。"""
         conn = self._get_conn()
@@ -3274,6 +3321,170 @@ class CAPIDatabase:
             )
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def list_auto_model_switch_rules(self) -> List[Dict]:
+        """列出自動切換規則，附帶目前 bundle 顯示欄位。"""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT r.*, b.machine_id, b.bundle_path, b.trained_at, b.is_active
+                     FROM auto_model_switch_rules r
+                     LEFT JOIN model_registry b ON b.id = r.bundle_id
+                    ORDER BY CASE WHEN r.series_prefix = '__DEFAULT__' THEN 0 ELSE 1 END,
+                             r.series_prefix"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_auto_model_switch_rule_by_series(self, series_prefix: str) -> Optional[Dict]:
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM auto_model_switch_rules WHERE series_prefix = ?",
+                (series_prefix,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_default_auto_model_switch_rule(self) -> Optional[Dict]:
+        return self.get_auto_model_switch_rule_by_series("__DEFAULT__")
+
+    def upsert_auto_model_switch_rule(
+        self,
+        series_prefix: str,
+        bundle_id: int,
+        notes: str = "",
+        rule_id: int = None,
+    ) -> Dict:
+        """新增或更新一筆自動切換規則。"""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                bundle = conn.execute(
+                    "SELECT id FROM model_registry WHERE id = ?",
+                    (bundle_id,),
+                ).fetchone()
+                if not bundle:
+                    raise ValueError(f"bundle_id={bundle_id} 不存在")
+
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if rule_id:
+                    cur = conn.execute(
+                        """UPDATE auto_model_switch_rules
+                              SET series_prefix = ?, bundle_id = ?, notes = ?, updated_at = ?
+                            WHERE id = ?""",
+                        (series_prefix, bundle_id, notes or "", now, rule_id),
+                    )
+                    if cur.rowcount == 0:
+                        raise ValueError(f"auto_model_switch_rules id={rule_id} 不存在")
+                    saved_id = rule_id
+                else:
+                    existing = conn.execute(
+                        "SELECT id FROM auto_model_switch_rules WHERE series_prefix = ?",
+                        (series_prefix,),
+                    ).fetchone()
+                    if existing:
+                        saved_id = int(existing["id"])
+                        conn.execute(
+                            """UPDATE auto_model_switch_rules
+                                  SET bundle_id = ?, notes = ?, updated_at = ?
+                                WHERE id = ?""",
+                            (bundle_id, notes or "", now, saved_id),
+                        )
+                    else:
+                        cur = conn.execute(
+                            """INSERT INTO auto_model_switch_rules
+                               (series_prefix, bundle_id, notes, created_at, updated_at)
+                               VALUES (?, ?, ?, ?, ?)""",
+                            (series_prefix, bundle_id, notes or "", now, now),
+                        )
+                        saved_id = cur.lastrowid
+
+                conn.commit()
+                row = conn.execute(
+                    """SELECT r.*, b.machine_id, b.bundle_path, b.trained_at, b.is_active
+                         FROM auto_model_switch_rules r
+                         LEFT JOIN model_registry b ON b.id = r.bundle_id
+                        WHERE r.id = ?""",
+                    (saved_id,),
+                ).fetchone()
+                return dict(row)
+            except sqlite3.IntegrityError as e:
+                conn.rollback()
+                raise ValueError(f"自動切換規則不可重複: {series_prefix}") from e
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def delete_auto_model_switch_rule(self, rule_id: int) -> bool:
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                cur = conn.execute(
+                    "DELETE FROM auto_model_switch_rules WHERE id = ?",
+                    (rule_id,),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def add_auto_model_switch_history(self, entry: Dict) -> int:
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                """INSERT INTO auto_model_switch_history
+                   (requested_model_id, series_prefix, previous_bundle_id,
+                    previous_bundle_label, target_bundle_id, target_bundle_label,
+                    action, status, message)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    entry.get("requested_model_id", ""),
+                    entry.get("series_prefix", ""),
+                    entry.get("previous_bundle_id"),
+                    entry.get("previous_bundle_label", ""),
+                    entry.get("target_bundle_id"),
+                    entry.get("target_bundle_label", ""),
+                    entry.get("action", ""),
+                    entry.get("status", ""),
+                    entry.get("message", ""),
+                ),
+            )
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+    def list_auto_model_switch_history(
+        self,
+        limit: int = 100,
+        series_prefix: str = "",
+        status: str = "",
+    ) -> List[Dict]:
+        sql = "SELECT * FROM auto_model_switch_history"
+        where = []
+        args: List[Any] = []
+        if series_prefix:
+            where.append("series_prefix = ?")
+            args.append(series_prefix)
+        if status:
+            where.append("status = ?")
+            args.append(status)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY checked_at DESC, id DESC LIMIT ?"
+        args.append(limit)
+
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(sql, tuple(args)).fetchall()
+            return [dict(r) for r in rows]
         finally:
             conn.close()
 

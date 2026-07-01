@@ -1341,8 +1341,122 @@
         color: #94a3b8;
     }
 
+    .auto-switch-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+    }
+
+    .auto-switch-toolbar {
+        display: grid;
+        grid-template-columns: 120px minmax(180px, 1fr) minmax(200px, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        padding: 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+    }
+
+    .auto-switch-table-wrap {
+        overflow-x: auto;
+    }
+
+    .auto-switch-table {
+        width: 100%;
+        min-width: 760px;
+        border-collapse: collapse;
+        font-size: 0.82rem;
+    }
+
+    .auto-switch-table th,
+    .auto-switch-table td {
+        padding: 8px 10px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+        text-align: left;
+        vertical-align: top;
+    }
+
+    .auto-switch-table th {
+        color: #94a3b8;
+        font-weight: 600;
+        background: rgba(15, 23, 42, 0.5);
+    }
+
+    .auto-switch-input,
+    .auto-switch-select,
+    .auto-switch-note {
+        width: 100%;
+        background: #0f172a;
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: 6px;
+        padding: 7px 9px;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.8rem;
+        outline: none;
+    }
+
+    .auto-switch-note {
+        min-height: 34px;
+        resize: vertical;
+    }
+
+    .auto-switch-actions {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+    }
+
+    .auto-switch-btn {
+        border: 1px solid var(--border);
+        background: #1e293b;
+        color: #e2e8f0;
+        border-radius: 5px;
+        padding: 6px 10px;
+        font-size: 0.78rem;
+        cursor: pointer;
+        white-space: nowrap;
+    }
+
+    .auto-switch-btn.primary {
+        background: #2563eb;
+        border-color: #2563eb;
+        color: #fff;
+    }
+
+    .auto-switch-btn.danger {
+        background: transparent;
+        border-color: #f43f5e;
+        color: #fb7185;
+    }
+
+    .auto-switch-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 7px;
+        border-radius: 999px;
+        background: rgba(34, 197, 94, 0.14);
+        color: #86efac;
+        font-size: 0.72rem;
+        margin-left: 6px;
+    }
+
+    .auto-switch-muted {
+        color: var(--text-muted);
+        font-size: 0.78rem;
+    }
+
+    .auto-switch-code {
+        color: #cdd6f4;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.78rem;
+    }
+
     @media (max-width: 980px) {
         .within-spec-help-layout {
+            grid-template-columns: 1fr;
+        }
+
+        .auto-switch-toolbar {
             grid-template-columns: 1fr;
         }
     }
@@ -1827,6 +1941,10 @@
     let withinSpecRules = null;
     let withinSpecRulesSource = '';
     let currentWithinSpecMachine = '';
+    let autoSwitchBundles = [];
+    let autoSwitchRules = [];
+    let autoSwitchHistory = [];
+    let autoSwitchActiveBundleId = null;
 
     window.switchTab = function (tabId) {
         currentTab = tabId;
@@ -1846,6 +1964,7 @@
     document.addEventListener('DOMContentLoaded', () => {
         loadSettings();
         loadHistory();
+        loadAutoModelSwitch();
     });
 
     // ── Load Settings ──
@@ -1867,6 +1986,236 @@
         } catch (e) {
             document.getElementById('settings-grid').innerHTML =
                 `<div style="color:#ef4444; padding:20px; grid-column:1/-1;">載入失敗: ${e.message}</div>`;
+        }
+    }
+
+    async function loadAutoModelSwitch() {
+        try {
+            const res = await fetch('/api/auto-model-switch');
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            autoSwitchBundles = data.bundles || [];
+            autoSwitchRules = data.rules || [];
+            autoSwitchActiveBundleId = data.active_bundle_id || null;
+            await loadAutoSwitchHistory();
+            renderSettings();
+        } catch (e) {
+            console.error(e);
+            autoSwitchBundles = [];
+            autoSwitchRules = [];
+            autoSwitchHistory = [];
+        }
+    }
+
+    async function loadAutoSwitchHistory() {
+        const res = await fetch('/api/auto-model-switch/history?limit=100');
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        autoSwitchHistory = data.history || [];
+    }
+
+    function renderAutoSwitchBundleOptions(selectedId) {
+        if (!autoSwitchBundles.length) {
+            return '<option value="">尚無模型</option>';
+        }
+        return autoSwitchBundles.map(b => {
+            const selected = String(b.id) === String(selectedId || '') ? ' selected' : '';
+            const active = Number(b.id) === Number(autoSwitchActiveBundleId) ? ' (啟用中)' : '';
+            return `<option value="${escapeAttr(b.id)}"${selected}>${escapeHtml(b.label || b.machine_id || b.bundle_path)}${active}</option>`;
+        }).join('');
+    }
+
+    function renderAutoModelSwitchPane() {
+        const defaultRule = autoSwitchRules.find(r => r.series_prefix === '__DEFAULT__') || {};
+        const rules = autoSwitchRules.filter(r => r.series_prefix !== '__DEFAULT__');
+        const ruleRows = rules.length ? rules.map(r => `
+            <tr>
+                <td>
+                    <input id="auto-series-${r.id}" class="auto-switch-input" maxlength="8" value="${escapeAttr(r.series_prefix || '')}">
+                </td>
+                <td>
+                    <select id="auto-bundle-${r.id}" class="auto-switch-select">
+                        ${renderAutoSwitchBundleOptions(r.bundle_id)}
+                    </select>
+                </td>
+                <td>
+                    <textarea id="auto-notes-${r.id}" class="auto-switch-note" rows="1">${escapeHtml(r.notes || '')}</textarea>
+                </td>
+                <td class="auto-switch-muted">${escapeHtml(r.created_at || '')}</td>
+                <td class="auto-switch-muted">${escapeHtml(r.updated_at || '')}</td>
+                <td>
+                    <div class="auto-switch-actions">
+                        <button class="auto-switch-btn primary" onclick="saveAutoSwitchRule(${r.id})">儲存</button>
+                        <button class="auto-switch-btn danger" onclick="deleteAutoSwitchRule(${r.id})">刪除</button>
+                    </div>
+                </td>
+            </tr>
+        `).join('') : `
+            <tr><td colspan="6" class="auto-switch-muted">尚未設定系列對應</td></tr>
+        `;
+        const historyRows = autoSwitchHistory.length ? autoSwitchHistory.map(h => `
+            <tr>
+                <td class="auto-switch-muted">${escapeHtml(h.checked_at || '')}</td>
+                <td><span class="auto-switch-code">${escapeHtml(h.series_prefix || '')}</span></td>
+                <td class="auto-switch-muted">${escapeHtml(h.requested_model_id || '')}</td>
+                <td>${escapeHtml(h.previous_bundle_label || '')}</td>
+                <td>${escapeHtml(h.target_bundle_label || '')}</td>
+                <td>${escapeHtml(h.action || '')}</td>
+                <td>${escapeHtml(h.status || '')}</td>
+                <td class="auto-switch-muted">${escapeHtml(h.message || '')}</td>
+            </tr>
+        `).join('') : `
+            <tr><td colspan="8" class="auto-switch-muted">尚無切換紀錄</td></tr>
+        `;
+
+        return `
+            <div id="pane-auto-model-switch" class="settings-tab-pane-block ${currentTab === 'auto-model-switch' ? 'active' : ''}" style="grid-column:1/-1;">
+                <div class="settings-section" style="border-left:3px solid #38bdf8;">
+                    <div class="settings-section-header">
+                        <div class="icon" style="background:rgba(56,189,248,.18);color:#67e8f9;">↔</div>
+                        <span>自動切換模型</span>
+                    </div>
+                    <div class="auto-switch-layout">
+                        <div class="auto-switch-table-wrap">
+                            <table class="auto-switch-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width:140px;">系列名</th>
+                                        <th>模型</th>
+                                        <th>備註</th>
+                                        <th style="width:150px;">建立時間</th>
+                                        <th style="width:150px;">修改時間</th>
+                                        <th style="width:140px;">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td><span class="auto-switch-code">預設模型</span></td>
+                                        <td>
+                                            <select id="auto-default-bundle" class="auto-switch-select">
+                                                ${renderAutoSwitchBundleOptions(defaultRule.bundle_id)}
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <textarea id="auto-default-notes" class="auto-switch-note" rows="1">${escapeHtml(defaultRule.notes || '')}</textarea>
+                                        </td>
+                                        <td class="auto-switch-muted">${escapeHtml(defaultRule.created_at || '')}</td>
+                                        <td class="auto-switch-muted">${escapeHtml(defaultRule.updated_at || '')}</td>
+                                        <td><button class="auto-switch-btn primary" onclick="saveAutoSwitchDefault()">儲存</button></td>
+                                    </tr>
+                                    ${ruleRows}
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="auto-switch-toolbar">
+                            <input id="auto-new-series" class="auto-switch-input" maxlength="8" placeholder="GN156HRA">
+                            <select id="auto-new-bundle" class="auto-switch-select">${renderAutoSwitchBundleOptions('')}</select>
+                            <input id="auto-new-notes" class="auto-switch-input" placeholder="備註">
+                            <button class="auto-switch-btn primary" onclick="addAutoSwitchRule()">新增</button>
+                        </div>
+                        <div class="settings-section-header" style="background:rgba(56,189,248,.08);border-top:1px solid rgba(56,189,248,.18);">
+                            <div class="icon" style="background:rgba(56,189,248,.18);color:#67e8f9;">≡</div>
+                            <span>切換歷史</span>
+                            <button class="auto-switch-btn" style="margin-left:auto;" onclick="refreshAutoSwitchHistory()">重新整理</button>
+                        </div>
+                        <div class="auto-switch-table-wrap">
+                            <table class="auto-switch-table">
+                                <thead>
+                                    <tr>
+                                        <th>時間</th>
+                                        <th>系列</th>
+                                        <th>Client 機種</th>
+                                        <th>原模型</th>
+                                        <th>目標模型</th>
+                                        <th>動作</th>
+                                        <th>狀態</th>
+                                        <th>訊息</th>
+                                    </tr>
+                                </thead>
+                                <tbody>${historyRows}</tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    async function saveAutoSwitchPayload(payload) {
+        const res = await fetch('/api/auto-model-switch/rules/upsert', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        await loadAutoModelSwitch();
+    }
+
+    async function saveAutoSwitchDefault() {
+        try {
+            await saveAutoSwitchPayload({
+                is_default: true,
+                bundle_id: document.getElementById('auto-default-bundle').value,
+                notes: document.getElementById('auto-default-notes').value
+            });
+            showToast('✅ 預設模型已儲存', 'success');
+        } catch (e) {
+            showToast('❌ ' + e.message, 'error');
+        }
+    }
+
+    async function saveAutoSwitchRule(id) {
+        try {
+            await saveAutoSwitchPayload({
+                id,
+                series_prefix: document.getElementById(`auto-series-${id}`).value,
+                bundle_id: document.getElementById(`auto-bundle-${id}`).value,
+                notes: document.getElementById(`auto-notes-${id}`).value
+            });
+            showToast('✅ 對應關係已儲存', 'success');
+        } catch (e) {
+            showToast('❌ ' + e.message, 'error');
+        }
+    }
+
+    async function addAutoSwitchRule() {
+        try {
+            await saveAutoSwitchPayload({
+                series_prefix: document.getElementById('auto-new-series').value,
+                bundle_id: document.getElementById('auto-new-bundle').value,
+                notes: document.getElementById('auto-new-notes').value
+            });
+            showToast('✅ 對應關係已新增', 'success');
+        } catch (e) {
+            showToast('❌ ' + e.message, 'error');
+        }
+    }
+
+    async function deleteAutoSwitchRule(id) {
+        if (!confirm('確定刪除此對應關係？')) return;
+        try {
+            const res = await fetch('/api/auto-model-switch/rules/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            showToast('✅ 對應關係已刪除', 'success');
+            await loadAutoModelSwitch();
+        } catch (e) {
+            showToast('❌ ' + e.message, 'error');
+        }
+    }
+
+    async function refreshAutoSwitchHistory() {
+        try {
+            await loadAutoSwitchHistory();
+            renderSettings();
+            showToast('✅ 歷史紀錄已更新', 'success');
+        } catch (e) {
+            showToast('❌ ' + e.message, 'error');
         }
     }
 
@@ -1983,6 +2332,7 @@
             <button class="settings-tab-btn ${currentTab === 'image-abnormal' ? 'active' : ''}" data-target="image-abnormal" onclick="switchTab('image-abnormal')">🖼️ 畫異設定</button>
             <button class="settings-tab-btn ${currentTab === 'report-result' ? 'active' : ''}" data-target="report-result" onclick="switchTab('report-result')">📤 回報結果設定</button>
             <button class="settings-tab-btn ${currentTab === 'within-spec' ? 'active' : ''}" data-target="within-spec" onclick="switchTab('within-spec')">📏 規格內判定</button>
+            <button class="settings-tab-btn ${currentTab === 'auto-model-switch' ? 'active' : ''}" data-target="auto-model-switch" onclick="switchTab('auto-model-switch')">↔ 自動切換模型</button>
             <button class="settings-tab-btn ${currentTab === 'history' ? 'active' : ''}" data-target="history" onclick="switchTab('history')">📋 修改紀錄</button>
         `;
 
@@ -2841,6 +3191,7 @@
                     </div>
                 </div>
             </div>
+            ${renderAutoModelSwitchPane()}
         `;
     }
 

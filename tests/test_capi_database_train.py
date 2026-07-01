@@ -50,6 +50,8 @@ class TestTrainingSchema:
         assert "training_jobs" in tables
         assert "model_registry" in tables
         assert "training_tile_pool" in tables
+        assert "auto_model_switch_rules" in tables
+        assert "auto_model_switch_history" in tables
 
     def test_training_jobs_columns(self, tmp_path):
         db = _make_db(tmp_path)
@@ -66,6 +68,18 @@ class TestTrainingSchema:
                     "panel_count", "inner_tile_count", "edge_tile_count",
                     "ng_tile_count", "bundle_size_bytes", "is_active", "job_id", "notes"}
         assert required.issubset(cols)
+
+    def test_auto_model_switch_columns(self, tmp_path):
+        db = _make_db(tmp_path)
+        rule_cols = _col_names(db, "auto_model_switch_rules")
+        assert {"id", "series_prefix", "bundle_id", "notes",
+                "created_at", "updated_at"}.issubset(rule_cols)
+
+        history_cols = _col_names(db, "auto_model_switch_history")
+        assert {"id", "checked_at", "requested_model_id", "series_prefix",
+                "previous_bundle_id", "previous_bundle_label",
+                "target_bundle_id", "target_bundle_label",
+                "action", "status", "message"}.issubset(history_cols)
 
     def test_training_tile_pool_columns(self, tmp_path):
         db = _make_db(tmp_path)
