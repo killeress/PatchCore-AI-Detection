@@ -8,8 +8,8 @@ TCP/IP Socket Server，接收 Testing 客戶端的推論請求，
     [Request]  無炸彈: AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片目錄路徑
                有炸彈: AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片前綴;(座標);圖片目錄路徑
                機檢判定: OK / NG / HY (畫異，HY 時跳過推論)
-    [Response] @QJPG-玻璃ID;MARK判定;MARK字;Defect判定+Defect清單,
-               AOI@玻璃ID;機種ID;機台編號;機檢判定;AI判定
+    [Response] AOI@玻璃ID;機種ID;機台編號;機檢判定;AI判定
+               @QJPG-玻璃ID;MARK判定;MARK字;Defect判定+Defect清單,
 
 AI 判定:
     OK                           — 正常
@@ -943,8 +943,8 @@ def build_dual_protocol_response(
     config: Optional[CAPIConfig] = None,
 ) -> str:
     return "\r\n".join([
-        build_qjpg_response(parsed, ai_judgment, results, config),
         build_legacy_response(parsed, ai_judgment),
+        build_qjpg_response(parsed, ai_judgment, results, config),
     ])
 
 
