@@ -195,6 +195,45 @@ def test_image_abnormal_precheck_detects_mean_brightness(monkeypatch):
     assert low_result["upper"] == 110
 
 
+def test_image_abnormal_precheck_uses_latest_retake_image(monkeypatch):
+    old_image = Path("W0F00000_145854.tif")
+    latest_image = Path("W0F00000_150610.tif")
+    read_paths = []
+
+    class FakeStat:
+        def __init__(self, mtime):
+            self.st_mtime = mtime
+
+    def fake_stat(path):
+        return FakeStat(2 if path.name == latest_image.name else 1)
+
+    def fake_imread(path, flags):
+        image_name = Path(path).name
+        read_paths.append(image_name)
+        if image_name == old_image.name:
+            return np.full((4, 4), 0, dtype=np.uint8)
+        return np.full((4, 4), 60, dtype=np.uint8)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    monkeypatch.setattr("capi_server.cv2.imread", fake_imread)
+    monkeypatch.setattr("capi_server.detect_panel_polygon", lambda image, cfg: (None, None))
+    cfg = CAPIConfig(
+        image_abnormal_detection_enabled=True,
+        image_abnormal_w0f00000_mean_lower=40,
+        image_abnormal_w0f00000_mean_upper=82,
+    )
+
+    result = check_image_abnormal_precheck(
+        Path("unused"),
+        cfg,
+        [old_image, latest_image],
+        report_prefixes=["W0F00000"],
+    )
+
+    assert result is None
+    assert read_paths == [latest_image.name]
+
+
 def test_image_abnormal_precheck_uses_polygon_mean_for_judgment(monkeypatch):
     image = np.full((6, 6), 250, dtype=np.uint8)
     image[1:5, 1:5] = 60

@@ -277,6 +277,44 @@ class CAPIDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_over_review_client ON over_review(client_record_id);
 
+                -- Over-retrain pool (過檢 tile 重訓候選池)
+                CREATE TABLE IF NOT EXISTS over_retrain_pool (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_record_id INTEGER NOT NULL,
+                    inference_record_id INTEGER NOT NULL,
+                    tile_result_id INTEGER NOT NULL UNIQUE,
+                    image_result_id INTEGER NOT NULL,
+                    machine_id TEXT NOT NULL,
+                    machine_no TEXT DEFAULT '',
+                    pnl_id TEXT NOT NULL,
+                    client_time_stamp TEXT DEFAULT '',
+                    datastr TEXT DEFAULT '',
+                    screen_prefix TEXT NOT NULL,
+                    lighting TEXT NOT NULL,
+                    zone TEXT DEFAULT '',
+                    source_path TEXT NOT NULL,
+                    thumb_path TEXT DEFAULT '',
+                    tile_x INTEGER DEFAULT 0,
+                    tile_y INTEGER DEFAULT 0,
+                    tile_w INTEGER DEFAULT 0,
+                    tile_h INTEGER DEFAULT 0,
+                    score REAL DEFAULT 0.0,
+                    added_to_job_id TEXT DEFAULT '',
+                    added_to_bundle_id INTEGER,
+                    added_to_unit TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    FOREIGN KEY (client_record_id) REFERENCES client_accuracy_records(id),
+                    FOREIGN KEY (inference_record_id) REFERENCES inference_records(id),
+                    FOREIGN KEY (tile_result_id) REFERENCES tile_results(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_over_retrain_pool_created
+                    ON over_retrain_pool(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_over_retrain_pool_machine
+                    ON over_retrain_pool(machine_id, lighting, zone);
+                CREATE INDEX IF NOT EXISTS idx_over_retrain_pool_client
+                    ON over_retrain_pool(client_record_id);
+
                 -- Within-spec suggestion calculation logs (過檢 Review 規格內建議)
                 CREATE TABLE IF NOT EXISTS within_spec_review_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1438,6 +1476,12 @@ class CAPIDatabase:
                            wsl.error_message as within_spec_error,
                            wsl.processing_seconds as within_spec_processing_seconds,
                            wsl.created_at as within_spec_created_at,
+                           (SELECT COUNT(*) FROM over_retrain_pool orp
+                            WHERE orp.client_record_id = c.id
+                           ) as over_retrain_pool_count,
+                           (SELECT MAX(created_at) FROM over_retrain_pool orp
+                            WHERE orp.client_record_id = c.id
+                           ) as over_retrain_pool_latest_at,
                            (SELECT ir.id FROM inference_records ir
                             WHERE ir.glass_id = c.pnl_id
                               AND ir.request_time >= substr(c.time_stamp, 1, 10)
@@ -1464,6 +1508,241 @@ class CAPIDatabase:
                 params
             ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_client_accuracy_record(self, client_record_id: int) -> Optional[Dict]:
+        """取得單筆 client accuracy record，附最近 inference 與 retrain pool 摘要。"""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                """SELECT c.id, c.time_stamp, c.pnl_id, c.mach_id,
+                          c.result_eqp, c.result_ai, c.result_ric, c.datastr,
+                          (SELECT COUNT(*) FROM over_retrain_pool orp
+                           WHERE orp.client_record_id = c.id
+                          ) as over_retrain_pool_count,
+                          (SELECT MAX(created_at) FROM over_retrain_pool orp
+                           WHERE orp.client_record_id = c.id
+                          ) as over_retrain_pool_latest_at,
+                          (SELECT ir.id FROM inference_records ir
+                           WHERE ir.glass_id = c.pnl_id
+                             AND ir.request_time >= substr(c.time_stamp, 1, 10)
+                             AND ir.request_time < date(substr(c.time_stamp, 1, 10), '+1 day')
+                           ORDER BY ir.request_time DESC LIMIT 1
+                          ) as inference_record_id,
+                          (SELECT ir.ai_judgment FROM inference_records ir
+                           WHERE ir.glass_id = c.pnl_id
+                             AND ir.request_time >= substr(c.time_stamp, 1, 10)
+                             AND ir.request_time < date(substr(c.time_stamp, 1, 10), '+1 day')
+                           ORDER BY ir.request_time DESC LIMIT 1
+                          ) as inference_ai_judgment
+                   FROM client_accuracy_records c
+                   WHERE c.id = ?""",
+                (int(client_record_id),),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # over_retrain_pool CRUD
+    # ------------------------------------------------------------------
+
+    def insert_over_retrain_pool_rows(self, rows: list) -> dict:
+        """批次加入過檢重訓 pool；tile_result_id 已存在時視為 existing。"""
+        if not rows:
+            return {"inserted_ids": [], "existing_ids": []}
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            inserted_ids = []
+            existing_ids = []
+            for row in rows:
+                cur.execute(
+                    """INSERT OR IGNORE INTO over_retrain_pool
+                       (client_record_id, inference_record_id, tile_result_id, image_result_id,
+                        machine_id, machine_no, pnl_id, client_time_stamp, datastr,
+                        screen_prefix, lighting, zone, source_path, thumb_path,
+                        tile_x, tile_y, tile_w, tile_h, score)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        int(row["client_record_id"]),
+                        int(row["inference_record_id"]),
+                        int(row["tile_result_id"]),
+                        int(row["image_result_id"]),
+                        row["machine_id"],
+                        row.get("machine_no", ""),
+                        row["pnl_id"],
+                        row.get("client_time_stamp", ""),
+                        row.get("datastr", ""),
+                        row["screen_prefix"],
+                        row["lighting"],
+                        row.get("zone", ""),
+                        row["source_path"],
+                        row.get("thumb_path", ""),
+                        int(row.get("tile_x", 0) or 0),
+                        int(row.get("tile_y", 0) or 0),
+                        int(row.get("tile_w", 0) or 0),
+                        int(row.get("tile_h", 0) or 0),
+                        float(row.get("score", 0.0) or 0.0),
+                    ),
+                )
+                if cur.rowcount:
+                    inserted_ids.append(cur.lastrowid)
+                    continue
+                existing = cur.execute(
+                    "SELECT id FROM over_retrain_pool WHERE tile_result_id = ?",
+                    (int(row["tile_result_id"]),),
+                ).fetchone()
+                if existing:
+                    existing_ids.append(existing["id"])
+            conn.commit()
+            return {"inserted_ids": inserted_ids, "existing_ids": existing_ids}
+        finally:
+            conn.close()
+
+    def list_over_retrain_pool(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        machine_id: Optional[str] = None,
+        lighting: Optional[str] = None,
+        zone: Optional[str] = None,
+        client_record_id: Optional[int] = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> Tuple[list, int]:
+        """查詢過檢重訓 pool，支援日期/機種/lighting/zone/來源 record 過濾。"""
+        if start_date and not _DATE_RE.match(start_date):
+            raise ValueError(f"Invalid start_date format: {start_date}")
+        if end_date and not _DATE_RE.match(end_date):
+            raise ValueError(f"Invalid end_date format: {end_date}")
+
+        def _next_date_str(date_str: str) -> str:
+            from datetime import timedelta
+            return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        where = []
+        params: list = []
+        if start_date:
+            where.append("created_at >= ?")
+            params.append(start_date)
+        if end_date:
+            where.append("created_at < ?")
+            params.append(_next_date_str(end_date))
+        if machine_id:
+            where.append("machine_id = ?")
+            params.append(machine_id)
+        if lighting:
+            where.append("lighting = ?")
+            params.append(lighting)
+        if zone is not None and zone != "":
+            where.append("zone = ?")
+            params.append(zone)
+        if client_record_id:
+            where.append("client_record_id = ?")
+            params.append(int(client_record_id))
+
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        limit = max(1, min(int(limit), 1000))
+        offset = max(0, int(offset))
+        conn = self._get_conn()
+        try:
+            total = conn.execute(
+                f"SELECT COUNT(*) as cnt FROM over_retrain_pool{where_sql}",
+                params,
+            ).fetchone()["cnt"]
+            rows = conn.execute(
+                f"""SELECT * FROM over_retrain_pool
+                    {where_sql}
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ? OFFSET ?""",
+                params + [limit, offset],
+            ).fetchall()
+            return [dict(r) for r in rows], int(total or 0)
+        finally:
+            conn.close()
+
+    def get_over_retrain_pool_items(self, pool_ids: list) -> list:
+        """依 id 清單查詢 pool item。"""
+        ids = [int(x) for x in pool_ids if str(x).strip()]
+        if not ids:
+            return []
+        placeholders = ",".join("?" * len(ids))
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM over_retrain_pool WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            by_id = {int(r["id"]): dict(r) for r in rows}
+            return [by_id[i] for i in ids if i in by_id]
+        finally:
+            conn.close()
+
+    def delete_over_retrain_pool_item(self, pool_id: int) -> Optional[Dict]:
+        """刪除單筆 pool item，回傳刪除前資料；找不到回 None。"""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM over_retrain_pool WHERE id = ?",
+                (int(pool_id),),
+            ).fetchone()
+            if not row:
+                return None
+            data = dict(row)
+            conn.execute("DELETE FROM over_retrain_pool WHERE id = ?", (int(pool_id),))
+            conn.commit()
+            return data
+        finally:
+            conn.close()
+
+    def mark_over_retrain_pool_added(
+        self,
+        pool_ids: list,
+        bundle_id: int,
+        job_id: str,
+        unit_label: str,
+    ) -> None:
+        """標記 pool item 已匯入特定 bundle/job/unit。"""
+        ids = [int(x) for x in pool_ids if str(x).strip()]
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                f"""UPDATE over_retrain_pool
+                    SET added_to_bundle_id = ?,
+                        added_to_job_id = ?,
+                        added_to_unit = ?,
+                        updated_at = datetime('now', 'localtime')
+                    WHERE id IN ({placeholders})""",
+                (int(bundle_id), job_id, unit_label, *ids),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def clear_over_retrain_pool_added(self, pool_ids: list) -> int:
+        """清除 pool item 的已匯入訓練清單標記，回傳更新筆數。"""
+        ids = [int(x) for x in pool_ids if str(x).strip()]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                f"""UPDATE over_retrain_pool
+                    SET added_to_bundle_id = NULL,
+                        added_to_job_id = '',
+                        added_to_unit = '',
+                        updated_at = datetime('now', 'localtime')
+                    WHERE id IN ({placeholders})""",
+                ids,
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
         finally:
             conn.close()
 
@@ -3389,6 +3668,23 @@ class CAPIDatabase:
         try:
             conn.execute("DELETE FROM training_tile_pool WHERE job_id = ?", (job_id,))
             conn.commit()
+        finally:
+            conn.close()
+
+    def delete_tile_pool_by_source_paths(self, job_id: str, source_paths: list) -> int:
+        """依 source_path 刪除指定 job 的 tile pool 紀錄，回傳刪除筆數。"""
+        paths = [str(p) for p in source_paths if str(p).strip()]
+        if not job_id or not paths:
+            return 0
+        placeholders = ",".join("?" * len(paths))
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                f"DELETE FROM training_tile_pool WHERE job_id = ? AND source_path IN ({placeholders})",
+                (job_id, *paths),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
         finally:
             conn.close()
 

@@ -518,8 +518,11 @@ def test_within_spec_all_zero_runtime_dust_mask_does_not_break_visuals(tmp_path)
     assert result["panel_summary"]["total_dot_count"] == 1
     visual = result["visuals"][0]
     assert visual["dust_mask_filtered_count"] == 0
-    assert "dust_mask_url" not in visual["urls"]
-    assert "dust_overlay_url" not in visual["urls"]
+    urls = visual["urls"]
+    assert urls["dust_mask_url"].endswith("_dust_mask.png")
+    assert urls["dust_overlay_url"].endswith("_dust_overlay.png")
+    assert (visual_dir / Path(urls["dust_mask_url"]).name).is_file()
+    assert (visual_dir / Path(urls["dust_overlay_url"]).name).is_file()
 
 
 def test_within_spec_rejects_large_non_dot_residue(tmp_path):
@@ -566,6 +569,45 @@ def test_within_spec_rejects_large_non_dot_residue(tmp_path):
         step["message"] == "非點狀殘留命中：不建議規格內"
         for step in detail["steps"]
     )
+
+
+def test_within_spec_dust_mask_filters_non_dot_residue_rejections(tmp_path):
+    image_path = tmp_path / "W0F00000.png"
+    image = np.full((128, 128, 3), 128, dtype=np.uint8)
+    cv2.rectangle(image, (0, 0), (127, 5), (60, 60, 60), -1)
+    cv2.circle(image, (64, 64), 3, (60, 60, 60), -1)
+    cv2.imwrite(str(image_path), image)
+
+    dust_mask = np.zeros((128, 128), dtype=np.uint8)
+    dust_mask[0:8, :] = 255
+
+    detail = _detail(image_path, tile_size=128)
+    detail["images"][0]["tiles"][0]["tile_id"] = 0
+    detail["images"][0]["tiles"][0]["_runtime_dust_mask"] = dust_mask
+
+    rules = _rules(screen_limit=1, tile_limit=1, threshold_mm=0.5, segmentation_method="hysteresis")
+    rules["default"]["dot_detection"]["max_area_px"] = 50000
+
+    result = _evaluate_within_spec_suggestion_detail(
+        detail,
+        rules,
+        visual_output_dir=tmp_path / "visuals",
+        visual_url_prefix="/visuals",
+    )
+
+    assert result["suggestion"] is not None
+    assert result["panel_summary"]["non_dot_residue_count"] == 0
+    rejected_step = next(
+        step for step in result["steps"]
+        if step["message"] == "點候選被過濾" and step["tile_id"] == 0
+    )
+    dust_rejections = [
+        item for item in rejected_step["rejected"]["black_dot"]
+        if item["reason"] == "dust_mask_overlap"
+    ]
+    assert any(item.get("source_reason") == "aspect_ratio_below_min" for item in dust_rejections)
+    assert result["visuals"][0]["dust_mask_filtered_rejected_count"] >= 1
+    assert "dust_mask_url" in result["visuals"][0]["urls"]
 
 
 def test_dot_detection_hysteresis_expands_low_contrast_boundary():
@@ -921,6 +963,38 @@ def test_dot_detection_debug_auto_polarity_selects_white_halo():
     assert detected["candidates"]
     assert detected["candidates"][0]["polarity"] == "white"
     assert any(item["segmentation_method"] == "white:halo" for item in detected["auto_candidates"])
+
+
+def test_dot_detection_debug_auto_keeps_rejected_candidates_from_nonwinning_polarity():
+    image = np.full((128, 128, 3), 128, dtype=np.uint8)
+    cv2.circle(image, (64, 64), 3, (60, 60, 60), -1)
+    cv2.rectangle(image, (0, 0), (14, 59), (190, 190, 190), -1)
+
+    detected = _detect_dot_components_debug_polarity(
+        image,
+        polarity="auto",
+        segmentation_method="background_diff",
+        diff_threshold=8,
+        background_kernel=31,
+        min_area=10,
+        max_area=50000,
+        morph_open=1,
+        size_metric="bbox_diagonal",
+        unit_per_px=0.02,
+        defect_threshold=0.3,
+        min_aspect_ratio=0.0,
+        edge_margin=8,
+        include_visuals=False,
+    )
+
+    assert detected["detected_polarity"] == "black"
+    assert detected["candidates"][0]["polarity"] == "black"
+    assert any(
+        rejected["reason"] == "edge_margin"
+        and rejected.get("source_polarity") == "white"
+        and rejected.get("expected_polarity") == "white"
+        for rejected in detected["rejected_candidates"]
+    )
 
 
 def test_within_spec_auto_visual_output_uses_heatmap_url(tmp_path):

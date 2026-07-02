@@ -608,11 +608,22 @@ def _image_mean_brightness(
     return float(gray.mean()), "full_image", int(gray.size)
 
 
+def _image_abnormal_latest_key(image_path: Path) -> Tuple[float, str]:
+    try:
+        modified_at = image_path.stat().st_mtime
+    except OSError:
+        modified_at = 0.0
+    return modified_at, image_path.name
+
+
 def _image_abnormal_screen_path_map(candidates: List[Path]) -> Dict[str, Path]:
     by_screen: Dict[str, Path] = {}
-    for image_path in sorted(candidates, key=lambda p: str(p.name)):
+    for image_path in candidates:
         screen = _image_abnormal_screen_from_filename(image_path.name)
-        if screen and screen not in by_screen:
+        if not screen:
+            continue
+        current = by_screen.get(screen)
+        if current is None or _image_abnormal_latest_key(image_path) > _image_abnormal_latest_key(current):
             by_screen[screen] = image_path
     return by_screen
 
@@ -689,9 +700,9 @@ def check_image_abnormal_precheck(
         len(target_prefixes),
         ", ".join(sorted(target_prefixes)),
     )
-    for image_path in sorted(candidates, key=lambda p: str(p.name)):
-        screen = _image_abnormal_screen_from_filename(image_path.name)
-        if screen not in target_prefixes or screen in checked_screens:
+    for screen in sorted(target_prefixes):
+        image_path = screen_paths.get(screen)
+        if not image_path:
             continue
         checked_screens.add(screen)
 

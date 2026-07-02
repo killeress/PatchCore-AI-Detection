@@ -65,6 +65,24 @@ def test_merge_run_skips_non_ok():
         assert stats["total_rows"] == 1
 
 
+def test_merge_run_reports_progress():
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        b = base / "20260101_100000"
+        b.mkdir()
+        (b / "crop.jpg").write_bytes(b"fake")
+        _write_manifest(b, [{"sample_id": "s1", "label": "true_ng",
+                              "crop_path": "crop.jpg", "status": "ok"}])
+
+        messages = []
+        from tools.merge_over_review_manifests import run as merge_run
+        stats = merge_run(base, set(), progress=messages.append)
+
+        assert stats["total_rows"] == 1
+        assert any("field scan 1/1" in msg for msg in messages)
+        assert any("merged batch 1/1" in msg for msg in messages)
+
+
 def test_merge_run_no_batches_raises():
     with tempfile.TemporaryDirectory() as tmp:
         from tools.merge_over_review_manifests import run as merge_run

@@ -651,6 +651,60 @@
         width: 100%;
     }
 
+    .miss-review-table {
+        min-width: 1280px;
+        table-layout: fixed;
+    }
+
+    #review_tableWrap_pending,
+    #review_tableWrap_done {
+        overflow: auto;
+    }
+
+    .miss-review-table th:nth-child(1),
+    .miss-review-table td:nth-child(1) { width: 44px; }
+    .miss-review-table th:nth-child(2),
+    .miss-review-table td:nth-child(2) { width: 112px; }
+    .miss-review-table th:nth-child(3),
+    .miss-review-table td:nth-child(3) { width: 120px; }
+    .miss-review-table th:nth-child(4),
+    .miss-review-table td:nth-child(4) { width: 78px; }
+    .miss-review-table th:nth-child(5),
+    .miss-review-table td:nth-child(5),
+    .miss-review-table th:nth-child(6),
+    .miss-review-table td:nth-child(6),
+    .miss-review-table th:nth-child(7),
+    .miss-review-table td:nth-child(7) { width: 62px; }
+    .miss-review-table th:nth-child(8),
+    .miss-review-table td:nth-child(8) { width: 180px; }
+    .miss-review-table th:nth-child(9),
+    .miss-review-table td:nth-child(9) { width: 82px; }
+    .miss-review-table th:nth-child(10),
+    .miss-review-table td:nth-child(10) { width: 170px; }
+    .miss-review-table th:nth-child(11),
+    .miss-review-table td:nth-child(11) { width: 190px; }
+    .miss-review-table th:nth-child(12),
+    .miss-review-table td:nth-child(12) { width: 110px; }
+
+    .miss-review-table th,
+    .miss-review-table td {
+        vertical-align: middle;
+    }
+
+    .over-review-table {
+        min-width: 1500px;
+    }
+
+    #over_review_tableWrap_pending,
+    #over_review_tableWrap_done {
+        overflow: auto;
+    }
+
+    .over-review-table th,
+    .over-review-table td {
+        vertical-align: middle;
+    }
+
     .review-filter-bar {
         display: flex;
         align-items: center;
@@ -1012,7 +1066,7 @@
                 <h3>⏳ 待 Review</h3>
             </div>
             <div class="table-wrap" id="review_tableWrap_pending">
-                <table>
+                <table class="miss-review-table">
                     <thead>
                         <tr>
                             <th>#</th>
@@ -1024,7 +1078,6 @@
                             <th>RIC</th>
                             <th>DATASTR</th>
                             <th>推論紀錄</th>
-                            <th style="min-width:150px;">建議</th>
                             <th style="min-width:160px;">分類</th>
                             <th style="min-width:200px;">備註</th>
                             <th style="min-width:100px;">操作</th>
@@ -1056,7 +1109,7 @@
                 </div>
             </div>
             <div class="table-wrap" id="review_tableWrap_done">
-                <table>
+                <table class="miss-review-table">
                     <thead>
                         <tr>
                             <th>#</th>
@@ -1068,7 +1121,6 @@
                             <th>RIC</th>
                             <th>DATASTR</th>
                             <th>推論紀錄</th>
-                            <th>建議</th>
                             <th>分類</th>
                             <th>備註</th>
                             <th style="min-width:100px;">操作</th>
@@ -1088,6 +1140,9 @@
             </button>
             <a href="/dataset_gallery" target="_blank" class="btn-export" style="text-decoration:none; display:inline-flex; align-items:center;">
                 🖼️ 樣本瀏覽
+            </a>
+            <a href="/models/retrain-pool" target="_blank" class="btn-export" style="text-decoration:none; display:inline-flex; align-items:center;">
+                🧺 重訓 Pool
             </a>
         </div>
         <div class="stats-grid" id="over_review_statsGrid"></div>
@@ -1112,7 +1167,7 @@
                 <h3>⏳ 待 Review</h3>
             </div>
             <div class="table-wrap" id="over_review_tableWrap_pending">
-                <table>
+                <table class="over-review-table">
                     <thead>
                         <tr>
                             <th>#</th>
@@ -1124,6 +1179,8 @@
                             <th>RIC</th>
                             <th>DATASTR</th>
                             <th>推論紀錄</th>
+                            <th style="min-width:170px;">加入重訓 Pool</th>
+                            <th style="min-width:150px;">Pool 狀態</th>
                             <th style="min-width:160px;">分類</th>
                             <th style="min-width:200px;">備註</th>
                             <th style="min-width:100px;">操作</th>
@@ -1155,7 +1212,7 @@
                 </div>
             </div>
             <div class="table-wrap" id="over_review_tableWrap_done">
-                <table>
+                <table class="over-review-table">
                     <thead>
                         <tr>
                             <th>#</th>
@@ -1167,8 +1224,10 @@
                             <th>RIC</th>
                             <th>DATASTR</th>
                             <th>推論紀錄</th>
-                            <th>分類</th>
-                            <th>備註</th>
+                            <th style="min-width:170px;">加入重訓 Pool</th>
+                            <th style="min-width:150px;">Pool 狀態</th>
+                            <th style="min-width:160px;">分類</th>
+                            <th style="min-width:200px;">備註</th>
                             <th style="min-width:100px;">操作</th>
                         </tr>
                     </thead>
@@ -1307,7 +1366,7 @@
                     byCategory: { ric_misjudge: 0, within_spec_misjudge: 0, data_error_actually_ok: 0 },
                 },
                 overReviewStats: {
-                    total: 0, reviewed: 0, unreviewed: 0,
+                    total: 0, reviewed: 0, unreviewed: 0, poolRecords: 0, poolTiles: 0,
                     byCategory: { edge_false_positive: 0, within_spec: 0, overexposure: 0, surface_scratch: 0, surface_dirt: 0, bubble: 0, aoi_ai_false_positive: 0, dust_mask_incomplete: 0, other: 0 },
                 },
                 scratchRescueStats: { panels: 0, images: 0, tiles: 0 },
@@ -1414,6 +1473,8 @@
             let missTotal = 0;
             const missByCat = { dust_misfilter: 0, data_error_actually_ok: 0, threshold_high: 0, ai_miss_within_spec: 0, within_spec_misjudge: 0, ric_misjudge: 0, outside_aoi_area: 0, other: 0 };
             let overReviewed = 0;
+            let overPoolRecords = 0;
+            let overPoolTiles = 0;
             const overByCat = { edge_false_positive: 0, within_spec: 0, overexposure: 0, surface_scratch: 0, surface_dirt: 0, bubble: 0, aoi_ai_false_positive: 0, dust_mask_incomplete: 0, other: 0 };
             let scratchPanels = 0;
             let scratchImages = 0;
@@ -1447,6 +1508,11 @@
                 if (eqp === 'NG' && ric === 'OK') aoiOver++;
                 if (ai === 'NG' && ric === 'OK') {
                     aiOver++;
+                    const poolCount = (rec.over_retrain_pool && rec.over_retrain_pool.count) ? rec.over_retrain_pool.count : 0;
+                    if (poolCount > 0) {
+                        overPoolRecords++;
+                        overPoolTiles += poolCount;
+                    }
                     if (rec.over_review && rec.over_review.category) {
                         overReviewed++;
                         const cat = rec.over_review.category;
@@ -1517,6 +1583,8 @@
                     total: aiOver,
                     reviewed: overReviewed,
                     unreviewed: aiOver - overReviewed,
+                    poolRecords: overPoolRecords,
+                    poolTiles: overPoolTiles,
                     byCategory: overByCat,
                 },
                 scratchRescueStats: {
@@ -2637,6 +2705,11 @@
                 <div class="detail">${ratioPercent(ors.unreviewed, ors.total)}</div>
             </div>
             <div class="stat-card match">
+                <div class="label">已加入 Pool</div>
+                <div class="value">${ors.poolRecords || 0}</div>
+                <div class="detail">${ors.poolTiles || 0} tiles</div>
+            </div>
+            <div class="stat-card match">
                 <div class="label">完成率</div>
                 <div class="value">${completionRate}</div>
                 <div class="detail">${ors.reviewed} / ${ors.total}</div>
@@ -2883,11 +2956,33 @@
                 : `(${done.length})`;
             updateOverReviewDoneFilterUI(done.length, filteredDone.length);
 
-            _fillOverReviewRows(document.getElementById('over_review_detailBody_pending'), pending, true);
-            _fillOverReviewRows(document.getElementById('over_review_detailBody_done'), filteredDone, false);
+            _fillOverReviewRows(document.getElementById('over_review_detailBody_pending'), pending);
+            _fillOverReviewRows(document.getElementById('over_review_detailBody_done'), filteredDone);
         }
 
-        function _fillOverReviewRows(tbody, rows, editable) {
+        function renderRetrainPoolAction(row) {
+            const pool = row.over_retrain_pool || {};
+            const count = pool.count || 0;
+            if (!row.inference_record_id) {
+                return '<span style="color:var(--text-muted); font-size:0.78rem;">無推論紀錄</span>';
+            }
+            if (count > 0) {
+                return `<a class="within-spec-btn" href="/models/retrain-pool?client_record_id=${row.id}" target="_blank" rel="noopener" style="text-decoration:none;">查看 Pool</a>`;
+            }
+            return `<button type="button" class="review-btn-save" id="over_retrain_pool_add_${row.id}" onclick="clientComp._addOverToRetrainPool(${row.id})">加入重訓 Pool</button>`;
+        }
+
+        function renderRetrainPoolStatus(row) {
+            const pool = row.over_retrain_pool || {};
+            const count = pool.count || 0;
+            if (count <= 0) {
+                return '<span style="color:var(--text-muted); font-size:0.78rem;">尚未加入</span>';
+            }
+            const latest = pool.latest_at ? `<div style="color:var(--text-muted); font-size:0.72rem;">${escapeClientHtml(pool.latest_at)}</div>` : '';
+            return `<span class="review-saved">已加入 ${count} tiles</span>${latest}`;
+        }
+
+        function _fillOverReviewRows(tbody, rows) {
             tbody.innerHTML = '';
             rows.forEach((row, i) => {
                 const review = row.over_review;
@@ -2912,7 +3007,8 @@
                     ? `<a href="/record/${row.inference_record_id}" target="_blank" style="color:var(--accent); font-size:0.82rem; text-decoration:underline;">🔗 查看</a>`
                     : `<span style="color:var(--text-muted); font-size:0.78rem;">無紀錄</span>`
                 }</td>
-                <td id="within_spec_suggestion_${row.id}">${renderWithinSpecSuggestion(row)}</td>
+                <td id="over_retrain_pool_action_${row.id}">${renderRetrainPoolAction(row)}</td>
+                <td id="over_retrain_pool_status_${row.id}">${renderRetrainPoolStatus(row)}</td>
                 <td>
                     <select class="review-select" id="over_review_cat_${row.id}" onchange="clientComp._markOverDirty(${row.id})">
                         <option value="">請選擇</option>
@@ -2945,6 +3041,36 @@
         function _markOverDirty(recordId) {
             const actionCell = document.getElementById(`over_review_action_${recordId}`);
             actionCell.innerHTML = `<button class="review-btn-save" onclick="clientComp._saveOverReview(${recordId})">儲存</button>`;
+        }
+
+        function _addOverToRetrainPool(recordId) {
+            const btn = document.getElementById(`over_retrain_pool_add_${recordId}`);
+            if (btn) { btn.disabled = true; btn.textContent = '加入中...'; }
+            fetch('/api/ric/over-retrain-pool/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ client_record_id: recordId })
+            })
+            .then(r => r.json().then(data => ({ ok: r.ok, data })))
+            .then(({ ok, data }) => {
+                if (!ok || !data.success) {
+                    alert('❌ ' + (data.error || '加入失敗'));
+                    if (btn) { btn.disabled = false; btn.textContent = '加入重訓 Pool'; }
+                    return;
+                }
+                const rec = rawRecords.find(r => r.id === recordId);
+                if (rec) {
+                    rec.over_retrain_pool = {
+                        count: data.total_for_record || ((data.inserted || 0) + (data.existing || 0)),
+                        latest_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+                    };
+                }
+                refreshReportFromRawRecords();
+            })
+            .catch(err => {
+                alert('❌ 網路錯誤: ' + err.message);
+                if (btn) { btn.disabled = false; btn.textContent = '加入重訓 Pool'; }
+            });
         }
 
         function _saveOverReview(recordId) {
@@ -3018,7 +3144,7 @@
             filterReviewDoneCategory, filterOverReviewDoneCategory,
             quickFilter, customFilter, loadData, toggleUpload, toggleIgnoreOmit, toggleIncludeEqpOK,
             _saveReview, _deleteReview, _markDirty,
-            _saveOverReview, _deleteOverReview, _markOverDirty,
+            _saveOverReview, _deleteOverReview, _markOverDirty, _addOverToRetrainPool,
             _runWithinSpecSuggestion: (recordId) => {
                 const row = rawRecords.find(r => r.id === recordId);
                 if (row) runWithinSpecSuggestion(row);

@@ -16,6 +16,7 @@ import tempfile
 import json
 import hashlib
 import html
+import inspect
 import secrets
 import urllib.parse
 import mimetypes
@@ -36,6 +37,7 @@ from capi_dataset_export import (
     JOB_STATE_FAILED, JOB_STATE_CANCELLED,
     read_manifest, write_manifest, delete_sample, relabel_sample,
     get_valid_labels, LABEL_ZH, list_job_dirs,
+    parse_datastr_per_prefix, extract_prefix, resolve_source_path,
 )
 from capi_scratch_batch import (
     ScratchBatchRunner, compute_summary as scratch_batch_summary,
@@ -1173,6 +1175,19 @@ def _detect_dot_components_debug_polarity(
             merged["segmentation_method"] = f"{item_polarity}:{candidate.get('segmentation_method', '')}"
             merged_auto_candidates.append(merged)
     best["auto_candidates"] = merged_auto_candidates
+    merged_rejected_candidates = []
+    for item in detected_by_polarity:
+        item_polarity = item.get("detected_polarity", "")
+        for rejected in item.get("rejected_candidates") or []:
+            merged = dict(rejected)
+            merged.setdefault("expected_polarity", item_polarity)
+            merged["source_polarity"] = item_polarity
+            merged_rejected_candidates.append(merged)
+    merged_rejected_candidates.sort(
+        key=lambda c: (_as_int(c.get("area_px"), 0), _as_int(c.get("max_diff"), 0)),
+        reverse=True,
+    )
+    best["rejected_candidates"] = merged_rejected_candidates[:100]
     for candidate in best.get("candidates") or []:
         candidate["polarity"] = chosen_polarity
     return best
@@ -1348,9 +1363,9 @@ def _attach_runtime_dust_masks_to_within_spec_detail(detail: Dict[str, Any], res
             if runtime_tile is None:
                 continue
 
-            dust_mask = getattr(runtime_tile, "dust_mask", None)
+            dust_mask = getattr(runtime_tile, "dust_two_stage_dust_mask", None)
             if dust_mask is None:
-                dust_mask = getattr(runtime_tile, "dust_two_stage_dust_mask", None)
+                dust_mask = getattr(runtime_tile, "dust_mask", None)
             if dust_mask is not None:
                 tile_data["_runtime_dust_mask"] = dust_mask
                 tile_data["dust_detail_text"] = getattr(runtime_tile, "dust_detail_text", "")
@@ -1414,8 +1429,18 @@ def _remove_dust_overlap_candidates(detected: Dict[str, Any], dust_mask) -> Dict
         return detected
 
     kept = []
-    rejected = list(detected.get("rejected_candidates") or [])
+    rejected = []
+    original_rejected = detected.get("rejected_candidates") or []
     original_count = len(detected.get("candidates") or [])
+    dust_filtered_rejected_count = 0
+    for candidate in original_rejected:
+        dust_rejected = _candidate_dust_overlap(candidate, dust_mask)
+        if dust_rejected:
+            dust_rejected["source_reason"] = candidate.get("reason", "")
+            rejected.append(dust_rejected)
+            dust_filtered_rejected_count += 1
+        else:
+            rejected.append(candidate)
     for candidate in detected.get("candidates") or []:
         dust_rejected = _candidate_dust_overlap(candidate, dust_mask)
         if dust_rejected:
@@ -1428,6 +1453,7 @@ def _remove_dust_overlap_candidates(detected: Dict[str, Any], dust_mask) -> Dict
     detected["candidates"] = kept
     detected["rejected_candidates"] = rejected[:50]
     detected["dust_mask_filtered_count"] = original_count - len(kept)
+    detected["dust_mask_filtered_rejected_count"] = dust_filtered_rejected_count
     return detected
 
 
@@ -1619,13 +1645,14 @@ def _save_within_spec_dot_visuals(
         import numpy as np
 
         dust_pixels = np.asarray(runtime_dust_mask) > 0
+        dust_mask_u8 = (dust_pixels.astype("uint8") * 255)
+        dust_mask_color = cv2.cvtColor(dust_mask_u8, cv2.COLOR_GRAY2BGR)
         if np.any(dust_pixels):
-            dust_mask_u8 = (dust_pixels.astype("uint8") * 255)
-            dust_mask_color = cv2.cvtColor(dust_mask_u8, cv2.COLOR_GRAY2BGR)
             dust_mask_color[dust_pixels] = (0, 255, 255)
-            base_overlay = detected.get("overlay")
-            if base_overlay is not None:
-                dust_overlay = base_overlay.copy()
+        base_overlay = detected.get("overlay")
+        if base_overlay is not None:
+            dust_overlay = base_overlay.copy()
+            if np.any(dust_pixels):
                 yellow = np.zeros_like(dust_overlay)
                 yellow[:, :] = (0, 255, 255)
                 dust_overlay[dust_pixels] = cv2.addWeighted(
@@ -1703,6 +1730,7 @@ def _save_within_spec_dot_visuals(
         "candidates": detected["candidates"][:30],
         "non_dot_residues": visual_residues[:20],
         "dust_mask_filtered_count": _as_int(detected.get("dust_mask_filtered_count"), 0),
+        "dust_mask_filtered_rejected_count": _as_int(detected.get("dust_mask_filtered_rejected_count"), 0),
         "thresholds": detected.get("thresholds", {}),
         "urls": {key: f"{url_prefix}/{filename}" for key, filename in files.items()},
     }
@@ -1935,6 +1963,7 @@ def _evaluate_within_spec_suggestion_detail(
                     "candidates": candidates,
                     "rejected_candidates": detected.get("rejected_candidates", []),
                     "dust_mask_filtered_count": detected.get("dust_mask_filtered_count", 0),
+                    "dust_mask_filtered_rejected_count": detected.get("dust_mask_filtered_rejected_count", 0),
                     "count": len(candidates),
                     "max_size_mm": max_size_mm,
                 })
@@ -1958,6 +1987,7 @@ def _evaluate_within_spec_suggestion_detail(
                     "segmentation_method": d["segmentation_method"],
                     "rejected_count": len(d.get("rejected_candidates") or []),
                     "dust_mask_filtered_count": _as_int(d.get("dust_mask_filtered_count"), 0),
+                    "dust_mask_filtered_rejected_count": _as_int(d.get("dust_mask_filtered_rejected_count"), 0),
                     "thresholds": d.get("thresholds", {}),
                 }
                 for d in detections
@@ -2220,27 +2250,6 @@ def _evaluate_within_spec_suggestion_detail(
 
 def _evaluate_within_spec_suggestion(detail: Dict[str, Any], rules: Dict[str, Any], machine_id: str = "") -> Optional[Dict[str, Any]]:
     return _evaluate_within_spec_suggestion_detail(detail, rules, machine_id).get("suggestion")
-
-
-class _ListHandler(logging.Handler):
-    """Captures training log records into a list for the retrain progress UI."""
-
-    def __init__(self, lines: list, lock: threading.Lock):
-        super().__init__()
-        self.lines = lines
-        self.lock = lock
-        self.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(message)s",
-            datefmt="%H:%M:%S",
-        ))
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            msg = self.format(record)
-            with self.lock:
-                self.lines.append(msg)
-        except Exception:
-            pass
 
 
 class _CallbackLogHandler(logging.Handler):
@@ -2575,6 +2584,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/api/settings":
                 if self._require_settings_user(api=True):
                     self._handle_api_settings()
+            elif path == "/api/settings/scratch-bundles":
+                if self._require_settings_user(api=True):
+                    self._handle_api_settings_scratch_bundles()
             elif path == "/api/settings/history":
                 if self._require_settings_user(api=True):
                     self._handle_api_settings_history(query)
@@ -2612,6 +2624,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path == "/api/dataset_export/file":
                 self._handle_dataset_export_file(query)
+                return
+            elif path == "/models/retrain-pool":
+                self._handle_retrain_pool_page()
+                return
+            elif path == "/api/retrain-pool":
+                self._handle_retrain_pool_list(query)
+                return
+            elif path == "/api/retrain-pool/file":
+                self._handle_retrain_pool_file(query)
                 return
             elif path == "/debug/scratch-batch":
                 self._handle_scratch_batch_page(path, query)
@@ -2704,6 +2725,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_over_review_save()
             elif path == "/api/ric/over-review/delete":
                 self._handle_over_review_delete()
+            elif path == "/api/ric/over-retrain-pool/add":
+                self._handle_over_retrain_pool_add()
             elif path == "/api/ric/within-spec-log/regenerate":
                 self._handle_within_spec_log_regenerate()
             elif path == "/api/ric/within-spec-suggestion/run":
@@ -2798,11 +2821,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/models/") and path.endswith("/tiles/decision"):
                 self._handle_models_tiles_decision()
                 return
+            elif path.startswith("/api/models/") and path.endswith("/retrain_pool/add"):
+                self._handle_models_retrain_pool_add()
+                return
             elif path.startswith("/api/models/") and path.endswith("/retrain_submodel_with_panels"):
                 self._handle_models_retrain_submodel_with_panels()
                 return
             elif path.startswith("/api/models/") and path.endswith("/retrain_submodel"):
                 self._handle_models_retrain_submodel()
+                return
+            elif path == "/api/retrain-pool/unadd":
+                self._handle_retrain_pool_unadd()
+                return
+            elif path == "/api/retrain-pool/delete":
+                self._handle_retrain_pool_delete()
                 return
             elif path.startswith("/api/models/") and path.endswith("/scan_self_score"):
                 self._handle_scan_self_score()
@@ -4519,6 +4551,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 },
                 "overReviewStats": {
                     "total": 0, "reviewed": 0, "unreviewed": 0,
+                    "poolRecords": 0,
+                    "poolTiles": 0,
                     "byCategory": _empty_over_cats(),
                 },
                 "scratchRescueStats": {
@@ -4539,6 +4573,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         miss_total = 0
         miss_by_cat = _empty_miss_cats()
         over_reviewed = 0
+        over_pool_records = 0
+        over_pool_tiles = 0
         over_by_cat = _empty_over_cats()
         scratch_stats = scratch_stats or {}
         scratch_panels = 0
@@ -4588,6 +4624,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 ),
                 "miss_review": None,
                 "over_review": None,
+                "over_retrain_pool": {
+                    "count": int(rec.get("over_retrain_pool_count") or 0),
+                    "latest_at": rec.get("over_retrain_pool_latest_at"),
+                },
                 "scratch_rescue": None,
                 "within_spec_log": None,
             }
@@ -4652,6 +4692,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 aoiOver += 1
             if ai == "NG" and ric == "OK":
                 aiOver += 1
+                pool_count = int(rec.get("over_retrain_pool_count") or 0)
+                if pool_count > 0:
+                    over_pool_records += 1
+                    over_pool_tiles += pool_count
                 if rec.get("over_review_category"):
                     over_reviewed += 1
                     cat = rec["over_review_category"]
@@ -4728,6 +4772,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "total": aiOver,
                 "reviewed": over_reviewed,
                 "unreviewed": aiOver - over_reviewed,
+                "poolRecords": over_pool_records,
+                "poolTiles": over_pool_tiles,
                 "byCategory": over_by_cat,
             },
             "scratchRescueStats": {
@@ -7361,6 +7407,55 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             limit = int(query.get("limit", [50])[0])
             history = self.db.get_config_change_history(param_name, limit) if self.db else []
             self._send_json({"history": history})
+        except Exception as e:
+            self._send_json({"error": str(e)})
+
+    def _handle_api_settings_scratch_bundles(self):
+        """API: 取得服務器上已有的刮痕分類器 bundle 檔案"""
+        try:
+            project_root = Path(__file__).resolve().parent
+            current_bundle = ""
+            if self.inferencer and getattr(self.inferencer, "config", None):
+                current_bundle = str(getattr(self.inferencer.config, "scratch_bundle_path", "") or "")
+
+            scan_dirs = [project_root / "deployment"]
+            if current_bundle:
+                current_path = Path(current_bundle)
+                if not current_path.is_absolute():
+                    current_path = project_root / current_path
+                scan_dirs.append(current_path.parent)
+
+            bundles = []
+            seen = set()
+            for scan_dir in scan_dirs:
+                if not scan_dir.exists() or not scan_dir.is_dir():
+                    continue
+                for path in scan_dir.glob("scratch_classifier*.pkl"):
+                    resolved = path.resolve()
+                    if resolved in seen or not path.is_file():
+                        continue
+                    seen.add(resolved)
+                    try:
+                        rel_path = path.relative_to(project_root).as_posix()
+                    except ValueError:
+                        rel_path = path.as_posix()
+                    stat = path.stat()
+                    bundles.append({
+                        "path": rel_path,
+                        "name": path.name,
+                        "size": stat.st_size,
+                        "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                    })
+
+            version_re = re.compile(r"scratch_classifier_v(\d+)\.pkl$", re.IGNORECASE)
+
+            def sort_key(item):
+                match = version_re.match(item["name"])
+                version = int(match.group(1)) if match else -1
+                return (version, item["mtime"], item["name"])
+
+            bundles.sort(key=sort_key, reverse=True)
+            self._send_json({"bundles": bundles, "current": current_bundle})
         except Exception as e:
             self._send_json({"error": str(e)})
 
@@ -10360,6 +10455,495 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return ""
         return "/api/train/new/thumb/" + urllib.parse.quote(rel.as_posix(), safe="/")
 
+    def _retrain_pool_base_dir(self) -> Path:
+        server_inst = self._capi_server_instance
+        cfg = server_inst.server_config.get("retrain_pool", {}) if server_inst else {}
+        if cfg.get("base_dir"):
+            return Path(cfg["base_dir"]).resolve()
+        return (self._dataset_export_base_dir().parent / "retrain_pool").resolve()
+
+    def _retrain_pool_file_url(self, pool_id: int, kind: str = "thumb") -> str:
+        return f"/api/retrain-pool/file?id={int(pool_id)}&kind={urllib.parse.quote(kind)}"
+
+    def _handle_retrain_pool_file(self, query: dict):
+        def _q(key, default=""):
+            value = query.get(key, default)
+            if isinstance(value, list):
+                return value[0] if value else default
+            return value
+
+        try:
+            pool_id = int(_q("id", "0"))
+        except (TypeError, ValueError):
+            self._send_error(400, "invalid id")
+            return
+        kind = _q("kind", "thumb")
+        items = self._capi_server_instance.database.get_over_retrain_pool_items([pool_id])
+        if not items:
+            self._send_404()
+            return
+        item = items[0]
+        path_str = item.get("thumb_path") if kind == "thumb" else item.get("source_path")
+        if not path_str:
+            path_str = item.get("source_path")
+        target = Path(path_str).resolve()
+        base = self._retrain_pool_base_dir()
+        try:
+            target.relative_to(base)
+        except ValueError:
+            self._send_error(403, "path outside retrain pool")
+            return
+        if not target.is_file():
+            self._send_404()
+            return
+        self._send_binary(str(target))
+
+    def _handle_retrain_pool_page(self):
+        from capi_train_new import LIGHTINGS
+        today = datetime.now().strftime("%Y-%m-%d")
+        template = self.jinja_env.get_template("retrain_pool.html")
+        html = template.render(
+            request_path="/models/retrain-pool",
+            lightings=list(LIGHTINGS),
+            today=today,
+        )
+        self._send_response(200, html)
+
+    def _handle_retrain_pool_list(self, query: dict):
+        def _q(key, default=""):
+            value = query.get(key, default)
+            if isinstance(value, list):
+                return value[0] if value else default
+            return value
+
+        try:
+            limit = max(1, min(int(_q("limit", "500")), 1000))
+            offset = max(0, int(_q("offset", "0")))
+            client_record_id = _q("client_record_id", "")
+            client_record_id = int(client_record_id) if client_record_id else None
+            rows, total = self._capi_server_instance.database.list_over_retrain_pool(
+                start_date=_q("start_date", "") or None,
+                end_date=_q("end_date", "") or None,
+                machine_id=_q("machine_id", "") or None,
+                lighting=_q("lighting", "") or None,
+                zone=_q("zone", None),
+                client_record_id=client_record_id,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+            return
+
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["thumb_url"] = self._retrain_pool_file_url(item["id"], "thumb")
+            item["image_url"] = self._retrain_pool_file_url(item["id"], "source")
+            item["created_date"] = (item.get("created_at") or "")[:10]
+            items.append(item)
+        self._send_json({"items": items, "total": total, "limit": limit, "offset": offset})
+
+    def _safe_unlink_retrain_pool_file(self, path_str: str) -> bool:
+        if not path_str:
+            return False
+        target = Path(path_str).resolve()
+        base = self._retrain_pool_base_dir()
+        try:
+            target.relative_to(base)
+        except ValueError:
+            return False
+        if target.is_file():
+            target.unlink()
+            return True
+        return False
+
+    def _safe_unlink_train_new_file(self, path_str: str) -> bool:
+        if not path_str:
+            return False
+        target = Path(path_str).resolve()
+        base = Path(".tmp/train_new_thumbs").resolve()
+        try:
+            target.relative_to(base)
+        except ValueError:
+            return False
+        if target.is_file():
+            target.unlink()
+            return True
+        return False
+
+    @staticmethod
+    def _retrain_pool_training_paths(item: dict) -> Tuple[Path, Path]:
+        unit = str(item.get("added_to_unit") or "")
+        if "-" in unit:
+            lighting, zone = unit.rsplit("-", 1)
+        else:
+            lighting = str(item.get("lighting") or "")
+            zone = str(item.get("zone") or "")
+        job_id = str(item.get("added_to_job_id") or "")
+        src_path = Path(item.get("source_path") or "")
+        filename = f"pool_{int(item['id']):06d}_{src_path.name}"
+        train_pool_dir = Path(".tmp/train_new_thumbs") / job_id / "retrain_pool" / lighting / zone
+        return (
+            (train_pool_dir / "tiles" / filename).resolve(),
+            (train_pool_dir / "thumb" / filename).resolve(),
+        )
+
+    def _handle_retrain_pool_unadd(self):
+        data = self._read_json_body()
+        if data is None:
+            return
+        try:
+            pool_id = int(data.get("id"))
+        except (TypeError, ValueError):
+            self._send_json({"error": "id 必須是整數"}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        items = db.get_over_retrain_pool_items([pool_id])
+        if not items:
+            self._send_json({"error": "pool item not found"}, status=404)
+            return
+        item = items[0]
+        job_id = str(item.get("added_to_job_id") or "")
+        if not job_id:
+            self._send_json({"ok": True, "message": "此 Pool item 尚未加入訓練清單"})
+            return
+        if self._train_new_worker_alive(job_id):
+            self._send_json({"error": "此訓練 job 仍在執行中，請先停止訓練後再移出清單"}, status=409)
+            return
+
+        train_source_path, train_thumb_path = self._retrain_pool_training_paths(item)
+        deleted_rows = db.delete_tile_pool_by_source_paths(job_id, [str(train_source_path)])
+        deleted_files = 0
+        deleted_files += int(self._safe_unlink_train_new_file(str(train_thumb_path)))
+        deleted_files += int(self._safe_unlink_train_new_file(str(train_source_path)))
+        updated_rows = db.clear_over_retrain_pool_added([pool_id])
+        self._send_json({
+            "ok": True,
+            "pool_id": pool_id,
+            "deleted_training_rows": deleted_rows,
+            "deleted_files": deleted_files,
+            "updated_rows": updated_rows,
+            "message": "已移出訓練清單；Pool 原始資料仍保留",
+        })
+
+    def _handle_retrain_pool_delete(self):
+        data = self._read_json_body()
+        if data is None:
+            return
+        try:
+            pool_id = int(data.get("id"))
+        except (TypeError, ValueError):
+            self._send_json({"error": "id 必須是整數"}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        items = db.get_over_retrain_pool_items([pool_id])
+        if not items:
+            self._send_json({"error": "pool item not found"}, status=404)
+            return
+        if items[0].get("added_to_job_id"):
+            self._send_json({
+                "error": "此 Pool item 已加入訓練清單，請先移出清單後再刪除",
+            }, status=409)
+            return
+
+        item = db.delete_over_retrain_pool_item(pool_id)
+        if not item:
+            self._send_json({"error": "pool item not found"}, status=404)
+            return
+
+        deleted_files = 0
+        deleted_files += int(self._safe_unlink_retrain_pool_file(item.get("thumb_path") or ""))
+        deleted_files += int(self._safe_unlink_retrain_pool_file(item.get("source_path") or ""))
+        self._send_json({
+            "ok": True,
+            "deleted_id": pool_id,
+            "deleted_files": deleted_files,
+            "kept_files": False,
+        })
+
+    @staticmethod
+    def _pool_ok_prefixes(datastr: str) -> set:
+        parsed = parse_datastr_per_prefix(datastr or "")
+        return {prefix for prefix, result in parsed.items() if result == "OK"}
+
+    def _handle_over_retrain_pool_add(self):
+        data = self._read_json_body()
+        if data is None:
+            return
+        try:
+            client_record_id = int(data.get("client_record_id"))
+        except (TypeError, ValueError):
+            self._send_json({"success": False, "error": "client_record_id 必須是整數"}, status=400)
+            return
+
+        from capi_database import CAPIDatabase
+        import cv2
+
+        db = self._capi_server_instance.database
+        record = db.get_client_accuracy_record(client_record_id)
+        if not record:
+            self._send_json({"success": False, "error": "找不到 client record"}, status=404)
+            return
+
+        ai = str(record.get("result_ai") or "")
+        ric = CAPIDatabase.parse_ric_judgment(record.get("datastr") or "")
+        if not ai.startswith("NG") or ric != "OK":
+            self._send_json({"success": False, "error": "只有 AI=NG 且 RIC=OK 的過檢紀錄可加入重訓 Pool"}, status=400)
+            return
+
+        inference_record_id = record.get("inference_record_id")
+        if not inference_record_id:
+            self._send_json({"success": False, "error": "此筆沒有對應推論紀錄，無法裁 tile"}, status=400)
+            return
+
+        ok_prefixes = self._pool_ok_prefixes(record.get("datastr") or "")
+        if not ok_prefixes:
+            self._send_json({"success": False, "error": "DATASTR 解析不到 OK 畫面，未自動加入"}, status=400)
+            return
+
+        detail = db.get_record_detail(int(inference_record_id))
+        if not detail:
+            self._send_json({"success": False, "error": "找不到推論明細"}, status=404)
+            return
+
+        server_inst = self._capi_server_instance
+        path_mapping = getattr(server_inst, "path_mapping", {}) if server_inst else {}
+        base_dir = self._retrain_pool_base_dir()
+        client_date = (record.get("time_stamp") or datetime.now().strftime("%Y-%m-%d"))[:10]
+        machine_id = detail.get("model_id") or record.get("mach_id") or ""
+        machine_no = detail.get("machine_no") or record.get("mach_id") or ""
+        safe_machine_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", machine_id or "unknown")[:80] or "unknown"
+
+        rows = []
+        skipped = []
+        for image in detail.get("images", []):
+            image_name = image.get("image_name") or Path(image.get("image_path") or "").name
+            screen_prefix = extract_prefix(image_name)
+            if screen_prefix not in ok_prefixes:
+                continue
+            if int(image.get("is_bomb") or 0):
+                skipped.append({"image": image_name, "reason": "bomb image"})
+                continue
+            source_image_path = resolve_source_path(image.get("image_path") or "", path_mapping)
+            image_bgr = cv2.imread(str(source_image_path), cv2.IMREAD_UNCHANGED)
+            if image_bgr is None:
+                skipped.append({"image": image_name, "reason": f"read failed: {source_image_path}"})
+                continue
+
+            for tile in image.get("tiles", []):
+                if not int(tile.get("is_anomaly") or 0):
+                    continue
+                if int(tile.get("is_bomb") or 0) or int(tile.get("is_exclude_zone") or 0):
+                    continue
+                tile_id = int(tile.get("id"))
+                x = max(0, int(tile.get("x") or 0))
+                y = max(0, int(tile.get("y") or 0))
+                w = max(1, int(tile.get("width") or 0))
+                h = max(1, int(tile.get("height") or 0))
+                crop = image_bgr[y:y + h, x:x + w].copy()
+                if crop.size == 0:
+                    skipped.append({"tile_result_id": tile_id, "reason": "empty crop"})
+                    continue
+                pad_bottom = max(0, h - crop.shape[0])
+                pad_right = max(0, w - crop.shape[1])
+                if pad_bottom or pad_right:
+                    crop = cv2.copyMakeBorder(
+                        crop, 0, pad_bottom, 0, pad_right,
+                        cv2.BORDER_REPLICATE,
+                )
+
+                zone = tile.get("zone") or ""
+                safe_screen = re.sub(r"[^A-Za-z0-9_.-]+", "_", screen_prefix or "unknown")[:80] or "unknown"
+                safe_zone = re.sub(r"[^A-Za-z0-9_.-]+", "_", zone or "unknown")[:40] or "unknown"
+                out_dir = base_dir / client_date / safe_machine_id / safe_screen / safe_zone
+                tile_dir = out_dir / "tiles"
+                thumb_dir = out_dir / "thumb"
+                tile_dir.mkdir(parents=True, exist_ok=True)
+                thumb_dir.mkdir(parents=True, exist_ok=True)
+                filename = f"c{client_record_id}_r{inference_record_id}_i{image.get('id')}_t{tile_id}.png"
+                tile_path = tile_dir / filename
+                thumb_path = thumb_dir / filename
+                if not tile_path.exists() and not cv2.imwrite(str(tile_path), crop):
+                    skipped.append({"tile_result_id": tile_id, "reason": "write crop failed"})
+                    continue
+                if not thumb_path.exists():
+                    thumb = cv2.resize(crop, (96, 96))
+                    cv2.imwrite(str(thumb_path), thumb)
+
+                rows.append({
+                    "client_record_id": client_record_id,
+                    "inference_record_id": int(inference_record_id),
+                    "tile_result_id": tile_id,
+                    "image_result_id": int(image.get("id")),
+                    "machine_id": machine_id,
+                    "machine_no": machine_no,
+                    "pnl_id": record.get("pnl_id") or "",
+                    "client_time_stamp": record.get("time_stamp") or "",
+                    "datastr": record.get("datastr") or "",
+                    "screen_prefix": screen_prefix,
+                    "lighting": screen_prefix,
+                    "zone": zone,
+                    "source_path": str(tile_path.resolve()),
+                    "thumb_path": str(thumb_path.resolve()),
+                    "tile_x": x,
+                    "tile_y": y,
+                    "tile_w": w,
+                    "tile_h": h,
+                    "score": float(tile.get("score") or 0.0),
+                })
+
+        if not rows:
+            self._send_json({
+                "success": False,
+                "error": "沒有可加入的過檢 tile",
+                "skipped": skipped[:20],
+            }, status=400)
+            return
+
+        result = db.insert_over_retrain_pool_rows(rows)
+        _, total_for_record = db.list_over_retrain_pool(
+            client_record_id=client_record_id,
+            limit=1,
+            offset=0,
+        )
+        self._send_json({
+            "success": True,
+            "inserted": len(result["inserted_ids"]),
+            "existing": len(result["existing_ids"]),
+            "pool_ids": result["inserted_ids"] + result["existing_ids"],
+            "total_for_record": total_for_record,
+            "skipped": skipped[:20],
+            "message": f"已加入 {len(result['inserted_ids'])} 個 tile，既有 {len(result['existing_ids'])} 個",
+        })
+
+    def _handle_models_retrain_pool_add(self):
+        from capi_train_new import LIGHTINGS, ZONES
+
+        parts = self.path.split("/")
+        try:
+            bundle_id = int(parts[3])
+        except (ValueError, IndexError):
+            self._send_json({"error": "invalid bundle id"}, status=400)
+            return
+        data = self._read_json_body()
+        if data is None:
+            return
+        pool_ids = data.get("pool_ids")
+        lighting = data.get("lighting")
+        zone = data.get("zone")
+        if not isinstance(pool_ids, list) or not pool_ids:
+            self._send_json({"error": "pool_ids 必須是非空陣列"}, status=400)
+            return
+        if lighting not in LIGHTINGS:
+            self._send_json({"error": f"lighting 必須為 {LIGHTINGS}"}, status=400)
+            return
+        if zone not in ZONES:
+            self._send_json({"error": f"zone 必須為 {ZONES}"}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        bundle = db.get_model_bundle(bundle_id)
+        if not bundle:
+            self._send_json({"error": "bundle not found"}, status=404)
+            return
+        job_id = bundle.get("job_id") or ""
+        if not job_id:
+            self._send_json({"error": "此 bundle 無關聯 job_id（訓練資料已刪），無法匯入 Pool"}, status=400)
+            return
+
+        try:
+            pool_ids = [int(x) for x in pool_ids]
+        except (TypeError, ValueError):
+            self._send_json({"error": "pool_ids 必須為整數陣列"}, status=400)
+            return
+        items = db.get_over_retrain_pool_items(pool_ids)
+        if len(items) != len(set(pool_ids)):
+            self._send_json({"error": "pool_ids 含不存在項目"}, status=404)
+            return
+
+        already_added = [i for i in items if i.get("added_to_job_id")]
+        if already_added:
+            units = sorted({
+                str(i.get("added_to_unit") or i.get("added_to_job_id") or "")
+                for i in already_added
+            })
+            suffix = f"（{', '.join(u for u in units if u)})" if units else ""
+            self._send_json({
+                "error": f"有 {len(already_added)} 筆 Pool tile 已加入過訓練清單，不能重複加入{suffix}",
+                "already_added_ids": [int(i["id"]) for i in already_added],
+            }, status=409)
+            return
+
+        wrong_machine = [i for i in items if i.get("machine_id") != bundle.get("machine_id")]
+        if wrong_machine:
+            self._send_json({"error": f"有 {len(wrong_machine)} 筆 Pool 機種不屬於此 bundle"}, status=400)
+            return
+        wrong_lighting = [i for i in items if i.get("lighting") != lighting]
+        if wrong_lighting:
+            self._send_json({"error": f"有 {len(wrong_lighting)} 筆 Pool lighting 不是 {lighting}"}, status=400)
+            return
+        wrong_zone = [i for i in items if i.get("zone") and i.get("zone") != zone]
+        if wrong_zone:
+            self._send_json({"error": f"有 {len(wrong_zone)} 筆 Pool zone 不是 {zone}"}, status=400)
+            return
+
+        missing_files = [i for i in items if not Path(i.get("source_path") or "").is_file()]
+        if missing_files:
+            self._send_json({"error": f"有 {len(missing_files)} 筆 Pool 圖檔不存在，請先刪除或重建"}, status=400)
+            return
+
+        import shutil as _shutil
+        train_pool_dir = Path(".tmp/train_new_thumbs") / job_id / "retrain_pool" / lighting / zone
+        train_tile_dir = train_pool_dir / "tiles"
+        train_thumb_dir = train_pool_dir / "thumb"
+        train_tile_dir.mkdir(parents=True, exist_ok=True)
+        train_thumb_dir.mkdir(parents=True, exist_ok=True)
+        existing_paths = {
+            str(Path(t["source_path"]).resolve())
+            for t in db.list_tile_pool(job_id, lighting=lighting, zone=zone, source="ok")
+        }
+        new_tiles = []
+        inserted_pool_ids = []
+        existing_count = 0
+        for item in items:
+            src_path = Path(item["source_path"]).resolve()
+            src_thumb = Path(item.get("thumb_path") or item["source_path"]).resolve()
+            filename = f"pool_{int(item['id']):06d}_{src_path.name}"
+            train_source_path = (train_tile_dir / filename).resolve()
+            train_thumb_path = (train_thumb_dir / filename).resolve()
+            if str(train_source_path) in existing_paths:
+                existing_count += 1
+                continue
+            if not train_source_path.exists():
+                _shutil.copy2(src_path, train_source_path)
+            if not train_thumb_path.exists():
+                _shutil.copy2(src_thumb if src_thumb.is_file() else src_path, train_thumb_path)
+            new_tiles.append({
+                "lighting": lighting,
+                "zone": zone,
+                "source": "ok",
+                "source_path": str(train_source_path),
+                "thumb_path": str(train_thumb_path),
+            })
+            inserted_pool_ids.append(int(item["id"]))
+            existing_paths.add(str(train_source_path))
+
+        if new_tiles:
+            db.insert_tile_pool(job_id, new_tiles)
+        db.mark_over_retrain_pool_added(pool_ids, bundle_id, job_id, f"{lighting}-{zone}")
+        self._send_json({
+            "ok": True,
+            "inserted": len(new_tiles),
+            "existing": existing_count,
+            "pool_ids": pool_ids,
+            "inserted_pool_ids": inserted_pool_ids,
+            "unit": f"{lighting}-{zone}",
+            "message": f"已加入訓練清單 {len(new_tiles)} 個 Pool tile，既有 {existing_count} 個",
+        })
+
     @staticmethod
     def _decorate_tiles_with_scores(tiles: list, db, score_from_bundle_id, sort_by: str) -> list:
         """In-place 為 tile dict 加 score / score_quartile，並依 sort_by 排序。"""
@@ -10422,24 +11006,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _retrain_worker(job: dict, params: dict) -> None:
-        """Background thread: merge manifests → train → update job state."""
+        """Background thread: merge manifests, then supervise training subprocess."""
+        import os as _os
+        import subprocess as _subprocess
+        import sys as _sys
+        import time as _time
         import traceback
         from tools.merge_over_review_manifests import run as merge_run
-        from scripts.over_review_poc.train_final_model import main as train_main
 
         log_lines = job["log_lines"]
         log_lock = job["_log_lock"]
 
-        handler = _ListHandler(log_lines, log_lock)
-        watched_loggers = [
-            logging.getLogger("scripts.over_review_poc.train_final_model"),
-            logging.getLogger("scripts.over_review_poc.finetune_lora"),
-            logging.getLogger("scripts.over_review_poc.dataset"),
-        ]
-        previous_logger_levels = [(lg, lg.level) for lg in watched_loggers]
-        for lg in watched_loggers:
-            lg.setLevel(logging.INFO)
-            lg.addHandler(handler)
+        def _append_log(message: str) -> None:
+            with log_lock:
+                log_lines.append(message)
 
         try:
             # Step 1: merge manifests
@@ -10447,21 +11027,41 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 job["step"] = "merge"
 
             base = Path(params["manifest_base"])
-            with log_lock:
-                log_lines.append(f"[merge] 掃描資料目錄 {base} ...")
-            merge_stats = merge_run(base, set())
+            _append_log(f"[merge] 掃描資料目錄 {base} ...")
+
+            def _log_merge_progress(message: str) -> None:
+                _append_log(f"[merge] {message}")
+
+            if "progress" in inspect.signature(merge_run).parameters:
+                merge_stats = merge_run(base, set(), progress=_log_merge_progress)
+            else:
+                _log_merge_progress("目前 merge 工具不支援進度回報，改用舊版合併流程")
+                merge_stats = merge_run(base, set())
             manifest_path = Path(merge_stats["out_path"])
-            with log_lock:
-                log_lines.append(
-                    f"[merge] 完成：{merge_stats['total_rows']} 筆，"
-                    f"共 {len(merge_stats['batches'])} 批次"
-                )
+            _append_log(
+                f"[merge] 完成：{merge_stats['total_rows']} 筆，"
+                f"共 {len(merge_stats['batches'])} 批次"
+            )
 
             # Step 2: train
             with CAPIWebHandler._retrain_state["lock"]:
                 job["step"] = "train"
 
+            project_root = Path(__file__).resolve().parent
+            output_path = Path(params["output_path"])
+            output_file = output_path if output_path.is_absolute() else project_root / output_path
+            log_dir = output_file.parent / "retrain_logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            train_log_file = log_dir / f"{job['job_id']}.log"
+            summary_json = log_dir / f"{job['job_id']}.summary.json"
+            train_log_file.write_text("", encoding="utf-8")
+            try:
+                summary_json.unlink()
+            except FileNotFoundError:
+                pass
+
             train_argv = [
+                _sys.executable, "-u", "-m", "scripts.over_review_poc.train_final_model",
                 "--manifest", str(manifest_path),
                 "--transform", "clahe",
                 "--clahe-clip", str(params.get("clahe_clip", 4.0)),
@@ -10471,18 +11071,84 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "--epochs", str(params.get("epochs", 15)),
                 "--calib-frac", str(params.get("calib_frac", 0.2)),
                 "--output", str(params["output_path"]),
+                "--summary-json", str(summary_json),
             ]
             if params.get("dinov2_repo"):
                 train_argv += ["--dinov2-repo", str(params["dinov2_repo"])]
             if params.get("dinov2_weights"):
                 train_argv += ["--dinov2-weights", str(params["dinov2_weights"])]
 
-            with log_lock:
-                log_lines.append(
-                    f"[train] 開始訓練：epochs={params.get('epochs', 15)}, "
-                    f"rank={params.get('rank', 16)}, output={params['output_path']}"
+            _append_log(
+                f"[train] 開始訓練 subprocess：epochs={params.get('epochs', 15)}, "
+                f"rank={params.get('rank', 16)}, output={params['output_path']}"
+            )
+            _append_log(f"[train] log={train_log_file}")
+
+            env = {**_os.environ, "PYTHONUNBUFFERED": "1"}
+            with open(train_log_file, "ab") as log_f:
+                proc = _subprocess.Popen(
+                    train_argv,
+                    cwd=str(project_root),
+                    env=env,
+                    stdout=log_f,
+                    stderr=_subprocess.STDOUT,
                 )
-            summary = train_main(train_argv)
+            _append_log(f"[train] subprocess pid={proc.pid}")
+
+            tail_pos = 0
+            last_subprocess_log_at = _time.monotonic()
+            next_heartbeat_at = last_subprocess_log_at + 60.0
+
+            def _drain_train_log() -> bool:
+                nonlocal tail_pos
+                try:
+                    with open(train_log_file, "rb") as f:
+                        f.seek(tail_pos)
+                        data = f.read()
+                        tail_pos = f.tell()
+                except FileNotFoundError:
+                    return False
+                if not data:
+                    return False
+                text = data.decode("utf-8", errors="replace")
+                for line in text.splitlines():
+                    line = line.rstrip()
+                    if line:
+                        _append_log(line)
+                return True
+
+            while True:
+                now = _time.monotonic()
+                if _drain_train_log():
+                    last_subprocess_log_at = now
+                    next_heartbeat_at = now + 60.0
+                ret = proc.poll()
+                if ret is not None:
+                    _drain_train_log()
+                    break
+                if now >= next_heartbeat_at:
+                    quiet_sec = int(now - last_subprocess_log_at)
+                    _append_log(
+                        f"[train] subprocess pid={proc.pid} still running; "
+                        f"no new train log for {quiet_sec}s"
+                    )
+                    next_heartbeat_at = now + 60.0
+                _time.sleep(1.0)
+
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"train subprocess exited with code {proc.returncode}; "
+                    f"see {train_log_file}"
+                )
+
+            if summary_json.is_file():
+                summary = json.loads(summary_json.read_text(encoding="utf-8"))
+            elif output_file.is_file():
+                summary = {"output_path": str(params["output_path"])}
+            else:
+                raise RuntimeError(
+                    f"train subprocess exited with code 0 but output was not created: {output_file}"
+                )
 
             # Done
             with CAPIWebHandler._retrain_state["lock"]:
@@ -10497,11 +11163,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 job["error"] = err
             with log_lock:
                 log_lines.append(f"[ERROR] {err}")
-
-        finally:
-            for lg, previous_level in previous_logger_levels:
-                lg.removeHandler(handler)
-                lg.setLevel(previous_level)
 
     # ------------------------------------------------------------------ #
     #  Model registry handlers                                            #

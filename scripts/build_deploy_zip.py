@@ -76,6 +76,7 @@ PATCH_DEPLOY_ROOT_FILES = {
 }
 
 PATCH_DEPLOY_PREFIXES = (
+    "scripts/over_review_poc/",
     "templates/",
     "static/",
     "tools/",
