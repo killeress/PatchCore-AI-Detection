@@ -3037,6 +3037,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             page = max(1, page)
         except (ValueError, TypeError):
             page = 1
+        auto_refresh_seconds = 0
+        if "auto_refresh" in query:
+            try:
+                auto_refresh_seconds = int(query.get("auto_refresh", ["300"])[0])
+            except (ValueError, TypeError, IndexError):
+                auto_refresh_seconds = 300
+            auto_refresh_seconds = max(60, min(auto_refresh_seconds, 3600))
 
         offset = (page - 1) * limit
         records, total_count = self.db.query_paged(limit, offset) if self.db else ([], 0)
@@ -3065,6 +3072,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             limit=limit,
             total_count=total_count,
             total_pages=total_pages,
+            auto_refresh_seconds=auto_refresh_seconds,
         )
         self._send_response(200, html)
 
