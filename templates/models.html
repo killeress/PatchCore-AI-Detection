@@ -41,6 +41,7 @@
   .mlib-info dd { margin: 0; color: #cdd6f4; font-family: monospace; }
   .mlib-actions-row { display: flex; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #313244; flex-wrap: wrap; }
   .mlib-btn { background: #1e1e2e; color: #a6adc8; border: 1px solid #45475a; padding: 7px 14px; border-radius: 4px; font-size: .8rem; cursor: pointer; }
+  .mlib-btn-primary { background: #89b4fa; color: #1e1e2e; border-color: #89b4fa; font-weight: 700; }
   .mlib-btn-danger { color: #f38ba8; border-color: #f38ba8; }
   .mlib-btn-close { background: #45475a; color: #cdd6f4; border: 0; }
   .mlib-thr-edit { background: transparent; border: 1px solid #45475a; color: #a6adc8; padding: 0 5px; border-radius: 3px; font-size: .72rem; cursor: pointer; margin-left: 4px; }
@@ -167,12 +168,19 @@
     font-weight: 700; cursor: pointer; margin-left: 8px;
   }
   .scan-self-btn[disabled] { background: #45475a; color: #6c7086; cursor: wait; }
+  .mlib-pool-table-wrap { max-height: 520px; overflow: auto; background: #11111b; border-radius: 6px; }
+  .mlib-pool-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; background: #000; display: block; }
+  .mlib-pool-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+  .mlib-pool-actions input[type="checkbox"] { transform: translateY(1px); }
 </style>
 
 <div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
     <h1 style="color:#cdd6f4;margin:0;">模型庫</h1>
-    <a href="/train/new" style="background:#89b4fa;color:#1e1e2e;padding:7px 16px;border-radius:5px;font-weight:700;text-decoration:none;font-size:.85rem;">+ 新機種訓練</a>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <a href="/models/retrain-pool" style="background:#1e1e2e;color:#a6adc8;border:1px solid #45475a;padding:7px 14px;border-radius:5px;font-weight:700;text-decoration:none;font-size:.85rem;">重訓 Pool</a>
+      <a href="/train/new" style="background:#89b4fa;color:#1e1e2e;padding:7px 16px;border-radius:5px;font-weight:700;text-decoration:none;font-size:.85rem;">+ 新機種訓練</a>
+    </div>
   </div>
 
   {% for machine_id, bundles in grouped.items() %}
@@ -232,6 +240,7 @@
       <button class="mlib-tab" data-tab="metrics" onclick="switchTab('metrics')">10 unit 品質</button>
       <button class="mlib-tab" data-tab="ok" onclick="switchTab('ok')">OK tiles</button>
       <button class="mlib-tab" data-tab="ng" onclick="switchTab('ng')">NG tiles</button>
+      <button class="mlib-tab" data-tab="pool" onclick="switchTab('pool')">重訓 Pool</button>
     </div>
 
     <div id="mlibPaneInfo" class="mlib-pane active mlib-info">
@@ -327,6 +336,53 @@
         <span style="margin-left:8px;color:#6c7086;">（NG 僅供檢視，Del/A 無效）</span>
       </div>
       <div id="mlibNgGrid" class="mlib-grid" data-bundle-id=""></div>
+    </div>
+
+    <div id="mlibPanePool" class="mlib-pane">
+      <div class="mlib-filter-row">
+        <label>Lighting：
+          <select id="mlibPoolLighting" onchange="loadRetrainPoolForBundle()">
+            <option value="">全部</option>
+            {% for lighting in lightings %}<option>{{ lighting }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Zone：
+          <select id="mlibPoolZone" onchange="loadRetrainPoolForBundle()">
+            <option value="">全部</option>
+            <option>inner</option><option>edge</option>
+          </select>
+        </label>
+        <span id="mlibPoolCount" style="color:#a6adc8;font-size:.78rem;"></span>
+        <a href="/models/retrain-pool" target="_blank" rel="noopener" class="mlib-btn" style="text-decoration:none;">開啟 Pool 頁</a>
+      </div>
+      <div class="mlib-pool-actions">
+        <label style="color:#a6adc8;font-size:.78rem;">
+          <input type="checkbox" id="mlibPoolSelectAll" onchange="togglePoolSelectAll(this.checked)">
+          全選目前顯示
+        </label>
+        <button id="mlibPoolAddBtn" class="mlib-btn mlib-btn-primary" onclick="addSelectedPoolToTrainingList()">
+          加入訓練清單
+        </button>
+        <span id="mlibPoolStatus" style="color:#a6adc8;font-size:.78rem;"></span>
+      </div>
+      <div class="mlib-pool-table-wrap">
+        <table class="mlib-table">
+          <thead>
+            <tr>
+              <th style="width:34px;"></th>
+              <th>Tile</th>
+              <th>Lighting</th>
+              <th>Zone</th>
+              <th>Panel</th>
+              <th>Score</th>
+              <th>收集時間</th>
+              <th>狀態</th>
+              <th>來源</th>
+            </tr>
+          </thead>
+          <tbody id="mlibPoolBody"></tbody>
+        </table>
+      </div>
     </div>
 
     <div class="mlib-actions-row" style="justify-content:flex-end;">
@@ -500,19 +556,29 @@ function closeModal() {
   currentBundleId = null;
   currentDetail = null;
   _bundleDetail = null;
+  _poolRowsCache = [];
   if (_retrainPollTimer) { clearInterval(_retrainPollTimer); _retrainPollTimer = null; }
 }
 
 function switchTab(name) {
   // 切換 tab 時清掉前一個 tab 的焦點（避免殘留紫色 outline）
   if (_focusedTileEl) { _focusedTileEl.classList.remove('focused'); _focusedTileEl = null; }
-  ['info','metrics','ok','ng'].forEach(n => {
+  ['info','metrics','ok','ng','pool'].forEach(n => {
     const btn = document.querySelector(`.mlib-tab[data-tab="${n}"]`);
     const pane = document.getElementById('mlibPane' + n.charAt(0).toUpperCase() + n.slice(1));
     if (btn) btn.classList.toggle('active', n === name);
     if (pane) pane.classList.toggle('active', n === name);
   });
   if (name === 'ok' || name === 'ng') loadTiles(name);
+  if (name === 'pool') {
+    const okLighting = document.getElementById('mlibOkLighting').value;
+    const okZone = document.getElementById('mlibOkZone').value;
+    const poolLighting = document.getElementById('mlibPoolLighting');
+    const poolZone = document.getElementById('mlibPoolZone');
+    if (!poolLighting.value && okLighting) poolLighting.value = okLighting;
+    if (!poolZone.value && okZone) poolZone.value = okZone;
+    loadRetrainPoolForBundle();
+  }
 }
 
 function fmtBytes(n) {
@@ -835,6 +901,102 @@ function loadTiles(source) {
       if (source === 'ok') updatePendingBar();
     })
     .catch(e => { grid.innerHTML = `<div class="mlib-empty">載入失敗：${e}</div>`; });
+}
+
+let _poolRowsCache = [];
+
+async function loadRetrainPoolForBundle() {
+  const body = document.getElementById('mlibPoolBody');
+  const cnt = document.getElementById('mlibPoolCount');
+  const status = document.getElementById('mlibPoolStatus');
+  if (!currentDetail) return;
+  body.innerHTML = `<tr><td colspan="9" class="mlib-empty">載入中...</td></tr>`;
+  status.textContent = '';
+  const params = new URLSearchParams({
+    machine_id: currentDetail.machine_id,
+    limit: '500',
+  });
+  const lighting = document.getElementById('mlibPoolLighting').value;
+  const zone = document.getElementById('mlibPoolZone').value;
+  if (lighting) params.set('lighting', lighting);
+  if (zone) params.set('zone', zone);
+
+  try {
+    const resp = await fetch(`/api/retrain-pool?${params}`);
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+    _poolRowsCache = data.items || [];
+    cnt.textContent = `共 ${data.total || 0} 個（顯示前 ${Math.min(data.total || 0, data.limit || 500)} 個）`;
+    document.getElementById('mlibPoolSelectAll').checked = false;
+    if (!_poolRowsCache.length) {
+      body.innerHTML = `<tr><td colspan="9" class="mlib-empty">此機種目前沒有符合條件的 Pool tile</td></tr>`;
+      return;
+    }
+    body.innerHTML = _poolRowsCache.map(item => `
+      <tr style="${item.added_to_job_id ? 'opacity:.58;' : ''}">
+        <td><input type="checkbox" class="pool-check" value="${item.id}" ${item.added_to_job_id ? 'disabled' : ''}></td>
+        <td><a href="${item.image_url}" target="_blank" rel="noopener"><img class="mlib-pool-thumb" src="${item.thumb_url}" loading="lazy"></a></td>
+        <td><code>${renderText(item.lighting)}</code></td>
+        <td>${renderText(item.zone || '未分區')}</td>
+        <td><code>${renderText(item.pnl_id)}</code></td>
+        <td>${item.score != null ? Number(item.score).toFixed(3) : '—'}</td>
+        <td>${renderText(item.created_at || '')}</td>
+        <td>${item.added_to_job_id ? `已加入 ${renderText(item.added_to_unit || '')}` : '可加入'}</td>
+        <td><a href="/record/${item.inference_record_id}" target="_blank" rel="noopener" style="color:#89b4fa;">推論</a></td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    _poolRowsCache = [];
+    cnt.textContent = '';
+    body.innerHTML = `<tr><td colspan="9" class="mlib-empty">載入失敗：${renderText(e.message)}</td></tr>`;
+  }
+}
+
+function togglePoolSelectAll(checked) {
+  document.querySelectorAll('#mlibPoolBody .pool-check:not(:disabled)').forEach(cb => { cb.checked = checked; });
+}
+
+function selectedPoolIds() {
+  return Array.from(document.querySelectorAll('#mlibPoolBody .pool-check:checked:not(:disabled)'))
+    .map(cb => parseInt(cb.value, 10))
+    .filter(Number.isFinite);
+}
+
+async function addSelectedPoolToTrainingList() {
+  if (!currentBundleId) return;
+  const lighting = document.getElementById('mlibPoolLighting').value;
+  const zone = document.getElementById('mlibPoolZone').value;
+  const ids = selectedPoolIds();
+  if (!lighting || !zone) { alert('請先指定單一 lighting/zone'); return; }
+  if (!ids.length) { alert('請先勾選要加入的 Pool tile'); return; }
+  if (!confirm(`確認將 ${ids.length} 個 Pool tile 加入 ${lighting}-${zone} 的訓練清單？\n加入後不會立刻重訓，可再到 OK tiles 按「重訓此子模型」。`)) return;
+
+  const btn = document.getElementById('mlibPoolAddBtn');
+  const status = document.getElementById('mlibPoolStatus');
+  btn.disabled = true;
+  status.textContent = '匯入 Pool...';
+  try {
+    const addResp = await fetch(`/api/models/${currentBundleId}/retrain_pool/add`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ pool_ids: ids, lighting, zone }),
+    });
+    const addData = await addResp.json();
+    if (!addResp.ok || addData.error) throw new Error(addData.error || `HTTP ${addResp.status}`);
+
+    document.getElementById('mlibOkLighting').value = lighting;
+    document.getElementById('mlibOkZone').value = zone;
+    await refreshPendingIndicator(currentBundleId);
+    await loadRetrainPoolForBundle();
+    status.textContent = (addData.message || '已加入訓練清單') + '；到 OK tiles 可啟動重訓';
+    if (document.getElementById('mlibPaneOk').classList.contains('active')) {
+      loadTiles('ok');
+    }
+  } catch (e) {
+    alert('加入失敗：' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function deleteTrainingData() {

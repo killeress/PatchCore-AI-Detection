@@ -1936,6 +1936,12 @@
                 <option value="percentile_99">99th Percentile (第99百分位 - 穩定的極值代表)</option>
             </select>
 
+            <select id="modal-scratch-bundle-select"
+                style="display:none; width: 100%; background: #0f172a; border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-family: 'Fira Code', monospace; font-size: 0.88rem; margin-bottom: 8px; outline: none;">
+            </select>
+            <div id="modal-scratch-bundle-help"
+                style="display:none; color: var(--text-muted); font-size: 0.78rem; margin-bottom: 16px; line-height: 1.5;"></div>
+
             <label id="modal-reason-label">修改原因 <span style="color:#ef4444;">*必填</span></label>
             <textarea id="modal-reason" placeholder="請說明修改原因，例如：調整閾值以降低過檢率..."></textarea>
         </div>
@@ -1953,6 +1959,13 @@
     // ── State ──
     let allParams = [];
     const PATCHCORE_PARAMS = ['patchcore_filter_enabled', 'patchcore_blur_sigma', 'patchcore_min_area', 'patchcore_score_metric'];
+    const SCRATCH_CLASSIFIER_PARAMS = [
+        'scratch_classifier_enabled',
+        'scratch_safety_multiplier',
+        'scratch_bundle_path',
+        'scratch_dinov2_repo_path',
+        'scratch_dinov2_weights_path'
+    ];
     const DUST_PARAMS = [
         'dust_brightness_threshold', 'dust_area_min', 'dust_area_max',
         'dust_extension', 'dust_heatmap_iou_threshold', 'dust_heatmap_top_percent',
@@ -2463,6 +2476,7 @@
     function renderSettings() {
         const grid = document.getElementById('settings-grid');
         const patchcoreParams = PATCHCORE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
+        const scratchParams = SCRATCH_CLASSIFIER_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const dustParams = DUST_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const cvEdgeParams = CV_EDGE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const aoiCoordParams = AOI_COORD_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
@@ -2563,6 +2577,7 @@
         const cvDustFilterInfoReason = 'fusion 下此開關對 fusion 產出的 aoi_edge defect 不生效（已由 fusion 內部統一處理）；四邊 (left/right/top/bottom) 檢測仍受此開關影響';
         const visibleTabs = [
             patchcoreParams.length > 0 ? 'patchcore' : null,
+            scratchParams.length > 0 ? 'scratch-classifier' : null,
             'dust',
             'cv-edge',
             'aoi-coord',
@@ -2580,6 +2595,7 @@
         const tabsContainer = document.getElementById('settings-tabs-container');
         tabsContainer.innerHTML = `
             ${patchcoreParams.length > 0 ? `<button class="settings-tab-btn ${currentTab === 'patchcore' ? 'active' : ''}" data-target="patchcore" onclick="switchTab('patchcore')">🔍 PatchCore</button>` : ''}
+            ${scratchParams.length > 0 ? `<button class="settings-tab-btn ${currentTab === 'scratch-classifier' ? 'active' : ''}" data-target="scratch-classifier" onclick="switchTab('scratch-classifier')">🧪 刮痕分類器</button>` : ''}
             <button class="settings-tab-btn ${currentTab === 'dust' ? 'active' : ''}" data-target="dust" onclick="switchTab('dust')">🧹 灰塵偵測</button>
             <button class="settings-tab-btn ${currentTab === 'cv-edge' ? 'active' : ''}" data-target="cv-edge" onclick="switchTab('cv-edge')">📐 CV 邊緣檢測</button>
             <button class="settings-tab-btn ${currentTab === 'aoi-coord' ? 'active' : ''}" data-target="aoi-coord" onclick="switchTab('aoi-coord')">🎯 AOI 機檢座標</button>
@@ -2600,6 +2616,16 @@
                         <span style="color: #c4b5fd; font-weight: 600;">PatchCore 前處理過濾(針對無現象過檢實驗)</span>
                     </div>
                     ${patchcoreParams.map(p => paramRow(p)).join('')}
+                </div>
+            </div>` : ''}
+            ${scratchParams.length > 0 ? `
+            <div id="pane-scratch-classifier" class="settings-tab-pane ${currentTab === 'scratch-classifier' ? 'active' : ''}">
+                <div class="settings-section" style="border-left: 3px solid #22c55e;">
+                    <div class="settings-section-header" style="background: rgba(34, 197, 94, 0.1); border-bottom: 1px solid rgba(34, 197, 94, 0.2);">
+                        <div class="icon" style="background: rgba(34, 197, 94, 0.2); color: #86efac;">🧪</div>
+                        <span style="color: #86efac; font-weight: 600;">刮痕分類器</span>
+                    </div>
+                    ${scratchParams.map(p => paramRow(p)).join('')}
                 </div>
             </div>` : ''}
             <div id="pane-dust" class="settings-tab-pane ${currentTab === 'dust' ? 'active' : ''}">
@@ -3614,6 +3640,12 @@
         'image_abnormal_b0f00000_mean_upper': 'B0F00000 產品區平均亮度上限',
         // AOI coordinate inference
         'aoi_heatmap_center_seed_enabled': 'Top% heatmap 額外保留 AOI 座標附近弱熱區',
+        // Scratch classifier
+        'scratch_classifier_enabled': '啟用刮痕分類器',
+        'scratch_safety_multiplier': '刮痕判定安全倍率',
+        'scratch_bundle_path': '刮痕分類器模型檔路徑',
+        'scratch_dinov2_repo_path': 'DINOv2 本地 repo 路徑',
+        'scratch_dinov2_weights_path': 'DINOv2 權重檔路徑',
     };
 
     // 依互斥規則鎖定某些參數列。key = param_name, value = 不生效原因 (會以 tooltip 顯示)
@@ -3845,6 +3877,52 @@
     // ── Edit Modal ──
     let currentEditDictKey = null;
 
+    function formatBytes(bytes) {
+        const n = Number(bytes || 0);
+        if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+        if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+        return `${n} B`;
+    }
+
+    async function loadScratchBundleOptions(currentValue) {
+        const inputEl = document.getElementById('modal-new-value');
+        const selectEl = document.getElementById('modal-scratch-bundle-select');
+        const helpEl = document.getElementById('modal-scratch-bundle-help');
+        try {
+            const res = await fetch('/api/settings/scratch-bundles');
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+
+            const bundles = data.bundles || [];
+            if (bundles.length === 0) {
+                selectEl.style.display = 'none';
+                inputEl.style.display = 'block';
+                inputEl.value = currentValue;
+                helpEl.textContent = '服務器目前找不到 scratch_classifier*.pkl，暫時改用手動輸入。';
+                return;
+            }
+
+            selectEl.innerHTML = '';
+            bundles.forEach(bundle => {
+                const option = document.createElement('option');
+                option.value = bundle.path;
+                option.textContent = `${bundle.path} (${formatBytes(bundle.size)}, ${bundle.mtime})`;
+                selectEl.appendChild(option);
+            });
+
+            const hasCurrent = currentValue && bundles.some(bundle => bundle.path === currentValue);
+            selectEl.value = hasCurrent ? currentValue : bundles[0].path;
+            helpEl.textContent = hasCurrent
+                ? '來源：服務器 deployment 目錄內既有的 scratch_classifier*.pkl。'
+                : `目前設定 ${currentValue || '空值'} 未在服務器模型清單中，已預選最新模型。`;
+        } catch (e) {
+            selectEl.style.display = 'none';
+            inputEl.style.display = 'block';
+            inputEl.value = currentValue;
+            helpEl.textContent = `讀取服務器模型清單失敗，暫時改用手動輸入：${e.message}`;
+        }
+    }
+
     function openEdit(paramName, dictKey = null) {
         const p = allParams.find(x => x.param_name === paramName);
         if (!p) return;
@@ -3887,10 +3965,14 @@
             const patchcoreMetricSelectEl = document.getElementById('modal-patchcore-metric-select');
             const labelEl = document.getElementById('modal-new-value-label');
             const helpEl = document.getElementById('modal-metric-help');
+            const scratchBundleSelectEl = document.getElementById('modal-scratch-bundle-select');
+            const scratchBundleHelpEl = document.getElementById('modal-scratch-bundle-help');
 
             inputEl.style.display = 'none';
             selectEl.style.display = 'none';
             patchcoreMetricSelectEl.style.display = 'none';
+            scratchBundleSelectEl.style.display = 'none';
+            scratchBundleHelpEl.style.display = 'none';
             const aoiEdgeInspectorSelectEl = document.getElementById('modal-aoi-edge-inspector-select');
             if (aoiEdgeInspectorSelectEl) aoiEdgeInspectorSelectEl.style.display = 'none';
             helpEl.style.display = 'none';
@@ -3908,6 +3990,13 @@
                 aoiEdgeInspectorSelectEl.style.display = 'block';
                 labelEl.innerHTML = 'AOI 座標邊緣 Inspector 選擇';
                 aoiEdgeInspectorSelectEl.value = prefill.replace(/"/g, '');
+            } else if (paramName === 'scratch_bundle_path') {
+                scratchBundleSelectEl.style.display = 'block';
+                scratchBundleSelectEl.innerHTML = '<option value="">讀取中...</option>';
+                scratchBundleHelpEl.style.display = 'block';
+                scratchBundleHelpEl.textContent = '正在讀取服務器上的刮痕分類器模型...';
+                labelEl.innerHTML = '刮痕分類器模型檔選擇';
+                loadScratchBundleOptions(prefill.replace(/"/g, ''));
             } else {
                 inputEl.style.display = 'block';
                 labelEl.innerHTML = '新的值 <span style="color:var(--text-muted); font-weight:normal;">(JSON 格式，數值直接輸入)</span>';
@@ -3942,6 +4031,7 @@
         const inputEl = document.getElementById('modal-new-value');
         const selectEl = document.getElementById('modal-new-value-select');
         const patchcoreMetricSelectEl = document.getElementById('modal-patchcore-metric-select');
+        const scratchBundleSelectEl = document.getElementById('modal-scratch-bundle-select');
 
         let newValueRaw = "";
         const aoiEdgeInspectorSelectEl = document.getElementById('modal-aoi-edge-inspector-select');
@@ -3952,6 +4042,12 @@
         } else if (paramName === 'aoi_edge_inspector' && aoiEdgeInspectorSelectEl &&
                    aoiEdgeInspectorSelectEl.style.display === 'block') {
             newValueRaw = JSON.stringify(aoiEdgeInspectorSelectEl.value);
+        } else if (paramName === 'scratch_bundle_path' && scratchBundleSelectEl.style.display === 'block') {
+            if (!scratchBundleSelectEl.value) {
+                showToast('模型清單尚未載入完成，請稍後再儲存', 'error');
+                return;
+            }
+            newValueRaw = JSON.stringify(scratchBundleSelectEl.value);
         } else {
             newValueRaw = inputEl.value.trim();
         }

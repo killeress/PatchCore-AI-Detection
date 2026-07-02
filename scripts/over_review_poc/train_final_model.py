@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import json
 import logging
 import os
 import subprocess
@@ -80,6 +81,8 @@ def main(argv=None):
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--calib-frac", type=float, default=0.2)
     p.add_argument("--output", required=True, type=Path)
+    p.add_argument("--summary-json", type=Path, default=None,
+                   help="Optional path to write training summary JSON for web supervisor.")
     p.add_argument("--default-safety", type=float, default=1.1,
                    help="Default safety multiplier baked into bundle metadata "
                         "(runtime config may override).")
@@ -160,6 +163,22 @@ def main(argv=None):
     )
 
     effective_threshold = float(min(conformal_threshold * args.default_safety, 0.9999))
+    summary = {
+        "output_path": str(args.output),
+        "total_samples": len(samples),
+        "scratch_count": int(y.sum()),
+        "conformal_threshold": conformal_threshold,
+        "effective_threshold": effective_threshold,
+        "calib_ng_count": int(calib_ng_mask.sum()),
+        "calib_total": len(calib_idx),
+    }
+    if args.summary_json:
+        args.summary_json.parent.mkdir(parents=True, exist_ok=True)
+        args.summary_json.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     logger.info(
         "Training complete: output=%s | conformal_threshold=%.4f | effective_threshold=%.4f | calib_ng=%d/%d",
         args.output, conformal_threshold, effective_threshold,
@@ -173,15 +192,7 @@ def main(argv=None):
     print(f"Est. eff. thresh:   {effective_threshold:.4f}")
     print(f"Calib NG count:     {int(calib_ng_mask.sum())} / {len(calib_idx)}")
     print(f"Calib score range:  [{calib_scores.min():.3f}, {calib_scores.max():.3f}]")
-    return {
-        "output_path": str(args.output),
-        "total_samples": len(samples),
-        "scratch_count": int(y.sum()),
-        "conformal_threshold": conformal_threshold,
-        "effective_threshold": effective_threshold,
-        "calib_ng_count": int(calib_ng_mask.sum()),
-        "calib_total": len(calib_idx),
-    }
+    return summary
 
 
 if __name__ == "__main__":

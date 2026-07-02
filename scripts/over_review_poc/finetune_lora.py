@@ -178,12 +178,15 @@ def _train_fold(samples, train_idx, transform, device, args):
 
     labels = np.array([1 if samples[i].label == SCRATCH_BINARY else 0
                        for i in train_idx])
+    logger.info("Building LoRA train dataset...")
     ds = _CropDataset([samples[i] for i in train_idx], transform, labels)
+    logger.info("Creating LoRA DataLoader...")
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
     total_batches = len(loader)
     progress_every = max(1, min(50, max(1, total_batches // 20)))
 
     trainable = [p for p in model.parameters() if p.requires_grad] + list(head.parameters())
+    logger.info("Creating AdamW optimizer...")
     optim = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=0.01)
     logger.info("LoRA trainable params: %s (ViT base frozen); head: %s; pos_weight=%.2f",
                 f"{n_lora:,}", sum(p.numel() for p in head.parameters()), pos_weight.item())
@@ -195,7 +198,13 @@ def _train_fold(samples, train_idx, transform, device, args):
     for epoch in range(args.epochs):
         model.train()
         total_loss, n_batches = 0.0, 0
+        logger.info("  epoch %d/%d start", epoch + 1, args.epochs)
         for batch_idx, (x, y) in enumerate(loader, start=1):
+            if batch_idx == 1:
+                logger.info(
+                    "  epoch %d/%d first batch loaded; moving to %s",
+                    epoch + 1, args.epochs, device,
+                )
             x, y = x.to(device), y.to(device)
             feat = model(x)              # (B, 768)
             logits = head(feat).squeeze(-1)

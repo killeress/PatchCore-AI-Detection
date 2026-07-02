@@ -25,6 +25,10 @@ import argparse
 import csv
 from collections import Counter
 from pathlib import Path
+from typing import Callable, Optional
+
+
+ProgressCallback = Callable[[str], None]
 
 
 def discover_batches(base: Path, exclude: set[str]) -> list[str]:
@@ -36,7 +40,24 @@ def discover_batches(base: Path, exclude: set[str]) -> list[str]:
     return batches
 
 
-def run(base: Path, exclude: set[str]) -> dict:
+def _batch_preview(batches: list[str]) -> str:
+    if len(batches) <= 8:
+        return str(batches)
+    return f"{batches[:5]} ... {batches[-3:]}"
+
+
+def _should_report(index: int, total: int) -> bool:
+    interval = max(1, total // 20)
+    return index == 1 or index == total or index % interval == 0
+
+
+def _emit(progress: Optional[ProgressCallback], message: str) -> None:
+    print(message)
+    if progress:
+        progress(message)
+
+
+def run(base: Path, exclude: set[str], progress: Optional[ProgressCallback] = None) -> dict:
     """Merge all batch manifest.csv files under *base* into manifest_merged.csv.
 
     Args:
@@ -58,72 +79,90 @@ def run(base: Path, exclude: set[str]) -> dict:
         raise ValueError(f"no batch dirs with manifest.csv found under {base}")
 
     if exclude:
-        print(f"excluded: {sorted(exclude)}")
-    print(f"merging {len(batches)} batches: {batches}")
+        _emit(progress, f"excluded: {sorted(exclude)}")
+    _emit(progress, f"merging {len(batches)} batches: {_batch_preview(batches)}")
 
     out_path = base / "manifest_merged.csv"
+    tmp_path = out_path.with_name(out_path.name + ".tmp")
 
     # --- field discovery (union of all CSV headers) ---
     all_fields: list[str] = []
-    for b in batches:
+    for idx, b in enumerate(batches, 1):
+        if progress and _should_report(idx, len(batches)):
+            progress(f"field scan {idx}/{len(batches)}: {b}")
         with open(base / b / "manifest.csv", encoding="utf-8-sig") as f:
             for col in csv.DictReader(f).fieldnames or []:
                 if col not in all_fields:
                     all_fields.append(col)
-    print("fields:", all_fields)
+    _emit(progress, f"fields: {all_fields}")
 
     # --- row merging ---
-    rows: list[dict] = []
-    seen: dict[str, str] = {}
+    seen: set[str] = set()
+    labels = Counter()
+    total_rows = 0
     dup = 0
     skipped_status = 0
     missing_crop = 0
 
-    for b in batches:
-        with open(base / b / "manifest.csv", encoding="utf-8-sig", newline="") as f:
-            for r in csv.DictReader(f):
-                if r.get("status", "ok") != "ok":
-                    skipped_status += 1
-                    continue
-                sid = r["sample_id"]
-                if sid in seen:
-                    dup += 1
-                    continue
-                seen[sid] = b
-                if r.get("crop_path"):
-                    rel = r["crop_path"].replace("\\", "/")
-                    r["crop_path"] = f"{b}/{rel}"
-                else:
-                    missing_crop += 1
-                    continue
-                if r.get("heatmap_path"):
-                    rel = r["heatmap_path"].replace("\\", "/")
-                    r["heatmap_path"] = f"{b}/{rel}"
-                p = base / r["crop_path"]
-                if not p.exists():
-                    missing_crop += 1
-                    continue
-                for fn in all_fields:
-                    r.setdefault(fn, "")
-                rows.append(r)
+    try:
+        with open(tmp_path, "w", encoding="utf-8-sig", newline="") as out_f:
+            writer = csv.DictWriter(out_f, fieldnames=all_fields)
+            writer.writeheader()
 
-    print(f"status!=ok skipped: {skipped_status}")
-    print(f"duplicate sample_id skipped: {dup}")
-    print(f"missing crop file skipped: {missing_crop}")
-    print(f"final rows: {len(rows)}")
-    labels = Counter(r["label"] for r in rows)
+            for idx, b in enumerate(batches, 1):
+                batch_rows = 0
+                with open(base / b / "manifest.csv", encoding="utf-8-sig", newline="") as f:
+                    for r in csv.DictReader(f):
+                        if r.get("status", "ok") != "ok":
+                            skipped_status += 1
+                            continue
+                        sid = r["sample_id"]
+                        if sid in seen:
+                            dup += 1
+                            continue
+                        seen.add(sid)
+                        if r.get("crop_path"):
+                            rel = r["crop_path"].replace("\\", "/")
+                            r["crop_path"] = f"{b}/{rel}"
+                        else:
+                            missing_crop += 1
+                            continue
+                        if r.get("heatmap_path"):
+                            rel = r["heatmap_path"].replace("\\", "/")
+                            r["heatmap_path"] = f"{b}/{rel}"
+                        p = base / r["crop_path"]
+                        if not p.exists():
+                            missing_crop += 1
+                            continue
+                        for fn in all_fields:
+                            r.setdefault(fn, "")
+                        writer.writerow(r)
+                        labels[r["label"]] += 1
+                        total_rows += 1
+                        batch_rows += 1
+                if progress and _should_report(idx, len(batches)):
+                    progress(
+                        f"merged batch {idx}/{len(batches)}: {b}, "
+                        f"+{batch_rows} rows, total {total_rows}"
+                    )
+
+        tmp_path.replace(out_path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+    _emit(progress, f"status!=ok skipped: {skipped_status}")
+    _emit(progress, f"duplicate sample_id skipped: {dup}")
+    _emit(progress, f"missing crop file skipped: {missing_crop}")
+    _emit(progress, f"final rows: {total_rows}")
     for lab, c in labels.most_common():
-        print(f"  {lab}: {c}")
-
-    with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=all_fields)
-        w.writeheader()
-        w.writerows(rows)
-    print(f"written: {out_path}")
+        _emit(progress, f"  {lab}: {c}")
+    _emit(progress, f"written: {out_path}")
 
     return {
         "batches": batches,
-        "total_rows": len(rows),
+        "total_rows": total_rows,
         "label_counts": dict(labels),
         "out_path": str(out_path),
     }

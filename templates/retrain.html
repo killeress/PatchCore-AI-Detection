@@ -173,7 +173,7 @@
                   border-left:3px solid #89b4fa;color:#a6adc8;font-size:.88rem;line-height:1.6;">
         若要部署新模型，請前往
         <a href="/settings" style="color:#89b4fa;text-decoration:none;font-weight:600;">設定頁面</a>
-        更新 <code style="background:#313244;padding:1px 5px;border-radius:3px;color:#cdd6f4;">scratch_bundle</code> 路徑後重啟服務。
+        更新 <code style="background:#313244;padding:1px 5px;border-radius:3px;color:#cdd6f4;">scratch_bundle_path</code> 路徑後重啟服務。
       </div>
     </div>
 
@@ -190,6 +190,26 @@
 
 <script>
 let _pollTimer = null;
+
+function _appendLogLine(line) {
+  const box = document.getElementById('log-box');
+  const current = box.textContent ? box.textContent + '\n' : '';
+  box.textContent = current + line;
+  box.scrollTop = box.scrollHeight;
+}
+
+function _startPolling() {
+  if (_pollTimer) clearInterval(_pollTimer);
+  _pollTimer = setInterval(_poll, 3000);
+  _poll();
+}
+
+function _prepareRunningView() {
+  document.getElementById('start-btn').disabled = true;
+  document.getElementById('progress-area').style.display = '';
+  document.getElementById('summary-box').style.display  = 'none';
+  document.getElementById('error-box').style.display    = 'none';
+}
 
 function _getParams() {
   return {
@@ -209,10 +229,7 @@ function startRetrain() {
     alert('請填寫資料集目錄和輸出路徑');
     return;
   }
-  document.getElementById('start-btn').disabled = true;
-  document.getElementById('progress-area').style.display = '';
-  document.getElementById('summary-box').style.display  = 'none';
-  document.getElementById('error-box').style.display    = 'none';
+  _prepareRunningView();
   document.getElementById('log-box').textContent = '';
   _setStep('merge');
 
@@ -223,9 +240,13 @@ function startRetrain() {
   })
   .then(r => r.json())
   .then(data => {
+    if (data.error === 'job_already_running') {
+      _appendLogLine('已有重訓 job 執行中，已接回目前進度。');
+      _startPolling();
+      return;
+    }
     if (data.error) { _showError(data.error); document.getElementById('start-btn').disabled = false; return; }
-    _pollTimer = setInterval(_poll, 3000);
-    _poll();
+    _startPolling();
   })
   .catch(e => { _showError(String(e)); document.getElementById('start-btn').disabled = false; });
 }
@@ -260,7 +281,11 @@ function _sensitivityLabel(thresh) {
 }
 
 function _updateUI(data) {
-  if (!data || data.state === 'idle') return;
+  if (!data || data.state === 'idle') {
+    document.getElementById('start-btn').disabled = false;
+    return;
+  }
+  document.getElementById('progress-area').style.display = '';
   if (data.elapsed_sec !== undefined)
     document.getElementById('elapsed').textContent = _fmtElapsed(data.elapsed_sec);
   if (data.step) _setStep(data.step === 'done' ? 'done' : data.step);
@@ -268,6 +293,11 @@ function _updateUI(data) {
     const box = document.getElementById('log-box');
     box.textContent = data.log_lines.join('\n');
     box.scrollTop = box.scrollHeight;
+  }
+  if (data.state === 'running') {
+    document.getElementById('start-btn').disabled = true;
+    document.getElementById('summary-box').style.display = 'none';
+    document.getElementById('error-box').style.display = 'none';
   }
   if (data.state === 'completed') {
     clearInterval(_pollTimer);
@@ -293,5 +323,16 @@ function _showError(msg) {
   box.querySelector('pre').textContent = msg;
   box.style.display = '';
 }
+
+document.addEventListener('DOMContentLoaded', () => {
+  fetch('/api/retrain/status')
+    .then(r => r.json())
+    .then(data => {
+      if (!data || data.state === 'idle') return;
+      _updateUI(data);
+      if (data.state === 'running') _startPolling();
+    })
+    .catch(console.error);
+});
 </script>
 {% endblock %}
