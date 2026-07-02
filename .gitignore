@@ -45,6 +45,7 @@ tmp/
 .pytest_tmp_ok/
 .pytest_temp_clean/
 pytest-cache-files-*/
+pytest.ini
 .superpowers/
 .worktrees/
 
