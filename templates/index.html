@@ -2,6 +2,12 @@
 
 {% block title %}CAPI AI 推論記錄{% endblock %}
 
+{% block extra_head %}
+{% if auto_refresh_seconds %}
+<meta http-equiv="refresh" content="{{ auto_refresh_seconds }}">
+{% endif %}
+{% endblock %}
+
 {% block extra_css %}
 <style>
     .stat-grid {
@@ -82,6 +88,9 @@
                 <option value="200" {% if limit==200 %}selected{% endif %}>200 筆</option>
             </select>
             <input type="hidden" name="page" value="1">
+            {% if auto_refresh_seconds %}
+            <input type="hidden" name="auto_refresh" value="{{ auto_refresh_seconds }}">
+            {% endif %}
         </form>
     </div>
 
@@ -130,7 +139,7 @@
     {% if total_pages > 1 %}
     <div style="display:flex;justify-content:center;align-items:center;gap:8px;margin-top:20px;flex-wrap:wrap;">
         {% if page > 1 %}
-        <a href="/?page={{ page - 1 }}&limit={{ limit }}"
+        <a href="/?page={{ page - 1 }}&limit={{ limit }}{% if auto_refresh_seconds %}&auto_refresh={{ auto_refresh_seconds }}{% endif %}"
             style="padding:6px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);text-decoration:none;font-size:0.9rem;">
             ← 上一頁
         </a>
@@ -142,7 +151,7 @@
             style="padding:6px 14px;background:var(--accent);border-radius:6px;color:#fff;font-size:0.9rem;font-weight:700;">{{
             p }}</span>
         {% elif p == 1 or p == total_pages or (p >= page - 2 and p <= page + 2) %} <a
-            href="/?page={{ p }}&limit={{ limit }}"
+            href="/?page={{ p }}&limit={{ limit }}{% if auto_refresh_seconds %}&auto_refresh={{ auto_refresh_seconds }}{% endif %}"
             style="padding:6px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);text-decoration:none;font-size:0.9rem;">
             {{ p }}
             </a>
@@ -151,7 +160,7 @@
             {% endif %}
             {% endfor %}
 
-            {% if page < total_pages %} <a href="/?page={{ page + 1 }}&limit={{ limit }}"
+            {% if page < total_pages %} <a href="/?page={{ page + 1 }}&limit={{ limit }}{% if auto_refresh_seconds %}&auto_refresh={{ auto_refresh_seconds }}{% endif %}"
                 style="padding:6px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);text-decoration:none;font-size:0.9rem;">
                 下一頁 →
                 </a>
