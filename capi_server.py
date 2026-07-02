@@ -1250,6 +1250,44 @@ def results_to_db_data(
     return db_images
 
 
+def _normalize_machine_judgment_for_bomb_only_panel(
+    machine_judgment: str,
+    results: List[ImageResult],
+) -> str:
+    """Store AOI NG as OK when the panel's only effective defects are bombs."""
+    if str(machine_judgment or "").upper() != "NG" or not results:
+        return machine_judgment
+
+    has_bomb = False
+    for result in results:
+        for tile, _score, _anomaly_map in getattr(result, "anomaly_tiles", []) or []:
+            if getattr(tile, "is_aoi_coord_below_threshold", False):
+                continue
+            if getattr(tile, "is_bomb", False):
+                has_bomb = True
+                continue
+            if (
+                getattr(tile, "is_suspected_dust_or_scratch", False)
+                or getattr(tile, "is_in_exclude_zone", False)
+                or getattr(tile, "scratch_filtered", False)
+            ):
+                continue
+            return machine_judgment
+
+        for edge in getattr(result, "edge_defects", []) or []:
+            if getattr(edge, "is_bomb", False):
+                has_bomb = True
+                continue
+            if (
+                getattr(edge, "is_suspected_dust_or_scratch", False)
+                or getattr(edge, "is_cv_ok", False)
+            ):
+                continue
+            return machine_judgment
+
+    return "OK" if has_bomb else machine_judgment
+
+
 # ── 主伺服器 ──────────────────────────────────────────
 
 class CAPIServer:
@@ -2616,6 +2654,16 @@ class CAPIServer:
             # 儲存到資料庫
             total_images = len(image_results_data)
             ng_images = sum(1 for d in image_results_data if d.get("is_ng"))
+            stored_machine_judgment = _normalize_machine_judgment_for_bomb_only_panel(
+                parsed["machine_judgment"],
+                results,
+            )
+            if stored_machine_judgment != parsed["machine_judgment"]:
+                logger.info(
+                    "[BOMB_ONLY_PANEL] Glass=%s machine_judgment %s -> OK for DB storage",
+                    parsed.get("glass_id", ""),
+                    parsed.get("machine_judgment", ""),
+                )
 
             # 組合 error_message：重複投片加上標記
             if is_duplicate:
@@ -2656,7 +2704,7 @@ class CAPIServer:
                 model_id=parsed["model_id"],
                 machine_no=parsed["machine_no"],
                 resolution=parsed["resolution"],
-                machine_judgment=parsed["machine_judgment"],
+                machine_judgment=stored_machine_judgment,
                 ai_judgment=ai_judgment,
                 image_dir=parsed["image_dir"],
                 total_images=total_images,
