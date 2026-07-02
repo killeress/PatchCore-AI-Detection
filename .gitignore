@@ -40,6 +40,11 @@ static/heatmaps/
 temp/
 tmp/
 .tmp/
+.tmp_pytest/
+.pytest_tmp/
+.pytest_tmp_ok/
+.pytest_temp_clean/
+pytest-cache-files-*/
 .superpowers/
 .worktrees/
 
