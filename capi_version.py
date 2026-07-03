@@ -38,7 +38,8 @@ def read_changelog() -> str:
 
 def get_version_info() -> Dict[str, Any]:
     manifest = read_release_manifest()
-    version = str(manifest.get("version") or read_app_version())
+    file_version = read_app_version()
+    version = file_version if file_version != "unknown" else str(manifest.get("version") or "unknown")
     return {
         "version": version,
         "git_commit": manifest.get("git_commit") or "",

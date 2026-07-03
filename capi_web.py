@@ -57,6 +57,16 @@ def _get_host_identity() -> str:
         return "unknown-host"
 
 
+class _AppVersionProxy:
+    def __getitem__(self, key: str) -> Any:
+        return get_version_info().get(key, "")
+
+    def __getattr__(self, key: str) -> Any:
+        if key.startswith("_"):
+            raise AttributeError(key)
+        return self[key]
+
+
 # 幫 Jinja2 準備一些好用的過濾器
 def ai_simple(ai_judgment):
     if not ai_judgment: return ""
@@ -2369,7 +2379,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             cls.jinja_env.filters['get_img_stem'] = get_img_stem
             cls.jinja_env.filters['fromjson'] = lambda s: json.loads(s) if s else {}
             cls.jinja_env.globals['hm_relative'] = hm_relative
-            cls.jinja_env.globals['app_version'] = get_version_info()
+            cls.jinja_env.globals['app_version'] = _AppVersionProxy()
             cls.jinja_env.globals['host_identity'] = _get_host_identity()
 
     @classmethod
