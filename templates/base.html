@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}CAPI AI 推論伺服器{% endblock %}</title>
+    <title>{% if host_identity %}[{{ host_identity|e }}] {% endif %}{% block title %}CAPI AI 推論伺服器{% endblock %}</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link href="/static/css/fonts.css" rel="stylesheet">
     <script src="/static/js/tailwindcss.js"></script>
@@ -167,6 +167,23 @@
             width: 28px;
             height: 28px;
             color: var(--accent);
+        }
+
+        .host-identity-badge {
+            display: inline-flex;
+            align-items: center;
+            max-width: 220px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            margin-left: 4px;
+            padding: 3px 8px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: rgba(59, 130, 246, 0.14);
+            color: #bfdbfe;
+            font-size: 0.78rem;
+            font-weight: 600;
         }
 
         nav a {
@@ -409,6 +426,9 @@
                         d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm.75-12h9v9h-9v-9z" />
                 </svg>
                 MOD2 CAPI AD-AI智能檢測
+                {% if host_identity %}
+                <span class="host-identity-badge" title="{{ host_identity|e }}">{{ host_identity|e }}</span>
+                {% endif %}
             </h1>
             <nav>
                 <a href="/dashboard" {% if request_path=='/dashboard' %}class="active" {% endif %}
@@ -456,7 +476,7 @@
     </div>
 
     <div class="container app-version-footer">
-        版本：{{ app_version.version }} ｜ <a href="/release-notes">更新內容</a>
+        {% if host_identity %}主機：{{ host_identity|e }} ｜ {% endif %}版本：{{ app_version.version }} ｜ <a href="/release-notes">更新內容</a>
     </div>
 
     <div id="release-notice" class="release-notice-backdrop" role="dialog" aria-modal="true"

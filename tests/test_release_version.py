@@ -33,6 +33,25 @@ def test_release_notes_markdown_renders_basic_html():
     assert "<li>新增規格內明細</li>" in rendered
 
 
+def test_base_template_includes_hostname_in_title_header_and_footer(monkeypatch):
+    import capi_web
+    from capi_web import CAPIWebHandler
+
+    original_env = CAPIWebHandler.jinja_env
+    monkeypatch.setattr(capi_web.socket, "gethostname", lambda: "CAPI07")
+    CAPIWebHandler.jinja_env = None
+    try:
+        CAPIWebHandler.init_jinja()
+        template = CAPIWebHandler.jinja_env.get_template("base.html")
+        rendered = template.render(request_path="/")
+    finally:
+        CAPIWebHandler.jinja_env = original_env
+
+    assert "<title>[CAPI07] CAPI AI 推論伺服器</title>" in rendered
+    assert 'class="host-identity-badge" title="CAPI07">CAPI07</span>' in rendered
+    assert "主機：CAPI07 ｜ 版本：" in rendered
+
+
 def test_build_release_zip_includes_manifest_and_checksums():
     from scripts import build_deploy_zip
 

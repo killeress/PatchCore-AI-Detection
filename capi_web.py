@@ -12,6 +12,7 @@ CAPI AI Web 查閱介面
 """
 
 import os
+import socket
 import tempfile
 import json
 import hashlib
@@ -47,6 +48,14 @@ from capi_scratch_batch import (
 from capi_version import get_version_info, read_changelog
 
 logger = logging.getLogger("capi.web")
+
+
+def _get_host_identity() -> str:
+    try:
+        return socket.gethostname().strip() or "unknown-host"
+    except Exception:
+        return "unknown-host"
+
 
 # 幫 Jinja2 準備一些好用的過濾器
 def ai_simple(ai_judgment):
@@ -2361,6 +2370,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             cls.jinja_env.filters['fromjson'] = lambda s: json.loads(s) if s else {}
             cls.jinja_env.globals['hm_relative'] = hm_relative
             cls.jinja_env.globals['app_version'] = get_version_info()
+            cls.jinja_env.globals['host_identity'] = _get_host_identity()
 
     @classmethod
     def _make_job_runtime(cls, job_id: str, phase: str) -> dict:

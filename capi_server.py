@@ -859,6 +859,7 @@ def _iter_qjpg_defect_records(
     results: List[ImageResult],
     product_resolution: Optional[Tuple[int, int]],
     config: Optional[CAPIConfig],
+    bomb_only: bool = False,
 ) -> List[str]:
     records: List[str] = []
     for result in results or []:
@@ -867,6 +868,8 @@ def _iter_qjpg_defect_records(
 
         for tile, _score, _anomaly_map in getattr(result, "anomaly_tiles", []) or []:
             if not _is_reportable_tile(tile):
+                continue
+            if bomb_only and not getattr(tile, "is_bomb", False):
                 continue
             if getattr(tile, "anomaly_peak_x", -1) >= 0 and getattr(tile, "anomaly_peak_y", -1) >= 0:
                 image_x, image_y = int(tile.anomaly_peak_x), int(tile.anomaly_peak_y)
@@ -886,6 +889,8 @@ def _iter_qjpg_defect_records(
 
         for edge in getattr(result, "edge_defects", []) or []:
             if not _is_reportable_edge_defect(edge):
+                continue
+            if bomb_only and not getattr(edge, "is_bomb", False):
                 continue
             center = getattr(edge, "center", (0, 0))
             defect_kind = "bomb" if getattr(edge, "is_bomb", False) else "unknown"
@@ -922,7 +927,12 @@ def build_qjpg_response(
     detected_mark_text = _first_mark_text(results or [])
     mark_status = "OK" if detected_mark_text else "NG"
     mark_text = detected_mark_text or "00"
-    records = _iter_qjpg_defect_records(results or [], product_resolution, config)
+    records = _iter_qjpg_defect_records(
+        results or [],
+        product_resolution,
+        config,
+        bomb_only=ai_judgment in ("OK", "OK-i"),
+    )
 
     if ai_judgment.startswith("ERR:HY"):
         defect_field = "NG" + _format_qjpg_defect_record(
