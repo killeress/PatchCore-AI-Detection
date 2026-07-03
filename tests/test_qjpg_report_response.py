@@ -127,10 +127,14 @@ def test_qjpg_response_uses_white_dot_code_for_b0f_defect():
 
 def test_qjpg_response_uses_bomb_code_for_bomb_defect_even_when_internal_ok():
     result = _image_result("W0F00000_114438.tif")
-    tile = _tile(1, 600, 450)
+    non_bomb_tile = _tile(1, 600, 450)
+    tile = _tile(2, 600, 450)
     tile.is_bomb = True
-    result.tiles = [tile]
-    result.anomaly_tiles = [(tile, 0.91, None)]
+    result.tiles = [non_bomb_tile, tile]
+    result.anomaly_tiles = [
+        (non_bomb_tile, 0.90, None),
+        (tile, 0.91, None),
+    ]
 
     response = build_qjpg_response(
         {"glass_id": "G1", "resolution": (2000, 1000)},
@@ -303,7 +307,7 @@ def test_image_abnormal_precheck_only_checks_aoi_report_prefixes(monkeypatch):
     assert read_paths == ["W0F00000_113600.tif", "B0F00000_113600.tif"]
 
 
-def test_qjpg_response_ok_i_reports_detected_points_and_missing_mark_is_00():
+def test_qjpg_response_ok_i_omits_within_spec_points_and_missing_mark_is_00():
     result = _image_result("STANDARD_114438.tif", mark_text="")
     tile = _tile(1, 600, 450)
     result.tiles = [tile]
@@ -316,4 +320,25 @@ def test_qjpg_response_ok_i_reports_detected_points_and_missing_mark_is_00():
         CAPIConfig(),
     )
 
-    assert response == "@QJPG-G1;NG;00;NGPCDK20100000500STANDARD,"
+    assert response == "@QJPG-G1;NG;00;OK,"
+
+
+def test_qjpg_response_ok_i_reports_only_bomb_points():
+    result = _image_result("W0F00000_114438.tif")
+    within_spec_tile = _tile(1, 600, 450)
+    bomb_tile = _tile(2, 700, 500)
+    bomb_tile.is_bomb = True
+    result.tiles = [within_spec_tile, bomb_tile]
+    result.anomaly_tiles = [
+        (within_spec_tile, 0.91, None),
+        (bomb_tile, 0.92, None),
+    ]
+
+    response = build_qjpg_response(
+        {"glass_id": "G1", "resolution": (2000, 1000)},
+        "OK-i",
+        [result],
+        CAPIConfig(report_bomb_defect_code="BMB99"),
+    )
+
+    assert response == "@QJPG-G1;OK;EJ;NGBMB990120000600W0F00000,"
