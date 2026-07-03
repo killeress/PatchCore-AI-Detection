@@ -76,6 +76,8 @@ _agent/
 
 # Analysis / over-review outputs
 reports/
+docs/agent_adoption/
+docs/project_report_assets/
 
 # Training datasets and artifacts (large, local-only)
 BGA_Train/
