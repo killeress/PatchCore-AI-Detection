@@ -11,7 +11,7 @@ APP_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$APP_ROOT"
 
 PATCH_ZIP="${1:-}"
-HEALTH_URL="${CAPI_HEALTH_URL:-http://127.0.0.1:8080/api/version}"
+HEALTH_URL="${CAPI_HEALTH_URL:-http://127.0.0.1/api/version}"
 BACKUP_ROOT="${CAPI_PATCH_BACKUP_ROOT:-$APP_ROOT/.patch_backups}"
 
 if [ -z "$PATCH_ZIP" ]; then
@@ -104,7 +104,7 @@ echo "$PATCH_ZIP" > "$BACKUP_DIR/patch_zip.txt"
 
 echo "[3/5] Extracting patch..."
 unzip -o "$PATCH_ZIP" -d "$APP_ROOT"
-chmod +x install_patch.sh rollback_patch.sh start_server.sh 2>/dev/null || true
+chmod +x install_patch.sh rollback_patch.sh start_server.sh promote_update.sh setup_auto_update_client.sh 2>/dev/null || true
 
 echo "[4/5] Restarting service..."
 if [ -x "./start_server.sh" ]; then
@@ -131,6 +131,11 @@ if command -v curl >/dev/null 2>&1; then
         echo "WARNING: health check failed: $HEALTH_URL"
         echo "Rollback command:"
         echo "  ./rollback_patch.sh \"$BACKUP_DIR\""
+        if [ "${CAPI_PATCH_AUTO_ROLLBACK:-0}" = "1" ] && [ -x "./rollback_patch.sh" ]; then
+            echo "Auto rollback enabled; rolling back now..."
+            ./rollback_patch.sh "$BACKUP_DIR"
+            exit 3
+        fi
         exit 2
     fi
 else

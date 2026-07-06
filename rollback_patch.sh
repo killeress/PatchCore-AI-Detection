@@ -54,7 +54,7 @@ if [ -d "$BACKUP_DIR/files" ]; then
     done
 fi
 
-chmod +x install_patch.sh rollback_patch.sh start_server.sh 2>/dev/null || true
+chmod +x install_patch.sh rollback_patch.sh start_server.sh promote_update.sh setup_auto_update_client.sh 2>/dev/null || true
 
 echo "[3/3] Restarting service..."
 if [ -x "./start_server.sh" ]; then

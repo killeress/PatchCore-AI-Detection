@@ -33,6 +33,13 @@ def test_release_notes_markdown_renders_basic_html():
     assert "<li>新增規格內明細</li>" in rendered
 
 
+def test_install_patch_default_health_url_matches_production_port():
+    script = Path("install_patch.sh").read_text(encoding="utf-8")
+
+    assert 'HEALTH_URL="${CAPI_HEALTH_URL:-http://127.0.0.1/api/version}"' in script
+    assert "127.0.0.1:8080/api/version" not in script
+
+
 def test_base_template_includes_hostname_in_title_header_and_footer(monkeypatch):
     import capi_web
     from capi_web import CAPIWebHandler
@@ -78,6 +85,9 @@ def test_build_release_zip_includes_manifest_and_checksums():
             assert "release_manifest.json" in names
             assert "checksums.txt" in names
             assert "capi_version.py" in names
+            assert "capi_update_agent.py" in names
+            assert "promote_update.sh" in names
+            assert "setup_auto_update_client.sh" in names
             assert "templates/release_notes.html" in names
 
             assert zf.read("VERSION").decode("utf-8").strip() == version
@@ -100,6 +110,7 @@ def test_build_patch_zip_includes_only_deployable_changes(monkeypatch):
     output_dir = Path("deployment") / f"_test_patch_{uuid.uuid4().hex}"
     monkeypatch.setattr(build_deploy_zip, "_git_changed_files", lambda: [
         "capi_web.py",
+        "capi_update_agent.py",
         "templates/base.html",
         "tests/test_release_version.py",
         "scripts/build_deploy_zip.py",
@@ -124,15 +135,24 @@ def test_build_patch_zip_includes_only_deployable_changes(monkeypatch):
             manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
             scripts = {
                 script_name: zf.read(script_name)
-                for script_name in ("start_server.sh", "install_patch.sh", "rollback_patch.sh")
+                for script_name in (
+                    "start_server.sh",
+                    "install_patch.sh",
+                    "rollback_patch.sh",
+                    "promote_update.sh",
+                    "setup_auto_update_client.sh",
+                )
             }
 
         assert manifest["package_type"] == "patch"
         assert "capi_web.py" in names
+        assert "capi_update_agent.py" in names
         assert "templates/base.html" in names
         assert "install_patch.sh" in names
         assert "rollback_patch.sh" in names
         assert "start_server.sh" in names
+        assert "promote_update.sh" in names
+        assert "setup_auto_update_client.sh" in names
         assert "VERSION" in names
         assert "CHANGELOG.md" in names
         assert "tests/test_release_version.py" not in names

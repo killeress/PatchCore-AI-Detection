@@ -40,6 +40,7 @@ CODE_FILES = [
     "capi_server.py",
     "capi_train_new.py",
     "capi_train_runner.py",
+    "capi_update_agent.py",
     "capi_web.py",
     "templates/base.html",
     "templates/dashboard.html",
@@ -59,12 +60,16 @@ CODE_FILES = [
     "start_server.sh",
     "install_patch.sh",
     "rollback_patch.sh",
+    "promote_update.sh",
+    "setup_auto_update_client.sh",
 ]
 
 PATCH_UTILITY_FILES = [
     "start_server.sh",
     "install_patch.sh",
     "rollback_patch.sh",
+    "promote_update.sh",
+    "setup_auto_update_client.sh",
 ]
 
 PATCH_DEPLOY_ROOT_FILES = {
@@ -73,6 +78,8 @@ PATCH_DEPLOY_ROOT_FILES = {
     "start_server.sh",
     "install_patch.sh",
     "rollback_patch.sh",
+    "promote_update.sh",
+    "setup_auto_update_client.sh",
 }
 
 PATCH_DEPLOY_PREFIXES = (
