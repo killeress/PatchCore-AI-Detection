@@ -1,5 +1,28 @@
 # 更新紀錄
 
+## 2026-07-06 v4
+
+### [功能調整]產線更新同步
+
+- 新增 `promote_update.sh`，第一台設備可一鍵完成本機安裝、健康檢查、發布 `latest.json`、啟動更新檔案服務與驗證公開狀態。
+- 新增 `setup_auto_update_client.sh`，第二、三台設備可一鍵建立定期檢查 cron，並支援立即執行一次更新。
+- 更新安裝/回滾腳本的權限處理，確保自動更新相關腳本解壓後可直接執行。
+
+## 2026-07-06 v3
+
+### [Bug fixed]產線更新同步
+
+- `install_patch.sh` 的預設健康檢查 URL 改為 production 使用的 `http://127.0.0.1/api/version`，避免 port 80 設備更新成功後被誤判為健康檢查失敗。
+
+## 2026-07-06 v2
+
+### [實驗功能]產線更新同步
+
+- 新增實驗版自動更新 agent，可從內網 `latest.json` 檢查新版 patch ZIP，下載後驗證 checksum 並呼叫既有安裝流程。
+- 新增更新主機發布流程，可由 patch ZIP 產生 `latest.json`，供其他實驗設備定期拉取。
+- `install_patch.sh` 支援 updater 呼叫時的自動回滾開關，健康檢查失敗時可自動執行 rollback。
+- 新增實驗 SOP，說明更新主機、實驗機 dry run、實際套用、排程檢查與停用方式。
+
 ## 2026-07-06 v1
 
 ### [Bug fixed]RIC Report
