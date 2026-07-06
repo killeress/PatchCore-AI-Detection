@@ -1538,7 +1538,7 @@
                 const combo = `${eqp}/${ai}/${ric}`;
                 combos[combo] = (combos[combo] || 0) + 1;
 
-                const day = (rec.time_stamp || 'unknown').substring(0, 10);
+                const day = getProductionDateKey(rec.time_stamp);
                 if (!daily[day]) daily[day] = { total: 0, aoiCorrect: 0, aiCorrect: 0, aiMiss: 0, aiOver: 0, aoiOver: 0, ricMisjudge: 0, withinSpecMisjudge: 0, aiNG: 0, aoiNG: 0, ricNG: 0 };
                 daily[day].total++;
                 if (eqp === ric) daily[day].aoiCorrect++;
@@ -1819,8 +1819,25 @@
             return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
         }
 
+        function _getProductionToday() {
+            const d = new Date();
+            if ((d.getHours() * 60 + d.getMinutes()) < 450) d.setDate(d.getDate() - 1);
+            return d;
+        }
+
+        function getProductionDateKey(value) {
+            const text = String(value || '').trim();
+            const m = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/);
+            if (!m) return (text || 'unknown').substring(0, 10);
+            const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+            const hour = Number(m[4] || 0);
+            const minute = Number(m[5] || 0);
+            if ((hour * 60 + minute) < 450) d.setDate(d.getDate() - 1);
+            return _formatDate(d);
+        }
+
         function _getDateRange(range) {
-            const today = new Date();
+            const today = _getProductionToday();
             const end = _formatDate(today);
             if (range === 'all') return { start: '', end: '' };
             if (range === 'today') return { start: end, end: end };
@@ -3202,8 +3219,14 @@
             return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
         }
 
+        function _getProductionToday() {
+            const d = new Date();
+            if ((d.getHours() * 60 + d.getMinutes()) < 450) d.setDate(d.getDate() - 1);
+            return d;
+        }
+
         function _getDateRange(range) {
-            const today = new Date();
+            const today = _getProductionToday();
             const end = _formatDate(today);
             if (range === 'all') return { start: '', end: '' };
             if (range === 'today') return { start: end, end: end };
@@ -3301,52 +3324,87 @@
 
         function _renderTrendChart(daily) {
             const ctx = document.getElementById('inf_trendChart').getContext('2d');
-            const pctOfDailyTotal = (count, index) => {
-                const total = daily[index]?.total || 0;
-                return total > 0 ? (count / total * 100).toFixed(1) + '%' : '';
-            };
+            const rows = daily.map(d => {
+                const total = Number(d.total) || 0;
+                const aoiNg = Number(d.aoi_ng) || 0;
+                const aiNg = Number(d.ai_ng) || 0;
+                const err = Number(d.err) || 0;
+                return {
+                    date: d.date,
+                    total,
+                    aoiNg,
+                    aiNg,
+                    aiOk: Math.max(total - aiNg - err, 0),
+                    aiMiss: Number(d.ai_miss) || 0,
+                    aiMissTotal: Number(d.ai_miss_total) || 0,
+                    aiMissRate: d.ai_miss_rate === null || d.ai_miss_rate === undefined ? null : Number(d.ai_miss_rate),
+                };
+            });
+            const pct = (count, total) => total > 0 ? count / total * 100 : 0;
+            const fmtPct = v => (Number(v) || 0).toFixed(1) + '%';
             trendChart = new Chart(ctx, {
                 type: 'bar',
                 plugins: [window.ChartDataLabels],
                 data: {
-                    labels: daily.map(d => d.date),
+                    labels: rows.map(d => d.date),
                     datasets: [
                         {
                             label: '總推論數',
-                            data: daily.map(d => d.total),
+                            data: rows.map(d => d.total),
                             backgroundColor: 'rgba(100, 116, 139, 0.3)',
                             borderColor: 'rgba(100, 116, 139, 0.6)',
                             borderWidth: 1,
+                            yAxisID: 'countY',
                             order: 2,
                         },
                         {
-                            label: 'AOI NG',
-                            data: daily.map(d => d.aoi_ng),
+                            label: 'AOI NG率',
+                            data: rows.map(d => pct(d.aoiNg, d.total)),
+                            rawCounts: rows.map(d => d.aoiNg),
                             type: 'line',
                             borderColor: '#f97316',
                             backgroundColor: 'rgba(249, 115, 22, 0.1)',
                             pointRadius: 3,
                             tension: 0.3,
+                            yAxisID: 'pctY',
                             order: 1,
                         },
                         {
-                            label: 'AI NG',
-                            data: daily.map(d => d.ai_ng),
+                            label: 'AI NG率',
+                            data: rows.map(d => pct(d.aiNg, d.total)),
+                            rawCounts: rows.map(d => d.aiNg),
                             type: 'line',
                             borderColor: '#3b82f6',
                             backgroundColor: 'rgba(59, 130, 246, 0.1)',
                             pointRadius: 3,
                             tension: 0.3,
+                            yAxisID: 'pctY',
                             order: 1,
                         },
                         {
-                            label: 'AI OK',
-                            data: daily.map(d => d.total - d.ai_ng - d.err),
+                            label: 'AI OK率',
+                            data: rows.map(d => pct(d.aiOk, d.total)),
+                            rawCounts: rows.map(d => d.aiOk),
                             type: 'line',
                             borderColor: '#14b8a6',
                             backgroundColor: 'rgba(20, 184, 166, 0.1)',
                             pointRadius: 3,
                             tension: 0.3,
+                            yAxisID: 'pctY',
+                            order: 1,
+                        },
+                        {
+                            label: 'AI 漏檢率',
+                            data: rows.map(d => d.aiMissRate),
+                            rawCounts: rows.map(d => d.aiMiss),
+                            rawTotals: rows.map(d => d.aiMissTotal),
+                            type: 'line',
+                            borderColor: '#ef4444',
+                            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                            borderDash: [5, 5],
+                            pointRadius: 3,
+                            tension: 0.3,
+                            yAxisID: 'pctY',
                             order: 1,
                         },
                     ],
@@ -3361,7 +3419,38 @@
                             anchor: 'end',
                             align: 'top',
                             offset: 4,
-                            formatter: (v, ctx) => ctx.dataset.type === 'line' ? pctOfDailyTotal(v, ctx.dataIndex) : '',
+                            formatter: (v, ctx) => ctx.dataset.type === 'line' && v !== null ? fmtPct(v) : '',
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: ctx => {
+                                    if (ctx.dataset.type === 'line') {
+                                        const count = ctx.dataset.rawCounts?.[ctx.dataIndex] || 0;
+                                        const total = ctx.dataset.rawTotals?.[ctx.dataIndex] || 0;
+                                        const countText = total > 0
+                                            ? `${count.toLocaleString()} / ${total.toLocaleString()} 筆`
+                                            : `${count.toLocaleString()} 筆`;
+                                        return `${ctx.dataset.label}: ${fmtPct(ctx.parsed.y)} (${countText})`;
+                                    }
+                                    return `${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString()} 筆`;
+                                },
+                            },
+                        },
+                    },
+                    scales: {
+                        x: _darkScales.x,
+                        countY: {
+                            position: 'left',
+                            beginAtZero: true,
+                            ticks: { color: '#64748b', callback: v => Number(v).toLocaleString() },
+                            grid: { color: 'rgba(148,163,184,0.1)' },
+                        },
+                        pctY: {
+                            position: 'right',
+                            beginAtZero: true,
+                            suggestedMax: 100,
+                            ticks: { color: '#64748b', callback: v => v + '%' },
+                            grid: { drawOnChartArea: false },
                         },
                     },
                 },

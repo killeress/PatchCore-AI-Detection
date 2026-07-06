@@ -18,10 +18,23 @@ import os
 import hashlib
 import hmac
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any, Tuple
 
 _DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+_FACTORY_DAY_START_TIME = "07:30:00"
+
+
+def _next_date_str(date_str: str) -> str:
+    return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _factory_day_start_ts(date_str: str) -> str:
+    return f"{date_str} {_FACTORY_DAY_START_TIME}"
+
+
+def _factory_day_end_ts(date_str: str) -> str:
+    return f"{_next_date_str(date_str)} {_FACTORY_DAY_START_TIME}"
 
 
 class CAPIDatabase:
@@ -1188,27 +1201,31 @@ class CAPIDatabase:
         finally:
             conn.close()
 
-    def get_shift_statistics(self) -> Dict:
-        """取得當班統計（白班 08:00~19:59 / 夜班 20:00~07:59）"""
-        from datetime import timedelta
-        now = datetime.now()
-        hour = now.hour
-
-        if 8 <= hour < 20:
-            # 白班：當日 08:00 ~ 19:59
+    @staticmethod
+    def _get_shift_window(now: datetime) -> Tuple[str, datetime, datetime]:
+        minutes = now.hour * 60 + now.minute
+        day_start = 7 * 60 + 30
+        night_start = 19 * 60 + 30
+        if day_start <= minutes < night_start:
+            # 白班：當日 07:30 ~ 19:30
             shift_name = "白班"
-            shift_start = now.replace(hour=8, minute=0, second=0, microsecond=0)
-            shift_end = now.replace(hour=19, minute=59, second=59, microsecond=0)
-        else:
-            # 夜班：20:00 ~ 隔日 07:59
+            shift_start = now.replace(hour=7, minute=30, second=0, microsecond=0)
+            shift_end = now.replace(hour=19, minute=30, second=0, microsecond=0)
+        elif minutes >= night_start:
+            # 夜班：當日 19:30 ~ 隔日 07:30
             shift_name = "夜班"
-            if hour >= 20:
-                shift_start = now.replace(hour=20, minute=0, second=0, microsecond=0)
-                shift_end = (now + timedelta(days=1)).replace(hour=7, minute=59, second=59, microsecond=0)
-            else:
-                # 凌晨 0~7 點，班次起點是前一天 20:00
-                shift_start = (now - timedelta(days=1)).replace(hour=20, minute=0, second=0, microsecond=0)
-                shift_end = now.replace(hour=7, minute=59, second=59, microsecond=0)
+            shift_start = now.replace(hour=19, minute=30, second=0, microsecond=0)
+            shift_end = (now + timedelta(days=1)).replace(hour=7, minute=30, second=0, microsecond=0)
+        else:
+            # 夜班：前日 19:30 ~ 當日 07:30
+            shift_name = "夜班"
+            shift_start = (now - timedelta(days=1)).replace(hour=19, minute=30, second=0, microsecond=0)
+            shift_end = now.replace(hour=7, minute=30, second=0, microsecond=0)
+        return shift_name, shift_start, shift_end
+
+    def get_shift_statistics(self, now: Optional[datetime] = None) -> Dict:
+        """取得當班統計（白班 07:30~19:30 / 夜班 19:30~07:30）"""
+        shift_name, shift_start, shift_end = self._get_shift_window(now or datetime.now())
 
         start_str = shift_start.strftime("%Y-%m-%d %H:%M:%S")
         end_str = shift_end.strftime("%Y-%m-%d %H:%M:%S")
@@ -1225,7 +1242,7 @@ class CAPIDatabase:
                      AVG(processing_seconds) as avg_time,
                      SUM(omit_overexposed) as overexposed_count
                    FROM inference_records
-                   WHERE created_at >= ? AND created_at <= ?""",
+                   WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)""",
                 (start_str, end_str)
             ).fetchone()
 
@@ -1275,17 +1292,13 @@ class CAPIDatabase:
             params.append(f"%{ai_judgment}%")
 
         if cross_filter:
-            def _next_date_str(date_str: str) -> str:
-                from datetime import timedelta
-                return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-
             # 使用 request_time 與 get_inference_stats 一致，確保數字對得上
             if start_date:
-                conditions.append("request_time >= ?")
-                params.append(start_date)
+                conditions.append("datetime(request_time) >= datetime(?)")
+                params.append(_factory_day_start_ts(start_date))
             if end_date:
-                conditions.append("request_time < ?")
-                params.append(_next_date_str(end_date))
+                conditions.append("datetime(request_time) < datetime(?)")
+                params.append(_factory_day_end_ts(end_date))
         else:
             if start_date:
                 conditions.append("created_at >= ?")
@@ -1446,20 +1459,16 @@ class CAPIDatabase:
         if end_date and not _DATE_RE.match(end_date):
             raise ValueError(f"Invalid end_date format: {end_date}")
 
-        def _next_date_str(date_str: str) -> str:
-            from datetime import timedelta
-            return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-
         conn = self._get_conn()
         try:
             where_clauses = []
             params = []
             if start_date:
-                where_clauses.append("c.time_stamp >= ?")
-                params.append(start_date)
+                where_clauses.append("datetime(c.time_stamp) >= datetime(?)")
+                params.append(_factory_day_start_ts(start_date))
             if end_date:
-                where_clauses.append("c.time_stamp < ?")
-                params.append(_next_date_str(end_date))
+                where_clauses.append("datetime(c.time_stamp) < datetime(?)")
+                params.append(_factory_day_end_ts(end_date))
             where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
             rows = conn.execute(
@@ -1484,14 +1493,14 @@ class CAPIDatabase:
                            ) as over_retrain_pool_latest_at,
                            (SELECT ir.id FROM inference_records ir
                             WHERE ir.glass_id = c.pnl_id
-                              AND ir.request_time >= substr(c.time_stamp, 1, 10)
-                              AND ir.request_time < date(substr(c.time_stamp, 1, 10), '+1 day')
+                              AND datetime(ir.request_time) >= datetime(date(datetime(c.time_stamp), '-7 hours', '-30 minutes') || ' 07:30:00')
+                              AND datetime(ir.request_time) < datetime(date(datetime(c.time_stamp), '-7 hours', '-30 minutes') || ' 07:30:00', '+1 day')
                             ORDER BY ir.request_time DESC LIMIT 1
                            ) as inference_record_id,
                            (SELECT ir.ai_judgment FROM inference_records ir
                             WHERE ir.glass_id = c.pnl_id
-                              AND ir.request_time >= substr(c.time_stamp, 1, 10)
-                              AND ir.request_time < date(substr(c.time_stamp, 1, 10), '+1 day')
+                              AND datetime(ir.request_time) >= datetime(date(datetime(c.time_stamp), '-7 hours', '-30 minutes') || ' 07:30:00')
+                              AND datetime(ir.request_time) < datetime(date(datetime(c.time_stamp), '-7 hours', '-30 minutes') || ' 07:30:00', '+1 day')
                             ORDER BY ir.request_time DESC LIMIT 1
                            ) as inference_ai_judgment
                     FROM client_accuracy_records c
@@ -1526,14 +1535,14 @@ class CAPIDatabase:
                           ) as over_retrain_pool_latest_at,
                           (SELECT ir.id FROM inference_records ir
                            WHERE ir.glass_id = c.pnl_id
-                             AND ir.request_time >= substr(c.time_stamp, 1, 10)
-                             AND ir.request_time < date(substr(c.time_stamp, 1, 10), '+1 day')
+                             AND datetime(ir.request_time) >= datetime(date(datetime(c.time_stamp), '-7 hours', '-30 minutes') || ' 07:30:00')
+                             AND datetime(ir.request_time) < datetime(date(datetime(c.time_stamp), '-7 hours', '-30 minutes') || ' 07:30:00', '+1 day')
                            ORDER BY ir.request_time DESC LIMIT 1
                           ) as inference_record_id,
                           (SELECT ir.ai_judgment FROM inference_records ir
                            WHERE ir.glass_id = c.pnl_id
-                             AND ir.request_time >= substr(c.time_stamp, 1, 10)
-                             AND ir.request_time < date(substr(c.time_stamp, 1, 10), '+1 day')
+                             AND datetime(ir.request_time) >= datetime(date(datetime(c.time_stamp), '-7 hours', '-30 minutes') || ' 07:30:00')
+                             AND datetime(ir.request_time) < datetime(date(datetime(c.time_stamp), '-7 hours', '-30 minutes') || ' 07:30:00', '+1 day')
                            ORDER BY ir.request_time DESC LIMIT 1
                           ) as inference_ai_judgment
                    FROM client_accuracy_records c
@@ -2764,21 +2773,17 @@ class CAPIDatabase:
         if end_date and not _DATE_RE.match(end_date):
             return {"success": False, "error": f"Invalid end_date format: {end_date}"}
 
-        def _next_date_str(date_str: str) -> str:
-            from datetime import timedelta
-            return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-
         conn = self._get_conn()
         try:
             # 建立日期篩選條件
             where_clauses = []
             params = []
             if start_date:
-                where_clauses.append("request_time >= ?")
-                params.append(start_date)
+                where_clauses.append("datetime(request_time) >= datetime(?)")
+                params.append(_factory_day_start_ts(start_date))
             if end_date:
-                where_clauses.append("request_time < ?")
-                params.append(_next_date_str(end_date))
+                where_clauses.append("datetime(request_time) < datetime(?)")
+                params.append(_factory_day_end_ts(end_date))
             where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
             _aoi_ng = self._AOI_NG_COND
@@ -2804,17 +2809,62 @@ class CAPIDatabase:
 
             # ── 2. 每日趨勢 ──
             daily_rows = conn.execute(
-                f"""SELECT DATE(request_time) as date,
+                f"""SELECT DATE(datetime(request_time), '-7 hours', '-30 minutes') as date,
                            COUNT(*) as total,
                            SUM(CASE WHEN {_aoi_ng} THEN 1 ELSE 0 END) as aoi_ng,
                            SUM(CASE WHEN {_ai_ng} THEN 1 ELSE 0 END) as ai_ng,
                            SUM(CASE WHEN {_err} THEN 1 ELSE 0 END) as err
                     FROM inference_records{where_sql}
-                    GROUP BY DATE(request_time)
+                    GROUP BY DATE(datetime(request_time), '-7 hours', '-30 minutes')
                     ORDER BY date""",
                 params
             ).fetchall()
             daily_trend = [dict(r) for r in daily_rows]
+
+            client_where_clauses = ["COALESCE(NULLIF(TRIM(c.result_eqp), ''), 'OK') != 'OK'"]
+            client_params = []
+            if start_date:
+                client_where_clauses.append("datetime(c.time_stamp) >= datetime(?)")
+                client_params.append(_factory_day_start_ts(start_date))
+            if end_date:
+                client_where_clauses.append("datetime(c.time_stamp) < datetime(?)")
+                client_params.append(_factory_day_end_ts(end_date))
+            client_where_sql = " WHERE " + " AND ".join(client_where_clauses)
+            counted_ai_miss_categories = {"threshold_high", "dust_misfilter"}
+            client_rows = conn.execute(
+                f"""SELECT DATE(datetime(c.time_stamp), '-7 hours', '-30 minutes') as date,
+                           c.result_ai,
+                           c.datastr,
+                           mr.category as review_category
+                    FROM client_accuracy_records c
+                    LEFT JOIN miss_review mr ON mr.client_record_id = c.id
+                    {client_where_sql}""",
+                client_params
+            ).fetchall()
+            ai_miss_by_day = {}
+            for row in client_rows:
+                day = row["date"]
+                if not day:
+                    continue
+                stats = ai_miss_by_day.setdefault(day, {"total": 0, "ai_miss": 0})
+                stats["total"] += 1
+                ai = (row["result_ai"] or "OK").strip()
+                if ai == "OK-i":
+                    ai = "OK"
+                if (
+                    ai == "OK"
+                    and self.parse_ric_judgment(row["datastr"] or "") == "NG"
+                    and row["review_category"] in counted_ai_miss_categories
+                ):
+                    stats["ai_miss"] += 1
+            for row in daily_trend:
+                miss_stats = ai_miss_by_day.get(row["date"], {"total": 0, "ai_miss": 0})
+                row["ai_miss"] = miss_stats["ai_miss"]
+                row["ai_miss_total"] = miss_stats["total"]
+                row["ai_miss_rate"] = (
+                    round(miss_stats["ai_miss"] * 100.0 / miss_stats["total"], 2)
+                    if miss_stats["total"] > 0 else None
+                )
 
             # ── 3. 機台統計 ──
             machine_rows = conn.execute(
