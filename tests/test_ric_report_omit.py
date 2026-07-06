@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -82,7 +83,16 @@ def test_client_accuracy_date_filter_is_end_date_inclusive(tmp_path):
     db = CAPIDatabase(str(tmp_path / "ric_date_filter.db"))
     db.save_client_accuracy_records([
         {
-            "time_stamp": "2026-05-20T23:59:59",
+            "time_stamp": "2026-05-20T07:29:59",
+            "pnl_id": "P0",
+            "mach_id": "M1",
+            "result_eqp": "OK",
+            "result_ai": "OK",
+            "result_ric": "OK",
+            "datastr": "DEFECT,OK;1;",
+        },
+        {
+            "time_stamp": "2026-05-20T07:30:00",
             "pnl_id": "P1",
             "mach_id": "M1",
             "result_eqp": "OK",
@@ -100,8 +110,17 @@ def test_client_accuracy_date_filter_is_end_date_inclusive(tmp_path):
             "datastr": "DEFECT,OK;1;",
         },
         {
-            "time_stamp": "2026-05-22T00:00:00",
+            "time_stamp": "2026-05-22T07:29:59",
             "pnl_id": "P3",
+            "mach_id": "M1",
+            "result_eqp": "OK",
+            "result_ai": "OK",
+            "result_ric": "OK",
+            "datastr": "DEFECT,OK;1;",
+        },
+        {
+            "time_stamp": "2026-05-22T07:30:00",
+            "pnl_id": "P4",
             "mach_id": "M1",
             "result_eqp": "OK",
             "result_ai": "OK",
@@ -112,18 +131,145 @@ def test_client_accuracy_date_filter_is_end_date_inclusive(tmp_path):
 
     rows = db.get_client_accuracy_records("2026-05-20", "2026-05-21")
 
-    assert {r["pnl_id"] for r in rows} == {"P1", "P2"}
+    assert {r["pnl_id"] for r in rows} == {"P1", "P2", "P3"}
 
 
 def test_inference_stats_date_filter_is_end_date_inclusive(tmp_path):
     db = CAPIDatabase(str(tmp_path / "ric_inference_stats_filter.db"))
-    _save_record(db, "INF1", tile_is_dust=0, request_time="2026-05-20T23:59:59")
+    _save_record(db, "INF0", tile_is_dust=0, request_time="2026-05-20T07:29:59")
+    _save_record(db, "INF1", tile_is_dust=0, request_time="2026-05-20T07:30:00")
     _save_record(db, "INF2", tile_is_dust=0, request_time="2026-05-21 00:00:00")
-    _save_record(db, "INF3", tile_is_dust=0, request_time="2026-05-22T00:00:00")
+    _save_record(db, "INF3", tile_is_dust=0, request_time="2026-05-22T07:29:59")
+    _save_record(db, "INF4", tile_is_dust=0, request_time="2026-05-22T07:30:00")
 
     stats = db.get_inference_stats("2026-05-20", "2026-05-21")
 
-    assert stats["summary"]["total"] == 2
+    assert stats["summary"]["total"] == 3
+    assert [row["date"] for row in stats["daily_trend"]] == ["2026-05-20", "2026-05-21"]
+    assert [row["total"] for row in stats["daily_trend"]] == [2, 1]
+
+
+def test_shift_window_uses_0730_1930_boundaries():
+    cases = [
+        ("2026-07-06 07:29:59", "夜班", "2026-07-05 19:30:00", "2026-07-06 07:30:00"),
+        ("2026-07-06 07:30:00", "白班", "2026-07-06 07:30:00", "2026-07-06 19:30:00"),
+        ("2026-07-06 19:29:59", "白班", "2026-07-06 07:30:00", "2026-07-06 19:30:00"),
+        ("2026-07-06 19:30:00", "夜班", "2026-07-06 19:30:00", "2026-07-07 07:30:00"),
+    ]
+
+    for now_text, expected_name, expected_start, expected_end in cases:
+        name, start, end = CAPIDatabase._get_shift_window(datetime.fromisoformat(now_text))
+        assert name == expected_name
+        assert start.strftime("%Y-%m-%d %H:%M:%S") == expected_start
+        assert end.strftime("%Y-%m-%d %H:%M:%S") == expected_end
+
+
+def test_shift_statistics_counts_current_shift_half_open_window(tmp_path):
+    db = CAPIDatabase(str(tmp_path / "shift_stats.db"))
+    ids = [
+        _save_record(db, "SHIFT_BEFORE", tile_is_dust=0, request_time="2026-07-06T07:29:59"),
+        _save_record(db, "SHIFT_START", tile_is_dust=0, request_time="2026-07-06T07:30:00", ai_judgment="OK"),
+        _save_record(db, "SHIFT_INSIDE", tile_is_dust=0, request_time="2026-07-06T19:29:59", ai_judgment="NG"),
+        _save_record(db, "SHIFT_END", tile_is_dust=0, request_time="2026-07-06T19:30:00"),
+    ]
+    conn = db._get_conn()
+    try:
+        for record_id, created_at in zip(ids, [
+            "2026-07-06 07:29:59",
+            "2026-07-06 07:30:00",
+            "2026-07-06 19:29:59",
+            "2026-07-06 19:30:00",
+        ]):
+            conn.execute("UPDATE inference_records SET created_at = ? WHERE id = ?", (created_at, record_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+    stats = db.get_shift_statistics(datetime.fromisoformat("2026-07-06 12:00:00"))
+
+    assert stats["shift_name"] == "白班"
+    assert stats["time_range"] == "07/06 07:30 ~ 07/06 19:30"
+    assert stats["total"] == 2
+    assert stats["ok_count"] == 1
+    assert stats["ng_count"] == 1
+
+
+def test_inference_stats_daily_trend_includes_review_adjusted_ai_miss_rate(tmp_path):
+    db = CAPIDatabase(str(tmp_path / "ric_inference_stats_ai_miss.db"))
+    _save_record(db, "INF_MISS", tile_is_dust=0, request_time="2026-05-20T10:00:00")
+    _save_record(db, "INF_OUTSIDE", tile_is_dust=0, request_time="2026-05-21T10:00:00")
+
+    db.save_client_accuracy_records([
+        {
+            "time_stamp": "2026-05-20T08:00:00",
+            "pnl_id": "MISS_THRESHOLD",
+            "mach_id": "M1",
+            "result_eqp": "NG",
+            "result_ai": "OK",
+            "result_ric": "NG",
+            "datastr": "DEFECT,NG;1;",
+        },
+        {
+            "time_stamp": "2026-05-20T08:01:00",
+            "pnl_id": "MISS_DUST",
+            "mach_id": "M1",
+            "result_eqp": "NG",
+            "result_ai": "OK-i",
+            "result_ric": "NG",
+            "datastr": "DEFECT,NG;1;",
+        },
+        {
+            "time_stamp": "2026-05-20T08:02:00",
+            "pnl_id": "MISS_WITHIN_SPEC",
+            "mach_id": "M1",
+            "result_eqp": "NG",
+            "result_ai": "OK",
+            "result_ric": "NG",
+            "datastr": "DEFECT,NG;1;",
+        },
+        {
+            "time_stamp": "2026-05-20T08:03:00",
+            "pnl_id": "MISS_UNREVIEWED",
+            "mach_id": "M1",
+            "result_eqp": "NG",
+            "result_ai": "OK",
+            "result_ric": "NG",
+            "datastr": "DEFECT,NG;1;",
+        },
+        {
+            "time_stamp": "2026-05-20T08:04:00",
+            "pnl_id": "MISS_EQP_OK",
+            "mach_id": "M1",
+            "result_eqp": "OK",
+            "result_ai": "OK",
+            "result_ric": "NG",
+            "datastr": "DEFECT,NG;1;",
+        },
+        {
+            "time_stamp": "2026-05-21T08:00:00",
+            "pnl_id": "MISS_OUTSIDE_DATE",
+            "mach_id": "M1",
+            "result_eqp": "NG",
+            "result_ai": "OK",
+            "result_ric": "NG",
+            "datastr": "DEFECT,NG;1;",
+        },
+    ])
+    records = {r["pnl_id"]: r["id"] for r in db.get_client_accuracy_records("2026-05-20", "2026-05-21")}
+    db.save_miss_review(records["MISS_THRESHOLD"], "threshold_high")
+    db.save_miss_review(records["MISS_DUST"], "dust_misfilter")
+    db.save_miss_review(records["MISS_WITHIN_SPEC"], "ai_miss_within_spec")
+    db.save_miss_review(records["MISS_EQP_OK"], "threshold_high")
+    db.save_miss_review(records["MISS_OUTSIDE_DATE"], "threshold_high")
+
+    stats = db.get_inference_stats("2026-05-20", "2026-05-20")
+
+    assert len(stats["daily_trend"]) == 1
+    day = stats["daily_trend"][0]
+    assert day["date"] == "2026-05-20"
+    assert day["ai_miss"] == 2
+    assert day["ai_miss_total"] == 4
+    assert day["ai_miss_rate"] == 50.0
 
 
 def test_client_accuracy_records_link_inference_by_same_day_range(tmp_path):

@@ -4556,6 +4556,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         _empty_miss_cats = lambda: {c: 0 for c in CAPIDatabase.VALID_MISS_CATEGORIES}
         _empty_over_cats = lambda: {c: 0 for c in CAPIDatabase.VALID_OVER_CATEGORIES}
+        def _production_day_key(value: str) -> str:
+            text = str(value or "").strip()
+            try:
+                dt = datetime.fromisoformat(text.replace("T", " "))
+                if dt.hour < 7 or (dt.hour == 7 and dt.minute < 30):
+                    dt -= timedelta(days=1)
+                return dt.strftime("%Y-%m-%d")
+            except Exception:
+                return (text or "unknown")[:10]
+
         actual_ok_review_categories = {"ric_misjudge", "data_error_actually_ok", "within_spec_misjudge"}
         counted_ai_miss_categories = {"threshold_high", "dust_misfilter"}
         total = len(records)
@@ -4745,7 +4755,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             combo = f"{eqp}/{ai}/{ric}"
             combos[combo] = combos.get(combo, 0) + 1
 
-            day = (rec.get("time_stamp") or "unknown")[:10]
+            day = _production_day_key(rec.get("time_stamp"))
             if day not in daily:
                 daily[day] = {
                     "total": 0, "aoiCorrect": 0, "aiCorrect": 0,
