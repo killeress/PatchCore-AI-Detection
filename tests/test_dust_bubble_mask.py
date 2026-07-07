@@ -37,6 +37,12 @@ def _low_contrast_bright_bubble_image() -> np.ndarray:
     return cv2.GaussianBlur(image, (9, 9), 0)
 
 
+def _low_contrast_ring_bubble_image() -> np.ndarray:
+    image = np.full((128, 128), 80, dtype=np.uint8)
+    cv2.ellipse(image, (64, 64), (22, 28), 0, 0, 360, 90, 5)
+    return cv2.GaussianBlur(image, (9, 9), 0)
+
+
 def test_low_contrast_bubble_mask_is_opt_in():
     image = _low_contrast_bubble_image()
 
@@ -77,6 +83,23 @@ def test_low_contrast_bright_bubble_is_added_to_dust_mask_when_enabled():
 
     assert is_dust is True
     assert covered >= 0.60
+    assert ratio > 0.0
+    assert "Bub:1" in detail
+
+
+def test_low_contrast_ring_bubble_fills_interior_when_enabled():
+    image = _low_contrast_ring_bubble_image()
+    inferencer = _make_inferencer(detect_bubbles=True)
+
+    is_dust, mask, ratio, detail = inferencer.check_dust_or_scratch_feature(image)
+
+    yy, xx = np.ogrid[:128, :128]
+    expected_bubble = ((xx - 64) ** 2 / (22 ** 2) + (yy - 64) ** 2 / (28 ** 2)) <= 1
+    covered = np.count_nonzero(mask[expected_bubble] > 0) / np.count_nonzero(expected_bubble)
+
+    assert is_dust is True
+    assert covered >= 0.75
+    assert mask[64, 64] == 255
     assert ratio > 0.0
     assert "Bub:1" in detail
 

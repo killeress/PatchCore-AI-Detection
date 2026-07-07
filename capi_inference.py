@@ -2555,6 +2555,7 @@ class CAPIInferencer:
                     open_kernel_bubble = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
                     bubble_min_area = max(area_min * 20, int(gray.size * 0.002))
                     bubble_max_area = min(area_max, int(gray.size * 0.08))
+                    bubble_fill_max_area = min(area_max, max(int(gray.size * 0.08), bubble_min_area * 30))
                     border_margin = 6
                     accepted_bubble_mask = np.zeros_like(gray, dtype=np.uint8)
 
@@ -2594,7 +2595,22 @@ class CAPIInferencer:
                             if float(np.mean(delta[component_mask])) < 4.0:
                                 continue
 
-                            bubble_mask = component_mask.astype(np.uint8) * 255
+                            component_u8 = component_mask.astype(np.uint8) * 255
+                            contours, _ = cv2.findContours(
+                                component_u8,
+                                cv2.RETR_EXTERNAL,
+                                cv2.CHAIN_APPROX_SIMPLE,
+                            )
+                            bubble_mask = np.zeros_like(component_u8)
+                            if contours:
+                                cv2.drawContours(bubble_mask, contours, -1, 255, thickness=-1)
+                            else:
+                                bubble_mask = component_u8
+
+                            filled_area = int(np.count_nonzero(bubble_mask > 0))
+                            if filled_area < bubble_min_area or filled_area > bubble_fill_max_area:
+                                continue
+
                             if extension > 0:
                                 bubble_dilate = cv2.getStructuringElement(
                                     cv2.MORPH_ELLIPSE,
