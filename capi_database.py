@@ -3205,21 +3205,22 @@ class CAPIDatabase:
 
                 new_value_json = json.dumps(new_value, ensure_ascii=False)
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if isinstance(new_value, bool):
+                    new_param_type = "bool"
+                elif isinstance(new_value, int):
+                    new_param_type = "int"
+                elif isinstance(new_value, float):
+                    new_param_type = "float"
+                elif isinstance(new_value, dict):
+                    new_param_type = "dict"
+                elif isinstance(new_value, list):
+                    new_param_type = "list"
+                else:
+                    new_param_type = "str"
 
                 if not old_row:
                     # 參數不存在於 DB → 自動新增 (從 config dataclass 補上的參數)
-                    if isinstance(new_value, bool):
-                        param_type = "bool"
-                    elif isinstance(new_value, int):
-                        param_type = "int"
-                    elif isinstance(new_value, float):
-                        param_type = "float"
-                    elif isinstance(new_value, dict):
-                        param_type = "dict"
-                    elif isinstance(new_value, list):
-                        param_type = "list"
-                    else:
-                        param_type = "str"
+                    param_type = new_param_type
                     old_value = ""
                     conn.execute(
                         """INSERT INTO config_params
@@ -3230,11 +3231,12 @@ class CAPIDatabase:
                 else:
                     old_value = old_row["param_value"]
                     param_type = old_row["param_type"]
+                    updated_param_type = "bool" if param_type == "str" and isinstance(new_value, bool) else param_type
 
                     # 更新設定值
                     conn.execute(
-                        "UPDATE config_params SET param_value = ?, updated_at = ? WHERE param_name = ?",
-                        (new_value_json, now, param_name)
+                        "UPDATE config_params SET param_value = ?, param_type = ?, updated_at = ? WHERE param_name = ?",
+                        (new_value_json, updated_param_type, now, param_name)
                     )
 
                 # 記錄修改歷史

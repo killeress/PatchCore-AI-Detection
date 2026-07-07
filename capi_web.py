@@ -7305,8 +7305,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             params = self.db.get_all_config_params() if self.db else []
             # 補上 config 中有但 DB 沒有的參數（用目前執行值作為預設）
             if self.inferencer and hasattr(self.inferencer, 'config') and self.inferencer.config:
-                existing_names = {p["param_name"] for p in params}
                 import dataclasses
+                field_type_by_name = {
+                    f.name: f.type
+                    for f in dataclasses.fields(self.inferencer.config)
+                }
+                for p in params:
+                    if field_type_by_name.get(p.get("param_name")) is bool:
+                        p["param_type"] = "bool"
+                existing_names = {p["param_name"] for p in params}
                 for f in dataclasses.fields(self.inferencer.config):
                     if f.name in existing_names:
                         continue
