@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+import uuid
 
 import cv2
 import numpy as np
@@ -118,3 +119,55 @@ def test_settings_api_marks_dataclass_bool_params_as_bool():
 
     params = {p["param_name"]: p for p in captured["params"]}
     assert params["dust_detect_bubbles_enabled"]["param_type"] == "bool"
+
+
+def test_settings_api_normalizes_existing_db_bool_param_type():
+    from capi_web import CAPIWebHandler
+
+    captured = {}
+    handler = CAPIWebHandler.__new__(CAPIWebHandler)
+    handler.db = SimpleNamespace(get_all_config_params=lambda: [{
+        "param_name": "dust_detect_bubbles_enabled",
+        "param_value": '"True"',
+        "param_type": "str",
+        "decoded_value": "True",
+    }])
+    handler.inferencer = SimpleNamespace(config=CAPIConfig())
+    handler._current_settings_user = lambda: None
+    handler._send_json = lambda payload: captured.update(payload)
+
+    handler._handle_api_settings()
+
+    params = {p["param_name"]: p for p in captured["params"]}
+    assert params["dust_detect_bubbles_enabled"]["param_type"] == "bool"
+
+
+def test_bool_update_repairs_legacy_string_param_type():
+    from capi_database import CAPIDatabase
+
+    db_path = Path(f"_test_bool_param_repair_{uuid.uuid4().hex}.db")
+    db = CAPIDatabase(str(db_path))
+    try:
+        conn = db._get_conn()
+        try:
+            conn.execute(
+                """INSERT INTO config_params
+                   (param_name, param_value, param_type, description)
+                   VALUES (?, ?, ?, ?)""",
+                ("dust_detect_bubbles_enabled", '"True"', "str", ""),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        db.update_config_param(
+            "dust_detect_bubbles_enabled",
+            False,
+            reason="unit test",
+        )
+        updated = db.get_config_param("dust_detect_bubbles_enabled")
+
+        assert updated["param_type"] == "bool"
+        assert updated["decoded_value"] is False
+    finally:
+        db_path.unlink(missing_ok=True)

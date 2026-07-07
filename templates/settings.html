@@ -3696,13 +3696,12 @@
         }
 
         let displayVal = '';
-        const normalizedValue = String(p.param_value || '').toLowerCase();
-        const isBool = p.param_type === 'bool' || normalizedValue === 'true' || normalizedValue === 'false';
-
         try {
             const parsed = JSON.parse(p.param_value);
             displayVal = String(parsed);
         } catch { displayVal = p.param_value; }
+        const normalizedValue = String(displayVal || '').toLowerCase();
+        const isBool = p.param_type === 'bool' || normalizedValue === 'true' || normalizedValue === 'false';
 
         let valueContent = `<span class="param-value-display" title="${displayVal}">${displayVal}</span>
                     <button class="btn-edit" ${lockedReason ? 'disabled' : ''} onclick='openEdit(${JSON.stringify(p.param_name)})'>✏️ 修改</button>`;
