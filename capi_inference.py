@@ -2550,7 +2550,6 @@ class CAPIInferencer:
                     blur_k -= 1
 
                 if blur_k >= 15:
-                    bubble_bg = cv2.GaussianBlur(gray, (blur_k, blur_k), 0)
                     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
                     open_kernel_bubble = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
                     bubble_min_area = max(area_min * 20, int(gray.size * 0.002))
@@ -2558,67 +2557,78 @@ class CAPIInferencer:
                     bubble_fill_max_area = min(area_max, max(int(gray.size * 0.08), bubble_min_area * 30))
                     border_margin = 6
                     accepted_bubble_mask = np.zeros_like(gray, dtype=np.uint8)
+                    bubble_sources = [(gray, 4.0, 4.0)]
+                    if min_dim >= 64:
+                        smooth_gray = cv2.GaussianBlur(cv2.medianBlur(gray, 5), (9, 9), 0)
+                        bubble_sources.append((smooth_gray, 2.0, 2.0))
 
-                    for delta in (
-                        bubble_bg.astype(np.int16) - gray.astype(np.int16),
-                        gray.astype(np.int16) - bubble_bg.astype(np.int16),
-                    ):
-                        delta[gray == 0] = 0
-                        bubble_binary = (delta >= 4).astype(np.uint8) * 255
-                        bubble_binary = cv2.morphologyEx(bubble_binary, cv2.MORPH_CLOSE, close_kernel, iterations=1)
-                        bubble_binary = cv2.morphologyEx(bubble_binary, cv2.MORPH_OPEN, open_kernel_bubble, iterations=1)
+                    for bubble_source, delta_threshold, mean_threshold in bubble_sources:
+                        bubble_bg = cv2.GaussianBlur(bubble_source, (blur_k, blur_k), 0)
+                        for delta in (
+                            bubble_bg.astype(np.int16) - bubble_source.astype(np.int16),
+                            bubble_source.astype(np.int16) - bubble_bg.astype(np.int16),
+                        ):
+                            delta[gray == 0] = 0
+                            bubble_binary = (delta >= delta_threshold).astype(np.uint8) * 255
+                            bubble_binary = cv2.morphologyEx(bubble_binary, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+                            bubble_binary = cv2.morphologyEx(bubble_binary, cv2.MORPH_OPEN, open_kernel_bubble, iterations=1)
 
-                        b_num_labels, b_labels, b_stats, _ = cv2.connectedComponentsWithStats(bubble_binary)
-                        for i in range(1, b_num_labels):
-                            b_area = int(b_stats[i, cv2.CC_STAT_AREA])
-                            b_x = int(b_stats[i, cv2.CC_STAT_LEFT])
-                            b_y = int(b_stats[i, cv2.CC_STAT_TOP])
-                            b_w = int(b_stats[i, cv2.CC_STAT_WIDTH])
-                            b_h = int(b_stats[i, cv2.CC_STAT_HEIGHT])
+                            b_num_labels, b_labels, b_stats, _ = cv2.connectedComponentsWithStats(bubble_binary)
+                            for i in range(1, b_num_labels):
+                                b_area = int(b_stats[i, cv2.CC_STAT_AREA])
+                                b_x = int(b_stats[i, cv2.CC_STAT_LEFT])
+                                b_y = int(b_stats[i, cv2.CC_STAT_TOP])
+                                b_w = int(b_stats[i, cv2.CC_STAT_WIDTH])
+                                b_h = int(b_stats[i, cv2.CC_STAT_HEIGHT])
 
-                            if b_area < bubble_min_area or b_area > bubble_max_area:
-                                continue
-                            if (
-                                b_x <= border_margin
-                                or b_y <= border_margin
-                                or b_x + b_w >= gray.shape[1] - border_margin
-                                or b_y + b_h >= gray.shape[0] - border_margin
-                            ):
-                                continue
+                                if b_area < bubble_min_area or b_area > bubble_max_area:
+                                    continue
+                                if (
+                                    b_x <= border_margin
+                                    or b_y <= border_margin
+                                    or b_x + b_w >= gray.shape[1] - border_margin
+                                    or b_y + b_h >= gray.shape[0] - border_margin
+                                ):
+                                    continue
 
-                            b_aspect = max(b_w, b_h) / (min(b_w, b_h) + 1e-5)
-                            b_fill_ratio = b_area / max(1, b_w * b_h)
-                            if b_aspect > 3.5 or b_fill_ratio < 0.25:
-                                continue
+                                b_aspect = max(b_w, b_h) / (min(b_w, b_h) + 1e-5)
+                                b_fill_ratio = b_area / max(1, b_w * b_h)
+                                if b_aspect > 3.5 or b_fill_ratio < 0.25:
+                                    continue
 
-                            component_mask = (b_labels == i)
-                            if float(np.mean(delta[component_mask])) < 4.0:
-                                continue
+                                component_mask = (b_labels == i)
+                                if float(np.mean(delta[component_mask])) < mean_threshold:
+                                    continue
 
-                            component_u8 = component_mask.astype(np.uint8) * 255
-                            contours, _ = cv2.findContours(
-                                component_u8,
-                                cv2.RETR_EXTERNAL,
-                                cv2.CHAIN_APPROX_SIMPLE,
-                            )
-                            bubble_mask = np.zeros_like(component_u8)
-                            if contours:
-                                cv2.drawContours(bubble_mask, contours, -1, 255, thickness=-1)
-                            else:
-                                bubble_mask = component_u8
-
-                            filled_area = int(np.count_nonzero(bubble_mask > 0))
-                            if filled_area < bubble_min_area or filled_area > bubble_fill_max_area:
-                                continue
-
-                            if extension > 0:
-                                bubble_dilate = cv2.getStructuringElement(
-                                    cv2.MORPH_ELLIPSE,
-                                    (extension * 2 + 1, extension * 2 + 1),
+                                component_u8 = component_mask.astype(np.uint8) * 255
+                                contours, _ = cv2.findContours(
+                                    component_u8,
+                                    cv2.RETR_EXTERNAL,
+                                    cv2.CHAIN_APPROX_SIMPLE,
                                 )
-                                bubble_mask = cv2.dilate(bubble_mask, bubble_dilate, iterations=1)
+                                bubble_mask = np.zeros_like(component_u8)
+                                if contours:
+                                    contour_points = np.vstack(contours)
+                                    if len(contour_points) >= 3:
+                                        hull = cv2.convexHull(contour_points)
+                                        cv2.drawContours(bubble_mask, [hull], -1, 255, thickness=-1)
+                                    else:
+                                        cv2.drawContours(bubble_mask, contours, -1, 255, thickness=-1)
+                                else:
+                                    bubble_mask = component_u8
 
-                            accepted_bubble_mask[bubble_mask > 0] = 255
+                                filled_area = int(np.count_nonzero(bubble_mask > 0))
+                                if filled_area < bubble_min_area or filled_area > bubble_fill_max_area:
+                                    continue
+
+                                if extension > 0:
+                                    bubble_dilate = cv2.getStructuringElement(
+                                        cv2.MORPH_ELLIPSE,
+                                        (extension * 2 + 1, extension * 2 + 1),
+                                    )
+                                    bubble_mask = cv2.dilate(bubble_mask, bubble_dilate, iterations=1)
+
+                                accepted_bubble_mask[bubble_mask > 0] = 255
 
                     if np.any(accepted_bubble_mask > 0):
                         b_count, _ = cv2.connectedComponents(accepted_bubble_mask, connectivity=8)
