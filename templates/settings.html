@@ -3696,7 +3696,8 @@
         }
 
         let displayVal = '';
-        const isBool = p.param_type === 'bool';
+        const normalizedValue = String(p.param_value || '').toLowerCase();
+        const isBool = p.param_type === 'bool' || normalizedValue === 'true' || normalizedValue === 'false';
 
         try {
             const parsed = JSON.parse(p.param_value);
@@ -3707,7 +3708,7 @@
                     <button class="btn-edit" ${lockedReason ? 'disabled' : ''} onclick='openEdit(${JSON.stringify(p.param_name)})'>✏️ 修改</button>`;
 
         if (isBool) {
-            const isChecked = displayVal === 'true';
+            const isChecked = String(displayVal).toLowerCase() === 'true';
             valueContent = `
                 <label class="switch">
                     <input type="checkbox" ${isChecked ? 'checked' : ''} ${lockedReason ? 'disabled' : ''} onchange='toggleBoolParam(${JSON.stringify(p.param_name)}, this.checked)'>

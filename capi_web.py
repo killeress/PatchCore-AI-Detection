@@ -7314,16 +7314,26 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     # 只處理 JSON 可序列化的基本型別
                     if isinstance(val, (str, int, float, bool)):
                         val_str = str(val)
+                        if isinstance(val, bool):
+                            param_type = "bool"
+                        elif isinstance(val, int):
+                            param_type = "int"
+                        elif isinstance(val, float):
+                            param_type = "float"
+                        else:
+                            param_type = "str"
                     elif isinstance(val, (dict, list)):
                         try:
                             val_str = json.dumps(val)
                         except (TypeError, ValueError):
                             continue
+                        param_type = "dict" if isinstance(val, dict) else "list"
                     else:
                         continue
                     params.append({
                         "param_name": f.name,
                         "param_value": val_str,
+                        "param_type": param_type,
                         "updated_at": None,
                     })
             # 附帶 model_resolution_map 給前端產品選擇器使用

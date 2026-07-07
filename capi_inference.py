@@ -2537,10 +2537,11 @@ class CAPIInferencer:
                         if dark_particle_count + dark_scratch_count > 0:
                             logging.debug(f"    暗色顆粒偵測: P:{dark_particle_count} S:{dark_scratch_count} Area:{dark_total_area} (Thr:{dark_threshold:.0f}, Median:{bg_median:.0f})")
 
-        # Step 6.5: 低對比氣泡偵測 — 抓大面積柔邊暗斑，避免只標到氣泡內的小亮點
+        # Step 6.5: 低對比氣泡偵測 — 抓大面積柔邊亮/暗斑，避免只標到氣泡內的小點
         bubble_count = 0
         bubble_total_area = 0
-        if getattr(self.config, 'dust_detect_bubbles_enabled', False):
+        bubble_detection_enabled = getattr(self.config, 'dust_detect_bubbles_enabled', False)
+        if bubble_detection_enabled:
             non_zero_pixels = gray[gray > 0]
             if len(non_zero_pixels) > 100 and float(np.median(non_zero_pixels)) > 20:
                 min_dim = min(gray.shape[:2])
@@ -2550,57 +2551,64 @@ class CAPIInferencer:
 
                 if blur_k >= 15:
                     bubble_bg = cv2.GaussianBlur(gray, (blur_k, blur_k), 0)
-                    dark_delta = bubble_bg.astype(np.int16) - gray.astype(np.int16)
-                    dark_delta[gray == 0] = 0
-                    bubble_binary = (dark_delta >= 4).astype(np.uint8) * 255
-
                     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
                     open_kernel_bubble = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                    bubble_binary = cv2.morphologyEx(bubble_binary, cv2.MORPH_CLOSE, close_kernel, iterations=1)
-                    bubble_binary = cv2.morphologyEx(bubble_binary, cv2.MORPH_OPEN, open_kernel_bubble, iterations=1)
-
-                    b_num_labels, b_labels, b_stats, _ = cv2.connectedComponentsWithStats(bubble_binary)
                     bubble_min_area = max(area_min * 20, int(gray.size * 0.002))
                     bubble_max_area = min(area_max, int(gray.size * 0.08))
                     border_margin = 6
+                    accepted_bubble_mask = np.zeros_like(gray, dtype=np.uint8)
 
-                    for i in range(1, b_num_labels):
-                        b_area = int(b_stats[i, cv2.CC_STAT_AREA])
-                        b_x = int(b_stats[i, cv2.CC_STAT_LEFT])
-                        b_y = int(b_stats[i, cv2.CC_STAT_TOP])
-                        b_w = int(b_stats[i, cv2.CC_STAT_WIDTH])
-                        b_h = int(b_stats[i, cv2.CC_STAT_HEIGHT])
+                    for delta in (
+                        bubble_bg.astype(np.int16) - gray.astype(np.int16),
+                        gray.astype(np.int16) - bubble_bg.astype(np.int16),
+                    ):
+                        delta[gray == 0] = 0
+                        bubble_binary = (delta >= 4).astype(np.uint8) * 255
+                        bubble_binary = cv2.morphologyEx(bubble_binary, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+                        bubble_binary = cv2.morphologyEx(bubble_binary, cv2.MORPH_OPEN, open_kernel_bubble, iterations=1)
 
-                        if b_area < bubble_min_area or b_area > bubble_max_area:
-                            continue
-                        if (
-                            b_x <= border_margin
-                            or b_y <= border_margin
-                            or b_x + b_w >= gray.shape[1] - border_margin
-                            or b_y + b_h >= gray.shape[0] - border_margin
-                        ):
-                            continue
+                        b_num_labels, b_labels, b_stats, _ = cv2.connectedComponentsWithStats(bubble_binary)
+                        for i in range(1, b_num_labels):
+                            b_area = int(b_stats[i, cv2.CC_STAT_AREA])
+                            b_x = int(b_stats[i, cv2.CC_STAT_LEFT])
+                            b_y = int(b_stats[i, cv2.CC_STAT_TOP])
+                            b_w = int(b_stats[i, cv2.CC_STAT_WIDTH])
+                            b_h = int(b_stats[i, cv2.CC_STAT_HEIGHT])
 
-                        b_aspect = max(b_w, b_h) / (min(b_w, b_h) + 1e-5)
-                        b_fill_ratio = b_area / max(1, b_w * b_h)
-                        if b_aspect > 3.5 or b_fill_ratio < 0.25:
-                            continue
+                            if b_area < bubble_min_area or b_area > bubble_max_area:
+                                continue
+                            if (
+                                b_x <= border_margin
+                                or b_y <= border_margin
+                                or b_x + b_w >= gray.shape[1] - border_margin
+                                or b_y + b_h >= gray.shape[0] - border_margin
+                            ):
+                                continue
 
-                        component_mask = (b_labels == i)
-                        if float(np.mean(dark_delta[component_mask])) < 4.0:
-                            continue
+                            b_aspect = max(b_w, b_h) / (min(b_w, b_h) + 1e-5)
+                            b_fill_ratio = b_area / max(1, b_w * b_h)
+                            if b_aspect > 3.5 or b_fill_ratio < 0.25:
+                                continue
 
-                        bubble_mask = component_mask.astype(np.uint8) * 255
-                        if extension > 0:
-                            bubble_dilate = cv2.getStructuringElement(
-                                cv2.MORPH_ELLIPSE,
-                                (extension * 2 + 1, extension * 2 + 1),
-                            )
-                            bubble_mask = cv2.dilate(bubble_mask, bubble_dilate, iterations=1)
+                            component_mask = (b_labels == i)
+                            if float(np.mean(delta[component_mask])) < 4.0:
+                                continue
 
-                        dust_mask[bubble_mask > 0] = 255
-                        bubble_count += 1
-                        bubble_total_area += int(np.count_nonzero(bubble_mask > 0))
+                            bubble_mask = component_mask.astype(np.uint8) * 255
+                            if extension > 0:
+                                bubble_dilate = cv2.getStructuringElement(
+                                    cv2.MORPH_ELLIPSE,
+                                    (extension * 2 + 1, extension * 2 + 1),
+                                )
+                                bubble_mask = cv2.dilate(bubble_mask, bubble_dilate, iterations=1)
+
+                            accepted_bubble_mask[bubble_mask > 0] = 255
+
+                    if np.any(accepted_bubble_mask > 0):
+                        b_count, _ = cv2.connectedComponents(accepted_bubble_mask, connectivity=8)
+                        bubble_count = max(0, b_count - 1)
+                        bubble_total_area = int(np.count_nonzero(accepted_bubble_mask > 0))
+                        dust_mask[accepted_bubble_mask > 0] = 255
         
         # 合併計數
         total_particle = particle_count + dark_particle_count
@@ -2612,7 +2620,7 @@ class CAPIInferencer:
         is_dust = (total_particle + total_scratch + bubble_count) > 0
         
         dark_info = f" DkP:{dark_particle_count} DkS:{dark_scratch_count}" if (dark_particle_count + dark_scratch_count) > 0 else ""
-        bubble_info = f" Bub:{bubble_count}" if bubble_count > 0 else ""
+        bubble_info = f" Bub:{bubble_count}" if bubble_detection_enabled else ""
         detail_text = (f"Thr:{used_threshold:.0f} P:{particle_count} S:{scratch_count} "
                        f"Area:{total_area} Ratio:{bright_ratio:.4f}{dark_info}{bubble_info}")
         
