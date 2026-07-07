@@ -70,6 +70,24 @@ def _striped_broken_ring_bubble_image() -> np.ndarray:
     return cv2.GaussianBlur(image, (5, 5), 0)
 
 
+def _striped_surface_edge_bubble_image() -> np.ndarray:
+    image = np.full((512, 512), 70, dtype=np.int16)
+    stripes = ((np.arange(512) % 2) * 2 - 1) * 3
+    image += stripes[None, :]
+    image[376:, :] += 35
+
+    bubble = np.zeros((512, 512), dtype=np.uint8)
+    cv2.ellipse(bubble, (270, 335), (45, 25), 0, 0, 360, 255, -1)
+    image[bubble > 0] += 6
+
+    lower_blob = np.zeros((512, 512), dtype=np.uint8)
+    cv2.ellipse(lower_blob, (330, 445), (35, 25), 0, 0, 360, 255, -1)
+    image[lower_blob > 0] += 4
+
+    image = np.clip(image, 0, 255).astype(np.uint8)
+    return cv2.GaussianBlur(image, (5, 5), 0)
+
+
 def test_low_contrast_bubble_mask_is_opt_in():
     image = _low_contrast_bubble_image()
 
@@ -161,6 +179,19 @@ def test_striped_broken_ring_bubble_fills_interior_when_enabled():
     assert is_dust is True
     assert covered >= 0.70
     assert mask[335, 270] == 255
+    assert ratio > 0.0
+    assert "Bub:1" in detail
+
+
+def test_surface_edge_blob_below_boundary_is_not_bubble():
+    image = _striped_surface_edge_bubble_image()
+    inferencer = _make_inferencer(detect_bubbles=True)
+
+    is_dust, mask, ratio, detail = inferencer.check_dust_or_scratch_feature(image)
+
+    assert is_dust is True
+    assert mask[335, 270] == 255
+    assert mask[445, 330] == 0
     assert ratio > 0.0
     assert "Bub:1" in detail
 
