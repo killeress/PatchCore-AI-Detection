@@ -43,6 +43,33 @@ def _low_contrast_ring_bubble_image() -> np.ndarray:
     return cv2.GaussianBlur(image, (9, 9), 0)
 
 
+def _striped_low_contrast_bubble_image() -> np.ndarray:
+    image = np.full((512, 512), 80, dtype=np.int16)
+    stripes = ((np.arange(512) % 2) * 2 - 1) * 4
+    image += stripes[None, :]
+
+    bubble = np.zeros((512, 512), dtype=np.uint8)
+    cv2.ellipse(bubble, (270, 335), (45, 40), 0, 0, 360, 255, -1)
+    image[bubble > 0] -= 6
+
+    image = np.clip(image, 0, 255).astype(np.uint8)
+    return cv2.GaussianBlur(image, (5, 5), 0)
+
+
+def _striped_broken_ring_bubble_image() -> np.ndarray:
+    image = np.full((512, 512), 80, dtype=np.int16)
+    stripes = ((np.arange(512) % 2) * 2 - 1) * 4
+    image += stripes[None, :]
+
+    bubble = np.zeros((512, 512), dtype=np.uint8)
+    cv2.ellipse(bubble, (270, 335), (45, 40), 0, 0, 360, 255, 8)
+    cv2.rectangle(bubble, (250, 305), (310, 335), 0, -1)
+    image[bubble > 0] -= 6
+
+    image = np.clip(image, 0, 255).astype(np.uint8)
+    return cv2.GaussianBlur(image, (5, 5), 0)
+
+
 def test_low_contrast_bubble_mask_is_opt_in():
     image = _low_contrast_bubble_image()
 
@@ -100,6 +127,40 @@ def test_low_contrast_ring_bubble_fills_interior_when_enabled():
     assert is_dust is True
     assert covered >= 0.75
     assert mask[64, 64] == 255
+    assert ratio > 0.0
+    assert "Bub:1" in detail
+
+
+def test_striped_low_contrast_bubble_is_detected_when_enabled():
+    image = _striped_low_contrast_bubble_image()
+    inferencer = _make_inferencer(detect_bubbles=True)
+
+    is_dust, mask, ratio, detail = inferencer.check_dust_or_scratch_feature(image)
+
+    yy, xx = np.ogrid[:512, :512]
+    expected_bubble = ((xx - 270) ** 2 / (45 ** 2) + (yy - 335) ** 2 / (40 ** 2)) <= 1
+    covered = np.count_nonzero(mask[expected_bubble] > 0) / np.count_nonzero(expected_bubble)
+
+    assert is_dust is True
+    assert covered >= 0.70
+    assert mask[335, 270] == 255
+    assert ratio > 0.0
+    assert "Bub:1" in detail
+
+
+def test_striped_broken_ring_bubble_fills_interior_when_enabled():
+    image = _striped_broken_ring_bubble_image()
+    inferencer = _make_inferencer(detect_bubbles=True)
+
+    is_dust, mask, ratio, detail = inferencer.check_dust_or_scratch_feature(image)
+
+    yy, xx = np.ogrid[:512, :512]
+    expected_bubble = ((xx - 270) ** 2 / (45 ** 2) + (yy - 335) ** 2 / (40 ** 2)) <= 1
+    covered = np.count_nonzero(mask[expected_bubble] > 0) / np.count_nonzero(expected_bubble)
+
+    assert is_dust is True
+    assert covered >= 0.70
+    assert mask[335, 270] == 255
     assert ratio > 0.0
     assert "Bub:1" in detail
 
