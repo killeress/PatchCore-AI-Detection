@@ -242,6 +242,7 @@ class CAPIConfig:
     dust_two_stage_diff_percentile: float = 90.0  # 取 diff 分布的此百分位作為特徵閾值
     dust_two_stage_min_area: int = 3          # 特徵最小面積 (px)
     dust_detect_dark_particles: bool = True   # 偵測暗色顆粒/圖案 (如偏黑 MARK)，當作表面灰塵過濾
+    dust_detect_bubbles_enabled: bool = False  # 偵測低對比氣泡/大片暗斑，併入 OMIT dust mask
     dust_high_cov_threshold: float = 0.5       # 高覆蓋率門檻：region COV >= 此值時直接判 dust，不要求 peak_in_dust（因 heatmap peak 有膨脹偏移）
     dust_peak_fraction_threshold: float = 0.80 # 次峰救援門檻：peak 不在灰塵上時，若灰塵區內最強分數 >= 區域 peak 的此比例，視為 heatmap 偏移，仍判 dust
     
@@ -494,6 +495,7 @@ class CAPIConfig:
             dust_two_stage_diff_percentile=data.get("dust_two_stage_diff_percentile", 90.0),
             dust_two_stage_min_area=data.get("dust_two_stage_min_area", 3),
             dust_detect_dark_particles=data.get("dust_detect_dark_particles", True),
+            dust_detect_bubbles_enabled=data.get("dust_detect_bubbles_enabled", False),
             dust_high_cov_threshold=data.get("dust_high_cov_threshold", 0.5),
             dust_peak_fraction_threshold=data.get("dust_peak_fraction_threshold", 0.80),
             omit_overexposure_mean_threshold=data.get("omit_overexposure_mean_threshold", 200),
@@ -617,6 +619,7 @@ class CAPIConfig:
             "dust_two_stage_diff_percentile": self.dust_two_stage_diff_percentile,
             "dust_two_stage_min_area": self.dust_two_stage_min_area,
             "dust_detect_dark_particles": self.dust_detect_dark_particles,
+            "dust_detect_bubbles_enabled": self.dust_detect_bubbles_enabled,
             "dust_high_cov_threshold": self.dust_high_cov_threshold,
             "dust_peak_fraction_threshold": self.dust_peak_fraction_threshold,
             "omit_overexposure_mean_threshold": self.omit_overexposure_mean_threshold,
@@ -710,6 +713,7 @@ class CAPIConfig:
             "dust_two_stage_diff_percentile": self.dust_two_stage_diff_percentile,
             "dust_two_stage_min_area": self.dust_two_stage_min_area,
             "dust_detect_dark_particles": self.dust_detect_dark_particles,
+            "dust_detect_bubbles_enabled": self.dust_detect_bubbles_enabled,
             "dust_high_cov_threshold": self.dust_high_cov_threshold,
             "dust_peak_fraction_threshold": self.dust_peak_fraction_threshold,
             "omit_overexposure_mean_threshold": self.omit_overexposure_mean_threshold,
@@ -868,6 +872,9 @@ class CAPIConfig:
         if "dust_detect_dark_particles" in param_map:
             val = param_map["dust_detect_dark_particles"]
             self.dust_detect_dark_particles = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "dust_detect_bubbles_enabled" in param_map:
+            val = param_map["dust_detect_bubbles_enabled"]
+            self.dust_detect_bubbles_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
         if "dust_high_cov_threshold" in param_map:
             self.dust_high_cov_threshold = float(param_map["dust_high_cov_threshold"])
         if "dust_peak_fraction_threshold" in param_map:
