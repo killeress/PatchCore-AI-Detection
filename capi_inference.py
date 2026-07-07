@@ -2557,6 +2557,17 @@ class CAPIInferencer:
                     bubble_fill_max_area = min(area_max, max(int(gray.size * 0.08), bubble_min_area * 30))
                     border_margin = 6
                     accepted_bubble_mask = np.zeros_like(gray, dtype=np.uint8)
+                    surface_edge_y = None
+                    if min_dim >= 64:
+                        row_mean = gray.astype(np.float32).mean(axis=1)
+                        row_mean = cv2.GaussianBlur(row_mean.reshape(-1, 1), (1, 9), 0).ravel()
+                        row_grad = np.gradient(row_mean)
+                        search_start = int(gray.shape[0] * 0.45)
+                        search_end = max(search_start + 1, gray.shape[0] - 10)
+                        edge_y = search_start + int(np.argmax(row_grad[search_start:search_end]))
+                        if float(row_grad[edge_y]) >= 10.0:
+                            surface_edge_y = edge_y
+
                     bubble_sources = [(gray, 4.0, 4.0)]
                     if min_dim >= 64:
                         smooth_gray = cv2.GaussianBlur(cv2.medianBlur(gray, 5), (9, 9), 0)
@@ -2589,6 +2600,8 @@ class CAPIInferencer:
                                     or b_x + b_w >= gray.shape[1] - border_margin
                                     or b_y + b_h >= gray.shape[0] - border_margin
                                 ):
+                                    continue
+                                if surface_edge_y is not None and b_y >= surface_edge_y - 20:
                                     continue
 
                                 b_aspect = max(b_w, b_h) / (min(b_w, b_h) + 1e-5)
