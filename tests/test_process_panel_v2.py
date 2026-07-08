@@ -764,6 +764,77 @@ def test_client_point_bomb_can_match_multiple_aoi_tiles_within_tolerance(tmp_pat
     assert near_tile.bomb_defect_code == "UNKNOWN"
 
 
+def test_forced_bomb_detection_skips_client_coord_already_covered_by_aoi(capsys):
+    from capi_inference import AOIReportDefect, CAPIInferencer
+
+    cfg = _make_config(Path("."))
+    cfg.bomb_area_force_detection_enabled = True
+    cfg.bomb_match_tolerance = 50
+    inferencer = CAPIInferencer(cfg)
+
+    original_defect = AOIReportDefect(
+        defect_code="PCDK2",
+        product_x=234,
+        product_y=128,
+        image_prefix="WGF50500",
+    )
+    aoi_report = {"WGF50500": [original_defect]}
+    bomb_info = {
+        "image_prefix": "WGF50500",
+        "defect_type": "point",
+        "coordinates": [(228, 128), (683, 138)],
+    }
+
+    forced_report, forced_count = inferencer._aoi_report_with_forced_client_bomb_coords(
+        aoi_report,
+        bomb_info,
+    )
+
+    assert forced_count == 1
+    assert aoi_report["WGF50500"] == [original_defect]
+    assert [(d.defect_code, d.product_x, d.product_y) for d in forced_report["WGF50500"]] == [
+        ("PCDK2", 234, 128),
+        ("BOMB_FORCE", 683, 138),
+    ]
+    log = capsys.readouterr().out
+    assert "AOI已涵蓋=1" in log
+    assert "補切=1" in log
+    assert "(683, 138)" in log
+
+
+def test_forced_bomb_detection_does_not_add_tile_when_aoi_covers_all_client_coords(capsys):
+    from capi_inference import AOIReportDefect, CAPIInferencer
+
+    cfg = _make_config(Path("."))
+    cfg.bomb_area_force_detection_enabled = True
+    cfg.bomb_match_tolerance = 50
+    inferencer = CAPIInferencer(cfg)
+
+    aoi_report = {
+        "WGF50500": [
+            AOIReportDefect("PCDK2", 234, 128, "WGF50500"),
+            AOIReportDefect("PCDK2", 689, 140, "WGF50500"),
+        ]
+    }
+    bomb_info = {
+        "image_prefix": "WGF50500",
+        "defect_type": "point",
+        "coordinates": [(228, 128), (683, 138)],
+    }
+
+    forced_report, forced_count = inferencer._aoi_report_with_forced_client_bomb_coords(
+        aoi_report,
+        bomb_info,
+    )
+
+    assert forced_count == 0
+    assert forced_report == aoi_report
+    log = capsys.readouterr().out
+    assert "AOI已涵蓋=2" in log
+    assert "補切=0" in log
+    assert "不額外補切 tile" in log
+
+
 def test_process_panel_v2_duplicate_panel_uses_latest_b0f_skip_file(tmp_path):
     import cv2
 

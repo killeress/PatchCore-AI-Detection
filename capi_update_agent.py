@@ -235,6 +235,7 @@ def check_once(args: argparse.Namespace) -> int:
         env["CAPI_PATCH_AUTO_ROLLBACK"] = "1"
     if args.health_url:
         env["CAPI_HEALTH_URL"] = args.health_url
+    env.setdefault("CAPI_PYTHON_BIN", sys.executable)
 
     _append_log(log_file, f"installing {package_path}")
     proc = subprocess.run(

@@ -1958,7 +1958,10 @@
 <script>
     // ── State ──
     let allParams = [];
-    const PATCHCORE_PARAMS = ['patchcore_filter_enabled', 'patchcore_blur_sigma', 'patchcore_min_area', 'patchcore_score_metric'];
+    const PATCHCORE_PARAMS = [
+        'patchcore_filter_enabled', 'patchcore_blur_sigma', 'patchcore_min_area', 'patchcore_score_metric',
+        'mark_exclusion_padding_px', 'mark_exclusion_soft_decay_px', 'no_detect_soft_decay_min_weight'
+    ];
     const SCRATCH_CLASSIFIER_PARAMS = [
         'scratch_classifier_enabled',
         'scratch_safety_multiplier',
@@ -2000,11 +2003,12 @@
         'cv_edge_bottom_width', 'cv_edge_bottom_threshold', 'cv_edge_bottom_min_area',
         'cv_edge_bottom_exclude_top', 'cv_edge_bottom_exclude_bottom', 'cv_edge_bottom_exclude_left', 'cv_edge_bottom_exclude_right',
         'cv_edge_exclude_enabled', 'cv_edge_exclude_x', 'cv_edge_exclude_y',
-        'cv_edge_exclude_w', 'cv_edge_exclude_h'
+        'cv_edge_exclude_w', 'cv_edge_exclude_h', 'cv_edge_exclude_soft_decay_px'
     ];
     const AOI_COORD_PARAMS = [
         'grid_tiling_enabled', 'aoi_coord_inspection_enabled',
         'aoi_heatmap_center_seed_enabled',
+        'bomb_area_force_detection_enabled',
         'aoi_report_path_replace_from', 'aoi_report_path_replace_to',
         'aoi_edge_inspector', 'aoi_edge_boundary_band_px',
         'aoi_edge_pc_roi_inward_shift_enabled', 'aoi_edge_aoi_margin_px',
@@ -2479,6 +2483,9 @@
         const scratchParams = SCRATCH_CLASSIFIER_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const dustParams = DUST_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const cvEdgeParams = CV_EDGE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
+        const exZoneDecayParams = ['cv_edge_exclude_soft_decay_px']
+            .map(name => allParams.find(p => p.param_name === name))
+            .filter(Boolean);
         const aoiCoordParams = AOI_COORD_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const b0fParams = B0F_BRIGHT_SPOT_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const imageAbnormalParams = IMAGE_ABNORMAL_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
@@ -2868,6 +2875,7 @@
                             
                             <div style="display: flex; flex-direction: column; gap: 12px; max-height: 450px; overflow-y: auto; padding-right: 4px;">
                                 <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0;">設定多個排除區域 (X, Y, W, H)，單位為 pixel。<br>PatchCore 推論及邊緣檢測若與任何區域重疊，仍會存圖但標記為「不檢測區域」並視為 OK。<br><strong style="color:#fda4af;">⚠️ 排除區域按產品分別設定。</strong></p>
+                                ${exZoneDecayParams.map(p => paramRow(p)).join('')}
                                 
                                 <div id="ex-zones-list">
                                     <!-- Rendered by JS -->
@@ -3625,6 +3633,11 @@
         'dust_two_stage_diff_percentile': '特徵偵測靈敏度 (取 diff 分布的此百分位, 越低越敏感)',
         'dust_two_stage_min_area': '特徵最小面積，低於此值視為雜訊 (px)',
         'dust_two_stage_fallback_score': '安全網: 找不到特徵但 heatmap 分數 ≥ 此值時保守判 NG',
+        // No-detect zone decay
+        'mark_exclusion_padding_px': 'MARK 不檢測區硬遮罩外擴 (px)',
+        'mark_exclusion_soft_decay_px': 'MARK 硬遮罩外圈 heatmap 降權寬度 (px)',
+        'cv_edge_exclude_soft_decay_px': '手動不檢測區外圈 heatmap 降權寬度 (px)',
+        'no_detect_soft_decay_min_weight': '不檢測區 soft decay 邊界最低權重 (0~1)',
         // Image abnormal precheck
         'image_abnormal_detection_enabled': '啟用畫異預檢',
         'image_abnormal_standard_mean_lower': 'STANDARD 產品區平均亮度下限',
@@ -3641,6 +3654,7 @@
         'image_abnormal_b0f00000_mean_upper': 'B0F00000 產品區平均亮度上限',
         // AOI coordinate inference
         'aoi_heatmap_center_seed_enabled': 'Top% heatmap 額外保留 AOI 座標附近弱熱區',
+        'bomb_area_force_detection_enabled': '炸彈區域強制偵測：AOI 未給 Client 炸彈座標時補切 tile',
         // Scratch classifier
         'scratch_classifier_enabled': '啟用刮痕分類器',
         'scratch_safety_multiplier': '刮痕判定安全倍率',

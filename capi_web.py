@@ -1391,6 +1391,44 @@ def _attach_runtime_dust_masks_to_within_spec_detail(detail: Dict[str, Any], res
     return detail
 
 
+def _attach_no_detect_regions_to_within_spec_detail(
+    detail: Dict[str, Any],
+    inferencer: Any,
+    model_id: str = "",
+) -> Dict[str, Any]:
+    """Attach MARK padding and configured no-detect zones for within-spec OpenCV filtering."""
+    if not detail:
+        return detail
+
+    config = getattr(inferencer, "config", None) if inferencer is not None else None
+    mark_padding = max(0, _as_int(getattr(config, "mark_exclusion_padding_px", 32), 32))
+    zones = []
+    if inferencer is not None and hasattr(inferencer, "_configured_exclude_regions_for_model"):
+        try:
+            for region in inferencer._configured_exclude_regions_for_model(model_id) or []:
+                zones.append({
+                    "enabled": True,
+                    "name": getattr(region, "name", "cv_edge_exclude"),
+                    "x1": int(getattr(region, "x1", 0)),
+                    "y1": int(getattr(region, "y1", 0)),
+                    "x2": int(getattr(region, "x2", 0)),
+                    "y2": int(getattr(region, "y2", 0)),
+                })
+        except Exception:
+            zones = []
+
+    for image in detail.get("images") or []:
+        no_detect_cfg = image.get("within_spec_no_detect")
+        if not isinstance(no_detect_cfg, dict):
+            no_detect_cfg = {}
+        else:
+            no_detect_cfg = dict(no_detect_cfg)
+        no_detect_cfg["mark_padding_px"] = mark_padding
+        no_detect_cfg["cv_edge_exclude_zones"] = zones
+        image["within_spec_no_detect"] = no_detect_cfg
+    return detail
+
+
 def _runtime_dust_mask_for_tile(tile: Dict[str, Any], shape: Tuple[int, int]) -> Optional[Any]:
     mask = tile.get("_runtime_dust_mask")
     if mask is None:
@@ -1406,6 +1444,129 @@ def _runtime_dust_mask_for_tile(tile: Dict[str, Any], shape: Tuple[int, int]) ->
     if dust_mask.shape[:2] != (target_h, target_w):
         dust_mask = cv2.resize(dust_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
     return dust_mask > 0
+
+
+def _parse_within_spec_rect(value: Any, *, bbox_is_size: bool = False) -> Optional[Tuple[int, int, int, int]]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        parts = [p.strip() for p in value.split(",") if p.strip()]
+        if len(parts) != 4:
+            return None
+        try:
+            nums = [int(float(p)) for p in parts]
+        except ValueError:
+            return None
+    elif isinstance(value, dict):
+        try:
+            if {"x1", "y1", "x2", "y2"}.issubset(value.keys()):
+                nums = [int(value["x1"]), int(value["y1"]), int(value["x2"]), int(value["y2"])]
+                bbox_is_size = False
+            else:
+                nums = [
+                    int(value.get("x", 0)),
+                    int(value.get("y", 0)),
+                    int(value.get("w", value.get("width", 0))),
+                    int(value.get("h", value.get("height", 0))),
+                ]
+                bbox_is_size = True
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(value, (list, tuple)) and len(value) == 4:
+        try:
+            nums = [int(float(v)) for v in value]
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+
+    x1, y1, a, b = nums
+    x2, y2 = (x1 + a, y1 + b) if bbox_is_size else (a, b)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _within_spec_no_detect_regions_for_image(image: Dict[str, Any]) -> List[Tuple[int, int, int, int, str]]:
+    regions: List[Tuple[int, int, int, int, str]] = []
+    no_detect_cfg = image.get("within_spec_no_detect") if isinstance(image.get("within_spec_no_detect"), dict) else {}
+    mark_padding = max(
+        0,
+        _as_int(
+            no_detect_cfg.get("mark_padding_px", image.get("mark_exclusion_padding_px")),
+            0,
+        ),
+    )
+
+    mark_rect = _parse_within_spec_rect(image.get("mark_bbox"), bbox_is_size=True)
+    if mark_rect:
+        x1, y1, x2, y2 = mark_rect
+        regions.append((x1 - mark_padding, y1 - mark_padding, x2 + mark_padding, y2 + mark_padding, "mark"))
+
+    for raw in image.get("mark_exclusion_regions") or []:
+        rect = _parse_within_spec_rect(raw)
+        if not rect:
+            continue
+        x1, y1, x2, y2 = rect
+        regions.append((x1 - mark_padding, y1 - mark_padding, x2 + mark_padding, y2 + mark_padding, "mark"))
+
+    zone_values = []
+    zone_values.extend(no_detect_cfg.get("cv_edge_exclude_zones") or [])
+    zone_values.extend(image.get("cv_edge_exclude_zones") or [])
+    for raw in zone_values:
+        if isinstance(raw, dict) and raw.get("enabled") is False:
+            continue
+        zone_is_size = False
+        if isinstance(raw, dict):
+            zone_is_size = not {"x1", "y1", "x2", "y2"}.issubset(raw.keys())
+        rect = _parse_within_spec_rect(raw, bbox_is_size=zone_is_size)
+        if rect:
+            regions.append((*rect, "exclude_zone"))
+
+    return regions
+
+
+def _within_spec_no_detect_mask_for_tile(
+    image: Dict[str, Any],
+    tile: Dict[str, Any],
+    shape: Tuple[int, int],
+    crop_box: Tuple[int, int, int, int],
+):
+    import cv2
+    import numpy as np
+
+    regions = _within_spec_no_detect_regions_for_image(image)
+    if not regions:
+        return None
+
+    target_h, target_w = int(shape[0]), int(shape[1])
+    if target_h <= 0 or target_w <= 0:
+        return None
+    crop_x1, crop_y1, crop_x2, crop_y2 = crop_box
+    crop_w = max(1, crop_x2 - crop_x1)
+    crop_h = max(1, crop_y2 - crop_y1)
+
+    mask = np.zeros((target_h, target_w), dtype=np.uint8)
+    for rx1, ry1, rx2, ry2, _source in regions:
+        ix1 = max(crop_x1, int(rx1))
+        iy1 = max(crop_y1, int(ry1))
+        ix2 = min(crop_x2, int(rx2))
+        iy2 = min(crop_y2, int(ry2))
+        if ix2 <= ix1 or iy2 <= iy1:
+            continue
+
+        mx1 = max(0, min(target_w, int(np.floor((ix1 - crop_x1) * target_w / crop_w))))
+        my1 = max(0, min(target_h, int(np.floor((iy1 - crop_y1) * target_h / crop_h))))
+        mx2 = max(0, min(target_w, int(np.ceil((ix2 - crop_x1) * target_w / crop_w))))
+        my2 = max(0, min(target_h, int(np.ceil((iy2 - crop_y1) * target_h / crop_h))))
+        if mx2 > mx1 and my2 > my1:
+            mask[my1:my2, mx1:mx2] = 255
+
+    if not np.any(mask > 0):
+        return None
+    if mask.shape[:2] != (target_h, target_w):
+        mask = cv2.resize(mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+    return mask > 0
 
 
 def _candidate_dust_overlap(candidate: Dict[str, Any], dust_mask) -> Optional[Dict[str, Any]]:
@@ -1443,6 +1604,41 @@ def _candidate_dust_overlap(candidate: Dict[str, Any], dust_mask) -> Optional[Di
     return rejected
 
 
+def _candidate_no_detect_overlap(candidate: Dict[str, Any], no_detect_mask) -> Optional[Dict[str, Any]]:
+    import numpy as np
+
+    if no_detect_mask is None:
+        return None
+    mask_h, mask_w = no_detect_mask.shape[:2]
+    x = max(0, min(mask_w - 1, _as_int(candidate.get("x"), 0)))
+    y = max(0, min(mask_h - 1, _as_int(candidate.get("y"), 0)))
+    w = max(1, _as_int(candidate.get("w"), 1))
+    h = max(1, _as_int(candidate.get("h"), 1))
+    x2 = max(x + 1, min(mask_w, x + w))
+    y2 = max(y + 1, min(mask_h, y + h))
+    patch = no_detect_mask[y:y2, x:x2]
+    if patch.size <= 0:
+        return None
+
+    overlap_ratio = float(np.count_nonzero(patch) / patch.size)
+    cx = max(0, min(mask_w - 1, int(round(_as_float(candidate.get("center_x"), x + w / 2.0)))))
+    cy = max(0, min(mask_h - 1, int(round(_as_float(candidate.get("center_y"), y + h / 2.0)))))
+    center_in_no_detect = bool(no_detect_mask[cy, cx])
+    if not center_in_no_detect and overlap_ratio < 0.25:
+        return None
+
+    rejected = {
+        k: v for k, v in candidate.items()
+        if k not in {"is_defect", "id"}
+    }
+    rejected.update({
+        "reason": "no_detect_mask_overlap",
+        "no_detect_overlap_ratio": round(overlap_ratio, 4),
+        "center_in_no_detect": center_in_no_detect,
+    })
+    return rejected
+
+
 def _remove_dust_overlap_candidates(detected: Dict[str, Any], dust_mask) -> Dict[str, Any]:
     if dust_mask is None:
         return detected
@@ -1473,6 +1669,39 @@ def _remove_dust_overlap_candidates(detected: Dict[str, Any], dust_mask) -> Dict
     detected["rejected_candidates"] = rejected[:50]
     detected["dust_mask_filtered_count"] = original_count - len(kept)
     detected["dust_mask_filtered_rejected_count"] = dust_filtered_rejected_count
+    return detected
+
+
+def _remove_no_detect_overlap_candidates(detected: Dict[str, Any], no_detect_mask) -> Dict[str, Any]:
+    if no_detect_mask is None:
+        return detected
+
+    kept = []
+    rejected = []
+    original_rejected = detected.get("rejected_candidates") or []
+    original_count = len(detected.get("candidates") or [])
+    no_detect_filtered_rejected_count = 0
+    for candidate in original_rejected:
+        no_detect_rejected = _candidate_no_detect_overlap(candidate, no_detect_mask)
+        if no_detect_rejected:
+            no_detect_rejected["source_reason"] = candidate.get("reason", "")
+            rejected.append(no_detect_rejected)
+            no_detect_filtered_rejected_count += 1
+        else:
+            rejected.append(candidate)
+    for candidate in detected.get("candidates") or []:
+        no_detect_rejected = _candidate_no_detect_overlap(candidate, no_detect_mask)
+        if no_detect_rejected:
+            rejected.append(no_detect_rejected)
+        else:
+            kept.append(candidate)
+
+    for idx, candidate in enumerate(kept, 1):
+        candidate["id"] = idx
+    detected["candidates"] = kept
+    detected["rejected_candidates"] = rejected[:50]
+    detected["no_detect_mask_filtered_count"] = original_count - len(kept)
+    detected["no_detect_mask_filtered_rejected_count"] = no_detect_filtered_rejected_count
     return detected
 
 
@@ -1622,6 +1851,7 @@ def _save_within_spec_dot_visuals(
     chosen: Dict[str, Any],
     dot_cfg: Dict[str, Any],
     runtime_dust_mask=None,
+    no_detect_mask=None,
     non_dot_residues: Optional[List[Dict[str, Any]]] = None,
     output_dir: Optional[Path],
     url_prefix: str,
@@ -1658,6 +1888,7 @@ def _save_within_spec_dot_visuals(
         include_visuals=True,
     )
     detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask)
+    detected = _remove_no_detect_overlap_candidates(detected, no_detect_mask)
     dust_mask_color = None
     dust_overlay = None
     if runtime_dust_mask is not None:
@@ -1678,6 +1909,29 @@ def _save_within_spec_dot_visuals(
                     dust_overlay[dust_pixels],
                     0.45,
                     yellow[dust_pixels],
+                    0.55,
+                    0,
+                )
+    no_detect_mask_color = None
+    no_detect_overlay = None
+    if no_detect_mask is not None:
+        import numpy as np
+
+        no_detect_pixels = np.asarray(no_detect_mask) > 0
+        no_detect_mask_u8 = (no_detect_pixels.astype("uint8") * 255)
+        no_detect_mask_color = cv2.cvtColor(no_detect_mask_u8, cv2.COLOR_GRAY2BGR)
+        if np.any(no_detect_pixels):
+            no_detect_mask_color[no_detect_pixels] = (255, 0, 255)
+        base_overlay = dust_overlay if dust_overlay is not None else detected.get("overlay")
+        if base_overlay is not None:
+            no_detect_overlay = base_overlay.copy()
+            if np.any(no_detect_pixels):
+                magenta = np.zeros_like(no_detect_overlay)
+                magenta[:, :] = (255, 0, 255)
+                no_detect_overlay[no_detect_pixels] = cv2.addWeighted(
+                    no_detect_overlay[no_detect_pixels],
+                    0.45,
+                    magenta[no_detect_pixels],
                     0.55,
                     0,
                 )
@@ -1724,6 +1978,10 @@ def _save_within_spec_dot_visuals(
         files["dust_mask_url"] = f"{prefix}_dust_mask.png"
     if dust_overlay is not None:
         files["dust_overlay_url"] = f"{prefix}_dust_overlay.png"
+    if no_detect_mask_color is not None:
+        files["no_detect_mask_url"] = f"{prefix}_no_detect_mask.png"
+    if no_detect_overlay is not None:
+        files["no_detect_overlay_url"] = f"{prefix}_no_detect_overlay.png"
     cv2.imwrite(str(output_dir / files["crop_url"]), tile_crop)
     cv2.imwrite(str(output_dir / files["preprocessed_url"]), processed_crop)
     cv2.imwrite(str(output_dir / files["overlay_url"]), detected["overlay"])
@@ -1733,6 +1991,10 @@ def _save_within_spec_dot_visuals(
         cv2.imwrite(str(output_dir / files["dust_mask_url"]), dust_mask_color)
     if dust_overlay is not None:
         cv2.imwrite(str(output_dir / files["dust_overlay_url"]), dust_overlay)
+    if no_detect_mask_color is not None:
+        cv2.imwrite(str(output_dir / files["no_detect_mask_url"]), no_detect_mask_color)
+    if no_detect_overlay is not None:
+        cv2.imwrite(str(output_dir / files["no_detect_overlay_url"]), no_detect_overlay)
 
     return {
         "image_name": image_name,
@@ -1750,6 +2012,8 @@ def _save_within_spec_dot_visuals(
         "non_dot_residues": visual_residues[:20],
         "dust_mask_filtered_count": _as_int(detected.get("dust_mask_filtered_count"), 0),
         "dust_mask_filtered_rejected_count": _as_int(detected.get("dust_mask_filtered_rejected_count"), 0),
+        "no_detect_mask_filtered_count": _as_int(detected.get("no_detect_mask_filtered_count"), 0),
+        "no_detect_mask_filtered_rejected_count": _as_int(detected.get("no_detect_mask_filtered_rejected_count"), 0),
         "thresholds": detected.get("thresholds", {}),
         "urls": {key: f"{url_prefix}/{filename}" for key, filename in files.items()},
     }
@@ -1782,6 +2046,14 @@ def _evaluate_within_spec_suggestion_detail(
         "evaluated_tile_count": 0,
         "panel_totals": [],
         "panel_summary": {},
+        "candidate_summary": {
+            "raw_candidate_count": 0,
+            "final_candidate_count": 0,
+            "dust_mask_filtered_count": 0,
+            "no_detect_mask_filtered_count": 0,
+            "dust_mask_filtered_rejected_count": 0,
+            "no_detect_mask_filtered_rejected_count": 0,
+        },
         "visuals": [],
         "non_dot_residues": [],
         "missed_dot_tiles": [],
@@ -1930,6 +2202,12 @@ def _evaluate_within_spec_suggestion_detail(
                 params=preprocess_params,
             )
             runtime_dust_mask = _runtime_dust_mask_for_tile(tile, processed_crop.shape[:2])
+            no_detect_mask = _within_spec_no_detect_mask_for_tile(
+                image,
+                tile,
+                processed_crop.shape[:2],
+                crop_box,
+            )
 
             detections = []
             for dot_type, polarity, label in dot_types:
@@ -1966,6 +2244,7 @@ def _evaluate_within_spec_suggestion_detail(
                     include_visuals=False,
                 )
                 detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask)
+                detected = _remove_no_detect_overlap_candidates(detected, no_detect_mask)
                 candidates = detected["candidates"]
                 max_size_mm = max((_as_float(c.get("size_mm"), 0.0) for c in candidates), default=0.0)
                 detections.append({
@@ -1983,6 +2262,8 @@ def _evaluate_within_spec_suggestion_detail(
                     "rejected_candidates": detected.get("rejected_candidates", []),
                     "dust_mask_filtered_count": detected.get("dust_mask_filtered_count", 0),
                     "dust_mask_filtered_rejected_count": detected.get("dust_mask_filtered_rejected_count", 0),
+                    "no_detect_mask_filtered_count": detected.get("no_detect_mask_filtered_count", 0),
+                    "no_detect_mask_filtered_rejected_count": detected.get("no_detect_mask_filtered_rejected_count", 0),
                     "count": len(candidates),
                     "max_size_mm": max_size_mm,
                 })
@@ -1997,6 +2278,20 @@ def _evaluate_within_spec_suggestion_detail(
                 continue
 
             chosen = max(detections, key=lambda d: (d["max_size_mm"], d["count"]))
+            tile_candidate_summary = {
+                "final_candidate_count": sum(_as_int(d.get("count"), 0) for d in detections),
+                "dust_mask_filtered_count": sum(_as_int(d.get("dust_mask_filtered_count"), 0) for d in detections),
+                "no_detect_mask_filtered_count": sum(_as_int(d.get("no_detect_mask_filtered_count"), 0) for d in detections),
+                "dust_mask_filtered_rejected_count": sum(_as_int(d.get("dust_mask_filtered_rejected_count"), 0) for d in detections),
+                "no_detect_mask_filtered_rejected_count": sum(_as_int(d.get("no_detect_mask_filtered_rejected_count"), 0) for d in detections),
+            }
+            tile_candidate_summary["raw_candidate_count"] = (
+                tile_candidate_summary["final_candidate_count"]
+                + tile_candidate_summary["dust_mask_filtered_count"]
+                + tile_candidate_summary["no_detect_mask_filtered_count"]
+            )
+            for key, value in tile_candidate_summary.items():
+                result["candidate_summary"][key] = result["candidate_summary"].get(key, 0) + value
             tile_non_dot_residues: List[Dict[str, Any]] = []
             tile_non_dot_keys = set()
             detection_summary = {
@@ -2007,6 +2302,8 @@ def _evaluate_within_spec_suggestion_detail(
                     "rejected_count": len(d.get("rejected_candidates") or []),
                     "dust_mask_filtered_count": _as_int(d.get("dust_mask_filtered_count"), 0),
                     "dust_mask_filtered_rejected_count": _as_int(d.get("dust_mask_filtered_rejected_count"), 0),
+                    "no_detect_mask_filtered_count": _as_int(d.get("no_detect_mask_filtered_count"), 0),
+                    "no_detect_mask_filtered_rejected_count": _as_int(d.get("no_detect_mask_filtered_rejected_count"), 0),
                     "thresholds": d.get("thresholds", {}),
                 }
                 for d in detections
@@ -2060,6 +2357,40 @@ def _evaluate_within_spec_suggestion_detail(
                         tile_non_dot_keys.add(key)
                         tile_non_dot_residues.append(matched)
             if chosen["count"] <= 0:
+                no_detect_filtered = sum(
+                    _as_int(d.get("no_detect_mask_filtered_count"), 0)
+                    for d in detections
+                )
+                if no_detect_filtered > 0:
+                    result["skipped_tiles"]["no_detect_mask"] = (
+                        result["skipped_tiles"].get("no_detect_mask", 0) + 1
+                    )
+                    add_step(
+                        "tile 點候選落在 MARK/不檢測區：略過規格內判定",
+                        image=image.get("image_name") or "",
+                        tile_id=tile.get("tile_id"),
+                        crop_box=crop_box,
+                        filtered_count=no_detect_filtered,
+                        detection=detection_summary,
+                    )
+                    visual = _save_within_spec_dot_visuals(
+                        tile_crop=tile_crop,
+                        processed_crop=processed_crop,
+                        chosen=chosen,
+                        dot_cfg=dot_cfg,
+                        runtime_dust_mask=runtime_dust_mask,
+                        no_detect_mask=no_detect_mask,
+                        non_dot_residues=tile_non_dot_residues,
+                        output_dir=visual_output_dir,
+                        url_prefix=visual_url_prefix,
+                        image_name=image.get("image_name") or image_path.name,
+                        tile_id=tile.get("tile_id"),
+                        crop_box=crop_box,
+                    )
+                    if visual:
+                        result["visuals"].append(visual)
+                    continue
+
                 missed_tile = {
                     "image": image.get("image_name") or image_path.name,
                     "screen": screen_code,
@@ -2089,6 +2420,7 @@ def _evaluate_within_spec_suggestion_detail(
                     chosen=chosen,
                     dot_cfg=dot_cfg,
                     runtime_dust_mask=runtime_dust_mask,
+                    no_detect_mask=no_detect_mask,
                     non_dot_residues=tile_non_dot_residues,
                     output_dir=visual_output_dir,
                     url_prefix=visual_url_prefix,
@@ -2142,6 +2474,7 @@ def _evaluate_within_spec_suggestion_detail(
                 chosen=chosen,
                 dot_cfg=dot_cfg,
                 runtime_dust_mask=runtime_dust_mask,
+                no_detect_mask=no_detect_mask,
                 non_dot_residues=tile_non_dot_residues,
                 output_dir=visual_output_dir,
                 url_prefix=visual_url_prefix,
@@ -2231,6 +2564,7 @@ def _evaluate_within_spec_suggestion_detail(
         "non_dot_residue_count": len(non_dot_residues),
         "missed_dot_tile_count": len(result["missed_dot_tiles"]),
         "skipped_tiles": result["skipped_tiles"],
+        "candidate_summary": result["candidate_summary"],
     }
     result["matches"] = matches[:5]
     if non_dot_residues:
@@ -7704,6 +8038,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         from capi_server import (
             results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment,
             InferenceLogCapture, WITHIN_SPEC_LOGS_URL,
+            _stored_machine_judgment_for_record,
         )
 
         def _update_status(msg, *_):
@@ -7767,6 +8102,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             omit_overexposure_info = panel_result[3] if len(panel_result) > 3 else ""
             is_duplicate = panel_result[4] if len(panel_result) > 4 else False
             omit_image_raw = panel_result[5] if len(panel_result) > 5 else None
+            aoi_report = panel_result[6] if len(panel_result) > 6 else {}
 
             if is_duplicate:
                 logger.warning(
@@ -7813,6 +8149,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         "source": "inference",
                     }
                     _attach_runtime_dust_masks_to_within_spec_detail(eval_detail, results)
+                    _attach_no_detect_regions_to_within_spec_detail(eval_detail, inferencer, model_id)
                     rules = getattr(getattr(inferencer, "config", None), "within_spec_judgment_rules", None)
                     if not rules:
                         rules = CAPIConfig().within_spec_judgment_rules
@@ -7894,6 +8231,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             image_results_data = results_to_db_data(results, heatmap_info) if results else []
             total_images = len(image_results_data)
             ng_images = sum(1 for d in image_results_data if d.get("is_ng"))
+            stored_machine_judgment = _stored_machine_judgment_for_record(
+                detail.get("machine_judgment", ""),
+                results,
+                aoi_report,
+            )
+            aoi_machine_coords = ""
+            if aoi_report:
+                aoi_coords_data = {}
+                for prefix, defects in aoi_report.items():
+                    aoi_coords_data[prefix] = [
+                        {"defect_code": d.defect_code, "product_x": d.product_x, "product_y": d.product_y}
+                        for d in defects
+                    ]
+                aoi_machine_coords = json.dumps(aoi_coords_data, ensure_ascii=False)
             if is_duplicate:
                 dup_note = "[DUPLICATE_PANEL] 重複投片，已依建立時間選取最新圖片推論"
                 err_suffix = ai_judgment if ai_judgment.startswith("ERR") else ""
@@ -7919,6 +8270,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 processing_seconds=processing_seconds,
                 heatmap_dir=heatmap_info.get("dir", ""),
                 error_message=error_message,
+                machine_judgment=stored_machine_judgment,
+                aoi_machine_coords=aoi_machine_coords if aoi_report else None,
                 image_results_data=image_results_data,
                 inference_log=inference_log,
                 omit_overexposed=int(omit_overexposed),

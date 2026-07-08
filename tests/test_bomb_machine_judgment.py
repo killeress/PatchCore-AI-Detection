@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
-from capi_server import _normalize_machine_judgment_for_bomb_only_panel
+from capi_server import (
+    _normalize_machine_judgment_for_bomb_only_panel,
+    _stored_machine_judgment_for_record,
+)
 
 
 def _tile(
@@ -53,6 +56,12 @@ def test_bomb_panel_keeps_machine_ng_when_real_tile_exists():
     assert _normalize_machine_judgment_for_bomb_only_panel("NG", [result]) == "NG"
 
 
+def test_bomb_panel_keeps_machine_ng_when_excluded_zone_tile_exists():
+    result = _result(tiles=[_tile(is_bomb=True), _tile(is_excluded=True)])
+
+    assert _normalize_machine_judgment_for_bomb_only_panel("NG", [result]) == "NG"
+
+
 def test_panel_without_bomb_keeps_machine_ng():
     result = _result(tiles=[_tile(is_dust=True)])
 
@@ -63,3 +72,17 @@ def test_machine_ok_is_not_changed():
     result = _result(tiles=[_tile(is_bomb=True)])
 
     assert _normalize_machine_judgment_for_bomb_only_panel("OK", [result]) == "OK"
+
+
+def test_record_machine_judgment_uses_aoi_report_ng_when_request_is_ok():
+    result = _result(tiles=[_tile(is_bomb=True)])
+    aoi_report = {"WGF50500": [SimpleNamespace(defect_code="C1111")]}
+
+    assert _stored_machine_judgment_for_record("OK", [result], aoi_report) == "NG"
+
+
+def test_record_machine_judgment_uses_aoi_report_ng_before_bomb_only_normalization():
+    result = _result(tiles=[_tile(is_bomb=True)])
+    aoi_report = {"WGF50500": [SimpleNamespace(defect_code="C1111")]}
+
+    assert _stored_machine_judgment_for_record("NG", [result], aoi_report) == "NG"

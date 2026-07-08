@@ -450,6 +450,9 @@ def test_within_spec_rejects_dot_candidate_on_runtime_dust_mask(tmp_path):
     assert result["panel_summary"]["evaluated_tile_count"] == 1
     assert result["panel_summary"]["total_dot_count"] == 1
     assert result["panel_summary"]["missed_dot_tile_count"] == 1
+    assert result["panel_summary"]["candidate_summary"]["raw_candidate_count"] == 2
+    assert result["panel_summary"]["candidate_summary"]["final_candidate_count"] == 1
+    assert result["panel_summary"]["candidate_summary"]["dust_mask_filtered_count"] == 1
     assert result["missed_dot_tiles"][0]["tile_id"] == 0
     assert result["panel_totals"][0]["total_count"] == 1
     rejected_step = next(
@@ -465,6 +468,42 @@ def test_within_spec_rejects_dot_candidate_on_runtime_dust_mask(tmp_path):
     assert urls["dust_overlay_url"].endswith("_dust_overlay.png")
     assert (visual_dir / Path(urls["dust_mask_url"]).name).is_file()
     assert (visual_dir / Path(urls["dust_overlay_url"]).name).is_file()
+
+
+def test_within_spec_ignores_dot_candidate_inside_mark_bbox(tmp_path):
+    image_path = tmp_path / "W0F00000.png"
+    visual_dir = tmp_path / "visuals"
+    _write_black_dot_image(image_path, [(48, 48)])
+
+    detail = _detail(image_path)
+    detail["images"][0]["mark_bbox"] = "40,40,20,20"
+    detail["images"][0]["within_spec_no_detect"] = {"mark_padding_px": 0}
+
+    result = _evaluate_within_spec_suggestion_detail(
+        detail,
+        _rules(),
+        visual_output_dir=visual_dir,
+        visual_url_prefix="/visuals",
+    )
+
+    assert result["suggestion"] is None
+    assert result["panel_summary"]["target_tile_count"] == 1
+    assert result["panel_summary"]["evaluated_tile_count"] == 0
+    assert result["panel_summary"]["missed_dot_tile_count"] == 0
+    assert result["panel_summary"]["candidate_summary"]["raw_candidate_count"] == 1
+    assert result["panel_summary"]["candidate_summary"]["final_candidate_count"] == 0
+    assert result["panel_summary"]["candidate_summary"]["no_detect_mask_filtered_count"] == 1
+    assert result["skipped_tiles"]["no_detect_mask"] == 1
+    assert any(
+        step["message"] == "tile 點候選落在 MARK/不檢測區：略過規格內判定"
+        for step in result["steps"]
+    )
+    visual = result["visuals"][0]
+    assert visual["no_detect_mask_filtered_count"] == 1
+    assert "no_detect_mask_url" in visual["urls"]
+    assert "no_detect_overlay_url" in visual["urls"]
+    assert (visual_dir / Path(visual["urls"]["no_detect_mask_url"]).name).is_file()
+    assert (visual_dir / Path(visual["urls"]["no_detect_overlay_url"]).name).is_file()
 
 
 def test_within_spec_all_zero_runtime_dust_mask_does_not_break_visuals(tmp_path):
@@ -523,6 +562,46 @@ def test_within_spec_all_zero_runtime_dust_mask_does_not_break_visuals(tmp_path)
     assert urls["dust_overlay_url"].endswith("_dust_overlay.png")
     assert (visual_dir / Path(urls["dust_mask_url"]).name).is_file()
     assert (visual_dir / Path(urls["dust_overlay_url"]).name).is_file()
+
+
+def test_within_spec_no_detect_zone_filters_non_dot_residue_rejections(tmp_path):
+    image_path = tmp_path / "W0F00000.png"
+    image = np.full((128, 128, 3), 128, dtype=np.uint8)
+    cv2.rectangle(image, (0, 0), (127, 5), (60, 60, 60), -1)
+    cv2.circle(image, (64, 64), 3, (60, 60, 60), -1)
+    cv2.imwrite(str(image_path), image)
+
+    detail = _detail(image_path, tile_size=128)
+    detail["images"][0]["tiles"][0]["tile_id"] = 0
+    detail["images"][0]["within_spec_no_detect"] = {
+        "cv_edge_exclude_zones": [
+            {"enabled": True, "x": 0, "y": 0, "w": 128, "h": 8},
+        ],
+    }
+
+    rules = _rules(screen_limit=1, tile_limit=1, threshold_mm=0.5, segmentation_method="hysteresis")
+    rules["default"]["dot_detection"]["max_area_px"] = 50000
+
+    result = _evaluate_within_spec_suggestion_detail(
+        detail,
+        rules,
+        visual_output_dir=tmp_path / "visuals",
+        visual_url_prefix="/visuals",
+    )
+
+    assert result["suggestion"] is not None
+    assert result["panel_summary"]["non_dot_residue_count"] == 0
+    rejected_step = next(
+        step for step in result["steps"]
+        if step["message"] == "點候選被過濾" and step["tile_id"] == 0
+    )
+    no_detect_rejections = [
+        item for item in rejected_step["rejected"]["black_dot"]
+        if item["reason"] == "no_detect_mask_overlap"
+    ]
+    assert any(item.get("source_reason") == "aspect_ratio_below_min" for item in no_detect_rejections)
+    assert result["visuals"][0]["no_detect_mask_filtered_rejected_count"] >= 1
+    assert "no_detect_mask_url" in result["visuals"][0]["urls"]
 
 
 def test_within_spec_rejects_large_non_dot_residue(tmp_path):

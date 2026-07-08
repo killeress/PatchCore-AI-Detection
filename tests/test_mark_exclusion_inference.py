@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -8,17 +9,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from capi_config import CAPIConfig
 from capi_database import CAPIDatabase
+from capi_edge_cv import EdgeExclusionZoneConfig, EdgeInspectionConfig
 from capi_inference import CAPIInferencer, ExclusionRegion, ImageResult, TileInfo
 from capi_server import results_to_db_data
 
 
-def test_mark_exclusion_masks_tile_heatmap_and_recalculates_score():
+def test_mark_exclusion_downweights_tile_heatmap_and_recalculates_score():
     config = CAPIConfig()
     config.patchcore_filter_enabled = False
     config.patchcore_concentration_enabled = False
     config.patchcore_diffuse_area_enabled = False
     config.edge_margin_px = 0
     config.mark_exclusion_padding_px = 0
+    config.mark_exclusion_soft_decay_px = 0
+    config.no_detect_soft_decay_min_weight = 0.10
 
     inferencer = object.__new__(CAPIInferencer)
     inferencer.config = config
@@ -44,7 +48,7 @@ def test_mark_exclusion_masks_tile_heatmap_and_recalculates_score():
     )
 
     assert tile.mark_exclusion_masked is True
-    assert np.all(masked_map[:, 4:] == 0)
+    assert np.allclose(masked_map[:, 4:], 0.10)
     assert masked_map[4, 2] == pytest.approx(0.25)
     assert score == pytest.approx(0.25)
 
@@ -56,6 +60,8 @@ def test_mark_exclusion_padding_masks_heatmap_bleed_outside_bbox():
     config.patchcore_diffuse_area_enabled = False
     config.edge_margin_px = 0
     config.mark_exclusion_padding_px = 10
+    config.mark_exclusion_soft_decay_px = 0
+    config.no_detect_soft_decay_min_weight = 0.10
 
     inferencer = object.__new__(CAPIInferencer)
     inferencer.config = config
@@ -72,7 +78,7 @@ def test_mark_exclusion_padding_masks_heatmap_bleed_outside_bbox():
     )
     anomaly_map = np.zeros((10, 10), dtype=np.float32)
     anomaly_map[5, 6] = 1.0   # inside MARK bbox
-    anomaly_map[5, 4] = 0.9   # heatmap bleed just outside bbox, inside padding
+    anomaly_map[5, 5] = 0.9   # heatmap bleed just outside bbox, inside padding
     anomaly_map[5, 3] = 0.33  # outside padded MARK area
 
     score, masked_map = inferencer.predict_tile(
@@ -82,19 +88,198 @@ def test_mark_exclusion_padding_masks_heatmap_bleed_outside_bbox():
     )
 
     assert tile.mark_exclusion_masked is True
-    assert masked_map[5, 6] == 0
-    assert masked_map[5, 4] == 0
+    assert masked_map[5, 6] == pytest.approx(0.10)
+    assert masked_map[5, 5] == pytest.approx(0.09)
     assert masked_map[5, 3] == pytest.approx(0.33)
     assert score == pytest.approx(0.33)
+
+
+def test_mark_exclusion_soft_decay_reduces_heatmap_bleed_outside_padding():
+    config = CAPIConfig()
+    config.patchcore_filter_enabled = False
+    config.patchcore_concentration_enabled = False
+    config.patchcore_diffuse_area_enabled = False
+    config.edge_margin_px = 0
+    config.mark_exclusion_padding_px = 0
+    config.mark_exclusion_soft_decay_px = 20
+    config.no_detect_soft_decay_min_weight = 0.10
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+    inferencer.threshold = 0.5
+
+    tile = TileInfo(
+        tile_id=1,
+        x=0,
+        y=0,
+        width=100,
+        height=100,
+        image=np.zeros((100, 100), dtype=np.uint8),
+        mark_exclusion_regions=[ExclusionRegion("mark_binary", 60, 20, 80, 80)],
+    )
+    anomaly_map = np.zeros((10, 10), dtype=np.float32)
+    anomaly_map[5, 6] = 1.0   # inside MARK bbox
+    anomaly_map[5, 5] = 1.0   # 5 px outside bbox, inside soft decay band
+    anomaly_map[5, 3] = 0.2   # outside soft decay band
+
+    score, masked_map = inferencer.predict_tile(
+        tile,
+        threshold=0.5,
+        raw_prediction=(1.0, anomaly_map),
+    )
+
+    assert tile.mark_exclusion_masked is True
+    assert masked_map[5, 6] == pytest.approx(0.10)
+    assert masked_map[5, 5] == pytest.approx(0.325, abs=0.001)
+    assert masked_map[5, 3] == pytest.approx(0.2)
+    assert score == pytest.approx(0.325, abs=0.001)
+
+
+def test_configured_exclude_zone_soft_decay_recalculates_main_score():
+    config = CAPIConfig()
+    config.patchcore_filter_enabled = False
+    config.patchcore_concentration_enabled = False
+    config.patchcore_diffuse_area_enabled = False
+    config.edge_margin_px = 0
+    config.cv_edge_exclude_soft_decay_px = 20
+    config.no_detect_soft_decay_min_weight = 0.10
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+    inferencer.threshold = 0.5
+    inferencer.edge_inspector = SimpleNamespace(
+        config=EdgeInspectionConfig(
+            exclude_zones=[
+                EdgeExclusionZoneConfig(enabled=True, x=60, y=20, w=20, h=60)
+            ]
+        )
+    )
+
+    tile = TileInfo(
+        tile_id=1,
+        x=0,
+        y=0,
+        width=100,
+        height=100,
+        image=np.zeros((100, 100), dtype=np.uint8),
+    )
+    anomaly_map = np.zeros((10, 10), dtype=np.float32)
+    anomaly_map[5, 6] = 1.0
+    anomaly_map[5, 5] = 1.0
+    anomaly_map[5, 3] = 0.2
+
+    score, masked_map = inferencer.predict_tile(
+        tile,
+        threshold=0.5,
+        raw_prediction=(1.0, anomaly_map),
+    )
+
+    assert masked_map[5, 6] == 0
+    assert masked_map[5, 5] == pytest.approx(0.325, abs=0.001)
+    assert masked_map[5, 3] == pytest.approx(0.2)
+    assert score == pytest.approx(0.325, abs=0.001)
+
+
+def test_configured_exclude_zone_soft_decay_preserves_aoi_seed_outside_zone():
+    config = CAPIConfig()
+    config.patchcore_filter_enabled = False
+    config.patchcore_concentration_enabled = False
+    config.patchcore_diffuse_area_enabled = False
+    config.edge_margin_px = 0
+    config.cv_edge_exclude_soft_decay_px = 20
+    config.no_detect_soft_decay_min_weight = 0.10
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+    inferencer.threshold = 0.5
+    inferencer.edge_inspector = SimpleNamespace(
+        config=EdgeInspectionConfig(
+            exclude_zones=[
+                EdgeExclusionZoneConfig(enabled=True, x=60, y=20, w=20, h=60)
+            ]
+        )
+    )
+
+    tile = TileInfo(
+        tile_id=1,
+        x=0,
+        y=0,
+        width=100,
+        height=100,
+        image=np.zeros((100, 100), dtype=np.uint8),
+        is_aoi_coord_tile=True,
+        aoi_image_x=55,
+        aoi_image_y=55,
+    )
+    anomaly_map = np.zeros((10, 10), dtype=np.float32)
+    anomaly_map[5, 6] = 1.0   # inside exclude zone
+    anomaly_map[5, 5] = 1.0   # AOI seed just outside zone
+
+    score, masked_map = inferencer.predict_tile(
+        tile,
+        threshold=0.5,
+        raw_prediction=(1.0, anomaly_map),
+    )
+
+    assert masked_map[5, 6] == 0
+    assert masked_map[5, 5] == pytest.approx(1.0)
+    assert score == pytest.approx(1.0)
+
+
+def test_mark_exclusion_padding_is_not_restored_by_aoi_seed():
+    config = CAPIConfig()
+    config.patchcore_filter_enabled = False
+    config.patchcore_concentration_enabled = False
+    config.patchcore_diffuse_area_enabled = False
+    config.edge_margin_px = 0
+    config.mark_exclusion_padding_px = 10
+    config.mark_exclusion_soft_decay_px = 20
+    config.no_detect_soft_decay_min_weight = 0.10
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+    inferencer.threshold = 0.5
+
+    tile = TileInfo(
+        tile_id=1,
+        x=0,
+        y=0,
+        width=100,
+        height=100,
+        image=np.zeros((100, 100), dtype=np.uint8),
+        mark_exclusion_regions=[ExclusionRegion("mark_binary", 60, 20, 80, 80)],
+        is_aoi_coord_tile=True,
+        aoi_image_x=55,
+        aoi_image_y=55,
+    )
+    anomaly_map = np.zeros((10, 10), dtype=np.float32)
+    anomaly_map[5, 5] = 1.0   # inside MARK hard padding
+    anomaly_map[5, 2] = 0.2   # outside padding and soft decay band
+
+    score, masked_map = inferencer.predict_tile(
+        tile,
+        threshold=0.5,
+        raw_prediction=(1.0, anomaly_map),
+    )
+
+    assert masked_map[5, 5] == pytest.approx(0.10)
+    assert masked_map[5, 2] == pytest.approx(0.2)
+    assert score == pytest.approx(0.2)
 
 
 def test_mark_exclusion_padding_roundtrips_config():
     cfg = CAPIConfig()
     cfg.mark_exclusion_padding_px = 48
+    cfg.mark_exclusion_soft_decay_px = 40
+    cfg.cv_edge_exclude_soft_decay_px = 72
+    cfg.no_detect_soft_decay_min_weight = 0.2
 
     reloaded = CAPIConfig.from_dict(cfg.to_dict())
 
     assert reloaded.mark_exclusion_padding_px == 48
+    assert reloaded.mark_exclusion_soft_decay_px == 40
+    assert reloaded.cv_edge_exclude_soft_decay_px == 72
+    assert reloaded.no_detect_soft_decay_min_weight == pytest.approx(0.2)
 
 
 def test_mark_detection_metadata_is_serialized_to_db_data():

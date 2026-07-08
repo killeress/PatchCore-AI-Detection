@@ -143,6 +143,28 @@ class TestSettingsUsers:
 
         assert history[0]["changed_by"] == "operator01"
 
+    def test_config_update_promotes_int_param_to_float(self, tmp_path):
+        db = _make_db(tmp_path)
+        with _conn(db) as conn:
+            conn.execute(
+                """INSERT INTO config_params
+                   (param_name, param_value, param_type, description)
+                   VALUES (?, ?, ?, ?)""",
+                ("scratch_safety_multiplier", "1", "int", "刮痕判定安全倍率"),
+            )
+            conn.commit()
+
+        assert db.update_config_param(
+            "scratch_safety_multiplier",
+            0.95,
+            "調整刮痕安全倍率",
+            changed_by="operator01",
+        )
+
+        row = db.get_config_param("scratch_safety_multiplier")
+        assert row["param_type"] == "float"
+        assert row["decoded_value"] == pytest.approx(0.95)
+
     def test_non_admin_account_crud(self, tmp_path):
         db = _make_db(tmp_path)
 

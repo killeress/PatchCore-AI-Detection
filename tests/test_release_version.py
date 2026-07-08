@@ -40,6 +40,14 @@ def test_install_patch_default_health_url_matches_production_port():
     assert "127.0.0.1:8080/api/version" not in script
 
 
+def test_start_server_prefers_capi_python_before_system_python():
+    script = Path("start_server.sh").read_text(encoding="utf-8")
+
+    assert 'PYTHON="${CAPI_PYTHON_BIN:-}"' in script
+    assert "/opt/miniconda3/envs/CAPI-PC/bin/python3" in script
+    assert "PYTHON=$(command -v python3 || command -v python || true)" in script
+
+
 def test_base_template_includes_hostname_in_title_header_and_footer(monkeypatch):
     import capi_web
     from capi_web import CAPIWebHandler

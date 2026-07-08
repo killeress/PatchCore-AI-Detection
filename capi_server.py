@@ -56,6 +56,7 @@ from capi_database import CAPIDatabase
 from capi_auto_model_switch import bundle_label, select_target_bundle
 from capi_heatmap import HeatmapManager
 from capi_web import (
+    _attach_no_detect_regions_to_within_spec_detail,
     _attach_runtime_dust_masks_to_within_spec_detail,
     _evaluate_within_spec_suggestion_detail,
     _within_spec_auto_visual_output,
@@ -1173,6 +1174,16 @@ def results_to_db_data(
                 ",".join(str(int(v)) for v in result.mark_bbox)
                 if getattr(result, "mark_bbox", None) else ""
             ),
+            "mark_exclusion_regions": [
+                {
+                    "name": getattr(region, "name", "mark"),
+                    "x1": int(getattr(region, "x1", 0)),
+                    "y1": int(getattr(region, "y1", 0)),
+                    "x2": int(getattr(region, "x2", 0)),
+                    "y2": int(getattr(region, "y2", 0)),
+                }
+                for region in (getattr(result, "mark_exclusion_regions", None) or [])
+            ],
             "mark_roi": getattr(result, "mark_roi", ""),
             "mark_orientation": getattr(result, "mark_orientation", ""),
             "mark_source_image": getattr(result, "mark_source_image", ""),
@@ -1264,21 +1275,24 @@ def _normalize_machine_judgment_for_bomb_only_panel(
     machine_judgment: str,
     results: List[ImageResult],
 ) -> str:
-    """Store AOI NG as OK when the panel's only effective defects are bombs."""
+    """Store AOI NG as OK only for pure bomb-only panels."""
     if str(machine_judgment or "").upper() != "NG" or not results:
         return machine_judgment
 
     has_bomb = False
+    has_excluded_zone = False
     for result in results:
         for tile, _score, _anomaly_map in getattr(result, "anomaly_tiles", []) or []:
             if getattr(tile, "is_aoi_coord_below_threshold", False):
+                continue
+            if getattr(tile, "is_in_exclude_zone", False):
+                has_excluded_zone = True
                 continue
             if getattr(tile, "is_bomb", False):
                 has_bomb = True
                 continue
             if (
                 getattr(tile, "is_suspected_dust_or_scratch", False)
-                or getattr(tile, "is_in_exclude_zone", False)
                 or getattr(tile, "scratch_filtered", False)
             ):
                 continue
@@ -1295,7 +1309,21 @@ def _normalize_machine_judgment_for_bomb_only_panel(
                 continue
             return machine_judgment
 
-    return "OK" if has_bomb else machine_judgment
+    return "OK" if has_bomb and not has_excluded_zone else machine_judgment
+
+
+def _aoi_report_has_defects(aoi_report: Optional[Dict]) -> bool:
+    return any(bool(defects) for defects in (aoi_report or {}).values())
+
+
+def _stored_machine_judgment_for_record(
+    machine_judgment: str,
+    results: List[ImageResult],
+    aoi_report: Optional[Dict] = None,
+) -> str:
+    if str(machine_judgment or "").upper() != "HY" and _aoi_report_has_defects(aoi_report):
+        return "NG"
+    return _normalize_machine_judgment_for_bomb_only_panel(machine_judgment, results)
 
 
 # ── 主伺服器 ──────────────────────────────────────────
@@ -1383,6 +1411,8 @@ class CAPIServer:
 
         # 非同步儲存執行緒池 (Heatmap + DB 在背景完成，不阻塞回覆)
         self._async_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="async-save")
+        self._async_executor_lock = threading.Lock()
+        self._async_executor_shutdown = False
 
         # 多機種 config 字典 (machine_id → CAPIConfig)；由 _load_model_configs 填入
         self.configs_by_machine: Dict[str, "CAPIConfig"] = {}
@@ -2094,14 +2124,41 @@ class CAPIServer:
             
         # 等待背景儲存任務完成
         logger.info("Waiting for background save tasks to complete...")
-        self._async_executor.shutdown(wait=True, cancel_futures=False)
-        logger.info("Background save tasks completed")
+        executor = None
+        with self._async_executor_lock:
+            if not self._async_executor_shutdown:
+                self._async_executor_shutdown = True
+                executor = self._async_executor
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=False)
+            logger.info("Background save tasks completed")
+        else:
+            logger.info("Background save executor already stopped")
             
         if self._server_socket:
             try:
                 self._server_socket.close()
             except Exception:
                 pass
+
+    def _queue_save_results_async(self, *args, **kwargs):
+        """Queue result persistence, falling back when the server is shutting down."""
+        with self._async_executor_lock:
+            if self._async_executor_shutdown:
+                should_save_sync = True
+            else:
+                try:
+                    self._async_executor.submit(self._save_results_async, *args, **kwargs)
+                    return
+                except RuntimeError as e:
+                    if "cannot schedule new futures" not in str(e):
+                        raise
+                    self._async_executor_shutdown = True
+                    should_save_sync = True
+
+        if should_save_sync:
+            logger.warning("Async save executor is stopped; saving result synchronously")
+            self._save_results_async(*args, **kwargs)
 
     def _handle_client(self, client_socket: socket.socket, client_addr: tuple):
         """處理客戶端連線（長連線模式）
@@ -2241,12 +2298,13 @@ class CAPIServer:
                             }
                         client_socket.sendall((response + "\r\n").encode("utf-8"))
                         request_count += 1
-                        self._async_executor.submit(
-                            self._save_results_async,
+                        self._queue_save_results_async(
                             client_addr, parsed, [],
                             ai_judgment, "[]",
                             request_time, response_time, 0.0,
                             False, None, None,
+                            client_request_text=request_data,
+                            client_response_text=response,
                         )
                         continue
 
@@ -2299,8 +2357,7 @@ class CAPIServer:
                     captured_log = InferenceLogCapture.stop_capture()
 
                     # 🔄 非同步儲存 Heatmap + DB（背景執行，不阻塞下一筆請求）
-                    self._async_executor.submit(
-                        self._save_results_async,
+                    self._queue_save_results_async(
                         client_addr, parsed, inference_results,
                         ai_judgment, ng_details,
                         request_time, response_time, processing_seconds,
@@ -2309,6 +2366,8 @@ class CAPIServer:
                         captured_log,
                         omit_overexposed, omit_overexposure_info,
                         within_spec_info,
+                        client_request_text=request_data,
+                        client_response_text=response,
                     )
 
                 except ProtocolError as e:
@@ -2326,7 +2385,7 @@ class CAPIServer:
                         client_socket.sendall((response + "\r\n").encode("utf-8"))
                     except Exception:
                         pass
-                    self._save_error_record(request_time, parsed, request_data, str(e))
+                    self._save_error_record(request_time, parsed, request_data, str(e), response)
                     # 協議錯誤不斷線，繼續等待下一筆
 
                 except Exception as e:
@@ -2344,7 +2403,7 @@ class CAPIServer:
                         client_socket.sendall((response + "\r\n").encode("utf-8"))
                     except Exception:
                         return  # 發送失敗，連線已斷
-                    self._save_error_record(request_time, parsed, request_data, str(e))
+                    self._save_error_record(request_time, parsed, request_data, str(e), response)
                     # 內部錯誤不斷線，繼續等待下一筆
 
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
@@ -2417,6 +2476,11 @@ class CAPIServer:
                 "source": "inference",
             }
             _attach_runtime_dust_masks_to_within_spec_detail(detail, results)
+            _attach_no_detect_regions_to_within_spec_detail(
+                detail,
+                inferencer,
+                parsed.get("model_id", ""),
+            )
             visual_dir, visual_prefix = _within_spec_auto_visual_output(
                 str(getattr(getattr(self, "heatmap_manager", None), "base_dir", "") or ""),
                 parsed.get("glass_id", ""),
@@ -2632,6 +2696,8 @@ class CAPIServer:
         omit_overexposed: bool = False,
         omit_overexposure_info: str = "",
         within_spec_info: Optional[Dict[str, Any]] = None,
+        client_request_text: str = "",
+        client_response_text: str = "",
     ):
         """
         非同步儲存 Heatmap 和 DB 記錄（在背景執行緒中執行）
@@ -2664,16 +2730,25 @@ class CAPIServer:
             # 儲存到資料庫
             total_images = len(image_results_data)
             ng_images = sum(1 for d in image_results_data if d.get("is_ng"))
-            stored_machine_judgment = _normalize_machine_judgment_for_bomb_only_panel(
+            aoi_report_has_defects = _aoi_report_has_defects(aoi_report)
+            stored_machine_judgment = _stored_machine_judgment_for_record(
                 parsed["machine_judgment"],
                 results,
+                aoi_report,
             )
             if stored_machine_judgment != parsed["machine_judgment"]:
-                logger.info(
-                    "[BOMB_ONLY_PANEL] Glass=%s machine_judgment %s -> OK for DB storage",
-                    parsed.get("glass_id", ""),
-                    parsed.get("machine_judgment", ""),
-                )
+                if aoi_report_has_defects and stored_machine_judgment == "NG":
+                    logger.info(
+                        "[AOI_REPORT_MACHINE_NG] Glass=%s machine_judgment %s -> NG for DB storage",
+                        parsed.get("glass_id", ""),
+                        parsed.get("machine_judgment", ""),
+                    )
+                else:
+                    logger.info(
+                        "[BOMB_ONLY_PANEL] Glass=%s machine_judgment %s -> OK for DB storage",
+                        parsed.get("glass_id", ""),
+                        parsed.get("machine_judgment", ""),
+                    )
 
             # 組合 error_message：重複投片加上標記
             if is_duplicate:
@@ -2726,6 +2801,8 @@ class CAPIServer:
                 heatmap_dir=heatmap_info.get("dir", ""),
                 error_message=error_message,
                 client_bomb_info=client_bomb_info_str,
+                client_request_text=client_request_text,
+                client_response_text=client_response_text,
                 aoi_machine_coords=aoi_machine_coords_str,
                 image_results_data=image_results_data,
                 inference_log=inference_log,
@@ -2754,7 +2831,14 @@ class CAPIServer:
             logger.error(f"[{client_addr}] Async save failed: {e}", exc_info=True)
 
 
-    def _save_error_record(self, request_time: str, parsed: Optional[Dict], raw_data: Optional[str], error: str):
+    def _save_error_record(
+        self,
+        request_time: str,
+        parsed: Optional[Dict],
+        raw_data: Optional[str],
+        error: str,
+        client_response_text: str = "",
+    ):
         """儲存錯誤記錄到資料庫"""
         try:
             self.db.save_inference_record(
@@ -2770,6 +2854,8 @@ class CAPIServer:
                 response_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 processing_seconds=0.0,
                 error_message=f"{error}\nRaw: {raw_data[:200] if raw_data else 'N/A'}",
+                client_request_text=raw_data or "",
+                client_response_text=client_response_text or "",
             )
         except Exception as db_err:
             logger.error(f"Failed to save error record: {db_err}")

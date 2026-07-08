@@ -31,6 +31,8 @@ def test_fresh_db_has_scratch_columns(tmp_path):
     record_cols = _get_columns(db_path, "inference_records")
     assert "image_preprocess_pipeline" in record_cols
     assert "image_preprocess_timing" in record_cols
+    assert "client_request_text" in record_cols
+    assert "client_response_text" in record_cols
 
 
 def test_existing_db_migrated(tmp_path):
@@ -62,6 +64,18 @@ def test_existing_db_migrated(tmp_path):
             FROM image_results_backup
         """)
         c.execute("DROP TABLE image_results_backup")
+
+        c.execute("ALTER TABLE inference_records RENAME TO inference_records_backup")
+        c.execute("""
+            CREATE TABLE inference_records AS
+            SELECT id, glass_id, model_id, machine_no, resolution_x, resolution_y,
+                   machine_judgment, ai_judgment, image_dir, total_images, ng_images,
+                   ng_details, request_time, response_time, processing_seconds,
+                   heatmap_dir, error_message, client_bomb_info, aoi_machine_coords,
+                   image_preprocess_pipeline, image_preprocess_timing, created_at
+            FROM inference_records_backup
+        """)
+        c.execute("DROP TABLE inference_records_backup")
         c.commit()
 
     # Verify columns are gone before migration
@@ -69,6 +83,9 @@ def test_existing_db_migrated(tmp_path):
         tile_cols_before = {row[1] for row in c.execute("PRAGMA table_info(tile_results)").fetchall()}
         assert "scratch_score" not in tile_cols_before
         assert "scratch_filtered" not in tile_cols_before
+        record_cols_before = {row[1] for row in c.execute("PRAGMA table_info(inference_records)").fetchall()}
+        assert "client_request_text" not in record_cols_before
+        assert "client_response_text" not in record_cols_before
 
     # Now re-open via CAPIDatabase — should detect and run migration
     db2 = CAPIDatabase(str(db_path))
@@ -82,6 +99,37 @@ def test_existing_db_migrated(tmp_path):
     assert "aoi_tile_shift_dy" in tile_cols
     image_cols = _get_columns(db_path, "image_results")
     assert "scratch_filter_count" in image_cols
+    record_cols = _get_columns(db_path, "inference_records")
+    assert "client_request_text" in record_cols
+    assert "client_response_text" in record_cols
+
+
+def test_record_client_wire_strings_persist(tmp_path):
+    db = CAPIDatabase(str(tmp_path / "client_wire.db"))
+    request_text = "AOI@PNL001;MODEL-A;CAPI07;OK;/images;1920*1080"
+    response_text = "QJPG@PNL001;OK\r\nAOI@PNL001;OK"
+
+    record_id = db.save_inference_record(
+        glass_id="PNL001",
+        model_id="MODEL-A",
+        machine_no="CAPI07",
+        resolution=(1920, 1080),
+        machine_judgment="OK",
+        ai_judgment="OK",
+        image_dir="/images",
+        total_images=0,
+        ng_images=0,
+        ng_details="[]",
+        request_time="2026-07-08 10:00:00",
+        response_time="2026-07-08 10:00:01",
+        processing_seconds=1.0,
+        client_request_text=request_text,
+        client_response_text=response_text,
+    )
+
+    detail = db.get_record_detail(record_id)
+    assert detail["client_request_text"] == request_text
+    assert detail["client_response_text"] == response_text
 
 
 def test_aoi_coord_fields_persist(tmp_path):
@@ -284,3 +332,38 @@ def test_scratch_fields_persist_on_rerun(tmp_path):
         ).fetchone()
         assert json.loads(raw_pipeline)[0]["method"] == "laplace_sharpen"
         assert json.loads(raw_timing)["total_elapsed_ms"] == pytest.approx(7.5)
+
+
+def test_rerun_can_update_machine_judgment_and_aoi_coords(tmp_path):
+    db = CAPIDatabase(str(tmp_path / "rerun_machine_judgment.db"))
+    rec_id = db.save_inference_record(
+        glass_id="G1", model_id="M1", machine_no="1",
+        resolution=(1920, 1080),
+        machine_judgment="OK", ai_judgment="OK",
+        image_dir="/fake",
+        total_images=1, ng_images=0, ng_details="",
+        request_time="2026-07-07T10:00:00",
+        response_time="2026-07-07T10:00:05",
+        processing_seconds=5.0,
+    )
+    aoi_coords = json.dumps({"WGF50500": [{"defect_code": "C1111", "product_x": 236, "product_y": 130}]})
+
+    db.update_record_for_rerun(
+        record_id=rec_id,
+        ai_judgment="OK",
+        total_images=1,
+        ng_images=0,
+        ng_details="",
+        processing_seconds=3.0,
+        machine_judgment="NG",
+        aoi_machine_coords=aoi_coords,
+    )
+
+    with sqlite3.connect(tmp_path / "rerun_machine_judgment.db") as c:
+        row = c.execute(
+            "SELECT machine_judgment, aoi_machine_coords FROM inference_records WHERE id = ?",
+            (rec_id,),
+        ).fetchone()
+
+    assert row[0] == "NG"
+    assert json.loads(row[1])["WGF50500"][0]["defect_code"] == "C1111"

@@ -433,6 +433,7 @@ class CAPIInferencer:
         # Scratch classifier post-filter (lazy-loaded on first NG tile)
         self.scratch_filter: ScratchFilter | None = None
         self._scratch_load_failed = False
+        self._scratch_filter_signature = None
 
         # 分發器：依架構選擇 v1（舊 5 模型）或 v2（新 C-10）
         if getattr(config, "is_new_architecture", False):
@@ -446,10 +447,20 @@ class CAPIInferencer:
         (caller responsibility — called inside process_panel)."""
         if not getattr(self.config, "scratch_classifier_enabled", False):
             return None
+
+        current_safety = float(getattr(self.config, "scratch_safety_multiplier", 1.1))
+        bundle = getattr(self.config, "scratch_bundle_path", "")
+        weights = getattr(self.config, "scratch_dinov2_weights_path", "")
+        repo_path = getattr(self.config, "scratch_dinov2_repo_path", "")
+        signature = (str(bundle or ""), str(weights or ""), str(repo_path or ""), str(self.device))
+        if self._scratch_filter_signature is not None and self._scratch_filter_signature != signature:
+            self.scratch_filter = None
+            self._scratch_load_failed = False
+            self._scratch_filter_signature = None
+
         if self._scratch_load_failed:
             return None
 
-        current_safety = float(getattr(self.config, "scratch_safety_multiplier", 1.1))
         if self.scratch_filter is not None and \
                 abs(self.scratch_filter._safety - current_safety) > 1e-9:
             self.scratch_filter = ScratchFilter(self.scratch_filter._classifier,
@@ -457,9 +468,6 @@ class CAPIInferencer:
         if self.scratch_filter is not None:
             return self.scratch_filter
 
-        bundle = getattr(self.config, "scratch_bundle_path", "")
-        weights = getattr(self.config, "scratch_dinov2_weights_path", "")
-        repo_path = getattr(self.config, "scratch_dinov2_repo_path", "")
         try:
             clf = ScratchClassifier(
                 bundle_path=bundle,
@@ -470,8 +478,10 @@ class CAPIInferencer:
         except Exception as e:
             logger.error("ScratchClassifier load failed: %s", e, exc_info=True)
             self._scratch_load_failed = True
+            self._scratch_filter_signature = signature
             return None
         self.scratch_filter = ScratchFilter(clf, safety_multiplier=current_safety)
+        self._scratch_filter_signature = signature
         logger.info("ScratchClassifier filter ready (safety=%.2f, threshold=%.6f)",
                     current_safety, self.scratch_filter.effective_threshold)
         return self.scratch_filter
@@ -1447,6 +1457,77 @@ class CAPIInferencer:
         anomaly_map: Optional[np.ndarray],
     ) -> Tuple[Optional[np.ndarray], bool]:
         regions = getattr(tile, "mark_exclusion_regions", None) or []
+        masked, changed = self._apply_no_detect_region_weighting(
+            tile,
+            anomaly_map,
+            regions,
+            hard_padding_px=max(0, int(getattr(self.config, "mark_exclusion_padding_px", 32))),
+            soft_decay_px=max(0, int(getattr(self.config, "mark_exclusion_soft_decay_px", 48))),
+            core_weight=float(getattr(self.config, "no_detect_soft_decay_min_weight", 0.10)),
+        )
+        if changed:
+            tile.mark_exclusion_masked = True
+        return masked, changed
+
+    def _configured_exclude_regions_for_model(
+        self,
+        model_id: Optional[str] = None,
+    ) -> List[ExclusionRegion]:
+        edge_inspector = getattr(self, "edge_inspector", None)
+        edge_config = getattr(edge_inspector, "config", None) if edge_inspector else None
+        if edge_config is None:
+            return []
+        try:
+            if model_id and hasattr(edge_config, "set_active_zones_for_product"):
+                resolution_code = model_id[5].upper() if len(model_id) >= 6 else ""
+                edge_config.set_active_zones_for_product(resolution_code)
+        except Exception as e:
+            logger.error(f"取得不檢測區失敗: {e}", exc_info=True)
+            return []
+
+        regions = []
+        for zone in getattr(edge_config, "exclude_zones", []) or []:
+            if not getattr(zone, "enabled", False):
+                continue
+            x = int(getattr(zone, "x", 0))
+            y = int(getattr(zone, "y", 0))
+            w = int(getattr(zone, "w", 0))
+            h = int(getattr(zone, "h", 0))
+            if w <= 0 or h <= 0:
+                continue
+            regions.append(ExclusionRegion(
+                name="cv_edge_exclude",
+                x1=x,
+                y1=y,
+                x2=x + w,
+                y2=y + h,
+            ))
+        return regions
+
+    def _mask_tile_configured_exclude_regions(
+        self,
+        tile: TileInfo,
+        anomaly_map: Optional[np.ndarray],
+        model_id: Optional[str] = None,
+    ) -> Tuple[Optional[np.ndarray], bool]:
+        regions = self._configured_exclude_regions_for_model(model_id)
+        return self._apply_no_detect_region_weighting(
+            tile,
+            anomaly_map,
+            regions,
+            hard_padding_px=0,
+            soft_decay_px=max(0, int(getattr(self.config, "cv_edge_exclude_soft_decay_px", 64))),
+        )
+
+    def _apply_no_detect_region_weighting(
+        self,
+        tile: TileInfo,
+        anomaly_map: Optional[np.ndarray],
+        regions: List[Any],
+        hard_padding_px: int = 0,
+        soft_decay_px: int = 0,
+        core_weight: float = 0.0,
+    ) -> Tuple[Optional[np.ndarray], bool]:
         if anomaly_map is None or not regions:
             return anomaly_map, False
 
@@ -1459,46 +1540,135 @@ class CAPIInferencer:
         tile_w = max(1, int(getattr(tile, "width", 0) or 1))
         tile_h = max(1, int(getattr(tile, "height", 0) or 1))
         amap_h, amap_w = amap.shape[:2]
-        padding_px = max(0, int(getattr(self.config, "mark_exclusion_padding_px", 32)))
-        padding_map_px = 1 if padding_px > 0 else 0
+        hard_padding_px = max(0, int(hard_padding_px))
+        soft_decay_px = max(0, int(soft_decay_px))
+        min_weight = float(getattr(self.config, "no_detect_soft_decay_min_weight", 0.10))
+        min_weight = max(0.0, min(1.0, min_weight))
+        core_weight = max(0.0, min(1.0, float(core_weight)))
 
-        masked = amap.copy()
+        weight = np.ones((amap_h, amap_w), dtype=np.float32)
         changed = False
-        for region in regions:
-            rx1 = int(getattr(region, "x1", 0)) - padding_px
-            ry1 = int(getattr(region, "y1", 0)) - padding_px
-            rx2 = int(getattr(region, "x2", 0)) + padding_px
-            ry2 = int(getattr(region, "y2", 0)) + padding_px
 
-            ox1 = max(tile_x, rx1)
-            oy1 = max(tile_y, ry1)
-            ox2 = min(tile_x + tile_w, rx2)
-            oy2 = min(tile_y + tile_h, ry2)
+        for region in regions:
+            rx1 = int(getattr(region, "x1", getattr(region, "x", 0)))
+            ry1 = int(getattr(region, "y1", getattr(region, "y", 0)))
+            rx2 = int(getattr(region, "x2", rx1 + int(getattr(region, "w", 0))))
+            ry2 = int(getattr(region, "y2", ry1 + int(getattr(region, "h", 0))))
+            if rx2 <= rx1 or ry2 <= ry1:
+                continue
+
+            core_x1 = rx1 - hard_padding_px
+            core_y1 = ry1 - hard_padding_px
+            core_x2 = rx2 + hard_padding_px
+            core_y2 = ry2 + hard_padding_px
+            influence_x1 = core_x1 - soft_decay_px
+            influence_y1 = core_y1 - soft_decay_px
+            influence_x2 = core_x2 + soft_decay_px
+            influence_y2 = core_y2 + soft_decay_px
+
+            ox1 = max(tile_x, influence_x1)
+            oy1 = max(tile_y, influence_y1)
+            ox2 = min(tile_x + tile_w, influence_x2)
+            oy2 = min(tile_y + tile_h, influence_y2)
             if ox2 <= ox1 or oy2 <= oy1:
                 continue
 
-            lx1 = ox1 - tile_x
-            ly1 = oy1 - tile_y
-            lx2 = ox2 - tile_x
-            ly2 = oy2 - tile_y
-            mx1 = int(np.floor(lx1 * amap_w / tile_w)) - padding_map_px
-            my1 = int(np.floor(ly1 * amap_h / tile_h)) - padding_map_px
-            mx2 = int(np.ceil(lx2 * amap_w / tile_w)) + padding_map_px
-            my2 = int(np.ceil(ly2 * amap_h / tile_h)) + padding_map_px
-            mx1 = max(0, min(amap_w, mx1))
-            my1 = max(0, min(amap_h, my1))
-            mx2 = max(0, min(amap_w, mx2))
-            my2 = max(0, min(amap_h, my2))
+            mx1 = max(0, min(amap_w, int(np.floor((ox1 - tile_x) * amap_w / tile_w))))
+            my1 = max(0, min(amap_h, int(np.floor((oy1 - tile_y) * amap_h / tile_h))))
+            mx2 = max(0, min(amap_w, int(np.ceil((ox2 - tile_x) * amap_w / tile_w))))
+            my2 = max(0, min(amap_h, int(np.ceil((oy2 - tile_y) * amap_h / tile_h))))
             if mx2 <= mx1 or my2 <= my1:
                 continue
 
-            masked[my1:my2, mx1:mx2] = 0
+            yy, xx = np.mgrid[my1:my2, mx1:mx2]
+            abs_x = tile_x + (xx.astype(np.float32) + 0.5) * tile_w / amap_w
+            abs_y = tile_y + (yy.astype(np.float32) + 0.5) * tile_h / amap_h
+
+            inside_core = (
+                (abs_x >= core_x1) & (abs_x < core_x2) &
+                (abs_y >= core_y1) & (abs_y < core_y2)
+            )
+            region_weight = np.ones_like(abs_x, dtype=np.float32)
+            region_weight[inside_core] = core_weight
+
+            if soft_decay_px > 0:
+                dx = np.maximum(np.maximum(core_x1 - abs_x, 0), abs_x - core_x2)
+                dy = np.maximum(np.maximum(core_y1 - abs_y, 0), abs_y - core_y2)
+                dist = np.sqrt(dx * dx + dy * dy)
+                ring = (~inside_core) & (dist <= soft_decay_px)
+                region_weight[ring] = min_weight + (1.0 - min_weight) * (
+                    dist[ring] / float(soft_decay_px)
+                )
+
+            weight[my1:my2, mx1:mx2] = np.minimum(weight[my1:my2, mx1:mx2], region_weight)
             changed = True
 
-        if changed:
-            tile.mark_exclusion_masked = True
-            return masked, True
-        return anomaly_map, False
+        if not changed:
+            return anomaly_map, False
+
+        self._restore_aoi_seed_weight(tile, weight, regions, hard_padding_px=hard_padding_px)
+        return (amap * weight).astype(amap.dtype, copy=False), True
+
+    def _restore_aoi_seed_weight(
+        self,
+        tile: TileInfo,
+        weight: np.ndarray,
+        regions: List[Any],
+        hard_padding_px: int = 0,
+    ) -> None:
+        if not getattr(tile, "is_aoi_coord_tile", False):
+            return
+        if not getattr(self.config, "aoi_heatmap_center_seed_enabled", True):
+            return
+
+        ax = int(getattr(tile, "aoi_image_x", -1))
+        ay = int(getattr(tile, "aoi_image_y", -1))
+        if ax < 0 or ay < 0:
+            return
+        hard_padding_px = max(0, int(hard_padding_px))
+        for region in regions:
+            rx1 = int(getattr(region, "x1", getattr(region, "x", 0)))
+            ry1 = int(getattr(region, "y1", getattr(region, "y", 0)))
+            rx2 = int(getattr(region, "x2", rx1 + int(getattr(region, "w", 0))))
+            ry2 = int(getattr(region, "y2", ry1 + int(getattr(region, "h", 0))))
+            core_x1 = rx1 - hard_padding_px
+            core_y1 = ry1 - hard_padding_px
+            core_x2 = rx2 + hard_padding_px
+            core_y2 = ry2 + hard_padding_px
+            if core_x1 <= ax < core_x2 and core_y1 <= ay < core_y2:
+                return
+
+        tile_w = max(1, int(getattr(tile, "width", 0) or 1))
+        tile_h = max(1, int(getattr(tile, "height", 0) or 1))
+        local_x = ax - int(getattr(tile, "x", 0))
+        local_y = ay - int(getattr(tile, "y", 0))
+        if local_x < 0 or local_y < 0 or local_x >= tile_w or local_y >= tile_h:
+            return
+
+        h, w = weight.shape[:2]
+        seed_x = int(round(local_x * (w - 1) / max(tile_w - 1, 1)))
+        seed_y = int(round(local_y * (h - 1) / max(tile_h - 1, 1)))
+        radius_tile_px = float(getattr(self.config, "aoi_heatmap_center_seed_radius_px", 12.0))
+        radius = max(1, int(round(radius_tile_px * min(w / tile_w, h / tile_h))))
+        yy, xx = np.ogrid[:h, :w]
+        seed_mask = (yy - seed_y) ** 2 + (xx - seed_x) ** 2 <= radius ** 2
+        grid_y, grid_x = np.mgrid[:h, :w]
+        abs_x = int(getattr(tile, "x", 0)) + (grid_x.astype(np.float32) + 0.5) * tile_w / w
+        abs_y = int(getattr(tile, "y", 0)) + (grid_y.astype(np.float32) + 0.5) * tile_h / h
+        for region in regions:
+            rx1 = int(getattr(region, "x1", getattr(region, "x", 0)))
+            ry1 = int(getattr(region, "y1", getattr(region, "y", 0)))
+            rx2 = int(getattr(region, "x2", rx1 + int(getattr(region, "w", 0))))
+            ry2 = int(getattr(region, "y2", ry1 + int(getattr(region, "h", 0))))
+            core_x1 = rx1 - hard_padding_px
+            core_y1 = ry1 - hard_padding_px
+            core_x2 = rx2 + hard_padding_px
+            core_y2 = ry2 + hard_padding_px
+            seed_mask &= ~(
+                (abs_x >= core_x1) & (abs_x < core_x2) &
+                (abs_y >= core_y1) & (abs_y < core_y2)
+            )
+        weight[seed_mask] = 1.0
 
     @staticmethod
     def _fix_legacy_precision(inferencer) -> None:
@@ -1698,7 +1868,7 @@ class CAPIInferencer:
 
         return results
 
-    def predict_tile(self, tile: TileInfo, inferencer=None, edge_margin_override: Optional[int] = None, patchcore_overrides: Optional[Dict[str, Any]] = None, threshold: Optional[float] = None, raw_prediction: Optional[Tuple[float, Optional[np.ndarray]]] = None) -> Tuple[float, Optional[np.ndarray]]:
+    def predict_tile(self, tile: TileInfo, inferencer=None, edge_margin_override: Optional[int] = None, patchcore_overrides: Optional[Dict[str, Any]] = None, threshold: Optional[float] = None, raw_prediction: Optional[Tuple[float, Optional[np.ndarray]]] = None, model_id: Optional[str] = None) -> Tuple[float, Optional[np.ndarray]]:
         """
         對單一 tile 進行推論
 
@@ -1750,6 +1920,7 @@ class CAPIInferencer:
         tile.score_mask_valid_ratio = tile.valid_ratio
         tile.mark_exclusion_masked = False
         mark_masked = False
+        configured_exclude_weighted = False
 
         # === 以下為 anomaly_map 後處理 (batch 和 fallback 共用) ===
         if anomaly_map is not None:
@@ -1888,6 +2059,12 @@ class CAPIInferencer:
             # MARK binary 區域屬於不檢測區域，只遮掉 tile 內重疊的 heatmap 像素。
             anomaly_map, mark_masked = self._mask_tile_mark_exclusion_regions(tile, anomaly_map)
 
+            # 手動不檢測區也要在主 score 階段套用，否則固定結構的 heatmap
+            # 只會在 dust 後處理被歸零，原始 Score 仍可能保留過檢。
+            anomaly_map, configured_exclude_weighted = self._mask_tile_configured_exclude_regions(
+                tile, anomaly_map, model_id=model_id
+            )
+
             # 邊緣衰減：過濾光影假陽性 (debug 模式可覆寫數值)
             edge_margin = self.config.edge_margin_px if edge_margin_override is None else edge_margin_override
             if edge_margin > 0:
@@ -1920,7 +2097,12 @@ class CAPIInferencer:
             tile.is_left_edge and self.config.edge_margin_sides.get('left', False),
             tile.is_right_edge and self.config.edge_margin_sides.get('right', False),
         ])
-        need_recalc = (tile.mask is not None) or has_edge_margin or mark_masked
+        need_recalc = (
+            (tile.mask is not None)
+            or has_edge_margin
+            or mark_masked
+            or configured_exclude_weighted
+        )
         if need_recalc and anomaly_map is not None:
             post_decay_max = float(np.max(anomaly_map))
 
@@ -2073,7 +2255,7 @@ class CAPIInferencer:
             if progress_callback:
                 progress_callback(i + 1, total)
 
-            score, anomaly_map = self.predict_tile(tile, inferencer=active_inferencer, edge_margin_override=edge_margin_override, patchcore_overrides=patchcore_overrides, threshold=active_threshold)
+            score, anomaly_map = self.predict_tile(tile, inferencer=active_inferencer, edge_margin_override=edge_margin_override, patchcore_overrides=patchcore_overrides, threshold=active_threshold, model_id=model_id)
             tile.score_threshold = active_threshold
             if tile.is_aoi_coord_tile and score <= 1e-9:
                 print(
@@ -2247,6 +2429,7 @@ class CAPIInferencer:
                 edge_margin_override=edge_margin_override,
                 patchcore_overrides=patchcore_overrides,
                 threshold=active_thr,
+                model_id=self.config.machine_id,
             )
             if score >= active_thr:
                 if anomaly_map is not None:
@@ -2835,77 +3018,26 @@ class CAPIInferencer:
         ):
             return anomaly_map, False
 
-        edge_inspector = getattr(self, "edge_inspector", None)
-        edge_config = getattr(edge_inspector, "config", None) if edge_inspector else None
-        if edge_config is None:
+        regions = self._configured_exclude_regions_for_model(model_id)
+        if not regions:
             return anomaly_map, False
-
-        try:
-            if model_id and hasattr(edge_config, "set_active_zones_for_product"):
-                resolution_code = model_id[5].upper() if len(model_id) >= 6 else ""
-                edge_config.set_active_zones_for_product(resolution_code)
-            active_zones = [
-                z for z in getattr(edge_config, "exclude_zones", [])
-                if getattr(z, "enabled", False)
-            ]
-        except Exception as e:
-            logger.error(f"取得不檢測區失敗: {e}", exc_info=True)
-            return anomaly_map, False
-
-        if not active_zones:
-            return anomaly_map, False
-
-        def _zone_contains(zone, x: int, y: int) -> bool:
-            return zone.x <= x <= zone.x + zone.w and zone.y <= y <= zone.y + zone.h
 
         aoi_x = int(getattr(tile_info, "aoi_image_x", -1))
         aoi_y = int(getattr(tile_info, "aoi_image_y", -1))
         if aoi_x >= 0 and aoi_y >= 0:
-            if any(_zone_contains(z, aoi_x, aoi_y) for z in active_zones):
+            if any(
+                int(r.x1) <= aoi_x <= int(r.x2) and int(r.y1) <= aoi_y <= int(r.y2)
+                for r in regions
+            ):
                 return anomaly_map, False
 
-        amap = np.asarray(anomaly_map)
-        if amap.ndim < 2 or amap.size == 0:
-            return anomaly_map, False
-
-        tile_x = int(getattr(tile_info, "x", 0))
-        tile_y = int(getattr(tile_info, "y", 0))
-        tile_w = max(1, int(getattr(tile_info, "width", 0) or 1))
-        tile_h = max(1, int(getattr(tile_info, "height", 0) or 1))
-        amap_h, amap_w = amap.shape[:2]
-
-        masked = amap.copy()
-        changed = False
-        for zone in active_zones:
-            zx1 = int(getattr(zone, "x", 0))
-            zy1 = int(getattr(zone, "y", 0))
-            zx2 = zx1 + int(getattr(zone, "w", 0))
-            zy2 = zy1 + int(getattr(zone, "h", 0))
-
-            ox1 = max(tile_x, zx1)
-            oy1 = max(tile_y, zy1)
-            ox2 = min(tile_x + tile_w, zx2)
-            oy2 = min(tile_y + tile_h, zy2)
-            if ox2 <= ox1 or oy2 <= oy1:
-                continue
-
-            lx1 = ox1 - tile_x
-            ly1 = oy1 - tile_y
-            lx2 = ox2 - tile_x
-            ly2 = oy2 - tile_y
-            mx1 = max(0, min(amap_w, int(np.floor(lx1 * amap_w / tile_w))))
-            my1 = max(0, min(amap_h, int(np.floor(ly1 * amap_h / tile_h))))
-            mx2 = max(0, min(amap_w, int(np.ceil(lx2 * amap_w / tile_w))))
-            my2 = max(0, min(amap_h, int(np.ceil(ly2 * amap_h / tile_h))))
-            if mx2 <= mx1 or my2 <= my1:
-                continue
-
-            masked[my1:my2, mx1:mx2] = 0
-            changed = True
-
-        if not changed:
-            return anomaly_map, False
-        return masked, True
+        return self._apply_no_detect_region_weighting(
+            tile_info,
+            anomaly_map,
+            regions,
+            hard_padding_px=0,
+            soft_decay_px=max(0, int(getattr(self.config, "cv_edge_exclude_soft_decay_px", 64))),
+        )
 
     def check_dust_per_region(
         self,
@@ -4566,6 +4698,103 @@ class CAPIInferencer:
 
         return defects
 
+    @staticmethod
+    def _aoi_prefix_matches(report_prefix: str, target_prefix: str) -> bool:
+        if not report_prefix or not target_prefix:
+            return False
+        return (
+            report_prefix == target_prefix
+            or report_prefix.startswith(target_prefix + "_")
+            or target_prefix.startswith(report_prefix + "_")
+        )
+
+    def _aoi_report_has_bomb_coord(
+        self,
+        aoi_report: Dict[str, List['AOIReportDefect']],
+        image_prefix: str,
+        product_x: int,
+        product_y: int,
+    ) -> bool:
+        tolerance = int(getattr(self.config, "bomb_match_tolerance", 50))
+        for report_prefix, defects in (aoi_report or {}).items():
+            if not self._aoi_prefix_matches(str(report_prefix), image_prefix):
+                continue
+            for defect in defects:
+                if (
+                    abs(int(defect.product_x) - product_x) <= tolerance
+                    and abs(int(defect.product_y) - product_y) <= tolerance
+                ):
+                    return True
+        return False
+
+    def _aoi_report_with_forced_client_bomb_coords(
+        self,
+        aoi_report: Optional[Dict[str, List['AOIReportDefect']]],
+        bomb_info: Optional[Dict[str, Any]],
+    ) -> Tuple[Dict[str, List['AOIReportDefect']], int]:
+        """Return AOI candidates for inference, adding Client bomb coords only when AOI missed them."""
+        base_report = aoi_report or {}
+        if not bomb_info:
+            return base_report, 0
+
+        if not getattr(self.config, "bomb_area_force_detection_enabled", False):
+            print("💣 [BOMB_FORCE] Client 有炸彈座標，但炸彈區域強制偵測未啟用，沿用 AOI Report 座標")
+            return base_report, 0
+
+        image_prefix = str(bomb_info.get("image_prefix") or "").strip()
+        defect_type = str(bomb_info.get("defect_type") or "").strip().lower()
+        raw_coords = bomb_info.get("coordinates") or []
+        if not image_prefix or defect_type != "point":
+            print(
+                f"💣 [BOMB_FORCE] Client bomb prefix={image_prefix or '-'} "
+                f"type={defect_type or '-'}，未補切 tile（僅支援 point 座標）"
+            )
+            return base_report, 0
+
+        coords: List[Tuple[int, int]] = []
+        for coord in raw_coords:
+            if len(coord) < 2:
+                continue
+            try:
+                coords.append((int(coord[0]), int(coord[1])))
+            except (TypeError, ValueError):
+                continue
+
+        if not coords:
+            print(f"💣 [BOMB_FORCE] Client bomb prefix={image_prefix} 無有效 point 座標，未補切 tile")
+            return base_report, 0
+
+        forced_report: Dict[str, List[AOIReportDefect]] = {
+            prefix: list(defects)
+            for prefix, defects in base_report.items()
+        }
+        covered = 0
+        forced_coords: List[Tuple[int, int]] = []
+        for product_x, product_y in coords:
+            if self._aoi_report_has_bomb_coord(base_report, image_prefix, product_x, product_y):
+                covered += 1
+                continue
+            forced_report.setdefault(image_prefix, []).append(
+                AOIReportDefect(
+                    defect_code="BOMB_FORCE",
+                    product_x=product_x,
+                    product_y=product_y,
+                    image_prefix=image_prefix,
+                )
+            )
+            forced_coords.append((product_x, product_y))
+
+        tolerance = int(getattr(self.config, "bomb_match_tolerance", 50))
+        print(
+            f"💣 [BOMB_FORCE] prefix={image_prefix} client_points={len(coords)} "
+            f"AOI已涵蓋={covered} 補切={len(forced_coords)} tol={tolerance}"
+        )
+        if forced_coords:
+            print(f"💣 [BOMB_FORCE] AOI 未給座標，改用 Client 炸彈座標補切 tile: {forced_coords}")
+        else:
+            print("💣 [BOMB_FORCE] AOI 已給出 Client 炸彈座標附近的點，不額外補切 tile")
+        return forced_report, len(forced_coords)
+
     def _apply_aoi_coord_inspection(
         self,
         panel_dir: Path,
@@ -5182,7 +5411,7 @@ class CAPIInferencer:
         )
 
         score, anomaly_map = self.predict_tile(
-            tile, inferencer=inferencer, threshold=threshold,
+            tile, inferencer=inferencer, threshold=threshold, model_id=self.config.machine_id,
         )
 
         max_area = _anomaly_max_cc_area(anomaly_map)
@@ -5683,16 +5912,21 @@ class CAPIInferencer:
         # 解析 AOI 機台 NG 報告，以缺陷座標為中心建立額外的 512x512 tiles
         # ================================================================
         aoi_report = {}
+        aoi_report_for_inference = {}
         if self.config.aoi_coord_inspection_enabled:
             aoi_report = aoi_report_override if aoi_report_override is not None else self._parse_aoi_report_txt(panel_dir)
-            if aoi_report:
+            aoi_report_for_inference, _forced_bomb_count = self._aoi_report_with_forced_client_bomb_coords(
+                aoi_report,
+                bomb_info,
+            )
+            if aoi_report_for_inference:
                 # 收集已有的圖片前綴
                 existing_prefixes = set()
                 for result in preprocessed_results:
                     existing_prefixes.add(self._get_image_prefix(result.image_path.name))
 
                 # v1-only: 對 skip_files 中有 AOI 報告的圖片，預處理後加入
-                for report_prefix in aoi_report:
+                for report_prefix in aoi_report_for_inference:
                     if report_prefix not in existing_prefixes:
                         matched_file = None
                         skipped_files = [f for f in image_files
@@ -5704,7 +5938,7 @@ class CAPIInferencer:
                                 break
                         if matched_file is not None:
                             print(f"🎯 AOI Coord: 為跳過的圖片 {matched_file.name} 建立預處理 "
-                                  f"(有 {len(aoi_report[report_prefix])} 筆 AOI 座標)")
+                                  f"(有 {len(aoi_report_for_inference[report_prefix])} 筆 AOI/forced 座標)")
                             skip_result = self.preprocess_image(
                                 matched_file,
                                 cached_mark=cached_mark,
@@ -5724,10 +5958,12 @@ class CAPIInferencer:
                     omit_image=omit_image,
                     omit_overexposed=omit_overexposed,
                     product_resolution=product_resolution,
-                    aoi_report=aoi_report,
+                    aoi_report=aoi_report_for_inference,
                 )
                 print(f"🎯 Phase 1.5 完成: AOI 座標新增 {stats['aoi_tile_count']} 個 tiles, "
                       f"{stats['aoi_edge_count']} 個邊緣 defects")
+        elif bomb_info is not None and getattr(self.config, "bomb_area_force_detection_enabled", False):
+            print("💣 [BOMB_FORCE] 已啟用但 aoi_coord_inspection_enabled=False，無法補切 Client 炸彈座標")
 
         self._attach_panel_mark_binary_to_results(
             preprocessed_results,
@@ -6974,21 +7210,28 @@ class CAPIInferencer:
             print(f"[v2] OMIT {tag}: {omit_overexposure_info}")
 
         aoi_report: Optional[Dict[str, List['AOIReportDefect']]] = None
+        aoi_report_for_inference: Dict[str, List['AOIReportDefect']] = {}
         if self.config.aoi_coord_inspection_enabled:
             aoi_report = (
                 aoi_report_override
                 if aoi_report_override is not None
                 else self._parse_aoi_report_txt(Path(panel_dir))
             )
+            aoi_report_for_inference, _forced_bomb_count = self._aoi_report_with_forced_client_bomb_coords(
+                aoi_report,
+                bomb_info,
+            )
+        elif bomb_info is not None and getattr(self.config, "bomb_area_force_detection_enabled", False):
+            print("💣 [BOMB_FORCE] 已啟用但 aoi_coord_inspection_enabled=False，無法補切 Client 炸彈座標")
 
         aoi_only_mode = bool(
             not self.config.grid_tiling_enabled
             and self.config.aoi_coord_inspection_enabled
-            and aoi_report
+            and aoi_report_for_inference
         )
         preprocess_image_files = image_files
         if aoi_only_mode:
-            report_prefixes = set(aoi_report.keys())
+            report_prefixes = set(aoi_report_for_inference.keys())
             preprocess_prefixes = {
                 prefix for prefix in report_prefixes
                 if not prefix.upper().startswith("B0")
@@ -7145,13 +7388,13 @@ class CAPIInferencer:
             omit_image=omit_image,
             omit_overexposed=omit_overexposed,
             product_resolution=product_resolution,
-            aoi_report=aoi_report,
+            aoi_report=aoi_report_for_inference,
         )
 
         # v1 相容：B0F00000 等 skip_files 沒有 PatchCore 模型，不屬於 5-lighting
         # grid；若 AOI report 指到這些黑圖，仍要建立 AOI-centered tiles，後續走
         # _detect_bright_spots() 二值化亮點偵測。
-        if aoi_report:
+        if aoi_report_for_inference:
             existing_prefixes = {
                 self._get_image_prefix(result.image_path.name)
                 for result in results
@@ -7160,7 +7403,7 @@ class CAPIInferencer:
             ref_bounds = ref_result.raw_bounds if ref_result else None
             ref_polygon = ref_result.panel_polygon if ref_result else None
 
-            for report_prefix, defects in aoi_report.items():
+            for report_prefix, defects in aoi_report_for_inference.items():
                 if report_prefix in existing_prefixes:
                     continue
 
@@ -7310,6 +7553,7 @@ class CAPIInferencer:
                         ti,
                         inferencer=model,
                         threshold=threshold,
+                        model_id=model_id or self.config.machine_id,
                     )
                     if ti.is_aoi_coord_tile and score <= 1e-9:
                         print(
