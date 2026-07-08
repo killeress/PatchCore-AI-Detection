@@ -122,10 +122,13 @@ def test_capi_config_preprocess_after_tiling_serialization():
 def test_aoi_heatmap_center_seed_enabled_serialization():
     cfg = CAPIConfig.from_dict({
         "aoi_heatmap_center_seed_enabled": False,
+        "bomb_area_force_detection_enabled": True,
     })
 
     assert cfg.aoi_heatmap_center_seed_enabled is False
+    assert cfg.bomb_area_force_detection_enabled is True
     assert cfg.to_dict()["aoi_heatmap_center_seed_enabled"] is False
+    assert cfg.to_dict()["bomb_area_force_detection_enabled"] is True
 
     with tempfile.TemporaryDirectory() as tmpdir:
         out_path = Path(tmpdir) / "output.yaml"
@@ -134,6 +137,7 @@ def test_aoi_heatmap_center_seed_enabled_serialization():
         with open(out_path, "r", encoding="utf-8") as rf:
             loaded = yaml.safe_load(rf)
         assert loaded["aoi_heatmap_center_seed_enabled"] is False
+        assert loaded["bomb_area_force_detection_enabled"] is True
 
 
 def test_report_result_defect_codes_defaults_and_db_overrides():

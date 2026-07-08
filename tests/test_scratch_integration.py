@@ -35,14 +35,14 @@ class _FakeClassifier:
         return self._score
 
 
-def test_get_scratch_filter_disabled_returns_none(tmp_path):
+def test_get_scratch_filter_disabled_returns_none():
     cfg = CAPIConfig()
     cfg.scratch_classifier_enabled = False
     inferencer = CAPIInferencer(config=cfg, model_path="")
     assert inferencer._get_scratch_filter() is None
 
 
-def test_get_scratch_filter_caches_on_success(tmp_path):
+def test_get_scratch_filter_caches_on_success():
     cfg = CAPIConfig()
     cfg.scratch_classifier_enabled = True
     inferencer = CAPIInferencer(config=cfg, model_path="")
@@ -53,7 +53,24 @@ def test_get_scratch_filter_caches_on_success(tmp_path):
         assert mock_cls.call_count == 1    # cached
 
 
-def test_get_scratch_filter_load_failure_sentinel(tmp_path):
+def test_get_scratch_filter_reloads_when_bundle_path_changes():
+    cfg = CAPIConfig()
+    cfg.scratch_classifier_enabled = True
+    cfg.scratch_bundle_path = "deployment/scratch_classifier_v1.pkl"
+    inferencer = CAPIInferencer(config=cfg, model_path="")
+    with patch("capi_inference.ScratchClassifier",
+               side_effect=lambda **kwargs: _FakeClassifier()) as mock_cls:
+        sf1 = inferencer._get_scratch_filter()
+        cfg.scratch_bundle_path = "deployment/scratch_classifier_v5.pkl"
+        sf2 = inferencer._get_scratch_filter()
+
+        assert sf1 is not sf2
+        assert mock_cls.call_count == 2
+        assert mock_cls.call_args_list[0].kwargs["bundle_path"] == "deployment/scratch_classifier_v1.pkl"
+        assert mock_cls.call_args_list[1].kwargs["bundle_path"] == "deployment/scratch_classifier_v5.pkl"
+
+
+def test_get_scratch_filter_load_failure_sentinel():
     from scratch_classifier import ScratchClassifierLoadError
     cfg = CAPIConfig()
     cfg.scratch_classifier_enabled = True
@@ -67,7 +84,23 @@ def test_get_scratch_filter_load_failure_sentinel(tmp_path):
         assert mock_cls.call_count == 1   # no retry
 
 
-def test_process_panel_applies_scratch_filter_inline(tmp_path, monkeypatch):
+def test_get_scratch_filter_retries_after_failed_bundle_path_changes():
+    from scratch_classifier import ScratchClassifierLoadError
+    cfg = CAPIConfig()
+    cfg.scratch_classifier_enabled = True
+    cfg.scratch_bundle_path = "deployment/missing.pkl"
+    inferencer = CAPIInferencer(config=cfg, model_path="")
+    with patch("capi_inference.ScratchClassifier",
+               side_effect=[ScratchClassifierLoadError("no bundle"), _FakeClassifier()]) as mock_cls:
+        assert inferencer._get_scratch_filter() is None
+        assert inferencer._get_scratch_filter() is None
+
+        cfg.scratch_bundle_path = "deployment/scratch_classifier_v5.pkl"
+        assert inferencer._get_scratch_filter() is not None
+        assert mock_cls.call_count == 2
+
+
+def test_process_panel_applies_scratch_filter_inline(monkeypatch):
     """Simulate the process_panel hook: build ImageResult with NG tiles,
     fake the filter, verify apply_to_image_result was called."""
     cfg = CAPIConfig()

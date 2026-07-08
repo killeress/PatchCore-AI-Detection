@@ -26,9 +26,16 @@ fi
 
 command -v unzip >/dev/null 2>&1 || { echo "ERROR: unzip not found"; exit 1; }
 
-PYTHON_BIN="$(command -v python3 || command -v python || true)"
+PYTHON_BIN="${CAPI_PYTHON_BIN:-}"
+if [ -z "$PYTHON_BIN" ]; then
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+fi
 if [ -z "$PYTHON_BIN" ]; then
     echo "ERROR: python3/python not found"
+    exit 1
+fi
+if ! "$PYTHON_BIN" --version >/dev/null 2>&1; then
+    echo "ERROR: configured Python not executable: $PYTHON_BIN"
     exit 1
 fi
 

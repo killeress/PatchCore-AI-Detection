@@ -191,3 +191,41 @@ def test_apply_threshold_inplace_rejects_bad_unit():
     assert server.apply_threshold_inplace("MX", "UNKNOWN", "inner", 0.7) is False
     # zone 不存在
     assert server.apply_threshold_inplace("MX", "G0F00000", "middle", 0.7) is False
+
+
+def test_queue_save_results_falls_back_after_executor_shutdown():
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from capi_server import CAPIServer
+
+    server = CAPIServer.__new__(CAPIServer)
+    server._async_executor = ThreadPoolExecutor(max_workers=1)
+    server._async_executor_lock = threading.Lock()
+    server._async_executor_shutdown = False
+
+    saved = []
+
+    def fake_save(*args, **kwargs):
+        saved.append((args, kwargs))
+
+    server._save_results_async = fake_save
+    server._async_executor.shutdown(wait=True)
+
+    server._queue_save_results_async(
+        ("127.0.0.1", 12345),
+        {"glass_id": "G1"},
+        [],
+        "OK",
+        "[]",
+        "2026-07-08 12:00:00",
+        "2026-07-08 12:00:01",
+        1.0,
+        client_request_text="AOI@G1",
+        client_response_text="@QJPG-G1",
+    )
+
+    assert server._async_executor_shutdown is True
+    assert len(saved) == 1
+    assert saved[0][0][3] == "OK"
+    assert saved[0][1]["client_request_text"] == "AOI@G1"

@@ -97,6 +97,7 @@ def test_check_downloads_package_and_runs_installer(monkeypatch):
         assert Path(calls[0]["cmd"][1]) == downloaded.resolve()
         assert calls[0]["env"]["CAPI_PATCH_AUTO_ROLLBACK"] == "1"
         assert calls[0]["env"]["CAPI_HEALTH_URL"] == "http://127.0.0.1/api/version"
+        assert calls[0]["env"]["CAPI_PYTHON_BIN"] == capi_update_agent.sys.executable
         assert state["last_success"]["version"] == "2099.01.02.1"
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

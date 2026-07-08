@@ -142,9 +142,31 @@ start_server() {
 
     mkdir -p "$LOG_DIR" "$HEATMAP_DIR"
 
-    PYTHON=$(command -v python3 || command -v python)
+    PYTHON="${CAPI_PYTHON_BIN:-}"
+    if [ -z "$PYTHON" ] && [ -n "${CONDA_PREFIX:-}" ] && [ -x "$CONDA_PREFIX/bin/python3" ]; then
+        PYTHON="$CONDA_PREFIX/bin/python3"
+    fi
+    if [ -z "$PYTHON" ]; then
+        for candidate in \
+            /opt/miniconda3/envs/CAPI-PC/bin/python3 \
+            /opt/miniconda3/envs/CAPI-PC/bin/python \
+            /root/miniconda3/envs/CAPI-PC/bin/python3
+        do
+            if [ -x "$candidate" ]; then
+                PYTHON="$candidate"
+                break
+            fi
+        done
+    fi
+    if [ -z "$PYTHON" ]; then
+        PYTHON=$(command -v python3 || command -v python || true)
+    fi
     if [ -z "$PYTHON" ]; then
         echo "ERROR: Python not found"
+        exit 1
+    fi
+    if ! "$PYTHON" --version >/dev/null 2>&1; then
+        echo "ERROR: configured Python not executable: $PYTHON"
         exit 1
     fi
     echo "  Python      : $PYTHON ($($PYTHON --version 2>&1))"

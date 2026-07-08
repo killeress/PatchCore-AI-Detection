@@ -86,6 +86,8 @@ class CAPIDatabase:
                     ng_details TEXT DEFAULT '',
                     request_time TEXT NOT NULL,
                     response_time TEXT DEFAULT '',
+                    client_request_text TEXT DEFAULT '',
+                    client_response_text TEXT DEFAULT '',
                     processing_seconds REAL DEFAULT 0.0,
                     heatmap_dir TEXT DEFAULT '',
                     error_message TEXT DEFAULT '',
@@ -522,6 +524,8 @@ class CAPIDatabase:
 
             add_column_if_not_exists("inference_records", "error_message", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "client_bomb_info", "TEXT DEFAULT ''")
+            add_column_if_not_exists("inference_records", "client_request_text", "TEXT DEFAULT ''")
+            add_column_if_not_exists("inference_records", "client_response_text", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "aoi_machine_coords", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "image_preprocess_pipeline", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "image_preprocess_timing", "TEXT DEFAULT ''")
@@ -619,6 +623,8 @@ class CAPIDatabase:
         heatmap_dir: str = "",
         error_message: str = "",
         client_bomb_info: str = "",
+        client_request_text: str = "",
+        client_response_text: str = "",
         aoi_machine_coords: str = "",
         image_results_data: Optional[List[Dict]] = None,
         inference_log: str = "",
@@ -647,6 +653,8 @@ class CAPIDatabase:
             heatmap_dir: 熱力圖儲存目錄
             error_message: 錯誤訊息
             client_bomb_info: 客戶端傳來的炸彈座標資訊 (JSON 字串)
+            client_request_text: 收到 Client 的原始請求字串
+            client_response_text: 回覆 Client 的原始結果字串
             aoi_machine_coords: AOI 機台檢測座標 (TXT 報告解析, JSON 字串)
             image_results_data: 圖片級結果列表
 
@@ -669,14 +677,16 @@ class CAPIDatabase:
                        (glass_id, model_id, machine_no, resolution_x, resolution_y,
                         machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                         ng_details, request_time, response_time, processing_seconds,
-                        heatmap_dir, error_message, client_bomb_info, aoi_machine_coords,
+                        heatmap_dir, error_message, client_bomb_info,
+                        client_request_text, client_response_text, aoi_machine_coords,
                         inference_log, omit_overexposed, omit_overexposure_info,
                         image_preprocess_pipeline, image_preprocess_timing)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (glass_id, model_id, machine_no, resolution[0], resolution[1],
                      machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                      ng_details, request_time, response_time, processing_seconds,
-                     heatmap_dir, error_message, client_bomb_info, aoi_machine_coords,
+                     heatmap_dir, error_message, client_bomb_info,
+                     client_request_text, client_response_text, aoi_machine_coords,
                      inference_log, omit_overexposed, omit_overexposure_info,
                      preprocess_json, preprocess_timing_json)
                 )
@@ -826,6 +836,8 @@ class CAPIDatabase:
         processing_seconds: float,
         heatmap_dir: str = "",
         error_message: str = "",
+        machine_judgment: Optional[str] = None,
+        aoi_machine_coords: Optional[str] = None,
         image_results_data: Optional[List[Dict]] = None,
         inference_log: str = "",
         omit_overexposed: int = 0,
@@ -862,6 +874,7 @@ class CAPIDatabase:
                 cursor = conn.execute(
                     """UPDATE inference_records SET
                            ai_judgment = ?,
+                           machine_judgment = COALESCE(?, machine_judgment),
                            total_images = ?,
                            ng_images = ?,
                            ng_details = ?,
@@ -869,15 +882,16 @@ class CAPIDatabase:
                            processing_seconds = ?,
                            heatmap_dir = ?,
                            error_message = ?,
+                           aoi_machine_coords = COALESCE(?, aoi_machine_coords),
                            inference_log = ?,
                            omit_overexposed = ?,
                            omit_overexposure_info = ?,
                            image_preprocess_pipeline = ?,
                            image_preprocess_timing = ?
                        WHERE id = ?""",
-                    (ai_judgment, total_images, ng_images, ng_details,
+                    (ai_judgment, machine_judgment, total_images, ng_images, ng_details,
                      now_str, processing_seconds, heatmap_dir, error_message,
-                     inference_log, omit_overexposed, omit_overexposure_info,
+                     aoi_machine_coords, inference_log, omit_overexposed, omit_overexposure_info,
                      preprocess_json, preprocess_timing_json,
                      record_id),
                 )
@@ -3231,7 +3245,18 @@ class CAPIDatabase:
                 else:
                     old_value = old_row["param_value"]
                     param_type = old_row["param_type"]
-                    updated_param_type = "bool" if param_type == "str" and isinstance(new_value, bool) else param_type
+                    updated_param_type = param_type
+                    if param_type == "str" and isinstance(new_value, bool):
+                        updated_param_type = "bool"
+                    elif (
+                        param_type in ("int", "float")
+                        and isinstance(new_value, (int, float))
+                        and not isinstance(new_value, bool)
+                    ):
+                        updated_param_type = (
+                            "float" if (param_type == "float" or isinstance(new_value, float))
+                            else "int"
+                        )
 
                     # 更新設定值
                     conn.execute(
@@ -3299,6 +3324,10 @@ class CAPIDatabase:
             ("patchcore_blur_sigma", config.patchcore_blur_sigma, "float", "異常圖高斯平滑強度 (抑制噪點)"),
             ("patchcore_min_area", config.patchcore_min_area, "int", "異常判定最小連通面積(px)"),
             ("patchcore_score_metric", config.patchcore_score_metric, "string", "計分方式 (max, top_k_avg, percentile_99)"),
+            ("mark_exclusion_padding_px", config.mark_exclusion_padding_px, "int", "MARK 不檢測區硬遮罩外擴 (px)"),
+            ("mark_exclusion_soft_decay_px", config.mark_exclusion_soft_decay_px, "int", "MARK 硬遮罩外圈 heatmap 降權寬度 (px)"),
+            ("cv_edge_exclude_soft_decay_px", config.cv_edge_exclude_soft_decay_px, "int", "手動不檢測區外圈 heatmap 降權寬度 (px)"),
+            ("no_detect_soft_decay_min_weight", config.no_detect_soft_decay_min_weight, "float", "不檢測區 soft decay 邊界最低權重 (0~1)"),
             ("dust_brightness_threshold", config.dust_brightness_threshold, "int", "灰塵亮度閾值 (備用)"),
             ("dust_area_min", config.dust_area_min, "int", "灰塵顆粒最小面積 (px)"),
             ("dust_area_max", config.dust_area_max, "int", "灰塵顆粒最大面積 (px)"),
@@ -3390,6 +3419,7 @@ class CAPIDatabase:
             # 預設開啟，否則記錄頁的 🎯 AOI 機檢座標推論 區塊永遠不會出現。
             ("aoi_coord_inspection_enabled", True, "bool", "啟用 AOI 機檢座標推論"),
             ("aoi_heatmap_center_seed_enabled", config.aoi_heatmap_center_seed_enabled, "bool", "啟用 AOI 中心 seed 保護，Top% heatmap 額外保留 AOI 座標附近弱熱區"),
+            ("bomb_area_force_detection_enabled", config.bomb_area_force_detection_enabled, "bool", "炸彈區域強制偵測：AOI Report 未給 Client 炸彈座標時補切 tile 偵測"),
             ("aoi_report_path_replace_from", "yuantu", "string", "報告路徑替換來源字串"),
             ("aoi_report_path_replace_to", "Report", "string", "報告路徑替換目標字串"),
         ]

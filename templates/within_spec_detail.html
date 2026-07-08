@@ -358,7 +358,23 @@
         </tbody>
     </table>
     {% else %}
-    <div style="color:var(--text-muted);">沒有可加總的點偵測結果。</div>
+    {% set candidate_summary = summary.candidate_summary or detail.candidate_summary or {} %}
+    {% set raw_candidates = candidate_summary.raw_candidate_count or 0 %}
+    {% set final_candidates = candidate_summary.final_candidate_count or 0 %}
+    {% set dust_filtered = candidate_summary.dust_mask_filtered_count or 0 %}
+    {% set no_detect_filtered = candidate_summary.no_detect_mask_filtered_count or 0 %}
+    {% if raw_candidates or dust_filtered or no_detect_filtered %}
+    <div style="color:var(--text-muted);line-height:1.7;">
+        沒有可加總的有效點。OpenCV 初步抓到 {{ raw_candidates }} 個點候選，
+        其中灰塵遮罩排除 {{ dust_filtered }} 個、MARK/不檢測區排除 {{ no_detect_filtered }} 個，
+        最後有效點 {{ final_candidates }} 個。
+        {% if summary.missed_dot_tile_count %}
+        因 AOI tile 最後沒有有效點，仍判定為點偵測未命中。
+        {% endif %}
+    </div>
+    {% else %}
+    <div style="color:var(--text-muted);">沒有可加總的有效點；本次未取得可列入 Panel 加總的點候選。</div>
+    {% endif %}
     {% endif %}
 </section>
 
@@ -408,10 +424,11 @@
                     {{ visual.count }} 點，max {{ "%.4f"|format(visual.max_size_mm or 0) }} mm
                     {% if visual.non_dot_residues %}，非點狀NG {{ visual.non_dot_residues|length }}{% endif %}
                     {% if visual.dust_mask_filtered_count %}，灰塵排除 {{ visual.dust_mask_filtered_count }}{% endif %}
+                    {% if visual.no_detect_mask_filtered_count %}，不檢測區排除 {{ visual.no_detect_mask_filtered_count }}{% endif %}
                 </div>
             </div>
-            <a href="{{ visual.urls.dust_overlay_url or visual.urls.overlay_url }}" target="_blank">
-                <img class="ws-main-img" src="{{ visual.urls.dust_overlay_url or visual.urls.overlay_url }}" alt="dot overlay">
+            <a href="{{ visual.urls.no_detect_overlay_url or visual.urls.dust_overlay_url or visual.urls.overlay_url }}" target="_blank">
+                <img class="ws-main-img" src="{{ visual.urls.no_detect_overlay_url or visual.urls.dust_overlay_url or visual.urls.overlay_url }}" alt="dot overlay">
             </a>
             <div class="ws-thumbs">
                 <a class="ws-thumb" href="{{ visual.urls.crop_url }}" target="_blank">
@@ -436,6 +453,18 @@
                 <a class="ws-thumb" href="{{ visual.urls.dust_overlay_url }}" target="_blank">
                     <img src="{{ visual.urls.dust_overlay_url }}" alt="dust overlay">
                     <div>灰塵疊圖</div>
+                </a>
+                {% endif %}
+                {% if visual.urls.no_detect_mask_url %}
+                <a class="ws-thumb" href="{{ visual.urls.no_detect_mask_url }}" target="_blank">
+                    <img src="{{ visual.urls.no_detect_mask_url }}" alt="no-detect mask">
+                    <div>不檢測遮罩</div>
+                </a>
+                {% endif %}
+                {% if visual.urls.no_detect_overlay_url %}
+                <a class="ws-thumb" href="{{ visual.urls.no_detect_overlay_url }}" target="_blank">
+                    <img src="{{ visual.urls.no_detect_overlay_url }}" alt="no-detect overlay">
+                    <div>不檢測疊圖</div>
                 </a>
                 {% endif %}
             </div>

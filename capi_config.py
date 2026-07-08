@@ -180,6 +180,9 @@ class CAPIConfig:
     mark_match_threshold: float = 0.45
     mark_min_y_ratio: float = 0.6
     mark_exclusion_padding_px: int = 32  # MARK 不檢測區外擴，吸收 PatchCore heatmap 擴散
+    mark_exclusion_soft_decay_px: int = 48  # MARK 硬遮罩外圈 heatmap 線性降權寬度
+    cv_edge_exclude_soft_decay_px: int = 64  # 手動不檢測區外圈 heatmap 線性降權寬度
+    no_detect_soft_decay_min_weight: float = 0.10  # soft decay 邊界最低權重 (0~1)
     
     # Otsu 裁剪設定
     otsu_offset: int = 5
@@ -298,6 +301,7 @@ class CAPIConfig:
     bomb_defects: List[BombDefect] = field(default_factory=list)
     bomb_match_tolerance: int = 50  # 座標匹配容忍度 (產品座標系像素)
     bomb_line_min_aspect_ratio: float = 3.0  # Line 型炸彈 heatmap 最小長寬比
+    bomb_area_force_detection_enabled: bool = False  # AOI 漏給炸彈座標時，使用 Client 炸彈座標補切 tile 偵測
     
     # 機種第六碼 → 產品解析度映射表 (寬, 高)
     # 例: {'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200], 'K': [2560, 1440], 'G': [2560, 1600]}
@@ -453,6 +457,9 @@ class CAPIConfig:
             mark_fallback_position=data.get("mark_fallback_position", None),
             mark_min_y_ratio=data.get("mark_min_y_ratio", 0.6),
             mark_exclusion_padding_px=int(data.get("mark_exclusion_padding_px", 32)),
+            mark_exclusion_soft_decay_px=int(data.get("mark_exclusion_soft_decay_px", 48)),
+            cv_edge_exclude_soft_decay_px=int(data.get("cv_edge_exclude_soft_decay_px", 64)),
+            no_detect_soft_decay_min_weight=float(data.get("no_detect_soft_decay_min_weight", 0.10)),
             otsu_offset=data.get("otsu_offset", 5),
             otsu_bottom_crop=data.get("otsu_bottom_crop", 1000),
             enable_panel_polygon=data.get("enable_panel_polygon", True),
@@ -551,6 +558,7 @@ class CAPIConfig:
             bomb_defects=[BombDefect.from_dict(b) for b in data.get("bomb_defects", [])],
             bomb_match_tolerance=data.get("bomb_match_tolerance", 50),
             bomb_line_min_aspect_ratio=data.get("bomb_line_min_aspect_ratio", 3.0),
+            bomb_area_force_detection_enabled=data.get("bomb_area_force_detection_enabled", False),
             model_resolution_map=data.get("model_resolution_map", {
                 'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200],
                 'K': [2560, 1440], 'G': [2560, 1600],
@@ -580,6 +588,9 @@ class CAPIConfig:
             "mark_match_threshold": self.mark_match_threshold,
             "mark_min_y_ratio": self.mark_min_y_ratio,
             "mark_exclusion_padding_px": self.mark_exclusion_padding_px,
+            "mark_exclusion_soft_decay_px": self.mark_exclusion_soft_decay_px,
+            "cv_edge_exclude_soft_decay_px": self.cv_edge_exclude_soft_decay_px,
+            "no_detect_soft_decay_min_weight": self.no_detect_soft_decay_min_weight,
             "mark_fallback_position": self.mark_fallback_position,
             "otsu_offset": self.otsu_offset,
             "otsu_bottom_crop": self.otsu_bottom_crop,
@@ -655,6 +666,7 @@ class CAPIConfig:
             "bomb_defects": [b.to_dict() for b in self.bomb_defects],
             "bomb_match_tolerance": self.bomb_match_tolerance,
             "bomb_line_min_aspect_ratio": self.bomb_line_min_aspect_ratio,
+            "bomb_area_force_detection_enabled": self.bomb_area_force_detection_enabled,
             "model_resolution_map": self.model_resolution_map,
             "grid_tiling_enabled": self.grid_tiling_enabled,
             "aoi_coord_inspection_enabled": self.aoi_coord_inspection_enabled,
@@ -677,6 +689,9 @@ class CAPIConfig:
             "mark_match_threshold": self.mark_match_threshold,
             "mark_min_y_ratio": self.mark_min_y_ratio,
             "mark_exclusion_padding_px": self.mark_exclusion_padding_px,
+            "mark_exclusion_soft_decay_px": self.mark_exclusion_soft_decay_px,
+            "cv_edge_exclude_soft_decay_px": self.cv_edge_exclude_soft_decay_px,
+            "no_detect_soft_decay_min_weight": self.no_detect_soft_decay_min_weight,
             "mark_fallback_position": self.mark_fallback_position,
             "otsu_offset": self.otsu_offset,
             "otsu_bottom_crop": self.otsu_bottom_crop,
@@ -748,6 +763,7 @@ class CAPIConfig:
             "bomb_defects": [b.to_dict() for b in self.bomb_defects],
             "bomb_match_tolerance": self.bomb_match_tolerance,
             "bomb_line_min_aspect_ratio": self.bomb_line_min_aspect_ratio,
+            "bomb_area_force_detection_enabled": self.bomb_area_force_detection_enabled,
             "model_resolution_map": self.model_resolution_map,
             "grid_tiling_enabled": self.grid_tiling_enabled,
             "aoi_coord_inspection_enabled": self.aoi_coord_inspection_enabled,
@@ -841,6 +857,14 @@ class CAPIConfig:
             self.patchcore_diffuse_area_threshold = float(param_map["patchcore_diffuse_area_threshold"])
         if "patchcore_diffuse_area_penalty" in param_map:
             self.patchcore_diffuse_area_penalty = float(param_map["patchcore_diffuse_area_penalty"])
+        if "mark_exclusion_padding_px" in param_map:
+            self.mark_exclusion_padding_px = int(param_map["mark_exclusion_padding_px"])
+        if "mark_exclusion_soft_decay_px" in param_map:
+            self.mark_exclusion_soft_decay_px = int(param_map["mark_exclusion_soft_decay_px"])
+        if "cv_edge_exclude_soft_decay_px" in param_map:
+            self.cv_edge_exclude_soft_decay_px = int(param_map["cv_edge_exclude_soft_decay_px"])
+        if "no_detect_soft_decay_min_weight" in param_map:
+            self.no_detect_soft_decay_min_weight = float(param_map["no_detect_soft_decay_min_weight"])
         if "dust_brightness_threshold" in param_map:
             self.dust_brightness_threshold = int(param_map["dust_brightness_threshold"])
         if "dust_area_min" in param_map:
@@ -918,6 +942,9 @@ class CAPIConfig:
         if "aoi_heatmap_center_seed_enabled" in param_map:
             val = param_map["aoi_heatmap_center_seed_enabled"]
             self.aoi_heatmap_center_seed_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "bomb_area_force_detection_enabled" in param_map:
+            val = param_map["bomb_area_force_detection_enabled"]
+            self.bomb_area_force_detection_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
         if "bright_spot_threshold" in param_map:
             self.bright_spot_threshold = int(param_map["bright_spot_threshold"])
         if "bright_spot_min_area" in param_map:

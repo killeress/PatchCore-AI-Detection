@@ -50,6 +50,17 @@
         transform: translateY(-2px);
         border-color: var(--accent);
     }
+
+    .client-wire-text {
+        margin: 0;
+        max-width: 720px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.82rem;
+        line-height: 1.5;
+        color: var(--text-muted);
+    }
 </style>
 {% endblock %}
 
@@ -213,6 +224,26 @@
         <tr>
             <th>回覆時間</th>
             <td>{{ detail.response_time }}</td>
+        </tr>
+        <tr>
+            <th>收到 Client 字串</th>
+            <td>
+                {% if detail.client_request_text %}
+                <pre class="client-wire-text">{{ detail.client_request_text }}</pre>
+                {% else %}
+                <span style="color:var(--text-muted)">-</span>
+                {% endif %}
+            </td>
+        </tr>
+        <tr>
+            <th>回覆 Client 字串</th>
+            <td>
+                {% if detail.client_response_text %}
+                <pre class="client-wire-text">{{ detail.client_response_text }}</pre>
+                {% else %}
+                <span style="color:var(--text-muted)">-</span>
+                {% endif %}
+            </td>
         </tr>
         <tr>
             <th>建立時間</th>
