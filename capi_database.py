@@ -380,6 +380,7 @@ class CAPIDatabase:
                     error_message   TEXT,
                     training_params TEXT,
                     training_scope  TEXT,
+                    training_data_source TEXT,
                     image_preprocess_pipeline TEXT,
                     preprocess_after_tiling   INTEGER DEFAULT 0,
                     tile_stride     INTEGER
@@ -583,6 +584,7 @@ class CAPIDatabase:
             add_column_if_not_exists("training_jobs", "panel_modes", "TEXT")
             # 6-step wizard：完整訓練或局部重訓 scope（mode / selected_units / target_bundle_id）
             add_column_if_not_exists("training_jobs", "training_scope", "TEXT")
+            add_column_if_not_exists("training_jobs", "training_data_source", "TEXT")
             add_column_if_not_exists("training_jobs", "image_preprocess_pipeline", "TEXT")
             add_column_if_not_exists("training_jobs", "preprocess_after_tiling", "INTEGER DEFAULT 0")
             add_column_if_not_exists("training_jobs", "tile_stride", "INTEGER")
@@ -3537,6 +3539,7 @@ class CAPIDatabase:
         training_params: Optional[Dict[str, Any]] = None,
         panel_modes: Optional[list] = None,
         training_scope: Optional[Dict[str, Any]] = None,
+        training_data_source: Optional[Dict[str, Any]] = None,
         image_preprocess_pipeline: Optional[list] = None,
         preprocess_after_tiling: bool = False,
         tile_stride: Optional[int] = 256,
@@ -3554,6 +3557,10 @@ class CAPIDatabase:
         params_json = json.dumps(training_params) if training_params is not None else None
         modes_json = json.dumps(panel_modes) if panel_modes is not None else None
         scope_json = json.dumps(training_scope) if training_scope is not None else None
+        source_json = (
+            json.dumps(training_data_source, ensure_ascii=False)
+            if training_data_source is not None else None
+        )
         preprocess_json = (
             json.dumps(image_preprocess_pipeline, ensure_ascii=False)
             if image_preprocess_pipeline is not None else None
@@ -3565,12 +3572,12 @@ class CAPIDatabase:
             cur.execute(
                 """INSERT INTO training_jobs
                    (job_id, machine_id, state, started_at, panel_paths, panel_modes,
-                    training_params, training_scope, image_preprocess_pipeline,
-                    preprocess_after_tiling, tile_stride)
-                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?, ?, ?, ?, ?)""",
+                    training_params, training_scope, training_data_source,
+                    image_preprocess_pipeline, preprocess_after_tiling, tile_stride)
+                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id, machine_id, json.dumps(panel_paths), modes_json,
-                    params_json, scope_json, preprocess_json,
+                    params_json, scope_json, source_json, preprocess_json,
                     1 if preprocess_after_tiling else 0, tile_stride_value,
                 ),
             )
@@ -3597,6 +3604,10 @@ class CAPIDatabase:
         job["training_params"] = json.loads(raw_params) if raw_params else None
         raw_scope = job.get("training_scope")
         job["training_scope"] = json.loads(raw_scope) if raw_scope else None
+        raw_source = job.get("training_data_source")
+        job["training_data_source"] = (
+            json.loads(raw_source) if raw_source else {"type": "inference_records"}
+        )
         raw_preprocess = job.get("image_preprocess_pipeline")
         job["image_preprocess_pipeline"] = json.loads(raw_preprocess) if raw_preprocess else []
         job["preprocess_after_tiling"] = bool(job.get("preprocess_after_tiling", 0))

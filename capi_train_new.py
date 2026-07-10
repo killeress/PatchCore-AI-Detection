@@ -131,6 +131,9 @@ class TrainingConfig:
     feature_layers: str = PATCHCORE_FEATURE_LAYERS_DEFAULT
     image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
     preprocess_after_tiling: bool = False
+    training_data_source: Dict[str, Any] = field(
+        default_factory=lambda: {"type": "inference_records"}
+    )
 
 
 # 使用者可從 step1 表單覆寫的 PatchCore 超參數。
@@ -1445,6 +1448,7 @@ def run_training_pipeline(
         "trained_with_job_id": job_id,
         "panel_count": len(cfg.panel_paths),
         "panel_glass_ids": [p.name for p in cfg.panel_paths],
+        "training_data_source": cfg.training_data_source,
         "edge_threshold_px": 768,
         "tile_stride": cfg.tile_stride,
         "preprocess_after_tiling": cfg.preprocess_after_tiling,

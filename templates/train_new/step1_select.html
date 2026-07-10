@@ -50,14 +50,35 @@
   </div>
   {% endif %}
 
-  <div style="background:#313244;border-radius:10px;padding:18px;margin-top:16px;">
-    <div style="display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap;">
+  <div class="source-card">
+    <div class="source-tabs">
+      <button type="button" id="source-recent-btn" class="source-tab active" onclick="setDataSource('inference_records')">最近推論紀錄</button>
+      <button type="button" id="source-manual-btn" class="source-tab" onclick="setDataSource('manual_folder')">手動資料夾</button>
+    </div>
+    <div id="source-recent-panel" class="source-panel">
       <div>
-        <div style="color:#cdd6f4;font-size:.95rem;font-weight:700;">最近推論紀錄</div>
-        <div style="color:#a6adc8;font-size:.82rem;margin-top:4px;">AOI OK 紀錄只查最近 3 天；選取後會以相同機種 ID 建立訓練 job。</div>
+        <div class="source-title">最近推論紀錄</div>
+        <div class="source-hint">AOI OK 紀錄只查最近 3 天；選取後會以相同機種 ID 建立訓練 job。</div>
       </div>
-      <button id="refresh-btn" onclick="loadPanels()"
-        style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:7px 16px;font-weight:700;">重新整理</button>
+      <button id="refresh-btn" type="button" onclick="loadPanels()" class="source-primary">重新整理</button>
+    </div>
+    <div id="source-manual-panel" class="source-manual" style="display:none;">
+      <label>
+        <span>機種 ID</span>
+        <input id="manual-machine-id" value="{% if training_scope.mode == 'partial' %}{{ target_bundle.machine_id }}{% endif %}"
+               {% if training_scope.mode == 'partial' %}readonly{% endif %}
+               placeholder="例如 GN140BGAAN80S">
+      </label>
+      <label class="manual-root-field">
+        <span>Batch 根目錄</span>
+        <input id="manual-batch-root" placeholder="例如 /aidata/training/GN140BGAAN80S/batch_01">
+      </label>
+      <button id="manual-scan-btn" type="button" onclick="loadManualPanels()" class="source-primary">掃描資料夾</button>
+      <div id="manual-scan-status" class="manual-status"></div>
+      <label class="manual-confirm">
+        <input id="manual-confirm-normal" type="checkbox" onchange="updateNext()">
+        <span>我已確認這批資料是可用於 PatchCore 訓練的正常樣本</span>
+      </label>
     </div>
   </div>
 
@@ -181,6 +202,24 @@
   .train-panel-table th { padding:8px; }
   .train-panel-table td { padding:8px; vertical-align:top; }
   .path-cell { color:#a6adc8;font-family:monospace;font-size:.76rem;word-break:break-all;line-height:1.35; }
+  .source-card { background:#313244;border-radius:10px;padding:18px;margin-top:16px; }
+  .source-tabs { display:flex;gap:6px;margin-bottom:14px; }
+  .source-tab { background:#1e1e2e;color:#a6adc8;border:1px solid #45475a;border-radius:6px;padding:7px 14px;font-weight:700;cursor:pointer; }
+  .source-tab.active { background:#89b4fa;color:#1e1e2e;border-color:#89b4fa; }
+  .source-panel { display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap; }
+  .source-title { color:#cdd6f4;font-size:.95rem;font-weight:700; }
+  .source-hint { color:#a6adc8;font-size:.82rem;margin-top:4px; }
+  .source-primary { background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:7px 16px;font-weight:700;cursor:pointer; }
+  .source-manual { display:grid;grid-template-columns:minmax(190px,.7fr) minmax(320px,1.6fr) auto;gap:12px;align-items:end; }
+  .source-manual label:not(.manual-confirm) { display:flex;flex-direction:column;gap:5px;color:#cdd6f4;font-size:.82rem;font-weight:600; }
+  .source-manual input[type="text"], .source-manual input:not([type]) { background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:8px 10px; }
+  .source-manual input[readonly] { opacity:.7; }
+  .manual-status { grid-column:1/-1;color:#a6adc8;font-size:.8rem; }
+  .manual-status.error { color:#f38ba8; }
+  .manual-status.ok { color:#a6e3a1; }
+  .manual-confirm { grid-column:1/-1;display:flex;align-items:center;gap:8px;color:#cdd6f4;font-size:.84rem;cursor:pointer; }
+  .manual-confirm input { width:17px;height:17px;accent-color:#a6e3a1; }
+  @media (max-width:760px) { .source-manual { grid-template-columns:1fr; } .manual-status,.manual-confirm { grid-column:1; } }
 
   /* Step1 sticky 操作條：列表多長都看得到下一步按鈕 */
   .step1-actionbar {
@@ -360,6 +399,8 @@ const DEFAULT_PREPROCESS_PIPELINE = {{ default_preprocess_pipeline|tojson }};
 let _selected = new Set();
 let _selectedMachineId = '';
 let _selectedMachineKey = '';
+let _dataSource = 'inference_records';
+let _manualResolvedBatchRoot = '';
 let _pipelineSteps = [];
 let _pipelineSeq = 0;
 let _previewPathEdited = false;
@@ -677,6 +718,22 @@ function jobMachineIdForSelection(machineId) {
   return isPartialTraining() ? TARGET_BUNDLE.machine_id : machineId;
 }
 
+function setDataSource(source) {
+  _dataSource = source === 'manual_folder' ? 'manual_folder' : 'inference_records';
+  document.getElementById('source-recent-btn').classList.toggle('active', _dataSource === 'inference_records');
+  document.getElementById('source-manual-btn').classList.toggle('active', _dataSource === 'manual_folder');
+  document.getElementById('source-recent-panel').style.display = _dataSource === 'inference_records' ? 'flex' : 'none';
+  document.getElementById('source-manual-panel').style.display = _dataSource === 'manual_folder' ? 'grid' : 'none';
+  _manualResolvedBatchRoot = '';
+  document.getElementById('manual-confirm-normal').checked = false;
+  if (_dataSource === 'inference_records') {
+    loadPanels();
+  } else {
+    renderPanels([], '請輸入機種 ID 與 batch 根目錄後掃描。');
+    document.getElementById('manual-scan-status').textContent = '';
+  }
+}
+
 function loadPanels() {
   const btn = document.getElementById('refresh-btn');
   btn.disabled = true;
@@ -701,14 +758,72 @@ function loadPanels() {
     });
 }
 
-function renderPanels(panels) {
+async function loadManualPanels() {
+  const machineInput = document.getElementById('manual-machine-id');
+  const rootInput = document.getElementById('manual-batch-root');
+  const status = document.getElementById('manual-scan-status');
+  const btn = document.getElementById('manual-scan-btn');
+  const machineId = (machineInput.value || '').trim();
+  const batchRoot = (rootInput.value || '').trim();
+  if (!machineId || !batchRoot) {
+    status.className = 'manual-status error';
+    status.textContent = '請先填寫機種 ID 與 batch 根目錄。';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.style.opacity = .55;
+  status.className = 'manual-status';
+  status.textContent = '掃描第一層 panel 資料夾中...';
+  document.getElementById('manual-confirm-normal').checked = false;
+  _manualResolvedBatchRoot = '';
+  try {
+    const resp = await fetch('/api/train/new/manual-panels', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({machine_id: machineId, batch_root: batchRoot}),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      renderPanels([], data.error || '掃描失敗');
+      status.className = 'manual-status error';
+      status.textContent = data.error || '掃描失敗';
+      return;
+    }
+    _manualResolvedBatchRoot = data.batch_root;
+    renderPanels(data.panels || [], '找不到可用的 panel 資料夾。');
+    const incomplete = (data.panels || []).filter(p => p.lighting_count < p.expected_lighting_count).length;
+    status.className = 'manual-status ok';
+    status.textContent = `找到 ${(data.panels || []).length} 個 panel` +
+      (incomplete ? `；其中 ${incomplete} 個 lighting 不完整，請在列表確認。` : '，lighting 皆完整。');
+  } catch (err) {
+    renderPanels([], '掃描資料夾失敗。');
+    status.className = 'manual-status error';
+    status.textContent = '掃描資料夾失敗：' + err;
+  } finally {
+    btn.disabled = false;
+    btn.style.opacity = 1;
+  }
+}
+
+function invalidateManualScan() {
+  if (_dataSource !== 'manual_folder' || !_manualResolvedBatchRoot) return;
+  _manualResolvedBatchRoot = '';
+  document.getElementById('manual-confirm-normal').checked = false;
+  document.getElementById('manual-scan-status').className = 'manual-status';
+  document.getElementById('manual-scan-status').textContent = '輸入已變更，請重新掃描。';
+  renderPanels([], '輸入已變更，請重新掃描 batch 根目錄。');
+}
+
+function renderPanels(panels, emptyMessage) {
   _selected = new Set();
   _selectedMachineId = '';
   _selectedMachineKey = '';
   _previewPathByPanel = new Map();
   const root = document.getElementById('panel-list');
   if (!panels.length) {
-    root.innerHTML = '<div style="background:#313244;padding:24px;border-radius:10px;color:#a6adc8;text-align:center;">最近 3 天無符合條件的 AOI OK panel</div>';
+    const message = emptyMessage || '最近 3 天無符合條件的 AOI OK panel';
+    root.innerHTML = `<div style="background:#313244;padding:24px;border-radius:10px;color:#a6adc8;text-align:center;">${escapeHtml(message)}</div>`;
     updateNext();
     return;
   }
@@ -722,7 +837,14 @@ function renderPanels(panels) {
   const thead = document.createElement('thead');
   const headRow = document.createElement('tr');
   headRow.style.cssText = 'background:#11111b;color:#a6adc8;font-size:.78rem;text-align:left;';
-  [
+  const columns = _dataSource === 'manual_folder' ? [
+    {text: '', width: '30px'},
+    {text: 'Panel 資料夾'},
+    {text: '機種 ID'},
+    {text: 'Lighting'},
+    {text: '樣本確認'},
+    {text: '圖片來源路徑', width: '44%'},
+  ] : [
     {text: '', width: '30px'},
     {text: 'Glass ID'},
     {text: '機種 ID'},
@@ -730,7 +852,8 @@ function renderPanels(panels) {
     {text: '機台'},
     {text: 'AI 判定'},
     {text: '圖片來源路徑', width: '34%'},
-  ].forEach(col => {
+  ];
+  columns.forEach(col => {
     const th = document.createElement('th');
     th.textContent = col.text;
     if (col.width) th.style.width = col.width;
@@ -763,9 +886,16 @@ function renderPanels(panels) {
 
     appendTextCell(tr, p.glass_id || '', 'font-family:monospace;color:#cdd6f4;font-size:.82rem;');
     appendTextCell(tr, p.model_id || '', 'font-family:monospace;color:#cdd6f4;font-size:.82rem;');
-    appendTextCell(tr, p.request_time || p.timestamp || p.created_at || '', 'color:#a6adc8;font-size:.82rem;');
-    appendTextCell(tr, p.machine_no || '', 'color:#a6adc8;font-size:.82rem;');
-    appendTextCell(tr, p.ai_judgment || '-', `font-size:.82rem;color:${p.ai_judgment === 'OK' ? '#a6e3a1' : '#fab387'};`);
+    if (_dataSource === 'manual_folder') {
+      const lightingText = `${p.lighting_count || 0}/${p.expected_lighting_count || 0} · ${(p.available_lightings || []).join(', ')}`;
+      const lightingColor = p.lighting_count === p.expected_lighting_count ? '#a6e3a1' : '#fab387';
+      appendTextCell(tr, lightingText, `color:${lightingColor};font-size:.78rem;`);
+      appendTextCell(tr, p.ai_judgment || '人工確認 OK', 'color:#a6e3a1;font-size:.82rem;');
+    } else {
+      appendTextCell(tr, p.request_time || p.timestamp || p.created_at || '', 'color:#a6adc8;font-size:.82rem;');
+      appendTextCell(tr, p.machine_no || '', 'color:#a6adc8;font-size:.82rem;');
+      appendTextCell(tr, p.ai_judgment || '-', `font-size:.82rem;color:${p.ai_judgment === 'OK' ? '#a6e3a1' : '#fab387'};`);
+    }
     appendTextCell(tr, panelPath || '-', '', 'path-cell');
     tbody.appendChild(tr);
   }
@@ -850,7 +980,8 @@ function updateNext() {
   document.getElementById('sel-count').textContent =
     `已選 ${_selected.size} 片（全部完整切 tile） ${machineText}`;
   const btn = document.getElementById('next-btn');
-  btn.disabled = _selected.size === 0;
+  const manualConfirmed = _dataSource !== 'manual_folder' || document.getElementById('manual-confirm-normal').checked;
+  btn.disabled = _selected.size === 0 || !manualConfirmed;
   btn.style.opacity = btn.disabled ? .4 : 1;
 }
 
@@ -908,6 +1039,16 @@ function collectTileStride() {
 function submitStart() {
   const mid = isPartialTraining() ? TARGET_BUNDLE.machine_id : _selectedMachineId;
   if (!mid) return;
+  if (_dataSource === 'manual_folder') {
+    if (!_manualResolvedBatchRoot) {
+      capAlert('請重新掃描 batch 根目錄。', {type: 'error', title: '手動資料尚未驗證'});
+      return;
+    }
+    if (!document.getElementById('manual-confirm-normal').checked) {
+      capAlert('請先確認這批資料是正常訓練樣本。', {type: 'warn', title: '尚未確認資料'});
+      return;
+    }
+  }
   if (isPartialTraining() && _selectedMachineKey !== targetMachinePrefix()) {
     capAlert(`局部重訓只能選擇料號前 ${MACHINE_PREFIX_LEN} 碼為 ${targetMachinePrefix()} 的 panel。`, {type: 'error', title: '料號不一致'});
     return;
@@ -931,6 +1072,9 @@ function submitStart() {
     return;
   }
   const body = {machine_id: mid, panel_paths: Array.from(_selected), training_scope: TRAINING_SCOPE};
+  body.training_data_source = _dataSource === 'manual_folder'
+    ? {type: 'manual_folder', batch_root: _manualResolvedBatchRoot, confirmed_normal: true}
+    : {type: 'inference_records'};
   if (params) body.training_params = params;
   body.tile_stride = tileStride;
   body.image_preprocess_pipeline = pipeline;
@@ -988,12 +1132,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const previewPath = document.getElementById('pp-preview-path');
   const previewBtn = document.getElementById('pp-run-preview');
   const useSelectedBtn = document.getElementById('pp-use-selected');
+  const manualMachineInput = document.getElementById('manual-machine-id');
+  const manualBatchInput = document.getElementById('manual-batch-root');
   if (addBtn) addBtn.onclick = () => addPipelineStep('bilateral');
   if (resetBtn) resetBtn.onclick = () => resetPipelineDefault();
   if (clearBtn) clearBtn.onclick = () => clearPipeline();
   if (previewPath) previewPath.addEventListener('input', () => { _previewPathEdited = true; });
   if (previewBtn) previewBtn.onclick = () => runPreprocessPreview();
   if (useSelectedBtn) useSelectedBtn.onclick = () => syncPreviewPath(true);
+  if (manualMachineInput) manualMachineInput.addEventListener('input', invalidateManualScan);
+  if (manualBatchInput) manualBatchInput.addEventListener('input', invalidateManualScan);
 });
 </script>
 

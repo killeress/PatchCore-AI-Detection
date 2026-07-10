@@ -3149,6 +3149,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/api/train/new/start":
                 self._handle_train_new_start()
                 return
+            elif path == "/api/train/new/manual-panels":
+                self._handle_train_new_manual_panels()
+                return
             elif path == "/api/train/new/preprocess_pipeline_preview":
                 self._handle_train_new_preprocess_pipeline_preview()
                 return
@@ -9696,6 +9699,89 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=500)
 
     @staticmethod
+    def _resolve_train_new_input_path(path_value, server_inst) -> Path:
+        """Resolve an operator-entered path to the path readable by this host."""
+        from capi_server import resolve_unc_path
+
+        raw = str(path_value or "").strip()
+        path_mapping = getattr(server_inst, "path_mapping", {}) if server_inst else {}
+        return Path(resolve_unc_path(raw, path_mapping))
+
+    @staticmethod
+    def _scan_train_new_manual_batch(batch_root: Path, machine_id: str) -> list:
+        """List valid first-level panel folders from a manually prepared batch."""
+        from capi_preprocess import LIGHTING_PREFIXES, filter_panel_lighting_files
+
+        panels = []
+        for panel_dir in sorted(batch_root.iterdir(), key=lambda p: p.name.lower()):
+            if not panel_dir.is_dir():
+                continue
+            lighting_files = filter_panel_lighting_files(panel_dir)
+            if not lighting_files:
+                continue
+            lightings = [lighting for lighting in LIGHTING_PREFIXES if lighting in lighting_files]
+            preview_path = CAPIWebHandler._resolve_train_new_preview_image_path(panel_dir)
+            panels.append({
+                "glass_id": panel_dir.name,
+                "model_id": machine_id,
+                "machine_no": "手動資料夾",
+                "machine_judgment": "OK",
+                "ai_judgment": "人工確認 OK",
+                "image_dir": str(panel_dir),
+                "image_path": str(panel_dir),
+                "preview_image_path": preview_path,
+                "available_lightings": lightings,
+                "lighting_count": len(lightings),
+                "expected_lighting_count": len(LIGHTING_PREFIXES),
+                "source_type": "manual_folder",
+            })
+        return panels
+
+    def _handle_train_new_manual_panels(self):
+        """POST /api/train/new/manual-panels — scan one batch directory level."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            data = json.loads(body) if body else {}
+        except Exception:
+            self._send_json({"error": "invalid JSON body"}, status=400)
+            return
+
+        machine_id = str(data.get("machine_id") or "").strip()
+        batch_root_raw = str(data.get("batch_root") or "").strip()
+        if not machine_id:
+            self._send_json({"error": "請提供機種 ID"}, status=400)
+            return
+        if not batch_root_raw:
+            self._send_json({"error": "請提供 batch 根目錄"}, status=400)
+            return
+
+        batch_root = self._resolve_train_new_input_path(
+            batch_root_raw, self._capi_server_instance
+        )
+        if not batch_root.is_dir():
+            self._send_json({"error": f"batch 根目錄不存在或無法讀取: {batch_root}"}, status=400)
+            return
+
+        try:
+            panels = self._scan_train_new_manual_batch(batch_root, machine_id)
+        except OSError as exc:
+            self._send_json({"error": f"無法讀取 batch 根目錄: {exc}"}, status=400)
+            return
+        if not panels:
+            self._send_json({
+                "error": "batch 根目錄第一層找不到含有效 lighting 圖的 panel 資料夾"
+            }, status=400)
+            return
+
+        self._send_json({
+            "panels": panels,
+            "machine_id": machine_id,
+            "batch_root": str(batch_root),
+            "source_type": "manual_folder",
+        })
+
+    @staticmethod
     def _resolve_train_new_preview_image_path(path_value) -> str:
         """Resolve a panel folder to the W0F00000_* image used by Step 2 preview."""
         raw = str(path_value or "").strip()
@@ -9864,6 +9950,52 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             clean_panel_paths.append(p.strip())
         panel_modes = derive_panel_modes(len(clean_panel_paths))
 
+        training_data_source = params.get("training_data_source")
+        if training_data_source is None:
+            training_data_source = {"type": "inference_records"}
+        if not isinstance(training_data_source, dict):
+            self._send_json({"error": "training_data_source must be an object"}, status=400)
+            return
+        source_type = str(training_data_source.get("type") or "").strip()
+        if source_type not in ("inference_records", "manual_folder"):
+            self._send_json({"error": "unsupported training_data_source.type"}, status=400)
+            return
+        if source_type == "manual_folder":
+            if training_data_source.get("confirmed_normal") is not True:
+                self._send_json({"error": "手動資料必須確認為正常訓練樣本"}, status=400)
+                return
+            batch_root_raw = str(training_data_source.get("batch_root") or "").strip()
+            if not batch_root_raw:
+                self._send_json({"error": "請提供 batch 根目錄"}, status=400)
+                return
+            batch_root = self._resolve_train_new_input_path(
+                batch_root_raw, self._capi_server_instance
+            )
+            if not batch_root.is_dir():
+                self._send_json({"error": f"batch 根目錄不存在或無法讀取: {batch_root}"}, status=400)
+                return
+            try:
+                valid_panels = {
+                    panel["image_path"]
+                    for panel in self._scan_train_new_manual_batch(batch_root, machine_id)
+                }
+            except OSError as exc:
+                self._send_json({"error": f"無法讀取 batch 根目錄: {exc}"}, status=400)
+                return
+            invalid_paths = [p for p in clean_panel_paths if p not in valid_panels]
+            if invalid_paths:
+                self._send_json({
+                    "error": f"panel_paths 含不屬於此 batch 或無有效 lighting 的路徑: {invalid_paths[0]}"
+                }, status=400)
+                return
+            training_data_source = {
+                "type": "manual_folder",
+                "batch_root": str(batch_root),
+                "confirmed_normal": True,
+            }
+        else:
+            training_data_source = {"type": "inference_records"}
+
         training_params, err = self._validate_training_params(params.get("training_params"))
         if err:
             self._send_json({"error": err}, status=400)
@@ -9922,6 +10054,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 training_params=training_params,
                 panel_modes=panel_modes,
                 training_scope=training_scope,
+                training_data_source=training_data_source,
                 image_preprocess_pipeline=image_preprocess_pipeline,
                 preprocess_after_tiling=preprocess_after_tiling,
                 tile_stride=tile_stride,
@@ -9935,7 +10068,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             args=(job_id, machine_id, clean_panel_paths,
                   self._capi_server_instance, training_params, panel_modes,
                   training_scope, image_preprocess_pipeline, preprocess_after_tiling,
-                  tile_stride),
+                  tile_stride, training_data_source),
             daemon=True, name=f"train_new_pre-{job_id}",
         )
         runtime["thread"] = thread
@@ -9973,7 +10106,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _train_new_preprocess_worker(
         job_id, machine_id, panel_paths, server_inst, training_params=None,
         panel_modes=None, training_scope=None, image_preprocess_pipeline=None,
-        preprocess_after_tiling=False, tile_stride=None,
+        preprocess_after_tiling=False, tile_stride=None, training_data_source=None,
     ):
         """背景 thread：preprocess + 抽 NG → state=review。
 
@@ -10011,6 +10144,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 image_preprocess_pipeline=image_preprocess_pipeline or [],
                 preprocess_after_tiling=preprocess_after_tiling,
                 tile_stride=int(tile_stride or CAPIWebHandler.TRAIN_NEW_DEFAULT_TILE_STRIDE),
+                training_data_source=training_data_source or {"type": "inference_records"},
             )
             apply_user_training_params(cfg, training_params, log_fn=log)
             pre_cfg = PreprocessConfig(
