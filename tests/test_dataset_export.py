@@ -127,6 +127,8 @@ def test_determine_label_unknown_category_raises():
 
 def test_extract_prefix_with_timestamp():
     assert extract_prefix("G0F00000_114438.tif") == "G0F00000"
+    assert extract_prefix("G0F00000083754.tif") == "G0F00000"
+    assert extract_prefix("U0F00000083755.tif") == "STANDARD"
     assert extract_prefix("STANDARD.png") == "STANDARD"
     assert extract_prefix("WGF_0001_20260410.bmp") == "WGF_0001"
 

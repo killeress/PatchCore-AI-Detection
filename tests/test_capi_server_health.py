@@ -1,6 +1,44 @@
 import pytest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+
+def test_load_model_configs_prefers_db_active_bundle_when_multiple_are_listed(tmp_path):
+    import yaml
+    from capi_server import CAPIServer
+
+    old_dir = tmp_path / "model" / "OLD"
+    new_dir = tmp_path / "model" / "NEW"
+    old_dir.mkdir(parents=True)
+    new_dir.mkdir(parents=True)
+    old_yaml = old_dir / "machine_config.yaml"
+    new_yaml = new_dir / "machine_config.yaml"
+    for path, machine_id in ((old_yaml, "OLD"), (new_yaml, "NEW")):
+        path.write_text(yaml.safe_dump({
+            "machine_id": machine_id,
+            "model_mapping": {
+                "G0F00000": {"inner": "inner.pt", "edge": "edge.pt"},
+            },
+            "threshold_mapping": {
+                "G0F00000": {"inner": 0.35, "edge": 0.35},
+            },
+        }))
+
+    server = CAPIServer.__new__(CAPIServer)
+    server.base_dir = tmp_path
+    server.server_config = {"model_configs": [str(old_yaml), str(new_yaml)]}
+    server.configs_by_machine = {}
+    server.fallback_config = None
+    server.db = MagicMock()
+    server.db.get_active_model_bundle.return_value = {
+        "bundle_path": "model/NEW",
+    }
+
+    server._load_model_configs(str(tmp_path / "server_config.yaml"))
+
+    assert server.fallback_config.machine_id == "NEW"
+    assert Path(server.fallback_config.config_path).resolve() == new_yaml.resolve()
 
 
 def test_health_check_new_arch_resolves_relative_model_paths(tmp_path):

@@ -130,7 +130,7 @@
           {% set zone_cls = "edge" if info.zone == "edge" else "inner" %}
           <tr class="d5-row d5-zone-{{ zone_cls }}">
             <td class="d5-td-num d5-cell-idx">{{ "%02d"|format(loop.index) }}</td>
-            <td class="d5-cell-mono">{{ info.lighting }}</td>
+            <td class="d5-cell-mono">{{ info.lighting_label }}</td>
             <td><span class="d5-zone-tag d5-zone-tag-{{ zone_cls }}">{{ info.zone }}</span></td>
             <td>
               {% if info.auroc is not none %}

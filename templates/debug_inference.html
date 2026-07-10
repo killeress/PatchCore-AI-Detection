@@ -2943,7 +2943,7 @@
             <div class="value" style="color:var(--accent)">${data.processing_time}s</div>
         </div>
         <div class="summary-card" style="grid-column: span 2;">
-            <div class="label">使用模型 (${data.image_prefix || '未知'})</div>
+            <div class="label">使用模型 (${data.image_prefix_label || data.image_prefix || '未知'})</div>
             <div class="value" style="color:var(--text);font-size:1.1rem;word-break:break-all;" title="${data.model_name || '預設'}">${data.model_name || '預設模型'}</div>
         </div>
         <div class="summary-card">
@@ -3265,7 +3265,7 @@
             </div>
             <div class="summary-card">
                 <div class="label">使用模型</div>
-                <div class="value" style="color:var(--text);font-size:0.85rem;" title="${data.model_name}">${data.image_prefix || '?'}</div>
+                <div class="value" style="color:var(--text);font-size:0.85rem;" title="${data.model_name}">${data.image_prefix_label || data.image_prefix || '?'}</div>
             </div>
         `;
 

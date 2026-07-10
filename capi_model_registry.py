@@ -287,18 +287,24 @@ def activate_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
     bundle = db.get_model_bundle(bundle_id)
     if not bundle:
         raise ValueError(f"bundle {bundle_id} not found")
-    yaml_rel = str(Path(bundle["bundle_path"]) / "machine_config.yaml")
+    target_yaml = _resolve_model_config_path(
+        server_config_path,
+        Path(bundle["bundle_path"]) / "machine_config.yaml",
+    )
 
     # 全域單一 active：一次讀寫 server_config，移除所有其他 bundle 的 yaml。
     # configs/capi_3f.yaml 不在 DB 內，不會被踢掉，保留作為最後 fallback。
     other_yamls = {
-        str(Path(o["bundle_path"]) / "machine_config.yaml")
+        _resolve_model_config_path(
+            server_config_path,
+            Path(o["bundle_path"]) / "machine_config.yaml",
+        )
         for o in db.list_model_bundles() if o["id"] != bundle_id
     }
     _rewrite_model_configs(
         server_config_path,
-        keep=lambda p: p not in other_yamls,
-        ensure_present=yaml_rel,
+        keep=lambda p: _resolve_model_config_path(server_config_path, p) not in other_yamls,
+        ensure_present=str(target_yaml),
     )
     db.deactivate_all_bundles(except_id=bundle_id)
     db.set_bundle_active(bundle_id, True)
@@ -310,9 +316,9 @@ def deactivate_bundle(db, bundle_id: int, server_config_path: Path) -> dict:
     bundle = db.get_model_bundle(bundle_id)
     if not bundle:
         raise ValueError(f"bundle {bundle_id} not found")
-    yaml_rel = str(Path(bundle["bundle_path"]) / "machine_config.yaml")
-    _ensure_model_configs_remains_non_empty(server_config_path, removing={yaml_rel})
-    _remove_from_model_configs(server_config_path, yaml_rel)
+    yaml_path = str(Path(bundle["bundle_path"]) / "machine_config.yaml")
+    _ensure_model_configs_remains_non_empty(server_config_path, removing={yaml_path})
+    _remove_from_model_configs(server_config_path, yaml_path)
     db.set_bundle_active(bundle_id, False)
     return {"ok": True, "message": "已停用，請重啟 server 才會生效"}
 
@@ -343,8 +349,20 @@ def _rewrite_model_configs(
     _dump_yaml(server_config_path, cfg)
 
 
-def _remove_from_model_configs(server_config_path: Path, yaml_rel: str) -> None:
-    _rewrite_model_configs(server_config_path, keep=lambda p: p != yaml_rel)
+def _resolve_model_config_path(server_config_path: Path, config_path) -> Path:
+    server_config_path = Path(server_config_path).resolve()
+    path = Path(str(config_path))
+    if not path.is_absolute():
+        path = server_config_path.parent / path
+    return path.resolve()
+
+
+def _remove_from_model_configs(server_config_path: Path, yaml_path: str) -> None:
+    resolved = _resolve_model_config_path(server_config_path, yaml_path)
+    _rewrite_model_configs(
+        server_config_path,
+        keep=lambda p: _resolve_model_config_path(server_config_path, p) != resolved,
+    )
 
 
 def _ensure_model_configs_remains_non_empty(
@@ -356,7 +374,14 @@ def _ensure_model_configs_remains_non_empty(
     在這裡先擋；若呼叫端要移除的 yaml 被移走後仍至少剩一個 entry 就放行。
     """
     cfg = _load_yaml(server_config_path)
-    remaining = [p for p in cfg.get("model_configs", []) if p not in removing]
+    resolved_removing = {
+        _resolve_model_config_path(server_config_path, path)
+        for path in removing
+    }
+    remaining = [
+        p for p in cfg.get("model_configs", [])
+        if _resolve_model_config_path(server_config_path, p) not in resolved_removing
+    ]
     if not remaining:
         raise ValueError(
             "不能停用 / 刪除最後一個 active bundle —— "

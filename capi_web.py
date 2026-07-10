@@ -46,6 +46,7 @@ from capi_scratch_batch import (
     STATE_RUNNING as SCRATCH_STATE_RUNNING,
 )
 from capi_version import get_version_info, read_changelog
+from capi_image_naming import canonical_image_prefix, image_prefix_display_labels, source_image_prefix
 
 logger = logging.getLogger("capi.web")
 
@@ -3519,6 +3520,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if not detail:
             self._send_404(path)
             return
+        self._decorate_record_image_prefix_labels(detail)
         self._decorate_record_preprocess_info(detail)
 
         template = self.jinja_env.get_template("record_detail.html")
@@ -3681,6 +3683,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if not detail:
             self._send_404(path)
             return
+        self._decorate_record_image_prefix_labels(detail)
         self._decorate_record_preprocess_info(detail)
 
         template = self.jinja_env.get_template("record_detail_v3.html")
@@ -3690,6 +3693,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             request_path=path
         )
         self._send_response(200, html)
+
+    @staticmethod
+    def _decorate_record_image_prefix_labels(detail: dict) -> None:
+        detail["image_prefix_labels"] = image_prefix_display_labels(
+            image.get("image_name") or image.get("image_path") or ""
+            for image in detail.get("images") or []
+        )
 
     @staticmethod
     def _decorate_record_preprocess_info(detail: dict) -> None:
@@ -3986,6 +3996,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     status["recent_heatmaps"] = recent_heatmaps
                 except Exception:
                     status["recent_heatmaps"] = []
+
+                threshold_mapping = status.get("server", {}).get("threshold_mapping") or {}
+                status.setdefault("server", {})["image_prefix_labels"] = \
+                    self._dashboard_lighting_labels(self.db, list(threshold_mapping))
 
             self._send_json(status)
         except Exception as e:
@@ -5736,6 +5750,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "overview_url": overview_url,
                 "tiles": tiles_data,
                 "image_prefix": img_prefix,
+                "image_prefix_label": source_image_prefix(image_path.name),
                 "model_name": model_name,
             }
 
@@ -6857,6 +6872,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "omit_url": omit_url,
                 "composite_url": composite_url,
                 "image_prefix": img_prefix,
+                "image_prefix_label": source_image_prefix(image_path.name),
                 "model_name": model_name,
                 "edge_margin_px": edge_margin_override if edge_margin_override is not None else self.inferencer.config.edge_margin_px,
             }
@@ -9219,6 +9235,44 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 out.append(lighting)
         return out
 
+    @staticmethod
+    def _train_new_lighting_labels(selected_lightings: list, panel_paths: list) -> dict:
+        labels = {lighting: lighting for lighting in selected_lightings}
+        if "STANDARD" not in labels:
+            return labels
+
+        for panel_path in panel_paths:
+            try:
+                source_labels = image_prefix_display_labels(
+                    entry.name for entry in Path(panel_path).iterdir() if entry.is_file()
+                )
+            except OSError:
+                continue
+            if source_labels.get("STANDARD") != "STANDARD":
+                for lighting in labels:
+                    if lighting in source_labels:
+                        labels[lighting] = source_labels[lighting]
+                return labels
+        return labels
+
+    @classmethod
+    def _dashboard_lighting_labels(cls, db, selected_lightings: list) -> dict:
+        labels = {lighting: lighting for lighting in selected_lightings}
+        if db is None:
+            return labels
+        try:
+            active_bundle = db.get_active_model_bundle()
+            job_id = (active_bundle or {}).get("job_id")
+            job = db.get_training_job(job_id) if job_id else None
+        except Exception:
+            return labels
+        if not job:
+            return labels
+        return cls._train_new_lighting_labels(
+            selected_lightings,
+            job.get("panel_paths") or [],
+        )
+
     def _handle_training_page(self):
         """GET /training - hub page listing trainable models."""
         template = self.jinja_env.get_template("training.html")
@@ -9308,12 +9362,23 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 template_name = "train_new/step4_progress.html"
         template = self.jinja_env.get_template(template_name)
         scope = (job or {}).get("training_scope") if job else None
+        selected_units = self._scope_selected_units(scope)
+        unit_labels = [f"{lighting}-{zone}" for lighting, zone in selected_units]
+        selected_lightings = self._scope_selected_lightings(scope)
+        lighting_labels = self._train_new_lighting_labels(
+            selected_lightings,
+            (job or {}).get("panel_paths") or [],
+        )
         html = template.render(
             request_path="/train/new/progress",
             job_id=job_id,
             training_scope=scope,
-            unit_labels=[f"{l}-{z}" for l, z in self._scope_selected_units(scope)],
-            selected_lightings=self._scope_selected_lightings(scope),
+            unit_labels=unit_labels,
+            display_unit_labels=[
+                f"{lighting_labels.get(lighting, lighting)}-{zone}"
+                for lighting, zone in selected_units
+            ],
+            selected_lightings=selected_lightings,
         )
         self._send_response(200, html)
 
@@ -9327,12 +9392,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
         template = self.jinja_env.get_template("train_new/step3_review.html")
         scope = job.get("training_scope")
+        selected_lightings = self._scope_selected_lightings(scope)
         html = template.render(
             request_path="/train/new/review",
             job_id=job_id,
             machine_id=job.get("machine_id", ""),
             training_scope=scope,
-            selected_lightings=self._scope_selected_lightings(scope),
+            selected_lightings=selected_lightings,
+            lighting_labels=self._train_new_lighting_labels(
+                selected_lightings,
+                job.get("panel_paths") or [],
+            ),
         )
         self._send_response(200, html)
 
@@ -9377,6 +9447,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return (g or "n/a").replace("/", "")
 
         unit_metrics = manifest.get("unit_metrics", {}) or {}
+        manifest_lightings = []
+        for unit_label in (manifest.get("tiles_per_unit") or {}):
+            lighting, _zone = unit_label.rsplit("-", 1)
+            if lighting not in manifest_lightings:
+                manifest_lightings.append(lighting)
+        lighting_labels = self._train_new_lighting_labels(
+            manifest_lightings,
+            job.get("panel_paths") or [],
+        )
         units = []
         total_size_bytes = 0
         total_elapsed = 0
@@ -9389,7 +9468,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             total_elapsed += elapsed
             grade = m.get("auroc_grade") or "n/a"
             units.append((unit_label, {
-                "lighting": lighting, "zone": zone,
+                "lighting": lighting,
+                "lighting_label": lighting_labels.get(lighting, lighting),
+                "zone": zone,
                 "train": tile_info["train"], "ng": tile_info["ng"],
                 "threshold": thresholds.get(lighting, {}).get(zone, 0.0),
                 "size_mb": size_bytes / 1e6,
@@ -10130,13 +10211,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             }
 
             if preprocess_after_tiling:
-                from capi_preprocess import PreprocessConfig, preprocess_panel_image
+                from capi_preprocess import LIGHTING_PREFIXES, PreprocessConfig, preprocess_panel_image
 
-                lighting = next(
-                    (prefix for prefix in ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
-                     if image_path.name.startswith(prefix)),
-                    "STANDARD",
-                )
+                lighting = canonical_image_prefix(image_path.name)
+                if lighting not in LIGHTING_PREFIXES:
+                    lighting = "STANDARD"
                 pre_cfg = PreprocessConfig(
                     tile_stride=tile_stride,
                     image_preprocess_pipeline=pipeline,

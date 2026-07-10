@@ -272,6 +272,9 @@ def test_train_one_patchcore_smoke(tmp_path, monkeypatch):
     assert call_names.index("fit") < call_names.index("export")
     patchcore_call = next(c for c in calls if c[0] == "Patchcore")
     assert patchcore_call[1]["layers"] == ("layer2", "layer3")
+    folder_call = next(c for c in calls if c[0] == "Folder")
+    assert folder_call[1]["abnormal_dir"] is None
+    assert folder_call[1]["test_split_mode"] == "synthetic"
     # 回傳路徑要存在
     assert out.exists()
     assert out.name == "model.pt"

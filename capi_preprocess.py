@@ -10,6 +10,7 @@ import logging
 import numpy as np
 import cv2
 from capi_image_preprocess_lab import apply_preprocess_method, normalize_preprocess_pipeline
+from capi_image_naming import canonical_image_prefix
 
 
 logger = logging.getLogger("capi.preprocess")
@@ -292,15 +293,10 @@ def filter_panel_lighting_files(
         name = entry.name
         if name in SKIP_EXACT:
             continue
-        # 優先比對 lighting prefix（STANDARD 開頭含 S，須先於 skip 判斷）
-        matched = False
-        for lighting in LIGHTING_PREFIXES:
-            if name.startswith(lighting):
-                if lighting not in result or _is_newer(entry, result[lighting]):
-                    result[lighting] = entry
-                matched = True
-                break
-        if matched:
+        lighting = canonical_image_prefix(name)
+        if lighting in LIGHTING_PREFIXES:
+            if lighting not in result or _is_newer(entry, result[lighting]):
+                result[lighting] = entry
             continue
     return result
 

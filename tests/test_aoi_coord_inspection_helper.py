@@ -101,6 +101,85 @@ def test_parse_aoi_report_uses_nested_new_arch_model_mapping_prefixes(new_arch_i
     ]
 
 
+def test_parse_aoi_report_maps_hm_u_prefix_to_standard(new_arch_inferencer, tmp_path):
+    panel_dir = tmp_path / "yuantu" / "GZ0790KA0017S" / "panel"
+    report_dir = tmp_path / "Report" / "GZ0790KA0017S" / "panel"
+    panel_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+
+    new_arch_inferencer.config.aoi_report_path_replace_from = "yuantu"
+    new_arch_inferencer.config.aoi_report_path_replace_to = "Report"
+    new_arch_inferencer.config.model_mapping = {
+        "STANDARD": {"inner": "/fake/s-inner.pt", "edge": "/fake/s-edge.pt"},
+    }
+    new_arch_inferencer._model_mapping = {}
+
+    (report_dir / "083755.TXT").write_text(
+        "header\n"
+        "@;OK;NGPCDK20035200136U0F00000;\n",
+        encoding="utf-8",
+    )
+
+    parsed = new_arch_inferencer._parse_aoi_report_txt(panel_dir)
+
+    assert set(parsed) == {"STANDARD"}
+    assert parsed["STANDARD"][0].image_prefix == "STANDARD"
+    assert (parsed["STANDARD"][0].product_x, parsed["STANDARD"][0].product_y) == (352, 136)
+
+
+def test_parse_aoi_report_accepts_multiline_ng_format(new_arch_inferencer, tmp_path):
+    panel_dir = tmp_path / "yuantu" / "TL6330XAV127" / "panel"
+    report_dir = tmp_path / "Report" / "TL6330XAV127" / "panel"
+    panel_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+
+    new_arch_inferencer.config.aoi_report_path_replace_from = "yuantu"
+    new_arch_inferencer.config.aoi_report_path_replace_to = "Report"
+    new_arch_inferencer.config.model_mapping = {
+        "STANDARD": {"inner": "/fake/s-inner.pt", "edge": "/fake/s-edge.pt"},
+    }
+    new_arch_inferencer._model_mapping = {}
+
+    (report_dir / "093340.TXT").write_text(
+        "TL6330XAV127\n"
+        "GZ0790KA0017S\n"
+        "GC3M66LIJ45CL0SPN0219\n"
+        "NG\n"
+        "PCDK20092400908U0F00000\n",
+        encoding="utf-8",
+    )
+
+    parsed = new_arch_inferencer._parse_aoi_report_txt(panel_dir)
+
+    assert set(parsed) == {"STANDARD"}
+    defect = parsed["STANDARD"][0]
+    assert defect.defect_code == "PCDK2"
+    assert (defect.product_x, defect.product_y) == (924, 908)
+    assert defect.image_prefix == "STANDARD"
+
+
+def test_parse_aoi_report_accepts_multiline_ok_without_coords(new_arch_inferencer, tmp_path):
+    panel_dir = tmp_path / "yuantu" / "TL6350YAZ13E" / "panel"
+    report_dir = tmp_path / "Report" / "TL6350YAZ13E" / "panel"
+    panel_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+
+    new_arch_inferencer.config.aoi_report_path_replace_from = "yuantu"
+    new_arch_inferencer.config.aoi_report_path_replace_to = "Report"
+
+    (report_dir / "093341.TXT").write_text(
+        "TL6350YAZ13E\n"
+        "GZ0790KA0017S\n"
+        "GC3M687IJ46271A1A0217\n"
+        "OK\n",
+        encoding="utf-8",
+    )
+
+    parsed = new_arch_inferencer._parse_aoi_report_txt(panel_dir)
+
+    assert parsed == {}
+
+
 def test_helper_new_arch_creates_centered_tile(new_arch_inferencer, tmp_path):
     """新架構：helper 以 AOI 座標為 anchor 建 512x512 tile；
     既存 grid tile 不被動到。遠離邊界時 AOI 座標仍在 tile 中心。"""

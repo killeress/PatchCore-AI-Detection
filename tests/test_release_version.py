@@ -97,6 +97,9 @@ def test_build_release_zip_includes_manifest_and_checksums():
             assert "promote_update.sh" in names
             assert "setup_auto_update_client.sh" in names
             assert "templates/release_notes.html" in names
+            assert "templates/debug_inference.html" in names
+            assert "templates/record_detail.html" in names
+            assert "templates/record_detail_v3.html" in names
 
             assert zf.read("VERSION").decode("utf-8").strip() == version
             manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))

@@ -3333,7 +3333,7 @@ class CAPIDatabase:
             ("dust_area_max", config.dust_area_max, "int", "灰塵顆粒最大面積 (px)"),
             ("dust_extension", config.dust_extension, "int", "灰塵區域膨脹像素"),
             ("dust_heatmap_iou_threshold", config.dust_heatmap_iou_threshold, "float", "Heatmap-Dust IOU/Coverage 閾值"),
-            ("dust_heatmap_top_percent", config.dust_heatmap_top_percent, "float", "Heatmap 熱區取前 X%"),
+            ("dust_heatmap_top_percent", config.dust_heatmap_top_percent, "float", "Heatmap 熱區取前 X%；two-stage REAL 特徵須落在此核心附近"),
             ("dust_heatmap_metric", config.dust_heatmap_metric, "string", 'Heatmap 判定指標: "coverage" (覆蓋率) 或是 "iou"'),
             ("dust_detect_dark_particles", config.dust_detect_dark_particles, "bool", "偵測暗色顆粒/圖案 (如偏黑 MARK) 並過濾"),
             # Otsu 邊緣裁切

@@ -76,6 +76,27 @@ def test_filter_panel_lighting_files_uses_latest_duplicate_lighting():
         assert result["G0F00000"] == latest_path
 
 
+def test_filter_panel_lighting_files_supports_hm_names():
+    from capi_preprocess import filter_panel_lighting_files
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        for name in [
+            "B0F00000083756.tif",
+            "PINIGBI0083748.tif",
+            "U0F00000083755.tif",
+            "WGF50500083752.tif",
+            "G0F00000083754.tif",
+            "R0F00000083753.tif",
+            "W0F00000083751.tif",
+        ]:
+            (base / name).write_bytes(b"x")
+
+        result = filter_panel_lighting_files(base)
+
+        assert set(result.keys()) == {"G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"}
+        assert result["STANDARD"].name == "U0F00000083755.tif"
+
+
 def test_detect_panel_polygon_simple_rect():
     from capi_preprocess import detect_panel_polygon, PreprocessConfig
     img = np.zeros((1000, 1500), np.uint8)

@@ -500,6 +500,7 @@
         // Threshold mapping (per-prefix display)
         const thContainer = document.getElementById('ui-threshold-container');
         const thMapping = data.server.threshold_mapping || {};
+        const prefixLabels = data.server.image_prefix_labels || {};
         const prefixKeys = Object.keys(thMapping);
         // 顯示資料來源提示，下次撞到「yaml 改了 dashboard 沒變」能立刻看出是 yaml 還是 DB override
         const isNewArch = !!data.server.is_new_architecture;
@@ -516,7 +517,8 @@
             thContainer.innerHTML = prefixKeys.map(prefix => {
                 const val = thMapping[prefix];
                 const color = prefixColors[prefix] || 'var(--accent)';
-                const shortName = prefix.length > 5 ? prefix.substring(0, 5) : prefix;
+                const displayPrefix = prefixLabels[prefix] || prefix;
+                const shortName = displayPrefix.length > 5 ? displayPrefix.substring(0, 5) : displayPrefix;
                 let valHtml;
                 if (val !== null && typeof val === 'object') {
                     const inner = val.inner != null ? val.inner : '—';
@@ -532,7 +534,7 @@
                 } else {
                     valHtml = `<span style="font-family:var(--tech-font);font-weight:600;color:#e2e8f0;font-size:0.85rem;">${val}</span>`;
                 }
-                const tipText = `${prefix} inner/edge thresholds\n${sourceHint}`;
+                const tipText = `${displayPrefix} inner/edge thresholds\n${sourceHint}`;
                 return `<div title="${tipText.replace(/"/g, '&quot;')}" style="display:flex;align-items:center;gap:5px;background:rgba(15,23,42,0.8);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:4px 10px;cursor:help;">
                     <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block;box-shadow:0 0 6px ${color};"></span>
                     <span style="font-size:0.75rem;color:var(--text-muted);letter-spacing:0.5px;">${shortName}</span>

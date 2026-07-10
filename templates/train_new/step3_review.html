@@ -27,7 +27,7 @@
     {% for lighting in selected_lightings %}
     <span class="lighting-tab" data-lighting="{{ lighting }}" onclick="switchLighting('{{ lighting }}')"
       style="background:#313244;padding:6px 14px;border-radius:6px 6px 0 0;color:#a6adc8;font-size:.82rem;cursor:pointer;white-space:nowrap;">
-      {{ lighting }} <span class="badge" style="background:#1e1e2e;padding:1px 7px;border-radius:8px;font-size:.72rem;margin-left:3px;">0/0</span>
+      {{ lighting_labels.get(lighting, lighting) }} <span class="badge" style="background:#1e1e2e;padding:1px 7px;border-radius:8px;font-size:.72rem;margin-left:3px;">0/0</span>
     </span>
     {% endfor %}
   </div>
@@ -173,6 +173,7 @@
 <script>
 const jobId = "{{ job_id }}";
 const lightings = {{ selected_lightings|tojson }};
+const lightingLabels = {{ lighting_labels|tojson }};
 const trainingScope = {{ training_scope|tojson }};
 let _currentLighting = lightings[0] || 'G0F00000';
 let _tilesByLighting = {};  // {lighting: [tile, ...]}
@@ -636,7 +637,7 @@ function modalShowTile(id) {
     ? (tile.zone ? `NG·${tile.zone}` : 'NG·共用')
     : (tile.zone || '');
   document.getElementById('modal-img').src = src;
-  document.getElementById('modal-title').textContent = `${_currentLighting} / ${zone} / tile #${tile.id}`;
+  document.getElementById('modal-title').textContent = `${lightingLabels[_currentLighting] || _currentLighting} / ${zone} / tile #${tile.id}`;
 
   const dec = document.getElementById('modal-decision');
   dec.style.display = '';
