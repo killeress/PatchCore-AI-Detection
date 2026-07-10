@@ -100,6 +100,15 @@ def test_build_release_zip_includes_manifest_and_checksums():
             assert "templates/debug_inference.html" in names
             assert "templates/record_detail.html" in names
             assert "templates/record_detail_v3.html" in names
+            assert "capi_edge_cv.py" in names
+            assert "capi_heatmap.py" in names
+            assert "capi_image_preprocess_lab.py" in names
+            assert "capi_dataset_export.py" in names
+            assert "capi_mark_detector.py" in names
+            assert "capi_scratch_batch.py" in names
+            assert "capi_scratch_export.py" in names
+            assert "scratch_classifier.py" in names
+            assert "scratch_filter.py" in names
 
             assert zf.read("VERSION").decode("utf-8").strip() == version
             manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))

@@ -1,5 +1,11 @@
 # 更新紀錄
 
+## 2026-07-10 v9
+
+### [Bug fixed]部署包啟動依賴
+
+- 修正 release ZIP 漏放 `capi_edge_cv.py`、熱力圖、前處理、資料集匯出與 scratch 後濾等啟動依賴模組，避免新 PC 解壓後啟動時出現 `ModuleNotFoundError`。
+
 ## 2026-07-10 v8
 
 ### [Bug fixed]灰塵 two-stage 過檢
