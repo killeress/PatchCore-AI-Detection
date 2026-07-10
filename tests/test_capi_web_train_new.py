@@ -244,6 +244,58 @@ def test_handle_train_new_panels_db_not_set():
     assert h._sent_response[0]["status"] == 503
 
 
+def test_handle_train_new_manual_panels_scans_first_level_only(tmp_path):
+    batch = tmp_path / "batch_01"
+    panel_a = batch / "panel_a"
+    panel_b = batch / "panel_b"
+    nested = batch / "group" / "nested_panel"
+    panel_a.mkdir(parents=True)
+    panel_b.mkdir()
+    nested.mkdir(parents=True)
+    (panel_a / "W0F00000_a.tif").write_bytes(b"w0")
+    (panel_a / "G0F00000_a.tif").write_bytes(b"g0")
+    (panel_b / "notes.txt").write_text("not an image", encoding="utf-8")
+    (nested / "W0F00000_nested.tif").write_bytes(b"w0")
+
+    server = MagicMock()
+    server.database = MagicMock()
+    server.path_mapping = {}
+    h = _make_handler_with_server(server, "/api/train/new/manual-panels")
+    payload = json.dumps({
+        "machine_id": "GN140BGAAN80S",
+        "batch_root": str(batch),
+    }).encode()
+    h.headers.get = MagicMock(return_value=str(len(payload)))
+    h.rfile = io.BytesIO(payload)
+
+    h._handle_train_new_manual_panels()
+
+    assert h._sent_response[0]["status"] == 200
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["batch_root"] == str(batch)
+    assert [p["glass_id"] for p in body["panels"]] == ["panel_a"]
+    assert body["panels"][0]["model_id"] == "GN140BGAAN80S"
+    assert body["panels"][0]["available_lightings"] == ["G0F00000", "W0F00000"]
+    assert body["panels"][0]["preview_image_path"].endswith("W0F00000_a.tif")
+
+
+def test_handle_train_new_manual_panels_rejects_empty_batch(tmp_path):
+    batch = tmp_path / "empty_batch"
+    batch.mkdir()
+    server = MagicMock()
+    server.database = MagicMock()
+    server.path_mapping = {}
+    h = _make_handler_with_server(server, "/api/train/new/manual-panels")
+    payload = json.dumps({"machine_id": "M", "batch_root": str(batch)}).encode()
+    h.headers.get = MagicMock(return_value=str(len(payload)))
+    h.rfile = io.BytesIO(payload)
+
+    h._handle_train_new_manual_panels()
+
+    assert h._sent_response[0]["status"] == 400
+    assert "第一層" in json.loads(h._sent_response[0]["body"])["error"]
+
+
 # ── /api/train/new/start tests ────────────────────────────────────────────────
 
 def test_handle_train_new_start_validates_params():
@@ -570,6 +622,70 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
     assert call_kwargs["training_params"] == payload["training_params"]
     assert call_kwargs["tile_stride"] == 128
     assert call_kwargs["image_preprocess_pipeline"][0]["method"] == "bilateral"
+
+
+def test_handle_train_new_start_persists_manual_data_source(tmp_path):
+    batch = tmp_path / "batch"
+    panel = batch / "panel_001"
+    panel.mkdir(parents=True)
+    (panel / "W0F00000_sample.tif").write_bytes(b"w0")
+
+    server = MagicMock()
+    server.database.create_training_job = MagicMock()
+    server.path_mapping = {}
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    payload = {
+        "machine_id": "GN140BGAAN80S",
+        "panel_paths": [str(panel)],
+        "training_data_source": {
+            "type": "manual_folder",
+            "batch_root": str(batch),
+            "confirmed_normal": True,
+        },
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    with patch("capi_web.threading.Thread") as mock_thread:
+        mock_thread.return_value.start = MagicMock()
+        h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 200
+    kwargs = server.database.create_training_job.call_args.kwargs
+    assert kwargs["training_data_source"] == {
+        "type": "manual_folder",
+        "batch_root": str(batch),
+        "confirmed_normal": True,
+    }
+    assert kwargs["panel_paths"] == [str(panel)]
+
+
+def test_handle_train_new_start_requires_manual_normal_confirmation(tmp_path):
+    batch = tmp_path / "batch"
+    panel = batch / "panel_001"
+    panel.mkdir(parents=True)
+    (panel / "W0F00000_sample.tif").write_bytes(b"w0")
+    server = MagicMock()
+    server.path_mapping = {}
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    payload = {
+        "machine_id": "M",
+        "panel_paths": [str(panel)],
+        "training_data_source": {
+            "type": "manual_folder",
+            "batch_root": str(batch),
+            "confirmed_normal": False,
+        },
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 400
+    assert "確認" in json.loads(h._sent_response[0]["body"])["error"]
 
 
 # ── /api/train/new/status tests ───────────────────────────────────────────────

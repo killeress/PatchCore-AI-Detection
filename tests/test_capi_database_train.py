@@ -320,6 +320,20 @@ class TestTrainingJobsCRUD:
         job = db.get_training_job("j_with_params")
         assert job["training_params"] == params
 
+    def test_training_data_source_round_trip(self, tmp_path):
+        db = _make_db(tmp_path)
+        source = {
+            "type": "manual_folder",
+            "batch_root": "/training/M/batch_01",
+            "confirmed_normal": True,
+        }
+        db.create_training_job(
+            job_id="j_manual_source", machine_id="M", panel_paths=["/training/M/batch_01/p1"],
+            training_data_source=source,
+        )
+
+        assert db.get_training_job("j_manual_source")["training_data_source"] == source
+
     def test_tile_stride_default_and_round_trip(self, tmp_path):
         db = _make_db(tmp_path)
         db.create_training_job(job_id="j_default_stride", machine_id="M", panel_paths=[])

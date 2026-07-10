@@ -229,6 +229,7 @@ def main() -> int:
         image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
         preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
         tile_stride=int(job.get("tile_stride") or 512),
+        training_data_source=job.get("training_data_source") or {"type": "inference_records"},
     )
     apply_user_training_params(cfg, job.get("training_params"), log_fn=log.info)
 
