@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from capi_image_naming import canonical_image_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -162,10 +163,7 @@ def extract_prefix(image_name: str) -> str:
         STANDARD.png → STANDARD
         WGF_0001_20260410.bmp → WGF_0001
     """
-    stem = Path(image_name).stem
-    if "_" in stem:
-        return stem.rsplit("_", 1)[0]
-    return stem
+    return canonical_image_prefix(image_name)
 
 
 def build_sample_id(glass_id: str, image_name: str, source_type: str,

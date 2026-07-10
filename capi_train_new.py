@@ -522,15 +522,27 @@ def train_one_patchcore(
 
     if log:
         log(f"{unit_label}: 建立 Folder datamodule")
+    abnormal_dir = staging_dir / "test" / "anormal"
+    has_abnormal_images = abnormal_dir.is_dir() and any(
+        path.is_file() for path in abnormal_dir.iterdir()
+    )
+    folder_kwargs = {}
+    if has_abnormal_images:
+        folder_kwargs["abnormal_dir"] = "test/anormal"
+    else:
+        folder_kwargs.update(abnormal_dir=None, test_split_mode="synthetic")
+        if log:
+            log(f"{unit_label}: 無 NG 樣本，改用 synthetic anomaly 建立驗證集")
+
     datamodule = Folder(
         name=f"unit_{unit_label}",
         root=staging_dir,
         normal_dir="train",
-        abnormal_dir="test/anormal",
         train_batch_size=cfg.batch_size,
         eval_batch_size=cfg.batch_size,
         num_workers=0,
         val_split_mode=val_mode,
+        **folder_kwargs,
     )
     try:
         datamodule.image_size = cfg.image_size
@@ -1201,7 +1213,7 @@ def train_single_submodel(
       - metrics: dict (compute_unit_metrics 結果)
       - tile_count: int (訓練用 tile 數)
       - ng_count: int (NG 數)
-      - ng_used: "zone" | "fallback"
+      - ng_used: "zone" | "fallback" | "none"
       - used_tile_ids: list[int] (該次訓練實際送進的 tile_pool.id)
       - elapsed_seconds: int
       - size_bytes: int (.pt 檔大小)
@@ -1225,7 +1237,11 @@ def train_single_submodel(
     ng_all = db.list_tile_pool(job_id, lighting=lighting,
                                source="ng", decision="accept")
     ng_for_zone = [t for t in ng_all if t.get("zone") in (zone, None)]
-    if len(ng_for_zone) < MIN_NG_PER_ZONE:
+    if not ng_all:
+        log(f"{unit_prefix}{unit_label}: 無可用 NG，僅以 OK tile 訓練")
+        ng_tiles = []
+        ng_used = "none"
+    elif len(ng_for_zone) < MIN_NG_PER_ZONE:
         log(f"{unit_prefix}{unit_label}: zone NG 僅 {len(ng_for_zone)} (<{MIN_NG_PER_ZONE})，"
             f"退回全部 NG ({len(ng_all)})")
         ng_tiles = ng_all

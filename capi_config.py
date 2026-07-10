@@ -14,6 +14,7 @@ import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
+from capi_image_naming import canonical_image_prefix
 
 
 def _default_within_spec_judgment_rules() -> Dict[str, Any]:
@@ -236,7 +237,7 @@ class CAPIConfig:
     dust_area_max: int = 100000               # 灰塵顆粒最大面積 (px)
     dust_extension: int = 5                   # 灰塵區域膨脹像素
     dust_heatmap_iou_threshold: float = 0.02  # Heatmap-Dust IOU/Coverage 閾值
-    dust_heatmap_top_percent: float = 5.0     # Heatmap 熱區取前 X% (Percentile 二值化)
+    dust_heatmap_top_percent: float = 5.0     # Heatmap 熱區取前 X%；two-stage REAL feature 須落在此核心附近
     dust_heatmap_metric: str = "coverage"     # Heatmap 判定指標: "coverage" (灰塵覆蓋率) 或是 "iou" (交集/聯集)
     dust_mask_before_binarize: bool = False   # 先遮罩灰塵區域再二值化 (解決灰塵強訊號淹沒弱缺陷的問題)
     dust_two_stage_enabled: bool = False      # 兩階段灰塵判定：heatmap定位→原圖找特徵點→精準比對dust_mask
@@ -990,6 +991,7 @@ class CAPIConfig:
     def should_skip_file(self, filename: str) -> bool:
         """檢查是否應該跳過此檔案（使用前綴比對，支援帶時間戳的檔名）"""
         stem = Path(filename).stem  # 取得不含副檔名的名稱
+        image_prefix = canonical_image_prefix(filename)
         
         # 側拍圖自動跳過 (e.g. ["SG0F00000", "SSTANDARD"] → SG0F00000_114438.tif 等)
         for prefix in self.side_shot_prefixes:
@@ -998,7 +1000,12 @@ class CAPIConfig:
         
         for skip_pattern in self.skip_files:
             # 支援前綴比對：skip_pattern "B0F00000" 可匹配 "B0F00000_031447.tif"
-            if stem == skip_pattern or stem.startswith(skip_pattern + "_") or filename == skip_pattern:
+            if (
+                image_prefix == skip_pattern
+                or stem == skip_pattern
+                or stem.startswith(skip_pattern + "_")
+                or filename == skip_pattern
+            ):
                 return True
         return False
     

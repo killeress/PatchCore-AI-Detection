@@ -122,6 +122,29 @@ def test_process_panel_v2_duplicate_panel_uses_latest_lighting_file(tmp_path):
     assert [r.image_path.name for r in results] == ["G0F00000_020000.png"]
 
 
+def test_process_panel_v2_duplicate_panel_uses_latest_hm_lighting_file(tmp_path):
+    old_img = _write_grey_panel_image_at(tmp_path / "G0F00000010000.png")
+    latest_img = _write_grey_panel_image_at(tmp_path / "G0F00000020000.png")
+    os.utime(old_img, (1000, 1000))
+    os.utime(latest_img, (2000, 2000))
+
+    cfg = _make_config(tmp_path)
+    cfg.max_images_per_panel = 20
+
+    from capi_inference import CAPIInferencer
+
+    fake_model = MagicMock()
+    fake_model.predict.return_value = _make_fake_predict_result(0.1)
+
+    with patch.object(CAPIInferencer, "_get_model_for", return_value=fake_model):
+        inferencer = CAPIInferencer(cfg)
+        results, _omit_vis, _omit_oe, _omit_info, is_dup, _omit_img, _report = \
+            inferencer.process_panel(tmp_path)
+
+    assert is_dup is True
+    assert [r.image_path.name for r in results] == ["G0F00000020000.png"]
+
+
 def test_process_panel_v2_passes_requested_product_resolution_to_preprocess(tmp_path, monkeypatch):
     _write_grey_panel_image(tmp_path, "G0F00000")
     cfg = _make_config(tmp_path)

@@ -88,6 +88,58 @@ def _striped_surface_edge_bubble_image() -> np.ndarray:
     return cv2.GaussianBlur(image, (5, 5), 0)
 
 
+def _surface_edge_partial_bubble_image() -> np.ndarray:
+    image = np.full((512, 512), 34, dtype=np.int16)
+    stripes = ((np.arange(512) % 2) * 2 - 1) * 2
+    image += stripes[None, :]
+    image[376:, :] += 70
+
+    bubble = np.zeros((512, 512), dtype=np.uint8)
+    cv2.ellipse(bubble, (430, 347), (31, 29), 0, 0, 360, 255, -1)
+    rows = np.arange(512)[:, None]
+    image[(bubble > 0) & (rows < 350)] += 6
+    image[(bubble > 0) & (rows >= 350)] += 1
+
+    image = np.clip(image, 0, 255).astype(np.uint8)
+    return cv2.GaussianBlur(image, (5, 5), 0)
+
+
+def _large_rotated_surface_bubble_image() -> np.ndarray:
+    yy, xx = np.mgrid[:512, :512]
+    image = (
+        np.full((512, 512), 31, dtype=np.float32)
+        + xx * 0.02
+        + yy * 0.005
+        + ((xx % 2) * 2 - 1) * 2
+    )
+
+    bubble = np.zeros((512, 512), dtype=np.uint8)
+    cv2.ellipse(bubble, (300, 337), (190, 75), -32, 0, 360, 255, -1)
+    image[bubble > 0] += 18
+    image[440:, :] += 100
+
+    image = np.clip(image, 0, 255).astype(np.uint8)
+    return cv2.GaussianBlur(image, (5, 5), 0)
+
+
+def _large_rotated_bubble_panel_image() -> tuple[np.ndarray, np.ndarray]:
+    yy, xx = np.mgrid[:700, :900]
+    image = (
+        np.full((700, 900), 31, dtype=np.float32)
+        + xx * 0.02
+        + yy * 0.005
+        + ((xx % 2) * 2 - 1) * 2
+    )
+
+    bubble = np.zeros((700, 900), dtype=np.uint8)
+    cv2.ellipse(bubble, (500, 417), (190, 75), -32, 0, 360, 255, -1)
+    image[bubble > 0] += 18
+    image[520:, :] += 100
+
+    image = np.clip(image, 0, 255).astype(np.uint8)
+    return cv2.GaussianBlur(image, (5, 5), 0), bubble
+
+
 def test_low_contrast_bubble_mask_is_opt_in():
     image = _low_contrast_bubble_image()
 
@@ -192,6 +244,107 @@ def test_surface_edge_blob_below_boundary_is_not_bubble():
     assert is_dust is True
     assert mask[335, 270] == 255
     assert mask[445, 330] == 0
+    assert ratio > 0.0
+    assert "Bub:1" in detail
+
+
+def test_surface_edge_partial_bubble_fills_to_boundary():
+    image = _surface_edge_partial_bubble_image()
+    inferencer = _make_inferencer(detect_bubbles=True)
+
+    is_dust, mask, ratio, detail = inferencer.check_dust_or_scratch_feature(image)
+
+    yy, xx = np.ogrid[:512, :512]
+    lower_bubble = (
+        ((xx - 430) ** 2 / (31 ** 2) + (yy - 347) ** 2 / (29 ** 2)) <= 1
+    ) & (yy >= 352) & (yy < 368)
+    covered = np.count_nonzero(mask[lower_bubble] > 0) / np.count_nonzero(lower_bubble)
+
+    assert is_dust is True
+    assert covered >= 0.75
+    assert mask[365, 430] == 255
+    assert ratio > 0.0
+    assert "Bub:1" in detail
+
+
+def test_large_rotated_surface_bubble_is_filled():
+    image = _large_rotated_surface_bubble_image()
+    inferencer = _make_inferencer(detect_bubbles=True)
+
+    is_dust, mask, ratio, detail = inferencer.check_dust_or_scratch_feature(image)
+
+    expected_bubble = np.zeros((512, 512), dtype=np.uint8)
+    cv2.ellipse(expected_bubble, (300, 337), (190, 75), -32, 0, 360, 255, -1)
+    covered = (
+        np.count_nonzero((mask > 0) & (expected_bubble > 0))
+        / np.count_nonzero(expected_bubble)
+    )
+
+    assert is_dust is True
+    assert covered >= 0.85
+    assert mask[337, 300] == 255
+    assert ratio > 0.0
+    assert "Bub:1" in detail
+
+
+def test_large_rectangular_surface_glare_is_not_bubble():
+    yy, xx = np.mgrid[:512, :512]
+    image = (
+        np.full((512, 512), 31, dtype=np.float32)
+        + xx * 0.02
+        + yy * 0.005
+        + ((xx % 2) * 2 - 1) * 2
+    )
+    image[220:440, 135:465] += 18
+    image[440:, :] += 100
+    image = cv2.GaussianBlur(np.clip(image, 0, 255).astype(np.uint8), (5, 5), 0)
+
+    inferencer = _make_inferencer(detect_bubbles=True)
+    _, mask, _, detail = inferencer.check_dust_or_scratch_feature(image)
+
+    assert mask[330, 300] == 0
+    assert "Bub:0" in detail
+
+
+def test_padded_context_recovers_boundary_clipped_large_bubble():
+    panel_image, bubble = _large_rotated_bubble_panel_image()
+    inferencer = _make_inferencer(detect_bubbles=True)
+    tile_x, tile_y, tile_size = 100, 80, 512
+    omit_crop = panel_image[
+        tile_y:tile_y + tile_size,
+        tile_x:tile_x + tile_size,
+    ]
+    expected = bubble[
+        tile_y:tile_y + tile_size,
+        tile_x:tile_x + tile_size,
+    ]
+
+    _, baseline_mask, _, baseline_detail = \
+        inferencer.check_dust_or_scratch_feature(omit_crop)
+    is_dust, mask, ratio, detail = \
+        inferencer._check_dust_or_scratch_feature_with_context(
+            panel_image,
+            tile_x,
+            tile_y,
+            tile_size,
+            tile_size,
+            omit_crop,
+        )
+
+    baseline_covered = (
+        np.count_nonzero((baseline_mask > 0) & (expected > 0))
+        / np.count_nonzero(expected)
+    )
+    covered = (
+        np.count_nonzero((mask > 0) & (expected > 0))
+        / np.count_nonzero(expected)
+    )
+
+    assert "Bub:0" in baseline_detail
+    assert baseline_covered < 0.20
+    assert is_dust is True
+    assert covered >= 0.90
+    assert mask[337, 400] == 255
     assert ratio > 0.0
     assert "Bub:1" in detail
 

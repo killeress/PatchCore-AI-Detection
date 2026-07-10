@@ -50,6 +50,7 @@ from typing import Dict, Optional, Tuple, List, Any
 sys.path.insert(0, str(Path(__file__).parent))
 
 from capi_config import CAPIConfig
+from capi_image_naming import CANONICAL_IMAGE_PREFIXES, canonical_image_prefix
 from capi_inference import CAPIInferencer, ImageResult, resolve_product_resolution
 from capi_preprocess import BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_polygon
 from capi_database import CAPIDatabase
@@ -406,7 +407,10 @@ def parse_request(data: str) -> Dict[str, Any]:
             )
     else:
         # 6 欄位模式，或單純的 fallback (路徑可能包含 ';' 所以重新 join)
-        image_dir = ";".join(parts[5:]).strip()
+        image_dir_parts = parts[5:]
+        while len(image_dir_parts) > 1 and not image_dir_parts[0].strip():
+            image_dir_parts = image_dir_parts[1:]
+        image_dir = ";".join(image_dir_parts).strip()
 
     return {
         "glass_id": parts[0],
@@ -451,19 +455,10 @@ def build_legacy_response(
 
 
 def _image_prefix_for_report(image_name: str) -> str:
-    stem = Path(str(image_name)).stem
-    return stem.rsplit("_", 1)[0] if "_" in stem else stem
+    return canonical_image_prefix(image_name)
 
 
-_REPORT_SCREEN_PREFIXES = (
-    "STANDARD",
-    "WGF50500",
-    "WGF00000",
-    "W0F00000",
-    "G0F00000",
-    "R0F00000",
-    "B0F00000",
-)
+_REPORT_SCREEN_PREFIXES = CANONICAL_IMAGE_PREFIXES
 
 _IMAGE_ABNORMAL_SCREEN_FIELDS = (
     ("STANDARD", "image_abnormal_standard_mean_lower", "image_abnormal_standard_mean_upper"),
@@ -484,9 +479,9 @@ def _screen_prefix_from_text(value: str) -> str:
 
 
 def _image_abnormal_screen_from_filename(filename: str) -> str:
-    stem = Path(str(filename)).stem.upper()
+    image_prefix = canonical_image_prefix(filename)
     for screen, _lower_field, _upper_field in _IMAGE_ABNORMAL_SCREEN_FIELDS:
-        if stem == screen or stem.startswith(screen + "_"):
+        if image_prefix == screen:
             return screen
     return ""
 
@@ -1457,12 +1452,27 @@ class CAPIServer:
             except Exception as e:
                 logger.warning(f"[MultiConfig] Failed to load config {path}: {e}")
 
-        # Fallback 選擇：優先用唯一 active bundle (is_new_architecture=True)；
-        # 否則退回 legacy capi_3f.yaml；都沒有就拿 configs_by_machine 第一筆。
+        # Fallback 選擇：優先使用 DB 標記 active 且已載入的 bundle。
+        # 舊版啟用流程可能因相對/絕對路徑不同，讓 model_configs 殘留多個
+        # new-arch yaml；不能再直接取清單第一個。
         new_arch_cfgs = [c for c in self.configs_by_machine.values() if c.is_new_architecture]
         if new_arch_cfgs:
-            self.fallback_config = new_arch_cfgs[0]
-            logger.info(f"[MultiConfig] Fallback = active bundle '{self.fallback_config.machine_id}'")
+            active_bundle = self.db.get_active_model_bundle()
+            active_path = self._bundle_config_path(active_bundle).resolve() if active_bundle else None
+            active_cfg = next(
+                (
+                    cfg for cfg in new_arch_cfgs
+                    if active_path is not None
+                    and Path(cfg.config_path).resolve() == active_path
+                ),
+                None,
+            )
+            self.fallback_config = active_cfg or new_arch_cfgs[0]
+            logger.info(
+                "[MultiConfig] Fallback = %s bundle '%s'",
+                "DB active" if active_cfg else "first loaded",
+                self.fallback_config.machine_id,
+            )
         elif "CAPI_3F" in self.configs_by_machine:
             self.fallback_config = self.configs_by_machine["CAPI_3F"]
             logger.info("[MultiConfig] Fallback = legacy CAPI_3F (no active bundle)")

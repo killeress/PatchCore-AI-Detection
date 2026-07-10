@@ -8,6 +8,7 @@ from capi_server import (
     build_dual_protocol_response,
     build_qjpg_response,
     check_image_abnormal_precheck,
+    parse_request,
 )
 
 
@@ -38,6 +39,30 @@ def _tile(tile_id: int, peak_x: int, peak_y: int) -> TileInfo:
     tile.anomaly_peak_x = peak_x
     tile.anomaly_peak_y = peak_y
     return tile
+
+
+def test_parse_request_keeps_standard_no_bomb_image_dir():
+    parsed = parse_request(
+        "AOI@TL62U17BC17B;GZ0790KA0017S;CAPI07HM-P2;1080,1920;OK;"
+        "//192.168.20.12/yuantu/GZ0790KA0017S/260616/TL62U17BC17B"
+    )
+
+    assert parsed["image_dir"] == (
+        "//192.168.20.12/yuantu/GZ0790KA0017S/260616/TL62U17BC17B"
+    )
+    assert parsed["bomb_info"] is None
+
+
+def test_parse_request_skips_empty_no_bomb_reserved_fields():
+    parsed = parse_request(
+        "AOI@TL62U17BC17B;GZ0790KA0017S;CAPI07HM-P2;1080,1920;OK;;;"
+        "//192.168.20.12/yuantu/GZ0790KA0017S/260616/TL62U17BC17B"
+    )
+
+    assert parsed["image_dir"] == (
+        "//192.168.20.12/yuantu/GZ0790KA0017S/260616/TL62U17BC17B"
+    )
+    assert parsed["bomb_info"] is None
 
 
 def test_qjpg_response_uses_final_ng_points_and_product_coordinates():

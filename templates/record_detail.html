@@ -193,7 +193,7 @@
             <td>
                 {% for img_key, coords in aoi_coords.items() %}
                 <div style="margin-bottom:8px;">
-                    <div style="font-weight:600;font-size:0.85rem;color:var(--text-primary);margin-bottom:4px;">{{ img_key }} ({{ coords|length }} 點)</div>
+                    <div style="font-weight:600;font-size:0.85rem;color:var(--text-primary);margin-bottom:4px;">{{ detail.image_prefix_labels.get(img_key, img_key) }} ({{ coords|length }} 點)</div>
                     <table style="width:auto;border-collapse:collapse;font-size:0.8rem;font-family:'Fira Code',monospace;">
                         <thead>
                             <tr>

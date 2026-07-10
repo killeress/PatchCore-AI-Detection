@@ -5,7 +5,7 @@
   <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.3rem;">Step 5 / 6 · PatchCore 模型訓練</h1>
   <p style="color:#a6adc8;font-size:.85rem;">
     {% if training_scope and training_scope.mode == "partial" %}
-      系統正在局部重訓 selected PT：{{ training_scope.selected_units|join(", ") }}。
+      系統正在局部重訓 selected PT：{{ display_unit_labels|join(", ") }}。
     {% else %}
       系統正在依 5 個光源與 inner/edge 區域訓練 10 個模型。
     {% endif %}
@@ -68,8 +68,18 @@
 const params = new URLSearchParams(location.search);
 const jobId = params.get('job_id') || "{{ job_id }}";
 const units = {{ unit_labels|tojson }};
+const displayUnits = {{ display_unit_labels|tojson }};
+const unitDisplayLabels = Object.fromEntries(units.map((unit, index) => [unit, displayUnits[index] || unit]));
 let _timer = null;
 let _lastLogText = '';
+
+function displayTrainingText(value) {
+  let text = String(value || '');
+  for (const [unit, label] of Object.entries(unitDisplayLabels)) {
+    if (unit !== label) text = text.split(unit).join(label);
+  }
+  return text;
+}
 
 // ETA 來自後端 log（_eta_text()），格式：「預估剩 Xm YYs（平均 Zs/unit）」
 // 全形括號是後端 f-string 寫死的，所以 regex 也用全形
@@ -91,7 +101,7 @@ function renderUnits(unitStatus) {
   const root = document.getElementById('unit-grid');
   root.innerHTML = units.map((u, i) => {
     const view = UNIT_STATE_VIEW[status[u]] || { cls: '', text: '等待中' };
-    return `<div class="unit-chip ${view.cls}"><div class="name">${i + 1}. ${u}</div><div class="state">${view.text}</div></div>`;
+    return `<div class="unit-chip ${view.cls}"><div class="name">${i + 1}. ${unitDisplayLabels[u] || u}</div><div class="state">${view.text}</div></div>`;
   }).join('');
 }
 
@@ -100,7 +110,7 @@ function poll() {
     .then(r => r.json())
     .then(d => {
       const logLines = d.log_lines || [];
-      const logText = logLines.join('\n');
+      const logText = logLines.map(displayTrainingText).join('\n');
       const logBox = document.getElementById('log-box');
       if (logText !== _lastLogText) {
         logBox.textContent = logText;
@@ -115,7 +125,7 @@ function poll() {
       if (d.state === 'failed') {
         clearInterval(_timer);
         pill.style.background = '#f38ba8';
-        pill.textContent = '失敗：' + (d.error_message || '未知');
+        pill.textContent = '失敗：' + displayTrainingText(d.error_message || '未知');
       } else if (d.state === 'completed') {
         clearInterval(_timer);
         location.href = `/train/new/done/${encodeURIComponent(jobId)}`;

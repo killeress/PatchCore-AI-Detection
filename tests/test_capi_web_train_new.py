@@ -943,22 +943,54 @@ def test_handle_train_new_thumb_rejects_sibling_prefix_escape(tmp_path, monkeypa
 
 def test_handle_train_new_progress_page_uses_step4_template_for_train_state():
     server = MagicMock()
-    server.database.get_training_job.return_value = {"job_id": "j1", "state": "train"}
+    server.database.get_training_job.return_value = {
+        "job_id": "j1",
+        "state": "train",
+        "panel_paths": ["/panel"],
+    }
     h = _make_handler_with_server(server, "/train/new/progress?job_id=j1")
+    h._mark_train_new_stale_if_needed = MagicMock(side_effect=lambda _db, job: job)
     template = MagicMock()
     template.render.return_value = "<html>step4</html>"
     h.jinja_env = MagicMock()
     h.jinja_env.get_template.return_value = template
 
-    h._handle_train_new_progress_page()
+    with patch.object(Path, "iterdir", return_value=[Path("U0F00000083755.tif")]), \
+            patch.object(Path, "is_file", return_value=True):
+        h._handle_train_new_progress_page()
 
     h.jinja_env.get_template.assert_called_with("train_new/step4_progress.html")
     assert h._sent_response[0]["body"] == "<html>step4</html>"
+    assert template.render.call_args.kwargs["display_unit_labels"][-2:] == [
+        "U0F00000-inner",
+        "U0F00000-edge",
+    ]
 
 
 def test_train_new_step4_progress_template_exists():
     template_path = Path(__file__).resolve().parent.parent / "templates" / "train_new" / "step4_progress.html"
     assert template_path.exists()
+    text = template_path.read_text(encoding="utf-8")
+    assert "unitDisplayLabels[u] || u" in text
+    assert "logLines.map(displayTrainingText)" in text
+    assert "displayTrainingText(d.error_message || '未知')" in text
+
+
+@pytest.mark.parametrize(("image_name", "expected_label"), [
+    ("U0F00000083755.tif", "U0F00000"),
+    ("STANDARD_110456.tif", "STANDARD"),
+])
+def test_train_new_review_lighting_label_matches_source_filename(image_name, expected_label):
+    from capi_web import CAPIWebHandler
+
+    with patch.object(Path, "iterdir", return_value=[Path(image_name)]), \
+            patch.object(Path, "is_file", return_value=True):
+        labels = CAPIWebHandler._train_new_lighting_labels(
+            ["G0F00000", "STANDARD"],
+            ["/panel"],
+        )
+
+    assert labels == {"G0F00000": "G0F00000", "STANDARD": expected_label}
 
 
 def test_train_new_done_template_uses_chinese_summary_labels():
@@ -971,6 +1003,7 @@ def test_train_new_done_template_uses_chinese_summary_labels():
     assert "<th>Lighting</th>" not in text
     assert "<th>Zone</th>" not in text
     assert "BUNDLE</span>" not in text
+    assert "{{ info.lighting_label }}" in text
 
 
 def test_train_new_select_panel_renderer_uses_text_content():
@@ -1005,6 +1038,55 @@ def test_record_detail_templates_show_preprocess_pipeline():
         assert "前處理總耗時" in text
         assert "step.timing_text" in text
         assert "舊紀錄未記錄" in text
+
+
+def test_record_detail_uses_source_prefix_display_labels():
+    from capi_web import CAPIWebHandler
+
+    detail = {
+        "images": [
+            {"image_name": "U0F00000083755.tif"},
+            {"image_name": "W0F00000083751.tif"},
+        ],
+    }
+    CAPIWebHandler._decorate_record_image_prefix_labels(detail)
+
+    assert detail["image_prefix_labels"] == {
+        "STANDARD": "U0F00000",
+        "W0F00000": "W0F00000",
+    }
+
+    base = Path(__file__).resolve().parent.parent / "templates"
+    for name in ("record_detail.html", "record_detail_v3.html"):
+        text = (base / name).read_text(encoding="utf-8")
+        assert "detail.image_prefix_labels.get(img_key, img_key)" in text
+
+
+def test_debug_inference_uses_source_prefix_display_label():
+    template_path = Path(__file__).resolve().parent.parent / "templates" / "debug_inference.html"
+    text = template_path.read_text(encoding="utf-8")
+    assert text.count("data.image_prefix_label || data.image_prefix") == 2
+
+
+def test_dashboard_lighting_labels_use_active_bundle_training_source():
+    from capi_web import CAPIWebHandler
+
+    db = MagicMock()
+    db.get_active_model_bundle.return_value = {"job_id": "job-hm"}
+    db.get_training_job.return_value = {"panel_paths": ["/panel"]}
+    with patch.object(Path, "iterdir", return_value=[Path("U0F00000083755.tif")]), \
+            patch.object(Path, "is_file", return_value=True):
+        labels = CAPIWebHandler._dashboard_lighting_labels(
+            db,
+            ["G0F00000", "STANDARD"],
+        )
+
+    assert labels == {"G0F00000": "G0F00000", "STANDARD": "U0F00000"}
+
+    template_path = Path(__file__).resolve().parent.parent / "templates" / "dashboard.html"
+    text = template_path.read_text(encoding="utf-8")
+    assert "const prefixLabels = data.server.image_prefix_labels || {};" in text
+    assert "const displayPrefix = prefixLabels[prefix] || prefix;" in text
 
 
 def test_record_detail_templates_link_within_spec_log_for_ng_records():

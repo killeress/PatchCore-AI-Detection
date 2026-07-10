@@ -108,6 +108,48 @@ def test_activate_bundle_deactivates_across_machine_ids(tmp_path):
         "legacy capi_3f.yaml 不在 DB，不應被踢掉，留作最後 fallback"
 
 
+def test_activate_bundle_removes_absolute_old_path_for_relative_db_bundle(tmp_path):
+    import yaml as yaml_mod
+    from capi_database import CAPIDatabase
+    from capi_model_registry import activate_bundle
+
+    old_dir = tmp_path / "model" / "OLD"
+    new_dir = tmp_path / "model" / "NEW"
+    old_dir.mkdir(parents=True)
+    new_dir.mkdir(parents=True)
+    (old_dir / "machine_config.yaml").write_text("machine_id: OLD\n")
+    (new_dir / "machine_config.yaml").write_text("machine_id: NEW\n")
+
+    sc_path = tmp_path / "server_config.yaml"
+    sc_path.write_text(yaml_mod.dump({
+        "model_configs": [
+            "configs/capi_3f.yaml",
+            str((old_dir / "machine_config.yaml").resolve()),
+        ],
+    }))
+
+    db = CAPIDatabase(tmp_path / "test.db")
+    old_id = db.register_model_bundle({
+        "machine_id": "OLD", "bundle_path": "model/OLD",
+        "trained_at": "2026-07-01T00:00:00", "job_id": "old",
+    })
+    new_id = db.register_model_bundle({
+        "machine_id": "NEW", "bundle_path": "model/NEW",
+        "trained_at": "2026-07-10T00:00:00", "job_id": "new",
+    })
+    db.set_bundle_active(old_id, True)
+
+    activate_bundle(db, new_id, server_config_path=sc_path)
+
+    configs = yaml_mod.safe_load(sc_path.read_text())["model_configs"]
+    assert configs == [
+        "configs/capi_3f.yaml",
+        str((new_dir / "machine_config.yaml").resolve()),
+    ]
+    assert db.get_model_bundle(old_id)["is_active"] == 0
+    assert db.get_model_bundle(new_id)["is_active"] == 1
+
+
 def test_delete_active_bundle_rejected(tmp_path):
     import pytest
     from capi_database import CAPIDatabase

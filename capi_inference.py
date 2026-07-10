@@ -39,6 +39,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import torch
 import logging
+import re
+from capi_image_naming import AOI_REPORT_PREFIXES, canonical_image_prefix, panel_image_group_key
 
 # ── 舊版 anomalib 相容性修補 ─────────────────────────────
 # 修補 1: PrecisionType stub
@@ -585,13 +587,7 @@ class CAPIInferencer:
         例如: 'G0F00000_114438.tif' → 'G0F00000'
               'STANDARD.png' → 'STANDARD'
         """
-        stem = Path(filename).stem
-        # 如果含有底線，嘗試去掉時間戳部分
-        if '_' in stem:
-            prefix = stem.rsplit('_', 1)[0]
-        else:
-            prefix = stem
-        return prefix
+        return canonical_image_prefix(filename)
 
     @staticmethod
     def _is_mark_binary_source(filename: str) -> bool:
@@ -2813,6 +2809,35 @@ class CAPIInferencer:
                                 else:
                                     bubble_mask = component_u8
 
+                                surface_gap = None
+                                if surface_edge_y is not None:
+                                    surface_gap = surface_edge_y - (b_y + b_h)
+                                if (
+                                    surface_gap is not None
+                                    and b_w >= b_h * 1.4
+                                    and b_h * 0.5 <= surface_gap <= b_h
+                                ):
+                                    # The bright surface edge can erase the lower half of a bubble.
+                                    ellipse_bottom = surface_edge_y - 1
+                                    ellipse_center = (
+                                        b_x + b_w // 2,
+                                        (b_y + ellipse_bottom) // 2,
+                                    )
+                                    ellipse_axes = (
+                                        max(1, b_w // 2),
+                                        max(1, (ellipse_bottom - b_y) // 2),
+                                    )
+                                    cv2.ellipse(
+                                        bubble_mask,
+                                        ellipse_center,
+                                        ellipse_axes,
+                                        0,
+                                        0,
+                                        360,
+                                        255,
+                                        thickness=-1,
+                                    )
+
                                 filled_area = int(np.count_nonzero(bubble_mask > 0))
                                 if filled_area < bubble_min_area or filled_area > bubble_fill_max_area:
                                     continue
@@ -2825,6 +2850,14 @@ class CAPIInferencer:
                                     bubble_mask = cv2.dilate(bubble_mask, bubble_dilate, iterations=1)
 
                                 accepted_bubble_mask[bubble_mask > 0] = 255
+
+                    large_bubble_mask = self._detect_large_surface_bubble_mask(
+                        gray,
+                        area_min,
+                        area_max,
+                        extension,
+                    )
+                    accepted_bubble_mask[large_bubble_mask > 0] = 255
 
                     if np.any(accepted_bubble_mask > 0):
                         b_count, _ = cv2.connectedComponents(accepted_bubble_mask, connectivity=8)
@@ -2847,6 +2880,230 @@ class CAPIInferencer:
                        f"Area:{total_area} Ratio:{bright_ratio:.4f}{dark_info}{bubble_info}")
         
         return is_dust, dust_mask, bright_ratio, detail_text
+
+    def _detect_large_surface_bubble_mask(
+        self,
+        gray: np.ndarray,
+        area_min: int,
+        area_max: int,
+        extension: int,
+        reference_area: Optional[int] = None,
+    ) -> np.ndarray:
+        """Detect large elongated bubbles that sit directly above the surface edge."""
+        bubble_mask = np.zeros_like(gray, dtype=np.uint8)
+        if gray is None or gray.size == 0 or min(gray.shape[:2]) < 256:
+            return bubble_mask
+
+        row_mean = gray.astype(np.float32).mean(axis=1)
+        row_mean = cv2.GaussianBlur(row_mean.reshape(-1, 1), (1, 9), 0).ravel()
+        row_grad = np.gradient(row_mean)
+        search_start = int(gray.shape[0] * 0.45)
+        search_end = max(search_start + 1, gray.shape[0] - 10)
+        surface_edge_y = search_start + int(np.argmax(row_grad[search_start:search_end]))
+        if float(row_grad[surface_edge_y]) < 10.0:
+            return bubble_mask
+
+        ref_area = gray.size if reference_area is None else max(1, int(reference_area))
+        base_bubble_min_area = max(area_min * 20, int(ref_area * 0.002))
+        large_min_area = max(base_bubble_min_area * 10, int(ref_area * 0.03))
+        large_max_area = min(area_max, int(ref_area * 0.25))
+        if large_max_area < large_min_area:
+            return bubble_mask
+
+        border_margin = 6
+        large_source = cv2.GaussianBlur(gray, (15, 15), 0)
+        background_bottom = max(border_margin + 1, surface_edge_y - 8)
+        background_roi = large_source[
+            border_margin:background_bottom,
+            border_margin:gray.shape[1] - border_margin,
+        ]
+        background_pixels = background_roi[background_roi > 0]
+        if background_pixels.size < 100:
+            return bubble_mask
+
+        large_threshold = float(np.median(background_pixels)) + 9.0
+        large_binary = (large_source >= large_threshold).astype(np.uint8) * 255
+        large_binary[gray == 0] = 0
+        large_binary[surface_edge_y:, :] = 0
+        large_binary[:border_margin, :] = 0
+        large_binary[:, :border_margin] = 0
+        large_binary[:, gray.shape[1] - border_margin:] = 0
+
+        large_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        large_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+        large_binary = cv2.morphologyEx(
+            large_binary, cv2.MORPH_OPEN, large_open, iterations=1
+        )
+        large_binary = cv2.morphologyEx(
+            large_binary, cv2.MORPH_CLOSE, large_close, iterations=1
+        )
+
+        large_num, large_labels, large_stats, _ = \
+            cv2.connectedComponentsWithStats(large_binary, connectivity=8)
+        for i in range(1, large_num):
+            b_x = int(large_stats[i, cv2.CC_STAT_LEFT])
+            b_y = int(large_stats[i, cv2.CC_STAT_TOP])
+            b_w = int(large_stats[i, cv2.CC_STAT_WIDTH])
+            b_h = int(large_stats[i, cv2.CC_STAT_HEIGHT])
+            b_area = int(large_stats[i, cv2.CC_STAT_AREA])
+
+            if b_area < large_min_area or b_area > large_max_area:
+                continue
+            if (
+                b_x <= border_margin
+                or b_y <= border_margin
+                or b_x + b_w >= gray.shape[1] - border_margin
+            ):
+                continue
+
+            surface_gap = surface_edge_y - (b_y + b_h)
+            if surface_gap < 0 or surface_gap > max(30, int(b_h * 0.25)):
+                continue
+
+            b_aspect = max(b_w, b_h) / (min(b_w, b_h) + 1e-5)
+            b_fill_ratio = b_area / max(1, b_w * b_h)
+            if b_aspect < 1.2 or b_aspect > 3.5:
+                continue
+            if b_fill_ratio < 0.4 or b_fill_ratio > 0.8:
+                continue
+
+            component_u8 = (large_labels == i).astype(np.uint8) * 255
+            contours, _ = cv2.findContours(
+                component_u8,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_NONE,
+            )
+            if not contours:
+                continue
+            contour = max(contours, key=cv2.contourArea)
+            if len(contour) < 5:
+                continue
+            hull = cv2.convexHull(contour)
+            hull_area = float(cv2.contourArea(hull))
+            solidity = float(cv2.contourArea(contour)) / max(1.0, hull_area)
+            ellipse_axes = cv2.fitEllipse(contour)[1]
+            ellipse_aspect = max(ellipse_axes) / max(1.0, min(ellipse_axes))
+            if solidity < 0.85 or ellipse_aspect < 1.5 or ellipse_aspect > 4.0:
+                continue
+
+            if extension > 0:
+                large_dilate = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE,
+                    (extension * 2 + 1, extension * 2 + 1),
+                )
+                component_u8 = cv2.dilate(component_u8, large_dilate, iterations=1)
+            bubble_mask[component_u8 > 0] = 255
+
+        return bubble_mask
+
+    def _check_dust_or_scratch_feature_with_context(
+        self,
+        omit_image: np.ndarray,
+        tile_x: int,
+        tile_y: int,
+        tile_width: int,
+        tile_height: int,
+        omit_crop: np.ndarray,
+        extension_override: Optional[int] = None,
+        context_shift: int = 96,
+    ) -> tuple:
+        """Supplement a boundary-clipped large bubble from horizontally shifted tiles."""
+        is_dust, dust_mask, bright_ratio, detail_text = \
+            self.check_dust_or_scratch_feature(omit_crop, extension_override)
+        if not getattr(self.config, 'dust_detect_bubbles_enabled', False):
+            return is_dust, dust_mask, bright_ratio, detail_text
+        if omit_image is None or omit_image.size == 0:
+            return is_dust, dust_mask, bright_ratio, detail_text
+
+        bubble_match = re.search(r"\bBub:(\d+)", detail_text)
+        base_bubble_count = int(bubble_match.group(1)) if bubble_match else 0
+        if base_bubble_count > 0:
+            return is_dust, dust_mask, bright_ratio, detail_text
+
+        shift = max(0, int(context_shift))
+        if shift == 0 or min(tile_width, tile_height) < 256:
+            return is_dust, dust_mask, bright_ratio, detail_text
+
+        context_bubble_mask = np.zeros((tile_height, tile_width), dtype=np.uint8)
+        oh, ow = omit_image.shape[:2]
+        extension = self.config.dust_extension \
+            if extension_override is None else extension_override
+        for offset_x in (-shift, shift):
+            shifted_x = tile_x + offset_x
+            if omit_image.ndim == 3:
+                shifted_crop = np.zeros(
+                    (tile_height, tile_width, omit_image.shape[2]),
+                    dtype=omit_image.dtype,
+                )
+            else:
+                shifted_crop = np.zeros((tile_height, tile_width), dtype=omit_image.dtype)
+
+            src_x1 = max(0, shifted_x)
+            src_y1 = max(0, tile_y)
+            src_x2 = min(ow, shifted_x + tile_width)
+            src_y2 = min(oh, tile_y + tile_height)
+            if src_x2 <= src_x1 or src_y2 <= src_y1:
+                continue
+
+            dst_x1 = src_x1 - shifted_x
+            dst_y1 = src_y1 - tile_y
+            dst_x2 = dst_x1 + (src_x2 - src_x1)
+            dst_y2 = dst_y1 + (src_y2 - src_y1)
+            shifted_crop[dst_y1:dst_y2, dst_x1:dst_x2] = \
+                omit_image[src_y1:src_y2, src_x1:src_x2]
+            if shifted_crop.ndim == 3:
+                shifted_gray = cv2.cvtColor(shifted_crop, cv2.COLOR_BGR2GRAY)
+            else:
+                shifted_gray = shifted_crop
+
+            shifted_bubble_mask = self._detect_large_surface_bubble_mask(
+                shifted_gray,
+                self.config.dust_area_min,
+                self.config.dust_area_max,
+                extension,
+                reference_area=tile_width * tile_height,
+            )
+            overlap_x1 = max(tile_x, shifted_x)
+            overlap_x2 = min(tile_x + tile_width, shifted_x + tile_width)
+            if overlap_x2 <= overlap_x1:
+                continue
+            source_x1 = overlap_x1 - shifted_x
+            source_x2 = overlap_x2 - shifted_x
+            target_x1 = overlap_x1 - tile_x
+            target_x2 = overlap_x2 - tile_x
+            context_bubble_mask[:, target_x1:target_x2] = cv2.bitwise_or(
+                context_bubble_mask[:, target_x1:target_x2],
+                shifted_bubble_mask[:, source_x1:source_x2],
+            )
+
+        if not np.any(context_bubble_mask > 0):
+            return is_dust, dust_mask, bright_ratio, detail_text
+
+        merged_mask = np.zeros((tile_height, tile_width), dtype=np.uint8)
+        if dust_mask is not None:
+            copy_h = min(tile_height, dust_mask.shape[0])
+            copy_w = min(tile_width, dust_mask.shape[1])
+            merged_mask[:copy_h, :copy_w] = dust_mask[:copy_h, :copy_w]
+        merged_mask[context_bubble_mask > 0] = 255
+
+        mask_area = int(np.count_nonzero(merged_mask > 0))
+        bright_ratio = float(mask_area / merged_mask.size) if merged_mask.size else 0.0
+        context_count, _ = cv2.connectedComponents(context_bubble_mask, connectivity=8)
+        context_bubble_count = max(0, context_count - 1)
+        bubble_count = max(base_bubble_count, context_bubble_count)
+        detail_text = re.sub(r"\bArea:\d+", f"Area:{mask_area}", detail_text, count=1)
+        detail_text = re.sub(
+            r"\bRatio:\d+(?:\.\d+)?",
+            f"Ratio:{bright_ratio:.4f}",
+            detail_text,
+            count=1,
+        )
+        if bubble_match:
+            detail_text = re.sub(r"\bBub:\d+", f"Bub:{bubble_count}", detail_text, count=1)
+        else:
+            detail_text += f" Bub:{bubble_count}"
+        detail_text += f" CtxShift:{shift}"
+        return True, merged_mask, bright_ratio, detail_text
     
     def check_omit_overexposure(self, omit_image: np.ndarray) -> tuple:
         """
@@ -3262,16 +3519,37 @@ class CAPIInferencer:
 
         hot_thr = np.percentile(pos_vals, 95)
         hot_mask = (anomaly_f >= hot_thr).astype(np.uint8) * 255
+        core_top_percent = min(
+            100.0,
+            max(0.01, float(getattr(cfg, "dust_heatmap_top_percent", 5.0))),
+        )
+        core_thr = np.percentile(pos_vals, 100.0 - core_top_percent)
+        hot_core_mask = (anomaly_f >= core_thr).astype(np.uint8)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
         hot_mask = cv2.dilate(hot_mask, kernel, iterations=2)
         n_labels, labels = cv2.connectedComponents(hot_mask, connectivity=8)
 
         scale = tile_w / w_am
         pad = 20
+        hot_core_tile = cv2.resize(
+            hot_core_mask,
+            (tile_w, tile_h),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        feature_core_margin_px = min(8, max(0, (min(tile_w, tile_h) - 1) // 2))
+        if feature_core_margin_px:
+            core_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (feature_core_margin_px * 2 + 1, feature_core_margin_px * 2 + 1),
+            )
+            hot_core_support = cv2.dilate(hot_core_tile, core_kernel) > 0
+        else:
+            hot_core_support = hot_core_tile > 0
 
         # --- Stage 2: Find features on original ---
         all_features = []
         ignored_border_features = 0
+        ignored_outside_hot_core_features = 0
         feature_border_margin_px = 8
 
         for lid in range(1, n_labels):
@@ -3354,6 +3632,12 @@ class CAPIInferencer:
                         ignored_border_features += 1
                         continue
 
+                    # Stage 1 的大範圍膨脹只用來找候選；能翻回 REAL 的 feature
+                    # 必須仍與未膨脹的高 heatmap 核心相連，避免附近底紋誤翻案。
+                    if not np.any(hot_core_support[ty1:ty2, tx1:tx2][fm]):
+                        ignored_outside_hot_core_features += 1
+                        continue
+
                     contours, _ = cv2.findContours(
                         (fm.astype(np.uint8)) * 255,
                         cv2.RETR_EXTERNAL,
@@ -3400,6 +3684,14 @@ class CAPIInferencer:
         # --- Verdict ---
         real_features = [f for f in all_features if not f["is_dust"]]
         dust_features = [f for f in all_features if f["is_dust"]]
+        ignored_parts = []
+        if ignored_border_features:
+            ignored_parts.append(f"ignored_border={ignored_border_features}")
+        if ignored_outside_hot_core_features:
+            ignored_parts.append(
+                f"ignored_outside_hot_core={ignored_outside_hot_core_features}"
+            )
+        ignored_hint = f" {' '.join(ignored_parts)}" if ignored_parts else ""
 
         if real_features:
             # find peak position of largest real feature
@@ -3407,7 +3699,6 @@ class CAPIInferencer:
             bx, by = best["abs_pos"]
             # convert to anomaly_map space for peak_yx
             real_peak_yx = (int(by / scale), int(bx / scale))
-            ignored_hint = f" ignored_border={ignored_border_features}" if ignored_border_features else ""
             detail = (f"TWO_STAGE: {len(real_features)}real+{len(dust_features)}dust"
                       f"{ignored_hint} -> REAL_NG (best@({bx},{by}) area={best['area']})")
             return True, real_peak_yx, all_features, detail
@@ -3415,7 +3706,6 @@ class CAPIInferencer:
         else:
             # 找不到 real feature -> 信任 PER_REGION 的 dust 判定
             # （MARK 等規則紋理在 OMIT 已被 dust mask 涵蓋；二階段抓不到 feature 屬正常）
-            ignored_hint = f" ignored_border={ignored_border_features}" if ignored_border_features else ""
             detail = (f"TWO_STAGE: 0real+{len(dust_features)}dust"
                       f"{ignored_hint} -> DUST")
             return False, None, all_features, detail
@@ -3750,11 +4040,9 @@ class CAPIInferencer:
     @staticmethod
     def _select_latest_panel_images(image_files: List[Path]) -> List[Path]:
         """
-        當面版資料夾存在重複投片（圖片數量超過上限）時，
-        依每個圖片前綴（去除時間戳尾碼後）只保留「最新」的一張。
+        當面版資料夾存在重複投片時，依每個圖片前綴只保留「最新」的一張。
 
-        命名規則假設: {前綴}_{HHMMSS}.{副檔名}
-        例如: G0F00000_104441.tif → 前綴 G0F00000，時間戳 104441。
+        支援舊命名 {前綴}_{HHMMSS} 與 HM 新命名 {前綴}{HHMMSS}。
 
         使用 st_mtime 排序，避免跨日時 HHMMSS 時間戳倒序 (如 235959 → 000001)。
         """
@@ -3762,12 +4050,7 @@ class CAPIInferencer:
 
         prefix_map: Dict[str, List[Path]] = defaultdict(list)
         for f in image_files:
-            stem = f.stem  # e.g. "G0F00000_104441" 或 "PINIGBI _104432"
-            parts = stem.rsplit("_", 1)
-            if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 6:
-                prefix = parts[0]
-            else:
-                prefix = stem
+            prefix = panel_image_group_key(f.name)
             prefix_map[prefix].append(f)
 
         selected = []
@@ -3781,12 +4064,15 @@ class CAPIInferencer:
         """Return image files for inference, applying duplicate-panel selection."""
         image_files = self._list_panel_image_files(panel_dir)
         max_imgs = self.config.max_images_per_panel
-        if len(image_files) <= max_imgs:
+        group_keys = [panel_image_group_key(f.name) for f in image_files]
+        has_duplicate_groups = len(set(group_keys)) < len(group_keys)
+        if len(image_files) <= max_imgs and not has_duplicate_groups:
             return image_files, False
 
         selected = self._select_latest_panel_images(image_files)
+        reason = "圖片數量超過上限" if len(image_files) > max_imgs else "同一畫面前綴重複"
         print(
-            f"⚠️ 重複投片偵測: {Path(panel_dir).name} 共 {len(image_files)} 張圖片 "
+            f"⚠️ 重複投片偵測({reason}): {Path(panel_dir).name} 共 {len(image_files)} 張圖片 "
             f"(上限 {max_imgs})，依建立時間選出最新 {len(selected)} 張繼續推論"
         )
         print(f"   ✅ 選用: {', '.join(f.name for f in selected)}")
@@ -3838,7 +4124,7 @@ class CAPIInferencer:
         for sf in self.config.skip_files:
             prefixes.add(sf)
         # 常見固定前綴
-        for p in ['G0F00000', 'R0F00000', 'W0F00000', 'WGF50500', 'WGF00000', 'B0F00000', 'STANDARD']:
+        for p in AOI_REPORT_PREFIXES:
             prefixes.add(p)
         return sorted(prefixes, key=len, reverse=True)
 
@@ -3848,9 +4134,10 @@ class CAPIInferencer:
 
         1. panel_dir 路徑替換 (預設 yuantu→Report) 取得報告目錄
         2. 找到最新 .TXT 檔
-        3. 解析第二行的 NG 缺陷字串
+        3. 解析 NG 缺陷字串
 
-        格式: NG{異常代碼}{10位座標}{8字元前綴}...
+        格式1: @;OK;NG{異常代碼}{10位座標}{8字元前綴}...
+        格式2: 獨立一行 NG，後續每行 {異常代碼}{10位座標}{8字元前綴}
         例: NGPCDK20028800554W0F00000PCDK20171100894B0F00000
 
         Returns:
@@ -3892,19 +4179,28 @@ class CAPIInferencer:
                 logger.warning(f"AOI Report: 報告內容不足 2 行: {report_file}")
                 return result_map
 
-            # 第二行以 @ 開頭，; 分隔
-            line2 = lines[1].strip().rstrip(',')
-            if not line2.startswith('@'):
-                logger.warning(f"AOI Report: 第二行格式異常 (不以@開頭): {line2[:50]}")
-                return result_map
-
-            # 以 ; 分隔，找到以 NG 開頭的欄位
-            fields = line2.split(';')
             ng_string = None
-            for field in fields:
-                field = field.strip()
-                if field.startswith('NG') and len(field) > 2:
-                    ng_string = field[2:]  # 去掉 NG 前綴
+            stripped_lines = [line.strip().rstrip(',') for line in lines]
+
+            # 舊格式：第二行以 @ 開頭，; 分隔，找到以 NG 開頭的欄位。
+            line2 = stripped_lines[1]
+            if line2.startswith('@'):
+                fields = line2.split(';')
+                for field in fields:
+                    field = field.strip()
+                    if field.startswith('NG') and len(field) > 2:
+                        ng_string = field[2:]  # 去掉 NG 前綴
+                        break
+            else:
+                # 新格式：前幾行是機種/PCB/機檢資訊，獨立一行 NG 後面才是座標。
+                for idx, line in enumerate(stripped_lines):
+                    if line.strip().upper().rstrip(';') != "NG":
+                        continue
+                    ng_string = "".join(
+                        part.strip().rstrip(';,')
+                        for part in stripped_lines[idx + 1:]
+                        if part.strip()
+                    )
                     break
 
             if not ng_string:
@@ -3930,16 +4226,17 @@ class CAPIInferencer:
                 product_x = int(coord_str[:5])
                 product_y = int(coord_str[5:])
 
+                canonical_prefix = canonical_image_prefix(image_prefix)
                 defect = AOIReportDefect(
                     defect_code=defect_code,
                     product_x=product_x,
                     product_y=product_y,
-                    image_prefix=image_prefix,
+                    image_prefix=canonical_prefix,
                 )
 
-                if image_prefix not in result_map:
-                    result_map[image_prefix] = []
-                result_map[image_prefix].append(defect)
+                if canonical_prefix not in result_map:
+                    result_map[canonical_prefix] = []
+                result_map[canonical_prefix].append(defect)
 
             total = sum(len(v) for v in result_map.values())
             per_prefix = ", ".join(f"{p}×{len(v)}" for p, v in result_map.items())
@@ -6074,7 +6371,10 @@ class CAPIInferencer:
                         tile.omit_crop_image = omit_crop.copy()
                         
                         # Step A: 進階灰塵偵測 (CLAHE + Otsu + 面積篩選)
-                        is_dust, dust_mask, bright_ratio, detail_text = self.check_dust_or_scratch_feature(omit_crop)
+                        is_dust, dust_mask, bright_ratio, detail_text = \
+                            self._check_dust_or_scratch_feature_with_context(
+                                omit_image, tx, ty, tw, th, omit_crop
+                            )
                         tile.dust_mask = dust_mask
                         tile.dust_bright_ratio = bright_ratio
 
@@ -6145,8 +6445,16 @@ class CAPIInferencer:
                                     # 兩階段: 用原圖精準定位 feature 點，比對 dust_mask (ext=0)
                                     dust_mask_no_ext = None
                                     if omit_crop is not None:
-                                        _, dust_mask_no_ext, _, _ = self.check_dust_or_scratch_feature(
-                                            omit_crop, extension_override=0)
+                                        _, dust_mask_no_ext, _, _ = \
+                                            self._check_dust_or_scratch_feature_with_context(
+                                                omit_image,
+                                                tx,
+                                                ty,
+                                                tw,
+                                                th,
+                                                omit_crop,
+                                                extension_override=0,
+                                            )
                                     ts_has_real, ts_peak_yx, ts_features, ts_detail = \
                                         self.check_dust_two_stage(
                                             tile.image, anomaly_map,
@@ -6733,7 +7041,9 @@ class CAPIInferencer:
                 tile.omit_crop_image = omit_crop.copy()
 
                 is_dust, dust_mask, bright_ratio, detail_text = \
-                    self.check_dust_or_scratch_feature(omit_crop)
+                    self._check_dust_or_scratch_feature_with_context(
+                        omit_image, tx, ty, tw, th, omit_crop
+                    )
                 tile.dust_mask = dust_mask
                 tile.dust_bright_ratio = bright_ratio
 
@@ -6797,9 +7107,16 @@ class CAPIInferencer:
                         if self.config.dust_two_stage_enabled:
                             dust_mask_no_ext = None
                             if omit_crop is not None:
-                                _, dust_mask_no_ext, _, _ = self.check_dust_or_scratch_feature(
-                                    omit_crop, extension_override=0
-                                )
+                                _, dust_mask_no_ext, _, _ = \
+                                    self._check_dust_or_scratch_feature_with_context(
+                                        omit_image,
+                                        tx,
+                                        ty,
+                                        tw,
+                                        th,
+                                        omit_crop,
+                                        extension_override=0,
+                                    )
                             ts_has_real, ts_peak_yx, ts_features, ts_detail = \
                                 self.check_dust_two_stage(
                                     tile.image,
