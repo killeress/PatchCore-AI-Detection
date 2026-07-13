@@ -328,6 +328,16 @@
 
 <section class="ws-band">
     <div class="ws-section-title">Panel 點數加總</div>
+    {% set candidate_summary = summary.candidate_summary or detail.candidate_summary or {} %}
+    {% set raw_candidates = candidate_summary.raw_candidate_count or 0 %}
+    {% set final_candidates = candidate_summary.final_candidate_count or 0 %}
+    {% set dust_filtered = candidate_summary.dust_mask_filtered_count or 0 %}
+    {% set no_detect_filtered = candidate_summary.no_detect_mask_filtered_count or 0 %}
+    {% set dust_only_ok_i = auto_decision.converted_to_ok_i
+        and raw_candidates > 0
+        and final_candidates == 0
+        and dust_filtered == raw_candidates
+        and no_detect_filtered == 0 %}
     {% if detail.panel_totals %}
     <table class="ws-table">
         <thead>
@@ -357,12 +367,12 @@
             {% endfor %}
         </tbody>
     </table>
+    {% if dust_only_ok_i %}
+    <div style="color:#86efac;line-height:1.7;margin-top:12px;">
+        OpenCV 初步抓到 {{ raw_candidates }} 個點候選，{{ dust_filtered }} 個皆由灰塵遮罩排除，因此以 0 點納入 Panel 規格比較；整片 Panel 均符合設定門檻，判定 OK-I。
+    </div>
+    {% endif %}
     {% else %}
-    {% set candidate_summary = summary.candidate_summary or detail.candidate_summary or {} %}
-    {% set raw_candidates = candidate_summary.raw_candidate_count or 0 %}
-    {% set final_candidates = candidate_summary.final_candidate_count or 0 %}
-    {% set dust_filtered = candidate_summary.dust_mask_filtered_count or 0 %}
-    {% set no_detect_filtered = candidate_summary.no_detect_mask_filtered_count or 0 %}
     {% if raw_candidates or dust_filtered or no_detect_filtered %}
     <div style="color:var(--text-muted);line-height:1.7;">
         沒有可加總的有效點。OpenCV 初步抓到 {{ raw_candidates }} 個點候選，
