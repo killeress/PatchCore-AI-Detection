@@ -888,14 +888,14 @@
 {% block content %}
 <!-- Top-level Tab Bar -->
 <div class="top-tab-bar">
-    <div class="top-tab active" data-top-tab="ric" onclick="switchTopTab('ric')">📊 RIC Report</div>
-    <div class="top-tab" data-top-tab="inference" onclick="switchTopTab('inference')">🤖 AI 推論紀錄</div>
+    <div class="top-tab active" data-top-tab="inference" onclick="switchTopTab('inference')">🤖 AI 推論紀錄</div>
+    <div class="top-tab" data-top-tab="ric" onclick="switchTopTab('ric')">📊 RIC Report</div>
     <div class="top-tab" data-top-tab="scratch" onclick="switchTopTab('scratch')">🩹 Scratch 審查</div>
     <a class="top-tab" href="/ric/within-spec-logs">📏 規格內明細</a>
 </div>
 
-<!-- Tab 1: RIC Report (existing content) -->
-<div class="top-tab-content active" id="tab-ric">
+<!-- RIC Report -->
+<div class="top-tab-content" id="tab-ric">
 <div class="ric-header">
     <div>
         <h2>📊 RIC Report</h2>
@@ -1242,8 +1242,8 @@
 </div>
 </div><!-- end #tab-ric -->
 
-<!-- Tab 2: AI 推論紀錄 -->
-<div class="top-tab-content" id="tab-inference">
+<!-- AI 推論紀錄 -->
+<div class="top-tab-content active" id="tab-inference">
     <!-- Date Filter Bar -->
     <div class="inf-date-bar">
         <span style="color:var(--text-muted); font-size:0.88rem; margin-right:4px;">日期篩選：</span>
@@ -3574,6 +3574,8 @@
 
         return { get _loaded() { return _loaded; }, quickFilter, customFilter, loadData, renderCards, renderCharts, renderCrossMatrix };
     })();
+
+    inferenceTab.quickFilter('today');
 </script>
 
 <!-- Dataset Export Modal (pure Tailwind + vanilla JS, 無 Bootstrap 依賴) -->

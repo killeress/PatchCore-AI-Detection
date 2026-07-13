@@ -57,6 +57,7 @@ CODE_FILES = [
     "templates/debug_inference.html",
     "templates/record_detail.html",
     "templates/record_detail_v3.html",
+    "templates/ric_report.html",
     "templates/training.html",
     "templates/release_notes.html",
     "templates/models.html",

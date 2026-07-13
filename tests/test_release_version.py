@@ -100,6 +100,7 @@ def test_build_release_zip_includes_manifest_and_checksums():
             assert "templates/debug_inference.html" in names
             assert "templates/record_detail.html" in names
             assert "templates/record_detail_v3.html" in names
+            assert "templates/ric_report.html" in names
             assert "capi_edge_cv.py" in names
             assert "capi_heatmap.py" in names
             assert "capi_image_preprocess_lab.py" in names
