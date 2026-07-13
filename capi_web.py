@@ -1210,7 +1210,13 @@ def _detect_dot_components_debug_polarity(
     best["rejected_candidates"] = merged_rejected_candidates[:100]
     for candidate in best.get("candidates") or []:
         candidate["polarity"] = chosen_polarity
-    return best
+    output = dict(best)
+    output["polarity_results"] = {
+        item.get("detected_polarity", ""): item
+        for item in detected_by_polarity
+        if item.get("detected_polarity")
+    }
+    return output
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -7353,30 +7359,33 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     hysteresis_edge_suppress_percent=hysteresis_edge_suppress_percent,
                 )
 
-            non_dot_residues = []
-            if non_dot_cfg.get("enabled"):
-                h_img, w_img = processed_image.shape[:2]
-                crop_box = (0, 0, int(w_img), int(h_img))
-                seen_residues = set()
-                for rejected in detected.get("rejected_candidates") or []:
-                    matched = _non_dot_residue_match(rejected, non_dot_cfg, crop_box)
-                    if not matched:
-                        continue
-                    key = (
-                        matched.get("reason"),
-                        matched.get("x"),
-                        matched.get("y"),
-                        matched.get("w"),
-                        matched.get("h"),
-                    )
-                    if key in seen_residues:
-                        continue
-                    seen_residues.add(key)
-                    non_dot_residues.append(matched)
+            def prepare_non_dot_result(detection):
+                residues = []
+                if non_dot_cfg.get("enabled"):
+                    h_img, w_img = processed_image.shape[:2]
+                    crop_box = (0, 0, int(w_img), int(h_img))
+                    seen_residues = set()
+                    for rejected in detection.get("rejected_candidates") or []:
+                        matched = _non_dot_residue_match(rejected, non_dot_cfg, crop_box)
+                        if not matched:
+                            continue
+                        key = (
+                            matched.get("reason"),
+                            matched.get("x"),
+                            matched.get("y"),
+                            matched.get("w"),
+                            matched.get("h"),
+                        )
+                        if key in seen_residues:
+                            continue
+                        seen_residues.add(key)
+                        residues.append(matched)
 
-            if non_dot_residues:
-                h_img, w_img = detected["overlay"].shape[:2]
-                for idx, residue in enumerate(non_dot_residues[:20], 1):
+                if not residues:
+                    return residues
+
+                h_img, w_img = detection["overlay"].shape[:2]
+                for idx, residue in enumerate(residues[:20], 1):
                     x = max(0, min(w_img - 1, _as_int(residue.get("x"), 0)))
                     y = max(0, min(h_img - 1, _as_int(residue.get("y"), 0)))
                     w = max(1, _as_int(residue.get("w"), 1))
@@ -7386,7 +7395,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     label_y = max(13, min(h_img - 5, y + 14))
                     label = f"NG residue #{idx}"
                     for key in ("overlay", "mask_color", "diff_color"):
-                        canvas = detected.get(key)
+                        canvas = detection.get(key)
                         if canvas is None:
                             continue
                         cv2.rectangle(canvas, (x, y), (x2, y2), (0, 0, 255), 2)
@@ -7400,6 +7409,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                             1,
                             cv2.LINE_AA,
                         )
+                return residues
+
+            polarity_detections = detected.get("polarity_results") or {}
+            polarity_non_dot_residues = {
+                key: prepare_non_dot_result(item)
+                for key, item in polarity_detections.items()
+            }
+            if polarity_detections:
+                non_dot_residues = polarity_non_dot_residues.get(
+                    detected.get("detected_polarity", ""),
+                    [],
+                )
+            else:
+                non_dot_residues = prepare_non_dot_result(detected)
 
             if CAPIWebHandler._debug_heatmap_dir is None:
                 CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
@@ -7417,6 +7440,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             cv2.imwrite(str(debug_dir / mask_filename), detected["mask_color"])
             cv2.imwrite(str(debug_dir / diff_filename), detected["diff_color"])
 
+            polarity_visual_urls = {}
+            for result_polarity, polarity_result in polarity_detections.items():
+                polarity_overlay_filename = f"debug_dot_overlay_{result_polarity}_{safe_name}_{ts}.png"
+                polarity_mask_filename = f"debug_dot_mask_{result_polarity}_{safe_name}_{ts}.png"
+                polarity_diff_filename = f"debug_dot_diff_{result_polarity}_{safe_name}_{ts}.png"
+                cv2.imwrite(str(debug_dir / polarity_overlay_filename), polarity_result["overlay"])
+                cv2.imwrite(str(debug_dir / polarity_mask_filename), polarity_result["mask_color"])
+                cv2.imwrite(str(debug_dir / polarity_diff_filename), polarity_result["diff_color"])
+                polarity_visual_urls[result_polarity] = {
+                    "overlay_url": f"/debug/heatmaps/{polarity_overlay_filename}",
+                    "mask_url": f"/debug/heatmaps/{polarity_mask_filename}",
+                    "diff_url": f"/debug/heatmaps/{polarity_diff_filename}",
+                }
+
             candidates = detected["candidates"]
             defect_count = sum(1 for c in candidates if c["is_defect"])
             max_size_px = max((c["size_px"] for c in candidates), default=0.0)
@@ -7427,6 +7464,50 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 defect_threshold_px = defect_threshold / unit_per_px if unit_per_px > 0 else None
             max_size_mm = max_size_units if unit_label.lower() == "mm" else None
             detected_thresholds = detected.get("thresholds", {})
+
+            polarity_response_results = {}
+            for result_polarity, polarity_result in polarity_detections.items():
+                polarity_candidates = polarity_result.get("candidates") or []
+                polarity_max_size_px = max(
+                    (candidate.get("size_px") or 0.0 for candidate in polarity_candidates),
+                    default=0.0,
+                )
+                polarity_max_size_units = None
+                if polarity_result.get("calibrated"):
+                    polarity_max_size_units = max(
+                        (candidate.get("size_units") or 0.0 for candidate in polarity_candidates),
+                        default=0.0,
+                    )
+                polarity_residues = polarity_non_dot_residues.get(result_polarity, [])
+                polarity_response_results[result_polarity] = {
+                    "detected_polarity": result_polarity,
+                    "segmentation_method": polarity_result.get("segmentation_method", segmentation_method),
+                    "thresholds": polarity_result.get("thresholds", {}),
+                    "calibrated": bool(polarity_result.get("calibrated")),
+                    "count": len(polarity_candidates),
+                    "defect_count": sum(1 for candidate in polarity_candidates if candidate.get("is_defect")),
+                    "max_size_px": round(float(polarity_max_size_px), 2),
+                    "max_size_units": (
+                        round(float(polarity_max_size_units), 4)
+                        if polarity_max_size_units is not None
+                        else None
+                    ),
+                    "max_size_mm": (
+                        round(float(polarity_max_size_units), 4)
+                        if polarity_max_size_units is not None and unit_label.lower() == "mm"
+                        else None
+                    ),
+                    "non_dot_residue": {
+                        "enabled": bool(non_dot_cfg.get("enabled")),
+                        "count": len(polarity_residues),
+                        "blocks_within_spec": bool(polarity_residues),
+                        "params": non_dot_cfg,
+                        "residues": polarity_residues[:50],
+                    },
+                    "auto_candidates": polarity_result.get("auto_candidates", []),
+                    "candidates": polarity_candidates[:300],
+                    **polarity_visual_urls.get(result_polarity, {}),
+                }
 
             response_data = {
                 "success": True,
@@ -7495,6 +7576,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 },
                 "auto_candidates": detected.get("auto_candidates", []),
                 "candidates": candidates[:300],
+                "polarity_results": polarity_response_results,
                 "source_url": "/api/debug/serve-image?path=" + urllib.parse.quote(str(image_path)),
                 "preprocessed_url": f"/debug/heatmaps/{preprocessed_filename}",
                 "overlay_url": f"/debug/heatmaps/{overlay_filename}",

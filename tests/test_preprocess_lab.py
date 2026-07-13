@@ -131,3 +131,13 @@ def test_debug_preprocess_lab_exposes_clahe_params():
     assert 'id="lab-clahe-tile-grid-size"' in template
     assert "clip_limit: parseFloat" in template
     assert "tile_grid_size: parseInt" in template
+
+
+def test_debug_dot_results_render_black_and_white_separately():
+    template = (Path(__file__).resolve().parent.parent / "templates" / "debug_inference.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="dot-polarity-results"' in template
+    assert "renderDotPolarityResults(data, polarityResults)" in template
+    assert "const sections = ['black', 'white']" in template

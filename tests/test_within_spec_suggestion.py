@@ -1068,6 +1068,9 @@ def test_dot_detection_debug_auto_keeps_rejected_candidates_from_nonwinning_pola
 
     assert detected["detected_polarity"] == "black"
     assert detected["candidates"][0]["polarity"] == "black"
+    assert set(detected["polarity_results"]) == {"black", "white"}
+    assert detected["polarity_results"]["black"]["detected_polarity"] == "black"
+    assert detected["polarity_results"]["white"]["detected_polarity"] == "white"
     assert any(
         rejected["reason"] == "edge_margin"
         and rejected.get("source_polarity") == "white"

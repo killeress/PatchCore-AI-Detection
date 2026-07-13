@@ -2002,6 +2002,7 @@
         <div id="dot-result-section" class="hidden">
             <div class="coord-info-cards" id="dot-info-cards"></div>
             <div class="coord-result-grid" id="dot-result-grid"></div>
+            <div id="dot-polarity-results" class="hidden"></div>
             <div class="card" id="dot-candidates-card" style="padding:16px; margin-top:16px;">
                 <div style="color:var(--text-muted); font-size:0.85rem; font-family:'Fira Code',monospace; margin-bottom:10px;">候選點 Top 20</div>
                 <div style="overflow:auto;">
@@ -2549,6 +2550,12 @@
 
     function renderDotResults(data) {
         document.getElementById('dot-result-section').classList.remove('hidden');
+        const polarityResults = data.polarity_results || {};
+        if (Object.keys(polarityResults).length > 0) {
+            renderDotPolarityResults(data, polarityResults);
+            return;
+        }
+        document.getElementById('dot-polarity-results').classList.add('hidden');
         const p = data.params_used || {};
         const calibrated = !!data.calibrated;
         const unitLabel = escapeHtml(data.unit_label || 'mm');
@@ -2707,6 +2714,220 @@
 
         renderDotCandidates(data.candidates || [], calibrated, unitLabel);
         renderDotNonDotResidues(data.non_dot_residue || {});
+    }
+
+    function renderDotPolarityResults(data, polarityResults) {
+        const p = data.params_used || {};
+        const calibrated = !!data.calibrated;
+        const unitLabel = escapeHtml(data.unit_label || 'mm');
+        const calibration = data.calibration || {};
+        const mmPerPx = calibration.mm_per_px ?? p.unit_per_px ?? dotDefaultMmPerPx;
+        const preprocess = data.preprocess || {};
+        const preprocessParams = preprocess.applied_params || {};
+        const preprocessText = preprocess.method
+            ? `${escapeHtml(preprocess.method_label || preprocess.method)} ${Object.entries(preprocessParams).map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(String(v))}`).join(', ')}`
+            : '-';
+        const blackResult = polarityResults.black || {};
+        const whiteResult = polarityResults.white || {};
+        const firstResult = polarityResults.black || polarityResults.white || {};
+        const segmentationMethod = firstResult.segmentation_method || p.segmentation_method || data.segmentation_method || 'background_diff';
+        const filterText = `area>=${p.min_area ?? 0} aspect>=${p.min_aspect_ratio ?? 0} open=${p.morph_open ?? 0} edge=${p.edge_margin ?? 0}`;
+        const thresholdText = `${p.defect_threshold} ${unitLabel}`;
+
+        document.getElementById('dot-candidates-card').classList.add('hidden');
+        document.getElementById('dot-candidates-table').innerHTML = '';
+        document.getElementById('dot-non-dot-card').classList.add('hidden');
+        document.getElementById('dot-non-dot-table').innerHTML = '';
+
+        document.getElementById('dot-info-cards').innerHTML = `
+            <div class="summary-card">
+                <div class="label">點類型</div>
+                <div class="value" style="color:var(--text);font-size:1rem;">黑點／白點分開顯示</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">偵測模式</div>
+                <div class="value" style="color:var(--accent);font-size:0.9rem;">${escapeHtml(segmentationMethod)}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">候選過濾</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.82rem;">${escapeHtml(filterText)}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">黑點候選</div>
+                <div class="value" style="color:var(--text);">${Number(blackResult.count || 0)}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">白點候選</div>
+                <div class="value" style="color:var(--accent);">${Number(whiteResult.count || 0)}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">規格門檻</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.95rem;">${thresholdText}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">點規比例</div>
+                <div class="value" style="color:var(--ok);font-size:0.95rem;">${Number(mmPerPx).toFixed(4)} mm/px</div>
+            </div>
+            <div class="summary-card" style="grid-column:span 2;">
+                <div class="label">偵測前處理</div>
+                <div class="value" style="color:var(--text-muted);font-size:0.82rem;line-height:1.45;">${preprocessText}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">耗時</div>
+                <div class="value" style="color:var(--accent);">${data.processing_time}s</div>
+            </div>
+        `;
+
+        const t = Date.now();
+        document.getElementById('dot-result-grid').innerHTML = `
+            <div class="img-card">
+                <h4>原圖</h4>
+                <img src="${data.source_url}&t=${t}" alt="Dot source" onclick="openLightbox(this.src)">
+            </div>
+            ${data.preprocessed_url ? `
+            <div class="img-card">
+                <h4>高斯平滑後</h4>
+                <img src="${data.preprocessed_url}?t=${t}" alt="Dot preprocessed" onclick="openLightbox(this.src)">
+            </div>
+            ` : ''}
+        `;
+
+        const sections = ['black', 'white']
+            .filter(polarity => polarityResults[polarity])
+            .map(polarity => {
+                const result = polarityResults[polarity];
+                const label = polarity === 'black' ? '黑點' : '白點';
+                const accent = polarity === 'black' ? 'var(--text)' : 'var(--accent)';
+                const maxSize = result.max_size_mm ?? result.max_size_units;
+                const maxSizeText = calibrated && maxSize !== null && maxSize !== undefined
+                    ? `${maxSize} ${unitLabel}`
+                    : '-';
+                const nonDot = result.non_dot_residue || {};
+                const candidateTable = dotCandidateTableMarkup(result.candidates || [], calibrated, unitLabel);
+                const residueTable = dotResidueTableMarkup(nonDot.residues || []);
+                return `
+                    <div class="card" style="padding:16px; margin-top:20px; border-color:${polarity === 'black' ? 'rgba(148,163,184,0.35)' : 'rgba(59,130,246,0.35)'};">
+                        <h3 style="margin:0; color:${accent};">${label}結果</h3>
+                        <div class="coord-info-cards">
+                            <div class="summary-card">
+                                <div class="label">候選點</div>
+                                <div class="value" style="color:${accent};">${Number(result.count || 0)}</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="label">超門檻數</div>
+                                <div class="value" style="color:${Number(result.defect_count || 0) > 0 ? 'var(--ng)' : 'var(--text-muted)'};">${Number(result.defect_count || 0)}</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="label">最大尺寸</div>
+                                <div class="value" style="color:${accent};">${maxSizeText}</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="label">最大尺寸 px</div>
+                                <div class="value" style="color:var(--text);">${Number(result.max_size_px || 0).toFixed(2)}</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="label">非點狀阻擋</div>
+                                <div class="value" style="color:${Number(nonDot.count || 0) > 0 ? 'var(--ng)' : 'var(--text-muted)'};">${Number(nonDot.count || 0)}</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="label">實際方法</div>
+                                <div class="value" style="color:var(--text-muted);font-size:0.85rem;">${escapeHtml(result.segmentation_method || segmentationMethod)}</div>
+                            </div>
+                        </div>
+                        <div class="coord-result-grid">
+                            <div class="img-card">
+                                <h4>${label} Overlay</h4>
+                                <img src="${result.overlay_url}?t=${t}" alt="${label} overlay" onclick="openLightbox(this.src)">
+                            </div>
+                            <div class="img-card">
+                                <h4>${label}二值 Mask</h4>
+                                <img src="${result.mask_url}?t=${t}" alt="${label} mask" onclick="openLightbox(this.src)">
+                            </div>
+                            <div class="img-card">
+                                <h4>${label} Diff Heatmap</h4>
+                                <img src="${result.diff_url}?t=${t}" alt="${label} diff" onclick="openLightbox(this.src)">
+                            </div>
+                        </div>
+                        ${candidateTable ? `
+                        <div style="color:var(--text-muted);font-size:0.85rem;font-family:'Fira Code',monospace;margin:16px 0 10px;">${label}候選 Top 20</div>
+                        <div style="overflow:auto;">${candidateTable}</div>
+                        ` : '<div style="color:var(--text-muted);margin-top:14px;">沒有候選點</div>'}
+                        ${residueTable ? `
+                        <div style="color:var(--ng);font-size:0.85rem;font-family:'Fira Code',monospace;margin:16px 0 10px;">${label}非點狀阻擋 Top 20</div>
+                        <div style="overflow:auto;">${residueTable}</div>
+                        ` : ''}
+                    </div>
+                `;
+            }).join('');
+
+        const splitContainer = document.getElementById('dot-polarity-results');
+        splitContainer.innerHTML = sections;
+        splitContainer.classList.remove('hidden');
+    }
+
+    function dotCandidateTableMarkup(candidates, calibrated, unitLabel) {
+        if (!candidates.length) return '';
+        const rows = candidates.slice(0, 20).map(c => {
+            const unitValue = calibrated && c.size_mm !== null && c.size_mm !== undefined
+                ? `${c.size_mm} ${unitLabel}`
+                : calibrated && c.size_units !== null && c.size_units !== undefined
+                    ? `${c.size_units} ${unitLabel}`
+                    : '-';
+            return `
+                <tr>
+                    <td style="color:${c.is_defect ? 'var(--ng)' : 'var(--ok)'};font-weight:700;">#${c.id}</td>
+                    <td>${c.is_defect ? '超門檻' : 'OK'}</td>
+                    <td>(${c.center_x}, ${c.center_y})</td>
+                    <td>${c.w}×${c.h}</td>
+                    <td>${c.area_px}</td>
+                    <td>${c.size_px}</td>
+                    <td>${unitValue}</td>
+                    <td>${c.aspect_ratio ?? '-'}</td>
+                    <td>${c.max_diff}</td>
+                    <td>${c.mean_diff}</td>
+                </tr>
+            `;
+        }).join('');
+        return `
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th><th>判定</th><th>中心</th><th>BBox</th><th>面積</th>
+                        <th>尺寸 px</th><th>預估 mm</th><th>長寬比</th><th>Max Diff</th><th>Mean Diff</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `;
+    }
+
+    function dotResidueTableMarkup(residues) {
+        if (!residues.length) return '';
+        const rows = residues.slice(0, 20).map((r, idx) => `
+            <tr>
+                <td style="color:var(--ng);font-weight:700;">#${idx + 1}</td>
+                <td>${escapeHtml(r.reason || '-')}</td>
+                <td>${r.x ?? '-'}, ${r.y ?? '-'}</td>
+                <td>${r.w ?? '-'}×${r.h ?? '-'}</td>
+                <td>${r.area_px ?? '-'}</td>
+                <td>${r.long_side_px ?? '-'}</td>
+                <td>${r.long_side_ratio ?? '-'}</td>
+                <td>${r.max_diff ?? '-'}</td>
+                <td>${r.aspect_ratio ?? '-'}</td>
+                <td>${escapeHtml(r.detected_polarity || r.expected_polarity || '-')}</td>
+            </tr>
+        `).join('');
+        return `
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th><th>原因</th><th>左上</th><th>BBox</th><th>面積</th>
+                        <th>長邊</th><th>長邊比例</th><th>Max Diff</th><th>Aspect</th><th>Polarity</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `;
     }
 
     function renderDotCandidates(candidates, calibrated, unitLabel) {
