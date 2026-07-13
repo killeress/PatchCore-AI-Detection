@@ -2721,149 +2721,17 @@ class CAPIInferencer:
         bubble_total_area = 0
         bubble_detection_enabled = getattr(self.config, 'dust_detect_bubbles_enabled', False)
         if bubble_detection_enabled:
-            non_zero_pixels = gray[gray > 0]
-            if len(non_zero_pixels) > 100 and float(np.median(non_zero_pixels)) > 20:
-                min_dim = min(gray.shape[:2])
-                blur_k = min(101, min_dim - 1 if min_dim % 2 == 0 else min_dim)
-                if blur_k % 2 == 0:
-                    blur_k -= 1
-
-                if blur_k >= 15:
-                    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-                    open_kernel_bubble = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                    bubble_min_area = max(area_min * 20, int(gray.size * 0.002))
-                    bubble_max_area = min(area_max, int(gray.size * 0.08))
-                    bubble_fill_max_area = min(area_max, max(int(gray.size * 0.08), bubble_min_area * 30))
-                    border_margin = 6
-                    accepted_bubble_mask = np.zeros_like(gray, dtype=np.uint8)
-                    surface_edge_y = None
-                    if min_dim >= 64:
-                        row_mean = gray.astype(np.float32).mean(axis=1)
-                        row_mean = cv2.GaussianBlur(row_mean.reshape(-1, 1), (1, 9), 0).ravel()
-                        row_grad = np.gradient(row_mean)
-                        search_start = int(gray.shape[0] * 0.45)
-                        search_end = max(search_start + 1, gray.shape[0] - 10)
-                        edge_y = search_start + int(np.argmax(row_grad[search_start:search_end]))
-                        if float(row_grad[edge_y]) >= 10.0:
-                            surface_edge_y = edge_y
-
-                    bubble_sources = [(gray, 4.0, 4.0)]
-                    if min_dim >= 64:
-                        smooth_gray = cv2.GaussianBlur(cv2.medianBlur(gray, 5), (9, 9), 0)
-                        bubble_sources.append((smooth_gray, 2.0, 2.0))
-
-                    for bubble_source, delta_threshold, mean_threshold in bubble_sources:
-                        bubble_bg = cv2.GaussianBlur(bubble_source, (blur_k, blur_k), 0)
-                        for delta in (
-                            bubble_bg.astype(np.int16) - bubble_source.astype(np.int16),
-                            bubble_source.astype(np.int16) - bubble_bg.astype(np.int16),
-                        ):
-                            delta[gray == 0] = 0
-                            bubble_binary = (delta >= delta_threshold).astype(np.uint8) * 255
-                            bubble_binary = cv2.morphologyEx(bubble_binary, cv2.MORPH_CLOSE, close_kernel, iterations=1)
-                            bubble_binary = cv2.morphologyEx(bubble_binary, cv2.MORPH_OPEN, open_kernel_bubble, iterations=1)
-
-                            b_num_labels, b_labels, b_stats, _ = cv2.connectedComponentsWithStats(bubble_binary)
-                            for i in range(1, b_num_labels):
-                                b_area = int(b_stats[i, cv2.CC_STAT_AREA])
-                                b_x = int(b_stats[i, cv2.CC_STAT_LEFT])
-                                b_y = int(b_stats[i, cv2.CC_STAT_TOP])
-                                b_w = int(b_stats[i, cv2.CC_STAT_WIDTH])
-                                b_h = int(b_stats[i, cv2.CC_STAT_HEIGHT])
-
-                                if b_area < bubble_min_area or b_area > bubble_max_area:
-                                    continue
-                                if (
-                                    b_x <= border_margin
-                                    or b_y <= border_margin
-                                    or b_x + b_w >= gray.shape[1] - border_margin
-                                    or b_y + b_h >= gray.shape[0] - border_margin
-                                ):
-                                    continue
-                                if surface_edge_y is not None and b_y >= surface_edge_y - 20:
-                                    continue
-
-                                b_aspect = max(b_w, b_h) / (min(b_w, b_h) + 1e-5)
-                                b_fill_ratio = b_area / max(1, b_w * b_h)
-                                if b_aspect > 3.5 or b_fill_ratio < 0.25:
-                                    continue
-
-                                component_mask = (b_labels == i)
-                                if float(np.mean(delta[component_mask])) < mean_threshold:
-                                    continue
-
-                                component_u8 = component_mask.astype(np.uint8) * 255
-                                contours, _ = cv2.findContours(
-                                    component_u8,
-                                    cv2.RETR_EXTERNAL,
-                                    cv2.CHAIN_APPROX_SIMPLE,
-                                )
-                                bubble_mask = np.zeros_like(component_u8)
-                                if contours:
-                                    contour_points = np.vstack(contours)
-                                    if len(contour_points) >= 3:
-                                        hull = cv2.convexHull(contour_points)
-                                        cv2.drawContours(bubble_mask, [hull], -1, 255, thickness=-1)
-                                    else:
-                                        cv2.drawContours(bubble_mask, contours, -1, 255, thickness=-1)
-                                else:
-                                    bubble_mask = component_u8
-
-                                surface_gap = None
-                                if surface_edge_y is not None:
-                                    surface_gap = surface_edge_y - (b_y + b_h)
-                                if (
-                                    surface_gap is not None
-                                    and b_w >= b_h * 1.4
-                                    and b_h * 0.5 <= surface_gap <= b_h
-                                ):
-                                    # The bright surface edge can erase the lower half of a bubble.
-                                    ellipse_bottom = surface_edge_y - 1
-                                    ellipse_center = (
-                                        b_x + b_w // 2,
-                                        (b_y + ellipse_bottom) // 2,
-                                    )
-                                    ellipse_axes = (
-                                        max(1, b_w // 2),
-                                        max(1, (ellipse_bottom - b_y) // 2),
-                                    )
-                                    cv2.ellipse(
-                                        bubble_mask,
-                                        ellipse_center,
-                                        ellipse_axes,
-                                        0,
-                                        0,
-                                        360,
-                                        255,
-                                        thickness=-1,
-                                    )
-
-                                filled_area = int(np.count_nonzero(bubble_mask > 0))
-                                if filled_area < bubble_min_area or filled_area > bubble_fill_max_area:
-                                    continue
-
-                                if extension > 0:
-                                    bubble_dilate = cv2.getStructuringElement(
-                                        cv2.MORPH_ELLIPSE,
-                                        (extension * 2 + 1, extension * 2 + 1),
-                                    )
-                                    bubble_mask = cv2.dilate(bubble_mask, bubble_dilate, iterations=1)
-
-                                accepted_bubble_mask[bubble_mask > 0] = 255
-
-                    large_bubble_mask = self._detect_large_surface_bubble_mask(
-                        gray,
-                        area_min,
-                        area_max,
-                        extension,
-                    )
-                    accepted_bubble_mask[large_bubble_mask > 0] = 255
-
-                    if np.any(accepted_bubble_mask > 0):
-                        b_count, _ = cv2.connectedComponents(accepted_bubble_mask, connectivity=8)
-                        bubble_count = max(0, b_count - 1)
-                        bubble_total_area = int(np.count_nonzero(accepted_bubble_mask > 0))
-                        dust_mask[accepted_bubble_mask > 0] = 255
+            accepted_bubble_mask = self._detect_bubble_mask(
+                gray,
+                area_min,
+                area_max,
+                extension,
+            )
+            if np.any(accepted_bubble_mask > 0):
+                b_count, _ = cv2.connectedComponents(accepted_bubble_mask, connectivity=8)
+                bubble_count = max(0, b_count - 1)
+                bubble_total_area = int(np.count_nonzero(accepted_bubble_mask > 0))
+                dust_mask[accepted_bubble_mask > 0] = 255
         
         # 合併計數
         total_particle = particle_count + dark_particle_count
@@ -2880,6 +2748,191 @@ class CAPIInferencer:
                        f"Area:{total_area} Ratio:{bright_ratio:.4f}{dark_info}{bubble_info}")
         
         return is_dust, dust_mask, bright_ratio, detail_text
+
+    def _detect_bubble_mask(
+        self,
+        gray: np.ndarray,
+        area_min: int,
+        area_max: int,
+        extension: int,
+        reference_area: Optional[int] = None,
+    ) -> np.ndarray:
+        """Detect regular and large low-contrast bubbles in one tile."""
+        accepted_bubble_mask = np.zeros_like(gray, dtype=np.uint8)
+        if gray is None or gray.size == 0:
+            return accepted_bubble_mask
+
+        non_zero_pixels = gray[gray > 0]
+        if len(non_zero_pixels) <= 100 or float(np.median(non_zero_pixels)) <= 20:
+            return accepted_bubble_mask
+
+        min_dim = min(gray.shape[:2])
+        blur_k = min(101, min_dim - 1 if min_dim % 2 == 0 else min_dim)
+        if blur_k % 2 == 0:
+            blur_k -= 1
+        if blur_k < 15:
+            return accepted_bubble_mask
+
+        ref_area = gray.size if reference_area is None else max(1, int(reference_area))
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        open_kernel_bubble = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        bubble_min_area = max(area_min * 20, int(ref_area * 0.002))
+        bubble_max_area = min(area_max, int(ref_area * 0.08))
+        bubble_fill_max_area = min(
+            area_max,
+            max(int(ref_area * 0.08), bubble_min_area * 30),
+        )
+        border_margin = 6
+        surface_edge_y = None
+        if min_dim >= 64:
+            row_mean = gray.astype(np.float32).mean(axis=1)
+            row_mean = cv2.GaussianBlur(row_mean.reshape(-1, 1), (1, 9), 0).ravel()
+            row_grad = np.gradient(row_mean)
+            search_start = int(gray.shape[0] * 0.45)
+            search_end = max(search_start + 1, gray.shape[0] - 10)
+            edge_y = search_start + int(np.argmax(row_grad[search_start:search_end]))
+            if float(row_grad[edge_y]) >= 10.0:
+                surface_edge_y = edge_y
+
+        bubble_sources = [(gray, 4.0, 4.0)]
+        if min_dim >= 64:
+            smooth_gray = cv2.GaussianBlur(cv2.medianBlur(gray, 5), (9, 9), 0)
+            bubble_sources.append((smooth_gray, 2.0, 2.0))
+
+        for bubble_source, delta_threshold, mean_threshold in bubble_sources:
+            bubble_bg = cv2.GaussianBlur(bubble_source, (blur_k, blur_k), 0)
+            for delta in (
+                bubble_bg.astype(np.int16) - bubble_source.astype(np.int16),
+                bubble_source.astype(np.int16) - bubble_bg.astype(np.int16),
+            ):
+                delta[gray == 0] = 0
+                bubble_binary = (delta >= delta_threshold).astype(np.uint8) * 255
+                bubble_binary = cv2.morphologyEx(
+                    bubble_binary,
+                    cv2.MORPH_CLOSE,
+                    close_kernel,
+                    iterations=1,
+                )
+                bubble_binary = cv2.morphologyEx(
+                    bubble_binary,
+                    cv2.MORPH_OPEN,
+                    open_kernel_bubble,
+                    iterations=1,
+                )
+
+                b_num_labels, b_labels, b_stats, _ = \
+                    cv2.connectedComponentsWithStats(bubble_binary)
+                for i in range(1, b_num_labels):
+                    b_area = int(b_stats[i, cv2.CC_STAT_AREA])
+                    b_x = int(b_stats[i, cv2.CC_STAT_LEFT])
+                    b_y = int(b_stats[i, cv2.CC_STAT_TOP])
+                    b_w = int(b_stats[i, cv2.CC_STAT_WIDTH])
+                    b_h = int(b_stats[i, cv2.CC_STAT_HEIGHT])
+
+                    if b_area < bubble_min_area or b_area > bubble_max_area:
+                        continue
+                    if (
+                        b_x <= border_margin
+                        or b_y <= border_margin
+                        or b_x + b_w >= gray.shape[1] - border_margin
+                        or b_y + b_h >= gray.shape[0] - border_margin
+                    ):
+                        continue
+                    if surface_edge_y is not None and b_y >= surface_edge_y - 20:
+                        continue
+
+                    b_aspect = max(b_w, b_h) / (min(b_w, b_h) + 1e-5)
+                    b_fill_ratio = b_area / max(1, b_w * b_h)
+                    if b_aspect > 3.5 or b_fill_ratio < 0.25:
+                        continue
+
+                    component_mask = b_labels == i
+                    if float(np.mean(delta[component_mask])) < mean_threshold:
+                        continue
+
+                    component_u8 = component_mask.astype(np.uint8) * 255
+                    contours, _ = cv2.findContours(
+                        component_u8,
+                        cv2.RETR_EXTERNAL,
+                        cv2.CHAIN_APPROX_SIMPLE,
+                    )
+                    bubble_mask = np.zeros_like(component_u8)
+                    if contours:
+                        contour_points = np.vstack(contours)
+                        if len(contour_points) >= 3:
+                            hull = cv2.convexHull(contour_points)
+                            cv2.drawContours(
+                                bubble_mask,
+                                [hull],
+                                -1,
+                                255,
+                                thickness=-1,
+                            )
+                        else:
+                            cv2.drawContours(
+                                bubble_mask,
+                                contours,
+                                -1,
+                                255,
+                                thickness=-1,
+                            )
+                    else:
+                        bubble_mask = component_u8
+
+                    surface_gap = None
+                    if surface_edge_y is not None:
+                        surface_gap = surface_edge_y - (b_y + b_h)
+                    if (
+                        surface_gap is not None
+                        and b_w >= b_h * 1.4
+                        and b_h * 0.5 <= surface_gap <= b_h
+                    ):
+                        ellipse_bottom = surface_edge_y - 1
+                        ellipse_center = (
+                            b_x + b_w // 2,
+                            (b_y + ellipse_bottom) // 2,
+                        )
+                        ellipse_axes = (
+                            max(1, b_w // 2),
+                            max(1, (ellipse_bottom - b_y) // 2),
+                        )
+                        cv2.ellipse(
+                            bubble_mask,
+                            ellipse_center,
+                            ellipse_axes,
+                            0,
+                            0,
+                            360,
+                            255,
+                            thickness=-1,
+                        )
+
+                    filled_area = int(np.count_nonzero(bubble_mask > 0))
+                    if filled_area < bubble_min_area or filled_area > bubble_fill_max_area:
+                        continue
+
+                    if extension > 0:
+                        bubble_dilate = cv2.getStructuringElement(
+                            cv2.MORPH_ELLIPSE,
+                            (extension * 2 + 1, extension * 2 + 1),
+                        )
+                        bubble_mask = cv2.dilate(
+                            bubble_mask,
+                            bubble_dilate,
+                            iterations=1,
+                        )
+
+                    accepted_bubble_mask[bubble_mask > 0] = 255
+
+        large_bubble_mask = self._detect_large_surface_bubble_mask(
+            gray,
+            area_min,
+            area_max,
+            extension,
+            reference_area=ref_area,
+        )
+        accepted_bubble_mask[large_bubble_mask > 0] = 255
+        return accepted_bubble_mask
 
     def _detect_large_surface_bubble_mask(
         self,
@@ -3006,8 +3059,9 @@ class CAPIInferencer:
         omit_crop: np.ndarray,
         extension_override: Optional[int] = None,
         context_shift: int = 96,
+        focus_x: Optional[int] = None,
     ) -> tuple:
-        """Supplement a boundary-clipped large bubble from horizontally shifted tiles."""
+        """Supplement boundary-clipped bubbles from horizontally shifted tiles."""
         is_dust, dust_mask, bright_ratio, detail_text = \
             self.check_dust_or_scratch_feature(omit_crop, extension_override)
         if not getattr(self.config, 'dust_detect_bubbles_enabled', False):
@@ -3017,18 +3071,25 @@ class CAPIInferencer:
 
         bubble_match = re.search(r"\bBub:(\d+)", detail_text)
         base_bubble_count = int(bubble_match.group(1)) if bubble_match else 0
-        if base_bubble_count > 0:
-            return is_dust, dust_mask, bright_ratio, detail_text
 
         shift = max(0, int(context_shift))
         if shift == 0 or min(tile_width, tile_height) < 256:
             return is_dust, dust_mask, bright_ratio, detail_text
 
+        context_offsets = (-shift, shift)
+        if focus_x is not None:
+            if focus_x < shift:
+                context_offsets = (-shift,)
+            elif focus_x >= tile_width - shift:
+                context_offsets = (shift,)
+            else:
+                return is_dust, dust_mask, bright_ratio, detail_text
+
         context_bubble_mask = np.zeros((tile_height, tile_width), dtype=np.uint8)
         oh, ow = omit_image.shape[:2]
         extension = self.config.dust_extension \
             if extension_override is None else extension_override
-        for offset_x in (-shift, shift):
+        for offset_x in context_offsets:
             shifted_x = tile_x + offset_x
             if omit_image.ndim == 3:
                 shifted_crop = np.zeros(
@@ -3056,12 +3117,31 @@ class CAPIInferencer:
             else:
                 shifted_gray = shifted_crop
 
-            shifted_bubble_mask = self._detect_large_surface_bubble_mask(
+            shifted_bubble_mask = self._detect_bubble_mask(
                 shifted_gray,
                 self.config.dust_area_min,
                 self.config.dust_area_max,
                 extension,
                 reference_area=tile_width * tile_height,
+            )
+            # 只補回穿越原 tile 左右邊界的元件，避免帶入平移視窗內的其他氣泡。
+            seam_x = -offset_x if offset_x < 0 else tile_width - offset_x
+            if seam_x <= 0 or seam_x >= tile_width:
+                continue
+            seam_start = max(0, seam_x - 6)
+            seam_end = min(tile_width, seam_x + 7)
+            seam_num, seam_labels = cv2.connectedComponents(
+                (shifted_bubble_mask > 0).astype(np.uint8),
+                connectivity=8,
+            )
+            if seam_num <= 1:
+                continue
+            crossing_labels = np.unique(seam_labels[:, seam_start:seam_end])
+            crossing_labels = crossing_labels[crossing_labels != 0]
+            if crossing_labels.size == 0:
+                continue
+            shifted_bubble_mask = (
+                np.isin(seam_labels, crossing_labels).astype(np.uint8) * 255
             )
             overlap_x1 = max(tile_x, shifted_x)
             overlap_x2 = min(tile_x + tile_width, shifted_x + tile_width)
@@ -3090,7 +3170,7 @@ class CAPIInferencer:
         bright_ratio = float(mask_area / merged_mask.size) if merged_mask.size else 0.0
         context_count, _ = cv2.connectedComponents(context_bubble_mask, connectivity=8)
         context_bubble_count = max(0, context_count - 1)
-        bubble_count = max(base_bubble_count, context_bubble_count)
+        bubble_count = base_bubble_count + context_bubble_count
         detail_text = re.sub(r"\bArea:\d+", f"Area:{mask_area}", detail_text, count=1)
         detail_text = re.sub(
             r"\bRatio:\d+(?:\.\d+)?",
@@ -6369,11 +6449,21 @@ class CAPIInferencer:
                         
                         omit_crop = omit_image[ty:y2, tx:x2]
                         tile.omit_crop_image = omit_crop.copy()
+                        focus_image_x = int(getattr(tile, 'aoi_image_x', -1))
+                        if focus_image_x < 0:
+                            focus_image_x = int(getattr(tile, 'anomaly_peak_x', -1))
+                        context_focus_x = focus_image_x - tx if focus_image_x >= 0 else None
                         
                         # Step A: 進階灰塵偵測 (CLAHE + Otsu + 面積篩選)
                         is_dust, dust_mask, bright_ratio, detail_text = \
                             self._check_dust_or_scratch_feature_with_context(
-                                omit_image, tx, ty, tw, th, omit_crop
+                                omit_image,
+                                tx,
+                                ty,
+                                tw,
+                                th,
+                                omit_crop,
+                                focus_x=context_focus_x,
                             )
                         tile.dust_mask = dust_mask
                         tile.dust_bright_ratio = bright_ratio
@@ -6454,6 +6544,7 @@ class CAPIInferencer:
                                                 th,
                                                 omit_crop,
                                                 extension_override=0,
+                                                focus_x=context_focus_x,
                                             )
                                     ts_has_real, ts_peak_yx, ts_features, ts_detail = \
                                         self.check_dust_two_stage(
@@ -7039,10 +7130,20 @@ class CAPIInferencer:
                 if sx2 > sx1 and sy2 > sy1:
                     omit_crop[sy1 - ty:sy2 - ty, sx1 - tx:sx2 - tx] = omit_image[sy1:sy2, sx1:sx2]
                 tile.omit_crop_image = omit_crop.copy()
+                focus_image_x = int(getattr(tile, 'aoi_image_x', -1))
+                if focus_image_x < 0:
+                    focus_image_x = int(getattr(tile, 'anomaly_peak_x', -1))
+                context_focus_x = focus_image_x - tx if focus_image_x >= 0 else None
 
                 is_dust, dust_mask, bright_ratio, detail_text = \
                     self._check_dust_or_scratch_feature_with_context(
-                        omit_image, tx, ty, tw, th, omit_crop
+                        omit_image,
+                        tx,
+                        ty,
+                        tw,
+                        th,
+                        omit_crop,
+                        focus_x=context_focus_x,
                     )
                 tile.dust_mask = dust_mask
                 tile.dust_bright_ratio = bright_ratio
@@ -7116,6 +7217,7 @@ class CAPIInferencer:
                                         th,
                                         omit_crop,
                                         extension_override=0,
+                                        focus_x=context_focus_x,
                                     )
                             ts_has_real, ts_peak_yx, ts_features, ts_detail = \
                                 self.check_dust_two_stage(

@@ -140,6 +140,20 @@ def _large_rotated_bubble_panel_image() -> tuple[np.ndarray, np.ndarray]:
     return cv2.GaussianBlur(image, (5, 5), 0), bubble
 
 
+def _regular_boundary_bubble_panel_image() -> tuple[np.ndarray, np.ndarray]:
+    image = np.full((700, 900), 80, dtype=np.uint8)
+
+    interior_bubble = np.zeros_like(image)
+    cv2.ellipse(interior_bubble, (300, 250), (25, 30), 0, 0, 360, 255, -1)
+    image[interior_bubble > 0] = 72
+
+    boundary_bubble = np.zeros_like(image)
+    cv2.ellipse(boundary_bubble, (600, 330), (30, 35), 0, 0, 360, 255, -1)
+    image[boundary_bubble > 0] = 72
+
+    return cv2.GaussianBlur(image, (9, 9), 0), boundary_bubble
+
+
 def test_low_contrast_bubble_mask_is_opt_in():
     image = _low_contrast_bubble_image()
 
@@ -329,6 +343,7 @@ def test_padded_context_recovers_boundary_clipped_large_bubble():
             tile_size,
             tile_size,
             omit_crop,
+            focus_x=500,
         )
 
     baseline_covered = (
@@ -347,6 +362,51 @@ def test_padded_context_recovers_boundary_clipped_large_bubble():
     assert mask[337, 400] == 255
     assert ratio > 0.0
     assert "Bub:1" in detail
+
+
+def test_context_recovers_regular_boundary_bubble_when_another_bubble_exists():
+    panel_image, boundary_bubble = _regular_boundary_bubble_panel_image()
+    inferencer = _make_inferencer(detect_bubbles=True)
+    tile_x, tile_y, tile_size = 100, 80, 512
+    omit_crop = panel_image[
+        tile_y:tile_y + tile_size,
+        tile_x:tile_x + tile_size,
+    ]
+    expected = boundary_bubble[
+        tile_y:tile_y + tile_size,
+        tile_x:tile_x + tile_size,
+    ]
+
+    _, baseline_mask, _, baseline_detail = \
+        inferencer.check_dust_or_scratch_feature(omit_crop)
+    is_dust, mask, ratio, detail = \
+        inferencer._check_dust_or_scratch_feature_with_context(
+            panel_image,
+            tile_x,
+            tile_y,
+            tile_size,
+            tile_size,
+            omit_crop,
+            focus_x=500,
+        )
+
+    baseline_covered = (
+        np.count_nonzero((baseline_mask > 0) & (expected > 0))
+        / np.count_nonzero(expected)
+    )
+    covered = (
+        np.count_nonzero((mask > 0) & (expected > 0))
+        / np.count_nonzero(expected)
+    )
+
+    assert "Bub:1" in baseline_detail
+    assert baseline_covered < 0.20
+    assert is_dust is True
+    assert covered >= 0.85
+    assert mask[250, 500] == 255
+    assert ratio > 0.0
+    assert "Bub:2" in detail
+    assert "CtxShift:96" in detail
 
 
 def test_bubble_detector_ignores_small_dark_specks():

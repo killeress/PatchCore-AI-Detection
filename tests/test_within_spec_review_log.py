@@ -175,6 +175,64 @@ def test_within_spec_detail_template_renders():
     assert "重新產生偵測圖片" in html
 
 
+def test_within_spec_detail_explains_dust_only_ok_i():
+    env = Environment(loader=FileSystemLoader("templates"))
+    template = env.get_template("within_spec_detail.html")
+
+    html = template.render(
+        request_path="/ric/within-spec-log/18707",
+        app_version={"version": ""},
+        host_identity="",
+        log={
+            "id": 18707,
+            "client_record_id": None,
+            "inference_record_id": 339088,
+            "suggested": True,
+            "reason": "",
+            "error_message": "",
+            "processing_seconds": 0.24,
+            "created_at": "2026-07-13 15:32:24",
+            "detail": {
+                "panel_summary": {
+                    "total_dot_count": 0,
+                    "target_tile_count": 3,
+                    "evaluated_tile_count": 3,
+                    "candidate_summary": {
+                        "raw_candidate_count": 3,
+                        "final_candidate_count": 0,
+                        "dust_mask_filtered_count": 3,
+                        "no_detect_mask_filtered_count": 0,
+                    },
+                },
+                "panel_totals": [{
+                    "screen": "W0F00000",
+                    "dot_type": "black_dot",
+                    "dot_label": "黑點",
+                    "total_count": 0,
+                    "max_size_mm": 0,
+                    "threshold_mm": 0.35,
+                    "screen_count_limit": 2,
+                    "max_tile_count": 0,
+                    "tile_count_threshold": 1,
+                    "evaluated_tiles": 1,
+                    "within": True,
+                }],
+                "inference_auto_decision": {
+                    "converted_to_ok_i": True,
+                    "status": "within_spec",
+                },
+            },
+        },
+    )
+
+    text = " ".join(html.split())
+    assert (
+        "OpenCV 初步抓到 3 個點候選，3 個皆由灰塵遮罩排除，因此以 0 點納入 "
+        "Panel 規格比較；整片 Panel 均符合設定門檻，判定 OK-I。"
+    ) in text
+    assert "仍判定為點偵測未命中" not in text
+
+
 def test_within_spec_report_template_renders():
     env = Environment(loader=FileSystemLoader("templates"))
     template = env.get_template("within_spec_report.html")

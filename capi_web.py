@@ -2297,6 +2297,17 @@ def _evaluate_within_spec_suggestion_detail(
                 + tile_candidate_summary["dust_mask_filtered_count"]
                 + tile_candidate_summary["no_detect_mask_filtered_count"]
             )
+            dust_only = (
+                tile_candidate_summary["raw_candidate_count"] > 0
+                and tile_candidate_summary["final_candidate_count"] == 0
+                and tile_candidate_summary["dust_mask_filtered_count"]
+                == tile_candidate_summary["raw_candidate_count"]
+            )
+            if dust_only:
+                chosen = max(
+                    detections,
+                    key=lambda d: _as_int(d.get("dust_mask_filtered_count"), 0),
+                )
             for key, value in tile_candidate_summary.items():
                 result["candidate_summary"][key] = result["candidate_summary"].get(key, 0) + value
             tile_non_dot_residues: List[Dict[str, Any]] = []
@@ -2363,7 +2374,16 @@ def _evaluate_within_spec_suggestion_detail(
                         non_dot_residues.append(matched)
                         tile_non_dot_keys.add(key)
                         tile_non_dot_residues.append(matched)
-            if chosen["count"] <= 0:
+            if dust_only:
+                add_step(
+                    "tile 點候選皆落在灰塵遮罩：以 0 點納入 Panel 判定",
+                    image=image.get("image_name") or "",
+                    tile_id=tile.get("tile_id"),
+                    crop_box=crop_box,
+                    filtered_count=tile_candidate_summary["dust_mask_filtered_count"],
+                    detection=detection_summary,
+                )
+            if chosen["count"] <= 0 and not dust_only:
                 no_detect_filtered = sum(
                     _as_int(d.get("no_detect_mask_filtered_count"), 0)
                     for d in detections
