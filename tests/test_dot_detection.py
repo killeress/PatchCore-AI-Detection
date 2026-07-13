@@ -2,7 +2,12 @@ import cv2
 import numpy as np
 from pathlib import Path
 
-from capi_web import DOT_RULER_MM_PER_PX, _detect_dot_components, _preprocess_dot_image_for_detection
+from capi_web import (
+    CAPIWebHandler,
+    DOT_RULER_MM_PER_PX,
+    _detect_dot_components,
+    _preprocess_dot_image_for_detection,
+)
 
 
 def test_detects_black_dot_without_unit_calibration():
@@ -173,3 +178,43 @@ def test_bundled_black_sample_default_opening_filters_background_texture():
 
     assert len(result["candidates"]) == 1
     assert result["candidates"][0]["size_px"] <= 10
+
+
+def test_debug_dot_api_returns_separate_black_and_white_results(tmp_path, monkeypatch):
+    image = np.full((96, 96, 3), 128, dtype=np.uint8)
+    cv2.circle(image, (32, 48), 4, (60, 60, 60), -1)
+    cv2.circle(image, (64, 48), 4, (210, 210, 210), -1)
+    image_path = tmp_path / "black_white.png"
+    assert cv2.imwrite(str(image_path), image)
+
+    payload = {
+        "image_path": str(image_path),
+        "polarity": "auto",
+        "segmentation_method": "background_diff",
+        "diff_threshold": 8,
+        "background_kernel": 31,
+        "min_area": 2,
+        "max_area": 1000,
+        "morph_open": 0,
+        "min_aspect_ratio": 0.0,
+        "edge_margin": 4,
+        "size_metric": "bbox_diagonal",
+        "unit_per_px": 0.02,
+        "defect_threshold": 0.3,
+    }
+    responses = []
+    handler = object.__new__(CAPIWebHandler)
+    handler._read_json_body = lambda: payload
+    handler._send_json = lambda data, status=200: responses.append((status, data))
+    monkeypatch.setattr(CAPIWebHandler, "_debug_heatmap_dir", tmp_path / "debug")
+
+    handler._handle_debug_dot_detection()
+
+    assert responses[0][0] == 200
+    polarity_results = responses[0][1]["polarity_results"]
+    assert set(polarity_results) == {"black", "white"}
+    assert polarity_results["black"]["count"] == 1
+    assert polarity_results["white"]["count"] == 1
+    for result in polarity_results.values():
+        for key in ("overlay_url", "mask_url", "diff_url"):
+            assert (CAPIWebHandler._debug_heatmap_dir / Path(result[key]).name).is_file()
