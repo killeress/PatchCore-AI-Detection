@@ -11,9 +11,9 @@
     局部重訓：
     <span style="color:#cdd6f4;font-weight:600;">{{ target_bundle.machine_id }} / {{ target_bundle.bundle_path|replace("model/", "") }}</span>，
     PT：<span style="color:#89b4fa;font-weight:600;">{{ training_scope.selected_units|join(", ") }}</span>。
-    <span style="display:block;margin-top:2px;">請重新選擇此機種的訓練 panel；所有已選 panel 都會完整切 tile，後續只會訓練選定 PT。</span>
+    <span style="display:block;margin-top:2px;">請重新選擇此機種的訓練 panel；每片可分別勾選 INNER／EDGE，後續只會訓練選定 PT。</span>
     {% else %}
-    從最近 3 天 AOI 判 OK 紀錄勾選訓練 panel；所有已選 panel 都會完整切 tile（inner + edge）。
+    從最近 3 天 AOI 判 OK 紀錄勾選訓練 panel；每片可分別決定是否切 INNER／EDGE，預設兩者皆勾選。
     <span style="color:#cdd6f4;font-size:.82rem;display:block;margin-top:2px;">至少選 1 片；片數越多，訓練資料越多、前處理與訓練時間也越長。</span>
     {% endif %}
   </p>
@@ -123,6 +123,59 @@
         <span class="tp-hint">layer3 only 可能降低過檢，但小缺陷敏感度會下降</span>
       </label>
       <label class="tp-field">
+        {% set inherited_pool = target_patchcore_params.get("feature_pool_kernel_size", 3) %}
+        <span class="tp-label">特徵鄰域聚合 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用 {{ inherited_pool }}×{{ inherited_pool }}{% else %}預設 3×3{% endif %}</span></span>
+        <select id="tp-feature_pool_kernel_size" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
+          {% if training_scope.mode == 'partial' %}
+          <option value="{{ inherited_pool }}" selected>{{ inherited_pool }}×{{ inherited_pool }}（沿用原 bundle，不可修改）</option>
+          {% else %}
+          <option value="3" selected>3×3（現有作法）</option>
+          <option value="5">5×5（實驗：增加特徵平滑）</option>
+          {% endif %}
+        </select>
+        <span class="tp-hint">5×5 可能降低細碎紋理過檢，也可能降低小缺陷敏感度；修改後需重訓</span>
+      </label>
+      <label class="tp-field">
+        {% set inherited_cleaning = target_patchcore_params.get("feature_cleaning_mode", "off") %}
+        {% set inherited_cleaning_scope = target_patchcore_params.get("feature_cleaning_scope", "inner_only") %}
+        {% set inherited_keep_ratio = target_patchcore_params.get("feature_cleaning_keep_ratio", 0.99) %}
+        <span class="tp-label">特徵域清洗 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用原 bundle{% else %}預設關閉{% endif %}</span></span>
+        <select id="tp-feature_cleaning_mode" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
+          {% if training_scope.mode == 'partial' %}
+          <option value="{{ inherited_cleaning }}" selected>{% if inherited_cleaning == "off" %}關閉{% else %}保守清洗（k=30、保留 {{ (inherited_keep_ratio * 100)|round(1) }}%）{% endif %}（沿用原 bundle，不可修改）</option>
+          {% else %}
+          <option value="off" selected>關閉（現有作法）</option>
+          <option value="knn_cosine_q99_v1">保守清洗（實驗：k=30）</option>
+          {% endif %}
+        </select>
+        <span class="tp-hint">
+          {% if training_scope.mode == 'partial' %}
+            局部重訓固定沿用原 bundle 設定
+          {% else %}
+            依訓練特徵密度移除離群 patch；不使用 OMIT／PINIGBI 遮罩
+          {% endif %}
+        </span>
+      </label>
+      <label class="tp-field">
+        <span class="tp-label">特徵清洗範圍 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用原 bundle{% else %}預設僅 inner{% endif %}</span></span>
+        <select id="tp-feature_cleaning_scope" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
+          {% if training_scope.mode == 'partial' %}
+          <option value="{{ inherited_cleaning_scope }}" selected>{% if inherited_cleaning_scope == "inner_and_edge" %}inner + edge{% else %}僅 inner{% endif %}（沿用原 bundle，不可修改）</option>
+          {% else %}
+          <option value="inner_only" selected>僅 inner（保守，現有作法）</option>
+          <option value="inner_and_edge">inner + edge（實驗）</option>
+          {% endif %}
+        </select>
+        <span class="tp-hint">edge 正常特徵變化較大；若包含 edge，建議先從保留 99.5%～99.9% 測試</span>
+      </label>
+      <label class="tp-field">
+        <span class="tp-label">特徵清洗保留比例 <span class="tp-default">預設 99%</span></span>
+        <input type="number" id="tp-feature_cleaning_keep_ratio" min="90" max="100" step="0.1"
+               value="{% if training_scope.mode == 'partial' %}{{ (inherited_keep_ratio * 100)|round(1) }}{% else %}99{% endif %}"
+               {% if training_scope.mode == 'partial' %}disabled{% endif %}>
+        <span class="tp-hint">只在開啟清洗時生效；99% 約移除 1%，97% 約移除 3%，100% 不移除</span>
+      </label>
+      <label class="tp-field">
         <span class="tp-label">tile step <span class="tp-default">預設 256</span></span>
         <input type="number" id="tile-stride" min="64" max="512" step="64" value="256">
         <span class="tp-hint">512 為原本不重疊切法；256 會讓 512×512 tile 產生 50% overlap</span>
@@ -187,7 +240,7 @@
   <div id="panel-list" style="margin-top:16px;padding-bottom:88px;"></div>
 
   <div class="step1-actionbar">
-    <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0 片</span>
+    <span id="sel-count" style="color:#a6e3a1;font-weight:600;">已選 0 片｜INNER 0 片｜EDGE 0 片</span>
     <span style="display:flex;gap:8px;align-items:center;margin-left:auto;">
       <a href="/train/new" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">返回</a>
       <button id="next-btn" onclick="submitStart()" disabled
@@ -199,9 +252,16 @@
 </div>
 
 <style>
-  .train-panel-table th { padding:8px; }
-  .train-panel-table td { padding:8px; vertical-align:top; }
-  .path-cell { color:#a6adc8;font-family:monospace;font-size:.76rem;word-break:break-all;line-height:1.35; }
+  .panel-table-wrap { background:#313244;border-radius:10px;max-height:380px;overflow:auto; }
+  .train-panel-table { table-layout:fixed;min-width:940px; }
+  .train-panel-table th { position:sticky;top:0;z-index:2;padding:7px 8px;white-space:nowrap; }
+  .train-panel-table td { height:40px;padding:6px 8px;vertical-align:middle;box-sizing:border-box; }
+  .path-cell { color:#a6adc8;font-family:monospace;font-size:.76rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.35; }
+  .panel-zone-cell { white-space:nowrap; }
+  .panel-zone-options { display:inline-flex;align-items:center;gap:8px; }
+  .panel-zone-option { display:inline-flex;align-items:center;gap:3px;color:#cdd6f4;font-size:.74rem;font-weight:700;cursor:pointer; }
+  .panel-zone-input { width:15px;height:15px;margin:0;accent-color:#89b4fa;cursor:pointer; }
+  .panel-zone-input:disabled { cursor:not-allowed;opacity:.45; }
   .source-card { background:#313244;border-radius:10px;padding:18px;margin-top:16px; }
   .source-tabs { display:flex;gap:6px;margin-bottom:14px; }
   .source-tab { background:#1e1e2e;color:#a6adc8;border:1px solid #45475a;border-radius:6px;padding:7px 14px;font-weight:700;cursor:pointer; }
@@ -399,6 +459,7 @@ const DEFAULT_PREPROCESS_PIPELINE = {{ default_preprocess_pipeline|tojson }};
 let _selected = new Set();
 let _selectedMachineId = '';
 let _selectedMachineKey = '';
+let _panelZoneModes = new Map();
 let _dataSource = 'inference_records';
 let _manualResolvedBatchRoot = '';
 let _pipelineSteps = [];
@@ -819,6 +880,7 @@ function renderPanels(panels, emptyMessage) {
   _selected = new Set();
   _selectedMachineId = '';
   _selectedMachineKey = '';
+  _panelZoneModes = new Map();
   _previewPathByPanel = new Map();
   const root = document.getElementById('panel-list');
   if (!panels.length) {
@@ -829,7 +891,7 @@ function renderPanels(panels, emptyMessage) {
   }
 
   const wrap = document.createElement('div');
-  wrap.style.cssText = 'background:#313244;border-radius:10px;overflow:hidden;';
+  wrap.className = 'panel-table-wrap';
   const table = document.createElement('table');
   table.className = 'train-panel-table';
   table.style.cssText = 'width:100%;border-collapse:collapse;';
@@ -838,20 +900,22 @@ function renderPanels(panels, emptyMessage) {
   const headRow = document.createElement('tr');
   headRow.style.cssText = 'background:#11111b;color:#a6adc8;font-size:.78rem;text-align:left;';
   const columns = _dataSource === 'manual_folder' ? [
-    {text: '', width: '30px'},
+    {text: '', width: '36px'},
+    {text: '訓練區域', width: '150px'},
     {text: 'Panel 資料夾'},
-    {text: '機種 ID'},
-    {text: 'Lighting'},
-    {text: '樣本確認'},
-    {text: '圖片來源路徑', width: '44%'},
+    {text: '機種 ID', width: '120px'},
+    {text: 'Lighting', width: '160px'},
+    {text: '樣本確認', width: '92px'},
+    {text: '圖片來源路徑', width: '230px'},
   ] : [
-    {text: '', width: '30px'},
-    {text: 'Glass ID'},
-    {text: '機種 ID'},
-    {text: '日期'},
-    {text: '機台'},
-    {text: 'AI 判定'},
-    {text: '圖片來源路徑', width: '34%'},
+    {text: '', width: '36px'},
+    {text: '訓練區域', width: '150px'},
+    {text: 'Glass ID', width: '112px'},
+    {text: '機種 ID', width: '122px'},
+    {text: '日期', width: '120px'},
+    {text: '機台', width: '72px'},
+    {text: 'AI 判定', width: '72px'},
+    {text: '圖片來源路徑', width: '256px'},
   ];
   columns.forEach(col => {
     const th = document.createElement('th');
@@ -866,6 +930,7 @@ function renderPanels(panels, emptyMessage) {
   for (const p of panels) {
     const panelPath = p.image_dir || p.image_path || '';
     const previewPath = p.preview_image_path || '';
+    _panelZoneModes.set(panelPath, {inner: true, edge: true});
     if (panelPath && previewPath) {
       _previewPathByPanel.set(panelPath, previewPath);
     }
@@ -884,6 +949,8 @@ function renderPanels(panels, emptyMessage) {
     checkTd.appendChild(check);
     tr.appendChild(checkTd);
 
+    tr.appendChild(createPanelZoneCell(tr));
+
     appendTextCell(tr, p.glass_id || '', 'font-family:monospace;color:#cdd6f4;font-size:.82rem;');
     appendTextCell(tr, p.model_id || '', 'font-family:monospace;color:#cdd6f4;font-size:.82rem;');
     if (_dataSource === 'manual_folder') {
@@ -896,7 +963,8 @@ function renderPanels(panels, emptyMessage) {
       appendTextCell(tr, p.machine_no || '', 'color:#a6adc8;font-size:.82rem;');
       appendTextCell(tr, p.ai_judgment || '-', `font-size:.82rem;color:${p.ai_judgment === 'OK' ? '#a6e3a1' : '#fab387'};`);
     }
-    appendTextCell(tr, panelPath || '-', '', 'path-cell');
+    const pathCell = appendTextCell(tr, panelPath || '-', '', 'path-cell');
+    pathCell.title = panelPath || '-';
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
@@ -911,6 +979,50 @@ function appendTextCell(row, value, styleText, className) {
   if (className) td.className = className;
   td.textContent = String(value);
   row.appendChild(td);
+  return td;
+}
+
+function createPanelZoneCell(tr) {
+  const td = document.createElement('td');
+  td.className = 'panel-zone-cell';
+  td.onclick = event => event.stopPropagation();
+  const options = document.createElement('span');
+  options.className = 'panel-zone-options';
+  for (const zone of ['inner', 'edge']) {
+    const label = document.createElement('label');
+    label.className = 'panel-zone-option';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = true;
+    input.disabled = true;
+    input.className = 'panel-zone-input';
+    input.dataset.zone = zone;
+    input.setAttribute('aria-label', zone.toUpperCase());
+    input.onchange = event => setPanelZone(tr, zone, event.target.checked);
+    label.append(input, document.createTextNode(zone.toUpperCase()));
+    options.appendChild(label);
+  }
+  td.appendChild(options);
+  return td;
+}
+
+function setPanelZone(tr, zone, checked) {
+  const path = tr.dataset.path;
+  const current = _panelZoneModes.get(path) || {inner: true, edge: true};
+  const next = {...current, [zone]: checked};
+  if (!next.inner && !next.edge) {
+    tr.querySelector(`.panel-zone-input[data-zone="${zone}"]`).checked = true;
+    capAlert('每片 PANEL 至少要保留 INNER 或 EDGE 其中一種。', {type: 'warn', title: '訓練區域不可全關'});
+    return;
+  }
+  _panelZoneModes.set(path, next);
+  updateNext();
+}
+
+function panelModeForPath(path) {
+  const zones = _panelZoneModes.get(path) || {inner: true, edge: true};
+  if (zones.inner && zones.edge) return 'full';
+  return zones.inner ? 'inner_only' : 'edge_only';
 }
 
 const SELECTED_PANEL_COLOR = '#a6e3a1';
@@ -956,6 +1068,7 @@ function refreshSelectedVisuals() {
     chk.style.color = '';
     chk.style.borderColor = '#45475a';
     chk.style.fontWeight = '';
+    tr.querySelectorAll('.panel-zone-input').forEach(input => { input.disabled = true; });
   });
   const ordered = Array.from(_selected);
   ordered.forEach((path, idx) => {
@@ -968,6 +1081,7 @@ function refreshSelectedVisuals() {
     chk.style.color = '#1e1e2e';
     chk.style.borderColor = SELECTED_PANEL_COLOR;
     chk.style.fontWeight = '700';
+    tr.querySelectorAll('.panel-zone-input').forEach(input => { input.disabled = false; });
   });
 }
 
@@ -977,11 +1091,28 @@ function updateNext() {
         ? `（目標機種 ${_selectedMachineId}，前 ${MACHINE_PREFIX_LEN} 碼 ${_selectedMachineKey}）`
         : `（機種 ${_selectedMachineId}）`)
     : '';
-  document.getElementById('sel-count').textContent =
-    `已選 ${_selected.size} 片（全部完整切 tile） ${machineText}`;
+  const selectedModes = Array.from(_selected, panelModeForPath);
+  const innerCount = selectedModes.filter(mode => mode !== 'edge_only').length;
+  const edgeCount = selectedModes.filter(mode => mode !== 'inner_only').length;
+  const requiredZones = new Set(
+    (TRAINING_SCOPE.selected_units || []).map(unit => String(unit).split('-').pop())
+  );
+  if (!requiredZones.size) {
+    requiredZones.add('inner');
+    requiredZones.add('edge');
+  }
+  const missingZones = [];
+  if (requiredZones.has('inner') && innerCount === 0) missingZones.push('INNER');
+  if (requiredZones.has('edge') && edgeCount === 0) missingZones.push('EDGE');
+  const countEl = document.getElementById('sel-count');
+  const missingText = _selected.size && missingZones.length ? `｜尚缺 ${missingZones.join('、')}` : '';
+  countEl.textContent =
+    `已選 ${_selected.size} 片｜INNER ${innerCount} 片｜EDGE ${edgeCount} 片${missingText} ${machineText}`;
+  countEl.style.color = missingText ? '#fab387' : '#a6e3a1';
   const btn = document.getElementById('next-btn');
   const manualConfirmed = _dataSource !== 'manual_folder' || document.getElementById('manual-confirm-normal').checked;
-  btn.disabled = _selected.size === 0 || !manualConfirmed;
+  btn.disabled = _selected.size === 0 || !manualConfirmed || missingZones.length > 0;
+  btn.title = missingZones.length ? `目前訓練範圍仍需要 ${missingZones.join('、')} tile` : '';
   btn.style.opacity = btn.disabled ? .4 : 1;
 }
 
@@ -993,6 +1124,10 @@ const TRAIN_PARAM_KEYS = [
   {key: 'coreset_ratio', type: 'float',  min: 0.01, max: 0.5},
   {key: 'precision',     type: 'select', choices: ['float32','float16'], default: 'float16'},
   {key: 'feature_layers', type: 'select', choices: ['layer2_layer3','layer3'], default: 'layer2_layer3'},
+  {key: 'feature_pool_kernel_size', type: 'select_int', choices: [3,5], default: 3},
+  {key: 'feature_cleaning_mode', type: 'select', choices: ['off','knn_cosine_q99_v1'], default: 'off'},
+  {key: 'feature_cleaning_scope', type: 'select', choices: ['inner_only','inner_and_edge'], default: 'inner_only'},
+  {key: 'feature_cleaning_keep_ratio', type: 'percent_ratio', min: 90, max: 100, default: 0.99},
 ];
 
 function collectTrainingParams() {
@@ -1000,10 +1135,11 @@ function collectTrainingParams() {
   const params = {};
   for (const spec of TRAIN_PARAM_KEYS) {
     const el = document.getElementById('tp-' + spec.key);
+    if (el.disabled) continue;
     el.classList.remove('invalid');
-    if (spec.type === 'select') {
+    if (spec.type === 'select' || spec.type === 'select_int') {
       // 維持預設值不送 key（後端套 dataclass 預設，manifest 仍誠實記錄 cfg 值）
-      const sel = el.value;
+      const sel = spec.type === 'select_int' ? parseInt(el.value, 10) : el.value;
       if (sel === spec.default) continue;
       if (!spec.choices.includes(sel)) {
         el.classList.add('invalid');
@@ -1014,6 +1150,17 @@ function collectTrainingParams() {
     }
     const raw = el.value.trim();
     if (!raw) continue;
+    if (spec.type === 'percent_ratio') {
+      const pct = parseFloat(raw);
+      if (!Number.isFinite(pct) || pct < spec.min || pct > spec.max) {
+        el.classList.add('invalid');
+        return {params: null, error: `${spec.key} 必須是 ${spec.min}% ~ ${spec.max}% 之間的數字`};
+      }
+      const ratio = pct / 100;
+      if (Math.abs(ratio - spec.default) < 1e-9) continue;
+      params[spec.key] = ratio;
+      continue;
+    }
     const num = spec.type === 'int' ? parseInt(raw, 10) : parseFloat(raw);
     if (!Number.isFinite(num) || num < spec.min || num > spec.max) {
       el.classList.add('invalid');
@@ -1071,7 +1218,13 @@ function submitStart() {
     capAlert(pipelineError, {type: 'error', title: '前處理設定錯誤'});
     return;
   }
-  const body = {machine_id: mid, panel_paths: Array.from(_selected), training_scope: TRAINING_SCOPE};
+  const panelPaths = Array.from(_selected);
+  const body = {
+    machine_id: mid,
+    panel_paths: panelPaths,
+    panel_modes: panelPaths.map(panelModeForPath),
+    training_scope: TRAINING_SCOPE,
+  };
   body.training_data_source = _dataSource === 'manual_folder'
     ? {type: 'manual_folder', batch_root: _manualResolvedBatchRoot, confirmed_normal: true}
     : {type: 'inference_records'};

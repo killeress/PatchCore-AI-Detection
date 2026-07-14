@@ -361,6 +361,19 @@ def test_polygon_corner_ordering():
     print("✅ test_polygon_corner_ordering")
 
 
+def test_polyfit_polygon_rejects_non_linear_edge_samples():
+    """彎曲/污染的邊緣點不可只因面積夠大就被當成有效 polygon。"""
+    binary = np.zeros((2000, 3000), dtype=np.uint8)
+    for x in range(500, 2500):
+        normalized_x = (x - 1500) / 1000
+        top = int(round(300 + 80 * normalized_x * normalized_x))
+        binary[top:1700, x] = 255
+
+    polygon = _polyfit_polygon(binary, (500, 300, 2500, 1700), tile_size=512)
+
+    assert polygon is None
+
+
 def test_preprocess_image_populates_panel_polygon():
     """preprocess_image 跑完後 result.panel_polygon 必須是 (4,2) float32"""
     img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"

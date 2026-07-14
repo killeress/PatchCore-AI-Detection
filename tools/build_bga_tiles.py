@@ -10,11 +10,11 @@ Pipeline:
 - Debug overlay per source image for verification
 """
 
+from __future__ import annotations
+
 """[DEPRECATED] 此腳本將被 capi_train_new 取代。
 新機種訓練請用 web wizard `/train/new`，舊機種（CAPI 3F）遷移完成後此檔可刪除。
 """
-
-from __future__ import annotations
 
 import warnings
 warnings.warn(

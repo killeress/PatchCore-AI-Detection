@@ -108,6 +108,72 @@ def test_preprocess_panels_to_pool_all_panels_have_inner_and_edge(tmp_path):
         assert "edge" in zones, f"panel {i + 1} 應該包含 edge tile"
 
 
+def test_preprocess_panels_to_pool_respects_per_panel_zone_modes(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from capi_preprocess import PreprocessConfig
+    from capi_train_new import preprocess_panels_to_pool, TrainingConfig
+
+    panel_dirs = [tmp_path / "panel_inner", tmp_path / "panel_edge"]
+    for panel_dir in panel_dirs:
+        panel_dir.mkdir()
+
+    tiles = [
+        SimpleNamespace(
+            tile_id=1,
+            image=np.zeros((16, 16), dtype=np.uint8),
+            zone="inner",
+            is_corner=False,
+        ),
+        SimpleNamespace(
+            tile_id=2,
+            image=np.zeros((16, 16), dtype=np.uint8),
+            zone="edge",
+            is_corner=True,
+        ),
+    ]
+    result = SimpleNamespace(polygon_detection_failed=False, tiles=tiles)
+    monkeypatch.setattr(
+        "capi_train_new.preprocess_panel_folder",
+        lambda _panel, _cfg: {"G0F00000": result},
+    )
+
+    class MockDB:
+        def __init__(self):
+            self.tiles_per_call = []
+
+        def insert_tile_pool(self, job_id, tile_records):
+            self.tiles_per_call.append(list(tile_records))
+            return []
+
+    db = MockDB()
+    cfg = TrainingConfig(
+        machine_id="TEST",
+        panel_paths=panel_dirs,
+        over_review_root=tmp_path / "or_unused",
+    )
+
+    stats = preprocess_panels_to_pool(
+        job_id="j_modes",
+        cfg=cfg,
+        preprocess_cfg=PreprocessConfig(),
+        db=db,
+        thumb_dir=tmp_path / "thumbs",
+        log=lambda _msg: None,
+        panel_modes=["inner_only", "edge_only"],
+    )
+
+    assert [[tile["zone"] for tile in batch] for batch in db.tiles_per_call] == [
+        ["inner"],
+        ["edge"],
+    ]
+    assert stats["panel_success"] == 2
+    assert stats["panel_success_inner_only"] == 1
+    assert stats["panel_success_edge_only"] == 1
+
+
 def test_preprocess_panels_to_pool_logs_after_tiling_mode(tmp_path, monkeypatch):
     from types import SimpleNamespace
     import numpy as np

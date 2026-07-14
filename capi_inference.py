@@ -7689,7 +7689,12 @@ class CAPIInferencer:
         )
 
         preprocess_start = time.time()
-        panel_results = preprocess_panel_folder(panel_path, pre_cfg, image_files=preprocess_image_files)
+        panel_results = preprocess_panel_folder(
+            panel_path,
+            pre_cfg,
+            image_files=preprocess_image_files,
+            boundary_reference_files=image_files if aoi_only_mode else None,
+        )
         if not panel_results and not aoi_only_mode:
             logger.warning(f"[v2] {panel_path}: preprocess_panel_folder 回傳空結果")
             # 回傳與 v1 格式相容的空結果

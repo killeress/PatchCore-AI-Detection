@@ -415,7 +415,11 @@ class TestValidateTrainingParams:
     def test_full_valid_dict(self):
         from capi_web import CAPIWebHandler
         raw = {"batch_size": 16, "coreset_ratio": 0.05,
-               "max_epochs": 2, "feature_layers": "layer3"}
+               "max_epochs": 2, "feature_layers": "layer3",
+               "feature_pool_kernel_size": 5,
+               "feature_cleaning_mode": "knn_cosine_q99_v1",
+               "feature_cleaning_scope": "inner_and_edge",
+               "feature_cleaning_keep_ratio": 0.97}
         params, err = CAPIWebHandler._validate_training_params(raw)
         assert err is None
         assert params == raw
@@ -443,6 +447,8 @@ class TestValidateTrainingParams:
             {"coreset_ratio": 0.6},
             {"max_epochs": 0},
             {"max_epochs": 100},
+            {"feature_cleaning_keep_ratio": 0.89},
+            {"feature_cleaning_keep_ratio": 1.01},
         ]:
             _, err = CAPIWebHandler._validate_training_params(raw)
             assert err and "out of range" in err, f"expected error for {raw}"
@@ -457,6 +463,13 @@ class TestValidateTrainingParams:
         from capi_web import CAPIWebHandler
         _, err = CAPIWebHandler._validate_training_params({"batch_size": True})
         assert err and "must be int" in err
+
+    def test_bool_not_treated_as_cleaning_ratio(self):
+        from capi_web import CAPIWebHandler
+        _, err = CAPIWebHandler._validate_training_params(
+            {"feature_cleaning_keep_ratio": True}
+        )
+        assert err and "must be float" in err
 
     def test_non_dict_rejected(self):
         from capi_web import CAPIWebHandler
@@ -500,6 +513,29 @@ class TestValidateTrainingParams:
         from capi_web import CAPIWebHandler
         for raw in [{"feature_layers": "layer2"}, {"feature_layers": "layer4"},
                     {"feature_layers": ["layer3"]}]:
+            _, err = CAPIWebHandler._validate_training_params(raw)
+            assert err and "must be one of" in err, f"expected error for {raw}"
+
+    def test_feature_experiment_choices_accepted(self):
+        from capi_web import CAPIWebHandler
+        raw = {
+            "feature_pool_kernel_size": 5,
+            "feature_cleaning_mode": "knn_cosine_q99_v1",
+            "feature_cleaning_scope": "inner_and_edge",
+            "feature_cleaning_keep_ratio": 0.97,
+        }
+        params, err = CAPIWebHandler._validate_training_params(raw)
+        assert err is None
+        assert params == raw
+
+    def test_feature_experiment_invalid_choices_rejected(self):
+        from capi_web import CAPIWebHandler
+        for raw in [
+            {"feature_pool_kernel_size": 4},
+            {"feature_pool_kernel_size": "5"},
+            {"feature_cleaning_mode": "knn_cosine_q97"},
+            {"feature_cleaning_scope": "edge_only"},
+        ]:
             _, err = CAPIWebHandler._validate_training_params(raw)
             assert err and "must be one of" in err, f"expected error for {raw}"
 
@@ -603,6 +639,10 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
             "batch_size": 16, "coreset_ratio": 0.05,
             "max_epochs": 2,
             "feature_layers": "layer3",
+            "feature_pool_kernel_size": 5,
+            "feature_cleaning_mode": "knn_cosine_q99_v1",
+            "feature_cleaning_scope": "inner_and_edge",
+            "feature_cleaning_keep_ratio": 0.97,
         },
         "tile_stride": 128,
         "image_preprocess_pipeline": [
@@ -1115,11 +1155,39 @@ def test_train_new_done_template_uses_chinese_summary_labels():
     assert "<th>光源</th>" in text
     assert "<th>區域</th>" in text
     assert "訓練 tile" in text
+    assert "特徵鄰域聚合" in text
+    assert "特徵清洗" in text
+    assert "實驗模型" in text
     assert "模型包" in text
     assert "<th>Lighting</th>" not in text
     assert "<th>Zone</th>" not in text
     assert "BUNDLE</span>" not in text
     assert "{{ info.lighting_label }}" in text
+
+
+def test_models_info_shows_all_recorded_custom_training_settings():
+    template_path = Path(__file__).resolve().parent.parent / "templates" / "models.html"
+    text = template_path.read_text(encoding="utf-8")
+
+    for field in (
+        "pp.precision",
+        "pp.feature_pool_kernel_size",
+        "pp.feature_cleaning_mode",
+        "pp.feature_cleaning_scope",
+        "pp.feature_cleaning_keep_ratio",
+        "m.tile_stride",
+        "m.preprocess_after_tiling",
+        "m.image_preprocess_pipeline",
+        "m.training_data_source",
+        "d.training_panel_modes",
+    ):
+        assert field in text
+
+    assert "特徵鄰域聚合" in text
+    assert "特徵域清洗" in text
+    assert "前處理套用時機" in text
+    assert "影像前處理流程" in text
+    assert "PANEL 切片設定" in text
 
 
 def test_train_new_select_panel_renderer_uses_text_content():
@@ -1143,6 +1211,13 @@ def test_train_new_select_has_pipeline_preview_controls():
     assert "p.preview_image_path" in text
     assert "responseText ? JSON.parse(responseText)" in text
     assert "preprocess_after_tiling: afterTiling" in text
+    assert "tp-feature_pool_kernel_size" in text
+    assert "tp-feature_cleaning_mode" in text
+    assert "tp-feature_cleaning_scope" in text
+    assert "tp-feature_cleaning_keep_ratio" in text
+    assert "type: 'percent_ratio'" in text
+    assert "沿用原 bundle，不可修改" in text
+    assert "if (el.disabled) continue;" in text
 
 
 def test_record_detail_templates_show_preprocess_pipeline():
@@ -1501,6 +1576,70 @@ def test_handle_train_new_page_lists_all_active_jobs():
     assert h._sent_response[0]["body"] == "<html>step1</html>"
 
 
+def test_stale_train_job_cleanup_removes_temp_data(tmp_path, monkeypatch):
+    from capi_database import CAPIDatabase
+    from capi_web import CAPIWebHandler
+
+    monkeypatch.chdir(tmp_path)
+    db = CAPIDatabase(tmp_path / "test.db")
+    job_id = "stale_web_cleanup"
+    db.create_training_job(job_id, "M", [])
+    db.insert_tile_pool(job_id, [
+        {
+            "lighting": "G0F00000",
+            "zone": "inner",
+            "source": "ok",
+            "source_path": str(tmp_path / "tile.png"),
+            "thumb_path": str(tmp_path / "thumb.png"),
+        },
+    ])
+    for root in ("training_staging", "training_runs", "train_new_thumbs"):
+        target = tmp_path / ".tmp" / root / job_id
+        target.mkdir(parents=True)
+        (target / "tile.png").write_bytes(b"tile")
+
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    CAPIWebHandler._train_slot = {"lock": threading.Lock(), "active_job_id": None}
+
+    updated = CAPIWebHandler._mark_train_new_stale_if_needed(
+        db,
+        db.get_training_job(job_id),
+    )
+
+    assert updated["state"] == "failed"
+    assert db.get_training_job(job_id)["state"] == "failed"
+    assert db.list_tile_pool(job_id) == []
+    assert not (tmp_path / ".tmp" / "training_staging" / job_id).exists()
+    assert not (tmp_path / ".tmp" / "training_runs" / job_id).exists()
+    assert not (tmp_path / ".tmp" / "train_new_thumbs" / job_id).exists()
+
+
+def test_reconcile_train_new_artifacts_keeps_review_thumbnails(tmp_path, monkeypatch):
+    from capi_database import CAPIDatabase
+    from capi_web import CAPIWebHandler
+
+    monkeypatch.chdir(tmp_path)
+    db = CAPIDatabase(tmp_path / "test.db")
+    job_id = "review_web_cleanup"
+    db.create_training_job(job_id, "M", [])
+    db.update_training_job_state(job_id, "review")
+    for root in ("training_staging", "training_runs", "train_new_thumbs"):
+        target = tmp_path / ".tmp" / root / job_id
+        target.mkdir(parents=True)
+        (target / "tile.png").write_bytes(b"tile")
+
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    CAPIWebHandler._train_slot = {"lock": threading.Lock(), "active_job_id": None}
+
+    CAPIWebHandler._reconcile_train_new_artifacts(db)
+
+    assert not (tmp_path / ".tmp" / "training_staging" / job_id).exists()
+    assert not (tmp_path / ".tmp" / "training_runs" / job_id).exists()
+    assert (tmp_path / ".tmp" / "train_new_thumbs" / job_id / "tile.png").exists()
+
+
 def test_handle_models_list_filters_by_machine_id():
     server = MagicMock()
     server.database.list_model_bundles.return_value = [{"id": 1, "machine_id": "M"}]
@@ -1638,6 +1777,28 @@ def test_handle_models_retrain_submodel_with_panels_creates_job():
     MockThread.return_value.start.assert_called_once()
 
 
+def test_handle_models_retrain_submodel_with_panels_rejects_bundle_level_override():
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    h = _make_handler_with_server(server, "/api/models/1/retrain_submodel_with_panels")
+    payload = {
+        "lighting": "G0F00000",
+        "zone": "inner",
+        "panel_paths": ["/panel/1"],
+        "training_params": {"feature_cleaning_mode": "knn_cosine_q99_v1"},
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_models_retrain_submodel_with_panels()
+
+    assert h._sent_response[0]["status"] == 400
+    assert "inherit bundle-level" in json.loads(h._sent_response[0]["body"])["error"]
+    server.database.create_training_job.assert_not_called()
+
+
 def test_handle_train_new_start_persists_partial_training_scope():
     from capi_web import CAPIWebHandler
 
@@ -1681,6 +1842,44 @@ def test_handle_train_new_start_persists_partial_training_scope():
     assert kwargs["panel_modes"] == ["full"] * 8
 
 
+def test_handle_train_new_start_partial_rejects_bundle_level_override():
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.database.get_model_bundle.return_value = {
+        "id": 7,
+        "machine_id": "M",
+        "bundle_path": "model/M-bundle",
+    }
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    payload = {
+        "machine_id": "M",
+        "panel_paths": ["/p0"],
+        "training_params": {
+            "feature_pool_kernel_size": 5,
+            "feature_cleaning_scope": "inner_and_edge",
+            "feature_cleaning_keep_ratio": 0.97,
+        },
+        "training_scope": {
+            "mode": "partial",
+            "target_bundle_id": 7,
+            "selected_units": ["G0F00000-inner"],
+        },
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 400
+    error = json.loads(h._sent_response[0]["body"])["error"]
+    assert "inherit bundle-level" in error
+    assert "feature_cleaning_scope" in error
+    assert "feature_cleaning_keep_ratio" in error
+    server.database.create_training_job.assert_not_called()
+
+
 def test_handle_train_new_start_accepts_variable_panel_count_as_full():
     from capi_web import CAPIWebHandler
 
@@ -1707,6 +1906,100 @@ def test_handle_train_new_start_accepts_variable_panel_count_as_full():
     MockThread.return_value.start.assert_called_once()
 
 
+def test_handle_train_new_start_persists_per_panel_zone_modes():
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.database.create_training_job = MagicMock()
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    payload = {
+        "machine_id": "M",
+        "panel_paths": ["/p0", "/p1"],
+        "panel_modes": ["inner_only", "edge_only"],
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    with patch("capi_train_new.generate_job_id", return_value="train_M_20260714_abcd"):
+        with patch("capi_web.threading.Thread") as MockThread:
+            MockThread.return_value.start = MagicMock()
+            h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 200
+    kwargs = server.database.create_training_job.call_args.kwargs
+    assert kwargs["panel_paths"] == ["/p0", "/p1"]
+    assert kwargs["panel_modes"] == ["inner_only", "edge_only"]
+
+
+@pytest.mark.parametrize(
+    "panel_modes, error_fragment",
+    [
+        (["full"], "same length"),
+        (["full", "unknown"], "invalid panel mode"),
+        (["edge_only", "edge_only"], "INNER"),
+    ],
+)
+def test_handle_train_new_start_rejects_invalid_panel_modes(panel_modes, error_fragment):
+    server = MagicMock()
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    body = json.dumps({
+        "machine_id": "M",
+        "panel_paths": ["/p0", "/p1"],
+        "panel_modes": panel_modes,
+    }).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 400
+    error = json.loads(h._sent_response[0]["body"])["error"]
+    assert error_fragment in error
+    server.database.create_training_job.assert_not_called()
+
+
+def test_handle_train_new_start_partial_edge_unit_accepts_edge_only_panels():
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.database.get_model_bundle.return_value = {
+        "id": 7,
+        "machine_id": "M",
+        "bundle_path": "model/M-bundle",
+    }
+    server.database.create_training_job = MagicMock()
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    payload = {
+        "machine_id": "M",
+        "panel_paths": ["/p0"],
+        "panel_modes": ["edge_only"],
+        "training_scope": {
+            "mode": "partial",
+            "target_bundle_id": 7,
+            "selected_units": ["G0F00000-edge"],
+        },
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    with patch("capi_train_new.generate_job_id", return_value="train_M_20260714_edge"):
+        with patch("capi_web.threading.Thread") as MockThread:
+            MockThread.return_value.start = MagicMock()
+            h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 200
+    kwargs = server.database.create_training_job.call_args.kwargs
+    assert kwargs["panel_modes"] == ["edge_only"]
+
+
 def test_handle_train_new_start_rejects_empty_panel_paths():
     server = MagicMock()
     h = _make_handler_with_server(server, "/api/train/new/start")
@@ -1726,7 +2019,13 @@ def test_train_new_select_page_no_fixed_panel_limit_text():
     text = template_path.read_text(encoding="utf-8")
 
     assert "已選 0 片" in text
-    assert "全部完整切 tile" in text
+    assert "panel-zone-input" in text
+    assert "panel_modes" in text
+    assert "inner_only" in text
+    assert "edge_only" in text
+    assert "panel-table-wrap" in text
+    assert "text-overflow:ellipsis" in text
+    assert "全部完整切 tile" not in text
     assert "PANEL_LIMIT" not in text
     assert "已選 0/8" not in text
     assert "僅 4 角" not in text
