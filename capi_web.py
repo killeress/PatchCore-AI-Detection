@@ -2702,6 +2702,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     TRAIN_NEW_DEFAULT_TILE_STRIDE = 256
     TRAIN_NEW_MIN_TILE_STRIDE = 64
     TRAIN_NEW_MAX_TILE_STRIDE = 512
+    PATCHCORE_BUNDLE_LOCKED_TRAINING_PARAMS = frozenset({
+        "feature_pool_kernel_size",
+        "feature_cleaning_mode",
+        "feature_cleaning_scope",
+        "feature_cleaning_keep_ratio",
+    })
 
     # 單子模型重訓 state（一次只允許一個 job）
     _submodel_retrain_state: dict = {
@@ -2804,6 +2810,113 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         return False
 
     @classmethod
+    def _cleanup_train_new_job_artifacts(
+        cls,
+        db,
+        job_id: str,
+        *,
+        remove_training_data: bool = True,
+        reason: str = "",
+    ) -> Optional[dict]:
+        from capi_model_registry import cleanup_training_job_artifacts
+
+        try:
+            result = cleanup_training_job_artifacts(
+                db,
+                job_id,
+                remove_training_data=remove_training_data,
+            )
+        except Exception:
+            logger.warning(
+                "training temp cleanup failed: job_id=%s reason=%s",
+                job_id,
+                reason,
+                exc_info=True,
+            )
+            return None
+
+        if result.get("deleted_files") or result.get("deleted_tile_rows"):
+            logger.info(
+                "training temp cleanup: job_id=%s reason=%s files=%s rows=%s freed=%s",
+                job_id,
+                reason or "unspecified",
+                result.get("deleted_files", 0),
+                result.get("deleted_tile_rows", 0),
+                result.get("freed_bytes", 0),
+            )
+        return result
+
+    @classmethod
+    def _reconcile_train_new_artifacts(cls, db) -> None:
+        """Server 啟動時回收 kill/失敗 job 的暫存資料。
+
+        review / completed job 的 thumbnails 是後續檢視與重訓資料，保留；
+        staging / runner 輸出則一律視為單次訓練暫存。
+        """
+        processed_job_ids = set()
+
+        try:
+            active_jobs = db.list_active_training_jobs()
+        except Exception:
+            logger.warning("cannot inspect active training jobs for temp cleanup", exc_info=True)
+            active_jobs = []
+
+        for job in active_jobs or []:
+            job_id = str(job.get("job_id") or "")
+            if not job_id:
+                continue
+            if job.get("state") in ("preprocess", "train"):
+                processed_job_ids.add(job_id)
+                cls._mark_train_new_stale_if_needed(db, job)
+
+        roots = (
+            Path(".tmp/training_staging"),
+            Path(".tmp/training_runs"),
+            Path(".tmp/train_new_thumbs"),
+        )
+        job_ids = set()
+        for root in roots:
+            try:
+                if root.is_dir():
+                    job_ids.update(
+                        child.name
+                        for child in root.iterdir()
+                        if child.is_dir() and not child.is_symlink()
+                    )
+            except OSError:
+                logger.warning("cannot scan training temp root: %s", root, exc_info=True)
+
+        for job_id in sorted(job_ids - processed_job_ids):
+            try:
+                job = db.get_training_job(job_id)
+            except Exception:
+                logger.warning("cannot inspect training job: %s", job_id, exc_info=True)
+                continue
+
+            if not job:
+                cls._cleanup_train_new_job_artifacts(
+                    db, job_id, reason="orphan temp directory"
+                )
+                continue
+
+            state = job.get("state")
+            if state == "failed":
+                cls._cleanup_train_new_job_artifacts(
+                    db, job_id, reason="failed job"
+                )
+            elif state in ("review", "completed"):
+                cls._cleanup_train_new_job_artifacts(
+                    db,
+                    job_id,
+                    remove_training_data=False,
+                    reason=f"{state} ephemeral cleanup",
+                )
+            elif state not in ("preprocess", "train"):
+                cls._cleanup_train_new_job_artifacts(
+                    db, job_id, reason=f"unexpected state={state}"
+                )
+
+    @classmethod
     def _mark_train_new_stale_if_needed(cls, db, job: Optional[dict]) -> Optional[dict]:
         if not job or job.get("state") not in ("preprocess", "train"):
             return job
@@ -2812,6 +2925,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         error = "interrupted: server restarted or training worker is not running"
         db.update_training_job_state(job["job_id"], "failed", error_message=error)
+        cls._cleanup_train_new_job_artifacts(db, job["job_id"], reason=error)
         cls._drop_job_runtime(job["job_id"])
         slot = cls._train_slot
         with slot["lock"]:
@@ -9434,8 +9548,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         target_bundle = None
+        target_patchcore_params = {}
         if scope["mode"] == "partial":
             target_bundle = self._capi_server_instance.database.get_model_bundle(scope["target_bundle_id"])
+            try:
+                from capi_model_registry import _read_manifest
+                target_manifest = _read_manifest(Path(target_bundle["bundle_path"]))
+                target_patchcore_params = target_manifest.get("patchcore_params") or {}
+            except Exception:
+                target_patchcore_params = {}
 
         template = self.jinja_env.get_template("train_new/step1_select.html")
         html = template.render(
@@ -9443,6 +9564,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             active_jobs=self._list_open_train_new_jobs(),
             training_scope=scope,
             target_bundle=target_bundle,
+            target_patchcore_params=target_patchcore_params,
             selected_lightings=self._scope_selected_lightings(scope),
             machine_prefix_len=self.TRAIN_NEW_MACHINE_PREFIX_LEN,
             preprocess_methods=get_method_specs(),
@@ -9590,6 +9712,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "ng_median": m.get("ng_median"),
                 "ng_max": m.get("ng_max"),
                 "elapsed_seconds": elapsed,
+                "feature_pool_kernel_size": m.get(
+                    "feature_pool_kernel_size",
+                    (manifest.get("patchcore_params") or {}).get("feature_pool_kernel_size", 3),
+                ),
+                "feature_cleaning": m.get("feature_cleaning") or {},
             }))
 
         overall_grade = manifest.get("overall_auroc_grade") or "n/a"
@@ -9606,6 +9733,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             panel_count=manifest.get("panel_count") or 0,
             panel_glass_ids=manifest.get("panel_glass_ids") or [],
             patchcore_params=manifest.get("patchcore_params") or {},
+            experimental_training=bool(manifest.get("experimental_training", False)),
             total_size_mb=total_size_bytes / 1e6,
             total_elapsed_seconds=total_elapsed,
             success_units=manifest.get("success_units") or len(units),
@@ -9943,9 +10071,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 cleaned[key] = val
                 continue
             try:
+                if isinstance(val, bool):
+                    raise TypeError
                 if spec["type"] is int:
-                    if isinstance(val, bool):
-                        raise TypeError
                     val = int(val)
                 else:
                     val = float(val)
@@ -10005,12 +10133,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         body: {
             "machine_id": "...",
-            "panel_paths": [...],   # 至少 1 片；所有 panel 都完整切 tile
+            "panel_paths": [...],   # 至少 1 片
+            "panel_modes": [...],   # optional; full / inner_only / edge_only
             "tile_stride": 256,     # optional; 512 means legacy non-overlap
             "training_params": {  # optional
                 "batch_size": 8,
                 "coreset_ratio": 0.1,
-                "max_epochs": 1
+                "max_epochs": 1,
+                "feature_pool_kernel_size": 3,
+                "feature_cleaning_mode": "off",
+                "feature_cleaning_scope": "inner_only",
+                "feature_cleaning_keep_ratio": 0.99
             },
             "image_preprocess_pipeline": [  # optional; omitted means recommended default
                 {"method": "bilateral", "params": {"diameter": 9}}
@@ -10022,10 +10155,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             }
         }
 
-        panel_modes 由後端推導；目前所有選到的 panel 都是 full。
+        panel_modes 未提供時由後端補成全 full，維持舊版呼叫相容。
         """
         from capi_train_new import (
-            generate_job_id, derive_panel_modes,
+            generate_job_id, normalize_panel_modes, panel_mode_zones,
         )
 
         try:
@@ -10050,7 +10183,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "panel_paths contains invalid path"}, status=400)
                 return
             clean_panel_paths.append(p.strip())
-        panel_modes = derive_panel_modes(len(clean_panel_paths))
+        try:
+            panel_modes = normalize_panel_modes(
+                params.get("panel_modes"), len(clean_panel_paths)
+            )
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
 
         training_data_source = params.get("training_data_source")
         if training_data_source is None:
@@ -10120,7 +10259,35 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if err:
             self._send_json({"error": err}, status=400)
             return
+        required_zones = {
+            zone for _lighting, zone in self._scope_selected_units(training_scope)
+        }
+        provided_zones = set()
+        for panel_mode in panel_modes:
+            provided_zones.update(panel_mode_zones(panel_mode))
+        missing_zones = required_zones - provided_zones
+        if missing_zones:
+            missing_label = "、".join(zone.upper() for zone in sorted(missing_zones))
+            self._send_json({
+                "error": (
+                    f"已選 PANEL 沒有提供 {missing_label} 訓練切片；"
+                    "請至少在一片 PANEL 勾選該區域"
+                )
+            }, status=400)
+            return
         if training_scope["mode"] == "partial":
+            locked_params = sorted(
+                set(training_params or {})
+                & self.PATCHCORE_BUNDLE_LOCKED_TRAINING_PARAMS
+            )
+            if locked_params:
+                self._send_json({
+                    "error": (
+                        "partial training must inherit bundle-level PatchCore params: "
+                        + ", ".join(locked_params)
+                    )
+                }, status=400)
+                return
             target_bundle = db.get_model_bundle(training_scope["target_bundle_id"])
             if not target_bundle:
                 self._send_json({"error": "target bundle not found"}, status=404)
@@ -10213,7 +10380,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """背景 thread：preprocess + 抽 NG → state=review。
 
         panel_modes 與 panel_paths 同長度；None 視同全 full（向下相容舊呼叫者）。
-        失敗條件：至少要有 1 片 full panel 成功前處理。
+        失敗條件：至少要有 1 片 panel 成功寫入 tile。
         """
         import traceback
         from pathlib import Path as _Path
@@ -10273,8 +10440,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 target_lightings=target_lightings,
                 target_units=target_units,
             )
-            if stats["panel_success_full"] <= 0:
-                raise RuntimeError("沒有任何 full panel 前處理成功")
+            if stats["panel_success"] <= 0:
+                raise RuntimeError("沒有任何 panel 前處理成功")
 
             log(f"抽 NG tile（每 lighting 上限 {NG_TILES_PER_LIGHTING} 個）")
             ng_stats = CAPIWebHandler._sample_ng_tiles_compat(
@@ -10291,6 +10458,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             traceback.print_exc()
             db.update_training_job_state(job_id, "failed", error_message=str(e))
+            CAPIWebHandler._cleanup_train_new_job_artifacts(
+                db, job_id, reason="preprocess failed"
+            )
             log(f"✗ 失敗: {e}")
             CAPIWebHandler._drop_job_runtime(job_id)
 
@@ -10570,8 +10740,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         )
         panel_paths = [Path(p) for p in job.get("panel_paths", [])]
         panel_modes = job.get("panel_modes") or ["full"] * len(panel_paths)
-        # corners_only panel 只有 4 個尖角 tile，畫前處理預覽會缺長邊與 inner，
-        # 改只挑 full panel 當預覽來源；長度不齊或沒 full 時 fallback 全部 panel。
+        # 預覽優先挑 full panel，能同時看到 inner / edge；沒有 full 時 fallback 全部 panel。
         full_panel_paths = [
             p for p, m in zip(panel_paths, panel_modes) if m == "full"
         ] or panel_paths
@@ -10771,6 +10940,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         db.update_training_job_state(job_id, "failed", error_message="cancelled by user")
+        CAPIWebHandler._cleanup_train_new_job_artifacts(
+            db, job_id, reason="cancelled from review"
+        )
         CAPIWebHandler._drop_job_runtime(job_id)
         self._send_json({"ok": True, "job_id": job_id, "state": "failed"})
 
@@ -10884,8 +11056,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 max_epochs=patchcore_params.get("max_epochs", 1),
                 precision=patchcore_params.get("precision", "float32"),
                 feature_layers=patchcore_params.get("feature_layers", "layer2_layer3"),
+                feature_pool_kernel_size=patchcore_params.get("feature_pool_kernel_size", 3),
+                feature_cleaning_mode=patchcore_params.get("feature_cleaning_mode", "off"),
+                feature_cleaning_scope=patchcore_params.get(
+                    "feature_cleaning_scope", "inner_only",
+                ),
+                feature_cleaning_keep_ratio=patchcore_params.get(
+                    "feature_cleaning_keep_ratio", 0.99,
+                ),
             )
-            apply_user_training_params(cfg, job.get("training_params"), log_fn=log)
+            partial_training_params = dict(job.get("training_params") or {})
+            for key in CAPIWebHandler.PATCHCORE_BUNDLE_LOCKED_TRAINING_PARAMS:
+                partial_training_params.pop(key, None)
+            apply_user_training_params(cfg, partial_training_params, log_fn=log)
 
             selected_units = CAPIWebHandler._scope_selected_units(scope)
             if not selected_units:
@@ -10943,6 +11126,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "ng_used": result["ng_used"],
                     "panel_count": len(job.get("panel_paths") or []),
                     "panel_glass_ids": [Path(p).name for p in job.get("panel_paths", [])],
+                    "feature_pool_kernel_size": metrics.get(
+                        "feature_pool_kernel_size", cfg.feature_pool_kernel_size,
+                    ),
+                    "feature_cleaning_mode": cfg.feature_cleaning_mode,
+                    "feature_cleaning": metrics.get("feature_cleaning") or {},
                 }
                 append_submodel_history(bundle_dir, lighting, zone, entry)
                 refreshed_manifest = _read_manifest(bundle_dir)
@@ -11010,6 +11198,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             for line in _traceback.format_exc().rstrip().splitlines()[-8:]:
                 log(f"  {line}")
         finally:
+            try:
+                finished_job = db.get_training_job(job_id)
+                if finished_job and finished_job.get("state") == "failed":
+                    CAPIWebHandler._cleanup_train_new_job_artifacts(
+                        db, job_id, reason="partial training failed"
+                    )
+            except Exception:
+                logger.warning(
+                    "cannot finalize partial training cleanup: job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
             slot = CAPIWebHandler._train_slot
             with slot["lock"]:
                 if slot.get("active_job_id") == job_id:
@@ -11137,6 +11337,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
         finally:
+            try:
+                finished_job = db.get_training_job(job_id)
+                if finished_job and finished_job.get("state") == "failed":
+                    CAPIWebHandler._cleanup_train_new_job_artifacts(
+                        db, job_id, reason="training worker failed"
+                    )
+            except Exception:
+                logger.warning(
+                    "cannot finalize failed training cleanup: job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
             # 釋放訓練槽（讓下一個排隊的 job 能進入 train）
             slot = CAPIWebHandler._train_slot
             with slot["lock"]:
@@ -12248,6 +12460,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if err:
             self._send_json({"error": err}, status=400)
             return
+        locked_params = sorted(
+            set(training_params or {})
+            & self.PATCHCORE_BUNDLE_LOCKED_TRAINING_PARAMS
+        )
+        if locked_params:
+            self._send_json({
+                "error": (
+                    "single-unit retraining must inherit bundle-level PatchCore params: "
+                    + ", ".join(locked_params)
+                )
+            }, status=400)
+            return
 
         db = self._capi_server_instance.database
         bundle = db.get_model_bundle(bundle_id)
@@ -12350,7 +12574,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             preprocess_panels_to_pool, sample_ng_tiles, train_single_submodel,
             NG_TILES_PER_LIGHTING,
         )
-        from capi_model_registry import append_submodel_history, _read_manifest
+        from capi_model_registry import append_submodel_history, _read_manifest, _write_manifest
 
         state = CAPIWebHandler._submodel_retrain_state
         server_inst = self._capi_server_instance
@@ -12415,8 +12639,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 max_epochs=patchcore_params.get("max_epochs", 1),
                 precision=patchcore_params.get("precision", "float32"),
                 feature_layers=patchcore_params.get("feature_layers", "layer2_layer3"),
+                feature_pool_kernel_size=patchcore_params.get("feature_pool_kernel_size", 3),
+                feature_cleaning_mode=patchcore_params.get("feature_cleaning_mode", "off"),
+                feature_cleaning_scope=patchcore_params.get(
+                    "feature_cleaning_scope", "inner_only",
+                ),
+                feature_cleaning_keep_ratio=patchcore_params.get(
+                    "feature_cleaning_keep_ratio", 0.99,
+                ),
             )
-            apply_user_training_params(cfg, training_params, log_fn=_log)
+            inherited_training_params = dict(training_params or {})
+            for key in CAPIWebHandler.PATCHCORE_BUNDLE_LOCKED_TRAINING_PARAMS:
+                inherited_training_params.pop(key, None)
+            apply_user_training_params(cfg, inherited_training_params, log_fn=_log)
 
             _set_step("preprocess")
             thumb_root = Path(".tmp/train_new_thumbs") / job_id
@@ -12498,8 +12733,26 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "ng_used": result["ng_used"],
                 "panel_count": len(panel_paths),
                 "panel_glass_ids": [Path(p).name for p in panel_paths],
+                "feature_pool_kernel_size": result["metrics"].get(
+                    "feature_pool_kernel_size", cfg.feature_pool_kernel_size,
+                ),
+                "feature_cleaning_mode": cfg.feature_cleaning_mode,
+                "feature_cleaning": result["metrics"].get("feature_cleaning") or {},
             }
             append_submodel_history(bundle_dir, lighting, zone, entry)
+            refreshed_manifest = _read_manifest(bundle_dir)
+            refreshed_metrics = dict(result["metrics"])
+            refreshed_metrics["used_tile_ids"] = result["used_tile_ids"]
+            refreshed_manifest.setdefault("unit_metrics", {})[unit_label] = refreshed_metrics
+            refreshed_manifest.setdefault("tiles_per_unit", {})[unit_label] = {
+                "train": result["tile_count"],
+                "ng": result["ng_count"],
+            }
+            refreshed_manifest.setdefault("model_files", {})[unit_label] = {
+                "path": output_pt.name,
+                "size_bytes": result["size_bytes"],
+            }
+            _write_manifest(bundle_dir, refreshed_manifest)
             _log("manifest history 已更新")
 
             from capi_model_registry import invalidate_score_cache
@@ -12554,6 +12807,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 with slot["lock"]:
                     if slot.get("active_job_id") == job_id:
                         slot["active_job_id"] = None
+            try:
+                finished_job = db.get_training_job(job_id)
+                if finished_job and finished_job.get("state") == "failed":
+                    CAPIWebHandler._cleanup_train_new_job_artifacts(
+                        db, job_id, reason="panel retrain failed"
+                    )
+            except Exception:
+                logger.warning(
+                    "cannot finalize panel retrain cleanup: job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
 
     def _handle_models_retrain_submodel(self):
         """POST /api/models/<id>/retrain_submodel
@@ -12635,7 +12900,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """
         import traceback
         from capi_train_new import train_single_submodel, TrainingConfig
-        from capi_model_registry import append_submodel_history, _read_manifest
+        from capi_model_registry import append_submodel_history, _read_manifest, _write_manifest
 
         state = CAPIWebHandler._submodel_retrain_state
 
@@ -12689,6 +12954,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 max_epochs=patchcore_params.get("max_epochs", 1),
                 precision=patchcore_params.get("precision", "float32"),
                 feature_layers=patchcore_params.get("feature_layers", "layer2_layer3"),
+                feature_pool_kernel_size=patchcore_params.get("feature_pool_kernel_size", 3),
+                feature_cleaning_mode=patchcore_params.get("feature_cleaning_mode", "off"),
+                feature_cleaning_scope=patchcore_params.get(
+                    "feature_cleaning_scope", "inner_only",
+                ),
+                feature_cleaning_keep_ratio=patchcore_params.get(
+                    "feature_cleaning_keep_ratio", 0.99,
+                ),
             )
             # backbone_cache_dir / required_backbones / output_root 沿用 dataclass 預設值
 
@@ -12721,8 +12994,26 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "used_tile_ids": result["used_tile_ids"],
                 "kind": "retrain",
                 "ng_used": result["ng_used"],
+                "feature_pool_kernel_size": result["metrics"].get(
+                    "feature_pool_kernel_size", cfg.feature_pool_kernel_size,
+                ),
+                "feature_cleaning_mode": cfg.feature_cleaning_mode,
+                "feature_cleaning": result["metrics"].get("feature_cleaning") or {},
             }
             append_submodel_history(bundle_dir, lighting, zone, entry)
+            refreshed_manifest = _read_manifest(bundle_dir)
+            refreshed_metrics = dict(result["metrics"])
+            refreshed_metrics["used_tile_ids"] = result["used_tile_ids"]
+            refreshed_manifest.setdefault("unit_metrics", {})[unit_label] = refreshed_metrics
+            refreshed_manifest.setdefault("tiles_per_unit", {})[unit_label] = {
+                "train": result["tile_count"],
+                "ng": result["ng_count"],
+            }
+            refreshed_manifest.setdefault("model_files", {})[unit_label] = {
+                "path": output_pt.name,
+                "size_bytes": result["size_bytes"],
+            }
+            _write_manifest(bundle_dir, refreshed_manifest)
             _log("manifest history 已更新")
 
             # 該 bundle 對該 lighting+zone 的舊分全失效
@@ -13171,6 +13462,7 @@ def create_web_server(
         "lock": threading.Lock(),
         "active_job_id": None,
     }
+    CAPIWebHandler._reconcile_train_new_artifacts(db)
     CAPIWebHandler.init_jinja()
 
     server = ThreadingHTTPServer((host, port), CAPIWebHandler)

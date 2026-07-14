@@ -188,6 +188,30 @@ def get_bundle_detail(db, bundle_id: int) -> Optional[dict]:
     else:
         bundle["thresholds"] = thresholds_json or None
 
+    bundle["training_panel_modes"] = None
+    job_id = bundle.get("job_id") or ""
+    if job_id:
+        try:
+            job = db.get_training_job(job_id)
+        except sqlite3.Error as e:
+            logger.warning("get_bundle_detail: 讀訓練 PANEL 設定失敗 (%s): %s", job_id, e)
+            job = None
+        if isinstance(job, dict):
+            panel_paths = job.get("panel_paths") or []
+            panel_modes = job.get("panel_modes") or ["full"] * len(panel_paths)
+            manifest_names = (bundle.get("manifest") or {}).get("panel_glass_ids") or []
+            bundle["training_panel_modes"] = [
+                {
+                    "panel_name": (
+                        manifest_names[index]
+                        if index < len(manifest_names)
+                        else Path(str(panel_path)).name
+                    ),
+                    "mode": panel_modes[index] if index < len(panel_modes) else "full",
+                }
+                for index, panel_path in enumerate(panel_paths)
+            ]
+
     bundle["training_data"] = get_training_data_summary(db, bundle)
     bundle["pending_changes"] = get_pending_change_summary_for_bundle(db, bundle)
     return bundle
@@ -196,6 +220,107 @@ def get_bundle_detail(db, bundle_id: int) -> Optional[dict]:
 def _training_data_dir(job_id: str) -> Path:
     """job_id 對應的訓練圖片目錄（thumb / tiles / preview / ng 都在底下）。"""
     return Path(".tmp/train_new_thumbs") / job_id
+
+
+def _training_staging_dir(job_id: str) -> Path:
+    return Path(".tmp/training_staging") / job_id
+
+
+def _training_runs_dir(job_id: str) -> Path:
+    return Path(".tmp/training_runs") / job_id
+
+
+def _safe_training_job_path(root: Path, job_id: str) -> Optional[Path]:
+    """Return a job directory only when job_id cannot escape the temp root."""
+    value = str(job_id or "").strip()
+    if not value or value in {".", ".."} or "/" in value or "\\" in value:
+        logger.warning("skip training temp cleanup for unsafe job_id=%r", job_id)
+        return None
+
+    base = root.resolve()
+    target = (base / value).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        logger.warning("skip training temp cleanup outside root: %s", target)
+        return None
+    return target
+
+
+def _remove_training_temp_dir(path: Optional[Path]) -> Tuple[int, int]:
+    if path is None or not path.exists():
+        return 0, 0
+    if path.is_symlink():
+        logger.warning("skip training temp symlink: %s", path)
+        return 0, 0
+
+    freed, file_count = _dir_walk_stats(path)
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        logger.warning("training temp cleanup failed for %s: %s", path, exc)
+        return 0, 0
+    return freed, file_count
+
+
+def cleanup_training_job_artifacts(
+    db,
+    job_id: str,
+    *,
+    remove_training_data: bool = True,
+    remove_ephemeral: bool = True,
+) -> dict:
+    """清理訓練 job 暫存資料。
+
+    `remove_training_data=False` 只清理每次訓練必須的 staging/run 輸出，
+    保留 review/completed job 的 tile pool 與 thumbnails。
+    """
+    value = str(job_id or "").strip()
+    staging_path = _training_staging_dir(value)
+    runs_path = _training_runs_dir(value)
+    thumbs_path = _training_data_dir(value)
+    roots = {
+        "staging": _safe_training_job_path(staging_path.parent, value),
+        "runs": _safe_training_job_path(runs_path.parent, value),
+        "thumbs": _safe_training_job_path(thumbs_path.parent, value),
+    }
+    if any(path is None for path in roots.values()):
+        return {
+            "ok": False,
+            "job_id": value,
+            "deleted_tile_rows": 0,
+            "deleted_files": 0,
+            "freed_bytes": 0,
+        }
+
+    deleted_tile_rows = 0
+    if remove_training_data and db is not None:
+        pool_rows = db.list_tile_pool(value)
+        tile_ids = [row["id"] for row in pool_rows if row.get("id") is not None]
+        if tile_ids:
+            invalidate_score_cache(db, tile_ids=tile_ids)
+        deleted_tile_rows = len(pool_rows)
+        db.cleanup_tile_pool(value)
+
+    deleted_files = 0
+    freed_bytes = 0
+    if remove_ephemeral:
+        for key in ("staging", "runs"):
+            freed, count = _remove_training_temp_dir(roots[key])
+            freed_bytes += freed
+            deleted_files += count
+    if remove_training_data:
+        freed, count = _remove_training_temp_dir(roots["thumbs"])
+        freed_bytes += freed
+        deleted_files += count
+
+    return {
+        "ok": True,
+        "job_id": value,
+        "deleted_tile_rows": deleted_tile_rows,
+        "deleted_files": deleted_files,
+        "freed_bytes": freed_bytes,
+    }
 
 
 def _dir_walk_stats(path: Path) -> Tuple[int, int]:
@@ -260,18 +385,15 @@ def delete_training_data(db, bundle_id: int) -> dict:
         return {"ok": True, "message": "此 bundle 沒有關聯 job_id，無訓練資料可清",
                 "deleted_files": 0, "freed_bytes": 0, "deleted_tile_rows": 0}
 
-    pool_ok = db.list_tile_pool(job_id, source="ok")
-    pool_ng = db.list_tile_pool(job_id, source="ng")
-    deleted_rows = len(pool_ok) + len(pool_ng)
-    tile_ids_to_clean = [t["id"] for t in pool_ok] + [t["id"] for t in pool_ng]
-
-    # 先把要刪的 tile_ids 撈出來再清 score cache，避免之後找不到對照
-    invalidate_score_cache(db, tile_ids=tile_ids_to_clean)
-    db.cleanup_tile_pool(job_id)
-
-    thumb_dir = _training_data_dir(job_id)
-    freed, deleted_files = _dir_walk_stats(thumb_dir)
-    shutil.rmtree(thumb_dir, ignore_errors=True)
+    cleanup = cleanup_training_job_artifacts(
+        db,
+        job_id,
+        remove_training_data=True,
+        remove_ephemeral=False,
+    )
+    deleted_rows = cleanup["deleted_tile_rows"]
+    deleted_files = cleanup["deleted_files"]
+    freed = cleanup["freed_bytes"]
 
     return {
         "ok": True,

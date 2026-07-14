@@ -46,7 +46,15 @@ MIN_TRAIN_TILES = 30
 NG_TILES_PER_LIGHTING = 100
 
 PANEL_MODE_FULL = "full"
+PANEL_MODE_INNER_ONLY = "inner_only"
+PANEL_MODE_EDGE_ONLY = "edge_only"
 PANEL_MODE_CORNERS_ONLY = "corners_only"
+PANEL_MODE_CHOICES = (
+    PANEL_MODE_FULL,
+    PANEL_MODE_INNER_ONLY,
+    PANEL_MODE_EDGE_ONLY,
+    PANEL_MODE_CORNERS_ONLY,
+)
 DEFAULT_TRAIN_TILE_STRIDE = 256
 LEGACY_TRAIN_TILE_STRIDE = 512
 PATCHCORE_FEATURE_LAYERS_DEFAULT = "layer2_layer3"
@@ -59,6 +67,28 @@ PATCHCORE_FEATURE_LAYER_MAP = {
     PATCHCORE_FEATURE_LAYERS_DEFAULT: ("layer2", "layer3"),
     PATCHCORE_FEATURE_LAYERS_LAYER3: ("layer3",),
 }
+PATCHCORE_FEATURE_POOL_KERNEL_DEFAULT = 3
+PATCHCORE_FEATURE_POOL_KERNEL_CHOICES = (3, 5)
+FEATURE_CLEANING_MODE_OFF = "off"
+# Stable recipe id for existing jobs/bundles; the actual keep ratio is stored separately.
+FEATURE_CLEANING_MODE_KNN_Q99 = "knn_cosine_q99_v1"
+FEATURE_CLEANING_MODE_CHOICES = (
+    FEATURE_CLEANING_MODE_OFF,
+    FEATURE_CLEANING_MODE_KNN_Q99,
+)
+FEATURE_CLEANING_K = 30
+FEATURE_CLEANING_KEEP_RATIO_DEFAULT = 0.99
+FEATURE_CLEANING_KEEP_RATIO_MIN = 0.90
+FEATURE_CLEANING_KEEP_RATIO_MAX = 1.00
+FEATURE_CLEANING_SEED = 42
+FEATURE_CLEANING_REFERENCE_SIZE = 20_000
+FEATURE_CLEANING_QUERY_CHUNK = 1_024
+FEATURE_CLEANING_SCOPE_INNER_ONLY = "inner_only"
+FEATURE_CLEANING_SCOPE_INNER_AND_EDGE = "inner_and_edge"
+FEATURE_CLEANING_SCOPE_CHOICES = (
+    FEATURE_CLEANING_SCOPE_INNER_ONLY,
+    FEATURE_CLEANING_SCOPE_INNER_AND_EDGE,
+)
 
 # 舊版訓練 wizard 曾使用固定 3 full + 5 corners-only 的選片策略。
 # 目前改為使用者自行選片，所有選到的 panel 都完整切 tile。
@@ -70,6 +100,29 @@ WIZARD_TOTAL_PANEL_COUNT = WIZARD_FULL_PANEL_COUNT + WIZARD_CORNERS_ONLY_PANEL_C
 def derive_panel_modes(panel_count: int) -> List[str]:
     """依目前 wizard 行為推 panel_modes：所有使用者選到的 panel 都完整切 tile。"""
     return [PANEL_MODE_FULL] * max(0, panel_count)
+
+
+def normalize_panel_modes(panel_modes: Optional[List[str]], panel_count: int) -> List[str]:
+    """驗證每片 panel 的切片模式；未提供時維持舊版全 full 行為。"""
+    if panel_modes is None:
+        return derive_panel_modes(panel_count)
+    if not isinstance(panel_modes, list) or len(panel_modes) != panel_count:
+        raise ValueError("panel_modes must be a list with the same length as panel_paths")
+    for mode in panel_modes:
+        if not isinstance(mode, str) or mode not in PANEL_MODE_CHOICES:
+            raise ValueError(f"invalid panel mode: {mode}")
+    return list(panel_modes)
+
+
+def panel_mode_zones(mode: str) -> set:
+    """回傳指定 panel 模式可寫入的 tile zone。"""
+    if mode == PANEL_MODE_FULL:
+        return {ZONE_INNER, ZONE_EDGE}
+    if mode == PANEL_MODE_INNER_ONLY:
+        return {ZONE_INNER}
+    if mode in (PANEL_MODE_EDGE_ONLY, PANEL_MODE_CORNERS_ONLY):
+        return {ZONE_EDGE}
+    raise ValueError(f"invalid panel mode: {mode}")
 
 # 與 PreprocessConfig.edge_threshold_px 同一單一來源（避免兩處飄移）。
 # NG zone heuristic：讀 over_review snapshot 的 manifest.csv；若有影像高度，
@@ -129,6 +182,10 @@ class TrainingConfig:
     max_epochs: int = 1
     precision: str = "float16"
     feature_layers: str = PATCHCORE_FEATURE_LAYERS_DEFAULT
+    feature_pool_kernel_size: int = PATCHCORE_FEATURE_POOL_KERNEL_DEFAULT
+    feature_cleaning_mode: str = FEATURE_CLEANING_MODE_OFF
+    feature_cleaning_scope: str = FEATURE_CLEANING_SCOPE_INNER_ONLY
+    feature_cleaning_keep_ratio: float = FEATURE_CLEANING_KEEP_RATIO_DEFAULT
     image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
     preprocess_after_tiling: bool = False
     training_data_source: Dict[str, Any] = field(
@@ -148,6 +205,14 @@ USER_TRAINABLE_PARAM_SPECS: Dict[str, Dict] = {
     "max_epochs":    {"type": int,   "min": 1,    "max": 10},
     "precision":     {"type": str,   "choices": ["float32", "float16"]},
     "feature_layers": {"type": str,   "choices": list(PATCHCORE_FEATURE_LAYERS_CHOICES)},
+    "feature_pool_kernel_size": {"type": int, "choices": list(PATCHCORE_FEATURE_POOL_KERNEL_CHOICES)},
+    "feature_cleaning_mode": {"type": str, "choices": list(FEATURE_CLEANING_MODE_CHOICES)},
+    "feature_cleaning_scope": {"type": str, "choices": list(FEATURE_CLEANING_SCOPE_CHOICES)},
+    "feature_cleaning_keep_ratio": {
+        "type": float,
+        "min": FEATURE_CLEANING_KEEP_RATIO_MIN,
+        "max": FEATURE_CLEANING_KEEP_RATIO_MAX,
+    },
 }
 USER_TRAINABLE_PARAM_NAMES: Tuple[str, ...] = tuple(USER_TRAINABLE_PARAM_SPECS.keys())
 
@@ -205,13 +270,14 @@ def preprocess_panels_to_pool(
 
     panel_modes 與 cfg.panel_paths 同長度：
       - "full"          : 收所有 inner / edge tile（原行為）
-      - "corners_only"  : 只收 is_corner=True 的 tile（4 outer-extension 角 +
+      - "inner_only"    : 只收 inner tile
+      - "edge_only"     : 只收 edge tile
+      - "corners_only"  : 只收 edge 且 is_corner=True 的 tile（4 outer-extension 角 +
                           4 inner-edge 角 / lighting）。長邊與 inner 不取樣，
                           目的是補強 edge 模型的角落樣本。
     None 視同全 full，與舊呼叫者相容。
     """
-    if panel_modes is None:
-        panel_modes = [PANEL_MODE_FULL] * len(cfg.panel_paths)
+    panel_modes = normalize_panel_modes(panel_modes, len(cfg.panel_paths))
     target_lighting_set = set(target_lightings) if target_lightings is not None else None
     target_unit_set = set(target_units) if target_units is not None else None
 
@@ -219,6 +285,8 @@ def preprocess_panels_to_pool(
     (thumb_dir / "tiles").mkdir(parents=True, exist_ok=True)
     (thumb_dir / "thumb").mkdir(parents=True, exist_ok=True)
     panel_success_full = 0
+    panel_success_inner_only = 0
+    panel_success_edge_only = 0
     panel_success_corner = 0
     panel_fail = 0
     total_tiles = 0
@@ -238,7 +306,13 @@ def preprocess_panels_to_pool(
         )
 
     for idx, (panel_dir, mode) in enumerate(zip(cfg.panel_paths, panel_modes), 1):
-        mode_label = "完整" if mode == PANEL_MODE_FULL else "僅 4 角"
+        mode_label = {
+            PANEL_MODE_FULL: "INNER + EDGE",
+            PANEL_MODE_INNER_ONLY: "僅 INNER",
+            PANEL_MODE_EDGE_ONLY: "僅 EDGE",
+            PANEL_MODE_CORNERS_ONLY: "僅 EDGE 4 角",
+        }[mode]
+        allowed_zones = panel_mode_zones(mode)
         log(f"[{idx}/{len(cfg.panel_paths)}] panel {panel_dir.name} ({mode_label})")
         try:
             results = preprocess_panel_folder(panel_dir, preprocess_cfg)
@@ -255,14 +329,15 @@ def preprocess_panels_to_pool(
         if polygon_failed_count > 0:
             log(f"  ⚠ {polygon_failed_count} lighting polygon 偵測失敗")
 
-        # 為每張 tile 存 .png + 縮圖 + 寫 DB；corners_only 模式下先過濾掉非角落 tile，
-        # 避免浪費 IO 寫不會用到的 PNG。
+        # 先依 panel mode 過濾 zone，再寫 .png + 縮圖 + DB，避免浪費 IO。
         tile_records = []
         for lighting, result in results.items():
             if target_lighting_set is not None and lighting not in target_lighting_set:
                 continue
             for tile in result.tiles:
                 if target_unit_set is not None and f"{lighting}-{tile.zone}" not in target_unit_set:
+                    continue
+                if tile.zone not in allowed_zones:
                     continue
                 if mode == PANEL_MODE_CORNERS_ONLY and not tile.is_corner:
                     continue
@@ -287,6 +362,10 @@ def preprocess_panels_to_pool(
             total_tiles += len(tile_records)
             if mode == PANEL_MODE_FULL:
                 panel_success_full += 1
+            elif mode == PANEL_MODE_INNER_ONLY:
+                panel_success_inner_only += 1
+            elif mode == PANEL_MODE_EDGE_ONLY:
+                panel_success_edge_only += 1
             else:
                 panel_success_corner += 1
             log(f"  ✓ 切出 {len(tile_records)} tile")
@@ -300,9 +379,16 @@ def preprocess_panels_to_pool(
             log("  ✗ 無 tile 寫入")
 
     return {
-        # panel_success 維持原 key 給舊呼叫者用（= full + corner）
-        "panel_success": panel_success_full + panel_success_corner,
+        # panel_success 維持原 key 給舊呼叫者用（= 所有有 tile 寫入的 panel）。
+        "panel_success": (
+            panel_success_full
+            + panel_success_inner_only
+            + panel_success_edge_only
+            + panel_success_corner
+        ),
         "panel_success_full": panel_success_full,
+        "panel_success_inner_only": panel_success_inner_only,
+        "panel_success_edge_only": panel_success_edge_only,
         "panel_success_corner": panel_success_corner,
         "panel_fail": panel_fail,
         "total_tiles": total_tiles,
@@ -506,6 +592,7 @@ def train_one_patchcore(
     unit_label: str,
     cfg: "TrainingConfig" = None,
     log: Optional[Callable[[str], None]] = None,
+    experiment_stats_out: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """訓練一個 (lighting, zone) unit。回傳 model.pt 路徑。
 
@@ -564,15 +651,102 @@ def train_one_patchcore(
     )
     model.pre_processor = Patchcore.configure_pre_processor(image_size=cfg.image_size)
 
+    pool_kernel = int(cfg.feature_pool_kernel_size)
+    if pool_kernel not in PATCHCORE_FEATURE_POOL_KERNEL_CHOICES:
+        raise ValueError(f"unsupported feature_pool_kernel_size: {pool_kernel}")
+    inner_model = getattr(model, "model", None)
+    if inner_model is not None and hasattr(inner_model, "feature_pooler"):
+        import torch
+        inner_model.feature_pooler = torch.nn.AvgPool2d(
+            kernel_size=pool_kernel,
+            stride=1,
+            padding=pool_kernel // 2,
+        )
+    elif pool_kernel != PATCHCORE_FEATURE_POOL_KERNEL_DEFAULT:
+        raise RuntimeError("PatchCore model does not expose feature_pooler")
+    elif log:
+        log(f"{unit_label}: feature_pooler unavailable; keep PatchCore default aggregation")
+    if log:
+        log(f"{unit_label}: feature aggregation={pool_kernel}x{pool_kernel}")
+
+    cleaning_mode = cfg.feature_cleaning_mode
+    if cleaning_mode not in FEATURE_CLEANING_MODE_CHOICES:
+        raise ValueError(f"unsupported feature_cleaning_mode: {cleaning_mode}")
+    cleaning_scope = cfg.feature_cleaning_scope
+    if cleaning_scope not in FEATURE_CLEANING_SCOPE_CHOICES:
+        raise ValueError(f"unsupported feature_cleaning_scope: {cleaning_scope}")
+    cleaning_keep_ratio = float(cfg.feature_cleaning_keep_ratio)
+    if not FEATURE_CLEANING_KEEP_RATIO_MIN <= cleaning_keep_ratio <= FEATURE_CLEANING_KEEP_RATIO_MAX:
+        raise ValueError(
+            "feature_cleaning_keep_ratio must be between "
+            f"{FEATURE_CLEANING_KEEP_RATIO_MIN} and {FEATURE_CLEANING_KEEP_RATIO_MAX}"
+        )
+    zone = unit_label.rsplit("-", 1)[-1].lower()
+    cleaning_stats: Dict[str, Any] = {
+        "mode": cleaning_mode,
+        "scope": cleaning_scope,
+        "keep_ratio": cleaning_keep_ratio,
+        "applied": False,
+        "reason": "disabled",
+    }
+    callbacks = None
+    cleaning_callback = None
+    if cleaning_mode == FEATURE_CLEANING_MODE_KNN_Q99:
+        clean_this_zone = (
+            zone == ZONE_INNER
+            or (zone == ZONE_EDGE and cleaning_scope == FEATURE_CLEANING_SCOPE_INNER_AND_EDGE)
+        )
+        if clean_this_zone:
+            from capi_patchcore_feature_cleaning import FeatureDensityCleaningCallback
+            cleaning_callback = FeatureDensityCleaningCallback(
+                k=FEATURE_CLEANING_K,
+                keep_ratio=cleaning_keep_ratio,
+                seed=FEATURE_CLEANING_SEED,
+                reference_size=FEATURE_CLEANING_REFERENCE_SIZE,
+                query_chunk=FEATURE_CLEANING_QUERY_CHUNK,
+            )
+            callbacks = [cleaning_callback]
+            cleaning_stats["reason"] = "pending"
+            if log:
+                log(
+                    f"{unit_label}: feature cleaning enabled "
+                    f"(scope={cleaning_scope}, cosine k={FEATURE_CLEANING_K}, "
+                    f"keep={cleaning_keep_ratio:.1%})"
+                )
+        else:
+            cleaning_stats["reason"] = "edge_scope_excluded"
+            if log:
+                log(f"{unit_label}: feature cleaning skipped (scope={cleaning_scope})")
+
     engine = Engine(
         max_epochs=cfg.max_epochs,
         default_root_dir=str(run_root),
-        callbacks=None,
+        callbacks=callbacks,
     )
 
     if log:
         log(f"{unit_label}: engine.fit 開始")
     engine.fit(datamodule=datamodule, model=model)
+    if cleaning_callback is not None:
+        if not cleaning_callback.stats:
+            raise RuntimeError("feature cleaning callback did not run")
+        cleaning_stats = dict(cleaning_callback.stats)
+        cleaning_stats.update({
+            "mode": cleaning_mode,
+            "scope": cleaning_scope,
+        })
+        if log:
+            log(
+                f"{unit_label}: feature cleaning "
+                f"{cleaning_stats.get('total', 0)} -> {cleaning_stats.get('kept', 0)} "
+                f"(removed={cleaning_stats.get('removed_ratio', 0.0):.2%})"
+            )
+    if experiment_stats_out is not None:
+        experiment_stats_out.clear()
+        experiment_stats_out.update({
+            "feature_pool_kernel_size": pool_kernel,
+            "feature_cleaning": cleaning_stats,
+        })
     if log:
         log(f"{unit_label}: engine.fit 完成，開始 export")
     engine.export(model=model, export_type=ExportType.TORCH)
@@ -1268,7 +1442,15 @@ def train_single_submodel(
             stage_dataset(staging,
                           [Path(t["source_path"]) for t in train_tiles],
                           [Path(t["source_path"]) for t in ng_tiles])
-            model_pt = train_one_patchcore(staging, run_root, unit_label, cfg, log=log)
+            experiment_stats: Dict[str, Any] = {}
+            model_pt = train_one_patchcore(
+                staging,
+                run_root,
+                unit_label,
+                cfg,
+                log=log,
+                experiment_stats_out=experiment_stats,
+            )
 
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("training cancelled by user")
@@ -1285,6 +1467,16 @@ def train_single_submodel(
             )
             metrics["train_count"] = len(train_tiles)
             metrics["ng_used"] = ng_used
+            metrics["feature_pool_kernel_size"] = experiment_stats.get(
+                "feature_pool_kernel_size", cfg.feature_pool_kernel_size,
+            )
+            metrics["feature_cleaning"] = experiment_stats.get("feature_cleaning", {
+                "mode": cfg.feature_cleaning_mode,
+                "scope": cfg.feature_cleaning_scope,
+                "keep_ratio": cfg.feature_cleaning_keep_ratio,
+                "applied": False,
+                "reason": "stats_unavailable",
+            })
             elapsed = time.monotonic() - unit_start
             metrics["elapsed_seconds"] = int(elapsed)
 
@@ -1446,6 +1638,10 @@ def run_training_pipeline(
         "machine_id": cfg.machine_id,
         "trained_at": datetime.now().isoformat(timespec="seconds"),
         "trained_with_job_id": job_id,
+        "experimental_training": bool(
+            cfg.feature_pool_kernel_size != PATCHCORE_FEATURE_POOL_KERNEL_DEFAULT
+            or cfg.feature_cleaning_mode != FEATURE_CLEANING_MODE_OFF
+        ),
         "panel_count": len(cfg.panel_paths),
         "panel_glass_ids": [p.name for p in cfg.panel_paths],
         "training_data_source": cfg.training_data_source,
@@ -1459,6 +1655,14 @@ def run_training_pipeline(
             "max_epochs": cfg.max_epochs,
             "precision": cfg.precision,
             "feature_layers": cfg.feature_layers,
+            "feature_pool_kernel_size": cfg.feature_pool_kernel_size,
+            "feature_cleaning_mode": cfg.feature_cleaning_mode,
+            "feature_cleaning_scope": cfg.feature_cleaning_scope,
+            "feature_cleaning_k": FEATURE_CLEANING_K,
+            "feature_cleaning_keep_ratio": cfg.feature_cleaning_keep_ratio,
+            "feature_cleaning_seed": FEATURE_CLEANING_SEED,
+            "feature_cleaning_reference_size": FEATURE_CLEANING_REFERENCE_SIZE,
+            "feature_cleaning_query_chunk": FEATURE_CLEANING_QUERY_CHUNK,
         },
         "image_preprocess_pipeline": cfg.image_preprocess_pipeline,
         "tiles_per_unit": tiles_per_unit,

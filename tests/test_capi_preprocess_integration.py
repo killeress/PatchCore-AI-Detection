@@ -140,6 +140,41 @@ def test_preprocess_panel_folder_prioritizes_w0f_reference(monkeypatch, tmp_path
             np.testing.assert_array_equal(result.panel_polygon, polygons["W0F00000"])
 
 
+def test_preprocess_panel_folder_uses_boundary_only_w0f_reference(monkeypatch, tmp_path):
+    target = tmp_path / "G0F00000_x.png"
+    reference = tmp_path / "W0F00000_x.png"
+    target.write_bytes(b"stub")
+    reference.write_bytes(b"stub")
+
+    w0f_polygon = np.array([[1, 2], [11, 2], [11, 12], [1, 12]], np.float32)
+    calls = []
+
+    def fake_preprocess_panel_image(image_path, lighting, config, reference_polygon=None):
+        calls.append((lighting, reference_polygon is not None))
+        polygon = reference_polygon if reference_polygon is not None else w0f_polygon
+        return PanelPreprocessResult(
+            image_path=Path(image_path),
+            lighting=lighting,
+            foreground_bbox=(0, 0, 10, 10),
+            panel_polygon=polygon,
+            tiles=[],
+            polygon_detection_failed=False,
+        )
+
+    monkeypatch.setattr(capi_preprocess, "preprocess_panel_image", fake_preprocess_panel_image)
+
+    results = preprocess_panel_folder(
+        tmp_path,
+        PreprocessConfig(tile_size=256),
+        image_files=[target],
+        boundary_reference_files=[target, reference],
+    )
+
+    assert calls == [("W0F00000", False), ("G0F00000", True)]
+    assert set(results) == {"G0F00000"}
+    np.testing.assert_array_equal(results["G0F00000"].panel_polygon, w0f_polygon)
+
+
 def test_preprocess_panel_image_with_preprocess_after_tiling():
     cfg = PreprocessConfig(
         tile_size=256,

@@ -1,6 +1,7 @@
 """測試 capi_model_registry 模型庫 CRUD 功能。"""
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock
 
 
 def test_list_bundles_grouped(tmp_path):
@@ -25,6 +26,38 @@ def test_list_bundles_grouped(tmp_path):
     assert "GN160" in grouped
     assert "OTHER" in grouped
     assert len(grouped["GN160"]) == 1
+
+
+def test_get_bundle_detail_exposes_per_panel_training_modes(tmp_path, monkeypatch):
+    import capi_model_registry as registry
+
+    bundle_dir = tmp_path / "model" / "M-20260714"
+    bundle_dir.mkdir(parents=True)
+    (bundle_dir / "manifest.json").write_text(
+        '{"machine_id":"M","panel_glass_ids":["PANEL_A","PANEL_B"]}',
+        encoding="utf-8",
+    )
+
+    db = MagicMock()
+    db.get_model_bundle.return_value = {
+        "id": 1,
+        "machine_id": "M",
+        "bundle_path": str(bundle_dir),
+        "job_id": "train_M_1",
+    }
+    db.get_training_job.return_value = {
+        "panel_paths": ["D:/train/PANEL_A", "D:/train/PANEL_B"],
+        "panel_modes": ["inner_only", "edge_only"],
+    }
+    monkeypatch.setattr(registry, "get_training_data_summary", lambda *_: {})
+    monkeypatch.setattr(registry, "get_pending_change_summary_for_bundle", lambda *_: {})
+
+    detail = registry.get_bundle_detail(db, 1)
+
+    assert detail["training_panel_modes"] == [
+        {"panel_name": "PANEL_A", "mode": "inner_only"},
+        {"panel_name": "PANEL_B", "mode": "edge_only"},
+    ]
 
 
 def test_activate_bundle_writes_server_config(tmp_path):
@@ -301,6 +334,67 @@ def test_delete_training_data_clears_db_and_dir(tmp_path, monkeypatch):
     assert not fake_dir.exists()
     # bundle 本身仍存在
     assert db.get_model_bundle(bid) is not None
+
+
+def test_cleanup_training_job_artifacts_removes_stale_training_data(tmp_path, monkeypatch):
+    from capi_database import CAPIDatabase
+    from capi_model_registry import cleanup_training_job_artifacts
+
+    monkeypatch.chdir(tmp_path)
+    db = CAPIDatabase(tmp_path / "test.db")
+    job_id = "stale_cleanup"
+    db.create_training_job(job_id, "M", [])
+    db.insert_tile_pool(job_id, [
+        {
+            "lighting": "G0F00000",
+            "zone": "inner",
+            "source": "ok",
+            "source_path": str(tmp_path / "tile.png"),
+            "thumb_path": str(tmp_path / "thumb.png"),
+        },
+    ])
+
+    for root in ("training_staging", "training_runs", "train_new_thumbs"):
+        target = tmp_path / ".tmp" / root / job_id
+        target.mkdir(parents=True)
+        (target / "tile.png").write_bytes(b"tile")
+
+    result = cleanup_training_job_artifacts(db, job_id)
+
+    assert result["ok"] is True
+    assert result["deleted_tile_rows"] == 1
+    assert result["deleted_files"] == 3
+    assert db.list_tile_pool(job_id) == []
+    assert not (tmp_path / ".tmp" / "training_staging" / job_id).exists()
+    assert not (tmp_path / ".tmp" / "training_runs" / job_id).exists()
+    assert not (tmp_path / ".tmp" / "train_new_thumbs" / job_id).exists()
+
+
+def test_cleanup_training_job_artifacts_preserves_review_thumbnails(tmp_path, monkeypatch):
+    from capi_database import CAPIDatabase
+    from capi_model_registry import cleanup_training_job_artifacts
+
+    monkeypatch.chdir(tmp_path)
+    db = CAPIDatabase(tmp_path / "test.db")
+    job_id = "review_cleanup"
+    db.create_training_job(job_id, "M", [])
+    db.update_training_job_state(job_id, "review")
+
+    for root in ("training_staging", "training_runs", "train_new_thumbs"):
+        target = tmp_path / ".tmp" / root / job_id
+        target.mkdir(parents=True)
+        (target / "tile.png").write_bytes(b"tile")
+
+    result = cleanup_training_job_artifacts(
+        db,
+        job_id,
+        remove_training_data=False,
+    )
+
+    assert result["ok"] is True
+    assert not (tmp_path / ".tmp" / "training_staging" / job_id).exists()
+    assert not (tmp_path / ".tmp" / "training_runs" / job_id).exists()
+    assert (tmp_path / ".tmp" / "train_new_thumbs" / job_id / "tile.png").exists()
 
 
 def test_delete_training_data_no_job_id(tmp_path):

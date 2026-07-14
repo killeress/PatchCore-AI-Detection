@@ -85,6 +85,9 @@ OUTLIER_SIGMA = 3.0
 MIN_EDGE_LEN_RATIO = 1.0
 MIN_POLYGON_AREA_RATIO = 0.9
 MIN_SAMPLES_PER_EDGE = 5
+EDGE_ENDPOINT_TRIM_RATIO = 0.05
+MAX_EDGE_RESIDUAL_P95_RATIO = 0.03
+MIN_EDGE_RESIDUAL_P95_PX = 8.0
 SMALL_PRODUCT_MAX_RESOLUTION = (1366, 768)
 # Half-tile edge extension has IoU ~= 1/3 with the original edge row. If
 # polygon inward-shift makes it overlap more than this, it is not a new sample.
@@ -429,6 +432,13 @@ def _polyfit_polygon(
     if min(len(tops), len(bots), len(lefts), len(rights)) < MIN_SAMPLES_PER_EDGE:
         return None
 
+    def _trim_edge_endpoints(pts):
+        # bbox 角落會混入相鄰斜邊；只用每邊中央 90% 評估直線品質。
+        trim = int(round(len(pts) * EDGE_ENDPOINT_TRIM_RATIO))
+        if trim <= 0 or len(pts) - 2 * trim < MIN_SAMPLES_PER_EDGE:
+            return pts
+        return pts[trim:-trim]
+
     def _trim_side_points(pts):
         if not stabilize_near_vertical_edges:
             return pts
@@ -456,11 +466,28 @@ def _polyfit_polygon(
                     a, b = np.polyfit(ind[keep], dep[keep], 1)
                 except (np.linalg.LinAlgError, ValueError):
                     pass
+        residuals = np.abs(dep - (a * ind + b))
+        residual_p95 = float(np.percentile(residuals, 95))
+        residual_limit = max(
+            MIN_EDGE_RESIDUAL_P95_PX,
+            float(tile_size) * MAX_EDGE_RESIDUAL_P95_RATIO,
+        )
+        if residual_p95 > residual_limit:
+            logger.warning(
+                "[boundary] reject non-linear %s edge: residual_p95=%.1fpx > %.1fpx (%d samples)",
+                "horizontal" if horizontal else "vertical",
+                residual_p95,
+                residual_limit,
+                len(arr),
+            )
+            return None
         return float(a), float(b)
 
-    side_lefts = _trim_side_points(lefts)
-    side_rights = _trim_side_points(rights)
-    top_l, bot_l = fit(tops, True), fit(bots, True)
+    top_points = _trim_edge_endpoints(tops)
+    bottom_points = _trim_edge_endpoints(bots)
+    side_lefts = _trim_side_points(_trim_edge_endpoints(lefts))
+    side_rights = _trim_side_points(_trim_edge_endpoints(rights))
+    top_l, bot_l = fit(top_points, True), fit(bottom_points, True)
     left_l, right_l = fit(side_lefts, False), fit(side_rights, False)
     if None in (top_l, bot_l, left_l, right_l):
         return None
@@ -846,37 +873,56 @@ def preprocess_panel_folder(
     folder: Path,
     config: PreprocessConfig,
     image_files: Optional[Iterable[Path]] = None,
+    boundary_reference_files: Optional[Iterable[Path]] = None,
 ) -> Dict[str, "PanelPreprocessResult"]:
     """處理整個 panel folder 的 5 lighting 圖。
 
-    流程：filter 出 5 lighting → STANDARD 先處理取 reference polygon →
-          其他 4 lighting 套 reference。STANDARD 失敗 fallback G0F00000。
+    流程：filter 出目標 lighting → 依 W0F/STD/G0F/R0F/WGF 優先序選
+          reference polygon → 所有目標 lighting 套同一個 reference。
+          boundary_reference_files 可提供只抓邊、不加入回傳結果的候選圖。
     """
     files = filter_panel_lighting_files(folder, image_files=image_files)
     if not files:
         return {}
 
+    reference_files = (
+        filter_panel_lighting_files(folder, image_files=boundary_reference_files)
+        if boundary_reference_files is not None
+        else files
+    )
+    if not reference_files:
+        reference_files = files
+
     # 決定 reference image：W0F00000 對低對比前後景較穩，找邊優先用它。
     ref_lighting = None
     for cand in BOUNDARY_REFERENCE_PRIORITY:
-        if cand in files:
+        if cand in reference_files:
             ref_lighting = cand
             break
     if ref_lighting is None:
         return {}
 
-    ref_result = preprocess_panel_image(files[ref_lighting], ref_lighting, config)
+    ref_result = preprocess_panel_image(reference_files[ref_lighting], ref_lighting, config)
     if ref_result.polygon_detection_failed:
         for cand in BOUNDARY_REFERENCE_PRIORITY:
-            if cand == ref_lighting or cand not in files:
+            if cand == ref_lighting or cand not in reference_files:
                 continue
-            fallback_result = preprocess_panel_image(files[cand], cand, config)
+            fallback_result = preprocess_panel_image(reference_files[cand], cand, config)
             if not fallback_result.polygon_detection_failed:
                 ref_lighting = cand
                 ref_result = fallback_result
                 break
 
-    results: Dict[str, PanelPreprocessResult] = {ref_lighting: ref_result}
+    logger.info(
+        "[boundary] reference=%s file=%s polygon=%s",
+        ref_lighting,
+        ref_result.image_path.name,
+        None if ref_result.panel_polygon is None else np.round(ref_result.panel_polygon, 1).tolist(),
+    )
+
+    results: Dict[str, PanelPreprocessResult] = {}
+    if ref_lighting in files:
+        results[ref_lighting] = ref_result
     ref_poly = ref_result.panel_polygon
     for lighting, path in files.items():
         if lighting == ref_lighting:

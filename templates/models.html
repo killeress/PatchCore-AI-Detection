@@ -38,7 +38,7 @@
   .mlib-filter-row select { background: #11111b; color: #cdd6f4; border: 1px solid #45475a; padding: 4px 8px; border-radius: 4px; font-size: .78rem; }
   .mlib-info dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; font-size: .82rem; }
   .mlib-info dt { color: #a6adc8; }
-  .mlib-info dd { margin: 0; color: #cdd6f4; font-family: monospace; }
+  .mlib-info dd { margin: 0; color: #cdd6f4; font-family: monospace; overflow-wrap: anywhere; }
   .mlib-actions-row { display: flex; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #313244; flex-wrap: wrap; }
   .mlib-btn { background: #1e1e2e; color: #a6adc8; border: 1px solid #45475a; padding: 7px 14px; border-radius: 4px; font-size: .8rem; cursor: pointer; }
   .mlib-btn-primary { background: #89b4fa; color: #1e1e2e; border-color: #89b4fa; font-weight: 700; }
@@ -589,6 +589,77 @@ function fmtBytes(n) {
   return (n/1024/1024/1024).toFixed(2) + ' GB';
 }
 
+const PREPROCESS_METHOD_LABELS = {
+  median: '標準中值濾波',
+  mean: '空間鄰域平均法',
+  gaussian: '高斯平滑',
+  bilateral: '雙邊濾波',
+  clahe: 'CLAHE 局部對比增強',
+  gray_band_shift: '分段灰階映射',
+  laplace_sharpen: 'Laplace 銳化',
+  nlm: 'Non-local Means',
+  stripe_profile: '週期條紋背景校正',
+};
+
+const PANEL_MODE_LABELS = {
+  full: 'INNER + EDGE',
+  inner_only: '僅 INNER',
+  edge_only: '僅 EDGE',
+  corners_only: '僅 EDGE 4 角',
+};
+
+function formatFeatureCleaning(pp) {
+  if (!Object.prototype.hasOwnProperty.call(pp, 'feature_cleaning_mode')) {
+    return '關閉（舊模型未記錄，依相容預設）';
+  }
+  if (pp.feature_cleaning_mode === 'off') return '關閉';
+
+  const scope = pp.feature_cleaning_scope === 'inner_and_edge'
+    ? 'INNER + EDGE'
+    : (pp.feature_cleaning_scope === 'inner_only' ? '僅 INNER' : '未記錄');
+  const k = pp.feature_cleaning_k != null ? pp.feature_cleaning_k : '未記錄';
+  const keepRatio = Number(pp.feature_cleaning_keep_ratio);
+  const ratioText = Number.isFinite(keepRatio)
+    ? `保留 ${Math.round(keepRatio * 10000) / 100}%（移除約 ${Math.round((1 - keepRatio) * 10000) / 100}%）`
+    : '保留比例未記錄';
+  return `保守清洗（範圍：${scope}；k=${k}；${ratioText}）`;
+}
+
+function formatPreprocessPipeline(pipeline) {
+  if (!Array.isArray(pipeline) || !pipeline.length) return '未啟用';
+  return pipeline.map((step, index) => {
+    const method = step && step.method ? step.method : 'unknown';
+    const label = PREPROCESS_METHOD_LABELS[method] || method;
+    const params = step && step.params && typeof step.params === 'object'
+      ? Object.entries(step.params).map(([key, value]) => `${key}=${value}`).join(', ')
+      : '';
+    return `${index + 1}. ${label}${params ? `（${params}）` : ''}`;
+  }).join('\n');
+}
+
+function formatTrainingDataSource(source) {
+  if (!source || !source.type) return '—（舊模型未記錄）';
+  if (source.type === 'inference_records') return '最近推論紀錄';
+  if (source.type === 'manual_folder') {
+    return source.batch_root ? `手動資料夾（${source.batch_root}）` : '手動資料夾';
+  }
+  return source.type;
+}
+
+function formatTrainingPanelModes(items, fallbackNames) {
+  if (Array.isArray(items) && items.length) {
+    return items.map((item, index) => {
+      const name = item && item.panel_name ? item.panel_name : `PANEL ${index + 1}`;
+      const mode = item && item.mode ? item.mode : '';
+      return `${name}：${PANEL_MODE_LABELS[mode] || mode || '模式未記錄'}`;
+    }).join('\n');
+  }
+  if (Array.isArray(fallbackNames) && fallbackNames.length) {
+    return fallbackNames.map(name => `${name}：模式未記錄`).join('\n');
+  }
+  return '—（舊模型或匯入模型未記錄）';
+}
+
 function renderDetail(d) {
   const m = d.manifest || {};
   document.getElementById('mlibTitle').textContent =
@@ -598,7 +669,21 @@ function renderDetail(d) {
 
   const td = d.training_data || {};
   const pp = m.patchcore_params || {};
-  const featureLayers = pp.feature_layers === 'layer3' ? 'layer3 only' : 'layer2 + layer3';
+  const featureLayers = pp.feature_layers === 'layer3'
+    ? 'layer3 only'
+    : (pp.feature_layers === 'layer2_layer3' ? 'layer2 + layer3' : '—（舊模型未記錄）');
+  const poolKernel = Number(pp.feature_pool_kernel_size);
+  const poolKernelText = Number.isFinite(poolKernel)
+    ? `${poolKernel}×${poolKernel}`
+    : '3×3（舊模型未記錄，依相容預設）';
+  const tileStrideText = m.tile_stride != null
+    ? `${m.tile_stride}px`
+    : '512px（舊模型未記錄，依相容預設）';
+  const preprocessTiming = m.preprocess_after_tiling === true
+    ? '先切 tile，再逐 tile 套用'
+    : (Object.prototype.hasOwnProperty.call(m, 'preprocess_after_tiling')
+      ? '先處理整張圖，再切 tile'
+      : '先處理整張圖，再切 tile（舊模型未記錄，依相容預設）');
   const dl = document.getElementById('mlibInfoDl');
   const rows = [
     ['Machine', d.machine_id],
@@ -612,20 +697,26 @@ function renderDetail(d) {
     ['啟用狀態', d.is_active ? '✅ 啟用中' : '— 未啟用'],
   ];
 
-  // PatchCore 訓練參數（舊 bundle 沒有 patchcore_params 就整段跳過）
-  if (Object.keys(pp).length) {
-    rows.push(
-      ['─── PatchCore 參數 ───', '─────'],
-      ['batch_size', pp.batch_size != null ? pp.batch_size : '—'],
-      ['coreset_ratio', pp.coreset_ratio != null ? pp.coreset_ratio : '—'],
-      ['max_epochs', pp.max_epochs != null ? pp.max_epochs : '—'],
-      ['feature_layers', featureLayers],
-      ['image_size', Array.isArray(pp.image_size) ? pp.image_size.join('×') : '—'],
-    );
-  }
+  rows.push(
+    ['─── PatchCore 參數 ───', '─────'],
+    ['batch_size', pp.batch_size != null ? pp.batch_size : '—'],
+    ['coreset_ratio', pp.coreset_ratio != null ? pp.coreset_ratio : '—'],
+    ['max_epochs', pp.max_epochs != null ? pp.max_epochs : '—'],
+    ['precision', pp.precision != null ? pp.precision : '—（舊模型未記錄）'],
+    ['feature_layers', featureLayers],
+    ['特徵鄰域聚合', poolKernelText],
+    ['特徵域清洗', formatFeatureCleaning(pp)],
+    ['image_size', Array.isArray(pp.image_size) ? pp.image_size.join('×') : '—'],
+  );
 
   rows.push(
+    ['─── 切片與前處理 ───', '─────'],
+    ['tile step', tileStrideText],
+    ['前處理套用時機', preprocessTiming],
+    ['影像前處理流程', formatPreprocessPipeline(m.image_preprocess_pipeline)],
     ['─── 訓練資料 ───', '─────'],
+    ['資料來源', formatTrainingDataSource(m.training_data_source)],
+    ['PANEL 切片設定', formatTrainingPanelModes(d.training_panel_modes, m.panel_glass_ids)],
     ['訓練資料 OK tile', td.ok_count != null ? td.ok_count : 0],
     ['訓練資料 NG tile', td.ng_count != null ? td.ng_count : 0],
     ['訓練資料磁碟用量', td.size_bytes != null ? fmtBytes(td.size_bytes) : '—'],

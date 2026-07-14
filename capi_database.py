@@ -365,7 +365,7 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_scratch_rescue_review_tile ON scratch_rescue_review(tile_result_id);
 
                 -- 訓練 Job 狀態追蹤
-                -- panel_modes: JSON array，元素 "full" / "corners_only"，與 panel_paths 同長度。
+                -- panel_modes: JSON array，元素 full / inner_only / edge_only / corners_only，與 panel_paths 同長度。
                 --   NULL 視同 ["full"] * len(panel_paths)（向下相容舊 job）。
                 CREATE TABLE IF NOT EXISTS training_jobs (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3549,7 +3549,7 @@ class CAPIDatabase:
         training_params 為 step1 使用者覆寫的 PatchCore 超參數（JSON 序列化後寫入），
         None 表示完全使用 TrainingConfig 的 dataclass 預設值。
 
-        panel_modes 為與 panel_paths 等長的 list，元素 "full" / "corners_only"。
+        panel_modes 為與 panel_paths 等長的 list，元素 full / inner_only / edge_only / corners_only。
         None 寫入 NULL，由 caller / get_*_training_job 視同全 full 處理。
         """
         # 用 `is not None` 而非 falsy；空 dict 與 None 語意不同（前者代表

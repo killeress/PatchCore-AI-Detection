@@ -6,6 +6,20 @@ from pathlib import Path
 import pytest
 
 
+def test_normalize_panel_modes_defaults_and_validates():
+    from capi_train_new import normalize_panel_modes
+
+    assert normalize_panel_modes(None, 2) == ["full", "full"]
+    assert normalize_panel_modes(["inner_only", "edge_only"], 2) == [
+        "inner_only",
+        "edge_only",
+    ]
+    with pytest.raises(ValueError, match="same length"):
+        normalize_panel_modes(["full"], 2)
+    with pytest.raises(ValueError, match="invalid panel mode"):
+        normalize_panel_modes(["unknown"], 1)
+
+
 def test_apply_user_training_params_none_is_noop():
     from capi_train_new import TrainingConfig, apply_user_training_params
     cfg = TrainingConfig(
@@ -15,6 +29,10 @@ def test_apply_user_training_params_none_is_noop():
     apply_user_training_params(cfg, None)
     apply_user_training_params(cfg, {})
     assert (cfg.batch_size, cfg.coreset_ratio, cfg.max_epochs) == snapshot
+    assert cfg.feature_pool_kernel_size == 3
+    assert cfg.feature_cleaning_mode == "off"
+    assert cfg.feature_cleaning_scope == "inner_only"
+    assert cfg.feature_cleaning_keep_ratio == 0.99
 
 
 def test_training_config_accepts_required_backbones():
@@ -36,11 +54,19 @@ def test_apply_user_training_params_overrides_match_keys():
     apply_user_training_params(cfg, {
         "batch_size": 16, "coreset_ratio": 0.05, "max_epochs": 2,
         "feature_layers": "layer3",
+        "feature_pool_kernel_size": 5,
+        "feature_cleaning_mode": "knn_cosine_q99_v1",
+        "feature_cleaning_scope": "inner_and_edge",
+        "feature_cleaning_keep_ratio": 0.97,
     })
     assert cfg.batch_size == 16
     assert cfg.coreset_ratio == 0.05
     assert cfg.max_epochs == 2
     assert cfg.feature_layers == "layer3"
+    assert cfg.feature_pool_kernel_size == 5
+    assert cfg.feature_cleaning_mode == "knn_cosine_q99_v1"
+    assert cfg.feature_cleaning_scope == "inner_and_edge"
+    assert cfg.feature_cleaning_keep_ratio == 0.97
 
 
 def test_patchcore_layers_for_mode():
@@ -333,6 +359,156 @@ def test_train_one_patchcore_layer3_only(tmp_path, monkeypatch):
     assert calls[0]["layers"] == ("layer3",)
 
 
+def test_train_one_patchcore_applies_pool5_and_skips_edge_cleaning(tmp_path, monkeypatch):
+    from capi_train_new import TrainingConfig, train_one_patchcore
+
+    staging = tmp_path / "staging"
+    (staging / "train").mkdir(parents=True)
+    (staging / "test" / "anormal").mkdir(parents=True)
+    captured = {}
+
+    class FakePatchcore:
+        def __init__(self, *a, **kw):
+            self.model = type("InnerModel", (), {"feature_pooler": object()})()
+            captured["model"] = self
+
+        @staticmethod
+        def configure_pre_processor(image_size):
+            return None
+
+        pre_processor = None
+
+    class FakeEngine:
+        def __init__(self, *a, **kw):
+            captured["callbacks"] = kw.get("callbacks")
+            self._default_root_dir = kw["default_root_dir"]
+
+        def fit(self, **kw):
+            pass
+
+        def export(self, **kw):
+            out = Path(self._default_root_dir) / "weights" / "torch" / "model.pt"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"fake")
+
+    class FakeFolder:
+        def __init__(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr("capi_train_new._import_anomalib", lambda: (
+        FakeFolder, FakePatchcore, FakeEngine,
+        type("ExportType", (), {"TORCH": "torch"}), "same_as_test",
+    ))
+    cfg = TrainingConfig(
+        machine_id="M", panel_paths=[], over_review_root=Path("/r"),
+        feature_pool_kernel_size=5,
+        feature_cleaning_mode="knn_cosine_q99_v1",
+    )
+    stats = {}
+
+    train_one_patchcore(
+        staging, tmp_path / "run", "G0F00000-edge", cfg=cfg,
+        experiment_stats_out=stats,
+    )
+
+    assert captured["model"].model.feature_pooler.kernel_size == 5
+    assert captured["callbacks"] is None
+    assert stats["feature_pool_kernel_size"] == 5
+    assert stats["feature_cleaning"]["reason"] == "edge_scope_excluded"
+    assert stats["feature_cleaning"]["scope"] == "inner_only"
+
+    cfg.feature_cleaning_keep_ratio = 0.89
+    with pytest.raises(ValueError, match="feature_cleaning_keep_ratio"):
+        train_one_patchcore(
+            staging, tmp_path / "invalid-ratio", "G0F00000-edge", cfg=cfg,
+        )
+
+    cfg.feature_cleaning_keep_ratio = 0.99
+    cfg.feature_cleaning_scope = "edge_only"
+    with pytest.raises(ValueError, match="feature_cleaning_scope"):
+        train_one_patchcore(
+            staging, tmp_path / "invalid-scope", "G0F00000-edge", cfg=cfg,
+        )
+
+
+@pytest.mark.parametrize(
+    ("unit_label", "cleaning_scope"),
+    [
+        ("G0F00000-inner", "inner_only"),
+        ("G0F00000-edge", "inner_and_edge"),
+    ],
+)
+def test_train_one_patchcore_cleans_selected_zone_before_export(
+    tmp_path, monkeypatch, unit_label, cleaning_scope,
+):
+    from capi_train_new import TrainingConfig, train_one_patchcore
+
+    staging = tmp_path / "staging"
+    (staging / "train").mkdir(parents=True)
+    (staging / "test" / "anormal").mkdir(parents=True)
+    captured = {}
+
+    class FakePatchcore:
+        def __init__(self, *a, **kw):
+            import torch
+            dense = torch.tensor([[1.0, 0.0]]).repeat(34, 1)
+            outlier = torch.tensor([[-1.0, 0.0]])
+            self.model = type("InnerModel", (), {
+                "embedding_store": [torch.cat([dense, outlier])],
+            })()
+
+        @staticmethod
+        def configure_pre_processor(image_size):
+            return None
+
+        pre_processor = None
+
+    class FakeEngine:
+        def __init__(self, *a, **kw):
+            captured["callbacks"] = kw.get("callbacks") or []
+            self._default_root_dir = kw["default_root_dir"]
+
+        def fit(self, *, model, **kw):
+            for callback in captured["callbacks"]:
+                callback.on_validation_start(
+                    type("Trainer", (), {"sanity_checking": False})(), model,
+                )
+
+        def export(self, **kw):
+            out = Path(self._default_root_dir) / "weights" / "torch" / "model.pt"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"fake")
+
+    class FakeFolder:
+        def __init__(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr("capi_train_new._import_anomalib", lambda: (
+        FakeFolder, FakePatchcore, FakeEngine,
+        type("ExportType", (), {"TORCH": "torch"}), "same_as_test",
+    ))
+    cfg = TrainingConfig(
+        machine_id="M", panel_paths=[], over_review_root=Path("/r"),
+        feature_cleaning_mode="knn_cosine_q99_v1",
+        feature_cleaning_scope=cleaning_scope,
+        feature_cleaning_keep_ratio=0.97,
+    )
+    stats = {}
+
+    train_one_patchcore(
+        staging, tmp_path / "run", unit_label, cfg=cfg,
+        experiment_stats_out=stats,
+    )
+
+    assert len(captured["callbacks"]) == 1
+    assert stats["feature_cleaning"]["applied"] is True
+    assert stats["feature_cleaning"]["total"] == 35
+    assert stats["feature_cleaning"]["kept"] == 34
+    assert stats["feature_cleaning"]["scope"] == cleaning_scope
+    assert stats["feature_cleaning"]["keep_ratio"] == 0.97
+    assert stats["feature_cleaning"]["reason"] == "completed"
+
+
 def test_calibrate_threshold_returns_default():
     """新版固定回 DEFAULT_THRESHOLD（不再依 NG/train_max 校準）。
 
@@ -498,8 +674,14 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     db = MockDB()
 
     trained_units = []
-    def fake_train(staging_dir, run_root, unit_label, cfg=None, log=None):
+    def fake_train(staging_dir, run_root, unit_label, cfg=None, log=None,
+                   experiment_stats_out=None):
         trained_units.append(unit_label)
+        if experiment_stats_out is not None:
+            experiment_stats_out.update({
+                "feature_pool_kernel_size": cfg.feature_pool_kernel_size,
+                "feature_cleaning": {"mode": cfg.feature_cleaning_mode, "applied": False},
+            })
         out = run_root / "weights" / "torch" / "model.pt"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"fakemodel")
@@ -535,6 +717,13 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     assert manifest["tile_stride"] == 256
     assert manifest["image_preprocess_pipeline"][0]["method"] == "bilateral"
     assert manifest["patchcore_params"]["feature_layers"] == "layer2_layer3"
+    assert manifest["patchcore_params"]["feature_pool_kernel_size"] == 3
+    assert manifest["patchcore_params"]["feature_cleaning_mode"] == "off"
+    assert manifest["patchcore_params"]["feature_cleaning_scope"] == "inner_only"
+    assert manifest["patchcore_params"]["feature_cleaning_keep_ratio"] == 0.99
+    assert manifest["patchcore_params"]["feature_cleaning_reference_size"] == 20_000
+    assert manifest["patchcore_params"]["feature_cleaning_query_chunk"] == 1_024
+    assert manifest["experimental_training"] is False
     import yaml
     y = yaml.safe_load((bundle_dir / "machine_config.yaml").read_text(encoding="utf-8"))
     assert y["tile_stride"] == 256
@@ -578,7 +767,8 @@ def test_run_training_pipeline_requires_all_units(tmp_path, monkeypatch):
                 res = [r for r in res if r.get(k) == v]
             return res
 
-    def fake_train(staging_dir, run_root, unit_label, cfg=None, log=None):
+    def fake_train(staging_dir, run_root, unit_label, cfg=None, log=None,
+                   experiment_stats_out=None):
         if unit_label == "G0F00000-edge":
             raise RuntimeError("edge model failed")
         out = run_root / "weights" / "torch" / "model.pt"

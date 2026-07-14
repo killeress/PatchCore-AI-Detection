@@ -106,8 +106,10 @@ def test_build_release_zip_includes_manifest_and_checksums():
             assert "capi_image_preprocess_lab.py" in names
             assert "capi_dataset_export.py" in names
             assert "capi_mark_detector.py" in names
+            assert "capi_patchcore_feature_cleaning.py" in names
             assert "capi_scratch_batch.py" in names
             assert "capi_scratch_export.py" in names
+            assert "scripts/over_review_poc/train_final_model.py" in names
             assert "scratch_classifier.py" in names
             assert "scratch_filter.py" in names
 

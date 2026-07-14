@@ -29,6 +29,12 @@
     </div>
   </div>
 
+  {% if experimental_training %}
+  <div style="margin:0 0 16px;padding:12px 16px;border:1px solid #fab387;border-radius:8px;background:#3b3028;color:#f9e2af;">
+    <strong>實驗模型：</strong>使用了 5×5 特徵聚合或特徵域清洗。請先以相同測試集重放並確認 threshold，再到模型庫手動啟用。
+  </div>
+  {% endif %}
+
   {# 三大頭條指標：整體 AUROC、訓練時長、Bundle 大小 #}
   <div class="d5-stats">
     {# AUROC 卡片：用顏色強烈表達 grade（excellent/good/fair/poor/fail） #}
@@ -92,6 +98,16 @@
               layer2 + layer3
             {% endif %}
           </dd>
+          <dt>特徵鄰域聚合</dt>
+          <dd>{{ patchcore_params.get("feature_pool_kernel_size", 3) }}×{{ patchcore_params.get("feature_pool_kernel_size", 3) }}</dd>
+          <dt>特徵域清洗</dt>
+          <dd>
+            {% if patchcore_params.get("feature_cleaning_mode", "off") == "off" %}
+              關閉
+            {% else %}
+              保守清洗（範圍={% if patchcore_params.get("feature_cleaning_scope", "inner_only") == "inner_and_edge" %}inner + edge{% else %}僅 inner{% endif %}、k={{ patchcore_params.get("feature_cleaning_k", 30) }}、保留 {{ (patchcore_params.get("feature_cleaning_keep_ratio", 0.99) * 100)|round(1) }}%）
+            {% endif %}
+          </dd>
           <dt>image_size</dt>
           <dd>
             {% if patchcore_params.get("image_size") %}
@@ -121,6 +137,7 @@
             <th class="d5-th-num">分離度</th>
             <th class="d5-th-num">門檻</th>
             <th class="d5-th-num">訓練 tile</th>
+            <th>特徵清洗</th>
             <th class="d5-th-num">耗時</th>
             <th class="d5-th-num">大小</th>
           </tr>
@@ -172,6 +189,22 @@
             </td>
             <td class="d5-td-num d5-cell-mono">{{ "%.4f"|format(info.threshold) }}</td>
             <td class="d5-td-num">{{ info.train }}</td>
+            <td>
+              {% set fc = info.feature_cleaning %}
+              {% if fc.get("applied") %}
+                <span title="{{ fc.get('total', 0) }} → {{ fc.get('kept', 0) }}；threshold={{ fc.get('threshold', '—') }}">
+                  移除 {{ fc.get("removed", 0) }}（{{ "%.2f"|format(fc.get("removed_ratio", 0) * 100) }}%）
+                </span>
+              {% elif fc.get("reason") == "edge_scope_excluded" %}
+                <span class="d5-na">edge 未套用</span>
+              {% elif fc.get("reason") == "insufficient_features" %}
+                <span class="d5-na">特徵不足，未清洗</span>
+              {% elif fc.get("reason") == "keep_all" %}
+                <span class="d5-na">保留 100%，未移除</span>
+              {% else %}
+                <span class="d5-na">關閉</span>
+              {% endif %}
+            </td>
             <td class="d5-td-num d5-cell-muted">
               {% if info.elapsed_seconds %}
                 {{ (info.elapsed_seconds // 60)|int }}分{{ "%02d"|format((info.elapsed_seconds % 60)|int) }}秒

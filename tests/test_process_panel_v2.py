@@ -151,7 +151,12 @@ def test_process_panel_v2_passes_requested_product_resolution_to_preprocess(tmp_
     cfg.machine_id = "UNKNOWN_SIZE_CODE"
     captured = {}
 
-    def fake_preprocess_panel_folder(_panel_path, pre_cfg, image_files=None):
+    def fake_preprocess_panel_folder(
+        _panel_path,
+        pre_cfg,
+        image_files=None,
+        boundary_reference_files=None,
+    ):
         captured["product_resolution"] = pre_cfg.product_resolution
         return {}
 
@@ -472,8 +477,8 @@ def test_process_panel_v2_grid_disabled_infers_only_aoi_tiles(tmp_path):
     assert len(results[0].anomaly_tiles) == 1
 
 
-def test_process_panel_v2_aoi_only_preprocesses_only_report_prefixes(tmp_path):
-    """AOI-only mode should not preprocess lighting images absent from the AOI report."""
+def test_process_panel_v2_aoi_only_uses_full_folder_for_boundary_reference(tmp_path):
+    """AOI-only keeps report targets but may use W0F as a boundary-only reference."""
     for prefix in ["STANDARD", "G0F00000", "R0F00000", "W0F00000", "WGF50500"]:
         _write_grey_panel_image(tmp_path, prefix)
     cfg = _make_config(tmp_path)
@@ -520,9 +525,13 @@ def test_process_panel_v2_aoi_only_preprocesses_only_report_prefixes(tmp_path):
     assert len(results) == 1
     pre_cfg = pre_folder.call_args.args[1]
     selected_names = [p.name for p in pre_folder.call_args.kwargs["image_files"]]
+    reference_names = [
+        p.name for p in pre_folder.call_args.kwargs["boundary_reference_files"]
+    ]
     assert pre_cfg.cache_processed_image is True
     assert pre_cfg.generate_grid_tiles is False
     assert selected_names == ["G0F00000_test.png"]
+    assert any(name.startswith("W0F00000") for name in reference_names)
 
 
 def test_process_panel_v2_aoi_tiles_reuse_cached_processed_image(tmp_path):
@@ -1106,10 +1115,20 @@ def test_process_panel_v2_aoi_only_mode_preprocesses_reference_for_black_images(
     captured_files = []
     original_preprocess_folder = capi_preprocess.preprocess_panel_folder
 
-    def fake_preprocess_panel_folder(folder, config, image_files=None):
+    def fake_preprocess_panel_folder(
+        folder,
+        config,
+        image_files=None,
+        boundary_reference_files=None,
+    ):
         if image_files:
             captured_files.extend([f.name for f in image_files])
-        return original_preprocess_folder(folder, config, image_files=image_files)
+        return original_preprocess_folder(
+            folder,
+            config,
+            image_files=image_files,
+            boundary_reference_files=boundary_reference_files,
+        )
 
     with patch("capi_preprocess.preprocess_panel_folder", side_effect=fake_preprocess_panel_folder), \
          patch.object(CAPIInferencer, "_parse_aoi_report_txt") as mock_parse:
