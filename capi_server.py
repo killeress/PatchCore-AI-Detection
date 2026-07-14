@@ -2110,13 +2110,19 @@ class CAPIServer:
                 try:
                     logger.info("[Cleanup] Starting scheduled database cleanup...")
                     stats = self.db.cleanup_old_records(
-                        ok_retain, ng_retain, tile_retain, vacuum, heatmap_retain
+                        ok_retain,
+                        ng_retain,
+                        tile_retain,
+                        vacuum,
+                        heatmap_retain,
+                        heatmap_base_dir=self.heatmap_manager.base_dir,
                     )
                     logger.info(
                         f"[Cleanup] Done — "
                         f"inference_records={stats['inference_records_deleted']}, "
                         f"tile_results={stats['tile_results_deleted']}, "
-                        f"heatmap_dirs={stats['heatmap_dirs_deleted']}"
+                        f"heatmap_dirs={stats['heatmap_dirs_deleted']}, "
+                        f"within_spec_dirs={stats['within_spec_dirs_deleted']}"
                     )
                 except Exception as e:
                     logger.error(f"[Cleanup] Failed: {e}")
