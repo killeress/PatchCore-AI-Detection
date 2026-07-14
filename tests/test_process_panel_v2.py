@@ -733,6 +733,95 @@ def test_bomb_postprocess_skips_b0f_aoi_track_only_tile(tmp_path):
     assert ng_tile.bomb_defect_code == "B01"
 
 
+@pytest.mark.parametrize(
+    ("coordinates", "matched_point", "missed_point"),
+    [
+        ([(1, 540), (1920, 540)], (960, 590), (960, 591)),
+        ([(960, 1), (960, 1080)], (1010, 540), (1011, 540)),
+        ([(100, 100), (900, 900)], (500, 535), (500, 571)),
+    ],
+)
+def test_line_bomb_uses_distance_to_segment_for_all_orientations(
+    tmp_path,
+    coordinates,
+    matched_point,
+    missed_point,
+):
+    from capi_inference import CAPIInferencer
+
+    cfg = _make_config(tmp_path)
+    cfg.bomb_match_tolerance = 50
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+    bomb = BombDefect(
+        image_prefix="WGF50500",
+        defect_code="B01",
+        defect_type="line",
+        coordinates=coordinates,
+    )
+
+    assert inferencer.check_bomb_match(
+        "WGF50500",
+        *matched_point,
+        (0, 0, 1920, 1080),
+        product_resolution=(1920, 1080),
+        bomb_list=[bomb],
+        skip_shape_check=True,
+    ) == (True, "B01")
+    assert inferencer.check_bomb_match(
+        "WGF50500",
+        *missed_point,
+        (0, 0, 1920, 1080),
+        product_resolution=(1920, 1080),
+        bomb_list=[bomb],
+        skip_shape_check=True,
+    ) == (False, "")
+
+
+def test_horizontal_line_bomb_keeps_aoi_coord_within_y_tolerance(tmp_path):
+    from capi_inference import CAPIInferencer, ImageResult, TileInfo
+
+    cfg = _make_config(tmp_path)
+    cfg.bomb_match_tolerance = 50
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+
+    tile = TileInfo(
+        tile_id=1,
+        x=704,
+        y=284,
+        width=512,
+        height=512,
+        image=np.zeros((512, 512), dtype=np.uint8),
+        zone="inner",
+    )
+    tile.is_aoi_coord_tile = True
+    tile.aoi_product_x = 960
+    tile.aoi_product_y = 570
+    result = ImageResult(
+        image_path=Path("WGF50500_test.png"),
+        image_size=(1920, 1080),
+        otsu_bounds=(0, 0, 1920, 1080),
+        exclusion_regions=[],
+        tiles=[tile],
+        excluded_tile_count=0,
+        processed_tile_count=1,
+        processing_time=0.0,
+        anomaly_tiles=[(tile, 1.0, None)],
+        raw_bounds=(0, 0, 1920, 1080),
+    )
+    bomb_info = {
+        "image_prefix": "WGF50500",
+        "defect_type": "line",
+        "coordinates": [(1, 540), (1920, 540)],
+    }
+
+    inferencer._apply_bomb_postprocess([result], bomb_info, (1920, 1080))
+
+    assert tile.is_bomb is True
+    assert tile.bomb_defect_code == "UNKNOWN"
+
+
 def test_client_point_bomb_can_match_multiple_aoi_tiles_within_tolerance(tmp_path):
     from capi_inference import CAPIInferencer, ImageResult, TileInfo
 
