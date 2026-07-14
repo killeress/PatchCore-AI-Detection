@@ -2462,6 +2462,7 @@ class CAPIDatabase:
         tile_retain_days: int = 7,
         vacuum: bool = True,
         heatmap_retain_days: int = 0,
+        heatmap_base_dir: Optional[str] = None,
     ) -> dict:
         from datetime import datetime, timedelta
         import shutil
@@ -2474,6 +2475,8 @@ class CAPIDatabase:
             "tile_results_deleted": 0,
             "inference_records_deleted": 0,
             "heatmap_dirs_deleted": 0,
+            "scratch_rescue_review_deleted": 0,
+            "within_spec_dirs_deleted": 0,
         }
 
         # Step 0: 清除過期 heatmap 目錄 (獨立天數，在 DB 記錄刪除前先查詢)
@@ -2491,9 +2494,41 @@ class CAPIDatabase:
                 finally:
                     conn.close()
 
+        within_spec_dirs_to_delete = []
+        if heatmap_retain_days > 0 and heatmap_base_dir:
+            within_spec_root = Path(heatmap_base_dir) / "within_spec_inference"
+            within_spec_cutoff_ts = (
+                now - timedelta(days=heatmap_retain_days)
+            ).timestamp()
+            try:
+                if within_spec_root.is_dir():
+                    for child in within_spec_root.iterdir():
+                        if child.is_symlink() or not child.is_dir():
+                            continue
+                        try:
+                            if child.stat().st_mtime < within_spec_cutoff_ts:
+                                within_spec_dirs_to_delete.append(child)
+                        except OSError:
+                            continue
+            except OSError:
+                pass
+
         with self._lock:
             conn = self._get_conn()
             try:
+                # scratch_rescue_review belongs to tile_results and must be
+                # removed first because its foreign key is not cascading.
+                cur = conn.execute("""
+                    DELETE FROM scratch_rescue_review
+                    WHERE tile_result_id IN (
+                        SELECT t.id FROM tile_results t
+                        JOIN image_results im ON t.image_result_id = im.id
+                        JOIN inference_records ir ON im.record_id = ir.id
+                        WHERE ir.created_at < ?
+                    )
+                """, (tile_cutoff,))
+                stats["scratch_rescue_review_deleted"] = cur.rowcount
+
                 # Step 1: 清除超過 tile_retain_days 的 tile_results
                 cur = conn.execute("""
                     DELETE FROM tile_results
@@ -2536,6 +2571,14 @@ class CAPIDatabase:
                 if p.is_dir():
                     shutil.rmtree(p)
                     stats["heatmap_dirs_deleted"] += 1
+            except Exception:
+                pass  # 目錄不存在或權限問題，跳過
+
+        for p in within_spec_dirs_to_delete:
+            try:
+                if p.is_dir() and not p.is_symlink():
+                    shutil.rmtree(p)
+                    stats["within_spec_dirs_deleted"] += 1
             except Exception:
                 pass  # 目錄不存在或權限問題，跳過
 
