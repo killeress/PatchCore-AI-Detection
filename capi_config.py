@@ -139,9 +139,9 @@ class BombDefect:
     """炸彈模擬缺陷定義 (機台模擬假 Defect 用於檢驗檢出能力)"""
     image_prefix: str       # 照片名前綴, e.g. "G0F00000"
     defect_code: str        # Defect Code, e.g. "PCLV6GA0"
-    defect_type: str        # "line" (豎線) 或 "point" (點)
+    defect_type: str        # "line" (橫/豎/斜線) 或 "point" (點)
     coordinates: List[Tuple[int, int]] = field(default_factory=list)
-    # 豎線: 2 點定義起終點 [(x1,y1),(x2,y2)]
+    # 線: 2 點定義起終點 [(x1,y1),(x2,y2)]
     # 點: 多個點座標 [(x1,y1),(x2,y2),...]
 
     @classmethod

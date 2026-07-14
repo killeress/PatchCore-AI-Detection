@@ -130,7 +130,7 @@ side_shot_prefixes:
 max_images_per_panel: 20
 
 # 炸彈系統 (機台模擬缺陷定義，用來檢驗 AD 檢出能力)
-# defect_type: "line" = 豎線 (兩點定義起終點), "point" = 點 (多個座標位置)
+# defect_type: "line" = 線段 (可橫/豎/斜，兩點定義起終點), "point" = 點 (多個座標位置)
 # coordinates: 產品座標系 (1920x1080)
 bomb_match_tolerance: 50  # 座標匹配容忍度 (產品座標系像素)
 bomb_line_min_aspect_ratio: 1.2  # Line 型炸彈 heatmap 最小長寬比 (建議 2.5~4.0)

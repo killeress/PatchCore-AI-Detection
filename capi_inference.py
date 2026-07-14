@@ -5840,6 +5840,33 @@ class CAPIInferencer:
         stats["ok_reason"] = reason
         return [], stats
 
+    @staticmethod
+    def _point_within_line_segment_tolerance(
+        point_x: float,
+        point_y: float,
+        pt1: Tuple[int, int],
+        pt2: Tuple[int, int],
+        tolerance: float,
+    ) -> bool:
+        """判斷產品座標點是否位於有限線段的容忍帶內。"""
+        x1, y1 = float(pt1[0]), float(pt1[1])
+        x2, y2 = float(pt2[0]), float(pt2[1])
+        dx = x2 - x1
+        dy = y2 - y1
+        length_squared = dx * dx + dy * dy
+
+        if length_squared == 0:
+            nearest_x, nearest_y = x1, y1
+        else:
+            projection = ((point_x - x1) * dx + (point_y - y1) * dy) / length_squared
+            projection = max(0.0, min(1.0, projection))
+            nearest_x = x1 + projection * dx
+            nearest_y = y1 + projection * dy
+
+        offset_x = point_x - nearest_x
+        offset_y = point_y - nearest_y
+        return offset_x * offset_x + offset_y * offset_y <= float(tolerance) ** 2
+
     def _check_heatmap_line_shape(
         self,
         anomaly_map: np.ndarray,
@@ -5954,24 +5981,17 @@ class CAPIInferencer:
                 continue
             
             if bomb.defect_type == "line" and len(bomb.coordinates) >= 2:
-                # 豎線型: 將兩端座標轉換，判斷 tile 是否在緩衝帶內
+                # 線型: 將 tile 位置轉回產品座標，判斷是否在線段容忍帶內
                 pt1 = bomb.coordinates[0]
                 pt2 = bomb.coordinates[1]
-                img_x1, img_y1 = self._map_aoi_coords(pt1[0], pt1[1], raw_bounds, product_resolution)
-                img_x2, img_y2 = self._map_aoi_coords(pt2[0], pt2[1], raw_bounds, product_resolution)
-                
-                # 線段 x 範圍 ± tolerance (轉換到圖片座標的 tolerance)
-                product_width = product_resolution[0]
-                x_start, _, x_end, _ = raw_bounds
-                scale_x = (x_end - x_start) / product_width
-                img_tolerance_x = int(tolerance * scale_x)
-                
-                min_x = min(img_x1, img_x2) - img_tolerance_x
-                max_x = max(img_x1, img_x2) + img_tolerance_x
-                min_y = min(img_y1, img_y2)
-                max_y = max(img_y1, img_y2)
-                
-                if min_x <= tile_center_x <= max_x and min_y <= tile_center_y <= max_y:
+                product_width, product_height = product_resolution
+                x_start, y_start, x_end, y_end = raw_bounds
+                product_x = (tile_center_x - x_start) * product_width / (x_end - x_start)
+                product_y = (tile_center_y - y_start) * product_height / (y_end - y_start)
+
+                if self._point_within_line_segment_tolerance(
+                    product_x, product_y, pt1, pt2, tolerance
+                ):
                     # 額外驗證：heatmap 是否呈現線狀形態
                     if anomaly_map is not None and not skip_shape_check:
                         is_line, aspect_ratio = self._check_heatmap_line_shape(
@@ -6888,12 +6908,13 @@ class CAPIInferencer:
                                 elif bomb.defect_type == "line" and len(bomb.coordinates) >= 2:
                                     # line 型: 檢查 AOI 座標是否在線段緩衝帶內
                                     pt1, pt2 = bomb.coordinates[0], bomb.coordinates[1]
-                                    min_x = min(pt1[0], pt2[0]) - tolerance
-                                    max_x = max(pt1[0], pt2[0]) + tolerance
-                                    min_y = min(pt1[1], pt2[1])
-                                    max_y = max(pt1[1], pt2[1])
-                                    if (min_x <= tile.aoi_product_x <= max_x and
-                                        min_y <= tile.aoi_product_y <= max_y):
+                                    if self._point_within_line_segment_tolerance(
+                                        tile.aoi_product_x,
+                                        tile.aoi_product_y,
+                                        pt1,
+                                        pt2,
+                                        tolerance,
+                                    ):
                                         aoi_matches_bomb = True
                                 if aoi_matches_bomb:
                                     break
@@ -7417,12 +7438,13 @@ class CAPIInferencer:
                                         break
                             elif bomb.defect_type == "line" and len(bomb.coordinates) >= 2:
                                 pt1, pt2 = bomb.coordinates[0], bomb.coordinates[1]
-                                min_x = min(pt1[0], pt2[0]) - tolerance
-                                max_x = max(pt1[0], pt2[0]) + tolerance
-                                min_y = min(pt1[1], pt2[1])
-                                max_y = max(pt1[1], pt2[1])
-                                if (min_x <= tile.aoi_product_x <= max_x and
-                                    min_y <= tile.aoi_product_y <= max_y):
+                                if self._point_within_line_segment_tolerance(
+                                    tile.aoi_product_x,
+                                    tile.aoi_product_y,
+                                    pt1,
+                                    pt2,
+                                    tolerance,
+                                ):
                                     aoi_matches_bomb = True
                             if aoi_matches_bomb:
                                 break
