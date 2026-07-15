@@ -50,6 +50,7 @@ from typing import Dict, Optional, Tuple, List, Any
 sys.path.insert(0, str(Path(__file__).parent))
 
 from capi_config import CAPIConfig
+from capi_image_orientation import read_detection_image
 from capi_image_naming import CANONICAL_IMAGE_PREFIXES, canonical_image_prefix
 from capi_inference import CAPIInferencer, ImageResult, resolve_product_resolution
 from capi_preprocess import BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_polygon
@@ -553,6 +554,7 @@ def _rect_polygon_from_bbox(bbox: Optional[Tuple[int, int, int, int]]) -> Option
 def _image_abnormal_preprocess_config(
     config: CAPIConfig,
     product_resolution: Optional[Tuple[int, int]] = None,
+    rotate_180: bool = False,
 ) -> PreprocessConfig:
     if product_resolution is None:
         product_resolution = resolve_product_resolution(
@@ -567,6 +569,7 @@ def _image_abnormal_preprocess_config(
         image_preprocess_pipeline=getattr(config, "image_preprocess_pipeline", []) or [],
         generate_grid_tiles=False,
         product_resolution=product_resolution,
+        rotate_180=rotate_180,
     )
 
 
@@ -636,7 +639,7 @@ def _image_abnormal_reference_polygon(
         cache_key = str(image_path)
         image = image_cache.get(cache_key)
         if image is None:
-            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            image = read_detection_image(image_path, cv2.IMREAD_UNCHANGED, pre_cfg.rotate_180)
             image_cache[cache_key] = image
         if image is None:
             continue
@@ -662,6 +665,7 @@ def check_image_abnormal_precheck(
     image_files: Optional[List[Path]] = None,
     report_prefixes: Optional[List[str]] = None,
     product_resolution: Optional[Tuple[int, int]] = None,
+    rotate_180: bool = False,
 ) -> Optional[Dict[str, Any]]:
     if not getattr(config, "image_abnormal_detection_enabled", False):
         return None
@@ -683,7 +687,7 @@ def check_image_abnormal_precheck(
 
     limits = _image_abnormal_limits(config)
     image_cache: Dict[str, Any] = {}
-    pre_cfg = _image_abnormal_preprocess_config(config, product_resolution)
+    pre_cfg = _image_abnormal_preprocess_config(config, product_resolution, rotate_180)
     screen_paths = _image_abnormal_screen_path_map(candidates)
     reference_polygon, reference_source, reference_shape = _image_abnormal_reference_polygon(
         screen_paths,
@@ -705,7 +709,7 @@ def check_image_abnormal_precheck(
         cache_key = str(image_path)
         image = image_cache.get(cache_key)
         if image is None:
-            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            image = read_detection_image(image_path, cv2.IMREAD_UNCHANGED, pre_cfg.rotate_180)
             image_cache[cache_key] = image
         if image is None:
             logger.warning("畫異預檢無法讀取圖片: %s", image_path)
@@ -2615,6 +2619,7 @@ class CAPIServer:
                 inferencer.config,
                 report_prefixes=list(aoi_report_override.keys()),
                 product_resolution=parsed["resolution"],
+                rotate_180=getattr(inferencer, "_rotate_detection_images_180", False),
             )
             if image_abnormal:
                 screen = image_abnormal["screen"]
@@ -2640,6 +2645,7 @@ class CAPIServer:
                     bomb_info=parsed.get("bomb_info"),
                     model_id=parsed.get("model_id"),
                     aoi_report_override=aoi_report_override,
+                    machine_judgment=parsed.get("machine_judgment"),
                 )
 
                 # process_panel 回傳: (results, omit_vis, omit_overexposed, omit_info, is_duplicate, omit_image, aoi_report)

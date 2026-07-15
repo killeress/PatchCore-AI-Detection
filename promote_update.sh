@@ -2,6 +2,7 @@
 # Install one update package on this host, then publish it for other hosts.
 #
 # Usage:
+#   ./promote_update.sh
 #   ./promote_update.sh /aidata/capi_ai/update_repo/staging/patchcore_ai_release_<version>_codeonly.zip
 
 set -euo pipefail
@@ -9,15 +10,24 @@ set -euo pipefail
 APP_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$APP_ROOT"
 
-PACKAGE="${1:-}"
 UPDATE_REPO="${CAPI_UPDATE_REPO:-/aidata/capi_ai/update_repo}"
+PACKAGE_DIR="${CAPI_UPDATE_PACKAGE_DIR:-$UPDATE_REPO/staging}"
+PACKAGE="${1:-}"
 HEALTH_URL="${CAPI_HEALTH_URL:-http://127.0.0.1/api/version}"
 HTTP_PORT="${CAPI_UPDATE_HTTP_PORT:-8088}"
 HTTP_LOG="${CAPI_UPDATE_HTTP_LOG:-/aidata/capi_ai/logs/update_repo_http.log}"
 
 if [ -z "$PACKAGE" ]; then
-    echo "Usage: $0 <release-zip>"
-    exit 1
+    PACKAGE_NAME="$(find "$PACKAGE_DIR" -maxdepth 1 -type f \
+        -name 'patchcore_ai_release_*_codeonly.zip' \
+        -printf '%f\n' 2>/dev/null | sort -V | tail -n 1)"
+    if [ -z "$PACKAGE_NAME" ]; then
+        echo "ERROR: no code-only release ZIP found in $PACKAGE_DIR"
+        echo "Usage: $0 [release-zip]"
+        exit 1
+    fi
+    PACKAGE="$PACKAGE_DIR/$PACKAGE_NAME"
+    echo "Auto-selected package: $PACKAGE"
 fi
 
 if [ ! -f "$PACKAGE" ]; then
@@ -56,18 +66,47 @@ mkdir -p "$UPDATE_REPO"
 
 echo "[3/4] Ensuring update HTTP server is running..."
 mkdir -p "$(dirname "$HTTP_LOG")"
-if curl -fsS "http://127.0.0.1:${HTTP_PORT}/latest.json" >/dev/null 2>&1; then
+HTTP_URL="http://127.0.0.1:${HTTP_PORT}/latest.json"
+if curl -fsS "$HTTP_URL" >/dev/null 2>&1; then
     echo "  HTTP server already serves latest.json on port $HTTP_PORT"
 else
-    (
-        cd "$UPDATE_REPO"
-        nohup "$PYTHON_BIN" -m http.server "$HTTP_PORT" --bind 0.0.0.0 >"$HTTP_LOG" 2>&1 &
-    )
-    sleep 2
+    echo "  Starting HTTP server on port $HTTP_PORT..."
+    nohup "$PYTHON_BIN" -m http.server "$HTTP_PORT" \
+        --bind 0.0.0.0 \
+        --directory "$UPDATE_REPO" \
+        >"$HTTP_LOG" 2>&1 </dev/null &
+    HTTP_PID=$!
+    http_ready=0
+    for _ in $(seq 1 10); do
+        if curl -fsS "$HTTP_URL" >/dev/null 2>&1; then
+            http_ready=1
+            break
+        fi
+        if ! kill -0 "$HTTP_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$http_ready" -ne 1 ]; then
+        echo "ERROR: update HTTP server did not serve latest.json on port $HTTP_PORT"
+        if kill -0 "$HTTP_PID" 2>/dev/null; then
+            echo "  HTTP server process is still running (pid=$HTTP_PID); stopping it."
+            kill "$HTTP_PID" 2>/dev/null || true
+        else
+            echo "  HTTP server process exited during startup (pid=$HTTP_PID)."
+        fi
+        if [ -f "$HTTP_LOG" ]; then
+            echo "  HTTP server log:"
+            tail -n 50 "$HTTP_LOG"
+        fi
+        exit 1
+    fi
+    echo "  HTTP server started (pid=$HTTP_PID)"
 fi
 
 echo "[4/4] Verifying published latest.json..."
-curl -fsS "http://127.0.0.1:${HTTP_PORT}/latest.json"
+curl -fsS "$HTTP_URL"
 echo ""
 
 echo "============================================================"

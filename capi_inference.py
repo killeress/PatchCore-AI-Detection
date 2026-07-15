@@ -41,6 +41,7 @@ import torch
 import logging
 import re
 from capi_image_naming import AOI_REPORT_PREFIXES, canonical_image_prefix, panel_image_group_key
+from capi_image_orientation import read_detection_image, requires_detection_rotation
 
 # ── 舊版 anomalib 相容性修補 ─────────────────────────────
 # 修補 1: PrecisionType stub
@@ -376,6 +377,9 @@ class CAPIInferencer:
         """
         self.config = config
         self.base_dir = base_dir or Path(__file__).parent
+        self._rotate_detection_images_180 = requires_detection_rotation()
+        if self._rotate_detection_images_180:
+            logger.info("Detection input rotation enabled: hostname=capi13 angle=180")
         self.mark_template = None
         self.model_path = Path(model_path) if model_path else None
         self.threshold = threshold
@@ -589,6 +593,17 @@ class CAPIInferencer:
         """
         return canonical_image_prefix(filename)
 
+    def _read_detection_image(
+        self,
+        image_path: Path,
+        flags: int = cv2.IMREAD_UNCHANGED,
+    ) -> Optional[np.ndarray]:
+        return read_detection_image(
+            image_path,
+            flags,
+            rotate_180=getattr(self, "_rotate_detection_images_180", False),
+        )
+
     @staticmethod
     def _is_mark_binary_source(filename: str) -> bool:
         """正式推論只從 W0F0000 畫面讀 dot-matrix MARK。"""
@@ -606,9 +621,15 @@ class CAPIInferencer:
             return None, []
 
         try:
-            from capi_mark_detector import detect_panel_mark_from_path
+            from capi_mark_detector import detect_panel_mark
 
-            detection = detect_panel_mark_from_path(source_path, include_debug=False)
+            image = self._read_detection_image(source_path)
+            if image is None:
+                raise FileNotFoundError(f"cannot read image: {source_path}")
+            detection = detect_panel_mark(image, include_debug=False)
+            image_h, image_w = image.shape[:2]
+            detection["source_image"] = source_path.name
+            detection["image_size"] = (int(image_w), int(image_h))
         except Exception as exc:
             print(f"MARK Binary 偵測失敗 ({source_path.name}): {exc}")
             return None, []
@@ -635,7 +656,6 @@ class CAPIInferencer:
             x2=x + width,
             y2=y + height,
         )
-        detection["source_image"] = source_path.name
         detection["mark_bbox_tuple"] = (x, y, width, height)
         print(
             f"MARK Binary {source_path.name}: text={detection.get('text', '')} "
@@ -1323,7 +1343,7 @@ class CAPIInferencer:
         start_time = time.time()
 
         # 載入圖片 (保持原始深度，例如 8-bit 灰階)
-        raw_image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+        raw_image = self._read_detection_image(image_path)
         if raw_image is None:
             print(f"⚠️ 無法載入: {image_path}")
             return None
@@ -2282,7 +2302,7 @@ class CAPIInferencer:
                 
                 # 重新讀取原圖 (全尺寸) 給 CV 處理，因為它需要高解析度才能看清楚
                 # 如果 cv2 記憶體太大，可以在 preprocess 前把 raw cv_image 傳過來，但此處再次讀取較安全
-                full_image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+                full_image = self._read_detection_image(result.image_path)
                 if full_image is not None:
                     # CV 內部處理需要時間，記錄一下
                     cv_start = time.time()
@@ -2339,13 +2359,14 @@ class CAPIInferencer:
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
             product_resolution=self._product_resolution(),
+            rotate_180=getattr(self, "_rotate_detection_images_180", False),
         )
         pre_result = preprocess_panel_image(image_path, lighting, pre_cfg)
 
         if pre_result.foreground_bbox == (0, 0, 0, 0):
             return None
 
-        raw_img = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+        raw_img = self._read_detection_image(image_path)
         if raw_img is None:
             return None
         img_h, img_w = raw_img.shape[:2]
@@ -2472,7 +2493,7 @@ class CAPIInferencer:
         output_path: Optional[Path] = None,
     ) -> np.ndarray:
         """視覺化預處理結果"""
-        image = cv2.imread(str(image_path))
+        image = self._read_detection_image(image_path, cv2.IMREAD_COLOR)
         vis = image.copy()
         
         # Otsu 邊界（藍色）
@@ -2525,7 +2546,25 @@ class CAPIInferencer:
         return vis
 
     
-    def check_dust_or_scratch_feature(self, image: np.ndarray, extension_override: Optional[int] = None) -> tuple:
+    def _use_omit_pixel_grid_filter(
+        self,
+        product_resolution: Optional[Tuple[int, int]] = None,
+    ) -> bool:
+        """Enable the opt-in pixel-grid filter only for 1366x768 products."""
+        if not getattr(self.config, "dust_pixel_grid_filter_enabled", False):
+            return False
+        resolution = product_resolution or self._product_resolution()
+        try:
+            return (int(resolution[0]), int(resolution[1])) == (1366, 768)
+        except (TypeError, ValueError, IndexError):
+            return False
+
+    def check_dust_or_scratch_feature(
+        self,
+        image: np.ndarray,
+        extension_override: Optional[int] = None,
+        product_resolution: Optional[Tuple[int, int]] = None,
+    ) -> tuple:
         """
         進階灰塵/刮痕偵測 — 使用 CLAHE 增強 + Otsu 自適應閾值 + 形態學 + 面積篩選
         
@@ -2539,6 +2578,7 @@ class CAPIInferencer:
         Args:
             image: OMIT 圖片裁切區域 (BGR 或灰階)
             extension_override: 覆寫 Config 中的 dust_extension 設定
+            product_resolution: 產品解析度；1366x768 且設定開啟時抑制產品像素紋理
             
         Returns:
             (is_dust, dust_mask, bright_ratio, detail_text)
@@ -2561,6 +2601,40 @@ class CAPIInferencer:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
             gray = image.copy()
+
+        # 1366x768 產品的一個顯示 pixel 約佔 5x6 camera pixels。先在 CLAHE
+        # 放大局部對比前做週期紋理平滑，避免產品像素格被誤當成灰塵/刮痕。
+        pixel_grid_filter_active = self._use_omit_pixel_grid_filter(product_resolution)
+        pixel_grid_blur_kernel = 0
+        if pixel_grid_filter_active:
+            requested_kernel = max(
+                3,
+                int(getattr(self.config, "dust_pixel_grid_blur_kernel", 7)),
+            )
+            if requested_kernel % 2 == 0:
+                requested_kernel += 1
+            max_kernel = min(gray.shape[:2])
+            if max_kernel % 2 == 0:
+                max_kernel -= 1
+            pixel_grid_blur_kernel = min(requested_kernel, max_kernel)
+            if pixel_grid_blur_kernel >= 3:
+                valid_mask = (gray > 0).astype(np.float32)
+                blurred_values = cv2.GaussianBlur(
+                    gray.astype(np.float32),
+                    (pixel_grid_blur_kernel, pixel_grid_blur_kernel),
+                    0,
+                )
+                blurred_weights = cv2.GaussianBlur(
+                    valid_mask,
+                    (pixel_grid_blur_kernel, pixel_grid_blur_kernel),
+                    0,
+                )
+                gray = np.where(
+                    valid_mask > 0,
+                    blurred_values / np.maximum(blurred_weights, 1e-6),
+                    0,
+                )
+                gray = np.clip(np.rint(gray), 0, 255).astype(np.uint8)
         
         # Step 2: CLAHE 局部對比增強 — 強化微弱灰塵的可見度
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
@@ -2746,6 +2820,8 @@ class CAPIInferencer:
         bubble_info = f" Bub:{bubble_count}" if bubble_detection_enabled else ""
         detail_text = (f"Thr:{used_threshold:.0f} P:{particle_count} S:{scratch_count} "
                        f"Area:{total_area} Ratio:{bright_ratio:.4f}{dark_info}{bubble_info}")
+        if pixel_grid_filter_active:
+            detail_text += f" PxGridBlur:{pixel_grid_blur_kernel}"
         
         return is_dust, dust_mask, bright_ratio, detail_text
 
@@ -3060,10 +3136,19 @@ class CAPIInferencer:
         extension_override: Optional[int] = None,
         context_shift: int = 96,
         focus_x: Optional[int] = None,
+        product_resolution: Optional[Tuple[int, int]] = None,
     ) -> tuple:
         """Supplement boundary-clipped bubbles from horizontally shifted tiles."""
-        is_dust, dust_mask, bright_ratio, detail_text = \
-            self.check_dust_or_scratch_feature(omit_crop, extension_override)
+        if product_resolution is None:
+            is_dust, dust_mask, bright_ratio, detail_text = \
+                self.check_dust_or_scratch_feature(omit_crop, extension_override)
+        else:
+            is_dust, dust_mask, bright_ratio, detail_text = \
+                self.check_dust_or_scratch_feature(
+                    omit_crop,
+                    extension_override,
+                    product_resolution=product_resolution,
+                )
         if not getattr(self.config, 'dust_detect_bubbles_enabled', False):
             return is_dust, dust_mask, bright_ratio, detail_text
         if omit_image is None or omit_image.size == 0:
@@ -4460,9 +4545,20 @@ class CAPIInferencer:
 
         return patchcore_tiles, edge_defects
 
-    def _map_aoi_coords(self, px: int, py: int, raw_bounds: Tuple[int, int, int, int],
-                         product_resolution: Optional[Tuple[int, int]] = None) -> Tuple[int, int]:
-        """將產品座標映射到圖片座標"""
+    def _map_aoi_coords(
+        self,
+        px: int,
+        py: int,
+        raw_bounds: Tuple[int, int, int, int],
+        product_resolution: Optional[Tuple[int, int]] = None,
+        panel_polygon: Optional[np.ndarray] = None,
+    ) -> Tuple[int, int]:
+        """將產品座標映射到圖片座標。
+
+        平常保留舊的 ``raw_bounds`` 線性映射；若映射點落在已偵測的
+        panel polygon 外，表示 raw bounds 可能被 panel 外輪廓拉大，改用
+        產品四角到 panel 四角的透視映射。
+        """
         if product_resolution is None:
             product_resolution = DEFAULT_PRODUCT_RESOLUTION
         PRODUCT_WIDTH, PRODUCT_HEIGHT = product_resolution
@@ -4480,8 +4576,51 @@ class CAPIInferencer:
         # 轉換座標
         img_x = int(px * scale_x + x_start)
         img_y = int(py * scale_y + y_start)
-        
-        return img_x, img_y
+
+        if panel_polygon is None:
+            return img_x, img_y
+
+        try:
+            polygon = np.asarray(panel_polygon, dtype=np.float32).reshape(-1, 2)
+            if polygon.shape != (4, 2) or not np.isfinite(polygon).all():
+                return img_x, img_y
+
+            raw_distance = float(cv2.pointPolygonTest(
+                polygon, (float(img_x), float(img_y)), True,
+            ))
+            if raw_distance >= -1.0:
+                return img_x, img_y
+
+            source = np.array([
+                [0.0, 0.0],
+                [float(PRODUCT_WIDTH), 0.0],
+                [float(PRODUCT_WIDTH), float(PRODUCT_HEIGHT)],
+                [0.0, float(PRODUCT_HEIGHT)],
+            ], dtype=np.float32)
+            transform = cv2.getPerspectiveTransform(source, polygon)
+            mapped = cv2.perspectiveTransform(
+                np.array([[[float(px), float(py)]]], dtype=np.float32),
+                transform,
+            )[0, 0]
+            if not np.isfinite(mapped).all():
+                return img_x, img_y
+
+            polygon_x = int(round(float(mapped[0])))
+            polygon_y = int(round(float(mapped[1])))
+            polygon_distance = float(cv2.pointPolygonTest(
+                polygon, (float(polygon_x), float(polygon_y)), True,
+            ))
+            if polygon_distance < -1.0:
+                return img_x, img_y
+
+            logger.warning(
+                "AOI mapping corrected by panel polygon: product=(%d,%d) "
+                "raw=(%d,%d) raw_dist=%.1fpx polygon=(%d,%d)",
+                px, py, img_x, img_y, raw_distance, polygon_x, polygon_y,
+            )
+            return polygon_x, polygon_y
+        except (cv2.error, TypeError, ValueError):
+            return img_x, img_y
 
     def _inspect_roi_fusion(
         self,
@@ -5226,13 +5365,14 @@ class CAPIInferencer:
                 image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
                 preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
                 product_resolution=product_resolution or self._product_resolution(),
+                rotate_180=getattr(self, "_rotate_detection_images_180", False),
             )
             aoi_tile_count = 0
             for result in preprocessed_results:
                 img_prefix = self._get_image_prefix(result.image_path.name)
                 if img_prefix not in aoi_report:
                     continue
-                image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+                image = self._read_detection_image(result.image_path)
                 if image is None:
                     logger.warning(f"[v2] AOI Coord: 無法讀取圖片 {result.image_path}")
                     continue
@@ -5257,7 +5397,7 @@ class CAPIInferencer:
             if img_prefix not in aoi_report:
                 continue
 
-            aoi_image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+            aoi_image = self._read_detection_image(result.image_path)
             if aoi_image is None:
                 continue
 
@@ -5368,7 +5508,21 @@ class CAPIInferencer:
             img_x, img_y = self._map_aoi_coords(
                 defect.product_x, defect.product_y,
                 result.raw_bounds, product_resolution,
+                panel_polygon=polygon,
             )
+
+            if polygon is not None:
+                polygon_distance = float(cv2.pointPolygonTest(
+                    np.asarray(polygon, dtype=np.float32),
+                    (float(img_x), float(img_y)),
+                    True,
+                ))
+                if polygon_distance < -1.0:
+                    raise RuntimeError(
+                        f"[v2] AOI 座標映射到 panel 外: "
+                        f"{defect.defect_code} product=({defect.product_x},{defect.product_y}) "
+                        f"image=({img_x},{img_y}) distance={polygon_distance:.1f}px"
+                    )
 
             # Inference/training aligned inward ROI：先用 AOI-centered origin，
             # 若跨出 polygon 則往產品內側推；不 zero-pad、不帶黑背景進 edge.pt。
@@ -5416,6 +5570,12 @@ class CAPIInferencer:
             tile_zone, _cov, _dist, tile_mask = classify_tile_zone(
                 (tx, ty, tx2, ty2), polygon, pre_cfg,
             )
+            if tile_mask is not None and not np.any(tile_mask):
+                raise RuntimeError(
+                    f"[v2] AOI tile 與 panel 無有效重疊: "
+                    f"{defect.defect_code} image=({img_x},{img_y}) "
+                    f"tile=({tx},{ty},{tx2},{ty2})"
+                )
 
             if is_skip_file:
                 zone = "bright_spot"
@@ -6029,6 +6189,7 @@ class CAPIInferencer:
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
+        machine_judgment: Optional[str] = None,
     ):
         """分發器：依 config.is_new_architecture 路由至 v1 或 v2 實作。"""
         return self._dispatch_process_panel(
@@ -6039,6 +6200,7 @@ class CAPIInferencer:
             bomb_info=bomb_info,
             model_id=model_id,
             aoi_report_override=aoi_report_override,
+            machine_judgment=machine_judgment,
         )
 
     def _process_panel_v1(
@@ -6050,6 +6212,7 @@ class CAPIInferencer:
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
+        machine_judgment: Optional[str] = None,
     ) -> List[ImageResult]:
         """
         處理整個面板的圖片 (包含 PINIGBI 灰塵檢查 和 AOI Defect 整合)
@@ -6087,7 +6250,7 @@ class CAPIInferencer:
         if omit_files:
             omit_path = omit_files[0]
             # 載入 OMIT 圖片 (保持原始深度)
-            omit_image = cv2.imread(str(omit_path), cv2.IMREAD_UNCHANGED)
+            omit_image = self._read_detection_image(omit_path)
             if omit_image is None:
                 print(f"⚠️ 無法載入 OMIT 圖片: {omit_path}")
         
@@ -6136,7 +6299,7 @@ class CAPIInferencer:
             files_to_scan = [f for f in normal_files if not self.config.should_skip_file(f.name)]
             for scan_path in files_to_scan:
                 try:
-                    scan_img = cv2.imread(str(scan_path), cv2.IMREAD_UNCHANGED)
+                    scan_img = self._read_detection_image(scan_path)
                     if scan_img is not None:
                         mark_region = self.find_mark_region(scan_img)
                         if mark_region:
@@ -6187,7 +6350,7 @@ class CAPIInferencer:
         )
         for ref_path in ref_candidates:
             try:
-                ref_img = cv2.imread(str(ref_path), cv2.IMREAD_UNCHANGED)
+                ref_img = self._read_detection_image(ref_path)
                 if ref_img is None:
                     continue
                 if self._use_robust_panel_boundary():
@@ -6484,6 +6647,7 @@ class CAPIInferencer:
                                 th,
                                 omit_crop,
                                 focus_x=context_focus_x,
+                                product_resolution=product_resolution,
                             )
                         tile.dust_mask = dust_mask
                         tile.dust_bright_ratio = bright_ratio
@@ -6565,6 +6729,7 @@ class CAPIInferencer:
                                                 omit_crop,
                                                 extension_override=0,
                                                 focus_x=context_focus_x,
+                                                product_resolution=product_resolution,
                                             )
                                     ts_has_real, ts_peak_yx, ts_features, ts_detail = \
                                         self.check_dust_two_stage(
@@ -6648,7 +6813,7 @@ class CAPIInferencer:
                     # 讀取原始圖片一次，供所有 edge defect 的 defect mask 計算
                     orig_for_edge = None
                     if getattr(self, 'edge_inspector', None) and self.edge_inspector.config.dust_filter_enabled:
-                        orig_for_edge = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+                        orig_for_edge = self._read_detection_image(img_path)
 
                     for ed in result.edge_defects:
                         if getattr(ed, 'inspector_mode', 'cv') == 'fusion':
@@ -6668,7 +6833,11 @@ class CAPIInferencer:
                             ed.omit_crop_image = omit_crop.copy()
 
                             if getattr(self, 'edge_inspector', None) and self.edge_inspector.config.dust_filter_enabled:
-                                is_dust, dust_mask, bright_ratio, detail_text = self.check_dust_or_scratch_feature(omit_crop)
+                                is_dust, dust_mask, bright_ratio, detail_text = \
+                                    self.check_dust_or_scratch_feature(
+                                        omit_crop,
+                                        product_resolution=product_resolution,
+                                    )
                                 ed.dust_mask = dust_mask
                                 ed.dust_bright_ratio = bright_ratio
 
@@ -7068,7 +7237,7 @@ class CAPIInferencer:
         omit_overexposed = False
         omit_overexposure_info = ""
         if omit_files:
-            omit_image = cv2.imread(str(omit_files[0]), cv2.IMREAD_UNCHANGED)
+            omit_image = self._read_detection_image(omit_files[0])
             if omit_image is not None:
                 omit_overexposed, _mean, _ratio, omit_overexposure_info = \
                     self.check_omit_overexposure(omit_image)
@@ -7091,7 +7260,7 @@ class CAPIInferencer:
             if model_id and len(model_id) >= 6:
                 resolution_code = model_id[5].upper()
             self.edge_inspector.config.set_active_zones_for_product(resolution_code)
-            full_image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+            full_image = self._read_detection_image(result.image_path)
             if full_image is not None:
                 result.edge_defects = self.edge_inspector.inspect(full_image, result.raw_bounds)
         except Exception as e:
@@ -7105,6 +7274,7 @@ class CAPIInferencer:
         omit_overexposure_info: str,
         cpu_workers: int = 4,
         model_id: Optional[str] = None,
+        product_resolution: Optional[Tuple[int, int]] = None,
     ) -> None:
         """Apply panel-level OMIT dust filtering to PatchCore anomaly tiles."""
         if omit_image is None:
@@ -7165,6 +7335,7 @@ class CAPIInferencer:
                         th,
                         omit_crop,
                         focus_x=context_focus_x,
+                        product_resolution=product_resolution,
                     )
                 tile.dust_mask = dust_mask
                 tile.dust_bright_ratio = bright_ratio
@@ -7239,6 +7410,7 @@ class CAPIInferencer:
                                         omit_crop,
                                         extension_override=0,
                                         focus_x=context_focus_x,
+                                        product_resolution=product_resolution,
                                     )
                             ts_has_real, ts_peak_yx, ts_features, ts_detail = \
                                 self.check_dust_two_stage(
@@ -7622,6 +7794,7 @@ class CAPIInferencer:
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
+        machine_judgment: Optional[str] = None,
     ):
         """新架構：依 tile zone routing inner/edge model。
 
@@ -7644,11 +7817,6 @@ class CAPIInferencer:
         t0 = time.time()
         image_files, is_duplicate = self._prepare_panel_image_files(panel_path)
         panel_mark_detection, panel_mark_regions = self._detect_panel_mark_binary_region(image_files)
-        omit_vis, omit_overexposed, omit_overexposure_info, omit_image = \
-            self._load_omit_context(panel_path, image_files=image_files)
-        if omit_image is not None:
-            tag = "OVEREXPOSED" if omit_overexposed else "OK"
-            print(f"[v2] OMIT {tag}: {omit_overexposure_info}")
 
         aoi_report: Optional[Dict[str, List['AOIReportDefect']]] = None
         aoi_report_for_inference: Dict[str, List['AOIReportDefect']] = {}
@@ -7665,11 +7833,103 @@ class CAPIInferencer:
         elif bomb_info is not None and getattr(self.config, "bomb_area_force_detection_enabled", False):
             print("💣 [BOMB_FORCE] 已啟用但 aoi_coord_inspection_enabled=False，無法補切 Client 炸彈座標")
 
+        aoi_ok_skip = bool(
+            str(machine_judgment or "").strip().upper() == "OK"
+            and not self.config.grid_tiling_enabled
+            and self.config.aoi_coord_inspection_enabled
+            and not aoi_report_for_inference
+        )
+        if aoi_ok_skip:
+            mark_source_name = str(
+                (panel_mark_detection or {}).get("source_image") or ""
+            )
+            mark_source_path = next(
+                (path for path in image_files if path.name == mark_source_name),
+                None,
+            )
+            if mark_source_path is None:
+                mark_source_path = next(
+                    (path for path in image_files if self._is_mark_binary_source(path.name)),
+                    image_files[0] if image_files else None,
+                )
+
+            mark_results: List[ImageResult] = []
+            if mark_source_path is not None:
+                image_size = (panel_mark_detection or {}).get("image_size")
+                try:
+                    image_width = int(image_size[0])
+                    image_height = int(image_size[1])
+                except (TypeError, ValueError, IndexError):
+                    mark_image = self._read_detection_image(mark_source_path)
+                    if mark_image is None:
+                        image_width = image_height = 0
+                    else:
+                        image_height, image_width = mark_image.shape[:2]
+
+                full_bounds = (0, 0, image_width, image_height)
+                mark_result = ImageResult(
+                    image_path=mark_source_path,
+                    image_size=(image_width, image_height),
+                    otsu_bounds=full_bounds,
+                    exclusion_regions=[],
+                    tiles=[],
+                    excluded_tile_count=0,
+                    processed_tile_count=0,
+                    processing_time=time.time() - t0,
+                    anomaly_tiles=[],
+                    raw_bounds=full_bounds,
+                    inference_time=0.0,
+                )
+                if bomb_info is not None:
+                    mark_result.client_bomb_info = bomb_info
+                mark_results.append(mark_result)
+
+            self._attach_panel_mark_binary_to_results(
+                mark_results,
+                panel_mark_detection,
+                panel_mark_regions,
+            )
+            total_elapsed = time.time() - t0
+            print(
+                "[v2] AOI_OK_SKIP: machine_judgment=OK、Grid Tiling 關閉且無 "
+                "AOI/forced 座標；保留 MARK，跳過 OMIT、影像預處理、模型與後處理"
+            )
+            print(
+                f"📊 Panel {panel_path.name} 總耗時 {total_elapsed:.2f}s | "
+                f"前置={total_elapsed:.2f}s, 預處理=0.00s, Tile準備=0.00s, "
+                f"GPU推論=0.00s, 後處理/收尾=0.00s | "
+                f"{len(mark_results)} MARK result(s), 0 NG, AOI_OK_SKIP"
+            )
+            return (
+                mark_results,
+                None,
+                False,
+                "",
+                is_duplicate,
+                None,
+                aoi_report or {},
+            )
+
+        omit_vis, omit_overexposed, omit_overexposure_info, omit_image = \
+            self._load_omit_context(panel_path, image_files=image_files)
+        if omit_image is not None:
+            tag = "OVEREXPOSED" if omit_overexposed else "OK"
+            print(f"[v2] OMIT {tag}: {omit_overexposure_info}")
+
         aoi_only_mode = bool(
             not self.config.grid_tiling_enabled
             and self.config.aoi_coord_inspection_enabled
             and aoi_report_for_inference
         )
+        if (
+            not self.config.grid_tiling_enabled
+            and self.config.aoi_coord_inspection_enabled
+            and not aoi_report_for_inference
+        ):
+            print(
+                "[v2] Grid Tiling 關閉，AOI report 無 NG/forced 座標："
+                "本次不建立任何 inference tile"
+            )
         preprocess_image_files = image_files
         if aoi_only_mode:
             report_prefixes = set(aoi_report_for_inference.keys())
@@ -7705,12 +7965,14 @@ class CAPIInferencer:
             edge_threshold_px=self.config.edge_threshold_px,
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
             cache_processed_image=aoi_only_mode,
-            generate_grid_tiles=not aoi_only_mode,
+            generate_grid_tiles=bool(self.config.grid_tiling_enabled),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
             product_resolution=product_resolution or self._product_resolution(),
+            rotate_180=getattr(self, "_rotate_detection_images_180", False),
         )
 
         preprocess_start = time.time()
+        setup_elapsed = preprocess_start - t0
         panel_results = preprocess_panel_folder(
             panel_path,
             pre_cfg,
@@ -7721,10 +7983,12 @@ class CAPIInferencer:
             logger.warning(f"[v2] {panel_path}: preprocess_panel_folder 回傳空結果")
             # 回傳與 v1 格式相容的空結果
             return [], omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image, {}
-        preprocess_elapsed = time.time() - preprocess_start
+        preprocess_end = time.time()
+        preprocess_elapsed = preprocess_end - preprocess_start
+        grid_tile_count = sum(len(result.tiles) for result in panel_results.values())
         print(
             f"⚡ Phase 1 完成: {len(panel_results)} 個 lighting 預處理耗時 "
-            f"{preprocess_elapsed:.2f}s"
+            f"{preprocess_elapsed:.2f}s (grid tiles={grid_tile_count})"
         )
 
         results: List[ImageResult] = []
@@ -7736,7 +8000,7 @@ class CAPIInferencer:
             polygon = pre_result.panel_polygon
 
             # 取得圖片尺寸
-            raw_img = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+            raw_img = self._read_detection_image(img_path)
             if raw_img is None:
                 logger.warning(f"[v2] 無法讀取圖片: {img_path}")
                 continue
@@ -7870,7 +8134,7 @@ class CAPIInferencer:
                 if matched_file is None:
                     continue
 
-                black_image = cv2.imread(str(matched_file), cv2.IMREAD_UNCHANGED)
+                black_image = self._read_detection_image(matched_file)
                 if black_image is None:
                     logger.warning(f"[v2] 無法讀取 skip_file 圖片: {matched_file}")
                     continue
@@ -7951,6 +8215,7 @@ class CAPIInferencer:
 
         # 推論：只對目前 result.tiles 內保留的 tiles 跑模型。
         inference_start = time.time()
+        tile_prepare_elapsed = inference_start - preprocess_end
         for entry in v2_entries:
             lighting = entry["lighting"]
             result = entry["result"]
@@ -8059,6 +8324,7 @@ class CAPIInferencer:
             omit_overexposure_info=omit_overexposure_info,
             cpu_workers=cpu_workers,
             model_id=model_id,
+            product_resolution=product_resolution,
         )
         self._apply_bomb_postprocess(results, bomb_info, product_resolution)
         self._apply_exclude_zone_postprocess(results, model_id)
@@ -8070,7 +8336,6 @@ class CAPIInferencer:
             for result in results:
                 result.client_bomb_info = bomb_info
 
-        total_elapsed = time.time() - t0
         def _has_effective_ng(result: ImageResult) -> bool:
             real_tiles = [
                 t for t, _s, _m in result.anomaly_tiles
@@ -8089,12 +8354,23 @@ class CAPIInferencer:
             return bool(real_tiles or real_edges)
 
         ng_count = sum(1 for r in results if _has_effective_ng(r))
+        total_elapsed = time.time() - t0
+        post_finalize_elapsed = max(
+            0.0,
+            total_elapsed
+            - setup_elapsed
+            - preprocess_elapsed
+            - tile_prepare_elapsed
+            - inference_elapsed,
+        )
         print(
-            f"📊 Panel {Path(panel_dir).name} 總計: "
-            f"預處理 {preprocess_elapsed:.2f}s + "
-            f"推論 {inference_elapsed:.2f}s + "
-            f"後處理 {post_elapsed:.2f}s = {total_elapsed:.2f}s "
-            f"({len(results)} lighting(s), {ng_count} NG)"
+            f"📊 Panel {Path(panel_dir).name} 總耗時 {total_elapsed:.2f}s | "
+            f"前置={setup_elapsed:.2f}s, "
+            f"預處理={preprocess_elapsed:.2f}s, "
+            f"Tile準備={tile_prepare_elapsed:.2f}s, "
+            f"GPU推論={inference_elapsed:.2f}s, "
+            f"後處理/收尾={post_finalize_elapsed:.2f}s | "
+            f"{len(results)} lighting(s), {ng_count} NG"
         )
 
         # 回傳與 v1 格式相容的 7-tuple
@@ -8157,7 +8433,7 @@ class CAPIInferencer:
 
     def visualize_inference_result(self, image_path: Path, result: ImageResult) -> np.ndarray:
         """視覺化推論結果（含異常標記 與 AOI 標記）"""
-        image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+        image = self._read_detection_image(image_path)
         
         # 如果是灰階，轉為 BGR 以便畫上彩色標記
         vis = image.copy()
@@ -8405,7 +8681,7 @@ class CAPIInferencer:
         """
         if product_resolution is None:
             product_resolution = DEFAULT_PRODUCT_RESOLUTION
-        image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+        image = self._read_detection_image(image_path)
         if image is None:
             image = np.zeros((product_resolution[1], product_resolution[0], 3), dtype=np.uint8)
         

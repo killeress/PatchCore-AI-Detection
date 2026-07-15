@@ -68,6 +68,10 @@ _PATTERNS: Dict[str, List[Tuple[str, ...]]] = {
 
 _POSITIONAL_PATTERNS: Dict[Tuple[str, int], List[Tuple[str, ...]]] = {
     ("B", 0): [("01110", "11111", "11010", "11110", "11011", "11111", "11110")],
+    # 實機網紋會讓點陣跨格；保留 R 的中段與下斜腳，避免被 F/P 吸走。
+    ("R", 0): [("11110", "11011", "10001", "11110", "10100", "10010", "10000")],
+    # 第二碼 5 的實機跨格容錯，避免低對比畫面被判成 J/E。
+    ("5", 1): [("01111", "10000", "01000", "11110", "00001", "00011", "11110")],
 }
 
 _FIRST_CHARS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
@@ -195,6 +199,30 @@ def _dot_mask(roi: np.ndarray, scale_basis: int) -> np.ndarray:
     return filtered
 
 
+def _remove_tiny_components(mask: np.ndarray) -> np.ndarray:
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    areas = [
+        int(stats[idx, cv2.CC_STAT_AREA])
+        for idx in range(1, count)
+        if stats[idx, cv2.CC_STAT_WIDTH] >= 2
+        and stats[idx, cv2.CC_STAT_HEIGHT] >= 2
+        and stats[idx, cv2.CC_STAT_AREA] >= 5
+    ]
+    if not areas:
+        return mask
+
+    min_area = max(5, int(round(float(np.median(areas)) * 0.15)))
+    keep = np.zeros(count, dtype=np.uint8)
+    for idx in range(1, count):
+        if (
+            stats[idx, cv2.CC_STAT_WIDTH] >= 2
+            and stats[idx, cv2.CC_STAT_HEIGHT] >= 2
+            and stats[idx, cv2.CC_STAT_AREA] >= min_area
+        ):
+            keep[idx] = 255
+    return keep[labels]
+
+
 def _find_mark_groups(
     mask: np.ndarray,
     offset_x: int,
@@ -214,6 +242,7 @@ def _find_mark_groups(
 
         component_mask = np.where(labels == idx, 255, 0).astype(np.uint8)
         mark_mask = cv2.bitwise_and(mask, mask, mask=component_mask)
+        mark_mask = _remove_tiny_components(mark_mask)
         ys, xs = np.where(mark_mask > 0)
         if len(xs) == 0:
             continue
@@ -282,10 +311,13 @@ def _recognize_group(mask: np.ndarray) -> Optional[Dict[str, Any]]:
     if split is None:
         return None
 
+    row_correction = _estimate_dot_row_correction([char_mask for char_mask, _ in split])
     chars = []
     text_parts = []
     char_boxes = []
     for idx, (char_mask, box) in enumerate(split):
+        if idx == 0 and row_correction != 0.0:
+            char_mask = _apply_dot_row_correction(char_mask, row_correction)
         allowed = _FIRST_CHARS if idx == 0 else _SECOND_CHARS
         recognized = _recognize_char(char_mask, allowed, char_index=idx)
         if recognized is None:
@@ -407,6 +439,34 @@ def _recognize_char(mask: np.ndarray, allowed: Iterable[str], char_index: Option
         char_score = max(_pattern_score(densities, pattern) for pattern in patterns)
         scores.append((char_score, char))
 
+    if char_index == 0 and scores:
+        best_score, best_char = max(scores)
+        r_score = next((score for score, char in scores if char == "R"), None)
+        if (
+            best_char in {"F", "P"}
+            and r_score is not None
+            and best_score - r_score <= 0.04
+            and _has_r_diagonal_leg(densities)
+        ):
+            scores = [
+                (best_score + 0.001, char) if char == "R" else (score, char)
+                for score, char in scores
+            ]
+
+    if char_index == 1 and scores:
+        best_score, best_char = max(scores)
+        five_score = next((score for score, char in scores if char == "5"), None)
+        if (
+            best_char == "J"
+            and five_score is not None
+            and best_score - five_score <= 0.015
+            and _has_5_structure(densities)
+        ):
+            scores = [
+                (best_score + 0.001, char) if char == "5" else (score, char)
+                for score, char in scores
+            ]
+
     scores.sort(reverse=True)
     if not scores:
         return None
@@ -440,11 +500,78 @@ def _grid_densities(mask: np.ndarray) -> np.ndarray:
     return densities
 
 
+def _row_projection_sharpness(mask: np.ndarray) -> float:
+    projection = (mask > 0).sum(axis=1).astype(np.float32)
+    return float(np.square(projection).sum() / max(float(projection.sum()), 1.0))
+
+
+def _apply_dot_row_correction(mask: np.ndarray, correction: float) -> np.ndarray:
+    if correction == 0.0:
+        return mask
+    height, width = mask.shape
+    center_x = (width - 1) / 2.0
+    padding = int(np.ceil(abs(correction) * width / 2.0)) + 3
+    transform = np.array(
+        [[1.0, 0.0, 0.0], [correction, 1.0, padding - correction * center_x]],
+        dtype=np.float32,
+    )
+    return cv2.warpAffine(
+        mask,
+        transform,
+        (width, height + 2 * padding),
+        flags=cv2.INTER_NEAREST,
+        borderValue=0,
+    )
+
+
+def _estimate_dot_row_correction(masks: Iterable[np.ndarray]) -> float:
+    masks = list(masks)
+    baseline_sharpness = [_row_projection_sharpness(mask) for mask in masks]
+    best_correction = 0.0
+    best_ratio = 1.0
+
+    for step in range(-6, 7):
+        if step == 0:
+            continue
+        correction = step * 0.05
+        sharpness_ratio = float(
+            np.mean(
+                [
+                    _row_projection_sharpness(_apply_dot_row_correction(mask, correction))
+                    / baseline
+                    for mask, baseline in zip(masks, baseline_sharpness)
+                ]
+            )
+        )
+        if sharpness_ratio > best_ratio:
+            best_correction = correction
+            best_ratio = sharpness_ratio
+
+    return best_correction if best_ratio >= 1.02 else 0.0
+
+
 def _pattern_score(densities: np.ndarray, pattern: Tuple[str, ...]) -> float:
     template = np.array([[1 if value == "1" else 0 for value in row] for row in pattern], dtype=bool)
     positive = densities[template].mean() if template.any() else 0.0
     negative = densities[~template].mean() if (~template).any() else 0.0
     return float(positive - 0.65 * negative)
+
+
+def _has_r_diagonal_leg(densities: np.ndarray) -> bool:
+    leg_bands = (
+        max(float(densities[4, 2]), float(densities[4, 3])),
+        max(float(densities[5, 2]), float(densities[5, 3]), float(densities[5, 4])),
+        max(float(densities[6, 3]), float(densities[6, 4])),
+    )
+    return min(leg_bands) >= 0.16 and float(np.mean(leg_bands)) >= 0.24
+
+
+def _has_5_structure(densities: np.ndarray) -> bool:
+    upper_left = float(densities[1:3, 0:2].mean())
+    middle_bar = float(densities[3, 1:4].mean())
+    lower_right = float(densities[4:6, 3:5].mean())
+    bottom_bar = float(densities[6, 0:4].mean())
+    return upper_left >= 0.18 and middle_bar >= 0.35 and lower_right >= 0.30 and bottom_bar >= 0.24
 
 
 def _public_result(best: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Dict[str, Any]:

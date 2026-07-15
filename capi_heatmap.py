@@ -2019,7 +2019,12 @@ class HeatmapManager:
             # 儲存 CV 邊緣缺陷比較圖
             if save_tile_detail and hasattr(result, 'edge_defects') and result.edge_defects:
                 try:
-                    full_img = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+                    reader = getattr(inferencer, "_read_detection_image", None)
+                    full_img = (
+                        reader(result.image_path)
+                        if reader is not None
+                        else cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+                    )
                     if full_img is not None:
                         # 取得 edge config 和 dust 相關函數
                         edge_config = None

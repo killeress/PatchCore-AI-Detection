@@ -1,5 +1,54 @@
 # 更新紀錄
 
+## 2026-07-15 v10
+
+### [Bug fixed]AOI 座標落在 Panel 外
+
+- AOI 座標依影像原始範圍換算後若落在偵測到的 Panel polygon 外，會改依產品四角做透視座標映射，修正 G0F、W0F 與 B0F tile 框到 Panel 外而得到全零遮罩的問題。
+- 修正後座標若仍不在 Panel 內，或 tile 沒有任何有效 Panel 區域，會明確中止該 Panel 推論，不再把全零熱力圖誤當成 AI OK。
+
+### [功能調整]OMIT 像素格紋平滑
+
+- 設定頁新增 1366x768 圖片專用的像素格紋平滑開關與 Gaussian kernel；預設關閉，啟用後只影響 OMIT 灰塵／氣泡遮罩，不改變其他解析度或模型分數。
+
+### [維運]更新包發布腳本
+
+- `promote_update.sh` 可自動選取 staging 中最新版 code-only ZIP，啟動更新服務後會檢查程序與 HTTP 回應；失敗時輸出 log，避免顯示成功但 Client 無法下載。
+
+## 2026-07-15 v9
+
+### [Bug fixed]重新推論套用 AOI OK 快速返回
+
+- 網頁「重新推論」現在會將原紀錄的 `machine_judgment` 傳入推論器，修正 AOI 原判定為 OK 時未進入 `AOI_OK_SKIP`、仍執行 OMIT、5-lighting 預處理與 ScratchClassifier 的問題。
+- 有／無 GPU lock 的 rerun 分支皆套用相同行為；AOI NG 或具有 AOI／forced 座標時仍維持完整推論。
+
+## 2026-07-15 v8
+
+### [Bug fixed]AOI OK 快速返回
+
+- 當 `grid_tiling_enabled=false`、AOI 座標推論開啟、Client 機檢判定為 OK 且報告沒有 NG／forced 座標時，保留 MARK／QJPG 結果後直接返回，不再載入 OMIT、執行 5-lighting 預處理、模型路由或 ScratchClassifier。
+- 推論 log 會標記 `AOI_OK_SKIP`，各 AI 階段時間顯示為 0，方便確認快速路徑生效。
+
+## 2026-07-15 v7
+
+### [Bug fixed]AOI-only Grid 與耗時計錄
+
+- `grid_tiling_enabled=false` 時不再先建立全面板 Grid tiles 再移除；AOI 報告為 OK、沒有 NG／forced 座標時會維持 0 個推論 tile。
+- Panel 總耗時 log 改列前置、預處理、Tile 準備、GPU 推論與後處理／收尾，避免分項時間與總耗時無法對照。
+
+## 2026-07-15 v6
+
+### [Bug fixed]MARK R5 辨識
+
+- 改善 `R5` 在低對比、雜點、網紋及點陣傾斜畫面下被誤判的問題；QJPG 回覆欄位維持不變。
+
+## 2026-07-14 v8
+
+### [Bug fixed]CAPI13 相機方向修正
+
+- hostname 完整等於 `capi13` 時，檢測前會將輸入圖片旋轉 180 度，以修正反裝相機造成的方向問題。
+- 其他 hostname 與原始圖片檔不受影響；更新包只需覆蓋程式並重啟服務。
+
 ## 2026-07-14 v7
 
 ### [Bug fixed]炸彈線段座標匹配

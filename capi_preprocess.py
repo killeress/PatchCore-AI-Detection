@@ -9,6 +9,7 @@ from typing import Optional, Tuple, List, Dict, Iterable, Any
 import logging
 import numpy as np
 import cv2
+from capi_image_orientation import read_detection_image
 from capi_image_preprocess_lab import apply_preprocess_method, normalize_preprocess_pipeline
 from capi_image_naming import canonical_image_prefix
 
@@ -33,6 +34,7 @@ class PreprocessConfig:
     generate_grid_tiles: bool = True
     preprocess_after_tiling: bool = False
     product_resolution: Optional[Tuple[int, int]] = None
+    rotate_180: bool = False
 
     def __post_init__(self):
         if self.outer_edge_extend is None:
@@ -801,7 +803,7 @@ def preprocess_panel_image(
     3. 走 bbox grid 切 tile，分類 zone
     4. 回傳 PanelPreprocessResult
     """
-    img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    img = read_detection_image(image_path, cv2.IMREAD_GRAYSCALE, config.rotate_180)
     if img is None:
         raise FileNotFoundError(f"無法讀取圖片: {image_path}")
     original_img = img.copy()

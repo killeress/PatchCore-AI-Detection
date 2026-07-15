@@ -24,6 +24,13 @@ mkdir -p /aidata/capi_ai/update_repo
 
 ```bash
 cd /root/Code/CAPI_AD
+./promote_update.sh
+```
+
+腳本會從 `/aidata/capi_ai/update_repo/staging` 自動選擇版本號最大的
+`patchcore_ai_release_*_codeonly.zip`。若要指定特定版本，仍可直接傳入完整 ZIP 路徑：
+
+```bash
 ./promote_update.sh /aidata/capi_ai/update_repo/staging/patchcore_ai_release_<version>_codeonly.zip
 ```
 

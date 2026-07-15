@@ -4,6 +4,7 @@ Smoke tests for _process_panel_v2 — uses MagicMock so no real GPU / model file
 """
 import tempfile
 import os
+import re
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -168,6 +169,167 @@ def test_process_panel_v2_passes_requested_product_resolution_to_preprocess(tmp_
     inferencer.process_panel(tmp_path, product_resolution=(1366, 768))
 
     assert captured["product_resolution"] == (1366, 768)
+
+
+def test_process_panel_v2_passes_capi13_rotation_to_preprocess(tmp_path, monkeypatch):
+    _write_grey_panel_image(tmp_path, "G0F00000")
+    cfg = _make_config(tmp_path)
+    captured = {}
+
+    def fake_preprocess_panel_folder(
+        _panel_path,
+        pre_cfg,
+        image_files=None,
+        boundary_reference_files=None,
+    ):
+        captured["rotate_180"] = pre_cfg.rotate_180
+        return {}
+
+    monkeypatch.setattr("capi_inference.requires_detection_rotation", lambda: True)
+    monkeypatch.setattr("capi_preprocess.preprocess_panel_folder", fake_preprocess_panel_folder)
+
+    from capi_inference import CAPIInferencer
+
+    inferencer = CAPIInferencer(cfg)
+    inferencer.process_panel(tmp_path)
+
+    assert captured["rotate_180"] is True
+
+
+def test_process_panel_v2_grid_disabled_empty_aoi_skips_grid_and_reports_full_timing(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _write_grey_panel_image(tmp_path, "G0F00000")
+    cfg = _make_config(tmp_path)
+    cfg.grid_tiling_enabled = False
+    cfg.aoi_coord_inspection_enabled = True
+
+    import capi_preprocess
+    from capi_inference import CAPIInferencer
+
+    def fail_if_grid_tiles_are_generated(*_args, **_kwargs):
+        pytest.fail("grid_tiling_enabled=False must not generate grid tiles")
+
+    monkeypatch.setattr(capi_preprocess, "_generate_tiles", fail_if_grid_tiles_are_generated)
+
+    inferencer = CAPIInferencer(cfg)
+    results, *_ = inferencer.process_panel(tmp_path, aoi_report_override={})
+
+    assert len(results) == 1
+    assert results[0].tiles == []
+
+    log = capsys.readouterr().out
+    assert "本次不建立任何 inference tile" in log
+    assert "grid tiles=0" in log
+
+    summary_match = re.search(
+        r"總耗時 (?P<total>\d+\.\d{2})s \| "
+        r"前置=(?P<setup>\d+\.\d{2})s, "
+        r"預處理=(?P<preprocess>\d+\.\d{2})s, "
+        r"Tile準備=(?P<tile_prepare>\d+\.\d{2})s, "
+        r"GPU推論=(?P<inference>\d+\.\d{2})s, "
+        r"後處理/收尾=(?P<post_finalize>\d+\.\d{2})s",
+        log,
+    )
+    assert summary_match is not None
+    timing = {name: float(value) for name, value in summary_match.groupdict().items()}
+    component_total = sum(value for name, value in timing.items() if name != "total")
+    assert timing["total"] == pytest.approx(component_total, abs=0.04)
+
+
+def test_process_panel_v2_aoi_ok_fast_path_preserves_mark_and_skips_ai(
+    tmp_path,
+    capsys,
+):
+    mark_image = _write_grey_panel_image(tmp_path, "W0F00000")
+    cfg = _make_config(tmp_path)
+    cfg.grid_tiling_enabled = False
+    cfg.aoi_coord_inspection_enabled = True
+
+    from capi_inference import CAPIInferencer
+    from capi_server import build_qjpg_response
+
+    mark_detection = {
+        "found": True,
+        "text": "R5",
+        "confidence": 0.99,
+        "bbox": {"x": 10, "y": 20, "width": 30, "height": 40},
+        "mark_bbox_tuple": (10, 20, 30, 40),
+        "roi": "bottom_left",
+        "orientation": "horizontal",
+        "source_image": mark_image.name,
+        "image_size": (1024, 1024),
+    }
+
+    with patch.object(
+        CAPIInferencer,
+        "_detect_panel_mark_binary_region",
+        return_value=(mark_detection, []),
+    ), patch.object(CAPIInferencer, "_load_omit_context") as load_omit, \
+         patch("capi_preprocess.preprocess_panel_folder") as preprocess_folder, \
+         patch.object(CAPIInferencer, "_get_model_for") as get_model, \
+         patch.object(CAPIInferencer, "_get_scratch_filter") as get_scratch_filter:
+        inferencer = CAPIInferencer(cfg)
+        results, _omit_vis, _omit_oe, _omit_info, _is_dup, omit_img, report = \
+            inferencer.process_panel(
+                tmp_path,
+                aoi_report_override={},
+                machine_judgment="OK",
+            )
+
+    assert len(results) == 1
+    assert results[0].image_path == mark_image
+    assert results[0].image_size == (1024, 1024)
+    assert results[0].tiles == []
+    assert results[0].mark_text == "R5"
+    assert omit_img is None
+    assert report == {}
+    load_omit.assert_not_called()
+    preprocess_folder.assert_not_called()
+    get_model.assert_not_called()
+    get_scratch_filter.assert_not_called()
+
+    response = build_qjpg_response(
+        {"glass_id": "PANEL001", "resolution": (1920, 1080)},
+        "OK",
+        results,
+        cfg,
+    )
+    assert response == "@QJPG-PANEL001;OK;R5;OK,"
+
+    log = capsys.readouterr().out
+    assert "AOI_OK_SKIP" in log
+    assert "預處理=0.00s" in log
+    assert "GPU推論=0.00s" in log
+
+
+def test_detect_panel_mark_not_found_retains_fast_path_source_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    mark_image = _write_grey_panel_image(tmp_path, "W0F00000")
+    cfg = _make_config(tmp_path)
+
+    monkeypatch.setattr(
+        "capi_mark_detector.detect_panel_mark",
+        lambda _image, include_debug=False: {
+            "found": False,
+            "message": "no dot-matrix mark candidate found",
+        },
+    )
+
+    from capi_inference import CAPIInferencer
+
+    inferencer = CAPIInferencer(cfg)
+    detection, regions = inferencer._detect_panel_mark_binary_region([mark_image])
+
+    assert detection is not None
+    assert detection["found"] is False
+    assert detection["source_image"] == mark_image.name
+    assert detection["image_size"] == (1024, 1024)
+    assert regions == []
 
 
 def test_process_panel_v2_no_anomaly_when_score_below_threshold(tmp_path):
