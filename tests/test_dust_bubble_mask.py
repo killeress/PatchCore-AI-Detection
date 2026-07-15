@@ -470,6 +470,27 @@ def test_settings_api_normalizes_existing_db_bool_param_type():
     assert params["dust_detect_bubbles_enabled"]["param_type"] == "bool"
 
 
+def test_settings_api_hides_removed_pixel_grid_mask_ratio():
+    from capi_web import CAPIWebHandler
+
+    captured = {}
+    handler = CAPIWebHandler.__new__(CAPIWebHandler)
+    handler.db = SimpleNamespace(get_all_config_params=lambda: [{
+        "param_name": "dust_pixel_grid_max_mask_ratio",
+        "param_value": "0.15",
+        "param_type": "float",
+        "decoded_value": 0.15,
+    }])
+    handler.inferencer = SimpleNamespace(config=CAPIConfig())
+    handler._current_settings_user = lambda: None
+    handler._send_json = lambda payload: captured.update(payload)
+
+    handler._handle_api_settings()
+
+    names = {p["param_name"] for p in captured["params"]}
+    assert "dust_pixel_grid_max_mask_ratio" not in names
+
+
 def test_bool_update_repairs_legacy_string_param_type():
     from capi_database import CAPIDatabase
 
@@ -499,3 +520,58 @@ def test_bool_update_repairs_legacy_string_param_type():
         assert updated["decoded_value"] is False
     finally:
         db_path.unlink(missing_ok=True)
+
+
+def test_1366_pixel_grid_filter_uses_configured_gaussian_only_for_target_resolution(monkeypatch):
+    inferencer = _make_inferencer(detect_bubbles=False)
+    inferencer.config.dust_pixel_grid_filter_enabled = True
+    inferencer.config.dust_pixel_grid_blur_kernel = 7
+    image = np.full((64, 64), 80, dtype=np.uint8)
+
+    original_blur = cv2.GaussianBlur
+    blur_kernels = []
+
+    def record_blur(src, ksize, sigma_x, *args, **kwargs):
+        blur_kernels.append(ksize)
+        return original_blur(src, ksize, sigma_x, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "GaussianBlur", record_blur)
+
+    inferencer.check_dust_or_scratch_feature(
+        image,
+        product_resolution=(1366, 768),
+    )
+    assert blur_kernels == [(7, 7), (7, 7)]
+
+    blur_kernels.clear()
+    inferencer.check_dust_or_scratch_feature(
+        image,
+        product_resolution=(1920, 1080),
+    )
+    assert blur_kernels == []
+
+
+def test_pixel_grid_filter_settings_can_hot_reload_from_db():
+    config = CAPIConfig()
+
+    config.apply_db_overrides([
+        {"param_name": "dust_pixel_grid_filter_enabled", "decoded_value": "true"},
+        {"param_name": "dust_pixel_grid_blur_kernel", "decoded_value": 9},
+    ])
+
+    assert config.dust_pixel_grid_filter_enabled is True
+    assert config.dust_pixel_grid_blur_kernel == 9
+    serialized = config.to_dict()
+    assert serialized["dust_pixel_grid_filter_enabled"] is True
+    assert serialized["dust_pixel_grid_blur_kernel"] == 9
+
+
+def test_pixel_grid_toggle_rerenders_dependent_setting_locks():
+    settings_html = (Path(__file__).resolve().parent.parent / "templates" / "settings.html").read_text(
+        encoding="utf-8"
+    )
+
+    lock_set_start = settings_html.index("const LOCK_AFFECTING_BOOL_PARAMS")
+    lock_set_end = settings_html.index("]);", lock_set_start)
+    lock_set = settings_html[lock_set_start:lock_set_end]
+    assert "'dust_pixel_grid_filter_enabled'" in lock_set

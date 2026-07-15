@@ -40,6 +40,20 @@ def test_install_patch_default_health_url_matches_production_port():
     assert "127.0.0.1:8080/api/version" not in script
 
 
+def test_promote_update_verifies_background_http_server_startup():
+    script = Path("promote_update.sh").read_text(encoding="utf-8")
+
+    assert 'PACKAGE_DIR="${CAPI_UPDATE_PACKAGE_DIR:-$UPDATE_REPO/staging}"' in script
+    assert "patchcore_ai_release_*_codeonly.zip" in script
+    assert "sort -V" in script
+    assert 'Usage: $0 [release-zip]' in script
+    assert '--directory "$UPDATE_REPO"' in script
+    assert "HTTP_PID=$!" in script
+    assert 'if ! kill -0 "$HTTP_PID"' in script
+    assert 'tail -n 50 "$HTTP_LOG"' in script
+    assert 'sleep 2' not in script
+
+
 def test_start_server_prefers_capi_python_before_system_python():
     script = Path("start_server.sh").read_text(encoding="utf-8")
 
@@ -103,6 +117,7 @@ def test_build_release_zip_includes_manifest_and_checksums():
             assert "templates/ric_report.html" in names
             assert "capi_edge_cv.py" in names
             assert "capi_heatmap.py" in names
+            assert "capi_image_orientation.py" in names
             assert "capi_image_preprocess_lab.py" in names
             assert "capi_dataset_export.py" in names
             assert "capi_mark_detector.py" in names

@@ -3377,6 +3377,8 @@ class CAPIDatabase:
             ("dust_area_min", config.dust_area_min, "int", "灰塵顆粒最小面積 (px)"),
             ("dust_area_max", config.dust_area_max, "int", "灰塵顆粒最大面積 (px)"),
             ("dust_extension", config.dust_extension, "int", "灰塵區域膨脹像素"),
+            ("dust_pixel_grid_filter_enabled", config.dust_pixel_grid_filter_enabled, "bool", "啟用 1366x768 產品 OMIT 像素紋理平滑"),
+            ("dust_pixel_grid_blur_kernel", config.dust_pixel_grid_blur_kernel, "int", "1366x768 OMIT Gaussian 核大小 (奇數，建議 7)"),
             ("dust_heatmap_iou_threshold", config.dust_heatmap_iou_threshold, "float", "Heatmap-Dust IOU/Coverage 閾值"),
             ("dust_heatmap_top_percent", config.dust_heatmap_top_percent, "float", "Heatmap 熱區取前 X%；two-stage REAL 特徵須落在此核心附近"),
             ("dust_heatmap_metric", config.dust_heatmap_metric, "string", 'Heatmap 判定指標: "coverage" (覆蓋率) 或是 "iou"'),

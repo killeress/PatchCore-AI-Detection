@@ -1971,7 +1971,8 @@
     ];
     const DUST_PARAMS = [
         'dust_brightness_threshold', 'dust_area_min', 'dust_area_max',
-        'dust_extension', 'dust_heatmap_iou_threshold', 'dust_heatmap_top_percent',
+        'dust_extension', 'dust_pixel_grid_filter_enabled', 'dust_pixel_grid_blur_kernel',
+        'dust_heatmap_iou_threshold', 'dust_heatmap_top_percent',
         'dust_heatmap_metric', 'dust_mask_before_binarize',
         'dust_two_stage_enabled', 'dust_two_stage_dust_ratio', 'dust_two_stage_bg_blur',
         'dust_two_stage_diff_percentile', 'dust_two_stage_min_area', 'dust_two_stage_fallback_score',
@@ -1980,7 +1981,8 @@
     // Sub-groups within DUST tab
     const DUST_OMIT_PARAMS = [
         'dust_brightness_threshold', 'dust_area_min', 'dust_area_max',
-        'dust_extension', 'dust_detect_dark_particles', 'dust_detect_bubbles_enabled'
+        'dust_extension', 'dust_pixel_grid_filter_enabled', 'dust_pixel_grid_blur_kernel',
+        'dust_detect_dark_particles', 'dust_detect_bubbles_enabled'
     ];
     const DUST_HEATMAP_PARAMS = [
         'dust_heatmap_iou_threshold', 'dust_heatmap_top_percent', 'dust_heatmap_metric'
@@ -2521,6 +2523,14 @@
             try { return String(JSON.parse(p.param_value)); } catch { return String(p.param_value); }
         };
 
+        const pixelGridFilterEnabled = readBool(
+            dustParams.find(p => p.param_name === 'dust_pixel_grid_filter_enabled')
+        );
+        if (!pixelGridFilterEnabled) {
+            const reason = 'dust_pixel_grid_filter_enabled=false 時不執行 1366x768 OMIT 像素紋理平滑';
+            paramLockMap['dust_pixel_grid_blur_kernel'] = reason;
+        }
+
         const aoiCoordEnabledParam = aoiCoordParams.find(p => p.param_name === 'aoi_coord_inspection_enabled');
         const aoiCoordEnabled = readBool(aoiCoordEnabledParam);
         const inspectorParam = aoiCoordParams.find(p => p.param_name === 'aoi_edge_inspector');
@@ -2984,6 +2994,7 @@
             if (!p) return '';
             try { return String(JSON.parse(p.param_value)); } catch { return String(p.param_value); }
         };
+
         const isEnabled = String(readDisplay(enabledParam)).toLowerCase() === 'true';
         const screens = [
             ['STANDARD', '標準畫面', 'image_abnormal_standard_mean_lower', 'image_abnormal_standard_mean_upper'],
@@ -3618,6 +3629,8 @@
         'dust_area_min': '灰塵顆粒最小面積 (px)',
         'dust_area_max': '灰塵顆粒最大面積 (px)',
         'dust_extension': '灰塵區域膨脹像素',
+        'dust_pixel_grid_filter_enabled': '啟用 1366×768 產品 OMIT 像素紋理平滑',
+        'dust_pixel_grid_blur_kernel': 'Gaussian Blur 核大小 (px，必須為奇數，建議 7)',
         'dust_detect_dark_particles': '偵測暗色顆粒 (如偏黑 MARK)',
         'dust_detect_bubbles_enabled': '偵測低對比氣泡/大片暗斑',
         // Heatmap COV
@@ -4205,7 +4218,10 @@
             if (p) p.param_value = String(newVal);
 
             // 會影響互斥鎖定的參數需重新渲染以刷新鎖定狀態
-            const LOCK_AFFECTING_BOOL_PARAMS = new Set(['aoi_coord_inspection_enabled']);
+            const LOCK_AFFECTING_BOOL_PARAMS = new Set([
+                'aoi_coord_inspection_enabled',
+                'dust_pixel_grid_filter_enabled',
+            ]);
             if (LOCK_AFFECTING_BOOL_PARAMS.has(paramName)) {
                 renderSettings();
             }

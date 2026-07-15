@@ -7872,6 +7872,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """API: 取得所有設定參數"""
         try:
             params = self.db.get_all_config_params() if self.db else []
+            params = [
+                p for p in params
+                if p.get("param_name") != "dust_pixel_grid_max_mask_ratio"
+            ]
             # 補上 config 中有但 DB 沒有的參數（用目前執行值作為預設）
             if self.inferencer and hasattr(self.inferencer, 'config') and self.inferencer.config:
                 import dataclasses
@@ -8319,6 +8323,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         product_resolution=resolution,
                         bomb_info=bomb_info,
                         model_id=model_id,
+                        machine_judgment=detail.get("machine_judgment"),
                     )
             else:
                 _update_status("正在推論中...")
@@ -8328,6 +8333,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     product_resolution=resolution,
                     bomb_info=bomb_info,
                     model_id=model_id,
+                    machine_judgment=detail.get("machine_judgment"),
                 )
 
             processing_seconds = _time.time() - start_time

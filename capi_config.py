@@ -236,6 +236,8 @@ class CAPIConfig:
     dust_area_min: int = 15                   # 灰塵顆粒最小面積 (px)
     dust_area_max: int = 100000               # 灰塵顆粒最大面積 (px)
     dust_extension: int = 5                   # 灰塵區域膨脹像素
+    dust_pixel_grid_filter_enabled: bool = False  # 1366x768 產品 OMIT 像素紋理平滑（相機圖仍為原解析度）
+    dust_pixel_grid_blur_kernel: int = 7          # 產品像素約 5x6 camera px，預設以 7x7 Gaussian 抑制週期紋理
     dust_heatmap_iou_threshold: float = 0.02  # Heatmap-Dust IOU/Coverage 閾值
     dust_heatmap_top_percent: float = 5.0     # Heatmap 熱區取前 X%；two-stage REAL feature 須落在此核心附近
     dust_heatmap_metric: str = "coverage"     # Heatmap 判定指標: "coverage" (灰塵覆蓋率) 或是 "iou" (交集/聯集)
@@ -493,6 +495,8 @@ class CAPIConfig:
             dust_area_min=data.get("dust_area_min", 15),
             dust_area_max=data.get("dust_area_max", 100000),
             dust_extension=data.get("dust_extension", 5),
+            dust_pixel_grid_filter_enabled=data.get("dust_pixel_grid_filter_enabled", False),
+            dust_pixel_grid_blur_kernel=data.get("dust_pixel_grid_blur_kernel", 7),
             dust_heatmap_iou_threshold=data.get("dust_heatmap_iou_threshold", 0.02),
             dust_heatmap_top_percent=data.get("dust_heatmap_top_percent", 5.0),
             dust_heatmap_metric=data.get("dust_heatmap_metric", "coverage"),
@@ -621,6 +625,8 @@ class CAPIConfig:
             "dust_area_min": self.dust_area_min,
             "dust_area_max": self.dust_area_max,
             "dust_extension": self.dust_extension,
+            "dust_pixel_grid_filter_enabled": self.dust_pixel_grid_filter_enabled,
+            "dust_pixel_grid_blur_kernel": self.dust_pixel_grid_blur_kernel,
             "dust_heatmap_iou_threshold": self.dust_heatmap_iou_threshold,
             "dust_heatmap_top_percent": self.dust_heatmap_top_percent,
             "dust_heatmap_metric": self.dust_heatmap_metric,
@@ -719,6 +725,8 @@ class CAPIConfig:
             "dust_area_min": self.dust_area_min,
             "dust_area_max": self.dust_area_max,
             "dust_extension": self.dust_extension,
+            "dust_pixel_grid_filter_enabled": self.dust_pixel_grid_filter_enabled,
+            "dust_pixel_grid_blur_kernel": self.dust_pixel_grid_blur_kernel,
             "dust_heatmap_iou_threshold": self.dust_heatmap_iou_threshold,
             "dust_heatmap_top_percent": self.dust_heatmap_top_percent,
             "dust_heatmap_metric": self.dust_heatmap_metric,
@@ -874,6 +882,11 @@ class CAPIConfig:
             self.dust_area_max = int(param_map["dust_area_max"])
         if "dust_extension" in param_map:
             self.dust_extension = int(param_map["dust_extension"])
+        if "dust_pixel_grid_filter_enabled" in param_map:
+            val = param_map["dust_pixel_grid_filter_enabled"]
+            self.dust_pixel_grid_filter_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "dust_pixel_grid_blur_kernel" in param_map:
+            self.dust_pixel_grid_blur_kernel = int(param_map["dust_pixel_grid_blur_kernel"])
         if "dust_heatmap_iou_threshold" in param_map:
             self.dust_heatmap_iou_threshold = float(param_map["dust_heatmap_iou_threshold"])
         if "dust_heatmap_top_percent" in param_map:
