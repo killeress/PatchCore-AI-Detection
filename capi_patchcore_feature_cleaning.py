@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import time
+from pathlib import Path
+from typing import Any
 
 import torch
 from lightning.pytorch.callbacks import Callback
@@ -19,6 +22,7 @@ class FeatureDensityCleaningCallback(Callback):
         seed: int = 42,
         reference_size: int = 20_000,
         query_chunk: int = 1_024,
+        trace_sources: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         super().__init__()
         if k < 1:
@@ -35,8 +39,95 @@ class FeatureDensityCleaningCallback(Callback):
         self.seed = seed
         self.reference_size = reference_size
         self.query_chunk = query_chunk
-        self.stats: dict[str, int | float | bool | str | None] = {}
+        self.trace_sources = trace_sources or {}
+        self.stats: dict[str, Any] = {}
         self._has_run = False
+        self._batch_layouts: list[dict[str, Any]] = []
+        self._current_grid_shape: tuple[int, int] | None = None
+        self._pool_hook_handle: Any = None
+
+    def on_train_start(self, trainer: object, pl_module: object) -> None:
+        """Capture the feature-grid shape before PatchCore flattens embeddings."""
+        del trainer
+        if not self.trace_sources or self._pool_hook_handle is not None:
+            return
+        pooler = getattr(getattr(pl_module, "model", None), "feature_pooler", None)
+        register_hook = getattr(pooler, "register_forward_hook", None)
+        if not callable(register_hook):
+            raise RuntimeError("feature cleaning trace requires a hookable feature_pooler")
+
+        def _capture_grid(_module: object, _inputs: object, output: object) -> None:
+            if self._current_grid_shape is not None:
+                return
+            shape = getattr(output, "shape", None)
+            if shape is None or len(shape) < 4:
+                return
+            self._current_grid_shape = (int(shape[-2]), int(shape[-1]))
+
+        self._pool_hook_handle = register_hook(_capture_grid)
+
+    def on_train_batch_start(
+        self,
+        trainer: object,
+        pl_module: object,
+        batch: object,
+        batch_idx: int,
+    ) -> None:
+        del trainer, pl_module, batch, batch_idx
+        if self.trace_sources:
+            self._current_grid_shape = None
+
+    def on_train_batch_end(
+        self,
+        trainer: object,
+        pl_module: object,
+        outputs: object,
+        batch: object,
+        batch_idx: int,
+    ) -> None:
+        """Bind each flattened embedding chunk back to its source tile paths."""
+        del trainer, outputs, batch_idx
+        if not self.trace_sources:
+            return
+        store = getattr(getattr(pl_module, "model", None), "embedding_store", None)
+        if not isinstance(store, list) or len(store) != len(self._batch_layouts) + 1:
+            raise RuntimeError("feature cleaning trace lost embedding batch alignment")
+        embedding_count = int(store[-1].shape[0])
+        raw_paths = getattr(batch, "image_path", None)
+        if raw_paths is None:
+            raise RuntimeError("feature cleaning trace requires batch.image_path")
+        if isinstance(raw_paths, (str, Path)):
+            paths = [str(raw_paths)]
+        else:
+            paths = [str(path) for path in raw_paths]
+        if not paths:
+            raise RuntimeError("feature cleaning trace received an empty image_path batch")
+
+        grid_shape = self._current_grid_shape
+        if grid_shape is None:
+            per_image = embedding_count // len(paths)
+            side = math.isqrt(per_image)
+            if side * side != per_image:
+                raise RuntimeError("feature cleaning trace could not infer feature-grid shape")
+            grid_shape = (side, side)
+        grid_h, grid_w = grid_shape
+        if embedding_count != len(paths) * grid_h * grid_w:
+            raise RuntimeError(
+                "feature cleaning trace embedding count does not match batch/grid layout"
+            )
+        input_tensor = getattr(batch, "image", None)
+        input_shape = getattr(input_tensor, "shape", None)
+        input_size = (
+            [int(input_shape[-2]), int(input_shape[-1])]
+            if input_shape is not None and len(input_shape) >= 4
+            else None
+        )
+        self._batch_layouts.append({
+            "image_paths": [str(Path(path).resolve()) for path in paths],
+            "input_size": input_size,
+            "grid_size": [grid_h, grid_w],
+            "embedding_count": embedding_count,
+        })
 
     @torch.no_grad()
     def on_validation_start(self, trainer: object, pl_module: object) -> None:
@@ -73,6 +164,7 @@ class FeatureDensityCleaningCallback(Callback):
                 applied=False,
                 reason="insufficient_features",
             )
+            self._remove_pool_hook()
             self._has_run = True
             return
 
@@ -86,6 +178,7 @@ class FeatureDensityCleaningCallback(Callback):
                 applied=False,
                 reason="keep_all",
             )
+            self._remove_pool_hook()
             self._has_run = True
             return
 
@@ -99,6 +192,8 @@ class FeatureDensityCleaningCallback(Callback):
         kept = int(keep_mask.sum().item())
         threshold = float(threshold_tensor.item())
         del kth_distances, threshold_tensor
+
+        removed_patch_trace = self._build_removed_patch_trace(keep_mask, embedding_store)
 
         offset = 0
         for index in range(len(embedding_store)):
@@ -120,7 +215,60 @@ class FeatureDensityCleaningCallback(Callback):
             applied=True,
             reason="completed",
         )
+        if removed_patch_trace:
+            self.stats["removed_patch_trace"] = removed_patch_trace
+        self._remove_pool_hook()
         self._has_run = True
+
+    def _build_removed_patch_trace(
+        self,
+        keep_mask: torch.Tensor,
+        embedding_store: list[torch.Tensor],
+    ) -> list[dict[str, Any]]:
+        if not self.trace_sources:
+            return []
+        if len(self._batch_layouts) != len(embedding_store):
+            raise RuntimeError("feature cleaning trace is missing one or more batch layouts")
+        records: list[dict[str, Any]] = []
+        offset = 0
+        for layout, embedding in zip(self._batch_layouts, embedding_store):
+            count = int(embedding.shape[0])
+            paths = layout["image_paths"]
+            grid_h, grid_w = layout["grid_size"]
+            per_image = grid_h * grid_w
+            local_keep = keep_mask[offset : offset + count].reshape(
+                len(paths), grid_h, grid_w
+            )
+            for image_idx, staged_path in enumerate(paths):
+                removed = torch.nonzero(
+                    ~local_keep[image_idx].reshape(-1), as_tuple=False
+                ).flatten()
+                if not removed.numel():
+                    continue
+                source = self.trace_sources.get(staged_path)
+                if source is None:
+                    source = self.trace_sources.get(Path(staged_path).name)
+                if source is None:
+                    raise RuntimeError(
+                        f"feature cleaning trace source not found: {staged_path}"
+                    )
+                records.append({
+                    "tile_pool_id": source.get("tile_pool_id"),
+                    "source_path": str(source.get("source_path") or staged_path),
+                    "input_size": layout.get("input_size"),
+                    "grid_size": [grid_h, grid_w],
+                    "removed_indices": [int(value) for value in removed.tolist()],
+                    "removed_count": int(removed.numel()),
+                })
+            offset += count
+        if offset != int(keep_mask.numel()):
+            raise RuntimeError("feature cleaning trace did not consume the full keep mask")
+        return records
+
+    def _remove_pool_hook(self) -> None:
+        if self._pool_hook_handle is not None:
+            self._pool_hook_handle.remove()
+            self._pool_hook_handle = None
 
     def _kth_cosine_distances(
         self,

@@ -102,7 +102,13 @@
           <dd>{{ patchcore_params.get("feature_pool_kernel_size", 3) }}×{{ patchcore_params.get("feature_pool_kernel_size", 3) }}</dd>
           <dt>特徵域清洗</dt>
           <dd>
-            {% if patchcore_params.get("feature_cleaning_mode", "off") == "off" %}
+            {% set cleaning_zones = patchcore_params.get("feature_cleaning_by_zone", {}) %}
+            {% if cleaning_zones %}
+              {% for zone in ["inner", "edge"] %}
+                {% set cfg = cleaning_zones.get(zone, {}) %}
+                {{ zone|upper }}：{% if cfg.get("mode", "off") == "off" %}關閉{% else %}k={{ cfg.get("k", 30) }}、保留 {{ (cfg.get("keep_ratio", 0.99) * 100)|round(1) }}%{% endif %}{% if not loop.last %}<br>{% endif %}
+              {% endfor %}
+            {% elif patchcore_params.get("feature_cleaning_mode", "off") == "off" %}
               關閉
             {% else %}
               保守清洗（範圍={% if patchcore_params.get("feature_cleaning_scope", "inner_only") == "inner_and_edge" %}inner + edge{% else %}僅 inner{% endif %}、k={{ patchcore_params.get("feature_cleaning_k", 30) }}、保留 {{ (patchcore_params.get("feature_cleaning_keep_ratio", 0.99) * 100)|round(1) }}%）
@@ -193,6 +199,7 @@
               {% set fc = info.feature_cleaning %}
               {% if fc.get("applied") %}
                 <span title="{{ fc.get('total', 0) }} → {{ fc.get('kept', 0) }}；threshold={{ fc.get('threshold', '—') }}">
+                  k={{ fc.get("k", "—") }}／保留 {{ "%.1f"|format(fc.get("keep_ratio", 0) * 100) }}%<br>
                   移除 {{ fc.get("removed", 0) }}（{{ "%.2f"|format(fc.get("removed_ratio", 0) * 100) }}%）
                 </span>
               {% elif fc.get("reason") == "edge_scope_excluded" %}
@@ -226,6 +233,40 @@
       <span class="d5-legend-hint">分離度 = NG 中位數 − 訓練最大分；越大表示模型越能區分異常</span>
     </div>
   </div>
+
+  {% set trace = namespace(has=false) %}
+  {% for _unit_label, _info in units %}
+    {% if _info.feature_cleaning.get("visualizations", []) %}{% set trace.has = true %}{% endif %}
+  {% endfor %}
+  {% if trace.has %}
+  <div class="d5-section" id="feature-cleaning-visualization">
+    <div class="d5-section-head">
+      <span class="d5-section-tag">// FEATURE CLEANING TRACE</span>
+      <h2 class="d5-section-title">實際被清除的 feature patches</h2>
+    </div>
+    <p class="d5-trace-hint">紅色格點直接來自本次訓練使用的 keep mask；每個子模型顯示被移除格點最多的前 12 個 tile。</p>
+    {% for unit_label, info in units %}
+      {% set visuals = info.feature_cleaning.get("visualizations", []) %}
+      {% if visuals %}
+      <details class="d5-trace-unit">
+        <summary>{{ unit_label }} · {{ info.feature_cleaning.get("affected_tiles", visuals|length) }} 個 tile 受影響</summary>
+        <div class="d5-trace-grid">
+          {% for visual in visuals %}
+          <figure class="d5-trace-card">
+            <canvas class="feature-cleaning-canvas"
+                    width="256" height="256"
+                    data-source="{{ visual.source_url }}"
+                    data-grid='{{ visual.grid_size|tojson }}'
+                    data-removed='{{ visual.removed_indices|tojson }}'></canvas>
+            <figcaption>{{ visual.source_name }}<br>移除 {{ visual.removed_count }} patches</figcaption>
+          </figure>
+          {% endfor %}
+        </div>
+      </details>
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
 
   {# 部署提示 + 操作 #}
   <div class="d5-deploy">
@@ -571,6 +612,13 @@
   .d5-btn-primary:hover { color: #11111b; }
   .d5-btn-primary { background: #89b4fa; border-color: #89b4fa; }
   .d5-btn-primary:hover { background: #b4befe; border-color: #b4befe; }
+  .d5-trace-hint { color:#a6adc8;font-size:.82rem;margin:0 0 12px; }
+  .d5-trace-unit { border:1px solid #313244;border-radius:8px;background:#181825;margin-top:10px; }
+  .d5-trace-unit summary { cursor:pointer;padding:11px 14px;color:#cdd6f4;font-weight:700; }
+  .d5-trace-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;padding:0 12px 12px; }
+  .d5-trace-card { margin:0;background:#11111b;border:1px solid #313244;border-radius:7px;overflow:hidden; }
+  .d5-trace-card canvas { display:block;width:100%;aspect-ratio:1/1;background:#05050a; }
+  .d5-trace-card figcaption { padding:7px 9px;color:#a6adc8;font-size:.7rem;line-height:1.4;word-break:break-all; }
 
   /* ── Responsive ─────────────────────────────────────────── */
   @media (max-width: 900px) {
@@ -579,4 +627,37 @@
     .d5-stat-value { font-size: 1.7rem; }
   }
 </style>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.feature-cleaning-canvas').forEach(canvas => {
+    const source = canvas.dataset.source;
+    let grid = [];
+    let removed = [];
+    try {
+      grid = JSON.parse(canvas.dataset.grid || '[]');
+      removed = JSON.parse(canvas.dataset.removed || '[]');
+    } catch (_) { return; }
+    if (!source || grid.length !== 2 || !grid[0] || !grid[1]) return;
+    const image = new Image();
+    image.onload = () => {
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const cellW = canvas.width / grid[1];
+      const cellH = canvas.height / grid[0];
+      ctx.fillStyle = 'rgba(243, 139, 168, .62)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, .85)';
+      ctx.lineWidth = .5;
+      removed.forEach(index => {
+        const row = Math.floor(index / grid[1]);
+        const col = index % grid[1];
+        const x = col * cellW;
+        const y = row * cellH;
+        ctx.fillRect(x, y, Math.max(1, cellW), Math.max(1, cellH));
+        if (cellW >= 5 && cellH >= 5) ctx.strokeRect(x, y, cellW, cellH);
+      });
+    };
+    image.src = source;
+  });
+});
+</script>
 {% endblock %}

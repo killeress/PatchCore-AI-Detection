@@ -337,6 +337,7 @@ class CAPIConfig:
 
     # 配置檔路徑（載入後記錄）
     config_path: Optional[Path] = None
+    image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "CAPIConfig":
@@ -435,6 +436,26 @@ class CAPIConfig:
             data = {}
         from capi_image_preprocess_lab import normalize_preprocess_pipeline
 
+        raw_zone_pipelines = data.get("image_preprocess_pipelines")
+        if raw_zone_pipelines is None:
+            raw_zone_pipelines = {}
+        image_preprocess_pipelines = {}
+        if not isinstance(raw_zone_pipelines, dict):
+            raise ValueError("image_preprocess_pipelines must be an object")
+        if raw_zone_pipelines and set(raw_zone_pipelines) != {"inner", "edge"}:
+            raise ValueError(
+                "image_preprocess_pipelines must contain inner and edge only"
+            )
+        if raw_zone_pipelines and data.get("preprocess_after_tiling") is not True:
+            raise ValueError(
+                "image_preprocess_pipelines requires preprocess_after_tiling=true"
+            )
+        image_preprocess_pipelines = {
+            zone: normalize_preprocess_pipeline(raw_zone_pipelines.get(zone) or [])
+            for zone in ("inner", "edge")
+            if zone in raw_zone_pipelines
+        }
+
         # 解析排除區域
         exclusion_zones = []
         for zone_data in data.get("exclusion_zones", []):
@@ -469,6 +490,7 @@ class CAPIConfig:
             image_preprocess_pipeline=normalize_preprocess_pipeline(
                 data.get("image_preprocess_pipeline", [])
             ),
+            image_preprocess_pipelines=image_preprocess_pipelines,
             preprocess_after_tiling=data.get("preprocess_after_tiling", False),
             exclusion_zones=exclusion_zones,
             tile_size=data.get("tile_size", 512),
@@ -601,6 +623,7 @@ class CAPIConfig:
             "otsu_bottom_crop": self.otsu_bottom_crop,
             "enable_panel_polygon": self.enable_panel_polygon,
             "image_preprocess_pipeline": self.image_preprocess_pipeline,
+            "image_preprocess_pipelines": self.image_preprocess_pipelines,
             "preprocess_after_tiling": self.preprocess_after_tiling,
             "exclusion_zones": [zone.to_dict() for zone in self.exclusion_zones],
             "tile_size": self.tile_size,
@@ -704,6 +727,7 @@ class CAPIConfig:
             "otsu_bottom_crop": self.otsu_bottom_crop,
             "enable_panel_polygon": self.enable_panel_polygon,
             "image_preprocess_pipeline": self.image_preprocess_pipeline,
+            "image_preprocess_pipelines": self.image_preprocess_pipelines,
             "preprocess_after_tiling": self.preprocess_after_tiling,
             "exclusion_zones": [zone.to_dict() for zone in self.exclusion_zones],
             "tile_size": self.tile_size,

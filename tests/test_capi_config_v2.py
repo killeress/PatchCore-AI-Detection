@@ -5,6 +5,7 @@ tests/test_capi_config_v2.py
 
 import tempfile
 from pathlib import Path
+import pytest
 import yaml
 from capi_config import CAPIConfig
 
@@ -117,6 +118,33 @@ def test_capi_config_preprocess_after_tiling_serialization():
             assert loaded["preprocess_after_tiling"] is True
     finally:
         Path(path).unlink()
+
+
+def test_capi_config_zone_preprocess_pipelines_round_trip():
+    pipelines = {
+        "inner": [{"method": "gaussian", "params": {"kernel_size": 3, "sigma": 1.0}}],
+        "edge": [{"method": "bilateral", "params": {"diameter": 5, "sigma_color": 20.0, "sigma_space": 20.0}}],
+    }
+    cfg = CAPIConfig.from_dict({
+        "preprocess_after_tiling": True,
+        "image_preprocess_pipelines": pipelines,
+    })
+
+    assert cfg.image_preprocess_pipelines == pipelines
+    assert cfg.to_dict()["image_preprocess_pipelines"] == pipelines
+
+
+@pytest.mark.parametrize(
+    "payload, error",
+    [
+        ({"image_preprocess_pipelines": []}, "must be an object"),
+        ({"preprocess_after_tiling": True, "image_preprocess_pipelines": {"inner": []}}, "inner and edge"),
+        ({"preprocess_after_tiling": False, "image_preprocess_pipelines": {"inner": [], "edge": []}}, "preprocess_after_tiling"),
+    ],
+)
+def test_capi_config_rejects_invalid_zone_preprocess_pipelines(payload, error):
+    with pytest.raises(ValueError, match=error):
+        CAPIConfig.from_dict(payload)
 
 
 def test_aoi_heatmap_center_seed_enabled_serialization():

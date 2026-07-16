@@ -643,12 +643,17 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
             "feature_cleaning_mode": "knn_cosine_q99_v1",
             "feature_cleaning_scope": "inner_and_edge",
             "feature_cleaning_keep_ratio": 0.97,
+            "feature_cleaning_by_zone": {
+                "inner": {"mode": "knn_cosine_q99_v1", "k": 30, "keep_ratio": 0.99},
+                "edge": {"mode": "knn_cosine_q99_v1", "k": 10, "keep_ratio": 0.998},
+            },
         },
         "tile_stride": 128,
-        "image_preprocess_pipeline": [
-            {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
-            {"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}},
-        ],
+        "preprocess_after_tiling": True,
+        "image_preprocess_pipelines": {
+            "inner": [{"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}}],
+            "edge": [{"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}}],
+        },
     }
     body = json.dumps(payload).encode()
     h.headers.get = MagicMock(return_value=str(len(body)))
@@ -661,7 +666,8 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
     call_kwargs = server.database.create_training_job.call_args.kwargs
     assert call_kwargs["training_params"] == payload["training_params"]
     assert call_kwargs["tile_stride"] == 128
-    assert call_kwargs["image_preprocess_pipeline"][0]["method"] == "bilateral"
+    assert call_kwargs["image_preprocess_pipelines"] == payload["image_preprocess_pipelines"]
+    assert call_kwargs["preprocess_after_tiling"] is True
 
 
 def test_handle_train_new_start_persists_manual_data_source(tmp_path):
@@ -1097,6 +1103,35 @@ def test_handle_train_new_thumb_rejects_sibling_prefix_escape(tmp_path, monkeypa
     assert h._sent_response[0]["status"] == 403
 
 
+def test_handle_train_new_bundle_asset_serves_only_report_assets(tmp_path):
+    bundle = tmp_path / "bundle"
+    asset = bundle / "feature_cleaning_reports" / "assets" / "G0F00000-inner" / "tile.png"
+    asset.parent.mkdir(parents=True)
+    asset.write_bytes(b"png")
+    outside = bundle / "G0F00000-inner.pt"
+    outside.write_bytes(b"model")
+
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1",
+        "output_bundle": str(bundle),
+    }
+    h = _make_handler_with_server(
+        server,
+        "/api/train/new/bundle-asset/j1/feature_cleaning_reports/assets/G0F00000-inner/tile.png",
+    )
+    h._send_binary = lambda path: h._sent_response.append({"status": 200, "body": path})
+
+    h._handle_train_new_bundle_asset()
+
+    assert h._sent_response[0] == {"status": 200, "body": str(asset.resolve())}
+
+    h.path = "/api/train/new/bundle-asset/j1/G0F00000-inner.pt"
+    h._sent_response.clear()
+    h._handle_train_new_bundle_asset()
+    assert h._sent_response[0]["status"] == 403
+
+
 def test_handle_train_new_progress_page_uses_step4_template_for_train_state():
     server = MagicMock()
     server.database.get_training_job.return_value = {
@@ -1332,6 +1367,30 @@ def test_record_preprocess_info_decoration_formats_steps():
     assert "高斯平滑" in detail["image_preprocess_pipeline_summary"]
 
 
+def test_record_preprocess_info_decoration_formats_zone_pipelines():
+    from capi_web import CAPIWebHandler
+
+    detail = {
+        "image_preprocess_pipeline": "[]",
+        "image_preprocess_pipelines": json.dumps({
+            "inner": [{"method": "gaussian", "params": {"kernel_size": 3, "sigma": 1.0}}],
+            "edge": [{"method": "median", "params": {"kernel_size": 5}}],
+        }),
+        "image_preprocess_timing": json.dumps({"total_elapsed_ms": 1250.0}),
+    }
+
+    CAPIWebHandler._decorate_record_preprocess_info(detail)
+
+    assert detail["image_preprocess_pipeline_recorded"] is True
+    assert [step["zone_label"] for step in detail["image_preprocess_pipeline_steps"]] == [
+        "INNER", "EDGE",
+    ]
+    assert "INNER:" in detail["image_preprocess_pipeline_summary"]
+    assert "EDGE:" in detail["image_preprocess_pipeline_summary"]
+    assert detail["image_preprocess_timing_recorded"] is True
+    assert detail["image_preprocess_total_seconds_text"] == "1.250s"
+
+
 def test_do_post_routes_train_new_preprocess_pipeline_preview(monkeypatch):
     from capi_web import CAPIWebHandler
 
@@ -1476,9 +1535,11 @@ def test_handle_train_new_preprocess_pipeline_preview_after_tiling_uses_tile(tmp
     payload = {
         "image_path": str(panel_dir),
         "preprocess_after_tiling": True,
-        "image_preprocess_pipeline": [
-            {"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}},
-        ],
+        "zone": "edge",
+        "image_preprocess_pipelines": {
+            "inner": [{"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}}],
+            "edge": [{"method": "bilateral", "params": {"diameter": 5, "sigma_color": 20.0, "sigma_space": 20.0}}],
+        },
     }
     body = json.dumps(payload).encode("utf-8")
     h.headers.get = MagicMock(return_value=str(len(body)))
@@ -1492,8 +1553,10 @@ def test_handle_train_new_preprocess_pipeline_preview_after_tiling_uses_tile(tmp
     assert resp["preprocess_after_tiling"] is True
     assert resp["preview_mode"] == "tile"
     assert resp["preview_size"] == [512, 512]
-    assert resp["pipeline"][0]["method"] == "gaussian"
-    assert resp["steps"][0]["method"] == "gaussian"
+    assert resp["requested_zone"] == "edge"
+    assert resp["tile_zone"] == "edge"
+    assert resp["pipeline"][0]["method"] == "bilateral"
+    assert resp["steps"][0]["method"] == "bilateral"
     assert len(resp["tile_rect"]) == 4
     assert resp["original_url"].startswith("/debug/heatmaps/train_preprocess_preview_")
     assert Path(resp["original_path"]).exists()

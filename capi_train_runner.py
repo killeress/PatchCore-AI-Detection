@@ -227,6 +227,7 @@ def main() -> int:
         output_root=train_paths["output_root"],
         required_backbones=train_paths["required_backbones"],
         image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
+        image_preprocess_pipelines=job.get("image_preprocess_pipelines") or {},
         preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
         tile_stride=int(job.get("tile_stride") or 512),
         training_data_source=job.get("training_data_source") or {"type": "inference_records"},

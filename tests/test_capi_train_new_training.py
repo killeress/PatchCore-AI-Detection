@@ -69,6 +69,42 @@ def test_apply_user_training_params_overrides_match_keys():
     assert cfg.feature_cleaning_keep_ratio == 0.97
 
 
+def test_feature_cleaning_by_zone_normalizes_and_resolves_independently():
+    from capi_train_new import (
+        TrainingConfig,
+        apply_user_training_params,
+        feature_cleaning_config_for_zone,
+        normalize_feature_cleaning_by_zone,
+    )
+
+    raw = {
+        "inner": {"mode": "knn_cosine_q99_v1", "k": 30, "keep_ratio": 0.99},
+        "edge": {"mode": "knn_cosine_q99_v1", "k": 10, "keep_ratio": 0.998},
+    }
+    assert normalize_feature_cleaning_by_zone(raw) == raw
+    cfg = TrainingConfig(machine_id="M", panel_paths=[], over_review_root=Path("/r"))
+    apply_user_training_params(cfg, {"feature_cleaning_by_zone": raw})
+    assert feature_cleaning_config_for_zone(cfg, "inner")["k"] == 30
+    assert feature_cleaning_config_for_zone(cfg, "edge") == raw["edge"]
+
+
+@pytest.mark.parametrize(
+    "raw, error",
+    [
+        ({"inner": {}}, "inner and edge"),
+        ({"inner": {}, "edge": {}, "outside": {}}, "inner and edge"),
+        ({"inner": {"k": True}, "edge": {}}, "must be an integer"),
+        ({"inner": {"k": 0}, "edge": {}}, "must be between"),
+        ({"inner": {"keep_ratio": 0.89}, "edge": {}}, "keep_ratio"),
+    ],
+)
+def test_feature_cleaning_by_zone_rejects_invalid_values(raw, error):
+    from capi_train_new import normalize_feature_cleaning_by_zone
+
+    with pytest.raises(ValueError, match=error):
+        normalize_feature_cleaning_by_zone(raw)
+
+
 def test_patchcore_layers_for_mode():
     from capi_train_new import _patchcore_layers_for_mode
     assert _patchcore_layers_for_mode(None) == ("layer2", "layer3")
@@ -237,6 +273,24 @@ def test_stage_dataset_creates_links_or_copies(tmp_path):
     ng_files = list((staging / "test" / "anormal").glob("*"))
     assert len(train_files) == 5
     assert len(ng_files) == 3
+
+
+def test_stage_dataset_keeps_duplicate_basenames_distinct(tmp_path):
+    from capi_train_new import stage_dataset
+
+    sources = []
+    for index in range(2):
+        source_dir = tmp_path / f"source_{index}"
+        source_dir.mkdir()
+        source = source_dir / "same.png"
+        source.write_bytes(str(index).encode("ascii"))
+        sources.append(source)
+
+    staged = stage_dataset(tmp_path / "staging", sources, [])
+
+    assert len(staged) == 2
+    assert staged[0].name != staged[1].name
+    assert {path.read_bytes() for path in staged} == {b"0", b"1"}
 
 
 def test_train_one_patchcore_smoke(tmp_path, monkeypatch):
@@ -675,12 +729,31 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
 
     trained_units = []
     def fake_train(staging_dir, run_root, unit_label, cfg=None, log=None,
-                   experiment_stats_out=None):
+                   experiment_stats_out=None, trace_sources=None):
         trained_units.append(unit_label)
         if experiment_stats_out is not None:
+            cleaning_stats = {"mode": cfg.feature_cleaning_mode, "applied": False}
+            if trace_sources:
+                source = next(iter(trace_sources.values()))
+                cleaning_stats = {
+                    "mode": "knn_cosine_q99_v1",
+                    "applied": True,
+                    "k": 10,
+                    "keep_ratio": 0.998,
+                    "removed": 1,
+                    "threshold": 0.2,
+                    "removed_patch_trace": [{
+                        "tile_pool_id": source["tile_pool_id"],
+                        "source_path": source["source_path"],
+                        "input_size": [512, 512],
+                        "grid_size": [2, 2],
+                        "removed_indices": [3],
+                        "removed_count": 1,
+                    }],
+                }
             experiment_stats_out.update({
                 "feature_pool_kernel_size": cfg.feature_pool_kernel_size,
-                "feature_cleaning": {"mode": cfg.feature_cleaning_mode, "applied": False},
+                "feature_cleaning": cleaning_stats,
             })
         out = run_root / "weights" / "torch" / "model.pt"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -697,9 +770,15 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
         over_review_root=tmp_path / "or",
         output_root=tmp_path / "model",
         tile_stride=256,
-        image_preprocess_pipeline=[
-            {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
-        ],
+        preprocess_after_tiling=True,
+        image_preprocess_pipelines={
+            "inner": [{"method": "gaussian", "params": {"kernel_size": 3, "sigma": 1.0}}],
+            "edge": [{"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}}],
+        },
+        feature_cleaning_by_zone={
+            "inner": {"mode": "off", "k": 30, "keep_ratio": 0.99},
+            "edge": {"mode": "knn_cosine_q99_v1", "k": 10, "keep_ratio": 0.998},
+        },
     )
     bundle_dir = run_training_pipeline(
         job_id="j1", cfg=cfg, db=db,
@@ -715,7 +794,8 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     manifest = _json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["trained_with_job_id"] == "j1"
     assert manifest["tile_stride"] == 256
-    assert manifest["image_preprocess_pipeline"][0]["method"] == "bilateral"
+    assert manifest["image_preprocess_pipelines"]["inner"][0]["method"] == "gaussian"
+    assert manifest["image_preprocess_pipelines"]["edge"][0]["method"] == "bilateral"
     assert manifest["patchcore_params"]["feature_layers"] == "layer2_layer3"
     assert manifest["patchcore_params"]["feature_pool_kernel_size"] == 3
     assert manifest["patchcore_params"]["feature_cleaning_mode"] == "off"
@@ -723,10 +803,23 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     assert manifest["patchcore_params"]["feature_cleaning_keep_ratio"] == 0.99
     assert manifest["patchcore_params"]["feature_cleaning_reference_size"] == 20_000
     assert manifest["patchcore_params"]["feature_cleaning_query_chunk"] == 1_024
-    assert manifest["experimental_training"] is False
+    assert manifest["patchcore_params"]["feature_cleaning_by_zone"]["inner"]["mode"] == "off"
+    assert manifest["patchcore_params"]["feature_cleaning_by_zone"]["edge"]["k"] == 10
+    assert manifest["experimental_training"] is True
     import yaml
     y = yaml.safe_load((bundle_dir / "machine_config.yaml").read_text(encoding="utf-8"))
     assert y["tile_stride"] == 256
+    assert y["preprocess_after_tiling"] is True
+    assert y["image_preprocess_pipelines"]["edge"][0]["method"] == "bilateral"
+    cleaning_report = _json.loads(
+        (bundle_dir / "feature_cleaning_reports" / "G0F00000-edge.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    trace_item = cleaning_report["tiles"][0]
+    assert "source_path" not in trace_item
+    assert trace_item["source_name"].endswith("G0F00000_edge_0.png")
+    assert (bundle_dir / trace_item["asset_path"]).is_file()
     assert len(trained_units) == 10
     # 應有 10 個 .pt
     pts = list(bundle_dir.glob("*.pt"))

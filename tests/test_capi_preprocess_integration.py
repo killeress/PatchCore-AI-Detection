@@ -58,6 +58,33 @@ def test_preprocess_panel_image_keeps_original_tiles_when_pipeline_enabled():
     assert all("elapsed_ms" in step for step in result.preprocess_steps)
 
 
+def test_preprocess_panel_image_aggregates_after_tiling_zone_timings():
+    cfg = PreprocessConfig(
+        tile_size=256,
+        tile_stride=256,
+        edge_threshold_px=384,
+        preprocess_after_tiling=True,
+        image_preprocess_pipelines={
+            "inner": [{"method": "mean", "params": {"kernel_size": 3}}],
+            "edge": [{"method": "median", "params": {"kernel_size": 3}}],
+        },
+    )
+
+    result = preprocess_panel_image(FIXTURE, "STANDARD", cfg)
+
+    assert {tile.zone for tile in result.tiles} == {"inner", "edge"}
+    assert all(len(tile.preprocess_steps) == 1 for tile in result.tiles)
+    assert all(
+        tile.preprocess_steps[0]["method"]
+        == ("mean" if tile.zone == "inner" else "median")
+        for tile in result.tiles
+    )
+    assert len(result.preprocess_steps) == len(result.tiles)
+    assert result.preprocess_total_ms == pytest.approx(
+        sum(tile.preprocess_total_ms for tile in result.tiles)
+    )
+
+
 def test_preprocess_panel_image_can_skip_grid_tiles_and_cache_image():
     cfg = PreprocessConfig(
         tile_size=256,
@@ -186,8 +213,11 @@ def test_preprocess_panel_image_with_preprocess_after_tiling():
     result = preprocess_panel_image(FIXTURE, "STANDARD", cfg)
     assert result.tiles
     
-    # 驗證大圖的前處理步驟被跳過
-    assert len(result.preprocess_steps) == 0
+    # 大圖前處理被跳過，但每個 tile 的實際步驟仍須彙整供推論紀錄顯示。
+    assert len(result.preprocess_steps) == len(result.tiles)
+    assert result.preprocess_total_ms == pytest.approx(
+        sum(tile.preprocess_total_ms for tile in result.tiles)
+    )
     
     # 驗證每個 tile 的 image 確實套用了前處理，而 original_image 是原來的
     tile = result.tiles[0]

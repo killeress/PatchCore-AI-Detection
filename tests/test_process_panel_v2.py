@@ -461,6 +461,7 @@ def test_process_panel_v2_aoi_centered_tiles_use_preprocess_pipeline(tmp_path):
     cfg.image_preprocess_pipeline = [
         {"method": "mean", "params": {"kernel_size": 3}},
     ]
+    cfg.preprocess_after_tiling = True
 
     from capi_inference import AOIReportDefect, CAPIInferencer
     from capi_preprocess import PanelPreprocessResult
@@ -487,8 +488,14 @@ def test_process_panel_v2_aoi_centered_tiles_use_preprocess_pipeline(tmp_path):
         return {
             "image": np.full_like(image, 23),
             "pipeline": pipeline,
-            "steps": [],
-            "total_elapsed_ms": 0.0,
+            "steps": [{
+                "index": 1,
+                "method": "mean",
+                "method_label": "均值模糊",
+                "applied_params": {"kernel_size": 3},
+                "elapsed_ms": 7.5,
+            }],
+            "total_elapsed_ms": 7.5,
         }
 
     amap = np.zeros((512, 512), dtype=np.float32)
@@ -514,6 +521,8 @@ def test_process_panel_v2_aoi_centered_tiles_use_preprocess_pipeline(tmp_path):
     np.testing.assert_array_equal(tile.image, np.full((512, 512), 23, dtype=np.uint8))
     assert tile.original_image is not None
     assert np.max(tile.original_image) == 200
+    assert results[0].preprocess_steps[0]["method"] == "mean"
+    assert results[0].preprocess_total_ms == 7.5
 
 
 def test_process_panel_v2_missing_lighting_config_fails(tmp_path):

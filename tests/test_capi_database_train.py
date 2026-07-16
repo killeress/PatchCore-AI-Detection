@@ -334,6 +334,24 @@ class TestTrainingJobsCRUD:
 
         assert db.get_training_job("j_manual_source")["training_data_source"] == source
 
+    def test_image_preprocess_pipelines_round_trip(self, tmp_path):
+        db = _make_db(tmp_path)
+        pipelines = {
+            "inner": [{"method": "gaussian", "params": {"kernel_size": 3, "sigma": 1.0}}],
+            "edge": [{"method": "bilateral", "params": {"diameter": 5, "sigma_color": 20.0, "sigma_space": 20.0}}],
+        }
+        db.create_training_job(
+            job_id="j_zone_preprocess",
+            machine_id="M",
+            panel_paths=[],
+            preprocess_after_tiling=True,
+            image_preprocess_pipelines=pipelines,
+        )
+
+        job = db.get_training_job("j_zone_preprocess")
+        assert job["preprocess_after_tiling"] is True
+        assert job["image_preprocess_pipelines"] == pipelines
+
     def test_tile_stride_default_and_round_trip(self, tmp_path):
         db = _make_db(tmp_path)
         db.create_training_job(job_id="j_default_stride", machine_id="M", panel_paths=[])

@@ -14,6 +14,23 @@ def test_generate_job_id_format():
     assert len(job_id.split("_")) >= 4
 
 
+def test_image_preprocess_pipeline_for_zone_prefers_zone_and_falls_back_to_shared():
+    from capi_preprocess import PreprocessConfig, image_preprocess_pipeline_for_zone
+
+    shared = [{"method": "gaussian", "params": {"kernel_size": 3, "sigma": 1.0}}]
+    inner = [{"method": "bilateral", "params": {"diameter": 5}}]
+    edge = [{"method": "median", "params": {"kernel_size": 5}}]
+    zone_cfg = PreprocessConfig(
+        image_preprocess_pipeline=shared,
+        image_preprocess_pipelines={"inner": inner, "edge": edge},
+        preprocess_after_tiling=True,
+    )
+
+    assert image_preprocess_pipeline_for_zone(zone_cfg, "inner") == inner
+    assert image_preprocess_pipeline_for_zone(zone_cfg, "edge") == edge
+    assert image_preprocess_pipeline_for_zone(PreprocessConfig(image_preprocess_pipeline=shared), "inner") == shared
+
+
 def test_preprocess_panels_to_pool_writes_tiles(tmp_path):
     """需要 fixture panel folder，每個 lighting 各 1 張圖。"""
     from pathlib import Path

@@ -2794,6 +2794,11 @@ class CAPIServer:
                 "image_preprocess_pipeline",
                 [],
             )
+            preprocess_pipelines = getattr(
+                getattr(record_inferencer, "config", None),
+                "image_preprocess_pipelines",
+                {},
+            )
             from capi_image_preprocess_lab import summarize_preprocess_timings
             preprocess_timing = summarize_preprocess_timings(
                 getattr(r, "preprocess_steps", []) for r in results
@@ -2835,6 +2840,7 @@ class CAPIServer:
                 omit_overexposed=int(omit_overexposed),
                 omit_overexposure_info=omit_overexposure_info,
                 image_preprocess_pipeline=preprocess_pipeline,
+                image_preprocess_pipelines=preprocess_pipelines,
                 image_preprocess_timing=preprocess_timing,
             )
 

@@ -135,10 +135,19 @@
         </select>
         <span class="tp-hint">5×5 可能降低細碎紋理過檢，也可能降低小缺陷敏感度；修改後需重訓</span>
       </label>
+      {% set inherited_cleaning = target_patchcore_params.get("feature_cleaning_mode", "off") %}
+      {% set inherited_cleaning_scope = target_patchcore_params.get("feature_cleaning_scope", "inner_only") %}
+      {% set inherited_keep_ratio = target_patchcore_params.get("feature_cleaning_keep_ratio", 0.99) %}
+      {% set inherited_cleaning_zones = target_patchcore_params.get("feature_cleaning_by_zone", {}) %}
       <label class="tp-field">
-        {% set inherited_cleaning = target_patchcore_params.get("feature_cleaning_mode", "off") %}
-        {% set inherited_cleaning_scope = target_patchcore_params.get("feature_cleaning_scope", "inner_only") %}
-        {% set inherited_keep_ratio = target_patchcore_params.get("feature_cleaning_keep_ratio", 0.99) %}
+        <span class="tp-label">特徵清洗設定方式 <span class="tp-default">預設共用</span></span>
+        <select id="tp-feature_cleaning_layout" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
+          <option value="shared" {% if not inherited_cleaning_zones %}selected{% endif %}>共用設定（目前作法）</option>
+          <option value="separate" {% if inherited_cleaning_zones %}selected{% endif %}>INNER／EDGE 分開設定</option>
+        </select>
+        <span class="tp-hint">分開設定後，兩區可使用不同 K 與保留比例</span>
+      </label>
+      <label class="tp-field fc-shared-field">
         <span class="tp-label">特徵域清洗 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用原 bundle{% else %}預設關閉{% endif %}</span></span>
         <select id="tp-feature_cleaning_mode" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
           {% if training_scope.mode == 'partial' %}
@@ -156,7 +165,7 @@
           {% endif %}
         </span>
       </label>
-      <label class="tp-field">
+      <label class="tp-field fc-shared-field">
         <span class="tp-label">特徵清洗範圍 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用原 bundle{% else %}預設僅 inner{% endif %}</span></span>
         <select id="tp-feature_cleaning_scope" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
           {% if training_scope.mode == 'partial' %}
@@ -168,16 +177,47 @@
         </select>
         <span class="tp-hint">edge 正常特徵變化較大；若包含 edge，建議先從保留 99.5%～99.9% 測試</span>
       </label>
-      <label class="tp-field">
+      <label class="tp-field fc-shared-field">
         <span class="tp-label">特徵清洗保留比例 <span class="tp-default">預設 99%</span></span>
         <input type="number" id="tp-feature_cleaning_keep_ratio" min="90" max="100" step="0.1"
                value="{% if training_scope.mode == 'partial' %}{{ (inherited_keep_ratio * 100)|round(1) }}{% else %}99{% endif %}"
                {% if training_scope.mode == 'partial' %}disabled{% endif %}>
         <span class="tp-hint">只在開啟清洗時生效；99% 約移除 1%，97% 約移除 3%，100% 不移除</span>
       </label>
+      <div id="feature-cleaning-by-zone" class="fc-zone-grid">
+        {% for zone in ["inner", "edge"] %}
+          {% set zone_cfg = inherited_cleaning_zones.get(zone, {}) %}
+          {% set fallback_enabled = inherited_cleaning != "off" and (zone == "inner" or inherited_cleaning_scope == "inner_and_edge") %}
+          {% set zone_mode = zone_cfg.get("mode", inherited_cleaning if fallback_enabled else "off") %}
+          {% set zone_k = zone_cfg.get("k", 30) %}
+          {% set zone_ratio = zone_cfg.get("keep_ratio", inherited_keep_ratio) %}
+          <section class="fc-zone-card fc-zone-{{ zone }}">
+            <div class="fc-zone-title">{{ zone|upper }}</div>
+            <label class="tp-field">
+              <span class="tp-label">清洗模式</span>
+              <select id="tp-feature_cleaning_{{ zone }}_mode" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
+                <option value="off" {% if zone_mode == "off" %}selected{% endif %}>關閉</option>
+                <option value="knn_cosine_q99_v1" {% if zone_mode != "off" %}selected{% endif %}>KNN cosine 清洗</option>
+              </select>
+            </label>
+            <label class="tp-field">
+              <span class="tp-label">K 值</span>
+              <input type="number" id="tp-feature_cleaning_{{ zone }}_k" min="1" max="200" step="1" value="{{ zone_k }}" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
+              <span class="tp-hint">第 K 個最近鄰；影響密度判斷尺度</span>
+            </label>
+            <label class="tp-field">
+              <span class="tp-label">保留比例</span>
+              <input type="number" id="tp-feature_cleaning_{{ zone }}_keep_ratio" min="90" max="100" step="0.1" value="{{ (zone_ratio * 100)|round(1) }}" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
+              <span class="tp-hint">控制實際移除比例</span>
+            </label>
+          </section>
+        {% endfor %}
+      </div>
       <label class="tp-field">
         <span class="tp-label">tile step <span class="tp-default">預設 256</span></span>
-        <input type="number" id="tile-stride" min="64" max="512" step="64" value="256">
+        <input type="number" id="tile-stride" min="64" max="512" step="64"
+               value="{% if training_scope.mode == 'partial' %}{{ target_tile_stride }}{% else %}256{% endif %}"
+               {% if training_scope.mode == 'partial' %}disabled{% endif %}>
         <span class="tp-hint">512 為原本不重疊切法；256 會讓 512×512 tile 產生 50% overlap</span>
       </label>
     </div>
@@ -189,6 +229,15 @@
       🧪 影像前處理
       <span style="color:#a6adc8;font-weight:400;font-size:.8rem;">可調整順序、參數，或清空為不啟用</span>
     </summary>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:14px;flex-wrap:wrap;">
+      <label style="color:#cdd6f4;font-size:.84rem;font-weight:700;">設定方式</label>
+      <select id="pp-config-mode" {% if training_scope.mode == 'partial' %}disabled{% endif %}
+              style="background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:7px 10px;">
+        <option value="shared" {% if not target_image_preprocess_pipelines %}selected{% endif %}>共用設定（目前作法）</option>
+        <option value="separate" {% if target_image_preprocess_pipelines %}selected{% endif %}>INNER／EDGE 分開設定</option>
+      </select>
+      <span id="pp-config-mode-hint" style="color:#a6adc8;font-size:.78rem;">分區設定只支援先切分後處理</span>
+    </div>
     <div style="display:flex;align-items:center;gap:10px;margin-top:14px;padding:8px 12px;background:#1e1e2e;border-radius:8px;border:1px solid #45475a;">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:#cdd6f4;font-size:.88rem;">
         <input type="checkbox" id="pp-after-tiling" style="width:18px;height:18px;accent-color:#89b4fa;cursor:pointer;">
@@ -200,6 +249,10 @@
       <button type="button" id="pp-add-step" style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:7px 14px;font-weight:700;">新增步驟</button>
       <button type="button" id="pp-reset-default" style="background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:7px 14px;font-weight:700;">重設預設</button>
       <button type="button" id="pp-clear-all" style="background:#313244;color:#f38ba8;border:1px solid #f38ba8;border-radius:5px;padding:7px 14px;font-weight:700;">清空</button>
+    </div>
+    <div id="pp-zone-tabs" style="display:none;gap:8px;margin-top:12px;">
+      <button type="button" class="pp-zone-tab active" data-zone="inner">INNER</button>
+      <button type="button" class="pp-zone-tab" data-zone="edge">EDGE</button>
     </div>
     <div id="pipeline-builder" style="margin-top:14px;display:flex;flex-direction:column;gap:10px;"></div>
     <div class="pp-preview">
@@ -306,6 +359,11 @@
   .tp-label { display:flex;align-items:center;gap:6px;font-weight:600; }
   .tp-default { color:#7f849c;font-weight:400;font-size:.74rem; }
   .tp-hint { color:#a6adc8;font-size:.74rem;line-height:1.4; }
+  .fc-zone-grid { display:none;grid-column:1/-1;grid-template-columns:repeat(2,minmax(240px,1fr));gap:12px; }
+  .fc-zone-card { display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:10px;padding:12px;border:1px solid #45475a;border-radius:8px;background:#1e1e2e; }
+  .fc-zone-title { grid-column:1/-1;font-weight:800;letter-spacing:.08em;color:#89b4fa; }
+  .fc-zone-edge .fc-zone-title { color:#fab387; }
+  @media (max-width:900px) { .fc-zone-grid,.fc-zone-card { grid-template-columns:1fr; } }
   .tp-field input, .tp-field select {
     background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;
     padding:6px 10px;font-family:'JetBrains Mono',Consolas,monospace;font-size:.86rem;
@@ -435,6 +493,9 @@
     padding:0;
   }
   .pp-help-icon:hover { background:#89b4fa;color:#1e1e2e; }
+  .pp-zone-tab { background:#1e1e2e;color:#a6adc8;border:1px solid #45475a;border-radius:6px;padding:7px 16px;font-weight:800;cursor:pointer; }
+  .pp-zone-tab.active { background:#89b4fa;color:#1e1e2e;border-color:#89b4fa; }
+  .pp-zone-tab[data-zone="edge"].active { background:#fab387;border-color:#fab387; }
   .pp-preview-result img {
     width:100%;
     aspect-ratio:1/1;
@@ -456,13 +517,20 @@ const SELECTED_LIGHTINGS = {{ selected_lightings|tojson }};
 const MACHINE_PREFIX_LEN = {{ machine_prefix_len|default(8)|tojson }};
 const PREPROCESS_METHOD_SPECS = {{ preprocess_methods|tojson }};
 const DEFAULT_PREPROCESS_PIPELINE = {{ default_preprocess_pipeline|tojson }};
+const TARGET_IMAGE_PREPROCESS_PIPELINE = {{ target_image_preprocess_pipeline|default([])|tojson }};
+const TARGET_IMAGE_PREPROCESS_PIPELINES = {{ target_image_preprocess_pipelines|default({})|tojson }};
+const TARGET_PREPROCESS_AFTER_TILING = {{ target_preprocess_after_tiling|default(false)|tojson }};
+const TARGET_FEATURE_CLEANING_BY_ZONE = {{ target_patchcore_params.get("feature_cleaning_by_zone", {})|tojson }};
 let _selected = new Set();
 let _selectedMachineId = '';
 let _selectedMachineKey = '';
 let _panelZoneModes = new Map();
 let _dataSource = 'inference_records';
 let _manualResolvedBatchRoot = '';
-let _pipelineSteps = [];
+let _pipelineStepsByKey = {shared: [], inner: [], edge: []};
+let _activePipelineKey = 'shared';
+let _zonePipelinesInitialized = false;
+let _zoneCleaningInitialized = Object.keys(TARGET_FEATURE_CLEANING_BY_ZONE || {}).length > 0;
 let _pipelineSeq = 0;
 let _previewPathEdited = false;
 let _previewPathByPanel = new Map();
@@ -495,38 +563,43 @@ function makePipelineStep(methodId, params) {
   };
 }
 
-function initPipelineSteps(rawPipeline) {
-  _pipelineSteps = clonePipeline(rawPipeline).map(step => makePipelineStep(step.method, step.params));
-  if (!_pipelineSteps.length) {
-    _pipelineSteps = DEFAULT_PREPROCESS_PIPELINE.map(step => makePipelineStep(step.method, step.params));
+function pipelineSteps(key=_activePipelineKey) {
+  return _pipelineStepsByKey[key] || [];
+}
+
+function initPipelineSteps(rawPipeline, key='shared', useDefaultWhenEmpty=true) {
+  _pipelineStepsByKey[key] = clonePipeline(rawPipeline).map(step => makePipelineStep(step.method, step.params));
+  if (!_pipelineStepsByKey[key].length && useDefaultWhenEmpty) {
+    _pipelineStepsByKey[key] = DEFAULT_PREPROCESS_PIPELINE.map(step => makePipelineStep(step.method, step.params));
   }
-  renderPipelineBuilder();
+  if (key === _activePipelineKey) renderPipelineBuilder();
 }
 
 function addPipelineStep(methodId) {
-  _pipelineSteps.push(makePipelineStep(methodId || 'bilateral'));
+  _pipelineStepsByKey[_activePipelineKey].push(makePipelineStep(methodId || 'bilateral'));
   renderPipelineBuilder();
 }
 
 function removePipelineStep(stepId) {
-  _pipelineSteps = _pipelineSteps.filter(step => step.id !== stepId);
+  _pipelineStepsByKey[_activePipelineKey] = pipelineSteps().filter(step => step.id !== stepId);
   renderPipelineBuilder();
 }
 
 function movePipelineStep(stepId, delta) {
-  const idx = _pipelineSteps.findIndex(step => step.id === stepId);
+  const steps = pipelineSteps();
+  const idx = steps.findIndex(step => step.id === stepId);
   const next = idx + delta;
-  if (idx < 0 || next < 0 || next >= _pipelineSteps.length) return;
-  const swapped = _pipelineSteps.slice();
+  if (idx < 0 || next < 0 || next >= steps.length) return;
+  const swapped = steps.slice();
   const tmp = swapped[idx];
   swapped[idx] = swapped[next];
   swapped[next] = tmp;
-  _pipelineSteps = swapped;
+  _pipelineStepsByKey[_activePipelineKey] = swapped;
   renderPipelineBuilder();
 }
 
 function changePipelineMethod(stepId, methodId) {
-  const step = _pipelineSteps.find(item => item.id === stepId);
+  const step = pipelineSteps().find(item => item.id === stepId);
   if (!step) return;
   step.method = methodId;
   step.params = defaultParamsForMethod(methodId);
@@ -534,7 +607,7 @@ function changePipelineMethod(stepId, methodId) {
 }
 
 function changePipelineParam(stepId, paramKey, rawValue) {
-  const step = _pipelineSteps.find(item => item.id === stepId);
+  const step = pipelineSteps().find(item => item.id === stepId);
   if (!step) return;
   step.params[paramKey] = rawValue;
 }
@@ -542,11 +615,24 @@ function changePipelineParam(stepId, paramKey, rawValue) {
 function renderPipelineBuilder() {
   const root = document.getElementById('pipeline-builder');
   if (!root) return;
-  if (!_pipelineSteps.length) {
+  const steps = pipelineSteps();
+  if (!steps.length) {
     root.innerHTML = '<div style="color:#a6adc8;font-size:.82rem;padding:10px 0;">目前沒有任何前處理步驟，送出後會直接使用原圖切片。</div>';
+    syncPreprocessReadOnly();
     return;
   }
-  root.innerHTML = _pipelineSteps.map((step, idx) => renderPipelineStep(step, idx)).join('');
+  root.innerHTML = steps.map((step, idx) => renderPipelineStep(step, idx)).join('');
+  syncPreprocessReadOnly();
+}
+
+function syncPreprocessReadOnly() {
+  const readOnly = isPartialTraining();
+  for (const id of ['pp-add-step', 'pp-reset-default', 'pp-clear-all']) {
+    const button = document.getElementById(id);
+    if (button) button.disabled = readOnly;
+  }
+  document.querySelectorAll('#pipeline-builder input, #pipeline-builder select, #pipeline-builder button')
+    .forEach(control => { control.disabled = readOnly; });
 }
 
 function renderPipelineStep(step, idx) {
@@ -609,9 +695,9 @@ function renderPipelineParam(step, spec, param) {
   `;
 }
 
-function collectImagePreprocessPipeline() {
+function collectImagePreprocessPipeline(key=_activePipelineKey) {
   const pipeline = [];
-  for (const step of _pipelineSteps) {
+  for (const step of pipelineSteps(key)) {
     const spec = PREPROCESS_METHOD_MAP[step.method];
     if (!spec) continue;
     const params = {};
@@ -638,12 +724,66 @@ function collectImagePreprocessPipeline() {
 }
 
 function resetPipelineDefault() {
-  initPipelineSteps(DEFAULT_PREPROCESS_PIPELINE);
+  initPipelineSteps(DEFAULT_PREPROCESS_PIPELINE, _activePipelineKey);
 }
 
 function clearPipeline() {
-  _pipelineSteps = [];
+  _pipelineStepsByKey[_activePipelineKey] = [];
   renderPipelineBuilder();
+}
+
+function isSeparatePreprocess() {
+  return document.getElementById('pp-config-mode')?.value === 'separate';
+}
+
+function setActivePipelineZone(zone) {
+  if (!['inner', 'edge'].includes(zone) || !isSeparatePreprocess()) return;
+  _activePipelineKey = zone;
+  document.querySelectorAll('.pp-zone-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.zone === zone);
+  });
+  renderPipelineBuilder();
+}
+
+function syncPreprocessConfigMode() {
+  const separate = isSeparatePreprocess();
+  const afterTiling = document.getElementById('pp-after-tiling');
+  const tabs = document.getElementById('pp-zone-tabs');
+  if (separate && !_zonePipelinesInitialized) {
+    _pipelineStepsByKey.inner = clonePipeline(pipelineSteps('shared')).map(
+      step => makePipelineStep(step.method, step.params)
+    );
+    _pipelineStepsByKey.edge = clonePipeline(pipelineSteps('shared')).map(
+      step => makePipelineStep(step.method, step.params)
+    );
+    _zonePipelinesInitialized = true;
+  }
+  if (tabs) tabs.style.display = separate ? 'flex' : 'none';
+  if (afterTiling) {
+    if (separate) afterTiling.checked = true;
+    afterTiling.disabled = separate || isPartialTraining();
+  }
+  _activePipelineKey = separate ? (_activePipelineKey === 'edge' ? 'edge' : 'inner') : 'shared';
+  document.querySelectorAll('.pp-zone-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.zone === _activePipelineKey);
+  });
+  renderPipelineBuilder();
+}
+
+function collectImagePreprocessPipelines() {
+  if (!isSeparatePreprocess()) {
+    const shared = collectImagePreprocessPipeline('shared');
+    return {pipeline: shared.pipeline, pipelines: null, error: shared.error};
+  }
+  const inner = collectImagePreprocessPipeline('inner');
+  if (inner.error) return {pipeline: null, pipelines: null, error: `INNER：${inner.error}`};
+  const edge = collectImagePreprocessPipeline('edge');
+  if (edge.error) return {pipeline: null, pipelines: null, error: `EDGE：${edge.error}`};
+  return {
+    pipeline: [],
+    pipelines: {inner: inner.pipeline, edge: edge.pipeline},
+    error: null,
+  };
 }
 
 function showDiffMapHelp() {
@@ -692,7 +832,7 @@ async function runPreprocessPreview() {
     return;
   }
 
-  const {pipeline, error} = collectImagePreprocessPipeline();
+  const {pipeline, pipelines, error} = collectImagePreprocessPipelines();
   if (error) {
     status.className = 'pp-preview-status error';
     status.textContent = error;
@@ -722,7 +862,9 @@ async function runPreprocessPreview() {
         machine_id: previewMachineId || '',
         image_path: rawPath,
         image_preprocess_pipeline: pipeline,
+        image_preprocess_pipelines: pipelines || {},
         preprocess_after_tiling: afterTiling,
+        zone: isSeparatePreprocess() ? _activePipelineKey : 'inner',
         tile_stride: tileStride,
       }),
     });
@@ -747,7 +889,7 @@ async function runPreprocessPreview() {
     status.textContent = `完成：${data.image_name}，耗時 ${data.processing_time}s`;
     const steps = (data.steps || []).map(s => `${s.index}.${s.method_label}`).join(' → ') || '未啟用前處理';
     const mode = data.preview_mode === 'tile'
-      ? `先切分後處理 tile ${data.tile_rect ? data.tile_rect.join(',') : ''}`
+      ? `先切分後處理 ${String(data.tile_zone || '').toUpperCase()} tile ${data.tile_rect ? data.tile_rect.join(',') : ''}`
       : '整張圖先處理';
     meta.textContent = `實際圖片：${data.image_path} ｜ 模式：${mode} ｜ 流程：${steps}`;
   } catch (err) {
@@ -1119,6 +1261,34 @@ function updateNext() {
 // 留空欄位不傳 key，由後端套 TrainingConfig dataclass 預設值
 // max_epochs 不列入：PatchCore 為 memory-based，anomalib 強制 1 epoch，
 // 不送 key 讓後端維持預設 1，manifest 也才會誠實記錄實際 epoch 數
+function isSeparateFeatureCleaning() {
+  return document.getElementById('tp-feature_cleaning_layout')?.value === 'separate';
+}
+
+function syncFeatureCleaningLayout() {
+  const separate = isSeparateFeatureCleaning();
+  const partial = isPartialTraining();
+  if (separate && !_zoneCleaningInitialized && !partial) {
+    const sharedMode = document.getElementById('tp-feature_cleaning_mode').value;
+    const sharedScope = document.getElementById('tp-feature_cleaning_scope').value;
+    const sharedRatio = document.getElementById('tp-feature_cleaning_keep_ratio').value;
+    for (const zone of ['inner', 'edge']) {
+      const enabled = sharedMode !== 'off' && (zone === 'inner' || sharedScope === 'inner_and_edge');
+      document.getElementById(`tp-feature_cleaning_${zone}_mode`).value = enabled ? sharedMode : 'off';
+      document.getElementById(`tp-feature_cleaning_${zone}_k`).value = '30';
+      document.getElementById(`tp-feature_cleaning_${zone}_keep_ratio`).value = sharedRatio;
+    }
+    _zoneCleaningInitialized = true;
+  }
+  document.querySelectorAll('.fc-shared-field').forEach(field => {
+    field.style.display = separate ? 'none' : '';
+    field.querySelectorAll('input,select').forEach(el => { el.disabled = separate || partial; });
+  });
+  const zoneGrid = document.getElementById('feature-cleaning-by-zone');
+  if (zoneGrid) zoneGrid.style.display = separate ? 'grid' : 'none';
+  zoneGrid?.querySelectorAll('input,select').forEach(el => { el.disabled = !separate || partial; });
+}
+
 const TRAIN_PARAM_KEYS = [
   {key: 'batch_size',    type: 'int',    min: 1,    max: 32},
   {key: 'coreset_ratio', type: 'float',  min: 0.01, max: 0.5},
@@ -1168,6 +1338,31 @@ function collectTrainingParams() {
     }
     params[spec.key] = num;
   }
+  if (isSeparateFeatureCleaning() && !isPartialTraining()) {
+    const byZone = {};
+    for (const zone of ['inner', 'edge']) {
+      const modeEl = document.getElementById(`tp-feature_cleaning_${zone}_mode`);
+      const kEl = document.getElementById(`tp-feature_cleaning_${zone}_k`);
+      const ratioEl = document.getElementById(`tp-feature_cleaning_${zone}_keep_ratio`);
+      const k = Number(kEl.value);
+      const ratioPct = Number(ratioEl.value);
+      [modeEl, kEl, ratioEl].forEach(el => el.classList.remove('invalid'));
+      if (!['off', 'knn_cosine_q99_v1'].includes(modeEl.value)) {
+        modeEl.classList.add('invalid');
+        return {params: null, error: `${zone.toUpperCase()} 清洗模式無效`};
+      }
+      if (!Number.isInteger(k) || k < 1 || k > 200) {
+        kEl.classList.add('invalid');
+        return {params: null, error: `${zone.toUpperCase()} K 值必須是 1 ~ 200 的整數`};
+      }
+      if (!Number.isFinite(ratioPct) || ratioPct < 90 || ratioPct > 100) {
+        ratioEl.classList.add('invalid');
+        return {params: null, error: `${zone.toUpperCase()} 保留比例必須是 90% ~ 100%`};
+      }
+      byZone[zone] = {mode: modeEl.value, k, keep_ratio: ratioPct / 100};
+    }
+    params.feature_cleaning_by_zone = byZone;
+  }
   return {params: Object.keys(params).length ? params : null, error: null};
 }
 
@@ -1212,7 +1407,7 @@ function submitStart() {
     capAlert(tileStrideError, {type: 'error', title: '切塊設定錯誤'});
     return;
   }
-  const {pipeline, error: pipelineError} = collectImagePreprocessPipeline();
+  const {pipeline, pipelines, error: pipelineError} = collectImagePreprocessPipelines();
   if (pipelineError) {
     document.getElementById('preprocess-params').setAttribute('open', '');
     capAlert(pipelineError, {type: 'error', title: '前處理設定錯誤'});
@@ -1231,6 +1426,7 @@ function submitStart() {
   if (params) body.training_params = params;
   body.tile_stride = tileStride;
   body.image_preprocess_pipeline = pipeline;
+  if (pipelines) body.image_preprocess_pipelines = pipelines;
   body.preprocess_after_tiling = document.getElementById('pp-after-tiling').checked;
   fetch('/api/train/new/start', {
     method: 'POST',
@@ -1278,7 +1474,17 @@ function escapeAttr(value) {
 
 document.addEventListener('DOMContentLoaded', loadPanels);
 document.addEventListener('DOMContentLoaded', () => {
-  initPipelineSteps(DEFAULT_PREPROCESS_PIPELINE);
+  const initialSharedPipeline = isPartialTraining()
+    ? TARGET_IMAGE_PREPROCESS_PIPELINE
+    : DEFAULT_PREPROCESS_PIPELINE;
+  initPipelineSteps(initialSharedPipeline, 'shared', !isPartialTraining());
+  if (Object.keys(TARGET_IMAGE_PREPROCESS_PIPELINES || {}).length) {
+    initPipelineSteps(TARGET_IMAGE_PREPROCESS_PIPELINES.inner || [], 'inner', false);
+    initPipelineSteps(TARGET_IMAGE_PREPROCESS_PIPELINES.edge || [], 'edge', false);
+    _zonePipelinesInitialized = true;
+  }
+  const afterTiling = document.getElementById('pp-after-tiling');
+  if (isPartialTraining() && afterTiling) afterTiling.checked = TARGET_PREPROCESS_AFTER_TILING;
   const addBtn = document.getElementById('pp-add-step');
   const resetBtn = document.getElementById('pp-reset-default');
   const clearBtn = document.getElementById('pp-clear-all');
@@ -1287,6 +1493,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const useSelectedBtn = document.getElementById('pp-use-selected');
   const manualMachineInput = document.getElementById('manual-machine-id');
   const manualBatchInput = document.getElementById('manual-batch-root');
+  const preprocessMode = document.getElementById('pp-config-mode');
+  const cleaningLayout = document.getElementById('tp-feature_cleaning_layout');
   if (addBtn) addBtn.onclick = () => addPipelineStep('bilateral');
   if (resetBtn) resetBtn.onclick = () => resetPipelineDefault();
   if (clearBtn) clearBtn.onclick = () => clearPipeline();
@@ -1295,6 +1503,13 @@ document.addEventListener('DOMContentLoaded', () => {
   if (useSelectedBtn) useSelectedBtn.onclick = () => syncPreviewPath(true);
   if (manualMachineInput) manualMachineInput.addEventListener('input', invalidateManualScan);
   if (manualBatchInput) manualBatchInput.addEventListener('input', invalidateManualScan);
+  if (preprocessMode) preprocessMode.addEventListener('change', syncPreprocessConfigMode);
+  document.querySelectorAll('.pp-zone-tab').forEach(btn => {
+    btn.addEventListener('click', () => setActivePipelineZone(btn.dataset.zone));
+  });
+  if (cleaningLayout) cleaningLayout.addEventListener('change', syncFeatureCleaningLayout);
+  syncPreprocessConfigMode();
+  syncFeatureCleaningLayout();
 });
 </script>
 
