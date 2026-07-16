@@ -81,6 +81,22 @@ def test_qjpg_response_uses_final_ng_points_and_product_coordinates():
     assert response == "@QJPG-T863BF29AH44;OK;EJ;NGPCDK20100000500W0F00000,"
 
 
+def test_qjpg_response_keeps_source_prefix_for_hm_standard_image():
+    result = _image_result("U0F00000092908.tif")
+    tile = _tile(1, 600, 450)
+    result.tiles = [tile]
+    result.anomaly_tiles = [(tile, 0.91, None)]
+
+    response = build_qjpg_response(
+        {"glass_id": "TL6380GAL102", "resolution": (2000, 1000)},
+        "NG",
+        [result],
+        CAPIConfig(),
+    )
+
+    assert response == "@QJPG-TL6380GAL102;OK;EJ;NGPCDK20100000500U0F00000,"
+
+
 def test_dual_protocol_response_sends_legacy_aoi_then_qjpg():
     result = _image_result("W0F00000_114438.tif")
     tile = _tile(1, 600, 450)

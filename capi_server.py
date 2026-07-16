@@ -51,7 +51,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from capi_config import CAPIConfig
 from capi_image_orientation import read_detection_image
-from capi_image_naming import CANONICAL_IMAGE_PREFIXES, canonical_image_prefix
+from capi_image_naming import (
+    CANONICAL_IMAGE_PREFIXES,
+    canonical_image_prefix,
+    source_image_prefix,
+)
 from capi_inference import CAPIInferencer, ImageResult, resolve_product_resolution
 from capi_preprocess import BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_polygon
 from capi_database import CAPIDatabase
@@ -456,7 +460,7 @@ def build_legacy_response(
 
 
 def _image_prefix_for_report(image_name: str) -> str:
-    return canonical_image_prefix(image_name)
+    return source_image_prefix(image_name)
 
 
 _REPORT_SCREEN_PREFIXES = CANONICAL_IMAGE_PREFIXES
