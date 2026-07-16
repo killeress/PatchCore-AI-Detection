@@ -15,6 +15,7 @@ import threading
 import json
 import re
 import os
+import logging
 import hashlib
 import hmac
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import List, Dict, Optional, Any, Tuple
 
 _DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _FACTORY_DAY_START_TIME = "07:30:00"
+logger = logging.getLogger(__name__)
 
 
 def _next_date_str(date_str: str) -> str:
@@ -2491,28 +2493,58 @@ class CAPIDatabase:
             "tile_results_deleted": 0,
             "inference_records_deleted": 0,
             "heatmap_dirs_deleted": 0,
+            "heatmap_dirs_failed": 0,
+            "heatmap_date_dirs_deleted": 0,
+            "heatmap_date_dirs_failed": 0,
             "scratch_rescue_review_deleted": 0,
             "within_spec_dirs_deleted": 0,
+            "within_spec_dirs_failed": 0,
         }
 
-        # Step 0: 清除過期 heatmap 目錄 (獨立天數，在 DB 記錄刪除前先查詢)
-        heatmap_dirs_to_delete = []
+        # Step 0: 先找出並刪除過期 heatmap；只有成功後才清 DB 路徑。
+        heatmap_records_by_dir = {}
+        heatmap_date_dirs_to_delete = []
+        within_spec_dirs_to_delete = []
         if heatmap_retain_days > 0:
             hm_cutoff = (now - timedelta(days=heatmap_retain_days)).strftime('%Y-%m-%d')
             with self._lock:
                 conn = self._get_conn()
                 try:
                     rows = conn.execute("""
-                        SELECT heatmap_dir FROM inference_records
+                        SELECT id, heatmap_dir FROM inference_records
                         WHERE heatmap_dir != '' AND created_at < ?
                     """, (hm_cutoff,)).fetchall()
-                    heatmap_dirs_to_delete = [r[0] for r in rows if r[0]]
+                    for row in rows:
+                        if row[1]:
+                            heatmap_records_by_dir.setdefault(row[1], []).append(row[0])
                 finally:
                     conn.close()
 
-        within_spec_dirs_to_delete = []
         if heatmap_retain_days > 0 and heatmap_base_dir:
-            within_spec_root = Path(heatmap_base_dir) / "within_spec_inference"
+            heatmap_root = Path(heatmap_base_dir)
+            heatmap_cutoff_date = (now - timedelta(days=heatmap_retain_days)).date()
+            try:
+                if heatmap_root.is_dir():
+                    for child in heatmap_root.iterdir():
+                        if child.is_symlink() or not child.is_dir():
+                            continue
+                        if not re.fullmatch(r"\d{8}", child.name):
+                            continue
+                        try:
+                            child_date = datetime.strptime(child.name, "%Y%m%d").date()
+                        except ValueError:
+                            continue
+                        if child_date < heatmap_cutoff_date:
+                            heatmap_date_dirs_to_delete.append(child)
+            except OSError as exc:
+                stats["heatmap_date_dirs_failed"] += 1
+                logger.warning(
+                    "[Cleanup] Failed to scan heatmap date directories under %s: %s",
+                    heatmap_root,
+                    exc,
+                )
+
+            within_spec_root = heatmap_root / "within_spec_inference"
             within_spec_cutoff_ts = (
                 now - timedelta(days=heatmap_retain_days)
             ).timestamp()
@@ -2522,16 +2554,106 @@ class CAPIDatabase:
                         if child.is_symlink() or not child.is_dir():
                             continue
                         try:
-                            if child.stat().st_mtime < within_spec_cutoff_ts:
-                                within_spec_dirs_to_delete.append(child)
-                        except OSError:
-                            continue
-            except OSError:
-                pass
+                            child_mtime = child.stat().st_mtime
+                            if child_mtime < within_spec_cutoff_ts:
+                                within_spec_dirs_to_delete.append((child, child_mtime))
+                        except OSError as exc:
+                            stats["within_spec_dirs_failed"] += 1
+                            logger.warning(
+                                "[Cleanup] Failed to inspect within-spec directory %s: %s",
+                                child,
+                                exc,
+                            )
+            except OSError as exc:
+                stats["within_spec_dirs_failed"] += 1
+                logger.warning(
+                    "[Cleanup] Failed to scan within-spec directories under %s: %s",
+                    within_spec_root,
+                    exc,
+                )
+
+        heatmap_records_to_clear = []
+        heatmap_retry_record_ids = set()
+        for directory, record_ids in heatmap_records_by_dir.items():
+            path = Path(directory)
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                    stats["heatmap_dirs_deleted"] += 1
+                elif path.exists():
+                    raise OSError("heatmap path is not a directory")
+                heatmap_records_to_clear.extend(
+                    (record_id, directory) for record_id in record_ids
+                )
+            except Exception as exc:
+                heatmap_retry_record_ids.update(record_ids)
+                stats["heatmap_dirs_failed"] += 1
+                logger.warning(
+                    "[Cleanup] Failed to delete heatmap directory %s: %s",
+                    path,
+                    exc,
+                )
+
+        # 舊版可能已刪除 DB record，因此直接掃描嚴格 YYYYMMDD 日期根目錄。
+        for path in heatmap_date_dirs_to_delete:
+            try:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                    stats["heatmap_date_dirs_deleted"] += 1
+            except Exception as exc:
+                stats["heatmap_date_dirs_failed"] += 1
+                logger.warning(
+                    "[Cleanup] Failed to delete heatmap date directory %s: %s",
+                    path,
+                    exc,
+                )
+
+        for path, original_mtime in within_spec_dirs_to_delete:
+            try:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                    stats["within_spec_dirs_deleted"] += 1
+            except Exception as exc:
+                stats["within_spec_dirs_failed"] += 1
+                logger.warning(
+                    "[Cleanup] Failed to delete within-spec directory %s: %s",
+                    path,
+                    exc,
+                )
+                if path.exists() and not path.is_symlink():
+                    try:
+                        os.utime(path, (original_mtime, original_mtime))
+                    except OSError as restore_exc:
+                        logger.warning(
+                            "[Cleanup] Failed to restore within-spec directory mtime "
+                            "for %s: %s",
+                            path,
+                            restore_exc,
+                        )
 
         with self._lock:
             conn = self._get_conn()
             try:
+                if heatmap_records_to_clear:
+                    conn.executemany(
+                        """
+                        UPDATE inference_records
+                        SET heatmap_dir = ''
+                        WHERE id = ? AND heatmap_dir = ?
+                        """,
+                        heatmap_records_to_clear,
+                    )
+
+                if heatmap_retry_record_ids:
+                    conn.execute(
+                        "CREATE TEMP TABLE cleanup_heatmap_retry_ids "
+                        "(id INTEGER PRIMARY KEY)"
+                    )
+                    conn.executemany(
+                        "INSERT INTO cleanup_heatmap_retry_ids (id) VALUES (?)",
+                        ((record_id,) for record_id in heatmap_retry_record_ids),
+                    )
+
                 # scratch_rescue_review belongs to tile_results and must be
                 # removed first because its foreign key is not cascading.
                 cur = conn.execute("""
@@ -2559,19 +2681,15 @@ class CAPIDatabase:
                 # Step 2: 清除過期 inference_records (cascade 自動刪子表)
                 cur = conn.execute("""
                     DELETE FROM inference_records
-                    WHERE ((ai_judgment = 'OK' OR ai_judgment = 'OK-i') AND created_at < ?)
-                       OR (ai_judgment != 'OK'  AND created_at < ?)
-                """, (ok_cutoff, ng_cutoff))
+                    WHERE (
+                        ((ai_judgment = 'OK' OR ai_judgment = 'OK-i') AND created_at < ?)
+                        OR (ai_judgment != 'OK' AND created_at < ?)
+                    )
+                """ + (
+                    " AND id NOT IN (SELECT id FROM cleanup_heatmap_retry_ids)"
+                    if heatmap_retry_record_ids else ""
+                ), (ok_cutoff, ng_cutoff))
                 stats["inference_records_deleted"] = cur.rowcount
-
-                # Step 2.5: 清除已刪記錄的 heatmap_dir 欄位 (圖檔已刪但記錄還在的情況)
-                if heatmap_retain_days > 0:
-                    hm_cutoff = (now - timedelta(days=heatmap_retain_days)).strftime('%Y-%m-%d')
-                    conn.execute("""
-                        UPDATE inference_records
-                        SET heatmap_dir = ''
-                        WHERE heatmap_dir != '' AND created_at < ?
-                    """, (hm_cutoff,))
 
                 conn.commit()
             except Exception as e:
@@ -2580,25 +2698,7 @@ class CAPIDatabase:
             finally:
                 conn.close()
 
-        # Step 3: 刪除實體 heatmap 目錄 (在鎖外執行，避免 IO 阻塞)
-        for d in heatmap_dirs_to_delete:
-            try:
-                p = Path(d)
-                if p.is_dir():
-                    shutil.rmtree(p)
-                    stats["heatmap_dirs_deleted"] += 1
-            except Exception:
-                pass  # 目錄不存在或權限問題，跳過
-
-        for p in within_spec_dirs_to_delete:
-            try:
-                if p.is_dir() and not p.is_symlink():
-                    shutil.rmtree(p)
-                    stats["within_spec_dirs_deleted"] += 1
-            except Exception:
-                pass  # 目錄不存在或權限問題，跳過
-
-        # Step 4: VACUUM (在鎖外，不阻塞其他操作)
+        # Step 3: VACUUM (在鎖外，不阻塞其他操作)
         if vacuum and (stats["tile_results_deleted"] > 0 or stats["inference_records_deleted"] > 0):
             conn = self._get_conn()
             try:

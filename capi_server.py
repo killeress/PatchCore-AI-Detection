@@ -1368,6 +1368,8 @@ class CAPIServer:
         # 停止旗標
         self._running = False
         self._server_socket = None
+        self._cleanup_stop_event = threading.Event()
+        self._cleanup_thread: Optional[threading.Thread] = None
 
         # 推論器 (延遲載入)
         self.inferencer: Optional[CAPIInferencer] = None
@@ -2024,10 +2026,10 @@ class CAPIServer:
             except Exception as e:
                 logger.error(f"Failed to start web server: {e}")
 
-        # 啟動清理排程
-        self._start_cleanup_scheduler()
-
         self._running = True
+
+        # 啟動清理排程（thread 啟動前必須先讓 lifecycle 進入 running）
+        self._start_cleanup_scheduler()
 
         with server_status.lock:
             server_status.is_running = True
@@ -2087,7 +2089,11 @@ class CAPIServer:
     def _start_cleanup_scheduler(self):
         cleanup_cfg = self.server_config.get("cleanup", {})
         if not cleanup_cfg.get("enabled", False):
-            return
+            return None
+
+        if self._cleanup_thread is not None and self._cleanup_thread.is_alive():
+            return self._cleanup_thread
+        self._cleanup_stop_event.clear()
 
         schedule_time  = cleanup_cfg.get("schedule_time", "02:00")
         ok_retain      = cleanup_cfg.get("ok_retain_days", 14)
@@ -2107,13 +2113,8 @@ class CAPIServer:
                 target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 if target <= now:
                     target += timedelta(days=1)
-                sleep_secs = int((target - now).total_seconds())
-                # 每 60 秒醒來檢查 _running
-                for _ in range(sleep_secs // 60 + 1):
-                    if not self._running:
-                        return
-                    time.sleep(min(60, sleep_secs))
-                if not self._running:
+                sleep_secs = max(0, (target - now).total_seconds())
+                if self._cleanup_stop_event.wait(sleep_secs) or not self._running:
                     return
                 try:
                     logger.info("[Cleanup] Starting scheduled database cleanup...")
@@ -2130,18 +2131,36 @@ class CAPIServer:
                         f"inference_records={stats['inference_records_deleted']}, "
                         f"tile_results={stats['tile_results_deleted']}, "
                         f"heatmap_dirs={stats['heatmap_dirs_deleted']}, "
-                        f"within_spec_dirs={stats['within_spec_dirs_deleted']}"
+                        f"heatmap_failures={stats['heatmap_dirs_failed']}, "
+                        f"heatmap_date_dirs={stats['heatmap_date_dirs_deleted']}, "
+                        f"heatmap_date_failures={stats['heatmap_date_dirs_failed']}, "
+                        f"within_spec_dirs={stats['within_spec_dirs_deleted']}, "
+                        f"within_spec_failures={stats['within_spec_dirs_failed']}"
                     )
                 except Exception as e:
                     logger.error(f"[Cleanup] Failed: {e}")
 
-        t = threading.Thread(target=_scheduler_loop, name="cleanup-scheduler", daemon=True)
-        t.start()
+        self._cleanup_thread = threading.Thread(
+            target=_scheduler_loop,
+            name="cleanup-scheduler",
+            daemon=True,
+        )
+        self._cleanup_thread.start()
+        return self._cleanup_thread
 
     def stop(self):
         """停止伺服器"""
         logger.info("Stopping server...")
         self._running = False
+        self._cleanup_stop_event.set()
+
+        cleanup_thread = self._cleanup_thread
+        if cleanup_thread is not None and cleanup_thread is not threading.current_thread():
+            cleanup_thread.join(timeout=1.0)
+            if cleanup_thread.is_alive():
+                logger.warning("[Cleanup] Scheduler did not stop within 1 second")
+            else:
+                self._cleanup_thread = None
         
         with server_status.lock:
             server_status.is_running = False
