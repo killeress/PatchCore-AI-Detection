@@ -285,43 +285,43 @@ def _default_version() -> str:
     return date.today().strftime("%Y.%m.%d.1")
 
 
-def _file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def _bytes_sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
 def _git_commit() -> str:
+    return _git_revision("--short")
+
+
+def _git_commit_full() -> str:
+    return _git_revision()
+
+
+def _git_revision(*args: str) -> str:
+    proc = _run_git(["rev-parse", *args, "HEAD"])
+    revision = proc.stdout.strip()
+    if not revision:
+        raise RuntimeError("git rev-parse HEAD returned an empty revision")
+    return revision
+
+
+def _run_git(args: list[str]) -> subprocess.CompletedProcess:
+    command = ["git", "-c", f"safe.directory={GIT_SAFE_DIR}", *args]
     try:
-        proc = subprocess.run(
-            ["git", "-c", f"safe.directory={GIT_SAFE_DIR}", "rev-parse", "--short", "HEAD"],
+        return subprocess.run(
+            command,
             cwd=PROJECT_ROOT,
             text=True,
             capture_output=True,
             check=True,
         )
-    except Exception:
-        return ""
-    return proc.stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = getattr(exc, "stderr", "") or getattr(exc, "stdout", "") or str(exc)
+        raise RuntimeError(f"git {' '.join(args)} failed: {detail.strip()}") from exc
 
 
 def _git_file_list(args: list[str]) -> list[str]:
-    try:
-        proc = subprocess.run(
-            ["git", "-c", f"safe.directory={GIT_SAFE_DIR}", *args],
-            cwd=PROJECT_ROOT,
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-    except Exception:
-        return []
+    proc = _run_git(args)
     return [line.strip().replace("\\", "/") for line in proc.stdout.splitlines() if line.strip()]
 
 
@@ -329,6 +329,19 @@ def _git_changed_files() -> list[str]:
     changed = set(_git_file_list(["diff", "--name-only", "HEAD"]))
     changed.update(_git_file_list(["ls-files", "--others", "--exclude-standard"]))
     return sorted(changed)
+
+
+def _git_managed_asset_files() -> list[str]:
+    files = _git_file_list([
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+        "templates",
+        "static",
+    ])
+    return sorted(rel for rel in files if (PROJECT_ROOT / rel).is_file())
 
 
 def _is_patch_deploy_file(rel: str) -> bool:
@@ -340,12 +353,51 @@ def _is_patch_deploy_file(rel: str) -> bool:
     return rel.startswith(PATCH_DEPLOY_PREFIXES)
 
 
-def _patch_files() -> tuple[list[str], list[str]]:
+def _release_files() -> list[str]:
+    return list(dict.fromkeys([*CODE_FILES, *_git_managed_asset_files()]))
+
+
+def _validate_required_code_files() -> None:
+    missing = [rel for rel in CODE_FILES if not (PROJECT_ROOT / rel).is_file()]
+    if missing:
+        raise FileNotFoundError(f"required CODE_FILES missing: {', '.join(missing)}")
+
+
+def _release_dirty_files(
+    changed_files: list[str],
+    package_files: list[str],
+    *,
+    patch_only: bool,
+    include_backbone: bool,
+) -> list[str]:
+    package_sources = {rel.replace("\\", "/") for rel in package_files}
+    package_sources.update(GENERATED_METADATA_FILES)
+    package_sources.add("scripts/build_deploy_zip.py")
+    dirty_files = []
+
+    for rel in changed_files:
+        rel = rel.replace("\\", "/")
+        relevant = rel in package_sources
+        if patch_only:
+            relevant = relevant or _is_patch_deploy_file(rel)
+        else:
+            relevant = relevant or rel.startswith(("templates/", "static/"))
+            if include_backbone:
+                relevant = relevant or rel.startswith(f"{BACKBONE_CACHE_DIR}/")
+        if relevant:
+            dirty_files.append(rel)
+
+    return sorted(set(dirty_files))
+
+
+def _patch_files(changed_files: list[str] | None = None) -> tuple[list[str], list[str]]:
     selected = []
     skipped = []
     seen = set()
+    if changed_files is None:
+        changed_files = _git_changed_files()
 
-    for rel in [*_git_changed_files(), *PATCH_UTILITY_FILES]:
+    for rel in [*changed_files, *PATCH_UTILITY_FILES]:
         rel = rel.replace("\\", "/")
         if rel in seen:
             continue
@@ -366,10 +418,22 @@ def _patch_files() -> tuple[list[str], list[str]]:
 
 def _add_file(zf: zipfile.ZipFile, src: Path, arcname: str, entries: list[dict]) -> None:
     zf.write(src, arcname=arcname)
+    h = hashlib.sha256()
+    size_bytes = 0
+    info = zf.getinfo(arcname)
+    original_name = info.orig_filename
+    info.orig_filename = info.filename  # Windows ZipInfo keeps backslashes here until archive close.
+    try:
+        with zf.open(info) as packed:
+            for chunk in iter(lambda: packed.read(1024 * 1024), b""):
+                h.update(chunk)
+                size_bytes += len(chunk)
+    finally:
+        info.orig_filename = original_name
     entries.append({
         "path": arcname,
-        "size_bytes": src.stat().st_size,
-        "sha256": _file_sha256(src),
+        "size_bytes": size_bytes,
+        "sha256": h.hexdigest(),
     })
 
 
@@ -382,6 +446,16 @@ def _add_text(zf: zipfile.ZipFile, arcname: str, text: str, entries=None) -> Non
             "size_bytes": len(data),
             "sha256": _bytes_sha256(data),
         })
+
+
+def _content_tree_sha256(entries: list[dict]) -> str:
+    canonical = json.dumps(
+        sorted(entries, key=lambda item: item["path"]),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return _bytes_sha256(canonical)
 
 
 def main(argv=None) -> int:
@@ -405,22 +479,53 @@ def main(argv=None) -> int:
         "--patch-only", action="store_true",
         help="Build a small patch ZIP from deployable Git changes only",
     )
+    parser.add_argument(
+        "--allow-dirty", action="store_true",
+        help="Allow full/code-only build from deploy-relevant uncommitted files",
+    )
     args = parser.parse_args(argv)
 
     version = (args.version or _default_version()).strip()
     if not version:
         raise ValueError("release version cannot be empty")
 
+    if args.patch_only:
+        args.no_backbone = True
+
+    if not args.patch_only:
+        _validate_required_code_files()
+
+    changed_files = _git_changed_files()
+    if args.patch_only:
+        package_files, skipped_files = _patch_files(changed_files)
+        if not package_files:
+            raise RuntimeError("no deployable changed files found for --patch-only")
+    else:
+        package_files, skipped_files = _release_files(), []
+
+    git_dirty_files = _release_dirty_files(
+        changed_files,
+        package_files,
+        patch_only=args.patch_only,
+        include_backbone=not args.no_backbone,
+    )
+    git_worktree_dirty = bool(changed_files)
+    git_dirty = bool(git_dirty_files)
+    if git_dirty and not args.patch_only and not args.allow_dirty:
+        raise RuntimeError(
+            "deploy-relevant dirty files: "
+            f"{', '.join(git_dirty_files)}; commit/stash them or rerun with --allow-dirty"
+        )
+
     built_at = datetime.now().astimezone().isoformat(timespec="seconds")
     git_commit = _git_commit()
+    git_commit_full = _git_commit_full()
+    source_mode = "working_tree" if args.patch_only or git_dirty else "git_commit"
 
     output_dir = args.output_dir
     if not output_dir.is_absolute():
         output_dir = PROJECT_ROOT / output_dir
     output_dir.mkdir(exist_ok=True)
-
-    if args.patch_only:
-        args.no_backbone = True
 
     suffix = "_codeonly" if args.no_backbone and not args.patch_only else ""
     package_name = "patchcore_ai_patch" if args.patch_only else "patchcore_ai_release"
@@ -441,23 +546,15 @@ def main(argv=None) -> int:
     backbone_files = 0
     entries = []
 
-    if args.patch_only:
-        package_files, skipped_files = _patch_files()
-        if not package_files:
-            raise RuntimeError("no deployable changed files found for --patch-only")
-    else:
-        package_files, skipped_files = list(CODE_FILES), []
-
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         # 1. Application code
         print(f"\n[1/5] Adding {len(package_files)} code files...")
         for rel in package_files:
             src = PROJECT_ROOT / rel
-            if not src.exists():
-                print(f"  ⚠ MISSING: {rel}")
-                continue
+            if not src.is_file():
+                raise FileNotFoundError(f"package file disappeared during build: {rel}")
             _add_file(zf, src, rel.replace("\\", "/"), entries)
-            code_size += src.stat().st_size
+            code_size += entries[-1]["size_bytes"]
             print(f"  + {rel}")
         if args.patch_only and skipped_files:
             print("\nSkipped non-deployable changed files:")
@@ -479,7 +576,7 @@ def main(argv=None) -> int:
                     if "xet/logs" in rel_str or rel_str.endswith(".log"):
                         continue
                     _add_file(zf, src, rel.as_posix(), entries)
-                    backbone_size += src.stat().st_size
+                    backbone_size += entries[-1]["size_bytes"]
                     backbone_files += 1
                 print(f"  + {backbone_files} files in {BACKBONE_CACHE_DIR}")
             else:
@@ -515,14 +612,21 @@ def main(argv=None) -> int:
             readme = readme + CODEONLY_README_NOTE
         _add_text(zf, "README.txt", readme, entries)
 
+        payload_entries = sorted(entries, key=lambda item: item["path"])
         manifest = {
             "version": version,
             "git_commit": git_commit,
+            "git_commit_full": git_commit_full,
+            "git_worktree_dirty": git_worktree_dirty,
+            "git_dirty": git_dirty,
+            "git_dirty_files": git_dirty_files,
+            "source_mode": source_mode,
+            "content_tree_sha256": _content_tree_sha256(payload_entries),
             "built_at": built_at,
             "artifact": zip_path.name,
             "requires_restart": True,
             "package_type": "patch" if args.patch_only else ("codeonly" if args.no_backbone else "full"),
-            "files": sorted(entries, key=lambda item: item["path"]),
+            "files": payload_entries,
         }
         manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
         _add_text(zf, "release_manifest.json", manifest_text, entries)

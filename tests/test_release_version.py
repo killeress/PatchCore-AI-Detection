@@ -1,8 +1,11 @@
+import hashlib
 import json
 from pathlib import Path
-import shutil
-import uuid
+import re
+import subprocess
 import zipfile
+
+import pytest
 
 
 def test_api_version_handler_returns_release_info(monkeypatch):
@@ -81,71 +84,350 @@ def test_base_template_includes_hostname_in_title_header_and_footer(monkeypatch)
     assert "主機：CAPI07 ｜ 版本：" in rendered
 
 
-def test_build_release_zip_includes_manifest_and_checksums():
+def test_build_release_zip_includes_manifest_checksums_and_all_web_assets(tmp_path, monkeypatch):
     from scripts import build_deploy_zip
 
     version = "2099.01.02.3"
-    output_dir = Path("deployment") / f"_test_release_{uuid.uuid4().hex}"
+    output_dir = tmp_path / "release"
+    monkeypatch.setattr(build_deploy_zip, "_git_changed_files", lambda: [])
 
-    try:
-        rc = build_deploy_zip.main([
+    rc = build_deploy_zip.main([
+        "--no-backbone",
+        "--version",
+        version,
+        "--output-dir",
+        str(output_dir),
+    ])
+
+    assert rc == 0
+    zip_path = output_dir / f"patchcore_ai_release_{version}_codeonly.zip"
+    assert zip_path.exists()
+
+    with zipfile.ZipFile(zip_path) as zf:
+        names = set(zf.namelist())
+        assert "VERSION" in names
+        assert "CHANGELOG.md" in names
+        assert "release_manifest.json" in names
+        assert "checksums.txt" in names
+        assert "capi_version.py" in names
+        assert "capi_update_agent.py" in names
+        assert "promote_update.sh" in names
+        assert "setup_auto_update_client.sh" in names
+        assert "templates/release_notes.html" in names
+        assert "templates/debug_inference.html" in names
+        assert "templates/record_detail.html" in names
+        assert "templates/record_detail_v3.html" in names
+        assert "templates/ric_report.html" in names
+        assert "capi_edge_cv.py" in names
+        assert "capi_heatmap.py" in names
+        assert "capi_image_orientation.py" in names
+        assert "capi_image_preprocess_lab.py" in names
+        assert "capi_dataset_export.py" in names
+        assert "capi_mark_detector.py" in names
+        assert "capi_patchcore_feature_cleaning.py" in names
+        assert "capi_scratch_batch.py" in names
+        assert "capi_scratch_export.py" in names
+        assert "scripts/over_review_poc/train_final_model.py" in names
+        assert "scratch_classifier.py" in names
+        assert "scratch_filter.py" in names
+
+        managed_assets = {
+            rel
+            for rel in build_deploy_zip._git_file_list([
+                "ls-files", "--cached", "--others", "--exclude-standard", "--", "templates", "static"
+            ])
+            if (build_deploy_zip.PROJECT_ROOT / rel).is_file()
+        }
+        assert managed_assets <= names
+
+        web_source = Path("capi_web.py").read_text(encoding="utf-8")
+        direct_templates = set(re.findall(r'get_template\(\s*["\']([^"\']+)["\']', web_source))
+        assert direct_templates <= {
+            name.removeprefix("templates/") for name in names if name.startswith("templates/")
+        }
+
+        base_source = Path("templates/base.html").read_text(encoding="utf-8")
+        static_refs = {
+            ref.lstrip("/")
+            for ref in re.findall(r'["\'](/static/[^"\'?#]+)', base_source)
+        }
+        assert static_refs <= names
+
+        assert zf.read("VERSION").decode("utf-8").strip() == version
+        manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
+        checksums = zf.read("checksums.txt").decode("utf-8")
+        for item in manifest["files"]:
+            data = zf.read(item["path"])
+            assert len(data) == item["size_bytes"]
+            assert hashlib.sha256(data).hexdigest() == item["sha256"]
+
+    assert manifest["version"] == version
+    assert manifest["package_type"] == "codeonly"
+    assert manifest["requires_restart"] is True
+    assert manifest["git_commit"] == build_deploy_zip._git_commit()
+    assert manifest["git_commit_full"] == build_deploy_zip._git_commit_full()
+    assert manifest["git_worktree_dirty"] is False
+    assert manifest["git_dirty"] is False
+    assert manifest["git_dirty_files"] == []
+    assert manifest["source_mode"] == "git_commit"
+    canonical_files = json.dumps(
+        manifest["files"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    assert manifest["content_tree_sha256"] == hashlib.sha256(canonical_files).hexdigest()
+    assert any(item["path"] == "capi_web.py" for item in manifest["files"])
+    assert "  capi_web.py\n" in checksums
+
+
+def test_build_release_zip_rejects_relevant_dirty_files_unless_overridden(tmp_path, monkeypatch):
+    from scripts import build_deploy_zip
+
+    version = "2099.01.02.30"
+    monkeypatch.setattr(build_deploy_zip, "CODE_FILES", ["capi_version.py", "capi_web.py"])
+    monkeypatch.setattr(build_deploy_zip, "_git_managed_asset_files", lambda: [])
+    monkeypatch.setattr(build_deploy_zip, "_git_changed_files", lambda: [
+        "W0F00000_084556.tif",
+        "outputs/report.pptx",
+        "capi_web.py",
+    ])
+
+    with pytest.raises(RuntimeError, match=r"capi_web\.py.*--allow-dirty"):
+        build_deploy_zip.main([
             "--no-backbone",
             "--version",
             version,
             "--output-dir",
+            str(tmp_path / "rejected"),
+        ])
+
+    output_dir = tmp_path / "allowed"
+    assert build_deploy_zip.main([
+        "--no-backbone",
+        "--allow-dirty",
+        "--version",
+        version,
+        "--output-dir",
+        str(output_dir),
+    ]) == 0
+
+    zip_path = output_dir / f"patchcore_ai_release_{version}_codeonly.zip"
+    with zipfile.ZipFile(zip_path) as zf:
+        manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
+
+    assert manifest["git_worktree_dirty"] is True
+    assert manifest["git_dirty"] is True
+    assert manifest["git_dirty_files"] == ["capi_web.py"]
+    assert manifest["source_mode"] == "working_tree"
+
+
+def test_build_release_zip_ignores_unrelated_dirty_files(tmp_path, monkeypatch):
+    from scripts import build_deploy_zip
+
+    version = "2099.01.02.31"
+    output_dir = tmp_path / "unrelated-dirty"
+    monkeypatch.setattr(build_deploy_zip, "CODE_FILES", ["capi_version.py"])
+    monkeypatch.setattr(build_deploy_zip, "_git_managed_asset_files", lambda: [])
+    monkeypatch.setattr(build_deploy_zip, "_git_changed_files", lambda: [
+        "W0F00000_084556.tif",
+        "outputs/report.pptx",
+    ])
+
+    assert build_deploy_zip.main([
+        "--no-backbone",
+        "--version",
+        version,
+        "--output-dir",
+        str(output_dir),
+    ]) == 0
+
+    zip_path = output_dir / f"patchcore_ai_release_{version}_codeonly.zip"
+    with zipfile.ZipFile(zip_path) as zf:
+        manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
+
+    assert manifest["git_worktree_dirty"] is True
+    assert manifest["git_dirty"] is False
+    assert manifest["git_dirty_files"] == []
+    assert manifest["source_mode"] == "git_commit"
+
+
+def test_build_release_zip_fails_before_writing_when_required_code_file_is_missing(tmp_path, monkeypatch):
+    from scripts import build_deploy_zip
+
+    output_dir = tmp_path / "missing"
+    monkeypatch.setattr(build_deploy_zip, "CODE_FILES", ["capi_version.py", "missing_required_module.py"])
+    monkeypatch.setattr(build_deploy_zip, "_git_managed_asset_files", lambda: [])
+    monkeypatch.setattr(build_deploy_zip, "_git_changed_files", lambda: [])
+
+    with pytest.raises(FileNotFoundError, match="missing_required_module.py"):
+        build_deploy_zip.main([
+            "--no-backbone",
+            "--version",
+            "2099.01.02.32",
+            "--output-dir",
             str(output_dir),
         ])
 
-        assert rc == 0
-        zip_path = output_dir / f"patchcore_ai_release_{version}_codeonly.zip"
-        assert zip_path.exists()
-
-        with zipfile.ZipFile(zip_path) as zf:
-            names = set(zf.namelist())
-            assert "VERSION" in names
-            assert "CHANGELOG.md" in names
-            assert "release_manifest.json" in names
-            assert "checksums.txt" in names
-            assert "capi_version.py" in names
-            assert "capi_update_agent.py" in names
-            assert "promote_update.sh" in names
-            assert "setup_auto_update_client.sh" in names
-            assert "templates/release_notes.html" in names
-            assert "templates/debug_inference.html" in names
-            assert "templates/record_detail.html" in names
-            assert "templates/record_detail_v3.html" in names
-            assert "templates/ric_report.html" in names
-            assert "capi_edge_cv.py" in names
-            assert "capi_heatmap.py" in names
-            assert "capi_image_orientation.py" in names
-            assert "capi_image_preprocess_lab.py" in names
-            assert "capi_dataset_export.py" in names
-            assert "capi_mark_detector.py" in names
-            assert "capi_patchcore_feature_cleaning.py" in names
-            assert "capi_scratch_batch.py" in names
-            assert "capi_scratch_export.py" in names
-            assert "scripts/over_review_poc/train_final_model.py" in names
-            assert "scratch_classifier.py" in names
-            assert "scratch_filter.py" in names
-
-            assert zf.read("VERSION").decode("utf-8").strip() == version
-            manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
-            checksums = zf.read("checksums.txt").decode("utf-8")
-
-        assert manifest["version"] == version
-        assert manifest["package_type"] == "codeonly"
-        assert manifest["requires_restart"] is True
-        assert any(item["path"] == "capi_web.py" for item in manifest["files"])
-        assert "  capi_web.py\n" in checksums
-    finally:
-        shutil.rmtree(output_dir, ignore_errors=True)
+    assert not output_dir.exists()
 
 
-def test_build_patch_zip_includes_only_deployable_changes(monkeypatch):
+@pytest.mark.parametrize(
+    ("mode_args", "failed_query"),
+    [
+        (["--no-backbone"], "changed-files"),
+        (["--patch-only"], "changed-files"),
+        (["--no-backbone"], "managed-assets"),
+        (["--no-backbone"], "head"),
+        (["--patch-only"], "head"),
+    ],
+)
+def test_build_zip_fails_closed_before_output_when_git_query_fails(
+    tmp_path, monkeypatch, mode_args, failed_query
+):
+    from scripts import build_deploy_zip
+
+    output_dir = tmp_path / failed_query
+    real_run = subprocess.run
+    monkeypatch.setattr(build_deploy_zip, "CODE_FILES", ["capi_version.py"])
+
+    if failed_query != "changed-files":
+        monkeypatch.setattr(build_deploy_zip, "_git_changed_files", lambda: [])
+    if failed_query != "managed-assets":
+        monkeypatch.setattr(build_deploy_zip, "_git_managed_asset_files", lambda: [])
+
+    def fail_selected_git_query(command, *args, **kwargs):
+        should_fail = (
+            (failed_query == "changed-files" and "diff" in command)
+            or (failed_query == "managed-assets" and "--cached" in command)
+            or (failed_query == "head" and "rev-parse" in command)
+        )
+        if should_fail:
+            raise subprocess.CalledProcessError(128, command, stderr="fatal: test git failure")
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(build_deploy_zip.subprocess, "run", fail_selected_git_query)
+
+    with pytest.raises(RuntimeError, match=r"git .* failed.*test git failure"):
+        build_deploy_zip.main([
+            *mode_args,
+            "--version",
+            "2099.01.02.33",
+            "--output-dir",
+            str(output_dir),
+        ])
+
+    assert not output_dir.exists()
+
+
+def test_codeonly_dirty_gate_ignores_backbone_but_full_release_does_not(tmp_path, monkeypatch):
+    from scripts import build_deploy_zip
+
+    changed_backbone = "deployment/torch_hub_cache/models/backbone.bin"
+    monkeypatch.setattr(build_deploy_zip, "CODE_FILES", ["capi_version.py"])
+    monkeypatch.setattr(build_deploy_zip, "_git_managed_asset_files", lambda: [])
+    monkeypatch.setattr(build_deploy_zip, "_git_changed_files", lambda: [changed_backbone])
+
+    codeonly_output = tmp_path / "codeonly"
+    assert build_deploy_zip.main([
+        "--no-backbone",
+        "--version",
+        "2099.01.02.34",
+        "--output-dir",
+        str(codeonly_output),
+    ]) == 0
+
+    with zipfile.ZipFile(codeonly_output / "patchcore_ai_release_2099.01.02.34_codeonly.zip") as zf:
+        manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
+    assert manifest["git_worktree_dirty"] is True
+    assert manifest["git_dirty"] is False
+    assert manifest["git_dirty_files"] == []
+
+    full_output = tmp_path / "full"
+    with pytest.raises(RuntimeError, match="torch_hub_cache"):
+        build_deploy_zip.main([
+            "--version",
+            "2099.01.02.35",
+            "--output-dir",
+            str(full_output),
+        ])
+    assert not full_output.exists()
+
+
+def test_release_dirty_gate_ignores_unlisted_root_python_file(tmp_path, monkeypatch):
+    from scripts import build_deploy_zip
+
+    output_dir = tmp_path / "unlisted-root-python"
+    monkeypatch.setattr(build_deploy_zip, "CODE_FILES", ["capi_version.py"])
+    monkeypatch.setattr(build_deploy_zip, "_git_managed_asset_files", lambda: [])
+    monkeypatch.setattr(build_deploy_zip, "_git_changed_files", lambda: ["experimental_module.py"])
+
+    assert build_deploy_zip.main([
+        "--no-backbone",
+        "--version",
+        "2099.01.02.36",
+        "--output-dir",
+        str(output_dir),
+    ]) == 0
+
+    with zipfile.ZipFile(output_dir / "patchcore_ai_release_2099.01.02.36_codeonly.zip") as zf:
+        manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
+    assert manifest["git_worktree_dirty"] is True
+    assert manifest["git_dirty"] is False
+    assert manifest["git_dirty_files"] == []
+
+
+def test_release_dirty_gate_keeps_deleted_web_asset_relevant(tmp_path, monkeypatch):
+    from scripts import build_deploy_zip
+
+    output_dir = tmp_path / "deleted-web-asset"
+    monkeypatch.setattr(build_deploy_zip, "CODE_FILES", ["capi_version.py"])
+    monkeypatch.setattr(build_deploy_zip, "_git_managed_asset_files", lambda: [])
+    monkeypatch.setattr(build_deploy_zip, "_git_changed_files", lambda: ["templates/deleted_page.html"])
+
+    with pytest.raises(RuntimeError, match="templates/deleted_page.html"):
+        build_deploy_zip.main([
+            "--no-backbone",
+            "--version",
+            "2099.01.02.37",
+            "--output-dir",
+            str(output_dir),
+        ])
+
+    assert not output_dir.exists()
+
+
+def test_add_file_records_actual_zip_entry_bytes_when_source_changes(tmp_path, monkeypatch):
+    from scripts import build_deploy_zip
+
+    source = tmp_path / "source.sh"
+    zip_path = tmp_path / "race.zip"
+    original_data = b"#!/bin/bash\necho original\n"
+    source.write_bytes(original_data)
+    original_write = zipfile.ZipFile.write
+
+    def write_then_change_source(zf, filename, arcname=None, *args, **kwargs):
+        result = original_write(zf, filename, arcname, *args, **kwargs)
+        Path(filename).write_bytes(b"changed after zip write")
+        return result
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", write_then_change_source)
+    entries = []
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        build_deploy_zip._add_file(zf, source, "source.sh", entries)
+
+    with zipfile.ZipFile(zip_path) as zf:
+        packed_data = zf.read("source.sh")
+    assert packed_data == original_data
+    assert entries == [{
+        "path": "source.sh",
+        "size_bytes": len(packed_data),
+        "sha256": hashlib.sha256(packed_data).hexdigest(),
+    }]
+
+
+def test_build_patch_zip_includes_only_deployable_changes(tmp_path, monkeypatch):
     from scripts import build_deploy_zip
 
     version = "2099.01.02.4"
-    output_dir = Path("deployment") / f"_test_patch_{uuid.uuid4().hex}"
+    output_dir = tmp_path / "patch"
     monkeypatch.setattr(build_deploy_zip, "_git_changed_files", lambda: [
         "capi_web.py",
         "capi_update_agent.py",
@@ -155,51 +437,52 @@ def test_build_patch_zip_includes_only_deployable_changes(monkeypatch):
         "Sample/ignore.py",
     ])
 
-    try:
-        rc = build_deploy_zip.main([
-            "--patch-only",
-            "--version",
-            version,
-            "--output-dir",
-            str(output_dir),
-        ])
+    rc = build_deploy_zip.main([
+        "--patch-only",
+        "--version",
+        version,
+        "--output-dir",
+        str(output_dir),
+    ])
 
-        assert rc == 0
-        zip_path = output_dir / f"patchcore_ai_patch_{version}.zip"
-        assert zip_path.exists()
+    assert rc == 0
+    zip_path = output_dir / f"patchcore_ai_patch_{version}.zip"
+    assert zip_path.exists()
 
-        with zipfile.ZipFile(zip_path) as zf:
-            names = set(zf.namelist())
-            manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
-            scripts = {
-                script_name: zf.read(script_name)
-                for script_name in (
-                    "start_server.sh",
-                    "install_patch.sh",
-                    "rollback_patch.sh",
-                    "promote_update.sh",
-                    "setup_auto_update_client.sh",
-                )
-            }
+    with zipfile.ZipFile(zip_path) as zf:
+        names = set(zf.namelist())
+        manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
+        scripts = {
+            script_name: zf.read(script_name)
+            for script_name in (
+                "start_server.sh",
+                "install_patch.sh",
+                "rollback_patch.sh",
+                "promote_update.sh",
+                "setup_auto_update_client.sh",
+            )
+        }
 
-        assert manifest["package_type"] == "patch"
-        assert "capi_web.py" in names
-        assert "capi_update_agent.py" in names
-        assert "templates/base.html" in names
-        assert "install_patch.sh" in names
-        assert "rollback_patch.sh" in names
-        assert "start_server.sh" in names
-        assert "promote_update.sh" in names
-        assert "setup_auto_update_client.sh" in names
-        assert "VERSION" in names
-        assert "CHANGELOG.md" in names
-        assert "tests/test_release_version.py" not in names
-        assert "scripts/build_deploy_zip.py" not in names
-        assert "Sample/ignore.py" not in names
-        assert "capi_config.py" not in names
+    assert manifest["package_type"] == "patch"
+    assert manifest["source_mode"] == "working_tree"
+    assert manifest["git_worktree_dirty"] is True
+    assert manifest["git_dirty"] is True
+    assert "tests/test_release_version.py" not in manifest["git_dirty_files"]
+    assert "capi_web.py" in names
+    assert "capi_update_agent.py" in names
+    assert "templates/base.html" in names
+    assert "install_patch.sh" in names
+    assert "rollback_patch.sh" in names
+    assert "start_server.sh" in names
+    assert "promote_update.sh" in names
+    assert "setup_auto_update_client.sh" in names
+    assert "VERSION" in names
+    assert "CHANGELOG.md" in names
+    assert "tests/test_release_version.py" not in names
+    assert "scripts/build_deploy_zip.py" not in names
+    assert "Sample/ignore.py" not in names
+    assert "capi_config.py" not in names
 
-        for data in scripts.values():
-            assert data.startswith(b"#!/bin/bash\n")
-            assert b"\r\n" not in data
-    finally:
-        shutil.rmtree(output_dir, ignore_errors=True)
+    for data in scripts.values():
+        assert data.startswith(b"#!/bin/bash\n")
+        assert b"\r\n" not in data
