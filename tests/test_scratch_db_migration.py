@@ -30,6 +30,7 @@ def test_fresh_db_has_scratch_columns(tmp_path):
 
     record_cols = _get_columns(db_path, "inference_records")
     assert "image_preprocess_pipeline" in record_cols
+    assert "image_preprocess_pipelines" in record_cols
     assert "image_preprocess_timing" in record_cols
     assert "client_request_text" in record_cols
     assert "client_response_text" in record_cols
@@ -229,6 +230,10 @@ def test_record_preprocess_pipeline_persists(tmp_path):
         {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
         {"method": "gaussian", "params": {"kernel_size": 5, "sigma": 1.0}},
     ]
+    zone_pipelines = {
+        "inner": [{"method": "gaussian", "params": {"kernel_size": 3, "sigma": 1.0}}],
+        "edge": [{"method": "median", "params": {"kernel_size": 5}}],
+    }
     timing = {
         "total_elapsed_ms": 12.5,
         "steps": [
@@ -254,14 +259,16 @@ def test_record_preprocess_pipeline_persists(tmp_path):
         response_time="2026-05-28T10:00:05",
         processing_seconds=5.0,
         image_preprocess_pipeline=pipeline,
+        image_preprocess_pipelines=zone_pipelines,
         image_preprocess_timing=timing,
     )
 
     with sqlite3.connect(tmp_path / "preprocess_record.db") as c:
-        raw_pipeline, raw_timing = c.execute(
-            "SELECT image_preprocess_pipeline, image_preprocess_timing FROM inference_records"
+        raw_pipeline, raw_zone_pipelines, raw_timing = c.execute(
+            "SELECT image_preprocess_pipeline, image_preprocess_pipelines, image_preprocess_timing FROM inference_records"
         ).fetchone()
     assert json.loads(raw_pipeline) == pipeline
+    assert json.loads(raw_zone_pipelines) == zone_pipelines
     assert json.loads(raw_timing)["total_elapsed_ms"] == pytest.approx(12.5)
 
 

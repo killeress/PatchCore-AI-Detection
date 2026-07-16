@@ -1368,6 +1368,7 @@
 
         <!-- Coord Result -->
         <div id="coord-result-section" class="hidden">
+            <div id="coord-preprocess-info" class="card hidden" style="padding:16px; margin-top:16px;"></div>
             <div class="coord-info-cards" id="coord-info-cards"></div>
             <div class="coord-result-grid" id="coord-result-grid"></div>
         </div>
@@ -3442,6 +3443,50 @@
     function renderCoordResults(data) {
         const section = document.getElementById('coord-result-section');
         section.classList.remove('hidden');
+
+        const preprocess = data.preprocess || {};
+        const preprocessInfo = document.getElementById('coord-preprocess-info');
+        const preprocessSteps = Array.isArray(preprocess.steps) ? preprocess.steps : [];
+        const preprocessPipeline = Array.isArray(preprocess.pipeline) ? preprocess.pipeline : [];
+        const preprocessSummary = preprocessPipeline.length
+            ? preprocessPipeline.map((step, index) => {
+                const params = Object.entries(step.params || {})
+                    .map(([key, value]) => `${escapeHtml(key)}=${escapeHtml(String(value))}`)
+                    .join(', ');
+                return `${index + 1}. ${escapeHtml(step.method || 'unknown')}${params ? ` (${params})` : ''}`;
+            }).join(' → ')
+            : '未啟用';
+        const preprocessRows = preprocessSteps.map(step => {
+            const params = Object.entries(step.applied_params || {})
+                .map(([key, value]) => `${escapeHtml(key)}=${escapeHtml(String(value))}`)
+                .join(', ');
+            const elapsed = Number(step.elapsed_ms || 0).toFixed(2);
+            return `
+                <div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;">
+                    <span style="display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:24px;border-radius:6px;background:rgba(59,130,246,0.12);color:var(--accent);font-family:'Fira Code',monospace;font-size:0.78rem;font-weight:700;">${escapeHtml(step.index)}</span>
+                    <span style="font-weight:600;">${escapeHtml(step.method_label || step.method || 'unknown')}</span>
+                    ${params ? `<code style="font-size:0.78rem;color:var(--text-muted);background:rgba(0,0,0,0.18);border:1px solid var(--border);border-radius:6px;padding:3px 6px;white-space:normal;word-break:break-all;">${params}</code>` : ''}
+                    <span style="font-size:0.78rem;color:#22c55e;background:rgba(34,197,94,0.10);border:1px solid rgba(34,197,94,0.28);border-radius:6px;padding:3px 6px;">耗時 ${elapsed}ms</span>
+                </div>
+            `;
+        }).join('');
+        const preprocessStatus = preprocess.skipped
+            ? '此圖片屬於 skip file，依正式推論規則未套用前處理'
+            : preprocess.applied
+                ? `本次座標推論使用 ${preprocessSteps.length} 個前處理步驟 ｜ 前處理總耗時 ${(Number(preprocess.total_time_ms || 0) / 1000).toFixed(3)}s`
+                : preprocess.enabled ? '已設定前處理，但本次未產生可套用步驟' : '本模型未啟用影像前處理';
+        preprocessInfo.innerHTML = `
+            <div style="display:flex;flex-direction:column;gap:8px;">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <span style="color:var(--text);font-weight:700;">影像前處理</span>
+                    <span style="color:var(--text-muted);font-size:0.82rem;">${escapeHtml(preprocessStatus)}</span>
+                </div>
+                <div style="color:var(--text-muted);font-size:0.82rem;">套用時機：${escapeHtml(preprocess.scope || '未記錄')}</div>
+                <div style="color:var(--text-muted);font-size:0.82rem;line-height:1.5;">訓練設定：${preprocessSummary}</div>
+                ${preprocessRows ? `<div style="display:flex;flex-direction:column;gap:6px;margin-top:4px;">${preprocessRows}</div>` : ''}
+            </div>
+        `;
+        preprocessInfo.classList.remove('hidden');
 
         const isNG = data.judgment === 'NG';
         const jColor = isNG ? 'var(--ng)' : 'var(--ok)';

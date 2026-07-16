@@ -2707,6 +2707,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         "feature_cleaning_mode",
         "feature_cleaning_scope",
         "feature_cleaning_keep_ratio",
+        "feature_cleaning_by_zone",
     })
 
     # 單子模型重訓 state（一次只允許一個 job）
@@ -3033,6 +3034,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_train_new_preprocess_preview()
             elif path.startswith("/api/train/new/thumb/"):
                 self._handle_train_new_thumb()
+            elif path.startswith("/api/train/new/bundle-asset/"):
+                self._handle_train_new_bundle_asset()
             elif path == "/ric":
                 self._handle_ric_page(query, path)
             elif path == "/ric/within-spec-logs":
@@ -3803,10 +3806,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self._send_response(200, html)
 
     def _handle_dashboard_v2(self, query: dict, path: str):
-        """AI-Native 即時儀表板頁面"""
-        template = self.jinja_env.get_template("dashboard_v2.html")
-        html = template.render(request_path=path)
-        self._send_response(200, html)
+        """舊版 V2 路由相容別名，改用現存的 V3 儀表板。"""
+        self._handle_dashboard_v3(query, path)
         
     def _handle_dashboard_v3(self, query: dict, path: str):
         """V3 高階 UI 即時儀表板頁面"""
@@ -3848,11 +3849,93 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _decorate_record_preprocess_info(detail: dict) -> None:
         """Add display-ready preprocessing metadata to an inference record."""
         raw = detail.get("image_preprocess_pipeline")
+        raw_zones = detail.get("image_preprocess_pipelines")
         detail["image_preprocess_pipeline_recorded"] = False
         detail["image_preprocess_pipeline_steps"] = []
         detail["image_preprocess_pipeline_summary"] = "舊紀錄未記錄"
         detail["image_preprocess_timing_recorded"] = False
         detail["image_preprocess_total_seconds_text"] = ""
+
+        if raw_zones not in (None, ""):
+            try:
+                pipelines = (
+                    json.loads(raw_zones)
+                    if isinstance(raw_zones, str)
+                    else raw_zones
+                )
+                if not isinstance(pipelines, dict) or set(pipelines) != {"inner", "edge"}:
+                    raise ValueError("invalid zone pipeline map")
+                from capi_image_preprocess_lab import get_method_specs, normalize_preprocess_pipeline
+                normalized_zones = {
+                    zone: normalize_preprocess_pipeline(pipelines.get(zone) or [])
+                    for zone in ("inner", "edge")
+                }
+                specs = {spec["id"]: spec for spec in get_method_specs()}
+            except Exception:
+                detail["image_preprocess_pipeline_recorded"] = True
+                detail["image_preprocess_pipeline_summary"] = "分區前處理設定解析失敗"
+                return
+
+            steps = []
+            zone_summaries = []
+            for zone in ("inner", "edge"):
+                summary_parts = []
+                for idx, step in enumerate(normalized_zones[zone], 1):
+                    method = step["method"]
+                    spec = specs.get(method, {})
+                    label = spec.get("label") or method
+                    param_labels = {
+                        item.get("key"): item.get("name") or item.get("key")
+                        for item in spec.get("params", [])
+                        if item.get("key")
+                    }
+                    params = [
+                        {
+                            "key": key,
+                            "label": param_labels.get(key, key),
+                            "value": value,
+                        }
+                        for key, value in step.get("params", {}).items()
+                    ]
+                    params_text = ", ".join(
+                        f"{item['label']}={item['value']}" for item in params
+                    )
+                    steps.append({
+                        "index": idx,
+                        "zone_label": zone.upper(),
+                        "method": method,
+                        "method_label": label,
+                        "params": params,
+                        "params_text": params_text,
+                        "timing_text": "",
+                        "elapsed_ms_total": 0.0,
+                        "elapsed_ms_avg": 0.0,
+                        "calls": 0,
+                    })
+                    summary_parts.append(f"{idx}.{label}({params_text})")
+                zone_summaries.append(
+                    f"{zone.upper()}: "
+                    + (" -> ".join(summary_parts) if summary_parts else "未啟用")
+                )
+            detail["image_preprocess_pipeline_recorded"] = True
+            detail["image_preprocess_pipeline_steps"] = steps
+            detail["image_preprocess_pipeline_summary"] = "；".join(zone_summaries)
+            timing_raw = detail.get("image_preprocess_timing")
+            if timing_raw:
+                try:
+                    timing = (
+                        json.loads(timing_raw)
+                        if isinstance(timing_raw, str)
+                        else timing_raw
+                    )
+                    detail["image_preprocess_timing_recorded"] = True
+                    total_ms = float((timing or {}).get("total_elapsed_ms") or 0.0)
+                    detail["image_preprocess_total_seconds_text"] = (
+                        f"{total_ms / 1000.0:.3f}s"
+                    )
+                except Exception:
+                    detail["image_preprocess_timing_recorded"] = False
+            return
 
         if raw is None or raw == "":
             return
@@ -6665,12 +6748,43 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             img_h, img_w = image.shape[:2]
 
+            # 座標推論必須與正式推論使用同一組模型訓練前處理。
+            # preprocess_after_tiling=False：先處理整張圖再裁切座標 tile；
+            # True：先裁切座標 tile，再套用前處理。
+            from capi_image_preprocess_lab import (
+                apply_preprocess_pipeline,
+                normalize_preprocess_pipeline,
+            )
+            configured_pipeline = normalize_preprocess_pipeline(
+                getattr(self.inferencer.config, "image_preprocess_pipeline", [])
+            )
+            configured_zone_pipelines = getattr(
+                self.inferencer.config, "image_preprocess_pipelines", {}
+            ) or {}
+            preprocess_after_tiling = bool(
+                getattr(self.inferencer.config, "preprocess_after_tiling", False)
+            )
+            is_skip_file = bool(
+                getattr(self.inferencer.config, "should_skip_file", lambda _name: False)(
+                    image_path.name
+                )
+            )
+            processed_panel_image = image
+            preprocess_steps = []
+            preprocess_total_ms = 0.0
+            if configured_pipeline and not preprocess_after_tiling and not is_skip_file:
+                pipeline_result = apply_preprocess_pipeline(image, configured_pipeline)
+                processed_panel_image = pipeline_result["image"]
+                configured_pipeline = pipeline_result["pipeline"]
+                preprocess_steps = pipeline_result["steps"]
+                preprocess_total_ms = float(pipeline_result.get("total_elapsed_ms") or 0.0)
+
             # 2. 計算 raw_bounds (面板在圖片中的實際邊界) 與 otsu_bounds
             raw_bounds, _ = self.inferencer._find_raw_object_bounds(image)
             if raw_bounds is None:
                 raw_bounds = (0, 0, img_w, img_h)
             
-            otsu_bounds, _, _ = self.inferencer.calculate_otsu_bounds(image)
+            otsu_bounds, _, _ = self.inferencer.calculate_otsu_bounds(processed_panel_image)
             if otsu_bounds is None:
                 otsu_bounds = raw_bounds
 
@@ -6702,7 +6816,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             crop_w = crop_x2 - crop_x1
             crop_h = crop_y2 - crop_y1
-            tile_image = image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+            raw_tile_image = image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+            tile_source_image = (
+                image if preprocess_after_tiling or is_skip_file else processed_panel_image
+            )
+            tile_image = tile_source_image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
             crop_shift_dx = crop_x1 - centered_crop_x1
             crop_shift_dy = crop_y1 - centered_crop_y1
 
@@ -6737,12 +6855,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 )
                 pre_cfg = PreprocessConfig(
                     tile_size=self.inferencer.config.tile_size,
+                    tile_stride=getattr(
+                        self.inferencer.config,
+                        "tile_stride",
+                        self.inferencer.config.tile_size,
+                    ),
                     otsu_offset=self.inferencer.config.otsu_offset,
                     enable_panel_polygon=self.inferencer.config.enable_panel_polygon,
                     edge_threshold_px=self.inferencer.config.edge_threshold_px,
                     image_preprocess_pipeline=getattr(self.inferencer.config, "image_preprocess_pipeline", []),
+                    image_preprocess_pipelines=configured_zone_pipelines,
                 )
-                _, polygon = detect_panel_polygon(image, pre_cfg)
+                _, polygon = detect_panel_polygon(processed_panel_image, pre_cfg)
                 if polygon is None and hasattr(self.inferencer, "_rect_polygon_from_bounds"):
                     polygon = self.inferencer._rect_polygon_from_bounds(raw_bounds)
                 if polygon is not None:
@@ -6762,7 +6886,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     crop_y2 = min(img_h, crop_y1 + tile_size)
                     crop_w = crop_x2 - crop_x1
                     crop_h = crop_y2 - crop_y1
-                    tile_image = image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+                    raw_tile_image = image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+                    tile_image = tile_source_image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
                     crop_shift_dx = crop_x1 - centered_crop_x1
                     crop_shift_dy = crop_y1 - centered_crop_y1
                     tile_info.x = crop_x1
@@ -6810,6 +6935,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     self._send_json({"error": f"找不到 {image_path.name} 對應的模型"})
                     return
 
+            active_pipeline = configured_pipeline
+            if is_v2 and configured_zone_pipelines:
+                active_pipeline = configured_zone_pipelines.get(zone, [])
+            if active_pipeline and preprocess_after_tiling and not is_skip_file:
+                pipeline_result = apply_preprocess_pipeline(raw_tile_image, active_pipeline)
+                tile_image = pipeline_result["image"]
+                configured_pipeline = pipeline_result["pipeline"]
+                preprocess_steps = pipeline_result["steps"]
+                preprocess_total_ms = float(pipeline_result.get("total_elapsed_ms") or 0.0)
+                tile_info.image = tile_image
+            elif preprocess_after_tiling:
+                configured_pipeline = list(active_pipeline or [])
+
             # 推論 (含 GPU lock)
             if hasattr(self, '_gpu_lock') and self._gpu_lock:
                 with self._gpu_lock:
@@ -6835,7 +6973,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             ts = int(_time.time() * 1000) % 100000  # 避免快取
 
             # 7. 儲存原始裁切圖
-            crop_bgr = tile_image.copy()
+            crop_bgr = raw_tile_image.copy()
             if len(crop_bgr.shape) == 2:
                 crop_bgr = cv2.cvtColor(crop_bgr, cv2.COLOR_GRAY2BGR)
             elif len(crop_bgr.shape) == 3 and crop_bgr.shape[2] == 1:
@@ -7018,6 +7156,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "image_prefix_label": source_image_prefix(image_path.name),
                 "model_name": model_name,
                 "edge_margin_px": edge_margin_override if edge_margin_override is not None else self.inferencer.config.edge_margin_px,
+                "preprocess": {
+                    "enabled": bool(configured_pipeline),
+                    "applied": bool(preprocess_steps),
+                    "pipeline": configured_pipeline,
+                    "steps": preprocess_steps,
+                    "total_time_ms": round(preprocess_total_ms, 3),
+                    "after_tiling": preprocess_after_tiling,
+                    "scope": "座標 tile（切塊後）" if preprocess_after_tiling else "整張影像（切塊前）",
+                    "skipped": is_skip_file,
+                },
             }
 
             self._send_json(response_data)
@@ -7863,10 +8011,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self._send_response(200, html)
 
     def _handle_settings_v2_page(self, path: str):
-        """設定管理頁面 (新版 V2)"""
-        template = self.jinja_env.get_template("settings_v2.html")
-        html = template.render(request_path=path)
-        self._send_response(200, html)
+        """舊版 V2 路由相容別名，改用現存的設定頁。"""
+        self._handle_settings_page(path)
 
     def _handle_api_settings(self):
         """API: 取得所有設定參數"""
@@ -8521,6 +8667,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     getattr(inferencer, "config", None),
                     "image_preprocess_pipeline",
                     [],
+                ),
+                image_preprocess_pipelines=getattr(
+                    getattr(inferencer, "config", None),
+                    "image_preprocess_pipelines",
+                    {},
                 ),
                 image_preprocess_timing=preprocess_timing,
             )
@@ -9555,12 +9706,26 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         target_bundle = None
         target_patchcore_params = {}
+        target_image_preprocess_pipeline = []
+        target_image_preprocess_pipelines = {}
+        target_preprocess_after_tiling = False
+        target_tile_stride = 256
         if scope["mode"] == "partial":
             target_bundle = self._capi_server_instance.database.get_model_bundle(scope["target_bundle_id"])
             try:
                 from capi_model_registry import _read_manifest
                 target_manifest = _read_manifest(Path(target_bundle["bundle_path"]))
                 target_patchcore_params = target_manifest.get("patchcore_params") or {}
+                target_image_preprocess_pipeline = target_manifest.get(
+                    "image_preprocess_pipeline"
+                ) or []
+                target_image_preprocess_pipelines = target_manifest.get(
+                    "image_preprocess_pipelines"
+                ) or {}
+                target_preprocess_after_tiling = bool(
+                    target_manifest.get("preprocess_after_tiling", False)
+                )
+                target_tile_stride = int(target_manifest.get("tile_stride") or 512)
             except Exception:
                 target_patchcore_params = {}
 
@@ -9571,6 +9736,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             training_scope=scope,
             target_bundle=target_bundle,
             target_patchcore_params=target_patchcore_params,
+            target_image_preprocess_pipeline=target_image_preprocess_pipeline,
+            target_image_preprocess_pipelines=target_image_preprocess_pipelines,
+            target_preprocess_after_tiling=target_preprocess_after_tiling,
+            target_tile_stride=target_tile_stride,
             selected_lightings=self._scope_selected_lightings(scope),
             machine_prefix_len=self.TRAIN_NEW_MACHINE_PREFIX_LEN,
             preprocess_methods=get_method_specs(),
@@ -9700,6 +9869,52 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elapsed = int(m.get("elapsed_seconds") or 0)
             total_elapsed += elapsed
             grade = m.get("auroc_grade") or "n/a"
+            feature_cleaning = dict(m.get("feature_cleaning") or {})
+            report_rel = str(feature_cleaning.get("report_path") or "")
+            feature_cleaning_visuals = []
+            if report_rel:
+                try:
+                    report_root = (bundle_path / "feature_cleaning_reports").resolve()
+                    report_path = (bundle_path / report_rel).resolve()
+                    report_path.relative_to(report_root)
+                    report = json.loads(report_path.read_text(encoding="utf-8"))
+                    report_tiles = sorted(
+                        report.get("tiles") or [],
+                        key=lambda item: int(item.get("removed_count") or 0),
+                        reverse=True,
+                    )
+                    for item in report_tiles[:12]:
+                        asset_path = str(item.get("asset_path") or "")
+                        if asset_path:
+                            source_url = (
+                                "/api/train/new/bundle-asset/"
+                                + urllib.parse.quote(job_id, safe="")
+                                + "/"
+                                + urllib.parse.quote(asset_path, safe="/")
+                            )
+                        else:
+                            source_url = self._train_new_thumb_url(
+                                item.get("source_path")
+                            )
+                        if not source_url:
+                            continue
+                        feature_cleaning_visuals.append({
+                            "source_url": source_url,
+                            "source_name": (
+                                item.get("source_name")
+                                or Path(item.get("source_path") or "").name
+                            ),
+                            "grid_size": item.get("grid_size") or [],
+                            "removed_indices": item.get("removed_indices") or [],
+                            "removed_count": int(item.get("removed_count") or 0),
+                        })
+                except (OSError, ValueError, json.JSONDecodeError):
+                    logger.warning(
+                        "[train/done] feature cleaning report unavailable: %s",
+                        report_rel,
+                        exc_info=True,
+                    )
+            feature_cleaning["visualizations"] = feature_cleaning_visuals
             units.append((unit_label, {
                 "lighting": lighting,
                 "lighting_label": lighting_labels.get(lighting, lighting),
@@ -9722,7 +9937,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "feature_pool_kernel_size",
                     (manifest.get("patchcore_params") or {}).get("feature_pool_kernel_size", 3),
                 ),
-                "feature_cleaning": m.get("feature_cleaning") or {},
+                "feature_cleaning": feature_cleaning,
             }))
 
         overall_grade = manifest.get("overall_auroc_grade") or "n/a"
@@ -10053,7 +10268,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         - 含未知 key → error
         - 數值越界 / 型別錯 → error
         """
-        from capi_train_new import USER_TRAINABLE_PARAM_SPECS
+        from capi_train_new import (
+            USER_TRAINABLE_PARAM_SPECS,
+            normalize_feature_cleaning_by_zone,
+        )
         if raw is None:
             return None, None
         if not isinstance(raw, dict):
@@ -10068,6 +10286,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if key not in raw:
                 continue
             val = raw[key]
+            if key == "feature_cleaning_by_zone":
+                try:
+                    cleaned[key] = normalize_feature_cleaning_by_zone(val)
+                except ValueError as exc:
+                    return None, f"training_params.{exc}"
+                continue
             if "choices" in spec:
                 if val not in spec["choices"]:
                     return None, (
@@ -10107,6 +10331,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return normalize_preprocess_pipeline(raw), None
         except Exception as exc:
             return None, f"image_preprocess_pipeline invalid: {exc}"
+
+    @staticmethod
+    def _validate_image_preprocess_pipelines(raw):
+        """Normalize optional INNER/EDGE tile preprocessing pipelines."""
+        from capi_train_new import normalize_image_preprocess_pipelines
+        try:
+            return normalize_image_preprocess_pipelines(raw), None
+        except Exception as exc:
+            return None, f"image_preprocess_pipelines invalid: {exc}"
 
     @staticmethod
     def _validate_train_tile_stride(raw):
@@ -10253,8 +10486,22 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if err:
             self._send_json({"error": err}, status=400)
             return
+        image_preprocess_pipelines, err = self._validate_image_preprocess_pipelines(
+            params.get("image_preprocess_pipelines")
+        )
+        if err:
+            self._send_json({"error": err}, status=400)
+            return
 
         preprocess_after_tiling = bool(params.get("preprocess_after_tiling", False))
+        if (
+            image_preprocess_pipelines
+            and params.get("preprocess_after_tiling") is not True
+        ):
+            self._send_json({
+                "error": "INNER/EDGE 分區前處理只支援先切分後處理"
+            }, status=400)
+            return
         tile_stride, err = self._validate_train_tile_stride(params.get("tile_stride"))
         if err:
             self._send_json({"error": err}, status=400)
@@ -10316,6 +10563,23 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         )
                     }, status=400)
                     return
+            try:
+                from capi_model_registry import _read_manifest
+                target_manifest = _read_manifest(Path(target_bundle["bundle_path"]))
+                image_preprocess_pipeline = target_manifest.get(
+                    "image_preprocess_pipeline"
+                ) or []
+                image_preprocess_pipelines = target_manifest.get(
+                    "image_preprocess_pipelines"
+                ) or {}
+                preprocess_after_tiling = bool(
+                    target_manifest.get("preprocess_after_tiling", False)
+                )
+            except Exception as exc:
+                self._send_json({
+                    "error": f"cannot inherit target bundle preprocessing: {exc}"
+                }, status=400)
+                return
 
         job_id = generate_job_id(machine_id)
 
@@ -10331,6 +10595,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 training_scope=training_scope,
                 training_data_source=training_data_source,
                 image_preprocess_pipeline=image_preprocess_pipeline,
+                image_preprocess_pipelines=image_preprocess_pipelines,
                 preprocess_after_tiling=preprocess_after_tiling,
                 tile_stride=tile_stride,
             )
@@ -10343,7 +10608,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             args=(job_id, machine_id, clean_panel_paths,
                   self._capi_server_instance, training_params, panel_modes,
                   training_scope, image_preprocess_pipeline, preprocess_after_tiling,
-                  tile_stride, training_data_source),
+                  tile_stride, training_data_source, image_preprocess_pipelines),
             daemon=True, name=f"train_new_pre-{job_id}",
         )
         runtime["thread"] = thread
@@ -10382,6 +10647,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         job_id, machine_id, panel_paths, server_inst, training_params=None,
         panel_modes=None, training_scope=None, image_preprocess_pipeline=None,
         preprocess_after_tiling=False, tile_stride=None, training_data_source=None,
+        image_preprocess_pipelines=None,
     ):
         """背景 thread：preprocess + 抽 NG → state=review。
 
@@ -10417,6 +10683,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 output_root=train_cfg["output_root"],
                 required_backbones=train_cfg["required_backbones"],
                 image_preprocess_pipeline=image_preprocess_pipeline or [],
+                image_preprocess_pipelines=image_preprocess_pipelines or {},
                 preprocess_after_tiling=preprocess_after_tiling,
                 tile_stride=int(tile_stride or CAPIWebHandler.TRAIN_NEW_DEFAULT_TILE_STRIDE),
                 training_data_source=training_data_source or {"type": "inference_records"},
@@ -10425,6 +10692,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             pre_cfg = PreprocessConfig(
                 tile_stride=cfg.tile_stride,
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
+                image_preprocess_pipelines=cfg.image_preprocess_pipelines,
                 preprocess_after_tiling=cfg.preprocess_after_tiling,
                 product_resolution=CAPIWebHandler._product_resolution_for_machine(machine_id, server_inst),
             )
@@ -10575,6 +10843,24 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"前處理流程無效: {exc}"}, status=400)
             return
         preprocess_after_tiling = bool(data.get("preprocess_after_tiling", False))
+        preview_zone = str(data.get("zone") or "inner").strip().lower()
+        if preview_zone not in ("inner", "edge"):
+            self._send_json({"error": "zone must be inner or edge"}, status=400)
+            return
+        try:
+            from capi_train_new import normalize_image_preprocess_pipelines
+            zone_pipelines = normalize_image_preprocess_pipelines(
+                data.get("image_preprocess_pipelines")
+            )
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        if zone_pipelines and data.get("preprocess_after_tiling") is not True:
+            self._send_json({
+                "error": "INNER/EDGE 分區前處理只支援先切分後處理"
+            }, status=400)
+            return
+        preview_pipeline = zone_pipelines.get(preview_zone, pipeline)
         tile_stride, err = self._validate_train_tile_stride(data.get("tile_stride"))
         if err:
             self._send_json({"error": err}, status=400)
@@ -10630,7 +10916,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     lighting = "STANDARD"
                 pre_cfg = PreprocessConfig(
                     tile_stride=tile_stride,
-                    image_preprocess_pipeline=pipeline,
+                    image_preprocess_pipeline=preview_pipeline,
                     preprocess_after_tiling=True,
                     product_resolution=self._product_resolution_for_machine(
                         machine_id,
@@ -10642,11 +10928,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     self._send_json({"error": "先切分後處理預覽無法產生 tile"}, status=400)
                     return
 
-                tile = next((t for t in panel_result.tiles if t.zone == "inner"), panel_result.tiles[0])
+                tile = next(
+                    (t for t in panel_result.tiles if t.zone == preview_zone),
+                    None,
+                )
+                if tile is None:
+                    self._send_json({
+                        "error": f"這張圖片沒有可預覽的 {preview_zone.upper()} tile"
+                    }, status=400)
+                    return
                 original = tile.original_image
                 if original is None:
                     original = image[tile.y1:tile.y2, tile.x1:tile.x2].copy()
-                result = apply_preprocess_pipeline(original, pipeline)
+                result = apply_preprocess_pipeline(original, preview_pipeline)
                 processed = result["image"]
                 diff = make_diff_image(original, processed)
 
@@ -10663,6 +10957,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "tile_id": int(tile.tile_id),
                     "tile_rect": [int(tile.x1), int(tile.y1), int(tile.x2), int(tile.y2)],
                     "tile_zone": tile.zone,
+                    "requested_zone": preview_zone,
                 }
             else:
                 result = apply_preprocess_pipeline(image, pipeline)
@@ -10738,6 +11033,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         preprocess_cfg = PreprocessConfig(
             tile_stride=int(job.get("tile_stride") or 512),
             image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
+            image_preprocess_pipelines=job.get("image_preprocess_pipelines") or {},
             preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
             product_resolution=self._product_resolution_for_machine(
                 job.get("machine_id", ""),
@@ -11055,6 +11351,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 backbone_cache_dir=train_cfg["backbone_cache_dir"],
                 required_backbones=train_cfg["required_backbones"],
                 image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
+                image_preprocess_pipelines=job.get("image_preprocess_pipelines") or {},
+                preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
                 tile_stride=int(job.get("tile_stride") or 512),
                 batch_size=patchcore_params.get("batch_size", 8),
                 image_size=tuple(patchcore_params.get("image_size", (512, 512))),
@@ -11070,6 +11368,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 feature_cleaning_keep_ratio=patchcore_params.get(
                     "feature_cleaning_keep_ratio", 0.99,
                 ),
+                feature_cleaning_by_zone=patchcore_params.get(
+                    "feature_cleaning_by_zone"
+                ) or {},
             )
             partial_training_params = dict(job.get("training_params") or {})
             for key in CAPIWebHandler.PATCHCORE_BUNDLE_LOCKED_TRAINING_PARAMS:
@@ -11372,6 +11673,33 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         target = (safe / parts).resolve()
         try:
             target.relative_to(safe)
+        except ValueError:
+            self._send_response(403, "")
+            return
+        if not target.is_file():
+            self._send_response(404, "")
+            return
+        self._send_binary(str(target))
+
+    def _handle_train_new_bundle_asset(self):
+        """Serve persisted feature-cleaning images from a completed bundle."""
+        from urllib.parse import unquote
+
+        encoded = self.path.split("/api/train/new/bundle-asset/", 1)[1].split("?", 1)[0]
+        parts = unquote(encoded).split("/", 1)
+        if len(parts) != 2:
+            self._send_response(404, "")
+            return
+        job_id, relative_path = parts
+        job = self._capi_server_instance.database.get_training_job(job_id)
+        if not job or not job.get("output_bundle"):
+            self._send_response(404, "")
+            return
+        bundle_path = Path(job["output_bundle"]).resolve()
+        asset_root = (bundle_path / "feature_cleaning_reports" / "assets").resolve()
+        target = (bundle_path / relative_path).resolve()
+        try:
+            target.relative_to(asset_root)
         except ValueError:
             self._send_response(403, "")
             return
@@ -12493,6 +12821,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception:
             old_manifest = {}
         image_preprocess_pipeline = old_manifest.get("image_preprocess_pipeline") or []
+        image_preprocess_pipelines = old_manifest.get("image_preprocess_pipelines") or {}
         preprocess_after_tiling = bool(old_manifest.get("preprocess_after_tiling", False))
         tile_stride = int(old_manifest.get("tile_stride") or 512)
 
@@ -12538,6 +12867,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 training_params=training_params,
                 panel_modes=panel_modes,
                 image_preprocess_pipeline=image_preprocess_pipeline,
+                image_preprocess_pipelines=image_preprocess_pipelines,
                 preprocess_after_tiling=preprocess_after_tiling,
                 tile_stride=tile_stride,
             )
@@ -12637,6 +12967,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 backbone_cache_dir=train_cfg["backbone_cache_dir"],
                 required_backbones=train_cfg["required_backbones"],
                 image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
+                image_preprocess_pipelines=job.get("image_preprocess_pipelines") or {},
                 preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
                 tile_stride=int(job.get("tile_stride") or 512),
                 batch_size=patchcore_params.get("batch_size", 8),
@@ -12653,6 +12984,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 feature_cleaning_keep_ratio=patchcore_params.get(
                     "feature_cleaning_keep_ratio", 0.99,
                 ),
+                feature_cleaning_by_zone=patchcore_params.get(
+                    "feature_cleaning_by_zone"
+                ) or {},
             )
             inherited_training_params = dict(training_params or {})
             for key in CAPIWebHandler.PATCHCORE_BUNDLE_LOCKED_TRAINING_PARAMS:
@@ -12665,6 +12999,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             preprocess_cfg = PreprocessConfig(
                 tile_stride=cfg.tile_stride,
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
+                image_preprocess_pipelines=cfg.image_preprocess_pipelines,
                 preprocess_after_tiling=cfg.preprocess_after_tiling,
                 product_resolution=CAPIWebHandler._product_resolution_for_machine(machine_id, server_inst),
             )
@@ -12968,6 +13303,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 feature_cleaning_keep_ratio=patchcore_params.get(
                     "feature_cleaning_keep_ratio", 0.99,
                 ),
+                feature_cleaning_by_zone=patchcore_params.get(
+                    "feature_cleaning_by_zone"
+                ) or {},
             )
             # backbone_cache_dir / required_backbones / output_root 沿用 dataclass 預設值
 

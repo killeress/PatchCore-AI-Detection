@@ -2353,10 +2353,12 @@ class CAPIInferencer:
 
         pre_cfg = PreprocessConfig(
             tile_size=self.config.tile_size,
+            tile_stride=getattr(self.config, "tile_stride", self.config.tile_size),
             otsu_offset=otsu_offset_override if otsu_offset_override is not None else self.config.otsu_offset,
             enable_panel_polygon=self.config.enable_panel_polygon,
             edge_threshold_px=self.config.edge_threshold_px,
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
+            image_preprocess_pipelines=getattr(self.config, "image_preprocess_pipelines", {}),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
             product_resolution=self._product_resolution(),
             rotate_180=getattr(self, "_rotate_detection_images_180", False),
@@ -5359,10 +5361,12 @@ class CAPIInferencer:
             from capi_preprocess import PreprocessConfig
             pre_cfg = PreprocessConfig(
                 tile_size=self.config.tile_size,
+                tile_stride=getattr(self.config, "tile_stride", self.config.tile_size),
                 otsu_offset=self.config.otsu_offset,
                 enable_panel_polygon=self.config.enable_panel_polygon,
                 edge_threshold_px=self.config.edge_threshold_px,
                 image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
+                image_preprocess_pipelines=getattr(self.config, "image_preprocess_pipelines", {}),
                 preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
                 product_resolution=product_resolution or self._product_resolution(),
                 rotate_180=getattr(self, "_rotate_detection_images_180", False),
@@ -5558,14 +5562,6 @@ class CAPIInferencer:
             crop_w = tx2 - tx
             crop_h = ty2 - ty
             tile_img = processed_image[ty:ty2, tx:tx2].copy()
-            if (
-                not is_skip_file
-                and getattr(pre_cfg, "preprocess_after_tiling", False)
-                and getattr(pre_cfg, "image_preprocess_pipeline", None)
-            ):
-                from capi_image_preprocess_lab import apply_preprocess_pipeline
-                pipeline_result = apply_preprocess_pipeline(tile_img, pre_cfg.image_preprocess_pipeline)
-                tile_img = pipeline_result["image"]
             original_tile = raw_image[ty:ty2, tx:tx2].copy()
             tile_zone, _cov, _dist, tile_mask = classify_tile_zone(
                 (tx, ty, tx2, ty2), polygon, pre_cfg,
@@ -5601,6 +5597,18 @@ class CAPIInferencer:
                     ))
                     if d_edge <= half:
                         zone = "edge"
+
+            if not is_skip_file and getattr(pre_cfg, "preprocess_after_tiling", False):
+                from capi_preprocess import image_preprocess_pipeline_for_zone
+                tile_pipeline = image_preprocess_pipeline_for_zone(pre_cfg, zone)
+                if tile_pipeline:
+                    from capi_image_preprocess_lab import apply_preprocess_pipeline
+                    pipeline_result = apply_preprocess_pipeline(tile_img, tile_pipeline)
+                    tile_img = pipeline_result["image"]
+                    result.preprocess_steps.extend(pipeline_result["steps"])
+                    result.preprocess_total_ms += float(
+                        pipeline_result.get("total_elapsed_ms") or 0.0
+                    )
 
             # 邊緣旗標以 AOI 中心相對 otsu_bounds 判定（與 tile 位置無關）
             is_top = img_y - otsu_y1 < half
@@ -7960,10 +7968,12 @@ class CAPIInferencer:
 
         pre_cfg = PreprocessConfig(
             tile_size=self.config.tile_size,
+            tile_stride=getattr(self.config, "tile_stride", self.config.tile_size),
             otsu_offset=self.config.otsu_offset,
             enable_panel_polygon=self.config.enable_panel_polygon,
             edge_threshold_px=self.config.edge_threshold_px,
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
+            image_preprocess_pipelines=getattr(self.config, "image_preprocess_pipelines", {}),
             cache_processed_image=aoi_only_mode,
             generate_grid_tiles=bool(self.config.grid_tiling_enabled),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),

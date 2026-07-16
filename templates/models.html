@@ -609,6 +609,18 @@ const PANEL_MODE_LABELS = {
 };
 
 function formatFeatureCleaning(pp) {
+  const byZone = pp.feature_cleaning_by_zone;
+  if (byZone && typeof byZone === 'object' && byZone.inner && byZone.edge) {
+    const formatZone = (zone, cfg) => {
+      if (!cfg || cfg.mode === 'off') return `${zone}: 關閉`;
+      const ratio = Number(cfg.keep_ratio);
+      const ratioText = Number.isFinite(ratio)
+        ? `${Math.round(ratio * 10000) / 100}%`
+        : '未記錄';
+      return `${zone}: k=${cfg.k ?? '未記錄'}，保留 ${ratioText}`;
+    };
+    return `${formatZone('INNER', byZone.inner)}；${formatZone('EDGE', byZone.edge)}`;
+  }
   if (!Object.prototype.hasOwnProperty.call(pp, 'feature_cleaning_mode')) {
     return '關閉（舊模型未記錄，依相容預設）';
   }
@@ -635,6 +647,14 @@ function formatPreprocessPipeline(pipeline) {
       : '';
     return `${index + 1}. ${label}${params ? `（${params}）` : ''}`;
   }).join('\n');
+}
+
+function formatPreprocessPipelines(m) {
+  const byZone = m.image_preprocess_pipelines;
+  if (byZone && typeof byZone === 'object' && byZone.inner && byZone.edge) {
+    return `INNER：${formatPreprocessPipeline(byZone.inner)}；EDGE：${formatPreprocessPipeline(byZone.edge)}`;
+  }
+  return formatPreprocessPipeline(m.image_preprocess_pipeline);
 }
 
 function formatTrainingDataSource(source) {
@@ -713,7 +733,7 @@ function renderDetail(d) {
     ['─── 切片與前處理 ───', '─────'],
     ['tile step', tileStrideText],
     ['前處理套用時機', preprocessTiming],
-    ['影像前處理流程', formatPreprocessPipeline(m.image_preprocess_pipeline)],
+    ['影像前處理流程', formatPreprocessPipelines(m)],
     ['─── 訓練資料 ───', '─────'],
     ['資料來源', formatTrainingDataSource(m.training_data_source)],
     ['PANEL 切片設定', formatTrainingPanelModes(d.training_panel_modes, m.panel_glass_ids)],
@@ -763,7 +783,7 @@ function renderMetrics(d) {
   for (const label of UNIT_ORDER) {
     const u = um[label];
     if (!u) {
-      rows += `<tr><td>${label}</td><td colspan="8" style="color:#a6adc8;">未訓練 / 跳過</td></tr>`;
+      rows += `<tr><td>${label}</td><td colspan="9" style="color:#a6adc8;">未訓練 / 跳過</td></tr>`;
       continue;
     }
     const sep = u.separation;
@@ -781,6 +801,10 @@ function renderMetrics(d) {
     const sepCell = sep == null ? '—'
       : `<span style="color:${sep < 0 ? '#f38ba8' : '#a6e3a1'};">${sep > 0 ? '+' : ''}${sep.toFixed(3)}</span>`;
     const caughtCell = `${caught} <span style="color:#a6adc8;">(${rate})</span>`;
+    const cleaning = u.feature_cleaning || {};
+    const cleaningCell = cleaning.report_path && d.job_id
+      ? `<a href="/train/new/done/${encodeURIComponent(d.job_id)}#feature-cleaning-visualization" style="color:#89b4fa;">查看 ${cleaning.removed || 0} patches</a>`
+      : (cleaning.applied ? `${cleaning.removed || 0} patches` : '—');
     const [lighting, zone] = label.split('-');
     // threshold 顯示優先用 thr（後端 get_bundle_detail 已從 machine_config.yaml 讀；
     // yaml 是 inference 引擎讀的 source of truth）。manifest.unit_metrics[].threshold
@@ -803,6 +827,7 @@ function renderMetrics(d) {
       + `<td>${thrCell}</td>`
       + `<td>${caughtCell}</td>`
       + `<td>${sepCell}</td>`
+      + `<td>${cleaningCell}</td>`
       + `</tr>`;
   }
 
@@ -840,7 +865,7 @@ function renderMetrics(d) {
         <th>Unit</th><th>Train</th><th>NG</th>
         <th>AUROC（評級）</th>
         <th>train_max</th><th>ng_median</th><th>threshold</th>
-        <th>NG 抓到</th><th>separation</th>
+        <th>NG 抓到</th><th>separation</th><th>清洗 patch</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>

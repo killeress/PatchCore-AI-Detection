@@ -124,6 +124,9 @@
                         </div>
                         {% for step in detail.image_preprocess_pipeline_steps %}
                         <div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;">
+                            {% if step.zone_label %}
+                            <span style="display:inline-flex;align-items:center;height:24px;border-radius:6px;background:rgba(168,85,247,0.12);color:#c084fc;padding:0 7px;font-size:0.72rem;font-weight:700;">{{ step.zone_label }}</span>
+                            {% endif %}
                             <span style="display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:24px;border-radius:6px;background:rgba(59,130,246,0.12);color:var(--accent);font-family:'Fira Code',monospace;font-size:0.78rem;font-weight:700;">{{ step.index }}</span>
                             <span style="font-weight:600;">{{ step.method_label }}</span>
                             {% if step.params_text %}

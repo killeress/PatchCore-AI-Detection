@@ -77,6 +77,8 @@ FEATURE_CLEANING_MODE_CHOICES = (
     FEATURE_CLEANING_MODE_KNN_Q99,
 )
 FEATURE_CLEANING_K = 30
+FEATURE_CLEANING_K_MIN = 1
+FEATURE_CLEANING_K_MAX = 200
 FEATURE_CLEANING_KEEP_RATIO_DEFAULT = 0.99
 FEATURE_CLEANING_KEEP_RATIO_MIN = 0.90
 FEATURE_CLEANING_KEEP_RATIO_MAX = 1.00
@@ -191,6 +193,8 @@ class TrainingConfig:
     training_data_source: Dict[str, Any] = field(
         default_factory=lambda: {"type": "inference_records"}
     )
+    feature_cleaning_by_zone: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
 
 # 使用者可從 step1 表單覆寫的 PatchCore 超參數。
@@ -213,8 +217,117 @@ USER_TRAINABLE_PARAM_SPECS: Dict[str, Dict] = {
         "min": FEATURE_CLEANING_KEEP_RATIO_MIN,
         "max": FEATURE_CLEANING_KEEP_RATIO_MAX,
     },
+    "feature_cleaning_by_zone": {"type": dict},
 }
 USER_TRAINABLE_PARAM_NAMES: Tuple[str, ...] = tuple(USER_TRAINABLE_PARAM_SPECS.keys())
+
+
+def normalize_feature_cleaning_by_zone(raw: Any) -> Dict[str, Dict[str, Any]]:
+    """Validate the optional INNER/EDGE-specific feature-cleaning recipe."""
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("feature_cleaning_by_zone must be an object")
+    unknown_zones = set(raw) - set(ZONES)
+    missing_zones = set(ZONES) - set(raw)
+    if unknown_zones or missing_zones:
+        raise ValueError("feature_cleaning_by_zone must contain inner and edge only")
+
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for zone in ZONES:
+        item = raw.get(zone)
+        if not isinstance(item, dict):
+            raise ValueError(f"feature_cleaning_by_zone.{zone} must be an object")
+        unknown = set(item) - {"mode", "k", "keep_ratio"}
+        if unknown:
+            raise ValueError(
+                f"feature_cleaning_by_zone.{zone} has unknown keys: {sorted(unknown)}"
+            )
+        mode = item.get("mode", FEATURE_CLEANING_MODE_OFF)
+        if mode not in FEATURE_CLEANING_MODE_CHOICES:
+            raise ValueError(
+                f"feature_cleaning_by_zone.{zone}.mode must be one of "
+                f"{list(FEATURE_CLEANING_MODE_CHOICES)}"
+            )
+        k_raw = item.get("k", FEATURE_CLEANING_K)
+        if isinstance(k_raw, bool):
+            raise ValueError(f"feature_cleaning_by_zone.{zone}.k must be an integer")
+        try:
+            k_numeric = float(k_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"feature_cleaning_by_zone.{zone}.k must be an integer"
+            ) from exc
+        if not k_numeric.is_integer():
+            raise ValueError(f"feature_cleaning_by_zone.{zone}.k must be an integer")
+        k_value = int(k_numeric)
+        if not FEATURE_CLEANING_K_MIN <= k_value <= FEATURE_CLEANING_K_MAX:
+            raise ValueError(
+                f"feature_cleaning_by_zone.{zone}.k must be between "
+                f"{FEATURE_CLEANING_K_MIN} and {FEATURE_CLEANING_K_MAX}"
+            )
+        ratio_raw = item.get("keep_ratio", FEATURE_CLEANING_KEEP_RATIO_DEFAULT)
+        if isinstance(ratio_raw, bool):
+            raise ValueError(
+                f"feature_cleaning_by_zone.{zone}.keep_ratio must be a number"
+            )
+        try:
+            keep_ratio = float(ratio_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"feature_cleaning_by_zone.{zone}.keep_ratio must be a number"
+            ) from exc
+        if not FEATURE_CLEANING_KEEP_RATIO_MIN <= keep_ratio <= FEATURE_CLEANING_KEEP_RATIO_MAX:
+            raise ValueError(
+                f"feature_cleaning_by_zone.{zone}.keep_ratio must be between "
+                f"{FEATURE_CLEANING_KEEP_RATIO_MIN} and {FEATURE_CLEANING_KEEP_RATIO_MAX}"
+            )
+        normalized[zone] = {
+            "mode": mode,
+            "k": k_value,
+            "keep_ratio": keep_ratio,
+        }
+    return normalized
+
+
+def normalize_image_preprocess_pipelines(raw: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """Validate optional per-zone tile preprocessing pipelines."""
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("image_preprocess_pipelines must be an object")
+    unknown_zones = set(raw) - set(ZONES)
+    missing_zones = set(ZONES) - set(raw)
+    if unknown_zones or missing_zones:
+        raise ValueError("image_preprocess_pipelines must contain inner and edge only")
+    from capi_image_preprocess_lab import normalize_preprocess_pipeline
+
+    return {
+        zone: normalize_preprocess_pipeline(raw.get(zone) or [])
+        for zone in ZONES
+    }
+
+
+def feature_cleaning_config_for_zone(
+    cfg: TrainingConfig,
+    zone: str,
+) -> Dict[str, Any]:
+    """Resolve a zone recipe, falling back to the legacy shared settings."""
+    by_zone = normalize_feature_cleaning_by_zone(cfg.feature_cleaning_by_zone)
+    if by_zone:
+        return dict(by_zone[zone])
+    enabled = (
+        cfg.feature_cleaning_mode == FEATURE_CLEANING_MODE_KNN_Q99
+        and (
+            zone == ZONE_INNER
+            or cfg.feature_cleaning_scope == FEATURE_CLEANING_SCOPE_INNER_AND_EDGE
+        )
+    )
+    return {
+        "mode": cfg.feature_cleaning_mode if enabled else FEATURE_CLEANING_MODE_OFF,
+        "k": FEATURE_CLEANING_K,
+        "keep_ratio": float(cfg.feature_cleaning_keep_ratio),
+    }
 
 
 def _patchcore_layers_for_mode(feature_layers: Optional[str]) -> Tuple[str, ...]:
@@ -242,6 +355,8 @@ def apply_user_training_params(
     if unknown:
         raise ValueError(f"unknown user training params: {sorted(unknown)}")
     for key, val in params.items():
+        if key == "feature_cleaning_by_zone":
+            val = normalize_feature_cleaning_by_zone(val)
         setattr(cfg, key, val)
     if log_fn is not None:
         log_fn(f"使用者覆寫訓練參數: {params}")
@@ -292,9 +407,17 @@ def preprocess_panels_to_pool(
     total_tiles = 0
     preprocess_desc = ""
     preprocess_after_tiling = bool(getattr(preprocess_cfg, "preprocess_after_tiling", False))
-    if preprocess_cfg.image_preprocess_pipeline:
+    if (
+        preprocess_cfg.image_preprocess_pipeline
+        or getattr(preprocess_cfg, "image_preprocess_pipelines", None)
+    ):
         from capi_image_preprocess_lab import describe_preprocess_pipeline
-        preprocess_desc = describe_preprocess_pipeline(preprocess_cfg.image_preprocess_pipeline)
+        if getattr(preprocess_cfg, "image_preprocess_pipelines", None):
+            preprocess_desc = "INNER/EDGE 分區前處理"
+        else:
+            preprocess_desc = describe_preprocess_pipeline(
+                preprocess_cfg.image_preprocess_pipeline
+            )
         preprocess_mode = (
             "先切分後處理（每個 tile 套用）"
             if preprocess_after_tiling
@@ -465,7 +588,10 @@ def sample_ng_tiles(
     preprocess_desc = ""
     if (
         preprocess_cfg is not None
-        and preprocess_cfg.image_preprocess_pipeline
+        and (
+            preprocess_cfg.image_preprocess_pipeline
+            or getattr(preprocess_cfg, "image_preprocess_pipelines", None)
+        )
         and thumb_dir is not None
     ):
         from capi_image_preprocess_lab import (
@@ -473,7 +599,10 @@ def sample_ng_tiles(
             describe_preprocess_pipeline,
         )
         apply_preprocess_pipeline = _apply_preprocess_pipeline
-        preprocess_desc = describe_preprocess_pipeline(preprocess_cfg.image_preprocess_pipeline)
+        if getattr(preprocess_cfg, "image_preprocess_pipelines", None):
+            preprocess_desc = "INNER/EDGE 分區前處理"
+        else:
+            preprocess_desc = describe_preprocess_pipeline(preprocess_cfg.image_preprocess_pipeline)
 
     for lighting in target_lightings:
         all_files = []
@@ -492,18 +621,22 @@ def sample_ng_tiles(
         for i, p in enumerate(chosen):
             source_path = p
             thumb_img = None
+            zone = zone_for(p)
             if apply_preprocess_pipeline is not None:
                 img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
                 if img is not None:
                     try:
-                        result = apply_preprocess_pipeline(img, preprocess_cfg.image_preprocess_pipeline)
-                        processed = result["image"]
-                        candidate = thumb_dir / "tiles" / "ng" / lighting / f"{job_id}_{lighting}_ng{i:04d}_{p.name}"
-                        candidate.parent.mkdir(parents=True, exist_ok=True)
-                        if cv2.imwrite(str(candidate), processed):
-                            source_path = candidate
-                            thumb_img = processed
-                            preprocessed_n += 1
+                        from capi_preprocess import image_preprocess_pipeline_for_zone
+                        pipeline = image_preprocess_pipeline_for_zone(preprocess_cfg, zone)
+                        if pipeline:
+                            result = apply_preprocess_pipeline(img, pipeline)
+                            processed = result["image"]
+                            candidate = thumb_dir / "tiles" / "ng" / lighting / f"{job_id}_{lighting}_ng{i:04d}_{p.name}"
+                            candidate.parent.mkdir(parents=True, exist_ok=True)
+                            if cv2.imwrite(str(candidate), processed):
+                                source_path = candidate
+                                thumb_img = processed
+                                preprocessed_n += 1
                     except Exception as e:
                         log(f"  ⚠ {lighting}: NG 前處理失敗 {p.name}: {e}")
             thumb_path = p
@@ -516,7 +649,6 @@ def sample_ng_tiles(
                     thumb = cv2.resize(thumb_img, (96, 96))
                     cv2.imwrite(str(candidate), thumb)
                     thumb_path = candidate
-            zone = zone_for(p)
             if zone == ZONE_EDGE:
                 edge_n += 1
             elif zone == ZONE_INNER:
@@ -548,7 +680,11 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def stage_dataset(staging_dir: Path, train_paths: List[Path], ng_paths: List[Path]) -> None:
+def stage_dataset(
+    staging_dir: Path,
+    train_paths: List[Path],
+    ng_paths: List[Path],
+) -> List[Path]:
     """為一個 (lighting, zone) unit 準備訓練 staging。
 
     結構：
@@ -564,12 +700,24 @@ def stage_dataset(staging_dir: Path, train_paths: List[Path], ng_paths: List[Pat
     train_dir.mkdir(parents=True, exist_ok=True)
     ng_dir.mkdir(parents=True, exist_ok=True)
 
-    for src in train_paths:
-        dst = train_dir / src.name
+    def destination_names(paths: List[Path]) -> List[str]:
+        counts: Dict[str, int] = {}
+        for src in paths:
+            counts[src.name] = counts.get(src.name, 0) + 1
+        return [
+            f"{index:06d}_{src.name}" if counts[src.name] > 1 else src.name
+            for index, src in enumerate(paths)
+        ]
+
+    staged_train_paths = []
+    for src, name in zip(train_paths, destination_names(train_paths)):
+        dst = train_dir / name
         _link_or_copy(src, dst)
-    for src in ng_paths:
-        dst = ng_dir / src.name
+        staged_train_paths.append(dst.resolve())
+    for src, name in zip(ng_paths, destination_names(ng_paths)):
+        dst = ng_dir / name
         _link_or_copy(src, dst)
+    return staged_train_paths
 
 
 def _import_anomalib():
@@ -593,6 +741,7 @@ def train_one_patchcore(
     cfg: "TrainingConfig" = None,
     log: Optional[Callable[[str], None]] = None,
     experiment_stats_out: Optional[Dict[str, Any]] = None,
+    trace_sources: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Path:
     """訓練一個 (lighting, zone) unit。回傳 model.pt 路徑。
 
@@ -682,41 +831,49 @@ def train_one_patchcore(
             f"{FEATURE_CLEANING_KEEP_RATIO_MIN} and {FEATURE_CLEANING_KEEP_RATIO_MAX}"
         )
     zone = unit_label.rsplit("-", 1)[-1].lower()
+    zone_cleaning = feature_cleaning_config_for_zone(cfg, zone)
+    zone_cleaning_mode = zone_cleaning["mode"]
+    zone_cleaning_k = int(zone_cleaning["k"])
+    zone_cleaning_keep_ratio = float(zone_cleaning["keep_ratio"])
+    per_zone_cleaning = bool(cfg.feature_cleaning_by_zone)
     cleaning_stats: Dict[str, Any] = {
-        "mode": cleaning_mode,
-        "scope": cleaning_scope,
-        "keep_ratio": cleaning_keep_ratio,
+        "mode": zone_cleaning_mode,
+        "scope": "per_zone" if per_zone_cleaning else cleaning_scope,
+        "zone": zone,
+        "k": zone_cleaning_k,
+        "keep_ratio": zone_cleaning_keep_ratio,
         "applied": False,
         "reason": "disabled",
     }
     callbacks = None
     cleaning_callback = None
-    if cleaning_mode == FEATURE_CLEANING_MODE_KNN_Q99:
-        clean_this_zone = (
-            zone == ZONE_INNER
-            or (zone == ZONE_EDGE and cleaning_scope == FEATURE_CLEANING_SCOPE_INNER_AND_EDGE)
+    if zone_cleaning_mode == FEATURE_CLEANING_MODE_KNN_Q99:
+        from capi_patchcore_feature_cleaning import FeatureDensityCleaningCallback
+        cleaning_callback = FeatureDensityCleaningCallback(
+            k=zone_cleaning_k,
+            keep_ratio=zone_cleaning_keep_ratio,
+            seed=FEATURE_CLEANING_SEED,
+            reference_size=FEATURE_CLEANING_REFERENCE_SIZE,
+            query_chunk=FEATURE_CLEANING_QUERY_CHUNK,
+            trace_sources=trace_sources,
         )
-        if clean_this_zone:
-            from capi_patchcore_feature_cleaning import FeatureDensityCleaningCallback
-            cleaning_callback = FeatureDensityCleaningCallback(
-                k=FEATURE_CLEANING_K,
-                keep_ratio=cleaning_keep_ratio,
-                seed=FEATURE_CLEANING_SEED,
-                reference_size=FEATURE_CLEANING_REFERENCE_SIZE,
-                query_chunk=FEATURE_CLEANING_QUERY_CHUNK,
+        callbacks = [cleaning_callback]
+        cleaning_stats["reason"] = "pending"
+        if log:
+            log(
+                f"{unit_label}: feature cleaning enabled "
+                f"(scope={'per_zone' if per_zone_cleaning else cleaning_scope}, "
+                f"cosine k={zone_cleaning_k}, keep={zone_cleaning_keep_ratio:.1%})"
             )
-            callbacks = [cleaning_callback]
-            cleaning_stats["reason"] = "pending"
-            if log:
-                log(
-                    f"{unit_label}: feature cleaning enabled "
-                    f"(scope={cleaning_scope}, cosine k={FEATURE_CLEANING_K}, "
-                    f"keep={cleaning_keep_ratio:.1%})"
-                )
-        else:
-            cleaning_stats["reason"] = "edge_scope_excluded"
-            if log:
-                log(f"{unit_label}: feature cleaning skipped (scope={cleaning_scope})")
+    elif (
+        not per_zone_cleaning
+        and cleaning_mode == FEATURE_CLEANING_MODE_KNN_Q99
+        and zone == ZONE_EDGE
+        and cleaning_scope == FEATURE_CLEANING_SCOPE_INNER_ONLY
+    ):
+        cleaning_stats["reason"] = "edge_scope_excluded"
+        if log:
+            log(f"{unit_label}: feature cleaning skipped (scope={cleaning_scope})")
 
     engine = Engine(
         max_epochs=cfg.max_epochs,
@@ -732,8 +889,9 @@ def train_one_patchcore(
             raise RuntimeError("feature cleaning callback did not run")
         cleaning_stats = dict(cleaning_callback.stats)
         cleaning_stats.update({
-            "mode": cleaning_mode,
-            "scope": cleaning_scope,
+            "mode": zone_cleaning_mode,
+            "scope": "per_zone" if per_zone_cleaning else cleaning_scope,
+            "zone": zone,
         })
         if log:
             log(
@@ -887,7 +1045,8 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
                               succeeded_units: Optional[Set[Tuple[str, str]]] = None,
                               image_preprocess_pipeline: Optional[List[Dict[str, Any]]] = None,
                               preprocess_after_tiling: bool = False,
-                              tile_stride: int = LEGACY_TRAIN_TILE_STRIDE) -> None:
+                              tile_stride: int = LEGACY_TRAIN_TILE_STRIDE,
+                              image_preprocess_pipelines: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> None:
     """產出 bundle 內的 inference yaml。
 
     若提供 succeeded_units，只寫入 inner/edge 都成功訓練的 lighting；
@@ -899,6 +1058,11 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
     model_mapping = {}
     threshold_mapping = {}
     image_preprocess_pipeline = normalize_preprocess_pipeline(image_preprocess_pipeline or [])
+    image_preprocess_pipelines = {
+        zone: normalize_preprocess_pipeline((image_preprocess_pipelines or {}).get(zone) or [])
+        for zone in ZONES
+        if zone in (image_preprocess_pipelines or {})
+    }
     tile_stride = int(tile_stride or LEGACY_TRAIN_TILE_STRIDE)
     for lighting in LIGHTINGS:
         if succeeded_units is not None and not all(
@@ -936,6 +1100,7 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
     model_mapping_block = _emit({"model_mapping": model_mapping})
     threshold_mapping_block = _emit({"threshold_mapping": threshold_mapping})
     image_preprocess_block = _emit({"image_preprocess_pipeline": image_preprocess_pipeline})
+    image_preprocess_zones_block = _emit({"image_preprocess_pipelines": image_preprocess_pipelines})
 
     content = f"""\
 # ============================================================================
@@ -957,8 +1122,9 @@ otsu_offset: 5
 otsu_bottom_crop: 0
 enable_panel_polygon: true
 
-# === 影像前處理（先套用，再切 tile / 推論）===
+# === 影像前處理（共用或 INNER/EDGE 分區；套用時機見下方）===
 {image_preprocess_block}
+{image_preprocess_zones_block}
 preprocess_after_tiling: {str(preprocess_after_tiling).lower()}
 
 # === 模型映射（lighting → inner/edge 模型路徑 + threshold）===
@@ -1439,10 +1605,21 @@ def train_single_submodel(
         staging = Path(".tmp/training_staging") / job_id / unit_label
         run_root = Path(".tmp/training_runs") / job_id / unit_label
         try:
-            stage_dataset(staging,
-                          [Path(t["source_path"]) for t in train_tiles],
-                          [Path(t["source_path"]) for t in ng_tiles])
+            staged_train_paths = stage_dataset(
+                staging,
+                [Path(t["source_path"]) for t in train_tiles],
+                [Path(t["source_path"]) for t in ng_tiles],
+            )
+            trace_sources: Dict[str, Dict[str, Any]] = {}
+            for tile, staged_path in zip(train_tiles, staged_train_paths):
+                trace_sources[str(staged_path)] = {
+                    "tile_pool_id": int(tile["id"]),
+                    "source_path": str(Path(tile["source_path"]).resolve()),
+                }
             experiment_stats: Dict[str, Any] = {}
+            trace_kwargs = {}
+            if feature_cleaning_config_for_zone(cfg, zone)["mode"] != FEATURE_CLEANING_MODE_OFF:
+                trace_kwargs["trace_sources"] = trace_sources
             model_pt = train_one_patchcore(
                 staging,
                 run_root,
@@ -1450,6 +1627,7 @@ def train_single_submodel(
                 cfg,
                 log=log,
                 experiment_stats_out=experiment_stats,
+                **trace_kwargs,
             )
 
             if cancel_event is not None and cancel_event.is_set():
@@ -1470,13 +1648,17 @@ def train_single_submodel(
             metrics["feature_pool_kernel_size"] = experiment_stats.get(
                 "feature_pool_kernel_size", cfg.feature_pool_kernel_size,
             )
+            fallback_cleaning = feature_cleaning_config_for_zone(cfg, zone)
             metrics["feature_cleaning"] = experiment_stats.get("feature_cleaning", {
-                "mode": cfg.feature_cleaning_mode,
-                "scope": cfg.feature_cleaning_scope,
-                "keep_ratio": cfg.feature_cleaning_keep_ratio,
+                **fallback_cleaning,
+                "scope": "per_zone" if cfg.feature_cleaning_by_zone else cfg.feature_cleaning_scope,
+                "zone": zone,
                 "applied": False,
                 "reason": "stats_unavailable",
             })
+            removed_patch_trace = metrics["feature_cleaning"].pop(
+                "removed_patch_trace", []
+            )
             elapsed = time.monotonic() - unit_start
             metrics["elapsed_seconds"] = int(elapsed)
 
@@ -1485,6 +1667,72 @@ def train_single_submodel(
             shutil.copy2(model_pt, tmp_path)
             os.replace(tmp_path, output_pt_path)
             size = output_pt_path.stat().st_size
+
+            if removed_patch_trace:
+                try:
+                    report_rel = Path("feature_cleaning_reports") / f"{unit_label}.json"
+                    report_path = output_pt_path.parent / report_rel
+                    assets_dir = (
+                        output_pt_path.parent
+                        / "feature_cleaning_reports"
+                        / "assets"
+                        / unit_label
+                    )
+                    report_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.rmtree(assets_dir, ignore_errors=True)
+                    assets_dir.mkdir(parents=True, exist_ok=True)
+                    report_tiles = []
+                    visual_indices = set(sorted(
+                        range(len(removed_patch_trace)),
+                        key=lambda item_index: int(
+                            removed_patch_trace[item_index].get("removed_count") or 0
+                        ),
+                        reverse=True,
+                    )[:12])
+                    for index, trace_item in enumerate(removed_patch_trace):
+                        source_path = Path(trace_item["source_path"])
+                        report_item = {
+                            key: value
+                            for key, value in trace_item.items()
+                            if key != "source_path"
+                        }
+                        report_item["source_name"] = source_path.name
+                        if index in visual_indices:
+                            asset_path = assets_dir / f"{index:04d}_{source_path.name}"
+                            asset_tmp = asset_path.with_suffix(asset_path.suffix + ".tmp")
+                            shutil.copy2(source_path, asset_tmp)
+                            os.replace(asset_tmp, asset_path)
+                            report_item["asset_path"] = asset_path.relative_to(
+                                output_pt_path.parent
+                            ).as_posix()
+                        report_tiles.append(report_item)
+
+                    report_tmp = report_path.with_suffix(report_path.suffix + ".tmp")
+                    report_payload = {
+                        "schema_version": 1,
+                        "unit_label": unit_label,
+                        "k": metrics["feature_cleaning"].get("k"),
+                        "keep_ratio": metrics["feature_cleaning"].get("keep_ratio"),
+                        "threshold": metrics["feature_cleaning"].get("threshold"),
+                        "removed": metrics["feature_cleaning"].get("removed", 0),
+                        "tiles": report_tiles,
+                    }
+                    report_tmp.write_text(
+                        json.dumps(report_payload, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    os.replace(report_tmp, report_path)
+                    metrics["feature_cleaning"]["report_path"] = report_rel.as_posix()
+                    metrics["feature_cleaning"]["affected_tiles"] = len(report_tiles)
+                except Exception as exc:
+                    logger.warning(
+                        "feature cleaning visualization report failed for %s: %s",
+                        unit_label,
+                        exc,
+                        exc_info=True,
+                    )
+                    if log:
+                        log(f"{unit_label}: feature cleaning 可視化報告寫入失敗: {exc}")
 
             return {
                 "threshold": round(threshold, 4),
@@ -1505,6 +1753,28 @@ def train_single_submodel(
                     tmp_leftover.unlink()
                 except OSError:
                     pass
+            report_tmp = (
+                output_pt_path.parent
+                / "feature_cleaning_reports"
+                / f"{unit_label}.json.tmp"
+            )
+            if report_tmp.exists():
+                try:
+                    report_tmp.unlink()
+                except OSError:
+                    pass
+            report_assets = (
+                output_pt_path.parent
+                / "feature_cleaning_reports"
+                / "assets"
+                / unit_label
+            )
+            if report_assets.exists():
+                for asset_tmp in report_assets.glob("*.tmp"):
+                    try:
+                        asset_tmp.unlink()
+                    except OSError:
+                        pass
             gc.collect()
             try:
                 import torch
@@ -1631,6 +1901,7 @@ def run_training_pipeline(
         thresholds,
         succeeded_units=succeeded_units,
         image_preprocess_pipeline=cfg.image_preprocess_pipeline,
+        image_preprocess_pipelines=cfg.image_preprocess_pipelines,
         preprocess_after_tiling=cfg.preprocess_after_tiling,
         tile_stride=cfg.tile_stride,
     )
@@ -1641,6 +1912,12 @@ def run_training_pipeline(
         "experimental_training": bool(
             cfg.feature_pool_kernel_size != PATCHCORE_FEATURE_POOL_KERNEL_DEFAULT
             or cfg.feature_cleaning_mode != FEATURE_CLEANING_MODE_OFF
+            or any(
+                item.get("mode") != FEATURE_CLEANING_MODE_OFF
+                for item in normalize_feature_cleaning_by_zone(
+                    cfg.feature_cleaning_by_zone
+                ).values()
+            )
         ),
         "panel_count": len(cfg.panel_paths),
         "panel_glass_ids": [p.name for p in cfg.panel_paths],
@@ -1663,8 +1940,12 @@ def run_training_pipeline(
             "feature_cleaning_seed": FEATURE_CLEANING_SEED,
             "feature_cleaning_reference_size": FEATURE_CLEANING_REFERENCE_SIZE,
             "feature_cleaning_query_chunk": FEATURE_CLEANING_QUERY_CHUNK,
+            "feature_cleaning_by_zone": normalize_feature_cleaning_by_zone(
+                cfg.feature_cleaning_by_zone
+            ),
         },
         "image_preprocess_pipeline": cfg.image_preprocess_pipeline,
+        "image_preprocess_pipelines": cfg.image_preprocess_pipelines,
         "tiles_per_unit": tiles_per_unit,
         "model_files": model_files,
         "unit_metrics": unit_metrics,

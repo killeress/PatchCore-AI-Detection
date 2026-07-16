@@ -82,6 +82,48 @@ def test_removes_isolated_feature_and_preserves_raw_embeddings():
     assert callback.stats["reason"] == "completed"
 
 
+def test_removed_patch_trace_maps_keep_mask_back_to_source_grid(tmp_path):
+    source = tmp_path / "tile.png"
+    source.write_bytes(b"tile")
+    raw = torch.tensor([
+        [1.0, 0.0],
+        [0.99, 0.01],
+        [0.98, -0.01],
+        [-1.0, 0.0],
+    ])
+    model = _model_with_store(raw.clone())
+    callback = FeatureDensityCleaningCallback(
+        k=2,
+        keep_ratio=0.75,
+        reference_size=4,
+        trace_sources={
+            str(source.resolve()): {
+                "tile_pool_id": 7,
+                "source_path": str(source.resolve()),
+            }
+        },
+    )
+    callback._current_grid_shape = (2, 2)
+    batch = SimpleNamespace(
+        image_path=[str(source)],
+        image=torch.zeros(1, 3, 8, 8),
+    )
+
+    callback.on_train_batch_end(None, model, None, batch, 0)
+    callback.on_train_epoch_end(None, model)
+
+    trace = callback.stats["removed_patch_trace"]
+    assert trace == [{
+        "tile_pool_id": 7,
+        "source_path": str(source.resolve()),
+        "input_size": [8, 8],
+        "grid_size": [2, 2],
+        "removed_indices": [3],
+        "removed_count": 1,
+    }]
+    assert callback.stats["removed"] == 1
+
+
 def test_sampled_reference_is_deterministic_across_query_chunks():
     generator = torch.Generator().manual_seed(7)
     raw = torch.randn(40, 8, generator=generator) * torch.arange(1, 41).unsqueeze(1)

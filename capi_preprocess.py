@@ -35,10 +35,22 @@ class PreprocessConfig:
     preprocess_after_tiling: bool = False
     product_resolution: Optional[Tuple[int, int]] = None
     rotate_180: bool = False
+    image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.outer_edge_extend is None:
             self.outer_edge_extend = self.tile_size // 2
+
+
+def image_preprocess_pipeline_for_zone(
+    config: PreprocessConfig,
+    zone: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Return a zone-specific tile pipeline, with legacy shared fallback."""
+    pipelines = getattr(config, "image_preprocess_pipelines", None) or {}
+    if zone in ("inner", "edge") and zone in pipelines:
+        return list(pipelines[zone] or [])
+    return list(getattr(config, "image_preprocess_pipeline", None) or [])
 
 
 @dataclass
@@ -55,6 +67,8 @@ class TileResult:
     # 4 個 outer-extension 角 + 4 個 inner-edge 角；訓練 wizard 的「corners-only」
     # panel 模式只收 is_corner=True 的 tile（只給 edge 模型補強用）。
     is_corner: bool = False
+    preprocess_steps: List[Dict[str, Any]] = field(default_factory=list)
+    preprocess_total_ms: float = 0.0
 
 
 @dataclass
@@ -858,6 +872,13 @@ def preprocess_panel_image(
             original_img=original_img,
             preprocess_pipeline=normalized_pipeline,
         )
+        if getattr(config, "preprocess_after_tiling", False):
+            preprocess_steps = [
+                step
+                for tile in tiles
+                for step in tile.preprocess_steps
+            ]
+            preprocess_total_ms = sum(tile.preprocess_total_ms for tile in tiles)
     return PanelPreprocessResult(
         image_path=image_path,
         lighting=lighting,
@@ -1026,10 +1047,17 @@ def _generate_tiles(
                 return
         emitted_positions.add((tx, ty))
         tile_img = img[ty:ty + ts, tx:tx + ts].copy()
-        if getattr(config, "preprocess_after_tiling", False) and config.image_preprocess_pipeline:
+        tile_pipeline = image_preprocess_pipeline_for_zone(config, zone)
+        tile_preprocess_steps: List[Dict[str, Any]] = []
+        tile_preprocess_total_ms = 0.0
+        if getattr(config, "preprocess_after_tiling", False) and tile_pipeline:
             from capi_image_preprocess_lab import apply_preprocess_pipeline
-            pipeline_result = apply_preprocess_pipeline(tile_img, config.image_preprocess_pipeline)
+            pipeline_result = apply_preprocess_pipeline(tile_img, tile_pipeline)
             tile_img = pipeline_result["image"]
+            tile_preprocess_steps = pipeline_result["steps"]
+            tile_preprocess_total_ms = float(
+                pipeline_result.get("total_elapsed_ms") or 0.0
+            )
 
         tiles.append(TileResult(
             tile_id=tid,
@@ -1043,8 +1071,14 @@ def _generate_tiles(
                 original_img[ty:ty + ts, tx:tx + ts].copy()
                 if original_img is not None else None
             ),
-            preprocess_pipeline=list(preprocess_pipeline or []),
+            preprocess_pipeline=(
+                list(tile_pipeline)
+                if getattr(config, "preprocess_after_tiling", False)
+                else list(preprocess_pipeline or [])
+            ),
             is_corner=_is_corner(tx, ty) if is_corner_override is None else is_corner_override,
+            preprocess_steps=tile_preprocess_steps,
+            preprocess_total_ms=tile_preprocess_total_ms,
         ))
         if zone == "edge":
             emitted_edge_rects.append(rect)
