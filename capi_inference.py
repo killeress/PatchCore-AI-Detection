@@ -4557,9 +4557,10 @@ class CAPIInferencer:
     ) -> Tuple[int, int]:
         """將產品座標映射到圖片座標。
 
-        平常保留舊的 ``raw_bounds`` 線性映射；若映射點落在已偵測的
-        panel polygon 外，表示 raw bounds 可能被 panel 外輪廓拉大，改用
-        產品四角到 panel 四角的透視映射。
+        平常保留舊的 ``raw_bounds`` 線性映射。若映射點已落在 panel
+        polygon 外，或 polygon 只佔 raw bounds 明顯較小的面積（代表
+        raw bounds 可能被產品外字樣拉大），改用產品四角到 panel
+        四角的透視映射。
         """
         if product_resolution is None:
             product_resolution = DEFAULT_PRODUCT_RESOLUTION
@@ -4590,7 +4591,10 @@ class CAPIInferencer:
             raw_distance = float(cv2.pointPolygonTest(
                 polygon, (float(img_x), float(img_y)), True,
             ))
-            if raw_distance >= -1.0:
+            raw_area = float(max(1, product_img_width * product_img_height))
+            polygon_coverage = abs(float(cv2.contourArea(polygon))) / raw_area
+            raw_bounds_contaminated = polygon_coverage < 0.90
+            if raw_distance >= -1.0 and not raw_bounds_contaminated:
                 return img_x, img_y
 
             source = np.array([
@@ -4617,8 +4621,9 @@ class CAPIInferencer:
 
             logger.warning(
                 "AOI mapping corrected by panel polygon: product=(%d,%d) "
-                "raw=(%d,%d) raw_dist=%.1fpx polygon=(%d,%d)",
-                px, py, img_x, img_y, raw_distance, polygon_x, polygon_y,
+                "raw=(%d,%d) raw_dist=%.1fpx coverage=%.3f polygon=(%d,%d)",
+                px, py, img_x, img_y, raw_distance, polygon_coverage,
+                polygon_x, polygon_y,
             )
             return polygon_x, polygon_y
         except (cv2.error, TypeError, ValueError):

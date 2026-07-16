@@ -4,6 +4,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import cv2
 import numpy as np
 
 from capi_config import CAPIConfig
@@ -170,6 +171,73 @@ def test_v2_aoi_coord_uses_polygon_when_raw_bounds_map_outside_panel():
         assert (tile.aoi_tile_shift_dx, tile.aoi_tile_shift_dy) == (0, 0)
         assert tile.valid_ratio == 1.0
         assert tile.zone == expected_zone
+
+
+def test_v2_aoi_coord_uses_polygon_when_wrong_raw_mapping_is_still_inside_panel():
+    """Raw bounds 被下方字樣拉長時，不能因錯誤座標仍在 panel 內就沿用。"""
+    cfg = CAPIConfig()
+    cfg.is_new_architecture = True
+    cfg.tile_size = 512
+    cfg.enable_panel_polygon = True
+
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+
+    image = np.full((4400, 5500), 180, dtype=np.uint8)
+    polygon = np.array(
+        [
+            [1003.3, 548.3],
+            [5214.0, 491.7],
+            [5245.0, 2861.1],
+            [1033.7, 2913.9],
+        ],
+        dtype=np.float32,
+    )
+    raw_bounds = (1003, 492, 5245, 4384)
+    product_resolution = (1920, 1080)
+    defect = AOIReportDefect(
+        defect_code="C1111",
+        product_x=1049,
+        product_y=645,
+        image_prefix="WGF50500",
+    )
+
+    raw_mapped = inferencer._map_aoi_coords(
+        defect.product_x,
+        defect.product_y,
+        raw_bounds,
+        product_resolution,
+    )
+    assert raw_mapped == (3320, 2816)
+    assert cv2.pointPolygonTest(polygon, raw_mapped, True) > 0
+
+    result = ImageResult(
+        image_path=Path("WGF50500_test.png"),
+        image_size=(5500, 4400),
+        otsu_bounds=(1003, 491, 5245, 2914),
+        exclusion_regions=[],
+        tiles=[],
+        excluded_tile_count=0,
+        processed_tile_count=0,
+        processing_time=0.0,
+        raw_bounds=raw_bounds,
+        panel_polygon=polygon,
+    )
+
+    created = inferencer._create_aoi_centered_tiles_v2(
+        image=image,
+        result=result,
+        defects=[defect],
+        product_resolution=product_resolution,
+        pre_cfg=PreprocessConfig(tile_size=512),
+    )
+
+    assert created == 1
+    tile = result.tiles[0]
+    assert (tile.aoi_image_x, tile.aoi_image_y) == (3321, 1931)
+    assert (tile.x, tile.y) == (3065, 1675)
+    assert (tile.aoi_tile_shift_dx, tile.aoi_tile_shift_dy) == (0, 0)
+    assert tile.zone == "inner"
 
 
 def test_v2_aoi_top_edge_locks_inward_shift_to_y_axis():
