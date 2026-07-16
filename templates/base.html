@@ -32,7 +32,7 @@
         }
     </script>
     <script type="module">
-        import mermaid from '/static/js/node_modules/mermaid/dist/mermaid.esm.min.mjs';
+        import mermaid from '/static/js/mermaid.esm.min.mjs';
         mermaid.initialize({ startOnLoad: true, theme: 'dark' });
     </script>
     <style>
@@ -425,7 +425,7 @@
                     <path stroke-linecap="round" stroke-linejoin="round"
                         d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm.75-12h9v9h-9v-9z" />
                 </svg>
-                MOD2 CAPI AD-AI智能檢測
+                CAPI AD-AI智能檢測
                 {% if host_identity %}
                 <span class="host-identity-badge" title="{{ host_identity|e }}">{{ host_identity|e }}</span>
                 {% endif %}
@@ -519,14 +519,28 @@
                 </div>
                 <div>
                     <h2 class="text-xl md:text-2xl font-semibold text-slate-100 font-sans tracking-wide m-0">CAPI
-                        檢測系統原理與流程</h2>
-                    <p class="text-sm text-slate-400 mt-1" style="font-family: 'Fira Code', monospace;">Detection Logic
-                        & Workflow Architecture</p>
+                        檢測系統現行邏輯與流程</h2>
+                    <p class="text-sm text-slate-400 mt-1" style="font-family: 'Fira Code', monospace;">Current Detection
+                        Pipeline &amp; Decision Flow</p>
                 </div>
             </div>
 
             <!-- Modal Body (Scrollable) -->
-            <div class="p-6 overflow-y-auto custom-scrollbar flex-1 flex flex-col gap-6">
+            <div class="p-6 overflow-y-auto custom-scrollbar flex-1 flex flex-col gap-5">
+                <div class="rounded-xl border border-blue-400/20 bg-blue-400/10 px-4 py-3 text-sm leading-relaxed text-blue-100">
+                    以下以目前的 <strong class="text-white">inner／edge 新架構</strong>為主；實際啟用的前處理、推論模式、門檻與後濾條件，仍以目前機種的模型設定及參數頁為準。舊式模型設定才可能使用傳統 CV 邊緣檢測。
+                </div>
+
+                <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-center text-xs"
+                    style="font-family: 'Fira Code', monospace;">
+                    <div class="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-2 py-2 text-emerald-300">1. 請求與預檢</div>
+                    <div class="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-2 py-2 text-cyan-300">2. 定位與切塊</div>
+                    <div class="rounded-lg border border-blue-500/20 bg-blue-500/10 px-2 py-2 text-blue-300">3. AI 推論</div>
+                    <div class="rounded-lg border border-orange-500/20 bg-orange-500/10 px-2 py-2 text-orange-300">4. 交叉驗證</div>
+                    <div class="rounded-lg border border-violet-500/20 bg-violet-500/10 px-2 py-2 text-violet-300">5. 多層後濾</div>
+                    <div class="rounded-lg border border-rose-500/20 bg-rose-500/10 px-2 py-2 text-rose-300">6. 判定與回報</div>
+                </div>
+
                 <!-- Info text cards -->
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div
@@ -534,18 +548,18 @@
                         <h3 class="text-green-400 mb-3 flex items-center gap-2 text-sm uppercase tracking-wider font-semibold"
                             style="font-family: 'Fira Code', monospace;">
                             <span class="w-2 h-2 rounded-full bg-green-500 pulse-dot inline-block block"></span>
-                            預處理與遮罩階段
+                            01 請求、定位與切塊
                         </h3>
                         <ul class="text-slate-300 text-sm flex flex-col gap-2 leading-relaxed m-0 p-0">
                             <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
-                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>使用 Otsu
-                                    二值化自動裁切前景並執行底部裁切 (Bottom Crop) 以過濾邊緣干擾。</span></li>
+                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>依 AOI 請求中的 <strong
+                                        class="text-slate-100">ModelID</strong> 選擇機種及目前啟用的模型 bundle，並整理最新一組點燈影像。</span></li>
                             <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
-                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>透過 Template Matching
-                                    識別排除區域 (例如 MARK 二維碼與機構位置)。</span></li>
+                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>優先使用 W0F 畫面，透過 <strong
+                                        class="text-slate-100">Otsu＋四角 Polygon</strong> 找出產品邊界，並讓其他點燈畫面共用定位結果。</span></li>
                             <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
-                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>將面板影像切分為 512x512
-                                    的非重疊圖塊 (Tiles) 並套用計算好的排除區域遮罩。</span></li>
+                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>依設定走完整 Grid 或 AOI 座標中心切塊；512×512 Tile
+                                    會分為 <strong class="text-cyan-300">inner／edge</strong>，靠邊 Tile 會向產品內側修正。</span></li>
                         </ul>
                     </div>
 
@@ -557,21 +571,20 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                     d="M13 10V3L4 14h7v7l9-11h-7z"></path>
                             </svg>
-                            AI 推論與表面膜過濾
+                            02 PatchCore 與 AOI 推論
                         </h3>
                         <ul class="text-slate-300 text-sm flex flex-col gap-2 leading-relaxed m-0 p-0">
                             <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
                                     style="font-family: 'Fira Code', monospace;">&gt;</span> <span><strong
-                                        class="text-slate-100">PatchCore 模型</strong> 對每個 Tile 進行推論以產生異常分數與熱圖。</span>
+                                        class="text-slate-100">五種主要點燈</strong>各自使用 inner／edge PatchCore 模型與門檻，產生異常分數及熱圖。</span>
                             </li>
                             <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
                                     style="font-family: 'Fira Code', monospace;">&gt;</span>
-                                <span>分數若大於閾值，系統會進行進階的交叉驗證。</span>
+                                <span>Polygon、MARK 與不檢測區遮罩會先作用於熱圖及分數，再與該 lighting／zone 的門檻比較。</span>
                             </li>
                             <li class="flex items-start gap-2"><span class="text-slate-500 mt-0.5"
-                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>包含真實缺陷即判定為
-                                    <strong class="text-red-500 text-base">🔴 NG</strong>，無異常則判定為 <strong
-                                        class="text-green-500 text-base">🟢 OK</strong>。</span></li>
+                                    style="font-family: 'Fira Code', monospace;">&gt;</span> <span>AOI 座標 Tile 未達門檻時只做 <strong
+                                        class="text-yellow-300">Track-only</strong>；B0F 黑畫面使用亮點偵測，不走 PatchCore。</span></li>
                         </ul>
                     </div>
 
@@ -584,31 +597,29 @@
                                     d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z">
                                 </path>
                             </svg>
-                            CV 傳統邊緣檢測與排除邏輯
+                            03 MARK、不檢測區與最終判定
                         </h3>
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <ul class="text-slate-300 text-sm flex flex-col gap-2 leading-relaxed m-0 p-0">
                                 <li class="flex items-start gap-2"><span class="text-teal-600 mt-0.5"
                                         style="font-family: 'Fira Code', monospace;">1.</span>
-                                    <span>對邊緣 ROI 執行中值濾波以預估背景層，計算原始圖與背景的 <strong class="text-slate-100">絕對差值圖
-                                            (AbsDiff)</strong>。</span>
+                                    <span>從 W0F 畫面辨識 <strong class="text-slate-100">點陣 MARK 字元</strong>，保留文字、信心值、方向與位置資訊。</span>
                                 </li>
                                 <li class="flex items-start gap-2"><span class="text-teal-600 mt-0.5"
                                         style="font-family: 'Fira Code', monospace;">2.</span>
-                                    <span>透過連通區域分析 (CCA) 提取特徵，並根據 <strong class="text-slate-100">亮度閾值</strong> 與 <strong
-                                            class="text-slate-100">面積大小</strong> 過濾微小噪點。</span>
+                                    <span>Polygon 外部、MARK 與人工設定的不檢測區會遮罩或降低熱圖權重；相關結果仍保留供追溯。</span>
                                 </li>
                             </ul>
                             <ul class="text-slate-300 text-sm flex flex-col gap-2 leading-relaxed m-0 p-0">
                                 <li class="flex items-start gap-2"><span class="text-teal-600 mt-0.5"
                                         style="font-family: 'Fira Code', monospace;">3.</span>
-                                    <span>取區域內最高對比像素作為 <strong class="text-teal-400">「差異值
-                                            (Diff)」</strong>，數值越大代表缺陷越顯著。</span>
+                                    <span>炸彈模擬缺陷、不檢測區與 Track-only 不列入一般 NG；啟用時，Scratch Classifier 會再過濾高信心表面刮痕。</span>
                                 </li>
                                 <li class="flex items-start gap-2"><span class="text-teal-600 mt-0.5"
                                         style="font-family: 'Fira Code', monospace;">4.</span>
-                                    <span>最終比對配置的 <strong
-                                            class="text-orange-400">不檢測排除區域</strong>，PatchCore 推論及邊緣檢測若缺陷位置落在排除框內，仍存圖但標記為「不檢測區域」並視為 OK。</span>
+                                    <span>彙總後仍有有效缺陷即為 <strong class="text-red-400">NG</strong>，否則為 <strong
+                                            class="text-green-400">OK</strong>；原始 NG 整片符合規格內條件時轉為 <strong
+                                            class="text-cyan-300">OK-i</strong>。QJPG 對外回覆為 OK，系統內仍保留 OK-i 追溯紀錄。</span>
                                 </li>
                             </ul>
                         </div>
@@ -624,50 +635,58 @@
                                 d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z">
                             </path>
                         </svg>
-                        OMIT 灰塵交叉驗證與濾除邏輯 (IoU)
+                        04 OMIT／PINIGBI 表面污染交叉驗證
                     </h3>
                     <div class="text-slate-300 text-sm leading-relaxed mb-4">
-                        當 AD 模型偵測到異常（給出大於閾值的異常分數）時，系統會進行進階的交叉驗證，以確認該異常是否僅為表面膜上的灰塵或刮痕：
+                        PatchCore 出現達門檻的異常，且 OMIT／PINIGBI 影像可用時，系統才會以對應位置的污染遮罩逐熱區複驗；實際指標與選配功能依目前參數設定。
                     </div>
                     <ul class="text-slate-300 text-sm flex flex-col gap-3 m-0 p-0">
                         <li class="flex items-start gap-2">
                             <span class="text-slate-500 mt-0.5" style="font-family: 'Fira Code', monospace;">1.</span>
                             <div>
-                                <strong class="text-slate-100">灰塵特徵提取：</strong>在 OMIT 影像的對應位置上，使用 CLAHE 局部對比增強與 Otsu
-                                自適應二值化，精準捕捉微小顆粒 (P) 與細長刮痕 (S)，生成灰塵遮罩。
+                                <strong class="text-slate-100">建立污染遮罩：</strong>CLAHE、Top-Hat、Otsu 與連通區域分析會提取亮／暗顆粒、細長刮痕，以及設定啟用時的氣泡或像素格抑制結果。
                             </div>
                         </li>
                         <li class="flex items-start gap-2">
                             <span class="text-slate-500 mt-0.5" style="font-family: 'Fira Code', monospace;">2.</span>
                             <div>
-                                <strong class="text-slate-100">IoU 交叉驗證：</strong>將 AD 模型的「異常熱圖亮區」與 OMIT
-                                的「灰塵遮罩」進行對比，計算出兩者的 <strong
-                                    class="text-orange-400 bg-orange-400/10 px-1 py-0.5 rounded">IoU (Intersection over
-                                    Union，重疊比例)</strong>。
+                                <strong class="text-slate-100">逐熱區比對：</strong>將熱圖前段高分區拆成獨立連通區域，再依設定使用 <strong
+                                    class="text-orange-400 bg-orange-400/10 px-1 py-0.5 rounded">Coverage 或 IoU</strong>
+                                與污染遮罩比對，並檢查峰值、次峰及高覆蓋率條件。
                             </div>
                         </li>
                         <li class="flex items-start gap-2">
                             <span class="text-slate-500 mt-0.5" style="font-family: 'Fira Code', monospace;">3.</span>
                             <div>
-                                <strong class="text-slate-100">判定與過濾：</strong>若計算出的 IoU 達標 (<code
-                                    style="font-family: 'Fira Code', monospace;">>=IOU_THR</code>)，則系統判定該處為表面膜灰塵造成的假陽性，並標記為
+                                <strong class="text-slate-100">保留真實缺陷：</strong>所有熱區皆符合污染條件才標記為
                                 <code class="text-yellow-500 text-xs bg-yellow-500/10 px-1 py-0.5 rounded"
-                                    style="font-family: 'Fira Code', monospace;">DUST (Filtered as OK)</code>。
+                                    style="font-family: 'Fira Code', monospace;">DUST</code>；只要仍有非污染熱區就保留為
+                                <code class="text-red-400 text-xs bg-red-500/10 px-1 py-0.5 rounded"
+                                    style="font-family: 'Fira Code', monospace;">REAL_NG</code>。OMIT 缺圖或過曝時不會據此濾除 NG。
                             </div>
                         </li>
                     </ul>
                     <div
                         class="mt-4 p-3 bg-slate-900/60 rounded-lg border border-slate-700/50 text-xs font-mono text-slate-400">
                         <span class="text-slate-500 mb-1 inline-block">// 判定數據標籤釋義</span><br>
-                        <span class="text-yellow-500">Thr:</span> <span class="text-slate-400">二值化閾值</span>
+                        <span class="text-yellow-500">P / S / Bub:</span> <span class="text-slate-400">顆粒／刮痕／氣泡</span>
                         &nbsp;|&nbsp;
-                        <span class="text-yellow-500">P:</span> <span class="text-slate-400">顆粒數量</span> &nbsp;|&nbsp;
-                        <span class="text-yellow-500">S:</span> <span class="text-slate-400">刮痕數量</span> &nbsp;|&nbsp;
-                        <span class="text-yellow-500">Area:</span> <span class="text-slate-400">灰塵總面積</span>
+                        <span class="text-yellow-500">COV / IOU:</span> <span class="text-slate-400">目前設定的重疊指標</span>
                         &nbsp;|&nbsp;
-                        <span class="text-yellow-500">Ratio:</span> <span class="text-slate-400">灰塵佔比</span>
-                        &nbsp;|&nbsp;
-                        <span class="text-yellow-500">IOU:</span> <span class="text-slate-400">重疊率</span>
+                        <span class="text-red-400">REAL_NG:</span> <span class="text-slate-400">仍存在非污染熱區</span>
+                    </div>
+                </div>
+
+                <div class="bg-slate-900/60 border border-slate-700/50 rounded-xl p-4">
+                    <div class="text-slate-500 text-xs mb-3" style="font-family: 'Fira Code', monospace;">// 常見結果標記</div>
+                    <div class="flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-400">
+                        <span><strong class="text-green-400">OK</strong> 無有效缺陷</span>
+                        <span><strong class="text-red-400">NG</strong> 真實缺陷</span>
+                        <span><strong class="text-cyan-300">OK-i</strong> 規格內轉 OK</span>
+                        <span><strong class="text-yellow-500">DUST</strong> 表面污染濾除</span>
+                        <span><strong class="text-slate-300">EXCLUDED</strong> 不檢測區</span>
+                        <span><strong class="text-fuchsia-300">BOMB</strong> 模擬缺陷</span>
+                        <span><strong class="text-blue-300">TRACK-ONLY</strong> 未達 NG 門檻</span>
                     </div>
                 </div>
 
