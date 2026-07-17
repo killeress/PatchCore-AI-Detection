@@ -1,14 +1,19 @@
 # CAPI AI 實驗版自動更新同步
 
-目的：先在未正式 RUN 的兩台設備上驗證「只更新一台，其餘設備自動拉取更新包、套用、重啟」的流程。
+目的：由更新主機發布版本，其餘設備定期拉取並驗證更新包；前端提醒管理人員在機台停止檢測後，手動套用並重啟。
 
 ## 設計邊界
 
 - 採用 pull 模式：實驗機定期讀取更新主機上的 `latest.json`，不是由更新主機主動連進每台設備。
 - 同步的是 patch ZIP，不是散檔。
 - 不同步 `server_config.yaml`、SQLite DB、heatmap、log、現場資料、AOI 圖片路徑。
-- 安裝仍走既有 `install_patch.sh`，會先驗 checksum、備份被覆蓋檔案、解壓、重啟、檢查 `/api/version`。
+- cron 只下載並驗證 ZIP，不會自動覆蓋程式或重啟服務。
+- 管理人員從前端按下「套用更新並重啟」後，才會執行既有 `install_patch.sh`：驗 checksum、備份、解壓、重啟並檢查 `/api/version`。
 - updater 預設會設定 `CAPI_PATCH_AUTO_ROLLBACK=1`；若健康檢查失敗且 `rollback_patch.sh` 可執行，會自動回滾。
+
+## 從舊版切換時的注意事項
+
+目前設備上的舊版 `capi_update_agent.py check` 仍會自動安裝及重啟，因此第一次導入本版時，不要直接在檢測期間發布到 `latest.json`。請先暫停 follower 的 cron，或選擇安全時段人工安裝本版；確認本版已啟動後再恢復 cron。從下一個版本開始，cron 才會只暫存更新並等待前端人工確認。
 
 ## 更新主機
 
@@ -48,9 +53,9 @@ cd /root/Code/CAPI_AD
 ./setup_auto_update_client.sh http://<第一台IP>:8088/latest.json --run-now
 ```
 
-這支腳本會建立 cron，每 5 分鐘檢查一次 `latest.json`。`--run-now` 會在設定完成後立刻執行一次更新。
+這支腳本會建立 cron，每 5 分鐘檢查一次 `latest.json`。`--run-now` 只會立刻檢查、下載並暫存新版，不會自動重啟。
 
-之後每次新版只要重複第一台的 `promote_update.sh`，第二、三台會由 cron 自動拉取。
+之後每次新版只要重複第一台的 `promote_update.sh`，第二、三台會由 cron 自動拉取。待更新版本會顯示在前端；請先停止機台檢測，再由 admin 登入並按下「套用更新並重啟」。
 
 產生 patch ZIP：
 
@@ -107,13 +112,19 @@ python3 capi_update_agent.py check \
 
 上面的健康檢查 URL 依目前 production `server_config.yaml` 的 web port 80 撰寫；若設備實際使用 8080，改成 `http://127.0.0.1:8080/api/version`。
 
-## 實際套用一次
+## 暫存並手動套用一次
 
 ```bash
 cd /root/Code/CAPI_AD
 python3 capi_update_agent.py check \
   --manifest-url http://<更新主機IP>:8088/latest.json \
   --health-url http://127.0.0.1/api/version
+```
+
+上面的命令只會把更新包暫存在 `update/incoming/`，並將狀態寫到 `update/auto_update_state.json`。確認機台已停止檢測後，可從前端按下「套用更新並重啟」。如需在終端機手動操作，可執行：
+
+```bash
+python3 capi_update_agent.py apply
 ```
 
 成功後檢查：
@@ -127,7 +138,7 @@ cat update/auto_update_state.json
 
 ## 週期性檢查
 
-cron 範例，每 5 分鐘檢查一次：
+cron 範例，每 5 分鐘檢查並暫存新版一次；不會自動安裝或重啟：
 
 ```cron
 */5 * * * * cd /root/Code/CAPI_AD && /usr/bin/python3 capi_update_agent.py check --manifest-url http://<更新主機IP>:8088/latest.json --health-url http://127.0.0.1/api/version >> /aidata/capi_ai/logs/auto_update_cron.log 2>&1
@@ -147,7 +158,7 @@ nohup python3 capi_update_agent.py check \
 ## 失敗處理
 
 - checksum 不符：不會安裝，會記錄到 `update/auto_update_state.json`。
-- installer 失敗：不會標記成功，同一版本預設不重試；修好原因後加 `--retry-failed` 再跑。
+- installer 失敗：前端會保留失敗提示與待更新版本；排除原因後可再次按下按鈕重試。
 - 健康檢查失敗：`install_patch.sh` 在 updater 呼叫下會自動執行 rollback。
 - 若設備沒有 `curl`，`install_patch.sh` 會略過健康檢查；實驗機請先安裝或確認有可用 `curl`。
 
