@@ -13,6 +13,8 @@ CAPI AI Web 查閱介面
 
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import json
 import hashlib
@@ -2679,6 +2681,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     _settings_session_ttl_seconds = 12 * 60 * 60
     _settings_sessions: Dict[str, Dict[str, Any]] = {}
     _settings_session_lock: threading.Lock = threading.Lock()
+    _update_state_file = Path(__file__).resolve().parent / "update" / "auto_update_state.json"
+    _update_apply_lock: threading.Lock = threading.Lock()
     # ── 訓練 wizard 多 job 註冊表（由 create_web_server 完整初始化） ─────────
     # _train_new_jobs key = job_id；value = per-job runtime dict，欄位：
     #   thread:        Thread (preprocess supervisor / training supervisor)
@@ -3063,6 +3067,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_status()
             elif path == "/api/version":
                 self._handle_api_version()
+            elif path == "/api/update/status":
+                self._handle_api_update_status()
             elif path == "/settings/login":
                 self._handle_settings_login_page(path)
             elif path == "/settings/logout":
@@ -3240,6 +3246,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_settings_login()
             elif path == "/api/settings/logout":
                 self._handle_api_settings_logout()
+            elif path == "/api/update/apply":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_update_apply()
             elif path == "/api/settings/users/create":
                 if self._require_settings_user(api=True, admin=True):
                     self._handle_api_settings_user_create()
@@ -4235,6 +4244,108 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _handle_api_version(self):
         """API: deployed release version."""
         self._send_json(get_version_info())
+
+    def _handle_api_update_status(self):
+        """API: sanitized pending-update status for the frontend notice."""
+        from capi_update_agent import _load_state
+
+        state = _load_state(self._update_state_file)
+        pending = state.get("pending_update") if isinstance(state.get("pending_update"), dict) else {}
+        failed = state.get("last_failed") if isinstance(state.get("last_failed"), dict) else {}
+        current_version = str(get_version_info().get("version") or "unknown")
+        pending_version = str(pending.get("version") or "")
+        status = str(state.get("status") or ("pending" if pending_version else "current"))
+
+        if pending_version == current_version:
+            pending_version = ""
+            status = "current"
+        elif not pending_version and status not in {"failed", "apply_requested", "installing"}:
+            status = "current"
+
+        self._send_json({
+            "status": status,
+            "current_version": current_version,
+            "pending_version": pending_version,
+            "detected_at": pending.get("detected_at"),
+            "can_apply": bool(pending_version) and status in {"pending", "failed"},
+            "failure_reason": str(failed.get("reason") or "")[:240],
+        })
+
+    def _handle_api_update_apply(self):
+        """Launch the staged updater outside the server process, then return 202."""
+        from capi_update_agent import _load_state, _write_state
+
+        tracker = getattr(self, "status_tracker", None)
+        if tracker is not None:
+            runtime_status = tracker.get_status()
+            active_inferences = int(runtime_status.get("traffic", {}).get("active_inferences") or 0)
+            if active_inferences > 0:
+                self._send_json({
+                    "error": f"目前仍有 {active_inferences} 筆檢測進行中，請稍後再試",
+                }, status=409)
+                return
+
+        state_file = self._update_state_file
+        app_root = Path(__file__).resolve().parent
+        with self._update_apply_lock:
+            state = _load_state(state_file)
+            pending = state.get("pending_update")
+            if not isinstance(pending, dict):
+                self._send_json({"error": "目前沒有待套用的更新"}, status=409)
+                return
+            if state.get("status") in {"apply_requested", "installing"}:
+                self._send_json({"error": "更新已在執行中"}, status=409)
+                return
+
+            version = str(pending.get("version") or "").strip()
+            state["status"] = "apply_requested"
+            state["apply_requested"] = {
+                "version": version,
+                "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            }
+            _write_state(state_file, state)
+
+            command = [
+                sys.executable,
+                str(app_root / "capi_update_agent.py"),
+                "apply",
+                "--app-root",
+                str(app_root),
+                "--state-file",
+                str(state_file),
+                "--delay",
+                "2",
+            ]
+            apply_log = state_file.parent / "manual_apply.log"
+            apply_log.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with apply_log.open("a", encoding="utf-8") as output:
+                    popen_kwargs = {
+                        "cwd": app_root,
+                        "stdout": output,
+                        "stderr": subprocess.STDOUT,
+                    }
+                    if os.name != "nt":
+                        popen_kwargs["start_new_session"] = True
+                    subprocess.Popen(command, **popen_kwargs)
+            except Exception as exc:
+                logger.error("Cannot start manual update process: %s", exc)
+                state.pop("apply_requested", None)
+                state["status"] = "failed"
+                state["last_failed"] = {
+                    "version": version,
+                    "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "reason": "cannot start manual update process",
+                }
+                _write_state(state_file, state)
+                self._send_json({"error": "無法啟動更新程序"}, status=500)
+                return
+
+        self._send_json({
+            "status": "apply_requested",
+            "version": version,
+            "message": "更新程序已啟動，服務即將重新啟動",
+        }, status=202)
 
     def _handle_api_stats(self, query: dict):
         """API: 統計資料"""
@@ -13801,6 +13912,7 @@ def create_web_server(
     }
     CAPIWebHandler._settings_sessions = {}
     CAPIWebHandler._settings_session_lock = threading.Lock()
+    CAPIWebHandler._update_apply_lock = threading.Lock()
     CAPIWebHandler._train_new_jobs = {}
     CAPIWebHandler._train_new_jobs_lock = threading.Lock()
     CAPIWebHandler._train_slot = {

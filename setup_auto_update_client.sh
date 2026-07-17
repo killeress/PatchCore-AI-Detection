@@ -1,5 +1,5 @@
 #!/bin/bash
-# Register periodic auto-update checks on a client host.
+# Register periodic update checks on a client host.
 #
 # Usage:
 #   ./setup_auto_update_client.sh http://<update-host>:8088/latest.json
@@ -70,12 +70,12 @@ echo "[1/2] Dry-run connectivity check..."
     --dry-run
 
 if [ "$RUN_NOW" -eq 1 ]; then
-    echo "[2/2] Running update now..."
+    echo "[2/2] Checking and staging an update now..."
     "$PYTHON_BIN" capi_update_agent.py check \
         --manifest-url "$MANIFEST_URL" \
         --health-url "$HEALTH_URL"
 else
-    echo "[2/2] Cron installed. Add --run-now to apply immediately."
+    echo "[2/2] Cron installed. Add --run-now to check immediately."
 fi
 
-echo "Auto-update client setup completed."
+echo "Update-check client setup completed. Pending updates must be applied from the frontend."

@@ -1,0 +1,162 @@
+<style>
+    .capi-update-notice {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        margin: 10px auto 0;
+        width: min(1380px, calc(100% - 20px));
+        padding: 12px 16px;
+        border: 1px solid #f59e0b;
+        border-radius: 10px;
+        background: #fffbeb;
+        color: #78350f;
+        box-shadow: 0 4px 14px rgba(146, 64, 14, 0.14);
+        flex-shrink: 0;
+        position: relative;
+        z-index: 20;
+    }
+
+    .capi-update-notice[hidden] {
+        display: none !important;
+    }
+
+    .capi-update-notice-copy {
+        min-width: 0;
+    }
+
+    .capi-update-notice-title {
+        font-weight: 700;
+        margin-bottom: 2px;
+    }
+
+    .capi-update-notice-message {
+        font-size: 13px;
+        line-height: 1.45;
+    }
+
+    .capi-update-notice button {
+        border: 0;
+        border-radius: 7px;
+        padding: 9px 14px;
+        background: #d97706;
+        color: #fff;
+        font: inherit;
+        font-weight: 700;
+        white-space: nowrap;
+        cursor: pointer;
+    }
+
+    .capi-update-notice button:disabled {
+        cursor: wait;
+        opacity: 0.65;
+    }
+
+    @media (max-width: 720px) {
+        .capi-update-notice {
+            align-items: stretch;
+            flex-direction: column;
+        }
+    }
+</style>
+
+<div id="capi-update-notice" class="capi-update-notice" role="status" hidden>
+    <div class="capi-update-notice-copy">
+        <div id="capi-update-notice-title" class="capi-update-notice-title">偵測到系統更新</div>
+        <div id="capi-update-notice-message" class="capi-update-notice-message"></div>
+    </div>
+    <button id="capi-update-apply" type="button">套用更新並重啟</button>
+</div>
+
+<script>
+    (function () {
+        const notice = document.getElementById('capi-update-notice');
+        const title = document.getElementById('capi-update-notice-title');
+        const message = document.getElementById('capi-update-notice-message');
+        const applyButton = document.getElementById('capi-update-apply');
+        let latestStatus = null;
+
+        if (!notice || !title || !message || !applyButton) return;
+
+        function renderUpdateStatus(data) {
+            latestStatus = data;
+            const status = data.status || 'current';
+            const pendingVersion = data.pending_version || '';
+
+            if (status === 'current' && !pendingVersion) {
+                notice.hidden = true;
+                return;
+            }
+
+            notice.hidden = false;
+            applyButton.hidden = !data.can_apply;
+            applyButton.disabled = false;
+            applyButton.textContent = status === 'failed' ? '重試套用並重啟' : '套用更新並重啟';
+
+            if (status === 'apply_requested' || status === 'installing') {
+                title.textContent = '正在套用更新並重新啟動服務';
+                message.textContent = '服務將短暫中斷，重新啟動完成後此提醒會自動消失。';
+                applyButton.hidden = true;
+                return;
+            }
+
+            if (status === 'failed') {
+                title.textContent = '系統更新失敗';
+                message.textContent = data.failure_reason
+                    ? `版本 ${pendingVersion || '未知'}：${data.failure_reason}`
+                    : '請查看 update/manual_apply.log，排除問題後再重試。';
+                return;
+            }
+
+            title.textContent = `偵測到新版本 ${pendingVersion}`;
+            message.textContent = `目前版本 ${data.current_version}。請先確認機台已停止檢測，再由管理人員手動套用並重啟服務。`;
+        }
+
+        async function fetchUpdateStatus() {
+            try {
+                const response = await fetch('/api/update/status', { cache: 'no-store' });
+                if (!response.ok) return;
+                renderUpdateStatus(await response.json());
+            } catch (error) {
+                // 重新啟動期間連線失敗屬正常現象，保留目前提示即可。
+            }
+        }
+
+        applyButton.addEventListener('click', async function () {
+            if (!latestStatus || !latestStatus.pending_version) return;
+            const confirmed = window.confirm(
+                `即將套用版本 ${latestStatus.pending_version} 並重新啟動服務。\n\n` +
+                '請確認機台已停止檢測，且目前沒有玻璃正在推論。'
+            );
+            if (!confirmed) return;
+
+            applyButton.disabled = true;
+            applyButton.textContent = '啟動更新中...';
+            try {
+                const response = await fetch('/api/update/apply', {
+                    method: 'POST',
+                });
+                const payload = await response.json();
+                if (response.status === 401) {
+                    window.location.href = '/settings/login?next=' + encodeURIComponent(window.location.pathname);
+                    return;
+                }
+                if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+                renderUpdateStatus({
+                    status: 'apply_requested',
+                    current_version: latestStatus.current_version,
+                    pending_version: latestStatus.pending_version,
+                    can_apply: false,
+                });
+            } catch (error) {
+                window.alert(`無法啟動更新：${error.message}`);
+                applyButton.disabled = false;
+                applyButton.textContent = '套用更新並重啟';
+                fetchUpdateStatus();
+            }
+        });
+
+        fetchUpdateStatus();
+        window.setInterval(fetchUpdateStatus, 10000);
+    })();
+</script>

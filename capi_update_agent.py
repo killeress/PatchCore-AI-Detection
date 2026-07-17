@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Experimental pull-based updater for CAPI AI patch ZIPs.
+"""Pull-based updater for staging and manually applying CAPI AI patch ZIPs.
 
-The updater intentionally runs outside capi_server.py so it can restart the
-service after applying a patch.
+Periodic checks only download and verify a pending package.  Applying the
+package is a separate command so an operator can choose a safe restart time.
 """
 from __future__ import annotations
 
@@ -192,12 +192,18 @@ def check_once(args: argparse.Namespace) -> int:
     state = _load_state(state_file)
 
     if wanted_version == current_version:
+        pending = state.get("pending_update")
+        if isinstance(pending, dict) and pending.get("version") == wanted_version:
+            state.pop("pending_update", None)
+            state.pop("last_failed", None)
+            state["status"] = "current"
+            state["checked_at"] = _now_iso()
+            _write_state(state_file, state)
         _append_log(log_file, f"already on version {wanted_version}; no update")
         return 0
 
-    last_failed = state.get("last_failed") if isinstance(state.get("last_failed"), dict) else {}
-    if last_failed.get("version") == wanted_version and not args.retry_failed:
-        _append_log(log_file, f"version {wanted_version} failed before; skip without --retry-failed")
+    if state.get("status") in {"apply_requested", "installing"}:
+        _append_log(log_file, "manual update is already in progress; skip this check")
         return 0
 
     package_location = _resolve_package_location(args.manifest_url, manifest["package"])
@@ -208,11 +214,22 @@ def check_once(args: argparse.Namespace) -> int:
         _append_log(log_file, f"dry run: would download {package_location}")
         return 0
 
-    _append_log(log_file, f"downloading {package_location}")
-    _download_package(package_location, package_path, args.timeout)
+    pending = state.get("pending_update") if isinstance(state.get("pending_update"), dict) else {}
+    package_already_staged = (
+        pending.get("version") == wanted_version
+        and pending.get("sha256") == manifest["sha256"]
+        and package_path.is_file()
+        and _sha256_file(package_path) == manifest["sha256"]
+    )
+    if package_already_staged:
+        _append_log(log_file, f"version {wanted_version} is already staged for manual apply")
+    else:
+        _append_log(log_file, f"downloading {package_location}")
+        _download_package(package_location, package_path, args.timeout)
 
     actual_sha256 = _sha256_file(package_path)
     if actual_sha256 != manifest["sha256"]:
+        state["status"] = "failed"
         state["last_failed"] = {
             "version": wanted_version,
             "at": _now_iso(),
@@ -222,6 +239,88 @@ def check_once(args: argparse.Namespace) -> int:
         }
         _write_state(state_file, state)
         raise RuntimeError(f"checksum mismatch for {package_path}")
+
+    last_failed = state.get("last_failed") if isinstance(state.get("last_failed"), dict) else {}
+    state["pending_update"] = {
+        "version": wanted_version,
+        "package": str(package_path.resolve()),
+        "sha256": manifest["sha256"],
+        "manifest_url": args.manifest_url,
+        "detected_at": pending.get("detected_at") or _now_iso(),
+        "health_url": args.health_url or pending.get("health_url"),
+        "download_dir": str(Path(download_dir).resolve()),
+    }
+    state["checked_at"] = _now_iso()
+    if last_failed.get("version") == wanted_version:
+        state["status"] = "failed"
+    else:
+        state["status"] = "pending"
+        state.pop("last_failed", None)
+    _write_state(state_file, state)
+    _append_log(log_file, f"staged version {wanted_version}; waiting for manual apply")
+    return 0
+
+
+def apply_pending(args: argparse.Namespace) -> int:
+    app_root = args.app_root.resolve()
+    update_dir = (app_root / "update").resolve()
+    log_file = args.log_file or update_dir / "auto_update.log"
+    state_file = args.state_file or update_dir / "auto_update_state.json"
+
+    if args.delay > 0:
+        _append_log(log_file, f"manual apply requested; starting in {args.delay}s")
+        time.sleep(args.delay)
+
+    state = _load_state(state_file)
+    if state.get("status") == "installing":
+        _append_log(log_file, "another manual update is already installing")
+        return 5
+
+    pending = state.get("pending_update")
+    if not isinstance(pending, dict):
+        _append_log(log_file, "no staged update to apply")
+        return 3
+
+    wanted_version = str(pending.get("version") or "").strip()
+    expected_sha256 = str(pending.get("sha256") or "").strip().lower()
+    download_dir = Path(
+        args.download_dir or pending.get("download_dir") or update_dir / "incoming"
+    ).resolve()
+    current_version = _read_current_version(app_root)
+    if wanted_version == current_version:
+        state.pop("pending_update", None)
+        state.pop("last_failed", None)
+        state["status"] = "current"
+        _write_state(state_file, state)
+        _append_log(log_file, f"already on version {wanted_version}; cleared pending update")
+        return 0
+
+    try:
+        package_path = Path(str(pending.get("package") or "")).resolve()
+        try:
+            package_path.relative_to(download_dir)
+        except ValueError as exc:
+            raise ValueError("staged package is outside update/incoming") from exc
+        if not package_path.is_file():
+            raise ValueError("staged package is missing")
+        if len(expected_sha256) != 64:
+            raise ValueError("pending update has invalid sha256")
+        actual_sha256 = _sha256_file(package_path)
+        if actual_sha256 != expected_sha256:
+            raise ValueError("staged package checksum mismatch")
+        if _read_zip_version(package_path) != wanted_version:
+            raise ValueError("staged package version mismatch")
+    except Exception as exc:
+        state.pop("apply_requested", None)
+        state["status"] = "failed"
+        state["last_failed"] = {
+            "version": wanted_version,
+            "at": _now_iso(),
+            "reason": str(exc),
+        }
+        _write_state(state_file, state)
+        _append_log(log_file, f"manual apply validation failed: {exc}")
+        return 4
 
     install_script = app_root / "install_patch.sh"
     if args.install_command:
@@ -233,11 +332,19 @@ def check_once(args: argparse.Namespace) -> int:
     env = os.environ.copy()
     if not args.no_auto_rollback:
         env["CAPI_PATCH_AUTO_ROLLBACK"] = "1"
-    if args.health_url:
-        env["CAPI_HEALTH_URL"] = args.health_url
+    health_url = args.health_url or pending.get("health_url")
+    if health_url:
+        env["CAPI_HEALTH_URL"] = str(health_url)
     env.setdefault("CAPI_PYTHON_BIN", sys.executable)
 
-    _append_log(log_file, f"installing {package_path}")
+    state.pop("apply_requested", None)
+    state["status"] = "installing"
+    state["installing"] = {
+        "version": wanted_version,
+        "started_at": _now_iso(),
+    }
+    _write_state(state_file, state)
+    _append_log(log_file, f"manually installing {package_path}")
     proc = subprocess.run(
         install_args,
         cwd=app_root,
@@ -251,6 +358,8 @@ def check_once(args: argparse.Namespace) -> int:
         _append_log(log_file, proc.stderr.rstrip())
 
     if proc.returncode != 0:
+        state.pop("installing", None)
+        state["status"] = "failed"
         state["last_failed"] = {
             "version": wanted_version,
             "at": _now_iso(),
@@ -262,6 +371,8 @@ def check_once(args: argparse.Namespace) -> int:
 
     installed_version = _read_current_version(app_root)
     if installed_version != wanted_version:
+        state.pop("installing", None)
+        state["status"] = "failed"
         state["last_failed"] = {
             "version": wanted_version,
             "at": _now_iso(),
@@ -275,9 +386,12 @@ def check_once(args: argparse.Namespace) -> int:
         "version": wanted_version,
         "at": _now_iso(),
         "package": str(package_path),
-        "manifest_url": args.manifest_url,
+        "manifest_url": pending.get("manifest_url"),
     }
+    state.pop("pending_update", None)
+    state.pop("installing", None)
     state.pop("last_failed", None)
+    state["status"] = "current"
     _write_state(state_file, state)
     _append_log(log_file, f"updated to version {wanted_version}")
     return 0
@@ -312,21 +426,29 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--package-url", default=None, help="absolute package URL; default is relative ZIP filename")
     publish.set_defaults(func=publish_manifest)
 
-    check = subparsers.add_parser("check", help="check latest.json and install a newer patch")
+    check = subparsers.add_parser("check", help="check latest.json and stage a newer patch")
     check.add_argument("--manifest-url", required=True, help="http(s), ftp, file URL, or local path to latest.json")
     check.add_argument("--app-root", type=Path, default=PROJECT_ROOT)
     check.add_argument("--download-dir", type=Path, default=None)
     check.add_argument("--state-file", type=Path, default=None)
     check.add_argument("--log-file", type=Path, default=None)
-    check.add_argument("--install-command", default=None, help="defaults to <app-root>/install_patch.sh")
     check.add_argument("--timeout", type=int, default=30)
-    check.add_argument("--health-url", default=None, help="passed to install_patch.sh as CAPI_HEALTH_URL")
+    check.add_argument("--health-url", default=None, help="stored for the later manual apply")
     check.add_argument("--dry-run", action="store_true")
-    check.add_argument("--retry-failed", action="store_true")
-    check.add_argument("--no-auto-rollback", action="store_true")
     check.add_argument("--loop", action="store_true", help="keep polling instead of checking once")
     check.add_argument("--interval", type=int, default=300, help="poll interval when --loop is used")
     check.set_defaults(func=run_check)
+
+    apply_cmd = subparsers.add_parser("apply", help="manually install the staged update and restart")
+    apply_cmd.add_argument("--app-root", type=Path, default=PROJECT_ROOT)
+    apply_cmd.add_argument("--download-dir", type=Path, default=None)
+    apply_cmd.add_argument("--state-file", type=Path, default=None)
+    apply_cmd.add_argument("--log-file", type=Path, default=None)
+    apply_cmd.add_argument("--install-command", default=None, help="defaults to <app-root>/install_patch.sh")
+    apply_cmd.add_argument("--health-url", default=None, help="override the health URL stored by check")
+    apply_cmd.add_argument("--no-auto-rollback", action="store_true")
+    apply_cmd.add_argument("--delay", type=int, default=0, help="seconds to wait before install")
+    apply_cmd.set_defaults(func=apply_pending)
 
     return parser
 
