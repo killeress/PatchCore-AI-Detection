@@ -159,7 +159,7 @@ nohup python3 capi_update_agent.py check \
 
 - checksum 不符：不會安裝，會記錄到 `update/auto_update_state.json`。
 - installer 失敗：前端會保留失敗提示與待更新版本；排除原因後可再次按下按鈕重試。
-- 健康檢查失敗：`install_patch.sh` 在 updater 呼叫下會自動執行 rollback。
+- 健康檢查失敗：`install_patch.sh` 在 updater 呼叫下會自動執行 rollback；預設等待服務恢復 120 秒，可用 `CAPI_HEALTH_TIMEOUT_SECONDS` 調整。
 - 若設備沒有 `curl`，`install_patch.sh` 會略過健康檢查；實驗機請先安裝或確認有可用 `curl`。
 
 手動回滾仍可用：

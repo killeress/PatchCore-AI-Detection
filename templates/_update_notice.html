@@ -104,7 +104,7 @@
                 title.textContent = '系統更新失敗';
                 message.textContent = data.failure_reason
                     ? `版本 ${pendingVersion || '未知'}：${data.failure_reason}`
-                    : '請查看 update/manual_apply.log，排除問題後再重試。';
+                    : '請查看 update/auto_update.log 與 update/manual_apply.log，排除問題後再重試。';
                 return;
             }
 

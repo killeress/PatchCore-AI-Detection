@@ -360,10 +360,16 @@ def apply_pending(args: argparse.Namespace) -> int:
     if proc.returncode != 0:
         state.pop("installing", None)
         state["status"] = "failed"
+        if proc.returncode == 3:
+            reason = "health check failed; automatic rollback completed (install command exited 3)"
+        elif proc.returncode == 2:
+            reason = "health check failed (install command exited 2)"
+        else:
+            reason = f"install command exited {proc.returncode}"
         state["last_failed"] = {
             "version": wanted_version,
             "at": _now_iso(),
-            "reason": f"install command exited {proc.returncode}",
+            "reason": reason,
             "package": str(package_path),
         }
         _write_state(state_file, state)

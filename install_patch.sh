@@ -12,10 +12,16 @@ cd "$APP_ROOT"
 
 PATCH_ZIP="${1:-}"
 HEALTH_URL="${CAPI_HEALTH_URL:-http://127.0.0.1/api/version}"
+HEALTH_TIMEOUT_SECONDS="${CAPI_HEALTH_TIMEOUT_SECONDS:-120}"
 BACKUP_ROOT="${CAPI_PATCH_BACKUP_ROOT:-$APP_ROOT/.patch_backups}"
 
 if [ -z "$PATCH_ZIP" ]; then
     echo "Usage: $0 <patch-zip>"
+    exit 1
+fi
+
+if ! [[ "$HEALTH_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || [ "$HEALTH_TIMEOUT_SECONDS" -lt 1 ]; then
+    echo "ERROR: CAPI_HEALTH_TIMEOUT_SECONDS must be a positive integer"
     exit 1
 fi
 
@@ -123,7 +129,8 @@ fi
 echo "[5/5] Health check..."
 if command -v curl >/dev/null 2>&1; then
     ok=0
-    for _ in $(seq 1 20); do
+    echo "  Timeout    : ${HEALTH_TIMEOUT_SECONDS}s"
+    for _ in $(seq 1 "$HEALTH_TIMEOUT_SECONDS"); do
         if curl -fsS "$HEALTH_URL" >/tmp/capi_patch_health.json 2>/dev/null; then
             ok=1
             break
