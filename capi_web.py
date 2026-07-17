@@ -2712,6 +2712,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         "feature_cleaning_mode",
         "feature_cleaning_scope",
         "feature_cleaning_keep_ratio",
+        "feature_cleaning_center_size",
         "feature_cleaning_by_zone",
     })
 
@@ -10494,7 +10495,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "feature_pool_kernel_size": 3,
                 "feature_cleaning_mode": "off",
                 "feature_cleaning_scope": "inner_only",
-                "feature_cleaning_keep_ratio": 0.99
+                "feature_cleaning_keep_ratio": 0.99,
+                "feature_cleaning_center_size": 384
             },
             "image_preprocess_pipeline": [  # optional; omitted means recommended default
                 {"method": "bilateral", "params": {"diameter": 9}}
@@ -11479,6 +11481,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 ),
                 feature_cleaning_keep_ratio=patchcore_params.get(
                     "feature_cleaning_keep_ratio", 0.99,
+                ),
+                feature_cleaning_center_size=patchcore_params.get(
+                    "feature_cleaning_center_size", 512,
                 ),
                 feature_cleaning_by_zone=patchcore_params.get(
                     "feature_cleaning_by_zone"
@@ -13096,6 +13101,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 feature_cleaning_keep_ratio=patchcore_params.get(
                     "feature_cleaning_keep_ratio", 0.99,
                 ),
+                feature_cleaning_center_size=patchcore_params.get(
+                    "feature_cleaning_center_size", 512,
+                ),
                 feature_cleaning_by_zone=patchcore_params.get(
                     "feature_cleaning_by_zone"
                 ) or {},
@@ -13414,6 +13422,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 ),
                 feature_cleaning_keep_ratio=patchcore_params.get(
                     "feature_cleaning_keep_ratio", 0.99,
+                ),
+                feature_cleaning_center_size=patchcore_params.get(
+                    "feature_cleaning_center_size", 512,
                 ),
                 feature_cleaning_by_zone=patchcore_params.get(
                     "feature_cleaning_by_zone"

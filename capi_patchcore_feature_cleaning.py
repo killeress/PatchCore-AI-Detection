@@ -19,6 +19,7 @@ class FeatureDensityCleaningCallback(Callback):
         *,
         k: int = 30,
         keep_ratio: float = 0.99,
+        center_size: int | None = None,
         seed: int = 42,
         reference_size: int = 20_000,
         query_chunk: int = 1_024,
@@ -29,6 +30,8 @@ class FeatureDensityCleaningCallback(Callback):
             raise ValueError("k must be positive")
         if not 0 < keep_ratio <= 1:
             raise ValueError("keep_ratio must be in (0, 1]")
+        if center_size is not None and center_size < 1:
+            raise ValueError("center_size must be positive")
         if reference_size <= k:
             raise ValueError("reference_size must be greater than k")
         if query_chunk < 1:
@@ -36,6 +39,7 @@ class FeatureDensityCleaningCallback(Callback):
 
         self.k = k
         self.keep_ratio = keep_ratio
+        self.center_size = center_size
         self.seed = seed
         self.reference_size = reference_size
         self.query_chunk = query_chunk
@@ -49,12 +53,12 @@ class FeatureDensityCleaningCallback(Callback):
     def on_train_start(self, trainer: object, pl_module: object) -> None:
         """Capture the feature-grid shape before PatchCore flattens embeddings."""
         del trainer
-        if not self.trace_sources or self._pool_hook_handle is not None:
+        if not self._needs_layouts() or self._pool_hook_handle is not None:
             return
         pooler = getattr(getattr(pl_module, "model", None), "feature_pooler", None)
         register_hook = getattr(pooler, "register_forward_hook", None)
         if not callable(register_hook):
-            raise RuntimeError("feature cleaning trace requires a hookable feature_pooler")
+            raise RuntimeError("feature cleaning requires a hookable feature_pooler")
 
         def _capture_grid(_module: object, _inputs: object, output: object) -> None:
             if self._current_grid_shape is not None:
@@ -74,7 +78,7 @@ class FeatureDensityCleaningCallback(Callback):
         batch_idx: int,
     ) -> None:
         del trainer, pl_module, batch, batch_idx
-        if self.trace_sources:
+        if self._needs_layouts():
             self._current_grid_shape = None
 
     def on_train_batch_end(
@@ -87,33 +91,33 @@ class FeatureDensityCleaningCallback(Callback):
     ) -> None:
         """Bind each flattened embedding chunk back to its source tile paths."""
         del trainer, outputs, batch_idx
-        if not self.trace_sources:
+        if not self._needs_layouts():
             return
         store = getattr(getattr(pl_module, "model", None), "embedding_store", None)
         if not isinstance(store, list) or len(store) != len(self._batch_layouts) + 1:
-            raise RuntimeError("feature cleaning trace lost embedding batch alignment")
+            raise RuntimeError("feature cleaning lost embedding batch alignment")
         embedding_count = int(store[-1].shape[0])
         raw_paths = getattr(batch, "image_path", None)
         if raw_paths is None:
-            raise RuntimeError("feature cleaning trace requires batch.image_path")
+            raise RuntimeError("feature cleaning requires batch.image_path")
         if isinstance(raw_paths, (str, Path)):
             paths = [str(raw_paths)]
         else:
             paths = [str(path) for path in raw_paths]
         if not paths:
-            raise RuntimeError("feature cleaning trace received an empty image_path batch")
+            raise RuntimeError("feature cleaning received an empty image_path batch")
 
         grid_shape = self._current_grid_shape
         if grid_shape is None:
             per_image = embedding_count // len(paths)
             side = math.isqrt(per_image)
             if side * side != per_image:
-                raise RuntimeError("feature cleaning trace could not infer feature-grid shape")
+                raise RuntimeError("feature cleaning could not infer feature-grid shape")
             grid_shape = (side, side)
         grid_h, grid_w = grid_shape
         if embedding_count != len(paths) * grid_h * grid_w:
             raise RuntimeError(
-                "feature cleaning trace embedding count does not match batch/grid layout"
+                "feature cleaning embedding count does not match batch/grid layout"
             )
         input_tensor = getattr(batch, "image", None)
         input_shape = getattr(input_tensor, "shape", None)
@@ -182,13 +186,35 @@ class FeatureDensityCleaningCallback(Callback):
             self._has_run = True
             return
 
+        cleaning_candidates = self._build_cleaning_candidate_mask(total)
+        candidate_count = int(cleaning_candidates.sum().item())
+        if candidate_count == 0:
+            self.stats = self._stats(
+                total=total,
+                kept=total,
+                threshold=None,
+                reference_size=used_reference_size,
+                started=started,
+                applied=False,
+                reason="no_cleaning_candidates",
+                cleaning_candidates=0,
+            )
+            self._remove_pool_hook()
+            self._has_run = True
+            return
+
         kth_distances, device = self._kth_cosine_distances(
             embedding_store,
             total=total,
             reference_size=used_reference_size,
         )
-        threshold_tensor = torch.quantile(kth_distances, self.keep_ratio)
-        keep_mask = kth_distances <= threshold_tensor
+        threshold_tensor = torch.quantile(
+            kth_distances[cleaning_candidates], self.keep_ratio
+        )
+        keep_mask = torch.ones(total, dtype=torch.bool)
+        keep_mask[cleaning_candidates] = (
+            kth_distances[cleaning_candidates] <= threshold_tensor
+        )
         kept = int(keep_mask.sum().item())
         threshold = float(threshold_tensor.item())
         del kth_distances, threshold_tensor
@@ -214,11 +240,56 @@ class FeatureDensityCleaningCallback(Callback):
             started=started,
             applied=True,
             reason="completed",
+            cleaning_candidates=candidate_count,
         )
         if removed_patch_trace:
             self.stats["removed_patch_trace"] = removed_patch_trace
         self._remove_pool_hook()
         self._has_run = True
+
+    def _needs_layouts(self) -> bool:
+        return self.center_size is not None or bool(self.trace_sources)
+
+    def _build_cleaning_candidate_mask(self, total: int) -> torch.Tensor:
+        if self.center_size is None:
+            return torch.ones(total, dtype=torch.bool)
+        if not self._batch_layouts:
+            raise RuntimeError("center feature cleaning requires batch/grid layouts")
+
+        masks: list[torch.Tensor] = []
+        consumed = 0
+        for layout in self._batch_layouts:
+            paths = layout["image_paths"]
+            input_size = layout.get("input_size")
+            if not input_size or len(input_size) != 2:
+                raise RuntimeError("center feature cleaning requires input image size")
+            input_h, input_w = (int(input_size[0]), int(input_size[1]))
+            grid_h, grid_w = (int(v) for v in layout["grid_size"])
+            center_h = min(int(self.center_size), input_h)
+            center_w = min(int(self.center_size), input_w)
+            top = (input_h - center_h) / 2.0
+            left = (input_w - center_w) / 2.0
+            # 以 feature cell 中心映射回輸入座標，避免寫死特定 backbone 的 grid 大小。
+            row_centers = (torch.arange(grid_h, dtype=torch.float32) + 0.5) * (
+                input_h / grid_h
+            )
+            col_centers = (torch.arange(grid_w, dtype=torch.float32) + 0.5) * (
+                input_w / grid_w
+            )
+            eligible_rows = (row_centers >= top) & (row_centers < top + center_h)
+            eligible_cols = (col_centers >= left) & (col_centers < left + center_w)
+            grid_mask = eligible_rows[:, None] & eligible_cols[None, :]
+            local_mask = grid_mask.reshape(-1).repeat(len(paths))
+            expected = int(layout["embedding_count"])
+            if int(local_mask.numel()) != expected:
+                raise RuntimeError(
+                    "center feature cleaning mask does not match embedding layout"
+                )
+            masks.append(local_mask)
+            consumed += expected
+        if consumed != total:
+            raise RuntimeError("center feature cleaning did not cover all embeddings")
+        return torch.cat(masks)
 
     def _build_removed_patch_trace(
         self,
@@ -348,13 +419,22 @@ class FeatureDensityCleaningCallback(Callback):
         started: float,
         applied: bool,
         reason: str,
+        cleaning_candidates: int | None = None,
     ) -> dict[str, int | float | bool | str | None]:
         removed = total - kept
+        candidate_count = total if cleaning_candidates is None else cleaning_candidates
         return {
             "total": total,
             "kept": kept,
             "removed": removed,
             "removed_ratio": removed / total if total else 0.0,
+            "cleaning_candidates": candidate_count,
+            "cleaning_candidate_kept": max(0, candidate_count - removed),
+            "cleaning_candidate_removed_ratio": (
+                removed / candidate_count if candidate_count else 0.0
+            ),
+            "protected": max(0, total - candidate_count),
+            "center_size": self.center_size,
             "threshold": threshold,
             "k": self.k,
             "keep_ratio": self.keep_ratio,

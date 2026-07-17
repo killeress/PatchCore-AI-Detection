@@ -138,6 +138,7 @@
       {% set inherited_cleaning = target_patchcore_params.get("feature_cleaning_mode", "off") %}
       {% set inherited_cleaning_scope = target_patchcore_params.get("feature_cleaning_scope", "inner_only") %}
       {% set inherited_keep_ratio = target_patchcore_params.get("feature_cleaning_keep_ratio", 0.99) %}
+      {% set inherited_cleaning_center_size = target_patchcore_params.get("feature_cleaning_center_size", 512) %}
       {% set inherited_cleaning_zones = target_patchcore_params.get("feature_cleaning_by_zone", {}) %}
       <label class="tp-field">
         <span class="tp-label">特徵清洗設定方式 <span class="tp-default">預設共用</span></span>
@@ -213,6 +214,13 @@
           </section>
         {% endfor %}
       </div>
+      <label class="tp-field">
+        <span class="tp-label">特徵清洗有效區域 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用中央 {{ inherited_cleaning_center_size }}×{{ inherited_cleaning_center_size }}{% else %}預設中央 384×384{% endif %}</span></span>
+        <input type="number" id="tp-feature_cleaning_center_size" min="64" max="512" step="16"
+               value="{% if training_scope.mode == 'partial' %}{{ inherited_cleaning_center_size }}{% else %}384{% endif %}"
+               {% if training_scope.mode == 'partial' %}disabled{% endif %}>
+        <span class="tp-hint">完整 512×512 tile 仍用於訓練；只有中央區可被清洗，外圍 feature 不會在此步驟被刪除</span>
+      </label>
       <label class="tp-field">
         <span class="tp-label">tile step <span class="tp-default">預設 256</span></span>
         <input type="number" id="tile-stride" min="64" max="512" step="64"
@@ -1298,6 +1306,7 @@ const TRAIN_PARAM_KEYS = [
   {key: 'feature_cleaning_mode', type: 'select', choices: ['off','knn_cosine_q99_v1'], default: 'off'},
   {key: 'feature_cleaning_scope', type: 'select', choices: ['inner_only','inner_and_edge'], default: 'inner_only'},
   {key: 'feature_cleaning_keep_ratio', type: 'percent_ratio', min: 90, max: 100, default: 0.99},
+  {key: 'feature_cleaning_center_size', type: 'int', min: 64, max: 512, default: 384},
 ];
 
 function collectTrainingParams() {

@@ -84,7 +84,7 @@ def test_base_template_includes_hostname_in_title_header_and_footer(monkeypatch)
     assert "主機：CAPI07 ｜ 版本：" in rendered
 
 
-def test_build_release_zip_includes_manifest_checksums_and_all_web_assets(tmp_path, monkeypatch):
+def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(tmp_path, monkeypatch):
     from scripts import build_deploy_zip
 
     version = "2099.01.02.3"
@@ -138,22 +138,20 @@ def test_build_release_zip_includes_manifest_checksums_and_all_web_assets(tmp_pa
             for rel in build_deploy_zip._git_file_list([
                 "ls-files", "--cached", "--others", "--exclude-standard", "--", "templates", "static"
             ])
-            if (build_deploy_zip.PROJECT_ROOT / rel).is_file()
+            if (
+                (build_deploy_zip.PROJECT_ROOT / rel).is_file()
+                and not build_deploy_zip._is_codeonly_excluded_file(rel)
+            )
         }
         assert managed_assets <= names
+        assert not any(name.startswith("templates/imgs/") for name in names)
+        assert not any(name.startswith("static/") for name in names)
 
         web_source = Path("capi_web.py").read_text(encoding="utf-8")
         direct_templates = set(re.findall(r'get_template\(\s*["\']([^"\']+)["\']', web_source))
         assert direct_templates <= {
             name.removeprefix("templates/") for name in names if name.startswith("templates/")
         }
-
-        base_source = Path("templates/base.html").read_text(encoding="utf-8")
-        static_refs = {
-            ref.lstrip("/")
-            for ref in re.findall(r'["\'](/static/[^"\'?#]+)', base_source)
-        }
-        assert static_refs <= names
 
         assert zf.read("VERSION").decode("utf-8").strip() == version
         manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
@@ -178,6 +176,47 @@ def test_build_release_zip_includes_manifest_checksums_and_all_web_assets(tmp_pa
     assert manifest["content_tree_sha256"] == hashlib.sha256(canonical_files).hexdigest()
     assert any(item["path"] == "capi_web.py" for item in manifest["files"])
     assert "  capi_web.py\n" in checksums
+
+
+def test_codeonly_warns_when_excluded_static_assets_change(tmp_path, monkeypatch, capsys):
+    from scripts import build_deploy_zip
+
+    version = "2099.01.02.38"
+    output_dir = tmp_path / "codeonly-static-warning"
+    monkeypatch.setattr(build_deploy_zip, "CODE_FILES", ["capi_version.py"])
+    monkeypatch.setattr(build_deploy_zip, "_git_managed_asset_files", lambda: [
+        "templates/base.html",
+        "templates/imgs/new-banner.png",
+        "static/js/new-widget.js",
+    ])
+    monkeypatch.setattr(build_deploy_zip, "_git_changed_files", lambda: [
+        "templates/imgs/new-banner.png",
+        "static/js/new-widget.js",
+    ])
+
+    assert build_deploy_zip.main([
+        "--no-backbone",
+        "--version",
+        version,
+        "--output-dir",
+        str(output_dir),
+    ]) == 0
+
+    output = capsys.readouterr().out
+    assert "WARNING: excluded static assets changed" in output
+    assert "templates/imgs/new-banner.png" in output
+    assert "static/js/new-widget.js" in output
+
+    with zipfile.ZipFile(output_dir / f"patchcore_ai_release_{version}_codeonly.zip") as zf:
+        names = set(zf.namelist())
+        manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
+
+    assert "templates/base.html" in names
+    assert "templates/imgs/new-banner.png" not in names
+    assert "static/js/new-widget.js" not in names
+    assert manifest["git_worktree_dirty"] is True
+    assert manifest["git_dirty"] is False
+    assert manifest["git_dirty_files"] == []
 
 
 def test_build_release_zip_rejects_relevant_dirty_files_unless_overridden(tmp_path, monkeypatch):
@@ -434,6 +473,7 @@ def test_build_patch_zip_includes_only_deployable_changes(tmp_path, monkeypatch)
         "capi_web.py",
         "capi_update_agent.py",
         "templates/base.html",
+        "static/favicon.svg",
         "tests/test_release_version.py",
         "scripts/build_deploy_zip.py",
         "Sample/ignore.py",
@@ -473,6 +513,7 @@ def test_build_patch_zip_includes_only_deployable_changes(tmp_path, monkeypatch)
     assert "capi_web.py" in names
     assert "capi_update_agent.py" in names
     assert "templates/base.html" in names
+    assert "static/favicon.svg" in names
     assert "install_patch.sh" in names
     assert "rollback_patch.sh" in names
     assert "start_server.sh" in names

@@ -114,6 +114,8 @@
               保守清洗（範圍={% if patchcore_params.get("feature_cleaning_scope", "inner_only") == "inner_and_edge" %}inner + edge{% else %}僅 inner{% endif %}、k={{ patchcore_params.get("feature_cleaning_k", 30) }}、保留 {{ (patchcore_params.get("feature_cleaning_keep_ratio", 0.99) * 100)|round(1) }}%）
             {% endif %}
           </dd>
+          <dt>清洗有效區域</dt>
+          <dd>中央 {{ patchcore_params.get("feature_cleaning_center_size", 512) }}×{{ patchcore_params.get("feature_cleaning_center_size", 512) }}</dd>
           <dt>image_size</dt>
           <dd>
             {% if patchcore_params.get("image_size") %}

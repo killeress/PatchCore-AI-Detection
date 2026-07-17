@@ -15,6 +15,7 @@ def test_default_recipe():
 
     assert callback.k == 30
     assert callback.keep_ratio == 0.99
+    assert callback.center_size is None
     assert callback.seed == 42
     assert callback.stats == {}
 
@@ -122,6 +123,60 @@ def test_removed_patch_trace_maps_keep_mask_back_to_source_grid(tmp_path):
         "removed_count": 1,
     }]
     assert callback.stats["removed"] == 1
+
+
+def test_center_cleaning_removes_only_center_candidates(monkeypatch):
+    raw = torch.arange(32, dtype=torch.float32).reshape(16, 2)
+    model = _model_with_store(raw.clone())
+    callback = FeatureDensityCleaningCallback(
+        k=2,
+        keep_ratio=0.75,
+        center_size=4,
+        reference_size=16,
+    )
+    callback._batch_layouts = [{
+        "image_paths": ["tile.png"],
+        "input_size": [8, 8],
+        "grid_size": [4, 4],
+        "embedding_count": 16,
+    }]
+    distances = torch.zeros(16)
+    distances[0] = 10.0  # 外圍即使最離群也必須保留
+    distances[10] = 9.0  # 中央候選區的離群 feature 應被移除
+    monkeypatch.setattr(
+        callback,
+        "_kth_cosine_distances",
+        lambda *args, **kwargs: (distances, torch.device("cpu")),
+    )
+
+    callback.on_train_epoch_end(None, model)
+
+    cleaned = torch.cat(model.model.embedding_store)
+    assert torch.equal(cleaned, torch.cat([raw[:10], raw[11:]]))
+    assert torch.equal(cleaned[0], raw[0])
+    assert callback.stats["cleaning_candidates"] == 4
+    assert callback.stats["protected"] == 12
+    assert callback.stats["removed"] == 1
+    assert callback.stats["center_size"] == 4
+
+
+def test_default_384_center_maps_to_48_by_48_features_on_64_grid():
+    callback = FeatureDensityCleaningCallback(center_size=384)
+    callback._batch_layouts = [{
+        "image_paths": ["tile.png"],
+        "input_size": [512, 512],
+        "grid_size": [64, 64],
+        "embedding_count": 64 * 64,
+    }]
+
+    mask = callback._build_cleaning_candidate_mask(64 * 64).reshape(64, 64)
+
+    assert int(mask.sum().item()) == 48 * 48
+    assert bool(mask[8:56, 8:56].all())
+    assert not bool(mask[:8].any())
+    assert not bool(mask[56:].any())
+    assert not bool(mask[:, :8].any())
+    assert not bool(mask[:, 56:].any())
 
 
 def test_sampled_reference_is_deterministic_across_query_chunks():

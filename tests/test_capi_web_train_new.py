@@ -419,7 +419,8 @@ class TestValidateTrainingParams:
                "feature_pool_kernel_size": 5,
                "feature_cleaning_mode": "knn_cosine_q99_v1",
                "feature_cleaning_scope": "inner_and_edge",
-               "feature_cleaning_keep_ratio": 0.97}
+               "feature_cleaning_keep_ratio": 0.97,
+               "feature_cleaning_center_size": 384}
         params, err = CAPIWebHandler._validate_training_params(raw)
         assert err is None
         assert params == raw
@@ -449,6 +450,8 @@ class TestValidateTrainingParams:
             {"max_epochs": 100},
             {"feature_cleaning_keep_ratio": 0.89},
             {"feature_cleaning_keep_ratio": 1.01},
+            {"feature_cleaning_center_size": 63},
+            {"feature_cleaning_center_size": 513},
         ]:
             _, err = CAPIWebHandler._validate_training_params(raw)
             assert err and "out of range" in err, f"expected error for {raw}"
@@ -523,6 +526,7 @@ class TestValidateTrainingParams:
             "feature_cleaning_mode": "knn_cosine_q99_v1",
             "feature_cleaning_scope": "inner_and_edge",
             "feature_cleaning_keep_ratio": 0.97,
+            "feature_cleaning_center_size": 384,
         }
         params, err = CAPIWebHandler._validate_training_params(raw)
         assert err is None
@@ -643,6 +647,7 @@ def test_handle_train_new_start_persists_training_params(monkeypatch):
             "feature_cleaning_mode": "knn_cosine_q99_v1",
             "feature_cleaning_scope": "inner_and_edge",
             "feature_cleaning_keep_ratio": 0.97,
+            "feature_cleaning_center_size": 384,
             "feature_cleaning_by_zone": {
                 "inner": {"mode": "knn_cosine_q99_v1", "k": 30, "keep_ratio": 0.99},
                 "edge": {"mode": "knn_cosine_q99_v1", "k": 10, "keep_ratio": 0.998},
@@ -1210,6 +1215,7 @@ def test_models_info_shows_all_recorded_custom_training_settings():
         "pp.feature_cleaning_mode",
         "pp.feature_cleaning_scope",
         "pp.feature_cleaning_keep_ratio",
+        "pp.feature_cleaning_center_size",
         "m.tile_stride",
         "m.preprocess_after_tiling",
         "m.image_preprocess_pipeline",
@@ -1250,6 +1256,7 @@ def test_train_new_select_has_pipeline_preview_controls():
     assert "tp-feature_cleaning_mode" in text
     assert "tp-feature_cleaning_scope" in text
     assert "tp-feature_cleaning_keep_ratio" in text
+    assert "tp-feature_cleaning_center_size" in text
     assert "type: 'percent_ratio'" in text
     assert "沿用原 bundle，不可修改" in text
     assert "if (el.disabled) continue;" in text
@@ -1922,6 +1929,7 @@ def test_handle_train_new_start_partial_rejects_bundle_level_override():
             "feature_pool_kernel_size": 5,
             "feature_cleaning_scope": "inner_and_edge",
             "feature_cleaning_keep_ratio": 0.97,
+            "feature_cleaning_center_size": 384,
         },
         "training_scope": {
             "mode": "partial",
@@ -1940,6 +1948,7 @@ def test_handle_train_new_start_partial_rejects_bundle_level_override():
     assert "inherit bundle-level" in error
     assert "feature_cleaning_scope" in error
     assert "feature_cleaning_keep_ratio" in error
+    assert "feature_cleaning_center_size" in error
     server.database.create_training_job.assert_not_called()
 
 

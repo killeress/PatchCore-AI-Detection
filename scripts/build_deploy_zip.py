@@ -113,6 +113,10 @@ GENERATED_METADATA_FILES = {
 }
 
 BACKBONE_CACHE_DIR = "deployment/torch_hub_cache"
+CODEONLY_EXCLUDED_PREFIXES = (
+    "templates/imgs/",
+    "static/",
+)
 
 SERVER_CONFIG_PATCH = """# === 新機種 PatchCore 訓練 wizard 需要在 server_config.yaml 加入以下欄位 ===
 # 將此檔的內容合併進 production 既有的 server_config.yaml（不要整個覆蓋）
@@ -226,6 +230,7 @@ CODEONLY_README_NOTE = """\
 
 【本 ZIP 為 code-only 增量包】
 - 不含 deployment/torch_hub_cache/（之前的部署包已含，production 機應已落地）
+- 不含 templates/imgs/ 與 static/（沿用 production 機已有的靜態資源）
 - 解壓覆蓋既有檔即可，不會動到 backbone cache 目錄
 """
 
@@ -353,12 +358,31 @@ def _is_patch_deploy_file(rel: str) -> bool:
     return rel.startswith(PATCH_DEPLOY_PREFIXES)
 
 
-def _release_files() -> list[str]:
-    return list(dict.fromkeys([*CODE_FILES, *_git_managed_asset_files()]))
+def _is_codeonly_excluded_file(rel: str) -> bool:
+    rel = rel.replace("\\", "/")
+    return rel.startswith(CODEONLY_EXCLUDED_PREFIXES)
 
 
-def _validate_required_code_files() -> None:
-    missing = [rel for rel in CODE_FILES if not (PROJECT_ROOT / rel).is_file()]
+def _release_files(*, codeonly: bool = False) -> list[str]:
+    files = list(dict.fromkeys([*CODE_FILES, *_git_managed_asset_files()]))
+    if codeonly:
+        files = [rel for rel in files if not _is_codeonly_excluded_file(rel)]
+    return files
+
+
+def _codeonly_excluded_changes(changed_files: list[str]) -> list[str]:
+    return sorted({
+        rel.replace("\\", "/")
+        for rel in changed_files
+        if _is_codeonly_excluded_file(rel)
+    })
+
+
+def _validate_required_code_files(*, codeonly: bool = False) -> None:
+    required_files = CODE_FILES
+    if codeonly:
+        required_files = [rel for rel in required_files if not _is_codeonly_excluded_file(rel)]
+    missing = [rel for rel in required_files if not (PROJECT_ROOT / rel).is_file()]
     if missing:
         raise FileNotFoundError(f"required CODE_FILES missing: {', '.join(missing)}")
 
@@ -369,6 +393,7 @@ def _release_dirty_files(
     *,
     patch_only: bool,
     include_backbone: bool,
+    codeonly: bool,
 ) -> list[str]:
     package_sources = {rel.replace("\\", "/") for rel in package_files}
     package_sources.update(GENERATED_METADATA_FILES)
@@ -381,7 +406,10 @@ def _release_dirty_files(
         if patch_only:
             relevant = relevant or _is_patch_deploy_file(rel)
         else:
-            relevant = relevant or rel.startswith(("templates/", "static/"))
+            if _is_codeonly_excluded_file(rel):
+                relevant = relevant or not codeonly
+            else:
+                relevant = relevant or rel.startswith("templates/")
             if include_backbone:
                 relevant = relevant or rel.startswith(f"{BACKBONE_CACHE_DIR}/")
         if relevant:
@@ -493,7 +521,7 @@ def main(argv=None) -> int:
         args.no_backbone = True
 
     if not args.patch_only:
-        _validate_required_code_files()
+        _validate_required_code_files(codeonly=args.no_backbone)
 
     changed_files = _git_changed_files()
     if args.patch_only:
@@ -501,13 +529,20 @@ def main(argv=None) -> int:
         if not package_files:
             raise RuntimeError("no deployable changed files found for --patch-only")
     else:
-        package_files, skipped_files = _release_files(), []
+        package_files, skipped_files = _release_files(codeonly=args.no_backbone), []
+
+    excluded_asset_changes = (
+        _codeonly_excluded_changes(changed_files)
+        if args.no_backbone and not args.patch_only
+        else []
+    )
 
     git_dirty_files = _release_dirty_files(
         changed_files,
         package_files,
         patch_only=args.patch_only,
         include_backbone=not args.no_backbone,
+        codeonly=args.no_backbone and not args.patch_only,
     )
     git_worktree_dirty = bool(changed_files)
     git_dirty = bool(git_dirty_files)
@@ -537,6 +572,12 @@ def main(argv=None) -> int:
         print("Mode: patch-only (--patch-only)")
     if args.no_backbone and not args.patch_only:
         print("Mode: code-only (--no-backbone)")
+        print("Excluded static directories: templates/imgs/, static/")
+        if excluded_asset_changes:
+            print("WARNING: excluded static assets changed and will not be packaged:")
+            for rel in excluded_asset_changes:
+                print(f"  ! {rel}")
+            print("Deploy these assets separately if the code update needs them.")
 
     if zip_path.exists():
         zip_path.unlink()

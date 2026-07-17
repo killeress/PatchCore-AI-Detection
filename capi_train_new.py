@@ -82,6 +82,9 @@ FEATURE_CLEANING_K_MAX = 200
 FEATURE_CLEANING_KEEP_RATIO_DEFAULT = 0.99
 FEATURE_CLEANING_KEEP_RATIO_MIN = 0.90
 FEATURE_CLEANING_KEEP_RATIO_MAX = 1.00
+FEATURE_CLEANING_CENTER_SIZE_DEFAULT = 384
+FEATURE_CLEANING_CENTER_SIZE_MIN = 64
+FEATURE_CLEANING_CENTER_SIZE_MAX = 512
 FEATURE_CLEANING_SEED = 42
 FEATURE_CLEANING_REFERENCE_SIZE = 20_000
 FEATURE_CLEANING_QUERY_CHUNK = 1_024
@@ -188,6 +191,7 @@ class TrainingConfig:
     feature_cleaning_mode: str = FEATURE_CLEANING_MODE_OFF
     feature_cleaning_scope: str = FEATURE_CLEANING_SCOPE_INNER_ONLY
     feature_cleaning_keep_ratio: float = FEATURE_CLEANING_KEEP_RATIO_DEFAULT
+    feature_cleaning_center_size: int = FEATURE_CLEANING_CENTER_SIZE_DEFAULT
     image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
     preprocess_after_tiling: bool = False
     training_data_source: Dict[str, Any] = field(
@@ -216,6 +220,11 @@ USER_TRAINABLE_PARAM_SPECS: Dict[str, Dict] = {
         "type": float,
         "min": FEATURE_CLEANING_KEEP_RATIO_MIN,
         "max": FEATURE_CLEANING_KEEP_RATIO_MAX,
+    },
+    "feature_cleaning_center_size": {
+        "type": int,
+        "min": FEATURE_CLEANING_CENTER_SIZE_MIN,
+        "max": FEATURE_CLEANING_CENTER_SIZE_MAX,
     },
     "feature_cleaning_by_zone": {"type": dict},
 }
@@ -830,6 +839,13 @@ def train_one_patchcore(
             "feature_cleaning_keep_ratio must be between "
             f"{FEATURE_CLEANING_KEEP_RATIO_MIN} and {FEATURE_CLEANING_KEEP_RATIO_MAX}"
         )
+    cleaning_center_size = int(cfg.feature_cleaning_center_size)
+    max_center_size = min(int(cfg.image_size[0]), int(cfg.image_size[1]))
+    if not FEATURE_CLEANING_CENTER_SIZE_MIN <= cleaning_center_size <= max_center_size:
+        raise ValueError(
+            "feature_cleaning_center_size must be between "
+            f"{FEATURE_CLEANING_CENTER_SIZE_MIN} and {max_center_size}"
+        )
     zone = unit_label.rsplit("-", 1)[-1].lower()
     zone_cleaning = feature_cleaning_config_for_zone(cfg, zone)
     zone_cleaning_mode = zone_cleaning["mode"]
@@ -842,6 +858,7 @@ def train_one_patchcore(
         "zone": zone,
         "k": zone_cleaning_k,
         "keep_ratio": zone_cleaning_keep_ratio,
+        "center_size": cleaning_center_size,
         "applied": False,
         "reason": "disabled",
     }
@@ -852,6 +869,7 @@ def train_one_patchcore(
         cleaning_callback = FeatureDensityCleaningCallback(
             k=zone_cleaning_k,
             keep_ratio=zone_cleaning_keep_ratio,
+            center_size=cleaning_center_size,
             seed=FEATURE_CLEANING_SEED,
             reference_size=FEATURE_CLEANING_REFERENCE_SIZE,
             query_chunk=FEATURE_CLEANING_QUERY_CHUNK,
@@ -863,7 +881,8 @@ def train_one_patchcore(
             log(
                 f"{unit_label}: feature cleaning enabled "
                 f"(scope={'per_zone' if per_zone_cleaning else cleaning_scope}, "
-                f"cosine k={zone_cleaning_k}, keep={zone_cleaning_keep_ratio:.1%})"
+                f"cosine k={zone_cleaning_k}, keep={zone_cleaning_keep_ratio:.1%}, "
+                f"center={cleaning_center_size}x{cleaning_center_size})"
             )
     elif (
         not per_zone_cleaning
@@ -1713,6 +1732,10 @@ def train_single_submodel(
                         "unit_label": unit_label,
                         "k": metrics["feature_cleaning"].get("k"),
                         "keep_ratio": metrics["feature_cleaning"].get("keep_ratio"),
+                        "center_size": metrics["feature_cleaning"].get("center_size"),
+                        "cleaning_candidates": metrics["feature_cleaning"].get(
+                            "cleaning_candidates"
+                        ),
                         "threshold": metrics["feature_cleaning"].get("threshold"),
                         "removed": metrics["feature_cleaning"].get("removed", 0),
                         "tiles": report_tiles,
@@ -1937,6 +1960,7 @@ def run_training_pipeline(
             "feature_cleaning_scope": cfg.feature_cleaning_scope,
             "feature_cleaning_k": FEATURE_CLEANING_K,
             "feature_cleaning_keep_ratio": cfg.feature_cleaning_keep_ratio,
+            "feature_cleaning_center_size": cfg.feature_cleaning_center_size,
             "feature_cleaning_seed": FEATURE_CLEANING_SEED,
             "feature_cleaning_reference_size": FEATURE_CLEANING_REFERENCE_SIZE,
             "feature_cleaning_query_chunk": FEATURE_CLEANING_QUERY_CHUNK,

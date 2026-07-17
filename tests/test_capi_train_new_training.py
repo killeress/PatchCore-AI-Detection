@@ -33,6 +33,7 @@ def test_apply_user_training_params_none_is_noop():
     assert cfg.feature_cleaning_mode == "off"
     assert cfg.feature_cleaning_scope == "inner_only"
     assert cfg.feature_cleaning_keep_ratio == 0.99
+    assert cfg.feature_cleaning_center_size == 384
 
 
 def test_training_config_accepts_required_backbones():
@@ -58,6 +59,7 @@ def test_apply_user_training_params_overrides_match_keys():
         "feature_cleaning_mode": "knn_cosine_q99_v1",
         "feature_cleaning_scope": "inner_and_edge",
         "feature_cleaning_keep_ratio": 0.97,
+        "feature_cleaning_center_size": 320,
     })
     assert cfg.batch_size == 16
     assert cfg.coreset_ratio == 0.05
@@ -67,6 +69,7 @@ def test_apply_user_training_params_overrides_match_keys():
     assert cfg.feature_cleaning_mode == "knn_cosine_q99_v1"
     assert cfg.feature_cleaning_scope == "inner_and_edge"
     assert cfg.feature_cleaning_keep_ratio == 0.97
+    assert cfg.feature_cleaning_center_size == 320
 
 
 def test_feature_cleaning_by_zone_normalizes_and_resolves_independently():
@@ -507,8 +510,9 @@ def test_train_one_patchcore_cleans_selected_zone_before_export(
             import torch
             dense = torch.tensor([[1.0, 0.0]]).repeat(34, 1)
             outlier = torch.tensor([[-1.0, 0.0]])
+            embeddings = torch.cat([dense[:17], outlier, dense[17:]])
             self.model = type("InnerModel", (), {
-                "embedding_store": [torch.cat([dense, outlier])],
+                "embedding_store": [embeddings],
             })()
 
         @staticmethod
@@ -524,6 +528,12 @@ def test_train_one_patchcore_cleans_selected_zone_before_export(
 
         def fit(self, *, model, **kw):
             for callback in captured["callbacks"]:
+                callback._batch_layouts = [{
+                    "image_paths": ["tile.png"],
+                    "input_size": [512, 512],
+                    "grid_size": [5, 7],
+                    "embedding_count": 35,
+                }]
                 callback.on_validation_start(
                     type("Trainer", (), {"sanity_checking": False})(), model,
                 )
@@ -560,6 +570,7 @@ def test_train_one_patchcore_cleans_selected_zone_before_export(
     assert stats["feature_cleaning"]["kept"] == 34
     assert stats["feature_cleaning"]["scope"] == cleaning_scope
     assert stats["feature_cleaning"]["keep_ratio"] == 0.97
+    assert stats["feature_cleaning"]["center_size"] == 384
     assert stats["feature_cleaning"]["reason"] == "completed"
 
 
@@ -801,6 +812,7 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     assert manifest["patchcore_params"]["feature_cleaning_mode"] == "off"
     assert manifest["patchcore_params"]["feature_cleaning_scope"] == "inner_only"
     assert manifest["patchcore_params"]["feature_cleaning_keep_ratio"] == 0.99
+    assert manifest["patchcore_params"]["feature_cleaning_center_size"] == 384
     assert manifest["patchcore_params"]["feature_cleaning_reference_size"] == 20_000
     assert manifest["patchcore_params"]["feature_cleaning_query_chunk"] == 1_024
     assert manifest["patchcore_params"]["feature_cleaning_by_zone"]["inner"]["mode"] == "off"
