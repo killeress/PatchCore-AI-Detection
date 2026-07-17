@@ -39,6 +39,18 @@ def _factory_day_end_ts(date_str: str) -> str:
     return f"{_next_date_str(date_str)} {_FACTORY_DAY_START_TIME}"
 
 
+def _normalize_inference_error_type(ai_judgment: str, error_message: str) -> str:
+    judgment = str(ai_judgment or "").strip()
+    error_type = judgment[4:].strip() if judgment.startswith("ERR:") else ""
+    if not error_type:
+        error_type = str(error_message or "").strip()
+    if not error_type:
+        return "Unknown"
+
+    match = re.match(r"([A-Za-z][A-Za-z0-9_-]*)", error_type)
+    return match.group(1) if match else error_type
+
+
 class CAPIDatabase:
     """CAPI AI 推論結果 SQLite 資料庫"""
 
@@ -2963,7 +2975,9 @@ class CAPIDatabase:
 
             _aoi_ng = self._AOI_NG_COND
             _ai_ng = self._AI_NG_COND
-            _err = self._ERR_COND
+            _err_all = self._ERR_COND
+            _hy = "ai_judgment LIKE 'ERR:HY%'"
+            _err = f"({_err_all}) AND NOT ({_hy})"
 
             # ── 1. Summary + Cross Matrix (single SQL aggregate) ──
             summary_row = conn.execute(
@@ -2972,10 +2986,11 @@ class CAPIDatabase:
                            SUM(CASE WHEN {_ai_ng} THEN 1 ELSE 0 END) as ai_ng,
                            SUM(CASE WHEN ({_aoi_ng}) AND (ai_judgment = 'OK' OR ai_judgment = 'OK-i') THEN 1 ELSE 0 END) as ai_revival,
                            SUM(CASE WHEN {_err} THEN 1 ELSE 0 END) as err_count,
-                           SUM(CASE WHEN NOT ({_aoi_ng}) AND NOT ({_ai_ng}) AND NOT ({_err}) THEN 1 ELSE 0 END) as ok_ok,
-                           SUM(CASE WHEN ({_aoi_ng}) AND NOT ({_ai_ng}) AND NOT ({_err}) THEN 1 ELSE 0 END) as ng_ok,
-                           SUM(CASE WHEN NOT ({_aoi_ng}) AND ({_ai_ng}) AND NOT ({_err}) THEN 1 ELSE 0 END) as ok_ng,
-                           SUM(CASE WHEN ({_aoi_ng}) AND ({_ai_ng}) AND NOT ({_err}) THEN 1 ELSE 0 END) as ng_ng
+                           SUM(CASE WHEN {_hy} THEN 1 ELSE 0 END) as hy_count,
+                           SUM(CASE WHEN NOT ({_aoi_ng}) AND NOT ({_ai_ng}) AND NOT ({_err_all}) THEN 1 ELSE 0 END) as ok_ok,
+                           SUM(CASE WHEN ({_aoi_ng}) AND NOT ({_ai_ng}) AND NOT ({_err_all}) THEN 1 ELSE 0 END) as ng_ok,
+                           SUM(CASE WHEN NOT ({_aoi_ng}) AND ({_ai_ng}) AND NOT ({_err_all}) THEN 1 ELSE 0 END) as ok_ng,
+                           SUM(CASE WHEN ({_aoi_ng}) AND ({_ai_ng}) AND NOT ({_err_all}) THEN 1 ELSE 0 END) as ng_ng
                     FROM inference_records{where_sql}""",
                 params
             ).fetchone()
@@ -2988,7 +3003,8 @@ class CAPIDatabase:
                            COUNT(*) as total,
                            SUM(CASE WHEN {_aoi_ng} THEN 1 ELSE 0 END) as aoi_ng,
                            SUM(CASE WHEN {_ai_ng} THEN 1 ELSE 0 END) as ai_ng,
-                           SUM(CASE WHEN {_err} THEN 1 ELSE 0 END) as err
+                           SUM(CASE WHEN {_err} THEN 1 ELSE 0 END) as err,
+                           SUM(CASE WHEN {_hy} THEN 1 ELSE 0 END) as hy
                     FROM inference_records{where_sql}
                     GROUP BY DATE(datetime(request_time), '-7 hours', '-30 minutes')
                     ORDER BY date""",
@@ -3065,21 +3081,22 @@ class CAPIDatabase:
             by_model = [dict(r) for r in model_rows]
 
             # ── 5. ERR 類型 (SQL GROUP BY) ──
-            err_where = f" WHERE ai_judgment LIKE 'ERR%'" if not where_clauses else where_sql + f" AND {_err}"
+            err_where = f" WHERE {_err}" if not where_clauses else where_sql + f" AND {_err}"
             err_rows = conn.execute(
-                f"""SELECT CASE WHEN LENGTH(TRIM(SUBSTR(ai_judgment, 5))) > 0
-                                THEN TRIM(SUBSTR(ai_judgment, 5))
-                                WHEN LENGTH(TRIM(error_message)) > 0
-                                THEN TRIM(error_message)
-                                ELSE 'Unknown'
-                           END as type,
-                           COUNT(*) as count
-                    FROM inference_records{err_where}
-                    GROUP BY type
-                    ORDER BY count DESC""",
+                f"""SELECT ai_judgment, error_message
+                    FROM inference_records{err_where}""",
                 params
             ).fetchall()
-            err_types = [dict(r) for r in err_rows]
+            err_type_counts = {}
+            for row in err_rows:
+                error_type = _normalize_inference_error_type(row["ai_judgment"], row["error_message"])
+                err_type_counts[error_type] = err_type_counts.get(error_type, 0) + 1
+            err_types = [
+                {"type": error_type, "count": count}
+                for error_type, count in sorted(
+                    err_type_counts.items(), key=lambda item: (-item[1], item[0])
+                )
+            ]
 
             return {
                 "success": True,
@@ -3089,6 +3106,7 @@ class CAPIDatabase:
                     "ai_ng": s["ai_ng"] or 0,
                     "ai_revival": s["ai_revival"] or 0,
                     "err_count": s["err_count"] or 0,
+                    "hy_count": s["hy_count"] or 0,
                 },
                 "daily_trend": daily_trend,
                 "by_machine": by_machine,

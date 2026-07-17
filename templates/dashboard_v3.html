@@ -940,10 +940,11 @@
             // ── Latest Output (sidebar only) ──
             if (data.latest_event && data.latest_event.glass_id) {
                 const ev = data.latest_event;
-                const j = (ev.judgment || '').toUpperCase();
+                const rawJudgment = (ev.judgment || '').toUpperCase();
+                const j = rawJudgment.startsWith('ERR:HY') ? 'HY' : rawJudgment;
                 const bigV = document.getElementById('summaryTotalValue');
                 bigV.textContent = j || 'READY';
-                bigV.className = j === 'OK' ? 'ok' : j.startsWith('NG') ? 'ng' : j === 'ERR' ? 'err' : '';
+                bigV.className = j === 'OK' ? 'ok' : j.startsWith('NG') ? 'ng' : (j === 'ERR' || j === 'HY') ? 'err' : '';
             }
 
             // ── Heatmap Grid (NG 優先) ──

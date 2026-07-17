@@ -69,7 +69,7 @@
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
         <h2 style="margin:0">推論記錄 #{{ detail.id }}
             <span class="badge {{ detail.ai_judgment | ai_badge }}" style="font-size:1rem;margin-left:8px">{{
-                detail.ai_judgment }}</span>
+                detail.ai_judgment | ai_simple }}</span>
         </h2>
         <button id="rerunBtn" onclick="triggerRerun({{ detail.id }})"
             style="padding:8px 18px;background:#2563EB;color:#fff;border:none;border-radius:8px;font-size:0.9rem;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all 0.2s;"
@@ -102,7 +102,7 @@
         <tr>
             <th>AI 判定</th>
             <td>
-                <strong>{{ detail.ai_judgment }}</strong>
+                <strong>{{ detail.ai_judgment | ai_simple }}</strong>
                 {% if detail.within_spec_log_id or detail.ai_judgment == 'OK-i' %}
                 <a href="{% if detail.within_spec_log_id %}/ric/within-spec-log/{{ detail.within_spec_log_id }}{% else %}/ric/within-spec-logs{% endif %}"
                    style="margin-left:10px;font-size:0.82rem;color:#2dd4bf;text-decoration:none;"
