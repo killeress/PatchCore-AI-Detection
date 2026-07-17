@@ -71,6 +71,7 @@ class _AppVersionProxy:
 # 幫 Jinja2 準備一些好用的過濾器
 def ai_simple(ai_judgment):
     if not ai_judgment: return ""
+    if ai_judgment.startswith("ERR:HY"): return "HY"
     return "OK-i" if ai_judgment == "OK-i" else ("OK" if ai_judgment == "OK" else ("NG" if ai_judgment.startswith("NG") else ("ERR" if ai_judgment.startswith("ERR") else ai_judgment)))
 
 def ai_badge(ai_judgment):

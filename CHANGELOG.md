@@ -1,5 +1,13 @@
 # 更新紀錄
 
+## 2026-07-17 v1
+
+### [功能調整]HY 畫異顯示與 ERR 統計
+
+- Client 傳入 HY 時，AI 推論紀錄、搜尋、明細與 Dashboard 顯示為 `HY`，不再顯示 `ERR`；Client 回覆內容維持不變。
+- RIC Report 將 HY 畫異獨立統計，不再併入 ERR 錯誤數量與 ERR 類型分布。
+- ERR 類型依錯誤代碼合併統計，例如不同 tile 座標的 `INFERENCE_FAILED` 會合併計數。
+
 ## 2026-07-16 v5
 
 ### [介面調整]系統上方標題

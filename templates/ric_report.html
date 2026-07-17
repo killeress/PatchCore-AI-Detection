@@ -578,6 +578,8 @@
     .inf-stat-card.revival .value, .inf-stat-card.revival .pct { color: #22c55e; }
     .inf-stat-card.err::before { background: #f59e0b; }
     .inf-stat-card.err .value, .inf-stat-card.err .pct { color: #f59e0b; }
+    .inf-stat-card.hy::before { background: #eab308; }
+    .inf-stat-card.hy .value, .inf-stat-card.hy .pct { color: #eab308; }
 
     .inf-charts-row {
         display: grid;
@@ -1287,7 +1289,7 @@
             <div class="inf-chart-container"><canvas id="inf_modelChart"></canvas></div>
         </div>
         <div class="inf-chart-card">
-            <h3>⚠️ ERR 類型分布</h3>
+            <h3>⚠️ ERR 類型分布（不含 HY）</h3>
             <div class="inf-chart-container"><canvas id="inf_errChart"></canvas></div>
         </div>
     </div>
@@ -3280,7 +3282,8 @@
         function renderCards(s) {
             const total = s.total || 1;
             const pct = v => (v / total * 100).toFixed(2) + '%';
-            const aiOk = s.total - s.ai_ng - s.err_count;
+            const hy = s.hy_count || 0;
+            const aiOk = s.total - s.ai_ng - s.err_count - hy;
             document.getElementById('inf_statsGrid').innerHTML = `
                 <div class="inf-stat-card">
                     <div class="label">總推論次數</div>
@@ -3310,6 +3313,11 @@
                     <div class="label">ERR 錯誤</div>
                     <div class="value">${s.err_count.toLocaleString()}</div>
                     <div class="pct">${pct(s.err_count)}</div>
+                </div>
+                <div class="inf-stat-card hy">
+                    <div class="label">HY 畫異</div>
+                    <div class="value">${hy.toLocaleString()}</div>
+                    <div class="pct">${pct(hy)}</div>
                 </div>`;
         }
 
@@ -3329,12 +3337,13 @@
                 const aoiNg = Number(d.aoi_ng) || 0;
                 const aiNg = Number(d.ai_ng) || 0;
                 const err = Number(d.err) || 0;
+                const hy = Number(d.hy) || 0;
                 return {
                     date: d.date,
                     total,
                     aoiNg,
                     aiNg,
-                    aiOk: Math.max(total - aiNg - err, 0),
+                    aiOk: Math.max(total - aiNg - err - hy, 0),
                     aiMiss: Number(d.ai_miss) || 0,
                     aiMissTotal: Number(d.ai_miss_total) || 0,
                     aiMissRate: d.ai_miss_rate === null || d.ai_miss_rate === undefined ? null : Number(d.ai_miss_rate),
@@ -3459,13 +3468,14 @@
 
         function _renderDistChart(s) {
             const ctx = document.getElementById('inf_distChart').getContext('2d');
-            const aoiOk = s.total - s.aoi_ng - s.err_count;
-            const aiOk = s.total - s.ai_ng - s.err_count;
+            const hy = s.hy_count || 0;
+            const aoiOk = s.total - s.aoi_ng - s.err_count - hy;
+            const aiOk = s.total - s.ai_ng - s.err_count - hy;
             distChart = new Chart(ctx, {
                 type: 'doughnut',
                 plugins: [window.ChartDataLabels],
                 data: {
-                    labels: ['AOI OK', 'AOI NG', 'AI OK', 'AI NG', 'ERR'],
+                    labels: ['AOI OK', 'AOI NG', 'AI OK', 'AI NG', 'ERR', 'HY'],
                     datasets: [
                         {
                             label: 'AOI',
@@ -3475,8 +3485,8 @@
                         },
                         {
                             label: 'AI',
-                            data: [0, 0, aiOk, s.ai_ng, s.err_count],
-                            backgroundColor: ['transparent', 'transparent', '#22c55e', '#ef4444', '#f59e0b'],
+                            data: [0, 0, aiOk, s.ai_ng, s.err_count, hy],
+                            backgroundColor: ['transparent', 'transparent', '#22c55e', '#ef4444', '#f59e0b', '#eab308'],
                             borderWidth: 0,
                         },
                     ],

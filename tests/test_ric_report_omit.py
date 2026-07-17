@@ -149,6 +149,37 @@ def test_inference_stats_date_filter_is_end_date_inclusive(tmp_path):
     assert [row["total"] for row in stats["daily_trend"]] == [2, 1]
 
 
+def test_inference_stats_separates_hy_and_groups_error_code_suffixes(tmp_path):
+    db = CAPIDatabase(str(tmp_path / "ric_inference_stats_errors.db"))
+    _save_record(db, "HY0", tile_is_dust=0, ai_judgment="ERR:HY:W0F00000")
+    _save_record(db, "HY1", tile_is_dust=0, ai_judgment="ERR:HY:G0F00000")
+    _save_record(
+        db,
+        "OOM0",
+        tile_is_dust=0,
+        ai_judgment="ERR:INFERENCE_FAILED (RuntimeError: tile(1,2) CUDA out of memory)",
+    )
+    _save_record(
+        db,
+        "OOM1",
+        tile_is_dust=0,
+        ai_judgment="ERR:INFERENCE_FAILED (RuntimeError: tile(3,4) CUDA out of memory)",
+    )
+    _save_record(db, "MODEL", tile_is_dust=0, ai_judgment="ERR:MODEL_NOT_LOADED")
+    _save_record(db, "OK", tile_is_dust=0, ai_judgment="OK")
+
+    stats = db.get_inference_stats("2026-05-26", "2026-05-26")
+
+    assert stats["summary"]["err_count"] == 3
+    assert stats["summary"]["hy_count"] == 2
+    assert stats["daily_trend"][0]["err"] == 3
+    assert stats["daily_trend"][0]["hy"] == 2
+    assert stats["err_types"] == [
+        {"type": "INFERENCE_FAILED", "count": 2},
+        {"type": "MODEL_NOT_LOADED", "count": 1},
+    ]
+
+
 def test_shift_window_uses_0730_1930_boundaries():
     cases = [
         ("2026-07-06 07:29:59", "夜班", "2026-07-05 19:30:00", "2026-07-06 07:30:00"),

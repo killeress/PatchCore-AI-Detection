@@ -603,8 +603,9 @@
             document.getElementById('ui-lr-meta').textContent = `機台: ${ev.machine_no} | 時間: ${ev.time} | 耗時: ${ev.duration}`;
 
             const jud = document.getElementById('ui-lr-judg');
-            jud.textContent = ev.judgment;
-            jud.className = 'lr-judgment ' + ev.judgment.toLowerCase();
+            const displayJudgment = (ev.judgment || '').toUpperCase().startsWith('ERR:HY') ? 'HY' : (ev.judgment || '');
+            jud.textContent = displayJudgment;
+            jud.className = 'lr-judgment ' + (displayJudgment === 'HY' ? 'err' : displayJudgment.toLowerCase());
 
             const box = document.getElementById('ui-lr-box');
             box.className = 'latest-result-box'; // Reset
