@@ -609,6 +609,10 @@ const PANEL_MODE_LABELS = {
 };
 
 function formatFeatureCleaning(pp) {
+  const centerSize = Number(pp.feature_cleaning_center_size);
+  const centerText = Number.isFinite(centerSize)
+    ? `中央 ${centerSize}×${centerSize}`
+    : '有效區域未記錄';
   const byZone = pp.feature_cleaning_by_zone;
   if (byZone && typeof byZone === 'object' && byZone.inner && byZone.edge) {
     const formatZone = (zone, cfg) => {
@@ -619,7 +623,7 @@ function formatFeatureCleaning(pp) {
         : '未記錄';
       return `${zone}: k=${cfg.k ?? '未記錄'}，保留 ${ratioText}`;
     };
-    return `${formatZone('INNER', byZone.inner)}；${formatZone('EDGE', byZone.edge)}`;
+    return `${formatZone('INNER', byZone.inner)}；${formatZone('EDGE', byZone.edge)}；${centerText}`;
   }
   if (!Object.prototype.hasOwnProperty.call(pp, 'feature_cleaning_mode')) {
     return '關閉（舊模型未記錄，依相容預設）';
@@ -634,7 +638,7 @@ function formatFeatureCleaning(pp) {
   const ratioText = Number.isFinite(keepRatio)
     ? `保留 ${Math.round(keepRatio * 10000) / 100}%（移除約 ${Math.round((1 - keepRatio) * 10000) / 100}%）`
     : '保留比例未記錄';
-  return `保守清洗（範圍：${scope}；k=${k}；${ratioText}）`;
+  return `保守清洗（範圍：${scope}；k=${k}；${ratioText}；${centerText}）`;
 }
 
 function formatPreprocessPipeline(pipeline) {
