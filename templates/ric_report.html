@@ -644,6 +644,42 @@
         background: var(--surface);
     }
 
+    .mes-filter-card {
+        width: 100%;
+        color: inherit;
+        font: inherit;
+        cursor: pointer;
+        transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .mes-filter-card:hover {
+        transform: translateY(-2px);
+        border-color: var(--accent);
+    }
+
+    .mes-filter-card.active {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3), 0 6px 20px rgba(59, 130, 246, 0.15);
+    }
+
+    .mes-filter-card .filter-hint {
+        opacity: 0;
+    }
+
+    .mes-filter-card:hover .filter-hint,
+    .mes-filter-card.active .filter-hint {
+        opacity: 1;
+    }
+
+    .mes-detail-header h3 { margin: 0; }
+
+    .btn-export:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+    }
+
     .mes-table-wrap {
         overflow: auto;
         max-height: 620px;
@@ -1370,7 +1406,10 @@
     <div class="inf-loading" id="mes_loading" style="display:none;">正在查詢 AI 與 MES Report...</div>
     <div class="inf-stats-grid" id="mes_statsGrid" style="display:none;"></div>
     <div class="inf-chart-card" id="mes_detailCard" style="display:none;">
-        <h3>📋 逐筆比對明細 <span id="mes_detailCount" style="color:var(--text-muted); font-weight:400;"></span></h3>
+        <div class="detail-header mes-detail-header">
+            <h3>📋 逐筆比對明細 <span id="mes_detailCount" style="color:var(--text-muted); font-weight:400;"></span></h3>
+            <button type="button" class="btn-export" id="mes_exportBtn" onclick="mesReportTab.exportCSV()" disabled>📥 導出 CSV</button>
+        </div>
         <div class="mes-table-wrap">
             <table class="mes-table">
                 <thead><tr>
@@ -3670,6 +3709,16 @@
 
     const mesReportTab = (function () {
         let _loaded = false;
+        let _data = null;
+        let _activeFilter = null;
+
+        const FILTER_LABELS = {
+            comparable: '可比對總數',
+            correct: '判定正確',
+            over_detection: '過檢',
+            miss_detection: '漏檢',
+            uncomparable: '無法比對',
+        };
 
         function _formatDate(d) {
             return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -3721,6 +3770,8 @@
             status.textContent = '正在連線 PNEMR 並比對 MES Report...';
             document.getElementById('mes_statsGrid').style.display = 'none';
             document.getElementById('mes_detailCard').style.display = 'none';
+            document.getElementById('mes_exportBtn').disabled = true;
+            _data = null;
             try {
                 const params = new URLSearchParams();
                 if (start) params.set('start_date', start);
@@ -3739,50 +3790,142 @@
         }
 
         function render(data) {
-            const s = data.summary;
+            _data = data;
+            renderCards();
+            renderDetails();
+        }
+
+        function renderCards() {
+            if (!_data) return;
+            const s = _data.summary;
             const cards = [
-                ['可比對總數', s.total, '100%', 'ai-ng'],
-                ['判定正確', s.correct, s.accuracy_rate.toFixed(2) + '%', 'revival'],
-                ['過檢', s.over_detection, s.over_detection_rate.toFixed(2) + '%', 'err'],
-                ['漏檢', s.miss_detection, s.miss_detection_rate.toFixed(2) + '%', 'aoi-ng'],
-                ['無法比對', s.uncomparable, 'ERR／無時間', 'hy'],
+                ['可比對總數', s.total, '100%', 'ai-ng', 'comparable'],
+                ['判定正確', s.correct, s.accuracy_rate.toFixed(2) + '%', 'revival', 'correct'],
+                ['過檢', s.over_detection, s.over_detection_rate.toFixed(2) + '%', 'err', 'over_detection'],
+                ['漏檢', s.miss_detection, s.miss_detection_rate.toFixed(2) + '%', 'aoi-ng', 'miss_detection'],
+                ['無法比對', s.uncomparable, 'ERR／無時間', 'hy', 'uncomparable'],
             ];
             const grid = document.getElementById('mes_statsGrid');
-            grid.innerHTML = cards.map(card => `
-                <div class="inf-stat-card ${card[3]}">
+            grid.innerHTML = cards.map(card => {
+                const active = _activeFilter === card[4];
+                return `
+                <button type="button" class="inf-stat-card mes-filter-card ${card[3]}${active ? ' active' : ''}"
+                        data-filter="${card[4]}" aria-pressed="${active}"
+                        onclick="mesReportTab.toggleFilter('${card[4]}')">
                     <div class="label">${card[0]}</div>
                     <div class="value">${Number(card[1]).toLocaleString()}</div>
                     <div class="pct">${card[2]}</div>
-                </div>`).join('');
-            grid.style.display = 'grid';
-
-            const visibleRows = data.records.slice(0, 2000);
-            document.getElementById('mes_detailCount').textContent =
-                `（顯示 ${visibleRows.length.toLocaleString()} / ${data.records.length.toLocaleString()} 筆）`;
-            document.getElementById('mes_detailBody').innerHTML = visibleRows.map(row => {
-                const result = {
-                    correct: ['正確', 'result-correct'],
-                    over_detection: ['過檢', 'result-over'],
-                    miss_detection: ['漏檢', 'result-miss'],
-                    uncomparable: ['無法比對', '']
-                }[row.comparison];
-                const defect = row.first_defect
-                    ? `${_esc(row.first_defect.dfct_code)}｜${_esc(row.first_defect.trans_date)}｜(${_esc(row.first_defect.x_axis)}, ${_esc(row.first_defect.y_axis)})`
-                    : '-';
-                return `<tr>
-                    <td>${_esc(row.request_time)}</td>
-                    <td><a href="/record/${encodeURIComponent(row.id)}" style="color:var(--accent);">${_esc(row.glass_id)}</a></td>
-                    <td>${_esc(row.model_id)} / ${_esc(row.machine_no)}</td>
-                    <td><span class="badge ${row.ai_judgment === 'NG' ? 'badge-ng' : row.ai_judgment === 'OK' ? 'badge-ok' : 'badge-err'}">${_esc(row.ai_raw_judgment || '-')}</span></td>
-                    <td><span class="badge ${row.mes_judgment === 'NG' ? 'badge-ng' : 'badge-ok'}">${_esc(row.mes_judgment || '-')}</span></td>
-                    <td class="${result[1]}">${result[0]}</td>
-                    <td>${defect}</td>
-                </tr>`;
+                    <div class="filter-hint">${active ? '再次點擊取消篩選' : '點擊篩選明細'}</div>
+                </button>`;
             }).join('');
+            grid.style.display = 'grid';
+        }
+
+        function filteredRecords() {
+            if (!_data) return [];
+            if (_activeFilter === 'comparable') {
+                return _data.records.filter(row => row.comparison !== 'uncomparable');
+            }
+            if (_activeFilter) {
+                return _data.records.filter(row => row.comparison === _activeFilter);
+            }
+            return _data.records;
+        }
+
+        function toggleFilter(filter) {
+            _activeFilter = _activeFilter === filter ? null : filter;
+            renderCards();
+            renderDetails();
+        }
+
+        function resultLabel(comparison) {
+            return {
+                correct: '正確',
+                over_detection: '過檢',
+                miss_detection: '漏檢',
+                uncomparable: '無法比對',
+            }[comparison] || comparison || '';
+        }
+
+        function renderDetails() {
+            if (!_data) return;
+            const filteredRows = filteredRecords();
+            const visibleRows = filteredRows.slice(0, 2000);
+            const totalCount = _data.records.length;
+            const filterLabel = FILTER_LABELS[_activeFilter];
+            document.getElementById('mes_detailCount').textContent = filterLabel
+                ? `（${filterLabel}：顯示 ${visibleRows.length.toLocaleString()} / ${filteredRows.length.toLocaleString()} 筆；全部 ${totalCount.toLocaleString()} 筆）`
+                : `（顯示 ${visibleRows.length.toLocaleString()} / ${totalCount.toLocaleString()} 筆）`;
+            const body = document.getElementById('mes_detailBody');
+            if (visibleRows.length === 0) {
+                body.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted); padding:28px;">目前篩選沒有資料</td></tr>';
+            } else {
+                body.innerHTML = visibleRows.map(row => {
+                    const result = {
+                        correct: ['正確', 'result-correct'],
+                        over_detection: ['過檢', 'result-over'],
+                        miss_detection: ['漏檢', 'result-miss'],
+                        uncomparable: ['無法比對', '']
+                    }[row.comparison] || [resultLabel(row.comparison), ''];
+                    const defect = row.first_defect
+                        ? `${_esc(row.first_defect.dfct_code)}｜${_esc(row.first_defect.trans_date)}｜(${_esc(row.first_defect.x_axis)}, ${_esc(row.first_defect.y_axis)})`
+                        : '-';
+                    return `<tr>
+                        <td>${_esc(row.request_time)}</td>
+                        <td><a href="/record/${encodeURIComponent(row.id)}" style="color:var(--accent);">${_esc(row.glass_id)}</a></td>
+                        <td>${_esc(row.model_id)} / ${_esc(row.machine_no)}</td>
+                        <td><span class="badge ${row.ai_judgment === 'NG' ? 'badge-ng' : row.ai_judgment === 'OK' ? 'badge-ok' : 'badge-err'}">${_esc(row.ai_raw_judgment || '-')}</span></td>
+                        <td><span class="badge ${row.mes_judgment === 'NG' ? 'badge-ng' : 'badge-ok'}">${_esc(row.mes_judgment || '-')}</span></td>
+                        <td class="${result[1]}">${result[0]}</td>
+                        <td>${defect}</td>
+                    </tr>`;
+                }).join('');
+            }
+            document.getElementById('mes_exportBtn').disabled = filteredRows.length === 0;
             document.getElementById('mes_detailCard').style.display = 'block';
         }
 
-        return { get _loaded() { return _loaded; }, quickFilter, customFilter, loadData };
+        function csvCell(value) {
+            return `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
+        }
+
+        function exportCSV() {
+            const rows = filteredRecords();
+            if (rows.length === 0) {
+                alert('目前篩選沒有資料可導出');
+                return;
+            }
+
+            const headers = ['推論時間', '玻璃 ID', 'Model', '機台', 'AI', 'MES', '比對結果', 'MES 有效不良'];
+            const lines = [headers.map(csvCell).join(',')];
+            rows.forEach(row => {
+                const defect = row.first_defect
+                    ? `${row.first_defect.dfct_code || ''}｜${row.first_defect.trans_date || ''}｜(${row.first_defect.x_axis ?? ''}, ${row.first_defect.y_axis ?? ''})`
+                    : '';
+                lines.push([
+                    row.request_time,
+                    row.glass_id,
+                    row.model_id,
+                    row.machine_no,
+                    row.ai_raw_judgment,
+                    row.mes_judgment,
+                    resultLabel(row.comparison),
+                    defect,
+                ].map(csvCell).join(','));
+            });
+
+            const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            const start = document.getElementById('mes_startDate').value || 'start';
+            const end = document.getElementById('mes_endDate').value || 'end';
+            link.href = url;
+            link.download = `mes_report_comparison_${start}_${end}_${_activeFilter || 'all'}.csv`;
+            link.click();
+            URL.revokeObjectURL(url);
+        }
+
+        return { get _loaded() { return _loaded; }, quickFilter, customFilter, loadData, toggleFilter, exportCSV };
     })();
 
     inferenceTab.quickFilter('today');
