@@ -122,7 +122,7 @@ def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
         ("MOD2", "10.174.1.79:1521/pnemr", "MOD2 / PNEMR / MERDA1.WP_DEFTHIS"),
     ):
         repository = OracleMESRepository({**base_config, "facility": facility})
-        rows = repository.fetch_defects(["PANEL-1"])
+        rows = repository.fetch_defects(["PANEL-1"], datetime(2026, 7, 19, 8, 0, 0, 123000))
         assert rows["PANEL-1"][0]["dfct_code"] == "PCM01"
         assert made_dsns[-1] == expected_dsn
         assert repository.source_label == expected_source
@@ -132,8 +132,8 @@ def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
     assert "FROM MERDA1.WP_DEFTHIS" in sql
     assert "DEFT_OPER = :deft_oper" in sql
     assert "IF_NEWER = 'Y'" in sql
-    assert "TRANS_DATE >=" not in sql
-    assert "min_trans_date" not in binds
+    assert "TRANS_DATE >= :min_trans_date" in sql
+    assert binds["min_trans_date"] == "2026-07-19 08.00.00.123000"
     assert binds["panel_0"] == "PANEL-1"
     assert binds["deft_oper"] == "1600"
 

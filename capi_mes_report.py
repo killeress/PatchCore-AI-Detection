@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from datetime import datetime
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
+
+
+logger = logging.getLogger(__name__)
 
 
 try:
@@ -183,7 +188,7 @@ class OracleMESRepository:
     def source_label(self) -> str:
         return f"{self.facility} / {self.service_name.upper()} / MERDA1.WP_DEFTHIS"
 
-    def fetch_defects(self, panel_ids: Sequence[str]) -> Dict[str, List[Dict]]:
+    def fetch_defects(self, panel_ids: Sequence[str], min_trans_date: datetime) -> Dict[str, List[Dict]]:
         panel_ids = sorted({str(value or "").strip().upper() for value in panel_ids if str(value or "").strip()})
         if not panel_ids:
             return {}
@@ -193,12 +198,21 @@ class OracleMESRepository:
             raise MESReportConfigurationError("Server 尚未安裝 python-oracledb，請執行 pip install -r requirements.txt") from exc
 
         dsn = oracledb.makedsn(self.host, self.port, service_name=self.service_name)
+        started_at = time.monotonic()
+        logger.info("[MES Report] Oracle connect start: facility=%s, panels=%d", self.facility, len(panel_ids))
         connection = oracledb.connect(user=self.user, password=self.password, dsn=dsn)
+        logger.info("[MES Report] Oracle connected in %.2fs", time.monotonic() - started_at)
         result: Dict[str, List[Dict]] = {}
+        min_trans_date_text = min_trans_date.strftime("%Y-%m-%d %H.%M.%S.%f")
+        batch_count = (len(panel_ids) + 899) // 900
         try:
             cursor = connection.cursor()
+            cursor.arraysize = 1000
+            cursor.prefetchrows = 1000
             try:
                 for offset in range(0, len(panel_ids), 900):
+                    batch_number = offset // 900 + 1
+                    batch_started_at = time.monotonic()
                     chunk = panel_ids[offset:offset + 900]
                     panel_binds = {f"panel_{idx}": value for idx, value in enumerate(chunk)}
                     placeholders = ", ".join(f":panel_{idx}" for idx in range(len(chunk)))
@@ -207,14 +221,18 @@ class OracleMESRepository:
                         FROM MERDA1.WP_DEFTHIS
                         WHERE DEFT_OPER = :deft_oper
                           AND IF_NEWER = 'Y'
+                          AND TRANS_DATE >= :min_trans_date
                           AND PNL_ID IN ({placeholders})
                         ORDER BY PNL_ID, TRANS_DATE
                     """
                     cursor.execute(sql, {
                         "deft_oper": "1600",
+                        "min_trans_date": min_trans_date_text,
                         **panel_binds,
                     })
+                    row_count = 0
                     for pnl_id, code, trans_date, x_axis, y_axis in cursor:
+                        row_count += 1
                         key = str(pnl_id or "").strip().upper()
                         result.setdefault(key, []).append({
                             "pnl_id": key,
@@ -223,8 +241,17 @@ class OracleMESRepository:
                             "x_axis": x_axis,
                             "y_axis": y_axis,
                         })
+                    logger.info(
+                        "[MES Report] Oracle batch %d/%d: panels=%d, rows=%d, elapsed=%.2fs",
+                        batch_number, batch_count, len(chunk), row_count,
+                        time.monotonic() - batch_started_at,
+                    )
             finally:
                 cursor.close()
         finally:
             connection.close()
+        logger.info(
+            "[MES Report] Oracle query complete: panels=%d, matched_panels=%d, elapsed=%.2fs",
+            len(panel_ids), len(result), time.monotonic() - started_at,
+        )
         return result

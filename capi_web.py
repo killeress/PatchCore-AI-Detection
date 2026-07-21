@@ -5794,8 +5794,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 cutoffs = [_parse_datetime(row.get("request_time")) for row in records]
                 valid_cutoffs = [value for value in cutoffs if value is not None]
                 if valid_cutoffs:
+                    panel_ids = [row.get("glass_id", "") for row in records]
+                    logger.info(
+                        "[MES Report] Local records ready: range=%s..%s, records=%d, unique_panels=%d",
+                        start_date, end_date, len(records),
+                        len({str(value or "").strip().upper() for value in panel_ids if str(value or "").strip()}),
+                    )
                     defects = repository.fetch_defects(
-                        [row.get("glass_id", "") for row in records],
+                        panel_ids,
+                        min(valid_cutoffs),
                     )
 
             report = build_mes_comparison(records, defects)
@@ -5804,6 +5811,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "source": repository.source_label,
                 "rule": "DEFT_OPER=1600、IF_NEWER=Y、推論時間後、排除 PCK21、X/Y 皆有值",
             })
+            logger.info("[MES Report] Comparison response ready: records=%d", len(report["records"]))
             self._send_json(report)
         except ValueError as e:
             self._send_json({"success": False, "error": str(e)}, status=400)
