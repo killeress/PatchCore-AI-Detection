@@ -74,11 +74,11 @@ def test_machine_ok_is_not_changed():
     assert _normalize_machine_judgment_for_bomb_only_panel("OK", [result]) == "OK"
 
 
-def test_record_machine_judgment_uses_aoi_report_ng_when_request_is_ok():
+def test_record_machine_judgment_preserves_client_ok_with_aoi_report():
     result = _result(tiles=[_tile(is_bomb=True)])
     aoi_report = {"WGF50500": [SimpleNamespace(defect_code="C1111")]}
 
-    assert _stored_machine_judgment_for_record("OK", [result], aoi_report) == "NG"
+    assert _stored_machine_judgment_for_record("OK", [result], aoi_report) == "OK"
 
 
 def test_record_machine_judgment_uses_aoi_report_ng_before_bomb_only_normalization():

@@ -1324,6 +1324,10 @@ def _stored_machine_judgment_for_record(
     results: List[ImageResult],
     aoi_report: Optional[Dict] = None,
 ) -> str:
+    # Client 傳入 OK 時，資料庫的機檢判定必須與 AOI response 一致；
+    # AOI TXT 缺陷只維持原本對非 OK 請求的 NG 防護。
+    if str(machine_judgment or "").upper() == "OK":
+        return machine_judgment
     if str(machine_judgment or "").upper() != "HY" and _aoi_report_has_defects(aoi_report):
         return "NG"
     return _normalize_machine_judgment_for_bomb_only_panel(machine_judgment, results)
