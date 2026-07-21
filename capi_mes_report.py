@@ -211,7 +211,7 @@ class OracleMESRepository:
                         ORDER BY PNL_ID, TRANS_DATE
                     """
                     cursor.execute(sql, {
-                        "deft_oper": 1600,
+                        "deft_oper": "1600",
                         **panel_binds,
                     })
                     for pnl_id, code, trans_date, x_axis, y_axis in cursor:

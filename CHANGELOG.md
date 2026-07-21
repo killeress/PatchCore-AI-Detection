@@ -1,5 +1,12 @@
 # 更新紀錄
 
+## 2026-07-21 v4
+
+### [Bug fixed]MES Report 字串欄位相容性
+
+- 修正 Oracle 製程站點欄位包含非數字內容時可能造成 Report 載入失敗的問題。
+- 新增 MES Oracle 唯讀診斷工具，方便現場檢查欄位型態與查詢參數。
+
 ## 2026-07-21 v3
 
 ### [Bug fixed]MES Report 日期欄位相容性
