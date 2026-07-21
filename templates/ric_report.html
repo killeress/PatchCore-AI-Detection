@@ -4031,6 +4031,11 @@
             }[comparison] || comparison || '';
         }
 
+        function qualifyingDefects(row) {
+            if (Array.isArray(row.qualifying_defects)) return row.qualifying_defects;
+            return row.first_defect ? [row.first_defect] : [];
+        }
+
         function renderDetails() {
             if (!_data) return;
             const filteredRows = filteredRecords();
@@ -4051,8 +4056,9 @@
                         miss_detection: ['漏檢', 'result-miss'],
                         uncomparable: ['無法比對', '']
                     }[row.comparison] || [resultLabel(row.comparison), ''];
-                    const defect = row.first_defect
-                        ? `${_esc(row.first_defect.dfct_code)}｜${_esc(row.first_defect.trans_date)}｜(${_esc(row.first_defect.x_axis)}, ${_esc(row.first_defect.y_axis)})`
+                    const defects = qualifyingDefects(row);
+                    const defect = defects.length
+                        ? defects.map(item => `${_esc(item.dfct_code)}｜${_esc(item.trans_date)}｜(${_esc(item.x_axis)}, ${_esc(item.y_axis)})`).join('<br>')
                         : '-';
                     const recordId = Number(row.id);
                     const detailButton = row.id != null && Number.isInteger(recordId)
@@ -4157,9 +4163,9 @@
             const headers = ['推論時間', '玻璃 ID', 'Model', '機台', 'AI', 'MES', '比對結果', 'MES 有效不良'];
             const lines = [headers.map(csvCell).join(',')];
             rows.forEach(row => {
-                const defect = row.first_defect
-                    ? `${row.first_defect.dfct_code || ''}｜${row.first_defect.trans_date || ''}｜(${row.first_defect.x_axis ?? ''}, ${row.first_defect.y_axis ?? ''})`
-                    : '';
+                const defect = qualifyingDefects(row)
+                    .map(item => `${item.dfct_code || ''}｜${item.trans_date || ''}｜(${item.x_axis ?? ''}, ${item.y_axis ?? ''})`)
+                    .join('\n');
                 lines.push([
                     row.request_time,
                     row.glass_id,

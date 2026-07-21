@@ -39,4 +39,7 @@ def test_ai_inference_records_is_the_default_report_tab():
     assert "let _ignoreAoiOk = false;" in html
     assert "params.set('ignore_aoi_ok', '1')" in html
     assert "已忽略 AOI=OK" in html
+    assert "Array.isArray(row.qualifying_defects)" in html
+    assert ".join('<br>')" in html
+    assert ".join('\\n')" in html
     assert "inferenceTab.quickFilter('today');" in html
