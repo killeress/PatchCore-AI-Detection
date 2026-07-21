@@ -77,6 +77,7 @@ CODE_FILES = [
     "static/favicon.svg",
     "scripts/over_review_poc/train_final_model.py",
     "tools/build_bga_tiles.py",
+    "tools/diagnose_mes_oracle.py",
     "tools/train_bga_all.py",
     "start_server.sh",
     "install_patch.sh",

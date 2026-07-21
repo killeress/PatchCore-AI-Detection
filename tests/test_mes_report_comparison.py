@@ -135,7 +135,7 @@ def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
     assert "TRANS_DATE >=" not in sql
     assert "min_trans_date" not in binds
     assert binds["panel_0"] == "PANEL-1"
-    assert binds["deft_oper"] == 1600
+    assert binds["deft_oper"] == "1600"
 
 
 def test_mes_comparison_records_use_factory_day_window():
