@@ -634,6 +634,49 @@
         color: var(--text-muted);
     }
 
+    .mes-status {
+        margin-bottom: 16px;
+        padding: 10px 14px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        color: var(--text-muted);
+        font-size: 0.82rem;
+        background: var(--surface);
+    }
+
+    .mes-table-wrap {
+        overflow: auto;
+        max-height: 620px;
+    }
+
+    .mes-table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 980px;
+    }
+
+    .mes-table th,
+    .mes-table td {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        font-size: 0.8rem;
+        white-space: nowrap;
+    }
+
+    .mes-table th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        background: var(--surface);
+        color: var(--text-muted);
+    }
+
+    .mes-table td { color: var(--text); }
+    .mes-table .result-over { color: #f59e0b; font-weight: 700; }
+    .mes-table .result-miss { color: #ef4444; font-weight: 700; }
+    .mes-table .result-correct { color: #22c55e; font-weight: 700; }
+
     /* ── Review Tab ── */
     .review-select {
         background: var(--surface);
@@ -892,6 +935,7 @@
 <div class="top-tab-bar">
     <div class="top-tab active" data-top-tab="inference" onclick="switchTopTab('inference')">🤖 AI 推論紀錄</div>
     <div class="top-tab" data-top-tab="ric" onclick="switchTopTab('ric')">📊 RIC Report</div>
+    <div class="top-tab" data-top-tab="mes" onclick="switchTopTab('mes')">🔗 Report數據比對</div>
     <div class="top-tab" data-top-tab="scratch" onclick="switchTopTab('scratch')">🩹 Scratch 審查</div>
     <a class="top-tab" href="/ric/within-spec-logs">📏 規格內明細</a>
 </div>
@@ -1302,6 +1346,42 @@
         </div>
     </div>
 </div><!-- end #tab-inference -->
+
+<!-- MES Report 與 AI 推論比對 -->
+<div class="top-tab-content" id="tab-mes">
+    <div class="ric-header">
+        <div>
+            <h2>🔗 Report數據比對</h2>
+            <div class="subtitle">AI 推論結果 vs MES Report 人員不良判定</div>
+        </div>
+    </div>
+    <div class="inf-date-bar mes-date-bar">
+        <span style="color:var(--text-muted); font-size:0.88rem; margin-right:4px;">日期篩選：</span>
+        <button class="quick-btn active" data-range="today" onclick="mesReportTab.quickFilter('today')">今日</button>
+        <button class="quick-btn" data-range="7d" onclick="mesReportTab.quickFilter('7d')">7 天</button>
+        <button class="quick-btn" data-range="30d" onclick="mesReportTab.quickFilter('30d')">30 天</button>
+        <span style="margin-left:12px;"></span>
+        <input type="date" id="mes_startDate">
+        <span style="color:var(--text-muted);">~</span>
+        <input type="date" id="mes_endDate">
+        <button class="search-btn" onclick="mesReportTab.customFilter()">查詢</button>
+    </div>
+    <div class="mes-status" id="mes_status">切換到此頁籤後載入 PNEMR 資料。</div>
+    <div class="inf-loading" id="mes_loading" style="display:none;">正在查詢 AI 與 MES Report...</div>
+    <div class="inf-stats-grid" id="mes_statsGrid" style="display:none;"></div>
+    <div class="inf-chart-card" id="mes_detailCard" style="display:none;">
+        <h3>📋 逐筆比對明細 <span id="mes_detailCount" style="color:var(--text-muted); font-weight:400;"></span></h3>
+        <div class="mes-table-wrap">
+            <table class="mes-table">
+                <thead><tr>
+                    <th>推論時間</th><th>玻璃 ID</th><th>Model / 機台</th>
+                    <th>AI</th><th>MES</th><th>比對結果</th><th>MES 有效不良</th>
+                </tr></thead>
+                <tbody id="mes_detailBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
 
 <!-- Tab 3: Scratch 審查 -->
 <div class="top-tab-content" id="tab-scratch">
@@ -3182,6 +3262,9 @@
         if (tabName === 'inference' && !inferenceTab._loaded) {
             inferenceTab.quickFilter('today');
         }
+        if (tabName === 'mes' && !mesReportTab._loaded) {
+            mesReportTab.quickFilter('today');
+        }
         if (tabName === 'scratch' && typeof srInit === 'function') {
             srInit();
         }
@@ -3583,6 +3666,123 @@
         }
 
         return { get _loaded() { return _loaded; }, quickFilter, customFilter, loadData, renderCards, renderCharts, renderCrossMatrix };
+    })();
+
+    const mesReportTab = (function () {
+        let _loaded = false;
+
+        function _formatDate(d) {
+            return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+        }
+
+        function _getProductionToday() {
+            const d = new Date();
+            if ((d.getHours() * 60 + d.getMinutes()) < 450) d.setDate(d.getDate() - 1);
+            return d;
+        }
+
+        function _getDateRange(range) {
+            const today = _getProductionToday();
+            const end = _formatDate(today);
+            if (range === 'today') return { start: end, end };
+            const start = new Date(today);
+            start.setDate(start.getDate() - (range === '7d' ? 6 : 29));
+            return { start: _formatDate(start), end };
+        }
+
+        function _esc(value) {
+            return String(value == null ? '' : value).replace(/[&<>'"]/g, ch => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+            })[ch]);
+        }
+
+        function quickFilter(range) {
+            document.querySelectorAll('.mes-date-bar .quick-btn').forEach(
+                button => button.classList.toggle('active', button.dataset.range === range)
+            );
+            const dates = _getDateRange(range);
+            document.getElementById('mes_startDate').value = dates.start;
+            document.getElementById('mes_endDate').value = dates.end;
+            loadData(dates.start, dates.end);
+        }
+
+        function customFilter() {
+            document.querySelectorAll('.mes-date-bar .quick-btn').forEach(button => button.classList.remove('active'));
+            loadData(
+                document.getElementById('mes_startDate').value,
+                document.getElementById('mes_endDate').value
+            );
+        }
+
+        async function loadData(start, end) {
+            const loading = document.getElementById('mes_loading');
+            const status = document.getElementById('mes_status');
+            loading.style.display = 'block';
+            status.textContent = '正在連線 PNEMR 並比對 MES Report...';
+            document.getElementById('mes_statsGrid').style.display = 'none';
+            document.getElementById('mes_detailCard').style.display = 'none';
+            try {
+                const params = new URLSearchParams();
+                if (start) params.set('start_date', start);
+                if (end) params.set('end_date', end);
+                const response = await fetch('/api/ric/mes-comparison?' + params.toString());
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || `HTTP ${response.status}`);
+                _loaded = true;
+                status.textContent = `資料來源：${data.source}｜規則：${data.rule}`;
+                render(data);
+            } catch (error) {
+                status.textContent = '載入失敗：' + error.message;
+            } finally {
+                loading.style.display = 'none';
+            }
+        }
+
+        function render(data) {
+            const s = data.summary;
+            const cards = [
+                ['可比對總數', s.total, '100%', 'ai-ng'],
+                ['判定正確', s.correct, s.accuracy_rate.toFixed(2) + '%', 'revival'],
+                ['過檢', s.over_detection, s.over_detection_rate.toFixed(2) + '%', 'err'],
+                ['漏檢', s.miss_detection, s.miss_detection_rate.toFixed(2) + '%', 'aoi-ng'],
+                ['無法比對', s.uncomparable, 'ERR／無時間', 'hy'],
+            ];
+            const grid = document.getElementById('mes_statsGrid');
+            grid.innerHTML = cards.map(card => `
+                <div class="inf-stat-card ${card[3]}">
+                    <div class="label">${card[0]}</div>
+                    <div class="value">${Number(card[1]).toLocaleString()}</div>
+                    <div class="pct">${card[2]}</div>
+                </div>`).join('');
+            grid.style.display = 'grid';
+
+            const visibleRows = data.records.slice(0, 2000);
+            document.getElementById('mes_detailCount').textContent =
+                `（顯示 ${visibleRows.length.toLocaleString()} / ${data.records.length.toLocaleString()} 筆）`;
+            document.getElementById('mes_detailBody').innerHTML = visibleRows.map(row => {
+                const result = {
+                    correct: ['正確', 'result-correct'],
+                    over_detection: ['過檢', 'result-over'],
+                    miss_detection: ['漏檢', 'result-miss'],
+                    uncomparable: ['無法比對', '']
+                }[row.comparison];
+                const defect = row.first_defect
+                    ? `${_esc(row.first_defect.dfct_code)}｜${_esc(row.first_defect.trans_date)}｜(${_esc(row.first_defect.x_axis)}, ${_esc(row.first_defect.y_axis)})`
+                    : '-';
+                return `<tr>
+                    <td>${_esc(row.request_time)}</td>
+                    <td><a href="/record/${encodeURIComponent(row.id)}" style="color:var(--accent);">${_esc(row.glass_id)}</a></td>
+                    <td>${_esc(row.model_id)} / ${_esc(row.machine_no)}</td>
+                    <td><span class="badge ${row.ai_judgment === 'NG' ? 'badge-ng' : row.ai_judgment === 'OK' ? 'badge-ok' : 'badge-err'}">${_esc(row.ai_raw_judgment || '-')}</span></td>
+                    <td><span class="badge ${row.mes_judgment === 'NG' ? 'badge-ng' : 'badge-ok'}">${_esc(row.mes_judgment || '-')}</span></td>
+                    <td class="${result[1]}">${result[0]}</td>
+                    <td>${defect}</td>
+                </tr>`;
+            }).join('');
+            document.getElementById('mes_detailCard').style.display = 'block';
+        }
+
+        return { get _loaded() { return _loaded; }, quickFilter, customFilter, loadData };
     })();
 
     inferenceTab.quickFilter('today');

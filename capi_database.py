@@ -3122,6 +3122,36 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def get_mes_comparison_records(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> list:
+        """取得 Report 數據比對使用的 AI 推論紀錄。"""
+        if start_date and not _DATE_RE.match(start_date):
+            raise ValueError(f"Invalid start_date format: {start_date}")
+        if end_date and not _DATE_RE.match(end_date):
+            raise ValueError(f"Invalid end_date format: {end_date}")
+
+        where_clauses = []
+        params = []
+        if start_date:
+            where_clauses.append("datetime(request_time) >= datetime(?)")
+            params.append(_factory_day_start_ts(start_date))
+        if end_date:
+            where_clauses.append("datetime(request_time) < datetime(?)")
+            params.append(_factory_day_end_ts(end_date))
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"""SELECT id, glass_id, model_id, machine_no, ai_judgment,
+                           image_dir, request_time
+                    FROM inference_records{where_sql}
+                    ORDER BY datetime(request_time) DESC, id DESC""",
+                params,
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
     # ── 設定參數管理方法 ─────────────────────────────────
 
     @staticmethod

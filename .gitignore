@@ -87,6 +87,7 @@ Sample/
 # Crash dumps and training logs (txt, not caught by *.log)
 *.stackdump
 log*.txt
+NGB DB資訊.txt
 
 # Deployment bundles (large ML models and pickled classifiers)
 deployment/*.pkl

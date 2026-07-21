@@ -15,7 +15,10 @@ def test_ai_inference_records_is_the_default_report_tab():
 
     inference_tab = '<div class="top-tab active" data-top-tab="inference"'
     ric_tab = '<div class="top-tab" data-top-tab="ric"'
+    mes_tab = '<div class="top-tab" data-top-tab="mes"'
     assert html.index(inference_tab) < html.index(ric_tab)
+    assert html.index(ric_tab) < html.index(mes_tab)
     assert '<div class="top-tab-content active" id="tab-inference">' in html
     assert '<div class="top-tab-content" id="tab-ric">' in html
+    assert '<div class="top-tab-content" id="tab-mes">' in html
     assert "inferenceTab.quickFilter('today');" in html

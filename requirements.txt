@@ -6,3 +6,4 @@ anomalib>=1.0.0
 numpy>=1.24.0
 pyyaml>=6.0
 nvidia-ml-py>=12.535.133  # Replaces pynvml
+oracledb>=2.0.0

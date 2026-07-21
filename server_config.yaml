@@ -48,6 +48,25 @@ database:
   path: /aidata/capi_ai/capi_results.db
 
 # ------------------------------------------------------------
+# MES Report — 依設備廠別選擇 Oracle TNS（每台設備只設定一個 facility）
+# ------------------------------------------------------------
+# 啟動 Server 前設定密碼：export CAPI_MES_ORACLE_PASSWORD='<password>'
+mes_report:
+  facility: MOD2
+  oracle:
+    user: MISSELECT
+    password_env: CAPI_MES_ORACLE_PASSWORD
+    tns:
+      MOD1:
+        host: 10.172.3.55
+        port: 1521
+        service_name: pncmr
+      MOD2:
+        host: 10.174.1.79
+        port: 1521
+        service_name: pnemr
+
+# ------------------------------------------------------------
 # 熱力圖儲存
 # ------------------------------------------------------------
 # base_dir         : 熱力圖根目錄，按 yyyy/mm/dd 分層
