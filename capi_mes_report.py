@@ -147,6 +147,7 @@ def build_mes_comparison(records: Sequence[Mapping], defects_by_panel: Mapping[s
             "comparison": comparison,
             "mes_row_count": mes_result["mes_row_count"],
             "qualifying_defect_count": len(mes_result["qualifying_defects"]),
+            "qualifying_defects": mes_result["qualifying_defects"],
             "first_defect": first_defect,
         })
 

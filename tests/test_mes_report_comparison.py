@@ -61,7 +61,10 @@ def test_build_mes_comparison_calculates_over_and_miss_rates():
     defects = {
         "MISS": [{**valid, "pnl_id": "MISS"}],
         "MISS-I": [{**valid, "pnl_id": "MISS-I"}],
-        "MATCH": [{**valid, "pnl_id": "MATCH"}],
+        "MATCH": [
+            {**valid, "pnl_id": "MATCH"},
+            {**_defect("2026-07-19 09:05:00", code="PCM02"), "pnl_id": "MATCH"},
+        ],
     }
 
     report = build_mes_comparison(records, defects)
@@ -83,6 +86,11 @@ def test_build_mes_comparison_calculates_over_and_miss_rates():
         "correct",
         "uncomparable",
     ]
+    assert [defect["dfct_code"] for defect in report["records"][3]["qualifying_defects"]] == [
+        "PCM01",
+        "PCM02",
+    ]
+    assert report["records"][3]["first_defect"]["dfct_code"] == "PCM01"
 
 
 def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
