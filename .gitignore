@@ -88,6 +88,7 @@ Sample/
 *.stackdump
 log*.txt
 NGB DB資訊.txt
+capi_mes_credentials.py
 
 # Deployment bundles (large ML models and pickled classifiers)
 deployment/*.pkl

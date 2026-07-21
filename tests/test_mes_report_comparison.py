@@ -2,6 +2,7 @@ from datetime import datetime
 import sqlite3
 from types import SimpleNamespace
 
+import capi_mes_report
 from capi_database import CAPIDatabase
 from capi_mes_report import OracleMESRepository, build_mes_comparison, classify_mes_judgment
 
@@ -80,6 +81,7 @@ def test_build_mes_comparison_calculates_over_and_miss_rates():
 
 
 def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
+    monkeypatch.setattr(capi_mes_report, "ORACLE_MES_PASSWORD", "secret")
     executed = []
     made_dsns = []
 
@@ -105,11 +107,9 @@ def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
         connect=lambda **kwargs: FakeConnection(),
     )
     monkeypatch.setitem(__import__("sys").modules, "oracledb", fake_oracledb)
-    monkeypatch.setenv("TEST_MES_PASSWORD", "secret")
     base_config = {
         "oracle": {
             "user": "MISSELECT",
-            "password_env": "TEST_MES_PASSWORD",
             "tns": {
                 "MOD1": {"host": "10.172.3.55", "port": 1521, "service_name": "pncmr"},
                 "MOD2": {"host": "10.174.1.79", "port": 1521, "service_name": "pnemr"},
@@ -126,6 +126,7 @@ def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
         assert rows["PANEL-1"][0]["dfct_code"] == "PCM01"
         assert made_dsns[-1] == expected_dsn
         assert repository.source_label == expected_source
+        assert repository.password == "secret"
 
     sql, binds = executed[-1]
     assert "FROM MERDA1.WP_DEFTHIS" in sql

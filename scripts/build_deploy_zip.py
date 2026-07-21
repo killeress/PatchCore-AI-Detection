@@ -118,6 +118,7 @@ GENERATED_METADATA_FILES = {
 }
 
 BACKBONE_CACHE_DIR = "deployment/torch_hub_cache"
+LOCAL_MES_CREDENTIALS_FILE = PROJECT_ROOT / "capi_mes_credentials.py"
 CODEONLY_EXCLUDED_PREFIXES = (
     "templates/imgs/",
     "static/",
@@ -150,12 +151,11 @@ training:
   gpu_memory_fraction: 0.50
 
 # Report 數據比對：每台設備只選擇一個廠別 Oracle TNS
-# 密碼請透過環境變數 CAPI_MES_ORACLE_PASSWORD 提供，不要寫進 yaml。
+# MES 連線資訊由部署包提供，各設備不需另外設定。
 mes_report:
   facility: MOD2
   oracle:
     user: MISSELECT
-    password_env: CAPI_MES_ORACLE_PASSWORD
     tns:
       MOD1:
         host: 10.172.3.55
@@ -187,7 +187,6 @@ README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明
    - 加 training 區段
    - 加 mes_report.oracle 區段
    - 安裝 Oracle thin driver：python3 -m pip install "oracledb>=2.0.0"
-   - 在 capi_server service 設定 CAPI_MES_ORACLE_PASSWORD 環境變數
 
 4. 確認 deployment/torch_hub_cache/ 目錄完整（應 ~264 MB）：
      du -sh /capi_ai/deployment/torch_hub_cache/
@@ -304,8 +303,7 @@ install_patch.sh 完成後會顯示 rollback 指令，例如：
 
 - 此包只更新程式檔與版本資訊，不應包含 DB、模型權重、heatmap、現場設定檔。
 - 若更新包內包含 start_server.sh，會一併更新現場啟動腳本。
-- Report 數據比對需安裝 `oracledb`、合併 server_config_mes_report.yaml.example，
-  並在 capi_server service 設定 CAPI_MES_ORACLE_PASSWORD。
+- Report 數據比對需安裝 `oracledb`，並合併 server_config_mes_report.yaml.example。
 """
 
 
@@ -549,6 +547,10 @@ def main(argv=None) -> int:
 
     if not args.patch_only:
         _validate_required_code_files(codeonly=args.no_backbone)
+    if not LOCAL_MES_CREDENTIALS_FILE.is_file():
+        raise FileNotFoundError(
+            "local MES credentials file missing: capi_mes_credentials.py"
+        )
 
     changed_files = _git_changed_files()
     if args.patch_only:
@@ -624,6 +626,9 @@ def main(argv=None) -> int:
             _add_file(zf, src, rel.replace("\\", "/"), entries)
             code_size += entries[-1]["size_bytes"]
             print(f"  + {rel}")
+        _add_file(zf, LOCAL_MES_CREDENTIALS_FILE, "capi_mes_credentials.py", entries)
+        code_size += entries[-1]["size_bytes"]
+        print("  + capi_mes_credentials.py (local-only)")
         if args.patch_only and skipped_files:
             print("\nSkipped non-deployable changed files:")
             for rel in skipped_files:

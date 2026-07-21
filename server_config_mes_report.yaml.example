@@ -4,7 +4,6 @@ mes_report:
   facility: MOD2
   oracle:
     user: MISSELECT
-    password_env: CAPI_MES_ORACLE_PASSWORD
     tns:
       MOD1:
         host: 10.172.3.55
@@ -14,6 +13,3 @@ mes_report:
         host: 10.174.1.79
         port: 1521
         service_name: pnemr
-
-# 啟動 capi_server 前，另以 service 環境變數提供密碼：
-# CAPI_MES_ORACLE_PASSWORD=<password>

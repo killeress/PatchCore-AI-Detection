@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
+
+
+try:
+    from capi_mes_credentials import ORACLE_MES_PASSWORD
+except ImportError:
+    ORACLE_MES_PASSWORD = ""
 
 
 class MESReportConfigurationError(RuntimeError):
@@ -158,16 +163,15 @@ class OracleMESRepository:
             raise MESReportConfigurationError(f"MES Oracle 找不到廠別 TNS：{self.facility}")
 
         tns_config = normalized_tns[self.facility]
-        password_env = str(oracle_config.get("password_env") or "CAPI_MES_ORACLE_PASSWORD")
         self.user = str(oracle_config.get("user") or "").strip()
-        self.password = str(oracle_config.get("password") or os.getenv(password_env) or "")
+        self.password = ORACLE_MES_PASSWORD
         self.host = str(tns_config.get("host") or "").strip()
         self.port = int(tns_config.get("port") or 1521)
         self.service_name = str(tns_config.get("service_name") or "").strip()
         missing = [
             name for name, value in (
                 ("user", self.user),
-                (password_env, self.password),
+                ("password", self.password),
                 ("host", self.host),
                 ("service_name", self.service_name),
             ) if not value
