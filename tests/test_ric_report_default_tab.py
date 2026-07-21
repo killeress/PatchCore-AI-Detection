@@ -26,4 +26,7 @@ def test_ai_inference_records_is_the_default_report_tab():
     assert "mesReportTab.toggleFilter('" in html
     assert "return _data.records.filter(row => row.comparison !== 'uncomparable');" in html
     assert "mes_report_comparison_${start}_${end}_${_activeFilter || 'all'}.csv" in html
+    assert "正在查詢 MES Oracle 並比對 Report，已等待 ${seconds} 秒" in html
+    assert "setInterval(updateWaitingText, 1000)" in html
+    assert "耗時：${elapsedSeconds} 秒" in html
     assert "inferenceTab.quickFilter('today');" in html

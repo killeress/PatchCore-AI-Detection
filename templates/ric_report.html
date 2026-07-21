@@ -3711,6 +3711,7 @@
         let _loaded = false;
         let _data = null;
         let _activeFilter = null;
+        let _waitTimer = null;
 
         const FILTER_LABELS = {
             comparable: '可比對總數',
@@ -3767,7 +3768,14 @@
             const loading = document.getElementById('mes_loading');
             const status = document.getElementById('mes_status');
             loading.style.display = 'block';
-            status.textContent = '正在連線 PNEMR 並比對 MES Report...';
+            if (_waitTimer) clearInterval(_waitTimer);
+            const waitStartedAt = Date.now();
+            const updateWaitingText = () => {
+                const seconds = Math.floor((Date.now() - waitStartedAt) / 1000);
+                status.textContent = `正在查詢 MES Oracle 並比對 Report，已等待 ${seconds} 秒...`;
+            };
+            updateWaitingText();
+            _waitTimer = setInterval(updateWaitingText, 1000);
             document.getElementById('mes_statsGrid').style.display = 'none';
             document.getElementById('mes_detailCard').style.display = 'none';
             document.getElementById('mes_exportBtn').disabled = true;
@@ -3780,11 +3788,14 @@
                 const data = await response.json();
                 if (!response.ok || !data.success) throw new Error(data.error || `HTTP ${response.status}`);
                 _loaded = true;
-                status.textContent = `資料來源：${data.source}｜規則：${data.rule}`;
+                const elapsedSeconds = ((Date.now() - waitStartedAt) / 1000).toFixed(1);
+                status.textContent = `資料來源：${data.source}｜耗時：${elapsedSeconds} 秒｜規則：${data.rule}`;
                 render(data);
             } catch (error) {
                 status.textContent = '載入失敗：' + error.message;
             } finally {
+                clearInterval(_waitTimer);
+                _waitTimer = null;
                 loading.style.display = 'none';
             }
         }
