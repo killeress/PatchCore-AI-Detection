@@ -183,7 +183,7 @@ class OracleMESRepository:
     def source_label(self) -> str:
         return f"{self.facility} / {self.service_name.upper()} / MERDA1.WP_DEFTHIS"
 
-    def fetch_defects(self, panel_ids: Sequence[str], min_trans_date: datetime) -> Dict[str, List[Dict]]:
+    def fetch_defects(self, panel_ids: Sequence[str]) -> Dict[str, List[Dict]]:
         panel_ids = sorted({str(value or "").strip().upper() for value in panel_ids if str(value or "").strip()})
         if not panel_ids:
             return {}
@@ -207,13 +207,11 @@ class OracleMESRepository:
                         FROM MERDA1.WP_DEFTHIS
                         WHERE DEFT_OPER = :deft_oper
                           AND IF_NEWER = 'Y'
-                          AND TRANS_DATE >= :min_trans_date
                           AND PNL_ID IN ({placeholders})
                         ORDER BY PNL_ID, TRANS_DATE
                     """
                     cursor.execute(sql, {
                         "deft_oper": 1600,
-                        "min_trans_date": min_trans_date,
                         **panel_binds,
                     })
                     for pnl_id, code, trans_date, x_axis, y_axis in cursor:

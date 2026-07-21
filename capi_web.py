@@ -5796,7 +5796,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if valid_cutoffs:
                     defects = repository.fetch_defects(
                         [row.get("glass_id", "") for row in records],
-                        min(valid_cutoffs),
                     )
 
             report = build_mes_comparison(records, defects)
