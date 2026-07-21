@@ -50,12 +50,11 @@ database:
 # ------------------------------------------------------------
 # MES Report — 依設備廠別選擇 Oracle TNS（每台設備只設定一個 facility）
 # ------------------------------------------------------------
-# 啟動 Server 前設定密碼：export CAPI_MES_ORACLE_PASSWORD='<password>'
+# MES 連線資訊由部署包提供，各設備不需另外設定。
 mes_report:
   facility: MOD2
   oracle:
     user: MISSELECT
-    password_env: CAPI_MES_ORACLE_PASSWORD
     tns:
       MOD1:
         host: 10.172.3.55
