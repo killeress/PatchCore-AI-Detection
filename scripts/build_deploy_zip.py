@@ -42,6 +42,7 @@ CODE_FILES = [
     "capi_image_preprocess_lab.py",
     "capi_inference.py",
     "capi_mark_detector.py",
+    "capi_mes_report.py",
     "capi_model_registry.py",
     "capi_preprocess.py",
     "capi_patchcore_feature_cleaning.py",
@@ -52,6 +53,8 @@ CODE_FILES = [
     "capi_train_runner.py",
     "capi_update_agent.py",
     "capi_web.py",
+    "requirements.txt",
+    "server_config_mes_report.yaml.example",
     "scratch_classifier.py",
     "scratch_filter.py",
     "templates/base.html",
@@ -98,6 +101,8 @@ PATCH_DEPLOY_ROOT_FILES = {
     "rollback_patch.sh",
     "promote_update.sh",
     "setup_auto_update_client.sh",
+    "requirements.txt",
+    "server_config_mes_report.yaml.example",
 }
 
 PATCH_DEPLOY_PREFIXES = (
@@ -143,6 +148,23 @@ training:
   # 訓練 subprocess GPU VRAM 上限（與 inference.gpu_memory_fraction 配對）
   # 0.40 + 0.50 = 0.90，剩 ~10% 給桌面/buffer
   gpu_memory_fraction: 0.50
+
+# Report 數據比對：每台設備只選擇一個廠別 Oracle TNS
+# 密碼請透過環境變數 CAPI_MES_ORACLE_PASSWORD 提供，不要寫進 yaml。
+mes_report:
+  facility: MOD2
+  oracle:
+    user: MISSELECT
+    password_env: CAPI_MES_ORACLE_PASSWORD
+    tns:
+      MOD1:
+        host: 10.172.3.55
+        port: 1521
+        service_name: pncmr
+      MOD2:
+        host: 10.174.1.79
+        port: 1521
+        service_name: pnemr
 """
 
 README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明
@@ -163,6 +185,9 @@ README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明
    - 加 model_configs 列表
    - 加 fallback_model_config
    - 加 training 區段
+   - 加 mes_report.oracle 區段
+   - 安裝 Oracle thin driver：python3 -m pip install "oracledb>=2.0.0"
+   - 在 capi_server service 設定 CAPI_MES_ORACLE_PASSWORD 環境變數
 
 4. 確認 deployment/torch_hub_cache/ 目錄完整（應 ~264 MB）：
      du -sh /capi_ai/deployment/torch_hub_cache/
@@ -279,6 +304,8 @@ install_patch.sh 完成後會顯示 rollback 指令，例如：
 
 - 此包只更新程式檔與版本資訊，不應包含 DB、模型權重、heatmap、現場設定檔。
 - 若更新包內包含 start_server.sh，會一併更新現場啟動腳本。
+- Report 數據比對需安裝 `oracledb`、合併 server_config_mes_report.yaml.example，
+  並在 capi_server service 設定 CAPI_MES_ORACLE_PASSWORD。
 """
 
 

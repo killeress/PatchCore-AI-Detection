@@ -3058,6 +3058,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_within_spec_suggestion_log_api(query)
             elif path == "/api/ric/inference-stats":
                 self._handle_inference_stats_api(query)
+            elif path == "/api/ric/mes-comparison":
+                self._handle_mes_comparison_api(query)
             elif path == "/scratch-review":
                 self._handle_scratch_review_page(path)
             elif path == "/api/scratch-review/list":
@@ -5769,6 +5771,46 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Inference stats API error: {e}", exc_info=True)
             self._send_json({"success": False, "error": str(e)})
+
+    def _handle_mes_comparison_api(self, query: dict):
+        """API: 將 AI 推論結果與 MES Report 人工不良判定比對。"""
+        try:
+            if not self.db:
+                self._send_json({"success": False, "error": "DB not available"}, status=503)
+                return
+
+            start_date = query.get("start_date", [""])[0] or None
+            end_date = query.get("end_date", [""])[0] or None
+            records = self.db.get_mes_comparison_records(start_date, end_date)
+
+            from capi_mes_report import OracleMESRepository, build_mes_comparison, _parse_datetime
+
+            server_inst = self._capi_server_instance
+            server_config = getattr(server_inst, "server_config", {}) if server_inst else {}
+            mes_report_config = server_config.get("mes_report") or {}
+            repository = OracleMESRepository(mes_report_config)
+            defects = {}
+            if records:
+                cutoffs = [_parse_datetime(row.get("request_time")) for row in records]
+                valid_cutoffs = [value for value in cutoffs if value is not None]
+                if valid_cutoffs:
+                    defects = repository.fetch_defects(
+                        [row.get("glass_id", "") for row in records],
+                        min(valid_cutoffs),
+                    )
+
+            report = build_mes_comparison(records, defects)
+            report.update({
+                "success": True,
+                "source": repository.source_label,
+                "rule": "DEFT_OPER=1600、IF_NEWER=Y、推論時間後、排除 PCK21、X/Y 皆有值",
+            })
+            self._send_json(report)
+        except ValueError as e:
+            self._send_json({"success": False, "error": str(e)}, status=400)
+        except Exception as e:
+            logger.error("MES comparison API error: %s", e, exc_info=True)
+            self._send_json({"success": False, "error": str(e)}, status=502)
 
     def _handle_debug_inference_run(self):
         """API: 執行 Debug 單圖推論"""
