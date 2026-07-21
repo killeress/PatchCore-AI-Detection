@@ -713,6 +713,144 @@
     .mes-table .result-miss { color: #ef4444; font-weight: 700; }
     .mes-table .result-correct { color: #22c55e; font-weight: 700; }
 
+    .mes-detail-btn {
+        padding: 5px 10px;
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        background: rgba(59, 130, 246, 0.12);
+        color: var(--accent);
+        cursor: pointer;
+        font: inherit;
+    }
+
+    .mes-detail-btn:hover { background: rgba(59, 130, 246, 0.22); }
+
+    .mes-report-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 1200;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(2, 6, 23, 0.82);
+    }
+
+    .mes-report-modal.open { display: flex; }
+
+    .mes-report-dialog {
+        width: min(1500px, 96vw);
+        max-height: 92vh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: var(--bg);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+    }
+
+    .mes-report-dialog-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border);
+        background: var(--surface);
+    }
+
+    .mes-report-dialog-header h3 { margin: 0; }
+
+    .mes-report-close {
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 5px 10px;
+        background: transparent;
+        color: var(--text-muted);
+        cursor: pointer;
+        font-size: 1rem;
+    }
+
+    .mes-report-close:hover { color: var(--text); border-color: var(--text-muted); }
+
+    .mes-report-detail-meta {
+        padding: 10px 20px;
+        border-bottom: 1px solid var(--border);
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        line-height: 1.7;
+    }
+
+    .mes-report-detail-body {
+        overflow: auto;
+        padding: 16px 20px 22px;
+    }
+
+    .mes-report-detail-state {
+        padding: 44px 16px;
+        text-align: center;
+        color: var(--text-muted);
+    }
+
+    .mes-report-record {
+        margin-bottom: 16px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--surface);
+    }
+
+    .mes-report-record:last-child { margin-bottom: 0; }
+
+    .mes-report-record-title {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 9px 12px;
+        border-bottom: 1px solid var(--border);
+        color: var(--text);
+        font-size: 0.84rem;
+    }
+
+    .mes-report-fields {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .mes-report-field {
+        min-width: 0;
+        padding: 9px 12px;
+        border-right: 1px solid var(--border);
+        border-bottom: 1px solid var(--border);
+    }
+
+    .mes-report-field-name {
+        margin-bottom: 4px;
+        color: var(--text-muted);
+        font-family: monospace;
+        font-size: 0.72rem;
+    }
+
+    .mes-report-field-value {
+        min-height: 1.2em;
+        color: var(--text);
+        font-size: 0.8rem;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
+
+    .mes-report-empty-value { color: var(--text-muted); font-style: italic; }
+
+    @media (max-width: 1100px) {
+        .mes-report-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 680px) {
+        .mes-report-modal { padding: 8px; }
+        .mes-report-fields { grid-template-columns: 1fr; }
+    }
+
     /* ── Review Tab ── */
     .review-select {
         background: var(--surface);
@@ -1414,10 +1552,22 @@
             <table class="mes-table">
                 <thead><tr>
                     <th>推論時間</th><th>玻璃 ID</th><th>Model / 機台</th>
-                    <th>AI</th><th>MES</th><th>比對結果</th><th>MES 有效不良</th>
+                    <th>AI</th><th>MES</th><th>比對結果</th><th>MES 有效不良</th><th>MES 完整數據</th>
                 </tr></thead>
                 <tbody id="mes_detailBody"></tbody>
             </table>
+        </div>
+    </div>
+
+    <div id="mesReportDetailModal" class="mes-report-modal" aria-hidden="true"
+         onclick="if(event.target === this) mesReportTab.closeDetail()">
+        <div class="mes-report-dialog" role="dialog" aria-modal="true" aria-labelledby="mesReportDetailTitle">
+            <div class="mes-report-dialog-header">
+                <h3 id="mesReportDetailTitle">MES Report 完整數據</h3>
+                <button type="button" class="mes-report-close" onclick="mesReportTab.closeDetail()" aria-label="關閉">✕</button>
+            </div>
+            <div class="mes-report-detail-meta" id="mesReportDetailMeta"></div>
+            <div class="mes-report-detail-body" id="mesReportDetailBody"></div>
         </div>
     </div>
 </div>
@@ -3712,6 +3862,7 @@
         let _data = null;
         let _activeFilter = null;
         let _waitTimer = null;
+        let _detailRequestToken = 0;
 
         const FILTER_LABELS = {
             comparable: '可比對總數',
@@ -3869,7 +4020,7 @@
                 : `（顯示 ${visibleRows.length.toLocaleString()} / ${totalCount.toLocaleString()} 筆）`;
             const body = document.getElementById('mes_detailBody');
             if (visibleRows.length === 0) {
-                body.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted); padding:28px;">目前篩選沒有資料</td></tr>';
+                body.innerHTML = '<tr><td colspan="8" style="text-align:center; color:var(--text-muted); padding:28px;">目前篩選沒有資料</td></tr>';
             } else {
                 body.innerHTML = visibleRows.map(row => {
                     const result = {
@@ -3881,6 +4032,10 @@
                     const defect = row.first_defect
                         ? `${_esc(row.first_defect.dfct_code)}｜${_esc(row.first_defect.trans_date)}｜(${_esc(row.first_defect.x_axis)}, ${_esc(row.first_defect.y_axis)})`
                         : '-';
+                    const recordId = Number(row.id);
+                    const detailButton = row.id != null && Number.isInteger(recordId)
+                        ? `<button type="button" class="mes-detail-btn" onclick="mesReportTab.openDetail(${recordId})">查看</button>`
+                        : '-';
                     return `<tr>
                         <td>${_esc(row.request_time)}</td>
                         <td><a href="/record/${encodeURIComponent(row.id)}" style="color:var(--accent);">${_esc(row.glass_id)}</a></td>
@@ -3889,11 +4044,81 @@
                         <td><span class="badge ${row.mes_judgment === 'NG' ? 'badge-ng' : 'badge-ok'}">${_esc(row.mes_judgment || '-')}</span></td>
                         <td class="${result[1]}">${result[0]}</td>
                         <td>${defect}</td>
+                        <td>${detailButton}</td>
                     </tr>`;
                 }).join('');
             }
             document.getElementById('mes_exportBtn').disabled = filteredRows.length === 0;
             document.getElementById('mes_detailCard').style.display = 'block';
+        }
+
+        function detailValue(value) {
+            if (value == null) return '<span class="mes-report-empty-value">NULL</span>';
+            const text = String(value);
+            if (!text.trim()) return '<span class="mes-report-empty-value">（空白）</span>';
+            return _esc(text);
+        }
+
+        function renderReportDetail(data) {
+            const inference = data.inference || {};
+            const rows = Array.isArray(data.rows) ? data.rows : [];
+            const columns = Array.isArray(data.columns) ? data.columns : [];
+            document.getElementById('mesReportDetailMeta').innerHTML =
+                `玻璃 ID：<strong>${_esc(inference.glass_id || '-')}</strong>｜` +
+                `推論時間：${_esc(inference.request_time || '-')}｜` +
+                `MES 記錄：${rows.length.toLocaleString()} 筆<br>` +
+                `資料來源：${_esc(data.source || '-')}｜規則：${_esc(data.rule || '-')}`;
+
+            const body = document.getElementById('mesReportDetailBody');
+            if (rows.length === 0) {
+                body.innerHTML = '<div class="mes-report-detail-state">查無符合此筆推論時間與比對規則的 MES Report 記錄。</div>';
+                return;
+            }
+            body.innerHTML = rows.map((row, index) => `
+                <section class="mes-report-record">
+                    <div class="mes-report-record-title">
+                        <strong>MES 記錄 ${index + 1} / ${rows.length}</strong>
+                        <span>${_esc(row.TRANS_DATE || '')}</span>
+                    </div>
+                    <div class="mes-report-fields">
+                        ${columns.map(column => `
+                            <div class="mes-report-field">
+                                <div class="mes-report-field-name">${_esc(column)}</div>
+                                <div class="mes-report-field-value">${detailValue(row[column])}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </section>
+            `).join('');
+        }
+
+        async function openDetail(recordId) {
+            const modal = document.getElementById('mesReportDetailModal');
+            const meta = document.getElementById('mesReportDetailMeta');
+            const body = document.getElementById('mesReportDetailBody');
+            const requestToken = ++_detailRequestToken;
+            modal.classList.add('open');
+            modal.setAttribute('aria-hidden', 'false');
+            meta.textContent = '正在取得該筆 AI 推論資訊...';
+            body.innerHTML = '<div class="mes-report-detail-state">正在連線 MES Oracle 並讀取完整欄位...</div>';
+            try {
+                const response = await fetch('/api/ric/mes-report-detail?record_id=' + encodeURIComponent(recordId));
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || `HTTP ${response.status}`);
+                if (requestToken !== _detailRequestToken) return;
+                renderReportDetail(data);
+            } catch (error) {
+                if (requestToken !== _detailRequestToken) return;
+                meta.textContent = '載入失敗';
+                body.innerHTML = `<div class="mes-report-detail-state">${_esc(error.message)}</div>`;
+            }
+        }
+
+        function closeDetail() {
+            _detailRequestToken += 1;
+            const modal = document.getElementById('mesReportDetailModal');
+            modal.classList.remove('open');
+            modal.setAttribute('aria-hidden', 'true');
         }
 
         function csvCell(value) {
@@ -3936,9 +4161,15 @@
             URL.revokeObjectURL(url);
         }
 
-        return { get _loaded() { return _loaded; }, quickFilter, customFilter, loadData, toggleFilter, exportCSV };
+        return {
+            get _loaded() { return _loaded; },
+            quickFilter, customFilter, loadData, toggleFilter, exportCSV, openDetail, closeDetail,
+        };
     })();
 
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') mesReportTab.closeDetail();
+    });
     inferenceTab.quickFilter('today');
 </script>
 

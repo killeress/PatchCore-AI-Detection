@@ -3152,6 +3152,21 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def get_mes_comparison_record(self, record_id: int) -> Optional[dict]:
+        """依本地推論紀錄 ID 取得 MES 完整資料查詢條件。"""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                """SELECT id, glass_id, model_id, machine_no, ai_judgment,
+                          image_dir, request_time
+                   FROM inference_records
+                   WHERE id = ?""",
+                (record_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
     # ── 設定參數管理方法 ─────────────────────────────────
 
     @staticmethod
