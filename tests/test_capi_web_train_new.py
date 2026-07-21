@@ -521,16 +521,17 @@ class TestValidateTrainingParams:
 
     def test_feature_experiment_choices_accepted(self):
         from capi_web import CAPIWebHandler
-        raw = {
-            "feature_pool_kernel_size": 5,
-            "feature_cleaning_mode": "knn_cosine_q99_v1",
-            "feature_cleaning_scope": "inner_and_edge",
-            "feature_cleaning_keep_ratio": 0.97,
-            "feature_cleaning_center_size": 384,
-        }
-        params, err = CAPIWebHandler._validate_training_params(raw)
-        assert err is None
-        assert params == raw
+        for kernel in (1, 5):
+            raw = {
+                "feature_pool_kernel_size": kernel,
+                "feature_cleaning_mode": "knn_cosine_q99_v1",
+                "feature_cleaning_scope": "inner_and_edge",
+                "feature_cleaning_keep_ratio": 0.97,
+                "feature_cleaning_center_size": 384,
+            }
+            params, err = CAPIWebHandler._validate_training_params(raw)
+            assert err is None
+            assert params == raw
 
     def test_feature_experiment_invalid_choices_rejected(self):
         from capi_web import CAPIWebHandler
@@ -1253,6 +1254,8 @@ def test_train_new_select_has_pipeline_preview_controls():
     assert "responseText ? JSON.parse(responseText)" in text
     assert "preprocess_after_tiling: afterTiling" in text
     assert "tp-feature_pool_kernel_size" in text
+    assert 'value="1">1×1（不進行鄰域平滑）</option>' in text
+    assert "choices: [1,3,5]" in text
     assert "tp-feature_cleaning_mode" in text
     assert "tp-feature_cleaning_scope" in text
     assert "tp-feature_cleaning_keep_ratio" in text
