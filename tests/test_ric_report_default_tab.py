@@ -34,4 +34,9 @@ def test_ai_inference_records_is_the_default_report_tab():
     assert "/api/ric/mes-report-detail?record_id=" in html
     assert "columns.map(column =>" in html
     assert "mesReportTab.openDetail(" in html
+    assert 'id="mes_ignoreAoiOk"' in html
+    assert "mesReportTab.toggleIgnoreAoiOk(this.checked)" in html
+    assert "let _ignoreAoiOk = false;" in html
+    assert "params.set('ignore_aoi_ok', '1')" in html
+    assert "已忽略 AOI=OK" in html
     assert "inferenceTab.quickFilter('today');" in html

@@ -3122,7 +3122,12 @@ class CAPIDatabase:
         finally:
             conn.close()
 
-    def get_mes_comparison_records(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> list:
+    def get_mes_comparison_records(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        ignore_aoi_ok: bool = False,
+    ) -> list:
         """取得 Report 數據比對使用的 AI 推論紀錄。"""
         if start_date and not _DATE_RE.match(start_date):
             raise ValueError(f"Invalid start_date format: {start_date}")
@@ -3137,6 +3142,8 @@ class CAPIDatabase:
         if end_date:
             where_clauses.append("datetime(request_time) < datetime(?)")
             params.append(_factory_day_end_ts(end_date))
+        if ignore_aoi_ok:
+            where_clauses.append("UPPER(TRIM(COALESCE(machine_judgment, ''))) != 'OK'")
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
         conn = self._get_conn()

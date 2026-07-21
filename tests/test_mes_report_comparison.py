@@ -238,6 +238,44 @@ def test_mes_comparison_records_use_factory_day_window():
     assert [row["glass_id"] for row in rows] == ["END", "START"]
 
 
+def test_mes_comparison_records_can_ignore_aoi_ok():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE inference_records (
+            id INTEGER PRIMARY KEY,
+            glass_id TEXT,
+            model_id TEXT,
+            machine_no TEXT,
+            machine_judgment TEXT,
+            ai_judgment TEXT,
+            image_dir TEXT,
+            request_time TEXT
+        )
+    """)
+    conn.executemany(
+        """INSERT INTO inference_records
+           (glass_id, model_id, machine_no, machine_judgment, ai_judgment, image_dir, request_time)
+           VALUES (?, 'MODEL', 'M1', ?, 'OK', '/images', '2026-07-19 08:00:00')""",
+        [
+            ("AOI-OK", "OK"),
+            ("AOI-OK-SPACED", " ok "),
+            ("AOI-NG", "NG"),
+            ("AOI-UNKNOWN", ""),
+        ],
+    )
+    db = CAPIDatabase.__new__(CAPIDatabase)
+    db._get_conn = lambda: conn
+
+    rows = db.get_mes_comparison_records(
+        "2026-07-19",
+        "2026-07-19",
+        ignore_aoi_ok=True,
+    )
+
+    assert {row["glass_id"] for row in rows} == {"AOI-NG", "AOI-UNKNOWN"}
+
+
 def test_get_mes_comparison_record_uses_server_side_inference_id():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

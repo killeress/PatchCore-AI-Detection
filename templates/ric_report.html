@@ -1539,6 +1539,16 @@
         <span style="color:var(--text-muted);">~</span>
         <input type="date" id="mes_endDate">
         <button class="search-btn" onclick="mesReportTab.customFilter()">查詢</button>
+        <span style="margin-left:16px; display:inline-flex; align-items:center; gap:6px;">
+            <label class="omit-toggle" title="排除 AOI 判定為 OK 的資料">
+                <input type="checkbox" id="mes_ignoreAoiOk" onchange="mesReportTab.toggleIgnoreAoiOk(this.checked)">
+                <span class="omit-toggle-slider"></span>
+            </label>
+            <span style="color:var(--text-muted); font-size:0.82rem;"
+                  title="開啟後，AOI=OK 的資料不參與統計、逐筆明細及 CSV 導出">忽略 AOI=OK</span>
+            <span id="mes_ignoreAoiOkBadge" style="display:none; background:rgba(245,158,11,0.15); color:#f59e0b;
+                  padding:2px 8px; border-radius:6px; font-size:0.75rem; font-weight:600;">已開啟</span>
+        </span>
     </div>
     <div class="mes-status" id="mes_status">切換到此頁籤後載入 PNEMR 資料。</div>
     <div class="inf-loading" id="mes_loading" style="display:none;">正在查詢 AI 與 MES Report...</div>
@@ -3863,6 +3873,7 @@
         let _activeFilter = null;
         let _waitTimer = null;
         let _detailRequestToken = 0;
+        let _ignoreAoiOk = false;
 
         const FILTER_LABELS = {
             comparable: '可比對總數',
@@ -3935,12 +3946,14 @@
                 const params = new URLSearchParams();
                 if (start) params.set('start_date', start);
                 if (end) params.set('end_date', end);
+                if (_ignoreAoiOk) params.set('ignore_aoi_ok', '1');
                 const response = await fetch('/api/ric/mes-comparison?' + params.toString());
                 const data = await response.json();
                 if (!response.ok || !data.success) throw new Error(data.error || `HTTP ${response.status}`);
                 _loaded = true;
                 const elapsedSeconds = ((Date.now() - waitStartedAt) / 1000).toFixed(1);
-                status.textContent = `資料來源：${data.source}｜耗時：${elapsedSeconds} 秒｜規則：${data.rule}`;
+                const aoiFilterText = data.ignore_aoi_ok ? '｜篩選：已忽略 AOI=OK' : '';
+                status.textContent = `資料來源：${data.source}｜耗時：${elapsedSeconds} 秒${aoiFilterText}｜規則：${data.rule}`;
                 render(data);
             } catch (error) {
                 status.textContent = '載入失敗：' + error.message;
@@ -3998,6 +4011,15 @@
             _activeFilter = _activeFilter === filter ? null : filter;
             renderCards();
             renderDetails();
+        }
+
+        function toggleIgnoreAoiOk(checked) {
+            _ignoreAoiOk = checked;
+            document.getElementById('mes_ignoreAoiOkBadge').style.display = checked ? 'inline' : 'none';
+            loadData(
+                document.getElementById('mes_startDate').value,
+                document.getElementById('mes_endDate').value
+            );
         }
 
         function resultLabel(comparison) {
@@ -4163,7 +4185,8 @@
 
         return {
             get _loaded() { return _loaded; },
-            quickFilter, customFilter, loadData, toggleFilter, exportCSV, openDetail, closeDetail,
+            quickFilter, customFilter, loadData, toggleFilter, toggleIgnoreAoiOk,
+            exportCSV, openDetail, closeDetail,
         };
     })();
 
