@@ -29,4 +29,9 @@ def test_ai_inference_records_is_the_default_report_tab():
     assert "正在查詢 MES Oracle 並比對 Report，已等待 ${seconds} 秒" in html
     assert "setInterval(updateWaitingText, 1000)" in html
     assert "耗時：${elapsedSeconds} 秒" in html
+    assert 'id="mesReportDetailModal"' in html
+    assert 'MES 完整數據' in html
+    assert "/api/ric/mes-report-detail?record_id=" in html
+    assert "columns.map(column =>" in html
+    assert "mesReportTab.openDetail(" in html
     assert "inferenceTab.quickFilter('today');" in html

@@ -3060,6 +3060,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_inference_stats_api(query)
             elif path == "/api/ric/mes-comparison":
                 self._handle_mes_comparison_api(query)
+            elif path == "/api/ric/mes-report-detail":
+                self._handle_mes_report_detail_api(query)
             elif path == "/scratch-review":
                 self._handle_scratch_review_page(path)
             elif path == "/api/scratch-review/list":
@@ -5817,6 +5819,49 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"success": False, "error": str(e)}, status=400)
         except Exception as e:
             logger.error("MES comparison API error: %s", e, exc_info=True)
+            self._send_json({"success": False, "error": str(e)}, status=502)
+
+    def _handle_mes_report_detail_api(self, query: dict):
+        """API: 按需取得一筆 AI 推論對應的完整 MES Report 欄位。"""
+        try:
+            if not self.db:
+                self._send_json({"success": False, "error": "DB not available"}, status=503)
+                return
+
+            record_id_text = query.get("record_id", [""])[0]
+            try:
+                record_id = int(record_id_text)
+            except (TypeError, ValueError):
+                self._send_json({"success": False, "error": "record_id 格式錯誤"}, status=400)
+                return
+
+            record = self.db.get_mes_comparison_record(record_id)
+            if not record:
+                self._send_json({"success": False, "error": "找不到該筆 AI 推論紀錄"}, status=404)
+                return
+
+            from capi_mes_report import OracleMESRepository, WP_DEFTHIS_COLUMNS, _parse_datetime
+
+            panel_id = str(record.get("glass_id") or "").strip()
+            cutoff = _parse_datetime(record.get("request_time"))
+            if not panel_id or cutoff is None:
+                self._send_json({"success": False, "error": "該筆推論缺少玻璃 ID 或推論時間"}, status=400)
+                return
+
+            server_inst = self._capi_server_instance
+            server_config = getattr(server_inst, "server_config", {}) if server_inst else {}
+            repository = OracleMESRepository(server_config.get("mes_report") or {})
+            rows = repository.fetch_report_details(panel_id, cutoff)
+            self._send_json({
+                "success": True,
+                "source": repository.source_label,
+                "rule": "同玻璃 ID、DEFT_OPER=1600、IF_NEWER=Y、推論時間後",
+                "columns": list(WP_DEFTHIS_COLUMNS),
+                "inference": record,
+                "rows": rows,
+            })
+        except Exception as e:
+            logger.error("MES report detail API error: %s", e, exc_info=True)
             self._send_json({"success": False, "error": str(e)}, status=502)
 
     def _handle_debug_inference_run(self):

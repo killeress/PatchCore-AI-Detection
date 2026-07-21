@@ -17,6 +17,18 @@ except ImportError:
     ORACLE_MES_PASSWORD = ""
 
 
+WP_DEFTHIS_COLUMNS = (
+    "FAC_ID", "PNL_ID", "TRANS_NBR", "DFCT_CODE", "DFCT_REASON",
+    "DFCT_REASON2", "ITEM_NBR", "DFCT_CODE2", "ERROR_FLAG", "COMMENTS",
+    "DFCT_DISP", "TRANS_DATE", "X_AXIS", "Y_AXIS", "PATTERN_CODE",
+    "RGB_FLAG", "IC_ADDRESS", "TRANS_OPERATION", "UPDATE_STAMP",
+    "SYS_TRANS_FLAG", "RW_ROUTE", "DEFT_DATE", "DEFT_OPER", "IF_NEWER",
+    "IF_MENDED", "IF_OK", "IC_COUNT", "IC_COF", "SUB_CODE", "T_STAMP",
+    "DFCT_GRADE", "MAT_ID", "LOT_QTY", "DEFECT_AREA", "PROJECT_COMMENTS",
+    "RELAX_FLAG", "RELAX_DESCRIPTION",
+)
+
+
 class MESReportConfigurationError(RuntimeError):
     """MES Oracle 連線設定不完整。"""
 
@@ -255,3 +267,54 @@ class OracleMESRepository:
             len(panel_ids), len(result), time.monotonic() - started_at,
         )
         return result
+
+    def fetch_report_details(self, panel_id: str, min_trans_date: datetime) -> List[Dict]:
+        """按需取得單筆 AI 推論所使用 MES 記錄的全部 WP_DEFTHIS 欄位。"""
+        normalized_panel_id = str(panel_id or "").strip().upper()
+        if not normalized_panel_id:
+            return []
+        try:
+            import oracledb
+        except ImportError as exc:
+            raise MESReportConfigurationError("Server 尚未安裝 python-oracledb，請執行 pip install -r requirements.txt") from exc
+
+        dsn = oracledb.makedsn(self.host, self.port, service_name=self.service_name)
+        started_at = time.monotonic()
+        logger.info(
+            "[MES Report] Detail query start: facility=%s, panel=%s",
+            self.facility, normalized_panel_id,
+        )
+        connection = oracledb.connect(user=self.user, password=self.password, dsn=dsn)
+        rows = []
+        try:
+            cursor = connection.cursor()
+            cursor.arraysize = 1000
+            cursor.prefetchrows = 1000
+            try:
+                columns_sql = ", ".join(WP_DEFTHIS_COLUMNS)
+                cursor.execute(
+                    f"""
+                        SELECT {columns_sql}
+                        FROM MERDA1.WP_DEFTHIS
+                        WHERE PNL_ID = :panel_id
+                          AND DEFT_OPER = :deft_oper
+                          AND IF_NEWER = 'Y'
+                          AND TRANS_DATE >= :min_trans_date
+                        ORDER BY TRANS_DATE, TRANS_NBR
+                    """,
+                    {
+                        "panel_id": normalized_panel_id,
+                        "deft_oper": "1600",
+                        "min_trans_date": min_trans_date.strftime("%Y-%m-%d %H.%M.%S.%f"),
+                    },
+                )
+                rows = [dict(zip(WP_DEFTHIS_COLUMNS, values)) for values in cursor]
+            finally:
+                cursor.close()
+        finally:
+            connection.close()
+        logger.info(
+            "[MES Report] Detail query complete: panel=%s, rows=%d, elapsed=%.2fs",
+            normalized_panel_id, len(rows), time.monotonic() - started_at,
+        )
+        return rows

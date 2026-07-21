@@ -4,7 +4,12 @@ from types import SimpleNamespace
 
 import capi_mes_report
 from capi_database import CAPIDatabase
-from capi_mes_report import OracleMESRepository, build_mes_comparison, classify_mes_judgment
+from capi_mes_report import (
+    WP_DEFTHIS_COLUMNS,
+    OracleMESRepository,
+    build_mes_comparison,
+    classify_mes_judgment,
+)
 
 
 def _defect(
@@ -138,6 +143,68 @@ def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
     assert binds["deft_oper"] == "1600"
 
 
+def test_oracle_repository_fetches_all_wp_defthis_columns_on_demand(monkeypatch):
+    monkeypatch.setattr(capi_mes_report, "ORACLE_MES_PASSWORD", "secret")
+    executed = []
+    values = [None] * len(WP_DEFTHIS_COLUMNS)
+    values[WP_DEFTHIS_COLUMNS.index("PNL_ID")] = "PANEL-1"
+    values[WP_DEFTHIS_COLUMNS.index("TRANS_NBR")] = 14
+    values[WP_DEFTHIS_COLUMNS.index("COMMENTS")] = "完整資料"
+    values[WP_DEFTHIS_COLUMNS.index("TRANS_DATE")] = "2026-07-19 09.00.00.123000"
+
+    class FakeCursor:
+        def execute(self, sql, binds):
+            executed.append((sql, binds))
+
+        def __iter__(self):
+            return iter([tuple(values)])
+
+        def close(self):
+            pass
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def close(self):
+            pass
+
+    fake_oracledb = SimpleNamespace(
+        makedsn=lambda host, port, service_name: f"{host}:{port}/{service_name}",
+        connect=lambda **kwargs: FakeConnection(),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "oracledb", fake_oracledb)
+    repository = OracleMESRepository({
+        "facility": "MOD2",
+        "oracle": {
+            "user": "MISSELECT",
+            "tns": {
+                "MOD2": {"host": "10.174.1.79", "port": 1521, "service_name": "pnemr"},
+            },
+        },
+    })
+
+    rows = repository.fetch_report_details("PANEL-1", datetime(2026, 7, 19, 8, 0, 0))
+
+    assert len(WP_DEFTHIS_COLUMNS) == 37
+    assert list(rows[0]) == list(WP_DEFTHIS_COLUMNS)
+    assert rows[0]["PNL_ID"] == "PANEL-1"
+    assert rows[0]["TRANS_NBR"] == 14
+    assert rows[0]["COMMENTS"] == "完整資料"
+    sql, binds = executed[0]
+    assert "SELECT FAC_ID, PNL_ID, TRANS_NBR" in " ".join(sql.split())
+    assert "RELAX_FLAG, RELAX_DESCRIPTION" in " ".join(sql.split())
+    assert "PNL_ID = :panel_id" in sql
+    assert "DEFT_OPER = :deft_oper" in sql
+    assert "IF_NEWER = 'Y'" in sql
+    assert "TRANS_DATE >= :min_trans_date" in sql
+    assert binds == {
+        "panel_id": "PANEL-1",
+        "deft_oper": "1600",
+        "min_trans_date": "2026-07-19 08.00.00.000000",
+    }
+
+
 def test_mes_comparison_records_use_factory_day_window():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -169,3 +236,38 @@ def test_mes_comparison_records_use_factory_day_window():
     rows = db.get_mes_comparison_records("2026-07-19", "2026-07-19")
 
     assert [row["glass_id"] for row in rows] == ["END", "START"]
+
+
+def test_get_mes_comparison_record_uses_server_side_inference_id():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE inference_records (
+            id INTEGER PRIMARY KEY,
+            glass_id TEXT,
+            model_id TEXT,
+            machine_no TEXT,
+            ai_judgment TEXT,
+            image_dir TEXT,
+            request_time TEXT
+        )
+    """)
+    conn.execute(
+        """INSERT INTO inference_records
+           (id, glass_id, model_id, machine_no, ai_judgment, image_dir, request_time)
+           VALUES (7, 'PANEL-7', 'MODEL', 'M1', 'OK', '/images', '2026-07-19 08:01:02')"""
+    )
+    db = CAPIDatabase.__new__(CAPIDatabase)
+    db._get_conn = lambda: conn
+
+    row = db.get_mes_comparison_record(7)
+
+    assert row == {
+        "id": 7,
+        "glass_id": "PANEL-7",
+        "model_id": "MODEL",
+        "machine_no": "M1",
+        "ai_judgment": "OK",
+        "image_dir": "/images",
+        "request_time": "2026-07-19 08:01:02",
+    }
