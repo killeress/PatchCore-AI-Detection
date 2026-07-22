@@ -320,6 +320,48 @@ def test_large_rectangular_surface_glare_is_not_bubble():
     assert "Bub:0" in detail
 
 
+def test_weak_irregular_texture_is_not_filled_as_bubble():
+    image = np.full((512, 512), 80, dtype=np.int16)
+    image += np.rint(np.linspace(6, -6, 512))[None, :].astype(np.int16)
+
+    irregular = np.zeros((512, 512), dtype=np.uint8)
+    points = np.array([
+        [190, 180], [300, 180], [300, 270], [230, 270],
+        [230, 235], [270, 235], [270, 215], [190, 215],
+    ], dtype=np.int32)
+    cv2.fillPoly(irregular, [points], 255)
+    image[irregular > 0] -= 6
+    image = cv2.GaussianBlur(np.clip(image, 0, 255).astype(np.uint8), (9, 9), 0)
+
+    inferencer = _make_inferencer(detect_bubbles=True)
+    mask = inferencer._detect_bubble_mask(
+        image,
+        inferencer.config.dust_area_min,
+        inferencer.config.dust_area_max,
+        inferencer.config.dust_extension,
+    )
+
+    # Small residuals are acceptable; the empty concavity must not be convex-hull filled.
+    assert mask[245, 210] == 0
+    assert np.count_nonzero(mask) < np.count_nonzero(irregular) // 2
+
+
+def test_small_bright_dust_patch_is_not_promoted_to_bubble():
+    image = np.full((512, 512), 80, dtype=np.uint8)
+    cv2.ellipse(image, (256, 256), (14, 10), 0, 0, 360, 92, -1)
+    image = cv2.GaussianBlur(image, (9, 9), 0)
+
+    inferencer = _make_inferencer(detect_bubbles=True)
+    bubble_mask = inferencer._detect_bubble_mask(
+        image,
+        inferencer.config.dust_area_min,
+        inferencer.config.dust_area_max,
+        inferencer.config.dust_extension,
+    )
+
+    assert np.count_nonzero(bubble_mask) == 0
+
+
 def test_padded_context_recovers_boundary_clipped_large_bubble():
     panel_image, bubble = _large_rotated_bubble_panel_image()
     inferencer = _make_inferencer(detect_bubbles=True)
@@ -522,7 +564,7 @@ def test_bool_update_repairs_legacy_string_param_type():
         db_path.unlink(missing_ok=True)
 
 
-def test_1366_pixel_grid_filter_uses_configured_gaussian_only_for_target_resolution(monkeypatch):
+def test_pixel_grid_filter_uses_configured_gaussian_for_any_resolution(monkeypatch):
     inferencer = _make_inferencer(detect_bubbles=False)
     inferencer.config.dust_pixel_grid_filter_enabled = True
     inferencer.config.dust_pixel_grid_blur_kernel = 7
@@ -544,6 +586,14 @@ def test_1366_pixel_grid_filter_uses_configured_gaussian_only_for_target_resolut
     assert blur_kernels == [(7, 7), (7, 7)]
 
     blur_kernels.clear()
+    inferencer.check_dust_or_scratch_feature(
+        image,
+        product_resolution=(1920, 1080),
+    )
+    assert blur_kernels == [(7, 7), (7, 7)]
+
+    blur_kernels.clear()
+    inferencer.config.dust_pixel_grid_filter_enabled = False
     inferencer.check_dust_or_scratch_feature(
         image,
         product_resolution=(1920, 1080),
@@ -575,3 +625,22 @@ def test_pixel_grid_toggle_rerenders_dependent_setting_locks():
     lock_set_end = settings_html.index("]);", lock_set_start)
     lock_set = settings_html[lock_set_start:lock_set_end]
     assert "'dust_pixel_grid_filter_enabled'" in lock_set
+
+    inference_start = settings_html.index("const INFERENCE_IMAGE_PARAMS")
+    inference_end = settings_html.index("];", inference_start)
+    inference_params = settings_html[inference_start:inference_end]
+    assert "'dust_pixel_grid_filter_enabled'" in inference_params
+    assert "'dust_pixel_grid_blur_kernel'" in inference_params
+
+    dust_start = settings_html.index("const DUST_PARAMS")
+    dust_end = settings_html.index("];", dust_start)
+    dust_params = settings_html[dust_start:dust_end]
+    assert "'dust_pixel_grid_filter_enabled'" not in dust_params
+    assert "'dust_pixel_grid_blur_kernel'" not in dust_params
+
+    dust_omit_start = settings_html.index("const DUST_OMIT_PARAMS")
+    dust_omit_end = settings_html.index("];", dust_omit_start)
+    dust_omit_params = settings_html[dust_omit_start:dust_omit_end]
+    assert "'dust_pixel_grid_filter_enabled'" not in dust_omit_params
+    assert "'dust_pixel_grid_blur_kernel'" not in dust_omit_params
+    assert "啟用 1366×768 產品 OMIT 像素紋理平滑" not in settings_html

@@ -1,21 +1,10 @@
-"""Host-specific orientation correction for images entering detection."""
+"""Orientation correction for images entering detection."""
 
-import socket
 from pathlib import Path
 from typing import Optional, Union
 
 import cv2
 import numpy as np
-
-
-ROTATE_180_HOSTNAME = "capi13"
-
-
-def requires_detection_rotation(hostname: Optional[str] = None) -> bool:
-    """Return whether detection images must be rotated for this exact host."""
-    active_hostname = socket.gethostname() if hostname is None else hostname
-    return str(active_hostname).strip().casefold() == ROTATE_180_HOSTNAME
-
 
 def apply_detection_orientation(
     image: Optional[np.ndarray],

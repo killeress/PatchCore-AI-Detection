@@ -3549,6 +3549,7 @@ class CAPIDatabase:
         # 定義要遷移的參數
         params_def = [
             ("anomaly_threshold", config.anomaly_threshold, "float", "異常分數閾值 (fallback)"),
+            ("inference_rotate_180_enabled", config.inference_rotate_180_enabled, "bool", "推論來源影像統一旋轉 180°（正式推論、規格內判定與 Debug 共用；不修改原始檔）"),
             ("model_mapping", config.model_mapping, "dict", "前綴 → 模型路徑映射"),
             ("threshold_mapping", config.threshold_mapping, "dict", "前綴 → 獨立閾值映射"),
             ("patchcore_filter_enabled", config.patchcore_filter_enabled, "bool", "啟用 PatchCore 後處理進階過濾"),
@@ -3563,8 +3564,8 @@ class CAPIDatabase:
             ("dust_area_min", config.dust_area_min, "int", "灰塵顆粒最小面積 (px)"),
             ("dust_area_max", config.dust_area_max, "int", "灰塵顆粒最大面積 (px)"),
             ("dust_extension", config.dust_extension, "int", "灰塵區域膨脹像素"),
-            ("dust_pixel_grid_filter_enabled", config.dust_pixel_grid_filter_enabled, "bool", "啟用 1366x768 產品 OMIT 像素紋理平滑"),
-            ("dust_pixel_grid_blur_kernel", config.dust_pixel_grid_blur_kernel, "int", "1366x768 OMIT Gaussian 核大小 (奇數，建議 7)"),
+            ("dust_pixel_grid_filter_enabled", config.dust_pixel_grid_filter_enabled, "bool", "啟用 OMIT 像素紋理平滑（所有產品解析度）"),
+            ("dust_pixel_grid_blur_kernel", config.dust_pixel_grid_blur_kernel, "int", "OMIT Gaussian 核大小（奇數，建議 7）"),
             ("dust_heatmap_iou_threshold", config.dust_heatmap_iou_threshold, "float", "Heatmap-Dust IOU/Coverage 閾值"),
             ("dust_heatmap_top_percent", config.dust_heatmap_top_percent, "float", "Heatmap 熱區取前 X%；two-stage REAL 特徵須落在此核心附近"),
             ("dust_heatmap_metric", config.dust_heatmap_metric, "string", 'Heatmap 判定指標: "coverage" (覆蓋率) 或是 "iou"'),
@@ -3681,6 +3682,10 @@ class CAPIDatabase:
             name for name, _value, _ptype, _desc in params_def
             if name.startswith("image_abnormal_")
         }
+        description_refresh_param_names = image_abnormal_param_names | {
+            "dust_pixel_grid_filter_enabled",
+            "dust_pixel_grid_blur_kernel",
+        }
 
         count = 0
         with self._lock:
@@ -3703,7 +3708,7 @@ class CAPIDatabase:
                         )
                         count += 1
                     else:
-                        if name in image_abnormal_param_names:
+                        if name in description_refresh_param_names:
                             conn.execute(
                                 "UPDATE config_params SET description = ? WHERE param_name = ?",
                                 (desc, name)

@@ -49,6 +49,7 @@ from capi_scratch_batch import (
 )
 from capi_version import get_version_info, read_changelog
 from capi_image_naming import canonical_image_prefix, image_prefix_display_labels, source_image_prefix
+from capi_image_orientation import read_detection_image
 
 logger = logging.getLogger("capi.web")
 
@@ -2035,6 +2036,7 @@ def _evaluate_within_spec_suggestion_detail(
     machine_id: str = "",
     visual_output_dir: Optional[Path] = None,
     visual_url_prefix: str = "",
+    rotate_180: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate within-spec suggestion on NG tiles only and collect traceable steps."""
     import cv2
@@ -2100,6 +2102,7 @@ def _evaluate_within_spec_suggestion_detail(
     non_dot_cfg = _non_dot_residue_config(dot_cfg)
     result["parameter_snapshot"] = {
         "captured_at": datetime.now().isoformat(timespec="seconds"),
+        "input_rotation_degrees": 180 if rotate_180 else 0,
         "candidate_keys": machine_candidates,
         "matched_machine_key": machine_key or "",
         "fallback_used": fallback_used,
@@ -2182,7 +2185,7 @@ def _evaluate_within_spec_suggestion_detail(
         if not image_path.is_file():
             add_step("原圖不存在，略過圖片", image=image.get("image_name") or "", path=str(image_path))
             continue
-        image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        image_bgr = read_detection_image(image_path, cv2.IMREAD_COLOR, rotate_180)
         if image_bgr is None:
             add_step("原圖讀取失敗，略過圖片", image=image.get("image_name") or "", path=str(image_path))
             continue
@@ -2631,8 +2634,18 @@ def _evaluate_within_spec_suggestion_detail(
     return result
 
 
-def _evaluate_within_spec_suggestion(detail: Dict[str, Any], rules: Dict[str, Any], machine_id: str = "") -> Optional[Dict[str, Any]]:
-    return _evaluate_within_spec_suggestion_detail(detail, rules, machine_id).get("suggestion")
+def _evaluate_within_spec_suggestion(
+    detail: Dict[str, Any],
+    rules: Dict[str, Any],
+    machine_id: str = "",
+    rotate_180: bool = False,
+) -> Optional[Dict[str, Any]]:
+    return _evaluate_within_spec_suggestion_detail(
+        detail,
+        rules,
+        machine_id,
+        rotate_180=rotate_180,
+    ).get("suggestion")
 
 
 class _CallbackLogHandler(logging.Handler):
@@ -4392,6 +4405,39 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         else:
             self._send_404()
 
+    def _inference_rotate_180_enabled(self) -> bool:
+        config = getattr(getattr(self, "inferencer", None), "config", None)
+        return bool(getattr(config, "inference_rotate_180_enabled", False))
+
+    def _read_inference_image(self, image_path: Path, flags: int):
+        return read_detection_image(
+            image_path,
+            flags,
+            rotate_180=self._inference_rotate_180_enabled(),
+        )
+
+    def _send_image_array_png(self, image) -> None:
+        import cv2
+        import numpy as np
+
+        if image.dtype != np.uint8:
+            max_value = float(image.max())
+            if max_value > 0:
+                image = (image.astype(np.float32) / max_value * 255).astype(np.uint8)
+            else:
+                image = np.zeros_like(image, dtype=np.uint8)
+        ok, buf = cv2.imencode(".png", image)
+        if not ok:
+            self._send_error(500, "PNG encode failed")
+            return
+        data = buf.tobytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _handle_source_image(self, path: str):
         """靜態檔案服務 (原始圖片)"""
         # /images/{record_id}/{image_name}
@@ -4413,7 +4459,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 
             full_path = Path(detail["image_dir"]) / image_name
             if full_path.exists() and full_path.is_file():
-                self._send_binary(str(full_path))
+                if self._inference_rotate_180_enabled():
+                    import cv2
+
+                    image = self._read_inference_image(full_path, cv2.IMREAD_UNCHANGED)
+                    if image is None:
+                        self._send_404()
+                        return
+                    self._send_image_array_png(image)
+                else:
+                    self._send_binary(str(full_path))
             else:
                 self._send_404()
         except Exception as e:
@@ -4450,6 +4505,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             # query 已由 do_GET 透過 parse_qs 解析為 dict
             params = query if isinstance(query, dict) else urllib.parse.parse_qs(query)
             img_path = params.get("path", [None])[0]
+            serve_raw = str(params.get("raw", ["0"])[0]).strip().lower() in ("1", "true", "yes")
             if not img_path:
                 self._send_error(400, "missing path parameter")
                 return
@@ -4460,31 +4516,24 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             suffix = p.suffix.lower()
             # 瀏覽器原生可顯示的格式直接回傳
-            if suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"):
+            if (
+                (serve_raw or not self._inference_rotate_180_enabled())
+                and suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
+            ):
                 self._send_binary(str(p))
                 return
 
             # 其餘格式 (tif, tiff, bmp …) 用 cv2 轉 PNG
             import cv2
-            img = cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
+            img = (
+                cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
+                if serve_raw
+                else self._read_inference_image(p, cv2.IMREAD_UNCHANGED)
+            )
             if img is None:
                 self._send_error(400, f"cv2 cannot read: {img_path}")
                 return
-            # 16-bit → 8-bit
-            if img.dtype != "uint8":
-                import numpy as np
-                img = (img.astype(np.float32) / img.max() * 255).astype(np.uint8)
-            ok, buf = cv2.imencode(".png", img)
-            if not ok:
-                self._send_error(500, "PNG encode failed")
-                return
-            data = buf.tobytes()
-            self.send_response(200)
-            self.send_header("Content-Type", "image/png")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            self.wfile.write(data)
+            self._send_image_array_png(img)
         except Exception as e:
             logger.error(f"Error serving debug image: {e}")
             self._send_error(500, str(e))
@@ -4527,7 +4576,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         try:
             start = _time.time()
-            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            image = self._read_inference_image(image_path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 self._send_json({"error": f"無法讀取圖片: {image_path}"})
                 return
@@ -5068,6 +5117,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 machine_id=str(detail.get("model_id") or detail.get("machine_no") or ""),
                 visual_output_dir=visual_dir,
                 visual_url_prefix=visual_prefix,
+                rotate_180=self._inference_rotate_180_enabled(),
             )
 
             source = "inference" if log.get("source") == "inference" else "review"
@@ -5150,6 +5200,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     detail,
                     self._load_within_spec_rules_for_review(),
                     machine_id=(query.get("mach_id") or [""])[0] or "",
+                    rotate_180=self._inference_rotate_180_enabled(),
                 )
 
             elapsed = _time.time() - started
@@ -5197,6 +5248,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 machine_id=mach_id,
                 visual_output_dir=visual_dir,
                 visual_url_prefix=visual_prefix,
+                rotate_180=self._inference_rotate_180_enabled(),
             )
             elapsed = _time.time() - started
             log = self.db.save_within_spec_review_log(
@@ -5744,6 +5796,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 path_mapping=path_mapping,
                 start_date=start_date,
                 end_date=end_date,
+                rotate_180=self._inference_rotate_180_enabled(),
             )
             summary["success"] = True
             summary["base_dir"] = str(base_dir)
@@ -6044,7 +6097,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             
             omit_full = None
             if omit_candidates:
-                omit_full = cv2.imread(str(omit_candidates[0]), cv2.IMREAD_UNCHANGED)
+                omit_full = self._read_inference_image(omit_candidates[0], cv2.IMREAD_UNCHANGED)
                 if omit_full is not None:
                     logger.info(f"[DEBUG] Found OMIT image for dust check: {omit_candidates[0].name}")
 
@@ -6205,7 +6258,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """API: 執行 Debug Mark 檢測（不跑 PatchCore 推論）"""
         import time as _time
         import cv2
-        from capi_mark_detector import detect_panel_mark_from_path
+        from capi_mark_detector import detect_panel_mark
 
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length)
@@ -6230,7 +6283,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         try:
             start = _time.time()
-            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            image = self._read_inference_image(image_path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 self._send_json({"error": f"無法讀取圖片: {image_path}"})
                 return
@@ -6240,7 +6293,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             debug_dir = CAPIWebHandler._debug_heatmap_dir
             debug_dir.mkdir(parents=True, exist_ok=True)
 
-            mark_detection = detect_panel_mark_from_path(image_path, include_debug=True)
+            mark_detection = detect_panel_mark(image, include_debug=True)
             mark_debug_images = mark_detection.pop("_debug_images", None)
             if mark_debug_images:
                 image_name = image_path.stem
@@ -6309,7 +6362,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             #     return
                 
             # 讀取圖片並自行找範圍，不依賴 inferencer
-            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            image = self._read_inference_image(image_path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 self._send_json({"error": "無法讀取圖片"})
                 return
@@ -6427,7 +6480,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             boundary_padding = int(data.get("boundary_padding", 15))
             boundary_min_brightness = int(data.get("boundary_min_brightness", 15))
 
-            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            image = self._read_inference_image(image_path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 self._send_json({"error": "無法讀取圖片"})
                 return
@@ -6632,7 +6685,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             roi_y = int(data.get("roi_y", 0))
             tile_size = int(data.get("tile_size", self.inferencer.config.tile_size))
 
-            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            image = self._read_inference_image(image_path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 self._send_json({"error": "無法讀取圖片"})
                 return
@@ -6725,7 +6778,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             shift_enabled_override = data.get("pc_roi_inward_shift_enabled", None)
             aoi_margin_override = data.get("aoi_margin_px", None)
 
-            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            image = self._read_inference_image(image_path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 self._send_json({"error": "無法讀取圖片"})
                 return
@@ -6737,7 +6790,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             try:
                 for f in image_path.parent.iterdir():
                     if f.is_file() and (f.stem.startswith("PINIGBI") or "OMIT0000" in f.name):
-                        _omit_raw = cv2.imread(str(f), cv2.IMREAD_UNCHANGED)
+                        _omit_raw = self._read_inference_image(f, cv2.IMREAD_UNCHANGED)
                         if _omit_raw is not None:
                             omit_image = (_omit_raw / 256).astype(np.uint8) if _omit_raw.dtype == np.uint16 else _omit_raw
                             break
@@ -6955,7 +7008,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             total_start = _time.time()
 
             # 1. 載入圖片
-            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            image = self._read_inference_image(image_path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 self._send_json({"error": f"無法載入圖片: {image_path}"})
                 return
@@ -7260,7 +7313,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 omit_candidates.extend(list(image_dir.glob(pattern)))
             if omit_candidates:
                 omit_path = omit_candidates[0]
-                omit_full = cv2.imread(str(omit_path), cv2.IMREAD_UNCHANGED)
+                omit_full = self._read_inference_image(omit_path, cv2.IMREAD_UNCHANGED)
                 if omit_full is not None:
                     try:
                         omit_crop = omit_full[crop_y1:crop_y2, crop_x1:crop_x2].copy()
@@ -7440,7 +7493,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             total_start = _time.time()
 
             # 1. 載入圖片
-            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            image = self._read_inference_image(image_path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 self._send_json({"error": f"無法載入圖片: {image_path}"})
                 return
@@ -7465,7 +7518,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         continue
                     if candidate.name.upper().startswith("W0F00000"):
                         try:
-                            ref_img = cv2.imread(str(candidate), cv2.IMREAD_UNCHANGED)
+                            ref_img = self._read_inference_image(candidate, cv2.IMREAD_UNCHANGED)
                             if ref_img is not None:
                                 reference_bounds, _ = self.inferencer._find_raw_object_bounds(ref_img)
                                 ref_image_name = candidate.name
@@ -7481,7 +7534,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         if cname.startswith(_DARK_PREFIXES) or cname.startswith("OMIT0000") or cname.startswith("PINIGBI"):
                             continue
                         try:
-                            ref_img = cv2.imread(str(candidate), cv2.IMREAD_UNCHANGED)
+                            ref_img = self._read_inference_image(candidate, cv2.IMREAD_UNCHANGED)
                             if ref_img is not None:
                                 reference_bounds, _ = self.inferencer._find_raw_object_bounds(ref_img)
                                 ref_image_name = candidate.name
@@ -7788,7 +7841,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         try:
             started = _time.time()
-            image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            image = self._read_inference_image(image_path, cv2.IMREAD_COLOR)
             if image is None:
                 self._send_json({"error": f"無法讀取圖片: {image_path}"}, status=400)
                 return
@@ -8765,6 +8818,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         model_id,
                         visual_output_dir=visual_dir,
                         visual_url_prefix=visual_prefix,
+                        rotate_180=bool(getattr(inferencer, "_rotate_detection_images_180", False)),
                     )
                     suggestion = eval_result.get("suggestion")
                     panel_totals = eval_result.get("panel_totals") or []
@@ -8930,7 +8984,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         state["current_job"]["last_glass_id"] = last_glass_id
 
             exporter = DatasetExporter(
-                db=cls.db, base_dir=output_dir, path_mapping=path_mapping,
+                db=cls.db,
+                base_dir=output_dir,
+                path_mapping=path_mapping,
+                rotate_180=bool(
+                    getattr(getattr(cls.inferencer, "config", None), "inference_rotate_180_enabled", False)
+                ),
             )
             summary = exporter.run(
                 days=days, include_true_ng=include_true_ng,
@@ -11115,7 +11174,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             token = uuid.uuid4().hex[:8]
             original_filename = None
             original_path = None
-            original_url = "/api/debug/serve-image?path=" + urllib.parse.quote(str(image_path))
+            original_url = "/api/debug/serve-image?raw=1&path=" + urllib.parse.quote(str(image_path))
             preview_mode = "image"
             extra_payload = {
                 "preprocess_after_tiling": False,
@@ -12215,7 +12274,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 skipped.append({"image": image_name, "reason": "bomb image"})
                 continue
             source_image_path = resolve_source_path(image.get("image_path") or "", path_mapping)
-            image_bgr = cv2.imread(str(source_image_path), cv2.IMREAD_UNCHANGED)
+            image_bgr = self._read_inference_image(source_image_path, cv2.IMREAD_UNCHANGED)
             if image_bgr is None:
                 skipped.append({"image": image_name, "reason": f"read failed: {source_image_path}"})
                 continue

@@ -204,6 +204,7 @@ class CAPIConfig:
     # 推論設定
     anomaly_threshold: float = 0.5
     model_path: str = ""  # 預設模型路徑 (fallback，當 model_mapping 無對應時使用)
+    inference_rotate_180_enabled: bool = False  # 推論來源影像統一旋轉 180°
     
     # 多模型映射 {image_prefix: model_path} — 依圖片前綴自動選用對應模型
     # 新架構格式: {image_prefix: {"inner": path, "edge": path}}
@@ -236,8 +237,8 @@ class CAPIConfig:
     dust_area_min: int = 15                   # 灰塵顆粒最小面積 (px)
     dust_area_max: int = 100000               # 灰塵顆粒最大面積 (px)
     dust_extension: int = 5                   # 灰塵區域膨脹像素
-    dust_pixel_grid_filter_enabled: bool = False  # 1366x768 產品 OMIT 像素紋理平滑（相機圖仍為原解析度）
-    dust_pixel_grid_blur_kernel: int = 7          # 產品像素約 5x6 camera px，預設以 7x7 Gaussian 抑制週期紋理
+    dust_pixel_grid_filter_enabled: bool = False  # OMIT 像素紋理平滑（所有產品解析度）
+    dust_pixel_grid_blur_kernel: int = 7          # 預設以 7x7 Gaussian 抑制週期紋理
     dust_heatmap_iou_threshold: float = 0.02  # Heatmap-Dust IOU/Coverage 閾值
     dust_heatmap_top_percent: float = 5.0     # Heatmap 熱區取前 X%；two-stage REAL feature 須落在此核心附近
     dust_heatmap_metric: str = "coverage"     # Heatmap 判定指標: "coverage" (灰塵覆蓋率) 或是 "iou" (交集/聯集)
@@ -497,6 +498,7 @@ class CAPIConfig:
             tile_stride=data.get("tile_stride", 512),
             anomaly_threshold=data.get("anomaly_threshold", 0.5),
             model_path=data.get("model_path", ""),
+            inference_rotate_180_enabled=data.get("inference_rotate_180_enabled", False),
             model_mapping=raw_model_mapping,
             threshold_mapping=threshold_mapping,
             is_new_architecture=is_new,
@@ -630,6 +632,7 @@ class CAPIConfig:
             "tile_stride": self.tile_stride,
             "anomaly_threshold": self.anomaly_threshold,
             "model_path": self.model_path,
+            "inference_rotate_180_enabled": self.inference_rotate_180_enabled,
             "model_mapping": self.model_mapping,
             "threshold_mapping": self.threshold_mapping,
             "patchcore_filter_enabled": self.patchcore_filter_enabled,
@@ -733,6 +736,7 @@ class CAPIConfig:
             "tile_size": self.tile_size,
             "tile_stride": self.tile_stride,
             "anomaly_threshold": self.anomaly_threshold,
+            "inference_rotate_180_enabled": self.inference_rotate_180_enabled,
             "model_mapping": self.model_mapping,
             "threshold_mapping": self.threshold_mapping,
             "patchcore_filter_enabled": self.patchcore_filter_enabled,
@@ -859,6 +863,9 @@ class CAPIConfig:
 
         if "anomaly_threshold" in param_map:
             self.anomaly_threshold = float(param_map["anomaly_threshold"])
+        if "inference_rotate_180_enabled" in param_map:
+            val = param_map["inference_rotate_180_enabled"]
+            self.inference_rotate_180_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
         # 新架構：threshold_mapping / model_mapping 永遠以 yaml 為唯一來源，
         # 不接受 DB override。否則 yaml 改完重啟會被首次 init 灌進 DB 的舊值蓋掉
         # （bug 案例：machine_config.yaml 改 0.5→0.4，重啟後 DB 殘留 0.5 把 yaml 蓋回去）
