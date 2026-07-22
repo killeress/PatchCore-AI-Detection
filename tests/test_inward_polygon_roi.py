@@ -141,7 +141,7 @@ def test_v2_aoi_coord_uses_polygon_when_raw_bounds_map_outside_panel():
         product_resolution,
     ) == (4476, 3854)
 
-    for is_skip_file, expected_zone in ((False, "edge"), (True, "bright_spot")):
+    for is_skip_file, expected_zone in ((False, "inner"), (True, "bright_spot")):
         result = ImageResult(
             image_path=Path("B0F00000_test.png" if is_skip_file else "W0F00000_test.png"),
             image_size=(5500, 4400),
@@ -293,7 +293,7 @@ def test_v2_aoi_top_edge_locks_inward_shift_to_y_axis():
     assert tile.y <= tile.aoi_image_y <= tile.y + tile.height - 1
 
 
-def test_v2_aoi_outer_ring_tile_routes_to_edge_even_when_anchor_just_outside_half_tile():
+def test_v2_aoi_anchor_just_outside_half_tile_routes_to_inner():
     cfg = CAPIConfig()
     cfg.is_new_architecture = True
     cfg.tile_size = 512
@@ -339,10 +339,10 @@ def test_v2_aoi_outer_ring_tile_routes_to_edge_even_when_anchor_just_outside_hal
     assert tile.aoi_image_y == 890
     assert tile.x == 653
     assert tile.y == 634
-    assert tile.zone == "edge"
+    assert tile.zone == "inner"
 
 
-def test_v2_aoi_bottom_outer_ring_tile_routes_to_edge_when_anchor_is_just_past_half_tile():
+def test_v2_aoi_bottom_anchor_just_past_half_tile_routes_to_inner():
     cfg = CAPIConfig()
     cfg.is_new_architecture = True
     cfg.tile_size = 512
@@ -387,7 +387,70 @@ def test_v2_aoi_bottom_outer_ring_tile_routes_to_edge_when_anchor_is_just_past_h
     assert tile.aoi_image_y == 3436
     assert tile.y == 3180
     assert raw_bounds[3] - tile.aoi_image_y > cfg.tile_size // 2
-    assert tile.zone == "edge"
+    assert tile.zone == "inner"
+
+
+def test_v2_aoi_zone_uses_defect_center_for_logged_w0f_case():
+    cfg = CAPIConfig()
+    cfg.is_new_architecture = True
+    cfg.tile_size = 512
+    cfg.enable_panel_polygon = True
+
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+
+    image = np.full((4384, 6576), 180, dtype=np.uint8)
+    polygon = np.array(
+        [
+            [549.9, 746.6],
+            [6152.4, 725.6],
+            [6107.9, 3823.6],
+            [608.4, 3863.1],
+        ],
+        dtype=np.float32,
+    )
+    result = ImageResult(
+        image_path=Path("W0F00000_144202.tif"),
+        image_size=(6576, 4384),
+        otsu_bounds=(550, 726, 6152, 3863),
+        exclusion_regions=[],
+        tiles=[],
+        excluded_tile_count=0,
+        processed_tile_count=0,
+        processing_time=0.0,
+        raw_bounds=(550, 726, 6152, 3863),
+        panel_polygon=polygon,
+    )
+    mapped_points = iter([(5725, 2823), (1579, 1075)])
+    inferencer._map_aoi_coords = lambda *_args, **_kwargs: next(mapped_points)
+
+    created = inferencer._create_aoi_centered_tiles_v2(
+        image=image,
+        result=result,
+        defects=[
+            AOIReportDefect(
+                defect_code="PCDB5",
+                product_x=1774,
+                product_y=722,
+                image_prefix="W0F00000",
+            ),
+            AOIReportDefect(
+                defect_code="PCDB5",
+                product_x=353,
+                product_y=120,
+                image_prefix="W0F00000",
+            ),
+        ],
+        product_resolution=(1920, 1080),
+        pre_cfg=PreprocessConfig(tile_size=512),
+    )
+
+    assert created == 2
+    assert [(tile.aoi_image_x, tile.aoi_image_y) for tile in result.tiles] == [
+        (5725, 2823),
+        (1579, 1075),
+    ]
+    assert [tile.zone for tile in result.tiles] == ["inner", "inner"]
 
 
 def test_v2_aoi_coord_tile_keeps_anchor_inside_when_inward_conflicts():

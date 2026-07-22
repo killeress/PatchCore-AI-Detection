@@ -23,7 +23,7 @@ class PreprocessConfig:
     tile_stride: int = 512
     otsu_offset: int = 5
     enable_panel_polygon: bool = True
-    edge_threshold_px: int = 768  # retained for config compatibility; zone split is coverage-based
+    edge_threshold_px: int = 768  # retained for config compatibility; zone split uses anchor distance <= tile_size / 2
     coverage_min: float = 0.3
     # Edge 取樣 anchor 仍可往 panel 外推半個 tile，但實際 ROI 會再依 polygon 往產品
     # 內側推回來，避免 edge.pt 學到黑色背景邊界。
@@ -541,12 +541,30 @@ def _polyfit_polygon(
     return polygon
 
 
+def classify_anchor_zone(
+    anchor_xy: Tuple[float, float],
+    polygon: Optional[np.ndarray],
+    edge_distance_px: float,
+) -> Tuple[str, float]:
+    """依 anchor 到 panel polygon 的 signed distance 分 INNER / EDGE。"""
+    if polygon is None:
+        return "inner", float("inf")
+
+    signed_distance = float(cv2.pointPolygonTest(
+        np.asarray(polygon, dtype=np.float32),
+        (float(anchor_xy[0]), float(anchor_xy[1])),
+        True,
+    ))
+    zone = "edge" if signed_distance <= float(edge_distance_px) else "inner"
+    return zone, signed_distance
+
+
 def classify_tile_zone(
     tile_rect: Tuple[int, int, int, int],
     polygon: Optional[np.ndarray],
     config: PreprocessConfig,
 ) -> Tuple[str, float, float, Optional[np.ndarray]]:
-    """根據 polygon 與 tile 幾何決定 zone + 計算 coverage / center_dist。
+    """以 tile 中心到 polygon 的距離決定 zone，並計算 coverage / mask。
 
     Returns: (zone, coverage, center_dist_to_edge, mask)
         - zone: "inner" | "edge" | "outside"
@@ -571,23 +589,20 @@ def classify_tile_zone(
     if coverage < config.coverage_min:
         return "outside", coverage, 0.0, mask
 
-    # 計算 tile 中心到 polygon 邊的最短距離
+    # 訓練圖沒有缺陷點，以 tile 中心作為與推論缺陷中心等價的 anchor。
     cx = (x1 + x2) / 2.0
     cy = (y1 + y2) / 2.0
-    dists = []
-    for i in range(len(polygon)):
-        p1 = polygon[i]
-        p2 = polygon[(i + 1) % len(polygon)]
-        d = _point_segment_dist((cx, cy), tuple(p1), tuple(p2))
-        dists.append(d)
-    center_dist = float(min(dists))
-
-    # 決定 zone：完整在 panel 內且外框未貼到 panel 邊界才是 inner。
-    if coverage >= 1.0 - 1e-6:
-        if _tile_touches_polygon_boundary(tile_rect, polygon):
-            return "edge", 1.0, center_dist, None
-        return "inner", 1.0, center_dist, None
-    return "edge", coverage, center_dist, mask if coverage < 1.0 - 1e-6 else None
+    # bbox grid 會受 otsu_offset 向產品內縮；補回這段偵測偏移後，實際分界仍是
+    # anchor 距真實 panel 邊界半個 tile。AOI 缺陷中心不經 bbox grid，無此補償。
+    grid_edge_distance = config.tile_size / 2.0 + max(
+        0.0, float(getattr(config, "otsu_offset", 0)),
+    )
+    zone, signed_center_dist = classify_anchor_zone(
+        (cx, cy), polygon, grid_edge_distance,
+    )
+    center_dist = abs(signed_center_dist)
+    output_mask = mask if coverage < 1.0 - 1e-6 else None
+    return zone, coverage, center_dist, output_mask
 
 
 def _clamp_tile_origin(tx: int, ty: int, img_w: int, img_h: int,
@@ -775,33 +790,6 @@ def resolve_inward_polygon_tile(
             best_cov, best_dist = cov, dist
 
     return best[0], best[1], best_cov, best != original
-
-
-def _tile_touches_polygon_boundary(
-    tile_rect: Tuple[int, int, int, int],
-    polygon: np.ndarray,
-    tolerance_px: float = 1.0,
-) -> bool:
-    """True when the tile rectangle touches the panel polygon boundary."""
-    x1, y1, x2, y2 = tile_rect
-    corners = ((x1, y1), (x2, y1), (x2, y2), (x1, y2))
-    poly = polygon.astype(np.float32)
-    for pt in corners:
-        dist = cv2.pointPolygonTest(poly, (float(pt[0]), float(pt[1])), True)
-        if abs(float(dist)) <= tolerance_px:
-            return True
-    return False
-
-
-def _point_segment_dist(p, a, b):
-    px, py = p; ax, ay = a; bx, by = b
-    dx, dy = bx - ax, by - ay
-    seg_sq = dx * dx + dy * dy
-    if seg_sq < 1e-9:
-        return ((px - ax) ** 2 + (py - ay) ** 2) ** 0.5
-    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / seg_sq))
-    qx, qy = ax + t * dx, ay + t * dy
-    return ((px - qx) ** 2 + (py - qy) ** 2) ** 0.5
 
 
 def preprocess_panel_image(
@@ -1105,18 +1093,29 @@ def _generate_tiles(
             zone, cov, dist, mask = classify_tile_zone((tx0, ty0, tx0 + ts, ty0 + ts), polygon, config)
             if zone == "outside":
                 continue
-            force_edge = zone == "edge" or (
-                zone == "inner" and (tx0 == xs[0] or tx0 == xs[-1] or ty0 == ys[0] or ty0 == ys[-1])
-            )
+            anchor_zone = zone
+            # Polygon 偵測失敗時以 bbox 首末排作為中心恰在半個 tile 的 fallback。
+            if polygon is None and (
+                tx0 == xs[0] or tx0 == xs[-1] or ty0 == ys[0] or ty0 == ys[-1]
+            ):
+                anchor_zone = "edge"
+            anchor_dist = dist
             tx, ty = tx0, ty0
             is_corner = _is_corner(tx0, ty0)
-            if force_edge:
+            needs_inward_shift = anchor_zone == "edge" or (
+                polygon is not None and cov < 1.0 - 1e-6
+            )
+            if needs_inward_shift:
                 tx, ty, _shifted = _resolve_edge_origin(tx0, ty0)
-                zone, cov, dist, mask = classify_tile_zone((tx, ty, tx + ts, ty + ts), polygon, config)
-                zone = "edge"
+                _shifted_zone, cov, _shifted_dist, mask = classify_tile_zone(
+                    (tx, ty, tx + ts, ty + ts), polygon, config,
+                )
                 if cov >= 1.0 - 1e-6:
                     mask = None
-            _emit(tx, ty, zone, cov, dist, mask, is_corner_override=is_corner)
+            _emit(
+                tx, ty, anchor_zone, cov, anchor_dist, mask,
+                is_corner_override=is_corner,
+            )
 
     extension_positions: List[Tuple[int, int, bool]] = []
     if top_ty is not None:

@@ -5464,8 +5464,8 @@ class CAPIInferencer:
         差異重點：
           - 邊緣不 bail 到 CV，每筆 AOI 座標都建立 PatchCore tile
           - OOB / polygon edge 用 inward clamp，不再 ``cv2.copyMakeBorder`` zero-pad
-          - zone 由 ``capi_preprocess.classify_tile_zone`` 依 panel polygon 判定，
-            AOI 點靠邊時強制 zone="edge"；skip_file 強制 zone="bright_spot"
+          - zone 由 AOI 缺陷中心到 panel polygon 的距離判定；距離不超過
+            半個 tile 時為 edge，否則為 inner；skip_file 強制 bright_spot
 
         Args:
             image: 原始圖片（cv2.imread 結果）
@@ -5477,7 +5477,11 @@ class CAPIInferencer:
 
         Returns: 新建立的 tile 數
         """
-        from capi_preprocess import classify_tile_zone, resolve_inward_polygon_tile
+        from capi_preprocess import (
+            classify_anchor_zone,
+            classify_tile_zone,
+            resolve_inward_polygon_tile,
+        )
 
         if result.raw_bounds is None:
             logger.warning("[v2] AOI Coord: raw_bounds 為 None，無法建立切塊")
@@ -5584,7 +5588,7 @@ class CAPIInferencer:
             crop_h = ty2 - ty
             tile_img = processed_image[ty:ty2, tx:tx2].copy()
             original_tile = raw_image[ty:ty2, tx:tx2].copy()
-            tile_zone, _cov, _dist, tile_mask = classify_tile_zone(
+            _tile_zone, _cov, _dist, tile_mask = classify_tile_zone(
                 (tx, ty, tx2, ty2), polygon, pre_cfg,
             )
             if tile_mask is not None and not np.any(tile_mask):
@@ -5597,27 +5601,9 @@ class CAPIInferencer:
             if is_skip_file:
                 zone = "bright_spot"
             else:
-                zone = tile_zone
-                if zone == "outside":
-                    zone = "edge"
-                outer_x1, outer_y1, outer_x2, outer_y2 = result.otsu_bounds or result.raw_bounds
-                outer_tol = max(2, int(getattr(self.config, "otsu_offset", 0)))
-                outer_ring_px = half + outer_tol
-                is_outer_ring_tile = (
-                    tx <= outer_x1 + outer_ring_px
-                    or ty <= outer_y1 + outer_ring_px
-                    or tx + tile_size >= outer_x2 - outer_ring_px
-                    or ty + tile_size >= outer_y2 - outer_ring_px
+                zone, _anchor_distance = classify_anchor_zone(
+                    (img_x, img_y), polygon, half,
                 )
-                if is_outer_ring_tile:
-                    zone = "edge"
-                if polygon is not None:
-                    d_edge = float(cv2.pointPolygonTest(
-                        np.asarray(polygon, dtype=np.float32),
-                        (float(img_x), float(img_y)), True,
-                    ))
-                    if d_edge <= half:
-                        zone = "edge"
 
             if not is_skip_file and getattr(pre_cfg, "preprocess_after_tiling", False):
                 from capi_preprocess import image_preprocess_pipeline_for_zone
