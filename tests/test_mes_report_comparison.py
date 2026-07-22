@@ -9,6 +9,7 @@ from capi_mes_report import (
     OracleMESRepository,
     build_mes_comparison,
     classify_mes_judgment,
+    load_defect_code_catalog,
 )
 
 
@@ -47,6 +48,28 @@ def test_mes_judgment_follows_logic_workbook_filters():
 
     assert result["judgment"] == "NG"
     assert result["qualifying_defects"][0]["dfct_code"] == "PCU12"
+    assert result["qualifying_defects"][0]["severity"] == "輕缺"
+    assert result["qualifying_defects"][0]["description"] == "BL異物"
+
+
+def test_defect_code_catalog_contains_excel_reference_values():
+    catalog = load_defect_code_catalog()
+
+    assert len(catalog) == 622
+    assert catalog["PCDK2"] == {"severity": "僅判等級", "description": "暗點"}
+    assert catalog["PCDD4"] == {"severity": "僅判等級", "description": "暗點2連結"}
+    assert catalog["PCMD1"] == {"severity": "僅判等級", "description": "全黑畫素漏光"}
+
+
+def test_unknown_defect_code_remains_reportable_as_unmapped():
+    result = classify_mes_judgment(
+        [_defect("2026-07-19 10:01:00", code="UNKNOWN-CODE")],
+        datetime.fromisoformat("2026-07-19 10:00:00"),
+    )
+
+    assert result["judgment"] == "NG"
+    assert result["qualifying_defects"][0]["severity"] == ""
+    assert result["qualifying_defects"][0]["description"] == ""
 
 
 def test_build_mes_comparison_calculates_over_and_miss_rates():
@@ -282,6 +305,34 @@ def test_mes_comparison_records_can_ignore_aoi_ok():
     )
 
     assert {row["glass_id"] for row in rows} == {"AOI-NG", "AOI-UNKNOWN"}
+
+
+def test_mes_comparison_records_can_filter_by_panel_id_case_insensitive_partial_match():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE inference_records (
+            id INTEGER PRIMARY KEY,
+            glass_id TEXT,
+            model_id TEXT,
+            machine_no TEXT,
+            ai_judgment TEXT,
+            image_dir TEXT,
+            request_time TEXT
+        )
+    """)
+    conn.executemany(
+        """INSERT INTO inference_records
+           (glass_id, model_id, machine_no, ai_judgment, image_dir, request_time)
+           VALUES (?, 'MODEL', 'M1', 'OK', '/images', '2026-07-19 08:00:00')""",
+        [("PANEL-ABC-001",), ("PANEL-XYZ-002",)],
+    )
+    db = CAPIDatabase.__new__(CAPIDatabase)
+    db._get_conn = lambda: conn
+
+    rows = db.get_mes_comparison_records("2026-07-19", "2026-07-19", panel_id="abc")
+
+    assert [row["glass_id"] for row in rows] == ["PANEL-ABC-001"]
 
 
 def test_get_mes_comparison_record_uses_server_side_inference_id():

@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 
 logger = logging.getLogger(__name__)
+
+
+DEFECT_CODE_CATALOG_PATH = Path(__file__).resolve().parent / "configs" / "mes_defect_codes.json"
 
 
 try:
@@ -31,6 +37,32 @@ WP_DEFTHIS_COLUMNS = (
 
 class MESReportConfigurationError(RuntimeError):
     """MES Oracle 連線設定不完整。"""
+
+
+@lru_cache(maxsize=1)
+def load_defect_code_catalog() -> Dict[str, Dict[str, str]]:
+    """載入 MES defect code 的嚴重程度與不良描述。"""
+    try:
+        with DEFECT_CODE_CATALOG_PATH.open("r", encoding="utf-8") as stream:
+            raw_catalog = json.load(stream)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("MES defect code 字典載入失敗：%s", exc)
+        return {}
+
+    if not isinstance(raw_catalog, dict):
+        logger.warning("MES defect code 字典格式錯誤：根節點必須是物件")
+        return {}
+
+    catalog = {}
+    for raw_code, raw_info in raw_catalog.items():
+        code = str(raw_code or "").strip().upper()
+        if not code or not isinstance(raw_info, dict):
+            continue
+        catalog[code] = {
+            "severity": str(raw_info.get("severity") or "").strip(),
+            "description": str(raw_info.get("description") or "").strip(),
+        }
+    return catalog
 
 
 def _parse_datetime(value) -> Optional[datetime]:
@@ -62,6 +94,7 @@ def _has_coordinate(value) -> bool:
 
 def classify_mes_judgment(rows: Iterable[Mapping], cutoff: datetime) -> Dict:
     """依 LOGIC.xlsx 判斷一筆 AI 推論之後，MES 是否有人員有效不良。"""
+    defect_code_catalog = load_defect_code_catalog()
     qualifying = []
     row_count = 0
     for row in rows:
@@ -74,8 +107,11 @@ def classify_mes_judgment(rows: Iterable[Mapping], cutoff: datetime) -> Dict:
             continue
         if not _has_coordinate(row.get("x_axis")) or not _has_coordinate(row.get("y_axis")):
             continue
+        defect_info = defect_code_catalog.get(defect_code, {})
         qualifying.append({
             "dfct_code": defect_code,
+            "severity": defect_info.get("severity", ""),
+            "description": defect_info.get("description", ""),
             "trans_date": _display_datetime(trans_date),
             "x_axis": row.get("x_axis"),
             "y_axis": row.get("y_axis"),

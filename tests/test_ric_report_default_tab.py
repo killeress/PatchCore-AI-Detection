@@ -35,11 +35,16 @@ def test_ai_inference_records_is_the_default_report_tab():
     assert "columns.map(column =>" in html
     assert "mesReportTab.openDetail(" in html
     assert 'id="mes_ignoreAoiOk"' in html
+    assert 'id="mes_panelId"' in html
+    assert "params.set('panel_id', panelId)" in html
+    assert "PANEL ID（完整或部分）" in html
     assert "mesReportTab.toggleIgnoreAoiOk(this.checked)" in html
     assert "let _ignoreAoiOk = false;" in html
     assert "params.set('ignore_aoi_ok', '1')" in html
     assert "已忽略 AOI=OK" in html
     assert "Array.isArray(row.qualifying_defects)" in html
-    assert ".join('<br>')" in html
+    assert "function defectCatalogText(item)" in html
+    assert "function defectHtml(item)" in html
+    assert "mes-defect-unmapped" in html
     assert ".join('\\n')" in html
     assert "inferenceTab.quickFilter('today');" in html

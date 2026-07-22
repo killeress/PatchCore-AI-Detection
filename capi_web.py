@@ -5837,10 +5837,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             start_date = query.get("start_date", [""])[0] or None
             end_date = query.get("end_date", [""])[0] or None
             ignore_aoi_ok = query.get("ignore_aoi_ok", ["0"])[0] == "1"
+            panel_id = query.get("panel_id", [""])[0].strip()
             records = self.db.get_mes_comparison_records(
                 start_date,
                 end_date,
                 ignore_aoi_ok=ignore_aoi_ok,
+                panel_id=panel_id or None,
             )
 
             from capi_mes_report import OracleMESRepository, build_mes_comparison, _parse_datetime
@@ -5856,10 +5858,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if valid_cutoffs:
                     panel_ids = [row.get("glass_id", "") for row in records]
                     logger.info(
-                        "[MES Report] Local records ready: range=%s..%s, records=%d, unique_panels=%d, ignore_aoi_ok=%s",
+                        "[MES Report] Local records ready: range=%s..%s, records=%d, unique_panels=%d, ignore_aoi_ok=%s, panel_id=%s",
                         start_date, end_date, len(records),
                         len({str(value or "").strip().upper() for value in panel_ids if str(value or "").strip()}),
-                        ignore_aoi_ok,
+                        ignore_aoi_ok, panel_id or "(all)",
                     )
                     defects = repository.fetch_defects(
                         panel_ids,
@@ -5872,6 +5874,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "source": repository.source_label,
                 "rule": "DEFT_OPER=1600、IF_NEWER=Y、推論時間後、排除 PCK21、X/Y 皆有值",
                 "ignore_aoi_ok": ignore_aoi_ok,
+                "panel_id": panel_id,
             })
             logger.info("[MES Report] Comparison response ready: records=%d", len(report["records"]))
             self._send_json(report)
