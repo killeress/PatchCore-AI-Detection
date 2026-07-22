@@ -181,3 +181,29 @@ def test_classify_tile_zone_no_polygon_fallback_inner():
     assert zone == "inner"
     assert cov == 1.0
     assert mask is None
+
+
+def test_generate_tiles_uses_tile_center_without_outer_row_override():
+    from capi_preprocess import _generate_tiles, PreprocessConfig
+
+    image = np.full((1600, 2000), 180, dtype=np.uint8)
+    polygon = np.array(
+        [[0, 0], [1999, 0], [1999, 1599], [0, 1599]],
+        dtype=np.float32,
+    )
+    cfg = PreprocessConfig(
+        tile_size=512,
+        tile_stride=512,
+        outer_edge_extend=0,
+    )
+
+    tiles = _generate_tiles(
+        image,
+        bbox=(300, 300, 1700, 1300),
+        polygon=polygon,
+        config=cfg,
+    )
+
+    assert tiles
+    assert {tile.zone for tile in tiles} == {"inner"}
+    assert all(tile.center_dist_to_edge > cfg.tile_size // 2 for tile in tiles)
