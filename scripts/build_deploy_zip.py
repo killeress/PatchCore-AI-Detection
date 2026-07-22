@@ -53,6 +53,7 @@ CODE_FILES = [
     "capi_train_runner.py",
     "capi_update_agent.py",
     "capi_web.py",
+    "configs/mes_defect_codes.json",
     "requirements.txt",
     "server_config_mes_report.yaml.example",
     "scratch_classifier.py",

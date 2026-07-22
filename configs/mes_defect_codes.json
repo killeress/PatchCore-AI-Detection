@@ -1,0 +1,2490 @@
+{
+  "P001": {
+    "severity": "輕缺",
+    "description": "元件銅箔脫落"
+  },
+  "P002": {
+    "severity": "輕缺",
+    "description": "來料標籤不良"
+  },
+  "P003": {
+    "severity": "輕缺",
+    "description": "PCB外觀不良"
+  },
+  "P004": {
+    "severity": "輕缺",
+    "description": "金手指不良"
+  },
+  "P005": {
+    "severity": "輕缺",
+    "description": "元件燒傷撞件"
+  },
+  "P006": {
+    "severity": "輕缺",
+    "description": "螺絲滑牙"
+  },
+  "P007": {
+    "severity": "輕缺",
+    "description": "CN脫落"
+  },
+  "P008": {
+    "severity": "輕缺",
+    "description": "元件不可修"
+  },
+  "P009": {
+    "severity": "輕缺",
+    "description": "PCB連錫/殘錫"
+  },
+  "P010": {
+    "severity": "輕缺",
+    "description": "PCB板漏銅"
+  },
+  "P011": {
+    "severity": "輕缺",
+    "description": "電氣性不良"
+  },
+  "P012": {
+    "severity": "輕缺",
+    "description": "解析報廢"
+  },
+  "P013": {
+    "severity": "輕缺",
+    "description": "PCBA內層短路"
+  },
+  "P014": {
+    "severity": "輕缺",
+    "description": "其他不良"
+  },
+  "P015": {
+    "severity": "輕缺",
+    "description": "UT1 NG"
+  },
+  "PAEF3": {
+    "severity": "重缺",
+    "description": "Gate/Data IC功能異常"
+  },
+  "PC000": {
+    "severity": "輕缺",
+    "description": "複判無不良"
+  },
+  "PCB01": {
+    "severity": "輕缺",
+    "description": "Array凸緣"
+  },
+  "PCB02": {
+    "severity": "輕缺",
+    "description": "CF凸緣"
+  },
+  "PCB05": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "延伸性裂痕"
+  },
+  "PCB06": {
+    "severity": "輕缺",
+    "description": "Array玻璃表面髒污"
+  },
+  "PCB07": {
+    "severity": "重缺",
+    "description": "CF玻璃表面髒污"
+  },
+  "PCB10": {
+    "severity": "輕缺",
+    "description": "Cell 崩邊"
+  },
+  "PCB11": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Cell切裂波浪狀漏光"
+  },
+  "PCB12": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Cell切裂點狀漏光"
+  },
+  "PCB14": {
+    "severity": "重缺",
+    "description": "來料破片"
+  },
+  "PCB16": {
+    "severity": "輕缺",
+    "description": "Array瑞子部破損"
+  },
+  "PCB19": {
+    "severity": "輕缺",
+    "description": "表面缺角"
+  },
+  "PCB20": {
+    "severity": "重缺",
+    "description": "製程破片"
+  },
+  "PCBC2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "磨邊不良"
+  },
+  "PCBC6": {
+    "severity": "輕缺",
+    "description": "LCM panel 缺角"
+  },
+  "PCBC7": {
+    "severity": "重缺",
+    "description": "LCM panel 破"
+  },
+  "PCBC8": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Open Cell來料破片"
+  },
+  "PCBCD": {
+    "severity": "輕缺",
+    "description": "TP/CG油墨異物"
+  },
+  "PCBCE": {
+    "severity": "輕缺",
+    "description": "TP/CG油墨缺損"
+  },
+  "PCBDB": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP/CG原材凸點"
+  },
+  "PCBDC": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP/CG原材凹點"
+  },
+  "PCBDE": {
+    "severity": "輕缺",
+    "description": "TP線路刮傷"
+  },
+  "PCBDI": {
+    "severity": "輕缺",
+    "description": "TP/CG髒污"
+  },
+  "PCBDL": {
+    "severity": "輕缺",
+    "description": "TP/CG刮傷"
+  },
+  "PCBDM": {
+    "severity": "重缺",
+    "description": "TP/CG崩角"
+  },
+  "PCBDN": {
+    "severity": "重缺",
+    "description": "TP/CG崩邊"
+  },
+  "PCBDO": {
+    "severity": "重缺",
+    "description": "TP/CG破裂"
+  },
+  "PCBDP": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "CG可視區刮傷"
+  },
+  "PCBDR": {
+    "severity": "輕缺",
+    "description": "TP/CG來料髒汙"
+  },
+  "PCBDS": {
+    "severity": "重缺",
+    "description": "TP/CG來料刮傷"
+  },
+  "PCBK1": {
+    "severity": "重缺",
+    "description": "機台破片"
+  },
+  "PCBK2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Tray盤破損"
+  },
+  "PCBZ1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "偏光板鐳切殘材不掉"
+  },
+  "PCBZ2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "偏光板鐳切異常"
+  },
+  "PCBZ3": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "偏光板鐳切玻璃損傷"
+  },
+  "PCC00": {
+    "severity": "僅判等級",
+    "description": "其他Cell不良"
+  },
+  "PCC04": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Panel線路腐蝕"
+  },
+  "PCC07": {
+    "severity": "僅判等級",
+    "description": "Cell內異物"
+  },
+  "PCC09": {
+    "severity": "僅判等級",
+    "description": "Cell內髒污"
+  },
+  "PCC0C": {
+    "severity": "輕缺",
+    "description": "蝕刻不良"
+  },
+  "PCC11": {
+    "severity": "重缺",
+    "description": "液晶氣泡"
+  },
+  "PCC20": {
+    "severity": "僅判等級",
+    "description": "液晶配向不良"
+  },
+  "PCCA1": {
+    "severity": "僅判等級",
+    "description": "PI印刷不良"
+  },
+  "PCCC4": {
+    "severity": "僅判等級",
+    "description": "BM不良"
+  },
+  "PCCC5": {
+    "severity": "僅判等級",
+    "description": "CF色剝落"
+  },
+  "PCCCA": {
+    "severity": "僅判等級",
+    "description": "注入口不均"
+  },
+  "PCCCF": {
+    "severity": "輕缺",
+    "description": "Spacer壓傷"
+  },
+  "PCCE1": {
+    "severity": "僅判等級",
+    "description": "CF表面凹凸點"
+  },
+  "PCCE2": {
+    "severity": "輕缺",
+    "description": "Array表面凹凸點"
+  },
+  "PCCF1": {
+    "severity": "僅判等級",
+    "description": "CF不良"
+  },
+  "PCCFF": {
+    "severity": "輕缺",
+    "description": "BM區破損"
+  },
+  "PCCL1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Shorting Bar切割不良"
+  },
+  "PCCR3": {
+    "severity": "僅判等級",
+    "description": "Rubbing斜紋Mura"
+  },
+  "PCD21": {
+    "severity": "重缺",
+    "description": "TP麻點"
+  },
+  "PCDA1": {
+    "severity": "僅判等級",
+    "description": "異物亮點"
+  },
+  "PCDA5": {
+    "severity": "僅判等級",
+    "description": "壓力點(可消失)"
+  },
+  "PCDAA": {
+    "severity": "僅判等級",
+    "description": "異物暗點"
+  },
+  "PCDAB": {
+    "severity": "僅判等級",
+    "description": "異物亮點二連結"
+  },
+  "PCDAD": {
+    "severity": "僅判等級",
+    "description": "高溫亮點"
+  },
+  "PCDB0": {
+    "severity": "僅判等級",
+    "description": "亮點總數"
+  },
+  "PCDB4": {
+    "severity": "僅判等級",
+    "description": "閃爍亮點"
+  },
+  "PCDB5": {
+    "severity": "僅判等級",
+    "description": "微亮點"
+  },
+  "PCDB6": {
+    "severity": "僅判等級",
+    "description": "亮點"
+  },
+  "PCDB7": {
+    "severity": "僅判等級",
+    "description": "碎亮點"
+  },
+  "PCDB8": {
+    "severity": "僅判等級",
+    "description": "亮點距離"
+  },
+  "PCDBA": {
+    "severity": "僅判等級",
+    "description": "低頻亮點"
+  },
+  "PCDBB": {
+    "severity": "僅判等級",
+    "description": "滿天星"
+  },
+  "PCDBC": {
+    "severity": "僅判等級",
+    "description": "亮點2連結"
+  },
+  "PCDBH": {
+    "severity": "僅判等級",
+    "description": "亮點3連結"
+  },
+  "PCDBI": {
+    "severity": "僅判等級",
+    "description": "亮點4連結"
+  },
+  "PCDBJ": {
+    "severity": "僅判等級",
+    "description": "亮點5連結"
+  },
+  "PCDC2": {
+    "severity": "僅判等級",
+    "description": "灰階亮點"
+  },
+  "PCDC3": {
+    "severity": "僅判等級",
+    "description": "Leak亮點"
+  },
+  "PCDC4": {
+    "severity": "僅判等級",
+    "description": "Leak綠色亮點"
+  },
+  "PCDCU": {
+    "severity": "僅判等級",
+    "description": "綠色亮點"
+  },
+  "PCDD0": {
+    "severity": "僅判等級",
+    "description": "暗點總數"
+  },
+  "PCDD1": {
+    "severity": "僅判等級",
+    "description": "1個暗點"
+  },
+  "PCDD4": {
+    "severity": "僅判等級",
+    "description": "暗點2連結"
+  },
+  "PCDD5": {
+    "severity": "僅判等級",
+    "description": "暗點距離"
+  },
+  "PCDD7": {
+    "severity": "僅判等級",
+    "description": "亮暗點距離"
+  },
+  "PCDD8": {
+    "severity": "僅判等級",
+    "description": "亮暗點總數"
+  },
+  "PCDDB": {
+    "severity": "僅判等級",
+    "description": "灰階暗點"
+  },
+  "PCDDC": {
+    "severity": "僅判等級",
+    "description": "暗點3連結"
+  },
+  "PCDDD": {
+    "severity": "僅判等級",
+    "description": "暗點4連結"
+  },
+  "PCDDE": {
+    "severity": "僅判等級",
+    "description": "暗點5連結"
+  },
+  "PCDK0": {
+    "severity": "僅判等級",
+    "description": "亮暗並列"
+  },
+  "PCDK1": {
+    "severity": "僅判等級",
+    "description": "壓力點"
+  },
+  "PCDK2": {
+    "severity": "僅判等級",
+    "description": "暗點"
+  },
+  "PCDZ1": {
+    "severity": "僅判等級",
+    "description": "其他點缺陷"
+  },
+  "PCE01": {
+    "severity": "重缺",
+    "description": "OTP不良"
+  },
+  "PCE04": {
+    "severity": "重缺",
+    "description": "背光不亮"
+  },
+  "PCE07": {
+    "severity": "輕缺",
+    "description": "BL漏光"
+  },
+  "PCE09": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL點燈線接頭燒焦"
+  },
+  "PCE22": {
+    "severity": "重缺",
+    "description": "TP測試不良"
+  },
+  "PCE26": {
+    "severity": "輕缺",
+    "description": "TP劃線測試異常"
+  },
+  "PCE2A": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP互電容容值異常"
+  },
+  "PCE2B": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP自電容容值異常"
+  },
+  "PCE2C": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP電容變化異常"
+  },
+  "PCE2D": {
+    "severity": "輕缺",
+    "description": "TP相鄰電容分佈異常"
+  },
+  "PCE2E": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TRx接地"
+  },
+  "PCE2F": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TRx短路"
+  },
+  "PCE2G": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TRx斷路"
+  },
+  "PCE2H": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP均勻度測試異常"
+  },
+  "PCE32": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL點即滅"
+  },
+  "PCE3A": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP中斷訊號異號"
+  },
+  "PCE3B": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP IIC訊號異常"
+  },
+  "PCE3C": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP電源異常"
+  },
+  "PCE3D": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP同步訊號異常"
+  },
+  "PCE51": {
+    "severity": "重缺",
+    "description": "BL Code更新錯誤"
+  },
+  "PCE52": {
+    "severity": "重缺",
+    "description": "FW Code更新錯誤"
+  },
+  "PCE53": {
+    "severity": "重缺",
+    "description": "輔助微控制器錯誤"
+  },
+  "PCE54": {
+    "severity": "重缺",
+    "description": "RX均勻度缺陷"
+  },
+  "PCE55": {
+    "severity": "重缺",
+    "description": "其他記憶體讀取錯誤"
+  },
+  "PCE56": {
+    "severity": "重缺",
+    "description": "其他記憶體寫入錯誤"
+  },
+  "PCE57": {
+    "severity": "重缺",
+    "description": "TX短路測試不良"
+  },
+  "PCE58": {
+    "severity": "重缺",
+    "description": "RX短路測試不良"
+  },
+  "PCEC1": {
+    "severity": "重缺",
+    "description": "LB FPC焊接不良"
+  },
+  "PCEC2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL周邊暗線"
+  },
+  "PCEC3": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL銅柱不良"
+  },
+  "PCEC4": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL定位Pin斷"
+  },
+  "PCEC5": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL漏電流"
+  },
+  "PCEC6": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "CCFL閃爍"
+  },
+  "PCEC7": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Hi-pot Fail"
+  },
+  "PCEC8": {
+    "severity": "輕缺",
+    "description": "BL外框變形"
+  },
+  "PCEC9": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "消費電流不良"
+  },
+  "PCECA": {
+    "severity": "重缺",
+    "description": "其他電氣不良"
+  },
+  "PCEH0": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Haptics其他功能不良"
+  },
+  "PCEH1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Haptics校準檢測不良"
+  },
+  "PCEH2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Haptics壓力檢測不良"
+  },
+  "PCEH3": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Haptics角度檢測不良"
+  },
+  "PCEH4": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Haptics聲音檢測不良"
+  },
+  "PCEH5": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Haptics振動檢測不良"
+  },
+  "PCEL0": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Logistic檢測異常"
+  },
+  "PCEM1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "De-Mura失敗"
+  },
+  "PCES1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "HDMI測試異常"
+  },
+  "PCES2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "SD卡讀取異常"
+  },
+  "PCES3": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "USB測試異常"
+  },
+  "PCES4": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "WIFI測試異常"
+  },
+  "PCES5": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "有線網絡測試異常"
+  },
+  "PCES6": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "分量測試異常"
+  },
+  "PCEZ1": {
+    "severity": "重缺",
+    "description": "畫面反轉不良"
+  },
+  "PCEZ2": {
+    "severity": "重缺",
+    "description": "文字畫面異常"
+  },
+  "PCEZ9": {
+    "severity": "僅判等級",
+    "description": "CR值異常"
+  },
+  "PCGB1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "側邊保護膠塗布不均"
+  },
+  "PCGB5": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "側邊保護膠氣泡"
+  },
+  "PCGB6": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "側邊保護膠未乾"
+  },
+  "PCGB7": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "側邊保護膠脫落"
+  },
+  "PCGBA": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "側邊保護膠長邊缺膠"
+  },
+  "PCGBB": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "側邊保護膠短邊缺膠"
+  },
+  "PCGBC": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "側邊保護膠角落缺膠"
+  },
+  "PCGBJ": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "側邊保護膠Array側溢膠"
+  },
+  "PCGBK": {
+    "severity": "輕缺",
+    "description": "側邊保護膠CF側溢膠"
+  },
+  "PCGBP": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "側邊保護膠長邊凸膠"
+  },
+  "PCGBQ": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "側邊保護膠短邊凸膠"
+  },
+  "PCGBR": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "側邊保護膠角落凸膠"
+  },
+  "PCH04": {
+    "severity": "輕缺",
+    "description": "FFC/FPC金手指破損"
+  },
+  "PCH05": {
+    "severity": "重缺",
+    "description": "FFC/FPC金手指異物"
+  },
+  "PCH09": {
+    "severity": "輕缺",
+    "description": "FFC/FPC破損"
+  },
+  "PCH10": {
+    "severity": "重缺",
+    "description": "LB FFC/FPC破損"
+  },
+  "PCH11": {
+    "severity": "輕缺",
+    "description": "FFC/FPC連接器變形"
+  },
+  "PCH14": {
+    "severity": "重缺",
+    "description": "FFC/FPC翹曲"
+  },
+  "PCH1A": {
+    "severity": "重缺",
+    "description": "FFC/FPC連接器位移"
+  },
+  "PCH22": {
+    "severity": "重缺",
+    "description": "FPC手拉焊鍚尖"
+  },
+  "PCH23": {
+    "severity": "重缺",
+    "description": "FPC手拉焊短路"
+  },
+  "PCH33": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "T-FPC 剝落"
+  },
+  "PCHC1": {
+    "severity": "輕缺",
+    "description": "FFC/FPC外觀不良"
+  },
+  "PCIC1": {
+    "severity": "輕缺",
+    "description": "畫面偏色"
+  },
+  "PCIC2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "階調色偏"
+  },
+  "PCIC3": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "階調偏綠"
+  },
+  "PCIC4": {
+    "severity": "輕缺",
+    "description": "畫面粗糙"
+  },
+  "PCJ00": {
+    "severity": "重缺",
+    "description": "PCBA元件損壞"
+  },
+  "PCJ09": {
+    "severity": "重缺",
+    "description": "PCB翹曲"
+  },
+  "PCJC1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "CB外觀不良"
+  },
+  "PCJC2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "LVDS連接器不良"
+  },
+  "PCJC3": {
+    "severity": "輕缺",
+    "description": "VR鈕損傷"
+  },
+  "PCK00": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "鐵框間隙過大"
+  },
+  "PCK02": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "膠框不良"
+  },
+  "PCK05": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "組裝異常"
+  },
+  "PCK13": {
+    "severity": "輕缺",
+    "description": "TP/CG組裝氣泡"
+  },
+  "PCK15": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP/CG原材氣泡"
+  },
+  "PCK21": {
+    "severity": "輕缺",
+    "description": "TP/CG組裝異物"
+  },
+  "PCK23": {
+    "severity": "重缺",
+    "description": "TP/CG組裝其他不良"
+  },
+  "PCK24": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP/CG翹起"
+  },
+  "PCK96": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "前框(四件式)間隙不良"
+  },
+  "PCK97": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "前框(四件式)段差不良"
+  },
+  "PCKGW": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Gasket翹起"
+  },
+  "PCLC1": {
+    "severity": "重缺",
+    "description": "壓力線"
+  },
+  "PCLC2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "H壓力線"
+  },
+  "PCLC3": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "V壓力線"
+  },
+  "PCLC7": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "H漸進線"
+  },
+  "PCLC8": {
+    "severity": "重缺",
+    "description": "H線"
+  },
+  "PCLC9": {
+    "severity": "重缺",
+    "description": "階調斷線"
+  },
+  "PCLCA": {
+    "severity": "重缺",
+    "description": "V線"
+  },
+  "PCLCB": {
+    "severity": "重缺",
+    "description": "H暗線"
+  },
+  "PCLCC": {
+    "severity": "重缺",
+    "description": "V亮點帶線"
+  },
+  "PCLCD": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "H亮點帶線"
+  },
+  "PCLCH": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "V暗點帶線"
+  },
+  "PCLCI": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "H暗點帶線"
+  },
+  "PCLH1": {
+    "severity": "重缺",
+    "description": "H亮線"
+  },
+  "PCLH2": {
+    "severity": "重缺",
+    "description": "H斷線"
+  },
+  "PCLH3": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "H Short"
+  },
+  "PCLH4": {
+    "severity": "重缺",
+    "description": "H線靜電破壞"
+  },
+  "PCLH5": {
+    "severity": "重缺",
+    "description": "H淡亮線"
+  },
+  "PCLH6": {
+    "severity": "重缺",
+    "description": "H淡暗線"
+  },
+  "PCLHM": {
+    "severity": "重缺",
+    "description": "H淡暗線(單驅可見)"
+  },
+  "PCLK1": {
+    "severity": "輕缺",
+    "description": "自配線刮壓傷"
+  },
+  "PCLK2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "自配線open"
+  },
+  "PCLK4": {
+    "severity": "重缺",
+    "description": "V暗線"
+  },
+  "PCLK6": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "WOA刮傷"
+  },
+  "PCLV1": {
+    "severity": "重缺",
+    "description": "V亮線"
+  },
+  "PCLV2": {
+    "severity": "重缺",
+    "description": "V斷線"
+  },
+  "PCLV3": {
+    "severity": "重缺",
+    "description": "V Short"
+  },
+  "PCLV4": {
+    "severity": "重缺",
+    "description": "V線靜電破壞"
+  },
+  "PCLV5": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "V淡亮線"
+  },
+  "PCLV6": {
+    "severity": "重缺",
+    "description": "V淡暗線"
+  },
+  "PCLV8": {
+    "severity": "重缺",
+    "description": "柵欄線"
+  },
+  "PCLVB": {
+    "severity": "重缺",
+    "description": "V淡暗線(單驅可見)"
+  },
+  "PCLX1": {
+    "severity": "重缺",
+    "description": "十字線"
+  },
+  "PCLZ1": {
+    "severity": "輕缺",
+    "description": "其他線缺陷"
+  },
+  "PCM00": {
+    "severity": "僅判等級",
+    "description": "其他不均"
+  },
+  "PCM01": {
+    "severity": "僅判等級",
+    "description": "垂直帶狀不均"
+  },
+  "PCM04": {
+    "severity": "僅判等級",
+    "description": "曝光不均"
+  },
+  "PCM05": {
+    "severity": "僅判等級",
+    "description": "雲狀不均"
+  },
+  "PCM06": {
+    "severity": "僅判等級",
+    "description": "黑霧"
+  },
+  "PCM07": {
+    "severity": "僅判等級",
+    "description": "1Hz不均-2"
+  },
+  "PCM09": {
+    "severity": "僅判等級",
+    "description": "圈狀不均"
+  },
+  "PCM10": {
+    "severity": "輕缺",
+    "description": "高凸點"
+  },
+  "PCM12": {
+    "severity": "僅判等級",
+    "description": "Pad不均"
+  },
+  "PCM16": {
+    "severity": "僅判等級",
+    "description": "黑點"
+  },
+  "PCM17": {
+    "severity": "僅判等級",
+    "description": "白點"
+  },
+  "PCM18": {
+    "severity": "僅判等級",
+    "description": "區塊不均"
+  },
+  "PCM19": {
+    "severity": "僅判等級",
+    "description": "水平帶狀不均"
+  },
+  "PCM1A": {
+    "severity": "僅判等級",
+    "description": "R/G/B污點"
+  },
+  "PCM20": {
+    "severity": "僅判等級",
+    "description": "角落不均"
+  },
+  "PCM21": {
+    "severity": "僅判等級",
+    "description": "耳朵漏光"
+  },
+  "PCM22": {
+    "severity": "僅判等級",
+    "description": "斜紋不均"
+  },
+  "PCM24": {
+    "severity": "僅判等級",
+    "description": "COG不均"
+  },
+  "PCM25": {
+    "severity": "僅判等級",
+    "description": "V線不均-未貫穿"
+  },
+  "PCM26": {
+    "severity": "僅判等級",
+    "description": "斜向不均-左"
+  },
+  "PCM27": {
+    "severity": "僅判等級",
+    "description": "斜向不均-右"
+  },
+  "PCM31": {
+    "severity": "僅判等級",
+    "description": "Burn in色差"
+  },
+  "PCM33": {
+    "severity": "僅判等級",
+    "description": "網狀不均"
+  },
+  "PCM55": {
+    "severity": "僅判等級",
+    "description": "水紋不均"
+  },
+  "PCM58": {
+    "severity": "僅判等級",
+    "description": "50%灰階不均"
+  },
+  "PCM59": {
+    "severity": "僅判等級",
+    "description": "灰階圓圈不均"
+  },
+  "PCM62": {
+    "severity": "僅判等級",
+    "description": "重力不均"
+  },
+  "PCM67": {
+    "severity": "僅判等級",
+    "description": "抖紋狀不均"
+  },
+  "PCM68": {
+    "severity": "僅判等級",
+    "description": "魚骨不均"
+  },
+  "PCM69": {
+    "severity": "僅判等級",
+    "description": "彩虹不均"
+  },
+  "PCMA2": {
+    "severity": "僅判等級",
+    "description": "擦拭不均"
+  },
+  "PCMA8": {
+    "severity": "僅判等級",
+    "description": "按壓不均"
+  },
+  "PCMAC": {
+    "severity": "僅判等級",
+    "description": "山水畫不均"
+  },
+  "PCMB6": {
+    "severity": "僅判等級",
+    "description": "黑階不均"
+  },
+  "PCMBB": {
+    "severity": "僅判等級",
+    "description": "Emboss不均"
+  },
+  "PCMBP": {
+    "severity": "僅判等級",
+    "description": "Array不均-4"
+  },
+  "PCMBR": {
+    "severity": "僅判等級",
+    "description": "線狀不均"
+  },
+  "PCMBT": {
+    "severity": "輕缺",
+    "description": "25%灰不均"
+  },
+  "PCMBW": {
+    "severity": "僅判等級",
+    "description": "黑白點"
+  },
+  "PCMC1": {
+    "severity": "僅判等級",
+    "description": "週邊Gap不均"
+  },
+  "PCMC2": {
+    "severity": "僅判等級",
+    "description": "CF曝光不均"
+  },
+  "PCMC5": {
+    "severity": "僅判等級",
+    "description": "斜向不均"
+  },
+  "PCMC9": {
+    "severity": "僅判等級",
+    "description": "其他不均 (1)"
+  },
+  "PCMCD": {
+    "severity": "僅判等級",
+    "description": "棋盤狀不均"
+  },
+  "PCMCF": {
+    "severity": "僅判等級",
+    "description": "邊框不均"
+  },
+  "PCMCJ": {
+    "severity": "僅判等級",
+    "description": "B污點"
+  },
+  "PCMCK": {
+    "severity": "僅判等級",
+    "description": "白色丸狀不均"
+  },
+  "PCMCL": {
+    "severity": "僅判等級",
+    "description": "1Hz不均-3"
+  },
+  "PCMCM": {
+    "severity": "僅判等級",
+    "description": "橫向不均"
+  },
+  "PCMCN": {
+    "severity": "僅判等級",
+    "description": "1Hz不均-4"
+  },
+  "PCMCO": {
+    "severity": "僅判等級",
+    "description": "1Hz不均-5"
+  },
+  "PCMCP": {
+    "severity": "僅判等級",
+    "description": "凹陷不均"
+  },
+  "PCMCQ": {
+    "severity": "僅判等級",
+    "description": "Shrink不均"
+  },
+  "PCMCR": {
+    "severity": "僅判等級",
+    "description": "CF不均-4"
+  },
+  "PCMCS": {
+    "severity": "僅判等級",
+    "description": "CF不均-5"
+  },
+  "PCMCT": {
+    "severity": "僅判等級",
+    "description": "心電圖不均"
+  },
+  "PCMD1": {
+    "severity": "僅判等級",
+    "description": "全黑畫素漏光"
+  },
+  "PCMD4": {
+    "severity": "僅判等級",
+    "description": "按壓漏光"
+  },
+  "PCMD5": {
+    "severity": "僅判等級",
+    "description": "沙沙不均"
+  },
+  "PCMD8": {
+    "severity": "僅判等級",
+    "description": "吸著不均"
+  },
+  "PCMD9": {
+    "severity": "僅判等級",
+    "description": "妊娠紋不均"
+  },
+  "PCMF2": {
+    "severity": "僅判等級",
+    "description": "燒機不均"
+  },
+  "PCMHX": {
+    "severity": "僅判等級",
+    "description": "環形不均"
+  },
+  "PCMK2": {
+    "severity": "僅判等級",
+    "description": "低頻不均"
+  },
+  "PCMV1": {
+    "severity": "僅判等級",
+    "description": "V線不均"
+  },
+  "PCN00": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "COF/TCP外觀不良"
+  },
+  "PCN01": {
+    "severity": "重缺",
+    "description": "COF/TCP剝離"
+  },
+  "PCN08": {
+    "severity": "重缺",
+    "description": "COF/TCP壓著異物"
+  },
+  "PCN10": {
+    "severity": "重缺",
+    "description": "COF/TCP刺傷"
+  },
+  "PCN11": {
+    "severity": "重缺",
+    "description": "COF/TCP折傷"
+  },
+  "PCN1A": {
+    "severity": "重缺",
+    "description": "COF/TCP拱起"
+  },
+  "PCNC1": {
+    "severity": "重缺",
+    "description": "S-COF/TCP對位不良"
+  },
+  "PCNC2": {
+    "severity": "重缺",
+    "description": "G-COF/TCP對位不良"
+  },
+  "PCNC3": {
+    "severity": "重缺",
+    "description": "無COF/TCP"
+  },
+  "PCNC4": {
+    "severity": "重缺",
+    "description": "COF/TCP無IC"
+  },
+  "PCNC6": {
+    "severity": "重缺",
+    "description": "COF/TCP壓著氣泡"
+  },
+  "PCNC7": {
+    "severity": "重缺",
+    "description": "COF/TCP對位不良"
+  },
+  "PCNC9": {
+    "severity": "重缺",
+    "description": "COF/TCP壓痕不良"
+  },
+  "PCO01": {
+    "severity": "重缺",
+    "description": "水平區塊缺陷"
+  },
+  "PCO02": {
+    "severity": "重缺",
+    "description": "垂直區塊缺陷"
+  },
+  "PCO04": {
+    "severity": "重缺",
+    "description": "無畫面"
+  },
+  "PCO05": {
+    "severity": "重缺",
+    "description": "畫面異常"
+  },
+  "PCO06": {
+    "severity": "重缺",
+    "description": "階調不良"
+  },
+  "PCO07": {
+    "severity": "重缺",
+    "description": "雜訊"
+  },
+  "PCO11": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "低頻畫面泛白"
+  },
+  "PCO12": {
+    "severity": "重缺",
+    "description": "半屏異常"
+  },
+  "PCP00": {
+    "severity": "輕缺",
+    "description": "偏光板來料不良"
+  },
+  "PCP05": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上偏光板髒污"
+  },
+  "PCP06": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "下偏光板髒污"
+  },
+  "PCP0A": {
+    "severity": "重缺",
+    "description": "偏光板Coating不良"
+  },
+  "PCP0B": {
+    "severity": "輕缺",
+    "description": "偏光板色差"
+  },
+  "PCP10": {
+    "severity": "輕缺",
+    "description": "偏光板保護膜翹起"
+  },
+  "PCP20": {
+    "severity": "重缺",
+    "description": "偏光板邊緣缺膠"
+  },
+  "PCP22": {
+    "severity": "輕缺",
+    "description": "上偏光板壓傷"
+  },
+  "PCP23": {
+    "severity": "輕缺",
+    "description": "上偏光板刺傷"
+  },
+  "PCP28": {
+    "severity": "重缺",
+    "description": "下偏光板壓傷"
+  },
+  "PCP29": {
+    "severity": "輕缺",
+    "description": "下偏光板刺傷"
+  },
+  "PCP31": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上偏光板燙傷"
+  },
+  "PCP41": {
+    "severity": "僅判等級",
+    "description": "偏光板材料因環境造成不良"
+  },
+  "PCPB1": {
+    "severity": "輕缺",
+    "description": "上偏光板氣泡"
+  },
+  "PCPB2": {
+    "severity": "輕缺",
+    "description": "下偏光板氣泡"
+  },
+  "PCPC1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "偏光板誤配"
+  },
+  "PCPC2": {
+    "severity": "重缺",
+    "description": "上偏光板纖維異物"
+  },
+  "PCPC3": {
+    "severity": "重缺",
+    "description": "下偏光板纖維異物"
+  },
+  "PCPC9": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上偏光板膠殘留"
+  },
+  "PCPCA": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "下偏光板膠殘留"
+  },
+  "PCPCD": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上SPV異物"
+  },
+  "PCPCE": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "下SPV異物"
+  },
+  "PCPCF": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上偏光板玻璃屑"
+  },
+  "PCPCG": {
+    "severity": "僅判等級",
+    "description": "下偏光板玻璃屑"
+  },
+  "PCPCL": {
+    "severity": "重缺",
+    "description": "上偏光板無矢印"
+  },
+  "PCPCN": {
+    "severity": "輕缺",
+    "description": "偏光板凹陷"
+  },
+  "PCPCO": {
+    "severity": "重缺",
+    "description": "偏光板凸起"
+  },
+  "PCPCR": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上偏光板崩邊"
+  },
+  "PCPF1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "偏光板保護膜撕除面積超規"
+  },
+  "PCPF2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "偏光板保護膜未撕除"
+  },
+  "PCPFB": {
+    "severity": "輕缺",
+    "description": "偏光板保護膜氣泡"
+  },
+  "PCPFD": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "偏光板保護膜髒污"
+  },
+  "PCPL1": {
+    "severity": "重缺",
+    "description": "上偏光板氣泡線"
+  },
+  "PCPL2": {
+    "severity": "重缺",
+    "description": "下偏光板氣泡線"
+  },
+  "PCPO1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上偏光板偏移"
+  },
+  "PCPO2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "下偏光板偏移"
+  },
+  "PCPP1": {
+    "severity": "輕缺",
+    "description": "上偏光板異物"
+  },
+  "PCPP2": {
+    "severity": "輕缺",
+    "description": "下偏光板異物"
+  },
+  "PCPS1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上偏光板刮傷"
+  },
+  "PCPS2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "下偏光板刮傷"
+  },
+  "PCPS3": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "偏光板斜紋"
+  },
+  "PCS01": {
+    "severity": "僅判等級",
+    "description": "Cell內刮傷"
+  },
+  "PCS02": {
+    "severity": "僅判等級",
+    "description": "Array表面刮傷"
+  },
+  "PCS03": {
+    "severity": "僅判等級",
+    "description": "CF表面刮傷"
+  },
+  "PCSI1": {
+    "severity": "輕缺",
+    "description": "TP/CG油墨面汙"
+  },
+  "PCST1": {
+    "severity": "輕缺",
+    "description": "TP/CG表面刺傷"
+  },
+  "PCT24": {
+    "severity": "輕缺",
+    "description": "Mylar褶皺"
+  },
+  "PCT25": {
+    "severity": "輕缺",
+    "description": "Mylar破損"
+  },
+  "PCT27": {
+    "severity": "輕缺",
+    "description": "Mylar浮起"
+  },
+  "PCT28": {
+    "severity": "輕缺",
+    "description": "Mylar貼付不良"
+  },
+  "PCT29": {
+    "severity": "輕缺",
+    "description": "Mylar上騎偏光片"
+  },
+  "PCT30": {
+    "severity": "輕缺",
+    "description": "Mylar與上偏間隙過大"
+  },
+  "PCTA0": {
+    "severity": "輕缺",
+    "description": "防爆膜其他不良"
+  },
+  "PCTA1": {
+    "severity": "輕缺",
+    "description": "防爆膜貼附異物"
+  },
+  "PCTA2": {
+    "severity": "輕缺",
+    "description": "防爆膜貼附氣泡"
+  },
+  "PCTA3": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "防爆膜表面刮傷"
+  },
+  "PCTAC": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "防爆膜異色"
+  },
+  "PCTAD": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "防爆膜凹點"
+  },
+  "PCTAL": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "防爆膜脫膠"
+  },
+  "PCTAM": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "防爆膜原材不良"
+  },
+  "PCTAP": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "防爆膜凸點"
+  },
+  "PCTAR": {
+    "severity": "重缺",
+    "description": "防爆膜來料髒污"
+  },
+  "PCTAS": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "防爆膜貼附偏移"
+  },
+  "PCTC1": {
+    "severity": "輕缺",
+    "description": "Tape不良"
+  },
+  "PCU10": {
+    "severity": "輕缺",
+    "description": "BL白點"
+  },
+  "PCU11": {
+    "severity": "輕缺",
+    "description": "BL刮傷"
+  },
+  "PCU12": {
+    "severity": "輕缺",
+    "description": "BL異物"
+  },
+  "PCU13": {
+    "severity": "僅判等級",
+    "description": "牛頓環"
+  },
+  "PCU14": {
+    "severity": "輕缺",
+    "description": "BL背板刮傷"
+  },
+  "PCU16": {
+    "severity": "輕缺",
+    "description": "BL汙"
+  },
+  "PCU18": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "水波紋"
+  },
+  "PCU1A": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL按壓白點"
+  },
+  "PCU36": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "欠LGP Pattern"
+  },
+  "PCU50": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL來料不良"
+  },
+  "PCU56": {
+    "severity": "輕缺",
+    "description": "Hot Spot缺陷"
+  },
+  "PCUC1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL LED調光NG"
+  },
+  "PCUC2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL Waving"
+  },
+  "PCUC3": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL Pooling"
+  },
+  "PCUC4": {
+    "severity": "輕缺",
+    "description": "BL暗影"
+  },
+  "PCUC5": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "CCFL線材不良"
+  },
+  "PCUC6": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Spacer貼付不良"
+  },
+  "PCUC8": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "CCFL卡勾斷"
+  },
+  "PCUC9": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL內部調光NG"
+  },
+  "PCUCA": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL外部調光NG"
+  },
+  "PCUCB": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "腳架氧化生鏽"
+  },
+  "PCUCC": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "P-Cover變形"
+  },
+  "PCUCD": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "單顆LED水舞不良"
+  },
+  "PCUCE": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "串式LED水舞不良"
+  },
+  "PCUCF": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "CB嵌合不良"
+  },
+  "PCUCG": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "燈罩變形"
+  },
+  "PCUCH": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "角落暗影"
+  },
+  "PCUCI": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "P-Cover嵌合不良"
+  },
+  "PCUCJ": {
+    "severity": "輕缺",
+    "description": "CCFL/LED接頭不良"
+  },
+  "PCUCK": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "燈管夾架不良"
+  },
+  "PCUCR": {
+    "severity": "輕缺",
+    "description": "BL小耳朵變形"
+  },
+  "PCUGX": {
+    "severity": "輕缺",
+    "description": "光學異常"
+  },
+  "PCUH4": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BL周邊白線"
+  },
+  "PCV00": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "鐵框生鏽"
+  },
+  "PCV01": {
+    "severity": "輕缺",
+    "description": "鐵框變形"
+  },
+  "PCV03": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "鐵框毛邊/碎削"
+  },
+  "PCV07": {
+    "severity": "重缺",
+    "description": "螺絲孔不良"
+  },
+  "PCV12": {
+    "severity": "重缺",
+    "description": "缺螺絲"
+  },
+  "PCV20": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上蓋/前框髒污"
+  },
+  "PCV21": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "下蓋/後蓋髒污"
+  },
+  "PCV22": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "腳架雜質髒污"
+  },
+  "PCV23": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上蓋/前框噴漆不良"
+  },
+  "PCV24": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "下蓋/後蓋噴漆不良"
+  },
+  "PCV25": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "腳架噴漆不良"
+  },
+  "PCV26": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上蓋/前框掉漆"
+  },
+  "PCV27": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "背板/後蓋掉漆"
+  },
+  "PCV28": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "腳架掉漆"
+  },
+  "PCV29": {
+    "severity": "輕缺",
+    "description": "Logo印刷不良"
+  },
+  "PCV30": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "結合線不良"
+  },
+  "PCV31": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "注入影不良"
+  },
+  "PCV32": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "散熱孔不良"
+  },
+  "PCV33": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上蓋/前框咬花不良"
+  },
+  "PCV34": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "下蓋/後蓋咬花不良"
+  },
+  "PCV35": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "腳架咬花不良"
+  },
+  "PCV36": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "腳架轉動不良"
+  },
+  "PCV37": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "外觀結構傾斜"
+  },
+  "PCV38": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "按鍵功能不良"
+  },
+  "PCV39": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "按鍵外觀不良"
+  },
+  "PCV40": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "聲音不良-雜音"
+  },
+  "PCV41": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "聲音不良-無聲"
+  },
+  "PCV42": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "No Signal不顯示"
+  },
+  "PCV43": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "啟動不良"
+  },
+  "PCV44": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "敲擊斷電"
+  },
+  "PCV45": {
+    "severity": "重缺",
+    "description": "消耗功率不良"
+  },
+  "PCV46": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "LED其它不良"
+  },
+  "PCV47": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "訊號源無輸入"
+  },
+  "PCV48": {
+    "severity": "重缺",
+    "description": "外接插座不良"
+  },
+  "PCV49": {
+    "severity": "重缺",
+    "description": "EDID無法燒錄"
+  },
+  "PCV50": {
+    "severity": "重缺",
+    "description": "遙控器無法感應"
+  },
+  "PCV51": {
+    "severity": "輕缺",
+    "description": "自動Auto NG"
+  },
+  "PCV52": {
+    "severity": "僅判等級",
+    "description": "OSD亮度無法調整"
+  },
+  "PCV53": {
+    "severity": "重缺",
+    "description": "Inverter功能不良"
+  },
+  "PCV54": {
+    "severity": "重缺",
+    "description": "Fluke畫面異常"
+  },
+  "PCV55": {
+    "severity": "重缺",
+    "description": "視訊功能不良"
+  },
+  "PCV56": {
+    "severity": "重缺",
+    "description": "開機異音"
+  },
+  "PCV57": {
+    "severity": "重缺",
+    "description": "錄音功能不良"
+  },
+  "PCV58": {
+    "severity": "僅判等級",
+    "description": "BL動態功能不良"
+  },
+  "PCV60": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "下蓋/後蓋刮傷"
+  },
+  "PCV61": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上蓋/前框刮傷"
+  },
+  "PCV62": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "C面刮傷"
+  },
+  "PCV63": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "支架刮傷"
+  },
+  "PCV64": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "底座刮傷"
+  },
+  "PCV65": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "塑件內緣缺角"
+  },
+  "PCV66": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上下蓋崁合不良"
+  },
+  "PCV67": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "上下蓋間隙不良"
+  },
+  "PCV68": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "腳架背蓋間隙不良"
+  },
+  "PCV69": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "顯示區四周間隙不良"
+  },
+  "PCV70": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "鐵框彎角不良"
+  },
+  "PCV71": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "鐵框夾異物"
+  },
+  "PCV72": {
+    "severity": "輕缺",
+    "description": "鐵框漏光"
+  },
+  "PCV73": {
+    "severity": "輕缺",
+    "description": "組立異物"
+  },
+  "PCV74": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "表示中心點偏移"
+  },
+  "PCV75": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "BIOS版本錯誤"
+  },
+  "PCV76": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "其他組裝不良"
+  },
+  "PCV77": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Tuner/B組裝不良"
+  },
+  "PCV78": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "序號比對NG"
+  },
+  "PCV79": {
+    "severity": "輕缺",
+    "description": "鐵框嵌合不良"
+  },
+  "PCV80": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "鐵框夾點燈線"
+  },
+  "PCV81": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "背面/後蓋其他外觀不良"
+  },
+  "PCV82": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "正面/前蓋其他外觀不良"
+  },
+  "PCV83": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Hinge外觀不良"
+  },
+  "PCV84": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "天線外觀不良"
+  },
+  "PCV85": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "CCD外觀不良"
+  },
+  "PCV86": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "CCD分位版本錯誤"
+  },
+  "PCV87": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "CCD偏移"
+  },
+  "PCV88": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "CCD小孔漏光"
+  },
+  "PCV89": {
+    "severity": "輕缺",
+    "description": "AA區不良"
+  },
+  "PCV91": {
+    "severity": "輕缺",
+    "description": "鐵框掉漆"
+  },
+  "PCV92": {
+    "severity": "輕缺",
+    "description": "上蓋/前框保護膜破損"
+  },
+  "PCV93": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "嵌合不良"
+  },
+  "PCV96": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Heatsink來料不良"
+  },
+  "PCV98": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "裝飾條來料不良"
+  },
+  "PCV99": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "蓋板來料不良"
+  },
+  "PCVA1": {
+    "severity": "輕缺",
+    "description": "模組厚度超規"
+  },
+  "PCVA2": {
+    "severity": "輕缺",
+    "description": "模組平整度超規"
+  },
+  "PCVA4": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "Chrome Trim刮傷"
+  },
+  "PCVC1": {
+    "severity": "輕缺",
+    "description": "螺絲鎖付不良"
+  },
+  "PCVZG": {
+    "severity": "重缺",
+    "description": "銀膠塗布不良"
+  },
+  "PCVZH": {
+    "severity": "重缺",
+    "description": "滾輪髒污"
+  },
+  "PCVZJ": {
+    "severity": "重缺",
+    "description": "Lead端殘膠"
+  },
+  "PCW02": {
+    "severity": "重缺",
+    "description": "S-IC對位不良"
+  },
+  "PCW03": {
+    "severity": "重缺",
+    "description": "S-IC壓痕不良"
+  },
+  "PCW07": {
+    "severity": "重缺",
+    "description": "G-IC對位不良"
+  },
+  "PCW08": {
+    "severity": "重缺",
+    "description": "G-IC壓痕不良"
+  },
+  "PCW10": {
+    "severity": "重缺",
+    "description": "S-IC壓著異物"
+  },
+  "PCW11": {
+    "severity": "重缺",
+    "description": "G-IC壓著異物"
+  },
+  "PCW17": {
+    "severity": "重缺",
+    "description": "S-IC脫落"
+  },
+  "PCW18": {
+    "severity": "重缺",
+    "description": "G-IC脫落"
+  },
+  "PCWC1": {
+    "severity": "重缺",
+    "description": "S-IC ACF貼付不良"
+  },
+  "PCWC2": {
+    "severity": "重缺",
+    "description": "G-IC ACF貼付不良"
+  },
+  "PCWC3": {
+    "severity": "重缺",
+    "description": "G-IC外觀不良"
+  },
+  "PCWC4": {
+    "severity": "重缺",
+    "description": "S-IC破"
+  },
+  "PCWC5": {
+    "severity": "重缺",
+    "description": "G-IC破"
+  },
+  "PCWC6": {
+    "severity": "重缺",
+    "description": "IC壓著氣泡"
+  },
+  "PCWC7": {
+    "severity": "重缺",
+    "description": "IC Bump刮傷"
+  },
+  "PCWC8": {
+    "severity": "重缺",
+    "description": "S-IC外觀不良"
+  },
+  "PCX01": {
+    "severity": "重缺",
+    "description": "FPC對位不良"
+  },
+  "PCX02": {
+    "severity": "重缺",
+    "description": "FPC壓痕不良"
+  },
+  "PCX03": {
+    "severity": "重缺",
+    "description": "FPC壓著氣泡"
+  },
+  "PCX04": {
+    "severity": "重缺",
+    "description": "FPCA壓著異物"
+  },
+  "PCX05": {
+    "severity": "重缺",
+    "description": "FPC外觀不良"
+  },
+  "PCX10": {
+    "severity": "重缺",
+    "description": "FPC對位孔破損"
+  },
+  "PCX11": {
+    "severity": "輕缺",
+    "description": "FPC/FPCA折傷"
+  },
+  "PCX12": {
+    "severity": "輕缺",
+    "description": "FPC/FPCA髒汙"
+  },
+  "PCX13": {
+    "severity": "重缺",
+    "description": "FPC壓著異物"
+  },
+  "PCXC1": {
+    "severity": "重缺",
+    "description": "S-OLB ACF貼付不良"
+  },
+  "PCXC2": {
+    "severity": "重缺",
+    "description": "G-OLBACF貼付不良"
+  },
+  "PCXC5": {
+    "severity": "重缺",
+    "description": "無FPC"
+  },
+  "PCYC1": {
+    "severity": "重缺",
+    "description": "S-PCB壓痕不良"
+  },
+  "PCYC2": {
+    "severity": "重缺",
+    "description": "G-PCB壓痕不良"
+  },
+  "PCYC4": {
+    "severity": "重缺",
+    "description": "G-PCB對位不良"
+  },
+  "PCYC5": {
+    "severity": "重缺",
+    "description": "S-PCB ACF貼付不良"
+  },
+  "PCYC6": {
+    "severity": "重缺",
+    "description": "G-PCB ACF貼付不良"
+  },
+  "PCYC7": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "PCB外觀不良"
+  },
+  "PCYC8": {
+    "severity": "重缺",
+    "description": "PCB壓著異物"
+  },
+  "PCZ00": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "其他不良"
+  },
+  "PCZ02": {
+    "severity": "輕缺",
+    "description": "TP/CG其他不良"
+  },
+  "PCZ03": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "TP 異物"
+  },
+  "PCZ07": {
+    "severity": "重缺",
+    "description": "混料"
+  },
+  "PCZ08": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "注入口漏光"
+  },
+  "PCZ13": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "T-FPC翹曲"
+  },
+  "PCZ15": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "T-FPC對位不良"
+  },
+  "PCZ17": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "T-FPC 殘膠"
+  },
+  "PCZ1H": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "雷射修補失敗"
+  },
+  "PCZ29": {
+    "severity": "輕缺",
+    "description": "少料"
+  },
+  "PCZ30": {
+    "severity": "輕缺",
+    "description": "多料"
+  },
+  "PCZ32": {
+    "severity": "重缺",
+    "description": "T-FPC ACF 貼附不良"
+  },
+  "PCZ35": {
+    "severity": "重缺",
+    "description": "T-FPC 刮傷"
+  },
+  "PCZ39": {
+    "severity": "重缺",
+    "description": "T-FPC 破裂"
+  },
+  "PCZ43": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "品保領出報廢"
+  },
+  "PCZ44": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "生管/物管領出報廢"
+  },
+  "PCZ45": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "工程領出報廢"
+  },
+  "PCZ46": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "ORT領出報廢"
+  },
+  "PCZ51": {
+    "severity": "重缺",
+    "description": "來料破片"
+  },
+  "PCZ52": {
+    "severity": "重缺",
+    "description": "前廠解析拆片"
+  },
+  "PCZ53": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "IC Tape上騎"
+  },
+  "PCZ54": {
+    "severity": "重缺",
+    "description": "輝度NG（上限）"
+  },
+  "PCZ55": {
+    "severity": "僅判等級",
+    "description": "RW超3次"
+  },
+  "PCZ56": {
+    "severity": "重缺",
+    "description": "輝度NG（下限）"
+  },
+  "PCZ57": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "畫面抖動"
+  },
+  "PCZ58": {
+    "severity": "輕缺",
+    "description": "背膠塗佈不均"
+  },
+  "PCZ59": {
+    "severity": "僅判等級",
+    "description": "液晶極化"
+  },
+  "PCZ60": {
+    "severity": "重缺",
+    "description": "cell翹曲"
+  },
+  "PCZ61": {
+    "severity": "重缺",
+    "description": "RW責PCBA不良"
+  },
+  "PCZ62": {
+    "severity": "輕缺",
+    "description": "均齊度NG"
+  },
+  "PCZ63": {
+    "severity": "輕缺",
+    "description": "調機片報廢"
+  },
+  "PCZ64": {
+    "severity": "重缺",
+    "description": "客戶買斷機種"
+  },
+  "PCZ65": {
+    "severity": "輕缺",
+    "description": "偏光板壓痕"
+  },
+  "PCZ66": {
+    "severity": "輕缺",
+    "description": "FA試修code"
+  },
+  "PCZ67": {
+    "severity": "輕缺",
+    "description": "暗態漏光"
+  },
+  "PCZ68": {
+    "severity": "輕缺",
+    "description": "下偏光板燙傷"
+  },
+  "PCZ69": {
+    "severity": "輕缺",
+    "description": "膠帶漏光"
+  },
+  "PCZ70": {
+    "severity": "重缺",
+    "description": "BL 泛藍"
+  },
+  "PCZ71": {
+    "severity": "輕缺",
+    "description": "BL水汽"
+  },
+  "PCZ72": {
+    "severity": "輕缺",
+    "description": "調機/不良後留品"
+  },
+  "PCZ73": {
+    "severity": "輕缺",
+    "description": "PCBA黃銅髒污"
+  },
+  "PCZ74": {
+    "severity": "重缺",
+    "description": "背膠塗佈不均"
+  },
+  "PCZ75": {
+    "severity": "輕缺",
+    "description": "背板髒污"
+  },
+  "PCZ90": {
+    "severity": "輕缺",
+    "description": "3D切換不良"
+  },
+  "PCZ91": {
+    "severity": "輕缺",
+    "description": "3D功能不良"
+  },
+  "PCZC1": {
+    "severity": "輕缺",
+    "description": "閃爍異常"
+  },
+  "PCZC5": {
+    "severity": "輕缺",
+    "description": "標籤不良"
+  },
+  "PCZC6": {
+    "severity": "輕缺",
+    "description": "搖晃異音"
+  },
+  "PCZC7": {
+    "severity": "輕缺",
+    "description": "玻璃其他不良"
+  },
+  "PCZC8": {
+    "severity": "輕缺",
+    "description": "關機殘影"
+  },
+  "PCZC9": {
+    "severity": "輕缺",
+    "description": "Line Shape"
+  },
+  "PCZCD": {
+    "severity": "輕缺",
+    "description": "亮度異常"
+  },
+  "PCZCE": {
+    "severity": "輕缺",
+    "description": "Flicker功能不良"
+  },
+  "PCZCF": {
+    "severity": "輕缺",
+    "description": "切換畫異"
+  },
+  "PCZCG": {
+    "severity": "輕缺",
+    "description": "光阻劑殘留"
+  },
+  "PCZCN": {
+    "severity": "輕缺",
+    "description": "殘像(IR)"
+  },
+  "PCZCQ": {
+    "severity": "輕缺",
+    "description": "二維條碼不良"
+  },
+  "PCZCR": {
+    "severity": "輕缺",
+    "description": "週邊線顯示異常"
+  },
+  "PCZCS": {
+    "severity": "輕缺",
+    "description": "保護蓋不良"
+  },
+  "PCZCT": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "模組拆成單玻"
+  },
+  "PCZCU": {
+    "severity": "輕缺",
+    "description": "挑片/刷條碼"
+  },
+  "PCZD8": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "料號/版本不同"
+  },
+  "PCZD9": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "等級判定錯誤"
+  },
+  "PCZE2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "紙箱破損"
+  },
+  "PCZE4": {
+    "severity": "僅判等級",
+    "description": "工程實驗降等"
+  },
+  "PCZFG": {
+    "severity": "僅判等級",
+    "description": "LCD帶Flag限等"
+  },
+  "PCZK1": {
+    "severity": "輕缺",
+    "description": "殘影(IS)"
+  },
+  "PCZK2": {
+    "severity": "重缺",
+    "description": "框膠剝離"
+  },
+  "PCZK3": {
+    "severity": "重缺",
+    "description": "框膠異常"
+  },
+  "PCZK4": {
+    "severity": "輕缺",
+    "description": "水平串擾"
+  },
+  "PCZK5": {
+    "severity": "重缺",
+    "description": "垂直串擾"
+  },
+  "PCZK7": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "EDID錯誤"
+  },
+  "PCZKB": {
+    "severity": "重缺",
+    "description": "封口膠不良"
+  },
+  "PCZKP": {
+    "severity": "輕缺",
+    "description": "色度異常"
+  },
+  "PCZZ1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "限度樣品領出報廢"
+  },
+  "PCZZF": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "RSB NG"
+  },
+  "PEE01": {
+    "severity": "輕缺",
+    "description": "Vcom異常"
+  },
+  "PETC1": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "OCA貼附氣泡"
+  },
+  "PETC2": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "OCA貼附異物"
+  },
+  "PETC4": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "OCA貼附偏移"
+  },
+  "PETCR": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "OCA拉膠不良"
+  },
+  "PETCZ": {
+    "severity": "OQC輕缺MFG重缺",
+    "description": "OCA其它不良"
+  }
+}

@@ -529,6 +529,16 @@
         font-size: 0.85rem;
     }
 
+    .inf-date-bar input[type="text"].mes-panel-id-input {
+        width: 180px;
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 0.85rem;
+    }
+
     .inf-date-bar .search-btn {
         padding: 6px 16px;
         border-radius: 6px;
@@ -712,6 +722,21 @@
     .mes-table .result-over { color: #f59e0b; font-weight: 700; }
     .mes-table .result-miss { color: #ef4444; font-weight: 700; }
     .mes-table .result-correct { color: #22c55e; font-weight: 700; }
+
+    .mes-table td.mes-defect-cell {
+        min-width: 320px;
+        white-space: normal;
+    }
+
+    .mes-defect-item + .mes-defect-item {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px dashed var(--border);
+    }
+
+    .mes-defect-code { color: var(--accent); font-weight: 700; }
+    .mes-defect-meta { margin-top: 2px; color: var(--text-muted); font-size: 0.85em; }
+    .mes-defect-unmapped { color: #f59e0b; font-weight: 700; }
 
     .mes-detail-btn {
         padding: 5px 10px;
@@ -1538,6 +1563,11 @@
         <input type="date" id="mes_startDate">
         <span style="color:var(--text-muted);">~</span>
         <input type="date" id="mes_endDate">
+        <span style="color:var(--text-muted); font-size:0.88rem; margin-left:4px;">PANEL ID：</span>
+        <input type="text" id="mes_panelId" class="mes-panel-id-input"
+               placeholder="PANEL ID（完整或部分）"
+               aria-label="PANEL ID"
+               onkeydown="if(event.key === 'Enter') mesReportTab.customFilter()">
         <button class="search-btn" onclick="mesReportTab.customFilter()">查詢</button>
         <span style="margin-left:16px; display:inline-flex; align-items:center; gap:6px;">
             <label class="omit-toggle" title="排除 AOI 判定為 OK 的資料">
@@ -3908,6 +3938,10 @@
             })[ch]);
         }
 
+        function _panelId() {
+            return document.getElementById('mes_panelId').value.trim();
+        }
+
         function quickFilter(range) {
             document.querySelectorAll('.mes-date-bar .quick-btn').forEach(
                 button => button.classList.toggle('active', button.dataset.range === range)
@@ -3915,18 +3949,19 @@
             const dates = _getDateRange(range);
             document.getElementById('mes_startDate').value = dates.start;
             document.getElementById('mes_endDate').value = dates.end;
-            loadData(dates.start, dates.end);
+            loadData(dates.start, dates.end, _panelId());
         }
 
         function customFilter() {
             document.querySelectorAll('.mes-date-bar .quick-btn').forEach(button => button.classList.remove('active'));
             loadData(
                 document.getElementById('mes_startDate').value,
-                document.getElementById('mes_endDate').value
+                document.getElementById('mes_endDate').value,
+                _panelId()
             );
         }
 
-        async function loadData(start, end) {
+        async function loadData(start, end, panelId = _panelId()) {
             const loading = document.getElementById('mes_loading');
             const status = document.getElementById('mes_status');
             loading.style.display = 'block';
@@ -3946,6 +3981,7 @@
                 const params = new URLSearchParams();
                 if (start) params.set('start_date', start);
                 if (end) params.set('end_date', end);
+                if (panelId) params.set('panel_id', panelId);
                 if (_ignoreAoiOk) params.set('ignore_aoi_ok', '1');
                 const response = await fetch('/api/ric/mes-comparison?' + params.toString());
                 const data = await response.json();
@@ -3953,7 +3989,8 @@
                 _loaded = true;
                 const elapsedSeconds = ((Date.now() - waitStartedAt) / 1000).toFixed(1);
                 const aoiFilterText = data.ignore_aoi_ok ? '｜篩選：已忽略 AOI=OK' : '';
-                status.textContent = `資料來源：${data.source}｜耗時：${elapsedSeconds} 秒${aoiFilterText}｜規則：${data.rule}`;
+                const panelFilterText = data.panel_id ? `｜PANEL ID：${data.panel_id}` : '';
+                status.textContent = `資料來源：${data.source}｜耗時：${elapsedSeconds} 秒${panelFilterText}${aoiFilterText}｜規則：${data.rule}`;
                 render(data);
             } catch (error) {
                 status.textContent = '載入失敗：' + error.message;
@@ -4018,7 +4055,8 @@
             document.getElementById('mes_ignoreAoiOkBadge').style.display = checked ? 'inline' : 'none';
             loadData(
                 document.getElementById('mes_startDate').value,
-                document.getElementById('mes_endDate').value
+                document.getElementById('mes_endDate').value,
+                _panelId()
             );
         }
 
@@ -4034,6 +4072,22 @@
         function qualifyingDefects(row) {
             if (Array.isArray(row.qualifying_defects)) return row.qualifying_defects;
             return row.first_defect ? [row.first_defect] : [];
+        }
+
+        function defectCatalogText(item) {
+            const parts = [item.severity, item.description]
+                .map(value => String(value || '').trim())
+                .filter(Boolean);
+            return parts.length ? parts.join('｜') : '未建檔';
+        }
+
+        function defectHtml(item) {
+            const mapped = Boolean(String(item.severity || '').trim() || String(item.description || '').trim());
+            const catalogClass = mapped ? '' : ' class="mes-defect-unmapped"';
+            return `<div class="mes-defect-item">
+                <div><span class="mes-defect-code">${_esc(item.dfct_code)}</span>｜<span${catalogClass}>${_esc(defectCatalogText(item))}</span></div>
+                <div class="mes-defect-meta">${_esc(item.trans_date)}｜(${_esc(item.x_axis)}, ${_esc(item.y_axis)})</div>
+            </div>`;
         }
 
         function renderDetails() {
@@ -4058,7 +4112,7 @@
                     }[row.comparison] || [resultLabel(row.comparison), ''];
                     const defects = qualifyingDefects(row);
                     const defect = defects.length
-                        ? defects.map(item => `${_esc(item.dfct_code)}｜${_esc(item.trans_date)}｜(${_esc(item.x_axis)}, ${_esc(item.y_axis)})`).join('<br>')
+                        ? defects.map(defectHtml).join('')
                         : '-';
                     const recordId = Number(row.id);
                     const detailButton = row.id != null && Number.isInteger(recordId)
@@ -4071,7 +4125,7 @@
                         <td><span class="badge ${row.ai_judgment === 'NG' ? 'badge-ng' : row.ai_judgment === 'OK' ? 'badge-ok' : 'badge-err'}">${_esc(row.ai_raw_judgment || '-')}</span></td>
                         <td><span class="badge ${row.mes_judgment === 'NG' ? 'badge-ng' : 'badge-ok'}">${_esc(row.mes_judgment || '-')}</span></td>
                         <td class="${result[1]}">${result[0]}</td>
-                        <td>${defect}</td>
+                        <td class="mes-defect-cell">${defect}</td>
                         <td>${detailButton}</td>
                     </tr>`;
                 }).join('');
@@ -4164,7 +4218,7 @@
             const lines = [headers.map(csvCell).join(',')];
             rows.forEach(row => {
                 const defect = qualifyingDefects(row)
-                    .map(item => `${item.dfct_code || ''}｜${item.trans_date || ''}｜(${item.x_axis ?? ''}, ${item.y_axis ?? ''})`)
+                    .map(item => `${item.dfct_code || ''}｜${defectCatalogText(item)}｜${item.trans_date || ''}｜(${item.x_axis ?? ''}, ${item.y_axis ?? ''})`)
                     .join('\n');
                 lines.push([
                     row.request_time,
