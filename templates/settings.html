@@ -1962,6 +1962,11 @@
         'patchcore_filter_enabled', 'patchcore_blur_sigma', 'patchcore_min_area', 'patchcore_score_metric',
         'mark_exclusion_padding_px', 'mark_exclusion_soft_decay_px', 'no_detect_soft_decay_min_weight'
     ];
+    const INFERENCE_IMAGE_PARAMS = [
+        'inference_rotate_180_enabled',
+        'dust_pixel_grid_filter_enabled',
+        'dust_pixel_grid_blur_kernel'
+    ];
     const SCRATCH_CLASSIFIER_PARAMS = [
         'scratch_classifier_enabled',
         'scratch_safety_multiplier',
@@ -1971,7 +1976,7 @@
     ];
     const DUST_PARAMS = [
         'dust_brightness_threshold', 'dust_area_min', 'dust_area_max',
-        'dust_extension', 'dust_pixel_grid_filter_enabled', 'dust_pixel_grid_blur_kernel',
+        'dust_extension',
         'dust_heatmap_iou_threshold', 'dust_heatmap_top_percent',
         'dust_heatmap_metric', 'dust_mask_before_binarize',
         'dust_two_stage_enabled', 'dust_two_stage_dust_ratio', 'dust_two_stage_bg_blur',
@@ -1981,7 +1986,7 @@
     // Sub-groups within DUST tab
     const DUST_OMIT_PARAMS = [
         'dust_brightness_threshold', 'dust_area_min', 'dust_area_max',
-        'dust_extension', 'dust_pixel_grid_filter_enabled', 'dust_pixel_grid_blur_kernel',
+        'dust_extension',
         'dust_detect_dark_particles', 'dust_detect_bubbles_enabled'
     ];
     const DUST_HEATMAP_PARAMS = [
@@ -2481,6 +2486,7 @@
 
     function renderSettings() {
         const grid = document.getElementById('settings-grid');
+        const inferenceImageParams = INFERENCE_IMAGE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const patchcoreParams = PATCHCORE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const scratchParams = SCRATCH_CLASSIFIER_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const dustParams = DUST_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
@@ -2524,10 +2530,10 @@
         };
 
         const pixelGridFilterEnabled = readBool(
-            dustParams.find(p => p.param_name === 'dust_pixel_grid_filter_enabled')
+            inferenceImageParams.find(p => p.param_name === 'dust_pixel_grid_filter_enabled')
         );
         if (!pixelGridFilterEnabled) {
-            const reason = 'dust_pixel_grid_filter_enabled=false 時不執行 1366x768 OMIT 像素紋理平滑';
+            const reason = 'dust_pixel_grid_filter_enabled=false 時不執行 OMIT 像素紋理平滑';
             paramLockMap['dust_pixel_grid_blur_kernel'] = reason;
         }
 
@@ -2593,7 +2599,7 @@
         const cvDustFilterInfoByFusion = aoiCoordEnabled && inspectorVal === 'fusion';
         const cvDustFilterInfoReason = 'fusion 下此開關對 fusion 產出的 aoi_edge defect 不生效（已由 fusion 內部統一處理）；四邊 (left/right/top/bottom) 檢測仍受此開關影響';
         const visibleTabs = [
-            patchcoreParams.length > 0 ? 'patchcore' : null,
+            inferenceImageParams.length > 0 || patchcoreParams.length > 0 ? 'patchcore' : null,
             scratchParams.length > 0 ? 'scratch-classifier' : null,
             'dust',
             'cv-edge',
@@ -2611,7 +2617,7 @@
 
         const tabsContainer = document.getElementById('settings-tabs-container');
         tabsContainer.innerHTML = `
-            ${patchcoreParams.length > 0 ? `<button class="settings-tab-btn ${currentTab === 'patchcore' ? 'active' : ''}" data-target="patchcore" onclick="switchTab('patchcore')">🔍 PatchCore</button>` : ''}
+            ${inferenceImageParams.length > 0 || patchcoreParams.length > 0 ? `<button class="settings-tab-btn ${currentTab === 'patchcore' ? 'active' : ''}" data-target="patchcore" onclick="switchTab('patchcore')">🔍 推論設定</button>` : ''}
             ${scratchParams.length > 0 ? `<button class="settings-tab-btn ${currentTab === 'scratch-classifier' ? 'active' : ''}" data-target="scratch-classifier" onclick="switchTab('scratch-classifier')">🧪 刮痕分類器</button>` : ''}
             <button class="settings-tab-btn ${currentTab === 'dust' ? 'active' : ''}" data-target="dust" onclick="switchTab('dust')">🧹 灰塵偵測</button>
             <button class="settings-tab-btn ${currentTab === 'cv-edge' ? 'active' : ''}" data-target="cv-edge" onclick="switchTab('cv-edge')">📐 CV 邊緣檢測</button>
@@ -2625,15 +2631,27 @@
         `;
 
         grid.innerHTML = `
-            ${patchcoreParams.length > 0 ? `
+            ${inferenceImageParams.length > 0 || patchcoreParams.length > 0 ? `
             <div id="pane-patchcore" class="settings-tab-pane ${currentTab === 'patchcore' ? 'active' : ''}">
+                ${inferenceImageParams.length > 0 ? `
+                <div class="settings-section" style="border-left: 3px solid #38bdf8; margin-bottom: 16px;">
+                    <div class="settings-section-header" style="background: rgba(56, 189, 248, 0.1); border-bottom: 1px solid rgba(56, 189, 248, 0.2);">
+                        <div class="icon" style="background: rgba(56, 189, 248, 0.2); color: #7dd3fc;">🔄</div>
+                        <span style="color: #7dd3fc; font-weight: 600;">輸入影像處理</span>
+                    </div>
+                    ${inferenceImageParams.map(p => paramRow(p)).join('')}
+                    <div style="padding: 10px 16px; color: #94a3b8; font-size: 0.78rem; line-height: 1.6;">
+                        推論影像旋轉開啟後，正式推論、AOI／OMIT／MARK／CV、規格內判定、Debug 工具與推論結果原圖皆使用旋轉 180° 後的方向；像素紋理平滑開啟後，所有產品解析度的 OMIT 灰塵分析都會套用 Gaussian 平滑。硬碟原始檔不會被修改。
+                    </div>
+                </div>` : ''}
+                ${patchcoreParams.length > 0 ? `
                 <div class="settings-section section-patchcore" style="border-left: 3px solid #8b5cf6;">
                     <div class="settings-section-header" style="background: rgba(139, 92, 246, 0.1); border-bottom: 1px solid rgba(139, 92, 246, 0.2);">
                         <div class="icon" style="background: rgba(139, 92, 246, 0.2); color: #c4b5fd;">🔍</div>
                         <span style="color: #c4b5fd; font-weight: 600;">PatchCore 前處理過濾(針對無現象過檢實驗)</span>
                     </div>
                     ${patchcoreParams.map(p => paramRow(p)).join('')}
-                </div>
+                </div>` : ''}
             </div>` : ''}
             ${scratchParams.length > 0 ? `
             <div id="pane-scratch-classifier" class="settings-tab-pane ${currentTab === 'scratch-classifier' ? 'active' : ''}">
@@ -3629,7 +3647,7 @@
         'dust_area_min': '灰塵顆粒最小面積 (px)',
         'dust_area_max': '灰塵顆粒最大面積 (px)',
         'dust_extension': '灰塵區域膨脹像素',
-        'dust_pixel_grid_filter_enabled': '啟用 1366×768 產品 OMIT 像素紋理平滑',
+        'dust_pixel_grid_filter_enabled': '啟用 OMIT 像素紋理平滑（所有產品解析度）',
         'dust_pixel_grid_blur_kernel': 'Gaussian Blur 核大小 (px，必須為奇數，建議 7)',
         'dust_detect_dark_particles': '偵測暗色顆粒 (如偏黑 MARK)',
         'dust_detect_bubbles_enabled': '偵測低對比氣泡/大片暗斑',
@@ -3651,6 +3669,7 @@
         'mark_exclusion_soft_decay_px': 'MARK 硬遮罩外圈 heatmap 降權寬度 (px)',
         'cv_edge_exclude_soft_decay_px': '手動不檢測區外圈 heatmap 降權寬度 (px)',
         'no_detect_soft_decay_min_weight': '不檢測區 soft decay 邊界最低權重 (0~1)',
+        'inference_rotate_180_enabled': '推論影像旋轉 180°',
         // Image abnormal precheck
         'image_abnormal_detection_enabled': '啟用畫異預檢',
         'image_abnormal_standard_mean_lower': 'STANDARD 產品區平均亮度下限',

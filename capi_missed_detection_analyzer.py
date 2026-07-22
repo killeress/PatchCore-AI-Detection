@@ -429,7 +429,7 @@ def analyze_panel(
             continue
 
         try:
-            image = cv2.imread(str(result.image_path), cv2.IMREAD_UNCHANGED)
+            image = inferencer._read_detection_image(result.image_path)
             if image is None:
                 continue
             vis = image.copy()

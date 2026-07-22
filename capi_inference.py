@@ -41,7 +41,7 @@ import torch
 import logging
 import re
 from capi_image_naming import AOI_REPORT_PREFIXES, canonical_image_prefix, panel_image_group_key
-from capi_image_orientation import read_detection_image, requires_detection_rotation
+from capi_image_orientation import read_detection_image
 
 # ── 舊版 anomalib 相容性修補 ─────────────────────────────
 # 修補 1: PrecisionType stub
@@ -377,9 +377,8 @@ class CAPIInferencer:
         """
         self.config = config
         self.base_dir = base_dir or Path(__file__).parent
-        self._rotate_detection_images_180 = requires_detection_rotation()
         if self._rotate_detection_images_180:
-            logger.info("Detection input rotation enabled: hostname=capi13 angle=180")
+            logger.info("Detection input rotation enabled: config=inference_rotate_180_enabled angle=180")
         self.mark_template = None
         self.model_path = Path(model_path) if model_path else None
         self.threshold = threshold
@@ -603,6 +602,11 @@ class CAPIInferencer:
             flags,
             rotate_180=getattr(self, "_rotate_detection_images_180", False),
         )
+
+    @property
+    def _rotate_detection_images_180(self) -> bool:
+        """Return the live runtime setting so settings hot-reload takes effect."""
+        return bool(getattr(self.config, "inference_rotate_180_enabled", False))
 
     @staticmethod
     def _is_mark_binary_source(filename: str) -> bool:
@@ -2548,18 +2552,9 @@ class CAPIInferencer:
         return vis
 
     
-    def _use_omit_pixel_grid_filter(
-        self,
-        product_resolution: Optional[Tuple[int, int]] = None,
-    ) -> bool:
-        """Enable the opt-in pixel-grid filter only for 1366x768 products."""
-        if not getattr(self.config, "dust_pixel_grid_filter_enabled", False):
-            return False
-        resolution = product_resolution or self._product_resolution()
-        try:
-            return (int(resolution[0]), int(resolution[1])) == (1366, 768)
-        except (TypeError, ValueError, IndexError):
-            return False
+    def _use_omit_pixel_grid_filter(self) -> bool:
+        """Return whether opt-in OMIT pixel-grid smoothing is enabled."""
+        return bool(getattr(self.config, "dust_pixel_grid_filter_enabled", False))
 
     def check_dust_or_scratch_feature(
         self,
@@ -2580,7 +2575,7 @@ class CAPIInferencer:
         Args:
             image: OMIT 圖片裁切區域 (BGR 或灰階)
             extension_override: 覆寫 Config 中的 dust_extension 設定
-            product_resolution: 產品解析度；1366x768 且設定開啟時抑制產品像素紋理
+            product_resolution: 保留呼叫相容性；像素紋理平滑不再依產品解析度限制
             
         Returns:
             (is_dust, dust_mask, bright_ratio, detail_text)
@@ -2604,9 +2599,9 @@ class CAPIInferencer:
         else:
             gray = image.copy()
 
-        # 1366x768 產品的一個顯示 pixel 約佔 5x6 camera pixels。先在 CLAHE
-        # 放大局部對比前做週期紋理平滑，避免產品像素格被誤當成灰塵/刮痕。
-        pixel_grid_filter_active = self._use_omit_pixel_grid_filter(product_resolution)
+        # 開關啟用時，先在 CLAHE 放大局部對比前做週期紋理平滑，
+        # 避免產品像素格被誤當成灰塵/刮痕；不限制產品解析度。
+        pixel_grid_filter_active = self._use_omit_pixel_grid_filter()
         pixel_grid_blur_kernel = 0
         if pixel_grid_filter_active:
             requested_kernel = max(
@@ -2854,7 +2849,9 @@ class CAPIInferencer:
         ref_area = gray.size if reference_area is None else max(1, int(reference_area))
         close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
         open_kernel_bubble = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        bubble_min_area = max(area_min * 20, int(ref_area * 0.002))
+        # Smaller bright regions belong to the particle detector; promoting them to
+        # bubbles would convex-hull fill the background around the actual white dust.
+        bubble_min_area = max(area_min * 20, int(ref_area * 0.003))
         bubble_max_area = min(area_max, int(ref_area * 0.08))
         bubble_fill_max_area = min(
             area_max,
@@ -2925,7 +2922,8 @@ class CAPIInferencer:
                         continue
 
                     component_mask = b_labels == i
-                    if float(np.mean(delta[component_mask])) < mean_threshold:
+                    component_mean_delta = float(np.mean(delta[component_mask]))
+                    if component_mean_delta < mean_threshold:
                         continue
 
                     component_u8 = component_mask.astype(np.uint8) * 255
@@ -2936,6 +2934,24 @@ class CAPIInferencer:
                     )
                     bubble_mask = np.zeros_like(component_u8)
                     if contours:
+                        outline = max(contours, key=cv2.contourArea)
+                        outline_perimeter = float(cv2.arcLength(outline, True))
+                        outline_circularity = (
+                            4.0 * np.pi * float(cv2.contourArea(outline))
+                            / max(1.0, outline_perimeter * outline_perimeter)
+                        )
+                        # The relaxed striped-surface branch can connect weak background
+                        # texture into an irregular blob that its convex hull then overfills.
+                        # Keep strong broken-ring bubbles and compact elongated surface
+                        # bubbles, but reject weak non-round background blobs.
+                        weak_irregular_blob = (
+                            component_mean_delta < 3.0
+                            and outline_circularity < 0.40
+                        )
+                        compact_elongated_bubble = b_aspect >= 2.0 and b_fill_ratio >= 0.40
+                        if weak_irregular_blob and not compact_elongated_bubble:
+                            continue
+
                         contour_points = np.vstack(contours)
                         if len(contour_points) >= 3:
                             hull = cv2.convexHull(contour_points)

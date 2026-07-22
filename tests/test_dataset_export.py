@@ -497,6 +497,48 @@ def test_exporter_run_end_to_end(tmp_path):
     assert summary.labels.get("over_edge_false_positive") == 2
 
 
+def test_exporter_crops_from_rotated_inference_orientation(tmp_path):
+    """匯出時應沿用推論方向，讓 tile 座標裁到同一塊內容。"""
+    import cv2
+
+    source_path = tmp_path / "G0F00000.tif"
+    image = np.full((512, 1024, 3), 10, dtype=np.uint8)
+    image[:, 512:] = 240
+    assert cv2.imwrite(str(source_path), image)
+
+    candidate = SampleCandidate(
+        sample_id="sid",
+        source_type="patchcore_tile",
+        glass_id="GLS123",
+        image_name=source_path.name,
+        image_path=str(source_path),
+        inference_record_id=1,
+        image_result_id=2,
+        tile_idx=0,
+        edge_defect_id=None,
+        prefix="G0F00000",
+        label="over_other",
+        tile_x=0,
+        tile_y=0,
+        tile_w=512,
+        tile_h=512,
+    )
+    job_dir = tmp_path / "job"
+    exporter = DatasetExporter(
+        FakeDB([], {}),
+        base_dir=str(tmp_path / "out"),
+        path_mapping={},
+        rotate_180=True,
+    )
+
+    row = exporter._process_candidate(candidate, source_path, job_dir)
+    crop = cv2.imread(str(job_dir / row["crop_path"]), cv2.IMREAD_UNCHANGED)
+
+    assert row["status"] == "ok"
+    assert crop is not None
+    assert np.all(crop == 240)
+
+
 def test_exporter_run_preclassifies_true_ng_white_spot(tmp_path):
     """RIC=NG 的 true_ng crop 若有明顯白點，輸出到 true_white_spot label。"""
     import cv2

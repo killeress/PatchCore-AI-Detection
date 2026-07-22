@@ -25,6 +25,7 @@ from typing import Dict, Optional
 
 import cv2
 import numpy as np
+from capi_image_orientation import read_detection_image
 
 from capi_dataset_export import (
     CROP_SIZE,
@@ -65,6 +66,7 @@ def export_misrescue_samples(
     path_mapping: Optional[Dict[str, str]] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    rotate_180: bool = False,
 ) -> dict:
     """執行一次增量匯出。回傳 summary dict。
 
@@ -73,6 +75,7 @@ def export_misrescue_samples(
         base_dir: 資料集根目錄（下方自動建 timestamped job 目錄）
         path_mapping: UNC → 本地掛載點映射（server config 的 path_mapping）
         start_date / end_date: 可選時段篩選（ISO YYYY-MM-DD）
+        rotate_180: 是否先將來源影像旋轉 180°，以對齊推論座標
 
     Returns:
         {
@@ -130,7 +133,7 @@ def export_misrescue_samples(
             last_src = src_key
         img = image_cache.get(src_key)
         if img is None:
-            img = cv2.imread(src_key, cv2.IMREAD_UNCHANGED)
+            img = read_detection_image(src_path, cv2.IMREAD_UNCHANGED, rotate_180)
             if img is None:
                 _mark_fail(row, rows, sid, stats, "missing_source")
                 continue

@@ -2538,6 +2538,7 @@ class CAPIServer:
                 parsed.get("model_id", ""),
                 visual_output_dir=visual_dir,
                 visual_url_prefix=visual_prefix,
+                rotate_180=bool(getattr(inferencer, "_rotate_detection_images_180", False)),
             )
             suggestion = eval_result.get("suggestion")
             panel_totals = eval_result.get("panel_totals") or []

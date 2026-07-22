@@ -149,6 +149,29 @@ def test_within_spec_suggestion_rejects_counts_over_limits(tmp_path):
     assert suggestion is None
 
 
+def test_within_spec_suggestion_rotates_source_before_using_inference_tile_coordinates(tmp_path):
+    image_path = tmp_path / "W0F00000.png"
+    image = np.full((96, 192, 3), 128, dtype=np.uint8)
+    cv2.circle(image, (144, 48), 3, (60, 60, 60), -1)
+    assert cv2.imwrite(str(image_path), image)
+
+    unrotated = _evaluate_within_spec_suggestion_detail(
+        _detail(image_path),
+        _rules(),
+        rotate_180=False,
+    )
+    rotated = _evaluate_within_spec_suggestion_detail(
+        _detail(image_path),
+        _rules(),
+        rotate_180=True,
+    )
+
+    assert unrotated["suggestion"] is None
+    assert rotated["suggestion"] is not None
+    assert rotated["panel_summary"]["total_dot_count"] == 1
+    assert rotated["parameter_snapshot"]["input_rotation_degrees"] == 180
+
+
 def test_within_spec_suggestion_uses_model_rule_before_default(tmp_path):
     image_path = tmp_path / "W0F00000.png"
     _write_black_dot_image(image_path, [(48, 48)])

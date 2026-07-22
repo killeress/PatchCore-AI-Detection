@@ -283,7 +283,7 @@ def run_single_inference(
         omit_file = find_omit_image(image_path)
     
     if omit_file and omit_file.exists():
-        omit_image = cv2.imread(str(omit_file), cv2.IMREAD_UNCHANGED)
+        omit_image = inferencer._read_detection_image(omit_file)
         if omit_image is not None:
             print(f"✅ OMIT/PINIGBI 圖片已載入: {omit_file.name}")
             # 過曝檢查

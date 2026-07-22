@@ -171,9 +171,10 @@ def test_process_panel_v2_passes_requested_product_resolution_to_preprocess(tmp_
     assert captured["product_resolution"] == (1366, 768)
 
 
-def test_process_panel_v2_passes_capi13_rotation_to_preprocess(tmp_path, monkeypatch):
+def test_process_panel_v2_passes_configured_rotation_to_preprocess(tmp_path, monkeypatch):
     _write_grey_panel_image(tmp_path, "G0F00000")
     cfg = _make_config(tmp_path)
+    cfg.inference_rotate_180_enabled = True
     captured = {}
 
     def fake_preprocess_panel_folder(
@@ -185,7 +186,6 @@ def test_process_panel_v2_passes_capi13_rotation_to_preprocess(tmp_path, monkeyp
         captured["rotate_180"] = pre_cfg.rotate_180
         return {}
 
-    monkeypatch.setattr("capi_inference.requires_detection_rotation", lambda: True)
     monkeypatch.setattr("capi_preprocess.preprocess_panel_folder", fake_preprocess_panel_folder)
 
     from capi_inference import CAPIInferencer

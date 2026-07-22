@@ -182,6 +182,53 @@ class TestSettingsUsers:
 
 
 class TestConfigParamDefaults:
+    def test_inference_rotation_parameter_defaults_off(self, tmp_path):
+        db = _make_db(tmp_path)
+
+        db.init_config_from_yaml(CAPIConfig())
+
+        param = db.get_config_param("inference_rotate_180_enabled")
+        assert param is not None
+        assert param["param_type"] == "bool"
+        assert param["decoded_value"] is False
+
+    def test_pixel_grid_descriptions_drop_resolution_restriction(self, tmp_path):
+        db = _make_db(tmp_path)
+        with _conn(db) as conn:
+            conn.execute(
+                """INSERT INTO config_params
+                   (param_name, param_value, param_type, description)
+                   VALUES (?, ?, ?, ?)""",
+                (
+                    "dust_pixel_grid_filter_enabled",
+                    "true",
+                    "bool",
+                    "啟用 1366x768 產品 OMIT 像素紋理平滑",
+                ),
+            )
+            conn.execute(
+                """INSERT INTO config_params
+                   (param_name, param_value, param_type, description)
+                   VALUES (?, ?, ?, ?)""",
+                (
+                    "dust_pixel_grid_blur_kernel",
+                    "9",
+                    "int",
+                    "1366x768 OMIT Gaussian 核大小",
+                ),
+            )
+            conn.commit()
+
+        db.init_config_from_yaml(CAPIConfig())
+
+        param = db.get_config_param("dust_pixel_grid_filter_enabled")
+        kernel_param = db.get_config_param("dust_pixel_grid_blur_kernel")
+        assert param["decoded_value"] is True
+        assert "所有產品解析度" in param["description"]
+        assert "1366" not in param["description"]
+        assert kernel_param["decoded_value"] == 9
+        assert "1366" not in kernel_param["description"]
+
     def test_image_abnormal_threshold_migration_preserves_manual_values(self, tmp_path):
         db = _make_db(tmp_path)
         with _conn(db) as conn:

@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 from capi_image_naming import canonical_image_prefix
+from capi_image_orientation import read_detection_image
 
 logger = logging.getLogger(__name__)
 
@@ -598,10 +599,17 @@ class JobSummary:
 class DatasetExporter:
     """過檢訓練資料集蒐集器（pure logic，不含 HTTP）"""
 
-    def __init__(self, db, base_dir: str, path_mapping: Dict[str, str]):
+    def __init__(
+        self,
+        db,
+        base_dir: str,
+        path_mapping: Dict[str, str],
+        rotate_180: bool = False,
+    ):
         self.db = db
         self.base_dir = Path(base_dir).resolve()
         self.path_mapping = path_mapping
+        self.rotate_180 = bool(rotate_180)
 
     def collect_candidates(self, days: int, include_true_ng: bool) -> List[SampleCandidate]:
         """便利包裝：只回傳 candidates，忽略診斷統計。"""
@@ -939,7 +947,7 @@ class DatasetExporter:
             logger.warning("Source not found: %s (sample_id=%s)", source_path, cand.sample_id)
             return row
 
-        img = cv2.imread(str(source_path), cv2.IMREAD_UNCHANGED)
+        img = read_detection_image(source_path, cv2.IMREAD_UNCHANGED, self.rotate_180)
         if img is None:
             row["status"] = "skipped_no_source"
             return row
