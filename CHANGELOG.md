@@ -1,5 +1,28 @@
 # 更新紀錄
 
+## 2026-07-22 v5
+
+### [Bug fixed]AOI 缺陷中心分區
+
+- 推論與訓練統一依缺陷／Tile 中心到 Panel polygon 的距離判定 INNER／EDGE，避免 tile 外框造成誤分區。
+
+## 2026-07-22 v4
+
+### [Bug fixed]MOD1 MES 完整數據
+
+- 修正 MOD1 因 `WP_DEFTHIS` 欄位差異導致「查看 MES 完整數據」失敗的問題，改依資料庫實際欄位顯示。
+
+### [新增功能]模型資料夾自動同步模型庫
+
+- 模型庫會掃描模型根目錄，提醒尚未同步的完整 bundle。
+- 可讀取 `manifest.json` 同步模型資訊到模型庫；同步後仍需手動啟用並重啟服務。
+
+## 2026-07-22 v3
+
+### [Bug fixed]MOD1 Report數據比對
+
+- 修正 MOD1 查詢 MES `WP_DEFTHIS` 的資料表來源，改用 `MCRDA1`；MOD2 維持使用 `MERDA1`。
+
 ## 2026-07-22 v2
 
 ### [新增功能]Report數據比對 PANEL ID 篩選
