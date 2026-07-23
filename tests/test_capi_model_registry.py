@@ -28,6 +28,68 @@ def test_list_bundles_grouped(tmp_path):
     assert len(grouped["GN160"]) == 1
 
 
+def test_discover_and_sync_bundle_from_model_root(tmp_path):
+    import json
+    import yaml as yaml_mod
+    from capi_database import CAPIDatabase
+    from capi_model_registry import discover_model_bundles, sync_discovered_bundles
+
+    server_config = tmp_path / "server_config.yaml"
+    server_config.write_text(yaml_mod.dump({"training": {"output_root": "model"}}))
+    bundle = tmp_path / "model" / "GN156HRAA2L0S-20260529_155800"
+    bundle.mkdir(parents=True)
+    (bundle / "G0F00000-inner.pt").write_bytes(b"inner")
+    (bundle / "G0F00000-edge.pt").write_bytes(b"edge")
+    (bundle / "manifest.json").write_text(json.dumps({
+        "machine_id": "GN156HRAA2L0S",
+        "trained_at": "2026-05-29T08:14:32",
+        "trained_with_job_id": "train_GN156HRAA2L0S_1",
+        "panel_count": 8,
+        "tiles_per_unit": {
+            "G0F00000-inner": {"train": 10, "ng": 2},
+            "G0F00000-edge": {"train": 5, "ng": 3},
+        },
+    }), encoding="utf-8")
+    (bundle / "thresholds.json").write_text("{}", encoding="utf-8")
+    old_root = "/old/capi_ai/model/GN156HRAA2L0S-20260529_155800"
+    (bundle / "machine_config.yaml").write_text(yaml_mod.dump({
+        "machine_id": "GN156HRAA2L0S",
+        "model_mapping": {
+            "G0F00000": {
+                "inner": f"{old_root}/G0F00000-inner.pt",
+                "edge": f"{old_root}/G0F00000-edge.pt",
+            },
+        },
+    }), encoding="utf-8")
+
+    db = CAPIDatabase(tmp_path / "test.db")
+    discovery = discover_model_bundles(db, server_config)
+
+    assert discovery["model_root"] == str((tmp_path / "model").resolve())
+    assert len(discovery["bundles"]) == 1
+    assert len(discovery["bundles"][0]["path_mismatches"]) == 2
+
+    result = sync_discovered_bundles(db, server_config)
+    assert len(result["imported"]) == 1
+    assert result["imported"][0]["path_rewritten"] is True
+
+    rows = db.list_model_bundles()
+    assert len(rows) == 1
+    assert rows[0]["machine_id"] == "GN156HRAA2L0S"
+    assert rows[0]["panel_count"] == 8
+    assert rows[0]["inner_tile_count"] == 10
+    assert rows[0]["edge_tile_count"] == 5
+    assert rows[0]["ng_tile_count"] == 5
+    assert rows[0]["is_active"] == 0
+    assert "訓練資料未同步" in rows[0]["notes"]
+
+    repaired = yaml_mod.safe_load((bundle / "machine_config.yaml").read_text(encoding="utf-8"))
+    assert repaired["model_mapping"]["G0F00000"]["inner"] == str(
+        (bundle / "G0F00000-inner.pt").resolve()
+    )
+    assert discover_model_bundles(db, server_config)["bundles"] == []
+
+
 def test_get_bundle_detail_exposes_per_panel_training_modes(tmp_path, monkeypatch):
     import capi_model_registry as registry
 
