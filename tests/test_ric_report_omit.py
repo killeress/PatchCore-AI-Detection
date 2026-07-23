@@ -149,6 +149,96 @@ def test_inference_stats_date_filter_is_end_date_inclusive(tmp_path):
     assert [row["total"] for row in stats["daily_trend"]] == [2, 1]
 
 
+def test_search_records_uses_factory_day_window(tmp_path):
+    db = CAPIDatabase(str(tmp_path / "search_factory_day.db"))
+    _save_record(db, "BEFORE", tile_is_dust=0, request_time="2026-05-20T07:29:59")
+    _save_record(db, "START", tile_is_dust=0, request_time="2026-05-20T07:30:00")
+    _save_record(db, "MIDNIGHT", tile_is_dust=0, request_time="2026-05-21T00:00:00")
+    _save_record(db, "LAST", tile_is_dust=0, request_time="2026-05-22T07:29:59")
+    _save_record(db, "END", tile_is_dust=0, request_time="2026-05-22T07:30:00")
+
+    rows, total = db.search_records(
+        start_date="2026-05-20",
+        end_date="2026-05-21",
+        limit=100,
+    )
+
+    assert total == 3
+    assert {row["glass_id"] for row in rows} == {"START", "MIDNIGHT", "LAST"}
+
+    quick_rows, quick_total = db.search_records(
+        start_date="2026-05-20",
+        end_date="2026-05-21",
+        cross_filter="ng_ok",
+        limit=100,
+    )
+
+    assert quick_total == 3
+    assert {row["glass_id"] for row in quick_rows} == {"START", "MIDNIGHT", "LAST"}
+
+
+def test_search_page_passes_date_only_to_factory_day_filter():
+    class SearchDB:
+        def __init__(self):
+            self.kwargs = None
+
+        def search_records(self, **kwargs):
+            self.kwargs = kwargs
+            return [], 0
+
+    class Template:
+        def render(self, **_kwargs):
+            return ""
+
+    class JinjaEnv:
+        def get_template(self, _name):
+            return Template()
+
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = SearchDB()
+    handler.jinja_env = JinjaEnv()
+    handler._send_response = lambda _status, _body: None
+
+    handler._handle_search(
+        {
+            "start_date": ["2026-05-20"],
+            "end_date": ["2026-05-21"],
+            "cross_filter": ["ng_ok"],
+        },
+        "/search",
+    )
+
+    assert handler.db.kwargs["start_date"] == "2026-05-20"
+    assert handler.db.kwargs["end_date"] == "2026-05-21"
+
+
+def test_search_export_passes_date_only_to_factory_day_filter():
+    import io
+
+    class SearchDB:
+        def __init__(self):
+            self.kwargs = None
+
+        def search_records(self, **kwargs):
+            self.kwargs = kwargs
+            return [], 0
+
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = SearchDB()
+    handler.send_response = lambda _status: None
+    handler.send_header = lambda _name, _value: None
+    handler.end_headers = lambda: None
+    handler.wfile = io.BytesIO()
+
+    handler._handle_search_export({
+        "start_date": ["2026-05-20"],
+        "end_date": ["2026-05-21"],
+    })
+
+    assert handler.db.kwargs["start_date"] == "2026-05-20"
+    assert handler.db.kwargs["end_date"] == "2026-05-21"
+
+
 def test_inference_stats_separates_hy_and_groups_error_code_suffixes(tmp_path):
     db = CAPIDatabase(str(tmp_path / "ric_inference_stats_errors.db"))
     _save_record(db, "HY0", tile_is_dust=0, ai_judgment="ERR:HY:W0F00000")

@@ -307,6 +307,71 @@ class CAPIDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_over_review_client ON over_review(client_record_id);
 
+                -- MES Report comparison manual review.
+                -- Deliberately no FK to inference_records: reviewed evidence must survive
+                -- inference/tile retention cleanup.
+                CREATE TABLE IF NOT EXISTS mes_comparison_review (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    inference_record_id INTEGER NOT NULL UNIQUE,
+                    glass_id TEXT NOT NULL,
+                    model_id TEXT DEFAULT '',
+                    machine_no TEXT DEFAULT '',
+                    request_time TEXT DEFAULT '',
+                    ai_judgment TEXT DEFAULT '',
+                    mes_judgment TEXT DEFAULT '',
+                    review_type TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    note TEXT DEFAULT '',
+                    reviewer TEXT DEFAULT '',
+                    confirmed_ng INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_mes_review_type
+                    ON mes_comparison_review(review_type, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_mes_review_machine
+                    ON mes_comparison_review(machine_no, model_id, updated_at DESC);
+
+                -- Human-confirmed NG samples selected from AOI-coordinate tiles.
+                -- Source IDs are snapshots only (no FK) so the validation DB remains
+                -- usable after tile_results/image_results are cleaned.
+                CREATE TABLE IF NOT EXISTS ng_validation_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    review_id INTEGER NOT NULL,
+                    inference_record_id INTEGER NOT NULL,
+                    tile_result_id INTEGER NOT NULL,
+                    image_result_id INTEGER NOT NULL,
+                    glass_id TEXT NOT NULL,
+                    model_id TEXT DEFAULT '',
+                    machine_no TEXT DEFAULT '',
+                    request_time TEXT DEFAULT '',
+                    image_name TEXT NOT NULL,
+                    source_image_path TEXT DEFAULT '',
+                    lighting TEXT NOT NULL,
+                    zone TEXT DEFAULT '',
+                    aoi_defect_code TEXT DEFAULT '',
+                    aoi_product_x INTEGER DEFAULT -1,
+                    aoi_product_y INTEGER DEFAULT -1,
+                    aoi_image_x INTEGER DEFAULT -1,
+                    aoi_image_y INTEGER DEFAULT -1,
+                    tile_x INTEGER DEFAULT 0,
+                    tile_y INTEGER DEFAULT 0,
+                    tile_w INTEGER DEFAULT 0,
+                    tile_h INTEGER DEFAULT 0,
+                    ai_score REAL DEFAULT 0.0,
+                    crop_path TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'confirmed',
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    UNIQUE(review_id, tile_result_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_ng_validation_status
+                    ON ng_validation_samples(status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_ng_validation_unit
+                    ON ng_validation_samples(model_id, lighting, zone, status);
+                CREATE INDEX IF NOT EXISTS idx_ng_validation_review
+                    ON ng_validation_samples(review_id, status);
+
                 -- Over-retrain pool (過檢 tile 重訓候選池)
                 CREATE TABLE IF NOT EXISTS over_retrain_pool (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1337,21 +1402,13 @@ class CAPIDatabase:
             conditions.append("ai_judgment LIKE ?")
             params.append(f"%{ai_judgment}%")
 
-        if cross_filter:
-            # 使用 request_time 與 get_inference_stats 一致，確保數字對得上
-            if start_date:
-                conditions.append("datetime(request_time) >= datetime(?)")
-                params.append(_factory_day_start_ts(start_date))
-            if end_date:
-                conditions.append("datetime(request_time) < datetime(?)")
-                params.append(_factory_day_end_ts(end_date))
-        else:
-            if start_date:
-                conditions.append("created_at >= ?")
-                params.append(start_date)
-            if end_date:
-                conditions.append("created_at <= ?")
-                params.append(end_date)
+        # 使用 request_time 與 RIC Report 一致，日期代表 07:30 起算的工廠生產日
+        if start_date:
+            conditions.append("datetime(request_time) >= datetime(?)")
+            params.append(_factory_day_start_ts(start_date))
+        if end_date:
+            conditions.append("datetime(request_time) < datetime(?)")
+            params.append(_factory_day_end_ts(end_date))
 
         where_clause = " AND ".join(conditions) if conditions else "1=1"
 
@@ -2118,6 +2175,21 @@ class CAPIDatabase:
 
     VALID_MISS_CATEGORIES = {'dust_misfilter', 'threshold_high', 'ai_miss_within_spec', 'within_spec_misjudge', 'ric_misjudge', 'outside_aoi_area', 'data_error_actually_ok', 'other'}
     VALID_OVER_CATEGORIES = {'edge_false_positive', 'within_spec', 'overexposure', 'surface_scratch', 'surface_dirt', 'bubble', 'aoi_ai_false_positive', 'dust_mask_incomplete', 'other'}
+    VALID_MES_REVIEW_CATEGORIES = {
+        "over_detection": {
+            "edge_false_positive", "within_spec", "overexposure",
+            "surface_scratch", "surface_dirt", "bubble",
+            "dust_mask_incomplete", "mes_not_registered", "actual_ng", "other",
+        },
+        "miss_detection": {
+            "score_below_threshold", "low_contrast", "dust_misfilter",
+            "not_visible_in_image", "outside_aoi_area",
+            "image_issue", "mes_misjudge", "other",
+        },
+        "true_ng": {
+            "confirmed_ng", "aoi_point_mismatch", "image_issue", "uncertain",
+        },
+    }
 
     def _save_review(self, table: str, valid_categories: set, client_record_id: int, category: str, note: str = '') -> int:
         """儲存或更新 Review (UPSERT by client_record_id)"""
@@ -3175,6 +3247,444 @@ class CAPIDatabase:
                 (record_id,),
             ).fetchone()
             return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_mes_review_aoi_candidates(
+        self,
+        inference_record_id: int,
+        tile_result_id: Optional[int] = None,
+    ) -> List[Dict]:
+        """取得一筆 Report 比對紀錄下，由 AOI 座標產生的候選 tile。"""
+        conditions = ["ir.id = ?", "t.is_aoi_coord = 1"]
+        params: List[Any] = [int(inference_record_id)]
+        if tile_result_id is not None:
+            conditions.append("t.id = ?")
+            params.append(int(tile_result_id))
+
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"""SELECT
+                        ir.id AS inference_record_id,
+                        ir.glass_id, ir.model_id, ir.machine_no,
+                        ir.machine_judgment, ir.ai_judgment,
+                        ir.request_time, ir.aoi_machine_coords,
+                        im.id AS image_result_id,
+                        im.image_path, im.image_name,
+                        im.image_width, im.image_height,
+                        im.is_ng AS image_is_ng,
+                        im.is_bomb AS image_is_bomb,
+                        t.id AS tile_result_id, t.tile_id,
+                        t.x AS tile_x, t.y AS tile_y,
+                        t.width AS tile_w, t.height AS tile_h,
+                        t.score AS ai_score, t.is_anomaly,
+                        t.is_dust, t.is_bomb, t.is_exclude_zone,
+                        t.peak_x, t.peak_y, t.zone,
+                        t.aoi_defect_code,
+                        t.aoi_product_x, t.aoi_product_y,
+                        t.aoi_image_x, t.aoi_image_y,
+                        EXISTS (
+                            SELECT 1
+                              FROM ng_validation_samples s
+                              JOIN mes_comparison_review mr ON mr.id = s.review_id
+                             WHERE mr.inference_record_id = ir.id
+                               AND s.tile_result_id = t.id
+                               AND s.status = 'confirmed'
+                        ) AS is_selected
+                    FROM tile_results t
+                    JOIN image_results im ON im.id = t.image_result_id
+                    JOIN inference_records ir ON ir.id = im.record_id
+                    WHERE {" AND ".join(conditions)}
+                    ORDER BY
+                        t.aoi_product_y, t.aoi_product_x,
+                        im.id, t.score DESC, t.id""",
+                params,
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_mes_review_aoi_candidate(self, tile_result_id: int) -> Optional[Dict]:
+        conn = self._get_conn()
+        try:
+            owner = conn.execute(
+                """SELECT im.record_id
+                     FROM tile_results t
+                     JOIN image_results im ON im.id = t.image_result_id
+                    WHERE t.id = ? AND t.is_aoi_coord = 1""",
+                (int(tile_result_id),),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not owner:
+            return None
+        rows = self.get_mes_review_aoi_candidates(
+            int(owner["record_id"]),
+            tile_result_id=int(tile_result_id),
+        )
+        return rows[0] if rows else None
+
+    def get_mes_comparison_reviews(
+        self,
+        inference_record_ids: Optional[List[int]] = None,
+    ) -> List[Dict]:
+        """取得 Report 比對人工 Review，附目前有效 NG 樣本數。"""
+        normalized_ids = sorted({
+            int(value) for value in (inference_record_ids or [])
+            if value is not None
+        })
+        conn = self._get_conn()
+        try:
+            def _fetch(where_sql: str = "", params: Optional[List[Any]] = None):
+                return conn.execute(
+                    f"""SELECT r.*,
+                               (SELECT COUNT(*)
+                                  FROM ng_validation_samples s
+                                 WHERE s.review_id = r.id
+                                   AND s.status = 'confirmed') AS ng_sample_count
+                          FROM mes_comparison_review r
+                          {where_sql}
+                          ORDER BY r.updated_at DESC, r.id DESC""",
+                    params or [],
+                ).fetchall()
+
+            if not normalized_ids:
+                rows = _fetch()
+            else:
+                rows = []
+                for offset in range(0, len(normalized_ids), 800):
+                    chunk = normalized_ids[offset:offset + 800]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows.extend(_fetch(
+                        f"WHERE r.inference_record_id IN ({placeholders})",
+                        chunk,
+                    ))
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_mes_comparison_review(self, inference_record_id: int) -> Optional[Dict]:
+        rows = self.get_mes_comparison_reviews([int(inference_record_id)])
+        return rows[0] if rows else None
+
+    def save_mes_comparison_review(
+        self,
+        *,
+        inference_record_id: int,
+        glass_id: str,
+        model_id: str,
+        machine_no: str,
+        request_time: str,
+        ai_judgment: str,
+        mes_judgment: str,
+        review_type: str,
+        category: str,
+        note: str = "",
+        reviewer: str = "",
+        confirmed_ng: bool = False,
+        samples: Optional[List[Dict]] = None,
+    ) -> Dict:
+        """UPSERT 人工 Review，並同步該 Review 選取的 NG 驗證樣本。"""
+        review_type = str(review_type or "").strip()
+        category = str(category or "").strip()
+        valid_categories = self.VALID_MES_REVIEW_CATEGORIES.get(review_type)
+        if valid_categories is None:
+            raise ValueError(f"Invalid review type: {review_type}")
+        if category not in valid_categories:
+            raise ValueError(f"Invalid category for {review_type}: {category}")
+
+        sample_rows = list(samples or [])
+        if confirmed_ng and not sample_rows:
+            raise ValueError("confirmed_ng requires at least one AOI sample")
+        if not confirmed_ng:
+            sample_rows = []
+
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    """INSERT INTO mes_comparison_review
+                       (inference_record_id, glass_id, model_id, machine_no,
+                        request_time, ai_judgment, mes_judgment,
+                        review_type, category, note, reviewer, confirmed_ng)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(inference_record_id)
+                       DO UPDATE SET
+                           glass_id = excluded.glass_id,
+                           model_id = excluded.model_id,
+                           machine_no = excluded.machine_no,
+                           request_time = excluded.request_time,
+                           ai_judgment = excluded.ai_judgment,
+                           mes_judgment = excluded.mes_judgment,
+                           review_type = excluded.review_type,
+                           category = excluded.category,
+                           note = excluded.note,
+                           reviewer = excluded.reviewer,
+                           confirmed_ng = excluded.confirmed_ng,
+                           updated_at = datetime('now', 'localtime')""",
+                    (
+                        int(inference_record_id),
+                        str(glass_id or ""),
+                        str(model_id or ""),
+                        str(machine_no or ""),
+                        str(request_time or ""),
+                        str(ai_judgment or ""),
+                        str(mes_judgment or ""),
+                        review_type,
+                        category,
+                        str(note or ""),
+                        str(reviewer or ""),
+                        int(bool(confirmed_ng)),
+                    ),
+                )
+                review_id = conn.execute(
+                    """SELECT id FROM mes_comparison_review
+                       WHERE inference_record_id = ?""",
+                    (int(inference_record_id),),
+                ).fetchone()["id"]
+
+                conn.execute(
+                    """UPDATE ng_validation_samples
+                       SET status = 'removed',
+                           updated_at = datetime('now', 'localtime')
+                       WHERE review_id = ?""",
+                    (review_id,),
+                )
+
+                for sample in sample_rows:
+                    conn.execute(
+                        """INSERT INTO ng_validation_samples
+                           (review_id, inference_record_id, tile_result_id,
+                            image_result_id, glass_id, model_id, machine_no,
+                            request_time, image_name, source_image_path,
+                            lighting, zone, aoi_defect_code,
+                            aoi_product_x, aoi_product_y,
+                            aoi_image_x, aoi_image_y,
+                            tile_x, tile_y, tile_w, tile_h,
+                            ai_score, crop_path, status)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                   ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed')
+                           ON CONFLICT(review_id, tile_result_id)
+                           DO UPDATE SET
+                               image_result_id = excluded.image_result_id,
+                               glass_id = excluded.glass_id,
+                               model_id = excluded.model_id,
+                               machine_no = excluded.machine_no,
+                               request_time = excluded.request_time,
+                               image_name = excluded.image_name,
+                               source_image_path = excluded.source_image_path,
+                               lighting = excluded.lighting,
+                               zone = excluded.zone,
+                               aoi_defect_code = excluded.aoi_defect_code,
+                               aoi_product_x = excluded.aoi_product_x,
+                               aoi_product_y = excluded.aoi_product_y,
+                               aoi_image_x = excluded.aoi_image_x,
+                               aoi_image_y = excluded.aoi_image_y,
+                               tile_x = excluded.tile_x,
+                               tile_y = excluded.tile_y,
+                               tile_w = excluded.tile_w,
+                               tile_h = excluded.tile_h,
+                               ai_score = excluded.ai_score,
+                               crop_path = excluded.crop_path,
+                               status = 'confirmed',
+                               updated_at = datetime('now', 'localtime')""",
+                        (
+                            review_id,
+                            int(inference_record_id),
+                            int(sample["tile_result_id"]),
+                            int(sample["image_result_id"]),
+                            str(glass_id or ""),
+                            str(model_id or ""),
+                            str(machine_no or ""),
+                            str(request_time or ""),
+                            str(sample.get("image_name") or ""),
+                            str(sample.get("source_image_path") or ""),
+                            str(sample.get("lighting") or ""),
+                            str(sample.get("zone") or ""),
+                            str(sample.get("aoi_defect_code") or ""),
+                            int(sample.get("aoi_product_x", -1)),
+                            int(sample.get("aoi_product_y", -1)),
+                            int(sample.get("aoi_image_x", -1)),
+                            int(sample.get("aoi_image_y", -1)),
+                            int(sample.get("tile_x", 0)),
+                            int(sample.get("tile_y", 0)),
+                            int(sample.get("tile_w", 0)),
+                            int(sample.get("tile_h", 0)),
+                            float(sample.get("ai_score", 0.0)),
+                            str(sample.get("crop_path") or ""),
+                        ),
+                    )
+
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        return self.get_mes_comparison_review(int(inference_record_id))
+
+    def delete_mes_comparison_review(self, inference_record_id: int) -> bool:
+        """移除 Review 並停用其 NG 樣本；crop 保留供稽核與復原。"""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                row = conn.execute(
+                    """SELECT id FROM mes_comparison_review
+                       WHERE inference_record_id = ?""",
+                    (int(inference_record_id),),
+                ).fetchone()
+                if not row:
+                    return False
+                conn.execute(
+                    """UPDATE ng_validation_samples
+                       SET status = 'removed',
+                           updated_at = datetime('now', 'localtime')
+                       WHERE review_id = ?""",
+                    (row["id"],),
+                )
+                conn.execute(
+                    """DELETE FROM mes_comparison_review
+                       WHERE inference_record_id = ?""",
+                    (int(inference_record_id),),
+                )
+                conn.commit()
+                return True
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def list_ng_validation_samples(
+        self,
+        *,
+        machine_no: str = "",
+        model_id: str = "",
+        lighting: str = "",
+        zone: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Tuple[List[Dict], int]:
+        where = ["s.status = 'confirmed'"]
+        params: List[Any] = []
+        for column, value in (
+            ("s.machine_no", machine_no),
+            ("s.model_id", model_id),
+            ("s.lighting", lighting),
+            ("s.zone", zone),
+        ):
+            if str(value or "").strip():
+                normalized = str(value).strip()
+                if column == "s.model_id" and normalized == "__unassigned__":
+                    where.append("TRIM(COALESCE(s.model_id, '')) = ''")
+                else:
+                    where.append(f"{column} = ?")
+                    params.append(normalized)
+        where_sql = " AND ".join(where)
+        limit = max(1, min(int(limit), 1000))
+        offset = max(0, int(offset))
+
+        conn = self._get_conn()
+        try:
+            total = conn.execute(
+                f"""SELECT COUNT(*) FROM ng_validation_samples s
+                    WHERE {where_sql}""",
+                params,
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""SELECT s.*, r.review_type, r.category,
+                           r.note, r.reviewer, r.updated_at AS reviewed_at
+                      FROM ng_validation_samples s
+                      LEFT JOIN mes_comparison_review r ON r.id = s.review_id
+                     WHERE {where_sql}
+                     ORDER BY s.created_at DESC, s.id DESC
+                     LIMIT ? OFFSET ?""",
+                params + [limit, offset],
+            ).fetchall()
+            return [dict(row) for row in rows], int(total)
+        finally:
+            conn.close()
+
+    def get_ng_validation_sample(self, sample_id: int) -> Optional[Dict]:
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                """SELECT * FROM ng_validation_samples
+                   WHERE id = ? AND status = 'confirmed'""",
+                (int(sample_id),),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def remove_ng_validation_sample(self, sample_id: int) -> bool:
+        """停用單筆 NG 驗證樣本；實體 crop 由呼叫端在路徑驗證後刪除。"""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                cursor = conn.execute(
+                    """UPDATE ng_validation_samples
+                       SET status = 'removed',
+                           updated_at = datetime('now', 'localtime')
+                       WHERE id = ? AND status = 'confirmed'""",
+                    (int(sample_id),),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def get_ng_validation_summary(self) -> Dict:
+        conn = self._get_conn()
+        try:
+            total_row = conn.execute(
+                """SELECT COUNT(*) AS samples,
+                          COUNT(DISTINCT review_id) AS reviews
+                     FROM ng_validation_samples
+                    WHERE status = 'confirmed'"""
+            ).fetchone()
+            lighting_rows = conn.execute(
+                """SELECT lighting, COUNT(*) AS count
+                     FROM ng_validation_samples
+                    WHERE status = 'confirmed'
+                    GROUP BY lighting
+                    ORDER BY lighting"""
+            ).fetchall()
+            zone_rows = conn.execute(
+                """SELECT zone, COUNT(*) AS count
+                     FROM ng_validation_samples
+                    WHERE status = 'confirmed'
+                    GROUP BY zone
+                    ORDER BY zone"""
+            ).fetchall()
+            model_rows = conn.execute(
+                """SELECT model_id, COUNT(*) AS count
+                     FROM ng_validation_samples
+                    WHERE status = 'confirmed'
+                    GROUP BY model_id
+                    ORDER BY model_id"""
+            ).fetchall()
+            return {
+                "samples": int(total_row["samples"] or 0),
+                "reviews": int(total_row["reviews"] or 0),
+                "by_lighting": {
+                    str(row["lighting"] or "unknown"): int(row["count"])
+                    for row in lighting_rows
+                },
+                "by_zone": {
+                    str(row["zone"] or "unknown"): int(row["count"])
+                    for row in zone_rows
+                },
+                "by_model": {
+                    str(row["model_id"] or ""): int(row["count"])
+                    for row in model_rows
+                },
+            }
         finally:
             conn.close()
 

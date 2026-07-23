@@ -34,6 +34,11 @@ WP_DEFTHIS_COLUMNS = (
     "RELAX_FLAG", "RELAX_DESCRIPTION",
 )
 
+WP_DEFTHIS_SCHEMA_BY_FACILITY = {
+    "MOD1": "MCRDA1",
+    "MOD2": "MERDA1",
+}
+
 
 class MESReportConfigurationError(RuntimeError):
     """MES Oracle 連線設定不完整。"""
@@ -168,6 +173,14 @@ def build_mes_comparison(records: Sequence[Mapping], defects_by_panel: Mapping[s
         else:
             comparison = "correct"
             correct += 1
+        if comparison == "over_detection":
+            review_type = "over_detection"
+        elif comparison == "miss_detection":
+            review_type = "miss_detection"
+        elif ai_judgment == "NG" and mes_result["judgment"] == "NG":
+            review_type = "true_ng"
+        else:
+            review_type = ""
 
         first_defect = mes_result["qualifying_defects"][0] if mes_result["qualifying_defects"] else None
         output.append({
@@ -181,6 +194,7 @@ def build_mes_comparison(records: Sequence[Mapping], defects_by_panel: Mapping[s
             "ai_judgment": ai_judgment,
             "mes_judgment": mes_result["judgment"],
             "comparison": comparison,
+            "review_type": review_type,
             "mes_row_count": mes_result["mes_row_count"],
             "qualifying_defect_count": len(mes_result["qualifying_defects"]),
             "qualifying_defects": mes_result["qualifying_defects"],
@@ -203,6 +217,46 @@ def build_mes_comparison(records: Sequence[Mapping], defects_by_panel: Mapping[s
     }
 
 
+def build_mes_review_summary(records: Sequence[Mapping]) -> Dict:
+    """統計目前 Report 範圍內的人工 Review 完成率、原因及 NG 樣本數。"""
+    review_types = ("over_detection", "miss_detection", "true_ng")
+    by_type = {
+        key: {"total": 0, "reviewed": 0, "pending": 0, "by_category": {}}
+        for key in review_types
+    }
+    reviewed = pending = confirmed_ng_reviews = ng_samples = 0
+
+    for row in records:
+        review_type = str(row.get("review_type") or "")
+        if review_type not in by_type:
+            continue
+        type_stats = by_type[review_type]
+        type_stats["total"] += 1
+        review = row.get("review") if isinstance(row.get("review"), Mapping) else None
+        category = str((review or {}).get("category") or "")
+        if not category:
+            pending += 1
+            type_stats["pending"] += 1
+            continue
+
+        reviewed += 1
+        type_stats["reviewed"] += 1
+        categories = type_stats["by_category"]
+        categories[category] = categories.get(category, 0) + 1
+        if bool(review.get("confirmed_ng")):
+            confirmed_ng_reviews += 1
+        ng_samples += int(review.get("ng_sample_count") or 0)
+
+    return {
+        "total": reviewed + pending,
+        "reviewed": reviewed,
+        "pending": pending,
+        "confirmed_ng_reviews": confirmed_ng_reviews,
+        "ng_samples": ng_samples,
+        "by_type": by_type,
+    }
+
+
 class OracleMESRepository:
     """依設備廠別，從對應 Oracle TNS 讀取 MES 人員不良判定。"""
 
@@ -213,6 +267,9 @@ class OracleMESRepository:
         normalized_tns = {str(name).upper(): value for name, value in tns_configs.items()}
         if not self.facility:
             raise MESReportConfigurationError("MES Oracle 設定缺少：facility")
+        self.wp_defthis_schema = WP_DEFTHIS_SCHEMA_BY_FACILITY.get(self.facility)
+        if not self.wp_defthis_schema:
+            raise MESReportConfigurationError(f"MES Oracle 找不到廠別 WP_DEFTHIS schema：{self.facility}")
         if self.facility not in normalized_tns:
             raise MESReportConfigurationError(f"MES Oracle 找不到廠別 TNS：{self.facility}")
 
@@ -235,7 +292,7 @@ class OracleMESRepository:
 
     @property
     def source_label(self) -> str:
-        return f"{self.facility} / {self.service_name.upper()} / MERDA1.WP_DEFTHIS"
+        return f"{self.facility} / {self.service_name.upper()} / {self.wp_defthis_schema}.WP_DEFTHIS"
 
     def fetch_defects(self, panel_ids: Sequence[str], min_trans_date: datetime) -> Dict[str, List[Dict]]:
         panel_ids = sorted({str(value or "").strip().upper() for value in panel_ids if str(value or "").strip()})
@@ -267,7 +324,7 @@ class OracleMESRepository:
                     placeholders = ", ".join(f":panel_{idx}" for idx in range(len(chunk)))
                     sql = f"""
                         SELECT PNL_ID, DFCT_CODE, TRANS_DATE, X_AXIS, Y_AXIS
-                        FROM MERDA1.WP_DEFTHIS
+                        FROM {self.wp_defthis_schema}.WP_DEFTHIS
                         WHERE DEFT_OPER = :deft_oper
                           AND IF_NEWER = 'Y'
                           AND TRANS_DATE >= :min_trans_date
@@ -328,11 +385,13 @@ class OracleMESRepository:
             cursor.arraysize = 1000
             cursor.prefetchrows = 1000
             try:
-                columns_sql = ", ".join(WP_DEFTHIS_COLUMNS)
+                # MOD1/MCRDA1 與 MOD2/MERDA1 的 WP_DEFTHIS 欄位並非完全相同。
+                # MOD1 使用實際欄位清單，避免查詢不存在的欄位（例如 SYS_TRANS_FLAG）。
+                columns_sql = "*" if self.facility == "MOD1" else ", ".join(WP_DEFTHIS_COLUMNS)
                 cursor.execute(
                     f"""
                         SELECT {columns_sql}
-                        FROM MERDA1.WP_DEFTHIS
+                        FROM {self.wp_defthis_schema}.WP_DEFTHIS
                         WHERE PNL_ID = :panel_id
                           AND DEFT_OPER = :deft_oper
                           AND IF_NEWER = 'Y'
@@ -345,7 +404,9 @@ class OracleMESRepository:
                         "min_trans_date": min_trans_date.strftime("%Y-%m-%d %H.%M.%S.%f"),
                     },
                 )
-                rows = [dict(zip(WP_DEFTHIS_COLUMNS, values)) for values in cursor]
+                description = getattr(cursor, "description", None) or []
+                columns = [str(item[0]).upper() for item in description] or list(WP_DEFTHIS_COLUMNS)
+                rows = [dict(zip(columns, values)) for values in cursor]
             finally:
                 cursor.close()
         finally:

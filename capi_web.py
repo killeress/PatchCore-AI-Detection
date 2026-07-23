@@ -41,6 +41,7 @@ from capi_dataset_export import (
     read_manifest, write_manifest, delete_sample, relabel_sample,
     get_valid_labels, LABEL_ZH, list_job_dirs,
     parse_datastr_per_prefix, extract_prefix, resolve_source_path,
+    crop_patchcore_tile,
 )
 from capi_scratch_batch import (
     ScratchBatchRunner, compute_summary as scratch_batch_summary,
@@ -52,6 +53,10 @@ from capi_image_naming import canonical_image_prefix, image_prefix_display_label
 from capi_image_orientation import read_detection_image
 
 logger = logging.getLogger("capi.web")
+
+_MES_REVIEW_LIGHTINGS = {
+    "G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD",
+}
 
 
 def _get_host_identity() -> str:
@@ -3075,6 +3080,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_mes_comparison_api(query)
             elif path == "/api/ric/mes-report-detail":
                 self._handle_mes_report_detail_api(query)
+            elif path == "/api/ric/mes-review/candidates":
+                self._handle_mes_review_candidates_api(query)
+            elif path == "/api/ric/mes-review/crop":
+                self._handle_mes_review_crop_api(query)
+            elif path == "/api/ric/ng-validation":
+                self._handle_ng_validation_api(query)
+            elif path == "/api/ric/ng-validation/file":
+                self._handle_ng_validation_file_api(query)
             elif path == "/scratch-review":
                 self._handle_scratch_review_page(path)
             elif path == "/api/scratch-review/list":
@@ -3251,6 +3264,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_over_review_save()
             elif path == "/api/ric/over-review/delete":
                 self._handle_over_review_delete()
+            elif path == "/api/ric/mes-review":
+                self._handle_mes_review_save()
+            elif path == "/api/ric/mes-review/delete":
+                self._handle_mes_review_delete()
+            elif path == "/api/ric/ng-validation/delete":
+                self._handle_ng_validation_delete()
             elif path == "/api/ric/over-retrain-pool/add":
                 self._handle_over_retrain_pool_add()
             elif path == "/api/ric/within-spec-log/regenerate":
@@ -3733,8 +3752,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except (ValueError, IndexError):
             page = 1
 
-        end_date_full = f"{end_date} 23:59:59" if end_date else ""
-
         # 先查總數以便在查詢前校正頁碼
         records = []
         total_count = 0
@@ -3744,7 +3761,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 machine_no=machine_no,
                 ai_judgment=ai_judgment,
                 start_date=start_date,
-                end_date=end_date_full,
+                end_date=end_date,
                 cross_filter=cross_filter,
                 record_id=record_id,
                 limit=per_page,
@@ -3785,14 +3802,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         start_date = query.get("start_date",  [""])[0]
         end_date   = query.get("end_date",    [""])[0]
         cross_filter = query.get("cross_filter", [""])[0]
-        end_date_full = f"{end_date} 23:59:59" if end_date else ""
 
         records, _ = self.db.search_records(
             glass_id=glass_id,
             machine_no=machine_no,
             ai_judgment=ai_judgment,
             start_date=start_date,
-            end_date=end_date_full,
+            end_date=end_date,
             cross_filter=cross_filter,
             record_id=record_id,
             limit=10000,
@@ -5851,7 +5867,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 panel_id=panel_id or None,
             )
 
-            from capi_mes_report import OracleMESRepository, build_mes_comparison, _parse_datetime
+            from capi_mes_report import (
+                OracleMESRepository,
+                build_mes_comparison,
+                build_mes_review_summary,
+                _parse_datetime,
+            )
 
             server_inst = self._capi_server_instance
             server_config = getattr(server_inst, "server_config", {}) if server_inst else {}
@@ -5875,6 +5896,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     )
 
             report = build_mes_comparison(records, defects)
+            review_rows = self.db.get_mes_comparison_reviews([
+                row.get("id") for row in report["records"] if row.get("id") is not None
+            ])
+            reviews_by_record = {
+                int(row["inference_record_id"]): row for row in review_rows
+            }
+            for row in report["records"]:
+                record_id = row.get("id")
+                row["review"] = (
+                    reviews_by_record.get(int(record_id))
+                    if record_id is not None else None
+                )
+            report["review_summary"] = build_mes_review_summary(report["records"])
+            report["ng_validation_summary"] = self.db.get_ng_validation_summary()
             report.update({
                 "success": True,
                 "source": repository.source_label,
@@ -5921,17 +5956,423 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             server_config = getattr(server_inst, "server_config", {}) if server_inst else {}
             repository = OracleMESRepository(server_config.get("mes_report") or {})
             rows = repository.fetch_report_details(panel_id, cutoff)
+            detail_columns = list(rows[0]) if rows else list(WP_DEFTHIS_COLUMNS)
             self._send_json({
                 "success": True,
                 "source": repository.source_label,
                 "rule": "同玻璃 ID、DEFT_OPER=1600、IF_NEWER=Y、推論時間後",
-                "columns": list(WP_DEFTHIS_COLUMNS),
+                "columns": detail_columns,
                 "inference": record,
                 "rows": rows,
             })
         except Exception as e:
             logger.error("MES report detail API error: %s", e, exc_info=True)
             self._send_json({"success": False, "error": str(e)}, status=502)
+
+    def _ng_validation_base_dir(self) -> Path:
+        server_inst = self._capi_server_instance
+        server_config = getattr(server_inst, "server_config", {}) if server_inst else {}
+        ng_config = server_config.get("ng_validation") or {}
+        configured = str(ng_config.get("base_dir") or "").strip()
+        if configured:
+            return Path(configured).resolve()
+
+        dataset_config = server_config.get("dataset_export") or {}
+        dataset_base = str(dataset_config.get("base_dir") or "").strip()
+        if dataset_base:
+            return (Path(dataset_base).parent / "ng_validation").resolve()
+        return (Path.cwd() / "datasets" / "ng_validation").resolve()
+
+    @staticmethod
+    def _query_int(query: dict, key: str) -> Optional[int]:
+        value = query.get(key, [""])
+        value = value[0] if isinstance(value, list) else value
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _mes_review_resolve_source(self, image_path: str) -> Path:
+        server_inst = self._capi_server_instance
+        path_mapping = getattr(server_inst, "path_mapping", {}) if server_inst else {}
+        return resolve_source_path(str(image_path or ""), path_mapping)
+
+    def _handle_mes_review_candidates_api(self, query: dict):
+        """GET: 取得指定推論紀錄中由 AOI 座標產生的五光源候選 tile。"""
+        record_id = self._query_int(query, "record_id")
+        if record_id is None:
+            self._send_json({"success": False, "error": "record_id 格式錯誤"}, status=400)
+            return
+        record = self.db.get_mes_comparison_record(record_id) if self.db else None
+        if not record:
+            self._send_json({"success": False, "error": "找不到該筆 AI 推論紀錄"}, status=404)
+            return
+
+        candidates = []
+        for row in self.db.get_mes_review_aoi_candidates(record_id):
+            lighting = canonical_image_prefix(row.get("image_name") or "")
+            if lighting not in _MES_REVIEW_LIGHTINGS:
+                continue
+            source_path = self._mes_review_resolve_source(row.get("image_path") or "")
+            item = dict(row)
+            item["lighting"] = lighting
+            item["source_available"] = source_path.is_file()
+            if not source_path.is_file():
+                item["collectable_reason"] = "原圖不存在，無法保存 NG crop"
+            elif int(row.get("image_is_bomb") or 0) or int(row.get("is_bomb") or 0):
+                item["collectable_reason"] = "BOMB 模擬缺陷，不納入真實 NG 驗證庫"
+            else:
+                item["collectable_reason"] = ""
+            item["collectable"] = bool(
+                source_path.is_file()
+                and not int(row.get("image_is_bomb") or 0)
+                and not int(row.get("is_bomb") or 0)
+            )
+            item["crop_url"] = (
+                f"/api/ric/mes-review/crop?tile_result_id={int(row['tile_result_id'])}"
+            )
+            candidates.append(item)
+
+        self._send_json({
+            "success": True,
+            "record": record,
+            "review": self.db.get_mes_comparison_review(record_id),
+            "candidates": candidates,
+            "message": (
+                f"找到 {len(candidates)} 個 AOI 座標候選 tile"
+                if candidates else
+                "找不到 AOI 座標 tile；可能未提供 AOI 座標或 tile 明細已超過保留期"
+            ),
+        })
+
+    def _handle_mes_review_crop_api(self, query: dict):
+        """GET: 讀取 AOI 候選 tile 的原始 512 crop。"""
+        tile_result_id = self._query_int(query, "tile_result_id")
+        if tile_result_id is None:
+            self._send_error(400, "tile_result_id 格式錯誤")
+            return
+        candidate = self.db.get_mes_review_aoi_candidate(tile_result_id)
+        if not candidate:
+            self._send_404()
+            return
+
+        lighting = canonical_image_prefix(candidate.get("image_name") or "")
+        if lighting not in _MES_REVIEW_LIGHTINGS:
+            self._send_error(400, "此光源不納入 PatchCore NG 驗證庫")
+            return
+        source_path = self._mes_review_resolve_source(candidate.get("image_path") or "")
+        if not source_path.is_file():
+            self._send_404()
+            return
+
+        import cv2
+
+        image = self._read_inference_image(source_path, cv2.IMREAD_UNCHANGED)
+        if image is None:
+            self._send_404()
+            return
+        crop = crop_patchcore_tile(
+            image,
+            int(candidate.get("tile_x") or 0),
+            int(candidate.get("tile_y") or 0),
+            max(1, int(candidate.get("tile_w") or 512)),
+            max(1, int(candidate.get("tile_h") or 512)),
+        )
+        self._send_image_array_png(crop)
+
+    def _prepare_ng_validation_samples(
+        self,
+        record: Dict,
+        candidates: List[Dict],
+    ) -> List[Dict]:
+        """裁切並保存人工勾選的 AOI tile，回傳 DB snapshot rows。"""
+        import cv2
+
+        base_dir = self._ng_validation_base_dir()
+        image_cache: Dict[str, Any] = {}
+        rows = []
+        for candidate in candidates:
+            lighting = canonical_image_prefix(candidate.get("image_name") or "")
+            if lighting not in _MES_REVIEW_LIGHTINGS:
+                raise ValueError(f"光源不納入 NG 驗證庫: {lighting}")
+            if int(candidate.get("image_is_bomb") or 0) or int(candidate.get("is_bomb") or 0):
+                raise ValueError(f"炸彈候選不可加入 NG 驗證庫: tile {candidate['tile_result_id']}")
+
+            source_path = self._mes_review_resolve_source(candidate.get("image_path") or "")
+            cache_key = str(source_path)
+            if cache_key not in image_cache:
+                image_cache[cache_key] = self._read_inference_image(
+                    source_path, cv2.IMREAD_UNCHANGED
+                ) if source_path.is_file() else None
+            image = image_cache[cache_key]
+            if image is None:
+                raise ValueError(f"原圖不存在或無法讀取: {source_path}")
+
+            x = int(candidate.get("tile_x") or 0)
+            y = int(candidate.get("tile_y") or 0)
+            w = max(1, int(candidate.get("tile_w") or 512))
+            h = max(1, int(candidate.get("tile_h") or 512))
+            crop = crop_patchcore_tile(image, x, y, w, h)
+            if crop.size == 0:
+                raise ValueError(f"AOI tile 裁切為空: {candidate['tile_result_id']}")
+
+            zone = str(candidate.get("zone") or "unknown").strip().lower() or "unknown"
+            safe_model = re.sub(
+                r"[^A-Za-z0-9_.-]+", "_", str(record.get("model_id") or "unknown")
+            )[:80] or "unknown"
+            safe_lighting = re.sub(r"[^A-Za-z0-9_.-]+", "_", lighting)[:40]
+            safe_zone = re.sub(r"[^A-Za-z0-9_.-]+", "_", zone)[:40] or "unknown"
+            safe_glass = re.sub(
+                r"[^A-Za-z0-9_.-]+", "_", str(record.get("glass_id") or "panel")
+            )[:80] or "panel"
+            request_day = re.sub(
+                r"[^0-9]+", "", str(record.get("request_time") or "")[:10]
+            ) or datetime.now().strftime("%Y%m%d")
+            out_dir = base_dir / safe_model / safe_lighting / safe_zone / "crop"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            filename = (
+                f"{request_day}_{safe_glass}_r{int(record['id'])}"
+                f"_t{int(candidate['tile_result_id'])}.png"
+            )
+            crop_path = out_dir / filename
+            if not cv2.imwrite(str(crop_path), crop):
+                raise ValueError(f"NG crop 寫入失敗: {crop_path}")
+
+            rows.append({
+                "tile_result_id": int(candidate["tile_result_id"]),
+                "image_result_id": int(candidate["image_result_id"]),
+                "image_name": str(candidate.get("image_name") or ""),
+                "source_image_path": str(source_path),
+                "lighting": lighting,
+                "zone": zone,
+                "aoi_defect_code": str(candidate.get("aoi_defect_code") or ""),
+                "aoi_product_x": int(
+                    candidate["aoi_product_x"]
+                    if candidate.get("aoi_product_x") is not None else -1
+                ),
+                "aoi_product_y": int(
+                    candidate["aoi_product_y"]
+                    if candidate.get("aoi_product_y") is not None else -1
+                ),
+                "aoi_image_x": int(
+                    candidate["aoi_image_x"]
+                    if candidate.get("aoi_image_x") is not None else -1
+                ),
+                "aoi_image_y": int(
+                    candidate["aoi_image_y"]
+                    if candidate.get("aoi_image_y") is not None else -1
+                ),
+                "tile_x": x,
+                "tile_y": y,
+                "tile_w": w,
+                "tile_h": h,
+                "ai_score": float(candidate.get("ai_score") or 0.0),
+                "crop_path": str(crop_path.resolve()),
+            })
+        return rows
+
+    def _handle_mes_review_save(self):
+        """POST: 儲存 Report 人工 Review，必要時同步 NG 驗證樣本。"""
+        data = self._read_json_body()
+        if data is None:
+            return
+        try:
+            record_id = int(data.get("record_id"))
+        except (TypeError, ValueError):
+            self._send_json({"success": False, "error": "record_id 格式錯誤"}, status=400)
+            return
+        record = self.db.get_mes_comparison_record(record_id) if self.db else None
+        if not record:
+            self._send_json({"success": False, "error": "找不到該筆 AI 推論紀錄"}, status=404)
+            return
+
+        review_type = str(data.get("review_type") or "").strip()
+        category = str(data.get("category") or "").strip()
+        mes_judgment = str(data.get("mes_judgment") or "").strip().upper()
+        confirmed_ng = bool(data.get("confirmed_ng"))
+        if mes_judgment not in {"OK", "NG"}:
+            self._send_json({"success": False, "error": "MES 判定格式錯誤"}, status=400)
+            return
+
+        raw_tile_ids = data.get("selected_tile_ids") or []
+        if not isinstance(raw_tile_ids, list):
+            self._send_json({"success": False, "error": "selected_tile_ids 必須是陣列"}, status=400)
+            return
+        try:
+            selected_tile_ids = sorted({int(value) for value in raw_tile_ids})
+        except (TypeError, ValueError):
+            self._send_json({"success": False, "error": "selected_tile_ids 格式錯誤"}, status=400)
+            return
+
+        all_candidates = self.db.get_mes_review_aoi_candidates(record_id)
+        candidates_by_id = {
+            int(row["tile_result_id"]): row
+            for row in all_candidates
+            if canonical_image_prefix(row.get("image_name") or "") in _MES_REVIEW_LIGHTINGS
+        }
+        missing_ids = [tile_id for tile_id in selected_tile_ids if tile_id not in candidates_by_id]
+        if missing_ids:
+            self._send_json({
+                "success": False,
+                "error": f"選取的 AOI tile 不屬於此推論紀錄: {missing_ids[:10]}",
+            }, status=400)
+            return
+        if confirmed_ng and not selected_tile_ids:
+            self._send_json({
+                "success": False,
+                "error": "加入 NG 驗證庫時，至少要勾選一張肉眼確認可見的 AOI 圖片",
+            }, status=400)
+            return
+
+        try:
+            samples = self._prepare_ng_validation_samples(
+                record,
+                [candidates_by_id[tile_id] for tile_id in selected_tile_ids],
+            ) if confirmed_ng else []
+            review = self.db.save_mes_comparison_review(
+                inference_record_id=record_id,
+                glass_id=record.get("glass_id") or "",
+                model_id=record.get("model_id") or "",
+                machine_no=record.get("machine_no") or "",
+                request_time=record.get("request_time") or "",
+                ai_judgment=record.get("ai_judgment") or "",
+                mes_judgment=mes_judgment,
+                review_type=review_type,
+                category=category,
+                note=str(data.get("note") or "").strip(),
+                reviewer="",
+                confirmed_ng=confirmed_ng,
+                samples=samples,
+            )
+        except ValueError as exc:
+            self._send_json({"success": False, "error": str(exc)}, status=400)
+            return
+        except Exception as exc:
+            logger.error("Save MES review failed: %s", exc, exc_info=True)
+            self._send_json({"success": False, "error": str(exc)}, status=500)
+            return
+
+        self._send_json({
+            "success": True,
+            "review": review,
+            "ng_validation_summary": self.db.get_ng_validation_summary(),
+            "message": (
+                f"Review 已儲存，NG 驗證庫同步 {review.get('ng_sample_count', 0)} 張"
+            ),
+        })
+
+    def _handle_mes_review_delete(self):
+        data = self._read_json_body()
+        if data is None:
+            return
+        try:
+            record_id = int(data.get("record_id"))
+        except (TypeError, ValueError):
+            self._send_json({"success": False, "error": "record_id 格式錯誤"}, status=400)
+            return
+        deleted = self.db.delete_mes_comparison_review(record_id) if self.db else False
+        if not deleted:
+            self._send_json({"success": False, "error": "找不到 Review"}, status=404)
+            return
+        self._send_json({
+            "success": True,
+            "ng_validation_summary": self.db.get_ng_validation_summary(),
+        })
+
+    def _handle_ng_validation_api(self, query: dict):
+        def _query_text(key: str) -> str:
+            value = query.get(key, [""])
+            return str(value[0] if isinstance(value, list) and value else value or "").strip()
+
+        limit = self._query_int(query, "limit") or 100
+        offset = self._query_int(query, "offset") or 0
+        samples, total = self.db.list_ng_validation_samples(
+            machine_no=_query_text("machine_no"),
+            model_id=_query_text("model_id"),
+            lighting=_query_text("lighting"),
+            zone=_query_text("zone"),
+            limit=limit,
+            offset=offset,
+        )
+        for sample in samples:
+            sample["file_url"] = f"/api/ric/ng-validation/file?id={int(sample['id'])}"
+        self._send_json({
+            "success": True,
+            "samples": samples,
+            "total": total,
+            "summary": self.db.get_ng_validation_summary(),
+            "base_dir": str(self._ng_validation_base_dir()),
+        })
+
+    def _handle_ng_validation_delete(self):
+        """POST: 刪除單筆 NG 驗證 crop，保留原始推論與 Review。"""
+        data = self._read_json_body()
+        if data is None:
+            return
+        try:
+            sample_id = int(data.get("sample_id"))
+        except (TypeError, ValueError):
+            self._send_json({"success": False, "error": "sample_id 格式錯誤"}, status=400)
+            return
+
+        sample = self.db.get_ng_validation_sample(sample_id) if self.db else None
+        if not sample:
+            self._send_json({"success": False, "error": "找不到 NG 驗證樣本"}, status=404)
+            return
+        try:
+            base_dir = self._ng_validation_base_dir()
+            crop_path = Path(sample.get("crop_path") or "").resolve()
+            crop_path.relative_to(base_dir)
+        except (OSError, ValueError):
+            self._send_json({
+                "success": False,
+                "error": "NG crop 路徑不在設定的驗證資料庫目錄內",
+            }, status=403)
+            return
+
+        file_deleted = False
+        try:
+            if crop_path.exists():
+                if not crop_path.is_file():
+                    raise OSError(f"NG crop 不是一般檔案: {crop_path}")
+                crop_path.unlink()
+                file_deleted = True
+        except OSError as exc:
+            logger.error("Delete NG validation crop failed: %s", exc, exc_info=True)
+            self._send_json({"success": False, "error": f"NG 圖片刪除失敗: {exc}"}, status=500)
+            return
+
+        deleted = self.db.remove_ng_validation_sample(sample_id)
+        if not deleted:
+            self._send_json({"success": False, "error": "NG 驗證樣本已不存在"}, status=404)
+            return
+        self._send_json({
+            "success": True,
+            "sample_id": sample_id,
+            "file_deleted": file_deleted,
+            "summary": self.db.get_ng_validation_summary(),
+        })
+
+    def _handle_ng_validation_file_api(self, query: dict):
+        sample_id = self._query_int(query, "id")
+        if sample_id is None:
+            self._send_error(400, "id 格式錯誤")
+            return
+        sample = self.db.get_ng_validation_sample(sample_id) if self.db else None
+        if not sample:
+            self._send_404()
+            return
+        try:
+            base_dir = self._ng_validation_base_dir()
+            crop_path = Path(sample.get("crop_path") or "").resolve()
+            crop_path.relative_to(base_dir)
+        except (OSError, ValueError):
+            self._send_error(403, "NG crop path outside configured base_dir")
+            return
+        if not crop_path.is_file():
+            self._send_404()
+            return
+        self._send_binary(str(crop_path))
 
     def _handle_debug_inference_run(self):
         """API: 執行 Debug 單圖推論"""
