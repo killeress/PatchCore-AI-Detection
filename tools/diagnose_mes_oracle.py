@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from capi_mes_credentials import ORACLE_MES_PASSWORD  # noqa: E402
+from capi_mes_report import WP_DEFTHIS_SCHEMA_BY_FACILITY  # noqa: E402
 
 
 def load_config(path: Path) -> dict:
@@ -74,6 +75,7 @@ def main() -> int:
     config = load_config(config_path)
     mes_config = config["mes_report"]
     facility = str(mes_config["facility"]).strip().upper()
+    schema = WP_DEFTHIS_SCHEMA_BY_FACILITY[facility]
     oracle_config = mes_config["oracle"]
     tns_config = oracle_config["tns"][facility]
     dsn = oracledb.makedsn(
@@ -102,13 +104,13 @@ def main() -> int:
         except Exception as exc:
             print("ERROR_MESSAGE_DETAILS: unavailable:", repr(exc))
 
-        print("\n=== MERDA1.WP_DEFTHIS column types ===")
+        print(f"\n=== {schema}.WP_DEFTHIS column types ===")
         cursor.execute(
-            """
+            f"""
             SELECT column_id, column_name, data_type,
                    data_length, data_precision, data_scale
             FROM ALL_TAB_COLUMNS
-            WHERE owner = 'MERDA1'
+            WHERE owner = '{schema}'
               AND table_name = 'WP_DEFTHIS'
               AND column_name IN (
                   'PNL_ID', 'DFCT_CODE', 'TRANS_DATE',
@@ -127,11 +129,11 @@ def main() -> int:
         print("\n=== Raw values, without comparison ===")
         try:
             cursor.execute(
-                """
+                f"""
                 SELECT DEFT_OPER, DUMP(DEFT_OPER),
                        PNL_ID, DUMP(PNL_ID),
                        IF_NEWER, TRANS_DATE, X_AXIS, Y_AXIS
-                FROM MERDA1.WP_DEFTHIS
+                FROM {schema}.WP_DEFTHIS
                 WHERE ROWNUM <= 10
                 """
             )
@@ -140,9 +142,9 @@ def main() -> int:
         except Exception as exc:
             print("RAW SELECT ERROR:", repr(exc))
 
-        deft_oper_sql = """
+        deft_oper_sql = f"""
             SELECT DEFT_OPER
-            FROM MERDA1.WP_DEFTHIS
+            FROM {schema}.WP_DEFTHIS
             WHERE DEFT_OPER = :value
               AND ROWNUM = 1
         """
@@ -154,9 +156,9 @@ def main() -> int:
             run_test(
                 cursor,
                 "PNL_ID bind only",
-                """
+                f"""
                 SELECT PNL_ID
-                FROM MERDA1.WP_DEFTHIS
+                FROM {schema}.WP_DEFTHIS
                 WHERE PNL_ID = :panel_id
                   AND ROWNUM = 1
                 """,
@@ -165,9 +167,9 @@ def main() -> int:
             run_test(
                 cursor,
                 "Current filter using string 1600",
-                """
+                f"""
                 SELECT PNL_ID, DFCT_CODE, TRANS_DATE, X_AXIS, Y_AXIS
-                FROM MERDA1.WP_DEFTHIS
+                FROM {schema}.WP_DEFTHIS
                 WHERE DEFT_OPER = :deft_oper
                   AND IF_NEWER = 'Y'
                   AND PNL_ID = :panel_id
@@ -178,9 +180,9 @@ def main() -> int:
             run_test(
                 cursor,
                 "Current filter using number 1600",
-                """
+                f"""
                 SELECT PNL_ID, DFCT_CODE, TRANS_DATE, X_AXIS, Y_AXIS
-                FROM MERDA1.WP_DEFTHIS
+                FROM {schema}.WP_DEFTHIS
                 WHERE DEFT_OPER = :deft_oper
                   AND IF_NEWER = 'Y'
                   AND PNL_ID = :panel_id

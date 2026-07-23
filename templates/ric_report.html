@@ -654,6 +654,46 @@
         background: var(--surface);
     }
 
+    .mes-workflow-tabs {
+        display: flex;
+        gap: 4px;
+        margin-bottom: 20px;
+        padding: 4px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--surface);
+    }
+
+    .mes-workflow-tab {
+        flex: 1;
+        padding: 12px 16px;
+        border: 0;
+        border-radius: 10px;
+        background: transparent;
+        color: var(--text-muted);
+        text-align: center;
+        font: inherit;
+        font-size: 0.9rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .mes-workflow-tab:hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.04);
+    }
+
+    .mes-workflow-tab.active {
+        color: white;
+        background: linear-gradient(135deg, var(--accent), #6366f1);
+    }
+
+    .mes-workflow-tab .count {
+        margin-left: 5px;
+        font-size: 0.78rem;
+    }
+
     .mes-filter-card {
         width: 100%;
         color: inherit;
@@ -719,6 +759,8 @@
     }
 
     .mes-table td { color: var(--text); }
+    .mes-review-only { display: none; }
+    .mes-table.mes-review-view .mes-review-only { display: table-cell; }
     .mes-table .result-over { color: #f59e0b; font-weight: 700; }
     .mes-table .result-miss { color: #ef4444; font-weight: 700; }
     .mes-table .result-correct { color: #22c55e; font-weight: 700; }
@@ -867,13 +909,375 @@
 
     .mes-report-empty-value { color: var(--text-muted); font-style: italic; }
 
+    .mes-review-panel {
+        margin-bottom: 16px;
+        padding: 16px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--surface);
+    }
+
+    .mes-review-panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+    }
+
+    .mes-review-panel-header h3 { margin: 0; }
+
+    .mes-review-stats {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(120px, 1fr));
+        gap: 10px;
+    }
+
+    .mes-review-stat {
+        position: relative;
+        overflow: hidden;
+        min-height: 112px;
+        padding: 12px;
+        border: 1px solid rgba(71, 85, 105, 0.8);
+        border-radius: 9px;
+        background: linear-gradient(145deg, rgba(15, 23, 42, 0.98), rgba(30, 41, 59, 0.86));
+        color: var(--text);
+        text-align: left;
+        cursor: pointer;
+        box-shadow: inset 0 1px 0 rgba(148, 163, 184, 0.05);
+        transition: transform 0.18s ease, border-color 0.18s ease,
+                    box-shadow 0.18s ease, background 0.18s ease;
+    }
+
+    .mes-review-stat::before {
+        content: '';
+        position: absolute;
+        inset: 0 0 auto;
+        height: 3px;
+        background: linear-gradient(90deg, #3b82f6, #6366f1);
+        opacity: 0.38;
+        transition: opacity 0.18s ease;
+    }
+
+    .mes-review-stat:hover {
+        transform: translateY(-2px);
+        border-color: rgba(96, 165, 250, 0.8);
+        box-shadow: 0 8px 18px rgba(2, 6, 23, 0.3);
+    }
+
+    .mes-review-stat.active {
+        border-color: #60a5fa;
+        background: linear-gradient(145deg, rgba(30, 64, 175, 0.24), rgba(30, 41, 59, 0.92));
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2), 0 8px 22px rgba(37, 99, 235, 0.16);
+    }
+
+    .mes-review-stat:hover::before,
+    .mes-review-stat.active::before { opacity: 1; }
+
+    .mes-review-stat-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+    }
+
+    .mes-review-stat-action {
+        flex: 0 0 auto;
+        padding: 2px 6px;
+        border: 1px solid rgba(96, 165, 250, 0.25);
+        border-radius: 999px;
+        color: #93c5fd;
+        font-size: 0.65rem;
+    }
+
+    .mes-review-stat.active .mes-review-stat-action {
+        border-color: rgba(96, 165, 250, 0.55);
+        background: rgba(59, 130, 246, 0.18);
+        color: #dbeafe;
+    }
+
+    .mes-review-stat .label { color: var(--text-muted); font-size: 0.75rem; }
+    .mes-review-stat .value { margin-top: 4px; font-size: 1.35rem; font-weight: 700; }
+    .mes-review-stat .detail { margin-top: 3px; color: var(--text-muted); font-size: 0.72rem; }
+    .mes-review-stat .filter-hint {
+        margin-top: 7px;
+        color: #60a5fa;
+        font-size: 0.68rem;
+        font-weight: 600;
+    }
+
+    .mes-comparison-trend-card { margin-bottom: 16px; }
+
+    .mes-comparison-trend-chart {
+        position: relative;
+        height: 310px;
+    }
+
+    .mes-comparison-trend-note {
+        margin-top: 8px;
+        color: var(--text-muted);
+        font-size: 0.76rem;
+    }
+
+    .mes-comparison-trend-empty {
+        display: none;
+        align-items: center;
+        justify-content: center;
+        min-height: 160px;
+        color: var(--text-muted);
+    }
+
+    .mes-review-reasons {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 12px;
+    }
+
+    .mes-review-reason-group {
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--bg);
+        font-size: 0.78rem;
+    }
+
+    .mes-review-reason-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+    }
+
+    .mes-review-reason-total {
+        color: var(--text-muted);
+        font-size: 0.72rem;
+    }
+
+    .mes-review-reason-chart {
+        position: relative;
+        height: 220px;
+        margin-top: 8px;
+    }
+
+    .mes-review-reason-empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 90px;
+        color: var(--text-muted);
+    }
+
+    .mes-review-layout {
+        display: grid;
+        grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    .mes-review-form {
+        overflow: auto;
+        padding: 16px;
+        border-right: 1px solid var(--border);
+        background: var(--surface);
+    }
+
+    .mes-review-field { margin-bottom: 13px; }
+    .mes-review-field label {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--text-muted);
+        font-size: 0.78rem;
+    }
+
+    .mes-review-field select,
+    .mes-review-field input[type="text"],
+    .mes-review-field textarea {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px 9px;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        background: var(--bg);
+        color: var(--text);
+        font: inherit;
+    }
+
+    .mes-review-field textarea { min-height: 84px; resize: vertical; }
+
+    .mes-review-confirm {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 10px;
+        border: 1px solid rgba(34, 197, 94, 0.35);
+        border-radius: 8px;
+        background: rgba(34, 197, 94, 0.08);
+        color: var(--text);
+        font-size: 0.78rem;
+        cursor: pointer;
+    }
+
+    .mes-review-candidates {
+        overflow: auto;
+        padding: 16px;
+    }
+
+    .mes-review-candidate-grid,
+    .mes-ng-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 12px;
+    }
+
+    .mes-review-candidate,
+    .mes-ng-card {
+        display: block;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+    }
+
+    .mes-review-candidate:has(input:checked) {
+        border-color: #22c55e;
+        box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.22);
+    }
+
+    .mes-review-candidate.disabled {
+        border-color: rgba(239, 68, 68, 0.5);
+        cursor: not-allowed;
+    }
+
+    .mes-review-candidate-disabled {
+        margin-top: 6px;
+        padding: 4px 7px;
+        border-radius: 6px;
+        background: rgba(239, 68, 68, 0.12);
+        color: #f87171;
+        font-weight: 700;
+    }
+
+    .mes-review-candidate img,
+    .mes-ng-card img {
+        display: block;
+        width: 100%;
+        aspect-ratio: 1;
+        object-fit: contain;
+        background: #020617;
+    }
+
+    .mes-review-candidate-info,
+    .mes-ng-card-info {
+        padding: 9px 10px;
+        color: var(--text);
+        font-size: 0.75rem;
+        line-height: 1.55;
+    }
+
+    .mes-ng-toolbar {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 10px;
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--border);
+        background: rgba(15, 23, 42, 0.5);
+    }
+
+    .mes-ng-toolbar label {
+        color: var(--text-muted);
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .mes-ng-toolbar select {
+        min-width: 220px;
+        padding: 7px 10px;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        background: var(--bg);
+        color: var(--text);
+    }
+
+    .mes-ng-filter-count {
+        color: var(--text-muted);
+        font-size: 0.76rem;
+    }
+
+    .mes-ng-model {
+        color: #60a5fa;
+        font-weight: 700;
+    }
+
+    .mes-ng-card-actions {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(148, 163, 184, 0.16);
+    }
+
+    .mes-ng-delete {
+        padding: 5px 9px;
+        border: 1px solid rgba(239, 68, 68, 0.55);
+        border-radius: 6px;
+        background: rgba(239, 68, 68, 0.12);
+        color: #f87171;
+        font-size: 0.72rem;
+        font-weight: 700;
+        cursor: pointer;
+    }
+
+    .mes-ng-delete:hover {
+        background: rgba(239, 68, 68, 0.22);
+    }
+
+    .mes-ng-delete:disabled {
+        cursor: wait;
+        opacity: 0.55;
+    }
+
+    .mes-review-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 16px;
+    }
+
+    .mes-review-status {
+        min-height: 1.4em;
+        margin-top: 8px;
+        color: var(--text-muted);
+        font-size: 0.76rem;
+    }
+
+    .mes-review-badge {
+        display: inline-block;
+        padding: 3px 7px;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        background: rgba(245, 158, 11, 0.15);
+        color: #f59e0b;
+    }
+
+    .mes-review-badge.done {
+        background: rgba(34, 197, 94, 0.14);
+        color: #22c55e;
+    }
+
     @media (max-width: 1100px) {
         .mes-report-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .mes-review-stats { grid-template-columns: repeat(3, minmax(130px, 1fr)); }
     }
 
     @media (max-width: 680px) {
         .mes-report-modal { padding: 8px; }
         .mes-report-fields { grid-template-columns: 1fr; }
+        .mes-review-layout { grid-template-columns: 1fr; overflow: auto; }
+        .mes-review-form { overflow: visible; border-right: 0; border-bottom: 1px solid var(--border); }
+        .mes-review-candidates { overflow: visible; }
+        .mes-review-stats,
+        .mes-review-reasons { grid-template-columns: 1fr; }
     }
 
     /* ── Review Tab ── */
@@ -1582,17 +1986,52 @@
     </div>
     <div class="mes-status" id="mes_status">切換到此頁籤後載入 PNEMR 資料。</div>
     <div class="inf-loading" id="mes_loading" style="display:none;">正在查詢 AI 與 MES Report...</div>
+    <div class="mes-workflow-tabs" id="mes_workflowTabs" style="display:none;">
+        <button type="button" class="mes-workflow-tab active" data-mes-view="comparison"
+                onclick="mesReportTab.switchView('comparison')">📊 比對總覽</button>
+        <button type="button" class="mes-workflow-tab" data-mes-view="review"
+                onclick="mesReportTab.switchView('review')">
+            👤 人工 Review <span class="count" id="mes_reviewPendingCount"></span>
+        </button>
+    </div>
     <div class="inf-stats-grid" id="mes_statsGrid" style="display:none;"></div>
+    <div class="inf-chart-card mes-comparison-trend-card" id="mes_trendCard" style="display:none;">
+        <h3>📈 每日 Report 比對趨勢</h3>
+        <div class="mes-comparison-trend-chart" id="mes_trendChartWrap">
+            <canvas id="mes_comparisonTrendChart" role="img"
+                    aria-label="每日 Report 判定正確率、過檢率、漏檢率與可比對數趨勢圖"></canvas>
+        </div>
+        <div class="mes-comparison-trend-empty" id="mes_trendEmpty">目前篩選範圍沒有可繪製的日期資料。</div>
+        <div class="mes-comparison-trend-note">
+            📌 判定正確率、過檢率與漏檢率的分母皆為「當日可比對數」；灰色長條為當日可比對數，無法比對資料不納入比例。
+        </div>
+    </div>
+    <div class="mes-review-panel" id="mes_reviewPanel" style="display:none;">
+        <div class="mes-review-panel-header">
+            <div>
+                <h3>👤 人工 Review 與 NG 驗證庫</h3>
+                <div style="margin-top:4px; color:var(--text-muted); font-size:0.76rem;">
+                    人工確認後才納入 NG 驗證資料。
+                </div>
+            </div>
+            <button type="button" class="btn-export" onclick="mesReportTab.openNgDatabase()">查看 NG 驗證庫</button>
+        </div>
+        <div class="mes-review-stats" id="mes_reviewStats"></div>
+        <div class="mes-review-reasons" id="mes_reviewReasons"></div>
+    </div>
     <div class="inf-chart-card" id="mes_detailCard" style="display:none;">
         <div class="detail-header mes-detail-header">
-            <h3>📋 逐筆比對明細 <span id="mes_detailCount" style="color:var(--text-muted); font-weight:400;"></span></h3>
+            <h3><span id="mes_detailTitle">📋 逐筆比對明細</span> <span id="mes_detailCount" style="color:var(--text-muted); font-weight:400;"></span></h3>
             <button type="button" class="btn-export" id="mes_exportBtn" onclick="mesReportTab.exportCSV()" disabled>📥 導出 CSV</button>
         </div>
         <div class="mes-table-wrap">
-            <table class="mes-table">
+            <table class="mes-table" id="mes_detailTable">
                 <thead><tr>
                     <th>推論時間</th><th>玻璃 ID</th><th>Model / 機台</th>
-                    <th>AI</th><th>MES</th><th>比對結果</th><th>MES 有效不良</th><th>MES 完整數據</th>
+                    <th>AI</th><th>MES</th><th>比對結果</th><th>MES 有效不良</th>
+                    <th class="mes-review-only">人工 Review</th>
+                    <th class="mes-review-only">NG 樣本</th>
+                    <th>MES 完整數據</th>
                 </tr></thead>
                 <tbody id="mes_detailBody"></tbody>
             </table>
@@ -1608,6 +2047,73 @@
             </div>
             <div class="mes-report-detail-meta" id="mesReportDetailMeta"></div>
             <div class="mes-report-detail-body" id="mesReportDetailBody"></div>
+        </div>
+    </div>
+
+    <div id="mesReviewModal" class="mes-report-modal" aria-hidden="true"
+         onclick="if(event.target === this) mesReportTab.closeReview()">
+        <div class="mes-report-dialog" role="dialog" aria-modal="true" aria-labelledby="mesReviewTitle">
+            <div class="mes-report-dialog-header">
+                <h3 id="mesReviewTitle">Report 人工 Review</h3>
+                <button type="button" class="mes-report-close" onclick="mesReportTab.closeReview()" aria-label="關閉">✕</button>
+            </div>
+            <div class="mes-report-detail-meta" id="mesReviewMeta"></div>
+            <div class="mes-review-layout">
+                <div class="mes-review-form">
+                    <div class="mes-review-field">
+                        <label for="mesReviewCategory">確認結果／原因</label>
+                        <select id="mesReviewCategory"><option value="">請選擇</option></select>
+                    </div>
+                    <div class="mes-review-field">
+                        <label for="mesReviewNote">備註</label>
+                        <textarea id="mesReviewNote" placeholder="缺陷現象、判斷依據或其他說明"></textarea>
+                    </div>
+                    <label class="mes-review-confirm">
+                        <input type="checkbox" id="mesReviewConfirmedNg">
+                        <span><strong>確認為真實 NG，加入 NG 驗證庫</strong><br>
+                        請在右側只勾選肉眼確定可看到缺陷的光源圖片。</span>
+                    </label>
+                    <div class="mes-review-actions">
+                        <button type="button" class="review-btn-save" id="mesReviewSaveBtn" onclick="mesReportTab.saveReview()">儲存 Review</button>
+                        <button type="button" class="review-btn-delete" id="mesReviewDeleteBtn" onclick="mesReportTab.deleteReview()" style="display:none;">刪除／重開</button>
+                    </div>
+                    <div class="mes-review-status" id="mesReviewStatus"></div>
+                </div>
+                <div class="mes-review-candidates">
+                    <div style="margin-bottom:10px;">
+                        <strong>AOI 座標候選圖片</strong>
+                        <div style="color:var(--text-muted); font-size:0.75rem; margin-top:3px;">
+                            B0F 已排除；低於門檻的 AI=OK tile 仍會顯示。
+                        </div>
+                    </div>
+                    <div class="mes-review-candidate-grid" id="mesReviewCandidateGrid">
+                        <div class="mes-report-detail-state">正在載入 AOI 候選圖片...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="mesNgDatabaseModal" class="mes-report-modal" aria-hidden="true"
+         onclick="if(event.target === this) mesReportTab.closeNgDatabase()">
+        <div class="mes-report-dialog" role="dialog" aria-modal="true" aria-labelledby="mesNgDatabaseTitle">
+            <div class="mes-report-dialog-header">
+                <h3 id="mesNgDatabaseTitle">NG 驗證資料庫</h3>
+                <button type="button" class="mes-report-close" onclick="mesReportTab.closeNgDatabase()" aria-label="關閉">✕</button>
+            </div>
+            <div class="mes-report-detail-meta" id="mesNgDatabaseMeta"></div>
+            <div class="mes-ng-toolbar">
+                <label for="mesNgModelFilter">機種分類</label>
+                <select id="mesNgModelFilter" onchange="mesReportTab.filterNgDatabase(this.value)">
+                    <option value="">全部機種</option>
+                </select>
+                <span class="mes-ng-filter-count" id="mesNgDatabaseFilterCount"></span>
+            </div>
+            <div class="mes-report-detail-body">
+                <div class="mes-ng-grid" id="mesNgDatabaseGrid">
+                    <div class="mes-report-detail-state">正在載入...</div>
+                </div>
+            </div>
         </div>
     </div>
 </div>
@@ -3904,6 +4410,16 @@
         let _waitTimer = null;
         let _detailRequestToken = 0;
         let _ignoreAoiOk = false;
+        let _activeView = 'comparison';
+        let _reviewFilter = null;
+        let _reviewRecordId = null;
+        let _reviewRequestToken = 0;
+        let _comparisonTrendChart = null;
+        let _ngDatabaseModelId = '';
+        const _reviewReasonCharts = {
+            over_detection: null,
+            miss_detection: null,
+        };
 
         const FILTER_LABELS = {
             comparable: '可比對總數',
@@ -3911,6 +4427,71 @@
             over_detection: '過檢',
             miss_detection: '漏檢',
             uncomparable: '無法比對',
+        };
+        const REVIEW_TYPE_LABELS = {
+            over_detection: '過檢',
+            miss_detection: '漏檢',
+            true_ng: 'AI/MES 皆 NG',
+        };
+        const REVIEW_CATEGORY_LABELS = {
+            edge_false_positive: '邊緣過檢',
+            within_spec: '規格內',
+            overexposure: '過曝',
+            surface_scratch: '表面划痕',
+            surface_dirt: '表面汙',
+            bubble: '氣泡',
+            dust_mask_incomplete: '灰塵屏蔽需完善',
+            mes_not_registered: 'MES 未登錄／延遲',
+            actual_ng: '人工確認實際 NG',
+            score_below_threshold: 'AI 分數低於門檻',
+            low_contrast: '低對比／弱特徵',
+            dust_misfilter: 'Dust 誤濾',
+            not_visible_in_image: '非畫面檢可見不良',
+            outside_aoi_area: '異常區域不在 AOI 提供區域',
+            image_issue: '原圖缺失／無法判定',
+            mes_misjudge: 'MES／人工判定有誤',
+            confirmed_ng: '確認真 NG',
+            aoi_point_mismatch: 'AOI 點與可見缺陷不符',
+            uncertain: '無法確認',
+            other: '其他',
+        };
+        const REVIEW_CATEGORY_ORDER = {
+            over_detection: [
+                'edge_false_positive', 'within_spec', 'overexposure',
+                'surface_scratch', 'surface_dirt', 'bubble',
+                'dust_mask_incomplete', 'mes_not_registered', 'actual_ng', 'other',
+            ],
+            miss_detection: [
+                'not_visible_in_image', 'outside_aoi_area',
+                'score_below_threshold', 'low_contrast', 'dust_misfilter',
+                'image_issue', 'mes_misjudge', 'other',
+            ],
+            true_ng: [
+                'confirmed_ng', 'aoi_point_mismatch', 'image_issue', 'uncertain',
+            ],
+        };
+        const REVIEW_REASON_COLORS = {
+            edge_false_positive: 'rgba(59,130,246,0.82)',
+            within_spec: 'rgba(139,92,246,0.82)',
+            overexposure: 'rgba(245,158,11,0.82)',
+            surface_scratch: 'rgba(6,182,212,0.82)',
+            surface_dirt: 'rgba(16,185,129,0.82)',
+            bubble: 'rgba(236,72,153,0.82)',
+            dust_mask_incomplete: 'rgba(20,184,166,0.82)',
+            mes_not_registered: 'rgba(249,115,22,0.82)',
+            actual_ng: 'rgba(34,197,94,0.82)',
+            score_below_threshold: 'rgba(239,68,68,0.82)',
+            low_contrast: 'rgba(168,85,247,0.82)',
+            dust_misfilter: 'rgba(234,179,8,0.82)',
+            not_visible_in_image: 'rgba(100,116,139,0.82)',
+            outside_aoi_area: 'rgba(14,165,233,0.82)',
+            image_issue: 'rgba(244,63,94,0.82)',
+            mes_misjudge: 'rgba(34,197,94,0.82)',
+            confirmed_ng: 'rgba(34,197,94,0.82)',
+            aoi_point_mismatch: 'rgba(249,115,22,0.82)',
+            uncertain: 'rgba(148,163,184,0.82)',
+            other: 'rgba(99,102,241,0.82)',
+            __remaining__: 'rgba(148,163,184,0.82)',
         };
 
         function _formatDate(d) {
@@ -3973,7 +4554,10 @@
             };
             updateWaitingText();
             _waitTimer = setInterval(updateWaitingText, 1000);
+            document.getElementById('mes_workflowTabs').style.display = 'none';
             document.getElementById('mes_statsGrid').style.display = 'none';
+            document.getElementById('mes_trendCard').style.display = 'none';
+            document.getElementById('mes_reviewPanel').style.display = 'none';
             document.getElementById('mes_detailCard').style.display = 'none';
             document.getElementById('mes_exportBtn').disabled = true;
             _data = null;
@@ -4003,7 +4587,10 @@
 
         function render(data) {
             _data = data;
+            document.getElementById('mes_workflowTabs').style.display = 'flex';
             renderCards();
+            renderComparisonTrend();
+            renderReviewPanel();
             renderDetails();
         }
 
@@ -4030,23 +4617,434 @@
                     <div class="filter-hint">${active ? '再次點擊取消篩選' : '點擊篩選明細'}</div>
                 </button>`;
             }).join('');
-            grid.style.display = 'grid';
+            grid.style.display = _activeView === 'comparison' ? 'grid' : 'none';
+        }
+
+        function buildComparisonDailyTrend() {
+            const daily = {};
+            (_data?.records || []).forEach(row => {
+                const date = String(row.request_time || '').slice(0, 10);
+                if (!date) return;
+                if (!daily[date]) {
+                    daily[date] = {
+                        date,
+                        comparable: 0,
+                        correct: 0,
+                        over_detection: 0,
+                        miss_detection: 0,
+                    };
+                }
+                const stats = daily[date];
+                if (row.comparison === 'uncomparable') return;
+                stats.comparable++;
+                if (row.comparison === 'correct') stats.correct++;
+                if (row.comparison === 'over_detection') stats.over_detection++;
+                if (row.comparison === 'miss_detection') stats.miss_detection++;
+            });
+            return Object.values(daily)
+                .filter(stats => stats.comparable > 0)
+                .sort((left, right) => left.date.localeCompare(right.date))
+                .map(stats => ({
+                    ...stats,
+                    accuracy_rate: stats.correct / stats.comparable * 100,
+                    over_detection_rate: stats.over_detection / stats.comparable * 100,
+                    miss_detection_rate: stats.miss_detection / stats.comparable * 100,
+                }));
+        }
+
+        function renderComparisonTrend() {
+            const card = document.getElementById('mes_trendCard');
+            const chartWrap = document.getElementById('mes_trendChartWrap');
+            const empty = document.getElementById('mes_trendEmpty');
+            const visible = Boolean(_data) && _activeView === 'comparison';
+            card.style.display = visible ? 'block' : 'none';
+            if (_comparisonTrendChart) {
+                _comparisonTrendChart.destroy();
+                _comparisonTrendChart = null;
+            }
+            if (!visible) return;
+
+            const rows = buildComparisonDailyTrend();
+            chartWrap.style.display = rows.length ? 'block' : 'none';
+            empty.style.display = rows.length ? 'none' : 'flex';
+            if (!rows.length) return;
+
+            const percentLabel = value => `${Number(value).toFixed(2)}%`;
+            _comparisonTrendChart = new Chart(
+                document.getElementById('mes_comparisonTrendChart').getContext('2d'),
+                {
+                    type: 'line',
+                    plugins: [window.ChartDataLabels],
+                    data: {
+                        labels: rows.map(row => row.date),
+                        datasets: [
+                            {
+                                label: '判定正確率 (%)',
+                                data: rows.map(row => row.accuracy_rate),
+                                borderColor: '#22c55e',
+                                backgroundColor: 'rgba(34,197,94,0.1)',
+                                tension: 0.3,
+                                fill: false,
+                                pointRadius: 4,
+                                pointBackgroundColor: '#22c55e',
+                            },
+                            {
+                                label: '過檢率 (%)',
+                                data: rows.map(row => row.over_detection_rate),
+                                borderColor: '#f59e0b',
+                                backgroundColor: 'rgba(245,158,11,0.1)',
+                                tension: 0.3,
+                                fill: false,
+                                pointRadius: 4,
+                                pointBackgroundColor: '#f59e0b',
+                            },
+                            {
+                                label: '漏檢率 (%)',
+                                data: rows.map(row => row.miss_detection_rate),
+                                borderColor: '#ef4444',
+                                backgroundColor: 'rgba(239,68,68,0.1)',
+                                borderDash: [5, 5],
+                                tension: 0.3,
+                                fill: false,
+                                pointRadius: 4,
+                                pointBackgroundColor: '#ef4444',
+                            },
+                            {
+                                label: '當日可比對數',
+                                data: rows.map(row => row.comparable),
+                                type: 'bar',
+                                backgroundColor: 'rgba(148,163,184,0.16)',
+                                borderRadius: 4,
+                                yAxisID: 'y1',
+                                order: 4,
+                            },
+                        ],
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: { mode: 'index', intersect: false },
+                        plugins: {
+                            legend: { labels: { color: '#94a3b8' } },
+                            datalabels: {
+                                color: context => ['#22c55e', '#f59e0b', '#ef4444', '#94a3b8'][context.datasetIndex],
+                                font: { size: 10, weight: 600 },
+                                align: context => context.dataset.type === 'bar'
+                                    ? 'end'
+                                    : context.datasetIndex === 2 ? 'bottom' : 'top',
+                                anchor: context => context.dataset.type === 'bar' ? 'end' : 'center',
+                                formatter: (value, context) => {
+                                    if (Number(value) === 0) return '';
+                                    return context.dataset.type === 'bar'
+                                        ? Number(value).toLocaleString()
+                                        : percentLabel(value);
+                                },
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: context => {
+                                        const row = rows[context.dataIndex];
+                                        const countByDataset = [
+                                            row.correct,
+                                            row.over_detection,
+                                            row.miss_detection,
+                                        ];
+                                        if (context.dataset.type === 'bar') {
+                                            return `當日可比對數：${row.comparable.toLocaleString()}`;
+                                        }
+                                        const count = countByDataset[context.datasetIndex];
+                                        return `${context.dataset.label}：${percentLabel(context.raw)}（${count} / ${row.comparable}）`;
+                                    },
+                                },
+                            },
+                        },
+                        scales: {
+                            x: {
+                                ticks: { color: '#64748b' },
+                                grid: { color: 'rgba(51,65,85,0.3)' },
+                            },
+                            y: {
+                                min: 0,
+                                title: { display: true, text: '百分比 (%)', color: '#64748b' },
+                                ticks: { color: '#64748b', callback: value => `${value}%` },
+                                grid: { color: 'rgba(51,65,85,0.5)' },
+                            },
+                            y1: {
+                                position: 'right',
+                                min: 0,
+                                title: { display: true, text: '可比對數', color: '#64748b' },
+                                ticks: { color: '#475569', precision: 0 },
+                                grid: { display: false },
+                            },
+                        },
+                    },
+                }
+            );
+        }
+
+        function computeReviewSummary() {
+            const byType = {};
+            Object.keys(REVIEW_TYPE_LABELS).forEach(key => {
+                byType[key] = { total: 0, reviewed: 0, pending: 0, by_category: {} };
+            });
+            let reviewed = 0, pending = 0, confirmedNgReviews = 0, ngSamples = 0;
+            (_data?.records || []).forEach(row => {
+                if (!byType[row.review_type]) return;
+                const stats = byType[row.review_type];
+                stats.total++;
+                const category = row.review?.category || '';
+                if (!category) {
+                    stats.pending++;
+                    pending++;
+                    return;
+                }
+                stats.reviewed++;
+                reviewed++;
+                stats.by_category[category] = (stats.by_category[category] || 0) + 1;
+                if (row.review.confirmed_ng) confirmedNgReviews++;
+                ngSamples += Number(row.review.ng_sample_count || 0);
+            });
+            return {
+                total: reviewed + pending,
+                reviewed,
+                pending,
+                confirmed_ng_reviews: confirmedNgReviews,
+                ng_samples: ngSamples,
+                by_type: byType,
+            };
+        }
+
+        function reviewFilterLabel() {
+            return {
+                pending: '未處理',
+                reviewed: '已處理',
+                confirmed_ng: '已入 NG 庫',
+                over_detection: '過檢候選',
+                miss_detection: '漏檢候選',
+                true_ng: 'AI/MES 皆 NG',
+            }[_reviewFilter] || '';
+        }
+
+        function prepareReasonChartData(stats, limit = 5) {
+            const reviewed = Number(stats?.reviewed || 0);
+            const entries = Object.entries(stats?.by_category || {})
+                .map(([category, count]) => ({
+                    category,
+                    count: Number(count || 0),
+                    label: REVIEW_CATEGORY_LABELS[category] || category,
+                }))
+                .filter(item => item.count > 0)
+                .sort((left, right) =>
+                    right.count - left.count || left.label.localeCompare(right.label)
+                );
+            const topEntries = entries.slice(0, limit);
+            const remainingCount = entries.slice(limit)
+                .reduce((total, item) => total + item.count, 0);
+            if (remainingCount > 0) {
+                topEntries.push({
+                    category: '__remaining__',
+                    count: remainingCount,
+                    label: '其他（合併）',
+                });
+            }
+            return { reviewed, entries: topEntries };
+        }
+
+        function renderReasonGroup(title, chartId, stats) {
+            const chartData = prepareReasonChartData(stats);
+            const content = chartData.entries.length
+                ? `<div class="mes-review-reason-chart">
+                       <canvas id="${chartId}" role="img" aria-label="${title} Top 5 水平長條圖"></canvas>
+                   </div>`
+                : '<div class="mes-review-reason-empty">尚無已確認原因</div>';
+            return `<div class="mes-review-reason-group">
+                <div class="mes-review-reason-header">
+                    <strong>${title} Top 5</strong>
+                    <span class="mes-review-reason-total">已 Review ${chartData.reviewed.toLocaleString()}</span>
+                </div>
+                ${content}
+            </div>`;
+        }
+
+        function destroyReasonCharts() {
+            Object.keys(_reviewReasonCharts).forEach(key => {
+                if (_reviewReasonCharts[key]) {
+                    _reviewReasonCharts[key].destroy();
+                    _reviewReasonCharts[key] = null;
+                }
+            });
+        }
+
+        function renderReasonChart(type, chartId, stats) {
+            const chartData = prepareReasonChartData(stats);
+            if (!chartData.entries.length) return;
+            const canvas = document.getElementById(chartId);
+            if (!canvas) return;
+            const reviewed = chartData.reviewed;
+            _reviewReasonCharts[type] = new Chart(canvas.getContext('2d'), {
+                type: 'bar',
+                plugins: [window.ChartDataLabels],
+                data: {
+                    labels: chartData.entries.map(item => item.label),
+                    datasets: [{
+                        data: chartData.entries.map(item => item.count),
+                        backgroundColor: chartData.entries.map(item =>
+                            REVIEW_REASON_COLORS[item.category] || REVIEW_REASON_COLORS.__remaining__
+                        ),
+                        borderWidth: 0,
+                        borderRadius: 5,
+                        maxBarThickness: 26,
+                    }],
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    layout: { padding: { right: 90 } },
+                    scales: {
+                        x: {
+                            beginAtZero: true,
+                            grace: '25%',
+                            ticks: {
+                                color: '#64748b',
+                                precision: 0,
+                                callback: value => Number(value).toLocaleString(),
+                            },
+                            grid: { color: 'rgba(148,163,184,0.12)' },
+                        },
+                        y: {
+                            ticks: { color: '#cbd5e1', autoSkip: false },
+                            grid: { display: false },
+                        },
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: context => {
+                                    const count = Number(context.raw || 0);
+                                    const pct = reviewed > 0 ? count / reviewed * 100 : 0;
+                                    return `${count.toLocaleString()} 件（${pct.toFixed(1)}%）`;
+                                },
+                            },
+                        },
+                        datalabels: {
+                            color: '#e2e8f0',
+                            anchor: 'end',
+                            align: 'end',
+                            offset: 4,
+                            clip: false,
+                            font: { size: 11, weight: 600 },
+                            formatter: value => {
+                                const count = Number(value || 0);
+                                const pct = reviewed > 0 ? count / reviewed * 100 : 0;
+                                return `${count.toLocaleString()} (${pct.toFixed(1)}%)`;
+                            },
+                        },
+                    },
+                },
+            });
+        }
+
+        function renderReviewPanel() {
+            if (!_data) return;
+            const summary = computeReviewSummary();
+            _data.review_summary = summary;
+            document.getElementById('mes_reviewPendingCount').textContent =
+                summary.pending > 0 ? `(${summary.pending})` : '';
+            document.getElementById('mes_reviewPanel').style.display =
+                _activeView === 'review' ? 'block' : 'none';
+            destroyReasonCharts();
+            if (_activeView !== 'review') return;
+            const globalNgSamples = Number(_data.ng_validation_summary?.samples || 0);
+            const cards = [
+                ['過檢候選', summary.by_type.over_detection.total, `待處理 ${summary.by_type.over_detection.pending}`, 'over_detection'],
+                ['漏檢候選', summary.by_type.miss_detection.total, `待處理 ${summary.by_type.miss_detection.pending}`, 'miss_detection'],
+                ['AI/MES 皆 NG', summary.by_type.true_ng.total, `待確認 ${summary.by_type.true_ng.pending}`, 'true_ng'],
+                ['未 Review', summary.pending, `候選共 ${summary.total}`, 'pending'],
+                ['已 Review', summary.reviewed, `未處理 ${summary.pending}`, 'reviewed'],
+                ['NG 驗證庫', globalNgSamples, `本範圍 ${summary.ng_samples} 張`, 'confirmed_ng'],
+            ];
+            document.getElementById('mes_reviewStats').innerHTML = cards.map(card => {
+                const active = _reviewFilter === card[3];
+                return `
+                <button type="button" class="mes-review-stat${active ? ' active' : ''}"
+                        aria-pressed="${active}"
+                        onclick="mesReportTab.toggleReviewFilter('${card[3]}')">
+                    <div class="mes-review-stat-head">
+                        <div class="label">${card[0]}</div>
+                        <span class="mes-review-stat-action">${active ? '✓ 篩選中' : '可篩選'}</span>
+                    </div>
+                    <div class="value">${Number(card[1]).toLocaleString()}</div>
+                    <div class="detail">${card[2]}</div>
+                    <div class="filter-hint">${active ? '再次點擊取消篩選' : '點擊查看明細 →'}</div>
+                </button>
+            `;
+            }).join('');
+            document.getElementById('mes_reviewReasons').innerHTML =
+                renderReasonGroup('過檢原因統計', 'mes_overReasonChart', summary.by_type.over_detection) +
+                renderReasonGroup('漏檢原因統計', 'mes_missReasonChart', summary.by_type.miss_detection);
+            renderReasonChart(
+                'over_detection',
+                'mes_overReasonChart',
+                summary.by_type.over_detection
+            );
+            renderReasonChart(
+                'miss_detection',
+                'mes_missReasonChart',
+                summary.by_type.miss_detection
+            );
         }
 
         function filteredRecords() {
             if (!_data) return [];
-            if (_activeFilter === 'comparable') {
-                return _data.records.filter(row => row.comparison !== 'uncomparable');
+            let rows = _data.records;
+            if (_activeView === 'comparison') {
+                if (_activeFilter === 'comparable') {
+                    rows = rows.filter(row => row.comparison !== 'uncomparable');
+                } else if (_activeFilter) {
+                    rows = rows.filter(row => row.comparison === _activeFilter);
+                }
+            } else {
+                rows = rows.filter(row => row.review_type);
+                if (_reviewFilter === 'pending') {
+                    rows = rows.filter(row => !row.review?.category);
+                } else if (_reviewFilter === 'reviewed') {
+                    rows = rows.filter(row => row.review?.category);
+                } else if (_reviewFilter === 'confirmed_ng') {
+                    rows = rows.filter(row => row.review?.confirmed_ng);
+                } else if (_reviewFilter) {
+                    rows = rows.filter(row => row.review_type === _reviewFilter);
+                }
             }
-            if (_activeFilter) {
-                return _data.records.filter(row => row.comparison === _activeFilter);
-            }
-            return _data.records;
+            return rows;
+        }
+
+        function switchView(view) {
+            if (!['comparison', 'review'].includes(view)) return;
+            _activeView = view;
+            if (view === 'review' && !_reviewFilter) _reviewFilter = 'pending';
+            document.querySelectorAll('.mes-workflow-tab').forEach(button => {
+                const active = button.dataset.mesView === view;
+                button.classList.toggle('active', active);
+                button.setAttribute('aria-pressed', active ? 'true' : 'false');
+            });
+            renderCards();
+            renderComparisonTrend();
+            renderReviewPanel();
+            renderDetails();
         }
 
         function toggleFilter(filter) {
             _activeFilter = _activeFilter === filter ? null : filter;
             renderCards();
+            renderDetails();
+        }
+
+        function toggleReviewFilter(filter) {
+            _reviewFilter = _reviewFilter === filter ? null : filter;
+            renderReviewPanel();
             renderDetails();
         }
 
@@ -4094,14 +5092,22 @@
             if (!_data) return;
             const filteredRows = filteredRecords();
             const visibleRows = filteredRows.slice(0, 2000);
-            const totalCount = _data.records.length;
-            const filterLabel = FILTER_LABELS[_activeFilter];
-            document.getElementById('mes_detailCount').textContent = filterLabel
-                ? `（${filterLabel}：顯示 ${visibleRows.length.toLocaleString()} / ${filteredRows.length.toLocaleString()} 筆；全部 ${totalCount.toLocaleString()} 筆）`
+            const reviewView = _activeView === 'review';
+            const totalCount = reviewView
+                ? _data.records.filter(row => row.review_type).length
+                : _data.records.length;
+            const activeLabels = reviewView
+                ? reviewFilterLabel()
+                : FILTER_LABELS[_activeFilter];
+            document.getElementById('mes_detailTitle').textContent =
+                reviewView ? '👤 人工 Review 明細' : '📋 逐筆比對明細';
+            document.getElementById('mes_detailTable').classList.toggle('mes-review-view', reviewView);
+            document.getElementById('mes_detailCount').textContent = activeLabels
+                ? `（${activeLabels}：顯示 ${visibleRows.length.toLocaleString()} / ${filteredRows.length.toLocaleString()} 筆；全部 ${totalCount.toLocaleString()} 筆）`
                 : `（顯示 ${visibleRows.length.toLocaleString()} / ${totalCount.toLocaleString()} 筆）`;
             const body = document.getElementById('mes_detailBody');
             if (visibleRows.length === 0) {
-                body.innerHTML = '<tr><td colspan="8" style="text-align:center; color:var(--text-muted); padding:28px;">目前篩選沒有資料</td></tr>';
+                body.innerHTML = `<tr><td colspan="${reviewView ? 10 : 8}" style="text-align:center; color:var(--text-muted); padding:28px;">目前篩選沒有資料</td></tr>`;
             } else {
                 body.innerHTML = visibleRows.map(row => {
                     const result = {
@@ -4118,6 +5124,18 @@
                     const detailButton = row.id != null && Number.isInteger(recordId)
                         ? `<button type="button" class="mes-detail-btn" onclick="mesReportTab.openDetail(${recordId})">查看</button>`
                         : '-';
+                    let reviewCell = '-';
+                    if (row.review_type) {
+                        const review = row.review;
+                        const status = review?.category
+                            ? `<span class="mes-review-badge done">已處理</span><div style="margin-top:4px;">${_esc(REVIEW_CATEGORY_LABELS[review.category] || review.category)}</div>`
+                            : '<span class="mes-review-badge">未處理</span>';
+                        reviewCell = `${status}<button type="button" class="mes-detail-btn" style="margin-top:5px;" onclick="mesReportTab.openReview(${recordId})">${review?.category ? '查看／修改' : '開始 Review'}</button>`;
+                    }
+                    const ngSampleCount = Number(row.review?.ng_sample_count || 0);
+                    const ngCell = ngSampleCount > 0
+                        ? `<span class="badge badge-ok">${ngSampleCount} 張</span>`
+                        : '-';
                     return `<tr>
                         <td>${_esc(row.request_time)}</td>
                         <td><a href="/record/${encodeURIComponent(row.id)}" style="color:var(--accent);">${_esc(row.glass_id)}</a></td>
@@ -4126,6 +5144,8 @@
                         <td><span class="badge ${row.mes_judgment === 'NG' ? 'badge-ng' : 'badge-ok'}">${_esc(row.mes_judgment || '-')}</span></td>
                         <td class="${result[1]}">${result[0]}</td>
                         <td class="mes-defect-cell">${defect}</td>
+                        <td class="mes-review-only" style="white-space:normal; min-width:130px;">${reviewCell}</td>
+                        <td class="mes-review-only">${ngCell}</td>
                         <td>${detailButton}</td>
                     </tr>`;
                 }).join('');
@@ -4203,6 +5223,296 @@
             modal.setAttribute('aria-hidden', 'true');
         }
 
+        function currentReviewRow() {
+            return (_data?.records || []).find(row => Number(row.id) === Number(_reviewRecordId)) || null;
+        }
+
+        function renderReviewCandidates(candidates) {
+            const grid = document.getElementById('mesReviewCandidateGrid');
+            if (!candidates.length) {
+                grid.innerHTML = '<div class="mes-report-detail-state">沒有可用的 AOI 座標 tile。仍可填寫原因統計，但無法加入 NG 驗證庫。</div>';
+                return;
+            }
+            grid.innerHTML = candidates.map(candidate => {
+                const tileId = Number(candidate.tile_result_id);
+                const checked = candidate.is_selected ? ' checked' : '';
+                const disabled = candidate.collectable ? '' : ' disabled';
+                const disabledReason = candidate.collectable
+                    ? ''
+                    : candidate.collectable_reason || '此圖片不可加入 NG 驗證庫';
+                const preview = candidate.source_available
+                    ? `<img src="${_esc(candidate.crop_url)}" alt="${_esc(candidate.image_name)}" loading="lazy">`
+                    : '<div class="mes-report-detail-state" style="aspect-ratio:1; padding:30px 8px;">原圖不存在</div>';
+                const aiResult = candidate.is_anomaly ? 'AI=NG' : 'AI=OK（低於門檻）';
+                const flags = [
+                    candidate.is_dust ? 'Dust' : '',
+                    candidate.is_exclude_zone ? '排除區' : '',
+                    candidate.is_bomb || candidate.image_is_bomb ? 'BOMB' : '',
+                ].filter(Boolean).join('／');
+                return `<label class="mes-review-candidate${candidate.collectable ? '' : ' disabled'}"${disabledReason ? ` title="${_esc(disabledReason)}" aria-disabled="true"` : ''}>
+                    ${preview}
+                    <div class="mes-review-candidate-info">
+                        <div><input type="checkbox" class="mes-review-candidate-check" value="${tileId}"${checked}${disabled}> <strong>${_esc(candidate.lighting)}</strong>｜${_esc(candidate.zone || 'unknown')}</div>
+                        <div>${_esc(candidate.image_name)}</div>
+                        <div>AOI ${_esc(candidate.aoi_defect_code || '-')}｜產品座標 (${_esc(candidate.aoi_product_x)}, ${_esc(candidate.aoi_product_y)})</div>
+                        <div>影像座標 (${_esc(candidate.aoi_image_x)}, ${_esc(candidate.aoi_image_y)})｜Score ${Number(candidate.ai_score || 0).toFixed(4)}</div>
+                        <div style="color:${candidate.is_anomaly ? '#ef4444' : '#f59e0b'};">${aiResult}${flags ? '｜' + _esc(flags) : ''}</div>
+                        ${disabledReason ? `<div class="mes-review-candidate-disabled">不可選：${_esc(disabledReason)}</div>` : ''}
+                    </div>
+                </label>`;
+            }).join('');
+        }
+
+        async function openReview(recordId) {
+            const row = (_data?.records || []).find(item => Number(item.id) === Number(recordId));
+            if (!row || !row.review_type) return;
+            _reviewRecordId = Number(recordId);
+            const requestToken = ++_reviewRequestToken;
+            const modal = document.getElementById('mesReviewModal');
+            modal.classList.add('open');
+            modal.setAttribute('aria-hidden', 'false');
+            document.getElementById('mesReviewTitle').textContent =
+                `${REVIEW_TYPE_LABELS[row.review_type] || row.review_type} Review`;
+            document.getElementById('mesReviewMeta').innerHTML =
+                `Panel：<strong>${_esc(row.glass_id)}</strong>｜Model / 機台：${_esc(row.model_id)} / ${_esc(row.machine_no)}｜` +
+                `AI=${_esc(row.ai_judgment || '-')}｜MES=${_esc(row.mes_judgment || '-')}`;
+
+            const review = row.review || {};
+            const categorySelect = document.getElementById('mesReviewCategory');
+            categorySelect.innerHTML = '<option value="">請選擇</option>' +
+                (REVIEW_CATEGORY_ORDER[row.review_type] || []).map(category =>
+                    `<option value="${category}"${review.category === category ? ' selected' : ''}>${_esc(REVIEW_CATEGORY_LABELS[category] || category)}</option>`
+                ).join('');
+            document.getElementById('mesReviewNote').value = review.note || '';
+            document.getElementById('mesReviewConfirmedNg').checked = Boolean(review.confirmed_ng);
+            document.getElementById('mesReviewDeleteBtn').style.display = review.category ? 'inline-block' : 'none';
+            document.getElementById('mesReviewStatus').textContent = '正在載入 AOI 座標候選圖片...';
+            document.getElementById('mesReviewCandidateGrid').innerHTML =
+                '<div class="mes-report-detail-state">正在載入...</div>';
+
+            try {
+                const response = await fetch('/api/ric/mes-review/candidates?record_id=' + encodeURIComponent(recordId));
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || `HTTP ${response.status}`);
+                if (requestToken !== _reviewRequestToken) return;
+                renderReviewCandidates(data.candidates || []);
+                document.getElementById('mesReviewStatus').textContent = data.message || '';
+            } catch (error) {
+                if (requestToken !== _reviewRequestToken) return;
+                document.getElementById('mesReviewCandidateGrid').innerHTML =
+                    `<div class="mes-report-detail-state">${_esc(error.message)}</div>`;
+                document.getElementById('mesReviewStatus').textContent = 'AOI 圖片載入失敗';
+            }
+        }
+
+        function closeReview() {
+            _reviewRequestToken += 1;
+            _reviewRecordId = null;
+            const modal = document.getElementById('mesReviewModal');
+            modal.classList.remove('open');
+            modal.setAttribute('aria-hidden', 'true');
+        }
+
+        async function saveReview() {
+            const row = currentReviewRow();
+            if (!row) return;
+            const category = document.getElementById('mesReviewCategory').value;
+            const confirmedNg = document.getElementById('mesReviewConfirmedNg').checked;
+            const selectedTileIds = Array.from(
+                document.querySelectorAll('.mes-review-candidate-check:checked')
+            ).map(input => Number(input.value));
+            if (!category) { alert('請選擇確認結果／原因'); return; }
+            if (confirmedNg && selectedTileIds.length === 0) {
+                alert('確認為真實 NG 時，至少要勾選一張肉眼可見缺陷的 AOI 圖片');
+                return;
+            }
+
+            const button = document.getElementById('mesReviewSaveBtn');
+            button.disabled = true;
+            button.textContent = '儲存中...';
+            document.getElementById('mesReviewStatus').textContent =
+                confirmedNg ? '正在保存 NG crop 與 Review...' : '正在保存 Review...';
+            try {
+                const response = await fetch('/api/ric/mes-review', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        record_id: row.id,
+                        review_type: row.review_type,
+                        category,
+                        note: document.getElementById('mesReviewNote').value.trim(),
+                        confirmed_ng: confirmedNg,
+                        selected_tile_ids: selectedTileIds,
+                        mes_judgment: row.mes_judgment,
+                    }),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || `HTTP ${response.status}`);
+                row.review = data.review;
+                _data.ng_validation_summary = data.ng_validation_summary || _data.ng_validation_summary;
+                renderReviewPanel();
+                renderDetails();
+                closeReview();
+            } catch (error) {
+                document.getElementById('mesReviewStatus').textContent = '儲存失敗：' + error.message;
+            } finally {
+                button.disabled = false;
+                button.textContent = '儲存 Review';
+            }
+        }
+
+        async function deleteReview() {
+            const row = currentReviewRow();
+            if (!row || !confirm('確定刪除此 Review？已蒐集的 NG 樣本會停用，但 crop 會保留供稽核。')) return;
+            try {
+                const response = await fetch('/api/ric/mes-review/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ record_id: row.id }),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || `HTTP ${response.status}`);
+                row.review = null;
+                _data.ng_validation_summary = data.ng_validation_summary || _data.ng_validation_summary;
+                renderReviewPanel();
+                renderDetails();
+                closeReview();
+            } catch (error) {
+                document.getElementById('mesReviewStatus').textContent = '刪除失敗：' + error.message;
+            }
+        }
+
+        function openNgDatabase() {
+            const modal = document.getElementById('mesNgDatabaseModal');
+            modal.classList.add('open');
+            modal.setAttribute('aria-hidden', 'false');
+            loadNgDatabase();
+        }
+
+        function filterNgDatabase(modelId) {
+            _ngDatabaseModelId = String(modelId || '');
+            loadNgDatabase();
+        }
+
+        async function loadNgDatabase() {
+            document.getElementById('mesNgDatabaseMeta').textContent = '正在讀取 NG 驗證資料庫...';
+            document.getElementById('mesNgDatabaseFilterCount').textContent = '載入中...';
+            document.getElementById('mesNgDatabaseGrid').innerHTML =
+                '<div class="mes-report-detail-state">正在載入...</div>';
+            try {
+                const params = new URLSearchParams({ limit: '100' });
+                if (_ngDatabaseModelId) params.set('model_id', _ngDatabaseModelId);
+                const response = await fetch('/api/ric/ng-validation?' + params.toString());
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || `HTTP ${response.status}`);
+                const summary = data.summary || {};
+                const modelEntries = Object.entries(summary.by_model || {})
+                    .map(([modelId, count]) => ({
+                        modelId,
+                        filterValue: modelId || '__unassigned__',
+                        label: modelId || '未標示機種',
+                        count: Number(count || 0),
+                    }))
+                    .sort((left, right) => left.label.localeCompare(right.label));
+                if (_ngDatabaseModelId &&
+                        !modelEntries.some(item => item.filterValue === _ngDatabaseModelId)) {
+                    _ngDatabaseModelId = '';
+                }
+                const modelSelect = document.getElementById('mesNgModelFilter');
+                modelSelect.innerHTML =
+                    `<option value="">全部機種 (${Number(summary.samples || 0).toLocaleString()})</option>` +
+                    modelEntries.map(item =>
+                        `<option value="${_esc(item.filterValue)}">${_esc(item.label)} (${item.count.toLocaleString()})</option>`
+                    ).join('');
+                modelSelect.value = _ngDatabaseModelId;
+                const lightingText = Object.entries(summary.by_lighting || {})
+                    .map(([key, value]) => `${key}:${value}`).join('、') || '-';
+                const zoneText = Object.entries(summary.by_zone || {})
+                    .map(([key, value]) => `${key}:${value}`).join('、') || '-';
+                const activeModel = modelEntries.find(
+                    item => item.filterValue === _ngDatabaseModelId
+                );
+                const modelText = activeModel ? activeModel.label : '全部機種';
+                document.getElementById('mesNgDatabaseMeta').innerHTML =
+                    `確認事件：<strong>${Number(summary.reviews || 0).toLocaleString()}</strong>｜` +
+                    `樣本：<strong>${Number(summary.samples || 0).toLocaleString()}</strong>｜` +
+                    `Lighting：${_esc(lightingText)}｜Zone：${_esc(zoneText)}<br>` +
+                    `儲存位置：${_esc(data.base_dir || '')}｜顯示最新 ${Number((data.samples || []).length).toLocaleString()} / ${Number(data.total || 0).toLocaleString()} 張`;
+                document.getElementById('mesNgDatabaseFilterCount').textContent =
+                    `${modelText}：${Number(data.total || 0).toLocaleString()} 張`;
+                const samples = data.samples || [];
+                document.getElementById('mesNgDatabaseGrid').innerHTML = samples.length
+                    ? samples.map(sample => `<div class="mes-ng-card">
+                        <img src="${_esc(sample.file_url)}" alt="${_esc(sample.image_name)}" loading="lazy">
+                        <div class="mes-ng-card-info">
+                            <div><strong>${_esc(sample.glass_id)}</strong></div>
+                            <div class="mes-ng-model">機種：${_esc(sample.model_id || '未標示')}</div>
+                            <div>${_esc(sample.lighting)}｜${_esc(sample.zone || 'unknown')}｜Score ${Number(sample.ai_score || 0).toFixed(4)}</div>
+                            <div>AOI ${_esc(sample.aoi_defect_code || '-')} (${_esc(sample.aoi_product_x)}, ${_esc(sample.aoi_product_y)})</div>
+                            <div>${_esc(REVIEW_CATEGORY_LABELS[sample.category] || sample.category || '-')}</div>
+                            <div class="mes-ng-card-actions">
+                                <button type="button" class="mes-ng-delete"
+                                        data-sample-id="${Number(sample.id)}"
+                                        onclick="mesReportTab.deleteNgSample(${Number(sample.id)})">🗑 刪除圖片</button>
+                            </div>
+                        </div>
+                    </div>`).join('')
+                    : '<div class="mes-report-detail-state">目前篩選條件下沒有 NG 驗證樣本。</div>';
+            } catch (error) {
+                document.getElementById('mesNgDatabaseMeta').textContent = '載入失敗';
+                document.getElementById('mesNgDatabaseFilterCount').textContent = '';
+                document.getElementById('mesNgDatabaseGrid').innerHTML =
+                    `<div class="mes-report-detail-state">${_esc(error.message)}</div>`;
+            }
+        }
+
+        async function deleteNgSample(sampleId) {
+            const id = Number(sampleId);
+            if (!Number.isInteger(id) ||
+                    !confirm('確定刪除此張 NG 驗證圖片？刪除後無法復原，但不會影響原始推論與 Review 紀錄。')) {
+                return;
+            }
+            const button = document.querySelector(`.mes-ng-delete[data-sample-id="${id}"]`);
+            if (button) {
+                button.disabled = true;
+                button.textContent = '刪除中...';
+            }
+            try {
+                const response = await fetch('/api/ric/ng-validation/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sample_id: id }),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || `HTTP ${response.status}`);
+                const summary = data.summary || {};
+                if (_data) {
+                    _data.ng_validation_summary = summary;
+                    renderReviewPanel();
+                }
+                const modelKey = _ngDatabaseModelId === '__unassigned__'
+                    ? ''
+                    : _ngDatabaseModelId;
+                if (_ngDatabaseModelId &&
+                        !Object.prototype.hasOwnProperty.call(summary.by_model || {}, modelKey)) {
+                    _ngDatabaseModelId = '';
+                }
+                await loadNgDatabase();
+            } catch (error) {
+                alert('刪除失敗：' + error.message);
+                if (button) {
+                    button.disabled = false;
+                    button.textContent = '🗑 刪除圖片';
+                }
+            }
+        }
+
+        function closeNgDatabase() {
+            const modal = document.getElementById('mesNgDatabaseModal');
+            modal.classList.remove('open');
+            modal.setAttribute('aria-hidden', 'true');
+        }
+
         function csvCell(value) {
             return `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
         }
@@ -4214,7 +5524,11 @@
                 return;
             }
 
-            const headers = ['推論時間', '玻璃 ID', 'Model', '機台', 'AI', 'MES', '比對結果', 'MES 有效不良'];
+            const headers = [
+                '推論時間', '玻璃 ID', 'Model', '機台', 'AI', 'MES', '比對結果',
+                'MES 有效不良', 'Review類型', 'Review原因',
+                '確認NG', 'NG樣本數', 'Review備註',
+            ];
             const lines = [headers.map(csvCell).join(',')];
             rows.forEach(row => {
                 const defect = qualifyingDefects(row)
@@ -4229,6 +5543,11 @@
                     row.mes_judgment,
                     resultLabel(row.comparison),
                     defect,
+                    REVIEW_TYPE_LABELS[row.review_type] || '',
+                    REVIEW_CATEGORY_LABELS[row.review?.category] || row.review?.category || '',
+                    row.review?.confirmed_ng ? 'Y' : '',
+                    row.review?.ng_sample_count || 0,
+                    row.review?.note || '',
                 ].map(csvCell).join(','));
             });
 
@@ -4245,13 +5564,20 @@
 
         return {
             get _loaded() { return _loaded; },
-            quickFilter, customFilter, loadData, toggleFilter, toggleIgnoreAoiOk,
+            quickFilter, customFilter, loadData, switchView,
+            toggleFilter, toggleReviewFilter, toggleIgnoreAoiOk,
             exportCSV, openDetail, closeDetail,
+            openReview, closeReview, saveReview, deleteReview,
+            openNgDatabase, closeNgDatabase, filterNgDatabase, deleteNgSample,
         };
     })();
 
     document.addEventListener('keydown', event => {
-        if (event.key === 'Escape') mesReportTab.closeDetail();
+        if (event.key === 'Escape') {
+            mesReportTab.closeDetail();
+            mesReportTab.closeReview();
+            mesReportTab.closeNgDatabase();
+        }
     });
     inferenceTab.quickFilter('today');
 </script>

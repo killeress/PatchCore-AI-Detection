@@ -154,7 +154,7 @@ def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
     }
 
     for facility, expected_dsn, expected_source in (
-        ("MOD1", "10.172.3.55:1521/pncmr", "MOD1 / PNCMR / MERDA1.WP_DEFTHIS"),
+        ("MOD1", "10.172.3.55:1521/pncmr", "MOD1 / PNCMR / MCRDA1.WP_DEFTHIS"),
         ("MOD2", "10.174.1.79:1521/pnemr", "MOD2 / PNEMR / MERDA1.WP_DEFTHIS"),
     ):
         repository = OracleMESRepository({**base_config, "facility": facility})
@@ -166,6 +166,7 @@ def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
 
     sql, binds = executed[-1]
     assert "FROM MERDA1.WP_DEFTHIS" in sql
+    assert "FROM MCRDA1.WP_DEFTHIS" in executed[0][0]
     assert "DEFT_OPER = :deft_oper" in sql
     assert "IF_NEWER = 'Y'" in sql
     assert "TRANS_DATE >= :min_trans_date" in sql
@@ -234,6 +235,57 @@ def test_oracle_repository_fetches_all_wp_defthis_columns_on_demand(monkeypatch)
         "deft_oper": "1600",
         "min_trans_date": "2026-07-19 08.00.00.000000",
     }
+
+
+def test_oracle_repository_uses_actual_mod1_wp_defthis_columns(monkeypatch):
+    monkeypatch.setattr(capi_mes_report, "ORACLE_MES_PASSWORD", "secret")
+    executed = []
+    columns = ("PNL_ID", "TRANS_NBR", "COMMENTS", "TRANS_DATE")
+    values = ("PANEL-1", 14, "MOD1資料", "2026-07-19 09.00.00.123000")
+
+    class FakeCursor:
+        description = [(column,) for column in columns]
+
+        def execute(self, sql, binds):
+            executed.append((sql, binds))
+
+        def __iter__(self):
+            return iter([values])
+
+        def close(self):
+            pass
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def close(self):
+            pass
+
+    fake_oracledb = SimpleNamespace(
+        makedsn=lambda host, port, service_name: f"{host}:{port}/{service_name}",
+        connect=lambda **kwargs: FakeConnection(),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "oracledb", fake_oracledb)
+    repository = OracleMESRepository({
+        "facility": "MOD1",
+        "oracle": {
+            "user": "MISSELECT",
+            "tns": {
+                "MOD1": {"host": "10.172.3.55", "port": 1521, "service_name": "pncmr"},
+            },
+        },
+    })
+
+    rows = repository.fetch_report_details("PANEL-1", datetime(2026, 7, 19, 8, 0, 0))
+
+    assert list(rows[0]) == list(columns)
+    assert rows[0]["COMMENTS"] == "MOD1資料"
+    sql, binds = executed[0]
+    assert "SELECT *" in " ".join(sql.split())
+    assert "FROM MCRDA1.WP_DEFTHIS" in sql
+    assert "SYS_TRANS_FLAG" not in sql
+    assert binds["panel_id"] == "PANEL-1"
 
 
 def test_mes_comparison_records_use_factory_day_window():
