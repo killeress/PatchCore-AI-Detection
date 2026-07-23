@@ -1,4 +1,4 @@
-"""模型庫 CRUD：列表、啟用/停用、刪除、ZIP 匯出。"""
+"""模型庫 CRUD：掃描/同步、列表、啟用/停用、刪除、ZIP 匯出。"""
 from __future__ import annotations
 import io
 import json
@@ -9,7 +9,7 @@ import sqlite3
 import zipfile
 import yaml
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from capi_train_new import ZONES
 
@@ -140,6 +140,245 @@ def list_bundles_grouped(db) -> Dict[str, List[dict]]:
     for b in bundles:
         grouped.setdefault(b["machine_id"], []).append(b)
     return grouped
+
+
+_BUNDLE_MARKER_FILES = ("manifest.json", "machine_config.yaml", "thresholds.json")
+
+
+def _resolve_model_root(server_config_path: Path) -> Path:
+    """Resolve the training output root used for folder-based bundle discovery."""
+    server_config_path = Path(server_config_path).resolve()
+    try:
+        config = _load_yaml(server_config_path)
+    except (OSError, ValueError, yaml.YAMLError):
+        config = {}
+    training = config.get("training") or {}
+    raw_root = training.get("output_root", "model")
+    root = Path(str(raw_root))
+    return (root if root.is_absolute() else server_config_path.parent / root).resolve()
+
+
+def _resolve_bundle_path(server_config_path: Path, raw_path: str) -> Path:
+    path = Path(str(raw_path))
+    return (path if path.is_absolute() else Path(server_config_path).resolve().parent / path).resolve()
+
+
+def _path_is_under(root: Path, path: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _iter_model_mapping_paths(model_mapping: Any):
+    if not isinstance(model_mapping, dict):
+        return
+    for value in model_mapping.values():
+        if isinstance(value, dict):
+            for nested in value.values():
+                if isinstance(nested, str) and nested.strip():
+                    yield nested
+        elif isinstance(value, str) and value.strip():
+            yield value
+
+
+def _inspect_bundle(bundle_path: Path, model_root: Path) -> dict:
+    """Validate one directory and derive the model_registry metadata."""
+    bundle_path = Path(bundle_path).resolve()
+    model_root = Path(model_root).resolve()
+    if not _path_is_under(model_root, bundle_path) or bundle_path == model_root:
+        raise ValueError("bundle 路徑不在模型根目錄內")
+    if not bundle_path.is_dir():
+        raise ValueError("bundle 不是資料夾")
+
+    missing = [name for name in _BUNDLE_MARKER_FILES if not (bundle_path / name).is_file()]
+    if missing:
+        raise ValueError(f"缺少必要檔案：{', '.join(missing)}")
+
+    try:
+        manifest = json.loads((bundle_path / "manifest.json").read_text(encoding="utf-8"))
+        config = _load_yaml(bundle_path / "machine_config.yaml")
+        json.loads((bundle_path / "thresholds.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise ValueError(f"bundle metadata 無法解析：{exc}") from exc
+
+    if not isinstance(manifest, dict) or not isinstance(config, dict):
+        raise ValueError("manifest.json 或 machine_config.yaml 格式無效")
+
+    machine_id = str(manifest.get("machine_id") or config.get("machine_id") or "").strip()
+    if not machine_id:
+        raise ValueError("找不到 machine_id")
+    config_machine_id = str(config.get("machine_id") or "").strip()
+    if config_machine_id and config_machine_id != machine_id:
+        raise ValueError(
+            f"machine_id 不一致：manifest={machine_id}，yaml={config_machine_id}"
+        )
+
+    mapping_paths = list(_iter_model_mapping_paths(config.get("model_mapping")))
+    if not mapping_paths:
+        raise ValueError("machine_config.yaml 沒有 model_mapping")
+
+    path_mismatches = []
+    missing_models = []
+    for raw_path in mapping_paths:
+        model_name = Path(raw_path).name
+        local_path = bundle_path / model_name
+        if not local_path.is_file():
+            missing_models.append(model_name)
+            continue
+        expected = str(local_path.resolve())
+        if str(Path(raw_path).resolve()) != expected:
+            path_mismatches.append({"source": raw_path, "target": expected})
+
+    if missing_models:
+        raise ValueError(f"model_mapping 指向的模型不存在：{', '.join(sorted(set(missing_models)))}")
+
+    model_files = list(bundle_path.glob("*.pt"))
+    if not model_files:
+        raise ValueError("找不到 .pt 模型檔")
+
+    tiles_per_unit = manifest.get("tiles_per_unit") or {}
+    if not isinstance(tiles_per_unit, dict):
+        tiles_per_unit = {}
+
+    def _unit_total(field: str, suffix: str = "") -> int:
+        return sum(
+            int(value.get(field, 0) or 0)
+            for key, value in tiles_per_unit.items()
+            if isinstance(value, dict) and (not suffix or str(key).endswith(suffix))
+        )
+
+    trained_at = str(manifest.get("trained_at") or config.get("trained_at") or "").strip()
+    if not trained_at:
+        raise ValueError("找不到 trained_at")
+
+    return {
+        "path": str(bundle_path),
+        "name": bundle_path.name,
+        "machine_id": machine_id,
+        "trained_at": trained_at,
+        "panel_count": int(manifest.get("panel_count", 0) or 0),
+        "inner_tile_count": _unit_total("train", "-inner"),
+        "edge_tile_count": _unit_total("train", "-edge"),
+        "ng_tile_count": _unit_total("ng"),
+        "bundle_size_bytes": sum(path.stat().st_size for path in model_files),
+        "source_job_id": str(manifest.get("trained_with_job_id") or "").strip(),
+        "path_mismatches": path_mismatches,
+    }
+
+
+def discover_model_bundles(db, server_config_path: Path) -> dict:
+    """Find valid, not-yet-registered bundle folders under training.output_root."""
+    model_root = _resolve_model_root(server_config_path)
+    registered_paths = {
+        _resolve_bundle_path(server_config_path, bundle["bundle_path"])
+        for bundle in db.list_model_bundles()
+    }
+    discovered = []
+    invalid = []
+
+    if not model_root.is_dir():
+        return {
+            "model_root": str(model_root),
+            "bundles": discovered,
+            "invalid": invalid,
+        }
+
+    for bundle_path in sorted(model_root.iterdir(), key=lambda path: path.name.lower()):
+        if not bundle_path.is_dir():
+            continue
+        if not any((bundle_path / marker).exists() for marker in _BUNDLE_MARKER_FILES):
+            continue
+        try:
+            info = _inspect_bundle(bundle_path, model_root)
+        except ValueError as exc:
+            invalid.append({"path": str(bundle_path.resolve()), "error": str(exc)})
+            continue
+        if bundle_path.resolve() in registered_paths:
+            continue
+        discovered.append(info)
+
+    return {
+        "model_root": str(model_root),
+        "bundles": discovered,
+        "invalid": invalid,
+    }
+
+
+def _rewrite_bundle_model_paths(bundle: dict) -> None:
+    """Repair copied absolute model paths after the bundle was validated."""
+    mismatches = bundle.get("path_mismatches") or []
+    if not mismatches:
+        return
+    yaml_path = Path(bundle["path"]) / "machine_config.yaml"
+    text = yaml_path.read_text(encoding="utf-8")
+    for mismatch in mismatches:
+        text = text.replace(mismatch["source"], mismatch["target"])
+    yaml_path.write_text(text, encoding="utf-8")
+
+
+def sync_discovered_bundles(
+    db,
+    server_config_path: Path,
+    bundle_paths: Optional[List[str]] = None,
+) -> dict:
+    """Register discovered bundles without activating or changing model_configs."""
+    discovery = discover_model_bundles(db, server_config_path)
+    selected = None
+    if bundle_paths is not None:
+        model_root = Path(discovery["model_root"]).resolve()
+        selected = {
+            _resolve_bundle_path(server_config_path, raw_path)
+            for raw_path in bundle_paths
+            if _path_is_under(model_root, _resolve_bundle_path(server_config_path, raw_path))
+        }
+
+    imported = []
+    skipped = []
+    for bundle in discovery["bundles"]:
+        if selected is not None and Path(bundle["path"]).resolve() not in selected:
+            continue
+        _rewrite_bundle_model_paths(bundle)
+        source_job_id = bundle.get("source_job_id") or ""
+        linked_job_id = None
+        if source_job_id:
+            try:
+                linked_job_id = source_job_id if db.get_training_job(source_job_id) else None
+            except Exception:
+                linked_job_id = None
+        notes = "資料夾掃描匯入"
+        if source_job_id and not linked_job_id:
+            notes += f"；原始 job {source_job_id} 的訓練資料未同步"
+        try:
+            bundle_id = db.register_model_bundle({
+                "machine_id": bundle["machine_id"],
+                "bundle_path": bundle["path"],
+                "trained_at": bundle["trained_at"],
+                "panel_count": bundle["panel_count"],
+                "inner_tile_count": bundle["inner_tile_count"],
+                "edge_tile_count": bundle["edge_tile_count"],
+                "ng_tile_count": bundle["ng_tile_count"],
+                "bundle_size_bytes": bundle["bundle_size_bytes"],
+                "job_id": linked_job_id,
+                "notes": notes,
+            })
+        except sqlite3.IntegrityError:
+            skipped.append({"path": bundle["path"], "reason": "已存在或同步競速"})
+            continue
+        imported.append({
+            "id": bundle_id,
+            "machine_id": bundle["machine_id"],
+            "path": bundle["path"],
+            "path_rewritten": bool(bundle.get("path_mismatches")),
+        })
+
+    return {
+        "model_root": discovery["model_root"],
+        "imported": imported,
+        "skipped": skipped,
+        "invalid": discovery["invalid"],
+    }
 
 
 def get_bundle_detail(db, bundle_id: int) -> Optional[dict]:

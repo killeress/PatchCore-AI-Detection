@@ -1725,6 +1725,56 @@ def test_handle_models_list_filters_by_machine_id():
     assert body["bundles"] == [{"id": 1, "machine_id": "M"}]
 
 
+def test_handle_models_discover_and_sync(tmp_path):
+    import json as json_mod
+    import yaml as yaml_mod
+    from capi_database import CAPIDatabase
+
+    server_config = tmp_path / "server_config.yaml"
+    server_config.write_text(yaml_mod.dump({"training": {"output_root": "model"}}))
+    bundle = tmp_path / "model" / "M-20260722"
+    bundle.mkdir(parents=True)
+    (bundle / "G0F00000-inner.pt").write_bytes(b"inner")
+    (bundle / "G0F00000-edge.pt").write_bytes(b"edge")
+    (bundle / "manifest.json").write_text(json_mod.dumps({
+        "machine_id": "M",
+        "trained_at": "2026-07-22T10:00:00",
+        "panel_count": 1,
+        "tiles_per_unit": {},
+    }), encoding="utf-8")
+    (bundle / "thresholds.json").write_text("{}", encoding="utf-8")
+    (bundle / "machine_config.yaml").write_text(yaml_mod.dump({
+        "machine_id": "M",
+        "model_mapping": {
+            "G0F00000": {
+                "inner": str(bundle / "G0F00000-inner.pt"),
+                "edge": str(bundle / "G0F00000-edge.pt"),
+            },
+        },
+    }), encoding="utf-8")
+
+    db = CAPIDatabase(tmp_path / "test.db")
+    server = MagicMock()
+    server.database = db
+    server.server_config_path = str(server_config)
+
+    discover_handler = _make_handler_with_server(server, "/api/models/discover")
+    discover_handler._handle_models_discover()
+    discovered = json.loads(discover_handler._sent_response[0]["body"])
+    assert len(discovered["bundles"]) == 1
+
+    payload = json.dumps({"bundle_paths": [discovered["bundles"][0]["path"]]}).encode()
+    sync_handler = _make_handler_with_server(server, "/api/models/sync")
+    sync_handler.rfile = io.BytesIO(payload)
+    sync_handler.headers.get = MagicMock(return_value=str(len(payload)))
+    sync_handler._handle_models_sync()
+
+    result = json.loads(sync_handler._sent_response[0]["body"])
+    assert sync_handler._sent_response[0]["status"] == 200
+    assert len(result["imported"]) == 1
+    assert len(db.list_model_bundles()) == 1
+
+
 def test_handle_models_update_notes_persists_free_text(tmp_path):
     from capi_database import CAPIDatabase
 

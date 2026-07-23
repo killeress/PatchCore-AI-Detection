@@ -47,6 +47,15 @@
   .mlib-thr-edit { background: transparent; border: 1px solid #45475a; color: #a6adc8; padding: 0 5px; border-radius: 3px; font-size: .72rem; cursor: pointer; margin-left: 4px; }
   .mlib-thr-edit:hover { background: #45475a; color: #cdd6f4; }
   .mlib-empty { color: #a6adc8; padding: 22px; text-align: center; font-size: .85rem; }
+  .mlib-discovery {
+    background: rgba(249,226,175,.12); border: 1px solid #f9e2af;
+    border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; color: #f9e2af;
+  }
+  .mlib-discovery-title { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+  .mlib-discovery-list { margin: 8px 0; color: #cdd6f4; font-size: .78rem; }
+  .mlib-discovery-list div { margin: 3px 0; overflow-wrap: anywhere; }
+  .mlib-discovery-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .mlib-discovery-warn { color: #f38ba8; font-size: .75rem; margin-top: 8px; }
   .mlib-note-row {
     display: grid; grid-template-columns: 42px 1fr auto minmax(70px, auto);
     gap: 8px; align-items: center; margin-top: 10px;
@@ -180,6 +189,17 @@
     <div style="display:flex;gap:8px;align-items:center;">
       <a href="/models/retrain-pool" style="background:#1e1e2e;color:#a6adc8;border:1px solid #45475a;padding:7px 14px;border-radius:5px;font-weight:700;text-decoration:none;font-size:.85rem;">重訓 Pool</a>
       <a href="/train/new" style="background:#89b4fa;color:#1e1e2e;padding:7px 16px;border-radius:5px;font-weight:700;text-decoration:none;font-size:.85rem;">+ 新機種訓練</a>
+    </div>
+  </div>
+
+  <div id="modelDiscovery" class="mlib-discovery" style="display:none;">
+    <div class="mlib-discovery-title">📦 發現未同步模型</div>
+    <div id="modelDiscoveryRoot" style="font-size:.74rem;margin-top:4px;"></div>
+    <div id="modelDiscoveryList" class="mlib-discovery-list"></div>
+    <div id="modelDiscoveryWarnings" class="mlib-discovery-warn"></div>
+    <div class="mlib-discovery-actions">
+      <button class="mlib-btn" onclick="scanModelBundles()">重新掃描</button>
+      <button id="modelDiscoverySync" class="mlib-btn mlib-btn-primary" onclick="syncDiscoveredModels()">同步到模型庫</button>
     </div>
   </div>
 
@@ -429,6 +449,67 @@ function escapeHtml(value) {
 function renderText(value) {
   return escapeHtml(value == null ? '—' : value).replace(/\n/g, '<br>');
 }
+
+let discoveredModelBundles = [];
+
+async function scanModelBundles() {
+  const box = document.getElementById('modelDiscovery');
+  const root = document.getElementById('modelDiscoveryRoot');
+  const list = document.getElementById('modelDiscoveryList');
+  const warnings = document.getElementById('modelDiscoveryWarnings');
+  const syncButton = document.getElementById('modelDiscoverySync');
+  try {
+    const resp = await fetch('/api/models/discover');
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+    discoveredModelBundles = data.bundles || [];
+    root.textContent = `掃描路徑：${data.model_root || '—'}`;
+    list.innerHTML = discoveredModelBundles.length
+      ? discoveredModelBundles.map(b =>
+          `<div><b>${escapeHtml(b.machine_id)}</b> · ${escapeHtml(b.name)} `
+          + `（Panel ${b.panel_count}，${(b.bundle_size_bytes / 1e6).toFixed(1)} MB）`
+          + (b.path_mismatches && b.path_mismatches.length
+            ? ' · 將修正模型路徑' : '')
+          + `<br><code>${escapeHtml(b.path)}</code></div>`
+        ).join('')
+      : '<div>目前沒有新的完整 bundle。</div>';
+    warnings.innerHTML = (data.invalid || []).map(item =>
+      `⚠ ${escapeHtml(item.path)}：${escapeHtml(item.error)}`
+    ).join('<br>');
+    box.style.display = (discoveredModelBundles.length || (data.invalid || []).length)
+      ? 'block' : 'none';
+    syncButton.disabled = !discoveredModelBundles.length;
+  } catch (e) {
+    box.style.display = 'block';
+    root.textContent = '';
+    list.textContent = `掃描失敗：${e.message}`;
+    warnings.textContent = '';
+    syncButton.disabled = true;
+  }
+}
+
+async function syncDiscoveredModels() {
+  if (!discoveredModelBundles.length) return;
+  if (!confirm(`確定同步 ${discoveredModelBundles.length} 個模型到模型庫？\n同步後仍需另外按「啟用」。`)) return;
+  const button = document.getElementById('modelDiscoverySync');
+  button.disabled = true;
+  try {
+    const resp = await fetch('/api/models/sync', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({bundle_paths: discoveredModelBundles.map(b => b.path)}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+    alert(`${data.message || '同步完成'}\n請在模型庫中按「啟用」，再重啟 server。`);
+    location.reload();
+  } catch (e) {
+    button.disabled = false;
+    alert('同步失敗：' + e.message);
+  }
+}
+
+scanModelBundles();
 
 function doAction(id, action) {
   if (action === 'activate') {

@@ -3175,6 +3175,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/models":
                 self._handle_models_page()
                 return
+            elif path == "/api/models/discover":
+                self._handle_models_discover()
+                return
             elif path == "/api/models":
                 self._handle_models_list()
                 return
@@ -3334,6 +3337,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path.startswith("/api/train/new/start_training/"):
                 self._handle_train_new_start_training()
+                return
+            elif path == "/api/models/sync":
+                self._handle_models_sync()
                 return
             elif path.startswith("/api/models/") and path.endswith("/activate"):
                 self._handle_models_activate()
@@ -12743,6 +12749,46 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         machine_id = (qs.get("machine_id") or [""])[0].strip() or None
         bundles = self._capi_server_instance.database.list_model_bundles(machine_id=machine_id)
         self._send_json({"bundles": bundles})
+
+    def _handle_models_discover(self):
+        """GET /api/models/discover → 掃描模型根目錄但不寫入 DB。"""
+        from capi_model_registry import discover_model_bundles
+        result = discover_model_bundles(
+            self._capi_server_instance.database,
+            server_config_path=Path(self._capi_server_instance.server_config_path),
+        )
+        self._send_json(result)
+
+    def _handle_models_sync(self):
+        """POST /api/models/sync → 將指定或全部發現的 bundle 寫入 model_registry。"""
+        content_length = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            payload = json.loads(self.rfile.read(content_length).decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._send_json({"error": f"無效 JSON: {exc}"}, status=400)
+            return
+
+        bundle_paths = payload.get("bundle_paths")
+        if bundle_paths is not None:
+            if not isinstance(bundle_paths, list) or not all(
+                isinstance(path, str) for path in bundle_paths
+            ):
+                self._send_json({"error": "bundle_paths 必須是字串陣列"}, status=400)
+                return
+
+        from capi_model_registry import sync_discovered_bundles
+        try:
+            result = sync_discovered_bundles(
+                self._capi_server_instance.database,
+                server_config_path=Path(self._capi_server_instance.server_config_path),
+                bundle_paths=bundle_paths,
+            )
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
+        result["message"] = f"已同步 {len(result['imported'])} 個模型"
+        self._send_json(result)
 
     def _handle_models_detail(self):
         """GET /api/models/<id>/detail"""
