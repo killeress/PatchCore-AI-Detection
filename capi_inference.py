@@ -7694,6 +7694,48 @@ class CAPIInferencer:
                                 f"tol={tolerance} matched={ed.is_bomb}"
                             )
 
+        # === Bomb line 共識機制 ===
+        # 若同一條 bomb line 已有 ≥3 個 tile 通過形態驗證，
+        # 則位置匹配但形態不通過的 tile 也視為 bomb（線已被確認存在）
+        for bomb in active_bombs:
+            if bomb.defect_type != "line":
+                continue
+            for result in results:
+                if not result.anomaly_tiles or result.raw_bounds is None:
+                    continue
+                img_prefix = result.image_path.stem
+                if not (img_prefix == bomb.image_prefix or
+                        img_prefix.startswith(bomb.image_prefix + "_")):
+                    continue
+                confirmed = sum(
+                    1 for t, _, _ in result.anomaly_tiles
+                    if t.is_bomb and t.bomb_defect_code == bomb.defect_code
+                )
+                if confirmed < 3:
+                    continue
+                for tile, _score, anomaly_map in result.anomaly_tiles:
+                    if getattr(tile, "is_aoi_coord_below_threshold", False):
+                        continue
+                    if tile.is_bomb:
+                        continue
+                    peak_x = getattr(tile, "anomaly_peak_x", tile.center[0])
+                    peak_y = getattr(tile, "anomaly_peak_y", tile.center[1])
+                    is_bomb, bomb_code = self.check_bomb_match(
+                        img_prefix, peak_x, peak_y, result.raw_bounds,
+                        anomaly_map=anomaly_map, product_resolution=product_resolution,
+                        bomb_list=[bomb], skip_shape_check=True,
+                    )
+                    if not is_bomb and tile.is_aoi_coord_tile:
+                        tile_cx, tile_cy = tile.center
+                        is_bomb, bomb_code = self.check_bomb_match(
+                            img_prefix, tile_cx, tile_cy, result.raw_bounds,
+                            anomaly_map=anomaly_map, product_resolution=product_resolution,
+                            bomb_list=[bomb], skip_shape_check=True,
+                        )
+                    if is_bomb:
+                        tile.is_bomb = True
+                        tile.bomb_defect_code = bomb_code
+
         # Per-image bomb 匹配摘要 log（對齊 v1 line 5236）
         from collections import Counter
         for result in results:
