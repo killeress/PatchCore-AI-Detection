@@ -993,6 +993,68 @@ def test_horizontal_line_bomb_keeps_aoi_coord_within_y_tolerance(tmp_path):
     assert tile.bomb_defect_code == "UNKNOWN"
 
 
+def test_line_bomb_consensus_marks_position_matches_with_non_line_heatmaps(tmp_path):
+    from capi_inference import CAPIInferencer, ImageResult, TileInfo
+
+    cfg = _make_config(tmp_path)
+    cfg.bomb_match_tolerance = 20
+    cfg.bomb_line_min_aspect_ratio = 1.2
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+
+    line_map = np.zeros((512, 512), dtype=np.float32)
+    line_map[64:448, 250:262] = 1.0
+    square_map = np.zeros((512, 512), dtype=np.float32)
+    square_map[250:262, 250:262] = 1.0
+
+    tiles = []
+    anomaly_tiles = []
+    for tile_id, (tile_y, aoi_y, anomaly_map) in enumerate([
+        (0, 200, line_map),
+        (200, 400, line_map),
+        (400, 600, line_map),
+        (0, 77, square_map),
+        (0, 29, square_map),
+    ]):
+        tile = TileInfo(
+            tile_id=tile_id,
+            x=704,
+            y=tile_y,
+            width=512,
+            height=512,
+            image=np.zeros((512, 512), dtype=np.uint8),
+            zone="edge" if aoi_y < 100 else "inner",
+        )
+        tile.is_aoi_coord_tile = True
+        tile.aoi_product_x = 960
+        tile.aoi_product_y = aoi_y
+        tiles.append(tile)
+        anomaly_tiles.append((tile, 0.375, anomaly_map))
+
+    result = ImageResult(
+        image_path=Path("WGF50500_test.png"),
+        image_size=(1920, 1080),
+        otsu_bounds=(0, 0, 1920, 1080),
+        exclusion_regions=[],
+        tiles=tiles,
+        excluded_tile_count=0,
+        processed_tile_count=len(tiles),
+        processing_time=0.0,
+        anomaly_tiles=anomaly_tiles,
+        raw_bounds=(0, 0, 1920, 1080),
+    )
+    bomb_info = {
+        "image_prefix": "WGF50500",
+        "defect_type": "line",
+        "coordinates": [(960, 1), (960, 1080)],
+    }
+
+    inferencer._apply_bomb_postprocess([result], bomb_info, (1920, 1080))
+
+    assert all(tile.is_bomb for tile in tiles)
+    assert all(tile.bomb_defect_code == "UNKNOWN" for tile in tiles)
+
+
 def test_client_point_bomb_can_match_multiple_aoi_tiles_within_tolerance(tmp_path):
     from capi_inference import CAPIInferencer, ImageResult, TileInfo
 
