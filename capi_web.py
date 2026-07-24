@@ -16,11 +16,13 @@ import socket
 import subprocess
 import sys
 import tempfile
+import gzip
 import json
 import hashlib
 import html
 import inspect
 import secrets
+import time
 import urllib.parse
 import mimetypes
 from contextlib import contextmanager
@@ -3431,16 +3433,69 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content.encode("utf-8"))
 
-    def _send_json(self, data, status=200, headers: Optional[Dict[str, str]] = None):
-        content = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+    def _send_json(
+        self,
+        data,
+        status=200,
+        headers: Optional[Dict[str, str]] = None,
+        *,
+        compact: bool = False,
+        compress: bool = False,
+        server_timing: Optional[Dict[str, float]] = None,
+    ):
+        serialize_started = time.monotonic()
+        dump_kwargs = (
+            {"separators": (",", ":")}
+            if compact else
+            {"indent": 2}
+        )
+        content = json.dumps(data, ensure_ascii=False, default=str, **dump_kwargs)
         content_bytes = content.encode("utf-8")
+        serialize_seconds = time.monotonic() - serialize_started
+        uncompressed_size = len(content_bytes)
+
+        response_headers = dict(headers or {})
+        compression_seconds = 0.0
+        accept_encoding = str(self.headers.get("Accept-Encoding", "") if self.headers else "")
+        compressed = (
+            compress
+            and len(content_bytes) >= 1024
+            and "gzip" in accept_encoding.lower()
+        )
+        if compress:
+            response_headers["Vary"] = "Accept-Encoding"
+        if compressed:
+            compression_started = time.monotonic()
+            content_bytes = gzip.compress(content_bytes, compresslevel=5)
+            compression_seconds = time.monotonic() - compression_started
+            response_headers["Content-Encoding"] = "gzip"
+
+        if server_timing:
+            timing_parts = [
+                f"{name};dur={max(0.0, float(seconds)) * 1000.0:.1f}"
+                for name, seconds in server_timing.items()
+            ]
+            timing_parts.append(f"json;dur={serialize_seconds * 1000.0:.1f}")
+            if compressed:
+                timing_parts.append(f"gzip;dur={compression_seconds * 1000.0:.1f}")
+            response_headers["Server-Timing"] = ", ".join(timing_parts)
+
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(content_bytes)))
-        for name, value in (headers or {}).items():
+        for name, value in response_headers.items():
             self.send_header(name, value)
         self.end_headers()
+        write_started = time.monotonic()
         self.wfile.write(content_bytes)
+        return {
+            "serialize_seconds": serialize_seconds,
+            "compression_seconds": compression_seconds,
+            "write_seconds": time.monotonic() - write_started,
+            "uncompressed_bytes": uncompressed_size,
+            "response_bytes": len(content_bytes),
+            "compressed": compressed,
+        }
 
     def _redirect(self, location: str, headers: Optional[Dict[str, str]] = None):
         body = f"<html><body>Redirecting to {html.escape(location)}</body></html>"
@@ -4144,6 +4199,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _handle_api_status(self):
         """API: 即時伺服器狀態"""
+        cors_headers = {"Access-Control-Allow-Origin": "*"}
         try:
             if hasattr(self, 'status_tracker') and self.status_tracker:
                 status = self.status_tracker.get_status()
@@ -4277,9 +4333,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 status.setdefault("server", {})["image_prefix_labels"] = \
                     self._dashboard_lighting_labels(self.db, list(threshold_mapping))
 
-            self._send_json(status)
+            self._send_json(status, headers=cors_headers)
         except Exception as e:
-            self._send_error(500, f"Cannot get server status: {e}")
+            self._send_json(
+                {"error": f"Cannot get server status: {e}"},
+                status=500,
+                headers=cors_headers,
+            )
 
     def _handle_api_version(self):
         """API: deployed release version."""
@@ -5851,6 +5911,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _handle_mes_comparison_api(self, query: dict):
         """API: 將 AI 推論結果與 MES Report 人工不良判定比對。"""
+        request_started = time.monotonic()
+        stage_timings = {}
         try:
             if not self.db:
                 self._send_json({"success": False, "error": "DB not available"}, status=503)
@@ -5860,12 +5922,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             end_date = query.get("end_date", [""])[0] or None
             ignore_aoi_ok = query.get("ignore_aoi_ok", ["0"])[0] == "1"
             panel_id = query.get("panel_id", [""])[0].strip()
+            stage_started = time.monotonic()
             records = self.db.get_mes_comparison_records(
                 start_date,
                 end_date,
                 ignore_aoi_ok=ignore_aoi_ok,
                 panel_id=panel_id or None,
             )
+            stage_timings["sqlite"] = time.monotonic() - stage_started
 
             from capi_mes_report import (
                 OracleMESRepository,
@@ -5879,6 +5943,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             mes_report_config = server_config.get("mes_report") or {}
             repository = OracleMESRepository(mes_report_config)
             defects = {}
+            stage_started = time.monotonic()
             if records:
                 cutoffs = [_parse_datetime(row.get("request_time")) for row in records]
                 valid_cutoffs = [value for value in cutoffs if value is not None]
@@ -5894,8 +5959,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         panel_ids,
                         min(valid_cutoffs),
                     )
+            stage_timings["oracle"] = time.monotonic() - stage_started
 
-            report = build_mes_comparison(records, defects)
+            stage_started = time.monotonic()
+            report = build_mes_comparison(
+                records,
+                defects,
+                host_name=_get_host_identity(),
+            )
+            stage_timings["comparison"] = time.monotonic() - stage_started
+            stage_started = time.monotonic()
             review_rows = self.db.get_mes_comparison_reviews([
                 row.get("id") for row in report["records"] if row.get("id") is not None
             ])
@@ -5917,8 +5990,36 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "ignore_aoi_ok": ignore_aoi_ok,
                 "panel_id": panel_id,
             })
-            logger.info("[MES Report] Comparison response ready: records=%d", len(report["records"]))
-            self._send_json(report)
+            stage_timings["review"] = time.monotonic() - stage_started
+            stage_timings["backend"] = time.monotonic() - request_started
+            report["timing"] = {
+                f"{name}_seconds": round(seconds, 3)
+                for name, seconds in stage_timings.items()
+            }
+            logger.info(
+                "[MES Report] Comparison response ready: records=%d, sqlite=%.2fs, oracle=%.2fs, comparison=%.2fs, review=%.2fs, backend=%.2fs",
+                len(report["records"]),
+                stage_timings["sqlite"],
+                stage_timings["oracle"],
+                stage_timings["comparison"],
+                stage_timings["review"],
+                stage_timings["backend"],
+            )
+            send_metrics = self._send_json(
+                report,
+                compact=True,
+                compress=True,
+                server_timing=stage_timings,
+            )
+            logger.info(
+                "[MES Report] Response sent: json=%.2fs, gzip=%.2fs, write=%.2fs, size=%d/%d bytes, compressed=%s",
+                send_metrics["serialize_seconds"],
+                send_metrics["compression_seconds"],
+                send_metrics["write_seconds"],
+                send_metrics["response_bytes"],
+                send_metrics["uncompressed_bytes"],
+                send_metrics["compressed"],
+            )
         except ValueError as e:
             self._send_json({"success": False, "error": str(e)}, status=400)
         except Exception as e:
