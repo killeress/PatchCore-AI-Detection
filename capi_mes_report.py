@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from datetime import datetime
 from functools import lru_cache
@@ -38,6 +39,10 @@ WP_DEFTHIS_SCHEMA_BY_FACILITY = {
     "MOD1": "MCRDA1",
     "MOD2": "MERDA1",
 }
+
+COORDINATE_MATCH_TOLERANCE = 20
+CAPIHM_HOSTNAME = "capihm"
+CAPIHM_AOI_HEIGHT = 1080
 
 
 class MESReportConfigurationError(RuntimeError):
@@ -97,6 +102,106 @@ def _has_coordinate(value) -> bool:
     return value is not None and str(value).strip() != ""
 
 
+def _coordinate_value(value) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _aoi_coordinates(raw_value) -> List[tuple]:
+    try:
+        payload = json.loads(raw_value or "{}")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(payload, Mapping):
+        return []
+
+    coordinates = []
+    seen = set()
+    for entries in payload.values():
+        if not isinstance(entries, (list, tuple)):
+            continue
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            x = _coordinate_value(entry.get("product_x"))
+            y = _coordinate_value(entry.get("product_y"))
+            if x is None or y is None or (x, y) in seen:
+                continue
+            seen.add((x, y))
+            coordinates.append((x, y))
+    return coordinates
+
+
+def _mes_coordinate_in_aoi_space(x: float, y: float, host_name: str) -> tuple:
+    if str(host_name or "").strip().lower() == CAPIHM_HOSTNAME:
+        # CAPIHM 的 MES 人工座標是將 AOI 橫式畫面順時針轉成直式後輸入。
+        return y, CAPIHM_AOI_HEIGHT - x
+    return x, y
+
+
+def _build_coordinate_match(
+    defects: Sequence[Mapping],
+    raw_aoi_coordinates,
+    host_name: str,
+) -> Dict:
+    mes_coordinates = []
+    for defect in defects:
+        x = _coordinate_value(defect.get("x_axis"))
+        y = _coordinate_value(defect.get("y_axis"))
+        if x is not None and y is not None:
+            mes_coordinates.append((x, y))
+
+    transform = (
+        "capihm_portrait_clockwise"
+        if str(host_name or "").strip().lower() == CAPIHM_HOSTNAME
+        else "none"
+    )
+    result = {
+        "status": "not_applicable",
+        "matched_count": 0,
+        "mes_coordinate_count": len(mes_coordinates),
+        "tolerance": COORDINATE_MATCH_TOLERANCE,
+        "method": "coordinate_only",
+        "transform": transform,
+    }
+    if not defects:
+        return result
+    if not mes_coordinates:
+        result["status"] = "invalid_mes_coordinates"
+        return result
+
+    aoi_coordinates = _aoi_coordinates(raw_aoi_coordinates)
+    if not aoi_coordinates:
+        result["status"] = "no_aoi_coordinates"
+        return result
+
+    for mes_x, mes_y in mes_coordinates:
+        compared_x, compared_y = _mes_coordinate_in_aoi_space(
+            mes_x,
+            mes_y,
+            host_name,
+        )
+        if any(
+            abs(aoi_x - compared_x) <= COORDINATE_MATCH_TOLERANCE
+            and abs(aoi_y - compared_y) <= COORDINATE_MATCH_TOLERANCE
+            for aoi_x, aoi_y in aoi_coordinates
+        ):
+            result["matched_count"] += 1
+
+    if result["matched_count"] == len(mes_coordinates):
+        result["status"] = "matched"
+    elif result["matched_count"]:
+        result["status"] = "partial"
+    else:
+        result["status"] = "unmatched"
+    return result
+
+
 def classify_mes_judgment(rows: Iterable[Mapping], cutoff: datetime) -> Dict:
     """依 LOGIC.xlsx 判斷一筆 AI 推論之後，MES 是否有人員有效不良。"""
     defect_code_catalog = load_defect_code_catalog()
@@ -142,7 +247,12 @@ def _rate(count: int, total: int) -> float:
     return round(count * 100.0 / total, 2) if total else 0.0
 
 
-def build_mes_comparison(records: Sequence[Mapping], defects_by_panel: Mapping[str, Sequence[Mapping]]) -> Dict:
+def build_mes_comparison(
+    records: Sequence[Mapping],
+    defects_by_panel: Mapping[str, Sequence[Mapping]],
+    *,
+    host_name: str = "",
+) -> Dict:
     """組合逐筆結果與以全部可比對推論為分母的過／漏檢統計。"""
     normalized_defects = {
         str(panel_id or "").strip().upper(): rows
@@ -183,6 +293,11 @@ def build_mes_comparison(records: Sequence[Mapping], defects_by_panel: Mapping[s
             review_type = ""
 
         first_defect = mes_result["qualifying_defects"][0] if mes_result["qualifying_defects"] else None
+        coordinate_match = _build_coordinate_match(
+            mes_result["qualifying_defects"],
+            record.get("aoi_machine_coords"),
+            host_name,
+        )
         output.append({
             "id": record.get("id"),
             "glass_id": glass_id,
@@ -199,6 +314,7 @@ def build_mes_comparison(records: Sequence[Mapping], defects_by_panel: Mapping[s
             "qualifying_defect_count": len(mes_result["qualifying_defects"]),
             "qualifying_defects": mes_result["qualifying_defects"],
             "first_defect": first_defect,
+            "coordinate_match": coordinate_match,
         })
 
     total = correct + over_detection + miss_detection
@@ -328,6 +444,13 @@ class OracleMESRepository:
                         WHERE DEFT_OPER = :deft_oper
                           AND IF_NEWER = 'Y'
                           AND TRANS_DATE >= :min_trans_date
+                          AND (
+                              DFCT_CODE IS NULL
+                              OR TRIM(DFCT_CODE) IS NULL
+                              OR UPPER(TRIM(DFCT_CODE)) <> 'PCK21'
+                          )
+                          AND TRIM(X_AXIS) IS NOT NULL
+                          AND TRIM(Y_AXIS) IS NOT NULL
                           AND PNL_ID IN ({placeholders})
                         ORDER BY PNL_ID, TRANS_DATE
                     """

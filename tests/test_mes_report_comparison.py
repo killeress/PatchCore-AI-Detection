@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 import sqlite3
 from types import SimpleNamespace
 
@@ -116,6 +117,86 @@ def test_build_mes_comparison_calculates_over_and_miss_rates():
     assert report["records"][3]["first_defect"]["dfct_code"] == "PCM01"
 
 
+def test_build_mes_comparison_matches_coordinates_with_inclusive_20_tolerance():
+    records = [
+        {
+            "id": 1,
+            "glass_id": "MATCH",
+            "ai_judgment": "OK",
+            "request_time": "2026-07-19 08:00:00",
+            "aoi_machine_coords": json.dumps({
+                "G0F00000": [
+                    {"defect_code": "PCDK2", "product_x": 720, "product_y": 300},
+                ],
+                "W0F00000": [
+                    {"defect_code": "PCDK2", "product_x": 720, "product_y": 300},
+                ],
+            }),
+        },
+        {
+            "id": 2,
+            "glass_id": "MISS",
+            "ai_judgment": "OK",
+            "request_time": "2026-07-19 08:00:00",
+            "aoi_machine_coords": json.dumps({
+                "STANDARD": [
+                    {"defect_code": "PCDK2", "product_x": 721, "product_y": 300},
+                ],
+            }),
+        },
+        {
+            "id": 3,
+            "glass_id": "NO-AOI",
+            "ai_judgment": "OK",
+            "request_time": "2026-07-19 08:00:00",
+            "aoi_machine_coords": "",
+        },
+    ]
+    defects = {
+        panel_id: [{
+            **_defect("2026-07-19 09:00:00", x=700, y=320),
+            "pnl_id": panel_id,
+        }]
+        for panel_id in ("MATCH", "MISS", "NO-AOI")
+    }
+
+    report = build_mes_comparison(records, defects)
+    matches = {row["id"]: row["coordinate_match"] for row in report["records"]}
+
+    assert matches[1]["status"] == "matched"
+    assert matches[1]["matched_count"] == 1
+    assert matches[2]["status"] == "unmatched"
+    assert matches[3]["status"] == "no_aoi_coordinates"
+
+
+def test_build_mes_comparison_rotates_capihm_portrait_coordinates():
+    record = {
+        "id": 1,
+        "glass_id": "CAPIHM-PANEL",
+        "ai_judgment": "OK",
+        "request_time": "2026-07-19 08:00:00",
+        "aoi_machine_coords": json.dumps({
+            "STANDARD": [
+                {"defect_code": "PCDK2", "product_x": 338, "product_y": 360},
+            ],
+        }),
+    }
+    defects = {
+        "CAPIHM-PANEL": [{
+            **_defect("2026-07-19 09:00:00", x=700, y=320),
+            "pnl_id": "CAPIHM-PANEL",
+        }],
+    }
+
+    regular = build_mes_comparison([record], defects)
+    capihm = build_mes_comparison([record], defects, host_name="CAPIHM")
+
+    assert regular["records"][0]["coordinate_match"]["status"] == "unmatched"
+    match = capihm["records"][0]["coordinate_match"]
+    assert match["status"] == "matched"
+    assert match["transform"] == "capihm_portrait_clockwise"
+
+
 def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
     monkeypatch.setattr(capi_mes_report, "ORACLE_MES_PASSWORD", "secret")
     executed = []
@@ -170,6 +251,9 @@ def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
     assert "DEFT_OPER = :deft_oper" in sql
     assert "IF_NEWER = 'Y'" in sql
     assert "TRANS_DATE >= :min_trans_date" in sql
+    assert "UPPER(TRIM(DFCT_CODE)) <> 'PCK21'" in sql
+    assert "TRIM(X_AXIS) IS NOT NULL" in sql
+    assert "TRIM(Y_AXIS) IS NOT NULL" in sql
     assert binds["min_trans_date"] == "2026-07-19 08.00.00.123000"
     assert binds["panel_0"] == "PANEL-1"
     assert binds["deft_oper"] == "1600"
@@ -299,7 +383,8 @@ def test_mes_comparison_records_use_factory_day_window():
             machine_no TEXT,
             ai_judgment TEXT,
             image_dir TEXT,
-            request_time TEXT
+            request_time TEXT,
+            aoi_machine_coords TEXT
         )
     """)
     conn.executemany(
@@ -321,6 +406,43 @@ def test_mes_comparison_records_use_factory_day_window():
     assert [row["glass_id"] for row in rows] == ["END", "START"]
 
 
+def test_mes_comparison_datetime_index_supports_range_and_order():
+    uri = "file:mes_index_test?mode=memory&cache=shared"
+    keeper = sqlite3.connect(uri, uri=True)
+    keeper.row_factory = sqlite3.Row
+    db = CAPIDatabase.__new__(CAPIDatabase)
+
+    def connect():
+        conn = sqlite3.connect(uri, uri=True)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    db._get_conn = connect
+    db._init_db()
+    try:
+        indexes = {
+            row["name"]
+            for row in keeper.execute("PRAGMA index_list('inference_records')")
+        }
+        plan = keeper.execute(
+            """EXPLAIN QUERY PLAN
+               SELECT id
+                 FROM inference_records
+                WHERE datetime(request_time) >= datetime(?)
+                  AND datetime(request_time) < datetime(?)
+                ORDER BY datetime(request_time) DESC, id DESC""",
+            ("2026-06-25 07:30:00", "2026-07-25 07:30:00"),
+        ).fetchall()
+    finally:
+        keeper.close()
+
+    assert "idx_records_request_time_dt" in indexes
+    assert any(
+        "SEARCH inference_records USING INDEX idx_records_request_time_dt" in row["detail"]
+        for row in plan
+    )
+
+
 def test_mes_comparison_records_can_ignore_aoi_ok():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -333,7 +455,8 @@ def test_mes_comparison_records_can_ignore_aoi_ok():
             machine_judgment TEXT,
             ai_judgment TEXT,
             image_dir TEXT,
-            request_time TEXT
+            request_time TEXT,
+            aoi_machine_coords TEXT
         )
     """)
     conn.executemany(
@@ -370,7 +493,8 @@ def test_mes_comparison_records_can_filter_by_panel_id_case_insensitive_partial_
             machine_no TEXT,
             ai_judgment TEXT,
             image_dir TEXT,
-            request_time TEXT
+            request_time TEXT,
+            aoi_machine_coords TEXT
         )
     """)
     conn.executemany(

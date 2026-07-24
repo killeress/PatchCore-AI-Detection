@@ -130,6 +130,12 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "capi_patchcore_feature_cleaning.py" in names
         assert "capi_scratch_batch.py" in names
         assert "capi_scratch_export.py" in names
+        assert "central_dashboard/index.html" in names
+        assert "central_dashboard/app.js" in names
+        assert "central_dashboard/config.js" in names
+        assert "central_dashboard/styles.css" in names
+        assert "central_dashboard/README.md" in names
+        assert "capi_mes_credentials.py" not in names
         assert "scripts/over_review_poc/train_final_model.py" in names
         assert "scratch_classifier.py" in names
         assert "scratch_filter.py" in names

@@ -1068,6 +1068,24 @@
         color: var(--text-muted);
     }
 
+    .mes-reason-filter-chip {
+        display: none;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 9px;
+        border: 1px solid rgba(96, 165, 250, 0.55);
+        border-radius: 999px;
+        background: rgba(59, 130, 246, 0.15);
+        color: #bfdbfe;
+        font-size: 0.74rem;
+        font-weight: 600;
+        cursor: pointer;
+    }
+
+    .mes-reason-filter-chip:hover {
+        background: rgba(59, 130, 246, 0.25);
+    }
+
     .mes-review-layout {
         display: grid;
         grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
@@ -2022,6 +2040,8 @@
     <div class="inf-chart-card" id="mes_detailCard" style="display:none;">
         <div class="detail-header mes-detail-header">
             <h3><span id="mes_detailTitle">📋 逐筆比對明細</span> <span id="mes_detailCount" style="color:var(--text-muted); font-weight:400;"></span></h3>
+            <button type="button" class="mes-reason-filter-chip" id="mes_reasonFilterChip"
+                    onclick="mesReportTab.clearReviewReasonFilter()" title="清除原因篩選"></button>
             <button type="button" class="btn-export" id="mes_exportBtn" onclick="mesReportTab.exportCSV()" disabled>📥 導出 CSV</button>
         </div>
         <div class="mes-table-wrap">
@@ -2029,6 +2049,7 @@
                 <thead><tr>
                     <th>推論時間</th><th>玻璃 ID</th><th>Model / 機台</th>
                     <th>AI</th><th>MES</th><th>比對結果</th><th>MES 有效不良</th>
+                    <th class="mes-review-only">座標匹配</th>
                     <th class="mes-review-only">人工 Review</th>
                     <th class="mes-review-only">NG 樣本</th>
                     <th>MES 完整數據</th>
@@ -4412,6 +4433,7 @@
         let _ignoreAoiOk = false;
         let _activeView = 'comparison';
         let _reviewFilter = null;
+        let _reviewReasonFilter = null;
         let _reviewRecordId = null;
         let _reviewRequestToken = 0;
         let _comparisonTrendChart = null;
@@ -4825,6 +4847,12 @@
             }[_reviewFilter] || '';
         }
 
+        function reviewReasonFilterLabel() {
+            if (!_reviewReasonFilter) return '';
+            const typeLabel = REVIEW_TYPE_LABELS[_reviewReasonFilter.type] || _reviewReasonFilter.type;
+            return `${typeLabel}原因：${_reviewReasonFilter.label}`;
+        }
+
         function prepareReasonChartData(stats, limit = 5) {
             const reviewed = Number(stats?.reviewed || 0);
             const entries = Object.entries(stats?.by_category || {})
@@ -4837,14 +4865,19 @@
                 .sort((left, right) =>
                     right.count - left.count || left.label.localeCompare(right.label)
                 );
-            const topEntries = entries.slice(0, limit);
-            const remainingCount = entries.slice(limit)
+            const topEntries = entries.slice(0, limit).map(item => ({
+                ...item,
+                categories: [item.category],
+            }));
+            const remainingEntries = entries.slice(limit);
+            const remainingCount = remainingEntries
                 .reduce((total, item) => total + item.count, 0);
             if (remainingCount > 0) {
                 topEntries.push({
                     category: '__remaining__',
                     count: remainingCount,
                     label: '其他（合併）',
+                    categories: remainingEntries.map(item => item.category),
                 });
             }
             return { reviewed, entries: topEntries };
@@ -4860,7 +4893,7 @@
             return `<div class="mes-review-reason-group">
                 <div class="mes-review-reason-header">
                     <strong>${title} Top 5</strong>
-                    <span class="mes-review-reason-total">已 Review ${chartData.reviewed.toLocaleString()}</span>
+                    <span class="mes-review-reason-total">已 Review ${chartData.reviewed.toLocaleString()}｜點擊長條篩選</span>
                 </div>
                 ${content}
             </div>`;
@@ -4891,7 +4924,16 @@
                         backgroundColor: chartData.entries.map(item =>
                             REVIEW_REASON_COLORS[item.category] || REVIEW_REASON_COLORS.__remaining__
                         ),
-                        borderWidth: 0,
+                        borderColor: chartData.entries.map(item =>
+                            _reviewReasonFilter?.type === type &&
+                            _reviewReasonFilter?.key === item.category
+                                ? '#e2e8f0'
+                                : 'transparent'
+                        ),
+                        borderWidth: chartData.entries.map(item =>
+                            _reviewReasonFilter?.type === type &&
+                            _reviewReasonFilter?.key === item.category ? 2 : 0
+                        ),
                         borderRadius: 5,
                         maxBarThickness: 26,
                     }],
@@ -4902,6 +4944,15 @@
                     maintainAspectRatio: false,
                     animation: false,
                     layout: { padding: { right: 90 } },
+                    onClick: (_event, elements) => {
+                        if (!elements.length) return;
+                        const item = chartData.entries[elements[0].index];
+                        toggleReviewReasonFilter(type, item);
+                    },
+                    onHover: (event, elements) => {
+                        const target = event.native && event.native.target;
+                        if (target) target.style.cursor = elements.length ? 'pointer' : 'default';
+                    },
                     scales: {
                         x: {
                             beginAtZero: true,
@@ -5008,7 +5059,13 @@
                 }
             } else {
                 rows = rows.filter(row => row.review_type);
-                if (_reviewFilter === 'pending') {
+                if (_reviewReasonFilter) {
+                    const categories = new Set(_reviewReasonFilter.categories);
+                    rows = rows.filter(row =>
+                        row.review_type === _reviewReasonFilter.type &&
+                        categories.has(row.review?.category)
+                    );
+                } else if (_reviewFilter === 'pending') {
                     rows = rows.filter(row => !row.review?.category);
                 } else if (_reviewFilter === 'reviewed') {
                     rows = rows.filter(row => row.review?.category);
@@ -5024,7 +5081,7 @@
         function switchView(view) {
             if (!['comparison', 'review'].includes(view)) return;
             _activeView = view;
-            if (view === 'review' && !_reviewFilter) _reviewFilter = 'pending';
+            if (view === 'review' && !_reviewFilter && !_reviewReasonFilter) _reviewFilter = 'pending';
             document.querySelectorAll('.mes-workflow-tab').forEach(button => {
                 const active = button.dataset.mesView === view;
                 button.classList.toggle('active', active);
@@ -5043,7 +5100,29 @@
         }
 
         function toggleReviewFilter(filter) {
+            _reviewReasonFilter = null;
             _reviewFilter = _reviewFilter === filter ? null : filter;
+            renderReviewPanel();
+            renderDetails();
+        }
+
+        function toggleReviewReasonFilter(type, item) {
+            const isSameFilter = _reviewReasonFilter?.type === type &&
+                _reviewReasonFilter?.key === item.category;
+            _reviewReasonFilter = isSameFilter ? null : {
+                type,
+                key: item.category,
+                label: item.label,
+                categories: item.categories.slice(),
+            };
+            _reviewFilter = null;
+            renderReviewPanel();
+            renderDetails();
+        }
+
+        function clearReviewReasonFilter() {
+            if (!_reviewReasonFilter) return;
+            _reviewReasonFilter = null;
             renderReviewPanel();
             renderDetails();
         }
@@ -5088,6 +5167,44 @@
             </div>`;
         }
 
+        function coordinateMatchText(match) {
+            const labels = {
+                matched: '匹配',
+                partial: '部分匹配',
+                unmatched: '未匹配',
+                no_aoi_coordinates: '無 AOI 座標',
+                invalid_mes_coordinates: 'MES 座標異常',
+                not_applicable: '不適用',
+            };
+            const status = match?.status || 'not_applicable';
+            const label = labels[status] || status;
+            if (['matched', 'partial', 'unmatched'].includes(status)) {
+                return `${label} ${Number(match.matched_count || 0)}/${Number(match.mes_coordinate_count || 0)}`;
+            }
+            return label;
+        }
+
+        function coordinateMatchHtml(row) {
+            const match = row.coordinate_match || {};
+            const status = match.status || 'not_applicable';
+            if (status === 'not_applicable') return '-';
+            const badgeClass = status === 'matched'
+                ? 'badge-ok'
+                : status === 'unmatched'
+                    ? 'badge-ng'
+                    : 'badge-err';
+            const title = match.transform === 'capihm_portrait_clockwise'
+                ? `X/Y 允差皆為 ±${Number(match.tolerance || 20)}；CAPIHM 已將 MES 直式座標轉回 AOI 橫式`
+                : `X/Y 允差皆為 ±${Number(match.tolerance || 20)}`;
+            const count = ['matched', 'partial', 'unmatched'].includes(status)
+                ? `<div class="mes-defect-meta">${Number(match.matched_count || 0)} / ${Number(match.mes_coordinate_count || 0)}</div>`
+                : '';
+            const transform = match.transform === 'capihm_portrait_clockwise'
+                ? '<div class="mes-defect-meta">CAPIHM 旋轉換算</div>'
+                : '';
+            return `<span class="badge ${badgeClass}" title="${_esc(title)}">${_esc(coordinateMatchText(match).replace(/\s+\d+\/\d+$/, ''))}</span>${count}${transform}`;
+        }
+
         function renderDetails() {
             if (!_data) return;
             const filteredRows = filteredRecords();
@@ -5097,8 +5214,12 @@
                 ? _data.records.filter(row => row.review_type).length
                 : _data.records.length;
             const activeLabels = reviewView
-                ? reviewFilterLabel()
+                ? reviewReasonFilterLabel() || reviewFilterLabel()
                 : FILTER_LABELS[_activeFilter];
+            const reasonFilterChip = document.getElementById('mes_reasonFilterChip');
+            const reasonFilterLabel = reviewView ? reviewReasonFilterLabel() : '';
+            reasonFilterChip.textContent = reasonFilterLabel ? `${reasonFilterLabel} ×` : '';
+            reasonFilterChip.style.display = reasonFilterLabel ? 'inline-flex' : 'none';
             document.getElementById('mes_detailTitle').textContent =
                 reviewView ? '👤 人工 Review 明細' : '📋 逐筆比對明細';
             document.getElementById('mes_detailTable').classList.toggle('mes-review-view', reviewView);
@@ -5107,7 +5228,7 @@
                 : `（顯示 ${visibleRows.length.toLocaleString()} / ${totalCount.toLocaleString()} 筆）`;
             const body = document.getElementById('mes_detailBody');
             if (visibleRows.length === 0) {
-                body.innerHTML = `<tr><td colspan="${reviewView ? 10 : 8}" style="text-align:center; color:var(--text-muted); padding:28px;">目前篩選沒有資料</td></tr>`;
+                body.innerHTML = `<tr><td colspan="${reviewView ? 11 : 8}" style="text-align:center; color:var(--text-muted); padding:28px;">目前篩選沒有資料</td></tr>`;
             } else {
                 body.innerHTML = visibleRows.map(row => {
                     const result = {
@@ -5144,6 +5265,7 @@
                         <td><span class="badge ${row.mes_judgment === 'NG' ? 'badge-ng' : 'badge-ok'}">${_esc(row.mes_judgment || '-')}</span></td>
                         <td class="${result[1]}">${result[0]}</td>
                         <td class="mes-defect-cell">${defect}</td>
+                        <td class="mes-review-only" style="white-space:normal; min-width:100px;">${coordinateMatchHtml(row)}</td>
                         <td class="mes-review-only" style="white-space:normal; min-width:130px;">${reviewCell}</td>
                         <td class="mes-review-only">${ngCell}</td>
                         <td>${detailButton}</td>
@@ -5526,7 +5648,7 @@
 
             const headers = [
                 '推論時間', '玻璃 ID', 'Model', '機台', 'AI', 'MES', '比對結果',
-                'MES 有效不良', 'Review類型', 'Review原因',
+                'MES 有效不良', '座標匹配', 'Review類型', 'Review原因',
                 '確認NG', 'NG樣本數', 'Review備註',
             ];
             const lines = [headers.map(csvCell).join(',')];
@@ -5543,6 +5665,7 @@
                     row.mes_judgment,
                     resultLabel(row.comparison),
                     defect,
+                    coordinateMatchText(row.coordinate_match),
                     REVIEW_TYPE_LABELS[row.review_type] || '',
                     REVIEW_CATEGORY_LABELS[row.review?.category] || row.review?.category || '',
                     row.review?.confirmed_ng ? 'Y' : '',
@@ -5556,8 +5679,10 @@
             const link = document.createElement('a');
             const start = document.getElementById('mes_startDate').value || 'start';
             const end = document.getElementById('mes_endDate').value || 'end';
+            const filterName = _reviewReasonFilter?.key ||
+                (_activeView === 'review' ? _reviewFilter : _activeFilter) || 'all';
             link.href = url;
-            link.download = `mes_report_comparison_${start}_${end}_${_activeFilter || 'all'}.csv`;
+            link.download = `mes_report_comparison_${start}_${end}_${filterName}.csv`;
             link.click();
             URL.revokeObjectURL(url);
         }
@@ -5566,6 +5691,7 @@
             get _loaded() { return _loaded; },
             quickFilter, customFilter, loadData, switchView,
             toggleFilter, toggleReviewFilter, toggleIgnoreAoiOk,
+            clearReviewReasonFilter,
             exportCSV, openDetail, closeDetail,
             openReview, closeReview, saveReview, deleteReview,
             openNgDatabase, closeNgDatabase, filterNgDatabase, deleteNgSample,

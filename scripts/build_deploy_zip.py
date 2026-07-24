@@ -75,6 +75,11 @@ CODE_FILES = [
     "templates/train_new/step3_review.html",
     "templates/train_new/step4_progress.html",
     "templates/train_new/step5_done.html",
+    "central_dashboard/README.md",
+    "central_dashboard/app.js",
+    "central_dashboard/config.js",
+    "central_dashboard/index.html",
+    "central_dashboard/styles.css",
     "static/favicon.svg",
     "scripts/over_review_poc/train_final_model.py",
     "tools/build_bga_tiles.py",
@@ -120,7 +125,6 @@ GENERATED_METADATA_FILES = {
 }
 
 BACKBONE_CACHE_DIR = "deployment/torch_hub_cache"
-LOCAL_MES_CREDENTIALS_FILE = PROJECT_ROOT / "capi_mes_credentials.py"
 CODEONLY_EXCLUDED_PREFIXES = (
     "templates/imgs/",
     "static/",
@@ -153,7 +157,7 @@ training:
   gpu_memory_fraction: 0.50
 
 # Report 數據比對：每台設備只選擇一個廠別 Oracle TNS
-# MES 連線資訊由部署包提供，各設備不需另外設定。
+# MES 密碼需在各設備本機另行配置；不要將 capi_mes_credentials.py 放入部署包。
 mes_report:
   facility: MOD2
   oracle:
@@ -188,6 +192,7 @@ README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明
    - 加 fallback_model_config
    - 加 training 區段
    - 加 mes_report.oracle 區段
+   - 若啟用 MES Report，請在 production 本機建立或保留 capi_mes_credentials.py；此檔不會放入 ZIP
    - 安裝 Oracle thin driver：python3 -m pip install "oracledb>=2.0.0"
 
 4. 確認 deployment/torch_hub_cache/ 目錄完整（應 ~264 MB）：
@@ -246,6 +251,7 @@ README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明
 
 - README.txt（本檔）
 - server_config_patch.yaml.example
+- central_dashboard/（CAPI AI 中控看板）
 - 8 個 capi_*.py 模組（含修改與新增）
 - 6 個 templates/train_new/*.html + templates/models.html
 - deployment/torch_hub_cache/（HuggingFace timm wide_resnet50_2 cache）
@@ -257,6 +263,7 @@ CODEONLY_README_NOTE = """\
 【本 ZIP 為 code-only 增量包】
 - 不含 deployment/torch_hub_cache/（之前的部署包已含，production 機應已落地）
 - 不含 templates/imgs/ 與 static/（沿用 production 機已有的靜態資源）
+- 不含 capi_mes_credentials.py；MES 密碼需在設備本機另行配置
 - 解壓覆蓋既有檔即可，不會動到 backbone cache 目錄
 """
 
@@ -549,10 +556,6 @@ def main(argv=None) -> int:
 
     if not args.patch_only:
         _validate_required_code_files(codeonly=args.no_backbone)
-    if not LOCAL_MES_CREDENTIALS_FILE.is_file():
-        raise FileNotFoundError(
-            "local MES credentials file missing: capi_mes_credentials.py"
-        )
 
     changed_files = _git_changed_files()
     if args.patch_only:
@@ -628,9 +631,6 @@ def main(argv=None) -> int:
             _add_file(zf, src, rel.replace("\\", "/"), entries)
             code_size += entries[-1]["size_bytes"]
             print(f"  + {rel}")
-        _add_file(zf, LOCAL_MES_CREDENTIALS_FILE, "capi_mes_credentials.py", entries)
-        code_size += entries[-1]["size_bytes"]
-        print("  + capi_mes_credentials.py (local-only)")
         if args.patch_only and skipped_files:
             print("\nSkipped non-deployable changed files:")
             for rel in skipped_files:

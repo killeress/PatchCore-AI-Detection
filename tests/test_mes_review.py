@@ -469,6 +469,19 @@ def test_report_template_contains_manual_review_and_ng_database_ui():
     assert "mes_misjudge: 'rgba(34,197,94,0.82)'" in template
     assert "backgroundColor: chartData.entries.map" in template
     assert "已 Review" in template
+    assert "toggleReviewReasonFilter(type, item)" in template
+    assert "onClick: (_event, elements)" in template
+    assert "categories: remainingEntries.map(item => item.category)" in template
+    assert "categories.has(row.review?.category)" in template
+    assert "_reviewFilter = null;" in template
+    assert 'id="mes_reasonFilterChip"' in template
+    assert "clearReviewReasonFilter" in template
+    assert "reviewReasonFilterLabel() || reviewFilterLabel()" in template
+    assert "點擊長條篩選" in template
+    assert "座標匹配" in template
+    assert "coordinateMatchHtml(row)" in template
+    assert "CAPIHM 旋轉換算" in template
+    assert "'MES 有效不良', '座標匹配'" in template
     assert "只使用 AOI 座標篩選五光源圖片" not in template
     assert "人工確認後才納入 NG 驗證資料。" in template
     assert 'id="mes_comparisonTrendChart"' in template

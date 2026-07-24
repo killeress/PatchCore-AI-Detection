@@ -219,6 +219,8 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_records_glass_id ON inference_records(glass_id);
                 CREATE INDEX IF NOT EXISTS idx_records_created_at ON inference_records(created_at);
                 CREATE INDEX IF NOT EXISTS idx_records_request_time ON inference_records(request_time);
+                CREATE INDEX IF NOT EXISTS idx_records_request_time_dt
+                    ON inference_records(datetime(request_time) DESC, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_records_machine_no ON inference_records(machine_no);
                 CREATE INDEX IF NOT EXISTS idx_records_ai_judgment ON inference_records(ai_judgment);
                 CREATE INDEX IF NOT EXISTS idx_records_glass_request_time ON inference_records(glass_id, request_time DESC);
@@ -3226,7 +3228,7 @@ class CAPIDatabase:
         try:
             rows = conn.execute(
                 f"""SELECT id, glass_id, model_id, machine_no, ai_judgment,
-                           image_dir, request_time
+                           image_dir, request_time, aoi_machine_coords
                     FROM inference_records{where_sql}
                     ORDER BY datetime(request_time) DESC, id DESC""",
                 params,

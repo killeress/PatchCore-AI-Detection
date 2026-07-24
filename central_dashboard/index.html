@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="description" content="CAPI AI 各產線即時狀態中控看板">
+    <title>CAPI AI 中控看板</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script defer src="./config.js"></script>
+    <script defer src="./app.js"></script>
+</head>
+<body>
+    <a class="skip-link" href="#line-grid">跳至線體狀態</a>
+
+    <header class="topbar">
+        <div>
+            <p class="eyebrow">CAPI AI CONTROL CENTER</p>
+            <h1 id="dashboard-title">CAPI AI 中控看板</h1>
+            <p class="subtitle">各線體即時狀態與設備健康摘要</p>
+        </div>
+
+        <div class="topbar-actions">
+            <div class="clock-block" aria-label="目前時間">
+                <span id="current-date">----</span>
+                <strong id="current-time">--:--:--</strong>
+            </div>
+            <div class="refresh-block">
+                <span id="refresh-status">準備更新</span>
+                <button id="refresh-button" type="button">立即更新</button>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <section class="summary-grid" aria-label="全廠摘要">
+            <article class="summary-card">
+                <span>線體總數</span>
+                <strong id="summary-total-lines">0</strong>
+            </article>
+            <article class="summary-card summary-online">
+                <span>正常</span>
+                <strong id="summary-online">0</strong>
+            </article>
+            <article class="summary-card summary-warning">
+                <span>異常</span>
+                <strong id="summary-warning">0</strong>
+            </article>
+            <article class="summary-card summary-offline">
+                <span>離線</span>
+                <strong id="summary-offline">0</strong>
+            </article>
+            <article class="summary-card summary-wide">
+                <span>在線線體當班投入</span>
+                <strong id="summary-shift-total">0</strong>
+            </article>
+            <article class="summary-card summary-wide">
+                <span>在線線體 NG 率</span>
+                <strong id="summary-ng-rate">--</strong>
+            </article>
+        </section>
+
+        <section id="alert-panel" class="alert-panel" aria-labelledby="alert-title" hidden>
+            <div>
+                <p class="eyebrow">ATTENTION</p>
+                <h2 id="alert-title">目前告警</h2>
+            </div>
+            <ul id="alert-list"></ul>
+        </section>
+
+        <section class="line-section" aria-labelledby="line-section-title">
+            <div class="section-heading">
+                <div>
+                    <p class="eyebrow">LIVE STATUS</p>
+                    <h2 id="line-section-title">線體狀態</h2>
+                </div>
+                <p id="data-note">每 30 秒由各 PC 的 API 更新一次</p>
+            </div>
+
+            <div id="config-error" class="config-error" role="alert" hidden></div>
+            <div id="line-grid" class="line-grid" aria-live="polite"></div>
+        </section>
+    </main>
+
+    <footer>
+        <span>此頁僅讀取各 PC API，不保存資料。</span>
+        <span id="footer-refresh-note">更新週期：30 秒</span>
+    </footer>
+
+    <template id="line-card-template">
+        <article class="line-card" data-state="checking">
+            <header class="line-card-header">
+                <div>
+                    <div class="line-kicker">
+                        <span data-field="factory">—</span>
+                        <span class="separator">/</span>
+                        <span data-field="pc-name">—</span>
+                    </div>
+                    <h3 data-field="line-name">—</h3>
+                </div>
+                <span class="status-pill" data-field="status">連線中</span>
+            </header>
+
+            <div class="line-links">
+                <a data-link="dashboard" target="_blank" rel="noopener noreferrer">開啟該 PC</a>
+                <a data-link="overexposed" target="_blank" rel="noopener noreferrer">Omit 過曝明細</a>
+            </div>
+
+            <div class="line-meta">
+                <span>
+                    <small>API</small>
+                    <span data-field="api-host">—</span>
+                </span>
+                <span>
+                    <small>最後成功</small>
+                    <span data-field="last-success">尚未取得</span>
+                </span>
+            </div>
+
+            <div class="shift-row">
+                <span data-field="shift-name">當班</span>
+                <span data-field="shift-range">—</span>
+            </div>
+
+            <div class="metric-grid">
+                <div class="metric metric-total">
+                    <span>當班投入</span>
+                    <strong data-field="total">—</strong>
+                    <small>包含 OK / NG / ERR</small>
+                </div>
+                <div class="metric metric-ok">
+                    <span>OK</span>
+                    <strong data-field="ok-count">—</strong>
+                    <small data-field="ok-rate">—</small>
+                </div>
+                <div class="metric metric-ng">
+                    <span>NG</span>
+                    <strong data-field="ng-count">—</strong>
+                    <small data-field="ng-rate">—</small>
+                </div>
+                <div class="metric metric-err">
+                    <span>ERR</span>
+                    <strong data-field="err-count">—</strong>
+                    <small data-field="err-rate">—</small>
+                </div>
+                <div class="metric metric-omit">
+                    <span>Omit 過曝</span>
+                    <strong data-field="overexposed">—</strong>
+                    <small>API 未提供時顯示 —</small>
+                </div>
+                <div class="metric metric-time">
+                    <span>平均耗時</span>
+                    <strong data-field="avg-time">—</strong>
+                    <small data-field="latest-duration">最近：—</small>
+                </div>
+            </div>
+
+            <div class="system-grid">
+                <div>
+                    <span>模型版本</span>
+                    <strong data-field="model-version">—</strong>
+                </div>
+                <div>
+                    <span>運算裝置</span>
+                    <strong data-field="device">—</strong>
+                </div>
+                <div>
+                    <span>VRAM</span>
+                    <strong data-field="vram">—</strong>
+                </div>
+                <div>
+                    <span>GPU / 溫度</span>
+                    <strong data-field="gpu-health">—</strong>
+                </div>
+                <div>
+                    <span>RAM</span>
+                    <strong data-field="ram">—</strong>
+                </div>
+                <div>
+                    <span>硬碟剩餘</span>
+                    <strong data-field="disk">—</strong>
+                </div>
+                <div>
+                    <span>AOI 連線</span>
+                    <strong data-field="connections">—</strong>
+                </div>
+                <div>
+                    <span>推論中</span>
+                    <strong data-field="active-inferences">—</strong>
+                </div>
+            </div>
+
+            <div class="latest-event">
+                <div>
+                    <span>最近判定</span>
+                    <strong data-field="latest-glass">尚無資料</strong>
+                </div>
+                <span class="judgment-badge" data-field="latest-judgment">—</span>
+                <span data-field="latest-time">—</span>
+            </div>
+
+            <div class="connection-error" data-field="error" hidden></div>
+        </article>
+    </template>
+</body>
+</html>
