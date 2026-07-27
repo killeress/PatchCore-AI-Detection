@@ -578,6 +578,14 @@
     .inf-stat-card .value { font-size: 1.6rem; font-weight: 700; margin: 4px 0; }
     .inf-stat-card .pct { font-size: 0.78rem; }
 
+    .mes-metric-hint {
+        display: inline-flex;
+        margin-left: 4px;
+        color: #94a3b8;
+        cursor: help;
+        font-size: 0.75rem;
+    }
+
     .inf-stat-card.aoi-ng::before { background: #f97316; }
     .inf-stat-card.aoi-ng .value, .inf-stat-card.aoi-ng .pct { color: #f97316; }
     .inf-stat-card.ai-ng::before { background: #3b82f6; }
@@ -4472,6 +4480,7 @@
             outside_aoi_area: '異常區域不在 AOI 提供區域',
             image_issue: '原圖缺失／無法判定',
             mes_misjudge: 'MES／人工判定有誤',
+            within_spec_release: '規格內釋放',
             confirmed_ng: '確認真 NG',
             aoi_point_mismatch: 'AOI 點與可見缺陷不符',
             uncertain: '無法確認',
@@ -4486,7 +4495,7 @@
             miss_detection: [
                 'not_visible_in_image', 'outside_aoi_area',
                 'score_below_threshold', 'low_contrast', 'dust_misfilter',
-                'image_issue', 'mes_misjudge', 'other',
+                'image_issue', 'mes_misjudge', 'within_spec_release', 'other',
             ],
             true_ng: [
                 'confirmed_ng', 'aoi_point_mismatch', 'image_issue', 'uncertain',
@@ -4509,12 +4518,17 @@
             outside_aoi_area: 'rgba(14,165,233,0.82)',
             image_issue: 'rgba(244,63,94,0.82)',
             mes_misjudge: 'rgba(34,197,94,0.82)',
+            within_spec_release: 'rgba(20,184,166,0.82)',
             confirmed_ng: 'rgba(34,197,94,0.82)',
             aoi_point_mismatch: 'rgba(249,115,22,0.82)',
             uncertain: 'rgba(148,163,184,0.82)',
             other: 'rgba(99,102,241,0.82)',
             __remaining__: 'rgba(148,163,184,0.82)',
         };
+        const COUNTED_MES_MISS_REVIEW_CATEGORIES = new Set([
+            'score_below_threshold', 'low_contrast', 'dust_misfilter',
+        ]);
+        const MES_MISS_RATE_HINT = '未 Review 的漏檢全部計入；已 Review 僅「AI 分數低於門檻」、「低對比／弱特徵」、「Dust 誤濾」計入。分母為可比對總數。';
 
         function _formatDate(d) {
             return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -4609,6 +4623,7 @@
 
         function render(data) {
             _data = data;
+            refreshComparisonMissSummary();
             document.getElementById('mes_workflowTabs').style.display = 'flex';
             renderCards();
             renderComparisonTrend();
@@ -4616,14 +4631,30 @@
             renderDetails();
         }
 
+        function countsAsMissDetection(row) {
+            if (row.comparison !== 'miss_detection') return false;
+            const category = row.review?.category || '';
+            return !category || COUNTED_MES_MISS_REVIEW_CATEGORIES.has(category);
+        }
+
+        function refreshComparisonMissSummary() {
+            if (!_data?.summary) return;
+            const counted = (_data.records || []).filter(countsAsMissDetection).length;
+            _data.summary.miss_detection = counted;
+            _data.summary.miss_detection_rate = _data.summary.total > 0
+                ? counted / _data.summary.total * 100
+                : 0;
+        }
+
         function renderCards() {
             if (!_data) return;
+            refreshComparisonMissSummary();
             const s = _data.summary;
             const cards = [
                 ['可比對總數', s.total, '100%', 'ai-ng', 'comparable'],
                 ['判定正確', s.correct, s.accuracy_rate.toFixed(2) + '%', 'revival', 'correct'],
                 ['過檢', s.over_detection, s.over_detection_rate.toFixed(2) + '%', 'err', 'over_detection'],
-                ['漏檢', s.miss_detection, s.miss_detection_rate.toFixed(2) + '%', 'aoi-ng', 'miss_detection'],
+                ['漏檢', s.miss_detection, s.miss_detection_rate.toFixed(2) + '%', 'aoi-ng', 'miss_detection', MES_MISS_RATE_HINT],
                 ['無法比對', s.uncomparable, 'ERR／無時間', 'hy', 'uncomparable'],
             ];
             const grid = document.getElementById('mes_statsGrid');
@@ -4633,7 +4664,9 @@
                 <button type="button" class="inf-stat-card mes-filter-card ${card[3]}${active ? ' active' : ''}"
                         data-filter="${card[4]}" aria-pressed="${active}"
                         onclick="mesReportTab.toggleFilter('${card[4]}')">
-                    <div class="label">${card[0]}</div>
+                    <div class="label">${card[0]}${card[5]
+                        ? `<span class="mes-metric-hint" title="${card[5]}" aria-label="${card[5]}">ⓘ</span>`
+                        : ''}</div>
                     <div class="value">${Number(card[1]).toLocaleString()}</div>
                     <div class="pct">${card[2]}</div>
                     <div class="filter-hint">${active ? '再次點擊取消篩選' : '點擊篩選明細'}</div>
@@ -4661,7 +4694,7 @@
                 stats.comparable++;
                 if (row.comparison === 'correct') stats.correct++;
                 if (row.comparison === 'over_detection') stats.over_detection++;
-                if (row.comparison === 'miss_detection') stats.miss_detection++;
+                if (countsAsMissDetection(row)) stats.miss_detection++;
             });
             return Object.values(daily)
                 .filter(stats => stats.comparable > 0)
@@ -5054,6 +5087,8 @@
             if (_activeView === 'comparison') {
                 if (_activeFilter === 'comparable') {
                     rows = rows.filter(row => row.comparison !== 'uncomparable');
+                } else if (_activeFilter === 'miss_detection') {
+                    rows = rows.filter(countsAsMissDetection);
                 } else if (_activeFilter) {
                     rows = rows.filter(row => row.comparison === _activeFilter);
                 }
@@ -5472,6 +5507,9 @@
                 if (!response.ok || !data.success) throw new Error(data.error || `HTTP ${response.status}`);
                 row.review = data.review;
                 _data.ng_validation_summary = data.ng_validation_summary || _data.ng_validation_summary;
+                refreshComparisonMissSummary();
+                renderCards();
+                renderComparisonTrend();
                 renderReviewPanel();
                 renderDetails();
                 closeReview();
@@ -5496,6 +5534,9 @@
                 if (!response.ok || !data.success) throw new Error(data.error || `HTTP ${response.status}`);
                 row.review = null;
                 _data.ng_validation_summary = data.ng_validation_summary || _data.ng_validation_summary;
+                refreshComparisonMissSummary();
+                renderCards();
+                renderComparisonTrend();
                 renderReviewPanel();
                 renderDetails();
                 closeReview();
