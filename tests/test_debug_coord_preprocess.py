@@ -36,7 +36,14 @@ class _FakeInferencer:
     def _get_inferencer_for_prefix(self, _prefix):
         return object()
 
-    def predict_tile(self, tile, inferencer=None, edge_margin_override=None):
+    def predict_tile(
+        self,
+        tile,
+        inferencer=None,
+        edge_margin_override=None,
+        threshold=None,
+        model_id=None,
+    ):
         self.last_tile = tile
         return 0.1, None
 

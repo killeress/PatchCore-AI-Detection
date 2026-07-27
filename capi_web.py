@@ -12,6 +12,7 @@ CAPI AI Web 查閱介面
 """
 
 import os
+import csv
 import socket
 import subprocess
 import sys
@@ -61,11 +62,335 @@ _MES_REVIEW_LIGHTINGS = {
 }
 
 
+def _coord_debug_point_payload(
+    *,
+    map_x: int,
+    map_y: int,
+    map_width: int,
+    map_height: int,
+    tile_x: int,
+    tile_y: int,
+    tile_width: int,
+    tile_height: int,
+) -> Dict[str, List[int]]:
+    """Convert an anomaly-map point into tile-local and full-image coordinates."""
+    local_x = int(round(
+        int(map_x) * max(int(tile_width) - 1, 0) / max(int(map_width) - 1, 1)
+    ))
+    local_y = int(round(
+        int(map_y) * max(int(tile_height) - 1, 0) / max(int(map_height) - 1, 1)
+    ))
+    return {
+        "map_coord": [int(map_x), int(map_y)],
+        "tile_coord": [local_x, local_y],
+        "image_coord": [int(tile_x) + local_x, int(tile_y) + local_y],
+    }
+
+
+def _coord_debug_region_payload(
+    region_details: List[Dict[str, Any]],
+    anomaly_map: Any,
+    *,
+    tile_score: float,
+    tile_info: Any,
+) -> List[Dict[str, Any]]:
+    """Serialize every Top-% connected region with an operator-facing explanation."""
+    if anomaly_map is None:
+        return []
+
+    import numpy as np
+
+    anomaly = np.asarray(anomaly_map, dtype=np.float32)
+    if anomaly.ndim < 2 or anomaly.size == 0:
+        return []
+    map_height, map_width = anomaly.shape[:2]
+    global_peak = max(float(np.max(anomaly)), 0.0)
+    payload = []
+    for index, region in enumerate(region_details or [], start=1):
+        peak_yx = region.get("peak_yx") or (0, 0)
+        peak_y, peak_x = int(peak_yx[0]), int(peak_yx[1])
+        peak_value = float(region.get("max_score") or 0.0)
+        relative = peak_value / global_peak if global_peak > 0 else 0.0
+        estimated_score = float(tile_score) * relative
+        is_dust = bool(region.get("is_dust", False))
+        peak_in_dust = bool(region.get("peak_in_dust", False))
+        coverage = float(region.get("coverage") or 0.0)
+        point = _coord_debug_point_payload(
+            map_x=peak_x,
+            map_y=peak_y,
+            map_width=map_width,
+            map_height=map_height,
+            tile_x=int(getattr(tile_info, "x", 0)),
+            tile_y=int(getattr(tile_info, "y", 0)),
+            tile_width=int(getattr(tile_info, "width", map_width)),
+            tile_height=int(getattr(tile_info, "height", map_height)),
+        )
+        if is_dust:
+            verdict_zh = "灰塵／氣泡熱區"
+            reason_zh = (
+                "此熱區與灰塵遮罩重疊，正式灰塵流程會把它當成非產品缺陷。"
+            )
+        else:
+            verdict_zh = "候選真缺陷"
+            reason_zh = (
+                "此熱區未被灰塵遮罩充分覆蓋，正式灰塵流程會保留為 NG 證據。"
+            )
+        payload.append({
+            "rank": index,
+            "label_id": int(region.get("label_id") or index),
+            **point,
+            "area": int(region.get("area") or 0),
+            "dust_overlap": int(region.get("dust_overlap") or 0),
+            "coverage": round(coverage, 6),
+            "peak_value": round(peak_value, 6),
+            "relative_to_global": round(relative, 6),
+            "estimated_score": round(estimated_score, 6),
+            "is_dust": is_dust,
+            "peak_in_dust": peak_in_dust,
+            "dust_sub_peak_rescue": bool(
+                region.get("dust_sub_peak_rescue", False)
+            ),
+            "verdict_zh": verdict_zh,
+            "reason_zh": reason_zh,
+        })
+    payload.sort(key=lambda item: item["peak_value"], reverse=True)
+    for rank, item in enumerate(payload, start=1):
+        item["rank"] = rank
+    return payload
+
+
+def _coord_debug_two_stage_payload(
+    features: List[Dict[str, Any]],
+    detail_text: str,
+    *,
+    tile_info: Any,
+) -> Dict[str, Any]:
+    """Translate two-stage feature evidence and counters into stable JSON."""
+    support_labels = {
+        "original_core": "原始 Top % 核心",
+        "dust_rerank": "排除灰塵後重新排名",
+        "local_score": "局部等效分數達門檻",
+    }
+    dust_reason_labels = {
+        "feature_overlap": "特徵本身與灰塵重疊",
+        "zone_dominated": "所在熱區主要由灰塵／氣泡構成",
+        "clean": "未被灰塵覆蓋",
+    }
+    serialized = []
+    for index, feature in enumerate(features or [], start=1):
+        abs_pos = feature.get("abs_pos") or (0, 0)
+        local_x, local_y = int(abs_pos[0]), int(abs_pos[1])
+        is_dust = bool(feature.get("is_dust", False))
+        support = str(feature.get("support_source") or "")
+        dust_reason = str(feature.get("dust_reason") or "")
+        serialized.append({
+            "rank": index,
+            "tile_coord": [local_x, local_y],
+            "image_coord": [
+                int(getattr(tile_info, "x", 0)) + local_x,
+                int(getattr(tile_info, "y", 0)) + local_y,
+            ],
+            "type": str(feature.get("type") or ""),
+            "type_zh": "暗點" if feature.get("type") == "dark" else "亮點",
+            "area": int(feature.get("area") or 0),
+            "dust_ratio": round(float(feature.get("dust_ratio") or 0.0), 6),
+            "zone_dust_coverage": round(
+                float(feature.get("zone_dust_cov") or 0.0), 6
+            ),
+            "local_peak": round(float(feature.get("local_peak") or 0.0), 6),
+            "estimated_score": round(
+                float(feature.get("local_equiv_score") or 0.0), 6
+            ),
+            "hot_core_supported": bool(
+                feature.get("hot_core_supported", False)
+            ),
+            "dust_rerank_supported": bool(
+                feature.get("dust_rerank_supported", False)
+            ),
+            "local_score_supported": bool(
+                feature.get("local_score_supported", False)
+            ),
+            "support_source": support,
+            "support_source_zh": support_labels.get(support, "未取得判定資格"),
+            "is_dust": is_dust,
+            "dust_reason": dust_reason,
+            "dust_reason_zh": dust_reason_labels.get(dust_reason, "未記錄"),
+            "verdict_zh": "灰塵／氣泡特徵" if is_dust else "候選真缺陷特徵",
+        })
+
+    counters = {}
+    counter_labels = {
+        "ignored_border": "位於切塊邊界，未採用",
+        "ignored_outside_hot_core": (
+            "原圖找到特徵，但未進入 Top % 核心、灰塵重排核心，"
+            "且局部等效分數也未達門檻"
+        ),
+        "reranked_after_dust": "排除灰塵／氣泡後重新排名而救回",
+        "local_score_rescued": "靠局部等效分數達門檻而救回",
+    }
+    for key, label_zh in counter_labels.items():
+        match = re.search(rf"\b{re.escape(key)}=(\d+)", str(detail_text or ""))
+        count = int(match.group(1)) if match else 0
+        counters[key] = {"count": count, "label_zh": label_zh}
+
+    return {
+        "ran": "TWO_STAGE:" in str(detail_text or ""),
+        "detail_raw": str(detail_text or ""),
+        "features": serialized,
+        "counters": counters,
+    }
+
+
 def _get_host_identity() -> str:
     try:
         return socket.gethostname().strip() or "unknown-host"
     except Exception:
         return "unknown-host"
+
+
+_HARDWARE_STATUS_CACHE_SECONDS = 30.0
+_hardware_status_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_hardware_status_lock = threading.Lock()
+
+
+def _metric_float(value: Any) -> Optional[float]:
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_gpu_status() -> Dict[str, Any]:
+    """Read GPU 0 metrics from the NVIDIA driver without importing torch."""
+    command = [
+        "nvidia-smi",
+        "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"available": False}
+
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return {"available": False}
+
+    try:
+        row = next(csv.reader(completed.stdout.splitlines()))
+    except (StopIteration, csv.Error):
+        return {"available": False}
+    if len(row) < 5:
+        return {"available": False}
+
+    vram_used_mib = _metric_float(row[2])
+    vram_total_mib = _metric_float(row[3])
+    return {
+        "available": True,
+        "name": row[0].strip(),
+        "utilization_percent": _metric_float(row[1]),
+        "vram_used_gb": round(vram_used_mib / 1024.0, 2) if vram_used_mib is not None else None,
+        "vram_total_gb": round(vram_total_mib / 1024.0, 2) if vram_total_mib is not None else None,
+        "temperature_c": _metric_float(row[4]),
+    }
+
+
+def _read_memory_status() -> Dict[str, Any]:
+    """Read host RAM usage using only the Python standard library."""
+    total_bytes = 0
+    available_bytes = 0
+
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            memory = _MemoryStatusEx()
+            memory.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory)):
+                return {}
+            total_bytes = int(memory.ullTotalPhys)
+            available_bytes = int(memory.ullAvailPhys)
+        else:
+            meminfo = {}
+            with open("/proc/meminfo", "r", encoding="ascii") as handle:
+                for line in handle:
+                    key, value = line.split(":", 1)
+                    meminfo[key] = int(value.strip().split()[0]) * 1024
+            total_bytes = meminfo.get("MemTotal", 0)
+            available_bytes = meminfo.get(
+                "MemAvailable",
+                meminfo.get("MemFree", 0) + meminfo.get("Buffers", 0) + meminfo.get("Cached", 0),
+            )
+    except (OSError, ValueError):
+        return {}
+
+    if total_bytes <= 0:
+        return {}
+    used_bytes = max(0, total_bytes - available_bytes)
+    return {
+        "used_gb": round(used_bytes / (1024 ** 3), 2),
+        "total_gb": round(total_bytes / (1024 ** 3), 2),
+        "used_percent": round((used_bytes / total_bytes) * 100.0, 1),
+    }
+
+
+def _read_disk_status(path: Any) -> Dict[str, Any]:
+    probe_path = Path(path or Path.cwd()).expanduser()
+    while not probe_path.exists() and probe_path != probe_path.parent:
+        probe_path = probe_path.parent
+    if not probe_path.exists():
+        probe_path = Path.cwd()
+
+    try:
+        usage = shutil.disk_usage(str(probe_path))
+    except OSError:
+        return {}
+    return {
+        "path": str(probe_path),
+        "free_gb": round(usage.free / (1024 ** 3), 2),
+        "used_gb": round(usage.used / (1024 ** 3), 2),
+        "total_gb": round(usage.total / (1024 ** 3), 2),
+        "used_percent": round((usage.used / usage.total) * 100.0, 1) if usage.total else 0.0,
+    }
+
+
+def _collect_hardware_status(disk_path: Any) -> Dict[str, Any]:
+    return {
+        "gpu": _read_gpu_status(),
+        "memory": _read_memory_status(),
+        "disk": _read_disk_status(disk_path),
+    }
+
+
+def _get_cached_hardware_status(disk_path: Any) -> Dict[str, Any]:
+    cache_key = str(Path(disk_path or Path.cwd()).expanduser())
+    now = time.monotonic()
+    with _hardware_status_lock:
+        cached = _hardware_status_cache.get(cache_key)
+        if cached and now - cached[0] < _HARDWARE_STATUS_CACHE_SECONDS:
+            return cached[1]
+        status = _collect_hardware_status(disk_path)
+        _hardware_status_cache[cache_key] = (now, status)
+        return status
 
 
 class _AppVersionProxy:
@@ -2703,6 +3028,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     _settings_session_lock: threading.Lock = threading.Lock()
     _update_state_file = Path(__file__).resolve().parent / "update" / "auto_update_state.json"
     _update_apply_lock: threading.Lock = threading.Lock()
+    _mes_comparison_lock: threading.Lock = threading.Lock()
     # ── 訓練 wizard 多 job 註冊表（由 create_web_server 完整初始化） ─────────
     # _train_new_jobs key = job_id；value = per-job runtime dict，欄位：
     #   thread:        Thread (preprocess supervisor / training supervisor)
@@ -4217,6 +4543,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 status["stats"]["total_err"] = shift_stats.get("err_count", 0) or 0
                 status["stats"]["shift_name"] = shift_stats.get("shift_name", "當班")
                 status["stats"]["time_range"] = shift_stats.get("time_range", "")
+                status["stats"]["avg_time"] = shift_stats.get("avg_time")
+                status["stats"]["overexposed_count"] = shift_stats.get("overexposed_count", 0) or 0
 
                 # 取最近 1 筆 image_results (有熱力圖)
                 try:
@@ -4332,6 +4660,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 threshold_mapping = status.get("server", {}).get("threshold_mapping") or {}
                 status.setdefault("server", {})["image_prefix_labels"] = \
                     self._dashboard_lighting_labels(self.db, list(threshold_mapping))
+
+            db_path = getattr(self.db, "db_path", None) if self.db else None
+            if db_path:
+                disk_path = Path(db_path).expanduser().parent
+            else:
+                disk_path = getattr(self, "heatmap_base_dir", None) or Path.cwd()
+            status["hardware"] = _get_cached_hardware_status(disk_path)
 
             self._send_json(status, headers=cors_headers)
         except Exception as e:
@@ -5911,6 +6246,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _handle_mes_comparison_api(self, query: dict):
         """API: 將 AI 推論結果與 MES Report 人工不良判定比對。"""
+        if not self._mes_comparison_lock.acquire(blocking=False):
+            logger.warning("[MES Report] Duplicate query rejected: another comparison is still running")
+            self._send_json(
+                {
+                    "success": False,
+                    "error": "MES Report 查詢進行中，請等待目前查詢完成。",
+                },
+                status=409,
+            )
+            return
+
         request_started = time.monotonic()
         stage_timings = {}
         try:
@@ -6027,6 +6373,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error("MES comparison API error: %s", e, exc_info=True)
             self._send_json({"success": False, "error": str(e)}, status=502)
+        finally:
+            self._mes_comparison_lock.release()
 
     def _handle_mes_report_detail_api(self, query: dict):
         """API: 按需取得一筆 AI 推論對應的完整 MES Report 欄位。"""
@@ -7513,6 +7861,367 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.error(f"[DEBUG] Edge Inspect Corner (Fusion) error: {e}", exc_info=True)
             self._send_json({"error": f"Fusion 角落檢測失敗: {str(e)}"})
 
+    def _run_debug_coord_dust_pipeline(
+        self,
+        *,
+        tile_info,
+        tile_image,
+        anomaly_map,
+        score,
+        score_threshold,
+        omit_image,
+        omit_crop,
+        product_resolution,
+        model_id,
+    ):
+        """
+        Reproduce the production OMIT/per-region/two-stage path for coordinate debug.
+
+        The returned payload is diagnostic only.  It never changes model/config
+        settings and keeps the raw PatchCore threshold judgment separately.
+        """
+        import numpy as np
+
+        inferencer = self.inferencer
+        config = inferencer.config
+        anomaly_map_for_dust = anomaly_map
+        dust_mask = None
+        detail_text = ""
+        region_details = []
+        heatmap_binary = None
+        region_labels = None
+        two_stage_features = []
+        two_stage_ran = False
+        final_is_dust = False
+        overall_metric = 0.0
+        exclude_zone_masked = False
+        seed_yx = None
+        seed_radius = 0
+        seed_min_score = None
+
+        metric_mode = str(
+            getattr(config, "dust_heatmap_metric", "coverage") or "coverage"
+        ).lower()
+        metric_name = "COV" if metric_mode == "coverage" else "IOU"
+        top_percent = float(
+            getattr(config, "dust_heatmap_top_percent", 5.0) or 5.0
+        )
+        overlap_threshold_raw = getattr(
+            config, "dust_heatmap_iou_threshold", 0.01
+        )
+        overlap_threshold = float(
+            0.01 if overlap_threshold_raw is None else overlap_threshold_raw
+        )
+        center_seed_enabled = bool(
+            getattr(config, "aoi_heatmap_center_seed_enabled", True)
+        )
+
+        payload = {
+            "available": omit_image is not None and omit_crop is not None,
+            "diagnostic_only": True,
+            "metric": metric_mode,
+            "metric_label": metric_name,
+            "top_percent": top_percent,
+            "overlap_threshold": overlap_threshold,
+            "omit_overexposed": False,
+            "dust_feature_detected": False,
+            "dust_filter_result": "NOT_CHECKED",
+            "dust_filter_result_zh": "尚未執行灰塵檢查",
+            "overall_metric": 0.0,
+            "regions": [],
+            "center_seed": {
+                "enabled": center_seed_enabled,
+                "applied": False,
+                "map_coord": None,
+                "radius": 0,
+                "min_score": None,
+                "explanation_zh": (
+                    "現場已開啟 AOI 中心弱熱區保留。"
+                    if center_seed_enabled
+                    else "現場設定為關閉；本次不會強制把座標中心塞回 Top % 熱區。"
+                ),
+            },
+            "exclude_zone_heatmap_masked": False,
+            "two_stage": _coord_debug_two_stage_payload(
+                [], "", tile_info=tile_info
+            ),
+            "detail_raw": "",
+        }
+
+        raw_judgment = "NG" if float(score) >= float(score_threshold) else "OK"
+        payload["raw_patchcore_judgment"] = raw_judgment
+
+        def _finish(final_reason_zh):
+            tile_info.dust_detail_text = detail_text
+            # Below-threshold tiles remain AI OK.  Dust evidence is still exposed
+            # in the diagnostic payload but must not be presented as a live filter.
+            tile_info.is_suspected_dust_or_scratch = bool(
+                final_is_dust and raw_judgment == "NG"
+            )
+            if raw_judgment == "OK":
+                final_judgment = "OK"
+                final_reason = "PatchCore 分數低於門檻；灰塵分析僅供排查。"
+            elif final_is_dust:
+                final_judgment = "OK"
+                final_reason = "PatchCore 初判 NG，但正式灰塵流程會過濾為 OK。"
+            else:
+                final_judgment = "NG"
+                final_reason = final_reason_zh
+            payload.update({
+                "final_judgment": final_judgment,
+                "final_reason_zh": final_reason,
+                "detail_raw": detail_text,
+                "overall_metric": round(float(overall_metric), 6),
+                "exclude_zone_heatmap_masked": bool(exclude_zone_masked),
+                "regions": _coord_debug_region_payload(
+                    region_details,
+                    anomaly_map_for_dust,
+                    tile_score=float(score),
+                    tile_info=tile_info,
+                ),
+                "two_stage": _coord_debug_two_stage_payload(
+                    two_stage_features,
+                    detail_text,
+                    tile_info=tile_info,
+                ),
+            })
+            return payload, anomaly_map_for_dust, dust_mask
+
+        if omit_image is None or omit_crop is None:
+            detail_text = "找不到 OMIT 圖片，無法驗證灰塵／氣泡"
+            payload["dust_filter_result"] = "NO_OMIT"
+            payload["dust_filter_result_zh"] = "沒有 OMIT，無法排除灰塵／氣泡"
+            return _finish("沒有 OMIT 可交叉驗證，保守維持 PatchCore NG。")
+
+        overexposure_check = getattr(inferencer, "check_omit_overexposure", None)
+        if callable(overexposure_check):
+            try:
+                is_overexposed, _mean, _ratio, overexposure_detail = \
+                    overexposure_check(omit_image)
+            except Exception as exc:
+                logger.warning("[DEBUG-COORD] OMIT overexposure check failed: %s", exc)
+                is_overexposed = False
+                overexposure_detail = ""
+            if is_overexposed:
+                payload["omit_overexposed"] = True
+                payload["dust_filter_result"] = "OMIT_OVEREXPOSED"
+                payload["dust_filter_result_zh"] = "OMIT 過曝，灰塵檢查停用"
+                detail_text = f"OMIT_OVEREXPOSED ({overexposure_detail})"
+                return _finish("OMIT 過曝，無法可靠排除灰塵，保守維持 NG。")
+
+        context_check = getattr(
+            inferencer, "_check_dust_or_scratch_feature_with_context", None
+        )
+        focus_x = int(getattr(tile_info, "aoi_image_x", -1)) - int(
+            getattr(tile_info, "x", 0)
+        )
+
+        def _detect_dust(extension_override=None):
+            if callable(context_check):
+                return context_check(
+                    omit_image,
+                    int(getattr(tile_info, "x", 0)),
+                    int(getattr(tile_info, "y", 0)),
+                    int(getattr(tile_info, "width", omit_crop.shape[1])),
+                    int(getattr(tile_info, "height", omit_crop.shape[0])),
+                    omit_crop,
+                    extension_override=extension_override,
+                    focus_x=focus_x,
+                    product_resolution=product_resolution,
+                )
+            basic_check = inferencer.check_dust_or_scratch_feature
+            try:
+                return basic_check(
+                    omit_crop,
+                    extension_override,
+                    product_resolution=product_resolution,
+                )
+            except TypeError:
+                return basic_check(omit_crop, extension_override)
+
+        is_dust_feature, dust_mask, bright_ratio, detail_text = _detect_dust()
+        tile_info.omit_crop_image = omit_crop.copy()
+        tile_info.dust_mask = dust_mask
+        tile_info.dust_bright_ratio = float(bright_ratio or 0.0)
+        payload["dust_feature_detected"] = bool(is_dust_feature)
+        payload["bright_ratio"] = round(float(bright_ratio or 0.0), 6)
+
+        if not is_dust_feature:
+            detail_text = f"{detail_text} NO_DUST -> REAL_NG".strip()
+            payload["dust_filter_result"] = "NO_DUST"
+            payload["dust_filter_result_zh"] = "OMIT 未找到灰塵／氣泡，保留為真缺陷"
+            return _finish("OMIT 未找到可解釋此熱區的灰塵／氣泡，維持 NG。")
+
+        if anomaly_map is None:
+            final_is_dust = True
+            detail_text = f"{detail_text} (no heatmap, marked as dust)".strip()
+            payload["dust_filter_result"] = "DUST"
+            payload["dust_filter_result_zh"] = "找到灰塵，但沒有熱力圖可逐區比對"
+            return _finish("沒有熱力圖可交叉驗證，依現行規則視為灰塵。")
+
+        mask_exclude = getattr(
+            inferencer, "_mask_aoi_exclude_zones_for_dust", None
+        )
+        if callable(mask_exclude):
+            anomaly_map_for_dust, exclude_zone_masked = mask_exclude(
+                tile_info, anomaly_map, model_id
+            )
+        if exclude_zone_masked:
+            detail_text = f"{detail_text} EXCLUDE_ZONE_HEATMAP_ZEROED".strip()
+
+        center_seed = getattr(inferencer, "_aoi_center_seed_for_tile", None)
+        if callable(center_seed):
+            seed_yx, seed_radius, seed_min_score = center_seed(
+                tile_info, anomaly_map_for_dust
+            )
+        if seed_yx is not None:
+            payload["center_seed"].update({
+                "applied": True,
+                "map_coord": [int(seed_yx[1]), int(seed_yx[0])],
+                "radius": int(seed_radius),
+                "min_score": (
+                    round(float(seed_min_score), 6)
+                    if seed_min_score is not None else None
+                ),
+                "explanation_zh": (
+                    "本次已把指定座標附近、且達最低熱力的像素額外納入 Top %。"
+                ),
+            })
+
+        has_real, real_peak_yx, overall_metric, region_details, \
+            heatmap_binary, region_labels = inferencer.check_dust_per_region(
+                dust_mask,
+                anomaly_map_for_dust,
+                top_percent=top_percent,
+                metric=metric_mode,
+                iou_threshold=overlap_threshold,
+                force_include_yx=seed_yx,
+                force_include_radius=seed_radius,
+                force_include_min_score=seed_min_score,
+            )
+        tile_info.dust_heatmap_iou = float(overall_metric)
+        tile_info.dust_region_details = region_details
+        tile_info.dust_heatmap_binary = heatmap_binary
+        if region_details:
+            tile_info.dust_region_max_cov = max(
+                float(region.get("coverage") or 0.0)
+                for region in region_details
+            )
+        dust_regions = [
+            region for region in region_details if region.get("is_dust")
+        ]
+        real_regions = [
+            region for region in region_details if not region.get("is_dust")
+        ]
+
+        if has_real:
+            final_is_dust = False
+            detail_text += (
+                f" PER_REGION: {len(real_regions)}real+"
+                f"{len(dust_regions)}dust -> REAL_NG"
+            )
+            payload["dust_filter_result"] = "REAL_NG"
+            payload["dust_filter_result_zh"] = "Top % 內仍有非灰塵熱區，保留 NG"
+            if real_peak_yx is not None:
+                map_height, map_width = np.asarray(
+                    anomaly_map_for_dust
+                ).shape[:2]
+                tile_info.anomaly_peak_y = int(getattr(tile_info, "y", 0)) + int(
+                    int(real_peak_yx[0])
+                    * int(getattr(tile_info, "height", map_height))
+                    / max(map_height, 1)
+                )
+                tile_info.anomaly_peak_x = int(getattr(tile_info, "x", 0)) + int(
+                    int(real_peak_yx[1])
+                    * int(getattr(tile_info, "width", map_width))
+                    / max(map_width, 1)
+                )
+        elif bool(getattr(config, "dust_two_stage_enabled", False)):
+            _precise_is_dust, precise_dust_mask, _precise_ratio, _precise_detail = \
+                _detect_dust(extension_override=0)
+            if precise_dust_mask is None:
+                precise_dust_mask = dust_mask
+            ts_has_real, ts_peak_yx, two_stage_features, ts_detail = \
+                inferencer.check_dust_two_stage(
+                    tile_image,
+                    anomaly_map_for_dust,
+                    precise_dust_mask,
+                    float(score),
+                    score_threshold=float(score_threshold),
+                    candidate_dust_mask=dust_mask,
+                )
+            two_stage_ran = True
+            tile_info.dust_two_stage_features = two_stage_features
+            tile_info.dust_two_stage_dust_mask = precise_dust_mask
+            detail_text += (
+                f" PER_REGION: 0real+{len(dust_regions)}dust -> {ts_detail}"
+            )
+            if ts_has_real:
+                final_is_dust = False
+                payload["dust_filter_result"] = "REAL_NG"
+                payload["dust_filter_result_zh"] = "二階段找到非灰塵特徵，保留 NG"
+                if ts_peak_yx is not None:
+                    map_height, map_width = np.asarray(
+                        anomaly_map_for_dust
+                    ).shape[:2]
+                    tile_info.anomaly_peak_y = int(
+                        getattr(tile_info, "y", 0)
+                    ) + int(
+                        int(ts_peak_yx[0])
+                        * int(getattr(tile_info, "height", map_height))
+                        / max(map_height, 1)
+                    )
+                    tile_info.anomaly_peak_x = int(
+                        getattr(tile_info, "x", 0)
+                    ) + int(
+                        int(ts_peak_yx[1])
+                        * int(getattr(tile_info, "width", map_width))
+                        / max(map_width, 1)
+                    )
+            else:
+                final_is_dust = True
+                payload["dust_filter_result"] = "DUST"
+                payload["dust_filter_result_zh"] = "二階段未找到可保留的真缺陷特徵"
+        else:
+            final_is_dust = True
+            detail_text += (
+                f" PER_REGION: 0real+{len(dust_regions)}dust -> DUST"
+            )
+            payload["dust_filter_result"] = "DUST"
+            payload["dust_filter_result_zh"] = "Top % 熱區全部可由灰塵／氣泡解釋"
+
+        try:
+            if two_stage_ran:
+                tile_info.dust_iou_debug_image = \
+                    inferencer.generate_two_stage_debug_image(
+                        tile_image,
+                        anomaly_map_for_dust,
+                        tile_info.dust_two_stage_dust_mask,
+                        two_stage_features,
+                        final_is_dust,
+                    )
+            else:
+                tile_info.dust_iou_debug_image = \
+                    inferencer.generate_dust_iou_debug_image(
+                        tile_image,
+                        anomaly_map_for_dust,
+                        dust_mask,
+                        heatmap_binary,
+                        overall_metric,
+                        top_percent,
+                        final_is_dust,
+                        region_details=region_details,
+                        region_labels=region_labels,
+                    )
+        except Exception as exc:
+            logger.warning("[DEBUG-COORD] Dust debug image failed: %s", exc)
+
+        if final_is_dust:
+            return _finish(
+                "Top % 與二階段證據都可由灰塵／氣泡解釋，正式流程會過濾。"
+            )
+        return _finish("灰塵流程仍找到非灰塵異常證據，維持 NG。")
+
     def _handle_debug_coord_inference(self):
         """API: 人工座標推論 — 以指定產品座標為中心裁切 512x512 做推論"""
         import time as _time
@@ -7556,6 +8265,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         debug_threshold = float(data.get("threshold", 0.5))
         edge_margin_raw = data.get("edge_margin_px")
         edge_margin_override = int(edge_margin_raw) if edge_margin_raw is not None else None
+        try:
+            peak_window_px = max(
+                1, min(512, int(data.get("peak_window_px", 50)))
+            )
+        except (ValueError, TypeError):
+            self._send_json({"error": "座標搜尋半徑必須是 1～512 的整數"})
+            return
 
         try:
             total_start = _time.time()
@@ -7650,6 +8366,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 x=crop_x1, y=crop_y1,
                 width=crop_w, height=crop_h,
                 image=tile_image,
+                original_image=raw_tile_image,
                 is_aoi_coord_tile=True,
                 aoi_product_x=product_x,
                 aoi_product_y=product_y,
@@ -7657,6 +8374,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 aoi_image_y=img_cy,
                 aoi_tile_shift_dx=crop_shift_dx,
                 aoi_tile_shift_dy=crop_shift_dy,
+                score_threshold=debug_threshold,
             )
 
             # 多模型路由：v1 走 prefix lookup；v2 依 polygon 分類 zone 後走 (lighting, zone) 取模型
@@ -7715,6 +8433,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     tile_info.width = crop_w
                     tile_info.height = crop_h
                     tile_info.image = tile_image
+                    tile_info.original_image = raw_tile_image
                     tile_info.aoi_tile_shift_dx = crop_shift_dx
                     tile_info.aoi_tile_shift_dy = crop_shift_dy
 
@@ -7769,16 +8488,21 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 configured_pipeline = list(active_pipeline or [])
 
             # 推論 (含 GPU lock)
+            debug_model_id = getattr(self.inferencer.config, "machine_id", None)
             if hasattr(self, '_gpu_lock') and self._gpu_lock:
                 with self._gpu_lock:
                     score, anomaly_map = self.inferencer.predict_tile(
                         tile_info, inferencer=target_inferencer,
                         edge_margin_override=edge_margin_override,
+                        threshold=debug_threshold,
+                        model_id=debug_model_id,
                     )
             else:
                 score, anomaly_map = self.inferencer.predict_tile(
                     tile_info, inferencer=target_inferencer,
                     edge_margin_override=edge_margin_override,
+                    threshold=debug_threshold,
+                    model_id=debug_model_id,
                 )
 
             total_time = _time.time() - total_start
@@ -7860,12 +8584,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             # 9. 嘗試尋找並裁切 OMIT 圖片
             omit_url = ""
+            omit_name = ""
+            omit_full = None
+            omit_crop = None
             image_dir = image_path.parent
             omit_candidates = []
             for pattern in ["PINIGBI*.*", "OMIT0000*.*"]:
-                omit_candidates.extend(list(image_dir.glob(pattern)))
+                omit_candidates.extend(
+                    candidate
+                    for candidate in image_dir.glob(pattern)
+                    if not candidate.name.startswith("S")
+                )
             if omit_candidates:
-                omit_path = omit_candidates[0]
+                omit_path = sorted(omit_candidates, key=lambda path: path.name)[0]
+                omit_name = omit_path.name
                 omit_full = self._read_inference_image(omit_path, cv2.IMREAD_UNCHANGED)
                 if omit_full is not None:
                     try:
@@ -7880,56 +8612,259 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     except Exception as e:
                         logger.warning(f"OMIT crop failed: {e}")
 
-            # 9.5 產生組合圖 (Coordinate 推論專屬)
+            # 9.5 依正式流程執行逐區域與 two-stage 灰塵診斷
+            dust_analysis, anomaly_map_for_dust, diagnostic_dust_mask = \
+                self._run_debug_coord_dust_pipeline(
+                    tile_info=tile_info,
+                    tile_image=tile_image,
+                    anomaly_map=anomaly_map,
+                    score=score,
+                    score_threshold=debug_threshold,
+                    omit_image=omit_full,
+                    omit_crop=omit_crop,
+                    product_resolution=(product_w, product_h),
+                    model_id=debug_model_id,
+                )
+            dust_analysis["omit_name"] = omit_name
+
+            # 9.6 Local-maxima 診斷：不受 Top % 配額限制，專門排查強氣泡搶分
+            peak_diagnostic_url = ""
+            heatmap_analysis = {
+                "available": False,
+                "diagnostic_only": True,
+                "peaks": [],
+                "conclusion_zh": "本次沒有可分析的熱力圖。",
+            }
+            if anomaly_map is not None:
+                try:
+                    from capi_heatmap_diagnostics import analyze_heatmap_peaks
+
+                    anomaly_array = np.asarray(anomaly_map, dtype=np.float32)
+                    map_h, map_w = anomaly_array.shape[:2]
+                    local_aoi_x = min(
+                        max(int(img_cx - crop_x1), 0), max(crop_w - 1, 0)
+                    )
+                    local_aoi_y = min(
+                        max(int(img_cy - crop_y1), 0), max(crop_h - 1, 0)
+                    )
+                    aoi_map_x = int(round(
+                        local_aoi_x * max(map_w - 1, 0) / max(crop_w - 1, 1)
+                    ))
+                    aoi_map_y = int(round(
+                        local_aoi_y * max(map_h - 1, 0) / max(crop_h - 1, 1)
+                    ))
+                    map_scale = min(
+                        map_w / max(crop_w, 1),
+                        map_h / max(crop_h, 1),
+                    )
+                    aoi_window_map = max(
+                        1, int(round(peak_window_px * map_scale))
+                    )
+                    heatmap_analysis = analyze_heatmap_peaks(
+                        anomaly_array,
+                        diagnostic_dust_mask,
+                        aoi_xy=(aoi_map_x, aoi_map_y),
+                        aoi_window=aoi_window_map,
+                        top_percent=float(dust_analysis["top_percent"]),
+                        min_distance=max(2, int(round(10 * map_scale))),
+                        threshold_rel=0.3,
+                        aoi_threshold_rel=0.3,
+                        global_score=float(score),
+                        # 正常平滑 heatmap 通常只有個位數峰值；安全上限避免
+                        # 嚴重雜訊圖讓 region-grow 診斷拖慢整個 Debug API。
+                        max_peaks=100,
+                    )
+                    heatmap_analysis["available"] = True
+                    heatmap_analysis["dust_mask_available"] = \
+                        diagnostic_dust_mask is not None
+                    peak_limit_reached = bool(
+                        int(heatmap_analysis.get("global_peak_count") or 0) >= 100
+                        or int(heatmap_analysis.get("aoi_peak_count") or 0) >= 100
+                    )
+                    heatmap_analysis["peak_limit_per_scan"] = 100
+                    heatmap_analysis["peak_limit_reached"] = peak_limit_reached
+                    heatmap_analysis["all_peaks_returned"] = \
+                        not peak_limit_reached
+                    heatmap_analysis["aoi_window_tile_px"] = peak_window_px
+                    heatmap_analysis["analysis_heatmap_zh"] = (
+                        "正式灰塵判定用熱力圖（已套用不檢測區遮罩）"
+                        if dust_analysis.get("exclude_zone_heatmap_masked")
+                        else "PatchCore 衰減後熱力圖"
+                    )
+                    global_stats = heatmap_analysis.get("global_stats") or {}
+                    top_info = heatmap_analysis.get("top_percent") or {}
+                    heatmap_analysis["statistics"] = {
+                        **global_stats,
+                        "global_peak": global_stats.get("max"),
+                        "top_percent": top_info.get("percent"),
+                        "top_cutoff": top_info.get("cutoff"),
+                        "retained_pixel_count": top_info.get(
+                            "retained_pixel_count", 0
+                        ),
+                    }
+
+                    effective_top = getattr(
+                        tile_info, "dust_heatmap_binary", None
+                    )
+                    if effective_top is not None:
+                        effective_top = np.asarray(effective_top)
+                        if effective_top.shape[:2] != (map_h, map_w):
+                            effective_top = cv2.resize(
+                                effective_top,
+                                (map_w, map_h),
+                                interpolation=cv2.INTER_NEAREST,
+                            )
+
+                    for peak in heatmap_analysis.get("peaks", []):
+                        map_x = int(peak.get("x", 0))
+                        map_y = int(peak.get("y", 0))
+                        peak.update(_coord_debug_point_payload(
+                            map_x=map_x,
+                            map_y=map_y,
+                            map_width=map_w,
+                            map_height=map_h,
+                            tile_x=crop_x1,
+                            tile_y=crop_y1,
+                            tile_width=crop_w,
+                            tile_height=crop_h,
+                        ))
+                        peak["peak_value"] = round(
+                            float(peak.get("raw_peak") or 0.0), 6
+                        )
+                        peak["relative_to_global"] = round(
+                            float(
+                                peak.get("relative_to_global_max") or 0.0
+                            ),
+                            6,
+                        )
+                        peak["in_top_percent"] = bool(
+                            peak.get("kept_by_top_percent", False)
+                        )
+                        if effective_top is not None:
+                            in_effective_top = bool(
+                                0 <= map_y < effective_top.shape[0]
+                                and 0 <= map_x < effective_top.shape[1]
+                                and effective_top[map_y, map_x] > 0
+                            )
+                        else:
+                            in_effective_top = peak["in_top_percent"]
+                        peak["in_effective_top_percent"] = in_effective_top
+                        peak["retained_by_center_seed"] = bool(
+                            in_effective_top and not peak["in_top_percent"]
+                        )
+                        peak["local_dust_coverage"] = peak.get(
+                            "local_dust_cov_11x11"
+                        )
+                        peak["region_grow_coverage"] = peak.get(
+                            "region_grow_cov"
+                        )
+                        estimated_score = peak.get("estimated_score")
+                        if estimated_score is not None:
+                            peak["estimated_score"] = round(
+                                float(estimated_score), 6
+                            )
+                            estimated_score = peak["estimated_score"]
+                        peak["passes_score_threshold"] = bool(
+                            estimated_score is not None
+                            and float(estimated_score) >= debug_threshold
+                        )
+                        is_aoi_peak = "aoi" in (peak.get("sources") or [])
+                        if peak.get("in_dust") is True:
+                            verdict_zh = "灰塵／氣泡高分來源"
+                        elif is_aoi_peak and not in_effective_top:
+                            verdict_zh = "座標附近候選；被 Top % 排除"
+                        elif is_aoi_peak:
+                            verdict_zh = "座標附近候選；已進入熱區"
+                        elif not in_effective_top:
+                            verdict_zh = "局部熱點；被 Top % 排除"
+                        else:
+                            verdict_zh = "正式熱區候選"
+                        peak["verdict_zh"] = verdict_zh
+                        peak["reason_zh"] = str(
+                            peak.get("interpretation_zh") or ""
+                        )
+
+                    dominant_peak = heatmap_analysis.get("dominant_peak")
+                    aoi_best_peak = heatmap_analysis.get("aoi_best_peak")
+                    heatmap_analysis["score_competition_detected"] = bool(
+                        dominant_peak
+                        and dominant_peak.get("in_dust") is True
+                        and aoi_best_peak
+                        and not aoi_best_peak.get(
+                            "in_effective_top_percent",
+                            aoi_best_peak.get("in_top_percent", False),
+                        )
+                    )
+
+                    # 產生可與表格排名對照的峰值圖；文字說明留在中文 UI。
+                    norm_map = cv2.normalize(
+                        anomaly_array, None, 0, 255, cv2.NORM_MINMAX
+                    ).astype(np.uint8)
+                    peak_overlay = cv2.applyColorMap(
+                        norm_map, cv2.COLORMAP_JET
+                    )
+                    peak_overlay = cv2.resize(
+                        peak_overlay, (crop_w, crop_h)
+                    )
+                    for peak in heatmap_analysis.get("peaks", []):
+                        px, py = peak["tile_coord"]
+                        if peak.get("in_dust") is True:
+                            color = (0, 215, 255)
+                        elif not peak.get("in_effective_top_percent", False):
+                            color = (255, 0, 255)
+                        else:
+                            color = (0, 0, 255)
+                        cv2.circle(peak_overlay, (px, py), 10, color, 2)
+                        cv2.putText(
+                            peak_overlay,
+                            f"#{peak['rank']}",
+                            (min(crop_w - 36, px + 12), max(16, py - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.48,
+                            color,
+                            1,
+                            cv2.LINE_AA,
+                        )
+                    cv2.circle(
+                        peak_overlay,
+                        (local_aoi_x, local_aoi_y),
+                        min(peak_window_px, max(1, min(crop_w, crop_h) // 2)),
+                        (255, 255, 0),
+                        1,
+                    )
+                    cv2.drawMarker(
+                        peak_overlay,
+                        (local_aoi_x, local_aoi_y),
+                        (255, 255, 0),
+                        markerType=cv2.MARKER_CROSS,
+                        markerSize=18,
+                        thickness=2,
+                    )
+                    peak_filename = (
+                        f"debug_coord_peaks_{image_name}_{ts}.png"
+                    )
+                    cv2.imwrite(str(debug_dir / peak_filename), peak_overlay)
+                    peak_diagnostic_url = (
+                        f"/debug/heatmaps/{peak_filename}"
+                    )
+                except Exception as diag_err:
+                    logger.warning(
+                        "[DEBUG-COORD] Local peak diagnostic failed: %s",
+                        diag_err,
+                        exc_info=True,
+                    )
+                    heatmap_analysis = {
+                        "available": False,
+                        "diagnostic_only": True,
+                        "peaks": [],
+                        "error_zh": f"局部峰值診斷失敗: {diag_err}",
+                        "conclusion_zh": "局部峰值診斷失敗，正式推論分數不受影響。",
+                    }
+
+            # 9.7 產生組合圖 (Coordinate 推論專屬)
             composite_url = ""
             if self.heatmap_manager:
                 try:
-                    # 如果有 omit_crop 則放進 tile_info
-                    if 'omit_crop' in locals() and omit_crop is not None:
-                        tile_info.omit_crop_image = omit_crop
-                        
-                        # Step A: 進行灰塵偵測
-                        is_dust, dust_mask, bright_ratio, detail_text = self.inferencer.check_dust_or_scratch_feature(omit_crop)
-                        tile_info.dust_mask = dust_mask
-                        tile_info.dust_bright_ratio = bright_ratio
-                        
-                        # Step B: 計算重疊指標 (Coverage 或 IOU)
-                        iou = 0.0
-                        heatmap_binary = None
-                        top_pct = self.inferencer.config.dust_heatmap_top_percent
-                        metric_mode = self.inferencer.config.dust_heatmap_metric
-                        metric_name = "COV" if metric_mode == "coverage" else "IOU"
-                        
-                        if is_dust and anomaly_map is not None:
-                            iou, heatmap_binary = self.inferencer.compute_dust_heatmap_iou(
-                                dust_mask, anomaly_map, top_percent=top_pct, metric=metric_mode
-                            )
-                            tile_info.dust_heatmap_iou = iou
-                            if iou >= self.inferencer.config.dust_heatmap_iou_threshold:
-                                tile_info.is_suspected_dust_or_scratch = True
-                                detail_text += f" {metric_name}:{iou:.3f}>={metric_name}_THR -> DUST"
-                            else:
-                                tile_info.is_suspected_dust_or_scratch = False
-                                detail_text += f" {metric_name}:{iou:.3f}<{metric_name}_THR -> REAL_NG"
-                            
-                            # 產生 Debug 可視化圖
-                            try:
-                                tile_info.dust_iou_debug_image = self.inferencer.generate_dust_iou_debug_image(
-                                    tile_image, anomaly_map, dust_mask,
-                                    heatmap_binary, iou, top_pct,
-                                    tile_info.is_suspected_dust_or_scratch,
-                                )
-                            except Exception as dbg_err:
-                                logger.warning(f"Debug image generation failed: {dbg_err}")
-                        elif is_dust:
-                            tile_info.is_suspected_dust_or_scratch = True
-                            detail_text += " (no heatmap, marked as dust)"
-                        else:
-                            tile_info.is_suspected_dust_or_scratch = False
-                            detail_text += " NO_DUST"
-
-                        tile_info.dust_detail_text = detail_text
-                    
                     composite_path = self.heatmap_manager.save_tile_heatmap(
                         save_dir=debug_dir,
                         image_name=f"coord_{image_name}_{ts}",
@@ -7951,6 +8886,29 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             # 10. 判定結果
             actual_threshold = debug_threshold
             judgment = "NG" if score >= actual_threshold else "OK"
+            total_time = _time.time() - total_start
+            score_breakdown = {
+                "raw_patchcore_score": round(
+                    float(getattr(tile_info, "raw_pred_score", score)), 6
+                ),
+                "pre_decay_map_max": round(
+                    float(getattr(tile_info, "pre_decay_map_max", 0.0)), 6
+                ),
+                "post_decay_map_max": round(
+                    float(getattr(tile_info, "post_decay_map_max", 0.0)), 6
+                ),
+                "decay_ratio": round(
+                    float(getattr(tile_info, "score_decay_ratio", 1.0)), 6
+                ),
+                "final_tile_score": round(float(score), 6),
+                "threshold": round(float(actual_threshold), 6),
+                "mask_valid_ratio": round(
+                    float(getattr(tile_info, "score_mask_valid_ratio", 1.0)), 6
+                ),
+                "edge_margin_sides": str(
+                    getattr(tile_info, "score_edge_margin_sides", "") or ""
+                ),
+            }
 
             response_data = {
                 "success": True,
@@ -7966,16 +8924,23 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "score": round(score, 4),
                 "threshold": actual_threshold,
                 "judgment": judgment,
+                "final_judgment": dust_analysis.get("final_judgment", judgment),
+                "final_reason_zh": dust_analysis.get("final_reason_zh", ""),
                 "processing_time": round(total_time, 3),
                 "crop_url": crop_url,
                 "heatmap_url": heatmap_url,
                 "overview_url": overview_url,
                 "omit_url": omit_url,
                 "composite_url": composite_url,
+                "peak_diagnostic_url": peak_diagnostic_url,
                 "image_prefix": img_prefix,
                 "image_prefix_label": source_image_prefix(image_path.name),
                 "model_name": model_name,
                 "edge_margin_px": edge_margin_override if edge_margin_override is not None else self.inferencer.config.edge_margin_px,
+                "peak_window_px": peak_window_px,
+                "score_breakdown": score_breakdown,
+                "dust_analysis": dust_analysis,
+                "heatmap_analysis": heatmap_analysis,
                 "preprocess": {
                     "enabled": bool(configured_pipeline),
                     "applied": bool(preprocess_steps),
@@ -14686,7 +15651,10 @@ def create_web_server(
     CAPIWebHandler._reconcile_train_new_artifacts(db)
     CAPIWebHandler.init_jinja()
 
-    server = ThreadingHTTPServer((host, port), CAPIWebHandler)
+    class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+        allow_reuse_address = True
+
+    server = ReusableThreadingHTTPServer((host, port), CAPIWebHandler)
     return server
 
 
@@ -14701,7 +15669,7 @@ def start_web_server_thread(
     gpu_lock=None,
     capi_server_instance=None,
     log_file=None,
-) -> threading.Thread:
+    ) -> threading.Thread:
     """
     在背景執行緒啟動 Web 伺服器
 
@@ -14717,6 +15685,7 @@ def start_web_server_thread(
         log_file=log_file,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True, name="web-server")
+    thread.web_server = server
     thread.start()
     logger.info(f"Web server started on http://{host}:{port}")
     return thread

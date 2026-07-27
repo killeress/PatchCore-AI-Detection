@@ -24,6 +24,7 @@ from typing import List, Dict, Optional, Any, Tuple
 
 _DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _FACTORY_DAY_START_TIME = "07:30:00"
+_MES_COMPARISON_FULL_SCAN_DAYS = 30
 logger = logging.getLogger(__name__)
 
 
@@ -3223,13 +3224,21 @@ class CAPIDatabase:
             where_clauses.append("UPPER(TRIM(COALESCE(glass_id, ''))) LIKE UPPER(?)")
             params.append(f"%{panel_id.strip()}%")
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        table_source = "inference_records"
+        if start_date and end_date:
+            range_days = (
+                datetime.strptime(end_date, "%Y-%m-%d")
+                - datetime.strptime(start_date, "%Y-%m-%d")
+            ).days + 1
+            if range_days >= _MES_COMPARISON_FULL_SCAN_DAYS:
+                table_source += " NOT INDEXED"
 
         conn = self._get_conn()
         try:
             rows = conn.execute(
                 f"""SELECT id, glass_id, model_id, machine_no, ai_judgment,
                            image_dir, request_time, aoi_machine_coords
-                    FROM inference_records{where_sql}
+                    FROM {table_source}{where_sql}
                     ORDER BY datetime(request_time) DESC, id DESC""",
                 params,
             ).fetchall()
@@ -4083,7 +4092,7 @@ class CAPIDatabase:
             ("dust_pixel_grid_filter_enabled", config.dust_pixel_grid_filter_enabled, "bool", "啟用 OMIT 像素紋理平滑（所有產品解析度）"),
             ("dust_pixel_grid_blur_kernel", config.dust_pixel_grid_blur_kernel, "int", "OMIT Gaussian 核大小（奇數，建議 7）"),
             ("dust_heatmap_iou_threshold", config.dust_heatmap_iou_threshold, "float", "Heatmap-Dust IOU/Coverage 閾值"),
-            ("dust_heatmap_top_percent", config.dust_heatmap_top_percent, "float", "Heatmap 熱區取前 X%；two-stage REAL 特徵須落在此核心附近"),
+            ("dust_heatmap_top_percent", config.dust_heatmap_top_percent, "float", "Heatmap 最紅前 X% 優先核心；two-stage 另有灰塵重排與特徵局部分數補救"),
             ("dust_heatmap_metric", config.dust_heatmap_metric, "string", 'Heatmap 判定指標: "coverage" (覆蓋率) 或是 "iou"'),
             ("dust_detect_dark_particles", config.dust_detect_dark_particles, "bool", "偵測暗色顆粒/圖案 (如偏黑 MARK) 並過濾"),
             # Otsu 邊緣裁切

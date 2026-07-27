@@ -46,13 +46,12 @@ from typing import List, Tuple, Dict, Any, Optional
 import cv2
 import numpy as np
 
-try:
-    from skimage.feature import peak_local_max
-except ImportError:
-    print("❌ 需要 scikit-image: pip install scikit-image")
-    sys.exit(1)
-
 from capi_config import CAPIConfig
+from capi_heatmap_diagnostics import (
+    local_dust_coverage as _diagnostic_local_dust_coverage,
+    region_grow_dust_coverage as _diagnostic_region_grow_coverage,
+    run_peak_trial as _diagnostic_run_peak_trial,
+)
 from capi_inference import (
     CAPIInferencer, DEFAULT_PRODUCT_RESOLUTION,
     resolve_product_resolution, MODEL_RESOLUTION_MAP,
@@ -64,28 +63,15 @@ from capi_inference import (
 # ============================================================
 
 def _local_dust_coverage(dust_mask, peak_y, peak_x, window=11):
-    h, w = dust_mask.shape[:2]
-    half = window // 2
-    y1 = max(0, peak_y - half); y2 = min(h, peak_y + half + 1)
-    x1 = max(0, peak_x - half); x2 = min(w, peak_x + half + 1)
-    region = dust_mask[y1:y2, x1:x2] > 0
-    return float(np.count_nonzero(region) / region.size) if region.size else 0.0
+    return _diagnostic_local_dust_coverage(
+        dust_mask, peak_y, peak_x, window=window
+    )
 
 
 def _region_grow_coverage(anomaly_map, dust_mask, peak_y, peak_x, drop_ratio=0.5):
-    peak_score = float(anomaly_map[peak_y, peak_x])
-    if peak_score <= 0:
-        return 0.0, 0
-    threshold = peak_score * drop_ratio
-    binary = (anomaly_map >= threshold).astype(np.uint8)
-    n_labels, labels = cv2.connectedComponents(binary, connectivity=8)
-    peak_label = labels[peak_y, peak_x]
-    if peak_label == 0:
-        return 0.0, 0
-    region_mask = labels == peak_label
-    region_area = int(np.count_nonzero(region_mask))
-    dust_overlap = int(np.count_nonzero(region_mask & (dust_mask > 0)))
-    return float(dust_overlap / region_area) if region_area else 0.0, region_area
+    return _diagnostic_region_grow_coverage(
+        anomaly_map, dust_mask, peak_y, peak_x, drop_ratio=drop_ratio
+    )
 
 
 def _peak_in_dust(dust_mask, peak_y, peak_x):
@@ -94,27 +80,13 @@ def _peak_in_dust(dust_mask, peak_y, peak_x):
 
 def _run_peak_trial(anomaly_map, dust_mask, *, min_distance, threshold_rel=None,
                     threshold_abs=None):
-    coords = peak_local_max(
+    return _diagnostic_run_peak_trial(
         anomaly_map,
+        dust_mask,
         min_distance=min_distance,
         threshold_rel=threshold_rel,
         threshold_abs=threshold_abs,
-        exclude_border=False,
     )
-    results = []
-    for (py, px) in coords:
-        score = float(anomaly_map[py, px])
-        in_dust = _peak_in_dust(dust_mask, py, px)
-        local_cov = _local_dust_coverage(dust_mask, py, px, 11)
-        rg_cov, rg_area = _region_grow_coverage(anomaly_map, dust_mask, py, px, 0.5)
-        results.append({
-            "y": int(py), "x": int(px), "score": score,
-            "in_dust": in_dust,
-            "local_dust_cov_11x11": local_cov,
-            "region_grow_cov": rg_cov, "region_grow_area": rg_area,
-        })
-    results.sort(key=lambda r: r["score"], reverse=True)
-    return results
 
 
 # ============================================================

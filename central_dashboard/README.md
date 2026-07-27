@@ -62,13 +62,16 @@ Access-Control-Allow-Origin: *
 - `stats.total_err`
 - `stats.shift_name`
 - `stats.time_range`
+- `stats.avg_time`（當班平均處理秒數）
+- `stats.overexposed_count`（當班 Omit 過曝數）
+- `hardware.gpu`（型號、使用率、溫度、VRAM）
+- `hardware.memory`（RAM 使用量）
+- `hardware.disk`（資料庫所在磁碟空間）
 - `latest_event`
 
-現有 API 尚未回傳 Omit 過曝、平均耗時、VRAM、GPU 使用率、溫度、RAM 與硬碟資訊，因此這些欄位會顯示 `—`。
+硬體資訊會在各 CAPI PC 端快取 30 秒。即使既有本機頁面更頻繁呼叫 `/api/status`，也不會每次都重新執行硬體查詢。GPU 資料由 NVIDIA 驅動的 `nvidia-smi` 提供；未安裝 NVIDIA 驅動或查詢失敗時，GPU/VRAM 欄位顯示 `—`，其他狀態仍可正常顯示。
 
-## 可選的硬體資料格式
-
-日後各 PC API 若增加以下欄位，前端不需修改即可顯示：
+## `/api/status` 新增資料格式
 
 ```json
 {
@@ -78,20 +81,38 @@ Access-Control-Allow-Origin: *
   },
   "hardware": {
     "gpu": {
+      "available": true,
+      "name": "NVIDIA RTX A4000",
       "vram_used_gb": 7.2,
       "vram_total_gb": 16.0,
       "utilization_percent": 42,
       "temperature_c": 58
     },
     "memory": {
+      "used_gb": 19.5,
+      "total_gb": 32.0,
       "used_percent": 61
     },
     "disk": {
+      "path": "/aidata/capi_ai",
       "free_gb": 182.4,
-      "total_gb": 500.0
+      "used_gb": 317.6,
+      "total_gb": 500.0,
+      "used_percent": 63.5
     }
   }
 }
 ```
 
 API 暫時離線時，看板會保留最後一次成功資料並標示離線，不會把既有數字清空。
+
+## 設備健康提醒
+
+看板會在「目前告警」區塊提醒設備健康狀況；提醒只會在 API 有提供對應數值時觸發：
+
+- 硬碟剩餘率 `<= 15%`：警告；`<= 10%`：嚴重
+- RAM 使用率 `>= 85%`：警告；`>= 95%`：嚴重
+- VRAM 使用率 `>= 85%`：警告；`>= 95%`：嚴重
+- GPU 溫度 `>= 80°C`：警告；`>= 90°C`：嚴重
+
+嚴重提醒會使用紅色，普通提醒使用黃色；設備卡片上方狀態色條也會同步變色。硬體提醒不會把正常運作的服務誤標成「服務異常」。

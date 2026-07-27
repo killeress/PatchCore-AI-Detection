@@ -4273,7 +4273,12 @@
                             color: '#e2e8f0',
                             font: { size: 10, weight: 600 },
                             anchor: 'end',
-                            align: 'top',
+                            align: ctx => {
+                                if (ctx.dataset.type !== 'line') return 'top';
+                                const value = Number(ctx.dataset.data?.[ctx.dataIndex]);
+                                return Number.isFinite(value) && value >= 90 ? 'bottom' : 'top';
+                            },
+                            clamp: true,
                             offset: 4,
                             formatter: (v, ctx) => ctx.dataset.type === 'line' && v !== null ? fmtPct(v) : '',
                         },
@@ -4437,6 +4442,7 @@
         let _data = null;
         let _activeFilter = null;
         let _waitTimer = null;
+        let _loading = false;
         let _detailRequestToken = 0;
         let _ignoreAoiOk = false;
         let _activeView = 'comparison';
@@ -4559,6 +4565,14 @@
             return document.getElementById('mes_panelId').value.trim();
         }
 
+        function _setQueryControlsDisabled(disabled) {
+            document.querySelectorAll(
+                '.mes-date-bar button, #mes_startDate, #mes_endDate, #mes_panelId, #mes_ignoreAoiOk'
+            ).forEach(control => {
+                control.disabled = disabled;
+            });
+        }
+
         function quickFilter(range) {
             document.querySelectorAll('.mes-date-bar .quick-btn').forEach(
                 button => button.classList.toggle('active', button.dataset.range === range)
@@ -4579,6 +4593,9 @@
         }
 
         async function loadData(start, end, panelId = _panelId()) {
+            if (_loading) return;
+            _loading = true;
+            _setQueryControlsDisabled(true);
             const loading = document.getElementById('mes_loading');
             const status = document.getElementById('mes_status');
             loading.style.display = 'block';
@@ -4618,6 +4635,8 @@
                 clearInterval(_waitTimer);
                 _waitTimer = null;
                 loading.style.display = 'none';
+                _loading = false;
+                _setQueryControlsDisabled(false);
             }
         }
 
@@ -4784,10 +4803,15 @@
                             datalabels: {
                                 color: context => ['#22c55e', '#f59e0b', '#ef4444', '#94a3b8'][context.datasetIndex],
                                 font: { size: 10, weight: 600 },
-                                align: context => context.dataset.type === 'bar'
-                                    ? 'end'
-                                    : context.datasetIndex === 2 ? 'bottom' : 'top',
+                                align: context => {
+                                    if (context.dataset.type === 'bar') return 'end';
+                                    const value = Number(context.dataset.data?.[context.dataIndex]);
+                                    if (Number.isFinite(value) && value >= 90) return 'bottom';
+                                    if (Number.isFinite(value) && value <= 10) return 'top';
+                                    return context.datasetIndex === 2 ? 'bottom' : 'top';
+                                },
                                 anchor: context => context.dataset.type === 'bar' ? 'end' : 'center',
+                                clamp: true,
                                 formatter: (value, context) => {
                                     if (Number(value) === 0) return '';
                                     return context.dataset.type === 'bar'

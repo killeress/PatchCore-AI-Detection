@@ -550,6 +550,187 @@
         margin-top: 16px;
     }
 
+    .coord-diagnostic {
+        margin-top: 16px;
+        padding: 18px;
+        background: linear-gradient(145deg, rgba(15, 23, 42, 0.82), rgba(17, 24, 39, 0.7));
+        border: 1px solid rgba(139, 92, 246, 0.32);
+        border-radius: 12px;
+    }
+
+    .coord-diagnostic-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+    }
+
+    .coord-diagnostic-title {
+        color: var(--text);
+        font-size: 1rem;
+        font-weight: 700;
+        margin: 0;
+    }
+
+    .coord-diagnostic-note {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        line-height: 1.55;
+        margin-top: 5px;
+    }
+
+    .coord-diagnostic-badge {
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid rgba(245, 158, 11, 0.35);
+        background: rgba(245, 158, 11, 0.1);
+        color: #fbbf24;
+        border-radius: 999px;
+        padding: 5px 10px;
+        font-size: 0.74rem;
+        white-space: nowrap;
+    }
+
+    .coord-diagnostic-alert {
+        margin-top: 14px;
+        padding: 12px 14px;
+        border-radius: 9px;
+        border: 1px solid rgba(59, 130, 246, 0.28);
+        background: rgba(59, 130, 246, 0.08);
+        color: #bfdbfe;
+        font-size: 0.86rem;
+        line-height: 1.6;
+    }
+
+    .coord-diagnostic-alert.warning {
+        border-color: rgba(245, 158, 11, 0.35);
+        background: rgba(245, 158, 11, 0.09);
+        color: #fde68a;
+    }
+
+    .coord-score-flow {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+        gap: 10px;
+        margin-top: 14px;
+    }
+
+    .coord-score-step {
+        padding: 11px 12px;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        background: rgba(2, 6, 23, 0.35);
+    }
+
+    .coord-score-step .step-label {
+        color: var(--text-muted);
+        font-size: 0.72rem;
+        line-height: 1.35;
+    }
+
+    .coord-score-step .step-value {
+        margin-top: 4px;
+        color: var(--text);
+        font-family: 'Fira Code', monospace;
+        font-size: 1rem;
+        font-weight: 700;
+    }
+
+    .coord-diagnostic-block {
+        margin-top: 18px;
+        padding-top: 16px;
+        border-top: 1px solid var(--border);
+    }
+
+    .coord-diagnostic-block h4 {
+        color: var(--text);
+        font-size: 0.9rem;
+        margin: 0 0 5px;
+    }
+
+    .coord-table-wrap {
+        margin-top: 10px;
+        max-height: 420px;
+        overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+    }
+
+    .coord-diagnostic-table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 920px;
+        font-size: 0.78rem;
+    }
+
+    .coord-diagnostic-table th,
+    .coord-diagnostic-table td {
+        padding: 9px 10px;
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        vertical-align: top;
+        line-height: 1.45;
+    }
+
+    .coord-diagnostic-table th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        color: #cbd5e1;
+        background: #111827;
+        white-space: nowrap;
+    }
+
+    .coord-diagnostic-table tr:last-child td {
+        border-bottom: none;
+    }
+
+    .coord-diagnostic-table code {
+        color: #bfdbfe;
+        font-size: 0.76rem;
+    }
+
+    .coord-status-pill {
+        display: inline-flex;
+        border-radius: 999px;
+        padding: 3px 8px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+
+    .coord-status-pill.dust {
+        color: #fbbf24;
+        background: rgba(245, 158, 11, 0.12);
+    }
+
+    .coord-status-pill.real {
+        color: #fca5a5;
+        background: rgba(239, 68, 68, 0.12);
+    }
+
+    .coord-status-pill.kept {
+        color: #86efac;
+        background: rgba(34, 197, 94, 0.12);
+    }
+
+    .coord-status-pill.dropped {
+        color: #fdba74;
+        background: rgba(249, 115, 22, 0.12);
+    }
+
+    .coord-empty-state {
+        padding: 14px;
+        color: var(--text-muted);
+        font-size: 0.82rem;
+        line-height: 1.55;
+        background: rgba(2, 6, 23, 0.25);
+        border: 1px dashed var(--border);
+        border-radius: 8px;
+        margin-top: 10px;
+    }
+
     .lab-param-panel {
         display: none;
         grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -1314,7 +1495,7 @@
                     📍 座標推論
                 </h2>
                 <p style="color:var(--text-muted); font-size:0.85rem; margin-top:4px;">
-                    輸入產品座標，以該點為中心裁切 512×512 區塊做推論（用於排查閥值未檢出的真實 Defect）
+                    輸入產品座標，重現正式推論與灰塵過濾，並列出每個熱區分數及被 Top % 淘汰的原因
                 </p>
             </div>
         </div>
@@ -1355,6 +1536,11 @@
                     <input type="number" id="coord-edge-margin" value="{{ default_edge_margin }}" min="0" max="512"
                         step="16" style="color:var(--err);">
                 </div>
+                <div class="coord-group">
+                    <label for="coord-peak-window">座標搜尋半徑</label>
+                    <input type="number" id="coord-peak-window" value="50" min="1" max="512"
+                        step="5" title="只影響局部峰值診斷，不會修改正式判定">
+                </div>
                 <button class="btn-run" id="btn-coord-run" onclick="runCoordInference()"
                     style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);">
                     <span class="spinner" id="coord-spinner"></span>
@@ -1370,6 +1556,7 @@
         <div id="coord-result-section" class="hidden">
             <div id="coord-preprocess-info" class="card hidden" style="padding:16px; margin-top:16px;"></div>
             <div class="coord-info-cards" id="coord-info-cards"></div>
+            <div id="coord-diagnostic-section" class="coord-diagnostic hidden"></div>
             <div class="coord-result-grid" id="coord-result-grid"></div>
         </div>
     </div>
@@ -3400,6 +3587,7 @@
         spn.classList.add('active');
         hideCoordError();
         document.getElementById('coord-result-section').classList.add('hidden');
+        document.getElementById('coord-diagnostic-section').classList.add('hidden');
 
         try {
             const resp = await fetch('/api/debug/coord-inference', {
@@ -3413,6 +3601,7 @@
                     product_h: productH,
                     threshold: parseFloat(document.getElementById('coord-threshold').value) || 0.5,
                     edge_margin_px: parseInt(document.getElementById('coord-edge-margin').value),
+                    peak_window_px: parseInt(document.getElementById('coord-peak-window').value) || 50,
                 }),
             });
 
@@ -3438,6 +3627,284 @@
     }
     function hideCoordError() {
         document.getElementById('coord-error-box').classList.add('hidden');
+    }
+
+    function coordDiagNumber(value, digits = 4) {
+        const number = Number(value);
+        return Number.isFinite(number) ? number.toFixed(digits) : '—';
+    }
+
+    function coordDiagPercent(value, digits = 1) {
+        const number = Number(value);
+        return Number.isFinite(number) ? `${(number * 100).toFixed(digits)}%` : '—';
+    }
+
+    function coordDiagPoint(item) {
+        const point = item?.image_coord || item?.tile_coord || item?.map_coord;
+        return Array.isArray(point) && point.length >= 2
+            ? `(${escapeHtml(point[0])}, ${escapeHtml(point[1])})`
+            : '—';
+    }
+
+    function renderCoordDiagnostics(data) {
+        const root = document.getElementById('coord-diagnostic-section');
+        const heat = data.heatmap_analysis || {};
+        const dust = data.dust_analysis || {};
+        const score = data.score_breakdown || {};
+        const stats = heat.statistics || heat.stats || {};
+        const regions = Array.isArray(dust.regions) ? dust.regions : [];
+        const peaks = Array.isArray(heat.peaks) ? heat.peaks : [];
+        const twoStage = dust.two_stage || {};
+        const features = Array.isArray(twoStage.features) ? twoStage.features : [];
+        const counters = twoStage.counters || {};
+
+        if (!heat.available && !dust.available && !Object.keys(score).length) {
+            root.classList.add('hidden');
+            root.innerHTML = '';
+            return;
+        }
+
+        const topPercent = Number(
+            stats.top_percent ?? heat.top_percent ?? dust.top_percent ?? 0
+        );
+        const topCutoff = stats.top_cutoff
+            ?? stats.top_percent_cutoff
+            ?? heat.top_cutoff;
+        const globalPeak = stats.global_peak
+            ?? stats.global_max
+            ?? heat.global_peak;
+        const dominant = heat.dominant_peak || peaks[0] || null;
+        const aoiBest = heat.aoi_best_peak || heat.best_aoi_peak || null;
+        const dominantIsDust = Boolean(dominant?.in_dust);
+        const competitionDetected = Boolean(
+            heat.score_competition_detected
+            || heat.top_percent_competition
+            || (
+                dominantIsDust
+                && aoiBest
+                && !(aoiBest.in_top_percent ?? aoiBest.inside_top_percent)
+            )
+        );
+        const conclusion = heat.conclusion_zh
+            || data.final_reason_zh
+            || dust.final_reason_zh
+            || '已完成熱力與灰塵流程診斷。';
+
+        const scoreSteps = [
+            ['模型原始分數', score.raw_patchcore_score],
+            ['衰減前熱圖最高值', score.pre_decay_map_max],
+            ['衰減後熱圖最高值', score.post_decay_map_max],
+            ['遮罩／邊緣保留比例', score.decay_ratio],
+            ['本次 Tile 分數', score.final_tile_score ?? data.score],
+            ['判定門檻', score.threshold ?? data.threshold],
+        ].map(([label, value], index) => `
+            <div class="coord-score-step">
+                <div class="step-label">${index + 1}. ${escapeHtml(label)}</div>
+                <div class="step-value">${coordDiagNumber(value, 4)}</div>
+            </div>
+        `).join('');
+
+        const seed = dust.center_seed || {};
+        const seedText = seed.enabled
+            ? (seed.applied ? '已開啟且本次有套用' : '已開啟，本次未形成有效 seed')
+            : '現場關閉';
+        const seedClass = seed.enabled ? 'kept' : 'dropped';
+
+        const regionRows = regions.map(region => `
+            <tr>
+                <td>#${escapeHtml(region.rank ?? region.label_id ?? '')}</td>
+                <td><code>${coordDiagPoint(region)}</code></td>
+                <td>${coordDiagNumber(region.peak_value, 4)}</td>
+                <td>${coordDiagPercent(region.relative_to_global)}</td>
+                <td>${coordDiagNumber(region.estimated_score, 4)}</td>
+                <td>${coordDiagPercent(region.coverage)}</td>
+                <td>${region.peak_in_dust ? '是' : '否'}</td>
+                <td>
+                    <span class="coord-status-pill ${region.is_dust ? 'dust' : 'real'}">
+                        ${escapeHtml(region.verdict_zh || (region.is_dust ? '灰塵／氣泡' : '候選真缺陷'))}
+                    </span>
+                    <div class="coord-diagnostic-note">${escapeHtml(region.reason_zh || '')}</div>
+                </td>
+            </tr>
+        `).join('');
+
+        const peakRows = peaks.map(peak => {
+            const peakValue = peak.peak_value ?? peak.score;
+            const relative = peak.relative_to_global ?? peak.relative_score;
+            const inTop = Boolean(peak.in_top_percent ?? peak.inside_top_percent);
+            const effectiveTop = peak.in_effective_top_percent
+                ?? peak.in_effective_top
+                ?? inTop;
+            const sources = peak.source_zh
+                ? peak.source_zh
+                : Array.isArray(peak.sources_zh)
+                ? peak.sources_zh.join('、')
+                : Array.isArray(peak.sources)
+                    ? peak.sources.join('、')
+                    : (peak.source || '局部峰值');
+            const dustKnown = heat.dust_mask_available !== false
+                && peak.in_dust !== null
+                && peak.in_dust !== undefined;
+            const dustText = dustKnown
+                ? (peak.in_dust ? '灰塵／氣泡上' : '非灰塵')
+                : '無 OMIT，未知';
+            return `
+                <tr>
+                    <td>#${escapeHtml(peak.rank ?? '')}</td>
+                    <td>${escapeHtml(sources)}</td>
+                    <td><code>${coordDiagPoint(peak)}</code></td>
+                    <td>${coordDiagNumber(peakValue, 4)}</td>
+                    <td>${coordDiagPercent(relative)}</td>
+                    <td>${coordDiagNumber(peak.estimated_score, 4)}</td>
+                    <td>
+                        <span class="coord-status-pill ${effectiveTop ? 'kept' : 'dropped'}">
+                            ${effectiveTop ? '有保留' : `被 Top ${coordDiagNumber(topPercent, 2)}% 排除`}
+                        </span>
+                    </td>
+                    <td>
+                        <span class="coord-status-pill ${peak.in_dust ? 'dust' : (dustKnown ? 'real' : 'dropped')}">
+                            ${dustText}
+                        </span>
+                        <div class="coord-diagnostic-note">
+                            11×11 灰塵覆蓋 ${coordDiagPercent(peak.local_dust_coverage ?? peak.local_dust_cov_11x11)}
+                        </div>
+                    </td>
+                    <td>${coordDiagNumber(peak.aoi_distance_px, 1)} px</td>
+                    <td>
+                        ${escapeHtml(peak.verdict_zh || peak.reason_zh || '診斷候選')}
+                        ${peak.reason_zh && peak.verdict_zh
+                            ? `<div class="coord-diagnostic-note">${escapeHtml(peak.reason_zh)}</div>`
+                            : ''}
+                    </td>
+                </tr>
+            `;
+        }).join('');
+
+        const counterItems = Object.entries(counters)
+            .filter(([, item]) => Number(item?.count || 0) > 0)
+            .map(([, item]) => `
+                <div class="coord-diagnostic-alert warning" style="margin-top:8px;">
+                    <strong>${escapeHtml(item.count)} 個：</strong>${escapeHtml(item.label_zh || '')}
+                </div>
+            `).join('');
+
+        const featureRows = features.map(feature => `
+            <tr>
+                <td>#${escapeHtml(feature.rank ?? '')}</td>
+                <td>${escapeHtml(feature.type_zh || feature.type || '—')}</td>
+                <td><code>${coordDiagPoint(feature)}</code></td>
+                <td>${coordDiagNumber(feature.local_peak, 4)}</td>
+                <td>${coordDiagNumber(feature.estimated_score, 4)}</td>
+                <td>${coordDiagPercent(feature.dust_ratio)}</td>
+                <td>${escapeHtml(feature.support_source_zh || '未取得判定資格')}</td>
+                <td>
+                    <span class="coord-status-pill ${feature.is_dust ? 'dust' : 'real'}">
+                        ${escapeHtml(feature.verdict_zh || '')}
+                    </span>
+                </td>
+            </tr>
+        `).join('');
+
+        const dominantSummary = dominant
+            ? `${dominantIsDust ? '灰塵／氣泡' : '非灰塵'} ｜ 熱力 ${coordDiagNumber(dominant.peak_value ?? dominant.score, 4)} ｜ 推估分數 ${coordDiagNumber(dominant.estimated_score, 4)}`
+            : '沒有可列出的局部峰值';
+        const aoiSummary = aoiBest
+            ? `座標附近最強候選：熱力 ${coordDiagNumber(aoiBest.peak_value ?? aoiBest.score, 4)}，推估分數 ${coordDiagNumber(aoiBest.estimated_score, 4)}`
+            : '指定座標範圍內沒有找到局部峰值';
+
+        root.innerHTML = `
+            <div class="coord-diagnostic-head">
+                <div>
+                    <h3 class="coord-diagnostic-title">🔎 熱力分數與漏檢原因診斷</h3>
+                    <div class="coord-diagnostic-note">
+                        分開顯示 Tile 總分、Top % 正式熱區及不受配額限制的局部峰值，方便判斷是否被氣泡搶分。
+                    </div>
+                </div>
+                <span class="coord-diagnostic-badge">僅供排查，不修改正式設定或判定</span>
+            </div>
+
+            <div class="coord-diagnostic-alert ${competitionDetected ? 'warning' : ''}">
+                <strong>診斷結論：</strong>${escapeHtml(conclusion)}
+                <div class="coord-diagnostic-note" style="margin-top:4px;">
+                    最高峰來源：${escapeHtml(dominantSummary)}；${escapeHtml(aoiSummary)}
+                </div>
+            </div>
+
+            <div class="coord-score-flow">${scoreSteps}</div>
+
+            <div class="coord-diagnostic-alert" style="margin-top:10px;">
+                <strong>Top ${coordDiagNumber(topPercent, 2)}% 切點：</strong>
+                熱力值需達 ${coordDiagNumber(topCutoff, 4)} 才會進入正式逐區域判定；
+                全圖最高熱力為 ${coordDiagNumber(globalPeak, 4)}。
+                <span class="coord-status-pill ${seedClass}" style="margin-left:8px;">中心保留：${escapeHtml(seedText)}</span>
+                <div class="coord-diagnostic-note">${escapeHtml(seed.explanation_zh || '')}</div>
+            </div>
+
+            <div class="coord-diagnostic-block">
+                <h4>① 正式 Top % 熱區（全部列出）</h4>
+                <div class="coord-diagnostic-note">
+                    這些區域實際進入 per-region 灰塵比對；「推估區域分數」＝ Tile 分數 × 此區峰值／全圖峰值，不等同模型重新單獨推論。
+                </div>
+                ${regionRows ? `
+                    <div class="coord-table-wrap">
+                        <table class="coord-diagnostic-table">
+                            <thead><tr>
+                                <th>排名</th><th>圖片位置</th><th>熱力峰值</th><th>相對最高峰</th>
+                                <th>推估區域分數</th><th>灰塵覆蓋</th><th>峰值在灰塵</th><th>區域判定</th>
+                            </tr></thead>
+                            <tbody>${regionRows}</tbody>
+                        </table>
+                    </div>
+                ` : `<div class="coord-empty-state">本次沒有可列出的正式 Top % 區域。若沒有 OMIT，仍可看下方局部峰值，但無法確認灰塵／氣泡。</div>`}
+            </div>
+
+            <div class="coord-diagnostic-block">
+                <h4>② 局部峰值掃描（不受 Top % 配額限制，全部列出）</h4>
+                <div class="coord-diagnostic-note">
+                    「被排除」代表熱力圖上有局部峰值，但沒有進入正式 Top % 核心；這正是強氣泡可能蓋過中心黑點時要看的欄位。
+                </div>
+                ${heat.peak_limit_reached ? `
+                    <div class="coord-diagnostic-alert warning">
+                        此熱力圖候選過多，已達每種掃描 ${escapeHtml(heat.peak_limit_per_scan || 100)} 個的安全上限；
+                        下表依熱力由高到低顯示，建議先檢查影像雜訊或前處理。
+                    </div>
+                ` : ''}
+                ${peakRows ? `
+                    <div class="coord-table-wrap">
+                        <table class="coord-diagnostic-table">
+                            <thead><tr>
+                                <th>排名</th><th>找到方式</th><th>圖片位置</th><th>熱力峰值</th>
+                                <th>相對最高峰</th><th>推估區域分數</th><th>Top % 去留</th>
+                                <th>灰塵關係</th><th>距指定座標</th><th>中文判讀</th>
+                            </tr></thead>
+                            <tbody>${peakRows}</tbody>
+                        </table>
+                    </div>
+                ` : `<div class="coord-empty-state">熱力圖內沒有達診斷條件的局部峰值。</div>`}
+            </div>
+
+            ${(twoStage.ran || counterItems || featureRows) ? `
+                <div class="coord-diagnostic-block">
+                    <h4>③ 二階段原圖特徵判定</h4>
+                    <div class="coord-diagnostic-note">
+                        顯示原圖暗點／亮點如何取得判定資格；若看到「未進 Top % 核心」，表示特徵存在但沒有被現行規則採用。
+                    </div>
+                    ${counterItems}
+                    ${featureRows ? `
+                        <div class="coord-table-wrap">
+                            <table class="coord-diagnostic-table">
+                                <thead><tr>
+                                    <th>排名</th><th>類型</th><th>圖片位置</th><th>局部熱力</th>
+                                    <th>局部等效分數</th><th>灰塵重疊</th><th>取得資格方式</th><th>判定</th>
+                                </tr></thead>
+                                <tbody>${featureRows}</tbody>
+                            </table>
+                        </div>
+                    ` : `<div class="coord-empty-state">二階段有執行，但沒有特徵通過採用條件；請查看上方被忽略原因。</div>`}
+                </div>
+            ` : ''}
+        `;
+        root.classList.remove('hidden');
     }
 
     function renderCoordResults(data) {
@@ -3491,6 +3958,10 @@
         const isNG = data.judgment === 'NG';
         const jColor = isNG ? 'var(--ng)' : 'var(--ok)';
         const jIcon = isNG ? '🔴' : '🟢';
+        const finalJudgment = data.final_judgment || data.judgment;
+        const finalIsNG = finalJudgment === 'NG';
+        const finalColor = finalIsNG ? 'var(--ng)' : 'var(--ok)';
+        const finalIcon = finalIsNG ? '🔴' : '🟢';
         const shift = data.tile_shift || [0, 0];
         const shiftText = `(${shift[0] > 0 ? '+' : ''}${shift[0]}, ${shift[1] > 0 ? '+' : ''}${shift[1]})`;
 
@@ -3498,8 +3969,12 @@
         const cards = document.getElementById('coord-info-cards');
         cards.innerHTML = `
             <div class="summary-card" style="border-color:${isNG ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}">
-                <div class="label">判定</div>
+                <div class="label">PatchCore 初判</div>
                 <div class="value" style="color:${jColor}">${jIcon} ${data.judgment}</div>
+            </div>
+            <div class="summary-card" style="border-color:${finalIsNG ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}" title="${escapeHtml(data.final_reason_zh || '')}">
+                <div class="label">灰塵流程後</div>
+                <div class="value" style="color:${finalColor}">${finalIcon} ${escapeHtml(finalJudgment)}</div>
             </div>
             <div class="summary-card">
                 <div class="label">異常分數</div>
@@ -3531,9 +4006,11 @@
             </div>
             <div class="summary-card">
                 <div class="label">使用模型</div>
-                <div class="value" style="color:var(--text);font-size:0.85rem;" title="${data.model_name}">${data.image_prefix_label || data.image_prefix || '?'}</div>
+                <div class="value" style="color:var(--text);font-size:0.85rem;" title="${escapeHtml(data.model_name || '')}">${escapeHtml(data.image_prefix_label || data.image_prefix || '?')}</div>
             </div>
         `;
+
+        renderCoordDiagnostics(data);
 
         // Images
         const grid = document.getElementById('coord-result-grid');
@@ -3566,7 +4043,17 @@
             </div>
         `;
 
-        // 4. OMIT Image (if available)
+        // 4. Local peak diagnostic
+        if (data.peak_diagnostic_url) {
+            imagesHtml += `
+                <div class="img-card">
+                    <h4>🎯 局部峰值編號圖（黃=灰塵／紫=被 Top % 排除／紅=保留）</h4>
+                    <img src="${data.peak_diagnostic_url}?t=${t}" alt="Local peak diagnostic" onclick="openLightbox(this.src)">
+                </div>
+            `;
+        }
+
+        // 5. OMIT Image (if available)
         if (data.omit_url) {
             imagesHtml += `
                 <div class="img-card">
@@ -3583,7 +4070,7 @@
             `;
         }
 
-        // 5. Composite Image
+        // 6. Composite Image
         if (data.composite_url) {
             imagesHtml += `
                 <div style="grid-column: 1 / -1; margin-top:16px; background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden;">

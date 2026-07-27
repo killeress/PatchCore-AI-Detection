@@ -65,6 +65,20 @@ def test_start_server_prefers_capi_python_before_system_python():
     assert "PYTHON=$(command -v python3 || command -v python || true)" in script
 
 
+def test_start_server_handles_zombies_and_checks_configured_ports():
+    script = Path("start_server.sh").read_text(encoding="utf-8")
+
+    assert "pid_is_zombie" in script
+    assert "while [ $i -lt 10 ] && pid_is_server \"$pid\"; do" in script
+    assert "check_configured_ports" in script
+    assert "wait_for_configured_ports" in script
+    assert "PORT_WAIT_SECONDS=10" in script
+    assert "setsid" in script
+    assert 'web.get("port", 8080)' in script
+    assert 'server.get("port", 7907)' in script
+    assert "ss" in script or "lsof" in script
+
+
 def test_base_template_includes_hostname_in_title_header_and_footer(monkeypatch):
     import capi_web
     from capi_web import CAPIWebHandler
@@ -122,6 +136,7 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "templates/ric_report.html" in names
         assert "capi_edge_cv.py" in names
         assert "capi_heatmap.py" in names
+        assert "capi_heatmap_diagnostics.py" in names
         assert "capi_image_orientation.py" in names
         assert "capi_image_preprocess_lab.py" in names
         assert "capi_dataset_export.py" in names

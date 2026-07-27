@@ -4,6 +4,16 @@
     const DEFAULT_REFRESH_SECONDS = 30;
     const MIN_REFRESH_SECONDS = 30;
     const DEFAULT_TIMEOUT_SECONDS = 8;
+    const HEALTH_THRESHOLDS = Object.freeze({
+        diskFreeWarningPercent: 15,
+        diskFreeCriticalPercent: 10,
+        ramUsedWarningPercent: 85,
+        ramUsedCriticalPercent: 95,
+        vramUsedWarningPercent: 85,
+        vramUsedCriticalPercent: 95,
+        gpuTemperatureWarningC: 80,
+        gpuTemperatureCriticalC: 90
+    });
     const config = normalizeConfig(window.CAPI_DASHBOARD_CONFIG);
     const lineStates = new Map();
 
@@ -37,13 +47,18 @@
         }
 
         const seenIds = new Set();
+        const factoryGrids = new Map();
         for (const line of activeLines) {
             if (!line.id || seenIds.has(line.id)) {
                 showConfigError("每條線都必須有不重複的 id，請檢查 config.js。");
                 continue;
             }
             seenIds.add(line.id);
-            createLineCard(line);
+            const factory = line.factory || "未設定廠別";
+            if (!factoryGrids.has(factory)) {
+                factoryGrids.set(factory, createFactorySection(factory, factoryGrids.size + 1));
+            }
+            createLineCard(line, factoryGrids.get(factory));
         }
 
         document.getElementById("refresh-button").addEventListener("click", function () {
@@ -68,7 +83,7 @@
         );
 
         return {
-            title: String(raw.title || "CAPI AI 中控看板"),
+            title: String(raw.title || "寧波廠區 CAPI AI 中控看板"),
             refreshIntervalSeconds,
             requestTimeoutSeconds,
             lines: Array.isArray(raw.lines) ? raw.lines : []
@@ -80,27 +95,50 @@
         return Number.isFinite(number) && number > 0 ? Math.round(number) : fallback;
     }
 
-    function createLineCard(line) {
+    function createFactorySection(factory, index) {
+        const section = document.createElement("section");
+        const headingId = `factory-title-${index}`;
+        section.className = "factory-group";
+        section.setAttribute("aria-labelledby", headingId);
+
+        const heading = document.createElement("div");
+        heading.className = "factory-heading";
+
+        const eyebrow = document.createElement("span");
+        eyebrow.className = "factory-heading-label";
+        eyebrow.textContent = "FACTORY ZONE";
+
+        const title = document.createElement("h3");
+        title.id = headingId;
+        title.textContent = factory;
+
+        const lineGrid = document.createElement("div");
+        lineGrid.className = "line-grid";
+        lineGrid.setAttribute("aria-label", `${factory} 線體狀態`);
+
+        heading.append(eyebrow, title);
+        section.append(heading, lineGrid);
+        document.getElementById("factory-sections").appendChild(section);
+        return lineGrid;
+    }
+
+    function createLineCard(line, lineGrid) {
         const template = document.getElementById("line-card-template");
         const card = template.content.firstElementChild.cloneNode(true);
 
         card.dataset.lineId = line.id;
-        setField(card, "factory", line.factory || "未設定廠別");
         setField(card, "pc-name", line.pcName || line.id);
         setField(card, "line-name", line.line || "未設定線體");
-        setField(card, "api-host", safeUrlLabel(line.apiUrl));
 
         configureLink(card, "dashboard", line.dashboardUrl || deriveBaseUrl(line.apiUrl));
         configureLink(card, "overexposed", line.overexposedUrl);
 
-        document.getElementById("line-grid").appendChild(card);
+        lineGrid.appendChild(card);
         lineStates.set(line.id, {
             line,
             card,
             status: "checking",
             data: null,
-            lastSuccessAt: null,
-            lastAttemptAt: null,
             error: ""
         });
         renderLineCard(lineStates.get(line.id));
@@ -139,7 +177,6 @@
     }
 
     async function refreshLine(state) {
-        state.lastAttemptAt = new Date();
         const controller = new AbortController();
         const timeoutId = window.setTimeout(
             () => controller.abort(),
@@ -165,7 +202,6 @@
             }
 
             state.data = normalizeStatus(rawData);
-            state.lastSuccessAt = new Date();
             state.status = state.data.running ? "online" : "warning";
             state.error = state.data.running ? "" : "API 可連線，但服務回報未運行。";
         } catch (error) {
@@ -205,7 +241,6 @@
                 asObject(raw.performance).avg_seconds
             ),
             activeConnections: numberValue(traffic.active_connections),
-            activeInferences: numberValue(traffic.active_inferences),
             connectedMachines: Array.isArray(traffic.connected_machines)
                 ? traffic.connected_machines
                 : [],
@@ -221,6 +256,8 @@
                 vramTotalGb: optionalNumber(gpu.vram_total_gb),
                 gpuUtilization: optionalNumber(gpu.utilization_percent),
                 gpuTemperature: optionalNumber(gpu.temperature_c),
+                ramUsedGb: optionalNumber(memory.used_gb),
+                ramTotalGb: optionalNumber(memory.total_gb),
                 ramUsedPercent: optionalNumber(memory.used_percent),
                 diskFreeGb: optionalNumber(disk.free_gb),
                 diskTotalGb: optionalNumber(disk.total_gb)
@@ -253,8 +290,11 @@
         const card = state.card;
         const data = state.data;
         card.dataset.state = state.status;
+        const healthAlerts = data && state.status !== "offline"
+            ? getHardwareAlerts(data)
+            : [];
+        card.dataset.health = healthAlerts.length ? healthAlerts[0].severity : "normal";
         setField(card, "status", statusText(state.status));
-        setField(card, "last-success", formatFreshness(state.lastSuccessAt));
 
         const errorElement = card.querySelector('[data-field="error"]');
         errorElement.hidden = !state.error;
@@ -295,14 +335,13 @@
         setField(card, "device", data.device || "—");
         setField(card, "vram", formatVram(data.hardware));
         setField(card, "gpu-health", formatGpuHealth(data.hardware));
-        setField(card, "ram", formatPercent(data.hardware.ramUsedPercent));
+        setField(card, "ram", formatMemory(data.hardware));
         setField(card, "disk", formatDisk(data.hardware));
         setField(
             card,
             "connections",
             `${formatNumber(data.activeConnections)} / ${formatNumber(data.connectedMachines.length)} 機台`
         );
-        setField(card, "active-inferences", formatNumber(data.activeInferences));
 
         const latestLabel = [data.latestEvent.glassId, data.latestEvent.machineNo]
             .filter(Boolean)
@@ -358,8 +397,16 @@
         return parts.length ? parts.join(" / ") : "—";
     }
 
-    function formatPercent(value) {
-        return value === null ? "—" : `${formatDecimal(value, 0)}%`;
+    function formatMemory(hardware) {
+        if (hardware.ramUsedGb !== null && hardware.ramTotalGb !== null) {
+            const usage = `${formatDecimal(hardware.ramUsedGb, 1)} / ${formatDecimal(hardware.ramTotalGb, 1)} GB`;
+            return hardware.ramUsedPercent === null
+                ? usage
+                : `${usage} (${formatDecimal(hardware.ramUsedPercent, 0)}%)`;
+        }
+        return hardware.ramUsedPercent === null
+            ? "—"
+            : `${formatDecimal(hardware.ramUsedPercent, 0)}%`;
     }
 
     function formatDisk(hardware) {
@@ -405,18 +452,76 @@
         }
     }
 
+    function getHardwareAlerts(data) {
+        const alerts = [];
+        const hardware = data.hardware || {};
+
+        if (hardware.diskFreeGb !== null && hardware.diskTotalGb > 0) {
+            const freePercent = (hardware.diskFreeGb / hardware.diskTotalGb) * 100;
+            if (freePercent <= HEALTH_THRESHOLDS.diskFreeCriticalPercent) {
+                alerts.push({
+                    severity: "critical",
+                    message: `硬碟空間嚴重不足：剩餘 ${formatDecimal(freePercent, 1)}%（${formatDecimal(hardware.diskFreeGb, 1)} / ${formatDecimal(hardware.diskTotalGb, 1)} GB）`
+                });
+            } else if (freePercent <= HEALTH_THRESHOLDS.diskFreeWarningPercent) {
+                alerts.push({
+                    severity: "warning",
+                    message: `硬碟空間偏低：剩餘 ${formatDecimal(freePercent, 1)}%（${formatDecimal(hardware.diskFreeGb, 1)} / ${formatDecimal(hardware.diskTotalGb, 1)} GB）`
+                });
+            }
+        }
+
+        if (hardware.ramUsedPercent !== null) {
+            if (hardware.ramUsedPercent >= HEALTH_THRESHOLDS.ramUsedCriticalPercent) {
+                alerts.push({
+                    severity: "critical",
+                    message: `RAM 使用率過高：${formatDecimal(hardware.ramUsedPercent, 0)}%`
+                });
+            } else if (hardware.ramUsedPercent >= HEALTH_THRESHOLDS.ramUsedWarningPercent) {
+                alerts.push({
+                    severity: "warning",
+                    message: `RAM 使用率偏高：${formatDecimal(hardware.ramUsedPercent, 0)}%`
+                });
+            }
+        }
+
+        if (hardware.vramUsedGb !== null && hardware.vramTotalGb > 0) {
+            const usedPercent = (hardware.vramUsedGb / hardware.vramTotalGb) * 100;
+            if (usedPercent >= HEALTH_THRESHOLDS.vramUsedCriticalPercent) {
+                alerts.push({
+                    severity: "critical",
+                    message: `VRAM 使用率過高：${formatDecimal(usedPercent, 0)}%（${formatDecimal(hardware.vramUsedGb, 1)} / ${formatDecimal(hardware.vramTotalGb, 1)} GB）`
+                });
+            } else if (usedPercent >= HEALTH_THRESHOLDS.vramUsedWarningPercent) {
+                alerts.push({
+                    severity: "warning",
+                    message: `VRAM 使用率偏高：${formatDecimal(usedPercent, 0)}%（${formatDecimal(hardware.vramUsedGb, 1)} / ${formatDecimal(hardware.vramTotalGb, 1)} GB）`
+                });
+            }
+        }
+
+        if (hardware.gpuTemperature !== null) {
+            if (hardware.gpuTemperature >= HEALTH_THRESHOLDS.gpuTemperatureCriticalC) {
+                alerts.push({
+                    severity: "critical",
+                    message: `GPU 溫度過高：${formatDecimal(hardware.gpuTemperature, 0)}°C`
+                });
+            } else if (hardware.gpuTemperature >= HEALTH_THRESHOLDS.gpuTemperatureWarningC) {
+                alerts.push({
+                    severity: "warning",
+                    message: `GPU 溫度偏高：${formatDecimal(hardware.gpuTemperature, 0)}°C`
+                });
+            }
+        }
+
+        return alerts.sort((left, right) => {
+            const priority = { critical: 0, warning: 1 };
+            return priority[left.severity] - priority[right.severity];
+        });
+    }
+
     function updateSummary() {
         const states = Array.from(lineStates.values());
-        const onlineStates = states.filter((state) => state.status === "online" && state.data);
-        const aggregate = onlineStates.reduce(
-            (result, state) => {
-                result.total += state.data.total;
-                result.ok += state.data.ok;
-                result.ng += state.data.ng;
-                return result;
-            },
-            { total: 0, ok: 0, ng: 0 }
-        );
 
         setText(document.getElementById("summary-total-lines"), states.length);
         setText(
@@ -431,30 +536,49 @@
             document.getElementById("summary-offline"),
             states.filter((state) => state.status === "offline").length
         );
-        setText(document.getElementById("summary-shift-total"), formatNumber(aggregate.total));
-        setText(
-            document.getElementById("summary-ng-rate"),
-            formatRate(aggregate.ng, aggregate.ok + aggregate.ng)
-        );
     }
 
     function renderAlerts() {
-        const alerts = Array.from(lineStates.values()).filter(
-            (state) => state.status === "offline" || state.status === "warning"
-        );
+        const alerts = [];
+        for (const state of lineStates.values()) {
+            const label = `${state.line.factory || "未設定廠別"} / ${state.line.line || state.line.id}`;
+            if (state.status === "offline") {
+                alerts.push({
+                    severity: "critical",
+                    message: `${label}：${state.error || statusText(state.status)}`
+                });
+            } else if (state.status === "warning") {
+                alerts.push({
+                    severity: "warning",
+                    message: `${label}：${state.error || statusText(state.status)}`
+                });
+            }
+
+            if (state.data && state.status !== "offline") {
+                for (const alert of getHardwareAlerts(state.data)) {
+                    alerts.push({
+                        severity: alert.severity,
+                        message: `${label}：${alert.message}`
+                    });
+                }
+            }
+        }
         const panel = document.getElementById("alert-panel");
         const list = document.getElementById("alert-list");
         list.replaceChildren();
+        const hasCritical = alerts.some((alert) => alert.severity === "critical");
+        panel.classList.toggle("has-critical", hasCritical);
+        panel.classList.toggle("has-warning", !hasCritical && alerts.length > 0);
 
         if (alerts.length === 0) {
             panel.hidden = true;
             return;
         }
 
-        for (const state of alerts) {
+        for (const alert of alerts) {
             const item = document.createElement("li");
-            const label = `${state.line.factory || "未設定廠別"} / ${state.line.line || state.line.id}`;
-            item.textContent = `${label}：${state.error || statusText(state.status)}`;
+            item.className = `alert-item alert-${alert.severity}`;
+            item.textContent = alert.message;
             list.appendChild(item);
         }
         panel.hidden = false;
@@ -472,7 +596,6 @@
         clearInterval(clockTimer);
         clockTimer = window.setInterval(function () {
             updateClock();
-            updateFreshnessLabels();
         }, 1000);
     }
 
@@ -512,26 +635,6 @@
         setText(element, `${seconds} 秒後更新`);
     }
 
-    function updateFreshnessLabels() {
-        for (const state of lineStates.values()) {
-            setField(state.card, "last-success", formatFreshness(state.lastSuccessAt));
-        }
-    }
-
-    function formatFreshness(date) {
-        if (!date) {
-            return "尚未取得";
-        }
-        const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
-        if (seconds < 5) {
-            return "剛剛";
-        }
-        if (seconds < 60) {
-            return `${seconds} 秒前`;
-        }
-        return `${Math.floor(seconds / 60)} 分鐘前`;
-    }
-
     function readableFetchError(error) {
         if (error && error.name === "AbortError") {
             return `API 逾時（超過 ${config.requestTimeoutSeconds} 秒）。`;
@@ -556,15 +659,6 @@
     function setText(element, value) {
         if (element) {
             element.textContent = value === undefined || value === null ? "" : String(value);
-        }
-    }
-
-    function safeUrlLabel(url) {
-        try {
-            const parsed = new URL(url);
-            return `${parsed.host}${parsed.pathname}`;
-        } catch (_error) {
-            return url || "未設定 API";
         }
     }
 
