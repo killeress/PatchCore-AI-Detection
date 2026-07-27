@@ -41,6 +41,11 @@ WP_DEFTHIS_SCHEMA_BY_FACILITY = {
 }
 
 COORDINATE_MATCH_TOLERANCE = 20
+MES_COUNTED_MISS_REVIEW_CATEGORIES = frozenset({
+    "score_below_threshold",
+    "low_contrast",
+    "dust_misfilter",
+})
 CAPIHM_HOSTNAME = "capihm"
 CAPIHM_AOI_HEIGHT = 1080
 
@@ -245,6 +250,30 @@ def _normalize_ai_judgment(value: str) -> Optional[str]:
 
 def _rate(count: int, total: int) -> float:
     return round(count * 100.0 / total, 2) if total else 0.0
+
+
+def is_mes_miss_counted(row: Mapping) -> bool:
+    """未 Review 的漏檢全算；已 Review 只計入確認屬於 AI 漏檢的原因。"""
+    if row.get("comparison") != "miss_detection":
+        return False
+    review = row.get("review") if isinstance(row.get("review"), Mapping) else None
+    category = str((review or {}).get("category") or "").strip()
+    return not category or category in MES_COUNTED_MISS_REVIEW_CATEGORIES
+
+
+def apply_mes_review_miss_policy(report: Dict) -> Dict:
+    """套用人工 Review 後的漏檢分子，分母仍為全部可比對數。"""
+    counted_misses = 0
+    for row in report.get("records") or []:
+        counted = is_mes_miss_counted(row)
+        row["counts_as_miss_detection"] = counted
+        if counted:
+            counted_misses += 1
+
+    summary = report["summary"]
+    summary["miss_detection"] = counted_misses
+    summary["miss_detection_rate"] = _rate(counted_misses, int(summary.get("total") or 0))
+    return report
 
 
 def build_mes_comparison(

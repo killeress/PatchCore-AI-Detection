@@ -2186,7 +2186,7 @@ class CAPIDatabase:
         "miss_detection": {
             "score_below_threshold", "low_contrast", "dust_misfilter",
             "not_visible_in_image", "outside_aoi_area",
-            "image_issue", "mes_misjudge", "other",
+            "image_issue", "mes_misjudge", "within_spec_release", "other",
         },
         "true_ng": {
             "confirmed_ng", "aoi_point_mismatch", "image_issue", "uncertain",

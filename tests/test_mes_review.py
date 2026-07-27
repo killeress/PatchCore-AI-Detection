@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from capi_database import CAPIDatabase
-from capi_mes_report import build_mes_review_summary
+from capi_mes_report import apply_mes_review_miss_policy, build_mes_review_summary
 from capi_web import CAPIWebHandler
 
 
@@ -288,6 +288,24 @@ def test_mes_review_rejects_category_from_other_review_type(tmp_path):
         )
 
 
+def test_mes_review_accepts_within_spec_release_category(tmp_path):
+    db = CAPIDatabase(tmp_path / "review.db")
+
+    review = db.save_mes_comparison_review(
+        inference_record_id=1,
+        glass_id="PANEL-1",
+        model_id="MODEL-1",
+        machine_no="HM01",
+        request_time="2026-07-23 08:00:00",
+        ai_judgment="OK",
+        mes_judgment="NG",
+        review_type="miss_detection",
+        category="within_spec_release",
+    )
+
+    assert review["category"] == "within_spec_release"
+
+
 def test_build_mes_review_summary_counts_pending_reasons_and_ng_samples():
     records = [
         {"review_type": "over_detection", "review": None},
@@ -320,6 +338,33 @@ def test_build_mes_review_summary_counts_pending_reasons_and_ng_samples():
     assert summary["ng_samples"] == 2
     assert summary["by_type"]["over_detection"]["by_category"] == {"within_spec": 1}
     assert summary["by_type"]["miss_detection"]["by_category"] == {"low_contrast": 1}
+
+
+def test_mes_miss_policy_counts_pending_and_only_selected_review_categories():
+    report = {
+        "summary": {
+            "total": 7,
+            "miss_detection": 6,
+            "miss_detection_rate": 85.71,
+        },
+        "records": [
+            {"comparison": "miss_detection", "review": None},
+            {"comparison": "miss_detection", "review": {"category": "score_below_threshold"}},
+            {"comparison": "miss_detection", "review": {"category": "low_contrast"}},
+            {"comparison": "miss_detection", "review": {"category": "dust_misfilter"}},
+            {"comparison": "miss_detection", "review": {"category": "not_visible_in_image"}},
+            {"comparison": "miss_detection", "review": {"category": "within_spec_release"}},
+            {"comparison": "correct", "review": None},
+        ],
+    }
+
+    apply_mes_review_miss_policy(report)
+
+    assert report["summary"]["miss_detection"] == 4
+    assert report["summary"]["miss_detection_rate"] == 57.14
+    assert [row["counts_as_miss_detection"] for row in report["records"]] == [
+        True, True, True, True, False, False, False,
+    ]
 
 
 def test_web_helper_saves_selected_aoi_crop_under_validation_root(tmp_path):
@@ -452,9 +497,15 @@ def test_report_template_contains_manual_review_and_ng_database_ui():
     assert "Review人員" not in template
     assert "非畫面檢可見不良" in template
     assert "異常區域不在 AOI 提供區域" in template
+    assert "規格內釋放" in template
+    assert "未 Review 的漏檢全部計入" in template
+    assert "COUNTED_MES_MISS_REVIEW_CATEGORIES" in template
+    assert "countsAsMissDetection(row)" in template
+    assert "rows = rows.filter(countsAsMissDetection)" in template
     miss_order = template.split("miss_detection: [", 1)[1].split("]", 1)[0]
     assert miss_order.index("'not_visible_in_image'") < miss_order.index("'outside_aoi_area'")
     assert miss_order.index("'outside_aoi_area'") < miss_order.index("'score_below_threshold'")
+    assert miss_order.index("'mes_misjudge'") < miss_order.index("'within_spec_release'")
     assert "mes-review-candidate-disabled" in template
     assert "不可選：" in template
     assert "prepareReasonChartData" in template
@@ -467,6 +518,7 @@ def test_report_template_contains_manual_review_and_ng_database_ui():
     assert "outside_aoi_area: 'rgba(14,165,233,0.82)'" in template
     assert "dust_misfilter: 'rgba(234,179,8,0.82)'" in template
     assert "mes_misjudge: 'rgba(34,197,94,0.82)'" in template
+    assert "within_spec_release: 'rgba(20,184,166,0.82)'" in template
     assert "backgroundColor: chartData.entries.map" in template
     assert "已 Review" in template
     assert "toggleReviewReasonFilter(type, item)" in template

@@ -5933,6 +5933,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             from capi_mes_report import (
                 OracleMESRepository,
+                apply_mes_review_miss_policy,
                 build_mes_comparison,
                 build_mes_review_summary,
                 _parse_datetime,
@@ -5981,6 +5982,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     reviews_by_record.get(int(record_id))
                     if record_id is not None else None
                 )
+            apply_mes_review_miss_policy(report)
             report["review_summary"] = build_mes_review_summary(report["records"])
             report["ng_validation_summary"] = self.db.get_ng_validation_summary()
             report.update({
