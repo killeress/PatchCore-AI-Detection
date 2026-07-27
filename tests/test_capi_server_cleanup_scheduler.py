@@ -10,6 +10,9 @@ def test_start_marks_server_running_before_cleanup_scheduler_starts():
         training_only=True,
         server_config={"web": {"enabled": False}},
         _running=False,
+        _stop_requested=False,
+        _web_server=None,
+        _web_thread=None,
     )
 
     def start_cleanup_scheduler():
@@ -21,6 +24,22 @@ def test_start_marks_server_running_before_cleanup_scheduler_starts():
     CAPIServer.start(server)
 
     assert observed_running_states == [True]
+
+
+def test_start_aborts_when_stop_arrives_during_startup():
+    server = SimpleNamespace(
+        training_only=True,
+        server_config={"web": {"enabled": False}},
+        _running=False,
+        _stop_requested=True,
+    )
+    server._start_cleanup_scheduler = lambda: (_ for _ in ()).throw(
+        AssertionError("cleanup scheduler must not start after stop request")
+    )
+
+    CAPIServer.start(server)
+
+    assert server._running is False
 
 
 def test_cleanup_scheduler_thread_stops_with_server():

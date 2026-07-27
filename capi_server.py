@@ -1371,7 +1371,10 @@ class CAPIServer:
 
         # 停止旗標
         self._running = False
+        self._stop_requested = False
         self._server_socket = None
+        self._web_server = None
+        self._web_thread = None
         self._cleanup_stop_event = threading.Event()
         self._cleanup_thread: Optional[threading.Thread] = None
 
@@ -2008,6 +2011,11 @@ class CAPIServer:
                 logger.error(f"Failed to load model: {e}")
                 logger.warning("Server will start without model (ERR for all requests)")
 
+        # SIGTERM 可能在模型載入期間到達；不要在收到停止要求後繼續綁定 Web/TCP port。
+        if getattr(self, "_stop_requested", False):
+            logger.info("Stop requested during startup; aborting server startup")
+            return
+
         # 啟動 Web 伺服器
         web_cfg = self.server_config.get("web", {})
         if web_cfg.get("enabled", True):
@@ -2015,7 +2023,7 @@ class CAPIServer:
             web_port = web_cfg.get("port", 8080)
             try:
                 log_file = self.server_config.get("logging", {}).get("file", "")
-                start_web_server_thread(
+                self._web_thread = start_web_server_thread(
                     web_host, web_port, self.db,
                     str(self.heatmap_manager.base_dir),
                     server_status,
@@ -2025,10 +2033,15 @@ class CAPIServer:
                     capi_server_instance=self,
                     log_file=log_file or None,
                 )
+                self._web_server = getattr(self._web_thread, "web_server", None)
                 print(f"[SERVER] Web server: http://{web_host}:{web_port}", flush=True)
                 logger.info(f"Web server: http://{web_host}:{web_port}")
             except Exception as e:
                 logger.error(f"Failed to start web server: {e}")
+
+        if getattr(self, "_stop_requested", False):
+            logger.info("Stop requested during startup; aborting server startup")
+            return
 
         self._running = True
 
@@ -2155,6 +2168,7 @@ class CAPIServer:
     def stop(self):
         """停止伺服器"""
         logger.info("Stopping server...")
+        self._stop_requested = True
         self._running = False
         self._cleanup_stop_event.set()
 
@@ -2187,6 +2201,23 @@ class CAPIServer:
                 self._server_socket.close()
             except Exception:
                 pass
+
+        web_server = getattr(self, "_web_server", None)
+        if web_server is not None:
+            try:
+                web_server.shutdown()
+            except Exception:
+                pass
+            try:
+                web_server.server_close()
+            except Exception:
+                pass
+            self._web_server = None
+
+        web_thread = getattr(self, "_web_thread", None)
+        if web_thread is not None and web_thread is not threading.current_thread():
+            web_thread.join(timeout=1.0)
+            self._web_thread = None
 
     def _queue_save_results_async(self, *args, **kwargs):
         """Queue result persistence, falling back when the server is shutting down."""

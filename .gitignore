@@ -55,6 +55,8 @@ pytest.ini
 *.png
 *.jpg
 *.jpeg
+*.tif
+*.tiff
 
 # IDEs and Editors
 .vscode/
@@ -76,6 +78,7 @@ _agent/
 
 # Analysis / over-review outputs
 reports/
+outputs/
 docs/agent_adoption/
 docs/project_report_assets/
 
@@ -94,6 +97,7 @@ capi_mes_credentials.py
 deployment/*.pkl
 deployment/*.pth
 deployment/*.zip
+deployment/**/*.zip
 # DINOv2 repo code copy (4.5MB, copied from ~/.cache/torch/hub for offline deploy)
 deployment/dinov2_repo/
 # Offline backbone cache for new training wizard (~264 MB; rebuilt by scripts/build_deploy_zip.py)

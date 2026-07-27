@@ -140,3 +140,133 @@ def test_two_stage_keeps_feature_with_high_heatmap_core_support():
     assert features
     assert all(feature["is_dust"] is False for feature in features)
     assert "real+0dust -> REAL_NG" in detail
+
+
+def test_two_stage_reranks_after_dust_suppression_for_off_center_feature():
+    config = CAPIConfig()
+    config.dust_two_stage_dust_ratio = 0.3
+    config.dust_two_stage_diff_percentile = 50.0
+    config.dust_two_stage_min_area = 3
+    config.dust_heatmap_top_percent = 0.5
+    config.dust_high_cov_threshold = 1.1
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+
+    tile = np.full((64, 64), 100, dtype=np.uint8)
+    tile[44:49, 44:49] = 30
+
+    anomaly_map = np.full((16, 16), 0.05, dtype=np.float32)
+    anomaly_map[2:4, 2:4] = 1.0
+    anomaly_map[10:13, 10:13] = 0.6
+
+    precise_dust_mask = np.zeros((64, 64), dtype=np.uint8)
+    candidate_dust_mask = np.zeros((64, 64), dtype=np.uint8)
+    candidate_dust_mask[6:18, 6:18] = 255
+
+    has_real, real_peak, features, detail = inferencer.check_dust_two_stage(
+        tile,
+        anomaly_map,
+        precise_dust_mask,
+        score=1.0,
+        score_threshold=0.9,
+        candidate_dust_mask=candidate_dust_mask,
+    )
+
+    assert has_real is True
+    assert real_peak is not None
+    target = next(f for f in features if f["dust_ratio"] == 0.0)
+    assert target["hot_core_supported"] is False
+    assert target["dust_rerank_supported"] is True
+    assert target["local_score_supported"] is False
+    assert target["support_source"] == "dust_rerank"
+    assert target["is_dust"] is False
+    assert "reranked_after_dust=" in detail
+    assert "support=dust_rerank" in detail
+
+
+def test_two_stage_local_score_rescues_off_center_feature_when_bubble_halo_still_wins():
+    config = CAPIConfig()
+    config.dust_two_stage_dust_ratio = 0.3
+    config.dust_two_stage_diff_percentile = 50.0
+    config.dust_two_stage_min_area = 3
+    config.dust_heatmap_top_percent = 0.5
+    config.dust_high_cov_threshold = 1.1
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+
+    tile = np.full((64, 64), 100, dtype=np.uint8)
+    tile[44:49, 44:49] = 30
+
+    anomaly_map = np.full((16, 16), 0.05, dtype=np.float32)
+    anomaly_map[2:4, 2:4] = 1.0
+    anomaly_map[2:4, 4:6] = 0.8
+    anomaly_map[10:13, 10:13] = 0.6
+
+    precise_dust_mask = np.zeros((64, 64), dtype=np.uint8)
+    candidate_dust_mask = np.zeros((64, 64), dtype=np.uint8)
+    candidate_dust_mask[6:18, 6:18] = 255
+
+    has_real, real_peak, features, detail = inferencer.check_dust_two_stage(
+        tile,
+        anomaly_map,
+        precise_dust_mask,
+        score=1.0,
+        score_threshold=0.35,
+        candidate_dust_mask=candidate_dust_mask,
+    )
+
+    assert has_real is True
+    assert real_peak is not None
+    target = next(f for f in features if f["dust_ratio"] == 0.0)
+    assert target["hot_core_supported"] is False
+    assert target["dust_rerank_supported"] is False
+    assert target["local_score_supported"] is True
+    assert target["support_source"] == "local_score"
+    assert target["local_equiv_score"] >= 0.35
+    assert target["is_dust"] is False
+    assert "local_score_rescued=" in detail
+    assert "support=local_score" in detail
+    assert "local_eq=" in detail
+
+
+def test_two_stage_local_score_does_not_rescue_feature_on_dust():
+    config = CAPIConfig()
+    config.dust_two_stage_dust_ratio = 0.3
+    config.dust_two_stage_diff_percentile = 50.0
+    config.dust_two_stage_min_area = 3
+    config.dust_heatmap_top_percent = 0.5
+    config.dust_high_cov_threshold = 1.1
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+
+    tile = np.full((64, 64), 100, dtype=np.uint8)
+    tile[44:49, 44:49] = 30
+
+    anomaly_map = np.full((16, 16), 0.05, dtype=np.float32)
+    anomaly_map[2:4, 2:4] = 1.0
+    anomaly_map[2:4, 4:6] = 0.8
+    anomaly_map[10:13, 10:13] = 0.6
+
+    precise_dust_mask = np.zeros((64, 64), dtype=np.uint8)
+    precise_dust_mask[40:54, 40:54] = 255
+    candidate_dust_mask = precise_dust_mask.copy()
+    candidate_dust_mask[6:18, 6:18] = 255
+
+    has_real, real_peak, features, detail = inferencer.check_dust_two_stage(
+        tile,
+        anomaly_map,
+        precise_dust_mask,
+        score=1.0,
+        score_threshold=0.35,
+        candidate_dust_mask=candidate_dust_mask,
+    )
+
+    assert has_real is False
+    assert real_peak is None
+    target = next(f for f in features if f["local_score_supported"] is True)
+    assert target["dust_ratio"] >= config.dust_two_stage_dust_ratio
+    assert target["is_dust"] is True
+    assert "-> DUST" in detail

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("capi.mes_report")
 
 
 DEFECT_CODE_CATALOG_PATH = Path(__file__).resolve().parent / "configs" / "mes_defect_codes.json"
@@ -39,6 +39,18 @@ WP_DEFTHIS_SCHEMA_BY_FACILITY = {
     "MOD1": "MCRDA1",
     "MOD2": "MERDA1",
 }
+
+WP_DEFTHIS_FAC_ID_BY_FACILITY = {
+    "MOD1": "C",
+    "MOD2": "E",
+}
+
+WP_DEFTHIS_INDEX_HINT_BY_FACILITY = {
+    "MOD1": "",
+    "MOD2": "/*+ INDEX(w WP_DEFTHIS_PK) */",
+}
+
+ORACLE_PANEL_BATCH_SIZE = 900
 
 COORDINATE_MATCH_TOLERANCE = 20
 MES_COUNTED_MISS_REVIEW_CATEGORIES = frozenset({
@@ -415,6 +427,8 @@ class OracleMESRepository:
         self.wp_defthis_schema = WP_DEFTHIS_SCHEMA_BY_FACILITY.get(self.facility)
         if not self.wp_defthis_schema:
             raise MESReportConfigurationError(f"MES Oracle 找不到廠別 WP_DEFTHIS schema：{self.facility}")
+        self.wp_defthis_fac_id = WP_DEFTHIS_FAC_ID_BY_FACILITY[self.facility]
+        self.wp_defthis_index_hint = WP_DEFTHIS_INDEX_HINT_BY_FACILITY[self.facility]
         if self.facility not in normalized_tns:
             raise MESReportConfigurationError(f"MES Oracle 找不到廠別 TNS：{self.facility}")
 
@@ -455,35 +469,32 @@ class OracleMESRepository:
         logger.info("[MES Report] Oracle connected in %.2fs", time.monotonic() - started_at)
         result: Dict[str, List[Dict]] = {}
         min_trans_date_text = min_trans_date.strftime("%Y-%m-%d %H.%M.%S.%f")
-        batch_count = (len(panel_ids) + 899) // 900
+        batch_size = ORACLE_PANEL_BATCH_SIZE
+        batch_count = (len(panel_ids) + batch_size - 1) // batch_size
         try:
             cursor = connection.cursor()
             cursor.arraysize = 1000
             cursor.prefetchrows = 1000
             try:
-                for offset in range(0, len(panel_ids), 900):
-                    batch_number = offset // 900 + 1
+                for offset in range(0, len(panel_ids), batch_size):
+                    batch_number = offset // batch_size + 1
                     batch_started_at = time.monotonic()
-                    chunk = panel_ids[offset:offset + 900]
+                    chunk = panel_ids[offset:offset + batch_size]
                     panel_binds = {f"panel_{idx}": value for idx, value in enumerate(chunk)}
                     placeholders = ", ".join(f":panel_{idx}" for idx in range(len(chunk)))
                     sql = f"""
-                        SELECT PNL_ID, DFCT_CODE, TRANS_DATE, X_AXIS, Y_AXIS
-                        FROM {self.wp_defthis_schema}.WP_DEFTHIS
-                        WHERE DEFT_OPER = :deft_oper
-                          AND IF_NEWER = 'Y'
-                          AND TRANS_DATE >= :min_trans_date
-                          AND (
-                              DFCT_CODE IS NULL
-                              OR TRIM(DFCT_CODE) IS NULL
-                              OR UPPER(TRIM(DFCT_CODE)) <> 'PCK21'
-                          )
-                          AND TRIM(X_AXIS) IS NOT NULL
-                          AND TRIM(Y_AXIS) IS NOT NULL
-                          AND PNL_ID IN ({placeholders})
-                        ORDER BY PNL_ID, TRANS_DATE
+                        SELECT {self.wp_defthis_index_hint}
+                               w.PNL_ID, w.DFCT_CODE, w.TRANS_DATE, w.X_AXIS, w.Y_AXIS
+                        FROM {self.wp_defthis_schema}.WP_DEFTHIS w
+                        WHERE w.FAC_ID = :fac_id
+                          AND w.DEFT_OPER = :deft_oper
+                          AND w.IF_NEWER = 'Y'
+                          AND w.TRANS_DATE >= :min_trans_date
+                          AND w.PNL_ID IN ({placeholders})
+                        ORDER BY w.PNL_ID, w.TRANS_DATE
                     """
                     cursor.execute(sql, {
+                        "fac_id": self.wp_defthis_fac_id,
                         "deft_oper": "1600",
                         "min_trans_date": min_trans_date_text,
                         **panel_binds,
@@ -544,13 +555,15 @@ class OracleMESRepository:
                     f"""
                         SELECT {columns_sql}
                         FROM {self.wp_defthis_schema}.WP_DEFTHIS
-                        WHERE PNL_ID = :panel_id
+                        WHERE FAC_ID = :fac_id
+                          AND PNL_ID = :panel_id
                           AND DEFT_OPER = :deft_oper
                           AND IF_NEWER = 'Y'
                           AND TRANS_DATE >= :min_trans_date
                         ORDER BY TRANS_DATE, TRANS_NBR
                     """,
                     {
+                        "fac_id": self.wp_defthis_fac_id,
                         "panel_id": normalized_panel_id,
                         "deft_oper": "1600",
                         "min_trans_date": min_trans_date.strftime("%Y-%m-%d %H.%M.%S.%f"),

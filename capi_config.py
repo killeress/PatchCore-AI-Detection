@@ -240,7 +240,7 @@ class CAPIConfig:
     dust_pixel_grid_filter_enabled: bool = False  # OMIT 像素紋理平滑（所有產品解析度）
     dust_pixel_grid_blur_kernel: int = 7          # 預設以 7x7 Gaussian 抑制週期紋理
     dust_heatmap_iou_threshold: float = 0.02  # Heatmap-Dust IOU/Coverage 閾值
-    dust_heatmap_top_percent: float = 5.0     # Heatmap 熱區取前 X%；two-stage REAL feature 須落在此核心附近
+    dust_heatmap_top_percent: float = 5.0     # Heatmap 最紅前 X% 優先核心；two-stage 另有灰塵重排與特徵局部分數補救
     dust_heatmap_metric: str = "coverage"     # Heatmap 判定指標: "coverage" (灰塵覆蓋率) 或是 "iou" (交集/聯集)
     dust_mask_before_binarize: bool = False   # 先遮罩灰塵區域再二值化 (解決灰塵強訊號淹沒弱缺陷的問題)
     dust_two_stage_enabled: bool = False      # 兩階段灰塵判定：heatmap定位→原圖找特徵點→精準比對dust_mask

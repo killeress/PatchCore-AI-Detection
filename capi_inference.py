@@ -3654,11 +3654,15 @@ class CAPIInferencer:
         anomaly_map: np.ndarray,
         dust_mask: np.ndarray,
         score: float,
+        score_threshold: Optional[float] = None,
+        candidate_dust_mask: Optional[np.ndarray] = None,
     ) -> tuple:
         """
         兩階段灰塵判定：
-          Stage 1: 用 heatmap 找出 hot zone（大概位置）
-          Stage 2: 回到原圖找 feature 點 → 精準比對 dust_mask（無擴散問題）
+          Stage 1: 用原 heatmap 的 Top 5% 找候選區；若有擴展 dust mask，
+                   另做一份灰塵抑制後的 heatmap 重新排名（原 score 不變）
+          Stage 2: 回到原圖找 feature 點，依原 Top 核心、重排核心或
+                   feature 局部等效分數確認，再精準比對無擴展 dust mask
 
         Returns:
             (has_real_defect, real_peak_yx, feature_details, detail_text)
@@ -3695,7 +3699,7 @@ class CAPIInferencer:
             dm = cv2.resize(dm, (tile_w, tile_h), interpolation=cv2.INTER_NEAREST)
         dust_bool_tile = dm > 0
 
-        # --- Stage 1: Heatmap -> hot zones ---
+        # --- Stage 1: Heatmap -> broad candidate zones ---
         pos_vals = anomaly_f[anomaly_f > 0]
         if len(pos_vals) == 0:
             return True, None, [], "TWO_STAGE: no positive heatmap -> REAL_NG"
@@ -3708,31 +3712,83 @@ class CAPIInferencer:
         )
         core_thr = np.percentile(pos_vals, 100.0 - core_top_percent)
         hot_core_mask = (anomaly_f >= core_thr).astype(np.uint8)
+
+        # 僅在候選排名的副本抑制已知灰塵/氣泡；保留原 anomaly map 與 score。
+        reranked_core_mask = np.zeros_like(hot_core_mask)
+        if candidate_dust_mask is not None:
+            candidate_dm = np.asarray(candidate_dust_mask, dtype=np.uint8)
+            if len(candidate_dm.shape) == 3:
+                candidate_dm = cv2.cvtColor(candidate_dm, cv2.COLOR_BGR2GRAY)
+            if candidate_dm.shape != (tile_h, tile_w):
+                candidate_dm = cv2.resize(
+                    candidate_dm,
+                    (tile_w, tile_h),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            candidate_dm_map = cv2.resize(
+                candidate_dm,
+                (w_am, h_am),
+                interpolation=cv2.INTER_NEAREST,
+            ) > 0
+            if np.any(candidate_dm_map):
+                reranked_anomaly = anomaly_f.copy()
+                reranked_anomaly[candidate_dm_map] = 0.0
+                reranked_pos_vals = reranked_anomaly[reranked_anomaly > 0]
+                if len(reranked_pos_vals) > 0:
+                    reranked_hot_thr = np.percentile(reranked_pos_vals, 95)
+                    reranked_hot_mask = (
+                        reranked_anomaly >= reranked_hot_thr
+                    ).astype(np.uint8) * 255
+                    hot_mask = cv2.bitwise_or(hot_mask, reranked_hot_mask)
+                    reranked_core_thr = np.percentile(
+                        reranked_pos_vals,
+                        100.0 - core_top_percent,
+                    )
+                    reranked_core_mask = (
+                        reranked_anomaly >= reranked_core_thr
+                    ).astype(np.uint8)
+
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
         hot_mask = cv2.dilate(hot_mask, kernel, iterations=2)
         n_labels, labels = cv2.connectedComponents(hot_mask, connectivity=8)
 
         scale = tile_w / w_am
         pad = 20
-        hot_core_tile = cv2.resize(
-            hot_core_mask,
-            (tile_w, tile_h),
-            interpolation=cv2.INTER_NEAREST,
-        )
         feature_core_margin_px = min(8, max(0, (min(tile_w, tile_h) - 1) // 2))
-        if feature_core_margin_px:
+
+        def _core_support_on_tile(core_mask: np.ndarray) -> np.ndarray:
+            core_tile = cv2.resize(
+                core_mask,
+                (tile_w, tile_h),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            if not feature_core_margin_px:
+                return core_tile > 0
             core_kernel = cv2.getStructuringElement(
                 cv2.MORPH_ELLIPSE,
                 (feature_core_margin_px * 2 + 1, feature_core_margin_px * 2 + 1),
             )
-            hot_core_support = cv2.dilate(hot_core_tile, core_kernel) > 0
-        else:
-            hot_core_support = hot_core_tile > 0
+            return cv2.dilate(core_tile, core_kernel) > 0
+
+        hot_core_support = _core_support_on_tile(hot_core_mask)
+        reranked_core_support = _core_support_on_tile(reranked_core_mask)
+        anomaly_tile = cv2.resize(
+            anomaly_f,
+            (tile_w, tile_h),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        global_anomaly_peak = float(np.max(anomaly_f))
+        local_support_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (feature_core_margin_px * 2 + 1, feature_core_margin_px * 2 + 1),
+        )
 
         # --- Stage 2: Find features on original ---
         all_features = []
         ignored_border_features = 0
         ignored_outside_hot_core_features = 0
+        reranked_after_dust_features = 0
+        local_score_rescued_features = 0
         feature_border_margin_px = 8
 
         for lid in range(1, n_labels):
@@ -3815,11 +3871,62 @@ class CAPIInferencer:
                         ignored_border_features += 1
                         continue
 
-                    # Stage 1 的大範圍膨脹只用來找候選；能翻回 REAL 的 feature
-                    # 必須仍與未膨脹的高 heatmap 核心相連，避免附近底紋誤翻案。
-                    if not np.any(hot_core_support[ty1:ty2, tx1:tx2][fm]):
+                    feature_in_broad_zone = bool(
+                        np.any(zone_mask_tile[ty1:ty2, tx1:tx2][fm])
+                    )
+                    hot_core_supported = bool(
+                        np.any(hot_core_support[ty1:ty2, tx1:tx2][fm])
+                    )
+                    dust_rerank_supported = bool(
+                        np.any(reranked_core_support[ty1:ty2, tx1:tx2][fm])
+                    )
+
+                    local_support = cv2.dilate(
+                        fm.astype(np.uint8),
+                        local_support_kernel,
+                    ) > 0
+                    local_values = anomaly_tile[ty1:ty2, tx1:tx2][local_support]
+                    local_peak = (
+                        float(np.max(local_values))
+                        if local_values.size > 0
+                        else 0.0
+                    )
+                    local_equiv_score = (
+                        float(score) * local_peak / global_anomaly_peak
+                        if global_anomaly_peak > 0
+                        else 0.0
+                    )
+                    local_score_supported = bool(
+                        score_threshold is not None
+                        and score_threshold > 0
+                        and local_equiv_score >= float(score_threshold)
+                    )
+
+                    # Top 5% 僅圈候選範圍；feature 可由原 Top 核心、
+                    # 灰塵抑制後重排核心，或自身局部分數取得判定資格。
+                    if not feature_in_broad_zone or not (
+                        hot_core_supported
+                        or dust_rerank_supported
+                        or local_score_supported
+                    ):
                         ignored_outside_hot_core_features += 1
                         continue
+
+                    if not hot_core_supported and dust_rerank_supported:
+                        reranked_after_dust_features += 1
+                    elif (
+                        not hot_core_supported
+                        and not dust_rerank_supported
+                        and local_score_supported
+                    ):
+                        local_score_rescued_features += 1
+
+                    if hot_core_supported:
+                        support_source = "original_core"
+                    elif dust_rerank_supported:
+                        support_source = "dust_rerank"
+                    else:
+                        support_source = "local_score"
 
                     contours, _ = cv2.findContours(
                         (fm.astype(np.uint8)) * 255,
@@ -3839,10 +3946,15 @@ class CAPIInferencer:
                     dust_overlap = int(np.count_nonzero(feat_dust > 0))
                     feat_dust_ratio = dust_overlap / farea
                     feature_on_dust = feat_dust_ratio >= dust_ratio_thr
-                    feature_is_dust = feature_on_dust or zone_dust_dominated
+                    # 原 Top 核心保留既有整區 dust 保護；重排/局部分數救回的
+                    # feature 則看自身與無擴展 dust mask 的精準重疊。
+                    feature_is_dust = feature_on_dust or (
+                        hot_core_supported and zone_dust_dominated
+                    )
                     dust_reason = (
                         "feature_overlap" if feature_on_dust
-                        else "zone_dominated" if zone_dust_dominated
+                        else "zone_dominated"
+                        if hot_core_supported and zone_dust_dominated
                         else "clean"
                     )
 
@@ -3862,6 +3974,13 @@ class CAPIInferencer:
                         "zone_id": lid,
                         "zone_dust_cov": zone_dust_cov,
                         "zone_dust_dominated": zone_dust_dominated,
+                        "broad_candidate_supported": feature_in_broad_zone,
+                        "hot_core_supported": hot_core_supported,
+                        "dust_rerank_supported": dust_rerank_supported,
+                        "local_score_supported": local_score_supported,
+                        "local_peak": local_peak,
+                        "local_equiv_score": local_equiv_score,
+                        "support_source": support_source,
                     })
 
         # --- Verdict ---
@@ -3874,6 +3993,14 @@ class CAPIInferencer:
             ignored_parts.append(
                 f"ignored_outside_hot_core={ignored_outside_hot_core_features}"
             )
+        if reranked_after_dust_features:
+            ignored_parts.append(
+                f"reranked_after_dust={reranked_after_dust_features}"
+            )
+        if local_score_rescued_features:
+            ignored_parts.append(
+                f"local_score_rescued={local_score_rescued_features}"
+            )
         ignored_hint = f" {' '.join(ignored_parts)}" if ignored_parts else ""
 
         if real_features:
@@ -3882,8 +4009,15 @@ class CAPIInferencer:
             bx, by = best["abs_pos"]
             # convert to anomaly_map space for peak_yx
             real_peak_yx = (int(by / scale), int(bx / scale))
+            threshold_hint = (
+                f"/{float(score_threshold):.3f}"
+                if score_threshold is not None
+                else ""
+            )
             detail = (f"TWO_STAGE: {len(real_features)}real+{len(dust_features)}dust"
-                      f"{ignored_hint} -> REAL_NG (best@({bx},{by}) area={best['area']})")
+                      f"{ignored_hint} -> REAL_NG (best@({bx},{by}) area={best['area']}"
+                      f" support={best['support_source']}"
+                      f" local_eq={best['local_equiv_score']:.3f}{threshold_hint})")
             return True, real_peak_yx, all_features, detail
 
         else:
@@ -6751,6 +6885,8 @@ class CAPIInferencer:
                                             tile.image, anomaly_map,
                                             dust_mask_no_ext if dust_mask_no_ext is not None else dust_mask,
                                             score,
+                                            score_threshold=tile.score_threshold,
+                                            candidate_dust_mask=dust_mask,
                                         )
                                     _two_stage_ran = True
                                     _ts_features = ts_features
@@ -7433,6 +7569,8 @@ class CAPIInferencer:
                                     anomaly_map_for_dust,
                                     dust_mask_no_ext if dust_mask_no_ext is not None else dust_mask,
                                     score,
+                                    score_threshold=tile.score_threshold,
+                                    candidate_dust_mask=dust_mask,
                                 )
                             _two_stage_ran = True
                             _ts_features = ts_features

@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import capi_mes_report
 from capi_database import CAPIDatabase
 from capi_mes_report import (
+    ORACLE_PANEL_BATCH_SIZE,
     WP_DEFTHIS_COLUMNS,
+    WP_DEFTHIS_FAC_ID_BY_FACILITY,
     OracleMESRepository,
     build_mes_comparison,
     classify_mes_judgment,
@@ -234,29 +236,86 @@ def test_oracle_repository_selects_tns_by_equipment_facility(monkeypatch):
         },
     }
 
-    for facility, expected_dsn, expected_source in (
-        ("MOD1", "10.172.3.55:1521/pncmr", "MOD1 / PNCMR / MCRDA1.WP_DEFTHIS"),
-        ("MOD2", "10.174.1.79:1521/pnemr", "MOD2 / PNEMR / MERDA1.WP_DEFTHIS"),
+    for facility, expected_fac_id, expected_dsn, expected_source in (
+        ("MOD1", "C", "10.172.3.55:1521/pncmr", "MOD1 / PNCMR / MCRDA1.WP_DEFTHIS"),
+        ("MOD2", "E", "10.174.1.79:1521/pnemr", "MOD2 / PNEMR / MERDA1.WP_DEFTHIS"),
     ):
         repository = OracleMESRepository({**base_config, "facility": facility})
         rows = repository.fetch_defects(["PANEL-1"], datetime(2026, 7, 19, 8, 0, 0, 123000))
         assert rows["PANEL-1"][0]["dfct_code"] == "PCM01"
         assert made_dsns[-1] == expected_dsn
         assert repository.source_label == expected_source
+        assert repository.wp_defthis_fac_id == expected_fac_id
         assert repository.password == "secret"
 
     sql, binds = executed[-1]
+    assert WP_DEFTHIS_FAC_ID_BY_FACILITY == {"MOD1": "C", "MOD2": "E"}
     assert "FROM MERDA1.WP_DEFTHIS" in sql
     assert "FROM MCRDA1.WP_DEFTHIS" in executed[0][0]
+    assert "INDEX(w WP_DEFTHIS_PK)" in sql
+    assert "INDEX(w WP_DEFTHIS_PK)" not in executed[0][0]
+    assert "FAC_ID = :fac_id" in sql
+    assert executed[0][1]["fac_id"] == "C"
+    assert binds["fac_id"] == "E"
     assert "DEFT_OPER = :deft_oper" in sql
     assert "IF_NEWER = 'Y'" in sql
     assert "TRANS_DATE >= :min_trans_date" in sql
-    assert "UPPER(TRIM(DFCT_CODE)) <> 'PCK21'" in sql
-    assert "TRIM(X_AXIS) IS NOT NULL" in sql
-    assert "TRIM(Y_AXIS) IS NOT NULL" in sql
     assert binds["min_trans_date"] == "2026-07-19 08.00.00.123000"
     assert binds["panel_0"] == "PANEL-1"
     assert binds["deft_oper"] == "1600"
+
+
+def test_oracle_repository_splits_panels_into_900_item_batches(monkeypatch):
+    monkeypatch.setattr(capi_mes_report, "ORACLE_MES_PASSWORD", "secret")
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, binds):
+            executed.append((sql, binds))
+
+        def __iter__(self):
+            return iter([])
+
+        def close(self):
+            pass
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def close(self):
+            pass
+
+    fake_oracledb = SimpleNamespace(
+        makedsn=lambda host, port, service_name: f"{host}:{port}/{service_name}",
+        connect=lambda **kwargs: FakeConnection(),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "oracledb", fake_oracledb)
+    repository = OracleMESRepository({
+        "facility": "MOD2",
+        "oracle": {
+            "user": "MISSELECT",
+            "tns": {
+                "MOD2": {
+                    "host": "10.174.1.79",
+                    "port": 1521,
+                    "service_name": "pnemr",
+                },
+            },
+        },
+    })
+
+    repository.fetch_defects(
+        [f"PANEL-{index:04d}" for index in range(901)],
+        datetime(2026, 7, 19, 8, 0, 0),
+    )
+
+    assert ORACLE_PANEL_BATCH_SIZE == 900
+    assert [
+        sum(name.startswith("panel_") for name in binds)
+        for _, binds in executed
+    ] == [900, 1]
+    assert all(binds["fac_id"] == "E" for _, binds in executed)
 
 
 def test_oracle_repository_fetches_all_wp_defthis_columns_on_demand(monkeypatch):
@@ -310,11 +369,13 @@ def test_oracle_repository_fetches_all_wp_defthis_columns_on_demand(monkeypatch)
     sql, binds = executed[0]
     assert "SELECT FAC_ID, PNL_ID, TRANS_NBR" in " ".join(sql.split())
     assert "RELAX_FLAG, RELAX_DESCRIPTION" in " ".join(sql.split())
+    assert "FAC_ID = :fac_id" in sql
     assert "PNL_ID = :panel_id" in sql
     assert "DEFT_OPER = :deft_oper" in sql
     assert "IF_NEWER = 'Y'" in sql
     assert "TRANS_DATE >= :min_trans_date" in sql
     assert binds == {
+        "fac_id": "E",
         "panel_id": "PANEL-1",
         "deft_oper": "1600",
         "min_trans_date": "2026-07-19 08.00.00.000000",
@@ -369,6 +430,8 @@ def test_oracle_repository_uses_actual_mod1_wp_defthis_columns(monkeypatch):
     assert "SELECT *" in " ".join(sql.split())
     assert "FROM MCRDA1.WP_DEFTHIS" in sql
     assert "SYS_TRANS_FLAG" not in sql
+    assert "FAC_ID = :fac_id" in sql
+    assert binds["fac_id"] == "C"
     assert binds["panel_id"] == "PANEL-1"
 
 
@@ -398,12 +461,44 @@ def test_mes_comparison_records_use_factory_day_window():
             ("AFTER", "2026-07-20 07:30:00"),
         ],
     )
+    statements = []
+    conn.set_trace_callback(statements.append)
     db = CAPIDatabase.__new__(CAPIDatabase)
     db._get_conn = lambda: conn
 
     rows = db.get_mes_comparison_records("2026-07-19", "2026-07-19")
 
     assert [row["glass_id"] for row in rows] == ["END", "START"]
+    assert not any("NOT INDEXED" in statement for statement in statements)
+
+
+def test_mes_comparison_records_use_full_scan_for_30_day_range():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE inference_records (
+            id INTEGER PRIMARY KEY,
+            glass_id TEXT,
+            model_id TEXT,
+            machine_no TEXT,
+            ai_judgment TEXT,
+            image_dir TEXT,
+            request_time TEXT,
+            aoi_machine_coords TEXT
+        )
+    """)
+    statements = []
+    conn.set_trace_callback(statements.append)
+    db = CAPIDatabase.__new__(CAPIDatabase)
+    db._get_conn = lambda: conn
+
+    rows = db.get_mes_comparison_records("2026-06-25", "2026-07-24")
+
+    assert rows == []
+    assert any(
+        "FROM inference_records NOT INDEXED" in statement
+        for statement in statements
+    )
 
 
 def test_mes_comparison_datetime_index_supports_range_and_order():

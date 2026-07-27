@@ -29,6 +29,7 @@ def test_v2_omit_postprocess_runs_two_stage_before_suppressing_dust():
         aoi_image_x=8,
         aoi_image_y=8,
     )
+    tile.score_threshold = 0.35
     anomaly_map = np.ones((8, 8), dtype=np.float32)
     result = ImageResult(
         image_path=Path("W0F00000_000000.tif"),
@@ -65,9 +66,19 @@ def test_v2_omit_postprocess_runs_two_stage_before_suppressing_dust():
             np.ones((8, 8), dtype=np.int32),
         )
 
-    def fake_check_dust_two_stage(tile_image, amap, dm, score):
+    def fake_check_dust_two_stage(
+        tile_image,
+        amap,
+        dm,
+        score,
+        *,
+        score_threshold,
+        candidate_dust_mask,
+    ):
         calls["two_stage"] = True
         assert dm is dust_mask_no_ext
+        assert score_threshold == 0.35
+        assert candidate_dust_mask is dust_mask
         return (
             True,
             (4, 5),
@@ -188,6 +199,7 @@ def test_v2_omit_postprocess_masks_aoi_exclude_zone_before_two_stage():
         aoi_image_x=4,
         aoi_image_y=8,
     )
+    tile.score_threshold = 0.35
     anomaly_map = np.zeros((8, 8), dtype=np.float32)
     anomaly_map[:, 4:] = 100.0  # strongest heat is inside the no-detect zone
     anomaly_map[4, 2] = 20.0    # weaker AOI-side heat must survive for two-stage
@@ -229,9 +241,19 @@ def test_v2_omit_postprocess_masks_aoi_exclude_zone_before_two_stage():
             np.ones((8, 8), dtype=np.int32),
         )
 
-    def fake_check_dust_two_stage(_tile_image, amap, dm, _score):
+    def fake_check_dust_two_stage(
+        _tile_image,
+        amap,
+        dm,
+        _score,
+        *,
+        score_threshold,
+        candidate_dust_mask,
+    ):
         calls["two_stage"] = True
         assert dm is dust_mask_no_ext
+        assert score_threshold == 0.35
+        assert candidate_dust_mask is dust_mask
         assert_exclude_zone_zeroed(amap)
         return (
             True,
