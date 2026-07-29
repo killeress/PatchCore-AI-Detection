@@ -141,6 +141,7 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "capi_image_preprocess_lab.py" in names
         assert "capi_dataset_export.py" in names
         assert "capi_mark_detector.py" in names
+        assert "capi_model_validation.py" in names
         assert "configs/mes_defect_codes.json" in names
         assert "capi_patchcore_feature_cleaning.py" in names
         assert "capi_scratch_batch.py" in names

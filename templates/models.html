@@ -181,12 +181,56 @@
   .mlib-pool-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; background: #000; display: block; }
   .mlib-pool-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
   .mlib-pool-actions input[type="checkbox"] { transform: translateY(1px); }
+  .validation-modal { max-width: 1180px; }
+  .validation-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+  .validation-toolbar {
+    display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+    margin:14px 0; padding:10px; background:#11111b; border-radius:7px;
+  }
+  .validation-toolbar select {
+    background:#1e1e2e; color:#cdd6f4; border:1px solid #45475a;
+    border-radius:4px; padding:6px 8px; max-width:310px;
+  }
+  .validation-progress {
+    display:none; height:8px; overflow:hidden; background:#313244;
+    border-radius:999px; margin:8px 0 14px;
+  }
+  .validation-progress > div {
+    height:100%; width:0; background:linear-gradient(90deg,#89b4fa,#a6e3a1);
+    transition:width .2s ease;
+  }
+  .validation-stats {
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:8px; margin-bottom:12px;
+  }
+  .validation-stat { background:#11111b; border:1px solid #313244; border-radius:7px; padding:10px; }
+  .validation-stat .label { color:#a6adc8; font-size:.72rem; }
+  .validation-stat .value { color:#cdd6f4; font-size:1.1rem; font-weight:700; margin-top:3px; }
+  .validation-stat.good .value { color:#a6e3a1; }
+  .validation-stat.bad .value { color:#f38ba8; }
+  .validation-results {
+    display:grid; grid-template-columns:repeat(auto-fill,minmax(205px,1fr));
+    gap:8px; max-height:430px; overflow:auto; margin-top:10px;
+  }
+  .validation-result {
+    background:#11111b; border:1px solid #313244; border-radius:7px; overflow:hidden;
+  }
+  .validation-result.regression { border-color:#f38ba8; }
+  .validation-result.gain { border-color:#a6e3a1; }
+  .validation-result.both_missed, .validation-result.missed { border-color:#fab387; }
+  .validation-result.error { border-color:#f9e2af; }
+  .validation-result img { width:100%; aspect-ratio:1; object-fit:cover; background:#000; display:block; }
+  .validation-result-body { padding:8px; color:#a6adc8; font-size:.72rem; line-height:1.5; }
+  .validation-result-title { color:#cdd6f4; font-weight:700; font-size:.78rem; }
+  .validation-result-status { font-weight:700; margin:3px 0; }
+  .validation-empty { color:#a6adc8; text-align:center; padding:24px; background:#11111b; border-radius:7px; }
 </style>
 
 <div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
     <h1 style="color:#cdd6f4;margin:0;">模型庫</h1>
-    <div style="display:flex;gap:8px;align-items:center;">
+    <div style="display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap;">
+      <a id="modelNgValidationShortcut" href="/ric?open_ng_validation=1" style="background:#10b981;color:#052e2b;border:1px solid #10b981;padding:7px 14px;border-radius:5px;font-weight:700;text-decoration:none;font-size:.85rem;">查看 NG 驗證庫</a>
       <a href="/models/retrain-pool" style="background:#1e1e2e;color:#a6adc8;border:1px solid #45475a;padding:7px 14px;border-radius:5px;font-weight:700;text-decoration:none;font-size:.85rem;">重訓 Pool</a>
       <a href="/train/new" style="background:#89b4fa;color:#1e1e2e;padding:7px 16px;border-radius:5px;font-weight:700;text-decoration:none;font-size:.85rem;">+ 新機種訓練</a>
     </div>
@@ -222,6 +266,7 @@
           <div>路徑：<code style="font-size:.7rem;color:#cdd6f4;">{{ b.bundle_path }}</code></div>
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;">
+          <button onclick="openModelValidation({{ b.id }})" style="background:#cba6f7;color:#1e1e2e;border:none;padding:5px 10px;border-radius:4px;font-size:.74rem;font-weight:700;">🧪 NG 能力考試</button>
           <button onclick="showDetail({{ b.id }})" style="background:#1e1e2e;color:#a6adc8;border:1px solid #45475a;padding:5px 10px;border-radius:4px;font-size:.74rem;">📋 細節 / 訓練資料</button>
           {% if b.is_active %}
             <button onclick="doAction({{ b.id }}, 'deactivate')" style="background:#fab387;color:#1e1e2e;border:none;padding:5px 10px;border-radius:4px;font-size:.74rem;font-weight:700;">⏸ 停用</button>
@@ -411,6 +456,36 @@
   </div>
 </div>
 
+<div id="modelValidationModalBg" class="mlib-modal-bg"
+     onclick="if(event.target===this)closeModelValidation()">
+  <div class="mlib-modal validation-modal" onclick="event.stopPropagation()">
+    <div class="validation-head">
+      <div>
+        <h2 id="modelValidationTitle">🧪 NG 能力考試</h2>
+        <div id="modelValidationMeta" style="color:#a6adc8;font-size:.78rem;line-height:1.6;"></div>
+      </div>
+      <button class="mlib-btn mlib-btn-close" onclick="closeModelValidation()">關閉</button>
+    </div>
+
+    <div class="validation-toolbar">
+      <label for="modelValidationRunSelect" style="color:#a6adc8;font-size:.78rem;">考試紀錄</label>
+      <select id="modelValidationRunSelect" onchange="loadModelValidation(this.value)">
+        <option value="">尚無紀錄</option>
+      </select>
+      <button id="modelValidationStartBtn" class="mlib-btn mlib-btn-primary"
+              onclick="startModelValidation()">開始考試</button>
+      <span id="modelValidationStatus" style="color:#a6adc8;font-size:.78rem;"></span>
+    </div>
+    <div id="modelValidationProgress" class="validation-progress">
+      <div id="modelValidationProgressBar"></div>
+    </div>
+
+    <div id="modelValidationSummary"></div>
+    <div id="modelValidationUnits"></div>
+    <div id="modelValidationResultList"></div>
+  </div>
+</div>
+
 <!-- tile preview modal（z-index 1100，高於 bundle-detail modal） -->
 <div id="tilePreviewModal" class="tile-modal" onclick="if(event.target===this)closeTilePreview()">
   <div class="modal-shell" onclick="event.stopPropagation()">
@@ -448,6 +523,283 @@ function escapeHtml(value) {
 
 function renderText(value) {
   return escapeHtml(value == null ? '—' : value).replace(/\n/g, '<br>');
+}
+
+let validationBundleId = null;
+let validationPageData = null;
+let validationPollTimer = null;
+
+function validationStateLabel(state) {
+  return {
+    pending: '等待中', running: '考試中', completed: '已完成',
+    failed: '失敗', cancelled: '已取消',
+  }[state] || state || '未知';
+}
+
+function validationRate(caught, total) {
+  const n = Number(total || 0);
+  if (!n) return '—';
+  return `${Number(caught || 0)} / ${n}（${(Number(caught || 0) / n * 100).toFixed(1)}%）`;
+}
+
+function validationScoreLine(row, prefix, label) {
+  const error = row[`${prefix}_error`];
+  if (error) {
+    return `<div><b>${escapeHtml(label)}：</b><span style="color:#f9e2af;">${escapeHtml(error)}</span></div>`;
+  }
+  const caught = row[`${prefix}_caught`];
+  if (caught == null) return `<div><b>${escapeHtml(label)}：</b>未執行</div>`;
+  const score = Number(row[`${prefix}_score`]);
+  const threshold = Number(row[`${prefix}_threshold`]);
+  return `<div><b>${escapeHtml(label)}：</b>`
+    + `<span style="color:${caught ? '#a6e3a1' : '#f38ba8'};">${caught ? '抓到' : '漏掉'}</span>`
+    + `｜Score ${score.toFixed(4)} / ${threshold.toFixed(4)}</div>`;
+}
+
+function validationComparisonLabel(value) {
+  return {
+    caught: '候選模型抓到',
+    missed: '候選模型漏掉',
+    both_caught: '新舊皆抓到',
+    gain: '候選模型進步',
+    regression: '候選模型退步',
+    both_missed: '新舊皆漏掉',
+    error: '無法評估',
+  }[value] || value || '—';
+}
+
+function closeModelValidation() {
+  document.getElementById('modelValidationModalBg').classList.remove('open');
+  if (validationPollTimer) {
+    clearTimeout(validationPollTimer);
+    validationPollTimer = null;
+  }
+}
+
+async function openModelValidation(bundleId) {
+  validationBundleId = Number(bundleId);
+  validationPageData = null;
+  document.getElementById('modelValidationModalBg').classList.add('open');
+  document.getElementById('modelValidationTitle').textContent = '🧪 NG 能力考試';
+  document.getElementById('modelValidationMeta').textContent = '正在讀取 NG 題庫與考試紀錄...';
+  document.getElementById('modelValidationSummary').innerHTML = '';
+  document.getElementById('modelValidationUnits').innerHTML = '';
+  document.getElementById('modelValidationResultList').innerHTML = '';
+  await loadModelValidation();
+}
+
+async function loadModelValidation(runId = '') {
+  if (!validationBundleId) return;
+  if (validationPollTimer) {
+    clearTimeout(validationPollTimer);
+    validationPollTimer = null;
+  }
+  const query = runId ? `?run_id=${encodeURIComponent(runId)}` : '';
+  try {
+    const response = await fetch(`/api/models/${validationBundleId}/validation${query}`);
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+    validationPageData = data;
+    renderModelValidation(data);
+    if (data.run && ['pending', 'running'].includes(data.run.state)) {
+      validationPollTimer = setTimeout(
+        () => loadModelValidation(data.run.id),
+        1000,
+      );
+    }
+  } catch (error) {
+    document.getElementById('modelValidationStatus').textContent = `讀取失敗：${error.message}`;
+    document.getElementById('modelValidationSummary').innerHTML =
+      `<div class="validation-empty">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderModelValidation(data) {
+  const candidate = data.candidate || {};
+  const baseline = data.baseline || null;
+  const runs = data.runs || [];
+  const run = data.run || null;
+  const displayCandidate = (run && run.candidate) || candidate;
+  const displayBaseline = run
+    ? (run.baseline_bundle_id != null ? (run.baseline || null) : null)
+    : baseline;
+  const displaySampleCount = run
+    ? Number(run.sample_count || 0)
+    : Number(data.sample_count || 0);
+  document.getElementById('modelValidationTitle').textContent =
+    `🧪 NG 能力考試｜${displayCandidate.label || displayCandidate.machine_id || '-'}`;
+  document.getElementById('modelValidationMeta').innerHTML =
+    `候選模型：<strong>${escapeHtml(displayCandidate.label || '-')}</strong><br>`
+    + (displayBaseline
+      ? `比較基準：<strong>${escapeHtml(displayBaseline.label || '-')}</strong>`
+        + `${run ? '（該次考試快照）' : '（目前 active）'}｜`
+      : '比較基準：無同機種 active bundle，僅評估候選模型｜')
+    + `NG 題目：<strong>${displaySampleCount}</strong> 張`
+    + '｜使用保存的 512×512 crop，不設最低題數；不含全 Panel 後處理';
+
+  const runSelect = document.getElementById('modelValidationRunSelect');
+  runSelect.innerHTML = runs.length
+    ? runs.map(item => {
+        const summary = item.summary || {};
+        const resultText = summary.candidate_evaluable
+          ? ` · ${summary.candidate_caught}/${summary.candidate_evaluable}`
+          : '';
+        return `<option value="${Number(item.id)}">#${Number(item.id)} · `
+          + `${escapeHtml(item.created_at || '')} · ${escapeHtml(validationStateLabel(item.state))}`
+          + `${escapeHtml(resultText)}</option>`;
+      }).join('')
+    : '<option value="">尚無紀錄</option>';
+  if (run) runSelect.value = String(run.id);
+  runSelect.disabled = !runs.length;
+
+  const hasRunningRun = runs.some(item => ['pending', 'running'].includes(item.state));
+  const startButton = document.getElementById('modelValidationStartBtn');
+  startButton.disabled = Number(data.sample_count || 0) <= 0 || hasRunningRun;
+  startButton.textContent = Number(data.sample_count || 0) > 0
+    ? `開始考試（${Number(data.sample_count)} 張）`
+    : '目前沒有 NG 題目';
+
+  const status = document.getElementById('modelValidationStatus');
+  const progress = document.getElementById('modelValidationProgress');
+  const progressBar = document.getElementById('modelValidationProgressBar');
+  if (!run) {
+    status.textContent = '尚未執行考試';
+    progress.style.display = 'none';
+    document.getElementById('modelValidationSummary').innerHTML =
+      '<div class="validation-empty">按「開始考試」後，系統會保存逐張分數與結果。</div>';
+    document.getElementById('modelValidationUnits').innerHTML = '';
+    document.getElementById('modelValidationResultList').innerHTML = '';
+    return;
+  }
+
+  status.textContent = `#${run.id} ${validationStateLabel(run.state)}`
+    + (run.error_message ? `：${run.error_message}` : '');
+  const total = Number(run.sample_count || 0);
+  const done = Number(run.progress || 0);
+  if (['pending', 'running'].includes(run.state)) {
+    progress.style.display = 'block';
+    progressBar.style.width = `${total ? Math.min(100, done / total * 100) : 0}%`;
+  } else {
+    progress.style.display = 'none';
+  }
+
+  renderModelValidationSummary(run);
+  renderModelValidationUnits(run);
+  renderModelValidationResults(run);
+}
+
+function renderModelValidationSummary(run) {
+  const summary = run.summary || {};
+  const hasBaseline = run.baseline_bundle_id != null;
+  const stats = [
+    ['考題 / 確認事件', `${Number(summary.sample_count || 0)} / ${Number(summary.review_count || 0)}`, ''],
+    ['候選 NG 抓到', validationRate(summary.candidate_caught, summary.candidate_evaluable), 'good'],
+    ['候選漏掉', Number(summary.candidate_missed || 0), summary.candidate_missed ? 'bad' : ''],
+    ['候選錯誤', Number(summary.candidate_errors || 0), summary.candidate_errors ? 'bad' : ''],
+  ];
+  if (hasBaseline) {
+    stats.push(
+      ['Active NG 抓到', validationRate(summary.baseline_caught, summary.baseline_evaluable), ''],
+      ['候選進步', Number(summary.candidate_gain || 0), 'good'],
+      ['候選退步', Number(summary.candidate_regression || 0), summary.candidate_regression ? 'bad' : ''],
+      ['新舊皆漏掉', Number(summary.both_missed || 0), summary.both_missed ? 'bad' : ''],
+    );
+  }
+  document.getElementById('modelValidationSummary').innerHTML =
+    `<div class="validation-stats">${stats.map(([label, value, cls]) =>
+      `<div class="validation-stat ${cls}"><div class="label">${escapeHtml(label)}</div>`
+      + `<div class="value">${escapeHtml(value)}</div></div>`
+    ).join('')}</div>`;
+}
+
+function renderModelValidationUnits(run) {
+  const units = Object.entries((run.summary || {}).units || {});
+  const hasBaseline = run.baseline_bundle_id != null;
+  if (!units.length) {
+    document.getElementById('modelValidationUnits').innerHTML = '';
+    return;
+  }
+  document.getElementById('modelValidationUnits').innerHTML = `
+    <h3 style="font-size:.9rem;color:#cdd6f4;margin:8px 0;">Lighting × Zone</h3>
+    <div style="max-height:260px;overflow:auto;">
+      <table class="mlib-table">
+        <thead><tr>
+          <th>Unit</th><th>題數</th><th>候選抓到</th>
+          ${hasBaseline ? '<th>Active 抓到</th><th>進步</th><th>退步</th>' : ''}
+          <th>錯誤</th>
+        </tr></thead>
+        <tbody>${units.map(([label, unit]) => `<tr>
+          <td>${escapeHtml(label)}</td>
+          <td>${Number(unit.sample_count || 0)}</td>
+          <td>${escapeHtml(validationRate(unit.candidate_caught, unit.candidate_evaluable))}</td>
+          ${hasBaseline
+            ? `<td>${escapeHtml(validationRate(unit.baseline_caught, unit.baseline_evaluable))}</td>`
+              + `<td style="color:#a6e3a1;">${Number(unit.candidate_gain || 0)}</td>`
+              + `<td style="color:#f38ba8;">${Number(unit.candidate_regression || 0)}</td>`
+            : ''}
+          <td>${Number(unit.candidate_errors || 0) + Number(unit.baseline_errors || 0)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderModelValidationResults(run) {
+  const hasBaseline = run.baseline_bundle_id != null;
+  const rank = {
+    regression: 0, both_missed: 1, missed: 1, error: 2,
+    gain: 3, both_caught: 4, caught: 4,
+  };
+  const rows = [...(run.results || [])].sort((left, right) =>
+    (rank[left.comparison] ?? 9) - (rank[right.comparison] ?? 9)
+      || Number(left.sample_id) - Number(right.sample_id)
+  );
+  if (!rows.length) {
+    document.getElementById('modelValidationResultList').innerHTML =
+      '<div class="validation-empty">尚無逐張結果。</div>';
+    return;
+  }
+  document.getElementById('modelValidationResultList').innerHTML = `
+    <h3 style="font-size:.9rem;color:#cdd6f4;margin:12px 0 6px;">逐張結果</h3>
+    <div class="validation-results">${rows.map(row => `
+      <div class="validation-result ${escapeHtml(row.comparison || '')}">
+        <img src="${escapeHtml(row.file_url || '')}" alt="${escapeHtml(row.image_name || '')}" loading="lazy">
+        <div class="validation-result-body">
+          <div class="validation-result-title">${escapeHtml(row.glass_id || '-')}</div>
+          <div>${escapeHtml(row.lighting || '-')}｜${escapeHtml(row.zone || '-')}｜${escapeHtml(row.aoi_defect_code || '-')}</div>
+          <div class="validation-result-status">${escapeHtml(validationComparisonLabel(row.comparison))}</div>
+          ${validationScoreLine(row, 'candidate', '候選')}
+          ${hasBaseline ? validationScoreLine(row, 'baseline', 'Active') : ''}
+          <div>Review：${escapeHtml(row.category || '-')}｜Sample #${Number(row.sample_id)}</div>
+        </div>
+      </div>`).join('')}</div>`;
+}
+
+async function startModelValidation() {
+  if (!validationBundleId || !validationPageData) return;
+  const count = Number(validationPageData.sample_count || 0);
+  if (!count) return;
+  const baselineText = validationPageData.baseline
+    ? `並與 active 模型「${validationPageData.baseline.label}」同題比較`
+    : '目前沒有同機種 active 模型，將只評估候選模型';
+  if (!confirm(`確定使用目前 ${count} 張 NG 題目開始考試？\n${baselineText}\n\n考試不會啟用或停用任何模型。`)) {
+    return;
+  }
+
+  const button = document.getElementById('modelValidationStartBtn');
+  button.disabled = true;
+  document.getElementById('modelValidationStatus').textContent = '正在啟動考試...';
+  try {
+    const response = await fetch(
+      `/api/models/${validationBundleId}/validation/start`,
+      {method: 'POST'},
+    );
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+    await loadModelValidation(data.run_id);
+  } catch (error) {
+    button.disabled = false;
+    document.getElementById('modelValidationStatus').textContent = `啟動失敗：${error.message}`;
+  }
 }
 
 let discoveredModelBundles = [];
@@ -1589,6 +1941,12 @@ document.addEventListener('click', (e) => {
 
 // 鍵盤處理（只在 bundle detail modal 開啟時生效）
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape'
+      && document.getElementById('modelValidationModalBg').classList.contains('open')) {
+    e.preventDefault();
+    closeModelValidation();
+    return;
+  }
   // 只在 bundle detail modal 開著時生效
   if (!document.getElementById('mlibModalBg').classList.contains('open')) return;
   // 文字輸入欄位優先
