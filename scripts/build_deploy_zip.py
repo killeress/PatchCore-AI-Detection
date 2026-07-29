@@ -45,6 +45,7 @@ CODE_FILES = [
     "capi_mark_detector.py",
     "capi_mes_report.py",
     "capi_model_registry.py",
+    "capi_model_validation.py",
     "capi_preprocess.py",
     "capi_patchcore_feature_cleaning.py",
     "capi_scratch_batch.py",

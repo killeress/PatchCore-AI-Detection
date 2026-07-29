@@ -375,6 +375,56 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_ng_validation_review
                     ON ng_validation_samples(review_id, status);
 
+                -- Versioned model exams against the durable NG validation samples.
+                -- Bundle/sample IDs are snapshots only so historical results remain
+                -- readable after a model or validation image is removed.
+                CREATE TABLE IF NOT EXISTS model_validation_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    candidate_bundle_id INTEGER NOT NULL,
+                    baseline_bundle_id INTEGER,
+                    machine_id TEXT NOT NULL DEFAULT '',
+                    sample_count INTEGER NOT NULL DEFAULT 0,
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    candidate_snapshot TEXT NOT NULL DEFAULT '{}',
+                    baseline_snapshot TEXT NOT NULL DEFAULT '{}',
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    error_message TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    started_at TEXT,
+                    completed_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_model_validation_candidate
+                    ON model_validation_runs(candidate_bundle_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_model_validation_state
+                    ON model_validation_runs(state, id DESC);
+
+                CREATE TABLE IF NOT EXISTS model_validation_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL,
+                    sample_id INTEGER NOT NULL,
+                    review_id INTEGER,
+                    glass_id TEXT DEFAULT '',
+                    model_id TEXT DEFAULT '',
+                    lighting TEXT NOT NULL,
+                    zone TEXT NOT NULL,
+                    image_name TEXT DEFAULT '',
+                    aoi_defect_code TEXT DEFAULT '',
+                    category TEXT DEFAULT '',
+                    candidate_score REAL,
+                    candidate_threshold REAL,
+                    candidate_caught INTEGER,
+                    candidate_error TEXT DEFAULT '',
+                    baseline_score REAL,
+                    baseline_threshold REAL,
+                    baseline_caught INTEGER,
+                    baseline_error TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    UNIQUE(run_id, sample_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_model_validation_result_run
+                    ON model_validation_results(run_id, sample_id);
+
                 -- Over-retrain pool (過檢 tile 重訓候選池)
                 CREATE TABLE IF NOT EXISTS over_retrain_pool (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3696,6 +3746,230 @@ class CAPIDatabase:
                     for row in model_rows
                 },
             }
+        finally:
+            conn.close()
+
+    # ── NG 模型考試 ─────────────────────────────────────
+
+    @staticmethod
+    def _decode_model_validation_run(row: sqlite3.Row) -> Dict:
+        data = dict(row)
+        for raw_key, decoded_key in (
+            ("candidate_snapshot", "candidate"),
+            ("baseline_snapshot", "baseline"),
+            ("summary_json", "summary"),
+        ):
+            try:
+                data[decoded_key] = json.loads(data.get(raw_key) or "{}")
+            except (TypeError, json.JSONDecodeError):
+                data[decoded_key] = {}
+            data.pop(raw_key, None)
+        return data
+
+    def create_model_validation_run(
+        self,
+        *,
+        candidate_bundle_id: int,
+        baseline_bundle_id: Optional[int],
+        machine_id: str,
+        sample_count: int,
+        candidate_snapshot: Dict,
+        baseline_snapshot: Optional[Dict] = None,
+    ) -> int:
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                """INSERT INTO model_validation_runs
+                   (candidate_bundle_id, baseline_bundle_id, machine_id,
+                    sample_count, candidate_snapshot, baseline_snapshot)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    int(candidate_bundle_id),
+                    int(baseline_bundle_id) if baseline_bundle_id is not None else None,
+                    str(machine_id or ""),
+                    max(0, int(sample_count)),
+                    json.dumps(candidate_snapshot or {}, ensure_ascii=False),
+                    json.dumps(baseline_snapshot or {}, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+        finally:
+            conn.close()
+
+    def start_model_validation_run(self, run_id: int) -> None:
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                """UPDATE model_validation_runs
+                      SET state = 'running',
+                          started_at = datetime('now', 'localtime'),
+                          error_message = ''
+                    WHERE id = ?""",
+                (int(run_id),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def save_model_validation_result(
+        self,
+        run_id: int,
+        result: Dict,
+        *,
+        progress: int,
+    ) -> None:
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    """INSERT INTO model_validation_results
+                       (run_id, sample_id, review_id, glass_id, model_id,
+                        lighting, zone, image_name, aoi_defect_code, category,
+                        candidate_score, candidate_threshold, candidate_caught,
+                        candidate_error, baseline_score, baseline_threshold,
+                        baseline_caught, baseline_error)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(run_id, sample_id)
+                       DO UPDATE SET
+                           review_id = excluded.review_id,
+                           glass_id = excluded.glass_id,
+                           model_id = excluded.model_id,
+                           lighting = excluded.lighting,
+                           zone = excluded.zone,
+                           image_name = excluded.image_name,
+                           aoi_defect_code = excluded.aoi_defect_code,
+                           category = excluded.category,
+                           candidate_score = excluded.candidate_score,
+                           candidate_threshold = excluded.candidate_threshold,
+                           candidate_caught = excluded.candidate_caught,
+                           candidate_error = excluded.candidate_error,
+                           baseline_score = excluded.baseline_score,
+                           baseline_threshold = excluded.baseline_threshold,
+                           baseline_caught = excluded.baseline_caught,
+                           baseline_error = excluded.baseline_error""",
+                    (
+                        int(run_id),
+                        int(result["sample_id"]),
+                        result.get("review_id"),
+                        str(result.get("glass_id") or ""),
+                        str(result.get("model_id") or ""),
+                        str(result.get("lighting") or ""),
+                        str(result.get("zone") or ""),
+                        str(result.get("image_name") or ""),
+                        str(result.get("aoi_defect_code") or ""),
+                        str(result.get("category") or ""),
+                        result.get("candidate_score"),
+                        result.get("candidate_threshold"),
+                        (
+                            int(bool(result["candidate_caught"]))
+                            if result.get("candidate_caught") is not None else None
+                        ),
+                        str(result.get("candidate_error") or ""),
+                        result.get("baseline_score"),
+                        result.get("baseline_threshold"),
+                        (
+                            int(bool(result["baseline_caught"]))
+                            if result.get("baseline_caught") is not None else None
+                        ),
+                        str(result.get("baseline_error") or ""),
+                    ),
+                )
+                conn.execute(
+                    """UPDATE model_validation_runs
+                          SET progress = ?
+                        WHERE id = ?""",
+                    (max(0, int(progress)), int(run_id)),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def finish_model_validation_run(
+        self,
+        run_id: int,
+        *,
+        state: str,
+        summary: Optional[Dict] = None,
+        error_message: str = "",
+    ) -> None:
+        if state not in {"completed", "failed", "cancelled"}:
+            raise ValueError(f"Invalid model validation state: {state}")
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                """UPDATE model_validation_runs
+                      SET state = ?,
+                          summary_json = ?,
+                          error_message = ?,
+                          completed_at = datetime('now', 'localtime')
+                    WHERE id = ?""",
+                (
+                    state,
+                    json.dumps(summary or {}, ensure_ascii=False),
+                    str(error_message or ""),
+                    int(run_id),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def list_model_validation_results(self, run_id: int) -> List[Dict]:
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT *
+                     FROM model_validation_results
+                    WHERE run_id = ?
+                    ORDER BY sample_id""",
+                (int(run_id),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_model_validation_run(
+        self,
+        run_id: int,
+        *,
+        include_results: bool = True,
+    ) -> Optional[Dict]:
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM model_validation_runs WHERE id = ?",
+                (int(run_id),),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None
+        data = self._decode_model_validation_run(row)
+        if include_results:
+            data["results"] = self.list_model_validation_results(run_id)
+        return data
+
+    def list_model_validation_runs(
+        self,
+        candidate_bundle_id: int,
+        *,
+        limit: int = 20,
+    ) -> List[Dict]:
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT *
+                     FROM model_validation_runs
+                    WHERE candidate_bundle_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?""",
+                (int(candidate_bundle_id), max(1, min(int(limit), 100))),
+            ).fetchall()
+            return [self._decode_model_validation_run(row) for row in rows]
         finally:
             conn.close()
 

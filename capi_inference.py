@@ -9139,6 +9139,27 @@ class SubmodelScorer:
                 else float(pred.pred_score)
         return score
 
+    def score_image_path(
+        self,
+        *,
+        bundle_dir: Path,
+        lighting: str,
+        zone: str,
+        image_path: Path,
+        preprocess_pipeline=None,
+    ) -> float:
+        """對一張已保存的 tile crop 套用 bundle 前處理後跑 raw score。"""
+        pt_path = Path(bundle_dir) / f"{lighting}-{zone}.pt"
+        inferencer = self._load_inferencer_for_pt(pt_path)
+        image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            raise FileNotFoundError(f"圖片不存在或無法讀取: {image_path}")
+        if preprocess_pipeline:
+            from capi_image_preprocess_lab import apply_preprocess_pipeline
+            image = apply_preprocess_pipeline(image, preprocess_pipeline)["image"]
+        with self.gpu_lock:
+            return self._score_one_tile(image, inferencer)
+
     def score_tiles(
         self,
         scoring_bundle_id: int,

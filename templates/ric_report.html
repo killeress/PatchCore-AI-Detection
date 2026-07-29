@@ -5770,7 +5770,13 @@
             mesReportTab.closeNgDatabase();
         }
     });
-    inferenceTab.quickFilter('today');
+    const initialParams = new URLSearchParams(window.location.search);
+    if (initialParams.get('open_ng_validation') === '1') {
+        switchTopTab('mes');
+        mesReportTab.openNgDatabase();
+    } else {
+        inferenceTab.quickFilter('today');
+    }
 </script>
 
 <!-- Dataset Export Modal (pure Tailwind + vanilla JS, 無 Bootstrap 依賴) -->

@@ -162,3 +162,33 @@ def test_score_one_tile_converts_grayscale_to_bgr():
     assert score == pytest.approx(0.42)
     assert captured["shape"] == (512, 512, 3), \
         f"_score_one_tile 應將 grayscale 轉成 (H,W,3) BGR，實際傳入 {captured['shape']}"
+
+
+def test_score_image_path_applies_validation_pipeline(tmp_path):
+    from capi_inference import SubmodelScorer
+
+    image_path = tmp_path / "sample.png"
+    cv2.imwrite(str(image_path), np.full((512, 512), 100, dtype=np.uint8))
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    processed = np.full((512, 512), 77, dtype=np.uint8)
+    scorer = SubmodelScorer(
+        gpu_lock=threading.Lock(), db=MagicMock(), log_fn=lambda m: None,
+    )
+
+    with patch.object(scorer, "_load_inferencer_for_pt", return_value=MagicMock()) as load, \
+         patch("capi_image_preprocess_lab.apply_preprocess_pipeline",
+               return_value={"image": processed}) as apply_pipeline, \
+         patch.object(scorer, "_score_one_tile", return_value=0.66) as score:
+        result = scorer.score_image_path(
+            bundle_dir=bundle_dir,
+            lighting="G0F00000",
+            zone="inner",
+            image_path=image_path,
+            preprocess_pipeline=[{"method": "median_blur", "params": {"kernel_size": 3}}],
+        )
+
+    assert result == pytest.approx(0.66)
+    assert load.call_args.args[0] == bundle_dir / "G0F00000-inner.pt"
+    assert apply_pipeline.call_args.args[0].shape == (512, 512)
+    assert np.array_equal(score.call_args.args[0], processed)

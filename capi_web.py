@@ -3525,6 +3525,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/models/") and path.endswith("/detail"):
                 self._handle_models_detail()
                 return
+            elif path.startswith("/api/models/") and path.endswith("/validation"):
+                self._handle_models_validation()
+                return
             elif path.startswith("/api/models/") and path.endswith("/training_tiles"):
                 self._handle_models_training_tiles()
                 return
@@ -3720,6 +3723,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path.startswith("/api/models/") and path.endswith("/scan_self_score"):
                 self._handle_scan_self_score()
+                return
+            elif path.startswith("/api/models/") and path.endswith("/validation/start"):
+                self._handle_models_validation_start()
                 return
             elif path == "/api/train/new/scan_prefilter_score":
                 self._handle_scan_prefilter_score()
@@ -14311,6 +14317,167 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         detail["pending_changes"] = _serialize_pending_changes(detail.get("pending_changes"))
         self._send_json(detail)
 
+    @staticmethod
+    def _model_validation_baseline(db, candidate: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        active = db.get_active_model_bundle()
+        if (
+            not active
+            or int(active["id"]) == int(candidate["id"])
+            or str(active.get("machine_id") or "") != str(candidate.get("machine_id") or "")
+        ):
+            return None
+        from capi_model_registry import get_bundle_detail
+        return get_bundle_detail(db, int(active["id"]))
+
+    @staticmethod
+    def _model_validation_run_payload(run: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not run:
+            return None
+        from capi_model_validation import (
+            build_model_validation_summary,
+            classify_model_validation_result,
+        )
+
+        payload = dict(run)
+        results = [dict(row) for row in payload.get("results") or []]
+        has_baseline = payload.get("baseline_bundle_id") is not None
+        if results and not payload.get("summary"):
+            payload["summary"] = build_model_validation_summary(
+                results,
+                has_baseline=has_baseline,
+            )
+        for result in results:
+            result["file_url"] = (
+                f"/api/ric/ng-validation/file?id={int(result['sample_id'])}"
+            )
+            result["comparison"] = classify_model_validation_result(
+                result,
+                has_baseline=has_baseline,
+            )
+        payload["results"] = results
+        return payload
+
+    def _handle_models_validation(self):
+        """GET /api/models/<id>/validation[?run_id=N]."""
+        parsed = urllib.parse.urlparse(self.path)
+        try:
+            bundle_id = int(parsed.path.split("/")[3])
+        except (IndexError, ValueError):
+            self._send_json({"error": "invalid bundle id"}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        from capi_model_registry import get_bundle_detail
+        from capi_model_validation import bundle_validation_snapshot
+
+        candidate = get_bundle_detail(db, bundle_id)
+        if not candidate:
+            self._send_json({"error": "bundle not found"}, status=404)
+            return
+        baseline = self._model_validation_baseline(db, candidate)
+        machine_id = str(candidate.get("machine_id") or "").strip()
+        if machine_id:
+            _, sample_count = db.list_ng_validation_samples(
+                model_id=machine_id,
+                limit=1,
+            )
+        else:
+            sample_count = 0
+        runs = db.list_model_validation_runs(bundle_id, limit=20)
+
+        query = urllib.parse.parse_qs(parsed.query)
+        raw_run_id = (query.get("run_id") or [""])[0]
+        selected_run = None
+        if raw_run_id:
+            try:
+                selected_run = db.get_model_validation_run(int(raw_run_id))
+            except ValueError:
+                self._send_json({"error": "run_id 格式錯誤"}, status=400)
+                return
+            if (
+                not selected_run
+                or int(selected_run["candidate_bundle_id"]) != bundle_id
+            ):
+                self._send_json({"error": "validation run not found"}, status=404)
+                return
+        elif runs:
+            selected_run = db.get_model_validation_run(int(runs[0]["id"]))
+
+        if selected_run and selected_run.get("state") in {"pending", "running"}:
+            with CAPIWebHandler._scan_state["lock"]:
+                active_job = CAPIWebHandler._scan_state.get("job")
+                matching_job = bool(
+                    active_job
+                    and active_job.get("kind") == "model_validation"
+                    and int(active_job.get("run_id") or 0) == int(selected_run["id"])
+                )
+            if not matching_job:
+                db.finish_model_validation_run(
+                    int(selected_run["id"]),
+                    state="failed",
+                    summary=selected_run.get("summary") or {},
+                    error_message="考試因 server 重啟或工作中斷而停止",
+                )
+                selected_run = db.get_model_validation_run(int(selected_run["id"]))
+                runs = db.list_model_validation_runs(bundle_id, limit=20)
+
+        self._send_json({
+            "candidate": bundle_validation_snapshot(candidate),
+            "baseline": bundle_validation_snapshot(baseline) if baseline else None,
+            "sample_count": sample_count,
+            "runs": runs,
+            "run": self._model_validation_run_payload(selected_run),
+        })
+
+    def _handle_models_validation_start(self):
+        """POST /api/models/<id>/validation/start."""
+        try:
+            bundle_id = int(urllib.parse.urlparse(self.path).path.split("/")[3])
+        except (IndexError, ValueError):
+            self._send_json({"error": "invalid bundle id"}, status=400)
+            return
+
+        db = self._capi_server_instance.database
+        from capi_model_registry import get_bundle_detail
+
+        candidate = get_bundle_detail(db, bundle_id)
+        if not candidate:
+            self._send_json({"error": "bundle not found"}, status=404)
+            return
+        machine_id = str(candidate.get("machine_id") or "").strip()
+        if not machine_id:
+            self._send_json({"error": "bundle 未設定機種 ID"}, status=400)
+            return
+
+        samples = []
+        offset = 0
+        total = 0
+        while True:
+            page, total = db.list_ng_validation_samples(
+                model_id=machine_id,
+                limit=1000,
+                offset=offset,
+            )
+            samples.extend(page)
+            offset += len(page)
+            if not page or offset >= total:
+                break
+        if not samples:
+            self._send_json({
+                "error": f"機種 {candidate.get('machine_id') or '-'} 尚無 NG 驗證樣本",
+            }, status=400)
+            return
+
+        baseline = self._model_validation_baseline(db, candidate)
+        started, response = CAPIWebHandler._start_model_validation_job(
+            candidate=candidate,
+            baseline=baseline,
+            samples=samples,
+            validation_base_dir=self._ng_validation_base_dir(),
+            server_inst=self._capi_server_instance,
+        )
+        self._send_json(response, status=202 if started else 409)
+
     def _handle_models_activate(self):
         """POST /api/models/<id>/activate"""
         parts = self.path.split("/")
@@ -15263,7 +15430,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     @classmethod
     def _cancel_and_wait_scan_idle(cls, timeout_s: float = 15.0) -> None:
-        """若有 prefilter/self scan 還在跑，cancel 它並等 worker thread 結束。
+        """若有 prefilter/self/validation scan 還在跑，cancel 並等 worker 結束。
 
         worker 的 finally 會清 _inferencer_cache + empty_cache；join 確保這段
         跑完再進訓練 subprocess，避免兩 process 同時搶 GPU。
@@ -15287,6 +15454,269 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if not job or job.get("state") != "running":
                     return
             time.sleep(0.2)
+
+    @classmethod
+    def _start_model_validation_job(
+        cls,
+        *,
+        candidate: Dict[str, Any],
+        baseline: Optional[Dict[str, Any]],
+        samples: List[Dict[str, Any]],
+        validation_base_dir: Path,
+        server_inst,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        from capi_model_validation import bundle_validation_snapshot
+
+        state = cls._scan_state
+        db = server_inst.database
+        with state["lock"]:
+            current = state["job"]
+            if current and current.get("state") == "running":
+                return False, {
+                    "error": "已有模型掃描或 NG 能力考試進行中",
+                    "job": {
+                        key: value
+                        for key, value in current.items()
+                        if key not in {"cancel_event", "thread"}
+                    },
+                }
+
+            run_id = db.create_model_validation_run(
+                candidate_bundle_id=int(candidate["id"]),
+                baseline_bundle_id=int(baseline["id"]) if baseline else None,
+                machine_id=str(candidate.get("machine_id") or ""),
+                sample_count=len(samples),
+                candidate_snapshot=bundle_validation_snapshot(candidate),
+                baseline_snapshot=bundle_validation_snapshot(baseline) if baseline else None,
+            )
+            cancel_event = threading.Event()
+            state["job"] = {
+                "scan_id": f"model_validation_{run_id}",
+                "run_id": run_id,
+                "kind": "model_validation",
+                "scoring_bundle_id": int(candidate["id"]),
+                "baseline_bundle_id": int(baseline["id"]) if baseline else None,
+                "total": len(samples),
+                "done": 0,
+                "skipped": 0,
+                "state": "running",
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+                "error": None,
+                "cancel_event": cancel_event,
+            }
+
+        thread = threading.Thread(
+            target=cls._model_validation_worker,
+            args=(
+                run_id,
+                candidate,
+                baseline,
+                samples,
+                Path(validation_base_dir),
+                cancel_event,
+                server_inst,
+            ),
+            daemon=True,
+            name=f"model-validation-{run_id}",
+        )
+        with state["lock"]:
+            if state["job"] and state["job"].get("run_id") == run_id:
+                state["job"]["thread"] = thread
+        try:
+            thread.start()
+        except Exception as exc:
+            db.finish_model_validation_run(
+                run_id,
+                state="failed",
+                error_message=str(exc),
+            )
+            with state["lock"]:
+                if state["job"] and state["job"].get("run_id") == run_id:
+                    state["job"]["state"] = "failed"
+                    state["job"]["error"] = str(exc)
+            return False, {"error": f"NG 能力考試啟動失敗: {exc}"}
+        return True, {"run_id": run_id, "total": len(samples), "state": "pending"}
+
+    @classmethod
+    def _model_validation_worker(
+        cls,
+        run_id: int,
+        candidate: Dict[str, Any],
+        baseline: Optional[Dict[str, Any]],
+        samples: List[Dict[str, Any]],
+        validation_base_dir: Path,
+        cancel_event: threading.Event,
+        server_inst,
+    ) -> None:
+        from capi_inference import SubmodelScorer
+        from capi_model_validation import (
+            build_model_validation_summary,
+            score_bundle_sample,
+        )
+
+        db = server_inst.database
+        state = cls._scan_state
+        scorer = None
+        final_state = "completed"
+        final_error = ""
+
+        def _empty_result(sample: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "sample_id": int(sample["id"]),
+                "review_id": sample.get("review_id"),
+                "glass_id": str(sample.get("glass_id") or ""),
+                "model_id": str(sample.get("model_id") or ""),
+                "lighting": str(sample.get("lighting") or ""),
+                "zone": str(sample.get("zone") or ""),
+                "image_name": str(sample.get("image_name") or ""),
+                "aoi_defect_code": str(sample.get("aoi_defect_code") or ""),
+                "category": str(sample.get("category") or ""),
+                "candidate_score": None,
+                "candidate_threshold": None,
+                "candidate_caught": None,
+                "candidate_error": "",
+                "baseline_score": None,
+                "baseline_threshold": None,
+                "baseline_caught": None,
+                "baseline_error": "",
+            }
+
+        def _score_into(
+            result: Dict[str, Any],
+            sample: Dict[str, Any],
+            bundle: Dict[str, Any],
+            prefix: str,
+        ) -> None:
+            try:
+                scored = score_bundle_sample(
+                    bundle,
+                    sample,
+                    scorer,
+                    validation_base_dir=validation_base_dir,
+                )
+                result[f"{prefix}_score"] = scored["score"]
+                result[f"{prefix}_threshold"] = scored["threshold"]
+                result[f"{prefix}_caught"] = scored["caught"]
+            except Exception as exc:
+                result[f"{prefix}_error"] = str(exc)[:1000]
+
+        def _release_loaded_models() -> None:
+            if scorer is not None:
+                scorer._inferencer_cache.clear()
+            cls._free_server_gpu_cache()
+
+        try:
+            db.start_model_validation_run(run_id)
+            scorer = SubmodelScorer(
+                gpu_lock=server_inst._gpu_lock,
+                db=db,
+                log_fn=lambda message: logger.info(
+                    "[model validation %s] %s", run_id, message
+                ),
+            )
+
+            grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+            for sample in samples:
+                key = (
+                    str(sample.get("lighting") or ""),
+                    str(sample.get("zone") or "").lower(),
+                )
+                grouped.setdefault(key, []).append(sample)
+
+            done = 0
+            for unit_key in sorted(grouped):
+                unit_samples = grouped[unit_key]
+                result_by_id = {
+                    int(sample["id"]): _empty_result(sample)
+                    for sample in unit_samples
+                }
+
+                for sample in unit_samples:
+                    if cancel_event.is_set():
+                        break
+                    _score_into(
+                        result_by_id[int(sample["id"])],
+                        sample,
+                        candidate,
+                        "candidate",
+                    )
+                _release_loaded_models()
+
+                if baseline and not cancel_event.is_set():
+                    for sample in unit_samples:
+                        if cancel_event.is_set():
+                            break
+                        _score_into(
+                            result_by_id[int(sample["id"])],
+                            sample,
+                            baseline,
+                            "baseline",
+                        )
+                    _release_loaded_models()
+
+                for sample in unit_samples:
+                    result = result_by_id[int(sample["id"])]
+                    if (
+                        not result["candidate_error"]
+                        and result["candidate_caught"] is None
+                    ):
+                        continue
+                    db.save_model_validation_result(
+                        run_id,
+                        result,
+                        progress=done + 1,
+                    )
+                    done += 1
+                    with state["lock"]:
+                        if state["job"] and state["job"].get("run_id") == run_id:
+                            state["job"]["done"] = done
+                if cancel_event.is_set():
+                    final_state = "cancelled"
+                    break
+
+            results = db.list_model_validation_results(run_id)
+            summary = build_model_validation_summary(
+                results,
+                has_baseline=baseline is not None,
+            )
+            db.finish_model_validation_run(
+                run_id,
+                state=final_state,
+                summary=summary,
+            )
+        except Exception as exc:
+            final_state = "failed"
+            final_error = str(exc)
+            logger.exception("model validation worker crashed: run=%s", run_id)
+            try:
+                partial_results = db.list_model_validation_results(run_id)
+                partial_summary = build_model_validation_summary(
+                    partial_results,
+                    has_baseline=baseline is not None,
+                )
+                db.finish_model_validation_run(
+                    run_id,
+                    state="failed",
+                    summary=partial_summary,
+                    error_message=final_error,
+                )
+            except Exception:
+                logger.exception(
+                    "failed to persist model validation failure: run=%s",
+                    run_id,
+                )
+        finally:
+            if scorer is not None:
+                scorer._inferencer_cache.clear()
+            scorer = None
+            cls._free_server_gpu_cache()
+            with state["lock"]:
+                if state["job"] and state["job"].get("run_id") == run_id:
+                    state["job"]["state"] = final_state
+                    state["job"]["done"] = len(
+                        db.list_model_validation_results(run_id)
+                    )
+                    state["job"]["error"] = final_error or None
 
     @classmethod
     def _start_scan_job(
@@ -15647,6 +16077,10 @@ def create_web_server(
     CAPIWebHandler._train_slot = {
         "lock": threading.Lock(),
         "active_job_id": None,
+    }
+    CAPIWebHandler._scan_state = {
+        "lock": threading.Lock(),
+        "job": None,
     }
     CAPIWebHandler._reconcile_train_new_artifacts(db)
     CAPIWebHandler.init_jinja()

@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 from jinja2 import Environment, FileSystemLoader
@@ -48,3 +49,28 @@ def test_ai_inference_records_is_the_default_report_tab():
     assert "mes-defect-unmapped" in html
     assert ".join('\\n')" in html
     assert "inferenceTab.quickFilter('today');" in html
+
+
+def test_ng_validation_shortcut_query_opens_existing_database_modal():
+    env = Environment(loader=FileSystemLoader("templates"))
+    env.globals.update(
+        app_version=SimpleNamespace(version="test"),
+        host_identity="",
+    )
+    template = env.get_template("ric_report.html")
+
+    html = template.render(request_path="/ric", batches=[])
+
+    assert "initialParams.get('open_ng_validation') === '1'" in html
+    assert "switchTopTab('mes');" in html
+    assert "mesReportTab.openNgDatabase();" in html
+
+
+def test_models_page_has_ng_validation_shortcut():
+    html = (Path(__file__).resolve().parent.parent / "templates" / "models.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="modelNgValidationShortcut"' in html
+    assert 'href="/ric?open_ng_validation=1"' in html
+    assert "查看 NG 驗證庫" in html
