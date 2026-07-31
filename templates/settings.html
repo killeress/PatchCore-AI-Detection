@@ -2074,6 +2074,19 @@
     let autoSwitchHistory = [];
     let autoSwitchActiveBundleId = null;
     let settingsUsers = [];
+    let markCalibration = { active_profile: null, profiles: [], samples: [] };
+    let markShadow = {
+        available: false,
+        rows: [],
+        stats: {},
+        filter: 'all',
+        limit: 100,
+        loading: false,
+        error: '',
+    };
+    let markLastResult = null;
+    let markPreviewUrl = '';
+    let markRollbackBusy = false;
 
     window.switchTab = function (tabId) {
         currentTab = tabId;
@@ -2096,6 +2109,7 @@
         loadAutoModelSwitch();
         if (SETTINGS_USER && SETTINGS_USER.can_manage_accounts) {
             loadSettingsUsers();
+            loadMarkShadow();
         }
     });
 
@@ -2277,6 +2291,503 @@
                 </div>
             </div>
         `;
+    }
+
+    async function loadMarkCalibration() {
+        if (!SETTINGS_USER || !SETTINGS_USER.can_manage_accounts) return;
+        try {
+            const res = await fetch('/api/settings/mark');
+            const data = await res.json();
+            if (!res.ok || data.error) throw new Error(data.error || 'MARK 校正資料載入失敗');
+            markCalibration = data;
+            renderSettings();
+        } catch (e) {
+            markCalibration = {
+                active_profile: null,
+                profiles: [],
+                samples: [],
+                error: e.message,
+            };
+            renderSettings();
+        }
+    }
+
+    function markProfileStatusLabel(status) {
+        return {
+            active: '啟用中',
+            retired: '已退役',
+            rejected: '回歸失敗',
+            validating: '驗證中',
+        }[status] || status || '--';
+    }
+
+    function renderMarkLastResult() {
+        if (!markLastResult) return '';
+        const regression = markLastResult.regression || {};
+        const failures = (regression.failures || []).slice(0, 8).map(item => `
+            <li>
+                #${escapeHtml(item.sample_id)} ${escapeHtml(item.filename)}：
+                預期 ${escapeHtml(item.expected_text)}，實際 ${escapeHtml(item.actual_text || '未找到')}
+                (${escapeHtml(item.reason || '')})
+            </li>
+        `).join('');
+        const color = markLastResult.activated ? '#4ade80' : '#fbbf24';
+        return `
+            <div style="margin:16px; padding:14px 16px; border:1px solid ${color}; border-radius:8px; background:rgba(15,23,42,.65);">
+                <div style="color:${color}; font-weight:700;">${escapeHtml(markLastResult.message || '')}</div>
+                ${markLastResult.original_detection ? `
+                    <div style="margin-top:8px; color:#cbd5e1; font-size:.82rem;">
+                        原判定：<code>${escapeHtml(markLastResult.original_detection.text || '未找到')}</code>
+                        ／ confidence ${Number(markLastResult.original_detection.confidence || 0).toFixed(3)}
+                        ／ ${escapeHtml(markLastResult.original_detection.roi || '')}
+                        ／ ${escapeHtml(markLastResult.original_detection.orientation || '')}
+                    </div>
+                ` : ''}
+                ${markLastResult.sample && markLastResult.sample.image_url ? `
+                    <a href="${escapeAttr(markLastResult.sample.image_url)}" target="_blank">
+                        <img src="${escapeAttr(markLastResult.sample.image_url)}" alt="已保存校正圖"
+                            style="display:block;max-width:520px;max-height:260px;object-fit:contain;margin-top:10px;border:1px solid #475569;border-radius:6px;">
+                    </a>
+                ` : ''}
+                ${failures ? `<ul style="margin:10px 0 0; color:#fca5a5; font-size:.8rem; line-height:1.6;">${failures}</ul>` : ''}
+            </div>
+        `;
+    }
+
+    function renderMarkCalibrationPane() {
+        if (!SETTINGS_USER || !SETTINGS_USER.can_manage_accounts) return '';
+        const active = markCalibration.active_profile || {};
+        const samples = markCalibration.samples || [];
+        const profiles = markCalibration.profiles || [];
+        const sampleRows = samples.length ? samples.map(sample => `
+            <tr>
+                <td>#${escapeHtml(sample.id)}</td>
+                <td><a href="${escapeAttr(sample.image_url || '#')}" target="_blank" style="color:#7dd3fc;">${escapeHtml(sample.original_filename || '')}</a></td>
+                <td>
+                    <code>${escapeHtml(sample.original_text || '未找到')}</code> →
+                    <code style="color:#86efac;">${escapeHtml(sample.expected_text || '')}</code>
+                    ${Number(sample.revision_count || 0) > 0 ? `<span class="auto-switch-muted">（修訂 ${escapeHtml(String(Number(sample.revision_count)))} 次）</span>` : ''}
+                </td>
+                <td>${Number(sample.original_confidence || 0).toFixed(3)}</td>
+                <td>${escapeHtml(sample.updated_by || sample.created_by || '')}</td>
+                <td class="auto-switch-muted">${escapeHtml(sample.updated_at || sample.created_at || '')}</td>
+                <td class="auto-switch-muted">${escapeHtml(sample.updated_reason || sample.reason || '')}</td>
+            </tr>
+        `).join('') : '<tr><td colspan="7" class="auto-switch-muted">尚無人工校正樣本</td></tr>';
+        const profileRows = profiles.length ? profiles.map(profile => {
+            const canRollback = profile.status === 'retired';
+            return `
+                <tr>
+                    <td><code>v${escapeHtml(profile.id)}</code></td>
+                    <td style="color:${profile.status === 'active' ? '#4ade80' : profile.status === 'rejected' ? '#fca5a5' : '#cbd5e1'};">${escapeHtml(markProfileStatusLabel(profile.status))}</td>
+                    <td>${escapeHtml(String(Number(profile.sample_count || 0)))}</td>
+                    <td>${escapeHtml(String(Number(profile.regression_passed || 0)))} / ${escapeHtml(String(Number(profile.regression_total || 0)))}</td>
+                    <td>${escapeHtml(profile.created_by || '')}</td>
+                    <td class="auto-switch-muted">${escapeHtml(profile.created_at || '')}</td>
+                    <td class="auto-switch-muted">${escapeHtml(profile.change_reason || '')}</td>
+                    <td>${canRollback ? `<button class="account-btn danger" onclick="rollbackMarkProfile(${Number(profile.id)})">回滾到此版</button>` : ''}</td>
+                </tr>
+            `;
+        }).join('') : '<tr><td colspan="8" class="auto-switch-muted">尚無 profile</td></tr>';
+
+        return `
+            <div id="pane-mark-calibration" class="settings-tab-pane-block ${currentTab === 'mark-calibration' ? 'active' : ''}" style="grid-column:1/-1;">
+                <div class="settings-section" style="border-left:3px solid #a78bfa;">
+                    <div class="settings-section-header" style="background:rgba(139,92,246,.1);">
+                        <div class="icon" style="background:rgba(139,92,246,.18);color:#c4b5fd;">🔤</div>
+                        <span>MARK 管理員校正</span>
+                        <span style="margin-left:auto;color:#86efac;font-size:.82rem;">目前啟用 v${escapeHtml(active.id || '--')} ／ ${escapeHtml(String(Number(active.sample_count || 0)))} 筆樣本</span>
+                    </div>
+                    <div style="padding:14px 16px; color:#cbd5e1; font-size:.84rem; line-height:1.7; border-bottom:1px solid var(--border);">
+                        每次保存一張誤判圖，系統會建立候選 profile 並重跑全部已標註案例；
+                        <strong style="color:#86efac;">全數通過就立即自動啟用</strong>，任何失敗都維持目前版本。
+                        校正樣本會永久累積，不需等待固定筆數；同圖若重新填寫不同答案，會保留修訂紀錄後重跑。
+                        此校正只調整現有點陣定位器與 Paddle 異常時的備援結果，不會訓練 PaddleOCR。
+                    </div>
+                    ${markCalibration.error ? `
+                    <div style="padding:16px;color:#fca5a5;">
+                        載入失敗：${escapeHtml(markCalibration.error)}
+                        <button class="account-btn" style="margin-left:12px;" onclick="loadMarkCalibration()">重新整理</button>
+                    </div>` : `
+                    <div style="display:grid; grid-template-columns:minmax(280px,1fr) minmax(240px,360px); gap:18px; padding:16px; border-bottom:1px solid var(--border);">
+                        <div style="display:grid; gap:12px;">
+                            <label style="color:#94a3b8;font-size:.82rem;">誤判的 W0F MARK 原始圖片（上傳）</label>
+                            <input id="mark-calibration-file" class="account-input" type="file" accept=".tif,.tiff,.png,.jpg,.jpeg,.bmp" onchange="previewMarkCalibrationFile(this)">
+                            <div style="display:flex;align-items:center;gap:10px;color:#64748b;font-size:.76rem;">
+                                <span style="height:1px;background:#334155;flex:1;"></span><span>或</span><span style="height:1px;background:#334155;flex:1;"></span>
+                            </div>
+                            <label style="color:#94a3b8;font-size:.82rem;">伺服器圖片文件路徑</label>
+                            <input id="mark-calibration-path" class="account-input" type="text" autocomplete="off" spellcheck="false"
+                                placeholder="/aidata/.../W0F00000_074058.tif" oninput="previewMarkCalibrationPath(this)">
+                            <div class="auto-switch-muted" style="font-size:.76rem;line-height:1.5;">
+                                請輸入 CAPI 生產主機可讀取的絕對路徑；系統讀取後仍會複製到校正樣本資料夾。
+                            </div>
+                            <label style="color:#94a3b8;font-size:.82rem;">正確兩碼</label>
+                            <input id="mark-correct-text" class="account-input" maxlength="2" placeholder="例如 B1"
+                                oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,2)">
+                            <label style="color:#94a3b8;font-size:.82rem;">校正原因</label>
+                            <textarea id="mark-correction-reason" class="auto-switch-note" rows="3" placeholder="例如：現場確認第二碼為 1，系統誤判為 J"></textarea>
+                            <button id="mark-correction-submit" class="account-btn primary" onclick="submitMarkCorrection()">保存、全量回歸並自動啟用</button>
+                        </div>
+                        <div style="min-height:220px; border:1px dashed #475569; border-radius:8px; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#0f172a;">
+                            <img id="mark-upload-preview" alt="MARK 圖片預覽" style="display:none;max-width:100%;max-height:320px;object-fit:contain;">
+                            <span id="mark-upload-placeholder" style="color:#64748b;text-align:center;padding:16px;">上傳圖片可顯示預覽；路徑圖片會在送出時由伺服器讀取</span>
+                        </div>
+                    </div>
+                    ${renderMarkLastResult()}
+                    <div class="settings-section-header" style="background:rgba(139,92,246,.06);">
+                        <span>校正樣本</span>
+                        <button class="account-btn" style="margin-left:auto;" onclick="loadMarkCalibration()">重新整理</button>
+                    </div>
+                    <div class="account-table-wrap">
+                        <table class="account-table">
+                            <thead><tr><th>ID</th><th>圖片</th><th>原判定 → 正確值</th><th>信心</th><th>管理員</th><th>時間</th><th>原因</th></tr></thead>
+                            <tbody>${sampleRows}</tbody>
+                        </table>
+                    </div>
+                    <div class="settings-section-header" style="background:rgba(139,92,246,.06);border-top:1px solid var(--border);">
+                        <span>Profile 版本</span>
+                        <span style="margin-left:auto;color:#fbbf24;font-size:.76rem;">回滾是緊急操作，會建立新啟用版本</span>
+                    </div>
+                    <div class="account-table-wrap">
+                        <table class="account-table">
+                            <thead><tr><th>版本</th><th>狀態</th><th>樣本數</th><th>回歸</th><th>建立者</th><th>時間</th><th>原因</th><th>操作</th></tr></thead>
+                            <tbody>${profileRows}</tbody>
+                        </table>
+                    </div>
+                    `}
+                </div>
+            </div>
+        `;
+    }
+
+    async function loadMarkShadow() {
+        if (!SETTINGS_USER || !SETTINGS_USER.can_manage_accounts) return;
+        markShadow.loading = true;
+        markShadow.error = '';
+        try {
+            const params = new URLSearchParams({
+                filter: markShadow.filter || 'all',
+                limit: String(markShadow.limit || 100),
+            });
+            const res = await fetch(`/api/settings/mark-shadow?${params.toString()}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Mark PPOCR檢查資料載入失敗');
+            markShadow = {
+                ...data,
+                filter: data.filter || markShadow.filter || 'all',
+                limit: Number(data.limit || markShadow.limit || 100),
+                loading: false,
+                error: data.error || '',
+            };
+        } catch (e) {
+            markShadow.loading = false;
+            markShadow.error = e.message;
+        }
+        renderSettings();
+    }
+
+    function setMarkShadowFilter(value) {
+        markShadow.filter = value;
+        loadMarkShadow();
+    }
+
+    function setMarkShadowLimit(value) {
+        markShadow.limit = Number(value) || 100;
+        loadMarkShadow();
+    }
+
+    function formatMarkShadowConfidence(value) {
+        const number = Number(value);
+        return Number.isFinite(number) ? number.toFixed(3) : '--';
+    }
+
+    function formatMarkShadowLatency(value) {
+        const number = Number(value);
+        return Number.isFinite(number) && number > 0 ? `${number.toFixed(1)} ms` : '--';
+    }
+
+    function formatMarkShadowTime(value) {
+        if (!value) return '--';
+        const date = new Date(value);
+        return Number.isNaN(date.getTime())
+            ? String(value)
+            : date.toLocaleString('zh-TW', { hour12: false });
+    }
+
+    function markShadowStatus(row) {
+        if (row.error) return ['錯誤', '#fca5a5', 'rgba(239,68,68,.14)'];
+        if (row.agreed) return ['一致', '#86efac', 'rgba(34,197,94,.14)'];
+        if (!row.valid_two_chars) return ['未讀取', '#fcd34d', 'rgba(245,158,11,.14)'];
+        return ['不一致', '#fca5a5', 'rgba(239,68,68,.14)'];
+    }
+
+    function renderMarkShadowPane() {
+        if (!SETTINGS_USER || !SETTINGS_USER.can_manage_accounts) return '';
+        const stats = markShadow.stats || {};
+        const latency = stats.latency_ms || {};
+        const rows = markShadow.rows || [];
+        const statCards = [
+            ['總筆數', Number(stats.total || 0), '#7dd3fc'],
+            ['一致', Number(stats.agreed || 0), '#86efac'],
+            ['不一致', Number(stats.disagreed || 0), '#fca5a5'],
+            ['未讀取', Number(stats.no_read || 0), '#fcd34d'],
+            ['錯誤', Number(stats.error_count || 0), '#fb7185'],
+            ['平均耗時', `${Number(latency.average || 0).toFixed(1)} ms`, '#c4b5fd'],
+        ].map(([label, value, color]) => `
+            <div style="padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:rgba(15,23,42,.65);">
+                <div class="auto-switch-muted" style="font-size:.74rem;">${escapeHtml(label)}</div>
+                <div style="margin-top:4px;color:${color};font-size:1.05rem;font-weight:700;">${escapeHtml(String(value))}</div>
+            </div>
+        `).join('');
+        const tableRows = rows.length ? rows.map(row => {
+            const status = markShadowStatus(row);
+            const paddleText = row.paddle_text || row.paddle_raw_text || '--';
+            const rawText = row.paddle_raw_text && row.paddle_raw_text !== row.paddle_text
+                ? `<div class="auto-switch-muted" style="margin-top:4px;font-size:.72rem;">raw: ${escapeHtml(row.paddle_raw_text)}</div>`
+                : '';
+            const crop = row.crop_url ? `
+                <a href="${escapeAttr(row.crop_url)}" target="_blank" style="display:inline-block;">
+                    <img src="${escapeAttr(row.crop_url)}" alt="MARK crop #${escapeAttr(String(row.id))}" loading="lazy"
+                        style="display:block;width:132px;height:78px;object-fit:contain;background:#020617;border:1px solid #334155;border-radius:6px;"
+                        onerror="this.style.display='none';this.nextElementSibling.style.display='inline';">
+                    <span class="auto-switch-muted" style="display:none;">圖片遺失</span>
+                </a>
+            ` : '<span class="auto-switch-muted">未保存</span>';
+            const recordLink = row.record_url
+                ? `<a href="${escapeAttr(row.record_url)}" target="_blank" rel="noopener noreferrer" style="color:#7dd3fc;white-space:nowrap;">LINK #${escapeHtml(String(row.inference_record_id))}</a>`
+                : '<span class="auto-switch-muted">未找到</span>';
+            return `
+                <tr>
+                    <td>${crop}</td>
+                    <td>
+                        <div style="color:#e2e8f0;">#${escapeHtml(String(row.id))} ${escapeHtml(row.source_image || '--')}</div>
+                        <div class="auto-switch-muted" style="margin-top:5px;font-size:.72rem;">${escapeHtml(formatMarkShadowTime(row.created_at))}</div>
+                    </td>
+                    <td>${recordLink}</td>
+                    <td>
+                        <code style="font-size:1rem;">${escapeHtml(row.current_text || '--')}</code>
+                        <div class="auto-switch-muted" style="margin-top:5px;">信心 ${escapeHtml(formatMarkShadowConfidence(row.current_confidence))}</div>
+                        <div class="auto-switch-muted" style="font-size:.72rem;">v${escapeHtml(String(row.current_profile_version || 0))} ／ ${escapeHtml(row.current_roi || '--')} ／ ${escapeHtml(row.current_orientation || '--')}</div>
+                    </td>
+                    <td>
+                        <code style="font-size:1rem;color:${row.agreed ? '#86efac' : '#fca5a5'};">${escapeHtml(paddleText)}</code>
+                        <div class="auto-switch-muted" style="margin-top:5px;">信心 ${escapeHtml(formatMarkShadowConfidence(row.paddle_confidence))}</div>
+                        ${rawText}
+                    </td>
+                    <td>
+                        <span style="display:inline-block;padding:3px 8px;border-radius:999px;color:${status[1]};background:${status[2]};font-size:.75rem;font-weight:700;">${status[0]}</span>
+                    </td>
+                    <td style="white-space:nowrap;">${escapeHtml(formatMarkShadowLatency(row.latency_ms))}</td>
+                    <td style="min-width:220px;max-width:420px;white-space:normal;overflow-wrap:anywhere;color:${row.error ? '#fca5a5' : '#64748b'};">${escapeHtml(row.error || '--')}</td>
+                </tr>
+            `;
+        }).join('') : `
+            <tr><td colspan="8" class="auto-switch-muted">
+                ${markShadow.loading ? '載入中…' : '目前篩選條件沒有資料'}
+            </td></tr>
+        `;
+
+        return `
+            <div id="pane-mark-shadow" class="settings-tab-pane-block ${currentTab === 'mark-shadow' ? 'active' : ''}" style="grid-column:1/-1;">
+                <div class="settings-section" style="border-left:3px solid #38bdf8;">
+                    <div class="settings-section-header" style="background:rgba(14,165,233,.08);">
+                        <div class="icon" style="background:rgba(14,165,233,.18);color:#7dd3fc;">🔬</div>
+                        <span>Mark PPOCR檢查</span>
+                        <span class="auto-switch-muted" style="margin-left:auto;">顯示 ${escapeHtml(String(rows.length))} 筆</span>
+                    </div>
+                    <div style="padding:14px 16px;color:#cbd5e1;font-size:.82rem;line-height:1.7;border-bottom:1px solid var(--border);">
+                        正式 MARK、QJPG 與 AOI 文字優先使用 PaddleOCR；原辨識保留作為 crop 定位、比較及 Paddle 異常時的備援。
+                        耗時統計只計算成功且大於 0 ms 的 Paddle 紀錄。
+                    </div>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;padding:16px;border-bottom:1px solid var(--border);">
+                        ${statCards}
+                    </div>
+                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--border);">
+                        <label class="auto-switch-muted">篩選</label>
+                        <select class="account-input" style="width:auto;min-width:130px;" onchange="setMarkShadowFilter(this.value)">
+                            <option value="all" ${markShadow.filter === 'all' ? 'selected' : ''}>全部</option>
+                            <option value="agreed" ${markShadow.filter === 'agreed' ? 'selected' : ''}>一致</option>
+                            <option value="disagreed" ${markShadow.filter === 'disagreed' ? 'selected' : ''}>不一致</option>
+                            <option value="no_read" ${markShadow.filter === 'no_read' ? 'selected' : ''}>未讀取</option>
+                            <option value="errors" ${markShadow.filter === 'errors' ? 'selected' : ''}>錯誤</option>
+                        </select>
+                        <label class="auto-switch-muted" style="margin-left:8px;">顯示</label>
+                        <select class="account-input" style="width:auto;" onchange="setMarkShadowLimit(this.value)">
+                            ${[50, 100, 200, 500].map(limit => `<option value="${limit}" ${Number(markShadow.limit) === limit ? 'selected' : ''}>${limit} 筆</option>`).join('')}
+                        </select>
+                        <button class="account-btn" onclick="loadMarkShadow()" ${markShadow.loading ? 'disabled' : ''}>
+                            ${markShadow.loading ? '載入中…' : '重新整理'}
+                        </button>
+                        <span class="auto-switch-muted" style="margin-left:auto;font-size:.72rem;">${escapeHtml(markShadow.db_path || '')}</span>
+                    </div>
+                    ${markShadow.error ? `
+                        <div style="padding:14px 16px;color:#fca5a5;border-bottom:1px solid var(--border);">
+                            ${escapeHtml(markShadow.error)}
+                        </div>
+                    ` : ''}
+                    <div class="account-table-wrap">
+                        <table class="account-table" style="min-width:1180px;">
+                            <thead><tr><th>Crop</th><th>來源／時間</th><th>推論紀錄</th><th>原辨識（定位／備援）</th><th>Paddle 辨識（正式）</th><th>比較</th><th>耗時</th><th>錯誤</th></tr></thead>
+                            <tbody>${tableRows}</tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    function previewMarkCalibrationFile(input) {
+        const file = input.files && input.files[0];
+        const pathInput = document.getElementById('mark-calibration-path');
+        const image = document.getElementById('mark-upload-preview');
+        const placeholder = document.getElementById('mark-upload-placeholder');
+        if (markPreviewUrl) URL.revokeObjectURL(markPreviewUrl);
+        markPreviewUrl = '';
+        if (file && pathInput && pathInput.value.trim()) {
+            image.style.display = 'none';
+            placeholder.style.display = '';
+            placeholder.textContent = '已同時選擇上傳檔案與輸入路徑，送出前請保留其中一種';
+            return;
+        }
+        if (!file) {
+            image.style.display = 'none';
+            placeholder.style.display = '';
+            previewMarkCalibrationPath(pathInput);
+            return;
+        }
+        if (/\.tiff?$/i.test(file.name)) {
+            image.style.display = 'none';
+            placeholder.style.display = '';
+            placeholder.textContent = `${file.name}（TIF 將由伺服器解碼並保存預覽）`;
+            return;
+        }
+        markPreviewUrl = URL.createObjectURL(file);
+        image.src = markPreviewUrl;
+        image.style.display = 'block';
+        placeholder.style.display = 'none';
+    }
+
+    function previewMarkCalibrationPath(input) {
+        const imagePath = (input && input.value || '').trim();
+        const fileInput = document.getElementById('mark-calibration-file');
+        const file = fileInput && fileInput.files && fileInput.files[0];
+        const image = document.getElementById('mark-upload-preview');
+        const placeholder = document.getElementById('mark-upload-placeholder');
+        if (!image || !placeholder) return;
+        if (markPreviewUrl) URL.revokeObjectURL(markPreviewUrl);
+        markPreviewUrl = '';
+        image.style.display = 'none';
+        placeholder.style.display = '';
+        if (file && imagePath) {
+            placeholder.textContent = '已同時選擇上傳檔案與輸入路徑，送出前請保留其中一種';
+        } else if (imagePath) {
+            placeholder.textContent = `${imagePath}（送出時由伺服器讀取）`;
+        } else if (file) {
+            previewMarkCalibrationFile(fileInput);
+        } else {
+            placeholder.textContent = '上傳圖片可顯示預覽；路徑圖片會在送出時由伺服器讀取';
+        }
+    }
+
+    async function submitMarkCorrection() {
+        const fileInput = document.getElementById('mark-calibration-file');
+        const pathInput = document.getElementById('mark-calibration-path');
+        const textInput = document.getElementById('mark-correct-text');
+        const reasonInput = document.getElementById('mark-correction-reason');
+        const button = document.getElementById('mark-correction-submit');
+        const file = fileInput && fileInput.files && fileInput.files[0];
+        const imagePath = (pathInput && pathInput.value || '').trim();
+        const correctText = (textInput && textInput.value || '').trim().toUpperCase();
+        const reason = (reasonInput && reasonInput.value || '').trim();
+        if (!file && !imagePath) return showToast('❌ 請選擇 MARK 圖片或輸入伺服器圖片文件路徑', 'error');
+        if (file && imagePath) return showToast('❌ 圖片上傳與圖片路徑只能擇一', 'error');
+        if (!/^[A-Z0-9]{2}$/.test(correctText)) return showToast('❌ 正確 MARK 必須是兩碼英數字', 'error');
+        if (!reason) return showToast('❌ 請填寫校正原因', 'error');
+        const sourceLabel = file ? file.name : imagePath;
+        if (!confirm(`請再次確認：${sourceLabel}\\n正確 MARK 是「${correctText}」？\\n保存後會永久加入全量回歸集。`)) return;
+
+        const form = new FormData();
+        if (file) form.append('file', file);
+        if (imagePath) form.append('image_path', imagePath);
+        form.append('correct_text', correctText);
+        form.append('reason', reason);
+        button.disabled = true;
+        button.textContent = '回歸執行中…';
+        try {
+            const res = await fetch('/api/settings/mark/correct', { method: 'POST', body: form });
+            const data = await res.json();
+            if (!res.ok || data.error) throw new Error(data.error || 'MARK 校正失敗');
+            markLastResult = data;
+            await loadMarkCalibration();
+            showToast(
+                data.activated
+                    ? (
+                        data.already_applied
+                            ? '✅ 此校正已在目前啟用版'
+                            : (data.revised ? '✅ 樣本已修訂，回歸通過並自動啟用' : '✅ 回歸通過，已自動啟用')
+                    )
+                    : '⚠️ 樣本已保存，但回歸失敗，維持舊版',
+                data.activated ? 'success' : 'error'
+            );
+        } catch (e) {
+            markLastResult = null;
+            await loadMarkCalibration();
+            showToast(`❌ ${e.message}`, 'error');
+        } finally {
+            const currentButton = document.getElementById('mark-correction-submit');
+            if (currentButton) {
+                currentButton.disabled = false;
+                currentButton.textContent = '保存、全量回歸並自動啟用';
+            }
+        }
+    }
+
+    async function rollbackMarkProfile(profileId) {
+        if (markRollbackBusy) return;
+        markRollbackBusy = true;
+        try {
+            const reason = prompt(
+                `確定回滾到 MARK profile v${profileId}？\\n`
+                + '舊版可能重新出現後續已知誤判，僅供緊急恢復。\\n請填寫原因：'
+            );
+            if (!reason || !reason.trim()) return;
+            let allowKnownRegressions = false;
+            while (true) {
+                const res = await fetch('/api/settings/mark/rollback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        profile_id: profileId,
+                        reason: reason.trim(),
+                        allow_known_regressions: allowKnownRegressions,
+                    }),
+                });
+                const data = await res.json();
+                if (data.requires_force && !allowKnownRegressions) {
+                    const failed = Number((data.regression || {}).failed || 0);
+                    if (!confirm(
+                        `目標 v${profileId} 對目前校正題庫有 ${failed} 筆失敗。\\n`
+                        + '強制啟用會重新出現已知誤判，確定仍要回滾？'
+                    )) return;
+                    allowKnownRegressions = true;
+                    continue;
+                }
+                if (!res.ok || data.error) throw new Error(data.error || '回滾失敗');
+                markLastResult = null;
+                await loadMarkCalibration();
+                showToast(
+                    data.forced ? `⚠️ ${data.message}（含已知回歸失敗）` : `✅ ${data.message}`,
+                    data.forced ? 'error' : 'success'
+                );
+                break;
+            }
+        } catch (e) {
+            await loadMarkCalibration();
+            showToast(`❌ ${e.message}`, 'error');
+        } finally {
+            markRollbackBusy = false;
+        }
     }
 
     function renderAutoSwitchBundleOptions(selectedId) {

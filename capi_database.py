@@ -21,11 +21,120 @@ import hmac
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any, Tuple
+from urllib.parse import urlparse
 
 _DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _FACTORY_DAY_START_TIME = "07:30:00"
 _MES_COMPARISON_FULL_SCAN_DAYS = 30
 logger = logging.getLogger(__name__)
+
+_DEFAULT_CENTRAL_DASHBOARD_CONFIG = {
+    "title": "寧波廠區 CAPI AI 中控看板",
+    "refreshIntervalSeconds": 30,
+    "requestTimeoutSeconds": 8,
+    "lines": [
+        {
+            "id": "mod2-capi03",
+            "factory": "MOD2",
+            "line": "CAPI03",
+            "pcName": "CAPI03",
+            "apiUrl": "http://10.174.37.81/api/status",
+            "dashboardUrl": "http://10.174.37.81/",
+            "overexposedUrl": "http://10.174.37.81/overexposed",
+            "enabled": True,
+        },
+        {
+            "id": "mod2-capi13",
+            "factory": "MOD2",
+            "line": "CAPI13",
+            "pcName": "CAPI13",
+            "apiUrl": "http://10.174.37.84/api/status",
+            "dashboardUrl": "http://10.174.37.84/",
+            "overexposedUrl": "http://10.174.37.84/overexposed",
+            "enabled": True,
+        },
+        {
+            "id": "mod2-hm-83",
+            "factory": "MOD2",
+            "line": "HM",
+            "pcName": "10.174.24.83",
+            "apiUrl": "http://10.174.24.83/api/status",
+            "dashboardUrl": "http://10.174.24.83/",
+            "overexposedUrl": "http://10.174.24.83/overexposed",
+            "enabled": True,
+        },
+        {
+            "id": "mod2-hm-103",
+            "factory": "MOD2",
+            "line": "HM",
+            "pcName": "10.174.24.103",
+            "apiUrl": "http://10.174.24.103/api/status",
+            "dashboardUrl": "http://10.174.24.103/",
+            "overexposedUrl": "http://10.174.24.103/overexposed",
+            "enabled": True,
+        },
+        {
+            "id": "mod2-capi08",
+            "factory": "MOD2",
+            "line": "CAPI08",
+            "pcName": "CAPI08",
+            "apiUrl": "http://10.174.37.160/api/status",
+            "dashboardUrl": "http://10.174.37.160/",
+            "overexposedUrl": "http://10.174.37.160/overexposed",
+            "enabled": True,
+        },
+        {
+            "id": "mod2-capi01",
+            "factory": "MOD2",
+            "line": "CAPI01",
+            "pcName": "CAPI01",
+            "apiUrl": "http://10.174.37.137/api/status",
+            "dashboardUrl": "http://10.174.37.137/",
+            "overexposedUrl": "http://10.174.37.137/overexposed",
+            "enabled": True,
+        },
+        {
+            "id": "mod2-capi14",
+            "factory": "MOD2",
+            "line": "CAPI14",
+            "pcName": "CAPI14",
+            "apiUrl": "http://10.174.37.67/api/status",
+            "dashboardUrl": "http://10.174.37.67/",
+            "overexposedUrl": "http://10.174.37.67/overexposed",
+            "enabled": True,
+        },
+        {
+            "id": "mod2-capi02",
+            "factory": "MOD2",
+            "line": "CAPI02",
+            "pcName": "CAPI02",
+            "apiUrl": "http://10.174.37.208/api/status",
+            "dashboardUrl": "http://10.174.37.208/",
+            "overexposedUrl": "http://10.174.37.208/overexposed",
+            "enabled": True,
+        },
+        {
+            "id": "mod1-capi35",
+            "factory": "MOD1",
+            "line": "CAPI35",
+            "pcName": "CAPI35",
+            "apiUrl": "http://10.172.25.105/api/status",
+            "dashboardUrl": "http://10.172.25.105/",
+            "overexposedUrl": "http://10.172.25.105/overexposed",
+            "enabled": True,
+        },
+        {
+            "id": "mod1-capi34",
+            "factory": "MOD1",
+            "line": "CAPI34",
+            "pcName": "CAPI34",
+            "apiUrl": "http://10.172.25.129/api/status",
+            "dashboardUrl": "http://10.172.25.129/",
+            "overexposedUrl": "http://10.172.25.129/overexposed",
+            "enabled": True,
+        },
+    ],
+}
 
 
 def _next_date_str(date_str: str) -> str:
@@ -73,9 +182,9 @@ class CAPIDatabase:
         self._lock = threading.Lock()
         self._init_db()
 
-    def _get_conn(self) -> sqlite3.Connection:
+    def _get_conn(self, timeout: float = 30) -> sqlite3.Connection:
         """取得資料庫連線 (每個執行緒需要獨立連線)"""
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = sqlite3.connect(str(self.db_path), timeout=float(timeout))
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
@@ -588,6 +697,98 @@ class CAPIDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_score_cache_bundle
                     ON tile_score_cache(scoring_bundle_id);
+
+                -- 管理員確認的 MARK 誤判樣本，永久作為後續版本回歸集。
+                CREATE TABLE IF NOT EXISTS mark_calibration_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_sha256 TEXT NOT NULL UNIQUE,
+                    image_path TEXT NOT NULL,
+                    original_filename TEXT NOT NULL,
+                    expected_text TEXT NOT NULL,
+                    original_text TEXT DEFAULT '',
+                    original_confidence REAL DEFAULT 0.0,
+                    original_roi TEXT DEFAULT '',
+                    original_orientation TEXT DEFAULT '',
+                    original_bbox TEXT DEFAULT '',
+                    prototype_json TEXT NOT NULL,
+                    rotation_applied INTEGER NOT NULL DEFAULT 0,
+                    profile_id_before INTEGER DEFAULT 0,
+                    candidate_profile_id INTEGER DEFAULT 0,
+                    created_by TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    updated_by TEXT DEFAULT '',
+                    updated_reason TEXT DEFAULT '',
+                    updated_at TEXT DEFAULT '',
+                    revision_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_mark_calibration_created
+                    ON mark_calibration_samples(created_at DESC, id DESC);
+
+                CREATE TABLE IF NOT EXISTS mark_calibration_sample_revisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sample_id INTEGER NOT NULL,
+                    previous_expected_text TEXT NOT NULL,
+                    new_expected_text TEXT NOT NULL,
+                    previous_prototype_json TEXT NOT NULL,
+                    new_prototype_json TEXT NOT NULL,
+                    changed_by TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    FOREIGN KEY (sample_id)
+                        REFERENCES mark_calibration_samples(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_mark_calibration_revision_sample
+                    ON mark_calibration_sample_revisions(sample_id, id DESC);
+
+                -- MARK 辨識 profile 為不可變版本；status 只表示生命週期。
+                CREATE TABLE IF NOT EXISTS mark_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_profile_id INTEGER DEFAULT 0,
+                    rollback_of_profile_id INTEGER DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'validating',
+                    profile_json TEXT NOT NULL,
+                    sample_set_sha256 TEXT NOT NULL DEFAULT '',
+                    sample_count INTEGER NOT NULL DEFAULT 0,
+                    regression_total INTEGER NOT NULL DEFAULT 0,
+                    regression_passed INTEGER NOT NULL DEFAULT 0,
+                    regression_failed INTEGER NOT NULL DEFAULT 0,
+                    regression_report TEXT DEFAULT '{}',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    change_reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    activated_at TEXT DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_mark_profiles_status
+                    ON mark_profiles(status, id DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_mark_profiles_one_active
+                    ON mark_profiles(status) WHERE status = 'active';
+
+                -- 中控看板顯示設定。即時設備狀態仍由各 PC API 取得。
+                CREATE TABLE IF NOT EXISTS central_dashboard_settings (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    title TEXT NOT NULL,
+                    refresh_interval_seconds INTEGER NOT NULL DEFAULT 30,
+                    request_timeout_seconds INTEGER NOT NULL DEFAULT 8,
+                    updated_by TEXT DEFAULT '',
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+                );
+
+                CREATE TABLE IF NOT EXISTS central_dashboard_lines (
+                    id TEXT PRIMARY KEY,
+                    factory TEXT NOT NULL,
+                    line_name TEXT NOT NULL,
+                    pc_name TEXT NOT NULL,
+                    api_url TEXT NOT NULL,
+                    dashboard_url TEXT DEFAULT '',
+                    overexposed_url TEXT DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    updated_by TEXT DEFAULT '',
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_central_dashboard_lines_order
+                    ON central_dashboard_lines(sort_order, id);
             """)
             
             # Migration for adding missing columns to existing database
@@ -644,6 +845,31 @@ class CAPIDatabase:
             ensure_within_spec_log_schema()
 
             add_column_if_not_exists("config_change_history", "changed_by", "TEXT DEFAULT ''")
+            add_column_if_not_exists(
+                "mark_profiles",
+                "sample_set_sha256",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            add_column_if_not_exists(
+                "mark_calibration_samples",
+                "updated_by",
+                "TEXT DEFAULT ''",
+            )
+            add_column_if_not_exists(
+                "mark_calibration_samples",
+                "updated_reason",
+                "TEXT DEFAULT ''",
+            )
+            add_column_if_not_exists(
+                "mark_calibration_samples",
+                "updated_at",
+                "TEXT DEFAULT ''",
+            )
+            add_column_if_not_exists(
+                "mark_calibration_samples",
+                "revision_count",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
 
             if not conn.execute(
                 "SELECT id FROM settings_users WHERE username = ?",
@@ -655,6 +881,26 @@ class CAPIDatabase:
                        (username, password_hash, is_admin, created_at, updated_at)
                        VALUES (?, ?, 1, ?, ?)""",
                     ("admin", self._hash_settings_password("INXCAPI"), now, now),
+                )
+
+            if not conn.execute(
+                "SELECT id FROM mark_profiles WHERE status = 'active' LIMIT 1"
+            ).fetchone():
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                conn.execute(
+                    """INSERT OR IGNORE INTO mark_profiles
+                       (status, profile_json, sample_count, regression_report,
+                        created_by, change_reason, created_at, activated_at)
+                       VALUES ('active', ?, 0, '{}', 'system', ?, ?, ?)""",
+                    (
+                        json.dumps(
+                            {"schema_version": 1, "prototypes": []},
+                            ensure_ascii=False,
+                        ),
+                        "內建點陣模板",
+                        now,
+                        now,
+                    ),
                 )
 
             add_column_if_not_exists("inference_records", "error_message", "TEXT DEFAULT ''")
@@ -1258,6 +1504,67 @@ class CAPIDatabase:
             return [dict(r) for r in rows], total
         finally:
             conn.close()
+
+    def find_inference_record_ids_for_images(
+        self, image_refs: List[Tuple[str, str]]
+    ) -> List[Optional[int]]:
+        """依圖片路徑／檔名找出對應的推論 record_id。"""
+        refs = [
+            (str(image_path or ""), str(image_name or ""))
+            for image_path, image_name in image_refs
+        ]
+        if not refs:
+            return []
+
+        image_paths = sorted({image_path for image_path, _ in refs if image_path})
+        image_names = sorted({image_name for _, image_name in refs if image_name})
+        conditions = []
+        params: List[str] = []
+        if image_paths:
+            placeholders = ", ".join("?" for _ in image_paths)
+            conditions.append(f"img.image_path IN ({placeholders})")
+            params.extend(image_paths)
+        if image_names:
+            placeholders = ", ".join("?" for _ in image_names)
+            conditions.append(f"img.image_name IN ({placeholders})")
+            params.extend(image_names)
+        if not conditions:
+            return [None] * len(refs)
+
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT img.image_path, img.image_name, img.record_id
+                FROM image_results img
+                JOIN inference_records rec ON rec.id = img.record_id
+                WHERE {' OR '.join(conditions)}
+                ORDER BY rec.id DESC, img.id DESC
+                """,
+                tuple(params),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        path_ids: Dict[str, int] = {}
+        name_ids: Dict[str, set] = {}
+        for row in rows:
+            record_id = int(row["record_id"])
+            image_path = str(row["image_path"] or "")
+            image_name = str(row["image_name"] or "")
+            if image_path and image_path not in path_ids:
+                path_ids[image_path] = record_id
+            if image_name:
+                name_ids.setdefault(image_name, set()).add(record_id)
+
+        matched: List[Optional[int]] = []
+        for image_path, image_name in refs:
+            if image_path in path_ids:
+                matched.append(path_ids[image_path])
+                continue
+            candidates = name_ids.get(image_name, set())
+            matched.append(next(iter(candidates)) if len(candidates) == 1 else None)
+        return matched
 
     def get_record_detail(self, record_id: int) -> Optional[Dict]:
         """取得完整推論記錄 (含圖片和 tile 結果)"""
@@ -2618,6 +2925,8 @@ class CAPIDatabase:
         vacuum: bool = True,
         heatmap_retain_days: int = 0,
         heatmap_base_dir: Optional[str] = None,
+        mark_shadow_base_dir: Optional[str] = None,
+        mark_shadow_db_path: Optional[str] = None,
     ) -> dict:
         from datetime import datetime, timedelta
         import shutil
@@ -2636,6 +2945,10 @@ class CAPIDatabase:
             "scratch_rescue_review_deleted": 0,
             "within_spec_dirs_deleted": 0,
             "within_spec_dirs_failed": 0,
+            "mark_shadow_dirs_deleted": 0,
+            "mark_shadow_dirs_failed": 0,
+            "mark_shadow_paths_cleared": 0,
+            "mark_shadow_paths_clear_failed": 0,
         }
 
         # Step 0: 先找出並刪除過期 heatmap；只有成功後才清 DB 路徑。
@@ -2709,6 +3022,38 @@ class CAPIDatabase:
                     exc,
                 )
 
+        mark_shadow_dirs_to_delete = []
+        if heatmap_retain_days > 0 and mark_shadow_base_dir:
+            mark_shadow_root = Path(mark_shadow_base_dir).expanduser()
+            mark_shadow_cutoff_date = (
+                now - timedelta(days=heatmap_retain_days)
+            ).date()
+            for relative_root in ("crops", "disagreements"):
+                root = mark_shadow_root / relative_root
+                try:
+                    if not root.is_dir():
+                        continue
+                    for child in root.iterdir():
+                        if child.is_symlink() or not child.is_dir():
+                            continue
+                        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", child.name):
+                            continue
+                        try:
+                            child_date = datetime.strptime(
+                                child.name, "%Y-%m-%d"
+                            ).date()
+                        except ValueError:
+                            continue
+                        if child_date < mark_shadow_cutoff_date:
+                            mark_shadow_dirs_to_delete.append(child)
+                except OSError as exc:
+                    stats["mark_shadow_dirs_failed"] += 1
+                    logger.warning(
+                        "[Cleanup] Failed to scan MARK Shadow directories under %s: %s",
+                        root,
+                        exc,
+                    )
+
         heatmap_records_to_clear = []
         heatmap_retry_record_ids = set()
         for directory, record_ids in heatmap_records_by_dir.items():
@@ -2767,6 +3112,65 @@ class CAPIDatabase:
                             path,
                             restore_exc,
                         )
+
+        mark_shadow_deleted_dirs = []
+        for path in mark_shadow_dirs_to_delete:
+            try:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                    mark_shadow_deleted_dirs.append(path.resolve())
+                    stats["mark_shadow_dirs_deleted"] += 1
+            except Exception as exc:
+                stats["mark_shadow_dirs_failed"] += 1
+                logger.warning(
+                    "[Cleanup] Failed to delete MARK Shadow directory %s: %s",
+                    path,
+                    exc,
+                )
+
+        if mark_shadow_deleted_dirs and mark_shadow_db_path:
+            try:
+                shadow_db_path = Path(mark_shadow_db_path).expanduser()
+                if shadow_db_path.is_file():
+                    shadow_root = (
+                        Path(mark_shadow_base_dir).expanduser().resolve()
+                        if mark_shadow_base_dir
+                        else shadow_db_path.parent.resolve()
+                    )
+                    with sqlite3.connect(str(shadow_db_path), timeout=3) as shadow_conn:
+                        shadow_rows = shadow_conn.execute(
+                            "SELECT id, crop_path FROM mark_shadow_results "
+                            "WHERE crop_path <> ''"
+                        ).fetchall()
+                        clear_ids = []
+                        for row in shadow_rows:
+                            crop_path = Path(str(row[1] or "")).expanduser()
+                            if not crop_path.is_absolute():
+                                crop_path = shadow_root / crop_path
+                            try:
+                                resolved_crop_path = crop_path.resolve()
+                            except OSError:
+                                continue
+                            if any(
+                                resolved_crop_path == deleted_dir
+                                or deleted_dir in resolved_crop_path.parents
+                                for deleted_dir in mark_shadow_deleted_dirs
+                            ):
+                                clear_ids.append((int(row[0]),))
+                        if clear_ids:
+                            shadow_conn.executemany(
+                                "UPDATE mark_shadow_results SET crop_path = '' "
+                                "WHERE id = ?",
+                                clear_ids,
+                            )
+                            shadow_conn.commit()
+                            stats["mark_shadow_paths_cleared"] = len(clear_ids)
+            except Exception as exc:
+                stats["mark_shadow_paths_clear_failed"] += 1
+                logger.warning(
+                    "[Cleanup] Failed to clear MARK Shadow crop paths: %s",
+                    exc,
+                )
 
         with self._lock:
             conn = self._get_conn()
@@ -4186,6 +4590,694 @@ class CAPIDatabase:
             finally:
                 conn.close()
 
+    @staticmethod
+    def _format_mark_profile(row) -> Dict[str, Any]:
+        result = dict(row)
+        try:
+            result["profile"] = json.loads(result.pop("profile_json") or "{}")
+        except (TypeError, ValueError):
+            result["profile"] = {}
+        try:
+            result["regression_report"] = json.loads(
+                result.get("regression_report") or "{}"
+            )
+        except (TypeError, ValueError):
+            result["regression_report"] = {}
+        return result
+
+    def _format_mark_calibration_sample(self, row) -> Dict[str, Any]:
+        result = dict(row)
+        for source, target, fallback in (
+            ("prototype_json", "prototypes", []),
+            ("original_bbox", "bbox", {}),
+        ):
+            try:
+                result[target] = json.loads(result.pop(source) or "")
+            except (TypeError, ValueError):
+                result[target] = fallback
+        result["rotation_applied"] = bool(result.get("rotation_applied"))
+        image_path = Path(str(result.get("image_path") or ""))
+        if image_path and not image_path.is_absolute():
+            image_path = self.db_path.parent / image_path
+        result["image_path"] = str(image_path)
+        return result
+
+    def get_mark_calibration_storage_dir(self) -> Path:
+        storage_dir = self.db_path.parent / "mark_calibration" / "samples"
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        return storage_dir
+
+    def get_active_mark_profile(
+        self,
+        *,
+        timeout: float = 30,
+    ) -> Dict[str, Any]:
+        conn = self._get_conn(timeout=timeout)
+        try:
+            row = conn.execute(
+                """SELECT * FROM mark_profiles
+                   WHERE status = 'active'
+                   ORDER BY id DESC LIMIT 1"""
+            ).fetchone()
+            if not row:
+                raise RuntimeError("MARK 啟用 profile 不存在")
+            return self._format_mark_profile(row)
+        finally:
+            conn.close()
+
+    def list_mark_profiles(self, limit: int = 50) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM mark_profiles
+                   ORDER BY id DESC LIMIT ?""",
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+            return [self._format_mark_profile(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_mark_profile(self, profile_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM mark_profiles WHERE id = ?",
+                (int(profile_id),),
+            ).fetchone()
+            return self._format_mark_profile(row) if row else None
+        finally:
+            conn.close()
+
+    def get_mark_calibration_sample(
+        self,
+        sample_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM mark_calibration_samples WHERE id = ?",
+                (int(sample_id),),
+            ).fetchone()
+            return self._format_mark_calibration_sample(row) if row else None
+        finally:
+            conn.close()
+
+    def get_mark_calibration_sample_by_hash(
+        self,
+        file_sha256: str,
+    ) -> Optional[Dict[str, Any]]:
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                """SELECT * FROM mark_calibration_samples
+                   WHERE file_sha256 = ?""",
+                (str(file_sha256 or "").lower(),),
+            ).fetchone()
+            return self._format_mark_calibration_sample(row) if row else None
+        finally:
+            conn.close()
+
+    def list_mark_calibration_samples(
+        self,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        try:
+            if limit is None:
+                rows = conn.execute(
+                    """SELECT * FROM mark_calibration_samples
+                       ORDER BY id ASC"""
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM mark_calibration_samples
+                       ORDER BY id DESC LIMIT ?""",
+                    (max(1, min(int(limit), 1000)),),
+                ).fetchall()
+            return [
+                self._format_mark_calibration_sample(row)
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def add_mark_calibration_sample(
+        self,
+        sample: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        expected_text = str(sample.get("expected_text") or "").strip().upper()
+        created_by = str(sample.get("created_by") or "").strip()[:64]
+        reason = str(sample.get("reason") or "").strip()[:500]
+        file_sha256 = str(sample.get("file_sha256") or "").strip().lower()
+        if not re.fullmatch(r"[A-Z0-9]{2}", expected_text):
+            raise ValueError("正確 MARK 必須是兩碼英數字")
+        if not created_by:
+            raise ValueError("缺少校正管理員")
+        if not reason:
+            raise ValueError("請填寫校正原因")
+        if not re.fullmatch(r"[0-9a-f]{64}", file_sha256):
+            raise ValueError("圖片 SHA-256 格式錯誤")
+        raw_image_path = str(sample.get("image_path") or "").strip()
+        if not raw_image_path:
+            raise ValueError("缺少 MARK 校正圖片路徑")
+        image_path = Path(raw_image_path)
+        try:
+            stored_image_path = image_path.resolve().relative_to(
+                self.db_path.parent.resolve()
+            )
+        except ValueError:
+            stored_image_path = image_path.resolve()
+
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                from capi_mark_calibration import build_mark_profile
+
+                existing_rows = conn.execute(
+                    "SELECT * FROM mark_calibration_samples ORDER BY id ASC"
+                ).fetchall()
+                existing_samples = [
+                    self._format_mark_calibration_sample(row)
+                    for row in existing_rows
+                ]
+                provisional_id = max(
+                    (
+                        int(item.get("id") or 0)
+                        for item in existing_samples
+                    ),
+                    default=0,
+                ) + 1
+                build_mark_profile(
+                    [
+                        *existing_samples,
+                        {
+                            "id": provisional_id,
+                            "prototypes": sample.get("prototypes") or [],
+                        },
+                    ]
+                )
+                cur = conn.execute(
+                    """INSERT INTO mark_calibration_samples
+                       (file_sha256, image_path, original_filename, expected_text,
+                        original_text, original_confidence, original_roi,
+                        original_orientation, original_bbox, prototype_json,
+                        rotation_applied, profile_id_before, created_by, reason)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        file_sha256,
+                        str(stored_image_path),
+                        Path(str(sample.get("original_filename") or "")).name,
+                        expected_text,
+                        str(sample.get("original_text") or "")[:16],
+                        float(sample.get("original_confidence") or 0.0),
+                        str(sample.get("original_roi") or "")[:32],
+                        str(sample.get("original_orientation") or "")[:32],
+                        json.dumps(sample.get("original_bbox") or {}, ensure_ascii=False),
+                        json.dumps(sample.get("prototypes") or [], ensure_ascii=False),
+                        1 if sample.get("rotation_applied") else 0,
+                        int(sample.get("profile_id_before") or 0),
+                        created_by,
+                        reason,
+                    ),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM mark_calibration_samples WHERE id = ?",
+                    (cur.lastrowid,),
+                ).fetchone()
+                return self._format_mark_calibration_sample(row)
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                raise ValueError("這張圖片已經保存過校正")
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def revise_mark_calibration_sample(
+        self,
+        sample_id: int,
+        *,
+        expected_text: str,
+        prototypes: List[Dict[str, Any]],
+        changed_by: str,
+        reason: str,
+    ) -> Dict[str, Any]:
+        expected_text = str(expected_text or "").strip().upper()
+        changed_by = str(changed_by or "").strip()[:64]
+        reason = str(reason or "").strip()[:500]
+        if not re.fullmatch(r"[A-Z0-9]{2}", expected_text):
+            raise ValueError("正確 MARK 必須是兩碼英數字")
+        if not changed_by:
+            raise ValueError("缺少校正管理員")
+        if not reason:
+            raise ValueError("請填寫修訂原因")
+
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT * FROM mark_calibration_samples WHERE id = ?",
+                    (int(sample_id),),
+                ).fetchone()
+                if not row:
+                    raise ValueError("找不到要修訂的 MARK 樣本")
+
+                previous_text = str(row["expected_text"] or "")
+                if not re.fullmatch(r"[A-Z0-9]{2}", previous_text):
+                    raise RuntimeError("既有 MARK 樣本答案格式錯誤")
+                if previous_text == expected_text:
+                    raise ValueError("MARK 樣本答案沒有變更")
+
+                changed_positions = {
+                    position
+                    for position in (0, 1)
+                    if previous_text[position] != expected_text[position]
+                }
+                from capi_mark_detector import normalize_mark_profile
+
+                normalized = normalize_mark_profile(
+                    {"schema_version": 1, "prototypes": prototypes}
+                )
+                normalized_prototypes = [
+                    {
+                        "char": item["char"],
+                        "position": item["position"],
+                        "densities": [
+                            list(density_row)
+                            for density_row in item["densities"]
+                        ],
+                    }
+                    for item in normalized["prototypes"]
+                ]
+                labels = {
+                    (int(item["position"]), str(item["char"]))
+                    for item in normalized_prototypes
+                }
+                label_positions = {position for position, _ in labels}
+                if not changed_positions.issubset(label_positions):
+                    raise ValueError("MARK 修訂缺少變更字元特徵")
+                if any(
+                    char != expected_text[position]
+                    for position, char in labels
+                ):
+                    raise ValueError("MARK 修訂特徵與變更字元不一致")
+
+                from capi_mark_calibration import build_mark_profile
+
+                existing_rows = conn.execute(
+                    """SELECT * FROM mark_calibration_samples
+                       WHERE id != ? ORDER BY id ASC""",
+                    (int(sample_id),),
+                ).fetchall()
+                existing_samples = [
+                    self._format_mark_calibration_sample(existing)
+                    for existing in existing_rows
+                ]
+                build_mark_profile(
+                    [
+                        *existing_samples,
+                        {
+                            "id": int(sample_id),
+                            "prototypes": normalized_prototypes,
+                        },
+                    ]
+                )
+
+                previous_prototype_json = str(row["prototype_json"] or "[]")
+                new_prototype_json = json.dumps(
+                    normalized_prototypes,
+                    ensure_ascii=False,
+                )
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                conn.execute(
+                    """INSERT INTO mark_calibration_sample_revisions
+                       (sample_id, previous_expected_text, new_expected_text,
+                        previous_prototype_json, new_prototype_json,
+                        changed_by, reason, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        int(sample_id),
+                        previous_text,
+                        expected_text,
+                        previous_prototype_json,
+                        new_prototype_json,
+                        changed_by,
+                        reason,
+                        now,
+                    ),
+                )
+                conn.execute(
+                    """UPDATE mark_calibration_samples
+                       SET expected_text = ?, prototype_json = ?,
+                           candidate_profile_id = 0, updated_by = ?,
+                           updated_reason = ?, updated_at = ?,
+                           revision_count = revision_count + 1
+                       WHERE id = ?""",
+                    (
+                        expected_text,
+                        new_prototype_json,
+                        changed_by,
+                        reason,
+                        now,
+                        int(sample_id),
+                    ),
+                )
+                conn.commit()
+                updated = conn.execute(
+                    "SELECT * FROM mark_calibration_samples WHERE id = ?",
+                    (int(sample_id),),
+                ).fetchone()
+                return self._format_mark_calibration_sample(updated)
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def create_mark_profile(
+        self,
+        profile: Dict[str, Any],
+        *,
+        parent_profile_id: int,
+        sample_count: int,
+        sample_set_sha256: str,
+        created_by: str,
+        reason: str,
+        triggering_sample_id: int,
+    ) -> Dict[str, Any]:
+        sample_set_sha256 = str(sample_set_sha256 or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", sample_set_sha256):
+            raise ValueError("MARK 樣本集摘要格式錯誤")
+
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                from capi_mark_calibration import mark_sample_set_sha256
+
+                current_rows = conn.execute(
+                    "SELECT * FROM mark_calibration_samples ORDER BY id ASC"
+                ).fetchall()
+                current_samples = [
+                    self._format_mark_calibration_sample(row)
+                    for row in current_rows
+                ]
+                if len(current_samples) != int(sample_count):
+                    raise RuntimeError("MARK 校正樣本集已變更，請重新執行")
+                if mark_sample_set_sha256(current_samples) != sample_set_sha256:
+                    raise RuntimeError("MARK 校正樣本集已變更，請重新執行")
+
+                conn.execute(
+                    """UPDATE mark_profiles
+                       SET status = 'rejected',
+                           regression_report = ?
+                       WHERE status = 'validating'""",
+                    (
+                        json.dumps(
+                            {
+                                "success": False,
+                                "reason": "被新的候選版本取代",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+                cur = conn.execute(
+                    """INSERT INTO mark_profiles
+                       (parent_profile_id, status, profile_json,
+                        sample_set_sha256, sample_count, created_by,
+                        change_reason)
+                       VALUES (?, 'validating', ?, ?, ?, ?, ?)""",
+                    (
+                        int(parent_profile_id),
+                        json.dumps(profile, ensure_ascii=False),
+                        sample_set_sha256,
+                        int(sample_count),
+                        str(created_by or "").strip()[:64],
+                        str(reason or "").strip()[:500],
+                    ),
+                )
+                profile_id = int(cur.lastrowid)
+                conn.execute(
+                    """UPDATE mark_calibration_samples
+                       SET candidate_profile_id = ?
+                       WHERE id = ?""",
+                    (profile_id, int(triggering_sample_id)),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM mark_profiles WHERE id = ?",
+                    (profile_id,),
+                ).fetchone()
+                return self._format_mark_profile(row)
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def finalize_mark_profile(
+        self,
+        profile_id: int,
+        regression_report: Dict[str, Any],
+        *,
+        activate: bool,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                candidate = conn.execute(
+                    "SELECT * FROM mark_profiles WHERE id = ?",
+                    (int(profile_id),),
+                ).fetchone()
+                if not candidate or candidate["status"] != "validating":
+                    raise RuntimeError(
+                        "MARK 候選 profile 狀態已變更，請重新整理後重試"
+                    )
+
+                total = int(regression_report.get("total") or 0)
+                passed = int(regression_report.get("passed") or 0)
+                failed = int(regression_report.get("failed") or 0)
+                report_sample_set_sha256 = str(
+                    regression_report.get("sample_set_sha256") or ""
+                ).lower()
+                candidate_sample_count = int(candidate["sample_count"] or 0)
+                candidate_sample_set_sha256 = str(
+                    candidate["sample_set_sha256"] or ""
+                ).lower()
+                gate_passed = (
+                    bool(regression_report.get("success"))
+                    and int(regression_report.get("profile_id") or 0)
+                    == int(profile_id)
+                    and total > 0
+                    and total == candidate_sample_count
+                    and passed == total
+                    and failed == 0
+                    and passed + failed == total
+                    and report_sample_set_sha256
+                    == candidate_sample_set_sha256
+                )
+                if activate and not gate_passed:
+                    raise ValueError("MARK 全量回歸未全數通過，不可啟用")
+                status = "rejected"
+                activated_at = ""
+                if activate:
+                    from capi_mark_calibration import mark_sample_set_sha256
+
+                    current_rows = conn.execute(
+                        "SELECT * FROM mark_calibration_samples ORDER BY id ASC"
+                    ).fetchall()
+                    current_samples = [
+                        self._format_mark_calibration_sample(row)
+                        for row in current_rows
+                    ]
+                    if len(current_samples) != candidate_sample_count:
+                        raise RuntimeError("MARK 校正樣本集已變更，請重新執行回歸")
+                    if (
+                        mark_sample_set_sha256(current_samples)
+                        != candidate_sample_set_sha256
+                    ):
+                        raise RuntimeError(
+                            "MARK 校正樣本集內容已變更，請重新執行回歸"
+                        )
+                    current = conn.execute(
+                        """SELECT id FROM mark_profiles
+                           WHERE status = 'active' LIMIT 1"""
+                    ).fetchone()
+                    current_id = int(current["id"]) if current else 0
+                    if current_id != int(candidate["parent_profile_id"] or 0):
+                        raise RuntimeError("MARK 啟用版本已被其他管理員更新，請重試")
+                    conn.execute(
+                        "UPDATE mark_profiles SET status = 'retired' WHERE status = 'active'"
+                    )
+                    status = "active"
+                    activated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                conn.execute(
+                    """UPDATE mark_profiles
+                       SET status = ?, regression_total = ?,
+                           regression_passed = ?, regression_failed = ?,
+                           regression_report = ?, activated_at = ?
+                       WHERE id = ?""",
+                    (
+                        status,
+                        total,
+                        passed,
+                        failed,
+                        json.dumps(regression_report, ensure_ascii=False),
+                        activated_at,
+                        int(profile_id),
+                    ),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM mark_profiles WHERE id = ?",
+                    (int(profile_id),),
+                ).fetchone()
+                return self._format_mark_profile(row)
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def rollback_mark_profile(
+        self,
+        target_profile_id: int,
+        *,
+        expected_active_profile_id: int,
+        regression_report: Dict[str, Any],
+        sample_count: int,
+        sample_set_sha256: str,
+        allow_known_regressions: bool,
+        changed_by: str,
+        reason: str,
+    ) -> Dict[str, Any]:
+        reason = str(reason or "").strip()
+        if not reason:
+            raise ValueError("請填寫回滾原因")
+        sample_set_sha256 = str(sample_set_sha256 or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", sample_set_sha256):
+            raise ValueError("MARK 樣本集摘要格式錯誤")
+
+        total = int(regression_report.get("total") or 0)
+        passed = int(regression_report.get("passed") or 0)
+        failed = int(regression_report.get("failed") or 0)
+        report_matches = (
+            int(regression_report.get("profile_id") or 0)
+            == int(target_profile_id)
+            and total == int(sample_count)
+            and passed + failed == total
+            and str(regression_report.get("sample_set_sha256") or "").lower()
+            == sample_set_sha256
+        )
+        gate_passed = (
+            report_matches
+            and failed == 0
+            and (total == 0 or (
+                bool(regression_report.get("success"))
+                and passed == total
+            ))
+        )
+        if not report_matches:
+            raise ValueError("MARK 回滾報告與目前樣本集不一致")
+        if not gate_passed and not allow_known_regressions:
+            raise ValueError(
+                f"目標版本有 {failed} 筆已知回歸失敗，不可直接啟用"
+            )
+
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(
+                    "SELECT * FROM mark_profiles WHERE status = 'active' LIMIT 1"
+                ).fetchone()
+                if (
+                    current
+                    and int(current["rollback_of_profile_id"] or 0)
+                    == int(target_profile_id)
+                ):
+                    conn.commit()
+                    return self._format_mark_profile(current)
+                target = conn.execute(
+                    """SELECT * FROM mark_profiles
+                       WHERE id = ? AND status = 'retired'""",
+                    (int(target_profile_id),),
+                ).fetchone()
+                if not current:
+                    raise RuntimeError("MARK 啟用 profile 不存在")
+                if not target:
+                    raise ValueError("只能回滾到曾啟用過的 MARK profile")
+                if int(current["id"]) != int(expected_active_profile_id):
+                    raise RuntimeError("MARK 啟用版本已被其他管理員更新，請重試")
+
+                from capi_mark_calibration import mark_sample_set_sha256
+
+                current_rows = conn.execute(
+                    "SELECT * FROM mark_calibration_samples ORDER BY id ASC"
+                ).fetchall()
+                current_samples = [
+                    self._format_mark_calibration_sample(row)
+                    for row in current_rows
+                ]
+                if len(current_samples) != int(sample_count):
+                    raise RuntimeError("MARK 校正樣本集已變更，請重新執行回歸")
+                if mark_sample_set_sha256(current_samples) != sample_set_sha256:
+                    raise RuntimeError(
+                        "MARK 校正樣本集內容已變更，請重新執行回歸"
+                    )
+
+                conn.execute(
+                    "UPDATE mark_profiles SET status = 'retired' WHERE id = ?",
+                    (int(current["id"]),),
+                )
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                cur = conn.execute(
+                    """INSERT INTO mark_profiles
+                       (parent_profile_id, rollback_of_profile_id, status,
+                        profile_json, sample_set_sha256, sample_count,
+                        regression_total, regression_passed, regression_failed,
+                        regression_report, created_by, change_reason,
+                        created_at, activated_at)
+                       VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        int(current["id"]),
+                        int(target["id"]),
+                        target["profile_json"],
+                        sample_set_sha256,
+                        int(sample_count),
+                        total,
+                        passed,
+                        failed,
+                        json.dumps(regression_report, ensure_ascii=False),
+                        str(changed_by or "").strip()[:64],
+                        (
+                            f"[強制回滾，已知失敗 {failed} 筆] {reason}"
+                            if not gate_passed
+                            else reason
+                        )[:500],
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM mark_profiles WHERE id = ?",
+                    (cur.lastrowid,),
+                ).fetchone()
+                return self._format_mark_profile(row)
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
     def get_config_param(self, param_name: str) -> Optional[Dict]:
         """取得單一設定參數"""
         conn = self._get_conn()
@@ -4203,6 +5295,232 @@ class CAPIDatabase:
             return None
         finally:
             conn.close()
+
+    @staticmethod
+    def _normalize_central_dashboard_config(config: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(config, dict):
+            raise ValueError("中控看板設定格式錯誤")
+
+        title = str(config.get("title") or "").strip()
+        if not title:
+            raise ValueError("看板標題不可空白")
+        if len(title) > 100:
+            raise ValueError("看板標題不可超過 100 字")
+
+        try:
+            refresh_seconds = int(config.get("refreshIntervalSeconds"))
+            timeout_seconds = int(config.get("requestTimeoutSeconds"))
+        except (TypeError, ValueError):
+            raise ValueError("更新週期與逾時秒數必須是整數")
+        if not 30 <= refresh_seconds <= 3600:
+            raise ValueError("更新週期必須介於 30 到 3600 秒")
+        if not 3 <= timeout_seconds < refresh_seconds:
+            raise ValueError("API 逾時必須至少 3 秒，且小於更新週期")
+
+        raw_lines = config.get("lines")
+        if not isinstance(raw_lines, list):
+            raise ValueError("線體設定必須是陣列")
+        if len(raw_lines) > 200:
+            raise ValueError("線體設定不可超過 200 筆")
+
+        normalized_lines = []
+        seen_ids = set()
+        field_specs = (
+            ("factory", "廠別", 64, True),
+            ("line", "線體名稱", 64, True),
+            ("pcName", "PC 名稱", 64, True),
+            ("apiUrl", "狀態 API URL", 500, True),
+            ("dashboardUrl", "設備看板 URL", 500, False),
+            ("overexposedUrl", "Omit 過曝 URL", 500, False),
+        )
+        for index, raw_line in enumerate(raw_lines, start=1):
+            if not isinstance(raw_line, dict):
+                raise ValueError(f"第 {index} 筆線體設定格式錯誤")
+            line_id = str(raw_line.get("id") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", line_id):
+                raise ValueError(
+                    f"第 {index} 筆線體 ID 僅能使用英數字、連字號與底線"
+                )
+            if line_id in seen_ids:
+                raise ValueError(f"線體 ID 重複：{line_id}")
+            seen_ids.add(line_id)
+
+            line = {"id": line_id}
+            for key, label, max_length, required in field_specs:
+                value = str(raw_line.get(key) or "").strip()
+                if required and not value:
+                    raise ValueError(f"第 {index} 筆的{label}不可空白")
+                if len(value) > max_length:
+                    raise ValueError(
+                        f"第 {index} 筆的{label}不可超過 {max_length} 字"
+                    )
+                line[key] = value
+
+            for key in ("apiUrl", "dashboardUrl", "overexposedUrl"):
+                value = line[key]
+                if not value:
+                    continue
+                parsed = urlparse(value)
+                if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                    raise ValueError(
+                        f"第 {index} 筆的 URL 必須使用 http:// 或 https://"
+                    )
+            line["enabled"] = raw_line.get("enabled") is not False
+            normalized_lines.append(line)
+
+        return {
+            "title": title,
+            "refreshIntervalSeconds": refresh_seconds,
+            "requestTimeoutSeconds": timeout_seconds,
+            "lines": normalized_lines,
+        }
+
+    @staticmethod
+    def _central_dashboard_config_from_rows(settings_row, line_rows) -> Dict[str, Any]:
+        return {
+            "title": settings_row["title"],
+            "refreshIntervalSeconds": int(
+                settings_row["refresh_interval_seconds"]
+            ),
+            "requestTimeoutSeconds": int(
+                settings_row["request_timeout_seconds"]
+            ),
+            "lines": [
+                {
+                    "id": row["id"],
+                    "factory": row["factory"],
+                    "line": row["line_name"],
+                    "pcName": row["pc_name"],
+                    "apiUrl": row["api_url"],
+                    "dashboardUrl": row["dashboard_url"],
+                    "overexposedUrl": row["overexposed_url"],
+                    "enabled": bool(row["enabled"]),
+                }
+                for row in line_rows
+            ],
+        }
+
+    def get_central_dashboard_config(
+        self,
+        initial_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """取得中控看板設定；第一次讀取時匯入原 config.js 的預設值。"""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                settings_row = conn.execute(
+                    "SELECT * FROM central_dashboard_settings WHERE id = 1"
+                ).fetchone()
+                if settings_row is None:
+                    self._write_central_dashboard_config(
+                        conn,
+                        self._normalize_central_dashboard_config(
+                            initial_config
+                            if isinstance(initial_config, dict)
+                            else _DEFAULT_CENTRAL_DASHBOARD_CONFIG
+                        ),
+                        changed_by="system",
+                    )
+                    conn.commit()
+                    settings_row = conn.execute(
+                        "SELECT * FROM central_dashboard_settings WHERE id = 1"
+                    ).fetchone()
+
+                line_rows = conn.execute(
+                    """SELECT * FROM central_dashboard_lines
+                       ORDER BY sort_order, id"""
+                ).fetchall()
+                return self._central_dashboard_config_from_rows(
+                    settings_row, line_rows
+                )
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _write_central_dashboard_config(
+        conn: sqlite3.Connection,
+        config: Dict[str, Any],
+        *,
+        changed_by: str,
+    ) -> None:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            """INSERT INTO central_dashboard_settings
+               (id, title, refresh_interval_seconds, request_timeout_seconds,
+                updated_by, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   title = excluded.title,
+                   refresh_interval_seconds = excluded.refresh_interval_seconds,
+                   request_timeout_seconds = excluded.request_timeout_seconds,
+                   updated_by = excluded.updated_by,
+                   updated_at = excluded.updated_at""",
+            (
+                config["title"],
+                config["refreshIntervalSeconds"],
+                config["requestTimeoutSeconds"],
+                changed_by,
+                now,
+            ),
+        )
+        conn.execute("DELETE FROM central_dashboard_lines")
+        conn.executemany(
+            """INSERT INTO central_dashboard_lines
+               (id, factory, line_name, pc_name, api_url, dashboard_url,
+                overexposed_url, enabled, sort_order, updated_by, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    line["id"],
+                    line["factory"],
+                    line["line"],
+                    line["pcName"],
+                    line["apiUrl"],
+                    line["dashboardUrl"],
+                    line["overexposedUrl"],
+                    1 if line["enabled"] else 0,
+                    index,
+                    changed_by,
+                    now,
+                )
+                for index, line in enumerate(config["lines"])
+            ],
+        )
+
+    def save_central_dashboard_config(
+        self,
+        config: Dict[str, Any],
+        *,
+        changed_by: str = "",
+    ) -> Dict[str, Any]:
+        """以單一交易取代中控看板設定與線體清單。"""
+        normalized = self._normalize_central_dashboard_config(config)
+        changed_by = str(changed_by or "").strip()[:64]
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                self._write_central_dashboard_config(
+                    conn, normalized, changed_by=changed_by
+                )
+                conn.commit()
+                settings_row = conn.execute(
+                    "SELECT * FROM central_dashboard_settings WHERE id = 1"
+                ).fetchone()
+                line_rows = conn.execute(
+                    """SELECT * FROM central_dashboard_lines
+                       ORDER BY sort_order, id"""
+                ).fetchall()
+                return self._central_dashboard_config_from_rows(
+                    settings_row, line_rows
+                )
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
 
     def get_all_config_params(self) -> List[Dict]:
         """取得所有設定參數"""

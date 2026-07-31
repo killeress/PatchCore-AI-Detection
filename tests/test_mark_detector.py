@@ -174,10 +174,13 @@ def test_remove_tiny_components_drops_isolated_noise():
         ("W0F00000_152329.tif", "0T", "top_right", "normal"),
         ("W0F00000_174608.tif", "EJ", "bottom_left", "rot180"),
         ("W0F00000_182349.tif", "K1", "top_right", "normal"),
+        ("W0F00000_150620.tif", "K1", "top_right", "normal"),
     ],
 )
 def test_detect_panel_mark_real_regressions(filename, expected_text, expected_roi, expected_orientation):
     image_path = _ROOT / "mark" / filename
+    if not image_path.exists():
+        image_path = _ROOT / "deployment" / filename
     if not image_path.exists():
         pytest.skip(f"real mark fixture not available: {image_path}")
 

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+import threading
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -82,15 +83,146 @@ _ROI_RATIOS = (
     ("bottom_left", (0.01, 0.52, 0.32, 0.97)),
 )
 
+_PROFILE_SCHEMA_VERSION = 1
+_PROFILE_SIMILARITY_FLOOR = 0.94
+_PROFILE_MAX_BOOST = 0.45
+_ACTIVE_PROFILE_LOCK = threading.Lock()
+_ACTIVE_PROFILE_REFRESH_LOCK = threading.Lock()
+_ACTIVE_PROFILE: Dict[str, Any] = {
+    "schema_version": _PROFILE_SCHEMA_VERSION,
+    "prototypes": (),
+}
+_ACTIVE_PROFILE_ID = 0
+_ACTIVE_PROFILE_LOADER: Optional[Callable[[], Dict[str, Any]]] = None
 
-def detect_panel_mark_from_path(image_path: str | Path, include_debug: bool = False) -> Dict[str, Any]:
+
+def normalize_mark_profile(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Validate and freeze a MARK calibration profile for inference."""
+    raw = profile or {}
+    if "profile" in raw and isinstance(raw.get("profile"), dict):
+        raw = raw["profile"]
+
+    schema_version = int(raw.get("schema_version", _PROFILE_SCHEMA_VERSION))
+    if schema_version != _PROFILE_SCHEMA_VERSION:
+        raise ValueError(f"unsupported MARK profile schema: {schema_version}")
+
+    prototypes = []
+    for item in raw.get("prototypes", []) or []:
+        char = str(item.get("char", "") or "").strip().upper()
+        position = int(item.get("position", -1))
+        if char not in _FIRST_CHARS or position not in (0, 1):
+            raise ValueError("invalid MARK profile prototype label")
+
+        densities = np.asarray(item.get("densities"), dtype=np.float32)
+        if densities.shape != (_GRID_ROWS, _GRID_COLS):
+            raise ValueError("MARK profile prototype must be a 7x5 density grid")
+        if not np.isfinite(densities).all():
+            raise ValueError("MARK profile prototype contains non-finite values")
+
+        prototypes.append(
+            {
+                "char": char,
+                "position": position,
+                "densities": tuple(
+                    tuple(float(value) for value in row)
+                    for row in np.clip(densities, 0.0, 1.0)
+                ),
+                "sample_id": int(item.get("sample_id") or 0),
+            }
+        )
+
+    return {
+        "schema_version": _PROFILE_SCHEMA_VERSION,
+        "prototypes": tuple(prototypes),
+    }
+
+
+def set_active_mark_profile(
+    profile: Optional[Dict[str, Any]],
+    profile_id: int = 0,
+) -> None:
+    """Atomically replace the profile used by subsequent MARK detections."""
+    normalized = normalize_mark_profile(profile)
+    with _ACTIVE_PROFILE_LOCK:
+        global _ACTIVE_PROFILE, _ACTIVE_PROFILE_ID
+        _ACTIVE_PROFILE = normalized
+        _ACTIVE_PROFILE_ID = int(profile_id or 0)
+
+
+def set_active_mark_profile_loader(
+    loader: Optional[Callable[[], Dict[str, Any]]],
+) -> None:
+    """Set the persistent profile loader checked before formal detections."""
+    with _ACTIVE_PROFILE_LOCK:
+        global _ACTIVE_PROFILE_LOADER
+        _ACTIVE_PROFILE_LOADER = loader
+
+
+def _refresh_active_mark_profile() -> None:
+    global _ACTIVE_PROFILE, _ACTIVE_PROFILE_ID
+    if not _ACTIVE_PROFILE_REFRESH_LOCK.acquire(blocking=False):
+        return
+    try:
+        with _ACTIVE_PROFILE_LOCK:
+            loader = _ACTIVE_PROFILE_LOADER
+            current_id = _ACTIVE_PROFILE_ID
+        if loader is None:
+            return
+
+        try:
+            loaded = loader()
+            loaded_id = int(loaded.get("id") or 0)
+            if loaded_id == current_id:
+                return
+            normalized = normalize_mark_profile(loaded.get("profile"))
+            with _ACTIVE_PROFILE_LOCK:
+                if _ACTIVE_PROFILE_ID != current_id:
+                    return
+                _ACTIVE_PROFILE = normalized
+                _ACTIVE_PROFILE_ID = loaded_id
+        except Exception:
+            # A transient DB read must not turn MARK detection into an inference error.
+            return
+    finally:
+        _ACTIVE_PROFILE_REFRESH_LOCK.release()
+
+
+def _active_mark_profile_snapshot() -> Tuple[Dict[str, Any], int]:
+    _refresh_active_mark_profile()
+    with _ACTIVE_PROFILE_LOCK:
+        return _ACTIVE_PROFILE, _ACTIVE_PROFILE_ID
+
+
+def detect_panel_mark_from_path(
+    image_path: str | Path,
+    include_debug: bool = False,
+    profile: Optional[Dict[str, Any]] = None,
+    profile_id: Optional[int] = None,
+) -> Dict[str, Any]:
     image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
     if image is None:
         return {"found": False, "error": f"cannot read image: {image_path}"}
-    return detect_panel_mark(image, include_debug=include_debug)
+    return detect_panel_mark(
+        image,
+        include_debug=include_debug,
+        profile=profile,
+        profile_id=profile_id,
+    )
 
 
-def detect_panel_mark(image: np.ndarray, include_debug: bool = False) -> Dict[str, Any]:
+def detect_panel_mark(
+    image: np.ndarray,
+    include_debug: bool = False,
+    profile: Optional[Dict[str, Any]] = None,
+    profile_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    if profile is None:
+        active_profile, active_profile_id = _active_mark_profile_snapshot()
+    else:
+        active_profile = normalize_mark_profile(profile)
+        active_profile_id = int(profile_id or 0)
+    profile_index = _index_profile_prototypes(active_profile)
+
     gray = _to_gray8(image)
     height, width = gray.shape[:2]
 
@@ -98,7 +230,15 @@ def detect_panel_mark(image: np.ndarray, include_debug: bool = False) -> Dict[st
     for roi_name, ratios in _ROI_RATIOS:
         x1, y1, x2, y2 = _roi_from_ratios(width, height, ratios)
         roi = gray[y1:y2, x1:x2]
-        candidate = _detect_roi(roi, x1, y1, width, height, roi_name)
+        candidate = _detect_roi(
+            roi,
+            x1,
+            y1,
+            width,
+            height,
+            roi_name,
+            profile_index,
+        )
         if candidate is not None:
             candidates.append(candidate)
 
@@ -107,15 +247,88 @@ def detect_panel_mark(image: np.ndarray, include_debug: bool = False) -> Dict[st
             "found": False,
             "message": "no dot-matrix mark candidate found",
             "candidates": [],
+            "profile_version": active_profile_id,
         }
 
     best = max(candidates, key=lambda item: item["candidate_score"])
     public = _public_result(best, candidates)
+    public["profile_version"] = active_profile_id
 
     if include_debug:
         public["_debug_images"] = _make_debug_images(gray, best)
 
     return public
+
+
+def build_mark_calibration_prototypes(
+    detection: Dict[str, Any],
+    expected_text: str,
+    force_positions: Optional[Iterable[int]] = None,
+) -> List[Dict[str, Any]]:
+    """Create two position-specific prototypes from a reviewed detection."""
+    expected_text = str(expected_text or "").strip().upper()
+    if len(expected_text) != 2 or any(char not in _FIRST_CHARS for char in expected_text):
+        raise ValueError("正確 MARK 必須是兩碼英數字")
+    if not detection.get("found"):
+        raise ValueError("圖片中找不到可校正的 MARK 候選")
+
+    chars = detection.get("chars") or []
+    if len(chars) != 2:
+        raise ValueError("MARK 候選無法切成兩個字元")
+    original_text = str(detection.get("text") or "")
+    forced = (
+        {int(position) for position in force_positions}
+        if force_positions is not None
+        else None
+    )
+    if forced is not None and not forced.issubset({0, 1}):
+        raise ValueError("MARK 校正字元位置格式錯誤")
+    if original_text == expected_text and not forced:
+        raise ValueError("系統判定已是此兩碼，不需要建立校正")
+
+    prototypes = []
+    for position, expected_char in enumerate(expected_text):
+        if forced is not None:
+            if position not in forced:
+                continue
+        elif position < len(original_text) and original_text[position] == expected_char:
+            continue
+        densities = chars[position].get("density_grid")
+        if densities is None:
+            raise ValueError("MARK 候選缺少字元特徵")
+        normalized = normalize_mark_profile(
+            {
+                "schema_version": _PROFILE_SCHEMA_VERSION,
+                "prototypes": [
+                    {
+                        "char": expected_char,
+                        "position": position,
+                        "densities": densities,
+                    }
+                ],
+            }
+        )
+        prototype = normalized["prototypes"][0]
+        prototypes.append(
+            {
+                "char": prototype["char"],
+                "position": prototype["position"],
+                "densities": [list(row) for row in prototype["densities"]],
+            }
+        )
+    return prototypes
+
+
+def _index_profile_prototypes(
+    profile: Dict[str, Any],
+) -> Dict[Tuple[int, str], Tuple[np.ndarray, ...]]:
+    by_key: Dict[Tuple[int, str], List[np.ndarray]] = {}
+    for item in profile.get("prototypes", ()) or ():
+        key = (int(item["position"]), str(item["char"]))
+        by_key.setdefault(key, []).append(
+            np.asarray(item["densities"], dtype=np.float32)
+        )
+    return {key: tuple(values) for key, values in by_key.items()}
 
 
 def _to_gray8(image: np.ndarray) -> np.ndarray:
@@ -146,15 +359,26 @@ def _detect_roi(
     full_width: int,
     full_height: int,
     roi_name: str,
+    profile_index: Dict[Tuple[int, str], Tuple[np.ndarray, ...]],
 ) -> Optional[Dict[str, Any]]:
     filtered = _dot_mask(roi, min(full_width, full_height))
     groups = _find_mark_groups(filtered, offset_x, offset_y, full_width, full_height)
     if not groups:
         return None
+    groups.extend(
+        _refine_mark_groups(
+            roi,
+            groups,
+            offset_x,
+            offset_y,
+            full_width,
+            full_height,
+        )
+    )
 
     best: Optional[Dict[str, Any]] = None
     for group in groups:
-        for recognized in _recognize_group_variants(group["mask"]):
+        for recognized in _recognize_group_variants(group["mask"], profile_index):
             char_scores = [ch["score"] for ch in recognized["chars"]]
             mean_score = float(np.mean(char_scores)) if char_scores else 0.0
             candidate_score = (
@@ -275,6 +499,59 @@ def _find_mark_groups(
     return groups
 
 
+def _refine_mark_groups(
+    roi: np.ndarray,
+    coarse_groups: List[Dict[str, Any]],
+    offset_x: int,
+    offset_y: int,
+    full_width: int,
+    full_height: int,
+) -> List[Dict[str, Any]]:
+    """Re-threshold coarse candidates locally so the full dot matrix is retained."""
+    refined: List[Dict[str, Any]] = []
+    roi_height, roi_width = roi.shape[:2]
+    scale_basis = min(full_width, full_height)
+
+    for coarse in coarse_groups:
+        bbox = coarse["bbox"]
+        margin = max(
+            20,
+            int(round(max(bbox["width"], bbox["height"]) * 0.40)),
+        )
+        x1 = max(0, bbox["x"] - offset_x - margin)
+        y1 = max(0, bbox["y"] - offset_y - margin)
+        x2 = min(roi_width, bbox["x"] - offset_x + bbox["width"] + margin)
+        y2 = min(roi_height, bbox["y"] - offset_y + bbox["height"] + margin)
+        local_roi = roi[y1:y2, x1:x2]
+        if local_roi.size == 0:
+            continue
+
+        local_mask = _dot_mask(local_roi, scale_basis)
+        local_groups = _find_mark_groups(
+            local_mask,
+            offset_x + x1,
+            offset_y + y1,
+            full_width,
+            full_height,
+        )
+        refined.extend(
+            candidate
+            for candidate in local_groups
+            if _bboxes_overlap(bbox, candidate["bbox"])
+        )
+
+    return refined
+
+
+def _bboxes_overlap(first: Dict[str, int], second: Dict[str, int]) -> bool:
+    return (
+        first["x"] < second["x"] + second["width"]
+        and second["x"] < first["x"] + first["width"]
+        and first["y"] < second["y"] + second["height"]
+        and second["y"] < first["y"] + first["height"]
+    )
+
+
 def _plausible_mark_size(mark_width: int, mark_height: int, full_width: int, full_height: int) -> bool:
     if mark_width <= 0 or mark_height <= 0:
         return False
@@ -306,7 +583,10 @@ def _count_small_components(mask: np.ndarray) -> int:
     return small
 
 
-def _recognize_group(mask: np.ndarray) -> Optional[Dict[str, Any]]:
+def _recognize_group(
+    mask: np.ndarray,
+    profile_index: Optional[Dict[Tuple[int, str], Tuple[np.ndarray, ...]]] = None,
+) -> Optional[Dict[str, Any]]:
     split = _split_two_chars(mask)
     if split is None:
         return None
@@ -319,7 +599,12 @@ def _recognize_group(mask: np.ndarray) -> Optional[Dict[str, Any]]:
         if idx == 0 and row_correction != 0.0:
             char_mask = _apply_dot_row_correction(char_mask, row_correction)
         allowed = _FIRST_CHARS if idx == 0 else _SECOND_CHARS
-        recognized = _recognize_char(char_mask, allowed, char_index=idx)
+        recognized = _recognize_char(
+            char_mask,
+            allowed,
+            char_index=idx,
+            profile_index=profile_index,
+        )
         if recognized is None:
             return None
         chars.append(recognized)
@@ -333,13 +618,16 @@ def _recognize_group(mask: np.ndarray) -> Optional[Dict[str, Any]]:
     }
 
 
-def _recognize_group_variants(mask: np.ndarray) -> List[Dict[str, Any]]:
+def _recognize_group_variants(
+    mask: np.ndarray,
+    profile_index: Optional[Dict[Tuple[int, str], Tuple[np.ndarray, ...]]] = None,
+) -> List[Dict[str, Any]]:
     variants: List[Dict[str, Any]] = []
     for orientation, oriented_mask in (
         ("normal", mask),
         ("rot180", cv2.rotate(mask, cv2.ROTATE_180)),
     ):
-        recognized = _recognize_group(oriented_mask)
+        recognized = _recognize_group(oriented_mask, profile_index)
         if recognized is None:
             continue
 
@@ -429,15 +717,36 @@ def _trim_mask(mask: np.ndarray, margin: int = 0) -> Optional[Tuple[np.ndarray, 
     return mask[y1:y2, x1:x2], {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
 
 
-def _recognize_char(mask: np.ndarray, allowed: Iterable[str], char_index: Optional[int] = None) -> Optional[Dict[str, Any]]:
+def _recognize_char(
+    mask: np.ndarray,
+    allowed: Iterable[str],
+    char_index: Optional[int] = None,
+    profile_index: Optional[Dict[Tuple[int, str], Tuple[np.ndarray, ...]]] = None,
+) -> Optional[Dict[str, Any]]:
     densities = _grid_densities(mask)
     scores = []
+    score_details: Dict[str, Dict[str, Optional[float]]] = {}
     for char in allowed:
         patterns = list(_PATTERNS[char])
         if char_index is not None:
             patterns.extend(_POSITIONAL_PATTERNS.get((char, char_index), []))
-        char_score = max(_pattern_score(densities, pattern) for pattern in patterns)
+        base_score = max(_pattern_score(densities, pattern) for pattern in patterns)
+        prototype_similarity = _best_prototype_similarity(
+            densities,
+            (profile_index or {}).get((int(char_index), char), ())
+            if char_index is not None
+            else (),
+        )
+        char_score, prototype_boost = _apply_prototype_score(
+            base_score,
+            prototype_similarity,
+        )
         scores.append((char_score, char))
+        score_details[char] = {
+            "base_score": float(base_score),
+            "prototype_similarity": prototype_similarity,
+            "prototype_boost": float(prototype_boost),
+        }
 
     if char_index == 0 and scores:
         best_score, best_char = max(scores)
@@ -472,14 +781,66 @@ def _recognize_char(mask: np.ndarray, allowed: Iterable[str], char_index: Option
         return None
 
     best_score, best_char = scores[0]
+    best_detail = score_details[best_char]
     return {
         "char": best_char,
         "score": round(float(best_score), 4),
+        "base_score": round(float(best_detail["base_score"] or 0.0), 4),
+        "prototype_similarity": (
+            round(float(best_detail["prototype_similarity"]), 4)
+            if best_detail["prototype_similarity"] is not None
+            else None
+        ),
+        "prototype_boost": round(float(best_detail["prototype_boost"] or 0.0), 4),
+        "density_grid": [
+            [round(float(value), 6) for value in row]
+            for row in densities
+        ],
         "alternatives": [
-            {"char": char, "score": round(float(score), 4)}
+            {
+                "char": char,
+                "score": round(float(score), 4),
+                "base_score": round(
+                    float(score_details[char]["base_score"] or 0.0),
+                    4,
+                ),
+                "prototype_similarity": (
+                    round(float(score_details[char]["prototype_similarity"]), 4)
+                    if score_details[char]["prototype_similarity"] is not None
+                    else None
+                ),
+            }
             for score, char in scores[:5]
         ],
     }
+
+
+def _best_prototype_similarity(
+    densities: np.ndarray,
+    prototypes: Iterable[np.ndarray],
+) -> Optional[float]:
+    similarities = [
+        1.0 - float(np.mean(np.abs(densities - prototype)))
+        for prototype in prototypes
+    ]
+    return max(similarities) if similarities else None
+
+
+def _apply_prototype_score(
+    base_score: float,
+    similarity: Optional[float],
+) -> Tuple[float, float]:
+    if similarity is None or similarity < _PROFILE_SIMILARITY_FLOOR:
+        return float(base_score), 0.0
+    if similarity >= 0.999:
+        adjusted = max(float(base_score), 1.5)
+        return adjusted, adjusted - float(base_score)
+
+    ratio = (similarity - _PROFILE_SIMILARITY_FLOOR) / (
+        1.0 - _PROFILE_SIMILARITY_FLOOR
+    )
+    boost = float(np.clip(ratio, 0.0, 1.0)) * _PROFILE_MAX_BOOST
+    return float(base_score) + boost, boost
 
 
 def _grid_densities(mask: np.ndarray) -> np.ndarray:

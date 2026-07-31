@@ -613,6 +613,70 @@ class CAPIInferencer:
         """正式推論只從 W0F0000 畫面讀 dot-matrix MARK。"""
         return Path(filename).name.upper().startswith("W0F0000")
 
+    @staticmethod
+    def _apply_online_paddle_mark_recognition(
+        image: np.ndarray,
+        detection: Dict[str, Any],
+        source_path: Path,
+    ) -> Dict[str, Any]:
+        """Use PaddleOCR for the formal text while retaining the CV locator metadata."""
+        legacy_text = str(detection.get("text") or "")
+        legacy_confidence = float(detection.get("confidence") or 0.0)
+        legacy_profile = int(detection.get("profile_version") or 0)
+        detection["legacy_text"] = legacy_text
+        detection["legacy_confidence"] = legacy_confidence
+
+        try:
+            from capi_mark_shadow import recognize_mark_online
+
+            paddle_result = recognize_mark_online(image, detection, source_path)
+        except Exception as exc:
+            paddle_result = {
+                "success": False,
+                "error": str(exc),
+                "round_trip_ms": 0.0,
+            }
+
+        paddle_text = str(paddle_result.get("paddle_text") or "").strip().upper()
+        paddle_valid = bool(
+            paddle_result.get("success")
+            and re.fullmatch(r"[A-Z0-9]{2}", paddle_text)
+        )
+        detection["paddle_text"] = paddle_text
+        detection["paddle_confidence"] = float(
+            paddle_result.get("paddle_confidence") or 0.0
+        )
+        detection["paddle_model"] = str(
+            paddle_result.get("model_name") or "unknown"
+        )
+        detection["paddle_engine_version"] = str(
+            paddle_result.get("engine_version") or "unknown"
+        )
+        detection["paddle_worker_version"] = str(
+            paddle_result.get("worker_version") or "unknown"
+        )
+        detection["paddle_latency_ms"] = float(
+            paddle_result.get("latency_ms") or 0.0
+        )
+        detection["paddle_round_trip_ms"] = float(
+            paddle_result.get("round_trip_ms") or 0.0
+        )
+        detection["recognition_error"] = str(
+            paddle_result.get("error") or ""
+        ).replace("\r", " ").replace("\n", " ")[:240]
+
+        if paddle_valid:
+            detection["text"] = paddle_text
+            detection["confidence"] = detection["paddle_confidence"]
+            detection["recognition_technique"] = "PaddleOCR"
+            detection["recognition_version"] = detection["paddle_engine_version"]
+            detection["recognition_fallback"] = False
+        else:
+            detection["recognition_technique"] = "DotMatrixCV"
+            detection["recognition_version"] = f"profile-v{legacy_profile}"
+            detection["recognition_fallback"] = True
+        return paddle_result
+
     def _detect_panel_mark_binary_region(
         self,
         image_files: List[Path],
@@ -661,13 +725,51 @@ class CAPIInferencer:
             y2=y + height,
         )
         detection["mark_bbox_tuple"] = (x, y, width, height)
+        self._apply_online_paddle_mark_recognition(
+            image,
+            detection,
+            source_path,
+        )
         print(
-            f"MARK Binary {source_path.name}: text={detection.get('text', '')} "
-            f"conf={float(detection.get('confidence') or 0.0):.3f} "
+            f"MARK Locator {source_path.name}: technique=DotMatrixCV "
+            f"profile=v{int(detection.get('profile_version') or 0)} "
             f"roi={detection.get('roi', '')} "
             f"orientation={detection.get('orientation', '')} "
             f"bbox=({x},{y},{width},{height})"
         )
+        if detection.get("recognition_fallback"):
+            print(
+                f"MARK Recognition {source_path.name}: "
+                f"technique=DotMatrixCV "
+                f"version={detection.get('recognition_version', '')} "
+                f"decision=fallback text={detection.get('text', '')} "
+                f"conf={float(detection.get('confidence') or 0.0):.3f} "
+                f"paddle_model={detection.get('paddle_model', 'unknown')} "
+                f"paddle_engine_version="
+                f"{detection.get('paddle_engine_version', 'unknown')} "
+                f"paddle_worker_api=v"
+                f"{detection.get('paddle_worker_version', 'unknown')} "
+                f"paddle_round_trip_ms="
+                f"{float(detection.get('paddle_round_trip_ms') or 0.0):.1f} "
+                f"reason={detection.get('recognition_error') or 'no_valid_two_chars'}"
+            )
+        else:
+            print(
+                f"MARK Recognition {source_path.name}: "
+                f"technique=PaddleOCR "
+                f"engine_version="
+                f"{detection.get('paddle_engine_version', 'unknown')} "
+                f"model={detection.get('paddle_model', 'unknown')} "
+                f"worker_api=v"
+                f"{detection.get('paddle_worker_version', 'unknown')} "
+                f"decision=primary text={detection.get('text', '')} "
+                f"conf={float(detection.get('confidence') or 0.0):.3f} "
+                f"model_latency_ms="
+                f"{float(detection.get('paddle_latency_ms') or 0.0):.1f} "
+                f"round_trip_ms="
+                f"{float(detection.get('paddle_round_trip_ms') or 0.0):.1f} "
+                f"legacy_text={detection.get('legacy_text', '')}"
+            )
         return detection, [region]
 
     def _attach_panel_mark_binary_to_results(
