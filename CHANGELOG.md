@@ -1,5 +1,67 @@
 # 更新紀錄
 
+## 2026-07-31 v1
+
+### [辨識切換]正式 MARK 使用 PaddleOCR
+
+- 線上 MARK、QJPG 與 AOI 正式兩碼改由 `PaddleOCR 3.7.0` 的 `PP-OCRv6_medium_rec` 決定。
+- 既有 `DotMatrixCV` 保留作為 MARK crop／bbox／排除區定位器；只有 Paddle 服務異常或未回傳有效兩碼時才使用舊結果備援。
+- 每片推論 LOG 會記錄實際採用的技術、引擎版本、模型、worker API、信心值、模型耗時、來回耗時及備援原因。
+- Paddle worker API 升級為 v2，健康檢查與辨識回傳會提供技術、PaddleOCR 版本及模型資訊。
+
+### [管理設定]中央帳號中心位置
+
+- 參數設定新增 MOD1／MOD2 中心選擇，分別預設帶入 `10.172.25.105` 與 `10.174.37.81`。
+- 中心 IP 可依現場需求修改，設定保存在本機 DB 並納入修改紀錄。
+
+## 2026-07-30 v5
+
+### [辨識改善]MARK 點陣擷取
+
+- 改善 MARK Binary 漏點及裁切不完整問題，降低 `K1` 被誤判為 `K4` 或 `KI` 的情況。
+
+## 2026-07-30 v4
+
+### [管理介面]MARK Shadow 比較
+
+- 管理員參數設定新增「MARK Shadow 比較」頁面，可直接查看 crop、原辨識、Paddle 辨識、雙方信心值、比較狀態、耗時與錯誤。
+- 支援全部、一致、不一致、未讀取及錯誤篩選；總覽顯示筆數與成功辨識耗時統計。
+- Shadow crop API 僅允許管理員讀取 DB 已記錄且位於 Shadow 資料目錄內的圖片。
+- Shadow worker 後續會保存一致與不一致的每筆 crop；舊資料原本未保存 crop 者仍顯示「未保存」。
+- 提供其他線體使用的 RHEL 9 x86_64 離線安裝包，可一次建立獨立 PaddleOCR runtime、模型、systemd 服務並啟用 Shadow 設定。
+
+## 2026-07-30 v3
+
+### [改善功能]MARK 校正支援伺服器圖片路徑
+
+- 管理員除了上傳圖片，也可輸入 CAPI 主機能讀取的絕對圖片文件路徑。
+- 路徑圖片讀取後仍會複製到校正樣本資料夾，後續全量回歸不依賴原始文件持續存在。
+- 上傳與路徑只能擇一；路徑來源沿用 W0F0000 檔名、格式、128 MB 與像素數驗證。
+
+## 2026-07-30 v2
+
+### [試驗功能]PaddleOCR MARK Shadow Test
+
+- 正式 MARK 判斷完成後，將同一個 MARK crop 非阻塞送往本機 PaddleOCR sidecar，正式 QJPG／AOI 回傳及排除區完全不變。
+- sidecar 使用獨立 CPU runtime 與 PP-OCRv6 recognition-only 模型，保存現行結果、Paddle 結果、信心值、耗時及不一致 crop。
+- 提供 RHEL 9／Python 3.12 離線安裝、systemd 啟動、健康檢查、統計及 CSV 匯出工具；Paddle 異常、逾時或未啟動皆不阻塞正式推論。
+
+## 2026-07-30 v1
+
+### [新增功能]MARK 管理員校正
+
+- 管理員可在參數設定上傳 `W0F0000` 誤判圖、填寫正確兩碼與原因，系統會保存標註並建立新版辨識 profile。
+- 每次校正都會重跑全部歷史標註；全數通過立即啟用，任何失敗皆維持原版本。
+- 支援同圖答案修訂、版本紀錄、跨程序同步與回滾保護；仍使用既有點陣辨識器，不導入 PaddleOCR。
+
+## 2026-07-29 v2
+
+### [部署調整]MES Oracle credentials 隨 code-only 包提供
+
+- code-only 更新包納入設備本機的 `capi_mes_credentials.py`，解壓後可直接載入 MES Oracle 密碼。
+- 該檔案仍維持 Git ignored；建包時會標記為 working-tree 內容，並要求明確使用 `--allow-dirty`。
+- credentials 含有敏感資訊，部署與傳輸時需限制檔案權限及包的存取範圍。
+
 ## 2026-07-29 v1
 
 ### [新增功能]NG 驗證庫模型能力考試
