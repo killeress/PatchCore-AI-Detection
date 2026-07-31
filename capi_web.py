@@ -63,6 +63,58 @@ _MES_REVIEW_LIGHTINGS = {
     "G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD",
 }
 
+CENTRAL_ACCOUNT_LOCATION_PARAM = "central_account_location"
+CENTRAL_ACCOUNT_DEFAULT_IPS = {
+    "MOD1": "10.172.25.105",
+    "MOD2": "10.174.37.81",
+}
+CENTRAL_ACCOUNT_LOCATION_DESCRIPTION = (
+    "中央帳號中心位置；依廠區帶入預設 IP，IP 可依現場需求修改"
+)
+
+
+def _default_central_account_location(
+    server_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, str]:
+    mes_report = (server_config or {}).get("mes_report") or {}
+    facility = str(mes_report.get("facility") or "MOD2").strip().upper()
+    if facility not in CENTRAL_ACCOUNT_DEFAULT_IPS:
+        facility = "MOD2"
+    return {
+        "facility": facility,
+        "ip": CENTRAL_ACCOUNT_DEFAULT_IPS[facility],
+    }
+
+
+def _normalize_central_account_location(value: Any) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError("中心位置格式錯誤")
+
+    facility = str(value.get("facility") or "").strip().upper()
+    if facility not in CENTRAL_ACCOUNT_DEFAULT_IPS:
+        raise ValueError("中心廠區只能選擇 MOD1 或 MOD2")
+
+    ip_text = str(value.get("ip") or "").strip()
+    try:
+        address = ipaddress.ip_address(ip_text)
+    except ValueError as exc:
+        raise ValueError("請輸入有效的 IPv4 位址") from exc
+    if address.version != 4:
+        raise ValueError("請輸入有效的 IPv4 位址")
+
+    return {
+        "facility": facility,
+        "ip": str(address),
+    }
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 def _coord_debug_point_payload(
     *,
@@ -3431,6 +3483,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_version()
             elif path == "/api/update/status":
                 self._handle_api_update_status()
+            elif path == "/api/central-dashboard/config/all":
+                if self._require_settings_user(api=True):
+                    self._handle_api_central_dashboard_config_all()
+            elif path == "/api/central-dashboard/config":
+                self._handle_api_central_dashboard_config()
             elif path == "/settings/login":
                 self._handle_settings_login_page(path)
             elif path == "/settings/logout":
@@ -3483,6 +3540,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_debug_heatmap_file(path)
             elif path == "/api/debug/serve-image":
                 self._handle_debug_serve_image(query)
+            elif path in (
+                "/central_dashboard/settings",
+                "/central_dashboard/settings/",
+                "/central_dashboard/settings.html",
+            ):
+                if self._require_settings_user(next_path="/central_dashboard/settings"):
+                    self._handle_central_dashboard_file(
+                        "/central_dashboard/settings.html"
+                    )
+            elif path == "/central_dashboard" or path == "/central_dashboard/":
+                self._handle_central_dashboard_file("/central_dashboard/index.html")
+            elif path.startswith("/central_dashboard/"):
+                self._handle_central_dashboard_file(path)
             elif path.startswith("/images/"):
                 self._handle_source_image(path)
             elif path in ("/favicon.ico", "/favicon.svg"):
@@ -3632,6 +3702,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_settings_login()
             elif path == "/api/settings/logout":
                 self._handle_api_settings_logout()
+            elif path == "/api/central-dashboard/config":
+                if self._require_settings_user(api=True):
+                    self._handle_api_central_dashboard_config_update()
             elif path == "/api/update/apply":
                 if self._require_settings_user(api=True, admin=True):
                     self._handle_api_update_apply()
@@ -4938,6 +5011,173 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_binary(str(full_path))
         else:
             self._send_404()
+
+    def _handle_central_dashboard_file(self, path: str):
+        """靜態檔案服務 (central_dashboard)"""
+        rel_path = path[len("/central_dashboard/"):]
+        rel_path = urllib.parse.unquote(rel_path).replace("..", "").replace("\\", "").lstrip("/")
+        if not rel_path:
+            rel_path = "index.html"
+        full_path = Path(__file__).parent / "central_dashboard" / rel_path
+        if full_path.exists() and full_path.is_file():
+            self._send_binary(str(full_path))
+        elif full_path.exists() and full_path.is_dir():
+            index_path = full_path / "index.html"
+            if index_path.exists() and index_path.is_file():
+                self._send_binary(str(index_path))
+            else:
+                self._send_404()
+        else:
+            self._send_404()
+
+    def _handle_api_central_dashboard_config(self):
+        """公開提供與目前 Web Server 同廠區網段的中控看板設定。"""
+        try:
+            config = self.db.get_central_dashboard_config(
+                self._load_central_dashboard_file_config()
+            )
+            webserver_ip = self._detect_central_dashboard_webserver_ip()
+            prefix = self._central_dashboard_network_prefix(webserver_ip)
+            configured_count = len(config.get("lines") or [])
+            if prefix:
+                config = dict(config)
+                config["lines"] = [
+                    line
+                    for line in config.get("lines") or []
+                    if self._central_dashboard_line_network_prefix(line) == prefix
+                ]
+            config["webServerIp"] = webserver_ip
+            config["networkPrefix"] = prefix
+            config["networkFilterApplied"] = bool(prefix)
+            config["configuredLineCount"] = configured_count
+            self._send_json(config)
+        except Exception as exc:
+            logger.error("Failed to load central dashboard config: %s", exc)
+            self._send_json(
+                {"error": "無法讀取中控看板設定"},
+                status=500,
+            )
+
+    def _handle_api_central_dashboard_config_all(self):
+        """設定頁使用：回傳所有廠區設備，不套用 Web Server 網段過濾。"""
+        try:
+            self._send_json(
+                self.db.get_central_dashboard_config(
+                    self._load_central_dashboard_file_config()
+                )
+            )
+        except Exception as exc:
+            logger.error("Failed to load all central dashboard config: %s", exc)
+            self._send_json(
+                {"error": "無法讀取完整中控看板設定"},
+                status=500,
+            )
+
+    @staticmethod
+    def _central_dashboard_network_prefix(value: str) -> str:
+        try:
+            address = ipaddress.ip_address(str(value or "").strip())
+        except ValueError:
+            return ""
+        if address.version != 4 or address.packed[0] != 10:
+            return ""
+        return f"{address.packed[0]}.{address.packed[1]}"
+
+    @classmethod
+    def _central_dashboard_line_network_prefix(
+        cls, line: Dict[str, Any]
+    ) -> str:
+        try:
+            hostname = urllib.parse.urlparse(
+                str(line.get("apiUrl") or "")
+            ).hostname
+        except (TypeError, ValueError):
+            return ""
+        return cls._central_dashboard_network_prefix(hostname or "")
+
+    def _detect_central_dashboard_webserver_ip(self) -> str:
+        candidates = []
+        try:
+            candidates.append(self.connection.getsockname()[0])
+        except (AttributeError, OSError, TypeError):
+            pass
+
+        host_header = str(
+            self.headers.get("Host", "") if self.headers else ""
+        ).strip()
+        if host_header:
+            try:
+                hostname = urllib.parse.urlsplit(f"//{host_header}").hostname
+                if hostname:
+                    candidates.append(hostname)
+                    try:
+                        candidates.append(socket.gethostbyname(hostname))
+                    except OSError:
+                        pass
+            except ValueError:
+                pass
+
+        try:
+            candidates.append(self.server.server_address[0])
+        except (AttributeError, IndexError, TypeError):
+            pass
+
+        for candidate in candidates:
+            if self._central_dashboard_network_prefix(candidate):
+                return str(candidate)
+        return ""
+
+    @staticmethod
+    def _load_central_dashboard_file_config() -> Optional[Dict[str, Any]]:
+        """讀取既有 config.js，供 SQLite 第一次初始化時保留現場設定。"""
+        config_path = Path(__file__).parent / "central_dashboard" / "config.js"
+        try:
+            source = config_path.read_text(encoding="utf-8")
+            _, separator, assigned = source.partition("=")
+            if not separator:
+                return None
+            object_source = assigned.strip()
+            if object_source.endswith(";"):
+                object_source = object_source[:-1]
+            object_source = re.sub(
+                r"([{,]\s*)([A-Za-z_$][A-Za-z0-9_$]*)(\s*:)",
+                r'\1"\2"\3',
+                object_source,
+            )
+            config = json.loads(object_source)
+            return config if isinstance(config, dict) else None
+        except Exception as exc:
+            logger.warning(
+                "Cannot import central_dashboard/config.js; using defaults: %s",
+                exc,
+            )
+            return None
+
+    def _handle_api_central_dashboard_config_update(self):
+        """更新中控看板顯示設定；路由層已要求參數設定登入。"""
+        data = self._read_json_body()
+        if data is None:
+            return
+        try:
+            user = self._current_settings_user() or {}
+            config = self.db.save_central_dashboard_config(
+                data,
+                changed_by=user.get("username", ""),
+            )
+            self._send_json(
+                {
+                    "success": True,
+                    "config": config,
+                }
+            )
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except Exception as exc:
+            logger.error("Failed to update central dashboard config: %s", exc)
+            self._send_json(
+                {"error": "無法儲存中控看板設定"},
+                status=500,
+            )
 
     # ── Debug 推論功能 ─────────────────────────────────
 
@@ -10689,6 +10929,39 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 p for p in params
                 if p.get("param_name") != "dust_pixel_grid_max_mask_ratio"
             ]
+            server_config = (
+                getattr(self._capi_server_instance, "server_config", {}) or {}
+            )
+            default_location = _default_central_account_location(server_config)
+            location_param = next(
+                (
+                    p for p in params
+                    if p.get("param_name") == CENTRAL_ACCOUNT_LOCATION_PARAM
+                ),
+                None,
+            )
+            if location_param:
+                try:
+                    location = _normalize_central_account_location(
+                        location_param.get("decoded_value")
+                    )
+                except ValueError:
+                    location = default_location
+                location_param.update({
+                    "param_value": json.dumps(location, ensure_ascii=False),
+                    "param_type": "dict",
+                    "description": CENTRAL_ACCOUNT_LOCATION_DESCRIPTION,
+                    "decoded_value": location,
+                })
+            else:
+                params.append({
+                    "param_name": CENTRAL_ACCOUNT_LOCATION_PARAM,
+                    "param_value": json.dumps(default_location, ensure_ascii=False),
+                    "param_type": "dict",
+                    "description": CENTRAL_ACCOUNT_LOCATION_DESCRIPTION,
+                    "updated_at": None,
+                    "decoded_value": default_location,
+                })
             # 補上 config 中有但 DB 沒有的參數（用目前執行值作為預設）
             if self.inferencer and hasattr(self.inferencer, 'config') and self.inferencer.config:
                 import dataclasses
@@ -10764,6 +11037,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if not reason.strip():
                 self._send_json({"error": "請填寫修改原因"})
                 return
+            if param_name == CENTRAL_ACCOUNT_LOCATION_PARAM:
+                try:
+                    new_value = _normalize_central_account_location(new_value)
+                except ValueError as e:
+                    self._send_json({"error": str(e)}, status=400)
+                    return
 
             # 新架構：threshold_mapping / model_mapping 屬於 bundle yaml 自包含設定，
             # 不接受 /settings 介面動 DB（避免重啟時被 DB 蓋掉 yaml）。請改 /models

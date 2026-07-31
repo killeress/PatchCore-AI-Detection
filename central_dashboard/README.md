@@ -1,29 +1,33 @@
 # CAPI AI 中控看板
 
-獨立的純 HTML / CSS / JavaScript 看板。中控瀏覽器每 30 秒呼叫各 PC 的 `/api/status`，不使用中央資料庫，也不修改各 PC 的資料。
+中控瀏覽器定期呼叫各 PC 的 `/api/status`。透過 CAPI Web Server 開啟時，標題、更新週期與線體清單儲存在該服務使用的 SQLite；即時設備狀態不寫入資料庫，也不修改各 PC 的資料。
 
 ## 設定線體
 
-編輯 `config.js` 的 `lines`。每條線至少需要：
+先登入既有參數設定帳號，再開啟：
 
-```javascript
-{
-    id: "mod2-line-01",
-    factory: "MOD2",
-    line: "Line 01",
-    pcName: "CAPI-PC-01",
-    apiUrl: "http://10.172.25.105/api/status",
-    dashboardUrl: "http://10.172.25.105/",
-    overexposedUrl: "http://10.172.25.105/overexposed",
-    enabled: true
-}
+```text
+http://<中控主機>/central_dashboard/settings
 ```
 
-`refreshIntervalSeconds` 小於 30 時，前端仍會強制使用 30 秒，避免查詢過於頻繁。
+設定頁可新增、修改、停用、刪除線體，並調整看板標題、更新週期與 API 逾時。第一次讀取時會將 `config.js` 的 10 筆現場設備匯入 SQLite；只保存看板需要的設備名稱與 URL，不保存登入帳密。
+
+看板網址：
+
+```text
+http://<中控主機>/central_dashboard/
+```
+
+主看板會偵測瀏覽器實際連入的 Web Server IPv4，並以前兩段作為廠區網段：
+
+- Web Server 為 `10.172.*.*` 時，只輪詢 `10.172.*.*` 的設備。
+- Web Server 為 `10.174.*.*` 時，只輪詢 `10.174.*.*` 的設備。
+- 使用設定頁時仍會讀取完整清單，避免儲存其中一個廠區時刪除另一個廠區資料。
+- 若無法偵測到 `10.*.*.*` 的 Web Server IP（例如本機 `localhost` 測試），不套用網段過濾。
 
 ## 在中控 PC 開啟（不需要 Python）
 
-將整個 `central_dashboard` 資料夾複製到中控 PC，直接雙擊 `index.html` 即可。CSS、JavaScript 與線體設定都在同一個資料夾內，不需安裝 Python、Node.js 或其他程式。
+若不使用 CAPI Web Server，仍可將整個 `central_dashboard` 資料夾複製到中控 PC 並直接雙擊 `index.html`。此備援模式無法存取 SQLite 或設定頁，會改讀同資料夾內的 `config.js`。
 
 ## API 與 CORS
 

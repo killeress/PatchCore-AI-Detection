@@ -14,7 +14,7 @@
         gpuTemperatureWarningC: 80,
         gpuTemperatureCriticalC: 90
     });
-    const config = normalizeConfig(window.CAPI_DASHBOARD_CONFIG);
+    let config = normalizeConfig(window.CAPI_DASHBOARD_CONFIG);
     const lineStates = new Map();
 
     let refreshTimer = null;
@@ -25,10 +25,29 @@
 
     document.addEventListener("DOMContentLoaded", initialize);
 
-    function initialize() {
+    async function initialize() {
+        const directFileMode = window.location.protocol === "file:";
+        if (!directFileMode) {
+            try {
+                const response = await fetch("/api/central-dashboard/config", {
+                    method: "GET",
+                    headers: { "Accept": "application/json" },
+                    cache: "no-store",
+                    credentials: "same-origin"
+                });
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                config = normalizeConfig(await response.json());
+            } catch (error) {
+                showConfigError(
+                    `SQLite 設定讀取失敗，暫時使用 config.js 備援：${error.message || error}`
+                );
+            }
+        }
+
         document.title = config.title;
         setText(document.getElementById("dashboard-title"), config.title);
-        const directFileMode = window.location.protocol === "file:";
         setText(
             document.getElementById("data-note"),
             `${directFileMode ? "直接開啟模式 · " : ""}每 ${config.refreshIntervalSeconds} 秒由各 PC 的 API 更新一次`
@@ -37,10 +56,14 @@
             document.getElementById("footer-refresh-note"),
             `更新週期：${config.refreshIntervalSeconds} 秒`
         );
+        const settingsLink = document.getElementById("dashboard-settings-link");
+        if (settingsLink) {
+            settingsLink.hidden = directFileMode;
+        }
 
         const activeLines = config.lines.filter((line) => line.enabled !== false);
         if (activeLines.length === 0) {
-            showConfigError("config.js 尚未設定任何啟用中的線體。");
+            showConfigError("尚未設定任何啟用中的線體。");
             updateSummary();
             startClock();
             return;
@@ -50,7 +73,7 @@
         const factoryGrids = new Map();
         for (const line of activeLines) {
             if (!line.id || seenIds.has(line.id)) {
-                showConfigError("每條線都必須有不重複的 id，請檢查 config.js。");
+                showConfigError("每條線都必須有不重複的 ID，請至設備設定頁檢查。");
                 continue;
             }
             seenIds.add(line.id);

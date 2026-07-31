@@ -134,6 +134,29 @@ h2 {
     gap: 10px;
 }
 
+.dashboard-settings-link {
+    display: flex;
+    align-items: center;
+    padding: 10px 14px;
+    color: var(--primary-dark);
+    background: var(--surface-blue);
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    text-decoration: none;
+    font-size: 0.84rem;
+    font-weight: 800;
+}
+
+.dashboard-settings-link:hover {
+    color: #ffffff;
+    background: var(--primary);
+    border-color: var(--primary);
+}
+
+.dashboard-settings-link[hidden] {
+    display: none;
+}
+
 .clock-block,
 .refresh-block {
     display: flex;
