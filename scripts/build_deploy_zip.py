@@ -42,7 +42,9 @@ CODE_FILES = [
     "capi_image_naming.py",
     "capi_image_preprocess_lab.py",
     "capi_inference.py",
+    "capi_mark_calibration.py",
     "capi_mark_detector.py",
+    "capi_mark_shadow.py",
     "capi_mes_report.py",
     "capi_model_registry.py",
     "capi_model_validation.py",
@@ -81,6 +83,7 @@ CODE_FILES = [
     "central_dashboard/app.js",
     "central_dashboard/config.js",
     "central_dashboard/index.html",
+    "central_dashboard/settings.html",
     "central_dashboard/styles.css",
     "static/favicon.svg",
     "scripts/over_review_poc/train_final_model.py",
@@ -92,6 +95,12 @@ CODE_FILES = [
     "rollback_patch.sh",
     "promote_update.sh",
     "setup_auto_update_client.sh",
+]
+
+# MES Oracle 密碼是設備本機的 ignored secret，只在 code-only 更新包中納入。
+# 建包時會被標記為 working-tree 檔案，並要求使用 --allow-dirty。
+CODEONLY_LOCAL_FILES = [
+    "capi_mes_credentials.py",
 ]
 
 PATCH_UTILITY_FILES = [
@@ -159,7 +168,7 @@ training:
   gpu_memory_fraction: 0.50
 
 # Report 數據比對：每台設備只選擇一個廠別 Oracle TNS
-# MES 密碼需在各設備本機另行配置；不要將 capi_mes_credentials.py 放入部署包。
+# code-only 更新包會帶入 capi_mes_credentials.py；該檔含有 MES 密碼，請限制檔案權限與傳輸範圍。
 mes_report:
   facility: MOD2
   oracle:
@@ -194,7 +203,7 @@ README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明
    - 加 fallback_model_config
    - 加 training 區段
    - 加 mes_report.oracle 區段
-   - 若啟用 MES Report，請在 production 本機建立或保留 capi_mes_credentials.py；此檔不會放入 ZIP
+   - 若啟用 MES Report，code-only 更新包會帶入 capi_mes_credentials.py；full 包仍需另行保留此本機檔案。該檔含有 MES 密碼，請限制檔案權限與傳輸範圍
    - 安裝 Oracle thin driver：python3 -m pip install "oracledb>=2.0.0"
 
 4. 確認 deployment/torch_hub_cache/ 目錄完整（應 ~264 MB）：
@@ -265,7 +274,7 @@ CODEONLY_README_NOTE = """\
 【本 ZIP 為 code-only 增量包】
 - 不含 deployment/torch_hub_cache/（之前的部署包已含，production 機應已落地）
 - 不含 templates/imgs/ 與 static/（沿用 production 機已有的靜態資源）
-- 不含 capi_mes_credentials.py；MES 密碼需在設備本機另行配置
+- 含 capi_mes_credentials.py；此檔含有 MES 密碼，請限制檔案權限與傳輸範圍
 - 解壓覆蓋既有檔即可，不會動到 backbone cache 目錄
 """
 
@@ -369,6 +378,10 @@ def _git_file_list(args: list[str]) -> list[str]:
 def _git_changed_files() -> list[str]:
     changed = set(_git_file_list(["diff", "--name-only", "HEAD"]))
     changed.update(_git_file_list(["ls-files", "--others", "--exclude-standard"]))
+    changed.update(
+        rel for rel in CODEONLY_LOCAL_FILES
+        if (PROJECT_ROOT / rel).is_file()
+    )
     return sorted(changed)
 
 
@@ -400,7 +413,10 @@ def _is_codeonly_excluded_file(rel: str) -> bool:
 
 
 def _release_files(*, codeonly: bool = False) -> list[str]:
-    files = list(dict.fromkeys([*CODE_FILES, *_git_managed_asset_files()]))
+    source_files = [*CODE_FILES]
+    if codeonly:
+        source_files.extend(CODEONLY_LOCAL_FILES)
+    files = list(dict.fromkeys([*source_files, *_git_managed_asset_files()]))
     if codeonly:
         files = [rel for rel in files if not _is_codeonly_excluded_file(rel)]
     return files
@@ -417,7 +433,10 @@ def _codeonly_excluded_changes(changed_files: list[str]) -> list[str]:
 def _validate_required_code_files(*, codeonly: bool = False) -> None:
     required_files = CODE_FILES
     if codeonly:
-        required_files = [rel for rel in required_files if not _is_codeonly_excluded_file(rel)]
+        required_files = [
+            *[rel for rel in required_files if not _is_codeonly_excluded_file(rel)],
+            *CODEONLY_LOCAL_FILES,
+        ]
     missing = [rel for rel in required_files if not (PROJECT_ROOT / rel).is_file()]
     if missing:
         raise FileNotFoundError(f"required CODE_FILES missing: {', '.join(missing)}")

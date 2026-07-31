@@ -140,7 +140,9 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "capi_image_orientation.py" in names
         assert "capi_image_preprocess_lab.py" in names
         assert "capi_dataset_export.py" in names
+        assert "capi_mark_calibration.py" in names
         assert "capi_mark_detector.py" in names
+        assert "capi_mark_shadow.py" in names
         assert "capi_model_validation.py" in names
         assert "configs/mes_defect_codes.json" in names
         assert "capi_patchcore_feature_cleaning.py" in names
@@ -150,8 +152,9 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "central_dashboard/app.js" in names
         assert "central_dashboard/config.js" in names
         assert "central_dashboard/styles.css" in names
+        assert "central_dashboard/settings.html" in names
         assert "central_dashboard/README.md" in names
-        assert "capi_mes_credentials.py" not in names
+        assert "capi_mes_credentials.py" in names
         assert "scripts/over_review_poc/train_final_model.py" in names
         assert "scratch_classifier.py" in names
         assert "scratch_filter.py" in names
@@ -197,8 +200,14 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         manifest["files"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     assert manifest["content_tree_sha256"] == hashlib.sha256(canonical_files).hexdigest()
+    assert any(item["path"] == "capi_mark_calibration.py" for item in manifest["files"])
+    assert any(item["path"] == "capi_mark_shadow.py" for item in manifest["files"])
     assert any(item["path"] == "capi_web.py" for item in manifest["files"])
+    assert any(item["path"] == "capi_mes_credentials.py" for item in manifest["files"])
+    assert "  capi_mark_calibration.py\n" in checksums
+    assert "  capi_mark_shadow.py\n" in checksums
     assert "  capi_web.py\n" in checksums
+    assert "  capi_mes_credentials.py\n" in checksums
 
 
 def test_codeonly_warns_when_excluded_static_assets_change(tmp_path, monkeypatch, capsys):
