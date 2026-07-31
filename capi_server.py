@@ -1355,6 +1355,16 @@ class CAPIServer:
         # 設定日誌
         setup_logging(self.server_config)
 
+        from capi_mark_shadow import configure_mark_shadow
+
+        shadow_enabled = configure_mark_shadow(
+            {} if training_only else self.server_config.get("mark_shadow", {})
+        )
+        logger.info(
+            "MARK PaddleOCR online recognition configured: enabled=%s",
+            shadow_enabled,
+        )
+
         server_cfg = self.server_config.get("server", {})
         self.host = server_cfg.get("host", "0.0.0.0")
         self.port = server_cfg.get("port", 7890)
@@ -1388,6 +1398,32 @@ class CAPIServer:
         db_path = db_cfg.get("path", "/data/capi_ai/capi_results.db")
         self.db = CAPIDatabase(db_path)
         logger.info(f"Database: {db_path}")
+        try:
+            from capi_mark_detector import (
+                set_active_mark_profile,
+                set_active_mark_profile_loader,
+            )
+
+            set_active_mark_profile_loader(
+                lambda: self.db.get_active_mark_profile(timeout=1)
+            )
+            active_mark_profile = self.db.get_active_mark_profile()
+            set_active_mark_profile(
+                active_mark_profile["profile"],
+                active_mark_profile["id"],
+            )
+            logger.info("MARK profile active: v%s", active_mark_profile["id"])
+        except Exception as exc:
+            logger.error("Failed to load active MARK profile: %s", exc)
+            from capi_mark_detector import (
+                set_active_mark_profile,
+                set_active_mark_profile_loader,
+            )
+
+            set_active_mark_profile_loader(
+                lambda: self.db.get_active_mark_profile(timeout=1)
+            )
+            set_active_mark_profile(None, 0)
 
         # 熱力圖管理
         heatmap_cfg = self.server_config.get("heatmap", {})
@@ -2118,12 +2154,21 @@ class CAPIServer:
         tile_retain    = cleanup_cfg.get("tile_retain_days", 7)
         heatmap_retain = cleanup_cfg.get("heatmap_retain_days", 0)
         vacuum         = cleanup_cfg.get("vacuum_after_cleanup", True)
+        mark_shadow_cfg = self.server_config.get("mark_shadow", {}) or {}
+        mark_shadow_db_path = (
+            os.environ.get("CAPI_MARK_SHADOW_DB_PATH")
+            or mark_shadow_cfg.get("database_path")
+            or "/aidata/capi_ai/mark_shadow/data/mark_shadow.db"
+        )
+        mark_shadow_db_path = str(Path(mark_shadow_db_path).expanduser())
+        mark_shadow_base_dir = str(Path(mark_shadow_db_path).parent)
         hour, minute   = map(int, schedule_time.split(":"))
 
         def _scheduler_loop():
             logger.info(
                 f"[Cleanup] Scheduler started, daily at {schedule_time} "
-                f"(OK={ok_retain}d, NG={ng_retain}d, tiles={tile_retain}d, heatmaps={heatmap_retain}d)"
+                f"(OK={ok_retain}d, NG={ng_retain}d, tiles={tile_retain}d, "
+                f"heatmaps={heatmap_retain}d, MARK images={heatmap_retain}d)"
             )
             while self._running:
                 now    = datetime.now()
@@ -2142,6 +2187,8 @@ class CAPIServer:
                         vacuum,
                         heatmap_retain,
                         heatmap_base_dir=self.heatmap_manager.base_dir,
+                        mark_shadow_base_dir=mark_shadow_base_dir,
+                        mark_shadow_db_path=mark_shadow_db_path,
                     )
                     logger.info(
                         f"[Cleanup] Done — "
@@ -2152,7 +2199,11 @@ class CAPIServer:
                         f"heatmap_date_dirs={stats['heatmap_date_dirs_deleted']}, "
                         f"heatmap_date_failures={stats['heatmap_date_dirs_failed']}, "
                         f"within_spec_dirs={stats['within_spec_dirs_deleted']}, "
-                        f"within_spec_failures={stats['within_spec_dirs_failed']}"
+                        f"within_spec_failures={stats['within_spec_dirs_failed']}, "
+                        f"mark_shadow_dirs={stats['mark_shadow_dirs_deleted']}, "
+                        f"mark_shadow_failures={stats['mark_shadow_dirs_failed']}, "
+                        f"mark_shadow_paths_cleared={stats['mark_shadow_paths_cleared']}, "
+                        f"mark_shadow_path_clear_failures={stats['mark_shadow_paths_clear_failed']}"
                     )
                 except Exception as e:
                     logger.error(f"[Cleanup] Failed: {e}")
@@ -2171,6 +2222,12 @@ class CAPIServer:
         self._stop_requested = True
         self._running = False
         self._cleanup_stop_event.set()
+        try:
+            from capi_mark_shadow import stop_mark_shadow
+
+            stop_mark_shadow()
+        except Exception as exc:
+            logger.warning("Failed to stop MARK shadow client: %s", exc)
 
         cleanup_thread = self._cleanup_thread
         if cleanup_thread is not None and cleanup_thread is not threading.current_thread():

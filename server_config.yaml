@@ -94,6 +94,19 @@ logging:
   backup_count: 5
 
 # ------------------------------------------------------------
+# PaddleOCR MARK online recognition — 正式文字優先使用 PaddleOCR
+# ------------------------------------------------------------
+# enabled: true 時同步取得正式文字；sidecar 異常或無有效兩碼才備援舊點陣結果。
+# 既有 DotMatrixCV 仍負責定位 bbox、排除區與技術故障時的安全備援。
+mark_shadow:
+  enabled: false
+  endpoint: http://127.0.0.1:8765/infer
+  database_path: /aidata/capi_ai/mark_shadow/data/mark_shadow.db
+  timeout_ms: 5000
+  max_queue: 64
+  crop_padding_ratio: 0.15
+
+# ------------------------------------------------------------
 # 定時清除舊資料 — 由 server 內建 scheduler 觸發
 # ------------------------------------------------------------
 # enabled             : 是否啟用排程清除
@@ -102,6 +115,7 @@ logging:
 # ng_retain_days      : NG 紀錄保留天數 (通常比 OK 久，方便回追)
 # tile_retain_days    : 每張 tile heatmap 保留天數 (磁碟最大宗)
 # heatmap_retain_days : 整 panel 總覽 heatmap 保留天數
+# MARK 檢查圖片（crops / disagreements）也使用 heatmap_retain_days
 # vacuum_after_cleanup: 清除後是否做 SQLite VACUUM 釋放空間
 cleanup:
   enabled: true

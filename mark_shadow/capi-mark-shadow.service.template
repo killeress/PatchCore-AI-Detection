@@ -1,0 +1,17 @@
+[Unit]
+Description=CAPI PaddleOCR MARK Shadow Worker
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@RELEASE_DIR@
+ExecStart=@RELEASE_DIR@/runtime/bin/python @RELEASE_DIR@/worker/paddle_shadow_worker.py --model-dir @RELEASE_DIR@/models/PP-OCRv6_medium_rec --model-name PP-OCRv6_medium_rec --device cpu --cpu-threads 8 --host 127.0.0.1 --port 8765 --db @DATA_DIR@/mark_shadow.db --disagreement-dir @DATA_DIR@/disagreements
+Restart=on-failure
+RestartSec=5
+Nice=10
+CPUWeight=20
+Environment=OMP_NUM_THREADS=8
+Environment=MKL_NUM_THREADS=8
+
+[Install]
+WantedBy=multi-user.target

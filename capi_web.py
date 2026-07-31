@@ -21,8 +21,10 @@ import gzip
 import json
 import hashlib
 import html
+import ipaddress
 import inspect
 import secrets
+import sqlite3
 import time
 import urllib.parse
 import mimetypes
@@ -3029,6 +3031,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     _update_state_file = Path(__file__).resolve().parent / "update" / "auto_update_state.json"
     _update_apply_lock: threading.Lock = threading.Lock()
     _mes_comparison_lock: threading.Lock = threading.Lock()
+    _mark_calibration_lock: threading.Lock = threading.Lock()
     # ── 訓練 wizard 多 job 註冊表（由 create_web_server 完整初始化） ─────────
     # _train_new_jobs key = job_id；value = per-job runtime dict，欄位：
     #   thread:        Thread (preprocess supervisor / training supervisor)
@@ -3439,6 +3442,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/api/settings/users":
                 if self._require_settings_user(api=True, admin=True):
                     self._handle_api_settings_users()
+            elif path == "/api/settings/mark":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_settings_mark()
+            elif path == "/api/settings/mark/sample-image":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_settings_mark_sample_image(query)
+            elif path == "/api/settings/mark-shadow":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_settings_mark_shadow(query)
+            elif path == "/api/settings/mark-shadow/crop":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_settings_mark_shadow_crop(query)
             elif path == "/settings":
                 if self._require_settings_user(next_path=path):
                     self._handle_settings_page(path)
@@ -3629,6 +3644,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/api/settings/users/delete":
                 if self._require_settings_user(api=True, admin=True):
                     self._handle_api_settings_user_delete()
+            elif path == "/api/settings/mark/correct":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_settings_mark_correct()
+            elif path == "/api/settings/mark/rollback":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_settings_mark_rollback()
             elif path == "/api/settings/update":
                 if self._require_settings_user(api=True):
                     self._handle_api_settings_update()
@@ -3917,7 +3938,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._redirect(f"/settings/login?next={next_qs}")
             return None
         if admin and not user.get("can_manage_accounts"):
-            self._send_json({"error": "只有 admin 可管理帳號"}, status=403)
+            self._send_json({"error": "只有 admin 可以執行此操作"}, status=403)
             return None
         return user
 
@@ -9733,6 +9754,861 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _handle_api_settings_users(self):
         users = self.db.list_settings_users() if self.db else []
         self._send_json({"users": users})
+
+    @staticmethod
+    def _mark_sample_public(sample: Dict[str, Any]) -> Dict[str, Any]:
+        result = {
+            key: value
+            for key, value in sample.items()
+            if key not in {"image_path", "prototypes"}
+        }
+        result["image_url"] = (
+            f"/api/settings/mark/sample-image?id={int(sample.get('id') or 0)}"
+        )
+        return result
+
+    @staticmethod
+    def _mark_profile_public(profile: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            key: value
+            for key, value in profile.items()
+            if key != "profile"
+        }
+
+    @staticmethod
+    def _mark_detection_public(detection: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "found": bool(detection.get("found")),
+            "text": str(detection.get("text") or ""),
+            "confidence": float(detection.get("confidence") or 0.0),
+            "bbox": detection.get("bbox") or {},
+            "roi": str(detection.get("roi") or ""),
+            "orientation": str(detection.get("orientation") or ""),
+            "profile_version": int(detection.get("profile_version") or 0),
+            "chars": [
+                {
+                    "char": str(item.get("char") or ""),
+                    "score": float(item.get("score") or 0.0),
+                    "base_score": float(item.get("base_score") or 0.0),
+                    "prototype_similarity": item.get("prototype_similarity"),
+                }
+                for item in (detection.get("chars") or [])
+            ],
+        }
+
+    def _handle_api_settings_mark(self):
+        try:
+            active = self.db.get_active_mark_profile()
+            profiles = self.db.list_mark_profiles(limit=50)
+            samples = self.db.list_mark_calibration_samples(limit=200)
+            self._send_json(
+                {
+                    "active_profile": self._mark_profile_public(active),
+                    "profiles": [
+                        self._mark_profile_public(profile)
+                        for profile in profiles
+                    ],
+                    "samples": [
+                        self._mark_sample_public(sample)
+                        for sample in samples
+                    ],
+                }
+            )
+        except Exception as exc:
+            logger.error("MARK calibration list failed: %s", exc, exc_info=True)
+            self._send_json({"error": str(exc)}, status=500)
+
+    def _handle_api_settings_mark_sample_image(self, query: dict):
+        try:
+            sample_id = int((query.get("id") or ["0"])[0])
+        except (TypeError, ValueError):
+            self._send_json({"error": "校正樣本 id 格式錯誤"}, status=400)
+            return
+        sample = self.db.get_mark_calibration_sample(sample_id)
+        if not sample:
+            self._send_json({"error": "找不到校正樣本"}, status=404)
+            return
+        image_path = Path(str(sample.get("image_path") or ""))
+        if not image_path.is_file():
+            self._send_json({"error": "校正樣本圖片遺失"}, status=404)
+            return
+        import cv2
+
+        image = read_detection_image(
+            image_path,
+            cv2.IMREAD_UNCHANGED,
+            bool(sample.get("rotation_applied")),
+        )
+        if image is None:
+            self._send_json({"error": "校正樣本圖片無法讀取"}, status=500)
+            return
+        height, width = image.shape[:2]
+        max_side = max(height, width)
+        if max_side > 1800:
+            scale = 1800.0 / max_side
+            image = cv2.resize(
+                image,
+                (max(1, int(width * scale)), max(1, int(height * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        self._send_image_array_png(image)
+
+    def _mark_shadow_db_path(self) -> Path:
+        server_config = getattr(self._capi_server_instance, "server_config", {}) or {}
+        shadow_config = server_config.get("mark_shadow", {}) or {}
+        configured = (
+            os.environ.get("CAPI_MARK_SHADOW_DB_PATH")
+            or shadow_config.get("database_path")
+            or "/aidata/capi_ai/mark_shadow/data/mark_shadow.db"
+        )
+        return Path(str(configured)).expanduser().resolve()
+
+    @staticmethod
+    def _mark_shadow_percentile(values: List[float], fraction: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        index = min(
+            len(ordered) - 1,
+            max(0, int(round((len(ordered) - 1) * fraction))),
+        )
+        return float(ordered[index])
+
+    def _open_mark_shadow_db(self):
+        db_path = self._mark_shadow_db_path()
+        if not db_path.is_file():
+            raise FileNotFoundError(f"MARK Shadow DB 不存在：{db_path}")
+        connection = sqlite3.connect(str(db_path), timeout=3)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        return connection
+
+    def _handle_api_settings_mark_shadow(self, query: dict):
+        db_path = self._mark_shadow_db_path()
+        try:
+            limit = max(1, min(500, int((query.get("limit") or ["100"])[0])))
+        except (TypeError, ValueError):
+            limit = 100
+        filter_name = str((query.get("filter") or ["all"])[0]).strip().lower()
+        filters = {
+            "all": ("", ()),
+            "agreed": ("WHERE agreed = 1 AND error = ''", ()),
+            "disagreed": ("WHERE agreed = 0", ()),
+            "errors": ("WHERE error <> ''", ()),
+            "no_read": ("WHERE valid_two_chars = 0", ()),
+        }
+        if filter_name not in filters:
+            self._send_json({"error": "MARK Shadow 篩選條件錯誤"}, status=400)
+            return
+
+        if not db_path.is_file():
+            self._send_json(
+                {
+                    "available": False,
+                    "db_path": str(db_path),
+                    "filter": filter_name,
+                    "limit": limit,
+                    "rows": [],
+                    "stats": {
+                        "total": 0,
+                        "valid_two_chars": 0,
+                        "no_read": 0,
+                        "agreed": 0,
+                        "disagreed": 0,
+                        "agreement_rate": 0.0,
+                        "error_count": 0,
+                        "latency_ms": {"average": 0.0, "p50": 0.0, "p95": 0.0},
+                    },
+                    "error": f"MARK Shadow DB 不存在：{db_path}",
+                }
+            )
+            return
+
+        try:
+            where_sql, params = filters[filter_name]
+            with self._open_mark_shadow_db() as connection:
+                rows = connection.execute(
+                    f"""
+                    SELECT
+                        id, created_at, captured_at, source_path, source_image,
+                        current_text, current_confidence,
+                        current_profile_version, current_roi,
+                        current_orientation, paddle_raw_text, paddle_text,
+                        paddle_confidence, valid_two_chars, agreed,
+                        latency_ms, model_name, crop_path, expected_text, error
+                    FROM mark_shadow_results
+                    {where_sql}
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (*params, limit),
+                ).fetchall()
+                stat_rows = connection.execute(
+                    """
+                    SELECT valid_two_chars, agreed, latency_ms, error
+                    FROM mark_shadow_results
+                    """
+                ).fetchall()
+
+            total = len(stat_rows)
+            valid = sum(int(row["valid_two_chars"] or 0) for row in stat_rows)
+            agreed = sum(int(row["agreed"] or 0) for row in stat_rows)
+            errors = sum(1 for row in stat_rows if str(row["error"] or ""))
+            latencies = [
+                float(row["latency_ms"])
+                for row in stat_rows
+                if not str(row["error"] or "") and float(row["latency_ms"] or 0) > 0
+            ]
+            record_ids = [None] * len(rows)
+            database = getattr(self, "db", None)
+            if database is not None and rows:
+                try:
+                    record_ids = database.find_inference_record_ids_for_images(
+                        [
+                            (
+                                str(row["source_path"] or ""),
+                                str(row["source_image"] or ""),
+                            )
+                            for row in rows
+                        ]
+                    )
+                except Exception as exc:
+                    logger.warning("MARK Shadow inference record link lookup failed: %s", exc)
+
+            public_rows = []
+            for index, row in enumerate(rows):
+                item = dict(row)
+                item.pop("source_path", None)
+                crop_path = str(item.pop("crop_path", "") or "")
+                item["crop_url"] = (
+                    f"/api/settings/mark-shadow/crop?id={int(item['id'])}"
+                    if crop_path
+                    else ""
+                )
+                item["valid_two_chars"] = bool(item.get("valid_two_chars"))
+                item["agreed"] = bool(item.get("agreed"))
+                record_id = record_ids[index] if index < len(record_ids) else None
+                item["inference_record_id"] = int(record_id) if record_id else None
+                item["record_url"] = f"/record/{int(record_id)}" if record_id else ""
+                public_rows.append(item)
+
+            self._send_json(
+                {
+                    "available": True,
+                    "db_path": str(db_path),
+                    "filter": filter_name,
+                    "limit": limit,
+                    "rows": public_rows,
+                    "stats": {
+                        "total": total,
+                        "valid_two_chars": valid,
+                        "no_read": total - valid,
+                        "agreed": agreed,
+                        "disagreed": total - agreed,
+                        "agreement_rate": (agreed / total) if total else 0.0,
+                        "error_count": errors,
+                        "latency_ms": {
+                            "average": (
+                                sum(latencies) / len(latencies)
+                                if latencies
+                                else 0.0
+                            ),
+                            "p50": self._mark_shadow_percentile(latencies, 0.50),
+                            "p95": self._mark_shadow_percentile(latencies, 0.95),
+                        },
+                    },
+                }
+            )
+        except Exception as exc:
+            logger.error("MARK Shadow list failed: %s", exc, exc_info=True)
+            self._send_json({"error": str(exc)}, status=500)
+
+    def _handle_api_settings_mark_shadow_crop(self, query: dict):
+        try:
+            result_id = int((query.get("id") or ["0"])[0])
+        except (TypeError, ValueError):
+            self._send_json({"error": "MARK Shadow id 格式錯誤"}, status=400)
+            return
+        if result_id <= 0:
+            self._send_json({"error": "MARK Shadow id 格式錯誤"}, status=400)
+            return
+
+        try:
+            with self._open_mark_shadow_db() as connection:
+                row = connection.execute(
+                    "SELECT crop_path FROM mark_shadow_results WHERE id = ?",
+                    (result_id,),
+                ).fetchone()
+            if not row:
+                self._send_json({"error": "找不到 MARK Shadow 紀錄"}, status=404)
+                return
+
+            raw_crop_path = str(row["crop_path"] or "")
+            if not raw_crop_path:
+                self._send_json({"error": "此紀錄未保存 crop 圖片"}, status=404)
+                return
+
+            crop_path = Path(raw_crop_path).expanduser().resolve()
+            data_root = self._mark_shadow_db_path().parent
+            allowed_roots = [
+                (data_root / "disagreements").resolve(),
+                (data_root / "crops").resolve(),
+            ]
+            if not any(crop_path.is_relative_to(root) for root in allowed_roots):
+                self._send_json({"error": "MARK Shadow crop 路徑不在允許範圍"}, status=403)
+                return
+            if not crop_path.is_file():
+                self._send_json({"error": "MARK Shadow crop 圖片遺失"}, status=404)
+                return
+
+            import cv2
+
+            image = read_detection_image(
+                crop_path,
+                cv2.IMREAD_UNCHANGED,
+                rotate_180=False,
+            )
+            if image is None:
+                self._send_json({"error": "MARK Shadow crop 圖片無法讀取"}, status=500)
+                return
+            self._send_image_array_png(image)
+        except Exception as exc:
+            logger.error("MARK Shadow crop failed: %s", exc, exc_info=True)
+            self._send_json({"error": str(exc)}, status=500)
+
+    def _read_mark_correction_form(self):
+        import cgi
+        import io
+
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            raise ValueError("請使用 multipart/form-data 上傳圖片")
+
+        content_length = int(self.headers.get("Content-Length", 0) or 0)
+        max_upload_bytes = 128 * 1024 * 1024
+        if content_length <= 0:
+            raise ValueError("上傳內容不可空白")
+        if content_length > max_upload_bytes:
+            raise ValueError("圖片上傳大小不可超過 128 MB")
+
+        body = self.rfile.read(content_length)
+        fs = cgi.FieldStorage(
+            fp=io.BytesIO(body),
+            environ={
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": content_type,
+                "CONTENT_LENGTH": str(content_length),
+            },
+            keep_blank_values=True,
+        )
+        image_path_text = str(
+            fs.getfirst("image_path", "") or ""
+        ).strip()
+        file_item = fs["file"] if "file" in fs else None
+        if isinstance(file_item, list):
+            file_item = file_item[0]
+        upload_filename = Path(
+            str(getattr(file_item, "filename", "") or "")
+        ).name
+        has_upload = bool(upload_filename)
+        if has_upload and image_path_text:
+            raise ValueError("圖片上傳與圖片路徑只能擇一")
+
+        if has_upload:
+            filename = upload_filename
+            file_data = file_item.file.read(max_upload_bytes + 1)
+            if not file_data:
+                raise ValueError("上傳圖片不可空白")
+            if len(file_data) > max_upload_bytes:
+                raise ValueError("圖片上傳大小不可超過 128 MB")
+        elif image_path_text:
+            if "\x00" in image_path_text:
+                raise ValueError("圖片文件路徑格式錯誤")
+            source_path = Path(image_path_text)
+            if not source_path.is_absolute():
+                raise ValueError("請輸入伺服器上的絕對圖片文件路徑")
+            try:
+                source_path = source_path.resolve(strict=True)
+                if not source_path.is_file():
+                    raise ValueError("圖片文件路徑不是檔案")
+                if source_path.stat().st_size > max_upload_bytes:
+                    raise ValueError("圖片文件大小不可超過 128 MB")
+                file_data = source_path.read_bytes()
+            except ValueError:
+                raise
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(f"無法讀取圖片文件路徑：{exc}") from exc
+            if not file_data:
+                raise ValueError("圖片文件不可空白")
+            if len(file_data) > max_upload_bytes:
+                raise ValueError("圖片文件大小不可超過 128 MB")
+            filename = source_path.name
+        else:
+            raise ValueError("請選擇 MARK 圖片或輸入伺服器圖片文件路徑")
+
+        return (
+            filename,
+            file_data,
+            str(fs.getfirst("correct_text", "") or "").strip().upper(),
+            str(fs.getfirst("reason", "") or "").strip(),
+        )
+
+    def _handle_api_settings_mark_correct(self):
+        import cv2
+        import numpy as np
+
+        try:
+            filename, file_data, expected_text, reason = (
+                self._read_mark_correction_form()
+            )
+            if not re.fullmatch(r"[A-Z0-9]{2}", expected_text):
+                raise ValueError("正確 MARK 必須是兩碼英數字")
+            if not reason:
+                raise ValueError("請填寫校正原因")
+
+            suffix = Path(filename).suffix.lower()
+            allowed_suffixes = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
+            if suffix not in allowed_suffixes:
+                raise ValueError("只接受 TIF、TIFF、PNG、JPG 或 BMP 圖片")
+            if not filename.upper().startswith("W0F0000"):
+                raise ValueError("MARK 校正只接受 W0F0000 畫面圖片")
+
+            image = cv2.imdecode(
+                np.frombuffer(file_data, dtype=np.uint8),
+                cv2.IMREAD_UNCHANGED,
+            )
+            if image is None or image.ndim not in (2, 3):
+                raise ValueError("圖片格式無法解碼")
+            if image.ndim == 3 and image.shape[2] not in (3, 4):
+                raise ValueError("圖片色彩通道格式不支援")
+            if int(image.shape[0]) * int(image.shape[1]) > 80_000_000:
+                raise ValueError("圖片像素數不可超過 8,000 萬")
+
+            user = self._current_settings_user() or {}
+            actor = str(user.get("username") or "")
+            file_sha256 = hashlib.sha256(file_data).hexdigest()
+
+            with CAPIWebHandler._mark_calibration_lock:
+                duplicate = self.db.get_mark_calibration_sample_by_hash(
+                    file_sha256
+                )
+                is_revision = bool(
+                    duplicate
+                    and str(duplicate.get("expected_text") or "")
+                    != expected_text
+                )
+
+                active = self.db.get_active_mark_profile()
+                rotate_180 = (
+                    bool(duplicate.get("rotation_applied"))
+                    if duplicate
+                    else bool(
+                        self.inferencer
+                        and getattr(
+                            getattr(self.inferencer, "config", None),
+                            "inference_rotate_180_enabled",
+                            False,
+                        )
+                    )
+                )
+                oriented_image = (
+                    cv2.rotate(image, cv2.ROTATE_180)
+                    if rotate_180
+                    else image
+                )
+
+                from capi_mark_calibration import (
+                    build_mark_profile,
+                    mark_sample_set_sha256,
+                    run_mark_profile_regression,
+                )
+                from capi_mark_detector import (
+                    build_mark_calibration_prototypes,
+                    detect_panel_mark,
+                    set_active_mark_profile,
+                )
+
+                original_detection = detect_panel_mark(
+                    oriented_image,
+                    include_debug=False,
+                    profile=active["profile"],
+                    profile_id=active["id"],
+                )
+                if is_revision:
+                    previous_text = str(duplicate.get("expected_text") or "")
+                    force_positions = [
+                        position
+                        for position in (0, 1)
+                        if previous_text[position] != expected_text[position]
+                    ]
+                    changed_prototypes = build_mark_calibration_prototypes(
+                        original_detection,
+                        expected_text,
+                        force_positions=force_positions,
+                    )
+                    prototypes = [
+                        item
+                        for item in (duplicate.get("prototypes") or [])
+                        if int(item.get("position", -1)) not in force_positions
+                    ] + changed_prototypes
+                elif duplicate:
+                    prototypes = duplicate.get("prototypes") or []
+                else:
+                    prototypes = build_mark_calibration_prototypes(
+                        original_detection,
+                        expected_text,
+                    )
+
+                if not duplicate or is_revision:
+                    existing_samples = self.db.list_mark_calibration_samples()
+                    provisional_id = max(
+                        (
+                            int(item.get("id") or 0)
+                            for item in existing_samples
+                        ),
+                        default=0,
+                    ) + 1
+                    provisional_sample = {
+                        "id": provisional_id,
+                        "prototypes": prototypes,
+                    }
+                    if is_revision:
+                        provisional_sample = {
+                            **duplicate,
+                            "expected_text": expected_text,
+                            "prototypes": prototypes,
+                        }
+                        existing_samples = [
+                            item
+                            for item in existing_samples
+                            if int(item.get("id") or 0)
+                            != int(duplicate.get("id") or 0)
+                        ]
+                    build_mark_profile(
+                        [
+                            *existing_samples,
+                            provisional_sample,
+                        ]
+                    )
+
+                storage_dir = self.db.get_mark_calibration_storage_dir()
+                if duplicate:
+                    image_path = Path(str(duplicate.get("image_path") or ""))
+                    if image_path.parent.resolve() != storage_dir.resolve():
+                        raise RuntimeError("既有 MARK 樣本路徑不在校正資料夾內")
+                else:
+                    image_path = storage_dir / f"{file_sha256}.img"
+                needs_write = not image_path.exists()
+                if not needs_write:
+                    needs_write = _sha256_path(image_path) != file_sha256
+                if needs_write:
+                    fd, temp_name = tempfile.mkstemp(
+                        prefix=f"{file_sha256}.",
+                        suffix=".tmp",
+                        dir=str(storage_dir),
+                    )
+                    try:
+                        with os.fdopen(fd, "wb") as output:
+                            output.write(file_data)
+                            output.flush()
+                            os.fsync(output.fileno())
+                        os.replace(temp_name, image_path)
+                    finally:
+                        if os.path.exists(temp_name):
+                            os.unlink(temp_name)
+
+                if is_revision:
+                    sample = self.db.revise_mark_calibration_sample(
+                        duplicate["id"],
+                        expected_text=expected_text,
+                        prototypes=prototypes,
+                        changed_by=actor,
+                        reason=reason,
+                    )
+                elif duplicate:
+                    sample = duplicate
+                else:
+                    try:
+                        sample = self.db.add_mark_calibration_sample(
+                            {
+                                "file_sha256": file_sha256,
+                                "image_path": str(image_path),
+                                "original_filename": filename,
+                                "expected_text": expected_text,
+                                "original_text": original_detection.get("text", ""),
+                                "original_confidence": original_detection.get(
+                                    "confidence",
+                                    0.0,
+                                ),
+                                "original_roi": original_detection.get("roi", ""),
+                                "original_orientation": original_detection.get(
+                                    "orientation",
+                                    "",
+                                ),
+                                "original_bbox": original_detection.get("bbox") or {},
+                                "prototypes": prototypes,
+                                "rotation_applied": rotate_180,
+                                "profile_id_before": active["id"],
+                                "created_by": actor,
+                                "reason": reason,
+                            }
+                        )
+                    except Exception:
+                        try:
+                            if (
+                                needs_write
+                                and not self.db.get_mark_calibration_sample_by_hash(
+                                    file_sha256
+                                )
+                                and image_path.is_file()
+                                and _sha256_path(image_path) == file_sha256
+                            ):
+                                image_path.unlink()
+                        except OSError:
+                            logger.warning(
+                                "Failed to clean unused MARK upload %s",
+                                image_path,
+                                exc_info=True,
+                            )
+                        raise
+
+                all_samples = self.db.list_mark_calibration_samples()
+                sample_set_sha256 = mark_sample_set_sha256(all_samples)
+                active_report = active.get("regression_report") or {}
+                if (
+                    duplicate
+                    and not is_revision
+                    and str(active.get("sample_set_sha256") or "")
+                    == sample_set_sha256
+                    and bool(active_report.get("success"))
+                    and int(active.get("regression_failed") or 0) == 0
+                ):
+                    self._send_json(
+                        {
+                            "success": True,
+                            "activated": True,
+                            "already_applied": True,
+                            "revised": False,
+                            "sample": self._mark_sample_public(sample),
+                            "original_detection": self._mark_detection_public(
+                                original_detection
+                            ),
+                            "candidate_profile": self._mark_profile_public(
+                                active
+                            ),
+                            "regression": active_report,
+                            "message": (
+                                f"這張圖片的校正已包含在啟用版 "
+                                f"v{active['id']}"
+                            ),
+                        }
+                    )
+                    return
+                candidate_data = build_mark_profile(all_samples)
+                candidate = self.db.create_mark_profile(
+                    candidate_data,
+                    parent_profile_id=active["id"],
+                    sample_count=len(all_samples),
+                    sample_set_sha256=sample_set_sha256,
+                    created_by=actor,
+                    reason=reason,
+                    triggering_sample_id=sample["id"],
+                )
+                regression = None
+                try:
+                    regression = run_mark_profile_regression(
+                        all_samples,
+                        candidate_data,
+                        profile_id=candidate["id"],
+                    )
+                    activated = bool(regression.get("success"))
+                    finalized = self.db.finalize_mark_profile(
+                        candidate["id"],
+                        regression,
+                        activate=activated,
+                    )
+                except Exception as exc:
+                    rejected_report = dict(
+                        regression
+                        or {
+                            "total": len(all_samples),
+                            "passed": 0,
+                            "failed": len(all_samples),
+                            "sample_set_sha256": sample_set_sha256,
+                            "failures": [
+                                {
+                                    "reason": f"回歸執行失敗: {exc}",
+                                    "actual_text": "",
+                                }
+                            ],
+                        }
+                    )
+                    rejected_report["success"] = False
+                    rejected_report["activation_error"] = str(exc)
+                    try:
+                        self.db.finalize_mark_profile(
+                            candidate["id"],
+                            rejected_report,
+                            activate=False,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to reject stale MARK profile v%s",
+                            candidate["id"],
+                            exc_info=True,
+                        )
+                    raise
+                if activated:
+                    set_active_mark_profile(
+                        finalized["profile"],
+                        finalized["id"],
+                    )
+
+            logger.info(
+                "[MARK CALIBRATION] sample=%s expected=%s revised=%s "
+                "profile=%s activated=%s regression=%s/%s admin=%s",
+                sample["id"],
+                expected_text,
+                is_revision,
+                finalized["id"],
+                activated,
+                regression["passed"],
+                regression["total"],
+                actor,
+            )
+            if activated:
+                response_message = (
+                    (
+                        f"已修訂樣本 #{sample['id']}；"
+                        if is_revision
+                        else ""
+                    )
+                    + f"全 {regression['total']} 筆回歸通過，"
+                    + f"已自動啟用 MARK profile v{finalized['id']}"
+                )
+            else:
+                saved_action = "已修訂" if is_revision else "已保存"
+                response_message = (
+                    f"樣本 #{sample['id']} {saved_action}，但回歸有 "
+                    f"{regression['failed']} 筆失敗，維持原啟用版本"
+                )
+            self._send_json(
+                {
+                    "success": True,
+                    "activated": activated,
+                    "revised": is_revision,
+                    "sample": self._mark_sample_public(sample),
+                    "original_detection": self._mark_detection_public(
+                        original_detection
+                    ),
+                    "candidate_profile": self._mark_profile_public(finalized),
+                    "regression": regression,
+                    "message": response_message,
+                }
+            )
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+        except Exception as exc:
+            logger.error("MARK calibration failed: %s", exc, exc_info=True)
+            self._send_json({"error": str(exc)}, status=500)
+
+    def _handle_api_settings_mark_rollback(self):
+        try:
+            data = self._read_json_body()
+            if data is None:
+                return
+            target_profile_id = int(data.get("profile_id") or 0)
+            reason = str(data.get("reason") or "").strip()
+            allow_known_regressions = (
+                data.get("allow_known_regressions") is True
+            )
+            if not target_profile_id:
+                raise ValueError("缺少回滾 profile id")
+            user = self._current_settings_user() or {}
+            actor = str(user.get("username") or "")
+
+            with CAPIWebHandler._mark_calibration_lock:
+                from capi_mark_calibration import (
+                    mark_sample_set_sha256,
+                    run_mark_profile_regression,
+                )
+
+                current = self.db.get_active_mark_profile()
+                target = self.db.get_mark_profile(target_profile_id)
+                if not target or target.get("status") != "retired":
+                    raise ValueError("只能回滾到曾啟用過的 MARK profile")
+                samples = self.db.list_mark_calibration_samples()
+                sample_set_sha256 = mark_sample_set_sha256(samples)
+                regression = run_mark_profile_regression(
+                    samples,
+                    target["profile"],
+                    profile_id=target["id"],
+                )
+                rollback_safe = (
+                    regression["total"] == 0
+                    or bool(regression.get("success"))
+                )
+                if not rollback_safe and not allow_known_regressions:
+                    self._send_json(
+                        {
+                            "error": (
+                                f"目標 v{target_profile_id} 對目前題庫有 "
+                                f"{regression['failed']} 筆失敗"
+                            ),
+                            "requires_force": True,
+                            "regression": regression,
+                        },
+                        status=409,
+                    )
+                    return
+                active = self.db.rollback_mark_profile(
+                    target_profile_id,
+                    expected_active_profile_id=current["id"],
+                    regression_report=regression,
+                    sample_count=len(samples),
+                    sample_set_sha256=sample_set_sha256,
+                    allow_known_regressions=allow_known_regressions,
+                    changed_by=actor,
+                    reason=reason,
+                )
+                already_applied = int(active["id"]) == int(current["id"])
+                from capi_mark_detector import set_active_mark_profile
+
+                set_active_mark_profile(active["profile"], active["id"])
+
+            logger.warning(
+                "[MARK CALIBRATION] rollback target=%s new_profile=%s "
+                "failed=%s forced=%s already_applied=%s admin=%s",
+                target_profile_id,
+                active["id"],
+                regression["failed"],
+                not rollback_safe,
+                already_applied,
+                actor,
+            )
+            self._send_json(
+                {
+                    "success": True,
+                    "active_profile": self._mark_profile_public(active),
+                    "regression": regression,
+                    "forced": not rollback_safe,
+                    "already_applied": already_applied,
+                    "message": (
+                        f"目前已是回滾版 v{active['id']}"
+                        if already_applied
+                        else f"已回滾並建立啟用版 v{active['id']}"
+                    ),
+                }
+            )
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+        except Exception as exc:
+            logger.error("MARK rollback failed: %s", exc, exc_info=True)
+            self._send_json({"error": str(exc)}, status=500)
 
     def _handle_api_settings_user_create(self):
         try:
@@ -16072,6 +16948,7 @@ def create_web_server(
     CAPIWebHandler._settings_sessions = {}
     CAPIWebHandler._settings_session_lock = threading.Lock()
     CAPIWebHandler._update_apply_lock = threading.Lock()
+    CAPIWebHandler._mark_calibration_lock = threading.Lock()
     CAPIWebHandler._train_new_jobs = {}
     CAPIWebHandler._train_new_jobs_lock = threading.Lock()
     CAPIWebHandler._train_slot = {
@@ -16082,6 +16959,31 @@ def create_web_server(
         "lock": threading.Lock(),
         "job": None,
     }
+    try:
+        from capi_mark_detector import (
+            set_active_mark_profile,
+            set_active_mark_profile_loader,
+        )
+
+        set_active_mark_profile_loader(
+            lambda: db.get_active_mark_profile(timeout=1)
+        )
+        active_mark_profile = db.get_active_mark_profile()
+        set_active_mark_profile(
+            active_mark_profile["profile"],
+            active_mark_profile["id"],
+        )
+    except Exception as exc:
+        logger.error("Failed to load active MARK profile for web server: %s", exc)
+        from capi_mark_detector import (
+            set_active_mark_profile,
+            set_active_mark_profile_loader,
+        )
+
+        set_active_mark_profile_loader(
+            lambda: db.get_active_mark_profile(timeout=1)
+        )
+        set_active_mark_profile(None, 0)
     CAPIWebHandler._reconcile_train_new_artifacts(db)
     CAPIWebHandler.init_jinja()
 

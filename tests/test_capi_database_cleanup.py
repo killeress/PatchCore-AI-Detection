@@ -124,6 +124,56 @@ def test_cleanup_removes_expired_within_spec_inference_dirs(tmp_path):
     assert recent_dir.exists()
 
 
+def test_cleanup_removes_expired_mark_shadow_image_dirs_and_clears_paths(tmp_path):
+    db = CAPIDatabase(tmp_path / "cleanup.db")
+    mark_root = tmp_path / "mark_shadow" / "data"
+    mark_db_path = mark_root / "mark_shadow.db"
+    old_date = (datetime.now() - timedelta(days=91)).strftime("%Y-%m-%d")
+    recent_date = datetime.now().strftime("%Y-%m-%d")
+    old_crop_dir = mark_root / "crops" / old_date
+    old_disagreement_dir = mark_root / "disagreements" / old_date
+    recent_crop_dir = mark_root / "crops" / recent_date
+    for directory in (old_crop_dir, old_disagreement_dir, recent_crop_dir):
+        directory.mkdir(parents=True)
+
+    old_crop = old_crop_dir / "old.png"
+    recent_crop = recent_crop_dir / "recent.png"
+    old_crop.write_bytes(b"old")
+    recent_crop.write_bytes(b"recent")
+    with sqlite3.connect(mark_db_path) as connection:
+        connection.execute(
+            "CREATE TABLE mark_shadow_results "
+            "(id INTEGER PRIMARY KEY, crop_path TEXT DEFAULT '')"
+        )
+        connection.executemany(
+            "INSERT INTO mark_shadow_results (id, crop_path) VALUES (?, ?)",
+            [(1, str(old_crop)), (2, str(recent_crop))],
+        )
+
+    stats = db.cleanup_old_records(
+        ok_retain_days=365,
+        ng_retain_days=365,
+        tile_retain_days=365,
+        vacuum=False,
+        heatmap_retain_days=90,
+        mark_shadow_base_dir=str(mark_root),
+        mark_shadow_db_path=str(mark_db_path),
+    )
+
+    assert stats["mark_shadow_dirs_deleted"] == 2
+    assert stats["mark_shadow_paths_cleared"] == 1
+    assert not old_crop_dir.exists()
+    assert not old_disagreement_dir.exists()
+    assert recent_crop_dir.exists()
+    with sqlite3.connect(mark_db_path) as connection:
+        assert connection.execute(
+            "SELECT crop_path FROM mark_shadow_results WHERE id = 1"
+        ).fetchone()[0] == ""
+        assert connection.execute(
+            "SELECT crop_path FROM mark_shadow_results WHERE id = 2"
+        ).fetchone()[0] == str(recent_crop)
+
+
 def test_cleanup_retries_failed_heatmap_delete_before_clearing_db_path(
     tmp_path, monkeypatch, caplog
 ):
