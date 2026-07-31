@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>中控看板設備設定</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --page: #eef3f7;
+            --surface: #ffffff;
+            --line: #d6e1e9;
+            --text: #172b3a;
+            --muted: #64798a;
+            --primary: #12618f;
+            --primary-dark: #0b456b;
+            --danger: #b52f43;
+            --success: #17845c;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            min-width: 320px;
+            min-height: 100vh;
+            margin: 0;
+            color: var(--text);
+            background: var(--page);
+            font-family: Inter, "Segoe UI", "Noto Sans TC", sans-serif;
+        }
+
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            padding: 20px clamp(18px, 4vw, 52px);
+            background: var(--surface);
+            border-top: 4px solid var(--primary);
+            border-bottom: 1px solid var(--line);
+        }
+
+        h1,
+        h2,
+        p {
+            margin-top: 0;
+        }
+
+        h1 {
+            margin-bottom: 5px;
+            color: #163349;
+            font-size: clamp(1.5rem, 3vw, 2.15rem);
+        }
+
+        header p {
+            margin-bottom: 0;
+            color: var(--muted);
+        }
+
+        .header-links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        a,
+        button {
+            font: inherit;
+        }
+
+        a {
+            color: var(--primary-dark);
+        }
+
+        .header-links a,
+        button {
+            padding: 9px 14px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 800;
+        }
+
+        .header-links a {
+            background: #f5f8fa;
+        }
+
+        main {
+            width: min(1480px, 100%);
+            margin: 0 auto;
+            padding: 24px clamp(18px, 4vw, 52px) 48px;
+        }
+
+        .panel {
+            margin-bottom: 18px;
+            padding: 20px;
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            box-shadow: 0 10px 28px rgba(44, 74, 96, 0.08);
+        }
+
+        .panel-heading,
+        .actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .panel-heading {
+            margin-bottom: 16px;
+        }
+
+        .panel-heading h2 {
+            margin-bottom: 3px;
+            font-size: 1.2rem;
+        }
+
+        .panel-heading p {
+            margin-bottom: 0;
+            color: var(--muted);
+            font-size: 0.88rem;
+        }
+
+        .global-grid,
+        .line-grid {
+            display: grid;
+            gap: 12px;
+        }
+
+        .global-grid {
+            grid-template-columns: minmax(260px, 2fr) repeat(2, minmax(170px, 1fr));
+        }
+
+        .line-grid {
+            grid-template-columns: repeat(3, minmax(180px, 1fr));
+        }
+
+        label {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            color: #29465a;
+            font-size: 0.78rem;
+            font-weight: 800;
+        }
+
+        input {
+            width: 100%;
+            min-height: 39px;
+            padding: 8px 10px;
+            color: var(--text);
+            background: #fbfdfe;
+            border: 1px solid #b9cbd8;
+            border-radius: 7px;
+            font: inherit;
+            font-size: 0.9rem;
+        }
+
+        input:focus {
+            outline: 3px solid rgba(0, 143, 186, 0.18);
+            border-color: var(--primary);
+        }
+
+        .line-editor {
+            margin-top: 12px;
+            padding: 16px;
+            background: #f8fbfd;
+            border: 1px solid var(--line);
+            border-left: 4px solid var(--primary);
+            border-radius: 10px;
+        }
+
+        .line-editor:first-child {
+            margin-top: 0;
+        }
+
+        .line-editor-heading {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .line-editor-heading strong {
+            color: var(--primary-dark);
+        }
+
+        .enabled-label {
+            flex-direction: row;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .enabled-label input {
+            width: 18px;
+            min-height: 18px;
+        }
+
+        button {
+            color: var(--text);
+            background: #ffffff;
+            cursor: pointer;
+        }
+
+        button:hover {
+            border-color: var(--primary);
+        }
+
+        .primary {
+            color: #ffffff;
+            background: var(--primary);
+            border-color: var(--primary);
+        }
+
+        .primary:hover {
+            background: var(--primary-dark);
+        }
+
+        .danger {
+            padding: 7px 10px;
+            color: var(--danger);
+            background: #fff7f8;
+            border-color: #e8bdc4;
+        }
+
+        button:disabled {
+            cursor: progress;
+            opacity: 0.58;
+        }
+
+        #message {
+            min-height: 22px;
+            margin: 0;
+            color: var(--muted);
+            font-weight: 700;
+        }
+
+        #message.success {
+            color: var(--success);
+        }
+
+        #message.error {
+            color: var(--danger);
+        }
+
+        .empty {
+            padding: 24px;
+            color: var(--muted);
+            text-align: center;
+            border: 1px dashed #b9cbd8;
+            border-radius: 8px;
+        }
+
+        @media (max-width: 900px) {
+            header {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .global-grid,
+            .line-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div>
+            <h1>中控看板設備設定</h1>
+            <p>設定儲存於目前 Web Server 使用的 SQLite 資料庫。</p>
+        </div>
+        <nav class="header-links" aria-label="頁面連結">
+            <a href="/central_dashboard/">返回中控看板</a>
+            <a href="/settings/logout">登出</a>
+        </nav>
+    </header>
+
+    <main>
+        <section class="panel" aria-labelledby="global-title">
+            <div class="panel-heading">
+                <div>
+                    <h2 id="global-title">看板設定</h2>
+                    <p>更新週期最短 30 秒；API 逾時必須小於更新週期。</p>
+                </div>
+            </div>
+            <div class="global-grid">
+                <label>
+                    看板標題
+                    <input id="title" maxlength="100" required>
+                </label>
+                <label>
+                    更新週期（秒）
+                    <input id="refresh-seconds" type="number" min="30" max="3600" required>
+                </label>
+                <label>
+                    API 逾時（秒）
+                    <input id="timeout-seconds" type="number" min="3" required>
+                </label>
+            </div>
+        </section>
+
+        <section class="panel" aria-labelledby="lines-title">
+            <div class="panel-heading">
+                <div>
+                    <h2 id="lines-title">納管線體</h2>
+                    <p>可直接新增、修改、停用或刪除設備；顯示順序依此頁排列。</p>
+                </div>
+                <button id="add-line" type="button">＋ 新增線體</button>
+            </div>
+            <div id="line-editors"></div>
+        </section>
+
+        <section class="panel actions" aria-label="儲存操作">
+            <p id="message" role="status">正在讀取設定…</p>
+            <div>
+                <button id="reload" type="button">重新讀取</button>
+                <button id="save" class="primary" type="button">儲存全部設定</button>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        (function () {
+            "use strict";
+
+            const state = { lines: [] };
+            const editors = document.getElementById("line-editors");
+            const saveButton = document.getElementById("save");
+            const reloadButton = document.getElementById("reload");
+
+            document.getElementById("add-line").addEventListener("click", addLine);
+            saveButton.addEventListener("click", saveConfig);
+            reloadButton.addEventListener("click", loadConfig);
+            loadConfig();
+
+            async function loadConfig() {
+                setBusy(true);
+                setMessage("正在讀取設定…");
+                try {
+                    const response = await fetch("/api/central-dashboard/config/all", {
+                        headers: { "Accept": "application/json" },
+                        cache: "no-store",
+                        credentials: "same-origin"
+                    });
+                    const data = await response.json();
+                    if (!response.ok) {
+                        throw new Error(data.error || `HTTP ${response.status}`);
+                    }
+                    document.getElementById("title").value = data.title || "";
+                    document.getElementById("refresh-seconds").value =
+                        data.refreshIntervalSeconds || 30;
+                    document.getElementById("timeout-seconds").value =
+                        data.requestTimeoutSeconds || 8;
+                    state.lines = Array.isArray(data.lines)
+                        ? data.lines.map((line) => Object.assign({}, line))
+                        : [];
+                    renderLines();
+                    setMessage(`已載入 ${state.lines.length} 筆線體設定。`, "success");
+                } catch (error) {
+                    setMessage(`讀取失敗：${error.message || error}`, "error");
+                } finally {
+                    setBusy(false);
+                }
+            }
+
+            function addLine() {
+                state.lines.push({
+                    id: `line-${Date.now()}`,
+                    factory: "",
+                    line: "",
+                    pcName: "",
+                    apiUrl: "",
+                    dashboardUrl: "",
+                    overexposedUrl: "",
+                    enabled: true
+                });
+                renderLines();
+                const lastEditor = editors.lastElementChild;
+                if (lastEditor) {
+                    lastEditor.scrollIntoView({ behavior: "smooth", block: "center" });
+                    lastEditor.querySelector('input[data-field="factory"]').focus();
+                }
+            }
+
+            function renderLines() {
+                editors.replaceChildren();
+                if (state.lines.length === 0) {
+                    const empty = document.createElement("div");
+                    empty.className = "empty";
+                    empty.textContent = "目前沒有線體。可按「新增線體」建立第一筆設定。";
+                    editors.appendChild(empty);
+                    return;
+                }
+
+                state.lines.forEach((line, index) => {
+                    const editor = document.createElement("article");
+                    editor.className = "line-editor";
+
+                    const heading = document.createElement("div");
+                    heading.className = "line-editor-heading";
+                    const title = document.createElement("strong");
+                    title.textContent = `${index + 1}. ${line.pcName || line.line || "新線體"}`;
+                    const remove = document.createElement("button");
+                    remove.type = "button";
+                    remove.className = "danger";
+                    remove.textContent = "刪除";
+                    remove.addEventListener("click", function () {
+                        state.lines.splice(index, 1);
+                        renderLines();
+                    });
+                    heading.append(title, remove);
+
+                    const grid = document.createElement("div");
+                    grid.className = "line-grid";
+                    grid.append(
+                        createInput(index, "id", "線體 ID", 64, true),
+                        createInput(index, "factory", "廠別", 64, true),
+                        createInput(index, "line", "線體名稱", 64, true),
+                        createInput(index, "pcName", "PC 名稱", 64, true),
+                        createInput(index, "apiUrl", "狀態 API URL", 500, true),
+                        createInput(index, "dashboardUrl", "設備看板 URL", 500, false),
+                        createInput(index, "overexposedUrl", "Omit 過曝 URL", 500, false)
+                    );
+
+                    const enabledLabel = document.createElement("label");
+                    enabledLabel.className = "enabled-label";
+                    const enabled = document.createElement("input");
+                    enabled.type = "checkbox";
+                    enabled.checked = line.enabled !== false;
+                    enabled.addEventListener("change", function () {
+                        state.lines[index].enabled = enabled.checked;
+                    });
+                    enabledLabel.append(enabled, "啟用此線體");
+                    grid.append(enabledLabel);
+
+                    editor.append(heading, grid);
+                    editors.appendChild(editor);
+                });
+            }
+
+            function createInput(index, field, labelText, maxLength, required) {
+                const label = document.createElement("label");
+                label.textContent = labelText;
+                const input = document.createElement("input");
+                input.dataset.field = field;
+                input.value = state.lines[index][field] || "";
+                input.maxLength = maxLength;
+                input.required = required;
+                if (field.endsWith("Url")) {
+                    input.type = "url";
+                    input.placeholder = "http://10.x.x.x/";
+                }
+                input.addEventListener("input", function () {
+                    state.lines[index][field] = input.value;
+                });
+                label.appendChild(input);
+                return label;
+            }
+
+            async function saveConfig() {
+                const config = {
+                    title: document.getElementById("title").value.trim(),
+                    refreshIntervalSeconds: Number(
+                        document.getElementById("refresh-seconds").value
+                    ),
+                    requestTimeoutSeconds: Number(
+                        document.getElementById("timeout-seconds").value
+                    ),
+                    lines: state.lines.map((line) => ({
+                        id: String(line.id || "").trim(),
+                        factory: String(line.factory || "").trim(),
+                        line: String(line.line || "").trim(),
+                        pcName: String(line.pcName || "").trim(),
+                        apiUrl: String(line.apiUrl || "").trim(),
+                        dashboardUrl: String(line.dashboardUrl || "").trim(),
+                        overexposedUrl: String(line.overexposedUrl || "").trim(),
+                        enabled: line.enabled !== false
+                    }))
+                };
+
+                setBusy(true);
+                setMessage("正在儲存設定…");
+                try {
+                    const response = await fetch("/api/central-dashboard/config", {
+                        method: "POST",
+                        headers: {
+                            "Accept": "application/json",
+                            "Content-Type": "application/json"
+                        },
+                        credentials: "same-origin",
+                        body: JSON.stringify(config)
+                    });
+                    const data = await response.json();
+                    if (response.status === 401) {
+                        window.location.href =
+                            "/settings/login?next=%2Fcentral_dashboard%2Fsettings";
+                        return;
+                    }
+                    if (!response.ok) {
+                        throw new Error(data.error || `HTTP ${response.status}`);
+                    }
+                    state.lines = data.config.lines.map((line) => Object.assign({}, line));
+                    renderLines();
+                    setMessage(
+                        `儲存完成，共 ${state.lines.length} 筆線體設定。`,
+                        "success"
+                    );
+                } catch (error) {
+                    setMessage(`儲存失敗：${error.message || error}`, "error");
+                } finally {
+                    setBusy(false);
+                }
+            }
+
+            function setBusy(busy) {
+                saveButton.disabled = busy;
+                reloadButton.disabled = busy;
+            }
+
+            function setMessage(message, type) {
+                const element = document.getElementById("message");
+                element.textContent = message;
+                element.className = type || "";
+            }
+        })();
+    </script>
+</body>
+</html>

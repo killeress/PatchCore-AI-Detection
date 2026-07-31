@@ -20,6 +20,11 @@
         </div>
 
         <div class="topbar-actions">
+            <a
+                id="dashboard-settings-link"
+                class="dashboard-settings-link"
+                href="/central_dashboard/settings"
+            >設備設定</a>
             <div class="clock-block" aria-label="目前時間">
                 <span id="current-date">----</span>
                 <strong id="current-time">--:--:--</strong>
@@ -74,7 +79,7 @@
     </main>
 
     <footer>
-        <span>此頁僅讀取各 PC API，不保存資料。</span>
+        <span>設備清單儲存於中央 SQLite；即時狀態僅讀取各 PC API。</span>
         <span id="footer-refresh-note">更新週期：30 秒</span>
     </footer>
 

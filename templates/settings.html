@@ -2051,6 +2051,11 @@
         'report_image_abnormal_defect_code'
     ];
     const WITHIN_SPEC_PARAM = 'within_spec_judgment_rules';
+    const CENTRAL_ACCOUNT_LOCATION_PARAM = 'central_account_location';
+    const CENTRAL_ACCOUNT_DEFAULT_IPS = {
+        MOD1: '10.172.25.105',
+        MOD2: '10.174.37.81',
+    };
     const WITHIN_SPEC_STANDARD_SCREENS = [
         ['STANDARD', 'STANDARD(標準)'],
         ['WGF50500', 'WGF50500(50灰)'],
@@ -2995,6 +3000,70 @@
         }
     }
 
+    function centralAccountLocationValue(param) {
+        let value = null;
+        try {
+            value = JSON.parse(param && param.param_value ? param.param_value : '{}');
+        } catch (e) {
+            value = null;
+        }
+        const facility = value && CENTRAL_ACCOUNT_DEFAULT_IPS[value.facility]
+            ? value.facility
+            : 'MOD2';
+        return {
+            facility,
+            ip: String((value && value.ip) || CENTRAL_ACCOUNT_DEFAULT_IPS[facility]),
+        };
+    }
+
+    function changeCentralAccountFacility(facility) {
+        const ipInput = document.getElementById('central-account-ip');
+        if (ipInput && CENTRAL_ACCOUNT_DEFAULT_IPS[facility]) {
+            ipInput.value = CENTRAL_ACCOUNT_DEFAULT_IPS[facility];
+        }
+    }
+
+    function isValidIpv4(value) {
+        const parts = String(value || '').trim().split('.');
+        return parts.length === 4 && parts.every(part => {
+            if (!/^(0|[1-9]\d{0,2})$/.test(part)) return false;
+            const number = Number(part);
+            return number >= 0 && number <= 255;
+        });
+    }
+
+    async function saveCentralAccountLocation() {
+        const facility = document.getElementById('central-account-facility').value;
+        const ip = document.getElementById('central-account-ip').value.trim();
+        if (!CENTRAL_ACCOUNT_DEFAULT_IPS[facility]) {
+            showToast('❌ 請選擇 MOD1 或 MOD2', 'error');
+            return;
+        }
+        if (!isValidIpv4(ip)) {
+            showToast('❌ 請輸入有效的 IPv4 位址', 'error');
+            return;
+        }
+
+        try {
+            const res = await fetch('/api/settings/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    param_name: CENTRAL_ACCOUNT_LOCATION_PARAM,
+                    new_value: { facility, ip },
+                    reason: '更新中央帳號中心位置',
+                }),
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            showToast(`✅ 中心位置已更新為 ${facility} / ${ip}`, 'success');
+            await loadSettings();
+            loadHistory();
+        } catch (e) {
+            showToast(`❌ ${e.message}`, 'error');
+        }
+    }
+
     function renderSettings() {
         const grid = document.getElementById('settings-grid');
         const inferenceImageParams = INFERENCE_IMAGE_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
@@ -3010,6 +3079,9 @@
         const imageAbnormalParams = IMAGE_ABNORMAL_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const reportResultParams = REPORT_RESULT_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const withinSpecParam = allParams.find(p => p.param_name === WITHIN_SPEC_PARAM);
+        const centralAccountLocation = centralAccountLocationValue(
+            allParams.find(p => p.param_name === CENTRAL_ACCOUNT_LOCATION_PARAM)
+        );
 
         // Group CV Edge Parameters
         const edgeEnabled = cvEdgeParams.find(p => p.param_name === 'cv_edge_enabled');
@@ -3119,6 +3191,8 @@
             'report-result',
             'within-spec',
             'auto-model-switch',
+            'central-account',
+            SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? 'mark-shadow' : null,
             SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? 'accounts' : null,
             'history',
         ].filter(Boolean);
@@ -3137,11 +3211,48 @@
             <button class="settings-tab-btn ${currentTab === 'report-result' ? 'active' : ''}" data-target="report-result" onclick="switchTab('report-result')">📤 回報結果設定</button>
             <button class="settings-tab-btn ${currentTab === 'within-spec' ? 'active' : ''}" data-target="within-spec" onclick="switchTab('within-spec')">📏 規格內判定</button>
             <button class="settings-tab-btn ${currentTab === 'auto-model-switch' ? 'active' : ''}" data-target="auto-model-switch" onclick="switchTab('auto-model-switch')">↔ 自動切換模型</button>
+            <button class="settings-tab-btn ${currentTab === 'central-account' ? 'active' : ''}" data-target="central-account" onclick="switchTab('central-account')">🏢 中心位置</button>
+            ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'mark-shadow' ? 'active' : ''}" data-target="mark-shadow" onclick="switchTab('mark-shadow')">🔬 Mark PPOCR檢查</button>` : ''}
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'accounts' ? 'active' : ''}" data-target="accounts" onclick="switchTab('accounts')">👤 帳號管理</button>` : ''}
             <button class="settings-tab-btn ${currentTab === 'history' ? 'active' : ''}" data-target="history" onclick="switchTab('history')">📋 修改紀錄</button>
         `;
 
         grid.innerHTML = `
+            <div id="pane-central-account" class="settings-tab-pane-block ${currentTab === 'central-account' ? 'active' : ''}" style="grid-column:1/-1;">
+                <div class="settings-section" style="max-width:760px; border-left:3px solid #22c55e;">
+                    <div class="settings-section-header" style="background:rgba(34,197,94,.1); border-bottom:1px solid rgba(34,197,94,.2);">
+                        <div class="icon" style="background:rgba(34,197,94,.2); color:#86efac;">🏢</div>
+                        <span style="color:#86efac; font-weight:600;">中央帳號中心位置</span>
+                    </div>
+                    <div style="padding:20px; display:grid; gap:18px;">
+                        <label style="display:grid; gap:7px;">
+                            <span style="font-size:.86rem; font-weight:600; color:#cbd5e1;">中心廠區</span>
+                            <select id="central-account-facility"
+                                    onchange="changeCentralAccountFacility(this.value)"
+                                    style="background:#0f172a; border:1px solid var(--border); color:var(--text); padding:10px 12px; border-radius:7px;">
+                                <option value="MOD1" ${centralAccountLocation.facility === 'MOD1' ? 'selected' : ''}>MOD1</option>
+                                <option value="MOD2" ${centralAccountLocation.facility === 'MOD2' ? 'selected' : ''}>MOD2</option>
+                            </select>
+                        </label>
+                        <label style="display:grid; gap:7px;">
+                            <span style="font-size:.86rem; font-weight:600; color:#cbd5e1;">中心 IP</span>
+                            <input id="central-account-ip"
+                                   type="text"
+                                   inputmode="decimal"
+                                   maxlength="15"
+                                   value="${escapeAttr(centralAccountLocation.ip)}"
+                                   placeholder="例如 10.174.37.81"
+                                   style="background:#0f172a; border:1px solid var(--border); color:var(--text); padding:10px 12px; border-radius:7px;">
+                        </label>
+                        <div style="color:#94a3b8; font-size:.8rem; line-height:1.65;">
+                            選擇 MOD1 會帶入 10.172.25.105；選擇 MOD2 會帶入 10.174.37.81。IP 帶入後仍可人工修改。此設定保存於本機設定 DB，供中央帳號登入功能使用。
+                        </div>
+                        <div>
+                            <button class="btn-save" onclick="saveCentralAccountLocation()">💾 儲存中心位置</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
             ${inferenceImageParams.length > 0 || patchcoreParams.length > 0 ? `
             <div id="pane-patchcore" class="settings-tab-pane ${currentTab === 'patchcore' ? 'active' : ''}">
                 ${inferenceImageParams.length > 0 ? `
@@ -3458,6 +3569,7 @@
             ${renderReportResultPane(reportResultParams)}
             ${renderImageAbnormalPane(imageAbnormalParams)}
             ${renderWithinSpecPane(withinSpecParam)}
+            ${renderMarkShadowPane()}
         `;
 
         // 延遲初始化可視化工具

@@ -1,0 +1,279 @@
+import io
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from capi_database import CAPIDatabase
+from capi_web import CAPIWebHandler
+
+
+def test_central_dashboard_defaults_are_imported_to_sqlite(tmp_path):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+
+    config = db.get_central_dashboard_config()
+
+    assert config["title"] == "寧波廠區 CAPI AI 中控看板"
+    assert config["refreshIntervalSeconds"] == 30
+    assert config["requestTimeoutSeconds"] == 8
+    assert [line["id"] for line in config["lines"]] == [
+        "mod2-capi03",
+        "mod2-capi13",
+        "mod2-hm-83",
+        "mod2-hm-103",
+        "mod2-capi08",
+        "mod2-capi01",
+        "mod2-capi14",
+        "mod2-capi02",
+        "mod1-capi35",
+        "mod1-capi34",
+    ]
+    assert all(
+        set(line) == {
+            "id",
+            "factory",
+            "line",
+            "pcName",
+            "apiUrl",
+            "dashboardUrl",
+            "overexposedUrl",
+            "enabled",
+        }
+        for line in config["lines"]
+    )
+    with sqlite3.connect(db.db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM central_dashboard_settings"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM central_dashboard_lines"
+        ).fetchone()[0] == 10
+
+
+def test_central_dashboard_first_read_can_import_local_file_config(tmp_path):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+    initial = {
+        "title": "現場已修改看板",
+        "refreshIntervalSeconds": 90,
+        "requestTimeoutSeconds": 12,
+        "lines": [
+            {
+                "id": "field-line",
+                "factory": "MOD9",
+                "line": "現場線",
+                "pcName": "FIELD-PC",
+                "apiUrl": "http://10.9.0.1/api/status",
+                "dashboardUrl": "http://10.9.0.1/",
+                "overexposedUrl": "",
+                "enabled": True,
+            }
+        ],
+    }
+
+    assert db.get_central_dashboard_config(initial) == initial
+
+
+def test_central_dashboard_config_js_can_be_parsed_for_first_import():
+    config = CAPIWebHandler._load_central_dashboard_file_config()
+
+    assert config["title"] == "寧波廠區 CAPI AI 中控看板"
+    assert config["lines"][0]["id"] == "mod2-capi03"
+    assert len(config["lines"]) == 10
+
+
+def test_central_dashboard_config_can_be_replaced_and_keep_order(tmp_path):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+    db.get_central_dashboard_config()
+
+    saved = db.save_central_dashboard_config(
+        {
+            "title": "全廠戰情室",
+            "refreshIntervalSeconds": 60,
+            "requestTimeoutSeconds": 10,
+            "lines": [
+                {
+                    "id": "mod2-capi02",
+                    "factory": "MOD2",
+                    "line": "CAPI02",
+                    "pcName": "PC-02",
+                    "apiUrl": "http://10.0.0.2/api/status",
+                    "dashboardUrl": "http://10.0.0.2/",
+                    "overexposedUrl": "",
+                    "enabled": False,
+                },
+                {
+                    "id": "mod1-capi01",
+                    "factory": "MOD1",
+                    "line": "CAPI01",
+                    "pcName": "PC-01",
+                    "apiUrl": "https://capi01.example/api/status",
+                    "dashboardUrl": "https://capi01.example/",
+                    "overexposedUrl": "https://capi01.example/overexposed",
+                    "enabled": True,
+                },
+            ],
+        },
+        changed_by="tester",
+    )
+
+    assert saved["title"] == "全廠戰情室"
+    assert [line["id"] for line in saved["lines"]] == [
+        "mod2-capi02",
+        "mod1-capi01",
+    ]
+    assert saved["lines"][0]["enabled"] is False
+    assert db.get_central_dashboard_config() == saved
+    with sqlite3.connect(db.db_path) as connection:
+        assert connection.execute(
+            "SELECT updated_by FROM central_dashboard_settings WHERE id = 1"
+        ).fetchone()[0] == "tester"
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (
+            {"refreshIntervalSeconds": 10},
+            "更新週期必須介於 30 到 3600 秒",
+        ),
+        (
+            {"requestTimeoutSeconds": 30},
+            "API 逾時必須至少 3 秒，且小於更新週期",
+        ),
+        (
+            {
+                "lines": [
+                    {
+                        "id": "line-1",
+                        "factory": "MOD1",
+                        "line": "CAPI01",
+                        "pcName": "PC-01",
+                        "apiUrl": "javascript:alert(1)",
+                    }
+                ]
+            },
+            "URL 必須使用 http:// 或 https://",
+        ),
+    ],
+)
+def test_central_dashboard_config_rejects_invalid_values(tmp_path, change, message):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+    config = db.get_central_dashboard_config()
+    config.update(change)
+
+    with pytest.raises(ValueError, match=message):
+        db.save_central_dashboard_config(config)
+
+
+def test_central_dashboard_api_updates_sqlite(tmp_path):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+    config = db.get_central_dashboard_config()
+    config["title"] = "中控測試"
+    payload = json.dumps(config).encode("utf-8")
+
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = db
+    handler.headers = {"Content-Length": str(len(payload))}
+    handler.rfile = io.BytesIO(payload)
+    handler._current_settings_user = lambda: {"username": "operator"}
+    responses = []
+    handler._send_json = lambda data, status=200, headers=None: responses.append(
+        (status, data)
+    )
+
+    handler._handle_api_central_dashboard_config_update()
+
+    assert responses[-1][0] == 200
+    assert responses[-1][1]["success"] is True
+    assert db.get_central_dashboard_config()["title"] == "中控測試"
+
+
+@pytest.mark.parametrize(
+    ("webserver_ip", "expected_prefix", "expected_ids"),
+    [
+        (
+            "10.172.99.10",
+            "10.172",
+            ["mod1-capi35", "mod1-capi34"],
+        ),
+        (
+            "10.174.99.10",
+            "10.174",
+            [
+                "mod2-capi03",
+                "mod2-capi13",
+                "mod2-hm-83",
+                "mod2-hm-103",
+                "mod2-capi08",
+                "mod2-capi01",
+                "mod2-capi14",
+                "mod2-capi02",
+            ],
+        ),
+    ],
+)
+def test_central_dashboard_api_filters_to_webserver_network(
+    tmp_path,
+    webserver_ip,
+    expected_prefix,
+    expected_ids,
+):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = db
+    handler.connection = type(
+        "_Connection",
+        (),
+        {"getsockname": lambda self: (webserver_ip, 80)},
+    )()
+    handler.headers = {}
+    responses = []
+    handler._send_json = lambda data, status=200, headers=None: responses.append(
+        (status, data)
+    )
+
+    handler._handle_api_central_dashboard_config()
+
+    payload = responses[-1][1]
+    assert responses[-1][0] == 200
+    assert payload["webServerIp"] == webserver_ip
+    assert payload["networkPrefix"] == expected_prefix
+    assert payload["networkFilterApplied"] is True
+    assert payload["configuredLineCount"] == 10
+    assert [line["id"] for line in payload["lines"]] == expected_ids
+
+
+def test_central_dashboard_all_api_keeps_both_factories(tmp_path):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = db
+    responses = []
+    handler._send_json = lambda data, status=200, headers=None: responses.append(
+        (status, data)
+    )
+
+    handler._handle_api_central_dashboard_config_all()
+
+    payload = responses[-1][1]
+    assert responses[-1][0] == 200
+    assert len(payload["lines"]) == 10
+    assert {line["factory"] for line in payload["lines"]} == {"MOD1", "MOD2"}
+    assert "networkPrefix" not in payload
+
+
+def test_central_dashboard_pages_use_sqlite_config_and_settings_route():
+    root = Path(__file__).resolve().parent.parent
+    index_html = (root / "central_dashboard" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    app_js = (root / "central_dashboard" / "app.js").read_text(encoding="utf-8")
+    settings_html = (root / "central_dashboard" / "settings.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'href="/central_dashboard/settings"' in index_html
+    assert 'fetch("/api/central-dashboard/config"' in app_js
+    assert "中控看板設備設定" in settings_html
+    assert 'method: "POST"' in settings_html
+    assert 'fetch("/api/central-dashboard/config/all"' in settings_html
