@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import Counter, deque
 import hashlib
 import json
 import logging
@@ -16,7 +17,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 import cv2
 import numpy as np
@@ -61,6 +62,172 @@ def percentile(values: list[float], fraction: float) -> float:
     return float(ordered[index])
 
 
+class MarkTemporalStabilizer:
+    """Keep a short-lived MARK OCR glitch from changing the formal result.
+
+    The history is keyed by the caller-provided stream key.  It is deliberately
+    based on raw, valid PaddleOCR text only; DotMatrix/CV is a locator and is
+    never included as a vote.  A new value must be seen three times in a row
+    before it replaces the current stable value.
+    """
+
+    HISTORY_LIMIT = 100
+    INITIAL_MIN_SUPPORT = 3
+    INITIAL_MODE_RATIO = 0.60
+    SWITCH_CONSECUTIVE = 3
+
+    def __init__(
+        self,
+        history_loader: Callable[[str, int], list[str]] | None = None,
+    ):
+        self._history_loader = history_loader
+        self._states: Dict[str, Dict[str, Any]] = {}
+        self._fresh_context_prefixes: set[str] = set()
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _key(stream_key: Any) -> str:
+        return str(stream_key or "default").strip() or "default"
+
+    def _new_state(self, key: str) -> Dict[str, Any]:
+        history = deque(maxlen=self.HISTORY_LIMIT)
+        load_history = not any(
+            key.startswith(prefix) for prefix in self._fresh_context_prefixes
+        )
+        if load_history and self._history_loader is not None:
+            try:
+                loaded = self._history_loader(key, self.HISTORY_LIMIT) or []
+            except Exception as exc:
+                LOGGER.warning("MARK temporal history load failed: %s", exc)
+                loaded = []
+            for value in loaded:
+                text = normalize_mark_text(value)
+                if text:
+                    history.append(text)
+
+        stable_text = ""
+        if history:
+            mode, count = Counter(history).most_common(1)[0]
+            if count >= self.INITIAL_MIN_SUPPORT and (
+                count / len(history) >= self.INITIAL_MODE_RATIO
+            ):
+                stable_text = mode
+        return {
+            "history": history,
+            "stable_text": stable_text,
+            "candidate_text": "",
+            "candidate_count": 0,
+        }
+
+    @staticmethod
+    def _snapshot(state: Dict[str, Any]) -> Dict[str, Any]:
+        history = state["history"]
+        stable_text = str(state.get("stable_text") or "")
+        support = history.count(stable_text) if stable_text else 0
+        return {
+            "temporal_stable_text": stable_text,
+            "temporal_history_count": len(history),
+            "temporal_stable_support_count": support,
+            "temporal_candidate_text": str(state.get("candidate_text") or ""),
+            "temporal_candidate_count": int(state.get("candidate_count") or 0),
+        }
+
+    def snapshot(self, stream_key: Any) -> Dict[str, Any]:
+        key = self._key(stream_key)
+        with self._lock:
+            state = self._states.get(key)
+            if state is None:
+                state = self._new_state(key)
+                self._states[key] = state
+            return self._snapshot(state)
+
+    def reset(self, stream_key: Any) -> None:
+        """Start a new history session without reloading older DB rows."""
+        key = self._key(stream_key)
+        with self._lock:
+            self._states[key] = {
+                "history": deque(maxlen=self.HISTORY_LIMIT),
+                "stable_text": "",
+                "candidate_text": "",
+                "candidate_count": 0,
+            }
+
+    def reset_context(self, stream_key: Any) -> None:
+        """Reset every ROI/orientation state for one machine/model session."""
+        key = self._key(stream_key)
+        parts = key.split("|", 2)
+        prefix = f"{parts[0]}|{parts[1]}|" if len(parts) == 3 else key
+        with self._lock:
+            self._fresh_context_prefixes.add(prefix)
+            for state_key in list(self._states):
+                if state_key.startswith(prefix):
+                    del self._states[state_key]
+
+    def observe(self, stream_key: Any, raw_text: Any) -> Dict[str, Any]:
+        key = self._key(stream_key)
+        raw = normalize_mark_text(raw_text)
+        if not raw:
+            result = self.snapshot(key)
+            result.update({
+                "final_text": "",
+                "adoption_reason": "no_valid_paddle",
+            })
+            return result
+
+        with self._lock:
+            state = self._states.get(key)
+            if state is None:
+                state = self._new_state(key)
+                self._states[key] = state
+            history = state["history"]
+            history.append(raw)
+            stable_text = str(state.get("stable_text") or "")
+            reason = "warmup"
+
+            if not stable_text:
+                mode, count = Counter(history).most_common(1)[0]
+                if count >= self.INITIAL_MIN_SUPPORT and (
+                    count / len(history) >= self.INITIAL_MODE_RATIO
+                ):
+                    stable_text = mode
+                    state["stable_text"] = stable_text
+
+            if stable_text:
+                if raw == stable_text:
+                    state["candidate_text"] = ""
+                    state["candidate_count"] = 0
+                    final_text = stable_text
+                    reason = "stable_match"
+                else:
+                    if state.get("candidate_text") == raw:
+                        state["candidate_count"] = int(
+                            state.get("candidate_count") or 0
+                        ) + 1
+                    else:
+                        state["candidate_text"] = raw
+                        state["candidate_count"] = 1
+
+                    if int(state["candidate_count"]) >= self.SWITCH_CONSECUTIVE:
+                        stable_text = raw
+                        state["stable_text"] = stable_text
+                        state["candidate_text"] = ""
+                        state["candidate_count"] = 0
+                        final_text = stable_text
+                        reason = "temporal_switch"
+                    else:
+                        final_text = stable_text
+                        reason = "temporal_outlier"
+            else:
+                final_text = raw
+
+            result = self._snapshot(state)
+            result.update({
+                "final_text": final_text,
+                "adoption_reason": reason,
+            })
+            return result
+
+
 class ShadowStore:
     def __init__(self, db_path: Path, disagreement_dir: Path):
         self.db_path = db_path
@@ -84,17 +251,24 @@ class ShadowStore:
                     captured_at TEXT DEFAULT '',
                     source_path TEXT DEFAULT '',
                     source_image TEXT DEFAULT '',
+                    inference_record_id INTEGER DEFAULT 0,
                     crop_sha256 TEXT NOT NULL,
                     current_text TEXT DEFAULT '',
                     current_confidence REAL DEFAULT 0,
                     current_profile_version INTEGER DEFAULT 0,
                     current_roi TEXT DEFAULT '',
                     current_orientation TEXT DEFAULT '',
+                    stream_key TEXT DEFAULT '',
                     paddle_raw_text TEXT DEFAULT '',
                     paddle_text TEXT DEFAULT '',
                     paddle_confidence REAL DEFAULT 0,
                     valid_two_chars INTEGER DEFAULT 0,
                     agreed INTEGER DEFAULT 0,
+                    final_text TEXT DEFAULT '',
+                    adoption_reason TEXT DEFAULT '',
+                    temporal_stable_text TEXT DEFAULT '',
+                    temporal_history_count INTEGER DEFAULT 0,
+                    temporal_stable_support_count INTEGER DEFAULT 0,
                     latency_ms REAL DEFAULT 0,
                     model_name TEXT NOT NULL,
                     crop_path TEXT DEFAULT '',
@@ -103,6 +277,26 @@ class ShadowStore:
                 )
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(mark_shadow_results)"
+                ).fetchall()
+            }
+            migrations = {
+                "inference_record_id": "INTEGER DEFAULT 0",
+                "stream_key": "TEXT DEFAULT ''",
+                "final_text": "TEXT DEFAULT ''",
+                "adoption_reason": "TEXT DEFAULT ''",
+                "temporal_stable_text": "TEXT DEFAULT ''",
+                "temporal_history_count": "INTEGER DEFAULT 0",
+                "temporal_stable_support_count": "INTEGER DEFAULT 0",
+            }
+            for column, definition in migrations.items():
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE mark_shadow_results ADD COLUMN {column} {definition}"
+                    )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_mark_shadow_created
@@ -115,6 +309,33 @@ class ShadowStore:
                 ON mark_shadow_results(agreed, valid_two_chars)
                 """
             )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_mark_shadow_inference_record
+                ON mark_shadow_results(inference_record_id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_mark_shadow_stream
+                ON mark_shadow_results(stream_key, id)
+                """
+            )
+
+    def recent_paddle_texts(self, stream_key: str, limit: int = 100) -> list[str]:
+        """Return raw valid Paddle results, oldest first, for one stream."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT paddle_text
+                FROM mark_shadow_results
+                WHERE stream_key = ? AND valid_two_chars = 1
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (str(stream_key or ""), max(1, int(limit))),
+            ).fetchall()
+        return [str(row["paddle_text"] or "") for row in reversed(rows)]
 
     def save(
         self,
@@ -151,10 +372,16 @@ class ShadowStore:
                     created_at, captured_at, source_path, source_image,
                     crop_sha256, current_text, current_confidence,
                     current_profile_version, current_roi, current_orientation,
-                    paddle_raw_text, paddle_text, paddle_confidence,
-                    valid_two_chars, agreed, latency_ms, model_name,
+                    stream_key, paddle_raw_text, paddle_text, paddle_confidence,
+                    valid_two_chars, agreed, final_text, adoption_reason,
+                    temporal_stable_text, temporal_history_count,
+                    temporal_stable_support_count, latency_ms, model_name,
                     crop_path, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     datetime.now(timezone.utc).isoformat(),
@@ -167,11 +394,17 @@ class ShadowStore:
                     int(request_data.get("current_profile_version") or 0),
                     str(request_data.get("current_roi") or ""),
                     str(request_data.get("current_orientation") or ""),
+                    str(request_data.get("stream_key") or ""),
                     str(result.get("paddle_raw_text") or ""),
                     str(result.get("paddle_text") or ""),
                     float(result.get("paddle_confidence") or 0.0),
                     int(bool(result.get("paddle_text"))),
                     int(agreed),
+                    str(result.get("final_text") or result.get("paddle_text") or ""),
+                    str(result.get("adoption_reason") or ""),
+                    str(result.get("temporal_stable_text") or ""),
+                    int(result.get("temporal_history_count") or 0),
+                    int(result.get("temporal_stable_support_count") or 0),
                     float(result.get("latency_ms") or 0.0),
                     str(result.get("model_name") or ""),
                     crop_path,
@@ -271,6 +504,28 @@ class ShadowApplication:
     def __init__(self, recognizer: PaddleRecognizer, store: ShadowStore):
         self.recognizer = recognizer
         self.store = store
+        self.temporal = MarkTemporalStabilizer(store.recent_paddle_texts)
+        self._context_lock = threading.Lock()
+        self._active_model_by_machine: Dict[str, str] = {}
+
+    def _reset_for_model_context(
+        self,
+        request_data: Dict[str, Any],
+        stream_key: str,
+    ) -> str:
+        machine_no = str(request_data.get("machine_no") or "").strip().casefold()
+        model_id = str(request_data.get("model_id") or "").strip().casefold()
+        if not machine_no or not model_id:
+            return ""
+
+        with self._context_lock:
+            previous_model = self._active_model_by_machine.get(machine_no)
+            if previous_model == model_id:
+                return ""
+            self._active_model_by_machine[machine_no] = model_id
+
+        self.temporal.reset_context(stream_key)
+        return "context_start" if previous_model is None else "model_switch_reset"
 
     def infer(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         png_base64 = str(request_data.get("image_png_base64") or "")
@@ -316,6 +571,17 @@ class ShadowApplication:
             getattr(self.recognizer, "engine_version", "unknown"),
         )
         result.setdefault("worker_version", VERSION)
+        raw_text = normalize_mark_text(result.get("paddle_text"))
+        result["paddle_text"] = raw_text
+        stream_key = str(request_data.get("stream_key") or "default").strip() or "default"
+        request_data["stream_key"] = stream_key
+        context_reason = self._reset_for_model_context(request_data, stream_key)
+        if raw_text:
+            result.update(self.temporal.observe(stream_key, raw_text))
+            if context_reason:
+                result["adoption_reason"] = context_reason
+        else:
+            result.update(self.temporal.observe(stream_key, ""))
         result["id"] = self.store.save(request_data, result, crop_png)
         result["agreed"] = bool(result.get("paddle_text")) and (
             result["paddle_text"] == str(request_data.get("current_text") or "")

@@ -92,6 +92,7 @@ def test_api_status_includes_shift_and_hardware_metrics(monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("missing")),
     )
     monkeypatch.setattr(capi_web, "_get_cached_hardware_status", lambda path: hardware)
+    monkeypatch.setattr(capi_web, "_get_host_identity", lambda: "CAPI34")
 
     handler = object.__new__(CAPIWebHandler)
     handler.status_tracker = _StatusTracker()
@@ -108,5 +109,6 @@ def test_api_status_includes_shift_and_hardware_metrics(monkeypatch):
     stats = captured["payload"]["stats"]
     assert stats["avg_time"] == 1.625
     assert stats["overexposed_count"] == 7
+    assert captured["payload"]["server"]["hostname"] == "CAPI34"
     assert captured["payload"]["hardware"] == hardware
     assert captured["headers"] == {"Access-Control-Allow-Origin": "*"}

@@ -4,6 +4,7 @@
     const DEFAULT_REFRESH_SECONDS = 30;
     const MIN_REFRESH_SECONDS = 30;
     const DEFAULT_TIMEOUT_SECONDS = 8;
+    const THEME_STORAGE_KEY = "capi-dashboard-theme";
     const HEALTH_THRESHOLDS = Object.freeze({
         diskFreeWarningPercent: 15,
         diskFreeCriticalPercent: 10,
@@ -26,6 +27,7 @@
     document.addEventListener("DOMContentLoaded", initialize);
 
     async function initialize() {
+        initializeTheme();
         const directFileMode = window.location.protocol === "file:";
         if (!directFileMode) {
             try {
@@ -48,14 +50,6 @@
 
         document.title = config.title;
         setText(document.getElementById("dashboard-title"), config.title);
-        setText(
-            document.getElementById("data-note"),
-            `${directFileMode ? "直接開啟模式 · " : ""}每 ${config.refreshIntervalSeconds} 秒由各 PC 的 API 更新一次`
-        );
-        setText(
-            document.getElementById("footer-refresh-note"),
-            `更新週期：${config.refreshIntervalSeconds} 秒`
-        );
         const settingsLink = document.getElementById("dashboard-settings-link");
         if (settingsLink) {
             settingsLink.hidden = directFileMode;
@@ -83,11 +77,7 @@
             }
             createLineCard(line, factoryGrids.get(factory));
         }
-
-        document.getElementById("refresh-button").addEventListener("click", function () {
-            clearTimeout(refreshTimer);
-            refreshAllLines();
-        });
+        updateSummary();
 
         startClock();
         countdownTimer = window.setInterval(updateRefreshStatus, 1000);
@@ -148,18 +138,19 @@
     function createLineCard(line, lineGrid) {
         const template = document.getElementById("line-card-template");
         const card = template.content.firstElementChild.cloneNode(true);
+        const overviewRow = createOverviewRow(line);
 
         card.dataset.lineId = line.id;
         setField(card, "pc-name", line.pcName || line.id);
         setField(card, "line-name", line.line || "未設定線體");
 
         configureLink(card, "dashboard", line.dashboardUrl || deriveBaseUrl(line.apiUrl));
-        configureLink(card, "overexposed", line.overexposedUrl);
 
         lineGrid.appendChild(card);
         lineStates.set(line.id, {
             line,
             card,
+            overviewRow,
             status: "checking",
             data: null,
             error: ""
@@ -167,8 +158,94 @@
         renderLineCard(lineStates.get(line.id));
     }
 
-    function configureLink(card, name, url) {
-        const element = card.querySelector(`[data-link="${name}"]`);
+    function createOverviewRow(line) {
+        const row = document.createElement("tr");
+        row.dataset.lineId = line.id;
+        row.dataset.state = "checking";
+
+        const lineCell = document.createElement("td");
+        lineCell.className = "overview-line-cell";
+        const lineIdentity = document.createElement("div");
+        lineIdentity.className = "overview-line";
+        const factory = document.createElement("span");
+        factory.className = "overview-factory";
+        factory.textContent = line.factory || "未設定廠別";
+        const lineName = document.createElement("strong");
+        lineName.textContent = line.line || "未設定線體";
+        lineIdentity.append(factory, lineName);
+        lineCell.appendChild(lineIdentity);
+
+        const ipCell = document.createElement("td");
+        ipCell.className = "overview-ip-cell";
+        const ip = document.createElement("code");
+        ip.className = "overview-ip";
+        ip.textContent = extractHostname(line.apiUrl) || "—";
+        ip.title = line.apiUrl || "";
+        ipCell.appendChild(ip);
+
+        const statusCell = document.createElement("td");
+        statusCell.className = "overview-status-cell";
+        const status = document.createElement("span");
+        status.className = "status-pill overview-status";
+        status.dataset.field = "overview-status";
+        status.textContent = statusText("checking");
+        statusCell.appendChild(status);
+
+        const aoiCell = document.createElement("td");
+        aoiCell.className = "overview-aoi-cell";
+        const aoi = document.createElement("span");
+        aoi.className = "overview-aoi";
+        aoi.dataset.field = "overview-aoi";
+        aoi.dataset.state = "unknown";
+        aoi.textContent = "AOI —";
+        aoiCell.appendChild(aoi);
+
+        const activityCell = document.createElement("td");
+        activityCell.className = "overview-activity-cell";
+        const activity = document.createElement("span");
+        activity.className = "overview-activity";
+        activity.dataset.field = "overview-activity";
+        activity.textContent = "尚無判定";
+        activityCell.appendChild(activity);
+
+        const alertCell = document.createElement("td");
+        alertCell.className = "overview-alert-cell is-empty";
+        const alerts = document.createElement("div");
+        alerts.className = "overview-alerts";
+        alerts.dataset.field = "overview-alerts";
+        alertCell.appendChild(alerts);
+
+        const linkCell = document.createElement("td");
+        linkCell.className = "overview-link-cell";
+        const link = document.createElement("a");
+        link.className = "overview-link";
+        link.dataset.link = "dashboard";
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "開啟";
+        linkCell.appendChild(link);
+
+        row.append(
+            lineCell,
+            ipCell,
+            statusCell,
+            aoiCell,
+            activityCell,
+            alertCell,
+            linkCell
+        );
+        configureLink(row, "dashboard", line.dashboardUrl || deriveBaseUrl(line.apiUrl));
+        document.getElementById("line-overview").appendChild(row);
+        return row;
+    }
+
+    function configureLink(root, name, url) {
+        const element = root && root.querySelector
+            ? root.querySelector(`[data-link="${name}"]`)
+            : null;
+        if (!element) {
+            return;
+        }
         if (!url) {
             element.hidden = true;
             element.removeAttribute("href");
@@ -184,16 +261,11 @@
 
         isRefreshing = true;
         nextRefreshAt = null;
-        const button = document.getElementById("refresh-button");
-        button.disabled = true;
-        button.textContent = "更新中…";
         updateRefreshStatus();
 
         await Promise.all(Array.from(lineStates.values(), refreshLine));
 
         isRefreshing = false;
-        button.disabled = false;
-        button.textContent = "立即更新";
         updateSummary();
         renderAlerts();
         scheduleNextRefresh();
@@ -248,6 +320,7 @@
 
         return {
             running: server.running !== false,
+            hostname: textValue(server.hostname),
             uptime: textValue(server.uptime),
             modelVersion: textValue(server.model_version),
             device: textValue(server.device || gpu.name),
@@ -255,8 +328,6 @@
             ok: numberValue(stats.total_ok ?? stats.ok_count),
             ng: numberValue(stats.total_ng ?? stats.ng_count),
             err: numberValue(stats.total_err ?? stats.err_count),
-            shiftName: textValue(stats.shift_name),
-            shiftRange: textValue(stats.time_range),
             overexposed: optionalNumber(stats.overexposed_count),
             avgTime: optionalNumber(
                 stats.avg_time ??
@@ -312,6 +383,7 @@
     function renderLineCard(state) {
         const card = state.card;
         const data = state.data;
+        renderOverviewRow(state);
         card.dataset.state = state.status;
         const healthAlerts = data && state.status !== "offline"
             ? getHardwareAlerts(data)
@@ -327,11 +399,18 @@
             return;
         }
 
+        setField(
+            card,
+            "pc-name",
+            data.hostname ||
+                state.line.pcName ||
+                extractHostname(state.line.apiUrl) ||
+                state.line.id
+        );
+
         const validCount = data.ok + data.ng;
         const totalForErrorRate = data.total || validCount + data.err;
 
-        setField(card, "shift-name", data.shiftName || "當班");
-        setField(card, "shift-range", data.shiftRange || "API 未提供班別時段");
         setField(card, "total", formatNumber(data.total));
         setField(card, "ok-count", formatNumber(data.ok));
         setField(card, "ng-count", formatNumber(data.ng));
@@ -375,6 +454,76 @@
         updateJudgmentClass(card, data.latestEvent.judgment);
     }
 
+    function renderOverviewRow(state) {
+        const row = state.overviewRow;
+        if (!row) {
+            return;
+        }
+        row.dataset.state = state.status;
+        const status = row.querySelector('[data-field="overview-status"]');
+        setText(status, statusText(state.status));
+        status.title = state.error || statusText(state.status);
+
+        const data = state.data;
+        const aoi = row.querySelector('[data-field="overview-aoi"]');
+        if (!data || state.status === "checking") {
+            setText(aoi, "AOI —");
+            aoi.dataset.state = "unknown";
+            aoi.title = "正在讀取 AOI 連線狀態";
+        } else if (state.status === "offline") {
+            setText(aoi, "AOI —");
+            aoi.dataset.state = "unknown";
+            aoi.title = "設備離線，無法確認 AOI 連線狀態";
+        } else if (data.activeConnections > 0) {
+            setText(aoi, `AOI ${formatNumber(data.activeConnections)}`);
+            aoi.dataset.state = "connected";
+            aoi.title = `${formatNumber(data.activeConnections)} 個 AOI 即時連線`;
+        } else {
+            setText(aoi, "AOI 未連線");
+            aoi.dataset.state = "disconnected";
+            aoi.title = "目前沒有 AOI 即時連線";
+        }
+
+        renderOverviewActivity(state);
+
+        const alertCell = row.querySelector(".overview-alert-cell");
+        const alertContainer = row.querySelector('[data-field="overview-alerts"]');
+        const healthAlerts = data && state.status !== "offline"
+            ? getHardwareAlerts(data)
+            : [];
+        alertContainer.replaceChildren();
+        for (const alert of healthAlerts) {
+            const badge = document.createElement("span");
+            badge.className = `overview-alert overview-alert-${alert.severity}`;
+            badge.textContent = `⚠ ${alert.summary}`;
+            badge.title = alert.message;
+            alertContainer.appendChild(badge);
+        }
+        alertCell.classList.toggle("is-empty", healthAlerts.length === 0);
+    }
+
+    function renderOverviewActivity(state, now = new Date()) {
+        const row = state.overviewRow;
+        if (!row) {
+            return;
+        }
+        const activity = row.querySelector('[data-field="overview-activity"]');
+        const latestEvent = state.data && state.data.latestEvent;
+        if (!latestEvent || !latestEvent.judgment) {
+            setText(activity, "尚無判定");
+            activity.title = "";
+            return;
+        }
+
+        const judgment = displayJudgment(latestEvent.judgment);
+        const relativeTime = formatRelativeTime(latestEvent.time, now);
+        setText(
+            activity,
+            relativeTime ? `最近 ${judgment} · ${relativeTime}` : `最近 ${judgment}`
+        );
+        activity.title = latestEvent.time ? `API 判定時間：${latestEvent.time}` : "";
+    }
+
     function statusText(status) {
         return {
             checking: "連線中",
@@ -400,6 +549,67 @@
             minimumFractionDigits: digits,
             maximumFractionDigits: digits
         });
+    }
+
+    function formatRelativeTime(value, now = new Date()) {
+        const eventTime = parseEventTime(value, now);
+        if (!eventTime) {
+            return textValue(value);
+        }
+
+        const elapsedSeconds = Math.max(
+            0,
+            Math.floor((now.getTime() - eventTime.getTime()) / 1000)
+        );
+        if (elapsedSeconds < 5) {
+            return "剛剛";
+        }
+        if (elapsedSeconds < 60) {
+            return `${elapsedSeconds} 秒前`;
+        }
+
+        const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+        if (elapsedMinutes < 60) {
+            return `${elapsedMinutes} 分鐘前`;
+        }
+
+        const elapsedHours = Math.floor(elapsedMinutes / 60);
+        if (elapsedHours < 24) {
+            return `${elapsedHours} 小時前`;
+        }
+        return `${Math.floor(elapsedHours / 24)} 天前`;
+    }
+
+    function parseEventTime(value, now) {
+        const rawValue = textValue(value);
+        if (!rawValue) {
+            return null;
+        }
+
+        const timeOnly = /^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/.exec(rawValue);
+        if (timeOnly) {
+            const hours = Number(timeOnly[1]);
+            const minutes = Number(timeOnly[2]);
+            const seconds = Number(timeOnly[3]);
+            const milliseconds = Number((timeOnly[4] || "").padEnd(3, "0")) || 0;
+            if (hours > 23 || minutes > 59 || seconds > 59) {
+                return null;
+            }
+
+            const eventTime = new Date(now);
+            eventTime.setHours(hours, minutes, seconds, milliseconds);
+            if (eventTime.getTime() - now.getTime() > 5 * 60 * 1000) {
+                eventTime.setDate(eventTime.getDate() - 1);
+            }
+            return eventTime;
+        }
+
+        const normalizedValue = rawValue.replace(
+            /^(\d{4}-\d{2}-\d{2})\s+/,
+            "$1T"
+        );
+        const eventTime = new Date(normalizedValue);
+        return Number.isNaN(eventTime.getTime()) ? null : eventTime;
     }
 
     function formatVram(hardware) {
@@ -484,11 +694,13 @@
             if (freePercent <= HEALTH_THRESHOLDS.diskFreeCriticalPercent) {
                 alerts.push({
                     severity: "critical",
+                    summary: `硬碟 ${formatDecimal(freePercent, 0)}%`,
                     message: `硬碟空間嚴重不足：剩餘 ${formatDecimal(freePercent, 1)}%（${formatDecimal(hardware.diskFreeGb, 1)} / ${formatDecimal(hardware.diskTotalGb, 1)} GB）`
                 });
             } else if (freePercent <= HEALTH_THRESHOLDS.diskFreeWarningPercent) {
                 alerts.push({
                     severity: "warning",
+                    summary: `硬碟 ${formatDecimal(freePercent, 0)}%`,
                     message: `硬碟空間偏低：剩餘 ${formatDecimal(freePercent, 1)}%（${formatDecimal(hardware.diskFreeGb, 1)} / ${formatDecimal(hardware.diskTotalGb, 1)} GB）`
                 });
             }
@@ -498,11 +710,13 @@
             if (hardware.ramUsedPercent >= HEALTH_THRESHOLDS.ramUsedCriticalPercent) {
                 alerts.push({
                     severity: "critical",
+                    summary: `RAM ${formatDecimal(hardware.ramUsedPercent, 0)}%`,
                     message: `RAM 使用率過高：${formatDecimal(hardware.ramUsedPercent, 0)}%`
                 });
             } else if (hardware.ramUsedPercent >= HEALTH_THRESHOLDS.ramUsedWarningPercent) {
                 alerts.push({
                     severity: "warning",
+                    summary: `RAM ${formatDecimal(hardware.ramUsedPercent, 0)}%`,
                     message: `RAM 使用率偏高：${formatDecimal(hardware.ramUsedPercent, 0)}%`
                 });
             }
@@ -513,11 +727,13 @@
             if (usedPercent >= HEALTH_THRESHOLDS.vramUsedCriticalPercent) {
                 alerts.push({
                     severity: "critical",
+                    summary: `VRAM ${formatDecimal(usedPercent, 0)}%`,
                     message: `VRAM 使用率過高：${formatDecimal(usedPercent, 0)}%（${formatDecimal(hardware.vramUsedGb, 1)} / ${formatDecimal(hardware.vramTotalGb, 1)} GB）`
                 });
             } else if (usedPercent >= HEALTH_THRESHOLDS.vramUsedWarningPercent) {
                 alerts.push({
                     severity: "warning",
+                    summary: `VRAM ${formatDecimal(usedPercent, 0)}%`,
                     message: `VRAM 使用率偏高：${formatDecimal(usedPercent, 0)}%（${formatDecimal(hardware.vramUsedGb, 1)} / ${formatDecimal(hardware.vramTotalGb, 1)} GB）`
                 });
             }
@@ -527,11 +743,13 @@
             if (hardware.gpuTemperature >= HEALTH_THRESHOLDS.gpuTemperatureCriticalC) {
                 alerts.push({
                     severity: "critical",
+                    summary: `GPU ${formatDecimal(hardware.gpuTemperature, 0)}°C`,
                     message: `GPU 溫度過高：${formatDecimal(hardware.gpuTemperature, 0)}°C`
                 });
             } else if (hardware.gpuTemperature >= HEALTH_THRESHOLDS.gpuTemperatureWarningC) {
                 alerts.push({
                     severity: "warning",
+                    summary: `GPU ${formatDecimal(hardware.gpuTemperature, 0)}°C`,
                     message: `GPU 溫度偏高：${formatDecimal(hardware.gpuTemperature, 0)}°C`
                 });
             }
@@ -642,18 +860,24 @@
                 hour12: false
             }).format(now)
         );
+        for (const state of lineStates.values()) {
+            renderOverviewActivity(state, now);
+        }
     }
 
     function updateRefreshStatus() {
         const element = document.getElementById("refresh-status");
         if (isRefreshing) {
+            element.dataset.state = "refreshing";
             setText(element, "正在更新各 PC");
             return;
         }
         if (!nextRefreshAt) {
+            element.dataset.state = "ready";
             setText(element, "準備更新");
             return;
         }
+        element.dataset.state = "countdown";
         const seconds = Math.max(0, Math.ceil((nextRefreshAt - Date.now()) / 1000));
         setText(element, `${seconds} 秒後更新`);
     }
@@ -675,8 +899,68 @@
         element.textContent = message;
     }
 
-    function setField(card, name, value) {
-        setText(card.querySelector(`[data-field="${name}"]`), value);
+    function initializeTheme() {
+        const button = document.getElementById("theme-toggle");
+        const initialTheme = document.documentElement.dataset.theme === "dark"
+            ? "dark"
+            : "light";
+        applyTheme(initialTheme);
+
+        button.addEventListener("click", function () {
+            const nextTheme = document.documentElement.dataset.theme === "dark"
+                ? "light"
+                : "dark";
+            try {
+                localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+            } catch (_error) {
+                // Theme still applies for the current page when storage is unavailable.
+            }
+            applyTheme(nextTheme);
+        });
+
+        if (window.matchMedia) {
+            const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+            if (typeof mediaQuery.addEventListener === "function") {
+                mediaQuery.addEventListener("change", function (event) {
+                    if (!readStoredTheme()) {
+                        applyTheme(event.matches ? "dark" : "light");
+                    }
+                });
+            }
+        }
+    }
+
+    function readStoredTheme() {
+        try {
+            const value = localStorage.getItem(THEME_STORAGE_KEY);
+            return value === "dark" || value === "light" ? value : "";
+        } catch (_error) {
+            return "";
+        }
+    }
+
+    function applyTheme(theme) {
+        const normalizedTheme = theme === "dark" ? "dark" : "light";
+        const isDark = normalizedTheme === "dark";
+        document.documentElement.dataset.theme = normalizedTheme;
+
+        const button = document.getElementById("theme-toggle");
+        button.setAttribute("aria-pressed", String(isDark));
+        button.setAttribute(
+            "aria-label",
+            isDark ? "切換為淺色模式" : "切換為深色模式"
+        );
+        button.title = isDark ? "切換為淺色模式" : "切換為深色模式";
+        setText(button.querySelector("[data-theme-label]"), isDark ? "淺色" : "深色");
+
+        const themeColor = document.getElementById("theme-color");
+        if (themeColor) {
+            themeColor.content = isDark ? "#08111c" : "#eef3f7";
+        }
+    }
+
+    function setField(root, name, value) {
+        setText(root.querySelector(`[data-field="${name}"]`), value);
     }
 
     function setText(element, value) {
@@ -689,6 +973,14 @@
         try {
             const parsed = new URL(url);
             return `${parsed.protocol}//${parsed.host}/`;
+        } catch (_error) {
+            return "";
+        }
+    }
+
+    function extractHostname(url) {
+        try {
+            return new URL(url).hostname;
         } catch (_error) {
             return "";
         }

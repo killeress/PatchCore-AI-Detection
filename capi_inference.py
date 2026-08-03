@@ -338,11 +338,17 @@ class ImageResult:
 
     # Dot-matrix MARK binary detection metadata (detected from W0F0000 image)
     mark_text: str = ""
+    mark_raw_text: str = ""
+    mark_final_text: str = ""
+    mark_adoption_reason: str = ""
+    mark_temporal_history_count: int = 0
+    mark_temporal_support_count: int = 0
     mark_confidence: float = 0.0
     mark_bbox: Optional[Tuple[int, int, int, int]] = None  # (x, y, width, height)
     mark_roi: str = ""
     mark_orientation: str = ""
     mark_source_image: str = ""
+    mark_shadow_result_id: int = 0
     mark_exclusion_regions: List[ExclusionRegion] = field(default_factory=list)
 
     # Image preprocessing timing metadata for record traceability.
@@ -638,11 +644,28 @@ class CAPIInferencer:
             }
 
         paddle_text = str(paddle_result.get("paddle_text") or "").strip().upper()
+        final_text = str(
+            paddle_result.get("final_text") or paddle_text
+        ).strip().upper()
         paddle_valid = bool(
             paddle_result.get("success")
             and re.fullmatch(r"[A-Z0-9]{2}", paddle_text)
+            and re.fullmatch(r"[A-Z0-9]{2}", final_text)
         )
         detection["paddle_text"] = paddle_text
+        detection["final_text"] = final_text if paddle_valid else ""
+        detection["mark_adoption_reason"] = str(
+            paddle_result.get("adoption_reason") or ""
+        )
+        detection["mark_temporal_stable_text"] = str(
+            paddle_result.get("temporal_stable_text") or ""
+        )
+        detection["mark_temporal_history_count"] = int(
+            paddle_result.get("temporal_history_count") or 0
+        )
+        detection["mark_temporal_support_count"] = int(
+            paddle_result.get("temporal_stable_support_count") or 0
+        )
         detection["paddle_confidence"] = float(
             paddle_result.get("paddle_confidence") or 0.0
         )
@@ -664,22 +687,51 @@ class CAPIInferencer:
         detection["recognition_error"] = str(
             paddle_result.get("error") or ""
         ).replace("\r", " ").replace("\n", " ")[:240]
+        try:
+            detection["mark_shadow_result_id"] = max(
+                0,
+                int(paddle_result.get("id") or 0),
+            )
+        except (TypeError, ValueError):
+            detection["mark_shadow_result_id"] = 0
 
         if paddle_valid:
-            detection["text"] = paddle_text
+            detection["text"] = final_text
             detection["confidence"] = detection["paddle_confidence"]
             detection["recognition_technique"] = "PaddleOCR"
             detection["recognition_version"] = detection["paddle_engine_version"]
             detection["recognition_fallback"] = False
+            detection["recognition_reason"] = str(
+                paddle_result.get("adoption_reason") or "paddle_primary"
+            )
         else:
             detection["recognition_technique"] = "DotMatrixCV"
             detection["recognition_version"] = f"profile-v{legacy_profile}"
             detection["recognition_fallback"] = True
+            detection["recognition_reason"] = detection.get("recognition_error") or "no_valid_two_chars"
         return paddle_result
+
+    @staticmethod
+    def _build_mark_stream_key(
+        machine_no: Optional[str],
+        model_id: Optional[str],
+        detection: Dict[str, Any],
+    ) -> str:
+        """Partition temporal MARK history without inferring MARK from model_id."""
+        parts = [
+            str(machine_no or "unknown").strip(),
+            str(model_id or "unknown").strip(),
+            str(detection.get("roi") or "unknown").strip(),
+            str(detection.get("orientation") or "unknown").strip(),
+        ]
+        return "|".join(part.replace("|", "/") or "unknown" for part in parts)
 
     def _detect_panel_mark_binary_region(
         self,
         image_files: List[Path],
+        *,
+        machine_no: Optional[str] = None,
+        model_id: Optional[str] = None,
     ) -> Tuple[Optional[Dict[str, Any]], List[ExclusionRegion]]:
         source_path = next(
             (f for f in image_files if self._is_mark_binary_source(f.name)),
@@ -725,6 +777,13 @@ class CAPIInferencer:
             y2=y + height,
         )
         detection["mark_bbox_tuple"] = (x, y, width, height)
+        detection["mark_stream_key"] = self._build_mark_stream_key(
+            machine_no,
+            model_id,
+            detection,
+        )
+        detection["mark_machine_no"] = str(machine_no or "")
+        detection["mark_model_id"] = str(model_id or "")
         self._apply_online_paddle_mark_recognition(
             image,
             detection,
@@ -763,6 +822,10 @@ class CAPIInferencer:
                 f"worker_api=v"
                 f"{detection.get('paddle_worker_version', 'unknown')} "
                 f"decision=primary text={detection.get('text', '')} "
+                f"raw={detection.get('paddle_text', '')} "
+                f"adoption={detection.get('recognition_reason', '')} "
+                f"history={int(detection.get('mark_temporal_support_count') or 0)}/"
+                f"{int(detection.get('mark_temporal_history_count') or 0)} "
                 f"conf={float(detection.get('confidence') or 0.0):.3f} "
                 f"model_latency_ms="
                 f"{float(detection.get('paddle_latency_ms') or 0.0):.1f} "
@@ -785,10 +848,29 @@ class CAPIInferencer:
         for result in results:
             result.mark_exclusion_regions = list(mark_regions)
             result.mark_source_image = str(mark_detection.get("source_image", ""))
+            result.mark_shadow_result_id = int(
+                mark_detection.get("mark_shadow_result_id") or 0
+            )
             if bbox_tuple is not None:
                 result.mark_bbox = tuple(int(v) for v in bbox_tuple)
             if mark_detection.get("found"):
                 result.mark_text = str(mark_detection.get("text", ""))
+                result.mark_raw_text = str(mark_detection.get("paddle_text", ""))
+                result.mark_final_text = str(
+                    mark_detection.get("final_text")
+                    or mark_detection.get("text", "")
+                )
+                result.mark_adoption_reason = str(
+                    mark_detection.get("mark_adoption_reason")
+                    or mark_detection.get("recognition_reason")
+                    or ""
+                )
+                result.mark_temporal_history_count = int(
+                    mark_detection.get("mark_temporal_history_count") or 0
+                )
+                result.mark_temporal_support_count = int(
+                    mark_detection.get("mark_temporal_support_count") or 0
+                )
                 result.mark_confidence = float(mark_detection.get("confidence") or 0.0)
                 result.mark_roi = str(mark_detection.get("roi", ""))
                 result.mark_orientation = str(mark_detection.get("orientation", ""))
@@ -6439,6 +6521,7 @@ class CAPIInferencer:
         product_resolution: Optional[Tuple[int, int]] = None,
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
+        machine_no: Optional[str] = None,
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
         machine_judgment: Optional[str] = None,
     ):
@@ -6450,6 +6533,7 @@ class CAPIInferencer:
             product_resolution=product_resolution,
             bomb_info=bomb_info,
             model_id=model_id,
+            machine_no=machine_no,
             aoi_report_override=aoi_report_override,
             machine_judgment=machine_judgment,
         )
@@ -6462,6 +6546,7 @@ class CAPIInferencer:
         product_resolution: Optional[Tuple[int, int]] = None,
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
+        machine_no: Optional[str] = None,
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
         machine_judgment: Optional[str] = None,
     ) -> List[ImageResult]:
@@ -6492,7 +6577,11 @@ class CAPIInferencer:
             return f.stem.startswith("PINIGBI") or "OMIT0000" in f.name
         omit_files = [f for f in image_files if is_dust_check_image(f)]
         normal_files = [f for f in image_files if not is_dust_check_image(f)]
-        panel_mark_detection, panel_mark_regions = self._detect_panel_mark_binary_region(normal_files)
+        panel_mark_detection, panel_mark_regions = self._detect_panel_mark_binary_region(
+            normal_files,
+            machine_no=machine_no,
+            model_id=model_id,
+        )
 
         # 載入 OMIT 圖片 (如果有)
         omit_image = None
@@ -8090,6 +8179,7 @@ class CAPIInferencer:
         product_resolution: Optional[Tuple[int, int]] = None,
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
+        machine_no: Optional[str] = None,
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
         machine_judgment: Optional[str] = None,
     ):
@@ -8113,7 +8203,11 @@ class CAPIInferencer:
         panel_path = Path(panel_dir)
         t0 = time.time()
         image_files, is_duplicate = self._prepare_panel_image_files(panel_path)
-        panel_mark_detection, panel_mark_regions = self._detect_panel_mark_binary_region(image_files)
+        panel_mark_detection, panel_mark_regions = self._detect_panel_mark_binary_region(
+            image_files,
+            machine_no=machine_no,
+            model_id=model_id,
+        )
 
         aoi_report: Optional[Dict[str, List['AOIReportDefect']]] = None
         aoi_report_for_inference: Dict[str, List['AOIReportDefect']] = {}

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import json
 import logging
 import os
 import queue
+import sqlite3
 import threading
 import time
 import urllib.request
@@ -22,6 +24,10 @@ logger = logging.getLogger("capi.mark_shadow")
 
 _CLIENT_LOCK = threading.Lock()
 _CLIENT: Optional["MarkShadowClient"] = None
+_DATABASE_PATH: Optional[Path] = None
+_REQUEST_RESULT_IDS: contextvars.ContextVar[tuple[int, ...]] = (
+    contextvars.ContextVar("mark_shadow_request_result_ids", default=())
+)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -81,6 +87,9 @@ def build_mark_shadow_payload(
         "current_profile_version": int(detection.get("profile_version") or 0),
         "current_roi": str(detection.get("roi") or ""),
         "current_orientation": str(detection.get("orientation") or ""),
+        "machine_no": str(detection.get("mark_machine_no") or ""),
+        "model_id": str(detection.get("mark_model_id") or ""),
+        "stream_key": str(detection.get("mark_stream_key") or ""),
         "bbox": {
             "x": x,
             "y": y,
@@ -212,7 +221,7 @@ class MarkShadowClient:
 
 def configure_mark_shadow(config: Optional[Dict[str, Any]]) -> bool:
     """Configure the process-global shadow client from server_config.yaml."""
-    global _CLIENT
+    global _CLIENT, _DATABASE_PATH
     cfg = config or {}
     enabled = _env_bool(
         "CAPI_MARK_SHADOW_ENABLED",
@@ -225,6 +234,11 @@ def configure_mark_shadow(config: Optional[Dict[str, Any]]) -> bool:
     timeout_ms = int(cfg.get("timeout_ms", 5000) or 5000)
     max_queue = int(cfg.get("max_queue", 64) or 64)
     padding_ratio = float(cfg.get("crop_padding_ratio", 0.15) or 0.15)
+    _DATABASE_PATH = Path(
+        os.environ.get("CAPI_MARK_SHADOW_DB_PATH")
+        or str(cfg.get("database_path") or "")
+        or "/aidata/capi_ai/mark_shadow/data/mark_shadow.db"
+    ).expanduser()
 
     with _CLIENT_LOCK:
         old_client = _CLIENT
@@ -244,6 +258,81 @@ def configure_mark_shadow(config: Optional[Dict[str, Any]]) -> bool:
                 max_queue,
             )
     return enabled
+
+
+def link_mark_shadow_results_to_inference(
+    result_ids,
+    inference_record_id: int,
+) -> int:
+    """Persist the exact inference-record relationship after the main DB save."""
+    normalized_ids = sorted(
+        {
+            int(result_id)
+            for result_id in (result_ids or [])
+            if int(result_id or 0) > 0
+        }
+    )
+    record_id = int(inference_record_id or 0)
+    if (
+        not normalized_ids
+        or record_id <= 0
+        or _DATABASE_PATH is None
+        or not _DATABASE_PATH.is_file()
+    ):
+        return 0
+
+    with sqlite3.connect(str(_DATABASE_PATH), timeout=10) as connection:
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(mark_shadow_results)"
+            ).fetchall()
+        }
+        if "inference_record_id" not in columns:
+            connection.execute(
+                "ALTER TABLE mark_shadow_results "
+                "ADD COLUMN inference_record_id INTEGER DEFAULT 0"
+            )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mark_shadow_inference_record
+            ON mark_shadow_results(inference_record_id)
+            """
+        )
+        placeholders = ", ".join("?" for _ in normalized_ids)
+        cursor = connection.execute(
+            f"""
+            UPDATE mark_shadow_results
+            SET inference_record_id = ?
+            WHERE id IN ({placeholders})
+            """,
+            (record_id, *normalized_ids),
+        )
+        return int(cursor.rowcount)
+
+
+def reset_mark_shadow_request_results() -> None:
+    """Start a fresh per-request collection of worker result IDs."""
+    _REQUEST_RESULT_IDS.set(())
+
+
+def consume_mark_shadow_request_results() -> list[int]:
+    """Return and clear MARK result IDs produced by the current request."""
+    result_ids = list(_REQUEST_RESULT_IDS.get())
+    _REQUEST_RESULT_IDS.set(())
+    return result_ids
+
+
+def _remember_mark_shadow_result(result: Dict[str, Any]) -> None:
+    try:
+        result_id = int(result.get("id") or 0)
+    except (TypeError, ValueError):
+        return
+    if result_id <= 0:
+        return
+    current = _REQUEST_RESULT_IDS.get()
+    if result_id not in current:
+        _REQUEST_RESULT_IDS.set((*current, result_id))
 
 
 def submit_mark_shadow(
@@ -279,6 +368,7 @@ def recognize_mark_online(
         result.setdefault("engine_version", "3.7.0")
         result.setdefault("worker_version", "1")
         result["round_trip_ms"] = (time.perf_counter() - started) * 1000.0
+        _remember_mark_shadow_result(result)
         return result
     except Exception as exc:
         return {

@@ -81,6 +81,7 @@ CODE_FILES = [
     "templates/train_new/step5_done.html",
     "central_dashboard/README.md",
     "central_dashboard/app.js",
+    "central_dashboard/banner.png",
     "central_dashboard/config.js",
     "central_dashboard/index.html",
     "central_dashboard/settings.html",

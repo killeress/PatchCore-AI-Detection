@@ -21,6 +21,7 @@ import gzip
 import json
 import hashlib
 import html
+import http.client
 import ipaddress
 import inspect
 import secrets
@@ -71,6 +72,9 @@ CENTRAL_ACCOUNT_DEFAULT_IPS = {
 CENTRAL_ACCOUNT_LOCATION_DESCRIPTION = (
     "中央帳號中心位置；依廠區帶入預設 IP，IP 可依現場需求修改"
 )
+CENTRAL_ACCOUNT_AUTH_HEADER = "X-CAPI-Central-Auth"
+CENTRAL_ACCOUNT_AUTH_PATH = "/api/settings/central-auth"
+CENTRAL_ACCOUNT_AUTH_TIMEOUT_SECONDS = 3.0
 
 
 def _default_central_account_location(
@@ -3700,6 +3704,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_scratch_review_export()
             elif path == "/api/settings/login":
                 self._handle_api_settings_login()
+            elif path == CENTRAL_ACCOUNT_AUTH_PATH:
+                self._handle_api_settings_central_auth()
             elif path == "/api/settings/logout":
                 self._handle_api_settings_logout()
             elif path == "/api/central-dashboard/config":
@@ -3973,6 +3979,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._settings_sessions.pop(token, None)
                 return None
             username = session.get("username", "")
+            if session.get("auth_source") == "central":
+                user = session.get("user")
+                if not isinstance(user, dict) or user.get("username") != username:
+                    self._settings_sessions.pop(token, None)
+                    return None
+                return dict(user)
             user = self.db.get_settings_user_by_username(username) if self.db else None
             if not user:
                 self._settings_sessions.pop(token, None)
@@ -3982,11 +3994,21 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _create_settings_session(self, user: Dict[str, Any]) -> str:
         token = secrets.token_urlsafe(32)
+        auth_source = (
+            "central" if user.get("auth_source") == "central" else "local"
+        )
+        session = {
+            "username": user["username"],
+            "auth_source": auth_source,
+            "expires_at": (
+                datetime.now()
+                + timedelta(seconds=self._settings_session_ttl_seconds)
+            ),
+        }
+        if auth_source == "central":
+            session["user"] = dict(user)
         with self._settings_session_lock:
-            self._settings_sessions[token] = {
-                "username": user["username"],
-                "expires_at": datetime.now() + timedelta(seconds=self._settings_session_ttl_seconds),
-            }
+            self._settings_sessions[token] = session
         return token
 
     def _drop_settings_session(self) -> None:
@@ -4632,7 +4654,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             else:
                 from capi_server import server_status
                 status = server_status.get_status()
-                
+
+            status.setdefault("server", {})["hostname"] = _get_host_identity()
+
             # 將當班統計數據替換為 DB (支援重啟後恢復)
             if self.db:
                 shift_stats = self.db.get_shift_statistics()
@@ -9964,6 +9988,154 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             headers={"Set-Cookie": self._settings_clear_cookie_header()},
         )
 
+    def _load_central_account_location(self) -> Dict[str, str]:
+        server_config = (
+            getattr(self._capi_server_instance, "server_config", {}) or {}
+        )
+        default_location = _default_central_account_location(server_config)
+        if not self.db:
+            return default_location
+        try:
+            param = self.db.get_config_param(CENTRAL_ACCOUNT_LOCATION_PARAM)
+            if not param:
+                return default_location
+            value = param.get("decoded_value")
+            if value is None:
+                value = json.loads(param.get("param_value") or "{}")
+            return _normalize_central_account_location(value)
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Invalid central account location; using facility default: %s",
+                exc,
+            )
+            return default_location
+
+    def _verify_central_settings_user(
+        self,
+        username: str,
+        password: str,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        location = self._load_central_account_location()
+        center_ip = location["ip"]
+        request_body = json.dumps(
+            {"username": username, "password": password},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request_headers = {
+            "Content-Type": "application/json",
+            CENTRAL_ACCOUNT_AUTH_HEADER: "1",
+        }
+
+        for auth_path in (CENTRAL_ACCOUNT_AUTH_PATH, "/api/settings/login"):
+            connection = None
+            try:
+                connection = http.client.HTTPConnection(
+                    center_ip,
+                    80,
+                    timeout=CENTRAL_ACCOUNT_AUTH_TIMEOUT_SECONDS,
+                )
+                connection.request(
+                    "POST",
+                    auth_path,
+                    body=request_body,
+                    headers=request_headers,
+                )
+                response = connection.getresponse()
+                status = int(response.status)
+                response_body = response.read()
+            except (OSError, http.client.HTTPException) as exc:
+                logger.warning(
+                    "Central account authentication unavailable at %s: %s",
+                    center_ip,
+                    exc,
+                )
+                return (
+                    None,
+                    "中心帳號服務無法連線，請改用本機帳號或聯絡管理員",
+                )
+            finally:
+                if connection is not None:
+                    connection.close()
+
+            if status == 404 and auth_path == CENTRAL_ACCOUNT_AUTH_PATH:
+                continue
+            if status == 401:
+                return None, None
+            if status != 200:
+                logger.warning(
+                    "Central account authentication returned HTTP %s from %s",
+                    status,
+                    center_ip,
+                )
+                return (
+                    None,
+                    "中心帳號服務回應異常，請改用本機帳號或聯絡管理員",
+                )
+
+            try:
+                payload = json.loads(response_body.decode("utf-8"))
+                remote_user = payload.get("user")
+            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                remote_user = None
+            if (
+                not isinstance(remote_user, dict)
+                or str(remote_user.get("username") or "") != username
+            ):
+                logger.warning(
+                    "Central account authentication returned invalid user data from %s",
+                    center_ip,
+                )
+                return (
+                    None,
+                    "中心帳號服務回應異常，請改用本機帳號或聯絡管理員",
+                )
+
+            try:
+                user_id = int(remote_user.get("id") or 0)
+            except (TypeError, ValueError):
+                user_id = 0
+            is_admin = bool(remote_user.get("is_admin"))
+            user = {
+                "id": user_id,
+                "username": username,
+                "is_admin": is_admin,
+                "can_manage_accounts": bool(
+                    remote_user.get("can_manage_accounts") or is_admin
+                ),
+                "created_at": str(remote_user.get("created_at") or ""),
+                "updated_at": str(remote_user.get("updated_at") or ""),
+                "auth_source": "central",
+                "central_facility": location["facility"],
+            }
+            logger.info(
+                "Settings login authenticated by central account service %s",
+                center_ip,
+            )
+            return user, None
+
+        return (
+            None,
+            "中心帳號服務版本不支援中央登入，請先更新中心主機",
+        )
+
+    def _handle_api_settings_central_auth(self):
+        if (
+            str(self.headers.get(CENTRAL_ACCOUNT_AUTH_HEADER, "") or "")
+            != "1"
+        ):
+            self._send_json({"error": "不允許的驗證來源"}, status=403)
+            return
+        data = self._read_json_body()
+        if data is None:
+            return
+        username = str(data.get("username", "") or "").strip()
+        password = str(data.get("password", "") or "")
+        user = self.db.verify_settings_user(username, password) if self.db else None
+        if not user:
+            self._send_json({"error": "帳號或密碼錯誤"}, status=401)
+            return
+        self._send_json({"success": True, "user": user})
+
     def _handle_api_settings_login(self):
         try:
             data = self._read_json_body()
@@ -9972,9 +10144,31 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             username = str(data.get("username", "") or "").strip()
             password = str(data.get("password", "") or "")
             next_path = self._safe_settings_next_path(data.get("next", "") or "/settings")
-            user = self.db.verify_settings_user(username, password) if self.db else None
-            if not user:
+            if not username or not password:
                 self._send_json({"error": "帳號或密碼錯誤"}, status=401)
+                return
+            user = self.db.verify_settings_user(username, password) if self.db else None
+            central_error = None
+            forwarded_auth = (
+                str(self.headers.get(CENTRAL_ACCOUNT_AUTH_HEADER, "") or "")
+                == "1"
+            )
+            if not user and not forwarded_auth:
+                local_user = (
+                    self.db.get_settings_user_by_username(username)
+                    if self.db
+                    else None
+                )
+                if not local_user:
+                    user, central_error = self._verify_central_settings_user(
+                        username,
+                        password,
+                    )
+            if not user:
+                if central_error:
+                    self._send_json({"error": central_error}, status=503)
+                else:
+                    self._send_json({"error": "帳號或密碼錯誤"}, status=401)
                 return
             token = self._create_settings_session(user)
             self._send_json(
@@ -10167,6 +10361,47 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         try:
             where_sql, params = filters[filter_name]
             with self._open_mark_shadow_db() as connection:
+                shadow_columns = {
+                    str(row["name"])
+                    for row in connection.execute(
+                        "PRAGMA table_info(mark_shadow_results)"
+                    ).fetchall()
+                }
+                inference_link_column = (
+                    "inference_record_id"
+                    if "inference_record_id" in shadow_columns
+                    else "0 AS inference_record_id"
+                )
+                stream_key_column = (
+                    "stream_key"
+                    if "stream_key" in shadow_columns
+                    else "'' AS stream_key"
+                )
+                final_text_column = (
+                    "final_text"
+                    if "final_text" in shadow_columns
+                    else "'' AS final_text"
+                )
+                adoption_reason_column = (
+                    "adoption_reason"
+                    if "adoption_reason" in shadow_columns
+                    else "'' AS adoption_reason"
+                )
+                temporal_stable_text_column = (
+                    "temporal_stable_text"
+                    if "temporal_stable_text" in shadow_columns
+                    else "'' AS temporal_stable_text"
+                )
+                temporal_history_count_column = (
+                    "temporal_history_count"
+                    if "temporal_history_count" in shadow_columns
+                    else "0 AS temporal_history_count"
+                )
+                temporal_support_count_column = (
+                    "temporal_stable_support_count"
+                    if "temporal_stable_support_count" in shadow_columns
+                    else "0 AS temporal_stable_support_count"
+                )
                 rows = connection.execute(
                     f"""
                     SELECT
@@ -10175,7 +10410,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         current_profile_version, current_roi,
                         current_orientation, paddle_raw_text, paddle_text,
                         paddle_confidence, valid_two_chars, agreed,
-                        latency_ms, model_name, crop_path, expected_text, error
+                        {stream_key_column}, {final_text_column},
+                        {adoption_reason_column}, {temporal_stable_text_column},
+                        {temporal_history_count_column},
+                        {temporal_support_count_column},
+                        latency_ms, model_name, crop_path, expected_text, error,
+                        {inference_link_column}
                     FROM mark_shadow_results
                     {where_sql}
                     ORDER BY id DESC
@@ -10199,19 +10439,34 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 for row in stat_rows
                 if not str(row["error"] or "") and float(row["latency_ms"] or 0) > 0
             ]
-            record_ids = [None] * len(rows)
+            record_ids = [
+                int(row["inference_record_id"])
+                if int(row["inference_record_id"] or 0) > 0
+                else None
+                for row in rows
+            ]
             database = getattr(self, "db", None)
-            if database is not None and rows:
+            unresolved_indexes = [
+                index for index, record_id in enumerate(record_ids)
+                if record_id is None
+            ]
+            if database is not None and unresolved_indexes:
                 try:
-                    record_ids = database.find_inference_record_ids_for_images(
+                    fallback_ids = database.find_inference_record_ids_for_images(
                         [
                             (
-                                str(row["source_path"] or ""),
-                                str(row["source_image"] or ""),
+                                str(rows[index]["source_path"] or ""),
+                                str(rows[index]["source_image"] or ""),
                             )
-                            for row in rows
+                            for index in unresolved_indexes
                         ]
                     )
+                    for index, fallback_id in zip(
+                        unresolved_indexes,
+                        fallback_ids,
+                    ):
+                        if fallback_id:
+                            record_ids[index] = int(fallback_id)
                 except Exception as exc:
                     logger.warning("MARK Shadow inference record link lookup failed: %s", exc)
 
@@ -10227,6 +10482,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 )
                 item["valid_two_chars"] = bool(item.get("valid_two_chars"))
                 item["agreed"] = bool(item.get("agreed"))
+                raw_final_text = str(item.get("final_text") or "").strip().upper()
+                if not raw_final_text and item["valid_two_chars"]:
+                    raw_final_text = str(item.get("paddle_text") or "").strip().upper()
+                if not raw_final_text and not item["valid_two_chars"]:
+                    raw_final_text = str(item.get("current_text") or "").strip().upper()
+                    if raw_final_text and not item.get("adoption_reason"):
+                        item["adoption_reason"] = "dotmatrix_fallback"
+                item["final_text"] = raw_final_text
+                current_text = str(item.get("current_text") or "").strip().upper()
+                item["final_agreed"] = bool(
+                    raw_final_text and current_text and raw_final_text == current_text
+                )
                 record_id = record_ids[index] if index < len(record_ids) else None
                 item["inference_record_id"] = int(record_id) if record_id else None
                 item["record_url"] = f"/record/{int(record_id)}" if record_id else ""
@@ -11037,7 +11304,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if not reason.strip():
                 self._send_json({"error": "請填寫修改原因"})
                 return
+            user = self._current_settings_user() or {}
             if param_name == CENTRAL_ACCOUNT_LOCATION_PARAM:
+                if not user.get("can_manage_accounts"):
+                    self._send_json(
+                        {"error": "只有 admin 可以修改中心位置"},
+                        status=403,
+                    )
+                    return
                 try:
                     new_value = _normalize_central_account_location(new_value)
                 except ValueError as e:
@@ -11061,7 +11335,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     })
                     return
 
-            user = self._current_settings_user() or {}
             success = self.db.update_config_param(
                 param_name,
                 new_value,
@@ -11415,6 +11688,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         product_resolution=resolution,
                         bomb_info=bomb_info,
                         model_id=model_id,
+                        machine_no=detail.get("machine_no"),
                         machine_judgment=detail.get("machine_judgment"),
                     )
             else:
@@ -11425,6 +11699,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     product_resolution=resolution,
                     bomb_info=bomb_info,
                     model_id=model_id,
+                    machine_no=detail.get("machine_no"),
                     machine_judgment=detail.get("machine_judgment"),
                 )
 
@@ -14210,6 +14485,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "job not found"}, status=404)
             return
         job = self._mark_train_new_stale_if_needed(db, job)
+        if job["state"] in ("train", "completed"):
+            self._send_json({
+                "ok": True,
+                "job_id": job_id,
+                "state": job["state"],
+                "already_started": True,
+            })
+            return
         if job["state"] != "review":
             self._send_json({"error": f"job state must be 'review', currently '{job['state']}'"}, status=409)
             return
@@ -14224,12 +14507,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 }, status=409)
                 return
             slot["active_job_id"] = job_id
-
-        # 先把 prefilter scan 收掉並釋放 server process 的 GPU cache，避免
-        # PatchCore prefilter 用過的 VRAM 仍被 caching allocator 占住，使
-        # 訓練 subprocess（自己 set fraction）擠不出物理 VRAM 而 OOM。
-        CAPIWebHandler._cancel_and_wait_scan_idle(timeout_s=15.0)
-        CAPIWebHandler._free_server_gpu_cache()
 
         # 確保 runtime 存在（從 review 接續，多半已存在；server 重啟後可能沒有）
         runtime = CAPIWebHandler._get_job_runtime(job_id)
@@ -14261,7 +14538,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         db.update_training_job_state(job_id, "train")
         thread.start()
-        self._send_json({"ok": True, "state": "train"})
+        self._send_json({"ok": True, "job_id": job_id, "state": "train"})
 
     @staticmethod
     def _train_new_partial_training_worker(job_id, server_inst):
@@ -14280,6 +14557,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             CAPIWebHandler._append_train_new_log(job_id, msg)
 
         try:
+            log("準備訓練資源：正在停止模型掃描並釋放 GPU")
+            CAPIWebHandler._cancel_and_wait_scan_idle(timeout_s=15.0)
+            CAPIWebHandler._free_server_gpu_cache()
+
             job = db.get_training_job(job_id)
             if not job:
                 raise RuntimeError(f"找不到 job_id={job_id}")
@@ -14506,6 +14787,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         proc = None
         try:
+            log("準備訓練資源：正在停止模型掃描並釋放 GPU")
+            CAPIWebHandler._cancel_and_wait_scan_idle(timeout_s=15.0)
+            CAPIWebHandler._free_server_gpu_cache()
+
             train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
             output_root = _Path(train_cfg["output_root"])
             log_dir = output_root / "training_logs"

@@ -3,40 +3,78 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="light">
-    <meta name="theme-color" content="#f3f7fa">
+    <meta name="color-scheme" content="light dark">
+    <meta id="theme-color" name="theme-color" content="#eef3f7">
     <meta name="description" content="寧波廠區 CAPI AI 各產線即時狀態中控看板">
     <title>寧波廠區 CAPI AI 中控看板</title>
+    <script>
+        (function () {
+            var savedTheme = "";
+            try {
+                savedTheme = localStorage.getItem("capi-dashboard-theme") || "";
+            } catch (_error) {
+                savedTheme = "";
+            }
+            var prefersDark = window.matchMedia &&
+                window.matchMedia("(prefers-color-scheme: dark)").matches;
+            document.documentElement.dataset.theme =
+                savedTheme === "dark" || savedTheme === "light"
+                    ? savedTheme
+                    : (prefersDark ? "dark" : "light");
+        })();
+    </script>
     <link rel="stylesheet" href="./styles.css">
     <script defer src="./config.js"></script>
     <script defer src="./app.js"></script>
 </head>
 <body>
-    <a class="skip-link" href="#factory-sections">跳至線體狀態</a>
+    <a class="skip-link" href="#line-overview">跳至線體總覽</a>
 
     <header class="topbar">
         <div class="brand-block">
             <h1 id="dashboard-title">寧波廠區 CAPI AI 中控看板</h1>
         </div>
 
-        <div class="topbar-actions">
-            <a
-                id="dashboard-settings-link"
-                class="dashboard-settings-link"
-                href="/central_dashboard/settings"
-            >設備設定</a>
+        <div class="topbar-actions" aria-label="看板工具列">
+            <div class="topbar-action-group">
+                <a
+                    id="dashboard-settings-link"
+                    class="dashboard-settings-link"
+                    href="/central_dashboard/settings"
+                >
+                    <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M4 7h10M18 7h2M4 17h2M10 17h10"></path>
+                        <circle cx="16" cy="7" r="2"></circle>
+                        <circle cx="8" cy="17" r="2"></circle>
+                    </svg>
+                    <span>設備設定</span>
+                </a>
+                <button
+                    id="theme-toggle"
+                    class="theme-toggle"
+                    type="button"
+                    aria-pressed="false"
+                >
+                    <span class="theme-toggle-track" aria-hidden="true"></span>
+                    <span class="theme-toggle-label" data-theme-label>深色</span>
+                </button>
+            </div>
             <div class="clock-block" aria-label="目前時間">
-                <span id="current-date">----</span>
+                <span class="toolbar-label">目前時間</span>
                 <strong id="current-time">--:--:--</strong>
+                <span id="current-date">----</span>
             </div>
             <div class="refresh-block">
-                <span id="refresh-status">準備更新</span>
-                <button id="refresh-button" type="button">立即更新</button>
+                <span class="toolbar-label">自動更新</span>
+                <strong id="refresh-status" data-state="ready">準備更新</strong>
             </div>
         </div>
     </header>
 
     <main>
+        <section class="dashboard-banner" aria-label="智慧製造 AI 視覺檢測示意圖">
+        </section>
+
         <section class="summary-grid" aria-label="全廠摘要">
             <article class="summary-card">
                 <span>納管線體</span>
@@ -56,6 +94,32 @@
             </article>
         </section>
 
+        <section class="overview-section" aria-labelledby="overview-title">
+            <div class="section-heading">
+                <div>
+                    <p class="eyebrow">QUICK OVERVIEW</p>
+                    <h2 id="overview-title">線體即時總覽</h2>
+                </div>
+            </div>
+
+            <div class="overview-table-wrap">
+                <table class="overview-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">線體</th>
+                            <th scope="col">IP 位址</th>
+                            <th scope="col">狀態</th>
+                            <th scope="col">AOI 連線</th>
+                            <th scope="col">最近生產活動</th>
+                            <th scope="col">異常摘要</th>
+                            <th scope="col">快速導航</th>
+                        </tr>
+                    </thead>
+                    <tbody id="line-overview" aria-live="polite"></tbody>
+                </table>
+            </div>
+        </section>
+
         <section id="alert-panel" class="alert-panel" aria-labelledby="alert-title" hidden>
             <div>
                 <p class="eyebrow">SYSTEM ALERT</p>
@@ -67,21 +131,15 @@
         <section class="line-section" aria-labelledby="line-section-title">
             <div class="section-heading">
                 <div>
-                    <p class="eyebrow">PRODUCTION LINES</p>
-                    <h2 id="line-section-title">線體狀態</h2>
+                    <p class="eyebrow">DETAILED CARDS</p>
+                    <h2 id="line-section-title">線體詳細資訊</h2>
                 </div>
-                <p id="data-note">每 30 秒由各 PC 的 API 更新一次</p>
             </div>
 
             <div id="config-error" class="config-error" role="alert" hidden></div>
             <div id="factory-sections" aria-live="polite"></div>
         </section>
     </main>
-
-    <footer>
-        <span>設備清單儲存於中央 SQLite；即時狀態僅讀取各 PC API。</span>
-        <span id="footer-refresh-note">更新週期：30 秒</span>
-    </footer>
 
     <template id="line-card-template">
         <article class="line-card" data-state="checking">
@@ -97,12 +155,6 @@
 
             <div class="line-links">
                 <a data-link="dashboard" target="_blank" rel="noopener noreferrer">設備看板</a>
-                <a data-link="overexposed" target="_blank" rel="noopener noreferrer">Omit 過曝明細</a>
-            </div>
-
-            <div class="shift-row">
-                <span data-field="shift-name">當班</span>
-                <span data-field="shift-range">—</span>
             </div>
 
             <div class="group-heading">

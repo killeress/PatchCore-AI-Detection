@@ -53,6 +53,7 @@ pytest.ini
 *.xls
 *.xlsx
 *.png
+!central_dashboard/banner.png
 *.jpg
 *.jpeg
 *.tif
