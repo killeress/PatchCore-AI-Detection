@@ -1172,6 +1172,16 @@ def results_to_db_data(
             "heatmap_path": overview_path,
             "scratch_filter_count": result.scratch_filter_count,
             "mark_text": getattr(result, "mark_text", ""),
+            "mark_raw_text": getattr(result, "mark_raw_text", ""),
+            "mark_final_text": getattr(result, "mark_final_text", "")
+            or getattr(result, "mark_text", ""),
+            "mark_adoption_reason": getattr(result, "mark_adoption_reason", ""),
+            "mark_temporal_history_count": int(
+                getattr(result, "mark_temporal_history_count", 0) or 0
+            ),
+            "mark_temporal_support_count": int(
+                getattr(result, "mark_temporal_support_count", 0) or 0
+            ),
             "mark_confidence": float(getattr(result, "mark_confidence", 0.0) or 0.0),
             "mark_bbox": (
                 ",".join(str(int(v)) for v in result.mark_bbox)
@@ -2325,6 +2335,10 @@ class CAPIServer:
                 parsed = None
                 request_config = None
                 raw_data = b""
+                mark_shadow_result_ids = []
+                from capi_mark_shadow import reset_mark_shadow_request_results
+
+                reset_mark_shadow_request_results()
 
                 # ── 優先從 pending_buffer 取出下一筆請求 ──
                 if pending_buffer:
@@ -2447,6 +2461,9 @@ class CAPIServer:
                     start_time = time.time()
                     InferenceLogCapture.start_capture()
                     ai_judgment, ng_details, inference_results, is_duplicate, omit_image_raw, aoi_report, omit_overexposed, omit_overexposure_info, within_spec_info = self._process_request(parsed)
+                    from capi_mark_shadow import consume_mark_shadow_request_results
+
+                    mark_shadow_result_ids = consume_mark_shadow_request_results()
                     processing_seconds = time.time() - start_time
 
                     # 重複投片時在 LOG 標記
@@ -2503,9 +2520,14 @@ class CAPIServer:
                         within_spec_info,
                         client_request_text=request_data,
                         client_response_text=response,
+                        mark_shadow_result_ids=mark_shadow_result_ids,
                     )
 
                 except ProtocolError as e:
+                    if not mark_shadow_result_ids:
+                        from capi_mark_shadow import consume_mark_shadow_request_results
+
+                        mark_shadow_result_ids = consume_mark_shadow_request_results()
                     InferenceLogCapture.stop_capture()  # 清除擷取緩衝區
                     if inference_started:
                         with server_status.lock:
@@ -2520,10 +2542,21 @@ class CAPIServer:
                         client_socket.sendall((response + "\r\n").encode("utf-8"))
                     except Exception:
                         pass
-                    self._save_error_record(request_time, parsed, request_data, str(e), response)
+                    self._save_error_record(
+                        request_time,
+                        parsed,
+                        request_data,
+                        str(e),
+                        response,
+                        mark_shadow_result_ids=mark_shadow_result_ids,
+                    )
                     # 協議錯誤不斷線，繼續等待下一筆
 
                 except Exception as e:
+                    if not mark_shadow_result_ids:
+                        from capi_mark_shadow import consume_mark_shadow_request_results
+
+                        mark_shadow_result_ids = consume_mark_shadow_request_results()
                     InferenceLogCapture.stop_capture()  # 清除擷取緩衝區
                     if inference_started:
                         with server_status.lock:
@@ -2538,7 +2571,14 @@ class CAPIServer:
                         client_socket.sendall((response + "\r\n").encode("utf-8"))
                     except Exception:
                         return  # 發送失敗，連線已斷
-                    self._save_error_record(request_time, parsed, request_data, str(e), response)
+                    self._save_error_record(
+                        request_time,
+                        parsed,
+                        request_data,
+                        str(e),
+                        response,
+                        mark_shadow_result_ids=mark_shadow_result_ids,
+                    )
                     # 內部錯誤不斷線，繼續等待下一筆
 
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
@@ -2760,6 +2800,7 @@ class CAPIServer:
                     product_resolution=parsed["resolution"],
                     bomb_info=parsed.get("bomb_info"),
                     model_id=parsed.get("model_id"),
+                    machine_no=parsed.get("machine_no"),
                     aoi_report_override=aoi_report_override,
                     machine_judgment=parsed.get("machine_judgment"),
                 )
@@ -2836,6 +2877,7 @@ class CAPIServer:
         within_spec_info: Optional[Dict[str, Any]] = None,
         client_request_text: str = "",
         client_response_text: str = "",
+        mark_shadow_result_ids: Optional[List[int]] = None,
     ):
         """
         非同步儲存 Heatmap 和 DB 記錄（在背景執行緒中執行）
@@ -2956,6 +2998,46 @@ class CAPIServer:
                 image_preprocess_timing=preprocess_timing,
             )
 
+            all_mark_shadow_result_ids = sorted(
+                {
+                    int(getattr(result, "mark_shadow_result_id", 0) or 0)
+                    for result in results
+                    if int(getattr(result, "mark_shadow_result_id", 0) or 0) > 0
+                }.union(
+                    {
+                        int(result_id)
+                        for result_id in (mark_shadow_result_ids or [])
+                        if int(result_id or 0) > 0
+                    }
+                )
+            )
+            if all_mark_shadow_result_ids:
+                try:
+                    from capi_mark_shadow import (
+                        link_mark_shadow_results_to_inference,
+                    )
+
+                    linked_count = link_mark_shadow_results_to_inference(
+                        all_mark_shadow_result_ids,
+                        record_id,
+                    )
+                    if linked_count != len(all_mark_shadow_result_ids):
+                        logger.warning(
+                            "MARK inference link incomplete: record_id=%s "
+                            "mark_result_ids=%s linked=%s",
+                            record_id,
+                            all_mark_shadow_result_ids,
+                            linked_count,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "MARK inference link failed: record_id=%s "
+                        "mark_result_ids=%s error=%s",
+                        record_id,
+                        all_mark_shadow_result_ids,
+                        exc,
+                    )
+
             if within_spec_info:
                 self.db.save_within_spec_review_log(
                     client_record_id=None,
@@ -2982,10 +3064,11 @@ class CAPIServer:
         raw_data: Optional[str],
         error: str,
         client_response_text: str = "",
+        mark_shadow_result_ids: Optional[List[int]] = None,
     ):
         """儲存錯誤記錄到資料庫"""
         try:
-            self.db.save_inference_record(
+            record_id = self.db.save_inference_record(
                 glass_id=parsed["glass_id"] if parsed else "",
                 model_id=parsed["model_id"] if parsed else "",
                 machine_no=parsed["machine_no"] if parsed else "",
@@ -3003,6 +3086,26 @@ class CAPIServer:
             )
         except Exception as db_err:
             logger.error(f"Failed to save error record: {db_err}")
+            return
+
+        if mark_shadow_result_ids:
+            try:
+                from capi_mark_shadow import (
+                    link_mark_shadow_results_to_inference,
+                )
+
+                link_mark_shadow_results_to_inference(
+                    mark_shadow_result_ids,
+                    record_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "MARK error-record link failed: record_id=%s "
+                    "mark_result_ids=%s error=%s",
+                    record_id,
+                    mark_shadow_result_ids,
+                    exc,
+                )
 
 
 # ── CLI ────────────────────────────────────────────────

@@ -268,6 +268,9 @@ def test_central_dashboard_pages_use_sqlite_config_and_settings_route():
         encoding="utf-8"
     )
     app_js = (root / "central_dashboard" / "app.js").read_text(encoding="utf-8")
+    styles_css = (root / "central_dashboard" / "styles.css").read_text(
+        encoding="utf-8"
+    )
     settings_html = (root / "central_dashboard" / "settings.html").read_text(
         encoding="utf-8"
     )
@@ -277,3 +280,46 @@ def test_central_dashboard_pages_use_sqlite_config_and_settings_route():
     assert "中控看板設備設定" in settings_html
     assert 'method: "POST"' in settings_html
     assert 'fetch("/api/central-dashboard/config/all"' in settings_html
+    assert 'data-link="overexposed"' not in index_html
+    assert "Omit 過曝明細" not in index_html
+    assert 'data-field="shift-name"' not in index_html
+    assert 'data-field="shift-range"' not in index_html
+    assert 'id="data-note"' not in index_html
+    assert '設備清單儲存於中央 SQLite；即時狀態僅讀取各 PC API。' not in index_html
+    assert 'id="footer-refresh-note"' not in index_html
+    assert 'configureLink(card, "overexposed"' not in app_js
+    assert '每 ${config.refreshIntervalSeconds} 秒由各 PC 的 API 更新一次' not in app_js
+    assert 'refreshTimer = window.setTimeout' in app_js
+    assert 'id="line-overview"' in index_html
+    assert 'id="theme-toggle"' in index_html
+    assert 'class="topbar-action-group"' in index_html
+    assert 'class="toolbar-icon"' in index_html
+    assert 'id="refresh-button"' not in index_html
+    assert 'document.getElementById("refresh-button")' not in app_js
+    assert 'id="refresh-status" data-state="ready"' in index_html
+    assert '#refresh-status::before' in styles_css
+    assert 'element.dataset.state = "refreshing"' in app_js
+    assert "createOverviewRow(line)" in app_js
+    assert "renderOverviewRow(state)" in app_js
+    assert "<th scope=\"col\">AOI 連線</th>" in index_html
+    assert "<th scope=\"col\">最近生產活動</th>" in index_html
+    assert "<th scope=\"col\">異常摘要</th>" in index_html
+    assert 'aoi.dataset.state = "connected";' in app_js
+    assert 'setText(aoi, "AOI 未連線");' in app_js
+    assert "function formatRelativeTime(value, now = new Date())" in app_js
+    assert "`最近 ${judgment} · ${relativeTime}`" in app_js
+    assert "badge.textContent = `⚠ ${alert.summary}`;" in app_js
+    assert 'link.textContent = "開啟";' in app_js
+    assert 'link.textContent = "開啟設備";' not in app_js
+    assert 'localStorage.setItem(THEME_STORAGE_KEY, nextTheme)' in app_js
+    assert ':root[data-theme="dark"]' in styles_css
+    assert 'createInput(index, "ip", "設備 IP", 15, true)' in settings_html
+    assert 'createInput(index, "pcName"' not in settings_html
+    assert 'createInput(index, "apiUrl"' not in settings_html
+    assert 'apiUrl: `${baseUrl}/api/status`' in settings_html
+    assert 'dashboardUrl: `${baseUrl}/`' in settings_html
+    assert 'overexposedUrl: `${baseUrl}/overexposed`' in settings_html
+    assert "createMoveButton(index, -1" in settings_html
+    assert "createMoveButton(index, 1" in settings_html
+    assert "hostname: textValue(server.hostname)" in app_js
+    assert 'data.hostname ||' in app_js

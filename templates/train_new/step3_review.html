@@ -61,7 +61,7 @@
 
   <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;padding-top:12px;border-top:1px solid #45475a;">
     <a href="/train/new" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">返回</a>
-    <button onclick="startTraining()"
+    <button id="start-training-btn" type="button" onclick="startTraining()"
       style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:8px 22px;font-weight:700;">
       開始訓練 →
     </button>
@@ -728,24 +728,94 @@ function updateAllBadges() {
   lightings.forEach(updateBadge);
 }
 
+let _startTrainingPending = false;
+
+function redirectForTrainingState(state) {
+  if (state === 'completed') {
+    location.href = `/train/new/done/${encodeURIComponent(jobId)}`;
+    return true;
+  }
+  if (state === 'train') {
+    location.href = `/train/new/progress?job_id=${encodeURIComponent(jobId)}`;
+    return true;
+  }
+  return false;
+}
+
 async function startTraining() {
-  const ok = await capConfirm(
-    (trainingScope && trainingScope.mode === 'partial'
-      ? `系統只會訓練 selected PT：${(trainingScope.selected_units || []).join(', ')}。\n其他 PT 不會重新訓練。`
-      : '系統將同時訓練 5 光源 × inner/edge 共 10 個 PatchCore 子模型。\n預計耗時 60–120 分鐘，期間可在 Step 5 觀察進度。'),
-    {
-      title: trainingScope && trainingScope.mode === 'partial' ? '開始局部重訓？' : '開始訓練 10 個模型？',
-      confirmText: '開始訓練',
-      cancelText: '再想想'
+  if (_startTrainingPending) return;
+  _startTrainingPending = true;
+
+  const button = document.getElementById('start-training-btn');
+  const originalText = button.textContent;
+  let leavingPage = false;
+  button.disabled = true;
+
+  try {
+    const ok = await capConfirm(
+      (trainingScope && trainingScope.mode === 'partial'
+        ? `系統只會訓練 selected PT：${(trainingScope.selected_units || []).join(', ')}。\n其他 PT 不會重新訓練。`
+        : '系統將同時訓練 5 光源 × inner/edge 共 10 個 PatchCore 子模型。\n預計耗時 60–120 分鐘，期間可在 Step 5 觀察進度。'),
+      {
+        title: trainingScope && trainingScope.mode === 'partial' ? '開始局部重訓？' : '開始訓練 10 個模型？',
+        confirmText: '開始訓練',
+        cancelText: '再想想'
+      }
+    );
+    if (!ok) return;
+
+    button.textContent = '啟動中…';
+    button.setAttribute('aria-busy', 'true');
+
+    let startError = null;
+    try {
+      const response = await fetch(
+        `/api/train/new/start_training/${encodeURIComponent(jobId)}`,
+        {method: 'POST'}
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.error) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+      leavingPage = redirectForTrainingState(data.state);
+      if (!leavingPage) {
+        location.href = `/train/new/progress?job_id=${encodeURIComponent(jobId)}`;
+        leavingPage = true;
+      }
+      return;
+    } catch (error) {
+      startError = error;
     }
-  );
-  if (!ok) return;
-  fetch(`/api/train/new/start_training/${encodeURIComponent(jobId)}`, {method: 'POST'})
-    .then(r => r.json())
-    .then(d => {
-      if (d.error) { capAlert(d.error, {type: 'error', title: '無法啟動訓練'}); return; }
-      location.href = `/train/new/progress?job_id=${encodeURIComponent(jobId)}`;
-    });
+
+    // POST 的回應可能被 proxy/網路中斷，但後端仍已成功啟動；先查 job 狀態再報錯。
+    try {
+      const statusResponse = await fetch(
+        `/api/train/new/status?job_id=${encodeURIComponent(jobId)}`,
+        {cache: 'no-store'}
+      );
+      const statusData = await statusResponse.json();
+      if (statusResponse.ok && redirectForTrainingState(statusData.state)) {
+        leavingPage = true;
+        return;
+      }
+    } catch (_) {
+      // 保留原始啟動錯誤，讓使用者知道第一次請求沒有取得有效回應。
+    }
+
+    throw startError;
+  } catch (error) {
+    await capAlert(
+      error && error.message ? error.message : '無法確認訓練是否已啟動，請重新整理後查看 job 狀態。',
+      {type: 'error', title: '無法啟動訓練'}
+    );
+  } finally {
+    if (!leavingPage) {
+      _startTrainingPending = false;
+      button.disabled = false;
+      button.textContent = originalText;
+      button.removeAttribute('aria-busy');
+    }
+  }
 }
 
 // ── 全域鍵盤處理（仿 Windows Photos）────────────────

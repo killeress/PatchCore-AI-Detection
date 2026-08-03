@@ -863,6 +863,35 @@ def test_handle_train_new_start_training_409_wrong_state():
     assert h._sent_response[0]["status"] == 409
 
 
+@pytest.mark.parametrize("state", ["train", "completed"])
+def test_handle_train_new_start_training_is_idempotent(monkeypatch, state):
+    """同一 job 重複送出開始請求時，已啟動或完成都應回成功。"""
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1", "machine_id": "M", "state": state, "panel_paths": []
+    }
+    monkeypatch.setattr(
+        CAPIWebHandler,
+        "_mark_train_new_stale_if_needed",
+        classmethod(lambda cls, db, job: job),
+    )
+
+    h = _make_handler_with_server(server, "/api/train/new/start_training/j1")
+    h._handle_train_new_start_training()
+
+    assert h._sent_response[0]["status"] == 200
+    body = json.loads(h._sent_response[0]["body"])
+    assert body == {
+        "ok": True,
+        "job_id": "j1",
+        "state": state,
+        "already_started": True,
+    }
+    server.database.update_training_job_state.assert_not_called()
+
+
 def test_handle_train_new_start_training_starts_thread(monkeypatch):
     """驗證在 review state 時，handler 會 update state + spawn thread。"""
     import threading
@@ -875,6 +904,10 @@ def test_handle_train_new_start_training_starts_thread(monkeypatch):
     CAPIWebHandler._train_new_jobs = {}
     CAPIWebHandler._train_new_jobs_lock = threading.Lock()
     CAPIWebHandler._train_slot = {"lock": threading.Lock(), "active_job_id": None}
+    wait_for_gpu = MagicMock()
+    free_gpu_cache = MagicMock()
+    monkeypatch.setattr(CAPIWebHandler, "_cancel_and_wait_scan_idle", wait_for_gpu)
+    monkeypatch.setattr(CAPIWebHandler, "_free_server_gpu_cache", free_gpu_cache)
 
     started_threads = []
     real_thread = threading.Thread
@@ -892,6 +925,8 @@ def test_handle_train_new_start_training_starts_thread(monkeypatch):
     body = json.loads(h._sent_response[0]["body"])
     assert body["state"] == "train"
     assert CAPIWebHandler._train_slot["active_job_id"] == "j1"
+    wait_for_gpu.assert_not_called()
+    free_gpu_cache.assert_not_called()
 
 
 def test_handle_train_new_start_training_rejects_when_slot_held():

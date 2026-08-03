@@ -191,6 +191,16 @@
             color: var(--primary-dark);
         }
 
+        .line-editor-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 7px;
+        }
+
+        .move-button {
+            padding: 7px 10px;
+        }
+
         .enabled-label {
             flex-direction: row;
             align-items: center;
@@ -310,7 +320,7 @@
             <div class="panel-heading">
                 <div>
                     <h2 id="lines-title">納管線體</h2>
-                    <p>可直接新增、修改、停用或刪除設備；顯示順序依此頁排列。</p>
+                    <p>只需填設備 IP，系統會自動建立相關 URL；PC 名稱由狀態 API 的 hostname 取得。顯示順序可用上移／下移調整。</p>
                 </div>
                 <button id="add-line" type="button">＋ 新增線體</button>
             </div>
@@ -359,7 +369,7 @@
                     document.getElementById("timeout-seconds").value =
                         data.requestTimeoutSeconds || 8;
                     state.lines = Array.isArray(data.lines)
-                        ? data.lines.map((line) => Object.assign({}, line))
+                        ? data.lines.map(toEditableLine)
                         : [];
                     renderLines();
                     setMessage(`已載入 ${state.lines.length} 筆線體設定。`, "success");
@@ -375,10 +385,7 @@
                     id: `line-${Date.now()}`,
                     factory: "",
                     line: "",
-                    pcName: "",
-                    apiUrl: "",
-                    dashboardUrl: "",
-                    overexposedUrl: "",
+                    ip: "",
                     enabled: true
                 });
                 renderLines();
@@ -406,7 +413,14 @@
                     const heading = document.createElement("div");
                     heading.className = "line-editor-heading";
                     const title = document.createElement("strong");
-                    title.textContent = `${index + 1}. ${line.pcName || line.line || "新線體"}`;
+                    title.textContent =
+                        `${index + 1}. ${line.line || getLineIp(line) || "新線體"}`;
+                    const headingActions = document.createElement("div");
+                    headingActions.className = "line-editor-actions";
+                    const moveUp = createMoveButton(index, -1, "↑ 上移");
+                    moveUp.disabled = index === 0;
+                    const moveDown = createMoveButton(index, 1, "↓ 下移");
+                    moveDown.disabled = index === state.lines.length - 1;
                     const remove = document.createElement("button");
                     remove.type = "button";
                     remove.className = "danger";
@@ -415,7 +429,8 @@
                         state.lines.splice(index, 1);
                         renderLines();
                     });
-                    heading.append(title, remove);
+                    headingActions.append(moveUp, moveDown, remove);
+                    heading.append(title, headingActions);
 
                     const grid = document.createElement("div");
                     grid.className = "line-grid";
@@ -423,10 +438,7 @@
                         createInput(index, "id", "線體 ID", 64, true),
                         createInput(index, "factory", "廠別", 64, true),
                         createInput(index, "line", "線體名稱", 64, true),
-                        createInput(index, "pcName", "PC 名稱", 64, true),
-                        createInput(index, "apiUrl", "狀態 API URL", 500, true),
-                        createInput(index, "dashboardUrl", "設備看板 URL", 500, false),
-                        createInput(index, "overexposedUrl", "Omit 過曝 URL", 500, false)
+                        createInput(index, "ip", "設備 IP", 15, true)
                     );
 
                     const enabledLabel = document.createElement("label");
@@ -445,6 +457,24 @@
                 });
             }
 
+            function createMoveButton(index, offset, text) {
+                const button = document.createElement("button");
+                button.type = "button";
+                button.className = "move-button";
+                button.textContent = text;
+                button.addEventListener("click", function () {
+                    const targetIndex = index + offset;
+                    if (targetIndex < 0 || targetIndex >= state.lines.length) {
+                        return;
+                    }
+                    const current = state.lines[index];
+                    state.lines[index] = state.lines[targetIndex];
+                    state.lines[targetIndex] = current;
+                    renderLines();
+                });
+                return button;
+            }
+
             function createInput(index, field, labelText, maxLength, required) {
                 const label = document.createElement("label");
                 label.textContent = labelText;
@@ -453,9 +483,10 @@
                 input.value = state.lines[index][field] || "";
                 input.maxLength = maxLength;
                 input.required = required;
-                if (field.endsWith("Url")) {
-                    input.type = "url";
-                    input.placeholder = "http://10.x.x.x/";
+                if (field === "ip") {
+                    input.inputMode = "decimal";
+                    input.placeholder = "例如：10.172.25.129";
+                    input.autocomplete = "off";
                 }
                 input.addEventListener("input", function () {
                     state.lines[index][field] = input.value;
@@ -464,26 +495,68 @@
                 return label;
             }
 
-            async function saveConfig() {
-                const config = {
-                    title: document.getElementById("title").value.trim(),
-                    refreshIntervalSeconds: Number(
-                        document.getElementById("refresh-seconds").value
-                    ),
-                    requestTimeoutSeconds: Number(
-                        document.getElementById("timeout-seconds").value
-                    ),
-                    lines: state.lines.map((line) => ({
-                        id: String(line.id || "").trim(),
-                        factory: String(line.factory || "").trim(),
-                        line: String(line.line || "").trim(),
-                        pcName: String(line.pcName || "").trim(),
-                        apiUrl: String(line.apiUrl || "").trim(),
-                        dashboardUrl: String(line.dashboardUrl || "").trim(),
-                        overexposedUrl: String(line.overexposedUrl || "").trim(),
-                        enabled: line.enabled !== false
-                    }))
+            function toEditableLine(line) {
+                return Object.assign({}, line, { ip: getLineIp(line) });
+            }
+
+            function getLineIp(line) {
+                const configuredIp = String((line && line.ip) || "").trim();
+                if (configuredIp) {
+                    return configuredIp;
+                }
+                try {
+                    return new URL(String((line && line.apiUrl) || "")).hostname;
+                } catch (_error) {
+                    return "";
+                }
+            }
+
+            function normalizeIpv4(value) {
+                const parts = String(value || "").trim().split(".");
+                if (
+                    parts.length !== 4 ||
+                    parts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255)
+                ) {
+                    return "";
+                }
+                return parts.map((part) => String(Number(part))).join(".");
+            }
+
+            function buildLineConfig(line, index) {
+                const ip = normalizeIpv4(getLineIp(line));
+                if (!ip) {
+                    throw new Error(`第 ${index + 1} 筆設備 IP 格式錯誤`);
+                }
+                const baseUrl = `http://${ip}`;
+                return {
+                    id: String(line.id || "").trim(),
+                    factory: String(line.factory || "").trim(),
+                    line: String(line.line || "").trim(),
+                    pcName: ip,
+                    apiUrl: `${baseUrl}/api/status`,
+                    dashboardUrl: `${baseUrl}/`,
+                    overexposedUrl: `${baseUrl}/overexposed`,
+                    enabled: line.enabled !== false
                 };
+            }
+
+            async function saveConfig() {
+                let config;
+                try {
+                    config = {
+                        title: document.getElementById("title").value.trim(),
+                        refreshIntervalSeconds: Number(
+                            document.getElementById("refresh-seconds").value
+                        ),
+                        requestTimeoutSeconds: Number(
+                            document.getElementById("timeout-seconds").value
+                        ),
+                        lines: state.lines.map(buildLineConfig)
+                    };
+                } catch (error) {
+                    setMessage(`儲存失敗：${error.message || error}`, "error");
+                    return;
+                }
 
                 setBusy(true);
                 setMessage("正在儲存設定…");
@@ -506,7 +579,7 @@
                     if (!response.ok) {
                         throw new Error(data.error || `HTTP ${response.status}`);
                     }
-                    state.lines = data.config.lines.map((line) => Object.assign({}, line));
+                    state.lines = data.config.lines.map(toEditableLine);
                     renderLines();
                     setMessage(
                         `儲存完成，共 ${state.lines.length} 筆線體設定。`,

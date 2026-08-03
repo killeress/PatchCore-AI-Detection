@@ -1508,7 +1508,7 @@ class CAPIDatabase:
     def find_inference_record_ids_for_images(
         self, image_refs: List[Tuple[str, str]]
     ) -> List[Optional[int]]:
-        """依圖片路徑／檔名找出對應的推論 record_id。"""
+        """依圖片路徑、面板目錄或檔名找出對應的推論 record_id。"""
         refs = [
             (str(image_path or ""), str(image_name or ""))
             for image_path, image_name in image_refs
@@ -1518,6 +1518,13 @@ class CAPIDatabase:
 
         image_paths = sorted({image_path for image_path, _ in refs if image_path})
         image_names = sorted({image_name for _, image_name in refs if image_name})
+        image_dirs = sorted(
+            {
+                str(Path(image_path).parent)
+                for image_path, _ in refs
+                if image_path
+            }
+        )
         conditions = []
         params: List[str] = []
         if image_paths:
@@ -1528,6 +1535,10 @@ class CAPIDatabase:
             placeholders = ", ".join("?" for _ in image_names)
             conditions.append(f"img.image_name IN ({placeholders})")
             params.extend(image_names)
+        if image_dirs:
+            placeholders = ", ".join("?" for _ in image_dirs)
+            conditions.append(f"rec.image_dir IN ({placeholders})")
+            params.extend(image_dirs)
         if not conditions:
             return [None] * len(refs)
 
@@ -1535,7 +1546,7 @@ class CAPIDatabase:
         try:
             rows = conn.execute(
                 f"""
-                SELECT img.image_path, img.image_name, img.record_id
+                SELECT img.image_path, img.image_name, img.record_id, rec.image_dir
                 FROM image_results img
                 JOIN inference_records rec ON rec.id = img.record_id
                 WHERE {' OR '.join(conditions)}
@@ -1547,6 +1558,7 @@ class CAPIDatabase:
             conn.close()
 
         path_ids: Dict[str, int] = {}
+        directory_ids: Dict[str, int] = {}
         name_ids: Dict[str, set] = {}
         for row in rows:
             record_id = int(row["record_id"])
@@ -1554,6 +1566,12 @@ class CAPIDatabase:
             image_name = str(row["image_name"] or "")
             if image_path and image_path not in path_ids:
                 path_ids[image_path] = record_id
+                image_dir = str(Path(image_path).parent)
+                if image_dir not in directory_ids:
+                    directory_ids[image_dir] = record_id
+            record_image_dir = str(row["image_dir"] or "")
+            if record_image_dir and record_image_dir not in directory_ids:
+                directory_ids[record_image_dir] = record_id
             if image_name:
                 name_ids.setdefault(image_name, set()).add(record_id)
 
@@ -1561,6 +1579,10 @@ class CAPIDatabase:
         for image_path, image_name in refs:
             if image_path in path_ids:
                 matched.append(path_ids[image_path])
+                continue
+            image_dir = str(Path(image_path).parent) if image_path else ""
+            if image_dir in directory_ids:
+                matched.append(directory_ids[image_dir])
                 continue
             candidates = name_ids.get(image_name, set())
             matched.append(next(iter(candidates)) if len(candidates) == 1 else None)

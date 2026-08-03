@@ -14,11 +14,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import capi_mark_shadow
+from capi_inference import CAPIInferencer
 from capi_database import CAPIDatabase
 from capi_mark_shadow import build_mark_shadow_payload, recognize_mark_online
 from capi_web import CAPIWebHandler
 from mark_shadow.paddle_shadow_worker import (
     PaddleRecognizer,
+    MarkTemporalStabilizer,
     ShadowApplication,
     ShadowStore,
     normalize_mark_text,
@@ -35,6 +37,8 @@ def test_build_mark_shadow_payload_crops_and_rotates_upright():
         "profile_version": 3,
         "roi": "bottom_left",
         "orientation": "rot180",
+        "mark_machine_no": "CAPI13",
+        "mark_model_id": "MODEL-A",
         "bbox": {"x": 5, "y": 6, "width": 4, "height": 3},
     }
 
@@ -52,6 +56,8 @@ def test_build_mark_shadow_payload_crops_and_rotates_upright():
     assert payload["source_image"] == "W0F00000_074058.tif"
     assert payload["current_text"] == "BJ"
     assert payload["current_profile_version"] == 3
+    assert payload["machine_no"] == "CAPI13"
+    assert payload["model_id"] == "MODEL-A"
 
 
 def test_normalize_mark_text_rejects_non_two_character_results():
@@ -60,6 +66,118 @@ def test_normalize_mark_text_rejects_non_two_character_results():
     assert normalize_mark_text("B") == ""
     assert normalize_mark_text("BJ1") == ""
     assert normalize_mark_text("B-") == ""
+
+
+def test_mark_temporal_stabilizer_uses_recent_stream_and_rejects_isolated_values():
+    stabilizer = MarkTemporalStabilizer()
+    key = "M1|MODEL-A|bottom_left|rot180"
+
+    assert stabilizer.observe(key, "K5")["final_text"] == "K5"
+    assert stabilizer.observe(key, "K5")["final_text"] == "K5"
+    assert stabilizer.observe(key, "K5")["adoption_reason"] == "stable_match"
+
+    isolated = stabilizer.observe(key, "K6")
+    assert isolated["final_text"] == "K5"
+    assert isolated["adoption_reason"] == "temporal_outlier"
+    assert isolated["temporal_history_count"] == 4
+
+    # A different one-off spelling must not join the K6 candidate run.
+    assert stabilizer.observe(key, "KS")["final_text"] == "K5"
+    assert stabilizer.observe(key, "K6")["final_text"] == "K5"
+    assert stabilizer.observe(key, "K6")["final_text"] == "K5"
+    switched = stabilizer.observe(key, "K6")
+    assert switched["final_text"] == "K6"
+    assert switched["adoption_reason"] == "temporal_switch"
+
+
+def test_model_switch_resets_history_even_when_switching_back(tmp_path):
+    store = ShadowStore(
+        tmp_path / "shadow.db",
+        tmp_path / "disagreements",
+    )
+    application = ShadowApplication(SimpleNamespace(model_name="fake"), store)
+    key_a = "CAPI13|MODEL-A|bottom_left|rot180"
+    key_a_other_orientation = "CAPI13|MODEL-A|top_right|normal"
+    key_b = "CAPI13|MODEL-B|bottom_left|rot180"
+
+    assert application._reset_for_model_context(
+        {"machine_no": "CAPI13", "model_id": "MODEL-A"},
+        key_a,
+    ) == "context_start"
+    application.temporal.observe(key_a, "K5")
+    application.temporal.observe(key_a, "K5")
+    assert application.temporal.observe(key_a, "K5")["temporal_stable_text"] == "K5"
+    application.temporal.observe(key_a_other_orientation, "K5")
+    application.temporal.observe(key_a_other_orientation, "K5")
+    assert application.temporal.observe(
+        key_a_other_orientation,
+        "K5",
+    )["temporal_stable_text"] == "K5"
+
+    assert application._reset_for_model_context(
+        {"machine_no": "CAPI13", "model_id": "MODEL-B"},
+        key_b,
+    ) == "model_switch_reset"
+    model_b = application.temporal.observe(key_b, "EJ")
+    assert model_b["final_text"] == "EJ"
+    assert model_b["temporal_history_count"] == 1
+
+    assert application._reset_for_model_context(
+        {"machine_no": "CAPI13", "model_id": "MODEL-A"},
+        key_a,
+    ) == "model_switch_reset"
+    switched_back = application.temporal.observe(key_a, "N5")
+    assert switched_back["final_text"] == "N5"
+    assert switched_back["temporal_stable_text"] == ""
+    assert switched_back["temporal_history_count"] == 1
+    other_orientation = application.temporal.observe(
+        key_a_other_orientation,
+        "N5",
+    )
+    assert other_orientation["final_text"] == "N5"
+    assert other_orientation["temporal_stable_text"] == ""
+    assert other_orientation["temporal_history_count"] == 1
+
+
+def test_formal_mark_uses_temporal_final_but_keeps_paddle_raw(monkeypatch):
+    import capi_mark_shadow
+
+    monkeypatch.setattr(
+        capi_mark_shadow,
+        "recognize_mark_online",
+        lambda image, detection, source_path: {
+            "success": True,
+            "paddle_text": "K6",
+            "final_text": "K5",
+            "adoption_reason": "temporal_outlier",
+            "paddle_confidence": 0.648,
+            "model_name": "PP-OCRv6_medium_rec",
+            "engine_version": "3.7.0",
+            "worker_version": "2",
+            "latency_ms": 30.0,
+            "round_trip_ms": 31.0,
+            "temporal_stable_text": "K5",
+            "temporal_history_count": 100,
+            "temporal_stable_support_count": 94,
+        },
+    )
+    detection = {
+        "found": True,
+        "text": "K5",
+        "confidence": 0.4,
+        "profile_version": 5,
+    }
+
+    CAPIInferencer._apply_online_paddle_mark_recognition(
+        np.zeros((12, 20), dtype=np.uint8),
+        detection,
+        Path("/images/W0F00000_101653.tif"),
+    )
+
+    assert detection["paddle_text"] == "K6"
+    assert detection["final_text"] == "K5"
+    assert detection["text"] == "K5"
+    assert detection["recognition_reason"] == "temporal_outlier"
 
 
 def test_prepare_paddle_image_converts_grayscale_and_bgra_to_bgr():
@@ -179,6 +297,63 @@ def test_shadow_store_saves_agreed_crop_for_admin_comparison(tmp_path):
     assert Path(crop_path).is_relative_to(tmp_path / "data" / "crops")
 
 
+def test_shadow_store_migrates_existing_database_for_inference_link(tmp_path):
+    db_path = tmp_path / "data" / "mark_shadow.db"
+    db_path.parent.mkdir(parents=True)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE mark_shadow_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                valid_two_chars INTEGER DEFAULT 0,
+                agreed INTEGER DEFAULT 0
+            )
+            """
+        )
+
+    ShadowStore(db_path, tmp_path / "data" / "disagreements")
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(mark_shadow_results)"
+            ).fetchall()
+        }
+    assert "inference_record_id" in columns
+
+
+def test_mark_shadow_result_can_be_linked_to_exact_inference_record(
+    tmp_path,
+    monkeypatch,
+):
+    store = ShadowStore(
+        tmp_path / "data" / "mark_shadow.db",
+        tmp_path / "data" / "disagreements",
+    )
+    result_id = _save_shadow_row(
+        store,
+        current_text="EJ",
+        paddle_text="EJ",
+        latency_ms=12.5,
+    )
+    monkeypatch.setattr(capi_mark_shadow, "_DATABASE_PATH", store.db_path)
+
+    linked = capi_mark_shadow.link_mark_shadow_results_to_inference(
+        [result_id],
+        387220,
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        row = connection.execute(
+            "SELECT inference_record_id FROM mark_shadow_results WHERE id = ?",
+            (result_id,),
+        ).fetchone()
+    assert linked == 1
+    assert row[0] == 387220
+
+
 def _save_shadow_row(store, *, current_text, paddle_text, latency_ms, error=""):
     image = np.full((12, 20), 180, dtype=np.uint8)
     encoded, png = cv2.imencode(".png", image)
@@ -239,6 +414,32 @@ def test_inference_database_matches_mark_shadow_image_to_record(tmp_path):
     assert db.find_inference_record_ids_for_images(
         [("", image_path.name)]
     ) == [record_id]
+
+    skipped_mark_path = tmp_path / "panel-2" / "W0F00000_101011.tif"
+    processed_path = skipped_mark_path.parent / "B0F00000_101011.tif"
+    skipped_mark_path.parent.mkdir()
+    directory_record_id = db.save_inference_record(
+        glass_id="G-DIR-LINK",
+        model_id="MODEL-LINK",
+        machine_no="M-LINK",
+        resolution=(100, 100),
+        machine_judgment="OK",
+        ai_judgment="OK",
+        image_dir=str(skipped_mark_path.parent),
+        total_images=1,
+        ng_images=0,
+        ng_details="[]",
+        request_time="2026-07-31 10:10:12",
+        response_time="2026-07-31 10:10:13",
+        processing_seconds=0.1,
+        image_results_data=[
+            {"image_path": str(processed_path), "image_name": processed_path.name}
+        ],
+    )
+
+    assert db.find_inference_record_ids_for_images(
+        [(str(skipped_mark_path), skipped_mark_path.name)]
+    ) == [directory_record_id]
 
 
 def test_mark_shadow_admin_api_returns_comparisons_and_success_latency(tmp_path, monkeypatch):
@@ -306,6 +507,55 @@ def test_mark_shadow_admin_api_returns_comparisons_and_success_latency(tmp_path,
     assert payload["stats"]["agreed"] == 1
     assert payload["stats"]["error_count"] == 1
     assert payload["stats"]["latency_ms"]["average"] == pytest.approx(16.25)
+
+
+def test_mark_shadow_admin_api_prefers_persisted_inference_link(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "data" / "mark_shadow.db"
+    store = ShadowStore(db_path, tmp_path / "data" / "disagreements")
+    result_id = _save_shadow_row(
+        store,
+        current_text="EJ",
+        paddle_text="B1",
+        latency_ms=12.5,
+    )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE mark_shadow_results
+            SET inference_record_id = 789
+            WHERE id = ?
+            """,
+            (result_id,),
+        )
+    monkeypatch.setattr(
+        CAPIWebHandler,
+        "_capi_server_instance",
+        SimpleNamespace(
+            server_config={"mark_shadow": {"database_path": str(db_path)}}
+        ),
+    )
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = SimpleNamespace(
+        find_inference_record_ids_for_images=lambda refs: pytest.fail(
+            "persisted MARK link should not use path fallback"
+        )
+    )
+    sent = []
+    handler._send_json = (
+        lambda payload, status=200, **kwargs: sent.append((payload, status))
+    )
+
+    handler._handle_api_settings_mark_shadow(
+        {"filter": ["disagreed"], "limit": ["50"]}
+    )
+
+    payload, status = sent[0]
+    assert status == 200
+    assert payload["rows"][0]["inference_record_id"] == 789
+    assert payload["rows"][0]["record_url"] == "/record/789"
 
 
 def test_mark_shadow_crop_api_only_serves_recorded_shadow_crop(tmp_path, monkeypatch):
@@ -379,7 +629,17 @@ def test_mark_shadow_settings_ui_has_admin_comparison_fields():
 
     assert "Mark PPOCR檢查" in template
     assert "/api/settings/mark-shadow" in template
-    for label in ("原辨識", "Paddle 辨識", "信心", "耗時", "錯誤", "Crop", "推論紀錄", "row.record_url"):
+    for label in (
+        "原辨識",
+        "Paddle 辨識",
+        "信心",
+        "耗時",
+        "錯誤",
+        "Crop",
+        "推論紀錄",
+        "row.record_url",
+        "推論紀錄寫入中",
+    ):
         assert label in template
     assert 'path == "/api/settings/mark-shadow"' in web_source
     assert "_require_settings_user(api=True, admin=True)" in web_source
@@ -390,6 +650,7 @@ def test_online_client_adds_versions_for_legacy_worker_response(monkeypatch):
         def recognize(self, image, detection, source_path):
             return {
                 "success": True,
+                "id": 654,
                 "paddle_text": "B1",
                 "paddle_confidence": 0.94,
                 "latency_ms": 18.0,
@@ -397,6 +658,7 @@ def test_online_client_adds_versions_for_legacy_worker_response(monkeypatch):
             }
 
     monkeypatch.setattr(capi_mark_shadow, "_CLIENT", FakeClient())
+    capi_mark_shadow.reset_mark_shadow_request_results()
 
     result = recognize_mark_online(
         np.zeros((20, 30), dtype=np.uint8),
@@ -409,6 +671,46 @@ def test_online_client_adds_versions_for_legacy_worker_response(monkeypatch):
     assert result["engine_version"] == "3.7.0"
     assert result["worker_version"] == "1"
     assert result["round_trip_ms"] >= 0
+    assert capi_mark_shadow.consume_mark_shadow_request_results() == [654]
+
+
+def test_async_save_links_captured_mark_when_inference_results_are_empty(
+    monkeypatch,
+):
+    from capi_server import CAPIServer
+
+    server = object.__new__(CAPIServer)
+    server.db = SimpleNamespace(save_inference_record=lambda **kwargs: 77)
+    linked = []
+    monkeypatch.setattr(
+        capi_mark_shadow,
+        "link_mark_shadow_results_to_inference",
+        lambda result_ids, record_id: (
+            linked.append((list(result_ids), record_id)) or len(result_ids)
+        ),
+    )
+
+    server._save_results_async(
+        client_addr=("127.0.0.1", 12345),
+        parsed={
+            "glass_id": "G-EMPTY",
+            "model_id": "MODEL-A",
+            "machine_no": "AOI-1",
+            "resolution": (100, 100),
+            "machine_judgment": "OK",
+            "image_dir": "/images/panel",
+            "bomb_info": None,
+        },
+        results=[],
+        ai_judgment="ERR:NO_IMAGES_FOUND",
+        ng_details="[]",
+        request_time="2026-07-31 10:10:10",
+        response_time="2026-07-31 10:10:11",
+        processing_seconds=0.1,
+        mark_shadow_result_ids=[321],
+    )
+
+    assert linked == [([321], 77)]
 
 
 def _legacy_mark_detection():
@@ -440,6 +742,7 @@ def test_formal_mark_uses_paddle_text_and_logs_technology(
         "capi_mark_shadow.recognize_mark_online",
         lambda image, detection, source_path: {
             "success": True,
+            "id": 321,
             "paddle_text": "B1",
             "paddle_confidence": 0.94,
             "latency_ms": 18.5,
@@ -453,13 +756,20 @@ def test_formal_mark_uses_paddle_text_and_logs_technology(
     inferencer = object.__new__(CAPIInferencer)
     inferencer.config = SimpleNamespace(inference_rotate_180_enabled=False)
 
-    detection, regions = inferencer._detect_panel_mark_binary_region([image_path])
+    detection, regions = inferencer._detect_panel_mark_binary_region(
+        [image_path],
+        machine_no="CAPI13",
+        model_id="MODEL-A",
+    )
 
     assert detection["text"] == "B1"
     assert detection["confidence"] == pytest.approx(0.94)
     assert detection["legacy_text"] == "EJ"
     assert detection["recognition_technique"] == "PaddleOCR"
     assert detection["recognition_fallback"] is False
+    assert detection["mark_machine_no"] == "CAPI13"
+    assert detection["mark_model_id"] == "MODEL-A"
+    assert detection["mark_shadow_result_id"] == 321
     assert [(r.x1, r.y1, r.x2, r.y2) for r in regions] == [(5, 6, 17, 14)]
     image_result = ImageResult(
         image_path=image_path,
@@ -478,6 +788,7 @@ def test_formal_mark_uses_paddle_text_and_logs_technology(
     )
     assert image_result.mark_text == "B1"
     assert image_result.mark_confidence == pytest.approx(0.94)
+    assert image_result.mark_shadow_result_id == 321
     log = capsys.readouterr().out
     assert "technique=PaddleOCR" in log
     assert "engine_version=3.7.0" in log

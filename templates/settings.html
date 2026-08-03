@@ -2242,7 +2242,7 @@
         }
     }
 
-    function renderAccountsPane() {
+    function renderAccountsPane(centralAccountLocation) {
         if (!SETTINGS_USER || !SETTINGS_USER.can_manage_accounts) return '';
         const rows = settingsUsers.length ? settingsUsers.map(u => {
             const isAdmin = !!u.is_admin;
@@ -2267,6 +2267,39 @@
         }).join('') : '<tr><td colspan="6" class="auto-switch-muted">尚無帳號資料</td></tr>';
         return `
             <div id="pane-accounts" class="settings-tab-pane-block ${currentTab === 'accounts' ? 'active' : ''}" style="grid-column:1/-1;">
+                <div class="settings-section" style="max-width:760px; border-left:3px solid #22c55e; margin-bottom:24px;">
+                    <div class="settings-section-header" style="background:rgba(34,197,94,.1); border-bottom:1px solid rgba(34,197,94,.2);">
+                        <div class="icon" style="background:rgba(34,197,94,.2); color:#86efac;">🏢</div>
+                        <span style="color:#86efac; font-weight:600;">中央帳號中心位置</span>
+                    </div>
+                    <div style="padding:20px; display:grid; gap:18px;">
+                        <label style="display:grid; gap:7px;">
+                            <span style="font-size:.86rem; font-weight:600; color:#cbd5e1;">中心廠區</span>
+                            <select id="central-account-facility"
+                                    onchange="changeCentralAccountFacility(this.value)"
+                                    style="background:#0f172a; border:1px solid var(--border); color:var(--text); padding:10px 12px; border-radius:7px;">
+                                <option value="MOD1" ${centralAccountLocation.facility === 'MOD1' ? 'selected' : ''}>MOD1</option>
+                                <option value="MOD2" ${centralAccountLocation.facility === 'MOD2' ? 'selected' : ''}>MOD2</option>
+                            </select>
+                        </label>
+                        <label style="display:grid; gap:7px;">
+                            <span style="font-size:.86rem; font-weight:600; color:#cbd5e1;">中心 IP</span>
+                            <input id="central-account-ip"
+                                   type="text"
+                                   inputmode="decimal"
+                                   maxlength="15"
+                                   value="${escapeAttr(centralAccountLocation.ip)}"
+                                   placeholder="例如 10.174.37.81"
+                                   style="background:#0f172a; border:1px solid var(--border); color:var(--text); padding:10px 12px; border-radius:7px;">
+                        </label>
+                        <div style="color:#94a3b8; font-size:.8rem; line-height:1.65;">
+                            選擇 MOD1 會帶入 10.172.25.105；選擇 MOD2 會帶入 10.174.37.81。IP 帶入後仍可人工修改。此設定保存於本機設定 DB，供中央帳號登入功能使用。
+                        </div>
+                        <div>
+                            <button class="btn-save" onclick="saveCentralAccountLocation()">💾 儲存中心位置</button>
+                        </div>
+                    </div>
+                </div>
                 <div class="settings-section" style="border-left:3px solid #22c55e;">
                     <div class="settings-section-header">
                         <div class="icon" style="background:rgba(34,197,94,.18);color:#86efac;">👤</div>
@@ -2520,11 +2553,25 @@
             : date.toLocaleString('zh-TW', { hour12: false });
     }
 
+    function formatMarkAdoptionReason(value) {
+        const labels = {
+            stable_match: '穩定值一致',
+            temporal_outlier: '離群值，沿用歷史穩定值',
+            temporal_switch: '新值連續 3 次，切換穩定值',
+            warmup: '穩定化暖機中',
+            context_start: '新推論 session，歷史已重置',
+            model_switch_reset: '機種切換，歷史已重置',
+            no_valid_paddle: 'Paddle 無有效二碼',
+            dotmatrix_fallback: 'Paddle 未讀，採用原辨識備援',
+        };
+        return labels[String(value || '')] || String(value || '');
+    }
+
     function markShadowStatus(row) {
         if (row.error) return ['錯誤', '#fca5a5', 'rgba(239,68,68,.14)'];
-        if (row.agreed) return ['一致', '#86efac', 'rgba(34,197,94,.14)'];
         if (!row.valid_two_chars) return ['未讀取', '#fcd34d', 'rgba(245,158,11,.14)'];
-        return ['不一致', '#fca5a5', 'rgba(239,68,68,.14)'];
+        if (row.final_agreed) return ['最終一致', '#86efac', 'rgba(34,197,94,.14)'];
+        return ['最終不一致', '#fca5a5', 'rgba(239,68,68,.14)'];
     }
 
     function renderMarkShadowPane() {
@@ -2534,8 +2581,8 @@
         const rows = markShadow.rows || [];
         const statCards = [
             ['總筆數', Number(stats.total || 0), '#7dd3fc'],
-            ['一致', Number(stats.agreed || 0), '#86efac'],
-            ['不一致', Number(stats.disagreed || 0), '#fca5a5'],
+            ['Paddle 原始一致', Number(stats.agreed || 0), '#86efac'],
+            ['Paddle 原始不一致', Number(stats.disagreed || 0), '#fca5a5'],
             ['未讀取', Number(stats.no_read || 0), '#fcd34d'],
             ['錯誤', Number(stats.error_count || 0), '#fb7185'],
             ['平均耗時', `${Number(latency.average || 0).toFixed(1)} ms`, '#c4b5fd'],
@@ -2548,8 +2595,12 @@
         const tableRows = rows.length ? rows.map(row => {
             const status = markShadowStatus(row);
             const paddleText = row.paddle_text || row.paddle_raw_text || '--';
+            const finalText = row.final_text || '--';
             const rawText = row.paddle_raw_text && row.paddle_raw_text !== row.paddle_text
                 ? `<div class="auto-switch-muted" style="margin-top:4px;font-size:.72rem;">raw: ${escapeHtml(row.paddle_raw_text)}</div>`
+                : '';
+            const adoptionInfo = row.adoption_reason
+                ? `<div class="auto-switch-muted" style="margin-top:5px;font-size:.72rem;">${escapeHtml(formatMarkAdoptionReason(row.adoption_reason))} ／ ${escapeHtml(String(row.temporal_stable_support_count || 0))}/${escapeHtml(String(row.temporal_history_count || 0))}</div>`
                 : '';
             const crop = row.crop_url ? `
                 <a href="${escapeAttr(row.crop_url)}" target="_blank" style="display:inline-block;">
@@ -2561,7 +2612,7 @@
             ` : '<span class="auto-switch-muted">未保存</span>';
             const recordLink = row.record_url
                 ? `<a href="${escapeAttr(row.record_url)}" target="_blank" rel="noopener noreferrer" style="color:#7dd3fc;white-space:nowrap;">LINK #${escapeHtml(String(row.inference_record_id))}</a>`
-                : '<span class="auto-switch-muted">未找到</span>';
+                : '<span class="auto-switch-muted">推論紀錄寫入中</span>';
             return `
                 <tr>
                     <td>${crop}</td>
@@ -2581,6 +2632,10 @@
                         ${rawText}
                     </td>
                     <td>
+                        <code style="font-size:1rem;color:${row.final_agreed ? '#86efac' : '#fbbf24'};">${escapeHtml(finalText)}</code>
+                        ${adoptionInfo}
+                    </td>
+                    <td>
                         <span style="display:inline-block;padding:3px 8px;border-radius:999px;color:${status[1]};background:${status[2]};font-size:.75rem;font-weight:700;">${status[0]}</span>
                     </td>
                     <td style="white-space:nowrap;">${escapeHtml(formatMarkShadowLatency(row.latency_ms))}</td>
@@ -2588,7 +2643,7 @@
                 </tr>
             `;
         }).join('') : `
-            <tr><td colspan="8" class="auto-switch-muted">
+            <tr><td colspan="9" class="auto-switch-muted">
                 ${markShadow.loading ? '載入中…' : '目前篩選條件沒有資料'}
             </td></tr>
         `;
@@ -2602,8 +2657,8 @@
                         <span class="auto-switch-muted" style="margin-left:auto;">顯示 ${escapeHtml(String(rows.length))} 筆</span>
                     </div>
                     <div style="padding:14px 16px;color:#cbd5e1;font-size:.82rem;line-height:1.7;border-bottom:1px solid var(--border);">
-                        正式 MARK、QJPG 與 AOI 文字優先使用 PaddleOCR；原辨識保留作為 crop 定位、比較及 Paddle 異常時的備援。
-                        耗時統計只計算成功且大於 0 ms 的 Paddle 紀錄。
+                        正式 MARK、QJPG 與 AOI 使用「最終採用結果」；Paddle 原始辨識保留供追查，原辨識只負責 crop 定位及 Paddle 無法讀取時的技術備援。
+                        近期 100 筆有效 Paddle 結果會做時間穩定化，單筆 K6／KS 等離群值不會直接改變正式結果；新值連續 3 次才會切換。
                     </div>
                     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;padding:16px;border-bottom:1px solid var(--border);">
                         ${statCards}
@@ -2632,8 +2687,8 @@
                         </div>
                     ` : ''}
                     <div class="account-table-wrap">
-                        <table class="account-table" style="min-width:1180px;">
-                            <thead><tr><th>Crop</th><th>來源／時間</th><th>推論紀錄</th><th>原辨識（定位／備援）</th><th>Paddle 辨識（正式）</th><th>比較</th><th>耗時</th><th>錯誤</th></tr></thead>
+                        <table class="account-table" style="min-width:1320px;">
+                            <thead><tr><th>Crop</th><th>來源／時間</th><th>推論紀錄</th><th>原辨識（定位／備援）</th><th>Paddle 辨識（原始）</th><th>最終採用結果</th><th>比較</th><th>耗時</th><th>錯誤</th></tr></thead>
                             <tbody>${tableRows}</tbody>
                         </table>
                     </div>
@@ -3191,7 +3246,6 @@
             'report-result',
             'within-spec',
             'auto-model-switch',
-            'central-account',
             SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? 'mark-shadow' : null,
             SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? 'accounts' : null,
             'history',
@@ -3211,48 +3265,12 @@
             <button class="settings-tab-btn ${currentTab === 'report-result' ? 'active' : ''}" data-target="report-result" onclick="switchTab('report-result')">📤 回報結果設定</button>
             <button class="settings-tab-btn ${currentTab === 'within-spec' ? 'active' : ''}" data-target="within-spec" onclick="switchTab('within-spec')">📏 規格內判定</button>
             <button class="settings-tab-btn ${currentTab === 'auto-model-switch' ? 'active' : ''}" data-target="auto-model-switch" onclick="switchTab('auto-model-switch')">↔ 自動切換模型</button>
-            <button class="settings-tab-btn ${currentTab === 'central-account' ? 'active' : ''}" data-target="central-account" onclick="switchTab('central-account')">🏢 中心位置</button>
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'mark-shadow' ? 'active' : ''}" data-target="mark-shadow" onclick="switchTab('mark-shadow')">🔬 Mark PPOCR檢查</button>` : ''}
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'accounts' ? 'active' : ''}" data-target="accounts" onclick="switchTab('accounts')">👤 帳號管理</button>` : ''}
             <button class="settings-tab-btn ${currentTab === 'history' ? 'active' : ''}" data-target="history" onclick="switchTab('history')">📋 修改紀錄</button>
         `;
 
         grid.innerHTML = `
-            <div id="pane-central-account" class="settings-tab-pane-block ${currentTab === 'central-account' ? 'active' : ''}" style="grid-column:1/-1;">
-                <div class="settings-section" style="max-width:760px; border-left:3px solid #22c55e;">
-                    <div class="settings-section-header" style="background:rgba(34,197,94,.1); border-bottom:1px solid rgba(34,197,94,.2);">
-                        <div class="icon" style="background:rgba(34,197,94,.2); color:#86efac;">🏢</div>
-                        <span style="color:#86efac; font-weight:600;">中央帳號中心位置</span>
-                    </div>
-                    <div style="padding:20px; display:grid; gap:18px;">
-                        <label style="display:grid; gap:7px;">
-                            <span style="font-size:.86rem; font-weight:600; color:#cbd5e1;">中心廠區</span>
-                            <select id="central-account-facility"
-                                    onchange="changeCentralAccountFacility(this.value)"
-                                    style="background:#0f172a; border:1px solid var(--border); color:var(--text); padding:10px 12px; border-radius:7px;">
-                                <option value="MOD1" ${centralAccountLocation.facility === 'MOD1' ? 'selected' : ''}>MOD1</option>
-                                <option value="MOD2" ${centralAccountLocation.facility === 'MOD2' ? 'selected' : ''}>MOD2</option>
-                            </select>
-                        </label>
-                        <label style="display:grid; gap:7px;">
-                            <span style="font-size:.86rem; font-weight:600; color:#cbd5e1;">中心 IP</span>
-                            <input id="central-account-ip"
-                                   type="text"
-                                   inputmode="decimal"
-                                   maxlength="15"
-                                   value="${escapeAttr(centralAccountLocation.ip)}"
-                                   placeholder="例如 10.174.37.81"
-                                   style="background:#0f172a; border:1px solid var(--border); color:var(--text); padding:10px 12px; border-radius:7px;">
-                        </label>
-                        <div style="color:#94a3b8; font-size:.8rem; line-height:1.65;">
-                            選擇 MOD1 會帶入 10.172.25.105；選擇 MOD2 會帶入 10.174.37.81。IP 帶入後仍可人工修改。此設定保存於本機設定 DB，供中央帳號登入功能使用。
-                        </div>
-                        <div>
-                            <button class="btn-save" onclick="saveCentralAccountLocation()">💾 儲存中心位置</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
             ${inferenceImageParams.length > 0 || patchcoreParams.length > 0 ? `
             <div id="pane-patchcore" class="settings-tab-pane ${currentTab === 'patchcore' ? 'active' : ''}">
                 ${inferenceImageParams.length > 0 ? `
@@ -3568,7 +3586,7 @@
             </div>
             ${renderReportResultPane(reportResultParams)}
             ${renderImageAbnormalPane(imageAbnormalParams)}
-            ${renderWithinSpecPane(withinSpecParam)}
+            ${renderWithinSpecPane(withinSpecParam, centralAccountLocation)}
             ${renderMarkShadowPane()}
         `;
 
@@ -3996,7 +4014,7 @@
         `;
     }
 
-    function renderWithinSpecPane(param) {
+    function renderWithinSpecPane(param, centralAccountLocation) {
         const sourceValue = param ? String(param.param_value || '') : '';
         if (!withinSpecRules || withinSpecRulesSource !== sourceValue) {
             const rawRules = parseJsonLoose(param ? param.param_value : null, defaultWithinSpecRules());
@@ -4113,7 +4131,7 @@
                 </div>
             </div>
             ${renderAutoModelSwitchPane()}
-            ${renderAccountsPane()}
+            ${renderAccountsPane(centralAccountLocation)}
         `;
     }
 
