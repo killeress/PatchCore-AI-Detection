@@ -153,17 +153,18 @@
         <span class="tp-label">特徵域清洗 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用原 bundle{% else %}預設關閉{% endif %}</span></span>
         <select id="tp-feature_cleaning_mode" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
           {% if training_scope.mode == 'partial' %}
-          <option value="{{ inherited_cleaning }}" selected>{% if inherited_cleaning == "off" %}關閉{% else %}保守清洗（k=30、保留 {{ (inherited_keep_ratio * 100)|round(1) }}%）{% endif %}（沿用原 bundle，不可修改）</option>
+          <option value="{{ inherited_cleaning }}" selected>{% if inherited_cleaning == "off" %}關閉{% elif inherited_cleaning == "context_overlap_adaptive_v1" %}真實上下文＋重疊一致性清洗{% else %}舊版 KNN 百分位清洗{% endif %}（沿用原 bundle，不可修改）</option>
           {% else %}
           <option value="off" selected>關閉（現有作法）</option>
-          <option value="knn_cosine_q99_v1">保守清洗（實驗：k=30）</option>
+          <option value="context_overlap_adaptive_v1">真實上下文＋重疊一致性（實驗，建議）</option>
+          <option value="knn_cosine_q99_v1">舊版 KNN 百分位清洗</option>
           {% endif %}
         </select>
         <span class="tp-hint">
           {% if training_scope.mode == 'partial' %}
             局部重訓固定沿用原 bundle 設定
           {% else %}
-            依訓練特徵密度移除離群 patch；不使用 OMIT／PINIGBI 遮罩
+            新模式會用 Panel 實體座標比對重疊 Tile，只在多視角一致且超過自適應門檻時移除；結果可以是 0 個
           {% endif %}
         </span>
       </label>
@@ -184,7 +185,7 @@
         <input type="number" id="tp-feature_cleaning_keep_ratio" min="90" max="100" step="0.1"
                value="{% if training_scope.mode == 'partial' %}{{ (inherited_keep_ratio * 100)|round(1) }}{% else %}99{% endif %}"
                {% if training_scope.mode == 'partial' %}disabled{% endif %}>
-        <span class="tp-hint">只在開啟清洗時生效；99% 約移除 1%，97% 約移除 3%，100% 不移除</span>
+        <span class="tp-hint">新模式中此值是「最多可移除比例」：99% 代表最多約 1%，若沒有明顯離群可移除 0 個；舊版仍依比例固定截尾</span>
       </label>
       <div id="feature-cleaning-by-zone" class="fc-zone-grid">
         {% for zone in ["inner", "edge"] %}
@@ -199,7 +200,8 @@
               <span class="tp-label">清洗模式</span>
               <select id="tp-feature_cleaning_{{ zone }}_mode" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
                 <option value="off" {% if zone_mode == "off" %}selected{% endif %}>關閉</option>
-                <option value="knn_cosine_q99_v1" {% if zone_mode != "off" %}selected{% endif %}>KNN cosine 清洗</option>
+                <option value="context_overlap_adaptive_v1" {% if zone_mode == "context_overlap_adaptive_v1" %}selected{% endif %}>真實上下文＋重疊一致性</option>
+                <option value="knn_cosine_q99_v1" {% if zone_mode == "knn_cosine_q99_v1" %}selected{% endif %}>舊版 KNN 百分位清洗</option>
               </select>
             </label>
             <label class="tp-field">
@@ -210,17 +212,17 @@
             <label class="tp-field">
               <span class="tp-label">保留比例</span>
               <input type="number" id="tp-feature_cleaning_{{ zone }}_keep_ratio" min="90" max="100" step="0.1" value="{{ (zone_ratio * 100)|round(1) }}" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
-              <span class="tp-hint">控制實際移除比例</span>
+              <span class="tp-hint">新模式為最大移除比例，允許實際移除 0 個</span>
             </label>
           </section>
         {% endfor %}
       </div>
-      <label class="tp-field">
-        <span class="tp-label">特徵清洗有效區域 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用中央 {{ inherited_cleaning_center_size }}×{{ inherited_cleaning_center_size }}{% else %}預設中央 384×384{% endif %}</span></span>
+      <label class="tp-field" id="feature-cleaning-center-field">
+        <span class="tp-label">舊版清洗有效區域 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用中央 {{ inherited_cleaning_center_size }}×{{ inherited_cleaning_center_size }}{% else %}預設中央 384×384{% endif %}</span></span>
         <input type="number" id="tp-feature_cleaning_center_size" min="64" max="512" step="16"
                value="{% if training_scope.mode == 'partial' %}{{ inherited_cleaning_center_size }}{% else %}384{% endif %}"
                {% if training_scope.mode == 'partial' %}disabled{% endif %}>
-        <span class="tp-hint">完整 512×512 tile 仍用於訓練；只有中央區可被清洗，外圍 feature 不會在此步驟被刪除</span>
+        <span class="tp-hint">只供舊版 KNN 模式使用；真實上下文模式會依重疊位置自動判斷，不使用中央 384</span>
       </label>
       <label class="tp-field">
         <span class="tp-label">tile step <span class="tp-default">預設 256</span></span>
@@ -1296,6 +1298,14 @@ function syncFeatureCleaningLayout() {
   const zoneGrid = document.getElementById('feature-cleaning-by-zone');
   if (zoneGrid) zoneGrid.style.display = separate ? 'grid' : 'none';
   zoneGrid?.querySelectorAll('input,select').forEach(el => { el.disabled = !separate || partial; });
+  const activeModes = separate
+    ? ['inner', 'edge'].map(zone => document.getElementById(`tp-feature_cleaning_${zone}_mode`).value)
+    : [document.getElementById('tp-feature_cleaning_mode').value];
+  const usesLegacyCenter = activeModes.includes('knn_cosine_q99_v1');
+  const centerField = document.getElementById('feature-cleaning-center-field');
+  const centerInput = document.getElementById('tp-feature_cleaning_center_size');
+  if (centerField) centerField.style.display = usesLegacyCenter ? '' : 'none';
+  if (centerInput) centerInput.disabled = !usesLegacyCenter || partial;
 }
 
 const TRAIN_PARAM_KEYS = [
@@ -1304,7 +1314,7 @@ const TRAIN_PARAM_KEYS = [
   {key: 'precision',     type: 'select', choices: ['float32','float16'], default: 'float16'},
   {key: 'feature_layers', type: 'select', choices: ['layer2_layer3','layer3'], default: 'layer2_layer3'},
   {key: 'feature_pool_kernel_size', type: 'select_int', choices: [1,3,5], default: 3},
-  {key: 'feature_cleaning_mode', type: 'select', choices: ['off','knn_cosine_q99_v1'], default: 'off'},
+  {key: 'feature_cleaning_mode', type: 'select', choices: ['off','knn_cosine_q99_v1','context_overlap_adaptive_v1'], default: 'off'},
   {key: 'feature_cleaning_scope', type: 'select', choices: ['inner_only','inner_and_edge'], default: 'inner_only'},
   {key: 'feature_cleaning_keep_ratio', type: 'percent_ratio', min: 90, max: 100, default: 0.99},
   {key: 'feature_cleaning_center_size', type: 'int', min: 64, max: 512, default: 384},
@@ -1357,7 +1367,7 @@ function collectTrainingParams() {
       const k = Number(kEl.value);
       const ratioPct = Number(ratioEl.value);
       [modeEl, kEl, ratioEl].forEach(el => el.classList.remove('invalid'));
-      if (!['off', 'knn_cosine_q99_v1'].includes(modeEl.value)) {
+      if (!['off', 'knn_cosine_q99_v1', 'context_overlap_adaptive_v1'].includes(modeEl.value)) {
         modeEl.classList.add('invalid');
         return {params: null, error: `${zone.toUpperCase()} 清洗模式無效`};
       }
@@ -1518,6 +1528,9 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.addEventListener('click', () => setActivePipelineZone(btn.dataset.zone));
   });
   if (cleaningLayout) cleaningLayout.addEventListener('change', syncFeatureCleaningLayout);
+  document.querySelectorAll('[id^="tp-feature_cleaning_"][id$="_mode"], #tp-feature_cleaning_mode').forEach(el => {
+    el.addEventListener('change', syncFeatureCleaningLayout);
+  });
   syncPreprocessConfigMode();
   syncFeatureCleaningLayout();
 });

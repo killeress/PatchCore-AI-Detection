@@ -685,6 +685,12 @@ class CAPIDatabase:
                     source      TEXT NOT NULL,
                     source_path TEXT NOT NULL,
                     thumb_path  TEXT,
+                    panel_path  TEXT,
+                    tile_index  INTEGER,
+                    tile_x      INTEGER,
+                    tile_y      INTEGER,
+                    tile_width  INTEGER,
+                    tile_height INTEGER,
                     decision    TEXT DEFAULT 'accept'
                 );
                 CREATE INDEX IF NOT EXISTS idx_tile_pool_job ON training_tile_pool(job_id, lighting, zone, source);
@@ -970,6 +976,12 @@ class CAPIDatabase:
             add_column_if_not_exists("training_jobs", "image_preprocess_pipelines", "TEXT")
             add_column_if_not_exists("training_jobs", "preprocess_after_tiling", "INTEGER DEFAULT 0")
             add_column_if_not_exists("training_jobs", "tile_stride", "INTEGER")
+            add_column_if_not_exists("training_tile_pool", "panel_path", "TEXT")
+            add_column_if_not_exists("training_tile_pool", "tile_index", "INTEGER")
+            add_column_if_not_exists("training_tile_pool", "tile_x", "INTEGER")
+            add_column_if_not_exists("training_tile_pool", "tile_y", "INTEGER")
+            add_column_if_not_exists("training_tile_pool", "tile_width", "INTEGER")
+            add_column_if_not_exists("training_tile_pool", "tile_height", "INTEGER")
             add_column_if_not_exists("model_registry", "notes", "TEXT")
             # 新架構 (C-10) per-tile model routing 紀錄："inner" / "edge" / "bright_spot"；v1 為 ""
             add_column_if_not_exists("tile_results", "zone", "TEXT DEFAULT ''")
@@ -6094,10 +6106,13 @@ class CAPIDatabase:
             for t in tiles:
                 cur.execute(
                     """INSERT INTO training_tile_pool
-                       (job_id, lighting, zone, source, source_path, thumb_path)
-                       VALUES (?,?,?,?,?,?)""",
+                       (job_id, lighting, zone, source, source_path, thumb_path,
+                        panel_path, tile_index, tile_x, tile_y, tile_width, tile_height)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (job_id, t["lighting"], t.get("zone"), t["source"],
-                     t["source_path"], t.get("thumb_path")),
+                     t["source_path"], t.get("thumb_path"), t.get("panel_path"),
+                     t.get("tile_index"), t.get("tile_x"), t.get("tile_y"),
+                     t.get("tile_width"), t.get("tile_height")),
                 )
                 ids.append(cur.lastrowid)
             conn.commit()

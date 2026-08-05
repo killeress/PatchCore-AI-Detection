@@ -59,8 +59,12 @@ def _make_handler_with_server(server, path="/api/train/new/start"):
 
     h._sent_response = []
 
-    def capture_json(payload, status=200):
-        h._sent_response.append({"status": status, "body": json.dumps(payload)})
+    def capture_json(payload, status=200, headers=None):
+        h._sent_response.append({
+            "status": status,
+            "body": json.dumps(payload),
+            "headers": dict(headers or {}),
+        })
 
     def capture_send(status, body, content_type="text/html; charset=utf-8"):
         h._sent_response.append({"status": status, "body": body})
@@ -521,10 +525,13 @@ class TestValidateTrainingParams:
 
     def test_feature_experiment_choices_accepted(self):
         from capi_web import CAPIWebHandler
-        for kernel in (1, 5):
+        for kernel, mode in (
+            (1, "knn_cosine_q99_v1"),
+            (5, "context_overlap_adaptive_v1"),
+        ):
             raw = {
                 "feature_pool_kernel_size": kernel,
-                "feature_cleaning_mode": "knn_cosine_q99_v1",
+                "feature_cleaning_mode": mode,
                 "feature_cleaning_scope": "inner_and_edge",
                 "feature_cleaning_keep_ratio": 0.97,
                 "feature_cleaning_center_size": 384,
@@ -767,6 +774,49 @@ def test_handle_train_new_status_with_job_id():
     assert body["job_id"] == "j1"
 
 
+def test_handle_train_new_status_reconciles_completed_runner_log():
+    """runner 已寫完成 log 時，status API 應自癒 DB 並回 completed。"""
+    from capi_web import CAPIWebHandler
+
+    class AliveThread:
+        def is_alive(self):
+            return True
+
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    runtime = CAPIWebHandler._make_job_runtime("j1", "train")
+    runtime["thread"] = AliveThread()
+    CAPIWebHandler._append_train_new_log(
+        "j1",
+        "[10:29:02] INFO [capi.train_runner] "
+        "✓ 訓練完成，bundle=/root/Code/CAPI_AD/model/M-20260804_100115",
+    )
+
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1",
+        "machine_id": "M",
+        "state": "train",
+        "started_at": "2026-08-04 10:01:14",
+        "completed_at": None,
+        "output_bundle": None,
+        "error_message": None,
+    }
+    h = _make_handler_with_server(server, "/api/train/new/status?job_id=j1")
+
+    h._handle_train_new_status()
+
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["state"] == "completed"
+    assert body["output_bundle"] == "/root/Code/CAPI_AD/model/M-20260804_100115"
+    assert h._sent_response[0]["headers"]["Cache-Control"] == "no-store, max-age=0"
+    server.database.update_training_job_state.assert_called_once_with(
+        "j1",
+        "completed",
+        output_bundle="/root/Code/CAPI_AD/model/M-20260804_100115",
+    )
+
+
 def test_handle_train_new_status_not_found():
     """指定 job_id，不存在 → 404。"""
     server = MagicMock()
@@ -927,6 +977,57 @@ def test_handle_train_new_start_training_starts_thread(monkeypatch):
     assert CAPIWebHandler._train_slot["active_job_id"] == "j1"
     wait_for_gpu.assert_not_called()
     free_gpu_cache.assert_not_called()
+
+
+def test_handle_train_new_start_training_sends_ack_before_worker_runs(monkeypatch):
+    """耗資源的 worker 必須等啟動回應送完後才執行。"""
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1", "machine_id": "M", "state": "review", "panel_paths": ["/p"]
+    }
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    CAPIWebHandler._train_slot = {"lock": threading.Lock(), "active_job_id": None}
+
+    worker_entered = threading.Event()
+
+    def worker(*_args):
+        worker_entered.set()
+
+    monkeypatch.setattr(CAPIWebHandler, "_train_new_training_worker", worker)
+
+    h = _make_handler_with_server(server, "/api/train/new/start_training/j1")
+    capture_json = h._send_json
+
+    def capture_ack(payload, status=200, headers=None):
+        assert not worker_entered.wait(0.1)
+        capture_json(payload, status=status, headers=headers)
+
+    h._send_json = capture_ack
+    h._handle_train_new_start_training()
+
+    assert worker_entered.wait(1.0)
+    assert json.loads(h._sent_response[0]["body"])["state"] == "train"
+
+
+def test_train_new_review_verifies_state_without_reposting_start():
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "templates" / "train_new" / "step3_review.html"
+    )
+    text = template_path.read_text(encoding="utf-8")
+    start_function = text.split("async function startTraining()", 1)[1].split(
+        "// ── 全域鍵盤處理", 1
+    )[0]
+
+    assert "START_STATUS_VERIFY_TIMEOUT_MS = 15000" in text
+    assert "verifyTrainingStateAfterConnectionError" in text
+    assert "自動確認啟動狀態中" in start_function
+    assert "await verifyTrainingStateAfterConnectionError()" in start_function
+    assert "response.status >= 500" in start_function
+    assert start_function.count("/api/train/new/start_training/") == 1
 
 
 def test_handle_train_new_start_training_rejects_when_slot_held():
@@ -1233,6 +1334,8 @@ def test_train_new_done_template_uses_chinese_summary_labels():
     assert "訓練 tile" in text
     assert "特徵鄰域聚合" in text
     assert "特徵清洗" in text
+    assert "context_overlap_adaptive_v1" in text
+    assert "自動依重疊 Tile 的 Panel 實體位置" in text
     assert "實驗模型" in text
     assert "模型包" in text
     assert "<th>Lighting</th>" not in text
@@ -1262,6 +1365,7 @@ def test_models_info_shows_all_recorded_custom_training_settings():
 
     assert "特徵鄰域聚合" in text
     assert "特徵域清洗" in text
+    assert "重疊上下文＋自適應門檻" in text
     assert "前處理套用時機" in text
     assert "影像前處理流程" in text
     assert "PANEL 切片設定" in text
@@ -1295,6 +1399,8 @@ def test_train_new_select_has_pipeline_preview_controls():
     assert "tp-feature_cleaning_scope" in text
     assert "tp-feature_cleaning_keep_ratio" in text
     assert "tp-feature_cleaning_center_size" in text
+    assert "context_overlap_adaptive_v1" in text
+    assert "不使用中央 384" in text
     assert "type: 'percent_ratio'" in text
     assert "沿用原 bundle，不可修改" in text
     assert "if (el.disabled) continue;" in text

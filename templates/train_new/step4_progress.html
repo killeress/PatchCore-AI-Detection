@@ -106,8 +106,14 @@ function renderUnits(unitStatus) {
 }
 
 function poll() {
-  fetch(`/api/train/new/status?job_id=${encodeURIComponent(jobId)}`)
-    .then(r => r.json())
+  fetch(
+    `/api/train/new/status?job_id=${encodeURIComponent(jobId)}`,
+    {cache: 'no-store'}
+  )
+    .then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    })
     .then(d => {
       const logLines = d.log_lines || [];
       const logText = logLines.map(displayTrainingText).join('\n');
@@ -120,6 +126,7 @@ function poll() {
       renderUnits(d.unit_status);
       syncEta(d.state, logLines);
       const pill = document.getElementById('status-pill');
+      pill.style.background = '#fab387';
       pill.textContent = stateText(d.state);
       document.getElementById('cancel-btn').disabled = !['preprocess', 'train', 'review'].includes(d.state);
       if (d.state === 'failed') {
@@ -133,6 +140,12 @@ function poll() {
         clearInterval(_timer);
         location.href = `/train/new/review/${encodeURIComponent(jobId)}`;
       }
+    })
+    .catch(error => {
+      const pill = document.getElementById('status-pill');
+      pill.style.background = '#f9e2af';
+      pill.textContent = '狀態更新失敗，正在重試';
+      console.error('training status poll failed', error);
     });
 }
 

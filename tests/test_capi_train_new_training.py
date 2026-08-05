@@ -72,6 +72,23 @@ def test_apply_user_training_params_overrides_match_keys():
     assert cfg.feature_cleaning_center_size == 320
 
 
+def test_context_cleaning_mode_resolves_for_enabled_zones():
+    from capi_train_new import (
+        TrainingConfig,
+        apply_user_training_params,
+        feature_cleaning_config_for_zone,
+    )
+
+    cfg = TrainingConfig(machine_id="M", panel_paths=[], over_review_root=Path("/r"))
+    apply_user_training_params(cfg, {
+        "feature_cleaning_mode": "context_overlap_adaptive_v1",
+        "feature_cleaning_scope": "inner_and_edge",
+    })
+
+    assert feature_cleaning_config_for_zone(cfg, "inner")["mode"] == "context_overlap_adaptive_v1"
+    assert feature_cleaning_config_for_zone(cfg, "edge")["mode"] == "context_overlap_adaptive_v1"
+
+
 def test_feature_cleaning_by_zone_normalizes_and_resolves_independently():
     from capi_train_new import (
         TrainingConfig,
@@ -815,6 +832,7 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     assert manifest["patchcore_params"]["feature_cleaning_center_size"] == 384
     assert manifest["patchcore_params"]["feature_cleaning_reference_size"] == 20_000
     assert manifest["patchcore_params"]["feature_cleaning_query_chunk"] == 1_024
+    assert manifest["patchcore_params"]["feature_cleaning_adaptive_mad_z"] == 6.0
     assert manifest["patchcore_params"]["feature_cleaning_by_zone"]["inner"]["mode"] == "off"
     assert manifest["patchcore_params"]["feature_cleaning_by_zone"]["edge"]["k"] == 10
     assert manifest["experimental_training"] is True

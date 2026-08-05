@@ -20,6 +20,129 @@ def test_default_recipe():
     assert callback.stats == {}
 
 
+def _context_callback_with_two_overlapping_tiles(tmp_path, *, keep_ratio=0.75):
+    first = tmp_path / "tile_a.png"
+    second = tmp_path / "tile_b.png"
+    panel = tmp_path / "panel"
+    panel.mkdir()
+    callback = FeatureDensityCleaningCallback(
+        k=1,
+        keep_ratio=keep_ratio,
+        reference_size=8,
+        strategy="context_overlap_adaptive",
+        trace_sources={
+            str(first.resolve()): {
+                "source_path": str(first.resolve()),
+                "panel_path": str(panel.resolve()),
+                "tile_x": 0,
+                "tile_y": 0,
+                "tile_width": 8,
+                "tile_height": 8,
+            },
+            str(second.resolve()): {
+                "source_path": str(second.resolve()),
+                "panel_path": str(panel.resolve()),
+                "tile_x": 4,
+                "tile_y": 0,
+                "tile_width": 8,
+                "tile_height": 8,
+            },
+        },
+    )
+    callback._batch_layouts = [{
+        "image_paths": [str(first.resolve()), str(second.resolve())],
+        "input_size": [8, 8],
+        "grid_size": [1, 4],
+        "embedding_count": 8,
+    }]
+    return callback
+
+
+def test_context_plan_uses_best_overlapping_view_and_auto_guard(tmp_path):
+    callback = _context_callback_with_two_overlapping_tiles(tmp_path)
+
+    plan = callback._build_context_cleaning_plan(8)
+
+    assert plan["candidate_mask"].tolist() == [False, False, True, True, True, True, False, False]
+    assert plan["reference_indices"].tolist() == [0, 1, 2, 5, 6, 7]
+    assert plan["stats"]["context_overlap_groups"] == 2
+    assert plan["stats"]["context_auto_guard_px"] == 4.0
+
+
+def test_overlap_consensus_rejects_tile_edge_only_outlier(tmp_path, monkeypatch):
+    raw = torch.arange(16, dtype=torch.float32).reshape(8, 2)
+    model = _model_with_store(raw.clone())
+    callback = _context_callback_with_two_overlapping_tiles(tmp_path)
+    # Physical x=5 is indices 2/4: only the Tile-edge view (4) is high.
+    # Physical x=7 is indices 3/5: both overlapping views are high.
+    distances = torch.tensor([0.0, 0.0, 0.1, 1.0, 1.0, 1.0, 0.0, 0.0])
+    monkeypatch.setattr(
+        callback,
+        "_kth_cosine_distances",
+        lambda *args, **kwargs: (distances, torch.device("cpu")),
+    )
+    monkeypatch.setattr(
+        callback,
+        "_adaptive_threshold",
+        lambda values: (torch.tensor(0.5), {"threshold_method": "test"}),
+    )
+
+    callback.on_train_epoch_end(None, model)
+
+    assert torch.equal(torch.cat(model.model.embedding_store), raw[[0, 1, 2, 4, 6, 7]])
+    assert callback.stats["raw_outlier_count"] == 3
+    assert callback.stats["consensus_removed_count"] == 2
+    assert callback.stats["removed"] == 2
+
+
+def test_adaptive_threshold_allows_zero_removal(tmp_path, monkeypatch):
+    raw = torch.arange(16, dtype=torch.float32).reshape(8, 2)
+    model = _model_with_store(raw.clone())
+    callback = _context_callback_with_two_overlapping_tiles(tmp_path)
+    distances = torch.full((8,), 0.2)
+    monkeypatch.setattr(
+        callback,
+        "_kth_cosine_distances",
+        lambda *args, **kwargs: (distances, torch.device("cpu")),
+    )
+
+    callback.on_train_epoch_end(None, model)
+
+    assert torch.equal(torch.cat(model.model.embedding_store), raw)
+    assert callback.stats["threshold"] == pytest.approx(0.2)
+    assert callback.stats["adaptive_mad"] == 0.0
+    assert callback.stats["raw_outlier_count"] == 0
+    assert callback.stats["removed"] == 0
+
+
+def test_context_mode_protects_tiles_without_coordinates(tmp_path):
+    source = tmp_path / "legacy_tile.png"
+    raw = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    model = _model_with_store(raw.clone())
+    callback = FeatureDensityCleaningCallback(
+        k=1,
+        keep_ratio=0.75,
+        reference_size=4,
+        strategy="context_overlap_adaptive",
+        trace_sources={
+            str(source.resolve()): {"source_path": str(source.resolve())},
+        },
+    )
+    callback._batch_layouts = [{
+        "image_paths": [str(source.resolve())],
+        "input_size": [4, 4],
+        "grid_size": [2, 2],
+        "embedding_count": 4,
+    }]
+
+    callback.on_train_epoch_end(None, model)
+
+    assert torch.equal(torch.cat(model.model.embedding_store), raw)
+    assert callback.stats["reason"] == "no_cleaning_candidates"
+    assert callback.stats["context_missing_metadata"] == 4
+    assert callback.stats["removed"] == 0
+
+
 def test_validation_hook_runs_before_epoch_end_fallback():
     raw = torch.tensor([[1.0, 0.0], [0.9, 0.1], [0.8, 0.2], [-1.0, 0.0]])
     model = _model_with_store(raw.clone())

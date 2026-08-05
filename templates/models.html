@@ -1042,6 +1042,8 @@ const PANEL_MODE_LABELS = {
 };
 
 function formatFeatureCleaning(pp) {
+  const contextMode = 'context_overlap_adaptive_v1';
+  const legacyMode = 'knn_cosine_q99_v1';
   const centerSize = Number(pp.feature_cleaning_center_size);
   const centerText = Number.isFinite(centerSize)
     ? `中央 ${centerSize}×${centerSize}`
@@ -1054,9 +1056,20 @@ function formatFeatureCleaning(pp) {
       const ratioText = Number.isFinite(ratio)
         ? `${Math.round(ratio * 10000) / 100}%`
         : '未記錄';
+      if (cfg.mode === contextMode) {
+        const maxRemoval = Number.isFinite(ratio)
+          ? `${Math.round((1 - ratio) * 10000) / 100}%`
+          : '未記錄';
+        return `${zone}: 重疊上下文，k=${cfg.k ?? '未記錄'}，最多移除 ${maxRemoval}`;
+      }
       return `${zone}: k=${cfg.k ?? '未記錄'}，保留 ${ratioText}`;
     };
-    return `${formatZone('INNER', byZone.inner)}；${formatZone('EDGE', byZone.edge)}；${centerText}`;
+    const modes = [byZone.inner?.mode, byZone.edge?.mode];
+    const areaText = modes.includes(legacyMode)
+      ? centerText
+      : (modes.includes(contextMode) ? '有效區域依重疊位置自動判斷' : '');
+    return [formatZone('INNER', byZone.inner), formatZone('EDGE', byZone.edge), areaText]
+      .filter(Boolean).join('；');
   }
   if (!Object.prototype.hasOwnProperty.call(pp, 'feature_cleaning_mode')) {
     return '關閉（舊模型未記錄，依相容預設）';
@@ -1071,6 +1084,12 @@ function formatFeatureCleaning(pp) {
   const ratioText = Number.isFinite(keepRatio)
     ? `保留 ${Math.round(keepRatio * 10000) / 100}%（移除約 ${Math.round((1 - keepRatio) * 10000) / 100}%）`
     : '保留比例未記錄';
+  if (pp.feature_cleaning_mode === contextMode) {
+    const maxRemoval = Number.isFinite(keepRatio)
+      ? `${Math.round((1 - keepRatio) * 10000) / 100}%`
+      : '未記錄';
+    return `重疊上下文＋自適應門檻（範圍：${scope}；k=${k}；最多移除 ${maxRemoval}；有效區域依重疊位置自動判斷）`;
+  }
   return `保守清洗（範圍：${scope}；k=${k}；${ratioText}；${centerText}）`;
 }
 

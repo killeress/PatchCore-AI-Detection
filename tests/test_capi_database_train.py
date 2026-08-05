@@ -85,7 +85,8 @@ class TestTrainingSchema:
         db = _make_db(tmp_path)
         cols = _col_names(db, "training_tile_pool")
         required = {"id", "job_id", "lighting", "zone", "source",
-                    "source_path", "thumb_path", "decision"}
+                    "source_path", "thumb_path", "panel_path", "tile_index",
+                    "tile_x", "tile_y", "tile_width", "tile_height", "decision"}
         assert required.issubset(cols)
 
     def test_tile_pool_index_exists(self, tmp_path):
@@ -450,6 +451,27 @@ class TestTilePoolCRUD:
         rejected = db.list_tile_pool("j1", decision="reject")
         assert len(rejected) == 1
         assert rejected[0]["id"] == ids[0]
+
+    def test_tile_pool_preserves_panel_coordinates(self, tmp_path):
+        db = _make_db(tmp_path)
+        db.create_training_job(job_id="j1", machine_id="M", panel_paths=[])
+        db.insert_tile_pool("j1", [{
+            "lighting": "G0F00000",
+            "zone": "inner",
+            "source": "ok",
+            "source_path": "/t/1.png",
+            "panel_path": "/panels/P001",
+            "tile_index": 7,
+            "tile_x": 384,
+            "tile_y": 256,
+            "tile_width": 512,
+            "tile_height": 512,
+        }])
+
+        tile = db.list_tile_pool("j1")[0]
+        assert tile["panel_path"] == "/panels/P001"
+        assert (tile["tile_index"], tile["tile_x"], tile["tile_y"]) == (7, 384, 256)
+        assert (tile["tile_width"], tile["tile_height"]) == (512, 512)
 
     def test_cleanup_tile_pool(self, tmp_path):
         db = _make_db(tmp_path)
