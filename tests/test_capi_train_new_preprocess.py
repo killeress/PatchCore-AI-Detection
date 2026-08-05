@@ -81,6 +81,12 @@ def test_preprocess_panels_to_pool_writes_tiles(tmp_path):
     first_tile = db.tiles[0]
     assert Path(first_tile["source_path"]).exists()
     assert Path(first_tile["thumb_path"]).exists()
+    assert first_tile["panel_path"] == str(panel_dir.resolve())
+    assert isinstance(first_tile["tile_index"], int)
+    assert isinstance(first_tile["tile_x"], int)
+    assert isinstance(first_tile["tile_y"], int)
+    assert first_tile["tile_width"] == 256
+    assert first_tile["tile_height"] == 256
 
 
 def test_preprocess_panels_to_pool_all_panels_have_inner_and_edge(tmp_path):

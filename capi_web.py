@@ -3059,6 +3059,9 @@ class _CallbackLogHandler(logging.Handler):
 _TRAIN_UNIT_LOG_RE = re.compile(
     r"\[\d+/\d+\]\s+(\S+):\s+(✓ done|✗ 訓練失敗|跳過：tile 不足|載 tile)"
 )
+_TRAIN_COMPLETED_LOG_RE = re.compile(
+    r"✓\s+(?:局部重訓|訓練)完成，bundle=(.+?)\s*$"
+)
 _TRAIN_UNIT_STATUS_MAP = {
     "✓ done": "done",
     "✗ 訓練失敗": "failed",
@@ -3098,6 +3101,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     #   log_lines:     List[str] (ring buffer 500)
     #   log_lock:      threading.Lock
     #   unit_status:   Dict[unit_label, status]
+    #   completed_bundle: Optional[str] (runner 完成訊息中的 bundle path)
     #   phase:         "preprocess" | "review" | "train"  (last known)
     _train_new_jobs: dict = {}
     _train_new_jobs_lock: threading.Lock = threading.Lock()
@@ -3172,6 +3176,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "log_lines": [],
             "log_lock": threading.Lock(),
             "unit_status": {},
+            "completed_bundle": None,
             "phase": phase,
         }
         with cls._train_new_jobs_lock:
@@ -3200,6 +3205,39 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             m = _TRAIN_UNIT_LOG_RE.search(msg)
             if m:
                 runtime.setdefault("unit_status", {})[m.group(1)] = _TRAIN_UNIT_STATUS_MAP[m.group(2)]
+            completed_match = _TRAIN_COMPLETED_LOG_RE.search(msg)
+            if completed_match:
+                runtime["completed_bundle"] = completed_match.group(1).strip()
+
+    @classmethod
+    def _sync_train_new_completed_state(
+        cls,
+        db,
+        job: Optional[dict],
+        completed_bundle: Optional[str],
+    ) -> Optional[dict]:
+        """以 runner 成功完成訊息校正 Web process 看到的 training job 狀態。"""
+        bundle_path = str(completed_bundle or "").strip()
+        if not job or job.get("state") != "train" or not bundle_path:
+            return job
+        try:
+            db.update_training_job_state(
+                job["job_id"],
+                "completed",
+                output_bundle=bundle_path,
+            )
+        except Exception:
+            logger.warning(
+                "cannot sync completed training state: job_id=%s bundle=%s",
+                job.get("job_id"),
+                bundle_path,
+                exc_info=True,
+            )
+            return job
+        updated = dict(job)
+        updated["state"] = "completed"
+        updated["output_bundle"] = bundle_path
+        return updated
 
     @classmethod
     def _train_new_cancel_event(cls, job_id: str) -> threading.Event:
@@ -13975,6 +14013,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         from urllib.parse import parse_qs, urlparse
         qs = parse_qs(urlparse(self.path).query)
         job_id = (qs.get("job_id") or [""])[0]
+        no_cache_headers = {
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+        }
 
         db = self._capi_server_instance.database
 
@@ -13982,14 +14024,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             # 無 job_id 回最近 active job 狀態
             job = db.get_active_training_job()
             if not job:
-                self._send_json({"state": "idle"})
+                self._send_json({"state": "idle"}, headers=no_cache_headers)
                 return
             job = self._mark_train_new_stale_if_needed(db, job)
             job_id = job["job_id"]
         else:
             job = db.get_training_job(job_id)
             if not job:
-                self._send_json({"error": "job not found"}, status=404)
+                self._send_json(
+                    {"error": "job not found"},
+                    status=404,
+                    headers=no_cache_headers,
+                )
                 return
             job = self._mark_train_new_stale_if_needed(db, job)
 
@@ -13997,10 +14043,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if runtime is None:
             log_lines = []
             unit_status = {}
+            completed_bundle = None
         else:
             with runtime["log_lock"]:
                 log_lines = list(runtime["log_lines"][-100:])
                 unit_status = dict(runtime.get("unit_status") or {})
+                completed_bundle = runtime.get("completed_bundle")
+
+        job = self._sync_train_new_completed_state(db, job, completed_bundle)
 
         resp = {
             "job_id": job["job_id"], "machine_id": job["machine_id"],
@@ -14013,7 +14063,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "unit_status": unit_status,
             "worker_alive": self._train_new_worker_alive(job_id),
         }
-        self._send_json(resp)
+        self._send_json(resp, headers=no_cache_headers)
 
     def _handle_train_new_tiles(self):
         """GET /api/train/new/tiles?job_id=X&lighting=Y[&score_from_bundle=N&sort_by=score_desc]"""
@@ -14485,7 +14535,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "job not found"}, status=404)
             return
         job = self._mark_train_new_stale_if_needed(db, job)
+        logger.info(
+            "[train/new] start request received: job_id=%s state=%s",
+            job_id,
+            job.get("state"),
+        )
         if job["state"] in ("train", "completed"):
+            logger.info(
+                "[train/new] start request already applied: job_id=%s state=%s",
+                job_id,
+                job["state"],
+            )
             self._send_json({
                 "ok": True,
                 "job_id": job_id,
@@ -14529,16 +14589,38 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             args = (job_id, job["machine_id"], job["panel_paths"], self._capi_server_instance)
             thread_name = f"train_new-{job_id}"
 
+        # 先建立 worker thread，但等 HTTP 啟動回應送完才放行耗資源的 GPU 清理／subprocess。
+        # 即使 Client 在收回應時斷線，finally 仍會放行，避免 job 卡在 train state。
+        worker_start_gate = threading.Event()
+
+        def run_after_start_ack():
+            worker_start_gate.wait()
+            target(*args)
+
         thread = threading.Thread(
-            target=target,
-            args=args,
+            target=run_after_start_ack,
             daemon=True, name=thread_name,
         )
         runtime["thread"] = thread
 
         db.update_training_job_state(job_id, "train")
         thread.start()
-        self._send_json({"ok": True, "job_id": job_id, "state": "train"})
+        try:
+            logger.info(
+                "[train/new] start state committed; worker waiting for ack: job_id=%s",
+                job_id,
+            )
+            self._send_json({"ok": True, "job_id": job_id, "state": "train"})
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
+            logger.warning(
+                "[train/new] start response connection lost: job_id=%s error=%s",
+                job_id,
+                exc,
+            )
+            raise
+        finally:
+            worker_start_gate.set()
+        logger.info("[train/new] start response sent: job_id=%s", job_id)
 
     @staticmethod
     def _train_new_partial_training_worker(job_id, server_inst):
@@ -14766,8 +14848,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         實際訓練在 capi_train_runner.py 的獨立 Python process 執行，使其能與
         推論 server 共用 GPU 而不互鎖（兩邊各自設 set_per_process_memory_fraction）。
-        Subprocess 自行寫 DB（model_registry + training_jobs.state），supervisor
-        只負責把 log 檔尾巴搬到 per-job log_lines + 退出後釋放 train slot。
+        Subprocess 自行寫 DB（model_registry + training_jobs.state）；supervisor
+        搬運 log、校正成功完成狀態，並在退出後釋放 train slot。
         """
         import os as _os
         import subprocess as _subprocess
@@ -14861,7 +14943,32 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     break
                 _time.sleep(1.0)
 
-            if proc.returncode != 0:
+            if proc.returncode == 0:
+                try:
+                    with runtime["log_lock"]:
+                        completed_bundle = runtime.get("completed_bundle")
+                    finished_job = db.get_training_job(job_id)
+                    synced_job = CAPIWebHandler._sync_train_new_completed_state(
+                        db,
+                        finished_job,
+                        completed_bundle,
+                    )
+                    if (
+                        finished_job
+                        and finished_job.get("state") == "train"
+                        and synced_job
+                        and synced_job.get("state") == "completed"
+                    ):
+                        log("✓ Web 訓練狀態已同步為 completed")
+                    elif finished_job and finished_job.get("state") == "train":
+                        log("⚠ runner 已成功結束，但未取得完成 bundle，保留 train 狀態")
+                except Exception:
+                    logger.warning(
+                        "cannot reconcile successful training state: job_id=%s",
+                        job_id,
+                        exc_info=True,
+                    )
+            else:
                 try:
                     job = db.get_training_job(job_id)
                     if job and job.get("state") == "train":

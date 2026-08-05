@@ -98,8 +98,8 @@ CODE_FILES = [
     "setup_auto_update_client.sh",
 ]
 
-# MES Oracle 密碼是設備本機的 ignored secret，只在 code-only 更新包中納入。
-# 建包時會被標記為 working-tree 檔案，並要求使用 --allow-dirty。
+# MES Oracle 密碼是設備本機的 ignored secret。預設不打包；只有呼叫端明確
+# 指定 --include-local-credentials 時才納入，並要求使用 --allow-dirty。
 CODEONLY_LOCAL_FILES = [
     "capi_mes_credentials.py",
 ]
@@ -169,7 +169,7 @@ training:
   gpu_memory_fraction: 0.50
 
 # Report 數據比對：每台設備只選擇一個廠別 Oracle TNS
-# code-only 更新包會帶入 capi_mes_credentials.py；該檔含有 MES 密碼，請限制檔案權限與傳輸範圍。
+# 更新包預設不含 capi_mes_credentials.py；除非建包時明確要求，否則請保留設備既有檔。
 mes_report:
   facility: MOD2
   oracle:
@@ -204,7 +204,7 @@ README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明
    - 加 fallback_model_config
    - 加 training 區段
    - 加 mes_report.oracle 區段
-   - 若啟用 MES Report，code-only 更新包會帶入 capi_mes_credentials.py；full 包仍需另行保留此本機檔案。該檔含有 MES 密碼，請限制檔案權限與傳輸範圍
+   - 若啟用 MES Report，請保留設備既有的 capi_mes_credentials.py；除非建包時明確要求，更新包不含明文密碼
    - 安裝 Oracle thin driver：python3 -m pip install "oracledb>=2.0.0"
 
 4. 確認 deployment/torch_hub_cache/ 目錄完整（應 ~264 MB）：
@@ -275,8 +275,20 @@ CODEONLY_README_NOTE = """\
 【本 ZIP 為 code-only 增量包】
 - 不含 deployment/torch_hub_cache/（之前的部署包已含，production 機應已落地）
 - 不含 templates/imgs/ 與 static/（沿用 production 機已有的靜態資源）
-- 含 capi_mes_credentials.py；此檔含有 MES 密碼，請限制檔案權限與傳輸範圍
 - 解壓覆蓋既有檔即可，不會動到 backbone cache 目錄
+"""
+
+CODEONLY_CREDENTIALS_EXCLUDED_README_NOTE = """\
+
+【本機 credentials】
+- 本 ZIP 不含 capi_mes_credentials.py，請保留 production 機既有檔案
+"""
+
+CODEONLY_CREDENTIALS_README_NOTE = """\
+
+【敏感檔案警告】
+- 本 ZIP 依明確要求納入 capi_mes_credentials.py；此檔含有 MES 密碼
+- 請限制 ZIP 與解壓後檔案的存取權限及傳輸範圍
 """
 
 
@@ -379,10 +391,6 @@ def _git_file_list(args: list[str]) -> list[str]:
 def _git_changed_files() -> list[str]:
     changed = set(_git_file_list(["diff", "--name-only", "HEAD"]))
     changed.update(_git_file_list(["ls-files", "--others", "--exclude-standard"]))
-    changed.update(
-        rel for rel in CODEONLY_LOCAL_FILES
-        if (PROJECT_ROOT / rel).is_file()
-    )
     return sorted(changed)
 
 
@@ -413,9 +421,13 @@ def _is_codeonly_excluded_file(rel: str) -> bool:
     return rel.startswith(CODEONLY_EXCLUDED_PREFIXES)
 
 
-def _release_files(*, codeonly: bool = False) -> list[str]:
+def _release_files(
+    *,
+    codeonly: bool = False,
+    include_local_credentials: bool = False,
+) -> list[str]:
     source_files = [*CODE_FILES]
-    if codeonly:
+    if codeonly and include_local_credentials:
         source_files.extend(CODEONLY_LOCAL_FILES)
     files = list(dict.fromkeys([*source_files, *_git_managed_asset_files()]))
     if codeonly:
@@ -431,13 +443,18 @@ def _codeonly_excluded_changes(changed_files: list[str]) -> list[str]:
     })
 
 
-def _validate_required_code_files(*, codeonly: bool = False) -> None:
+def _validate_required_code_files(
+    *,
+    codeonly: bool = False,
+    include_local_credentials: bool = False,
+) -> None:
     required_files = CODE_FILES
     if codeonly:
         required_files = [
             *[rel for rel in required_files if not _is_codeonly_excluded_file(rel)],
-            *CODEONLY_LOCAL_FILES,
         ]
+        if include_local_credentials:
+            required_files.extend(CODEONLY_LOCAL_FILES)
     missing = [rel for rel in required_files if not (PROJECT_ROOT / rel).is_file()]
     if missing:
         raise FileNotFoundError(f"required CODE_FILES missing: {', '.join(missing)}")
@@ -567,6 +584,13 @@ def main(argv=None) -> int:
         "--allow-dirty", action="store_true",
         help="Allow full/code-only build from deploy-relevant uncommitted files",
     )
+    parser.add_argument(
+        "--include-local-credentials", action="store_true",
+        help=(
+            "Include the ignored local capi_mes_credentials.py in a code-only ZIP. "
+            "This embeds plaintext secrets and requires --allow-dirty."
+        ),
+    )
     args = parser.parse_args(argv)
 
     version = (args.version or _default_version()).strip()
@@ -575,17 +599,32 @@ def main(argv=None) -> int:
 
     if args.patch_only:
         args.no_backbone = True
+    if args.include_local_credentials and (args.patch_only or not args.no_backbone):
+        parser.error("--include-local-credentials is only valid with --no-backbone")
+    if args.include_local_credentials and not args.allow_dirty:
+        parser.error("--include-local-credentials requires --allow-dirty")
 
     if not args.patch_only:
-        _validate_required_code_files(codeonly=args.no_backbone)
+        _validate_required_code_files(
+            codeonly=args.no_backbone,
+            include_local_credentials=args.include_local_credentials,
+        )
 
     changed_files = _git_changed_files()
+    if args.include_local_credentials:
+        changed_files = sorted(set(changed_files) | {
+            rel for rel in CODEONLY_LOCAL_FILES
+            if (PROJECT_ROOT / rel).is_file()
+        })
     if args.patch_only:
         package_files, skipped_files = _patch_files(changed_files)
         if not package_files:
             raise RuntimeError("no deployable changed files found for --patch-only")
     else:
-        package_files, skipped_files = _release_files(codeonly=args.no_backbone), []
+        package_files, skipped_files = _release_files(
+            codeonly=args.no_backbone,
+            include_local_credentials=args.include_local_credentials,
+        ), []
 
     excluded_asset_changes = (
         _codeonly_excluded_changes(changed_files)
@@ -629,6 +668,8 @@ def main(argv=None) -> int:
     if args.no_backbone and not args.patch_only:
         print("Mode: code-only (--no-backbone)")
         print("Excluded static directories: templates/imgs/, static/")
+        if args.include_local_credentials:
+            print("WARNING: including plaintext local MES credentials by explicit request")
         if excluded_asset_changes:
             print("WARNING: excluded static assets changed and will not be packaged:")
             for rel in excluded_asset_changes:
@@ -707,6 +748,10 @@ def main(argv=None) -> int:
         )
         if args.no_backbone and not args.patch_only:
             readme = readme + CODEONLY_README_NOTE
+            if args.include_local_credentials:
+                readme = readme + CODEONLY_CREDENTIALS_README_NOTE
+            else:
+                readme = readme + CODEONLY_CREDENTIALS_EXCLUDED_README_NOTE
         _add_text(zf, "README.txt", readme, entries)
 
         payload_entries = sorted(entries, key=lambda item: item["path"])
@@ -723,6 +768,7 @@ def main(argv=None) -> int:
             "artifact": zip_path.name,
             "requires_restart": True,
             "package_type": "patch" if args.patch_only else ("codeonly" if args.no_backbone else "full"),
+            "contains_local_credentials": bool(args.include_local_credentials),
             "files": payload_entries,
         }
         manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"

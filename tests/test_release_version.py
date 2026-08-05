@@ -154,7 +154,7 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "central_dashboard/styles.css" in names
         assert "central_dashboard/settings.html" in names
         assert "central_dashboard/README.md" in names
-        assert "capi_mes_credentials.py" in names
+        assert "capi_mes_credentials.py" not in names
         assert "scripts/over_review_poc/train_final_model.py" in names
         assert "scratch_classifier.py" in names
         assert "scratch_filter.py" in names
@@ -189,6 +189,7 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
 
     assert manifest["version"] == version
     assert manifest["package_type"] == "codeonly"
+    assert manifest["contains_local_credentials"] is False
     assert manifest["requires_restart"] is True
     assert manifest["git_commit"] == build_deploy_zip._git_commit()
     assert manifest["git_commit_full"] == build_deploy_zip._git_commit_full()
@@ -203,11 +204,46 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
     assert any(item["path"] == "capi_mark_calibration.py" for item in manifest["files"])
     assert any(item["path"] == "capi_mark_shadow.py" for item in manifest["files"])
     assert any(item["path"] == "capi_web.py" for item in manifest["files"])
-    assert any(item["path"] == "capi_mes_credentials.py" for item in manifest["files"])
+    assert not any(item["path"] == "capi_mes_credentials.py" for item in manifest["files"])
     assert "  capi_mark_calibration.py\n" in checksums
     assert "  capi_mark_shadow.py\n" in checksums
     assert "  capi_web.py\n" in checksums
-    assert "  capi_mes_credentials.py\n" in checksums
+    assert "  capi_mes_credentials.py\n" not in checksums
+
+
+def test_codeonly_includes_local_credentials_only_with_explicit_flag(
+    tmp_path, monkeypatch, capsys,
+):
+    from scripts import build_deploy_zip
+
+    version = "2099.01.02.39"
+    output_dir = tmp_path / "release-with-credentials"
+    monkeypatch.setattr(build_deploy_zip, "CODE_FILES", ["capi_version.py"])
+    monkeypatch.setattr(build_deploy_zip, "_git_managed_asset_files", lambda: [])
+    monkeypatch.setattr(build_deploy_zip, "_git_changed_files", lambda: [])
+
+    assert build_deploy_zip.main([
+        "--no-backbone",
+        "--allow-dirty",
+        "--include-local-credentials",
+        "--version",
+        version,
+        "--output-dir",
+        str(output_dir),
+    ]) == 0
+
+    output = capsys.readouterr().out
+    assert "including plaintext local MES credentials" in output
+    with zipfile.ZipFile(
+        output_dir / f"patchcore_ai_release_{version}_codeonly.zip"
+    ) as zf:
+        names = set(zf.namelist())
+        manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
+
+    assert "capi_mes_credentials.py" in names
+    assert manifest["contains_local_credentials"] is True
+    assert manifest["git_dirty_files"] == ["capi_mes_credentials.py"]
+    assert manifest["source_mode"] == "working_tree"
 
 
 def test_codeonly_warns_when_excluded_static_assets_change(tmp_path, monkeypatch, capsys):

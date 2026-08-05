@@ -729,6 +729,8 @@ function updateAllBadges() {
 }
 
 let _startTrainingPending = false;
+const START_STATUS_VERIFY_TIMEOUT_MS = 15000;
+const START_STATUS_VERIFY_INTERVAL_MS = 1000;
 
 function redirectForTrainingState(state) {
   if (state === 'completed') {
@@ -740,6 +742,39 @@ function redirectForTrainingState(state) {
     return true;
   }
   return false;
+}
+
+async function verifyTrainingStateAfterConnectionError() {
+  const deadline = Date.now() + START_STATUS_VERIFY_TIMEOUT_MS;
+  let lastState = '';
+
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, START_STATUS_VERIFY_INTERVAL_MS));
+    try {
+      const statusResponse = await fetch(
+        `/api/train/new/status?job_id=${encodeURIComponent(jobId)}`,
+        {cache: 'no-store'}
+      );
+      const statusData = await statusResponse.json().catch(() => ({}));
+      if (!statusResponse.ok) continue;
+
+      lastState = statusData.state || lastState;
+      if (redirectForTrainingState(statusData.state)) {
+        return {started: true, state: statusData.state};
+      }
+      if (statusData.state === 'failed') {
+        return {
+          started: false,
+          state: 'failed',
+          error: statusData.error_message || '訓練 job 啟動失敗',
+        };
+      }
+    } catch (_) {
+      // 短暫斷線時持續確認，直到 timeout 才顯示錯誤。
+    }
+  }
+
+  return {started: false, state: lastState};
 }
 
 async function startTraining() {
@@ -775,7 +810,12 @@ async function startTraining() {
       );
       const data = await response.json().catch(() => ({}));
       if (!response.ok || data.error) {
-        throw new Error(data.error || `HTTP ${response.status}`);
+        const responseError = new Error(data.error || `HTTP ${response.status}`);
+        responseError.serverResponseReceived = true;
+        responseError.shouldVerifyJobState = (
+          response.status === 408 || response.status === 429 || response.status >= 500
+        );
+        throw responseError;
       }
       leavingPage = redirectForTrainingState(data.state);
       if (!leavingPage) {
@@ -784,25 +824,29 @@ async function startTraining() {
       }
       return;
     } catch (error) {
+      if (error && error.serverResponseReceived && !error.shouldVerifyJobState) throw error;
       startError = error;
     }
 
-    // POST 的回應可能被 proxy/網路中斷，但後端仍已成功啟動；先查 job 狀態再報錯。
-    try {
-      const statusResponse = await fetch(
-        `/api/train/new/status?job_id=${encodeURIComponent(jobId)}`,
-        {cache: 'no-store'}
-      );
-      const statusData = await statusResponse.json();
-      if (statusResponse.ok && redirectForTrainingState(statusData.state)) {
-        leavingPage = true;
-        return;
-      }
-    } catch (_) {
-      // 保留原始啟動錯誤，讓使用者知道第一次請求沒有取得有效回應。
+    // POST 回應可能中斷，但後端仍已成功啟動；自動確認一段時間，不要求使用者重複點擊。
+    button.textContent = '自動確認啟動狀態中…';
+    const verified = await verifyTrainingStateAfterConnectionError();
+    if (verified.started) {
+      leavingPage = true;
+      return;
+    }
+    if (verified.state === 'failed') {
+      throw new Error(verified.error);
     }
 
-    throw startError;
+    const originalMessage = startError && startError.message
+      ? startError.message
+      : '啟動請求未取得有效回應';
+    throw new Error(
+      `啟動連線中斷，系統已自動確認 15 秒，仍無法確認訓練狀態。\n` +
+      `請重新整理此頁查看 job 狀態，請勿連續點擊「開始訓練」。\n\n` +
+      `原始訊息：${originalMessage}`
+    );
   } catch (error) {
     await capAlert(
       error && error.message ? error.message : '無法確認訓練是否已啟動，請重新整理後查看 job 狀態。',

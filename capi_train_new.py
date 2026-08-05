@@ -72,9 +72,11 @@ PATCHCORE_FEATURE_POOL_KERNEL_CHOICES = (1, 3, 5)
 FEATURE_CLEANING_MODE_OFF = "off"
 # Stable recipe id for existing jobs/bundles; the actual keep ratio is stored separately.
 FEATURE_CLEANING_MODE_KNN_Q99 = "knn_cosine_q99_v1"
+FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE = "context_overlap_adaptive_v1"
 FEATURE_CLEANING_MODE_CHOICES = (
     FEATURE_CLEANING_MODE_OFF,
     FEATURE_CLEANING_MODE_KNN_Q99,
+    FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE,
 )
 FEATURE_CLEANING_K = 30
 FEATURE_CLEANING_K_MIN = 1
@@ -88,6 +90,7 @@ FEATURE_CLEANING_CENTER_SIZE_MAX = 512
 FEATURE_CLEANING_SEED = 42
 FEATURE_CLEANING_REFERENCE_SIZE = 20_000
 FEATURE_CLEANING_QUERY_CHUNK = 1_024
+FEATURE_CLEANING_ADAPTIVE_MAD_Z = 6.0
 FEATURE_CLEANING_SCOPE_INNER_ONLY = "inner_only"
 FEATURE_CLEANING_SCOPE_INNER_AND_EDGE = "inner_and_edge"
 FEATURE_CLEANING_SCOPE_CHOICES = (
@@ -326,7 +329,7 @@ def feature_cleaning_config_for_zone(
     if by_zone:
         return dict(by_zone[zone])
     enabled = (
-        cfg.feature_cleaning_mode == FEATURE_CLEANING_MODE_KNN_Q99
+        cfg.feature_cleaning_mode != FEATURE_CLEANING_MODE_OFF
         and (
             zone == ZONE_INNER
             or cfg.feature_cleaning_scope == FEATURE_CLEANING_SCOPE_INNER_AND_EDGE
@@ -481,12 +484,31 @@ def preprocess_panels_to_pool(
                 thumb = cv2.resize(tile.image, (96, 96))
                 cv2.imwrite(str(thumb_path), thumb)
 
+                tile_x = getattr(tile, "x1", None)
+                tile_y = getattr(tile, "y1", None)
+                tile_x2 = getattr(tile, "x2", None)
+                tile_y2 = getattr(tile, "y2", None)
+
                 tile_records.append({
                     "lighting": lighting,
                     "zone": tile.zone,
                     "source": "ok",
                     "source_path": str(tile_path.resolve()),
                     "thumb_path": str(thumb_path.resolve()),
+                    "panel_path": str(panel_dir.resolve()),
+                    "tile_index": int(tile.tile_id),
+                    "tile_x": int(tile_x) if tile_x is not None else None,
+                    "tile_y": int(tile_y) if tile_y is not None else None,
+                    "tile_width": (
+                        int(tile_x2 - tile_x)
+                        if tile_x is not None and tile_x2 is not None
+                        else None
+                    ),
+                    "tile_height": (
+                        int(tile_y2 - tile_y)
+                        if tile_y is not None and tile_y2 is not None
+                        else None
+                    ),
                 })
 
         if tile_records:
@@ -864,29 +886,47 @@ def train_one_patchcore(
     }
     callbacks = None
     cleaning_callback = None
-    if zone_cleaning_mode == FEATURE_CLEANING_MODE_KNN_Q99:
+    if zone_cleaning_mode in (
+        FEATURE_CLEANING_MODE_KNN_Q99,
+        FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE,
+    ):
         from capi_patchcore_feature_cleaning import FeatureDensityCleaningCallback
+        context_adaptive = (
+            zone_cleaning_mode == FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE
+        )
         cleaning_callback = FeatureDensityCleaningCallback(
             k=zone_cleaning_k,
             keep_ratio=zone_cleaning_keep_ratio,
-            center_size=cleaning_center_size,
+            center_size=None if context_adaptive else cleaning_center_size,
             seed=FEATURE_CLEANING_SEED,
             reference_size=FEATURE_CLEANING_REFERENCE_SIZE,
             query_chunk=FEATURE_CLEANING_QUERY_CHUNK,
             trace_sources=trace_sources,
+            strategy=(
+                "context_overlap_adaptive"
+                if context_adaptive
+                else "quantile"
+            ),
+            adaptive_mad_z=FEATURE_CLEANING_ADAPTIVE_MAD_Z,
         )
         callbacks = [cleaning_callback]
         cleaning_stats["reason"] = "pending"
         if log:
+            cleaning_detail = (
+                "context=overlap/adaptive"
+                if context_adaptive
+                else f"center={cleaning_center_size}x{cleaning_center_size}"
+            )
             log(
                 f"{unit_label}: feature cleaning enabled "
                 f"(scope={'per_zone' if per_zone_cleaning else cleaning_scope}, "
+                f"mode={zone_cleaning_mode}, "
                 f"cosine k={zone_cleaning_k}, keep={zone_cleaning_keep_ratio:.1%}, "
-                f"center={cleaning_center_size}x{cleaning_center_size})"
+                f"{cleaning_detail})"
             )
     elif (
         not per_zone_cleaning
-        and cleaning_mode == FEATURE_CLEANING_MODE_KNN_Q99
+        and cleaning_mode != FEATURE_CLEANING_MODE_OFF
         and zone == ZONE_EDGE
         and cleaning_scope == FEATURE_CLEANING_SCOPE_INNER_ONLY
     ):
@@ -1634,6 +1674,12 @@ def train_single_submodel(
                 trace_sources[str(staged_path)] = {
                     "tile_pool_id": int(tile["id"]),
                     "source_path": str(Path(tile["source_path"]).resolve()),
+                    "panel_path": tile.get("panel_path"),
+                    "tile_index": tile.get("tile_index"),
+                    "tile_x": tile.get("tile_x"),
+                    "tile_y": tile.get("tile_y"),
+                    "tile_width": tile.get("tile_width"),
+                    "tile_height": tile.get("tile_height"),
                 }
             experiment_stats: Dict[str, Any] = {}
             trace_kwargs = {}
@@ -1964,6 +2010,7 @@ def run_training_pipeline(
             "feature_cleaning_seed": FEATURE_CLEANING_SEED,
             "feature_cleaning_reference_size": FEATURE_CLEANING_REFERENCE_SIZE,
             "feature_cleaning_query_chunk": FEATURE_CLEANING_QUERY_CHUNK,
+            "feature_cleaning_adaptive_mad_z": FEATURE_CLEANING_ADAPTIVE_MAD_Z,
             "feature_cleaning_by_zone": normalize_feature_cleaning_by_zone(
                 cfg.feature_cleaning_by_zone
             ),

@@ -106,16 +106,31 @@
             {% if cleaning_zones %}
               {% for zone in ["inner", "edge"] %}
                 {% set cfg = cleaning_zones.get(zone, {}) %}
-                {{ zone|upper }}：{% if cfg.get("mode", "off") == "off" %}關閉{% else %}k={{ cfg.get("k", 30) }}、保留 {{ (cfg.get("keep_ratio", 0.99) * 100)|round(1) }}%{% endif %}{% if not loop.last %}<br>{% endif %}
+                {{ zone|upper }}：{% if cfg.get("mode", "off") == "off" %}關閉{% elif cfg.get("mode") == "context_overlap_adaptive_v1" %}重疊上下文、k={{ cfg.get("k", 30) }}、最多移除 {{ ((1 - cfg.get("keep_ratio", 0.99)) * 100)|round(1) }}%{% else %}舊版 KNN、k={{ cfg.get("k", 30) }}、保留 {{ (cfg.get("keep_ratio", 0.99) * 100)|round(1) }}%{% endif %}{% if not loop.last %}<br>{% endif %}
               {% endfor %}
             {% elif patchcore_params.get("feature_cleaning_mode", "off") == "off" %}
               關閉
+            {% elif patchcore_params.get("feature_cleaning_mode") == "context_overlap_adaptive_v1" %}
+              重疊上下文＋自適應門檻（範圍={% if patchcore_params.get("feature_cleaning_scope", "inner_only") == "inner_and_edge" %}inner + edge{% else %}僅 inner{% endif %}、k={{ patchcore_params.get("feature_cleaning_k", 30) }}、最多移除 {{ ((1 - patchcore_params.get("feature_cleaning_keep_ratio", 0.99)) * 100)|round(1) }}%）
             {% else %}
-              保守清洗（範圍={% if patchcore_params.get("feature_cleaning_scope", "inner_only") == "inner_and_edge" %}inner + edge{% else %}僅 inner{% endif %}、k={{ patchcore_params.get("feature_cleaning_k", 30) }}、保留 {{ (patchcore_params.get("feature_cleaning_keep_ratio", 0.99) * 100)|round(1) }}%）
+              舊版 KNN 清洗（範圍={% if patchcore_params.get("feature_cleaning_scope", "inner_only") == "inner_and_edge" %}inner + edge{% else %}僅 inner{% endif %}、k={{ patchcore_params.get("feature_cleaning_k", 30) }}、保留 {{ (patchcore_params.get("feature_cleaning_keep_ratio", 0.99) * 100)|round(1) }}%）
             {% endif %}
           </dd>
           <dt>清洗有效區域</dt>
-          <dd>中央 {{ patchcore_params.get("feature_cleaning_center_size", 512) }}×{{ patchcore_params.get("feature_cleaning_center_size", 512) }}</dd>
+          <dd>
+            {% set modes = namespace(context=false, legacy=false) %}
+            {% if cleaning_zones %}
+              {% for zone in ["inner", "edge"] %}
+                {% if cleaning_zones.get(zone, {}).get("mode") == "context_overlap_adaptive_v1" %}{% set modes.context = true %}{% endif %}
+                {% if cleaning_zones.get(zone, {}).get("mode") == "knn_cosine_q99_v1" %}{% set modes.legacy = true %}{% endif %}
+              {% endfor %}
+            {% elif patchcore_params.get("feature_cleaning_mode") == "context_overlap_adaptive_v1" %}
+              {% set modes.context = true %}
+            {% elif patchcore_params.get("feature_cleaning_mode") == "knn_cosine_q99_v1" %}
+              {% set modes.legacy = true %}
+            {% endif %}
+            {% if modes.context and modes.legacy %}新模式自動依重疊位置；舊版中央 {{ patchcore_params.get("feature_cleaning_center_size", 512) }}×{{ patchcore_params.get("feature_cleaning_center_size", 512) }}{% elif modes.context %}自動依重疊 Tile 的 Panel 實體位置（不使用中央裁切）{% elif modes.legacy %}中央 {{ patchcore_params.get("feature_cleaning_center_size", 512) }}×{{ patchcore_params.get("feature_cleaning_center_size", 512) }}{% else %}—{% endif %}
+          </dd>
           <dt>image_size</dt>
           <dd>
             {% if patchcore_params.get("image_size") %}
@@ -200,8 +215,8 @@
             <td>
               {% set fc = info.feature_cleaning %}
               {% if fc.get("applied") %}
-                <span title="{{ fc.get('total', 0) }} → {{ fc.get('kept', 0) }}；threshold={{ fc.get('threshold', '—') }}">
-                  k={{ fc.get("k", "—") }}／保留 {{ "%.1f"|format(fc.get("keep_ratio", 0) * 100) }}%<br>
+                <span title="{{ fc.get('total', 0) }} → {{ fc.get('kept', 0) }}；threshold={{ fc.get('threshold', '—') }}；raw={{ fc.get('raw_outlier_count', '—') }}；overlap groups={{ fc.get('context_overlap_groups', '—') }}">
+                  {% if fc.get("mode") == "context_overlap_adaptive_v1" %}重疊上下文 k={{ fc.get("k", "—") }}／最多移除 {{ "%.1f"|format((1 - fc.get("keep_ratio", 1)) * 100) }}%{% else %}k={{ fc.get("k", "—") }}／保留 {{ "%.1f"|format(fc.get("keep_ratio", 0) * 100) }}%{% endif %}<br>
                   移除 {{ fc.get("removed", 0) }}（{{ "%.2f"|format(fc.get("removed_ratio", 0) * 100) }}%）
                 </span>
               {% elif fc.get("reason") == "edge_scope_excluded" %}
@@ -210,6 +225,8 @@
                 <span class="d5-na">特徵不足，未清洗</span>
               {% elif fc.get("reason") == "keep_all" %}
                 <span class="d5-na">保留 100%，未移除</span>
+              {% elif fc.get("reason") in ["no_cleaning_candidates", "insufficient_context_references"] %}
+                <span class="d5-na">無安全清洗候選，移除 0</span>
               {% else %}
                 <span class="d5-na">關閉</span>
               {% endif %}
