@@ -810,7 +810,7 @@ def train_one_patchcore(
         normal_dir="train",
         train_batch_size=cfg.batch_size,
         eval_batch_size=cfg.batch_size,
-        num_workers=0,
+        num_workers=16,
         val_split_mode=val_mode,
         **folder_kwargs,
     )
