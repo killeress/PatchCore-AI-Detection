@@ -200,6 +200,22 @@
         aoi.textContent = "AOI —";
         aoiCell.appendChild(aoi);
 
+        const aoiRateCell = document.createElement("td");
+        aoiRateCell.className = "overview-rate-cell overview-aoi-rate-cell";
+        const aoiRate = document.createElement("span");
+        aoiRate.className = "overview-rate overview-rate-aoi";
+        aoiRate.dataset.field = "aoi-rate";
+        aoiRate.textContent = "AOI —";
+        aoiRateCell.appendChild(aoiRate);
+
+        const aiRateCell = document.createElement("td");
+        aiRateCell.className = "overview-rate-cell overview-ai-rate-cell";
+        const aiRate = document.createElement("span");
+        aiRate.className = "overview-rate overview-rate-ai";
+        aiRate.dataset.field = "ai-rate";
+        aiRate.textContent = "AI —";
+        aiRateCell.appendChild(aiRate);
+
         const activityCell = document.createElement("td");
         activityCell.className = "overview-activity-cell";
         const activity = document.createElement("span");
@@ -230,6 +246,8 @@
             ipCell,
             statusCell,
             aoiCell,
+            aoiRateCell,
+            aiRateCell,
             activityCell,
             alertCell,
             linkCell
@@ -327,6 +345,8 @@
             total: numberValue(stats.total_requests ?? stats.total),
             ok: numberValue(stats.total_ok ?? stats.ok_count),
             ng: numberValue(stats.total_ng ?? stats.ng_count),
+            aoiNg: optionalNumber(stats.aoi_ng_count),
+            aiNg: optionalNumber(stats.ai_ng_count ?? stats.total_ng ?? stats.ng_count),
             err: numberValue(stats.total_err ?? stats.err_count),
             overexposed: optionalNumber(stats.overexposed_count),
             avgTime: optionalNumber(
@@ -484,6 +504,14 @@
             aoi.title = "目前沒有 AOI 即時連線";
         }
 
+        if (data && state.status !== "offline") {
+            renderOverviewRejectRate(row, "aoi-rate", "AOI", data.aoiNg, data.total);
+            renderOverviewRejectRate(row, "ai-rate", "AI", data.aiNg, data.total);
+        } else {
+            renderOverviewRejectRate(row, "aoi-rate", "AOI", null, 0);
+            renderOverviewRejectRate(row, "ai-rate", "AI", null, 0);
+        }
+
         renderOverviewActivity(state);
 
         const alertCell = row.querySelector(".overview-alert-cell");
@@ -500,6 +528,16 @@
             alertContainer.appendChild(badge);
         }
         alertCell.classList.toggle("is-empty", healthAlerts.length === 0);
+    }
+
+    function renderOverviewRejectRate(row, field, label, ngCount, total) {
+        const element = row.querySelector(`[data-field="${field}"]`);
+        const hasRate = ngCount !== null && total > 0;
+        const rate = hasRate ? formatRate(ngCount, total) : "—";
+        setText(element, `${label} ${rate}`);
+        element.title = hasRate
+            ? `${label} 當班排片率：${rate}（NG ${formatNumber(ngCount)} / 總投入 ${formatNumber(total)}）`
+            : `${label} 當班尚無可計算資料`;
     }
 
     function renderOverviewActivity(state, now = new Date()) {

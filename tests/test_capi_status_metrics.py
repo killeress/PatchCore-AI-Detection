@@ -21,6 +21,7 @@ class _Database:
             "total": 280,
             "ok_count": 189,
             "ng_count": 22,
+            "aoi_ng_count": 64,
             "err_count": 0,
             "avg_time": 1.625,
             "overexposed_count": 7,
@@ -109,6 +110,8 @@ def test_api_status_includes_shift_and_hardware_metrics(monkeypatch):
     stats = captured["payload"]["stats"]
     assert stats["avg_time"] == 1.625
     assert stats["overexposed_count"] == 7
+    assert stats["aoi_ng_count"] == 64
+    assert stats["ai_ng_count"] == 22
     assert captured["payload"]["server"]["hostname"] == "CAPI34"
     assert captured["payload"]["hardware"] == hardware
     assert captured["headers"] == {"Access-Control-Allow-Origin": "*"}

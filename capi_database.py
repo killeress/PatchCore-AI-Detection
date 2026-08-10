@@ -1743,6 +1743,7 @@ class CAPIDatabase:
                      COUNT(*) as total,
                      SUM(CASE WHEN ai_judgment = 'OK' OR ai_judgment = 'OK-i' THEN 1 ELSE 0 END) as ok_count,
                      SUM(CASE WHEN ai_judgment = 'NG' OR ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ng_count,
+                     SUM(CASE WHEN machine_judgment != '' AND machine_judgment != 'OK' THEN 1 ELSE 0 END) as aoi_ng_count,
                      SUM(CASE WHEN ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END) as err_count,
                      AVG(processing_seconds) as avg_time,
                      SUM(omit_overexposed) as overexposed_count
@@ -5707,6 +5708,8 @@ class CAPIDatabase:
             ("patchcore_blur_sigma", config.patchcore_blur_sigma, "float", "異常圖高斯平滑強度 (抑制噪點)"),
             ("patchcore_min_area", config.patchcore_min_area, "int", "異常判定最小連通面積(px)"),
             ("patchcore_score_metric", config.patchcore_score_metric, "string", "計分方式 (max, top_k_avg, percentile_99)"),
+            ("tile_corner_exclusion_enabled", config.tile_corner_exclusion_enabled, "bool", "啟用 Tile 四角不檢測區（每個角落套用正方形硬遮罩）"),
+            ("tile_corner_exclusion_size_px", config.tile_corner_exclusion_size_px, "int", "Tile 四角不檢測區正方形邊長 (px)"),
             ("mark_exclusion_padding_px", config.mark_exclusion_padding_px, "int", "MARK 不檢測區硬遮罩外擴 (px)"),
             ("mark_exclusion_soft_decay_px", config.mark_exclusion_soft_decay_px, "int", "MARK 硬遮罩外圈 heatmap 降權寬度 (px)"),
             ("cv_edge_exclude_soft_decay_px", config.cv_edge_exclude_soft_decay_px, "int", "手動不檢測區外圈 heatmap 降權寬度 (px)"),

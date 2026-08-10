@@ -1655,6 +1655,32 @@ class CAPIInferencer:
 
         return result
 
+    def _mask_tile_corner_exclusion(
+        self,
+        tile: TileInfo,
+        anomaly_map: Optional[np.ndarray],
+    ) -> Tuple[Optional[np.ndarray], bool]:
+        """將每個 Tile 四角的正方形區域設為不檢測。"""
+        if anomaly_map is None or not getattr(self.config, "tile_corner_exclusion_enabled", False):
+            return anomaly_map, False
+
+        size_px = max(0, int(getattr(self.config, "tile_corner_exclusion_size_px", 32)))
+        if size_px == 0:
+            return anomaly_map, False
+
+        map_h, map_w = anomaly_map.shape[:2]
+        tile_h = max(1, int(tile.height))
+        tile_w = max(1, int(tile.width))
+        mask_h = min(map_h, max(1, int(np.ceil(size_px * map_h / tile_h))))
+        mask_w = min(map_w, max(1, int(np.ceil(size_px * map_w / tile_w))))
+
+        masked_map = anomaly_map.copy()
+        masked_map[:mask_h, :mask_w] = 0
+        masked_map[:mask_h, -mask_w:] = 0
+        masked_map[-mask_h:, :mask_w] = 0
+        masked_map[-mask_h:, -mask_w:] = 0
+        return masked_map, True
+
     def _mask_tile_mark_exclusion_regions(
         self,
         tile: TileInfo,
@@ -2124,6 +2150,7 @@ class CAPIInferencer:
         tile.score_mask_valid_ratio = tile.valid_ratio
         tile.mark_exclusion_masked = False
         mark_masked = False
+        corner_masked = False
         configured_exclude_weighted = False
 
         # === 以下為 anomaly_map 後處理 (batch 和 fallback 共用) ===
@@ -2260,6 +2287,9 @@ class CAPIInferencer:
                 # 將排除區域設為 0
                 anomaly_map = anomaly_map * (mask_resized / 255.0)
 
+            # 每個 Tile 的四角可設定為正方形不檢測區。
+            anomaly_map, corner_masked = self._mask_tile_corner_exclusion(tile, anomaly_map)
+
             # MARK binary 區域屬於不檢測區域，只遮掉 tile 內重疊的 heatmap 像素。
             anomaly_map, mark_masked = self._mask_tile_mark_exclusion_regions(tile, anomaly_map)
 
@@ -2305,6 +2335,7 @@ class CAPIInferencer:
             (tile.mask is not None)
             or has_edge_margin
             or mark_masked
+            or corner_masked
             or configured_exclude_weighted
         )
         if need_recalc and anomaly_map is not None:
@@ -2376,6 +2407,9 @@ class CAPIInferencer:
 
         # 合併兩種偵測結果
         binary = cv2.bitwise_or(binary_diff, binary_abs)
+
+        # 與 PatchCore Tile 共用四角不檢測設定。
+        binary, _ = self._mask_tile_corner_exclusion(tile, binary)
 
         # 如果 tile 有 mask（排除區域），套用 mask
         if tile.mask is not None:
