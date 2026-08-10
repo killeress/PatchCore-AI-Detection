@@ -4702,6 +4702,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 status["stats"]["total_requests"] = shift_stats.get("total", 0) or 0
                 status["stats"]["total_ok"] = shift_stats.get("ok_count", 0) or 0
                 status["stats"]["total_ng"] = shift_stats.get("ng_count", 0) or 0
+                status["stats"]["aoi_ng_count"] = shift_stats.get("aoi_ng_count", 0) or 0
+                status["stats"]["ai_ng_count"] = shift_stats.get("ng_count", 0) or 0
                 status["stats"]["total_err"] = shift_stats.get("err_count", 0) or 0
                 status["stats"]["shift_name"] = shift_stats.get("shift_name", "當班")
                 status["stats"]["time_range"] = shift_stats.get("time_range", "")

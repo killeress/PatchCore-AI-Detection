@@ -302,6 +302,10 @@ def test_shift_statistics_counts_current_shift_half_open_window(tmp_path):
             "2026-07-06 19:30:00",
         ]):
             conn.execute("UPDATE inference_records SET created_at = ? WHERE id = ?", (created_at, record_id))
+        conn.execute(
+            "UPDATE inference_records SET machine_judgment = 'OK' WHERE id = ?",
+            (ids[1],),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -313,6 +317,7 @@ def test_shift_statistics_counts_current_shift_half_open_window(tmp_path):
     assert stats["total"] == 2
     assert stats["ok_count"] == 1
     assert stats["ng_count"] == 1
+    assert stats["aoi_ng_count"] == 1
 
 
 def test_inference_stats_daily_trend_includes_review_adjusted_ai_miss_rate(tmp_path):

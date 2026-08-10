@@ -548,6 +548,7 @@ main {
 
 .overview-status-cell,
 .overview-aoi-cell,
+.overview-rate-cell,
 .overview-activity-cell,
 .overview-link-cell {
     white-space: nowrap;
@@ -576,6 +577,20 @@ main {
     color: var(--red);
     background: rgba(207, 63, 80, 0.07);
     border-color: rgba(207, 63, 80, 0.24);
+}
+
+.overview-rate {
+    font-size: 0.78rem;
+    font-weight: 900;
+    font-variant-numeric: tabular-nums;
+}
+
+.overview-rate-aoi {
+    color: var(--amber);
+}
+
+.overview-rate-ai {
+    color: var(--cyan);
 }
 
 .overview-activity {
@@ -1293,7 +1308,7 @@ main {
     }
 }
 
-@media (max-width: 1080px) {
+@media (max-width: 1320px) {
     .overview-table,
     .overview-table tbody,
     .overview-table tr,
@@ -1345,6 +1360,17 @@ main {
 
     .overview-aoi-cell {
         grid-row: 2;
+        grid-column: 2;
+        justify-self: end;
+    }
+
+    .overview-aoi-rate-cell {
+        grid-row: 3;
+        grid-column: 1;
+    }
+
+    .overview-ai-rate-cell {
+        grid-row: 3;
         grid-column: 2;
         justify-self: end;
     }

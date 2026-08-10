@@ -219,6 +219,8 @@ class CAPIConfig:
     patchcore_blur_sigma: float = 1.5                # 異常圖高斯平滑強度
     patchcore_min_area: int = 10                     # 判定為真異常的最小連通面積(像素)
     patchcore_score_metric: str = "max"              # 計分方式: "max", "top_k_avg", "percentile_99"
+    tile_corner_exclusion_enabled: bool = False       # 是否排除每個 Tile 的四個角落
+    tile_corner_exclusion_size_px: int = 32           # 四角不檢測區正方形邊長 (px)
 
     # 集中度檢查 (Concentration Check) — 過濾 heatmap 均勻偏暖的瀰漫性假陽性
     patchcore_concentration_enabled: bool = True       # 是否啟用集中度檢查
@@ -507,6 +509,8 @@ class CAPIConfig:
             patchcore_blur_sigma=data.get("patchcore_blur_sigma", 1.5),
             patchcore_min_area=data.get("patchcore_min_area", 10),
             patchcore_score_metric=data.get("patchcore_score_metric", "max"),
+            tile_corner_exclusion_enabled=data.get("tile_corner_exclusion_enabled", False),
+            tile_corner_exclusion_size_px=int(data.get("tile_corner_exclusion_size_px", 32)),
             patchcore_concentration_enabled=data.get("patchcore_concentration_enabled", True),
             patchcore_concentration_min_ratio=data.get("patchcore_concentration_min_ratio", 2.0),
             patchcore_concentration_penalty=data.get("patchcore_concentration_penalty", 0.5),
@@ -639,6 +643,8 @@ class CAPIConfig:
             "patchcore_blur_sigma": self.patchcore_blur_sigma,
             "patchcore_min_area": self.patchcore_min_area,
             "patchcore_score_metric": self.patchcore_score_metric,
+            "tile_corner_exclusion_enabled": self.tile_corner_exclusion_enabled,
+            "tile_corner_exclusion_size_px": self.tile_corner_exclusion_size_px,
             "patchcore_concentration_enabled": self.patchcore_concentration_enabled,
             "patchcore_concentration_min_ratio": self.patchcore_concentration_min_ratio,
             "patchcore_concentration_penalty": self.patchcore_concentration_penalty,
@@ -743,6 +749,8 @@ class CAPIConfig:
             "patchcore_blur_sigma": self.patchcore_blur_sigma,
             "patchcore_min_area": self.patchcore_min_area,
             "patchcore_score_metric": self.patchcore_score_metric,
+            "tile_corner_exclusion_enabled": self.tile_corner_exclusion_enabled,
+            "tile_corner_exclusion_size_px": self.tile_corner_exclusion_size_px,
             "patchcore_concentration_enabled": self.patchcore_concentration_enabled,
             "patchcore_concentration_min_ratio": self.patchcore_concentration_min_ratio,
             "patchcore_concentration_penalty": self.patchcore_concentration_penalty,
@@ -883,6 +891,11 @@ class CAPIConfig:
             self.patchcore_min_area = int(param_map["patchcore_min_area"])
         if "patchcore_score_metric" in param_map:
             self.patchcore_score_metric = str(param_map["patchcore_score_metric"])
+        if "tile_corner_exclusion_enabled" in param_map:
+            val = param_map["tile_corner_exclusion_enabled"]
+            self.tile_corner_exclusion_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "tile_corner_exclusion_size_px" in param_map:
+            self.tile_corner_exclusion_size_px = int(param_map["tile_corner_exclusion_size_px"])
         if "patchcore_concentration_enabled" in param_map:
             val = param_map["patchcore_concentration_enabled"]
             self.patchcore_concentration_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)

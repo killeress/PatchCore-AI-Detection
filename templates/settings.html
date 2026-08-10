@@ -1960,6 +1960,7 @@
     let allParams = [];
     const PATCHCORE_PARAMS = [
         'patchcore_filter_enabled', 'patchcore_blur_sigma', 'patchcore_min_area', 'patchcore_score_metric',
+        'tile_corner_exclusion_enabled', 'tile_corner_exclusion_size_px',
         'mark_exclusion_padding_px', 'mark_exclusion_soft_decay_px', 'no_detect_soft_decay_min_weight'
     ];
     const INFERENCE_IMAGE_PARAMS = [
@@ -3175,6 +3176,14 @@
             paramLockMap['dust_pixel_grid_blur_kernel'] = reason;
         }
 
+        const tileCornerExclusionEnabled = readBool(
+            patchcoreParams.find(p => p.param_name === 'tile_corner_exclusion_enabled')
+        );
+        if (!tileCornerExclusionEnabled) {
+            paramLockMap['tile_corner_exclusion_size_px'] =
+                'tile_corner_exclusion_enabled=false 時不套用 Tile 四角不檢測區';
+        }
+
         const aoiCoordEnabledParam = aoiCoordParams.find(p => p.param_name === 'aoi_coord_inspection_enabled');
         const aoiCoordEnabled = readBool(aoiCoordEnabledParam);
         const inspectorParam = aoiCoordParams.find(p => p.param_name === 'aoi_edge_inspector');
@@ -4311,6 +4320,8 @@
         'cv_edge_exclude_soft_decay_px': '手動不檢測區外圈 heatmap 降權寬度 (px)',
         'no_detect_soft_decay_min_weight': '不檢測區 soft decay 邊界最低權重 (0~1)',
         'inference_rotate_180_enabled': '推論影像旋轉 180°',
+        'tile_corner_exclusion_enabled': '啟用 Tile 四角不檢測區',
+        'tile_corner_exclusion_size_px': 'Tile 四角不檢測區大小 (px，正方形邊長)',
         // Image abnormal precheck
         'image_abnormal_detection_enabled': '啟用畫異預檢',
         'image_abnormal_standard_mean_lower': 'STANDARD 產品區平均亮度下限',
@@ -4881,6 +4892,7 @@
             const LOCK_AFFECTING_BOOL_PARAMS = new Set([
                 'aoi_coord_inspection_enabled',
                 'dust_pixel_grid_filter_enabled',
+                'tile_corner_exclusion_enabled',
             ]);
             if (LOCK_AFFECTING_BOOL_PARAMS.has(paramName)) {
                 renderSettings();

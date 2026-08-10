@@ -302,10 +302,16 @@ def test_central_dashboard_pages_use_sqlite_config_and_settings_route():
     assert "createOverviewRow(line)" in app_js
     assert "renderOverviewRow(state)" in app_js
     assert "<th scope=\"col\">AOI 連線</th>" in index_html
+    assert "<th scope=\"col\">AOI 排片率</th>" in index_html
+    assert "<th scope=\"col\">AI 排片率</th>" in index_html
     assert "<th scope=\"col\">最近生產活動</th>" in index_html
     assert "<th scope=\"col\">異常摘要</th>" in index_html
     assert 'aoi.dataset.state = "connected";' in app_js
     assert 'setText(aoi, "AOI 未連線");' in app_js
+    assert "aoiNg: optionalNumber(stats.aoi_ng_count)" in app_js
+    assert "aiNg: optionalNumber(stats.ai_ng_count ?? stats.total_ng ?? stats.ng_count)" in app_js
+    assert 'renderOverviewRejectRate(row, "aoi-rate", "AOI", data.aoiNg, data.total);' in app_js
+    assert 'renderOverviewRejectRate(row, "ai-rate", "AI", data.aiNg, data.total);' in app_js
     assert "function formatRelativeTime(value, now = new Date())" in app_js
     assert "`最近 ${judgment} · ${relativeTime}`" in app_js
     assert "badge.textContent = `⚠ ${alert.summary}`;" in app_js
