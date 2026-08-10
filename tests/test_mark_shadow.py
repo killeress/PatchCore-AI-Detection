@@ -28,7 +28,7 @@ from mark_shadow.paddle_shadow_worker import (
 )
 
 
-def test_build_mark_shadow_payload_crops_and_rotates_upright():
+def test_build_mark_shadow_payload_keeps_full_mark_envelope_and_rotates_upright():
     image = np.arange(20 * 30, dtype=np.uint16).reshape(20, 30)
     detection = {
         "found": True,
@@ -51,7 +51,7 @@ def test_build_mark_shadow_payload_crops_and_rotates_upright():
 
     png = base64.b64decode(payload["image_png_base64"])
     actual = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
-    expected = cv2.rotate(image[2:13, 1:13], cv2.ROTATE_180)
+    expected = cv2.rotate(image[2:13, 0:14], cv2.ROTATE_180)
     np.testing.assert_array_equal(actual, expected)
     assert payload["source_image"] == "W0F00000_074058.tif"
     assert payload["current_text"] == "BJ"

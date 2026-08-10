@@ -1,10 +1,12 @@
 import io
 import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 
+from capi_config import CAPIConfig
 from capi_inference import CAPIInferencer
 
 
@@ -189,3 +191,120 @@ def test_coord_debug_template_has_operator_facing_heatmap_tables():
     assert "局部峰值掃描（不受 Top % 配額限制，全部列出）" in template
     assert "被 Top % 排除" in template
     assert "僅供排查，不修改正式設定或判定" in template
+    assert "MARK 不檢測區" in template
+    assert "data.mark_exclusion" in template
+
+
+class _MarkAwareDiagnosticInferencer(CAPIInferencer):
+    def __init__(self):
+        self.config = CAPIConfig()
+        self.config.machine_id = "TEST_MODEL"
+        self.config.tile_size = 64
+        self.config.tile_stride = 64
+        self.config.otsu_offset = 0
+        self.config.enable_panel_polygon = False
+        self.config.edge_margin_px = 0
+        self.config.patchcore_filter_enabled = False
+        self.config.patchcore_concentration_enabled = False
+        self.config.patchcore_diffuse_area_enabled = False
+        self.config.mark_exclusion_padding_px = 0
+        self.config.mark_exclusion_soft_decay_px = 0
+        self.config.no_detect_soft_decay_min_weight = 0.10
+        self._model_mapping = {}
+        self.last_tile = None
+
+    def _find_raw_object_bounds(self, image):
+        height, width = image.shape[:2]
+        return (0, 0, width, height), None
+
+    def calculate_otsu_bounds(self, image):
+        height, width = image.shape[:2]
+        return (0, 0, width, height), None, None
+
+    def _get_image_prefix(self, _name):
+        return "WGF50500"
+
+    def _get_inferencer_for_prefix(self, _prefix):
+        return object()
+
+    def predict_tile(
+        self,
+        tile,
+        inferencer=None,
+        edge_margin_override=None,
+        threshold=None,
+        model_id=None,
+    ):
+        self.last_tile = tile
+        anomaly = np.zeros((64, 64), dtype=np.float32)
+        anomaly[55, 55] = 1.0  # MARK peak inside absolute bbox (80,80)-(96,96)
+        anomaly[32, 32] = 0.2  # AOI center remains below the 0.28 threshold
+        return CAPIInferencer.predict_tile(
+            self,
+            tile,
+            threshold=threshold,
+            model_id=model_id,
+            raw_prediction=(1.0, anomaly),
+        )
+
+
+def test_coord_debug_applies_panel_mark_exclusion_before_scoring(tmp_path):
+    from capi_web import CAPIWebHandler
+
+    image = np.full((128, 128), 90, dtype=np.uint8)
+    image_path = tmp_path / "WGF50500_sample.tif"
+    mark_path = tmp_path / "W0F00000_sample.tif"
+    assert cv2.imwrite(str(image_path), image)
+    assert cv2.imwrite(str(mark_path), image)
+
+    body = json.dumps({
+        "image_path": str(image_path),
+        "product_x": 64,
+        "product_y": 64,
+        "product_w": 128,
+        "product_h": 128,
+        "threshold": 0.28,
+        "edge_margin_px": 0,
+    }).encode("utf-8")
+
+    handler = CAPIWebHandler.__new__(CAPIWebHandler)
+    handler.inferencer = _MarkAwareDiagnosticInferencer()
+    handler.heatmap_manager = None
+    handler.rfile = io.BytesIO(body)
+    handler.headers = SimpleNamespace(
+        get=lambda key, default=0: (
+            str(len(body)) if key == "Content-Length" else default
+        )
+    )
+    sent = []
+    handler._send_json = lambda payload, status=200: sent.append((payload, status))
+    CAPIWebHandler._debug_heatmap_dir = tmp_path / "debug"
+
+    detection = {
+        "found": True,
+        "bbox": {"x": 80, "y": 80, "width": 16, "height": 16},
+        "roi": "bottom_left",
+        "orientation": "normal",
+    }
+    with patch("capi_mark_detector.detect_panel_mark", return_value=detection), \
+         patch.object(
+             handler.inferencer, "_apply_online_paddle_mark_recognition"
+         ) as recognize_mark:
+        handler._handle_debug_coord_inference()
+
+    recognize_mark.assert_not_called()
+
+    assert sent and sent[0][1] == 200
+    response = sent[0][0]
+    assert response["judgment"] == "OK"
+    assert response["score"] == 0.2
+    assert response["mark_exclusion"] == {
+        "applied": True,
+        "source_image": mark_path.name,
+        "bbox": [80, 80, 16, 16],
+        "region_count": 1,
+        "reason_zh": "已套用正式 MARK 不檢測區",
+    }
+    assert response["score_breakdown"]["mark_exclusion_masked"] is True
+    assert response["score_breakdown"]["mark_exclusion_region_count"] == 1
+    assert handler.inferencer.last_tile.mark_exclusion_masked is True

@@ -7,6 +7,7 @@ import contextvars
 import hashlib
 import json
 import logging
+import math
 import os
 import queue
 import sqlite3
@@ -21,6 +22,8 @@ import cv2
 
 
 logger = logging.getLogger("capi.mark_shadow")
+
+_MARK_CROP_ASPECT_RATIO = 2.0
 
 _CLIENT_LOCK = threading.Lock()
 _CLIENT: Optional["MarkShadowClient"] = None
@@ -60,12 +63,34 @@ def build_mark_shadow_payload(
         raise ValueError("MARK shadow bbox must have positive size")
 
     image_height, image_width = image.shape[:2]
-    pad_x = max(4, int(round(width * max(0.0, float(padding_ratio)))))
-    pad_y = max(4, int(round(height * max(0.0, float(padding_ratio)))))
-    x1 = max(0, x - pad_x)
-    y1 = max(0, y - pad_y)
-    x2 = min(image_width, x + width + pad_x)
-    y2 = min(image_height, y + height + pad_y)
+    # The locator bbox is tight around dots that survived thresholding.  If faint
+    # outer dots were filtered out, padding that bbox alone cannot recover the
+    # complete two-character MARK.  Normalize the OCR envelope to the expected
+    # horizontal two-character geometry before adding the configured padding.
+    envelope_width = max(
+        width,
+        int(math.ceil(height * _MARK_CROP_ASPECT_RATIO)),
+    )
+    envelope_height = max(
+        height,
+        int(math.ceil(envelope_width / _MARK_CROP_ASPECT_RATIO)),
+    )
+    ratio = max(0.0, float(padding_ratio))
+    pad_x = max(4, int(round(envelope_width * ratio)))
+    pad_y = max(4, int(round(envelope_height * ratio)))
+
+    crop_width = min(image_width, envelope_width + pad_x * 2)
+    crop_height = min(image_height, envelope_height + pad_y * 2)
+    center_x = x + width / 2.0
+    center_y = y + height / 2.0
+    x1 = int(math.floor(center_x - crop_width / 2.0))
+    y1 = int(math.floor(center_y - crop_height / 2.0))
+    # Shift crops at image edges instead of shortening them, so the expected
+    # MARK envelope and its context are retained whenever the source allows it.
+    x1 = max(0, min(x1, image_width - crop_width))
+    y1 = max(0, min(y1, image_height - crop_height))
+    x2 = x1 + crop_width
+    y2 = y1 + crop_height
     if x2 <= x1 or y2 <= y1:
         raise ValueError("MARK shadow crop is empty")
 
