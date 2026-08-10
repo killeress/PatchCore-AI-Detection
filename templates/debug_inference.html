@@ -3964,6 +3964,11 @@
         const finalIcon = finalIsNG ? '🔴' : '🟢';
         const shift = data.tile_shift || [0, 0];
         const shiftText = `(${shift[0] > 0 ? '+' : ''}${shift[0]}, ${shift[1] > 0 ? '+' : ''}${shift[1]})`;
+        const markExclusion = data.mark_exclusion || {};
+        const markApplied = Boolean(markExclusion.applied);
+        const markLocated = Number(markExclusion.region_count || 0) > 0;
+        const markStatus = markApplied ? '✅ 已套用' : (markLocated ? '⚪ 未影響' : '— 未套用');
+        const markColor = markApplied ? 'var(--ok)' : 'var(--text-muted)';
 
         // Info cards
         const cards = document.getElementById('coord-info-cards');
@@ -4003,6 +4008,11 @@
             <div class="summary-card">
                 <div class="label">座標修正量</div>
                 <div class="value" style="color:${shift[0] || shift[1] ? 'var(--accent)' : 'var(--text-muted)'};font-size:0.9rem;">${shiftText}</div>
+            </div>
+            <div class="summary-card" title="${escapeHtml(markExclusion.reason_zh || '')}">
+                <div class="label">MARK 不檢測區</div>
+                <div class="value" style="color:${markColor};font-size:0.9rem;">${markStatus}</div>
+                <div style="color:var(--text-muted);font-size:0.72rem;margin-top:4px;word-break:break-all;">${escapeHtml(markExclusion.source_image || '')}</div>
             </div>
             <div class="summary-card">
                 <div class="label">使用模型</div>

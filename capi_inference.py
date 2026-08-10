@@ -732,6 +732,7 @@ class CAPIInferencer:
         *,
         machine_no: Optional[str] = None,
         model_id: Optional[str] = None,
+        apply_recognition: bool = True,
     ) -> Tuple[Optional[Dict[str, Any]], List[ExclusionRegion]]:
         source_path = next(
             (f for f in image_files if self._is_mark_binary_source(f.name)),
@@ -784,6 +785,8 @@ class CAPIInferencer:
         )
         detection["mark_machine_no"] = str(machine_no or "")
         detection["mark_model_id"] = str(model_id or "")
+        if not apply_recognition:
+            return detection, [region]
         self._apply_online_paddle_mark_recognition(
             image,
             detection,

@@ -8553,6 +8553,55 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             )
         return _finish("灰塵流程仍找到非灰塵異常證據，維持 NG。")
 
+    def _resolve_debug_coord_mark_exclusion(self, image_path: Path):
+        """Locate the panel MARK for coordinate debug without running OCR side effects."""
+        status = {
+            "applied": False,
+            "source_image": "",
+            "bbox": None,
+            "region_count": 0,
+            "reason_zh": "同資料夾找不到 W0F0000 MARK 來源圖",
+        }
+
+        try:
+            prepare_files = getattr(
+                self.inferencer, "_prepare_panel_image_files", None
+            )
+            detect_mark = getattr(
+                self.inferencer, "_detect_panel_mark_binary_region", None
+            )
+            if not callable(prepare_files) or not callable(detect_mark):
+                return [], status
+
+            image_files, _is_duplicate = prepare_files(image_path.parent)
+            detection, regions = detect_mark(
+                image_files,
+                apply_recognition=False,
+            )
+            detection = detection or {}
+            status["source_image"] = str(detection.get("source_image") or "")
+            if not detection.get("found") or not regions:
+                status["reason_zh"] = str(
+                    detection.get("message")
+                    or detection.get("error")
+                    or "MARK 未定位"
+                )
+                return [], status
+
+            bbox = detection.get("mark_bbox_tuple")
+            if bbox is None:
+                raise ValueError("MARK 定位結果缺少 bbox")
+            status.update({
+                "bbox": [int(value) for value in bbox],
+                "region_count": len(regions),
+                "reason_zh": "MARK 已定位，等待套用不檢測區",
+            })
+            return list(regions), status
+        except Exception as exc:
+            logger.warning("[DEBUG-COORD] MARK exclusion failed: %s", exc)
+            status["reason_zh"] = f"MARK 不檢測區建立失敗：{exc}"
+            return [], status
+
     def _handle_debug_coord_inference(self):
         """API: 人工座標推論 — 以指定產品座標為中心裁切 512x512 做推論"""
         import time as _time
@@ -8818,6 +8867,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif preprocess_after_tiling:
                 configured_pipeline = list(active_pipeline or [])
 
+            mark_regions, mark_exclusion = \
+                self._resolve_debug_coord_mark_exclusion(image_path)
+            tile_info.mark_exclusion_regions = list(mark_regions)
+            tile_info.mark_exclusion_region_count = len(mark_regions)
+
             # 推論 (含 GPU lock)
             debug_model_id = getattr(self.inferencer.config, "machine_id", None)
             if hasattr(self, '_gpu_lock') and self._gpu_lock:
@@ -8834,6 +8888,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     edge_margin_override=edge_margin_override,
                     threshold=debug_threshold,
                     model_id=debug_model_id,
+                )
+
+            if mark_regions:
+                mark_exclusion["applied"] = bool(
+                    getattr(tile_info, "mark_exclusion_masked", False)
+                )
+                mark_exclusion["reason_zh"] = (
+                    "已套用正式 MARK 不檢測區"
+                    if mark_exclusion["applied"]
+                    else "MARK 已定位，但未影響本次座標 tile"
                 )
 
             total_time = _time.time() - total_start
@@ -9018,9 +9082,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         not peak_limit_reached
                     heatmap_analysis["aoi_window_tile_px"] = peak_window_px
                     heatmap_analysis["analysis_heatmap_zh"] = (
-                        "正式灰塵判定用熱力圖（已套用不檢測區遮罩）"
-                        if dust_analysis.get("exclude_zone_heatmap_masked")
-                        else "PatchCore 衰減後熱力圖"
+                        "正式灰塵判定用熱力圖（已套用 MARK 不檢測區）"
+                        if getattr(tile_info, "mark_exclusion_masked", False)
+                        else (
+                            "正式灰塵判定用熱力圖（已套用不檢測區遮罩）"
+                            if dust_analysis.get("exclude_zone_heatmap_masked")
+                            else "PatchCore 衰減後熱力圖"
+                        )
                     )
                     global_stats = heatmap_analysis.get("global_stats") or {}
                     top_info = heatmap_analysis.get("top_percent") or {}
@@ -9239,6 +9307,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "edge_margin_sides": str(
                     getattr(tile_info, "score_edge_margin_sides", "") or ""
                 ),
+                "mark_exclusion_masked": bool(
+                    getattr(tile_info, "mark_exclusion_masked", False)
+                ),
+                "mark_exclusion_region_count": int(
+                    getattr(tile_info, "mark_exclusion_region_count", 0) or 0
+                ),
             }
 
             response_data = {
@@ -9267,6 +9341,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "image_prefix": img_prefix,
                 "image_prefix_label": source_image_prefix(image_path.name),
                 "model_name": model_name,
+                "mark_exclusion": mark_exclusion,
                 "edge_margin_px": edge_margin_override if edge_margin_override is not None else self.inferencer.config.edge_margin_px,
                 "peak_window_px": peak_window_px,
                 "score_breakdown": score_breakdown,
