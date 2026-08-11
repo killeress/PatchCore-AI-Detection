@@ -14,10 +14,12 @@ from capi_mark_detector import _remove_tiny_components, detect_panel_mark
 _ROOT = Path(__file__).resolve().parent.parent
 
 _PATTERNS = {
+    "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
     "B": ("01110", "11111", "11010", "11110", "11011", "11111", "11110"),
     "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
     "F": ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
     "J": ("01111", "01111", "00110", "00110", "00110", "11110", "11100"),
+    "N": ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
     "O": ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
     "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
     "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
@@ -27,7 +29,7 @@ _PATTERNS = {
 }
 
 
-def _draw_mark(image, text, x, y, cell=10, gap=8, radius=3, row_shear=0.0):
+def _draw_mark(image, text, x, y, cell=10, gap=8, radius=3, row_shear=0.0, pixel_value=45):
     cursor_x = x
     for char in text:
         for row_idx, row in enumerate(_PATTERNS[char]):
@@ -40,7 +42,7 @@ def _draw_mark(image, text, x, y, cell=10, gap=8, radius=3, row_shear=0.0):
                             y + row_idx * cell + int(round(row_shear * col_idx * cell)),
                         ),
                         radius,
-                        45,
+                        pixel_value,
                         -1,
                     )
         cursor_x += 5 * cell + gap
@@ -96,6 +98,26 @@ def test_detect_panel_mark_bottom_left_rotated_180_reads_canonical_text():
     assert result["text"] == "EJ"
     assert result["roi"] == "bottom_left"
     assert result["orientation"] == "rot180"
+
+
+def test_detect_panel_mark_bottom_left_retries_narrow_roi_when_wide_roi_is_noisy():
+    image = np.full((768, 1024), 120, dtype=np.uint8)
+    _draw_mark(image, "N0", 790, 150, pixel_value=85)
+    image = cv2.rotate(image, cv2.ROTATE_180)
+
+    # High-contrast dots outside the narrow fallback raise the wide ROI's
+    # global Otsu threshold enough to erase the low-contrast MARK.
+    for y in range(int(image.shape[0] * 0.53), int(image.shape[0] * 0.96), 12):
+        for x in range(int(image.shape[1] * 0.285), int(image.shape[1] * 0.318), 12):
+            cv2.circle(image, (x, y), 3, 20, -1)
+
+    result = detect_panel_mark(image)
+
+    assert result["found"] is True
+    assert result["text"] == "N0"
+    assert result["roi"] == "bottom_left"
+    assert result["orientation"] == "rot180"
+    assert result["search_pass"] == "fallback"
 
 
 @pytest.mark.parametrize("text", ["F5", "P5", "R5", "T5"])

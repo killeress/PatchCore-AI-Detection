@@ -796,6 +796,7 @@ class CAPIInferencer:
             f"MARK Locator {source_path.name}: technique=DotMatrixCV "
             f"profile=v{int(detection.get('profile_version') or 0)} "
             f"roi={detection.get('roi', '')} "
+            f"search={detection.get('search_pass', 'primary')} "
             f"orientation={detection.get('orientation', '')} "
             f"bbox=({x},{y},{width},{height})"
         )
