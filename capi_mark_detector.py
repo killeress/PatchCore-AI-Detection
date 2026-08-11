@@ -83,6 +83,13 @@ _ROI_RATIOS = (
     ("bottom_left", (0.01, 0.52, 0.32, 0.97)),
 )
 
+# Keep the broad bottom-left search for existing layouts. If both primary
+# corners fail, retry the rotationally symmetric width used by top_right so
+# unrelated texture at the ROI's right edge cannot dominate global Otsu.
+_FALLBACK_ROI_RATIOS = (
+    ("bottom_left", (0.01, 0.52, 0.28, 0.97)),
+)
+
 _PROFILE_SCHEMA_VERSION = 1
 _PROFILE_SIMILARITY_FLOOR = 0.94
 _PROFILE_MAX_BOOST = 0.45
@@ -227,20 +234,27 @@ def detect_panel_mark(
     height, width = gray.shape[:2]
 
     candidates: List[Dict[str, Any]] = []
-    for roi_name, ratios in _ROI_RATIOS:
-        x1, y1, x2, y2 = _roi_from_ratios(width, height, ratios)
-        roi = gray[y1:y2, x1:x2]
-        candidate = _detect_roi(
-            roi,
-            x1,
-            y1,
-            width,
-            height,
-            roi_name,
-            profile_index,
-        )
-        if candidate is not None:
-            candidates.append(candidate)
+    for search_pass, roi_ratios in (
+        ("primary", _ROI_RATIOS),
+        ("fallback", _FALLBACK_ROI_RATIOS),
+    ):
+        for roi_name, ratios in roi_ratios:
+            x1, y1, x2, y2 = _roi_from_ratios(width, height, ratios)
+            roi = gray[y1:y2, x1:x2]
+            candidate = _detect_roi(
+                roi,
+                x1,
+                y1,
+                width,
+                height,
+                roi_name,
+                profile_index,
+            )
+            if candidate is not None:
+                candidate["search_pass"] = search_pass
+                candidates.append(candidate)
+        if candidates:
+            break
 
     if not candidates:
         return {
@@ -955,6 +969,7 @@ def _public_result(best: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Di
         "bbox": bbox,
         "char_boxes": char_boxes,
         "roi": best["roi"],
+        "search_pass": best.get("search_pass", "primary"),
         "orientation": best.get("orientation", "normal"),
         "component_count": best["component_count"],
         "chars": best["chars"],
@@ -963,6 +978,7 @@ def _public_result(best: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Di
             {
                 "text": item.get("text", ""),
                 "roi": item.get("roi", ""),
+                "search_pass": item.get("search_pass", "primary"),
                 "orientation": item.get("orientation", "normal"),
                 "bbox": item.get("bbox"),
                 "confidence": round(float(item.get("confidence", 0.0)), 3),
