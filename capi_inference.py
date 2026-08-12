@@ -35,6 +35,7 @@ from typing import List, Dict, Tuple, Optional, Any
 import re
 import time
 import contextvars
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import torch
@@ -108,6 +109,7 @@ from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
 from scratch_filter import ScratchFilter
 
 logger = logging.getLogger("capi.inference")
+_MARK_PATCH_SCORE_LOCK = threading.RLock()
 
 
 # ── 產品解析度映射 ─────────────────────────────────────
@@ -216,6 +218,13 @@ class TileInfo:
     mark_exclusion_regions: List[Any] = field(default_factory=list, repr=False)  # MARK binary 不檢測區域
     mark_exclusion_masked: bool = False      # 此 tile 的 heatmap 是否被 MARK binary 區域遮罩
     mark_exclusion_region_count: int = 0
+    mark_patch_score_applied: bool = False   # 是否排除 MARK Patch 後重算正式分數
+    mark_patchcore_score: float = 0.0        # 排除 MARK 後、其他遮罩前的正式分數
+    mark_patch_valid_count: int = 0
+    mark_patch_total_count: int = 0
+    mark_patch_peak_x: int = -1
+    mark_patch_peak_y: int = -1
+    mark_patch_score_reason: str = ""
     # Scratch classifier post-filter (over-review reduction)
     scratch_score: float = 0.0              # 0 = 未跑 classifier
     scratch_filtered: bool = False          # True = 被翻回 OK
@@ -2064,6 +2073,171 @@ class CAPIInferencer:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         return torch.from_numpy(img.copy()).permute(2, 0, 1).float() / 255.0
 
+    def _tile_intersects_mark_influence(self, tile: TileInfo) -> bool:
+        """Return whether the tile overlaps MARK padding or soft-decay range."""
+        regions = getattr(tile, "mark_exclusion_regions", None) or []
+        influence = max(0, int(getattr(self.config, "mark_exclusion_padding_px", 32))) + \
+            max(0, int(getattr(self.config, "mark_exclusion_soft_decay_px", 48)))
+        tx1, ty1 = int(tile.x), int(tile.y)
+        tx2 = tx1 + max(1, int(tile.width))
+        ty2 = ty1 + max(1, int(tile.height))
+        for region in regions:
+            base_x1 = int(getattr(region, "x1", getattr(region, "x", 0)))
+            base_y1 = int(getattr(region, "y1", getattr(region, "y", 0)))
+            base_x2 = int(
+                getattr(region, "x2", base_x1 + int(getattr(region, "w", 0)))
+            )
+            base_y2 = int(
+                getattr(region, "y2", base_y1 + int(getattr(region, "h", 0)))
+            )
+            rx1, ry1 = base_x1 - influence, base_y1 - influence
+            rx2, ry2 = base_x2 + influence, base_y2 + influence
+            if max(tx1, rx1) < min(tx2, rx2) and max(ty1, ry1) < min(ty2, ry2):
+                return True
+        return False
+
+    @staticmethod
+    def _normalize_patchcore_image_score(outer_model: Any, raw_score: torch.Tensor) -> float:
+        """Apply the same image-score normalization used by anomalib post-processing."""
+        normalized = raw_score
+        post_processor = getattr(outer_model, "post_processor", None)
+        if post_processor is not None and bool(
+            getattr(post_processor, "enable_normalization", False)
+        ):
+            normalized = post_processor._normalize(
+                raw_score,
+                post_processor.image_min,
+                post_processor.image_max,
+                post_processor.image_threshold,
+            )
+        return float(normalized.reshape(-1)[0].item())
+
+    def _predict_with_mark_patch_score(
+        self,
+        tile: TileInfo,
+        inferencer: Any,
+        input_image: np.ndarray,
+    ) -> Tuple[Any, Dict[str, Any]]:
+        """Exclude MARK-affected patches before PatchCore selects its image score."""
+        detail: Dict[str, Any] = {
+            "applied": False,
+            "reason": "unsupported_model_api",
+            "valid_count": 0,
+            "total_count": 0,
+            "peak_x": -1,
+            "peak_y": -1,
+            "elapsed_ms": 0.0,
+        }
+        outer_model = getattr(inferencer, "model", None)
+        patchcore_model = getattr(outer_model, "model", None)
+        if patchcore_model is None and callable(
+            getattr(outer_model, "compute_anomaly_score", None)
+        ):
+            patchcore_model = outer_model
+        original_compute = getattr(patchcore_model, "compute_anomaly_score", None)
+        if not callable(original_compute):
+            return inferencer.predict(input_image), detail
+
+        instance_dict = getattr(patchcore_model, "__dict__", {})
+        had_override = "compute_anomaly_score" in instance_dict
+        previous_override = instance_dict.get("compute_anomaly_score")
+
+        def _mark_aware_score(patch_scores, locations, embedding):
+            original_score = original_compute(patch_scores, locations, embedding)
+            detail["original_raw_score"] = original_score.detach()
+            started = time.perf_counter()
+            try:
+                scores = patch_scores if patch_scores.ndim == 2 else patch_scores.unsqueeze(0)
+                if scores.shape[0] != 1:
+                    detail["reason"] = "unsupported_patch_batch"
+                    return original_score
+
+                total_count = int(scores.shape[1])
+                grid_size = int(round(total_count ** 0.5))
+                detail["total_count"] = total_count
+                if grid_size <= 0 or grid_size * grid_size != total_count:
+                    detail["reason"] = "non_square_patch_grid"
+                    return original_score
+
+                probe = np.ones((grid_size, grid_size), dtype=np.float32)
+                weighted, changed = self._apply_no_detect_region_weighting(
+                    tile,
+                    probe,
+                    getattr(tile, "mark_exclusion_regions", None) or [],
+                    hard_padding_px=max(
+                        0, int(getattr(self.config, "mark_exclusion_padding_px", 32))
+                    ),
+                    soft_decay_px=max(
+                        0, int(getattr(self.config, "mark_exclusion_soft_decay_px", 48))
+                    ),
+                    core_weight=float(
+                        getattr(self.config, "no_detect_soft_decay_min_weight", 0.10)
+                    ),
+                )
+                if not changed:
+                    detail["reason"] = "mark_does_not_reach_patch_grid"
+                    return original_score
+
+                valid = np.asarray(weighted).reshape(-1) >= (1.0 - 1e-6)
+                valid_count = int(np.count_nonzero(valid))
+                detail["valid_count"] = valid_count
+                if valid_count <= 0:
+                    detail["reason"] = "all_patches_excluded"
+                    return original_score
+                if valid_count == total_count:
+                    detail["reason"] = "no_patch_excluded"
+                    return original_score
+
+                valid_tensor = torch.as_tensor(
+                    valid, dtype=torch.bool, device=scores.device
+                )
+                masked_scores = scores.clone()
+                masked_scores[:, ~valid_tensor] = float("-inf")
+                peak_index = int(torch.argmax(masked_scores[0]).item())
+                mark_free_score = original_compute(
+                    masked_scores, locations, embedding
+                )
+                peak_row, peak_col = divmod(peak_index, grid_size)
+                detail.update({
+                    "applied": True,
+                    "reason": "applied",
+                    "raw_score": mark_free_score.detach(),
+                    "peak_x": int(round(
+                        tile.x + (peak_col + 0.5) * tile.width / grid_size
+                    )),
+                    "peak_y": int(round(
+                        tile.y + (peak_row + 0.5) * tile.height / grid_size
+                    )),
+                    "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                })
+                return mark_free_score
+            except Exception as exc:
+                detail["reason"] = f"score_recompute_failed:{type(exc).__name__}"
+                logger.warning("MARK PatchCore score recompute failed: %s", exc)
+                return original_score
+
+        patchcore_model.compute_anomaly_score = _mark_aware_score
+        try:
+            predictions = inferencer.predict(input_image)
+        finally:
+            if had_override:
+                patchcore_model.compute_anomaly_score = previous_override
+            else:
+                delattr(patchcore_model, "compute_anomaly_score")
+
+        if detail["applied"]:
+            pred_score = predictions.pred_score
+            detail["score"] = float(
+                pred_score.item() if hasattr(pred_score, "item") else pred_score
+            )
+            detail["original_score"] = self._normalize_patchcore_image_score(
+                outer_model, detail["original_raw_score"]
+            )
+            detail["model"] = type(patchcore_model).__name__
+        elif "original_raw_score" not in detail:
+            detail["reason"] = "patch_score_not_emitted"
+        return predictions, detail
+
     def _batch_forward(self, tiles: List[TileInfo], inferencer, batch_size: int = 4) -> Optional[List[Tuple[float, Optional[np.ndarray]]]]:
         """
         批次模型推論，回傳每個 tile 的 (pred_score, anomaly_map_numpy)
@@ -2116,6 +2290,21 @@ class CAPIInferencer:
             (異常分數, 異常熱圖) - 如果有遮罩，會過濾排除區域的異常
         """
         active_threshold = threshold if threshold is not None else self.threshold
+        patchcore_enabled = getattr(self.config, 'patchcore_filter_enabled', False)
+        if patchcore_overrides is not None and 'patchcore_filter_enabled' in patchcore_overrides:
+            patchcore_enabled = patchcore_overrides['patchcore_filter_enabled']
+        mark_patch_detail: Dict[str, Any] = {
+            "applied": False,
+            "reason": "raw_prediction" if raw_prediction is not None else "not_applicable",
+        }
+
+        tile.mark_patch_score_applied = False
+        tile.mark_patchcore_score = 0.0
+        tile.mark_patch_valid_count = 0
+        tile.mark_patch_total_count = 0
+        tile.mark_patch_peak_x = -1
+        tile.mark_patch_peak_y = -1
+        tile.mark_patch_score_reason = ""
 
         if raw_prediction is not None:
             # 使用預先批次計算的結果，跳過模型推論
@@ -2135,7 +2324,21 @@ class CAPIInferencer:
                  else:
                      input_image = cv2.cvtColor(input_image, cv2.COLOR_GRAY2BGR)
 
-            predictions = active_inferencer.predict(input_image)
+            with _MARK_PATCH_SCORE_LOCK:
+                if (
+                    not patchcore_enabled
+                    and self._tile_intersects_mark_influence(tile)
+                ):
+                    predictions, mark_patch_detail = \
+                        self._predict_with_mark_patch_score(
+                            tile, active_inferencer, input_image
+                        )
+                else:
+                    predictions = active_inferencer.predict(input_image)
+                    if patchcore_enabled:
+                        mark_patch_detail["reason"] = "patchcore_filter_enabled"
+                    else:
+                        mark_patch_detail["reason"] = "mark_not_in_tile"
 
             # 取得分數
             pred_score = float(predictions.pred_score.item()) if hasattr(predictions.pred_score, 'item') else float(predictions.pred_score)
@@ -2145,7 +2348,11 @@ class CAPIInferencer:
             if hasattr(predictions, 'anomaly_map') and predictions.anomaly_map is not None:
                 anomaly_map = predictions.anomaly_map.squeeze().cpu().numpy() if hasattr(predictions.anomaly_map, 'cpu') else predictions.anomaly_map.squeeze()
 
-        raw_pred_score = float(pred_score)
+        raw_pred_score = float(
+            mark_patch_detail.get("original_score", pred_score)
+            if mark_patch_detail.get("applied")
+            else pred_score
+        )
         tile.raw_pred_score = raw_pred_score
         tile.pre_decay_map_max = 0.0
         tile.post_decay_map_max = 0.0
@@ -2153,9 +2360,19 @@ class CAPIInferencer:
         tile.score_edge_margin_sides = ""
         tile.score_mask_valid_ratio = tile.valid_ratio
         tile.mark_exclusion_masked = False
+        if mark_patch_detail.get("applied"):
+            tile.mark_patch_score_applied = True
+            tile.mark_patchcore_score = float(mark_patch_detail["score"])
+            tile.mark_patch_valid_count = int(mark_patch_detail.get("valid_count", 0))
+            tile.mark_patch_total_count = int(mark_patch_detail.get("total_count", 0))
+            tile.mark_patch_peak_x = int(mark_patch_detail.get("peak_x", -1))
+            tile.mark_patch_peak_y = int(mark_patch_detail.get("peak_y", -1))
+            tile.mark_patch_score_reason = "applied"
         mark_masked = False
         corner_masked = False
         configured_exclude_weighted = False
+        pre_mark_map_max = 0.0
+        post_mark_map_max = 0.0
 
         # === 以下為 anomaly_map 後處理 (batch 和 fallback 共用) ===
         if anomaly_map is not None:
@@ -2163,10 +2380,6 @@ class CAPIInferencer:
             pre_process_max = float(np.max(anomaly_map))
 
             # --- PatchCore 後處理過濾 ---
-            patchcore_enabled = getattr(self.config, 'patchcore_filter_enabled', False)
-            if patchcore_overrides is not None and 'patchcore_filter_enabled' in patchcore_overrides:
-                patchcore_enabled = patchcore_overrides['patchcore_filter_enabled']
-
             if patchcore_enabled:
                 # 1. 高斯平滑
                 sigma = getattr(self.config, 'patchcore_blur_sigma', 1.5)
@@ -2293,9 +2506,11 @@ class CAPIInferencer:
 
             # 每個 Tile 的四角可設定為正方形不檢測區。
             anomaly_map, corner_masked = self._mask_tile_corner_exclusion(tile, anomaly_map)
+            pre_mark_map_max = float(np.max(anomaly_map))
 
             # MARK binary 區域屬於不檢測區域，只遮掉 tile 內重疊的 heatmap 像素。
             anomaly_map, mark_masked = self._mask_tile_mark_exclusion_regions(tile, anomaly_map)
+            post_mark_map_max = float(np.max(anomaly_map))
 
             # 手動不檢測區也要在主 score 階段套用，否則固定結構的 heatmap
             # 只會在 dust 後處理被歸零，原始 Score 仍可能保留過檢。
@@ -2345,10 +2560,49 @@ class CAPIInferencer:
         if need_recalc and anomaly_map is not None:
             post_decay_max = float(np.max(anomaly_map))
 
-            if pre_decay_max > 0:
-                # 用 max 比率調整 pred_score (統一使用 max 作為 decay 基準，避免 metric 不一致)
+            if tile.mark_patch_score_applied and mark_masked:
+                # MARK 已在 PatchCore 選分階段排除；只保留其他遮罩與邊緣的衰減，
+                # 不可再用 MARK 前後 max 比率降低整張 Tile。
+                before_mark_ratio = (
+                    pre_mark_map_max / pre_decay_max if pre_decay_max > 0 else 1.0
+                )
+                after_mark_ratio = (
+                    post_decay_max / post_mark_map_max if post_mark_map_max > 0 else 1.0
+                )
+                decay_ratio = before_mark_ratio * after_mark_ratio
+                pred_score = pred_score * decay_ratio
+                logger.info(
+                    "[MARK_PATCH_SCORE] method=patchcore_valid_patch_v1 "
+                    "model=%s raw=%.4f mark_free=%.4f final=%.4f threshold=%.4f "
+                    "patches=%d/%d peak=(%d,%d) other_decay=%.4f elapsed_ms=%.2f",
+                    mark_patch_detail.get("model", "unknown"),
+                    raw_pred_score,
+                    tile.mark_patchcore_score,
+                    pred_score,
+                    active_threshold,
+                    tile.mark_patch_valid_count,
+                    tile.mark_patch_total_count,
+                    tile.mark_patch_peak_x,
+                    tile.mark_patch_peak_y,
+                    decay_ratio,
+                    float(mark_patch_detail.get("elapsed_ms", 0.0)),
+                )
+            elif pre_decay_max > 0:
+                # 無 Patch evidence 時保留既有比例計分，避免不支援模型中斷推論。
                 decay_ratio = post_decay_max / pre_decay_max
                 pred_score = pred_score * decay_ratio
+                if mark_masked:
+                    tile.mark_patch_score_reason = str(
+                        mark_patch_detail.get("reason") or "unknown_fallback"
+                    )
+                    logger.info(
+                        "[MARK_PATCH_SCORE] method=max_ratio fallback=%s raw=%.4f "
+                        "final=%.4f threshold=%.4f",
+                        tile.mark_patch_score_reason,
+                        raw_pred_score,
+                        pred_score,
+                        active_threshold,
+                    )
             else:
                 decay_ratio = 0.0
                 pred_score = 0.0

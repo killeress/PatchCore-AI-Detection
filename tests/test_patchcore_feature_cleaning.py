@@ -69,6 +69,214 @@ def test_context_plan_uses_best_overlapping_view_and_auto_guard(tmp_path):
     assert plan["stats"]["context_auto_guard_px"] == 4.0
 
 
+def test_rejected_neighbor_overlap_is_forced_out_of_accepted_tile(tmp_path):
+    accepted = tmp_path / "t0011.png"
+    accepted.write_bytes(b"tile")
+    panel = tmp_path / "panel"
+    panel.mkdir()
+    callback = FeatureDensityCleaningCallback(
+        k=1,
+        keep_ratio=0.94,
+        reference_size=4096,
+        strategy="context_overlap_adaptive",
+        trace_sources={
+            str(accepted.resolve()): {
+                "tile_pool_id": 141168,
+                "source_path": str(accepted.resolve()),
+                "panel_path": str(panel.resolve()),
+                "tile_x": 4694,
+                "tile_y": 736,
+                "tile_width": 512,
+                "tile_height": 512,
+            },
+        },
+        rejected_trace_sources=[{
+            "tile_pool_id": 141167,
+            "panel_path": str(panel.resolve()),
+            "tile_x": 4331,
+            "tile_y": 735,
+            "tile_width": 512,
+            "tile_height": 512,
+        }],
+    )
+    callback._batch_layouts = [{
+        "image_paths": [str(accepted.resolve())],
+        "input_size": [512, 512],
+        "grid_size": [64, 64],
+        "embedding_count": 64 * 64,
+    }]
+
+    plan = callback._build_context_cleaning_plan(64 * 64)
+    rejected = plan["forced_exclude_mask"].reshape(64, 64)
+
+    # t0010/t0011 overlap is 149 px. Feature centers 4..148 (cols 0..18)
+    # are covered by the rejected t0010 and must not reach KNN or coreset.
+    assert bool(rejected[:, :19].all())
+    assert not bool(rejected[:, 19:].any())
+    assert not bool(plan["candidate_mask"][plan["forced_exclude_mask"]].any())
+    assert not set(torch.nonzero(plan["forced_exclude_mask"]).flatten().tolist()) & set(
+        plan["reference_indices"].tolist()
+    )
+    assert plan["stats"]["context_rejected_tiles"] == 1
+    assert plan["stats"]["context_rejected_overlap_features"] == 64 * 19
+
+
+def test_rejected_overlap_applies_even_when_no_distance_candidates(tmp_path):
+    accepted = tmp_path / "accepted.png"
+    accepted.write_bytes(b"tile")
+    panel = tmp_path / "panel"
+    panel.mkdir()
+    raw = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    model = _model_with_store(raw.clone())
+    callback = FeatureDensityCleaningCallback(
+        k=1,
+        keep_ratio=0.75,
+        reference_size=4,
+        strategy="context_overlap_adaptive",
+        trace_sources={
+            str(accepted.resolve()): {
+                "tile_pool_id": 11,
+                "source_path": str(accepted.resolve()),
+                "panel_path": str(panel.resolve()),
+                "tile_x": 4,
+                "tile_y": 0,
+                "tile_width": 8,
+                "tile_height": 8,
+            },
+        },
+        rejected_trace_sources=[{
+            "tile_pool_id": 10,
+            "panel_path": str(panel.resolve()),
+            "tile_x": 0,
+            "tile_y": 0,
+            "tile_width": 8,
+            "tile_height": 8,
+        }],
+    )
+    callback._batch_layouts = [{
+        "image_paths": [str(accepted.resolve())],
+        "input_size": [8, 8],
+        "grid_size": [1, 4],
+        "embedding_count": 4,
+    }]
+
+    callback.on_train_epoch_end(None, model)
+    callback.record_coreset_indices([0])
+
+    assert torch.equal(torch.cat(model.model.embedding_store), raw[2:])
+    assert callback.stats["reason"] == "rejected_overlap_only"
+    assert callback.stats["rejected_overlap_excluded"] == 2
+    trace = callback.stats["patch_trace"][0]
+    assert trace["reason_codes"][:2] == [4, 4]
+    assert trace["removed_indices"] == [0, 1]
+    # Coreset index 0 after filtering maps back to original feature index 2.
+    assert trace["coreset_indices"] == [2]
+
+
+def test_rejected_overlap_applies_when_total_does_not_exceed_k(tmp_path):
+    accepted = tmp_path / "accepted-small.png"
+    accepted.write_bytes(b"tile")
+    panel = tmp_path / "panel-small"
+    panel.mkdir()
+    raw = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    model = _model_with_store(raw.clone())
+    callback = FeatureDensityCleaningCallback(
+        k=4,
+        keep_ratio=0.75,
+        reference_size=5,
+        strategy="context_overlap_adaptive",
+        trace_sources={
+            str(accepted.resolve()): {
+                "tile_pool_id": 11,
+                "source_path": str(accepted.resolve()),
+                "panel_path": str(panel.resolve()),
+                "tile_x": 4,
+                "tile_y": 0,
+                "tile_width": 8,
+                "tile_height": 8,
+            },
+        },
+        rejected_trace_sources=[{
+            "tile_pool_id": 10,
+            "panel_path": str(panel.resolve()),
+            "tile_x": 0,
+            "tile_y": 0,
+            "tile_width": 8,
+            "tile_height": 8,
+        }],
+    )
+    callback._batch_layouts = [{
+        "image_paths": [str(accepted.resolve())],
+        "input_size": [8, 8],
+        "grid_size": [1, 4],
+        "embedding_count": 4,
+    }]
+
+    callback.on_train_epoch_end(None, model)
+
+    assert torch.equal(torch.cat(model.model.embedding_store), raw[2:])
+    assert callback.stats["reason"] == "rejected_overlap_only"
+    assert callback.stats["rejected_overlap_excluded"] == 2
+
+
+def test_coreset_wrapper_records_exact_original_cell_indices(tmp_path, monkeypatch):
+    source = tmp_path / "tile.png"
+    source.write_bytes(b"tile")
+    raw = torch.tensor([
+        [1.0, 0.0],
+        [0.9, 0.1],
+        [0.8, 0.2],
+        [-1.0, 0.0],
+    ])
+    class Inner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding_store = [raw.clone()]
+            self.register_buffer("memory_bank", torch.empty(0))
+
+        def subsample_embedding(self, _ratio):
+            pass
+
+    inner = Inner()
+    model = SimpleNamespace(model=inner)
+    callback = FeatureDensityCleaningCallback(
+        k=1,
+        keep_ratio=0.75,
+        reference_size=4,
+        trace_sources={
+            str(source.resolve()): {
+                "tile_pool_id": 7,
+                "source_path": str(source.resolve()),
+            },
+        },
+    )
+    callback._batch_layouts = [{
+        "image_paths": [str(source.resolve())],
+        "input_size": [8, 8],
+        "grid_size": [2, 2],
+        "embedding_count": 4,
+    }]
+    distances = torch.tensor([0.0, 0.1, 0.2, 1.0])
+    monkeypatch.setattr(
+        callback,
+        "_kth_cosine_distances",
+        lambda *args, **kwargs: (distances, torch.device("cpu")),
+    )
+    monkeypatch.setattr(
+        callback,
+        "_select_coreset_indices",
+        lambda _memory_bank, _ratio: [0, 2],
+    )
+
+    callback._install_coreset_trace(model)
+    callback.on_train_epoch_end(None, model)
+    inner.subsample_embedding(0.5)
+
+    assert torch.equal(inner.memory_bank, raw[[0, 2]])
+    assert callback.stats["coreset_selected"] == 2
+    assert callback.stats["patch_trace"][0]["coreset_indices"] == [0, 2]
+
+
 def test_overlap_consensus_rejects_tile_edge_only_outlier(tmp_path, monkeypatch):
     raw = torch.arange(16, dtype=torch.float32).reshape(8, 2)
     model = _model_with_store(raw.clone())

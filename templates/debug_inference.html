@@ -3692,9 +3692,12 @@
 
         const scoreSteps = [
             ['模型原始分數', score.raw_patchcore_score],
+            ...(score.mark_patch_score_applied ? [[
+                '排除 MARK Patch 後正式分數', score.mark_patchcore_score,
+            ]] : []),
             ['衰減前熱圖最高值', score.pre_decay_map_max],
             ['衰減後熱圖最高值', score.post_decay_map_max],
-            ['遮罩／邊緣保留比例', score.decay_ratio],
+            [score.mark_patch_score_applied ? '其他遮罩／邊緣保留比例' : '遮罩／邊緣保留比例', score.decay_ratio],
             ['本次 Tile 分數', score.final_tile_score ?? data.score],
             ['判定門檻', score.threshold ?? data.threshold],
         ].map(([label, value], index) => `
@@ -3703,6 +3706,11 @@
                 <div class="step-value">${coordDiagNumber(value, 4)}</div>
             </div>
         `).join('');
+        const markPatchScoreNote = score.mark_patch_score_applied
+            ? `已排除 MARK 影響 Patch，以 ${Number(score.mark_patch_valid_count || 0)}/${Number(score.mark_patch_total_count || 0)} 個有效 Patch 重算正式分數。`
+            : (score.mark_exclusion_masked
+                ? `MARK Patch 正式分數未套用：${score.mark_patch_score_reason || '無 Patch evidence'}，本次使用舊式比例備援。`
+                : '');
 
         const seed = dust.center_seed || {};
         const seedText = seed.enabled
@@ -3831,6 +3839,7 @@
             </div>
 
             <div class="coord-score-flow">${scoreSteps}</div>
+            ${markPatchScoreNote ? `<div class="coord-diagnostic-note" style="margin-top:6px;">${escapeHtml(markPatchScoreNote)}</div>` : ''}
 
             <div class="coord-diagnostic-alert" style="margin-top:10px;">
                 <strong>Top ${coordDiagNumber(topPercent, 2)}% 切點：</strong>

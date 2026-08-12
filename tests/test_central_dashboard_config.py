@@ -39,9 +39,11 @@ def test_central_dashboard_defaults_are_imported_to_sqlite(tmp_path):
             "dashboardUrl",
             "overexposedUrl",
             "enabled",
+            "isProduction",
         }
         for line in config["lines"]
     )
+    assert all(line["isProduction"] is False for line in config["lines"])
     with sqlite3.connect(db.db_path) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM central_dashboard_settings"
@@ -67,6 +69,7 @@ def test_central_dashboard_first_read_can_import_local_file_config(tmp_path):
                 "dashboardUrl": "http://10.9.0.1/",
                 "overexposedUrl": "",
                 "enabled": True,
+                "isProduction": False,
             }
         ],
     }
@@ -101,6 +104,7 @@ def test_central_dashboard_config_can_be_replaced_and_keep_order(tmp_path):
                     "dashboardUrl": "http://10.0.0.2/",
                     "overexposedUrl": "",
                     "enabled": False,
+                    "isProduction": True,
                 },
                 {
                     "id": "mod1-capi01",
@@ -123,11 +127,55 @@ def test_central_dashboard_config_can_be_replaced_and_keep_order(tmp_path):
         "mod1-capi01",
     ]
     assert saved["lines"][0]["enabled"] is False
+    assert saved["lines"][0]["isProduction"] is True
+    assert saved["lines"][1]["isProduction"] is False
     assert db.get_central_dashboard_config() == saved
     with sqlite3.connect(db.db_path) as connection:
         assert connection.execute(
             "SELECT updated_by FROM central_dashboard_settings WHERE id = 1"
         ).fetchone()[0] == "tester"
+
+
+def test_central_dashboard_existing_database_adds_is_production_column(tmp_path):
+    db_path = tmp_path / "legacy-dashboard.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """CREATE TABLE central_dashboard_lines (
+                   id TEXT PRIMARY KEY,
+                   factory TEXT NOT NULL,
+                   line_name TEXT NOT NULL,
+                   pc_name TEXT NOT NULL,
+                   api_url TEXT NOT NULL,
+                   dashboard_url TEXT DEFAULT '',
+                   overexposed_url TEXT DEFAULT '',
+                   enabled INTEGER NOT NULL DEFAULT 1,
+                   sort_order INTEGER NOT NULL DEFAULT 0,
+                   updated_by TEXT DEFAULT '',
+                   updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+               )"""
+        )
+        connection.execute(
+            """INSERT INTO central_dashboard_lines
+               (id, factory, line_name, pc_name, api_url)
+               VALUES ('legacy-line', 'MOD2', 'CAPI01', 'CAPI01',
+                       'http://10.174.37.137/api/status')"""
+        )
+
+    CAPIDatabase(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1] for row in connection.execute(
+                "PRAGMA table_info(central_dashboard_lines)"
+            ).fetchall()
+        }
+        is_production = connection.execute(
+            "SELECT is_production FROM central_dashboard_lines WHERE id = ?",
+            ("legacy-line",),
+        ).fetchone()[0]
+
+    assert "is_production" in columns
+    assert is_production == 0
 
 
 @pytest.mark.parametrize(
@@ -306,6 +354,7 @@ def test_central_dashboard_pages_use_sqlite_config_and_settings_route():
     assert "<th scope=\"col\">AI 排片率</th>" in index_html
     assert "<th scope=\"col\">最近生產活動</th>" in index_html
     assert "<th scope=\"col\">異常摘要</th>" in index_html
+    assert "<th scope=\"col\">程式版本</th>" in index_html
     assert 'aoi.dataset.state = "connected";' in app_js
     assert 'setText(aoi, "AOI 未連線");' in app_js
     assert "aoiNg: optionalNumber(stats.aoi_ng_count)" in app_js
@@ -317,6 +366,16 @@ def test_central_dashboard_pages_use_sqlite_config_and_settings_route():
     assert "badge.textContent = `⚠ ${alert.summary}`;" in app_js
     assert 'link.textContent = "開啟";' in app_js
     assert 'link.textContent = "開啟設備";' not in app_js
+    assert 'updateButton.textContent = "更新程式";' in app_js
+    assert "function renderOverviewUpdate(state)" in app_js
+    assert "function applyCentralUpdate(lineId)" in app_js
+    assert 'fetch("/api/central-dashboard/update/apply"' in app_js
+    assert 'body: JSON.stringify({' in app_js
+    assert "window.confirm(" in app_js
+    assert "訓練工作進行中" in app_js
+    assert "overview-update-action" in styles_css
+    assert ".overview-update-action[hidden]" in styles_css
+    assert "focus_update" not in app_js
     assert 'localStorage.setItem(THEME_STORAGE_KEY, nextTheme)' in app_js
     assert ':root[data-theme="dark"]' in styles_css
     assert 'createInput(index, "ip", "設備 IP", 15, true)' in settings_html
@@ -325,7 +384,14 @@ def test_central_dashboard_pages_use_sqlite_config_and_settings_route():
     assert 'apiUrl: `${baseUrl}/api/status`' in settings_html
     assert 'dashboardUrl: `${baseUrl}/`' in settings_html
     assert 'overexposedUrl: `${baseUrl}/overexposed`' in settings_html
+    assert 'productionLabel.append(production, "正式上線")' in settings_html
+    assert "isProduction: line.isProduction === true" in settings_html
     assert "createMoveButton(index, -1" in settings_html
     assert "createMoveButton(index, 1" in settings_html
+    assert 'row.dataset.production = "true"' in app_js
+    assert 'badge.textContent = "上線"' in app_js
+    assert "overview-production-badge" in styles_css
+    assert 'tr[data-production="true"]' in styles_css
+    assert "card.dataset.production" not in app_js
     assert "hostname: textValue(server.hostname)" in app_js
     assert 'data.hostname ||' in app_js

@@ -592,6 +592,104 @@ def test_train_one_patchcore_cleans_selected_zone_before_export(
     assert stats["feature_cleaning"]["reason"] == "completed"
 
 
+def test_train_single_submodel_passes_rejected_tile_geometry_to_context_cleaning(
+    tmp_path, monkeypatch,
+):
+    from capi_train_new import TrainingConfig, train_single_submodel
+
+    pool = []
+    for index in range(30):
+        path = tmp_path / "tiles" / f"accepted_{index}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"tile")
+        pool.append({
+            "id": index + 1,
+            "lighting": "W0F00000",
+            "zone": "edge",
+            "source": "ok",
+            "decision": "accept",
+            "source_path": str(path),
+            "panel_path": str(tmp_path / "panel"),
+            "tile_index": index,
+            "tile_x": index * 4,
+            "tile_y": 0,
+            "tile_width": 8,
+            "tile_height": 8,
+        })
+    rejected_path = tmp_path / "tiles" / "rejected.png"
+    rejected_path.write_bytes(b"tile")
+    pool.append({
+        "id": 999,
+        "lighting": "W0F00000",
+        "zone": "inner",  # reject geometry must cross zone boundaries
+        "source": "ok",
+        "decision": "reject",
+        "source_path": str(rejected_path),
+        "panel_path": str(tmp_path / "panel"),
+        "tile_index": 99,
+        "tile_x": 4,
+        "tile_y": 0,
+        "tile_width": 8,
+        "tile_height": 8,
+    })
+
+    class MockDB:
+        def list_tile_pool(self, _job_id, **filters):
+            rows = list(pool)
+            for key, value in filters.items():
+                rows = [row for row in rows if row.get(key) == value]
+            return rows
+
+    captured = {}
+
+    def fake_train(
+        staging_dir, run_root, unit_label, cfg=None, log=None,
+        experiment_stats_out=None, trace_sources=None,
+        rejected_trace_sources=None,
+    ):
+        captured["rejected"] = rejected_trace_sources
+        if experiment_stats_out is not None:
+            experiment_stats_out.update({
+                "feature_pool_kernel_size": cfg.feature_pool_kernel_size,
+                "feature_cleaning": {
+                    "mode": "context_overlap_adaptive_v1",
+                    "applied": True,
+                    "removed": 0,
+                },
+            })
+        output = run_root / "weights" / "torch" / "model.pt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"model")
+        return output
+
+    monkeypatch.setattr("capi_train_new.train_one_patchcore", fake_train)
+    monkeypatch.setattr(
+        "capi_train_new._calibrate_from_model",
+        lambda *args, **kwargs: (0.1, [0.1], []),
+    )
+    monkeypatch.setattr("capi_train_new._setup_offline_env", lambda *args, **kwargs: None)
+    config = TrainingConfig(
+        machine_id="M",
+        panel_paths=[],
+        over_review_root=tmp_path / "over_review",
+        feature_cleaning_mode="context_overlap_adaptive_v1",
+        feature_cleaning_scope="inner_and_edge",
+    )
+
+    train_single_submodel(
+        db=MockDB(),
+        job_id="job",
+        lighting="W0F00000",
+        zone="edge",
+        cfg=config,
+        output_pt_path=tmp_path / "bundle" / "W0F00000-edge.pt",
+        log=lambda _message: None,
+    )
+
+    assert [item["tile_pool_id"] for item in captured["rejected"]] == [999]
+    assert captured["rejected"][0]["tile_x"] == 4
+
+
 def test_calibrate_threshold_returns_default():
     """新版固定回 DEFAULT_THRESHOLD（不再依 NG/train_max 校準）。
 
@@ -770,14 +868,34 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
                     "k": 10,
                     "keep_ratio": 0.998,
                     "removed": 1,
+                    "distance_removed": 1,
+                    "rejected_overlap_excluded": 0,
+                    "coreset_selected": 1,
                     "threshold": 0.2,
-                    "removed_patch_trace": [{
+                    "patch_trace": [{
                         "tile_pool_id": source["tile_pool_id"],
                         "source_path": source["source_path"],
                         "input_size": [512, 512],
                         "grid_size": [2, 2],
                         "removed_indices": [3],
                         "removed_count": 1,
+                        "distance_removed_indices": [3],
+                        "distance_removed_count": 1,
+                        "rejected_overlap_indices": [],
+                        "rejected_overlap_count": 0,
+                        "protected_indices": [],
+                        "protected_count": 0,
+                        "candidate_indices": [0, 1, 2, 3],
+                        "raw_outlier_indices": [3],
+                        "distances": [0.01, 0.02, 0.03, 0.9],
+                        "reason_codes": [0, 0, 0, 1],
+                        "overlap_view_counts": [1, 1, 1, 1],
+                        "outlier_vote_counts": [0, 0, 0, 1],
+                        "outlier_vote_required": [1, 1, 1, 1],
+                        "rejected_overlap_counts": [0, 0, 0, 0],
+                        "rejected_neighbor_tile_ids": [],
+                        "coreset_indices": [0],
+                        "coreset_count": 1,
                     }],
                 }
             experiment_stats_out.update({
@@ -848,8 +966,14 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
         )
     )
     trace_item = cleaning_report["tiles"][0]
+    assert cleaning_report["schema_version"] == 2
+    assert cleaning_report["reason_legend"]["4"] == "excluded_by_rejected_overlap"
     assert "source_path" not in trace_item
     assert trace_item["source_name"].endswith("G0F00000_edge_0.png")
+    assert trace_item["distances"] == [0.01, 0.02, 0.03, 0.9]
+    assert trace_item["reason_codes"] == [0, 0, 0, 1]
+    assert trace_item["outlier_vote_counts"] == [0, 0, 0, 1]
+    assert trace_item["coreset_indices"] == [0]
     assert (bundle_dir / trace_item["asset_path"]).is_file()
     assert len(trained_units) == 10
     # 應有 10 個 .pt
