@@ -1336,6 +1336,13 @@ def test_train_new_done_template_uses_chinese_summary_labels():
     assert "特徵清洗" in text
     assert "context_overlap_adaptive_v1" in text
     assert "自動依重疊 Tile 的 Panel 實體位置" in text
+    assert "Feature patch 逐格追蹤" in text
+    assert "Rejected Tile 重疊排除" in text
+    assert "data-distances" in text
+    assert "data-votes-required" in text
+    assert "data-coreset" in text
+    assert "最終原因" in text
+    assert "進入 coreset" in text
     assert "實驗模型" in text
     assert "模型包" in text
     assert "<th>Lighting</th>" not in text

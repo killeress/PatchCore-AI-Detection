@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -12,6 +13,98 @@ from capi_database import CAPIDatabase
 from capi_edge_cv import EdgeExclusionZoneConfig, EdgeInspectionConfig
 from capi_inference import CAPIInferencer, ExclusionRegion, ImageResult, TileInfo
 from capi_server import results_to_db_data
+
+
+class _FakePatchcoreModel:
+    def compute_anomaly_score(self, patch_scores, _locations, embedding):
+        batch_size, patch_count = patch_scores.shape
+        selected = torch.argmax(patch_scores, dim=1)
+        features = embedding.reshape(batch_size, patch_count, -1)
+        rows = torch.arange(batch_size, device=patch_scores.device)
+        return patch_scores[rows, selected] + features[rows, selected, 0]
+
+
+class _FakePostProcessor:
+    enable_normalization = True
+    image_min = torch.tensor(0.0)
+    image_max = torch.tensor(2.0)
+    image_threshold = torch.tensor(1.0)
+
+    @staticmethod
+    def _normalize(preds, norm_min, norm_max, threshold):
+        return (((preds - threshold) / (norm_max - norm_min)) + 0.5).clamp(0, 1)
+
+
+class _FakePatchcoreInferencer:
+    def __init__(self):
+        self.patchcore = _FakePatchcoreModel()
+        self.post_processor = _FakePostProcessor()
+        self.model = SimpleNamespace(
+            model=self.patchcore,
+            post_processor=self.post_processor,
+        )
+
+    def predict(self, _image):
+        # Bottom-right is MARK (0.90); top-left is the real point defect (0.60).
+        patch_scores = torch.tensor([[0.60, 0.40, 0.30, 0.90]])
+        locations = torch.zeros((1, 4), dtype=torch.long)
+        embedding = torch.tensor([[0.10], [0.05], [0.02], [0.50]])
+        raw_score = self.patchcore.compute_anomaly_score(
+            patch_scores, locations, embedding
+        )
+        pred_score = self.post_processor._normalize(
+            raw_score,
+            self.post_processor.image_min,
+            self.post_processor.image_max,
+            self.post_processor.image_threshold,
+        )
+        anomaly_map = torch.zeros((1, 64, 64), dtype=torch.float32)
+        anomaly_map[:, :32, :32] = 0.60
+        anomaly_map[:, 32:, 32:] = 0.90
+        return SimpleNamespace(pred_score=pred_score, anomaly_map=anomaly_map)
+
+
+def test_mark_exclusion_recomputes_formal_score_from_strongest_valid_patch():
+    config = CAPIConfig()
+    config.patchcore_filter_enabled = False
+    config.patchcore_concentration_enabled = False
+    config.patchcore_diffuse_area_enabled = False
+    config.edge_margin_px = 0
+    config.mark_exclusion_padding_px = 0
+    config.mark_exclusion_soft_decay_px = 0
+    config.no_detect_soft_decay_min_weight = 0.10
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+    inferencer.threshold = 0.5
+    fake_model = _FakePatchcoreInferencer()
+    tile = TileInfo(
+        tile_id=1,
+        x=0,
+        y=0,
+        width=64,
+        height=64,
+        image=np.zeros((64, 64), dtype=np.uint8),
+        mark_exclusion_regions=[ExclusionRegion("mark_binary", 32, 32, 64, 64)],
+    )
+
+    score, masked_map = inferencer.predict_tile(
+        tile, inferencer=fake_model, threshold=0.5
+    )
+
+    # Original: (0.90 + 0.50) normalized = 0.70.
+    # MARK-free: (0.60 + 0.10) normalized = 0.35.
+    assert tile.raw_pred_score == pytest.approx(0.70)
+    assert score == pytest.approx(0.35)
+    assert tile.mark_patch_score_applied is True
+    assert tile.mark_patchcore_score == pytest.approx(0.35)
+    assert tile.mark_patch_valid_count == 3
+    assert tile.mark_patch_total_count == 4
+    assert (tile.mark_patch_peak_x, tile.mark_patch_peak_y) == (16, 16)
+    assert tile.mark_patch_score_reason == "applied"
+    assert masked_map[48, 48] == pytest.approx(0.09)
+    assert masked_map[16, 16] == pytest.approx(0.60)
+    assert "compute_anomaly_score" not in fake_model.patchcore.__dict__
 
 
 def test_mark_exclusion_downweights_tile_heatmap_and_recalculates_score():

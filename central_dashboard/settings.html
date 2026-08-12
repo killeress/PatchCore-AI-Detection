@@ -201,13 +201,13 @@
             padding: 7px 10px;
         }
 
-        .enabled-label {
+        .line-option-label {
             flex-direction: row;
             align-items: center;
             gap: 8px;
         }
 
-        .enabled-label input {
+        .line-option-label input {
             width: 18px;
             min-height: 18px;
         }
@@ -320,7 +320,7 @@
             <div class="panel-heading">
                 <div>
                     <h2 id="lines-title">納管線體</h2>
-                    <p>只需填設備 IP，系統會自動建立相關 URL；PC 名稱由狀態 API 的 hostname 取得。顯示順序可用上移／下移調整。</p>
+                    <p>只需填設備 IP，系統會自動建立相關 URL；「正式上線」只標示線體總覽，不影響啟用、排序或告警。</p>
                 </div>
                 <button id="add-line" type="button">＋ 新增線體</button>
             </div>
@@ -386,7 +386,8 @@
                     factory: "",
                     line: "",
                     ip: "",
-                    enabled: true
+                    enabled: true,
+                    isProduction: false
                 });
                 renderLines();
                 const lastEditor = editors.lastElementChild;
@@ -442,7 +443,7 @@
                     );
 
                     const enabledLabel = document.createElement("label");
-                    enabledLabel.className = "enabled-label";
+                    enabledLabel.className = "line-option-label";
                     const enabled = document.createElement("input");
                     enabled.type = "checkbox";
                     enabled.checked = line.enabled !== false;
@@ -450,7 +451,17 @@
                         state.lines[index].enabled = enabled.checked;
                     });
                     enabledLabel.append(enabled, "啟用此線體");
-                    grid.append(enabledLabel);
+
+                    const productionLabel = document.createElement("label");
+                    productionLabel.className = "line-option-label";
+                    const production = document.createElement("input");
+                    production.type = "checkbox";
+                    production.checked = line.isProduction === true;
+                    production.addEventListener("change", function () {
+                        state.lines[index].isProduction = production.checked;
+                    });
+                    productionLabel.append(production, "正式上線");
+                    grid.append(enabledLabel, productionLabel);
 
                     editor.append(heading, grid);
                     editors.appendChild(editor);
@@ -536,7 +547,8 @@
                     apiUrl: `${baseUrl}/api/status`,
                     dashboardUrl: `${baseUrl}/`,
                     overexposedUrl: `${baseUrl}/overexposed`,
-                    enabled: line.enabled !== false
+                    enabled: line.enabled !== false,
+                    isProduction: line.isProduction === true
                 };
             }
 

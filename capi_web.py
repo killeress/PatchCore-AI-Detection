@@ -75,6 +75,10 @@ CENTRAL_ACCOUNT_LOCATION_DESCRIPTION = (
 CENTRAL_ACCOUNT_AUTH_HEADER = "X-CAPI-Central-Auth"
 CENTRAL_ACCOUNT_AUTH_PATH = "/api/settings/central-auth"
 CENTRAL_ACCOUNT_AUTH_TIMEOUT_SECONDS = 3.0
+CENTRAL_UPDATE_AUTH_HEADER = "X-CAPI-Central-Update"
+CENTRAL_UPDATE_USER_HEADER = "X-CAPI-Central-User"
+CENTRAL_UPDATE_APPLY_PATH = "/api/update/apply-central"
+CENTRAL_UPDATE_TIMEOUT_SECONDS = 8.0
 
 
 def _default_central_account_location(
@@ -3749,9 +3753,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/api/central-dashboard/config":
                 if self._require_settings_user(api=True):
                     self._handle_api_central_dashboard_config_update()
+            elif path == "/api/central-dashboard/update/apply":
+                user = self._require_settings_user(api=True, admin=True)
+                if user:
+                    self._handle_api_central_dashboard_update_apply(user)
             elif path == "/api/update/apply":
                 if self._require_settings_user(api=True, admin=True):
                     self._handle_api_update_apply()
+            elif path == CENTRAL_UPDATE_APPLY_PATH:
+                self._handle_api_central_update_apply()
             elif path == "/api/settings/users/create":
                 if self._require_settings_user(api=True, admin=True):
                     self._handle_api_settings_user_create()
@@ -4694,6 +4704,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 status = server_status.get_status()
 
             status.setdefault("server", {})["hostname"] = _get_host_identity()
+            status["update"] = self._get_update_status_payload()
 
             # 將當班統計數據替換為 DB (支援重啟後恢復)
             if self.db:
@@ -4844,8 +4855,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """API: deployed release version."""
         self._send_json(get_version_info())
 
-    def _handle_api_update_status(self):
-        """API: sanitized pending-update status for the frontend notice."""
+    def _get_update_status_payload(self) -> Dict[str, Any]:
+        """Return the sanitized update state shared by local and central dashboards."""
         from capi_update_agent import _load_state
 
         state = _load_state(self._update_state_file)
@@ -4861,16 +4872,104 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         elif not pending_version and status not in {"failed", "apply_requested", "installing"}:
             status = "current"
 
-        self._send_json({
+        return {
             "status": status,
             "current_version": current_version,
             "pending_version": pending_version,
             "detected_at": pending.get("detected_at"),
             "can_apply": bool(pending_version) and status in {"pending", "failed"},
             "failure_reason": str(failed.get("reason") or "")[:240],
-        })
+            "central_apply_supported": True,
+        }
 
-    def _handle_api_update_apply(self):
+    def _handle_api_update_status(self):
+        """API: sanitized pending-update status for the frontend notice."""
+        self._send_json(self._get_update_status_payload())
+
+    @classmethod
+    def _active_training_update_blocker(cls) -> str:
+        """Return the active training job that makes a service restart unsafe."""
+        for state_name, label in (
+            ("_retrain_state", "刮痕分類器重訓"),
+            ("_submodel_retrain_state", "PatchCore 子模型重訓"),
+        ):
+            state = getattr(cls, state_name, None)
+            if not isinstance(state, dict):
+                continue
+            lock = state.get("lock")
+            if lock is None:
+                job = state.get("job")
+            else:
+                with lock:
+                    job = state.get("job")
+            if isinstance(job, dict) and job.get("state") == "running":
+                job_id = str(job.get("job_id") or "").strip()
+                return f"{label} {job_id}".strip()
+
+        with cls._train_new_jobs_lock:
+            runtimes = list(cls._train_new_jobs.items())
+        for job_id, runtime in runtimes:
+            if runtime.get("phase") not in {"preprocess", "train"}:
+                continue
+            thread = runtime.get("thread")
+            proc = runtime.get("proc")
+            thread_alive = thread is not None and thread.is_alive()
+            proc_alive = proc is not None and proc.poll() is None
+            if thread_alive or proc_alive:
+                return f"PatchCore 訓練 {job_id}"
+
+        slot = cls._train_slot
+        with slot["lock"]:
+            active_job_id = str(slot.get("active_job_id") or "").strip()
+        if active_job_id:
+            return f"PatchCore 訓練 {active_job_id}"
+        return ""
+
+    def _handle_api_central_update_apply(self):
+        """Apply an update requested by the configured central dashboard host."""
+        source_ip = str(getattr(self, "client_address", ("", 0))[0] or "").strip()
+        center_ip = str(self._load_central_account_location().get("ip") or "").strip()
+        trusted_header = str(
+            self.headers.get(CENTRAL_UPDATE_AUTH_HEADER, "") if self.headers else ""
+        )
+        if trusted_header != "1" or not source_ip or source_ip != center_ip:
+            logger.warning(
+                "Rejected central update request source=%s configured_center=%s",
+                source_ip or "unknown",
+                center_ip or "unknown",
+            )
+            self._send_json({"error": "不允許的中央更新來源"}, status=403)
+            return
+
+        data = self._read_json_body()
+        if data is None:
+            return
+        expected_version = str(data.get("expectedVersion") or "").strip()
+        if not expected_version:
+            self._send_json({"error": "缺少預期更新版本"}, status=400)
+            return
+        requested_by = urllib.parse.unquote(
+            str(self.headers.get(CENTRAL_UPDATE_USER_HEADER, "") or "")
+        ).strip()[:64]
+        logger.info(
+            "Accepted central update request source=%s requested_by=%s version=%s",
+            source_ip,
+            requested_by or "unknown",
+            expected_version,
+        )
+        self._handle_api_update_apply(
+            expected_version=expected_version,
+            requested_by=requested_by,
+            request_source="central_dashboard",
+        )
+
+    def _handle_api_update_apply(
+        self,
+        *,
+        expected_version: str = "",
+        requested_by: str = "",
+        request_source: str = "local",
+    ):
         """Launch the staged updater outside the server process, then return 202."""
         from capi_update_agent import _load_state, _write_state
 
@@ -4887,6 +4986,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         state_file = self._update_state_file
         app_root = Path(__file__).resolve().parent
         with self._update_apply_lock:
+            active_training = self._active_training_update_blocker()
+            if active_training:
+                logger.warning(
+                    "Rejected update while training is active: %s",
+                    active_training,
+                )
+                self._send_json({
+                    "error": (
+                        f"目前有訓練工作進行中（{active_training}），"
+                        "請等待完成或取消後再更新"
+                    ),
+                }, status=409)
+                return
+
             state = _load_state(state_file)
             pending = state.get("pending_update")
             if not isinstance(pending, dict):
@@ -4897,12 +5010,29 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
 
             version = str(pending.get("version") or "").strip()
+            expected_version = str(expected_version or "").strip()
+            if expected_version and version != expected_version:
+                self._send_json({
+                    "error": (
+                        f"待更新版本已變更（目前 {version or '未知'}），"
+                        "請重新整理後再試"
+                    ),
+                }, status=409)
+                return
             state["status"] = "apply_requested"
             state["apply_requested"] = {
                 "version": version,
                 "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "requested_by": str(requested_by or "").strip()[:64],
+                "source": str(request_source or "local").strip()[:32],
             }
             _write_state(state_file, state)
+            logger.info(
+                "Update apply requested source=%s requested_by=%s version=%s",
+                request_source or "local",
+                requested_by or "unknown",
+                version,
+            )
 
             command = [
                 sys.executable,
@@ -5242,6 +5372,144 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 {"error": "無法儲存中控看板設定"},
                 status=500,
             )
+
+    def _handle_api_central_dashboard_update_apply(self, user: Dict[str, Any]):
+        """Proxy an admin-approved update request to one configured CAPI device."""
+        data = self._read_json_body()
+        if data is None:
+            return
+        line_id = str(data.get("lineId") or "").strip()
+        expected_version = str(data.get("expectedVersion") or "").strip()
+        if not line_id or not expected_version:
+            self._send_json({"error": "缺少線體或更新版本"}, status=400)
+            return
+
+        config = self.db.get_central_dashboard_config(
+            self._load_central_dashboard_file_config()
+        )
+        line = next(
+            (
+                item
+                for item in config.get("lines") or []
+                if item.get("id") == line_id and item.get("enabled") is not False
+            ),
+            None,
+        )
+        if not line:
+            self._send_json({"error": "找不到已啟用的線體設定"}, status=404)
+            return
+
+        api_url = str(line.get("apiUrl") or "").strip()
+        try:
+            parsed = urllib.parse.urlparse(api_url)
+            target_ip = ipaddress.ip_address(parsed.hostname or "")
+            if (
+                parsed.scheme not in {"http", "https"}
+                or target_ip.version != 4
+                or target_ip.packed[0] != 10
+            ):
+                raise ValueError
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        except (ValueError, TypeError):
+            self._send_json({"error": "設備更新目標必須是 10.x.x.x 的 HTTP(S) 位址"}, status=400)
+            return
+
+        webserver_ip = self._detect_central_dashboard_webserver_ip()
+        webserver_prefix = self._central_dashboard_network_prefix(webserver_ip)
+        target_prefix = self._central_dashboard_network_prefix(str(target_ip))
+        if webserver_prefix and target_prefix != webserver_prefix:
+            self._send_json({"error": "設備不屬於此中控看板網段"}, status=403)
+            return
+
+        body = json.dumps(
+            {"expectedVersion": expected_version},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        requested_by = str(user.get("username") or "").strip()[:64]
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            CENTRAL_UPDATE_AUTH_HEADER: "1",
+            CENTRAL_UPDATE_USER_HEADER: urllib.parse.quote(requested_by, safe=""),
+        }
+        timeout_seconds = min(
+            15.0,
+            max(
+                3.0,
+                float(config.get("requestTimeoutSeconds") or CENTRAL_UPDATE_TIMEOUT_SECONDS),
+            ),
+        )
+        connection_class = (
+            http.client.HTTPSConnection
+            if parsed.scheme == "https"
+            else http.client.HTTPConnection
+        )
+        connection = None
+        try:
+            connection = connection_class(
+                str(target_ip),
+                port,
+                timeout=timeout_seconds,
+            )
+            connection.request(
+                "POST",
+                CENTRAL_UPDATE_APPLY_PATH,
+                body=body,
+                headers=headers,
+            )
+            response = connection.getresponse()
+            response_status = int(response.status)
+            response_body = response.read()
+        except (OSError, http.client.HTTPException) as exc:
+            logger.warning(
+                "Central dashboard cannot reach update endpoint line=%s target=%s: %s",
+                line_id,
+                target_ip,
+                exc,
+            )
+            self._send_json({"error": "無法連線至設備更新服務"}, status=502)
+            return
+        finally:
+            if connection is not None:
+                connection.close()
+
+        try:
+            response_payload = json.loads(response_body.decode("utf-8"))
+            if not isinstance(response_payload, dict):
+                response_payload = {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            response_payload = {}
+
+        if response_status == 202:
+            logger.info(
+                "Central dashboard update started line=%s target=%s requested_by=%s version=%s",
+                line_id,
+                target_ip,
+                requested_by or "unknown",
+                expected_version,
+            )
+            self._send_json({
+                "success": True,
+                "lineId": line_id,
+                "status": "apply_requested",
+                "version": str(response_payload.get("version") or expected_version),
+                "message": "更新程序已啟動，設備即將重新啟動",
+            }, status=202)
+            return
+
+        if response_status == 404:
+            self._send_json({
+                "error": "設備版本尚未支援中央直接更新，需先安裝本版一次",
+            }, status=409)
+            return
+        error = str(response_payload.get("error") or "").strip()
+        if response_status in {400, 403, 409}:
+            self._send_json(
+                {"error": error or "設備拒絕更新要求"},
+                status=response_status,
+            )
+            return
+        self._send_json({"error": error or "設備更新服務回應異常"}, status=502)
 
     # ── Debug 推論功能 ─────────────────────────────────
 
@@ -9313,6 +9581,25 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "mark_exclusion_region_count": int(
                     getattr(tile_info, "mark_exclusion_region_count", 0) or 0
                 ),
+                "mark_patch_score_applied": bool(
+                    getattr(tile_info, "mark_patch_score_applied", False)
+                ),
+                "mark_patchcore_score": round(
+                    float(getattr(tile_info, "mark_patchcore_score", 0.0)), 6
+                ),
+                "mark_patch_valid_count": int(
+                    getattr(tile_info, "mark_patch_valid_count", 0) or 0
+                ),
+                "mark_patch_total_count": int(
+                    getattr(tile_info, "mark_patch_total_count", 0) or 0
+                ),
+                "mark_patch_peak": [
+                    int(getattr(tile_info, "mark_patch_peak_x", -1)),
+                    int(getattr(tile_info, "mark_patch_peak_y", -1)),
+                ],
+                "mark_patch_score_reason": str(
+                    getattr(tile_info, "mark_patch_score_reason", "") or ""
+                ),
             }
 
             response_data = {
@@ -13249,6 +13536,31 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                             "grid_size": item.get("grid_size") or [],
                             "removed_indices": item.get("removed_indices") or [],
                             "removed_count": int(item.get("removed_count") or 0),
+                            "distance_removed_count": int(
+                                item.get("distance_removed_count") or 0
+                            ),
+                            "rejected_overlap_count": int(
+                                item.get("rejected_overlap_count") or 0
+                            ),
+                            "protected_count": int(item.get("protected_count") or 0),
+                            "distances": item.get("distances") or [],
+                            "reason_codes": item.get("reason_codes") or [],
+                            "overlap_view_counts": item.get("overlap_view_counts") or [],
+                            "outlier_vote_counts": item.get("outlier_vote_counts") or [],
+                            "outlier_vote_required": item.get("outlier_vote_required") or [],
+                            "rejected_overlap_counts": item.get(
+                                "rejected_overlap_counts"
+                            ) or [],
+                            "coreset_indices": item.get("coreset_indices") or [],
+                            "coreset_count": int(item.get("coreset_count") or 0),
+                            "rejected_neighbor_tile_ids": item.get(
+                                "rejected_neighbor_tile_ids"
+                            ) or [],
+                            "tile_x": item.get("tile_x"),
+                            "tile_y": item.get("tile_y"),
+                            "tile_width": item.get("tile_width"),
+                            "tile_height": item.get("tile_height"),
+                            "threshold": report.get("threshold"),
                         })
                 except (OSError, ValueError, json.JSONDecodeError):
                     logger.warning(

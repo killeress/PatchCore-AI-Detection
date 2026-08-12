@@ -789,6 +789,7 @@ class CAPIDatabase:
                     dashboard_url TEXT DEFAULT '',
                     overexposed_url TEXT DEFAULT '',
                     enabled INTEGER NOT NULL DEFAULT 1,
+                    is_production INTEGER NOT NULL DEFAULT 0,
                     sort_order INTEGER NOT NULL DEFAULT 0,
                     updated_by TEXT DEFAULT '',
                     updated_at TEXT DEFAULT (datetime('now', 'localtime'))
@@ -803,6 +804,12 @@ class CAPIDatabase:
                 columns = [row[1] for row in cursor.fetchall()]
                 if column not in columns:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {def_type}")
+
+            add_column_if_not_exists(
+                "central_dashboard_lines",
+                "is_production",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
 
             def ensure_within_spec_log_schema():
                 cursor = conn.execute("PRAGMA table_info(within_spec_review_log)")
@@ -5401,6 +5408,7 @@ class CAPIDatabase:
                         f"第 {index} 筆的 URL 必須使用 http:// 或 https://"
                     )
             line["enabled"] = raw_line.get("enabled") is not False
+            line["isProduction"] = raw_line.get("isProduction") is True
             normalized_lines.append(line)
 
         return {
@@ -5430,6 +5438,7 @@ class CAPIDatabase:
                     "dashboardUrl": row["dashboard_url"],
                     "overexposedUrl": row["overexposed_url"],
                     "enabled": bool(row["enabled"]),
+                    "isProduction": bool(row["is_production"]),
                 }
                 for row in line_rows
             ],
@@ -5505,8 +5514,9 @@ class CAPIDatabase:
         conn.executemany(
             """INSERT INTO central_dashboard_lines
                (id, factory, line_name, pc_name, api_url, dashboard_url,
-                overexposed_url, enabled, sort_order, updated_by, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                overexposed_url, enabled, is_production, sort_order,
+                updated_by, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     line["id"],
@@ -5517,6 +5527,7 @@ class CAPIDatabase:
                     line["dashboardUrl"],
                     line["overexposedUrl"],
                     1 if line["enabled"] else 0,
+                    1 if line["isProduction"] else 0,
                     index,
                     changed_by,
                     now,

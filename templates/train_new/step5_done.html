@@ -261,23 +261,46 @@
   <div class="d5-section" id="feature-cleaning-visualization">
     <div class="d5-section-head">
       <span class="d5-section-tag">// FEATURE CLEANING TRACE</span>
-      <h2 class="d5-section-title">實際被清除的 feature patches</h2>
+      <h2 class="d5-section-title">Feature patch 逐格追蹤</h2>
     </div>
-    <p class="d5-trace-hint">紅色格點直接來自本次訓練使用的 keep mask；每個子模型顯示被移除格點最多的前 12 個 tile。</p>
+    <p class="d5-trace-hint">每個子模型顯示排除格點最多的前 12 個 Tile；移到格點可查看距離、門檻、重疊票數、保留原因與最終是否進入 coreset。</p>
+    <div class="d5-trace-legend">
+      <span><i class="trace-red"></i>距離異常移除</span>
+      <span><i class="trace-orange"></i>Rejected Tile 重疊排除</span>
+      <span><i class="trace-purple"></i>重疊票數不一致而保留</span>
+      <span><i class="trace-yellow"></i>保護區／缺座標</span>
+      <span><i class="trace-green"></i>進入 coreset</span>
+    </div>
     {% for unit_label, info in units %}
       {% set visuals = info.feature_cleaning.get("visualizations", []) %}
       {% if visuals %}
       <details class="d5-trace-unit">
-        <summary>{{ unit_label }} · {{ info.feature_cleaning.get("affected_tiles", visuals|length) }} 個 tile 受影響</summary>
+        <summary>{{ unit_label }} · {{ info.feature_cleaning.get("affected_tiles", visuals|length) }} 個 Tile 受影響 · 距離移除 {{ info.feature_cleaning.get("distance_removed", info.feature_cleaning.get("removed", 0)) }} · Reject 聯動排除 {{ info.feature_cleaning.get("rejected_overlap_excluded", 0) }} · Coreset {{ info.feature_cleaning.get("coreset_selected", 0) }}</summary>
         <div class="d5-trace-grid">
           {% for visual in visuals %}
           <figure class="d5-trace-card">
             <canvas class="feature-cleaning-canvas"
                     width="256" height="256"
-                    data-source="{{ visual.source_url }}"
-                    data-grid='{{ visual.grid_size|tojson }}'
-                    data-removed='{{ visual.removed_indices|tojson }}'></canvas>
-            <figcaption>{{ visual.source_name }}<br>移除 {{ visual.removed_count }} patches</figcaption>
+                     data-source="{{ visual.source_url }}"
+                     data-grid='{{ visual.grid_size|tojson }}'
+                     data-distances='{{ visual.distances|tojson }}'
+                     data-reasons='{{ visual.reason_codes|tojson }}'
+                     data-overlap-views='{{ visual.overlap_view_counts|tojson }}'
+                     data-votes='{{ visual.outlier_vote_counts|tojson }}'
+                     data-votes-required='{{ visual.outlier_vote_required|tojson }}'
+                     data-rejected-overlaps='{{ visual.rejected_overlap_counts|tojson }}'
+                     data-coreset='{{ visual.coreset_indices|tojson }}'
+                     data-threshold='{{ visual.threshold|tojson }}'
+                     data-tile-x='{{ visual.tile_x|tojson }}'
+                     data-tile-y='{{ visual.tile_y|tojson }}'
+                     data-tile-width='{{ visual.tile_width|tojson }}'
+                     data-tile-height='{{ visual.tile_height|tojson }}'></canvas>
+            <figcaption>
+              {{ visual.source_name }}<br>
+              距離移除 {{ visual.distance_removed_count }} · Reject 聯動 {{ visual.rejected_overlap_count }} · Protected {{ visual.protected_count }} · Coreset {{ visual.coreset_count }}
+              {% if visual.rejected_neighbor_tile_ids %}<br>Rejected 鄰居：{{ visual.rejected_neighbor_tile_ids|join(", ") }}{% endif %}
+            </figcaption>
+            <div class="d5-trace-cell-detail">移動滑鼠到 feature 格點查看判定明細</div>
           </figure>
           {% endfor %}
         </div>
@@ -632,12 +655,21 @@
   .d5-btn-primary { background: #89b4fa; border-color: #89b4fa; }
   .d5-btn-primary:hover { background: #b4befe; border-color: #b4befe; }
   .d5-trace-hint { color:#a6adc8;font-size:.82rem;margin:0 0 12px; }
+  .d5-trace-legend { display:flex;flex-wrap:wrap;gap:10px 16px;margin:0 0 12px;color:#a6adc8;font-size:.72rem; }
+  .d5-trace-legend span { display:inline-flex;align-items:center;gap:5px; }
+  .d5-trace-legend i { display:inline-block;width:13px;height:13px;border:1px solid rgba(255,255,255,.35); }
+  .d5-trace-legend .trace-red { background:rgba(243,139,168,.68); }
+  .d5-trace-legend .trace-orange { background:rgba(250,179,135,.72); }
+  .d5-trace-legend .trace-purple { background:rgba(203,166,247,.48); }
+  .d5-trace-legend .trace-yellow { background:rgba(249,226,175,.30); }
+  .d5-trace-legend .trace-green { background:transparent;border:2px solid #a6e3a1; }
   .d5-trace-unit { border:1px solid #313244;border-radius:8px;background:#181825;margin-top:10px; }
   .d5-trace-unit summary { cursor:pointer;padding:11px 14px;color:#cdd6f4;font-weight:700; }
   .d5-trace-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;padding:0 12px 12px; }
   .d5-trace-card { margin:0;background:#11111b;border:1px solid #313244;border-radius:7px;overflow:hidden; }
-  .d5-trace-card canvas { display:block;width:100%;aspect-ratio:1/1;background:#05050a; }
+  .d5-trace-card canvas { display:block;width:100%;aspect-ratio:1/1;background:#05050a;cursor:crosshair; }
   .d5-trace-card figcaption { padding:7px 9px;color:#a6adc8;font-size:.7rem;line-height:1.4;word-break:break-all; }
+  .d5-trace-cell-detail { min-height:72px;padding:7px 9px;border-top:1px solid #252637;background:#0c0c13;color:#bac2de;font-family:'Fira Code',monospace;font-size:.66rem;line-height:1.5; }
 
   /* ── Responsive ─────────────────────────────────────────── */
   @media (max-width: 900px) {
@@ -648,34 +680,92 @@
 </style>
 <script>
 document.addEventListener('DOMContentLoaded', () => {
+  const reasonLabels = {
+    0: '保留：距離正常 (kept_normal)',
+    1: '移除：距離超過門檻 (removed_distance_outlier)',
+    2: '保留：重疊視角票數不一致 (kept_overlap_disagreement)',
+    3: '保留：Tile 邊界保護 (protected_tile_boundary)',
+    4: '排除：Rejected Tile 覆蓋 (excluded_by_rejected_overlap)',
+    5: '保留：缺少 Panel/Tile 座標 (missing_coordinate_metadata)',
+    6: '保留：清洗範圍外 (protected_outside_cleaning_scope)',
+  };
+  const reasonColors = {
+    1: 'rgba(243, 139, 168, .68)',
+    2: 'rgba(203, 166, 247, .42)',
+    3: 'rgba(249, 226, 175, .24)',
+    4: 'rgba(250, 179, 135, .72)',
+    5: 'rgba(180, 190, 254, .32)',
+    6: 'rgba(249, 226, 175, .18)',
+  };
+  const parseData = (canvas, name, fallback) => {
+    try { return JSON.parse(canvas.dataset[name] || fallback); }
+    catch (_) { return JSON.parse(fallback); }
+  };
   document.querySelectorAll('.feature-cleaning-canvas').forEach(canvas => {
     const source = canvas.dataset.source;
-    let grid = [];
-    let removed = [];
-    try {
-      grid = JSON.parse(canvas.dataset.grid || '[]');
-      removed = JSON.parse(canvas.dataset.removed || '[]');
-    } catch (_) { return; }
+    const grid = parseData(canvas, 'grid', '[]');
+    const distances = parseData(canvas, 'distances', '[]');
+    const reasons = parseData(canvas, 'reasons', '[]');
+    const overlapViews = parseData(canvas, 'overlapViews', '[]');
+    const votes = parseData(canvas, 'votes', '[]');
+    const votesRequired = parseData(canvas, 'votesRequired', '[]');
+    const rejectedOverlaps = parseData(canvas, 'rejectedOverlaps', '[]');
+    const coreset = new Set(parseData(canvas, 'coreset', '[]'));
+    const threshold = parseData(canvas, 'threshold', 'null');
+    const tileX = parseData(canvas, 'tileX', 'null');
+    const tileY = parseData(canvas, 'tileY', 'null');
+    const tileWidth = parseData(canvas, 'tileWidth', 'null');
+    const tileHeight = parseData(canvas, 'tileHeight', 'null');
     if (!source || grid.length !== 2 || !grid[0] || !grid[1]) return;
+    const detail = canvas.closest('.d5-trace-card').querySelector('.d5-trace-cell-detail');
+    const cellW = canvas.width / grid[1];
+    const cellH = canvas.height / grid[0];
     const image = new Image();
     image.onload = () => {
       const ctx = canvas.getContext('2d');
       ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-      const cellW = canvas.width / grid[1];
-      const cellH = canvas.height / grid[0];
-      ctx.fillStyle = 'rgba(243, 139, 168, .62)';
-      ctx.strokeStyle = 'rgba(255, 255, 255, .85)';
-      ctx.lineWidth = .5;
-      removed.forEach(index => {
+      reasons.forEach((reason, index) => {
+        if (!reasonColors[reason]) return;
         const row = Math.floor(index / grid[1]);
         const col = index % grid[1];
         const x = col * cellW;
         const y = row * cellH;
+        ctx.fillStyle = reasonColors[reason];
         ctx.fillRect(x, y, Math.max(1, cellW), Math.max(1, cellH));
-        if (cellW >= 5 && cellH >= 5) ctx.strokeRect(x, y, cellW, cellH);
+      });
+      ctx.strokeStyle = '#a6e3a1';
+      ctx.lineWidth = 1;
+      coreset.forEach(index => {
+        const row = Math.floor(index / grid[1]);
+        const col = index % grid[1];
+        ctx.strokeRect(col * cellW + .5, row * cellH + .5,
+                       Math.max(1, cellW - 1), Math.max(1, cellH - 1));
       });
     };
     image.src = source;
+
+    canvas.addEventListener('mousemove', event => {
+      const rect = canvas.getBoundingClientRect();
+      const col = Math.min(grid[1] - 1, Math.max(0,
+        Math.floor((event.clientX - rect.left) / rect.width * grid[1])));
+      const row = Math.min(grid[0] - 1, Math.max(0,
+        Math.floor((event.clientY - rect.top) / rect.height * grid[0])));
+      const index = row * grid[1] + col;
+      const distance = distances[index];
+      const required = votesRequired[index] || 0;
+      const voteText = required ? `${votes[index] || 0}/${required}` : '未投票';
+      const panelX = (tileX != null && tileWidth != null)
+        ? tileX + (col + .5) * tileWidth / grid[1] : null;
+      const panelY = (tileY != null && tileHeight != null)
+        ? tileY + (row + .5) * tileHeight / grid[0] : null;
+      detail.innerHTML =
+        `格點：row ${row}, col ${col}, index ${index}<br>` +
+        `Panel 座標：${panelX == null ? '—' : `${panelX.toFixed(1)}, ${panelY.toFixed(1)}`}<br>` +
+        `距離／門檻：${distance == null ? '—' : Number(distance).toFixed(6)} / ${threshold == null ? '—' : Number(threshold).toFixed(6)}<br>` +
+        `異常票：${voteText}（accepted 視角 ${overlapViews[index] || 0}、rejected 覆蓋 ${rejectedOverlaps[index] || 0}）<br>` +
+        `最終原因：${reasonLabels[reasons[index]] || 'unknown'}<br>` +
+        `進入 coreset：${coreset.has(index) ? '是' : '否'}`;
+    });
   });
 });
 </script>

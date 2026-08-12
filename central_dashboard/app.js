@@ -162,6 +162,9 @@
         const row = document.createElement("tr");
         row.dataset.lineId = line.id;
         row.dataset.state = "checking";
+        if (line.isProduction === true) {
+            row.dataset.production = "true";
+        }
 
         const lineCell = document.createElement("td");
         lineCell.className = "overview-line-cell";
@@ -173,6 +176,13 @@
         const lineName = document.createElement("strong");
         lineName.textContent = line.line || "未設定線體";
         lineIdentity.append(factory, lineName);
+        if (line.isProduction === true) {
+            const badge = document.createElement("span");
+            badge.className = "overview-production-badge";
+            badge.textContent = "上線";
+            badge.title = "正式上線設備";
+            lineIdentity.appendChild(badge);
+        }
         lineCell.appendChild(lineIdentity);
 
         const ipCell = document.createElement("td");
@@ -231,6 +241,30 @@
         alerts.dataset.field = "overview-alerts";
         alertCell.appendChild(alerts);
 
+        const updateCell = document.createElement("td");
+        updateCell.className = "overview-update-cell";
+        const updateInfo = document.createElement("div");
+        updateInfo.className = "overview-update";
+        updateInfo.dataset.field = "overview-update";
+        updateInfo.dataset.state = "unknown";
+        const updateBadge = document.createElement("span");
+        updateBadge.className = "overview-update-badge";
+        updateBadge.dataset.field = "overview-update-badge";
+        updateBadge.hidden = true;
+        const version = document.createElement("span");
+        version.className = "overview-version";
+        version.dataset.field = "overview-version";
+        version.textContent = "—";
+        const updateButton = document.createElement("button");
+        updateButton.type = "button";
+        updateButton.className = "overview-update-action";
+        updateButton.dataset.action = "update";
+        updateButton.textContent = "更新程式";
+        updateButton.hidden = true;
+        updateButton.addEventListener("click", () => applyCentralUpdate(line.id));
+        updateInfo.append(updateBadge, version, updateButton);
+        updateCell.appendChild(updateInfo);
+
         const linkCell = document.createElement("td");
         linkCell.className = "overview-link-cell";
         const link = document.createElement("a");
@@ -250,9 +284,11 @@
             aiRateCell,
             activityCell,
             alertCell,
+            updateCell,
             linkCell
         );
-        configureLink(row, "dashboard", line.dashboardUrl || deriveBaseUrl(line.apiUrl));
+        const dashboardUrl = line.dashboardUrl || deriveBaseUrl(line.apiUrl);
+        configureLink(row, "dashboard", dashboardUrl);
         document.getElementById("line-overview").appendChild(row);
         return row;
     }
@@ -335,6 +371,7 @@
         const gpu = asObject(hardware.gpu);
         const memory = asObject(hardware.memory || hardware.ram);
         const disk = asObject(hardware.disk);
+        const update = asObject(raw.update);
 
         return {
             running: server.running !== false,
@@ -364,6 +401,14 @@
                 judgment: textValue(latestEvent.judgment || latestEvent.detail),
                 time: textValue(latestEvent.time),
                 duration: textValue(latestEvent.duration)
+            },
+            update: {
+                status: textValue(update.status).toLowerCase() || "unknown",
+                currentVersion: textValue(update.current_version),
+                pendingVersion: textValue(update.pending_version),
+                canApply: update.can_apply === true,
+                failureReason: textValue(update.failure_reason),
+                centralApplySupported: update.central_apply_supported === true
             },
             hardware: {
                 vramUsedGb: optionalNumber(gpu.vram_used_gb),
@@ -513,12 +558,16 @@
         }
 
         renderOverviewActivity(state);
+        renderOverviewUpdate(state);
 
         const alertCell = row.querySelector(".overview-alert-cell");
         const alertContainer = row.querySelector('[data-field="overview-alerts"]');
         const healthAlerts = data && state.status !== "offline"
             ? getHardwareAlerts(data)
             : [];
+        row.dataset.health = healthAlerts.length
+            ? healthAlerts[0].severity
+            : "normal";
         alertContainer.replaceChildren();
         for (const alert of healthAlerts) {
             const badge = document.createElement("span");
@@ -528,6 +577,142 @@
             alertContainer.appendChild(badge);
         }
         alertCell.classList.toggle("is-empty", healthAlerts.length === 0);
+    }
+
+    function renderOverviewUpdate(state) {
+        const row = state.overviewRow;
+        const container = row.querySelector('[data-field="overview-update"]');
+        const badge = row.querySelector('[data-field="overview-update-badge"]');
+        const version = row.querySelector('[data-field="overview-version"]');
+        const updateButton = row.querySelector('[data-action="update"]');
+        const update = state.data && state.data.update;
+        const currentVersion = update && update.currentVersion !== "unknown"
+            ? update.currentVersion
+            : "";
+        const pendingVersion = update ? update.pendingVersion : "";
+        const updateStatus = update ? update.status : "unknown";
+        const canApplyUpdate = Boolean(
+            update &&
+            update.canApply &&
+            update.centralApplySupported &&
+            state.status !== "offline" &&
+            state.status !== "checking"
+        );
+
+        badge.hidden = true;
+        updateButton.hidden = true;
+        updateButton.disabled = false;
+        updateButton.textContent = "更新程式";
+        container.dataset.state = "unknown";
+        setText(version, currentVersion || "—");
+
+        if (updateStatus === "apply_requested" || updateStatus === "installing") {
+            container.dataset.state = "applying";
+            badge.hidden = false;
+            setText(badge, "更新中");
+            setText(version, pendingVersion || currentVersion || "—");
+            container.title = "設備正在套用更新並重新啟動，完成後版本會自動刷新。";
+            return;
+        }
+
+        if (updateStatus === "failed") {
+            container.dataset.state = "failed";
+            badge.hidden = false;
+            setText(badge, "更新失敗");
+            setText(version, pendingVersion || currentVersion || "—");
+            updateButton.hidden = !canApplyUpdate;
+            updateButton.setAttribute(
+                "aria-label",
+                `${state.line.line || state.line.id} 重試更新至版本 ${pendingVersion || "未知"}`
+            );
+            container.title = update.failureReason || "請開啟設備更新頁查看失敗狀態。";
+            return;
+        }
+
+        if (pendingVersion) {
+            container.dataset.state = "pending";
+            badge.hidden = false;
+            setText(badge, "新版本");
+            setText(version, pendingVersion);
+            updateButton.hidden = !canApplyUpdate;
+            updateButton.setAttribute(
+                "aria-label",
+                `${state.line.line || state.line.id} 更新至版本 ${pendingVersion}`
+            );
+            if (!update.centralApplySupported) {
+                container.title = "設備需先安裝支援中央更新的版本一次。";
+            } else if (state.status === "offline") {
+                container.title = `目前版本 ${currentVersion || "未知"}，設備離線，恢復連線後可更新至 ${pendingVersion}。`;
+            } else {
+                container.title = `目前版本 ${currentVersion || "未知"}，點擊後在此頁確認並直接啟動設備更新。`;
+            }
+            return;
+        }
+
+        if (currentVersion) {
+            container.dataset.state = "current";
+            container.title = `目前程式版本 ${currentVersion}`;
+            return;
+        }
+
+        container.title = "此設備尚未提供程式版本與更新狀態。";
+    }
+
+    async function applyCentralUpdate(lineId) {
+        const state = lineStates.get(lineId);
+        const update = state && state.data && state.data.update;
+        if (
+            !state ||
+            !update ||
+            !update.pendingVersion ||
+            !update.canApply ||
+            !update.centralApplySupported
+        ) {
+            return;
+        }
+
+        const lineName = state.line.line || state.line.id;
+        const confirmed = window.confirm(
+            `即將直接更新 ${lineName} 至版本 ${update.pendingVersion}，並重新啟動該設備服務。\n\n` +
+            "請確認該設備已停止檢測，且目前沒有玻璃正在推論或訓練工作進行中。"
+        );
+        if (!confirmed) {
+            return;
+        }
+
+        const updateButton = state.overviewRow.querySelector('[data-action="update"]');
+        updateButton.disabled = true;
+        updateButton.textContent = "啟動中…";
+        try {
+            const response = await fetch("/api/central-dashboard/update/apply", {
+                method: "POST",
+                headers: {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json"
+                },
+                credentials: "same-origin",
+                body: JSON.stringify({
+                    lineId: state.line.id,
+                    expectedVersion: update.pendingVersion
+                })
+            });
+            const payload = await response.json();
+            if (response.status === 401) {
+                window.location.href = "/settings/login?next=%2Fcentral_dashboard%2F";
+                return;
+            }
+            if (!response.ok) {
+                throw new Error(payload.error || `HTTP ${response.status}`);
+            }
+
+            update.status = "apply_requested";
+            update.canApply = false;
+            renderLineCard(state);
+            window.setTimeout(refreshAllLines, 3000);
+        } catch (error) {
+            window.alert(`無法啟動 ${lineName} 更新：${error.message || error}`);
+            renderOverviewUpdate(state);
+        }
     }
 
     function renderOverviewRejectRate(row, field, label, ngCount, total) {

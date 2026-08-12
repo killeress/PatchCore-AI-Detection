@@ -109,7 +109,7 @@
             }
 
             title.textContent = `偵測到新版本 ${pendingVersion}`;
-            message.textContent = `目前版本 ${data.current_version}。請先確認機台已停止檢測，再由管理人員手動套用並重啟服務。`;
+            message.textContent = `目前版本 ${data.current_version}。請先確認機台已停止檢測且沒有訓練工作，再由管理人員手動套用並重啟服務。`;
         }
 
         async function fetchUpdateStatus() {
@@ -126,7 +126,7 @@
             if (!latestStatus || !latestStatus.pending_version) return;
             const confirmed = window.confirm(
                 `即將套用版本 ${latestStatus.pending_version} 並重新啟動服務。\n\n` +
-                '請確認機台已停止檢測，且目前沒有玻璃正在推論。'
+                '請確認機台已停止檢測，且目前沒有玻璃正在推論或訓練工作進行中。'
             );
             if (!confirmed) return;
 

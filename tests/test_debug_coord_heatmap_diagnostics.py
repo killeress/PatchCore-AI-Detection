@@ -193,6 +193,8 @@ def test_coord_debug_template_has_operator_facing_heatmap_tables():
     assert "僅供排查，不修改正式設定或判定" in template
     assert "MARK 不檢測區" in template
     assert "data.mark_exclusion" in template
+    assert "排除 MARK Patch 後正式分數" in template
+    assert "mark_patch_score_reason" in template
 
 
 class _MarkAwareDiagnosticInferencer(CAPIInferencer):
@@ -307,4 +309,6 @@ def test_coord_debug_applies_panel_mark_exclusion_before_scoring(tmp_path):
     }
     assert response["score_breakdown"]["mark_exclusion_masked"] is True
     assert response["score_breakdown"]["mark_exclusion_region_count"] == 1
+    assert response["score_breakdown"]["mark_patch_score_applied"] is False
+    assert response["score_breakdown"]["mark_patch_score_reason"] == "raw_prediction"
     assert handler.inferencer.last_tile.mark_exclusion_masked is True

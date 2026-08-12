@@ -773,6 +773,7 @@ def train_one_patchcore(
     log: Optional[Callable[[str], None]] = None,
     experiment_stats_out: Optional[Dict[str, Any]] = None,
     trace_sources: Optional[Dict[str, Dict[str, Any]]] = None,
+    rejected_trace_sources: Optional[List[Dict[str, Any]]] = None,
 ) -> Path:
     """訓練一個 (lighting, zone) unit。回傳 model.pt 路徑。
 
@@ -902,6 +903,7 @@ def train_one_patchcore(
             reference_size=FEATURE_CLEANING_REFERENCE_SIZE,
             query_chunk=FEATURE_CLEANING_QUERY_CHUNK,
             trace_sources=trace_sources,
+            rejected_trace_sources=rejected_trace_sources,
             strategy=(
                 "context_overlap_adaptive"
                 if context_adaptive
@@ -1636,6 +1638,8 @@ def train_single_submodel(
 
     train_tiles = db.list_tile_pool(job_id, lighting=lighting, zone=zone,
                                     source="ok", decision="accept")
+    rejected_tiles = db.list_tile_pool(job_id, lighting=lighting,
+                                       source="ok", decision="reject")
     ng_all = db.list_tile_pool(job_id, lighting=lighting,
                                source="ng", decision="accept")
     ng_for_zone = [t for t in ng_all if t.get("zone") in (zone, None)]
@@ -1685,6 +1689,25 @@ def train_single_submodel(
             trace_kwargs = {}
             if feature_cleaning_config_for_zone(cfg, zone)["mode"] != FEATURE_CLEANING_MODE_OFF:
                 trace_kwargs["trace_sources"] = trace_sources
+            if (
+                feature_cleaning_config_for_zone(cfg, zone)["mode"]
+                == FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE
+                and rejected_tiles
+            ):
+                trace_kwargs["rejected_trace_sources"] = [{
+                    "tile_pool_id": int(tile["id"]),
+                    "source_path": tile.get("source_path"),
+                    "panel_path": tile.get("panel_path"),
+                    "tile_index": tile.get("tile_index"),
+                    "tile_x": tile.get("tile_x"),
+                    "tile_y": tile.get("tile_y"),
+                    "tile_width": tile.get("tile_width"),
+                    "tile_height": tile.get("tile_height"),
+                } for tile in rejected_tiles]
+                log(
+                    f"{unit_prefix}{unit_label}: 載入 {len(rejected_tiles)} 張 rejected Tile "
+                    "幾何範圍，重疊位置採 reject 優先排除"
+                )
             model_pt = train_one_patchcore(
                 staging,
                 run_root,
@@ -1721,9 +1744,11 @@ def train_single_submodel(
                 "applied": False,
                 "reason": "stats_unavailable",
             })
+            patch_trace = metrics["feature_cleaning"].pop("patch_trace", [])
             removed_patch_trace = metrics["feature_cleaning"].pop(
                 "removed_patch_trace", []
             )
+            cleaning_patch_trace = patch_trace or removed_patch_trace
             elapsed = time.monotonic() - unit_start
             metrics["elapsed_seconds"] = int(elapsed)
 
@@ -1733,7 +1758,7 @@ def train_single_submodel(
             os.replace(tmp_path, output_pt_path)
             size = output_pt_path.stat().st_size
 
-            if removed_patch_trace:
+            if cleaning_patch_trace:
                 try:
                     report_rel = Path("feature_cleaning_reports") / f"{unit_label}.json"
                     report_path = output_pt_path.parent / report_rel
@@ -1747,14 +1772,19 @@ def train_single_submodel(
                     shutil.rmtree(assets_dir, ignore_errors=True)
                     assets_dir.mkdir(parents=True, exist_ok=True)
                     report_tiles = []
+                    affected_indices = [
+                        index
+                        for index, trace_item in enumerate(cleaning_patch_trace)
+                        if int(trace_item.get("removed_count") or 0) > 0
+                    ]
                     visual_indices = set(sorted(
-                        range(len(removed_patch_trace)),
+                        affected_indices,
                         key=lambda item_index: int(
-                            removed_patch_trace[item_index].get("removed_count") or 0
+                            cleaning_patch_trace[item_index].get("removed_count") or 0
                         ),
                         reverse=True,
                     )[:12])
-                    for index, trace_item in enumerate(removed_patch_trace):
+                    for index, trace_item in enumerate(cleaning_patch_trace):
                         source_path = Path(trace_item["source_path"])
                         report_item = {
                             key: value
@@ -1774,7 +1804,7 @@ def train_single_submodel(
 
                     report_tmp = report_path.with_suffix(report_path.suffix + ".tmp")
                     report_payload = {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "unit_label": unit_label,
                         "k": metrics["feature_cleaning"].get("k"),
                         "keep_ratio": metrics["feature_cleaning"].get("keep_ratio"),
@@ -1784,6 +1814,26 @@ def train_single_submodel(
                         ),
                         "threshold": metrics["feature_cleaning"].get("threshold"),
                         "removed": metrics["feature_cleaning"].get("removed", 0),
+                        "distance_removed": metrics["feature_cleaning"].get(
+                            "distance_removed", 0
+                        ),
+                        "rejected_overlap_excluded": metrics["feature_cleaning"].get(
+                            "rejected_overlap_excluded", 0
+                        ),
+                        "coreset_selected": metrics["feature_cleaning"].get(
+                            "coreset_selected", 0
+                        ),
+                        "reason_legend": metrics["feature_cleaning"].get(
+                            "trace_reason_legend"
+                        ) or {
+                            "0": "kept_normal",
+                            "1": "removed_distance_outlier",
+                            "2": "kept_overlap_disagreement",
+                            "3": "protected_tile_boundary",
+                            "4": "excluded_by_rejected_overlap",
+                            "5": "missing_coordinate_metadata",
+                            "6": "protected_outside_cleaning_scope",
+                        },
                         "tiles": report_tiles,
                     }
                     report_tmp.write_text(
@@ -1792,7 +1842,8 @@ def train_single_submodel(
                     )
                     os.replace(report_tmp, report_path)
                     metrics["feature_cleaning"]["report_path"] = report_rel.as_posix()
-                    metrics["feature_cleaning"]["affected_tiles"] = len(report_tiles)
+                    metrics["feature_cleaning"]["affected_tiles"] = len(affected_indices)
+                    metrics["feature_cleaning"]["traced_tiles"] = len(report_tiles)
                 except Exception as exc:
                     logger.warning(
                         "feature cleaning visualization report failed for %s: %s",
