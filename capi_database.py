@@ -332,6 +332,7 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_records_request_time_dt
                     ON inference_records(datetime(request_time) DESC, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_records_machine_no ON inference_records(machine_no);
+                CREATE INDEX IF NOT EXISTS idx_records_model_id ON inference_records(model_id);
                 CREATE INDEX IF NOT EXISTS idx_records_ai_judgment ON inference_records(ai_judgment);
                 CREATE INDEX IF NOT EXISTS idx_records_glass_request_time ON inference_records(glass_id, request_time DESC);
                 CREATE INDEX IF NOT EXISTS idx_image_results_record_id ON image_results(record_id);
@@ -6111,6 +6112,69 @@ class CAPIDatabase:
     # ------------------------------------------------------------------
     # training_tile_pool CRUD
     # ------------------------------------------------------------------
+
+    def list_training_bomb_candidates(
+        self,
+        machine_id: str,
+        lightings: Optional[Tuple[str, ...]] = None,
+    ) -> List[Dict]:
+        """列出同機種推論紀錄內含 Client AOI 炸彈資料的來源影像。
+
+        不依賴舊模型的 ``is_bomb`` 結果；呼叫端會直接依
+        ``client_bomb_info`` 座標切 crop。B0F 黑畫面固定排除。
+        """
+        machine_id = str(machine_id or "").strip()
+        if not machine_id:
+            return []
+
+        clean_lightings = tuple(
+            str(lighting or "").strip().upper()
+            for lighting in (lightings or ())
+            if str(lighting or "").strip()
+            and str(lighting or "").strip().upper() != "B0F00000"
+        )
+        if lightings is not None and not clean_lightings:
+            return []
+
+        conditions = [
+            "ir.model_id = ?",
+            "TRIM(COALESCE(ir.client_bomb_info, '')) != ''",
+            "UPPER(im.image_name) NOT LIKE 'B0F00000%'",
+        ]
+        params: List[Any] = [machine_id]
+        if clean_lightings:
+            raw_prefixes = []
+            for lighting in clean_lightings:
+                raw_prefixes.append(lighting)
+                if lighting == "STANDARD":
+                    raw_prefixes.append("U0F00000")
+            conditions.append(
+                "(" + " OR ".join("UPPER(im.image_name) LIKE ?" for _ in raw_prefixes) + ")"
+            )
+            params.extend(f"{prefix}%" for prefix in raw_prefixes)
+        where_sql = " AND ".join(conditions)
+
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"""SELECT
+                        ir.id AS inference_record_id,
+                        ir.glass_id, ir.model_id, ir.machine_no, ir.image_dir,
+                        ir.resolution_x, ir.resolution_y,
+                        ir.request_time, ir.client_bomb_info,
+                        im.id AS image_result_id,
+                        im.id AS source_result_id,
+                        im.image_path, im.image_name,
+                        im.image_width, im.image_height, im.otsu_bounds
+                    FROM image_results im
+                    JOIN inference_records ir ON ir.id = im.record_id
+                    WHERE {where_sql}
+                    ORDER BY ir.id DESC, im.id DESC""",
+                tuple(params),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(row) for row in rows]
 
     def insert_tile_pool(self, job_id: str, tiles: list) -> list:
         """批次插入 tile pool 紀錄，回傳各列的 lastrowid 清單。"""

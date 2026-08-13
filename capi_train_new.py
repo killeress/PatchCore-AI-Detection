@@ -2,7 +2,7 @@
 
 提供：
 - preprocess_panels_to_pool: Step 2 切 tile + 寫 DB
-- sample_ng_tiles: 從 over_review 抽 NG
+- sample_ng_tiles: 從推論紀錄抽 Client AOI 炸彈 crop
 - run_training_pipeline: Step 4 訓 10 模型 + 寫 bundle
 """
 from __future__ import annotations
@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable, Iterable, Any
 import cv2
 
-from capi_dataset_export import read_manifest
+from capi_dataset_export import crop_edge_defect
+from capi_image_naming import canonical_image_prefix
+from capi_image_orientation import read_detection_image
 from capi_preprocess import (
     PreprocessConfig, preprocess_panel_folder, PanelPreprocessResult,
 )
@@ -35,6 +37,9 @@ class TrainingDB(Protocol):
     """Database interface required by train worker."""
     def insert_tile_pool(self, job_id: str, tiles: List[dict]) -> List[int]: ...
     def list_tile_pool(self, job_id: str, **filters) -> List[dict]: ...
+    def list_training_bomb_candidates(
+        self, machine_id: str, lightings: Optional[Tuple[str, ...]] = None,
+    ) -> List[dict]: ...
 
 LIGHTINGS = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
 ZONE_INNER = "inner"
@@ -132,44 +137,22 @@ def panel_mode_zones(mode: str) -> set:
         return {ZONE_EDGE}
     raise ValueError(f"invalid panel mode: {mode}")
 
-# 與 PreprocessConfig.edge_threshold_px 同一單一來源（避免兩處飄移）。
-# NG zone heuristic：讀 over_review snapshot 的 manifest.csv；若有影像高度，
-# edge band 會依高度縮小，避免 768 高度機種全被固定 768px top band 吃掉。
-# 舊 manifest 沒高度時保留 legacy top-band 行為。
-EDGE_BAND_PX = PreprocessConfig().edge_threshold_px  # 768
-_NG_HEIGHT_KEYS = ("panel_height", "product_height", "resolution_y", "image_height", "height")
-
+# AOI 炸彈依映射後的 crop 中心位置判定 inner/edge。
 # 該 zone 的 NG 樣本少於此閾值時，訓練端退回該 lighting 全部 NG（避免 calibration 失準）。
 MIN_NG_PER_ZONE = 5
 
 
-def _parse_positive_int(value: Any) -> Optional[int]:
-    try:
-        parsed = int(float(value))
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _ng_edge_band_for_height(panel_height: Optional[int]) -> int:
-    if panel_height is None:
-        return EDGE_BAND_PX
-    return max(1, min(EDGE_BAND_PX, int(panel_height) // 4))
-
-
-def _classify_ng_zone(defect_y: int, panel_height: Optional[int] = None) -> str:
-    band = _ng_edge_band_for_height(panel_height)
-    if panel_height is not None:
-        return ZONE_EDGE if defect_y < band or defect_y >= panel_height - band else ZONE_INNER
-    return ZONE_EDGE if defect_y < band else ZONE_INNER
-
-
-def _manifest_panel_height(row: Dict[str, str]) -> Optional[int]:
-    for key in _NG_HEIGHT_KEYS:
-        height = _parse_positive_int(row.get(key))
-        if height is not None:
-            return height
-    return None
+def _classify_ng_crop_zone(
+    center_x: int,
+    center_y: int,
+    bounds: Tuple[int, int, int, int],
+    tile_size: int = 512,
+) -> str:
+    """依炸彈座標到 panel 四邊的距離決定應校正 inner 或 edge 模型。"""
+    x1, y1, x2, y2 = bounds
+    edge_distance = max(1, int(tile_size) // 2)
+    distance = min(center_x - x1, x2 - center_x, center_y - y1, y2 - center_y)
+    return ZONE_EDGE if distance <= edge_distance else ZONE_INNER
 
 
 @dataclass
@@ -549,52 +532,6 @@ def preprocess_panels_to_pool(
     }
 
 
-def _make_ng_zone_classifier(log: Callable[[str], None]):
-    """回傳 zone_for(file_path) -> ZONE_EDGE | ZONE_INNER | None。
-
-    每個 snapshot 讀一次 manifest.csv（capi_dataset_export.read_manifest，BOM 容錯），
-    建 {filename: (defect_y, panel_height)} 索引；有高度時用上下 edge band，
-    無高度時保留 legacy top-band 判斷。
-    """
-    cache: Dict[Path, Dict[str, Tuple[int, Optional[int]]]] = {}
-
-    def _load(snap_dir: Path) -> Dict[str, Tuple[int, Optional[int]]]:
-        if snap_dir in cache:
-            return cache[snap_dir]
-        index: Dict[str, Tuple[int, Optional[int]]] = {}
-        try:
-            rows = read_manifest(snap_dir / "manifest.csv")
-        except Exception as e:
-            log(f"  ⚠ 讀取 manifest 失敗 {snap_dir}: {e}")
-            rows = {}
-        for r in rows.values():
-            crop_rel = r.get("crop_path") or ""
-            if not crop_rel:
-                continue
-            try:
-                defect_y = int(r.get("defect_y") or 0)
-            except (TypeError, ValueError):
-                continue
-            index[Path(crop_rel).name] = (defect_y, _manifest_panel_height(r))
-        cache[snap_dir] = index
-        return index
-
-    def zone_for(file_path: Path) -> Optional[str]:
-        # 路徑慣例（與 capi_dataset_export 寫入結構對齊）：
-        # <over_review_root>/<snapshot>/true_ng/<lighting>/crop/<filename>
-        try:
-            snap_dir = file_path.parents[3]
-        except IndexError:
-            return None
-        meta = _load(snap_dir).get(file_path.name)
-        if meta is None:
-            return None
-        defect_y, panel_height = meta
-        return _classify_ng_zone(defect_y, panel_height)
-
-    return zone_for
-
-
 def sample_ng_tiles(
     job_id: str,
     over_review_root: Path,
@@ -604,17 +541,88 @@ def sample_ng_tiles(
     log: Callable[[str], None] = print,
     lightings: Optional[Iterable[str]] = None,
     preprocess_cfg: Optional[PreprocessConfig] = None,
+    machine_id: str = "",
+    rotate_180: bool = False,
 ) -> dict:
-    """從 over_review/{*}/true_ng/{lighting}/crop/ 隨機抽 NG tile，並依 manifest defect_y heuristic 標記 zone。"""
-    target_lightings = tuple(lightings) if lightings is not None else LIGHTINGS
-    if not over_review_root.exists():
-        log(f"⚠ over_review 不存在: {over_review_root}，跳過 NG 抽樣")
-        return {"sampled": 0, "missing_lightings": list(target_lightings)}
+    """從同機種推論紀錄抽 Client AOI 炸彈 crop，作為 PatchCore 驗證 NG。
+
+    ``over_review_root`` 僅保留舊版呼叫介面相容；新版不再讀取該目錄。
+    B0F00000 黑畫面固定排除。這些 crop 只會以 ``source=ng`` 進入
+    ``test/anormal``，不會加入 normal memory bank。
+    """
+    del over_review_root
+    requested_lightings = tuple(lightings) if lightings is not None else LIGHTINGS
+    target_lightings = tuple(dict.fromkeys(
+        str(lighting).strip().upper()
+        for lighting in requested_lightings
+        if str(lighting).strip() and str(lighting).strip().upper() != "B0F00000"
+    ))
+    result_stats = {
+        "sampled": 0,
+        "missing_lightings": [],
+        "black_skipped": 0,
+        "invalid_skipped": 0,
+    }
+    if not target_lightings:
+        return result_stats
+    if not machine_id:
+        log("⚠ 未提供 machine_id，無法從推論紀錄抽 AOI 炸彈 crop")
+        result_stats["missing_lightings"] = list(target_lightings)
+        return result_stats
+
+    try:
+        candidates = db.list_training_bomb_candidates(
+            machine_id=str(machine_id).strip(),
+            lightings=target_lightings,
+        )
+    except AttributeError:
+        log("⚠ 資料庫版本不支援 AOI 炸彈 crop 查詢，未使用 over_review 舊資料")
+        result_stats["missing_lightings"] = list(target_lightings)
+        return result_stats
+
+    by_lighting: Dict[str, List[dict]] = {lighting: [] for lighting in target_lightings}
+    for source_row in candidates:
+        image_lighting = canonical_image_prefix(source_row.get("image_name") or "").upper()
+        try:
+            bomb_info = json.loads(str(source_row.get("client_bomb_info") or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            result_stats["invalid_skipped"] += 1
+            continue
+        bomb_lighting = canonical_image_prefix(bomb_info.get("image_prefix") or "").upper()
+        if image_lighting == "B0F00000" or bomb_lighting == "B0F00000":
+            result_stats["black_skipped"] += 1
+            continue
+        if image_lighting != bomb_lighting or image_lighting not in by_lighting:
+            continue
+
+        valid_coords = []
+        for coord in bomb_info.get("coordinates") or []:
+            try:
+                valid_coords.append((int(coord[0]), int(coord[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        defect_type = str(bomb_info.get("defect_type") or "point").strip().lower()
+        if defect_type == "line" and len(valid_coords) >= 2:
+            pt1, pt2 = valid_coords[0], valid_coords[1]
+            crop_centers = [((pt1[0] + pt2[0]) // 2, (pt1[1] + pt2[1]) // 2)]
+        else:
+            crop_centers = valid_coords
+            defect_type = "point"
+        if not crop_centers:
+            result_stats["invalid_skipped"] += 1
+            continue
+        for coord_index, (product_x, product_y) in enumerate(crop_centers):
+            by_lighting[image_lighting].append({
+                **source_row,
+                "source_type": defect_type,
+                "coord_index": coord_index,
+                "product_x": product_x,
+                "product_y": product_y,
+            })
 
     sampled = 0
-    missing = []
-    snapshots = [d for d in over_review_root.iterdir() if d.is_dir() and (d / "true_ng").exists()]
-    zone_for = _make_ng_zone_classifier(log)
+    missing: List[str] = []
+    work_root = thumb_dir or (Path(".tmp/train_new_thumbs") / job_id)
     apply_preprocess_pipeline = None
     preprocess_desc = ""
     if (
@@ -623,7 +631,6 @@ def sample_ng_tiles(
             preprocess_cfg.image_preprocess_pipeline
             or getattr(preprocess_cfg, "image_preprocess_pipelines", None)
         )
-        and thumb_dir is not None
     ):
         from capi_image_preprocess_lab import (
             apply_preprocess_pipeline as _apply_preprocess_pipeline,
@@ -636,50 +643,111 @@ def sample_ng_tiles(
             preprocess_desc = describe_preprocess_pipeline(preprocess_cfg.image_preprocess_pipeline)
 
     for lighting in target_lightings:
-        all_files = []
-        for snap in snapshots:
-            crop_dir = snap / "true_ng" / lighting / "crop"
-            if crop_dir.exists():
-                all_files.extend(crop_dir.glob("*.png"))
-        if not all_files:
+        lighting_candidates = list(by_lighting.get(lighting) or [])
+        if not lighting_candidates:
             missing.append(lighting)
-            log(f"⚠ {lighting}: 無 NG 樣本")
+            log(f"⚠ {lighting}: 推論紀錄無可用 AOI 炸彈 crop")
             continue
-        chosen = random.sample(all_files, min(per_lighting, len(all_files)))
+        random.shuffle(lighting_candidates)
         records = []
         edge_n = inner_n = unknown_n = 0
         preprocessed_n = 0
-        for i, p in enumerate(chosen):
-            source_path = p
-            thumb_img = None
-            zone = zone_for(p)
+        for candidate in lighting_candidates:
+            if len(records) >= per_lighting:
+                break
+
+            raw_source_path = Path(str(candidate.get("image_path") or ""))
+            if not raw_source_path.is_file():
+                fallback_path = (
+                    Path(str(candidate.get("image_dir") or ""))
+                    / Path(str(candidate.get("image_name") or "")).name
+                )
+                raw_source_path = fallback_path if fallback_path.is_file() else raw_source_path
+            if not raw_source_path.is_file():
+                result_stats["invalid_skipped"] += 1
+                log(f"  ⚠ {lighting}: 炸彈原圖不存在 {raw_source_path}")
+                continue
+
+            image = read_detection_image(
+                raw_source_path,
+                cv2.IMREAD_GRAYSCALE,
+                rotate_180=bool(rotate_180),
+            )
+            if image is None:
+                result_stats["invalid_skipped"] += 1
+                log(f"  ⚠ {lighting}: 炸彈原圖讀取失敗 {raw_source_path}")
+                continue
+
+            try:
+                bounds = tuple(
+                    int(part.strip())
+                    for part in str(candidate.get("otsu_bounds") or "").split(",")
+                )
+                if len(bounds) != 4 or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+                    raise ValueError("invalid otsu_bounds")
+            except (TypeError, ValueError, cv2.error) as exc:
+                bounds = (0, 0, image.shape[1], image.shape[0])
+                log(f"  ⚠ {lighting}: {raw_source_path.name} 無有效 Otsu bounds，改用全圖映射 ({exc})")
+
+            product_width = int(candidate.get("resolution_x") or 0)
+            product_height = int(candidate.get("resolution_y") or 0)
+            if product_width <= 0:
+                product_width = max(1, image.shape[1])
+            if product_height <= 0:
+                product_height = max(1, image.shape[0])
+            img_x = int(
+                int(candidate.get("product_x") or 0)
+                * (bounds[2] - bounds[0]) / product_width
+                + bounds[0]
+            )
+            img_y = int(
+                int(candidate.get("product_y") or 0)
+                * (bounds[3] - bounds[1]) / product_height
+                + bounds[1]
+            )
+            try:
+                crop = crop_edge_defect(image, img_x, img_y)
+            except (TypeError, ValueError, cv2.error) as exc:
+                result_stats["invalid_skipped"] += 1
+                log(f"  ⚠ {lighting}: 炸彈 crop 失敗 {raw_source_path.name}: {exc}")
+                continue
+            if crop.shape[:2] != (512, 512):
+                result_stats["invalid_skipped"] += 1
+                log(f"  ⚠ {lighting}: 炸彈 crop 尺寸不是 512x512: {crop.shape[:2]}")
+                continue
+
+            zone = _classify_ng_crop_zone(img_x, img_y, bounds)
             if apply_preprocess_pipeline is not None:
-                img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-                if img is not None:
-                    try:
-                        from capi_preprocess import image_preprocess_pipeline_for_zone
-                        pipeline = image_preprocess_pipeline_for_zone(preprocess_cfg, zone)
-                        if pipeline:
-                            result = apply_preprocess_pipeline(img, pipeline)
-                            processed = result["image"]
-                            candidate = thumb_dir / "tiles" / "ng" / lighting / f"{job_id}_{lighting}_ng{i:04d}_{p.name}"
-                            candidate.parent.mkdir(parents=True, exist_ok=True)
-                            if cv2.imwrite(str(candidate), processed):
-                                source_path = candidate
-                                thumb_img = processed
-                                preprocessed_n += 1
-                    except Exception as e:
-                        log(f"  ⚠ {lighting}: NG 前處理失敗 {p.name}: {e}")
-            thumb_path = p
-            if thumb_dir is not None:
-                candidate = thumb_dir / "thumb" / "ng" / lighting / f"{job_id}_{lighting}_ng{i:04d}_{p.name}"
-                candidate.parent.mkdir(parents=True, exist_ok=True)
-                if thumb_img is None:
-                    thumb_img = cv2.imread(str(source_path), cv2.IMREAD_UNCHANGED)
-                if thumb_img is not None:
-                    thumb = cv2.resize(thumb_img, (96, 96))
-                    cv2.imwrite(str(candidate), thumb)
-                    thumb_path = candidate
+                try:
+                    from capi_preprocess import image_preprocess_pipeline_for_zone
+                    pipeline = image_preprocess_pipeline_for_zone(preprocess_cfg, zone)
+                    if pipeline:
+                        crop = apply_preprocess_pipeline(crop, pipeline)["image"]
+                        preprocessed_n += 1
+                except Exception as exc:
+                    log(f"  ⚠ {lighting}: NG 前處理失敗 {raw_source_path.name}: {exc}")
+
+            record_id = int(candidate.get("inference_record_id") or 0)
+            source_result_id = int(candidate.get("source_result_id") or 0)
+            source_type = str(candidate.get("source_type") or "point")
+            coord_index = int(candidate.get("coord_index") or 0)
+            stem = (
+                f"{job_id}_{lighting}_bomb_r{record_id}_"
+                f"img{source_result_id}_{source_type}{coord_index}"
+            )
+            source_path = work_root / "tiles" / "ng" / lighting / f"{stem}.png"
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            if not cv2.imwrite(str(source_path), crop):
+                result_stats["invalid_skipped"] += 1
+                log(f"  ⚠ {lighting}: 炸彈 crop 寫入失敗 {source_path}")
+                continue
+
+            thumb_path = work_root / "thumb" / "ng" / lighting / f"{stem}.png"
+            thumb_path.parent.mkdir(parents=True, exist_ok=True)
+            thumb = cv2.resize(crop, (96, 96))
+            if not cv2.imwrite(str(thumb_path), thumb):
+                thumb_path = source_path
+
             if zone == ZONE_EDGE:
                 edge_n += 1
             elif zone == ZONE_INNER:
@@ -689,16 +757,32 @@ def sample_ng_tiles(
             records.append({
                 "lighting": lighting, "zone": zone, "source": "ng",
                 "source_path": str(source_path.resolve()), "thumb_path": str(thumb_path.resolve()),
+                "panel_path": str(raw_source_path.resolve()),
+                "tile_index": source_result_id,
+                "tile_x": max(0, min(img_x - 256, image.shape[1] - 512)),
+                "tile_y": max(0, min(img_y - 256, image.shape[0] - 512)),
+                "tile_width": 512,
+                "tile_height": 512,
             })
-        db.insert_tile_pool(job_id, records)
+        if records:
+            db.insert_tile_pool(job_id, records)
+        else:
+            missing.append(lighting)
         sampled += len(records)
         preprocess_text = (
             f" / 前處理={preprocessed_n}: {preprocess_desc}"
             if preprocessed_n else ""
         )
-        log(f"  ✓ {lighting}: 抽 {len(chosen)} 個 NG (edge={edge_n} / inner={inner_n} / 未分類={unknown_n}{preprocess_text})")
+        if records:
+            log(
+                f"  ✓ {lighting}: 抽 {len(records)} 個 NG "
+                f"(來源=推論紀錄 AOI 炸彈 / edge={edge_n} / inner={inner_n} "
+                f"/ 未分類={unknown_n}{preprocess_text})"
+            )
 
-    return {"sampled": sampled, "missing_lightings": missing}
+    result_stats["sampled"] = sampled
+    result_stats["missing_lightings"] = missing
+    return result_stats
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:

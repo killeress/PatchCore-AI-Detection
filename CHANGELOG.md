@@ -1,5 +1,13 @@
 # 更新紀錄
 
+## 2026-08-13 v2
+
+### [模型訓練]改用 AOI 炸彈 Crop 校正異常門檻
+
+- 新模型訓練的 NG 驗證資料改由同機種推論紀錄抽取 Client AOI 炸彈 Crop，不再從 `over_review/true_ng` 取樣。
+- 直接依推論紀錄保存的 Client AOI 炸彈座標切 512×512：點炸彈逐點切、線炸彈取線段中心切；不要求舊模型先判成 BOMB。每個光源最多 100 張，B0F 黑畫面固定排除。
+- 炸彈 Crop 只用於驗證、分數正規化與門檻校正，不會加入 PatchCore 正常 Memory Bank；沒有可用炸彈時仍會在訓練 LOG 明確標示並使用 synthetic anomaly。
+
 ## 2026-08-13 v1
 
 ### [MARK 辨識]PPOCR Crop 固定旋轉 180°

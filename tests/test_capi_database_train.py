@@ -92,6 +92,7 @@ class TestTrainingSchema:
     def test_tile_pool_index_exists(self, tmp_path):
         db = _make_db(tmp_path)
         assert "idx_tile_pool_job" in _index_names(db)
+        assert "idx_records_model_id" in _index_names(db)
 
     def test_tile_pool_decision_default_accept(self, tmp_path):
         db = _make_db(tmp_path)
@@ -454,6 +455,105 @@ class TestTrainingJobsCRUD:
 
 
 class TestTilePoolCRUD:
+    def test_training_bomb_candidates_use_client_coordinates_without_ai_match_and_skip_black(self, tmp_path):
+        db = _make_db(tmp_path)
+
+        common = {
+            "glass_id": "P001",
+            "machine_no": "EQ01",
+            "resolution": (1920, 1200),
+            "machine_judgment": "NG",
+            "ai_judgment": "OK",
+            "image_dir": "/images/P001",
+            "total_images": 2,
+            "ng_images": 0,
+            "ng_details": "[]",
+            "request_time": "2026-08-13 10:00:00",
+            "response_time": "2026-08-13 10:00:01",
+            "processing_seconds": 1.0,
+        }
+        bomb_images = [
+            {
+                "image_path": "/images/P001/WGF50500_100000.tif",
+                "image_name": "WGF50500_100000.tif",
+                "image_width": 1000,
+                "image_height": 1000,
+                "otsu_bounds": "0,0,1000,1000",
+                "tiles": [
+                    {
+                        "tile_id": 7, "x": 200, "y": 300, "width": 512, "height": 512,
+                        "score": 0.2, "is_anomaly": 0, "is_bomb": 0, "zone": "inner",
+                    },
+                    {
+                        "tile_id": 8, "x": 0, "y": 0, "width": 512, "height": 512,
+                        "score": 0.8, "is_anomaly": 1, "is_bomb": 0, "zone": "edge",
+                    },
+                ],
+                "edge_defects": [{
+                    "side": "left", "bbox_x": 0, "bbox_y": 100, "bbox_w": 20, "bbox_h": 40,
+                    "center_x": 10, "center_y": 120, "is_bomb": 0,
+                }],
+            },
+            {
+                "image_path": "/images/P001/B0F00000_100000.tif",
+                "image_name": "B0F00000_100000.tif",
+                "image_width": 1000,
+                "image_height": 1000,
+                "otsu_bounds": "0,0,1000,1000",
+                "tiles": [{
+                    "tile_id": 1, "x": 0, "y": 0, "width": 512, "height": 512,
+                    "score": 1.0, "is_anomaly": 1, "is_bomb": 1, "zone": "bright_spot",
+                }],
+            },
+        ]
+        db.save_inference_record(
+            model_id="MODEL-A",
+            client_bomb_info='{"image_prefix":"WGF50500","defect_type":"point","coordinates":[[1,2]]}',
+            image_results_data=bomb_images,
+            **common,
+        )
+        db.save_inference_record(
+            model_id="MODEL-A",
+            client_bomb_info="",
+            image_results_data=[bomb_images[0]],
+            **{**common, "glass_id": "P002", "request_time": "2026-08-13 10:01:00"},
+        )
+        db.save_inference_record(
+            model_id="MODEL-B",
+            client_bomb_info='{"image_prefix":"WGF50500"}',
+            image_results_data=[bomb_images[0]],
+            **{**common, "glass_id": "P003", "request_time": "2026-08-13 10:02:00"},
+        )
+        standard_image = {
+            **bomb_images[0],
+            "image_path": "/images/P004/U0F00000_100000.tif",
+            "image_name": "U0F00000_100000.tif",
+        }
+        db.save_inference_record(
+            model_id="MODEL-A",
+            client_bomb_info='{"image_prefix":"U0F00000","defect_type":"point","coordinates":[[1,2]]}',
+            image_results_data=[standard_image],
+            **{**common, "glass_id": "P004", "request_time": "2026-08-13 10:03:00"},
+        )
+
+        rows = db.list_training_bomb_candidates(
+            machine_id="MODEL-A",
+            lightings=("WGF50500", "B0F00000"),
+        )
+
+        assert len(rows) == 1
+        assert all(row["model_id"] == "MODEL-A" for row in rows)
+        assert all(row["image_name"].startswith("WGF50500") for row in rows)
+        assert rows[0]["client_bomb_info"].startswith('{"image_prefix":"WGF50500"')
+        assert rows[0]["resolution_x"] == 1920
+        assert rows[0]["resolution_y"] == 1200
+
+        standard_rows = db.list_training_bomb_candidates(
+            machine_id="MODEL-A",
+            lightings=("STANDARD",),
+        )
+        assert [row["image_name"] for row in standard_rows] == ["U0F00000_100000.tif"]
+
     def test_tile_pool_crud(self, tmp_path):
         db = _make_db(tmp_path)
         db.create_training_job(job_id="j1", machine_id="M", panel_paths=[])

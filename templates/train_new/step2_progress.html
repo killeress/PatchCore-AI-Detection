@@ -48,7 +48,7 @@
       <span class="d2-step-num">02</span>
       <div class="d2-step-body">
         <div class="d2-step-title">NG SAMPLING</div>
-        <div class="d2-step-hint">over_review 抽樣</div>
+        <div class="d2-step-hint">推論紀錄 AOI 炸彈 Crop</div>
       </div>
     </div>
     <div class="d2-step-link"></div>
@@ -87,7 +87,7 @@
         <span class="d2-stat-divider d2-stat-divider-mute">·</span>
         <span class="d2-stat-mini" id="d2-ng-lightings">0 / {{ selected_lightings|length }} lighting</span>
       </div>
-      <div class="d2-stat-meta">over_review true_ng 抽樣</div>
+      <div class="d2-stat-meta">同機種 AOI 炸彈；排除 B0F 黑畫面</div>
     </div>
     <div class="d2-stat">
       <div class="d2-stat-label">STATUS</div>
@@ -390,7 +390,7 @@ function parseLog(lines) {
     if (mt) { stats.tiles += parseInt(mt[1]); continue; }
     const mn = line.match(RE_NG);
     if (mn) { stats.ng += parseInt(mn[2]); stats.ngLightings += 1; stats.sawNgPhase = true; continue; }
-    if (line.includes('over_review')) { stats.sawNgPhase = true; }
+    if (line.includes('AOI 炸彈')) { stats.sawNgPhase = true; }
     if (RE_FAIL.test(line)) stats.failLines.push(line);
     if (RE_WARN.test(line)) stats.warnLines.push(line);
   }
