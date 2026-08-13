@@ -60,6 +60,58 @@ def test_build_mark_shadow_payload_keeps_full_mark_envelope_and_rotates_upright(
     assert payload["model_id"] == "MODEL-A"
 
 
+@pytest.mark.parametrize("inference_rotate_180_enabled", [False, True])
+def test_mark_crop_always_rotates_after_optional_full_image_rotation(
+    tmp_path,
+    inference_rotate_180_enabled,
+):
+    raw_image = np.arange(12 * 20, dtype=np.uint8).reshape(12, 20)
+    image_path = tmp_path / "W0F00000_080000.tif"
+    assert cv2.imwrite(str(image_path), raw_image)
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = SimpleNamespace(
+        inference_rotate_180_enabled=inference_rotate_180_enabled,
+    )
+    detection_image = inferencer._read_detection_image(image_path)
+    detection = {
+        "found": True,
+        "text": "EJ",
+        "roi": "bottom_left",
+        # The locator result must not control the PPOCR crop direction.
+        "orientation": "normal",
+        "bbox": {"x": 0, "y": 0, "width": 20, "height": 12},
+    }
+
+    payload = build_mark_shadow_payload(
+        detection_image,
+        detection,
+        image_path,
+        padding_ratio=0,
+    )
+
+    png = base64.b64decode(payload["image_png_base64"])
+    actual = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    expected = cv2.rotate(detection_image, cv2.ROTATE_180)
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_mark_stream_key_uses_fixed_crop_rotation_not_locator_orientation():
+    normal_key = CAPIInferencer._build_mark_stream_key(
+        "CAPI13",
+        "MODEL-A",
+        {"roi": "bottom_left", "orientation": "normal"},
+    )
+    locator_rotated_key = CAPIInferencer._build_mark_stream_key(
+        "CAPI13",
+        "MODEL-A",
+        {"roi": "bottom_left", "orientation": "rot180"},
+    )
+
+    assert normal_key == "CAPI13|MODEL-A|bottom_left|rot180"
+    assert locator_rotated_key == normal_key
+
+
 def test_normalize_mark_text_rejects_non_two_character_results():
     assert normalize_mark_text(" b j ") == "BJ"
     assert normalize_mark_text("B1") == "B1"

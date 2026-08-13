@@ -726,12 +726,12 @@ class CAPIInferencer:
         model_id: Optional[str],
         detection: Dict[str, Any],
     ) -> str:
-        """Partition temporal MARK history without inferring MARK from model_id."""
+        """Partition temporal MARK history by the fixed PPOCR crop direction."""
         parts = [
             str(machine_no or "unknown").strip(),
             str(model_id or "unknown").strip(),
             str(detection.get("roi") or "unknown").strip(),
-            str(detection.get("orientation") or "unknown").strip(),
+            "rot180",
         ]
         return "|".join(part.replace("|", "/") or "unknown" for part in parts)
 
@@ -807,6 +807,7 @@ class CAPIInferencer:
             f"roi={detection.get('roi', '')} "
             f"search={detection.get('search_pass', 'primary')} "
             f"orientation={detection.get('orientation', '')} "
+            f"paddle_crop_rotation=rot180_fixed "
             f"bbox=({x},{y},{width},{height})"
         )
         if detection.get("recognition_fallback"):

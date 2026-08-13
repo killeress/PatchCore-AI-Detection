@@ -5712,7 +5712,7 @@ class CAPIDatabase:
         # 定義要遷移的參數
         params_def = [
             ("anomaly_threshold", config.anomaly_threshold, "float", "異常分數閾值 (fallback)"),
-            ("inference_rotate_180_enabled", config.inference_rotate_180_enabled, "bool", "推論來源影像統一旋轉 180°（正式推論、規格內判定與 Debug 共用；不修改原始檔）"),
+            ("inference_rotate_180_enabled", config.inference_rotate_180_enabled, "bool", "推論來源影像統一旋轉 180°（正式推論、規格內判定與 Debug 共用；MARK PPOCR Crop 固定再旋轉 180°；不修改原始檔）"),
             ("model_mapping", config.model_mapping, "dict", "前綴 → 模型路徑映射"),
             ("threshold_mapping", config.threshold_mapping, "dict", "前綴 → 獨立閾值映射"),
             ("patchcore_filter_enabled", config.patchcore_filter_enabled, "bool", "啟用 PatchCore 後處理進階過濾"),
@@ -5848,6 +5848,7 @@ class CAPIDatabase:
             if name.startswith("image_abnormal_")
         }
         description_refresh_param_names = image_abnormal_param_names | {
+            "inference_rotate_180_enabled",
             "dust_pixel_grid_filter_enabled",
             "dust_pixel_grid_blur_kernel",
         }

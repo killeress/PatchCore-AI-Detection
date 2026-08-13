@@ -47,7 +47,7 @@ def build_mark_shadow_payload(
     *,
     padding_ratio: float = 0.15,
 ) -> Dict[str, Any]:
-    """Build the exact upright MARK crop sent to the shadow recognizer."""
+    """Build the fixed 180-degree MARK crop sent to the shadow recognizer."""
     if image is None or not detection.get("found"):
         raise ValueError("MARK shadow requires a successful detection")
 
@@ -94,9 +94,13 @@ def build_mark_shadow_payload(
     if x2 <= x1 or y2 <= y1:
         raise ValueError("MARK shadow crop is empty")
 
-    crop = image[y1:y2, x1:x2].copy()
-    if str(detection.get("orientation") or "").lower() == "rot180":
-        crop = cv2.rotate(crop, cv2.ROTATE_180)
+    # Product MARKs are photographed upside down after the optional full-image
+    # orientation step.  PPOCR therefore always receives one additional 180°
+    # crop rotation; the DotMatrixCV locator orientation is diagnostic only.
+    crop = cv2.rotate(
+        image[y1:y2, x1:x2].copy(),
+        cv2.ROTATE_180,
+    )
 
     encoded, png = cv2.imencode(".png", crop)
     if not encoded:
