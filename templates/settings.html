@@ -2625,7 +2625,7 @@
                     <td>
                         <code style="font-size:1rem;">${escapeHtml(row.current_text || '--')}</code>
                         <div class="auto-switch-muted" style="margin-top:5px;">信心 ${escapeHtml(formatMarkShadowConfidence(row.current_confidence))}</div>
-                        <div class="auto-switch-muted" style="font-size:.72rem;">v${escapeHtml(String(row.current_profile_version || 0))} ／ ${escapeHtml(row.current_roi || '--')} ／ ${escapeHtml(row.current_orientation || '--')}</div>
+                        <div class="auto-switch-muted" style="font-size:.72rem;">v${escapeHtml(String(row.current_profile_version || 0))} ／ ${escapeHtml(row.current_roi || '--')} ／ 定位 ${escapeHtml(row.current_orientation || '--')} ／ Crop 固定 rot180</div>
                     </td>
                     <td>
                         <code style="font-size:1rem;color:${row.agreed ? '#86efac' : '#fca5a5'};">${escapeHtml(paddleText)}</code>
@@ -3290,7 +3290,7 @@
                     </div>
                     ${inferenceImageParams.map(p => paramRow(p)).join('')}
                     <div style="padding: 10px 16px; color: #94a3b8; font-size: 0.78rem; line-height: 1.6;">
-                        推論影像旋轉開啟後，正式推論、AOI／OMIT／MARK／CV、規格內判定、Debug 工具與推論結果原圖皆使用旋轉 180° 後的方向；像素紋理平滑開啟後，所有產品解析度的 OMIT 灰塵分析都會套用 Gaussian 平滑。硬碟原始檔不會被修改。
+                        推論影像旋轉開啟後，正式推論、AOI／OMIT／MARK／CV、規格內判定、Debug 工具與推論結果原圖皆使用旋轉 180° 後的方向；無論此開關是否啟用，MARK PPOCR Crop 固定再旋轉 180° 才辨識。像素紋理平滑開啟後，所有產品解析度的 OMIT 灰塵分析都會套用 Gaussian 平滑。硬碟原始檔不會被修改。
                     </div>
                 </div>` : ''}
                 ${patchcoreParams.length > 0 ? `
