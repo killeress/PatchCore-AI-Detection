@@ -387,7 +387,7 @@ function setFilter(filter) {
 }
 
 function groupTiles(tiles) {
-  // NG 依 manifest defect_y heuristic 已在後端標 zone（"inner"/"edge"/null）。
+  // AOI 炸彈 NG 由後端依座標映射後的 crop 中心判定 inner/edge。
   // 未分類者（zone=null）兩 unit 都會收，所以獨立一組顯示。
   return {
     inner_ok: tiles.filter(t => t.zone === 'inner' && t.source === 'ok'),

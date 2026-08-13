@@ -13145,6 +13145,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         return default_resolution
 
     @staticmethod
+    def _training_bomb_rotate_180(machine_id: str, server_inst=None) -> bool:
+        """Return the source-image orientation used by the matching machine inferencer."""
+        if server_inst is None:
+            return False
+        inferencers = getattr(server_inst, "inferencers", None)
+        inferencer = inferencers.get(machine_id) if hasattr(inferencers, "get") else None
+        config = getattr(inferencer, "config", None)
+        return bool(getattr(config, "inference_rotate_180_enabled", False))
+
+    @staticmethod
     def _sample_ng_tiles_compat(sample_ng_tiles_fn, preprocess_cfg=None, log=print, **kwargs):
         """Call sample_ng_tiles across mixed capi_web/capi_train_new deployments."""
         import inspect
@@ -13153,7 +13163,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         call_kwargs["log"] = log
         supports_preprocess_cfg = False
         try:
-            supports_preprocess_cfg = "preprocess_cfg" in inspect.signature(sample_ng_tiles_fn).parameters
+            signature = inspect.signature(sample_ng_tiles_fn)
+            parameters = signature.parameters
+            supports_kwargs = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            supports_preprocess_cfg = "preprocess_cfg" in parameters
+            if not supports_kwargs:
+                for optional_name in ("machine_id", "rotate_180"):
+                    if optional_name not in parameters:
+                        call_kwargs.pop(optional_name, None)
         except (TypeError, ValueError):
             supports_preprocess_cfg = False
         if supports_preprocess_cfg:
@@ -14304,7 +14324,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         preprocess_after_tiling=False, tile_stride=None, training_data_source=None,
         image_preprocess_pipelines=None,
     ):
-        """背景 thread：preprocess + 抽 NG → state=review。
+        """背景 thread：preprocess + 從推論紀錄抽 AOI 炸彈 NG → state=review。
 
         panel_modes 與 panel_paths 同長度；None 視同全 full（向下相容舊呼叫者）。
         失敗條件：至少要有 1 片 panel 成功寫入 tile。
@@ -14372,13 +14392,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if stats["panel_success"] <= 0:
                 raise RuntimeError("沒有任何 panel 前處理成功")
 
-            log(f"抽 NG tile（每 lighting 上限 {NG_TILES_PER_LIGHTING} 個）")
+            log(f"從推論紀錄抽 AOI 炸彈 crop（每 lighting 上限 {NG_TILES_PER_LIGHTING} 個，排除 B0F 黑畫面）")
             ng_stats = CAPIWebHandler._sample_ng_tiles_compat(
                 sample_ng_tiles,
                 job_id=job_id, over_review_root=cfg.over_review_root,
                 db=db, thumb_dir=thumb_root, log=log,
                 lightings=target_lightings,
                 preprocess_cfg=pre_cfg,
+                machine_id=machine_id,
+                rotate_180=CAPIWebHandler._training_bomb_rotate_180(machine_id, server_inst),
             )
 
             db.update_training_job_state(job_id, "review")
@@ -16959,7 +16981,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             _log(f"OK tile 寫入完成：{stats['total_tiles']} tiles")
 
             _set_step("ng")
-            _log(f"抽 NG tile（lighting={lighting}，上限 {NG_TILES_PER_LIGHTING} 個）")
+            _log(f"從推論紀錄抽 AOI 炸彈 crop（lighting={lighting}，上限 {NG_TILES_PER_LIGHTING} 個，排除 B0F 黑畫面）")
             CAPIWebHandler._sample_ng_tiles_compat(
                 sample_ng_tiles,
                 job_id=job_id,
@@ -16970,6 +16992,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 log=_log,
                 lightings=(lighting,),
                 preprocess_cfg=preprocess_cfg,
+                machine_id=machine_id,
+                rotate_180=CAPIWebHandler._training_bomb_rotate_180(machine_id, server_inst),
             )
 
             db.update_training_job_state(job_id, "train")

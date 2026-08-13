@@ -127,9 +127,9 @@ cleanup:
   vacuum_after_cleanup: true
 
 # ------------------------------------------------------------
-# 過檢資料集匯出 — 給訓練 wizard 取樣使用
+# 過檢資料集匯出 — 供過檢分析／分類資料使用
 # ------------------------------------------------------------
-# base_dir         : 過檢匯出根目錄；訓練 wizard 預設從這裡讀 panel
+# base_dir         : 過檢匯出根目錄；PatchCore 訓練 NG 已改讀推論紀錄 AOI 炸彈 crop
 # min_free_space_gb: 匯出前檢查剩餘空間，低於此值停止匯出避免塞爆磁碟
 dataset_export:
   base_dir: /aidata/capi_ai/datasets/over_review
@@ -158,7 +158,7 @@ model_configs:
 # ------------------------------------------------------------
 # backbone_cache_dir : timm/HuggingFace backbone 權重快取
 #                      (內網無法連網，需事先 FTP 上傳完整目錄)
-# over_review_root   : 過檢資料集根目錄，與 dataset_export.base_dir 一致
+# over_review_root   : 舊版相容欄位；新版 PatchCore NG 不再從這裡抽樣
 # output_root        : 訓練出的 bundle 輸出根目錄
 #                      實際 bundle 位置: <output_root>/<machine_id>-<timestamp>/
 # gpu_memory_fraction: 訓練 subprocess GPU VRAM 上限；0 = 不限制

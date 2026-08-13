@@ -248,38 +248,80 @@ def test_preprocess_panels_to_pool_logs_after_tiling_mode(tmp_path, monkeypatch)
 
 
 def test_sample_ng_tiles(tmp_path):
+    import cv2
+    import numpy as np
+    from pathlib import Path
     from capi_train_new import sample_ng_tiles
 
-    # 模擬 over_review 結構：snapshot/true_ng/<lighting>/crop/<files>.png
-    or_root = tmp_path / "over_review"
-    snap_a = or_root / "20260415_104812" / "true_ng"
-    for lighting in ["G0F00000", "R0F00000", "STANDARD"]:
-        crop_dir = snap_a / lighting / "crop"
-        crop_dir.mkdir(parents=True)
-        for i in range(50):
-            (crop_dir / f"img_{i}.png").write_bytes(b"x")
+    source = tmp_path / "WGF50500_100000.png"
+    image = np.zeros((900, 1000), dtype=np.uint8)
+    image[200:712, 300:812] = 177
+    assert cv2.imwrite(str(source), image)
 
     class MockDB:
-        def __init__(self): self.tiles = []
+        def __init__(self):
+            self.tiles = []
+            self.query = None
+
+        def list_training_bomb_candidates(self, machine_id, lightings):
+            self.query = (machine_id, tuple(lightings))
+            return [
+                {
+                    "inference_record_id": 10,
+                    "source_result_id": 20,
+                    "client_bomb_info": '{"image_prefix":"WGF50500","defect_type":"point","coordinates":[[556,456]]}',
+                    "image_path": str(source),
+                    "image_dir": str(tmp_path),
+                    "image_name": source.name,
+                    "image_width": 1000,
+                    "image_height": 900,
+                    "resolution_x": 1000,
+                    "resolution_y": 900,
+                    "otsu_bounds": "0,0,1000,900",
+                },
+                {
+                    "inference_record_id": 11,
+                    "source_result_id": 21,
+                    "client_bomb_info": '{"image_prefix":"B0F00000","defect_type":"point","coordinates":[[256,256]]}',
+                    "image_path": str(tmp_path / "B0F00000_100000.png"),
+                    "image_dir": str(tmp_path),
+                    "image_name": "B0F00000_100000.png",
+                    "image_width": 1000,
+                    "image_height": 900,
+                    "resolution_x": 1000,
+                    "resolution_y": 900,
+                    "otsu_bounds": "0,0,1000,900",
+                },
+            ]
+
         def insert_tile_pool(self, job_id, tiles):
             self.tiles.extend(tiles)
             return list(range(len(tiles)))
 
     db = MockDB()
+    thumb_dir = tmp_path / ".tmp" / "train_new_thumbs" / "j1"
     stats = sample_ng_tiles(
-        job_id="j1", over_review_root=or_root, db=db,
-        per_lighting=10, log=lambda m: None,
+        job_id="j1", machine_id="MODEL-A", over_review_root=tmp_path / "unused", db=db,
+        thumb_dir=thumb_dir, per_lighting=10, log=lambda m: None,
+        lightings=("WGF50500", "B0F00000"),
     )
-    assert stats["sampled"] == 30  # 3 lighting × 10
-    assert set(stats["missing_lightings"]) == {"W0F00000", "WGF50500"}
-    by_lighting = {}
-    for t in db.tiles:
-        by_lighting.setdefault(t["lighting"], 0)
-        by_lighting[t["lighting"]] += 1
-    assert by_lighting == {"G0F00000": 10, "R0F00000": 10, "STANDARD": 10}
-    # 沒有 manifest.csv → zone heuristic 全部回 None（不分 inner/edge）
-    assert all(t["zone"] is None for t in db.tiles)
-    assert all(t["source"] == "ng" for t in db.tiles)
+
+    assert db.query == ("MODEL-A", ("WGF50500",))
+    assert stats["sampled"] == 1
+    assert stats["missing_lightings"] == []
+    assert stats["black_skipped"] == 1
+    assert len(db.tiles) == 1
+    tile = db.tiles[0]
+    assert tile["lighting"] == "WGF50500"
+    assert tile["zone"] == "inner"
+    assert tile["source"] == "ng"
+    assert tile["panel_path"] == str(source.resolve())
+    crop_path = Path(tile["source_path"])
+    thumb_path = Path(tile["thumb_path"])
+    assert crop_path.exists() and cv2.imread(str(crop_path)).shape[:2] == (512, 512)
+    assert int(cv2.imread(str(crop_path), cv2.IMREAD_GRAYSCALE).mean()) == 177
+    crop_path.resolve().relative_to(thumb_dir.resolve())
+    thumb_path.resolve().relative_to(thumb_dir.resolve())
 
 
 def test_sample_ng_tiles_applies_preprocess_pipeline_to_ng_crops(tmp_path):
@@ -289,16 +331,21 @@ def test_sample_ng_tiles_applies_preprocess_pipeline_to_ng_crops(tmp_path):
     from capi_preprocess import PreprocessConfig
     from capi_train_new import sample_ng_tiles
 
-    or_root = tmp_path / "over_review"
-    crop_dir = or_root / "20260415_104812" / "true_ng" / "G0F00000" / "crop"
-    crop_dir.mkdir(parents=True)
-    original = np.zeros((512, 512), dtype=np.uint8)
-    original[:, 256:] = 255
-    source = crop_dir / "img_0.png"
+    original = np.zeros((700, 700), dtype=np.uint8)
+    original[:, 350:] = 255
+    source = tmp_path / "G0F00000_100000.png"
     assert cv2.imwrite(str(source), original)
 
     class MockDB:
         def __init__(self): self.tiles = []
+        def list_training_bomb_candidates(self, machine_id, lightings):
+            return [{
+                "inference_record_id": 1, "source_result_id": 2,
+                "client_bomb_info": '{"image_prefix":"G0F00000","defect_type":"point","coordinates":[[350,350]]}',
+                "image_path": str(source), "image_dir": str(tmp_path), "image_name": source.name,
+                "image_width": 700, "image_height": 700,
+                "resolution_x": 700, "resolution_y": 700, "otsu_bounds": "0,0,700,700",
+            }]
         def insert_tile_pool(self, job_id, tiles):
             self.tiles.extend(tiles)
             return list(range(len(tiles)))
@@ -308,7 +355,8 @@ def test_sample_ng_tiles_applies_preprocess_pipeline_to_ng_crops(tmp_path):
     thumb_dir = tmp_path / "thumbs"
     sample_ng_tiles(
         job_id="j_ng_pre",
-        over_review_root=or_root,
+        machine_id="MODEL-A",
+        over_review_root=tmp_path / "unused",
         db=db,
         thumb_dir=thumb_dir,
         per_lighting=1,
@@ -325,124 +373,113 @@ def test_sample_ng_tiles_applies_preprocess_pipeline_to_ng_crops(tmp_path):
     assert len(db.tiles) == 1
     processed_path = Path(db.tiles[0]["source_path"])
     assert processed_path.exists()
-    assert processed_path != source.resolve()
     processed = cv2.imread(str(processed_path), cv2.IMREAD_GRAYSCALE)
     assert processed is not None
-    assert not np.array_equal(processed, original)
+    raw_crop = original[94:606, 94:606]
+    assert not np.array_equal(processed, raw_crop)
     assert any("前處理=1: 1.高斯平滑" in msg for msg in logs)
 
 
-def test_sample_ng_tiles_classifies_zone_from_manifest(tmp_path):
-    """有 manifest.csv 時依 defect_y 標 zone：< EDGE_BAND_PX → edge，否則 inner。"""
-    import csv
-    from pathlib import Path
-    from capi_train_new import sample_ng_tiles, EDGE_BAND_PX
-
-    or_root = tmp_path / "over_review"
-    snap = or_root / "20260420_120000"
-    crop_dir = snap / "true_ng" / "G0F00000" / "crop"
-    crop_dir.mkdir(parents=True)
-    rows = []
-    for i in range(6):
-        fname = f"img_{i}.png"
-        (crop_dir / fname).write_bytes(b"x")
-        # 前 3 張落在 top edge band，後 3 張在 inner
-        defect_y = 100 if i < 3 else EDGE_BAND_PX + 500
-        rows.append({"sample_id": f"s{i}",
-                     "crop_path": f"true_ng/G0F00000/crop/{fname}",
-                     "defect_y": str(defect_y)})
-    with open(snap / "manifest.csv", "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["sample_id", "crop_path", "defect_y"])
-        w.writeheader()
-        w.writerows(rows)
-
-    class MockDB:
-        def __init__(self): self.tiles = []
-        def insert_tile_pool(self, job_id, tiles):
-            self.tiles.extend(tiles)
-            return list(range(len(tiles)))
-
-    db = MockDB()
-    sample_ng_tiles(job_id="j2", over_review_root=or_root, db=db,
-                    per_lighting=10, log=lambda m: None)
-
-    zones = {Path(t["source_path"]).name: t["zone"] for t in db.tiles}
-    for i in range(3):
-        assert zones[f"img_{i}.png"] == "edge", f"img_{i} 應為 edge"
-    for i in range(3, 6):
-        assert zones[f"img_{i}.png"] == "inner", f"img_{i} 應為 inner"
-
-
-def test_sample_ng_tiles_classifies_zone_with_manifest_height_768(tmp_path):
-    """1366x768 機種不應因 EDGE_BAND_PX=768 導致全部 NG 都被標成 edge。"""
-    import csv
+def test_sample_ng_tiles_crops_line_bomb_at_segment_midpoint(tmp_path):
+    import cv2
+    import numpy as np
     from pathlib import Path
     from capi_train_new import sample_ng_tiles
 
-    or_root = tmp_path / "over_review"
-    snap = or_root / "20260420_130000"
-    crop_dir = snap / "true_ng" / "G0F00000" / "crop"
-    crop_dir.mkdir(parents=True)
-    rows = [
-        ("top.png", 100, "edge"),
-        ("middle.png", 384, "inner"),
-        ("bottom.png", 760, "edge"),
-    ]
-    manifest_rows = []
-    for fname, defect_y, _zone in rows:
-        (crop_dir / fname).write_bytes(b"x")
-        manifest_rows.append({
-            "sample_id": fname,
-            "crop_path": f"true_ng/G0F00000/crop/{fname}",
-            "defect_y": str(defect_y),
-            "image_height": "768",
-        })
-    with open(snap / "manifest.csv", "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["sample_id", "crop_path", "defect_y", "image_height"])
-        w.writeheader()
-        w.writerows(manifest_rows)
+    source = tmp_path / "WGF50500_line.png"
+    image = np.zeros((1024, 1024), dtype=np.uint8)
+    image[510:515, 256:769] = 255
+    assert cv2.imwrite(str(source), image)
 
     class MockDB:
         def __init__(self): self.tiles = []
+        def list_training_bomb_candidates(self, machine_id, lightings):
+            return [{
+                "inference_record_id": 8, "source_result_id": 9,
+                "client_bomb_info": '{"image_prefix":"WGF50500","defect_type":"line","coordinates":[[256,512],[768,512]]}',
+                "image_path": str(source), "image_dir": str(tmp_path), "image_name": source.name,
+                "image_width": 1024, "image_height": 1024,
+                "resolution_x": 1024, "resolution_y": 1024, "otsu_bounds": "0,0,1024,1024",
+            }]
         def insert_tile_pool(self, job_id, tiles):
             self.tiles.extend(tiles)
             return list(range(len(tiles)))
 
     db = MockDB()
-    sample_ng_tiles(job_id="j3", over_review_root=or_root, db=db,
-                    per_lighting=10, log=lambda m: None)
+    stats = sample_ng_tiles(
+        job_id="j_line", machine_id="MODEL-A", over_review_root=tmp_path / "unused", db=db,
+        thumb_dir=tmp_path / "thumbs", per_lighting=10, log=lambda m: None,
+        lightings=("WGF50500",),
+    )
 
-    zones = {Path(t["source_path"]).name: t["zone"] for t in db.tiles}
-    assert zones == {fname: zone for fname, _y, zone in rows}
+    assert stats["sampled"] == 1
+    crop_path = Path(db.tiles[0]["source_path"])
+    crop = cv2.imread(str(crop_path), cv2.IMREAD_GRAYSCALE)
+    assert crop is not None
+    assert crop.shape == (512, 512)
+    assert int(crop[256, 256]) == 255
+    assert "line0" in crop_path.name
 
 
-def test_sample_ng_tiles_writes_confined_thumbnails(tmp_path):
-    from pathlib import Path
+def test_sample_ng_tiles_black_only_scope_does_not_query_database(tmp_path):
+    from capi_train_new import sample_ng_tiles
+
+    class MockDB:
+        def list_training_bomb_candidates(self, **_kwargs):
+            raise AssertionError("B0F-only scope must not query bomb candidates")
+
+    stats = sample_ng_tiles(
+        job_id="j_black", machine_id="MODEL-A", over_review_root=tmp_path / "unused",
+        db=MockDB(), lightings=("B0F00000",), log=lambda _msg: None,
+    )
+
+    assert stats == {
+        "sampled": 0,
+        "missing_lightings": [],
+        "black_skipped": 0,
+        "invalid_skipped": 0,
+    }
+
+
+def test_sample_ng_tiles_classifies_zone_from_inference_crop(tmp_path):
+    """依 AOI 炸彈座標映射後的 crop 中心與影像高度判定 zone。"""
     import cv2
     import numpy as np
     from capi_train_new import sample_ng_tiles
 
-    or_root = tmp_path / "over_review"
-    crop_dir = or_root / "20260415_104812" / "true_ng" / "G0F00000" / "crop"
-    crop_dir.mkdir(parents=True)
-    for i in range(2):
-        cv2.imwrite(str(crop_dir / f"img_{i}.png"), np.full((32, 32), 128, dtype=np.uint8))
+    source = tmp_path / "W0F00000_100000.png"
+    assert cv2.imwrite(str(source), np.full((1200, 1000), 128, dtype=np.uint8))
 
     class MockDB:
         def __init__(self): self.tiles = []
+        def list_training_bomb_candidates(self, machine_id, lightings):
+            return [{
+                "inference_record_id": 1, "source_result_id": 1,
+                "client_bomb_info": '{"image_prefix":"W0F00000","defect_type":"point","coordinates":[[500,600],[10,40]]}',
+                "image_path": str(source), "image_dir": str(tmp_path), "image_name": source.name,
+                "image_width": 1000, "image_height": 1200,
+                "resolution_x": 1000, "resolution_y": 1200, "otsu_bounds": "0,0,1000,1200",
+            }]
         def insert_tile_pool(self, job_id, tiles):
             self.tiles.extend(tiles)
             return list(range(len(tiles)))
 
     db = MockDB()
-    thumb_dir = tmp_path / ".tmp" / "train_new_thumbs" / "j1"
     sample_ng_tiles(
-        job_id="j1", over_review_root=or_root, db=db,
-        thumb_dir=thumb_dir, per_lighting=2, log=lambda m: None,
+        job_id="j2", machine_id="MODEL-A", over_review_root=tmp_path / "unused", db=db,
+        thumb_dir=tmp_path / "thumbs", per_lighting=10, log=lambda m: None,
+        lightings=("W0F00000",),
     )
 
-    assert db.tiles
-    for tile in db.tiles:
-        thumb = Path(tile["thumb_path"])
-        assert thumb.exists()
-        thumb.resolve().relative_to(thumb_dir.resolve())
+    assert {tile["zone"] for tile in db.tiles} == {"inner", "edge"}
+
+
+def test_sample_ng_tiles_classifies_zone_against_all_panel_edges():
+    from capi_train_new import _classify_ng_crop_zone
+
+    bounds = (0, 0, 1366, 768)
+    assert _classify_ng_crop_zone(683, 100, bounds) == "edge"
+    assert _classify_ng_crop_zone(683, 384, bounds) == "inner"
+    assert _classify_ng_crop_zone(10, 384, bounds) == "edge"
+    assert _classify_ng_crop_zone(1350, 384, bounds) == "edge"
+    assert _classify_ng_crop_zone(683, 760, bounds) == "edge"
