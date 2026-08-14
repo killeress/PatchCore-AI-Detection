@@ -12,6 +12,7 @@ import os
 import json
 import logging
 import random
+import re
 import shutil
 import time
 import traceback
@@ -22,11 +23,14 @@ from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable, Iterable, Any
 import cv2
 
-from capi_dataset_export import crop_edge_defect
 from capi_image_naming import canonical_image_prefix
 from capi_image_orientation import read_detection_image
 from capi_preprocess import (
     PreprocessConfig, preprocess_panel_folder, PanelPreprocessResult,
+    classify_anchor_zone, detect_panel_polygon,
+    image_preprocess_pipeline_for_zone, map_product_coord_to_image,
+    rect_polygon_from_bounds, resolve_aoi_inward_shift_axes,
+    resolve_inward_polygon_tile,
 )
 
 logger = logging.getLogger("capi.train_new")
@@ -40,6 +44,10 @@ class TrainingDB(Protocol):
     def list_training_bomb_candidates(
         self, machine_id: str, lightings: Optional[Tuple[str, ...]] = None,
     ) -> List[dict]: ...
+    def list_training_bomb_validation_samples(
+        self, *, machine_id: str, lightings: Optional[Tuple[str, ...]] = None,
+    ) -> List[dict]: ...
+    def save_training_bomb_validation_samples(self, samples: List[dict]) -> int: ...
 
 LIGHTINGS = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
 ZONE_INNER = "inner"
@@ -49,6 +57,7 @@ TRAINING_UNITS = [(l, z) for l in LIGHTINGS for z in ZONES]  # 10 個
 
 MIN_TRAIN_TILES = 30
 NG_TILES_PER_LIGHTING = 100
+TRAIN_ZERO_SCORE_EPSILON = 1e-6
 
 PANEL_MODE_FULL = "full"
 PANEL_MODE_INNER_ONLY = "inner_only"
@@ -543,12 +552,17 @@ def sample_ng_tiles(
     preprocess_cfg: Optional[PreprocessConfig] = None,
     machine_id: str = "",
     rotate_180: bool = False,
+    ng_validation_base_dir: Optional[Path] = None,
 ) -> dict:
-    """從同機種推論紀錄抽 Client AOI 炸彈 crop，作為 PatchCore 驗證 NG。
+    """準備同機種 Client AOI 炸彈 crop，作為 PatchCore 驗證 NG。
 
     ``over_review_root`` 僅保留舊版呼叫介面相容；新版不再讀取該目錄。
+    已有訓練炸彈快取時直接從 NG 驗證庫載入；缺少的 lighting 才讀取
+    推論原圖裁切，並將未前處理的 512 crop 持久化供下次重用。
     B0F00000 黑畫面固定排除。這些 crop 只會以 ``source=ng`` 進入
     ``test/anormal``，不會加入 normal memory bank。
+    AOI 映射、panel polygon 內縮、zone 判定與前處理順序和正式 v2
+    推論共用，避免 NG 校正樣本與實際驗證 tile 不同 ROI。
     """
     del over_review_root
     requested_lightings = tuple(lightings) if lightings is not None else LIGHTINGS
@@ -562,6 +576,8 @@ def sample_ng_tiles(
         "missing_lightings": [],
         "black_skipped": 0,
         "invalid_skipped": 0,
+        "cache_reused": 0,
+        "cache_saved": 0,
     }
     if not target_lightings:
         return result_stats
@@ -570,15 +586,62 @@ def sample_ng_tiles(
         result_stats["missing_lightings"] = list(target_lightings)
         return result_stats
 
-    try:
-        candidates = db.list_training_bomb_candidates(
-            machine_id=str(machine_id).strip(),
-            lightings=target_lightings,
-        )
-    except AttributeError:
-        log("⚠ 資料庫版本不支援 AOI 炸彈 crop 查詢，未使用 over_review 舊資料")
-        result_stats["missing_lightings"] = list(target_lightings)
-        return result_stats
+    tile_size = int(
+        getattr(preprocess_cfg, "tile_size", 512)
+        if preprocess_cfg is not None else 512
+    )
+    validation_root = (
+        Path(ng_validation_base_dir).resolve()
+        if ng_validation_base_dir is not None else None
+    )
+    cached_by_lighting: Dict[str, List[dict]] = {
+        lighting: [] for lighting in target_lightings
+    }
+    if validation_root is not None:
+        try:
+            cached_samples = db.list_training_bomb_validation_samples(
+                machine_id=str(machine_id).strip(),
+                lightings=target_lightings,
+            )
+        except AttributeError:
+            cached_samples = []
+            log("⚠ 資料庫版本不支援訓練 NG 快取，改走推論原圖裁切")
+        for sample in cached_samples:
+            lighting = str(sample.get("lighting") or "").strip().upper()
+            zone = str(sample.get("zone") or "").strip().lower()
+            if lighting not in cached_by_lighting or zone not in ZONES:
+                continue
+            try:
+                crop_path = Path(str(sample.get("crop_path") or "")).resolve()
+                crop_path.relative_to(validation_root)
+            except (OSError, ValueError):
+                result_stats["invalid_skipped"] += 1
+                continue
+            if not crop_path.is_file():
+                result_stats["invalid_skipped"] += 1
+                continue
+            cached_probe = cv2.imread(str(crop_path), cv2.IMREAD_GRAYSCALE)
+            if cached_probe is None or cached_probe.shape[:2] != (tile_size, tile_size):
+                result_stats["invalid_skipped"] += 1
+                continue
+            cached_by_lighting[lighting].append({
+                **sample,
+                "crop_path": str(crop_path),
+            })
+
+    uncached_lightings = tuple(
+        lighting for lighting in target_lightings
+        if not cached_by_lighting.get(lighting)
+    )
+    candidates = []
+    if uncached_lightings:
+        try:
+            candidates = db.list_training_bomb_candidates(
+                machine_id=str(machine_id).strip(),
+                lightings=uncached_lightings,
+            )
+        except AttributeError:
+            log("⚠ 資料庫版本不支援 AOI 炸彈 crop 查詢，未使用 over_review 舊資料")
 
     by_lighting: Dict[str, List[dict]] = {lighting: [] for lighting in target_lightings}
     for source_row in candidates:
@@ -642,7 +705,119 @@ def sample_ng_tiles(
         else:
             preprocess_desc = describe_preprocess_pipeline(preprocess_cfg.image_preprocess_pipeline)
 
+    def write_job_tile(
+        *,
+        lighting: str,
+        zone: str,
+        stem: str,
+        crop,
+        panel_path: Path,
+        tile_index: int,
+        tile_x: int,
+        tile_y: int,
+        error_label: str,
+    ) -> Optional[dict]:
+        source_path = work_root / "tiles" / "ng" / lighting / f"{stem}.png"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(source_path), crop):
+            result_stats["invalid_skipped"] += 1
+            log(f"  ⚠ {lighting}: {error_label}寫入失敗 {source_path}")
+            return None
+
+        thumb_path = work_root / "thumb" / "ng" / lighting / f"{stem}.png"
+        thumb_path.parent.mkdir(parents=True, exist_ok=True)
+        thumb = cv2.resize(crop, (96, 96))
+        if not cv2.imwrite(str(thumb_path), thumb):
+            thumb_path = source_path
+        return {
+            "lighting": lighting,
+            "zone": zone,
+            "source": "ng",
+            "source_path": str(source_path.resolve()),
+            "thumb_path": str(thumb_path.resolve()),
+            "panel_path": str(panel_path),
+            "tile_index": int(tile_index),
+            "tile_x": int(tile_x),
+            "tile_y": int(tile_y),
+            "tile_width": tile_size,
+            "tile_height": tile_size,
+        }
+
+    def safe_path_token(value: Any, fallback: str, max_length: int) -> str:
+        token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or fallback))
+        return token[:max_length] or fallback
+
+    # Cache geometry/preprocessed pixels once per source image.  A single
+    # inference record can contain several AOI coordinates; re-running Otsu and
+    # polygon fitting for every coordinate made the old sampler both slower and
+    # more likely to drift from formal inference.
+    geometry_cache: Dict[
+        str,
+        Tuple[Any, Any, Tuple[int, int, int, int], Optional[Any]],
+    ] = {}
+
     for lighting in target_lightings:
+        cached_samples = list(cached_by_lighting.get(lighting) or [])
+        if cached_samples:
+            random.shuffle(cached_samples)
+            cached_records = []
+            cached_edge_n = cached_inner_n = 0
+            cached_preprocessed_n = 0
+            for sample in cached_samples[:per_lighting]:
+                crop_path = Path(str(sample.get("crop_path") or ""))
+                crop = cv2.imread(str(crop_path), cv2.IMREAD_GRAYSCALE)
+                if crop is None or crop.shape[:2] != (tile_size, tile_size):
+                    result_stats["invalid_skipped"] += 1
+                    log(f"  ⚠ {lighting}: NG 驗證庫 crop 無法讀取或尺寸錯誤 {crop_path}")
+                    continue
+                zone = str(sample.get("zone") or "").strip().lower()
+                if apply_preprocess_pipeline is not None and preprocess_cfg is not None:
+                    try:
+                        pipeline = image_preprocess_pipeline_for_zone(preprocess_cfg, zone)
+                        if pipeline:
+                            crop = apply_preprocess_pipeline(crop, pipeline)["image"]
+                            cached_preprocessed_n += 1
+                    except Exception as exc:
+                        log(f"  ⚠ {lighting}: NG 快取前處理失敗 {crop_path.name}: {exc}")
+
+                source_image_path = str(sample.get("source_image_path") or "").strip()
+                panel_path = Path(source_image_path) if source_image_path else crop_path
+                record = write_job_tile(
+                    lighting=lighting,
+                    zone=zone,
+                    stem=f"{job_id}_{lighting}_ngcache_s{int(sample.get('id') or 0)}",
+                    crop=crop,
+                    panel_path=panel_path,
+                    tile_index=int(sample.get("id") or 0),
+                    tile_x=int(sample.get("tile_x") or 0),
+                    tile_y=int(sample.get("tile_y") or 0),
+                    error_label="NG 快取 crop ",
+                )
+                if record is None:
+                    continue
+                cached_records.append(record)
+                if zone == ZONE_EDGE:
+                    cached_edge_n += 1
+                else:
+                    cached_inner_n += 1
+
+            if cached_records:
+                db.insert_tile_pool(job_id, cached_records)
+                reused = len(cached_records)
+                sampled += reused
+                result_stats["cache_reused"] += reused
+                preprocess_text = (
+                    f" / 前處理={cached_preprocessed_n}: {preprocess_desc}"
+                    if cached_preprocessed_n else ""
+                )
+                log(
+                    f"  ✓ {lighting}: 從 NG 驗證庫重用 {reused} 個 NG "
+                    f"(不重讀推論原圖 / edge={cached_edge_n} / inner={cached_inner_n}"
+                    f"{preprocess_text})"
+                )
+                continue
+            log(f"  ⚠ {lighting}: NG 驗證庫快取不可用，改走推論原圖裁切")
+
         lighting_candidates = list(by_lighting.get(lighting) or [])
         if not lighting_candidates:
             missing.append(lighting)
@@ -650,6 +825,7 @@ def sample_ng_tiles(
             continue
         random.shuffle(lighting_candidates)
         records = []
+        validation_rows = []
         edge_n = inner_n = unknown_n = 0
         preprocessed_n = 0
         for candidate in lighting_candidates:
@@ -668,58 +844,142 @@ def sample_ng_tiles(
                 log(f"  ⚠ {lighting}: 炸彈原圖不存在 {raw_source_path}")
                 continue
 
-            image = read_detection_image(
-                raw_source_path,
-                cv2.IMREAD_GRAYSCALE,
-                rotate_180=bool(rotate_180),
-            )
-            if image is None:
-                result_stats["invalid_skipped"] += 1
-                log(f"  ⚠ {lighting}: 炸彈原圖讀取失敗 {raw_source_path}")
-                continue
-
-            try:
-                bounds = tuple(
-                    int(part.strip())
-                    for part in str(candidate.get("otsu_bounds") or "").split(",")
+            source_key = str(raw_source_path.resolve())
+            geometry = geometry_cache.get(source_key)
+            if geometry is None:
+                raw_image = read_detection_image(
+                    raw_source_path,
+                    cv2.IMREAD_GRAYSCALE,
+                    rotate_180=bool(rotate_180),
                 )
-                if len(bounds) != 4 or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
-                    raise ValueError("invalid otsu_bounds")
-            except (TypeError, ValueError, cv2.error) as exc:
-                bounds = (0, 0, image.shape[1], image.shape[0])
-                log(f"  ⚠ {lighting}: {raw_source_path.name} 無有效 Otsu bounds，改用全圖映射 ({exc})")
+                if raw_image is None:
+                    result_stats["invalid_skipped"] += 1
+                    log(f"  ⚠ {lighting}: 炸彈原圖讀取失敗 {raw_source_path}")
+                    continue
 
-            product_width = int(candidate.get("resolution_x") or 0)
-            product_height = int(candidate.get("resolution_y") or 0)
+                # This is intentionally the same ordering as
+                # preprocess_panel_image / _create_aoi_centered_tiles_v2:
+                # global pipeline first, then boundary detection and crop.
+                geometry_image = raw_image
+                if (
+                    preprocess_cfg is not None
+                    and preprocess_cfg.image_preprocess_pipeline
+                    and not getattr(preprocess_cfg, "preprocess_after_tiling", False)
+                    and apply_preprocess_pipeline is not None
+                ):
+                    try:
+                        geometry_image = apply_preprocess_pipeline(
+                            raw_image, preprocess_cfg.image_preprocess_pipeline,
+                        )["image"]
+                    except Exception as exc:
+                        log(f"  ⚠ {lighting}: NG 整圖前處理失敗 {raw_source_path.name}: {exc}")
+                        geometry_image = raw_image
+
+                detected_bounds = None
+                detected_polygon = None
+                if preprocess_cfg is not None:
+                    try:
+                        detected_bounds, detected_polygon = detect_panel_polygon(
+                            geometry_image, preprocess_cfg,
+                        )
+                    except Exception as exc:
+                        log(f"  ⚠ {lighting}: panel 邊界偵測失敗 {raw_source_path.name}: {exc}")
+
+                try:
+                    db_bounds = tuple(
+                        int(part.strip())
+                        for part in str(candidate.get("otsu_bounds") or "").split(",")
+                    )
+                    if (
+                        len(db_bounds) != 4
+                        or db_bounds[2] <= db_bounds[0]
+                        or db_bounds[3] <= db_bounds[1]
+                    ):
+                        raise ValueError("invalid otsu_bounds")
+                except (TypeError, ValueError, cv2.error) as exc:
+                    db_bounds = (0, 0, raw_image.shape[1], raw_image.shape[0])
+                    log(f"  ⚠ {lighting}: {raw_source_path.name} 無有效 Otsu bounds，改用全圖映射 ({exc})")
+
+                bounds = detected_bounds or db_bounds
+                polygon = (
+                    detected_polygon
+                    if detected_polygon is not None
+                    else rect_polygon_from_bounds(bounds)
+                )
+                geometry = (
+                    raw_image,
+                    geometry_image,
+                    tuple(int(v) for v in bounds),
+                    polygon,
+                )
+                geometry_cache[source_key] = geometry
+
+            raw_image, image, bounds, polygon = geometry
+            product_width = int(
+                getattr(preprocess_cfg, "product_resolution", None)[0]
+                if preprocess_cfg is not None
+                and getattr(preprocess_cfg, "product_resolution", None)
+                else candidate.get("resolution_x") or 0
+            )
+            product_height = int(
+                getattr(preprocess_cfg, "product_resolution", None)[1]
+                if preprocess_cfg is not None
+                and getattr(preprocess_cfg, "product_resolution", None)
+                else candidate.get("resolution_y") or 0
+            )
             if product_width <= 0:
                 product_width = max(1, image.shape[1])
             if product_height <= 0:
                 product_height = max(1, image.shape[0])
-            img_x = int(
-                int(candidate.get("product_x") or 0)
-                * (bounds[2] - bounds[0]) / product_width
-                + bounds[0]
+            product_resolution = (product_width, product_height)
+            product_x = int(candidate.get("product_x") or 0)
+            product_y = int(candidate.get("product_y") or 0)
+            img_x, img_y = map_product_coord_to_image(
+                product_x, product_y, bounds, product_resolution, polygon,
             )
-            img_y = int(
-                int(candidate.get("product_y") or 0)
-                * (bounds[3] - bounds[1]) / product_height
-                + bounds[1]
+
+            half = tile_size // 2
+            centered_tile_x = img_x - half
+            centered_tile_y = img_y - half
+            tile_x, tile_y, _coverage, _shifted = resolve_inward_polygon_tile(
+                anchor_xy=(img_x, img_y),
+                polygon=polygon,
+                image_shape=image.shape[:2],
+                tile_size=tile_size,
+                initial_origin=(centered_tile_x, centered_tile_y),
+                keep_anchor_inside=True,
+                shift_axes=resolve_aoi_inward_shift_axes(
+                    img_x, img_y, bounds, tile_size,
+                ),
             )
-            try:
-                crop = crop_edge_defect(image, img_x, img_y)
-            except (TypeError, ValueError, cv2.error) as exc:
+            raw_crop = raw_image[
+                tile_y:tile_y + tile_size,
+                tile_x:tile_x + tile_size,
+            ].copy()
+            crop = image[
+                tile_y:tile_y + tile_size,
+                tile_x:tile_x + tile_size,
+            ].copy()
+            if (
+                raw_crop.shape[:2] != (tile_size, tile_size)
+                or crop.shape[:2] != (tile_size, tile_size)
+            ):
                 result_stats["invalid_skipped"] += 1
-                log(f"  ⚠ {lighting}: 炸彈 crop 失敗 {raw_source_path.name}: {exc}")
-                continue
-            if crop.shape[:2] != (512, 512):
-                result_stats["invalid_skipped"] += 1
-                log(f"  ⚠ {lighting}: 炸彈 crop 尺寸不是 512x512: {crop.shape[:2]}")
+                log(
+                    f"  ⚠ {lighting}: 炸彈 crop 尺寸不是 {tile_size}x{tile_size}: "
+                    f"{crop.shape[:2]}"
+                )
                 continue
 
-            zone = _classify_ng_crop_zone(img_x, img_y, bounds)
-            if apply_preprocess_pipeline is not None:
+            zone, _anchor_distance = classify_anchor_zone(
+                (img_x, img_y), polygon, half,
+            )
+            if (
+                apply_preprocess_pipeline is not None
+                and preprocess_cfg is not None
+                and getattr(preprocess_cfg, "preprocess_after_tiling", False)
+            ):
                 try:
-                    from capi_preprocess import image_preprocess_pipeline_for_zone
                     pipeline = image_preprocess_pipeline_for_zone(preprocess_cfg, zone)
                     if pipeline:
                         crop = apply_preprocess_pipeline(crop, pipeline)["image"]
@@ -735,18 +995,20 @@ def sample_ng_tiles(
                 f"{job_id}_{lighting}_bomb_r{record_id}_"
                 f"img{source_result_id}_{source_type}{coord_index}"
             )
-            source_path = work_root / "tiles" / "ng" / lighting / f"{stem}.png"
-            source_path.parent.mkdir(parents=True, exist_ok=True)
-            if not cv2.imwrite(str(source_path), crop):
-                result_stats["invalid_skipped"] += 1
-                log(f"  ⚠ {lighting}: 炸彈 crop 寫入失敗 {source_path}")
+            record = write_job_tile(
+                lighting=lighting,
+                zone=zone,
+                stem=stem,
+                crop=crop,
+                panel_path=raw_source_path.resolve(),
+                tile_index=source_result_id,
+                tile_x=tile_x,
+                tile_y=tile_y,
+                error_label="炸彈 crop ",
+            )
+            if record is None:
                 continue
-
-            thumb_path = work_root / "thumb" / "ng" / lighting / f"{stem}.png"
-            thumb_path.parent.mkdir(parents=True, exist_ok=True)
-            thumb = cv2.resize(crop, (96, 96))
-            if not cv2.imwrite(str(thumb_path), thumb):
-                thumb_path = source_path
+            records.append(record)
 
             if zone == ZONE_EDGE:
                 edge_n += 1
@@ -754,18 +1016,67 @@ def sample_ng_tiles(
                 inner_n += 1
             else:
                 unknown_n += 1
-            records.append({
-                "lighting": lighting, "zone": zone, "source": "ng",
-                "source_path": str(source_path.resolve()), "thumb_path": str(thumb_path.resolve()),
-                "panel_path": str(raw_source_path.resolve()),
-                "tile_index": source_result_id,
-                "tile_x": max(0, min(img_x - 256, image.shape[1] - 512)),
-                "tile_y": max(0, min(img_y - 256, image.shape[0] - 512)),
-                "tile_width": 512,
-                "tile_height": 512,
-            })
+
+            if validation_root is not None:
+                safe_model = safe_path_token(machine_id, "unknown", 80)
+                safe_lighting = safe_path_token(lighting, "unknown", 40)
+                safe_zone = safe_path_token(zone, "unknown", 40)
+                safe_glass = safe_path_token(candidate.get("glass_id"), "panel", 80)
+                request_day = re.sub(
+                    r"[^0-9]+", "", str(candidate.get("request_time") or "")[:10]
+                ) or datetime.now().strftime("%Y%m%d")
+                validation_dir = (
+                    validation_root / safe_model / safe_lighting / safe_zone / "crop"
+                )
+                validation_path = validation_dir / (
+                    f"{request_day}_{safe_glass}_r{record_id}_"
+                    f"img{source_result_id}_{source_type}{coord_index}.png"
+                )
+                validation_error_logged = False
+                try:
+                    validation_dir.mkdir(parents=True, exist_ok=True)
+                    validation_written = cv2.imwrite(str(validation_path), raw_crop)
+                except (OSError, cv2.error) as exc:
+                    validation_written = False
+                    validation_error_logged = True
+                    log(f"  ⚠ {lighting}: NG 驗證庫 crop 寫入失敗 {validation_path}: {exc}")
+                if validation_written:
+                    validation_rows.append({
+                        "inference_record_id": record_id,
+                        "image_result_id": source_result_id,
+                        "coord_index": coord_index,
+                        "glass_id": str(candidate.get("glass_id") or ""),
+                        "model_id": str(machine_id).strip(),
+                        "machine_no": str(candidate.get("machine_no") or ""),
+                        "request_time": str(candidate.get("request_time") or ""),
+                        "image_name": str(candidate.get("image_name") or ""),
+                        "source_image_path": str(raw_source_path.resolve()),
+                        "lighting": lighting,
+                        "zone": zone,
+                        "source_type": source_type,
+                        "aoi_product_x": product_x,
+                        "aoi_product_y": product_y,
+                        "aoi_image_x": img_x,
+                        "aoi_image_y": img_y,
+                        "tile_x": tile_x,
+                        "tile_y": tile_y,
+                        "tile_w": tile_size,
+                        "tile_h": tile_size,
+                        "crop_path": str(validation_path.resolve()),
+                    })
+                elif not validation_error_logged:
+                    log(f"  ⚠ {lighting}: NG 驗證庫 crop 寫入失敗 {validation_path}")
         if records:
             db.insert_tile_pool(job_id, records)
+            if validation_rows:
+                try:
+                    saved = db.save_training_bomb_validation_samples(validation_rows)
+                    result_stats["cache_saved"] += int(saved or 0)
+                    log(f"  ✓ {lighting}: 新增 {int(saved or 0)} 張至 NG 驗證庫")
+                except AttributeError:
+                    log("  ⚠ 資料庫版本不支援寫入訓練 NG 快取")
+                except Exception as exc:
+                    log(f"  ⚠ {lighting}: NG 驗證庫寫入失敗，仍繼續本次訓練: {exc}")
         else:
             missing.append(lighting)
         sampled += len(records)
@@ -857,7 +1168,6 @@ def train_one_patchcore(
     log: Optional[Callable[[str], None]] = None,
     experiment_stats_out: Optional[Dict[str, Any]] = None,
     trace_sources: Optional[Dict[str, Dict[str, Any]]] = None,
-    rejected_trace_sources: Optional[List[Dict[str, Any]]] = None,
 ) -> Path:
     """訓練一個 (lighting, zone) unit。回傳 model.pt 路徑。
 
@@ -987,7 +1297,6 @@ def train_one_patchcore(
             reference_size=FEATURE_CLEANING_REFERENCE_SIZE,
             query_chunk=FEATURE_CLEANING_QUERY_CHUNK,
             trace_sources=trace_sources,
-            rejected_trace_sources=rejected_trace_sources,
             strategy=(
                 "context_overlap_adaptive"
                 if context_adaptive
@@ -1119,12 +1428,13 @@ def compute_unit_metrics(
     ng_scores: List[float],
     threshold: float,
     train_scores: List[float],
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """從 calibrate 用的數字算出 unit 品質指標。純函式，沒 I/O。
 
     回傳欄位：
       train_max          訓練樣本最大分數（已抽樣 100）
       train_count_eval   評估時用到的 train sample 數
+      train_zero_score_* OK 評估分數為 0 的數量、比例與全為 0 警告
       ng_count           實際算到分數的 NG 樣本數
       ng_min/median/max  NG 分布
       ng_p10             NG 第 10 百分位
@@ -1135,11 +1445,23 @@ def compute_unit_metrics(
       auroc              異常檢測 AUROC
       auroc_grade        excellent / good / fair / poor / fail / n/a
     """
+    train_zero_score_count = sum(
+        1 for score in train_scores
+        if abs(float(score)) <= TRAIN_ZERO_SCORE_EPSILON
+    )
+    train_zero_score_warning = bool(train_scores) and (
+        train_zero_score_count == len(train_scores)
+    )
     metrics = {
         "train_max": round(float(train_max), 4),
         "ng_count": len(ng_scores),
         "threshold": round(float(threshold), 4),
         "train_count_eval": len(train_scores),
+        "train_zero_score_count": train_zero_score_count,
+        "train_zero_score_rate": round(
+            train_zero_score_count / len(train_scores), 4
+        ) if train_scores else None,
+        "train_zero_score_warning": train_zero_score_warning,
     }
     if not ng_scores:
         metrics.update({
@@ -1722,8 +2044,6 @@ def train_single_submodel(
 
     train_tiles = db.list_tile_pool(job_id, lighting=lighting, zone=zone,
                                     source="ok", decision="accept")
-    rejected_tiles = db.list_tile_pool(job_id, lighting=lighting,
-                                       source="ok", decision="reject")
     ng_all = db.list_tile_pool(job_id, lighting=lighting,
                                source="ng", decision="accept")
     ng_for_zone = [t for t in ng_all if t.get("zone") in (zone, None)]
@@ -1773,25 +2093,6 @@ def train_single_submodel(
             trace_kwargs = {}
             if feature_cleaning_config_for_zone(cfg, zone)["mode"] != FEATURE_CLEANING_MODE_OFF:
                 trace_kwargs["trace_sources"] = trace_sources
-            if (
-                feature_cleaning_config_for_zone(cfg, zone)["mode"]
-                == FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE
-                and rejected_tiles
-            ):
-                trace_kwargs["rejected_trace_sources"] = [{
-                    "tile_pool_id": int(tile["id"]),
-                    "source_path": tile.get("source_path"),
-                    "panel_path": tile.get("panel_path"),
-                    "tile_index": tile.get("tile_index"),
-                    "tile_x": tile.get("tile_x"),
-                    "tile_y": tile.get("tile_y"),
-                    "tile_width": tile.get("tile_width"),
-                    "tile_height": tile.get("tile_height"),
-                } for tile in rejected_tiles]
-                log(
-                    f"{unit_prefix}{unit_label}: 載入 {len(rejected_tiles)} 張 rejected Tile "
-                    "幾何範圍，重疊位置採 reject 優先排除"
-                )
             model_pt = train_one_patchcore(
                 staging,
                 run_root,
@@ -1901,9 +2202,6 @@ def train_single_submodel(
                         "distance_removed": metrics["feature_cleaning"].get(
                             "distance_removed", 0
                         ),
-                        "rejected_overlap_excluded": metrics["feature_cleaning"].get(
-                            "rejected_overlap_excluded", 0
-                        ),
                         "coreset_selected": metrics["feature_cleaning"].get(
                             "coreset_selected", 0
                         ),
@@ -1914,7 +2212,6 @@ def train_single_submodel(
                             "1": "removed_distance_outlier",
                             "2": "kept_overlap_disagreement",
                             "3": "protected_tile_boundary",
-                            "4": "excluded_by_rejected_overlap",
                             "5": "missing_coordinate_metadata",
                             "6": "protected_outside_cleaning_scope",
                         },

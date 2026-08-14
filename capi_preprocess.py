@@ -17,6 +17,119 @@ from capi_image_naming import canonical_image_prefix
 logger = logging.getLogger("capi.preprocess")
 
 
+# AOI product-coordinate mapping uses this legacy fallback when the model or
+# inference record does not carry an explicit product resolution.
+DEFAULT_PRODUCT_RESOLUTION = (1920, 1080)
+
+
+def rect_polygon_from_bounds(
+    bounds: Optional[Tuple[int, int, int, int]],
+) -> Optional[np.ndarray]:
+    """Build the same inclusive rectangular panel polygon used by inference."""
+    if bounds is None:
+        return None
+    x1, y1, x2, y2 = (int(value) for value in bounds)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return np.array(
+        [[x1, y1], [x2 - 1, y1], [x2 - 1, y2 - 1], [x1, y2 - 1]],
+        dtype=np.float32,
+    )
+
+
+def resolve_aoi_inward_shift_axes(
+    img_x: int,
+    img_y: int,
+    bounds: Tuple[int, int, int, int],
+    tile_size: int,
+) -> str:
+    """Return the panel axis that an AOI tile is allowed to shift inward on."""
+    half = int(tile_size) // 2
+    x1, y1, x2, y2 = (int(value) for value in bounds)
+    near_top_or_bottom = (img_y - y1 < half) or (y2 - img_y < half)
+    near_left_or_right = (img_x - x1 < half) or (x2 - img_x < half)
+    if near_top_or_bottom and not near_left_or_right:
+        return "y"
+    if near_left_or_right and not near_top_or_bottom:
+        return "x"
+    return "xy"
+
+
+def map_product_coord_to_image(
+    px: int,
+    py: int,
+    raw_bounds: Tuple[int, int, int, int],
+    product_resolution: Optional[Tuple[int, int]] = None,
+    panel_polygon: Optional[np.ndarray] = None,
+) -> Tuple[int, int]:
+    """Map a product AOI coordinate using the formal inference mapping.
+
+    The linear mapping is retained as the first choice.  When a valid panel
+    polygon shows that the linear point is outside a contaminated/raw bound,
+    the same four-corner perspective correction as production inference is
+    used instead.  Keeping this helper shared prevents NG training crops from
+    being sampled from a different coordinate system than validation.
+    """
+    product_width, product_height = product_resolution or DEFAULT_PRODUCT_RESOLUTION
+    x_start, y_start, x_end, y_end = (int(value) for value in raw_bounds)
+    product_img_width = x_end - x_start
+    product_img_height = y_end - y_start
+    if product_width <= 0 or product_height <= 0:
+        product_width, product_height = DEFAULT_PRODUCT_RESOLUTION
+
+    img_x = int(px * product_img_width / product_width + x_start)
+    img_y = int(py * product_img_height / product_height + y_start)
+
+    if panel_polygon is None:
+        return img_x, img_y
+
+    try:
+        polygon = np.asarray(panel_polygon, dtype=np.float32).reshape(-1, 2)
+        if polygon.shape != (4, 2) or not np.isfinite(polygon).all():
+            return img_x, img_y
+
+        raw_distance = float(cv2.pointPolygonTest(
+            polygon, (float(img_x), float(img_y)), True,
+        ))
+        raw_area = float(max(1, product_img_width * product_img_height))
+        polygon_coverage = abs(float(cv2.contourArea(polygon))) / raw_area
+        raw_bounds_contaminated = polygon_coverage < 0.90
+        if raw_distance >= -1.0 and not raw_bounds_contaminated:
+            return img_x, img_y
+
+        source = np.array([
+            [0.0, 0.0],
+            [float(product_width), 0.0],
+            [float(product_width), float(product_height)],
+            [0.0, float(product_height)],
+        ], dtype=np.float32)
+        transform = cv2.getPerspectiveTransform(source, polygon)
+        mapped = cv2.perspectiveTransform(
+            np.array([[[float(px), float(py)]]], dtype=np.float32),
+            transform,
+        )[0, 0]
+        if not np.isfinite(mapped).all():
+            return img_x, img_y
+
+        polygon_x = int(round(float(mapped[0])))
+        polygon_y = int(round(float(mapped[1])))
+        polygon_distance = float(cv2.pointPolygonTest(
+            polygon, (float(polygon_x), float(polygon_y)), True,
+        ))
+        if polygon_distance < -1.0:
+            return img_x, img_y
+
+        logger.warning(
+            "AOI mapping corrected by panel polygon: product=(%d,%d) "
+            "raw=(%d,%d) raw_dist=%.1fpx coverage=%.3f polygon=(%d,%d)",
+            px, py, img_x, img_y, raw_distance, polygon_coverage,
+            polygon_x, polygon_y,
+        )
+        return polygon_x, polygon_y
+    except (cv2.error, TypeError, ValueError):
+        return img_x, img_y
+
+
 @dataclass
 class PreprocessConfig:
     tile_size: int = 512

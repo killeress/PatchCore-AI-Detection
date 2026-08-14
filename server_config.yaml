@@ -136,10 +136,10 @@ dataset_export:
   min_free_space_gb: 1
 
 # ------------------------------------------------------------
-# Report 人工確認 NG 驗證資料庫
+# NG 驗證資料庫（人工確認 + 訓練炸彈快取）
 # ------------------------------------------------------------
-# 只保存人工 Review 勾選、確認可見的 AOI 座標 tile。
-# 此資料不會加入 PatchCore normal memory bank，供新模型回放驗證使用。
+# 保存人工 Review 勾選的 AOI tile，以及新模型第一次訓練裁出的 AOI 炸彈快取。
+# 此資料不會加入 PatchCore normal memory bank，供後續訓練與模型回放驗證使用。
 ng_validation:
   base_dir: /aidata/capi_ai/datasets/ng_validation
 

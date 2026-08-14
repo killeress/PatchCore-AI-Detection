@@ -3711,6 +3711,27 @@
             : (score.mark_exclusion_masked
                 ? `MARK Patch 正式分數未套用：${score.mark_patch_score_reason || '無 Patch evidence'}，本次使用舊式比例備援。`
                 : '');
+        const normalizationAvailable = score.normalization_available === true;
+        const normalizationClamped = score.normalization_zero_clamped === true;
+        const normalizationSummary = score.model_normalization_enabled === false
+            ? '模型未啟用 Anomalib normalization，0 分不是由 clamp 造成。'
+            : normalizationAvailable
+            ? (normalizationClamped
+                ? 'raw 距離落在正規化 0 分邊界以下，顯示 0 是 Anomalib clamp 結果，不代表模型沒有距離。'
+                : 'raw 距離沒有落在正規化 0 分邊界以下，0 分不是由此 clamp 造成。')
+            : '本次 worker 沒有回傳未正規化模型距離或 image normalization 參數。';
+        const normalizationRows = [
+            ['模型 raw 距離（未正規化）', score.raw_model_score],
+            ['image min', score.model_image_min],
+            ['image max', score.model_image_max],
+            ['image threshold', score.model_image_threshold],
+            ['Anomalib normalization enabled', score.model_normalization_enabled === true ? '是' : (score.model_normalization_enabled === false ? '否' : null)],
+            ['正規化 0 分邊界', score.normalization_zero_boundary],
+            ['raw anomaly map max', score.raw_anomaly_map_max],
+            ['normalized anomaly map max', score.normalized_anomaly_map_max],
+        ].map(([label, value]) => `
+            <tr><td>${escapeHtml(label)}</td><td>${typeof value === 'string' ? escapeHtml(value) : coordDiagNumber(value, 6)}</td></tr>
+        `).join('');
 
         const seed = dust.center_seed || {};
         const seedText = seed.enabled
@@ -3840,6 +3861,20 @@
 
             <div class="coord-score-flow">${scoreSteps}</div>
             ${markPatchScoreNote ? `<div class="coord-diagnostic-note" style="margin-top:6px;">${escapeHtml(markPatchScoreNote)}</div>` : ''}
+
+            <div class="coord-diagnostic-block" style="margin-top:10px;">
+                <h4>模型正規化診斷（為什麼會顯示 0 分）</h4>
+                <div class="coord-diagnostic-alert ${normalizationClamped ? 'warning' : ''}">
+                    <strong>${normalizationClamped ? '正規化 clamp：' : '正規化狀態：'}</strong>
+                    ${escapeHtml(normalizationSummary)}
+                </div>
+                <div class="coord-table-wrap">
+                    <table class="coord-diagnostic-table">
+                        <thead><tr><th>欄位</th><th>值</th></tr></thead>
+                        <tbody>${normalizationRows}</tbody>
+                    </table>
+                </div>
+            </div>
 
             <div class="coord-diagnostic-alert" style="margin-top:10px;">
                 <strong>Top ${coordDiagNumber(topPercent, 2)}% 切點：</strong>

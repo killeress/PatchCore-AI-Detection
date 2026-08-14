@@ -104,6 +104,9 @@ from capi_preprocess import (
     detect_panel_polygon,
     _polyfit_polygon as _pf_polygon,
     is_small_product_resolution,
+    rect_polygon_from_bounds,
+    resolve_aoi_inward_shift_axes,
+    map_product_coord_to_image,
 )
 from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
 from scratch_filter import ScratchFilter
@@ -124,6 +127,49 @@ MODEL_RESOLUTION_MAP = {
 }
 
 DEFAULT_PRODUCT_RESOLUTION = (1920, 1080)
+
+
+def score_normalization_diagnostic(
+    raw_score: Optional[float],
+    image_min: Optional[float],
+    image_max: Optional[float],
+    image_threshold: Optional[float],
+    normalization_enabled: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Explain Anomalib's clamp-to-zero image-score normalization boundary."""
+    if normalization_enabled is False:
+        return {
+            "normalization_available": False,
+            "normalization_zero_boundary": None,
+            "normalization_zero_clamped": False,
+        }
+    values = (raw_score, image_min, image_max)
+    if any(value is None or not np.isfinite(float(value)) for value in values):
+        return {
+            "normalization_available": False,
+            "normalization_zero_boundary": None,
+            "normalization_zero_clamped": None,
+        }
+    minimum = float(image_min)
+    maximum = float(image_max)
+    if maximum <= minimum:
+        return {
+            "normalization_available": False,
+            "normalization_zero_boundary": None,
+            "normalization_zero_clamped": None,
+        }
+    threshold = (
+        float(image_threshold)
+        if image_threshold is not None and np.isfinite(float(image_threshold))
+        else (minimum + maximum) / 2.0
+    )
+    zero_boundary = threshold - (maximum - minimum) * 0.5
+    raw = float(raw_score)
+    return {
+        "normalization_available": True,
+        "normalization_zero_boundary": zero_boundary,
+        "normalization_zero_clamped": bool(raw <= zero_boundary + 1e-9),
+    }
 
 
 def _anomaly_max_cc_area(anomaly_map: Optional[np.ndarray], peak_value: Optional[float] = None) -> int:
@@ -209,7 +255,14 @@ class TileInfo:
     bright_spot_area: int = 0               # B0F 偵測：偵測到的亮點面積 (px)
     bright_spot_min_area: int = 0           # B0F 偵測：使用的最小面積
     score_threshold: Optional[float] = None # 此 tile 推論時實際使用的門檻（v2 依 zone 不同）
-    raw_pred_score: float = 0.0             # 模型原始 pred_score，未經 mask/edge margin 比率調整
+    raw_pred_score: float = 0.0             # 模型 normalized pred_score，未經 mask/edge margin 比率調整
+    raw_model_score: Optional[float] = None # 未經 Anomalib image-score normalization 的模型距離
+    model_image_min: Optional[float] = None # Anomalib image-score normalization 下界
+    model_image_max: Optional[float] = None # Anomalib image-score normalization 上界
+    model_image_threshold: Optional[float] = None # Anomalib image-score normalization threshold
+    model_normalization_enabled: Optional[bool] = None # 本次模型是否啟用 Anomalib normalization
+    raw_anomaly_map_max: Optional[float] = None # 未正規化 anomaly map 最高值
+    normalized_anomaly_map_max: Optional[float] = None # 正規化 anomaly map 最高值
     pre_decay_map_max: float = 0.0          # mask/edge margin 前 anomaly_map max
     post_decay_map_max: float = 0.0         # mask/edge margin 後 anomaly_map max
     score_decay_ratio: float = 1.0          # post_decay_map_max / pre_decay_map_max
@@ -994,15 +1047,7 @@ class CAPIInferencer:
     @staticmethod
     def _rect_polygon_from_bounds(bounds: Optional[Tuple[int, int, int, int]]) -> Optional[np.ndarray]:
         """Build a rectangular panel polygon from raw bounds for AOI inward clamping."""
-        if bounds is None:
-            return None
-        x1, y1, x2, y2 = (int(v) for v in bounds)
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return np.array(
-            [[x1, y1], [x2 - 1, y1], [x2 - 1, y2 - 1], [x1, y2 - 1]],
-            dtype=np.float32,
-        )
+        return rect_polygon_from_bounds(bounds)
 
     @staticmethod
     def _resolve_aoi_inward_shift_axes(
@@ -1012,15 +1057,7 @@ class CAPIInferencer:
         tile_size: int,
     ) -> str:
         """Limit AOI inward ROI correction to the axis implied by the nearest edge."""
-        half = tile_size // 2
-        x1, y1, x2, y2 = (int(v) for v in bounds)
-        near_top_or_bottom = (img_y - y1 < half) or (y2 - img_y < half)
-        near_left_or_right = (img_x - x1 < half) or (x2 - img_x < half)
-        if near_top_or_bottom and not near_left_or_right:
-            return "y"
-        if near_left_or_right and not near_top_or_bottom:
-            return "x"
-        return "xy"
+        return resolve_aoi_inward_shift_axes(img_x, img_y, bounds, tile_size)
 
     @staticmethod
     def _format_aoi_tile_log_suffix(tile: 'TileInfo') -> str:
@@ -2113,6 +2150,92 @@ class CAPIInferencer:
             )
         return float(normalized.reshape(-1)[0].item())
 
+    @staticmethod
+    def _prediction_value(value: Any) -> Optional[float]:
+        """Convert a tensor/scalar prediction to a finite float for diagnostics."""
+        if value is None:
+            return None
+        try:
+            if hasattr(value, "detach"):
+                value = value.detach()
+            if hasattr(value, "reshape"):
+                value = value.reshape(-1)[0]
+            if hasattr(value, "item"):
+                value = value.item()
+            result = float(value)
+            return result if np.isfinite(result) else None
+        except (TypeError, ValueError, RuntimeError):
+            return None
+
+    def _capture_model_score_diagnostics(
+        self,
+        inferencer: Any,
+        input_image: np.ndarray,
+        normalized_predictions: Any,
+    ) -> Dict[str, Any]:
+        """Capture raw distance and normalization bounds for coordinate diagnostics.
+
+        Formal inference must not pay for a second model call.  This helper is
+        called only by the opt-in coordinate debug path; it temporarily disables
+        Anomalib post-processing normalization, then restores the original flag.
+        """
+        diagnostics: Dict[str, Any] = {
+            "raw_model_score": None,
+            "model_image_min": None,
+            "model_image_max": None,
+            "model_image_threshold": None,
+            "model_normalization_enabled": None,
+            "raw_anomaly_map_max": None,
+            "normalized_anomaly_map_max": None,
+        }
+        outer_model = getattr(inferencer, "model", None)
+        post_processor = getattr(outer_model, "post_processor", None)
+        if post_processor is None:
+            return diagnostics
+
+        for field_name in (
+            "image_min", "image_max", "image_threshold",
+        ):
+            diagnostics[f"model_{field_name}"] = self._prediction_value(
+                getattr(post_processor, field_name, None)
+            )
+        normalized_map = getattr(normalized_predictions, "anomaly_map", None)
+        if normalized_map is not None:
+            try:
+                diagnostics["normalized_anomaly_map_max"] = self._prediction_value(
+                    torch.amax(normalized_map)
+                    if hasattr(normalized_map, "detach")
+                    else np.max(np.asarray(normalized_map))
+                )
+            except (TypeError, ValueError, RuntimeError):
+                pass
+
+        if not hasattr(post_processor, "enable_normalization"):
+            return diagnostics
+        previous_normalization = bool(post_processor.enable_normalization)
+        diagnostics["model_normalization_enabled"] = previous_normalization
+        try:
+            post_processor.enable_normalization = False
+            raw_predictions = inferencer.predict(input_image)
+            diagnostics["raw_model_score"] = self._prediction_value(
+                getattr(raw_predictions, "pred_score", None)
+            )
+            raw_map = getattr(raw_predictions, "anomaly_map", None)
+            if raw_map is not None:
+                try:
+                    diagnostics["raw_anomaly_map_max"] = self._prediction_value(
+                        torch.amax(raw_map)
+                        if hasattr(raw_map, "detach")
+                        else np.max(np.asarray(raw_map))
+                    )
+                except (TypeError, ValueError, RuntimeError):
+                    pass
+        except Exception as exc:
+            logger.warning("Coordinate raw-score diagnostics failed: %s", exc)
+        finally:
+            post_processor.enable_normalization = previous_normalization
+        return diagnostics
+
     def _predict_with_mark_patch_score(
         self,
         tile: TileInfo,
@@ -2277,7 +2400,7 @@ class CAPIInferencer:
 
         return results
 
-    def predict_tile(self, tile: TileInfo, inferencer=None, edge_margin_override: Optional[int] = None, patchcore_overrides: Optional[Dict[str, Any]] = None, threshold: Optional[float] = None, raw_prediction: Optional[Tuple[float, Optional[np.ndarray]]] = None, model_id: Optional[str] = None) -> Tuple[float, Optional[np.ndarray]]:
+    def predict_tile(self, tile: TileInfo, inferencer=None, edge_margin_override: Optional[int] = None, patchcore_overrides: Optional[Dict[str, Any]] = None, threshold: Optional[float] = None, raw_prediction: Optional[Tuple[float, Optional[np.ndarray]]] = None, model_id: Optional[str] = None, capture_raw_diagnostics: bool = False) -> Tuple[float, Optional[np.ndarray]]:
         """
         對單一 tile 進行推論
 
@@ -2286,6 +2409,7 @@ class CAPIInferencer:
             inferencer: 指定的 inferencer 物件，若為 None 使用 self.inferencer
             threshold: 異常判斷閾值（用於面積過濾），若為 None 使用 self.threshold
             raw_prediction: 預先計算的 (pred_score, anomaly_map)，若提供則跳過模型推論
+            capture_raw_diagnostics: 僅供座標診斷頁，額外記錄未正規化模型距離
 
         Returns:
             (異常分數, 異常熱圖) - 如果有遮罩，會過濾排除區域的異常
@@ -2306,6 +2430,13 @@ class CAPIInferencer:
         tile.mark_patch_peak_x = -1
         tile.mark_patch_peak_y = -1
         tile.mark_patch_score_reason = ""
+        tile.raw_model_score = None
+        tile.model_image_min = None
+        tile.model_image_max = None
+        tile.model_image_threshold = None
+        tile.model_normalization_enabled = None
+        tile.raw_anomaly_map_max = None
+        tile.normalized_anomaly_map_max = None
 
         if raw_prediction is not None:
             # 使用預先批次計算的結果，跳過模型推論
@@ -2348,6 +2479,20 @@ class CAPIInferencer:
             anomaly_map = None
             if hasattr(predictions, 'anomaly_map') and predictions.anomaly_map is not None:
                 anomaly_map = predictions.anomaly_map.squeeze().cpu().numpy() if hasattr(predictions.anomaly_map, 'cpu') else predictions.anomaly_map.squeeze()
+
+            if capture_raw_diagnostics and not mark_patch_detail.get("applied"):
+                diagnostics = self._capture_model_score_diagnostics(
+                    active_inferencer, input_image, predictions,
+                )
+                tile.raw_model_score = diagnostics["raw_model_score"]
+                tile.model_image_min = diagnostics["model_image_min"]
+                tile.model_image_max = diagnostics["model_image_max"]
+                tile.model_image_threshold = diagnostics["model_image_threshold"]
+                tile.model_normalization_enabled = diagnostics[
+                    "model_normalization_enabled"
+                ]
+                tile.raw_anomaly_map_max = diagnostics["raw_anomaly_map_max"]
+                tile.normalized_anomaly_map_max = diagnostics["normalized_anomaly_map_max"]
 
         raw_pred_score = float(
             mark_patch_detail.get("original_score", pred_score)
@@ -5189,72 +5334,9 @@ class CAPIInferencer:
         raw bounds 可能被產品外字樣拉大），改用產品四角到 panel
         四角的透視映射。
         """
-        if product_resolution is None:
-            product_resolution = DEFAULT_PRODUCT_RESOLUTION
-        PRODUCT_WIDTH, PRODUCT_HEIGHT = product_resolution
-        
-        x_start, y_start, x_end, y_end = raw_bounds
-        
-        # 計算產品在圖片中的實際尺寸
-        product_img_width = x_end - x_start
-        product_img_height = y_end - y_start
-        
-        # 計算縮放比例
-        scale_x = product_img_width / PRODUCT_WIDTH
-        scale_y = product_img_height / PRODUCT_HEIGHT
-        
-        # 轉換座標
-        img_x = int(px * scale_x + x_start)
-        img_y = int(py * scale_y + y_start)
-
-        if panel_polygon is None:
-            return img_x, img_y
-
-        try:
-            polygon = np.asarray(panel_polygon, dtype=np.float32).reshape(-1, 2)
-            if polygon.shape != (4, 2) or not np.isfinite(polygon).all():
-                return img_x, img_y
-
-            raw_distance = float(cv2.pointPolygonTest(
-                polygon, (float(img_x), float(img_y)), True,
-            ))
-            raw_area = float(max(1, product_img_width * product_img_height))
-            polygon_coverage = abs(float(cv2.contourArea(polygon))) / raw_area
-            raw_bounds_contaminated = polygon_coverage < 0.90
-            if raw_distance >= -1.0 and not raw_bounds_contaminated:
-                return img_x, img_y
-
-            source = np.array([
-                [0.0, 0.0],
-                [float(PRODUCT_WIDTH), 0.0],
-                [float(PRODUCT_WIDTH), float(PRODUCT_HEIGHT)],
-                [0.0, float(PRODUCT_HEIGHT)],
-            ], dtype=np.float32)
-            transform = cv2.getPerspectiveTransform(source, polygon)
-            mapped = cv2.perspectiveTransform(
-                np.array([[[float(px), float(py)]]], dtype=np.float32),
-                transform,
-            )[0, 0]
-            if not np.isfinite(mapped).all():
-                return img_x, img_y
-
-            polygon_x = int(round(float(mapped[0])))
-            polygon_y = int(round(float(mapped[1])))
-            polygon_distance = float(cv2.pointPolygonTest(
-                polygon, (float(polygon_x), float(polygon_y)), True,
-            ))
-            if polygon_distance < -1.0:
-                return img_x, img_y
-
-            logger.warning(
-                "AOI mapping corrected by panel polygon: product=(%d,%d) "
-                "raw=(%d,%d) raw_dist=%.1fpx coverage=%.3f polygon=(%d,%d)",
-                px, py, img_x, img_y, raw_distance, polygon_coverage,
-                polygon_x, polygon_y,
-            )
-            return polygon_x, polygon_y
-        except (cv2.error, TypeError, ValueError):
-            return img_x, img_y
+        return map_product_coord_to_image(
+            px, py, raw_bounds, product_resolution, panel_polygon,
+        )
 
     def _inspect_roi_fusion(
         self,

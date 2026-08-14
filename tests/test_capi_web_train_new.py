@@ -1337,7 +1337,8 @@ def test_train_new_done_template_uses_chinese_summary_labels():
     assert "context_overlap_adaptive_v1" in text
     assert "自動依重疊 Tile 的 Panel 實體位置" in text
     assert "Feature patch 逐格追蹤" in text
-    assert "Rejected Tile 重疊排除" in text
+    assert "Rejected Tile 重疊排除" not in text
+    assert "距離異常移除" in text
     assert "data-distances" in text
     assert "data-votes-required" in text
     assert "data-coreset" in text
@@ -1345,6 +1346,11 @@ def test_train_new_done_template_uses_chinese_summary_labels():
     assert "進入 coreset" in text
     assert "實驗模型" in text
     assert "模型包" in text
+    assert "OK 評估分數全部為 0" in text
+    assert "zero_score_units" in text
+    assert "info.train_zero_score_warning" in text
+    assert "正規化 0 分" in text
+    assert "<th class=\"d5-th-num\">train_max</th>" in text
     assert "<th>Lighting</th>" not in text
     assert "<th>Zone</th>" not in text
     assert "BUNDLE</span>" not in text
@@ -1376,6 +1382,10 @@ def test_models_info_shows_all_recorded_custom_training_settings():
     assert "前處理套用時機" in text
     assert "影像前處理流程" in text
     assert "PANEL 切片設定" in text
+    assert "zeroScoreWarning" in text
+    assert "train_zero_score_warning" in text
+    assert "正規化 0 分" in text
+    assert "黃色列" in text
 
 
 def test_train_new_select_panel_renderer_uses_text_content():
@@ -2310,8 +2320,15 @@ def test_sample_ng_tiles_compat_supports_legacy_signature():
 
     captured = {}
 
-    def legacy_sample_ng_tiles(**kwargs):
-        captured.update(kwargs)
+    def legacy_sample_ng_tiles(job_id, over_review_root, db, thumb_dir, lightings, log):
+        captured.update({
+            "job_id": job_id,
+            "over_review_root": over_review_root,
+            "db": db,
+            "thumb_dir": thumb_dir,
+            "lightings": lightings,
+            "log": log,
+        })
         return {"sampled": 0}
 
     logs = []
@@ -2322,6 +2339,9 @@ def test_sample_ng_tiles_compat_supports_legacy_signature():
         db=object(),
         thumb_dir=Path("/tmp/thumb"),
         lightings=("G0F00000",),
+        machine_id="MODEL-A",
+        rotate_180=True,
+        ng_validation_base_dir=Path("/tmp/ng-validation"),
         log=logs.append,
         preprocess_cfg=SimpleNamespace(image_preprocess_pipeline=[{"method": "gaussian"}]),
     )

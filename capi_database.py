@@ -445,7 +445,7 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_mes_review_machine
                     ON mes_comparison_review(machine_no, model_id, updated_at DESC);
 
-                -- Human-confirmed NG samples selected from AOI-coordinate tiles.
+                -- Durable NG samples from human-confirmed AOI tiles or training bomb crops.
                 -- Source IDs are snapshots only (no FK) so the validation DB remains
                 -- usable after tile_results/image_results are cleaned.
                 CREATE TABLE IF NOT EXISTS ng_validation_samples (
@@ -473,6 +473,7 @@ class CAPIDatabase:
                     tile_h INTEGER DEFAULT 0,
                     ai_score REAL DEFAULT 0.0,
                     crop_path TEXT NOT NULL,
+                    sample_source TEXT NOT NULL DEFAULT 'manual_review',
                     status TEXT NOT NULL DEFAULT 'confirmed',
                     created_at TEXT DEFAULT (datetime('now', 'localtime')),
                     updated_at TEXT DEFAULT (datetime('now', 'localtime')),
@@ -925,6 +926,11 @@ class CAPIDatabase:
             add_column_if_not_exists("inference_records", "image_preprocess_pipeline", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "image_preprocess_pipelines", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "image_preprocess_timing", "TEXT DEFAULT ''")
+            add_column_if_not_exists(
+                "ng_validation_samples",
+                "sample_source",
+                "TEXT NOT NULL DEFAULT 'manual_review'",
+            )
             add_column_if_not_exists("image_results", "is_bomb", "INTEGER DEFAULT 0")
             add_column_if_not_exists("image_results", "mark_text", "TEXT DEFAULT ''")
             add_column_if_not_exists("image_results", "mark_confidence", "REAL DEFAULT 0.0")
@@ -4115,6 +4121,139 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def list_training_bomb_validation_samples(
+        self,
+        *,
+        machine_id: str,
+        lightings: Optional[Tuple[str, ...]] = None,
+    ) -> List[Dict]:
+        """Return reusable AOI bomb crops saved by an earlier training job."""
+        machine_id = str(machine_id or "").strip()
+        if not machine_id:
+            return []
+        clean_lightings = tuple(dict.fromkeys(
+            str(lighting or "").strip().upper()
+            for lighting in (lightings or ())
+            if str(lighting or "").strip()
+            and str(lighting or "").strip().upper() != "B0F00000"
+        ))
+        if lightings is not None and not clean_lightings:
+            return []
+
+        where = [
+            "status = 'confirmed'",
+            "sample_source = 'training_bomb'",
+            "model_id = ?",
+        ]
+        params: List[Any] = [machine_id]
+        if clean_lightings:
+            where.append(
+                "lighting IN (" + ",".join("?" for _ in clean_lightings) + ")"
+            )
+            params.extend(clean_lightings)
+
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"""SELECT *
+                      FROM ng_validation_samples
+                     WHERE {' AND '.join(where)}
+                     ORDER BY lighting, created_at DESC, id DESC""",
+                params,
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def save_training_bomb_validation_samples(self, samples: List[Dict]) -> int:
+        """Persist training AOI bomb crops in the existing NG validation DB.
+
+        ``review_id=0`` and a deterministic negative ``tile_result_id`` reserve
+        a namespace for system-generated samples without creating a fake human
+        MES review. Source IDs remain snapshots, matching the table contract.
+        """
+        sample_rows = list(samples or [])
+        if not sample_rows:
+            return 0
+
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                for sample in sample_rows:
+                    image_result_id = int(sample["image_result_id"])
+                    coord_index = max(0, int(sample.get("coord_index") or 0))
+                    synthetic_tile_result_id = -(
+                        image_result_id * 1_000_000 + coord_index + 1
+                    )
+                    conn.execute(
+                        """INSERT INTO ng_validation_samples
+                           (review_id, inference_record_id, tile_result_id,
+                            image_result_id, glass_id, model_id, machine_no,
+                            request_time, image_name, source_image_path,
+                            lighting, zone, aoi_defect_code,
+                            aoi_product_x, aoi_product_y,
+                            aoi_image_x, aoi_image_y,
+                            tile_x, tile_y, tile_w, tile_h,
+                            ai_score, crop_path, sample_source, status)
+                           VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                   ?, ?, ?, ?, ?, ?, 0.0, ?, 'training_bomb', 'confirmed')
+                           ON CONFLICT(review_id, tile_result_id)
+                           DO UPDATE SET
+                               inference_record_id = excluded.inference_record_id,
+                               image_result_id = excluded.image_result_id,
+                               glass_id = excluded.glass_id,
+                               model_id = excluded.model_id,
+                               machine_no = excluded.machine_no,
+                               request_time = excluded.request_time,
+                               image_name = excluded.image_name,
+                               source_image_path = excluded.source_image_path,
+                               lighting = excluded.lighting,
+                               zone = excluded.zone,
+                               aoi_defect_code = excluded.aoi_defect_code,
+                               aoi_product_x = excluded.aoi_product_x,
+                               aoi_product_y = excluded.aoi_product_y,
+                               aoi_image_x = excluded.aoi_image_x,
+                               aoi_image_y = excluded.aoi_image_y,
+                               tile_x = excluded.tile_x,
+                               tile_y = excluded.tile_y,
+                               tile_w = excluded.tile_w,
+                               tile_h = excluded.tile_h,
+                               crop_path = excluded.crop_path,
+                               sample_source = 'training_bomb',
+                               status = 'confirmed',
+                               updated_at = datetime('now', 'localtime')""",
+                        (
+                            int(sample["inference_record_id"]),
+                            synthetic_tile_result_id,
+                            image_result_id,
+                            str(sample.get("glass_id") or ""),
+                            str(sample.get("model_id") or ""),
+                            str(sample.get("machine_no") or ""),
+                            str(sample.get("request_time") or ""),
+                            str(sample.get("image_name") or ""),
+                            str(sample.get("source_image_path") or ""),
+                            str(sample.get("lighting") or ""),
+                            str(sample.get("zone") or ""),
+                            "CLIENT_BOMB:" + str(sample.get("source_type") or "point"),
+                            int(sample.get("aoi_product_x", -1)),
+                            int(sample.get("aoi_product_y", -1)),
+                            int(sample.get("aoi_image_x", -1)),
+                            int(sample.get("aoi_image_y", -1)),
+                            int(sample.get("tile_x", 0)),
+                            int(sample.get("tile_y", 0)),
+                            int(sample.get("tile_w", 512)),
+                            int(sample.get("tile_h", 512)),
+                            str(sample.get("crop_path") or ""),
+                        ),
+                    )
+                conn.commit()
+                return len(sample_rows)
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
     def get_ng_validation_sample(self, sample_id: int) -> Optional[Dict]:
         conn = self._get_conn()
         try:
@@ -4152,7 +4291,9 @@ class CAPIDatabase:
         try:
             total_row = conn.execute(
                 """SELECT COUNT(*) AS samples,
-                          COUNT(DISTINCT review_id) AS reviews
+                          COUNT(DISTINCT CASE
+                              WHEN sample_source = 'manual_review' AND review_id > 0
+                              THEN review_id END) AS reviews
                      FROM ng_validation_samples
                     WHERE status = 'confirmed'"""
             ).fetchone()

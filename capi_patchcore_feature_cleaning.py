@@ -17,7 +17,6 @@ TRACE_REASON_LEGEND = {
     1: "removed_distance_outlier",
     2: "kept_overlap_disagreement",
     3: "protected_tile_boundary",
-    4: "excluded_by_rejected_overlap",
     5: "missing_coordinate_metadata",
     6: "protected_outside_cleaning_scope",
 }
@@ -36,7 +35,6 @@ class FeatureDensityCleaningCallback(Callback):
         reference_size: int = 20_000,
         query_chunk: int = 1_024,
         trace_sources: dict[str, dict[str, Any]] | None = None,
-        rejected_trace_sources: list[dict[str, Any]] | None = None,
         strategy: str = "quantile",
         adaptive_mad_z: float = 6.0,
     ) -> None:
@@ -63,7 +61,6 @@ class FeatureDensityCleaningCallback(Callback):
         self.reference_size = reference_size
         self.query_chunk = query_chunk
         self.trace_sources = trace_sources or {}
-        self.rejected_trace_sources = rejected_trace_sources or []
         self.strategy = strategy
         self.adaptive_mad_z = adaptive_mad_z
         self.stats: dict[str, Any] = {}
@@ -297,18 +294,15 @@ class FeatureDensityCleaningCallback(Callback):
             cleaning_candidates = context_plan["candidate_mask"]
             reference_indices = context_plan["reference_indices"]
             used_reference_size = min(int(reference_indices.numel()), self.reference_size)
-            forced_exclude_mask = context_plan["forced_exclude_mask"]
         else:
             cleaning_candidates = self._build_cleaning_candidate_mask(total)
-            forced_exclude_mask = torch.zeros(total, dtype=torch.bool)
         candidate_count = int(cleaning_candidates.sum().item())
-        forced_excluded = int(forced_exclude_mask.sum().item())
 
         if self.keep_ratio == 1:
             self._finalize_cleaning_result(
                 embedding_store=embedding_store,
                 total=total,
-                keep_mask=~forced_exclude_mask,
+                keep_mask=torch.ones(total, dtype=torch.bool),
                 cleaning_candidates=cleaning_candidates,
                 context_plan=context_plan,
                 kth_distances=None,
@@ -316,8 +310,8 @@ class FeatureDensityCleaningCallback(Callback):
                 threshold=None,
                 reference_size=used_reference_size,
                 started=started,
-                applied=bool(forced_excluded),
-                reason="rejected_overlap_only" if forced_excluded else "keep_all",
+                applied=False,
+                reason="keep_all",
             )
             return
 
@@ -325,7 +319,7 @@ class FeatureDensityCleaningCallback(Callback):
             self._finalize_cleaning_result(
                 embedding_store=embedding_store,
                 total=total,
-                keep_mask=~forced_exclude_mask,
+                keep_mask=torch.ones(total, dtype=torch.bool),
                 cleaning_candidates=cleaning_candidates,
                 context_plan=context_plan,
                 kth_distances=None,
@@ -333,12 +327,8 @@ class FeatureDensityCleaningCallback(Callback):
                 threshold=None,
                 reference_size=used_reference_size,
                 started=started,
-                applied=bool(forced_excluded),
-                reason=(
-                    "rejected_overlap_only"
-                    if forced_excluded
-                    else "no_cleaning_candidates"
-                ),
+                applied=False,
+                reason="no_cleaning_candidates",
             )
             return
 
@@ -346,7 +336,7 @@ class FeatureDensityCleaningCallback(Callback):
             self._finalize_cleaning_result(
                 embedding_store=embedding_store,
                 total=total,
-                keep_mask=~forced_exclude_mask,
+                keep_mask=torch.ones(total, dtype=torch.bool),
                 cleaning_candidates=cleaning_candidates,
                 context_plan=context_plan,
                 kth_distances=None,
@@ -354,12 +344,8 @@ class FeatureDensityCleaningCallback(Callback):
                 threshold=None,
                 reference_size=used_reference_size,
                 started=started,
-                applied=bool(forced_excluded),
-                reason=(
-                    "rejected_overlap_only_insufficient_context"
-                    if forced_excluded
-                    else "insufficient_context_references"
-                ),
+                applied=False,
+                reason="insufficient_context_references",
             )
             return
 
@@ -378,9 +364,7 @@ class FeatureDensityCleaningCallback(Callback):
             raw_remove_mask = cleaning_candidates & (kth_distances > threshold_tensor)
             keep_mask = self._apply_overlap_consensus(raw_remove_mask, context_plan)
             adaptive_stats["raw_outlier_count"] = int(raw_remove_mask.sum().item())
-            adaptive_stats["consensus_removed_count"] = int(
-                ((~keep_mask) & ~forced_exclude_mask).sum().item()
-            )
+            adaptive_stats["consensus_removed_count"] = int((~keep_mask).sum().item())
         else:
             threshold_tensor = torch.quantile(candidate_distances, self.keep_ratio)
             raw_remove_mask = cleaning_candidates & (kth_distances > threshold_tensor)
@@ -388,7 +372,6 @@ class FeatureDensityCleaningCallback(Callback):
             keep_mask[cleaning_candidates] = (
                 candidate_distances <= threshold_tensor
             )
-        keep_mask[forced_exclude_mask] = False
         threshold = float(threshold_tensor.item())
         del threshold_tensor
         self._finalize_cleaning_result(
@@ -426,12 +409,6 @@ class FeatureDensityCleaningCallback(Callback):
         adaptive_stats: dict[str, Any] | None = None,
         device: torch.device | None = None,
     ) -> None:
-        forced_exclude_mask = (
-            context_plan["forced_exclude_mask"]
-            if context_plan is not None
-            else torch.zeros(total, dtype=torch.bool)
-        )
-        forced_excluded = int(forced_exclude_mask.sum().item())
         patch_trace = self._build_patch_trace(
             keep_mask=keep_mask,
             embedding_store=embedding_store,
@@ -478,16 +455,12 @@ class FeatureDensityCleaningCallback(Callback):
             applied=applied,
             reason=reason,
             cleaning_candidates=candidate_count,
-            forced_excluded=forced_excluded,
         )
         self.stats["strategy"] = self.strategy
         self.stats["trace_reason_legend"] = {
             str(code): reason for code, reason in TRACE_REASON_LEGEND.items()
         }
-        self.stats["distance_removed"] = int(
-            ((~keep_mask) & ~forced_exclude_mask).sum().item()
-        )
-        self.stats["rejected_overlap_excluded"] = forced_excluded
+        self.stats["distance_removed"] = int((~keep_mask).sum().item())
         if context_plan is not None:
             self.stats.update(context_plan["stats"])
         if adaptive_stats:
@@ -582,10 +555,8 @@ class FeatureDensityCleaningCallback(Callback):
             raise RuntimeError("context feature cleaning did not cover all embeddings")
 
         candidate_mask = torch.zeros(total, dtype=torch.bool)
-        forced_exclude_mask = torch.zeros(total, dtype=torch.bool)
         missing_metadata_mask = torch.zeros(total, dtype=torch.bool)
         overlap_view_counts = torch.zeros(total, dtype=torch.int16)
-        rejected_overlap_counts = torch.zeros(total, dtype=torch.int16)
         if not pitch_x_values or not pitch_y_values:
             for image in images:
                 if image.get("source") is None:
@@ -593,22 +564,15 @@ class FeatureDensityCleaningCallback(Callback):
                     missing_metadata_mask[start : start + int(image["count"])] = True
             return {
                 "candidate_mask": candidate_mask,
-                "forced_exclude_mask": forced_exclude_mask,
                 "reference_indices": torch.arange(total, dtype=torch.long),
                 "overlap_groups": [],
                 "missing_metadata_mask": missing_metadata_mask,
                 "overlap_view_counts": overlap_view_counts,
-                "rejected_overlap_counts": rejected_overlap_counts,
                 "stats": {
                     "context_overlap_groups": 0,
                     "context_singletons": 0,
                     "context_missing_metadata": missing_metadata,
                     "context_auto_guard_px": None,
-                    "context_rejected_tiles": 0,
-                    "context_rejected_overlap_groups": 0,
-                    "context_rejected_overlap_features": 0,
-                    "context_rejected_affected_tiles": 0,
-                    "context_rejected_missing_metadata": 0,
                 },
             }
 
@@ -616,38 +580,7 @@ class FeatureDensityCleaningCallback(Callback):
         base_pitch_y = self._median(pitch_y_values)
         grouped: dict[tuple[str, int, int], list[tuple[int, float]]] = {}
         missing_reference_indices: list[int] = []
-        rejected_rectangles_by_panel: dict[
-            str, list[tuple[int, int, int, int]]
-        ] = {}
-        rejected_missing_metadata = 0
-        valid_rejected_tiles = 0
-        for source in self.rejected_trace_sources:
-            required = ("panel_path", "tile_x", "tile_y", "tile_width", "tile_height")
-            if (
-                not source.get("panel_path")
-                or any(source.get(name) is None for name in required[1:])
-            ):
-                rejected_missing_metadata += 1
-                continue
-            tile_width = int(source["tile_width"])
-            tile_height = int(source["tile_height"])
-            if tile_width <= 0 or tile_height <= 0:
-                rejected_missing_metadata += 1
-                continue
-            panel_key = str(Path(str(source["panel_path"])).resolve()).casefold()
-            tile_x = int(source["tile_x"])
-            tile_y = int(source["tile_y"])
-            rectangle = (tile_x, tile_y, tile_x + tile_width, tile_y + tile_height)
-            rectangles = rejected_rectangles_by_panel.setdefault(panel_key, [])
-            if rectangle not in rectangles:
-                rectangles.append(rectangle)
-                valid_rejected_tiles += 1
-
-        rectangles_by_panel: dict[str, list[tuple[int, int, int, int]]] = {
-            panel_key: list(rectangles)
-            for panel_key, rectangles in rejected_rectangles_by_panel.items()
-        }
-        rejected_affected_tile_ids: set[int | str] = set()
+        rectangles_by_panel: dict[str, list[tuple[int, int, int, int]]] = {}
         for image in images:
             start = int(image["start"])
             count = int(image["count"])
@@ -687,18 +620,6 @@ class FeatureDensityCleaningCallback(Callback):
                     grouped.setdefault((panel_key, key_x, key_y), []).append(
                         (index, border_margin)
                     )
-                    rejected_count = sum(
-                        int(rx1 <= physical_x < rx2 and ry1 <= physical_y < ry2)
-                        for rx1, ry1, rx2, ry2 in rejected_rectangles_by_panel.get(
-                            panel_key, []
-                        )
-                    )
-                    if rejected_count:
-                        forced_exclude_mask[index] = True
-                        rejected_overlap_counts[index] = rejected_count
-                        rejected_affected_tile_ids.add(
-                            source.get("tile_pool_id") or str(source.get("source_path") or start)
-                        )
 
         overlap_depths: list[float] = []
         for rectangles in rectangles_by_panel.values():
@@ -722,17 +643,10 @@ class FeatureDensityCleaningCallback(Callback):
         reference_indices: list[int] = []
         overlap_group_count = 0
         singleton_count = 0
-        rejected_overlap_group_count = 0
         for members in grouped.values():
             best_index, best_margin = max(members, key=lambda item: item[1])
             indices = [index for index, _margin in members]
             overlap_view_counts[indices] = len(indices)
-            if bool(forced_exclude_mask[indices].any().item()):
-                rejected_overlap_group_count += 1
-                forced_exclude_mask[indices] = True
-                group_rejected_count = int(rejected_overlap_counts[indices].max().item())
-                rejected_overlap_counts[indices] = max(1, group_rejected_count)
-                continue
             reference_indices.append(best_index)
             if len(indices) > 1:
                 overlap_group_count += 1
@@ -748,25 +662,16 @@ class FeatureDensityCleaningCallback(Callback):
         reference_indices.extend(missing_reference_indices)
         return {
             "candidate_mask": candidate_mask,
-            "forced_exclude_mask": forced_exclude_mask,
             "reference_indices": torch.tensor(reference_indices, dtype=torch.long),
             "overlap_groups": overlap_groups,
             "missing_metadata_mask": missing_metadata_mask,
             "overlap_view_counts": overlap_view_counts,
-            "rejected_overlap_counts": rejected_overlap_counts,
             "stats": {
                 "context_overlap_groups": overlap_group_count,
                 "context_singletons": singleton_count,
                 "context_missing_metadata": missing_metadata,
                 "context_auto_guard_px": auto_guard,
                 "context_reference_candidates": len(reference_indices),
-                "context_rejected_tiles": valid_rejected_tiles,
-                "context_rejected_overlap_groups": rejected_overlap_group_count,
-                "context_rejected_overlap_features": int(
-                    forced_exclude_mask.sum().item()
-                ),
-                "context_rejected_affected_tiles": len(rejected_affected_tile_ids),
-                "context_rejected_missing_metadata": rejected_missing_metadata,
             },
         }
 
@@ -863,11 +768,6 @@ class FeatureDensityCleaningCallback(Callback):
             return []
         if len(self._batch_layouts) != len(embedding_store):
             raise RuntimeError("feature cleaning trace is missing one or more batch layouts")
-        forced_exclude_mask = (
-            context_plan["forced_exclude_mask"]
-            if context_plan is not None
-            else torch.zeros_like(keep_mask)
-        )
         missing_metadata_mask = (
             context_plan["missing_metadata_mask"]
             if context_plan is not None
@@ -877,11 +777,6 @@ class FeatureDensityCleaningCallback(Callback):
             context_plan["overlap_view_counts"].clone()
             if context_plan is not None
             else torch.ones(int(keep_mask.numel()), dtype=torch.int16)
-        )
-        rejected_overlap_counts = (
-            context_plan["rejected_overlap_counts"]
-            if context_plan is not None
-            else torch.zeros(int(keep_mask.numel()), dtype=torch.int16)
         )
         outlier_vote_counts = raw_remove_mask.to(dtype=torch.int16)
         outlier_vote_required = torch.zeros(int(keep_mask.numel()), dtype=torch.int16)
@@ -897,16 +792,15 @@ class FeatureDensityCleaningCallback(Callback):
                     overlap_disagreement_mask[indices] = True
 
         reason_codes = torch.zeros(int(keep_mask.numel()), dtype=torch.uint8)
-        protected_mask = ~cleaning_candidates & ~forced_exclude_mask
+        protected_mask = ~cleaning_candidates
         if context_plan is not None:
             reason_codes[protected_mask] = 3
             reason_codes[missing_metadata_mask] = 5
         else:
             reason_codes[protected_mask] = 6
         reason_codes[overlap_disagreement_mask & keep_mask] = 2
-        distance_removed_mask = ~keep_mask & ~forced_exclude_mask
+        distance_removed_mask = ~keep_mask
         reason_codes[distance_removed_mask] = 1
-        reason_codes[forced_exclude_mask] = 4
 
         records: list[dict[str, Any]] = []
         self._trace_record_spans = []
@@ -923,9 +817,6 @@ class FeatureDensityCleaningCallback(Callback):
                 removed = torch.nonzero(~local_keep, as_tuple=False).flatten()
                 distance_removed = torch.nonzero(
                     distance_removed_mask[image_start:image_end], as_tuple=False
-                ).flatten()
-                rejected_overlap = torch.nonzero(
-                    forced_exclude_mask[image_start:image_end], as_tuple=False
                 ).flatten()
                 protected = torch.nonzero(
                     protected_mask[image_start:image_end], as_tuple=False
@@ -968,10 +859,6 @@ class FeatureDensityCleaningCallback(Callback):
                         int(value) for value in distance_removed.tolist()
                     ],
                     "distance_removed_count": int(distance_removed.numel()),
-                    "rejected_overlap_indices": [
-                        int(value) for value in rejected_overlap.tolist()
-                    ],
-                    "rejected_overlap_count": int(rejected_overlap.numel()),
                     "protected_indices": [int(value) for value in protected.tolist()],
                     "protected_count": int(protected.numel()),
                     "candidate_indices": [int(value) for value in candidates.tolist()],
@@ -993,11 +880,6 @@ class FeatureDensityCleaningCallback(Callback):
                         int(value)
                         for value in outlier_vote_required[image_start:image_end].tolist()
                     ],
-                    "rejected_overlap_counts": [
-                        int(value)
-                        for value in rejected_overlap_counts[image_start:image_end].tolist()
-                    ],
-                    "rejected_neighbor_tile_ids": self._rejected_neighbor_tile_ids(source),
                     "coreset_indices": [],
                     "coreset_count": 0,
                 }
@@ -1007,41 +889,6 @@ class FeatureDensityCleaningCallback(Callback):
         if offset != int(keep_mask.numel()):
             raise RuntimeError("feature cleaning trace did not consume the full keep mask")
         return records
-
-    def _rejected_neighbor_tile_ids(self, source: dict[str, Any]) -> list[int]:
-        required = ("panel_path", "tile_x", "tile_y", "tile_width", "tile_height")
-        if (
-            not source.get("panel_path")
-            or any(source.get(name) is None for name in required[1:])
-        ):
-            return []
-        panel_key = str(Path(str(source["panel_path"])).resolve()).casefold()
-        sx1 = int(source["tile_x"])
-        sy1 = int(source["tile_y"])
-        sx2 = sx1 + int(source["tile_width"])
-        sy2 = sy1 + int(source["tile_height"])
-        ids: list[int] = []
-        for rejected in self.rejected_trace_sources:
-            if (
-                not rejected.get("panel_path")
-                or any(rejected.get(name) is None for name in required[1:])
-            ):
-                continue
-            rejected_panel = str(
-                Path(str(rejected["panel_path"])).resolve()
-            ).casefold()
-            if rejected_panel != panel_key:
-                continue
-            rx1 = int(rejected["tile_x"])
-            ry1 = int(rejected["tile_y"])
-            rx2 = rx1 + int(rejected["tile_width"])
-            ry2 = ry1 + int(rejected["tile_height"])
-            if min(sx2, rx2) <= max(sx1, rx1) or min(sy2, ry2) <= max(sy1, ry1):
-                continue
-            tile_pool_id = rejected.get("tile_pool_id")
-            if tile_pool_id is not None:
-                ids.append(int(tile_pool_id))
-        return sorted(set(ids))
 
     def _remove_pool_hook(self) -> None:
         if self._pool_hook_handle is not None:
@@ -1136,7 +983,6 @@ class FeatureDensityCleaningCallback(Callback):
         applied: bool,
         reason: str,
         cleaning_candidates: int | None = None,
-        forced_excluded: int = 0,
     ) -> dict[str, int | float | bool | str | None]:
         removed = total - kept
         candidate_count = total if cleaning_candidates is None else cleaning_candidates
@@ -1150,7 +996,7 @@ class FeatureDensityCleaningCallback(Callback):
             "cleaning_candidate_removed_ratio": (
                 removed / candidate_count if candidate_count else 0.0
             ),
-            "protected": max(0, total - candidate_count - forced_excluded),
+            "protected": max(0, total - candidate_count),
             "center_size": self.center_size,
             "strategy": self.strategy,
             "threshold": threshold,

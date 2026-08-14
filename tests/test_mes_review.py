@@ -122,6 +122,57 @@ def test_mes_review_upsert_syncs_durable_ng_validation_samples(tmp_path):
     assert db.get_ng_validation_sample(samples[0]["id"])["crop_path"] == str(crop_path)
 
 
+def test_training_bomb_samples_share_ng_validation_db_without_fake_review(tmp_path):
+    db = CAPIDatabase(tmp_path / "review.db")
+    crop_path = tmp_path / "ng-validation" / "MODEL-A" / "G0F00000" / "inner" / "crop" / "bomb.png"
+    crop_path.parent.mkdir(parents=True)
+    crop_path.write_bytes(b"crop")
+    sample = {
+        "inference_record_id": 101,
+        "image_result_id": 202,
+        "coord_index": 0,
+        "glass_id": "PANEL-101",
+        "model_id": "MODEL-A",
+        "machine_no": "HM01",
+        "request_time": "2026-08-14 08:00:00",
+        "image_name": "G0F00000_080000.tif",
+        "source_image_path": str(tmp_path / "source.tif"),
+        "lighting": "G0F00000",
+        "zone": "inner",
+        "source_type": "point",
+        "aoi_product_x": 130,
+        "aoi_product_y": 220,
+        "aoi_image_x": 1280,
+        "aoi_image_y": 768,
+        "tile_x": 1024,
+        "tile_y": 512,
+        "tile_w": 512,
+        "tile_h": 512,
+        "crop_path": str(crop_path),
+    }
+
+    assert db.save_training_bomb_validation_samples([sample]) == 1
+    assert db.save_training_bomb_validation_samples([sample]) == 1
+
+    cached = db.list_training_bomb_validation_samples(
+        machine_id="MODEL-A", lightings=("G0F00000",),
+    )
+    assert len(cached) == 1
+    assert cached[0]["sample_source"] == "training_bomb"
+    assert cached[0]["review_id"] == 0
+    assert cached[0]["tile_result_id"] < 0
+    samples, total = db.list_ng_validation_samples(model_id="MODEL-A")
+    assert total == 1
+    assert samples[0]["crop_path"] == str(crop_path)
+    assert db.get_ng_validation_summary() == {
+        "samples": 1,
+        "reviews": 0,
+        "by_lighting": {"G0F00000": 1},
+        "by_zone": {"inner": 1},
+        "by_model": {"MODEL-A": 1},
+    }
+
+
 def test_ng_validation_filters_by_model_and_deletes_only_selected_crop(tmp_path):
     db = CAPIDatabase(tmp_path / "review.db")
     base_dir = tmp_path / "ng-validation"
@@ -492,6 +543,8 @@ def test_report_template_contains_manual_review_and_ng_database_ui():
     assert "deleteNgSample" in template
     assert "🗑 刪除圖片" in template
     assert "機種：" in template
+    assert "訓練 AOI 炸彈快取" in template
+    assert "人工確認事件" in template
     assert "B0F 已排除" in template
     assert "mesReviewReviewer" not in template
     assert "Review人員" not in template
@@ -535,7 +588,7 @@ def test_report_template_contains_manual_review_and_ng_database_ui():
     assert "CAPIHM 旋轉換算" in template
     assert "'MES 有效不良', '座標匹配'" in template
     assert "只使用 AOI 座標篩選五光源圖片" not in template
-    assert "人工確認後才納入 NG 驗證資料。" in template
+    assert "新模型訓練自動保存的 AOI 炸彈快取" in template
     assert 'id="mes_comparisonTrendChart"' in template
     assert "buildComparisonDailyTrend" in template
     assert "判定正確率 (%)" in template
