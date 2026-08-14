@@ -186,6 +186,39 @@ def test_compute_unit_metrics_no_ng():
     assert m["auroc_grade"] == "n/a"
 
 
+def test_compute_unit_metrics_warns_when_all_ok_scores_are_zero():
+    from capi_train_new import compute_unit_metrics
+
+    m = compute_unit_metrics(
+        0.0,
+        [0.5, 0.7],
+        threshold=0.35,
+        train_scores=[0.0, 0.0, 0.0],
+    )
+
+    assert m["train_zero_score_count"] == 3
+    assert m["train_zero_score_rate"] == 1.0
+    assert m["train_zero_score_warning"] is True
+
+
+def test_compute_unit_metrics_zero_warning_uses_unrounded_scores():
+    from capi_train_new import compute_unit_metrics
+
+    # train_max 顯示四位小數仍會是 0.0000，但實際分數不是 clamp 0，
+    # 不應只因顯示值為 0 就誤報。
+    m = compute_unit_metrics(
+        0.00001,
+        [0.5, 0.7],
+        threshold=0.35,
+        train_scores=[0.0, 0.00001],
+    )
+
+    assert m["train_max"] == 0.0
+    assert m["train_zero_score_count"] == 1
+    assert m["train_zero_score_rate"] == 0.5
+    assert m["train_zero_score_warning"] is False
+
+
 def test_compute_unit_metrics_negative_separation():
     from capi_train_new import compute_unit_metrics
     ng_scores = [0.2, 0.25, 0.3, 0.35]
@@ -592,7 +625,7 @@ def test_train_one_patchcore_cleans_selected_zone_before_export(
     assert stats["feature_cleaning"]["reason"] == "completed"
 
 
-def test_train_single_submodel_passes_rejected_tile_geometry_to_context_cleaning(
+def test_train_single_submodel_does_not_load_rejected_tiles_for_context_cleaning(
     tmp_path, monkeypatch,
 ):
     from capi_train_new import TrainingConfig, train_single_submodel
@@ -621,7 +654,7 @@ def test_train_single_submodel_passes_rejected_tile_geometry_to_context_cleaning
     pool.append({
         "id": 999,
         "lighting": "W0F00000",
-        "zone": "inner",  # reject geometry must cross zone boundaries
+        "zone": "inner",  # Rejected rows must not affect edge training.
         "source": "ok",
         "decision": "reject",
         "source_path": str(rejected_path),
@@ -633,8 +666,11 @@ def test_train_single_submodel_passes_rejected_tile_geometry_to_context_cleaning
         "tile_height": 8,
     })
 
+    list_calls = []
+
     class MockDB:
         def list_tile_pool(self, _job_id, **filters):
+            list_calls.append(dict(filters))
             rows = list(pool)
             for key, value in filters.items():
                 rows = [row for row in rows if row.get(key) == value]
@@ -645,9 +681,8 @@ def test_train_single_submodel_passes_rejected_tile_geometry_to_context_cleaning
     def fake_train(
         staging_dir, run_root, unit_label, cfg=None, log=None,
         experiment_stats_out=None, trace_sources=None,
-        rejected_trace_sources=None,
     ):
-        captured["rejected"] = rejected_trace_sources
+        captured["trace_sources"] = trace_sources
         if experiment_stats_out is not None:
             experiment_stats_out.update({
                 "feature_pool_kernel_size": cfg.feature_pool_kernel_size,
@@ -686,8 +721,8 @@ def test_train_single_submodel_passes_rejected_tile_geometry_to_context_cleaning
         log=lambda _message: None,
     )
 
-    assert [item["tile_pool_id"] for item in captured["rejected"]] == [999]
-    assert captured["rejected"][0]["tile_x"] == 4
+    assert len(captured["trace_sources"]) == 30
+    assert not any(call.get("decision") == "reject" for call in list_calls)
 
 
 def test_calibrate_threshold_returns_default():
@@ -869,7 +904,6 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
                     "keep_ratio": 0.998,
                     "removed": 1,
                     "distance_removed": 1,
-                    "rejected_overlap_excluded": 0,
                     "coreset_selected": 1,
                     "threshold": 0.2,
                     "patch_trace": [{
@@ -881,8 +915,6 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
                         "removed_count": 1,
                         "distance_removed_indices": [3],
                         "distance_removed_count": 1,
-                        "rejected_overlap_indices": [],
-                        "rejected_overlap_count": 0,
                         "protected_indices": [],
                         "protected_count": 0,
                         "candidate_indices": [0, 1, 2, 3],
@@ -892,8 +924,6 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
                         "overlap_view_counts": [1, 1, 1, 1],
                         "outlier_vote_counts": [0, 0, 0, 1],
                         "outlier_vote_required": [1, 1, 1, 1],
-                        "rejected_overlap_counts": [0, 0, 0, 0],
-                        "rejected_neighbor_tile_ids": [],
                         "coreset_indices": [0],
                         "coreset_count": 1,
                     }],
@@ -967,7 +997,8 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     )
     trace_item = cleaning_report["tiles"][0]
     assert cleaning_report["schema_version"] == 2
-    assert cleaning_report["reason_legend"]["4"] == "excluded_by_rejected_overlap"
+    assert "4" not in cleaning_report["reason_legend"]
+    assert "rejected_overlap_excluded" not in cleaning_report
     assert "source_path" not in trace_item
     assert trace_item["source_name"].endswith("G0F00000_edge_0.png")
     assert trace_item["distances"] == [0.01, 0.02, 0.03, 0.9]

@@ -35,6 +35,15 @@
   </div>
   {% endif %}
 
+  {% if zero_score_units %}
+  <div style="margin:0 0 16px;padding:12px 16px;border:1px solid #f9e2af;border-radius:8px;background:rgba(249,226,175,.10);color:#f9e2af;">
+    <strong>⚠ OK 評估分數全部為 0：</strong>{{ zero_score_units|join("、") }}
+    <div style="margin-top:4px;color:#cdd6f4;font-size:.82rem;line-height:1.5;">
+      可能是 Anomalib 正規化後被 clamp 為 0；不代表模型沒有特徵距離，但 train_max 與分離度的參考性不足。請至座標診斷確認 raw 距離與 normalization 範圍。
+    </div>
+  </div>
+  {% endif %}
+
   {# 三大頭條指標：整體 AUROC、訓練時長、Bundle 大小 #}
   <div class="d5-stats">
     {# AUROC 卡片：用顏色強烈表達 grade（excellent/good/fair/poor/fail） #}
@@ -157,6 +166,7 @@
             <th>區域</th>
             <th>AUROC</th>
             <th>NG 攔截率</th>
+            <th class="d5-th-num">train_max</th>
             <th class="d5-th-num">分離度</th>
             <th class="d5-th-num">門檻</th>
             <th class="d5-th-num">訓練 tile</th>
@@ -168,7 +178,7 @@
         <tbody>
           {% for unit_label, info in units %}
           {% set zone_cls = "edge" if info.zone == "edge" else "inner" %}
-          <tr class="d5-row d5-zone-{{ zone_cls }}">
+          <tr class="d5-row d5-zone-{{ zone_cls }}"{% if info.train_zero_score_warning %} style="background:rgba(249,226,175,.08);"{% endif %}>
             <td class="d5-td-num d5-cell-idx">{{ "%02d"|format(loop.index) }}</td>
             <td class="d5-cell-mono">{{ info.lighting_label }}</td>
             <td><span class="d5-zone-tag d5-zone-tag-{{ zone_cls }}">{{ info.zone }}</span></td>
@@ -202,6 +212,14 @@
               {% else %}
                 <span class="d5-na">無 NG 樣本</span>
               {% endif %}
+            </td>
+            <td class="d5-td-num d5-cell-mono">
+              {% if info.train_max is not none %}
+                {{ "%.4f"|format(info.train_max) }}
+                {% if info.train_zero_score_warning %}
+                  <span style="display:block;margin-top:3px;color:#1e1e2e;background:#f9e2af;border-radius:8px;padding:1px 6px;font-size:.66rem;font-weight:700;white-space:nowrap;" title="OK 評估分數全部為 0；可能被 Anomalib normalization clamp">正規化 0 分</span>
+                {% endif %}
+              {% else %}<span class="d5-na">—</span>{% endif %}
             </td>
             <td class="d5-td-num d5-cell-mono">
               {% if info.separation is not none %}
@@ -253,9 +271,10 @@
     </div>
   </div>
 
-  {% set trace = namespace(has=false) %}
+  {% set trace = namespace(has=false, has_legacy_reject=false) %}
   {% for _unit_label, _info in units %}
     {% if _info.feature_cleaning.get("visualizations", []) %}{% set trace.has = true %}{% endif %}
+    {% if _info.feature_cleaning.get("rejected_overlap_excluded", 0) %}{% set trace.has_legacy_reject = true %}{% endif %}
   {% endfor %}
   {% if trace.has %}
   <div class="d5-section" id="feature-cleaning-visualization">
@@ -266,7 +285,7 @@
     <p class="d5-trace-hint">每個子模型顯示排除格點最多的前 12 個 Tile；移到格點可查看距離、門檻、重疊票數、保留原因與最終是否進入 coreset。</p>
     <div class="d5-trace-legend">
       <span><i class="trace-red"></i>距離異常移除</span>
-      <span><i class="trace-orange"></i>Rejected Tile 重疊排除</span>
+      {% if trace.has_legacy_reject %}<span><i class="trace-orange"></i>歷史報告：Reject 聯動排除</span>{% endif %}
       <span><i class="trace-purple"></i>重疊票數不一致而保留</span>
       <span><i class="trace-yellow"></i>保護區／缺座標</span>
       <span><i class="trace-green"></i>進入 coreset</span>
@@ -274,8 +293,9 @@
     {% for unit_label, info in units %}
       {% set visuals = info.feature_cleaning.get("visualizations", []) %}
       {% if visuals %}
+      {% set legacy_rejected = info.feature_cleaning.get("rejected_overlap_excluded", 0) %}
       <details class="d5-trace-unit">
-        <summary>{{ unit_label }} · {{ info.feature_cleaning.get("affected_tiles", visuals|length) }} 個 Tile 受影響 · 距離移除 {{ info.feature_cleaning.get("distance_removed", info.feature_cleaning.get("removed", 0)) }} · Reject 聯動排除 {{ info.feature_cleaning.get("rejected_overlap_excluded", 0) }} · Coreset {{ info.feature_cleaning.get("coreset_selected", 0) }}</summary>
+        <summary>{{ unit_label }} · {{ info.feature_cleaning.get("affected_tiles", visuals|length) }} 個 Tile 受影響 · 距離移除 {{ info.feature_cleaning.get("distance_removed", info.feature_cleaning.get("removed", 0)) }}{% if legacy_rejected %} · 歷史 Reject 排除 {{ legacy_rejected }}{% endif %} · Coreset {{ info.feature_cleaning.get("coreset_selected", 0) }}</summary>
         <div class="d5-trace-grid">
           {% for visual in visuals %}
           <figure class="d5-trace-card">
@@ -297,8 +317,8 @@
                      data-tile-height='{{ visual.tile_height|tojson }}'></canvas>
             <figcaption>
               {{ visual.source_name }}<br>
-              距離移除 {{ visual.distance_removed_count }} · Reject 聯動 {{ visual.rejected_overlap_count }} · Protected {{ visual.protected_count }} · Coreset {{ visual.coreset_count }}
-              {% if visual.rejected_neighbor_tile_ids %}<br>Rejected 鄰居：{{ visual.rejected_neighbor_tile_ids|join(", ") }}{% endif %}
+              距離移除 {{ visual.distance_removed_count }}{% if visual.rejected_overlap_count %} · 歷史 Reject 排除 {{ visual.rejected_overlap_count }}{% endif %} · Protected {{ visual.protected_count }} · Coreset {{ visual.coreset_count }}
+              {% if visual.rejected_neighbor_tile_ids %}<br>歷史 Rejected 鄰居：{{ visual.rejected_neighbor_tile_ids|join(", ") }}{% endif %}
             </figcaption>
             <div class="d5-trace-cell-detail">移動滑鼠到 feature 格點查看判定明細</div>
           </figure>
@@ -685,7 +705,7 @@ document.addEventListener('DOMContentLoaded', () => {
     1: '移除：距離超過門檻 (removed_distance_outlier)',
     2: '保留：重疊視角票數不一致 (kept_overlap_disagreement)',
     3: '保留：Tile 邊界保護 (protected_tile_boundary)',
-    4: '排除：Rejected Tile 覆蓋 (excluded_by_rejected_overlap)',
+    4: '歷史排除：Rejected Tile 覆蓋 (excluded_by_rejected_overlap)',
     5: '保留：缺少 Panel/Tile 座標 (missing_coordinate_metadata)',
     6: '保留：清洗範圍外 (protected_outside_cleaning_scope)',
   };
@@ -754,6 +774,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const distance = distances[index];
       const required = votesRequired[index] || 0;
       const voteText = required ? `${votes[index] || 0}/${required}` : '未投票';
+      const rejectedCoverage = Number(rejectedOverlaps[index] || 0);
+      const legacyRejectedText = rejectedCoverage
+        ? `、歷史 rejected 覆蓋 ${rejectedCoverage}` : '';
       const panelX = (tileX != null && tileWidth != null)
         ? tileX + (col + .5) * tileWidth / grid[1] : null;
       const panelY = (tileY != null && tileHeight != null)
@@ -762,7 +785,7 @@ document.addEventListener('DOMContentLoaded', () => {
         `格點：row ${row}, col ${col}, index ${index}<br>` +
         `Panel 座標：${panelX == null ? '—' : `${panelX.toFixed(1)}, ${panelY.toFixed(1)}`}<br>` +
         `距離／門檻：${distance == null ? '—' : Number(distance).toFixed(6)} / ${threshold == null ? '—' : Number(threshold).toFixed(6)}<br>` +
-        `異常票：${voteText}（accepted 視角 ${overlapViews[index] || 0}、rejected 覆蓋 ${rejectedOverlaps[index] || 0}）<br>` +
+        `異常票：${voteText}（accepted 視角 ${overlapViews[index] || 0}${legacyRejectedText}）<br>` +
         `最終原因：${reasonLabels[reasons[index]] || 'unknown'}<br>` +
         `進入 coreset：${coreset.has(index) ? '是' : '否'}`;
     });

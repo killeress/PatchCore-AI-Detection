@@ -324,6 +324,104 @@ def test_sample_ng_tiles(tmp_path):
     thumb_path.resolve().relative_to(thumb_dir.resolve())
 
 
+def test_sample_ng_tiles_saves_first_crop_then_reuses_ng_validation_cache(tmp_path):
+    import cv2
+    import numpy as np
+    from pathlib import Path
+    from capi_train_new import sample_ng_tiles
+
+    source = tmp_path / "G0F00000_100000.png"
+    assert cv2.imwrite(str(source), np.full((700, 700), 180, dtype=np.uint8))
+
+    class MockDB:
+        def __init__(self):
+            self.cache = []
+            self.raw_queries = 0
+            self.tiles_by_job = {}
+
+        def list_training_bomb_validation_samples(self, *, machine_id, lightings):
+            assert machine_id == "MODEL-A"
+            return [row for row in self.cache if row["lighting"] in lightings]
+
+        def list_training_bomb_candidates(self, machine_id, lightings):
+            self.raw_queries += 1
+            assert machine_id == "MODEL-A"
+            assert tuple(lightings) == ("G0F00000",)
+            return [{
+                "inference_record_id": 10,
+                "source_result_id": 20,
+                "glass_id": "PANEL-10",
+                "model_id": "MODEL-A",
+                "machine_no": "HM01",
+                "request_time": "2026-08-14 10:00:00",
+                "client_bomb_info": (
+                    '{"image_prefix":"G0F00000","defect_type":"point",'
+                    '"coordinates":[[350,350]]}'
+                ),
+                "image_path": str(source),
+                "image_dir": str(tmp_path),
+                "image_name": source.name,
+                "resolution_x": 700,
+                "resolution_y": 700,
+                "otsu_bounds": "0,0,700,700",
+            }]
+
+        def save_training_bomb_validation_samples(self, samples):
+            self.cache = [
+                {**sample, "id": index + 1, "sample_source": "training_bomb"}
+                for index, sample in enumerate(samples)
+            ]
+            return len(samples)
+
+        def insert_tile_pool(self, job_id, tiles):
+            self.tiles_by_job.setdefault(job_id, []).extend(tiles)
+            return list(range(len(tiles)))
+
+    db = MockDB()
+    validation_root = tmp_path / "ng-validation"
+    first = sample_ng_tiles(
+        job_id="j_first",
+        machine_id="MODEL-A",
+        over_review_root=tmp_path / "unused",
+        db=db,
+        thumb_dir=tmp_path / "first",
+        per_lighting=10,
+        lightings=("G0F00000",),
+        ng_validation_base_dir=validation_root,
+        log=lambda _message: None,
+    )
+
+    assert first["sampled"] == 1
+    assert first["cache_saved"] == 1
+    assert first["cache_reused"] == 0
+    assert db.raw_queries == 1
+    assert len(db.cache) == 1
+    cache_path = Path(db.cache[0]["crop_path"])
+    cache_path.resolve().relative_to(validation_root.resolve())
+    assert cache_path.is_file()
+
+    source.unlink()
+    second = sample_ng_tiles(
+        job_id="j_second",
+        machine_id="MODEL-A",
+        over_review_root=tmp_path / "unused",
+        db=db,
+        thumb_dir=tmp_path / "second",
+        per_lighting=10,
+        lightings=("G0F00000",),
+        ng_validation_base_dir=validation_root,
+        log=lambda _message: None,
+    )
+
+    assert second["sampled"] == 1
+    assert second["cache_reused"] == 1
+    assert second["cache_saved"] == 0
+    assert db.raw_queries == 1
+    reused_path = Path(db.tiles_by_job["j_second"][0]["source_path"])
+    assert reused_path.is_file()
+    assert cv2.imread(str(reused_path), cv2.IMREAD_GRAYSCALE).shape == (512, 512)
+
+
 def test_sample_ng_tiles_applies_preprocess_pipeline_to_ng_crops(tmp_path):
     import cv2
     import numpy as np
@@ -337,7 +435,11 @@ def test_sample_ng_tiles_applies_preprocess_pipeline_to_ng_crops(tmp_path):
     assert cv2.imwrite(str(source), original)
 
     class MockDB:
-        def __init__(self): self.tiles = []
+        def __init__(self):
+            self.tiles = []
+            self.saved = []
+        def list_training_bomb_validation_samples(self, **_kwargs):
+            return []
         def list_training_bomb_candidates(self, machine_id, lightings):
             return [{
                 "inference_record_id": 1, "source_result_id": 2,
@@ -349,6 +451,9 @@ def test_sample_ng_tiles_applies_preprocess_pipeline_to_ng_crops(tmp_path):
         def insert_tile_pool(self, job_id, tiles):
             self.tiles.extend(tiles)
             return list(range(len(tiles)))
+        def save_training_bomb_validation_samples(self, samples):
+            self.saved.extend(samples)
+            return len(samples)
 
     db = MockDB()
     logs = []
@@ -362,6 +467,7 @@ def test_sample_ng_tiles_applies_preprocess_pipeline_to_ng_crops(tmp_path):
         per_lighting=1,
         log=logs.append,
         lightings=("G0F00000",),
+        ng_validation_base_dir=tmp_path / "ng-validation",
         preprocess_cfg=PreprocessConfig(
             preprocess_after_tiling=True,
             image_preprocess_pipeline=[
@@ -375,9 +481,92 @@ def test_sample_ng_tiles_applies_preprocess_pipeline_to_ng_crops(tmp_path):
     assert processed_path.exists()
     processed = cv2.imread(str(processed_path), cv2.IMREAD_GRAYSCALE)
     assert processed is not None
-    raw_crop = original[94:606, 94:606]
+    tile = db.tiles[0]
+    raw_crop = original[
+        tile["tile_y"]:tile["tile_y"] + tile["tile_height"],
+        tile["tile_x"]:tile["tile_x"] + tile["tile_width"],
+    ]
     assert not np.array_equal(processed, raw_crop)
+    cached_raw = cv2.imread(db.saved[0]["crop_path"], cv2.IMREAD_GRAYSCALE)
+    assert np.array_equal(cached_raw, raw_crop)
     assert any("前處理=1: 1.高斯平滑" in msg for msg in logs)
+
+
+def test_sample_ng_tiles_uses_formal_polygon_mapping_and_inward_roi(tmp_path, monkeypatch):
+    """NG crop must use the same polygon mapping/inward shift as v2 inference."""
+    import cv2
+    import numpy as np
+    from pathlib import Path
+    from capi_preprocess import PreprocessConfig
+    from capi_train_new import sample_ng_tiles
+
+    source = tmp_path / "R0F00000_edge.png"
+    image = np.zeros((900, 1000), dtype=np.uint8)
+    image[100:800, 100:900] = 200
+    assert cv2.imwrite(str(source), image)
+
+    polygon = np.array(
+        [[100, 100], [899, 100], [899, 799], [100, 799]],
+        dtype=np.float32,
+    )
+    monkeypatch.setattr(
+        "capi_train_new.detect_panel_polygon",
+        lambda _image, _config: ((100, 100, 900, 800), polygon),
+    )
+
+    class MockDB:
+        def __init__(self):
+            self.tiles = []
+
+        def list_training_bomb_candidates(self, machine_id, lightings):
+            return [{
+                "inference_record_id": 1,
+                "source_result_id": 2,
+                "client_bomb_info": (
+                    '{"image_prefix":"R0F00000","defect_type":"point",'
+                    '"coordinates":[[1800,540]]}'
+                ),
+                "image_path": str(source),
+                "image_dir": str(tmp_path),
+                "image_name": source.name,
+                "resolution_x": 1920,
+                "resolution_y": 1080,
+                # Deliberately contaminated/raw bounds: formal mapping must
+                # correct this through the detected panel polygon.
+                "otsu_bounds": "0,0,1000,900",
+            }]
+
+        def insert_tile_pool(self, job_id, tiles):
+            self.tiles.extend(tiles)
+            return list(range(len(tiles)))
+
+    db = MockDB()
+    stats = sample_ng_tiles(
+        job_id="j_polygon",
+        machine_id="MODEL-A",
+        over_review_root=tmp_path / "unused",
+        db=db,
+        thumb_dir=tmp_path / "thumbs",
+        per_lighting=1,
+        lightings=("R0F00000",),
+        preprocess_cfg=PreprocessConfig(
+            tile_size=512,
+            product_resolution=(1920, 1080),
+            enable_panel_polygon=True,
+        ),
+        log=lambda _message: None,
+    )
+
+    assert stats["sampled"] == 1
+    tile = db.tiles[0]
+    # Linear mapping would center at x=681? The formal polygon correction maps
+    # the point to x=850, then shifts the tile inward to the panel right edge.
+    assert tile["zone"] == "edge"
+    assert tile["tile_x"] < 594
+    assert tile["tile_x"] + tile["tile_width"] <= 900
+    crop = cv2.imread(str(Path(tile["source_path"])), cv2.IMREAD_GRAYSCALE)
+    assert crop is not None and crop.shape == (512, 512)
+    assert int(crop.mean()) > 190
 
 
 def test_sample_ng_tiles_crops_line_bomb_at_segment_midpoint(tmp_path):
@@ -438,6 +627,8 @@ def test_sample_ng_tiles_black_only_scope_does_not_query_database(tmp_path):
         "missing_lightings": [],
         "black_skipped": 0,
         "invalid_skipped": 0,
+        "cache_reused": 0,
+        "cache_saved": 0,
     }
 
 

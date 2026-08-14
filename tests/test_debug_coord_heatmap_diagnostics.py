@@ -177,6 +177,8 @@ def test_coord_debug_exposes_bubble_score_competition_in_chinese(tmp_path):
     assert analysis["aoi_best_peak"]["estimated_score"] == 0.6
     assert "搶走高分" in analysis["conclusion_zh"]
     assert response["peak_diagnostic_url"]
+    assert "raw_model_score" in response["score_breakdown"]
+    assert response["score_breakdown"]["normalization_available"] is False
 
 
 def test_coord_debug_template_has_operator_facing_heatmap_tables():
@@ -195,6 +197,62 @@ def test_coord_debug_template_has_operator_facing_heatmap_tables():
     assert "data.mark_exclusion" in template
     assert "排除 MARK Patch 後正式分數" in template
     assert "mark_patch_score_reason" in template
+    assert "模型正規化診斷（為什麼會顯示 0 分）" in template
+    assert "模型 raw 距離（未正規化）" in template
+    assert "normalization_zero_boundary" in template
+
+
+def test_score_normalization_diagnostic_explains_zero_clamp():
+    from capi_inference import score_normalization_diagnostic
+
+    diagnostic = score_normalization_diagnostic(
+        raw_score=10.0,
+        image_min=20.0,
+        image_max=100.0,
+        image_threshold=60.0,
+    )
+
+    assert diagnostic["normalization_available"] is True
+    assert diagnostic["normalization_zero_boundary"] == 20.0
+    assert diagnostic["normalization_zero_clamped"] is True
+
+
+def test_raw_model_diagnostics_temporarily_disables_normalization():
+    import torch
+
+    class FakePostProcessor:
+        enable_normalization = True
+        image_min = torch.tensor(20.0)
+        image_max = torch.tensor(100.0)
+        image_threshold = torch.tensor(60.0)
+
+    class FakeModel:
+        post_processor = FakePostProcessor()
+
+    class FakeInferencer:
+        model = FakeModel()
+
+        def predict(self, _image):
+            raw = not self.model.post_processor.enable_normalization
+            return SimpleNamespace(
+                pred_score=torch.tensor(10.0 if raw else 0.0),
+                anomaly_map=torch.tensor([[[10.0 if raw else 0.0]]]),
+            )
+
+    worker = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer = FakeInferencer()
+    normalized = inferencer.predict(np.zeros((4, 4), dtype=np.uint8))
+    diagnostics = worker._capture_model_score_diagnostics(
+        inferencer,
+        np.zeros((4, 4), dtype=np.uint8),
+        normalized,
+    )
+
+    assert diagnostics["raw_model_score"] == 10.0
+    assert diagnostics["model_normalization_enabled"] is True
+    assert diagnostics["normalized_anomaly_map_max"] == 0.0
+    assert diagnostics["raw_anomaly_map_max"] == 10.0
+    assert inferencer.model.post_processor.enable_normalization is True
 
 
 class _MarkAwareDiagnosticInferencer(CAPIInferencer):

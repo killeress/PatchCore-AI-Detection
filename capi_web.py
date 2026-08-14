@@ -7019,8 +7019,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.error("MES report detail API error: %s", e, exc_info=True)
             self._send_json({"success": False, "error": str(e)}, status=502)
 
-    def _ng_validation_base_dir(self) -> Path:
-        server_inst = self._capi_server_instance
+    @staticmethod
+    def _ng_validation_base_dir_for_server(server_inst) -> Path:
         server_config = getattr(server_inst, "server_config", {}) if server_inst else {}
         ng_config = server_config.get("ng_validation") or {}
         configured = str(ng_config.get("base_dir") or "").strip()
@@ -7032,6 +7032,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if dataset_base:
             return (Path(dataset_base).parent / "ng_validation").resolve()
         return (Path.cwd() / "datasets" / "ng_validation").resolve()
+
+    def _ng_validation_base_dir(self) -> Path:
+        return self._ng_validation_base_dir_for_server(self._capi_server_instance)
 
     @staticmethod
     def _query_int(query: dict, key: str) -> Optional[int]:
@@ -8875,7 +8878,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         import time as _time
         import cv2
         import numpy as np
-        from capi_inference import TileInfo
+        from capi_inference import TileInfo, score_normalization_diagnostic
 
         # 讀取 POST body
         content_length = int(self.headers.get('Content-Length', 0))
@@ -9056,6 +9059,30 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if polygon is None and hasattr(self.inferencer, "_rect_polygon_from_bounds"):
                     polygon = self.inferencer._rect_polygon_from_bounds(raw_bounds)
                 if polygon is not None:
+                    # Use the same polygon-aware product-coordinate mapping as
+                    # formal v2 AOI inference before resolving the ROI.  The
+                    # old debug path only used raw-bounds linear mapping, so a
+                    # contaminated bound could make the diagnostic inspect a
+                    # different tile than production.
+                    img_cx, img_cy = self.inferencer._map_aoi_coords(
+                        product_x,
+                        product_y,
+                        raw_bounds,
+                        (product_w, product_h),
+                        panel_polygon=polygon,
+                    )
+                    centered_crop_x1 = img_cx - half
+                    centered_crop_y1 = img_cy - half
+                    crop_x1 = max(0, centered_crop_x1)
+                    crop_y1 = max(0, centered_crop_y1)
+                    crop_x2 = crop_x1 + tile_size
+                    crop_y2 = crop_y1 + tile_size
+                    if crop_x2 > img_w:
+                        crop_x2 = img_w
+                        crop_x1 = max(0, crop_x2 - tile_size)
+                    if crop_y2 > img_h:
+                        crop_y2 = img_h
+                        crop_y1 = max(0, crop_y2 - tile_size)
                     shift_axes = self.inferencer._resolve_aoi_inward_shift_axes(
                         img_cx, img_cy, raw_bounds, tile_size,
                     )
@@ -9082,6 +9109,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     tile_info.height = crop_h
                     tile_info.image = tile_image
                     tile_info.original_image = raw_tile_image
+                    tile_info.aoi_image_x = img_cx
+                    tile_info.aoi_image_y = img_cy
                     tile_info.aoi_tile_shift_dx = crop_shift_dx
                     tile_info.aoi_tile_shift_dy = crop_shift_dy
 
@@ -9142,20 +9171,31 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             # 推論 (含 GPU lock)
             debug_model_id = getattr(self.inferencer.config, "machine_id", None)
+            predict_kwargs = {
+                "inferencer": target_inferencer,
+                "edge_margin_override": edge_margin_override,
+                "threshold": debug_threshold,
+                "model_id": debug_model_id,
+            }
+            # Older test doubles / deployed workers may still expose the old
+            # predict_tile signature.  Only the real implementation receives
+            # the opt-in second pass for raw-score diagnostics.
+            try:
+                import inspect
+                if "capture_raw_diagnostics" in inspect.signature(
+                    self.inferencer.predict_tile
+                ).parameters:
+                    predict_kwargs["capture_raw_diagnostics"] = True
+            except (TypeError, ValueError):
+                pass
             if hasattr(self, '_gpu_lock') and self._gpu_lock:
                 with self._gpu_lock:
                     score, anomaly_map = self.inferencer.predict_tile(
-                        tile_info, inferencer=target_inferencer,
-                        edge_margin_override=edge_margin_override,
-                        threshold=debug_threshold,
-                        model_id=debug_model_id,
+                        tile_info, **predict_kwargs,
                     )
             else:
                 score, anomaly_map = self.inferencer.predict_tile(
-                    tile_info, inferencer=target_inferencer,
-                    edge_margin_override=edge_margin_override,
-                    threshold=debug_threshold,
-                    model_id=debug_model_id,
+                    tile_info, **predict_kwargs,
                 )
 
             if mark_regions:
@@ -9554,10 +9594,58 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             actual_threshold = debug_threshold
             judgment = "NG" if score >= actual_threshold else "OK"
             total_time = _time.time() - total_start
+            def _finite_tile_diag(name: str) -> Optional[float]:
+                value = getattr(tile_info, name, None)
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    return None
+                return value if np.isfinite(value) else None
+
+            raw_model_score = _finite_tile_diag("raw_model_score")
+            model_image_min = _finite_tile_diag("model_image_min")
+            model_image_max = _finite_tile_diag("model_image_max")
+            model_image_threshold = _finite_tile_diag("model_image_threshold")
+            model_normalization_enabled = getattr(
+                tile_info, "model_normalization_enabled", None
+            )
+            normalization_diag = score_normalization_diagnostic(
+                raw_model_score,
+                model_image_min,
+                model_image_max,
+                model_image_threshold,
+                normalization_enabled=model_normalization_enabled,
+            )
             score_breakdown = {
                 "raw_patchcore_score": round(
                     float(getattr(tile_info, "raw_pred_score", score)), 6
                 ),
+                # raw_patchcore_score is the normalized score retained for
+                # backward compatibility; these fields expose the distance
+                # before Anomalib normalization so a displayed 0 is explainable.
+                "raw_model_score": (
+                    round(raw_model_score, 6) if raw_model_score is not None else None
+                ),
+                "model_image_min": (
+                    round(model_image_min, 6) if model_image_min is not None else None
+                ),
+                "model_image_max": (
+                    round(model_image_max, 6) if model_image_max is not None else None
+                ),
+                "model_image_threshold": (
+                    round(model_image_threshold, 6)
+                    if model_image_threshold is not None else None
+                ),
+                "model_normalization_enabled": model_normalization_enabled,
+                "raw_anomaly_map_max": (
+                    round(_finite_tile_diag("raw_anomaly_map_max"), 6)
+                    if _finite_tile_diag("raw_anomaly_map_max") is not None else None
+                ),
+                "normalized_anomaly_map_max": (
+                    round(_finite_tile_diag("normalized_anomaly_map_max"), 6)
+                    if _finite_tile_diag("normalized_anomaly_map_max") is not None else None
+                ),
+                **normalization_diag,
                 "pre_decay_map_max": round(
                     float(getattr(tile_info, "pre_decay_map_max", 0.0)), 6
                 ),
@@ -13171,7 +13259,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             )
             supports_preprocess_cfg = "preprocess_cfg" in parameters
             if not supports_kwargs:
-                for optional_name in ("machine_id", "rotate_180"):
+                for optional_name in (
+                    "machine_id", "rotate_180", "ng_validation_base_dir",
+                ):
                     if optional_name not in parameters:
                         call_kwargs.pop(optional_name, None)
         except (TypeError, ValueError):
@@ -13518,6 +13608,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elapsed = int(m.get("elapsed_seconds") or 0)
             total_elapsed += elapsed
             grade = m.get("auroc_grade") or "n/a"
+            if "train_zero_score_warning" in m:
+                train_zero_score_warning = bool(m.get("train_zero_score_warning"))
+            else:
+                # Legacy manifests only persisted the rounded train_max.  Use
+                # it as a compatibility hint; new manifests use exact scores.
+                train_max_value = m.get("train_max")
+                train_zero_score_warning = bool(
+                    int(m.get("train_count_eval") or 0) > 0
+                    and train_max_value is not None
+                    and float(train_max_value) == 0.0
+                )
             feature_cleaning = dict(m.get("feature_cleaning") or {})
             report_rel = str(feature_cleaning.get("report_path") or "")
             feature_cleaning_visuals = []
@@ -13604,6 +13705,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "ng_fallback": m.get("ng_used") == "fallback",
                 "separation": m.get("separation"),
                 "train_max": m.get("train_max"),
+                "train_count_eval": int(m.get("train_count_eval") or 0),
+                "train_zero_score_count": int(
+                    m.get("train_zero_score_count") or 0
+                ),
+                "train_zero_score_rate": m.get("train_zero_score_rate"),
+                "train_zero_score_warning": train_zero_score_warning,
                 "ng_median": m.get("ng_median"),
                 "ng_max": m.get("ng_max"),
                 "elapsed_seconds": elapsed,
@@ -13615,6 +13722,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             }))
 
         overall_grade = manifest.get("overall_auroc_grade") or "n/a"
+        zero_score_units = [
+            unit_label
+            for unit_label, info in units
+            if info.get("train_zero_score_warning")
+        ]
         template = self.jinja_env.get_template("train_new/step5_done.html")
         html = template.render(
             request_path="/train/new/done",
@@ -13632,6 +13744,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             total_size_mb=total_size_bytes / 1e6,
             total_elapsed_seconds=total_elapsed,
             success_units=manifest.get("success_units") or len(units),
+            zero_score_units=zero_score_units,
         )
         self._send_response(200, html)
 
@@ -14392,7 +14505,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if stats["panel_success"] <= 0:
                 raise RuntimeError("沒有任何 panel 前處理成功")
 
-            log(f"從推論紀錄抽 AOI 炸彈 crop（每 lighting 上限 {NG_TILES_PER_LIGHTING} 個，排除 B0F 黑畫面）")
+            log(
+                f"準備 NG 驗證 crop（優先重用 NG 驗證庫；缺少才從推論紀錄裁切，"
+                f"每 lighting 上限 {NG_TILES_PER_LIGHTING} 個，排除 B0F 黑畫面）"
+            )
             ng_stats = CAPIWebHandler._sample_ng_tiles_compat(
                 sample_ng_tiles,
                 job_id=job_id, over_review_root=cfg.over_review_root,
@@ -14401,6 +14517,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 preprocess_cfg=pre_cfg,
                 machine_id=machine_id,
                 rotate_180=CAPIWebHandler._training_bomb_rotate_180(machine_id, server_inst),
+                ng_validation_base_dir=CAPIWebHandler._ng_validation_base_dir_for_server(
+                    server_inst
+                ),
             )
 
             db.update_training_job_state(job_id, "review")
@@ -16981,7 +17100,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             _log(f"OK tile 寫入完成：{stats['total_tiles']} tiles")
 
             _set_step("ng")
-            _log(f"從推論紀錄抽 AOI 炸彈 crop（lighting={lighting}，上限 {NG_TILES_PER_LIGHTING} 個，排除 B0F 黑畫面）")
+            _log(
+                f"準備 NG 驗證 crop（優先重用 NG 驗證庫；缺少才從推論紀錄裁切，"
+                f"lighting={lighting}，上限 {NG_TILES_PER_LIGHTING} 個，排除 B0F 黑畫面）"
+            )
             CAPIWebHandler._sample_ng_tiles_compat(
                 sample_ng_tiles,
                 job_id=job_id,
@@ -16994,6 +17116,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 preprocess_cfg=preprocess_cfg,
                 machine_id=machine_id,
                 rotate_180=CAPIWebHandler._training_bomb_rotate_180(machine_id, server_inst),
+                ng_validation_base_dir=CAPIWebHandler._ng_validation_base_dir_for_server(
+                    server_inst
+                ),
             )
 
             db.update_training_job_state(job_id, "train")
@@ -17521,9 +17646,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         final_error = ""
 
         def _empty_result(sample: Dict[str, Any]) -> Dict[str, Any]:
+            review_id = int(sample.get("review_id") or 0)
             return {
                 "sample_id": int(sample["id"]),
-                "review_id": sample.get("review_id"),
+                "review_id": review_id if review_id > 0 else None,
                 "glass_id": str(sample.get("glass_id") or ""),
                 "model_id": str(sample.get("model_id") or ""),
                 "lighting": str(sample.get("lighting") or ""),

@@ -26,6 +26,7 @@
   .mlib-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
   .mlib-table th, .mlib-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #313244; }
   .mlib-table th { color: #a6adc8; font-weight: 600; background: #11111b; }
+  .mlib-table tr.zero-score-warn td { background: rgba(249,226,175,.10); }
   .mlib-table tr.warn td { background: rgba(243,139,168,.08); }
   .mlib-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr));
@@ -1236,6 +1237,7 @@ function renderMetrics(d) {
   const overallGrade = gradeMap[m.overall_auroc_grade] || gradeMap['n/a'];
 
   let rows = '';
+  const zeroScoreUnits = [];
   for (const label of UNIT_ORDER) {
     const u = um[label];
     if (!u) {
@@ -1254,6 +1256,15 @@ function renderMetrics(d) {
     const warn = u.auroc_grade === 'poor' || u.auroc_grade === 'fail'
       || (sep != null && sep < 0)
       || (u.ng_caught_rate != null && u.ng_caught_rate < 0.5);
+    // New bundles persist the exact all-zero result before display rounding.
+    // Legacy bundles fall back to exact train_max=0 only when train samples
+    // were actually evaluated.
+    const zeroScoreWarning = u.train_zero_score_warning === true
+      || (u.train_zero_score_warning == null
+        && Number(u.train_count_eval || 0) > 0
+        && u.train_max != null
+        && Number(u.train_max) === 0);
+    if (zeroScoreWarning) zeroScoreUnits.push(label);
     const sepCell = sep == null ? '—'
       : `<span style="color:${sep < 0 ? '#f38ba8' : '#a6e3a1'};">${sep > 0 ? '+' : ''}${sep.toFixed(3)}</span>`;
     const caughtCell = `${caught} <span style="color:#a6adc8;">(${rate})</span>`;
@@ -1273,12 +1284,17 @@ function renderMetrics(d) {
         + ` <button class="mlib-thr-edit" onclick="editThreshold(${currentBundleId},'${lighting}','${zone}',${currentThr})"`
         + ` title="編輯 threshold">✏</button>`
       : '—';
-    rows += `<tr class="${warn ? 'warn' : ''}">`
+    const trainMaxCell = u.train_max != null
+      ? `${u.train_max}${zeroScoreWarning
+        ? ` <span style="background:#f9e2af;color:#1e1e2e;padding:1px 6px;border-radius:8px;font-size:.68rem;font-weight:700;" title="OK 評估分數全部為 0；可能被 Anomalib normalization clamp，train_max 與 separation 參考性不足">正規化 0 分</span>`
+        : ''}`
+      : '—';
+    rows += `<tr class="${warn ? 'warn' : (zeroScoreWarning ? 'zero-score-warn' : '')}">`
       + `<td><code>${label}</code></td>`
       + `<td>${u.train_count != null ? u.train_count : '—'}</td>`
       + `<td>${u.ng_count != null ? u.ng_count : '—'}</td>`
       + `<td>${aurocCell}</td>`
-      + `<td>${u.train_max != null ? u.train_max : '—'}</td>`
+      + `<td>${trainMaxCell}</td>`
       + `<td>${u.ng_median != null ? u.ng_median : '—'}</td>`
       + `<td>${thrCell}</td>`
       + `<td>${caughtCell}</td>`
@@ -1306,13 +1322,23 @@ function renderMetrics(d) {
       </div>
     </div>
   `;
+  const zeroScoreWarningCard = zeroScoreUnits.length ? `
+    <div style="background:rgba(249,226,175,.10);border-left:4px solid #f9e2af;
+                padding:10px 14px;margin-bottom:12px;border-radius:4px;color:#f9e2af;">
+      <strong>⚠ OK 評估分數全部為 0：</strong>${zeroScoreUnits.map(escapeHtml).join('、')}
+      <div style="font-size:.76rem;color:#cdd6f4;margin-top:4px;line-height:1.5;">
+        可能是 Anomalib 正規化後被 clamp 為 0；不代表模型沒有特徵距離，但
+        <code>train_max</code> 與 <code>separation</code> 的參考性不足。請用座標診斷確認 raw 距離與 normalization 範圍。
+      </div>
+    </div>
+  ` : '';
 
   // threshold 來源徽章：machine_config.yaml 是 inference 真值來源；thresholds.json 為 fallback
   const thrSource = d.thresholds_source || 'thresholds.json';
   const sourceBadgeColor = thrSource === 'machine_config.yaml' ? '#a6e3a1' : '#fab387';
   const sourceBadge = `<span style="background:${sourceBadgeColor};color:#1e1e2e;padding:2px 8px;border-radius:6px;font-size:.7rem;font-weight:700;margin-left:8px;" title="threshold 來源；inference 引擎讀的真值就是 machine_config.yaml">${thrSource}</span>`;
 
-  target.innerHTML = summaryCard + `
+  target.innerHTML = zeroScoreWarningCard + summaryCard + `
     <div style="display:flex;align-items:center;font-size:.78rem;color:#a6adc8;margin-bottom:6px;">
       <span>threshold 來源：</span>${sourceBadge}
     </div>
@@ -1338,6 +1364,7 @@ function renderMetrics(d) {
       <code>threshold</code> 來自 <code>machine_config.yaml</code>（可點 ✏ 編輯，自動同步寫 yaml + thresholds.json）·
       <code>NG 抓到</code> NG 中 score≥threshold 的個數·
       <code>separation</code> = ng_median − train_max。<br>
+      <span style="color:#f9e2af;">黃色列</span>：OK 評估分數全部為 0，品質指標可能被正規化 clamp；
       <span style="color:#f38ba8;">紅色列</span>：AUROC 偏弱/不及格、separation 負值、或 NG 抓到率 &lt; 50%，建議補 NG 樣本重訓。
     </div>
   `;
