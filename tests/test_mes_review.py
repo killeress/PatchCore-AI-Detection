@@ -173,6 +173,72 @@ def test_training_bomb_samples_share_ng_validation_db_without_fake_review(tmp_pa
     }
 
 
+def test_inference_record_sample_is_idempotent_and_marks_record_detail(tmp_path):
+    db = CAPIDatabase(tmp_path / "review.db")
+    record_id, image_id, tile_id = _insert_aoi_candidates(
+        db, str(tmp_path / "source.tif")
+    )
+    sample = {
+        "tile_result_id": tile_id,
+        "image_result_id": image_id,
+        "image_name": "G0F00000_080000.tif",
+        "source_image_path": str(tmp_path / "source.tif"),
+        "lighting": "G0F00000",
+        "zone": "inner",
+        "aoi_defect_code": "PCDK2",
+        "aoi_product_x": 130,
+        "aoi_product_y": 220,
+        "aoi_image_x": 1280,
+        "aoi_image_y": 768,
+        "tile_x": 1024,
+        "tile_y": 512,
+        "tile_w": 512,
+        "tile_h": 512,
+        "ai_score": 0.23,
+        "crop_path": str(tmp_path / "ng-validation" / "sample.png"),
+    }
+    record = db.get_mes_comparison_record(record_id)
+
+    saved = db.save_inference_record_ng_validation_sample(record, sample)
+    saved_again = db.save_inference_record_ng_validation_sample(record, sample)
+
+    assert saved_again["id"] == saved["id"]
+    assert saved["sample_source"] == "inference_record"
+    assert saved["review_id"] == -1
+    assert db.list_ng_validation_samples()[1] == 1
+    assert db.get_confirmed_ng_validation_sample_for_tile(tile_id)["id"] == saved["id"]
+    detail = db.get_record_detail(record_id)
+    detail_tile = next(
+        tile for tile in detail["images"][0]["tiles"] if tile["id"] == tile_id
+    )
+    assert detail_tile["ng_validation_sample_id"] == saved["id"]
+
+    review = db.save_mes_comparison_review(
+        inference_record_id=record_id,
+        glass_id="PANEL-1",
+        model_id="MODEL-1",
+        machine_no="HM01",
+        request_time="2026-07-23 08:00:00",
+        ai_judgment="OK",
+        mes_judgment="NG",
+        review_type="miss_detection",
+        category="score_below_threshold",
+        confirmed_ng=True,
+        samples=[sample],
+    )
+    active_samples, total = db.list_ng_validation_samples()
+    assert review["ng_sample_count"] == 1
+    assert total == 1
+    assert active_samples[0]["sample_source"] == "manual_review"
+    with sqlite3.connect(str(db.db_path)) as conn:
+        direct_row = conn.execute(
+            """SELECT status FROM ng_validation_samples
+               WHERE id = ?""",
+            (saved["id"],),
+        ).fetchone()
+    assert direct_row[0] == "removed"
+
+
 def test_ng_validation_filters_by_model_and_deletes_only_selected_crop(tmp_path):
     db = CAPIDatabase(tmp_path / "review.db")
     base_dir = tmp_path / "ng-validation"
@@ -476,6 +542,304 @@ def test_web_helper_saves_selected_aoi_crop_under_validation_root(tmp_path):
         handler._prepare_ng_validation_samples(record, [b0f_candidate])
 
 
+def test_record_detail_can_add_bomb_tile_to_ng_validation_once(tmp_path):
+    source_path = tmp_path / "G0F00000_080000.png"
+    image = np.arange(1100 * 1600, dtype=np.uint32).reshape(1100, 1600)
+    assert cv2.imwrite(str(source_path), (image % 256).astype(np.uint8))
+    db = CAPIDatabase(tmp_path / "review.db")
+    _, _, tile_id = _insert_aoi_candidates(db, str(source_path))
+    with sqlite3.connect(str(db.db_path)) as conn:
+        conn.execute("UPDATE tile_results SET is_bomb = 1 WHERE id = ?", (tile_id,))
+
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = db
+    handler.inferencer = SimpleNamespace(
+        config=SimpleNamespace(inference_rotate_180_enabled=False)
+    )
+    handler._capi_server_instance = SimpleNamespace(
+        server_config={
+            "ng_validation": {"base_dir": str(tmp_path / "ng-validation")},
+        },
+        path_mapping={},
+    )
+    handler._read_json_body = lambda: {"tile_result_id": tile_id}
+    responses = []
+    handler._send_json = lambda data, status=200: responses.append((status, data))
+
+    handler._handle_record_ng_validation_add()
+
+    assert responses[-1][0] == 200
+    assert responses[-1][1]["success"] is True
+    assert responses[-1][1]["already_exists"] is False
+    samples, total = db.list_ng_validation_samples()
+    assert total == 1
+    assert samples[0]["sample_source"] == "inference_record"
+    crop_path = Path(samples[0]["crop_path"])
+    assert cv2.imread(str(crop_path), cv2.IMREAD_UNCHANGED).shape == (512, 512)
+
+    source_path.unlink()
+    handler._handle_record_ng_validation_add()
+
+    assert responses[-1][0] == 200
+    assert responses[-1][1]["already_exists"] is True
+    assert db.list_ng_validation_samples()[1] == 1
+
+
+def test_record_detail_classification_switches_ng_pool_and_none(tmp_path):
+    source_path = tmp_path / "G0F00000_080000.png"
+    image = np.arange(1100 * 1600, dtype=np.uint32).reshape(1100, 1600)
+    assert cv2.imwrite(str(source_path), (image % 256).astype(np.uint8))
+    db = CAPIDatabase(tmp_path / "review.db")
+    record_id, _, tile_id = _insert_aoi_candidates(db, str(source_path))
+
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = db
+    handler.inferencer = SimpleNamespace(
+        config=SimpleNamespace(inference_rotate_180_enabled=False)
+    )
+    handler._capi_server_instance = SimpleNamespace(
+        server_config={
+            "ng_validation": {"base_dir": str(tmp_path / "ng-validation")},
+            "retrain_pool": {"base_dir": str(tmp_path / "retrain-pool")},
+        },
+        path_mapping={},
+    )
+    request = {"tile_result_id": tile_id, "classification": "retrain_pool"}
+    handler._read_json_body = lambda: dict(request)
+    responses = []
+    handler._send_json = lambda data, status=200: responses.append((status, data))
+
+    handler._handle_record_sample_classification()
+    assert responses[-1][0] == 400
+    assert "AI 判定不是 NG" in responses[-1][1]["error"]
+
+    with sqlite3.connect(str(db.db_path)) as conn:
+        conn.execute(
+            "UPDATE tile_results SET is_anomaly = 1 WHERE id = ?",
+            (tile_id,),
+        )
+
+    handler._handle_record_sample_classification()
+    assert responses[-1][0] == 200
+    assert responses[-1][1]["classification"] == "retrain_pool"
+    pool_item = db.get_over_retrain_pool_item_for_tile(tile_id)
+    assert pool_item["client_record_id"] is None
+    assert pool_item["sample_source"] == "inference_record"
+    pool_paths = [Path(pool_item["source_path"]), Path(pool_item["thumb_path"])]
+    assert all(path.is_file() for path in pool_paths)
+    detail = db.get_record_detail(record_id)
+    detail_tile = next(
+        tile for tile in detail["images"][0]["tiles"] if tile["id"] == tile_id
+    )
+    assert detail_tile["retrain_pool_id"] == pool_item["id"]
+    assert detail_tile["ng_validation_sample_id"] is None
+
+    handler._handle_record_sample_classification()
+    assert responses[-1][1]["already_exists"] is True
+    assert db.list_over_retrain_pool(limit=10)[1] == 1
+
+    request["classification"] = "ng"
+    handler._handle_record_sample_classification()
+    assert responses[-1][0] == 200
+    assert responses[-1][1]["classification"] == "ng"
+    assert db.get_over_retrain_pool_item_for_tile(tile_id) is None
+    assert all(not path.exists() for path in pool_paths)
+    ng_sample = db.get_confirmed_ng_validation_sample_for_tile(tile_id)
+    assert ng_sample["sample_source"] == "inference_record"
+    ng_crop_path = Path(ng_sample["crop_path"])
+    assert ng_crop_path.is_file()
+
+    request["classification"] = "retrain_pool"
+    handler._handle_record_sample_classification()
+    assert responses[-1][0] == 200
+    assert db.get_confirmed_ng_validation_sample_for_tile(tile_id) is None
+    assert not ng_crop_path.exists()
+    pool_item = db.get_over_retrain_pool_item_for_tile(tile_id)
+    assert pool_item is not None
+    pool_paths = [Path(pool_item["source_path"]), Path(pool_item["thumb_path"])]
+
+    request["classification"] = "none"
+    handler._handle_record_sample_classification()
+    assert responses[-1][0] == 200
+    assert responses[-1][1]["classification"] == "none"
+    assert db.get_confirmed_ng_validation_sample_for_tile(tile_id) is None
+    assert db.get_over_retrain_pool_item_for_tile(tile_id) is None
+    assert all(not path.exists() for path in pool_paths)
+
+
+def test_record_detail_cannot_reclassify_pool_item_already_added_to_training(tmp_path):
+    db = CAPIDatabase(tmp_path / "review.db")
+    record_id, image_id, tile_id = _insert_aoi_candidates(
+        db,
+        str(tmp_path / "missing-source.png"),
+    )
+    pool_dir = tmp_path / "retrain-pool"
+    source_path = pool_dir / "tiles" / "tile.png"
+    thumb_path = pool_dir / "thumb" / "tile.png"
+    source_path.parent.mkdir(parents=True)
+    thumb_path.parent.mkdir(parents=True)
+    source_path.write_bytes(b"tile")
+    thumb_path.write_bytes(b"thumb")
+    result = db.insert_over_retrain_pool_rows([{
+        "client_record_id": None,
+        "inference_record_id": record_id,
+        "tile_result_id": tile_id,
+        "image_result_id": image_id,
+        "machine_id": "MODEL-1",
+        "machine_no": "HM01",
+        "pnl_id": "PANEL-1",
+        "client_time_stamp": "2026-07-23 08:00:00",
+        "screen_prefix": "G0F00000",
+        "lighting": "G0F00000",
+        "zone": "inner",
+        "source_path": str(source_path),
+        "thumb_path": str(thumb_path),
+        "tile_x": 1024,
+        "tile_y": 512,
+        "tile_w": 512,
+        "tile_h": 512,
+        "score": 0.23,
+        "sample_source": "inference_record",
+    }])
+    pool_id = result["inserted_ids"][0]
+    db.mark_over_retrain_pool_added([pool_id], 9, "job-active", "G0F00000-inner")
+
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = db
+    handler._capi_server_instance = SimpleNamespace(
+        server_config={
+            "ng_validation": {"base_dir": str(tmp_path / "ng-validation")},
+            "retrain_pool": {"base_dir": str(pool_dir)},
+        },
+        path_mapping={},
+    )
+    handler._read_json_body = lambda: {
+        "tile_result_id": tile_id,
+        "classification": "ng",
+    }
+    responses = []
+    handler._send_json = lambda data, status=200: responses.append((status, data))
+
+    handler._handle_record_sample_classification()
+
+    assert responses[-1][0] == 409
+    assert "先到重訓 Pool 移出清單" in responses[-1][1]["error"]
+    assert db.get_over_retrain_pool_item_for_tile(tile_id)["id"] == pool_id
+    assert db.get_confirmed_ng_validation_sample_for_tile(tile_id) is None
+
+
+def test_rerun_detaches_legacy_pool_tile_and_preserves_training_state(tmp_path):
+    db_path = tmp_path / "rerun-pool.db"
+    db = CAPIDatabase(db_path)
+    record_id, image_id, tile_id = _insert_aoi_candidates(
+        db,
+        str(tmp_path / "source.png"),
+    )
+    result = db.insert_over_retrain_pool_rows([{
+        "client_record_id": None,
+        "inference_record_id": record_id,
+        "tile_result_id": tile_id,
+        "image_result_id": image_id,
+        "machine_id": "MODEL-1",
+        "machine_no": "HM01",
+        "pnl_id": "PANEL-1",
+        "client_time_stamp": "2026-07-23 08:00:00",
+        "screen_prefix": "G0F00000",
+        "lighting": "G0F00000",
+        "zone": "inner",
+        "source_path": str(tmp_path / "pool-source.png"),
+        "thumb_path": str(tmp_path / "pool-thumb.png"),
+        "tile_x": 1024,
+        "tile_y": 512,
+        "tile_w": 512,
+        "tile_h": 512,
+        "score": 0.23,
+        "sample_source": "inference_record",
+    }])
+    pool_id = result["inserted_ids"][0]
+    db.mark_over_retrain_pool_added(
+        [pool_id],
+        9,
+        "job-active",
+        "G0F00000-inner",
+    )
+
+    # Simulate the schema already deployed in the field before this fix.
+    with sqlite3.connect(str(db_path)) as conn:
+        table_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'over_retrain_pool'"
+        ).fetchone()[0]
+        columns = [
+            row[1] for row in conn.execute("PRAGMA table_info(over_retrain_pool)")
+        ]
+        legacy_sql = table_sql.replace(
+            "tile_result_id INTEGER UNIQUE",
+            "tile_result_id INTEGER NOT NULL UNIQUE",
+        ).replace(" ON DELETE SET NULL", "")
+        conn.execute(
+            "ALTER TABLE over_retrain_pool RENAME TO over_retrain_pool_current"
+        )
+        conn.execute(legacy_sql)
+        column_sql = ", ".join(f'"{column}"' for column in columns)
+        conn.execute(
+            f"INSERT INTO over_retrain_pool ({column_sql}) "
+            f"SELECT {column_sql} FROM over_retrain_pool_current"
+        )
+        conn.execute("DROP TABLE over_retrain_pool_current")
+
+    db = CAPIDatabase(db_path)
+    db.update_record_for_rerun(
+        record_id=record_id,
+        ai_judgment="NG",
+        total_images=1,
+        ng_images=1,
+        ng_details="G0F00000",
+        processing_seconds=1.0,
+        image_results_data=[{
+            "image_path": str(tmp_path / "source.png"),
+            "image_name": "G0F00000_080000.tif",
+            "tiles": [{
+                "tile_id": 7,
+                "x": 1024,
+                "y": 512,
+                "width": 512,
+                "height": 512,
+                "score": 0.44,
+                "is_anomaly": 1,
+                "is_aoi_coord": 1,
+                "aoi_defect_code": "C1111",
+                "aoi_product_x": 1214,
+                "aoi_product_y": 842,
+            }],
+        }],
+    )
+
+    pool_item = db.get_over_retrain_pool_items([pool_id])[0]
+    assert pool_item["tile_result_id"] is None
+    assert pool_item["added_to_bundle_id"] == 9
+    assert pool_item["added_to_job_id"] == "job-active"
+    assert pool_item["added_to_unit"] == "G0F00000-inner"
+    assert pool_item["source_path"] == str(tmp_path / "pool-source.png")
+    with sqlite3.connect(str(db_path)) as conn:
+        tile_column = next(
+            row for row in conn.execute("PRAGMA table_info(over_retrain_pool)")
+            if row[1] == "tile_result_id"
+        )
+        tile_fk = next(
+            row for row in conn.execute("PRAGMA foreign_key_list(over_retrain_pool)")
+            if row[3] == "tile_result_id"
+        )
+        new_tile_id = conn.execute(
+            "SELECT id FROM tile_results WHERE image_result_id IN "
+            "(SELECT id FROM image_results WHERE record_id = ?)",
+            (record_id,),
+        ).fetchone()[0]
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert tile_column[3] == 0
+    assert tile_fk[6] == "SET NULL"
+    assert new_tile_id != tile_id
+
+
 def test_web_review_save_does_not_require_reviewer(tmp_path):
     db = CAPIDatabase(tmp_path / "review.db")
     record_id, _, _ = _insert_aoi_candidates(db, str(tmp_path / "source.tif"))
@@ -544,6 +908,7 @@ def test_report_template_contains_manual_review_and_ng_database_ui():
     assert "🗑 刪除圖片" in template
     assert "機種：" in template
     assert "訓練 AOI 炸彈快取" in template
+    assert "推論紀錄手動加入" in template
     assert "人工確認事件" in template
     assert "B0F 已排除" in template
     assert "mesReviewReviewer" not in template
@@ -597,3 +962,16 @@ def test_report_template_contains_manual_review_and_ng_database_ui():
     assert "mes-review-stat-action" in template
     assert "點擊查看明細 →" in template
     assert 'aria-pressed="${active}"' in template
+
+
+def test_record_detail_template_uses_single_sample_classification_action():
+    template = Path("templates/record_detail.html").read_text(encoding="utf-8")
+
+    assert "樣本歸類" in template
+    assert "有現象／真 NG" in template
+    assert "無現象／AI 過檢" in template
+    assert "/api/record/sample-classification" in template
+    assert "ng_validation_sample_id" in template
+    assert "retrain_pool_id" in template
+    assert "addAoiTileToNgValidation" not in template
+    assert template.count('data-tile-result-id="{{ t.id }}"') == 1

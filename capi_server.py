@@ -58,6 +58,7 @@ from capi_image_naming import (
 )
 from capi_inference import CAPIInferencer, ImageResult, resolve_product_resolution
 from capi_preprocess import BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_polygon
+from capi_white_frame import WhiteFrameInspection, inspect_white_frame_panel
 from capi_database import CAPIDatabase
 from capi_auto_model_switch import bundle_label, select_target_bundle
 from capi_heatmap import HeatmapManager
@@ -1200,6 +1201,10 @@ def results_to_db_data(
             "mark_roi": getattr(result, "mark_roi", ""),
             "mark_orientation": getattr(result, "mark_orientation", ""),
             "mark_source_image": getattr(result, "mark_source_image", ""),
+            "white_frame_result": json.dumps(
+                getattr(result, "white_frame_result", None),
+                ensure_ascii=False,
+            ) if getattr(result, "white_frame_result", None) else "",
             "tiles": [],
         }
 
@@ -1282,6 +1287,25 @@ def results_to_db_data(
         db_images.append(img_data)
 
     return db_images
+
+
+def _white_frame_image_result(inspection: WhiteFrameInspection) -> ImageResult:
+    """Convert a shadow WHITEFRA observation into a persistable image row."""
+    processing_seconds = float(inspection.payload.get("processing_ms", 0.0) or 0.0) / 1000.0
+    return ImageResult(
+        image_path=inspection.image_path,
+        image_size=inspection.image_size,
+        otsu_bounds=inspection.bounds,
+        exclusion_regions=[],
+        tiles=[],
+        excluded_tile_count=0,
+        processed_tile_count=0,
+        processing_time=processing_seconds,
+        anomaly_tiles=[],
+        raw_bounds=inspection.bounds,
+        inference_time=processing_seconds,
+        white_frame_result=inspection.payload,
+    )
 
 
 def _normalize_machine_judgment_for_bomb_only_panel(
@@ -2886,13 +2910,57 @@ class CAPIServer:
         """
         save_start = time.time()
         try:
+            record_inferencer = None
+            # WHITEFRA is observation-only and is not part of the TCP response.
+            # Inspect it in this post-response worker to avoid adding latency to
+            # the formal judgment path, while still persisting it on the record.
+            if results:
+                try:
+                    record_inferencer = self._get_or_create_inferencer(parsed.get("model_id", ""))
+                    panel_dir = Path(resolve_unc_path(parsed["image_dir"], self.path_mapping))
+                    white_frame_inspection = inspect_white_frame_panel(
+                        panel_dir,
+                        rotate_180=getattr(
+                            record_inferencer,
+                            "_rotate_detection_images_180",
+                            False,
+                        ),
+                    )
+                    if white_frame_inspection is not None:
+                        payload = white_frame_inspection.payload
+                        side_summary = ", ".join(
+                            f"{payload['sides'][side]['label']}={payload['sides'][side]['status']}"
+                            for side in ("top", "right", "bottom", "left")
+                        )
+                        shadow_log = (
+                            f"[WHITE_FRAME_SHADOW] Image={white_frame_inspection.image_path.name} "
+                            f"Algorithm={payload.get('algorithm', 'white-frame-cv-v1')} "
+                            f"Status={payload.get('status', 'UNREADABLE')} Sides=[{side_summary}] "
+                            f"Angle={payload.get('angle_deg', '-')} TT={payload.get('processing_ms', 0)}ms "
+                            "FormalJudgment=unchanged TCP=unchanged"
+                            + (f" Reason={payload.get('reason')}" if payload.get("reason") else "")
+                        )
+                        if payload.get("status") == "UNREADABLE":
+                            logger.warning(shadow_log)
+                        else:
+                            logger.info(shadow_log)
+                        inference_log = f"{(inference_log or '').rstrip()}\n{shadow_log}".strip()
+                        results.append(_white_frame_image_result(white_frame_inspection))
+                except Exception as exc:
+                    logger.warning(
+                        "[WHITE_FRAME_SHADOW] Background inspection failed; "
+                        "formal judgment and TCP unchanged: %s",
+                        exc,
+                        exc_info=True,
+                    )
+
             # 儲存熱力圖
             heatmap_info = {}
-            record_inferencer = None
             if results:
                 try:
                     # 使用與推論時相同的 inferencer（per-machine dispatcher）
-                    record_inferencer = self._get_or_create_inferencer(parsed.get("model_id", ""))
+                    if record_inferencer is None:
+                        record_inferencer = self._get_or_create_inferencer(parsed.get("model_id", ""))
                     heatmap_info = self.heatmap_manager.save_panel_heatmaps(
                         glass_id=parsed["glass_id"],
                         results=results,

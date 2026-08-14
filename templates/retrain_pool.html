@@ -140,6 +140,9 @@ function renderPool(items) {
 
 function renderItem(item) {
   const unit = `${item.lighting || ''}-${item.zone || '未分區'}`;
+  const sourceLabel = item.sample_source === 'inference_record'
+    ? '推論紀錄手動歸類'
+    : 'RIC 過檢 Review';
   const added = item.added_to_job_id
     ? `<div>已匯入：<code>${esc(item.added_to_unit || item.added_to_job_id)}</code></div>`
     : '';
@@ -155,6 +158,7 @@ function renderItem(item) {
         <div><code>${esc(item.machine_id)}</code></div>
         <div>Unit：<code>${esc(unit)}</code></div>
         <div>Panel：<code>${esc(item.pnl_id)}</code></div>
+        <div>來源：<code>${esc(sourceLabel)}</code></div>
         <div>Score：${item.score != null ? Number(item.score).toFixed(3) : '—'}</div>
         <div>${esc(item.created_at || '')}</div>
         ${added}
