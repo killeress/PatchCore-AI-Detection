@@ -1,0 +1,43 @@
+{% if wf %}
+<div style="margin:16px 0 20px;padding:16px;border:1px solid rgba(148,163,184,0.45);border-radius:10px;background:rgba(148,163,184,0.08);">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+        <div>
+            <div style="font-weight:700;font-size:0.95rem;">白色外框檢測</div>
+            <div style="margin-top:3px;color:#94A3B8;font-size:0.75rem;">影子模式，不影響正式 OK／NG 與 TCP 回傳；四角不列入判斷</div>
+        </div>
+        {% if wf.status == 'NG' %}
+        <span style="padding:4px 10px;border-radius:999px;background:rgba(239,68,68,0.16);color:#EF4444;font-weight:700;font-size:0.78rem;">觀察 NG</span>
+        {% elif wf.status == 'OK' %}
+        <span style="padding:4px 10px;border-radius:999px;background:rgba(34,197,94,0.16);color:#22C55E;font-weight:700;font-size:0.78rem;">觀察 OK</span>
+        {% else %}
+        <span style="padding:4px 10px;border-radius:999px;background:rgba(245,158,11,0.16);color:#F59E0B;font-weight:700;font-size:0.78rem;">無法判讀</span>
+        {% endif %}
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;">
+        {% for side in ['top', 'right', 'bottom', 'left'] %}
+        {% set side_result = wf.get('sides', {}).get(side, {}) %}
+        {% set side_status = side_result.get('status', 'UNKNOWN') %}
+        <div style="padding:10px 12px;border:1px solid rgba(148,163,184,0.32);border-radius:8px;background:rgba(148,163,184,0.06);">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                <strong style="font-size:0.85rem;">{{ side_result.get('label', side) }}</strong>
+                <span style="font-weight:700;font-size:0.78rem;color:{% if side_status == 'NG' %}#EF4444{% elif side_status == 'OK' %}#22C55E{% else %}#F59E0B{% endif %};">{{ side_status }}</span>
+            </div>
+            {% if side_status == 'NG' %}
+            <div style="margin-top:5px;color:#94A3B8;font-size:0.72rem;">
+                斷線 {{ side_result.get('gap_count', 0) }} 處；最長 {{ side_result.get('largest_gap_px', 0) }} px
+            </div>
+            {% elif side_status == 'OK' %}
+            <div style="margin-top:5px;color:#94A3B8;font-size:0.72rem;">有效區間連續</div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+
+    <div style="margin-top:10px;color:#94A3B8;font-size:0.72rem;font-family:'Fira Code',monospace;">
+        {% if wf.get('angle_deg') is not none %}校正角度: {{ wf.angle_deg }}° | {% endif %}
+        檢測耗時: {{ wf.get('processing_ms', 0) | round(1) }}ms
+        {% if wf.get('reason') %} | 原因: {{ wf.reason }}{% endif %}
+    </div>
+</div>
+{% endif %}

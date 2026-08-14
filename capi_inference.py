@@ -398,6 +398,9 @@ class ImageResult:
     # CV 邊緣檢查結果
     edge_defects: List[EdgeDefect] = field(default_factory=list)
 
+    # WHITEFRA bright-frame observation.  Shadow-only: never affects formal judgment.
+    white_frame_result: Optional[Dict[str, Any]] = None
+
     # Dot-matrix MARK binary detection metadata (detected from W0F0000 image)
     mark_text: str = ""
     mark_raw_text: str = ""

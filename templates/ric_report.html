@@ -2037,7 +2037,7 @@
             <div>
                 <h3>👤 人工 Review 與 NG 驗證庫</h3>
                 <div style="margin-top:4px; color:var(--text-muted); font-size:0.76rem;">
-                    包含人工確認 NG，以及新模型訓練自動保存的 AOI 炸彈快取。
+                    包含人工確認 NG、推論紀錄手動加入，以及新模型訓練自動保存的 AOI 炸彈快取。
                 </div>
             </div>
             <button type="button" class="btn-export" onclick="mesReportTab.openNgDatabase()">查看 NG 驗證庫</button>
@@ -5638,7 +5638,9 @@
                             <div>AOI ${_esc(sample.aoi_defect_code || '-')} (${_esc(sample.aoi_product_x)}, ${_esc(sample.aoi_product_y)})</div>
                             <div>${sample.sample_source === 'training_bomb'
                                 ? '訓練 AOI 炸彈快取'
-                                : _esc(REVIEW_CATEGORY_LABELS[sample.category] || sample.category || '-')}</div>
+                                : sample.sample_source === 'inference_record'
+                                    ? '推論紀錄手動加入'
+                                    : _esc(REVIEW_CATEGORY_LABELS[sample.category] || sample.category || '-')}</div>
                             <div class="mes-ng-card-actions">
                                 <button type="button" class="mes-ng-delete"
                                         data-sample-id="${Number(sample.id)}"

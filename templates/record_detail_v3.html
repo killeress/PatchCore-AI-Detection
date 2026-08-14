@@ -718,8 +718,9 @@
             </h3>
 
             {% for img in detail.images %}
+            {% set wf = img.get("white_frame_result") %}
             {% set img_status, img_badge = img | img_status_info %}
-            <div class="white-panel {% if img_status == 'NG' %}panel-status-ng{% elif img_status == 'OK' %}panel-status-ok{% else %}panel-status-err{% endif %}"
+            <div class="white-panel {% if not wf %}{% if img_status == 'NG' %}panel-status-ng{% elif img_status == 'OK' %}panel-status-ok{% else %}panel-status-err{% endif %}{% endif %}"
                 style="position: relative; overflow: hidden;">
 
                 <div
@@ -733,15 +734,26 @@
                                 </path>
                             </svg>
                             {{ img | get_img_stem }}
+                            {% if wf %}
+                            <span class="badge" style="background:#F1F5F9;color:#64748B;">白框觀察</span>
+                            {% else %}
                             <span
                                 class="badge {% if img_status == 'OK' %}bg-ok-subtle{% elif img_status == 'NG' %}bg-ng-subtle{% else %}bg-err-subtle{% endif %}">
                                 {{ img_status }}
                             </span>
+                            {% endif %}
                         </h4>
                     </div>
 
                     <div
                         style="display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: #64748B; background: #F8FAFC; padding: 10px 12px; border-radius: 8px; border: 1px solid #E2E8F0;">
+                        {% if wf %}
+                        <span><strong style="color: #475569; font-weight: 500;">尺寸:</strong> {{ img.image_width }}x{{ img.image_height }}</span>
+                        <span style="color: #CBD5E1;">|</span>
+                        <span><strong style="color: #475569; font-weight: 500;">類型:</strong> WHITEFRA 白框觀察</span>
+                        <span style="color: #CBD5E1;">|</span>
+                        <span><strong style="color: #475569; font-weight: 500;">耗時:</strong> {{ img.inference_time_ms | round(0) }}ms</span>
+                        {% else %}
                         <span><strong style="color: #475569; font-weight: 500;">尺寸:</strong> {{ img.image_width }}x{{
                             img.image_height }}</span>
                         <span style="color: #CBD5E1;">|</span>
@@ -778,8 +790,11 @@
                         <span style="color: #CBD5E1;">|</span>
                         <span><strong style="color: #475569; font-weight: 500;">耗時:</strong> {{ img.inference_time_ms |
                             round(0) }}ms</span>
+                        {% endif %}
                     </div>
                 </div>
+
+                {% include "_white_frame_result.html" %}
 
                 {% if img.tiles %}
                 <div style="overflow-x: auto; border: 1px solid #E2E8F0; border-radius: 8px; margin-bottom: 24px;">

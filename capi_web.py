@@ -3730,6 +3730,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_mes_review_save()
             elif path == "/api/ric/mes-review/delete":
                 self._handle_mes_review_delete()
+            elif path == "/api/record/sample-classification":
+                self._handle_record_sample_classification()
+            elif path == "/api/record/ng-validation/add":
+                self._handle_record_ng_validation_add()
             elif path == "/api/ric/ng-validation/delete":
                 self._handle_ng_validation_delete()
             elif path == "/api/ric/over-retrain-pool/add":
@@ -7137,6 +7141,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self,
         record: Dict,
         candidates: List[Dict],
+        *,
+        allow_bomb: bool = False,
     ) -> List[Dict]:
         """裁切並保存人工勾選的 AOI tile，回傳 DB snapshot rows。"""
         import cv2
@@ -7148,7 +7154,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             lighting = canonical_image_prefix(candidate.get("image_name") or "")
             if lighting not in _MES_REVIEW_LIGHTINGS:
                 raise ValueError(f"光源不納入 NG 驗證庫: {lighting}")
-            if int(candidate.get("image_is_bomb") or 0) or int(candidate.get("is_bomb") or 0):
+            if (
+                not allow_bomb
+                and (
+                    int(candidate.get("image_is_bomb") or 0)
+                    or int(candidate.get("is_bomb") or 0)
+                )
+            ):
                 raise ValueError(f"炸彈候選不可加入 NG 驗證庫: tile {candidate['tile_result_id']}")
 
             source_path = self._mes_review_resolve_source(candidate.get("image_path") or "")
@@ -7223,6 +7235,298 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "crop_path": str(crop_path.resolve()),
             })
         return rows
+
+    def _prepare_record_retrain_pool_row(
+        self,
+        record: Dict,
+        candidate: Dict,
+    ) -> Dict:
+        """裁切單一 AI 過檢 tile，準備推論紀錄手動加入 Pool 的資料。"""
+        import cv2
+
+        if not int(candidate.get("is_anomaly") or 0):
+            raise ValueError("此 Tile 的 AI 判定不是 NG，不能歸類為無現象過檢")
+        if int(candidate.get("image_is_bomb") or 0) or int(candidate.get("is_bomb") or 0):
+            raise ValueError("炸彈模擬 Tile 不能加入重訓 Pool")
+        if int(candidate.get("is_exclude_zone") or 0):
+            raise ValueError("排除區 Tile 不能加入重訓 Pool")
+
+        lighting = canonical_image_prefix(candidate.get("image_name") or "")
+        if lighting not in _MES_REVIEW_LIGHTINGS:
+            raise ValueError(f"此光源不支援重訓 Pool: {lighting}")
+        source_path = self._mes_review_resolve_source(candidate.get("image_path") or "")
+        image = (
+            self._read_inference_image(source_path, cv2.IMREAD_UNCHANGED)
+            if source_path.is_file() else None
+        )
+        if image is None:
+            raise ValueError(f"原圖不存在或無法讀取: {source_path}")
+
+        x = int(candidate.get("tile_x") or 0)
+        y = int(candidate.get("tile_y") or 0)
+        w = max(1, int(candidate.get("tile_w") or 512))
+        h = max(1, int(candidate.get("tile_h") or 512))
+        crop = crop_patchcore_tile(image, x, y, w, h)
+        if crop.size == 0:
+            raise ValueError(f"AOI tile 裁切為空: {candidate['tile_result_id']}")
+
+        zone = str(candidate.get("zone") or "").strip().lower()
+        safe_machine = re.sub(
+            r"[^A-Za-z0-9_.-]+", "_", str(record.get("model_id") or "unknown")
+        )[:80] or "unknown"
+        safe_lighting = re.sub(r"[^A-Za-z0-9_.-]+", "_", lighting)[:40]
+        safe_zone = re.sub(r"[^A-Za-z0-9_.-]+", "_", zone or "unknown")[:40]
+        request_day = re.sub(
+            r"[^0-9]+", "", str(record.get("request_time") or "")[:10]
+        ) or datetime.now().strftime("%Y%m%d")
+        out_dir = (
+            self._retrain_pool_base_dir()
+            / request_day
+            / safe_machine
+            / safe_lighting
+            / safe_zone
+        )
+        tile_dir = out_dir / "tiles"
+        thumb_dir = out_dir / "thumb"
+        tile_dir.mkdir(parents=True, exist_ok=True)
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        filename = (
+            f"manual_r{int(record['id'])}_i{int(candidate['image_result_id'])}"
+            f"_t{int(candidate['tile_result_id'])}.png"
+        )
+        tile_path = tile_dir / filename
+        thumb_path = thumb_dir / filename
+        if not cv2.imwrite(str(tile_path), crop):
+            raise ValueError(f"重訓 Pool crop 寫入失敗: {tile_path}")
+        thumb = cv2.resize(crop, (96, 96))
+        if not cv2.imwrite(str(thumb_path), thumb):
+            try:
+                tile_path.unlink()
+            except OSError:
+                pass
+            raise ValueError(f"重訓 Pool 縮圖寫入失敗: {thumb_path}")
+
+        return {
+            "client_record_id": None,
+            "inference_record_id": int(record["id"]),
+            "tile_result_id": int(candidate["tile_result_id"]),
+            "image_result_id": int(candidate["image_result_id"]),
+            "machine_id": str(record.get("model_id") or ""),
+            "machine_no": str(record.get("machine_no") or ""),
+            "pnl_id": str(record.get("glass_id") or ""),
+            "client_time_stamp": str(record.get("request_time") or ""),
+            "datastr": "",
+            "screen_prefix": lighting,
+            "lighting": lighting,
+            "zone": zone,
+            "source_path": str(tile_path.resolve()),
+            "thumb_path": str(thumb_path.resolve()),
+            "tile_x": x,
+            "tile_y": y,
+            "tile_w": w,
+            "tile_h": h,
+            "score": float(candidate.get("ai_score") or 0.0),
+            "sample_source": "inference_record",
+        }
+
+    def _remove_record_ng_classification(self, sample: Dict) -> None:
+        if not self.db.remove_ng_validation_sample(int(sample["id"])):
+            return
+        try:
+            crop_path = Path(sample.get("crop_path") or "").resolve()
+            crop_path.relative_to(self._ng_validation_base_dir())
+            if crop_path.is_file():
+                crop_path.unlink()
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Remove reclassified NG crop failed: sample_id=%s error=%s",
+                sample.get("id"),
+                exc,
+            )
+
+    def _remove_record_retrain_pool_classification(self, item: Dict) -> None:
+        deleted = self.db.delete_over_retrain_pool_item(int(item["id"]))
+        if not deleted:
+            return
+        for path_str in (deleted.get("thumb_path") or "", deleted.get("source_path") or ""):
+            try:
+                self._safe_unlink_retrain_pool_file(path_str)
+            except OSError as exc:
+                logger.warning(
+                    "Remove reclassified Pool crop failed: pool_id=%s error=%s",
+                    deleted.get("id"),
+                    exc,
+                )
+
+    def _handle_record_sample_classification(self, data: Optional[Dict] = None):
+        """POST: 將單一 AOI tile 互斥歸類為真 NG、過檢 Pool 或未歸類。"""
+        if data is None:
+            data = self._read_json_body()
+        if data is None:
+            return
+        try:
+            tile_result_id = int(data.get("tile_result_id"))
+        except (TypeError, ValueError):
+            self._send_json(
+                {"success": False, "error": "tile_result_id 格式錯誤"},
+                status=400,
+            )
+            return
+        classification = str(data.get("classification") or "").strip().lower()
+        if classification not in {"ng", "retrain_pool", "none"}:
+            self._send_json(
+                {"success": False, "error": "classification 必須是 ng、retrain_pool 或 none"},
+                status=400,
+            )
+            return
+
+        candidate = (
+            self.db.get_mes_review_aoi_candidate(tile_result_id)
+            if self.db else None
+        )
+        if not candidate:
+            self._send_json(
+                {"success": False, "error": "找不到此 AOI 座標 Tile"},
+                status=404,
+            )
+            return
+        record = self.db.get_mes_comparison_record(
+            int(candidate["inference_record_id"])
+        )
+        if not record:
+            self._send_json(
+                {"success": False, "error": "找不到此 Tile 的推論紀錄"},
+                status=404,
+            )
+            return
+
+        existing_ng = self.db.get_confirmed_ng_validation_sample_for_tile(
+            tile_result_id
+        )
+        existing_pool = self.db.get_over_retrain_pool_item_for_tile(tile_result_id)
+        if (
+            classification in {"ng", "none"}
+            and existing_pool
+            and existing_pool.get("added_to_job_id")
+        ):
+            self._send_json({
+                "success": False,
+                "error": "此 Pool 樣本已加入訓練清單，請先到重訓 Pool 移出清單",
+                "pool_id": int(existing_pool["id"]),
+            }, status=409)
+            return
+        if (
+            classification in {"retrain_pool", "none"}
+            and existing_ng
+            and existing_ng.get("sample_source") != "inference_record"
+        ):
+            self._send_json({
+                "success": False,
+                "error": "此 Tile 已由人工 Review 確認為真 NG，不能在推論紀錄變更歸類",
+                "sample_id": int(existing_ng["id"]),
+            }, status=409)
+            return
+
+        already_exists = bool(
+            (classification == "ng" and existing_ng and not existing_pool)
+            or (classification == "retrain_pool" and existing_pool and not existing_ng)
+            or (classification == "none" and not existing_ng and not existing_pool)
+        )
+        saved_ng = existing_ng
+        saved_pool = existing_pool
+        prepared_pool = None
+        try:
+            if classification == "ng":
+                if not saved_ng:
+                    sample = self._prepare_ng_validation_samples(
+                        record,
+                        [candidate],
+                        allow_bomb=True,
+                    )[0]
+                    saved_ng = self.db.save_inference_record_ng_validation_sample(
+                        record,
+                        sample,
+                    )
+                if existing_pool:
+                    self._remove_record_retrain_pool_classification(existing_pool)
+                saved_pool = None
+                message = "此 AOI Tile 已在 NG 樣本庫中" if already_exists else "已歸類為真 NG"
+            elif classification == "retrain_pool":
+                if not saved_pool:
+                    prepared_pool = self._prepare_record_retrain_pool_row(
+                        record,
+                        candidate,
+                    )
+                    result = self.db.insert_over_retrain_pool_rows([prepared_pool])
+                    saved_pool = self.db.get_over_retrain_pool_item_for_tile(
+                        tile_result_id
+                    )
+                    if not saved_pool or not (
+                        result["inserted_ids"] or result["existing_ids"]
+                    ):
+                        raise RuntimeError("重訓 Pool 寫入失敗")
+                if existing_ng:
+                    self._remove_record_ng_classification(existing_ng)
+                saved_ng = None
+                message = "此 AOI Tile 已在重訓 Pool 中" if already_exists else "已歸類為無現象過檢"
+            else:
+                if existing_ng:
+                    self._remove_record_ng_classification(existing_ng)
+                if existing_pool:
+                    self._remove_record_retrain_pool_classification(existing_pool)
+                saved_ng = None
+                saved_pool = None
+                message = "此 AOI Tile 尚未歸類" if already_exists else "已移除樣本歸類"
+        except ValueError as exc:
+            self._send_json({"success": False, "error": str(exc)}, status=400)
+            return
+        except Exception as exc:
+            if prepared_pool and not self.db.get_over_retrain_pool_item_for_tile(tile_result_id):
+                for path_str in (
+                    prepared_pool.get("thumb_path") or "",
+                    prepared_pool.get("source_path") or "",
+                ):
+                    try:
+                        self._safe_unlink_retrain_pool_file(path_str)
+                    except OSError:
+                        pass
+            logger.error(
+                "Classify inference tile failed: tile_result_id=%s classification=%s error=%s",
+                tile_result_id,
+                classification,
+                exc,
+                exc_info=True,
+            )
+            self._send_json({"success": False, "error": str(exc)}, status=500)
+            return
+
+        logger.info(
+            "Inference tile classified: record_id=%s tile_result_id=%s "
+            "classification=%s ng_sample_id=%s retrain_pool_id=%s",
+            record["id"],
+            tile_result_id,
+            classification,
+            saved_ng.get("id") if saved_ng else "",
+            saved_pool.get("id") if saved_pool else "",
+        )
+        self._send_json({
+            "success": True,
+            "already_exists": already_exists,
+            "classification": classification,
+            "sample_id": int(saved_ng["id"]) if saved_ng else None,
+            "pool_id": int(saved_pool["id"]) if saved_pool else None,
+            "message": message,
+            "summary": self.db.get_ng_validation_summary(),
+        })
+
+    def _handle_record_ng_validation_add(self):
+        """Backward-compatible endpoint for the original NG-only action."""
+        data = self._read_json_body()
+        if data is None:
+            return
+        normalized = dict(data)
+        normalized["classification"] = "ng"
+        self._handle_record_sample_classification(normalized)
 
     def _handle_mes_review_save(self):
         """POST: 儲存 Report 人工 Review，必要時同步 NG 驗證樣本。"""
@@ -12132,8 +12436,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         from capi_server import (
             results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment,
             InferenceLogCapture, WITHIN_SPEC_LOGS_URL,
-            _stored_machine_judgment_for_record,
+            _stored_machine_judgment_for_record, _white_frame_image_result,
         )
+        from capi_white_frame import inspect_white_frame_panel
 
         def _update_status(msg, *_):
             with cls._rerun_lock:
@@ -12169,6 +12474,36 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             start_time = _time.time()
 
             InferenceLogCapture.start_capture()
+            white_frame_inspection = None
+            try:
+                white_frame_inspection = inspect_white_frame_panel(
+                    panel_dir,
+                    rotate_180=getattr(inferencer, "_rotate_detection_images_180", False),
+                )
+                if white_frame_inspection is not None:
+                    payload = white_frame_inspection.payload
+                    side_summary = ", ".join(
+                        f"{payload['sides'][side]['label']}={payload['sides'][side]['status']}"
+                        for side in ("top", "right", "bottom", "left")
+                    )
+                    logger.info(
+                        "[WHITE_FRAME_SHADOW][RERUN] Image=%s Algorithm=%s Status=%s Sides=[%s] "
+                        "Angle=%s TT=%sms FormalJudgment=unchanged%s",
+                        white_frame_inspection.image_path.name,
+                        payload.get("algorithm", "white-frame-cv-v1"),
+                        payload.get("status", "UNREADABLE"),
+                        side_summary,
+                        payload.get("angle_deg", "-"),
+                        payload.get("processing_ms", 0),
+                        f" Reason={payload.get('reason')}" if payload.get("reason") else "",
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[WHITE_FRAME_SHADOW][RERUN] Inspection failed; formal judgment unchanged: %s",
+                    exc,
+                    exc_info=True,
+                )
+
             if cls._gpu_lock:
                 with cls._gpu_lock:
                     _update_status("正在推論中...")
@@ -12305,6 +12640,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
                 if within_spec_info and within_spec_info.get("converted"):
                     ai_judgment = "OK-i"
+
+            if white_frame_inspection is not None:
+                results.append(_white_frame_image_result(white_frame_inspection))
 
             _update_status("正在儲存 heatmap...")
             heatmap_info = {}

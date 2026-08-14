@@ -246,6 +246,7 @@ class CAPIDatabase:
                     mark_roi TEXT DEFAULT '',
                     mark_orientation TEXT DEFAULT '',
                     mark_source_image TEXT DEFAULT '',
+                    white_frame_result TEXT DEFAULT '',
                     FOREIGN KEY (record_id) REFERENCES inference_records(id) ON DELETE CASCADE
                 );
 
@@ -445,7 +446,8 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_mes_review_machine
                     ON mes_comparison_review(machine_no, model_id, updated_at DESC);
 
-                -- Durable NG samples from human-confirmed AOI tiles or training bomb crops.
+                -- Durable NG samples from human-confirmed AOI tiles,
+                -- inference-record manual adds, or training bomb crops.
                 -- Source IDs are snapshots only (no FK) so the validation DB remains
                 -- usable after tile_results/image_results are cleaned.
                 CREATE TABLE IF NOT EXISTS ng_validation_samples (
@@ -485,6 +487,8 @@ class CAPIDatabase:
                     ON ng_validation_samples(model_id, lighting, zone, status);
                 CREATE INDEX IF NOT EXISTS idx_ng_validation_review
                     ON ng_validation_samples(review_id, status);
+                CREATE INDEX IF NOT EXISTS idx_ng_validation_tile
+                    ON ng_validation_samples(tile_result_id, status);
 
                 -- Versioned model exams against the durable NG validation samples.
                 -- Bundle/sample IDs are snapshots only so historical results remain
@@ -539,9 +543,9 @@ class CAPIDatabase:
                 -- Over-retrain pool (過檢 tile 重訓候選池)
                 CREATE TABLE IF NOT EXISTS over_retrain_pool (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    client_record_id INTEGER NOT NULL,
+                    client_record_id INTEGER,
                     inference_record_id INTEGER NOT NULL,
-                    tile_result_id INTEGER NOT NULL UNIQUE,
+                    tile_result_id INTEGER UNIQUE,
                     image_result_id INTEGER NOT NULL,
                     machine_id TEXT NOT NULL,
                     machine_no TEXT DEFAULT '',
@@ -558,6 +562,7 @@ class CAPIDatabase:
                     tile_w INTEGER DEFAULT 0,
                     tile_h INTEGER DEFAULT 0,
                     score REAL DEFAULT 0.0,
+                    sample_source TEXT NOT NULL DEFAULT 'ric_over_review',
                     added_to_job_id TEXT DEFAULT '',
                     added_to_bundle_id INTEGER,
                     added_to_unit TEXT DEFAULT '',
@@ -565,7 +570,7 @@ class CAPIDatabase:
                     updated_at TEXT DEFAULT (datetime('now', 'localtime')),
                     FOREIGN KEY (client_record_id) REFERENCES client_accuracy_records(id),
                     FOREIGN KEY (inference_record_id) REFERENCES inference_records(id),
-                    FOREIGN KEY (tile_result_id) REFERENCES tile_results(id)
+                    FOREIGN KEY (tile_result_id) REFERENCES tile_results(id) ON DELETE SET NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_over_retrain_pool_created
                     ON over_retrain_pool(created_at DESC);
@@ -859,6 +864,105 @@ class CAPIDatabase:
 
             ensure_within_spec_log_schema()
 
+            def ensure_over_retrain_pool_schema():
+                cursor = conn.execute("PRAGMA table_info(over_retrain_pool)")
+                columns = {row[1]: row for row in cursor.fetchall()}
+                client_col = columns.get("client_record_id")
+                tile_col = columns.get("tile_result_id")
+                tile_fk = next(
+                    (
+                        row for row in conn.execute(
+                            "PRAGMA foreign_key_list(over_retrain_pool)"
+                        )
+                        if row[3] == "tile_result_id"
+                    ),
+                    None,
+                )
+                # Pool crops and training markers must survive when rerun replaces
+                # their source tile. The old tile link becomes a detached snapshot.
+                needs_rebuild = (
+                    bool(client_col and client_col[3])
+                    or bool(tile_col and tile_col[3])
+                    or not tile_fk
+                    or str(tile_fk[6]).upper() != "SET NULL"
+                )
+                if needs_rebuild:
+                    has_sample_source = "sample_source" in columns
+                    conn.execute(
+                        "ALTER TABLE over_retrain_pool RENAME TO over_retrain_pool_old"
+                    )
+                    conn.executescript("""
+                        CREATE TABLE over_retrain_pool (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            client_record_id INTEGER,
+                            inference_record_id INTEGER NOT NULL,
+                            tile_result_id INTEGER UNIQUE,
+                            image_result_id INTEGER NOT NULL,
+                            machine_id TEXT NOT NULL,
+                            machine_no TEXT DEFAULT '',
+                            pnl_id TEXT NOT NULL,
+                            client_time_stamp TEXT DEFAULT '',
+                            datastr TEXT DEFAULT '',
+                            screen_prefix TEXT NOT NULL,
+                            lighting TEXT NOT NULL,
+                            zone TEXT DEFAULT '',
+                            source_path TEXT NOT NULL,
+                            thumb_path TEXT DEFAULT '',
+                            tile_x INTEGER DEFAULT 0,
+                            tile_y INTEGER DEFAULT 0,
+                            tile_w INTEGER DEFAULT 0,
+                            tile_h INTEGER DEFAULT 0,
+                            score REAL DEFAULT 0.0,
+                            sample_source TEXT NOT NULL DEFAULT 'ric_over_review',
+                            added_to_job_id TEXT DEFAULT '',
+                            added_to_bundle_id INTEGER,
+                            added_to_unit TEXT DEFAULT '',
+                            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                            updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+                            FOREIGN KEY (client_record_id) REFERENCES client_accuracy_records(id),
+                            FOREIGN KEY (inference_record_id) REFERENCES inference_records(id),
+                            FOREIGN KEY (tile_result_id) REFERENCES tile_results(id) ON DELETE SET NULL
+                        );
+                    """)
+                    source_expr = (
+                        "COALESCE(sample_source, 'ric_over_review')"
+                        if has_sample_source else
+                        "'ric_over_review'"
+                    )
+                    conn.execute(
+                        f"""INSERT INTO over_retrain_pool
+                            (id, client_record_id, inference_record_id, tile_result_id,
+                             image_result_id, machine_id, machine_no, pnl_id,
+                             client_time_stamp, datastr, screen_prefix, lighting, zone,
+                             source_path, thumb_path, tile_x, tile_y, tile_w, tile_h,
+                             score, sample_source, added_to_job_id, added_to_bundle_id,
+                             added_to_unit, created_at, updated_at)
+                            SELECT id, client_record_id, inference_record_id, tile_result_id,
+                                   image_result_id, machine_id, machine_no, pnl_id,
+                                   client_time_stamp, datastr, screen_prefix, lighting, zone,
+                                   source_path, thumb_path, tile_x, tile_y, tile_w, tile_h,
+                                   score, {source_expr}, added_to_job_id, added_to_bundle_id,
+                                   added_to_unit, created_at, updated_at
+                              FROM over_retrain_pool_old"""
+                    )
+                    conn.execute("DROP TABLE over_retrain_pool_old")
+
+                add_column_if_not_exists(
+                    "over_retrain_pool",
+                    "sample_source",
+                    "TEXT NOT NULL DEFAULT 'ric_over_review'",
+                )
+                conn.executescript("""
+                    CREATE INDEX IF NOT EXISTS idx_over_retrain_pool_created
+                        ON over_retrain_pool(created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_over_retrain_pool_machine
+                        ON over_retrain_pool(machine_id, lighting, zone);
+                    CREATE INDEX IF NOT EXISTS idx_over_retrain_pool_client
+                        ON over_retrain_pool(client_record_id);
+                """)
+
+            ensure_over_retrain_pool_schema()
+
             add_column_if_not_exists("config_change_history", "changed_by", "TEXT DEFAULT ''")
             add_column_if_not_exists(
                 "mark_profiles",
@@ -938,6 +1042,7 @@ class CAPIDatabase:
             add_column_if_not_exists("image_results", "mark_roi", "TEXT DEFAULT ''")
             add_column_if_not_exists("image_results", "mark_orientation", "TEXT DEFAULT ''")
             add_column_if_not_exists("image_results", "mark_source_image", "TEXT DEFAULT ''")
+            add_column_if_not_exists("image_results", "white_frame_result", "TEXT DEFAULT ''")
             add_column_if_not_exists("tile_results", "is_bomb", "INTEGER DEFAULT 0")
             add_column_if_not_exists("tile_results", "bomb_code", "TEXT DEFAULT ''")
             add_column_if_not_exists("tile_results", "peak_x", "INTEGER DEFAULT -1")
@@ -1118,8 +1223,8 @@ class CAPIDatabase:
                                 max_score, is_ng, is_dust_only, is_bomb, inference_time_ms,
                                 heatmap_path, scratch_filter_count,
                                 mark_text, mark_confidence, mark_bbox, mark_roi,
-                                mark_orientation, mark_source_image)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                mark_orientation, mark_source_image, white_frame_result)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (record_id,
                              img_data.get("image_path", ""),
                              img_data.get("image_name", ""),
@@ -1141,7 +1246,8 @@ class CAPIDatabase:
                              img_data.get("mark_bbox", ""),
                              img_data.get("mark_roi", ""),
                              img_data.get("mark_orientation", ""),
-                             img_data.get("mark_source_image", ""))
+                             img_data.get("mark_source_image", ""),
+                             img_data.get("white_frame_result", ""))
                         )
                         image_result_id = img_cursor.lastrowid
 
@@ -1330,8 +1436,8 @@ class CAPIDatabase:
                                 max_score, is_ng, is_dust_only, is_bomb, inference_time_ms,
                                 heatmap_path, scratch_filter_count,
                                 mark_text, mark_confidence, mark_bbox, mark_roi,
-                                mark_orientation, mark_source_image)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                mark_orientation, mark_source_image, white_frame_result)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (record_id,
                              img_data.get("image_path", ""),
                              img_data.get("image_name", ""),
@@ -1353,7 +1459,8 @@ class CAPIDatabase:
                              img_data.get("mark_bbox", ""),
                              img_data.get("mark_roi", ""),
                              img_data.get("mark_orientation", ""),
-                             img_data.get("mark_source_image", ""))
+                             img_data.get("mark_source_image", ""),
+                             img_data.get("white_frame_result", ""))
                         )
                         image_result_id = img_cursor.lastrowid
 
@@ -1644,10 +1751,43 @@ class CAPIDatabase:
             result["images"] = []
             for img in images:
                 img_dict = dict(img)
+                raw_white_frame = img_dict.get("white_frame_result") or ""
+                if raw_white_frame:
+                    try:
+                        img_dict["white_frame_result"] = json.loads(raw_white_frame)
+                    except (json.JSONDecodeError, TypeError):
+                        img_dict["white_frame_result"] = {
+                            "status": "UNREADABLE",
+                            "reason": "stored_result_invalid",
+                            "sides": {},
+                        }
+                else:
+                    img_dict["white_frame_result"] = None
                 # 取得 tile 結果 (NG優先、然後依分數降冪)
                 tiles = conn.execute(
-                    """SELECT * FROM tile_results
-                       WHERE image_result_id = ?
+                    """SELECT t.*,
+                              (SELECT s.id
+                                 FROM ng_validation_samples s
+                                WHERE s.tile_result_id = t.id
+                                  AND s.status = 'confirmed'
+                                ORDER BY s.id DESC
+                                LIMIT 1) AS ng_validation_sample_id
+                              ,(SELECT s.sample_source
+                                  FROM ng_validation_samples s
+                                 WHERE s.tile_result_id = t.id
+                                   AND s.status = 'confirmed'
+                                 ORDER BY s.id DESC
+                                 LIMIT 1) AS ng_validation_sample_source
+                              ,(SELECT p.id
+                                  FROM over_retrain_pool p
+                                 WHERE p.tile_result_id = t.id
+                                 LIMIT 1) AS retrain_pool_id
+                              ,(SELECT p.added_to_job_id
+                                  FROM over_retrain_pool p
+                                 WHERE p.tile_result_id = t.id
+                                 LIMIT 1) AS retrain_pool_job_id
+                         FROM tile_results t
+                       WHERE t.image_result_id = ?
                        ORDER BY 
                            CASE 
                                WHEN is_dust = 0 AND is_bomb = 0 THEN 1
@@ -2082,12 +2222,15 @@ class CAPIDatabase:
                 cur.execute(
                     """INSERT OR IGNORE INTO over_retrain_pool
                        (client_record_id, inference_record_id, tile_result_id, image_result_id,
-                        machine_id, machine_no, pnl_id, client_time_stamp, datastr,
-                        screen_prefix, lighting, zone, source_path, thumb_path,
-                        tile_x, tile_y, tile_w, tile_h, score)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         machine_id, machine_no, pnl_id, client_time_stamp, datastr,
+                         screen_prefix, lighting, zone, source_path, thumb_path,
+                         tile_x, tile_y, tile_w, tile_h, score, sample_source)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        int(row["client_record_id"]),
+                        (
+                            int(row["client_record_id"])
+                            if row.get("client_record_id") is not None else None
+                        ),
                         int(row["inference_record_id"]),
                         int(row["tile_result_id"]),
                         int(row["image_result_id"]),
@@ -2106,6 +2249,7 @@ class CAPIDatabase:
                         int(row.get("tile_w", 0) or 0),
                         int(row.get("tile_h", 0) or 0),
                         float(row.get("score", 0.0) or 0.0),
+                        str(row.get("sample_source") or "ric_over_review"),
                     ),
                 )
                 if cur.rowcount:
@@ -2198,6 +2342,21 @@ class CAPIDatabase:
             ).fetchall()
             by_id = {int(r["id"]): dict(r) for r in rows}
             return [by_id[i] for i in ids if i in by_id]
+        finally:
+            conn.close()
+
+    def get_over_retrain_pool_item_for_tile(
+        self,
+        tile_result_id: int,
+    ) -> Optional[Dict]:
+        """Return the retrain Pool item already linked to an inference tile."""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM over_retrain_pool WHERE tile_result_id = ?",
+                (int(tile_result_id),),
+            ).fetchone()
+            return dict(row) if row else None
         finally:
             conn.close()
 
@@ -3801,9 +3960,7 @@ class CAPIDatabase:
                         EXISTS (
                             SELECT 1
                               FROM ng_validation_samples s
-                              JOIN mes_comparison_review mr ON mr.id = s.review_id
-                             WHERE mr.inference_record_id = ir.id
-                               AND s.tile_result_id = t.id
+                             WHERE s.tile_result_id = t.id
                                AND s.status = 'confirmed'
                         ) AS is_selected
                     FROM tile_results t
@@ -3967,6 +4124,17 @@ class CAPIDatabase:
                 )
 
                 for sample in sample_rows:
+                    # A tile may first be collected directly from /record/<id>.
+                    # Once a formal Review confirms it, keep only the Review row active.
+                    conn.execute(
+                        """UPDATE ng_validation_samples
+                           SET status = 'removed',
+                               updated_at = datetime('now', 'localtime')
+                           WHERE sample_source = 'inference_record'
+                             AND tile_result_id = ?
+                             AND status = 'confirmed'""",
+                        (int(sample["tile_result_id"]),),
+                    )
                     conn.execute(
                         """INSERT INTO ng_validation_samples
                            (review_id, inference_record_id, tile_result_id,
@@ -4164,6 +4332,114 @@ class CAPIDatabase:
             return [dict(row) for row in rows]
         finally:
             conn.close()
+
+    def get_confirmed_ng_validation_sample_for_tile(
+        self,
+        tile_result_id: int,
+    ) -> Optional[Dict]:
+        """Return an active NG sample already linked to an inference tile."""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                """SELECT * FROM ng_validation_samples
+                   WHERE tile_result_id = ? AND status = 'confirmed'
+                   ORDER BY CASE sample_source
+                                WHEN 'manual_review' THEN 0
+                                WHEN 'inference_record' THEN 1
+                                ELSE 2
+                            END,
+                            id DESC
+                   LIMIT 1""",
+                (int(tile_result_id),),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def save_inference_record_ng_validation_sample(
+        self,
+        record: Dict,
+        sample: Dict,
+    ) -> Dict:
+        """Persist one tile manually added from the inference-record page."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    """INSERT INTO ng_validation_samples
+                       (review_id, inference_record_id, tile_result_id,
+                        image_result_id, glass_id, model_id, machine_no,
+                        request_time, image_name, source_image_path,
+                        lighting, zone, aoi_defect_code,
+                        aoi_product_x, aoi_product_y,
+                        aoi_image_x, aoi_image_y,
+                        tile_x, tile_y, tile_w, tile_h,
+                        ai_score, crop_path, sample_source, status)
+                       VALUES (-1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               ?, ?, ?, ?, ?, ?, ?, ?, 'inference_record', 'confirmed')
+                       ON CONFLICT(review_id, tile_result_id)
+                       DO UPDATE SET
+                           inference_record_id = excluded.inference_record_id,
+                           image_result_id = excluded.image_result_id,
+                           glass_id = excluded.glass_id,
+                           model_id = excluded.model_id,
+                           machine_no = excluded.machine_no,
+                           request_time = excluded.request_time,
+                           image_name = excluded.image_name,
+                           source_image_path = excluded.source_image_path,
+                           lighting = excluded.lighting,
+                           zone = excluded.zone,
+                           aoi_defect_code = excluded.aoi_defect_code,
+                           aoi_product_x = excluded.aoi_product_x,
+                           aoi_product_y = excluded.aoi_product_y,
+                           aoi_image_x = excluded.aoi_image_x,
+                           aoi_image_y = excluded.aoi_image_y,
+                           tile_x = excluded.tile_x,
+                           tile_y = excluded.tile_y,
+                           tile_w = excluded.tile_w,
+                           tile_h = excluded.tile_h,
+                           ai_score = excluded.ai_score,
+                           crop_path = excluded.crop_path,
+                           sample_source = 'inference_record',
+                           status = 'confirmed',
+                           updated_at = datetime('now', 'localtime')""",
+                    (
+                        int(record["id"]),
+                        int(sample["tile_result_id"]),
+                        int(sample["image_result_id"]),
+                        str(record.get("glass_id") or ""),
+                        str(record.get("model_id") or ""),
+                        str(record.get("machine_no") or ""),
+                        str(record.get("request_time") or ""),
+                        str(sample.get("image_name") or ""),
+                        str(sample.get("source_image_path") or ""),
+                        str(sample.get("lighting") or ""),
+                        str(sample.get("zone") or ""),
+                        str(sample.get("aoi_defect_code") or ""),
+                        int(sample.get("aoi_product_x", -1)),
+                        int(sample.get("aoi_product_y", -1)),
+                        int(sample.get("aoi_image_x", -1)),
+                        int(sample.get("aoi_image_y", -1)),
+                        int(sample.get("tile_x", 0)),
+                        int(sample.get("tile_y", 0)),
+                        int(sample.get("tile_w", 0)),
+                        int(sample.get("tile_h", 0)),
+                        float(sample.get("ai_score", 0.0)),
+                        str(sample.get("crop_path") or ""),
+                    ),
+                )
+                row = conn.execute(
+                    """SELECT * FROM ng_validation_samples
+                       WHERE review_id = -1 AND tile_result_id = ?""",
+                    (int(sample["tile_result_id"]),),
+                ).fetchone()
+                conn.commit()
+                return dict(row)
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
 
     def save_training_bomb_validation_samples(self, samples: List[Dict]) -> int:
         """Persist training AOI bomb crops in the existing NG validation DB.
