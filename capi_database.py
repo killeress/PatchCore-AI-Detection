@@ -1638,6 +1638,152 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    @staticmethod
+    def _parse_white_frame_row(row: Dict[str, Any]) -> Dict[str, Any]:
+        """將白框 JSON 結果整理成總表可直接顯示的欄位。"""
+        item = dict(row)
+        raw_result = item.pop("white_frame_result", "") or ""
+        try:
+            payload = json.loads(raw_result) if raw_result else {}
+        except (json.JSONDecodeError, TypeError):
+            payload = {
+                "status": "UNREADABLE",
+                "reason": "stored_result_invalid",
+                "sides": {},
+            }
+        if not isinstance(payload, dict):
+            payload = {
+                "status": "UNREADABLE",
+                "reason": "stored_result_invalid",
+                "sides": {},
+            }
+
+        status = str(payload.get("status") or "UNKNOWN").upper()
+        if status not in {"OK", "NG", "UNREADABLE"}:
+            status = "UNKNOWN"
+        sides = payload.get("sides") if isinstance(payload.get("sides"), dict) else {}
+        ng_sides = []
+        ng_sides_detail = []
+        for side in ("top", "right", "bottom", "left"):
+            side_result = sides.get(side)
+            if not isinstance(side_result, dict):
+                continue
+            if str(side_result.get("status") or "").upper() != "NG":
+                continue
+            label = str(side_result.get("label") or side)
+            gaps = side_result.get("gaps") if isinstance(side_result.get("gaps"), list) else []
+            coordinates = []
+            for gap in gaps:
+                if not isinstance(gap, dict):
+                    continue
+                center_x = gap.get("center_x")
+                center_y = gap.get("center_y")
+                if center_x is None or center_y is None:
+                    continue
+                try:
+                    coordinates.append((int(center_x), int(center_y)))
+                except (TypeError, ValueError):
+                    continue
+            ng_sides.append(side)
+            ng_sides_detail.append({
+                "key": side,
+                "label": label,
+                "gap_count": int(side_result.get("gap_count") or len(gaps) or 0),
+                "largest_gap_px": int(side_result.get("largest_gap_px") or 0),
+                "coordinates": coordinates,
+            })
+
+        item.update({
+            "white_frame_status": status,
+            "white_frame_payload": payload,
+            "white_frame_ng_sides": ng_sides,
+            "white_frame_ng_sides_detail": ng_sides_detail,
+            "white_frame_reason": str(payload.get("reason") or ""),
+        })
+        return item
+
+    def query_white_frame_paged(
+        self,
+        *,
+        status: str = "",
+        edge: str = "",
+        machine_no: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Tuple[List[Dict], int, Dict[str, int]]:
+        """查詢 WHITEFRA 白框總表，回傳 (分頁資料, 總筆數, 統計)。"""
+        allowed_statuses = {"OK", "NG", "UNREADABLE", "UNKNOWN"}
+        status = str(status or "").strip().upper()
+        if status not in allowed_statuses:
+            status = ""
+        edge = str(edge or "").strip().lower()
+        if edge not in {"top", "right", "bottom", "left"}:
+            edge = ""
+        limit = max(1, min(int(limit or 50), 500))
+        offset = max(0, int(offset or 0))
+
+        conditions = [
+            "substr(upper(img.image_name), 1, 9) = 'WHITEFRA_'",
+            "COALESCE(TRIM(img.white_frame_result), '') <> ''",
+        ]
+        params: List[Any] = []
+        if machine_no:
+            conditions.append("ir.machine_no LIKE ?")
+            params.append(f"%{machine_no}%")
+        if start_date and _DATE_RE.match(str(start_date)):
+            conditions.append("datetime(ir.request_time) >= datetime(?)")
+            params.append(_factory_day_start_ts(str(start_date)))
+        if end_date and _DATE_RE.match(str(end_date)):
+            conditions.append("datetime(ir.request_time) < datetime(?)")
+            params.append(_factory_day_end_ts(str(end_date)))
+
+        where_clause = " AND ".join(conditions)
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"""SELECT img.id AS image_result_id,
+                           img.record_id AS record_id,
+                           img.image_path AS image_path,
+                           img.image_name AS image_name,
+                           img.image_width AS image_width,
+                           img.image_height AS image_height,
+                           img.inference_time_ms AS inference_time_ms,
+                           img.white_frame_result AS white_frame_result,
+                           ir.glass_id AS glass_id,
+                           ir.model_id AS model_id,
+                           ir.machine_no AS machine_no,
+                           ir.created_at AS created_at
+                      FROM image_results img
+                      JOIN inference_records ir ON ir.id = img.record_id
+                     WHERE {where_clause}
+                     ORDER BY ir.created_at DESC, img.id DESC""",
+                params,
+            ).fetchall()
+        finally:
+            conn.close()
+
+        parsed_rows = []
+        for row in rows:
+            item = self._parse_white_frame_row(dict(row))
+            if status and item["white_frame_status"] != status:
+                continue
+            if edge and edge not in item["white_frame_ng_sides"]:
+                continue
+            parsed_rows.append(item)
+
+        summary = {
+            "total": len(parsed_rows),
+            "ok": sum(item["white_frame_status"] == "OK" for item in parsed_rows),
+            "ng": sum(item["white_frame_status"] == "NG" for item in parsed_rows),
+            "unreadable": sum(
+                item["white_frame_status"] in {"UNREADABLE", "UNKNOWN"}
+                for item in parsed_rows
+            ),
+        }
+        return parsed_rows[offset:offset + limit], len(parsed_rows), summary
+
     def find_inference_record_ids_for_images(
         self, image_refs: List[Tuple[str, str]]
     ) -> List[Optional[int]]:

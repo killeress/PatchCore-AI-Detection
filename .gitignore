@@ -48,6 +48,7 @@ pytest-cache-files-*/
 pytest.ini
 .superpowers/
 .worktrees/
+debug*/
 
 # Data files and screenshots
 *.xls
