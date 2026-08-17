@@ -1,0 +1,238 @@
+{% extends "base.html" %}
+
+{% block title %}白框總表{% endblock %}
+
+{% block extra_css %}
+<style>
+    .white-frame-stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 12px;
+        margin-bottom: 20px;
+    }
+
+    .white-frame-stat {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px;
+    }
+
+    .white-frame-stat .value {
+        font-size: 1.8rem;
+        font-weight: 700;
+        font-family: 'Fira Code', monospace;
+    }
+
+    .white-frame-stat .label {
+        color: var(--text-muted);
+        font-size: 0.82rem;
+        margin-top: 4px;
+    }
+
+    .white-frame-filter {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+
+    .white-frame-filter input,
+    .white-frame-filter select {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 9px 12px;
+        border-radius: 7px;
+        font: inherit;
+    }
+
+    .white-frame-filter button {
+        background: var(--accent);
+        color: #fff;
+        border: 0;
+        padding: 9px 18px;
+        border-radius: 7px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+
+    .white-frame-table {
+        min-width: 980px;
+    }
+
+    .white-frame-table-wrap {
+        overflow-x: auto;
+    }
+
+    .white-frame-preview {
+        width: 150px;
+        height: 92px;
+        object-fit: contain;
+        display: block;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: #020617;
+        cursor: zoom-in;
+    }
+
+    .white-frame-image-name {
+        max-width: 150px;
+        margin-top: 5px;
+        color: var(--text-muted);
+        font-size: 0.7rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .white-frame-side {
+        display: inline-block;
+        margin: 2px 4px 2px 0;
+        padding: 3px 7px;
+        border-radius: 5px;
+        background: rgba(239, 68, 68, 0.14);
+        color: #f87171;
+        font-size: 0.78rem;
+        white-space: nowrap;
+    }
+
+    .white-frame-coordinate {
+        color: var(--text-muted);
+        font-size: 0.72rem;
+        margin-top: 3px;
+        line-height: 1.4;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="white-frame-stats">
+    <div class="white-frame-stat">
+        <div class="value">{{ summary.total or 0 }}</div>
+        <div class="label">白框記錄</div>
+    </div>
+    <div class="white-frame-stat">
+        <div class="value" style="color:var(--ng)">{{ summary.ng or 0 }}</div>
+        <div class="label">異常 NG</div>
+    </div>
+    <div class="white-frame-stat">
+        <div class="value" style="color:var(--ok)">{{ summary.ok or 0 }}</div>
+        <div class="label">完整 OK</div>
+    </div>
+    <div class="white-frame-stat">
+        <div class="value" style="color:var(--err)">{{ summary.unreadable or 0 }}</div>
+        <div class="label">無法判讀</div>
+    </div>
+</div>
+
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+        <div>
+            <h2 style="margin:0;font-size:1.15rem;">白色外框檢測總表</h2>
+            <div style="color:var(--text-muted);font-size:0.82rem;margin-top:3px;">WHITEFRA 圖片檢測結果、異常邊緣與斷線座標</div>
+        </div>
+        <a href="/white-frame" style="color:var(--text-muted);font-size:0.82rem;text-decoration:none;">清除篩選</a>
+    </div>
+    <form method="GET" action="/white-frame" class="white-frame-filter">
+        <select name="status" aria-label="白框結果">
+            <option value="">全部結果</option>
+            <option value="NG" {% if status == 'NG' %}selected{% endif %}>異常 NG</option>
+            <option value="OK" {% if status == 'OK' %}selected{% endif %}>完整 OK</option>
+            <option value="UNREADABLE" {% if status == 'UNREADABLE' %}selected{% endif %}>無法判讀</option>
+        </select>
+        <select name="edge" aria-label="異常邊緣">
+            <option value="">全部邊緣</option>
+            <option value="top" {% if edge == 'top' %}selected{% endif %}>上邊 NG</option>
+            <option value="right" {% if edge == 'right' %}selected{% endif %}>右邊 NG</option>
+            <option value="bottom" {% if edge == 'bottom' %}selected{% endif %}>下邊 NG</option>
+            <option value="left" {% if edge == 'left' %}selected{% endif %}>左邊 NG</option>
+        </select>
+        <input name="machine_no" value="{{ machine_no }}" placeholder="機台編號">
+        <label style="color:var(--text-muted);font-size:0.82rem;">開始</label>
+        <input type="date" name="start_date" value="{{ start_date }}">
+        <label style="color:var(--text-muted);font-size:0.82rem;">結束</label>
+        <input type="date" name="end_date" value="{{ end_date }}">
+        <input type="hidden" name="limit" value="{{ limit }}">
+        <button type="submit">立即搜尋</button>
+    </form>
+</div>
+
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+        <h3 style="margin:0;">檢測記錄 <span style="font-size:0.82rem;font-weight:400;color:var(--text-muted);">共 {{ total_count }} 筆，第 {{ page }}/{{ total_pages }} 頁</span></h3>
+    </div>
+    <div class="white-frame-table-wrap">
+        <table class="white-frame-table">
+            <thead>
+                <tr>
+                    <th>圖片</th>
+                    <th>白框結果</th>
+                    <th>異常邊緣／座標</th>
+                    <th>玻璃編號</th>
+                    <th>機台</th>
+                    <th>建立時間</th>
+                    <th>明細</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in records %}
+                <tr>
+                    <td>
+                        <img class="white-frame-preview" src="{{ r.image_url }}" alt="{{ r.image_name }}" loading="lazy"
+                            onclick="openLightbox(this.src)"
+                            onerror="this.style.display='none';this.nextElementSibling.style.display='block';">
+                        <span style="display:none;color:var(--text-muted);font-size:0.78rem;">圖片無法讀取</span>
+                        <div class="white-frame-image-name" title="{{ r.image_name }}">{{ r.image_name }}</div>
+                    </td>
+                    <td>
+                        {% if r.white_frame_status == 'NG' %}
+                        <span class="badge badge-ng">NG</span>
+                        {% elif r.white_frame_status == 'OK' %}
+                        <span class="badge badge-ok">OK</span>
+                        {% else %}
+                        <span class="badge" style="background:rgba(245,158,11,0.16);color:#F59E0B;">{{ r.white_frame_status }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if r.white_frame_ng_sides_detail %}
+                            {% for side in r.white_frame_ng_sides_detail %}
+                            <span class="white-frame-side">{{ side.label }} NG · {{ side.gap_count }} 處</span>
+                            {% if side.coordinates %}
+                            <div class="white-frame-coordinate">座標：{% for coord in side.coordinates %}({{ coord[0] }}, {{ coord[1] }}){% if not loop.last %}、{% endif %}{% endfor %}</div>
+                            {% endif %}
+                            {% endfor %}
+                        {% elif r.white_frame_status == 'OK' %}
+                        <span style="color:var(--text-muted);">四邊完整</span>
+                        {% else %}
+                        <span style="color:var(--text-muted);">{{ r.white_frame_reason or '—' }}</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ r.glass_id }}</td>
+                    <td>{{ r.machine_no }}</td>
+                    <td style="white-space:nowrap;">{{ r.created_at }}</td>
+                    <td><a href="{{ r.detail_url }}" style="color:var(--accent);text-decoration:none;">查看明細 →</a></td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="7" style="text-align:center;color:var(--text-muted);padding:32px;">沒有符合條件的 WHITEFRA 記錄</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if total_pages > 1 %}
+    {% set page_base = '/white-frame?' ~ query_string %}
+    <div style="display:flex;justify-content:center;align-items:center;gap:8px;margin-top:20px;flex-wrap:wrap;">
+        {% if page > 1 %}
+        <a href="{{ page_base }}{% if query_string %}&{% endif %}page={{ page - 1 }}" style="color:var(--text);text-decoration:none;padding:6px 12px;border:1px solid var(--border);border-radius:6px;">← 上一頁</a>
+        {% endif %}
+        <span style="color:var(--text-muted);font-size:0.85rem;">第 {{ page }} / {{ total_pages }} 頁</span>
+        {% if page < total_pages %}
+        <a href="{{ page_base }}{% if query_string %}&{% endif %}page={{ page + 1 }}" style="color:var(--text);text-decoration:none;padding:6px 12px;border:1px solid var(--border);border-radius:6px;">下一頁 →</a>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

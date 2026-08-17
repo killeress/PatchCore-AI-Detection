@@ -3,8 +3,8 @@
     <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
         <div>
             <div style="font-weight:700;font-size:0.95rem;">白色外框檢測</div>
-            <div style="margin-top:3px;color:#94A3B8;font-size:0.75rem;">影子模式，不影響正式 OK／NG 與 TCP 回傳；四角不列入判斷</div>
         </div>
+        <a href="/white-frame" style="font-size:0.75rem;color:#93C5FD;text-decoration:none;">查看白框總表 →</a>
         {% if wf.status == 'NG' %}
         <span style="padding:4px 10px;border-radius:999px;background:rgba(239,68,68,0.16);color:#EF4444;font-weight:700;font-size:0.78rem;">觀察 NG</span>
         {% elif wf.status == 'OK' %}

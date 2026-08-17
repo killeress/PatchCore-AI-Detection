@@ -3447,6 +3447,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_record_detail(record_id, path)
             elif path == "/overexposed":
                 self._handle_overexposed(query, path)
+            elif path == "/white-frame":
+                self._handle_white_frame_page(query, path)
             elif path == "/search":
                 self._handle_search(query, path)
             elif path == "/search/export":
@@ -3600,7 +3602,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/central_dashboard/"):
                 self._handle_central_dashboard_file(path)
             elif path.startswith("/images/"):
-                self._handle_source_image(path)
+                self._handle_source_image(path, query)
             elif path in ("/favicon.ico", "/favicon.svg"):
                 self._handle_static_assets("/static/favicon.svg")
             elif path.startswith("/imgs/"):
@@ -4343,6 +4345,96 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             request_path=path
         )
         self._send_response(200, html)
+
+    def _handle_white_frame_page(self, query: dict, path: str):
+        """WHITEFRA 白框檢測總表。"""
+        status = str(query.get("status", [""])[0] or "").strip().upper()
+        if status not in {"OK", "NG", "UNREADABLE", "UNKNOWN"}:
+            status = ""
+        edge = str(query.get("edge", [""])[0] or "").strip().lower()
+        if edge not in {"top", "right", "bottom", "left"}:
+            edge = ""
+        machine_no = str(query.get("machine_no", [""])[0] or "").strip()
+        start_date = str(query.get("start_date", [""])[0] or "").strip()
+        end_date = str(query.get("end_date", [""])[0] or "").strip()
+        try:
+            limit = max(1, min(int(query.get("limit", [50])[0]), 200))
+        except (ValueError, TypeError, IndexError):
+            limit = 50
+        try:
+            page = max(1, int(query.get("page", [1])[0]))
+        except (ValueError, TypeError, IndexError):
+            page = 1
+
+        records, total_count, summary = (
+            self.db.query_white_frame_paged(
+                status=status,
+                edge=edge,
+                machine_no=machine_no,
+                start_date=start_date,
+                end_date=end_date,
+                limit=limit,
+                offset=(page - 1) * limit,
+            )
+            if self.db
+            else ([], 0, {"total": 0, "ok": 0, "ng": 0, "unreadable": 0})
+        )
+
+        import math
+
+        total_pages = max(1, math.ceil(total_count / limit))
+        if page > total_pages:
+            page = total_pages
+            records, _total_count, _summary = (
+                self.db.query_white_frame_paged(
+                    status=status,
+                    edge=edge,
+                    machine_no=machine_no,
+                    start_date=start_date,
+                    end_date=end_date,
+                    limit=limit,
+                    offset=(page - 1) * limit,
+                )
+                if self.db
+                else ([], 0, {})
+            )
+
+        for record in records:
+            image_name = str(record.get("image_name") or "")
+            record["image_url"] = (
+                f"/images/{int(record['record_id'])}/"
+                f"{urllib.parse.quote(image_name, safe='')}?preview=1"
+            )
+            record["detail_url"] = f"/record/{int(record['record_id'])}"
+
+        query_params = [
+            ("status", status),
+            ("edge", edge),
+            ("machine_no", machine_no),
+            ("start_date", start_date),
+            ("end_date", end_date),
+            ("limit", str(limit)),
+        ]
+        query_string = urllib.parse.urlencode(
+            [(key, value) for key, value in query_params if value]
+        )
+        template = self.jinja_env.get_template("white_frame.html")
+        html_text = template.render(
+            records=records,
+            total_count=total_count,
+            summary=summary,
+            status=status,
+            edge=edge,
+            machine_no=machine_no,
+            start_date=start_date,
+            end_date=end_date,
+            page=page,
+            limit=limit,
+            total_pages=total_pages,
+            query_string=query_string,
+            request_path=path,
+        )
+        self._send_response(200, html_text)
 
     def _handle_search_export(self, query: dict):
         """匯出搜尋結果為 CSV"""
@@ -5153,7 +5245,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _handle_source_image(self, path: str):
+    def _handle_source_image(self, path: str, query: Optional[dict] = None):
         """靜態檔案服務 (原始圖片)"""
         # /images/{record_id}/{image_name}
         try:
@@ -5162,7 +5254,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_404()
                 return
             record_id = int(parts[1])
-            image_name = parts[2]
+            image_name = urllib.parse.unquote(parts[2])
             
             # 安全檢查：防止路徑穿越
             image_name = image_name.replace("..", "").replace("/", "").replace("\\", "")
@@ -5173,8 +5265,28 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
                 
             full_path = Path(detail["image_dir"]) / image_name
+            preview = str((query or {}).get("preview", [""])[0]).lower() in (
+                "1", "true", "yes"
+            )
             if full_path.exists() and full_path.is_file():
-                if self._inference_rotate_180_enabled():
+                if preview:
+                    import cv2
+
+                    image = self._read_inference_image(full_path, cv2.IMREAD_UNCHANGED)
+                    if image is None:
+                        self._send_404()
+                        return
+                    height, width = image.shape[:2]
+                    max_dimension = 640
+                    scale = min(1.0, max_dimension / max(height, width))
+                    if scale < 1.0:
+                        image = cv2.resize(
+                            image,
+                            (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                    self._send_image_array_png(image)
+                elif self._inference_rotate_180_enabled():
                     import cv2
 
                     image = self._read_inference_image(full_path, cv2.IMREAD_UNCHANGED)

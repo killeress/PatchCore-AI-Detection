@@ -1,5 +1,25 @@
 # 更新紀錄
 
+## 2026-08-17 v3
+
+### [系統診斷]釋放模型預熱顯存快取
+
+- 每個 PatchCore 模型完成 GPU warm-up 後立即釋放未使用的 PyTorch CUDA allocator cache，避免後續模型載入占用前一個模型留下的大型 KNN 暫存區塊；模型權重、Memory Bank與判定流程不變。
+- LOG 保留 warm-up 前後、cache 清理前後、實際釋放量、allocated／reserved／峰值及整張 GPU 剩餘顯存；清理失敗只記錄 warning，不中斷模型啟動。
+
+## 2026-08-17 v2
+
+### [系統診斷]GPU 顯存載入追蹤
+
+- 啟動載入每個 PatchCore 模型時記錄 CUDA allocated、reserved、warm-up 峰值與整張 GPU 剩餘顯存，協助區分模型常駐用量、warm-up 暫存與 allocator 快取；不修改模型、推論判定或顯存清理行為。
+
+## 2026-08-17 v1
+
+### [推論紀錄]WHITEFRA 白框總表
+
+- 新增「白框總表」頁面，顯示 WHITEFRA 圖片、整體結果、異常邊緣與斷線座標，可依結果、邊緣、機台及日期快速篩選。
+- 白框總表快捷連結放在「參數設定」的「Mark PPOCR檢查」旁，不占用上方導覽列；白框明細同步移除模式與角落判斷提示文字。
+
 ## 2026-08-14 v5
 
 ### [推論紀錄]WHITEFRA 白色外框影子檢測

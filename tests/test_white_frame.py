@@ -194,6 +194,74 @@ def test_shadow_result_does_not_change_judgment_or_tcp_and_persists(tmp_path):
     assert detail["images"][0]["white_frame_result"]["status"] == "NG"
 
 
+def test_white_frame_summary_query_returns_images_sides_coordinates_and_filters(tmp_path):
+    db = CAPIDatabase(tmp_path / "white_frame_summary.db")
+
+    def save(name, status, machine, request_time, sides):
+        payload = {
+            "status": status,
+            "sides": sides,
+            "ng_sides": [key for key, value in sides.items() if value.get("status") == "NG"],
+        }
+        return db.save_inference_record(
+            glass_id=f"G-{name}",
+            model_id="MODEL-A",
+            machine_no=machine,
+            resolution=(1200, 800),
+            machine_judgment="OK",
+            ai_judgment="OK",
+            image_dir=str(tmp_path),
+            total_images=1,
+            ng_images=0,
+            ng_details="[]",
+            request_time=request_time,
+            response_time=request_time,
+            processing_seconds=0.02,
+            image_results_data=[{
+                "image_path": str(tmp_path / name),
+                "image_name": name,
+                "image_width": 1200,
+                "image_height": 800,
+                "white_frame_result": json.dumps(payload),
+            }],
+        )
+
+    top_ng = {
+        "top": {
+            "label": "上邊",
+            "status": "NG",
+            "gap_count": 1,
+            "largest_gap_px": 90,
+            "gaps": [{"center_x": 610, "center_y": 142}],
+        },
+        "right": {"label": "右邊", "status": "OK", "gaps": []},
+        "bottom": {"label": "下邊", "status": "OK", "gaps": []},
+        "left": {"label": "左邊", "status": "OK", "gaps": []},
+    }
+    all_ok = {
+        side: {"label": side, "status": "OK", "gaps": []}
+        for side in ("上邊", "右邊", "下邊", "左邊")
+    }
+    save("WHITEFRA_NG.png", "NG", "CAPI01", "2026-08-14 10:00:00", top_ng)
+    save("WHITEFRA_OK.png", "OK", "CAPI02", "2026-08-15 10:00:00", all_ok)
+
+    rows, total, summary = db.query_white_frame_paged(limit=10)
+    assert total == 2
+    assert summary == {"total": 2, "ok": 1, "ng": 1, "unreadable": 0}
+    ng_row = next(row for row in rows if row["white_frame_status"] == "NG")
+    assert ng_row["white_frame_ng_sides"] == ["top"]
+    assert ng_row["white_frame_ng_sides_detail"][0]["coordinates"] == [(610, 142)]
+
+    rows, total, summary = db.query_white_frame_paged(status="NG", edge="top", machine_no="CAPI01")
+    assert total == 1
+    assert summary["ng"] == 1
+    assert rows[0]["glass_id"] == "G-WHITEFRA_NG.png"
+
+    rows, total, _summary = db.query_white_frame_paged(status="NG", edge="left")
+    assert rows == []
+    assert total == 0
+
+
 def test_server_persists_white_frame_in_post_response_worker(tmp_path, monkeypatch):
     normal_result = _white_result(tmp_path / "W0F00000.png", {})
     normal_result.white_frame_result = None
@@ -280,8 +348,18 @@ def test_local_wbf_reference_samples():
 def test_record_pages_include_shadow_result_panel():
     partial = Path("templates/_white_frame_result.html").read_text(encoding="utf-8")
     assert "白色外框檢測" in partial
-    assert "不影響正式 OK／NG 與 TCP 回傳" in partial
-    assert "四角不列入判斷" in partial
+    assert "影子模式，不影響正式 OK／NG 與 TCP 回傳；四角不列入判斷" not in partial
     for template_name in ("record_detail.html", "record_detail_v3.html"):
         template = Path("templates") / template_name
         assert '{% include "_white_frame_result.html" %}' in template.read_text(encoding="utf-8")
+
+
+def test_white_frame_summary_page_template_and_nav_are_present():
+    page = Path("templates/white_frame.html").read_text(encoding="utf-8")
+    nav = Path("templates/base.html").read_text(encoding="utf-8")
+    settings = Path("templates/settings.html").read_text(encoding="utf-8")
+    assert "白色外框檢測總表" in page
+    assert "r.image_url" in page
+    assert "r.white_frame_ng_sides_detail" in page
+    assert 'href="/white-frame"' not in nav
+    assert 'href=\"/white-frame\"' in settings

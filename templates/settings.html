@@ -3275,6 +3275,7 @@
             <button class="settings-tab-btn ${currentTab === 'within-spec' ? 'active' : ''}" data-target="within-spec" onclick="switchTab('within-spec')">📏 規格內判定</button>
             <button class="settings-tab-btn ${currentTab === 'auto-model-switch' ? 'active' : ''}" data-target="auto-model-switch" onclick="switchTab('auto-model-switch')">↔ 自動切換模型</button>
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'mark-shadow' ? 'active' : ''}" data-target="mark-shadow" onclick="switchTab('mark-shadow')">🔬 Mark PPOCR檢查</button>` : ''}
+            ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<a class="settings-tab-btn" href="/white-frame" style="text-decoration:none;">🖼️ 白框總表</a>` : ''}
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'accounts' ? 'active' : ''}" data-target="accounts" onclick="switchTab('accounts')">👤 帳號管理</button>` : ''}
             <button class="settings-tab-btn ${currentTab === 'history' ? 'active' : ''}" data-target="history" onclick="switchTab('history')">📋 修改紀錄</button>
         `;

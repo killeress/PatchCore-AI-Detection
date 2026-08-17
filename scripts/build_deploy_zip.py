@@ -67,6 +67,7 @@ CODE_FILES = [
     "templates/dashboard.html",
     "templates/debug_inference.html",
     "templates/_white_frame_result.html",
+    "templates/white_frame.html",
     "templates/record_detail.html",
     "templates/record_detail_v3.html",
     "templates/retrain_pool.html",

@@ -571,6 +571,56 @@ class CAPIInferencer:
             except ImportError:
                 return "cpu"
         return device
+
+    @staticmethod
+    def _log_cuda_memory(stage: str) -> None:
+        """記錄 PyTorch allocator 與整張 GPU 的顯存快照。"""
+        if not torch.cuda.is_available():
+            return
+
+        try:
+            torch.cuda.synchronize()
+            mib = 1024 * 1024
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            logger.info(
+                "[CUDA-MEM] %s | "
+                "allocated=%.1f MiB reserved=%.1f MiB "
+                "peak_allocated=%.1f MiB peak_reserved=%.1f MiB "
+                "device_used=%.1f MiB device_free=%.1f MiB",
+                stage,
+                torch.cuda.memory_allocated() / mib,
+                torch.cuda.memory_reserved() / mib,
+                torch.cuda.max_memory_allocated() / mib,
+                torch.cuda.max_memory_reserved() / mib,
+                (total_bytes - free_bytes) / mib,
+                free_bytes / mib,
+            )
+        except Exception as exc:
+            logger.warning("[CUDA-MEM] %s unavailable: %s", stage, exc)
+
+    @staticmethod
+    def _clear_cuda_cache(stage: str) -> None:
+        """釋放未使用的 PyTorch CUDA cache，並記錄實際釋放量。"""
+        if not torch.cuda.is_available():
+            return
+
+        try:
+            torch.cuda.synchronize()
+            mib = 1024 * 1024
+            reserved_before = torch.cuda.memory_reserved()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            reserved_after = torch.cuda.memory_reserved()
+            logger.info(
+                "[CUDA-MEM] cache-clear %s | "
+                "reserved_before=%.1f MiB reserved_after=%.1f MiB released=%.1f MiB",
+                stage,
+                reserved_before / mib,
+                reserved_after / mib,
+                max(0, reserved_before - reserved_after) / mib,
+            )
+        except Exception as exc:
+            logger.warning("[CUDA-MEM] cache-clear %s failed: %s", stage, exc)
     
     def _load_model_from_path(self, model_path: Path) -> Optional[Any]:
         """載入 PatchCore 模型並回傳 inferencer 物件 (支援 OpenVINO 和 PyTorch)
@@ -611,8 +661,9 @@ class CAPIInferencer:
             original_windows_path = pathlib.WindowsPath
             if platform.system() != 'Windows':
                 pathlib.WindowsPath = pathlib.PosixPath
-                
+
             try:
+                self._log_cuda_memory(f"before-load model={model_path.name}")
                 inferencer_obj = TorchInferencer(
                     path=str(model_path),
                     device=self.device,
@@ -636,15 +687,28 @@ class CAPIInferencer:
         # fp16 KNN 優化: 將 memory bank 轉為 fp16，並 patch euclidean_dist 使用 tensor core
         self._optimize_model_fp16(inferencer_obj)
 
+        self._log_cuda_memory(f"after-load model={model_path.name}")
+
         # GPU Warm-up: 預先編譯 CUDA kernels，避免首次推論延遲
         if self.device != "cpu" and inferencer_obj is not None:
             try:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.reset_peak_memory_stats()
+            except Exception as e:
+                logger.warning("[CUDA-MEM] reset peak failed for %s: %s", model_path.name, e)
+            try:
                 print("🔥 GPU Warm-up 中...")
                 dummy = np.zeros((self.config.tile_size, self.config.tile_size, 3), dtype=np.uint8)
-                inferencer_obj.predict(dummy)
+                warmup_result = inferencer_obj.predict(dummy)
+                del warmup_result
                 print("✅ GPU Warm-up 完成")
             except Exception as e:
                 print(f"⚠️ GPU Warm-up 失敗 (不影響推論): {e}")
+            finally:
+                self._log_cuda_memory(f"after-warmup model={model_path.name}")
+                self._clear_cuda_cache(f"model={model_path.name}")
+                self._log_cuda_memory(f"after-cache-clear model={model_path.name}")
         
         return inferencer_obj
     
@@ -1020,6 +1084,9 @@ class CAPIInferencer:
             loaded,
             total,
             self.config.machine_id,
+        )
+        self._log_cuda_memory(
+            f"preload-complete machine={self.config.machine_id} loaded={loaded}/{total}"
         )
         return loaded, total
 
