@@ -6303,7 +6303,9 @@ class CAPIInferencer:
                 panel_polygon=polygon,
             )
 
-            if polygon is not None:
+            # B0F 只用 polygon 粗略定位 AOI 中心；亮點判定必須保留完整
+            # 512x512，不用 polygon 當有效範圍，也不因 polygon 抓歪而拒絕座標。
+            if not is_skip_file and polygon is not None:
                 polygon_distance = float(cv2.pointPolygonTest(
                     np.asarray(polygon, dtype=np.float32),
                     (float(img_x), float(img_y)),
@@ -6331,10 +6333,10 @@ class CAPIInferencer:
                 ty2 = img_h
                 ty = max(0, ty2 - tile_size)
 
-            shift_axes = self._resolve_aoi_inward_shift_axes(
-                img_x, img_y, result.raw_bounds, tile_size,
-            )
             if not is_skip_file and polygon is not None:
+                shift_axes = self._resolve_aoi_inward_shift_axes(
+                    img_x, img_y, result.raw_bounds, tile_size,
+                )
                 tx, ty, _cov, _shifted = resolve_inward_polygon_tile(
                     anchor_xy=(img_x, img_y),
                     polygon=polygon,
@@ -6351,15 +6353,17 @@ class CAPIInferencer:
             crop_h = ty2 - ty
             tile_img = processed_image[ty:ty2, tx:tx2].copy()
             original_tile = raw_image[ty:ty2, tx:tx2].copy()
-            _tile_zone, _cov, _dist, tile_mask = classify_tile_zone(
-                (tx, ty, tx2, ty2), polygon, pre_cfg,
-            )
-            if tile_mask is not None and not np.any(tile_mask):
-                raise RuntimeError(
-                    f"[v2] AOI tile 與 panel 無有效重疊: "
-                    f"{defect.defect_code} image=({img_x},{img_y}) "
-                    f"tile=({tx},{ty},{tx2},{ty2})"
+            tile_mask = None
+            if not is_skip_file:
+                _tile_zone, _cov, _dist, tile_mask = classify_tile_zone(
+                    (tx, ty, tx2, ty2), polygon, pre_cfg,
                 )
+                if tile_mask is not None and not np.any(tile_mask):
+                    raise RuntimeError(
+                        f"[v2] AOI tile 與 panel 無有效重疊: "
+                        f"{defect.defect_code} image=({img_x},{img_y}) "
+                        f"tile=({tx},{ty},{tx2},{ty2})"
+                    )
 
             if is_skip_file:
                 zone = "bright_spot"

@@ -173,6 +173,69 @@ def test_v2_aoi_coord_uses_polygon_when_raw_bounds_map_outside_panel():
         assert tile.zone == expected_zone
 
 
+def test_v2_b0f_bright_spot_checks_full_tile_outside_polygon():
+    """B0F 以完整 512x512 判定，不讓不準的 polygon 遮掉極邊緣亮點。"""
+    cfg = CAPIConfig()
+    cfg.is_new_architecture = True
+    cfg.tile_size = 512
+    cfg.enable_panel_polygon = True
+    cfg.bright_spot_diff_threshold = 2
+    cfg.bright_spot_median_kernel = 77
+    cfg.bright_spot_min_area = 2
+    cfg.bright_spot_threshold = 200
+    cfg.tile_corner_exclusion_enabled = False
+
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+
+    image = np.zeros((1024, 1024), dtype=np.uint8)
+    image[400:419, 900:920] = 54
+    polygon = np.array(
+        [[256, 0], [768, 0], [768, 1024], [256, 1024]],
+        dtype=np.float32,
+    )
+    result = ImageResult(
+        image_path=Path("B0F00000_test.png"),
+        image_size=(1024, 1024),
+        otsu_bounds=(256, 0, 768, 1024),
+        exclusion_regions=[],
+        tiles=[],
+        excluded_tile_count=0,
+        processed_tile_count=0,
+        processing_time=0.0,
+        raw_bounds=(256, 0, 768, 1024),
+        panel_polygon=polygon,
+    )
+
+    created = inferencer._create_aoi_centered_tiles_v2(
+        image=image,
+        result=result,
+        defects=[
+            AOIReportDefect(
+                defect_code="PCDK2",
+                product_x=512,
+                product_y=512,
+                image_prefix="B0F00000",
+            )
+        ],
+        product_resolution=(512, 1024),
+        pre_cfg=PreprocessConfig(tile_size=512),
+        is_skip_file=True,
+    )
+
+    assert created == 1
+    tile = result.tiles[0]
+    assert (tile.x, tile.y) == (512, 256)
+    assert tile.image.shape == (512, 512)
+    assert tile.mask is None
+
+    score, _anomaly_map = inferencer._detect_bright_spots(tile)
+
+    assert score == 1.0
+    assert tile.bright_spot_max_diff == 54
+    assert tile.bright_spot_area == 380
+
+
 def test_v2_aoi_coord_uses_polygon_when_wrong_raw_mapping_is_still_inside_panel():
     """Raw bounds 被下方字樣拉長時，不能因錯誤座標仍在 panel 內就沿用。"""
     cfg = CAPIConfig()

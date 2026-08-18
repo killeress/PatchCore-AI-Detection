@@ -828,9 +828,7 @@ def test_process_panel_v2_runs_b0f_skip_file_with_bright_spot_logic(tmp_path, pr
     assert len(b0f.tiles) == 1
     tile = b0f.tiles[0]
     assert tile.is_aoi_coord_tile is True
-    assert tile.mask is not None
-    assert tile.mask.shape == tile.image.shape[:2]
-    assert tile.mask.dtype == np.uint8
+    assert tile.mask is None
     np.testing.assert_array_equal(tile.image, np.zeros((512, 512), dtype=np.uint8))
     assert tile.is_bright_spot_detection is True
     assert len(b0f.anomaly_tiles) == 1
