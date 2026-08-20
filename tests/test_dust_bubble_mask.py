@@ -1,5 +1,6 @@
-from pathlib import Path
+import re
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 import uuid
 
@@ -531,6 +532,72 @@ def test_settings_api_hides_removed_pixel_grid_mask_ratio():
 
     names = {p["param_name"] for p in captured["params"]}
     assert "dust_pixel_grid_max_mask_ratio" not in names
+
+
+def test_settings_api_returns_seeded_page_params_without_inferencer(tmp_path):
+    from capi_database import CAPIDatabase
+    from capi_web import CAPIWebHandler
+
+    db = CAPIDatabase(tmp_path / "settings.db")
+    config = CAPIConfig()
+    config.is_new_architecture = True
+    db.init_config_from_yaml(config)
+    captured = {}
+    handler = CAPIWebHandler.__new__(CAPIWebHandler)
+    handler.db = db
+    handler.inferencer = None
+    handler._current_settings_user = lambda: None
+    handler._send_json = lambda payload: captured.update(payload)
+
+    handler._handle_api_settings()
+
+    settings_html = (
+        Path(__file__).resolve().parent.parent / "templates" / "settings.html"
+    ).read_text(encoding="utf-8")
+    grouped_names = set()
+    for body in re.findall(
+        r"const\s+[A-Z][A-Z0-9_]*_PARAMS\s*=\s*\[(.*?)\];",
+        settings_html,
+        flags=re.DOTALL,
+    ):
+        grouped_names.update(re.findall(r"['\"]([A-Za-z0-9_]+)['\"]", body))
+    grouped_names.add("within_spec_judgment_rules")
+    names = {p["param_name"] for p in captured["params"]}
+    assert grouped_names.issubset(names)
+
+
+def test_settings_api_and_page_hide_removed_params():
+    from capi_web import CAPIWebHandler
+
+    captured = {}
+    handler = CAPIWebHandler.__new__(CAPIWebHandler)
+    removed_names = {
+        "dust_two_stage_fallback_score",
+        "aoi_edge_aoi_margin_px",
+        "aoi_edge_pc_shift_band_px",
+    }
+    handler.db = SimpleNamespace(get_all_config_params=lambda: [
+        {
+            "param_name": name,
+            "param_value": "0.5",
+            "param_type": "float",
+            "decoded_value": 0.5,
+        }
+        for name in removed_names
+    ])
+    handler.inferencer = SimpleNamespace(config=CAPIConfig())
+    handler._current_settings_user = lambda: None
+    handler._send_json = lambda payload: captured.update(payload)
+
+    handler._handle_api_settings()
+
+    names = {p["param_name"] for p in captured["params"]}
+    assert names.isdisjoint(removed_names)
+    settings_html = (
+        Path(__file__).resolve().parent.parent / "templates" / "settings.html"
+    ).read_text(encoding="utf-8")
+    for name in removed_names:
+        assert name not in settings_html
 
 
 def test_bool_update_repairs_legacy_string_param_type():

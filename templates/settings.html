@@ -1981,7 +1981,7 @@
         'dust_heatmap_iou_threshold', 'dust_heatmap_top_percent',
         'dust_heatmap_metric', 'dust_mask_before_binarize',
         'dust_two_stage_enabled', 'dust_two_stage_dust_ratio', 'dust_two_stage_bg_blur',
-        'dust_two_stage_diff_percentile', 'dust_two_stage_min_area', 'dust_two_stage_fallback_score',
+        'dust_two_stage_diff_percentile', 'dust_two_stage_min_area',
         'dust_detect_dark_particles', 'dust_detect_bubbles_enabled'
     ];
     // Sub-groups within DUST tab
@@ -1998,7 +1998,7 @@
     ];
     const DUST_TWO_STAGE_PARAMS = [
         'dust_two_stage_enabled', 'dust_two_stage_dust_ratio', 'dust_two_stage_bg_blur',
-        'dust_two_stage_diff_percentile', 'dust_two_stage_min_area', 'dust_two_stage_fallback_score'
+        'dust_two_stage_diff_percentile', 'dust_two_stage_min_area'
     ];
     const CV_EDGE_PARAMS = [
         'cv_edge_enabled', 'cv_edge_dust_filter_enabled', 'otsu_offset',
@@ -2019,7 +2019,7 @@
         'bomb_area_force_detection_enabled',
         'aoi_report_path_replace_from', 'aoi_report_path_replace_to',
         'aoi_edge_inspector', 'aoi_edge_boundary_band_px',
-        'aoi_edge_pc_roi_inward_shift_enabled', 'aoi_edge_aoi_margin_px',
+        'aoi_edge_pc_roi_inward_shift_enabled',
         'cv_edge_aoi_threshold', 'cv_edge_aoi_min_area', 'cv_edge_aoi_solidity_min',
         'cv_edge_aoi_polygon_erode_px',
         'cv_edge_aoi_morph_open_kernel', 'cv_edge_aoi_min_max_diff',
@@ -3228,15 +3228,13 @@
                 const reason = 'aoi_edge_inspector=cv 時不使用此參數（僅 fusion 生效）';
                 paramLockMap['aoi_edge_boundary_band_px'] = reason;
                 paramLockMap['aoi_edge_pc_roi_inward_shift_enabled'] = reason;
-                paramLockMap['aoi_edge_aoi_margin_px'] = reason;
             } else if (inspectorVal === 'patchcore') {
                 const reason = 'aoi_edge_inspector=patchcore 時完全走 PatchCore，CV 細節與 fusion band/shift 均不使用';
                 paramLockMap['aoi_edge_boundary_band_px'] = reason;
                 paramLockMap['aoi_edge_pc_roi_inward_shift_enabled'] = reason;
-                paramLockMap['aoi_edge_aoi_margin_px'] = reason;
                 CV_AOI_DETAIL_PARAMS.forEach(n => { paramLockMap[n] = reason; });
             }
-            // fusion 下無額外鎖定：cv_edge_aoi_* / aoi_edge_boundary_band_px / shift / margin 皆生效
+            // fusion 下無額外鎖定：cv_edge_aoi_* / aoi_edge_boundary_band_px / shift 皆生效
         }
 
         // fusion 下 inspector_mode=="fusion" 的 aoi_edge defect 已在 _inspect_roi_fusion
@@ -4314,7 +4312,6 @@
         'dust_two_stage_bg_blur': '局部背景估計 Gaussian Blur 核大小 (px, 必須奇數)',
         'dust_two_stage_diff_percentile': '特徵偵測靈敏度 (取 diff 分布的此百分位, 越低越敏感)',
         'dust_two_stage_min_area': '特徵最小面積，低於此值視為雜訊 (px)',
-        'dust_two_stage_fallback_score': '安全網: 找不到特徵但 heatmap 分數 ≥ 此值時保守判 NG',
         // No-detect zone decay
         'mark_exclusion_padding_px': 'MARK 不檢測區硬遮罩外擴 (px)',
         'mark_exclusion_soft_decay_px': 'MARK 硬遮罩外圈 heatmap 降權寬度 (px)',

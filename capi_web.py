@@ -12100,7 +12100,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             params = self.db.get_all_config_params() if self.db else []
             params = [
                 p for p in params
-                if p.get("param_name") != "dust_pixel_grid_max_mask_ratio"
+                if p.get("param_name") not in {
+                    "dust_pixel_grid_max_mask_ratio",
+                    "dust_two_stage_fallback_score",
+                    "aoi_edge_aoi_margin_px",
+                    "aoi_edge_pc_shift_band_px",
+                }
             ]
             server_config = (
                 getattr(self._capi_server_instance, "server_config", {}) or {}

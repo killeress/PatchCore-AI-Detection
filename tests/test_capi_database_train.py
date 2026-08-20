@@ -4,6 +4,7 @@ Tests for training-related schema additions to CAPIDatabase:
   - model_registry
   - training_tile_pool
 """
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -184,6 +185,129 @@ class TestSettingsUsers:
 
 
 class TestConfigParamDefaults:
+    def test_settings_page_grouped_params_are_seeded_in_db(self, tmp_path):
+        db = _make_db(tmp_path)
+        config = CAPIConfig()
+        config.is_new_architecture = True
+        db.init_config_from_yaml(config)
+
+        settings_html = (
+            Path(__file__).resolve().parent.parent / "templates" / "settings.html"
+        ).read_text(encoding="utf-8")
+        grouped_names = set()
+        for body in re.findall(
+            r"const\s+[A-Z][A-Z0-9_]*_PARAMS\s*=\s*\[(.*?)\];",
+            settings_html,
+            flags=re.DOTALL,
+        ):
+            grouped_names.update(re.findall(r"['\"]([A-Za-z0-9_]+)['\"]", body))
+        grouped_names.add("within_spec_judgment_rules")
+
+        db_params = {
+            param["param_name"]: param
+            for param in db.get_all_config_params()
+        }
+        missing = sorted(grouped_names - set(db_params))
+        missing_descriptions = sorted(
+            name for name in grouped_names
+            if name in db_params and not db_params[name].get("description")
+        )
+
+        assert missing == []
+        assert missing_descriptions == []
+
+    def test_scratch_settings_are_seeded_and_existing_value_is_preserved(self, tmp_path):
+        db = _make_db(tmp_path)
+        with _conn(db) as conn:
+            conn.execute(
+                """INSERT INTO config_params
+                   (param_name, param_value, param_type, description)
+                   VALUES (?, ?, ?, ?)""",
+                ("scratch_safety_multiplier", "0.95", "float", "舊說明"),
+            )
+            conn.commit()
+
+        config = CAPIConfig()
+        config.scratch_classifier_enabled = False
+        config.scratch_safety_multiplier = 1.5
+        config.scratch_bundle_path = "deployment/custom_scratch.pkl"
+        config.scratch_dinov2_repo_path = "deployment/custom_dinov2_repo"
+        config.scratch_dinov2_weights_path = "deployment/custom_dinov2.pth"
+        db.init_config_from_yaml(config)
+
+        expected = {
+            "scratch_classifier_enabled": ("bool", False),
+            "scratch_safety_multiplier": ("float", 0.95),
+            "scratch_bundle_path": ("string", "deployment/custom_scratch.pkl"),
+            "scratch_dinov2_repo_path": ("string", "deployment/custom_dinov2_repo"),
+            "scratch_dinov2_weights_path": ("string", "deployment/custom_dinov2.pth"),
+        }
+        for name, (param_type, value) in expected.items():
+            param = db.get_config_param(name)
+            assert param is not None, name
+            assert param["param_type"] == param_type
+            assert param["decoded_value"] == value
+            assert param["description"]
+
+    def test_active_dust_settings_are_seeded_from_config(self, tmp_path):
+        db = _make_db(tmp_path)
+        config = CAPIConfig()
+        config.dust_mask_before_binarize = True
+        config.dust_two_stage_enabled = True
+        config.dust_two_stage_dust_ratio = 0.42
+        config.dust_two_stage_bg_blur = 41
+        config.dust_two_stage_diff_percentile = 87.5
+        config.dust_two_stage_min_area = 6
+        config.dust_detect_bubbles_enabled = True
+
+        db.init_config_from_yaml(config)
+
+        expected = {
+            "dust_mask_before_binarize": ("bool", True),
+            "dust_two_stage_enabled": ("bool", True),
+            "dust_two_stage_dust_ratio": ("float", 0.42),
+            "dust_two_stage_bg_blur": ("int", 41),
+            "dust_two_stage_diff_percentile": ("float", 87.5),
+            "dust_two_stage_min_area": ("int", 6),
+            "dust_detect_bubbles_enabled": ("bool", True),
+        }
+        for name, (param_type, value) in expected.items():
+            param = db.get_config_param(name)
+            assert param is not None, name
+            assert param["param_type"] == param_type
+            if isinstance(value, float):
+                assert param["decoded_value"] == pytest.approx(value)
+            else:
+                assert param["decoded_value"] == value
+
+        assert db.get_config_param("dust_two_stage_fallback_score") is None
+
+    def test_dust_settings_migration_preserves_existing_values(self, tmp_path):
+        db = _make_db(tmp_path)
+        with _conn(db) as conn:
+            conn.execute(
+                """INSERT INTO config_params
+                   (param_name, param_value, param_type, description)
+                   VALUES (?, ?, ?, ?)""",
+                ("dust_detect_bubbles_enabled", "true", "bool", "舊說明"),
+            )
+            conn.execute(
+                """INSERT INTO config_params
+                   (param_name, param_value, param_type, description)
+                   VALUES (?, ?, ?, ?)""",
+                ("dust_two_stage_dust_ratio", "0.15", "float", "舊說明"),
+            )
+            conn.commit()
+
+        config = CAPIConfig()
+        config.dust_detect_bubbles_enabled = False
+        config.dust_two_stage_dust_ratio = 0.42
+        db.init_config_from_yaml(config)
+
+        assert db.get_config_param("dust_detect_bubbles_enabled")["decoded_value"] is True
+        assert db.get_config_param("dust_two_stage_dust_ratio")["decoded_value"] == pytest.approx(0.15)
+        assert db.get_config_param("dust_two_stage_bg_blur") is not None
+
     def test_inference_rotation_parameter_defaults_off(self, tmp_path):
         db = _make_db(tmp_path)
 
