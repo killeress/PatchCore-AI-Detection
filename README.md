@@ -1,220 +1,169 @@
-# CAPI AI — Automated Optical Inspection Intelligence System
+# CAPI AI — AOI PatchCore Inspection Platform
 
-> **An industrial-grade AI inference platform for panel defect detection, built on PatchCore anomaly detection with real-time TCP/IP communication, heatmap visualization, and human-inspection cross-validation.**
+> Production-oriented AI inference service for AOI panel inspection. It receives AOI requests over TCP, runs the configured PatchCore pipeline, returns the legacy AOI result together with the QJPG report, and stores traceable results for Web review.
 
-[![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python)](https://python.org)
-[![PatchCore](https://img.shields.io/badge/AI-PatchCore-orange)](https://github.com/amazon-science/patchcore-inspection)
-[![OpenVINO](https://img.shields.io/badge/Runtime-OpenVINO%20%7C%20PyTorch-lightblue)](https://openvino.ai)
-[![SQLite](https://img.shields.io/badge/Database-SQLite-green)](https://sqlite.org)
+🇹🇼 [繁體中文說明 → README.zh-TW.md](./README.zh-TW.md)
 
-🇹🇼 [繁體中文版說明 → README.zh-TW.md](./README.zh-TW.md)
+## What this repository contains
 
----
+- **Inference server** — `capi_server.py` handles persistent TCP client connections, request parsing, model dispatch, inference, and protocol responses.
+- **PatchCore pipeline** — `capi_inference.py` and `capi_preprocess.py` cover panel preprocessing, tile/zone routing, anomaly scoring, heatmaps, MARK and bomb handling, and post-processing rules defined by model configuration.
+- **Traceability and Web UI** — `capi_database.py` stores inference, image, and tile records in SQLite; `capi_web.py` serves monitoring, search, record details, RIC review, and administration pages.
+- **Training and model library** — the `/training` → `/train/new` workflow prepares training data, reviews tiles, trains model bundles, and manages activation from `/models`.
+- **Deployment support** — release metadata, deploy ZIP generation, manual update, and pull-based update helpers are included in the repository.
 
-## Overview
+The production data path is:
 
-CAPI AI integrates seamlessly into existing AOI (Automated Optical Inspection) production lines, acting as a second-layer AI judge that validates machine judgment using deep learning anomaly detection. It supports real-time inference via TCP/IP, persists all results to a SQLite database, and provides a built-in web dashboard for traceability and analytics — including comparison with RIC (human re-inspection) records.
-
-```
-AOI Machine  ──TCP/IP──▶  CAPI AI Server  ──▶  SQLite DB
-                                │                    │
-                                ▼                    ▼
-                          Heatmap Files         Web Dashboard
-                                                     │
-                                            RIC Comparison Report
-```
-
----
-
-## Key Features
-
-| Feature | Description |
-|---------|-------------|
-| 🔬 **PatchCore Inference** | Tile-based anomaly detection (512×512 patches) with configurable thresholds |
-| 🌐 **TCP/IP Server** | Multi-client socket server for real-time AOI integration |
-| 🗺️ **Heatmap Visualization** | Per-tile anomaly heatmaps with overlay rendering |
-| 🧹 **Smart Filtering** | Dust/scratch suppression via OMIT image cross-validation & Heatmap IOU |
-| 💣 **Bomb Defect Detection** | YAML-configurable coordinate-based bomb defect classification |
-| 📊 **Web Dashboard** | Real-time monitoring, searchable record history, per-shift statistics |
-| 🔎 **RIC Cross-Validation** | Import human inspection (RIC) data and compare against AI/AOI results |
-| 🗃️ **3-Layer Traceability** | Record → Image → Tile level persistence with full audit trail |
-| ⚡ **Dual Runtime** | Supports both OpenVINO (`.xml`) and PyTorch (`.pt`) model formats |
-| 🏭 **Multi-Line Support** | Port-per-line architecture (Line N → Port 79NN) |
-
----
-
-## Project Structure
-
-```
-CAPI01_AD/
-│
-├── configs/
-│   └── capi_3f.yaml              # Inference configuration (thresholds, exclusion zones, bomb coords)
-│
-├── ── Core Modules ──
-├── capi_config.py                # YAML config loader & validator
-├── capi_inference.py             # PatchCore inference engine (tiling, scoring, filtering)
-├── capi_heatmap.py               # Heatmap generation & file management
-├── capi_database.py              # SQLite persistence (records / images / tiles)
-│
-├── ── Server ──
-├── capi_server.py                # TCP Socket Server (production entry point)
-├── capi_web.py                   # Web interface (HTTP server + REST API)
-├── server_config.yaml            # Linux production config
-├── server_config_local.yaml      # Windows local testing config
-├── start_server.sh               # Linux startup script
-│
-├── ── Templates & Static ──
-├── templates/                    # Jinja2 HTML templates
-│   ├── base.html                 # Layout & navigation
-│   ├── dashboard_v3.html         # Real-time monitoring dashboard
-│   ├── record_detail_v3.html     # Per-record drill-down with heatmaps
-│   ├── ric_report.html           # RIC human inspection comparison report
-│   └── ...
-├── static/                       # CSS, JS, assets
-│
-├── ── Tooling ──
-├── capi_missed_detection_analyzer.py  # Missed detection batch analyzer
-├── diagnose_bomb.py                   # Bomb defect diagnostics & visualizer
-├── auto_sender.py                     # Automated test request sender
-├── test_client.py                     # TCP client for manual testing
-├── check_db.py                        # Database inspection utility
-│
-├── model.pt                      # Trained PatchCore model
-├── capi_mark.png                 # MARK template for exclusion detection
-├── requirements.txt
-└── README.md
+```text
+AOI client
+    │ TCP
+    ▼
+capi_server.py ──► capi_inference.py / capi_preprocess.py
+    │                              │
+    ├── legacy AOI + QJPG response │
+    ├── SQLite inference records   └── heatmaps and diagnostics
+    ▼
+capi_web.py ──► dashboard, review, training, model library, settings
 ```
 
----
+## Requirements and installation
 
-## Getting Started
-
-### Prerequisites
+Use Python 3.10 or newer; the current development/deployment environments use Python 3.11/3.12.
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-> **GPU Note**: OpenVINO inference is recommended for production. PyTorch (`.pt`) is supported for local testing without Intel hardware.
+The repository does not contain production model weights. A runnable installation also needs model bundles and image-path mappings appropriate for the target machine. Weight files, databases, local datasets, and local credentials are intentionally excluded from normal source control and deployment packaging.
 
-### Linux Production Server
+## Start the server
 
-```bash
-# 1. Edit configuration
-vim server_config.yaml
+### Windows local test
 
-# 2. Launch (background + web dashboard)
-chmod +x start_server.sh
-./start_server.sh
-```
+`server_config_local.yaml` is the local profile:
 
-### Windows Local Testing
+- TCP server: `0.0.0.0:7891`
+- Web UI: `http://localhost:8080`
+- SQLite database: `./test_results.db`
+- Heatmaps: `./test_heatmaps`
 
-```bash
-# Terminal A — Start the inference server
+Start it with either command:
+
+```powershell
 python capi_server.py --config server_config_local.yaml
-
-# Terminal B — Run a test request
-python test_client.py
-
-# Terminal B — Test with a real panel folder
-python test_client.py --real "D:\path\to\panel_folder"
-
-# Browser — View the web dashboard
-# http://localhost:8080
+# or
+start_server_local.bat
 ```
 
----
+If a panel dataset is available, `auto_sender.py` can send sample requests:
 
-## Communication Protocol
-
-CAPI AI uses a simple semicolon-delimited TCP text protocol:
-
-```
-[Request]   AOI@<GlassID>;<ModelID>;<MachineNo>;<ResX>,<ResY>;<MachineJudgment>;<ImageDir>
-[Response]  AOI@<GlassID>;<ModelID>;<MachineNo>;<MachineJudgment>;<AIJudgment>
+```powershell
+python auto_sender.py --host 127.0.0.1 --port 7891 --ng-folder D:\path\to\panels --count 1
 ```
 
-**AI Judgment values:**
+### Linux production
 
-| Value | Meaning |
-|-------|---------|
-| `OK` | No defect detected |
-| `NG@ImageName(X,Y)` | Defect found at tile coordinates (X, Y) |
-| `ERR:description` | Processing error |
+Edit `server_config.yaml` for the target machine, then use the service helper:
 
----
-
-## Web Dashboard
-
-Access the dashboard at `http://<server>:<port>/` after starting the server.
-
-| Route | Description |
-|-------|-------------|
-| `/` | Real-time monitoring dashboard |
-| `/records` | Searchable inference history |
-| `/record/<id>` | Per-record heatmap drill-down |
-| `/ric` | RIC human inspection comparison report |
-| `/debug` | Single-image debug inference |
-| `/stats` | Historical statistics & trends |
-
-### RIC Comparison Report
-
-Import human re-inspection (RIC) `.xls` export files to automatically compare:
-- **AOI Accuracy** — Agreement rate between AOI judgment and RIC result
-- **AI Accuracy** — Agreement rate between AI judgment and RIC result
-- **Over-inspection Rate** — Cases where AOI/AI judged NG but RIC judged OK
-- **Miss-detection Rate** — Cases where AOI/AI judged OK but RIC judged NG
-
-Click any stat card to instantly filter the detail table. Export filtered results as CSV.
-
----
-
-## Configuration
-
-Key parameters in `configs/capi_3f.yaml`:
-
-```yaml
-threshold: 0.65                    # Anomaly score threshold (0.0 ~ 1.0)
-tile_size: 512                     # Inference tile size (px)
-dust_heatmap_top_percent: 0.4      # Dust/scratch IOU top-percentile
-excluded_edge_margin: 0.03         # Edge exclusion ratio
-bomb_defects:                      # Coordinate-based bomb defect rules
-  - image_prefix: "STANDARD"
-    coordinates: [[x1,y1], ...]
+```bash
+chmod +x start_server.sh
+./start_server.sh              # stop old process, start in background, tail the log
+./start_server.sh status
+./start_server.sh log
+./start_server.sh stop
 ```
 
----
+The production profile currently defaults to TCP port `7907` and Web port `80`. The actual ports, database path, heatmap path, model list, path mapping, retention policy, and optional integrations are controlled by `server_config.yaml`.
 
-## Architecture
+For a direct foreground start:
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    AOI Machine (Client)                  │
-└──────────────────────────┬──────────────────────────────┘
-                           │ TCP/IP Request
-┌──────────────────────────▼──────────────────────────────┐
-│                   CAPIServer (capi_server.py)            │
-│  ┌──────────────┐   ┌───────────────┐   ┌────────────┐  │
-│  │ Config Loader│   │ CAPIInferencer│   │HeatmapMgr  │  │
-│  │(capi_config) │   │(PatchCore)    │   │(capi_heatm)│  │
-│  └──────────────┘   └───────┬───────┘   └────────────┘  │
-│                             │                            │
-│  ┌──────────────────────────▼──────────────────────────┐ │
-│  │              CAPIDatabase (SQLite)                  │ │
-│  │  inference_records → image_results → tile_results   │ │
-│  └──────────────────────────┬──────────────────────────┘ │
-└──────────────────────────── │ ──────────────────────────-┘
-                              │
-┌─────────────────────────────▼───────────────────────────┐
-│                 CAPIWebHandler (capi_web.py)             │
-│         HTTP Dashboard + REST API + RIC Reports          │
-└─────────────────────────────────────────────────────────┘
+```bash
+python3 capi_server.py --config server_config.yaml
 ```
 
----
+Do not copy production paths or credentials into the local profile. In particular, `server_config.yaml` contains machine-specific paths and MES settings that must be reviewed before deployment.
 
-## License
+## TCP protocol
 
-Internal use only. © CAPI AI Team.
+The server accepts semicolon-delimited `AOI@` requests. A request without bomb coordinates is:
+
+```text
+AOI@<glass_id>;<model_id>;<machine_no>;<resolution_x>,<resolution_y>;<machine_judgment>;<image_dir>
+```
+
+A request with bomb data adds an image prefix and coordinates before the image path:
+
+```text
+AOI@<glass_id>;<model_id>;<machine_no>;<resolution_x>,<resolution_y>;<machine_judgment>;<image_prefix>;<coordinates>;<image_dir>
+```
+
+`machine_judgment` is normally `OK`, `NG`, or `HY`. `HY` skips AI inference and is returned as an image-abnormal result.
+
+The current response is CRLF-terminated and contains both formats, in this order:
+
+```text
+AOI@<glass_id>;<model_id>;<machine_no>;<machine_judgment>;<ai_judgment>
+@QJPG-<glass_id>;<mark_status>;<mark_text>;<defect_field>,
+```
+
+Clients should identify each line by its prefix (`AOI@` or `@QJPG-`) instead of assuming that a response contains only one line. `ai_judgment` can be `OK`, `NG`, or `ERR:<description>`; the internal `OK-i` result is exposed as `OK` in the legacy response. The complete field and QJPG defect-code specification is in [docs/client_communication_protocol.zh-TW.md](./docs/client_communication_protocol.zh-TW.md).
+
+## Main Web UI entry points
+
+Open `http://<server>:<web_port>/` after the server starts.
+
+| Path | Purpose |
+|---|---|
+| `/` | Live dashboard and current shift status |
+| `/search` | Search and export inference records |
+| `/record/<id>` | Record details, images, tiles, and heatmaps |
+| `/ric` | RIC, over-review, miss-review, MES comparison, and related reports |
+| `/ric/within-spec-logs` | Within-spec review list and details |
+| `/training` | Training hub |
+| `/train/new` | New-machine PatchCore training workflow |
+| `/models` | Model bundle inspection and activation |
+| `/debug` | Single-image and coordinate diagnostics |
+| `/white-frame` | White-frame overview and records |
+| `/settings` | Authenticated settings and account administration |
+| `/logs` | Server log viewer |
+| `/release-notes` | In-app release notes |
+| `/api/status` | Runtime and hardware status JSON |
+| `/api/version` | Deployed version and build metadata JSON |
+
+## Configuration boundaries
+
+| File or directory | Responsibility |
+|---|---|
+| `server_config.yaml` | Production TCP/Web settings, SQLite, heatmaps, path mapping, model list, cleanup, training, and optional integrations |
+| `server_config_local.yaml` | Windows/local profile with local ports and output paths |
+| `configs/capi_3f.yaml` | Legacy/fallback model configuration, image-prefix mappings, thresholds, exclusion zones, bomb rules, and post-processing |
+| `model/<machine>-<timestamp>/` | Bundles produced by the training workflow; each bundle contains its own model configuration and metadata |
+| `VERSION` / `CHANGELOG.md` | Release identity and operator-facing change history |
+
+Production `model_configs` should point to the bundle `machine_config.yaml` files that match the incoming `ModelID`. `configs/capi_3f.yaml` is retained for legacy/fallback use; it is not a substitute for installing the required model weights.
+
+## Common development checks
+
+Run the protocol smoke test without starting a listener:
+
+```bash
+python -X utf8 capi_server.py --test-protocol
+```
+
+Run the automated test suite from the repository root:
+
+```bash
+python -m pytest tests/
+```
+
+## Related documentation
+
+- [Client communication protocol](./docs/client_communication_protocol.zh-TW.md)
+- [New-machine model training SOP](./docs/new_system_model_training_sop.zh-TW.md)
+- [PatchCore training architecture](./docs/patchcore_training_architecture.zh-TW.md)
+- [Experimental pull-based update workflow](./docs/experimental_auto_update.zh-TW.md)
+- [Deployment ZIP builder](./scripts/build_deploy_zip.py)
+- [Central dashboard](./central_dashboard/README.md)
+- [Change history](./CHANGELOG.md)
+
+Internal project; not intended for public distribution.
