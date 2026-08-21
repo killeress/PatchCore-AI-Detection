@@ -1,220 +1,169 @@
-# CAPI AI — 自動光學檢測智慧推論系統
+# CAPI AI — AOI PatchCore 智慧檢測平台
 
-> **工業級 AI 推論平台，搭載 PatchCore 異常檢測技術，提供即時 TCP/IP 通訊、熱力圖視覺化，並支援人工複檢 (RIC) 交叉比對，專為面板缺陷偵測設計。**
+> 面向產線的 AI 推論服務，透過 TCP 接收 AOI 請求，執行設定好的 PatchCore 推論流程，同時回傳既有 AOI 判定與 QJPG 報告，並將結果保存供 Web 追溯與複核。
 
-[![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python)](https://python.org)
-[![PatchCore](https://img.shields.io/badge/AI-PatchCore-orange)](https://github.com/amazon-science/patchcore-inspection)
-[![OpenVINO](https://img.shields.io/badge/Runtime-OpenVINO%20%7C%20PyTorch-lightblue)](https://openvino.ai)
-[![SQLite](https://img.shields.io/badge/Database-SQLite-green)](https://sqlite.org)
+🇺🇸 [English version → README.md](./README.md)
 
-🇺🇸 [English Version → README.md](./README.md)
+## 本專案包含什麼
 
----
+- **推論伺服器** — `capi_server.py` 處理長連線 TCP 客戶端、請求解析、模型分派、推論與協議回覆。
+- **PatchCore 推論流程** — `capi_inference.py` 與 `capi_preprocess.py` 負責面板前處理、Tile／區域路由、異常分數、熱力圖、MARK、炸彈與模型設定中的後處理規則。
+- **追溯與 Web 介面** — `capi_database.py` 將推論、圖片、Tile 記錄保存到 SQLite；`capi_web.py` 提供監控、搜尋、單筆詳情、RIC 複核與管理頁面。
+- **訓練與模型庫** — `/training` → `/train/new` 流程可準備訓練資料、審核 Tile、訓練模型 Bundle，再由 `/models` 管理啟用。
+- **部署支援** — Repo 內含版本資訊、部署 ZIP 產生、人工更新與 pull 模式更新工具。
 
-## 系統簡介
+正式資料流如下：
 
-CAPI AI 無縫整合至現有 AOI（自動光學檢測）產線，作為第二層 AI 判定引擎，透過深度學習異常檢測技術驗證機台判定結果。系統支援即時 TCP/IP 推論、SQLite 永久記錄，並內建 Web 儀表板提供完整的追溯與分析能力，包含與 RIC（人工複檢）記錄的比對報表。
-
-```
-AOI 機台  ──TCP/IP──▶  CAPI AI 伺服器  ──▶  SQLite DB
-                              │                   │
-                              ▼                   ▼
-                         熱力圖檔案          Web 儀表板
-                                                  │
-                                        RIC 人工複檢比對報表
-```
-
----
-
-## 核心功能
-
-| 功能 | 說明 |
-|------|------|
-| 🔬 **PatchCore 推論** | 以 512×512 切塊為單位進行異常偵測，門檻值可彈性設定 |
-| 🌐 **TCP/IP 伺服器** | 多客戶端 Socket 伺服器，直接整合 AOI 機台即時通訊 |
-| 🗺️ **熱力圖視覺化** | 逐 Tile 異常熱力圖，支援疊加原圖顯示 |
-| 🧹 **智慧過濾機制** | OMIT 圖片交叉驗證 + Heatmap IOU 灰塵/刮痕抑制 |
-| 💣 **炸彈缺陷偵測** | YAML 可設定座標型炸彈缺陷分類規則 |
-| 📊 **Web 儀表板** | 即時監控、可搜尋記錄歷史、按班次統計分析 |
-| 🔎 **RIC 交叉比對** | 匯入人工複檢資料，與 AI/AOI 結果進行準確率、過檢率、漏檢率比對 |
-| 🗃️ **三層追溯記錄** | 推論 → 圖片 → Tile 三層完整稽核記錄 |
-| ⚡ **雙執行環境** | 同時支援 OpenVINO (`.xml`) 與 PyTorch (`.pt`) 模型格式 |
-| 🏭 **多產線支援** | 依產線分配對應 Port（第 N 線 → Port 79NN） |
-
----
-
-## 專案結構
-
-```
-CAPI01_AD/
-│
-├── configs/
-│   └── capi_3f.yaml              # 推論設定檔（門檻值、排除區域、炸彈座標）
-│
-├── ── 核心模組 ──
-├── capi_config.py                # YAML 配置載入與驗證
-├── capi_inference.py             # PatchCore 推論引擎（切塊、評分、過濾）
-├── capi_heatmap.py               # 熱力圖生成與檔案管理
-├── capi_database.py              # SQLite 持久化（記錄/圖片/Tile）
-│
-├── ── 伺服器 ──
-├── capi_server.py                # TCP Socket 伺服器（正式環境入口）
-├── capi_web.py                   # Web 介面（HTTP 伺服器 + REST API）
-├── server_config.yaml            # Linux 正式環境設定
-├── server_config_local.yaml      # Windows 本地測試設定
-├── start_server.sh               # Linux 啟動腳本
-│
-├── ── 範本與靜態資源 ──
-├── templates/                    # Jinja2 HTML 範本
-│   ├── base.html                 # 版面配置與導航欄
-│   ├── dashboard_v3.html         # 即時監控儀表板
-│   ├── record_detail_v3.html     # 單筆記錄熱力圖詳情
-│   ├── ric_report.html           # RIC 人工複檢比對報表
-│   └── ...
-├── static/                       # CSS、JS、靜態資源
-│
-├── ── 分析工具 ──
-├── capi_missed_detection_analyzer.py  # 漏檢批次分析工具
-├── diagnose_bomb.py                   # 炸彈缺陷診斷與視覺化
-├── auto_sender.py                     # 自動化測試請求發送器
-├── test_client.py                     # TCP 客戶端手動測試工具
-├── check_db.py                        # 資料庫檢查工具
-│
-├── model.pt                      # 已訓練的 PatchCore 模型
-├── capi_mark.png                 # MARK 範本（排除區域偵測用）
-├── requirements.txt
-└── README.zh-TW.md
+```text
+AOI 客戶端
+    │ TCP
+    ▼
+capi_server.py ──► capi_inference.py / capi_preprocess.py
+    │                              │
+    ├── AOI 舊協議 + QJPG 回覆     │
+    ├── SQLite 推論記錄             └── 熱力圖與診斷資料
+    ▼
+capi_web.py ──► 儀表板、複核、訓練、模型庫、設定
 ```
 
----
+## 環境與安裝
 
-## 快速上手
-
-### 安裝依賴
+請使用 Python 3.10 以上；目前開發／部署環境使用 Python 3.11／3.12。
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-> **GPU 注意事項**：正式環境建議使用 OpenVINO 推論。若無 Intel 硬體，可改用 PyTorch (`.pt`) 格式於本地測試。
+Repo 不包含正式模型權重。要實際啟動推論，還需要依目標機種準備模型 Bundle，以及可讀取 AOI 圖片的路徑映射。模型權重、資料庫、本機資料集與本機憑證預設不納入一般版本控制與部署包。
 
-### Linux 正式伺服器
-
-```bash
-# 1. 編輯設定檔
-vim server_config.yaml
-
-# 2. 啟動（含後台服務與 Web 儀表板）
-chmod +x start_server.sh
-./start_server.sh
-```
+## 啟動伺服器
 
 ### Windows 本地測試
 
-```bash
-# 終端 A — 啟動推論伺服器
+`server_config_local.yaml` 是本地測試設定：
+
+- TCP 伺服器：`0.0.0.0:7891`
+- Web 介面：`http://localhost:8080`
+- SQLite 資料庫：`./test_results.db`
+- 熱力圖：`./test_heatmaps`
+
+可使用以下任一方式啟動：
+
+```powershell
 python capi_server.py --config server_config_local.yaml
-
-# 終端 B — 執行測試請求
-python test_client.py
-
-# 終端 B — 以真實面板目錄測試
-python test_client.py --real "D:\path\to\panel_folder"
-
-# 瀏覽器 — 開啟 Web 儀表板
-# http://localhost:8080
+# 或
+start_server_local.bat
 ```
 
----
+若已有面板資料集，可用 `auto_sender.py` 發送測試請求：
 
-## 通訊協議
-
-CAPI AI 採用以分號分隔的簡易 TCP 文字協議：
-
-```
-[請求]  AOI@<玻璃ID>;<機種ID>;<機台編號>;<解析度X>,<解析度Y>;<機檢判定>;<圖片目錄>
-[回應]  AOI@<玻璃ID>;<機種ID>;<機台編號>;<機檢判定>;<AI判定>
+```powershell
+python auto_sender.py --host 127.0.0.1 --port 7891 --ng-folder D:\path\to\panels --count 1
 ```
 
-**AI 判定值說明：**
+### Linux 正式環境
 
-| 值 | 說明 |
-|----|------|
-| `OK` | 未偵測到缺陷 |
-| `NG@圖片名(X,Y)` | 於座標 (X, Y) 偵測到缺陷 |
-| `ERR:描述` | 處理錯誤 |
+先依目標設備修改 `server_config.yaml`，再使用服務腳本：
 
----
-
-## Web 儀表板
-
-啟動伺服器後，透過瀏覽器開啟 `http://<伺服器IP>:<Port>/` 存取。
-
-| 路由 | 說明 |
-|------|------|
-| `/` | 即時監控儀表板 |
-| `/records` | 可搜尋的推論記錄歷史 |
-| `/record/<id>` | 單筆記錄熱力圖詳情 |
-| `/ric` | RIC 人工複檢比對報表 |
-| `/debug` | 單圖 Debug 推論 |
-| `/stats` | 歷史統計與趨勢分析 |
-
-### RIC 人工複檢比對報表
-
-匯入人工複檢 (RIC) `.xls` 匯出檔案，自動計算：
-- **AOI 準確率** — AOI 判定與 RIC 結果一致的比率
-- **AI 準確率** — AI 判定與 RIC 結果一致的比率
-- **過檢率** — AOI/AI 判 NG 但 RIC 判 OK 的比率
-- **漏檢率** — AOI/AI 判 OK 但 RIC 判 NG 的比率
-
-點擊任一統計卡片即可即時篩選明細表，並可將篩選結果導出為 CSV。
-
----
-
-## 設定檔說明
-
-`configs/capi_3f.yaml` 主要參數：
-
-```yaml
-threshold: 0.65                    # 異常分數門檻值（0.0 ~ 1.0）
-tile_size: 512                     # 推論切塊尺寸（像素）
-dust_heatmap_top_percent: 0.4      # 灰塵/刮痕 IOU 分位數閾值
-excluded_edge_margin: 0.03         # 邊緣排除比例
-bomb_defects:                      # 座標型炸彈缺陷規則
-  - image_prefix: "STANDARD"
-    coordinates: [[x1,y1], ...]
+```bash
+chmod +x start_server.sh
+./start_server.sh              # 停止舊程序、背景啟動並追蹤 Log
+./start_server.sh status
+./start_server.sh log
+./start_server.sh stop
 ```
 
----
+目前正式設定預設使用 TCP `7907`、Web `80`。實際 Port、資料庫路徑、熱力圖路徑、模型清單、路徑映射、保留期限與選用整合功能，都由 `server_config.yaml` 控制。
 
-## 系統架構
+若要以前景模式直接啟動：
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                      AOI 機台（客戶端）                   │
-└──────────────────────────┬──────────────────────────────┘
-                           │ TCP/IP 請求
-┌──────────────────────────▼──────────────────────────────┐
-│                 CAPIServer (capi_server.py)              │
-│  ┌──────────────┐   ┌───────────────┐   ┌────────────┐  │
-│  │ Config Loader│   │ CAPIInferencer│   │HeatmapMgr  │  │
-│  │(capi_config) │   │(PatchCore)    │   │(capi_heatm)│  │
-│  └──────────────┘   └───────┬───────┘   └────────────┘  │
-│                             │                            │
-│  ┌──────────────────────────▼──────────────────────────┐ │
-│  │              CAPIDatabase (SQLite)                  │ │
-│  │  inference_records → image_results → tile_results   │ │
-│  └──────────────────────────┬──────────────────────────┘ │
-└──────────────────────────── │ ──────────────────────────-┘
-                              │
-┌─────────────────────────────▼───────────────────────────┐
-│                CAPIWebHandler (capi_web.py)              │
-│         HTTP 儀表板 + REST API + RIC 比對報表             │
-└─────────────────────────────────────────────────────────┘
+```bash
+python3 capi_server.py --config server_config.yaml
 ```
 
----
+不要把正式環境路徑或憑證直接複製到本地設定。尤其 `server_config.yaml` 含有設備專用路徑與 MES 設定，部署前必須逐項確認。
 
-## 授權聲明
+## TCP 通訊協議
 
-僅限內部使用。© CAPI AI Team。
+伺服器接受以分號分隔的 `AOI@` 請求。沒有炸彈座標時：
+
+```text
+AOI@<玻璃ID>;<機種ID>;<機台編號>;<解析度X>,<解析度Y>;<機檢判定>;<圖片目錄>
+```
+
+包含炸彈資料時，圖片路徑前會增加圖片前綴與座標：
+
+```text
+AOI@<玻璃ID>;<機種ID>;<機台編號>;<解析度X>,<解析度Y>;<機檢判定>;<圖片前綴>;<座標>;<圖片目錄>
+```
+
+`機檢判定` 通常是 `OK`、`NG` 或 `HY`。`HY` 會跳過 AI 推論，改走畫異結果。
+
+目前回覆以 CRLF 結尾，同一包包含兩種格式，順序如下：
+
+```text
+AOI@<玻璃ID>;<機種ID>;<機台編號>;<機檢判定>;<AI判定>
+@QJPG-<玻璃ID>;<MARK判定>;<MARK字>;<Defect欄位>,
+```
+
+客戶端應依 prefix（`AOI@` 或 `@QJPG-`）辨識每一行，不要假設回覆只有一行。`AI判定` 可為 `OK`、`NG` 或 `ERR:<描述>`；內部的 `OK-i` 在舊 AOI 回覆中會轉成 `OK`。完整欄位與 QJPG defect code 規格請參考 [docs/client_communication_protocol.zh-TW.md](./docs/client_communication_protocol.zh-TW.md)。
+
+## Web 介面主要入口
+
+伺服器啟動後，開啟 `http://<伺服器>:<Web Port>/`。
+
+| 路徑 | 用途 |
+|---|---|
+| `/` | 即時儀表板與當班狀態 |
+| `/search` | 搜尋與匯出推論記錄 |
+| `/record/<id>` | 單筆記錄、圖片、Tile 與熱力圖 |
+| `/ric` | RIC、過檢、漏檢、MES 比對與相關報表 |
+| `/ric/within-spec-logs` | 規格內複核清單與詳情 |
+| `/training` | 模型訓練入口 |
+| `/train/new` | 新機種 PatchCore 訓練流程 |
+| `/models` | 模型 Bundle 檢查與啟用 |
+| `/debug` | 單圖與座標診斷 |
+| `/white-frame` | 白框總表與記錄 |
+| `/settings` | 需登入的設定與帳號管理 |
+| `/logs` | 伺服器 Log 檢視 |
+| `/release-notes` | 系統內更新說明 |
+| `/api/status` | 執行狀態與硬體狀態 JSON |
+| `/api/version` | 部署版本與建置資訊 JSON |
+
+## 設定檔邊界
+
+| 檔案或目錄 | 責任 |
+|---|---|
+| `server_config.yaml` | 正式 TCP／Web、SQLite、熱力圖、路徑映射、模型清單、清理排程、訓練與選用整合設定 |
+| `server_config_local.yaml` | Windows／本地測試用 Port 與輸出路徑 |
+| `configs/capi_3f.yaml` | 舊架構／fallback 模型設定、圖片前綴映射、門檻、排除區、炸彈規則與後處理 |
+| `model/<machine>-<timestamp>/` | 訓練流程產生的模型 Bundle，內含該 Bundle 的模型設定與 metadata |
+| `VERSION`／`CHANGELOG.md` | 發行版本與操作員可讀的更新紀錄 |
+
+正式環境的 `model_configs` 應指向與請求 `ModelID` 相符的 Bundle `machine_config.yaml`。`configs/capi_3f.yaml` 僅保留作舊架構／fallback 使用，不能取代必要模型權重的安裝。
+
+## 常用開發檢查
+
+不啟動 Listener，直接執行協議 smoke test：
+
+```bash
+python -X utf8 capi_server.py --test-protocol
+```
+
+在 repo 根目錄執行自動化測試：
+
+```bash
+python -m pytest tests/
+```
+
+## 相關文件
+
+- [客戶端通訊協議](./docs/client_communication_protocol.zh-TW.md)
+- [新機種模型訓練 SOP](./docs/new_system_model_training_sop.zh-TW.md)
+- [PatchCore 訓練架構](./docs/patchcore_training_architecture.zh-TW.md)
+- [實驗版 pull 模式自動更新流程](./docs/experimental_auto_update.zh-TW.md)
+- [部署 ZIP 產生器](./scripts/build_deploy_zip.py)
+- [中央看板](./central_dashboard/README.md)
+- [更新紀錄](./CHANGELOG.md)
+
+內部專案，非公開發行用途。
