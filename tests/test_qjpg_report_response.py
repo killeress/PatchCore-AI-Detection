@@ -4,6 +4,7 @@ import numpy as np
 
 from capi_config import CAPIConfig
 from capi_inference import ImageResult, TileInfo
+from capi_station_adapter import AAPIStationAdapter
 from capi_server import (
     build_dual_protocol_response,
     build_qjpg_response,
@@ -346,6 +347,41 @@ def test_image_abnormal_precheck_only_checks_aoi_report_prefixes(monkeypatch):
 
     assert result["screen"] == "B0F00000"
     assert read_paths == ["W0F00000_113600.tif", "B0F00000_113600.tif"]
+
+
+def test_aapi_image_abnormal_alias_keeps_w0f00010_source_distinct(monkeypatch):
+    adapter = AAPIStationAdapter()
+    read_paths = []
+
+    def fake_imread(path, flags):
+        image_name = Path(path).name
+        read_paths.append(image_name)
+        value = 90 if "W0F00010" in image_name else 60
+        return np.full((4, 4), value, dtype=np.uint8)
+
+    monkeypatch.setattr("capi_server.cv2.imread", fake_imread)
+    monkeypatch.setattr("capi_server.detect_panel_polygon", lambda image, cfg: (None, None))
+    cfg = CAPIConfig(
+        image_abnormal_detection_enabled=True,
+        image_abnormal_wgf50500_mean_lower=40,
+        image_abnormal_wgf50500_mean_upper=82,
+    )
+    w0f00010 = Path("YQ607S210B12W0F00010164822.tif")
+    wgf50500 = Path("YQ607S210B12WGF50500164821.tif")
+
+    result = check_image_abnormal_precheck(
+        Path("unused"),
+        cfg,
+        [w0f00010, wgf50500],
+        report_prefixes=["W0F00010"],
+        image_prefix_resolver=adapter.image_prefix,
+        screen_alias_resolver=adapter.model_prefix,
+        boundary_reference_priority=adapter.boundary_reference_priority,
+    )
+
+    assert result["screen"] == "WGF50500"
+    assert result["image_name"] == w0f00010.name
+    assert read_paths.count(w0f00010.name) == 1
 
 
 def test_qjpg_response_ok_i_omits_within_spec_points_and_missing_mark_is_00():

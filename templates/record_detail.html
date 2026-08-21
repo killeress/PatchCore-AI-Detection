@@ -387,16 +387,19 @@
                         <thead>
                             <tr>
                                 <th style="padding:2px 12px;border:1px solid var(--border);background:var(--bg-secondary);text-align:center;">#</th>
+                                <th style="padding:2px 12px;border:1px solid var(--border);background:var(--bg-secondary);text-align:center;">基準</th>
                                 <th style="padding:2px 12px;border:1px solid var(--border);background:var(--bg-secondary);text-align:center;">X</th>
                                 <th style="padding:2px 12px;border:1px solid var(--border);background:var(--bg-secondary);text-align:center;">Y</th>
                             </tr>
                         </thead>
                         <tbody>
                             {% for c in coords %}
+                            {% set use_image_coord = c.get("coordinate_space", "product") == "image" and c.get("product_x", -1) < 0 %}
                             <tr>
                                 <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;color:var(--text-muted);">{{ loop.index }}</td>
-                                <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;">{{ c.product_x }}</td>
-                                <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;">{{ c.product_y }}</td>
+                                <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;">{{ "圖片" if use_image_coord else "產品" }}</td>
+                                <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;">{{ c.get("image_x", c.get("source_x", -1)) if use_image_coord else c.product_x }}</td>
+                                <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;">{{ c.get("image_y", c.get("source_y", -1)) if use_image_coord else c.product_y }}</td>
                             </tr>
                             {% endfor %}
                         </tbody>

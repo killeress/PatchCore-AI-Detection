@@ -2,8 +2,8 @@
 
 The detector is intentionally independent from PatchCore.  It aligns the
 visible long bright segments to a canonical rectangle, then checks each side
-as a one-dimensional continuity signal.  Results are observation-only; the
-caller decides how they are persisted or displayed.
+as a one-dimensional continuity signal.  An NG result participates in the
+formal panel judgment.
 """
 
 from __future__ import annotations
@@ -144,8 +144,7 @@ def inspect_white_frame_image(
     )
     payload = {
         "algorithm": "white-frame-cv-v1",
-        "shadow_mode": True,
-        "affects_judgment": False,
+        "affects_judgment": True,
         "status": "NG" if ng_sides else "OK",
         "image_name": path.name,
         "angle_deg": round(angle, 3),
@@ -171,8 +170,7 @@ def _unreadable(
     }
     payload = {
         "algorithm": "white-frame-cv-v1",
-        "shadow_mode": True,
-        "affects_judgment": False,
+        "affects_judgment": True,
         "status": "UNREADABLE",
         "reason": reason,
         "image_name": path.name,

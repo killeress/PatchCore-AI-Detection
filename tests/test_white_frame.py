@@ -16,6 +16,7 @@ from capi_database import CAPIDatabase
 from capi_inference import ImageResult
 from capi_server import (
     CAPIServer,
+    _white_frame_image_result,
     aggregate_judgment,
     build_dual_protocol_response,
     results_to_db_data,
@@ -77,8 +78,10 @@ def _white_result(path: Path, payload: dict) -> ImageResult:
         processed_tile_count=0,
         processing_time=0.02,
         anomaly_tiles=[],
+        raw_bounds=(180, 140, 1021, 661),
         inference_time=0.02,
         white_frame_result=payload,
+        report_image_prefix="WHITEFRA",
     )
 
 
@@ -137,21 +140,32 @@ def test_blank_white_frame_is_unreadable_not_exception(tmp_path):
     result = inspect_white_frame_image(image_path)
 
     assert result.payload["status"] == "UNREADABLE"
-    assert result.payload["affects_judgment"] is False
+    assert result.payload["affects_judgment"] is True
 
 
-def test_shadow_result_does_not_change_judgment_or_tcp_and_persists(tmp_path):
+def test_white_frame_ng_changes_formal_judgment_and_qjpg_uses_its_own_frame_coords(tmp_path):
     payload = {
         "algorithm": "white-frame-cv-v1",
-        "shadow_mode": True,
-        "affects_judgment": False,
+        "affects_judgment": True,
         "status": "NG",
         "ng_sides": ["top"],
-        "sides": {"top": {"label": "上邊", "status": "NG", "gap_count": 1}},
+        "sides": {
+            "top": {
+                "label": "上邊",
+                "status": "NG",
+                "gap_count": 1,
+                "gaps": [{"center_x": 600, "center_y": 140}],
+            }
+        },
         "processing_ms": 20.0,
     }
     image_path = tmp_path / "WHITEFRA_123456.png"
-    result = _white_result(image_path, payload)
+    result = _white_frame_image_result(WhiteFrameInspection(
+        image_path=image_path,
+        image_size=(1200, 800),
+        bounds=(180, 140, 1021, 661),
+        payload=payload,
+    ))
     parsed = {
         "glass_id": "G-WHITE",
         "model_id": "MODEL-A",
@@ -160,14 +174,22 @@ def test_shadow_result_does_not_change_judgment_or_tcp_and_persists(tmp_path):
         "resolution": (1200, 800),
     }
 
-    assert aggregate_judgment([result]) == ("OK", "[]")
-    assert build_dual_protocol_response(parsed, "OK", [result]) == build_dual_protocol_response(
-        parsed, "OK", []
+    ai_judgment, ng_details = aggregate_judgment([result])
+    assert ai_judgment == "NG"
+    assert json.loads(ng_details)[0]["type"] == "white_frame_gap"
+    response = build_dual_protocol_response(
+        parsed,
+        ai_judgment,
+        [result],
+        SimpleNamespace(report_white_dot_defect_code="WHT01"),
     )
+    # (600, 140) is converted with WHITEFRA bounds (180,140)-(1021,661),
+    # not with any black-screen image bounds.
+    assert "NGWHT010059900000WHITEFRA" in response
 
     db_data = results_to_db_data([result], {})
-    assert db_data[0]["is_ng"] == 0
-    assert db_data[0]["anomaly_count"] == 0
+    assert db_data[0]["is_ng"] == 1
+    assert db_data[0]["anomaly_count"] == 1
     assert json.loads(db_data[0]["white_frame_result"])["ng_sides"] == ["top"]
 
     db = CAPIDatabase(tmp_path / "white_frame.db")
@@ -177,11 +199,11 @@ def test_shadow_result_does_not_change_judgment_or_tcp_and_persists(tmp_path):
         machine_no="CAPI01",
         resolution=(1200, 800),
         machine_judgment="OK",
-        ai_judgment="OK",
+        ai_judgment="NG",
         image_dir=str(tmp_path),
         total_images=1,
-        ng_images=0,
-        ng_details="[]",
+        ng_images=1,
+        ng_details=ng_details,
         request_time="2026-08-14 10:00:00",
         response_time="2026-08-14 10:00:01",
         processing_seconds=0.02,
@@ -189,8 +211,8 @@ def test_shadow_result_does_not_change_judgment_or_tcp_and_persists(tmp_path):
     )
     detail = db.get_record_detail(record_id)
 
-    assert detail["ai_judgment"] == "OK"
-    assert detail["images"][0]["is_ng"] == 0
+    assert detail["ai_judgment"] == "NG"
+    assert detail["images"][0]["is_ng"] == 1
     assert detail["images"][0]["white_frame_result"]["status"] == "NG"
 
 
@@ -262,15 +284,19 @@ def test_white_frame_summary_query_returns_images_sides_coordinates_and_filters(
     assert total == 0
 
 
-def test_server_persists_white_frame_in_post_response_worker(tmp_path, monkeypatch):
+def test_server_runs_white_frame_before_formal_response_and_does_not_allow_ok_i(tmp_path, monkeypatch):
     normal_result = _white_result(tmp_path / "W0F00000.png", {})
     normal_result.white_frame_result = None
     fake_inferencer = SimpleNamespace(
         config=SimpleNamespace(
+            image_abnormal_detection_enabled=False,
             image_preprocess_pipeline=[],
             image_preprocess_pipelines={},
         ),
         _rotate_detection_images_180=False,
+        process_panel=lambda *_args, **_kwargs: (
+            [normal_result], None, False, "", False, None, {}
+        ),
     )
     inspection = WhiteFrameInspection(
         image_path=tmp_path / "WHITEFRA_123456.png",
@@ -278,10 +304,17 @@ def test_server_persists_white_frame_in_post_response_worker(tmp_path, monkeypat
         bounds=(180, 140, 1021, 661),
         payload={
             "status": "NG",
+            "affects_judgment": True,
+            "ng_sides": ["top"],
             "angle_deg": 1.0,
             "processing_ms": 10.0,
             "sides": {
-                "top": {"label": "上邊", "status": "NG"},
+                "top": {
+                    "label": "上邊",
+                    "status": "NG",
+                    "gap_count": 1,
+                    "gaps": [{"center_x": 600, "center_y": 140}],
+                },
                 "right": {"label": "右邊", "status": "OK"},
                 "bottom": {"label": "下邊", "status": "OK"},
                 "left": {"label": "左邊", "status": "OK"},
@@ -289,13 +322,66 @@ def test_server_persists_white_frame_in_post_response_worker(tmp_path, monkeypat
         },
     )
 
-    def fake_inspection(panel_dir, **_kwargs):
-        assert panel_dir == tmp_path
+    def fake_inspection(image_path, **_kwargs):
+        assert image_path == inspection.image_path
         return inspection
 
-    monkeypatch.setattr(capi_server, "inspect_white_frame_panel", fake_inspection)
+    monkeypatch.setattr(capi_server, "inspect_white_frame_image", fake_inspection)
     server = CAPIServer.__new__(CAPIServer)
     server.path_mapping = {}
+    server._get_or_create_inferencer = lambda _model_id: fake_inferencer
+    server.station_adapter = SimpleNamespace(
+        find_white_frame_image=lambda panel_dir: inspection.image_path,
+    )
+    server.cpu_workers = 1
+    import threading
+    server._gpu_lock = threading.Lock()
+    server._evaluate_within_spec_for_inference = MagicMock(
+        side_effect=AssertionError("white-frame NG must not be converted to OK-i")
+    )
+    parsed = {
+        "glass_id": "G-WHITE",
+        "model_id": "MODEL-A",
+        "machine_no": "CAPI01",
+        "machine_judgment": "OK",
+        "resolution": (1200, 800),
+        "image_dir": str(tmp_path),
+        "bomb_info": None,
+    }
+
+    ai_judgment, ng_details, results, *_rest = server._process_request(parsed)
+
+    assert ai_judgment == "NG"
+    assert len(results) == 2
+    assert results[-1].report_image_prefix == "WHITEFRA"
+    assert json.loads(ng_details)[0]["type"] == "white_frame_gap"
+    server._evaluate_within_spec_for_inference.assert_not_called()
+
+
+def test_async_save_does_not_reinspect_or_change_formal_white_frame_result(tmp_path, monkeypatch):
+    payload = {
+        "status": "NG",
+        "affects_judgment": True,
+        "ng_sides": ["top"],
+        "sides": {
+            "top": {
+                "label": "上邊",
+                "status": "NG",
+                "gap_count": 1,
+                "gaps": [{"center_x": 600, "center_y": 140}],
+            }
+        },
+    }
+    formal_result = _white_result(tmp_path / "WHITEFRA_123456.png", payload)
+    fake_inferencer = SimpleNamespace(
+        config=SimpleNamespace(image_preprocess_pipeline=[], image_preprocess_pipelines={}),
+    )
+    monkeypatch.setattr(
+        capi_server,
+        "inspect_white_frame_image",
+        MagicMock(side_effect=AssertionError("post-response inspection is forbidden")),
+    )
+    server = CAPIServer.__new__(CAPIServer)
     server._get_or_create_inferencer = lambda _model_id: fake_inferencer
     server.heatmap_manager = SimpleNamespace(save_panel_heatmaps=lambda **_kwargs: {})
     server.save_overview = True
@@ -313,22 +399,14 @@ def test_server_persists_white_frame_in_post_response_worker(tmp_path, monkeypat
     }
 
     server._save_results_async(
-        ("test", 1),
-        parsed,
-        [normal_result],
-        "OK",
-        "[]",
-        "2026-08-14 10:00:00.000",
-        "2026-08-14 10:00:01.000",
-        0.1,
+        ("test", 1), parsed, [formal_result], "NG", "[]",
+        "2026-08-21 10:00:00.000", "2026-08-21 10:00:01.000", 0.1,
     )
 
     saved = server.db.save_inference_record.call_args.kwargs
-    assert saved["ai_judgment"] == "OK"
-    assert saved["ng_images"] == 0
-    assert len(saved["image_results_data"]) == 2
-    assert json.loads(saved["image_results_data"][1]["white_frame_result"])["status"] == "NG"
-    assert "FormalJudgment=unchanged TCP=unchanged" in saved["inference_log"]
+    assert saved["ai_judgment"] == "NG"
+    assert saved["ng_images"] == 1
+    assert len(saved["image_results_data"]) == 1
 
 
 @pytest.mark.skipif(not Path("WBF/OK.png").exists(), reason="local WBF samples not available")
@@ -345,10 +423,10 @@ def test_local_wbf_reference_samples():
         assert set(result.payload["ng_sides"]) == expected, (name, result.payload)
 
 
-def test_record_pages_include_shadow_result_panel():
+def test_record_pages_include_white_frame_result_panel():
     partial = Path("templates/_white_frame_result.html").read_text(encoding="utf-8")
     assert "白色外框檢測" in partial
-    assert "影子模式，不影響正式 OK／NG 與 TCP 回傳；四角不列入判斷" not in partial
+    assert "不影響正式 OK／NG" not in partial
     for template_name in ("record_detail.html", "record_detail_v3.html"):
         template = Path("templates") / template_name
         assert '{% include "_white_frame_result.html" %}' in template.read_text(encoding="utf-8")

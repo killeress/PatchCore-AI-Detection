@@ -57,6 +57,7 @@ from capi_scratch_batch import (
 from capi_version import get_version_info, read_changelog
 from capi_image_naming import canonical_image_prefix, image_prefix_display_labels, source_image_prefix
 from capi_image_orientation import read_detection_image
+from capi_station_adapter import resolve_station_profile_from_hostname
 
 logger = logging.getLogger("capi.web")
 
@@ -3167,7 +3168,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             cls.jinja_env.filters['fromjson'] = lambda s: json.loads(s) if s else {}
             cls.jinja_env.globals['hm_relative'] = hm_relative
             cls.jinja_env.globals['app_version'] = _AppVersionProxy()
-            cls.jinja_env.globals['host_identity'] = _get_host_identity()
+            host_identity = _get_host_identity()
+            station_profile = resolve_station_profile_from_hostname(
+                host_identity,
+                default_if_unknown="capi",
+            )
+            cls.jinja_env.globals['host_identity'] = host_identity
+            cls.jinja_env.globals['station_name'] = station_profile.upper()
 
     @classmethod
     def _make_job_runtime(cls, job_id: str, phase: str) -> dict:
@@ -12549,8 +12556,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment,
             InferenceLogCapture, WITHIN_SPEC_LOGS_URL,
             _stored_machine_judgment_for_record, _white_frame_image_result,
+            _has_white_frame_ng, _serialize_aoi_machine_coords,
         )
-        from capi_white_frame import inspect_white_frame_panel
+        from capi_station_adapter import create_station_adapter
+        from capi_white_frame import inspect_white_frame_image
 
         def _update_status(msg, *_):
             with cls._rerun_lock:
@@ -12588,30 +12597,36 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             InferenceLogCapture.start_capture()
             white_frame_inspection = None
             try:
-                white_frame_inspection = inspect_white_frame_panel(
-                    panel_dir,
-                    rotate_180=getattr(inferencer, "_rotate_detection_images_180", False),
+                station_adapter = (
+                    getattr(server_inst, "station_adapter", None)
+                    or create_station_adapter("capi")
                 )
-                if white_frame_inspection is not None:
+                white_frame_path = station_adapter.find_white_frame_image(panel_dir)
+                if white_frame_path is not None:
+                    white_frame_inspection = inspect_white_frame_image(
+                        white_frame_path,
+                        rotate_180=getattr(inferencer, "_rotate_detection_images_180", False),
+                    )
                     payload = white_frame_inspection.payload
                     side_summary = ", ".join(
-                        f"{payload['sides'][side]['label']}={payload['sides'][side]['status']}"
+                        f"{side}={payload.get('sides', {}).get(side, {}).get('status', 'UNKNOWN')}"
                         for side in ("top", "right", "bottom", "left")
                     )
                     logger.info(
-                        "[WHITE_FRAME_SHADOW][RERUN] Image=%s Algorithm=%s Status=%s Sides=[%s] "
-                        "Angle=%s TT=%sms FormalJudgment=unchanged%s",
+                        "[WHITE_FRAME][RERUN] Image=%s Algorithm=%s Status=%s Sides=[%s] "
+                        "Angle=%s TT=%sms FormalJudgment=%s%s",
                         white_frame_inspection.image_path.name,
                         payload.get("algorithm", "white-frame-cv-v1"),
                         payload.get("status", "UNREADABLE"),
                         side_summary,
                         payload.get("angle_deg", "-"),
                         payload.get("processing_ms", 0),
+                        "NG" if payload.get("status") == "NG" else "unchanged",
                         f" Reason={payload.get('reason')}" if payload.get("reason") else "",
                     )
             except Exception as exc:
                 logger.warning(
-                    "[WHITE_FRAME_SHADOW][RERUN] Inspection failed; formal judgment unchanged: %s",
+                    "[WHITE_FRAME][RERUN] Inspection failed: %s",
                     exc,
                     exc_info=True,
                 )
@@ -12626,6 +12641,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         bomb_info=bomb_info,
                         model_id=model_id,
                         machine_no=detail.get("machine_no"),
+                        glass_id=detail.get("glass_id"),
                         machine_judgment=detail.get("machine_judgment"),
                     )
             else:
@@ -12637,6 +12653,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     bomb_info=bomb_info,
                     model_id=model_id,
                     machine_no=detail.get("machine_no"),
+                    glass_id=detail.get("glass_id"),
                     machine_judgment=detail.get("machine_judgment"),
                 )
 
@@ -12648,6 +12665,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             is_duplicate = panel_result[4] if len(panel_result) > 4 else False
             omit_image_raw = panel_result[5] if len(panel_result) > 5 else None
             aoi_report = panel_result[6] if len(panel_result) > 6 else {}
+
+            if white_frame_inspection is not None:
+                results.append(_white_frame_image_result(white_frame_inspection))
 
             if is_duplicate:
                 logger.warning(
@@ -12669,7 +12689,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     )
 
             within_spec_info = None
-            if ai_judgment.startswith("NG"):
+            if ai_judgment.startswith("NG") and _has_white_frame_ng(results):
+                logger.info(
+                    "[WHITE_FRAME][RERUN] Glass=%s formal NG bypasses within-spec OK-i conversion",
+                    detail.get("glass_id", ""),
+                )
+            elif ai_judgment.startswith("NG"):
                 parsed_for_within_spec = {
                     "glass_id": detail.get("glass_id", ""),
                     "model_id": model_id,
@@ -12753,9 +12778,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if within_spec_info and within_spec_info.get("converted"):
                     ai_judgment = "OK-i"
 
-            if white_frame_inspection is not None:
-                results.append(_white_frame_image_result(white_frame_inspection))
-
             _update_status("正在儲存 heatmap...")
             heatmap_info = {}
             if cls.heatmap_manager:
@@ -12785,15 +12807,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 results,
                 aoi_report,
             )
-            aoi_machine_coords = ""
-            if aoi_report:
-                aoi_coords_data = {}
-                for prefix, defects in aoi_report.items():
-                    aoi_coords_data[prefix] = [
-                        {"defect_code": d.defect_code, "product_x": d.product_x, "product_y": d.product_y}
-                        for d in defects
-                    ]
-                aoi_machine_coords = json.dumps(aoi_coords_data, ensure_ascii=False)
+            aoi_machine_coords = _serialize_aoi_machine_coords(aoi_report)
             if is_duplicate:
                 dup_note = "[DUPLICATE_PANEL] 重複投片，已依建立時間選取最新圖片推論"
                 err_suffix = ai_judgment if ai_judgment.startswith("ERR") else ""

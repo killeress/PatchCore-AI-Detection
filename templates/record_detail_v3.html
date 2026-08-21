@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MOD2 CAPI AD - 記錄 #{{ detail.id }}</title>
+    <title>MOD2 {{ station_name }} AD - 記錄 #{{ detail.id }}</title>
 
     <link href="/static/css/fonts.css" rel="stylesheet">
     <script src="/static/js/tailwindcss.js"></script>
@@ -359,10 +359,10 @@
     <div id="headerFrame">
         <div id="brandingBlock">
             <div id="logoLabel">
-                <img src="/imgs/logo.png" alt="CAPI Logo">
+                <img src="/imgs/logo.png" alt="{{ station_name }} Logo">
             </div>
             <div id="titleBlock">
-                <div id="titleLabel">MOD2 CAPI AD</div>
+                <div id="titleLabel">MOD2 {{ station_name }} AD</div>
                 <div id="subtitleLabel">AI Vision Intelligence</div>
             </div>
         </div>
@@ -530,16 +530,19 @@
                                             <thead>
                                                 <tr>
                                                     <th style="padding: 2px 10px; border: 1px solid #E2E8F0; background: #F1F5F9; text-align: center;">#</th>
+                                                    <th style="padding: 2px 10px; border: 1px solid #E2E8F0; background: #F1F5F9; text-align: center;">基準</th>
                                                     <th style="padding: 2px 10px; border: 1px solid #E2E8F0; background: #F1F5F9; text-align: center;">X</th>
                                                     <th style="padding: 2px 10px; border: 1px solid #E2E8F0; background: #F1F5F9; text-align: center;">Y</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
                                                 {% for c in coords %}
+                                                {% set use_image_coord = c.get("coordinate_space", "product") == "image" and c.get("product_x", -1) < 0 %}
                                                 <tr>
                                                     <td style="padding: 2px 10px; border: 1px solid #E2E8F0; text-align: center; color: #94A3B8;">{{ loop.index }}</td>
-                                                    <td style="padding: 2px 10px; border: 1px solid #E2E8F0; text-align: center;">{{ c.product_x }}</td>
-                                                    <td style="padding: 2px 10px; border: 1px solid #E2E8F0; text-align: center;">{{ c.product_y }}</td>
+                                                    <td style="padding: 2px 10px; border: 1px solid #E2E8F0; text-align: center;">{{ "圖片" if use_image_coord else "產品" }}</td>
+                                                    <td style="padding: 2px 10px; border: 1px solid #E2E8F0; text-align: center;">{{ c.get("image_x", c.get("source_x", -1)) if use_image_coord else c.product_x }}</td>
+                                                    <td style="padding: 2px 10px; border: 1px solid #E2E8F0; text-align: center;">{{ c.get("image_y", c.get("source_y", -1)) if use_image_coord else c.product_y }}</td>
                                                 </tr>
                                                 {% endfor %}
                                             </tbody>
@@ -1010,7 +1013,7 @@
     </main>
 
     <footer style="margin-top: auto; padding: 24px 0; text-align: center; border-top: 1px solid #E2E8F0; z-index: 10;">
-        <p style="font-size: 12px; color: #94A3B8;">&copy; 2026 CAPI AI Vision Intelligence System. Selected Records.
+        <p style="font-size: 12px; color: #94A3B8;">&copy; 2026 {{ station_name }} AI Vision Intelligence System. Selected Records.
         </p>
     </footer>
 

@@ -41,8 +41,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 import logging
 import re
-from capi_image_naming import AOI_REPORT_PREFIXES, canonical_image_prefix, panel_image_group_key
+from capi_image_naming import AOI_REPORT_PREFIXES, canonical_image_prefix
 from capi_image_orientation import read_detection_image
+from capi_station_adapter import StationAdapter, create_station_adapter
 
 # ── 舊版 anomalib 相容性修補 ─────────────────────────────
 # 修補 1: PrecisionType stub
@@ -350,9 +351,14 @@ class AOIDefect:
 class AOIReportDefect:
     """AOI 機台 NG 報告缺陷 (解析自 Report TXT)"""
     defect_code: str      # 異常代碼 (PCDK2, C1111, PTMD6)
-    product_x: int        # 產品座標 X
-    product_y: int        # 產品座標 Y
+    product_x: int        # 來源座標 X；coordinate_space=product 時為產品座標
+    product_y: int        # 來源座標 Y；coordinate_space=product 時為產品座標
     image_prefix: str     # 圖片前綴 (W0F00000, B0F00000)
+    coordinate_space: str = "product"  # product | image
+    resolved_product_x: int = -1
+    resolved_product_y: int = -1
+    resolved_image_x: int = -1
+    resolved_image_y: int = -1
 
 @dataclass
 class ImageResult:
@@ -398,8 +404,11 @@ class ImageResult:
     # CV 邊緣檢查結果
     edge_defects: List[EdgeDefect] = field(default_factory=list)
 
-    # WHITEFRA bright-frame observation.  Shadow-only: never affects formal judgment.
+    # WHITEFRA bright-frame formal inspection result.
     white_frame_result: Optional[Dict[str, Any]] = None
+
+    # Adapter-normalized QJPG screen name. Empty retains legacy filename parsing.
+    report_image_prefix: str = ""
 
     # Dot-matrix MARK binary detection metadata (detected from W0F0000 image)
     mark_text: str = ""
@@ -427,6 +436,10 @@ class ImageResult:
 
 class CAPIInferencer:
     """CAPI 推論器"""
+
+    # Keep helper/unit-test instances created via ``__new__`` on legacy CAPI
+    # conventions unless a running server explicitly injects another adapter.
+    station_adapter = create_station_adapter("capi")
     
     def __init__(
         self, 
@@ -435,6 +448,7 @@ class CAPIInferencer:
         device: str = "auto",
         threshold: float = 0.5,
         base_dir: Optional[Path] = None,
+        station_adapter: Optional[StationAdapter] = None,
     ):
         """
         初始化推論器
@@ -448,6 +462,7 @@ class CAPIInferencer:
         """
         self.config = config
         self.base_dir = base_dir or Path(__file__).parent
+        self.station_adapter = station_adapter or create_station_adapter("capi")
         if self._rotate_detection_images_180:
             logger.info("Detection input rotation enabled: config=inference_rotate_180_enabled angle=180")
         self.mark_template = None
@@ -725,7 +740,13 @@ class CAPIInferencer:
         例如: 'G0F00000_114438.tif' → 'G0F00000'
               'STANDARD.png' → 'STANDARD'
         """
-        return canonical_image_prefix(filename)
+        return self.station_adapter.image_prefix(filename)
+
+    def _get_model_prefix(self, image_prefix: str) -> str:
+        return self.station_adapter.model_prefix(image_prefix)
+
+    def _get_report_prefix(self, filename: str) -> str:
+        return self.station_adapter.report_prefix(filename)
 
     def _read_detection_image(
         self,
@@ -743,10 +764,9 @@ class CAPIInferencer:
         """Return the live runtime setting so settings hot-reload takes effect."""
         return bool(getattr(self.config, "inference_rotate_180_enabled", False))
 
-    @staticmethod
-    def _is_mark_binary_source(filename: str) -> bool:
+    def _is_mark_binary_source(self, filename: str) -> bool:
         """正式推論只從 W0F0000 畫面讀 dot-matrix MARK。"""
-        return Path(filename).name.upper().startswith("W0F0000")
+        return self._get_image_prefix(filename).upper().startswith("W0F0000")
 
     @staticmethod
     def _apply_online_paddle_mark_recognition(
@@ -1020,6 +1040,7 @@ class CAPIInferencer:
         1. model_mapping 中的對應模型
         2. fallback 到 self.inferencer (單一模型)
         """
+        prefix = self._get_model_prefix(prefix)
         # 查找映射
         if prefix in self._model_mapping:
             model_path = self._model_mapping[prefix]
@@ -1043,6 +1064,7 @@ class CAPIInferencer:
     
     def _get_threshold_for_prefix(self, prefix: str) -> float:
         """根據圖片前綴取得對應的閾值"""
+        prefix = self._get_model_prefix(prefix)
         return self._threshold_mapping.get(prefix, self.threshold)
 
     def _get_inferencer_for_zone(self, prefix: str, zone: str) -> Optional[Any]:
@@ -1052,8 +1074,9 @@ class CAPIInferencer:
         ``{prefix: {"inner": path, "edge": path}}``，需要 zone 才能解析。
         舊架構 ``{prefix: path}``，zone 參數忽略。
         """
+        model_prefix = self._get_model_prefix(prefix)
         if getattr(self.config, "is_new_architecture", False):
-            return self._get_model_for(self.config.machine_id, prefix, zone)
+            return self._get_model_for(self.config.machine_id, model_prefix, zone)
         return self._get_inferencer_for_prefix(prefix)
 
     def preload_v2_models(self) -> Tuple[int, int]:
@@ -1092,6 +1115,7 @@ class CAPIInferencer:
 
     def _get_threshold_for_zone(self, prefix: str, zone: str) -> float:
         """同上，threshold 版本。新架構 threshold_mapping 是 ``{prefix: {inner, edge}}``。"""
+        prefix = self._get_model_prefix(prefix)
         if getattr(self.config, "is_new_architecture", False):
             thr_map = self.config.threshold_mapping.get(prefix)
             if isinstance(thr_map, dict):
@@ -3042,8 +3066,9 @@ class CAPIInferencer:
         from capi_preprocess import preprocess_panel_image, PreprocessConfig
 
         lighting = self._get_image_prefix(image_path.name)
+        model_lighting = self._get_model_prefix(lighting)
 
-        lighting_map = self.config.model_mapping.get(lighting, {})
+        lighting_map = self.config.model_mapping.get(model_lighting, {})
         if not isinstance(lighting_map, dict) or "inner" not in lighting_map or "edge" not in lighting_map:
             return None
 
@@ -3072,7 +3097,7 @@ class CAPIInferencer:
         bbox = pre_result.foreground_bbox
         polygon = pre_result.panel_polygon
 
-        lighting_thr = self.config.threshold_mapping.get(lighting, {})
+        lighting_thr = self.config.threshold_mapping.get(model_lighting, {})
         if isinstance(lighting_thr, dict):
             cfg_inner_thr = float(lighting_thr.get("inner", 0.75))
             cfg_edge_thr = float(lighting_thr.get("edge", 0.75))
@@ -5046,8 +5071,7 @@ class CAPIInferencer:
             if f.is_file() and f.suffix.lower() in cls._PANEL_IMAGE_EXTENSIONS
         )
 
-    @staticmethod
-    def _select_latest_panel_images(image_files: List[Path]) -> List[Path]:
+    def _select_latest_panel_images(self, image_files: List[Path]) -> List[Path]:
         """
         當面版資料夾存在重複投片時，依每個圖片前綴只保留「最新」的一張。
 
@@ -5059,7 +5083,7 @@ class CAPIInferencer:
 
         prefix_map: Dict[str, List[Path]] = defaultdict(list)
         for f in image_files:
-            prefix = panel_image_group_key(f.name)
+            prefix = self.station_adapter.image_group_key(f.name)
             prefix_map[prefix].append(f)
 
         selected = []
@@ -5073,7 +5097,7 @@ class CAPIInferencer:
         """Return image files for inference, applying duplicate-panel selection."""
         image_files = self._list_panel_image_files(panel_dir)
         max_imgs = self.config.max_images_per_panel
-        group_keys = [panel_image_group_key(f.name) for f in image_files]
+        group_keys = [self.station_adapter.image_group_key(f.name) for f in image_files]
         has_duplicate_groups = len(set(group_keys)) < len(group_keys)
         if len(image_files) <= max_imgs and not has_duplicate_groups:
             return image_files, False
@@ -5137,7 +5161,13 @@ class CAPIInferencer:
             prefixes.add(p)
         return sorted(prefixes, key=len, reverse=True)
 
-    def _parse_aoi_report_txt(self, panel_dir: Path) -> Dict[str, List['AOIReportDefect']]:
+    def _parse_aoi_report_txt(
+        self,
+        panel_dir: Path,
+        *,
+        glass_id: str = "",
+        machine_judgment: str = "",
+    ) -> Dict[str, List['AOIReportDefect']]:
         """
         解析 AOI 機台 NG 報告 TXT。
 
@@ -5153,6 +5183,34 @@ class CAPIInferencer:
             {image_prefix: [AOIReportDefect, ...]}
         """
         result_map: Dict[str, List[AOIReportDefect]] = {}
+
+        station_report = self.station_adapter.parse_aoi_report(
+            panel_dir,
+            glass_id=glass_id,
+            machine_judgment=machine_judgment,
+        )
+        if station_report is not None:
+            for image_prefix, defects in station_report.items():
+                result_map[image_prefix] = [
+                    AOIReportDefect(
+                        defect_code=defect.defect_code,
+                        product_x=defect.x,
+                        product_y=defect.y,
+                        image_prefix=defect.image_prefix,
+                        coordinate_space=defect.coordinate_space,
+                    )
+                    for defect in defects
+                ]
+            total = sum(len(v) for v in result_map.values())
+            per_prefix = ", ".join(f"{p}×{len(v)}" for p, v in result_map.items())
+            logger.info(
+                "AOI Report[%s]: glass=%s parsed=%s [%s]",
+                self.station_adapter.profile.upper(),
+                glass_id,
+                total,
+                per_prefix,
+            )
+            return result_map
 
         # 路徑替換取得報告目錄
         replace_from = self.config.aoi_report_path_replace_from
@@ -5299,10 +5357,10 @@ class CAPIInferencer:
         next_tile_id = max((t.tile_id for t in result.tiles), default=-1) + 1
 
         for defect in aoi_defects:
-            # 產品座標 → 圖片座標
-            img_x, img_y = self._map_aoi_coords(
-                defect.product_x, defect.product_y,
-                result.raw_bounds, product_resolution
+            img_x, img_y, product_x, product_y = self._resolve_aoi_report_defect(
+                defect,
+                result,
+                product_resolution,
             )
 
             # 計算 tile 起點 (以座標為中心)
@@ -5370,8 +5428,8 @@ class CAPIInferencer:
                 is_right_edge=is_right,
                 is_aoi_coord_tile=True,
                 aoi_defect_code=defect.defect_code,
-                aoi_product_x=defect.product_x,
-                aoi_product_y=defect.product_y,
+                aoi_product_x=product_x,
+                aoi_product_y=product_y,
                 aoi_image_x=img_x,
                 aoi_image_y=img_y,
                 aoi_tile_shift_dx=tx - centered_tx,
@@ -5407,6 +5465,63 @@ class CAPIInferencer:
         return map_product_coord_to_image(
             px, py, raw_bounds, product_resolution, panel_polygon,
         )
+
+    def _resolve_aoi_report_defect(
+        self,
+        defect: 'AOIReportDefect',
+        result: 'ImageResult',
+        product_resolution: Optional[Tuple[int, int]],
+        panel_polygon: Optional[np.ndarray] = None,
+    ) -> Tuple[int, int, int, int]:
+        """Resolve station source coordinates into both image and product space."""
+        if result.raw_bounds is None:
+            raise RuntimeError("AOI coordinate resolution requires raw_bounds")
+
+        coordinate_space_value = getattr(defect, "coordinate_space", "product")
+        coordinate_space = (
+            coordinate_space_value.lower()
+            if isinstance(coordinate_space_value, str) and coordinate_space_value
+            else "product"
+        )
+        if coordinate_space == "image":
+            img_x = int(defect.product_x)
+            img_y = int(defect.product_y)
+            image_width, image_height = result.image_size
+            if self._rotate_detection_images_180:
+                img_x = int(image_width) - 1 - img_x
+                img_y = int(image_height) - 1 - img_y
+            if not (0 <= img_x < int(image_width) and 0 <= img_y < int(image_height)):
+                raise RuntimeError(
+                    f"AOI image coordinate out of bounds: ({img_x},{img_y}) "
+                    f"image={image_width}x{image_height}"
+                )
+
+            product_width, product_height = product_resolution or DEFAULT_PRODUCT_RESOLUTION
+            x1, y1, x2, y2 = result.raw_bounds
+            panel_width = max(1, int(x2) - int(x1))
+            panel_height = max(1, int(y2) - int(y1))
+            product_x = int(round((img_x - int(x1)) * int(product_width) / panel_width))
+            product_y = int(round((img_y - int(y1)) * int(product_height) / panel_height))
+            product_x = max(0, min(int(product_width), product_x))
+            product_y = max(0, min(int(product_height), product_y))
+        elif coordinate_space == "product":
+            product_x = int(defect.product_x)
+            product_y = int(defect.product_y)
+            img_x, img_y = self._map_aoi_coords(
+                product_x,
+                product_y,
+                result.raw_bounds,
+                product_resolution,
+                panel_polygon=panel_polygon,
+            )
+        else:
+            raise RuntimeError(f"Unsupported AOI coordinate_space: {coordinate_space}")
+
+        defect.resolved_product_x = product_x
+        defect.resolved_product_y = product_y
+        defect.resolved_image_x = img_x
+        defect.resolved_image_y = img_y
+        return img_x, img_y, product_x, product_y
 
     def _inspect_roi_fusion(
         self,
@@ -6022,6 +6137,8 @@ class CAPIInferencer:
             if not self._aoi_prefix_matches(str(report_prefix), image_prefix):
                 continue
             for defect in defects:
+                if str(getattr(defect, "coordinate_space", "product")).lower() != "product":
+                    continue
                 if (
                     abs(int(defect.product_x) - product_x) <= tolerance
                     and abs(int(defect.product_y) - product_y) <= tolerance
@@ -6096,6 +6213,17 @@ class CAPIInferencer:
         else:
             print("💣 [BOMB_FORCE] AOI 已給出 Client 炸彈座標附近的點，不額外補切 tile")
         return forced_report, len(forced_coords)
+
+    def _filter_aoi_report_for_inference(
+        self,
+        aoi_report: Dict[str, List['AOIReportDefect']],
+    ) -> Dict[str, List['AOIReportDefect']]:
+        """Exclude screens handled by a dedicated detector from PatchCore routing."""
+        return {
+            prefix: defects
+            for prefix, defects in (aoi_report or {}).items()
+            if self.station_adapter.is_inference_prefix(prefix)
+        }
 
     def _apply_aoi_coord_inspection(
         self,
@@ -6297,9 +6425,10 @@ class CAPIInferencer:
         created = 0
 
         for defect in defects:
-            img_x, img_y = self._map_aoi_coords(
-                defect.product_x, defect.product_y,
-                result.raw_bounds, product_resolution,
+            img_x, img_y, product_x, product_y = self._resolve_aoi_report_defect(
+                defect,
+                result,
+                product_resolution,
                 panel_polygon=polygon,
             )
 
@@ -6312,7 +6441,8 @@ class CAPIInferencer:
                 if polygon_distance < -1.0:
                     raise RuntimeError(
                         f"[v2] AOI 座標映射到 panel 外: "
-                        f"{defect.defect_code} product=({defect.product_x},{defect.product_y}) "
+                        f"{defect.defect_code} source={defect.coordinate_space}"
+                        f"({defect.product_x},{defect.product_y}) "
                         f"image=({img_x},{img_y}) distance={polygon_distance:.1f}px"
                     )
 
@@ -6395,8 +6525,8 @@ class CAPIInferencer:
                 mask=tile_mask,
                 is_aoi_coord_tile=True,
                 aoi_defect_code=defect.defect_code,
-                aoi_product_x=defect.product_x,
-                aoi_product_y=defect.product_y,
+                aoi_product_x=product_x,
+                aoi_product_y=product_y,
                 aoi_image_x=img_x,
                 aoi_image_y=img_y,
                 aoi_tile_shift_dx=tx - centered_tx,
@@ -6434,9 +6564,11 @@ class CAPIInferencer:
 
         把 result.edge_defects mutate（append NG 或 OK record）。新架構走 zone='edge'。
         """
-        img_x, img_y = self._map_aoi_coords(
-            edef.product_x, edef.product_y,
-            result.raw_bounds, product_resolution
+        img_x, img_y, _product_x, _product_y = self._resolve_aoi_report_defect(
+            edef,
+            result,
+            product_resolution,
+            panel_polygon=result.panel_polygon,
         )
         roi_size = self.config.tile_size
         roi_half = roi_size // 2
@@ -6967,11 +7099,12 @@ class CAPIInferencer:
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
         machine_no: Optional[str] = None,
+        glass_id: Optional[str] = None,
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
         machine_judgment: Optional[str] = None,
     ):
         """分發器：依 config.is_new_architecture 路由至 v1 或 v2 實作。"""
-        return self._dispatch_process_panel(
+        panel_result = self._dispatch_process_panel(
             panel_dir,
             progress_callback=progress_callback,
             cpu_workers=cpu_workers,
@@ -6979,9 +7112,14 @@ class CAPIInferencer:
             bomb_info=bomb_info,
             model_id=model_id,
             machine_no=machine_no,
+            glass_id=glass_id,
             aoi_report_override=aoi_report_override,
             machine_judgment=machine_judgment,
         )
+        if panel_result and panel_result[0]:
+            for result in panel_result[0]:
+                result.report_image_prefix = self._get_report_prefix(result.image_path.name)
+        return panel_result
 
     def _process_panel_v1(
         self,
@@ -6992,6 +7130,7 @@ class CAPIInferencer:
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
         machine_no: Optional[str] = None,
+        glass_id: Optional[str] = None,
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
         machine_judgment: Optional[str] = None,
     ) -> List[ImageResult]:
@@ -7019,9 +7158,19 @@ class CAPIInferencer:
         
         # 1. 分離一般圖片和灰塵檢查用圖片 (支援 OMIT0000 和 PINIGBI 兩種格式)
         def is_dust_check_image(f):
-            return f.stem.startswith("PINIGBI") or "OMIT0000" in f.name
+            return self.station_adapter.is_omit_image(f.name)
         omit_files = [f for f in image_files if is_dust_check_image(f)]
-        normal_files = [f for f in image_files if not is_dust_check_image(f)]
+        normal_files = [
+            f for f in image_files
+            if not is_dust_check_image(f)
+            and not self.station_adapter.is_white_frame_image(f.name)
+        ]
+        if self.station_adapter.profile == "aapi":
+            normal_files = [
+                f for f in normal_files
+                if self._get_image_prefix(f.name) in self.station_adapter.inference_prefixes
+                or self._get_image_prefix(f.name).upper().startswith("B0")
+            ]
         panel_mark_detection, panel_mark_regions = self._detect_panel_mark_binary_region(
             normal_files,
             machine_no=machine_no,
@@ -7114,22 +7263,19 @@ class CAPIInferencer:
         # 在光源較弱的機種（如 G0F / R0F / STANDARD）會抓歪 polygon，連帶影響
         # tiling / mask / exclusion。這裡以 W0F (白光) 優先作為參考，其他圖套用。
         # B0F (暗色) 本來就無法獨立偵測邊界，同樣走這條路徑。
-        _DARK_PREFIXES = ("B0F",)  # 不得作為 reference 的暗色圖片前綴
-        _REFERENCE_PRIORITY = ("W0F", "WGF", "G0F", "R0F", "STANDARD")
-
         def _prefix_rank(filename: str) -> int:
-            up = filename.upper()
-            for i, p in enumerate(_REFERENCE_PRIORITY):
-                if up.startswith(p):
+            image_prefix = self._get_image_prefix(filename)
+            for i, p in enumerate(self.station_adapter.boundary_reference_priority):
+                if image_prefix == p:
                     return i
-            return len(_REFERENCE_PRIORITY)  # 兜底：其他非暗色非 OMIT
+            return len(self.station_adapter.boundary_reference_priority)
 
         panel_reference_raw_bounds: Optional[Tuple[int, int, int, int]] = None
         panel_reference_polygon: Optional[np.ndarray] = None
 
         ref_candidates = sorted(
             [f for f in normal_files
-             if not f.name.upper().startswith(_DARK_PREFIXES)
+             if not self._get_image_prefix(f.name).upper().startswith("B0")
              and not is_dust_check_image(f)],
             key=lambda f: _prefix_rank(f.name),
         )
@@ -7259,11 +7405,16 @@ class CAPIInferencer:
         aoi_report = {}
         aoi_report_for_inference = {}
         if self.config.aoi_coord_inspection_enabled:
-            aoi_report = aoi_report_override if aoi_report_override is not None else self._parse_aoi_report_txt(panel_dir)
+            aoi_report = aoi_report_override if aoi_report_override is not None else self._parse_aoi_report_txt(
+                panel_dir,
+                glass_id=glass_id or "",
+                machine_judgment=machine_judgment or "",
+            )
             aoi_report_for_inference, _forced_bomb_count = self._aoi_report_with_forced_client_bomb_coords(
                 aoi_report,
                 bomb_info,
             )
+            aoi_report_for_inference = self._filter_aoi_report_for_inference(aoi_report_for_inference)
             if aoi_report_for_inference:
                 # 收集已有的圖片前綴
                 existing_prefixes = set()
@@ -7363,8 +7514,9 @@ class CAPIInferencer:
             # 模型路由 log (僅在多模型模式下顯示)
             if self._model_mapping:
                 model_name = "fallback"
-                if img_prefix in self._model_mapping:
-                    model_name = self._model_mapping[img_prefix].name
+                model_prefix = self._get_model_prefix(img_prefix)
+                if model_prefix in self._model_mapping:
+                    model_name = self._model_mapping[model_prefix].name
                 print(f"🎯 {result.image_path.name} → 模型: {model_name}, 閾值: {target_threshold}")
 
             result = self.run_inference(
@@ -8018,7 +8170,7 @@ class CAPIInferencer:
             image_files = self._list_panel_image_files(panel_dir)
         omit_files = [
             f for f in image_files
-            if f.stem.startswith("PINIGBI") or "OMIT0000" in f.name
+            if self.station_adapter.is_omit_image(f.name)
         ]
         omit_image = None
         omit_overexposed = False
@@ -8625,6 +8777,7 @@ class CAPIInferencer:
         bomb_info: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
         machine_no: Optional[str] = None,
+        glass_id: Optional[str] = None,
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
         machine_judgment: Optional[str] = None,
     ):
@@ -8660,12 +8813,17 @@ class CAPIInferencer:
             aoi_report = (
                 aoi_report_override
                 if aoi_report_override is not None
-                else self._parse_aoi_report_txt(Path(panel_dir))
+                else self._parse_aoi_report_txt(
+                    Path(panel_dir),
+                    glass_id=glass_id or "",
+                    machine_judgment=machine_judgment or "",
+                )
             )
             aoi_report_for_inference, _forced_bomb_count = self._aoi_report_with_forced_client_bomb_coords(
                 aoi_report,
                 bomb_info,
             )
+            aoi_report_for_inference = self._filter_aoi_report_for_inference(aoi_report_for_inference)
         elif bomb_info is not None and getattr(self.config, "bomb_area_force_detection_enabled", False):
             print("💣 [BOMB_FORCE] 已啟用但 aoi_coord_inspection_enabled=False，無法補切 Client 炸彈座標")
 
@@ -8811,12 +8969,17 @@ class CAPIInferencer:
 
         preprocess_start = time.time()
         setup_elapsed = preprocess_start - t0
-        panel_results = preprocess_panel_folder(
-            panel_path,
-            pre_cfg,
-            image_files=preprocess_image_files,
-            boundary_reference_files=image_files if aoi_only_mode else None,
-        )
+        preprocess_kwargs = {
+            "image_files": preprocess_image_files,
+            "boundary_reference_files": image_files if aoi_only_mode else None,
+        }
+        if self.station_adapter.profile == "aapi":
+            preprocess_kwargs.update({
+                "prefix_resolver": self._get_image_prefix,
+                "allowed_prefixes": self.station_adapter.inference_prefixes,
+                "boundary_reference_priority": self.station_adapter.boundary_reference_priority,
+            })
+        panel_results = preprocess_panel_folder(panel_path, pre_cfg, **preprocess_kwargs)
         if not panel_results and not aoi_only_mode:
             logger.warning(f"[v2] {panel_path}: preprocess_panel_folder 回傳空結果")
             # 回傳與 v1 格式相容的空結果
@@ -8833,6 +8996,7 @@ class CAPIInferencer:
         v2_entries: List[Dict[str, Any]] = []
 
         for lighting, pre_result in panel_results.items():
+            model_lighting = self._get_model_prefix(lighting)
             img_path = pre_result.image_path
             bbox = pre_result.foreground_bbox  # (x1, y1, x2, y2)
             polygon = pre_result.panel_polygon
@@ -8852,11 +9016,11 @@ class CAPIInferencer:
                 raw_bounds_unoffset = bbox
 
             # 取得此 lighting 對應的 inner / edge model 路徑
-            lighting_map = self.config.model_mapping.get(lighting, {})
+            lighting_map = self.config.model_mapping.get(model_lighting, {})
             if not isinstance(lighting_map, dict):
                 lighting_map = {}
 
-            lighting_thr = self.config.threshold_mapping.get(lighting, {})
+            lighting_thr = self.config.threshold_mapping.get(model_lighting, {})
             if isinstance(lighting_thr, dict):
                 inner_thr = float(lighting_thr.get("inner", 0.75))
                 edge_thr = float(lighting_thr.get("edge", 0.75))
@@ -8919,6 +9083,7 @@ class CAPIInferencer:
             results.append(image_result)
             v2_entries.append({
                 "lighting": lighting,
+                "model_lighting": model_lighting,
                 "result": image_result,
                 "zone_by_tile_id": zone_by_tile_id,
                 "inner_thr": inner_thr,
@@ -9056,6 +9221,7 @@ class CAPIInferencer:
         tile_prepare_elapsed = inference_start - preprocess_end
         for entry in v2_entries:
             lighting = entry["lighting"]
+            model_lighting = entry.get("model_lighting", self._get_model_prefix(lighting))
             result = entry["result"]
             zone_by_tile_id = entry["zone_by_tile_id"]
             inner_thr = entry["inner_thr"]
@@ -9097,7 +9263,7 @@ class CAPIInferencer:
                 threshold = inner_thr if zone == "inner" else edge_thr
                 ti.score_threshold = threshold
                 try:
-                    model = self._get_model_for(self.config.machine_id, lighting, zone)
+                    model = self._get_model_for(self.config.machine_id, model_lighting, zone)
                     score, anomaly_map = self.predict_tile(
                         ti,
                         inferencer=model,

@@ -5,7 +5,7 @@
 """
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Iterable, Any
+from typing import Optional, Tuple, List, Dict, Iterable, Any, Callable
 import logging
 import numpy as np
 import cv2
@@ -399,6 +399,8 @@ def _find_low_contrast_side_boundary(
 def filter_panel_lighting_files(
     folder: Path,
     image_files: Optional[Iterable[Path]] = None,
+    prefix_resolver: Optional[Callable[[str], str]] = None,
+    allowed_prefixes: Optional[Iterable[str]] = None,
 ) -> Dict[str, Path]:
     """從 panel folder 過濾出 5 個有效 lighting 圖。
 
@@ -416,6 +418,8 @@ def filter_panel_lighting_files(
             curr_key = (0, current.name)
         return cand_key > curr_key
 
+    resolve_prefix = prefix_resolver or canonical_image_prefix
+    allowed = set(allowed_prefixes or LIGHTING_PREFIXES)
     result: Dict[str, Path] = {}
     entries = image_files if image_files is not None else folder.iterdir()
     for entry in entries:
@@ -425,8 +429,8 @@ def filter_panel_lighting_files(
         name = entry.name
         if name in SKIP_EXACT:
             continue
-        lighting = canonical_image_prefix(name)
-        if lighting in LIGHTING_PREFIXES:
+        lighting = resolve_prefix(name)
+        if lighting in allowed:
             if lighting not in result or _is_newer(entry, result[lighting]):
                 result[lighting] = entry
             continue
@@ -998,6 +1002,9 @@ def preprocess_panel_folder(
     config: PreprocessConfig,
     image_files: Optional[Iterable[Path]] = None,
     boundary_reference_files: Optional[Iterable[Path]] = None,
+    prefix_resolver: Optional[Callable[[str], str]] = None,
+    allowed_prefixes: Optional[Iterable[str]] = None,
+    boundary_reference_priority: Optional[Iterable[str]] = None,
 ) -> Dict[str, "PanelPreprocessResult"]:
     """處理整個 panel folder 的 5 lighting 圖。
 
@@ -1005,12 +1012,22 @@ def preprocess_panel_folder(
           reference polygon → 所有目標 lighting 套同一個 reference。
           boundary_reference_files 可提供只抓邊、不加入回傳結果的候選圖。
     """
-    files = filter_panel_lighting_files(folder, image_files=image_files)
+    files = filter_panel_lighting_files(
+        folder,
+        image_files=image_files,
+        prefix_resolver=prefix_resolver,
+        allowed_prefixes=allowed_prefixes,
+    )
     if not files:
         return {}
 
     reference_files = (
-        filter_panel_lighting_files(folder, image_files=boundary_reference_files)
+        filter_panel_lighting_files(
+            folder,
+            image_files=boundary_reference_files,
+            prefix_resolver=prefix_resolver,
+            allowed_prefixes=allowed_prefixes,
+        )
         if boundary_reference_files is not None
         else files
     )
@@ -1019,7 +1036,7 @@ def preprocess_panel_folder(
 
     # 決定 reference image：W0F00000 對低對比前後景較穩，找邊優先用它。
     ref_lighting = None
-    for cand in BOUNDARY_REFERENCE_PRIORITY:
+    for cand in tuple(boundary_reference_priority or BOUNDARY_REFERENCE_PRIORITY):
         if cand in reference_files:
             ref_lighting = cand
             break
@@ -1028,7 +1045,7 @@ def preprocess_panel_folder(
 
     ref_result = preprocess_panel_image(reference_files[ref_lighting], ref_lighting, config)
     if ref_result.polygon_detection_failed:
-        for cand in BOUNDARY_REFERENCE_PRIORITY:
+        for cand in tuple(boundary_reference_priority or BOUNDARY_REFERENCE_PRIORITY):
             if cand == ref_lighting or cand not in reference_files:
                 continue
             fallback_result = preprocess_panel_image(reference_files[cand], cand, config)
