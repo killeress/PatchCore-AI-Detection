@@ -1,4 +1,4 @@
-"""CAPI AI 推論伺服器啟動腳本 (Python 版).
+"""CAPI/AAPI AI 推論伺服器啟動腳本 (Python 版).
 
 為什麼用 Python：bash script 在 Windows -> Linux 透過 FTP 傳輸時容易帶
 CRLF 行尾，導致 `/bin/bash^M: bad interpreter`。Python 對 CRLF 完全免疫。
@@ -14,10 +14,13 @@ import argparse
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from capi_station_adapter import resolve_station_profile_from_hostname
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PID_FILE = Path("/tmp/capi_server.pid")
@@ -25,6 +28,13 @@ LOG_DIR = Path("/data/capi_ai/logs")
 HEATMAP_DIR = Path("/data/capi_ai/heatmaps")
 DEFAULT_CONFIG = "server_config.yaml"
 SERVER_SCRIPT = "capi_server.py"
+
+
+def _station_name() -> str:
+    return resolve_station_profile_from_hostname(
+        socket.gethostname(),
+        default_if_unknown="capi" if os.name == "nt" else None,
+    ).upper()
 
 
 def _is_capi_server(pid: int) -> bool:
@@ -139,7 +149,7 @@ def _clear_pyc(root: Path) -> int:
 
 def cmd_start(config_file: str) -> int:
     print("=" * 60)
-    print("  CAPI AI Inference Server")
+    print(f"  {_station_name()} AI Inference Server")
     print("=" * 60)
     print(f"  Working dir : {SCRIPT_DIR}")
     print(f"  Config      : {config_file}")
@@ -179,7 +189,7 @@ def cmd_start(config_file: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="CAPI AI server launcher (Python, CRLF-immune)",
+        description="CAPI/AAPI AI server launcher (Python, CRLF-immune)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

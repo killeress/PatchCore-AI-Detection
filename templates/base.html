@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% if host_identity %}[{{ host_identity|e }}] {% endif %}{% block title %}CAPI AI 推論伺服器{% endblock %}</title>
+    <title>{% if host_identity %}[{{ host_identity|e }}] {% endif %}{% block title %}{{ station_name }} AI 推論伺服器{% endblock %}</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link href="/static/css/fonts.css" rel="stylesheet">
     <script src="/static/js/tailwindcss.js"></script>
@@ -425,7 +425,7 @@
                     <path stroke-linecap="round" stroke-linejoin="round"
                         d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm.75-12h9v9h-9v-9z" />
                 </svg>
-                CAPI AD-AI智能檢測
+                {{ station_name }} AD-AI智能檢測
                 {% if host_identity %}
                 <span class="host-identity-badge" title="{{ host_identity|e }}">{{ host_identity|e }}</span>
                 {% endif %}
@@ -520,7 +520,7 @@
                     </svg>
                 </div>
                 <div>
-                    <h2 class="text-xl md:text-2xl font-semibold text-slate-100 font-sans tracking-wide m-0">CAPI
+                    <h2 class="text-xl md:text-2xl font-semibold text-slate-100 font-sans tracking-wide m-0">{{ station_name }}
                         檢測系統現行邏輯與流程</h2>
                     <p class="text-sm text-slate-400 mt-1" style="font-family: 'Fira Code', monospace;">Current Detection
                         Pipeline &amp; Decision Flow</p>

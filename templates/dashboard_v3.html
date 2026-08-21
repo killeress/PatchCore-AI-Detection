@@ -4,8 +4,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MOD2 CAPI AD - 即時監控儀表板</title>
-    <meta name="description" content="CAPI AI Vision - 即時 AI 缺陷偵測監控看板">
+    <title>MOD2 {{ station_name }} AD - 即時監控儀表板</title>
+    <meta name="description" content="{{ station_name }} AI Vision - 即時 AI 缺陷偵測監控看板">
 
     <link href="/static/css/fonts.css" rel="stylesheet">
     <script src="/static/js/tailwindcss.js"></script>
@@ -717,10 +717,10 @@
     <div id="headerFrame">
         <div id="brandingBlock">
             <div id="logoLabel">
-                <img src="/imgs/logo.png" alt="CAPI Logo" onerror="this.style.display='none'">
+                <img src="/imgs/logo.png" alt="{{ station_name }} Logo" onerror="this.style.display='none'">
             </div>
             <div id="titleBlock">
-                <div id="titleLabel">CAPI AI Vision</div>
+                <div id="titleLabel">{{ station_name }} AI Vision</div>
                 <div id="subtitleLabel">MOD2 即時 AI 缺陷偵測監控平台</div>
             </div>
         </div>
@@ -865,7 +865,7 @@
             <span id="connLabel">已連接客戶端 (<span id="ui-conn-count">0</span>)：</span>
             <span id="ui-machine-list"></span>
         </div>
-        <div id="copyright">© 2026 CAPI AI Vision Intelligence System</div>
+        <div id="copyright">© 2026 {{ station_name }} AI Vision Intelligence System</div>
     </div>
 
     <script>

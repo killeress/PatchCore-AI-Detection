@@ -79,23 +79,48 @@ def test_start_server_handles_zombies_and_checks_configured_ports():
     assert "ss" in script or "lsof" in script
 
 
-def test_base_template_includes_hostname_in_title_header_and_footer(monkeypatch):
+@pytest.mark.parametrize(
+    ("hostname", "station_name"),
+    [("CAPI07", "CAPI"), ("mod2-aapi09", "AAPI")],
+)
+def test_base_template_uses_hostname_for_station_brand(
+    monkeypatch,
+    hostname,
+    station_name,
+):
     import capi_web
     from capi_web import CAPIWebHandler
 
     original_env = CAPIWebHandler.jinja_env
-    monkeypatch.setattr(capi_web.socket, "gethostname", lambda: "CAPI07")
+    monkeypatch.setattr(capi_web.socket, "gethostname", lambda: hostname)
     CAPIWebHandler.jinja_env = None
     try:
         CAPIWebHandler.init_jinja()
         template = CAPIWebHandler.jinja_env.get_template("base.html")
         rendered = template.render(request_path="/")
+        dashboard_rendered = CAPIWebHandler.jinja_env.get_template(
+            "dashboard_v3.html"
+        ).render()
     finally:
         CAPIWebHandler.jinja_env = original_env
 
-    assert "<title>[CAPI07] CAPI AI 推論伺服器</title>" in rendered
-    assert 'class="host-identity-badge" title="CAPI07">CAPI07</span>' in rendered
-    assert "主機：CAPI07 ｜ 版本：" in rendered
+    assert f"<title>[{hostname}] {station_name} AI 推論伺服器</title>" in rendered
+    assert f"{station_name} AD-AI智能檢測" in rendered
+    assert f'class="host-identity-badge" title="{hostname}">{hostname}</span>' in rendered
+    assert f"主機：{hostname} ｜ 版本：" in rendered
+    assert f"MOD2 {station_name} AD - 即時監控儀表板" in dashboard_rendered
+    assert f"{station_name} AI Vision" in dashboard_rendered
+    if station_name == "AAPI":
+        assert "CAPI AD-AI智能檢測" not in rendered
+        assert "CAPI AI Vision" not in dashboard_rendered
+
+
+def test_start_server_banner_uses_hostname_station(monkeypatch):
+    import start_server
+
+    monkeypatch.setattr(start_server.socket, "gethostname", lambda: "mod2-aapi09")
+
+    assert start_server._station_name() == "AAPI"
 
 
 def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(tmp_path, monkeypatch):
@@ -124,6 +149,8 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "release_manifest.json" in names
         assert "checksums.txt" in names
         assert "capi_version.py" in names
+        assert "capi_station_adapter.py" in names
+        assert "start_server.py" in names
         assert "capi_update_agent.py" in names
         assert "promote_update.sh" in names
         assert "setup_auto_update_client.sh" in names
@@ -203,10 +230,14 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
     assert manifest["content_tree_sha256"] == hashlib.sha256(canonical_files).hexdigest()
     assert any(item["path"] == "capi_mark_calibration.py" for item in manifest["files"])
     assert any(item["path"] == "capi_mark_shadow.py" for item in manifest["files"])
+    assert any(item["path"] == "capi_station_adapter.py" for item in manifest["files"])
+    assert any(item["path"] == "start_server.py" for item in manifest["files"])
     assert any(item["path"] == "capi_web.py" for item in manifest["files"])
     assert not any(item["path"] == "capi_mes_credentials.py" for item in manifest["files"])
     assert "  capi_mark_calibration.py\n" in checksums
     assert "  capi_mark_shadow.py\n" in checksums
+    assert "  capi_station_adapter.py\n" in checksums
+    assert "  start_server.py\n" in checksums
     assert "  capi_web.py\n" in checksums
     assert "  capi_mes_credentials.py\n" not in checksums
 

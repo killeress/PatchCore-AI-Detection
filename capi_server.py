@@ -44,7 +44,7 @@ import cv2
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Tuple, List, Any
+from typing import Callable, Dict, Optional, Tuple, List, Any
 
 # 確保模組路徑
 sys.path.insert(0, str(Path(__file__).parent))
@@ -58,7 +58,11 @@ from capi_image_naming import (
 )
 from capi_inference import CAPIInferencer, ImageResult, resolve_product_resolution
 from capi_preprocess import BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_polygon
-from capi_white_frame import WhiteFrameInspection, inspect_white_frame_panel
+from capi_station_adapter import (
+    create_station_adapter,
+    resolve_station_profile_from_hostname,
+)
+from capi_white_frame import WhiteFrameInspection, inspect_white_frame_image
 from capi_database import CAPIDatabase
 from capi_auto_model_switch import bundle_label, select_target_bundle
 from capi_heatmap import HeatmapManager
@@ -620,10 +624,17 @@ def _image_abnormal_latest_key(image_path: Path) -> Tuple[float, str]:
     return modified_at, image_path.name
 
 
-def _image_abnormal_screen_path_map(candidates: List[Path]) -> Dict[str, Path]:
+def _image_abnormal_screen_path_map(
+    candidates: List[Path],
+    image_prefix_resolver: Optional[Callable[[str], str]] = None,
+) -> Dict[str, Path]:
     by_screen: Dict[str, Path] = {}
     for image_path in candidates:
-        screen = _image_abnormal_screen_from_filename(image_path.name)
+        screen = (
+            image_prefix_resolver(image_path.name)
+            if image_prefix_resolver is not None
+            else _image_abnormal_screen_from_filename(image_path.name)
+        )
         if not screen:
             continue
         current = by_screen.get(screen)
@@ -636,8 +647,9 @@ def _image_abnormal_reference_polygon(
     screen_paths: Dict[str, Path],
     pre_cfg: PreprocessConfig,
     image_cache: Dict[str, Any],
+    boundary_reference_priority: Optional[Tuple[str, ...]] = None,
 ) -> Tuple[Optional[np.ndarray], str, Optional[Tuple[int, int]]]:
-    for screen in BOUNDARY_REFERENCE_PRIORITY:
+    for screen in boundary_reference_priority or BOUNDARY_REFERENCE_PRIORITY:
         image_path = screen_paths.get(screen)
         if not image_path:
             continue
@@ -671,16 +683,24 @@ def check_image_abnormal_precheck(
     report_prefixes: Optional[List[str]] = None,
     product_resolution: Optional[Tuple[int, int]] = None,
     rotate_180: bool = False,
+    image_prefix_resolver: Optional[Callable[[str], str]] = None,
+    screen_alias_resolver: Optional[Callable[[str], str]] = None,
+    boundary_reference_priority: Optional[Tuple[str, ...]] = None,
 ) -> Optional[Dict[str, Any]]:
     if not getattr(config, "image_abnormal_detection_enabled", False):
         return None
 
-    target_prefixes = {
-        prefix
-        for prefix in (report_prefixes or [])
-        if prefix in _image_abnormal_limits(config)
-    }
-    if not target_prefixes:
+    limits = _image_abnormal_limits(config)
+    requested_screens = {}
+    for source_prefix in report_prefixes or []:
+        screen = (
+            screen_alias_resolver(source_prefix)
+            if screen_alias_resolver is not None
+            else source_prefix
+        )
+        if screen in limits:
+            requested_screens[source_prefix] = screen
+    if not requested_screens:
         logger.info("畫異預檢: AOI Report 無需檢查的畫面前綴，跳過")
         return None
 
@@ -690,26 +710,35 @@ def check_image_abnormal_precheck(
         logger.warning("畫異預檢無法列出圖片 (%s): %s", panel_dir, exc)
         return None
 
-    limits = _image_abnormal_limits(config)
     image_cache: Dict[str, Any] = {}
     pre_cfg = _image_abnormal_preprocess_config(config, product_resolution, rotate_180)
-    screen_paths = _image_abnormal_screen_path_map(candidates)
+    screen_paths = _image_abnormal_screen_path_map(
+        candidates,
+        image_prefix_resolver=image_prefix_resolver,
+    )
     reference_polygon, reference_source, reference_shape = _image_abnormal_reference_polygon(
         screen_paths,
         pre_cfg,
         image_cache,
+        boundary_reference_priority=boundary_reference_priority,
     )
-    checked_screens = set()
+    checked_prefixes = set()
     logger.info(
         "畫異預檢: AOI Report 涉及 %d 種可檢查畫面前綴 [%s]",
-        len(target_prefixes),
-        ", ".join(sorted(target_prefixes)),
+        len(requested_screens),
+        ", ".join(
+            sorted(
+                source if source == screen else f"{source}->{screen}"
+                for source, screen in requested_screens.items()
+            )
+        ),
     )
-    for screen in sorted(target_prefixes):
-        image_path = screen_paths.get(screen)
+    for source_prefix in sorted(requested_screens):
+        screen = requested_screens[source_prefix]
+        image_path = screen_paths.get(source_prefix)
         if not image_path:
             continue
-        checked_screens.add(screen)
+        checked_prefixes.add(source_prefix)
 
         cache_key = str(image_path)
         image = image_cache.get(cache_key)
@@ -750,11 +779,11 @@ def check_image_abnormal_precheck(
 
         logger.info("[IMAGE_ABNORMAL OK] %s: %s", image_path.name, detail)
 
-    missing_screens = target_prefixes - checked_screens
-    if missing_screens:
+    missing_prefixes = set(requested_screens) - checked_prefixes
+    if missing_prefixes:
         logger.warning(
             "畫異預檢: AOI Report 涉及但資料夾找不到對應圖片 [%s]",
-            ", ".join(sorted(missing_screens)),
+            ", ".join(sorted(missing_prefixes)),
         )
 
     return None
@@ -838,6 +867,39 @@ def _is_reportable_edge_defect(edge: Any) -> bool:
     )
 
 
+def _white_frame_payload(result: ImageResult) -> Dict[str, Any]:
+    payload = getattr(result, "white_frame_result", None)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _is_white_frame_ng(result: ImageResult) -> bool:
+    return str(_white_frame_payload(result).get("status", "")).upper() == "NG"
+
+
+def _has_white_frame_ng(results: List[ImageResult]) -> bool:
+    return any(_is_white_frame_ng(result) for result in (results or []))
+
+
+def _iter_white_frame_gaps(result: ImageResult):
+    payload = _white_frame_payload(result)
+    sides = payload.get("sides", {})
+    if not isinstance(sides, dict):
+        return
+    for side in ("top", "right", "bottom", "left"):
+        side_result = sides.get(side, {})
+        if not isinstance(side_result, dict):
+            continue
+        for gap in side_result.get("gaps", []) or []:
+            if not isinstance(gap, dict):
+                continue
+            try:
+                image_x = int(gap["center_x"])
+                image_y = int(gap["center_y"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            yield side, gap, image_x, image_y
+
+
 def _format_qjpg_defect_record(
     defect_code: str,
     image_x: int,
@@ -868,8 +930,24 @@ def _iter_qjpg_defect_records(
 ) -> List[str]:
     records: List[str] = []
     for result in results or []:
-        image_prefix = _image_prefix_for_report(result.image_path.name)
+        image_prefix = (
+            str(getattr(result, "report_image_prefix", "") or "").strip()
+            or _image_prefix_for_report(result.image_path.name)
+        )
         raw_bounds = getattr(result, "raw_bounds", None) or getattr(result, "otsu_bounds", None)
+
+        if _is_white_frame_ng(result) and not bomb_only:
+            for _side, _gap, image_x, image_y in _iter_white_frame_gaps(result):
+                records.append(
+                    _format_qjpg_defect_record(
+                        _report_defect_code(config, "white"),
+                        image_x,
+                        image_y,
+                        "WHITEFRA",
+                        raw_bounds,
+                        product_resolution,
+                    )
+                )
 
         for tile, _score, _anomaly_map in getattr(result, "anomaly_tiles", []) or []:
             if not _is_reportable_tile(tile):
@@ -1020,6 +1098,28 @@ def aggregate_judgment(results: List[ImageResult]) -> Tuple[str, str]:
     ng_details = []
 
     for result in results:
+        if _is_white_frame_ng(result):
+            white_gaps = list(_iter_white_frame_gaps(result))
+            if white_gaps:
+                for side, gap, image_x, image_y in white_gaps:
+                    ng_details.append({
+                        "image": result.image_path.stem,
+                        "type": "white_frame_gap",
+                        "side": side,
+                        "peak_x": image_x,
+                        "peak_y": image_y,
+                        "gap_length_px": int(gap.get("length_px", 0) or 0),
+                        "is_white_frame": True,
+                        "is_dust": False,
+                    })
+            else:
+                ng_details.append({
+                    "image": result.image_path.stem,
+                    "type": "white_frame_ng",
+                    "is_white_frame": True,
+                    "is_dust": False,
+                })
+
         if not result.anomaly_tiles:
             continue
 
@@ -1119,12 +1219,16 @@ def results_to_db_data(
         is_ng = 0
         is_dust_only = 0
         is_bomb = 0
-        anomaly_count = len(result.anomaly_tiles)
+        tile_anomaly_count = len(result.anomaly_tiles)
+        white_frame_ng_count = 0
+        if _is_white_frame_ng(result):
+            white_frame_ng_count = max(1, sum(1 for _item in _iter_white_frame_gaps(result)))
+        anomaly_count = tile_anomaly_count + white_frame_ng_count
         
         # 加上 CV Edge 的 NG 數量 (排除灰塵和炸彈)
         cv_edge_count = len([d for d in result.edge_defects if not getattr(d, 'is_suspected_dust_or_scratch', False) and not getattr(d, 'is_bomb', False) and not getattr(d, 'is_cv_ok', False)])
 
-        if anomaly_count > 0 or cv_edge_count > 0:
+        if tile_anomaly_count > 0 or cv_edge_count > 0:
             real_ng = [t for t, s, m in result.anomaly_tiles
                        if not t.is_suspected_dust_or_scratch and not t.is_bomb and not t.is_in_exclude_zone
                        and not getattr(t, 'is_aoi_coord_below_threshold', False)
@@ -1134,7 +1238,7 @@ def results_to_db_data(
             if real_ng or cv_edge_count > 0:
                 is_ng = 1
                 
-            all_dust = (anomaly_count > 0 and 
+            all_dust = (tile_anomaly_count > 0 and
                        all(t.is_suspected_dust_or_scratch for t, s, m in result.anomaly_tiles) and 
                        cv_edge_count == 0)
             
@@ -1144,6 +1248,11 @@ def results_to_db_data(
                 is_dust_only = 1
             if has_bomb and not real_ng and cv_edge_count == 0:
                 is_bomb = 1
+
+        if white_frame_ng_count:
+            is_ng = 1
+            is_dust_only = 0
+            is_bomb = 0
 
         max_score = max((s for _, s, _ in result.anomaly_tiles), default=0.0)
 
@@ -1290,7 +1399,7 @@ def results_to_db_data(
 
 
 def _white_frame_image_result(inspection: WhiteFrameInspection) -> ImageResult:
-    """Convert a shadow WHITEFRA observation into a persistable image row."""
+    """Convert formal WHITEFRA inspection output into an ImageResult."""
     processing_seconds = float(inspection.payload.get("processing_ms", 0.0) or 0.0) / 1000.0
     return ImageResult(
         image_path=inspection.image_path,
@@ -1305,6 +1414,7 @@ def _white_frame_image_result(inspection: WhiteFrameInspection) -> ImageResult:
         raw_bounds=inspection.bounds,
         inference_time=processing_seconds,
         white_frame_result=inspection.payload,
+        report_image_prefix="WHITEFRA",
     )
 
 
@@ -1353,6 +1463,54 @@ def _aoi_report_has_defects(aoi_report: Optional[Dict]) -> bool:
     return any(bool(defects) for defects in (aoi_report or {}).values())
 
 
+def _serialize_aoi_machine_coords(aoi_report: Optional[Dict]) -> str:
+    if not aoi_report:
+        return ""
+
+    aoi_coords_data = {}
+    for prefix, defects in aoi_report.items():
+        serialized = []
+        for defect in defects:
+            coordinate_space_value = getattr(defect, "coordinate_space", "product")
+            coordinate_space = (
+                coordinate_space_value.lower()
+                if isinstance(coordinate_space_value, str) and coordinate_space_value
+                else "product"
+            )
+            resolved_product_x = int(getattr(defect, "resolved_product_x", -1))
+            resolved_product_y = int(getattr(defect, "resolved_product_y", -1))
+            resolved_image_x = int(getattr(defect, "resolved_image_x", -1))
+            resolved_image_y = int(getattr(defect, "resolved_image_y", -1))
+            serialized.append({
+                "defect_code": defect.defect_code,
+                "coordinate_space": coordinate_space,
+                "source_x": int(defect.product_x),
+                "source_y": int(defect.product_y),
+                "product_x": (
+                    resolved_product_x
+                    if resolved_product_x >= 0
+                    else int(defect.product_x) if coordinate_space == "product" else -1
+                ),
+                "product_y": (
+                    resolved_product_y
+                    if resolved_product_y >= 0
+                    else int(defect.product_y) if coordinate_space == "product" else -1
+                ),
+                "image_x": (
+                    resolved_image_x
+                    if resolved_image_x >= 0
+                    else int(defect.product_x) if coordinate_space == "image" else -1
+                ),
+                "image_y": (
+                    resolved_image_y
+                    if resolved_image_y >= 0
+                    else int(defect.product_y) if coordinate_space == "image" else -1
+                ),
+            })
+        aoi_coords_data[prefix] = serialized
+    return json.dumps(aoi_coords_data, ensure_ascii=False)
+
+
 def _stored_machine_judgment_for_record(
     machine_judgment: str,
     results: List[ImageResult],
@@ -1372,6 +1530,8 @@ def _stored_machine_judgment_for_record(
 class CAPIServer:
     """CAPI AI TCP Socket 推論伺服器"""
 
+    station_adapter = create_station_adapter("capi")
+
     def __init__(self, config_path: str, training_only: bool = False):
         """
         Args:
@@ -1388,6 +1548,33 @@ class CAPIServer:
 
         # 設定日誌
         setup_logging(self.server_config)
+
+        self.station_hostname = socket.gethostname().strip()
+        windows_development_fallback = "capi" if os.name == "nt" else None
+        self.station_profile = resolve_station_profile_from_hostname(
+            self.station_hostname,
+            default_if_unknown=windows_development_fallback,
+        )
+        self.station_adapter = create_station_adapter(
+            self.station_profile,
+            self.server_config.get("aapi", {}),
+        )
+        selection_source = "hostname"
+        if self.station_profile not in self.station_hostname.casefold():
+            selection_source = "windows-development-fallback"
+            logger.warning(
+                "Station hostname has no CAPI/AAPI marker; using the Windows "
+                "development fallback: hostname=%s profile=%s",
+                self.station_hostname,
+                self.station_profile,
+            )
+        logger.info(
+            "Station adapter selected: hostname=%s source=%s profile=%s adapter=%s",
+            self.station_hostname,
+            selection_source,
+            self.station_profile,
+            type(self.station_adapter).__name__,
+        )
 
         from capi_mark_shadow import configure_mark_shadow
 
@@ -1605,6 +1792,7 @@ class CAPIServer:
                 model_path=None,
                 device=device,
                 threshold=cfg.anomaly_threshold,
+                station_adapter=self.station_adapter,
             )
             loaded, total = inferencer.preload_v2_models()
             logger.info(f"[Dispatch] Preloaded new-arch models for machine='{model_id}' ({loaded}/{total})")
@@ -1648,6 +1836,7 @@ class CAPIServer:
             model_path=model_path,
             device=device,
             threshold=cfg.anomaly_threshold,
+            station_adapter=self.station_adapter,
         )
         if cfg.is_new_architecture:
             loaded, total = inferencer.preload_v2_models()
@@ -1892,6 +2081,7 @@ class CAPIServer:
             model_path=model_path,
             device=device,
             threshold=threshold,
+            station_adapter=self.station_adapter,
         )
 
         if capi_config.is_new_architecture:
@@ -2062,9 +2252,15 @@ class CAPIServer:
         print("[SERVER] Starting...", flush=True)
         logger.info("=" * 60)
         if self.training_only:
-            logger.info("CAPI AI Server Starting (TRAINING-ONLY mode: no inference, no TCP)")
+            logger.info(
+                "%s AI Server Starting (TRAINING-ONLY mode: no inference, no TCP)",
+                self.station_profile.upper(),
+            )
         else:
-            logger.info("CAPI AI Inference Server Starting")
+            logger.info(
+                "%s AI Inference Server Starting",
+                self.station_profile.upper(),
+            )
         logger.info("=" * 60)
 
         # 載入模型（training-only 模式跳過，把 GPU 留給訓練 subprocess）
@@ -2779,6 +2975,12 @@ class CAPIServer:
         if inferencer is None:
             return "ERR:MODEL_NOT_LOADED", "[]", [], False, None, {}, False, "", None
 
+        station_adapter = (
+            getattr(self, "station_adapter", None)
+            or getattr(inferencer, "station_adapter", None)
+            or create_station_adapter("capi")
+        )
+
         # 轉換路徑
         image_dir = resolve_unc_path(parsed["image_dir"], self.path_mapping)
         panel_dir = Path(image_dir)
@@ -2792,14 +2994,42 @@ class CAPIServer:
         logger.info(f"Inference directory: {panel_dir}")
 
         aoi_report_override = None
-        if getattr(inferencer.config, "image_abnormal_detection_enabled", False):
-            aoi_report_override = inferencer._parse_aoi_report_txt(panel_dir)
+        image_abnormal_enabled = bool(
+            getattr(inferencer.config, "image_abnormal_detection_enabled", False)
+        )
+        external_daily_report = (
+            getattr(station_adapter, "profile", "capi") == "aapi"
+        )
+        if image_abnormal_enabled or external_daily_report:
+            try:
+                aoi_report_override = inferencer._parse_aoi_report_txt(
+                    panel_dir,
+                    glass_id=parsed.get("glass_id", ""),
+                    machine_judgment=parsed.get("machine_judgment", ""),
+                )
+            except Exception as exc:
+                logger.error(
+                    "AOI report load failed: Glass=%s Station=%s Error=%s",
+                    parsed.get("glass_id", ""),
+                    getattr(station_adapter, "profile", "capi"),
+                    exc,
+                    exc_info=True,
+                )
+                return (
+                    f"ERR:AOI_REPORT_FAILED ({type(exc).__name__}: {str(exc)[:100]})",
+                    "[]", [], False, None, {}, False, "", None,
+                )
+
+        if image_abnormal_enabled:
             image_abnormal = check_image_abnormal_precheck(
                 panel_dir,
                 inferencer.config,
-                report_prefixes=list(aoi_report_override.keys()),
+                report_prefixes=list((aoi_report_override or {}).keys()),
                 product_resolution=parsed["resolution"],
                 rotate_180=getattr(inferencer, "_rotate_detection_images_180", False),
+                image_prefix_resolver=station_adapter.image_prefix,
+                screen_alias_resolver=station_adapter.model_prefix,
+                boundary_reference_priority=station_adapter.boundary_reference_priority,
             )
             if image_abnormal:
                 screen = image_abnormal["screen"]
@@ -2825,6 +3055,7 @@ class CAPIServer:
                     bomb_info=parsed.get("bomb_info"),
                     model_id=parsed.get("model_id"),
                     machine_no=parsed.get("machine_no"),
+                    glass_id=parsed.get("glass_id"),
                     aoi_report_override=aoi_report_override,
                     machine_judgment=parsed.get("machine_judgment"),
                 )
@@ -2836,6 +3067,43 @@ class CAPIServer:
                 is_duplicate = panel_result[4]
                 omit_image_raw = panel_result[5] if len(panel_result) > 5 else None
                 aoi_report = panel_result[6] if len(panel_result) > 6 else {}
+
+                try:
+                    white_frame_path = station_adapter.find_white_frame_image(panel_dir)
+                    if white_frame_path is not None:
+                        white_frame_inspection = inspect_white_frame_image(
+                            white_frame_path,
+                            rotate_180=getattr(
+                                inferencer,
+                                "_rotate_detection_images_180",
+                                False,
+                            ),
+                        )
+                        white_result = _white_frame_image_result(white_frame_inspection)
+                        results.append(white_result)
+                        payload = white_frame_inspection.payload
+                        side_summary = ", ".join(
+                            f"{side}={payload.get('sides', {}).get(side, {}).get('status', 'UNKNOWN')}"
+                            for side in ("top", "right", "bottom", "left")
+                        )
+                        logger.info(
+                            "[WHITE_FRAME] Image=%s Algorithm=%s Status=%s Sides=[%s] "
+                            "Angle=%s TT=%sms FormalJudgment=%s Reason=%s",
+                            white_frame_path.name,
+                            payload.get("algorithm", "white-frame-cv-v1"),
+                            payload.get("status", "UNREADABLE"),
+                            side_summary,
+                            payload.get("angle_deg", "-"),
+                            payload.get("processing_ms", 0),
+                            "NG" if payload.get("status") == "NG" else "unchanged",
+                            payload.get("reason", "-") or "-",
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[WHITE_FRAME] Inspection failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
 
                 if is_duplicate:
                     logger.warning(
@@ -2857,7 +3125,13 @@ class CAPIServer:
                         )
 
                 within_spec_info = None
-                if ai_judgment.startswith("NG"):
+                white_frame_ng = _has_white_frame_ng(results)
+                if ai_judgment.startswith("NG") and white_frame_ng:
+                    logger.info(
+                        "[WHITE_FRAME] Glass=%s formal NG bypasses within-spec OK-i conversion",
+                        parsed.get("glass_id", ""),
+                    )
+                elif ai_judgment.startswith("NG"):
                     within_spec_info = self._evaluate_within_spec_for_inference(parsed, results, inferencer)
                     if within_spec_info and within_spec_info.get("converted"):
                         reason = within_spec_info.get("reason", "")
@@ -2911,48 +3185,6 @@ class CAPIServer:
         save_start = time.time()
         try:
             record_inferencer = None
-            # WHITEFRA is observation-only and is not part of the TCP response.
-            # Inspect it in this post-response worker to avoid adding latency to
-            # the formal judgment path, while still persisting it on the record.
-            if results:
-                try:
-                    record_inferencer = self._get_or_create_inferencer(parsed.get("model_id", ""))
-                    panel_dir = Path(resolve_unc_path(parsed["image_dir"], self.path_mapping))
-                    white_frame_inspection = inspect_white_frame_panel(
-                        panel_dir,
-                        rotate_180=getattr(
-                            record_inferencer,
-                            "_rotate_detection_images_180",
-                            False,
-                        ),
-                    )
-                    if white_frame_inspection is not None:
-                        payload = white_frame_inspection.payload
-                        side_summary = ", ".join(
-                            f"{payload['sides'][side]['label']}={payload['sides'][side]['status']}"
-                            for side in ("top", "right", "bottom", "left")
-                        )
-                        shadow_log = (
-                            f"[WHITE_FRAME_SHADOW] Image={white_frame_inspection.image_path.name} "
-                            f"Algorithm={payload.get('algorithm', 'white-frame-cv-v1')} "
-                            f"Status={payload.get('status', 'UNREADABLE')} Sides=[{side_summary}] "
-                            f"Angle={payload.get('angle_deg', '-')} TT={payload.get('processing_ms', 0)}ms "
-                            "FormalJudgment=unchanged TCP=unchanged"
-                            + (f" Reason={payload.get('reason')}" if payload.get("reason") else "")
-                        )
-                        if payload.get("status") == "UNREADABLE":
-                            logger.warning(shadow_log)
-                        else:
-                            logger.info(shadow_log)
-                        inference_log = f"{(inference_log or '').rstrip()}\n{shadow_log}".strip()
-                        results.append(_white_frame_image_result(white_frame_inspection))
-                except Exception as exc:
-                    logger.warning(
-                        "[WHITE_FRAME_SHADOW] Background inspection failed; "
-                        "formal judgment and TCP unchanged: %s",
-                        exc,
-                        exc_info=True,
-                    )
 
             # 儲存熱力圖
             heatmap_info = {}
@@ -3027,15 +3259,7 @@ class CAPIServer:
             )
 
             # 序列化 AOI 機台檢測座標 (TXT 報告解析結果)
-            aoi_machine_coords_str = ""
-            if aoi_report:
-                aoi_coords_data = {}
-                for prefix, defects in aoi_report.items():
-                    aoi_coords_data[prefix] = [
-                        {"defect_code": d.defect_code, "product_x": d.product_x, "product_y": d.product_y}
-                        for d in defects
-                    ]
-                aoi_machine_coords_str = json.dumps(aoi_coords_data, ensure_ascii=False)
+            aoi_machine_coords_str = _serialize_aoi_machine_coords(aoi_report)
 
             record_id = self.db.save_inference_record(
                 glass_id=parsed["glass_id"],
@@ -3179,7 +3403,11 @@ class CAPIServer:
 # ── CLI ────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="CAPI AI Inference Server")
+    station_name = resolve_station_profile_from_hostname(
+        socket.gethostname(),
+        default_if_unknown="capi",
+    ).upper()
+    parser = argparse.ArgumentParser(description=f"{station_name} AI Inference Server")
     parser.add_argument(
         "--config", "-c",
         default="server_config.yaml",

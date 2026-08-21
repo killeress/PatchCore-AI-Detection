@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}參數設定 — CAPI AI{% endblock %}
+{% block title %}參數設定 — {{ station_name }} AI{% endblock %}
 
 {% block extra_css %}
 <style>
@@ -2459,7 +2459,7 @@
                             <input id="mark-calibration-path" class="account-input" type="text" autocomplete="off" spellcheck="false"
                                 placeholder="/aidata/.../W0F00000_074058.tif" oninput="previewMarkCalibrationPath(this)">
                             <div class="auto-switch-muted" style="font-size:.76rem;line-height:1.5;">
-                                請輸入 CAPI 生產主機可讀取的絕對路徑；系統讀取後仍會複製到校正樣本資料夾。
+                                請輸入 {{ station_name }} 生產主機可讀取的絕對路徑；系統讀取後仍會複製到校正樣本資料夾。
                             </div>
                             <label style="color:#94a3b8;font-size:.82rem;">正確兩碼</label>
                             <input id="mark-correct-text" class="account-input" maxlength="2" placeholder="例如 B1"
