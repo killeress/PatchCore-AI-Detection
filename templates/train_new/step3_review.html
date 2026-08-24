@@ -787,12 +787,16 @@ async function startTraining() {
   button.disabled = true;
 
   try {
+    const selectedUnits = (trainingScope && trainingScope.selected_units) || [];
+    const selectedLightingCount = new Set(
+      selectedUnits.map(unit => String(unit).split('-').slice(0, -1).join('-'))
+    ).size;
     const ok = await capConfirm(
       (trainingScope && trainingScope.mode === 'partial'
-        ? `系統只會訓練 selected PT：${(trainingScope.selected_units || []).join(', ')}。\n其他 PT 不會重新訓練。`
-        : '系統將同時訓練 5 光源 × inner/edge 共 10 個 PatchCore 子模型。\n預計耗時 60–120 分鐘，期間可在 Step 5 觀察進度。'),
+        ? `系統只會訓練 selected PT：${selectedUnits.join(', ')}。\n其他 PT 不會重新訓練。`
+        : `系統將同時訓練 ${selectedLightingCount} 光源 × inner/edge 共 ${selectedUnits.length} 個 PatchCore 子模型。\n預計耗時 60–120 分鐘，期間可在 Step 5 觀察進度。`),
       {
-        title: trainingScope && trainingScope.mode === 'partial' ? '開始局部重訓？' : '開始訓練 10 個模型？',
+        title: trainingScope && trainingScope.mode === 'partial' ? '開始局部重訓？' : `開始訓練 ${selectedUnits.length} 個模型？`,
         confirmText: '開始訓練',
         cancelText: '再想想'
       }

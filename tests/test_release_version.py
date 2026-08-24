@@ -162,6 +162,7 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "templates/record_detail.html" in names
         assert "templates/record_detail_v3.html" in names
         assert "templates/ric_report.html" in names
+        assert "templates/train_new/step1_scope.html" in names
         assert "capi_edge_cv.py" in names
         assert "capi_heatmap.py" in names
         assert "capi_heatmap_diagnostics.py" in names

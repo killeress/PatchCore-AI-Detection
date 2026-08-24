@@ -1684,6 +1684,66 @@ def test_handle_train_new_preprocess_pipeline_preview_uses_panel_folder(tmp_path
     assert Path(resp["diff_path"]).exists()
 
 
+def test_handle_train_new_preprocess_pipeline_preview_uses_aapi_panel_folder(
+    tmp_path, monkeypatch
+):
+    from capi_station_adapter import AAPIStationAdapter
+    from capi_web import CAPIWebHandler
+
+    panel_dir = tmp_path / "YQ52TR205A41"
+    panel_dir.mkdir()
+    img = np.full((64, 64), 128, dtype=np.uint8)
+    img[16:48, 16:48] = 200
+    image_names = (
+        "YQ52TR205A41PINIGBI0073951.tif",
+        "YQ52TR205A41R0F00000073956.tif",
+        "YQ52TR205A41W0F00000073951.tif",
+        "YQ52TR205A41WGF50500073958.tif",
+        "YQ52TR205A41Windows_BG073957.tif",
+        "YQ52TR205A41White_Frame074000.tif",
+    )
+    for image_name in image_names:
+        assert cv2.imwrite(str(panel_dir / image_name), img)
+
+    debug_dir = tmp_path / "debug"
+    monkeypatch.setattr(CAPIWebHandler, "_debug_heatmap_dir", debug_dir)
+
+    server = MagicMock()
+    server.station_adapter = AAPIStationAdapter()
+    h = _make_handler_with_server(
+        server,
+        "/api/train/new/preprocess_pipeline_preview",
+    )
+    payload = {
+        "image_path": str(panel_dir),
+        "image_preprocess_pipeline": [],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_preprocess_pipeline_preview()
+
+    assert h._sent_response[0]["status"] == 200
+    resp = json.loads(h._sent_response[0]["body"])
+    assert resp["success"] is True
+    assert resp["image_name"] == "YQ52TR205A41W0F00000073951.tif"
+
+
+def test_aapi_training_scope_has_eight_model_units():
+    from capi_station_adapter import AAPIStationAdapter
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.station_adapter = AAPIStationAdapter()
+
+    units = CAPIWebHandler._all_train_unit_labels(server)
+
+    assert len(units) == 8
+    assert "G0F00000-inner" not in units
+    assert units[-2:] == ["STANDARD-inner", "STANDARD-edge"]
+
+
 def test_handle_train_new_preprocess_pipeline_preview_after_tiling_uses_tile(tmp_path, monkeypatch):
     from capi_web import CAPIWebHandler
 

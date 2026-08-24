@@ -7,6 +7,11 @@
 - 修正 AAPI 每日 AOI Report 路徑為 `/192.168.2.190/d/LOG/ReportYYMMDD.log`，補上實際 share mount 的 `d` 層級。
 - 部署時請將 `server_config_patch.yaml.example` 的 `aapi.report_root` 合併至設備既有 `server_config.yaml`，再重啟服務。
 
+### [AAPI 修正]模型訓練圖片辨識
+
+- 修正模型訓練頁面無法辨識 AAPI「Glass ID + lighting + 流水號」`.tif` 檔名，執行預覽與正式切圖改為共用 AAPI Adapter，不再誤報資料夾內沒有可訓練圖片。
+- AAPI 完整訓練依現場圖片與既有模型映射執行 4 lighting × INNER/EDGE，共 8 個 PT；`Windows_BG` 使用 `STANDARD`，`W0F00010` 與 `WGF50500` 共同訓練 `WGF50500`。CAPI 仍維持 5 lighting × INNER/EDGE，共 10 個 PT。
+
 ## 2026-08-24 v1
 
 ### [AAPI 測試]準備 AAPI 測試程式包

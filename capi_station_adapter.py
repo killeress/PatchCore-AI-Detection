@@ -52,6 +52,23 @@ class StationAdapter:
     def model_prefix(self, image_prefix: str) -> str:
         return image_prefix
 
+    def training_image_prefix(self, image_name: str) -> str:
+        """Return the PatchCore model lighting used by a source image."""
+        return self.model_prefix(self.image_prefix(image_name))
+
+    @property
+    def training_prefixes(self) -> Tuple[str, ...]:
+        """Model lightings that can be trained from this station's images."""
+        available = {
+            self.model_prefix(prefix)
+            for prefix in self.inference_prefixes
+            if self.is_inference_prefix(prefix)
+        }
+        return tuple(
+            prefix for prefix in StationAdapter.inference_prefixes
+            if prefix in available
+        )
+
     def report_prefix(self, image_name: str) -> str:
         return source_image_prefix(image_name)
 

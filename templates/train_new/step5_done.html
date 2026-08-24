@@ -54,7 +54,7 @@
       </div>
       <div class="d5-stat-sub">
         <span class="d5-grade-badge">{{ grade_labels.get((overall_auroc_grade or "n/a")|lower, overall_auroc_grade|upper) }}</span>
-        <span class="d5-stat-hint">{{ success_units }}/10 子模型平均</span>
+        <span class="d5-stat-hint">{{ success_units }}/{{ units|length }} 子模型平均</span>
       </div>
     </div>
     <div class="d5-stat">
@@ -64,14 +64,14 @@
         {% set _s = (total_elapsed_seconds % 60)|int %}
         {{ _m }}<span class="d5-stat-unit">分</span> {{ "%02d"|format(_s) }}<span class="d5-stat-unit">秒</span>
       </div>
-      <div class="d5-stat-sub"><span class="d5-stat-hint">10 個子模型累計耗時</span></div>
+      <div class="d5-stat-sub"><span class="d5-stat-hint">{{ units|length }} 個子模型累計耗時</span></div>
     </div>
     <div class="d5-stat">
       <div class="d5-stat-label">模型包大小</div>
       <div class="d5-stat-value">
         {{ "%.1f"|format(total_size_mb) }}<span class="d5-stat-unit">MB</span>
       </div>
-      <div class="d5-stat-sub"><span class="d5-stat-hint">10 個 .pt 模型檔</span></div>
+      <div class="d5-stat-sub"><span class="d5-stat-hint">{{ units|length }} 個 .pt 模型檔</span></div>
     </div>
   </div>
 

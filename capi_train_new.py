@@ -124,6 +124,35 @@ def derive_panel_modes(panel_count: int) -> List[str]:
     return [PANEL_MODE_FULL] * max(0, panel_count)
 
 
+def normalize_training_units(
+    training_units: Optional[Iterable[Any]],
+) -> List[Tuple[str, str]]:
+    """Validate a station-specific subset of the known PatchCore units."""
+    if training_units is None:
+        return list(TRAINING_UNITS)
+
+    normalized: List[Tuple[str, str]] = []
+    for raw_unit in training_units:
+        if isinstance(raw_unit, str):
+            try:
+                lighting, zone = raw_unit.rsplit("-", 1)
+            except ValueError as exc:
+                raise ValueError(f"invalid training unit: {raw_unit}") from exc
+        else:
+            try:
+                lighting, zone = raw_unit
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid training unit: {raw_unit}") from exc
+        unit = (str(lighting), str(zone))
+        if unit not in TRAINING_UNITS:
+            raise ValueError(f"invalid training unit: {unit[0]}-{unit[1]}")
+        if unit not in normalized:
+            normalized.append(unit)
+    if not normalized:
+        raise ValueError("training_units must not be empty")
+    return normalized
+
+
 def normalize_panel_modes(panel_modes: Optional[List[str]], panel_count: int) -> List[str]:
     """驗證每片 panel 的切片模式；未提供時維持舊版全 full 行為。"""
     if panel_modes is None:
@@ -192,6 +221,7 @@ class TrainingConfig:
     training_data_source: Dict[str, Any] = field(
         default_factory=lambda: {"type": "inference_records"}
     )
+    training_units: Optional[List[Tuple[str, str]]] = None
     feature_cleaning_by_zone: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
@@ -384,6 +414,10 @@ def preprocess_panels_to_pool(
     panel_modes: Optional[List[str]] = None,
     target_lightings: Optional[Iterable[str]] = None,
     target_units: Optional[Iterable[str]] = None,
+    prefix_resolver: Optional[Callable[[str], str]] = None,
+    allowed_prefixes: Optional[Iterable[str]] = None,
+    boundary_reference_priority: Optional[Iterable[str]] = None,
+    training_lighting_resolver: Optional[Callable[[str], str]] = None,
 ) -> dict:
     """將 cfg.panel_paths 全部前處理 + 切 tile + 寫 DB。
 
@@ -442,7 +476,18 @@ def preprocess_panels_to_pool(
         allowed_zones = panel_mode_zones(mode)
         log(f"[{idx}/{len(cfg.panel_paths)}] panel {panel_dir.name} ({mode_label})")
         try:
-            results = preprocess_panel_folder(panel_dir, preprocess_cfg)
+            preprocess_kwargs = {}
+            if prefix_resolver is not None:
+                preprocess_kwargs["prefix_resolver"] = prefix_resolver
+            if allowed_prefixes is not None:
+                preprocess_kwargs["allowed_prefixes"] = allowed_prefixes
+            if boundary_reference_priority is not None:
+                preprocess_kwargs["boundary_reference_priority"] = (
+                    boundary_reference_priority
+                )
+            results = preprocess_panel_folder(
+                panel_dir, preprocess_cfg, **preprocess_kwargs
+            )
         except Exception as e:
             log(f"  ✗ 處理失敗: {e}")
             panel_fail += 1
@@ -458,7 +503,14 @@ def preprocess_panels_to_pool(
 
         # 先依 panel mode 過濾 zone，再寫 .png + 縮圖 + DB，避免浪費 IO。
         tile_records = []
-        for lighting, result in results.items():
+        for source_lighting, result in results.items():
+            lighting = (
+                training_lighting_resolver(source_lighting)
+                if training_lighting_resolver is not None
+                else source_lighting
+            )
+            if lighting not in LIGHTINGS:
+                continue
             if target_lighting_set is not None and lighting not in target_lighting_set:
                 continue
             for tile in result.tiles:
@@ -468,7 +520,9 @@ def preprocess_panels_to_pool(
                     continue
                 if mode == PANEL_MODE_CORNERS_ONLY and not tile.is_corner:
                     continue
-                tile_filename = f"{job_id}_{panel_dir.name}_{lighting}_t{tile.tile_id:04d}.png"
+                tile_filename = (
+                    f"{job_id}_{panel_dir.name}_{source_lighting}_t{tile.tile_id:04d}.png"
+                )
                 tile_path = thumb_dir / "tiles" / tile_filename
                 cv2.imwrite(str(tile_path), tile.image)
 
@@ -553,6 +607,8 @@ def sample_ng_tiles(
     machine_id: str = "",
     rotate_180: bool = False,
     ng_validation_base_dir: Optional[Path] = None,
+    image_prefix_resolver: Optional[Callable[[str], str]] = None,
+    model_prefix_resolver: Optional[Callable[[str], str]] = None,
 ) -> dict:
     """準備同機種 Client AOI 炸彈 crop，作為 PatchCore 驗證 NG。
 
@@ -565,12 +621,19 @@ def sample_ng_tiles(
     推論共用，避免 NG 校正樣本與實際驗證 tile 不同 ROI。
     """
     del over_review_root
+    resolve_image_prefix = image_prefix_resolver or canonical_image_prefix
+    resolve_model_prefix = model_prefix_resolver or (lambda prefix: prefix)
     requested_lightings = tuple(lightings) if lightings is not None else LIGHTINGS
     target_lightings = tuple(dict.fromkeys(
         str(lighting).strip().upper()
         for lighting in requested_lightings
         if str(lighting).strip() and str(lighting).strip().upper() != "B0F00000"
     ))
+    query_lightings = (
+        None
+        if image_prefix_resolver is not None or model_prefix_resolver is not None
+        else target_lightings
+    )
     result_stats = {
         "sampled": 0,
         "missing_lightings": [],
@@ -601,13 +664,16 @@ def sample_ng_tiles(
         try:
             cached_samples = db.list_training_bomb_validation_samples(
                 machine_id=str(machine_id).strip(),
-                lightings=target_lightings,
+                lightings=query_lightings,
             )
         except AttributeError:
             cached_samples = []
             log("⚠ 資料庫版本不支援訓練 NG 快取，改走推論原圖裁切")
         for sample in cached_samples:
-            lighting = str(sample.get("lighting") or "").strip().upper()
+            source_lighting = resolve_image_prefix(
+                str(sample.get("lighting") or "").strip()
+            )
+            lighting = str(resolve_model_prefix(source_lighting)).strip().upper()
             zone = str(sample.get("zone") or "").strip().lower()
             if lighting not in cached_by_lighting or zone not in ZONES:
                 continue
@@ -638,20 +704,30 @@ def sample_ng_tiles(
         try:
             candidates = db.list_training_bomb_candidates(
                 machine_id=str(machine_id).strip(),
-                lightings=uncached_lightings,
+                lightings=None if query_lightings is None else uncached_lightings,
             )
         except AttributeError:
             log("⚠ 資料庫版本不支援 AOI 炸彈 crop 查詢，未使用 over_review 舊資料")
 
     by_lighting: Dict[str, List[dict]] = {lighting: [] for lighting in target_lightings}
     for source_row in candidates:
-        image_lighting = canonical_image_prefix(source_row.get("image_name") or "").upper()
+        image_source_lighting = resolve_image_prefix(
+            source_row.get("image_name") or ""
+        )
+        image_lighting = str(
+            resolve_model_prefix(image_source_lighting)
+        ).strip().upper()
         try:
             bomb_info = json.loads(str(source_row.get("client_bomb_info") or ""))
         except (TypeError, ValueError, json.JSONDecodeError):
             result_stats["invalid_skipped"] += 1
             continue
-        bomb_lighting = canonical_image_prefix(bomb_info.get("image_prefix") or "").upper()
+        bomb_source_lighting = resolve_image_prefix(
+            bomb_info.get("image_prefix") or ""
+        )
+        bomb_lighting = str(
+            resolve_model_prefix(bomb_source_lighting)
+        ).strip().upper()
         if image_lighting == "B0F00000" or bomb_lighting == "B0F00000":
             result_stats["black_skipped"] += 1
             continue
@@ -2293,7 +2369,7 @@ def run_training_pipeline(
     log: Callable[[str], None] = print,
     cancel_event=None,
 ) -> Path:
-    """執行 10 unit 訓練，輸出 bundle 目錄。
+    """執行目前站點所需的 training units，輸出 bundle 目錄。
 
     gpu_lock: 同 process 多 thread 共享 GPU 時用於序列化的 lock；subprocess
         模式下傳 None 即可（VRAM 已透過 set_per_process_memory_fraction 隔離）。
@@ -2301,6 +2377,8 @@ def run_training_pipeline(
     """
     # 1. 環境檢查
     _setup_offline_env(cfg.backbone_cache_dir, log, cfg.required_backbones)
+    active_units = normalize_training_units(cfg.training_units)
+    unit_total = len(active_units)
 
     # 路徑格式：<machine_id>-<YYYYMMDD_HHMMSS>。
     # job_id 已存在 manifest.json.trained_with_job_id 與 DB model_bundles.job_id，
@@ -2308,7 +2386,9 @@ def run_training_pipeline(
     bundle_dir = cfg.output_root / f"{cfg.machine_id}-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
-    thresholds: Dict[str, Dict[str, float]] = {l: {} for l in LIGHTINGS}
+    thresholds: Dict[str, Dict[str, float]] = {
+        lighting: {} for lighting, _zone in active_units
+    }
     tiles_per_unit: Dict[str, Dict[str, int]] = {}
     model_files: Dict[str, Dict] = {}
     unit_metrics: Dict[str, Dict] = {}
@@ -2321,25 +2401,28 @@ def run_training_pipeline(
         if not completed_durations:
             return ""
         avg = sum(completed_durations) / len(completed_durations)
-        remaining_units = len(TRAINING_UNITS) - len(completed_durations)
+        remaining_units = unit_total - len(completed_durations)
         if remaining_units <= 0:
             return ""
         eta_s = avg * remaining_units
         m, s = divmod(int(eta_s), 60)
         return f"預估剩 {m}m{s:02d}s（平均 {int(avg)}s/unit）"
 
-    for idx, (lighting, zone) in enumerate(TRAINING_UNITS, 1):
+    for idx, (lighting, zone) in enumerate(active_units, 1):
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("training cancelled by user")
 
         unit_label = f"{lighting}-{zone}"
-        log(f"[{idx}/10] {unit_label}: 載 tile")
+        log(f"[{idx}/{unit_total}] {unit_label}: 載 tile")
         unit_start = time.monotonic()
 
         train_tiles = db.list_tile_pool(job_id, lighting=lighting, zone=zone,
                                         source="ok", decision="accept")
         if len(train_tiles) < MIN_TRAIN_TILES:
-            log(f"[{idx}/10] {unit_label}: 跳過：tile 不足 ({len(train_tiles)} < {MIN_TRAIN_TILES})")
+            log(
+                f"[{idx}/{unit_total}] {unit_label}: 跳過：tile 不足 "
+                f"({len(train_tiles)} < {MIN_TRAIN_TILES})"
+            )
             continue
 
         try:
@@ -2348,7 +2431,7 @@ def run_training_pipeline(
                 db=db, job_id=job_id, lighting=lighting, zone=zone,
                 cfg=cfg, output_pt_path=output_pt,
                 gpu_lock=gpu_lock, log=log, cancel_event=cancel_event,
-                unit_prefix=f"[{idx}/10] ",
+                unit_prefix=f"[{idx}/{unit_total}] ",
             )
 
             thresholds[lighting][zone] = result["threshold"]
@@ -2368,27 +2451,27 @@ def run_training_pipeline(
             auroc = metrics.get("auroc")
             auroc_str = f", AUROC={auroc:.3f}({metrics.get('auroc_grade','')})" if auroc is not None else ""
             log(
-                f"[{idx}/10] {unit_label}: ✓ done | {result['elapsed_seconds']}s, "
+                f"[{idx}/{unit_total}] {unit_label}: ✓ done | {result['elapsed_seconds']}s, "
                 f"threshold={result['threshold']:.4f}, size={result['size_bytes']/1e6:.1f}MB, "
                 f"ng_caught={caught}/{ng_n}{auroc_str}"
                 + (f" | {eta}" if eta else "")
             )
         except Exception as e:
             completed_durations.append(time.monotonic() - unit_start)
-            log(f"[{idx}/10] {unit_label}: ✗ 訓練失敗: {e}")
+            log(f"[{idx}/{unit_total}] {unit_label}: ✗ 訓練失敗: {e}")
             for line in traceback.format_exc().rstrip().splitlines()[-8:]:
                 log(f"  {line}")
             # 不增加 success_units，繼續下一個 unit
 
-    if success_units != len(TRAINING_UNITS):
+    if success_units != unit_total:
         missing = [
             f"{lighting}-{zone}"
-            for lighting, zone in TRAINING_UNITS
+            for lighting, zone in active_units
             if (lighting, zone) not in succeeded_units
         ]
         shutil.rmtree(bundle_dir, ignore_errors=True)
         raise RuntimeError(
-            f"成功 unit 數 {success_units}/{len(TRAINING_UNITS)}，缺少: {', '.join(missing)}"
+            f"成功 unit 數 {success_units}/{unit_total}，缺少: {', '.join(missing)}"
         )
 
     auroc_values = [u["auroc"] for u in unit_metrics.values() if u.get("auroc") is not None]
@@ -2410,6 +2493,9 @@ def run_training_pipeline(
         "machine_id": cfg.machine_id,
         "trained_at": datetime.now().isoformat(timespec="seconds"),
         "trained_with_job_id": job_id,
+        "training_units": [
+            f"{lighting}-{zone}" for lighting, zone in active_units
+        ],
         "experimental_training": bool(
             cfg.feature_pool_kernel_size != PATCHCORE_FEATURE_POOL_KERNEL_DEFAULT
             or cfg.feature_cleaning_mode != FEATURE_CLEANING_MODE_OFF

@@ -8,7 +8,7 @@
 
   <h1 style="color:#cdd6f4;margin:0 0 6px 0;font-size:1.4rem;">Step 1 / 6 · 選擇訓練模型</h1>
   <p style="color:#a6adc8;font-size:.9rem;line-height:1.55;margin:0;">
-    選擇要訓練全部 10 個 PT，或只針對既有 bundle 的指定 PT 重新選圖重訓。
+    選擇要訓練全部 {{ full_unit_count }} 個 PT，或只針對既有 bundle 的指定 PT 重新選圖重訓。
   </p>
 
   {% if active_jobs %}
@@ -43,7 +43,7 @@
     <label class="scope-card active" data-mode="full" onclick="selectMode('full')">
       <input type="radio" name="mode" value="full" checked>
       <span class="scope-title">完整訓練</span>
-      <span class="scope-desc">重新選圖並訓練 5 光源 × inner/edge，共 10 個 PT，產生新的 bundle。</span>
+      <span class="scope-desc">重新選圖並訓練 {{ full_lighting_count }} 光源 × inner/edge，共 {{ full_unit_count }} 個 PT，產生新的 bundle。</span>
     </label>
     <label class="scope-card" data-mode="partial" onclick="selectMode('partial')">
       <input type="radio" name="mode" value="partial">
