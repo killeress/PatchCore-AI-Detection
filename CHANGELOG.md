@@ -1,5 +1,12 @@
 # 更新紀錄
 
+## 2026-08-24 v2
+
+### [AAPI 修正]AOI Report 網路路徑
+
+- 修正 AAPI 每日 AOI Report 路徑為 `/192.168.2.190/d/LOG/ReportYYMMDD.log`，補上實際 share mount 的 `d` 層級。
+- 部署時請將 `server_config_patch.yaml.example` 的 `aapi.report_root` 合併至設備既有 `server_config.yaml`，再重啟服務。
+
 ## 2026-08-24 v1
 
 ### [AAPI 測試]準備 AAPI 測試程式包

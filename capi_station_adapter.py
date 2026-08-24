@@ -122,7 +122,7 @@ class AAPIStationAdapter(StationAdapter):
 
     def __init__(self, config: Optional[Mapping[str, object]] = None):
         config = config or {}
-        self.report_root = Path(str(config.get("report_root") or "/192.168.2.190/LOG"))
+        self.report_root = Path(str(config.get("report_root") or "/192.168.2.190/d/LOG"))
         self.report_retry_count = max(1, int(config.get("report_retry_count") or 3))
         self.report_retry_interval_seconds = max(
             0.0,

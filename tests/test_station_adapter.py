@@ -63,6 +63,14 @@ def test_server_config_does_not_select_station_profile(config_path):
     assert "station_profile" not in config
 
 
+@pytest.mark.parametrize("config_path", ["server_config.yaml", "server_config_local.yaml"])
+def test_aapi_report_root_matches_production_log_mount(config_path):
+    config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+
+    assert config["aapi"]["report_root"] == "/192.168.2.190/d/LOG"
+    assert str(AAPIStationAdapter().report_root).replace("\\", "/") == "/192.168.2.190/d/LOG"
+
+
 def test_aapi_filename_mapping_keeps_source_images_distinct():
     adapter = AAPIStationAdapter()
     samples = {
