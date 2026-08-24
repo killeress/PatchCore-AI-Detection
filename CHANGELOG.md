@@ -1,5 +1,12 @@
 # 更新紀錄
 
+## 2026-08-24 v1
+
+### [AAPI 測試]準備 AAPI 測試程式包
+
+- 以 AAPI Adapter、Glass ID／`ReportYYMMDD.log` 解析、WHITEFRA 正式判定及 QJPG 產品座標回覆建立測試用 code-only 更新包。
+- 本包不含模型、`static/`、`templates/imgs/`、現場設定檔及 MES credentials；部署後請保留並合併設備設定，再重啟服務進行 AAPI 測試。
+
 ## 2026-08-21 v1
 
 ### [站點平展]AAPI Adapter 與 WHITEFRA 正式判定
