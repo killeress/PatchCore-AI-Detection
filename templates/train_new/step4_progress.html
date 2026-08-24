@@ -7,7 +7,7 @@
     {% if training_scope and training_scope.mode == "partial" %}
       系統正在局部重訓 selected PT：{{ display_unit_labels|join(", ") }}。
     {% else %}
-      系統正在依 5 個光源與 inner/edge 區域訓練 10 個模型。
+      系統正在依 {{ selected_lightings|length }} 個光源與 inner/edge 區域訓練 {{ unit_labels|length }} 個模型。
     {% endif %}
   </p>
 

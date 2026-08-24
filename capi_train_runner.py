@@ -216,7 +216,13 @@ def main() -> int:
     )
 
     from capi_train_new import (
-        TrainingConfig, apply_user_training_params, run_training_pipeline,
+        TrainingConfig, apply_user_training_params, normalize_training_units,
+        run_training_pipeline,
+    )
+
+    training_scope = job.get("training_scope") or {}
+    training_units = normalize_training_units(
+        training_scope.get("selected_units")
     )
 
     cfg = TrainingConfig(
@@ -231,6 +237,7 @@ def main() -> int:
         preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
         tile_stride=int(job.get("tile_stride") or 512),
         training_data_source=job.get("training_data_source") or {"type": "inference_records"},
+        training_units=training_units,
     )
     apply_user_training_params(cfg, job.get("training_params"), log_fn=log.info)
 

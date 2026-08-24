@@ -94,6 +94,11 @@ def test_aapi_filename_mapping_keeps_source_images_distinct():
         adapter.image_group_key("YQ607S210B12WGF50500164821.tif")
     assert adapter.is_white_frame_image("YQ607S210B12White_Frame164823.tif")
     assert adapter.is_omit_image("YQ607S210B12PINIGBI0164814.tif")
+    assert adapter.training_image_prefix("YQ607S210B12Windows_BG164820.tif") == "STANDARD"
+    assert adapter.training_image_prefix("YQ607S210B12W0F00010164822.tif") == "WGF50500"
+    assert adapter.training_prefixes == (
+        "R0F00000", "W0F00000", "WGF50500", "STANDARD",
+    )
 
 
 def test_aapi_preprocess_keeps_w0f00010_and_wgf50500_as_two_images(tmp_path):

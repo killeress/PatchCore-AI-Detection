@@ -20,6 +20,84 @@ def test_normalize_panel_modes_defaults_and_validates():
         normalize_panel_modes(["unknown"], 1)
 
 
+def test_normalize_training_units_accepts_aapi_subset():
+    from capi_train_new import normalize_training_units
+
+    units = normalize_training_units([
+        "R0F00000-inner",
+        "R0F00000-edge",
+        "W0F00000-inner",
+        "W0F00000-edge",
+        "WGF50500-inner",
+        "WGF50500-edge",
+        "STANDARD-inner",
+        "STANDARD-edge",
+    ])
+
+    assert len(units) == 8
+    assert ("G0F00000", "inner") not in units
+
+
+def test_run_training_pipeline_uses_configured_training_units(tmp_path, monkeypatch):
+    import json
+
+    from capi_train_new import TrainingConfig, run_training_pipeline
+
+    class MockDB:
+        def list_tile_pool(self, _job_id, **_filters):
+            return [{"id": index} for index in range(30)]
+
+    trained = []
+
+    def fake_train_single_submodel(
+        *, lighting, zone, output_pt_path, **_kwargs
+    ):
+        trained.append((lighting, zone))
+        output_pt_path.write_bytes(b"model")
+        return {
+            "threshold": 0.5,
+            "tile_count": 30,
+            "ng_count": 0,
+            "size_bytes": 5,
+            "metrics": {"auroc": None, "auroc_grade": "n/a"},
+            "used_tile_ids": [],
+            "elapsed_seconds": 1,
+        }
+
+    monkeypatch.setattr("capi_train_new._setup_offline_env", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        "capi_train_new.train_single_submodel",
+        fake_train_single_submodel,
+    )
+    configured_units = [
+        ("R0F00000", "inner"),
+        ("R0F00000", "edge"),
+    ]
+    bundle_dir = run_training_pipeline(
+        job_id="j_aapi_units",
+        cfg=TrainingConfig(
+            machine_id="AAPI-TEST",
+            panel_paths=[],
+            over_review_root=tmp_path / "unused",
+            output_root=tmp_path / "model",
+            training_units=configured_units,
+        ),
+        db=MockDB(),
+        log=lambda _msg: None,
+    )
+
+    manifest = json.loads(
+        (bundle_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert trained == configured_units
+    assert manifest["training_units"] == [
+        "R0F00000-inner", "R0F00000-edge",
+    ]
+    assert sorted(path.name for path in bundle_dir.glob("*.pt")) == [
+        "R0F00000-edge.pt", "R0F00000-inner.pt",
+    ]
+
+
 def test_apply_user_training_params_none_is_noop():
     from capi_train_new import TrainingConfig, apply_user_training_params
     cfg = TrainingConfig(

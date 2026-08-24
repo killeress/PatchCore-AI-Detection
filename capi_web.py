@@ -13596,11 +13596,22 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         bundles = db.list_model_bundles() if db else []
         new_arch_count = len(bundles)
         active_count = sum(1 for b in bundles if b.get("is_active"))
+        training_lightings = self._train_new_station_adapter(
+            server_inst
+        ).training_prefixes
+        training_unit_count = len(training_lightings) * 2
 
         cards.append({
             "title": "新機種 PatchCore",
-            "subtitle": "C-10 (5 lighting × inner+edge)",
-            "description": f"訓練完整 10 個 PT，或針對既有 bundle 選擇指定 PT 重新選圖重訓。已啟用 {active_count} 個 / 共 {new_arch_count} bundle。",
+            "subtitle": (
+                f"C-{training_unit_count} "
+                f"({len(training_lightings)} lighting × inner+edge)"
+            ),
+            "description": (
+                f"訓練完整 {training_unit_count} 個 PT，或針對既有 bundle "
+                f"選擇指定 PT 重新選圖重訓。已啟用 {active_count} 個 / "
+                f"共 {new_arch_count} bundle。"
+            ),
             "bundle_path": "model/<機種>-<日期>",
             "trained_at": "—" if new_arch_count == 0 else "詳見模型庫",
             "status": "ok" if active_count > 0 else "warning",
@@ -13612,14 +13623,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _build_submodel_retrain_choices(self):
         """Build bundle/unit choices for single PatchCore submodel retraining."""
-        from capi_train_new import (
-            TRAINING_UNITS,
-            WIZARD_FULL_PANEL_COUNT,
-            WIZARD_TOTAL_PANEL_COUNT,
-        )
+        from capi_train_new import WIZARD_FULL_PANEL_COUNT, WIZARD_TOTAL_PANEL_COUNT
 
         server_inst = self._capi_server_instance
         db = server_inst.database if server_inst else None
+        unit_labels = self._all_train_unit_labels(server_inst)
 
         bundles = []
         if db:
@@ -13652,17 +13660,36 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         return {
             "bundles": bundles,
             "units": [
-                {"lighting": lighting, "zone": zone, "label": f"{lighting}-{zone}"}
-                for lighting, zone in TRAINING_UNITS
+                {
+                    "lighting": label.rsplit("-", 1)[0],
+                    "zone": label.rsplit("-", 1)[1],
+                    "label": label,
+                }
+                for label in unit_labels
             ],
             "full_panel_count": WIZARD_FULL_PANEL_COUNT,
             "total_panel_count": WIZARD_TOTAL_PANEL_COUNT,
         }
 
     @staticmethod
-    def _all_train_unit_labels() -> list:
-        from capi_train_new import TRAINING_UNITS
-        return [f"{lighting}-{zone}" for lighting, zone in TRAINING_UNITS]
+    def _train_new_station_adapter(server_inst=None):
+        from capi_station_adapter import create_station_adapter
+
+        adapter = getattr(server_inst, "station_adapter", None) if server_inst else None
+        if getattr(adapter, "profile", None) not in ("capi", "aapi"):
+            adapter = create_station_adapter("capi")
+        return adapter
+
+    @classmethod
+    def _all_train_unit_labels(cls, server_inst=None) -> list:
+        from capi_train_new import ZONES
+
+        adapter = cls._train_new_station_adapter(server_inst)
+        return [
+            f"{lighting}-{zone}"
+            for lighting in adapter.training_prefixes
+            for zone in ZONES
+        ]
 
     @classmethod
     def _machine_id_prefix(cls, machine_id: str) -> str:
@@ -13725,6 +13752,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if not supports_kwargs:
                 for optional_name in (
                     "machine_id", "rotate_180", "ng_validation_base_dir",
+                    "image_prefix_resolver", "model_prefix_resolver",
                 ):
                     if optional_name not in parameters:
                         call_kwargs.pop(optional_name, None)
@@ -13743,12 +13771,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         return bool(prefix_a and prefix_a == prefix_b)
 
     @classmethod
-    def _normalize_train_new_scope(cls, raw, db=None) -> tuple:
+    def _normalize_train_new_scope(cls, raw, db=None, all_units=None) -> tuple:
         """Validate and normalize train scope for the 6-step wizard.
 
         Returns (scope, error).  The default is full 10-unit training.
         """
-        all_units = cls._all_train_unit_labels()
+        all_units = list(all_units or cls._all_train_unit_labels())
         if raw is None:
             raw = {}
         if not isinstance(raw, dict):
@@ -13815,8 +13843,29 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         return out
 
     @staticmethod
-    def _train_new_lighting_labels(selected_lightings: list, panel_paths: list) -> dict:
+    def _train_new_lighting_labels(
+        selected_lightings: list,
+        panel_paths: list,
+        station_adapter=None,
+    ) -> dict:
         labels = {lighting: lighting for lighting in selected_lightings}
+        if getattr(station_adapter, "profile", None) == "aapi":
+            for panel_path in panel_paths:
+                try:
+                    entries = [
+                        entry for entry in Path(panel_path).iterdir()
+                        if entry.is_file()
+                    ]
+                except OSError:
+                    continue
+                for entry in entries:
+                    source = station_adapter.image_prefix(entry.name)
+                    model = station_adapter.model_prefix(source)
+                    if model not in labels:
+                        continue
+                    if source == model or labels[model] == model:
+                        labels[model] = source
+            return labels
         if "STANDARD" not in labels:
             return labels
 
@@ -13881,6 +13930,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             active_jobs=self._list_open_train_new_jobs(),
             bundles=choices["bundles"],
             units=choices["units"],
+            full_unit_count=len(choices["units"]),
+            full_lighting_count=len({
+                unit["lighting"] for unit in choices["units"]
+            }),
         )
         self._send_response(200, html)
 
@@ -13902,7 +13955,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if units_raw:
             scope_raw["selected_units"] = [u for u in units_raw.split(",") if u]
 
-        scope, err = self._normalize_train_new_scope(scope_raw, self._capi_server_instance.database)
+        scope, err = self._normalize_train_new_scope(
+            scope_raw,
+            self._capi_server_instance.database,
+            self._all_train_unit_labels(self._capi_server_instance),
+        )
         if err:
             self._send_response(400, f"Invalid training scope: {err}")
             return
@@ -13973,6 +14030,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         lighting_labels = self._train_new_lighting_labels(
             selected_lightings,
             (job or {}).get("panel_paths") or [],
+            self._train_new_station_adapter(self._capi_server_instance),
         )
         html = template.render(
             request_path="/train/new/progress",
@@ -14007,6 +14065,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             lighting_labels=self._train_new_lighting_labels(
                 selected_lightings,
                 job.get("panel_paths") or [],
+                self._train_new_station_adapter(self._capi_server_instance),
             ),
         )
         self._send_response(200, html)
@@ -14060,6 +14119,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         lighting_labels = self._train_new_lighting_labels(
             manifest_lightings,
             job.get("panel_paths") or [],
+            self._train_new_station_adapter(self._capi_server_instance),
         )
         units = []
         total_size_bytes = 0
@@ -14395,7 +14455,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             for panel in panels:
                 image_dir = panel.get("image_dir", "")
                 panel["image_path"] = image_dir
-                panel["preview_image_path"] = self._resolve_train_new_preview_image_path(image_dir)
+                panel["preview_image_path"] = self._resolve_train_new_preview_image_path(
+                    image_dir,
+                    self._train_new_station_adapter(self._capi_server_instance),
+                )
             self._send_json({"panels": panels, "days": days})
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=500)
@@ -14410,19 +14473,41 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         return Path(resolve_unc_path(raw, path_mapping))
 
     @staticmethod
-    def _scan_train_new_manual_batch(batch_root: Path, machine_id: str) -> list:
+    def _scan_train_new_manual_batch(
+        batch_root: Path,
+        machine_id: str,
+        station_adapter=None,
+    ) -> list:
         """List valid first-level panel folders from a manually prepared batch."""
-        from capi_preprocess import LIGHTING_PREFIXES, filter_panel_lighting_files
+        from capi_preprocess import filter_panel_lighting_files
+        from capi_station_adapter import create_station_adapter
+
+        if getattr(station_adapter, "profile", None) not in ("capi", "aapi"):
+            station_adapter = create_station_adapter("capi")
 
         panels = []
         for panel_dir in sorted(batch_root.iterdir(), key=lambda p: p.name.lower()):
             if not panel_dir.is_dir():
                 continue
-            lighting_files = filter_panel_lighting_files(panel_dir)
+            lighting_files = filter_panel_lighting_files(
+                panel_dir,
+                prefix_resolver=station_adapter.image_prefix,
+                allowed_prefixes=station_adapter.inference_prefixes,
+            )
             if not lighting_files:
                 continue
-            lightings = [lighting for lighting in LIGHTING_PREFIXES if lighting in lighting_files]
-            preview_path = CAPIWebHandler._resolve_train_new_preview_image_path(panel_dir)
+            model_lightings = {
+                station_adapter.model_prefix(source_lighting)
+                for source_lighting in lighting_files
+            }
+            lightings = [
+                lighting for lighting in station_adapter.training_prefixes
+                if lighting in model_lightings
+            ]
+            preview_path = CAPIWebHandler._resolve_train_new_preview_image_path(
+                panel_dir,
+                station_adapter,
+            )
             panels.append({
                 "glass_id": panel_dir.name,
                 "model_id": machine_id,
@@ -14434,7 +14519,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "preview_image_path": preview_path,
                 "available_lightings": lightings,
                 "lighting_count": len(lightings),
-                "expected_lighting_count": len(LIGHTING_PREFIXES),
+                "expected_lighting_count": len(station_adapter.training_prefixes),
                 "source_type": "manual_folder",
             })
         return panels
@@ -14450,6 +14535,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         machine_id = str(data.get("machine_id") or "").strip()
+        station_adapter = self._train_new_station_adapter(
+            self._capi_server_instance
+        )
         batch_root_raw = str(data.get("batch_root") or "").strip()
         if not machine_id:
             self._send_json({"error": "請提供機種 ID"}, status=400)
@@ -14466,7 +14554,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            panels = self._scan_train_new_manual_batch(batch_root, machine_id)
+            panels = self._scan_train_new_manual_batch(
+                batch_root,
+                machine_id,
+                station_adapter,
+            )
         except OSError as exc:
             self._send_json({"error": f"無法讀取 batch 根目錄: {exc}"}, status=400)
             return
@@ -14484,8 +14576,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         })
 
     @staticmethod
-    def _resolve_train_new_preview_image_path(path_value) -> str:
-        """Resolve a panel folder to the W0F00000_* image used by Step 2 preview."""
+    def _resolve_train_new_preview_image_path(path_value, station_adapter=None) -> str:
+        """Resolve a panel folder to a station-valid image used by Step 2 preview."""
+        from capi_station_adapter import create_station_adapter
+
         raw = str(path_value or "").strip()
         if not raw:
             return ""
@@ -14495,18 +14589,24 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if not path.is_dir():
             return ""
 
-        for candidate in sorted(path.iterdir(), key=lambda p: p.name):
-            if candidate.is_file() and candidate.name.upper().startswith("W0F00000_"):
-                return str(candidate)
+        if getattr(station_adapter, "profile", None) not in ("capi", "aapi"):
+            station_adapter = create_station_adapter("capi")
 
         try:
             from capi_preprocess import filter_panel_lighting_files
-            files = filter_panel_lighting_files(path)
-            preferred = ("W0F00000", "STANDARD", "G0F00000", "R0F00000", "WGF50500")
-            for lighting in preferred:
-                if lighting in files:
-                    return str(files[lighting])
-        except Exception:
+            files = filter_panel_lighting_files(
+                path,
+                prefix_resolver=station_adapter.image_prefix,
+                allowed_prefixes=station_adapter.inference_prefixes,
+            )
+            for source_lighting in station_adapter.boundary_reference_priority:
+                if (
+                    source_lighting in files
+                    and station_adapter.model_prefix(source_lighting)
+                    in station_adapter.training_prefixes
+                ):
+                    return str(files[source_lighting])
+        except (OSError, ValueError):
             return ""
         return ""
 
@@ -14709,7 +14809,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             try:
                 valid_panels = {
                     panel["image_path"]
-                    for panel in self._scan_train_new_manual_batch(batch_root, machine_id)
+                    for panel in self._scan_train_new_manual_batch(
+                        batch_root,
+                        machine_id,
+                        self._train_new_station_adapter(
+                            self._capi_server_instance
+                        ),
+                    )
                 }
             except OSError as exc:
                 self._send_json({"error": f"無法讀取 batch 根目錄: {exc}"}, status=400)
@@ -14760,7 +14866,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         db = self._capi_server_instance.database
-        training_scope, err = self._normalize_train_new_scope(params.get("training_scope"), db)
+        training_scope, err = self._normalize_train_new_scope(
+            params.get("training_scope"),
+            db,
+            self._all_train_unit_labels(self._capi_server_instance),
+        )
         if err:
             self._send_json({"error": err}, status=400)
             return
@@ -14925,6 +15035,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         try:
             train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
+            station_adapter = CAPIWebHandler._train_new_station_adapter(server_inst)
+            selected_units = CAPIWebHandler._scope_selected_units(training_scope)
 
             thumb_root = _Path(".tmp/train_new_thumbs") / job_id
             cfg = TrainingConfig(
@@ -14939,6 +15051,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 preprocess_after_tiling=preprocess_after_tiling,
                 tile_stride=int(tile_stride or CAPIWebHandler.TRAIN_NEW_DEFAULT_TILE_STRIDE),
                 training_data_source=training_data_source or {"type": "inference_records"},
+                training_units=selected_units,
             )
             apply_user_training_params(cfg, training_params, log_fn=log)
             pre_cfg = PreprocessConfig(
@@ -14948,11 +15061,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 preprocess_after_tiling=cfg.preprocess_after_tiling,
                 product_resolution=CAPIWebHandler._product_resolution_for_machine(machine_id, server_inst),
             )
-            target_lightings = None
-            target_units = None
+            target_lightings = []
+            for selected_lighting, _selected_zone in selected_units:
+                if selected_lighting not in target_lightings:
+                    target_lightings.append(selected_lighting)
+            target_units = [
+                f"{selected_lighting}-{selected_zone}"
+                for selected_lighting, selected_zone in selected_units
+            ]
             if training_scope and training_scope.get("mode") == "partial":
-                target_lightings = CAPIWebHandler._scope_selected_lightings(training_scope)
-                target_units = training_scope.get("selected_units") or None
                 log(
                     "局部重訓 scope: "
                     + ", ".join(training_scope.get("selected_units") or [])
@@ -14965,6 +15082,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 panel_modes=panel_modes,
                 target_lightings=target_lightings,
                 target_units=target_units,
+                prefix_resolver=station_adapter.image_prefix,
+                allowed_prefixes=station_adapter.inference_prefixes,
+                boundary_reference_priority=station_adapter.boundary_reference_priority,
+                training_lighting_resolver=station_adapter.model_prefix,
             )
             if stats["panel_success"] <= 0:
                 raise RuntimeError("沒有任何 panel 前處理成功")
@@ -14973,6 +15094,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 f"準備 NG 驗證 crop（優先重用 NG 驗證庫；缺少才從推論紀錄裁切，"
                 f"每 lighting 上限 {NG_TILES_PER_LIGHTING} 個，排除 B0F 黑畫面）"
             )
+            ng_kwargs = {}
+            if station_adapter.profile == "aapi":
+                ng_kwargs = {
+                    "image_prefix_resolver": station_adapter.image_prefix,
+                    "model_prefix_resolver": station_adapter.model_prefix,
+                }
             ng_stats = CAPIWebHandler._sample_ng_tiles_compat(
                 sample_ng_tiles,
                 job_id=job_id, over_review_root=cfg.over_review_root,
@@ -14984,6 +15111,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 ng_validation_base_dir=CAPIWebHandler._ng_validation_base_dir_for_server(
                     server_inst
                 ),
+                **ng_kwargs,
             )
 
             db.update_training_job_state(job_id, "review")
@@ -15138,6 +15266,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": err}, status=400)
             return
         machine_id = str(data.get("machine_id") or "").strip()
+        station_adapter = self._train_new_station_adapter(
+            self._capi_server_instance
+        )
 
         source_path = Path(raw_path)
         if not source_path.exists():
@@ -15145,7 +15276,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         if source_path.is_dir():
-            resolved_preview = self._resolve_train_new_preview_image_path(source_path)
+            resolved_preview = self._resolve_train_new_preview_image_path(
+                source_path,
+                station_adapter,
+            )
             if not resolved_preview:
                 self._send_json({"error": f"資料夾內找不到可訓練 lighting 圖: {source_path}"}, status=400)
                 return
@@ -15183,7 +15317,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if preprocess_after_tiling:
                 from capi_preprocess import LIGHTING_PREFIXES, PreprocessConfig, preprocess_panel_image
 
-                lighting = canonical_image_prefix(image_path.name)
+                lighting = station_adapter.training_image_prefix(image_path.name)
                 if lighting not in LIGHTING_PREFIXES:
                     lighting = "STANDARD"
                 pre_cfg = PreprocessConfig(
@@ -15288,6 +15422,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         from urllib.parse import parse_qs, urlparse
         import cv2
         from capi_preprocess import PreprocessConfig, filter_panel_lighting_files, preprocess_panel_folder
+        station_adapter = self._train_new_station_adapter(
+            self._capi_server_instance
+        )
 
         qs = parse_qs(urlparse(self.path).query)
         job_id = (qs.get("job_id") or [""])[0]
@@ -15321,17 +15458,38 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         preview_panel_dir = None
         preview_files = None
+        preview_source_lighting = None
         for panel_dir in full_panel_paths:
             if not panel_dir.exists():
                 continue
-            files = filter_panel_lighting_files(panel_dir)
-            if lighting not in files:
+            files = filter_panel_lighting_files(
+                panel_dir,
+                prefix_resolver=station_adapter.image_prefix,
+                allowed_prefixes=station_adapter.inference_prefixes,
+            )
+            matching_sources = [
+                source_lighting for source_lighting in files
+                if station_adapter.model_prefix(source_lighting) == lighting
+            ]
+            if not matching_sources:
                 continue
+            preview_source_lighting = next(
+                (
+                    source_lighting
+                    for source_lighting in station_adapter.boundary_reference_priority
+                    if source_lighting in matching_sources
+                ),
+                matching_sources[0],
+            )
             preview_panel_dir = panel_dir
             preview_files = files
             break
 
-        if preview_panel_dir is None or preview_files is None:
+        if (
+            preview_panel_dir is None
+            or preview_files is None
+            or preview_source_lighting is None
+        ):
             self._send_response(404, "")
             return
 
@@ -15376,8 +15534,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             preview_panel_dir,
             preprocess_cfg,
             image_files=preview_files.values(),
+            prefix_resolver=station_adapter.image_prefix,
+            allowed_prefixes=station_adapter.inference_prefixes,
+            boundary_reference_priority=station_adapter.boundary_reference_priority,
         )
-        result = results.get(lighting)
+        result = results.get(preview_source_lighting)
 
         if result is None:
             self._send_response(404, "")

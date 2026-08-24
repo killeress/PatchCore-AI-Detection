@@ -80,6 +80,7 @@ CODE_FILES = [
     "templates/settings.html",
     "templates/within_spec_detail.html",
     "templates/train_new/_modal.html",
+    "templates/train_new/step1_scope.html",
     "templates/train_new/step1_select.html",
     "templates/train_new/step2_progress.html",
     "templates/train_new/step3_review.html",
@@ -276,7 +277,7 @@ README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明
 - server_config_patch.yaml.example
 - central_dashboard/（CAPI AI 中控看板）
 - 8 個 capi_*.py 模組（含修改與新增）
-- 6 個 templates/train_new/*.html + templates/models.html
+- 7 個 templates/train_new/*.html + templates/models.html
 - deployment/torch_hub_cache/（HuggingFace timm wide_resnet50_2 cache）
 """
 

@@ -89,6 +89,63 @@ def test_preprocess_panels_to_pool_writes_tiles(tmp_path):
     assert first_tile["tile_height"] == 256
 
 
+def test_preprocess_panels_to_pool_accepts_aapi_glass_prefixed_images(tmp_path):
+    from pathlib import Path
+
+    from capi_preprocess import PreprocessConfig
+    from capi_station_adapter import AAPIStationAdapter
+    from capi_train_new import TrainingConfig, preprocess_panels_to_pool
+
+    fixture_img = Path("tests/fixtures/preprocess/synthetic_panel.png")
+    panel_dir = tmp_path / "YQ52TR205A41"
+    panel_dir.mkdir()
+    image_names = (
+        "YQ52TR205A41R0F00000073956.tif",
+        "YQ52TR205A41W0F00000073951.tif",
+        "YQ52TR205A41W0F00010073959.tif",
+        "YQ52TR205A41WGF50500073958.tif",
+        "YQ52TR205A41Windows_BG073957.tif",
+    )
+    for image_name in image_names:
+        (panel_dir / image_name).write_bytes(fixture_img.read_bytes())
+
+    class MockDB:
+        def __init__(self):
+            self.tiles = []
+
+        def insert_tile_pool(self, job_id, tiles):
+            self.tiles.extend(tiles)
+            return list(range(len(tiles)))
+
+    db = MockDB()
+    adapter = AAPIStationAdapter()
+    stats = preprocess_panels_to_pool(
+        job_id="j_aapi",
+        cfg=TrainingConfig(
+            machine_id="GN160TEST",
+            panel_paths=[panel_dir],
+            over_review_root=tmp_path / "unused",
+        ),
+        preprocess_cfg=PreprocessConfig(tile_size=256, tile_stride=256),
+        db=db,
+        thumb_dir=tmp_path / "thumbs",
+        log=lambda _msg: None,
+        target_lightings=adapter.training_prefixes,
+        prefix_resolver=adapter.image_prefix,
+        allowed_prefixes=adapter.inference_prefixes,
+        boundary_reference_priority=adapter.boundary_reference_priority,
+        training_lighting_resolver=adapter.model_prefix,
+    )
+
+    assert stats["panel_success"] == 1
+    assert {tile["lighting"] for tile in db.tiles} == {
+        "R0F00000", "W0F00000", "WGF50500", "STANDARD",
+    }
+    tile_names = {Path(tile["source_path"]).name for tile in db.tiles}
+    assert any("W0F00010" in name for name in tile_names)
+    assert any("WGF50500" in name for name in tile_names)
+
+
 def test_preprocess_panels_to_pool_all_panels_have_inner_and_edge(tmp_path):
     """每片 panel 都應同時有 inner + edge tile。"""
     from pathlib import Path
@@ -322,6 +379,65 @@ def test_sample_ng_tiles(tmp_path):
     assert int(cv2.imread(str(crop_path), cv2.IMREAD_GRAYSCALE).mean()) == 177
     crop_path.resolve().relative_to(thumb_dir.resolve())
     thumb_path.resolve().relative_to(thumb_dir.resolve())
+
+
+def test_sample_ng_tiles_routes_aapi_prefixed_image_to_model_lighting(tmp_path):
+    import cv2
+    import numpy as np
+
+    from capi_station_adapter import AAPIStationAdapter
+    from capi_train_new import sample_ng_tiles
+
+    source = tmp_path / "YQ52TR205A41Windows_BG073957.tif"
+    image = np.full((900, 1000), 177, dtype=np.uint8)
+    assert cv2.imwrite(str(source), image)
+
+    class MockDB:
+        def __init__(self):
+            self.tiles = []
+            self.query_lightings = "unset"
+
+        def list_training_bomb_candidates(self, machine_id, lightings):
+            self.query_lightings = lightings
+            return [{
+                "inference_record_id": 10,
+                "source_result_id": 20,
+                "client_bomb_info": (
+                    '{"image_prefix":"Windows_BG","defect_type":"point",'
+                    '"coordinates":[[500,450]]}'
+                ),
+                "image_path": str(source),
+                "image_dir": str(tmp_path),
+                "image_name": source.name,
+                "image_width": 1000,
+                "image_height": 900,
+                "resolution_x": 1000,
+                "resolution_y": 900,
+                "otsu_bounds": "0,0,1000,900",
+            }]
+
+        def insert_tile_pool(self, _job_id, tiles):
+            self.tiles.extend(tiles)
+            return list(range(len(tiles)))
+
+    db = MockDB()
+    adapter = AAPIStationAdapter()
+    stats = sample_ng_tiles(
+        job_id="j_aapi_ng",
+        machine_id="MODEL-A",
+        over_review_root=tmp_path / "unused",
+        db=db,
+        thumb_dir=tmp_path / "thumbs",
+        per_lighting=10,
+        log=lambda _msg: None,
+        lightings=("STANDARD",),
+        image_prefix_resolver=adapter.image_prefix,
+        model_prefix_resolver=adapter.model_prefix,
+    )
+
+    assert db.query_lightings is None
+    assert stats["sampled"] == 1
+    assert db.tiles[0]["lighting"] == "STANDARD"
 
 
 def test_sample_ng_tiles_saves_first_crop_then_reuses_ng_validation_cache(tmp_path):
