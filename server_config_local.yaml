@@ -7,7 +7,7 @@
 # Windows 本地 hostname 未含站點名稱時，程式預設使用 CAPI Adapter。
 # AAPI Adapter 讀取每日 AOI report 的位置。
 aapi:
-  report_root: /192.168.2.190/LOG
+  report_root: /192.168.2.190/d/LOG
   report_retry_count: 3
   report_retry_interval_seconds: 0.2
 
