@@ -1,4 +1,4 @@
-CAPI MARK PaddleOCR Worker Update 2026.08.25.1
+CAPI MARK PaddleOCR Worker Update 2026.08.25.2
 ================================================
 
 Changes:

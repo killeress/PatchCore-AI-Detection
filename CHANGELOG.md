@@ -1,5 +1,13 @@
 # 更新紀錄
 
+## 2026-08-25 v2
+
+### [部署更新]Code-only 包整合 MARK Worker
+
+- Code-only ZIP 現在同時包含 MARK PaddleOCR worker 與更新腳本，不需要再另外傳送 `mark_shadow_worker_hotfix_*.tar.gz`。
+- 使用 `install_patch.sh` 部署時，若現場已有 `/aidata/capi_ai/mark_shadow/current`，會自動備份 worker、套用更新、重啟 `capi-mark-shadow.service` 並確認健康狀態；更新失敗會還原原 worker。
+- 未安裝 MARK worker 的設備會安全略過；PaddleOCR runtime 與模型仍沿用現場既有安裝，不納入 code-only ZIP。
+
 ## 2026-08-25 v1
 
 ### [AAPI 修正]AOI Report 跟隨圖片來源主機
