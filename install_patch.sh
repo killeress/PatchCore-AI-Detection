@@ -14,6 +14,7 @@ PATCH_ZIP="${1:-}"
 HEALTH_URL="${CAPI_HEALTH_URL:-http://127.0.0.1/api/version}"
 HEALTH_TIMEOUT_SECONDS="${CAPI_HEALTH_TIMEOUT_SECONDS:-120}"
 BACKUP_ROOT="${CAPI_PATCH_BACKUP_ROOT:-$APP_ROOT/.patch_backups}"
+MARK_SHADOW_TARGET_ROOT="${MARK_SHADOW_TARGET_ROOT:-/aidata/capi_ai/mark_shadow}"
 
 if [ -z "$PATCH_ZIP" ]; then
     echo "Usage: $0 <patch-zip>"
@@ -67,7 +68,7 @@ echo "  Version  : $VERSION_IN_ZIP"
 echo "  Backup   : $BACKUP_DIR"
 echo "============================================================"
 
-echo "[1/5] Verifying ZIP checksums..."
+echo "[1/6] Verifying ZIP checksums..."
 "$PYTHON_BIN" - "$PATCH_ZIP" <<'PY'
 import hashlib
 import sys
@@ -95,7 +96,7 @@ with zipfile.ZipFile(zip_path) as z:
 print("  Checksums OK")
 PY
 
-echo "[2/5] Backing up files that will be replaced..."
+echo "[2/6] Backing up files that will be replaced..."
 mkdir -p "$BACKUP_DIR/files"
 : > "$BACKUP_DIR/created_files.txt"
 
@@ -115,18 +116,19 @@ done < <(unzip -Z1 "$PATCH_ZIP")
 
 echo "$PATCH_ZIP" > "$BACKUP_DIR/patch_zip.txt"
 
-echo "[3/5] Extracting patch..."
+echo "[3/6] Extracting patch..."
 unzip -o "$PATCH_ZIP" -d "$APP_ROOT"
-chmod +x install_patch.sh rollback_patch.sh start_server.sh promote_update.sh setup_auto_update_client.sh 2>/dev/null || true
+chmod +x install_patch.sh rollback_patch.sh start_server.sh promote_update.sh setup_auto_update_client.sh \
+    mark_shadow/install_worker_hotfix.sh 2>/dev/null || true
 
-echo "[4/5] Restarting service..."
+echo "[4/6] Restarting service..."
 if [ -x "./start_server.sh" ]; then
     ./start_server.sh restart --no-tail
 else
     echo "WARNING: start_server.sh not executable; please restart manually."
 fi
 
-echo "[5/5] Health check..."
+echo "[5/6] Health check..."
 if command -v curl >/dev/null 2>&1; then
     ok=0
     echo "  Timeout    : ${HEALTH_TIMEOUT_SECONDS}s"
@@ -156,10 +158,37 @@ else
     echo "WARNING: curl not found; skipped health check."
 fi
 
+echo "[6/6] Applying bundled MARK shadow worker..."
+WORKER_INSTALLER="$APP_ROOT/mark_shadow/install_worker_hotfix.sh"
+WORKER_PAYLOAD="$APP_ROOT/mark_shadow/paddle_shadow_worker.py"
+MARK_SHADOW_UPDATE_STATUS="not_bundled"
+if [ ! -f "$WORKER_INSTALLER" ] && [ ! -f "$WORKER_PAYLOAD" ]; then
+    echo "  No bundled MARK shadow worker; skipped."
+elif [ ! -f "$WORKER_INSTALLER" ] || [ ! -f "$WORKER_PAYLOAD" ]; then
+    echo "ERROR: bundled MARK shadow worker payload is incomplete"
+    exit 4
+elif [ ! -L "$MARK_SHADOW_TARGET_ROOT/current" ]; then
+    MARK_SHADOW_UPDATE_STATUS="not_installed"
+    echo "  MARK shadow worker is not installed; skipped: $MARK_SHADOW_TARGET_ROOT/current"
+else
+    if ! MARK_SHADOW_OUTER_CHECKSUMS_VERIFIED=1 "$WORKER_INSTALLER"; then
+        echo "ERROR: bundled MARK shadow worker update failed"
+        echo "Rollback command:"
+        echo "  ./rollback_patch.sh \"$BACKUP_DIR\""
+        if [ "${CAPI_PATCH_AUTO_ROLLBACK:-0}" = "1" ] && [ -x "./rollback_patch.sh" ]; then
+            echo "Auto rollback enabled; rolling back CAPI files now..."
+            ./rollback_patch.sh "$BACKUP_DIR"
+        fi
+        exit 4
+    fi
+    MARK_SHADOW_UPDATE_STATUS="installed"
+fi
+
 mkdir -p "$APP_ROOT/update"
 {
     echo "$(date '+%F %T') installed $PATCH_ZIP"
     echo "backup=$BACKUP_DIR"
+    echo "mark_shadow_worker=$MARK_SHADOW_UPDATE_STATUS"
 } >> "$APP_ROOT/update/update.log"
 
 echo "============================================================"

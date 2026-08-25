@@ -45,6 +45,9 @@ CODE_FILES = [
     "capi_mark_calibration.py",
     "capi_mark_detector.py",
     "capi_mark_shadow.py",
+    "mark_shadow/paddle_shadow_worker.py",
+    "mark_shadow/install_worker_hotfix.sh",
+    "mark_shadow/README_WORKER_HOTFIX.txt",
     "capi_mes_report.py",
     "capi_model_registry.py",
     "capi_model_validation.py",
@@ -129,6 +132,9 @@ PATCH_DEPLOY_ROOT_FILES = {
     "setup_auto_update_client.sh",
     "requirements.txt",
     "server_config_mes_report.yaml.example",
+    "mark_shadow/paddle_shadow_worker.py",
+    "mark_shadow/install_worker_hotfix.sh",
+    "mark_shadow/README_WORKER_HOTFIX.txt",
 }
 
 PATCH_DEPLOY_PREFIXES = (
@@ -283,6 +289,8 @@ CODEONLY_README_NOTE = """\
 - 不含 deployment/torch_hub_cache/（之前的部署包已含，production 機應已落地）
 - 不含 templates/imgs/ 與 static/（沿用 production 機已有的靜態資源）
 - 解壓覆蓋既有檔即可，不會動到 backbone cache 目錄
+- 內含 MARK PaddleOCR worker 更新；使用 install_patch.sh 時，若現場已有 MARK worker，會自動備份、套用、重啟並檢查健康狀態
+- 不含 PaddleOCR runtime 與模型，沿用 /aidata/capi_ai/mark_shadow/current 既有安裝
 """
 
 CODEONLY_CREDENTIALS_EXCLUDED_README_NOTE = """\
