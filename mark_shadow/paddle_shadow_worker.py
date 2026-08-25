@@ -23,7 +23,7 @@ import cv2
 import numpy as np
 
 
-VERSION = "2"
+VERSION = "3"
 TECHNIQUE = "PaddleOCR"
 LOGGER = logging.getLogger("mark_shadow.worker")
 VALID_MARK = re.compile(r"[A-Z0-9]{2}")
@@ -39,6 +39,32 @@ def installed_package_version(package_name: str) -> str:
 def normalize_mark_text(value: Any) -> str:
     text = "".join(str(value or "").upper().split())
     return text if VALID_MARK.fullmatch(text) else ""
+
+
+def rescue_paddle_u_with_dotmatrix_v(
+    paddle_text: Any,
+    dotmatrix_text: Any,
+) -> tuple[str, tuple[int, ...]]:
+    """Use DotMatrixCV only for same-position Paddle U / locator V conflicts."""
+    paddle = normalize_mark_text(paddle_text)
+    dotmatrix = normalize_mark_text(dotmatrix_text)
+    if not paddle or not dotmatrix:
+        return paddle, ()
+
+    rescued_positions = tuple(
+        index
+        for index, (paddle_char, dotmatrix_char) in enumerate(
+            zip(paddle, dotmatrix)
+        )
+        if paddle_char == "U" and dotmatrix_char == "V"
+    )
+    if not rescued_positions:
+        return paddle, ()
+
+    corrected = list(paddle)
+    for index in rescued_positions:
+        corrected[index] = "V"
+    return "".join(corrected), rescued_positions
 
 
 def prepare_paddle_image(image: np.ndarray) -> np.ndarray:
@@ -66,9 +92,9 @@ class MarkTemporalStabilizer:
     """Keep a short-lived MARK OCR glitch from changing the formal result.
 
     The history is keyed by the caller-provided stream key.  It is deliberately
-    based on raw, valid PaddleOCR text only; DotMatrix/CV is a locator and is
-    never included as a vote.  A new value must be seen three times in a row
-    before it replaces the current stable value.
+    based on valid PaddleOCR text after the narrow same-position U/V rescue.
+    Other DotMatrix/CV disagreements never enter the vote.  A new value must
+    be seen three times in a row before it replaces the current stable value.
     """
 
     HISTORY_LIMIT = 100
@@ -323,11 +349,11 @@ class ShadowStore:
             )
 
     def recent_paddle_texts(self, stream_key: str, limit: int = 100) -> list[str]:
-        """Return raw valid Paddle results, oldest first, for one stream."""
+        """Return effective Paddle/CV texts, oldest first, for one stream."""
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT paddle_text
+                SELECT paddle_text, current_text
                 FROM mark_shadow_results
                 WHERE stream_key = ? AND valid_two_chars = 1
                 ORDER BY id DESC
@@ -335,7 +361,13 @@ class ShadowStore:
                 """,
                 (str(stream_key or ""), max(1, int(limit))),
             ).fetchall()
-        return [str(row["paddle_text"] or "") for row in reversed(rows)]
+        return [
+            rescue_paddle_u_with_dotmatrix_v(
+                row["paddle_text"],
+                row["current_text"],
+            )[0]
+            for row in reversed(rows)
+        ]
 
     def save(
         self,
@@ -573,13 +605,23 @@ class ShadowApplication:
         result.setdefault("worker_version", VERSION)
         raw_text = normalize_mark_text(result.get("paddle_text"))
         result["paddle_text"] = raw_text
+        recognition_text, rescued_positions = rescue_paddle_u_with_dotmatrix_v(
+            raw_text,
+            request_data.get("current_text"),
+        )
         stream_key = str(request_data.get("stream_key") or "default").strip() or "default"
         request_data["stream_key"] = stream_key
         context_reason = self._reset_for_model_context(request_data, stream_key)
         if raw_text:
-            result.update(self.temporal.observe(stream_key, raw_text))
+            result.update(self.temporal.observe(stream_key, recognition_text))
             if context_reason:
                 result["adoption_reason"] = context_reason
+            if rescued_positions:
+                positions = ",".join(str(index + 1) for index in rescued_positions)
+                result["adoption_reason"] = (
+                    f"dotmatrix_uv_rescue[pos={positions}];"
+                    f"{result.get('adoption_reason') or 'direct'}"
+                )
         else:
             result.update(self.temporal.observe(stream_key, ""))
         result["id"] = self.store.save(request_data, result, crop_png)

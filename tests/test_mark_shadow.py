@@ -25,6 +25,7 @@ from mark_shadow.paddle_shadow_worker import (
     ShadowStore,
     normalize_mark_text,
     prepare_paddle_image,
+    rescue_paddle_u_with_dotmatrix_v,
 )
 
 
@@ -118,6 +119,29 @@ def test_normalize_mark_text_rejects_non_two_character_results():
     assert normalize_mark_text("B") == ""
     assert normalize_mark_text("BJ1") == ""
     assert normalize_mark_text("B-") == ""
+
+
+@pytest.mark.parametrize(
+    ("paddle_text", "dotmatrix_text", "expected_text", "expected_positions"),
+    [
+        ("UU", "VV", "VV", (0, 1)),
+        ("U1", "V1", "V1", (0,)),
+        ("1U", "1V", "1V", (1,)),
+        ("UU", "UU", "UU", ()),
+        ("VV", "UU", "VV", ()),
+        ("UU", "0V", "UV", (1,)),
+    ],
+)
+def test_uv_rescue_only_replaces_paddle_u_conflicting_with_dotmatrix_v(
+    paddle_text,
+    dotmatrix_text,
+    expected_text,
+    expected_positions,
+):
+    assert rescue_paddle_u_with_dotmatrix_v(
+        paddle_text,
+        dotmatrix_text,
+    ) == (expected_text, expected_positions)
 
 
 def test_mark_temporal_stabilizer_uses_recent_stream_and_rejects_isolated_values():
@@ -267,7 +291,7 @@ def test_paddle_recognizer_sends_three_channel_image_to_model():
     assert result["paddle_text"] == "EJ"
     assert result["paddle_confidence"] == pytest.approx(0.93)
     assert result["technique"] == "PaddleOCR"
-    assert result["worker_version"] == "2"
+    assert result["worker_version"] == "3"
     assert result["error"] == ""
 
 
@@ -309,10 +333,59 @@ def test_shadow_application_saves_comparison_and_disagreement_crop(tmp_path):
 
     assert result["agreed"] is False
     assert result["technique"] == "PaddleOCR"
-    assert result["worker_version"] == "2"
+    assert result["worker_version"] == "3"
     assert store.stats()["total"] == 1
     assert store.stats()["disagreed"] == 1
     assert len(list((tmp_path / "disagreements").rglob("*.png"))) == 1
+
+
+def test_shadow_application_uses_uv_rescue_before_temporal_decision(tmp_path):
+    class FakeRecognizer:
+        model_name = "fake"
+
+        def predict(self, image):
+            return {
+                "paddle_raw_text": "UU",
+                "paddle_text": "UU",
+                "paddle_confidence": 0.995,
+                "latency_ms": 12.5,
+                "model_name": self.model_name,
+                "error": "",
+            }
+
+    image = np.full((12, 20), 180, dtype=np.uint8)
+    encoded, png = cv2.imencode(".png", image)
+    assert encoded
+    png_bytes = png.tobytes()
+    import hashlib
+
+    request_data = {
+        "source_path": "/images/W0F00000_134042.tif",
+        "source_image": "W0F00000_134042.tif",
+        "crop_sha256": hashlib.sha256(png_bytes).hexdigest(),
+        "image_png_base64": base64.b64encode(png_bytes).decode("ascii"),
+        "current_text": "VV",
+        "current_confidence": 0.918,
+        "stream_key": "CAPI13|MODEL-A|bottom_left|rot180",
+    }
+    store = ShadowStore(tmp_path / "shadow.db", tmp_path / "disagreements")
+
+    result = ShadowApplication(FakeRecognizer(), store).infer(request_data)
+
+    assert result["paddle_text"] == "UU"
+    assert result["final_text"] == "VV"
+    assert result["adoption_reason"] == "dotmatrix_uv_rescue[pos=1,2];warmup"
+    with sqlite3.connect(store.db_path) as connection:
+        saved = connection.execute(
+            "SELECT paddle_text, final_text, adoption_reason "
+            "FROM mark_shadow_results WHERE id = ?",
+            (result["id"],),
+        ).fetchone()
+    assert saved == (
+        "UU",
+        "VV",
+        "dotmatrix_uv_rescue[pos=1,2];warmup",
+    )
 
 
 def test_shadow_store_saves_agreed_crop_for_admin_comparison(tmp_path):
@@ -347,6 +420,30 @@ def test_shadow_store_saves_agreed_crop_for_admin_comparison(tmp_path):
         ).fetchone()[0]
     assert Path(crop_path).is_file()
     assert Path(crop_path).is_relative_to(tmp_path / "data" / "crops")
+
+
+def test_shadow_history_reapplies_uv_rescue_to_existing_raw_rows(tmp_path):
+    store = ShadowStore(
+        tmp_path / "shadow.db",
+        tmp_path / "disagreements",
+    )
+    stream_key = "CAPI13|MODEL-A|bottom_left|rot180"
+    with sqlite3.connect(store.db_path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO mark_shadow_results (
+                created_at, crop_sha256, current_text, paddle_text,
+                valid_two_chars, model_name, stream_key
+            ) VALUES (?, ?, ?, ?, 1, 'fake', ?)
+            """,
+            [
+                ("2026-08-25T01:00:00Z", "a", "VV", "UU", stream_key),
+                ("2026-08-25T01:00:01Z", "b", "UU", "UU", stream_key),
+                ("2026-08-25T01:00:02Z", "c", "V1", "U1", stream_key),
+            ],
+        )
+
+    assert store.recent_paddle_texts(stream_key) == ["VV", "UU", "V1"]
 
 
 def test_shadow_store_migrates_existing_database_for_inference_link(tmp_path):
