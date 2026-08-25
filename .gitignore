@@ -100,6 +100,9 @@ deployment/*.pkl
 deployment/*.pth
 deployment/*.zip
 deployment/**/*.zip
+deployment/*.tar.gz
+deployment/*.tar.gz.sha256
+deployment/mark_shadow_worker_hotfix_*/
 # DINOv2 repo code copy (4.5MB, copied from ~/.cache/torch/hub for offline deploy)
 deployment/dinov2_repo/
 # Offline backbone cache for new training wizard (~264 MB; rebuilt by scripts/build_deploy_zip.py)
