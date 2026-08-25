@@ -1555,10 +1555,7 @@ class CAPIServer:
             self.station_hostname,
             default_if_unknown=windows_development_fallback,
         )
-        self.station_adapter = create_station_adapter(
-            self.station_profile,
-            self.server_config.get("aapi", {}),
-        )
+        self.station_adapter = create_station_adapter(self.station_profile)
         selection_source = "hostname"
         if self.station_profile not in self.station_hostname.casefold():
             selection_source = "windows-development-fallback"

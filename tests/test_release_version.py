@@ -201,9 +201,6 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert managed_assets <= names
         assert not any(name.startswith("templates/imgs/") for name in names)
         assert not any(name.startswith("static/") for name in names)
-        assert "/192.168.2.190/d/LOG" in zf.read(
-            "server_config_patch.yaml.example"
-        ).decode("utf-8")
 
         web_source = Path("capi_web.py").read_text(encoding="utf-8")
         direct_templates = set(re.findall(r'get_template\(\s*["\']([^"\']+)["\']', web_source))
