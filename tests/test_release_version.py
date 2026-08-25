@@ -43,6 +43,28 @@ def test_install_patch_default_health_url_matches_production_port():
     assert "127.0.0.1:8080/api/version" not in script
 
 
+def test_install_patch_applies_bundled_mark_worker_after_main_health_check():
+    script = Path("install_patch.sh").read_text(encoding="utf-8")
+
+    main_health = script.index('echo "[5/6] Health check..."')
+    worker_install = script.index('echo "[6/6] Applying bundled MARK shadow worker..."')
+
+    assert main_health < worker_install
+    assert 'MARK_SHADOW_TARGET_ROOT="${MARK_SHADOW_TARGET_ROOT:-/aidata/capi_ai/mark_shadow}"' in script
+    assert 'elif [ ! -L "$MARK_SHADOW_TARGET_ROOT/current" ]; then' in script
+    assert 'MARK_SHADOW_OUTER_CHECKSUMS_VERIFIED=1' in script
+    assert 'WORKER_INSTALLER="$APP_ROOT/mark_shadow/install_worker_hotfix.sh"' in script
+
+
+def test_worker_hotfix_installer_accepts_verified_codeonly_layout():
+    script = Path("mark_shadow/install_worker_hotfix.sh").read_text(encoding="utf-8")
+
+    assert 'WORKER_SOURCE="$SCRIPT_DIR/paddle_shadow_worker.py"' in script
+    assert 'MARK_SHADOW_OUTER_CHECKSUMS_VERIFIED:-0' in script
+    assert 'WORKER_SOURCE="$PATCH_ROOT/worker/paddle_shadow_worker.py"' in script
+    assert 'CHECKSUM_FILE="$PATCH_ROOT/SHA256SUMS"' in script
+
+
 def test_promote_update_verifies_background_http_server_startup():
     script = Path("promote_update.sh").read_text(encoding="utf-8")
 
@@ -172,6 +194,9 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "capi_mark_calibration.py" in names
         assert "capi_mark_detector.py" in names
         assert "capi_mark_shadow.py" in names
+        assert "mark_shadow/paddle_shadow_worker.py" in names
+        assert "mark_shadow/install_worker_hotfix.sh" in names
+        assert "mark_shadow/README_WORKER_HOTFIX.txt" in names
         assert "capi_model_validation.py" in names
         assert "configs/mes_defect_codes.json" in names
         assert "capi_patchcore_feature_cleaning.py" in names
@@ -187,6 +212,12 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "scripts/over_review_poc/train_final_model.py" in names
         assert "scratch_classifier.py" in names
         assert "scratch_filter.py" in names
+        for bundled_worker_file in (
+            "mark_shadow/paddle_shadow_worker.py",
+            "mark_shadow/install_worker_hotfix.sh",
+            "mark_shadow/README_WORKER_HOTFIX.txt",
+        ):
+            assert zf.read(bundled_worker_file) == Path(bundled_worker_file).read_bytes()
 
         managed_assets = {
             rel
@@ -232,12 +263,16 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
     assert manifest["content_tree_sha256"] == hashlib.sha256(canonical_files).hexdigest()
     assert any(item["path"] == "capi_mark_calibration.py" for item in manifest["files"])
     assert any(item["path"] == "capi_mark_shadow.py" for item in manifest["files"])
+    assert any(item["path"] == "mark_shadow/paddle_shadow_worker.py" for item in manifest["files"])
+    assert any(item["path"] == "mark_shadow/install_worker_hotfix.sh" for item in manifest["files"])
     assert any(item["path"] == "capi_station_adapter.py" for item in manifest["files"])
     assert any(item["path"] == "start_server.py" for item in manifest["files"])
     assert any(item["path"] == "capi_web.py" for item in manifest["files"])
     assert not any(item["path"] == "capi_mes_credentials.py" for item in manifest["files"])
     assert "  capi_mark_calibration.py\n" in checksums
     assert "  capi_mark_shadow.py\n" in checksums
+    assert "  mark_shadow/paddle_shadow_worker.py\n" in checksums
+    assert "  mark_shadow/install_worker_hotfix.sh\n" in checksums
     assert "  capi_station_adapter.py\n" in checksums
     assert "  start_server.py\n" in checksums
     assert "  capi_web.py\n" in checksums
@@ -575,6 +610,7 @@ def test_build_patch_zip_includes_only_deployable_changes(tmp_path, monkeypatch)
         "capi_update_agent.py",
         "templates/base.html",
         "static/favicon.svg",
+        "mark_shadow/paddle_shadow_worker.py",
         "tests/test_release_version.py",
         "scripts/build_deploy_zip.py",
         "Sample/ignore.py",
@@ -615,6 +651,7 @@ def test_build_patch_zip_includes_only_deployable_changes(tmp_path, monkeypatch)
     assert "capi_update_agent.py" in names
     assert "templates/base.html" in names
     assert "static/favicon.svg" in names
+    assert "mark_shadow/paddle_shadow_worker.py" in names
     assert "install_patch.sh" in names
     assert "rollback_patch.sh" in names
     assert "start_server.sh" in names

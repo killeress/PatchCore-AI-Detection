@@ -3,29 +3,44 @@
 
 set -euo pipefail
 
-PATCH_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET_ROOT="${MARK_SHADOW_TARGET_ROOT:-/aidata/capi_ai/mark_shadow}"
 CURRENT_LINK="$TARGET_ROOT/current"
+
+if [ -f "$SCRIPT_DIR/paddle_shadow_worker.py" ]; then
+    PATCH_ROOT="$SCRIPT_DIR"
+    WORKER_SOURCE="$SCRIPT_DIR/paddle_shadow_worker.py"
+    if [ "${MARK_SHADOW_OUTER_CHECKSUMS_VERIFIED:-0}" != "1" ]; then
+        echo "ERROR: code-only worker payload must be installed through install_patch.sh"
+        exit 1
+    fi
+    CHECKSUM_FILE=""
+else
+    PATCH_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+    WORKER_SOURCE="$PATCH_ROOT/worker/paddle_shadow_worker.py"
+    CHECKSUM_FILE="$PATCH_ROOT/SHA256SUMS"
+fi
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "ERROR: install_worker_hotfix.sh must run as root"
     exit 1
 fi
 
-for required in \
-    "$PATCH_ROOT/SHA256SUMS" \
-    "$PATCH_ROOT/worker/paddle_shadow_worker.py"
-do
-    if [ ! -f "$required" ]; then
-        echo "ERROR: hotfix item missing: $required"
-        exit 1
-    fi
-done
-
-command -v sha256sum >/dev/null 2>&1 || {
-    echo "ERROR: sha256sum not found"
+if [ ! -f "$WORKER_SOURCE" ]; then
+    echo "ERROR: hotfix item missing: $WORKER_SOURCE"
     exit 1
-}
+fi
+if [ -n "$CHECKSUM_FILE" ] && [ ! -f "$CHECKSUM_FILE" ]; then
+    echo "ERROR: hotfix item missing: $CHECKSUM_FILE"
+    exit 1
+fi
+
+if [ -n "$CHECKSUM_FILE" ]; then
+    command -v sha256sum >/dev/null 2>&1 || {
+        echo "ERROR: sha256sum not found"
+        exit 1
+    }
+fi
 command -v systemctl >/dev/null 2>&1 || {
     echo "ERROR: systemctl not found"
     exit 1
@@ -36,7 +51,11 @@ command -v curl >/dev/null 2>&1 || {
 }
 
 echo "[1/5] Verifying hotfix checksums..."
-(cd "$PATCH_ROOT" && sha256sum -c SHA256SUMS)
+if [ -n "$CHECKSUM_FILE" ]; then
+    (cd "$PATCH_ROOT" && sha256sum -c SHA256SUMS)
+else
+    echo "  Checksums already verified by install_patch.sh"
+fi
 
 if [ ! -L "$CURRENT_LINK" ]; then
     echo "ERROR: MARK shadow current release link not found: $CURRENT_LINK"
@@ -59,14 +78,14 @@ if [ ! -f "$TARGET_WORKER" ] || [ ! -x "$RUNTIME_PYTHON" ]; then
 fi
 
 echo "[2/5] Validating patched worker..."
-"$RUNTIME_PYTHON" -m py_compile "$PATCH_ROOT/worker/paddle_shadow_worker.py"
+"$RUNTIME_PYTHON" -m py_compile "$WORKER_SOURCE"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 BACKUP="$TARGET_WORKER.before-shadow-hotfix.$STAMP.bak"
 cp -a "$TARGET_WORKER" "$BACKUP"
 
 echo "[3/5] Replacing worker (backup: $BACKUP)..."
-install -m 0755 "$PATCH_ROOT/worker/paddle_shadow_worker.py" "$TARGET_WORKER.new"
+install -m 0755 "$WORKER_SOURCE" "$TARGET_WORKER.new"
 mv -f "$TARGET_WORKER.new" "$TARGET_WORKER"
 
 echo "[4/5] Restarting MARK shadow service..."
