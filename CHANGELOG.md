@@ -7,6 +7,11 @@
 - AAPI 圖片來自 `192.168.2.190` 時讀取 `.190/d/LOG`，來自 `192.168.2.191` 時改讀取 `.191/d/LOG`，避免所有請求固定查詢 `.190` 而使部分機台回傳 `ERR:AOI_REPORT_FAILED`。
 - hostname 仍只負責選擇 AAPI Adapter，不新增 `server_config.yaml` 設定。
 
+### [MARK 辨識]U／V 字形衝突救援
+
+- 所有機種的 MARK 辨識中，若 PaddleOCR 將同一位置判為 `U`、DotMatrixCV 判為 `V`，正式結果改採 `V`；其他字元及反向 `V→U` 維持 PaddleOCR 結果。
+- PaddleOCR 原始結果仍完整保留，救援後結果會先進入既有時序穩定判定，並以 `dotmatrix_uv_rescue` 記錄套用位置與原因。
+
 ## 2026-08-24 v3
 
 ### [AAPI 修正]改由 hostname 決定 Adapter 與 AOI Report 路徑

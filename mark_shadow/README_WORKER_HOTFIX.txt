@@ -1,12 +1,12 @@
-CAPI MARK PaddleOCR Worker Update 2026.07.31.1
+CAPI MARK PaddleOCR Worker Update 2026.08.25.1
 ================================================
 
 Changes:
-  Convert grayscale or BGRA MARK crops to 3-channel BGR before PaddleOCR.
-  This fixes per-row error "tuple index out of range".
-  Save both agreed and disagreed crops for the admin comparison page.
-  Return PaddleOCR engine, model, and worker API versions for formal logs.
-  Worker API version is now v2.
+  When PaddleOCR reads U and DotMatrixCV reads V at the same character
+  position, use V as the effective result before temporal stabilization.
+  Preserve the raw PaddleOCR result and record dotmatrix_uv_rescue positions.
+  Other character conflicts and the reverse V-to-U direction are unchanged.
+  Worker API version is now v3.
 
 Install on the production host:
   cd <extracted hotfix directory>
@@ -16,5 +16,5 @@ Verify:
   curl http://127.0.0.1:8765/health
 
 Existing error rows are preserved. After a new panel is collected, verify that
-the newest row has latency_ms greater than zero, an empty error value, and a
-non-empty crop_path.
+the newest row has worker_version 3 and dotmatrix_uv_rescue in adoption_reason
+when a Paddle U / DotMatrixCV V conflict occurs.
