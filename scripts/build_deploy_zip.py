@@ -286,6 +286,12 @@ README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明
 CODEONLY_README_NOTE = """\
 
 【本 ZIP 為 code-only 增量包】
+- 此段安裝方式取代上方的一般解壓步驟；請先從 ZIP 換入新版 installer，再執行完整安裝：
+    cd /root/Code/CAPI_AD
+    unzip -o /path/to/patchcore_ai_release_<version>_codeonly.zip install_patch.sh
+    chmod +x install_patch.sh
+    sudo ./install_patch.sh /path/to/patchcore_ai_release_<version>_codeonly.zip
+- 只手動解壓並重啟主程式，不會更新 /aidata/capi_ai/mark_shadow/current 內的正式 worker
 - 不含 deployment/torch_hub_cache/（之前的部署包已含，production 機應已落地）
 - 不含 templates/imgs/ 與 static/（沿用 production 機已有的靜態資源）
 - 解壓覆蓋既有檔即可，不會動到 backbone cache 目錄

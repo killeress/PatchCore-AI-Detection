@@ -242,6 +242,7 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert zf.read("VERSION").decode("utf-8").strip() == version
         manifest = json.loads(zf.read("release_manifest.json").decode("utf-8"))
         checksums = zf.read("checksums.txt").decode("utf-8")
+        readme = zf.read("README.txt").decode("utf-8")
         for item in manifest["files"]:
             data = zf.read(item["path"])
             assert len(data) == item["size_bytes"]
@@ -277,6 +278,8 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
     assert "  start_server.py\n" in checksums
     assert "  capi_web.py\n" in checksums
     assert "  capi_mes_credentials.py\n" not in checksums
+    assert "unzip -o /path/to/patchcore_ai_release_<version>_codeonly.zip install_patch.sh" in readme
+    assert "只手動解壓並重啟主程式，不會更新" in readme
 
 
 def test_codeonly_includes_local_credentials_only_with_explicit_flag(
