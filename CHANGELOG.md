@@ -1,11 +1,26 @@
 # 更新紀錄
 
+## 待發布
+
+### [AAPI 修正]AOI Report 跟隨圖片來源主機
+
+- AAPI 圖片來自 `192.168.2.190` 時讀取 `.190/d/LOG`，來自 `192.168.2.191` 時改讀取 `.191/d/LOG`，避免所有請求固定查詢 `.190` 而使部分機台回傳 `ERR:AOI_REPORT_FAILED`。
+- hostname 仍只負責選擇 AAPI Adapter，不新增 `server_config.yaml` 設定。
+
+## 2026-08-24 v3
+
+### [AAPI 修正]改由 hostname 決定 Adapter 與 AOI Report 路徑
+
+- AAPI 由 hostname 選擇 Adapter，AOI Report 固定使用 `/192.168.2.190/d/LOG`；不再使用 `server_config.yaml` 的 `aapi.report_root`。
+- 舊設備不需要修改設定檔，重啟新版服務後即可套用 AAPI 路徑。
+- AAPI AOI 座標改為 X 先除以 3、Y 保持不變，再以圖片中產品左上角為 `(0, 0)` 換算實際圖片位置；CAPI 座標邏輯不變。
+
 ## 2026-08-24 v2
 
 ### [AAPI 修正]AOI Report 網路路徑
 
 - 修正 AAPI 每日 AOI Report 路徑為 `/192.168.2.190/d/LOG/ReportYYMMDD.log`，補上實際 share mount 的 `d` 層級。
-- 部署時請將 `server_config_patch.yaml.example` 的 `aapi.report_root` 合併至設備既有 `server_config.yaml`，再重啟服務。
+- AAPI 站點由 hostname 選擇 Adapter；每日 AOI Report 路徑固定由 AAPI Adapter 使用 `/192.168.2.190/d/LOG`，不需要修改 `server_config.yaml`。
 
 ### [AAPI 修正]模型訓練圖片辨識
 

@@ -152,10 +152,6 @@ CODEONLY_EXCLUDED_PREFIXES = (
 SERVER_CONFIG_PATCH = """# === 新機種 PatchCore 訓練 wizard 需要在 server_config.yaml 加入以下欄位 ===
 # 將此檔的內容合併進 production 既有的 server_config.yaml（不要整個覆蓋）
 
-# AAPI 每日 AOI Report（實際 share mount 含 d 層級）
-aapi:
-  report_root: /192.168.2.190/d/LOG
-
 # 推論端 GPU VRAM 上限（讓訓練 subprocess 可同時跑而不互搶）
 # 16GB GPU 實測：5 個 model load 完即 ~4.2GB；推論 working set 再 ~1-2GB
 # 0 = 不限制（舊行為）
@@ -214,7 +210,6 @@ README_TEXT = """新機種 PatchCore 訓練 Wizard — Production 部署說明
    - 加 model_configs 列表
    - 加 fallback_model_config
    - 加 training 區段
-   - 確認 AAPI 的 `aapi.report_root` 為 `/192.168.2.190/d/LOG`
    - 加 mes_report.oracle 區段
    - 若啟用 MES Report，請保留設備既有的 capi_mes_credentials.py；除非建包時明確要求，更新包不含明文密碼
    - 安裝 Oracle thin driver：python3 -m pip install "oracledb>=2.0.0"

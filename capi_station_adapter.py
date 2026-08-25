@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import time
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from capi_image_naming import (
     canonical_image_prefix,
@@ -101,6 +101,11 @@ class StationAdapter:
 
 class AAPIStationAdapter(StationAdapter):
     profile = "aapi"
+    REPORT_ROOT_BY_SOURCE_HOST = {
+        "192.168.2.190": Path("/192.168.2.190/d/LOG"),
+        "192.168.2.191": Path("/192.168.2.191/d/LOG"),
+    }
+    REPORT_ROOT = REPORT_ROOT_BY_SOURCE_HOST["192.168.2.190"]
     inference_prefixes = (
         "R0F00000",
         "W0F00000",
@@ -137,13 +142,19 @@ class AAPIStationAdapter(StationAdapter):
     )
     _DATE_SEGMENT = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
 
-    def __init__(self, config: Optional[Mapping[str, object]] = None):
-        config = config or {}
-        self.report_root = Path(str(config.get("report_root") or "/192.168.2.190/d/LOG"))
-        self.report_retry_count = max(1, int(config.get("report_retry_count") or 3))
+    def __init__(
+        self,
+        *,
+        report_root: Optional[Path] = None,
+        report_retry_count: int = 3,
+        report_retry_interval_seconds: float = 0.2,
+    ):
+        self._report_root_overridden = report_root is not None
+        self.report_root = Path(report_root) if report_root is not None else self.REPORT_ROOT
+        self.report_retry_count = max(1, int(report_retry_count))
         self.report_retry_interval_seconds = max(
             0.0,
-            float(config.get("report_retry_interval_seconds") or 0.2),
+            float(report_retry_interval_seconds),
         )
 
     def image_prefix(self, image_name: str) -> str:
@@ -209,12 +220,22 @@ class AAPIStationAdapter(StationAdapter):
         )
 
     def _report_file_for_panel(self, panel_dir: Path) -> Path:
+        panel_dir = Path(panel_dir)
         match = self._DATE_SEGMENT.search(str(panel_dir))
         if match is None:
             raise RuntimeError(f"AAPI image path has no YYYYMMDD date segment: {panel_dir}")
         yyyymmdd = match.group(1)
         report_date = yyyymmdd[2:4] + yyyymmdd[4:6] + yyyymmdd[6:8]
-        return self.report_root / f"Report{report_date}.log"
+        report_root = self.report_root
+        if not self._report_root_overridden:
+            image_root = panel_dir.parent.parent
+            share_root = image_root.parent
+            if image_root.name.casefold() == "image" and share_root.name.casefold() == "d":
+                report_root = self.REPORT_ROOT_BY_SOURCE_HOST.get(
+                    share_root.parent.name,
+                    report_root,
+                )
+        return report_root / f"Report{report_date}.log"
 
     def _read_latest_glass_record(
         self,
@@ -249,7 +270,9 @@ class AAPIStationAdapter(StationAdapter):
             internal_prefix = self._internal_report_prefix(source_prefix)
             parsed.setdefault(internal_prefix, []).append(StationAOIDefect(
                 defect_code=defect_code,
-                x=int(raw_x),
+                # AAPI records X in three-channel units.  The resulting X/Y
+                # are image-pixel offsets from the panel's top-left corner.
+                x=int(raw_x) // 3,
                 y=int(raw_y),
                 image_prefix=internal_prefix,
                 coordinate_space="image",
@@ -297,15 +320,12 @@ def resolve_station_profile_from_hostname(
     )
 
 
-def create_station_adapter(
-    profile: str,
-    config: Optional[Mapping[str, object]] = None,
-) -> StationAdapter:
+def create_station_adapter(profile: str) -> StationAdapter:
     normalized = str(profile or "capi").strip().lower()
     if normalized == "capi":
         return StationAdapter()
     if normalized == "aapi":
-        return AAPIStationAdapter(config)
+        return AAPIStationAdapter()
     raise ValueError(f"Unsupported station_profile: {profile!r}; expected 'capi' or 'aapi'")
 
 

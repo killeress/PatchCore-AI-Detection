@@ -61,14 +61,39 @@ def test_server_config_does_not_select_station_profile(config_path):
     config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
 
     assert "station_profile" not in config
+    assert "aapi" not in config
 
 
-@pytest.mark.parametrize("config_path", ["server_config.yaml", "server_config_local.yaml"])
-def test_aapi_report_root_matches_production_log_mount(config_path):
-    config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+def test_aapi_adapter_uses_hostname_selected_default_report_root():
+    profile = resolve_station_profile_from_hostname("mod2-aapi09")
+    adapter = create_station_adapter(profile)
 
-    assert config["aapi"]["report_root"] == "/192.168.2.190/d/LOG"
-    assert str(AAPIStationAdapter().report_root).replace("\\", "/") == "/192.168.2.190/d/LOG"
+    assert str(adapter.report_root).replace("\\", "/") == "/192.168.2.190/d/LOG"
+
+
+@pytest.mark.parametrize("host", ["192.168.2.190", "192.168.2.191"])
+def test_aapi_report_follows_panel_source_host(host):
+    adapter = AAPIStationAdapter()
+
+    report_file = adapter._report_file_for_panel(
+        Path(f"/{host}/d/image/20260823/YQ536J221B12")
+    )
+
+    assert str(report_file).replace("\\", "/").endswith(
+        f"/{host}/d/LOG/Report260823.log"
+    )
+
+
+def test_aapi_explicit_report_root_override_wins_over_panel_source():
+    adapter = AAPIStationAdapter(report_root=Path("/test/LOG"))
+
+    report_file = adapter._report_file_for_panel(
+        Path("/192.168.2.191/d/image/20260823/YQ536J221B12")
+    )
+
+    assert str(report_file).replace("\\", "/").endswith(
+        "/test/LOG/Report260823.log"
+    )
 
 
 def test_aapi_filename_mapping_keeps_source_images_distinct():
@@ -151,10 +176,7 @@ def test_aapi_report_uses_last_complete_exact_glass_record(tmp_path):
         "White_Frame,CLV2(00277,00881)\n",
         encoding="utf-8",
     )
-    adapter = AAPIStationAdapter({
-        "report_root": str(report_root),
-        "report_retry_count": 1,
-    })
+    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
 
     parsed = adapter.parse_aoi_report(
         tmp_path / "image" / "20260820" / "YQ607S210B12",
@@ -164,8 +186,55 @@ def test_aapi_report_uses_last_complete_exact_glass_record(tmp_path):
 
     assert set(parsed) == {"W0F00010", "WINDOWS_BG", "WHITEFRA"}
     assert parsed["W0F00010"][0].coordinate_space == "image"
-    assert (parsed["W0F00010"][0].x, parsed["W0F00010"][0].y) == (4649, 235)
+    assert (parsed["W0F00010"][0].x, parsed["W0F00010"][0].y) == (1549, 235)
     assert parsed["WHITEFRA"][0].defect_code == "CLV2"
+
+
+def test_aapi_report_x_is_divided_by_three_and_offset_from_panel_origin(tmp_path):
+    report_root = tmp_path / "LOG"
+    report_root.mkdir()
+    (report_root / "Report260823.log").write_text(
+        "2026/8/23 07:37:56,YQ5318225E35,NG,W0F00000,CM00(02983,01187)\n",
+        encoding="utf-8",
+    )
+    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
+    parsed = adapter.parse_aoi_report(
+        tmp_path / "image" / "20260823" / "YQ5318225E35",
+        glass_id="YQ5318225E35",
+        machine_judgment="NG",
+    )
+    defect = parsed["W0F00000"][0]
+
+    assert (defect.x, defect.y) == (994, 1187)
+
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.station_adapter = adapter
+    inferencer.config = CAPIConfig(inference_rotate_180_enabled=False)
+    report_defect = AOIReportDefect(
+        defect_code=defect.defect_code,
+        product_x=defect.x,
+        product_y=defect.y,
+        image_prefix=defect.image_prefix,
+        coordinate_space=defect.coordinate_space,
+    )
+    result = ImageResult(
+        image_path=Path("YQ5318225E35W0F00000073756.tif"),
+        image_size=(4000, 3000),
+        otsu_bounds=(100, 200, 3100, 2200),
+        exclusion_regions=[],
+        tiles=[],
+        excluded_tile_count=0,
+        processed_tile_count=0,
+        processing_time=0,
+        anomaly_tiles=[],
+        raw_bounds=(100, 200, 3100, 2200),
+    )
+
+    assert inferencer._resolve_aoi_report_defect(
+        report_defect,
+        result,
+        (3000, 2000),
+    ) == (1094, 1387, 994, 1187)
 
 
 def test_aapi_report_does_not_fall_back_to_stale_row_when_latest_is_partial(tmp_path):
@@ -176,10 +245,7 @@ def test_aapi_report_does_not_fall_back_to_stale_row_when_latest_is_partial(tmp_
         "2026/8/20 16:48:24,YQ607S210B12,NG,W0F00000,CDK2(0531",
         encoding="utf-8",
     )
-    adapter = AAPIStationAdapter({
-        "report_root": str(report_root),
-        "report_retry_count": 1,
-    })
+    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
 
     with pytest.raises(RuntimeError, match="latest_record_incomplete"):
         adapter.parse_aoi_report(
@@ -191,10 +257,7 @@ def test_aapi_report_does_not_fall_back_to_stale_row_when_latest_is_partial(tmp_
 
 def test_aapi_ok_without_log_row_has_no_aoi_candidates(tmp_path):
     report_root = tmp_path / "LOG"
-    adapter = AAPIStationAdapter({
-        "report_root": str(report_root),
-        "report_retry_count": 1,
-    })
+    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
 
     assert adapter.parse_aoi_report(
         Path("/image/20260820/YQ607S210B12"),
@@ -210,10 +273,7 @@ def test_aapi_ng_rejects_latest_ok_record(tmp_path):
         "2026/8/20 16:48:24,YQ607S210B12,OK\n",
         encoding="utf-8",
     )
-    adapter = AAPIStationAdapter({
-        "report_root": str(report_root),
-        "report_retry_count": 1,
-    })
+    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
 
     with pytest.raises(RuntimeError, match="latest_record_status_ok"):
         adapter.parse_aoi_report(
@@ -225,6 +285,7 @@ def test_aapi_ng_rejects_latest_ok_record(tmp_path):
 
 def test_aapi_image_coordinate_is_resolved_to_product_coordinate():
     inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.station_adapter = AAPIStationAdapter()
     inferencer.config = CAPIConfig(inference_rotate_180_enabled=False)
     defect = AOIReportDefect(
         defect_code="CDK2",
@@ -247,23 +308,24 @@ def test_aapi_image_coordinate_is_resolved_to_product_coordinate():
     )
 
     assert inferencer._resolve_aoi_report_defect(defect, result, (2000, 1200)) == (
-        600,
-        400,
-        1000,
-        600,
+        700,
+        500,
+        1200,
+        800,
     )
-    assert (defect.resolved_image_x, defect.resolved_image_y) == (600, 400)
-    assert (defect.resolved_product_x, defect.resolved_product_y) == (1000, 600)
+    assert (defect.resolved_image_x, defect.resolved_image_y) == (700, 500)
+    assert (defect.resolved_product_x, defect.resolved_product_y) == (1200, 800)
 
     from capi_server import _serialize_aoi_machine_coords
     stored = json.loads(_serialize_aoi_machine_coords({"W0F00000": [defect]}))
     assert stored["W0F00000"][0]["coordinate_space"] == "image"
-    assert (stored["W0F00000"][0]["image_x"], stored["W0F00000"][0]["image_y"]) == (600, 400)
-    assert (stored["W0F00000"][0]["product_x"], stored["W0F00000"][0]["product_y"]) == (1000, 600)
+    assert (stored["W0F00000"][0]["image_x"], stored["W0F00000"][0]["image_y"]) == (700, 500)
+    assert (stored["W0F00000"][0]["product_x"], stored["W0F00000"][0]["product_y"]) == (1200, 800)
 
 
 def test_aapi_image_coordinate_respects_formal_180_degree_input_rotation():
     inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.station_adapter = AAPIStationAdapter()
     inferencer.config = CAPIConfig(inference_rotate_180_enabled=True)
     defect = AOIReportDefect(
         defect_code="CDK2",
@@ -274,20 +336,20 @@ def test_aapi_image_coordinate_respects_formal_180_degree_input_rotation():
     )
     result = ImageResult(
         image_path=Path("YQ607S210B12W0F00000164814.tif"),
-        image_size=(1000, 500),
-        otsu_bounds=(0, 0, 1000, 500),
+        image_size=(1200, 800),
+        otsu_bounds=(100, 200, 1100, 700),
         exclusion_regions=[],
         tiles=[],
         excluded_tile_count=0,
         processed_tile_count=0,
         processing_time=0,
         anomaly_tiles=[],
-        raw_bounds=(0, 0, 1000, 500),
+        raw_bounds=(100, 200, 1100, 700),
     )
 
     assert inferencer._resolve_aoi_report_defect(defect, result, (2000, 1000)) == (
-        900,
-        450,
+        1000,
+        650,
         1800,
         900,
     )
