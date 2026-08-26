@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import re
 import sqlite3
@@ -14,11 +15,19 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import capi_mark_shadow
+import capi_web
 from capi_inference import CAPIInferencer
 from capi_database import CAPIDatabase
-from capi_mark_shadow import build_mark_shadow_payload, recognize_mark_online
+from capi_mark_shadow import (
+    MARK_FORCED_CHAR_CONVERSIONS_PARAM,
+    build_mark_shadow_payload,
+    normalize_forced_char_conversions,
+    recognize_mark_online,
+    set_forced_char_conversions,
+)
 from capi_web import CAPIWebHandler
 from mark_shadow.paddle_shadow_worker import (
+    apply_forced_char_conversions,
     PaddleRecognizer,
     MarkTemporalStabilizer,
     ShadowApplication,
@@ -27,6 +36,13 @@ from mark_shadow.paddle_shadow_worker import (
     prepare_paddle_image,
     rescue_paddle_u_with_dotmatrix_v,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_forced_char_conversions():
+    set_forced_char_conversions(None)
+    yield
+    set_forced_char_conversions(None)
 
 
 def test_build_mark_shadow_payload_keeps_full_mark_envelope_and_rotates_upright():
@@ -59,6 +75,44 @@ def test_build_mark_shadow_payload_keeps_full_mark_envelope_and_rotates_upright(
     assert payload["current_profile_version"] == 3
     assert payload["machine_no"] == "CAPI13"
     assert payload["model_id"] == "MODEL-A"
+    assert payload["forced_char_conversions"] == [
+        {"paddle": "U", "dotmatrix": "V"}
+    ]
+
+
+def test_mark_payload_uses_runtime_forced_char_conversions():
+    set_forced_char_conversions([
+        {"paddle": "0", "dotmatrix": "O"},
+    ])
+    payload = build_mark_shadow_payload(
+        np.zeros((20, 30), dtype=np.uint8),
+        {
+            "found": True,
+            "text": "00",
+            "bbox": {"x": 5, "y": 6, "width": 12, "height": 8},
+        },
+        "W0F00000_000000.tif",
+    )
+
+    assert payload["forced_char_conversions"] == [
+        {"paddle": "0", "dotmatrix": "O"}
+    ]
+
+
+def test_normalize_forced_char_conversions_rejects_invalid_or_duplicate_rules():
+    assert normalize_forced_char_conversions([]) == []
+    assert normalize_forced_char_conversions([
+        {"paddle": "u", "dotmatrix": "v"},
+    ]) == [{"paddle": "U", "dotmatrix": "V"}]
+    with pytest.raises(ValueError):
+        normalize_forced_char_conversions([
+            {"paddle": "U", "dotmatrix": "V"},
+            {"paddle": "U", "dotmatrix": "V"},
+        ])
+    with pytest.raises(ValueError):
+        normalize_forced_char_conversions([
+            {"paddle": "U", "dotmatrix": "U"},
+        ])
 
 
 @pytest.mark.parametrize("inference_rotate_180_enabled", [False, True])
@@ -142,6 +196,15 @@ def test_uv_rescue_only_replaces_paddle_u_conflicting_with_dotmatrix_v(
         paddle_text,
         dotmatrix_text,
     ) == (expected_text, expected_positions)
+
+
+def test_user_defined_conflict_rules_replace_only_matching_positions():
+    assert apply_forced_char_conversions(
+        "00",
+        "O0",
+        [{"paddle": "0", "dotmatrix": "O"}],
+    ) == ("O0", (0,), (("0", "O"),))
+    assert apply_forced_char_conversions("UU", "VV", []) == ("UU", (), ())
 
 
 def test_mark_temporal_stabilizer_uses_recent_stream_and_rejects_isolated_values():
@@ -291,7 +354,7 @@ def test_paddle_recognizer_sends_three_channel_image_to_model():
     assert result["paddle_text"] == "EJ"
     assert result["paddle_confidence"] == pytest.approx(0.93)
     assert result["technique"] == "PaddleOCR"
-    assert result["worker_version"] == "3"
+    assert result["worker_version"] == "4"
     assert result["error"] == ""
 
 
@@ -328,12 +391,13 @@ def test_shadow_application_saves_comparison_and_disagreement_crop(tmp_path):
         "current_orientation": "rot180",
     }
     store = ShadowStore(tmp_path / "shadow.db", tmp_path / "disagreements")
+    application = ShadowApplication(FakeRecognizer(), store)
 
-    result = ShadowApplication(FakeRecognizer(), store).infer(request_data)
+    result = application.infer(request_data)
 
     assert result["agreed"] is False
     assert result["technique"] == "PaddleOCR"
-    assert result["worker_version"] == "3"
+    assert result["worker_version"] == "4"
     assert store.stats()["total"] == 1
     assert store.stats()["disagreed"] == 1
     assert len(list((tmp_path / "disagreements").rglob("*.png"))) == 1
@@ -369,12 +433,15 @@ def test_shadow_application_uses_uv_rescue_before_temporal_decision(tmp_path):
         "stream_key": "CAPI13|MODEL-A|bottom_left|rot180",
     }
     store = ShadowStore(tmp_path / "shadow.db", tmp_path / "disagreements")
+    application = ShadowApplication(FakeRecognizer(), store)
 
-    result = ShadowApplication(FakeRecognizer(), store).infer(request_data)
+    result = application.infer(request_data)
 
     assert result["paddle_text"] == "UU"
     assert result["final_text"] == "VV"
-    assert result["adoption_reason"] == "dotmatrix_uv_rescue[pos=1,2];warmup"
+    assert result["adoption_reason"] == (
+        "forced_char_conversion[pos=1,2;rules=U>V];warmup"
+    )
     with sqlite3.connect(store.db_path) as connection:
         saved = connection.execute(
             "SELECT paddle_text, final_text, adoption_reason "
@@ -384,8 +451,14 @@ def test_shadow_application_uses_uv_rescue_before_temporal_decision(tmp_path):
     assert saved == (
         "UU",
         "VV",
-        "dotmatrix_uv_rescue[pos=1,2];warmup",
+        "forced_char_conversion[pos=1,2;rules=U>V];warmup",
     )
+
+    request_data["forced_char_conversions"] = []
+    disabled_result = application.infer(request_data)
+    assert disabled_result["paddle_text"] == "UU"
+    assert disabled_result["final_text"] == "UU"
+    assert disabled_result["adoption_reason"] == "warmup"
 
 
 def test_shadow_store_saves_agreed_crop_for_admin_comparison(tmp_path):
@@ -656,6 +729,106 @@ def test_mark_shadow_admin_api_returns_comparisons_and_success_latency(tmp_path,
     assert payload["stats"]["agreed"] == 1
     assert payload["stats"]["error_count"] == 1
     assert payload["stats"]["latency_ms"]["average"] == pytest.approx(16.25)
+    assert payload["forced_char_conversions"] == [
+        {"paddle": "U", "dotmatrix": "V"}
+    ]
+
+
+def _mark_rules_update_handler(*, admin=True):
+    class FakeDB:
+        def __init__(self):
+            self.updated = []
+
+        def update_config_param(
+            self,
+            param_name,
+            new_value,
+            reason,
+            changed_by="",
+        ):
+            self.updated.append((param_name, new_value, reason, changed_by))
+            return True
+
+        def get_all_config_params(self):
+            return []
+
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = FakeDB()
+    handler.inferencer = None
+    handler._capi_server_instance = SimpleNamespace(inferencers={})
+    handler._current_settings_user = lambda: {
+        "username": "admin" if admin else "operator",
+        "can_manage_accounts": admin,
+    }
+    responses = []
+    handler._send_json = (
+        lambda payload, status=200, **kwargs: responses.append((status, payload))
+    )
+    return handler, responses
+
+
+def test_admin_can_save_mark_forced_char_conversions(monkeypatch):
+    handler, responses = _mark_rules_update_handler()
+    applied = []
+    monkeypatch.setattr(
+        capi_web,
+        "set_forced_char_conversions",
+        lambda value: applied.append(value),
+    )
+    body = json.dumps({
+        "param_name": MARK_FORCED_CHAR_CONVERSIONS_PARAM,
+        "new_value": [{"paddle": "0", "dotmatrix": "o"}],
+        "reason": "新增 0/O 衝突規則",
+    }).encode("utf-8")
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+
+    handler._handle_api_settings_update()
+
+    expected = [{"paddle": "0", "dotmatrix": "O"}]
+    assert responses[-1][0] == 200
+    assert handler.db.updated == [(
+        MARK_FORCED_CHAR_CONVERSIONS_PARAM,
+        expected,
+        "新增 0/O 衝突規則",
+        "admin",
+    )]
+    assert applied == [expected]
+
+
+def test_non_admin_cannot_save_mark_forced_char_conversions():
+    handler, responses = _mark_rules_update_handler(admin=False)
+    body = json.dumps({
+        "param_name": MARK_FORCED_CHAR_CONVERSIONS_PARAM,
+        "new_value": [],
+        "reason": "清空規則",
+    }).encode("utf-8")
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+
+    handler._handle_api_settings_update()
+
+    assert responses[-1] == (
+        403,
+        {"error": "只有 admin 可以修改 MARK 強制轉換規則"},
+    )
+    assert handler.db.updated == []
+
+
+def test_server_restores_mark_forced_char_conversions_from_database():
+    from capi_server import CAPIServer
+
+    server = object.__new__(CAPIServer)
+    server.db = SimpleNamespace(
+        get_config_param=lambda name: {
+            "param_name": name,
+            "decoded_value": [{"paddle": "8", "dotmatrix": "B"}],
+        }
+    )
+
+    assert server._load_mark_forced_char_conversions() == [
+        {"paddle": "8", "dotmatrix": "B"}
+    ]
 
 
 def test_mark_shadow_admin_api_prefers_persisted_inference_link(
@@ -788,6 +961,10 @@ def test_mark_shadow_settings_ui_has_admin_comparison_fields():
         "推論紀錄",
         "row.record_url",
         "推論紀錄寫入中",
+        "字元衝突強制轉換",
+        "儲存並立即套用",
+        "saveMarkForcedConversions",
+        "mark_forced_char_conversions",
     ):
         assert label in template
     assert 'path == "/api/settings/mark-shadow"' in web_source

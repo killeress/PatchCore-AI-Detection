@@ -5484,27 +5484,12 @@ class CAPIInferencer:
             else "product"
         )
         if coordinate_space == "image":
-            source_x = int(defect.product_x)
-            source_y = int(defect.product_y)
-            if getattr(self.station_adapter, "profile", "capi") == "aapi":
-                # AAPI image coordinates are panel-relative.  The adapter has
-                # already converted raw X from three-channel units to pixels.
-                x1, y1, x2, y2 = result.raw_bounds
-                panel_width = max(1, int(x2) - int(x1))
-                panel_height = max(1, int(y2) - int(y1))
-                if self._rotate_detection_images_180:
-                    source_x = panel_width - 1 - source_x
-                    source_y = panel_height - 1 - source_y
-                img_x = int(x1) + source_x
-                img_y = int(y1) + source_y
-            else:
-                img_x = source_x
-                img_y = source_y
-                if self._rotate_detection_images_180:
-                    image_width, image_height = result.image_size
-                    img_x = int(image_width) - 1 - img_x
-                    img_y = int(image_height) - 1 - img_y
+            img_x = int(defect.product_x)
+            img_y = int(defect.product_y)
             image_width, image_height = result.image_size
+            if self._rotate_detection_images_180:
+                img_x = int(image_width) - 1 - img_x
+                img_y = int(image_height) - 1 - img_y
             if not (0 <= img_x < int(image_width) and 0 <= img_y < int(image_height)):
                 raise RuntimeError(
                     f"AOI image coordinate out of bounds: ({img_x},{img_y}) "

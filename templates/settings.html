@@ -2053,6 +2053,8 @@
     ];
     const WITHIN_SPEC_PARAM = 'within_spec_judgment_rules';
     const CENTRAL_ACCOUNT_LOCATION_PARAM = 'central_account_location';
+    const MARK_FORCED_CHAR_CONVERSIONS_PARAM = 'mark_forced_char_conversions';
+    const MARK_CONVERSION_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'.split('');
     const CENTRAL_ACCOUNT_DEFAULT_IPS = {
         MOD1: '10.172.25.105',
         MOD2: '10.174.37.81',
@@ -2088,7 +2090,9 @@
         filter: 'all',
         limit: 100,
         loading: false,
+        savingRules: false,
         error: '',
+        forced_char_conversions: [{ paddle: 'U', dotmatrix: 'V' }],
     };
     let markLastResult = null;
     let markPreviewUrl = '';
@@ -2516,7 +2520,14 @@
                 ...data,
                 filter: data.filter || markShadow.filter || 'all',
                 limit: Number(data.limit || markShadow.limit || 100),
+                forced_char_conversions: Array.isArray(data.forced_char_conversions)
+                    ? data.forced_char_conversions.map(rule => ({
+                        paddle: String(rule.paddle || '').toUpperCase(),
+                        dotmatrix: String(rule.dotmatrix || '').toUpperCase(),
+                    }))
+                    : markShadow.forced_char_conversions,
                 loading: false,
+                savingRules: false,
                 error: data.error || '',
             };
         } catch (e) {
@@ -2534,6 +2545,79 @@
     function setMarkShadowLimit(value) {
         markShadow.limit = Number(value) || 100;
         loadMarkShadow();
+    }
+
+    function markConversionOptions(selected) {
+        return MARK_CONVERSION_CHARS.map(char => `
+            <option value="${char}" ${char === selected ? 'selected' : ''}>${char}</option>
+        `).join('');
+    }
+
+    function updateMarkForcedConversion(index, field, value) {
+        const rule = (markShadow.forced_char_conversions || [])[index];
+        if (!rule || !['paddle', 'dotmatrix'].includes(field)) return;
+        rule[field] = String(value || '').trim().toUpperCase();
+        if (field === 'dotmatrix') renderSettings();
+    }
+
+    function addMarkForcedConversion() {
+        markShadow.forced_char_conversions = [
+            ...(markShadow.forced_char_conversions || []),
+            { paddle: 'U', dotmatrix: 'V' },
+        ];
+        renderSettings();
+    }
+
+    function removeMarkForcedConversion(index) {
+        markShadow.forced_char_conversions = (
+            markShadow.forced_char_conversions || []
+        ).filter((_rule, ruleIndex) => ruleIndex !== index);
+        renderSettings();
+    }
+
+    async function saveMarkForcedConversions() {
+        const rules = (markShadow.forced_char_conversions || []).map(rule => ({
+            paddle: String(rule.paddle || '').trim().toUpperCase(),
+            dotmatrix: String(rule.dotmatrix || '').trim().toUpperCase(),
+        }));
+        const invalidIndex = rules.findIndex(rule =>
+            !/^[A-Z0-9]$/.test(rule.paddle)
+            || !/^[A-Z0-9]$/.test(rule.dotmatrix)
+            || rule.paddle === rule.dotmatrix
+        );
+        if (invalidIndex >= 0) {
+            showToast(`❌ 第 ${invalidIndex + 1} 筆規則格式錯誤`, 'error');
+            return;
+        }
+        const pairs = rules.map(rule => `${rule.paddle}:${rule.dotmatrix}`);
+        if (new Set(pairs).size !== pairs.length) {
+            showToast('❌ 強制轉換規則不可重複', 'error');
+            return;
+        }
+
+        markShadow.savingRules = true;
+        renderSettings();
+        try {
+            const res = await fetch('/api/settings/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    param_name: MARK_FORCED_CHAR_CONVERSIONS_PARAM,
+                    new_value: rules,
+                    reason: '更新 MARK 字元衝突強制轉換規則',
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok || data.error) throw new Error(data.error || '儲存失敗');
+            showToast('✅ MARK 強制轉換規則已立即生效', 'success');
+            await loadSettings();
+            await loadMarkShadow();
+            loadHistory();
+        } catch (e) {
+            markShadow.savingRules = false;
+            showToast(`❌ ${e.message}`, 'error');
+            renderSettings();
+        }
     }
 
     function formatMarkShadowConfidence(value) {
@@ -2555,6 +2639,9 @@
     }
 
     function formatMarkAdoptionReason(value) {
+        if (String(value || '').startsWith('forced_char_conversion[')) {
+            return `字元衝突強制轉換：${String(value).replace('forced_char_conversion', '')}`;
+        }
         const labels = {
             stable_match: '穩定值一致',
             temporal_outlier: '離群值，沿用歷史穩定值',
@@ -2580,6 +2667,7 @@
         const stats = markShadow.stats || {};
         const latency = stats.latency_ms || {};
         const rows = markShadow.rows || [];
+        const forcedRules = markShadow.forced_char_conversions || [];
         const statCards = [
             ['總筆數', Number(stats.total || 0), '#7dd3fc'],
             ['Paddle 原始一致', Number(stats.agreed || 0), '#86efac'],
@@ -2660,6 +2748,38 @@
                     <div style="padding:14px 16px;color:#cbd5e1;font-size:.82rem;line-height:1.7;border-bottom:1px solid var(--border);">
                         正式 MARK、QJPG 與 AOI 使用「最終採用結果」；Paddle 原始辨識保留供追查，原辨識只負責 crop 定位及 Paddle 無法讀取時的技術備援。
                         近期 100 筆有效 Paddle 結果會做時間穩定化，單筆 K6／KS 等離群值不會直接改變正式結果；新值連續 3 次才會切換。
+                    </div>
+                    <div style="padding:16px;border-bottom:1px solid var(--border);background:rgba(14,165,233,.035);">
+                        <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+                            <div style="flex:1;min-width:280px;">
+                                <div style="color:#e2e8f0;font-weight:700;">字元衝突強制轉換</div>
+                                <div class="auto-switch-muted" style="margin-top:5px;font-size:.76rem;line-height:1.6;">
+                                    所有機種共用。只有 Paddle 與 DotMatrixCV 在同一位置符合規則時，才強制採用 DotMatrixCV 字元；未符合時維持 PaddleOCR 結果。
+                                </div>
+                            </div>
+                            <button class="account-btn" onclick="addMarkForcedConversion()" ${markShadow.savingRules ? 'disabled' : ''}>＋ 新增規則</button>
+                            <button class="account-btn primary" onclick="saveMarkForcedConversions()" ${markShadow.savingRules ? 'disabled' : ''}>
+                                ${markShadow.savingRules ? '儲存中…' : '儲存並立即套用'}
+                            </button>
+                        </div>
+                        <div style="margin-top:12px;display:grid;gap:8px;">
+                            ${forcedRules.length ? forcedRules.map((rule, index) => `
+                                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--border);border-radius:7px;background:rgba(15,23,42,.55);">
+                                    <span class="auto-switch-muted">Paddle</span>
+                                    <select class="account-input" style="width:76px;" onchange="updateMarkForcedConversion(${index}, 'paddle', this.value)">
+                                        ${markConversionOptions(String(rule.paddle || '').toUpperCase())}
+                                    </select>
+                                    <span style="color:#64748b;">＋ DotMatrixCV</span>
+                                    <select class="account-input" style="width:76px;" onchange="updateMarkForcedConversion(${index}, 'dotmatrix', this.value)">
+                                        ${markConversionOptions(String(rule.dotmatrix || '').toUpperCase())}
+                                    </select>
+                                    <span style="color:#7dd3fc;font-weight:700;">→ 採用 ${escapeHtml(String(rule.dotmatrix || '').toUpperCase())}</span>
+                                    <button class="account-btn danger" style="margin-left:auto;" onclick="removeMarkForcedConversion(${index})" ${markShadow.savingRules ? 'disabled' : ''}>移除</button>
+                                </div>
+                            `).join('') : `
+                                <div class="auto-switch-muted" style="padding:10px 2px;">目前沒有強制轉換規則；所有衝突維持 PaddleOCR 結果。</div>
+                            `}
+                        </div>
                     </div>
                     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;padding:16px;border-bottom:1px solid var(--border);">
                         ${statCards}

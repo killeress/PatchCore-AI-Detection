@@ -57,6 +57,12 @@ from capi_scratch_batch import (
 from capi_version import get_version_info, read_changelog
 from capi_image_naming import canonical_image_prefix, image_prefix_display_labels, source_image_prefix
 from capi_image_orientation import read_detection_image
+from capi_mark_shadow import (
+    MARK_FORCED_CHAR_CONVERSIONS_PARAM,
+    get_forced_char_conversions,
+    normalize_forced_char_conversions,
+    set_forced_char_conversions,
+)
 from capi_station_adapter import resolve_station_profile_from_hostname
 
 logger = logging.getLogger("capi.web")
@@ -11232,6 +11238,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _handle_api_settings_mark_shadow(self, query: dict):
         db_path = self._mark_shadow_db_path()
+        forced_char_conversions = get_forced_char_conversions()
         try:
             limit = max(1, min(500, int((query.get("limit") or ["100"])[0])))
         except (TypeError, ValueError):
@@ -11256,6 +11263,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "filter": filter_name,
                     "limit": limit,
                     "rows": [],
+                    "forced_char_conversions": forced_char_conversions,
                     "stats": {
                         "total": 0,
                         "valid_two_chars": 0,
@@ -11419,6 +11427,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "filter": filter_name,
                     "limit": limit,
                     "rows": public_rows,
+                    "forced_char_conversions": forced_char_conversions,
                     "stats": {
                         "total": total,
                         "valid_two_chars": valid,
@@ -12231,6 +12240,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     self._send_json({"error": str(e)}, status=400)
                     return
 
+            if param_name == MARK_FORCED_CHAR_CONVERSIONS_PARAM:
+                if not user.get("can_manage_accounts"):
+                    self._send_json(
+                        {"error": "只有 admin 可以修改 MARK 強制轉換規則"},
+                        status=403,
+                    )
+                    return
+                try:
+                    new_value = normalize_forced_char_conversions(new_value)
+                except ValueError as e:
+                    self._send_json({"error": str(e)}, status=400)
+                    return
+
             # 新架構：threshold_mapping / model_mapping 屬於 bundle yaml 自包含設定，
             # 不接受 /settings 介面動 DB（避免重啟時被 DB 蓋掉 yaml）。請改 /models
             # 介面或直接編輯 machine_config.yaml。
@@ -12255,6 +12277,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 changed_by=user.get("username", ""),
             )
             if success:
+                if param_name == MARK_FORCED_CHAR_CONVERSIONS_PARAM:
+                    set_forced_char_conversions(new_value)
+                    logger.info(
+                        "[MARK Config Hot-Reload] forced character rules=%s actor=%s",
+                        new_value,
+                        user.get("username", ""),
+                    )
                 # Hot-reload 1：把 DB 同步到所有 inferencer.config 屬性（包含單機與
                 # 多機新架構 inferencers）。apply_db_overrides 純 setattr、不重載
                 # 模型，重複呼叫安全。沒這段時，UI 改完 settings 必須重啟 server

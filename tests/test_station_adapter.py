@@ -185,27 +185,28 @@ def test_aapi_report_uses_last_complete_exact_glass_record(tmp_path):
     )
 
     assert set(parsed) == {"W0F00010", "WINDOWS_BG", "WHITEFRA"}
-    assert parsed["W0F00010"][0].coordinate_space == "image"
+    assert parsed["W0F00010"][0].coordinate_space == "product"
     assert (parsed["W0F00010"][0].x, parsed["W0F00010"][0].y) == (1549, 235)
     assert parsed["WHITEFRA"][0].defect_code == "CLV2"
 
 
-def test_aapi_report_x_is_divided_by_three_and_offset_from_panel_origin(tmp_path):
+def test_aapi_report_coordinate_is_mapped_from_protocol_product_resolution(tmp_path):
     report_root = tmp_path / "LOG"
     report_root.mkdir()
     (report_root / "Report260823.log").write_text(
-        "2026/8/23 07:37:56,YQ5318225E35,NG,W0F00000,CM00(02983,01187)\n",
+        "2026/8/23 09:09:37,YQ62PY211B12,NG,W0F00000,CDK2(03078,00497)\n",
         encoding="utf-8",
     )
     adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
     parsed = adapter.parse_aoi_report(
-        tmp_path / "image" / "20260823" / "YQ5318225E35",
-        glass_id="YQ5318225E35",
+        tmp_path / "image" / "20260823" / "YQ62PY211B12",
+        glass_id="YQ62PY211B12",
         machine_judgment="NG",
     )
     defect = parsed["W0F00000"][0]
 
-    assert (defect.x, defect.y) == (994, 1187)
+    assert defect.coordinate_space == "product"
+    assert (defect.x, defect.y) == (1026, 497)
 
     inferencer = CAPIInferencer.__new__(CAPIInferencer)
     inferencer.station_adapter = adapter
@@ -218,23 +219,23 @@ def test_aapi_report_x_is_divided_by_three_and_offset_from_panel_origin(tmp_path
         coordinate_space=defect.coordinate_space,
     )
     result = ImageResult(
-        image_path=Path("YQ5318225E35W0F00000073756.tif"),
-        image_size=(4000, 3000),
-        otsu_bounds=(100, 200, 3100, 2200),
+        image_path=Path("YQ62PY211B12W0F00000090937.tif"),
+        image_size=(6576, 4384),
+        otsu_bounds=(68, 219, 6320, 4093),
         exclusion_regions=[],
         tiles=[],
         excluded_tile_count=0,
         processed_tile_count=0,
         processing_time=0,
         anomaly_tiles=[],
-        raw_bounds=(100, 200, 3100, 2200),
+        raw_bounds=(68, 219, 6320, 4093),
     )
 
     assert inferencer._resolve_aoi_report_defect(
         report_defect,
         result,
-        (3000, 2000),
-    ) == (1094, 1387, 994, 1187)
+        (1920, 1200),
+    ) == (3408, 1823, 1026, 497)
 
 
 def test_aapi_report_does_not_fall_back_to_stale_row_when_latest_is_partial(tmp_path):
@@ -283,7 +284,7 @@ def test_aapi_ng_rejects_latest_ok_record(tmp_path):
         )
 
 
-def test_aapi_image_coordinate_is_resolved_to_product_coordinate():
+def test_aapi_product_coordinate_is_resolved_to_image_coordinate():
     inferencer = CAPIInferencer.__new__(CAPIInferencer)
     inferencer.station_adapter = AAPIStationAdapter()
     inferencer.config = CAPIConfig(inference_rotate_180_enabled=False)
@@ -292,7 +293,7 @@ def test_aapi_image_coordinate_is_resolved_to_product_coordinate():
         product_x=600,
         product_y=400,
         image_prefix="W0F00000",
-        coordinate_space="image",
+        coordinate_space="product",
     )
     result = ImageResult(
         image_path=Path("YQ607S210B12W0F00000164814.tif"),
@@ -308,24 +309,23 @@ def test_aapi_image_coordinate_is_resolved_to_product_coordinate():
     )
 
     assert inferencer._resolve_aoi_report_defect(defect, result, (2000, 1200)) == (
-        700,
-        500,
-        1200,
-        800,
+        400,
+        300,
+        600,
+        400,
     )
-    assert (defect.resolved_image_x, defect.resolved_image_y) == (700, 500)
-    assert (defect.resolved_product_x, defect.resolved_product_y) == (1200, 800)
+    assert (defect.resolved_image_x, defect.resolved_image_y) == (400, 300)
+    assert (defect.resolved_product_x, defect.resolved_product_y) == (600, 400)
 
     from capi_server import _serialize_aoi_machine_coords
     stored = json.loads(_serialize_aoi_machine_coords({"W0F00000": [defect]}))
-    assert stored["W0F00000"][0]["coordinate_space"] == "image"
-    assert (stored["W0F00000"][0]["image_x"], stored["W0F00000"][0]["image_y"]) == (700, 500)
-    assert (stored["W0F00000"][0]["product_x"], stored["W0F00000"][0]["product_y"]) == (1200, 800)
+    assert stored["W0F00000"][0]["coordinate_space"] == "product"
+    assert (stored["W0F00000"][0]["image_x"], stored["W0F00000"][0]["image_y"]) == (400, 300)
+    assert (stored["W0F00000"][0]["product_x"], stored["W0F00000"][0]["product_y"]) == (600, 400)
 
 
-def test_aapi_image_coordinate_respects_formal_180_degree_input_rotation():
+def test_absolute_image_coordinate_respects_formal_180_degree_input_rotation():
     inferencer = CAPIInferencer.__new__(CAPIInferencer)
-    inferencer.station_adapter = AAPIStationAdapter()
     inferencer.config = CAPIConfig(inference_rotate_180_enabled=True)
     defect = AOIReportDefect(
         defect_code="CDK2",
@@ -336,26 +336,26 @@ def test_aapi_image_coordinate_respects_formal_180_degree_input_rotation():
     )
     result = ImageResult(
         image_path=Path("YQ607S210B12W0F00000164814.tif"),
-        image_size=(1200, 800),
-        otsu_bounds=(100, 200, 1100, 700),
+        image_size=(1000, 500),
+        otsu_bounds=(0, 0, 1000, 500),
         exclusion_regions=[],
         tiles=[],
         excluded_tile_count=0,
         processed_tile_count=0,
         processing_time=0,
         anomaly_tiles=[],
-        raw_bounds=(100, 200, 1100, 700),
+        raw_bounds=(0, 0, 1000, 500),
     )
 
     assert inferencer._resolve_aoi_report_defect(defect, result, (2000, 1000)) == (
-        1000,
-        650,
+        900,
+        450,
         1800,
         900,
     )
 
 
-def test_unresolved_aapi_report_coordinate_is_stored_as_image_space():
+def test_unresolved_aapi_report_coordinate_is_stored_as_product_space():
     from capi_server import _serialize_aoi_machine_coords
 
     defect = AOIReportDefect(
@@ -363,10 +363,10 @@ def test_unresolved_aapi_report_coordinate_is_stored_as_image_space():
         product_x=277,
         product_y=881,
         image_prefix="WHITEFRA",
-        coordinate_space="image",
+        coordinate_space="product",
     )
 
     stored = json.loads(_serialize_aoi_machine_coords({"WHITEFRA": [defect]}))
     row = stored["WHITEFRA"][0]
-    assert (row["product_x"], row["product_y"]) == (-1, -1)
-    assert (row["image_x"], row["image_y"]) == (277, 881)
+    assert (row["product_x"], row["product_y"]) == (277, 881)
+    assert (row["image_x"], row["image_y"]) == (-1, -1)

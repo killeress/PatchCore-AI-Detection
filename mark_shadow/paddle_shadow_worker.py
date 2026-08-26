@@ -23,10 +23,11 @@ import cv2
 import numpy as np
 
 
-VERSION = "3"
+VERSION = "4"
 TECHNIQUE = "PaddleOCR"
 LOGGER = logging.getLogger("mark_shadow.worker")
 VALID_MARK = re.compile(r"[A-Z0-9]{2}")
+DEFAULT_FORCED_CHAR_CONVERSIONS = (("U", "V"),)
 
 
 def installed_package_version(package_name: str) -> str:
@@ -41,30 +42,74 @@ def normalize_mark_text(value: Any) -> str:
     return text if VALID_MARK.fullmatch(text) else ""
 
 
+def normalize_forced_char_conversions(value: Any) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return DEFAULT_FORCED_CHAR_CONVERSIONS
+    if not isinstance(value, (list, tuple)) or len(value) > 100:
+        raise ValueError("invalid forced_char_conversions")
+
+    normalized = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("invalid forced_char_conversions rule")
+        paddle = str(item.get("paddle") or "").strip().upper()
+        dotmatrix = str(item.get("dotmatrix") or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]", paddle):
+            raise ValueError("invalid Paddle character conversion")
+        if not re.fullmatch(r"[A-Z0-9]", dotmatrix):
+            raise ValueError("invalid DotMatrix character conversion")
+        if paddle == dotmatrix or (paddle, dotmatrix) in seen:
+            raise ValueError("duplicate or ineffective character conversion")
+        seen.add((paddle, dotmatrix))
+        normalized.append((paddle, dotmatrix))
+    return tuple(normalized)
+
+
+def apply_forced_char_conversions(
+    paddle_text: Any,
+    dotmatrix_text: Any,
+    rules: Any = None,
+) -> tuple[str, tuple[int, ...], tuple[tuple[str, str], ...]]:
+    """Apply configured same-position Paddle/DotMatrix conflict conversions."""
+    paddle = normalize_mark_text(paddle_text)
+    dotmatrix = normalize_mark_text(dotmatrix_text)
+    if not paddle or not dotmatrix:
+        return paddle, (), ()
+
+    configured = set(normalize_forced_char_conversions(rules))
+    applied = tuple(
+        (index, paddle_char, dotmatrix_char)
+        for index, (paddle_char, dotmatrix_char) in enumerate(
+            zip(paddle, dotmatrix)
+        )
+        if (paddle_char, dotmatrix_char) in configured
+    )
+    rescued_positions = tuple(item[0] for item in applied)
+    if not rescued_positions:
+        return paddle, (), ()
+
+    corrected = list(paddle)
+    for index, _paddle_char, dotmatrix_char in applied:
+        corrected[index] = dotmatrix_char
+    applied_rules = tuple(
+        (paddle_char, dotmatrix_char)
+        for _, paddle_char, dotmatrix_char in applied
+    )
+    return "".join(corrected), rescued_positions, applied_rules
+
+
 def rescue_paddle_u_with_dotmatrix_v(
     paddle_text: Any,
     dotmatrix_text: Any,
 ) -> tuple[str, tuple[int, ...]]:
-    """Use DotMatrixCV only for same-position Paddle U / locator V conflicts."""
-    paddle = normalize_mark_text(paddle_text)
-    dotmatrix = normalize_mark_text(dotmatrix_text)
-    if not paddle or not dotmatrix:
-        return paddle, ()
-
-    rescued_positions = tuple(
-        index
-        for index, (paddle_char, dotmatrix_char) in enumerate(
-            zip(paddle, dotmatrix)
-        )
-        if paddle_char == "U" and dotmatrix_char == "V"
+    """Backward-compatible helper for the original default U/V rescue."""
+    corrected, positions, _rules = apply_forced_char_conversions(
+        paddle_text,
+        dotmatrix_text,
+        [{"paddle": "U", "dotmatrix": "V"}],
     )
-    if not rescued_positions:
-        return paddle, ()
-
-    corrected = list(paddle)
-    for index in rescued_positions:
-        corrected[index] = "V"
-    return "".join(corrected), rescued_positions
+    return corrected, positions
 
 
 def prepare_paddle_image(image: np.ndarray) -> np.ndarray:
@@ -92,9 +137,9 @@ class MarkTemporalStabilizer:
     """Keep a short-lived MARK OCR glitch from changing the formal result.
 
     The history is keyed by the caller-provided stream key.  It is deliberately
-    based on valid PaddleOCR text after the narrow same-position U/V rescue.
-    Other DotMatrix/CV disagreements never enter the vote.  A new value must
-    be seen three times in a row before it replaces the current stable value.
+    based on valid PaddleOCR text after configured same-position conflict
+    conversions. Other DotMatrix/CV disagreements never enter the vote. A new
+    value must be seen three times in a row before it replaces the stable value.
     """
 
     HISTORY_LIMIT = 100
@@ -178,6 +223,12 @@ class MarkTemporalStabilizer:
                 "candidate_count": 0,
             }
 
+    def reset_all(self) -> None:
+        """Reload every stream under the currently configured conversion rules."""
+        with self._lock:
+            self._states.clear()
+            self._fresh_context_prefixes.clear()
+
     def reset_context(self, stream_key: Any) -> None:
         """Reset every ROI/orientation state for one machine/model session."""
         key = self._key(stream_key)
@@ -258,6 +309,8 @@ class ShadowStore:
     def __init__(self, db_path: Path, disagreement_dir: Path):
         self.db_path = db_path
         self.disagreement_dir = disagreement_dir
+        self._forced_char_conversions = DEFAULT_FORCED_CHAR_CONVERSIONS
+        self._forced_char_conversions_lock = threading.Lock()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.disagreement_dir.mkdir(parents=True, exist_ok=True)
         self._initialize()
@@ -350,6 +403,8 @@ class ShadowStore:
 
     def recent_paddle_texts(self, stream_key: str, limit: int = 100) -> list[str]:
         """Return effective Paddle/CV texts, oldest first, for one stream."""
+        with self._forced_char_conversions_lock:
+            rules = tuple(self._forced_char_conversions)
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -361,13 +416,25 @@ class ShadowStore:
                 """,
                 (str(stream_key or ""), max(1, int(limit))),
             ).fetchall()
+        rule_payload = [
+            {"paddle": paddle, "dotmatrix": dotmatrix}
+            for paddle, dotmatrix in rules
+        ]
         return [
-            rescue_paddle_u_with_dotmatrix_v(
+            apply_forced_char_conversions(
                 row["paddle_text"],
                 row["current_text"],
+                rule_payload,
             )[0]
             for row in reversed(rows)
         ]
+
+    def set_forced_char_conversions(self, value: Any) -> bool:
+        normalized = normalize_forced_char_conversions(value)
+        with self._forced_char_conversions_lock:
+            changed = normalized != self._forced_char_conversions
+            self._forced_char_conversions = normalized
+        return changed
 
     def save(
         self,
@@ -605,12 +672,23 @@ class ShadowApplication:
         result.setdefault("worker_version", VERSION)
         raw_text = normalize_mark_text(result.get("paddle_text"))
         result["paddle_text"] = raw_text
-        recognition_text, rescued_positions = rescue_paddle_u_with_dotmatrix_v(
-            raw_text,
-            request_data.get("current_text"),
+        requested_rules = (
+            request_data.get("forced_char_conversions")
+            if "forced_char_conversions" in request_data
+            else None
         )
         stream_key = str(request_data.get("stream_key") or "default").strip() or "default"
         request_data["stream_key"] = stream_key
+        rules_changed = self.store.set_forced_char_conversions(requested_rules)
+        if rules_changed:
+            self.temporal.reset_all()
+        recognition_text, rescued_positions, applied_rules = (
+            apply_forced_char_conversions(
+                raw_text,
+                request_data.get("current_text"),
+                requested_rules,
+            )
+        )
         context_reason = self._reset_for_model_context(request_data, stream_key)
         if raw_text:
             result.update(self.temporal.observe(stream_key, recognition_text))
@@ -618,8 +696,12 @@ class ShadowApplication:
                 result["adoption_reason"] = context_reason
             if rescued_positions:
                 positions = ",".join(str(index + 1) for index in rescued_positions)
+                rule_names = ",".join(
+                    f"{paddle}>{dotmatrix}"
+                    for paddle, dotmatrix in dict.fromkeys(applied_rules)
+                )
                 result["adoption_reason"] = (
-                    f"dotmatrix_uv_rescue[pos={positions}];"
+                    f"forced_char_conversion[pos={positions};rules={rule_names}];"
                     f"{result.get('adoption_reason') or 'direct'}"
                 )
         else:
