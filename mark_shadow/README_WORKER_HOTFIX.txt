@@ -1,12 +1,12 @@
-CAPI MARK PaddleOCR Worker Update 2026.08.25.2
-================================================
+CAPI MARK PaddleOCR Worker Update (Unreleased)
+==============================================
 
 Changes:
-  When PaddleOCR reads U and DotMatrixCV reads V at the same character
-  position, use V as the effective result before temporal stabilization.
-  Preserve the raw PaddleOCR result and record dotmatrix_uv_rescue positions.
-  Other character conflicts and the reverse V-to-U direction are unchanged.
-  Worker API version is now v3.
+  Apply the administrator-managed character conflict rules received from CAPI
+  before temporal stabilization. The default U/V rule remains enabled until an
+  administrator edits or removes it in Mark PPOCR inspection settings.
+  Preserve raw PaddleOCR results and record the applied rule and positions.
+  Worker API version is now v4.
 
 Install on the production host:
   cd <extracted hotfix directory>
@@ -16,5 +16,5 @@ Verify:
   curl http://127.0.0.1:8765/health
 
 Existing error rows are preserved. After a new panel is collected, verify that
-the newest row has worker_version 3 and dotmatrix_uv_rescue in adoption_reason
-when a Paddle U / DotMatrixCV V conflict occurs.
+the newest row has worker_version 4 and forced_char_conversion in
+adoption_reason when a configured conflict occurs.

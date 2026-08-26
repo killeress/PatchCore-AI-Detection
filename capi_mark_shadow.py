@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import queue
+import re
 import sqlite3
 import threading
 import time
@@ -24,10 +25,14 @@ import cv2
 logger = logging.getLogger("capi.mark_shadow")
 
 _MARK_CROP_ASPECT_RATIO = 2.0
+MARK_FORCED_CHAR_CONVERSIONS_PARAM = "mark_forced_char_conversions"
+DEFAULT_FORCED_CHAR_CONVERSIONS = (("U", "V"),)
 
 _CLIENT_LOCK = threading.Lock()
+_RULES_LOCK = threading.Lock()
 _CLIENT: Optional["MarkShadowClient"] = None
 _DATABASE_PATH: Optional[Path] = None
+_FORCED_CHAR_CONVERSIONS = DEFAULT_FORCED_CHAR_CONVERSIONS
 _REQUEST_RESULT_IDS: contextvars.ContextVar[tuple[int, ...]] = (
     contextvars.ContextVar("mark_shadow_request_result_ids", default=())
 )
@@ -38,6 +43,59 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return bool(default)
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_forced_char_conversions(value: Any) -> list[Dict[str, str]]:
+    """Validate user-managed Paddle/DotMatrix character conflict rules."""
+    if value is None:
+        value = [
+            {"paddle": paddle, "dotmatrix": dotmatrix}
+            for paddle, dotmatrix in DEFAULT_FORCED_CHAR_CONVERSIONS
+        ]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("MARK 強制轉換規則格式錯誤")
+    if len(value) > 100:
+        raise ValueError("MARK 強制轉換規則最多 100 筆")
+
+    normalized = []
+    seen = set()
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"第 {index} 筆 MARK 強制轉換規則格式錯誤")
+        paddle = str(item.get("paddle") or "").strip().upper()
+        dotmatrix = str(item.get("dotmatrix") or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]", paddle):
+            raise ValueError(f"第 {index} 筆 Paddle 字元必須是單一英文或數字")
+        if not re.fullmatch(r"[A-Z0-9]", dotmatrix):
+            raise ValueError(f"第 {index} 筆 DotMatrixCV 字元必須是單一英文或數字")
+        if paddle == dotmatrix:
+            raise ValueError(f"第 {index} 筆規則的兩個字元不可相同")
+        pair = (paddle, dotmatrix)
+        if pair in seen:
+            raise ValueError(f"第 {index} 筆規則與前面重複")
+        seen.add(pair)
+        normalized.append({"paddle": paddle, "dotmatrix": dotmatrix})
+    return normalized
+
+
+def set_forced_char_conversions(value: Any) -> list[Dict[str, str]]:
+    global _FORCED_CHAR_CONVERSIONS
+    normalized = normalize_forced_char_conversions(value)
+    with _RULES_LOCK:
+        _FORCED_CHAR_CONVERSIONS = tuple(
+            (item["paddle"], item["dotmatrix"])
+            for item in normalized
+        )
+    return normalized
+
+
+def get_forced_char_conversions() -> list[Dict[str, str]]:
+    with _RULES_LOCK:
+        rules = tuple(_FORCED_CHAR_CONVERSIONS)
+    return [
+        {"paddle": paddle, "dotmatrix": dotmatrix}
+        for paddle, dotmatrix in rules
+    ]
 
 
 def build_mark_shadow_payload(
@@ -119,6 +177,7 @@ def build_mark_shadow_payload(
         "machine_no": str(detection.get("mark_machine_no") or ""),
         "model_id": str(detection.get("mark_model_id") or ""),
         "stream_key": str(detection.get("mark_stream_key") or ""),
+        "forced_char_conversions": get_forced_char_conversions(),
         "bbox": {
             "x": x,
             "y": y,
@@ -263,6 +322,14 @@ def configure_mark_shadow(config: Optional[Dict[str, Any]]) -> bool:
     timeout_ms = int(cfg.get("timeout_ms", 5000) or 5000)
     max_queue = int(cfg.get("max_queue", 64) or 64)
     padding_ratio = float(cfg.get("crop_padding_ratio", 0.15) or 0.15)
+    try:
+        set_forced_char_conversions(cfg.get("forced_char_conversions"))
+    except ValueError as exc:
+        logger.warning(
+            "Invalid MARK forced character conversions; using default: %s",
+            exc,
+        )
+        set_forced_char_conversions(None)
     _DATABASE_PATH = Path(
         os.environ.get("CAPI_MARK_SHADOW_DB_PATH")
         or str(cfg.get("database_path") or "")

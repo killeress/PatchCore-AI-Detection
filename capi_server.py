@@ -1616,6 +1616,7 @@ class CAPIServer:
         db_path = db_cfg.get("path", "/data/capi_ai/capi_results.db")
         self.db = CAPIDatabase(db_path)
         logger.info(f"Database: {db_path}")
+        self._load_mark_forced_char_conversions()
         try:
             from capi_mark_detector import (
                 set_active_mark_profile,
@@ -1696,6 +1697,24 @@ class CAPIServer:
 
         # 啟動時驗證新架構模型檔案是否存在
         self._health_check_models()
+
+    def _load_mark_forced_char_conversions(self) -> List[Dict[str, str]]:
+        """Restore persisted MARK character-conflict rules at server startup."""
+        from capi_mark_shadow import (
+            MARK_FORCED_CHAR_CONVERSIONS_PARAM,
+            get_forced_char_conversions,
+            set_forced_char_conversions,
+        )
+
+        try:
+            stored = self.db.get_config_param(MARK_FORCED_CHAR_CONVERSIONS_PARAM)
+            if stored is not None:
+                set_forced_char_conversions(stored.get("decoded_value"))
+        except Exception as exc:
+            logger.warning("MARK forced character rules load failed: %s", exc)
+        rules = get_forced_char_conversions()
+        logger.info("MARK forced character rules active: %s", rules)
+        return rules
 
     def _load_model_configs(self, server_config_path: str) -> None:
         """載入 server_config 中 model_configs 清單，建立 configs_by_machine dispatcher。

@@ -270,12 +270,12 @@ class AAPIStationAdapter(StationAdapter):
             internal_prefix = self._internal_report_prefix(source_prefix)
             parsed.setdefault(internal_prefix, []).append(StationAOIDefect(
                 defect_code=defect_code,
-                # AAPI records X in three-channel units.  The resulting X/Y
-                # are image-pixel offsets from the panel's top-left corner.
+                # AAPI records product X in three-channel units.  Convert it
+                # before mapping the product coordinate with protocol resolution.
                 x=int(raw_x) // 3,
                 y=int(raw_y),
                 image_prefix=internal_prefix,
-                coordinate_space="image",
+                coordinate_space="product",
             ))
         return parsed, ""
 
