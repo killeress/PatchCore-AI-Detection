@@ -98,6 +98,46 @@ def get_forced_char_conversions() -> list[Dict[str, str]]:
     ]
 
 
+def _legacy_worker_needs_rule_compat(worker_version: Any) -> bool:
+    match = re.match(r"(\d+)", str(worker_version or "").strip())
+    return match is None or int(match.group(1)) < 4
+
+
+def _apply_main_forced_char_conversions(
+    paddle_text: Any,
+    dotmatrix_text: Any,
+) -> tuple[str, tuple[int, ...], tuple[tuple[str, str], ...]]:
+    paddle = "".join(str(paddle_text or "").upper().split())
+    dotmatrix = "".join(str(dotmatrix_text or "").upper().split())
+    if not re.fullmatch(r"[A-Z0-9]{2}", paddle):
+        return paddle, (), ()
+    if not re.fullmatch(r"[A-Z0-9]{2}", dotmatrix):
+        return paddle, (), ()
+
+    configured = {
+        (rule["paddle"], rule["dotmatrix"])
+        for rule in get_forced_char_conversions()
+    }
+    applied = tuple(
+        (index, paddle_char, dotmatrix_char)
+        for index, (paddle_char, dotmatrix_char) in enumerate(
+            zip(paddle, dotmatrix)
+        )
+        if (paddle_char, dotmatrix_char) in configured
+    )
+    if not applied:
+        return paddle, (), ()
+
+    corrected = list(paddle)
+    for index, _paddle_char, dotmatrix_char in applied:
+        corrected[index] = dotmatrix_char
+    return (
+        "".join(corrected),
+        tuple(item[0] for item in applied),
+        tuple((item[1], item[2]) for item in applied),
+    )
+
+
 def build_mark_shadow_payload(
     image,
     detection: Dict[str, Any],
@@ -431,6 +471,56 @@ def _remember_mark_shadow_result(result: Dict[str, Any]) -> None:
         _REQUEST_RESULT_IDS.set((*current, result_id))
 
 
+def _persist_main_rule_compat_result(result: Dict[str, Any]) -> None:
+    try:
+        result_id = int(result.get("id") or 0)
+    except (TypeError, ValueError):
+        return
+    if (
+        result_id <= 0
+        or _DATABASE_PATH is None
+        or not _DATABASE_PATH.is_file()
+    ):
+        return
+
+    try:
+        with sqlite3.connect(str(_DATABASE_PATH), timeout=10) as connection:
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(mark_shadow_results)"
+                ).fetchall()
+            }
+            migrations = {
+                "final_text": "TEXT DEFAULT ''",
+                "adoption_reason": "TEXT DEFAULT ''",
+            }
+            for column, definition in migrations.items():
+                if column not in columns:
+                    connection.execute(
+                        "ALTER TABLE mark_shadow_results "
+                        f"ADD COLUMN {column} {definition}"
+                    )
+            connection.execute(
+                """
+                UPDATE mark_shadow_results
+                SET final_text = ?, adoption_reason = ?
+                WHERE id = ?
+                """,
+                (
+                    str(result.get("final_text") or ""),
+                    str(result.get("adoption_reason") or ""),
+                    result_id,
+                ),
+            )
+    except sqlite3.Error as exc:
+        logger.warning(
+            "MARK main compatibility result persistence failed: id=%s error=%s",
+            result_id,
+            exc,
+        )
+
+
 def submit_mark_shadow(
     image,
     detection: Dict[str, Any],
@@ -463,6 +553,33 @@ def recognize_mark_online(
         result.setdefault("technique", "PaddleOCR")
         result.setdefault("engine_version", "3.7.0")
         result.setdefault("worker_version", "1")
+        if (
+            result.get("success")
+            and _legacy_worker_needs_rule_compat(result.get("worker_version"))
+        ):
+            corrected, positions, applied_rules = (
+                _apply_main_forced_char_conversions(
+                    result.get("paddle_text"),
+                    detection.get("text"),
+                )
+            )
+            if positions:
+                position_names = ",".join(str(index + 1) for index in positions)
+                rule_names = ",".join(
+                    f"{paddle}>{dotmatrix}"
+                    for paddle, dotmatrix in dict.fromkeys(applied_rules)
+                )
+                prior_reason = str(
+                    result.get("adoption_reason") or "legacy_worker"
+                )
+                result["final_text"] = corrected
+                result["adoption_reason"] = (
+                    "forced_char_conversion["
+                    f"pos={position_names};rules={rule_names};"
+                    "source=main_compat;"
+                    f"worker=v{result['worker_version']}];{prior_reason}"
+                )
+                _persist_main_rule_compat_result(result)
         result["round_trip_ms"] = (time.perf_counter() - started) * 1000.0
         _remember_mark_shadow_result(result)
         return result

@@ -282,6 +282,7 @@ class TileInfo:
     # Scratch classifier post-filter (over-review reduction)
     scratch_score: float = 0.0              # 0 = 未跑 classifier
     scratch_filtered: bool = False          # True = 被翻回 OK
+    anomaly_peak_source: str = ""           # heatmap_argmax | aoi_real_region | aoi_report_fallback
 
     @property
     def center(self) -> Tuple[int, int]:
@@ -7920,6 +7921,7 @@ class CAPIInferencer:
         print(f"🧹 Phase 3 完成: 灰塵檢測後處理耗時 {postprocess_time:.2f}s")
         
         results = preprocessed_results
+        self._apply_aoi_peak_postprocess(results)
                 
         # === 炸彈系統比對 ===
         # 決定炸彈來源：優先使用 Client 端傳入的 runtime 資料
@@ -7955,8 +7957,19 @@ class CAPIInferencer:
                     for tile, score, anomaly_map in result.anomaly_tiles:
                         if getattr(tile, "is_aoi_coord_below_threshold", False):
                             continue
-                        # 計算熱力圖峰值位置 (更精確的缺陷位置)
-                        if anomaly_map is not None and anomaly_map.size > 0:
+                        preserve_aoi_peak = (
+                            tile.is_aoi_coord_tile
+                            and tile.anomaly_peak_source in {
+                                "aoi_real_region",
+                                "aoi_report_fallback",
+                            }
+                            and tile.anomaly_peak_x >= 0
+                            and tile.anomaly_peak_y >= 0
+                        )
+                        # AOI peak 已由中央 REAL_NG 熱區選定時不可被全圖 argmax 覆蓋。
+                        if preserve_aoi_peak:
+                            pass
+                        elif anomaly_map is not None and anomaly_map.size > 0:
                             try:
                                 amap_h, amap_w = anomaly_map.shape[:2]
                                 # 二值化偵測 (B0F00000 等): 使用亮點重心而非 argmax
@@ -8439,6 +8452,137 @@ class CAPIInferencer:
                 except Exception as e:
                     logger.warning("灰塵檢測失敗 (%s): %s", futures[future].image_path.name, e)
 
+    def _apply_aoi_peak_postprocess(self, results: List[ImageResult]) -> None:
+        """Prefer a valid hot region near the AOI seed for downstream coordinates.
+
+        AOI-centered tiles may contain a stronger crop-border artifact than the
+        machine-specified defect in the middle.  Keep the closest non-dust hot
+        region within the central quarter of the tile; otherwise retain the
+        original AOI report coordinate.  Grid tiles are intentionally untouched.
+        """
+        for result in results:
+            for tile, _score, anomaly_map in result.anomaly_tiles or []:
+                if (
+                    not tile.is_aoi_coord_tile
+                    or getattr(tile, "is_aoi_coord_below_threshold", False)
+                    or tile.is_bright_spot_detection
+                ):
+                    continue
+
+                aoi_x = int(getattr(tile, "aoi_image_x", -1))
+                aoi_y = int(getattr(tile, "aoi_image_y", -1))
+                if aoi_x < 0 or aoi_y < 0:
+                    continue
+
+                previous_peak = (tile.anomaly_peak_x, tile.anomaly_peak_y)
+                selected_peak = None
+                selected_distance = None
+
+                if anomaly_map is not None and anomaly_map.size > 0:
+                    amap = np.asarray(anomaly_map, dtype=np.float32)
+                    seed_yx, seed_radius, seed_min_score = \
+                        self._aoi_center_seed_for_tile(tile, amap)
+                    if seed_yx is None:
+                        continue
+
+                    region_details = [
+                        detail
+                        for detail in (tile.dust_region_details or [])
+                        if detail.get("peak_yx") is not None
+                    ]
+                    if not region_details:
+                        zero_dust = np.zeros(amap.shape[:2], dtype=np.uint8)
+                        (
+                            _has_real,
+                            _real_peak,
+                            _overall_iou,
+                            region_details,
+                            _heatmap_binary,
+                            _labels,
+                        ) = self.check_dust_per_region(
+                            zero_dust,
+                            amap,
+                            top_percent=float(getattr(
+                                self.config, "dust_heatmap_top_percent", 5.0,
+                            )),
+                            metric=str(getattr(
+                                self.config, "dust_heatmap_metric", "coverage",
+                            )),
+                            iou_threshold=float(getattr(
+                                self.config, "dust_heatmap_iou_threshold", 0.02,
+                            )),
+                            force_include_yx=seed_yx,
+                            force_include_radius=seed_radius,
+                            force_include_min_score=seed_min_score,
+                        )
+
+                    amap_h, amap_w = amap.shape[:2]
+                    scale_x = tile.width / max(1, amap_w)
+                    scale_y = tile.height / max(1, amap_h)
+                    candidates = []
+                    for detail in region_details:
+                        if detail.get("is_dust"):
+                            continue
+                        peak_yx = detail.get("peak_yx")
+                        if peak_yx is None:
+                            continue
+                        peak_y, peak_x = int(peak_yx[0]), int(peak_yx[1])
+                        distance = float(np.hypot(
+                            (peak_x - seed_yx[1]) * scale_x,
+                            (peak_y - seed_yx[0]) * scale_y,
+                        ))
+                        candidates.append((
+                            distance,
+                            -float(detail.get("max_score", 0.0)),
+                            peak_x,
+                            peak_y,
+                        ))
+
+                    max_center_distance = max(
+                        32.0,
+                        min(tile.width, tile.height) * 0.25,
+                    )
+                    if candidates:
+                        distance, _neg_score, peak_x, peak_y = min(candidates)
+                        if distance <= max_center_distance:
+                            selected_peak = (
+                                tile.x + int(peak_x * tile.width / max(1, amap_w)),
+                                tile.y + int(peak_y * tile.height / max(1, amap_h)),
+                            )
+                            selected_distance = distance
+
+                if selected_peak is not None:
+                    tile.anomaly_peak_x, tile.anomaly_peak_y = selected_peak
+                    tile.anomaly_peak_source = "aoi_real_region"
+                else:
+                    tile.anomaly_peak_x = aoi_x
+                    tile.anomaly_peak_y = aoi_y
+                    tile.anomaly_peak_source = "aoi_report_fallback"
+
+                distance_text = (
+                    f"{selected_distance:.1f}px"
+                    if selected_distance is not None
+                    else "fallback"
+                )
+                logger.info(
+                    "[AOI_PEAK] image=%s tile=(%s,%s) source=%s "
+                    "aoi_product=(%s,%s) aoi_image=(%s,%s) "
+                    "previous=(%s,%s) selected=(%s,%s) distance=%s",
+                    result.image_path.name,
+                    tile.x,
+                    tile.y,
+                    tile.anomaly_peak_source,
+                    tile.aoi_product_x,
+                    tile.aoi_product_y,
+                    aoi_x,
+                    aoi_y,
+                    previous_peak[0],
+                    previous_peak[1],
+                    tile.anomaly_peak_x,
+                    tile.anomaly_peak_y,
+                    distance_text,
+                )
+
     def _apply_bomb_postprocess(
         self,
         results: List[ImageResult],
@@ -8504,7 +8648,18 @@ class CAPIInferencer:
                 for tile, _score, anomaly_map in result.anomaly_tiles:
                     if getattr(tile, "is_aoi_coord_below_threshold", False):
                         continue
-                    if anomaly_map is not None and anomaly_map.size > 0:
+                    preserve_aoi_peak = (
+                        tile.is_aoi_coord_tile
+                        and tile.anomaly_peak_source in {
+                            "aoi_real_region",
+                            "aoi_report_fallback",
+                        }
+                        and tile.anomaly_peak_x >= 0
+                        and tile.anomaly_peak_y >= 0
+                    )
+                    if preserve_aoi_peak:
+                        pass
+                    elif anomaly_map is not None and anomaly_map.size > 0:
                         try:
                             amap_h, amap_w = anomaly_map.shape[:2]
                             peak_local = np.unravel_index(np.argmax(anomaly_map), anomaly_map.shape)
@@ -9330,6 +9485,7 @@ class CAPIInferencer:
             model_id=model_id,
             product_resolution=product_resolution,
         )
+        self._apply_aoi_peak_postprocess(results)
         self._apply_bomb_postprocess(results, bomb_info, product_resolution)
         self._apply_exclude_zone_postprocess(results, model_id)
         self._apply_scratch_postprocess(results)

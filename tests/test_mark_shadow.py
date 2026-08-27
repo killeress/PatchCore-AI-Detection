@@ -1000,6 +1000,91 @@ def test_online_client_adds_versions_for_legacy_worker_response(monkeypatch):
     assert capi_mark_shadow.consume_mark_shadow_request_results() == [654]
 
 
+def test_online_client_applies_admin_rule_for_v1_worker_and_persists(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "mark_shadow.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE mark_shadow_results (
+                id INTEGER PRIMARY KEY,
+                current_text TEXT DEFAULT '',
+                paddle_text TEXT DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO mark_shadow_results (id, current_text, paddle_text)
+            VALUES (701, 'VV', 'UU')
+            """
+        )
+
+    class FakeClient:
+        def recognize(self, image, detection, source_path):
+            return {
+                "success": True,
+                "id": 701,
+                "paddle_text": "UU",
+                "final_text": "UU",
+                "paddle_confidence": 0.997,
+                "latency_ms": 26.8,
+                "model_name": "PP-OCRv6_medium_rec",
+                "worker_version": "1",
+            }
+
+    monkeypatch.setattr(capi_mark_shadow, "_CLIENT", FakeClient())
+    monkeypatch.setattr(capi_mark_shadow, "_DATABASE_PATH", db_path)
+    capi_mark_shadow.reset_mark_shadow_request_results()
+
+    result = recognize_mark_online(
+        np.zeros((20, 30), dtype=np.uint8),
+        {"found": True, "text": "VV"},
+        Path("W0F00000_073416.tif"),
+    )
+
+    assert result["final_text"] == "VV"
+    assert result["adoption_reason"] == (
+        "forced_char_conversion[pos=1,2;rules=U>V;"
+        "source=main_compat;worker=v1];legacy_worker"
+    )
+    with sqlite3.connect(db_path) as connection:
+        saved = connection.execute(
+            "SELECT final_text, adoption_reason "
+            "FROM mark_shadow_results WHERE id = 701"
+        ).fetchone()
+    assert saved == ("VV", result["adoption_reason"])
+    assert capi_mark_shadow.consume_mark_shadow_request_results() == [701]
+
+
+def test_online_client_trusts_v4_worker_temporal_result(monkeypatch):
+    class FakeClient:
+        def recognize(self, image, detection, source_path):
+            return {
+                "success": True,
+                "id": 702,
+                "paddle_text": "UU",
+                "final_text": "K5",
+                "adoption_reason": "temporal_outlier",
+                "worker_version": "4",
+            }
+
+    monkeypatch.setattr(capi_mark_shadow, "_CLIENT", FakeClient())
+    capi_mark_shadow.reset_mark_shadow_request_results()
+
+    result = recognize_mark_online(
+        np.zeros((20, 30), dtype=np.uint8),
+        {"found": True, "text": "VV"},
+        Path("W0F00000_073416.tif"),
+    )
+
+    assert result["final_text"] == "K5"
+    assert result["adoption_reason"] == "temporal_outlier"
+    assert capi_mark_shadow.consume_mark_shadow_request_results() == [702]
+
+
 def test_async_save_links_captured_mark_when_inference_results_are_empty(
     monkeypatch,
 ):

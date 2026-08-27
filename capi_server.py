@@ -914,6 +914,20 @@ def _format_qjpg_defect_record(
         raw_bounds,
         product_resolution,
     )
+    return _format_qjpg_product_defect_record(
+        defect_code,
+        product_x,
+        product_y,
+        image_prefix,
+    )
+
+
+def _format_qjpg_product_defect_record(
+    defect_code: str,
+    product_x: int,
+    product_y: int,
+    image_prefix: str,
+) -> str:
     return (
         f"{defect_code}"
         f"{_format_report_coord(product_x)}"
@@ -954,21 +968,36 @@ def _iter_qjpg_defect_records(
                 continue
             if bomb_only and not getattr(tile, "is_bomb", False):
                 continue
-            if getattr(tile, "anomaly_peak_x", -1) >= 0 and getattr(tile, "anomaly_peak_y", -1) >= 0:
-                image_x, image_y = int(tile.anomaly_peak_x), int(tile.anomaly_peak_y)
-            else:
-                image_x, image_y = tile.center
             defect_kind = _tile_report_defect_kind(tile, image_prefix)
-            records.append(
-                _format_qjpg_defect_record(
-                    _report_defect_code(config, defect_kind),
-                    image_x,
-                    image_y,
-                    image_prefix,
-                    raw_bounds,
-                    product_resolution,
+            defect_code = _report_defect_code(config, defect_kind)
+            if (
+                getattr(tile, "anomaly_peak_source", "") == "aoi_report_fallback"
+                and getattr(tile, "aoi_product_x", -1) >= 0
+                and getattr(tile, "aoi_product_y", -1) >= 0
+            ):
+                records.append(
+                    _format_qjpg_product_defect_record(
+                        defect_code,
+                        int(tile.aoi_product_x),
+                        int(tile.aoi_product_y),
+                        image_prefix,
+                    )
                 )
-            )
+            else:
+                if getattr(tile, "anomaly_peak_x", -1) >= 0 and getattr(tile, "anomaly_peak_y", -1) >= 0:
+                    image_x, image_y = int(tile.anomaly_peak_x), int(tile.anomaly_peak_y)
+                else:
+                    image_x, image_y = tile.center
+                records.append(
+                    _format_qjpg_defect_record(
+                        defect_code,
+                        image_x,
+                        image_y,
+                        image_prefix,
+                        raw_bounds,
+                        product_resolution,
+                    )
+                )
 
         for edge in getattr(result, "edge_defects", []) or []:
             if not _is_reportable_edge_defect(edge):
