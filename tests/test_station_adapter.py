@@ -84,6 +84,33 @@ def test_aapi_report_follows_panel_source_host(host):
     )
 
 
+def test_aapi_mod1_report_uses_tianmu_daily_log_layout():
+    adapter = AAPIStationAdapter()
+
+    report_file = adapter._report_file_for_panel(
+        Path("/192.168.1.11/d/tianmu/yuantu/20260825/T362H8E0NN04")
+    )
+
+    assert str(report_file).replace("\\", "/").endswith(
+        "/192.168.1.11/d/tianmu/report/Report260825.log"
+    )
+
+
+@pytest.mark.parametrize(
+    "panel_dir",
+    [
+        Path("/192.168.1.11/d/image/20260825/T362H8E0NN04"),
+        Path("/192.168.2.190/d/tianmu/yuantu/20260825/T362H8E0NN04"),
+        Path("/192.168.9.9/d/image/20260825/T362H8E0NN04"),
+    ],
+)
+def test_aapi_report_rejects_unknown_source_or_layout(panel_dir):
+    adapter = AAPIStationAdapter()
+
+    with pytest.raises(RuntimeError, match="Unsupported AAPI image/report layout"):
+        adapter._report_file_for_panel(panel_dir)
+
+
 def test_aapi_explicit_report_root_override_wins_over_panel_source():
     adapter = AAPIStationAdapter(report_root=Path("/test/LOG"))
 
@@ -124,6 +151,30 @@ def test_aapi_filename_mapping_keeps_source_images_distinct():
     assert adapter.training_prefixes == (
         "R0F00000", "W0F00000", "WGF50500", "STANDARD",
     )
+
+
+def test_aapi_mod1_filename_aliases_use_existing_models_and_white_frame_route(tmp_path):
+    adapter = AAPIStationAdapter()
+    standard_name = "T362H8E0NN04STANDARD143141.tif"
+    white_frame_name = "T362H8E0NN04BWFRAME0143143.tif"
+
+    assert adapter.image_prefix(standard_name) == "WINDOWS_BG"
+    assert adapter.model_prefix(adapter.image_prefix(standard_name)) == "STANDARD"
+    assert adapter.report_prefix(standard_name) == "STANDARD"
+    assert adapter.training_image_prefix(standard_name) == "STANDARD"
+    assert adapter.image_prefix(white_frame_name) == "WHITEFRA"
+    assert adapter.is_white_frame_image(white_frame_name)
+
+    (tmp_path / standard_name).write_bytes(b"")
+    (tmp_path / white_frame_name).write_bytes(b"")
+    files = filter_panel_lighting_files(
+        tmp_path,
+        prefix_resolver=adapter.image_prefix,
+        allowed_prefixes=adapter.inference_prefixes,
+    )
+
+    assert set(files) == {"WINDOWS_BG"}
+    assert files["WINDOWS_BG"].name == standard_name
 
 
 def test_aapi_preprocess_keeps_w0f00010_and_wgf50500_as_two_images(tmp_path):
@@ -188,6 +239,32 @@ def test_aapi_report_uses_last_complete_exact_glass_record(tmp_path):
     assert parsed["W0F00010"][0].coordinate_space == "product"
     assert (parsed["W0F00010"][0].x, parsed["W0F00010"][0].y) == (1549, 235)
     assert parsed["WHITEFRA"][0].defect_code == "CLV2"
+
+
+def test_aapi_mod1_cp950_report_maps_standard_and_bwframe0(tmp_path):
+    report_root = tmp_path / "report"
+    report_root.mkdir()
+    report = report_root / "Report260825.log"
+    report.write_bytes(
+        (
+            "2026/8/25 下午 01:33:40,T362L7J7NQ03,NG,"
+            "W0F00000,CO05(00201,00661)"
+            "STANDARD,CLH2(00111,00250)"
+            "BWFRAME0,CLV2(00220,00395)\n"
+        ).encode("cp950")
+    )
+    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
+
+    parsed = adapter.parse_aoi_report(
+        tmp_path / "yuantu" / "20260825" / "T362L7J7NQ03",
+        glass_id="T362L7J7NQ03",
+        machine_judgment="NG",
+    )
+
+    assert set(parsed) == {"W0F00000", "WINDOWS_BG", "WHITEFRA"}
+    assert (parsed["W0F00000"][0].x, parsed["W0F00000"][0].y) == (67, 661)
+    assert (parsed["WINDOWS_BG"][0].x, parsed["WINDOWS_BG"][0].y) == (37, 250)
+    assert (parsed["WHITEFRA"][0].x, parsed["WHITEFRA"][0].y) == (73, 395)
 
 
 def test_aapi_report_coordinate_is_mapped_from_protocol_product_resolution(tmp_path):

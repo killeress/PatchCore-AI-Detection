@@ -102,6 +102,7 @@ class StationAdapter:
 class AAPIStationAdapter(StationAdapter):
     profile = "aapi"
     REPORT_ROOT_BY_SOURCE_HOST = {
+        "192.168.1.11": Path("/192.168.1.11/d/tianmu/report"),
         "192.168.2.190": Path("/192.168.2.190/d/LOG"),
         "192.168.2.191": Path("/192.168.2.191/d/LOG"),
     }
@@ -123,7 +124,9 @@ class AAPIStationAdapter(StationAdapter):
 
     _SOURCE_PREFIXES: Tuple[Tuple[str, str], ...] = (
         ("WHITE_FRAME", "WHITEFRA"),
+        ("BWFRAME0", "WHITEFRA"),
         ("WINDOWS_BG", "WINDOWS_BG"),
+        ("STANDARD", "WINDOWS_BG"),
         ("W0F00010", "W0F00010"),
         ("WGF50500", "WGF50500"),
         ("R0F00000", "R0F00000"),
@@ -136,7 +139,8 @@ class AAPIStationAdapter(StationAdapter):
         "W0F00010": "WGF50500",
     }
     _REPORT_RECORD = re.compile(
-        r"(White_Frame|Windows_BG|W0F00010|WGF50500|R0F00000|W0F00000|B0F00000),"
+        r"(White_Frame|BWFRAME0|Windows_BG|STANDARD|W0F00010|WGF50500|"
+        r"R0F00000|W0F00000|B0F00000),"
         r"([A-Za-z0-9]+)\((\d+),(\d+)\)",
         re.IGNORECASE,
     )
@@ -229,12 +233,28 @@ class AAPIStationAdapter(StationAdapter):
         report_root = self.report_root
         if not self._report_root_overridden:
             image_root = panel_dir.parent.parent
-            share_root = image_root.parent
-            if image_root.name.casefold() == "image" and share_root.name.casefold() == "d":
-                report_root = self.REPORT_ROOT_BY_SOURCE_HOST.get(
-                    share_root.parent.name,
-                    report_root,
+            if (
+                image_root.name.casefold() == "image"
+                and image_root.parent.name.casefold() == "d"
+            ):
+                source_host = image_root.parent.parent.name
+                allowed_hosts = {"192.168.2.190", "192.168.2.191"}
+            elif (
+                image_root.name.casefold() == "yuantu"
+                and image_root.parent.name.casefold() == "tianmu"
+                and image_root.parent.parent.name.casefold() == "d"
+            ):
+                source_host = image_root.parent.parent.parent.name
+                allowed_hosts = {"192.168.1.11"}
+            else:
+                source_host = ""
+                allowed_hosts = set()
+
+            if source_host not in allowed_hosts:
+                raise RuntimeError(
+                    f"Unsupported AAPI image/report layout: {panel_dir}"
                 )
+            report_root = self.REPORT_ROOT_BY_SOURCE_HOST[source_host]
         return report_root / f"Report{report_date}.log"
 
     def _read_latest_glass_record(
@@ -242,7 +262,11 @@ class AAPIStationAdapter(StationAdapter):
         report_file: Path,
         glass_id: str,
     ) -> Tuple[Optional[Dict[str, List[StationAOIDefect]]], str]:
-        text = report_file.read_text(encoding="utf-8", errors="replace")
+        raw_text = report_file.read_bytes()
+        try:
+            text = raw_text.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw_text.decode("cp950", errors="replace")
         matching_lines = []
         for line in text.splitlines():
             fields = line.strip().split(",", 3)

@@ -1,5 +1,13 @@
 # 更新紀錄
 
+## 2026-08-27 v3
+
+### [AAPI 新增支援]一廠圖片與每日 Report
+
+- AAPI 圖片來自 `192.168.1.11/d/tianmu/yuantu` 時，依圖片日期讀取同主機 `d/tianmu/report/ReportYYMMDD.log`；三廠 `.190/.191` 仍使用各自的 `d/LOG`。
+- 一廠 `STANDARD` 圖片沿用 `Windows_BG`／`STANDARD` 模型，`BWFRAME0` 沿用 `White_Frame` 正式檢查；每日 Report 同步支援這兩種畫面及 CP950 編碼。
+- 未知 AAPI 來源主機或不符合廠別目錄結構時直接回報錯誤，不再默認查詢 `.190`，避免跨廠誤讀同名 Glass ID。
+
 ## 2026-08-27 v2
 
 ### [CAPI／AAPI 修正]AOI QJPG 座標避開 Tile 邊界假熱點
