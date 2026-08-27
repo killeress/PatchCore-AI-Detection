@@ -1,5 +1,19 @@
 # 更新紀錄
 
+## 2026-08-27 v2
+
+### [CAPI／AAPI 修正]AOI QJPG 座標避開 Tile 邊界假熱點
+
+- AOI 座標置中的 Tile 改為優先回報最接近 AOI 中心的有效 REAL_NG 熱區；中央沒有有效熱區時，直接沿用 AOI Report 的原始產品座標，不再被 Tile 邊界較高的單一 heatmap 像素帶偏。
+- BOMB 後處理不再覆蓋已選定的 AOI peak；一般 Grid Tile、模型分數、判定門檻與灰塵規則維持不變。
+
+## 2026-08-27 v1
+
+### [MARK 修正]Code-only 自動相容舊版 Paddle Worker
+
+- 批次套用 code-only 更新時，即使設備仍在使用舊版 MARK Paddle worker，管理員設定的字元強制轉換也會由主程式立即套用並記錄；不需要逐台登入補裝 worker。
+- 新版安裝器仍會自動備份、更新及重啟 MARK worker；已是新版 worker 的設備維持原本時序穩定判定。
+
 ## 2026-08-26 v1
 
 ### [AAPI 修正]AOI 產品座標依玻璃解析度映射

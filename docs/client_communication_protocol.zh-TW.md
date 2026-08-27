@@ -195,7 +195,8 @@ NGPCDK20100000500W0F00000
 
 座標來源:
 
-- AI 會優先使用 heatmap peak 座標。
+- AOI 座標置中的 Tile 會優先使用最接近 AOI 中心的有效 REAL_NG heatmap 區域；中央沒有有效區域時，沿用 AOI Report 的原始產品座標。
+- 一般 Grid Tile 使用 heatmap peak 座標。
 - 若沒有 peak，使用 tile center。
 - 座標會從影像座標依 panel bounds 轉換到 request 傳入的產品解析度。
 - 最後輸出時 clamp 到 `0..99999`，並格式化成 5 碼。

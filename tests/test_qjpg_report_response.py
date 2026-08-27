@@ -82,6 +82,59 @@ def test_qjpg_response_uses_final_ng_points_and_product_coordinates():
     assert response == "@QJPG-T863BF29AH44;OK;EJ;NGPCDK20100000500W0F00000,"
 
 
+def test_qjpg_aoi_report_fallback_keeps_exact_source_product_coordinate():
+    result = _image_result("W0F00000_114438.tif")
+    tile = _tile(1, 600, 450)
+    tile.is_aoi_coord_tile = True
+    tile.aoi_product_x = 1136
+    tile.aoi_product_y = 872
+    tile.aoi_image_x = 600
+    tile.aoi_image_y = 450
+    tile.anomaly_peak_source = "aoi_report_fallback"
+    result.tiles = [tile]
+    result.anomaly_tiles = [(tile, 0.91, None)]
+
+    response = build_qjpg_response(
+        {"glass_id": "YQ52TV232E45", "resolution": (1920, 1200)},
+        "NG",
+        [result],
+        CAPIConfig(),
+    )
+
+    assert response == (
+        "@QJPG-YQ52TV232E45;OK;EJ;"
+        "NGPCDK20113600872W0F00000,"
+    )
+
+
+def test_qjpg_aoi_center_real_region_matches_field_product_coordinate():
+    result = _image_result("YQ52TV232E45W0F00000085923.tif", mark_text="N0")
+    result.raw_bounds = (77, 202, 6320, 4114)
+    result.otsu_bounds = result.raw_bounds
+    result.report_image_prefix = "W0F00000"
+    tile = _tile(1, 3770, 3045)
+    tile.is_aoi_coord_tile = True
+    tile.aoi_product_x = 1136
+    tile.aoi_product_y = 872
+    tile.aoi_image_x = 3770
+    tile.aoi_image_y = 3045
+    tile.anomaly_peak_source = "aoi_real_region"
+    result.tiles = [tile]
+    result.anomaly_tiles = [(tile, 0.4283, None)]
+
+    response = build_qjpg_response(
+        {"glass_id": "YQ52TV232E45", "resolution": (1920, 1200)},
+        "NG",
+        [result],
+        CAPIConfig(),
+    )
+
+    assert response == (
+        "@QJPG-YQ52TV232E45;OK;N0;"
+        "NGPCDK20113600872W0F00000,"
+    )
+
+
 def test_qjpg_response_keeps_source_prefix_for_hm_standard_image():
     result = _image_result("U0F00000092908.tif")
     tile = _tile(1, 600, 450)
