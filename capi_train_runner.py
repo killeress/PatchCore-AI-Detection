@@ -224,6 +224,11 @@ def main() -> int:
     training_units = normalize_training_units(
         training_scope.get("selected_units")
     )
+    from capi_grid_canonicalization import normalize_grid_canonicalization
+    grid_cfg = normalize_grid_canonicalization(
+        job.get("grid_canonicalization"),
+        require_resolution=True,
+    )
 
     cfg = TrainingConfig(
         machine_id=job["machine_id"],
@@ -236,6 +241,12 @@ def main() -> int:
         image_preprocess_pipelines=job.get("image_preprocess_pipelines") or {},
         preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
         tile_stride=int(job.get("tile_stride") or 512),
+        grid_canonicalization_enabled=grid_cfg["enabled"],
+        grid_samples_per_cell=grid_cfg["samples_per_cell"],
+        product_resolution=(
+            tuple(grid_cfg["product_resolution"])
+            if grid_cfg["product_resolution"] else None
+        ),
         training_data_source=job.get("training_data_source") or {"type": "inference_records"},
         training_units=training_units,
     )

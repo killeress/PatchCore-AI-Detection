@@ -907,7 +907,13 @@ def test_write_manifest_yaml(tmp_path):
         "G0F00000": {"inner": 0.62, "edge": 0.71},
     }, image_preprocess_pipeline=[
         {"method": "bilateral", "params": {"diameter": 9, "sigma_color": 35.0, "sigma_space": 35.0}},
-    ])
+    ], grid_canonicalization={
+        "enabled": True,
+        "version": 1,
+        "samples_per_cell": 1,
+        "product_resolution": [1920, 1080],
+        "coordinate_preserving": True,
+    })
     import yaml
     y = yaml.safe_load((bundle / "machine_config.yaml").read_text(encoding="utf-8"))
     assert y["machine_id"] == "GN160"
@@ -923,6 +929,9 @@ def test_write_manifest_yaml(tmp_path):
     assert y["image_abnormal_b0f00000_mean_upper"] == 13
     assert y["bomb_match_tolerance"] == 20
     assert y["image_preprocess_pipeline"][0]["method"] == "bilateral"
+    assert y["grid_canonicalization"]["enabled"] is True
+    assert y["grid_canonicalization"]["samples_per_cell"] == 1
+    assert y["grid_canonicalization"]["product_resolution"] == [1920, 1080]
     # Scratch classifier 設定要寫進去，否則新架構 server 啟動時 scratch 預設空路徑會撞網路。
     assert y["scratch_classifier_enabled"] is True
     assert y["scratch_dinov2_repo_path"] == "deployment/dinov2_repo"
@@ -1034,6 +1043,9 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
             "inner": {"mode": "off", "k": 30, "keep_ratio": 0.99},
             "edge": {"mode": "knn_cosine_q99_v1", "k": 10, "keep_ratio": 0.998},
         },
+        grid_canonicalization_enabled=True,
+        grid_samples_per_cell=3,
+        product_resolution=(1920, 1080),
     )
     bundle_dir = run_training_pipeline(
         job_id="j1", cfg=cfg, db=db,
@@ -1063,11 +1075,19 @@ def test_run_training_pipeline_orchestrates_10_units(tmp_path, monkeypatch):
     assert manifest["patchcore_params"]["feature_cleaning_by_zone"]["inner"]["mode"] == "off"
     assert manifest["patchcore_params"]["feature_cleaning_by_zone"]["edge"]["k"] == 10
     assert manifest["experimental_training"] is True
+    assert manifest["grid_canonicalization"] == {
+        "enabled": True,
+        "version": 1,
+        "samples_per_cell": 3,
+        "product_resolution": [1920, 1080],
+        "coordinate_preserving": True,
+    }
     import yaml
     y = yaml.safe_load((bundle_dir / "machine_config.yaml").read_text(encoding="utf-8"))
     assert y["tile_stride"] == 256
     assert y["preprocess_after_tiling"] is True
     assert y["image_preprocess_pipelines"]["edge"][0]["method"] == "bilateral"
+    assert y["grid_canonicalization"] == manifest["grid_canonicalization"]
     cleaning_report = _json.loads(
         (bundle_dir / "feature_cleaning_reports" / "G0F00000-edge.json").read_text(
             encoding="utf-8"

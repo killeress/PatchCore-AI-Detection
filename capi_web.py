@@ -9388,7 +9388,61 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             processed_panel_image = image
             preprocess_steps = []
             preprocess_total_ms = 0.0
-            if configured_pipeline and not preprocess_after_tiling and not is_skip_file:
+            grid_enabled = bool(getattr(
+                self.inferencer.config, "grid_canonicalization_enabled", False
+            )) and not is_skip_file
+            grid_polygon = None
+            if grid_enabled:
+                expected_resolution = getattr(
+                    self.inferencer.config, "grid_product_resolution", None
+                )
+                if tuple(expected_resolution or ()) != (product_w, product_h):
+                    self._send_json({
+                        "error": (
+                            "Client 產品解析度與 Pixel Grid 模型不一致: "
+                            f"client={product_w}x{product_h}, "
+                            f"model={tuple(expected_resolution or ())}"
+                        )
+                    })
+                    return
+                from capi_preprocess import PreprocessConfig, preprocess_panel_image
+                grid_pre_cfg = PreprocessConfig(
+                    tile_size=self.inferencer.config.tile_size,
+                    tile_stride=getattr(
+                        self.inferencer.config,
+                        "tile_stride",
+                        self.inferencer.config.tile_size,
+                    ),
+                    otsu_offset=self.inferencer.config.otsu_offset,
+                    enable_panel_polygon=self.inferencer.config.enable_panel_polygon,
+                    edge_threshold_px=self.inferencer.config.edge_threshold_px,
+                    image_preprocess_pipeline=(
+                        configured_pipeline if not preprocess_after_tiling else []
+                    ),
+                    cache_processed_image=True,
+                    generate_grid_tiles=False,
+                    product_resolution=(product_w, product_h),
+                    grid_canonicalization_enabled=True,
+                    grid_samples_per_cell=getattr(
+                        self.inferencer.config, "grid_samples_per_cell", 3
+                    ),
+                    rotate_180=getattr(
+                        self.inferencer, "_rotate_detection_images_180", False
+                    ),
+                )
+                grid_result = preprocess_panel_image(
+                    image_path,
+                    self.inferencer._get_image_prefix(image_path.name),
+                    grid_pre_cfg,
+                )
+                if grid_result.processed_image is None:
+                    self._send_json({"error": "Pixel Grid 座標診斷前處理失敗"})
+                    return
+                processed_panel_image = grid_result.processed_image
+                grid_polygon = grid_result.panel_polygon
+                preprocess_steps = list(grid_result.preprocess_steps)
+                preprocess_total_ms = float(grid_result.preprocess_total_ms or 0.0)
+            elif configured_pipeline and not preprocess_after_tiling and not is_skip_file:
                 pipeline_result = apply_preprocess_pipeline(image, configured_pipeline)
                 processed_panel_image = pipeline_result["image"]
                 configured_pipeline = pipeline_result["pipeline"]
@@ -9434,7 +9488,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             crop_h = crop_y2 - crop_y1
             raw_tile_image = image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
             tile_source_image = (
-                image if preprocess_after_tiling or is_skip_file else processed_panel_image
+                image
+                if (preprocess_after_tiling and not grid_enabled) or is_skip_file
+                else processed_panel_image
             )
             tile_image = tile_source_image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
             crop_shift_dx = crop_x1 - centered_crop_x1
@@ -9483,8 +9539,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     edge_threshold_px=self.inferencer.config.edge_threshold_px,
                     image_preprocess_pipeline=getattr(self.inferencer.config, "image_preprocess_pipeline", []),
                     image_preprocess_pipelines=configured_zone_pipelines,
+                    product_resolution=(product_w, product_h),
+                    grid_canonicalization_enabled=grid_enabled,
+                    grid_samples_per_cell=getattr(
+                        self.inferencer.config, "grid_samples_per_cell", 3
+                    ),
                 )
-                _, polygon = detect_panel_polygon(processed_panel_image, pre_cfg)
+                polygon = grid_polygon
+                if polygon is None:
+                    _, polygon = detect_panel_polygon(processed_panel_image, pre_cfg)
                 if polygon is None and hasattr(self.inferencer, "_rect_polygon_from_bounds"):
                     polygon = self.inferencer._rect_polygon_from_bounds(raw_bounds)
                 if polygon is not None:
@@ -9584,11 +9647,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if is_v2 and configured_zone_pipelines:
                 active_pipeline = configured_zone_pipelines.get(zone, [])
             if active_pipeline and preprocess_after_tiling and not is_skip_file:
-                pipeline_result = apply_preprocess_pipeline(raw_tile_image, active_pipeline)
+                pipeline_input = tile_info.image if grid_enabled else raw_tile_image
+                pipeline_result = apply_preprocess_pipeline(pipeline_input, active_pipeline)
                 tile_image = pipeline_result["image"]
                 configured_pipeline = pipeline_result["pipeline"]
-                preprocess_steps = pipeline_result["steps"]
-                preprocess_total_ms = float(pipeline_result.get("total_elapsed_ms") or 0.0)
+                preprocess_steps.extend(pipeline_result["steps"])
+                preprocess_total_ms += float(pipeline_result.get("total_elapsed_ms") or 0.0)
                 tile_info.image = tile_image
             elif preprocess_after_tiling:
                 configured_pipeline = list(active_pipeline or [])
@@ -13999,6 +14063,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         target_image_preprocess_pipelines = {}
         target_preprocess_after_tiling = False
         target_tile_stride = 256
+        target_grid_canonicalization = {
+            "enabled": False,
+            "version": 1,
+            "samples_per_cell": 3,
+            "product_resolution": None,
+            "coordinate_preserving": True,
+        }
         if scope["mode"] == "partial":
             target_bundle = self._capi_server_instance.database.get_model_bundle(scope["target_bundle_id"])
             try:
@@ -14015,6 +14086,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     target_manifest.get("preprocess_after_tiling", False)
                 )
                 target_tile_stride = int(target_manifest.get("tile_stride") or 512)
+                from capi_grid_canonicalization import normalize_grid_canonicalization
+                target_grid_canonicalization = normalize_grid_canonicalization(
+                    target_manifest.get("grid_canonicalization"),
+                    require_resolution=True,
+                )
             except Exception:
                 target_patchcore_params = {}
 
@@ -14029,6 +14105,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             target_image_preprocess_pipelines=target_image_preprocess_pipelines,
             target_preprocess_after_tiling=target_preprocess_after_tiling,
             target_tile_stride=target_tile_stride,
+            target_grid_canonicalization=target_grid_canonicalization,
             selected_lightings=self._scope_selected_lightings(scope),
             machine_prefix_len=self.TRAIN_NEW_MACHINE_PREFIX_LEN,
             preprocess_methods=get_method_specs(),
@@ -14722,6 +14799,43 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return None, f"image_preprocess_pipelines invalid: {exc}"
 
     @staticmethod
+    def _validate_grid_canonicalization(raw):
+        """Validate the opt-in product-pixel-grid preprocessing contract."""
+        from capi_grid_canonicalization import normalize_grid_canonicalization
+        try:
+            return normalize_grid_canonicalization(raw), None
+        except ValueError as exc:
+            return None, str(exc)
+
+    @staticmethod
+    def _resolve_selected_panel_resolution(db, panel_paths):
+        """Resolve one common, non-zero Client resolution for selected records."""
+        try:
+            by_path = db.get_inference_panel_resolutions(panel_paths)
+        except Exception as exc:
+            return None, f"無法讀取訓練 PANEL 的 Client 解析度: {exc}"
+        if not isinstance(by_path, dict):
+            return None, "無法讀取訓練 PANEL 的 Client 解析度"
+        missing = [path for path in panel_paths if path not in by_path]
+        if missing:
+            return None, f"訓練 PANEL 缺少 Client 解析度: {missing[0]}"
+        try:
+            resolutions = {
+                tuple(int(value) for value in by_path[path])
+                for path in panel_paths
+            }
+        except (TypeError, ValueError):
+            return None, "訓練 PANEL 的 Client 解析度格式無效"
+        if any(len(value) != 2 or value[0] <= 0 or value[1] <= 0 for value in resolutions):
+            return None, "訓練 PANEL 的 Client 解析度格式無效"
+        if len(resolutions) != 1:
+            labels = ", ".join(
+                f"{width}x{height}" for width, height in sorted(resolutions)
+            )
+            return None, f"所選訓練 PANEL 的 Client 解析度不一致: {labels}"
+        return next(iter(resolutions)), None
+
+    @staticmethod
     def _validate_train_tile_stride(raw):
         """Validate training tile step/stride. 512 keeps legacy non-overlap tiling."""
         if raw is None or raw == "":
@@ -14893,6 +15007,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if err:
             self._send_json({"error": err}, status=400)
             return
+        grid_canonicalization, err = self._validate_grid_canonicalization(
+            params.get("grid_canonicalization")
+        )
+        if err:
+            self._send_json({"error": err}, status=400)
+            return
 
         db = self._capi_server_instance.database
         training_scope, err = self._normalize_train_new_scope(
@@ -14966,11 +15086,53 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 preprocess_after_tiling = bool(
                     target_manifest.get("preprocess_after_tiling", False)
                 )
+                from capi_grid_canonicalization import normalize_grid_canonicalization
+                grid_canonicalization = normalize_grid_canonicalization(
+                    target_manifest.get("grid_canonicalization"),
+                    require_resolution=True,
+                )
             except Exception as exc:
                 self._send_json({
                     "error": f"cannot inherit target bundle preprocessing: {exc}"
                 }, status=400)
                 return
+
+        if grid_canonicalization["enabled"]:
+            expected_resolution = (
+                tuple(grid_canonicalization["product_resolution"])
+                if grid_canonicalization.get("product_resolution") else None
+            )
+            if source_type == "manual_folder":
+                if (
+                    training_scope.get("mode") != "partial"
+                    or expected_resolution is None
+                ):
+                    self._send_json({
+                        "error": "Pixel Grid 標準化需要從推論紀錄取得 Client 產品解析度"
+                    }, status=400)
+                    return
+            else:
+                selected_resolution, resolution_error = (
+                    self._resolve_selected_panel_resolution(db, clean_panel_paths)
+                )
+                if resolution_error:
+                    self._send_json({"error": resolution_error}, status=400)
+                    return
+                if (
+                    expected_resolution is not None
+                    and selected_resolution != expected_resolution
+                ):
+                    self._send_json({
+                        "error": (
+                            "所選 PANEL 的 Client 解析度與目標模型不一致: "
+                            f"selected={selected_resolution[0]}x{selected_resolution[1]}, "
+                            f"model={expected_resolution[0]}x{expected_resolution[1]}"
+                        )
+                    }, status=400)
+                    return
+                grid_canonicalization["product_resolution"] = list(
+                    selected_resolution
+                )
 
         job_id = generate_job_id(machine_id)
 
@@ -14989,6 +15151,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 image_preprocess_pipelines=image_preprocess_pipelines,
                 preprocess_after_tiling=preprocess_after_tiling,
                 tile_stride=tile_stride,
+                grid_canonicalization=grid_canonicalization,
             )
         except Exception:
             CAPIWebHandler._drop_job_runtime(job_id)
@@ -14999,7 +15162,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             args=(job_id, machine_id, clean_panel_paths,
                   self._capi_server_instance, training_params, panel_modes,
                   training_scope, image_preprocess_pipeline, preprocess_after_tiling,
-                  tile_stride, training_data_source, image_preprocess_pipelines),
+                  tile_stride, training_data_source, image_preprocess_pipelines,
+                  grid_canonicalization),
             daemon=True, name=f"train_new_pre-{job_id}",
         )
         runtime["thread"] = thread
@@ -15038,7 +15202,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         job_id, machine_id, panel_paths, server_inst, training_params=None,
         panel_modes=None, training_scope=None, image_preprocess_pipeline=None,
         preprocess_after_tiling=False, tile_stride=None, training_data_source=None,
-        image_preprocess_pipelines=None,
+        image_preprocess_pipelines=None, grid_canonicalization=None,
     ):
         """背景 thread：preprocess + 從推論紀錄抽 AOI 炸彈 NG → state=review。
 
@@ -15066,6 +15230,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
             station_adapter = CAPIWebHandler._train_new_station_adapter(server_inst)
             selected_units = CAPIWebHandler._scope_selected_units(training_scope)
+            from capi_grid_canonicalization import normalize_grid_canonicalization
+            grid_cfg = normalize_grid_canonicalization(
+                grid_canonicalization,
+                require_resolution=True,
+            )
 
             thumb_root = _Path(".tmp/train_new_thumbs") / job_id
             cfg = TrainingConfig(
@@ -15079,6 +15248,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 image_preprocess_pipelines=image_preprocess_pipelines or {},
                 preprocess_after_tiling=preprocess_after_tiling,
                 tile_stride=int(tile_stride or CAPIWebHandler.TRAIN_NEW_DEFAULT_TILE_STRIDE),
+                grid_canonicalization_enabled=grid_cfg["enabled"],
+                grid_samples_per_cell=grid_cfg["samples_per_cell"],
+                product_resolution=(
+                    tuple(grid_cfg["product_resolution"])
+                    if grid_cfg["product_resolution"] else None
+                ),
                 training_data_source=training_data_source or {"type": "inference_records"},
                 training_units=selected_units,
             )
@@ -15088,7 +15263,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
                 image_preprocess_pipelines=cfg.image_preprocess_pipelines,
                 preprocess_after_tiling=cfg.preprocess_after_tiling,
-                product_resolution=CAPIWebHandler._product_resolution_for_machine(machine_id, server_inst),
+                product_resolution=(
+                    cfg.product_resolution
+                    if cfg.grid_canonicalization_enabled
+                    else CAPIWebHandler._product_resolution_for_machine(machine_id, server_inst)
+                ),
+                grid_canonicalization_enabled=cfg.grid_canonicalization_enabled,
+                grid_samples_per_cell=cfg.grid_samples_per_cell,
             )
             target_lightings = []
             for selected_lighting, _selected_zone in selected_units:
@@ -15105,6 +15286,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 )
 
             log(f"開始前處理 {len(panel_paths)} panel（tile=512, stride={cfg.tile_stride}）")
+            if cfg.grid_canonicalization_enabled:
+                log(
+                    "Pixel Grid 標準化："
+                    f"product={cfg.product_resolution[0]}x{cfg.product_resolution[1]}, "
+                    f"samples_per_cell={cfg.grid_samples_per_cell}"
+                )
             stats = preprocess_panels_to_pool(
                 job_id=job_id, cfg=cfg, preprocess_cfg=pre_cfg,
                 db=db, thumb_dir=thumb_root, log=log,
@@ -15294,6 +15481,22 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if err:
             self._send_json({"error": err}, status=400)
             return
+        grid_canonicalization, err = self._validate_grid_canonicalization(
+            data.get("grid_canonicalization")
+        )
+        if err:
+            self._send_json({"error": err}, status=400)
+            return
+        if grid_canonicalization["enabled"]:
+            from capi_grid_canonicalization import normalize_grid_canonicalization
+            try:
+                grid_canonicalization = normalize_grid_canonicalization(
+                    grid_canonicalization,
+                    require_resolution=True,
+                )
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
         machine_id = str(data.get("machine_id") or "").strip()
         station_adapter = self._train_new_station_adapter(
             self._capi_server_instance
@@ -15353,10 +15556,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     tile_stride=tile_stride,
                     image_preprocess_pipeline=preview_pipeline,
                     preprocess_after_tiling=True,
-                    product_resolution=self._product_resolution_for_machine(
-                        machine_id,
-                        self._capi_server_instance,
+                    product_resolution=(
+                        tuple(grid_canonicalization["product_resolution"])
+                        if grid_canonicalization["enabled"]
+                        else self._product_resolution_for_machine(
+                            machine_id,
+                            self._capi_server_instance,
+                        )
                     ),
+                    grid_canonicalization_enabled=grid_canonicalization["enabled"],
+                    grid_samples_per_cell=grid_canonicalization["samples_per_cell"],
                 )
                 panel_result = preprocess_panel_image(image_path, lighting, pre_cfg)
                 if not panel_result.tiles:
@@ -15375,8 +15584,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 original = tile.original_image
                 if original is None:
                     original = image[tile.y1:tile.y2, tile.x1:tile.x2].copy()
-                result = apply_preprocess_pipeline(original, preview_pipeline)
-                processed = result["image"]
+                if grid_canonicalization["enabled"]:
+                    processed = tile.image
+                    grid_steps = [
+                        step for step in panel_result.preprocess_steps
+                        if step.get("method") == "grid_canonicalization"
+                    ]
+                    result = {
+                        "image": processed,
+                        "pipeline": preview_pipeline,
+                        "steps": grid_steps + list(tile.preprocess_steps),
+                    }
+                else:
+                    result = apply_preprocess_pipeline(original, preview_pipeline)
+                    processed = result["image"]
                 diff = make_diff_image(original, processed)
 
                 preview_mode = "tile"
@@ -15395,8 +15616,36 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "requested_zone": preview_zone,
                 }
             else:
-                result = apply_preprocess_pipeline(image, pipeline)
-                processed = result["image"]
+                if grid_canonicalization["enabled"]:
+                    from capi_preprocess import LIGHTING_PREFIXES, PreprocessConfig, preprocess_panel_image
+
+                    lighting = station_adapter.training_image_prefix(image_path.name)
+                    if lighting not in LIGHTING_PREFIXES:
+                        lighting = "STANDARD"
+                    pre_cfg = PreprocessConfig(
+                        tile_stride=tile_stride,
+                        image_preprocess_pipeline=pipeline,
+                        cache_processed_image=True,
+                        generate_grid_tiles=False,
+                        product_resolution=tuple(
+                            grid_canonicalization["product_resolution"]
+                        ),
+                        grid_canonicalization_enabled=True,
+                        grid_samples_per_cell=grid_canonicalization["samples_per_cell"],
+                    )
+                    panel_result = preprocess_panel_image(image_path, lighting, pre_cfg)
+                    if panel_result.processed_image is None:
+                        self._send_json({"error": "Pixel Grid 預覽處理失敗"}, status=400)
+                        return
+                    processed = panel_result.processed_image
+                    result = {
+                        "image": processed,
+                        "pipeline": pipeline,
+                        "steps": panel_result.preprocess_steps,
+                    }
+                else:
+                    result = apply_preprocess_pipeline(image, pipeline)
+                    processed = result["image"]
                 diff = make_diff_image(image, processed)
                 processed_filename = f"train_preprocess_preview_{safe_stem}_{token}.png"
                 diff_filename = f"train_preprocess_preview_{safe_stem}_{token}_diff.png"
@@ -15426,6 +15675,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "input_dtype": str(image.dtype),
                 "pipeline": result["pipeline"],
                 "steps": result["steps"],
+                "grid_canonicalization": grid_canonicalization,
                 "processing_time": round(_time.time() - start, 3),
                 "original_url": original_url,
                 "processed_url": f"/debug/heatmaps/{processed_filename}",
@@ -15468,15 +15718,27 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_response(404, "")
             return
 
+        from capi_grid_canonicalization import normalize_grid_canonicalization
+        grid_cfg = normalize_grid_canonicalization(
+            job.get("grid_canonicalization"),
+            require_resolution=True,
+        )
+
         preprocess_cfg = PreprocessConfig(
             tile_stride=int(job.get("tile_stride") or 512),
             image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
             image_preprocess_pipelines=job.get("image_preprocess_pipelines") or {},
             preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
-            product_resolution=self._product_resolution_for_machine(
-                job.get("machine_id", ""),
-                self._capi_server_instance,
+            product_resolution=(
+                tuple(grid_cfg["product_resolution"])
+                if grid_cfg["enabled"]
+                else self._product_resolution_for_machine(
+                    job.get("machine_id", ""),
+                    self._capi_server_instance,
+                )
             ),
+            grid_canonicalization_enabled=grid_cfg["enabled"],
+            grid_samples_per_cell=grid_cfg["samples_per_cell"],
         )
         panel_paths = [Path(p) for p in job.get("panel_paths", [])]
         panel_modes = job.get("panel_modes") or ["full"] * len(panel_paths)
@@ -15545,6 +15807,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "preprocess_after_tiling": bool(job.get("preprocess_after_tiling", False)),
             "tile_stride": preprocess_cfg.tile_stride,
             "product_resolution": preprocess_cfg.product_resolution,
+            "grid_canonicalization": grid_cfg,
         }
         cache_key = hashlib.sha1(
             json.dumps(cache_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -15842,6 +16105,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             bundle_dir = Path(bundle["bundle_path"])
             manifest = _read_manifest(bundle_dir)
             patchcore_params = manifest.get("patchcore_params") or {}
+            from capi_grid_canonicalization import normalize_grid_canonicalization
+            grid_cfg = normalize_grid_canonicalization(
+                job.get("grid_canonicalization"),
+                require_resolution=True,
+            )
             train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
             cfg = TrainingConfig(
                 machine_id=job["machine_id"],
@@ -15854,6 +16122,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 image_preprocess_pipelines=job.get("image_preprocess_pipelines") or {},
                 preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
                 tile_stride=int(job.get("tile_stride") or 512),
+                grid_canonicalization_enabled=grid_cfg["enabled"],
+                grid_samples_per_cell=grid_cfg["samples_per_cell"],
+                product_resolution=(
+                    tuple(grid_cfg["product_resolution"])
+                    if grid_cfg["product_resolution"] else None
+                ),
                 batch_size=patchcore_params.get("batch_size", 8),
                 image_size=tuple(patchcore_params.get("image_size", (512, 512))),
                 coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
@@ -17557,6 +17831,32 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         image_preprocess_pipelines = old_manifest.get("image_preprocess_pipelines") or {}
         preprocess_after_tiling = bool(old_manifest.get("preprocess_after_tiling", False))
         tile_stride = int(old_manifest.get("tile_stride") or 512)
+        from capi_grid_canonicalization import normalize_grid_canonicalization
+        try:
+            grid_canonicalization = normalize_grid_canonicalization(
+                old_manifest.get("grid_canonicalization"),
+                require_resolution=True,
+            )
+        except ValueError as exc:
+            self._send_json({"error": f"bundle Pixel Grid 設定無效: {exc}"}, status=400)
+            return
+        if grid_canonicalization["enabled"]:
+            selected_resolution, resolution_error = self._resolve_selected_panel_resolution(
+                db, clean_panel_paths
+            )
+            if resolution_error:
+                self._send_json({"error": resolution_error}, status=400)
+                return
+            expected_resolution = tuple(grid_canonicalization["product_resolution"])
+            if selected_resolution != expected_resolution:
+                self._send_json({
+                    "error": (
+                        "所選 PANEL 的 Client 解析度與目標模型不一致: "
+                        f"selected={selected_resolution[0]}x{selected_resolution[1]}, "
+                        f"model={expected_resolution[0]}x{expected_resolution[1]}"
+                    )
+                }, status=400)
+                return
 
         machine_id = str(bundle.get("machine_id") or "").strip()
         if not machine_id:
@@ -17603,6 +17903,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 image_preprocess_pipelines=image_preprocess_pipelines,
                 preprocess_after_tiling=preprocess_after_tiling,
                 tile_stride=tile_stride,
+                grid_canonicalization=grid_canonicalization,
             )
         except Exception:
             with state["lock"]:
@@ -17692,6 +17993,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             train_cfg = CAPIWebHandler._load_train_new_config(server_inst)
             patchcore_params = old_manifest.get("patchcore_params") or {}
+            from capi_grid_canonicalization import normalize_grid_canonicalization
+            grid_cfg = normalize_grid_canonicalization(
+                job.get("grid_canonicalization"),
+                require_resolution=True,
+            )
             cfg = TrainingConfig(
                 machine_id=machine_id,
                 panel_paths=[Path(p) for p in panel_paths],
@@ -17703,6 +18009,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 image_preprocess_pipelines=job.get("image_preprocess_pipelines") or {},
                 preprocess_after_tiling=bool(job.get("preprocess_after_tiling", False)),
                 tile_stride=int(job.get("tile_stride") or 512),
+                grid_canonicalization_enabled=grid_cfg["enabled"],
+                grid_samples_per_cell=grid_cfg["samples_per_cell"],
+                product_resolution=(
+                    tuple(grid_cfg["product_resolution"])
+                    if grid_cfg["product_resolution"] else None
+                ),
                 batch_size=patchcore_params.get("batch_size", 8),
                 image_size=tuple(patchcore_params.get("image_size", (512, 512))),
                 coreset_ratio=patchcore_params.get("coreset_ratio", 0.1),
@@ -17737,7 +18049,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
                 image_preprocess_pipelines=cfg.image_preprocess_pipelines,
                 preprocess_after_tiling=cfg.preprocess_after_tiling,
-                product_resolution=CAPIWebHandler._product_resolution_for_machine(machine_id, server_inst),
+                product_resolution=(
+                    cfg.product_resolution
+                    if cfg.grid_canonicalization_enabled
+                    else CAPIWebHandler._product_resolution_for_machine(machine_id, server_inst)
+                ),
+                grid_canonicalization_enabled=cfg.grid_canonicalization_enabled,
+                grid_samples_per_cell=cfg.grid_samples_per_cell,
             )
             stats = preprocess_panels_to_pool(
                 job_id=job_id,

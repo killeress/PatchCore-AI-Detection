@@ -193,6 +193,10 @@ class CAPIConfig:
     enable_panel_polygon: bool = True  # 啟用後在 tile.mask 上套用 polygon 做精準裁切
     image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
     preprocess_after_tiling: bool = False  # 先切塊後前處理選項
+    grid_canonicalization_enabled: bool = False
+    grid_canonicalization_version: int = 1
+    grid_samples_per_cell: int = 3
+    grid_product_resolution: Optional[Tuple[int, int]] = None
 
     # 排除區域
     exclusion_zones: List[ExclusionZone] = field(default_factory=list)
@@ -438,6 +442,12 @@ class CAPIConfig:
         if data is None:
             data = {}
         from capi_image_preprocess_lab import normalize_preprocess_pipeline
+        from capi_grid_canonicalization import normalize_grid_canonicalization
+
+        grid_cfg = normalize_grid_canonicalization(
+            data.get("grid_canonicalization"),
+            require_resolution=True,
+        )
 
         raw_zone_pipelines = data.get("image_preprocess_pipelines")
         if raw_zone_pipelines is None:
@@ -495,6 +505,13 @@ class CAPIConfig:
             ),
             image_preprocess_pipelines=image_preprocess_pipelines,
             preprocess_after_tiling=data.get("preprocess_after_tiling", False),
+            grid_canonicalization_enabled=grid_cfg["enabled"],
+            grid_canonicalization_version=grid_cfg["version"],
+            grid_samples_per_cell=grid_cfg["samples_per_cell"],
+            grid_product_resolution=(
+                tuple(grid_cfg["product_resolution"])
+                if grid_cfg["product_resolution"] else None
+            ),
             exclusion_zones=exclusion_zones,
             tile_size=data.get("tile_size", 512),
             tile_stride=data.get("tile_stride", 512),
@@ -631,6 +648,16 @@ class CAPIConfig:
             "image_preprocess_pipeline": self.image_preprocess_pipeline,
             "image_preprocess_pipelines": self.image_preprocess_pipelines,
             "preprocess_after_tiling": self.preprocess_after_tiling,
+            "grid_canonicalization": {
+                "enabled": self.grid_canonicalization_enabled,
+                "version": self.grid_canonicalization_version,
+                "samples_per_cell": self.grid_samples_per_cell,
+                "product_resolution": (
+                    list(self.grid_product_resolution)
+                    if self.grid_product_resolution else None
+                ),
+                "coordinate_preserving": True,
+            },
             "exclusion_zones": [zone.to_dict() for zone in self.exclusion_zones],
             "tile_size": self.tile_size,
             "tile_stride": self.tile_stride,
@@ -738,6 +765,16 @@ class CAPIConfig:
             "image_preprocess_pipeline": self.image_preprocess_pipeline,
             "image_preprocess_pipelines": self.image_preprocess_pipelines,
             "preprocess_after_tiling": self.preprocess_after_tiling,
+            "grid_canonicalization": {
+                "enabled": self.grid_canonicalization_enabled,
+                "version": self.grid_canonicalization_version,
+                "samples_per_cell": self.grid_samples_per_cell,
+                "product_resolution": (
+                    list(self.grid_product_resolution)
+                    if self.grid_product_resolution else None
+                ),
+                "coordinate_preserving": True,
+            },
             "exclusion_zones": [zone.to_dict() for zone in self.exclusion_zones],
             "tile_size": self.tile_size,
             "tile_stride": self.tile_stride,

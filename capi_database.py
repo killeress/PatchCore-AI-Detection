@@ -633,7 +633,8 @@ class CAPIDatabase:
                     image_preprocess_pipeline TEXT,
                     image_preprocess_pipelines TEXT,
                     preprocess_after_tiling   INTEGER DEFAULT 0,
-                    tile_stride     INTEGER
+                    tile_stride     INTEGER,
+                    grid_canonicalization TEXT
                 );
 
                 -- 已訓練模型 bundle 元資料
@@ -1095,6 +1096,7 @@ class CAPIDatabase:
             add_column_if_not_exists("training_jobs", "image_preprocess_pipelines", "TEXT")
             add_column_if_not_exists("training_jobs", "preprocess_after_tiling", "INTEGER DEFAULT 0")
             add_column_if_not_exists("training_jobs", "tile_stride", "INTEGER")
+            add_column_if_not_exists("training_jobs", "grid_canonicalization", "TEXT")
             add_column_if_not_exists("training_tile_pool", "panel_path", "TEXT")
             add_column_if_not_exists("training_tile_pool", "tile_index", "INTEGER")
             add_column_if_not_exists("training_tile_pool", "tile_x", "INTEGER")
@@ -6510,6 +6512,7 @@ class CAPIDatabase:
         preprocess_after_tiling: bool = False,
         tile_stride: Optional[int] = 256,
         image_preprocess_pipelines: Optional[Dict[str, list]] = None,
+        grid_canonicalization: Optional[Dict[str, Any]] = None,
     ) -> int:
         """建立一筆新的訓練 job，初始 state 為 'preprocess'。回傳 rowid。
 
@@ -6536,6 +6539,10 @@ class CAPIDatabase:
             json.dumps(image_preprocess_pipelines, ensure_ascii=False)
             if image_preprocess_pipelines is not None else None
         )
+        grid_canonicalization_json = (
+            json.dumps(grid_canonicalization, ensure_ascii=False)
+            if grid_canonicalization is not None else None
+        )
         tile_stride_value = int(tile_stride) if tile_stride is not None else None
         conn = self._get_conn()
         try:
@@ -6545,12 +6552,13 @@ class CAPIDatabase:
                    (job_id, machine_id, state, started_at, panel_paths, panel_modes,
                     training_params, training_scope, training_data_source,
                     image_preprocess_pipeline, image_preprocess_pipelines,
-                    preprocess_after_tiling, tile_stride)
-                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    preprocess_after_tiling, tile_stride, grid_canonicalization)
+                   VALUES (?, ?, 'preprocess', datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id, machine_id, json.dumps(panel_paths), modes_json,
                     params_json, scope_json, source_json, preprocess_json, preprocess_zones_json,
                     1 if preprocess_after_tiling else 0, tile_stride_value,
+                    grid_canonicalization_json,
                 ),
             )
             conn.commit()
@@ -6589,6 +6597,17 @@ class CAPIDatabase:
         job["preprocess_after_tiling"] = bool(job.get("preprocess_after_tiling", 0))
         raw_tile_stride = job.get("tile_stride")
         job["tile_stride"] = int(raw_tile_stride) if raw_tile_stride else 512
+        raw_grid_canonicalization = job.get("grid_canonicalization")
+        job["grid_canonicalization"] = (
+            json.loads(raw_grid_canonicalization)
+            if raw_grid_canonicalization else {
+                "enabled": False,
+                "version": 1,
+                "samples_per_cell": 3,
+                "product_resolution": None,
+                "coordinate_preserving": True,
+            }
+        )
         return job
 
     def get_training_job(self, job_id: str) -> Optional[Dict]:
@@ -7218,6 +7237,7 @@ class CAPIDatabase:
             params.append(limit)
             cur.execute(
                 f"""SELECT id, glass_id, model_id, machine_no,
+                           resolution_x, resolution_y,
                            machine_judgment, ai_judgment, image_dir,
                            request_time, created_at
                     FROM inference_records
@@ -7227,6 +7247,37 @@ class CAPIDatabase:
             )
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def get_inference_panel_resolutions(self, panel_paths: list) -> Dict[str, Tuple[int, int]]:
+        """Return the latest valid Client resolution for each selected image_dir."""
+        clean_paths = list(dict.fromkeys(str(path) for path in panel_paths if str(path)))
+        if not clean_paths:
+            return {}
+        placeholders = ",".join("?" for _ in clean_paths)
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"""SELECT image_dir, resolution_x, resolution_y, id
+                    FROM inference_records
+                    WHERE image_dir IN ({placeholders})
+                    ORDER BY id DESC""",
+                clean_paths,
+            )
+            result: Dict[str, Tuple[int, int]] = {}
+            for image_dir, width, height, _record_id in cur.fetchall():
+                key = str(image_dir or "")
+                if key in result:
+                    continue
+                try:
+                    resolution = (int(width), int(height))
+                except (TypeError, ValueError):
+                    continue
+                if resolution[0] > 0 and resolution[1] > 0:
+                    result[key] = resolution
+            return result
         finally:
             conn.close()
 

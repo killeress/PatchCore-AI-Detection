@@ -3082,7 +3082,17 @@ class CAPIInferencer:
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
             image_preprocess_pipelines=getattr(self.config, "image_preprocess_pipelines", {}),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
-            product_resolution=self._product_resolution(),
+            product_resolution=(
+                getattr(self.config, "grid_product_resolution", None)
+                if getattr(self.config, "grid_canonicalization_enabled", False)
+                else self._product_resolution()
+            ),
+            grid_canonicalization_enabled=getattr(
+                self.config, "grid_canonicalization_enabled", False
+            ),
+            grid_samples_per_cell=getattr(
+                self.config, "grid_samples_per_cell", 3
+            ),
             rotate_180=getattr(self, "_rotate_detection_images_180", False),
         )
         pre_result = preprocess_panel_image(image_path, lighting, pre_cfg)
@@ -6282,6 +6292,12 @@ class CAPIInferencer:
                 image_preprocess_pipelines=getattr(self.config, "image_preprocess_pipelines", {}),
                 preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
                 product_resolution=product_resolution or self._product_resolution(),
+                grid_canonicalization_enabled=getattr(
+                    self.config, "grid_canonicalization_enabled", False
+                ),
+                grid_samples_per_cell=getattr(
+                    self.config, "grid_samples_per_cell", 3
+                ),
                 rotate_180=getattr(self, "_rotate_detection_images_180", False),
             )
             aoi_tile_count = 0
@@ -7105,6 +7121,28 @@ class CAPIInferencer:
         machine_judgment: Optional[str] = None,
     ):
         """分發器：依 config.is_new_architecture 路由至 v1 或 v2 實作。"""
+        if getattr(self.config, "grid_canonicalization_enabled", False):
+            from capi_grid_canonicalization import normalize_product_resolution
+
+            actual_resolution = normalize_product_resolution(product_resolution)
+            if actual_resolution is None:
+                raise ValueError(
+                    "Pixel Grid 標準化模型需要 Client 傳入產品解析度"
+                )
+            expected_resolution = normalize_product_resolution(
+                getattr(self.config, "grid_product_resolution", None)
+            )
+            if expected_resolution is None:
+                raise ValueError(
+                    "Pixel Grid 標準化模型未記錄訓練產品解析度，請重新訓練模型"
+                )
+            if actual_resolution != expected_resolution:
+                raise ValueError(
+                    "Client 產品解析度與模型訓練解析度不一致: "
+                    f"client={actual_resolution[0]}x{actual_resolution[1]}, "
+                    f"model={expected_resolution[0]}x{expected_resolution[1]}"
+                )
+            product_resolution = actual_resolution
         panel_result = self._dispatch_process_panel(
             panel_dir,
             progress_callback=progress_callback,
@@ -9115,10 +9153,19 @@ class CAPIInferencer:
             edge_threshold_px=self.config.edge_threshold_px,
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
             image_preprocess_pipelines=getattr(self.config, "image_preprocess_pipelines", {}),
-            cache_processed_image=aoi_only_mode,
+            cache_processed_image=(
+                aoi_only_mode
+                or getattr(self.config, "grid_canonicalization_enabled", False)
+            ),
             generate_grid_tiles=bool(self.config.grid_tiling_enabled),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
             product_resolution=product_resolution or self._product_resolution(),
+            grid_canonicalization_enabled=getattr(
+                self.config, "grid_canonicalization_enabled", False
+            ),
+            grid_samples_per_cell=getattr(
+                self.config, "grid_samples_per_cell", 3
+            ),
             rotate_180=getattr(self, "_rotate_detection_images_180", False),
         )
 

@@ -171,6 +171,47 @@ def test_process_panel_v2_passes_requested_product_resolution_to_preprocess(tmp_
     assert captured["product_resolution"] == (1366, 768)
 
 
+def test_grid_model_requires_matching_client_resolution(tmp_path, monkeypatch):
+    _write_grey_panel_image(tmp_path, "G0F00000")
+    cfg = _make_config(tmp_path)
+    cfg.grid_canonicalization_enabled = True
+    cfg.grid_samples_per_cell = 3
+    cfg.grid_product_resolution = (1920, 1080)
+    captured = {}
+
+    def fake_preprocess_panel_folder(
+        _panel_path,
+        pre_cfg,
+        image_files=None,
+        boundary_reference_files=None,
+    ):
+        captured["enabled"] = pre_cfg.grid_canonicalization_enabled
+        captured["samples"] = pre_cfg.grid_samples_per_cell
+        captured["resolution"] = pre_cfg.product_resolution
+        captured["cache"] = pre_cfg.cache_processed_image
+        return {}
+
+    monkeypatch.setattr(
+        "capi_preprocess.preprocess_panel_folder", fake_preprocess_panel_folder
+    )
+
+    from capi_inference import CAPIInferencer
+
+    inferencer = CAPIInferencer(cfg)
+    with pytest.raises(ValueError, match="需要 Client"):
+        inferencer.process_panel(tmp_path)
+    with pytest.raises(ValueError, match="不一致"):
+        inferencer.process_panel(tmp_path, product_resolution=(1366, 768))
+
+    inferencer.process_panel(tmp_path, product_resolution=(1920, 1080))
+    assert captured == {
+        "enabled": True,
+        "samples": 3,
+        "resolution": (1920, 1080),
+        "cache": True,
+    }
+
+
 def test_process_panel_v2_passes_configured_rotation_to_preprocess(tmp_path, monkeypatch):
     _write_grey_panel_image(tmp_path, "G0F00000")
     cfg = _make_config(tmp_path)

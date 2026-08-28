@@ -1,5 +1,13 @@
 # 更新紀錄
 
+## 2026-08-28 v1
+
+### [模型訓練]產品 Pixel Grid 標準化
+
+- 訓練頁新增可選的 Pixel Grid 對齊與 Cell-aware area resampling；`samples_per_cell` 僅允許 `3`（建議，保留較多細節）或 `1`（較強抑制摩爾紋，但極細／Subpixel defect 可能被稀釋）。
+- 完整訓練會從所選推論紀錄取得 Client 產品解析度，解析度缺漏或混用時停止建模；設定與解析度會寫入 Job、模型 manifest 及 `machine_config.yaml`。
+- 推論會套用與訓練相同設定，並強制檢查 Client 解析度與模型一致；舊模型維持停用，模型庫可查看實際設定。
+
 ## 2026-08-27 v3
 
 ### [AAPI 新增支援]一廠圖片與每日 Report
