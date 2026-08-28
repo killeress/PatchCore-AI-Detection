@@ -330,6 +330,32 @@ class TestTrainingJobsCRUD:
         db = _make_db(tmp_path)
         assert db.get_training_job("nonexistent") is None
 
+    def test_failed_training_job_can_return_to_review_without_losing_error(self, tmp_path):
+        db = _make_db(tmp_path)
+        job_id = "train_retry"
+        db.create_training_job(job_id=job_id, machine_id="M", panel_paths=["/p"])
+        db.insert_tile_pool(job_id, [{
+            "lighting": "G0F00000",
+            "zone": "inner",
+            "source": "ok",
+            "source_path": "/tile.png",
+        }])
+        db.update_training_job_state(
+            job_id,
+            "failed",
+            error_message="CUDA out of memory",
+            output_bundle="/partial/bundle",
+        )
+
+        assert db.reset_failed_training_job_for_review(job_id) is True
+
+        job = db.get_training_job(job_id)
+        assert job["state"] == "review"
+        assert job["completed_at"] is None
+        assert job["output_bundle"] is None
+        assert job["error_message"] == "CUDA out of memory"
+        assert db.reset_failed_training_job_for_review(job_id) is False
+
     def test_update_output_bundle(self, tmp_path):
         db = _make_db(tmp_path)
         job_id = "train_test_bundle"
@@ -362,6 +388,28 @@ class TestTrainingJobsCRUD:
         active = db.get_active_training_job()
         assert active is not None
         assert active["state"] in ("preprocess", "review", "train")
+
+    def test_list_retryable_training_jobs_requires_failed_job_with_tiles(self, tmp_path):
+        db = _make_db(tmp_path)
+        for job_id, state, with_tile in (
+            ("j_retry", "failed", True),
+            ("j_failed_empty", "failed", False),
+            ("j_review", "review", True),
+        ):
+            db.create_training_job(job_id=job_id, machine_id="M", panel_paths=[])
+            db.update_training_job_state(job_id, state)
+            if with_tile:
+                db.insert_tile_pool(job_id, [{
+                    "lighting": "G0F00000",
+                    "zone": "inner",
+                    "source": "ok",
+                    "source_path": f"/{job_id}.png",
+                    "decision": "reject",
+                }])
+
+        jobs = db.list_retryable_training_jobs()
+
+        assert [job["job_id"] for job in jobs] == ["j_retry"]
 
     def test_panel_paths_empty_list(self, tmp_path):
         db = _make_db(tmp_path)
@@ -499,7 +547,7 @@ class TestTrainingJobsCRUD:
 
 
 class TestTilePoolCRUD:
-    def test_training_bomb_candidates_use_client_coordinates_without_ai_match_and_skip_black(self, tmp_path):
+    def test_training_bomb_candidates_use_client_coordinates_without_ai_match_and_skip_black_and_expired(self, tmp_path):
         db = _make_db(tmp_path)
 
         common = {
@@ -597,6 +645,20 @@ class TestTilePoolCRUD:
             lightings=("STANDARD",),
         )
         assert [row["image_name"] for row in standard_rows] == ["U0F00000_100000.tif"]
+
+        with _conn(db) as conn:
+            conn.execute(
+                """UPDATE inference_records
+                      SET created_at = datetime('now', 'localtime', '-4 days')
+                    WHERE glass_id = 'P001'"""
+            )
+            conn.commit()
+
+        expired_rows = db.list_training_bomb_candidates(
+            machine_id="MODEL-A",
+            lightings=("WGF50500",),
+        )
+        assert expired_rows == []
 
     def test_tile_pool_crud(self, tmp_path):
         db = _make_db(tmp_path)

@@ -21,6 +21,17 @@
     <button id="cancel-btn" type="button" onclick="cancelTraining()" style="background:#45475a;color:#cdd6f4;border:1px solid #585b70;border-radius:6px;padding:7px 12px;cursor:pointer;">取消訓練</button>
   </div>
 
+  <div id="failed-actions" style="display:none;background:#313244;border:1px solid #f38ba8;border-radius:10px;padding:14px 16px;margin-top:14px;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+    <div>
+      <div style="color:#cdd6f4;font-weight:700;">原選圖與 tile 審核結果已保留</div>
+      <div id="failed-retry-note" style="color:#a6adc8;font-size:.82rem;margin-top:3px;">可以回到審核頁確認後重新訓練，不需要再次挑圖。</div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button id="retry-btn" type="button" onclick="retryTraining()" style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:6px;padding:8px 14px;font-weight:700;cursor:pointer;">回到原選圖重試</button>
+      <button id="abandon-failed-btn" type="button" onclick="abandonFailedTraining()" style="background:#313244;color:#f38ba8;border:1px solid #f38ba8;border-radius:6px;padding:8px 14px;font-weight:700;cursor:pointer;">放棄並清除</button>
+    </div>
+  </div>
+
   <div id="unit-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:16px;"></div>
 
 <style>
@@ -129,16 +140,29 @@ function poll() {
       pill.style.background = '#fab387';
       pill.textContent = stateText(d.state);
       document.getElementById('cancel-btn').disabled = !['preprocess', 'train', 'review'].includes(d.state);
+      const failedActions = document.getElementById('failed-actions');
       if (d.state === 'failed') {
-        clearInterval(_timer);
+        if (!d.worker_alive) clearInterval(_timer);
         pill.style.background = '#f38ba8';
         pill.textContent = '失敗：' + displayTrainingText(d.error_message || '未知');
+        failedActions.style.display = 'flex';
+        const retryButton = document.getElementById('retry-btn');
+        retryButton.style.display = d.retryable ? '' : 'none';
+        document.getElementById('failed-retry-note').textContent = d.retryable
+          ? '可以回到審核頁確認後重新訓練，不需要再次挑圖。'
+          : (d.worker_alive
+              ? '系統正在整理失敗的訓練資源，請稍後重新整理。'
+              : '此 job 沒有可重用的選圖資料，請放棄後重新建立訓練。');
       } else if (d.state === 'completed') {
+        failedActions.style.display = 'none';
         clearInterval(_timer);
         location.href = `/train/new/done/${encodeURIComponent(jobId)}`;
       } else if (d.state === 'review') {
+        failedActions.style.display = 'none';
         clearInterval(_timer);
         location.href = `/train/new/review/${encodeURIComponent(jobId)}`;
+      } else {
+        failedActions.style.display = 'none';
       }
     })
     .catch(error => {
@@ -151,7 +175,7 @@ function poll() {
 
 async function cancelTraining() {
   const ok = await capConfirm(
-    '已完成的 unit 不會保留，需從 Step 1 重新開始整個訓練流程。',
+    '已完成的 unit 模型不會保留；原選圖與 tile 審核結果會保留，可回到審核頁重試。',
     {title: '確定要取消訓練？', confirmText: '取消訓練', cancelText: '繼續訓練', danger: true}
   );
   if (!ok) return;
@@ -168,6 +192,47 @@ async function cancelTraining() {
     .finally(() => {
       btn.disabled = false;
     });
+}
+
+async function retryTraining() {
+  const btn = document.getElementById('retry-btn');
+  btn.disabled = true;
+  try {
+    const response = await fetch(`/api/train/new/retry/${encodeURIComponent(jobId)}`, {
+      method: 'POST'
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    location.href = `/train/new/review/${encodeURIComponent(jobId)}`;
+  } catch (error) {
+    btn.disabled = false;
+    await capAlert(error.message || '無法準備重試。', {type: 'error', title: '重試失敗'});
+  }
+}
+
+async function abandonFailedTraining() {
+  const ok = await capConfirm(
+    '此 job 的原選圖與 tile 審核結果將永久清除。',
+    {title: '確定放棄此次訓練？', confirmText: '放棄並清除', cancelText: '保留', danger: true}
+  );
+  if (!ok) return;
+  const btn = document.getElementById('abandon-failed-btn');
+  btn.disabled = true;
+  try {
+    const response = await fetch(`/api/train/new/cancel/${encodeURIComponent(jobId)}`, {
+      method: 'POST'
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    location.href = '/train/new';
+  } catch (error) {
+    btn.disabled = false;
+    await capAlert(error.message || '無法清除此 job。', {type: 'error', title: '清除失敗'});
+  }
 }
 
 function stateText(s) {

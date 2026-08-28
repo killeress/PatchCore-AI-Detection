@@ -387,6 +387,61 @@ def test_sample_ng_tiles(tmp_path):
     thumb_path.resolve().relative_to(thumb_dir.resolve())
 
 
+def test_sample_ng_tiles_aggregates_missing_recent_source_warnings(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from capi_train_new import sample_ng_tiles
+
+    class MockDB:
+        def list_training_bomb_candidates(self, machine_id, lightings):
+            assert machine_id == "MODEL-A"
+            assert tuple(lightings) == ("G0F00000",)
+            return [
+                {
+                    "inference_record_id": index,
+                    "source_result_id": index,
+                    "client_bomb_info": (
+                        '{"image_prefix":"G0F00000","defect_type":"point",'
+                        '"coordinates":[[350,350]]}'
+                    ),
+                    "image_path": str(tmp_path / f"G0F00000_missing_{index}.png"),
+                    "image_dir": str(tmp_path),
+                    "image_name": f"G0F00000_missing_{index}.png",
+                }
+                for index in (1, 2)
+            ]
+
+        def insert_tile_pool(self, _job_id, _tiles):
+            raise AssertionError("missing sources must not create NG tiles")
+
+    probed_paths = []
+    original_is_file = Path.is_file
+
+    def tracked_is_file(path):
+        probed_paths.append(path)
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", tracked_is_file)
+    logs = []
+    stats = sample_ng_tiles(
+        job_id="j_missing_recent",
+        machine_id="MODEL-A",
+        over_review_root=tmp_path / "unused",
+        db=MockDB(),
+        thumb_dir=tmp_path / "thumbs",
+        per_lighting=10,
+        log=logs.append,
+        lightings=("G0F00000",),
+    )
+
+    missing_logs = [line for line in logs if "炸彈原圖不存在" in line]
+    missing_probes = [path for path in probed_paths if path.name.startswith("G0F00000_missing_")]
+    assert stats["sampled"] == 0
+    assert stats["invalid_skipped"] == 2
+    assert missing_logs == ["  ⚠ G0F00000: 最近 3 天炸彈原圖不存在 2 筆，已略過"]
+    assert len(missing_probes) == 2
+
+
 def test_sample_ng_tiles_routes_aapi_prefixed_image_to_model_lighting(tmp_path):
     import cv2
     import numpy as np

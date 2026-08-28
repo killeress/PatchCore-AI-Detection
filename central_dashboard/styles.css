@@ -349,6 +349,7 @@ h2 {
 
 .dashboard-settings-link:focus-visible,
 .theme-toggle:focus-visible,
+.process-tab:focus-visible,
 .overview-update-action:focus-visible,
 .overview-link:focus-visible,
 .line-links a:focus-visible {
@@ -376,6 +377,69 @@ main {
     border: 1px solid #c8dce9;
     border-radius: 16px;
     box-shadow: var(--shadow-strong);
+}
+
+.process-tabs {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 18px;
+    padding: 7px;
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+}
+
+.process-tabs[hidden],
+.overview-table tr[hidden],
+.line-card[hidden],
+.factory-group[hidden] {
+    display: none;
+}
+
+.process-tabs-label {
+    padding-left: 11px;
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 900;
+    letter-spacing: 0.12em;
+    white-space: nowrap;
+}
+
+.process-tab-list {
+    display: flex;
+    flex: 1;
+    gap: 6px;
+}
+
+.process-tab {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    min-height: 42px;
+    padding: 0 16px;
+    color: var(--heading-soft);
+    background: var(--surface-soft);
+    border: 1px solid transparent;
+    border-radius: 9px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 900;
+    transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.process-tab:hover {
+    color: var(--primary-dark);
+    background: var(--surface-blue);
+    border-color: var(--line);
+}
+
+.process-tab[aria-pressed="true"] {
+    color: var(--surface);
+    background: var(--primary);
+    border-color: var(--primary);
 }
 
 .summary-grid {
@@ -1578,6 +1642,21 @@ main {
         justify-content: space-between;
         padding-bottom: 6px;
         border-bottom: 1px solid var(--line);
+    }
+
+    .process-tabs {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 7px;
+    }
+
+    .process-tabs-label {
+        padding: 3px 5px 0;
+    }
+
+    .process-tab {
+        flex: 1;
+        padding: 0 9px;
     }
 
     .clock-block,

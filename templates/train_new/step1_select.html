@@ -20,7 +20,7 @@
 
   {% if active_jobs %}
   <div style="background:#2f3347;border:1px solid #89b4fa;border-radius:10px;padding:14px 16px;margin-top:16px;">
-    <div style="color:#cdd6f4;font-weight:700;font-size:.92rem;margin-bottom:6px;">進行中的訓練 job ({{ active_jobs|length }})</div>
+    <div style="color:#cdd6f4;font-weight:700;font-size:.92rem;margin-bottom:6px;">進行中或可重試的訓練 job ({{ active_jobs|length }})</div>
     {% for j in active_jobs %}
     <div style="display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 0;border-top:1px solid #45475a;">
       <div>
@@ -29,7 +29,7 @@
           <span style="margin-left:8px;color:#a6adc8;">{{ j.machine_id }}</span>
         </div>
         <div style="color:#a6adc8;font-size:.78rem;margin-top:2px;">
-          state: <span style="color:{% if j.state == 'review' %}#a6e3a1{% elif j.state == 'train' %}#fab387{% else %}#89b4fa{% endif %};font-weight:600;">{{ j.state }}</span>
+          state: <span style="color:{% if j.state == 'review' %}#a6e3a1{% elif j.state == 'train' %}#fab387{% elif j.state == 'failed' %}#f38ba8{% else %}#89b4fa{% endif %};font-weight:600;">{{ j.state }}</span>
         </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
@@ -39,6 +39,9 @@
         {% elif j.state in ('preprocess', 'train') %}
         <a href="/train/new/progress?job_id={{ j.job_id }}"
            style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:6px 12px;font-weight:700;text-decoration:none;font-size:.82rem;">查看進度 →</a>
+        {% elif j.state == 'failed' %}
+        <a href="/train/new/progress?job_id={{ j.job_id }}"
+           style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:6px 12px;font-weight:700;text-decoration:none;font-size:.82rem;">保留選圖重試 →</a>
         {% endif %}
         <button onclick="cancelReviewJob('{{ j.job_id }}')"
           style="background:#313244;color:#f38ba8;border:1px solid #f38ba8;border-radius:5px;padding:6px 12px;font-weight:700;font-size:.82rem;cursor:pointer;">
@@ -238,7 +241,7 @@
     <summary style="cursor:pointer;color:#cdd6f4;font-weight:600;font-size:.92rem;list-style:none;display:flex;align-items:center;gap:8px;">
       <span style="display:inline-block;transition:transform .15s ease;">▶</span>
       🧭 產品 Pixel Grid 標準化（實驗性）
-      <span style="color:#a6adc8;font-weight:400;font-size:.8rem;">用 Panel 四角與 Client 解析度固定產品 Pixel 相位</span>
+      <span style="color:#a6adc8;font-weight:400;font-size:.8rem;">用 Panel 四角與產品解析度固定產品 Pixel 相位</span>
     </summary>
     <div style="display:grid;grid-template-columns:minmax(260px,1fr) minmax(280px,1fr);gap:14px;margin-top:14px;">
       <label style="display:flex;align-items:flex-start;gap:9px;color:#cdd6f4;font-size:.86rem;line-height:1.5;">
@@ -259,6 +262,31 @@
           <option value="1" {% if target_grid_canonicalization.samples_per_cell|default(3) == 1 %}selected{% endif %}>1 — 摩爾紋抑制較強，極細／Subpixel defect 可能被稀釋</option>
         </select>
       </label>
+      <div id="grid-manual-resolution-fields"
+           style="display:none;grid-column:1/-1;flex-direction:column;gap:8px;padding:11px 12px;background:#1e1e2e;border:1px solid #45475a;border-radius:7px;">
+        <div style="color:#cdd6f4;font-size:.84rem;font-weight:700;">
+          手動資料產品解析度
+          <span style="color:#a6adc8;font-size:.76rem;font-weight:400;">預設 1920×1080，請確認或修改產品解析度</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;">
+          <label style="display:flex;align-items:center;gap:6px;color:#bac2de;font-size:.8rem;">
+            寬
+            <input type="number" id="grid-product-width" min="1" step="1" value="1920"
+                   inputmode="numeric" aria-label="產品解析度寬度"
+                   style="width:120px;background:#11111b;color:#cdd6f4;border:1px solid #585b70;border-radius:5px;padding:7px 9px;">
+          </label>
+          <span style="color:#a6adc8;">×</span>
+          <label style="display:flex;align-items:center;gap:6px;color:#bac2de;font-size:.8rem;">
+            高
+            <input type="number" id="grid-product-height" min="1" step="1" value="1080"
+                   inputmode="numeric" aria-label="產品解析度高度"
+                   style="width:120px;background:#11111b;color:#cdd6f4;border:1px solid #585b70;border-radius:5px;padding:7px 9px;">
+          </label>
+        </div>
+        <div style="color:#a6adc8;font-size:.75rem;line-height:1.45;">
+          請填 Panel 的邏輯產品解析度，不是 CCD 輸出 TIFF 的影像尺寸；此值會寫入模型，推論時仍會與 Client 通訊解析度核對。
+        </div>
+      </div>
     </div>
     <div id="grid-resolution-status" style="margin-top:12px;padding:9px 12px;background:#1e1e2e;border:1px solid #45475a;border-radius:7px;color:#a6adc8;font-size:.8rem;line-height:1.5;">
       尚未選擇 PANEL；啟用後會由所選推論紀錄讀取 Client 解析度。
@@ -989,6 +1017,7 @@ function setDataSource(source) {
     renderPanels([], '請輸入機種 ID 與 batch 根目錄後掃描。');
     document.getElementById('manual-scan-status').textContent = '';
   }
+  syncGridCanonicalization();
 }
 
 function loadPanels() {
@@ -1478,7 +1507,18 @@ function selectedGridResolution() {
     return {resolution: expected, error: null};
   }
   if (_dataSource === 'manual_folder') {
-    return {resolution: null, error: '完整訓練的手動資料沒有 Client 解析度，無法啟用 Pixel Grid 標準化'};
+    const widthEl = document.getElementById('grid-product-width');
+    const heightEl = document.getElementById('grid-product-height');
+    const width = Number(widthEl?.value);
+    const height = Number(heightEl?.value);
+    const widthValid = Number.isInteger(width) && width > 0;
+    const heightValid = Number.isInteger(height) && height > 0;
+    widthEl?.classList.toggle('invalid', !widthValid);
+    heightEl?.classList.toggle('invalid', !heightValid);
+    if (!widthValid || !heightValid) {
+      return {resolution: null, error: '手動資料產品解析度的寬、高必須是正整數'};
+    }
+    return {resolution: [width, height], error: null};
   }
   if (!_selected.size) {
     return {resolution: null, error: '請先選擇訓練 PANEL'};
@@ -1522,6 +1562,15 @@ function syncGridCanonicalization() {
   const enabled = document.getElementById('grid-canonicalization-enabled')?.checked || false;
   const samplesEl = document.getElementById('grid-samples-per-cell');
   if (samplesEl) samplesEl.disabled = isPartialTraining() || !enabled;
+  const manualResolutionFields = document.getElementById('grid-manual-resolution-fields');
+  const manualResolutionEditable = _dataSource === 'manual_folder' && !isPartialTraining();
+  if (manualResolutionFields) {
+    manualResolutionFields.style.display = manualResolutionEditable ? 'flex' : 'none';
+  }
+  ['grid-product-width', 'grid-product-height'].forEach(id => {
+    const input = document.getElementById(id);
+    if (input) input.disabled = !manualResolutionEditable || !enabled;
+  });
   const status = document.getElementById('grid-resolution-status');
   if (!status) return;
   if (!enabled) {
@@ -1535,8 +1584,11 @@ function syncGridCanonicalization() {
     status.textContent = error;
   } else {
     const samples = Number(samplesEl?.value || 3);
+    const resolutionSource = isPartialTraining()
+      ? '目標模型產品解析度'
+      : (_dataSource === 'manual_folder' ? '手動確認產品解析度' : 'Client 產品解析度');
     status.style.color = '#a6e3a1';
-    status.textContent = `Client／模型產品解析度：${resolution[0]}×${resolution[1]}；canonical plane：${resolution[0] * samples}×${resolution[1] * samples}（${samples} samples/cell）`;
+    status.textContent = `${resolutionSource}：${resolution[0]}×${resolution[1]}；canonical plane：${resolution[0] * samples}×${resolution[1] * samples}（${samples} samples/cell）`;
   }
 }
 
@@ -1666,6 +1718,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const cleaningLayout = document.getElementById('tp-feature_cleaning_layout');
   const gridEnabled = document.getElementById('grid-canonicalization-enabled');
   const gridSamples = document.getElementById('grid-samples-per-cell');
+  const gridProductWidth = document.getElementById('grid-product-width');
+  const gridProductHeight = document.getElementById('grid-product-height');
   if (addBtn) addBtn.onclick = () => addPipelineStep('bilateral');
   if (resetBtn) resetBtn.onclick = () => resetPipelineDefault();
   if (clearBtn) clearBtn.onclick = () => clearPipeline();
@@ -1676,6 +1730,8 @@ document.addEventListener('DOMContentLoaded', () => {
   if (manualBatchInput) manualBatchInput.addEventListener('input', invalidateManualScan);
   if (gridEnabled) gridEnabled.addEventListener('change', syncGridCanonicalization);
   if (gridSamples) gridSamples.addEventListener('change', syncGridCanonicalization);
+  if (gridProductWidth) gridProductWidth.addEventListener('input', syncGridCanonicalization);
+  if (gridProductHeight) gridProductHeight.addEventListener('input', syncGridCanonicalization);
   if (preprocessMode) preprocessMode.addEventListener('change', syncPreprocessConfigMode);
   document.querySelectorAll('.pp-zone-tab').forEach(btn => {
     btn.addEventListener('click', () => setActivePipelineZone(btn.dataset.zone));
