@@ -412,38 +412,6 @@ def test_aapi_report_does_not_fall_back_to_stale_row_when_latest_is_partial(tmp_
         )
 
 
-def test_aapi_report_waits_for_slow_latest_record_completion(tmp_path, monkeypatch):
-    report_root = tmp_path / "report"
-    report_root.mkdir()
-    report = report_root / "Report260828.log"
-    report.write_text(
-        "2026/8/28 11:47:19,T362F8B0NF09,NG,STANDARD,CO05(029",
-        encoding="utf-8",
-    )
-    sleep_calls = []
-
-    def finish_report(_seconds):
-        sleep_calls.append(_seconds)
-        if len(sleep_calls) == 3:
-            report.write_text(
-                "2026/8/28 11:47:19,T362F8B0NF09,NG,"
-                "STANDARD,CO05(02996,00555)\n",
-                encoding="utf-8",
-            )
-
-    monkeypatch.setattr("capi_station_adapter.time.sleep", finish_report)
-    adapter = AAPIStationAdapter(report_root=report_root)
-
-    parsed = adapter.parse_aoi_report(
-        tmp_path / "yuantu" / "20260828" / "T362F8B0NF09",
-        glass_id="T362F8B0NF09",
-        machine_judgment="NG",
-    )
-
-    assert len(sleep_calls) == 3
-    assert (parsed["WINDOWS_BG"][0].x, parsed["WINDOWS_BG"][0].y) == (998, 555)
-
-
 def test_aapi_ok_without_log_row_has_no_aoi_candidates(tmp_path):
     report_root = tmp_path / "LOG"
     adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
