@@ -50,10 +50,24 @@ class TrainingDB(Protocol):
     def save_training_bomb_validation_samples(self, samples: List[dict]) -> int: ...
 
 LIGHTINGS = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
+SUPPORTED_LIGHTINGS = (
+    "G0F00000",
+    "R0F00000",
+    "W0F00000",
+    "WGF25250",
+    "WGF50500",
+    "U0F00000",
+    "STANDARD",
+)
 ZONE_INNER = "inner"
 ZONE_EDGE = "edge"
 ZONES = (ZONE_INNER, ZONE_EDGE)
 TRAINING_UNITS = [(l, z) for l in LIGHTINGS for z in ZONES]  # 10 個
+SUPPORTED_TRAINING_UNITS = [
+    (lighting, zone)
+    for lighting in SUPPORTED_LIGHTINGS
+    for zone in ZONES
+]
 
 MIN_TRAIN_TILES = 30
 NG_TILES_PER_LIGHTING = 100
@@ -144,7 +158,7 @@ def normalize_training_units(
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid training unit: {raw_unit}") from exc
         unit = (str(lighting), str(zone))
-        if unit not in TRAINING_UNITS:
+        if unit not in SUPPORTED_TRAINING_UNITS:
             raise ValueError(f"invalid training unit: {unit[0]}-{unit[1]}")
         if unit not in normalized:
             normalized.append(unit)
@@ -512,7 +526,7 @@ def preprocess_panels_to_pool(
                 if training_lighting_resolver is not None
                 else source_lighting
             )
-            if lighting not in LIGHTINGS:
+            if lighting not in SUPPORTED_LIGHTINGS:
                 continue
             if target_lighting_set is not None and lighting not in target_lighting_set:
                 continue
@@ -1616,7 +1630,8 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
         grid_canonicalization,
         require_resolution=True,
     )
-    for lighting in LIGHTINGS:
+    output_lightings = LIGHTINGS if succeeded_units is None else SUPPORTED_LIGHTINGS
+    for lighting in output_lightings:
         if succeeded_units is not None and not all(
             (lighting, zone) in succeeded_units for zone in ("inner", "edge")
         ):

@@ -20,22 +20,39 @@ def test_normalize_panel_modes_defaults_and_validates():
         normalize_panel_modes(["unknown"], 1)
 
 
-def test_normalize_training_units_accepts_aapi_subset():
+def test_normalize_training_units_accepts_all_aapi_model_families():
     from capi_train_new import normalize_training_units
 
     units = normalize_training_units([
+        "G0F00000-inner",
+        "G0F00000-edge",
         "R0F00000-inner",
         "R0F00000-edge",
         "W0F00000-inner",
         "W0F00000-edge",
+        "WGF25250-inner",
+        "WGF25250-edge",
         "WGF50500-inner",
         "WGF50500-edge",
+        "U0F00000-inner",
+        "U0F00000-edge",
         "STANDARD-inner",
         "STANDARD-edge",
     ])
 
-    assert len(units) == 8
-    assert ("G0F00000", "inner") not in units
+    assert len(units) == 14
+    assert ("WGF25250", "inner") in units
+    assert ("U0F00000", "edge") in units
+
+
+def test_normalize_training_units_default_remains_capi_ten_units():
+    from capi_train_new import normalize_training_units
+
+    units = normalize_training_units(None)
+
+    assert len(units) == 10
+    assert ("WGF25250", "inner") not in units
+    assert ("U0F00000", "edge") not in units
 
 
 def test_run_training_pipeline_uses_configured_training_units(tmp_path, monkeypatch):
@@ -70,8 +87,10 @@ def test_run_training_pipeline_uses_configured_training_units(tmp_path, monkeypa
         fake_train_single_submodel,
     )
     configured_units = [
-        ("R0F00000", "inner"),
-        ("R0F00000", "edge"),
+        ("WGF25250", "inner"),
+        ("WGF25250", "edge"),
+        ("U0F00000", "inner"),
+        ("U0F00000", "edge"),
     ]
     bundle_dir = run_training_pipeline(
         job_id="j_aapi_units",
@@ -91,11 +110,18 @@ def test_run_training_pipeline_uses_configured_training_units(tmp_path, monkeypa
     )
     assert trained == configured_units
     assert manifest["training_units"] == [
-        "R0F00000-inner", "R0F00000-edge",
+        "WGF25250-inner", "WGF25250-edge",
+        "U0F00000-inner", "U0F00000-edge",
     ]
     assert sorted(path.name for path in bundle_dir.glob("*.pt")) == [
-        "R0F00000-edge.pt", "R0F00000-inner.pt",
+        "U0F00000-edge.pt", "U0F00000-inner.pt",
+        "WGF25250-edge.pt", "WGF25250-inner.pt",
     ]
+    import yaml
+    machine_config = yaml.safe_load(
+        (bundle_dir / "machine_config.yaml").read_text(encoding="utf-8")
+    )
+    assert set(machine_config["model_mapping"]) == {"WGF25250", "U0F00000"}
 
 
 def test_apply_user_training_params_none_is_noop():

@@ -151,6 +151,30 @@ def test_qjpg_response_keeps_source_prefix_for_hm_standard_image():
     assert response == "@QJPG-TL6380GAL102;OK;EJ;NGPCDK20100000500U0F00000,"
 
 
+def test_qjpg_response_keeps_aapi_reserved_model_prefixes_independent():
+    adapter = AAPIStationAdapter()
+    cases = (
+        ("YQ52TR205A41WGF25250073954.tif", "WGF25250"),
+        ("YQ52TR205A41U0F00000073953.tif", "U0F00000"),
+    )
+
+    for image_name, expected_prefix in cases:
+        result = _image_result(image_name)
+        result.report_image_prefix = adapter.report_prefix(image_name)
+        tile = _tile(1, 600, 450)
+        result.tiles = [tile]
+        result.anomaly_tiles = [(tile, 0.91, None)]
+
+        response = build_qjpg_response(
+            {"glass_id": "YQ52TR205A41", "resolution": (2000, 1000)},
+            "NG",
+            [result],
+            CAPIConfig(),
+        )
+
+        assert response.endswith(f"0100000500{expected_prefix},")
+
+
 def test_dual_protocol_response_sends_legacy_aoi_then_qjpg():
     result = _image_result("W0F00000_114438.tif")
     tile = _tile(1, 600, 450)

@@ -100,10 +100,13 @@ def test_preprocess_panels_to_pool_accepts_aapi_glass_prefixed_images(tmp_path):
     panel_dir = tmp_path / "YQ52TR205A41"
     panel_dir.mkdir()
     image_names = (
+        "YQ52TR205A41G0F00000073955.tif",
         "YQ52TR205A41R0F00000073956.tif",
         "YQ52TR205A41W0F00000073951.tif",
         "YQ52TR205A41W0F00010073959.tif",
+        "YQ52TR205A41WGF25250073954.tif",
         "YQ52TR205A41WGF50500073958.tif",
+        "YQ52TR205A41U0F00000073953.tif",
         "YQ52TR205A41Windows_BG073957.tif",
     )
     for image_name in image_names:
@@ -139,11 +142,14 @@ def test_preprocess_panels_to_pool_accepts_aapi_glass_prefixed_images(tmp_path):
 
     assert stats["panel_success"] == 1
     assert {tile["lighting"] for tile in db.tiles} == {
-        "R0F00000", "W0F00000", "WGF50500", "STANDARD",
+        "G0F00000", "R0F00000", "W0F00000", "WGF25250",
+        "WGF50500", "U0F00000", "STANDARD",
     }
     tile_names = {Path(tile["source_path"]).name for tile in db.tiles}
     assert any("W0F00010" in name for name in tile_names)
+    assert any("WGF25250" in name for name in tile_names)
     assert any("WGF50500" in name for name in tile_names)
+    assert any("U0F00000" in name for name in tile_names)
 
 
 def test_preprocess_panels_to_pool_all_panels_have_inner_and_edge(tmp_path):

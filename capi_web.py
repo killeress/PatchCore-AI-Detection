@@ -13701,7 +13701,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 f"({len(training_lightings)} lighting × inner+edge)"
             ),
             "description": (
-                f"訓練完整 {training_unit_count} 個 PT，或針對既有 bundle "
+                f"依資料中實際存在的畫面訓練，最多 {training_unit_count} 個 PT；"
+                f"也可針對既有 bundle "
                 f"選擇指定 PT 重新選圖重訓。已啟用 {active_count} 個 / "
                 f"共 {new_arch_count} bundle。"
             ),
@@ -13782,6 +13783,40 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             f"{lighting}-{zone}"
             for lighting in adapter.training_prefixes
             for zone in ZONES
+        ]
+
+    @staticmethod
+    def _detect_train_new_lightings(panel_paths, station_adapter):
+        """Return model lightings actually present in all readable panel folders.
+
+        ``None`` means at least one selected folder could not be read, so callers
+        must not silently treat an I/O problem as an intentionally absent screen.
+        An empty list means the folders were readable but contained no supported
+        training lighting.
+        """
+        from capi_preprocess import filter_panel_lighting_files
+
+        detected = set()
+        for raw_path in panel_paths:
+            panel_dir = Path(str(raw_path))
+            if not panel_dir.is_dir():
+                return None
+            try:
+                lighting_files = filter_panel_lighting_files(
+                    panel_dir,
+                    prefix_resolver=station_adapter.image_prefix,
+                    allowed_prefixes=station_adapter.inference_prefixes,
+                )
+            except (OSError, TypeError, ValueError):
+                return None
+            detected.update(
+                station_adapter.model_prefix(source_lighting)
+                for source_lighting in lighting_files
+            )
+
+        return [
+            lighting for lighting in station_adapter.training_prefixes
+            if lighting in detected
         ]
 
     @classmethod
@@ -13867,7 +13902,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _normalize_train_new_scope(cls, raw, db=None, all_units=None) -> tuple:
         """Validate and normalize train scope for the 6-step wizard.
 
-        Returns (scope, error).  The default is full 10-unit training.
+        Returns (scope, error).  Full scope starts from every station-supported
+        unit; the start handler later narrows it to screens found in selected data.
         """
         all_units = list(all_units or cls._all_train_unit_labels())
         if raw is None:
@@ -14882,7 +14918,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "image_preprocess_pipeline": [  # optional; omitted means recommended default
                 {"method": "bilateral", "params": {"diameter": 9}}
             ],
-            "training_scope": {   # optional; omitted means full 10-unit training
+            "training_scope": {   # optional; omitted means all screens present in selected data
                 "mode": "full" | "partial",
                 "target_bundle_id": 123,            # partial only
                 "selected_units": ["G0F00000-inner"] # partial only
@@ -15015,14 +15051,41 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         db = self._capi_server_instance.database
+        station_adapter = self._train_new_station_adapter(
+            self._capi_server_instance
+        )
+        all_unit_labels = self._all_train_unit_labels(
+            self._capi_server_instance
+        )
         training_scope, err = self._normalize_train_new_scope(
             params.get("training_scope"),
             db,
-            self._all_train_unit_labels(self._capi_server_instance),
+            all_unit_labels,
         )
         if err:
             self._send_json({"error": err}, status=400)
             return
+        omitted_lightings = []
+        if training_scope["mode"] == "full":
+            detected_lightings = self._detect_train_new_lightings(
+                clean_panel_paths,
+                station_adapter,
+            )
+            if detected_lightings == []:
+                self._send_json({
+                    "error": "所選 PANEL 找不到任何可訓練的 lighting 原圖"
+                }, status=400)
+                return
+            if detected_lightings is not None:
+                detected_set = set(detected_lightings)
+                training_scope["selected_units"] = [
+                    unit for unit in all_unit_labels
+                    if unit.rsplit("-", 1)[0] in detected_set
+                ]
+                omitted_lightings = [
+                    lighting for lighting in station_adapter.training_prefixes
+                    if lighting not in detected_set
+                ]
         required_zones = {
             zone for _lighting, zone in self._scope_selected_units(training_scope)
         }
@@ -15156,6 +15219,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception:
             CAPIWebHandler._drop_job_runtime(job_id)
             raise
+
+        if omitted_lightings:
+            selected_lightings = self._scope_selected_lightings(training_scope)
+            self._append_train_new_log(
+                job_id,
+                "依所選資料自動訓練畫面："
+                + ", ".join(selected_lightings)
+                + "；沒有原圖，略過："
+                + ", ".join(omitted_lightings),
+            )
 
         thread = threading.Thread(
             target=CAPIWebHandler._train_new_preprocess_worker,
@@ -16574,12 +16647,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self._send_binary(str(target))
 
     def _handle_retrain_pool_page(self):
-        from capi_train_new import LIGHTINGS
         today = datetime.now().strftime("%Y-%m-%d")
+        lightings = self._train_new_station_adapter(
+            self._capi_server_instance
+        ).training_prefixes
         template = self.jinja_env.get_template("retrain_pool.html")
         html = template.render(
             request_path="/models/retrain-pool",
-            lightings=list(LIGHTINGS),
+            lightings=list(lightings),
             today=today,
         )
         self._send_response(200, html)
@@ -16895,7 +16970,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         })
 
     def _handle_models_retrain_pool_add(self):
-        from capi_train_new import LIGHTINGS, ZONES
+        from capi_train_new import SUPPORTED_LIGHTINGS, ZONES
 
         parts = self.path.split("/")
         try:
@@ -16912,8 +16987,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if not isinstance(pool_ids, list) or not pool_ids:
             self._send_json({"error": "pool_ids 必須是非空陣列"}, status=400)
             return
-        if lighting not in LIGHTINGS:
-            self._send_json({"error": f"lighting 必須為 {LIGHTINGS}"}, status=400)
+        if lighting not in SUPPORTED_LIGHTINGS:
+            self._send_json({
+                "error": f"lighting 必須為 {SUPPORTED_LIGHTINGS}"
+            }, status=400)
             return
         if zone not in ZONES:
             self._send_json({"error": f"zone 必須為 {ZONES}"}, status=400)
@@ -17247,7 +17324,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """GET /models"""
         db = self._capi_server_instance.database
         from capi_model_registry import list_bundles_grouped, get_pending_change_summary_for_bundle
-        from capi_train_new import LIGHTINGS, TRAINING_UNITS
+        from capi_train_new import ZONES
+        lightings = self._train_new_station_adapter(
+            self._capi_server_instance
+        ).training_prefixes
         grouped = list_bundles_grouped(db)
         for bundles in grouped.values():
             for b in bundles:
@@ -17257,8 +17337,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         html = template.render(
             request_path="/models",
             grouped=grouped,
-            lightings=list(LIGHTINGS),
-            unit_labels=[f"{l}-{z}" for l, z in TRAINING_UNITS],
+            lightings=list(lightings),
+            unit_labels=[f"{lighting}-{zone}" for lighting in lightings for zone in ZONES],
         )
         self._send_response(200, html)
 
@@ -17756,7 +17836,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         重新選圖後只重訓單一子模型，不跑完整 10-unit pipeline。
         """
         from capi_train_new import (
-            LIGHTINGS, ZONES,
+            SUPPORTED_LIGHTINGS, ZONES,
             derive_panel_modes, generate_job_id,
         )
 
@@ -17776,8 +17856,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         lighting = body.get("lighting")
         zone = body.get("zone")
-        if lighting not in LIGHTINGS:
-            self._send_json({"error": f"lighting 必須為 {LIGHTINGS}"}, status=400)
+        if lighting not in SUPPORTED_LIGHTINGS:
+            self._send_json({
+                "error": f"lighting 必須為 {SUPPORTED_LIGHTINGS}"
+            }, status=400)
             return
         if zone not in ZONES:
             self._send_json({"error": f"zone 必須為 {ZONES}"}, status=400)
@@ -18229,7 +18311,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         啟動 worker thread 重訓單一子模型。已有 retrain job 跑 → 409。
         """
-        from capi_train_new import LIGHTINGS, ZONES
+        from capi_train_new import SUPPORTED_LIGHTINGS, ZONES
 
         parts = self.path.split("/")
         try:
@@ -18247,8 +18329,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         lighting = body.get("lighting")
         zone = body.get("zone")
-        if lighting not in LIGHTINGS:
-            self._send_json({"error": f"lighting 必須為 {LIGHTINGS}"}, status=400)
+        if lighting not in SUPPORTED_LIGHTINGS:
+            self._send_json({
+                "error": f"lighting 必須為 {SUPPORTED_LIGHTINGS}"
+            }, status=400)
             return
         if zone not in ZONES:
             self._send_json({"error": f"zone 必須為 {ZONES}"}, status=400)
@@ -18891,7 +18975,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """POST /api/models/<bundle_id>/scan_self_score
         body: {"lighting": str, "zone": "inner"|"edge"}
         """
-        from capi_train_new import LIGHTINGS, ZONES
+        from capi_train_new import SUPPORTED_LIGHTINGS, ZONES
         parts = self.path.split("/")
         try:
             bundle_id = int(parts[3])
@@ -18904,7 +18988,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "invalid JSON"}, status=400); return
 
         lighting = body.get("lighting"); zone = body.get("zone")
-        if lighting not in LIGHTINGS or zone not in ZONES:
+        if lighting not in SUPPORTED_LIGHTINGS or zone not in ZONES:
             self._send_json({"error": "lighting/zone 不合法"}, status=400); return
 
         db = self._capi_server_instance.database
@@ -18943,7 +19027,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """POST /api/train/new/scan_prefilter_score
         body: {"job_id", "scoring_bundle_id", "lighting", "zone"}
         """
-        from capi_train_new import LIGHTINGS, ZONES
+        from capi_train_new import SUPPORTED_LIGHTINGS, ZONES
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
@@ -18959,7 +19043,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             scoring_bundle_id = int(scoring_bundle_id)
         except (TypeError, ValueError):
             self._send_json({"error": "scoring_bundle_id 必須是整數"}, status=400); return
-        if lighting not in LIGHTINGS or zone not in ZONES:
+        if lighting not in SUPPORTED_LIGHTINGS or zone not in ZONES:
             self._send_json({"error": "lighting/zone 不合法"}, status=400); return
 
         db = self._capi_server_instance.database
@@ -19017,14 +19101,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         """
         db = self._capi_server_instance.database
         bundles = db.list_model_bundles() or []
-        from capi_train_new import LIGHTINGS, ZONES
+        from capi_train_new import SUPPORTED_LIGHTINGS, ZONES
         out = []
         for b in bundles:
             bundle_dir = Path(b["bundle_path"])
             # 至少要存在 1 個 .pt 才算可用（細項 lighting+zone 由 frontend 切 tab 才知）
             has_any_pt = any(
                 (bundle_dir / f"{l}-{z}.pt").exists()
-                for l in LIGHTINGS for z in ZONES
+                for l in SUPPORTED_LIGHTINGS for z in ZONES
             )
             if not has_any_pt:
                 continue
