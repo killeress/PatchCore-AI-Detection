@@ -59,15 +59,14 @@ class StationAdapter:
     @property
     def training_prefixes(self) -> Tuple[str, ...]:
         """Model lightings that can be trained from this station's images."""
-        available = {
-            self.model_prefix(prefix)
-            for prefix in self.inference_prefixes
-            if self.is_inference_prefix(prefix)
-        }
-        return tuple(
-            prefix for prefix in StationAdapter.inference_prefixes
-            if prefix in available
-        )
+        available = []
+        for prefix in self.inference_prefixes:
+            if not self.is_inference_prefix(prefix):
+                continue
+            model_prefix = self.model_prefix(prefix)
+            if model_prefix not in available:
+                available.append(model_prefix)
+        return tuple(available)
 
     def report_prefix(self, image_name: str) -> str:
         return source_image_prefix(image_name)
@@ -108,16 +107,22 @@ class AAPIStationAdapter(StationAdapter):
     }
     REPORT_ROOT = REPORT_ROOT_BY_SOURCE_HOST["192.168.2.190"]
     inference_prefixes = (
+        "G0F00000",
         "R0F00000",
         "W0F00000",
+        "WGF25250",
         "W0F00010",
         "WGF50500",
+        "U0F00000",
         "WINDOWS_BG",
     )
     boundary_reference_priority = (
         "W0F00000",
         "WINDOWS_BG",
+        "U0F00000",
+        "G0F00000",
         "R0F00000",
+        "WGF25250",
         "W0F00010",
         "WGF50500",
     )
@@ -128,9 +133,12 @@ class AAPIStationAdapter(StationAdapter):
         ("WINDOWS_BG", "WINDOWS_BG"),
         ("STANDARD", "WINDOWS_BG"),
         ("W0F00010", "W0F00010"),
+        ("WGF25250", "WGF25250"),
         ("WGF50500", "WGF50500"),
+        ("G0F00000", "G0F00000"),
         ("R0F00000", "R0F00000"),
         ("W0F00000", "W0F00000"),
+        ("U0F00000", "U0F00000"),
         ("B0F00000", "B0F00000"),
         ("PINIGBI0", "PINIGBI"),
     )
@@ -139,8 +147,8 @@ class AAPIStationAdapter(StationAdapter):
         "W0F00010": "WGF50500",
     }
     _REPORT_RECORD = re.compile(
-        r"(White_Frame|BWFRAME0|Windows_BG|STANDARD|W0F00010|WGF50500|"
-        r"R0F00000|W0F00000|B0F00000),"
+        r"(White_Frame|BWFRAME0|Windows_BG|STANDARD|W0F00010|WGF25250|"
+        r"WGF50500|G0F00000|R0F00000|W0F00000|U0F00000|B0F00000),"
         r"([A-Za-z0-9]+)\((\d+),(\d+)\)",
         re.IGNORECASE,
     )

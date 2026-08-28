@@ -1811,7 +1811,7 @@ def test_handle_train_new_preprocess_pipeline_preview_uses_aapi_panel_folder(
     assert resp["image_name"] == "YQ52TR205A41W0F00000073951.tif"
 
 
-def test_aapi_training_scope_has_eight_model_units():
+def test_aapi_training_scope_has_fourteen_supported_model_units():
     from capi_station_adapter import AAPIStationAdapter
     from capi_web import CAPIWebHandler
 
@@ -1820,9 +1820,133 @@ def test_aapi_training_scope_has_eight_model_units():
 
     units = CAPIWebHandler._all_train_unit_labels(server)
 
-    assert len(units) == 8
-    assert "G0F00000-inner" not in units
+    assert len(units) == 14
+    assert units[:2] == ["G0F00000-inner", "G0F00000-edge"]
+    assert "WGF25250-inner" in units
+    assert "U0F00000-edge" in units
     assert units[-2:] == ["STANDARD-inner", "STANDARD-edge"]
+
+
+def test_handle_train_new_start_full_scope_omits_capi_screen_without_images(tmp_path):
+    from capi_station_adapter import StationAdapter
+    from capi_web import CAPIWebHandler
+
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    for name in (
+        "R0F00000_090000.tif",
+        "W0F00000_090000.tif",
+        "WGF50500_090000.tif",
+        "U0F00000_090000.tif",
+    ):
+        (panel_dir / name).write_bytes(b"image")
+
+    server = MagicMock()
+    server.station_adapter = StationAdapter()
+    server.database.create_training_job = MagicMock()
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    payload = json.dumps({
+        "machine_id": "M",
+        "panel_paths": [str(panel_dir)],
+    }).encode()
+    h.headers.get = MagicMock(return_value=str(len(payload)))
+    h.rfile = io.BytesIO(payload)
+
+    with patch("capi_web.threading.Thread") as mock_thread:
+        mock_thread.return_value.start = MagicMock()
+        h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 200
+    scope = server.database.create_training_job.call_args.kwargs["training_scope"]
+    assert scope["selected_units"] == [
+        "R0F00000-inner", "R0F00000-edge",
+        "W0F00000-inner", "W0F00000-edge",
+        "WGF50500-inner", "WGF50500-edge",
+        "STANDARD-inner", "STANDARD-edge",
+    ]
+    assert not any(unit.startswith("G0F00000-") for unit in scope["selected_units"])
+    runtime = CAPIWebHandler._get_job_runtime(
+        json.loads(h._sent_response[0]["body"])["job_id"]
+    )
+    assert any("沒有原圖，略過：G0F00000" in line for line in runtime["log_lines"])
+
+
+def test_handle_train_new_start_full_scope_uses_present_aapi_aliases(tmp_path):
+    from capi_station_adapter import AAPIStationAdapter
+    from capi_web import CAPIWebHandler
+
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    (panel_dir / "YQ52TR205A41W0F00000073951.tif").write_bytes(b"image")
+    (panel_dir / "YQ52TR205A41Windows_BG073951.tif").write_bytes(b"image")
+
+    server = MagicMock()
+    server.station_adapter = AAPIStationAdapter()
+    server.database.create_training_job = MagicMock()
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    payload = json.dumps({
+        "machine_id": "AAPI-MOD1",
+        "panel_paths": [str(panel_dir)],
+    }).encode()
+    h.headers.get = MagicMock(return_value=str(len(payload)))
+    h.rfile = io.BytesIO(payload)
+
+    with patch("capi_web.threading.Thread") as mock_thread:
+        mock_thread.return_value.start = MagicMock()
+        h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 200
+    scope = server.database.create_training_job.call_args.kwargs["training_scope"]
+    assert scope["selected_units"] == [
+        "W0F00000-inner", "W0F00000-edge",
+        "STANDARD-inner", "STANDARD-edge",
+    ]
+
+
+def test_handle_train_new_start_includes_present_aapi_reserved_models(tmp_path):
+    from capi_station_adapter import AAPIStationAdapter
+    from capi_web import CAPIWebHandler
+
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    for image_name in (
+        "YQ52TR205A41G0F00000073955.tif",
+        "YQ52TR205A41WGF25250073954.tif",
+        "YQ52TR205A41U0F00000073953.tif",
+    ):
+        (panel_dir / image_name).write_bytes(b"image")
+
+    server = MagicMock()
+    server.station_adapter = AAPIStationAdapter()
+    server.database.create_training_job = MagicMock()
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    payload = json.dumps({
+        "machine_id": "AAPI-MOD1",
+        "panel_paths": [str(panel_dir)],
+    }).encode()
+    h.headers.get = MagicMock(return_value=str(len(payload)))
+    h.rfile = io.BytesIO(payload)
+
+    with patch("capi_web.threading.Thread") as mock_thread:
+        mock_thread.return_value.start = MagicMock()
+        h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 200
+    scope = server.database.create_training_job.call_args.kwargs["training_scope"]
+    assert scope["selected_units"] == [
+        "G0F00000-inner", "G0F00000-edge",
+        "WGF25250-inner", "WGF25250-edge",
+        "U0F00000-inner", "U0F00000-edge",
+    ]
 
 
 def test_handle_train_new_preprocess_pipeline_preview_after_tiling_uses_tile(tmp_path, monkeypatch):
