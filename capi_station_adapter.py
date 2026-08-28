@@ -154,13 +154,11 @@ class AAPIStationAdapter(StationAdapter):
     )
     _DATE_SEGMENT = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
 
-    # AIP writers can publish the NG status before finishing the defect payload.
-    # At the default interval, 26 reads cover a five-second completion window.
     def __init__(
         self,
         *,
         report_root: Optional[Path] = None,
-        report_retry_count: int = 26,
+        report_retry_count: int = 3,
         report_retry_interval_seconds: float = 0.2,
     ):
         self._report_root_overridden = report_root is not None
