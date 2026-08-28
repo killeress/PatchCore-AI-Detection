@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Iterable, Any, Callable
 import logging
+import time
 import numpy as np
 import cv2
 from capi_image_orientation import read_detection_image
@@ -147,6 +148,8 @@ class PreprocessConfig:
     generate_grid_tiles: bool = True
     preprocess_after_tiling: bool = False
     product_resolution: Optional[Tuple[int, int]] = None
+    grid_canonicalization_enabled: bool = False
+    grid_samples_per_cell: int = 3
     rotate_180: bool = False
     image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
@@ -967,6 +970,71 @@ def preprocess_panel_image(
             processed_image=img if config.cache_processed_image else None,
         )
 
+    if getattr(config, "grid_canonicalization_enabled", False):
+        if polygon is None:
+            logger.warning(
+                "[grid] %s: panel polygon unavailable; skip tiles",
+                image_path.name,
+            )
+            return PanelPreprocessResult(
+                image_path=image_path,
+                lighting=lighting,
+                foreground_bbox=bbox,
+                panel_polygon=None,
+                tiles=[],
+                polygon_detection_failed=True,
+                preprocess_steps=preprocess_steps,
+                preprocess_total_ms=preprocess_total_ms,
+                processed_image=img if config.cache_processed_image else None,
+            )
+        from capi_grid_canonicalization import (
+            GRID_CANONICALIZATION_VERSION,
+            canonicalize_panel_grid,
+        )
+
+        grid_started = time.perf_counter()
+        grid_result = canonicalize_panel_grid(
+            img,
+            polygon,
+            config.product_resolution,
+            config.grid_samples_per_cell,
+        )
+        grid_elapsed_ms = (time.perf_counter() - grid_started) * 1000.0
+        img = grid_result.image
+        preprocess_steps.append({
+            "index": len(preprocess_steps) + 1,
+            "method": "grid_canonicalization",
+            "method_label": "產品 Pixel Grid 標準化",
+            "requested_params": {
+                "version": GRID_CANONICALIZATION_VERSION,
+                "product_resolution": list(grid_result.product_resolution),
+                "samples_per_cell": grid_result.samples_per_cell,
+                "coordinate_preserving": True,
+            },
+            "applied_params": {
+                "version": GRID_CANONICALIZATION_VERSION,
+                "product_resolution": list(grid_result.product_resolution),
+                "samples_per_cell": grid_result.samples_per_cell,
+                "coordinate_preserving": True,
+            },
+            "elapsed_ms": grid_elapsed_ms,
+            "stats": {
+                "canonical_size": list(grid_result.canonical_size),
+                "rectified_size": list(grid_result.rectified_size),
+            },
+        })
+        preprocess_total_ms += grid_elapsed_ms
+        logger.info(
+            "[grid] %s product=%sx%s samples=%s canonical=%sx%s elapsed=%.1fms",
+            image_path.name,
+            grid_result.product_resolution[0],
+            grid_result.product_resolution[1],
+            grid_result.samples_per_cell,
+            grid_result.canonical_size[0],
+            grid_result.canonical_size[1],
+            grid_elapsed_ms,
+        )
+
     tiles = []
     if config.generate_grid_tiles:
         tiles = _generate_tiles(
@@ -978,12 +1046,13 @@ def preprocess_panel_image(
             preprocess_pipeline=normalized_pipeline,
         )
         if getattr(config, "preprocess_after_tiling", False):
-            preprocess_steps = [
+            tile_steps = [
                 step
                 for tile in tiles
                 for step in tile.preprocess_steps
             ]
-            preprocess_total_ms = sum(tile.preprocess_total_ms for tile in tiles)
+            preprocess_steps.extend(tile_steps)
+            preprocess_total_ms += sum(tile.preprocess_total_ms for tile in tiles)
     return PanelPreprocessResult(
         image_path=image_path,
         lighting=lighting,

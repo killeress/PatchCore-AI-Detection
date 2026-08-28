@@ -188,6 +188,7 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "capi_edge_cv.py" in names
         assert "capi_heatmap.py" in names
         assert "capi_heatmap_diagnostics.py" in names
+        assert "capi_grid_canonicalization.py" in names
         assert "capi_image_orientation.py" in names
         assert "capi_image_preprocess_lab.py" in names
         assert "capi_dataset_export.py" in names
@@ -267,6 +268,7 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
     assert any(item["path"] == "mark_shadow/paddle_shadow_worker.py" for item in manifest["files"])
     assert any(item["path"] == "mark_shadow/install_worker_hotfix.sh" for item in manifest["files"])
     assert any(item["path"] == "capi_station_adapter.py" for item in manifest["files"])
+    assert any(item["path"] == "capi_grid_canonicalization.py" for item in manifest["files"])
     assert any(item["path"] == "start_server.py" for item in manifest["files"])
     assert any(item["path"] == "capi_web.py" for item in manifest["files"])
     assert not any(item["path"] == "capi_mes_credentials.py" for item in manifest["files"])
@@ -275,6 +277,7 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
     assert "  mark_shadow/paddle_shadow_worker.py\n" in checksums
     assert "  mark_shadow/install_worker_hotfix.sh\n" in checksums
     assert "  capi_station_adapter.py\n" in checksums
+    assert "  capi_grid_canonicalization.py\n" in checksums
     assert "  start_server.py\n" in checksums
     assert "  capi_web.py\n" in checksums
     assert "  capi_mes_credentials.py\n" not in checksums

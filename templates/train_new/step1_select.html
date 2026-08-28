@@ -234,6 +234,40 @@
     </div>
   </details>
 
+  <details id="grid-canonicalization" open style="margin-top:16px;background:#313244;border-radius:10px;padding:14px 18px;">
+    <summary style="cursor:pointer;color:#cdd6f4;font-weight:600;font-size:.92rem;list-style:none;display:flex;align-items:center;gap:8px;">
+      <span style="display:inline-block;transition:transform .15s ease;">▶</span>
+      🧭 產品 Pixel Grid 標準化（實驗性）
+      <span style="color:#a6adc8;font-weight:400;font-size:.8rem;">用 Panel 四角與 Client 解析度固定產品 Pixel 相位</span>
+    </summary>
+    <div style="display:grid;grid-template-columns:minmax(260px,1fr) minmax(280px,1fr);gap:14px;margin-top:14px;">
+      <label style="display:flex;align-items:flex-start;gap:9px;color:#cdd6f4;font-size:.86rem;line-height:1.5;">
+        <input type="checkbox" id="grid-canonicalization-enabled"
+               style="width:18px;height:18px;margin-top:2px;accent-color:#89b4fa;"
+               {% if training_scope.mode == 'partial' and target_grid_canonicalization.enabled %}checked{% endif %}
+               {% if training_scope.mode == 'partial' %}disabled{% endif %}>
+        <span><strong>啟用 Pixel Grid 對齊＋Cell-aware area resampling</strong><br>
+          <span style="color:#a6adc8;font-size:.78rem;">同一設定會寫入模型；推論時強制比對 Client 產品解析度。變更此設定必須重新訓練。</span>
+        </span>
+      </label>
+      <label style="display:flex;flex-direction:column;gap:6px;color:#cdd6f4;font-size:.84rem;">
+        <span><strong>samples_per_cell</strong>（每個產品 Pixel、每一軸保留的 sample 數）</span>
+        <select id="grid-samples-per-cell"
+                {% if training_scope.mode == 'partial' %}disabled{% endif %}
+                style="background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:8px 10px;">
+          <option value="3" {% if target_grid_canonicalization.samples_per_cell|default(3) == 3 %}selected{% endif %}>3（建議）— 保留較多細節，摩爾紋抑制較弱</option>
+          <option value="1" {% if target_grid_canonicalization.samples_per_cell|default(3) == 1 %}selected{% endif %}>1 — 摩爾紋抑制較強，極細／Subpixel defect 可能被稀釋</option>
+        </select>
+      </label>
+    </div>
+    <div id="grid-resolution-status" style="margin-top:12px;padding:9px 12px;background:#1e1e2e;border:1px solid #45475a;border-radius:7px;color:#a6adc8;font-size:.8rem;line-height:1.5;">
+      尚未選擇 PANEL；啟用後會由所選推論紀錄讀取 Client 解析度。
+    </div>
+    <div style="margin-top:8px;color:#fab387;font-size:.78rem;line-height:1.5;">
+      注意：1 不是「較高品質」，而是更強的每-cell 面積平均；若 defect 小於一個產品 Pixel，可能降低其對比。建議先用 3 建基準，再以固定 defect 驗證集比較 1。
+    </div>
+  </details>
+
   <details id="preprocess-params" open style="margin-top:16px;background:#313244;border-radius:10px;padding:14px 18px;">
     <summary style="cursor:pointer;color:#cdd6f4;font-weight:600;font-size:.92rem;list-style:none;display:flex;align-items:center;gap:8px;">
       <span style="display:inline-block;transition:transform .15s ease;" class="pp-caret">▶</span>
@@ -531,6 +565,7 @@ const DEFAULT_PREPROCESS_PIPELINE = {{ default_preprocess_pipeline|tojson }};
 const TARGET_IMAGE_PREPROCESS_PIPELINE = {{ target_image_preprocess_pipeline|default([])|tojson }};
 const TARGET_IMAGE_PREPROCESS_PIPELINES = {{ target_image_preprocess_pipelines|default({})|tojson }};
 const TARGET_PREPROCESS_AFTER_TILING = {{ target_preprocess_after_tiling|default(false)|tojson }};
+const TARGET_GRID_CANONICALIZATION = {{ target_grid_canonicalization|default({})|tojson }};
 const TARGET_FEATURE_CLEANING_BY_ZONE = {{ target_patchcore_params.get("feature_cleaning_by_zone", {})|tojson }};
 let _selected = new Set();
 let _selectedMachineId = '';
@@ -545,6 +580,7 @@ let _zoneCleaningInitialized = Object.keys(TARGET_FEATURE_CLEANING_BY_ZONE || {}
 let _pipelineSeq = 0;
 let _previewPathEdited = false;
 let _previewPathByPanel = new Map();
+let _panelResolutionByPath = new Map();
 
 const PREPROCESS_METHOD_MAP = Object.fromEntries(PREPROCESS_METHOD_SPECS.map(spec => [spec.id, spec]));
 
@@ -855,6 +891,12 @@ async function runPreprocessPreview() {
     status.textContent = tileStrideError;
     return;
   }
+  const {config: gridCanonicalization, error: gridError} = collectGridCanonicalization();
+  if (gridError) {
+    status.className = 'pp-preview-status error';
+    status.textContent = gridError;
+    return;
+  }
 
   const afterTiling = document.getElementById('pp-after-tiling')?.checked || false;
   btn.disabled = true;
@@ -877,6 +919,7 @@ async function runPreprocessPreview() {
         preprocess_after_tiling: afterTiling,
         zone: isSeparatePreprocess() ? _activePipelineKey : 'inner',
         tile_stride: tileStride,
+        grid_canonicalization: gridCanonicalization,
       }),
     });
     const responseText = await resp.text();
@@ -1035,10 +1078,12 @@ function renderPanels(panels, emptyMessage) {
   _selectedMachineKey = '';
   _panelZoneModes = new Map();
   _previewPathByPanel = new Map();
+  _panelResolutionByPath = new Map();
   const root = document.getElementById('panel-list');
   if (!panels.length) {
     const message = emptyMessage || '最近 3 天無符合條件的 AOI OK panel';
     root.innerHTML = `<div style="background:#313244;padding:24px;border-radius:10px;color:#a6adc8;text-align:center;">${escapeHtml(message)}</div>`;
+    syncGridCanonicalization();
     updateNext();
     return;
   }
@@ -1059,6 +1104,7 @@ function renderPanels(panels, emptyMessage) {
     {text: '機種 ID', width: '120px'},
     {text: 'Lighting', width: '160px'},
     {text: '樣本確認', width: '92px'},
+    {text: 'Client 解析度', width: '112px'},
     {text: '圖片來源路徑', width: '230px'},
   ] : [
     {text: '', width: '36px'},
@@ -1068,6 +1114,7 @@ function renderPanels(panels, emptyMessage) {
     {text: '日期', width: '120px'},
     {text: '機台', width: '72px'},
     {text: 'AI 判定', width: '72px'},
+    {text: 'Client 解析度', width: '112px'},
     {text: '圖片來源路徑', width: '256px'},
   ];
   columns.forEach(col => {
@@ -1083,9 +1130,14 @@ function renderPanels(panels, emptyMessage) {
   for (const p of panels) {
     const panelPath = p.image_dir || p.image_path || '';
     const previewPath = p.preview_image_path || '';
+    const resolutionX = Number(p.resolution_x || 0);
+    const resolutionY = Number(p.resolution_y || 0);
     _panelZoneModes.set(panelPath, {inner: true, edge: true});
     if (panelPath && previewPath) {
       _previewPathByPanel.set(panelPath, previewPath);
+    }
+    if (panelPath && resolutionX > 0 && resolutionY > 0) {
+      _panelResolutionByPath.set(panelPath, [resolutionX, resolutionY]);
     }
     const tr = document.createElement('tr');
     tr.dataset.path = panelPath;
@@ -1116,6 +1168,11 @@ function renderPanels(panels, emptyMessage) {
       appendTextCell(tr, p.machine_no || '', 'color:#a6adc8;font-size:.82rem;');
       appendTextCell(tr, p.ai_judgment || '-', `font-size:.82rem;color:${p.ai_judgment === 'OK' ? '#a6e3a1' : '#fab387'};`);
     }
+    appendTextCell(
+      tr,
+      resolutionX > 0 && resolutionY > 0 ? `${resolutionX}×${resolutionY}` : '—',
+      `font-size:.8rem;color:${resolutionX > 0 && resolutionY > 0 ? '#89b4fa' : '#6c7086'};`
+    );
     const pathCell = appendTextCell(tr, panelPath || '-', '', 'path-cell');
     pathCell.title = panelPath || '-';
     tbody.appendChild(tr);
@@ -1123,6 +1180,7 @@ function renderPanels(panels, emptyMessage) {
   table.appendChild(tbody);
   wrap.appendChild(table);
   root.replaceChildren(wrap);
+  syncGridCanonicalization();
   updateNext();
 }
 
@@ -1267,6 +1325,7 @@ function updateNext() {
   btn.disabled = _selected.size === 0 || !manualConfirmed || missingZones.length > 0;
   btn.title = missingZones.length ? `目前訓練範圍仍需要 ${missingZones.join('、')} tile` : '';
   btn.style.opacity = btn.disabled ? .4 : 1;
+  syncGridCanonicalization();
 }
 
 // 留空欄位不傳 key，由後端套 TrainingConfig dataclass 預設值
@@ -1398,6 +1457,89 @@ function collectTileStride() {
   return {tileStride: value, error: null};
 }
 
+function selectedGridResolution() {
+  if (isPartialTraining() && TARGET_GRID_CANONICALIZATION.enabled) {
+    const inherited = TARGET_GRID_CANONICALIZATION.product_resolution;
+    if (!Array.isArray(inherited) || inherited.length !== 2) {
+      return {resolution: null, error: '目標模型未記錄 Pixel Grid 產品解析度'};
+    }
+    const expected = [Number(inherited[0]), Number(inherited[1])];
+    if (_dataSource === 'inference_records') {
+      for (const path of _selected) {
+        const value = _panelResolutionByPath.get(path);
+        if (!Array.isArray(value) || value.length !== 2) {
+          return {resolution: null, error: `PANEL 缺少 Client 解析度：${path}`};
+        }
+        if (Number(value[0]) !== expected[0] || Number(value[1]) !== expected[1]) {
+          return {resolution: null, error: `PANEL Client 解析度 ${value[0]}×${value[1]} 與目標模型 ${expected[0]}×${expected[1]} 不一致`};
+        }
+      }
+    }
+    return {resolution: expected, error: null};
+  }
+  if (_dataSource === 'manual_folder') {
+    return {resolution: null, error: '完整訓練的手動資料沒有 Client 解析度，無法啟用 Pixel Grid 標準化'};
+  }
+  if (!_selected.size) {
+    return {resolution: null, error: '請先選擇訓練 PANEL'};
+  }
+  const values = [];
+  for (const path of _selected) {
+    const value = _panelResolutionByPath.get(path);
+    if (!Array.isArray(value) || value.length !== 2 || !value[0] || !value[1]) {
+      return {resolution: null, error: `PANEL 缺少 Client 解析度：${path}`};
+    }
+    values.push([Number(value[0]), Number(value[1])]);
+  }
+  const unique = new Set(values.map(value => `${value[0]}x${value[1]}`));
+  if (unique.size !== 1) {
+    return {resolution: null, error: `所選 PANEL 的 Client 解析度不一致：${Array.from(unique).join('、')}`};
+  }
+  return {resolution: values[0], error: null};
+}
+
+function collectGridCanonicalization() {
+  const enabled = document.getElementById('grid-canonicalization-enabled')?.checked || false;
+  const samples = Number(document.getElementById('grid-samples-per-cell')?.value || 3);
+  if (![1, 3].includes(samples)) {
+    return {config: null, error: 'samples_per_cell 只允許 1 或 3'};
+  }
+  const config = {
+    enabled,
+    version: 1,
+    samples_per_cell: samples,
+    product_resolution: null,
+    coordinate_preserving: true,
+  };
+  if (!enabled) return {config, error: null};
+  const {resolution, error} = selectedGridResolution();
+  if (error) return {config: null, error};
+  config.product_resolution = resolution;
+  return {config, error: null};
+}
+
+function syncGridCanonicalization() {
+  const enabled = document.getElementById('grid-canonicalization-enabled')?.checked || false;
+  const samplesEl = document.getElementById('grid-samples-per-cell');
+  if (samplesEl) samplesEl.disabled = isPartialTraining() || !enabled;
+  const status = document.getElementById('grid-resolution-status');
+  if (!status) return;
+  if (!enabled) {
+    status.style.color = '#a6adc8';
+    status.textContent = '未啟用；目前維持原始相機取樣。';
+    return;
+  }
+  const {resolution, error} = selectedGridResolution();
+  if (error) {
+    status.style.color = '#f38ba8';
+    status.textContent = error;
+  } else {
+    const samples = Number(samplesEl?.value || 3);
+    status.style.color = '#a6e3a1';
+    status.textContent = `Client／模型產品解析度：${resolution[0]}×${resolution[1]}；canonical plane：${resolution[0] * samples}×${resolution[1] * samples}（${samples} samples/cell）`;
+  }
+}
+
 function submitStart() {
   const mid = isPartialTraining() ? TARGET_BUNDLE.machine_id : _selectedMachineId;
   if (!mid) return;
@@ -1433,6 +1575,12 @@ function submitStart() {
     capAlert(pipelineError, {type: 'error', title: '前處理設定錯誤'});
     return;
   }
+  const {config: gridCanonicalization, error: gridError} = collectGridCanonicalization();
+  if (gridError) {
+    document.getElementById('grid-canonicalization').setAttribute('open', '');
+    capAlert(gridError, {type: 'error', title: 'Pixel Grid 設定錯誤'});
+    return;
+  }
   const panelPaths = Array.from(_selected);
   const body = {
     machine_id: mid,
@@ -1448,6 +1596,7 @@ function submitStart() {
   body.image_preprocess_pipeline = pipeline;
   if (pipelines) body.image_preprocess_pipelines = pipelines;
   body.preprocess_after_tiling = document.getElementById('pp-after-tiling').checked;
+  body.grid_canonicalization = gridCanonicalization;
   fetch('/api/train/new/start', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -1515,6 +1664,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const manualBatchInput = document.getElementById('manual-batch-root');
   const preprocessMode = document.getElementById('pp-config-mode');
   const cleaningLayout = document.getElementById('tp-feature_cleaning_layout');
+  const gridEnabled = document.getElementById('grid-canonicalization-enabled');
+  const gridSamples = document.getElementById('grid-samples-per-cell');
   if (addBtn) addBtn.onclick = () => addPipelineStep('bilateral');
   if (resetBtn) resetBtn.onclick = () => resetPipelineDefault();
   if (clearBtn) clearBtn.onclick = () => clearPipeline();
@@ -1523,6 +1674,8 @@ document.addEventListener('DOMContentLoaded', () => {
   if (useSelectedBtn) useSelectedBtn.onclick = () => syncPreviewPath(true);
   if (manualMachineInput) manualMachineInput.addEventListener('input', invalidateManualScan);
   if (manualBatchInput) manualBatchInput.addEventListener('input', invalidateManualScan);
+  if (gridEnabled) gridEnabled.addEventListener('change', syncGridCanonicalization);
+  if (gridSamples) gridSamples.addEventListener('change', syncGridCanonicalization);
   if (preprocessMode) preprocessMode.addEventListener('change', syncPreprocessConfigMode);
   document.querySelectorAll('.pp-zone-tab').forEach(btn => {
     btn.addEventListener('click', () => setActivePipelineZone(btn.dataset.zone));
@@ -1533,6 +1686,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   syncPreprocessConfigMode();
   syncFeatureCleaningLayout();
+  syncGridCanonicalization();
 });
 </script>
 

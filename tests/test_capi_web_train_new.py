@@ -403,6 +403,87 @@ def test_handle_train_new_start_rejects_invalid_panel_path():
     assert "invalid path" in json.loads(h._sent_response[0]["body"])["error"]
 
 
+def test_handle_train_new_start_persists_grid_config_from_client_resolutions():
+    from capi_web import CAPIWebHandler
+
+    server = MagicMock()
+    server.database.create_training_job = MagicMock()
+    server.database.get_inference_panel_resolutions.return_value = {
+        "/p0": (1920, 1080),
+        "/p1": (1920, 1080),
+    }
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    h = _make_handler_with_server(server)
+    payload = {
+        "machine_id": "M",
+        "panel_paths": ["/p0", "/p1"],
+        "grid_canonicalization": {
+            "enabled": True,
+            "samples_per_cell": 3,
+        },
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    with patch("capi_web.threading.Thread") as mock_thread:
+        mock_thread.return_value.start = MagicMock()
+        h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 200
+    grid = server.database.create_training_job.call_args.kwargs["grid_canonicalization"]
+    assert grid == {
+        "enabled": True,
+        "version": 1,
+        "samples_per_cell": 3,
+        "product_resolution": [1920, 1080],
+        "coordinate_preserving": True,
+    }
+
+
+def test_handle_train_new_start_rejects_mixed_client_resolutions_for_grid():
+    server = MagicMock()
+    server.database.get_inference_panel_resolutions.return_value = {
+        "/p0": (1920, 1080),
+        "/p1": (1366, 768),
+    }
+    h = _make_handler_with_server(server)
+    payload = {
+        "machine_id": "M",
+        "panel_paths": ["/p0", "/p1"],
+        "grid_canonicalization": {"enabled": True, "samples_per_cell": 1},
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 400
+    assert "解析度不一致" in json.loads(h._sent_response[0]["body"])["error"]
+    server.database.create_training_job.assert_not_called()
+
+
+def test_handle_train_new_start_rejects_unsupported_samples_per_cell():
+    server = MagicMock()
+    h = _make_handler_with_server(server)
+    payload = {
+        "machine_id": "M",
+        "panel_paths": ["/p0"],
+        "grid_canonicalization": {"enabled": True, "samples_per_cell": 2},
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 400
+    assert "samples_per_cell" in json.loads(h._sent_response[0]["body"])["error"]
+    server.database.create_training_job.assert_not_called()
+
+
 # ── training_params validation ────────────────────────────────────────────────
 
 class TestValidateTrainingParams:

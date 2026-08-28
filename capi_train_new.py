@@ -218,6 +218,9 @@ class TrainingConfig:
     feature_cleaning_center_size: int = FEATURE_CLEANING_CENTER_SIZE_DEFAULT
     image_preprocess_pipeline: List[Dict[str, Any]] = field(default_factory=list)
     preprocess_after_tiling: bool = False
+    grid_canonicalization_enabled: bool = False
+    grid_samples_per_cell: int = 3
+    product_resolution: Optional[Tuple[int, int]] = None
     training_data_source: Dict[str, Any] = field(
         default_factory=lambda: {"type": "inference_records"}
     )
@@ -1589,7 +1592,8 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
                               image_preprocess_pipeline: Optional[List[Dict[str, Any]]] = None,
                               preprocess_after_tiling: bool = False,
                               tile_stride: int = LEGACY_TRAIN_TILE_STRIDE,
-                              image_preprocess_pipelines: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> None:
+                              image_preprocess_pipelines: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+                              grid_canonicalization: Optional[Dict[str, Any]] = None) -> None:
     """產出 bundle 內的 inference yaml。
 
     若提供 succeeded_units，只寫入 inner/edge 都成功訓練的 lighting；
@@ -1597,6 +1601,7 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
     """
     import yaml
     from capi_image_preprocess_lab import normalize_preprocess_pipeline
+    from capi_grid_canonicalization import normalize_grid_canonicalization
 
     model_mapping = {}
     threshold_mapping = {}
@@ -1607,6 +1612,10 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
         if zone in (image_preprocess_pipelines or {})
     }
     tile_stride = int(tile_stride or LEGACY_TRAIN_TILE_STRIDE)
+    grid_canonicalization = normalize_grid_canonicalization(
+        grid_canonicalization,
+        require_resolution=True,
+    )
     for lighting in LIGHTINGS:
         if succeeded_units is not None and not all(
             (lighting, zone) in succeeded_units for zone in ("inner", "edge")
@@ -1644,6 +1653,9 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
     threshold_mapping_block = _emit({"threshold_mapping": threshold_mapping})
     image_preprocess_block = _emit({"image_preprocess_pipeline": image_preprocess_pipeline})
     image_preprocess_zones_block = _emit({"image_preprocess_pipelines": image_preprocess_pipelines})
+    grid_canonicalization_block = _emit({
+        "grid_canonicalization": grid_canonicalization,
+    })
 
     content = f"""\
 # ============================================================================
@@ -1664,6 +1676,11 @@ otsu_offset: 5
 # default=1000 會切掉 panel 底部 1000px，新架構 panel polygon 完全失準
 otsu_bottom_crop: 0
 enable_panel_polygon: true
+
+# === 產品 Pixel Grid 標準化 ===
+# samples_per_cell=1：摩爾紋抑制較強，極細 defect 可能被面積平均稀釋。
+# samples_per_cell=3：保留較多細節（建議起始值），摩爾紋抑制較弱。
+{grid_canonicalization_block}
 
 # === 影像前處理（共用或 INNER/EDGE 分區；套用時機見下方）===
 {image_preprocess_block}
@@ -2478,6 +2495,16 @@ def run_training_pipeline(
     overall_auroc = round(sum(auroc_values) / len(auroc_values), 4) if auroc_values else None
     overall_auroc_grade = _auroc_grade(overall_auroc)
 
+    grid_canonicalization = {
+        "enabled": bool(cfg.grid_canonicalization_enabled),
+        "version": 1,
+        "samples_per_cell": int(cfg.grid_samples_per_cell),
+        "product_resolution": (
+            list(cfg.product_resolution) if cfg.product_resolution else None
+        ),
+        "coordinate_preserving": True,
+    }
+
     write_thresholds(bundle_dir, thresholds)
     write_machine_config_yaml(
         bundle_dir,
@@ -2488,6 +2515,7 @@ def run_training_pipeline(
         image_preprocess_pipelines=cfg.image_preprocess_pipelines,
         preprocess_after_tiling=cfg.preprocess_after_tiling,
         tile_stride=cfg.tile_stride,
+        grid_canonicalization=grid_canonicalization,
     )
     write_manifest(bundle_dir, {
         "machine_id": cfg.machine_id,
@@ -2497,7 +2525,8 @@ def run_training_pipeline(
             f"{lighting}-{zone}" for lighting, zone in active_units
         ],
         "experimental_training": bool(
-            cfg.feature_pool_kernel_size != PATCHCORE_FEATURE_POOL_KERNEL_DEFAULT
+            cfg.grid_canonicalization_enabled
+            or cfg.feature_pool_kernel_size != PATCHCORE_FEATURE_POOL_KERNEL_DEFAULT
             or cfg.feature_cleaning_mode != FEATURE_CLEANING_MODE_OFF
             or any(
                 item.get("mode") != FEATURE_CLEANING_MODE_OFF
@@ -2512,6 +2541,7 @@ def run_training_pipeline(
         "edge_threshold_px": 768,
         "tile_stride": cfg.tile_stride,
         "preprocess_after_tiling": cfg.preprocess_after_tiling,
+        "grid_canonicalization": grid_canonicalization,
         "patchcore_params": {
             "batch_size": cfg.batch_size,
             "image_size": list(cfg.image_size),

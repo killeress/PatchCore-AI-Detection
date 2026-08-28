@@ -440,6 +440,50 @@ class TestTrainingJobsCRUD:
         )
         assert db.get_training_job("j_custom_stride")["tile_stride"] == 128
 
+    def test_grid_canonicalization_round_trip(self, tmp_path):
+        db = _make_db(tmp_path)
+        grid = {
+            "enabled": True,
+            "version": 1,
+            "samples_per_cell": 3,
+            "product_resolution": [1920, 1080],
+            "coordinate_preserving": True,
+        }
+        db.create_training_job(
+            job_id="j_grid",
+            machine_id="M",
+            panel_paths=["/p0"],
+            grid_canonicalization=grid,
+        )
+
+        assert db.get_training_job("j_grid")["grid_canonicalization"] == grid
+
+    def test_resolves_latest_client_resolution_by_panel_path(self, tmp_path):
+        db = _make_db(tmp_path)
+        common = {
+            "model_id": "M",
+            "machine_no": "EQ",
+            "machine_judgment": "OK",
+            "ai_judgment": "OK",
+            "total_images": 1,
+            "ng_images": 0,
+            "ng_details": "",
+            "request_time": "2026-08-27 10:00:00",
+            "response_time": "2026-08-27 10:00:01",
+            "processing_seconds": 1.0,
+        }
+        db.save_inference_record(
+            glass_id="G1", resolution=(1920, 1080), image_dir="/p1", **common
+        )
+        db.save_inference_record(
+            glass_id="G2", resolution=(1366, 768), image_dir="/p2", **common
+        )
+
+        assert db.get_inference_panel_resolutions(["/p1", "/p2", "/missing"]) == {
+            "/p1": (1920, 1080),
+            "/p2": (1366, 768),
+        }
+
     def test_active_job_includes_training_params(self, tmp_path):
         """get_active_training_job 也應該反序列化 training_params。"""
         db = _make_db(tmp_path)

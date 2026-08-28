@@ -147,6 +147,34 @@ def test_capi_config_rejects_invalid_zone_preprocess_pipelines(payload, error):
         CAPIConfig.from_dict(payload)
 
 
+def test_grid_canonicalization_round_trip_and_validation():
+    cfg = CAPIConfig.from_dict({
+        "grid_canonicalization": {
+            "enabled": True,
+            "version": 1,
+            "samples_per_cell": 3,
+            "product_resolution": [1920, 1080],
+            "coordinate_preserving": True,
+        }
+    })
+
+    assert cfg.grid_canonicalization_enabled is True
+    assert cfg.grid_samples_per_cell == 3
+    assert cfg.grid_product_resolution == (1920, 1080)
+    reloaded = CAPIConfig.from_dict(cfg.to_dict())
+    assert reloaded.grid_canonicalization_enabled is True
+    assert reloaded.grid_product_resolution == (1920, 1080)
+
+    with pytest.raises(ValueError, match="samples_per_cell"):
+        CAPIConfig.from_dict({
+            "grid_canonicalization": {
+                "enabled": True,
+                "samples_per_cell": 2,
+                "product_resolution": [1920, 1080],
+            }
+        })
+
+
 def test_aoi_heatmap_center_seed_enabled_serialization():
     cfg = CAPIConfig.from_dict({
         "aoi_heatmap_center_seed_enabled": False,

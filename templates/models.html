@@ -1114,6 +1114,20 @@ function formatPreprocessPipelines(m) {
   return formatPreprocessPipeline(m.image_preprocess_pipeline);
 }
 
+function formatGridCanonicalization(m) {
+  const cfg = m.grid_canonicalization;
+  if (!cfg || typeof cfg !== 'object') return '未啟用（舊模型未記錄）';
+  if (cfg.enabled !== true) return '未啟用';
+  const resolution = Array.isArray(cfg.product_resolution) && cfg.product_resolution.length === 2
+    ? `${cfg.product_resolution[0]}×${cfg.product_resolution[1]}`
+    : '解析度未記錄';
+  const samples = Number(cfg.samples_per_cell);
+  const note = samples === 1
+    ? '摩爾紋抑制較強；極細／Subpixel defect 可能被稀釋'
+    : '保留較多細節；摩爾紋抑制較弱';
+  return `啟用 v${cfg.version || 1}｜產品 ${resolution}｜${samples} samples/cell｜${note}`;
+}
+
 function formatTrainingDataSource(source) {
   if (!source || !source.type) return '—（舊模型未記錄）';
   if (source.type === 'inference_records') return '最近推論紀錄';
@@ -1189,6 +1203,7 @@ function renderDetail(d) {
   rows.push(
     ['─── 切片與前處理 ───', '─────'],
     ['tile step', tileStrideText],
+    ['Pixel Grid 標準化', formatGridCanonicalization(m)],
     ['前處理套用時機', preprocessTiming],
     ['影像前處理流程', formatPreprocessPipelines(m)],
     ['─── 訓練資料 ───', '─────'],
