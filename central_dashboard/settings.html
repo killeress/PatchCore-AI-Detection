@@ -212,6 +212,18 @@
             min-height: 18px;
         }
 
+        .production-fields {
+            display: grid;
+            grid-template-columns: auto minmax(150px, 1fr);
+            align-items: end;
+            gap: 16px;
+        }
+
+        .production-fields .line-option-label {
+            min-height: 39px;
+            white-space: nowrap;
+        }
+
         button {
             color: var(--text);
             background: #ffffff;
@@ -320,7 +332,7 @@
             <div class="panel-heading">
                 <div>
                     <h2 id="lines-title">納管線體</h2>
-                    <p>只需填設備 IP，系統會自動建立相關 URL；「正式上線」只標示線體總覽，不影響啟用、排序或告警。</p>
+                    <p>只需填設備 IP，系統會自動建立相關 URL；新勾選「正式上線」時會自動填入當日日期，日期仍可修改。</p>
                 </div>
                 <button id="add-line" type="button">＋ 新增線體</button>
             </div>
@@ -387,7 +399,8 @@
                     line: "",
                     ip: "",
                     enabled: true,
-                    isProduction: false
+                    isProduction: false,
+                    productionDate: ""
                 });
                 renderLines();
                 const lastEditor = editors.lastElementChild;
@@ -457,11 +470,29 @@
                     const production = document.createElement("input");
                     production.type = "checkbox";
                     production.checked = line.isProduction === true;
+
+                    const productionDateLabel = document.createElement("label");
+                    productionDateLabel.textContent = "上線日期";
+                    const productionDate = document.createElement("input");
+                    productionDate.type = "date";
+                    productionDate.value = line.productionDate || "";
+                    productionDate.addEventListener("input", function () {
+                        state.lines[index].productionDate = productionDate.value;
+                    });
+                    productionDateLabel.appendChild(productionDate);
+
                     production.addEventListener("change", function () {
                         state.lines[index].isProduction = production.checked;
+                        if (production.checked && !productionDate.value) {
+                            productionDate.value = currentLocalDate();
+                            state.lines[index].productionDate = productionDate.value;
+                        }
                     });
                     productionLabel.append(production, "正式上線");
-                    grid.append(enabledLabel, productionLabel);
+                    const productionFields = document.createElement("div");
+                    productionFields.className = "production-fields";
+                    productionFields.append(productionLabel, productionDateLabel);
+                    grid.append(enabledLabel, productionFields);
 
                     editor.append(heading, grid);
                     editors.appendChild(editor);
@@ -507,7 +538,17 @@
             }
 
             function toEditableLine(line) {
-                return Object.assign({}, line, { ip: getLineIp(line) });
+                return Object.assign({}, line, {
+                    ip: getLineIp(line),
+                    productionDate: String(line.productionDate || "").trim()
+                });
+            }
+
+            function currentLocalDate() {
+                const today = new Date();
+                const month = String(today.getMonth() + 1).padStart(2, "0");
+                const day = String(today.getDate()).padStart(2, "0");
+                return `${today.getFullYear()}-${month}-${day}`;
             }
 
             function getLineIp(line) {
@@ -548,7 +589,8 @@
                     dashboardUrl: `${baseUrl}/`,
                     overexposedUrl: `${baseUrl}/overexposed`,
                     enabled: line.enabled !== false,
-                    isProduction: line.isProduction === true
+                    isProduction: line.isProduction === true,
+                    productionDate: String(line.productionDate || "").trim()
                 };
             }
 

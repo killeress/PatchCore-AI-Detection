@@ -4,13 +4,26 @@
 <div style="max-width:1100px;margin:0 auto;padding:24px 16px;">
   <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 12px 0;">
     <h1 style="color:#cdd6f4;margin:0;font-size:1.3rem;">Step 4 / 6 · 訓練 tile 審核</h1>
-    <div class="kbd-hint" aria-label="鍵盤捷徑提示">
-      <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd><span>切換</span>
-      <kbd>Enter</kbd><span>放大</span>
-      <kbd>Del</kbd><span>排除</span>
-      <kbd>Esc</kbd><span>關閉</span>
+    <div style="display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap;">
+      <button id="abandon-training-btn" type="button" onclick="abandonTraining()"
+        style="background:#313244;color:#f38ba8;border:1px solid #f38ba8;border-radius:5px;padding:7px 12px;font-weight:700;cursor:pointer;">
+        放棄此次訓練
+      </button>
+      <div class="kbd-hint" aria-label="鍵盤捷徑提示">
+        <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd><span>切換</span>
+        <kbd>Enter</kbd><span>放大</span>
+        <kbd>Del</kbd><span>排除</span>
+        <kbd>Esc</kbd><span>關閉</span>
+      </div>
     </div>
   </div>
+
+  {% if retry_error %}
+  <div style="background:#313244;border:1px solid #f38ba8;border-radius:9px;padding:12px 14px;margin-bottom:14px;">
+    <div style="color:#f38ba8;font-weight:700;font-size:.88rem;">上次訓練失敗，原選圖與審核結果已保留</div>
+    <div style="color:#a6adc8;font-size:.8rem;margin-top:4px;word-break:break-word;">{{ retry_error }}</div>
+  </div>
+  {% endif %}
 
   <div class="prefilter-bar">
     <span>預篩模型：</span>
@@ -63,7 +76,7 @@
     <a href="/train/new" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">返回</a>
     <button id="start-training-btn" type="button" onclick="startTraining()"
       style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:8px 22px;font-weight:700;">
-      開始訓練 →
+      {% if retry_error %}重新訓練 →{% else %}開始訓練 →{% endif %}
     </button>
   </div>
 </div>
@@ -775,6 +788,33 @@ async function verifyTrainingStateAfterConnectionError() {
   }
 
   return {started: false, state: lastState};
+}
+
+async function abandonTraining() {
+  const ok = await capConfirm(
+    `Job ID: ${jobId}\n\n本次已選資料與 tile 審核結果會清除，既有模型不受影響。`,
+    {title: '確定放棄此次訓練？', confirmText: '放棄訓練', cancelText: '繼續審核', danger: true}
+  );
+  if (!ok) return;
+
+  const button = document.getElementById('abandon-training-btn');
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/train/new/cancel/${encodeURIComponent(jobId)}`, {
+      method: 'POST'
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    location.href = '/train/new';
+  } catch (error) {
+    button.disabled = false;
+    await capAlert(
+      error && error.message ? error.message : '無法取消此訓練 job。',
+      {type: 'error', title: '取消失敗'}
+    );
+  }
 }
 
 async function startTraining() {

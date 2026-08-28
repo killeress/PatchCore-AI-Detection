@@ -9,6 +9,7 @@
  * - apiUrl          : 該 PC 的 /api/status
  * - dashboardUrl    : 「開啟該 PC」超連結
  * - overexposedUrl  : Omit 過曝明細超連結
+ * - productionDate : 正式上線日期（YYYY-MM-DD，可留白）
  */
 window.CAPI_DASHBOARD_CONFIG = {
     title: "寧波廠區 CAPI AI 中控看板",

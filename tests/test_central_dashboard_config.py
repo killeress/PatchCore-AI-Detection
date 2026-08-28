@@ -40,10 +40,12 @@ def test_central_dashboard_defaults_are_imported_to_sqlite(tmp_path):
             "overexposedUrl",
             "enabled",
             "isProduction",
+            "productionDate",
         }
         for line in config["lines"]
     )
     assert all(line["isProduction"] is False for line in config["lines"])
+    assert all(line["productionDate"] == "" for line in config["lines"])
     with sqlite3.connect(db.db_path) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM central_dashboard_settings"
@@ -70,6 +72,7 @@ def test_central_dashboard_first_read_can_import_local_file_config(tmp_path):
                 "overexposedUrl": "",
                 "enabled": True,
                 "isProduction": False,
+                "productionDate": "",
             }
         ],
     }
@@ -105,6 +108,7 @@ def test_central_dashboard_config_can_be_replaced_and_keep_order(tmp_path):
                     "overexposedUrl": "",
                     "enabled": False,
                     "isProduction": True,
+                    "productionDate": "2026-08-28",
                 },
                 {
                     "id": "mod1-capi01",
@@ -128,7 +132,9 @@ def test_central_dashboard_config_can_be_replaced_and_keep_order(tmp_path):
     ]
     assert saved["lines"][0]["enabled"] is False
     assert saved["lines"][0]["isProduction"] is True
+    assert saved["lines"][0]["productionDate"] == "2026-08-28"
     assert saved["lines"][1]["isProduction"] is False
+    assert saved["lines"][1]["productionDate"] == ""
     assert db.get_central_dashboard_config() == saved
     with sqlite3.connect(db.db_path) as connection:
         assert connection.execute(
@@ -178,6 +184,47 @@ def test_central_dashboard_existing_database_adds_is_production_column(tmp_path)
     assert is_production == 0
 
 
+def test_central_dashboard_existing_production_line_gets_blank_production_date(
+    tmp_path,
+):
+    db_path = tmp_path / "legacy-dashboard.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """CREATE TABLE central_dashboard_lines (
+                   id TEXT PRIMARY KEY,
+                   factory TEXT NOT NULL,
+                   line_name TEXT NOT NULL,
+                   pc_name TEXT NOT NULL,
+                   api_url TEXT NOT NULL,
+                   dashboard_url TEXT DEFAULT '',
+                   overexposed_url TEXT DEFAULT '',
+                   enabled INTEGER NOT NULL DEFAULT 1,
+                   is_production INTEGER NOT NULL DEFAULT 0,
+                   sort_order INTEGER NOT NULL DEFAULT 0,
+                   updated_by TEXT DEFAULT '',
+                   updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+               )"""
+        )
+        connection.execute(
+            """INSERT INTO central_dashboard_lines
+               (id, factory, line_name, pc_name, api_url, is_production)
+               VALUES ('existing-production', 'MOD2', 'CAPI01', 'CAPI01',
+                       'http://10.174.37.137/api/status', 1)"""
+        )
+
+    CAPIDatabase(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """SELECT is_production, production_date
+                 FROM central_dashboard_lines
+                WHERE id = ?""",
+            ("existing-production",),
+        ).fetchone()
+
+    assert row == (1, "")
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
@@ -202,6 +249,21 @@ def test_central_dashboard_existing_database_adds_is_production_column(tmp_path)
                 ]
             },
             "URL 必須使用 http:// 或 https://",
+        ),
+        (
+            {
+                "lines": [
+                    {
+                        "id": "line-1",
+                        "factory": "MOD1",
+                        "line": "CAPI01",
+                        "pcName": "PC-01",
+                        "apiUrl": "http://10.0.0.1/api/status",
+                        "productionDate": "2026-02-30",
+                    }
+                ]
+            },
+            "上線日期格式錯誤",
         ),
     ],
 )
@@ -339,6 +401,9 @@ def test_central_dashboard_pages_use_sqlite_config_and_settings_route():
     assert '每 ${config.refreshIntervalSeconds} 秒由各 PC 的 API 更新一次' not in app_js
     assert 'refreshTimer = window.setTimeout' in app_js
     assert 'id="line-overview"' in index_html
+    assert 'id="process-tabs"' in index_html
+    assert 'data-process-zone="capi">CAPI</button>' in index_html
+    assert 'data-process-zone="aapi">AAPI</button>' in index_html
     assert 'id="theme-toggle"' in index_html
     assert 'class="topbar-action-group"' in index_html
     assert 'class="toolbar-icon"' in index_html
@@ -348,6 +413,11 @@ def test_central_dashboard_pages_use_sqlite_config_and_settings_route():
     assert '#refresh-status::before' in styles_css
     assert 'element.dataset.state = "refreshing"' in app_js
     assert "createOverviewRow(line)" in app_js
+    assert '.toUpperCase().startsWith("AAPI")' in app_js
+    assert "function selectProcessZone(zoneId)" in app_js
+    assert "state.overviewRow.hidden = hidden" in app_js
+    assert "state.card.hidden = hidden" in app_js
+    assert '.process-tab[aria-pressed="true"]' in styles_css
     assert "renderOverviewRow(state)" in app_js
     assert "<th scope=\"col\">AOI 連線</th>" in index_html
     assert "<th scope=\"col\">AOI 排片率</th>" in index_html
@@ -386,6 +456,11 @@ def test_central_dashboard_pages_use_sqlite_config_and_settings_route():
     assert 'overexposedUrl: `${baseUrl}/overexposed`' in settings_html
     assert 'productionLabel.append(production, "正式上線")' in settings_html
     assert "isProduction: line.isProduction === true" in settings_html
+    assert 'productionDate.type = "date"' in settings_html
+    assert "currentLocalDate()" in settings_html
+    assert "if (production.checked && !productionDate.value)" in settings_html
+    assert "state.lines[index].productionDate = productionDate.value" in settings_html
+    assert "productionDate: String(line.productionDate || \"\").trim()" in settings_html
     assert "createMoveButton(index, -1" in settings_html
     assert "createMoveButton(index, 1" in settings_html
     assert 'row.dataset.production = "true"' in app_js

@@ -3313,6 +3313,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             )
         return result
 
+    @staticmethod
+    def _train_new_job_has_review_data(db, job_id: str) -> bool:
+        """Return whether a failed job still has tiles that can be reviewed/retried."""
+        try:
+            return len(db.list_tile_pool(job_id, source="ok")) > 0
+        except Exception:
+            logger.warning(
+                "cannot inspect retryable training data: job_id=%s",
+                job_id,
+                exc_info=True,
+            )
+            return False
+
     @classmethod
     def _reconcile_train_new_artifacts(cls, db) -> None:
         """Server 啟動時回收 kill/失敗 job 的暫存資料。
@@ -3369,7 +3382,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             state = job.get("state")
             if state == "failed":
                 cls._cleanup_train_new_job_artifacts(
-                    db, job_id, reason="failed job"
+                    db,
+                    job_id,
+                    remove_training_data=not cls._train_new_job_has_review_data(
+                        db, job_id
+                    ),
+                    reason="failed job",
                 )
             elif state in ("review", "completed"):
                 cls._cleanup_train_new_job_artifacts(
@@ -3391,8 +3409,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return job
 
         error = "interrupted: server restarted or training worker is not running"
+        failed_phase = job.get("state")
         db.update_training_job_state(job["job_id"], "failed", error_message=error)
-        cls._cleanup_train_new_job_artifacts(db, job["job_id"], reason=error)
+        cls._cleanup_train_new_job_artifacts(
+            db,
+            job["job_id"],
+            remove_training_data=failed_phase != "train",
+            reason=error,
+        )
         cls._drop_job_runtime(job["job_id"])
         slot = cls._train_slot
         with slot["lock"]:
@@ -3851,6 +3875,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 return
             elif path.startswith("/api/train/new/cancel/"):
                 self._handle_train_new_cancel()
+                return
+            elif path.startswith("/api/train/new/retry/"):
+                self._handle_train_new_retry()
                 return
             elif path.startswith("/api/train/new/start_training/"):
                 self._handle_train_new_start_training()
@@ -14041,13 +14068,25 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     def _list_open_train_new_jobs(self):
         db = self._capi_server_instance.database
-        all_active = db.list_active_training_jobs()
+        all_active = list(db.list_active_training_jobs() or [])
+        retryable_jobs = list(db.list_retryable_training_jobs() or [])
         # 把 stale job 補刀（preprocess/train 但 worker 已死）
         cleaned = []
         for j in all_active:
             j = self._mark_train_new_stale_if_needed(db, j)
             if j and j["state"] in ("preprocess", "review", "train"):
                 cleaned.append(j)
+            elif (
+                j
+                and j["state"] == "failed"
+                and self._train_new_job_has_review_data(db, j["job_id"])
+            ):
+                cleaned.append(j)
+        known_job_ids = {job["job_id"] for job in cleaned}
+        cleaned.extend(
+            job for job in retryable_jobs
+            if job["job_id"] not in known_job_ids
+        )
         return cleaned
 
     def _handle_train_new_scope_page(self):
@@ -14162,7 +14201,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._capi_server_instance.database,
                 job,
             )
-            if job and job.get("state") == "train":
+            if job and (
+                job.get("state") == "train"
+                or (
+                    job.get("state") == "failed"
+                    and self._train_new_job_has_review_data(
+                        self._capi_server_instance.database,
+                        job_id,
+                    )
+                )
+            ):
                 template_name = "train_new/step4_progress.html"
         template = self.jinja_env.get_template(template_name)
         scope = (job or {}).get("training_scope") if job else None
@@ -14209,6 +14257,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 job.get("panel_paths") or [],
                 self._train_new_station_adapter(self._capi_server_instance),
             ),
+            retry_error=job.get("error_message") or "",
         )
         self._send_response(200, html)
 
@@ -15166,12 +15215,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if grid_canonicalization.get("product_resolution") else None
             )
             if source_type == "manual_folder":
-                if (
-                    training_scope.get("mode") != "partial"
-                    or expected_resolution is None
-                ):
+                if expected_resolution is None:
                     self._send_json({
-                        "error": "Pixel Grid 標準化需要從推論紀錄取得 Client 產品解析度"
+                        "error": (
+                            "手動資料啟用 Pixel Grid 標準化時，"
+                            "請確認產品解析度"
+                        )
                     }, status=400)
                     return
             else:
@@ -15381,7 +15430,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             log(
                 f"準備 NG 驗證 crop（優先重用 NG 驗證庫；缺少才從推論紀錄裁切，"
-                f"每 lighting 上限 {NG_TILES_PER_LIGHTING} 個，排除 B0F 黑畫面）"
+                f"僅查最近 3 天，每 lighting 上限 {NG_TILES_PER_LIGHTING} 個，"
+                f"排除 B0F 黑畫面）"
             )
             ng_kwargs = {}
             if station_adapter.profile == "aapi":
@@ -15462,6 +15512,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 completed_bundle = runtime.get("completed_bundle")
 
         job = self._sync_train_new_completed_state(db, job, completed_bundle)
+        worker_alive = self._train_new_worker_alive(job_id)
+        retryable = (
+            job.get("state") == "failed"
+            and not worker_alive
+            and self._train_new_job_has_review_data(db, job_id)
+        )
 
         resp = {
             "job_id": job["job_id"], "machine_id": job["machine_id"],
@@ -15472,7 +15528,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "tile_stride": job.get("tile_stride"),
             "log_lines": log_lines,
             "unit_status": unit_status,
-            "worker_alive": self._train_new_worker_alive(job_id),
+            "worker_alive": worker_alive,
+            "retryable": retryable,
         }
         self._send_json(resp, headers=no_cache_headers)
 
@@ -16002,6 +16059,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         job = self._mark_train_new_stale_if_needed(db, job)
 
         if job["state"] == "failed":
+            CAPIWebHandler._cleanup_train_new_job_artifacts(
+                db, job_id, reason="abandoned failed job"
+            )
+            CAPIWebHandler._drop_job_runtime(job_id)
             self._send_json({"ok": True, "job_id": job_id, "state": "failed"})
             return
 
@@ -16045,6 +16106,57 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         )
         CAPIWebHandler._drop_job_runtime(job_id)
         self._send_json({"ok": True, "job_id": job_id, "state": "failed"})
+
+    def _handle_train_new_retry(self):
+        """POST /api/train/new/retry/<job_id> — reuse reviewed tiles after failure."""
+        job_id = self.path.rsplit("/", 1)[-1].split("?")[0]
+        db = self._capi_server_instance.database
+        job = db.get_training_job(job_id)
+        if not job:
+            self._send_json({"error": "job not found"}, status=404)
+            return
+        if job.get("state") == "review":
+            self._send_json({
+                "ok": True,
+                "job_id": job_id,
+                "state": "review",
+                "already_ready": True,
+            })
+            return
+        if job.get("state") != "failed":
+            self._send_json({
+                "error": f"job state must be 'failed', currently '{job.get('state')}'"
+            }, status=409)
+            return
+        if self._train_new_worker_alive(job_id):
+            self._send_json({"error": "training worker is still finalizing"}, status=409)
+            return
+        if not self._train_new_job_has_review_data(db, job_id):
+            self._send_json({
+                "error": "此失敗 job 已無可重用的選圖資料，請重新建立訓練"
+            }, status=409)
+            return
+
+        CAPIWebHandler._cleanup_train_new_job_artifacts(
+            db,
+            job_id,
+            remove_training_data=False,
+            reason="prepare failed job retry",
+        )
+        if not db.reset_failed_training_job_for_review(job_id):
+            self._send_json({"error": "job state changed; reload and try again"}, status=409)
+            return
+
+        slot = CAPIWebHandler._train_slot
+        with slot["lock"]:
+            if slot.get("active_job_id") == job_id:
+                slot["active_job_id"] = None
+        CAPIWebHandler._drop_job_runtime(job_id)
+        CAPIWebHandler._make_job_runtime(job_id, "review")
+        CAPIWebHandler._append_train_new_log(
+            job_id, "已保留原選圖與 tile 審核結果，可重新開始訓練"
+        )
+        self._send_json({"ok": True, "job_id": job_id, "state": "review"})
 
     def _handle_train_new_start_training(self):
         """POST /api/train/new/start_training/<job_id>"""
@@ -16123,7 +16235,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         )
         runtime["thread"] = thread
 
-        db.update_training_job_state(job_id, "train")
+        db.update_training_job_state(job_id, "train", error_message="")
         thread.start()
         try:
             logger.info(
@@ -16359,7 +16471,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 finished_job = db.get_training_job(job_id)
                 if finished_job and finished_job.get("state") == "failed":
                     CAPIWebHandler._cleanup_train_new_job_artifacts(
-                        db, job_id, reason="partial training failed"
+                        db,
+                        job_id,
+                        remove_training_data=False,
+                        reason="partial training failed",
                     )
             except Exception:
                 logger.warning(
@@ -16527,7 +16642,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 finished_job = db.get_training_job(job_id)
                 if finished_job and finished_job.get("state") == "failed":
                     CAPIWebHandler._cleanup_train_new_job_artifacts(
-                        db, job_id, reason="training worker failed"
+                        db,
+                        job_id,
+                        remove_training_data=False,
+                        reason="training worker failed",
                     )
             except Exception:
                 logger.warning(
@@ -18156,7 +18274,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             _set_step("ng")
             _log(
                 f"準備 NG 驗證 crop（優先重用 NG 驗證庫；缺少才從推論紀錄裁切，"
-                f"lighting={lighting}，上限 {NG_TILES_PER_LIGHTING} 個，排除 B0F 黑畫面）"
+                f"僅查最近 3 天，lighting={lighting}，"
+                f"上限 {NG_TILES_PER_LIGHTING} 個，排除 B0F 黑畫面）"
             )
             CAPIWebHandler._sample_ng_tiles_compat(
                 sample_ng_tiles,

@@ -17,6 +17,7 @@
     });
     let config = normalizeConfig(window.CAPI_DASHBOARD_CONFIG);
     const lineStates = new Map();
+    let activeProcessZone = "capi";
 
     let refreshTimer = null;
     let countdownTimer = null;
@@ -77,6 +78,7 @@
             }
             createLineCard(line, factoryGrids.get(factory));
         }
+        initializeProcessTabs();
         updateSummary();
 
         startClock();
@@ -139,8 +141,12 @@
         const template = document.getElementById("line-card-template");
         const card = template.content.firstElementChild.cloneNode(true);
         const overviewRow = createOverviewRow(line);
+        const processZone = String(line.line || "").trim().toUpperCase().startsWith("AAPI")
+            ? "aapi"
+            : "capi";
 
         card.dataset.lineId = line.id;
+        card.dataset.processZone = processZone;
         setField(card, "pc-name", line.pcName || line.id);
         setField(card, "line-name", line.line || "未設定線體");
 
@@ -151,11 +157,48 @@
             line,
             card,
             overviewRow,
+            processZone,
             status: "checking",
             data: null,
             error: ""
         });
         renderLineCard(lineStates.get(line.id));
+    }
+
+    function initializeProcessTabs() {
+        const tabs = document.getElementById("process-tabs");
+        const availableZones = new Set(
+            Array.from(lineStates.values(), (state) => state.processZone)
+        );
+        activeProcessZone = availableZones.has("capi")
+            ? "capi"
+            : (availableZones.values().next().value || "capi");
+        tabs.hidden = availableZones.size < 2;
+        for (const tab of tabs.querySelectorAll(".process-tab")) {
+            tab.addEventListener("click", () => selectProcessZone(tab.dataset.processZone));
+        }
+        selectProcessZone(activeProcessZone);
+    }
+
+    function selectProcessZone(zoneId) {
+        activeProcessZone = zoneId;
+        for (const tab of document.querySelectorAll(".process-tab")) {
+            const selected = tab.dataset.processZone === activeProcessZone;
+            tab.setAttribute("aria-pressed", String(selected));
+        }
+
+        for (const state of lineStates.values()) {
+            const hidden = state.processZone !== activeProcessZone;
+            state.overviewRow.hidden = hidden;
+            state.card.hidden = hidden;
+        }
+        for (const group of document.querySelectorAll(".factory-group")) {
+            group.hidden = !Array.from(group.querySelectorAll(".line-card")).some(
+                (card) => !card.hidden
+            );
+        }
+        updateSummary();
+        renderAlerts();
     }
 
     function createOverviewRow(line) {
@@ -985,7 +1028,9 @@
     }
 
     function updateSummary() {
-        const states = Array.from(lineStates.values());
+        const states = Array.from(lineStates.values()).filter(
+            (state) => state.processZone === activeProcessZone
+        );
 
         setText(document.getElementById("summary-total-lines"), states.length);
         setText(
@@ -1005,6 +1050,9 @@
     function renderAlerts() {
         const alerts = [];
         for (const state of lineStates.values()) {
+            if (state.processZone !== activeProcessZone) {
+                continue;
+            }
             const label = `${state.line.factory || "未設定廠別"} / ${state.line.line || state.line.id}`;
             if (state.status === "offline") {
                 alerts.push({

@@ -442,6 +442,23 @@ def test_handle_train_new_start_persists_grid_config_from_client_resolutions():
     }
 
 
+def test_train_new_manual_grid_resolution_defaults_are_editable():
+    template = (
+        Path(__file__).resolve().parent.parent
+        / "templates"
+        / "train_new"
+        / "step1_select.html"
+    ).read_text(encoding="utf-8")
+
+    assert 'id="grid-product-width"' in template
+    assert 'id="grid-product-height"' in template
+    assert 'id="grid-product-width" min="1" step="1" value="1920"' in template
+    assert 'id="grid-product-height" min="1" step="1" value="1080"' in template
+    assert "請確認或修改產品解析度" in template
+    assert "Number(widthEl?.value)" in template
+    assert "Number(heightEl?.value)" in template
+
+
 def test_handle_train_new_start_rejects_mixed_client_resolutions_for_grid():
     server = MagicMock()
     server.database.get_inference_panel_resolutions.return_value = {
@@ -801,6 +818,51 @@ def test_handle_train_new_start_persists_manual_data_source(tmp_path):
     assert kwargs["panel_paths"] == [str(panel)]
 
 
+def test_handle_train_new_start_accepts_manual_grid_resolution(tmp_path):
+    batch = tmp_path / "batch"
+    panel = batch / "panel_001"
+    panel.mkdir(parents=True)
+    (panel / "W0F00000_sample.tif").write_bytes(b"w0")
+
+    server = MagicMock()
+    server.database.create_training_job = MagicMock()
+    server.path_mapping = {}
+    h = _make_handler_with_server(server, "/api/train/new/start")
+    payload = {
+        "machine_id": "GN140BGAAN80S",
+        "panel_paths": [str(panel)],
+        "training_data_source": {
+            "type": "manual_folder",
+            "batch_root": str(batch),
+            "confirmed_normal": True,
+        },
+        "grid_canonicalization": {
+            "enabled": True,
+            "samples_per_cell": 3,
+            "product_resolution": [2560, 1440],
+        },
+    }
+    body = json.dumps(payload).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+
+    with patch("capi_web.threading.Thread") as mock_thread:
+        mock_thread.return_value.start = MagicMock()
+        h._handle_train_new_start()
+
+    assert h._sent_response[0]["status"] == 200
+    grid = server.database.create_training_job.call_args.kwargs[
+        "grid_canonicalization"
+    ]
+    assert grid == {
+        "enabled": True,
+        "version": 1,
+        "samples_per_cell": 3,
+        "product_resolution": [2560, 1440],
+        "coordinate_preserving": True,
+    }
+
+
 def test_handle_train_new_start_requires_manual_normal_confirmation(tmp_path):
     batch = tmp_path / "batch"
     panel = batch / "panel_001"
@@ -853,6 +915,27 @@ def test_handle_train_new_status_with_job_id():
     body = json.loads(h._sent_response[0]["body"])
     assert body["state"] == "review"
     assert body["job_id"] == "j1"
+
+
+def test_handle_train_new_status_marks_failed_job_with_tiles_retryable():
+    from capi_web import CAPIWebHandler
+
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1", "machine_id": "M", "state": "failed",
+        "started_at": "2026-08-28 14:30:04", "completed_at": "2026-08-28 14:38:50",
+        "output_bundle": None, "error_message": "CUDA OOM",
+    }
+    server.database.list_tile_pool.return_value = [{"id": 1}]
+    h = _make_handler_with_server(server, "/api/train/new/status?job_id=j1")
+
+    h._handle_train_new_status()
+
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["state"] == "failed"
+    assert body["retryable"] is True
 
 
 def test_handle_train_new_status_reconciles_completed_runner_log():
@@ -1051,7 +1134,9 @@ def test_handle_train_new_start_training_starts_thread(monkeypatch):
     h = _make_handler_with_server(server, "/api/train/new/start_training/j1")
     h._handle_train_new_start_training()
 
-    server.database.update_training_job_state.assert_called_with("j1", "train")
+    server.database.update_training_job_state.assert_called_with(
+        "j1", "train", error_message=""
+    )
     assert len(started_threads) == 1
     body = json.loads(h._sent_response[0]["body"])
     assert body["state"] == "train"
@@ -1111,6 +1196,32 @@ def test_train_new_review_verifies_state_without_reposting_start():
     assert start_function.count("/api/train/new/start_training/") == 1
 
 
+def test_train_new_scope_and_review_pages_offer_abandon_action():
+    templates_dir = Path(__file__).resolve().parent.parent / "templates" / "train_new"
+    scope_text = (templates_dir / "step1_scope.html").read_text(encoding="utf-8")
+    review_text = (templates_dir / "step3_review.html").read_text(encoding="utf-8")
+
+    assert "放棄" in scope_text
+    assert "abandonTrainingJob('{{ j.job_id }}', this)" in scope_text
+    assert ">返回模型訓練</a>" in scope_text
+    assert "放棄此次訓練" in review_text
+    assert 'id="abandon-training-btn"' in review_text
+    assert "async function abandonTraining()" in review_text
+    scope_function = scope_text.split("async function abandonTrainingJob", 1)[1].split(
+        "function goNext", 1
+    )[0]
+    review_function = review_text.split("async function abandonTraining()", 1)[1].split(
+        "async function startTraining()", 1
+    )[0]
+    for function_text in (scope_function, review_function):
+        assert "/api/train/new/cancel/${encodeURIComponent(jobId)}" in function_text
+        assert "method: 'POST'" in function_text
+        assert "確定放棄此次訓練？" in function_text
+        assert "location.href = '/train/new'" in function_text
+    assert "未完成的訓練結果不會保留" in scope_function
+    assert "既有模型不受影響" in review_function
+
+
 def test_handle_train_new_start_training_rejects_when_slot_held():
     """另一個 job 已在 train → 第二個 start_training 收 409。"""
     from capi_web import CAPIWebHandler
@@ -1135,6 +1246,60 @@ def test_handle_train_new_start_training_rejects_when_slot_held():
     assert body["training_job_id"] == "j1"
     # slot 不應被改寫
     assert CAPIWebHandler._train_slot["active_job_id"] == "j1"
+
+
+def test_handle_train_new_retry_preserves_reviewed_tiles(tmp_path, monkeypatch):
+    from capi_database import CAPIDatabase
+    from capi_web import CAPIWebHandler
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(tmp_path)
+    db = CAPIDatabase(tmp_path / "test.db")
+    job_id = "j_retry"
+    db.create_training_job(job_id=job_id, machine_id="M", panel_paths=["/p"])
+    tile_id = db.insert_tile_pool(job_id, [{
+        "lighting": "G0F00000",
+        "zone": "inner",
+        "source": "ok",
+        "source_path": str(tmp_path / "tile.png"),
+        "thumb_path": str(tmp_path / "thumb.png"),
+    }])[0]
+    db.update_tile_decisions(job_id, [tile_id], "reject")
+    db.update_training_job_state(job_id, "failed", error_message="CUDA OOM")
+
+    CAPIWebHandler._train_new_jobs = {}
+    CAPIWebHandler._train_new_jobs_lock = threading.Lock()
+    CAPIWebHandler._train_slot = {"lock": threading.Lock(), "active_job_id": None}
+    server = MagicMock()
+    server.database = db
+    h = _make_handler_with_server(server, f"/api/train/new/retry/{job_id}")
+
+    h._handle_train_new_retry()
+
+    body = json.loads(h._sent_response[0]["body"])
+    assert h._sent_response[0]["status"] == 200
+    assert body["state"] == "review"
+    job = db.get_training_job(job_id)
+    assert job["state"] == "review"
+    assert job["completed_at"] is None
+    assert job["error_message"] == "CUDA OOM"
+    tiles = db.list_tile_pool(job_id)
+    assert len(tiles) == 1
+    assert tiles[0]["decision"] == "reject"
+
+
+def test_handle_train_new_retry_rejects_failed_job_without_tiles():
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1", "machine_id": "M", "state": "failed", "panel_paths": []
+    }
+    server.database.list_tile_pool.return_value = []
+    h = _make_handler_with_server(server, "/api/train/new/retry/j1")
+
+    h._handle_train_new_retry()
+
+    assert h._sent_response[0]["status"] == 409
+    server.database.reset_failed_training_job_for_review.assert_not_called()
 
 
 def test_handle_train_new_cancel_marks_review_job_failed():
@@ -1381,6 +1546,27 @@ def test_handle_train_new_progress_page_uses_step4_template_for_train_state():
     ]
 
 
+def test_handle_train_new_progress_page_uses_training_template_for_retryable_failure():
+    server = MagicMock()
+    server.database.get_training_job.return_value = {
+        "job_id": "j1",
+        "state": "failed",
+        "error_message": "CUDA OOM",
+        "panel_paths": [],
+    }
+    server.database.list_tile_pool.return_value = [{"id": 1}]
+    h = _make_handler_with_server(server, "/train/new/progress?job_id=j1")
+    template = MagicMock()
+    template.render.return_value = "<html>retry</html>"
+    h.jinja_env = MagicMock()
+    h.jinja_env.get_template.return_value = template
+
+    h._handle_train_new_progress_page()
+
+    h.jinja_env.get_template.assert_called_with("train_new/step4_progress.html")
+    assert h._sent_response[0]["body"] == "<html>retry</html>"
+
+
 def test_train_new_step4_progress_template_exists():
     template_path = Path(__file__).resolve().parent.parent / "templates" / "train_new" / "step4_progress.html"
     assert template_path.exists()
@@ -1388,6 +1574,9 @@ def test_train_new_step4_progress_template_exists():
     assert "unitDisplayLabels[u] || u" in text
     assert "logLines.map(displayTrainingText)" in text
     assert "displayTrainingText(d.error_message || '未知')" in text
+    assert "原選圖與 tile 審核結果已保留" in text
+    assert "/api/train/new/retry/${encodeURIComponent(jobId)}" in text
+    assert "回到原選圖重試" in text
 
 
 @pytest.mark.parametrize(("image_name", "expected_label"), [
@@ -2055,6 +2244,9 @@ def test_handle_train_new_page_lists_all_active_jobs():
         {"job_id": "j_pre", "machine_id": "M", "state": "preprocess", "panel_paths": []},
         {"job_id": "j_rev", "machine_id": "M", "state": "review", "panel_paths": []},
     ]
+    server.database.list_retryable_training_jobs.return_value = [
+        {"job_id": "j_retry", "machine_id": "M", "state": "failed", "panel_paths": []},
+    ]
     h = _make_handler_with_server(server, "/train/new")
     template = MagicMock()
     template.render.return_value = "<html>step1</html>"
@@ -2068,11 +2260,12 @@ def test_handle_train_new_page_lists_all_active_jobs():
     active_jobs = template.render.call_args.kwargs["active_jobs"]
     ids = [j["job_id"] for j in active_jobs]
     assert "j_rev" in ids
+    assert "j_retry" in ids
     # j_pre 在 preprocess 狀態：worker 不存在 → _mark_train_new_stale_if_needed 會把它標 failed → 從清單剔除
     assert h._sent_response[0]["body"] == "<html>step1</html>"
 
 
-def test_stale_train_job_cleanup_removes_temp_data(tmp_path, monkeypatch):
+def test_stale_train_job_cleanup_preserves_review_data(tmp_path, monkeypatch):
     from capi_database import CAPIDatabase
     from capi_web import CAPIWebHandler
 
@@ -2080,6 +2273,7 @@ def test_stale_train_job_cleanup_removes_temp_data(tmp_path, monkeypatch):
     db = CAPIDatabase(tmp_path / "test.db")
     job_id = "stale_web_cleanup"
     db.create_training_job(job_id, "M", [])
+    db.update_training_job_state(job_id, "train")
     db.insert_tile_pool(job_id, [
         {
             "lighting": "G0F00000",
@@ -2105,10 +2299,10 @@ def test_stale_train_job_cleanup_removes_temp_data(tmp_path, monkeypatch):
 
     assert updated["state"] == "failed"
     assert db.get_training_job(job_id)["state"] == "failed"
-    assert db.list_tile_pool(job_id) == []
+    assert len(db.list_tile_pool(job_id)) == 1
     assert not (tmp_path / ".tmp" / "training_staging" / job_id).exists()
     assert not (tmp_path / ".tmp" / "training_runs" / job_id).exists()
-    assert not (tmp_path / ".tmp" / "train_new_thumbs" / job_id).exists()
+    assert (tmp_path / ".tmp" / "train_new_thumbs" / job_id / "tile.png").exists()
 
 
 def test_reconcile_train_new_artifacts_keeps_review_thumbnails(tmp_path, monkeypatch):

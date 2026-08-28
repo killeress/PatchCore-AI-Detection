@@ -798,6 +798,7 @@ class CAPIDatabase:
                     overexposed_url TEXT DEFAULT '',
                     enabled INTEGER NOT NULL DEFAULT 1,
                     is_production INTEGER NOT NULL DEFAULT 0,
+                    production_date TEXT NOT NULL DEFAULT '',
                     sort_order INTEGER NOT NULL DEFAULT 0,
                     updated_by TEXT DEFAULT '',
                     updated_at TEXT DEFAULT (datetime('now', 'localtime'))
@@ -817,6 +818,11 @@ class CAPIDatabase:
                 "central_dashboard_lines",
                 "is_production",
                 "INTEGER NOT NULL DEFAULT 0",
+            )
+            add_column_if_not_exists(
+                "central_dashboard_lines",
+                "production_date",
+                "TEXT NOT NULL DEFAULT ''",
             )
 
             def ensure_within_spec_log_schema():
@@ -5975,6 +5981,15 @@ class CAPIDatabase:
                     )
             line["enabled"] = raw_line.get("enabled") is not False
             line["isProduction"] = raw_line.get("isProduction") is True
+            production_date = str(raw_line.get("productionDate") or "").strip()
+            if production_date:
+                try:
+                    if not _DATE_RE.fullmatch(production_date):
+                        raise ValueError
+                    datetime.strptime(production_date, "%Y-%m-%d")
+                except ValueError:
+                    raise ValueError(f"第 {index} 筆的上線日期格式錯誤")
+            line["productionDate"] = production_date
             normalized_lines.append(line)
 
         return {
@@ -6005,6 +6020,7 @@ class CAPIDatabase:
                     "overexposedUrl": row["overexposed_url"],
                     "enabled": bool(row["enabled"]),
                     "isProduction": bool(row["is_production"]),
+                    "productionDate": row["production_date"] or "",
                 }
                 for row in line_rows
             ],
@@ -6080,9 +6096,9 @@ class CAPIDatabase:
         conn.executemany(
             """INSERT INTO central_dashboard_lines
                (id, factory, line_name, pc_name, api_url, dashboard_url,
-                overexposed_url, enabled, is_production, sort_order,
+                overexposed_url, enabled, is_production, production_date, sort_order,
                 updated_by, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     line["id"],
@@ -6094,6 +6110,7 @@ class CAPIDatabase:
                     line["overexposedUrl"],
                     1 if line["enabled"] else 0,
                     1 if line["isProduction"] else 0,
+                    line["productionDate"],
                     index,
                     changed_by,
                     now,
@@ -6655,6 +6672,30 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def reset_failed_training_job_for_review(self, job_id: str) -> bool:
+        """將仍保有 tile pool 的失敗 job 重設回 review，供原資料重試。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                """UPDATE training_jobs
+                      SET state = 'review',
+                          completed_at = NULL,
+                          output_bundle = NULL
+                    WHERE job_id = ?
+                      AND state = 'failed'
+                      AND EXISTS (
+                          SELECT 1
+                            FROM training_tile_pool
+                           WHERE training_tile_pool.job_id = training_jobs.job_id
+                             AND training_tile_pool.source = 'ok'
+                      )""",
+                (job_id,),
+            )
+            conn.commit()
+            return cur.rowcount == 1
+        finally:
+            conn.close()
+
     def get_active_training_job(self) -> Optional[Dict]:
         """回傳目前進行中的 job（preprocess / review / train），依 started_at DESC 取最新一筆。"""
         conn = self._get_conn()
@@ -6691,6 +6732,32 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def list_retryable_training_jobs(self) -> List[Dict]:
+        """回傳訓練失敗但仍保有 review tile 的 job。"""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT training_jobs.*
+                     FROM training_jobs
+                    WHERE training_jobs.state = 'failed'
+                      AND EXISTS (
+                          SELECT 1
+                            FROM training_tile_pool
+                           WHERE training_tile_pool.job_id = training_jobs.job_id
+                             AND training_tile_pool.source = 'ok'
+                      )
+                    ORDER BY training_jobs.completed_at DESC,
+                             training_jobs.started_at DESC"""
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return []
+            cols = [d[0] for d in cur.description]
+            return [self._decode_training_job_row(cols, row) for row in rows]
+        finally:
+            conn.close()
+
     # ------------------------------------------------------------------
     # training_tile_pool CRUD
     # ------------------------------------------------------------------
@@ -6700,7 +6767,7 @@ class CAPIDatabase:
         machine_id: str,
         lightings: Optional[Tuple[str, ...]] = None,
     ) -> List[Dict]:
-        """列出同機種推論紀錄內含 Client AOI 炸彈資料的來源影像。
+        """列出同機種近 3 天推論紀錄內含 Client AOI 炸彈資料的來源影像。
 
         不依賴舊模型的 ``is_bomb`` 結果；呼叫端會直接依
         ``client_bomb_info`` 座標切 crop。B0F 黑畫面固定排除。
@@ -6720,6 +6787,7 @@ class CAPIDatabase:
 
         conditions = [
             "ir.model_id = ?",
+            "ir.created_at >= datetime('now', 'localtime', '-3 days')",
             "TRIM(COALESCE(ir.client_bomb_info, '')) != ''",
             "UPPER(im.image_name) NOT LIKE 'B0F00000%'",
         ]

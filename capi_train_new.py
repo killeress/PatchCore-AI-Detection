@@ -631,7 +631,7 @@ def sample_ng_tiles(
 
     ``over_review_root`` 僅保留舊版呼叫介面相容；新版不再讀取該目錄。
     已有訓練炸彈快取時直接從 NG 驗證庫載入；缺少的 lighting 才讀取
-    推論原圖裁切，並將未前處理的 512 crop 持久化供下次重用。
+    最近 3 天推論原圖裁切，並將未前處理的 512 crop 持久化供下次重用。
     B0F00000 黑畫面固定排除。這些 crop 只會以 ``source=ng`` 進入
     ``test/anormal``，不會加入 normal memory bank。
     AOI 映射、panel polygon 內縮、zone 判定與前處理順序和正式 v2
@@ -914,11 +914,12 @@ def sample_ng_tiles(
         lighting_candidates = list(by_lighting.get(lighting) or [])
         if not lighting_candidates:
             missing.append(lighting)
-            log(f"⚠ {lighting}: 推論紀錄無可用 AOI 炸彈 crop")
+            log(f"⚠ {lighting}: 最近 3 天推論紀錄無可用 AOI 炸彈 crop")
             continue
         random.shuffle(lighting_candidates)
         records = []
         validation_rows = []
+        missing_source_count = 0
         edge_n = inner_n = unknown_n = 0
         preprocessed_n = 0
         for candidate in lighting_candidates:
@@ -926,15 +927,18 @@ def sample_ng_tiles(
                 break
 
             raw_source_path = Path(str(candidate.get("image_path") or ""))
-            if not raw_source_path.is_file():
+            source_exists = raw_source_path.is_file()
+            if not source_exists:
                 fallback_path = (
                     Path(str(candidate.get("image_dir") or ""))
                     / Path(str(candidate.get("image_name") or "")).name
                 )
-                raw_source_path = fallback_path if fallback_path.is_file() else raw_source_path
-            if not raw_source_path.is_file():
+                if fallback_path != raw_source_path and fallback_path.is_file():
+                    raw_source_path = fallback_path
+                    source_exists = True
+            if not source_exists:
                 result_stats["invalid_skipped"] += 1
-                log(f"  ⚠ {lighting}: 炸彈原圖不存在 {raw_source_path}")
+                missing_source_count += 1
                 continue
 
             source_key = str(raw_source_path.resolve())
@@ -1159,6 +1163,11 @@ def sample_ng_tiles(
                     })
                 elif not validation_error_logged:
                     log(f"  ⚠ {lighting}: NG 驗證庫 crop 寫入失敗 {validation_path}")
+        if missing_source_count:
+            log(
+                f"  ⚠ {lighting}: 最近 3 天炸彈原圖不存在 "
+                f"{missing_source_count} 筆，已略過"
+            )
         if records:
             db.insert_tile_pool(job_id, records)
             if validation_rows:
@@ -1611,7 +1620,7 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
     """產出 bundle 內的 inference yaml。
 
     若提供 succeeded_units，只寫入 inner/edge 都成功訓練的 lighting；
-    None 表示寫入全部 5×2=10 組（舊行為，測試用）。
+    None 表示寫入 CAPI 預設 5×2=10 組（舊行為，測試用）。
     """
     import yaml
     from capi_image_preprocess_lab import normalize_preprocess_pipeline

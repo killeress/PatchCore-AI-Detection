@@ -13,7 +13,7 @@
 
   {% if active_jobs %}
   <div style="background:#2f3347;border:1px solid #89b4fa;border-radius:10px;padding:14px 16px;margin-top:16px;">
-    <div style="color:#cdd6f4;font-weight:700;font-size:.92rem;margin-bottom:6px;">進行中的訓練 job ({{ active_jobs|length }})</div>
+    <div style="color:#cdd6f4;font-weight:700;font-size:.92rem;margin-bottom:6px;">進行中或可重試的訓練 job ({{ active_jobs|length }})</div>
     {% for j in active_jobs %}
     <div style="display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 0;border-top:1px solid #45475a;">
       <div>
@@ -22,7 +22,7 @@
           <span style="margin-left:8px;color:#a6adc8;">{{ j.machine_id }}</span>
         </div>
         <div style="color:#a6adc8;font-size:.78rem;margin-top:2px;">
-          state: <span style="color:{% if j.state == 'review' %}#a6e3a1{% elif j.state == 'train' %}#fab387{% else %}#89b4fa{% endif %};font-weight:600;">{{ j.state }}</span>
+          state: <span style="color:{% if j.state == 'review' %}#a6e3a1{% elif j.state == 'train' %}#fab387{% elif j.state == 'failed' %}#f38ba8{% else %}#89b4fa{% endif %};font-weight:600;">{{ j.state }}</span>
         </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
@@ -32,7 +32,14 @@
         {% elif j.state in ('preprocess', 'train') %}
         <a href="/train/new/progress?job_id={{ j.job_id }}"
            style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:6px 12px;font-weight:700;text-decoration:none;font-size:.82rem;">查看進度 →</a>
+        {% elif j.state == 'failed' %}
+        <a href="/train/new/progress?job_id={{ j.job_id }}"
+           style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:6px 12px;font-weight:700;text-decoration:none;font-size:.82rem;">保留選圖重試 →</a>
         {% endif %}
+        <button type="button" onclick="abandonTrainingJob('{{ j.job_id }}', this)"
+          style="background:#313244;color:#f38ba8;border:1px solid #f38ba8;border-radius:5px;padding:6px 12px;font-weight:700;font-size:.82rem;cursor:pointer;">
+          放棄
+        </button>
       </div>
     </div>
     {% endfor %}
@@ -85,7 +92,7 @@
   </div>
 
   <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:10px;align-items:center;">
-    <a href="/training" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">取消</a>
+    <a href="/training" style="background:#313244;color:#a6adc8;padding:8px 18px;border-radius:5px;text-decoration:none;">返回模型訓練</a>
     <button id="nextBtn" onclick="goNext()"
       style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:8px 22px;font-weight:700;cursor:pointer;">
       下一步：選擇訓練資料 →
@@ -129,6 +136,38 @@ function setUnitPreset(kind) {
   });
 }
 
+async function abandonTrainingJob(jobId, button) {
+  const ok = await capConfirm(
+    `Job ID: ${jobId}\n\n此 job 會停止，未完成的訓練結果不會保留；review 階段的暫存 tile 會清除。`,
+    {title: '確定放棄此次訓練？', confirmText: '放棄訓練', cancelText: '繼續保留', danger: true}
+  );
+  if (!ok) return;
+
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/train/new/cancel/${encodeURIComponent(jobId)}`, {
+      method: 'POST'
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    if (data.cancel_requested) {
+      await capAlert(
+        '已送出取消要求，系統會在目前訓練階段結束後停止。',
+        {title: '取消要求已送出'}
+      );
+    }
+    location.href = '/train/new';
+  } catch (error) {
+    button.disabled = false;
+    await capAlert(
+      error && error.message ? error.message : '無法取消此訓練 job。',
+      {type: 'error', title: '取消失敗'}
+    );
+  }
+}
+
 function goNext() {
   const mode = selectedMode();
   const params = new URLSearchParams();
@@ -150,4 +189,5 @@ function goNext() {
   location.href = '/train/new/select?' + params.toString();
 }
 </script>
+{% include "train_new/_modal.html" %}
 {% endblock %}

@@ -75,7 +75,15 @@
         <section class="dashboard-banner" aria-label="智慧製造 AI 視覺檢測示意圖">
         </section>
 
-        <section class="summary-grid" aria-label="全廠摘要">
+        <div id="process-tabs" class="process-tabs" role="group" aria-label="製程類別" hidden>
+            <span class="process-tabs-label">製程類別</span>
+            <div class="process-tab-list">
+                <button class="process-tab" type="button" data-process-zone="capi">CAPI</button>
+                <button class="process-tab" type="button" data-process-zone="aapi">AAPI</button>
+            </div>
+        </div>
+
+        <section class="summary-grid" aria-label="目前製程摘要">
             <article class="summary-card">
                 <span>納管線體</span>
                 <strong id="summary-total-lines">0</strong>
