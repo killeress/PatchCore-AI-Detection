@@ -453,6 +453,60 @@ def test_v2_aoi_zone_uses_defect_center_for_logged_w0f_case():
     assert [tile.zone for tile in result.tiles] == ["inner", "inner"]
 
 
+def test_v2_aoi_near_polygon_fit_boundary_routes_to_edge():
+    cfg = CAPIConfig()
+    cfg.is_new_architecture = True
+    cfg.tile_size = 512
+    cfg.enable_panel_polygon = True
+
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+
+    image = np.full((4384, 6576), 180, dtype=np.uint8)
+    polygon = np.array(
+        [
+            [1206.9, 1377.4],
+            [5331.2, 1397.0],
+            [5317.3, 3965.8],
+            [1200.1, 3957.2],
+        ],
+        dtype=np.float32,
+    )
+    result = ImageResult(
+        image_path=Path("W0F00000_092442.tif"),
+        image_size=(6576, 4384),
+        otsu_bounds=(1200, 1377, 5331, 3966),
+        exclusion_regions=[],
+        tiles=[],
+        excluded_tile_count=0,
+        processed_tile_count=0,
+        processing_time=0.0,
+        raw_bounds=(1200, 1377, 5331, 3966),
+        panel_polygon=polygon,
+    )
+    inferencer._map_aoi_coords = lambda *_args, **_kwargs: (1980, 1645)
+
+    created = inferencer._create_aoi_centered_tiles_v2(
+        image=image,
+        result=result,
+        defects=[
+            AOIReportDefect(
+                defect_code="BOMB_FORCE",
+                product_x=363,
+                product_y=124,
+                image_prefix="W0F00000",
+            )
+        ],
+        product_resolution=(1920, 1200),
+        pre_cfg=PreprocessConfig(tile_size=512),
+    )
+
+    assert created == 1
+    tile = result.tiles[0]
+    assert (tile.x, tile.y) == (1724, 1389)
+    assert tile.zone == "edge"
+
+
 def test_v2_aoi_coord_tile_keeps_anchor_inside_when_inward_conflicts():
     cfg = CAPIConfig()
     cfg.is_new_architecture = True

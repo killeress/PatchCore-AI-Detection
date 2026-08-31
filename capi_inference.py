@@ -6402,6 +6402,8 @@ class CAPIInferencer:
         Returns: 新建立的 tile 數
         """
         from capi_preprocess import (
+            MAX_EDGE_RESIDUAL_P95_RATIO,
+            MIN_EDGE_RESIDUAL_P95_PX,
             classify_anchor_zone,
             classify_tile_zone,
             resolve_inward_polygon_tile,
@@ -6453,6 +6455,12 @@ class CAPIInferencer:
         polygon = result.panel_polygon
         if polygon is None:
             polygon = self._rect_polygon_from_bounds(result.raw_bounds)
+        polygon_fit_tolerance = 0.0
+        if result.panel_polygon is not None:
+            polygon_fit_tolerance = max(
+                MIN_EDGE_RESIDUAL_P95_PX,
+                float(tile_size) * MAX_EDGE_RESIDUAL_P95_RATIO,
+            )
         next_tile_id = max((t.tile_id for t in result.tiles), default=-1) + 1
         otsu_x1, otsu_y1, otsu_x2, otsu_y2 = result.raw_bounds
         created = 0
@@ -6527,8 +6535,11 @@ class CAPIInferencer:
             if is_skip_file:
                 zone = "bright_spot"
             else:
+                # A fitted boundary can legitimately deviate by this amount;
+                # keep near-touching tiles on the edge model instead of letting
+                # polygon fit noise flip them to inner.
                 zone, _anchor_distance = classify_anchor_zone(
-                    (img_x, img_y), polygon, half,
+                    (img_x, img_y), polygon, half + polygon_fit_tolerance,
                 )
 
             if not is_skip_file and getattr(pre_cfg, "preprocess_after_tiling", False):
