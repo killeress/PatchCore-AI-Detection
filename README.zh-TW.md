@@ -162,6 +162,7 @@ python -m pytest tests/
 - [新機種模型訓練 SOP](./docs/new_system_model_training_sop.zh-TW.md)
 - [PatchCore 訓練架構](./docs/patchcore_training_architecture.zh-TW.md)
 - [實驗版 pull 模式自動更新流程](./docs/experimental_auto_update.zh-TW.md)
+- [Code-only 發行包打包 SOP](./docs/codeonly_release_sop.zh-TW.md)
 - [部署 ZIP 產生器](./scripts/build_deploy_zip.py)
 - [中央看板](./central_dashboard/README.md)
 - [更新紀錄](./CHANGELOG.md)

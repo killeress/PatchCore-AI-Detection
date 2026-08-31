@@ -65,7 +65,6 @@ CODE_FILES = [
     "capi_white_frame.py",
     "configs/mes_defect_codes.json",
     "requirements.txt",
-    "server_config_mes_report.yaml.example",
     "scratch_classifier.py",
     "scratch_filter.py",
     "start_server.py",
@@ -132,7 +131,6 @@ PATCH_DEPLOY_ROOT_FILES = {
     "promote_update.sh",
     "setup_auto_update_client.sh",
     "requirements.txt",
-    "server_config_mes_report.yaml.example",
     "mark_shadow/paddle_shadow_worker.py",
     "mark_shadow/install_worker_hotfix.sh",
     "mark_shadow/README_WORKER_HOTFIX.txt",
@@ -358,7 +356,7 @@ install_patch.sh 完成後會顯示 rollback 指令，例如：
 
 - 此包只更新程式檔與版本資訊，不應包含 DB、模型權重、heatmap、現場設定檔。
 - 若更新包內包含 start_server.sh，會一併更新現場啟動腳本。
-- Report 數據比對需安裝 `oracledb`，並合併 server_config_mes_report.yaml.example。
+- Report 數據比對需安裝 `oracledb`；設定範例請取自 full/code-only ZIP 內的 server_config_patch.yaml.example。
 """
 
 
