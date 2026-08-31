@@ -2000,7 +2000,7 @@ def test_handle_train_new_preprocess_pipeline_preview_uses_aapi_panel_folder(
     assert resp["image_name"] == "YQ52TR205A41W0F00000073951.tif"
 
 
-def test_aapi_training_scope_has_fourteen_supported_model_units():
+def test_aapi_training_scope_has_sixteen_supported_model_units():
     from capi_station_adapter import AAPIStationAdapter
     from capi_web import CAPIWebHandler
 
@@ -2009,9 +2009,11 @@ def test_aapi_training_scope_has_fourteen_supported_model_units():
 
     units = CAPIWebHandler._all_train_unit_labels(server)
 
-    assert len(units) == 14
+    assert len(units) == 16
     assert units[:2] == ["G0F00000-inner", "G0F00000-edge"]
     assert "WGF25250-inner" in units
+    assert "W0F00010-inner" in units
+    assert "WGF50500-inner" in units
     assert "U0F00000-edge" in units
     assert units[-2:] == ["STANDARD-inner", "STANDARD-edge"]
 
@@ -2063,13 +2065,15 @@ def test_handle_train_new_start_full_scope_omits_capi_screen_without_images(tmp_
     assert any("沒有原圖，略過：G0F00000" in line for line in runtime["log_lines"])
 
 
-def test_handle_train_new_start_full_scope_uses_present_aapi_aliases(tmp_path):
+def test_handle_train_new_start_full_scope_keeps_aapi_screens_separate(tmp_path):
     from capi_station_adapter import AAPIStationAdapter
     from capi_web import CAPIWebHandler
 
     panel_dir = tmp_path / "panel"
     panel_dir.mkdir()
     (panel_dir / "YQ52TR205A41W0F00000073951.tif").write_bytes(b"image")
+    (panel_dir / "YQ52TR205A41W0F00010073959.tif").write_bytes(b"image")
+    (panel_dir / "YQ52TR205A41WGF50500073958.tif").write_bytes(b"image")
     (panel_dir / "YQ52TR205A41Windows_BG073951.tif").write_bytes(b"image")
 
     server = MagicMock()
@@ -2094,6 +2098,8 @@ def test_handle_train_new_start_full_scope_uses_present_aapi_aliases(tmp_path):
     scope = server.database.create_training_job.call_args.kwargs["training_scope"]
     assert scope["selected_units"] == [
         "W0F00000-inner", "W0F00000-edge",
+        "W0F00010-inner", "W0F00010-edge",
+        "WGF50500-inner", "WGF50500-edge",
         "STANDARD-inner", "STANDARD-edge",
     ]
 

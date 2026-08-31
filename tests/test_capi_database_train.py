@@ -301,6 +301,12 @@ class TestConfigParamDefaults:
         assert upper["param_value"] == "85"
         assert "產品區平均亮度" in upper["description"]
         assert history_count == 1
+        assert db.get_config_param(
+            "image_abnormal_w0f00010_mean_lower"
+        )["decoded_value"] == 72
+        assert db.get_config_param(
+            "image_abnormal_w0f00010_mean_upper"
+        )["decoded_value"] == 92
 
 
 class TestTrainingJobsCRUD:

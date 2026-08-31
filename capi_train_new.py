@@ -55,6 +55,7 @@ SUPPORTED_LIGHTINGS = (
     "R0F00000",
     "W0F00000",
     "WGF25250",
+    "W0F00010",
     "WGF50500",
     "U0F00000",
     "STANDARD",
@@ -1761,6 +1762,8 @@ image_abnormal_standard_mean_lower: 68
 image_abnormal_standard_mean_upper: 88
 image_abnormal_wgf50500_mean_lower: 72
 image_abnormal_wgf50500_mean_upper: 92
+image_abnormal_w0f00010_mean_lower: 72
+image_abnormal_w0f00010_mean_upper: 92
 image_abnormal_g0f00000_mean_lower: 67
 image_abnormal_g0f00000_mean_upper: 87
 image_abnormal_r0f00000_mean_lower: 71

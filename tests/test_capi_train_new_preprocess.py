@@ -143,13 +143,18 @@ def test_preprocess_panels_to_pool_accepts_aapi_glass_prefixed_images(tmp_path):
     assert stats["panel_success"] == 1
     assert {tile["lighting"] for tile in db.tiles} == {
         "G0F00000", "R0F00000", "W0F00000", "WGF25250",
-        "WGF50500", "U0F00000", "STANDARD",
+        "W0F00010", "WGF50500", "U0F00000", "STANDARD",
     }
     tile_names = {Path(tile["source_path"]).name for tile in db.tiles}
     assert any("W0F00010" in name for name in tile_names)
     assert any("WGF25250" in name for name in tile_names)
     assert any("WGF50500" in name for name in tile_names)
     assert any("U0F00000" in name for name in tile_names)
+    w0f00010_tiles = [tile for tile in db.tiles if tile["lighting"] == "W0F00010"]
+    wgf50500_tiles = [tile for tile in db.tiles if tile["lighting"] == "WGF50500"]
+    assert w0f00010_tiles and wgf50500_tiles
+    assert all("W0F00010" in Path(tile["source_path"]).name for tile in w0f00010_tiles)
+    assert all("WGF50500" in Path(tile["source_path"]).name for tile in wgf50500_tiles)
 
 
 def test_preprocess_panels_to_pool_all_panels_have_inner_and_edge(tmp_path):

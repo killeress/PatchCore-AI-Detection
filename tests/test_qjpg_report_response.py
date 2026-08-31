@@ -426,7 +426,7 @@ def test_image_abnormal_precheck_only_checks_aoi_report_prefixes(monkeypatch):
     assert read_paths == ["W0F00000_113600.tif", "B0F00000_113600.tif"]
 
 
-def test_aapi_image_abnormal_alias_keeps_w0f00010_source_distinct(monkeypatch):
+def test_aapi_image_abnormal_keeps_w0f00010_and_wgf50500_independent(monkeypatch):
     adapter = AAPIStationAdapter()
     read_paths = []
 
@@ -440,8 +440,10 @@ def test_aapi_image_abnormal_alias_keeps_w0f00010_source_distinct(monkeypatch):
     monkeypatch.setattr("capi_server.detect_panel_polygon", lambda image, cfg: (None, None))
     cfg = CAPIConfig(
         image_abnormal_detection_enabled=True,
-        image_abnormal_wgf50500_mean_lower=40,
-        image_abnormal_wgf50500_mean_upper=82,
+        image_abnormal_w0f00010_mean_lower=40,
+        image_abnormal_w0f00010_mean_upper=82,
+        image_abnormal_wgf50500_mean_lower=50,
+        image_abnormal_wgf50500_mean_upper=70,
     )
     w0f00010 = Path("YQ607S210B12W0F00010164822.tif")
     wgf50500 = Path("YQ607S210B12WGF50500164821.tif")
@@ -456,7 +458,9 @@ def test_aapi_image_abnormal_alias_keeps_w0f00010_source_distinct(monkeypatch):
         boundary_reference_priority=adapter.boundary_reference_priority,
     )
 
-    assert result["screen"] == "WGF50500"
+    assert result["screen"] == "W0F00010"
+    assert result["lower"] == 40
+    assert result["upper"] == 82
     assert result["image_name"] == w0f00010.name
     assert read_paths.count(w0f00010.name) == 1
 

@@ -144,7 +144,6 @@ class AAPIStationAdapter(StationAdapter):
     )
     _MODEL_ALIASES = {
         "WINDOWS_BG": "STANDARD",
-        "W0F00010": "WGF50500",
     }
     _REPORT_RECORD = re.compile(
         r"(White_Frame|BWFRAME0|Windows_BG|STANDARD|W0F00010|WGF25250|"

@@ -142,9 +142,9 @@ def test_aapi_filename_mapping_keeps_source_images_distinct():
         assert adapter.image_prefix(image_name) == expected
 
     assert adapter.model_prefix("WINDOWS_BG") == "STANDARD"
-    assert adapter.model_prefix("W0F00010") == "WGF50500"
+    assert adapter.model_prefix("W0F00010") == "W0F00010"
     assert adapter.report_prefix("YQ607S210B12Windows_BG164820.tif") == "STANDARD"
-    assert adapter.report_prefix("YQ607S210B12W0F00010164822.tif") == "WGF50500"
+    assert adapter.report_prefix("YQ607S210B12W0F00010164822.tif") == "W0F00010"
     assert adapter.report_prefix("YQ607S210B12WGF25250164820.tif") == "WGF25250"
     assert adapter.report_prefix("YQ607S210B12U0F00000164817.tif") == "U0F00000"
     assert adapter.image_group_key("YQ607S210B12W0F00010164822.tif") != \
@@ -152,10 +152,10 @@ def test_aapi_filename_mapping_keeps_source_images_distinct():
     assert adapter.is_white_frame_image("YQ607S210B12White_Frame164823.tif")
     assert adapter.is_omit_image("YQ607S210B12PINIGBI0164814.tif")
     assert adapter.training_image_prefix("YQ607S210B12Windows_BG164820.tif") == "STANDARD"
-    assert adapter.training_image_prefix("YQ607S210B12W0F00010164822.tif") == "WGF50500"
+    assert adapter.training_image_prefix("YQ607S210B12W0F00010164822.tif") == "W0F00010"
     assert adapter.training_prefixes == (
         "G0F00000", "R0F00000", "W0F00000", "WGF25250",
-        "WGF50500", "U0F00000", "STANDARD",
+        "W0F00010", "WGF50500", "U0F00000", "STANDARD",
     )
 
 
@@ -199,7 +199,7 @@ def test_aapi_preprocess_keeps_w0f00010_and_wgf50500_as_two_images(tmp_path):
     )
 
     assert set(files) == {"W0F00010", "WGF50500", "WINDOWS_BG"}
-    assert adapter.model_prefix("W0F00010") == adapter.model_prefix("WGF50500")
+    assert adapter.model_prefix("W0F00010") != adapter.model_prefix("WGF50500")
 
 
 def test_aapi_reserved_lightings_are_independent_models(tmp_path):
@@ -225,7 +225,7 @@ def test_aapi_reserved_lightings_are_independent_models(tmp_path):
     } == {"WGF25250", "G0F00000", "U0F00000"}
 
 
-def test_aapi_model_routing_uses_alias_without_merging_source_images():
+def test_aapi_model_routing_keeps_w0f00010_and_wgf50500_independent():
     inferencer = CAPIInferencer.__new__(CAPIInferencer)
     inferencer.station_adapter = AAPIStationAdapter()
     inferencer.config = SimpleNamespace(
@@ -234,6 +234,7 @@ def test_aapi_model_routing_uses_alias_without_merging_source_images():
         threshold_mapping={
             "STANDARD": {"inner": 0.41, "edge": 0.51},
             "WGF50500": {"inner": 0.42, "edge": 0.52},
+            "W0F00010": {"inner": 0.43, "edge": 0.53},
         },
     )
     inferencer.threshold = 0.75
@@ -241,7 +242,11 @@ def test_aapi_model_routing_uses_alias_without_merging_source_images():
 
     assert inferencer._get_inferencer_for_zone("WINDOWS_BG", "inner") == "model"
     inferencer._get_model_for.assert_called_once_with("MODEL-A", "STANDARD", "inner")
-    assert inferencer._get_threshold_for_zone("W0F00010", "edge") == 0.52
+    inferencer._get_model_for.reset_mock()
+    assert inferencer._get_inferencer_for_zone("W0F00010", "edge") == "model"
+    inferencer._get_model_for.assert_called_once_with("MODEL-A", "W0F00010", "edge")
+    assert inferencer._get_threshold_for_zone("WGF50500", "edge") == 0.52
+    assert inferencer._get_threshold_for_zone("W0F00010", "edge") == 0.53
 
 
 def test_aapi_model_routing_keeps_reserved_models_independent():
