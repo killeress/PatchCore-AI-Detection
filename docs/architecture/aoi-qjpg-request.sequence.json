@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "AOI 請求到 AOI／QJPG 回覆時序",
+    "output": "docs/architecture/aoi-qjpg-request.html",
+    "viewBox": [1760, 760],
+    "column_fit": "spread",
+    "animation": "trace",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "request_decode",
+        "label": "請求與站點語意",
+        "focus": ["aoi", "server", "adapter", "source"],
+        "note": "CAPIServer 解析 AOI@ 請求，再由 StationAdapter 統一 CAPI／AAPI 的命名與報告規則。"
+      },
+      {
+        "id": "inference_path",
+        "label": "推論主路徑",
+        "focus": ["orchestrator", "preprocess", "models", "judgment"],
+        "note": "影像切成光源與 inner／edge tiles，送入對應 PatchCore 模型後再做規則化後處理。"
+      },
+      {
+        "id": "response_path",
+        "label": "判定與回覆",
+        "focus": ["judgment", "orchestrator", "server", "aoi"],
+        "note": "彙總為最終判定，組成 AOI 舊協定與 QJPG 回覆後立即送回設備。"
+      }
+    ]
+  },
+  "participants": [
+    {"id": "aoi", "type": "external", "label": "AOI 設備", "sublabel": "TCP 用戶端"},
+    {"id": "server", "type": "backend", "label": "CAPIServer", "sublabel": "連線與協定"},
+    {"id": "adapter", "type": "backend", "label": "站點轉接器", "sublabel": "CAPI／AAPI"},
+    {"id": "source", "type": "external", "label": "影像與 AOI 報告", "sublabel": "面板輸入"},
+    {"id": "orchestrator", "type": "backend", "label": "推論協調器", "sublabel": "process_panel"},
+    {"id": "preprocess", "type": "backend", "label": "前處理", "sublabel": "面板與 tile"},
+    {"id": "models", "type": "cloud", "label": "PatchCore 模型", "sublabel": "inner／edge"},
+    {"id": "judgment", "type": "security", "label": "後處理與判定", "sublabel": "過濾與彙總"}
+  ],
+  "segments": [
+    {"from": 150, "to": 296, "label": "解析與載入"},
+    {"from": 308, "to": 568, "label": "前處理與推論"},
+    {"from": 582, "to": 706, "label": "判定與回覆"}
+  ],
+  "messages": [
+    {"id": "m_request", "from": "aoi", "to": "server", "y": 184, "label": "AOI@ TCP 請求", "variant": "emphasis"},
+    {"id": "m_profile", "from": "server", "to": "adapter", "y": 218, "label": "選用 CAPI／AAPI 規則", "variant": "default"},
+    {"id": "m_load", "from": "adapter", "to": "source", "y": 252, "label": "解析影像命名與報告位置", "variant": "default"},
+    {"id": "m_loaded", "from": "source", "to": "adapter", "y": 286, "label": "影像候選與 AOI 報告", "variant": "return"},
+    {"id": "m_process", "from": "server", "to": "orchestrator", "y": 332, "label": "process_panel＋標準化報告", "variant": "emphasis"},
+    {"id": "m_semantics", "from": "orchestrator", "to": "adapter", "y": 366, "label": "取得前綴、座標與邊界語意", "variant": "default"},
+    {"id": "m_preprocess", "from": "orchestrator", "to": "preprocess", "y": 400, "label": "面板偵測、校正與切 tile", "variant": "emphasis"},
+    {"id": "m_tiles", "from": "preprocess", "to": "orchestrator", "y": 434, "label": "光源＋inner／edge tiles", "variant": "return"},
+    {"id": "m_infer", "from": "orchestrator", "to": "models", "y": 468, "label": "依光源與區域執行推論", "variant": "emphasis"},
+    {"id": "m_scores", "from": "models", "to": "orchestrator", "y": 502, "label": "分數與異常圖", "variant": "return"},
+    {"id": "m_post", "from": "orchestrator", "to": "judgment", "y": 536, "label": "抑塵、排除區與 AOI 座標比對", "variant": "default"},
+    {"id": "m_judgment", "from": "judgment", "to": "orchestrator", "y": 604, "label": "OK／NG／ERR 與缺陷明細", "variant": "return"},
+    {"id": "m_aggregate", "from": "orchestrator", "to": "server", "y": 638, "label": "彙總判定與可回報缺陷", "variant": "emphasis"},
+    {"id": "m_response", "from": "server", "to": "aoi", "y": 674, "label": "組裝並送回 AOI／QJPG 雙協定", "variant": "return", "note": "Heatmap 與 SQLite 另由背景工作保存，不延後本次回覆。"}
+  ],
+  "activations": [
+    {"participant": "server", "from": 178, "to": 682, "type": "backend"},
+    {"participant": "adapter", "from": 212, "to": 374, "type": "backend"},
+    {"participant": "source", "from": 246, "to": 294, "type": "external"},
+    {"participant": "orchestrator", "from": 326, "to": 646, "type": "backend"},
+    {"participant": "preprocess", "from": 394, "to": 442, "type": "backend"},
+    {"participant": "models", "from": 462, "to": 510, "type": "cloud"},
+    {"participant": "judgment", "from": 530, "to": 612, "type": "security"}
+  ],
+  "cards": [
+    {"dot": "cyan", "title": "站點差異集中", "items": ["CAPI／AAPI 差異由 StationAdapter 提供", "核心推論接收標準化後的影像與報告語意", "協定層不暴露環境位址或實體路徑"]},
+    {"dot": "violet", "title": "雙區模型推論", "items": ["前處理建立光源與 inner／edge 分區", "各 tile 交由對應 PatchCore 模型評分", "後處理將分數轉成可回報缺陷"]},
+    {"dot": "emerald", "title": "即時回覆優先", "items": ["先完成最終判定與雙協定編碼", "TCP 回覆不等待 Heatmap 或 SQLite 寫入", "背景證據路徑由資料流圖另行呈現"]}
+  ]
+}

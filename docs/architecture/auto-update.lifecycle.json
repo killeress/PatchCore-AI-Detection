@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "拉取式更新生命週期",
+    "subtitle": "定期檢查只下載暫存；人工套用後以健康檢查決定完成或自動回復",
+    "output": "docs/architecture/auto-update.html",
+    "viewBox": [1200, 630],
+    "animation": "trace",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "views": [
+      {"id": "check_stage", "label": "檢查與暫存", "focus": ["current", "checking", "staging", "pending", "failed"], "note": "更新代理比較版本，下載候選套件並驗證雜湊；定期檢查不會直接重啟服務。"},
+      {"id": "manual_apply", "label": "人工套用", "focus": ["pending", "installing", "health", "updated"], "note": "操作員明確要求套用後，才進入備份、解壓、重啟與版本驗證。"},
+      {"id": "recovery_path", "label": "健康失敗與回復", "focus": ["health", "rollback", "recovered", "failed"], "note": "健康檢查失敗會進入自動回復；回復成功與失敗是不同結果。"}
+    ]
+  },
+  "lanes": [
+    {"id": "main", "label": "更新階段"},
+    {"id": "gate", "label": "安裝與健康閘門"},
+    {"id": "recovery", "label": "回復控制"},
+    {"id": "terminal", "label": "結果"}
+  ],
+  "states": [
+    {"id": "current", "type": "start", "label": "目前版本", "sublabel": "服務正常運作", "lane": "main", "col": 0, "step": "01", "tag": "current"},
+    {"id": "checking", "type": "active", "label": "檢查更新", "sublabel": "讀取清單、比較版本", "lane": "main", "col": 1, "step": "02", "tag": "check"},
+    {"id": "staging", "type": "decision", "label": "下載與驗證", "sublabel": "版本、套件、雜湊", "lane": "main", "col": 2, "step": "03", "tag": "verify"},
+    {"id": "pending", "type": "waiting", "label": "等待人工套用", "sublabel": "候選套件已暫存", "lane": "main", "col": 3, "step": "04", "tag": "pending"},
+    {"id": "updated", "type": "success", "label": "更新完成", "sublabel": "新版本健康運作", "lane": "main", "col": 4, "step": "05", "tag": "current"},
+    {"id": "installing", "type": "active", "label": "安裝中", "sublabel": "備份、解壓、重啟", "lane": "gate", "col": 0, "tag": "installing"},
+    {"id": "health", "type": "decision", "label": "健康檢查", "sublabel": "服務回應、版本相符", "lane": "gate", "col": 1, "tag": "health gate"},
+    {"id": "rollback", "type": "active", "label": "自動回復", "sublabel": "還原上一版並重啟", "lane": "recovery", "col": 2, "tag": "rollback"},
+    {"id": "failed", "type": "failure", "label": "更新失敗", "sublabel": "保留原因供處理", "lane": "terminal", "col": 0, "tag": "failed"},
+    {"id": "recovered", "type": "success", "label": "已回復服務", "sublabel": "舊版恢復健康", "lane": "terminal", "col": 1, "tag": "restored"}
+  ],
+  "transitions": [
+    {"id": "no_update", "from": "checking", "to": "current", "note": "版本相同時維持 current", "variant": "dashed", "fromSide": "top", "toSide": "top", "via": [[248, 80], [94, 80]]},
+    {"id": "stage_failed", "from": "staging", "to": "failed", "variant": "security", "fromSide": "left", "toSide": "left", "via": [[320, 157], [320, 479]]},
+    {"id": "manual_apply", "from": "pending", "to": "installing", "note": "操作員確認後才套用", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "via": [[556, 230], [402, 230]]},
+    {"id": "restart_health", "from": "installing", "to": "health", "variant": "default", "fromSide": "bottom", "toSide": "bottom", "route": "bottom-channel", "channelY": 382},
+    {"id": "health_ok", "from": "health", "to": "updated", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "via": [[556, 230], [710, 230]]},
+    {"id": "health_failed", "from": "health", "to": "rollback", "variant": "security", "fromSide": "bottom", "toSide": "bottom", "route": "bottom-channel", "channelY": 402},
+    {"id": "rollback_ok", "from": "rollback", "to": "recovered", "variant": "emphasis", "fromSide": "bottom", "toSide": "right", "via": [[710, 420], [640, 420], [640, 479]]},
+    {"id": "rollback_failed", "from": "rollback", "to": "failed", "variant": "security", "fromSide": "right", "toSide": "bottom", "via": [[900, 307], [900, 540], [402, 540]]}
+  ]
+}

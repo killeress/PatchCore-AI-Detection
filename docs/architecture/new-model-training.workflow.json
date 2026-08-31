@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "新機種 PatchCore 訓練工作流",
+    "output": "docs/architecture/new-model-training.html",
+    "viewBox": [800, 360],
+    "animation": "trace",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "views": [
+      {"id": "select_inputs", "label": "選擇訓練輸入", "focus": ["choose_scope", "select_panels"], "note": "操作員決定完整或部分訓練範圍，並選取 AOI 判 OK 的面板。"},
+      {"id": "prepare_review", "label": "前處理與覆核", "focus": ["prepare_pool", "review_tiles"], "note": "共用前處理切出 inner／edge tiles，寫入暫存池供人工 accept／reject。"},
+      {"id": "train_publish", "label": "訓練與登錄", "focus": ["train_bundle", "completed"], "note": "雙區 PatchCore 訓練與門檻校準完成後，產生 bundle 並登錄模型庫。"}
+    ]
+  },
+  "lanes": [
+    {"id": "operator", "label": "操作員與 Web Wizard"},
+    {"id": "pipeline", "label": "背景訓練管線"}
+  ],
+  "phases": [
+    {"id": "phase_input", "label": "選擇", "fromCol": 0, "toCol": 1},
+    {"id": "phase_prepare", "label": "準備與覆核", "fromCol": 2, "toCol": 3, "variant": "emphasis"},
+    {"id": "phase_train", "label": "訓練與完成", "fromCol": 4, "toCol": 5}
+  ],
+  "mainPath": ["choose_scope", "select_panels", "prepare_pool", "review_tiles", "train_bundle", "completed"],
+  "nodes": [
+    {"id": "choose_scope", "lane": "operator", "col": 0, "type": "external", "label": "選訓練範圍", "sublabel": "完整或部分", "tag": "步驟 1"},
+    {"id": "select_panels", "lane": "operator", "col": 1, "type": "frontend", "label": "選合格面板", "sublabel": "來源為推論紀錄", "tag": "步驟 2"},
+    {"id": "prepare_pool", "lane": "pipeline", "col": 2, "type": "backend", "label": "準備 Tile Pool", "sublabel": "前處理＋inner／edge", "tag": "training jobs"},
+    {"id": "review_tiles", "lane": "operator", "col": 3, "type": "frontend", "label": "覆核 Tiles", "sublabel": "accept／reject", "tag": "人工閘門"},
+    {"id": "train_bundle", "lane": "pipeline", "col": 4, "type": "cloud", "label": "訓練與封裝", "sublabel": "PatchCore＋門檻校準", "tag": "GPU 單例"},
+    {"id": "completed", "lane": "operator", "col": 5, "type": "database", "label": "登錄完成", "sublabel": "Bundle 與模型庫", "tag": "步驟 6"}
+  ],
+  "edges": [
+    {"from": "choose_scope", "to": "select_panels", "variant": "emphasis"},
+    {"from": "select_panels", "to": "prepare_pool", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "via": [[220, 181], [300, 181]]},
+    {"from": "prepare_pool", "to": "review_tiles", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "via": [[300, 181], [430, 181]]},
+    {"from": "review_tiles", "to": "train_bundle", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "via": [[430, 181], [500, 181]]},
+    {"from": "train_bundle", "to": "completed", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "via": [[500, 181], [625, 181]]}
+  ]
+}
