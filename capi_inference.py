@@ -3824,11 +3824,10 @@ class CAPIInferencer:
 
             if b_area < large_min_area or b_area > large_max_area:
                 continue
-            if (
-                b_x <= border_margin
-                or b_y <= border_margin
-                or b_x + b_w >= gray.shape[1] - border_margin
-            ):
+            touches_left_border = b_x <= border_margin
+            touches_right_border = b_x + b_w >= gray.shape[1] - border_margin
+            right_clipped_triangle = touches_right_border and not touches_left_border
+            if b_y <= border_margin or touches_left_border:
                 continue
 
             surface_gap = surface_edge_y - (b_y + b_h)
@@ -3837,10 +3836,17 @@ class CAPIInferencer:
 
             b_aspect = max(b_w, b_h) / (min(b_w, b_h) + 1e-5)
             b_fill_ratio = b_area / max(1, b_w * b_h)
-            if b_aspect < 1.2 or b_aspect > 3.5:
-                continue
-            if b_fill_ratio < 0.4 or b_fill_ratio > 0.8:
-                continue
+            # A lower-right bubble can be clipped into a triangle by the tile edge.
+            if right_clipped_triangle:
+                if b_aspect < 1.0 or b_aspect > 3.5:
+                    continue
+                if b_fill_ratio < 0.35 or b_fill_ratio > 0.70:
+                    continue
+            else:
+                if b_aspect < 1.2 or b_aspect > 3.5:
+                    continue
+                if b_fill_ratio < 0.4 or b_fill_ratio > 0.8:
+                    continue
 
             component_u8 = (large_labels == i).astype(np.uint8) * 255
             contours, _ = cv2.findContours(
@@ -3858,7 +3864,17 @@ class CAPIInferencer:
             solidity = float(cv2.contourArea(contour)) / max(1.0, hull_area)
             ellipse_axes = cv2.fitEllipse(contour)[1]
             ellipse_aspect = max(ellipse_axes) / max(1.0, min(ellipse_axes))
-            if solidity < 0.85 or ellipse_aspect < 1.5 or ellipse_aspect > 4.0:
+            if right_clipped_triangle:
+                perimeter = float(cv2.arcLength(contour, True))
+                polygon = cv2.approxPolyDP(contour, 0.04 * perimeter, True)
+                if (
+                    solidity < 0.80
+                    or len(polygon) not in (3, 4)
+                    or ellipse_aspect < 1.2
+                    or ellipse_aspect > 4.0
+                ):
+                    continue
+            elif solidity < 0.85 or ellipse_aspect < 1.5 or ellipse_aspect > 4.0:
                 continue
 
             if extension > 0:
