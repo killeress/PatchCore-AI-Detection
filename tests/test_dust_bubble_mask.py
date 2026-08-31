@@ -122,6 +122,24 @@ def _large_rotated_surface_bubble_image() -> np.ndarray:
     return cv2.GaussianBlur(image, (5, 5), 0)
 
 
+def _clipped_triangular_surface_bubble_image() -> tuple[np.ndarray, np.ndarray]:
+    yy, xx = np.mgrid[:512, :512]
+    image = (
+        np.full((512, 512), 31, dtype=np.float32)
+        + xx * 0.004
+        + yy * 0.003
+        + ((xx % 2) * 2 - 1) * 2
+    )
+
+    bubble = np.zeros((512, 512), dtype=np.uint8)
+    cv2.fillPoly(bubble, [np.array([[250, 440], [511, 180], [511, 440]])], 255)
+    image[bubble > 0] += 18
+    image[440:, :] += 100
+
+    image = np.clip(image, 0, 255).astype(np.uint8)
+    return cv2.GaussianBlur(image, (5, 5), 0), bubble
+
+
 def _large_rotated_bubble_panel_image() -> tuple[np.ndarray, np.ndarray]:
     yy, xx = np.mgrid[:700, :900]
     image = (
@@ -297,6 +315,26 @@ def test_large_rotated_surface_bubble_is_filled():
     assert is_dust is True
     assert covered >= 0.85
     assert mask[337, 300] == 255
+    assert ratio > 0.0
+    assert "Bub:1" in detail
+
+
+def test_clipped_triangular_surface_bubble_is_filled():
+    image, expected_bubble = _clipped_triangular_surface_bubble_image()
+    inferencer = _make_inferencer(detect_bubbles=True)
+
+    is_dust, mask, ratio, detail = inferencer.check_dust_or_scratch_feature(image)
+
+    upper_bubble = expected_bubble.copy()
+    upper_bubble[440:, :] = 0
+    covered = (
+        np.count_nonzero((mask > 0) & (upper_bubble > 0))
+        / np.count_nonzero(upper_bubble)
+    )
+
+    assert is_dust is True
+    assert covered >= 0.85
+    assert mask[350, 430] == 255
     assert ratio > 0.0
     assert "Bub:1" in detail
 
