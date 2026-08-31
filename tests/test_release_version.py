@@ -178,6 +178,7 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "setup_auto_update_client.sh" in names
         assert "templates/release_notes.html" in names
         assert "server_config_patch.yaml.example" in names
+        assert "server_config_mes_report.yaml.example" not in names
         assert "templates/_update_notice.html" in names
         assert "templates/dashboard_v3.html" in names
         assert "templates/debug_inference.html" in names
@@ -283,6 +284,7 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
     assert "  capi_mes_credentials.py\n" not in checksums
     assert "unzip -o /path/to/patchcore_ai_release_<version>_codeonly.zip install_patch.sh" in readme
     assert "只手動解壓並重啟主程式，不會更新" in readme
+    assert "full/code-only ZIP 內的 server_config_patch.yaml.example" in build_deploy_zip.PATCH_README_TEXT
 
 
 def test_codeonly_includes_local_credentials_only_with_explicit_flag(
