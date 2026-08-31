@@ -229,6 +229,8 @@ def test_image_abnormal_settings_defaults_fallback_and_db_overrides():
     assert cfg.image_abnormal_standard_mean_upper == 88
     assert cfg.image_abnormal_wgf50500_mean_lower == 72
     assert cfg.image_abnormal_wgf50500_mean_upper == 92
+    assert cfg.image_abnormal_w0f00010_mean_lower == 72
+    assert cfg.image_abnormal_w0f00010_mean_upper == 92
     assert cfg.image_abnormal_g0f00000_mean_lower == 67
     assert cfg.image_abnormal_g0f00000_mean_upper == 87
     assert cfg.image_abnormal_r0f00000_mean_lower == 71
@@ -238,6 +240,13 @@ def test_image_abnormal_settings_defaults_fallback_and_db_overrides():
     assert cfg.image_abnormal_b0f00000_mean_lower == 0
     assert cfg.image_abnormal_b0f00000_mean_upper == 13
 
+    inherited = CAPIConfig.from_dict({
+        "image_abnormal_wgf50500_mean_lower": 44,
+        "image_abnormal_wgf50500_mean_upper": 84,
+    })
+    assert inherited.image_abnormal_w0f00010_mean_lower == 44
+    assert inherited.image_abnormal_w0f00010_mean_upper == 84
+
     legacy = CAPIConfig.from_dict({"image_abnormal_w0f00000_mean_threshold": 91})
     assert legacy.image_abnormal_w0f00000_mean_lower == 70
     assert legacy.image_abnormal_w0f00000_mean_upper == 91
@@ -246,6 +255,8 @@ def test_image_abnormal_settings_defaults_fallback_and_db_overrides():
         {"param_name": "image_abnormal_detection_enabled", "decoded_value": True},
         {"param_name": "image_abnormal_w0f00000_mean_lower", "decoded_value": 51},
         {"param_name": "image_abnormal_w0f00000_mean_upper", "decoded_value": 91},
+        {"param_name": "image_abnormal_w0f00010_mean_lower", "decoded_value": 52},
+        {"param_name": "image_abnormal_w0f00010_mean_upper", "decoded_value": 92},
         {"param_name": "image_abnormal_b0f00000_mean_lower", "decoded_value": 1},
         {"param_name": "image_abnormal_b0f00000_mean_upper", "decoded_value": 77},
     ])
@@ -253,9 +264,12 @@ def test_image_abnormal_settings_defaults_fallback_and_db_overrides():
     assert cfg.image_abnormal_detection_enabled is True
     assert cfg.image_abnormal_w0f00000_mean_lower == 51
     assert cfg.image_abnormal_w0f00000_mean_upper == 91
+    assert cfg.image_abnormal_w0f00010_mean_lower == 52
+    assert cfg.image_abnormal_w0f00010_mean_upper == 92
     assert cfg.image_abnormal_b0f00000_mean_lower == 1
     assert cfg.image_abnormal_b0f00000_mean_upper == 77
     assert cfg.to_dict()["image_abnormal_w0f00000_mean_upper"] == 91
+    assert cfg.to_dict()["image_abnormal_w0f00010_mean_upper"] == 92
 
 
 def test_within_spec_judgment_rules_defaults_and_overrides():

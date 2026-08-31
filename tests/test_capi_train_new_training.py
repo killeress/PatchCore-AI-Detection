@@ -32,6 +32,8 @@ def test_normalize_training_units_accepts_all_aapi_model_families():
         "W0F00000-edge",
         "WGF25250-inner",
         "WGF25250-edge",
+        "W0F00010-inner",
+        "W0F00010-edge",
         "WGF50500-inner",
         "WGF50500-edge",
         "U0F00000-inner",
@@ -40,8 +42,10 @@ def test_normalize_training_units_accepts_all_aapi_model_families():
         "STANDARD-edge",
     ])
 
-    assert len(units) == 14
+    assert len(units) == 16
     assert ("WGF25250", "inner") in units
+    assert ("W0F00010", "inner") in units
+    assert ("WGF50500", "inner") in units
     assert ("U0F00000", "edge") in units
 
 
@@ -89,6 +93,10 @@ def test_run_training_pipeline_uses_configured_training_units(tmp_path, monkeypa
     configured_units = [
         ("WGF25250", "inner"),
         ("WGF25250", "edge"),
+        ("W0F00010", "inner"),
+        ("W0F00010", "edge"),
+        ("WGF50500", "inner"),
+        ("WGF50500", "edge"),
         ("U0F00000", "inner"),
         ("U0F00000", "edge"),
     ]
@@ -111,17 +119,23 @@ def test_run_training_pipeline_uses_configured_training_units(tmp_path, monkeypa
     assert trained == configured_units
     assert manifest["training_units"] == [
         "WGF25250-inner", "WGF25250-edge",
+        "W0F00010-inner", "W0F00010-edge",
+        "WGF50500-inner", "WGF50500-edge",
         "U0F00000-inner", "U0F00000-edge",
     ]
     assert sorted(path.name for path in bundle_dir.glob("*.pt")) == [
         "U0F00000-edge.pt", "U0F00000-inner.pt",
+        "W0F00010-edge.pt", "W0F00010-inner.pt",
         "WGF25250-edge.pt", "WGF25250-inner.pt",
+        "WGF50500-edge.pt", "WGF50500-inner.pt",
     ]
     import yaml
     machine_config = yaml.safe_load(
         (bundle_dir / "machine_config.yaml").read_text(encoding="utf-8")
     )
-    assert set(machine_config["model_mapping"]) == {"WGF25250", "U0F00000"}
+    assert set(machine_config["model_mapping"]) == {
+        "WGF25250", "W0F00010", "WGF50500", "U0F00000",
+    }
 
 
 def test_apply_user_training_params_none_is_noop():
@@ -951,6 +965,8 @@ def test_write_manifest_yaml(tmp_path):
     assert y["image_abnormal_detection_enabled"] is False
     assert y["image_abnormal_w0f00000_mean_lower"] == 70
     assert y["image_abnormal_w0f00000_mean_upper"] == 90
+    assert y["image_abnormal_w0f00010_mean_lower"] == 72
+    assert y["image_abnormal_w0f00010_mean_upper"] == 92
     assert y["image_abnormal_b0f00000_mean_lower"] == 0
     assert y["image_abnormal_b0f00000_mean_upper"] == 13
     assert y["bomb_match_tolerance"] == 20

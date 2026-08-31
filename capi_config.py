@@ -269,6 +269,8 @@ class CAPIConfig:
     image_abnormal_standard_mean_upper: int = 88
     image_abnormal_wgf50500_mean_lower: int = 72
     image_abnormal_wgf50500_mean_upper: int = 92
+    image_abnormal_w0f00010_mean_lower: int = 72
+    image_abnormal_w0f00010_mean_upper: int = 92
     image_abnormal_g0f00000_mean_lower: int = 67
     image_abnormal_g0f00000_mean_upper: int = 87
     image_abnormal_r0f00000_mean_lower: int = 71
@@ -568,6 +570,17 @@ class CAPIConfig:
                 "image_abnormal_wgf50500_mean_upper",
                 data.get("image_abnormal_wgf50500_mean_threshold", 92),
             ),
+            image_abnormal_w0f00010_mean_lower=data.get(
+                "image_abnormal_w0f00010_mean_lower",
+                data.get("image_abnormal_wgf50500_mean_lower", 72),
+            ),
+            image_abnormal_w0f00010_mean_upper=data.get(
+                "image_abnormal_w0f00010_mean_upper",
+                data.get(
+                    "image_abnormal_wgf50500_mean_upper",
+                    data.get("image_abnormal_wgf50500_mean_threshold", 92),
+                ),
+            ),
             image_abnormal_g0f00000_mean_lower=data.get("image_abnormal_g0f00000_mean_lower", 67),
             image_abnormal_g0f00000_mean_upper=data.get(
                 "image_abnormal_g0f00000_mean_upper",
@@ -706,6 +719,8 @@ class CAPIConfig:
             "image_abnormal_standard_mean_upper": self.image_abnormal_standard_mean_upper,
             "image_abnormal_wgf50500_mean_lower": self.image_abnormal_wgf50500_mean_lower,
             "image_abnormal_wgf50500_mean_upper": self.image_abnormal_wgf50500_mean_upper,
+            "image_abnormal_w0f00010_mean_lower": self.image_abnormal_w0f00010_mean_lower,
+            "image_abnormal_w0f00010_mean_upper": self.image_abnormal_w0f00010_mean_upper,
             "image_abnormal_g0f00000_mean_lower": self.image_abnormal_g0f00000_mean_lower,
             "image_abnormal_g0f00000_mean_upper": self.image_abnormal_g0f00000_mean_upper,
             "image_abnormal_r0f00000_mean_lower": self.image_abnormal_r0f00000_mean_lower,
@@ -820,6 +835,8 @@ class CAPIConfig:
             "image_abnormal_standard_mean_upper": self.image_abnormal_standard_mean_upper,
             "image_abnormal_wgf50500_mean_lower": self.image_abnormal_wgf50500_mean_lower,
             "image_abnormal_wgf50500_mean_upper": self.image_abnormal_wgf50500_mean_upper,
+            "image_abnormal_w0f00010_mean_lower": self.image_abnormal_w0f00010_mean_lower,
+            "image_abnormal_w0f00010_mean_upper": self.image_abnormal_w0f00010_mean_upper,
             "image_abnormal_g0f00000_mean_lower": self.image_abnormal_g0f00000_mean_lower,
             "image_abnormal_g0f00000_mean_upper": self.image_abnormal_g0f00000_mean_upper,
             "image_abnormal_r0f00000_mean_lower": self.image_abnormal_r0f00000_mean_lower,
@@ -1006,6 +1023,8 @@ class CAPIConfig:
             "image_abnormal_standard_mean_upper",
             "image_abnormal_wgf50500_mean_lower",
             "image_abnormal_wgf50500_mean_upper",
+            "image_abnormal_w0f00010_mean_lower",
+            "image_abnormal_w0f00010_mean_upper",
             "image_abnormal_g0f00000_mean_lower",
             "image_abnormal_g0f00000_mean_upper",
             "image_abnormal_r0f00000_mean_lower",

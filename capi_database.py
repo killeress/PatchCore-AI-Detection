@@ -6381,6 +6381,8 @@ class CAPIDatabase:
             ("image_abnormal_standard_mean_upper", config.image_abnormal_standard_mean_upper, "int", "STANDARD 產品區平均亮度上限"),
             ("image_abnormal_wgf50500_mean_lower", config.image_abnormal_wgf50500_mean_lower, "int", "WGF50500 產品區平均亮度下限"),
             ("image_abnormal_wgf50500_mean_upper", config.image_abnormal_wgf50500_mean_upper, "int", "WGF50500 產品區平均亮度上限"),
+            ("image_abnormal_w0f00010_mean_lower", config.image_abnormal_w0f00010_mean_lower, "int", "W0F00010 產品區平均亮度下限"),
+            ("image_abnormal_w0f00010_mean_upper", config.image_abnormal_w0f00010_mean_upper, "int", "W0F00010 產品區平均亮度上限"),
             ("image_abnormal_g0f00000_mean_lower", config.image_abnormal_g0f00000_mean_lower, "int", "G0F00000 產品區平均亮度下限"),
             ("image_abnormal_g0f00000_mean_upper", config.image_abnormal_g0f00000_mean_upper, "int", "G0F00000 產品區平均亮度上限"),
             ("image_abnormal_r0f00000_mean_lower", config.image_abnormal_r0f00000_mean_lower, "int", "R0F00000 產品區平均亮度下限"),
