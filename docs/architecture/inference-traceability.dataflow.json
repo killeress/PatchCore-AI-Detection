@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "推論證據與 Web 覆核資料流",
+    "output": "docs/architecture/inference-traceability.html",
+    "viewBox": [1380, 760],
+    "animation": "trace",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "views": [
+      {"id": "realtime_data", "label": "即時資料路徑", "focus": ["aoi_request", "input_assets", "server_adapter", "inference_result", "aoi_response"], "note": "請求與面板資料進入推論，最終判定先回覆設備。"},
+      {"id": "evidence_persist", "label": "非同步證據保存", "focus": ["inference_result", "save_worker", "heatmap_manager", "heatmap_files", "sqlite"], "note": "回覆後由背景工作保存 Heatmap 與結構化推論紀錄。"},
+      {"id": "web_review", "label": "Web 查詢與覆核", "focus": ["heatmap_files", "sqlite", "web", "reviewer"], "note": "詳情頁合併資料庫與 Heatmap，覆核結果再寫回 SQLite。"}
+    ]
+  },
+  "stages": [
+    {"label": "來源"},
+    {"label": "推論處理"},
+    {"label": "即時輸出／分流"},
+    {"label": "證據保存"},
+    {"label": "查詢與覆核"}
+  ],
+  "nodes": [
+    {"id": "aoi_request", "type": "external", "label": "AOI TCP 請求", "sublabel": "識別與面板資訊", "stage": 0, "row": 0, "tag": "AOI@"},
+    {"id": "input_assets", "type": "external", "label": "面板影像與 AOI 報告", "sublabel": "推論輸入", "stage": 0, "row": 2, "tag": "來源資產"},
+    {"id": "server_adapter", "type": "backend", "label": "伺服器與站點轉接器", "sublabel": "CAPIServer／StationAdapter", "stage": 1, "row": 0, "tag": "正規化", "width": 160},
+    {"id": "inference_result", "type": "backend", "label": "推論結果快照", "sublabel": "分數、異常圖、判定明細", "stage": 1, "row": 2, "tag": "ImageResult"},
+    {"id": "aoi_response", "type": "external", "label": "AOI／QJPG 回覆", "sublabel": "即時判定", "stage": 2, "row": 0, "tag": "先回覆"},
+    {"id": "save_worker", "type": "messagebus", "label": "背景保存工作", "sublabel": "不阻塞下一筆請求", "stage": 2, "row": 2, "tag": "async"},
+    {"id": "heatmap_manager", "type": "backend", "label": "Heatmap 管理器", "sublabel": "面板與 tile 視覺證據", "stage": 3, "row": 0, "tag": "render"},
+    {"id": "heatmap_files", "type": "database", "label": "Heatmap 檔案", "sublabel": "可視化輸出", "stage": 3, "row": 1, "tag": "files"},
+    {"id": "sqlite", "type": "database", "label": "SQLite 推論紀錄", "sublabel": "面板、影像與 tile 層級", "stage": 3, "row": 3, "tag": "source of truth"},
+    {"id": "web", "type": "frontend", "label": "Web 詳情與覆核", "sublabel": "紀錄、Heatmap、規格內資訊", "stage": 4, "row": 1, "tag": "review"},
+    {"id": "reviewer", "type": "external", "label": "操作員／工程人員", "sublabel": "查詢與人工判讀", "stage": 4, "row": 3, "tag": "human"}
+  ],
+  "flows": [
+    {"from": "aoi_request", "to": "server_adapter", "label": "請求欄位", "classification": "即時", "variant": "emphasis", "route": "straight"},
+    {"from": "input_assets", "to": "inference_result", "label": "影像＋標準化報告", "classification": "推論輸入", "variant": "emphasis", "route": "straight"},
+    {"from": "server_adapter", "to": "inference_result", "label": "站點語意＋處理參數", "classification": "正規化", "variant": "emphasis", "route": "vertical-channel"},
+    {"from": "inference_result", "to": "aoi_response", "label": "最終判定＋缺陷記錄", "classification": "同步回覆", "variant": "emphasis", "route": "vertical-channel"},
+    {"from": "inference_result", "to": "save_worker", "label": "完整結果快照", "classification": "背景工作", "variant": "dashed", "route": "straight", "labelDy": 30},
+    {"from": "save_worker", "to": "heatmap_manager", "label": "異常圖與 tile 資料", "classification": "視覺證據", "variant": "default", "route": "vertical-channel"},
+    {"from": "heatmap_manager", "to": "heatmap_files", "label": "面板／tile Heatmap", "classification": "檔案", "variant": "default", "route": "straight", "labelDy": 26},
+    {"from": "save_worker", "to": "sqlite", "label": "請求、回覆、判定與明細", "classification": "結構化紀錄", "variant": "emphasis", "route": "vertical-channel"},
+    {"from": "heatmap_files", "to": "web", "label": "視覺證據", "classification": "讀取", "variant": "default", "route": "straight", "labelDy": -34},
+    {"from": "sqlite", "to": "web", "label": "面板／影像／tile 紀錄", "classification": "查詢", "variant": "emphasis", "route": "vertical-channel"},
+    {"from": "web", "to": "reviewer", "label": "詳情與覆核畫面", "classification": "人機介面", "variant": "emphasis", "route": "straight", "labelDy": 26},
+    {"from": "reviewer", "to": "sqlite", "label": "覆核決策與備註", "classification": "可追溯寫回", "variant": "dashed", "route": "bottom-channel"}
+  ],
+  "cards": [
+    {"dot": "emerald", "title": "回覆與保存解耦", "items": ["AOI／QJPG 判定先沿同步路徑送回", "完整推論快照再交給背景保存工作", "Heatmap 生成不佔用設備等待時間"]},
+    {"dot": "cyan", "title": "兩類證據", "items": ["SQLite 保存請求、回覆與分層結果", "Heatmap 檔案保留可視化異常依據", "Web 詳情頁在查詢時匯合兩者"]},
+    {"dot": "violet", "title": "覆核閉環", "items": ["操作員從 Web 檢查分數與影像證據", "人工決策寫回可追溯紀錄", "覆核不改寫原始設備請求與即時回覆"]}
+  ]
+}

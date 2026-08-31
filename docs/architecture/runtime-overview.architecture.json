@@ -1,0 +1,591 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "CAPI／AAPI AI 高階執行架構",
+    "output": "runtime-overview.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/killeress/PatchCore-AI-Detection",
+      "revision": "5c490de0d8e85ea7fd119b719a451e466413070b"
+    },
+    "viewBox": [
+      1760,
+      760
+    ],
+    "views": [
+      {
+        "id": "primary-inference",
+        "label": "主推論路徑",
+        "focus": [
+          "aoi-client",
+          "capi-server",
+          "station-adapter",
+          "input-loader",
+          "preprocess",
+          "patchcore-models",
+          "postprocess",
+          "judgment",
+          "dual-response"
+        ],
+        "note": "沿著單次 AOI TCP 請求，查看站別分流、推論判定到雙協議回覆。"
+      },
+      {
+        "id": "station-input",
+        "label": "CAPI／AAPI 輸入差異",
+        "focus": [
+          "capi-server",
+          "station-adapter",
+          "input-loader"
+        ],
+        "note": "站別 Adapter 封裝檔名、影像與 AOI 報告來源差異，共用後段推論核心。"
+      },
+      {
+        "id": "trace-review",
+        "label": "追溯與 Web 複核",
+        "focus": [
+          "postprocess",
+          "judgment",
+          "sqlite",
+          "heatmap-store",
+          "web-review"
+        ],
+        "note": "SQLite 與 Heatmap 是主推論旁路，由 Web 提供查詢、詳情與複核。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "aoi-client",
+      "type": "external",
+      "label": "AOI 客戶端",
+      "sublabel": "AOI@ TCP 請求",
+      "tag": "產線設備",
+      "pos": [
+        35,
+        245
+      ],
+      "size": [
+        135,
+        72
+      ],
+      "sources": [
+        {
+          "path": "docs/client_communication_protocol.zh-TW.md",
+          "line": 13,
+          "end_line": 18,
+          "label": "TCP 請求與雙回覆規格"
+        }
+      ]
+    },
+    {
+      "id": "capi-server",
+      "type": "backend",
+      "label": "CAPIServer",
+      "sublabel": "連線、解析與請求協調",
+      "tag": "capi_server.py",
+      "pos": [
+        220,
+        245
+      ],
+      "size": [
+        150,
+        72
+      ],
+      "sources": [
+        {
+          "path": "capi_server.py",
+          "line": 1559,
+          "label": "CAPIServer 類別"
+        },
+        {
+          "path": "capi_server.py",
+          "line": 2573,
+          "label": "客戶端連線處理"
+        },
+        {
+          "path": "capi_server.py",
+          "line": 3004,
+          "label": "單次請求處理"
+        }
+      ]
+    },
+    {
+      "id": "station-adapter",
+      "type": "backend",
+      "label": "CAPI／AAPI Adapter",
+      "sublabel": "依 hostname 選擇站別",
+      "tag": "capi_station_adapter.py",
+      "pos": [
+        420,
+        245
+      ],
+      "size": [
+        165,
+        72
+      ],
+      "sources": [
+        {
+          "path": "capi_station_adapter.py",
+          "line": 32,
+          "label": "共用 StationAdapter"
+        },
+        {
+          "path": "capi_station_adapter.py",
+          "line": 102,
+          "label": "AAPI Adapter"
+        },
+        {
+          "path": "capi_station_adapter.py",
+          "line": 314,
+          "label": "hostname 分流"
+        }
+      ]
+    },
+    {
+      "id": "input-loader",
+      "type": "backend",
+      "label": "影像／AOI 報告載入",
+      "sublabel": "檔名、路徑與座標語意",
+      "tag": "station-specific",
+      "pos": [
+        635,
+        245
+      ],
+      "size": [
+        175,
+        72
+      ],
+      "sources": [
+        {
+          "path": "capi_station_adapter.py",
+          "line": 91,
+          "label": "AOI 報告介面"
+        },
+        {
+          "path": "capi_station_adapter.py",
+          "line": 192,
+          "label": "AAPI 報告讀取"
+        },
+        {
+          "path": "capi_server.py",
+          "line": 1088,
+          "label": "影像路徑映射"
+        }
+      ]
+    },
+    {
+      "id": "preprocess",
+      "type": "backend",
+      "label": "共用前處理",
+      "sublabel": "面板定位、切 Tile、區域分類",
+      "tag": "capi_preprocess.py",
+      "pos": [
+        860,
+        245
+      ],
+      "size": [
+        165,
+        72
+      ],
+      "sources": [
+        {
+          "path": "capi_preprocess.py",
+          "label": "訓練與推論共用前處理"
+        }
+      ]
+    },
+    {
+      "id": "patchcore-models",
+      "type": "backend",
+      "label": "PatchCore 模型",
+      "sublabel": "Lighting × Inner／Edge",
+      "tag": "Anomalib",
+      "pos": [
+        1075,
+        245
+      ],
+      "size": [
+        165,
+        72
+      ],
+      "sources": [
+        {
+          "path": "capi_inference.py",
+          "line": 8926,
+          "label": "V2 面板推論"
+        },
+        {
+          "path": "capi_inference.py",
+          "line": 9539,
+          "label": "Lighting／Zone 模型路由"
+        }
+      ]
+    },
+    {
+      "id": "postprocess",
+      "type": "backend",
+      "label": "後處理與缺陷規則",
+      "sublabel": "Heatmap、Dust、AOI、CV",
+      "tag": "rule pipeline",
+      "pos": [
+        1290,
+        245
+      ],
+      "size": [
+        175,
+        72
+      ],
+      "sources": [
+        {
+          "path": "capi_inference.py",
+          "line": 8206,
+          "label": "CV Edge 檢查"
+        },
+        {
+          "path": "capi_inference.py",
+          "line": 8455,
+          "label": "AOI Peak 後處理"
+        },
+        {
+          "path": "scratch_filter.py",
+          "label": "刮傷規則"
+        }
+      ]
+    },
+    {
+      "id": "judgment",
+      "type": "backend",
+      "label": "最終判定",
+      "sublabel": "彙總 AI 與可回報缺陷",
+      "tag": "OK／NG／ERR",
+      "pos": [
+        1515,
+        245
+      ],
+      "size": [
+        165,
+        72
+      ],
+      "sources": [
+        {
+          "path": "capi_server.py",
+          "line": 1118,
+          "label": "判定彙總"
+        },
+        {
+          "path": "capi_server.py",
+          "line": 1197,
+          "label": "CV Edge 判定整合"
+        }
+      ]
+    },
+    {
+      "id": "dual-response",
+      "type": "messagebus",
+      "label": "AOI／QJPG 回覆",
+      "sublabel": "雙協議回覆封包",
+      "tag": "AOI@ + @QJPG-",
+      "pos": [
+        1515,
+        395
+      ],
+      "size": [
+        165,
+        72
+      ],
+      "sources": [
+        {
+          "path": "capi_server.py",
+          "line": 1031,
+          "label": "QJPG 組碼"
+        },
+        {
+          "path": "capi_server.py",
+          "line": 1072,
+          "label": "雙協議回覆"
+        }
+      ]
+    },
+    {
+      "id": "sqlite",
+      "type": "database",
+      "label": "SQLite 推論紀錄",
+      "sublabel": "Panel、Tile 與複核資料",
+      "tag": "capi_database.py",
+      "pos": [
+        1290,
+        520
+      ],
+      "size": [
+        175,
+        72
+      ],
+      "sources": [
+        {
+          "path": "capi_database.py",
+          "label": "推論與複核資料存取"
+        },
+        {
+          "path": "capi_server.py",
+          "line": 3204,
+          "label": "非同步保存結果"
+        }
+      ]
+    },
+    {
+      "id": "heatmap-store",
+      "type": "database",
+      "label": "Heatmap／診斷檔案",
+      "sublabel": "可視化推論證據",
+      "tag": "filesystem",
+      "pos": [
+        1075,
+        520
+      ],
+      "size": [
+        165,
+        72
+      ],
+      "sources": [
+        {
+          "path": "capi_heatmap.py",
+          "label": "Heatmap 產生與保存"
+        },
+        {
+          "path": "capi_heatmap_diagnostics.py",
+          "label": "Heatmap 診斷"
+        }
+      ]
+    },
+    {
+      "id": "web-review",
+      "type": "frontend",
+      "label": "Web 追溯與複核",
+      "sublabel": "Dashboard、詳情與 RIC",
+      "tag": "capi_web.py",
+      "pos": [
+        1515,
+        520
+      ],
+      "size": [
+        165,
+        72
+      ],
+      "sources": [
+        {
+          "path": "capi_web.py",
+          "line": 3084,
+          "label": "Web HTTP Handler"
+        },
+        {
+          "path": "templates/record_detail.html",
+          "label": "單筆詳情頁"
+        }
+      ]
+    }
+  ],
+  "boundaries": [],
+  "connections": [
+    {
+      "id": "request-to-server",
+      "from": "aoi-client",
+      "to": "capi-server",
+      "label": "TCP AOI@ 請求",
+      "variant": "emphasis",
+      "labelAt": [
+        195,
+        241
+      ]
+    },
+    {
+      "id": "server-to-adapter",
+      "from": "capi-server",
+      "to": "station-adapter",
+      "label": "依 hostname 選擇",
+      "variant": "emphasis",
+      "labelAt": [
+        395,
+        241
+      ]
+    },
+    {
+      "id": "adapter-to-loader",
+      "from": "station-adapter",
+      "to": "input-loader",
+      "label": "套用站別規則",
+      "variant": "emphasis",
+      "labelAt": [
+        610,
+        241
+      ]
+    },
+    {
+      "id": "loader-to-preprocess",
+      "from": "input-loader",
+      "to": "preprocess",
+      "label": "影像＋AOI 座標",
+      "variant": "emphasis",
+      "labelAt": [
+        835,
+        241
+      ]
+    },
+    {
+      "id": "preprocess-to-models",
+      "from": "preprocess",
+      "to": "patchcore-models",
+      "label": "512×512 Tile／Zone",
+      "variant": "emphasis",
+      "labelAt": [
+        1050,
+        241
+      ]
+    },
+    {
+      "id": "models-to-postprocess",
+      "from": "patchcore-models",
+      "to": "postprocess",
+      "label": "異常分數＋Heatmap",
+      "variant": "emphasis",
+      "labelAt": [
+        1265,
+        241
+      ]
+    },
+    {
+      "id": "postprocess-to-judgment",
+      "from": "postprocess",
+      "to": "judgment",
+      "label": "候選缺陷",
+      "variant": "emphasis"
+    },
+    {
+      "id": "judgment-to-response",
+      "from": "judgment",
+      "to": "dual-response",
+      "label": "AI 判定＋Defect",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        1660,
+        356
+      ]
+    },
+    {
+      "id": "judgment-to-sqlite",
+      "from": "judgment",
+      "to": "sqlite",
+      "label": "非同步保存",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        1535,
+        369
+      ],
+      "via": [
+        [
+          1597.5,
+          375
+        ],
+        [
+          1475,
+          375
+        ],
+        [
+          1475,
+          495
+        ],
+        [
+          1377.5,
+          495
+        ]
+      ]
+    },
+    {
+      "id": "postprocess-to-heatmap",
+      "from": "postprocess",
+      "to": "heatmap-store",
+      "label": "保存診斷證據",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        1268,
+        429
+      ],
+      "via": [
+        [
+          1377.5,
+          435
+        ],
+        [
+          1157.5,
+          435
+        ]
+      ]
+    },
+    {
+      "id": "sqlite-to-web",
+      "from": "sqlite",
+      "to": "web-review",
+      "label": "查詢與複核",
+      "variant": "dashed",
+      "labelAt": [
+        1490,
+        606
+      ]
+    },
+    {
+      "id": "heatmap-to-web",
+      "from": "heatmap-store",
+      "to": "web-review",
+      "label": "顯示影像證據",
+      "variant": "dashed",
+      "labelAt": [
+        1378,
+        614
+      ],
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          1157.5,
+          620
+        ],
+        [
+          1597.5,
+          620
+        ]
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "主推論路徑",
+      "items": [
+        "AOI@ 請求進入 CAPIServer，由站別 Adapter 封裝 CAPI／AAPI 差異",
+        "共用前處理與 PatchCore Inner／Edge 模型完成判定，再組成 AOI@ 與 @QJPG- 回覆"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "站別邊界",
+      "items": [
+        "hostname 只決定 StationAdapter；影像命名、AOI 報告與座標差異停留在 Adapter／Loader",
+        "後段前處理、模型、後處理與判定維持共用"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "追溯旁路",
+      "items": [
+        "SQLite 保存推論與複核紀錄；Heatmap／診斷檔案保存視覺證據",
+        "Web 從兩種來源呈現 Dashboard、詳情與 RIC 複核"
+      ]
+    }
+  ]
+}
