@@ -17,7 +17,11 @@ IMAGE_PREFIX_ALIASES = {
     "U0F00000": "STANDARD",
 }
 
-AOI_REPORT_PREFIXES: Tuple[str, ...] = tuple(IMAGE_PREFIX_ALIASES) + CANONICAL_IMAGE_PREFIXES
+# WHITEFRA is handled by the dedicated white-frame inspector, but its
+# machine defect record is still part of the AOI report format.
+AOI_REPORT_PREFIXES: Tuple[str, ...] = (
+    tuple(IMAGE_PREFIX_ALIASES) + CANONICAL_IMAGE_PREFIXES + ("WHITEFRA",)
+)
 
 
 def canonical_image_prefix(image_name: str) -> str:

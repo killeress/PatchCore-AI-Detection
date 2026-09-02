@@ -6289,6 +6289,9 @@ class CAPIInferencer:
 
         if aoi_report is None:
             aoi_report = self._parse_aoi_report_txt(panel_dir)
+        # Dedicated detectors (currently WHITEFRA) remain in the parsed report
+        # for reporting, but must not enter AOI coordinate inspection.
+        aoi_report = self._filter_aoi_report_for_inference(aoi_report)
         if not aoi_report:
             if is_new_arch:
                 print("[v2] AOI 座標 attribution: AOI report 解析為空（report 不存在或無 NG 條目）")
