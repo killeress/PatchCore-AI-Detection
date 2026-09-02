@@ -7,6 +7,7 @@ TCP/IP Socket Server，接收 Testing 客戶端的推論請求，
 通訊協議:
     [Request]  無炸彈: AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片目錄路徑
                有炸彈: AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片前綴;(座標);圖片目錄路徑
+               AAPI NG: 上述格式;圖片前綴,缺陷代碼(X,Y)...
                機檢判定: OK / NG / HY (畫異，HY 時跳過推論)
     [Response] AOI@玻璃ID;機種ID;機台編號;機檢判定;AI判定
                @QJPG-玻璃ID;MARK判定;MARK字;Defect判定+Defect清單,
@@ -35,6 +36,7 @@ import contextvars
 from concurrent.futures import ThreadPoolExecutor
 import json
 import time
+import re
 import logging
 import logging.handlers
 import argparse
@@ -358,6 +360,27 @@ def _parse_bomb_coordinates(image_prefix: str, coords_raw: str) -> Optional[Dict
         }
 
 
+_AOI_REPORT_PAYLOAD_START = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_]*,[A-Za-z0-9]+\("
+)
+
+
+def _split_image_dir_and_aoi_report(fields: List[str]) -> Tuple[str, str]:
+    """Split the optional AAPI AOI payload appended after the image directory."""
+    image_fields = list(fields)
+    while len(image_fields) > 1 and not image_fields[0].strip():
+        image_fields = image_fields[1:]
+
+    for index in range(1, len(image_fields)):
+        if _AOI_REPORT_PAYLOAD_START.match(image_fields[index].strip()):
+            return (
+                ";".join(image_fields[:index]).strip(),
+                ";".join(image_fields[index:]).strip(),
+            )
+
+    return ";".join(image_fields).strip(), ""
+
+
 def parse_request(data: str) -> Dict[str, Any]:
     """
     解析客戶端請求
@@ -365,6 +388,7 @@ def parse_request(data: str) -> Dict[str, Any]:
     格式:
         無炸彈 (6 欄位): AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片目錄路徑
         有炸彈 (8 欄位): AOI@玻璃ID;機種ID;機台編號;解析度X,解析度Y;機檢判定;圖片前綴;(座標);圖片目錄路徑
+        AAPI NG 可在圖片目錄後加上: ;圖片前綴,缺陷代碼(X,Y)...
         機檢判定: OK / NG / HY (畫異)
 
     Returns:
@@ -376,6 +400,7 @@ def parse_request(data: str) -> Dict[str, Any]:
             "machine_judgment": str,
             "image_dir": str,
             "bomb_info": Optional[Dict],  # None 或 {image_prefix, defect_type, coordinates}
+            "aoi_report_payload": str,
         }
     """
     data = data.strip()
@@ -398,15 +423,26 @@ def parse_request(data: str) -> Dict[str, Any]:
         raise ProtocolError(f"Invalid resolution format: {parts[3]}")
 
     bomb_info = None
-    image_dir = ""
+    image_fields = parts[5:]
 
     # 判斷是否包含炸彈資訊 (8 欄位)
     # 由於炸彈座標內部也包含 ';' (例如 `(350/174;1465/363)`), split(";") 會把座標切碎。
-    # 特徵：parts[6] 開頭是 "(", 且倒數第二個 parts[-2] 結尾是 ")"
-    if len(parts) >= 8 and parts[6].strip().startswith("(") and parts[-2].strip().endswith(")"):
+    # 找出第一個結束括號，後面依序是圖片路徑與可選的 AAPI AOI 座標串。
+    bomb_coords_end = None
+    if len(parts) >= 8 and parts[6].strip().startswith("("):
+        bomb_coords_end = next(
+            (
+                index
+                for index in range(6, len(parts))
+                if parts[index].strip().endswith(")")
+            ),
+            None,
+        )
+
+    if bomb_coords_end is not None and bomb_coords_end + 1 < len(parts):
         bomb_image_prefix = parts[5].strip()
-        bomb_coords_raw = ";".join(parts[6:-1]).strip()
-        image_dir = parts[-1].strip()
+        bomb_coords_raw = ";".join(parts[6:bomb_coords_end + 1]).strip()
+        image_fields = parts[bomb_coords_end + 1:]
 
         bomb_info = _parse_bomb_coordinates(bomb_image_prefix, bomb_coords_raw)
         if bomb_info:
@@ -415,12 +451,7 @@ def parse_request(data: str) -> Dict[str, Any]:
                 f"type={bomb_info['defect_type']} "
                 f"coords={bomb_info['coordinates']}"
             )
-    else:
-        # 6 欄位模式，或單純的 fallback (路徑可能包含 ';' 所以重新 join)
-        image_dir_parts = parts[5:]
-        while len(image_dir_parts) > 1 and not image_dir_parts[0].strip():
-            image_dir_parts = image_dir_parts[1:]
-        image_dir = ";".join(image_dir_parts).strip()
+    image_dir, aoi_report_payload = _split_image_dir_and_aoi_report(image_fields)
 
     return {
         "glass_id": parts[0],
@@ -430,6 +461,7 @@ def parse_request(data: str) -> Dict[str, Any]:
         "machine_judgment": parts[4],
         "image_dir": image_dir,
         "bomb_info": bomb_info,
+        "aoi_report_payload": aoi_report_payload,
     }
 
 
@@ -3043,19 +3075,20 @@ class CAPIServer:
         image_abnormal_enabled = bool(
             getattr(inferencer.config, "image_abnormal_detection_enabled", False)
         )
-        external_daily_report = (
+        direct_aoi_report = (
             getattr(station_adapter, "profile", "capi") == "aapi"
         )
-        if image_abnormal_enabled or external_daily_report:
+        if image_abnormal_enabled or direct_aoi_report:
             try:
                 aoi_report_override = inferencer._parse_aoi_report_txt(
                     panel_dir,
                     glass_id=parsed.get("glass_id", ""),
                     machine_judgment=parsed.get("machine_judgment", ""),
+                    report_payload=parsed.get("aoi_report_payload", ""),
                 )
             except Exception as exc:
                 logger.error(
-                    "AOI report load failed: Glass=%s Station=%s Error=%s",
+                    "AOI report parse failed: Glass=%s Station=%s Error=%s",
                     parsed.get("glass_id", ""),
                     getattr(station_adapter, "profile", "capi"),
                     exc,

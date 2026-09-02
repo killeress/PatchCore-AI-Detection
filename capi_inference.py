@@ -5225,13 +5225,13 @@ class CAPIInferencer:
         *,
         glass_id: str = "",
         machine_judgment: str = "",
+        report_payload: str = "",
     ) -> Dict[str, List['AOIReportDefect']]:
         """
-        解析 AOI 機台 NG 報告 TXT。
+        解析 AOI 機台 NG 報告。
 
-        1. panel_dir 路徑替換 (預設 yuantu→Report) 取得報告目錄
-        2. 找到最新 .TXT 檔
-        3. 解析 NG 缺陷字串
+        AAPI 直接解析 Testing request 尾段的 report_payload。
+        其他站點保留原有的 panel_dir TXT 解析。
 
         格式1: @;OK;NG{異常代碼}{10位座標}{8字元前綴}...
         格式2: 獨立一行 NG，後續每行 {異常代碼}{10位座標}{8字元前綴}
@@ -5246,6 +5246,7 @@ class CAPIInferencer:
             panel_dir,
             glass_id=glass_id,
             machine_judgment=machine_judgment,
+            report_payload=report_payload,
         )
         if station_report is not None:
             for image_prefix, defects in station_report.items():
