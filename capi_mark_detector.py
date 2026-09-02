@@ -90,6 +90,14 @@ _FALLBACK_ROI_RATIOS = (
     ("bottom_left", (0.01, 0.52, 0.28, 0.97)),
 )
 
+# HM panels use a multi-character dot matrix near the panel's lower-right edge.
+# The top-left entry is the same physical location before an optional 180° input
+# rotation. Both ROIs are relative to panel bounds, not the full camera frame.
+_HM_PANEL_ROIS = (
+    ("bottom_right", (0.90, 0.60, 1.00, 0.90), "hm_fixed_roi"),
+    ("top_left", (0.00, 0.10, 0.10, 0.40), "hm_rotated_fallback"),
+)
+
 _PROFILE_SCHEMA_VERSION = 1
 _PROFILE_SIMILARITY_FLOOR = 0.94
 _PROFILE_MAX_BOOST = 0.45
@@ -272,6 +280,78 @@ def detect_panel_mark(
         public["_debug_images"] = _make_debug_images(gray, best)
 
     return public
+
+
+def detect_hm_panel_mark(
+    image: np.ndarray,
+    panel_bounds: Tuple[int, int, int, int],
+) -> Dict[str, Any]:
+    """Locate an HM MARK for exclusion without recognizing its characters."""
+    gray = _to_gray8(image)
+    image_height, image_width = gray.shape[:2]
+    panel_x1, panel_y1, panel_x2, panel_y2 = panel_bounds
+    panel_x1 = max(0, min(image_width - 1, int(panel_x1)))
+    panel_y1 = max(0, min(image_height - 1, int(panel_y1)))
+    panel_x2 = max(panel_x1 + 1, min(image_width, int(panel_x2)))
+    panel_y2 = max(panel_y1 + 1, min(image_height, int(panel_y2)))
+
+    panel_width = panel_x2 - panel_x1
+    panel_height = panel_y2 - panel_y1
+    groups: List[Dict[str, Any]] = []
+    roi_name = ""
+    search_pass = ""
+    for roi_name, ratios, search_pass in _HM_PANEL_ROIS:
+        left, top, right, bottom = ratios
+        roi_x1 = panel_x1 + int(round(panel_width * left))
+        roi_y1 = panel_y1 + int(round(panel_height * top))
+        roi_x2 = panel_x1 + int(round(panel_width * right))
+        roi_y2 = panel_y1 + int(round(panel_height * bottom))
+        roi = gray[roi_y1:roi_y2, roi_x1:roi_x2]
+
+        dot_mask = _dot_mask(roi, min(image_width, image_height))
+        groups = _find_mark_groups(
+            dot_mask,
+            roi_x1,
+            roi_y1,
+            image_width,
+            image_height,
+        )
+        groups.extend(
+            _refine_mark_groups(
+                roi,
+                groups,
+                roi_x1,
+                roi_y1,
+                image_width,
+                image_height,
+            )
+        )
+        if groups:
+            break
+    if not groups:
+        return {
+            "found": False,
+            "message": "no HM bottom-right mark candidate found",
+            "candidates": [],
+            "recognition_skipped": True,
+            "recognition_reason": "hm_location_only",
+        }
+
+    best = max(groups, key=lambda item: item["component_count"])
+    result = {
+        "found": True,
+        "text": "",
+        "confidence": 0.0,
+        "bbox": best["bbox"],
+        "roi": roi_name,
+        "search_pass": search_pass,
+        "orientation": "normal" if roi_name == "bottom_right" else "rot180",
+        "component_count": best["component_count"],
+        "locator_technique": "HM-DotMatrixCV",
+        "recognition_skipped": True,
+        "recognition_reason": "hm_location_only",
+    }
+    return result
 
 
 def build_mark_calibration_prototypes(

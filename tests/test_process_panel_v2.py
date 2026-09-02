@@ -373,6 +373,66 @@ def test_detect_panel_mark_not_found_retains_fast_path_source_metadata(
     assert regions == []
 
 
+def test_hm_mark_uses_location_only_detector_and_skips_recognition(
+    tmp_path,
+    monkeypatch,
+):
+    mark_image = _write_grey_panel_image_at(tmp_path / "W0F00000013142.tif")
+    cfg = _make_config(tmp_path)
+    located = {
+        "found": True,
+        "text": "",
+        "confidence": 0.0,
+        "bbox": {"x": 820, "y": 650, "width": 60, "height": 80},
+        "roi": "bottom_right",
+        "search_pass": "hm_fixed_roi",
+        "orientation": "normal",
+        "locator_technique": "HM-DotMatrixCV",
+        "recognition_skipped": True,
+        "recognition_reason": "hm_location_only",
+    }
+    hm_calls = []
+
+    def fake_hm_detector(image, panel_bounds):
+        hm_calls.append((image.shape, panel_bounds))
+        return dict(located)
+
+    monkeypatch.setattr(
+        "capi_mark_detector.detect_hm_panel_mark",
+        fake_hm_detector,
+    )
+    monkeypatch.setattr(
+        "capi_mark_detector.detect_panel_mark",
+        lambda *_args, **_kwargs: pytest.fail("legacy MARK detector must not run"),
+    )
+
+    from capi_inference import CAPIInferencer
+
+    inferencer = CAPIInferencer(cfg)
+    assert inferencer._is_hm_mark_layout(
+        "W0F00000_013142.tif",
+        "CAPI07HM-P2",
+    ) is True
+    assert inferencer._is_hm_mark_layout(
+        "W0F00000_013142.tif",
+        "CAPI1403",
+    ) is False
+    monkeypatch.setattr(
+        inferencer,
+        "_apply_online_paddle_mark_recognition",
+        lambda *_args, **_kwargs: pytest.fail("HM MARK recognition must not run"),
+    )
+    detection, regions = inferencer._detect_panel_mark_binary_region([mark_image])
+
+    assert hm_calls == [((1024, 1024), (100, 100, 900, 900))]
+    assert detection["found"] is True
+    assert detection["text"] == ""
+    assert detection["mark_bbox_tuple"] == (820, 650, 60, 80)
+    assert [(r.x1, r.y1, r.x2, r.y2) for r in regions] == [
+        (820, 650, 880, 730),
+    ]
+
+
 def test_process_panel_v2_no_anomaly_when_score_below_threshold(tmp_path):
     """All tiles below threshold → no anomaly_tiles in results."""
     _write_grey_panel_image(tmp_path, "G0F00000")

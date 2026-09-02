@@ -8,7 +8,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import capi_mark_detector as mark_detector
-from capi_mark_detector import _remove_tiny_components, detect_panel_mark
+from capi_mark_detector import (
+    _remove_tiny_components,
+    detect_hm_panel_mark,
+    detect_panel_mark,
+)
 
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -97,6 +101,44 @@ def test_detect_panel_mark_bottom_left_rotated_180_reads_canonical_text():
     assert result["found"] is True
     assert result["text"] == "EJ"
     assert result["roi"] == "bottom_left"
+    assert result["orientation"] == "rot180"
+
+
+def test_detect_hm_panel_mark_locates_multi_character_grid_without_recognition():
+    image = np.full((768, 1024), 160, dtype=np.uint8)
+    _draw_mark(image, "TT", 930, 500, cell=8, gap=8, radius=3)
+    _draw_mark(image, "N0", 930, 555, cell=8, gap=8, radius=3)
+
+    result = detect_hm_panel_mark(
+        image,
+        panel_bounds=(0, 0, 1024, 768),
+    )
+
+    assert result["found"] is True
+    assert result["text"] == ""
+    assert result["recognition_skipped"] is True
+    assert result["recognition_reason"] == "hm_location_only"
+    assert result["roi"] == "bottom_right"
+    assert result["bbox"]["x"] <= 930
+    assert result["bbox"]["y"] <= 500
+    assert result["bbox"]["height"] >= 100
+
+
+def test_detect_hm_panel_mark_handles_unrotated_source_position():
+    image = np.full((768, 1024), 160, dtype=np.uint8)
+    _draw_mark(image, "TT", 930, 500, cell=8, gap=8, radius=3)
+    _draw_mark(image, "N0", 930, 555, cell=8, gap=8, radius=3)
+    image = cv2.rotate(image, cv2.ROTATE_180)
+
+    result = detect_hm_panel_mark(
+        image,
+        panel_bounds=(0, 0, 1024, 768),
+    )
+
+    assert result["found"] is True
+    assert result["text"] == ""
+    assert result["roi"] == "top_left"
+    assert result["search_pass"] == "hm_rotated_fallback"
     assert result["orientation"] == "rot180"
 
 
