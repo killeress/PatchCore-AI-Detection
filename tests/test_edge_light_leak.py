@@ -305,6 +305,131 @@ def test_edge_light_leak_settings_and_debug_ui_are_exposed():
     assert database.index("cv_edge_light_leak_enabled") < database.index("cv_edge_enabled")
     assert "邊緣漏光救援判定" in debug
     assert "edge_light_leak_url" in debug
+    assert "switchTab('tab-edge-light-leak'" in debug
+    assert "edge-leak-image-path" in debug
+    assert "edge-leak-enabled" in debug
+    assert "edge-leak-edge-distance" in debug
+    assert "edge-leak-aoi-radius" in debug
+    assert "edge-leak-bright-threshold" in debug
+    assert "edge-leak-dark-threshold" in debug
+    assert "edge-leak-min-length" in debug
+    assert "edge-leak-boundary-offset" in debug
+    assert "edge-leak-band-width" in debug
+    assert "edge-leak-reference-gap" in debug
+    assert "edge-leak-max-dust-overlap" in debug
+    assert "edge_light_leak_overrides" in debug
+    assert "renderEdgeLightLeakResults" in debug
+
+
+def test_debug_edge_light_leak_overrides_do_not_mutate_formal_config():
+    from capi_web import _build_edge_light_leak_debug_config
+
+    formal = _light_leak_config()
+    debug = _build_edge_light_leak_debug_config(
+        formal,
+        {
+            "cv_edge_light_leak_enabled": False,
+            "cv_edge_light_leak_edge_distance": 90,
+            "cv_edge_light_leak_aoi_radius": 60,
+            "cv_edge_light_leak_threshold": 5.0,
+            "cv_edge_light_leak_dark_threshold": 6.0,
+            "cv_edge_light_leak_min_length": 35,
+            "cv_edge_light_leak_boundary_offset": 12,
+            "cv_edge_light_leak_band_width": 40,
+            "cv_edge_light_leak_reference_gap": 30,
+            "cv_edge_light_leak_max_dust_overlap": 0.15,
+        },
+    )
+
+    assert debug is not formal
+    assert debug.light_leak_enabled is False
+    assert debug.light_leak_edge_distance == 90
+    assert debug.light_leak_aoi_radius == 60
+    assert debug.light_leak_threshold == pytest.approx(5.0)
+    assert debug.light_leak_dark_threshold == pytest.approx(6.0)
+    assert debug.light_leak_min_length == 35
+    assert debug.light_leak_boundary_offset == 12
+    assert debug.light_leak_band_width == 40
+    assert debug.light_leak_reference_gap == 30
+    assert debug.light_leak_max_dust_overlap == pytest.approx(0.15)
+    assert formal.light_leak_enabled is True
+    assert formal.light_leak_dark_threshold == pytest.approx(4.0)
+
+
+def test_debug_edge_light_leak_overrides_validate_ranges():
+    from capi_web import _build_edge_light_leak_debug_config
+
+    with pytest.raises(ValueError, match="最大灰塵覆蓋率"):
+        _build_edge_light_leak_debug_config(
+            _light_leak_config(),
+            {"cv_edge_light_leak_max_dust_overlap": 1.1},
+        )
+
+
+def test_debug_edge_light_leak_tab_forces_diagnostic_with_request_config():
+    from capi_web import (
+        CAPIWebHandler,
+        _build_edge_light_leak_debug_config,
+    )
+
+    image, dust, polygon, aoi, _ = _synthetic_panel("bottom")
+    formal_config = _light_leak_config()
+    request_config = _build_edge_light_leak_debug_config(
+        formal_config,
+        {
+            "cv_edge_light_leak_threshold": 20.0,
+            "cv_edge_light_leak_dark_threshold": 20.0,
+        },
+    )
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = CAPIConfig()
+    inferencer.config.dust_two_stage_enabled = False
+    inferencer.edge_inspector = SimpleNamespace(config=formal_config)
+    inferencer.check_omit_overexposure = (
+        lambda _image: (False, 80.0, 0.0, "正常")
+    )
+    inferencer._check_dust_or_scratch_feature_with_context = (
+        lambda *args, **kwargs: (False, dust.copy(), 0.0, "no dust")
+    )
+
+    tile = TileInfo(
+        tile_id=1,
+        x=0,
+        y=0,
+        width=image.shape[1],
+        height=image.shape[0],
+        image=image.copy(),
+        original_image=image.copy(),
+        is_aoi_coord_tile=True,
+        aoi_product_x=aoi[0],
+        aoi_product_y=aoi[1],
+        aoi_image_x=aoi[0],
+        aoi_image_y=aoi[1],
+        score_threshold=0.28,
+    )
+    handler = object.__new__(CAPIWebHandler)
+    handler.inferencer = inferencer
+
+    payload, _anomaly, _dust = handler._run_debug_coord_dust_pipeline(
+        tile_info=tile,
+        tile_image=image,
+        anomaly_map=np.ones((12, 16), dtype=np.float32),
+        score=0.66,
+        score_threshold=0.28,
+        omit_image=np.zeros_like(image),
+        omit_crop=np.zeros_like(image),
+        product_resolution=(image.shape[1], image.shape[0]),
+        model_id="TEST",
+        panel_polygon=polygon,
+        raw_bounds=(0, 0, image.shape[1], image.shape[0]),
+        edge_light_leak_config=request_config,
+        edge_light_leak_force_debug=True,
+    )
+
+    assert payload["edge_light_leak"]["enabled"] is True
+    assert payload["edge_light_leak"]["detected"] is False
+    assert payload["edge_light_leak"]["threshold"] == pytest.approx(20.0)
+    assert formal_config.light_leak_threshold == pytest.approx(4.0)
 
 
 def test_edge_light_leak_config_loads_independently_from_cv_main_switch():

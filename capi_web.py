@@ -29,6 +29,7 @@ import sqlite3
 import time
 import urllib.parse
 import mimetypes
+from dataclasses import replace
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from http.cookies import SimpleCookie
@@ -86,6 +87,70 @@ CENTRAL_UPDATE_AUTH_HEADER = "X-CAPI-Central-Update"
 CENTRAL_UPDATE_USER_HEADER = "X-CAPI-Central-User"
 CENTRAL_UPDATE_APPLY_PATH = "/api/update/apply-central"
 CENTRAL_UPDATE_TIMEOUT_SECONDS = 8.0
+
+
+def _build_edge_light_leak_debug_config(
+    base_config: Any,
+    overrides: Optional[Dict[str, Any]],
+) -> Any:
+    """Build one-request Debug overrides without mutating formal edge settings."""
+    if not overrides:
+        return base_config
+    if not isinstance(overrides, dict):
+        raise ValueError("邊緣漏光測試參數格式錯誤")
+
+    parsed: Dict[str, Any] = {}
+    enabled_key = "cv_edge_light_leak_enabled"
+    if enabled_key in overrides:
+        enabled = overrides[enabled_key]
+        if isinstance(enabled, bool):
+            parsed["light_leak_enabled"] = enabled
+        elif enabled in (0, 1, "0", "1"):
+            parsed["light_leak_enabled"] = bool(int(enabled))
+        else:
+            raise ValueError("邊緣漏光檢測開關格式錯誤")
+
+    specs = {
+        "cv_edge_light_leak_edge_distance": (
+            "light_leak_edge_distance", int, 0, 100000, "AOI 距邊距離"
+        ),
+        "cv_edge_light_leak_aoi_radius": (
+            "light_leak_aoi_radius", int, 1, 100000, "AOI 搜尋半徑"
+        ),
+        "cv_edge_light_leak_threshold": (
+            "light_leak_threshold", float, 0.0, 255.0, "亮帶灰階差門檻"
+        ),
+        "cv_edge_light_leak_dark_threshold": (
+            "light_leak_dark_threshold", float, 0.0, 255.0, "暗段灰階差門檻"
+        ),
+        "cv_edge_light_leak_min_length": (
+            "light_leak_min_length", int, 1, 100000, "最小連續長度"
+        ),
+        "cv_edge_light_leak_boundary_offset": (
+            "light_leak_boundary_offset", int, 0, 100000, "邊界偏移"
+        ),
+        "cv_edge_light_leak_band_width": (
+            "light_leak_band_width", int, 1, 100000, "檢查帶寬度"
+        ),
+        "cv_edge_light_leak_reference_gap": (
+            "light_leak_reference_gap", int, 0, 100000, "參考帶間距"
+        ),
+        "cv_edge_light_leak_max_dust_overlap": (
+            "light_leak_max_dust_overlap", float, 0.0, 1.0, "最大灰塵覆蓋率"
+        ),
+    }
+    for key, (field_name, cast, minimum, maximum, label) in specs.items():
+        if key not in overrides:
+            continue
+        try:
+            value = cast(overrides[key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label}格式錯誤") from exc
+        if value < minimum or value > maximum:
+            raise ValueError(f"{label}必須介於 {minimum}～{maximum}")
+        parsed[field_name] = value
+
+    return replace(base_config, **parsed)
 
 
 def _default_central_account_location(
@@ -5884,6 +5949,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             default_aoi_boundary_padding=15,
             default_aoi_boundary_min_bright=15,
             default_aoi_edge_inspector=get_val('aoi_edge_inspector', 'cv'),
+            default_edge_light_leak_enabled=get_val('cv_edge_light_leak_enabled', False),
+            default_edge_light_leak_edge_distance=get_val('cv_edge_light_leak_edge_distance', 80),
+            default_edge_light_leak_aoi_radius=get_val('cv_edge_light_leak_aoi_radius', 50),
+            default_edge_light_leak_threshold=get_val('cv_edge_light_leak_threshold', 4.0),
+            default_edge_light_leak_dark_threshold=get_val('cv_edge_light_leak_dark_threshold', 4.0),
+            default_edge_light_leak_min_length=get_val('cv_edge_light_leak_min_length', 30),
+            default_edge_light_leak_boundary_offset=get_val('cv_edge_light_leak_boundary_offset', 10),
+            default_edge_light_leak_band_width=get_val('cv_edge_light_leak_band_width', 35),
+            default_edge_light_leak_reference_gap=get_val('cv_edge_light_leak_reference_gap', 35),
+            default_edge_light_leak_max_dust_overlap=get_val('cv_edge_light_leak_max_dust_overlap', 0.2),
             preprocess_methods=get_method_specs(),
             dot_samples=_list_debug_dot_samples(dot_sample_dir),
             dot_detection_defaults=dot_detection_defaults,
@@ -8933,6 +9008,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         model_id,
         panel_polygon,
         raw_bounds,
+        edge_light_leak_config=None,
+        edge_light_leak_force_debug=False,
     ):
         """
         Reproduce the production OMIT/per-region/two-stage path for coordinate debug.
@@ -8960,7 +9037,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         seed_min_score = None
         edge_light_leak_rescued = False
 
-        edge_config = getattr(
+        edge_config = edge_light_leak_config or getattr(
             getattr(inferencer, "edge_inspector", None), "config", None
         )
         edge_light_leak_enabled = bool(
@@ -9037,7 +9114,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         def _finish(final_reason_zh):
             nonlocal final_is_dust, detail_text, edge_light_leak_rescued
-            if final_is_dust and raw_judgment == "NG":
+            should_apply_edge_rescue = final_is_dust and raw_judgment == "NG"
+            if should_apply_edge_rescue or edge_light_leak_force_debug:
                 inspect_light_leak = getattr(
                     inferencer, "_inspect_aoi_edge_light_leak_tile", None
                 )
@@ -9049,9 +9127,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         product_resolution=product_resolution,
                         dust_mask=dust_mask,
                         generate_debug=True,
+                        config_override=edge_config,
                     )
                     payload["edge_light_leak"] = edge_outcome
-                    if edge_outcome.get("detected"):
+                    if should_apply_edge_rescue and edge_outcome.get("detected"):
                         final_is_dust = False
                         edge_light_leak_rescued = True
                         detail_text += (
@@ -9440,6 +9519,23 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             self._send_json({"error": "座標搜尋半徑必須是 1～512 的整數"})
             return
+
+        edge_light_leak_config = None
+        edge_light_leak_overrides = data.get("edge_light_leak_overrides")
+        if edge_light_leak_overrides is not None:
+            from capi_edge_cv import EdgeInspectionConfig
+
+            base_edge_config = getattr(
+                getattr(self.inferencer, "edge_inspector", None), "config", None
+            ) or EdgeInspectionConfig()
+            try:
+                edge_light_leak_config = _build_edge_light_leak_debug_config(
+                    base_edge_config,
+                    edge_light_leak_overrides,
+                )
+            except ValueError as exc:
+                self._send_json({"error": str(exc)})
+                return
 
         try:
             total_start = _time.time()
@@ -9912,6 +10008,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     model_id=debug_model_id,
                     panel_polygon=panel_polygon,
                     raw_bounds=raw_bounds,
+                    edge_light_leak_config=edge_light_leak_config,
+                    edge_light_leak_force_debug=(
+                        edge_light_leak_overrides is not None
+                    ),
                 )
             dust_analysis["omit_name"] = omit_name
 

@@ -8326,9 +8326,10 @@ class CAPIInferencer:
         product_resolution: Optional[Tuple[int, int]],
         dust_mask: Optional[np.ndarray],
         generate_debug: bool = False,
+        config_override: Optional[EdgeInspectionConfig] = None,
     ) -> Dict[str, Any]:
         """Run the shared AOI edge brightness-anomaly rule for production or Debug."""
-        edge_config = getattr(
+        edge_config = config_override or getattr(
             getattr(self, "edge_inspector", None), "config", None
         )
         if edge_config is None or not getattr(
