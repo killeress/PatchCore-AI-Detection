@@ -6851,6 +6851,117 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def migrate_legacy_aapi_w0f00010_training_job(
+        self,
+        job_id: str,
+        ordered_units: List[str],
+    ) -> Dict[str, Any]:
+        """將舊 AAPI job 內誤併入 WGF50500 的 W0F00010 tile 拆回獨立光源。
+
+        舊版仍把 W0F00010 映射到 WGF50500，但 OK tile 的檔名與 NG tile
+        的原圖路徑仍保留 W0F00010，可在不重切圖的情況下安全還原。只處理
+        尚可審核的 job，並保留 tile id 與人工 decision。
+        """
+        unchanged = {
+            "changed": False,
+            "migrated_tiles": 0,
+            "scope_updated": False,
+        }
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            job_row = conn.execute(
+                "SELECT state, training_scope FROM training_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if not job_row or job_row["state"] not in ("review", "failed"):
+                conn.commit()
+                return unchanged
+
+            marker = "%W0F00010%"
+            updated = conn.execute(
+                """UPDATE training_tile_pool
+                      SET lighting = 'W0F00010'
+                    WHERE job_id = ?
+                      AND lighting = 'WGF50500'
+                      AND (
+                          UPPER(COALESCE(source_path, '')) LIKE ?
+                          OR UPPER(COALESCE(thumb_path, '')) LIKE ?
+                          OR UPPER(COALESCE(panel_path, '')) LIKE ?
+                      )""",
+                (job_id, marker, marker, marker),
+            )
+            migrated_tiles = int(updated.rowcount or 0)
+            if migrated_tiles <= 0:
+                conn.commit()
+                return unchanged
+
+            available_units = {
+                f"{row['lighting']}-{row['zone']}"
+                for row in conn.execute(
+                    """SELECT DISTINCT lighting, zone
+                         FROM training_tile_pool
+                        WHERE job_id = ?
+                          AND source = 'ok'
+                          AND zone IN ('inner', 'edge')""",
+                    (job_id,),
+                ).fetchall()
+            }
+
+            raw_scope = job_row["training_scope"]
+            try:
+                scope = json.loads(raw_scope) if raw_scope else {}
+            except (TypeError, json.JSONDecodeError):
+                scope = {}
+            if not isinstance(scope, dict):
+                scope = {}
+
+            selected_units = scope.get("selected_units")
+            if isinstance(selected_units, list):
+                selected = list(dict.fromkeys(str(unit) for unit in selected_units))
+            else:
+                selected = list(available_units)
+                scope = {
+                    "mode": "full",
+                    "selected_units": selected,
+                    "target_bundle_id": None,
+                }
+
+            selected_set = set(selected)
+            for zone in ("inner", "edge"):
+                w0_unit = f"W0F00010-{zone}"
+                wgf_unit = f"WGF50500-{zone}"
+                if w0_unit in available_units:
+                    selected_set.add(w0_unit)
+                if wgf_unit not in available_units:
+                    selected_set.discard(wgf_unit)
+
+            clean_order = list(dict.fromkeys(str(unit) for unit in ordered_units))
+            ordered_selected = [unit for unit in clean_order if unit in selected_set]
+            ordered_selected.extend(
+                unit for unit in selected
+                if unit in selected_set and unit not in ordered_selected
+            )
+            scope_updated = ordered_selected != selected
+            if scope_updated:
+                scope["selected_units"] = ordered_selected
+                conn.execute(
+                    "UPDATE training_jobs SET training_scope = ? WHERE job_id = ?",
+                    (json.dumps(scope, ensure_ascii=False), job_id),
+                )
+
+            conn.commit()
+            return {
+                "changed": True,
+                "migrated_tiles": migrated_tiles,
+                "scope_updated": scope_updated,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def list_tile_pool(self, job_id: str, lighting: str = None, zone: str = None,
                        source: str = None, decision: str = None) -> list:
         """查詢 tile pool，支援 lighting / zone / source / decision 任意組合過濾。"""

@@ -713,6 +713,78 @@ class TestTilePoolCRUD:
         assert (tile["tile_index"], tile["tile_x"], tile["tile_y"]) == (7, 384, 256)
         assert (tile["tile_width"], tile["tile_height"]) == (512, 512)
 
+    def test_migrate_legacy_aapi_job_splits_w0f00010_without_losing_review(self, tmp_path):
+        db = _make_db(tmp_path)
+        job_id = "j_legacy_aapi"
+        db.create_training_job(
+            job_id=job_id,
+            machine_id="AAPI-MOD1",
+            panel_paths=["/panels/P001"],
+            training_scope={
+                "mode": "full",
+                "selected_units": [
+                    "R0F00000-inner", "R0F00000-edge",
+                    "WGF50500-inner", "WGF50500-edge",
+                ],
+                "target_bundle_id": None,
+            },
+        )
+        db.update_training_job_state(job_id, "review")
+        tile_ids = db.insert_tile_pool(job_id, [
+            {
+                "lighting": "WGF50500", "zone": "inner", "source": "ok",
+                "source_path": "/tmp/j_panel_W0F00010_t0001.png",
+            },
+            {
+                "lighting": "WGF50500", "zone": "edge", "source": "ok",
+                "source_path": "/tmp/j_panel_W0F00010_t0002.png",
+            },
+            {
+                "lighting": "WGF50500", "zone": "inner", "source": "ng",
+                "source_path": "/tmp/j_WGF50500_bomb.png",
+                "panel_path": "/panels/P001/YQ62UP210G17W0F00010192219.tif",
+            },
+            {
+                "lighting": "WGF50500", "zone": "inner", "source": "ok",
+                "source_path": "/tmp/j_panel_WGF50500_t0001.png",
+            },
+            {
+                "lighting": "WGF50500", "zone": "edge", "source": "ok",
+                "source_path": "/tmp/j_panel_WGF50500_t0002.png",
+            },
+        ])
+        db.update_tile_decisions(job_id, [tile_ids[0]], "reject")
+
+        ordered_units = [
+            "R0F00000-inner", "R0F00000-edge",
+            "W0F00010-inner", "W0F00010-edge",
+            "WGF50500-inner", "WGF50500-edge",
+        ]
+        result = db.migrate_legacy_aapi_w0f00010_training_job(
+            job_id,
+            ordered_units,
+        )
+
+        assert result == {
+            "changed": True,
+            "migrated_tiles": 3,
+            "scope_updated": True,
+        }
+        w0_tiles = db.list_tile_pool(job_id, lighting="W0F00010")
+        assert {tile["id"] for tile in w0_tiles} == set(tile_ids[:3])
+        assert next(tile for tile in w0_tiles if tile["id"] == tile_ids[0])["decision"] == "reject"
+        assert {tile["id"] for tile in db.list_tile_pool(job_id, lighting="WGF50500")} == set(tile_ids[3:])
+        assert db.get_training_job(job_id)["training_scope"]["selected_units"] == ordered_units
+
+        assert db.migrate_legacy_aapi_w0f00010_training_job(
+            job_id,
+            ordered_units,
+        ) == {
+            "changed": False,
+            "migrated_tiles": 0,
+            "scope_updated": False,
+        }
+
     def test_cleanup_tile_pool(self, tmp_path):
         db = _make_db(tmp_path)
         db.create_training_job(job_id="j1", machine_id="M", panel_paths=[])

@@ -13998,6 +13998,35 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 out.append(lighting)
         return out
 
+    @classmethod
+    def _migrate_legacy_aapi_training_job(cls, db, job, server_inst=None):
+        result = {
+            "changed": False,
+            "migrated_tiles": 0,
+            "scope_updated": False,
+        }
+        if not job or job.get("state") not in ("review", "failed"):
+            return job, result
+
+        station_adapter = cls._train_new_station_adapter(server_inst)
+        if station_adapter.profile != "aapi":
+            return job, result
+
+        result = db.migrate_legacy_aapi_w0f00010_training_job(
+            job["job_id"],
+            cls._all_train_unit_labels(server_inst),
+        )
+        if not result.get("changed"):
+            return job, result
+
+        logger.info(
+            "[train/new] migrated legacy AAPI lighting split: job_id=%s tiles=%s scope_updated=%s",
+            job["job_id"],
+            result.get("migrated_tiles", 0),
+            result.get("scope_updated", False),
+        )
+        return db.get_training_job(job["job_id"]) or job, result
+
     @staticmethod
     def _train_new_lighting_labels(
         selected_lightings: list,
@@ -14243,6 +14272,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if not job:
             self._send_response(404, "Job not found")
             return
+        job, _migration = self._migrate_legacy_aapi_training_job(
+            db,
+            job,
+            self._capi_server_instance,
+        )
         template = self.jinja_env.get_template("train_new/step3_review.html")
         scope = job.get("training_scope")
         selected_lightings = self._scope_selected_lightings(scope)
@@ -16187,6 +16221,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
         if job["state"] != "review":
             self._send_json({"error": f"job state must be 'review', currently '{job['state']}'"}, status=409)
+            return
+
+        job, migration = self._migrate_legacy_aapi_training_job(
+            db,
+            job,
+            self._capi_server_instance,
+        )
+        if migration.get("changed"):
+            self._send_json({
+                "error": "舊版 AAPI 光源資料已修復，請重新整理審核頁後再開始訓練",
+                "reload_required": True,
+                "migrated_tiles": migration.get("migrated_tiles", 0),
+            }, status=409)
             return
 
         # GPU singleton：拿不到 train slot 就 409 並回對方 job_id
