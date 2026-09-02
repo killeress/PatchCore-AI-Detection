@@ -1,6 +1,11 @@
 # 更新紀錄
 
-## 2026-09-02 v2
+## 2026-09-02 v3
+
+### [AAPI AOI 座標]改由 Testing request 直接傳入
+
+- AAPI NG request 於圖片目錄後附加 AOI 缺陷座標串，Server 沿用現有座標轉換規則直接解析，不再讀取 `/d/LOG/Report*.log`。
+- AOI 機檢為 OK 時不附加座標串；NG 缺少或傳入不完整座標時回覆 AOI report error，避免無座標推論。
 
 ### [Debug 推論]新增獨立邊緣漏光調參頁籤
 

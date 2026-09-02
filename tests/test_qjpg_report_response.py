@@ -52,6 +52,43 @@ def test_parse_request_keeps_standard_no_bomb_image_dir():
         "//192.168.20.12/yuantu/GZ0790KA0017S/260616/TL62U17BC17B"
     )
     assert parsed["bomb_info"] is None
+    assert parsed["aoi_report_payload"] == ""
+
+
+def test_parse_request_extracts_testing_aoi_coordinates_after_image_dir():
+    aoi_payload = (
+        "W0F00000,CDK2(01092,00131)"
+        "W0F00000,CDK2(00858,00553)"
+        "W0F00000,CM00(02996,00555)"
+        "W0F00000,CM00(05315,00716)"
+    )
+    parsed = parse_request(
+        "AOI@YQ52J5019D21;GN140BGAAN80S;AAPI09-12;1366,768;NG;W0F00000;"
+        "(90/90;115/115;140/140;90/140;140/90);"
+        "/192.168.2.190/d/image/20260814/YQ23CQ220B12;"
+        + aoi_payload
+    )
+
+    assert parsed["image_dir"] == (
+        "/192.168.2.190/d/image/20260814/YQ23CQ220B12"
+    )
+    assert parsed["aoi_report_payload"] == aoi_payload
+    assert parsed["bomb_info"] == {
+        "image_prefix": "W0F00000",
+        "defect_type": "point",
+        "coordinates": [(90, 90), (115, 115), (140, 140), (90, 140), (140, 90)],
+    }
+
+
+def test_parse_request_extracts_testing_aoi_coordinates_without_bomb_fields():
+    parsed = parse_request(
+        "AOI@G1;MODEL;AAPI09-12;1366,768;NG;/image/panel;"
+        "W0F00000,CDK2(01092,00131)"
+    )
+
+    assert parsed["image_dir"] == "/image/panel"
+    assert parsed["bomb_info"] is None
+    assert parsed["aoi_report_payload"] == "W0F00000,CDK2(01092,00131)"
 
 
 def test_parse_request_skips_empty_no_bomb_reserved_fields():
