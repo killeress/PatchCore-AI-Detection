@@ -770,6 +770,14 @@ class CAPIInferencer:
         return self._get_image_prefix(filename).upper().startswith("W0F0000")
 
     @staticmethod
+    def _is_hm_mark_layout(filename: str, machine_no: Optional[str]) -> bool:
+        """Identify the HM fixed lower-right MARK layout."""
+        if "HM" in str(machine_no or "").upper():
+            return True
+        stem = Path(filename).stem.upper()
+        return re.fullmatch(r"W0F00000\d{6}", stem) is not None
+
+    @staticmethod
     def _apply_online_paddle_mark_recognition(
         image: np.ndarray,
         detection: Dict[str, Any],
@@ -892,12 +900,19 @@ class CAPIInferencer:
             return None, []
 
         try:
-            from capi_mark_detector import detect_panel_mark
+            from capi_mark_detector import detect_hm_panel_mark, detect_panel_mark
 
             image = self._read_detection_image(source_path)
             if image is None:
                 raise FileNotFoundError(f"cannot read image: {source_path}")
-            detection = detect_panel_mark(image, include_debug=False)
+            if self._is_hm_mark_layout(source_path.name, machine_no):
+                panel_bounds, _ = self._find_raw_object_bounds(image)
+                detection = detect_hm_panel_mark(
+                    image,
+                    panel_bounds,
+                )
+            else:
+                detection = detect_panel_mark(image, include_debug=False)
             image_h, image_w = image.shape[:2]
             detection["source_image"] = source_path.name
             detection["image_size"] = (int(image_w), int(image_h))
@@ -935,6 +950,19 @@ class CAPIInferencer:
         )
         detection["mark_machine_no"] = str(machine_no or "")
         detection["mark_model_id"] = str(model_id or "")
+        if detection.get("recognition_skipped"):
+            print(
+                f"MARK Locator {source_path.name}: "
+                f"technique={detection.get('locator_technique', 'HM-DotMatrixCV')} "
+                f"roi={detection.get('roi', '')} "
+                f"search={detection.get('search_pass', 'hm_fixed_roi')} "
+                f"bbox=({x},{y},{width},{height})"
+            )
+            print(
+                f"MARK Recognition {source_path.name}: decision=skipped "
+                f"reason={detection.get('recognition_reason', 'hm_location_only')}"
+            )
+            return detection, [region]
         if not apply_recognition:
             return detection, [region]
         self._apply_online_paddle_mark_recognition(
