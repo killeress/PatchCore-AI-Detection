@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
-import time
 from typing import Dict, List, Optional, Tuple
 
 from capi_image_naming import (
@@ -93,6 +92,7 @@ class StationAdapter:
         *,
         glass_id: str,
         machine_judgment: str,
+        report_payload: str = "",
     ) -> Optional[Dict[str, List[StationAOIDefect]]]:
         # None tells CAPIInferencer to retain the existing per-panel TXT parser.
         return None
@@ -100,12 +100,6 @@ class StationAdapter:
 
 class AAPIStationAdapter(StationAdapter):
     profile = "aapi"
-    REPORT_ROOT_BY_SOURCE_HOST = {
-        "192.168.1.11": Path("/192.168.1.11/d/tianmu/report"),
-        "192.168.2.190": Path("/192.168.2.190/d/LOG"),
-        "192.168.2.191": Path("/192.168.2.191/d/LOG"),
-    }
-    REPORT_ROOT = REPORT_ROOT_BY_SOURCE_HOST["192.168.2.190"]
     inference_prefixes = (
         "G0F00000",
         "R0F00000",
@@ -151,22 +145,6 @@ class AAPIStationAdapter(StationAdapter):
         r"([A-Za-z0-9]+)\((\d+),(\d+)\)",
         re.IGNORECASE,
     )
-    _DATE_SEGMENT = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
-
-    def __init__(
-        self,
-        *,
-        report_root: Optional[Path] = None,
-        report_retry_count: int = 3,
-        report_retry_interval_seconds: float = 0.2,
-    ):
-        self._report_root_overridden = report_root is not None
-        self.report_root = Path(report_root) if report_root is not None else self.REPORT_ROOT
-        self.report_retry_count = max(1, int(report_retry_count))
-        self.report_retry_interval_seconds = max(
-            0.0,
-            float(report_retry_interval_seconds),
-        )
 
     def image_prefix(self, image_name: str) -> str:
         stem = Path(str(image_name)).stem
@@ -202,98 +180,28 @@ class AAPIStationAdapter(StationAdapter):
         *,
         glass_id: str,
         machine_judgment: str,
+        report_payload: str = "",
     ) -> Optional[Dict[str, List[StationAOIDefect]]]:
         glass_id = str(glass_id or "").strip()
         if not glass_id:
-            raise RuntimeError("AAPI AOI report requires glass_id")
-        if str(machine_judgment or "").strip().upper() == "OK":
+            raise RuntimeError("AAPI AOI coordinates require glass_id")
+
+        judgment = str(machine_judgment or "").strip().upper()
+        if judgment != "NG":
             return {}
 
-        report_file = self._report_file_for_panel(panel_dir)
-        last_error = ""
-        for attempt in range(self.report_retry_count):
-            try:
-                parsed, last_error = self._read_latest_glass_record(report_file, glass_id)
-            except OSError as exc:
-                parsed = None
-                last_error = f"{type(exc).__name__}: {exc}"
-            if parsed is not None:
-                if not parsed:
-                    last_error = "latest_record_status_ok"
-                else:
-                    return parsed
-            if attempt + 1 < self.report_retry_count:
-                time.sleep(self.report_retry_interval_seconds)
-
-        raise RuntimeError(
-            f"AAPI AOI report unavailable for glass={glass_id}: "
-            f"file={report_file} reason={last_error or 'not_found'}"
-        )
-
-    def _report_file_for_panel(self, panel_dir: Path) -> Path:
-        panel_dir = Path(panel_dir)
-        match = self._DATE_SEGMENT.search(str(panel_dir))
-        if match is None:
-            raise RuntimeError(f"AAPI image path has no YYYYMMDD date segment: {panel_dir}")
-        yyyymmdd = match.group(1)
-        report_date = yyyymmdd[2:4] + yyyymmdd[4:6] + yyyymmdd[6:8]
-        report_root = self.report_root
-        if not self._report_root_overridden:
-            image_root = panel_dir.parent.parent
-            if (
-                image_root.name.casefold() == "image"
-                and image_root.parent.name.casefold() == "d"
-            ):
-                source_host = image_root.parent.parent.name
-                allowed_hosts = {"192.168.2.190", "192.168.2.191"}
-            elif (
-                image_root.name.casefold() == "yuantu"
-                and image_root.parent.name.casefold() == "tianmu"
-                and image_root.parent.parent.name.casefold() == "d"
-            ):
-                source_host = image_root.parent.parent.parent.name
-                allowed_hosts = {"192.168.1.11"}
-            else:
-                source_host = ""
-                allowed_hosts = set()
-
-            if source_host not in allowed_hosts:
-                raise RuntimeError(
-                    f"Unsupported AAPI image/report layout: {panel_dir}"
-                )
-            report_root = self.REPORT_ROOT_BY_SOURCE_HOST[source_host]
-        return report_root / f"Report{report_date}.log"
-
-    def _read_latest_glass_record(
-        self,
-        report_file: Path,
-        glass_id: str,
-    ) -> Tuple[Optional[Dict[str, List[StationAOIDefect]]], str]:
-        raw_text = report_file.read_bytes()
-        try:
-            text = raw_text.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            text = raw_text.decode("cp950", errors="replace")
-        matching_lines = []
-        for line in text.splitlines():
-            fields = line.strip().split(",", 3)
-            if len(fields) >= 3 and fields[1].strip() == glass_id:
-                matching_lines.append(fields)
-        if not matching_lines:
-            return None, "not_found"
-
-        fields = matching_lines[-1]
-        status = fields[2].strip().upper()
-        payload = fields[3].strip() if len(fields) == 4 else ""
-        if status == "OK" and not payload:
-            return {}, ""
-        if status != "NG" or not payload:
-            return None, "latest_record_incomplete"
+        payload = str(report_payload or "").strip()
+        if not payload:
+            raise RuntimeError(
+                f"AAPI AOI coordinates missing from Testing request for glass={glass_id}"
+            )
 
         matches = list(self._REPORT_RECORD.finditer(payload))
         residue = self._REPORT_RECORD.sub("", payload).strip(" ,;\t")
         if not matches or residue:
-            return None, "latest_record_incomplete"
+            raise RuntimeError(
+                f"AAPI AOI coordinates malformed for glass={glass_id}: {payload[:100]}"
+            )
 
         parsed: Dict[str, List[StationAOIDefect]] = {}
         for match in matches:
@@ -308,7 +216,7 @@ class AAPIStationAdapter(StationAdapter):
                 image_prefix=internal_prefix,
                 coordinate_space="product",
             ))
-        return parsed, ""
+        return parsed
 
     def _internal_report_prefix(self, source_prefix: str) -> str:
         upper = str(source_prefix).upper()
