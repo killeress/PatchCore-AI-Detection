@@ -64,65 +64,6 @@ def test_server_config_does_not_select_station_profile(config_path):
     assert "aapi" not in config
 
 
-def test_aapi_adapter_uses_hostname_selected_default_report_root():
-    profile = resolve_station_profile_from_hostname("mod2-aapi09")
-    adapter = create_station_adapter(profile)
-
-    assert str(adapter.report_root).replace("\\", "/") == "/192.168.2.190/d/LOG"
-
-
-@pytest.mark.parametrize("host", ["192.168.2.190", "192.168.2.191"])
-def test_aapi_report_follows_panel_source_host(host):
-    adapter = AAPIStationAdapter()
-
-    report_file = adapter._report_file_for_panel(
-        Path(f"/{host}/d/image/20260823/YQ536J221B12")
-    )
-
-    assert str(report_file).replace("\\", "/").endswith(
-        f"/{host}/d/LOG/Report260823.log"
-    )
-
-
-def test_aapi_mod1_report_uses_tianmu_daily_log_layout():
-    adapter = AAPIStationAdapter()
-
-    report_file = adapter._report_file_for_panel(
-        Path("/192.168.1.11/d/tianmu/yuantu/20260825/T362H8E0NN04")
-    )
-
-    assert str(report_file).replace("\\", "/").endswith(
-        "/192.168.1.11/d/tianmu/report/Report260825.log"
-    )
-
-
-@pytest.mark.parametrize(
-    "panel_dir",
-    [
-        Path("/192.168.1.11/d/image/20260825/T362H8E0NN04"),
-        Path("/192.168.2.190/d/tianmu/yuantu/20260825/T362H8E0NN04"),
-        Path("/192.168.9.9/d/image/20260825/T362H8E0NN04"),
-    ],
-)
-def test_aapi_report_rejects_unknown_source_or_layout(panel_dir):
-    adapter = AAPIStationAdapter()
-
-    with pytest.raises(RuntimeError, match="Unsupported AAPI image/report layout"):
-        adapter._report_file_for_panel(panel_dir)
-
-
-def test_aapi_explicit_report_root_override_wins_over_panel_source():
-    adapter = AAPIStationAdapter(report_root=Path("/test/LOG"))
-
-    report_file = adapter._report_file_for_panel(
-        Path("/192.168.2.191/d/image/20260823/YQ536J221B12")
-    )
-
-    assert str(report_file).replace("\\", "/").endswith(
-        "/test/LOG/Report260823.log"
-    )
-
-
 def test_aapi_filename_mapping_keeps_source_images_distinct():
     adapter = AAPIStationAdapter()
     samples = {
@@ -275,48 +216,95 @@ def test_aapi_model_routing_keeps_reserved_models_independent():
     assert inferencer._get_threshold_for_zone("WINDOWS_BG", "inner") == 0.34
 
 
-def test_aapi_report_uses_last_complete_exact_glass_record(tmp_path):
-    report_root = tmp_path / "LOG"
-    report_root.mkdir()
-    report = report_root / "Report260820.log"
-    report.write_text(
-        "2026/8/20 16:40:00,YQ-OTHER,NG,W0F00000,CDK2(00001,00002)\n"
-        "2026/8/20 16:41:00,YQ607S210B12,NG,W0F00000,CDK2(01094,00129)\n"
-        "2026/8/20 16:48:24,YQ607S210B12,NG,"
-        "W0F00010,CM00(04649,00235)Windows_BG,CO05(02996,00555)"
-        "White_Frame,CLV2(00277,00881)\n",
-        encoding="utf-8",
-    )
-    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
-
+def test_aapi_report_parses_testing_payload_with_existing_coordinate_conversion():
+    adapter = AAPIStationAdapter()
     parsed = adapter.parse_aoi_report(
-        tmp_path / "image" / "20260820" / "YQ607S210B12",
+        Path("/not-mounted/image/20260814/YQ23CQ220B12"),
+        glass_id="YQ52J5019D21",
+        machine_judgment="NG",
+        report_payload=(
+            "W0F00000,CDK2(01092,00131)"
+            "W0F00000,CDK2(00858,00553)"
+            "W0F00000,CM00(02996,00555)"
+            "W0F00000,CM00(05315,00716)"
+        ),
+    )
+
+    defects = parsed["W0F00000"]
+    assert [(item.defect_code, item.x, item.y) for item in defects] == [
+        ("CDK2", 364, 131),
+        ("CDK2", 286, 553),
+        ("CM00", 998, 555),
+        ("CM00", 1771, 716),
+    ]
+    assert all(item.coordinate_space == "product" for item in defects)
+
+
+def test_inferencer_uses_aapi_testing_payload_without_report_file():
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.station_adapter = AAPIStationAdapter()
+
+    parsed = inferencer._parse_aoi_report_txt(
+        Path("/not-mounted/image/20260814/YQ23CQ220B12"),
+        glass_id="YQ52J5019D21",
+        machine_judgment="NG",
+        report_payload="W0F00000,CDK2(01092,00131)",
+    )
+
+    defect = parsed["W0F00000"][0]
+    assert isinstance(defect, AOIReportDefect)
+    assert (defect.defect_code, defect.product_x, defect.product_y) == (
+        "CDK2",
+        364,
+        131,
+    )
+
+
+def test_server_forwards_testing_payload_to_aapi_parser(tmp_path):
+    from capi_server import CAPIServer
+
+    report_parser = MagicMock(side_effect=RuntimeError("stop after parse"))
+    inferencer = SimpleNamespace(
+        config=SimpleNamespace(image_abnormal_detection_enabled=False),
+        _parse_aoi_report_txt=report_parser,
+    )
+    server = CAPIServer.__new__(CAPIServer)
+    server.path_mapping = {}
+    server.station_adapter = AAPIStationAdapter()
+    server._get_or_create_inferencer = lambda _model_id: inferencer
+    payload = "W0F00000,CDK2(01092,00131)"
+
+    result = server._process_request({
+        "glass_id": "YQ52J5019D21",
+        "model_id": "GN140BGAAN80S",
+        "machine_no": "AAPI09-12",
+        "resolution": (1366, 768),
+        "machine_judgment": "NG",
+        "image_dir": str(tmp_path),
+        "bomb_info": None,
+        "aoi_report_payload": payload,
+    })
+
+    assert result[0].startswith("ERR:AOI_REPORT_FAILED")
+    report_parser.assert_called_once_with(
+        tmp_path,
+        glass_id="YQ52J5019D21",
+        machine_judgment="NG",
+        report_payload=payload,
+    )
+
+
+def test_aapi_report_parses_reserved_lightings_independently():
+    adapter = AAPIStationAdapter()
+    parsed = adapter.parse_aoi_report(
+        Path("/image/panel"),
         glass_id="YQ607S210B12",
         machine_judgment="NG",
-    )
-
-    assert set(parsed) == {"W0F00010", "WINDOWS_BG", "WHITEFRA"}
-    assert parsed["W0F00010"][0].coordinate_space == "product"
-    assert (parsed["W0F00010"][0].x, parsed["W0F00010"][0].y) == (1549, 235)
-    assert parsed["WHITEFRA"][0].defect_code == "CLV2"
-
-
-def test_aapi_report_parses_reserved_lightings_independently(tmp_path):
-    report_root = tmp_path / "LOG"
-    report_root.mkdir()
-    (report_root / "Report260820.log").write_text(
-        "2026/8/20 16:48:24,YQ607S210B12,NG,"
-        "WGF25250,C250(00300,00400)"
-        "G0F00000,CG00(00600,00700)"
-        "U0F00000,CU00(00900,01000)\n",
-        encoding="utf-8",
-    )
-    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
-
-    parsed = adapter.parse_aoi_report(
-        tmp_path / "image" / "20260820" / "YQ607S210B12",
-        glass_id="YQ607S210B12",
-        machine_judgment="NG",
+        report_payload=(
+            "WGF25250,C250(00300,00400);"
+            "G0F00000,CG00(00600,00700);"
+            "U0F00000,CU00(00900,01000)"
+        ),
     )
 
     assert set(parsed) == {"WGF25250", "G0F00000", "U0F00000"}
@@ -325,24 +313,17 @@ def test_aapi_report_parses_reserved_lightings_independently(tmp_path):
     assert parsed["U0F00000"][0].image_prefix == "U0F00000"
 
 
-def test_aapi_mod1_cp950_report_maps_standard_and_bwframe0(tmp_path):
-    report_root = tmp_path / "report"
-    report_root.mkdir()
-    report = report_root / "Report260825.log"
-    report.write_bytes(
-        (
-            "2026/8/25 下午 01:33:40,T362L7J7NQ03,NG,"
-            "W0F00000,CO05(00201,00661)"
-            "STANDARD,CLH2(00111,00250)"
-            "BWFRAME0,CLV2(00220,00395)\n"
-        ).encode("cp950")
-    )
-    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
-
+def test_aapi_testing_payload_maps_standard_and_bwframe0():
+    adapter = AAPIStationAdapter()
     parsed = adapter.parse_aoi_report(
-        tmp_path / "yuantu" / "20260825" / "T362L7J7NQ03",
+        Path("/image/panel"),
         glass_id="T362L7J7NQ03",
         machine_judgment="NG",
+        report_payload=(
+            "W0F00000,CO05(00201,00661)"
+            "STANDARD,CLH2(00111,00250)"
+            "BWFRAME0,CLV2(00220,00395)"
+        ),
     )
 
     assert set(parsed) == {"W0F00000", "WINDOWS_BG", "WHITEFRA"}
@@ -351,18 +332,13 @@ def test_aapi_mod1_cp950_report_maps_standard_and_bwframe0(tmp_path):
     assert (parsed["WHITEFRA"][0].x, parsed["WHITEFRA"][0].y) == (73, 395)
 
 
-def test_aapi_report_coordinate_is_mapped_from_protocol_product_resolution(tmp_path):
-    report_root = tmp_path / "LOG"
-    report_root.mkdir()
-    (report_root / "Report260823.log").write_text(
-        "2026/8/23 09:09:37,YQ62PY211B12,NG,W0F00000,CDK2(03078,00497)\n",
-        encoding="utf-8",
-    )
-    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
+def test_aapi_report_coordinate_is_mapped_from_protocol_product_resolution():
+    adapter = AAPIStationAdapter()
     parsed = adapter.parse_aoi_report(
-        tmp_path / "image" / "20260823" / "YQ62PY211B12",
+        Path("/image/20260823/YQ62PY211B12"),
         glass_id="YQ62PY211B12",
         machine_judgment="NG",
+        report_payload="W0F00000,CDK2(03078,00497)",
     )
     defect = parsed["W0F00000"][0]
 
@@ -399,47 +375,31 @@ def test_aapi_report_coordinate_is_mapped_from_protocol_product_resolution(tmp_p
     ) == (3408, 1823, 1026, 497)
 
 
-def test_aapi_report_does_not_fall_back_to_stale_row_when_latest_is_partial(tmp_path):
-    report_root = tmp_path / "LOG"
-    report_root.mkdir()
-    (report_root / "Report260820.log").write_text(
-        "2026/8/20 16:41:00,YQ607S210B12,NG,W0F00000,CDK2(01094,00129)\n"
-        "2026/8/20 16:48:24,YQ607S210B12,NG,W0F00000,CDK2(0531",
-        encoding="utf-8",
-    )
-    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
-
-    with pytest.raises(RuntimeError, match="latest_record_incomplete"):
+def test_aapi_ng_rejects_malformed_testing_payload():
+    adapter = AAPIStationAdapter()
+    with pytest.raises(RuntimeError, match="coordinates malformed"):
         adapter.parse_aoi_report(
-            tmp_path / "image" / "20260820" / "YQ607S210B12",
+            Path("/image/panel"),
             glass_id="YQ607S210B12",
             machine_judgment="NG",
+            report_payload="W0F00000,CDK2(01094,00129)partial",
         )
 
 
-def test_aapi_ok_without_log_row_has_no_aoi_candidates(tmp_path):
-    report_root = tmp_path / "LOG"
-    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
-
+def test_aapi_ok_without_testing_payload_has_no_aoi_candidates():
+    adapter = AAPIStationAdapter()
     assert adapter.parse_aoi_report(
-        Path("/image/20260820/YQ607S210B12"),
+        Path("/image/panel"),
         glass_id="YQ607S210B12",
         machine_judgment="OK",
     ) == {}
 
 
-def test_aapi_ng_rejects_latest_ok_record(tmp_path):
-    report_root = tmp_path / "LOG"
-    report_root.mkdir()
-    (report_root / "Report260820.log").write_text(
-        "2026/8/20 16:48:24,YQ607S210B12,OK\n",
-        encoding="utf-8",
-    )
-    adapter = AAPIStationAdapter(report_root=report_root, report_retry_count=1)
-
-    with pytest.raises(RuntimeError, match="latest_record_status_ok"):
+def test_aapi_ng_requires_testing_payload():
+    adapter = AAPIStationAdapter()
+    with pytest.raises(RuntimeError, match="missing from Testing request"):
         adapter.parse_aoi_report(
-            tmp_path / "image" / "20260820" / "YQ607S210B12",
+            Path("/image/panel"),
             glass_id="YQ607S210B12",
             machine_judgment="NG",
         )
