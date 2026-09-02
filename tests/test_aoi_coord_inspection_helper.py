@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from capi_config import CAPIConfig
-from capi_inference import CAPIInferencer, ImageResult
+from capi_inference import AOIReportDefect, CAPIInferencer, ImageResult
 
 
 @pytest.fixture
@@ -99,6 +99,88 @@ def test_parse_aoi_report_uses_nested_new_arch_model_mapping_prefixes(new_arch_i
         (1565, 325),
         (289, 553),
     ]
+
+
+def test_parse_aoi_report_accepts_whitefra_record(new_arch_inferencer, tmp_path):
+    """WHITEFRA QJPG defect records are parsed for reporting."""
+    panel_dir = tmp_path / "yuantu" / "GN153JCAK040S" / "20260902" / "T8669D72AK21"
+    report_dir = tmp_path / "Report" / "GN153JCAK040S" / "20260902" / "T8669D72AK21"
+    panel_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+
+    new_arch_inferencer.config.aoi_report_path_replace_from = "yuantu"
+    new_arch_inferencer.config.aoi_report_path_replace_to = "Report"
+    new_arch_inferencer.config.model_mapping = {}
+    new_arch_inferencer._model_mapping = {}
+
+    (report_dir / "092950.TXT").write_text(
+        "T8669D72AK21\n"
+        "@QJPG-T8669D72AK21;OK;DV;NGC11110000000046WHITEFRA,\n",
+        encoding="utf-8",
+    )
+
+    parsed = new_arch_inferencer._parse_aoi_report_txt(panel_dir)
+
+    assert set(parsed) == {"WHITEFRA"}
+    defect = parsed["WHITEFRA"][0]
+    assert defect == AOIReportDefect(
+        defect_code="C1111",
+        product_x=0,
+        product_y=46,
+        image_prefix="WHITEFRA",
+    )
+
+
+def test_aoi_coord_inspection_skips_whitefra_for_dedicated_detector(
+    new_arch_inferencer, tmp_path
+):
+    """WHITEFRA stays reportable but never creates an AOI inspection tile."""
+    from capi_inference import TileInfo
+
+    image_path = tmp_path / "WHITEFRA_092950.png"
+    image_path.write_bytes(b"")
+    result = ImageResult(
+        image_path=image_path,
+        image_size=(1920, 1080),
+        otsu_bounds=(0, 0, 1920, 1080),
+        exclusion_regions=[],
+        tiles=[
+            TileInfo(
+                tile_id=0,
+                x=0,
+                y=0,
+                width=512,
+                height=512,
+                image=np.zeros((512, 512), dtype=np.uint8),
+            )
+        ],
+        excluded_tile_count=0,
+        processed_tile_count=1,
+        processing_time=0.0,
+        anomaly_tiles=[],
+        raw_bounds=(0, 0, 1920, 1080),
+        panel_polygon=None,
+    )
+    white_defect = AOIReportDefect(
+        defect_code="C1111",
+        product_x=0,
+        product_y=46,
+        image_prefix="WHITEFRA",
+    )
+
+    with patch.object(new_arch_inferencer, "_create_aoi_centered_tiles_v2") as mock_create:
+        stats = new_arch_inferencer._apply_aoi_coord_inspection(
+            panel_dir=tmp_path,
+            preprocessed_results=[result],
+            omit_image=None,
+            omit_overexposed=False,
+            product_resolution=(1920, 1080),
+            aoi_report={"WHITEFRA": [white_defect]},
+        )
+
+    mock_create.assert_not_called()
+    assert stats == {"aoi_tile_count": 0, "aoi_edge_count": 0}
+    assert len(result.tiles) == 1
 
 
 def test_parse_aoi_report_maps_hm_u_prefix_to_standard(new_arch_inferencer, tmp_path):
