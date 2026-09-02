@@ -1054,6 +1054,7 @@
         <button class="tab-btn" onclick="switchTab('tab-dot-detection', this)">⚫ 點圖偵測</button>
         <button class="tab-btn" onclick="switchTab('tab-preprocess-lab', this)">🧪 影像預處理實驗室</button>
         <button class="tab-btn" onclick="switchTab('tab-coord', this)">📍 座標推論</button>
+        <button class="tab-btn" onclick="switchTab('tab-edge-light-leak', this)">💡 邊緣漏光檢測</button>
         <button class="tab-btn" onclick="switchTab('tab-edge', this)">📐 邊緣檢測 (整邊)</button>
         <button class="tab-btn" onclick="switchTab('tab-edge-corner', this)">📐 邊緣檢測 (角落)</button>
         <button class="tab-btn" onclick="switchTab('tab-coords-viewer', this)">🎯 座標查看</button>
@@ -1558,6 +1559,112 @@
             <div class="coord-info-cards" id="coord-info-cards"></div>
             <div id="coord-diagnostic-section" class="coord-diagnostic hidden"></div>
             <div class="coord-result-grid" id="coord-result-grid"></div>
+        </div>
+    </div>
+
+    <!-- ═══ 邊緣漏光檢測頁籤 ═══ -->
+    <div id="tab-edge-light-leak" class="tab-content">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+            <div>
+                <h2 style="font-size:1.4rem; color:var(--text); font-family:'Fira Code',monospace; display:flex; align-items:center; gap:10px;">
+                    💡 邊緣漏光檢測
+                    <span class="debug-badge">DEBUG ONLY</span>
+                </h2>
+                <p style="color:var(--text-muted); font-size:0.85rem; margin-top:4px;">
+                    直接調整亮帶／暗段參數並重現 AOI 灰塵後救援；欄位初始值來自正式設定，修改只影響本次測試。
+                </p>
+            </div>
+        </div>
+
+        <div class="card" style="padding:20px;">
+            <div class="coord-input-row">
+                <input type="text" id="edge-leak-image-path" placeholder="點燈圖片絕對路徑" autocomplete="off" spellcheck="false"
+                    style="flex:1; min-width:360px; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.95rem; outline:none;">
+                <div class="coord-group">
+                    <label for="edge-leak-x">Product X</label>
+                    <input type="number" id="edge-leak-x" value="960" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-leak-y">Product Y</label>
+                    <input type="number" id="edge-leak-y" value="540" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-leak-resolution">產品解析度</label>
+                    <select id="edge-leak-resolution">
+                        {% for code, res in model_resolution_map.items() %}
+                        <option value="{{ res[0] }},{{ res[1] }}" {% if res[0]==1920 and res[1]==1080 %} selected{% endif %}>
+                            {{ code }}: {{ res[0] }}×{{ res[1] }}
+                        </option>
+                        {% endfor %}
+                        {% if not model_resolution_map %}
+                        <option value="1920,1080" selected>1920×1080</option>
+                        {% endif %}
+                    </select>
+                </div>
+                <div class="coord-group">
+                    <label for="edge-leak-score-threshold">PatchCore 門檻</label>
+                    <input type="number" id="edge-leak-score-threshold" value="{{ default_threshold }}" min="0" max="1" step="0.01">
+                </div>
+            </div>
+
+            <div style="height:1px; background:var(--border); margin:16px 0;"></div>
+            <div class="coord-input-row">
+                <div class="coord-group" style="justify-content:flex-end; min-width:130px;">
+                    <label for="edge-leak-enabled">功能開關</label>
+                    <label style="display:flex; align-items:center; gap:8px; min-height:38px; cursor:pointer; color:var(--text);">
+                        <input type="checkbox" id="edge-leak-enabled" {% if default_edge_light_leak_enabled %}checked{% endif %}>
+                        本次啟用
+                    </label>
+                </div>
+                <div class="coord-group">
+                    <label for="edge-leak-edge-distance">AOI 距邊上限</label>
+                    <input type="number" id="edge-leak-edge-distance" value="{{ default_edge_light_leak_edge_distance }}" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-leak-aoi-radius">AOI 搜尋半徑</label>
+                    <input type="number" id="edge-leak-aoi-radius" value="{{ default_edge_light_leak_aoi_radius }}" min="1" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-leak-bright-threshold">亮帶灰階差門檻</label>
+                    <input type="number" id="edge-leak-bright-threshold" value="{{ default_edge_light_leak_threshold }}" min="0" max="255" step="0.1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-leak-dark-threshold">暗段灰階差門檻</label>
+                    <input type="number" id="edge-leak-dark-threshold" value="{{ default_edge_light_leak_dark_threshold }}" min="0" max="255" step="0.1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-leak-min-length">最小連續長度</label>
+                    <input type="number" id="edge-leak-min-length" value="{{ default_edge_light_leak_min_length }}" min="1" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-leak-boundary-offset">邊界偏移</label>
+                    <input type="number" id="edge-leak-boundary-offset" value="{{ default_edge_light_leak_boundary_offset }}" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-leak-band-width">檢查帶寬度</label>
+                    <input type="number" id="edge-leak-band-width" value="{{ default_edge_light_leak_band_width }}" min="1" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-leak-reference-gap">參考帶間距</label>
+                    <input type="number" id="edge-leak-reference-gap" value="{{ default_edge_light_leak_reference_gap }}" min="0" step="1">
+                </div>
+                <div class="coord-group">
+                    <label for="edge-leak-max-dust-overlap">最大灰塵覆蓋率</label>
+                    <input type="number" id="edge-leak-max-dust-overlap" value="{{ default_edge_light_leak_max_dust_overlap }}" min="0" max="1" step="0.01">
+                </div>
+                <button class="btn-run" id="btn-edge-leak-run" onclick="runEdgeLightLeakInference()"
+                    style="background:linear-gradient(135deg,#f59e0b,#d97706); align-self:flex-end;">
+                    <span class="spinner" id="edge-leak-spinner"></span>
+                    <span id="edge-leak-btn-text">💡 執行檢測</span>
+                </button>
+            </div>
+        </div>
+
+        <div id="edge-leak-error-box" class="error-box hidden"></div>
+        <div id="edge-leak-result-section" class="hidden">
+            <div class="coord-info-cards" id="edge-leak-info-cards"></div>
+            <div id="edge-leak-diagnostic" class="coord-diagnostic"></div>
+            <div class="coord-result-grid" id="edge-leak-result-grid"></div>
         </div>
     </div>
 
@@ -3515,10 +3622,12 @@
 
     // ═══ 座標推論 ═══════════════════════════════
     const coordPathInput = document.getElementById('coord-image-path');
+    const edgeLeakPathInput = document.getElementById('edge-leak-image-path');
 
     // 同步圖片路徑: 全圖推論 → 座標推論/邊緣檢測/黑畫面推論
     input.addEventListener('input', () => {
         if (!coordPathInput.value) coordPathInput.value = input.value;
+        if (!edgeLeakPathInput.value) edgeLeakPathInput.value = input.value;
         const edgePathInput = document.getElementById('edge-image-path');
         if (edgePathInput && !edgePathInput.value) edgePathInput.value = input.value;
         const labPathInput = document.getElementById('lab-image-path');
@@ -3529,6 +3638,9 @@
     coordPathInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') runCoordInference();
     });
+    edgeLeakPathInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') runEdgeLightLeakInference();
+    });
 
     // 自動帶入 URL 的 ?path= 參數
     (function () {
@@ -3537,6 +3649,8 @@
         if (pathParam) {
             coordPathInput.value = pathParam;
             autoSelectResolution(pathParam);
+            edgeLeakPathInput.value = pathParam;
+            autoSelectResolution(pathParam, 'edge-leak-resolution');
         }
     })();
 
@@ -3544,12 +3658,16 @@
     coordPathInput.addEventListener('input', () => {
         autoSelectResolution(coordPathInput.value);
     });
+    edgeLeakPathInput.addEventListener('input', () => {
+        autoSelectResolution(edgeLeakPathInput.value, 'edge-leak-resolution');
+    });
 
-    function autoSelectResolution(pathStr) {
+    function autoSelectResolution(pathStr, selectId = 'coord-resolution') {
         if (!pathStr) return;
         const normalized = pathStr.replace(/\\/g, '/');
         const parts = normalized.split('/');
-        const selectEl = document.getElementById('coord-resolution');
+        const selectEl = document.getElementById(selectId);
+        if (!selectEl) return;
 
         // 從路徑後方往前找 (因為 model_id 通常在倒數幾層資料夾，例如 GN140JCAL010S)
         for (let p = parts.length - 1; p >= 0; p--) {
@@ -3618,6 +3736,181 @@
             btnText.textContent = '📍 座標推論';
             spn.classList.remove('active');
         }
+    }
+
+    async function runEdgeLightLeakInference() {
+        const imgPath = edgeLeakPathInput.value.trim() || input.value.trim();
+        if (!imgPath) {
+            showEdgeLeakError('請輸入點燈圖片路徑');
+            return;
+        }
+
+        const resolution = document.getElementById('edge-leak-resolution').value.split(',');
+        const productW = parseInt(resolution[0], 10) || 1920;
+        const productH = parseInt(resolution[1], 10) || 1080;
+        const intValue = id => parseInt(document.getElementById(id).value, 10);
+        const floatValue = id => parseFloat(document.getElementById(id).value);
+        const overrides = {
+            cv_edge_light_leak_enabled: document.getElementById('edge-leak-enabled').checked,
+            cv_edge_light_leak_edge_distance: intValue('edge-leak-edge-distance'),
+            cv_edge_light_leak_aoi_radius: intValue('edge-leak-aoi-radius'),
+            cv_edge_light_leak_threshold: floatValue('edge-leak-bright-threshold'),
+            cv_edge_light_leak_dark_threshold: floatValue('edge-leak-dark-threshold'),
+            cv_edge_light_leak_min_length: intValue('edge-leak-min-length'),
+            cv_edge_light_leak_boundary_offset: intValue('edge-leak-boundary-offset'),
+            cv_edge_light_leak_band_width: intValue('edge-leak-band-width'),
+            cv_edge_light_leak_reference_gap: intValue('edge-leak-reference-gap'),
+            cv_edge_light_leak_max_dust_overlap: floatValue('edge-leak-max-dust-overlap'),
+        };
+        if (Object.values(overrides).some(value => typeof value === 'number' && !Number.isFinite(value))) {
+            showEdgeLeakError('請完整填寫所有測試參數');
+            return;
+        }
+
+        const button = document.getElementById('btn-edge-leak-run');
+        const buttonText = document.getElementById('edge-leak-btn-text');
+        const spinner = document.getElementById('edge-leak-spinner');
+        button.disabled = true;
+        buttonText.textContent = '檢測中...';
+        spinner.classList.add('active');
+        hideEdgeLeakError();
+        document.getElementById('edge-leak-result-section').classList.add('hidden');
+
+        try {
+            const response = await fetch('/api/debug/coord-inference', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    image_path: imgPath,
+                    product_x: intValue('edge-leak-x'),
+                    product_y: intValue('edge-leak-y'),
+                    product_w: productW,
+                    product_h: productH,
+                    threshold: floatValue('edge-leak-score-threshold'),
+                    peak_window_px: overrides.cv_edge_light_leak_aoi_radius,
+                    edge_light_leak_overrides: overrides,
+                }),
+            });
+            const data = await response.json();
+            if (data.error) {
+                showEdgeLeakError(data.error);
+                return;
+            }
+            renderEdgeLightLeakResults(data);
+        } catch (error) {
+            showEdgeLeakError('請求失敗: ' + error.message);
+        } finally {
+            button.disabled = false;
+            buttonText.textContent = '💡 執行檢測';
+            spinner.classList.remove('active');
+        }
+    }
+
+    function renderEdgeLightLeakResults(data) {
+        const section = document.getElementById('edge-leak-result-section');
+        const cards = document.getElementById('edge-leak-info-cards');
+        const diagnostic = document.getElementById('edge-leak-diagnostic');
+        const grid = document.getElementById('edge-leak-result-grid');
+        const edge = data.dust_analysis?.edge_light_leak || {};
+        const detected = Boolean(edge.detected);
+        const applicable = Boolean(edge.applicable);
+        const statusText = !edge.enabled
+            ? '未啟用'
+            : detected
+                ? '🔴 NG'
+                : (applicable ? '🟢 未命中' : '⚪ 不適用');
+        const statusColor = detected ? 'var(--ng)' : (applicable ? 'var(--ok)' : 'var(--text-muted)');
+        const typeText = edge.anomaly_type_zh || edge.anomaly_type || '—';
+        const sideText = edge.side_zh || ({top:'上邊', bottom:'下邊', left:'左邊', right:'右邊'}[edge.side] || '—');
+
+        cards.innerHTML = `
+            <div class="summary-card" style="border-color:${detected ? 'rgba(239,68,68,0.35)' : 'rgba(34,197,94,0.25)'}">
+                <div class="label">規則判定</div>
+                <div class="value" style="color:${statusColor}">${statusText}</div>
+            </div>
+            <div class="summary-card"><div class="label">方向／類型</div><div class="value" style="font-size:0.95rem;">${escapeHtml(sideText)}／${escapeHtml(typeText)}</div></div>
+            <div class="summary-card"><div class="label">最大灰階差</div><div class="value">${coordDiagNumber(edge.max_delta, 2)}</div></div>
+            <div class="summary-card"><div class="label">連續長度</div><div class="value">${coordDiagNumber(edge.continuous_length, 0)} px</div></div>
+            <div class="summary-card"><div class="label">灰塵覆蓋</div><div class="value">${coordDiagPercent(edge.dust_overlap)}</div></div>
+            <div class="summary-card"><div class="label">PatchCore 分數</div><div class="value">${coordDiagNumber(data.score, 4)}</div></div>
+            <div class="summary-card"><div class="label">正式鏈最終判定</div><div class="value" style="color:${data.final_judgment === 'NG' ? 'var(--ng)' : 'var(--ok)'}">${escapeHtml(data.final_judgment || '—')}</div></div>
+            <div class="summary-card"><div class="label">OMIT</div><div class="value" style="font-size:0.8rem;">${escapeHtml(data.dust_analysis?.omit_name || '未找到')}</div></div>
+        `;
+
+        const reasonLabels = {
+            disabled: '功能未啟用',
+            aoi_not_near_edge: 'AOI 不在距邊上限內',
+            below_threshold: '灰階差未達門檻',
+            short_run: '連續長度不足',
+            dust_overlap: '灰塵覆蓋過高',
+            detected: '命中',
+            bands_outside_product: '檢查帶超出產品範圍',
+        };
+        const candidates = Array.isArray(edge.candidates) ? edge.candidates : [];
+        const rows = candidates.map(candidate => {
+            const candidateSide = ({top:'上邊', bottom:'下邊', left:'左邊', right:'右邊'}[candidate.side] || candidate.side || '—');
+            return `
+                <tr>
+                    <td>${escapeHtml(candidateSide)}</td>
+                    <td>${escapeHtml(candidate.anomaly_type_zh || candidate.anomaly_type || '—')}</td>
+                    <td>${coordDiagNumber(candidate.edge_distance, 0)} px</td>
+                    <td>${coordDiagNumber(candidate.threshold, 2)}</td>
+                    <td>${coordDiagNumber(candidate.max_delta, 2)}</td>
+                    <td>${coordDiagNumber(candidate.mean_delta, 2)}</td>
+                    <td>${coordDiagNumber(candidate.continuous_length, 0)} px</td>
+                    <td>${coordDiagPercent(candidate.dust_overlap)}</td>
+                    <td><span class="coord-status-pill ${candidate.detected ? 'real' : 'dropped'}">${candidate.detected ? 'NG' : escapeHtml(reasonLabels[candidate.reason] || candidate.reason || '未命中')}</span></td>
+                </tr>
+            `;
+        }).join('');
+        diagnostic.innerHTML = `
+            <div class="coord-diagnostic-head">
+                <div>
+                    <h3 class="coord-diagnostic-title">💡 邊緣亮度異常診斷</h3>
+                    <div class="coord-diagnostic-note">本頁永遠執行規則診斷；只有正式條件為 PatchCore NG 且灰塵流程準備放行時，命中結果才會執行救援。</div>
+                </div>
+                <span class="coord-diagnostic-badge">本次參數，不寫入正式設定</span>
+            </div>
+            <div class="coord-diagnostic-alert ${detected ? 'warning' : ''}">
+                <strong>${detected ? '規則命中：' : '規則結果：'}</strong>${escapeHtml(edge.reason_zh || reasonLabels[edge.reason] || edge.reason || '—')}
+                <div class="coord-diagnostic-note" style="margin-top:4px;">
+                    亮帶門檻 ${coordDiagNumber(edge.threshold, 2)} ｜ 暗段門檻 ${coordDiagNumber(edge.dark_threshold, 2)} ｜ 最小長度 ${coordDiagNumber(edge.min_length, 0)} px ｜ 最大灰塵覆蓋 ${coordDiagPercent(edge.max_dust_overlap)}
+                </div>
+            </div>
+            ${rows ? `
+                <div class="coord-table-wrap" style="margin-top:10px;">
+                    <table class="coord-diagnostic-table">
+                        <thead><tr><th>方向</th><th>類型</th><th>AOI 距邊</th><th>門檻</th><th>最大差</th><th>平均差</th><th>連續長度</th><th>灰塵覆蓋</th><th>判定</th></tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+            ` : ''}
+        `;
+
+        const timestamp = Date.now();
+        const images = [
+            [data.overview_url, '🗺️ 全圖與 AOI 定位'],
+            [data.crop_url, '🖼️ 原圖 Tile'],
+            [data.edge_light_leak_url, '💡 黃=邊緣帶／藍=參考帶／綠=亮帶／紫=暗段'],
+            [data.omit_url, '🫧 OMIT Crop'],
+        ];
+        grid.innerHTML = images.filter(([url]) => url).map(([url, title]) => `
+            <div class="img-card">
+                <h4>${title}</h4>
+                <img src="${url}?t=${timestamp}" alt="${title}" onclick="openLightbox(this.src)">
+            </div>
+        `).join('');
+        section.classList.remove('hidden');
+    }
+
+    function showEdgeLeakError(message) {
+        const box = document.getElementById('edge-leak-error-box');
+        box.textContent = '❌ ' + message;
+        box.classList.remove('hidden');
+    }
+
+    function hideEdgeLeakError() {
+        document.getElementById('edge-leak-error-box').classList.add('hidden');
     }
 
     function showCoordError(msg) {
