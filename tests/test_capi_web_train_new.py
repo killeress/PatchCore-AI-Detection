@@ -1077,6 +1077,87 @@ def test_handle_train_new_start_training_409_wrong_state():
     assert h._sent_response[0]["status"] == 409
 
 
+def test_handle_train_new_review_page_migrates_legacy_aapi_lighting_scope():
+    from capi_station_adapter import AAPIStationAdapter
+
+    old_job = {
+        "job_id": "j1", "machine_id": "AAPI-MOD1", "state": "review",
+        "panel_paths": ["/panels/P001"], "error_message": None,
+        "training_scope": {
+            "mode": "full",
+            "selected_units": ["WGF50500-inner", "WGF50500-edge"],
+            "target_bundle_id": None,
+        },
+    }
+    migrated_job = {
+        **old_job,
+        "training_scope": {
+            "mode": "full",
+            "selected_units": [
+                "W0F00010-inner", "W0F00010-edge",
+                "WGF50500-inner", "WGF50500-edge",
+            ],
+            "target_bundle_id": None,
+        },
+    }
+    server = MagicMock()
+    server.station_adapter = AAPIStationAdapter()
+    server.database.get_training_job.side_effect = [old_job, migrated_job]
+    server.database.migrate_legacy_aapi_w0f00010_training_job.return_value = {
+        "changed": True,
+        "migrated_tiles": 100,
+        "scope_updated": True,
+    }
+    h = _make_handler_with_server(server, "/train/new/review/j1")
+    template = MagicMock()
+    template.render.return_value = "review"
+    h.jinja_env = MagicMock()
+    h.jinja_env.get_template.return_value = template
+
+    h._handle_train_new_review_page()
+
+    context = template.render.call_args.kwargs
+    assert context["selected_lightings"] == ["W0F00010", "WGF50500"]
+    assert h._sent_response[0]["status"] == 200
+
+
+def test_handle_train_new_start_training_requires_reload_after_legacy_aapi_migration(monkeypatch):
+    from capi_station_adapter import AAPIStationAdapter
+    from capi_web import CAPIWebHandler
+
+    job = {
+        "job_id": "j1", "machine_id": "AAPI-MOD1", "state": "review",
+        "panel_paths": ["/panels/P001"],
+        "training_scope": {
+            "mode": "full",
+            "selected_units": ["WGF50500-inner", "WGF50500-edge"],
+            "target_bundle_id": None,
+        },
+    }
+    server = MagicMock()
+    server.station_adapter = AAPIStationAdapter()
+    server.database.get_training_job.side_effect = [job, job]
+    server.database.migrate_legacy_aapi_w0f00010_training_job.return_value = {
+        "changed": True,
+        "migrated_tiles": 100,
+        "scope_updated": True,
+    }
+    monkeypatch.setattr(
+        CAPIWebHandler,
+        "_mark_train_new_stale_if_needed",
+        classmethod(lambda cls, db, current_job: current_job),
+    )
+    h = _make_handler_with_server(server, "/api/train/new/start_training/j1")
+
+    h._handle_train_new_start_training()
+
+    assert h._sent_response[0]["status"] == 409
+    body = json.loads(h._sent_response[0]["body"])
+    assert body["reload_required"] is True
+    assert "重新整理" in body["error"]
+    server.database.update_training_job_state.assert_not_called()
+
+
 @pytest.mark.parametrize("state", ["train", "completed"])
 def test_handle_train_new_start_training_is_idempotent(monkeypatch, state):
     """同一 job 重複送出開始請求時，已啟動或完成都應回成功。"""
