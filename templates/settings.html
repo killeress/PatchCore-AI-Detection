@@ -2001,6 +2001,12 @@
         'dust_two_stage_diff_percentile', 'dust_two_stage_min_area', 'dust_two_stage_fallback_score'
     ];
     const CV_EDGE_PARAMS = [
+        'cv_edge_light_leak_enabled', 'cv_edge_light_leak_edge_distance',
+        'cv_edge_light_leak_aoi_radius', 'cv_edge_light_leak_threshold',
+        'cv_edge_light_leak_dark_threshold',
+        'cv_edge_light_leak_min_length', 'cv_edge_light_leak_boundary_offset',
+        'cv_edge_light_leak_band_width', 'cv_edge_light_leak_reference_gap',
+        'cv_edge_light_leak_max_dust_overlap',
         'cv_edge_enabled', 'cv_edge_dust_filter_enabled', 'otsu_offset',
         'cv_edge_left_width', 'cv_edge_left_threshold', 'cv_edge_left_min_area',
         'cv_edge_left_exclude_top', 'cv_edge_left_exclude_bottom', 'cv_edge_left_exclude_left', 'cv_edge_left_exclude_right',
@@ -3262,6 +3268,8 @@
         );
 
         // Group CV Edge Parameters
+        const lightLeakParams = cvEdgeParams.filter(p => p.param_name.startsWith('cv_edge_light_leak_'));
+        const lightLeakEnabled = lightLeakParams.find(p => p.param_name === 'cv_edge_light_leak_enabled');
         const edgeEnabled = cvEdgeParams.find(p => p.param_name === 'cv_edge_enabled');
         const dustFilterEnabled = cvEdgeParams.find(p => p.param_name === 'cv_edge_dust_filter_enabled');
         const otsuOffsetParam = cvEdgeParams.find(p => p.param_name === 'otsu_offset');
@@ -3273,7 +3281,7 @@
         };
 
         cvEdgeParams.forEach(p => {
-            if (p.param_name === 'cv_edge_enabled' || p.param_name === 'cv_edge_dust_filter_enabled' || p.param_name === 'otsu_offset' || p.param_name.startsWith('cv_edge_exclude_')) return;
+            if (p.param_name.startsWith('cv_edge_light_leak_') || p.param_name === 'cv_edge_enabled' || p.param_name === 'cv_edge_dust_filter_enabled' || p.param_name === 'otsu_offset' || p.param_name.startsWith('cv_edge_exclude_')) return;
             const sideKey = ['left', 'right', 'top', 'bottom'].find(s => p.param_name.startsWith(`cv_edge_${s}_`));
             if (sideKey) sides[sideKey].params.push(p);
         });
@@ -3308,6 +3316,14 @@
 
         const aoiCoordEnabledParam = aoiCoordParams.find(p => p.param_name === 'aoi_coord_inspection_enabled');
         const aoiCoordEnabled = readBool(aoiCoordEnabledParam);
+        if (!readBool(lightLeakEnabled)) {
+            const reason = 'cv_edge_light_leak_enabled=false 時不執行邊緣漏光救援';
+            lightLeakParams.forEach(p => {
+                if (p.param_name !== 'cv_edge_light_leak_enabled') {
+                    paramLockMap[p.param_name] = reason;
+                }
+            });
+        }
         const inspectorParam = aoiCoordParams.find(p => p.param_name === 'aoi_edge_inspector');
         const inspectorVal = readStr(inspectorParam).toLowerCase() || 'cv';
 
@@ -3518,6 +3534,24 @@
                 })()}
             </div>
             <div id="pane-cv-edge" class="settings-tab-pane-block ${currentTab === 'cv-edge' ? 'active' : ''}">
+                ${lightLeakEnabled ? `
+                <div class="settings-section" style="border-left: 3px solid #facc15; margin-bottom: 16px;">
+                    <div class="settings-section-header" style="background: rgba(250, 204, 21, 0.10); border-bottom: 1px solid rgba(250, 204, 21, 0.22);">
+                        <div class="icon" style="background: rgba(250, 204, 21, 0.16); color: #fde047;">💡</div>
+                        <span style="color:#fde047; font-weight:600;">邊緣漏光檢測</span>
+                        <div style="margin-left:auto; display:flex; align-items:center; gap:10px;">
+                            <span style="font-size:0.75rem; color:var(--text-muted);">獨立開關：</span>
+                            <label class="switch" style="transform:scale(0.85);">
+                                <input type="checkbox" ${readBool(lightLeakEnabled) ? 'checked' : ''} onchange='toggleBoolParam("cv_edge_light_leak_enabled", this.checked)'>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                    <div style="padding:10px 16px; color:#94a3b8; font-size:0.78rem; line-height:1.6; border-bottom:1px solid rgba(250,204,21,0.12);">
+                        AOI Tile 被灰塵流程判為 DUST 時，改以原始 AOI 附近的上／下／左／右連續亮帶做救援；命中後恢復 NG。此功能不降低 PatchCore 門檻，也不受下方傳統 CV 主開關影響。
+                    </div>
+                    ${lightLeakParams.filter(p => p.param_name !== 'cv_edge_light_leak_enabled').map(p => paramRow(p)).join('')}
+                </div>` : ''}
                 <div class="settings-section section-cv-edge" style="border-left: 3px solid #3b82f6;">
                     <div class="settings-section-header">
                         <div class="icon">📐</div>
@@ -5019,6 +5053,7 @@
                 'aoi_coord_inspection_enabled',
                 'dust_pixel_grid_filter_enabled',
                 'tile_corner_exclusion_enabled',
+                'cv_edge_light_leak_enabled',
             ]);
             if (LOCK_AFFECTING_BOOL_PARAMS.has(paramName)) {
                 renderSettings();

@@ -6321,6 +6321,16 @@ class CAPIDatabase:
             # Otsu 邊緣裁切
             ("otsu_offset", config.otsu_offset, "int", "Otsu 產品邊緣裁切內縮 (px)"),
             # CV 邊緣檢測
+            ("cv_edge_light_leak_enabled", False, "bool", "啟用邊緣漏光檢測（AOI 灰塵判定後，以四邊連續亮帶或暗段救回 NG；獨立於 CV 主開關）"),
+            ("cv_edge_light_leak_edge_distance", 80, "int", "邊緣漏光檢測：AOI 距產品邊最大距離（產品座標 px）"),
+            ("cv_edge_light_leak_aoi_radius", 50, "int", "邊緣漏光檢測：沿產品邊以 AOI 為中心的搜尋半徑（產品座標 px）"),
+            ("cv_edge_light_leak_threshold", 4.0, "float", "邊緣漏光檢測：亮帶相對內側參考帶的最小灰階差"),
+            ("cv_edge_light_leak_dark_threshold", 4.0, "float", "邊緣漏光檢測：暗段相對內側參考帶的最小灰階差"),
+            ("cv_edge_light_leak_min_length", 30, "int", "邊緣漏光檢測：亮帶或暗段最小連續長度（產品座標 px）"),
+            ("cv_edge_light_leak_boundary_offset", 10, "int", "邊緣漏光檢測：避開產品最外框的距離（產品座標 px）"),
+            ("cv_edge_light_leak_band_width", 35, "int", "邊緣漏光檢測：邊緣帶與參考帶寬度（產品座標 px）"),
+            ("cv_edge_light_leak_reference_gap", 35, "int", "邊緣漏光檢測：邊緣帶與內側參考帶間距（產品座標 px）"),
+            ("cv_edge_light_leak_max_dust_overlap", 0.2, "float", "邊緣漏光檢測：候選亮帶或暗段允許的最大 OMIT 灰塵覆蓋率（0~1）"),
             ("cv_edge_enabled", False, "bool", "是否啟用傳統 CV 邊緣檢測"),
             ("cv_edge_dust_filter_enabled", False, "bool", "是否啟用 CV 邊緣檢測的灰塵過濾"),
             ("cv_edge_left_width", 450, "int", "左邊界檢測寬度 (px)"),
