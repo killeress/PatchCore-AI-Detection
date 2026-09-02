@@ -99,6 +99,7 @@ from capi_edge_cv import (
     CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel,
     compute_fg_aware_diff, compute_boundary_band_mask, compute_pc_roi_offset,
     verify_polygon_clear_of_pc_roi, classify_pc_roi_verify_failure,
+    inspect_aoi_edge_light_leak,
 )
 from capi_preprocess import (
     PreprocessConfig,
@@ -283,6 +284,8 @@ class TileInfo:
     scratch_score: float = 0.0              # 0 = 未跑 classifier
     scratch_filtered: bool = False          # True = 被翻回 OK
     anomaly_peak_source: str = ""           # heatmap_argmax | aoi_real_region | aoi_report_fallback
+    edge_light_leak_result: Optional[dict] = field(default=None, repr=False)
+    edge_light_leak_debug_image: Optional[np.ndarray] = field(default=None, repr=False)
 
     @property
     def center(self) -> Tuple[int, int]:
@@ -8314,6 +8317,162 @@ class CAPIInferencer:
         except Exception as e:
             logger.error(f"CV 邊緣檢查失敗 {result.image_path.name}: {e}", exc_info=True)
 
+    def _inspect_aoi_edge_light_leak_tile(
+        self,
+        tile: TileInfo,
+        *,
+        panel_polygon: Optional[np.ndarray],
+        raw_bounds: Optional[Tuple[int, int, int, int]],
+        product_resolution: Optional[Tuple[int, int]],
+        dust_mask: Optional[np.ndarray],
+        generate_debug: bool = False,
+    ) -> Dict[str, Any]:
+        """Run the shared AOI edge brightness-anomaly rule for production or Debug."""
+        edge_config = getattr(
+            getattr(self, "edge_inspector", None), "config", None
+        )
+        if edge_config is None or not getattr(
+            edge_config, "light_leak_enabled", False
+        ):
+            outcome = {
+                "enabled": bool(getattr(edge_config, "light_leak_enabled", False)),
+                "applicable": False,
+                "detected": False,
+                "side": "",
+                "anomaly_type": "",
+                "reason": "disabled",
+                "candidates": [],
+            }
+            tile.edge_light_leak_result = outcome
+            return outcome
+        if not getattr(tile, "is_aoi_coord_tile", False):
+            outcome = {
+                "enabled": True,
+                "applicable": False,
+                "detected": False,
+                "side": "",
+                "anomaly_type": "",
+                "reason": "not_aoi_tile",
+                "candidates": [],
+            }
+            tile.edge_light_leak_result = outcome
+            return outcome
+
+        product_x = int(getattr(tile, "aoi_product_x", -1))
+        product_y = int(getattr(tile, "aoi_product_y", -1))
+        if product_x < 0 or product_y < 0:
+            outcome = {
+                "enabled": True,
+                "applicable": False,
+                "detected": False,
+                "side": "",
+                "anomaly_type": "",
+                "reason": "missing_aoi_product_coord",
+                "candidates": [],
+            }
+            tile.edge_light_leak_result = outcome
+            return outcome
+
+        resolution = product_resolution or self._product_resolution()
+        raw_tile = (
+            tile.original_image
+            if tile.original_image is not None
+            else tile.image
+        )
+        try:
+            outcome = inspect_aoi_edge_light_leak(
+                tile_image=raw_tile,
+                tile_origin=(int(tile.x), int(tile.y)),
+                panel_polygon=panel_polygon,
+                raw_bounds=raw_bounds,
+                aoi_product_xy=(product_x, product_y),
+                product_resolution=(int(resolution[0]), int(resolution[1])),
+                dust_mask=dust_mask,
+                config=edge_config,
+                generate_debug=generate_debug,
+            )
+        except Exception as exc:
+            logger.warning("AOI 邊緣漏光檢查失敗: %s", exc, exc_info=True)
+            outcome = {
+                "enabled": True,
+                "applicable": False,
+                "detected": False,
+                "side": "",
+                "anomaly_type": "",
+                "reason": "inspection_error",
+                "error": str(exc),
+                "candidates": [],
+            }
+
+        tile.edge_light_leak_debug_image = outcome.pop("debug_image", None)
+        side_zh = {
+            "top": "上邊",
+            "bottom": "下邊",
+            "left": "左邊",
+            "right": "右邊",
+        }
+        anomaly_type_zh = {
+            "BRIGHT_LEAK": "邊緣亮帶",
+            "DARK_DROP": "邊緣暗段",
+        }
+        reason_zh = {
+            "disabled": "功能未啟用",
+            "not_aoi_tile": "非 AOI 座標 Tile",
+            "missing_aoi_product_coord": "缺少 AOI 產品座標",
+            "aoi_not_near_edge": "AOI 不在設定的邊緣距離內",
+            "below_threshold": "邊緣與內側亮度差未達門檻",
+            "short_run": "亮度異常連續長度不足",
+            "dust_overlap": "候選亮帶或暗段與 OMIT 灰塵重疊過高",
+            "detected": "找到低灰塵重疊的連續邊緣亮度異常",
+            "bands_outside_product": "檢查帶超出產品範圍",
+            "inspection_error": "檢查發生錯誤",
+        }
+        outcome["side_zh"] = side_zh.get(str(outcome.get("side") or ""), "—")
+        outcome["anomaly_type_zh"] = anomaly_type_zh.get(
+            str(outcome.get("anomaly_type") or ""), "—"
+        )
+        outcome["reason_zh"] = reason_zh.get(
+            str(outcome.get("reason") or ""), str(outcome.get("reason") or "")
+        )
+        tile.edge_light_leak_result = outcome
+        return outcome
+
+    def _apply_aoi_edge_light_leak_rescue(
+        self,
+        result: ImageResult,
+        tile: TileInfo,
+        dust_mask: Optional[np.ndarray],
+        product_resolution: Optional[Tuple[int, int]],
+    ) -> str:
+        """Turn a dust-suppressed AOI tile back to NG for an edge brightness anomaly."""
+        if not tile.is_suspected_dust_or_scratch:
+            return ""
+        outcome = self._inspect_aoi_edge_light_leak_tile(
+            tile,
+            panel_polygon=result.panel_polygon,
+            raw_bounds=result.raw_bounds,
+            product_resolution=product_resolution,
+            dust_mask=dust_mask,
+        )
+        if not outcome.get("detected"):
+            return ""
+
+        tile.is_suspected_dust_or_scratch = False
+        image_center = outcome.get("candidate_image_center")
+        if isinstance(image_center, (list, tuple)) and len(image_center) >= 2:
+            tile.anomaly_peak_x = int(image_center[0])
+            tile.anomaly_peak_y = int(image_center[1])
+            tile.anomaly_peak_source = "aoi_edge_light_leak"
+        side = str(outcome.get("side") or "unknown").upper()
+        anomaly_type = str(outcome.get("anomaly_type") or "UNKNOWN").upper()
+        return (
+            f" EDGE_LIGHT_LEAK_RESCUE: {anomaly_type} {side}"
+            f" delta={float(outcome.get('max_delta') or 0.0):.2f}"
+            f" length={int(outcome.get('continuous_length') or 0)}"
+            f" dust={float(outcome.get('dust_overlap') or 0.0):.3f}"
+            " -> REAL_NG"
+        )
+
     def _apply_omit_dust_postprocess(
         self,
         results: List[ImageResult],
@@ -8497,6 +8656,18 @@ class CAPIInferencer:
                                 f" PER_REGION: 0real+{len(dust_regions)}dust -> DUST"
                             )
 
+                    rescue_dust_mask = (
+                        _ts_dust_mask_no_ext
+                        if _ts_dust_mask_no_ext is not None
+                        else dust_mask
+                    )
+                    detail_text += self._apply_aoi_edge_light_leak_rescue(
+                        result,
+                        tile,
+                        rescue_dust_mask,
+                        product_resolution,
+                    )
+
                     try:
                         if _two_stage_ran:
                             dm_for_debug = _ts_dust_mask_no_ext if _ts_dust_mask_no_ext is not None else dust_mask
@@ -8521,6 +8692,12 @@ class CAPIInferencer:
                 elif is_dust:
                     tile.is_suspected_dust_or_scratch = True
                     detail_text += " (no heatmap, marked as dust)"
+                    detail_text += self._apply_aoi_edge_light_leak_rescue(
+                        result,
+                        tile,
+                        dust_mask,
+                        product_resolution,
+                    )
                 else:
                     detail_text += " NO_DUST -> REAL_NG"
                 tile.dust_detail_text = detail_text

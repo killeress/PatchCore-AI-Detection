@@ -3650,6 +3650,8 @@
         const root = document.getElementById('coord-diagnostic-section');
         const heat = data.heatmap_analysis || {};
         const dust = data.dust_analysis || {};
+        const edgeLeak = dust.edge_light_leak || {};
+        const edgeLeakCandidates = Array.isArray(edgeLeak.candidates) ? edgeLeak.candidates : [];
         const score = data.score_breakdown || {};
         const stats = heat.statistics || heat.stats || {};
         const regions = Array.isArray(dust.regions) ? dust.regions : [];
@@ -3840,6 +3842,22 @@
         const aoiSummary = aoiBest
             ? `座標附近最強候選：熱力 ${coordDiagNumber(aoiBest.peak_value ?? aoiBest.score, 4)}，推估分數 ${coordDiagNumber(aoiBest.estimated_score, 4)}`
             : '指定座標範圍內沒有找到局部峰值';
+        const edgeLeakRows = edgeLeakCandidates.map(candidate => `
+            <tr>
+                <td>${escapeHtml(candidate.side_zh || ({top:'上邊', bottom:'下邊', left:'左邊', right:'右邊'}[candidate.side] || candidate.side || '—'))}</td>
+                <td>${escapeHtml(candidate.anomaly_type_zh || candidate.anomaly_type || '—')}</td>
+                <td>${coordDiagNumber(candidate.edge_distance, 0)} px</td>
+                <td>${coordDiagNumber(candidate.max_delta, 2)}</td>
+                <td>${coordDiagNumber(candidate.continuous_length, 0)} px</td>
+                <td>${coordDiagPercent(candidate.dust_overlap)}</td>
+                <td><span class="coord-status-pill ${candidate.detected ? 'real' : 'dropped'}">${candidate.detected ? '亮度異常 NG' : escapeHtml(candidate.reason || '未命中')}</span></td>
+            </tr>
+        `).join('');
+        const edgeLeakStatus = !edgeLeak.enabled
+            ? '功能未啟用'
+            : edgeLeak.detected
+                ? `${edgeLeak.side_zh || edgeLeak.side || '邊緣'}找到${edgeLeak.anomaly_type_zh || edgeLeak.anomaly_type || '連續亮度異常'}，灰塵後救回 NG`
+                : (edgeLeak.reason_zh || '本次未找到符合條件的邊緣亮度異常');
 
         root.innerHTML = `
             <div class="coord-diagnostic-head">
@@ -3947,6 +3965,24 @@
                     ` : `<div class="coord-empty-state">二階段有執行，但沒有特徵通過採用條件；請查看上方被忽略原因。</div>`}
                 </div>
             ` : ''}
+
+            <div class="coord-diagnostic-block" style="margin-top:10px;">
+                <h4>④ 邊緣漏光救援判定</h4>
+                <div class="coord-diagnostic-alert ${edgeLeak.detected ? 'warning' : ''}">
+                    <strong>${edgeLeak.detected ? '已救回 NG：' : '檢查結果：'}</strong>${escapeHtml(edgeLeakStatus)}
+                    <div class="coord-diagnostic-note" style="margin-top:4px;">
+                        亮帶門檻 ${coordDiagNumber(edgeLeak.threshold, 2)} ｜ 暗段門檻 ${coordDiagNumber(edgeLeak.dark_threshold, 2)} ｜ 最小連續長度 ${coordDiagNumber(edgeLeak.min_length, 0)} px ｜ 最大灰塵覆蓋 ${coordDiagPercent(edgeLeak.max_dust_overlap)}
+                    </div>
+                </div>
+                ${edgeLeakRows ? `
+                    <div class="coord-table-wrap">
+                        <table class="coord-diagnostic-table">
+                            <thead><tr><th>方向</th><th>類型</th><th>AOI 距邊</th><th>最大灰階差</th><th>連續長度</th><th>灰塵覆蓋</th><th>判定</th></tr></thead>
+                            <tbody>${edgeLeakRows}</tbody>
+                        </table>
+                    </div>
+                ` : ''}
+            </div>
         `;
         root.classList.remove('hidden');
     }
@@ -4013,6 +4049,13 @@
         const markLocated = Number(markExclusion.region_count || 0) > 0;
         const markStatus = markApplied ? '✅ 已套用' : (markLocated ? '⚪ 未影響' : '— 未套用');
         const markColor = markApplied ? 'var(--ok)' : 'var(--text-muted)';
+        const edgeLeak = data.dust_analysis?.edge_light_leak || {};
+        const edgeLeakStatus = !edgeLeak.enabled
+            ? '未啟用'
+            : edgeLeak.detected
+                ? `${edgeLeak.side_zh || edgeLeak.side || ''} ${edgeLeak.anomaly_type_zh || edgeLeak.anomaly_type || ''} NG`
+                : (edgeLeak.applicable ? '未命中' : '未執行');
+        const edgeLeakColor = edgeLeak.detected ? 'var(--ng)' : 'var(--text-muted)';
 
         // Info cards
         const cards = document.getElementById('coord-info-cards');
@@ -4058,6 +4101,10 @@
                 <div class="value" style="color:${markColor};font-size:0.9rem;">${markStatus}</div>
                 <div style="color:var(--text-muted);font-size:0.72rem;margin-top:4px;word-break:break-all;">${escapeHtml(markExclusion.source_image || '')}</div>
             </div>
+            <div class="summary-card" title="${escapeHtml(edgeLeak.reason_zh || '')}">
+                <div class="label">邊緣漏光檢測</div>
+                <div class="value" style="color:${edgeLeakColor};font-size:0.9rem;">${escapeHtml(edgeLeakStatus)}</div>
+            </div>
             <div class="summary-card">
                 <div class="label">使用模型</div>
                 <div class="value" style="color:var(--text);font-size:0.85rem;" title="${escapeHtml(data.model_name || '')}">${escapeHtml(data.image_prefix_label || data.image_prefix || '?')}</div>
@@ -4098,6 +4145,16 @@
         `;
 
         // 4. Local peak diagnostic
+        if (data.edge_light_leak_url) {
+            imagesHtml += `
+                <div class="img-card">
+                    <h4>💡 邊緣漏光檢查（黃=邊緣帶／藍=參考帶／綠=亮帶命中／紫=暗段命中）</h4>
+                    <img src="${data.edge_light_leak_url}?t=${t}" alt="Edge light leak diagnostic" onclick="openLightbox(this.src)">
+                </div>
+            `;
+        }
+
+        // 5. Local peak diagnostic
         if (data.peak_diagnostic_url) {
             imagesHtml += `
                 <div class="img-card">
@@ -4107,7 +4164,7 @@
             `;
         }
 
-        // 5. OMIT Image (if available)
+        // 6. OMIT Image (if available)
         if (data.omit_url) {
             imagesHtml += `
                 <div class="img-card">

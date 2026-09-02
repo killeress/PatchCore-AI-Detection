@@ -8931,6 +8931,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         omit_crop,
         product_resolution,
         model_id,
+        panel_polygon,
+        raw_bounds,
     ):
         """
         Reproduce the production OMIT/per-region/two-stage path for coordinate debug.
@@ -8956,6 +8958,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         seed_yx = None
         seed_radius = 0
         seed_min_score = None
+        edge_light_leak_rescued = False
+
+        edge_config = getattr(
+            getattr(inferencer, "edge_inspector", None), "config", None
+        )
+        edge_light_leak_enabled = bool(
+            getattr(edge_config, "light_leak_enabled", False)
+        )
 
         metric_mode = str(
             getattr(config, "dust_heatmap_metric", "coverage") or "coverage"
@@ -9003,6 +9013,22 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             "two_stage": _coord_debug_two_stage_payload(
                 [], "", tile_info=tile_info
             ),
+            "edge_light_leak": {
+                "enabled": edge_light_leak_enabled,
+                "applicable": False,
+                "detected": False,
+                "side": "",
+                "side_zh": "—",
+                "anomaly_type": "",
+                "anomaly_type_zh": "—",
+                "reason": "not_run",
+                "reason_zh": (
+                    "等待灰塵流程判定"
+                    if edge_light_leak_enabled
+                    else "功能未啟用"
+                ),
+                "candidates": [],
+            },
             "detail_raw": "",
         }
 
@@ -9010,6 +9036,33 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         payload["raw_patchcore_judgment"] = raw_judgment
 
         def _finish(final_reason_zh):
+            nonlocal final_is_dust, detail_text, edge_light_leak_rescued
+            if final_is_dust and raw_judgment == "NG":
+                inspect_light_leak = getattr(
+                    inferencer, "_inspect_aoi_edge_light_leak_tile", None
+                )
+                if callable(inspect_light_leak):
+                    edge_outcome = inspect_light_leak(
+                        tile_info,
+                        panel_polygon=panel_polygon,
+                        raw_bounds=raw_bounds,
+                        product_resolution=product_resolution,
+                        dust_mask=dust_mask,
+                        generate_debug=True,
+                    )
+                    payload["edge_light_leak"] = edge_outcome
+                    if edge_outcome.get("detected"):
+                        final_is_dust = False
+                        edge_light_leak_rescued = True
+                        detail_text += (
+                            " EDGE_LIGHT_LEAK_RESCUE:"
+                            f" {str(edge_outcome.get('anomaly_type') or 'unknown').upper()}"
+                            f" {str(edge_outcome.get('side') or 'unknown').upper()}"
+                            f" delta={float(edge_outcome.get('max_delta') or 0.0):.2f}"
+                            f" length={int(edge_outcome.get('continuous_length') or 0)}"
+                            f" dust={float(edge_outcome.get('dust_overlap') or 0.0):.3f}"
+                            " -> REAL_NG"
+                        )
             tile_info.dust_detail_text = detail_text
             # Below-threshold tiles remain AI OK.  Dust evidence is still exposed
             # in the diagnostic payload but must not be presented as a live filter.
@@ -9019,6 +9072,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if raw_judgment == "OK":
                 final_judgment = "OK"
                 final_reason = "PatchCore 分數低於門檻；灰塵分析僅供排查。"
+            elif edge_light_leak_rescued:
+                final_judgment = "NG"
+                final_reason = (
+                    "最高分雖可由灰塵解釋，但 AOI 附近找到連續邊緣亮度異常，"
+                    "正式流程會救回 NG。"
+                )
+                payload["dust_filter_result"] = "EDGE_LIGHT_LEAK_RESCUE"
+                payload["dust_filter_result_zh"] = "灰塵後找到邊緣亮度異常，救回 NG"
             elif final_is_dust:
                 final_judgment = "OK"
                 final_reason = "PatchCore 初判 NG，但正式灰塵流程會過濾為 OK。"
@@ -9543,6 +9604,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             # 多模型路由：v1 走 prefix lookup；v2 依 polygon 分類 zone 後走 (lighting, zone) 取模型
             img_prefix = self.inferencer._get_image_prefix(image_path.name)
             is_v2 = getattr(self.inferencer.config, "is_new_architecture", False)
+            panel_polygon = None
 
             if is_v2:
                 lighting_map = self.inferencer.config.model_mapping.get(img_prefix, {})
@@ -9577,6 +9639,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     _, polygon = detect_panel_polygon(processed_panel_image, pre_cfg)
                 if polygon is None and hasattr(self.inferencer, "_rect_polygon_from_bounds"):
                     polygon = self.inferencer._rect_polygon_from_bounds(raw_bounds)
+                panel_polygon = polygon
                 if polygon is not None:
                     # Use the same polygon-aware product-coordinate mapping as
                     # formal v2 AOI inference before resolving the ROI.  The
@@ -9847,8 +9910,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     omit_crop=omit_crop,
                     product_resolution=(product_w, product_h),
                     model_id=debug_model_id,
+                    panel_polygon=panel_polygon,
+                    raw_bounds=raw_bounds,
                 )
             dust_analysis["omit_name"] = omit_name
+
+            edge_light_leak_url = ""
+            edge_light_leak_debug = getattr(
+                tile_info, "edge_light_leak_debug_image", None
+            )
+            if edge_light_leak_debug is not None:
+                leak_filename = f"debug_coord_edge_light_leak_{image_name}_{ts}.png"
+                if cv2.imwrite(str(debug_dir / leak_filename), edge_light_leak_debug):
+                    edge_light_leak_url = f"/debug/heatmaps/{leak_filename}"
 
             # 9.6 Local-maxima 診斷：不受 Top % 配額限制，專門排查強氣泡搶分
             peak_diagnostic_url = ""
@@ -10233,6 +10307,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "omit_url": omit_url,
                 "composite_url": composite_url,
                 "peak_diagnostic_url": peak_diagnostic_url,
+                "edge_light_leak_url": edge_light_leak_url,
                 "image_prefix": img_prefix,
                 "image_prefix_label": source_image_prefix(image_path.name),
                 "model_name": model_name,

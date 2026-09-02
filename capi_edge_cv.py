@@ -489,6 +489,17 @@ class EdgeInspectionConfig:
     exclude_zones: List[EdgeExclusionZoneConfig] = field(default_factory=list)
     # 儲存完整的按產品分組排除區域 (key=resolution_code, value=list of zones)
     all_exclude_zones_by_product: Dict[str, List[dict]] = field(default_factory=dict)
+    # AOI 灰塵判定後的四邊漏光救援；獨立於舊 CV 四邊主開關。
+    light_leak_enabled: bool = False
+    light_leak_edge_distance: int = 80
+    light_leak_aoi_radius: int = 50
+    light_leak_threshold: float = 4.0
+    light_leak_dark_threshold: float = 4.0
+    light_leak_min_length: int = 30
+    light_leak_boundary_offset: int = 10
+    light_leak_band_width: int = 35
+    light_leak_reference_gap: int = 35
+    light_leak_max_dust_overlap: float = 0.2
 
     def get_threshold_for_side(self, side: str) -> int:
         """取得指定邊的閾值，aoi_edge 使用獨立閾值"""
@@ -539,6 +550,16 @@ class EdgeInspectionConfig:
         cfg = cls(
             enabled=bool(get("cv_edge_enabled", True)),
             dust_filter_enabled=bool(get("cv_edge_dust_filter_enabled", False)),
+            light_leak_enabled=bool(get("cv_edge_light_leak_enabled", False)),
+            light_leak_edge_distance=int(get("cv_edge_light_leak_edge_distance", 80)),
+            light_leak_aoi_radius=int(get("cv_edge_light_leak_aoi_radius", 50)),
+            light_leak_threshold=float(get("cv_edge_light_leak_threshold", 4.0)),
+            light_leak_dark_threshold=float(get("cv_edge_light_leak_dark_threshold", 4.0)),
+            light_leak_min_length=int(get("cv_edge_light_leak_min_length", 30)),
+            light_leak_boundary_offset=int(get("cv_edge_light_leak_boundary_offset", 10)),
+            light_leak_band_width=int(get("cv_edge_light_leak_band_width", 35)),
+            light_leak_reference_gap=int(get("cv_edge_light_leak_reference_gap", 35)),
+            light_leak_max_dust_overlap=float(get("cv_edge_light_leak_max_dust_overlap", 0.2)),
         )
         # 左
         cfg.left.width = int(get("cv_edge_left_width", 450))
@@ -649,6 +670,403 @@ class EdgeInspectionConfig:
                 ]
         
         return cfg
+
+
+def _longest_true_run(values: np.ndarray) -> Tuple[int, int]:
+    """Return the longest true run as ``(start, end_exclusive)``."""
+    best_start = best_end = 0
+    run_start: Optional[int] = None
+    for index, active in enumerate(np.asarray(values, dtype=bool)):
+        if active and run_start is None:
+            run_start = index
+        if not active and run_start is not None:
+            if index - run_start > best_end - best_start:
+                best_start, best_end = run_start, index
+            run_start = None
+    if run_start is not None and len(values) - run_start > best_end - best_start:
+        best_start, best_end = run_start, len(values)
+    return best_start, best_end
+
+
+def inspect_aoi_edge_light_leak(
+    *,
+    tile_image: np.ndarray,
+    tile_origin: Tuple[int, int],
+    panel_polygon: Optional[np.ndarray],
+    raw_bounds: Optional[Tuple[int, int, int, int]],
+    aoi_product_xy: Tuple[int, int],
+    product_resolution: Tuple[int, int],
+    dust_mask: Optional[np.ndarray],
+    config: EdgeInspectionConfig,
+    generate_debug: bool = False,
+) -> Dict[str, Any]:
+    """檢查 AOI 附近是否有連續的四邊亮帶或暗段。
+
+    Tile 先依 panel polygon 轉回產品座標，讓上／下／左／右共用同一組
+    band 參數。此檢查只提供灰塵流程後的救援證據，不改 PatchCore 分數。
+    """
+    result: Dict[str, Any] = {
+        "enabled": bool(config.light_leak_enabled),
+        "applicable": False,
+        "detected": False,
+        "side": "",
+        "anomaly_type": "",
+        "anomaly_type_zh": "",
+        "reason": "disabled",
+        "continuous_length": 0,
+        "max_delta": 0.0,
+        "mean_delta": 0.0,
+        "dust_overlap": 0.0,
+        "candidate_product_bbox": None,
+        "candidate_image_center": None,
+        "candidates": [],
+        "debug_image": None,
+        "threshold": float(config.light_leak_threshold),
+        "dark_threshold": float(config.light_leak_dark_threshold),
+        "min_length": int(config.light_leak_min_length),
+        "max_dust_overlap": float(config.light_leak_max_dust_overlap),
+        "aoi_radius": int(config.light_leak_aoi_radius),
+        "edge_distance_limit": int(config.light_leak_edge_distance),
+    }
+    if not config.light_leak_enabled:
+        return result
+    if tile_image is None or np.asarray(tile_image).size == 0:
+        result["reason"] = "missing_tile"
+        return result
+
+    product_width = int(product_resolution[0])
+    product_height = int(product_resolution[1])
+    if product_width <= 1 or product_height <= 1:
+        result["reason"] = "invalid_product_resolution"
+        return result
+
+    polygon = None
+    if panel_polygon is not None:
+        candidate_polygon = np.asarray(panel_polygon, dtype=np.float32).reshape(-1, 2)
+        if len(candidate_polygon) == 4:
+            polygon = candidate_polygon
+    if polygon is None and raw_bounds is not None:
+        x1, y1, x2, y2 = (float(value) for value in raw_bounds)
+        polygon = np.array(
+            [[x1, y1], [x2 - 1, y1], [x2 - 1, y2 - 1], [x1, y2 - 1]],
+            dtype=np.float32,
+        )
+    if polygon is None:
+        result["reason"] = "missing_panel_geometry"
+        return result
+
+    destination = np.array(
+        [
+            [0, 0],
+            [product_width - 1, 0],
+            [product_width - 1, product_height - 1],
+            [0, product_height - 1],
+        ],
+        dtype=np.float32,
+    )
+    try:
+        image_to_product = cv2.getPerspectiveTransform(polygon, destination)
+    except cv2.error:
+        result["reason"] = "invalid_panel_geometry"
+        return result
+
+    tile_x, tile_y = int(tile_origin[0]), int(tile_origin[1])
+    tile_to_image = np.array(
+        [[1.0, 0.0, float(tile_x)], [0.0, 1.0, float(tile_y)], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    tile_to_product = image_to_product.astype(np.float64) @ tile_to_image
+
+    tile_array = np.asarray(tile_image)
+    if tile_array.ndim == 3:
+        gray = cv2.cvtColor(tile_array, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = tile_array.astype(np.uint8, copy=False)
+    tile_height, tile_width = gray.shape[:2]
+    warped_gray = cv2.warpPerspective(
+        gray,
+        tile_to_product,
+        (product_width, product_height),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    valid_tile = np.full((tile_height, tile_width), 255, dtype=np.uint8)
+    warped_valid = cv2.warpPerspective(
+        valid_tile,
+        tile_to_product,
+        (product_width, product_height),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+
+    warped_dust = None
+    if dust_mask is not None:
+        dust = np.asarray(dust_mask, dtype=np.uint8)
+        if dust.ndim == 3:
+            dust = cv2.cvtColor(dust, cv2.COLOR_BGR2GRAY)
+        if dust.shape[:2] != (tile_height, tile_width):
+            dust = cv2.resize(
+                dust, (tile_width, tile_height), interpolation=cv2.INTER_NEAREST
+            )
+        warped_dust = cv2.warpPerspective(
+            dust,
+            tile_to_product,
+            (product_width, product_height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+
+    aoi_x = min(max(int(aoi_product_xy[0]), 0), product_width - 1)
+    aoi_y = min(max(int(aoi_product_xy[1]), 0), product_height - 1)
+    edge_distance = max(0, int(config.light_leak_edge_distance))
+    distances = {
+        "left": aoi_x,
+        "right": product_width - 1 - aoi_x,
+        "top": aoi_y,
+        "bottom": product_height - 1 - aoi_y,
+    }
+    eligible_sides = [
+        side for side, distance in distances.items() if distance <= edge_distance
+    ]
+    if not eligible_sides:
+        result["reason"] = "aoi_not_near_edge"
+        return result
+    result["applicable"] = True
+
+    radius = max(1, int(config.light_leak_aoi_radius))
+    threshold = max(0.0, float(config.light_leak_threshold))
+    dark_threshold = max(0.0, float(config.light_leak_dark_threshold))
+    min_length = max(1, int(config.light_leak_min_length))
+    boundary_offset = max(0, int(config.light_leak_boundary_offset))
+    band_width = max(1, int(config.light_leak_band_width))
+    reference_gap = max(0, int(config.light_leak_reference_gap))
+    reference_start = boundary_offset + band_width + reference_gap
+    max_dust_overlap = min(
+        1.0, max(0.0, float(config.light_leak_max_dust_overlap))
+    )
+
+    debug_canvas = None
+    if generate_debug:
+        debug_canvas = cv2.cvtColor(warped_gray, cv2.COLOR_GRAY2BGR)
+        cv2.drawMarker(
+            debug_canvas,
+            (aoi_x, aoi_y),
+            (255, 255, 0),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=22,
+            thickness=2,
+        )
+
+    candidates: List[Dict[str, Any]] = []
+    inverse_transform = None
+    try:
+        inverse_transform = np.linalg.inv(image_to_product)
+    except np.linalg.LinAlgError:
+        pass
+
+    for side in eligible_sides:
+        tangent_center = aoi_x if side in ("top", "bottom") else aoi_y
+        tangent_limit = product_width if side in ("top", "bottom") else product_height
+        tangent_start = max(0, tangent_center - radius)
+        tangent_end = min(tangent_limit, tangent_center + radius + 1)
+
+        if side == "top":
+            edge_rect = (
+                tangent_start,
+                boundary_offset,
+                tangent_end,
+                boundary_offset + band_width,
+            )
+            ref_rect = (
+                tangent_start,
+                reference_start,
+                tangent_end,
+                reference_start + band_width,
+            )
+        elif side == "bottom":
+            edge_rect = (
+                tangent_start,
+                product_height - boundary_offset - band_width,
+                tangent_end,
+                product_height - boundary_offset,
+            )
+            ref_rect = (
+                tangent_start,
+                product_height - reference_start - band_width,
+                tangent_end,
+                product_height - reference_start,
+            )
+        elif side == "left":
+            edge_rect = (
+                boundary_offset,
+                tangent_start,
+                boundary_offset + band_width,
+                tangent_end,
+            )
+            ref_rect = (
+                reference_start,
+                tangent_start,
+                reference_start + band_width,
+                tangent_end,
+            )
+        else:  # right
+            edge_rect = (
+                product_width - boundary_offset - band_width,
+                tangent_start,
+                product_width - boundary_offset,
+                tangent_end,
+            )
+            ref_rect = (
+                product_width - reference_start - band_width,
+                tangent_start,
+                product_width - reference_start,
+                tangent_end,
+            )
+
+        ex1, ey1, ex2, ey2 = edge_rect
+        rx1, ry1, rx2, ry2 = ref_rect
+        if (
+            ex1 < 0 or ey1 < 0 or ex2 > product_width or ey2 > product_height
+            or rx1 < 0 or ry1 < 0 or rx2 > product_width or ry2 > product_height
+            or ex2 <= ex1 or ey2 <= ey1 or rx2 <= rx1 or ry2 <= ry1
+        ):
+            continue
+
+        edge_values = warped_gray[ey1:ey2, ex1:ex2].astype(np.float32)
+        ref_values = warped_gray[ry1:ry2, rx1:rx2].astype(np.float32)
+        edge_valid = warped_valid[ey1:ey2, ex1:ex2] > 0
+        ref_valid = warped_valid[ry1:ry2, rx1:rx2] > 0
+        profile_axis = 0 if side in ("top", "bottom") else 1
+        valid_profile = (
+            np.mean(edge_valid, axis=profile_axis) >= 0.8
+        ) & (
+            np.mean(ref_valid, axis=profile_axis) >= 0.8
+        )
+        edge_profile = np.median(edge_values, axis=profile_axis)
+        ref_profile = np.median(ref_values, axis=profile_axis)
+        signed_delta = edge_profile - ref_profile
+        signed_delta[~valid_profile] = 0.0
+        smooth_signed_delta = cv2.GaussianBlur(
+            signed_delta.astype(np.float32).reshape(-1, 1),
+            (1, 9),
+            0,
+        ).reshape(-1)
+        if debug_canvas is not None:
+            cv2.rectangle(debug_canvas, (ex1, ey1), (ex2 - 1, ey2 - 1), (0, 255, 255), 2)
+            cv2.rectangle(debug_canvas, (rx1, ry1), (rx2 - 1, ry2 - 1), (255, 160, 0), 2)
+
+        polarity_profiles = (
+            ("BRIGHT_LEAK", "邊緣亮帶", smooth_signed_delta, threshold),
+            ("DARK_DROP", "邊緣暗段", -smooth_signed_delta, dark_threshold),
+        )
+        for anomaly_type, anomaly_type_zh, delta_profile, active_threshold in polarity_profiles:
+            active = valid_profile & (delta_profile >= active_threshold)
+            run_start, run_end = _longest_true_run(active)
+            run_length = int(run_end - run_start)
+            run_delta = delta_profile[run_start:run_end]
+            max_delta = float(np.max(run_delta)) if run_delta.size else 0.0
+            mean_delta = float(np.mean(run_delta)) if run_delta.size else 0.0
+
+            if side in ("top", "bottom"):
+                candidate_bbox = (
+                    tangent_start + run_start,
+                    ey1,
+                    tangent_start + run_end,
+                    ey2,
+                )
+            else:
+                candidate_bbox = (
+                    ex1,
+                    tangent_start + run_start,
+                    ex2,
+                    tangent_start + run_end,
+                )
+            cx1, cy1, cx2, cy2 = candidate_bbox
+            dust_overlap = 0.0
+            if warped_dust is not None and cx2 > cx1 and cy2 > cy1:
+                candidate_dust = warped_dust[cy1:cy2, cx1:cx2] > 0
+                dust_overlap = float(np.mean(candidate_dust)) if candidate_dust.size else 0.0
+
+            detected = run_length >= min_length and dust_overlap <= max_dust_overlap
+            if run_length <= 0:
+                reason = "below_threshold"
+            elif run_length < min_length:
+                reason = "short_run"
+            elif dust_overlap > max_dust_overlap:
+                reason = "dust_overlap"
+            else:
+                reason = "detected"
+
+            center_product_x = int(round((cx1 + cx2 - 1) / 2.0)) if cx2 > cx1 else aoi_x
+            center_product_y = int(round((cy1 + cy2 - 1) / 2.0)) if cy2 > cy1 else aoi_y
+            center_image = None
+            if inverse_transform is not None:
+                point = np.array(
+                    [[[float(center_product_x), float(center_product_y)]]],
+                    dtype=np.float32,
+                )
+                mapped = cv2.perspectiveTransform(point, inverse_transform)[0, 0]
+                center_image = [int(round(float(mapped[0]))), int(round(float(mapped[1])))]
+
+            candidate = {
+                "side": side,
+                "edge_distance": int(distances[side]),
+                "anomaly_type": anomaly_type,
+                "anomaly_type_zh": anomaly_type_zh,
+                "detected": bool(detected),
+                "reason": reason,
+                "threshold": round(float(active_threshold), 4),
+                "continuous_length": run_length,
+                "max_delta": round(max_delta, 4),
+                "mean_delta": round(mean_delta, 4),
+                "dust_overlap": round(dust_overlap, 6),
+                "candidate_product_bbox": [int(v) for v in candidate_bbox],
+                "candidate_image_center": center_image,
+                "edge_band_product_bbox": [int(v) for v in edge_rect],
+                "reference_band_product_bbox": [int(v) for v in ref_rect],
+            }
+            candidates.append(candidate)
+
+            if debug_canvas is not None and run_length > 0:
+                if detected:
+                    color = (0, 255, 0) if anomaly_type == "BRIGHT_LEAK" else (255, 0, 255)
+                else:
+                    color = (0, 128, 255)
+                cv2.rectangle(debug_canvas, (cx1, cy1), (cx2 - 1, cy2 - 1), color, 3)
+                label_y = max(20, ey1 - 6)
+                if anomaly_type == "DARK_DROP":
+                    label_y += 20
+                cv2.putText(
+                    debug_canvas,
+                    f"{side} {anomaly_type} d={max_delta:.1f} len={run_length} dust={dust_overlap:.2f}",
+                    (max(5, ex1), label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+    if not candidates:
+        result["reason"] = "bands_outside_product"
+        result["debug_image"] = debug_canvas
+        return result
+
+    best = max(
+        candidates,
+        key=lambda item: (
+            bool(item["detected"]),
+            int(item["continuous_length"]),
+            float(item["max_delta"]),
+        ),
+    )
+    result.update(best)
+    result["candidates"] = candidates
+    result["debug_image"] = debug_canvas
+    return result
 
 
 class CVEdgeInspector:
