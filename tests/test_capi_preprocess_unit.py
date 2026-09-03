@@ -17,6 +17,7 @@ def test_preprocess_config_defaults():
     assert cfg.enable_panel_polygon is True
     assert cfg.edge_threshold_px == 768
     assert cfg.coverage_min == 0.3
+    assert cfg.fast_raw_boundary_enabled is False
 
 
 def test_tile_result_zone_values():

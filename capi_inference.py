@@ -9482,6 +9482,7 @@ class CAPIInferencer:
                 or getattr(self.config, "grid_canonicalization_enabled", False)
             ),
             generate_grid_tiles=bool(self.config.grid_tiling_enabled),
+            fast_raw_boundary_enabled=(self.station_adapter.profile == "aapi"),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
             product_resolution=product_resolution or self._product_resolution(),
             grid_canonicalization_enabled=getattr(
