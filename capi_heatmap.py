@@ -274,9 +274,11 @@ def build_feature_zoom_panels(
       - feature_contour: 實際 feature mask 輪廓（tile pixel 座標）
       - dust_overlap: feature mask 內落在 dust_mask 的像素數
       - dust_ratio: feature 與 dust_mask 的重疊比例
+      - dust_association_ratio: feature 落在灰塵核心關聯外擴區的比例
+      - dust_distance_px: feature 到灰塵核心的最短距離
       - is_dust: dust_ratio 是否達門檻
       - zone_dust_cov: feature 所屬 hot zone 與 dust_mask 的覆蓋率
-      - dust_reason: "feature_overlap" / "zone_dominated" / "clean"
+      - dust_reason: "feature_overlap" / "association_halo" / "zone_dominated" / "clean"
 
     Returns:
         [(panel_image, label_text), ...] 最多 max_panels 筆
@@ -349,11 +351,16 @@ def build_feature_zoom_panels(
             dust_ratio = float(feat.get("dust_ratio", 0.0))
             area = int(feat.get("area", 0))
             dust_overlap = int(feat.get("dust_overlap", round(dust_ratio * area)))
+            association_overlap = int(feat.get("dust_association_overlap", 0))
+            association_ratio = float(feat.get("dust_association_ratio", 0.0))
+            dust_distance_px = feat.get("dust_distance_px")
             spot_type = feat.get("type", "?")
             zone_dust_cov = feat.get("zone_dust_cov", None)
             dust_reason = str(feat.get("dust_reason", ""))
             tag = "DUST" if is_dust else "REAL"
-            if is_dust and dust_reason == "zone_dominated":
+            if is_dust and dust_reason == "association_halo":
+                tag = "DUST-HALO"
+            elif is_dust and dust_reason == "zone_dominated":
                 tag = "DUST-ZONE"
             tag_color = (0, 200, 255) if is_dust else (0, 0, 255)
             outline_color = (255, 255, 0) if is_dust else (0, 0, 255)
@@ -393,9 +400,23 @@ def build_feature_zoom_panels(
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, tag_color, 2)
             cv2.putText(panel, f"FeatureDust: {dust_overlap}/{area} = {dust_ratio:.3f}", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
-            cv2.putText(panel, f"Type: {spot_type}  Pos:({abs_x},{abs_y})", (10, 85),
+            distance_text = (
+                f"{float(dust_distance_px):.1f}px"
+                if dust_distance_px is not None
+                else "n/a"
+            )
+            cv2.putText(
+                panel,
+                f"AssocDust: {association_overlap}/{area} = {association_ratio:.3f}  Dist:{distance_text}",
+                (10, 85),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (220, 220, 220),
+                1,
+            )
+            cv2.putText(panel, f"Type: {spot_type}  Pos:({abs_x},{abs_y})", (10, 110),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
-            text_y = 110
+            text_y = 135
             if zone_dust_cov is not None:
                 cv2.putText(panel, f"ZoneDustCOV: {float(zone_dust_cov):.3f}", (10, text_y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)

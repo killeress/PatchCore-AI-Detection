@@ -3,6 +3,7 @@ import numpy as np
 from pathlib import Path
 
 from capi_web import (
+    _candidate_dust_overlap,
     _detect_dot_components,
     _detect_dot_components_auto,
     _detect_dot_components_debug_polarity,
@@ -13,6 +14,26 @@ from capi_web import (
     _format_within_spec_panel_summary,
     _within_spec_auto_visual_output,
 )
+
+
+def test_candidate_dust_overlap_uses_component_pixels_instead_of_whole_bbox():
+    candidate = {
+        "x": 0,
+        "y": 0,
+        "w": 10,
+        "h": 10,
+        "center_x": 5,
+        "center_y": 5,
+    }
+    candidate_mask = np.zeros((10, 10), dtype=np.uint8)
+    candidate_mask[:, :2] = 255
+    dust_mask = candidate_mask > 0
+
+    rejected = _candidate_dust_overlap(candidate, dust_mask, candidate_mask)
+
+    assert rejected is not None
+    assert rejected["dust_overlap_ratio"] == 1.0
+    assert rejected["dust_overlap_basis"] == "component"
 
 
 def _rules(*, screen_limit=1, tile_limit=1, threshold_mm=0.3, white_enabled=False, segmentation_method="background_diff"):

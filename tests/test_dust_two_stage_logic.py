@@ -270,3 +270,89 @@ def test_two_stage_local_score_does_not_rescue_feature_on_dust():
     assert target["dust_ratio"] >= config.dust_two_stage_dust_ratio
     assert target["is_dust"] is True
     assert "-> DUST" in detail
+
+
+def test_two_stage_treats_original_core_halo_next_to_dust_as_dust():
+    config = CAPIConfig()
+    config.dust_two_stage_dust_ratio = 0.3
+    config.dust_two_stage_association_radius_px = 4
+    config.dust_two_stage_association_ratio = 0.5
+    config.dust_two_stage_diff_percentile = 50.0
+    config.dust_two_stage_min_area = 3
+    config.dust_heatmap_top_percent = 0.5
+    config.dust_high_cov_threshold = 1.1
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+
+    tile = np.full((64, 64), 100, dtype=np.uint8)
+    tile[30:35, 35:40] = 180
+
+    anomaly_map = np.zeros((16, 16), dtype=np.float32)
+    anomaly_map[8, 9] = 1.0
+
+    precise_dust_mask = np.zeros((64, 64), dtype=np.uint8)
+    precise_dust_mask[30:35, 30:35] = 255
+
+    has_real, real_peak, features, detail = inferencer.check_dust_two_stage(
+        tile,
+        anomaly_map,
+        precise_dust_mask,
+        score=1.0,
+        score_threshold=0.35,
+        candidate_dust_mask=precise_dust_mask,
+    )
+
+    assert has_real is False
+    assert real_peak is None
+    assert features
+    assert all(feature["is_dust"] is True for feature in features)
+    assert any(
+        feature["dust_reason"] == "association_halo"
+        and feature["dust_association_overlap"] > 0
+        and feature["dust_distance_px"] <= config.dust_two_stage_association_radius_px
+        for feature in features
+    )
+    assert "association_halo=" in detail
+    assert "-> DUST" in detail
+
+
+def test_two_stage_keeps_independent_feature_outside_dust_association_radius():
+    config = CAPIConfig()
+    config.dust_two_stage_dust_ratio = 0.3
+    config.dust_two_stage_association_radius_px = 4
+    config.dust_two_stage_association_ratio = 0.5
+    config.dust_two_stage_diff_percentile = 50.0
+    config.dust_two_stage_min_area = 3
+    config.dust_heatmap_top_percent = 0.5
+    config.dust_high_cov_threshold = 1.1
+
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = config
+
+    tile = np.full((64, 64), 100, dtype=np.uint8)
+    tile[30:35, 44:49] = 180
+
+    anomaly_map = np.zeros((16, 16), dtype=np.float32)
+    anomaly_map[8, 11:13] = 1.0
+
+    precise_dust_mask = np.zeros((64, 64), dtype=np.uint8)
+    precise_dust_mask[30:35, 30:35] = 255
+
+    has_real, real_peak, features, detail = inferencer.check_dust_two_stage(
+        tile,
+        anomaly_map,
+        precise_dust_mask,
+        score=1.0,
+        score_threshold=0.35,
+        candidate_dust_mask=precise_dust_mask,
+    )
+
+    assert has_real is True
+    assert real_peak is not None
+    assert any(
+        not feature["is_dust"]
+        and feature["dust_distance_px"] > config.dust_two_stage_association_radius_px
+        for feature in features
+    )
+    assert "-> REAL_NG" in detail

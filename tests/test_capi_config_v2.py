@@ -196,6 +196,26 @@ def test_aoi_heatmap_center_seed_enabled_serialization():
         assert loaded["bomb_area_force_detection_enabled"] is True
 
 
+def test_dust_two_stage_association_settings_round_trip_and_db_clamp():
+    cfg = CAPIConfig.from_dict({
+        "dust_two_stage_association_radius_px": 3,
+        "dust_two_stage_association_ratio": 0.6,
+    })
+
+    assert cfg.dust_two_stage_association_radius_px == 3
+    assert cfg.dust_two_stage_association_ratio == 0.6
+    assert cfg.to_dict()["dust_two_stage_association_radius_px"] == 3
+    assert cfg.to_dict()["dust_two_stage_association_ratio"] == 0.6
+
+    cfg.apply_db_overrides([
+        {"param_name": "dust_two_stage_association_radius_px", "decoded_value": -2},
+        {"param_name": "dust_two_stage_association_ratio", "decoded_value": 1.5},
+    ])
+
+    assert cfg.dust_two_stage_association_radius_px == 0
+    assert cfg.dust_two_stage_association_ratio == 1.0
+
+
 def test_report_result_defect_codes_defaults_and_db_overrides():
     cfg = CAPIConfig()
     assert cfg.report_black_dot_defect_code == "PCDK2"

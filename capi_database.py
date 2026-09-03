@@ -6317,6 +6317,8 @@ class CAPIDatabase:
             ("dust_heatmap_iou_threshold", config.dust_heatmap_iou_threshold, "float", "Heatmap-Dust IOU/Coverage 閾值"),
             ("dust_heatmap_top_percent", config.dust_heatmap_top_percent, "float", "Heatmap 最紅前 X% 優先核心；two-stage 另有灰塵重排與特徵局部分數補救"),
             ("dust_heatmap_metric", config.dust_heatmap_metric, "string", 'Heatmap 判定指標: "coverage" (覆蓋率) 或是 "iou"'),
+            ("dust_two_stage_association_radius_px", config.dust_two_stage_association_radius_px, "int", "Two-stage 灰塵核心外暈圈關聯半徑 (px)"),
+            ("dust_two_stage_association_ratio", config.dust_two_stage_association_ratio, "float", "非原始 Top 核心特徵落在灰塵關聯區的最低比例 (0~1)"),
             ("dust_detect_dark_particles", config.dust_detect_dark_particles, "bool", "偵測暗色顆粒/圖案 (如偏黑 MARK) 並過濾"),
             # Otsu 邊緣裁切
             ("otsu_offset", config.otsu_offset, "int", "Otsu 產品邊緣裁切內縮 (px)"),
