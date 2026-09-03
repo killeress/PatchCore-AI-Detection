@@ -1628,52 +1628,149 @@
         }
     }
 
+    /* ── Exclusion Zone Canvas & Toolbar ── */
+    .ex-canvas-wrapper {
+        position: relative;
+        background: #0a0f1a;
+        border: 1px solid var(--border, #334155);
+        border-radius: 10px;
+        overflow: hidden;
+        cursor: crosshair;
+        width: 100%;
+        height: 520px;
+    }
+
+    .ex-canvas-wrapper img {
+        display: block;
+        max-width: 100%;
+        max-height: 520px;
+        user-select: none;
+        -webkit-user-drag: none;
+        transform-origin: 0 0;
+    }
+
+    .ex-canvas-wrapper canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        pointer-events: none;
+    }
+
+    .ex-coord-bar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-top: 10px;
+        flex-wrap: wrap;
+    }
+
+    .ex-coord-tag {
+        background: var(--surface, #1e293b);
+        border: 1px solid var(--border, #334155);
+        border-radius: 8px;
+        padding: 6px 14px;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.85rem;
+        color: var(--text, #e2e8f0);
+        min-width: 150px;
+        text-align: center;
+    }
+
+    .ex-coord-tag .ex-label {
+        color: var(--text-muted, #94a3b8);
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 2px;
+    }
+
+    .btn-copy {
+        background: rgba(59, 130, 246, 0.15);
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        border-radius: 8px;
+        padding: 6px 14px;
+        color: var(--accent, #60a5fa);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.82rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .btn-copy:hover {
+        background: rgba(59, 130, 246, 0.25);
+        border-color: var(--accent, #60a5fa);
+    }
+
+    .btn-copy.copied {
+        background: rgba(34, 197, 94, 0.15);
+        border-color: rgba(34, 197, 94, 0.4);
+        color: var(--ok, #4ade80);
+    }
+
+    .btn-add-sel-zone {
+        background: linear-gradient(135deg, #f43f5e, #e11d48);
+        border: 1px solid rgba(244, 63, 94, 0.4);
+        border-radius: 8px;
+        padding: 7px 16px;
+        color: #fff;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.82rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+        box-shadow: 0 2px 6px rgba(244, 63, 94, 0.25);
+    }
+
+    .btn-add-sel-zone:hover {
+        background: linear-gradient(135deg, #fb7185, #f43f5e);
+        box-shadow: 0 4px 12px rgba(244, 63, 94, 0.4);
+        transform: translateY(-1px);
+    }
+
     /* Exclusion Zone List Styles */
     .ex-zone-item {
         background: rgba(255, 255, 255, 0.03);
         border: 1px solid rgba(255, 255, 255, 0.1);
         border-radius: 8px;
-        padding: 12px;
+        padding: 10px 12px;
         margin-bottom: 8px;
-        display: grid;
-        grid-template-columns: 1fr auto;
-        gap: 12px;
-        align-items: center;
         transition: all 0.2s;
     }
 
     .ex-zone-item:hover {
-        background: rgba(255, 255, 255, 0.05);
+        background: rgba(255, 255, 255, 0.06);
         border-color: #f43f5e;
     }
 
     .ex-zone-inputs {
         display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        gap: 8px;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 6px;
     }
 
     .ex-zone-input-group {
         display: flex;
         align-items: center;
-        gap: 6px;
+        gap: 4px;
     }
 
     .ex-zone-input-group label {
         font-size: 0.75rem;
-        color: var(--text-muted);
-        min-width: 15px;
+        color: var(--text-muted, #94a3b8);
+        min-width: 12px;
+        font-weight: 600;
     }
 
     .ex-zone-input-group input {
         width: 100%;
-        background: rgba(0, 0, 0, 0.2);
+        background: rgba(0, 0, 0, 0.3);
         border: 1px solid rgba(255, 255, 255, 0.1);
         color: #fff;
-        padding: 4px 8px;
+        padding: 4px 6px;
         border-radius: 4px;
         font-size: 0.8rem;
-        font-family: 'Fira Code';
+        font-family: 'Fira Code', monospace;
     }
 
     .btn-delete-zone {
@@ -2082,6 +2179,25 @@
 
     // ── Init ──
     let currentTab = 'patchcore';
+    let exCurrentImagePath = '';
+    let exInitialProductCode = '';
+    let exInitialQueryCoords = null;
+    (function () {
+        const params = new URLSearchParams(window.location.search);
+        const tabParam = params.get('tab');
+        if (tabParam) currentTab = tabParam;
+        const pathParam = params.get('path');
+        if (pathParam) exCurrentImagePath = pathParam;
+        const productParam = (params.get('product') || '').trim().toUpperCase();
+        if (productParam) exInitialProductCode = productParam;
+        const qx = parseInt(params.get('x'));
+        const qy = parseInt(params.get('y'));
+        const qw = parseInt(params.get('w'));
+        const qh = parseInt(params.get('h'));
+        if (!isNaN(qx) && !isNaN(qy) && !isNaN(qw) && !isNaN(qh) && qw > 0 && qh > 0) {
+            exInitialQueryCoords = { x: qx, y: qy, w: qw, h: qh };
+        }
+    })();
     let withinSpecRules = null;
     let withinSpecRulesSource = '';
     let currentWithinSpecMachine = '';
@@ -2116,8 +2232,13 @@
             if (pane.id === 'pane-' + tabId) pane.classList.add('active');
             else pane.classList.remove('active');
         });
-        if (tabId === 'cv-edge' && typeof updateExZoneBox === 'function') {
-            setTimeout(updateExZoneBox, 50);
+        if (tabId === 'cv-edge') {
+            setTimeout(() => {
+                if (typeof initExZoneViewer === 'function') initExZoneViewer();
+                if (typeof exSyncOverlay === 'function') exSyncOverlay();
+                if (typeof exRedraw === 'function') exRedraw();
+                if (typeof updateEdgeVisualizer === 'function') updateEdgeVisualizer();
+            }, 50);
         }
     };
 
@@ -3690,34 +3811,82 @@
                             </div>
                         </div>
                         
-                        <!-- 產品選擇器 -->
-                        <div style="padding: 12px 16px 0; display:flex; align-items:center; gap:12px; border-bottom: 1px solid rgba(244,63,94,0.15); padding-bottom: 12px;">
-                            <span style="font-size: 0.8rem; color: #fda4af; font-weight: 600;">📦 選擇產品:</span>
-                            <select id="ex-product-selector" onchange="switchExProduct(this.value)" style="background: #1e293b; color: #e2e8f0; border: 1px solid #475569; border-radius: 6px; padding: 6px 12px; font-size: 0.85rem; font-family: 'Fira Code', monospace; cursor: pointer; min-width: 200px;">
-                                <!-- Populated by JS -->
-                            </select>
-                            <span id="ex-product-info" style="font-size: 0.75rem; color: #64748b;"></span>
+                        <!-- 產品選擇器與圖片路徑載入 -->
+                        <div style="padding: 12px 16px; display:flex; flex-wrap:wrap; align-items:center; gap:12px; border-bottom: 1px solid rgba(244,63,94,0.15); background: rgba(15,23,42,0.4);">
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <span style="font-size: 0.82rem; color: #fda4af; font-weight: 600; white-space:nowrap;">📦 選擇產品:</span>
+                                <select id="ex-product-selector" onchange="switchExProduct(this.value)" style="background: #1e293b; color: #e2e8f0; border: 1px solid #475569; border-radius: 6px; padding: 6px 12px; font-size: 0.85rem; font-family: 'Fira Code', monospace; cursor: pointer; min-width: 180px;">
+                                    <!-- Populated by JS -->
+                                </select>
+                                <span id="ex-product-info" style="font-size: 0.75rem; color: #94a3b8; font-family:'Fira Code';"></span>
+                            </div>
+                            <div style="flex:1; min-width:320px; display:flex; align-items:center; gap:8px;">
+                                <input type="text" id="ex-image-path" placeholder="自訂圖片路徑 (留空則載入該產品範例圖，支援 .tif/.jpg/.png)" autocomplete="off" spellcheck="false"
+                                    style="flex:1; background:#0f172a; border:1px solid #334155; border-radius:6px; padding:6px 12px; color:#e2e8f0; font-family:'Fira Code',monospace; font-size:0.82rem; outline:none;"
+                                    onkeydown="if(event.key==='Enter') exLoadImage()">
+                                <button class="btn-run" id="btn-ex-load" onclick="exLoadImage()" style="background:linear-gradient(135deg,#10b981,#059669); color:#fff; border:none; border-radius:6px; padding:6px 14px; cursor:pointer; font-size:0.82rem; font-weight:600; white-space:nowrap;">
+                                    📂 載入圖片
+                                </button>
+                                <button class="btn-copy" onclick="exResetToSample()" style="padding:6px 12px; font-size:0.8rem; white-space:nowrap;" title="還原為該產品的預設範例圖">
+                                    🖼️ 還原範例圖
+                                </button>
+                            </div>
                         </div>
 
-                        <div style="padding: 16px; display: grid; grid-template-columns: 3fr 2fr; gap: 24px; align-items: start;">
-                            <div id="ex-vis-container" style="background: #0f172a; border: 1px dashed #64748b; border-radius: 8px; position: relative; width: 100%; aspect-ratio: 4/3; overflow: hidden; display: flex; align-items: center; justify-content: center;">
-                                <img src="/imgs/Sample.jpg" class="vis-bg-img" alt="Panel Background">
-                                <span style="position: absolute; color: rgba(255,255,255,0.1); font-weight: bold; font-size: 2rem; user-select: none; z-index: 1;">PANEL / IMAGE</span>
-                                <span style="position: absolute; bottom: 8px; right: 8px; color: #475569; font-size: 0.65rem; font-family: 'Fira Code'; z-index: 2;">Ref: 6576x4384</span>
-                                <!-- Zones will be rendered here by JS -->
+                        <div style="padding: 16px; display: grid; grid-template-columns: 1.6fr 1fr; gap: 20px; align-items: start;">
+                            <!-- 左側：圖片查看器、縮放、即時座標與框選 -->
+                            <div style="display:flex; flex-direction:column; gap:10px;">
+                                <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+                                    <div style="display:flex; align-items:center; gap:10px;">
+                                        <button class="btn-copy" onclick="exResetZoom()">🔄 重置縮放</button>
+                                        <span id="ex-zoom-display" style="font-family:'Fira Code',monospace; font-size:0.85rem; color:var(--text-muted);">100%</span>
+                                        <span style="color:var(--text-muted); font-size:0.75rem;">滾輪縮放 ｜ 右鍵/中鍵拖曳平移 ｜ 左鍵框選</span>
+                                    </div>
+                                    <span id="ex-res-display" style="font-family:'Fira Code',monospace; font-size:0.75rem; color:#64748b;">Ref: 6576×4384</span>
+                                </div>
+
+                                <div class="ex-canvas-wrapper" id="ex-wrapper">
+                                    <img id="ex-image" src="/imgs/Sample.jpg" alt="Panel Background" draggable="false">
+                                    <canvas id="ex-overlay"></canvas>
+                                </div>
+
+                                <!-- 即時座標列與操作按鈕 -->
+                                <div class="ex-coord-bar">
+                                    <div class="ex-coord-tag">
+                                        <div class="ex-label">游標位置</div>
+                                        <div id="ex-cursor-pos">—</div>
+                                    </div>
+                                    <div class="ex-coord-tag" id="ex-selection-display" style="display:none;">
+                                        <div class="ex-label">框選區域 (x, y, w, h)</div>
+                                        <div id="ex-selection-text">—</div>
+                                    </div>
+                                    <button class="btn-copy" id="ex-btn-copy-sel" style="display:none;" onclick="exCopySelection()">📋 複製框選座標</button>
+                                    <button class="btn-add-sel-zone" id="ex-btn-add-sel" style="display:none;" onclick="exAddZoneFromSelection()">➕ 新增為不檢測區域</button>
+                                </div>
                             </div>
                             
-                            <div style="display: flex; flex-direction: column; gap: 12px; max-height: 450px; overflow-y: auto; padding-right: 4px;">
-                                <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0;">設定多個排除區域 (X, Y, W, H)，單位為 pixel。<br>PatchCore 推論及邊緣檢測若與任何區域重疊，仍會存圖但標記為「不檢測區域」並視為 OK。<br><strong style="color:#fda4af;">⚠️ 排除區域按產品分別設定。</strong></p>
+                            <!-- 右側：排除區域清單與參數 -->
+                            <div style="display: flex; flex-direction: column; gap: 12px; max-height: 600px; overflow-y: auto; padding-right: 4px;">
+                                <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0; line-height: 1.5;">
+                                    設定排除區域 (X, Y, W, H)，單位為 pixel。<br>
+                                    PatchCore 推論及邊緣檢測若與任何區域重疊，仍會存圖但標記為「不檢測區域」並視為 OK。<br>
+                                    可在左圖以<b>滑鼠左鍵拖曳框選</b>後點擊「➕ 新增為不檢測區域」，或手動新增編輯。<br>
+                                    <strong style="color:#fda4af;">⚠️ 排除區域按產品分別設定。</strong>
+                                </p>
                                 ${exZoneDecayParams.map(p => paramRow(p)).join('')}
                                 
+                                <div style="display:flex; align-items:center; justify-content:space-between; margin-top:4px; padding-bottom:6px; border-bottom:1px solid rgba(255,255,255,0.08);">
+                                    <span style="font-size:0.85rem; font-weight:600; color:#fda4af;">📋 已設定排除區域 (<span id="ex-zones-count">0</span>)</span>
+                                    <button class="btn-copy" style="padding:4px 8px; font-size:0.75rem;" onclick="exCopyAllZones()">📋 全部複製</button>
+                                </div>
+
                                 <div id="ex-zones-list">
                                     <!-- Rendered by JS -->
                                 </div>
 
-                                <button class="btn-edit" style="justify-content: center; gap: 4px; border: 1px dashed rgba(255,255,255,0.2); background: rgba(255,255,255,0.02);" onclick="addExZone()">➕ 新增排除區域</button>
+                                <button class="btn-edit" style="justify-content: center; gap: 4px; border: 1px dashed rgba(255,255,255,0.2); background: rgba(255,255,255,0.02); padding: 8px;" onclick="addExZone()">➕ 手動新增排除區域</button>
                                 
-                                <button class="btn-save" style="margin-top: 10px; background: linear-gradient(135deg, #f43f5e, #e11d48);" onclick="saveExZone()">💾 儲存所有排除區域設定</button>
+                                <button class="btn-save" style="margin-top: 8px; background: linear-gradient(135deg, #f43f5e, #e11d48); padding: 10px;" onclick="saveExZone()">💾 儲存所有排除區域設定</button>
                             </div>
                         </div>
                     </div>
@@ -5068,6 +5237,19 @@
 
     // ── Edge Exclusion Zone Logic ──
     let currentExZones = [];
+    let exHoveredZoneIdx = null;
+    let exCustomImageLoaded = false;
+
+    // Canvas viewer state (zoom, pan, drag selection)
+    let exZoom = 1;
+    let exPanX = 0, exPanY = 0;
+    let exScaleX = 1, exScaleY = 1;
+    let exPanning = false;
+    let exPanStartX = 0, exPanStartY = 0;
+    let exPanStartPX = 0, exPanStartPY = 0;
+    let exDragging = false;
+    let exStartX = 0, exStartY = 0;
+    let exCurRect = null;
 
     function getParamValue(name, def) {
         const p = allParams.find(x => x.param_name === name);
@@ -5093,6 +5275,18 @@
             sel.innerHTML = '<option value="">（無產品資料）</option>';
             return;
         }
+        if (exInitialProductCode && modelResolutionMap[exInitialProductCode]) {
+            currentProductCode = exInitialProductCode;
+        }
+        const requireExplicitProduct = Boolean(exInitialQueryCoords) && !currentProductCode;
+        if (requireExplicitProduct) {
+            const prompt = document.createElement('option');
+            prompt.value = '';
+            prompt.textContent = '— 請選擇要套用的產品 —';
+            prompt.disabled = true;
+            prompt.selected = true;
+            sel.appendChild(prompt);
+        }
         codes.forEach(code => {
             const res = modelResolutionMap[code];
             const opt = document.createElement('option');
@@ -5101,7 +5295,7 @@
             sel.appendChild(opt);
         });
         // 預設選第一個
-        if (!currentProductCode && codes.length > 0) {
+        if (!currentProductCode && !requireExplicitProduct && codes.length > 0) {
             currentProductCode = codes[0];
         }
         sel.value = currentProductCode;
@@ -5113,19 +5307,10 @@
             allExZonesByProduct[currentProductCode] = JSON.parse(JSON.stringify(currentExZones));
         }
         currentProductCode = code;
+        exInitialProductCode = '';
         // 載入新產品的 zones
         currentExZones = allExZonesByProduct[code] ? JSON.parse(JSON.stringify(allExZonesByProduct[code])) : [];
         renderExZones();
-
-        // 更新背景圖 (若有專屬產品圖則載入，否則退回預設)
-        const bgImg = document.querySelector('.vis-bg-img');
-        if (bgImg) {
-            bgImg.onerror = function () {
-                this.onerror = null;
-                this.src = '/imgs/Sample.jpg';
-            };
-            bgImg.src = `/imgs/Sample_${code}.jpg`;
-        }
 
         // 更新 info 文字
         const info = document.getElementById('ex-product-info');
@@ -5133,6 +5318,14 @@
             const res = modelResolutionMap[code];
             info.textContent = `Panel: ${res[0]}×${res[1]}px`;
         }
+
+        // 如果未載入自訂圖片，則更新該產品的預設 Sample 圖
+        if (!exCustomImageLoaded) {
+            loadProductSampleImage(code, Boolean(exInitialQueryCoords));
+        } else {
+            exRedraw();
+        }
+        exUpdateSelectionUI();
     }
 
     function initExZoneData() {
@@ -5186,17 +5379,509 @@
         currentExZones = allExZonesByProduct[currentProductCode] ? JSON.parse(JSON.stringify(allExZonesByProduct[currentProductCode])) : [];
 
         renderExZones();
+        initExZoneViewer();
+    }
+
+    function initExZoneViewer() {
+        const wrapper = document.getElementById('ex-wrapper');
+        const img = document.getElementById('ex-image');
+        const overlay = document.getElementById('ex-overlay');
+        if (!wrapper || !img || !overlay) return;
+
+        if (!wrapper.dataset.eventsBound) {
+            wrapper.dataset.eventsBound = '1';
+
+            // 滾輪縮放 (以游標為中心)
+            wrapper.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const rect = wrapper.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+
+                const oldZoom = exZoom;
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                exZoom = Math.max(0.2, Math.min(20, exZoom * delta));
+
+                exPanX = mx - (mx - exPanX) * (exZoom / oldZoom);
+                exPanY = my - (my - exPanY) * (exZoom / oldZoom);
+
+                exApplyTransform();
+                exSyncOverlay();
+                exRedraw();
+                const disp = document.getElementById('ex-zoom-display');
+                if (disp) disp.textContent = Math.round(exZoom * 100) + '%';
+            }, { passive: false });
+
+            // 滑鼠按下 (中鍵或右鍵拖曳平移，左鍵框選)
+            wrapper.addEventListener('mousedown', (e) => {
+                if (e.button === 1 || e.button === 2) {
+                    e.preventDefault();
+                    exPanning = true;
+                    exPanStartX = e.clientX;
+                    exPanStartY = e.clientY;
+                    exPanStartPX = exPanX;
+                    exPanStartPY = exPanY;
+                    wrapper.style.cursor = 'grabbing';
+                    return;
+                }
+                if (e.button !== 0) return;
+                exInitialQueryCoords = null;
+                const rect = wrapper.getBoundingClientRect();
+                exStartX = e.clientX - rect.left;
+                exStartY = e.clientY - rect.top;
+                exDragging = true;
+                exCurRect = null;
+            });
+
+            // 阻止右鍵選單以順暢平移
+            wrapper.addEventListener('contextmenu', (e) => e.preventDefault());
+
+            // 滑鼠移動：即時游標像素座標 & 框選矩形
+            wrapper.addEventListener('mousemove', (e) => {
+                if (exPanning) {
+                    exPanX = exPanStartPX + (e.clientX - exPanStartX);
+                    exPanY = exPanStartPY + (e.clientY - exPanStartY);
+                    exApplyTransform();
+                    exSyncOverlay();
+                    exRedraw();
+                    return;
+                }
+
+                const rect = wrapper.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+
+                const curImg = document.getElementById('ex-image');
+                const naturalW = curImg ? (curImg.naturalWidth || getCurrentProductResolution().w) : 6576;
+                const naturalH = curImg ? (curImg.naturalHeight || getCurrentProductResolution().h) : 4384;
+
+                const realX = Math.round((mx - exPanX) * exScaleX);
+                const realY = Math.round((my - exPanY) * exScaleY);
+                const clampedX = Math.max(0, Math.min(naturalW, realX));
+                const clampedY = Math.max(0, Math.min(naturalH, realY));
+
+                const curPos = document.getElementById('ex-cursor-pos');
+                if (curPos) curPos.textContent = `(${clampedX}, ${clampedY})`;
+
+                if (exDragging) {
+                    const x1 = Math.min(exStartX, mx);
+                    const y1 = Math.min(exStartY, my);
+                    const x2 = Math.max(exStartX, mx);
+                    const y2 = Math.max(exStartY, my);
+
+                    const rx1 = Math.max(0, Math.min(naturalW, Math.round((x1 - exPanX) * exScaleX)));
+                    const ry1 = Math.max(0, Math.min(naturalH, Math.round((y1 - exPanY) * exScaleY)));
+                    const rx2 = Math.max(0, Math.min(naturalW, Math.round((x2 - exPanX) * exScaleX)));
+                    const ry2 = Math.max(0, Math.min(naturalH, Math.round((y2 - exPanY) * exScaleY)));
+
+                    exCurRect = {
+                        x: rx1,
+                        y: ry1,
+                        w: Math.max(0, rx2 - rx1),
+                        h: Math.max(0, ry2 - ry1),
+                    };
+                    exRedraw();
+                    exUpdateSelectionUI();
+                }
+            });
+
+            wrapper.addEventListener('mouseleave', () => {
+                if (!exDragging) {
+                    const curPos = document.getElementById('ex-cursor-pos');
+                    if (curPos) curPos.textContent = '—';
+                }
+            });
+        }
+
+        if (!window._exMouseUpBound) {
+            window._exMouseUpBound = true;
+            window.addEventListener('mouseup', (e) => {
+                if (exPanning) {
+                    exPanning = false;
+                    const w = document.getElementById('ex-wrapper');
+                    if (w) w.style.cursor = 'crosshair';
+                }
+                if (exDragging) {
+                    exDragging = false;
+                    if (!exCurRect || exCurRect.w < 3 || exCurRect.h < 3) {
+                        exCurRect = null;
+                        exUpdateSelectionUI();
+                        exRedraw();
+                    }
+                }
+            });
+            window.addEventListener('resize', () => {
+                if (currentTab === 'cv-edge') {
+                    exSyncOverlay();
+                    exRedraw();
+                }
+            });
+        }
+
+        // 載入圖片
+        const pathInput = document.getElementById('ex-image-path');
+        const preserveTransferredSelection = Boolean(exInitialQueryCoords);
+        if (exCurrentImagePath) {
+            if (pathInput) pathInput.value = exCurrentImagePath;
+            exLoadImage(preserveTransferredSelection);
+        } else {
+            loadProductSampleImage(currentProductCode, preserveTransferredSelection);
+        }
+
+        // 若 URL 帶有預設座標，自動載入並框選
+        if (exInitialQueryCoords) {
+            exCurRect = { ...exInitialQueryCoords };
+            setTimeout(() => {
+                exUpdateSelectionUI();
+                exRedraw();
+            }, 100);
+        }
+    }
+
+    function exSyncOverlay() {
+        const img = document.getElementById('ex-image');
+        const overlay = document.getElementById('ex-overlay');
+        if (!img || !overlay) return;
+
+        const clientW = img.clientWidth || 600;
+        const clientH = img.clientHeight || 400;
+
+        const renderedW = clientW * exZoom;
+        const renderedH = clientH * exZoom;
+
+        overlay.width = renderedW;
+        overlay.height = renderedH;
+        overlay.style.width = renderedW + 'px';
+        overlay.style.height = renderedH + 'px';
+        overlay.style.left = exPanX + 'px';
+        overlay.style.top = exPanY + 'px';
+
+        const naturalW = img.naturalWidth || getCurrentProductResolution().w;
+        const naturalH = img.naturalHeight || getCurrentProductResolution().h;
+
+        exScaleX = naturalW / (renderedW || 1);
+        exScaleY = naturalH / (renderedH || 1);
+    }
+
+    function exApplyTransform() {
+        const img = document.getElementById('ex-image');
+        if (!img) return;
+        img.style.transformOrigin = '0 0';
+        img.style.transform = `translate(${exPanX}px, ${exPanY}px) scale(${exZoom})`;
+    }
+
+    function exResetZoom() {
+        exZoom = 1;
+        exPanX = 0;
+        exPanY = 0;
+        exApplyTransform();
+        exSyncOverlay();
+        exRedraw();
+        const disp = document.getElementById('ex-zoom-display');
+        if (disp) disp.textContent = '100%';
+    }
+
+    function exUpdateSelectionUI() {
+        const selDisplay = document.getElementById('ex-selection-display');
+        const btnCopy = document.getElementById('ex-btn-copy-sel');
+        const btnAdd = document.getElementById('ex-btn-add-sel');
+        const selText = document.getElementById('ex-selection-text');
+
+        if (exCurRect && exCurRect.w > 2 && exCurRect.h > 2) {
+            if (selDisplay) selDisplay.style.display = '';
+            if (btnCopy) btnCopy.style.display = '';
+            if (btnAdd) btnAdd.style.display = '';
+            if (selText) selText.textContent = `(${exCurRect.x}, ${exCurRect.y}, ${exCurRect.w}, ${exCurRect.h})`;
+        } else {
+            if (selDisplay) selDisplay.style.display = 'none';
+            if (btnCopy) btnCopy.style.display = 'none';
+            if (btnAdd) btnAdd.style.display = 'none';
+        }
+    }
+
+    function exRedraw() {
+        const overlay = document.getElementById('ex-overlay');
+        if (!overlay) return;
+        const ctx = overlay.getContext('2d');
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+        function toCanvas(rx, ry) {
+            return [rx / exScaleX, ry / exScaleY];
+        }
+
+        // 1. 繪製所有已儲存的排除區域
+        currentExZones.forEach((zone, i) => {
+            const [dx, dy] = toCanvas(zone.x, zone.y);
+            const [dw, dh] = toCanvas(zone.w, zone.h);
+            const isHovered = (exHoveredZoneIdx === i);
+
+            if (zone.enabled) {
+                ctx.strokeStyle = isHovered ? '#f43f5e' : 'rgba(244, 63, 94, 0.85)';
+                ctx.lineWidth = isHovered ? 3 : 2;
+                ctx.setLineDash(isHovered ? [] : [6, 3]);
+                ctx.strokeRect(dx, dy, dw, dh);
+                ctx.setLineDash([]);
+                ctx.fillStyle = isHovered ? 'rgba(244, 63, 94, 0.28)' : 'rgba(244, 63, 94, 0.15)';
+                ctx.fillRect(dx, dy, dw, dh);
+
+                ctx.fillStyle = isHovered ? '#ff6482' : 'rgba(253, 164, 175, 0.95)';
+                ctx.font = 'bold 12px "Fira Code", monospace';
+                ctx.fillText(`Zone #${i + 1} (${zone.w}×${zone.h})`, dx + 4, Math.max(14, dy + 14));
+            } else {
+                ctx.strokeStyle = 'rgba(148, 163, 184, 0.5)';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([4, 4]);
+                ctx.strokeRect(dx, dy, dw, dh);
+                ctx.setLineDash([]);
+                ctx.fillStyle = 'rgba(148, 163, 184, 0.08)';
+                ctx.fillRect(dx, dy, dw, dh);
+
+                ctx.fillStyle = 'rgba(148, 163, 184, 0.7)';
+                ctx.font = '11px "Fira Code", monospace';
+                ctx.fillText(`Zone #${i + 1} (停用)`, dx + 4, Math.max(14, dy + 14));
+            }
+        });
+
+        // 2. 繪製當前拖曳框選區域 (藍色)
+        if (exCurRect && exCurRect.w > 0 && exCurRect.h > 0) {
+            const [dx, dy] = toCanvas(exCurRect.x, exCurRect.y);
+            const [dw, dh] = toCanvas(exCurRect.w, exCurRect.h);
+
+            ctx.strokeStyle = 'rgba(59, 130, 246, 0.95)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([]);
+            ctx.strokeRect(dx, dy, dw, dh);
+            ctx.fillStyle = 'rgba(59, 130, 246, 0.15)';
+            ctx.fillRect(dx, dy, dw, dh);
+
+            ctx.fillStyle = 'rgba(96, 165, 250, 0.95)';
+            ctx.font = 'bold 12px "Fira Code", monospace';
+            ctx.fillText(`${exCurRect.w}×${exCurRect.h}`, dx + dw + 4, dy + dh / 2 + 4);
+        }
+    }
+
+    function exAddZoneFromSelection() {
+        if (!currentProductCode) {
+            alert('請先選擇此排除區域要套用的產品');
+            const selector = document.getElementById('ex-product-selector');
+            if (selector) selector.focus();
+            return;
+        }
+        if (!exCurRect || exCurRect.w < 3 || exCurRect.h < 3) {
+            alert('請先在圖片上框選有效區域');
+            return;
+        }
+        const newZone = {
+            enabled: true,
+            x: exCurRect.x,
+            y: exCurRect.y,
+            w: exCurRect.w,
+            h: exCurRect.h,
+        };
+        currentExZones.push(newZone);
+        const addedIdx = currentExZones.length;
+
+        exInitialQueryCoords = null;
+        exInitialProductCode = '';
+        exCurRect = null;
+        exUpdateSelectionUI();
+        renderExZones();
+        exRedraw();
+
+        showToast(`✅ 已新增排除區域 #${addedIdx}: (${newZone.x}, ${newZone.y}, ${newZone.w}, ${newZone.h})`, 'success');
+
+        setTimeout(() => {
+            const list = document.getElementById('ex-zones-list');
+            if (list && list.lastElementChild) {
+                list.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                list.lastElementChild.classList.add('highlighted');
+                setTimeout(() => {
+                    if (list.lastElementChild) list.lastElementChild.classList.remove('highlighted');
+                }, 1500);
+            }
+        }, 50);
+    }
+
+    function loadProductSampleImage(code, preserveSelection = false) {
+        const img = document.getElementById('ex-image');
+        if (!img) return;
+        const selectionToRestore = preserveSelection && (exCurRect || exInitialQueryCoords)
+            ? { ...(exCurRect || exInitialQueryCoords) }
+            : null;
+        if (!preserveSelection) exInitialQueryCoords = null;
+
+        const sampleSrc = code ? `/imgs/Sample_${code}.jpg` : '/imgs/Sample.jpg';
+        img.onerror = function () {
+            this.onerror = null;
+            this.src = '/imgs/Sample.jpg';
+        };
+        img.onload = function () {
+            exResetZoom();
+            updateExResDisplay();
+            exCurRect = selectionToRestore;
+            exUpdateSelectionUI();
+            exRedraw();
+        };
+
+        if (img.src.endsWith(sampleSrc) && img.complete && img.naturalWidth > 0) {
+            exResetZoom();
+            updateExResDisplay();
+            exCurRect = selectionToRestore;
+            exUpdateSelectionUI();
+            exSyncOverlay();
+            exRedraw();
+        } else {
+            img.src = sampleSrc;
+        }
+    }
+
+    function exLoadImage(preserveSelection = false) {
+        const input = document.getElementById('ex-image-path');
+        const pathVal = input ? input.value.trim() : '';
+        if (!pathVal) {
+            alert('請輸入圖片路徑');
+            return;
+        }
+        const selectionToRestore = preserveSelection && (exCurRect || exInitialQueryCoords)
+            ? { ...(exCurRect || exInitialQueryCoords) }
+            : null;
+        if (!preserveSelection) exInitialQueryCoords = null;
+        exCurrentImagePath = pathVal;
+        const url = '/api/debug/serve-image?path=' + encodeURIComponent(pathVal);
+        const img = document.getElementById('ex-image');
+        if (!img) return;
+
+        img.onload = function () {
+            exCustomImageLoaded = true;
+            exResetZoom();
+            updateExResDisplay();
+            exCurRect = selectionToRestore;
+            exUpdateSelectionUI();
+            exRedraw();
+            showToast('✅ 圖片載入成功', 'success');
+        };
+        img.onerror = function () {
+            alert('圖片載入失敗，請確認檔案路徑是否正確且伺服器可存取');
+        };
+        img.src = url;
+    }
+
+    function exResetToSample() {
+        exInitialQueryCoords = null;
+        exInitialProductCode = '';
+        exCustomImageLoaded = false;
+        exCurrentImagePath = '';
+        const input = document.getElementById('ex-image-path');
+        if (input) input.value = '';
+        loadProductSampleImage(currentProductCode);
+        showToast('🖼️ 已還原為產品範例圖', 'info');
+    }
+
+    function updateExResDisplay() {
+        const img = document.getElementById('ex-image');
+        const disp = document.getElementById('ex-res-display');
+        if (!disp) return;
+        if (img && img.naturalWidth && img.naturalHeight) {
+            disp.textContent = `解析度: ${img.naturalWidth}×${img.naturalHeight}px`;
+        } else {
+            const res = getCurrentProductResolution();
+            disp.textContent = `解析度: ${res.w}×${res.h}px`;
+        }
+    }
+
+    function exCopyToClipboard(text, btn) {
+        function onSuccess() {
+            if (btn) {
+                const orig = btn.textContent;
+                btn.classList.add('copied');
+                btn.textContent = '✅ 已複製';
+                setTimeout(() => {
+                    btn.classList.remove('copied');
+                    btn.textContent = orig;
+                }, 1500);
+            } else {
+                showToast('✅ 已複製到剪貼簿', 'success');
+            }
+        }
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(onSuccess).catch(() => exFallbackCopy(text, onSuccess));
+        } else {
+            exFallbackCopy(text, onSuccess);
+        }
+    }
+
+    function exFallbackCopy(text, cb) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+            document.execCommand('copy');
+            if (cb) cb();
+        } catch (_) {
+            alert('複製失敗，請手動複製:\n' + text);
+        }
+        document.body.removeChild(ta);
+    }
+
+    function exCopySelection() {
+        if (!exCurRect) return;
+        const btn = document.getElementById('ex-btn-copy-sel');
+        exCopyToClipboard(`${exCurRect.x}, ${exCurRect.y}, ${exCurRect.w}, ${exCurRect.h}`, btn);
+    }
+
+    function exCopySingleZone(idx) {
+        const zone = currentExZones[idx];
+        if (!zone) return;
+        exCopyToClipboard(`${zone.x}, ${zone.y}, ${zone.w}, ${zone.h}`);
+    }
+
+    function exCopyAllZones() {
+        if (!currentExZones || currentExZones.length === 0) {
+            showToast('尚無排除區域可複製', 'warning');
+            return;
+        }
+        const text = currentExZones.map((z, i) =>
+            `Zone #${i + 1} (${z.enabled ? '啟用' : '停用'}): x=${z.x}, y=${z.y}, w=${z.w}, h=${z.h}`
+        ).join('\n');
+        exCopyToClipboard(text);
     }
 
     function renderExZones() {
         const listContainer = document.getElementById('ex-zones-list');
+        const countEl = document.getElementById('ex-zones-count');
+        if (countEl) countEl.textContent = currentExZones.length;
         if (!listContainer) return;
+
+        if (currentExZones.length === 0) {
+            listContainer.innerHTML = '<div style="color:var(--text-muted); font-size:0.8rem; text-align:center; padding:20px 0; border:1px dashed rgba(255,255,255,0.1); border-radius:8px;">尚未設定任何排除區域<br><span style="font-size:0.75rem; color:#64748b;">可在左側圖片上拖曳框選，或點擊下方按鈕新增</span></div>';
+            exRedraw();
+            return;
+        }
 
         listContainer.innerHTML = '';
         currentExZones.forEach((zone, idx) => {
             const item = document.createElement('div');
             item.className = 'ex-zone-item';
+            item.dataset.zoneIdx = idx;
+            item.onmouseenter = () => { exHoveredZoneIdx = idx; exRedraw(); };
+            item.onmouseleave = () => { exHoveredZoneIdx = null; exRedraw(); };
             item.innerHTML = `
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
+                    <div style="display:flex; align-items:center; gap:6px;">
+                        <span style="font-weight:700; font-size:0.82rem; color:${zone.enabled ? '#fda4af' : '#94a3b8'};">Zone #${idx + 1}</span>
+                        <span style="font-size:0.75rem; color:var(--text-muted); font-family:'Fira Code';">(${zone.w}×${zone.h})</span>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <button class="btn-copy" style="padding:2px 8px; font-size:0.72rem;" onclick="exCopySingleZone(${idx})" title="複製此組座標">📋</button>
+                        <label class="switch" style="transform: scale(0.7);" title="${zone.enabled ? '已啟用' : '已停用'}">
+                            <input type="checkbox" ${zone.enabled ? 'checked' : ''} onchange="updateExZoneValue(${idx}, 'enabled', this.checked)">
+                            <span class="slider"></span>
+                        </label>
+                        <button class="btn-delete-zone" onclick="removeExZone(${idx})" title="刪除此區域">🗑️</button>
+                    </div>
+                </div>
                 <div class="ex-zone-inputs">
                     <div class="ex-zone-input-group">
                         <label>X</label>
@@ -5215,29 +5900,28 @@
                         <input type="number" value="${zone.h}" onchange="updateExZoneValue(${idx}, 'h', this.value)">
                     </div>
                 </div>
-                <div style="display: flex; flex-direction: column; gap: 8px; align-items: center;">
-                    <label class="switch" style="transform: scale(0.7);">
-                        <input type="checkbox" ${zone.enabled ? 'checked' : ''} onchange="updateExZoneValue(${idx}, 'enabled', this.checked)">
-                        <span class="slider"></span>
-                    </label>
-                    <button class="btn-delete-zone" onclick="removeExZone(${idx})" title="刪除此區域">🗑️</button>
-                </div>
             `;
             listContainer.appendChild(item);
         });
 
-        updateExVis();
+        exRedraw();
     }
 
     function addExZone() {
+        if (!currentProductCode) {
+            alert('請先選擇此排除區域要套用的產品');
+            return;
+        }
         currentExZones.push({ enabled: true, x: 0, y: 0, w: 100, h: 100 });
         renderExZones();
+        exRedraw();
     }
 
     function removeExZone(idx) {
-        if (!confirm('確定要刪除此排除區域嗎？')) return;
+        if (!confirm(`確定要刪除排除區域 #${idx + 1} 嗎？`)) return;
         currentExZones.splice(idx, 1);
         renderExZones();
+        exRedraw();
     }
 
     function updateExZoneValue(idx, key, value) {
@@ -5246,56 +5930,22 @@
         } else {
             currentExZones[idx][key] = parseInt(value) || 0;
         }
-        updateExVis();
+        exRedraw();
     }
 
     function updateExVis() {
-        const VIRTUAL_W = 6576;
-        const VIRTUAL_H = 4384;
-        const container = document.getElementById('ex-vis-container');
-        if (!container) return;
+        exRedraw();
+    }
 
-        // 移除所有現有的 box (保留背景圖與文字)
-        container.querySelectorAll('.ex-zone-box').forEach(el => el.remove());
-
-        currentExZones.forEach((zone, idx) => {
-            if (!zone.enabled) return;
-
-            const box = document.createElement('div');
-            box.className = 'ex-zone-box';
-            box.style.position = 'absolute';
-            box.style.border = '2px solid #f43f5e';
-            box.style.background = 'rgba(244, 63, 94, 0.3)';
-            box.style.pointerEvents = 'none';
-            box.style.transition = 'all 0.2s';
-            box.style.zIndex = '3';
-
-            const pctX = Math.max(0, Math.min(100, (zone.x / VIRTUAL_W) * 100));
-            const pctY = Math.max(0, Math.min(100, (zone.y / VIRTUAL_H) * 100));
-            const pctW = Math.min(100 - pctX, (zone.w / VIRTUAL_W) * 100);
-            const pctH = Math.min(100 - pctY, (zone.h / VIRTUAL_H) * 100);
-
-            box.style.left = `${pctX}%`;
-            box.style.top = `${pctY}%`;
-            box.style.width = `${pctW}%`;
-            box.style.height = `${pctH}%`;
-
-            const label = document.createElement('div');
-            label.style.position = 'absolute';
-            label.style.top = '-18px';
-            label.style.left = '0';
-            label.style.color = '#f43f5e';
-            label.style.fontSize = '9px';
-            label.style.fontWeight = 'bold';
-            label.style.whiteSpace = 'nowrap';
-            label.textContent = `Zone ${idx + 1}`;
-            box.appendChild(label);
-
-            container.appendChild(box);
-        });
+    function updateExZoneBox() {
+        exRedraw();
     }
 
     async function saveExZone() {
+        if (!currentProductCode) {
+            showToast('請先選擇要套用的產品', 'warning');
+            return;
+        }
         // 先把目前正在編輯的產品 zones 存回 dict
         if (currentProductCode) {
             allExZonesByProduct[currentProductCode] = JSON.parse(JSON.stringify(currentExZones));
@@ -5319,15 +5969,6 @@
         } catch (e) {
             showToast('❌ 儲存失敗: ' + e.message, 'error');
         }
-    }
-
-    function updateExZoneBox() {
-        // This function is deprecated and replaced by updateExVis.
-        // It's kept for now to avoid breaking existing calls if any,
-        // but its content is no longer relevant for the new multi-zone logic.
-        // The new logic is handled by renderExZones and updateExVis.
-        console.warn("updateExZoneBox is deprecated. Use renderExZones/updateExVis instead.");
-        updateExVis(); // Redirect to the new visualization function
     }
 
     function updateEdgeVisualizer() {
@@ -5410,4 +6051,3 @@
     });
 </script>
 {% endblock %}
-```
