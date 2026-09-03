@@ -2,6 +2,7 @@ import io
 import http.client
 import json
 import threading
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -438,3 +439,21 @@ def test_settings_template_integrates_central_location_into_accounts():
     assert "renderWithinSpecPane(withinSpecParam, centralAccountLocation)" in template
     assert "function renderWithinSpecPane(param, centralAccountLocation)" in template
     assert "${renderAccountsPane(centralAccountLocation)}" in template
+
+
+def test_settings_login_redirect_preserves_exclusion_zone_query():
+    target = (
+        "/settings?tab=cv-edge&path=D%3A%5Cpanel%5CH0F00000.tif"
+        "&product=H&x=100&y=200&w=300&h=400"
+    )
+    handler = object.__new__(CAPIWebHandler)
+    handler.path = target
+    handler._current_settings_user = lambda: None
+    redirects = []
+    handler._redirect = redirects.append
+
+    handler.do_GET()
+
+    assert redirects == [
+        "/settings/login?next=" + urllib.parse.quote(target, safe="")
+    ]

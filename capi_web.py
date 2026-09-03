@@ -3662,10 +3662,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if self._require_settings_user(api=True, admin=True):
                     self._handle_api_settings_mark_shadow_crop(query)
             elif path == "/settings":
-                if self._require_settings_user(next_path=path):
+                if self._require_settings_user(next_path=self.path):
                     self._handle_settings_page(path)
             elif path == "/settings_v2":
-                if self._require_settings_user(next_path=path):
+                if self._require_settings_user(next_path=self.path):
                     self._handle_settings_v2_page(path)
             elif path == "/api/settings":
                 if self._require_settings_user(api=True):

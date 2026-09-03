@@ -1919,6 +1919,13 @@
             <div class="coord-input-row" style="margin-bottom:16px;">
                 <input type="text" id="cv-image-path" placeholder="圖片絕對路徑" autocomplete="off" spellcheck="false"
                     style="flex:1; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.95rem; outline:none;">
+                <select id="cv-product-code" title="此區域要套用的產品"
+                    style="background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:'Fira Code',monospace; font-size:0.9rem; outline:none;">
+                    <option value="">選擇產品</option>
+                    {% for code, res in model_resolution_map.items() %}
+                    <option value="{{ code }}">{{ code }}: {{ res[0] }}×{{ res[1] }}</option>
+                    {% endfor %}
+                </select>
                 <button class="btn-run" id="btn-cv-load" onclick="cvLoadImage()" style="background:linear-gradient(135deg,#10b981,#059669);">
                     📂 載入圖片
                 </button>
@@ -1948,6 +1955,7 @@
                     </div>
                     <button class="btn-copy" id="cv-btn-copy-sel" style="display:none;" onclick="cvCopySelection()">📋 複製框選座標</button>
                     <button class="btn-copy" id="cv-btn-add-region" style="display:none;" onclick="cvAddRegion()">＋ 記錄此區域</button>
+                    <button class="btn-copy" id="cv-btn-to-settings" style="display:none; color:#fda4af; border-color:rgba(244,63,94,0.4); background:rgba(244,63,94,0.12);" onclick="cvGoToSettingsExZone()">⚙️ 設為排除區域 (前往設定)</button>
                 </div>
 
                 <!-- Saved regions -->
@@ -5281,11 +5289,17 @@
     document.getElementById('cv-image-path').addEventListener('keydown', (e) => {
         if (e.key === 'Enter') cvLoadImage();
     });
+    document.getElementById('cv-image-path').addEventListener('input', (e) => {
+        autoSelectResolution(e.target.value, 'cv-product-code');
+    });
 
     // 同步路徑到座標查看
     input.addEventListener('input', () => {
         const cvPath = document.getElementById('cv-image-path');
-        if (cvPath && !cvPath.value) cvPath.value = input.value;
+        if (cvPath && !cvPath.value) {
+            cvPath.value = input.value;
+            autoSelectResolution(input.value, 'cv-product-code');
+        }
     });
 
     (function () {
@@ -5294,18 +5308,20 @@
         if (pathParam) {
             const cvPath = document.getElementById('cv-image-path');
             if (cvPath) cvPath.value = pathParam;
+            autoSelectResolution(pathParam, 'cv-product-code');
         }
     })();
 
     function cvLoadImage() {
         const pathVal = document.getElementById('cv-image-path').value.trim();
         if (!pathVal) return;
+        autoSelectResolution(pathVal, 'cv-product-code');
         const url = '/api/debug/serve-image?path=' + encodeURIComponent(pathVal);
         cvImg.onload = function () {
             cvZoom = 1; cvPanX = 0; cvPanY = 0;
+            document.getElementById('cv-viewer-area').classList.remove('hidden');
             cvApplyTransform();
             cvSyncOverlay();
-            document.getElementById('cv-viewer-area').classList.remove('hidden');
             document.getElementById('cv-zoom-display').textContent = '100%';
             cvCurRect = null;
             cvRegions = [];
@@ -5440,17 +5456,35 @@
         const selDisplay = document.getElementById('cv-selection-display');
         const btnCopy = document.getElementById('cv-btn-copy-sel');
         const btnAdd = document.getElementById('cv-btn-add-region');
+        const btnSettings = document.getElementById('cv-btn-to-settings');
         if (cvCurRect && cvCurRect.w > 2 && cvCurRect.h > 2) {
             selDisplay.style.display = '';
             btnCopy.style.display = '';
             btnAdd.style.display = '';
+            if (btnSettings) btnSettings.style.display = '';
             document.getElementById('cv-selection-text').textContent =
                 `(${cvCurRect.x}, ${cvCurRect.y}, ${cvCurRect.w}, ${cvCurRect.h})`;
         } else {
             selDisplay.style.display = 'none';
             btnCopy.style.display = 'none';
             btnAdd.style.display = 'none';
+            if (btnSettings) btnSettings.style.display = 'none';
         }
+    }
+
+    function cvGoToSettingsExZone() {
+        if (!cvCurRect) return;
+        const pathVal = document.getElementById('cv-image-path').value.trim();
+        const productSelect = document.getElementById('cv-product-code');
+        const productCode = productSelect ? productSelect.value.trim() : '';
+        if (!productCode) {
+            alert('請先選擇此排除區域要套用的產品');
+            if (productSelect) productSelect.focus();
+            return;
+        }
+        cvCopyToClipboard(`${cvCurRect.x}, ${cvCurRect.y}, ${cvCurRect.w}, ${cvCurRect.h}`);
+        const url = `/settings?tab=cv-edge&path=${encodeURIComponent(pathVal)}&product=${encodeURIComponent(productCode)}&x=${cvCurRect.x}&y=${cvCurRect.y}&w=${cvCurRect.w}&h=${cvCurRect.h}`;
+        window.open(url, '_blank');
     }
 
     function cvRedraw() {
