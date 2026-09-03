@@ -251,6 +251,8 @@ class CAPIConfig:
     dust_mask_before_binarize: bool = False   # 先遮罩灰塵區域再二值化 (解決灰塵強訊號淹沒弱缺陷的問題)
     dust_two_stage_enabled: bool = False      # 兩階段灰塵判定：heatmap定位→原圖找特徵點→精準比對dust_mask
     dust_two_stage_dust_ratio: float = 0.3    # 特徵點與灰塵重疊比例 >= 此值判為灰塵
+    dust_two_stage_association_radius_px: int = 4  # 無擴展灰塵核心外的暈圈關聯半徑 (px)
+    dust_two_stage_association_ratio: float = 0.5  # 非原始 Top 核心特徵需落在關聯區的最低比例
     dust_two_stage_bg_blur: int = 31          # 局部背景估計的 Gaussian blur kernel size
     dust_two_stage_diff_percentile: float = 90.0  # 取 diff 分布的此百分位作為特徵閾值
     dust_two_stage_min_area: int = 3          # 特徵最小面積 (px)
@@ -550,6 +552,8 @@ class CAPIConfig:
             dust_mask_before_binarize=data.get("dust_mask_before_binarize", False),
             dust_two_stage_enabled=data.get("dust_two_stage_enabled", False),
             dust_two_stage_dust_ratio=data.get("dust_two_stage_dust_ratio", 0.3),
+            dust_two_stage_association_radius_px=data.get("dust_two_stage_association_radius_px", 4),
+            dust_two_stage_association_ratio=data.get("dust_two_stage_association_ratio", 0.5),
             dust_two_stage_bg_blur=data.get("dust_two_stage_bg_blur", 31),
             dust_two_stage_diff_percentile=data.get("dust_two_stage_diff_percentile", 90.0),
             dust_two_stage_min_area=data.get("dust_two_stage_min_area", 3),
@@ -705,6 +709,8 @@ class CAPIConfig:
             "dust_mask_before_binarize": self.dust_mask_before_binarize,
             "dust_two_stage_enabled": self.dust_two_stage_enabled,
             "dust_two_stage_dust_ratio": self.dust_two_stage_dust_ratio,
+            "dust_two_stage_association_radius_px": self.dust_two_stage_association_radius_px,
+            "dust_two_stage_association_ratio": self.dust_two_stage_association_ratio,
             "dust_two_stage_bg_blur": self.dust_two_stage_bg_blur,
             "dust_two_stage_diff_percentile": self.dust_two_stage_diff_percentile,
             "dust_two_stage_min_area": self.dust_two_stage_min_area,
@@ -821,6 +827,8 @@ class CAPIConfig:
             "dust_mask_before_binarize": self.dust_mask_before_binarize,
             "dust_two_stage_enabled": self.dust_two_stage_enabled,
             "dust_two_stage_dust_ratio": self.dust_two_stage_dust_ratio,
+            "dust_two_stage_association_radius_px": self.dust_two_stage_association_radius_px,
+            "dust_two_stage_association_ratio": self.dust_two_stage_association_ratio,
             "dust_two_stage_bg_blur": self.dust_two_stage_bg_blur,
             "dust_two_stage_diff_percentile": self.dust_two_stage_diff_percentile,
             "dust_two_stage_min_area": self.dust_two_stage_min_area,
@@ -999,6 +1007,15 @@ class CAPIConfig:
             self.dust_two_stage_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
         if "dust_two_stage_dust_ratio" in param_map:
             self.dust_two_stage_dust_ratio = float(param_map["dust_two_stage_dust_ratio"])
+        if "dust_two_stage_association_radius_px" in param_map:
+            self.dust_two_stage_association_radius_px = max(
+                0, int(param_map["dust_two_stage_association_radius_px"])
+            )
+        if "dust_two_stage_association_ratio" in param_map:
+            self.dust_two_stage_association_ratio = min(
+                1.0,
+                max(0.0, float(param_map["dust_two_stage_association_ratio"])),
+            )
         if "dust_two_stage_bg_blur" in param_map:
             self.dust_two_stage_bg_blur = int(param_map["dust_two_stage_bg_blur"])
         if "dust_two_stage_diff_percentile" in param_map:

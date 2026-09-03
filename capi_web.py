@@ -310,6 +310,7 @@ def _coord_debug_two_stage_payload(
     }
     dust_reason_labels = {
         "feature_overlap": "特徵本身與灰塵重疊",
+        "association_halo": "緊鄰灰塵核心的亮／暗暈圈",
         "zone_dominated": "所在熱區主要由灰塵／氣泡構成",
         "clean": "未被灰塵覆蓋",
     }
@@ -331,6 +332,20 @@ def _coord_debug_two_stage_payload(
             "type_zh": "暗點" if feature.get("type") == "dark" else "亮點",
             "area": int(feature.get("area") or 0),
             "dust_ratio": round(float(feature.get("dust_ratio") or 0.0), 6),
+            "dust_association_overlap": int(
+                feature.get("dust_association_overlap") or 0
+            ),
+            "dust_association_ratio": round(
+                float(feature.get("dust_association_ratio") or 0.0), 6
+            ),
+            "dust_distance_px": (
+                round(float(feature["dust_distance_px"]), 3)
+                if feature.get("dust_distance_px") is not None
+                else None
+            ),
+            "dust_association_radius_px": int(
+                feature.get("dust_association_radius_px") or 0
+            ),
             "zone_dust_coverage": round(
                 float(feature.get("zone_dust_cov") or 0.0), 6
             ),
@@ -364,6 +379,7 @@ def _coord_debug_two_stage_payload(
         ),
         "reranked_after_dust": "排除灰塵／氣泡後重新排名而救回",
         "local_score_rescued": "靠局部等效分數達門檻而救回",
+        "association_halo": "緊鄰灰塵核心，判為同一污染的亮／暗暈圈",
     }
     for key, label_zh in counter_labels.items():
         match = re.search(rf"\b{re.escape(key)}=(\d+)", str(detail_text or ""))
@@ -1862,7 +1878,9 @@ def _attach_runtime_dust_masks_to_within_spec_detail(detail: Dict[str, Any], res
             if runtime_tile is None:
                 continue
 
-            dust_mask = getattr(runtime_tile, "dust_two_stage_dust_mask", None)
+            dust_mask = getattr(runtime_tile, "dust_two_stage_association_mask", None)
+            if dust_mask is None:
+                dust_mask = getattr(runtime_tile, "dust_two_stage_dust_mask", None)
             if dust_mask is None:
                 dust_mask = getattr(runtime_tile, "dust_mask", None)
             if dust_mask is not None:
@@ -2049,7 +2067,11 @@ def _within_spec_no_detect_mask_for_tile(
     return mask > 0
 
 
-def _candidate_dust_overlap(candidate: Dict[str, Any], dust_mask) -> Optional[Dict[str, Any]]:
+def _candidate_dust_overlap(
+    candidate: Dict[str, Any],
+    dust_mask,
+    candidate_mask=None,
+) -> Optional[Dict[str, Any]]:
     import numpy as np
 
     if dust_mask is None:
@@ -2065,7 +2087,20 @@ def _candidate_dust_overlap(candidate: Dict[str, Any], dust_mask) -> Optional[Di
     if patch.size <= 0:
         return None
 
+    overlap_basis = "bbox"
     overlap_ratio = float(np.count_nonzero(patch) / patch.size)
+    if candidate_mask is not None:
+        feature_mask = np.asarray(candidate_mask)
+        if feature_mask.ndim == 3:
+            feature_mask = feature_mask[:, :, 0]
+        if feature_mask.shape[:2] == dust_mask.shape[:2]:
+            feature_patch = feature_mask[y:y2, x:x2] > 0
+            feature_area = int(np.count_nonzero(feature_patch))
+            if feature_area > 0:
+                overlap_ratio = float(
+                    np.count_nonzero(patch & feature_patch) / feature_area
+                )
+                overlap_basis = "component"
     cx = max(0, min(mask_w - 1, int(round(_as_float(candidate.get("center_x"), x + w / 2.0)))))
     cy = max(0, min(mask_h - 1, int(round(_as_float(candidate.get("center_y"), y + h / 2.0)))))
     center_in_dust = bool(dust_mask[cy, cx])
@@ -2079,6 +2114,7 @@ def _candidate_dust_overlap(candidate: Dict[str, Any], dust_mask) -> Optional[Di
     rejected.update({
         "reason": "dust_mask_overlap",
         "dust_overlap_ratio": round(overlap_ratio, 4),
+        "dust_overlap_basis": overlap_basis,
         "center_in_dust": center_in_dust,
     })
     return rejected
@@ -2126,10 +2162,13 @@ def _remove_dust_overlap_candidates(detected: Dict[str, Any], dust_mask) -> Dict
     kept = []
     rejected = []
     original_rejected = detected.get("rejected_candidates") or []
+    candidate_mask = detected.get("mask")
     original_count = len(detected.get("candidates") or [])
     dust_filtered_rejected_count = 0
     for candidate in original_rejected:
-        dust_rejected = _candidate_dust_overlap(candidate, dust_mask)
+        dust_rejected = _candidate_dust_overlap(
+            candidate, dust_mask, candidate_mask
+        )
         if dust_rejected:
             dust_rejected["source_reason"] = candidate.get("reason", "")
             rejected.append(dust_rejected)
@@ -2137,7 +2176,9 @@ def _remove_dust_overlap_candidates(detected: Dict[str, Any], dust_mask) -> Dict
         else:
             rejected.append(candidate)
     for candidate in detected.get("candidates") or []:
-        dust_rejected = _candidate_dust_overlap(candidate, dust_mask)
+        dust_rejected = _candidate_dust_overlap(
+            candidate, dust_mask, candidate_mask
+        )
         if dust_rejected:
             rejected.append(dust_rejected)
         else:
@@ -9402,6 +9443,14 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             two_stage_ran = True
             tile_info.dust_two_stage_features = two_stage_features
             tile_info.dust_two_stage_dust_mask = precise_dust_mask
+            association_builder = getattr(
+                inferencer, "_build_dust_association_mask", None
+            )
+            tile_info.dust_two_stage_association_mask = (
+                association_builder(precise_dust_mask)
+                if callable(association_builder)
+                else precise_dust_mask
+            )
             detail_text += (
                 f" PER_REGION: 0real+{len(dust_regions)}dust -> {ts_detail}"
             )

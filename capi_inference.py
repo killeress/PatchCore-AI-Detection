@@ -237,6 +237,7 @@ class TileInfo:
     dust_iou_debug_image: Optional[np.ndarray] = field(default=None, repr=False)  # IOU debug 可視化圖
     dust_two_stage_features: Optional[list] = field(default=None, repr=False)  # 兩階段特徵點列表
     dust_two_stage_dust_mask: Optional[np.ndarray] = field(default=None, repr=False)  # two-stage 實際使用的 dust mask
+    dust_two_stage_association_mask: Optional[np.ndarray] = field(default=None, repr=False)  # 規格內檢查使用的灰塵暈圈關聯 mask
     is_bomb: bool = False       # 是否為炸彈系統模擬缺陷
     bomb_defect_code: str = ""  # 匹配到的炸彈 Defect Code
     is_in_exclude_zone: bool = False  # 是否位於不檢測排除區域內
@@ -4423,6 +4424,30 @@ class CAPIInferencer:
 
         return has_real_defect, real_peak_yx, overall_iou, region_details, heatmap_binary, labels
 
+    def _build_dust_association_mask(
+        self,
+        dust_mask: Optional[np.ndarray],
+    ) -> Optional[np.ndarray]:
+        """Expand the precise dust core only for feature-to-dust association."""
+        if dust_mask is None:
+            return None
+
+        dm = np.asarray(dust_mask, dtype=np.uint8)
+        if len(dm.shape) == 3:
+            dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
+        radius = max(
+            0,
+            int(getattr(self.config, "dust_two_stage_association_radius_px", 4)),
+        )
+        if radius == 0 or not np.any(dm > 0):
+            return dm.copy()
+
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (radius * 2 + 1, radius * 2 + 1),
+        )
+        return cv2.dilate(dm, kernel, iterations=1)
+
     def check_dust_two_stage(
         self,
         tile_image: np.ndarray,
@@ -4444,6 +4469,17 @@ class CAPIInferencer:
         """
         cfg = self.config
         dust_ratio_thr = cfg.dust_two_stage_dust_ratio
+        association_radius_px = max(
+            0,
+            int(getattr(cfg, "dust_two_stage_association_radius_px", 4)),
+        )
+        association_ratio_thr = min(
+            1.0,
+            max(
+                0.0,
+                float(getattr(cfg, "dust_two_stage_association_ratio", 0.5)),
+            ),
+        )
         bg_blur_k = cfg.dust_two_stage_bg_blur
         diff_pct = cfg.dust_two_stage_diff_percentile
         min_area = cfg.dust_two_stage_min_area
@@ -4473,6 +4509,15 @@ class CAPIInferencer:
         if dm.shape != (tile_h, tile_w):
             dm = cv2.resize(dm, (tile_w, tile_h), interpolation=cv2.INTER_NEAREST)
         dust_bool_tile = dm > 0
+        association_dm = self._build_dust_association_mask(dm)
+        association_bool_tile = association_dm > 0
+        dust_distance_map = None
+        if np.any(dust_bool_tile):
+            dust_distance_map = cv2.distanceTransform(
+                (~dust_bool_tile).astype(np.uint8),
+                cv2.DIST_L2,
+                3,
+            )
 
         # --- Stage 1: Heatmap -> broad candidate zones ---
         pos_vals = anomaly_f[anomaly_f > 0]
@@ -4721,15 +4766,39 @@ class CAPIInferencer:
                     dust_overlap = int(np.count_nonzero(feat_dust > 0))
                     feat_dust_ratio = dust_overlap / farea
                     feature_on_dust = feat_dust_ratio >= dust_ratio_thr
+                    association_pixels = association_bool_tile[
+                        ty1:ty2, tx1:tx2
+                    ][fm]
+                    association_overlap = int(np.count_nonzero(association_pixels))
+                    association_ratio = association_overlap / farea
+                    dust_distance_px = None
+                    if dust_distance_map is not None:
+                        feature_distances = dust_distance_map[
+                            ty1:ty2, tx1:tx2
+                        ][fm]
+                        if feature_distances.size:
+                            dust_distance_px = float(np.min(feature_distances))
+                    association_halo = bool(
+                        association_radius_px > 0
+                        and not feature_on_dust
+                        and association_overlap > 0
+                        and (
+                            hot_core_supported
+                            or association_ratio >= association_ratio_thr
+                        )
+                    )
                     # 原 Top 核心保留既有整區 dust 保護；重排/局部分數救回的
-                    # feature 則看自身與無擴展 dust mask 的精準重疊。
-                    feature_is_dust = feature_on_dust or (
+                    # feature 則看自身與無擴展 dust mask 的精準重疊。灰塵核心
+                    # 的小幅關聯外擴只用來吸收同一顆灰塵造成的亮／暗暈圈。
+                    feature_is_dust = feature_on_dust or association_halo or (
                         hot_core_supported and zone_dust_dominated
                     )
                     dust_reason = (
                         "feature_overlap" if feature_on_dust
                         else "zone_dominated"
                         if hot_core_supported and zone_dust_dominated
+                        else "association_halo"
+                        if association_halo
                         else "clean"
                     )
 
@@ -4744,6 +4813,10 @@ class CAPIInferencer:
                         "feature_contour": feature_contour,
                         "dust_overlap": dust_overlap,
                         "dust_ratio": feat_dust_ratio,
+                        "dust_association_overlap": association_overlap,
+                        "dust_association_ratio": association_ratio,
+                        "dust_distance_px": dust_distance_px,
+                        "dust_association_radius_px": association_radius_px,
                         "is_dust": feature_is_dust,
                         "dust_reason": dust_reason,
                         "zone_id": lid,
@@ -4761,6 +4834,10 @@ class CAPIInferencer:
         # --- Verdict ---
         real_features = [f for f in all_features if not f["is_dust"]]
         dust_features = [f for f in all_features if f["is_dust"]]
+        association_halo_features = sum(
+            1 for feature in dust_features
+            if feature.get("dust_reason") == "association_halo"
+        )
         ignored_parts = []
         if ignored_border_features:
             ignored_parts.append(f"ignored_border={ignored_border_features}")
@@ -4775,6 +4852,10 @@ class CAPIInferencer:
         if local_score_rescued_features:
             ignored_parts.append(
                 f"local_score_rescued={local_score_rescued_features}"
+            )
+        if association_halo_features:
+            ignored_parts.append(
+                f"association_halo={association_halo_features}"
             )
         ignored_hint = f" {' '.join(ignored_parts)}" if ignored_parts else ""
 
@@ -7782,6 +7863,9 @@ class CAPIInferencer:
                                     _ts_dust_mask_no_ext = dust_mask_no_ext
                                     tile.dust_two_stage_features = ts_features
                                     tile.dust_two_stage_dust_mask = dust_mask_no_ext if dust_mask_no_ext is not None else dust_mask
+                                    tile.dust_two_stage_association_mask = self._build_dust_association_mask(
+                                        tile.dust_two_stage_dust_mask
+                                    )
                                     if ts_has_real:
                                         tile.is_suspected_dust_or_scratch = False
                                         detail_text += (
@@ -8635,6 +8719,9 @@ class CAPIInferencer:
                             _ts_dust_mask_no_ext = dust_mask_no_ext
                             tile.dust_two_stage_features = ts_features
                             tile.dust_two_stage_dust_mask = dust_mask_no_ext if dust_mask_no_ext is not None else dust_mask
+                            tile.dust_two_stage_association_mask = self._build_dust_association_mask(
+                                tile.dust_two_stage_dust_mask
+                            )
 
                             if ts_has_real:
                                 tile.is_suspected_dust_or_scratch = False
