@@ -1244,6 +1244,52 @@ def test_client_point_bomb_can_match_multiple_aoi_tiles_within_tolerance(tmp_pat
     assert near_tile.bomb_defect_code == "UNKNOWN"
 
 
+def test_client_point_bomb_matches_aapi_glass_prefixed_filename(tmp_path):
+    from capi_inference import CAPIInferencer, ImageResult, TileInfo
+    from capi_station_adapter import AAPIStationAdapter
+
+    cfg = _make_config(tmp_path)
+    cfg.bomb_match_tolerance = 20
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+    inferencer.station_adapter = AAPIStationAdapter()
+
+    tile = TileInfo(
+        tile_id=1,
+        x=1521,
+        y=598,
+        width=512,
+        height=512,
+        image=np.zeros((512, 512), dtype=np.uint8),
+        zone="inner",
+    )
+    tile.is_aoi_coord_tile = True
+    tile.aoi_product_x = 367
+    tile.aoi_product_y = 131
+    result = ImageResult(
+        image_path=Path("T865PE94AL13W0F00000145021.tif"),
+        image_size=(6576, 4384),
+        otsu_bounds=(905, 542, 5477, 3404),
+        exclusion_regions=[],
+        tiles=[tile],
+        excluded_tile_count=0,
+        processed_tile_count=1,
+        processing_time=0.0,
+        anomaly_tiles=[(tile, 1.0, None)],
+        raw_bounds=(905, 542, 5477, 3404),
+    )
+    bomb_info = {
+        "image_prefix": "W0F00000",
+        "defect_type": "point",
+        "coordinates": [(367, 131)],
+    }
+
+    inferencer._apply_bomb_postprocess([result], bomb_info, (1920, 1200))
+
+    assert tile.is_bomb is True
+    assert tile.bomb_defect_code == "UNKNOWN"
+
+
 def test_forced_bomb_detection_skips_client_coord_already_covered_by_aoi(capsys):
     from capi_inference import AOIReportDefect, CAPIInferencer
 
