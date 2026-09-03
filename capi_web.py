@@ -71,6 +71,9 @@ logger = logging.getLogger("capi.web")
 _MES_REVIEW_LIGHTINGS = {
     "G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD",
 }
+_DEBUG_IMAGE_EXTENSIONS = {
+    ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp",
+}
 
 CENTRAL_ACCOUNT_LOCATION_PARAM = "central_account_location"
 CENTRAL_ACCOUNT_DEFAULT_IPS = {
@@ -5735,8 +5738,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     # ── Debug 推論功能 ─────────────────────────────────
 
     def _handle_debug_serve_image(self, query):
-        """API: 以絕對路徑提供原始圖片 (僅 Debug 用)
+        """API: 以圖片或資料夾路徑提供原始圖片 (僅 Debug 用)
         瀏覽器不支援 TIF/TIFF/BMP，自動轉為 PNG 回傳。
+
+        資料夾路徑會自動選擇檔名包含 W0F00000 的最新圖片，讓座標查看
+        與 CV 不檢測區域設定共用同一組 panel 資料夾路徑。
         """
         try:
             # query 已由 do_GET 透過 parse_qs 解析為 dict
@@ -5747,7 +5753,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_error(400, "missing path parameter")
                 return
             p = Path(img_path)
-            if not p.exists() or not p.is_file():
+            if p.is_dir():
+                resolved = self._resolve_debug_image_path(p)
+                if resolved is None:
+                    self._send_error(
+                        404,
+                        f"no image containing W0F00000 found in folder: {img_path}",
+                    )
+                    return
+                p = resolved
+            elif not p.exists() or not p.is_file():
                 self._send_error(404, f"file not found: {img_path}")
                 return
 
@@ -5774,6 +5789,42 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Error serving debug image: {e}")
             self._send_error(500, str(e))
+
+    @staticmethod
+    def _resolve_debug_image_path(path_value) -> Optional[Path]:
+        """Resolve a panel folder to its newest W0F00000 image.
+
+        A direct image path is returned unchanged.  Folder scanning is limited
+        to the folder's immediate children so an unrelated nested panel cannot
+        be selected accidentally.
+        """
+        path = Path(str(path_value or "").strip())
+        if path.is_file():
+            return path
+        if not path.is_dir():
+            return None
+
+        try:
+            candidates = [
+                entry
+                for entry in path.iterdir()
+                if entry.is_file()
+                and entry.suffix.lower() in _DEBUG_IMAGE_EXTENSIONS
+                and "W0F00000" in entry.name.upper()
+            ]
+        except OSError:
+            return None
+        if not candidates:
+            return None
+
+        def latest_key(candidate: Path) -> Tuple[int, str]:
+            try:
+                modified = candidate.stat().st_mtime_ns
+            except OSError:
+                modified = 0
+            return modified, candidate.name
+
+        return max(candidates, key=latest_key)
 
     def _handle_debug_preprocess_lab(self):
         """API: Debug image preprocessing lab."""
