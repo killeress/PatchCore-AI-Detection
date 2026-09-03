@@ -151,6 +151,7 @@ class PreprocessConfig:
     grid_canonicalization_enabled: bool = False
     grid_samples_per_cell: int = 3
     rotate_180: bool = False
+    fast_raw_boundary_enabled: bool = False  # opt-in from AAPI inference only
     image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -209,6 +210,13 @@ BOUNDARY_GRAY_BAND_SHIFT_PARAMS = {
     "bright_shift": 10,
     "band_mode": "keep",
 }
+BOUNDARY_DETECTION_SCALE = 0.5
+BOUNDARY_DOWNSCALE_MIN_SPAN_TILES = 4
+BOUNDARY_GAUSSIAN_KERNEL = (5, 5)
+BOUNDARY_GAUSSIAN_SIGMA = 1.0
+# YQ60 sample is 94.5% x 89.0%; smaller legacy panels stay below this gate.
+FAST_BOUNDARY_MIN_WIDTH_RATIO = 0.85
+FAST_BOUNDARY_MIN_HEIGHT_RATIO = 0.80
 SKIP_EXACT = ("Optics.log",)
 
 EDGE_MARGIN = 20
@@ -537,6 +545,149 @@ def detect_panel_polygon(
         stabilize_near_vertical_edges=_use_robust_panel_boundary(config),
     )
     return bbox, polygon
+
+
+def detect_panel_boundary(
+    image: np.ndarray,
+    config: PreprocessConfig,
+    *,
+    source_name: str = "",
+) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[np.ndarray]]:
+    """Detect the panel boundary from the raw image, independent of model preprocessing."""
+    if image is None or image.size == 0:
+        return None, None
+
+    started = time.perf_counter()
+    img_h, img_w = image.shape[:2]
+    robust_boundary = _use_robust_panel_boundary(config)
+    can_downscale = (
+        not robust_boundary
+        and min(img_h, img_w)
+        >= BOUNDARY_DOWNSCALE_MIN_SPAN_TILES * max(1, int(config.tile_size))
+    )
+    requested_scale = BOUNDARY_DETECTION_SCALE if can_downscale else 1.0
+
+    if requested_scale < 1.0:
+        scaled_w = max(1, int(round(img_w * requested_scale)))
+        scaled_h = max(1, int(round(img_h * requested_scale)))
+        boundary_image = cv2.resize(
+            image,
+            (scaled_w, scaled_h),
+            interpolation=cv2.INTER_AREA,
+        )
+    else:
+        scaled_w, scaled_h = img_w, img_h
+        boundary_image = image
+
+    # Small-product detection already applies its own blur before Otsu.  The
+    # regular path needs this dedicated low-pass step so display pixel grids or
+    # model sharpening cannot destabilize first/last-foreground edge samples.
+    if not robust_boundary:
+        boundary_image = cv2.GaussianBlur(
+            boundary_image,
+            BOUNDARY_GAUSSIAN_KERNEL,
+            sigmaX=BOUNDARY_GAUSSIAN_SIGMA,
+        )
+    normalize_ms = (time.perf_counter() - started) * 1000.0
+
+    scale_x = scaled_w / float(img_w)
+    scale_y = scaled_h / float(img_h)
+    scaled_cfg = replace(
+        config,
+        tile_size=max(1, int(round(config.tile_size * min(scale_x, scale_y)))),
+        tile_stride=max(1, int(round(config.tile_stride * min(scale_x, scale_y)))),
+        otsu_offset=max(0, int(round(config.otsu_offset * min(scale_x, scale_y)))),
+    )
+
+    detect_started = time.perf_counter()
+    bbox, polygon = detect_panel_polygon(boundary_image, scaled_cfg)
+    detect_ms = (time.perf_counter() - detect_started) * 1000.0
+
+    if bbox is not None and (scale_x != 1.0 or scale_y != 1.0):
+        bbox = (
+            int(round(bbox[0] / scale_x)),
+            int(round(bbox[1] / scale_y)),
+            int(round(bbox[2] / scale_x)),
+            int(round(bbox[3] / scale_y)),
+        )
+    if polygon is not None and (scale_x != 1.0 or scale_y != 1.0):
+        polygon = polygon.astype(np.float32, copy=True)
+        polygon[:, 0] /= scale_x
+        polygon[:, 1] /= scale_y
+
+    if polygon is not None:
+        status = "ok"
+    elif not config.enable_panel_polygon and bbox is not None:
+        status = "bbox_only"
+    else:
+        status = "polygon_failed"
+    logger.info(
+        "[boundary] source=%s input=raw scale=%.2f gaussian=%s "
+        "normalize=%.1fms detect=%.1fms status=%s bbox=%s",
+        source_name or "-",
+        min(scale_x, scale_y),
+        "internal" if robust_boundary else "5x5",
+        normalize_ms,
+        detect_ms,
+        status,
+        bbox,
+    )
+    return bbox, polygon
+
+
+def _detect_panel_boundary_file(
+    image_path: Path,
+    config: PreprocessConfig,
+) -> Tuple[
+    Optional[Tuple[int, int, int, int]],
+    Optional[np.ndarray],
+    Optional[bool],
+]:
+    image = read_detection_image(image_path, cv2.IMREAD_GRAYSCALE, config.rotate_180)
+    if image is None:
+        raise FileNotFoundError(f"無法載入圖片: {image_path}")
+    return _detect_fast_panel_boundary(image, config, source_name=image_path.name)
+
+
+def _detect_fast_panel_boundary(
+    image: np.ndarray,
+    config: PreprocessConfig,
+    *,
+    source_name: str = "",
+) -> Tuple[
+    Optional[Tuple[int, int, int, int]],
+    Optional[np.ndarray],
+    Optional[bool],
+]:
+    """Return boundary plus occupancy eligibility; None means detection failed."""
+    bbox, polygon = detect_panel_boundary(image, config, source_name=source_name)
+    if bbox is None:
+        return None, None, None
+
+    img_h, img_w = image.shape[:2]
+    x1, y1, x2, y2 = bbox
+    width_ratio = max(0, x2 - x1) / float(max(1, img_w))
+    height_ratio = max(0, y2 - y1) / float(max(1, img_h))
+    if (
+        width_ratio < FAST_BOUNDARY_MIN_WIDTH_RATIO
+        or height_ratio < FAST_BOUNDARY_MIN_HEIGHT_RATIO
+    ):
+        logger.info(
+            "[boundary] source=%s fast_raw=no reason=small_occupancy "
+            "width_ratio=%.3f height_ratio=%.3f",
+            source_name or "-",
+            width_ratio,
+            height_ratio,
+        )
+        return bbox, polygon, False
+
+    logger.info(
+        "[boundary] source=%s fast_raw=yes width_ratio=%.3f height_ratio=%.3f",
+        source_name or "-",
+        width_ratio,
+        height_ratio,
+    )
+    return bbox, polygon, True
 
 
 def _polyfit_polygon(
@@ -917,18 +1068,49 @@ def preprocess_panel_image(
     lighting: str,
     config: PreprocessConfig,
     reference_polygon: Optional[np.ndarray] = None,
+    reference_bbox: Optional[Tuple[int, int, int, int]] = None,
 ) -> PanelPreprocessResult:
     """單張 lighting 圖完整前處理。
 
-    1. 讀圖
-    2. 偵測 panel polygon（或沿用 reference_polygon）
-    3. 走 bbox grid 切 tile，分類 zone
-    4. 回傳 PanelPreprocessResult
+    預設維持既有流程：模型影像前處理後才偵測 boundary。
+    fast_raw_boundary_enabled 僅供符合占比門檻的 AAPI 大面板先從 raw image 抓邊。
     """
     img = read_detection_image(image_path, cv2.IMREAD_GRAYSCALE, config.rotate_180)
     if img is None:
         raise FileNotFoundError(f"無法讀取圖片: {image_path}")
     original_img = img.copy()
+
+    bbox = None
+    detected_polygon = None
+    if getattr(config, "fast_raw_boundary_enabled", False):
+        if reference_bbox is not None:
+            bbox = reference_bbox
+        else:
+            boundary_cfg = (
+                replace(config, enable_panel_polygon=False)
+                if reference_polygon is not None
+                else config
+            )
+            (
+                candidate_bbox,
+                candidate_polygon,
+                large_occupancy,
+            ) = _detect_fast_panel_boundary(
+                original_img, boundary_cfg, source_name=image_path.name
+            )
+            if large_occupancy:
+                bbox = candidate_bbox
+                detected_polygon = candidate_polygon
+
+        fast_boundary_usable = bbox is not None and (
+            reference_polygon is not None
+            or not config.enable_panel_polygon
+            or detected_polygon is not None
+        )
+        if not fast_boundary_usable:
+            bbox = None
+            detected_polygon = None
+
     normalized_pipeline: List[Dict[str, Any]] = []
     preprocess_steps: List[Dict[str, Any]] = []
     preprocess_total_ms = 0.0
@@ -947,15 +1129,22 @@ def preprocess_panel_image(
                 float(step.get("elapsed_ms") or 0.0), step["stats"],
             )
 
-    if reference_polygon is not None:
-        # 沿用 reference polygon；只需 bbox，跳過 polyfit 節省運算
-        bbox_only_cfg = replace(config, enable_panel_polygon=False)
-        bbox, _ = detect_panel_polygon(img, bbox_only_cfg)
-        polygon = reference_polygon
-        polygon_failed = False
+    if bbox is None:
+        if reference_polygon is not None:
+            # Legacy behavior: share the reference polygon but detect each
+            # lighting's bbox from its model-preprocessed image.
+            bbox_only_cfg = replace(config, enable_panel_polygon=False)
+            bbox, _ = detect_panel_polygon(img, bbox_only_cfg)
+            polygon = reference_polygon
+        else:
+            bbox, polygon = detect_panel_polygon(img, config)
     else:
-        bbox, polygon = detect_panel_polygon(img, config)
-        polygon_failed = config.enable_panel_polygon and polygon is None
+        polygon = (
+            reference_polygon
+            if reference_polygon is not None
+            else detected_polygon
+        )
+    polygon_failed = config.enable_panel_polygon and polygon is None
 
     if bbox is None:
         return PanelPreprocessResult(
@@ -1066,6 +1255,55 @@ def preprocess_panel_image(
     )
 
 
+def _preprocess_panel_folder_legacy(
+    files: Dict[str, Path],
+    reference_files: Dict[str, Path],
+    config: PreprocessConfig,
+    boundary_reference_priority: Iterable[str],
+) -> Dict[str, "PanelPreprocessResult"]:
+    """Run the original preprocess-then-boundary reference selection."""
+    ref_lighting = next(
+        (cand for cand in boundary_reference_priority if cand in reference_files),
+        None,
+    )
+    if ref_lighting is None:
+        return {}
+
+    ref_result = preprocess_panel_image(reference_files[ref_lighting], ref_lighting, config)
+    if ref_result.polygon_detection_failed:
+        for cand in boundary_reference_priority:
+            if cand == ref_lighting or cand not in reference_files:
+                continue
+            fallback_result = preprocess_panel_image(reference_files[cand], cand, config)
+            if not fallback_result.polygon_detection_failed:
+                ref_lighting = cand
+                ref_result = fallback_result
+                break
+
+    logger.info(
+        "[boundary] reference=%s file=%s polygon=%s",
+        ref_lighting,
+        ref_result.image_path.name,
+        None
+        if ref_result.panel_polygon is None
+        else np.round(ref_result.panel_polygon, 1).tolist(),
+    )
+
+    results: Dict[str, PanelPreprocessResult] = {}
+    if ref_lighting in files:
+        results[ref_lighting] = ref_result
+    for lighting, path in files.items():
+        if lighting == ref_lighting:
+            continue
+        results[lighting] = preprocess_panel_image(
+            path,
+            lighting,
+            config,
+            reference_polygon=ref_result.panel_polygon,
+        )
+    return results
+
+
 def preprocess_panel_folder(
     folder: Path,
     config: PreprocessConfig,
@@ -1103,41 +1341,82 @@ def preprocess_panel_folder(
     if not reference_files:
         reference_files = files
 
-    # 決定 reference image：W0F00000 對低對比前後景較穩，找邊優先用它。
-    ref_lighting = None
-    for cand in tuple(boundary_reference_priority or BOUNDARY_REFERENCE_PRIORITY):
-        if cand in reference_files:
-            ref_lighting = cand
-            break
-    if ref_lighting is None:
-        return {}
+    reference_priority = tuple(
+        boundary_reference_priority or BOUNDARY_REFERENCE_PRIORITY
+    )
+    if not getattr(config, "fast_raw_boundary_enabled", False):
+        return _preprocess_panel_folder_legacy(
+            files,
+            reference_files,
+            config,
+            reference_priority,
+        )
 
-    ref_result = preprocess_panel_image(reference_files[ref_lighting], ref_lighting, config)
-    if ref_result.polygon_detection_failed:
-        for cand in tuple(boundary_reference_priority or BOUNDARY_REFERENCE_PRIORITY):
-            if cand == ref_lighting or cand not in reference_files:
-                continue
-            fallback_result = preprocess_panel_image(reference_files[cand], cand, config)
-            if not fallback_result.polygon_detection_failed:
-                ref_lighting = cand
-                ref_result = fallback_result
-                break
+    # 先用 raw-image boundary-only 路徑選 reference；候選圖不跑模型前處理。
+    # W0F00000 對低對比前後景較穩，因此仍優先使用。
+    ref_lighting = None
+    ref_bbox = None
+    ref_polygon = None
+    for cand in reference_priority:
+        if cand not in reference_files:
+            continue
+        candidate_bbox, candidate_polygon, large_occupancy = (
+            _detect_panel_boundary_file(reference_files[cand], config)
+        )
+        if large_occupancy is False:
+            logger.info(
+                "[boundary] fast raw path skipped; using legacy flow for this panel"
+            )
+            return _preprocess_panel_folder_legacy(
+                files,
+                reference_files,
+                replace(config, fast_raw_boundary_enabled=False),
+                reference_priority,
+            )
+        if large_occupancy and (
+            not config.enable_panel_polygon or candidate_polygon is not None
+        ):
+            ref_lighting = cand
+            ref_bbox = candidate_bbox
+            ref_polygon = candidate_polygon
+            break
+
+    if ref_lighting is None:
+        logger.info(
+            "[boundary] fast raw path found no valid polygon; using legacy flow"
+        )
+        return _preprocess_panel_folder_legacy(
+            files,
+            reference_files,
+            replace(config, fast_raw_boundary_enabled=False),
+            reference_priority,
+        )
 
     logger.info(
         "[boundary] reference=%s file=%s polygon=%s",
         ref_lighting,
-        ref_result.image_path.name,
-        None if ref_result.panel_polygon is None else np.round(ref_result.panel_polygon, 1).tolist(),
+        reference_files[ref_lighting].name,
+        None if ref_polygon is None else np.round(ref_polygon, 1).tolist(),
     )
 
     results: Dict[str, PanelPreprocessResult] = {}
+    ordered_lightings = list(files)
     if ref_lighting in files:
-        results[ref_lighting] = ref_result
-    ref_poly = ref_result.panel_polygon
-    for lighting, path in files.items():
-        if lighting == ref_lighting:
-            continue
-        results[lighting] = preprocess_panel_image(path, lighting, config, reference_polygon=ref_poly)
+        ordered_lightings.remove(ref_lighting)
+        ordered_lightings.insert(0, ref_lighting)
+    for lighting in ordered_lightings:
+        cached_reference_bbox = (
+            ref_bbox
+            if files[lighting] == reference_files[ref_lighting]
+            else None
+        )
+        results[lighting] = preprocess_panel_image(
+            files[lighting],
+            lighting,
+            config,
+            reference_polygon=ref_polygon,
+            reference_bbox=cached_reference_bbox,
+        )
     return results
 
 
