@@ -8137,7 +8137,7 @@ class CAPIInferencer:
             )
             for result in results:
                 if result.anomaly_tiles and result.raw_bounds is not None:
-                    img_prefix = result.image_path.stem
+                    img_prefix = self._get_image_prefix(result.image_path.name)
                     for tile, score, anomaly_map in result.anomaly_tiles:
                         if getattr(tile, "is_aoi_coord_below_threshold", False):
                             continue
@@ -8240,7 +8240,7 @@ class CAPIInferencer:
                 for result in results:
                     if not result.anomaly_tiles or result.raw_bounds is None:
                         continue
-                    img_prefix = result.image_path.stem
+                    img_prefix = self._get_image_prefix(result.image_path.name)
                     if not (img_prefix == bomb.image_prefix or
                             img_prefix.startswith(bomb.image_prefix + "_")):
                         continue
@@ -8279,7 +8279,7 @@ class CAPIInferencer:
             for result in results:
                 if not hasattr(result, 'edge_defects') or not result.edge_defects or result.raw_bounds is None:
                     continue
-                img_prefix = result.image_path.stem
+                img_prefix = self._get_image_prefix(result.image_path.name)
                 for ed in result.edge_defects:
                     if getattr(ed, 'is_cv_ok', False):
                         continue
@@ -9006,7 +9006,7 @@ class CAPIInferencer:
 
         for result in results:
             if result.anomaly_tiles and result.raw_bounds is not None:
-                img_prefix = result.image_path.stem
+                img_prefix = self._get_image_prefix(result.image_path.name)
                 for tile, _score, anomaly_map in result.anomaly_tiles:
                     if getattr(tile, "is_aoi_coord_below_threshold", False):
                         continue
@@ -9112,7 +9112,7 @@ class CAPIInferencer:
                             )
 
             if getattr(result, "edge_defects", None) and result.raw_bounds is not None:
-                img_prefix = result.image_path.stem
+                img_prefix = self._get_image_prefix(result.image_path.name)
                 for ed in result.edge_defects:
                     if getattr(ed, "is_cv_ok", False):
                         continue
@@ -9146,7 +9146,7 @@ class CAPIInferencer:
             for result in results:
                 if not result.anomaly_tiles or result.raw_bounds is None:
                     continue
-                img_prefix = result.image_path.stem
+                img_prefix = self._get_image_prefix(result.image_path.name)
                 if not (img_prefix == bomb.image_prefix or
                         img_prefix.startswith(bomb.image_prefix + "_")):
                     continue
