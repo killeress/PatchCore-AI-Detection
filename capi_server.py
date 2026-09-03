@@ -58,7 +58,7 @@ from capi_image_naming import (
     canonical_image_prefix,
     source_image_prefix,
 )
-from capi_inference import CAPIInferencer, ImageResult, resolve_product_resolution
+from capi_inference import CAPIInferencer, ImageResult, TileInfo, resolve_product_resolution
 from capi_preprocess import BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_polygon
 from capi_station_adapter import (
     create_station_adapter,
@@ -969,6 +969,52 @@ def _format_qjpg_product_defect_record(
     )
 
 
+def _tile_two_stage_real_feature_points(tile: TileInfo) -> List[Tuple[int, int]]:
+    """Return every two-stage REAL feature in full-image coordinates."""
+    features = getattr(tile, "dust_two_stage_features", None)
+    if not isinstance(features, (list, tuple)):
+        return []
+
+    tile_image = getattr(tile, "image", None)
+    source_h = int(tile_image.shape[0]) if getattr(tile_image, "ndim", 0) >= 2 else int(tile.height)
+    source_w = int(tile_image.shape[1]) if getattr(tile_image, "ndim", 0) >= 2 else int(tile.width)
+    source_h = max(1, source_h)
+    source_w = max(1, source_w)
+    tile_h = max(1, int(tile.height))
+    tile_w = max(1, int(tile.width))
+
+    ranked_points = []
+    for index, feature in enumerate(features):
+        if not isinstance(feature, dict):
+            continue
+        if "is_dust" not in feature or bool(feature.get("is_dust")):
+            continue
+        abs_pos = feature.get("abs_pos")
+        if not isinstance(abs_pos, (list, tuple)) or len(abs_pos) < 2:
+            continue
+        try:
+            local_x = int(round(float(abs_pos[0]) * tile_w / source_w))
+            local_y = int(round(float(abs_pos[1]) * tile_h / source_h))
+            area = int(feature.get("area", 0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        local_x = max(0, min(tile_w - 1, local_x))
+        local_y = max(0, min(tile_h - 1, local_y))
+        ranked_points.append(
+            (-area, index, int(tile.x) + local_x, int(tile.y) + local_y)
+        )
+
+    points = []
+    seen = set()
+    for _negative_area, _index, image_x, image_y in sorted(ranked_points):
+        point = (image_x, image_y)
+        if point in seen:
+            continue
+        seen.add(point)
+        points.append(point)
+    return points
+
+
 def _iter_qjpg_defect_records(
     results: List[ImageResult],
     product_resolution: Optional[Tuple[int, int]],
@@ -1003,6 +1049,24 @@ def _iter_qjpg_defect_records(
                 continue
             defect_kind = _tile_report_defect_kind(tile, image_prefix)
             defect_code = _report_defect_code(config, defect_kind)
+            real_feature_points = (
+                []
+                if getattr(tile, "is_bomb", False)
+                else _tile_two_stage_real_feature_points(tile)
+            )
+            if real_feature_points:
+                records.extend(
+                    _format_qjpg_defect_record(
+                        defect_code,
+                        image_x,
+                        image_y,
+                        image_prefix,
+                        raw_bounds,
+                        product_resolution,
+                    )
+                    for image_x, image_y in real_feature_points
+                )
+                continue
             if (
                 getattr(tile, "anomaly_peak_source", "") == "aoi_report_fallback"
                 and getattr(tile, "aoi_product_x", -1) >= 0

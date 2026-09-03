@@ -215,6 +215,7 @@ NGPCDK20100000500W0F00000
 
 座標來源:
 
+- Two-stage 有辨識出 REAL_NG 特徵時，逐筆使用每個 REAL_NG 在原圖上的實際特徵中心；同一 Tile 可輸出多筆 record。
 - AOI 座標置中的 Tile 會優先使用最接近 AOI 中心的有效 REAL_NG heatmap 區域；中央沒有有效區域時，沿用 AOI Report 的原始產品座標。
 - 一般 Grid Tile 使用 heatmap peak 座標。
 - 若沒有 peak，使用 tile center。

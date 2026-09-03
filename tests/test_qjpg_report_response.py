@@ -119,6 +119,37 @@ def test_qjpg_response_uses_final_ng_points_and_product_coordinates():
     assert response == "@QJPG-T863BF29AH44;OK;EJ;NGPCDK20100000500W0F00000,"
 
 
+def test_qjpg_response_reports_every_two_stage_real_feature_coordinate():
+    result = _image_result("W0F00000_114438.tif")
+    tile = _tile(1, 600, 450)
+    tile.x = 200
+    tile.y = 250
+    tile.is_aoi_coord_tile = True
+    tile.aoi_product_x = 999
+    tile.aoi_product_y = 888
+    tile.anomaly_peak_source = "aoi_report_fallback"
+    tile.dust_two_stage_features = [
+        {"abs_pos": (100, 50), "area": 10, "is_dust": False},
+        {"abs_pos": (300, 200), "area": 30, "is_dust": False},
+        {"abs_pos": (250, 150), "area": 40, "is_dust": True},
+    ]
+    result.tiles = [tile]
+    result.anomaly_tiles = [(tile, 0.91, None)]
+
+    response = build_qjpg_response(
+        {"glass_id": "T863BF29AH44", "resolution": (2000, 1000)},
+        "NG",
+        [result],
+        CAPIConfig(),
+    )
+
+    assert response == (
+        "@QJPG-T863BF29AH44;OK;EJ;"
+        "NGPCDK20080000500W0F00000"
+        "PCDK20040000200W0F00000,"
+    )
+
+
 def test_qjpg_aoi_report_fallback_keeps_exact_source_product_coordinate():
     result = _image_result("W0F00000_114438.tif")
     tile = _tile(1, 600, 450)
