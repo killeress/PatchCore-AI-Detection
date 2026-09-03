@@ -1,5 +1,23 @@
 # 更新紀錄
 
+## 2026-09-03 v3
+
+### [CAPI 灰塵判定]關聯灰塵核心周邊暈圈
+
+- Two-stage 灰塵判定新增核心外關聯半徑與覆蓋比例，吸收同一污染造成的亮／暗暈圈，並同步提供 Debug 資訊與規格內候選過濾。
+
+### [AAPI 前處理]加速大型 Panel 邊界偵測
+
+- AAPI 大面板改由 raw image 降採樣偵測邊界，再執行模型影像前處理；小占比或偵測失敗時自動沿用既有流程。
+
+### [AAPI 炸彈比對]支援含 Glass ID 的影像檔名
+
+- 炸彈座標比對統一解析 AAPI 影像前綴，含 Glass ID 與流水碼的檔名也能正確對應 lighting。
+
+### [QJPG Report]逐筆回報 Two-stage REAL_NG
+
+- 同一 Tile 內有多個 Two-stage REAL_NG 特徵時，改以每個實際特徵中心各輸出一筆 QJPG defect record。
+
 ## 2026-09-03 v2
 
 ### [Debug 座標／CV 邊緣檢測]資料夾自動選取最新白畫面
