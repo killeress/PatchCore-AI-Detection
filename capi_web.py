@@ -5790,21 +5790,34 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             params = query if isinstance(query, dict) else urllib.parse.parse_qs(query)
             img_path = params.get("path", [None])[0]
             serve_raw = str(params.get("raw", ["0"])[0]).strip().lower() in ("1", "true", "yes")
+            resolve_only = str(params.get("resolve", ["0"])[0]).strip().lower() in ("1", "true", "yes")
             if not img_path:
-                self._send_error(400, "missing path parameter")
+                if resolve_only:
+                    self._send_json({"error": "missing path parameter"}, status=400)
+                else:
+                    self._send_error(400, "missing path parameter")
                 return
             p = Path(img_path)
             if p.is_dir():
                 resolved = self._resolve_debug_image_path(p)
                 if resolved is None:
-                    self._send_error(
-                        404,
-                        f"no image containing W0F00000 found in folder: {img_path}",
-                    )
+                    message = f"no front image containing W0F00000 found in folder: {img_path}"
+                    if resolve_only:
+                        self._send_json({"error": message}, status=404)
+                    else:
+                        self._send_error(404, message)
                     return
                 p = resolved
             elif not p.exists() or not p.is_file():
-                self._send_error(404, f"file not found: {img_path}")
+                message = f"file not found: {img_path}"
+                if resolve_only:
+                    self._send_json({"error": message}, status=404)
+                else:
+                    self._send_error(404, message)
+                return
+
+            if resolve_only:
+                self._send_json({"image_path": str(p)})
                 return
 
             suffix = p.suffix.lower()
@@ -5833,11 +5846,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _resolve_debug_image_path(path_value) -> Optional[Path]:
-        """Resolve a panel folder to its newest W0F00000 image.
+        """Resolve a panel folder to its newest front-facing W0F00000 image.
 
         A direct image path is returned unchanged.  Folder scanning is limited
-        to the folder's immediate children so an unrelated nested panel cannot
-        be selected accidentally.
+        to the folder's immediate children and excludes side images whose names
+        start with S.
         """
         path = Path(str(path_value or "").strip())
         if path.is_file():
@@ -5852,6 +5865,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if entry.is_file()
                 and entry.suffix.lower() in _DEBUG_IMAGE_EXTENSIONS
                 and "W0F00000" in entry.name.upper()
+                and not entry.name.upper().startswith("S")
             ]
         except OSError:
             return None
@@ -12951,7 +12965,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment,
             InferenceLogCapture, WITHIN_SPEC_LOGS_URL,
             _stored_machine_judgment_for_record, _white_frame_image_result,
-            _has_white_frame_ng, _serialize_aoi_machine_coords,
+            _has_white_frame_ng, _serialize_aoi_machine_coords, parse_request,
         )
         from capi_station_adapter import create_station_adapter
         from capi_white_frame import inspect_white_frame_image
@@ -12985,6 +12999,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     bomb_info = json.loads(detail["client_bomb_info"])
                 except (json.JSONDecodeError, TypeError):
                     pass
+
+            aoi_report_override = None
+            client_request_text = str(detail.get("client_request_text") or "").strip()
+            if client_request_text:
+                # AAPI AOI 字串保存在原始 Testing request，rerun 時需還原成 override。
+                stored_request = parse_request(client_request_text)
+                report_payload = stored_request.get("aoi_report_payload", "")
+                if report_payload:
+                    aoi_report_override = inferencer._parse_aoi_report_txt(
+                        panel_dir,
+                        glass_id=detail.get("glass_id", ""),
+                        machine_judgment=detail.get("machine_judgment", ""),
+                        report_payload=report_payload,
+                    )
 
             _update_status("正在等待 GPU...")
             start_time = _time.time()
@@ -13037,6 +13065,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         model_id=model_id,
                         machine_no=detail.get("machine_no"),
                         glass_id=detail.get("glass_id"),
+                        aoi_report_override=aoi_report_override,
                         machine_judgment=detail.get("machine_judgment"),
                     )
             else:
@@ -13049,6 +13078,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     model_id=model_id,
                     machine_no=detail.get("machine_no"),
                     glass_id=detail.get("glass_id"),
+                    aoi_report_override=aoi_report_override,
                     machine_judgment=detail.get("machine_judgment"),
                 )
 

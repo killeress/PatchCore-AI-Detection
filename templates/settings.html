@@ -5739,9 +5739,9 @@
         }
     }
 
-    function exLoadImage(preserveSelection = false) {
+    async function exLoadImage(preserveSelection = false) {
         const input = document.getElementById('ex-image-path');
-        const pathVal = input ? input.value.trim() : '';
+        let pathVal = input ? input.value.trim() : '';
         if (!pathVal) {
             alert('請輸入圖片路徑');
             return;
@@ -5750,6 +5750,18 @@
             ? { ...(exCurRect || exInitialQueryCoords) }
             : null;
         if (!preserveSelection) exInitialQueryCoords = null;
+        try {
+            const response = await fetch('/api/debug/serve-image?resolve=1&path=' + encodeURIComponent(pathVal));
+            const data = await response.json();
+            if (!response.ok || !data.image_path) {
+                throw new Error(data.error || '找不到可載入的圖片');
+            }
+            pathVal = data.image_path;
+            input.value = pathVal;
+        } catch (err) {
+            alert('圖片載入失敗：' + err.message);
+            return;
+        }
         exCurrentImagePath = pathVal;
         const url = '/api/debug/serve-image?path=' + encodeURIComponent(pathVal);
         const img = document.getElementById('ex-image');
