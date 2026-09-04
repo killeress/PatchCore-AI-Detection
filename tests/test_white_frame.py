@@ -268,7 +268,7 @@ def test_white_frame_summary_query_returns_images_sides_coordinates_and_filters(
         side: {"label": side, "status": "OK", "gaps": []}
         for side in ("上邊", "右邊", "下邊", "左邊")
     }
-    save("WHITEFRA_NG.png", "NG", "CAPI01", "2026-08-14 10:00:00", top_ng)
+    save("WHITEFRA132147.tif", "NG", "CAPI01", "2026-08-14 10:00:00", top_ng)
     save("WHITEFRA_OK.png", "OK", "CAPI02", "2026-08-15 10:00:00", all_ok)
 
     rows, total, summary = db.query_white_frame_paged(limit=10)
@@ -281,7 +281,7 @@ def test_white_frame_summary_query_returns_images_sides_coordinates_and_filters(
     rows, total, summary = db.query_white_frame_paged(status="NG", edge="top", machine_no="CAPI01")
     assert total == 1
     assert summary["ng"] == 1
-    assert rows[0]["glass_id"] == "G-WHITEFRA_NG.png"
+    assert rows[0]["glass_id"] == "G-WHITEFRA132147.tif"
 
     rows, total, _summary = db.query_white_frame_paged(status="NG", edge="left")
     assert rows == []

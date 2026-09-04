@@ -1733,7 +1733,6 @@ class CAPIDatabase:
         offset = max(0, int(offset or 0))
 
         conditions = [
-            "substr(upper(img.image_name), 1, 9) = 'WHITEFRA_'",
             "COALESCE(TRIM(img.white_frame_result), '') <> ''",
         ]
         params: List[Any] = []
