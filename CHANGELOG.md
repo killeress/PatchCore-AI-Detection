@@ -1,5 +1,15 @@
 # 更新紀錄
 
+## 2026-09-04 v1
+
+### [Debug 圖片載入]資料夾解析與前端路徑同步
+
+- Debug 推論與不檢測區域設定在輸入 panel 資料夾時，先解析最新正面 `W0F00000` 圖片，再載入與保存實際圖片路徑；側面圖片不再被誤選。
+
+### [Debug 重跑]保留 AAPI AOI 座標
+
+- Debug 推論重跑時還原原始 Testing request 的 AOI 座標，避免 AAPI NG panel 重跑遺失 AOI report override。
+
 ## 2026-09-03 v3
 
 ### [CAPI 灰塵判定]關聯灰塵核心周邊暈圈

@@ -26,6 +26,18 @@ def test_debug_coordinate_overlay_is_sized_after_viewer_becomes_visible():
     assert loader.index(show_viewer) < loader.index("cvSyncOverlay()")
 
 
+def test_debug_coordinate_loader_replaces_folder_with_resolved_image_path():
+    template = (ROOT / "templates" / "debug_inference.html").read_text(
+        encoding="utf-8"
+    )
+    loader = template.split("function cvLoadImage", 1)[1].split(
+        "function cvSyncOverlay", 1
+    )[0]
+
+    assert "resolve=1" in loader
+    assert "pathInput.value = pathVal" in loader
+
+
 def test_settings_exclusion_transfer_consumes_product_code():
     template = (ROOT / "templates" / "settings.html").read_text(encoding="utf-8")
 
@@ -42,3 +54,13 @@ def test_settings_exclusion_transfer_restores_selection_after_image_load():
     assert "preserveSelection" in loader
     assert "selectionToRestore" in loader
     assert "exCurRect = selectionToRestore" in loader
+
+
+def test_settings_exclusion_loader_replaces_folder_with_resolved_image_path():
+    template = (ROOT / "templates" / "settings.html").read_text(encoding="utf-8")
+    loader = template.split("function exLoadImage", 1)[1].split(
+        "function exResetToSample", 1
+    )[0]
+
+    assert "resolve=1" in loader
+    assert "input.value = pathVal" in loader

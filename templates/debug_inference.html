@@ -5312,9 +5312,22 @@
         }
     })();
 
-    function cvLoadImage() {
-        const pathVal = document.getElementById('cv-image-path').value.trim();
+    async function cvLoadImage() {
+        const pathInput = document.getElementById('cv-image-path');
+        let pathVal = pathInput.value.trim();
         if (!pathVal) return;
+        try {
+            const response = await fetch('/api/debug/serve-image?resolve=1&path=' + encodeURIComponent(pathVal));
+            const data = await response.json();
+            if (!response.ok || !data.image_path) {
+                throw new Error(data.error || '找不到可載入的圖片');
+            }
+            pathVal = data.image_path;
+            pathInput.value = pathVal;
+        } catch (err) {
+            alert('圖片載入失敗：' + err.message);
+            return;
+        }
         autoSelectResolution(pathVal, 'cv-product-code');
         const url = '/api/debug/serve-image?path=' + encodeURIComponent(pathVal);
         cvImg.onload = function () {
