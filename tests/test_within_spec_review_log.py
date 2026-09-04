@@ -6,7 +6,7 @@ def test_within_spec_review_log_persists_and_joins_latest_summary(tmp_path):
     db = CAPIDatabase(str(tmp_path / "capi.db"))
     db.save_client_accuracy_records([
         {
-            "time_stamp": "2026-06-18 07:00:00",
+            "time_stamp": "2026-06-18 08:00:00",
             "pnl_id": "PANEL001",
             "mach_id": "CAPI0703",
             "result_eqp": "NG",
@@ -26,8 +26,8 @@ def test_within_spec_review_log_persists_and_joins_latest_summary(tmp_path):
         total_images=0,
         ng_images=0,
         ng_details="",
-        request_time="2026-06-18 07:00:01",
-        response_time="2026-06-18 07:00:02",
+        request_time="2026-06-18 08:00:01",
+        response_time="2026-06-18 08:00:02",
         processing_seconds=0.1,
     )
     client = db.get_client_accuracy_records("2026-06-18", "2026-06-18")[0]
@@ -60,9 +60,10 @@ def test_within_spec_review_log_persists_and_joins_latest_summary(tmp_path):
     assert rows[0]["within_spec_suggested"] == 1
     assert rows[0]["within_spec_reason"] == "W0F00000 黑點 0.2mm <= 0.3mm"
 
+    log_date = saved["created_at"][:10]
     report_rows = db.list_within_spec_review_log_report(
-        start_date="2026-06-18",
-        end_date="2026-06-18",
+        start_date=log_date,
+        end_date=log_date,
         keyword="PANEL001",
         suggested=True,
     )
@@ -75,6 +76,7 @@ def test_within_spec_review_log_persists_and_joins_latest_summary(tmp_path):
 
 def test_within_spec_detail_template_renders():
     env = Environment(loader=FileSystemLoader("templates"))
+    env.globals.update(app_version={"version": "test"}, host_identity="")
     template = env.get_template("within_spec_detail.html")
 
     html = template.render(
@@ -235,6 +237,7 @@ def test_within_spec_detail_explains_dust_only_ok_i():
 
 def test_within_spec_report_template_renders():
     env = Environment(loader=FileSystemLoader("templates"))
+    env.globals.update(app_version={"version": "test"}, host_identity="")
     template = env.get_template("within_spec_report.html")
 
     html = template.render(

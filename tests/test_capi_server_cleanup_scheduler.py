@@ -7,6 +7,7 @@ from capi_server import CAPIServer
 def test_start_marks_server_running_before_cleanup_scheduler_starts():
     observed_running_states = []
     server = SimpleNamespace(
+        station_profile="capi",
         training_only=True,
         server_config={"web": {"enabled": False}},
         _running=False,
@@ -28,6 +29,7 @@ def test_start_marks_server_running_before_cleanup_scheduler_starts():
 
 def test_start_aborts_when_stop_arrives_during_startup():
     server = SimpleNamespace(
+        station_profile="capi",
         training_only=True,
         server_config={"web": {"enabled": False}},
         _running=False,

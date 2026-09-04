@@ -62,7 +62,7 @@ def find_omit_image(image_dir: Path) -> Optional[np.ndarray]:
     return None
 
 
-def test_aoi_coord(
+def run_aoi_coord_inference(
     image_path: str = None,
     image_dir: str = "./test_images",
     aoi_coords: list = None,
@@ -449,7 +449,7 @@ def test_aoi_coord(
 
 
 if __name__ == "__main__":
-    test_aoi_coord(
+    run_aoi_coord_inference(
         image_dir="./test_images",
         disable_edge=True,
         config_overrides={

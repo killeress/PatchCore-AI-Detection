@@ -60,7 +60,11 @@ def test_invalidate_on_delete_bundle(db_with_pool, tmp_path, monkeypatch):
     db, job_id, ids = db_with_pool
 
     # delete_bundle 驗證 bundle_path 必須在 server_config_path.parent/model/ 之下
-    cfg = tmp_path / "server.yaml"; cfg.write_text("model_configs: []\n")
+    fallback_yaml = tmp_path / "model" / "fallback" / "machine_config.yaml"
+    fallback_yaml.parent.mkdir(parents=True)
+    fallback_yaml.write_text("threshold_mapping: {}\n")
+    cfg = tmp_path / "server.yaml"
+    cfg.write_text("model_configs:\n  - model/fallback/machine_config.yaml\n")
     bundle_dir = tmp_path / "model" / "b"; bundle_dir.mkdir(parents=True)
     # bundle marker 必須存在
     (bundle_dir / "machine_config.yaml").write_text("threshold_mapping: {}\n")

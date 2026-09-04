@@ -173,7 +173,7 @@ class TestPCGroupPanel3DustOverlay:
     """Panel 3: 套 dust_check_fn 回傳的藍色 overlay (BGR 255,100,0)"""
 
     def test_dust_overlay_applied_when_fn_returns_mask(self, tmp_path):
-        """dust_check_fn 回傳 dust_mask 時，Panel 3 中 dust 區塊偏藍色 (B 高 R 低)"""
+        """dust_check_fn 回傳 dust_mask 時，Panel 4 中 dust 區塊呈黃色。"""
         omit = np.full((2000, 2000), 128, dtype=np.uint8)
 
         def stub_dust_check(img):
@@ -191,16 +191,15 @@ class TestPCGroupPanel3DustOverlay:
             dust_check_fn=stub_dust_check,
         )
         out = cv2.imread(path)
-        h_out, w_out = out.shape[:2]
-        panel_w_approx = w_out // 3
-        panel3_left = panel_w_approx * 2 + 20
+        _, w_out = out.shape[:2]
+        gap_w = 10
+        panel_w = (w_out - 3 * gap_w) // 4
         header_h = 50; panel_h = 400
-        center_x = (panel3_left + w_out - 5) // 2
+        center_x = 3 * (panel_w + gap_w) + panel_w // 2
         center_y = header_h + panel_h // 2
         px = out[center_y, center_x]
-        # 藍色 overlay 後 B > R 明顯
-        assert px[0] > px[2] + 30, \
-            f"dust 中心像素應偏藍 (B>R+30)，實為 B={px[0]} G={px[1]} R={px[2]}"
+        assert px[1] > px[0] + 30 and px[2] > px[0] + 30, \
+            f"dust 中心像素應偏黃，實為 B={px[0]} G={px[1]} R={px[2]}"
 
     def test_no_dust_overlay_when_fn_is_none(self, tmp_path):
         """dust_check_fn 為 None 時 Panel 3 保持純 OMIT (灰)，無藍色覆蓋"""
