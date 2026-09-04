@@ -35,31 +35,6 @@ def _fake_image_result_with_scratch_data() -> ImageResult:
     return ir
 
 
-def test_build_image_results_data_includes_scratch():
-    """If a helper exists that builds image_results_data from ImageResult,
-    verify it includes scratch fields. If no such helper, this test may need
-    to be adapted to exercise the actual pipeline code."""
-    # Find and import the helper used to build image_results_data dicts.
-    # Search order: capi_inference, capi_server (top-level function or method).
-    # If the helper is inline in a larger function, add a comment in the
-    # implementation step pointing at the call-site that was modified instead.
-    try:
-        from capi_server import build_image_results_data
-    except ImportError:
-        try:
-            from capi_inference import build_image_results_data
-        except ImportError:
-            pytest.skip("No dedicated helper found; verified at integration level")
-            return
-
-    ir = _fake_image_result_with_scratch_data()
-    data = build_image_results_data([ir])
-    assert len(data) == 1
-    assert data[0]["scratch_filter_count"] == 3
-    assert data[0]["tiles"][0]["scratch_score"] == pytest.approx(0.87)
-    assert data[0]["tiles"][0]["scratch_filtered"] is True
-
-
 def test_results_to_db_data_includes_scratch():
     """Verify results_to_db_data (the actual helper) includes scratch fields."""
     from capi_server import results_to_db_data

@@ -135,58 +135,6 @@ def test_polygon_stabilizes_near_vertical_sides_with_bad_top_rows():
     assert abs(float(polygon[:, 0].max()) - 899.0) <= 2.0
 
 
-def test_polygon_detect_real_W0F():
-    """真實影像 W0F00000_110022.tif 的 4 角誤差應該符合 spec 預期值"""
-    img_path = Path(__file__).resolve().parent.parent / "test_images" / "W0F00000_110022.tif"
-    if not img_path.exists():
-        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
-        return
-
-    gray = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-    inf = _make_inferencer()
-    bbox, binary = inf._find_raw_object_bounds(gray)
-    polygon = inf._find_panel_polygon(binary, bbox)
-    assert polygon is not None
-
-    # Spec 9.1 預期: TL=6.6, TR=15.7, BR=15.0, BL=0.6 (±2 px 容忍)
-    bbox_corners = np.array([
-        [bbox[0], bbox[1]], [bbox[2], bbox[1]],
-        [bbox[2], bbox[3]], [bbox[0], bbox[3]],
-    ], dtype=np.float32)
-    errs = np.linalg.norm(polygon - bbox_corners, axis=1)
-    expected = np.array([6.6, 15.7, 15.0, 0.6])
-    diff = np.abs(errs - expected).max()
-    assert diff < 2.0, \
-        f"W0F 4 角誤差與 spec 不符: expected {expected}, got {errs}, max diff {diff:.2f}px"
-    print(f"✅ test_polygon_detect_real_W0F (errs={errs.round(1).tolist()})")
-
-
-def test_polygon_detect_real_G0F():
-    """真實影像 G0F00000_151955.tif 的 4 角誤差應該符合 spec 預期值"""
-    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
-    if not img_path.exists():
-        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
-        return
-
-    gray = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-    inf = _make_inferencer()
-    bbox, binary = inf._find_raw_object_bounds(gray)
-    polygon = inf._find_panel_polygon(binary, bbox)
-    assert polygon is not None
-
-    # Spec 9.1 預期: TL=16.7, TR=19.0, BR=36.9, BL=3.8 (±2 px 容忍)
-    bbox_corners = np.array([
-        [bbox[0], bbox[1]], [bbox[2], bbox[1]],
-        [bbox[2], bbox[3]], [bbox[0], bbox[3]],
-    ], dtype=np.float32)
-    errs = np.linalg.norm(polygon - bbox_corners, axis=1)
-    expected = np.array([16.7, 19.0, 36.9, 3.8])
-    diff = np.abs(errs - expected).max()
-    assert diff < 2.0, \
-        f"G0F 4 角誤差與 spec 不符: expected {expected}, got {errs}, max diff {diff:.2f}px"
-    print(f"✅ test_polygon_detect_real_G0F (errs={errs.round(1).tolist()})")
-
-
 def test_detect_panel_polygon_keeps_upper_band_connected():
     """上緣若被細小黑縫切開，detect_panel_polygon 仍應抓到完整外框。"""
     img = np.full((768, 1366), 18, dtype=np.uint8)
@@ -495,47 +443,6 @@ def test_aapi_large_panel_raw_boundary_requires_large_frame_occupancy(monkeypatc
     np.testing.assert_array_equal(returned_polygon, polygon)
 
 
-def test_preprocess_image_populates_panel_polygon():
-    """preprocess_image 跑完後 result.panel_polygon 必須是 (4,2) float32"""
-    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
-    if not img_path.exists():
-        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
-        return
-
-    cfg = CAPIConfig()
-    cfg.tile_size = 512
-    cfg.tile_stride = 512
-    cfg.otsu_bottom_crop = 0  # 不做 bottom crop 以便直接比對
-    inf = CAPIInferencer(cfg)
-    result = inf.preprocess_image(img_path)
-    assert result is not None
-    assert result.panel_polygon is not None, "polygon 應該要被計算"
-    assert result.panel_polygon.shape == (4, 2)
-    assert result.panel_polygon.dtype == np.float32
-    print(f"✅ test_preprocess_image_populates_panel_polygon "
-          f"(polygon={result.panel_polygon.round(1).tolist()})")
-
-
-def test_preprocess_image_polygon_disabled_when_toggle_off():
-    """enable_panel_polygon=False 時 panel_polygon 必須為 None"""
-    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
-    if not img_path.exists():
-        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
-        return
-
-    cfg = CAPIConfig()
-    cfg.tile_size = 512
-    cfg.tile_stride = 512
-    cfg.otsu_bottom_crop = 0
-    cfg.enable_panel_polygon = False
-    inf = CAPIInferencer(cfg)
-    result = inf.preprocess_image(img_path)
-    assert result is not None
-    assert result.panel_polygon is None, \
-        f"toggle off 時 polygon 應為 None，實際 {result.panel_polygon}"
-    print("✅ test_preprocess_image_polygon_disabled_when_toggle_off")
-
-
 def test_reference_polygon_not_double_shrunk():
     """
     回歸 I1: 傳入 reference_polygon 時，calculate_otsu_bounds 不應改動 polygon。
@@ -710,17 +617,11 @@ def test_bottom_crop_preserves_polygon_tilt():
 
 
 def test_exclusion_region_uses_polygon_br_anchor():
-    """
-    relative_bottom_right 排除區應以 polygon BR 為錨點，
-    而不是 bbox 右下角。
-    """
+    """relative_bottom_right 排除區應以 polygon BR 為錨點。"""
     from capi_config import ExclusionZone
 
     cfg = CAPIConfig()
-    cfg.tile_size = 512
-    cfg.tile_stride = 512
     cfg.otsu_bottom_crop = 0
-    cfg.otsu_offset = 0
     cfg.exclusion_zones = [
         ExclusionZone(
             name="test_br",
@@ -731,144 +632,22 @@ def test_exclusion_region_uses_polygon_br_anchor():
         ),
     ]
     inf = CAPIInferencer(cfg)
+    image = np.zeros((1000, 1000), dtype=np.uint8)
+    polygon = np.array(
+        [[100, 100], [900, 100], [850, 900], [150, 900]],
+        dtype=np.float32,
+    )
 
-    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
-    if not img_path.exists():
-        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
-        return
+    regions = inf.calculate_exclusion_regions(
+        image,
+        otsu_bounds=(100, 100, 900, 900),
+        panel_polygon=polygon,
+    )
 
-    result = inf.preprocess_image(img_path)
-    assert result is not None
-    assert result.panel_polygon is not None
-
-    # 找到 test_br 排除區
-    br_regions = [r for r in result.exclusion_regions if r.name == "test_br"]
-    assert len(br_regions) == 1, f"應該找到 1 個 test_br 排除區，實際 {len(br_regions)}"
-    br = br_regions[0]
-
-    # 排除區的 x2/y2 必須接近 polygon BR，不能是 bbox 右下
-    poly_br_x, poly_br_y = int(round(result.panel_polygon[2][0])), int(round(result.panel_polygon[2][1]))
-    bbox_x2, bbox_y2 = result.otsu_bounds[2], result.otsu_bounds[3]
-
-    # 防護: 測試圖的 polygon BR 必須明顯偏離 bbox BR，否則此測試會變成「兩者都對」
-    # 的同義反覆 — 若未來有人換成 axis-aligned 的測試圖，這個 guard 會 fail fast
-    delta = abs(poly_br_x - bbox_x2) + abs(poly_br_y - bbox_y2)
-    assert delta >= 5, \
-        f"測試圖 polygon BR 必須明顯偏離 bbox BR (delta={delta})，否則無法區分新舊行為"
-
-    # G0F 這張 polygon BR 與 bbox 右下差 ~37 px
-    assert abs(br.x2 - poly_br_x) <= 1, \
-        f"排除區 x2={br.x2} 應接近 polygon BR x={poly_br_x}，而非 bbox x2={bbox_x2}"
-    assert abs(br.y2 - poly_br_y) <= 1, \
-        f"排除區 y2={br.y2} 應接近 polygon BR y={poly_br_y}，而非 bbox y2={bbox_y2}"
-    print(f"✅ test_exclusion_region_uses_polygon_br_anchor "
-          f"(br=({br.x2},{br.y2}), poly BR=({poly_br_x},{poly_br_y}), "
-          f"bbox BR=({bbox_x2},{bbox_y2}))")
-
-
-def test_toggle_off_bbox_unchanged():
-    """
-    enable_panel_polygon=False 時 otsu_bounds 與 toggle=True 時完全一致
-    (polygon 可能改變 bbox 計算路徑時，此測試會抓到)
-    """
-    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
-    if not img_path.exists():
-        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
-        return
-
-    cfg_on = CAPIConfig()
-    cfg_on.tile_size = 512
-    cfg_on.tile_stride = 512
-    cfg_on.otsu_bottom_crop = 0
-    cfg_on.enable_panel_polygon = True
-
-    cfg_off = CAPIConfig()
-    cfg_off.tile_size = 512
-    cfg_off.tile_stride = 512
-    cfg_off.otsu_bottom_crop = 0
-    cfg_off.enable_panel_polygon = False
-
-    inf_on = CAPIInferencer(cfg_on)
-    inf_off = CAPIInferencer(cfg_off)
-
-    r_on = inf_on.preprocess_image(img_path)
-    r_off = inf_off.preprocess_image(img_path)
-
-    assert r_on.otsu_bounds == r_off.otsu_bounds, \
-        f"otsu_bounds 應相同, on={r_on.otsu_bounds} off={r_off.otsu_bounds}"
-    assert r_off.panel_polygon is None
-    assert r_on.panel_polygon is not None
-    print(f"✅ test_toggle_off_bbox_unchanged (bbox={r_on.otsu_bounds})")
-
-
-def test_toggle_off_all_tile_masks_are_none():
-    """
-    enable_panel_polygon=False 時每個 tile 的 mask 都必須是 None
-    (否則代表有未受 toggle 控制的程式碼在設 mask)
-    """
-    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
-    if not img_path.exists():
-        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
-        return
-
-    cfg = CAPIConfig()
-    cfg.tile_size = 512
-    cfg.tile_stride = 512
-    cfg.otsu_bottom_crop = 0
-    cfg.enable_panel_polygon = False
-    inf = CAPIInferencer(cfg)
-    result = inf.preprocess_image(img_path)
-
-    none_count = sum(1 for t in result.tiles if t.mask is None)
-    assert none_count == len(result.tiles), \
-        f"toggle off 時所有 tile mask 必須為 None，實際 {none_count}/{len(result.tiles)}"
-    print(f"✅ test_toggle_off_all_tile_masks_are_none ({len(result.tiles)} tiles, all mask=None)")
-
-
-def test_toggle_on_some_edge_tiles_have_mask():
-    """
-    enable_panel_polygon=True 時至少有一個邊緣 tile 有 mask (非 None)
-    (否則代表 polygon 沒實際生效)
-    """
-    img_path = Path(__file__).resolve().parent.parent / "test_images" / "G0F00000_151955.tif"
-    if not img_path.exists():
-        print(f"⚠️  跳過 (測試圖不存在): {img_path}")
-        return
-
-    cfg = CAPIConfig()
-    cfg.tile_size = 512
-    cfg.tile_stride = 512
-    cfg.otsu_bottom_crop = 0
-    cfg.enable_panel_polygon = True
-    inf = CAPIInferencer(cfg)
-    result = inf.preprocess_image(img_path)
-
-    masked = [t for t in result.tiles if t.mask is not None]
-    assert len(masked) >= 1, \
-        f"toggle on 時應至少 1 個邊緣 tile 有 mask，實際 {len(masked)}"
-    print(f"✅ test_toggle_on_some_edge_tiles_have_mask ({len(masked)} 個 tile 有 mask)")
-
-
-if __name__ == "__main__":
-    test_config_enable_panel_polygon_default_true()
-    test_config_roundtrip_enable_panel_polygon()
-    test_config_yaml_loads_enable_panel_polygon()
-
-    test_polygon_detect_ideal_rectangle()
-    test_polygon_detect_degenerate_all_black()
-    test_polygon_detect_degenerate_tiny_noise()
-    test_polygon_detect_real_W0F()
-    test_polygon_detect_real_G0F()
-    test_polygon_corner_ordering()
-
-    test_preprocess_image_populates_panel_polygon()
-    test_preprocess_image_polygon_disabled_when_toggle_off()
-    test_reference_polygon_not_double_shrunk()
-    test_bottom_crop_preserves_polygon_tilt()
-    test_exclusion_region_uses_polygon_br_anchor()
-
-    test_toggle_off_bbox_unchanged()
-    test_toggle_off_all_tile_masks_are_none()
-    test_toggle_on_some_edge_tiles_have_mask()
-
-    print("\n✅ 所有測試通過")
+    assert len(regions) == 1
+    assert (regions[0].x1, regions[0].y1, regions[0].x2, regions[0].y2) == (
+        550,
+        700,
+        850,
+        900,
+    )

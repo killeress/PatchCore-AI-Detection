@@ -33,16 +33,13 @@ python run_single_inference.py <image_path>   # Single image with heatmap output
 python capi_missed_detection_analyzer.py      # Missed detection analysis
 python diagnose_bomb.py                       # Bomb defect coordinate debug
 python check_db.py                            # Inspect SQLite database
-python tests/test_cv_edge.py                  # Test edge detection
 ```
 
 **Testing:**
 ```bash
 # Start server first, then in another terminal:
-python tests/test_inference.py          # TCP protocol test (sends simulated AOI requests)
-python tests/test_cv_edge.py            # CV edge detection unit tests
-python tests/test_aoi_coord_inference.py  # AOI coord full pipeline test
-python tests/test_dust_two_stage.py       # Two-stage dust filter test
+python tools/diag_aoi_coord_inference.py  # AOI coord full pipeline diagnostic
+python capi_server.py --test-protocol     # TCP protocol smoke test
 ```
 
 ## Architecture

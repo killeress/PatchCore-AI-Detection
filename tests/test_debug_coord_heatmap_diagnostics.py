@@ -281,8 +281,11 @@ class _MarkAwareDiagnosticInferencer(CAPIInferencer):
         height, width = image.shape[:2]
         return (0, 0, width, height), None, None
 
-    def _get_image_prefix(self, _name):
-        return "WGF50500"
+    def _get_image_prefix(self, name):
+        return str(name)[:8]
+
+    def _prepare_panel_image_files(self, panel_dir):
+        return sorted(panel_dir.glob("*.tif")), False
 
     def _get_inferencer_for_prefix(self, _prefix):
         return object()
