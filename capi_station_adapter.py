@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 from capi_image_naming import (
     canonical_image_prefix,
+    is_white_frame_image_name,
     panel_image_group_key,
     source_image_prefix,
 )
@@ -78,7 +79,7 @@ class StationAdapter:
         return stem.startswith("PINIGBI") or "OMIT0000" in stem
 
     def is_white_frame_image(self, image_name: str) -> bool:
-        return Path(image_name).stem.upper().startswith("WHITEFRA_")
+        return is_white_frame_image_name(image_name)
 
     def find_white_frame_image(self, panel_dir: Path) -> Optional[Path]:
         return _latest_matching_image(panel_dir, self.is_white_frame_image)

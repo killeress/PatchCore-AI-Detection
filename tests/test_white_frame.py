@@ -21,6 +21,7 @@ from capi_server import (
     build_dual_protocol_response,
     results_to_db_data,
 )
+from capi_station_adapter import create_station_adapter
 from capi_white_frame import (
     WhiteFrameInspection,
     find_white_frame_image,
@@ -90,12 +91,15 @@ def test_find_white_frame_image_is_optional_and_selects_newest(tmp_path):
     (tmp_path / "W0F00000_100000.png").write_bytes(b"not selected")
     older = tmp_path / "WHITEFRA_100000.png"
     newer = tmp_path / "whitefra_100001.TIF"
+    hm_compact = tmp_path / "WHITEFRA132147.tif"
     older.write_bytes(b"old")
     newer.write_bytes(b"new")
+    hm_compact.write_bytes(b"hm")
     os.utime(older, (1, 1))
     os.utime(newer, (2, 2))
+    os.utime(hm_compact, (3, 3))
 
-    assert find_white_frame_image(tmp_path) == newer
+    assert find_white_frame_image(tmp_path) == hm_compact
 
 
 def test_rotated_frame_and_open_corners_are_ok(tmp_path):
@@ -298,8 +302,10 @@ def test_server_runs_white_frame_before_formal_response_and_does_not_allow_ok_i(
             [normal_result], None, False, "", False, None, {}
         ),
     )
+    white_frame_path = tmp_path / "WHITEFRA132147.tif"
+    white_frame_path.write_bytes(b"image")
     inspection = WhiteFrameInspection(
-        image_path=tmp_path / "WHITEFRA_123456.png",
+        image_path=white_frame_path,
         image_size=(1200, 800),
         bounds=(180, 140, 1021, 661),
         payload={
@@ -330,9 +336,7 @@ def test_server_runs_white_frame_before_formal_response_and_does_not_allow_ok_i(
     server = CAPIServer.__new__(CAPIServer)
     server.path_mapping = {}
     server._get_or_create_inferencer = lambda _model_id: fake_inferencer
-    server.station_adapter = SimpleNamespace(
-        find_white_frame_image=lambda panel_dir: inspection.image_path,
-    )
+    server.station_adapter = create_station_adapter("capi")
     server.cpu_workers = 1
     import threading
     server._gpu_lock = threading.Lock()
