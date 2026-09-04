@@ -159,7 +159,9 @@ def test_process_panel_v2_passes_requested_product_resolution_to_preprocess(tmp_
         boundary_reference_files=None,
     ):
         captured["product_resolution"] = pre_cfg.product_resolution
-        captured["fast_raw_boundary_enabled"] = pre_cfg.fast_raw_boundary_enabled
+        captured["aapi_large_panel_raw_boundary_enabled"] = (
+            pre_cfg.aapi_large_panel_raw_boundary_enabled
+        )
         return {}
 
     monkeypatch.setattr("capi_preprocess.preprocess_panel_folder", fake_preprocess_panel_folder)
@@ -170,10 +172,13 @@ def test_process_panel_v2_passes_requested_product_resolution_to_preprocess(tmp_
     inferencer.process_panel(tmp_path, product_resolution=(1366, 768))
 
     assert captured["product_resolution"] == (1366, 768)
-    assert captured["fast_raw_boundary_enabled"] is False
+    assert captured["aapi_large_panel_raw_boundary_enabled"] is False
 
 
-def test_process_panel_v2_enables_fast_raw_boundary_for_aapi_only(tmp_path, monkeypatch):
+def test_process_panel_v2_enables_large_panel_raw_boundary_for_aapi_only(
+    tmp_path,
+    monkeypatch,
+):
     _write_grey_panel_image_at(
         tmp_path / "YQ60TE232C13G0F00000000001.tif"
     )
@@ -181,7 +186,9 @@ def test_process_panel_v2_enables_fast_raw_boundary_for_aapi_only(tmp_path, monk
     captured = {}
 
     def fake_preprocess_panel_folder(_panel_path, pre_cfg, **kwargs):
-        captured["fast_raw_boundary_enabled"] = pre_cfg.fast_raw_boundary_enabled
+        captured["aapi_large_panel_raw_boundary_enabled"] = (
+            pre_cfg.aapi_large_panel_raw_boundary_enabled
+        )
         return {}
 
     monkeypatch.setattr("capi_preprocess.preprocess_panel_folder", fake_preprocess_panel_folder)
@@ -193,7 +200,7 @@ def test_process_panel_v2_enables_fast_raw_boundary_for_aapi_only(tmp_path, monk
     inferencer.station_adapter = AAPIStationAdapter()
     inferencer.process_panel(tmp_path)
 
-    assert captured["fast_raw_boundary_enabled"] is True
+    assert captured["aapi_large_panel_raw_boundary_enabled"] is True
 
 
 def test_grid_model_requires_matching_client_resolution(tmp_path, monkeypatch):

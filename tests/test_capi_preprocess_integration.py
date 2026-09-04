@@ -67,7 +67,7 @@ def test_preprocess_panel_image_detects_boundary_from_raw_image(monkeypatch):
         np.float32,
     )
 
-    def fake_detect_fast_panel_boundary(image, config, *, source_name=""):
+    def fake_detect_aapi_large_panel_raw_boundary(image, config, *, source_name=""):
         captured["boundary_image"] = image.copy()
         return (200, 150, 1300, 850), expected_polygon, True
 
@@ -78,8 +78,8 @@ def test_preprocess_panel_image_detects_boundary_from_raw_image(monkeypatch):
 
     monkeypatch.setattr(
         capi_preprocess,
-        "_detect_fast_panel_boundary",
-        fake_detect_fast_panel_boundary,
+        "_detect_aapi_large_panel_raw_boundary",
+        fake_detect_aapi_large_panel_raw_boundary,
     )
     monkeypatch.setattr(
         "capi_image_preprocess_lab.apply_preprocess_pipeline",
@@ -90,7 +90,7 @@ def test_preprocess_panel_image_detects_boundary_from_raw_image(monkeypatch):
         tile_size=256,
         generate_grid_tiles=False,
         cache_processed_image=True,
-        fast_raw_boundary_enabled=True,
+        aapi_large_panel_raw_boundary_enabled=True,
         image_preprocess_pipeline=[
             {"method": "mean", "params": {"kernel_size": 3}},
         ],
@@ -112,8 +112,10 @@ def test_preprocess_panel_image_default_keeps_legacy_boundary_order(monkeypatch)
         np.float32,
     )
 
-    def reject_fast_boundary(*args, **kwargs):
-        raise AssertionError("default CAPI flow must not use fast raw boundary")
+    def reject_aapi_large_panel_raw_boundary(*args, **kwargs):
+        raise AssertionError(
+            "default CAPI flow must not use AAPI large-panel raw boundary"
+        )
 
     def fake_detect_panel_polygon(image, config):
         captured["boundary_image"] = image.copy()
@@ -126,8 +128,8 @@ def test_preprocess_panel_image_default_keeps_legacy_boundary_order(monkeypatch)
 
     monkeypatch.setattr(
         capi_preprocess,
-        "_detect_fast_panel_boundary",
-        reject_fast_boundary,
+        "_detect_aapi_large_panel_raw_boundary",
+        reject_aapi_large_panel_raw_boundary,
     )
     monkeypatch.setattr(
         capi_preprocess,
@@ -155,11 +157,13 @@ def test_preprocess_panel_image_default_keeps_legacy_boundary_order(monkeypatch)
     np.testing.assert_array_equal(result.panel_polygon, expected_polygon)
 
 
-def test_fast_boundary_small_occupancy_falls_back_to_legacy(monkeypatch):
+def test_aapi_large_panel_raw_boundary_small_occupancy_falls_back_to_legacy(
+    monkeypatch,
+):
     from capi_image_preprocess_lab import apply_preprocess_pipeline as real_apply_pipeline
 
     captured = {}
-    fast_polygon = np.array(
+    aapi_large_panel_raw_boundary_polygon = np.array(
         [[400, 300], [1100, 300], [1100, 700], [400, 700]],
         np.float32,
     )
@@ -168,9 +172,13 @@ def test_fast_boundary_small_occupancy_falls_back_to_legacy(monkeypatch):
         np.float32,
     )
 
-    def fake_fast_boundary(image, config, *, source_name=""):
-        captured["fast_image"] = image.copy()
-        return (400, 300, 1100, 700), fast_polygon, False
+    def fake_aapi_large_panel_raw_boundary(image, config, *, source_name=""):
+        captured["aapi_large_panel_raw_boundary_image"] = image.copy()
+        return (
+            (400, 300, 1100, 700),
+            aapi_large_panel_raw_boundary_polygon,
+            False,
+        )
 
     def fake_legacy_boundary(image, config):
         captured["legacy_image"] = image.copy()
@@ -183,8 +191,8 @@ def test_fast_boundary_small_occupancy_falls_back_to_legacy(monkeypatch):
 
     monkeypatch.setattr(
         capi_preprocess,
-        "_detect_fast_panel_boundary",
-        fake_fast_boundary,
+        "_detect_aapi_large_panel_raw_boundary",
+        fake_aapi_large_panel_raw_boundary,
     )
     monkeypatch.setattr(capi_preprocess, "detect_panel_polygon", fake_legacy_boundary)
     monkeypatch.setattr(
@@ -195,7 +203,7 @@ def test_fast_boundary_small_occupancy_falls_back_to_legacy(monkeypatch):
     cfg = PreprocessConfig(
         tile_size=256,
         generate_grid_tiles=False,
-        fast_raw_boundary_enabled=True,
+        aapi_large_panel_raw_boundary_enabled=True,
         image_preprocess_pipeline=[
             {"method": "mean", "params": {"kernel_size": 3}},
         ],
@@ -203,7 +211,9 @@ def test_fast_boundary_small_occupancy_falls_back_to_legacy(monkeypatch):
     result = preprocess_panel_image(FIXTURE, "STANDARD", cfg)
     raw = capi_preprocess.cv2.imread(str(FIXTURE), capi_preprocess.cv2.IMREAD_GRAYSCALE)
 
-    np.testing.assert_array_equal(captured["fast_image"], raw)
+    np.testing.assert_array_equal(
+        captured["aapi_large_panel_raw_boundary_image"], raw
+    )
     np.testing.assert_array_equal(
         captured["legacy_image"],
         np.zeros_like(captured["legacy_image"]),
@@ -300,7 +310,7 @@ def test_preprocess_panel_folder_default_keeps_legacy_candidate_flow(monkeypatch
     )
     preprocess_calls = []
 
-    def reject_fast_boundary(*args, **kwargs):
+    def reject_aapi_large_panel_raw_boundary_file(*args, **kwargs):
         raise AssertionError("default CAPI folder flow must not probe raw boundary")
 
     def fake_preprocess_panel_image(
@@ -327,8 +337,8 @@ def test_preprocess_panel_folder_default_keeps_legacy_candidate_flow(monkeypatch
 
     monkeypatch.setattr(
         capi_preprocess,
-        "_detect_panel_boundary_file",
-        reject_fast_boundary,
+        "_detect_aapi_large_panel_boundary_file",
+        reject_aapi_large_panel_raw_boundary_file,
     )
     monkeypatch.setattr(capi_preprocess, "preprocess_panel_image", fake_preprocess_panel_image)
 
@@ -358,7 +368,7 @@ def test_preprocess_panel_folder_prioritizes_w0f_reference(monkeypatch, tmp_path
         for idx, lighting in enumerate(["STANDARD", "G0F00000", "R0F00000", "W0F00000", "WGF50500"], 1)
     }
 
-    def fake_detect_panel_boundary_file(image_path, config):
+    def fake_detect_aapi_large_panel_boundary_file(image_path, config):
         lighting = capi_preprocess.canonical_image_prefix(Path(image_path).name)
         boundary_calls.append(lighting)
         return (0, 0, 10, 10), polygons[lighting], True
@@ -383,14 +393,17 @@ def test_preprocess_panel_folder_prioritizes_w0f_reference(monkeypatch, tmp_path
 
     monkeypatch.setattr(
         capi_preprocess,
-        "_detect_panel_boundary_file",
-        fake_detect_panel_boundary_file,
+        "_detect_aapi_large_panel_boundary_file",
+        fake_detect_aapi_large_panel_boundary_file,
     )
     monkeypatch.setattr(capi_preprocess, "preprocess_panel_image", fake_preprocess_panel_image)
 
     results = preprocess_panel_folder(
         tmp_path,
-        PreprocessConfig(tile_size=256, fast_raw_boundary_enabled=True),
+        PreprocessConfig(
+            tile_size=256,
+            aapi_large_panel_raw_boundary_enabled=True,
+        ),
     )
 
     assert boundary_calls == ["W0F00000"]
@@ -412,7 +425,7 @@ def test_preprocess_panel_folder_uses_boundary_only_w0f_reference(monkeypatch, t
     boundary_calls = []
     preprocess_calls = []
 
-    def fake_detect_panel_boundary_file(image_path, config):
+    def fake_detect_aapi_large_panel_boundary_file(image_path, config):
         boundary_calls.append(Path(image_path).name)
         return (0, 0, 10, 10), w0f_polygon, True
 
@@ -438,14 +451,17 @@ def test_preprocess_panel_folder_uses_boundary_only_w0f_reference(monkeypatch, t
 
     monkeypatch.setattr(
         capi_preprocess,
-        "_detect_panel_boundary_file",
-        fake_detect_panel_boundary_file,
+        "_detect_aapi_large_panel_boundary_file",
+        fake_detect_aapi_large_panel_boundary_file,
     )
     monkeypatch.setattr(capi_preprocess, "preprocess_panel_image", fake_preprocess_panel_image)
 
     results = preprocess_panel_folder(
         tmp_path,
-        PreprocessConfig(tile_size=256, fast_raw_boundary_enabled=True),
+        PreprocessConfig(
+            tile_size=256,
+            aapi_large_panel_raw_boundary_enabled=True,
+        ),
         image_files=[target],
         boundary_reference_files=[target, reference],
     )
@@ -466,7 +482,7 @@ def test_preprocess_panel_folder_small_occupancy_uses_legacy_flow(monkeypatch, t
     boundary_calls = []
     preprocess_calls = []
 
-    def fake_detect_panel_boundary_file(image_path, config):
+    def fake_detect_aapi_large_panel_boundary_file(image_path, config):
         boundary_calls.append(Path(image_path).name)
         return (0, 0, 10, 10), polygon, False
 
@@ -481,7 +497,7 @@ def test_preprocess_panel_folder_small_occupancy_uses_legacy_flow(monkeypatch, t
             (
                 lighting,
                 reference_polygon is not None,
-                config.fast_raw_boundary_enabled,
+                config.aapi_large_panel_raw_boundary_enabled,
             )
         )
         result_polygon = (
@@ -498,14 +514,17 @@ def test_preprocess_panel_folder_small_occupancy_uses_legacy_flow(monkeypatch, t
 
     monkeypatch.setattr(
         capi_preprocess,
-        "_detect_panel_boundary_file",
-        fake_detect_panel_boundary_file,
+        "_detect_aapi_large_panel_boundary_file",
+        fake_detect_aapi_large_panel_boundary_file,
     )
     monkeypatch.setattr(capi_preprocess, "preprocess_panel_image", fake_preprocess_panel_image)
 
     results = preprocess_panel_folder(
         tmp_path,
-        PreprocessConfig(tile_size=256, fast_raw_boundary_enabled=True),
+        PreprocessConfig(
+            tile_size=256,
+            aapi_large_panel_raw_boundary_enabled=True,
+        ),
         image_files=[target],
         boundary_reference_files=[target, reference],
     )
@@ -532,7 +551,7 @@ def test_preprocess_panel_folder_fallbacks_are_boundary_only(monkeypatch, tmp_pa
     boundary_calls = []
     preprocess_calls = []
 
-    def fake_detect_panel_boundary_file(image_path, config):
+    def fake_detect_aapi_large_panel_boundary_file(image_path, config):
         lighting = capi_preprocess.canonical_image_prefix(Path(image_path).name)
         boundary_calls.append(lighting)
         polygon = standard_polygon if lighting == "STANDARD" else None
@@ -557,14 +576,17 @@ def test_preprocess_panel_folder_fallbacks_are_boundary_only(monkeypatch, tmp_pa
 
     monkeypatch.setattr(
         capi_preprocess,
-        "_detect_panel_boundary_file",
-        fake_detect_panel_boundary_file,
+        "_detect_aapi_large_panel_boundary_file",
+        fake_detect_aapi_large_panel_boundary_file,
     )
     monkeypatch.setattr(capi_preprocess, "preprocess_panel_image", fake_preprocess_panel_image)
 
     results = preprocess_panel_folder(
         tmp_path,
-        PreprocessConfig(tile_size=256, fast_raw_boundary_enabled=True),
+        PreprocessConfig(
+            tile_size=256,
+            aapi_large_panel_raw_boundary_enabled=True,
+        ),
         image_files=[target],
         boundary_reference_files=[target, w0f, standard],
     )

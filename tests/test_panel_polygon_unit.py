@@ -52,7 +52,7 @@ from capi_inference import CAPIInferencer
 from capi_preprocess import (
     BOUNDARY_GRAY_BAND_SHIFT_PARAMS,
     PreprocessConfig,
-    _detect_fast_panel_boundary,
+    _detect_aapi_large_panel_raw_boundary,
     detect_panel_boundary,
     detect_panel_polygon,
     _polyfit_polygon,
@@ -386,10 +386,16 @@ def test_detect_panel_boundary_half_scale_restores_full_resolution(monkeypatch):
         np.float32,
     )
 
-    def fake_detect_panel_polygon(boundary_image, config):
+    def fake_detect_panel_polygon(
+        boundary_image,
+        config,
+        *,
+        side_endpoint_trim_ratio,
+    ):
         captured["shape"] = boundary_image.shape
         captured["tile_size"] = config.tile_size
         captured["otsu_offset"] = config.otsu_offset
+        captured["side_trim"] = side_endpoint_trim_ratio
         return (50, 100, 1450, 1000), scaled_polygon
 
     monkeypatch.setattr(
@@ -412,6 +418,7 @@ def test_detect_panel_boundary_half_scale_restores_full_resolution(monkeypatch):
         "shape": (1100, 1500),
         "tile_size": 256,
         "otsu_offset": 2,
+        "side_trim": 0.15,
     }
     assert bbox == (100, 200, 2900, 2000)
     np.testing.assert_array_equal(polygon, scaled_polygon * 2)
@@ -435,7 +442,25 @@ def test_detect_panel_boundary_still_rejects_curved_large_panel():
     assert polygon is None
 
 
-def test_fast_boundary_requires_large_frame_occupancy(monkeypatch):
+def test_detect_panel_boundary_still_rejects_curved_vertical_edge():
+    image = np.zeros((2200, 3000), dtype=np.uint8)
+    for y in range(300, 1900):
+        normalized_y = (y - 1100) / 800
+        left = int(round(500 + 100 * normalized_y * normalized_y))
+        image[y, left:2500] = 255
+
+    _bbox, polygon = detect_panel_boundary(
+        image,
+        PreprocessConfig(
+            tile_size=512,
+            product_resolution=(1920, 1200),
+        ),
+    )
+
+    assert polygon is None
+
+
+def test_aapi_large_panel_raw_boundary_requires_large_frame_occupancy(monkeypatch):
     import capi_preprocess
 
     image = np.zeros((1000, 1000), dtype=np.uint8)
@@ -454,14 +479,14 @@ def test_fast_boundary_requires_large_frame_occupancy(monkeypatch):
         fake_detect_panel_boundary,
     )
 
-    _bbox, _polygon, large_occupancy = _detect_fast_panel_boundary(
+    _bbox, _polygon, large_occupancy = _detect_aapi_large_panel_raw_boundary(
         image,
         PreprocessConfig(),
     )
     assert large_occupancy is False
 
     detected["bbox"] = (50, 100, 950, 900)
-    bbox, returned_polygon, large_occupancy = _detect_fast_panel_boundary(
+    bbox, returned_polygon, large_occupancy = _detect_aapi_large_panel_raw_boundary(
         image,
         PreprocessConfig(),
     )

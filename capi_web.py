@@ -5394,6 +5394,88 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    @staticmethod
+    def _annotate_white_frame_gaps(
+        image,
+        payload: Optional[Dict[str, Any]],
+        source_size: Optional[Tuple[int, int]] = None,
+    ):
+        """Draw WHITEFRA gap centers on an image used by the record view."""
+        if not isinstance(payload, dict) or payload.get("status") != "NG":
+            return image
+
+        sides = payload.get("sides") if isinstance(payload.get("sides"), dict) else {}
+        markers = []
+        for side in ("top", "right", "bottom", "left"):
+            side_result = sides.get(side) or {}
+            if not isinstance(side_result, dict) or side_result.get("status") != "NG":
+                continue
+            for gap in side_result.get("gaps") or []:
+                if not isinstance(gap, dict) or gap.get("center_x") is None or gap.get("center_y") is None:
+                    continue
+                try:
+                    markers.append((float(gap["center_x"]), float(gap["center_y"])))
+                except (TypeError, ValueError):
+                    continue
+
+        if not markers:
+            return image
+
+        import cv2
+        import numpy as np
+
+        if image.dtype == np.uint8:
+            canvas = image.copy()
+        else:
+            max_value = float(image.max())
+            canvas = (
+                np.clip(image.astype(np.float32) * (255.0 / max_value), 0, 255).astype(np.uint8)
+                if max_value > 0 else np.zeros_like(image, dtype=np.uint8)
+            )
+
+        if canvas.ndim == 2:
+            canvas = cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
+        elif canvas.shape[2] == 4:
+            canvas = cv2.cvtColor(canvas, cv2.COLOR_BGRA2BGR)
+
+        display_height, display_width = canvas.shape[:2]
+        source_width, source_height = source_size or (display_width, display_height)
+        scaled_markers = []
+        for center_x, center_y in markers:
+            x = int(round(center_x * display_width / source_width))
+            y = int(round(center_y * display_height / source_height))
+            scaled_markers.append((
+                max(0, min(display_width - 1, x)),
+                max(0, min(display_height - 1, y)),
+            ))
+
+        radius = max(10, min(42, int(round(min(display_width, display_height) * 0.035))))
+        line_width = max(2, int(round(radius * 0.18)))
+        cross_half = max(4, int(round(radius * 0.55)))
+        overlay = canvas.copy()
+        for center in scaled_markers:
+            cv2.circle(overlay, center, radius, (0, 0, 255), -1, cv2.LINE_AA)
+        cv2.addWeighted(overlay, 0.22, canvas, 0.78, 0, canvas)
+
+        for index, (x, y) in enumerate(scaled_markers, start=1):
+            center = (x, y)
+            cv2.circle(canvas, center, radius, (0, 0, 255), line_width, cv2.LINE_AA)
+            cv2.line(canvas, (x - cross_half, y), (x + cross_half, y), (0, 0, 255), line_width, cv2.LINE_AA)
+            cv2.line(canvas, (x, y - cross_half), (x, y + cross_half), (0, 0, 255), line_width, cv2.LINE_AA)
+
+            label = str(index)
+            font_scale = max(0.42, min(0.8, radius / 24.0))
+            label_at = (min(display_width - 1, x + radius + 4), max(12, y - radius + 12))
+            cv2.putText(
+                canvas, label, label_at, cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale, (0, 0, 0), line_width + 1, cv2.LINE_AA,
+            )
+            cv2.putText(
+                canvas, label, label_at, cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale, (255, 255, 255), 1, cv2.LINE_AA,
+            )
+        return canvas
+
     def _handle_source_image(self, path: str, query: Optional[dict] = None):
         """靜態檔案服務 (原始圖片)"""
         # /images/{record_id}/{image_name}
@@ -5417,8 +5499,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             preview = str((query or {}).get("preview", [""])[0]).lower() in (
                 "1", "true", "yes"
             )
+            annotate_white_frame = str(
+                (query or {}).get("white_frame", [""])[0]
+            ).lower() in ("1", "true", "yes")
             if full_path.exists() and full_path.is_file():
-                if preview:
+                if preview or annotate_white_frame or self._inference_rotate_180_enabled():
                     import cv2
 
                     image = self._read_inference_image(full_path, cv2.IMREAD_UNCHANGED)
@@ -5426,22 +5511,26 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         self._send_404()
                         return
                     height, width = image.shape[:2]
-                    max_dimension = 640
-                    scale = min(1.0, max_dimension / max(height, width))
-                    if scale < 1.0:
-                        image = cv2.resize(
+                    if preview:
+                        max_dimension = 640
+                        scale = min(1.0, max_dimension / max(height, width))
+                        if scale < 1.0:
+                            image = cv2.resize(
+                                image,
+                                (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+                                interpolation=cv2.INTER_AREA,
+                            )
+                    if annotate_white_frame:
+                        white_frame_payload = next((
+                            item.get("white_frame_result")
+                            for item in detail.get("images", [])
+                            if str(item.get("image_name") or Path(str(item.get("image_path") or "")).name) == image_name
+                        ), None)
+                        image = self._annotate_white_frame_gaps(
                             image,
-                            (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
-                            interpolation=cv2.INTER_AREA,
+                            white_frame_payload,
+                            source_size=(width, height),
                         )
-                    self._send_image_array_png(image)
-                elif self._inference_rotate_180_enabled():
-                    import cv2
-
-                    image = self._read_inference_image(full_path, cv2.IMREAD_UNCHANGED)
-                    if image is None:
-                        self._send_404()
-                        return
                     self._send_image_array_png(image)
                 else:
                     self._send_binary(str(full_path))
