@@ -16,10 +16,10 @@ from typing import Any, Dict, Optional, Tuple
 import cv2
 import numpy as np
 
+from capi_image_naming import is_white_frame_image_name
 from capi_image_orientation import read_detection_image
 
 
-WHITE_FRAME_PREFIX = "WHITEFRA_"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 SIDE_ORDER = ("top", "right", "bottom", "left")
 SIDE_LABELS = {
@@ -62,13 +62,13 @@ class WhiteFrameInspection:
 
 
 def find_white_frame_image(panel_dir: Path) -> Optional[Path]:
-    """Return the newest WHITEFRA_* image, or ``None`` when not supplied."""
+    """Return the newest WHITEFRA image, or ``None`` when not supplied."""
     candidates = [
         path
         for path in Path(panel_dir).iterdir()
         if path.is_file()
         and path.suffix.lower() in IMAGE_EXTENSIONS
-        and path.name.upper().startswith(WHITE_FRAME_PREFIX)
+        and is_white_frame_image_name(path.name)
     ]
     if not candidates:
         return None

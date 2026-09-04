@@ -72,6 +72,12 @@ def panel_image_group_key(image_name: str) -> str:
     return canonical_image_prefix(image_name)
 
 
+def is_white_frame_image_name(image_name: str) -> bool:
+    """Return whether a CAPI filename is a WHITEFRA image."""
+    stem = Path(str(image_name)).stem.upper()
+    return _matches_prefix(stem, "WHITEFRA")
+
+
 def _matches_prefix(stem_upper: str, prefix: str) -> bool:
     if stem_upper == prefix or stem_upper.startswith(prefix + "_"):
         return True

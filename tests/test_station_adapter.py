@@ -37,6 +37,15 @@ def test_station_profile_is_selected_from_hostname(hostname, expected):
     assert resolve_station_profile_from_hostname(hostname) == expected
 
 
+def test_capi_white_frame_image_supports_hm_compact_timestamp_name(tmp_path):
+    adapter = create_station_adapter("capi")
+    image_path = tmp_path / "WHITEFRA132147.tif"
+    image_path.write_bytes(b"image")
+
+    assert adapter.is_white_frame_image(image_path.name) is True
+    assert adapter.find_white_frame_image(tmp_path) == image_path
+
+
 @pytest.mark.parametrize("hostname", ["mod2-ai09", "", "aapi-capi-test"])
 def test_unknown_or_ambiguous_station_hostname_is_rejected(hostname):
     with pytest.raises(RuntimeError, match="hostname"):
