@@ -151,7 +151,7 @@ class PreprocessConfig:
     grid_canonicalization_enabled: bool = False
     grid_samples_per_cell: int = 3
     rotate_180: bool = False
-    fast_raw_boundary_enabled: bool = False  # opt-in from AAPI inference only
+    aapi_large_panel_raw_boundary_enabled: bool = False
     image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -215,8 +215,9 @@ BOUNDARY_DOWNSCALE_MIN_SPAN_TILES = 4
 BOUNDARY_GAUSSIAN_KERNEL = (5, 5)
 BOUNDARY_GAUSSIAN_SIGMA = 1.0
 # YQ60 sample is 94.5% x 89.0%; smaller legacy panels stay below this gate.
-FAST_BOUNDARY_MIN_WIDTH_RATIO = 0.85
-FAST_BOUNDARY_MIN_HEIGHT_RATIO = 0.80
+AAPI_LARGE_PANEL_MIN_WIDTH_RATIO = 0.85
+AAPI_LARGE_PANEL_MIN_HEIGHT_RATIO = 0.80
+AAPI_LARGE_PANEL_SIDE_ENDPOINT_TRIM_RATIO = 0.15
 SKIP_EXACT = ("Optics.log",)
 
 EDGE_MARGIN = 20
@@ -451,6 +452,8 @@ def filter_panel_lighting_files(
 def detect_panel_polygon(
     image: np.ndarray,
     config: PreprocessConfig,
+    *,
+    side_endpoint_trim_ratio: float = EDGE_ENDPOINT_TRIM_RATIO,
 ) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[np.ndarray]]:
     """Otsu binarize → 最大連通輪廓 bbox → polyfit 4 角 polygon。
 
@@ -543,6 +546,7 @@ def detect_panel_polygon(
         bbox,
         config.tile_size,
         stabilize_near_vertical_edges=_use_robust_panel_boundary(config),
+        side_endpoint_trim_ratio=side_endpoint_trim_ratio,
     )
     return bbox, polygon
 
@@ -600,7 +604,11 @@ def detect_panel_boundary(
     )
 
     detect_started = time.perf_counter()
-    bbox, polygon = detect_panel_polygon(boundary_image, scaled_cfg)
+    bbox, polygon = detect_panel_polygon(
+        boundary_image,
+        scaled_cfg,
+        side_endpoint_trim_ratio=AAPI_LARGE_PANEL_SIDE_ENDPOINT_TRIM_RATIO,
+    )
     detect_ms = (time.perf_counter() - detect_started) * 1000.0
 
     if bbox is not None and (scale_x != 1.0 or scale_y != 1.0):
@@ -635,7 +643,7 @@ def detect_panel_boundary(
     return bbox, polygon
 
 
-def _detect_panel_boundary_file(
+def _detect_aapi_large_panel_boundary_file(
     image_path: Path,
     config: PreprocessConfig,
 ) -> Tuple[
@@ -646,10 +654,14 @@ def _detect_panel_boundary_file(
     image = read_detection_image(image_path, cv2.IMREAD_GRAYSCALE, config.rotate_180)
     if image is None:
         raise FileNotFoundError(f"無法載入圖片: {image_path}")
-    return _detect_fast_panel_boundary(image, config, source_name=image_path.name)
+    return _detect_aapi_large_panel_raw_boundary(
+        image,
+        config,
+        source_name=image_path.name,
+    )
 
 
-def _detect_fast_panel_boundary(
+def _detect_aapi_large_panel_raw_boundary(
     image: np.ndarray,
     config: PreprocessConfig,
     *,
@@ -669,11 +681,12 @@ def _detect_fast_panel_boundary(
     width_ratio = max(0, x2 - x1) / float(max(1, img_w))
     height_ratio = max(0, y2 - y1) / float(max(1, img_h))
     if (
-        width_ratio < FAST_BOUNDARY_MIN_WIDTH_RATIO
-        or height_ratio < FAST_BOUNDARY_MIN_HEIGHT_RATIO
+        width_ratio < AAPI_LARGE_PANEL_MIN_WIDTH_RATIO
+        or height_ratio < AAPI_LARGE_PANEL_MIN_HEIGHT_RATIO
     ):
         logger.info(
-            "[boundary] source=%s fast_raw=no reason=small_occupancy "
+            "[boundary] source=%s aapi_large_panel_raw_boundary=no "
+            "reason=small_occupancy "
             "width_ratio=%.3f height_ratio=%.3f",
             source_name or "-",
             width_ratio,
@@ -682,7 +695,8 @@ def _detect_fast_panel_boundary(
         return bbox, polygon, False
 
     logger.info(
-        "[boundary] source=%s fast_raw=yes width_ratio=%.3f height_ratio=%.3f",
+        "[boundary] source=%s aapi_large_panel_raw_boundary=yes "
+        "width_ratio=%.3f height_ratio=%.3f",
         source_name or "-",
         width_ratio,
         height_ratio,
@@ -695,6 +709,7 @@ def _polyfit_polygon(
     bbox: Tuple[int, int, int, int],
     tile_size: int,
     stabilize_near_vertical_edges: bool = False,
+    side_endpoint_trim_ratio: float = EDGE_ENDPOINT_TRIM_RATIO,
 ) -> Optional[np.ndarray]:
     """從 capi_inference._find_panel_polygon 抽出，邏輯不變。"""
     H, W = binary_mask.shape[:2]
@@ -719,9 +734,9 @@ def _polyfit_polygon(
     if min(len(tops), len(bots), len(lefts), len(rights)) < MIN_SAMPLES_PER_EDGE:
         return None
 
-    def _trim_edge_endpoints(pts):
-        # bbox 角落會混入相鄰斜邊；只用每邊中央 90% 評估直線品質。
-        trim = int(round(len(pts) * EDGE_ENDPOINT_TRIM_RATIO))
+    def _trim_edge_endpoints(pts, trim_ratio=EDGE_ENDPOINT_TRIM_RATIO):
+        # bbox 角落會混入相鄰斜邊；只用每邊中央區段評估直線品質。
+        trim = int(round(len(pts) * trim_ratio))
         if trim <= 0 or len(pts) - 2 * trim < MIN_SAMPLES_PER_EDGE:
             return pts
         return pts[trim:-trim]
@@ -772,8 +787,12 @@ def _polyfit_polygon(
 
     top_points = _trim_edge_endpoints(tops)
     bottom_points = _trim_edge_endpoints(bots)
-    side_lefts = _trim_side_points(_trim_edge_endpoints(lefts))
-    side_rights = _trim_side_points(_trim_edge_endpoints(rights))
+    side_lefts = _trim_side_points(
+        _trim_edge_endpoints(lefts, side_endpoint_trim_ratio)
+    )
+    side_rights = _trim_side_points(
+        _trim_edge_endpoints(rights, side_endpoint_trim_ratio)
+    )
     top_l, bot_l = fit(top_points, True), fit(bottom_points, True)
     left_l, right_l = fit(side_lefts, False), fit(side_rights, False)
     if None in (top_l, bot_l, left_l, right_l):
@@ -1073,7 +1092,8 @@ def preprocess_panel_image(
     """單張 lighting 圖完整前處理。
 
     預設維持既有流程：模型影像前處理後才偵測 boundary。
-    fast_raw_boundary_enabled 僅供符合占比門檻的 AAPI 大面板先從 raw image 抓邊。
+    aapi_large_panel_raw_boundary_enabled 僅供符合占比門檻的 AAPI 大面板
+    先從 raw image 抓邊。
     """
     img = read_detection_image(image_path, cv2.IMREAD_GRAYSCALE, config.rotate_180)
     if img is None:
@@ -1082,7 +1102,7 @@ def preprocess_panel_image(
 
     bbox = None
     detected_polygon = None
-    if getattr(config, "fast_raw_boundary_enabled", False):
+    if getattr(config, "aapi_large_panel_raw_boundary_enabled", False):
         if reference_bbox is not None:
             bbox = reference_bbox
         else:
@@ -1095,19 +1115,19 @@ def preprocess_panel_image(
                 candidate_bbox,
                 candidate_polygon,
                 large_occupancy,
-            ) = _detect_fast_panel_boundary(
+            ) = _detect_aapi_large_panel_raw_boundary(
                 original_img, boundary_cfg, source_name=image_path.name
             )
             if large_occupancy:
                 bbox = candidate_bbox
                 detected_polygon = candidate_polygon
 
-        fast_boundary_usable = bbox is not None and (
+        aapi_large_panel_raw_boundary_usable = bbox is not None and (
             reference_polygon is not None
             or not config.enable_panel_polygon
             or detected_polygon is not None
         )
-        if not fast_boundary_usable:
+        if not aapi_large_panel_raw_boundary_usable:
             bbox = None
             detected_polygon = None
 
@@ -1344,7 +1364,7 @@ def preprocess_panel_folder(
     reference_priority = tuple(
         boundary_reference_priority or BOUNDARY_REFERENCE_PRIORITY
     )
-    if not getattr(config, "fast_raw_boundary_enabled", False):
+    if not getattr(config, "aapi_large_panel_raw_boundary_enabled", False):
         return _preprocess_panel_folder_legacy(
             files,
             reference_files,
@@ -1361,16 +1381,17 @@ def preprocess_panel_folder(
         if cand not in reference_files:
             continue
         candidate_bbox, candidate_polygon, large_occupancy = (
-            _detect_panel_boundary_file(reference_files[cand], config)
+            _detect_aapi_large_panel_boundary_file(reference_files[cand], config)
         )
         if large_occupancy is False:
             logger.info(
-                "[boundary] fast raw path skipped; using legacy flow for this panel"
+                "[boundary] AAPI large-panel raw boundary skipped; "
+                "using legacy flow for this panel"
             )
             return _preprocess_panel_folder_legacy(
                 files,
                 reference_files,
-                replace(config, fast_raw_boundary_enabled=False),
+                replace(config, aapi_large_panel_raw_boundary_enabled=False),
                 reference_priority,
             )
         if large_occupancy and (
@@ -1383,12 +1404,13 @@ def preprocess_panel_folder(
 
     if ref_lighting is None:
         logger.info(
-            "[boundary] fast raw path found no valid polygon; using legacy flow"
+            "[boundary] AAPI large-panel raw boundary found no valid polygon; "
+            "using legacy flow"
         )
         return _preprocess_panel_folder_legacy(
             files,
             reference_files,
-            replace(config, fast_raw_boundary_enabled=False),
+            replace(config, aapi_large_panel_raw_boundary_enabled=False),
             reference_priority,
         )
 

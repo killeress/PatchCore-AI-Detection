@@ -34,6 +34,42 @@
         {% endfor %}
     </div>
 
+    {% set image_name = img.get('image_name', '') %}
+    {% if image_name and detail.get('id') %}
+    {% set white_frame_image_url = '/images/' ~ detail.id ~ '/' ~ (image_name | urlencode) ~ '?white_frame=1' %}
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(148,163,184,0.24);">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+            <strong style="font-size:0.8rem;">檢測影像</strong>
+            {% if wf.status == 'NG' %}
+            <span style="color:#EF4444;font-size:0.72rem;font-weight:600;">紅色標記為斷線中心</span>
+            {% endif %}
+        </div>
+        <img src="{{ white_frame_image_url }}&preview=1" data-full-src="{{ white_frame_image_url }}"
+            alt="{{ image_name }} 白框檢測影像" loading="lazy"
+            style="display:block;width:min(100%,640px);height:auto;max-height:520px;object-fit:contain;background:#020617;border:1px solid rgba(148,163,184,0.32);border-radius:8px;cursor:zoom-in;"
+            onclick="openLightbox(this.dataset.fullSrc)"
+            onerror="this.style.display='none';this.nextElementSibling.style.display='block';">
+        <span style="display:none;color:#94A3B8;font-size:0.75rem;">圖片無法讀取</span>
+
+        {% if wf.status == 'NG' %}
+        {% set marker = namespace(index=0) %}
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
+            {% for side in ['top', 'right', 'bottom', 'left'] %}
+            {% set side_result = wf.get('sides', {}).get(side, {}) %}
+            {% for gap in side_result.get('gaps', []) %}
+            {% if gap.get('center_x') is not none and gap.get('center_y') is not none %}
+            {% set marker.index = marker.index + 1 %}
+            <span style="padding:3px 7px;border-radius:999px;background:rgba(239,68,68,0.12);color:#EF4444;font-size:0.7rem;font-family:'Fira Code',monospace;">
+                #{{ marker.index }} {{ side_result.get('label', side) }} ({{ gap.center_x }}, {{ gap.center_y }})
+            </span>
+            {% endif %}
+            {% endfor %}
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
+
     <div style="margin-top:10px;color:#94A3B8;font-size:0.72rem;font-family:'Fira Code',monospace;">
         {% if wf.get('angle_deg') is not none %}校正角度: {{ wf.angle_deg }}° | {% endif %}
         檢測耗時: {{ wf.get('processing_ms', 0) | round(1) }}ms

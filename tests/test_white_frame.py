@@ -427,9 +427,77 @@ def test_record_pages_include_white_frame_result_panel():
     partial = Path("templates/_white_frame_result.html").read_text(encoding="utf-8")
     assert "白色外框檢測" in partial
     assert "不影響正式 OK／NG" not in partial
+    assert "?white_frame=1" in partial
+    assert "紅色標記為斷線中心" in partial
     for template_name in ("record_detail.html", "record_detail_v3.html"):
         template = Path("templates") / template_name
         assert '{% include "_white_frame_result.html" %}' in template.read_text(encoding="utf-8")
+
+
+def test_white_frame_annotation_marks_scaled_gap_center_only_for_ng():
+    from capi_web import CAPIWebHandler
+
+    image = np.zeros((100, 200), dtype=np.uint8)
+    payload = {
+        "status": "NG",
+        "sides": {
+            "top": {
+                "status": "NG",
+                "gaps": [{"center_x": 500, "center_y": 250}],
+            },
+        },
+    }
+
+    annotated = CAPIWebHandler._annotate_white_frame_gaps(
+        image,
+        payload,
+        source_size=(1000, 500),
+    )
+
+    assert annotated.shape == (100, 200, 3)
+    assert tuple(annotated[50, 100]) == (0, 0, 255)
+    assert tuple(annotated[50, 199]) == (0, 0, 0)
+
+    untouched = CAPIWebHandler._annotate_white_frame_gaps(
+        image,
+        {"status": "OK", "sides": {}},
+    )
+    assert untouched is image
+
+
+def test_source_image_preview_applies_white_frame_annotation(tmp_path):
+    from capi_web import CAPIWebHandler
+
+    image_name = "WHITEFRA_TEST.png"
+    assert cv2.imwrite(str(tmp_path / image_name), np.zeros((500, 1000), dtype=np.uint8))
+    payload = {
+        "status": "NG",
+        "sides": {
+            "top": {
+                "status": "NG",
+                "gaps": [{"center_x": 500, "center_y": 250}],
+            },
+        },
+    }
+    detail = {
+        "image_dir": str(tmp_path),
+        "images": [{"image_name": image_name, "white_frame_result": payload}],
+    }
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = SimpleNamespace(get_record_detail=lambda _record_id: detail)
+    sent_images = []
+    handler._send_image_array_png = lambda image: sent_images.append(image)
+    handler._send_404 = lambda *_args: pytest.fail("unexpected 404")
+    handler._send_binary = lambda *_args: pytest.fail("unexpected raw image response")
+
+    handler._handle_source_image(
+        f"/images/7/{image_name}",
+        {"preview": ["1"], "white_frame": ["1"]},
+    )
+
+    assert len(sent_images) == 1
+    assert sent_images[0].shape == (320, 640, 3)
+    assert tuple(sent_images[0][160, 320]) == (0, 0, 255)
 
 
 def test_white_frame_summary_page_template_and_nav_are_present():
