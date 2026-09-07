@@ -91,6 +91,27 @@ def test_polygon_detect_ideal_rectangle():
     print(f"✅ test_polygon_detect_ideal_rectangle (max err={diff:.2f}px)")
 
 
+def test_aapi_polygon_can_ignore_external_bright_objects():
+    """AAPI 大面板可隔離外部亮點，預設共用流程則維持原行為。"""
+    binary = np.zeros((2200, 3200), dtype=np.uint8)
+    binary[300:1800, 300:2900] = 255
+    binary[2000:2200, 2400:2650] = 255
+    original = binary.copy()
+    expected = np.array([[300, 300], [2899, 300], [2899, 1799], [300, 1799]])
+
+    assert _polyfit_polygon(binary, (300, 300, 2900, 2200), tile_size=512) is None
+    for bbox in ((300, 300, 2900, 1800), (300, 300, 2900, 2200)):
+        polygon = _polyfit_polygon(
+            binary,
+            bbox,
+            tile_size=512,
+            isolate_largest_contour=True,
+        )
+        assert polygon is not None
+        np.testing.assert_allclose(polygon, expected, atol=2)
+    np.testing.assert_array_equal(binary, original)
+
+
 def test_polygon_detect_degenerate_all_black():
     """全黑圖 → 應該回傳 None"""
     binary = np.zeros((3000, 4000), dtype=np.uint8)
@@ -339,11 +360,13 @@ def test_detect_panel_boundary_half_scale_restores_full_resolution(monkeypatch):
         config,
         *,
         side_endpoint_trim_ratio,
+        isolate_largest_contour,
     ):
         captured["shape"] = boundary_image.shape
         captured["tile_size"] = config.tile_size
         captured["otsu_offset"] = config.otsu_offset
         captured["side_trim"] = side_endpoint_trim_ratio
+        captured["isolate_largest_contour"] = isolate_largest_contour
         return (50, 100, 1450, 1000), scaled_polygon
 
     monkeypatch.setattr(
@@ -367,6 +390,7 @@ def test_detect_panel_boundary_half_scale_restores_full_resolution(monkeypatch):
         "tile_size": 256,
         "otsu_offset": 2,
         "side_trim": 0.15,
+        "isolate_largest_contour": False,
     }
     assert bbox == (100, 200, 2900, 2000)
     np.testing.assert_array_equal(polygon, scaled_polygon * 2)
@@ -418,7 +442,14 @@ def test_aapi_large_panel_raw_boundary_requires_large_frame_occupancy(monkeypatc
     )
     detected = {"bbox": (100, 100, 900, 900)}
 
-    def fake_detect_panel_boundary(image, config, *, source_name=""):
+    def fake_detect_panel_boundary(
+        image,
+        config,
+        *,
+        source_name="",
+        isolate_largest_contour=False,
+    ):
+        assert isolate_largest_contour is True
         return detected["bbox"], polygon
 
     monkeypatch.setattr(

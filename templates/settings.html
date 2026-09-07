@@ -2061,6 +2061,7 @@
         'mark_exclusion_padding_px', 'mark_exclusion_soft_decay_px', 'no_detect_soft_decay_min_weight'
     ];
     const INFERENCE_IMAGE_PARAMS = [
+        'side_white_detection_enabled',
         'inference_rotate_180_enabled',
         'dust_pixel_grid_filter_enabled',
         'dust_pixel_grid_blur_kernel'
@@ -2181,6 +2182,7 @@
 
     // ── Init ──
     let currentTab = 'patchcore';
+    {% include "_side_white_settings.js" %}
     let exCurrentImagePath = '';
     let exInitialProductCode = '';
     let exInitialQueryCoords = null;
@@ -2226,6 +2228,7 @@
 
     window.switchTab = function (tabId) {
         currentTab = tabId;
+        if (tabId === 'side-white' && !sideWhite.loaded) loadSideWhite();
         document.querySelectorAll('.settings-tab-btn').forEach(btn => {
             if (btn.dataset.target === tabId) btn.classList.add('active');
             else btn.classList.remove('active');
@@ -2251,6 +2254,7 @@
         if (SETTINGS_USER && SETTINGS_USER.can_manage_accounts) {
             loadSettingsUsers();
             loadMarkShadow();
+            if (currentTab === 'side-white') loadSideWhite();
         }
     });
 
@@ -3517,6 +3521,7 @@
             'within-spec',
             'auto-model-switch',
             SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? 'mark-shadow' : null,
+            SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? 'side-white' : null,
             SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? 'accounts' : null,
             'history',
         ].filter(Boolean);
@@ -3536,6 +3541,7 @@
             <button class="settings-tab-btn ${currentTab === 'within-spec' ? 'active' : ''}" data-target="within-spec" onclick="switchTab('within-spec')">📏 規格內判定</button>
             <button class="settings-tab-btn ${currentTab === 'auto-model-switch' ? 'active' : ''}" data-target="auto-model-switch" onclick="switchTab('auto-model-switch')">↔ 自動切換模型</button>
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'mark-shadow' ? 'active' : ''}" data-target="mark-shadow" onclick="switchTab('mark-shadow')">🔬 Mark PPOCR檢查</button>` : ''}
+            ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'side-white' ? 'active' : ''}" data-target="side-white" onclick="switchTab('side-white')">側拍白畫面 Review</button>` : ''}
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<a class="settings-tab-btn" href="/white-frame" style="text-decoration:none;">🖼️ 白框總表</a>` : ''}
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'accounts' ? 'active' : ''}" data-target="accounts" onclick="switchTab('accounts')">👤 帳號管理</button>` : ''}
             <button class="settings-tab-btn ${currentTab === 'history' ? 'active' : ''}" data-target="history" onclick="switchTab('history')">📋 修改紀錄</button>
@@ -3925,6 +3931,7 @@
             ${renderImageAbnormalPane(imageAbnormalParams)}
             ${renderWithinSpecPane(withinSpecParam, centralAccountLocation)}
             ${renderMarkShadowPane()}
+            ${renderSideWhitePane()}
         `;
 
         // 延遲初始化可視化工具
@@ -4651,6 +4658,8 @@
         'cv_edge_exclude_soft_decay_px': '手動不檢測區外圈 heatmap 降權寬度 (px)',
         'no_detect_soft_decay_min_weight': '不檢測區 soft decay 邊界最低權重 (0~1)',
         'inference_rotate_180_enabled': '推論影像旋轉 180°',
+        'side_white_detection_enabled': '啟用側拍白畫面檢測（僅 Review）',
+        'side_white_detection_params': '側拍白畫面檢測參數',
         'tile_corner_exclusion_enabled': '啟用 Tile 四角不檢測區',
         'tile_corner_exclusion_size_px': 'Tile 四角不檢測區大小 (px，正方形邊長)',
         // Image abnormal precheck

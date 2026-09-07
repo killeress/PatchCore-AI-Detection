@@ -17,6 +17,7 @@ class _DiagnosticInferencer:
     def __init__(self):
         self.config = SimpleNamespace(
             machine_id="TEST_MODEL",
+            model_resolution_map={"M": [128, 128]},
             tile_size=64,
             otsu_offset=0,
             enable_panel_polygon=False,
@@ -259,6 +260,7 @@ class _MarkAwareDiagnosticInferencer(CAPIInferencer):
     def __init__(self):
         self.config = CAPIConfig()
         self.config.machine_id = "TEST_MODEL"
+        self.config.model_resolution_map = {"M": [128, 128]}
         self.config.tile_size = 64
         self.config.tile_stride = 64
         self.config.otsu_offset = 0

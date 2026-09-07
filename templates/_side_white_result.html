@@ -1,0 +1,42 @@
+{% autoescape true %}
+{% include "_side_white_styles.html" %}
+{% set sw = detail.get('side_white_result') %}
+<section class="sw-card" id="side-white-result">
+    <div class="sw-head"><h3>側拍白畫面檢測</h3><span class="sw-badge">觀察模式 · 不影響最終判定</span></div>
+    {% if sw %}
+    {% set p = sw.payload %}
+    {% set statuses = {'CANDIDATES':'發現候選', 'NO_CANDIDATES':'未發現候選（非 OK 判定）', 'NO_IMAGE':'無側拍白畫面', 'ERROR':'檢測失敗'} %}
+    {% set reviews = {'unreviewed':'待 Review', 'confirmed':'確認不良', 'false_positive':'過檢', 'missed':'漏檢', 'uncertain':'待確認'} %}
+    <div class="sw-head"><strong>{{ statuses.get(sw.status, sw.status) }} · {{ sw.candidate_count }} 個候選</strong>
+        <a href="/settings?tab=side-white&amp;glass_id={{ detail.glass_id|urlencode }}">前往側拍 Review →</a></div>
+    <p class="sw-note">{{ p.get('side_image','') }}{% if p.get('front_image') %} → {{ p.front_image }}{% endif %}
+        · 耗時 {{ p.get('processing_ms',0) }} ms · {{ p.algorithm }}</p>
+    {% if p.get('reason') %}<p class="sw-note">{{ p.reason }}</p>{% endif %}
+    <p class="sw-note">{{ p.get('mapping',{}).get('reason','') }}</p>
+    {% if p.get('parameters') %}
+    <p class="sw-note">當時參數：最低局部反差 {{ p.parameters.min_contrast_gray }} · 雜訊門檻倍率 {{ p.parameters.noise_sigma_factor }} · 最小候選面積 {{ p.parameters.min_area_px }} 個側拍像素 · 邊緣排除寬度 {{ p.parameters.edge_margin_px }} 側拍 px{% if p.get('threshold_gray') is not none %}；本次實際門檻 {{ p.threshold_gray }} 灰階。{% endif %}</p>
+    {% else %}<p class="sw-note">此筆未保存參數快照。</p>{% endif %}
+    <p class="sw-note">預覽裁切至面板範圍。黃框為候選；藍框 MASK 為角落文字／貼紙排除區。</p>
+    <p class="sw-note">{{ reviews.get(sw.review_decision, sw.review_decision) }}{% if sw.reviewed_at %} · {{ sw.reviewed_by }} · {{ sw.reviewed_at }}{% endif %}{% if sw.review_note %}<br>{{ sw.review_note }}{% endif %}</p>
+    {% if p.get('truncated') %}<p class="sw-badge sw-warn">候選過多，僅保留反差最高的 100 個；請 Review 影像品質。</p>{% endif %}
+    <div class="sw-images">
+        {% for kind, label in [('side','側拍候選（亮度增強）'), ('front','正拍映射位置（估算）'), ('residual','局部亮暗差（增強顯示）')] %}
+        {% if p.get('artifacts',{}).get(kind) %}
+        <figure><a href="/api/side-white/image?id={{ sw.id }}&amp;kind={{ kind }}" target="_blank" rel="noopener"><img loading="lazy" src="/api/side-white/image?id={{ sw.id }}&amp;kind={{ kind }}" alt="{{ label }}" onerror="this.replaceWith(document.createTextNode('預覽已過期或遺失'))"></a><figcaption>{{ label }}</figcaption></figure>
+        {% endif %}
+        {% endfor %}
+    </div>
+    {% if p.get('rotation_applied') %}<p class="sw-note">預覽已旋轉 180°；下表座標仍為原始 TIF 座標。</p>{% endif %}
+    {% if p.candidates %}
+    <p class="sw-note">原始 TIF 像素座標：左上角為 (0,0)，X 向右、Y 向下；類型描述外觀，尚未確認缺陷成因。</p>
+    <div class="sw-scroll"><table class="sw-table"><thead><tr><th>候選</th><th>形態</th><th>側拍 (X,Y)</th><th>正拍 (X,Y)，估算</th><th>面積／側拍 px</th><th>局部反差</th></tr></thead><tbody>
+    {% set kinds = {'bright_dark_pair':'亮暗成對', 'bright_spot':'亮斑', 'dark_spot':'暗斑', 'line':'細長紋路'} %}
+    {% for c in p.candidates %}<tr><td>#{{ c.id }}</td><td>{{ kinds.get(c.kind,c.kind) }}</td><td>{{ c.side_raw_xy[0]|round(1) }}, {{ c.side_raw_xy[1]|round(1) }}</td><td>{% if c.front_raw_xy %}{{ c.front_raw_xy[0]|round(1) }}, {{ c.front_raw_xy[1]|round(1) }}{% else %}未映射{% endif %}</td><td>{{ c.area_px }}</td><td>{{ c.contrast_gray }}</td></tr>{% endfor %}
+    </tbody></table></div>
+    {% endif %}
+    {% else %}
+    <p class="sw-note">此筆尚無側拍檢測資料：可能未啟用、屬於舊紀錄，或背景處理尚未完成。</p>
+    <button type="button" class="sw-btn" onclick="location.reload()">重新整理</button>
+    {% endif %}
+</section>
+{% endautoescape %}

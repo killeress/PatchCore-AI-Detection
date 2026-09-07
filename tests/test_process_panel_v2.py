@@ -146,10 +146,10 @@ def test_process_panel_v2_duplicate_panel_uses_latest_hm_lighting_file(tmp_path)
     assert [r.image_path.name for r in results] == ["G0F00000020000.png"]
 
 
-def test_process_panel_v2_passes_requested_product_resolution_to_preprocess(tmp_path, monkeypatch):
+def test_process_panel_v2_ignores_client_product_resolution(tmp_path, monkeypatch):
     _write_grey_panel_image(tmp_path, "G0F00000")
     cfg = _make_config(tmp_path)
-    cfg.machine_id = "UNKNOWN_SIZE_CODE"
+    cfg.machine_id = "GN140JCAL010S"
     captured = {}
 
     def fake_preprocess_panel_folder(
@@ -171,7 +171,7 @@ def test_process_panel_v2_passes_requested_product_resolution_to_preprocess(tmp_
     inferencer = CAPIInferencer(cfg)
     inferencer.process_panel(tmp_path, product_resolution=(1366, 768))
 
-    assert captured["product_resolution"] == (1366, 768)
+    assert captured["product_resolution"] == (1920, 1200)
     assert captured["aapi_large_panel_raw_boundary_enabled"] is False
 
 
@@ -203,7 +203,7 @@ def test_process_panel_v2_enables_large_panel_raw_boundary_for_aapi_only(
     assert captured["aapi_large_panel_raw_boundary_enabled"] is True
 
 
-def test_grid_model_requires_matching_client_resolution(tmp_path, monkeypatch):
+def test_grid_model_requires_matching_model_name_resolution(tmp_path, monkeypatch):
     _write_grey_panel_image(tmp_path, "G0F00000")
     cfg = _make_config(tmp_path)
     cfg.grid_canonicalization_enabled = True
@@ -230,12 +230,12 @@ def test_grid_model_requires_matching_client_resolution(tmp_path, monkeypatch):
     from capi_inference import CAPIInferencer
 
     inferencer = CAPIInferencer(cfg)
-    with pytest.raises(ValueError, match="需要 Client"):
-        inferencer.process_panel(tmp_path)
+    inferencer.process_panel(tmp_path)
+    inferencer.process_panel(tmp_path, product_resolution=(1366, 768))
     with pytest.raises(ValueError, match="不一致"):
-        inferencer.process_panel(tmp_path, product_resolution=(1366, 768))
-
-    inferencer.process_panel(tmp_path, product_resolution=(1920, 1080))
+        inferencer.process_panel(
+            tmp_path, model_id="GN140JCAL010S", product_resolution=(1920, 1080)
+        )
     assert captured == {
         "enabled": True,
         "samples": 3,
@@ -1521,6 +1521,30 @@ def test_predict_tile_applies_mask(tmp_path):
 # ---------------------------------------------------------------------------
 # run_inference_v2_single_image — debug 單圖路徑
 # ---------------------------------------------------------------------------
+
+def test_debug_single_image_uses_requested_model_resolution_and_checks_grid(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from capi_inference import CAPIInferencer
+
+    cfg = _make_config(tmp_path)
+    cfg.machine_id = "GN140BCAL010S"
+    captured = []
+
+    def preprocess(_path, _lighting, pre_cfg):
+        captured.append(pre_cfg.product_resolution)
+        return SimpleNamespace(foreground_bbox=(0, 0, 0, 0))
+
+    monkeypatch.setattr("capi_preprocess.preprocess_panel_image", preprocess)
+    inferencer = CAPIInferencer(cfg)
+    image = tmp_path / "G0F00000_test.png"
+    inferencer.run_inference_v2_single_image(image, model_id="GN140JCAL010S")
+    assert captured == [(1920, 1200)]
+    cfg.grid_canonicalization_enabled = True
+    cfg.grid_product_resolution = (1366, 768)
+    with pytest.raises(ValueError, match="不一致"):
+        inferencer.run_inference_v2_single_image(image, model_id="GN140JCAL010S")
+    assert len(captured) == 1
+
 
 def test_run_inference_v2_single_image_returns_image_result(tmp_path):
     """v2 debug 單圖推論：missing prefix→None；正常 prefix→ImageResult。"""

@@ -10,6 +10,8 @@ import pytest
 class _FakeInferencer:
     def __init__(self, pipeline, after_tiling):
         self.config = SimpleNamespace(
+            machine_id="GN140BCAL010S",
+            model_resolution_map={"B": [16, 16]},
             tile_size=8,
             otsu_offset=0,
             enable_panel_polygon=False,
@@ -49,22 +51,25 @@ class _FakeInferencer:
 
 
 @pytest.mark.parametrize("after_tiling", [False, True])
-def test_coord_inference_applies_configured_preprocess(tmp_path, after_tiling):
+@pytest.mark.parametrize("unknown_code", [False, True])
+def test_coord_inference_applies_configured_preprocess(tmp_path, after_tiling, unknown_code):
     from capi_web import CAPIWebHandler
     from capi_image_preprocess_lab import apply_preprocess_pipeline
 
     pipeline = [{"method": "gaussian", "params": {"kernel_size": 3, "sigma": 1.0}}]
     fake_inferencer = _FakeInferencer(pipeline, after_tiling)
+    if unknown_code:
+        fake_inferencer.config.machine_id = "GN140ZCAL010S"
     image = np.tile(np.arange(16, dtype=np.uint8), (16, 1))
     image_path = tmp_path / "W0F00000_sample.tif"
     assert cv2.imwrite(str(image_path), image)
 
     body = json.dumps({
         "image_path": str(image_path),
-        "product_x": 8,
-        "product_y": 8,
-        "product_w": 16,
-        "product_h": 16,
+        "product_x": 960 if unknown_code else 8,
+        "product_y": 540 if unknown_code else 8,
+        "product_w": 999,
+        "product_h": 999,
         "threshold": 0.5,
         "edge_margin_px": 0,
     }).encode("utf-8")
@@ -85,6 +90,8 @@ def test_coord_inference_applies_configured_preprocess(tmp_path, after_tiling):
     assert sent and sent[0][1] == 200
     response = sent[0][0]
     assert response["success"] is True
+    assert response["product_resolution"] == ([1920, 1080] if unknown_code else [16, 16])
+    assert bool(response["resolution_warning"]) is unknown_code
     assert response["preprocess"]["applied"] is True
     assert response["preprocess"]["after_tiling"] is after_tiling
     assert response["preprocess"]["steps"][0]["method"] == "gaussian"

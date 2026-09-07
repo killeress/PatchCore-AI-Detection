@@ -454,6 +454,7 @@ def detect_panel_polygon(
     config: PreprocessConfig,
     *,
     side_endpoint_trim_ratio: float = EDGE_ENDPOINT_TRIM_RATIO,
+    isolate_largest_contour: bool = False,
 ) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[np.ndarray]]:
     """Otsu binarize → 最大連通輪廓 bbox → polyfit 4 角 polygon。
 
@@ -547,6 +548,7 @@ def detect_panel_polygon(
         config.tile_size,
         stabilize_near_vertical_edges=_use_robust_panel_boundary(config),
         side_endpoint_trim_ratio=side_endpoint_trim_ratio,
+        isolate_largest_contour=isolate_largest_contour,
     )
     return bbox, polygon
 
@@ -556,6 +558,7 @@ def detect_panel_boundary(
     config: PreprocessConfig,
     *,
     source_name: str = "",
+    isolate_largest_contour: bool = False,
 ) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[np.ndarray]]:
     """Detect the panel boundary from the raw image, independent of model preprocessing."""
     if image is None or image.size == 0:
@@ -608,6 +611,7 @@ def detect_panel_boundary(
         boundary_image,
         scaled_cfg,
         side_endpoint_trim_ratio=AAPI_LARGE_PANEL_SIDE_ENDPOINT_TRIM_RATIO,
+        isolate_largest_contour=isolate_largest_contour,
     )
     detect_ms = (time.perf_counter() - detect_started) * 1000.0
 
@@ -672,7 +676,12 @@ def _detect_aapi_large_panel_raw_boundary(
     Optional[bool],
 ]:
     """Return boundary plus occupancy eligibility; None means detection failed."""
-    bbox, polygon = detect_panel_boundary(image, config, source_name=source_name)
+    bbox, polygon = detect_panel_boundary(
+        image,
+        config,
+        source_name=source_name,
+        isolate_largest_contour=True,
+    )
     if bbox is None:
         return None, None, None
 
@@ -710,10 +719,28 @@ def _polyfit_polygon(
     tile_size: int,
     stabilize_near_vertical_edges: bool = False,
     side_endpoint_trim_ratio: float = EDGE_ENDPOINT_TRIM_RATIO,
+    isolate_largest_contour: bool = False,
 ) -> Optional[np.ndarray]:
-    """從 capi_inference._find_panel_polygon 抽出，邏輯不變。"""
+    """Fit four panel edges, optionally excluding disconnected foreground."""
     H, W = binary_mask.shape[:2]
     xmin, ymin, xmax, ymax = bbox
+    if isolate_largest_contour:
+        contours, _ = cv2.findContours(
+            binary_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        if not contours:
+            return None
+        panel_contour = max(contours, key=cv2.contourArea)
+        panel_mask = np.zeros_like(binary_mask)
+        cv2.drawContours(panel_mask, [panel_contour], -1, 255, cv2.FILLED)
+        binary_mask = cv2.bitwise_and(binary_mask, panel_mask)
+
+        # AAPI 大面板的 bbox 可能包含外部亮點；只使用面板輪廓範圍。
+        x, y, w, h = cv2.boundingRect(panel_contour)
+        xmin, ymin = max(xmin, x), max(ymin, y)
+        xmax, ymax = min(xmax, x + w), min(ymax, y + h)
     if xmax - xmin < 2 * EDGE_MARGIN or ymax - ymin < 2 * EDGE_MARGIN:
         return None
 
@@ -1377,6 +1404,8 @@ def preprocess_panel_folder(
     ref_lighting = None
     ref_bbox = None
     ref_polygon = None
+    bbox_only_ref_lighting = None
+    bbox_only_ref_bbox = None
     for cand in reference_priority:
         if cand not in reference_files:
             continue
@@ -1394,6 +1423,13 @@ def preprocess_panel_folder(
                 replace(config, aapi_large_panel_raw_boundary_enabled=False),
                 reference_priority,
             )
+        if (
+            large_occupancy
+            and candidate_bbox is not None
+            and bbox_only_ref_lighting is None
+        ):
+            bbox_only_ref_lighting = cand
+            bbox_only_ref_bbox = candidate_bbox
         if large_occupancy and (
             not config.enable_panel_polygon or candidate_polygon is not None
         ):
@@ -1403,16 +1439,27 @@ def preprocess_panel_folder(
             break
 
     if ref_lighting is None:
-        logger.info(
-            "[boundary] AAPI large-panel raw boundary found no valid polygon; "
-            "using legacy flow"
-        )
-        return _preprocess_panel_folder_legacy(
-            files,
-            reference_files,
-            replace(config, aapi_large_panel_raw_boundary_enabled=False),
-            reference_priority,
-        )
+        if bbox_only_ref_lighting is not None:
+            ref_lighting = bbox_only_ref_lighting
+            ref_bbox = bbox_only_ref_bbox
+            logger.info(
+                "[boundary] AAPI large-panel raw polygons unavailable; "
+                "using bbox-only reference=%s file=%s bbox=%s",
+                ref_lighting,
+                reference_files[ref_lighting].name,
+                ref_bbox,
+            )
+        else:
+            logger.info(
+                "[boundary] AAPI large-panel raw boundary unavailable; "
+                "using legacy flow"
+            )
+            return _preprocess_panel_folder_legacy(
+                files,
+                reference_files,
+                replace(config, aapi_large_panel_raw_boundary_enabled=False),
+                reference_priority,
+            )
 
     logger.info(
         "[boundary] reference=%s file=%s polygon=%s",

@@ -16,6 +16,14 @@ logger = logging.getLogger("capi.mes_report")
 
 
 DEFECT_CODE_CATALOG_PATH = Path(__file__).resolve().parent / "configs" / "mes_defect_codes.json"
+AAPI_DEFECT_CODE_CATALOG_PATH = Path(__file__).resolve().parent / "configs" / "aapi_mes_defect_codes.json"
+
+CAPI_MES_RULE = "DEFT_OPER=1600、IF_NEWER=Y、推論時間後、排除 PCK21、X/Y 皆有值"
+AAPI_MES_RULE = (
+    "接收時間後有 1400→2100 過站，且 DEFT_OPER=1400、IF_NEWER=Y、"
+    "TRANS_DATE 嚴格晚於接收時間的不良命中 AAPI 畫面碼清單才判 NG；"
+    "不要求 X/Y，查無資料或未命中判 OK"
+)
 
 
 try:
@@ -251,6 +259,46 @@ def classify_mes_judgment(rows: Iterable[Mapping], cutoff: datetime) -> Dict:
     }
 
 
+@lru_cache(maxsize=1)
+def load_aapi_defect_codes() -> Dict[str, str]:
+    """客戶 AAPI通信協議20260905.xlsx 的「画面检不良Code」清單。"""
+    # 此清單決定 OK/NG；載入失敗不可當成空清單，否則所有玻璃會誤判 OK。
+    with AAPI_DEFECT_CODE_CATALOG_PATH.open("r", encoding="utf-8") as stream:
+        return json.load(stream)
+
+
+def classify_aapi_mes_judgment(rows: Iterable[Mapping], cutoff: datetime) -> Dict:
+    """AAPI：先確認接收後送快修，再以畫面不良碼判定，不以座標篩選。"""
+    screen_codes = load_aapi_defect_codes()
+    defect_code_catalog = load_defect_code_catalog()
+    qualifying = []
+    row_count = 0
+    for row in rows:
+        trans_date = _parse_datetime(row.get("trans_date"))
+        rework_date = _parse_datetime(row.get("rework_trans_date"))
+        if rework_date is None or rework_date <= cutoff:
+            continue
+        if trans_date is None or trans_date <= cutoff:
+            continue
+        row_count += 1
+        code = str(row.get("dfct_code") or "").strip().upper()
+        if code not in screen_codes:
+            continue
+        qualifying.append({
+            "dfct_code": code,
+            "severity": defect_code_catalog.get(code, {}).get("severity", ""),
+            "description": screen_codes[code],
+            "trans_date": _display_datetime(trans_date),
+            "x_axis": row.get("x_axis"),
+            "y_axis": row.get("y_axis"),
+        })
+    return {
+        "judgment": "NG" if qualifying else "OK",
+        "mes_row_count": row_count,
+        "qualifying_defects": qualifying,
+    }
+
+
 def _normalize_ai_judgment(value: str) -> Optional[str]:
     text = str(value or "").strip().upper()
     if text in {"OK", "OK-I"}:
@@ -293,8 +341,10 @@ def build_mes_comparison(
     defects_by_panel: Mapping[str, Sequence[Mapping]],
     *,
     host_name: str = "",
+    station_profile: str = "capi",
 ) -> Dict:
     """組合逐筆結果與以全部可比對推論為分母的過／漏檢統計。"""
+    classify = classify_aapi_mes_judgment if station_profile == "aapi" else classify_mes_judgment
     normalized_defects = {
         str(panel_id or "").strip().upper(): rows
         for panel_id, rows in defects_by_panel.items()
@@ -307,7 +357,7 @@ def build_mes_comparison(
         ai_judgment = _normalize_ai_judgment(record.get("ai_judgment"))
         cutoff = _parse_datetime(record.get("request_time"))
         mes_result = (
-            classify_mes_judgment(normalized_defects.get(glass_id.upper(), []), cutoff)
+            classify(normalized_defects.get(glass_id.upper(), []), cutoff)
             if cutoff is not None else
             {"judgment": None, "mes_row_count": 0, "qualifying_defects": []}
         )
@@ -417,7 +467,8 @@ def build_mes_review_summary(records: Sequence[Mapping]) -> Dict:
 class OracleMESRepository:
     """依設備廠別，從對應 Oracle TNS 讀取 MES 人員不良判定。"""
 
-    def __init__(self, config: Mapping):
+    def __init__(self, config: Mapping, *, station_profile: str = "capi"):
+        self.station_profile = station_profile
         self.facility = str(config.get("facility") or "").strip().upper()
         oracle_config = config.get("oracle") if isinstance(config.get("oracle"), Mapping) else {}
         tns_configs = oracle_config.get("tns") if isinstance(oracle_config.get("tns"), Mapping) else {}
@@ -451,7 +502,14 @@ class OracleMESRepository:
 
     @property
     def source_label(self) -> str:
-        return f"{self.facility} / {self.service_name.upper()} / {self.wp_defthis_schema}.WP_DEFTHIS"
+        source = f"{self.facility} / {self.service_name.upper()} / {self.wp_defthis_schema}.WP_DEFTHIS"
+        if self.station_profile == "aapi":
+            source += f" + {self.wp_defthis_schema}.WP_PNLHIST"
+        return source
+
+    @property
+    def rule_label(self) -> str:
+        return AAPI_MES_RULE if self.station_profile == "aapi" else CAPI_MES_RULE
 
     def fetch_defects(self, panel_ids: Sequence[str], min_trans_date: datetime) -> Dict[str, List[Dict]]:
         panel_ids = sorted({str(value or "").strip().upper() for value in panel_ids if str(value or "").strip()})
@@ -482,25 +540,44 @@ class OracleMESRepository:
                     chunk = panel_ids[offset:offset + batch_size]
                     panel_binds = {f"panel_{idx}": value for idx, value in enumerate(chunk)}
                     placeholders = ", ".join(f":panel_{idx}" for idx in range(len(chunk)))
+                    aapi = self.station_profile == "aapi"
+                    rework_column = ", h.REWORK_TRANS_DATE" if aapi else ""
+                    # MAX 僅用於「是否存在接收後過站」，避免 MRWK/MVIN 多筆過站放大不良數。
+                    # 保留時間供每筆推論再篩選，不能只使用整批最早接收時間判斷。
+                    rework_join = f"""
+                        JOIN (
+                            SELECT PNL_ID, MAX(TRANS_DATE) AS REWORK_TRANS_DATE
+                            FROM {self.wp_defthis_schema}.WP_PNLHIST
+                            WHERE FAC_ID = :fac_id
+                              AND OPER = '1400' AND TO_OPER = '2100'
+                              AND TRANS_DATE > :min_trans_date
+                              AND PNL_ID IN ({placeholders})
+                            GROUP BY PNL_ID
+                        ) h ON h.PNL_ID = w.PNL_ID
+                    """ if aapi else ""
+                    time_operator = ">" if aapi else ">="
+                    date_order = "w.DEFT_DATE, w.TRANS_NBR, w.ITEM_NBR" if aapi else "w.TRANS_DATE"
                     sql = f"""
                         SELECT {self.wp_defthis_index_hint}
-                               w.PNL_ID, w.DFCT_CODE, w.TRANS_DATE, w.X_AXIS, w.Y_AXIS
+                               w.PNL_ID, w.DFCT_CODE, w.TRANS_DATE, w.X_AXIS, w.Y_AXIS{rework_column}
                         FROM {self.wp_defthis_schema}.WP_DEFTHIS w
+                        {rework_join}
                         WHERE w.FAC_ID = :fac_id
                           AND w.DEFT_OPER = :deft_oper
                           AND w.IF_NEWER = 'Y'
-                          AND w.TRANS_DATE >= :min_trans_date
+                          AND w.TRANS_DATE {time_operator} :min_trans_date
                           AND w.PNL_ID IN ({placeholders})
-                        ORDER BY w.PNL_ID, w.TRANS_DATE
+                        ORDER BY w.PNL_ID, {date_order}
                     """
                     cursor.execute(sql, {
                         "fac_id": self.wp_defthis_fac_id,
-                        "deft_oper": "1600",
+                        "deft_oper": "1400" if aapi else "1600",
                         "min_trans_date": min_trans_date_text,
                         **panel_binds,
                     })
                     row_count = 0
-                    for pnl_id, code, trans_date, x_axis, y_axis in cursor:
+                    for values in cursor:
+                        pnl_id, code, trans_date, x_axis, y_axis = values[:5]
                         row_count += 1
                         key = str(pnl_id or "").strip().upper()
                         result.setdefault(key, []).append({
@@ -509,6 +586,7 @@ class OracleMESRepository:
                             "trans_date": trans_date,
                             "x_axis": x_axis,
                             "y_axis": y_axis,
+                            **({"rework_trans_date": values[5]} if aapi else {}),
                         })
                     logger.info(
                         "[MES Report] Oracle batch %d/%d: panels=%d, rows=%d, elapsed=%.2fs",
@@ -551,6 +629,17 @@ class OracleMESRepository:
                 # MOD1/MCRDA1 與 MOD2/MERDA1 的 WP_DEFTHIS 欄位並非完全相同。
                 # MOD1 使用實際欄位清單，避免查詢不存在的欄位（例如 SYS_TRANS_FLAG）。
                 columns_sql = "*" if self.facility == "MOD1" else ", ".join(WP_DEFTHIS_COLUMNS)
+                aapi = self.station_profile == "aapi"
+                rework_filter = f"""
+                          AND EXISTS (
+                              SELECT 1 FROM {self.wp_defthis_schema}.WP_PNLHIST h
+                              WHERE h.FAC_ID = :fac_id AND h.PNL_ID = :panel_id
+                                AND h.OPER = '1400' AND h.TO_OPER = '2100'
+                                AND h.TRANS_DATE > :min_trans_date
+                          )
+                """ if aapi else ""
+                time_operator = ">" if aapi else ">="
+                date_order = "DEFT_DATE, TRANS_NBR, ITEM_NBR" if aapi else "TRANS_DATE, TRANS_NBR"
                 cursor.execute(
                     f"""
                         SELECT {columns_sql}
@@ -559,13 +648,14 @@ class OracleMESRepository:
                           AND PNL_ID = :panel_id
                           AND DEFT_OPER = :deft_oper
                           AND IF_NEWER = 'Y'
-                          AND TRANS_DATE >= :min_trans_date
-                        ORDER BY TRANS_DATE, TRANS_NBR
+                          AND TRANS_DATE {time_operator} :min_trans_date
+                          {rework_filter}
+                        ORDER BY {date_order}
                     """,
                     {
                         "fac_id": self.wp_defthis_fac_id,
                         "panel_id": normalized_panel_id,
-                        "deft_oper": "1600",
+                        "deft_oper": "1400" if aapi else "1600",
                         "min_trans_date": min_trans_date.strftime("%Y-%m-%d %H.%M.%S.%f"),
                     },
                 )

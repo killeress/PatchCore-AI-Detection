@@ -596,6 +596,77 @@ def test_preprocess_panel_folder_fallbacks_are_boundary_only(monkeypatch, tmp_pa
     np.testing.assert_array_equal(results["G0F00000"].panel_polygon, standard_polygon)
 
 
+def test_preprocess_panel_folder_uses_raw_bbox_when_all_aapi_polygons_fail(
+    monkeypatch,
+    tmp_path,
+):
+    w0f = tmp_path / "W0F00000_x.png"
+    standard = tmp_path / "STANDARD_x.png"
+    for path in (w0f, standard):
+        path.write_bytes(b"stub")
+
+    w0f_bbox = (100, 200, 6400, 4200)
+    boundary_calls = []
+    preprocess_calls = []
+
+    def fake_detect_aapi_large_panel_boundary_file(image_path, config):
+        lighting = capi_preprocess.canonical_image_prefix(Path(image_path).name)
+        boundary_calls.append(lighting)
+        bbox = w0f_bbox if lighting == "W0F00000" else (90, 190, 6410, 4210)
+        return bbox, None, True
+
+    def reject_legacy(*args, **kwargs):
+        raise AssertionError("AAPI large-panel bbox must not enter legacy fallback")
+
+    def fake_preprocess_panel_image(
+        image_path,
+        lighting,
+        config,
+        reference_polygon=None,
+        reference_bbox=None,
+    ):
+        preprocess_calls.append((lighting, reference_polygon, reference_bbox))
+        return PanelPreprocessResult(
+            image_path=Path(image_path),
+            lighting=lighting,
+            foreground_bbox=reference_bbox,
+            panel_polygon=reference_polygon,
+            tiles=[],
+            polygon_detection_failed=reference_polygon is None,
+        )
+
+    monkeypatch.setattr(
+        capi_preprocess,
+        "_detect_aapi_large_panel_boundary_file",
+        fake_detect_aapi_large_panel_boundary_file,
+    )
+    monkeypatch.setattr(
+        capi_preprocess,
+        "_preprocess_panel_folder_legacy",
+        reject_legacy,
+    )
+    monkeypatch.setattr(
+        capi_preprocess,
+        "preprocess_panel_image",
+        fake_preprocess_panel_image,
+    )
+
+    results = preprocess_panel_folder(
+        tmp_path,
+        PreprocessConfig(
+            tile_size=256,
+            aapi_large_panel_raw_boundary_enabled=True,
+        ),
+        image_files=[w0f],
+        boundary_reference_files=[w0f, standard],
+    )
+
+    assert boundary_calls == ["W0F00000", "STANDARD"]
+    assert preprocess_calls == [("W0F00000", None, w0f_bbox)]
+    assert results["W0F00000"].foreground_bbox == w0f_bbox
+    assert results["W0F00000"].panel_polygon is None
+
+
 def test_preprocess_panel_image_with_preprocess_after_tiling():
     cfg = PreprocessConfig(
         tile_size=256,

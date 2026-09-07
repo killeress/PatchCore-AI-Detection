@@ -3078,6 +3078,7 @@ class CAPIInferencer:
         edge_margin_override: Optional[int] = None,
         patchcore_overrides: Optional[Dict[str, Any]] = None,
         otsu_offset_override: Optional[int] = None,
+        model_id: Optional[str] = None,
     ) -> Optional[ImageResult]:
         """新架構單圖預處理 + per-tile zone-aware 推論 (debug 用)。
 
@@ -3105,6 +3106,14 @@ class CAPIInferencer:
         if not isinstance(lighting_map, dict) or "inner" not in lighting_map or "edge" not in lighting_map:
             return None
 
+        model_id = model_id or getattr(self.config, "machine_id", "")
+        product_resolution = resolve_product_resolution(
+            model_id, getattr(self.config, "model_resolution_map", None)
+        )
+        if getattr(self.config, "grid_canonicalization_enabled", False):
+            if tuple(getattr(self.config, "grid_product_resolution", None) or ()) != product_resolution:
+                raise ValueError("機種產品解析度與 Pixel Grid 模型不一致")
+
         pre_cfg = PreprocessConfig(
             tile_size=self.config.tile_size,
             tile_stride=getattr(self.config, "tile_stride", self.config.tile_size),
@@ -3114,11 +3123,7 @@ class CAPIInferencer:
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
             image_preprocess_pipelines=getattr(self.config, "image_preprocess_pipelines", {}),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
-            product_resolution=(
-                getattr(self.config, "grid_product_resolution", None)
-                if getattr(self.config, "grid_canonicalization_enabled", False)
-                else self._product_resolution()
-            ),
+            product_resolution=product_resolution,
             grid_canonicalization_enabled=getattr(
                 self.config, "grid_canonicalization_enabled", False
             ),
@@ -3212,7 +3217,7 @@ class CAPIInferencer:
                 edge_margin_override=edge_margin_override,
                 patchcore_overrides=patchcore_overrides,
                 threshold=active_thr,
-                model_id=self.config.machine_id,
+                model_id=model_id,
             )
             if score >= active_thr:
                 if anomaly_map is not None:
@@ -7263,15 +7268,18 @@ class CAPIInferencer:
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
         machine_judgment: Optional[str] = None,
     ):
-        """分發器：依 config.is_new_architecture 路由至 v1 或 v2 實作。"""
+        """依機種第六碼決定產品解析度，再路由至 v1 或 v2 實作。
+
+        product_resolution 保留呼叫相容性；不採用 Client 傳入的解析度。
+        """
+        product_resolution = resolve_product_resolution(
+            model_id or getattr(self.config, "machine_id", ""),
+            getattr(self.config, "model_resolution_map", None),
+        )
         if getattr(self.config, "grid_canonicalization_enabled", False):
             from capi_grid_canonicalization import normalize_product_resolution
 
             actual_resolution = normalize_product_resolution(product_resolution)
-            if actual_resolution is None:
-                raise ValueError(
-                    "Pixel Grid 標準化模型需要 Client 傳入產品解析度"
-                )
             expected_resolution = normalize_product_resolution(
                 getattr(self.config, "grid_product_resolution", None)
             )
@@ -7281,8 +7289,8 @@ class CAPIInferencer:
                 )
             if actual_resolution != expected_resolution:
                 raise ValueError(
-                    "Client 產品解析度與模型訓練解析度不一致: "
-                    f"client={actual_resolution[0]}x{actual_resolution[1]}, "
+                    "機種產品解析度與模型訓練解析度不一致: "
+                    f"product={actual_resolution[0]}x{actual_resolution[1]}, "
                     f"model={expected_resolution[0]}x{expected_resolution[1]}"
                 )
             product_resolution = actual_resolution

@@ -223,6 +223,22 @@ class CAPIDatabase:
                     created_at TEXT DEFAULT (datetime('now', 'localtime'))
                 );
 
+                CREATE TABLE IF NOT EXISTS side_white_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    record_id INTEGER NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    candidate_count INTEGER NOT NULL DEFAULT 0,
+                    payload TEXT NOT NULL,
+                    review_decision TEXT NOT NULL DEFAULT 'unreviewed',
+                    review_note TEXT NOT NULL DEFAULT '',
+                    reviewed_by TEXT NOT NULL DEFAULT '',
+                    reviewed_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    FOREIGN KEY (record_id) REFERENCES inference_records(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_side_white_review
+                    ON side_white_results(review_decision, id DESC);
+
                 CREATE TABLE IF NOT EXISTS image_results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     record_id INTEGER NOT NULL,
@@ -1874,6 +1890,82 @@ class CAPIDatabase:
             matched.append(next(iter(candidates)) if len(candidates) == 1 else None)
         return matched
 
+    @staticmethod
+    def _decode_side_white_row(row) -> Dict:
+        result = dict(row)
+        result["payload"] = json.loads(result["payload"])
+        return result
+
+    def save_side_white_result(self, record_id: int, payload: Dict, *, heatmap_dir: str = "") -> int:
+        """Store observation-only results without changing inference or report fields."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                cursor = conn.execute(
+                    """INSERT INTO side_white_results(record_id, status, candidate_count, payload)
+                       VALUES (?, ?, ?, ?)""",
+                    (record_id, payload["status"], len(payload.get("candidates", [])),
+                     json.dumps(payload, ensure_ascii=False)),
+                )
+                if heatmap_dir:
+                    conn.execute("UPDATE inference_records SET heatmap_dir=? WHERE id=? AND heatmap_dir=''",
+                                 (heatmap_dir, record_id))
+                conn.commit()
+                return cursor.lastrowid
+            finally:
+                conn.close()
+
+    def get_side_white_result(self, result_id: int) -> Optional[Dict]:
+        conn = self._get_conn()
+        try:
+            row = conn.execute("SELECT * FROM side_white_results WHERE id = ?", (result_id,)).fetchone()
+            return self._decode_side_white_row(row) if row else None
+        finally:
+            conn.close()
+
+    def list_side_white_results(self, *, status="", review="", glass_id="", machine_no="",
+                                limit=50, offset=0) -> Dict:
+        conditions, params = [], []
+        for column, value in (("s.status", status), ("s.review_decision", review),
+                              ("r.machine_no", machine_no)):
+            if value:
+                conditions.append(column + " = ?")
+                params.append(value)
+        if glass_id:
+            conditions.append("r.glass_id LIKE ?")
+            params.append("%" + glass_id + "%")
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        join = " FROM side_white_results s JOIN inference_records r ON r.id = s.record_id"
+        conn = self._get_conn()
+        try:
+            total = conn.execute("SELECT COUNT(*)" + join + where, params).fetchone()[0]
+            rows = conn.execute(
+                "SELECT s.*, r.glass_id, r.model_id, r.machine_no, r.ai_judgment, r.request_time"
+                + join + where + " ORDER BY s.id DESC LIMIT ? OFFSET ?",
+                params + [max(1, min(int(limit), 100)), max(0, int(offset))],
+            ).fetchall()
+            return {"rows": [self._decode_side_white_row(row) for row in rows], "total": total}
+        finally:
+            conn.close()
+
+    def review_side_white_result(self, result_id: int, decision: str, note: str, actor: str) -> bool:
+        if decision not in {"unreviewed", "confirmed", "false_positive", "missed", "uncertain"}:
+            raise ValueError("無效的側拍 Review 標記")
+        if not isinstance(note, str) or len(note) > 2000:
+            raise ValueError("Review 備註最多 2000 字")
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                cursor = conn.execute(
+                    """UPDATE side_white_results SET review_decision=?, review_note=?,
+                       reviewed_by=?, reviewed_at=datetime('now','localtime') WHERE id=?""",
+                    (decision, note, actor, result_id),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            finally:
+                conn.close()
+
     def get_record_detail(self, record_id: int) -> Optional[Dict]:
         """取得完整推論記錄 (含圖片和 tile 結果)"""
         conn = self._get_conn()
@@ -1886,6 +1978,10 @@ class CAPIDatabase:
                 return None
 
             result = dict(record)
+            side_white = conn.execute(
+                "SELECT * FROM side_white_results WHERE record_id = ?", (record_id,)
+            ).fetchone()
+            result["side_white_result"] = self._decode_side_white_row(side_white) if side_white else None
             latest_within_spec_log = conn.execute(
                 """SELECT id FROM within_spec_review_log
                    WHERE inference_record_id = ?
@@ -6294,6 +6390,8 @@ class CAPIDatabase:
         # 定義要遷移的參數
         params_def = [
             ("anomaly_threshold", config.anomaly_threshold, "float", "異常分數閾值 (fallback)"),
+            ("side_white_detection_enabled", config.side_white_detection_enabled, "bool", "側拍白畫面檢測：僅記錄候選與 Review，不影響最終判定及 AOI／QJPG 回報"),
+            ("side_white_detection_params", config.side_white_detection_params, "dict", "側拍白畫面檢測參數：最低局部反差、雜訊門檻倍率、最小候選面積、邊緣排除寬度"),
             ("inference_rotate_180_enabled", config.inference_rotate_180_enabled, "bool", "推論來源影像統一旋轉 180°（正式推論、規格內判定與 Debug 共用；MARK PPOCR Crop 固定再旋轉 180°；不修改原始檔）"),
             ("model_mapping", config.model_mapping, "dict", "前綴 → 模型路徑映射"),
             ("threshold_mapping", config.threshold_mapping, "dict", "前綴 → 獨立閾值映射"),

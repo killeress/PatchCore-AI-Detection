@@ -3702,6 +3702,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/api/settings/mark-shadow":
                 if self._require_settings_user(api=True, admin=True):
                     self._handle_api_settings_mark_shadow(query)
+            elif path == "/api/settings/side-white":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_side_white(query)
+            elif path == "/api/side-white/image":
+                self._handle_api_side_white_image(query)
             elif path == "/api/settings/mark-shadow/crop":
                 if self._require_settings_user(api=True, admin=True):
                     self._handle_api_settings_mark_shadow_crop(query)
@@ -3932,6 +3937,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path == "/api/settings/update":
                 if self._require_settings_user(api=True):
                     self._handle_api_settings_update()
+            elif path == "/api/settings/side-white/review":
+                if self._require_settings_user(api=True, admin=True):
+                    self._handle_api_side_white_review()
             elif path == "/api/settings/reload":
                 if self._require_settings_user(api=True):
                     self._handle_api_settings_reload()
@@ -6113,6 +6121,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "dot_detection": _json_safe_snapshot(dot_cfg),
                 }
         
+        resolution_map = getattr(self.inferencer.config, "model_resolution_map", None) if self.inferencer else None
+        if resolution_map is None:
+            resolution_map = CAPIConfig().model_resolution_map
         dot_sample_dir = Path(__file__).resolve().parent / "templates" / "imgs"
         template = self.jinja_env.get_template("debug_inference.html")
         html = template.render(
@@ -6123,7 +6134,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             default_dust_metric=get_val('dust_heatmap_metric', 'iou'),
             default_dust_iou_thr=get_val('dust_heatmap_iou_threshold', 0.01),
             default_dust_top_pct=get_val('dust_heatmap_top_percent', 5.0),
-            model_resolution_map=get_val('model_resolution_map', {}),
+            model_resolution_map=resolution_map,
+            debug_machine_id=getattr(self.inferencer.config, "machine_id", "") if self.inferencer else "",
             default_patchcore_filter_enabled=get_val('patchcore_filter_enabled', False),
             default_patchcore_blur_sigma=get_val('patchcore_blur_sigma', 1.5),
             default_patchcore_min_area=get_val('patchcore_min_area', 10),
@@ -7269,6 +7281,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             logger.error(f"Inference stats API error: {e}", exc_info=True)
             self._send_json({"success": False, "error": str(e)})
 
+    @staticmethod
+    def _mes_report_station_profile(server_inst=None):
+        profile = getattr(server_inst, "station_profile", None)
+        if profile not in ("capi", "aapi"):
+            profile = getattr(getattr(server_inst, "station_adapter", None), "profile", None)
+        if profile in ("capi", "aapi"):
+            return profile
+        return resolve_station_profile_from_hostname(_get_host_identity(), default_if_unknown="capi")
+
     def _handle_mes_comparison_api(self, query: dict):
         """API: 將 AI 推論結果與 MES Report 人工不良判定比對。"""
         if not self._mes_comparison_lock.acquire(blocking=False):
@@ -7313,7 +7334,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             server_inst = self._capi_server_instance
             server_config = getattr(server_inst, "server_config", {}) if server_inst else {}
             mes_report_config = server_config.get("mes_report") or {}
-            repository = OracleMESRepository(mes_report_config)
+            station_profile = self._mes_report_station_profile(server_inst)
+            repository = OracleMESRepository(mes_report_config, station_profile=station_profile)
             defects = {}
             stage_started = time.monotonic()
             if records:
@@ -7338,6 +7360,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 records,
                 defects,
                 host_name=_get_host_identity(),
+                station_profile=station_profile,
             )
             stage_timings["comparison"] = time.monotonic() - stage_started
             stage_started = time.monotonic()
@@ -7359,7 +7382,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             report.update({
                 "success": True,
                 "source": repository.source_label,
-                "rule": "DEFT_OPER=1600、IF_NEWER=Y、推論時間後、排除 PCK21、X/Y 皆有值",
+                "rule": repository.rule_label,
+                "station_profile": station_profile,
                 "ignore_aoi_ok": ignore_aoi_ok,
                 "panel_id": panel_id,
             })
@@ -7430,13 +7454,21 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             server_inst = self._capi_server_instance
             server_config = getattr(server_inst, "server_config", {}) if server_inst else {}
-            repository = OracleMESRepository(server_config.get("mes_report") or {})
+            station_profile = self._mes_report_station_profile(server_inst)
+            repository = OracleMESRepository(
+                server_config.get("mes_report") or {}, station_profile=station_profile,
+            )
             rows = repository.fetch_report_details(panel_id, cutoff)
             detail_columns = list(rows[0]) if rows else list(WP_DEFTHIS_COLUMNS)
             self._send_json({
                 "success": True,
                 "source": repository.source_label,
-                "rule": "同玻璃 ID、DEFT_OPER=1600、IF_NEWER=Y、推論時間後",
+                "rule": (
+                    repository.rule_label + "；明細含清單外不良碼供核對"
+                    if station_profile == "aapi" else
+                    "同玻璃 ID、DEFT_OPER=1600、IF_NEWER=Y、推論時間後"
+                ),
+                "station_profile": station_profile,
                 "columns": detail_columns,
                 "inference": record,
                 "rows": rows,
@@ -8153,6 +8185,31 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
         self._send_binary(str(crop_path))
 
+    def _debug_product_resolution(self, image_path, model_id=None):
+        """使用路徑中的機種資料夾；無機種資料夾時使用已載入的機種。"""
+        from capi_inference import MODEL_RESOLUTION_MAP, resolve_product_resolution
+
+        config = self.inferencer.config if self.inferencer else None
+        if not model_id:
+            parts = str(image_path).replace("\\", "/").split("/")
+            model_id = next((part for part in reversed(parts)
+                             if re.fullmatch(r"[Gg][NnZz]\d{3}[A-Za-z0-9][A-Za-z0-9_-]*", part)), None)
+        model_id = str(model_id or getattr(config, "machine_id", "") or "")
+        resolution_map = getattr(config, "model_resolution_map", None)
+        if resolution_map is None:
+            resolution_map = MODEL_RESOLUTION_MAP
+        resolution = resolve_product_resolution(model_id, resolution_map)
+        code = model_id[5].upper() if len(model_id) >= 6 else ""
+        warning = ""
+        if code not in resolution_map:
+            warning = f"機種 {model_id or '未提供'} 的第六碼 {code or '缺失'} 無對應解析度，使用預設 1920×1080。"
+            logger.warning("[DEBUG] %s", warning)
+        return {
+            "model_id": model_id,
+            "product_resolution": list(resolution),
+            "resolution_warning": warning,
+        }
+
     def _handle_debug_inference_run(self):
         """API: 執行 Debug 單圖推論"""
         import time as _time
@@ -8184,6 +8241,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if self.inferencer is None:
             self._send_json({"error": "推論器尚未載入 (inferencer is None)"})
             return
+
+        resolution_info = self._debug_product_resolution(image_path, data.get("model_id"))
+        debug_model_id = resolution_info["model_id"]
 
         # Debug 門檻：預設 0.5（比正式環境低，用於漏檢排查）
         debug_threshold = float(data.get("threshold", 0.5))
@@ -8237,6 +8297,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                             edge_margin_override=edge_margin_override,
                             patchcore_overrides=patchcore_overrides if patchcore_overrides else None,
                             otsu_offset_override=otsu_offset_override,
+                            model_id=debug_model_id,
                         )
                 else:
                     result = self.inferencer.run_inference_v2_single_image(
@@ -8245,6 +8306,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         edge_margin_override=edge_margin_override,
                         patchcore_overrides=patchcore_overrides if patchcore_overrides else None,
                         otsu_offset_override=otsu_offset_override,
+                        model_id=debug_model_id,
                     )
 
                 if result is None:
@@ -8268,9 +8330,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if target_inferencer is None:
                     self._send_json({"error": f"找不到 {image_path.name} 對應的模型"})
                     return
-
-                # model_id: 從 POST 資料取得（可選），用於推導產品解析度
-                debug_model_id = data.get("model_id")
 
                 if hasattr(self, '_gpu_lock') and self._gpu_lock:
                     with self._gpu_lock:
@@ -8459,6 +8518,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             response_data = {
                 "success": True,
+                **resolution_info,
                 "image_path": str(image_path),
                 "image_name": image_path.name,
                 "image_size": list(result.image_size),
@@ -9706,8 +9766,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         try:
             product_x = int(data.get("product_x", 0))
             product_y = int(data.get("product_y", 0))
-            product_w = int(data.get("product_w", 1920))
-            product_h = int(data.get("product_h", 1080))
+            resolution_info = self._debug_product_resolution(image_path, data.get("model_id"))
+            product_w, product_h = resolution_info["product_resolution"]
         except (ValueError, TypeError) as e:
             self._send_json({"error": f"座標或解析度參數無效: {e}"})
             return
@@ -9786,8 +9846,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 if tuple(expected_resolution or ()) != (product_w, product_h):
                     self._send_json({
                         "error": (
-                            "Client 產品解析度與 Pixel Grid 模型不一致: "
-                            f"client={product_w}x{product_h}, "
+                            "機種產品解析度與 Pixel Grid 模型不一致: "
+                            f"product={product_w}x{product_h}, "
                             f"model={tuple(expected_resolution or ())}"
                         )
                     })
@@ -10052,7 +10112,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             tile_info.mark_exclusion_region_count = len(mark_regions)
 
             # 推論 (含 GPU lock)
-            debug_model_id = getattr(self.inferencer.config, "machine_id", None)
+            debug_model_id = resolution_info["model_id"]
             predict_kwargs = {
                 "inferencer": target_inferencer,
                 "edge_margin_override": edge_margin_override,
@@ -10590,7 +10650,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             response_data = {
                 "success": True,
                 "product_coord": [product_x, product_y],
-                "product_resolution": [product_w, product_h],
+                **resolution_info,
                 "image_coord": [img_cx, img_cy],
                 "centered_crop_origin": [centered_crop_x1, centered_crop_y1],
                 "tile_shift": [crop_shift_dx, crop_shift_dy],
@@ -10674,8 +10734,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         try:
             product_x = int(data.get("product_x", 0))
             product_y = int(data.get("product_y", 0))
-            product_w = int(data.get("product_w", 1920))
-            product_h = int(data.get("product_h", 1080))
+            resolution_info = self._debug_product_resolution(image_path, data.get("model_id"))
+            product_w, product_h = resolution_info["product_resolution"]
         except (ValueError, TypeError) as e:
             self._send_json({"error": f"座標或解析度參數無效: {e}"})
             return
@@ -10899,7 +10959,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             response_data = {
                 "success": True,
                 "product_coord": [product_x, product_y],
-                "product_resolution": [product_w, product_h],
+                **resolution_info,
                 "image_coord": [img_cx, img_cy],
                 "crop_region": [crop_x1, crop_y1, crop_x2, crop_y2],
                 "raw_bounds": list(raw_bounds),
@@ -11674,6 +11734,64 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 interpolation=cv2.INTER_AREA,
             )
         self._send_image_array_png(image)
+
+    def _handle_api_side_white(self, query):
+        try:
+            limit = max(1, min(int(query.get("limit", [20])[0]), 100))
+            offset = max(0, int(query.get("offset", [0])[0]))
+            data = self.db.list_side_white_results(
+                status=query.get("status", [""])[0], review=query.get("review", [""])[0],
+                glass_id=query.get("glass_id", [""])[0], machine_no=query.get("machine_no", [""])[0],
+                limit=limit, offset=offset,
+            )
+            self._send_json({**data, "limit": limit, "offset": offset})
+        except (ValueError, TypeError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+
+    def _handle_api_side_white_review(self):
+        data = self._read_json_body()
+        if data is None:
+            return
+        if not isinstance(data, dict):
+            self._send_json({"error": "Review 資料必須是 JSON 物件"}, status=400)
+            return
+        try:
+            user = self._current_settings_user() or {}
+            updated = self.db.review_side_white_result(
+                int(data.get("id", 0)), data.get("decision", ""), data.get("note", ""), user.get("username", ""),
+            )
+            if not updated:
+                self._send_json({"error": "找不到側拍檢測結果"}, status=404)
+                return
+            self._send_json({"success": True})
+        except (ValueError, TypeError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+
+    def _handle_api_side_white_image(self, query):
+        # Same visibility as record detail; only serve artifacts recorded by this inspector.
+        try:
+            kind = query.get("kind", ["side"])[0]
+            row = self.db.get_side_white_result(int(query.get("id", [0])[0]))
+            if not row or kind not in {"side", "front", "residual"}:
+                self._send_404()
+                return
+            stored = row["payload"].get("artifacts", {}).get(kind)
+            if not stored:
+                self._send_404()
+                return
+            path = Path(stored).resolve()
+            root = Path(self.heatmap_base_dir).resolve()
+            if not path.is_relative_to(root) or path.suffix.lower() != ".jpg" or not path.is_file():
+                self._send_404()
+                return
+            content = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        except (ValueError, TypeError, OSError):
+            self._send_404()
 
     def _mark_shadow_db_path(self) -> Path:
         server_config = getattr(self._capi_server_instance, "server_config", {}) or {}
@@ -12696,6 +12814,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "請填寫修改原因"})
                 return
             user = self._current_settings_user() or {}
+            if param_name == "side_white_detection_params":
+                if not user.get("can_manage_accounts"):
+                    self._send_json({"error": "只有 admin 可以修改側拍檢測參數"}, status=403)
+                    return
+                from capi_config import normalize_side_white_params
+                try:
+                    new_value = normalize_side_white_params(new_value)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                    return
             if param_name == CENTRAL_ACCOUNT_LOCATION_PARAM:
                 if not user.get("can_manage_accounts"):
                     self._send_json(
