@@ -1132,7 +1132,10 @@ def build_qjpg_response(
     config: Optional[CAPIConfig] = None,
 ) -> str:
     glass_id = str((parsed or {}).get("glass_id", "") or "")
-    product_resolution = (parsed or {}).get("resolution")
+    product_resolution = resolve_product_resolution(
+        (parsed or {}).get("model_id") or getattr(config, "machine_id", ""),
+        getattr(config, "model_resolution_map", None),
+    )
     detected_mark_text = _first_mark_text(results or [])
     mark_status = "OK" if detected_mark_text else "NG"
     mark_text = detected_mark_text or "00"
@@ -2650,6 +2653,8 @@ class CAPIServer:
 
     def _queue_save_results_async(self, *args, **kwargs):
         """Queue result persistence, falling back when the server is shutting down."""
+        if kwargs.get("side_white_params") is not None:
+            kwargs["side_white_params"] = dict(kwargs["side_white_params"])
         with self._async_executor_lock:
             if self._async_executor_shutdown:
                 should_save_sync = True
@@ -2883,6 +2888,9 @@ class CAPIServer:
                         client_request_text=request_data,
                         client_response_text=response,
                         mark_shadow_result_ids=mark_shadow_result_ids,
+                        side_white_enabled=bool(getattr(request_config, "side_white_detection_enabled", False)),
+                        side_white_rotate_180=bool(getattr(request_config, "inference_rotate_180_enabled", False)),
+                        side_white_params=getattr(request_config, "side_white_detection_params", None),
                     )
 
                 except ProtocolError as e:
@@ -3117,6 +3125,10 @@ class CAPIServer:
         if inferencer is None:
             return "ERR:MODEL_NOT_LOADED", "[]", [], False, None, {}, False, "", None
 
+        product_resolution = resolve_product_resolution(
+            model_id,
+            getattr(inferencer.config, "model_resolution_map", None),
+        )
         station_adapter = (
             getattr(self, "station_adapter", None)
             or getattr(inferencer, "station_adapter", None)
@@ -3168,7 +3180,7 @@ class CAPIServer:
                 panel_dir,
                 inferencer.config,
                 report_prefixes=list((aoi_report_override or {}).keys()),
-                product_resolution=parsed["resolution"],
+                product_resolution=product_resolution,
                 rotate_180=getattr(inferencer, "_rotate_detection_images_180", False),
                 image_prefix_resolver=station_adapter.image_prefix,
                 screen_alias_resolver=station_adapter.model_prefix,
@@ -3194,7 +3206,7 @@ class CAPIServer:
                 panel_result = inferencer.process_panel(
                     panel_dir,
                     cpu_workers=self.cpu_workers,
-                    product_resolution=parsed["resolution"],
+                    product_resolution=product_resolution,
                     bomb_info=parsed.get("bomb_info"),
                     model_id=parsed.get("model_id"),
                     machine_no=parsed.get("machine_no"),
@@ -3319,6 +3331,9 @@ class CAPIServer:
         client_request_text: str = "",
         client_response_text: str = "",
         mark_shadow_result_ids: Optional[List[int]] = None,
+        side_white_enabled: bool = False,
+        side_white_rotate_180: bool = False,
+        side_white_params: Optional[Dict] = None,
     ):
         """
         非同步儲存 Heatmap 和 DB 記錄（在背景執行緒中執行）
@@ -3484,6 +3499,9 @@ class CAPIServer:
                     source="inference",
                 )
 
+            if side_white_enabled:
+                self._save_side_white_review(record_id, parsed, heatmap_info, side_white_rotate_180, side_white_params)
+
             dup_tag = " [DUPLICATE]" if is_duplicate else ""
             save_time = time.time() - save_start
             logger.info(f"[{client_addr}] Async save completed: heatmap+DB in {save_time:.2f}s{dup_tag}")
@@ -3491,6 +3509,36 @@ class CAPIServer:
         except Exception as e:
             logger.error(f"[{client_addr}] Async save failed: {e}", exc_info=True)
 
+
+    def _save_side_white_review(self, record_id, parsed, heatmap_info, rotate_180, params=None):
+        """Run after the formal response; side results never enter ImageResult aggregation."""
+        from capi_side_white import ALGORITHM, find_side_white_pair, inspect_side_white_image
+        from capi_config import normalize_side_white_params
+
+        output_dir = None
+        payload = {"algorithm": ALGORITHM, "shadow_only": True, "status": "NO_IMAGE",
+                   "candidates": [], "artifacts": {}, "mapping": {"status": "unavailable"},
+                   "reason": "此筆沒有側拍白畫面 SW0F00000", "processing_ms": 0}
+        try:
+            params = normalize_side_white_params(params)
+            payload["parameters"] = dict(params)
+            folder = Path(resolve_unc_path(parsed["image_dir"], self.path_mapping))
+            side, front = find_side_white_pair(folder)
+            if side is not None:
+                if heatmap_info.get("dir"):
+                    output_dir = Path(heatmap_info["dir"]) / f"side_white_{record_id}"
+                else:
+                    output_dir = self.heatmap_manager.base_dir / datetime.now().strftime("%Y%m%d") / f"side_white_{record_id}"
+                payload = inspect_side_white_image(side, front, output_dir, rotate_180=rotate_180, params=params)
+        except Exception as exc:
+            logger.warning("[SIDE_WHITE] Inspection failed for record=%s: %s", record_id, exc, exc_info=True)
+            payload.update(status="ERROR", reason=str(exc))
+        try:
+            self.db.save_side_white_result(record_id, payload, heatmap_dir=str(output_dir.resolve()) if output_dir else "")
+            logger.info("[SIDE_WHITE] record=%s status=%s candidates=%s TT=%sms formal_judgment=unchanged",
+                        record_id, payload["status"], len(payload["candidates"]), payload.get("processing_ms", 0))
+        except Exception as exc:
+            logger.warning("[SIDE_WHITE] Review save failed for record=%s: %s", record_id, exc, exc_info=True)
 
     def _save_error_record(
         self,

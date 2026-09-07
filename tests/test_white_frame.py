@@ -189,7 +189,7 @@ def test_white_frame_ng_changes_formal_judgment_and_qjpg_uses_its_own_frame_coor
     )
     # (600, 140) is converted with WHITEFRA bounds (180,140)-(1021,661),
     # not with any black-screen image bounds.
-    assert "NGWHT010059900000WHITEFRA" in response
+    assert "NGWHT010095900000WHITEFRA" in response
 
     db_data = results_to_db_data([result], {})
     assert db_data[0]["is_ng"] == 1

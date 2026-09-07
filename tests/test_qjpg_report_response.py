@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from capi_config import CAPIConfig
 from capi_inference import ImageResult, TileInfo
@@ -40,6 +41,66 @@ def _tile(tile_id: int, peak_x: int, peak_y: int) -> TileInfo:
     tile.anomaly_peak_x = peak_x
     tile.anomaly_peak_y = peak_y
     return tile
+
+
+@pytest.mark.parametrize("code,resolution", [
+    ("B", (1366, 768)),
+    ("H", (1920, 1080)),
+    ("J", (1920, 1200)),
+    ("K", (2560, 1440)),
+    ("G", (2560, 1600)),
+    ("j", (1920, 1200)),
+    ("?", (1920, 1080)),
+])
+def test_qjpg_coordinates_follow_model_sixth_character(code, resolution):
+    result = _image_result("W0F00000_114438.tif")
+    tile = _tile(1, 600, 450)
+    result.tiles = [tile]
+    result.anomaly_tiles = [(tile, 0.91, None)]
+    response = build_qjpg_response(
+        {"glass_id": "G1", "model_id": f"GN140{code}CAL010S", "resolution": (100, 200)},
+        "NG", [result], CAPIConfig(machine_id="GN140BCAL010S"),
+    )
+    width, height = resolution
+    assert response == (
+        f"@QJPG-G1;OK;EJ;NGPCDK2{width // 2:05d}{height // 2:05d}W0F00000,"
+    )
+
+
+def test_server_precheck_and_inference_use_configured_model_resolution(tmp_path, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from capi_server import CAPIServer
+
+    config = CAPIConfig(image_abnormal_detection_enabled=True)
+    config.model_resolution_map["J"] = [2560, 1600]
+    inferencer = SimpleNamespace(
+        config=config,
+        _parse_aoi_report_txt=MagicMock(return_value={}),
+        process_panel=MagicMock(side_effect=RuntimeError("stop after dispatch")),
+    )
+    precheck = MagicMock(return_value=None)
+    monkeypatch.setattr("capi_server.check_image_abnormal_precheck", precheck)
+    server = CAPIServer.__new__(CAPIServer)
+    server.path_mapping = {}
+    server.cpu_workers = 1
+    server._gpu_lock = threading.Lock()
+    server._get_or_create_inferencer = lambda _model_id: inferencer
+    parsed = {
+        "model_id": "GN140JCAL010S", "glass_id": "G1",
+        "image_dir": str(tmp_path), "resolution": (100, 200),
+    }
+    server._process_request(parsed)
+    assert precheck.call_args.kwargs["product_resolution"] == (2560, 1600)
+    assert inferencer.process_panel.call_args.kwargs["product_resolution"] == (2560, 1600)
+    result = _image_result("W0F00000_114438.tif")
+    tile = _tile(1, 600, 450)
+    result.tiles = [tile]
+    result.anomaly_tiles = [(tile, 0.91, None)]
+    assert build_qjpg_response(parsed, "NG", [result], config).endswith(
+        "PCDK20128000800W0F00000,"
+    )
 
 
 def test_parse_request_keeps_standard_no_bomb_image_dir():
@@ -116,7 +177,7 @@ def test_qjpg_response_uses_final_ng_points_and_product_coordinates():
         CAPIConfig(),
     )
 
-    assert response == "@QJPG-T863BF29AH44;OK;EJ;NGPCDK20100000500W0F00000,"
+    assert response == "@QJPG-T863BF29AH44;OK;EJ;NGPCDK20096000540W0F00000,"
 
 
 def test_qjpg_response_reports_every_two_stage_real_feature_coordinate():
@@ -145,8 +206,8 @@ def test_qjpg_response_reports_every_two_stage_real_feature_coordinate():
 
     assert response == (
         "@QJPG-T863BF29AH44;OK;EJ;"
-        "NGPCDK20080000500W0F00000"
-        "PCDK20040000200W0F00000,"
+        "NGPCDK20076800540W0F00000"
+        "PCDK20038400216W0F00000,"
     )
 
 
@@ -163,7 +224,7 @@ def test_qjpg_aoi_report_fallback_keeps_exact_source_product_coordinate():
     result.anomaly_tiles = [(tile, 0.91, None)]
 
     response = build_qjpg_response(
-        {"glass_id": "YQ52TV232E45", "resolution": (1920, 1200)},
+        {"glass_id": "YQ52TV232E45", "model_id": "GN140JCAL010S", "resolution": (1366, 768)},
         "NG",
         [result],
         CAPIConfig(),
@@ -191,7 +252,7 @@ def test_qjpg_aoi_center_real_region_matches_field_product_coordinate():
     result.anomaly_tiles = [(tile, 0.4283, None)]
 
     response = build_qjpg_response(
-        {"glass_id": "YQ52TV232E45", "resolution": (1920, 1200)},
+        {"glass_id": "YQ52TV232E45", "model_id": "GN140JCAL010S", "resolution": (1366, 768)},
         "NG",
         [result],
         CAPIConfig(),
@@ -216,7 +277,7 @@ def test_qjpg_response_keeps_source_prefix_for_hm_standard_image():
         CAPIConfig(),
     )
 
-    assert response == "@QJPG-TL6380GAL102;OK;EJ;NGPCDK20100000500U0F00000,"
+    assert response == "@QJPG-TL6380GAL102;OK;EJ;NGPCDK20096000540U0F00000,"
 
 
 def test_qjpg_response_keeps_aapi_reserved_model_prefixes_independent():
@@ -240,7 +301,7 @@ def test_qjpg_response_keeps_aapi_reserved_model_prefixes_independent():
             CAPIConfig(),
         )
 
-        assert response.endswith(f"0100000500{expected_prefix},")
+        assert response.endswith(f"0096000540{expected_prefix},")
 
 
 def test_dual_protocol_response_sends_legacy_aoi_then_qjpg():
@@ -265,7 +326,7 @@ def test_dual_protocol_response_sends_legacy_aoi_then_qjpg():
     assert response == (
         "AOI@T863BF29AH44;GN156HCAB6G0S;CAPI1403;OK;NG"
         "\r\n"
-        "@QJPG-T863BF29AH44;OK;EJ;NGPCDK20100000500W0F00000,"
+        "@QJPG-T863BF29AH44;OK;EJ;NGPCDK20096000540W0F00000,"
     )
 
 
@@ -309,7 +370,7 @@ def test_qjpg_response_uses_white_dot_code_for_b0f_defect():
         CAPIConfig(report_white_dot_defect_code="WHT01"),
     )
 
-    assert response == "@QJPG-G1;OK;EJ;NGWHT010100000500B0F00000,"
+    assert response == "@QJPG-G1;OK;EJ;NGWHT010096000540B0F00000,"
 
 
 def test_qjpg_response_uses_bomb_code_for_bomb_defect_even_when_internal_ok():
@@ -330,7 +391,7 @@ def test_qjpg_response_uses_bomb_code_for_bomb_defect_even_when_internal_ok():
         CAPIConfig(report_bomb_defect_code="BMB99"),
     )
 
-    assert response == "@QJPG-G1;OK;EJ;NGBMB990100000500W0F00000,"
+    assert response == "@QJPG-G1;OK;EJ;NGBMB990096000540W0F00000,"
 
 
 def test_qjpg_response_uses_image_abnormal_code_for_hy():
@@ -567,4 +628,4 @@ def test_qjpg_response_ok_i_reports_only_bomb_points():
         CAPIConfig(report_bomb_defect_code="BMB99"),
     )
 
-    assert response == "@QJPG-G1;OK;EJ;NGBMB990120000600W0F00000,"
+    assert response == "@QJPG-G1;OK;EJ;NGBMB990115200648W0F00000,"

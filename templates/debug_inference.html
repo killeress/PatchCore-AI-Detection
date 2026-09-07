@@ -1081,7 +1081,7 @@
         <!-- Input & Groups -->
         <div class="card" style="padding: 24px; background: rgba(15, 23, 42, 0.4); border: 1px solid var(--border);">
             <!-- Image Path Input Row -->
-            <div class="input-section" style="margin-bottom: 24px;">
+            <div class="input-section" style="margin-bottom: 24px; flex-direction: column; align-items: stretch;">
                 <input type="text" id="image-path-input" placeholder="輸入圖片絕對路徑，例如: /data/images/G0F00000_143133.tif"
                     autocomplete="off" spellcheck="false"
                     style="flex: 1; font-size: 1rem; padding: 14px 18px; background: rgba(0,0,0,0.3); border-color: rgba(59, 130, 246, 0.3);">
@@ -2327,6 +2327,8 @@
 {% block extra_js %}
 <script>
     const dotSamples = {{ dot_samples|tojson }};
+    const debugResolutionMap = {{ (model_resolution_map or {})|tojson }};
+    const debugMachineId = {{ (debug_machine_id or '')|tojson }};
     const dotMachineConfigs = {{ (dot_machine_configs or {})|tojson }};
     const dotDefaultMmPerPx = {{ dot_default_mm_per_px|tojson }};
     const dotCalibrationPoints = {{ dot_calibration_points|tojson }};
@@ -3378,6 +3380,7 @@
             });
 
             const data = await resp.json();
+            if (data.product_resolution) showResolutionInfo('image-path-input', data);
 
             if (data.error) {
                 showError(data.error);
@@ -3670,27 +3673,51 @@
         autoSelectResolution(edgeLeakPathInput.value, 'edge-leak-resolution');
     });
 
-    function autoSelectResolution(pathStr, selectId = 'coord-resolution') {
-        if (!pathStr) return;
-        const normalized = pathStr.replace(/\\/g, '/');
-        const parts = normalized.split('/');
-        const selectEl = document.getElementById(selectId);
-        if (!selectEl) return;
+    function debugResolutionInfo(pathStr) {
+        const parts = String(pathStr || '').replace(/\\/g, '/').split('/');
+        const modelId = parts.reverse().find(part => /^[Gg][NnZz]\d{3}[A-Za-z0-9][A-Za-z0-9_-]*$/.test(part)) || debugMachineId;
+        const code = modelId.length >= 6 ? modelId[5].toUpperCase() : '';
+        const known = Object.prototype.hasOwnProperty.call(debugResolutionMap, code);
+        return {
+            model_id: modelId,
+            code: known ? code : '',
+            product_resolution: known ? debugResolutionMap[code] : [1920, 1080],
+            resolution_warning: known ? '' : `機種 ${modelId || '未提供'} 的第六碼 ${code || '缺失'} 無對應解析度，使用預設 1920×1080。`,
+        };
+    }
 
-        // 從路徑後方往前找 (因為 model_id 通常在倒數幾層資料夾，例如 GN140JCAL010S)
-        for (let p = parts.length - 1; p >= 0; p--) {
-            const part = parts[p];
-            if (part && part.length >= 6) {
-                const code = part[5].toUpperCase(); // 第六碼
-                for (let i = 0; i < selectEl.options.length; i++) {
-                    if (selectEl.options[i].text.startsWith(code + ':')) {
-                        selectEl.selectedIndex = i;
-                        console.log(`[Coord] Auto-selected resolution for code: ${code} from path part: ${part}`);
-                        return; // 找到即結束
-                    }
-                }
-            }
+    function showResolutionInfo(targetId, info) {
+        const target = document.getElementById(targetId);
+        if (!target) return;
+        let note = document.getElementById(targetId + '-resolution-note');
+        if (!note) {
+            note = document.createElement('div');
+            note.id = targetId + '-resolution-note';
+            note.setAttribute('role', 'status');
+            target.insertAdjacentElement('afterend', note);
+            note.style.fontSize = '0.8rem';
+            note.style.marginTop = '6px';
         }
+        note.style.color = info.resolution_warning ? 'var(--err)' : 'var(--text-muted)';
+        note.textContent = info.resolution_warning || `${info.model_id}：依第六碼自動使用 ${info.product_resolution.join('×')}`;
+    }
+
+    function autoSelectResolution(pathStr, selectId = 'coord-resolution') {
+        const info = debugResolutionInfo(pathStr);
+        const selectEl = document.getElementById(selectId);
+        if (!selectEl) return info;
+        if (selectId === 'cv-product-code') {
+            selectEl.value = info.code;
+        } else {
+            const value = info.product_resolution.join(',');
+            if (!Array.from(selectEl.options).some(option => option.value === value)) {
+                selectEl.add(new Option(info.product_resolution.join('×'), value));
+            }
+            selectEl.value = value;
+            selectEl.disabled = true;
+        }
+        showResolutionInfo(selectId, info);
+        return info;
     }
 
     async function runCoordInference() {
@@ -3700,6 +3727,7 @@
             return;
         }
 
+        autoSelectResolution(imgPath);
         const resSel = document.getElementById('coord-resolution').value.split(',');
         const productW = parseInt(resSel[0]) || 1920;
         const productH = parseInt(resSel[1]) || 1080;
@@ -3732,6 +3760,7 @@
             });
 
             const data = await resp.json();
+            if (data.product_resolution) showResolutionInfo('coord-resolution', data);
             if (data.error) {
                 showCoordError(data.error);
                 return;
@@ -3753,6 +3782,7 @@
             return;
         }
 
+        autoSelectResolution(imgPath, 'edge-leak-resolution');
         const resolution = document.getElementById('edge-leak-resolution').value.split(',');
         const productW = parseInt(resolution[0], 10) || 1920;
         const productH = parseInt(resolution[1], 10) || 1080;
@@ -3800,6 +3830,7 @@
                 }),
             });
             const data = await response.json();
+            if (data.product_resolution) showResolutionInfo('edge-leak-resolution', data);
             if (data.error) {
                 showEdgeLeakError(data.error);
                 return;
@@ -4521,23 +4552,7 @@
     });
 
     function bsAutoSelectResolution(pathStr) {
-        if (!pathStr) return;
-        const normalized = pathStr.replace(/\\/g, '/');
-        const parts = normalized.split('/');
-        const selectEl = document.getElementById('bs-resolution');
-
-        for (let p = parts.length - 1; p >= 0; p--) {
-            const part = parts[p];
-            if (part && part.length >= 6) {
-                const code = part[5].toUpperCase();
-                for (let i = 0; i < selectEl.options.length; i++) {
-                    if (selectEl.options[i].text.startsWith(code + ':')) {
-                        selectEl.selectedIndex = i;
-                        return;
-                    }
-                }
-            }
-        }
+        return autoSelectResolution(pathStr, 'bs-resolution');
     }
 
     async function runBrightSpotInference() {
@@ -4547,6 +4562,7 @@
             return;
         }
 
+        bsAutoSelectResolution(imgPath);
         const resSel = document.getElementById('bs-resolution').value.split(',');
         const productW = parseInt(resSel[0]) || 1920;
         const productH = parseInt(resSel[1]) || 1080;
@@ -4586,6 +4602,7 @@
             });
 
             const data = await resp.json();
+            if (data.product_resolution) showResolutionInfo('bs-resolution', data);
             if (data.error) {
                 showBsError(data.error);
                 return;
@@ -5624,5 +5641,19 @@
         catch (_) { alert('複製失敗，請手動複製:\n' + text); }
         document.body.removeChild(ta);
     }
+    function refreshDebugResolutions() {
+        showResolutionInfo('image-path-input', debugResolutionInfo(input.value));
+        for (const [pathId, selectId] of [
+            ['coord-image-path', 'coord-resolution'],
+            ['edge-leak-image-path', 'edge-leak-resolution'],
+            ['bs-image-path', 'bs-resolution'],
+            ['cv-image-path', 'cv-product-code'],
+        ]) {
+            const pathInput = document.getElementById(pathId);
+            autoSelectResolution((pathInput && pathInput.value) || input.value, selectId);
+        }
+    }
+    input.addEventListener('input', refreshDebugResolutions);
+    refreshDebugResolutions();
 </script>
 {% endblock %}

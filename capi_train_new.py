@@ -1808,7 +1808,7 @@ aoi_report_path_replace_to: Report
 bomb_match_tolerance: 20
 bomb_line_min_aspect_ratio: 1.2
 
-# === 機種第六碼 → 產品解析度（本地工具如 diagnose_bomb 備用）===
+# === 機種第六碼 → 產品解析度（推論座標換算依據，不採用 Client 解析度）===
 model_resolution_map:
   B: [1366, 768]
   H: [1920, 1080]

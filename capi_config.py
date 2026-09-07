@@ -17,6 +17,31 @@ from typing import List, Dict, Optional, Any, Tuple
 from capi_image_naming import canonical_image_prefix
 
 
+def normalize_side_white_params(value=None) -> Dict[str, Any]:
+    """Validate the four review-only inspection controls and fill older config defaults."""
+    defaults = {"min_contrast_gray": 2.2, "noise_sigma_factor": 4.5,
+                "min_area_px": 20, "edge_margin_px": 16}
+    if value is None:
+        value = {}
+    if not isinstance(value, dict) or set(value) - defaults.keys():
+        raise ValueError("側拍參數必須是包含四項已知設定的物件")
+    result = {**defaults, **value}
+    for key, label, low, high, integer in (
+        ("min_contrast_gray", "最低局部反差", .1, 255, False),
+        ("noise_sigma_factor", "雜訊門檻倍率", .1, 100, False),
+        ("min_area_px", "最小候選面積", 1, 1000000, True),
+        ("edge_margin_px", "邊緣排除寬度", 0, 512, True),
+    ):
+        number = result[key]
+        if (isinstance(number, bool) or not isinstance(number, (int, float))
+                or not low <= number <= high
+                or (integer and number != int(number))):
+            unit = "整數" if integer else "數值"
+            raise ValueError(f"{label}必須是 {low}～{high} 的{unit}")
+        result[key] = int(number) if integer else float(number)
+    return result
+
+
 def _default_within_spec_judgment_rules() -> Dict[str, Any]:
     """Default within-spec dot judgment settings, keyed by machine id."""
     dot_detection = {
@@ -209,6 +234,8 @@ class CAPIConfig:
     anomaly_threshold: float = 0.5
     model_path: str = ""  # 預設模型路徑 (fallback，當 model_mapping 無對應時使用)
     inference_rotate_180_enabled: bool = False  # 推論來源影像統一旋轉 180°
+    side_white_detection_enabled: bool = False  # 側拍白畫面只記錄與 Review
+    side_white_detection_params: Dict[str, Any] = field(default_factory=normalize_side_white_params)
     
     # 多模型映射 {image_prefix: model_path} — 依圖片前綴自動選用對應模型
     # 新架構格式: {image_prefix: {"inner": path, "edge": path}}
@@ -522,6 +549,8 @@ class CAPIConfig:
             anomaly_threshold=data.get("anomaly_threshold", 0.5),
             model_path=data.get("model_path", ""),
             inference_rotate_180_enabled=data.get("inference_rotate_180_enabled", False),
+            side_white_detection_enabled=data.get("side_white_detection_enabled", False),
+            side_white_detection_params=normalize_side_white_params(data.get("side_white_detection_params")),
             model_mapping=raw_model_mapping,
             threshold_mapping=threshold_mapping,
             is_new_architecture=is_new,
@@ -681,6 +710,8 @@ class CAPIConfig:
             "anomaly_threshold": self.anomaly_threshold,
             "model_path": self.model_path,
             "inference_rotate_180_enabled": self.inference_rotate_180_enabled,
+            "side_white_detection_enabled": self.side_white_detection_enabled,
+            "side_white_detection_params": dict(self.side_white_detection_params),
             "model_mapping": self.model_mapping,
             "threshold_mapping": self.threshold_mapping,
             "patchcore_filter_enabled": self.patchcore_filter_enabled,
@@ -801,6 +832,8 @@ class CAPIConfig:
             "tile_stride": self.tile_stride,
             "anomaly_threshold": self.anomaly_threshold,
             "inference_rotate_180_enabled": self.inference_rotate_180_enabled,
+            "side_white_detection_enabled": self.side_white_detection_enabled,
+            "side_white_detection_params": dict(self.side_white_detection_params),
             "model_mapping": self.model_mapping,
             "threshold_mapping": self.threshold_mapping,
             "patchcore_filter_enabled": self.patchcore_filter_enabled,
@@ -936,6 +969,11 @@ class CAPIConfig:
         if "inference_rotate_180_enabled" in param_map:
             val = param_map["inference_rotate_180_enabled"]
             self.inference_rotate_180_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "side_white_detection_enabled" in param_map:
+            val = param_map["side_white_detection_enabled"]
+            self.side_white_detection_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "side_white_detection_params" in param_map:
+            self.side_white_detection_params = normalize_side_white_params(param_map["side_white_detection_params"])
         # 新架構：threshold_mapping / model_mapping 永遠以 yaml 為唯一來源，
         # 不接受 DB override。否則 yaml 改完重啟會被首次 init 灌進 DB 的舊值蓋掉
         # （bug 案例：machine_config.yaml 改 0.5→0.4，重啟後 DB 殘留 0.5 把 yaml 蓋回去）

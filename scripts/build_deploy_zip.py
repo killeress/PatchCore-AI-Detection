@@ -63,7 +63,9 @@ CODE_FILES = [
     "capi_update_agent.py",
     "capi_web.py",
     "capi_white_frame.py",
+    "capi_side_white.py",
     "configs/mes_defect_codes.json",
+    "configs/aapi_mes_defect_codes.json",
     "requirements.txt",
     "scratch_classifier.py",
     "scratch_filter.py",
@@ -72,6 +74,9 @@ CODE_FILES = [
     "templates/dashboard.html",
     "templates/debug_inference.html",
     "templates/_white_frame_result.html",
+    "templates/_side_white_result.html",
+    "templates/_side_white_settings.js",
+    "templates/_side_white_styles.html",
     "templates/white_frame.html",
     "templates/record_detail.html",
     "templates/record_detail_v3.html",
@@ -123,6 +128,7 @@ PATCH_UTILITY_FILES = [
 ]
 
 PATCH_DEPLOY_ROOT_FILES = {
+    "configs/aapi_mes_defect_codes.json",
     "VERSION",
     "CHANGELOG.md",
     "start_server.sh",
