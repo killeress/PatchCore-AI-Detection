@@ -1,0 +1,142 @@
+{% if aoi_tiles %}
+<div style="margin-top: 24px; padding-top: 16px; border-top: 2px solid #10b981;">
+    <h4 style="color: #10b981; margin-bottom: 12px; font-family: 'Fira Code', monospace; font-size: 0.9rem; display: flex; align-items: center; gap: 8px;">
+        🎯 {{ aoi_section_title | default('AOI 機檢座標推論') }}
+        <span style="font-size: 0.75rem; color: var(--text-muted);">{{ aoi_section_note | default('(以 AOI 機台 NG 座標為中心切塊推論)') }}</span>
+    </h4>
+    <div style="overflow-x:auto;"><table class="data-table list-table" style="width:100%;">
+        <thead>
+            <tr>
+                <th>區域</th>
+                <th>異常代碼</th>
+                <th>AOI 座標</th>
+                <th>圖片座標</th>
+                <th>Tile 位置</th>
+                <th>修正量</th>
+                <th>大小</th>
+                <th>AI 分數</th>
+                <th>AI 判定</th>
+                <th>樣本狀態</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in aoi_tiles %}
+            {% set t_badge, t_info = t | tile_info %}
+            {% set aoi_is_scratch = t.get("scratch_filtered") %}
+            {% set aoi_scr_score = t.get("scratch_score", 0) or 0 %}
+            <tr>
+                <td style="color: #10b981;">🎯 #{{ t.tile_id }}</td>
+                <td><span style="color: #10b981; font-weight: 600;">{{ t.get("aoi_defect_code", "") }}</span></td>
+                <td>
+                    {% if t.get("aoi_product_x", -1) >= 0 and t.get("aoi_product_y", -1) >= 0 %}
+                    <span style="color: #F59E0B; font-family: 'Fira Code', monospace;">({{ t.aoi_product_x }}, {{ t.aoi_product_y }})</span>
+                    {% else %}
+                    <span style="color: var(--text-muted);">—</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if t.get("aoi_image_x", -1) >= 0 and t.get("aoi_image_y", -1) >= 0 %}
+                    <span style="color: #93C5FD; font-family: 'Fira Code', monospace;">({{ t.aoi_image_x }}, {{ t.aoi_image_y }})</span>
+                    {% else %}
+                    <span style="color: var(--text-muted);">—</span>
+                    {% endif %}
+                </td>
+                <td>({{ t.x }}, {{ t.y }})</td>
+                <td>
+                    {% set aoi_dx = t.get("aoi_tile_shift_dx", 0) or 0 %}
+                    {% set aoi_dy = t.get("aoi_tile_shift_dy", 0) or 0 %}
+                    <span style="color: {% if aoi_dx or aoi_dy %}#38BDF8{% else %}var(--text-muted){% endif %}; font-family: 'Fira Code', monospace;">
+                        ({% if aoi_dx > 0 %}+{% endif %}{{ aoi_dx }}, {% if aoi_dy > 0 %}+{% endif %}{{ aoi_dy }})
+                    </span>
+                </td>
+                <td>{{ t.width }}x{{ t.height }}</td>
+                <td><span class="badge {{ t_badge }}">{{ t.score | round(3) }}</span></td>
+                <td>
+                    {% if aoi_is_scratch %}
+                    <span style="color: #0D9488; font-weight: 600;">🧽 Scratch 救回 OK</span>
+                    <span style="color: #0D9488; font-size: 0.8rem;"> (score={{ aoi_scr_score | round(3) }})</span>
+                    {% elif t.get("is_anomaly") %}
+                    <span style="color: #EF4444; font-weight: 600;">AI 也判 NG</span>
+                    {% else %}
+                    <span style="color: #22C55E; font-weight: 600;">AI 判 OK</span>
+                    {% endif %}
+                    {% if 'DUST' in t_info or '灰塵' in t_info %}
+                    <span style="color: #D97706; font-size: 0.8rem;"> | 灰塵</span>
+                    {% endif %}
+                    {% if 'BOMB' in t_info or '炸彈' in t_info %}
+                    <span style="color: #DC2626; font-size: 0.8rem;"> | 炸彈</span>
+                    {% endif %}
+                    {% if aoi_scr_score >= 0.001 and not aoi_is_scratch %}
+                    <span style="color: var(--text-muted); font-size: 0.8rem;"> | SCR:{{ aoi_scr_score | round(3) }}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if t.get("ng_validation_sample_id") %}
+                    <span class="sample-status is-ng">真 NG</span>
+                    {% elif t.get("retrain_pool_id") %}
+                    <span class="sample-status is-pool">
+                        重訓 Pool{% if t.get("retrain_pool_job_id") %}（已入訓練）{% else %}待選{% endif %}
+                    </span>
+                    {% else %}
+                    <span class="sample-status">未歸類</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table></div>
+
+    <div class="img-grid" style="display:flex;gap:16px;overflow-x:auto;margin-top:12px;">
+        {% for t in aoi_tiles %}
+        {% if t.heatmap_path and heatmap_base_dir %}
+        {% set thm_url = hm_relative(t.heatmap_path, heatmap_base_dir) %}
+        {% if thm_url %}
+        <div class="image-box" style="flex:0 0 auto;width:650px;max-width:100%;border: 2px solid rgba(16, 185, 129, 0.3); border-radius: 8px;">
+            <h4
+                style="margin-bottom:8px;color:#10b981;font-size:0.85rem;font-family:'Fira Code',monospace;">
+                🎯 #{{ t.tile_id }} — {{ t.get("aoi_defect_code", "") }}
+                {% if t.get("aoi_product_x", -1) >= 0 %}
+                <span style="color: #F59E0B;">AOI({{ t.aoi_product_x }},{{ t.aoi_product_y }})</span>
+                {% endif %}
+                {% if t.get("aoi_image_x", -1) >= 0 %}
+                <span style="color: #93C5FD;">img({{ t.aoi_image_x }},{{ t.aoi_image_y }})</span>
+                {% endif %}
+                {% set aoi_dx = t.get("aoi_tile_shift_dx", 0) or 0 %}
+                {% set aoi_dy = t.get("aoi_tile_shift_dy", 0) or 0 %}
+                <span style="color: #38BDF8;">shift({% if aoi_dx > 0 %}+{% endif %}{{ aoi_dx }},{% if aoi_dy > 0 %}+{% endif %}{{ aoi_dy }})</span>
+                {% if t.get("scratch_filtered") %}
+                <span style="color: #0D9488;">[🧽 Scratch 救回 OK]</span>
+                {% elif t.get("is_anomaly") %}
+                <span style="color: #EF4444;">[AI: NG]</span>
+                {% else %}
+                <span style="color: #22C55E;">[AI: OK]</span>
+                {% endif %}
+                {% set aoi_sc = t.get("scratch_score", 0) or 0 %}
+                {% if aoi_sc >= 0.001 and not t.get("scratch_filtered") %}
+                <span style="color: var(--text-muted); font-size: 0.75rem;">SCR:{{ aoi_sc | round(3) }}</span>
+                {% endif %}
+                {% if aoi_sample_classification_enabled | default(true) %}
+                <button type="button"
+                        class="sample-classify-btn{% if t.get('ng_validation_sample_id') %} is-ng{% elif t.get('retrain_pool_id') %} is-pool{% endif %}"
+                        data-tile-result-id="{{ t.id }}"
+                        data-current-classification="{% if t.get('ng_validation_sample_id') %}ng{% elif t.get('retrain_pool_id') %}retrain_pool{% else %}none{% endif %}"
+                        data-is-anomaly="{{ 1 if t.get('is_anomaly') else 0 }}"
+                        data-is-bomb="{{ 1 if t.get('is_bomb') or img.get('is_bomb') else 0 }}"
+                        data-is-exclude-zone="{{ 1 if t.get('is_exclude_zone') else 0 }}"
+                        data-ng-source="{{ t.get('ng_validation_sample_source', '') }}"
+                        data-pool-locked="{{ 1 if t.get('retrain_pool_job_id') else 0 }}"
+                        style="float:right;margin-left:8px;"
+                        onclick="openSampleClassification(this)"
+                        title="判斷此 AOI Tile 為真 NG 或無現象過檢">
+                    {% if t.get("ng_validation_sample_id") %}真 NG ▾{% elif t.get("retrain_pool_id") %}重訓 Pool ▾{% else %}樣本歸類 ▾{% endif %}
+                </button>
+                {% endif %}
+            </h4>
+            <img src="/heatmaps/{{ thm_url }}" alt="aoi tile{{ t.tile_id }} heatmap" onclick="openLightbox(this.src)">
+        </div>
+        {% endif %}
+        {% endif %}
+        {% endfor %}
+    </div>
+</div>
+{% endif %}

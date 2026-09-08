@@ -30,7 +30,7 @@ _warnings.filterwarnings("ignore", message=r".*xFormers is not available.*")
 import cv2
 import numpy as np
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Dict, Tuple, Optional, Any
 import re
 import time
@@ -244,6 +244,7 @@ class TileInfo:
     anomaly_peak_x: int = -1    # 熱力圖峰值 x (圖片座標, -1=未計算)
     anomaly_peak_y: int = -1    # 熱力圖峰值 y (圖片座標, -1=未計算)
     is_aoi_coord_tile: bool = False  # 是否來自 AOI 機檢座標
+    aoi_source_prefix: str = ""  # 保留跨畫面補檢的 AOI 來源
     aoi_defect_code: str = ""        # AOI 異常代碼 (PCDK2, C1111, PTMD6)
     aoi_product_x: int = -1         # AOI 產品座標 X (-1=非 AOI 座標 tile)
     aoi_product_y: int = -1         # AOI 產品座標 Y (-1=非 AOI 座標 tile)
@@ -6364,11 +6365,18 @@ class CAPIInferencer:
         aoi_report: Dict[str, List['AOIReportDefect']],
     ) -> Dict[str, List['AOIReportDefect']]:
         """Exclude screens handled by a dedicated detector from PatchCore routing."""
-        return {
-            prefix: defects
+        filtered = {
+            prefix: list(defects)
             for prefix, defects in (aoi_report or {}).items()
             if self.station_adapter.is_inference_prefix(prefix)
         }
+        if self.station_adapter.profile == "aapi" and (aoi_report or {}).get("WHITEFRA"):
+            # Copy before coordinate resolution: WHITEFRA and W0F00000 have
+            # different image bounds, while the source product point is shared.
+            filtered.setdefault("W0F00000", []).extend(
+                replace(defect) for defect in aoi_report["WHITEFRA"]
+            )
+        return filtered
 
     def _apply_aoi_coord_inspection(
         self,
@@ -6407,8 +6415,7 @@ class CAPIInferencer:
 
         if aoi_report is None:
             aoi_report = self._parse_aoi_report_txt(panel_dir)
-        # Dedicated detectors (currently WHITEFRA) remain in the parsed report
-        # for reporting, but must not enter AOI coordinate inspection.
+        # WHITEFRA itself stays on CV; AAPI also checks its points on W0F00000.
         aoi_report = self._filter_aoi_report_for_inference(aoi_report)
         if not aoi_report:
             if is_new_arch:
@@ -6418,7 +6425,6 @@ class CAPIInferencer:
         # 新架構：以 AOI 機檢座標為 anchor 建 512x512 tile；靠 polygon 邊時
         # 往產品內側推，讓 edge.pt 的訓練與推論都只看產品本體，不看黑背景。
         if getattr(self.config, "is_new_architecture", False):
-            from capi_preprocess import PreprocessConfig
             pre_cfg = PreprocessConfig(
                 tile_size=self.config.tile_size,
                 tile_stride=getattr(self.config, "tile_stride", self.config.tile_size),
@@ -6471,8 +6477,24 @@ class CAPIInferencer:
             if aoi_image is None:
                 continue
 
+            defects = aoi_report[img_prefix]
+            if self.station_adapter.profile == "aapi" and img_prefix == "W0F00000":
+                followups = [d for d in defects if d.image_prefix == "WHITEFRA"]
+                if followups:
+                    # Legacy models also need inward tiles for this white-screen
+                    # follow-up, rather than the ordinary v1 CV edge fallback.
+                    aoi_tile_count += self._create_aoi_centered_tiles_v2(
+                        image=aoi_image, result=result, defects=followups,
+                        product_resolution=product_resolution,
+                        pre_cfg=PreprocessConfig(
+                            tile_size=self.config.tile_size,
+                            enable_panel_polygon=self.config.enable_panel_polygon,
+                            product_resolution=product_resolution or self._product_resolution(),
+                        ),
+                    )
+                defects = [d for d in defects if d.image_prefix != "WHITEFRA"]
             new_tiles, edge_defs = self._create_aoi_coord_tiles(
-                aoi_image, result, aoi_report[img_prefix], product_resolution,
+                aoi_image, result, defects, product_resolution,
             )
             result.tiles.extend(new_tiles)
             aoi_tile_count += len(new_tiles)
@@ -6689,6 +6711,7 @@ class CAPIInferencer:
                 original_image=original_tile,
                 mask=tile_mask,
                 is_aoi_coord_tile=True,
+                aoi_source_prefix=defect.image_prefix,
                 aoi_defect_code=defect.defect_code,
                 aoi_product_x=product_x,
                 aoi_product_y=product_y,

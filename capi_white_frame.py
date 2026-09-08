@@ -104,6 +104,9 @@ def inspect_white_frame_image(
     *,
     rotate_180: bool = False,
     config: WhiteFrameConfig = WhiteFrameConfig(),
+    aoi_points: Optional[list] = None,
+    product_resolution: Optional[Tuple[int, int]] = None,
+    tile_size: int = 512,
 ) -> WhiteFrameInspection:
     started = perf_counter()
     path = Path(image_path)
@@ -155,7 +158,110 @@ def inspect_white_frame_image(
         "sides": side_results,
         "processing_ms": round((perf_counter() - started) * 1000.0, 1),
     }
+    if aoi_points:
+        payload["full_frame_status"] = payload["status"]
+        payload["aoi_algorithm"] = "white-frame-aoi-cv-v1"
+        payload["aoi_tiles"] = _inspect_aoi_tiles(
+            gray, quad, bounds, aoi_points, product_resolution, tile_size, config,
+        )
+        if any(tile["status"] == "NG" for tile in payload["aoi_tiles"]):
+            payload["status"] = "NG"
+        payload["processing_ms"] = round((perf_counter() - started) * 1000.0, 1)
     return WhiteFrameInspection(path, (width, height), bounds, payload)
+
+
+def _inspect_aoi_tiles(gray, quad, bounds, points, product_resolution, tile_size, config):
+    """Inspect native-resolution line strength without closing small notches."""
+    from capi_preprocess import map_product_coord_to_image
+
+    height, width = gray.shape
+    half = tile_size // 2
+    results = []
+    for index, point in enumerate(points):
+        image_x, image_y = map_product_coord_to_image(
+            point["product_x"], point["product_y"], bounds, product_resolution, quad,
+        )
+        tx = max(0, min(image_x - half, width - tile_size))
+        ty = max(0, min(image_y - half, height - tile_size))
+        crop_w, crop_h = min(tile_size, width - tx), min(tile_size, height - ty)
+        item = {
+            "tile_id": index, "aoi_defect_code": point["defect_code"],
+            "aoi_product_x": point["product_x"], "aoi_product_y": point["product_y"],
+            "aoi_image_x": image_x, "aoi_image_y": image_y,
+            "x": tx, "y": ty, "width": crop_w, "height": crop_h,
+            "aoi_tile_shift_dx": tx - (image_x - half),
+            "aoi_tile_shift_dy": ty - (image_y - half),
+            "status": "UNREADABLE", "gaps": [],
+        }
+        results.append(item)
+        anchor = np.array([image_x, image_y], dtype=np.float32)
+        candidates = []
+        for side_index, side in enumerate(SIDE_ORDER):
+            start = quad[side_index]
+            vector = quad[(side_index + 1) % 4] - start
+            length = float(np.linalg.norm(vector))
+            direction = vector / max(length, 1.0)
+            along = float(np.clip(np.dot(anchor - start, direction), 0, length))
+            distance = float(np.linalg.norm(anchor - start - along * direction))
+            candidates.append((distance, side, start, direction, length))
+        _, side, start, direction, length = min(candidates, key=lambda entry: entry[0])
+        item["side"] = side
+        item["side_label"] = SIDE_LABELS[side]
+        # Only sample the portion of this frame side inside the actual TILE.
+        positions = np.arange(int(length) + 1, dtype=np.float32)
+        centers = start + positions[:, None] * direction
+        inside = (
+            (centers[:, 0] >= tx + 2) & (centers[:, 0] < tx + crop_w - 2)
+            & (centers[:, 1] >= ty + 2) & (centers[:, 1] < ty + crop_h - 2)
+            & (positions >= 2) & (positions <= length - 2)
+        )
+        centers = centers[inside]
+        if len(centers) < 16:
+            item["reason"] = "TILE 內沒有足夠的白框線段"
+            continue
+        normal = np.array([-direction[1], direction[0]], dtype=np.float32)
+        offsets = np.arange(-config.max_edge_band_px, config.max_edge_band_px + 1, dtype=np.float32)
+        samples = centers[None, :, :] + offsets[:, None, None] * normal
+        strip = cv2.remap(
+            gray, samples[:, :, 0], samples[:, :, 1], cv2.INTER_LINEAR,
+        ).astype(np.float32)
+        background = np.median(strip, axis=0)
+        contrast = np.maximum(strip - background, 0)
+        peak = float(np.median(contrast.max(axis=0)))
+        if peak < config.brightness_floor:
+            item["reason"] = "白框線亮度不足，無法建立局部基準"
+            continue
+        # Integrating the bright cross-section catches a narrowed line even
+        # when its brightest pixel remains white. No gap-closing morphology.
+        strength = np.maximum(contrast - peak * 0.25, 0).sum(axis=0)
+        baseline = float(np.median(strength))
+        ratios = strength / max(baseline, 1.0)
+        item["min_line_ratio"] = round(float(ratios.min()), 3)
+        for begin, end in _missing_runs(ratios >= 0.60, 2, len(centers) - 2):
+            if end - begin < 2:
+                continue
+            center = centers[(begin + end - 1) // 2]
+            item["gaps"].append({
+                "center_x": int(round(float(center[0]))),
+                "center_y": int(round(float(center[1]))),
+                "length_px": end - begin,
+                "line_ratio": round(float(ratios[begin:end].min()), 3),
+                "source": "aoi_tile",
+            })
+        item["status"] = "NG" if item["gaps"] else "OK"
+    return results
+
+
+def render_white_frame_aoi_tile(image: np.ndarray, tile: dict) -> np.ndarray:
+    """Render stored CV findings on the original TILE, without re-inspection."""
+    x, y, width, height = (int(tile[key]) for key in ("x", "y", "width", "height"))
+    crop = _to_gray_u8(image[y:y + height, x:x + width])
+    canvas = cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
+    for gap in tile.get("gaps", []):
+        cx, cy = int(gap["center_x"]) - x, int(gap["center_y"]) - y
+        radius = max(10, min(40, int(gap["length_px"]) // 2 + 6))
+        cv2.rectangle(canvas, (cx - radius, cy - radius), (cx + radius, cy + radius), (0, 0, 255), 1)
+    return canvas
 
 
 def _unreadable(

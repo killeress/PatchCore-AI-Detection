@@ -503,15 +503,39 @@ def test_qjpg_response_uses_bomb_code_for_bomb_defect_even_when_internal_ok():
     assert response == "@QJPG-G1;OK;EJ;NGBMB990096000540W0F00000,"
 
 
-def test_qjpg_response_uses_image_abnormal_code_for_hy():
+@pytest.mark.parametrize("screen", ["W0F00000", "G0F00000"])
+def test_qjpg_response_uses_image_abnormal_code_for_hy(screen):
     response = build_qjpg_response(
         {"glass_id": "G1", "resolution": (2000, 1000), "image_dir": "D:/panels/W0F00000_114438.tif"},
-        "ERR:HY:W0F00000",
+        f"ERR:HY:{screen}",
         [],
         CAPIConfig(report_image_abnormal_defect_code="HY999"),
     )
 
-    assert response == "@QJPG-G1;NG;00;NGHY9990000000000W0F00000,"
+    assert response == f"@QJPG-G1;NG;00;NGHY9990000000000{screen},"
+
+
+@pytest.mark.parametrize(
+    "image_names",
+    [None, [], ["W0F00000_1.tif", "G0F00000_1.tif"]],
+    ids=["missing_directory", "empty_directory", "multiple_screens"],
+)
+def test_hy_response_defaults_unknown_screen_to_white(tmp_path, image_names):
+    panel_dir = tmp_path / "panel"
+    if image_names is not None:
+        panel_dir.mkdir()
+        for image_name in image_names:
+            (panel_dir / image_name).touch()
+
+    parsed = parse_request(
+        f"AOI@G1;GN153JCAK040S;CAPI03;1920,1200;HY;;();{panel_dir}"
+    )
+    response = build_dual_protocol_response(parsed, "ERR:HY", [], CAPIConfig())
+
+    assert response == (
+        "AOI@G1;GN153JCAK040S;CAPI03;HY;ERR:HY\r\n"
+        "@QJPG-G1;NG;00;NGPCO050000000000W0F00000,"
+    )
 
 
 def test_image_abnormal_precheck_detects_mean_brightness(monkeypatch):

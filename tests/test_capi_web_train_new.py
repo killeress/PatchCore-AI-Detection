@@ -1035,6 +1035,7 @@ def test_handle_train_new_tiles_requires_params():
 def test_handle_train_new_tiles_decision_updates():
     """正常情境：更新 tile decisions，回傳 ok + updated count。"""
     server = MagicMock()
+    server.database.get_training_job.return_value = {"state": "review", "training_params": {}}
     h = _make_handler_with_server(server, "/api/train/new/tiles/decision")
     body_bytes = json.dumps({"job_id": "j1", "tile_ids": [1, 2, 3], "decision": "reject"}).encode()
     h.headers.get = MagicMock(return_value=str(len(body_bytes)))

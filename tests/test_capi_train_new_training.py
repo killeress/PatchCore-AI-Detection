@@ -464,13 +464,19 @@ def test_stage_dataset_keeps_duplicate_basenames_distinct(tmp_path):
     assert {path.read_bytes() for path in staged} == {b"0", b"1"}
 
 
-def test_train_one_patchcore_smoke(tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_calibration", [False, True])
+def test_train_one_patchcore_smoke(tmp_path, monkeypatch, with_calibration):
     """smoke test：mock anomalib，確認 orchestration 順序正確。"""
     from capi_train_new import train_one_patchcore
 
     staging = tmp_path / "staging"
     (staging / "train").mkdir(parents=True)
     (staging / "test" / "anormal").mkdir(parents=True)
+
+    if with_calibration:
+        (staging / "test" / "normal").mkdir(parents=True)
+        (staging / "test" / "normal" / "ok.png").write_bytes(b"ok")
+        (staging / "test" / "anormal" / "ng.png").write_bytes(b"ng")
 
     calls = []
 
@@ -525,8 +531,13 @@ def test_train_one_patchcore_smoke(tmp_path, monkeypatch):
     assert patchcore_call[1]["layers"] == ("layer2", "layer3")
     folder_call = next(c for c in calls if c[0] == "Folder")
     assert folder_call[1]["num_workers"] == 16
-    assert folder_call[1]["abnormal_dir"] is None
-    assert folder_call[1]["test_split_mode"] == "synthetic"
+    if with_calibration:
+        assert folder_call[1]["normal_test_dir"] == "test/normal"
+        assert folder_call[1]["abnormal_dir"] == "test/anormal"
+        assert "test_split_mode" not in folder_call[1]
+    else:
+        assert folder_call[1]["abnormal_dir"] is None
+        assert folder_call[1]["test_split_mode"] == "synthetic"
     # 回傳路徑要存在
     assert out.exists()
     assert out.name == "model.pt"

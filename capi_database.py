@@ -1109,6 +1109,9 @@ class CAPIDatabase:
             add_column_if_not_exists("tile_results", "scratch_filtered", "INTEGER DEFAULT 0")
             add_column_if_not_exists("image_results", "scratch_filter_count", "INTEGER DEFAULT 0")
             add_column_if_not_exists("training_jobs", "training_params", "TEXT")
+            add_column_if_not_exists("training_tile_pool", "dataset_role", "TEXT NOT NULL DEFAULT 'train'")
+            add_column_if_not_exists("training_tile_pool", "validation_label", "TEXT NOT NULL DEFAULT ''")
+            add_column_if_not_exists("training_tile_pool", "validation_group", "TEXT NOT NULL DEFAULT ''")
             # 8 panel wizard：前 3 = full（收 inner+edge），後 5 = corners_only（只收 4 角給 edge 模型補強）
             add_column_if_not_exists("training_jobs", "panel_modes", "TEXT")
             # 6-step wizard：完整訓練或局部重訓 scope（mode / selected_units / target_bundle_id）
@@ -1692,6 +1695,13 @@ class CAPIDatabase:
             side_result = sides.get(side)
             if not isinstance(side_result, dict):
                 continue
+            local_gaps = [gap for tile in payload.get("aoi_tiles", [])
+                if tile.get("side") == side and tile.get("status") == "NG"
+                for gap in tile.get("gaps", [])]
+            if local_gaps:
+                gaps = list(side_result.get("gaps", [])) + local_gaps
+                side_result = dict(side_result, status="NG", gaps=gaps,
+                    gap_count=len(gaps), largest_gap_px=max(gap.get("length_px", 0) for gap in gaps))
             if str(side_result.get("status") or "").upper() != "NG":
                 continue
             label = str(side_result.get("label") or side)
@@ -2060,6 +2070,20 @@ class CAPIDatabase:
                 img_dict["edge_defects"] = [dict(e) for e in edge_defects]
 
                 result["images"].append(img_dict)
+
+            # Resolve saved follow-up tile references to the real database rows,
+            # retaining heatmaps and sample classification IDs under WHITEFRA.
+            for frame in result["images"]:
+                wf = frame.get("white_frame_result") or {}
+                reference = wf.get("white_screen") or {}
+                source = next((image for image in result["images"]
+                    if image["image_name"] == reference.get("image_name")), None)
+                if source is not None:
+                    tiles = [tile for tile in source["tiles"]
+                        if tile["tile_id"] in reference.get("tile_ids", [])]
+                    for tile in tiles:
+                        tile["is_white_frame_followup"] = True
+                    wf["white_screen_result"] = dict(source, tiles=tiles)
 
             return result
         finally:
@@ -6947,12 +6971,15 @@ class CAPIDatabase:
                 cur.execute(
                     """INSERT INTO training_tile_pool
                        (job_id, lighting, zone, source, source_path, thumb_path,
-                        panel_path, tile_index, tile_x, tile_y, tile_width, tile_height)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        panel_path, tile_index, tile_x, tile_y, tile_width, tile_height,
+                        dataset_role, validation_label, validation_group)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (job_id, t["lighting"], t.get("zone"), t["source"],
                      t["source_path"], t.get("thumb_path"), t.get("panel_path"),
                      t.get("tile_index"), t.get("tile_x"), t.get("tile_y"),
-                     t.get("tile_width"), t.get("tile_height")),
+                     t.get("tile_width"), t.get("tile_height"),
+                     t.get("dataset_role", "train"), t.get("validation_label", ""),
+                     t.get("validation_group", "")),
                 )
                 ids.append(cur.lastrowid)
             conn.commit()
@@ -7103,6 +7130,35 @@ class CAPIDatabase:
                 (decision, job_id, *tile_ids),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def update_validation_review(self, job_id, tile_ids, *, label=None, decision=None, allow_training_labels=False):
+        """Freeze labels/decisions once the wizard leaves review (atomic SQL guard)."""
+        if not tile_ids:
+            return 0
+        if label not in (None, "", "ok", "ng") or decision not in (None, "accept", "reject"):
+            raise ValueError("invalid validation review")
+        field, value = ("validation_label", label) if label is not None else ("decision", decision)
+        if value is None:
+            raise ValueError("label or decision required")
+        role_guard = " AND dataset_role IN ('calibration', 'acceptance')" if label is not None else ""
+        if label is not None and allow_training_labels:
+            role_guard = " AND dataset_role IN ('train', 'calibration', 'acceptance') AND validation_group != ''"
+        placeholders = ",".join("?" * len(tile_ids))
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                f"UPDATE training_tile_pool SET {field} = ? WHERE job_id = ? "
+                f"AND id IN ({placeholders}){role_guard} "
+                "AND EXISTS (SELECT 1 FROM training_jobs j WHERE j.job_id = training_tile_pool.job_id AND j.state = 'review')",
+                (value, job_id, *tile_ids),
+            )
+            if cur.rowcount != len(set(tile_ids)):
+                conn.rollback()
+                return 0
+            conn.commit()
+            return cur.rowcount
         finally:
             conn.close()
 

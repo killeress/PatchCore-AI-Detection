@@ -37,9 +37,10 @@
     {% set image_name = img.get('image_name', '') %}
     {% if image_name and detail.get('id') %}
     {% set white_frame_image_url = '/images/' ~ detail.id ~ '/' ~ (image_name | urlencode) ~ '?white_frame=1' %}
-    <div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(148,163,184,0.24);">
+    <div style="display:flex;flex-wrap:wrap;gap:20px;margin-top:12px;padding-top:12px;border-top:1px solid rgba(148,163,184,0.24);">
+      <div style="flex:1 1 480px;min-width:0;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-            <strong style="font-size:0.8rem;">檢測影像</strong>
+            <strong style="font-size:0.8rem;">檢測影像{% if wf.get('full_frame_status') %} · 整片 {{ wf.full_frame_status }}{% endif %}</strong>
             {% if wf.status == 'NG' %}
             <span style="color:#EF4444;font-size:0.72rem;font-weight:600;">紅色標記為斷線中心</span>
             {% endif %}
@@ -67,6 +68,30 @@
             {% endfor %}
         </div>
         {% endif %}
+      </div>
+      {% if wf.get('aoi_tiles') %}
+      <div style="flex:1 1 480px;min-width:0;">
+        <strong style="font-size:0.85rem;">AOI 座標放大檢查 · OpenCV</strong>
+        {% for tile in wf.aoi_tiles %}
+        <div style="margin-top:10px;padding:12px;border:1px solid rgba(148,163,184,0.32);border-radius:8px;">
+            <div style="display:flex;justify-content:space-between;gap:8px;">
+                <strong>#{{ tile.tile_id }} {{ tile.aoi_defect_code }} · {{ tile.get('side_label', '') }}</strong>
+                <strong style="color:{% if tile.status == 'NG' %}#EF4444{% elif tile.status == 'OK' %}#22C55E{% else %}#F59E0B{% endif %};">{% if tile.status == 'UNREADABLE' %}無法判讀{% else %}{{ tile.status }}{% endif %}</strong>
+            </div>
+            <div style="margin:6px 0;font-size:0.75rem;line-height:1.7;">
+                AOI ({{ tile.aoi_product_x }}, {{ tile.aoi_product_y }}) → 圖片 ({{ tile.aoi_image_x }}, {{ tile.aoi_image_y }})<br>
+                TILE ({{ tile.x }}, {{ tile.y }}) · {{ tile.width }}×{{ tile.height }} · 修正量 ({{ tile.aoi_tile_shift_dx }}, {{ tile.aoi_tile_shift_dy }})
+                {% if tile.status == 'NG' %}<br><span style="color:#EF4444;">局部白線缺口／變細 {{ tile.gaps | length }} 處，紅框標示異常位置</span>{% endif %}
+                {% if tile.get('reason') %}<br>{{ tile.reason }}{% endif %}
+            </div>
+            <img src="/images/{{ detail.id }}/{{ image_name | urlencode }}?white_frame_tile={{ tile.tile_id }}"
+                alt="AOI #{{ tile.tile_id }} 白框局部檢查" loading="lazy"
+                style="display:block;width:min(100%,512px);height:auto;background:#020617;border-radius:6px;cursor:zoom-in;"
+                onclick="openLightbox(this.src)">
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
     </div>
     {% endif %}
 
@@ -75,5 +100,19 @@
         檢測耗時: {{ wf.get('processing_ms', 0) | round(1) }}ms
         {% if wf.get('reason') %} | 原因: {{ wf.reason }}{% endif %}
     </div>
+    {% if wf.get('white_screen') %}
+        {% if wf.get('white_screen_result') %}
+            {% with img=wf.white_screen_result, aoi_tiles=wf.white_screen_result.tiles,
+                    aoi_section_title='White_Frame 座標 · W0F00000 白畫面 PatchCore 補檢',
+                    aoi_section_note='(同一產品座標，套用白畫面邊緣修正)' %}
+                {% include "_aoi_coord_result.html" %}
+            {% endwith %}
+        {% endif %}
+        {% if wf.white_screen.status == 'UNAVAILABLE' %}
+        <div style="margin-top:16px;padding:12px;border-top:2px solid #10b981;color:#F59E0B;">
+            W0F00000 白畫面 PatchCore 補檢：{{ wf.white_screen.reason }}
+        </div>
+        {% endif %}
+    {% endif %}
 </div>
 {% endif %}
