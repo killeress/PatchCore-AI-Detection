@@ -29,6 +29,8 @@
     </div>
   </div>
 
+  {% include "train_new/_validation_report.html" %}
+
   {% if experimental_training %}
   <div style="margin:0 0 16px;padding:12px 16px;border:1px solid #fab387;border-radius:8px;background:#3b3028;color:#f9e2af;">
     <strong>實驗模型：</strong>使用了 5×5 特徵聚合或特徵域清洗。請先以相同測試集重放並確認 threshold，再到模型庫手動啟用。

@@ -1,0 +1,60 @@
+{% if validation_reports %}
+{% set status_labels = {'pass': '本次樣本符合目標', 'fail': '未達目標', 'insufficient': '資料不足', 'unassessed': '未設定完整目標'} %}
+{% macro percentage(value) %}{% if value is not none %}{{ '%.2f'|format(value * 100) }}%{% else %}—{% endif %}{% endmacro %}
+<section style="margin:16px 0;padding:18px;border:1px solid #89b4fa;border-radius:10px;">
+  <h2>獨立校正與驗收</h2>
+  <p>校正組選門檻，驗收組只評估。以下以切片分數計算，尚未包含灰塵、OMIT、遮罩等產線後處理；樣本通過不代表未來所有批次都合格。</p>
+  {% for report in validation_reports %}
+  <article style="border-top:1px solid #45475a;padding:16px 0;">
+    <h3>{{ report.unit_label }} · 建議門檻驗收：{% if report.stale %}歷史報告（模型或設定已改變）{% else %}{{ status_labels.get(report.status, report.status) }}{% endif %}</h3>
+    {% for reason in report.reasons %}<p>{{ reason }}</p>{% endfor %}
+    <p>目前門檻 {{ report.current_threshold|default('—') }} ／ 建議門檻 {{ report.suggested_threshold if report.suggested_threshold is not none else '—' }}</p>
+    {% if report.current_threshold is defined and report.current_threshold not in [0.35, report.suggested_threshold] %}<p>目前門檻不在本次比較範圍，不能引用這份報告作為目前門檻的驗收結果。</p>{% endif %}
+    {% if report.targets %}<p>目標：OK 誤判率 ≤ {{ percentage(report.targets.max_false_positive_rate) }}；NG 漏檢率 ≤ {{ percentage(report.targets.max_miss_rate) }}</p>{% endif %}
+    <table style="width:100%;text-align:left;border-collapse:collapse;">
+      <thead><tr><th>資料／門檻</th><th>OK 誤判 / OK 數</th><th>誤判率</th><th>NG 漏檢 / NG 數</th><th>漏檢率</th></tr></thead>
+      <tbody>
+      {% for label, metrics in [('校正／建議門檻', report.calibration), ('驗收／原 0.35', report.baseline), ('驗收／建議門檻', report.suggested)] %}
+      {% if metrics %}<tr><td>{{ label }}</td><td>{{ metrics.false_positives }} / {{ metrics.ok_count }}</td><td>{{ percentage(metrics.false_positive_rate) }}</td><td>{{ metrics.misses }} / {{ metrics.ng_count }}</td><td>{{ percentage(metrics.miss_rate) }}</td></tr>{% endif %}
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if not report.stale and report.suggested_threshold is not none and report.status != 'insufficient' %}
+      {% if report.current_threshold == report.suggested_threshold %}<p>目前已使用建議門檻。</p>
+      {% else %}<button type="button" onclick="adoptValidationThreshold(this)" data-unit="{{ report.unit_label }}">採用建議門檻（不啟用模型）</button>{% endif %}
+    {% endif %}
+    {% if report.download_url %}<p><a href="{{ report.download_url }}" target="_blank" rel="noopener">完整報告與逐張分數 JSON</a></p>{% endif %}
+    {% if report.acceptance_by_batch %}
+    <details><summary>各驗收批次表現</summary>
+      {% for batch, values in report.acceptance_by_batch.items() %}
+      <p>批次 {{ batch }}：OK {{ values.baseline.ok_count }}、NG {{ values.baseline.ng_count }}；原門檻誤判 {{ percentage(values.baseline.false_positive_rate) }}／漏檢 {{ percentage(values.baseline.miss_rate) }}{% if values.suggested %}；建議門檻誤判 {{ percentage(values.suggested.false_positive_rate) }}／漏檢 {{ percentage(values.suggested.miss_rate) }}{% endif %}</p>
+      {% endfor %}
+    </details>
+    {% endif %}
+    <details><summary>驗收錯判清單（原門檻或建議門檻，{{ report.errors|default([])|length }} 張）</summary>
+      {% for sample in report.errors %}
+      <p><a href="{{ sample.url }}" target="_blank" rel="noopener">查看 #{{ sample.tile_id }} 切片</a> · 批次 {{ sample.group }} · 標籤 {{ sample.label|upper }} · 分數 {{ '%.6f'|format(sample.score) }} · 原門檻 {{ '錯判' if sample.baseline_wrong else '正確' }} · 建議門檻 {{ ('錯判' if sample.suggested_wrong else '正確') if report.suggested_threshold is not none else '無建議' }}</p>
+      {% endfor %}
+    </details>
+  </article>
+  {% endfor %}
+  <p>下方原有 AUROC 使用訓練流程資料，僅供診斷；獨立驗收結果以上表為準。</p>
+</section>
+<script>
+async function adoptValidationThreshold(button) {
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/train/new/apply-validation/' + encodeURIComponent({{ job_id|tojson }}), {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({unit_label: button.dataset.unit}),
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || '採用失敗');
+    location.reload();
+  } catch (error) {
+    capAlert(String(error), {type: 'error'});
+    button.disabled = false;
+  }
+}
+</script>
+{% endif %}

@@ -3999,6 +3999,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/train/new/start_training/"):
                 self._handle_train_new_start_training()
                 return
+            elif path.startswith("/api/train/new/apply-validation/"):
+                self._handle_train_new_apply_validation()
+                return
             elif path == "/api/models/sync":
                 self._handle_models_sync()
                 return
@@ -5426,6 +5429,11 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     continue
 
+        for tile in payload.get("aoi_tiles", []):
+            if tile.get("status") == "NG":
+                markers.extend((float(gap["center_x"]), float(gap["center_y"]))
+                    for gap in tile.get("gaps", []))
+
         if not markers:
             return image
 
@@ -5510,13 +5518,26 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             annotate_white_frame = str(
                 (query or {}).get("white_frame", [""])[0]
             ).lower() in ("1", "true", "yes")
+            white_frame_tile = (query or {}).get("white_frame_tile", [None])[0]
             if full_path.exists() and full_path.is_file():
-                if preview or annotate_white_frame or self._inference_rotate_180_enabled():
+                if preview or annotate_white_frame or white_frame_tile is not None or self._inference_rotate_180_enabled():
                     import cv2
 
                     image = self._read_inference_image(full_path, cv2.IMREAD_UNCHANGED)
                     if image is None:
                         self._send_404()
+                        return
+                    if white_frame_tile is not None:
+                        from capi_white_frame import render_white_frame_aoi_tile
+                        payload = next((item.get("white_frame_result") or {}
+                            for item in detail.get("images", [])
+                            if item.get("image_name") == image_name), {})
+                        tile = next((tile for tile in payload.get("aoi_tiles", [])
+                            if tile["tile_id"] == int(white_frame_tile)), None)
+                        if tile is None:
+                            self._send_404()
+                            return
+                        self._send_image_array_png(render_white_frame_aoi_tile(image, tile))
                         return
                     height, width = image.shape[:2]
                     if preview:
@@ -13183,6 +13204,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             InferenceLogCapture, WITHIN_SPEC_LOGS_URL,
             _stored_machine_judgment_for_record, _white_frame_image_result,
             _has_white_frame_ng, _serialize_aoi_machine_coords, parse_request,
+            _white_frame_aoi_kwargs, _link_white_frame_white_screen,
         )
         from capi_station_adapter import create_station_adapter
         from capi_white_frame import inspect_white_frame_image
@@ -13236,16 +13258,22 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
             InferenceLogCapture.start_capture()
             white_frame_inspection = None
+            white_frame_kwargs = {}
             try:
                 station_adapter = (
                     getattr(server_inst, "station_adapter", None)
+                    or getattr(inferencer, "station_adapter", None)
                     or create_station_adapter("capi")
                 )
                 white_frame_path = station_adapter.find_white_frame_image(panel_dir)
                 if white_frame_path is not None:
+                    white_frame_kwargs = _white_frame_aoi_kwargs(
+                        station_adapter, aoi_report_override, inferencer.config, model_id,
+                    )
                     white_frame_inspection = inspect_white_frame_image(
                         white_frame_path,
                         rotate_180=getattr(inferencer, "_rotate_detection_images_180", False),
+                        **white_frame_kwargs,
                     )
                     payload = white_frame_inspection.payload
                     side_summary = ", ".join(
@@ -13309,6 +13337,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             aoi_report = panel_result[6] if len(panel_result) > 6 else {}
 
             if white_frame_inspection is not None:
+                if white_frame_kwargs:
+                    _link_white_frame_white_screen(white_frame_inspection, results, station_adapter)
                 results.append(_white_frame_image_result(white_frame_inspection))
 
             if is_duplicate:
@@ -14858,6 +14888,29 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return (g or "n/a").replace("/", "")
 
         unit_metrics = manifest.get("unit_metrics", {}) or {}
+        validation_reports = []
+        for unit_label, metrics in unit_metrics.items():
+            if not metrics.get("validation"):
+                continue
+            try:
+                from capi_training_validation import load_report
+                report = load_report(bundle_path, unit_label)
+                lighting, zone = unit_label.rsplit("-", 1)
+                report["current_threshold"] = thresholds.get(lighting, {}).get(zone)
+                report["errors"] = []
+                suggested = report["suggested_threshold"]
+                for sample in report["samples"]:
+                    if sample["role"] != "acceptance":
+                        continue
+                    baseline_wrong = (sample["score"] >= 0.35) != (sample["label"] == "ng")
+                    suggested_wrong = suggested is not None and (sample["score"] >= suggested) != (sample["label"] == "ng")
+                    if baseline_wrong or suggested_wrong:
+                        report["errors"].append({**sample, "baseline_wrong": baseline_wrong, "suggested_wrong": suggested_wrong,
+                            "url": "/api/train/new/bundle-asset/" + urllib.parse.quote(job_id, safe="") + "/" + urllib.parse.quote(sample["asset_path"], safe="/")})
+                report["download_url"] = "/api/train/new/bundle-asset/" + urllib.parse.quote(job_id, safe="") + "/validation_reports/" + urllib.parse.quote(unit_label, safe="") + "/report.json"
+            except (OSError, ValueError, KeyError) as exc:
+                report = {"unit_label": unit_label, "status": "insufficient", "stale": True, "reasons": [f"報告無法讀取：{exc}"], "baseline": {}, "suggested": None, "suggested_threshold": None}
+            validation_reports.append(report)
         manifest_lightings = []
         for unit_label in (manifest.get("tiles_per_unit") or {}):
             lighting, _zone = unit_label.rsplit("-", 1)
@@ -15016,6 +15069,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             total_elapsed_seconds=total_elapsed,
             success_units=manifest.get("success_units") or len(units),
             zero_score_units=zero_score_units,
+            validation_reports=validation_reports,
         )
         self._send_response(200, html)
 
@@ -15224,6 +15278,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         batch_root: Path,
         machine_id: str,
         station_adapter=None,
+        include_batches: bool = False,
     ) -> list:
         """List valid first-level panel folders from a manually prepared batch."""
         from capi_preprocess import filter_panel_lighting_files
@@ -15242,6 +15297,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 allowed_prefixes=station_adapter.inference_prefixes,
             )
             if not lighting_files:
+                if include_batches:
+                    panels.extend(CAPIWebHandler._scan_train_new_manual_batch(
+                        panel_dir, machine_id, station_adapter,
+                    ))
                 continue
             model_lightings = {
                 station_adapter.model_prefix(source_lighting)
@@ -15268,6 +15327,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "lighting_count": len(lightings),
                 "expected_lighting_count": len(station_adapter.training_prefixes),
                 "source_type": "manual_folder",
+                "batch_id": batch_root.name,
             })
         return panels
 
@@ -15305,6 +15365,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 batch_root,
                 machine_id,
                 station_adapter,
+                **({"include_batches": True} if data.get("include_batches") is True else {}),
             )
         except OSError as exc:
             self._send_json({"error": f"無法讀取 batch 根目錄: {exc}"}, status=400)
@@ -15384,6 +15445,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             if key not in raw:
                 continue
             val = raw[key]
+            if key == "validation_config":
+                from capi_training_validation import normalize_validation_config
+                try:
+                    cleaned[key] = normalize_validation_config(val)
+                except ValueError as exc:
+                    return None, str(exc)
+                continue
             if key == "feature_cleaning_by_zone":
                 try:
                     cleaned[key] = normalize_feature_cleaning_by_zone(val)
@@ -15599,6 +15667,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         self._train_new_station_adapter(
                             self._capi_server_instance
                         ),
+                        **({"include_batches": True} if training_data_source.get("include_batches") is True else {}),
                     )
                 }
             except OSError as exc:
@@ -15614,6 +15683,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 "type": "manual_folder",
                 "batch_root": str(batch_root),
                 "confirmed_normal": True,
+                **({"include_batches": True} if training_data_source.get("include_batches") is True else {}),
             }
         else:
             training_data_source = {"type": "inference_records"}
@@ -15622,6 +15692,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if err:
             self._send_json({"error": err}, status=400)
             return
+        if (training_params or {}).get("validation_config"):
+            from capi_training_validation import normalize_validation_config
+            try:
+                training_params["validation_config"] = normalize_validation_config(
+                    training_params["validation_config"], clean_panel_paths,
+                )
+                if (params.get("training_scope") or {}).get("mode") == "partial":
+                    raise ValueError("獨立校正／驗收目前適用於完整新模型訓練")
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
         image_preprocess_pipeline, err = self._validate_image_preprocess_pipeline(
             params.get("image_preprocess_pipeline")
         )
@@ -15995,7 +16076,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "image_prefix_resolver": station_adapter.image_prefix,
                     "model_prefix_resolver": station_adapter.model_prefix,
                 }
-            ng_stats = CAPIWebHandler._sample_ng_tiles_compat(
+            ng_stats = {} if cfg.validation_config else CAPIWebHandler._sample_ng_tiles_compat(
                 sample_ng_tiles,
                 job_id=job_id, over_review_root=cfg.over_review_root,
                 db=db, thumb_dir=thumb_root, log=log,
@@ -16102,12 +16183,19 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
         db = self._capi_server_instance.database
         tiles = db.list_tile_pool(job_id, lighting=lighting)
+        job = db.get_training_job(job_id)
+        auto_review = isinstance(job, dict) and ((job.get("training_params") or {}).get("validation_config") or {}).get("split_mode") == "auto_batch"
         for tile in tiles:
+            tile["auto_review"] = bool(auto_review)
             tile["thumb_url"] = self._train_new_thumb_url(tile.get("thumb_path"))
             tile["image_url"] = self._train_new_thumb_url(tile.get("source_path"))
         if score_from:
             CAPIWebHandler._decorate_tiles_with_scores(tiles, db, score_from, sort_by)
-        self._send_json({"tiles": tiles})
+        payload = {"tiles": tiles}
+        if auto_review:
+            panels = job["training_params"]["validation_config"]["panels"].values()
+            payload["auto_split"] = {role: sum(p["role"] == role for p in panels) for role in ("train", "calibration", "acceptance")}
+        self._send_json(payload)
 
     def _handle_train_new_preprocess_pipeline_preview(self):
         """POST /api/train/new/preprocess_pipeline_preview
@@ -16591,11 +16679,35 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         tile_ids = body.get("tile_ids", [])
         decision = body.get("decision")
 
+        if "validation_label" in body:
+            label = body["validation_label"]
+            if not job_id or not isinstance(tile_ids, list) or not tile_ids or any(type(t) is not int or t <= 0 for t in tile_ids) or label not in ("", "ok", "ng"):
+                self._send_json({"error": "job_id, tile_ids, validation_label required"}, status=400)
+                return
+            db = self._capi_server_instance.database
+            job = db.get_training_job(job_id)
+            auto_review = isinstance(job, dict) and ((job.get("training_params") or {}).get("validation_config") or {}).get("split_mode") == "auto_batch"
+            updated = db.update_validation_review(job_id, tile_ids, label=label,
+                **({"allow_training_labels": True} if auto_review else {}))
+            if updated != len(set(tile_ids)):
+                self._send_json({"error": "僅能在審核階段標註此切片，請重新整理"}, status=409)
+                return
+            self._send_json({"ok": True, "updated": updated})
+            return
+
         if not job_id or not tile_ids or decision not in ("accept", "reject"):
             self._send_json({"error": "job_id, tile_ids, decision required"}, status=400)
             return
 
         db = self._capi_server_instance.database
+        job = db.get_training_job(job_id)
+        if job and (job.get("training_params") or {}).get("validation_config"):
+            updated = db.update_validation_review(job_id, tile_ids, decision=decision)
+            if updated != len(set(tile_ids)):
+                self._send_json({"error": "資料已凍結，請重新整理"}, status=409)
+                return
+            self._send_json({"ok": True, "updated": updated})
+            return
         db.update_tile_decisions(job_id, tile_ids, decision)
         self._send_json({"ok": True, "updated": len(tile_ids)})
 
@@ -16744,6 +16856,15 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if job["state"] != "review":
             self._send_json({"error": f"job state must be 'review', currently '{job['state']}'"}, status=409)
             return
+
+        if (job.get("training_params") or {}).get("validation_config"):
+            auto_review = job["training_params"]["validation_config"].get("split_mode") == "auto_batch"
+            pending = [t for t in db.list_tile_pool(job_id)
+                       if (auto_review or t.get("dataset_role") in ("calibration", "acceptance"))
+                       and t.get("decision") == "accept" and t.get("validation_label") not in ("ok", "ng")]
+            if pending:
+                self._send_json({"error": f"還有 {len(pending)} 張切片未確認 OK／NG，請完成標記或排除後再訓練"}, status=400)
+                return
 
         job, migration = self._migrate_legacy_aapi_training_job(
             db,
@@ -17263,16 +17384,46 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
         bundle_path = Path(job["output_bundle"]).resolve()
         asset_root = (bundle_path / "feature_cleaning_reports" / "assets").resolve()
+        validation_root = (bundle_path / "validation_reports").resolve()
         target = (bundle_path / relative_path).resolve()
         try:
             target.relative_to(asset_root)
         except ValueError:
-            self._send_response(403, "")
-            return
+            if not target.is_relative_to(validation_root) or target.suffix.lower() not in (".png", ".json"):
+                self._send_response(403, "")
+                return
         if not target.is_file():
             self._send_response(404, "")
             return
         self._send_binary(str(target))
+
+    def _handle_train_new_apply_validation(self):
+        job_id = self.path.rsplit("/", 1)[-1].split("?", 1)[0]
+        db = self._capi_server_instance.database
+        job = db.get_training_job(job_id)
+        if not job or job.get("state") != "completed" or not job.get("output_bundle"):
+            self._send_json({"error": "找不到已完成的訓練模型"}, status=409)
+            return
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
+            if not isinstance(body, dict):
+                raise ValueError("請提供 JSON object")
+            unit_label = body.get("unit_label", "")
+            root = Path(job["output_bundle"]).resolve()
+            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            if unit_label not in manifest.get("unit_metrics", {}) or not manifest["unit_metrics"][unit_label].get("validation"):
+                raise ValueError("此子模型沒有獨立驗收報告")
+            bundle = next((b for b in db.list_model_bundles(job["machine_id"]) if Path(b["bundle_path"]).resolve() == root), None)
+            if not bundle:
+                raise ValueError("模型尚未登錄")
+            from capi_training_validation import adopt_threshold
+            with CAPIWebHandler._train_slot["lock"]:
+                if CAPIWebHandler._train_slot.get("active_job_id"):
+                    raise ValueError("訓練進行中，請待完成後採用門檻")
+                result = adopt_threshold(db, bundle["id"], unit_label)
+            self._send_json(result)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
 
     def _train_new_thumb_url(self, thumb_path: str) -> str:
         """Convert a stored thumbnail path to the confined thumbnail route."""
@@ -19740,6 +19891,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "scoring bundle not found"}, status=404); return
 
         pool = db.list_tile_pool(tile_pool_job_id, lighting=lighting, zone=zone, source="ok")
+        from capi_training_validation import training_tiles
+        pool = training_tiles(pool)
         if not pool:
             self._send_json({"state": "empty"}); return
         tile_ids = [t["id"] for t in pool]

@@ -568,7 +568,7 @@ def _image_abnormal_screen_name(
     }
     if len(screens) == 1:
         return next(iter(screens))
-    return "UNKNOWN"
+    return "W0F00000"
 
 
 def _image_gray(image: Any) -> np.ndarray:
@@ -910,7 +910,16 @@ def _is_white_frame_ng(result: ImageResult) -> bool:
 
 
 def _has_white_frame_ng(results: List[ImageResult]) -> bool:
-    return any(_is_white_frame_ng(result) for result in (results or []))
+    """Keep frame CV and AAPI white-screen follow-up NG out of OK-i conversion."""
+    return any(
+        _is_white_frame_ng(result) or any(
+            getattr(tile, "aoi_source_prefix", "") == "WHITEFRA"
+            and not getattr(tile, "is_bomb", False)
+            and _is_reportable_tile(tile)
+            for tile, _score, _map in getattr(result, "anomaly_tiles", [])
+        )
+        for result in (results or [])
+    )
 
 
 def _iter_white_frame_gaps(result: ImageResult):
@@ -931,6 +940,10 @@ def _iter_white_frame_gaps(result: ImageResult):
             except (KeyError, TypeError, ValueError):
                 continue
             yield side, gap, image_x, image_y
+    for tile in payload.get("aoi_tiles", []):
+        if tile.get("status") == "NG":
+            for gap in tile.get("gaps", []):
+                yield tile["side"], gap, int(gap["center_x"]), int(gap["center_y"])
 
 
 def _format_qjpg_defect_record(
@@ -1240,7 +1253,7 @@ def aggregate_judgment(results: List[ImageResult]) -> Tuple[str, str]:
                 for side, gap, image_x, image_y in white_gaps:
                     ng_details.append({
                         "image": result.image_path.stem,
-                        "type": "white_frame_gap",
+                        "type": "white_frame_aoi_gap" if gap.get("source") == "aoi_tile" else "white_frame_gap",
                         "side": side,
                         "peak_x": image_x,
                         "peak_y": image_y,
@@ -1532,6 +1545,35 @@ def results_to_db_data(
         db_images.append(img_data)
 
     return db_images
+
+
+def _white_frame_aoi_kwargs(station_adapter, aoi_report, config, model_id):
+    points = (aoi_report or {}).get("WHITEFRA", [])
+    if station_adapter.profile != "aapi" or not points:
+        return {}
+    return {
+        "aoi_points": [
+            {"defect_code": d.defect_code, "product_x": d.product_x, "product_y": d.product_y}
+            for d in points
+        ],
+        "product_resolution": resolve_product_resolution(
+            model_id, getattr(config, "model_resolution_map", None),
+        ),
+        "tile_size": getattr(config, "tile_size", 512),
+    }
+
+
+def _link_white_frame_white_screen(inspection, results, station_adapter):
+    white_screen = next((r for r in results
+        if station_adapter.image_prefix(r.image_path.name) == "W0F00000"), None)
+    tile_ids = [t.tile_id for t, _score, _map in white_screen.anomaly_tiles
+        if t.aoi_source_prefix == "WHITEFRA"] if white_screen else []
+    inspection.payload["white_screen"] = {
+        "image_name": white_screen.image_path.name if white_screen else "",
+        "tile_ids": tile_ids,
+        "status": "INSPECTED" if tile_ids else "UNAVAILABLE",
+        "reason": "" if tile_ids else "未取得 W0F00000 補檢結果，請確認影像及 AOI 推論設定",
+    }
 
 
 def _white_frame_image_result(inspection: WhiteFrameInspection) -> ImageResult:
@@ -3233,6 +3275,9 @@ class CAPIServer:
                 try:
                     white_frame_path = station_adapter.find_white_frame_image(panel_dir)
                     if white_frame_path is not None:
+                        white_frame_kwargs = _white_frame_aoi_kwargs(
+                            station_adapter, aoi_report, inferencer.config, model_id,
+                        )
                         white_frame_inspection = inspect_white_frame_image(
                             white_frame_path,
                             rotate_180=getattr(
@@ -3240,7 +3285,10 @@ class CAPIServer:
                                 "_rotate_detection_images_180",
                                 False,
                             ),
+                            **white_frame_kwargs,
                         )
+                        if white_frame_kwargs:
+                            _link_white_frame_white_screen(white_frame_inspection, results, station_adapter)
                         white_result = _white_frame_image_result(white_frame_inspection)
                         results.append(white_result)
                         payload = white_frame_inspection.payload

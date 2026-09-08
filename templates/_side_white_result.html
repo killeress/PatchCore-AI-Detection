@@ -1,9 +1,9 @@
 {% autoescape true %}
-{% include "_side_white_styles.html" %}
 {% set sw = detail.get('side_white_result') %}
+{% if sw %}
+{% include "_side_white_styles.html" %}
 <section class="sw-card" id="side-white-result">
     <div class="sw-head"><h3>側拍白畫面檢測</h3><span class="sw-badge">觀察模式 · 不影響最終判定</span></div>
-    {% if sw %}
     {% set p = sw.payload %}
     {% set statuses = {'CANDIDATES':'發現候選', 'NO_CANDIDATES':'未發現候選（非 OK 判定）', 'NO_IMAGE':'無側拍白畫面', 'ERROR':'檢測失敗'} %}
     {% set reviews = {'unreviewed':'待 Review', 'confirmed':'確認不良', 'false_positive':'過檢', 'missed':'漏檢', 'uncertain':'待確認'} %}
@@ -34,9 +34,6 @@
     {% for c in p.candidates %}<tr><td>#{{ c.id }}</td><td>{{ kinds.get(c.kind,c.kind) }}</td><td>{{ c.side_raw_xy[0]|round(1) }}, {{ c.side_raw_xy[1]|round(1) }}</td><td>{% if c.front_raw_xy %}{{ c.front_raw_xy[0]|round(1) }}, {{ c.front_raw_xy[1]|round(1) }}{% else %}未映射{% endif %}</td><td>{{ c.area_px }}</td><td>{{ c.contrast_gray }}</td></tr>{% endfor %}
     </tbody></table></div>
     {% endif %}
-    {% else %}
-    <p class="sw-note">此筆尚無側拍檢測資料：可能未啟用、屬於舊紀錄，或背景處理尚未完成。</p>
-    <button type="button" class="sw-btn" onclick="location.reload()">重新整理</button>
-    {% endif %}
 </section>
+{% endif %}
 {% endautoescape %}

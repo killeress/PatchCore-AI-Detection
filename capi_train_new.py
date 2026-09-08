@@ -242,6 +242,7 @@ class TrainingConfig:
     training_units: Optional[List[Tuple[str, str]]] = None
     feature_cleaning_by_zone: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    validation_config: Dict[str, Any] = field(default_factory=dict)
 
 
 # 使用者可從 step1 表單覆寫的 PatchCore 超參數。
@@ -270,6 +271,7 @@ USER_TRAINABLE_PARAM_SPECS: Dict[str, Dict] = {
         "max": FEATURE_CLEANING_CENTER_SIZE_MAX,
     },
     "feature_cleaning_by_zone": {"type": dict},
+    "validation_config": {"type": dict},
 }
 USER_TRAINABLE_PARAM_NAMES: Tuple[str, ...] = tuple(USER_TRAINABLE_PARAM_SPECS.keys())
 
@@ -409,6 +411,9 @@ def apply_user_training_params(
     for key, val in params.items():
         if key == "feature_cleaning_by_zone":
             val = normalize_feature_cleaning_by_zone(val)
+        if key == "validation_config":
+            from capi_training_validation import normalize_validation_config
+            val = normalize_validation_config(val, cfg.panel_paths)
         setattr(cfg, key, val)
     if log_fn is not None:
         log_fn(f"使用者覆寫訓練參數: {params}")
@@ -449,6 +454,8 @@ def preprocess_panels_to_pool(
     None 視同全 full，與舊呼叫者相容。
     """
     panel_modes = normalize_panel_modes(panel_modes, len(cfg.panel_paths))
+    from capi_training_validation import normalize_validation_config, path_key
+    validation = normalize_validation_config(cfg.validation_config, cfg.panel_paths)
     target_lighting_set = set(target_lightings) if target_lightings is not None else None
     target_unit_set = set(target_units) if target_units is not None else None
 
@@ -485,6 +492,7 @@ def preprocess_panels_to_pool(
         )
 
     for idx, (panel_dir, mode) in enumerate(zip(cfg.panel_paths, panel_modes), 1):
+        panel_validation = validation.get("panels", {}).get(path_key(panel_dir), {})
         mode_label = {
             PANEL_MODE_FULL: "INNER + EDGE",
             PANEL_MODE_INNER_ONLY: "僅 INNER",
@@ -539,7 +547,7 @@ def preprocess_panels_to_pool(
                 if mode == PANEL_MODE_CORNERS_ONLY and not tile.is_corner:
                     continue
                 tile_filename = (
-                    f"{job_id}_{panel_dir.name}_{source_lighting}_t{tile.tile_id:04d}.png"
+                    f"{job_id}_{idx}_{panel_dir.name}_{source_lighting}_t{tile.tile_id:04d}.png"
                 )
                 tile_path = thumb_dir / "tiles" / tile_filename
                 cv2.imwrite(str(tile_path), tile.image)
@@ -557,6 +565,8 @@ def preprocess_panels_to_pool(
                     "lighting": lighting,
                     "zone": tile.zone,
                     "source": "ok",
+                    "dataset_role": panel_validation.get("role", "train"),
+                    "validation_group": panel_validation.get("group", ""),
                     "source_path": str(tile_path.resolve()),
                     "thumb_path": str(thumb_path.resolve()),
                     "panel_path": str(panel_dir.resolve()),
@@ -595,6 +605,9 @@ def preprocess_panels_to_pool(
         else:
             panel_fail += 1
             log("  ✗ 無 tile 寫入")
+
+    if validation and panel_fail:
+        raise RuntimeError(f"獨立校正／驗收資料有 {panel_fail} 片前處理失敗，請修正來源後重新建立訓練")
 
     return {
         # panel_success 維持原 key 給舊呼叫者用（= 所有有 tile 寫入的 panel）。
@@ -1295,6 +1308,9 @@ def train_one_patchcore(
         path.is_file() for path in abnormal_dir.iterdir()
     )
     folder_kwargs = {}
+    calibration_normal = staging_dir / "test" / "normal"
+    if calibration_normal.is_dir() and any(calibration_normal.iterdir()):
+        folder_kwargs["normal_test_dir"] = "test/normal"
     if has_abnormal_images:
         folder_kwargs["abnormal_dir"] = "test/anormal"
     else:
@@ -2164,6 +2180,8 @@ def train_single_submodel(
 
     train_tiles = db.list_tile_pool(job_id, lighting=lighting, zone=zone,
                                     source="ok", decision="accept")
+    from capi_training_validation import training_tiles, validation_tiles, evaluate_model, freeze_inputs
+    train_tiles = training_tiles(train_tiles, require_confirmed=cfg.validation_config.get("split_mode") == "auto_batch")
     ng_all = db.list_tile_pool(job_id, lighting=lighting,
                                source="ng", decision="accept")
     ng_for_zone = [t for t in ng_all if t.get("zone") in (zone, None)]
@@ -2180,6 +2198,19 @@ def train_single_submodel(
         ng_tiles = ng_for_zone
         ng_used = "zone"
 
+    held_out = validation_tiles(db, job_id, lighting, zone) if cfg.validation_config else []
+    calibration_ok = []
+    if cfg.validation_config:
+        calibration = [t for t in held_out if t["dataset_role"] == "calibration" and t["decision"] == "accept"]
+        calibration_ok = [t for t in calibration if t.get("validation_label") == "ok"]
+        ng_tiles = [t for t in calibration if t.get("validation_label") == "ng"]
+        # A complete calibration pair supplies anomalib's normalization data.
+        # Missing classes use the existing train-only synthetic fallback;
+        # acceptance images are never supplied to Folder.
+        if not calibration_ok or not ng_tiles:
+            calibration_ok, ng_tiles = [], []
+        ng_used = "independent_calibration" if ng_tiles else "none"
+
     if len(train_tiles) < MIN_TRAIN_TILES:
         raise RuntimeError(
             f"{unit_label}: tile 不足 ({len(train_tiles)} < {MIN_TRAIN_TILES})"
@@ -2192,11 +2223,28 @@ def train_single_submodel(
         staging = Path(".tmp/training_staging") / job_id / unit_label
         run_root = Path(".tmp/training_runs") / job_id / unit_label
         try:
+            frozen_inputs = None
+            if cfg.validation_config:
+                log(f"{unit_label}: 保存獨立校正／驗收資料快照")
+                frozen_inputs = freeze_inputs(held_out, train_tiles, output_pt_path.parent, unit_label)
+                snapshots = {s["tile_id"]: output_pt_path.parent / s["asset_path"] for s in frozen_inputs[0]}
+                calibration_ok = [{**t, "source_path": str(snapshots[t["id"]])} for t in calibration_ok if t["id"] in snapshots]
+                ng_tiles = [{**t, "source_path": str(snapshots[t["id"]])} for t in ng_tiles if t["id"] in snapshots]
+                if not calibration_ok or not ng_tiles:
+                    calibration_ok, ng_tiles, ng_used = [], [], "none"
+                if staging.exists():
+                    staging.resolve().relative_to(Path(".tmp/training_staging").resolve())
+                    shutil.rmtree(staging)
             staged_train_paths = stage_dataset(
                 staging,
                 [Path(t["source_path"]) for t in train_tiles],
                 [Path(t["source_path"]) for t in ng_tiles],
             )
+            if calibration_ok:
+                normal_dir = staging / "test" / "normal"
+                normal_dir.mkdir(parents=True, exist_ok=True)
+                for tile in calibration_ok:
+                    shutil.copy2(tile["source_path"], normal_dir / f"{tile['id']}.png")
             trace_sources: Dict[str, Dict[str, Any]] = {}
             for tile, staged_path in zip(train_tiles, staged_train_paths):
                 trace_sources[str(staged_path)] = {
@@ -2262,6 +2310,15 @@ def train_single_submodel(
             shutil.copy2(model_pt, tmp_path)
             os.replace(tmp_path, output_pt_path)
             size = output_pt_path.stat().st_size
+
+            if cfg.validation_config:
+                log(f"{unit_label}: 開始獨立校正／驗收（逐張推論）")
+                metrics["validation"] = evaluate_model(
+                    output_pt_path, held_out, train_tiles, cfg.validation_config,
+                    output_pt_path.parent, unit_label, log, cancel_event, frozen_inputs,
+                )
+                elapsed = time.monotonic() - unit_start
+                metrics["elapsed_seconds"] = int(elapsed)
 
             if cleaning_patch_trace:
                 try:
@@ -2462,6 +2519,8 @@ def run_training_pipeline(
 
         train_tiles = db.list_tile_pool(job_id, lighting=lighting, zone=zone,
                                         source="ok", decision="accept")
+        from capi_training_validation import training_tiles
+        train_tiles = training_tiles(train_tiles, require_confirmed=cfg.validation_config.get("split_mode") == "auto_batch")
         if len(train_tiles) < MIN_TRAIN_TILES:
             log(
                 f"[{idx}/{unit_total}] {unit_label}: 跳過：tile 不足 "
@@ -2599,4 +2658,7 @@ def run_training_pipeline(
         "overall_auroc_grade": overall_auroc_grade,
         "success_units": success_units,
     })
+    if cfg.validation_config:
+        from capi_training_validation import seal_reports
+        seal_reports(bundle_dir, unit_metrics)
     return bundle_dir

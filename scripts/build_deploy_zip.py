@@ -59,6 +59,7 @@ CODE_FILES = [
     "capi_server.py",
     "capi_station_adapter.py",
     "capi_train_new.py",
+    "capi_training_validation.py",
     "capi_train_runner.py",
     "capi_update_agent.py",
     "capi_web.py",

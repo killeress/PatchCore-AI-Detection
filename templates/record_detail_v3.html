@@ -724,6 +724,8 @@
 
             {% for img in detail.images %}
             {% set wf = img.get("white_frame_result") %}
+            {% set display_tiles = img.tiles | rejectattr("is_white_frame_followup") | list %}
+            {% set aoi_sample_classification_enabled = false %}
             {% set img_status, img_badge = img | img_status_info %}
             <div class="white-panel {% if not wf %}{% if img_status == 'NG' %}panel-status-ng{% elif img_status == 'OK' %}panel-status-ok{% else %}panel-status-err{% endif %}{% endif %}"
                 style="position: relative; overflow: hidden;">
@@ -801,7 +803,7 @@
 
                 {% include "_white_frame_result.html" %}
 
-                {% if img.tiles %}
+                {% if display_tiles %}
                 <div style="overflow-x: auto; border: 1px solid #E2E8F0; border-radius: 8px; margin-bottom: 24px;">
                     <table class="data-table list-table">
                         <thead>
@@ -818,7 +820,7 @@
                             </tr>
                         </thead>
                         <tbody>
-                            {% for t in img.tiles %}
+                            {% for t in display_tiles %}
                             {% set t_badge, t_info = t | tile_info %}
                             {% set is_scratch = t.get("scratch_filtered") %}
                             {% set t_zone = t.get("zone", "") %}
@@ -901,7 +903,7 @@
                     {% endif %}
 
                     {# --- 3. 各 Tile 疊加圖 --- #}
-                    {% for t in img.tiles %}
+                    {% for t in display_tiles %}
                     {% if t.heatmap_path and heatmap_base_dir %}
                     {% set thm_url = hm_relative(t.heatmap_path, heatmap_base_dir) %}
                     {% set is_scratch = t.get("scratch_filtered") %}
