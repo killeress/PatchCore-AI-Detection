@@ -52,7 +52,7 @@ from capi_inference import CAPIInferencer
 from capi_preprocess import (
     BOUNDARY_GRAY_BAND_SHIFT_PARAMS,
     PreprocessConfig,
-    _detect_aapi_large_panel_raw_boundary,
+    _detect_large_panel_raw_boundary,
     detect_panel_boundary,
     detect_panel_polygon,
     _polyfit_polygon,
@@ -432,7 +432,7 @@ def test_detect_panel_boundary_still_rejects_curved_vertical_edge():
     assert polygon is None
 
 
-def test_aapi_large_panel_raw_boundary_requires_large_frame_occupancy(monkeypatch):
+def test_large_panel_raw_boundary_requires_large_frame_occupancy(monkeypatch):
     import capi_preprocess
 
     image = np.zeros((1000, 1000), dtype=np.uint8)
@@ -458,14 +458,14 @@ def test_aapi_large_panel_raw_boundary_requires_large_frame_occupancy(monkeypatc
         fake_detect_panel_boundary,
     )
 
-    _bbox, _polygon, large_occupancy = _detect_aapi_large_panel_raw_boundary(
+    _bbox, _polygon, large_occupancy = _detect_large_panel_raw_boundary(
         image,
         PreprocessConfig(),
     )
     assert large_occupancy is False
 
     detected["bbox"] = (50, 100, 950, 900)
-    bbox, returned_polygon, large_occupancy = _detect_aapi_large_panel_raw_boundary(
+    bbox, returned_polygon, large_occupancy = _detect_large_panel_raw_boundary(
         image,
         PreprocessConfig(),
     )

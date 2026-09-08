@@ -151,7 +151,7 @@ class PreprocessConfig:
     grid_canonicalization_enabled: bool = False
     grid_samples_per_cell: int = 3
     rotate_180: bool = False
-    aapi_large_panel_raw_boundary_enabled: bool = False
+    large_panel_raw_boundary_enabled: bool = False
     image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -214,10 +214,10 @@ BOUNDARY_DETECTION_SCALE = 0.5
 BOUNDARY_DOWNSCALE_MIN_SPAN_TILES = 4
 BOUNDARY_GAUSSIAN_KERNEL = (5, 5)
 BOUNDARY_GAUSSIAN_SIGMA = 1.0
-# YQ60 sample is 94.5% x 89.0%; smaller legacy panels stay below this gate.
-AAPI_LARGE_PANEL_MIN_WIDTH_RATIO = 0.85
-AAPI_LARGE_PANEL_MIN_HEIGHT_RATIO = 0.80
-AAPI_LARGE_PANEL_SIDE_ENDPOINT_TRIM_RATIO = 0.15
+# Large panels must nearly fill the frame; smaller legacy panels stay below this gate.
+LARGE_PANEL_MIN_WIDTH_RATIO = 0.85
+LARGE_PANEL_MIN_HEIGHT_RATIO = 0.80
+LARGE_PANEL_SIDE_ENDPOINT_TRIM_RATIO = 0.15
 SKIP_EXACT = ("Optics.log",)
 
 EDGE_MARGIN = 20
@@ -610,7 +610,7 @@ def detect_panel_boundary(
     bbox, polygon = detect_panel_polygon(
         boundary_image,
         scaled_cfg,
-        side_endpoint_trim_ratio=AAPI_LARGE_PANEL_SIDE_ENDPOINT_TRIM_RATIO,
+        side_endpoint_trim_ratio=LARGE_PANEL_SIDE_ENDPOINT_TRIM_RATIO,
         isolate_largest_contour=isolate_largest_contour,
     )
     detect_ms = (time.perf_counter() - detect_started) * 1000.0
@@ -647,7 +647,7 @@ def detect_panel_boundary(
     return bbox, polygon
 
 
-def _detect_aapi_large_panel_boundary_file(
+def _detect_large_panel_boundary_file(
     image_path: Path,
     config: PreprocessConfig,
 ) -> Tuple[
@@ -658,14 +658,14 @@ def _detect_aapi_large_panel_boundary_file(
     image = read_detection_image(image_path, cv2.IMREAD_GRAYSCALE, config.rotate_180)
     if image is None:
         raise FileNotFoundError(f"無法載入圖片: {image_path}")
-    return _detect_aapi_large_panel_raw_boundary(
+    return _detect_large_panel_raw_boundary(
         image,
         config,
         source_name=image_path.name,
     )
 
 
-def _detect_aapi_large_panel_raw_boundary(
+def _detect_large_panel_raw_boundary(
     image: np.ndarray,
     config: PreprocessConfig,
     *,
@@ -690,11 +690,11 @@ def _detect_aapi_large_panel_raw_boundary(
     width_ratio = max(0, x2 - x1) / float(max(1, img_w))
     height_ratio = max(0, y2 - y1) / float(max(1, img_h))
     if (
-        width_ratio < AAPI_LARGE_PANEL_MIN_WIDTH_RATIO
-        or height_ratio < AAPI_LARGE_PANEL_MIN_HEIGHT_RATIO
+        width_ratio < LARGE_PANEL_MIN_WIDTH_RATIO
+        or height_ratio < LARGE_PANEL_MIN_HEIGHT_RATIO
     ):
         logger.info(
-            "[boundary] source=%s aapi_large_panel_raw_boundary=no "
+            "[boundary] source=%s large_panel_raw_boundary=no "
             "reason=small_occupancy "
             "width_ratio=%.3f height_ratio=%.3f",
             source_name or "-",
@@ -704,7 +704,7 @@ def _detect_aapi_large_panel_raw_boundary(
         return bbox, polygon, False
 
     logger.info(
-        "[boundary] source=%s aapi_large_panel_raw_boundary=yes "
+        "[boundary] source=%s large_panel_raw_boundary=yes "
         "width_ratio=%.3f height_ratio=%.3f",
         source_name or "-",
         width_ratio,
@@ -1119,7 +1119,7 @@ def preprocess_panel_image(
     """單張 lighting 圖完整前處理。
 
     預設維持既有流程：模型影像前處理後才偵測 boundary。
-    aapi_large_panel_raw_boundary_enabled 僅供符合占比門檻的 AAPI 大面板
+    large_panel_raw_boundary_enabled 讓符合占比門檻的 CAPI/AAPI 大面板
     先從 raw image 抓邊。
     """
     img = read_detection_image(image_path, cv2.IMREAD_GRAYSCALE, config.rotate_180)
@@ -1129,7 +1129,7 @@ def preprocess_panel_image(
 
     bbox = None
     detected_polygon = None
-    if getattr(config, "aapi_large_panel_raw_boundary_enabled", False):
+    if getattr(config, "large_panel_raw_boundary_enabled", False):
         if reference_bbox is not None:
             bbox = reference_bbox
         else:
@@ -1142,19 +1142,19 @@ def preprocess_panel_image(
                 candidate_bbox,
                 candidate_polygon,
                 large_occupancy,
-            ) = _detect_aapi_large_panel_raw_boundary(
+            ) = _detect_large_panel_raw_boundary(
                 original_img, boundary_cfg, source_name=image_path.name
             )
             if large_occupancy:
                 bbox = candidate_bbox
                 detected_polygon = candidate_polygon
 
-        aapi_large_panel_raw_boundary_usable = bbox is not None and (
+        large_panel_raw_boundary_usable = bbox is not None and (
             reference_polygon is not None
             or not config.enable_panel_polygon
             or detected_polygon is not None
         )
-        if not aapi_large_panel_raw_boundary_usable:
+        if not large_panel_raw_boundary_usable:
             bbox = None
             detected_polygon = None
 
@@ -1391,7 +1391,7 @@ def preprocess_panel_folder(
     reference_priority = tuple(
         boundary_reference_priority or BOUNDARY_REFERENCE_PRIORITY
     )
-    if not getattr(config, "aapi_large_panel_raw_boundary_enabled", False):
+    if not getattr(config, "large_panel_raw_boundary_enabled", False):
         return _preprocess_panel_folder_legacy(
             files,
             reference_files,
@@ -1410,17 +1410,17 @@ def preprocess_panel_folder(
         if cand not in reference_files:
             continue
         candidate_bbox, candidate_polygon, large_occupancy = (
-            _detect_aapi_large_panel_boundary_file(reference_files[cand], config)
+            _detect_large_panel_boundary_file(reference_files[cand], config)
         )
         if large_occupancy is False:
             logger.info(
-                "[boundary] AAPI large-panel raw boundary skipped; "
+                "[boundary] large-panel raw boundary skipped; "
                 "using legacy flow for this panel"
             )
             return _preprocess_panel_folder_legacy(
                 files,
                 reference_files,
-                replace(config, aapi_large_panel_raw_boundary_enabled=False),
+                replace(config, large_panel_raw_boundary_enabled=False),
                 reference_priority,
             )
         if (
@@ -1443,7 +1443,7 @@ def preprocess_panel_folder(
             ref_lighting = bbox_only_ref_lighting
             ref_bbox = bbox_only_ref_bbox
             logger.info(
-                "[boundary] AAPI large-panel raw polygons unavailable; "
+                "[boundary] large-panel raw polygons unavailable; "
                 "using bbox-only reference=%s file=%s bbox=%s",
                 ref_lighting,
                 reference_files[ref_lighting].name,
@@ -1451,13 +1451,13 @@ def preprocess_panel_folder(
             )
         else:
             logger.info(
-                "[boundary] AAPI large-panel raw boundary unavailable; "
+                "[boundary] large-panel raw boundary unavailable; "
                 "using legacy flow"
             )
             return _preprocess_panel_folder_legacy(
                 files,
                 reference_files,
-                replace(config, aapi_large_panel_raw_boundary_enabled=False),
+                replace(config, large_panel_raw_boundary_enabled=False),
                 reference_priority,
             )
 

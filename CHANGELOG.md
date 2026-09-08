@@ -1,5 +1,12 @@
 # 更新紀錄
 
+## 2026-09-08 v5
+
+### [CAPI 前處理]大型面板改由原圖偵測邊界
+
+- CAPI 與 AAPI 的大型面板統一先從 raw image 偵測邊界，避免模型前處理使邊緣殘差過大而得到 `polygon=None`。
+- 保留面板占比門檻、小面板 legacy fallback 與 raw bbox fallback，避免改變既有小面板流程。
+
 ## 2026-09-08 v4
 
 ### [新機種 PatchCore 訓練]依 PANEL ID 與區域自動分組

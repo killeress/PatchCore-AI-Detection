@@ -159,8 +159,8 @@ def test_process_panel_v2_ignores_client_product_resolution(tmp_path, monkeypatc
         boundary_reference_files=None,
     ):
         captured["product_resolution"] = pre_cfg.product_resolution
-        captured["aapi_large_panel_raw_boundary_enabled"] = (
-            pre_cfg.aapi_large_panel_raw_boundary_enabled
+        captured["large_panel_raw_boundary_enabled"] = (
+            pre_cfg.large_panel_raw_boundary_enabled
         )
         return {}
 
@@ -172,10 +172,10 @@ def test_process_panel_v2_ignores_client_product_resolution(tmp_path, monkeypatc
     inferencer.process_panel(tmp_path, product_resolution=(1366, 768))
 
     assert captured["product_resolution"] == (1920, 1200)
-    assert captured["aapi_large_panel_raw_boundary_enabled"] is False
+    assert captured["large_panel_raw_boundary_enabled"] is True
 
 
-def test_process_panel_v2_enables_large_panel_raw_boundary_for_aapi_only(
+def test_process_panel_v2_enables_large_panel_raw_boundary_for_aapi(
     tmp_path,
     monkeypatch,
 ):
@@ -186,8 +186,8 @@ def test_process_panel_v2_enables_large_panel_raw_boundary_for_aapi_only(
     captured = {}
 
     def fake_preprocess_panel_folder(_panel_path, pre_cfg, **kwargs):
-        captured["aapi_large_panel_raw_boundary_enabled"] = (
-            pre_cfg.aapi_large_panel_raw_boundary_enabled
+        captured["large_panel_raw_boundary_enabled"] = (
+            pre_cfg.large_panel_raw_boundary_enabled
         )
         return {}
 
@@ -200,7 +200,7 @@ def test_process_panel_v2_enables_large_panel_raw_boundary_for_aapi_only(
     inferencer.station_adapter = AAPIStationAdapter()
     inferencer.process_panel(tmp_path)
 
-    assert captured["aapi_large_panel_raw_boundary_enabled"] is True
+    assert captured["large_panel_raw_boundary_enabled"] is True
 
 
 def test_grid_model_requires_matching_model_name_resolution(tmp_path, monkeypatch):
