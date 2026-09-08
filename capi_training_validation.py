@@ -4,8 +4,10 @@ All scores are exported-model tile scores, before production post-filters.
 Acceptance samples never participate in threshold selection or model fitting.
 """
 from bisect import bisect_left
+from collections import Counter, deque
 from datetime import datetime, timezone
 import hashlib
+from itertools import product
 import json
 import math
 from pathlib import Path
@@ -19,7 +21,7 @@ def path_key(value):
     return str(Path(value).resolve()).casefold()
 
 
-def assign_batch_roles(panels):
+def assign_batch_roles(panels, merge_physical=True):
     """Stable batch split; keep repeated physical panels in one component."""
     parents = {item["group"].casefold(): item["group"].casefold() for item in panels.values()}
     def root(group):
@@ -30,7 +32,7 @@ def assign_batch_roles(panels):
     for path, item in panels.items():
         group = item["group"].casefold()
         name = Path(path).name.casefold()
-        if name in physical:
+        if merge_physical and name in physical:
             a, b = root(group), root(physical[name])
             parents[max(a, b)] = min(a, b)
         physical[name] = group
@@ -45,23 +47,84 @@ def assign_batch_roles(panels):
     return len(groups)
 
 
-def normalize_validation_config(raw, panel_paths=None):
+def assign_panel_roles(panels):
+    """Cover each selected zone while keeping every PANEL ID in one role."""
+    masks = {}
+    for panel in panels.values():
+        group = panel["group"].casefold()
+        masks[group] = masks.get(group, 0) | sum(1 if z == "inner" else 2 for z in panel["zones"])
+    members = {mask: deque() for mask in (1, 2, 3)}  # INNER, EDGE, both
+    for group in sorted(masks, key=lambda g: hashlib.sha256(("validation-v1:" + g).encode()).hexdigest()):
+        members[masks[group]].append(group)
+    totals = {bit: sum(bool(mask & bit) for mask in masks.values()) for bit in (1, 2)}
+    targets = {bit: max(1, count // 5) if count >= 3 else 0 for bit, count in totals.items()}
+    required = sum(bit for bit in totals if targets[bit])
+    options = {0: [()], 1: [(1,), (3,)], 2: [(2,), (3,)], 3: [(3,), (1, 2)]}[required]
+    plans = []
+    for calibration, acceptance in product(options, repeat=2):
+        used = Counter(calibration + acceptance)
+        if any(count > len(members[mask]) for mask, count in used.items()):
+            continue
+        if any(count and count <= sum(n for mask, n in used.items() if mask & bit)
+               for bit, count in totals.items()):
+            continue  # Always leave training panels for every selected zone.
+        scarce = sum(n for mask, n in used.items() for bit in totals if mask & bit and not targets[bit])
+        plans.append(((sum(used.values()), scarce), calibration, acceptance))
+    # With two zones a covering plan exists whenever each requested zone has 3 IDs.
+    _, calibration, acceptance = min(plans, key=lambda p: p[0])
+    roles = {group: "train" for group in masks}
+    counts = {"train": totals.copy(), "calibration": {1: 0, 2: 0}, "acceptance": {1: 0, 2: 0}}
+
+    def take(mask, role):
+        roles[members[mask].popleft()] = role
+        for bit in totals:
+            if mask & bit:
+                counts["train"][bit] -= 1
+                counts[role][bit] += 1
+
+    for role, selected in (("calibration", calibration), ("acceptance", acceptance)):
+        for mask in selected:
+            take(mask, role)
+    for role in ("calibration", "acceptance"):
+        while True:
+            choices = []
+            for mask, remaining in members.items():
+                gain = sum(1 if counts[role][bit] < targets[bit] else -1 for bit in totals if mask & bit)
+                if remaining and gain > 0 and all(counts["train"][bit] > 1 for bit in totals if mask & bit):
+                    choices.append((-gain, mask))
+            if not choices:
+                break
+            take(min(choices)[1], role)
+    for panel in panels.values():
+        panel["role"] = roles[panel["group"].casefold()]
+
+
+def normalize_validation_config(raw, panel_paths=None, panel_modes=None):
     if raw is None or raw == {}:
         return {}
     if not isinstance(raw, dict) or set(raw) - {"panels", "max_false_positive_rate", "max_miss_rate", "split_mode"}:
         raise ValueError("validation_config 格式錯誤")
-    auto = raw.get("split_mode") == "auto_batch"
+    auto = raw.get("split_mode") in ("auto_batch", "auto_panel")
     if "split_mode" in raw and not auto:
         raise ValueError("不支援的資料分組方式")
     panels = raw.get("panels")
     if not isinstance(panels, dict) or not panels:
         raise ValueError("請指定訓練、校正、驗收 panel 與批次")
+    zone_selection = {}
+    if panel_modes is not None:
+        from capi_train_new import normalize_panel_modes, panel_mode_zones
+        modes = normalize_panel_modes(panel_modes, len(panel_paths))
+        zone_selection = {path_key(path): sorted(panel_mode_zones(mode)) for path, mode in zip(panel_paths, modes)}
+    # Old running jobs without zone metadata keep their original assignment.
+    zone_aware = raw.get("split_mode") == "auto_panel" and (panel_modes is not None or any("zones" in p for p in panels.values() if isinstance(p, dict)))
     clean, groups, physical_panels = {}, {}, {}
     for path, item in panels.items():
         if not isinstance(path, str) or not path.strip() or not isinstance(item, dict):
             raise ValueError("validation_config.panels 格式錯誤")
         role = "train" if auto else item.get("role")
         group = item.get("group")
+        if raw.get("split_mode") == "auto_panel":
+            group = group or Path(path).name
         if role not in ROLES or not isinstance(group, str) or not group.strip():
             raise ValueError("請確認每片圖片的批次名稱" if auto else "每片 panel 必須指定用途與批次 ID")
         group = group.strip()
@@ -74,15 +137,22 @@ def normalize_validation_config(raw, panel_paths=None):
                 raise ValueError("同一批次或同一 panel 不可跨訓練／校正／驗收用途")
             mapping[identity] = role
         clean[key] = {"role": role, "group": group}
-    if auto:
-        assign_batch_roles(clean)
+        if zone_aware:
+            zones = zone_selection.get(key, item.get("zones", ["inner", "edge"]))
+            if not isinstance(zones, list) or not zones or any(z not in ("inner", "edge") for z in zones):
+                raise ValueError("PANEL 訓練區域必須為 INNER／EDGE")
+            clean[key]["zones"] = sorted(set(zones))
+    if zone_aware:
+        assign_panel_roles(clean)
+    elif auto:
+        assign_batch_roles(clean, merge_physical=raw.get("split_mode") != "auto_panel")
     if not auto and {p["role"] for p in clean.values()} != set(ROLES):
         raise ValueError("獨立驗收需要三組不同批次：訓練、校正、驗收")
     if panel_paths is not None and set(clean) != {path_key(p) for p in panel_paths}:
         raise ValueError("驗收用途設定必須與選取的 panel 完全一致")
     result = {"panels": clean}
     if auto:
-        result["split_mode"] = "auto_batch"
+        result["split_mode"] = raw["split_mode"]
     for key in ("max_false_positive_rate", "max_miss_rate"):
         value = raw.get(key)
         if value is not None:
@@ -95,6 +165,14 @@ def normalize_validation_config(raw, panel_paths=None):
 def training_tiles(tiles, require_confirmed=False):
     return [t for t in tiles if t.get("dataset_role", "train") == "train"
             and (t.get("validation_label") == "ok" if require_confirmed else t.get("validation_label") != "ng")]
+
+
+def review_decision_labels(tiles, config):
+    """In the simplified wizard, the final include/exclude decision is the label."""
+    if config.get("split_mode") != "auto_panel":
+        return tiles
+    return [{**t, "validation_label": "ok" if t["decision"] == "accept" else "ng",
+             "label_source": "review_decision"} for t in tiles]
 
 
 def sha256_file(path):
@@ -226,11 +304,13 @@ def build_report(samples, config, *, complete=True, issues=None):
     proposed = rates(acceptance, suggested) if suggested is not None else None
     calibrated = rates(calibration, suggested) if suggested is not None else None
     reasons = list(issues or [])
-    if config.get("split_mode") == "auto_batch" and not any(p["role"] == "acceptance" for p in config["panels"].values()):
-        reasons.append("不足三組互不重疊的批次，本次全部用於正常樣本訓練，尚無獨立校正／驗收。")
+    if config.get("split_mode") in ("auto_batch", "auto_panel") and not any(p["role"] == "acceptance" for p in config["panels"].values()):
+        group_name = "PANEL ID" if config["split_mode"] == "auto_panel" else "批次"
+        reasons.append(f"不足三組互不重疊的 {group_name}，本次全部用於正常樣本訓練，尚無獨立校正／驗收。")
     if suggested is None or not baseline["ok_count"] or not baseline["ng_count"] or not complete:
         status = "insufficient"
-        reasons.append("校正與驗收各需人工確認的 OK、NG；資料缺漏時不判定合格。")
+        reasons.append("校正與驗收各需保留（OK）及排除（NG）切片；資料不足時不判定合格。" if config.get("split_mode") == "auto_panel"
+                       else "校正與驗收各需人工確認的 OK、NG；資料缺漏時不判定合格。")
     elif any(config.get(key) is None for key in ("max_false_positive_rate", "max_miss_rate")):
         status = "unassessed"
         reasons.append("尚未同時設定可接受誤判率與漏檢率，僅提供建議與實測值。")
@@ -243,6 +323,8 @@ def build_report(samples, config, *, complete=True, issues=None):
         items = [s for s in acceptance if s["group"] == group]
         grouped[group] = {"baseline": rates(items, 0.35), "suggested": rates(items, suggested) if suggested is not None else None}
     return {"schema_version": 1, "scope": "exported_model_tile_score_before_production_filters",
+            "label_source": "review_decision" if config.get("split_mode") == "auto_panel" else "manual_label",
+            "grouping": "panel_id" if config.get("split_mode") == "auto_panel" else "batch",
             "created_at": datetime.now(timezone.utc).isoformat(), "status": status, "reasons": reasons,
             "baseline_threshold": 0.35, "suggested_threshold": suggested,
             "selection_rule": "calibration_only: satisfy configured limits, then minimize FPR + miss rate",
@@ -251,9 +333,9 @@ def build_report(samples, config, *, complete=True, issues=None):
             "acceptance_by_batch": grouped, "samples": samples}
 
 
-def validation_tiles(db, job_id, lighting, zone):
-    return [t for t in db.list_tile_pool(job_id, lighting=lighting, zone=zone)
-            if t.get("dataset_role") in ("calibration", "acceptance")]
+def validation_tiles(db, job_id, lighting, zone, config=None):
+    return review_decision_labels([t for t in db.list_tile_pool(job_id, lighting=lighting, zone=zone)
+            if t.get("dataset_role") in ("calibration", "acceptance")], config or {})
 
 
 def freeze_inputs(tiles, train_tiles, bundle_dir, unit_label):
@@ -267,7 +349,7 @@ def freeze_inputs(tiles, train_tiles, bundle_dir, unit_label):
     train_hashes = {t["sha256"] for t in train_inputs}
     seen = {h: "train" for h in train_hashes}
     for tile in tiles:
-        if tile.get("decision") != "accept":
+        if tile.get("decision") != "accept" and tile.get("label_source") != "review_decision":
             continue
         if tile.get("validation_label") not in ("ok", "ng"):
             issues.append(f"tile #{tile['id']} 尚未確認 OK／NG")
@@ -286,6 +368,7 @@ def freeze_inputs(tiles, train_tiles, bundle_dir, unit_label):
             issues.append(f"tile #{tile['id']} 無法保存：{exc}")
             continue
         frozen.append({"tile_id": tile["id"], "role": role, "label": tile["validation_label"],
+                       "label_source": tile.get("label_source", "manual_label"), "decision": tile.get("decision"),
                        "group": tile["validation_group"], "panel_path": tile.get("panel_path"),
                        "source_path": str(source), "sha256": digest,
                        "asset_path": asset.relative_to(bundle_dir).as_posix()})

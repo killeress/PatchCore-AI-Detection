@@ -2736,7 +2736,8 @@ def test_handle_train_new_start_accepts_variable_panel_count_as_full():
     MockThread.return_value.start.assert_called_once()
 
 
-def test_handle_train_new_start_persists_per_panel_zone_modes():
+@pytest.mark.parametrize("auto_validation", [False, True])
+def test_handle_train_new_start_persists_per_panel_zone_modes(auto_validation):
     from capi_web import CAPIWebHandler
 
     server = MagicMock()
@@ -2750,6 +2751,11 @@ def test_handle_train_new_start_persists_per_panel_zone_modes():
         "panel_paths": ["/p0", "/p1"],
         "panel_modes": ["inner_only", "edge_only"],
     }
+    if auto_validation:
+        payload["panel_paths"] = [f"/p{i}" for i in range(6)]
+        payload["panel_modes"] = ["inner_only"] * 3 + ["edge_only"] * 3
+        payload["training_params"] = {"validation_config": {"split_mode": "auto_panel", "panels": {
+            path: {} for path in payload["panel_paths"]}}}
     body = json.dumps(payload).encode()
     h.headers.get = MagicMock(return_value=str(len(body)))
     h.rfile = io.BytesIO(body)
@@ -2761,8 +2767,16 @@ def test_handle_train_new_start_persists_per_panel_zone_modes():
 
     assert h._sent_response[0]["status"] == 200
     kwargs = server.database.create_training_job.call_args.kwargs
-    assert kwargs["panel_paths"] == ["/p0", "/p1"]
-    assert kwargs["panel_modes"] == ["inner_only", "edge_only"]
+    assert kwargs["panel_paths"] == payload["panel_paths"]
+    assert kwargs["panel_modes"] == payload["panel_modes"]
+    if auto_validation:
+        from capi_train_new import TrainingConfig, apply_user_training_params
+        panels = kwargs["training_params"]["validation_config"]["panels"].values()
+        for zone in ("inner", "edge"):
+            assert sorted(p["role"] for p in panels if zone in p["zones"]) == ["acceptance", "calibration", "train"]
+        cfg = TrainingConfig(machine_id="M", panel_paths=[Path(p) for p in payload["panel_paths"]], over_review_root=Path("unused"))
+        apply_user_training_params(cfg, kwargs["training_params"])
+        assert cfg.validation_config == kwargs["training_params"]["validation_config"]
 
 
 @pytest.mark.parametrize(

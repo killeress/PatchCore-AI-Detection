@@ -11,7 +11,7 @@ import yaml
 from capi_training_validation import (
     adopt_threshold, build_report, evaluate_model, load_report,
     normalize_validation_config, rates, seal_reports, sha256_file,
-    suggest_threshold, training_tiles, write_json,
+    suggest_threshold, training_tiles, write_json, review_decision_labels, validation_tiles,
 )
 
 
@@ -228,7 +228,7 @@ def test_validation_report_template_exposes_no_pass_without_targets(tmp_path):
 
 
 @pytest.mark.parametrize("complete_calibration", [True, False])
-@pytest.mark.parametrize("auto_review", [True, False])
+@pytest.mark.parametrize("auto_review", ["auto_batch", "auto_panel", None])
 def test_training_stages_only_training_and_calibration_never_acceptance(tmp_path, monkeypatch, complete_calibration, auto_review):
     import capi_train_new as training
     import capi_training_validation as validation
@@ -237,12 +237,17 @@ def test_training_stages_only_training_and_calibration_never_acceptance(tmp_path
         rows[0]["validation_label"] = "ok"
     if not complete_calibration:
         rows[2]["validation_label"] = "ok"
+    if auto_review == "auto_panel":
+        for row in rows:
+            row["decision"] = "reject" if row["validation_label"] == "ng" else "accept"
+        rows[0]["validation_label"] = "ng"  # Old labels cannot override the include decision.
     rows += [{**rows[0], "id": index} for index in range(6, 35)]
     rows.append({**rows[2], "id": 100, "source": "ng", "dataset_role": "train"})
     rows.append({**rows[3], "id": 101, "zone": "edge"})
     if auto_review:
-        rows.extend([{**rows[0], "id": 102, "validation_label": "ng"},
-                     {**rows[0], "id": 103, "validation_label": ""}])
+        decision = "reject" if auto_review == "auto_panel" else "accept"
+        rows.extend([{**rows[0], "id": 102, "validation_label": "ng", "decision": decision},
+                     {**rows[0], "id": 103, "validation_label": "", "decision": decision}])
     db = SimpleNamespace(list_tile_pool=lambda job, **filters: [t for t in rows if all(t.get(k) == v for k, v in filters.items())])
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(training, "_setup_offline_env", lambda *a: None)
@@ -275,7 +280,7 @@ def test_training_stages_only_training_and_calibration_never_acceptance(tmp_path
     monkeypatch.setattr(validation, "evaluate_model", evaluate)
     cfg = training.TrainingConfig(machine_id="M", panel_paths=[], over_review_root=tmp_path, validation_config=config(tmp_path))
     if auto_review:
-        cfg.validation_config["split_mode"] = "auto_batch"
+        cfg.validation_config["split_mode"] = auto_review
     result = training.train_single_submodel(db, "j", "W0F00000", "inner", cfg, tmp_path / "bundle" / "W0F00000_inner.pt", log=lambda _: None)
     assert staged and evaluated
     assert result["tile_count"] == 30
@@ -426,20 +431,27 @@ def test_auto_training_uses_only_confirmed_ok():
     assert [t["id"] for t in training_tiles(rows)] == [0, 2]
 
 
-def test_auto_review_api_can_label_training_ng_without_training_it(tmp_path):
+def test_auto_review_api_uses_include_exclude_instead_of_extra_labels(tmp_path):
     from capi_database import CAPIDatabase
     db = CAPIDatabase(tmp_path / "test.db")
-    normalized = normalize_validation_config(auto_config(tmp_path))
-    db.create_training_job("j", "machine", [], training_params={"validation_config": normalized})
+    normalized = normalize_validation_config({**config(tmp_path), "split_mode": "auto_panel"})
+    db.create_training_job("j", "machine", list(normalized["panels"]), training_params={"validation_config": normalized})
     db.update_training_job_state("j", "review")
     ids = db.insert_tile_pool("j", make_tiles(tmp_path))
     h, responses = handler_for(db, "/api/train/new/tiles/decision", {"job_id": "j", "tile_ids": [ids[0]], "validation_label": "ng"})
     h._handle_train_new_tiles_decision()
-    assert responses[0][0] == 200
-    assert db.list_tile_pool("j")[0]["validation_label"] == "ng"
-    assert training_tiles(db.list_tile_pool("j"), require_confirmed=True) == []
+    assert responses[0][0] == 409
+    for decision, label in [("reject", "ng"), ("accept", "ok")]:
+        h, responses = handler_for(db, "/api/train/new/tiles/decision", {"job_id": "j", "tile_ids": [ids[0]], "decision": decision})
+        h._handle_train_new_tiles_decision()
+        assert responses[0][0] == 200
+        h, responses = handler_for(db, "/api/train/new/tiles?job_id=j&lighting=W0F00000", {})
+        h._handle_train_new_tiles()
+        tile = responses[0][1]["tiles"][0]
+        assert tile["validation_label"] == label
+        assert tile["decision_review"] is True
     db.update_training_job_state("j", "train")
-    assert db.update_validation_review("j", [ids[0]], label="ok", allow_training_labels=True) == 0
+    assert db.update_validation_review("j", [ids[0]], decision="reject") == 0
 
 
 def test_auto_config_passes_web_validation_and_runner_without_changing_split(tmp_path):
@@ -451,3 +463,268 @@ def test_auto_config_passes_web_validation_and_runner_without_changing_split(tmp
     cfg = TrainingConfig(machine_id="M", panel_paths=[Path(p) for p in raw["panels"]], over_review_root=tmp_path)
     apply_user_training_params(cfg, params)
     assert cfg.validation_config == params["validation_config"]
+
+
+def test_same_day_six_panel_ids_split_four_one_one_stably(tmp_path):
+    raw = {"split_mode": "auto_panel", "panels": {
+        str(tmp_path / "2026-09-08" / f"panel-{i}"): {} for i in range(6)}}
+    normalized = normalize_validation_config(raw)
+    assert normalize_validation_config(normalized) == normalized
+    assert normalize_validation_config({**raw, "panels": dict(reversed(list(raw["panels"].items())))}) == normalized
+    assert [p["role"] for p in normalized["panels"].values()].count("train") == 4
+    assert [p["role"] for p in normalized["panels"].values()].count("calibration") == 1
+    assert [p["role"] for p in normalized["panels"].values()].count("acceptance") == 1
+
+
+def test_panel_identity_uses_glass_id_even_when_folders_differ(tmp_path):
+    raw = {"split_mode": "auto_panel", "panels": {
+        str(tmp_path / f"capture-{i}"): {"group": f"GLASS-{i // 2}"} for i in range(6)}}
+    normalized = normalize_validation_config(raw)
+    assert {p["role"] for p in normalized["panels"].values()} == {"train", "calibration", "acceptance"}
+    for panel_id in ("GLASS-0", "GLASS-1", "GLASS-2"):
+        assert len({p["role"] for p in normalized["panels"].values() if p["group"] == panel_id}) == 1
+
+
+def test_zone_split_covers_inner_and_edge_for_every_small_selection_mix(tmp_path):
+    from itertools import product
+    for inner, edge, both in product(range(5), repeat=3):
+        if inner + edge + both == 0:
+            continue
+        modes = ["inner_only"] * inner + ["edge_only"] * edge + ["full"] * both
+        raw = {"split_mode": "auto_panel", "panels": {str(tmp_path / f"P{i}"): {} for i in range(len(modes))}}
+        paths = list(raw["panels"])
+        cfg = normalize_validation_config(raw, paths, modes)
+        assert normalize_validation_config(cfg) == cfg
+        assert normalize_validation_config(raw, paths[::-1], modes[::-1]) == cfg
+        for zone, total in (("inner", inner + both), ("edge", edge + both)):
+            roles = {p["role"] for p in cfg["panels"].values() if zone in p["zones"]}
+            if total:
+                assert "train" in roles, (inner, edge, both, zone)
+            if total >= 3:
+                assert roles == {"train", "calibration", "acceptance"}, (inner, edge, both, zone)
+
+
+def test_zone_split_uses_selected_modes_and_does_not_force_global_four_one_one(tmp_path):
+    raw = {"split_mode": "auto_panel", "panels": {
+        str(tmp_path / f"P{i}"): {"zones": ["inner", "edge"]} for i in range(6)}}
+    cfg = normalize_validation_config(raw, list(raw["panels"]), ["inner_only"] * 3 + ["edge_only"] * 3)
+    for zone in ("inner", "edge"):
+        rows = [p for p in cfg["panels"].values() if zone in p["zones"]]
+        assert len(rows) == 3
+        assert sorted(p["role"] for p in rows) == ["acceptance", "calibration", "train"]
+    full = normalize_validation_config(raw, list(raw["panels"]), ["full"] * 6)
+    assert [p["role"] for p in full["panels"].values()].count("train") == 4
+
+
+def test_zone_split_merges_same_panel_id_across_inner_and_edge_captures(tmp_path):
+    raw = {"split_mode": "auto_panel", "panels": {
+        str(tmp_path / f"capture{i}"): {"group": f"P{i // 2}"} for i in range(6)}}
+    cfg = normalize_validation_config(raw, list(raw["panels"]), ["inner_only", "corners_only"] * 3)
+    for group in ("P0", "P1", "P2"):
+        panels = [p for p in cfg["panels"].values() if p["group"] == group]
+        assert len({p["role"] for p in panels}) == 1
+        assert {z for p in panels for z in p["zones"]} == {"inner", "edge"}
+    assert {p["role"] for p in cfg["panels"].values()} == {"train", "calibration", "acceptance"}
+
+
+def test_preprocessing_writes_zone_aware_panel_roles(tmp_path, monkeypatch):
+    import capi_train_new as training
+    from capi_preprocess import PreprocessConfig
+    from capi_training_validation import path_key
+    paths = [tmp_path / f"P{i}" for i in range(6)]
+    modes = ["inner_only"] * 3 + ["edge_only"] * 3
+    raw = {"split_mode": "auto_panel", "panels": {str(p): {} for p in paths}}
+    cfg = training.TrainingConfig(machine_id="M", panel_paths=paths, over_review_root=tmp_path, validation_config=raw)
+    tiles = [SimpleNamespace(tile_id=i, zone=zone, is_corner=False, image=np.full((16, 16), i, np.uint8))
+             for i, zone in enumerate(("inner", "edge"))]
+    monkeypatch.setattr(training, "preprocess_panel_folder", lambda *a: {
+        "W0F00000": SimpleNamespace(polygon_detection_failed=False, tiles=tiles)})
+    written = []
+    db = SimpleNamespace(insert_tile_pool=lambda job_id, rows: written.extend(rows))
+    training.preprocess_panels_to_pool("j", cfg, PreprocessConfig(), db, tmp_path / "thumbs", lambda _: None, panel_modes=modes)
+    expected = normalize_validation_config(raw, paths, modes)
+    assert len(written) == 6
+    for tile in written:
+        panel = expected["panels"][path_key(tile["panel_path"])]
+        assert [tile["zone"]] == panel["zones"]
+        assert tile["dataset_role"] == panel["role"]
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_insufficient_panel_ids_keep_normal_training(count, tmp_path):
+    cfg = normalize_validation_config({"split_mode": "auto_panel", "panels": {
+        str(tmp_path / str(i)): {} for i in range(count)}})
+    assert {p["role"] for p in cfg["panels"].values()} == {"train"}
+    report = build_report([], cfg)
+    assert report["status"] == "insufficient"
+    assert any("PANEL ID" in reason for reason in report["reasons"])
+
+
+@pytest.mark.parametrize("state", ["review", "train", "completed"])
+@pytest.mark.parametrize("split_mode", ["auto_batch", "auto_panel"])
+def test_existing_review_migration_preserves_decisions_and_finished_history(tmp_path, state, split_mode):
+    from capi_database import CAPIDatabase
+    from capi_training_validation import path_key
+    db = CAPIDatabase(tmp_path / "test.db")
+    raw = {"split_mode": split_mode, "panels": {
+        str(tmp_path / f"panel-{i}"): {"group": "same-day" if split_mode == "auto_batch" else f"GLASS-{i}"} for i in range(6)}}
+    cfg = normalize_validation_config(raw)
+    db.create_training_job("j", "M", list(raw["panels"]), panel_modes=["inner_only"] * 3 + ["edge_only"] * 3,
+                           training_params={"validation_config": cfg, "precision": "float32"})
+    db.update_training_job_state("j", state)
+    rows = make_tiles(tmp_path)
+    rows += [{**rows[0], "id": 6}]
+    for i, row in enumerate(rows):
+        row.update(panel_path=list(raw["panels"])[i], dataset_role="train", validation_group="same-day",
+                   decision="reject" if i % 2 else "accept")
+    db.insert_tile_pool("j", rows)
+    before = db.list_tile_pool("j")
+    db.migrate_panel_validation_review("j")
+    db.migrate_panel_validation_review("j")  # Refreshing again is harmless.
+    after = db.list_tile_pool("j")
+    params = db.get_training_job("j")["training_params"]
+    assert params["precision"] == "float32"
+    assert [t["decision"] for t in after] == [t["decision"] for t in before]
+    if state != "review":
+        assert after == before
+        assert params["validation_config"] == cfg
+    else:
+        cfg = params["validation_config"]
+        assert cfg["split_mode"] == "auto_panel"
+        assert {t["dataset_role"] for t in after} == {"train", "calibration", "acceptance"}
+        for zone in ("inner", "edge"):
+            assert {p["role"] for p in cfg["panels"].values() if zone in p["zones"]} == {"train", "calibration", "acceptance"}
+        for tile in after:
+            panel = cfg["panels"][path_key(tile["panel_path"])]
+            assert (tile["dataset_role"], tile["validation_group"]) == (panel["role"], panel["group"])
+        if split_mode == "auto_panel":
+            assert {p["group"] for p in cfg["panels"].values()} == {f"GLASS-{i}" for i in range(6)}
+
+
+def test_excluded_tiles_are_scored_as_ng_and_recorded_with_provenance(tmp_path, monkeypatch):
+    rows = make_tiles(tmp_path)
+    for row in rows:
+        row["decision"] = "reject" if row["validation_label"] == "ng" else "accept"
+        row["validation_label"] = ""  # No second annotation step.
+    cfg = {"split_mode": "auto_panel", "panels": {"p": {"role": "acceptance"}}}
+    db = SimpleNamespace(list_tile_pool=lambda job, **kw: rows)
+    held_out = validation_tiles(db, "j", "W0F00000", "inner", cfg)
+    model = tmp_path / "model.pt"
+    model.write_bytes(b"model")
+    seen = fake_inferencer(monkeypatch)
+    summary = evaluate_model(model, held_out, rows[:1], cfg, tmp_path, "W0F00000-inner", lambda _: None)
+    assert seen == [60, 90, 120, 150]
+    report = json.loads((tmp_path / summary["report_path"]).read_text(encoding="utf-8"))
+    assert report["label_source"] == "review_decision"
+    assert report["grouping"] == "panel_id"
+    assert report["baseline"]["ng_count"] == 1
+    assert report["calibration"]["ng_count"] == 1
+    assert all(s["decision"] == "reject" for s in report["samples"] if s["label"] == "ng")
+    assert [t["id"] for t in training_tiles(review_decision_labels(rows, cfg))] == [1]
+
+
+def test_feature_memory_estimate_tracks_precision_layers_size_and_warning_boundary():
+    from capi_train_new import estimate_patchcore_feature_memory
+    baseline = estimate_patchcore_feature_memory(600)
+    assert baseline["feature_bytes"] / 2**30 == 7.03125
+    assert baseline["stack_bytes"] / 2**30 == 14.0625
+    assert not baseline["warning"]
+    assert estimate_patchcore_feature_memory(601)["warning"]
+    assert estimate_patchcore_feature_memory(600, precision="float32")["feature_bytes"] == 2 * baseline["feature_bytes"]
+    assert estimate_patchcore_feature_memory(600, image_size=(256, 256))["feature_bytes"] == baseline["feature_bytes"] // 4
+    assert estimate_patchcore_feature_memory(600, feature_layers="layer3")["feature_bytes"] / 2**30 == 1.171875
+
+
+def test_simplified_start_allows_unlabeled_tiles_and_freezes_decisions(tmp_path, monkeypatch):
+    import threading
+    from capi_database import CAPIDatabase
+    from capi_web import CAPIWebHandler
+    db = CAPIDatabase(tmp_path / "test.db")
+    cfg = normalize_validation_config({**config(tmp_path), "split_mode": "auto_panel"})
+    db.create_training_job("j", "M", list(cfg["panels"]), training_params={"validation_config": cfg})
+    db.update_training_job_state("j", "review")
+    rows = make_tiles(tmp_path)
+    for row in rows:
+        row["validation_label"] = ""
+    ids = db.insert_tile_pool("j", rows)
+    monkeypatch.setattr(CAPIWebHandler, "_train_slot", {"lock": threading.Lock(), "active_job_id": None})
+    monkeypatch.setattr(CAPIWebHandler, "_train_new_jobs", {})
+    started = []
+    monkeypatch.setattr("capi_web.threading.Thread", lambda **kw: SimpleNamespace(start=lambda: started.append(kw)))
+    h, responses = handler_for(db, "/api/train/new/start_training/j", {})
+    h._mark_train_new_stale_if_needed = lambda database, job: job
+    h._migrate_legacy_aapi_training_job = lambda database, job, server: (job, {})
+    h._handle_train_new_start_training()
+    assert responses[0][0] == 200 and started
+    assert db.get_training_job("j")["state"] == "train"
+    assert db.update_validation_review("j", [ids[0]], decision="reject") == 0
+
+
+def test_review_memory_counts_each_pt_without_held_out_or_rejected_tiles():
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js required for review UI behavior test")
+    template = (Path(__file__).resolve().parents[1] / "templates/train_new/step3_review.html").read_text(encoding="utf-8")
+    functions = "function trainingMemoryRows()" + template.split("function trainingMemoryRows()", 1)[1].split("function visibleTiles(", 1)[0]
+    functions += "function groupTiles(tiles)" + template.split("function groupTiles(tiles)", 1)[1].split("async function labelValidation", 1)[0]
+    functions += "function visibleTiles(list)" + template.split("function visibleTiles(list)", 1)[1].split("// ── 鍵盤導航", 1)[0]
+    functions += "function zoneSplitRows()" + template.split("function zoneSplitRows()", 1)[1].split("function groupTiles(", 1)[0]
+    script = r"""
+const assert = require('node:assert/strict');
+const trainingScope = {selected_units: ['W0F00000-inner', 'W0F00000-edge']};
+const _memoryByLighting = {W0F00000: {bytes_per_tile: 12582912, warning_tiles: 600}};
+const _splitByLighting = {W0F00000: {decision_review: true}};
+const base = {source: 'ok', zone: 'inner', dataset_role: 'train', validation_group: 'P1', decision: 'accept', auto_review: true, decision_review: true, validation_label: 'ng'};
+let _currentLighting = 'W0F00000';
+const _filter = 'all', _focusedTileId = null;
+const elements = {};
+const document = {getElementById: id => elements[id] ||= {innerHTML: '', textContent: ''}};
+function updateBadge() {}
+const _tilesByLighting = {W0F00000: [
+  ...Array.from({length: 601}, () => ({...base})),
+  ...Array.from({length: 20}, () => ({...base, zone: 'edge'})),
+  ...Array.from({length: 200}, () => ({...base, dataset_role: 'calibration'})),
+  ...Array.from({length: 200}, () => ({...base, dataset_role: 'acceptance'})),
+  ...Array.from({length: 200}, () => ({...base, decision: 'reject'})),
+  {...base, source: 'ng'},
+]};
+""" + functions + r"""
+assert.deepEqual(trainingMemoryRows().map(r => r.count), [601, 20]);
+assert.match(oomWarningText(), /W0F00000-inner：601/);
+assert.ok(!oomWarningText().includes('W0F00000-edge'));
+_tilesByLighting.W0F00000[0].decision = 'reject';
+assert.deepEqual(trainingMemoryRows().map(r => r.count), [600, 20]);
+assert.equal(oomWarningText(), '');
+assert.equal(trainingMemoryRows()[0].featureGiB, 7.03125);
+render();
+assert.ok(!elements['content-area'].innerHTML.includes('待標記'));
+assert.ok(!elements['content-area'].innerHTML.includes('labelValidationGroup'));
+assert.ok(elements['content-area'].innerHTML.includes('保留＝OK，排除＝NG'));
+assert.ok(elements['content-area'].innerHTML.includes('>NG</span>'));
+assert.ok(elements['auto-split-summary'].innerHTML.includes('缺驗收 PANEL'));
+trainingScope.selected_units.push('R0F00000-inner', 'R0F00000-edge');
+_splitByLighting.R0F00000 = {decision_review: true};
+_tilesByLighting.R0F00000 = [
+  {...base, validation_group: 'TRAIN'},
+  {...base, validation_group: 'CAL', dataset_role: 'calibration'},
+  {...base, validation_group: 'cal', dataset_role: 'calibration', decision: 'reject'},
+  {...base, validation_group: 'ACCEPT', dataset_role: 'acceptance'},
+  {...base, validation_group: 'ACCEPT', dataset_role: 'acceptance', decision: 'reject'},
+  {...base, validation_group: 'EDGE', zone: 'edge'},
+];
+_currentLighting = 'R0F00000';
+assert.equal(zoneSplitRows()[0].calibration.panels, 1);
+assert.deepEqual(zoneSplitRows()[0].missing, []);
+assert.deepEqual(zoneSplitRows()[1].missing, ['缺校正 PANEL', '缺驗收 PANEL']);
+_tilesByLighting.R0F00000[1].decision = 'reject';
+assert.deepEqual(zoneSplitRows()[0].missing, ['校正缺 OK']);
+showAutoSplit();
+assert.ok(elements['auto-split-summary'].innerHTML.includes('校正缺 OK'));
+assert.ok(elements['auto-split-summary'].innerHTML.includes('OK 0／NG 2'));
+_tilesByLighting.R0F00000[1].decision = 'accept';
+assert.deepEqual(zoneSplitRows()[0].missing, []);
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

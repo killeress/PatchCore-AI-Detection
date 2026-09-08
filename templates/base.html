@@ -462,10 +462,10 @@
                     </svg>
                     Server Log
                 </a> -->
-                <a href="#" onclick="document.getElementById('about-modal').classList.remove('hidden'); return false;"
+                <a href="/help" target="_blank" rel="noopener" {% if request_path=='/help/sop' %}class="active" {% endif %}
                     style="display:inline-flex; align-items:center; gap:6px;">
                     <img src="/imgs/nav_about.png"
-                        style="width: 30px; height: 30px; object-fit: contain; border-radius: 4px;"> 關於檢測邏輯
+                        style="width: 30px; height: 30px; object-fit: contain; border-radius: 4px;"> 幫助 / SOP
                 </a>
             </nav>
         </div>

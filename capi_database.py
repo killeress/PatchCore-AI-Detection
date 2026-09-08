@@ -7133,6 +7133,39 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def migrate_panel_validation_review(self, job_id):
+        """Upgrade unfinished automatic reviews, preserving every include/exclude decision."""
+        from capi_training_validation import normalize_validation_config
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT state, training_params, panel_paths, panel_modes FROM training_jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if not row or row[0] != "review":
+                return
+            params = json.loads(row[1] or "{}")
+            config = params.get("validation_config") or {}
+            if config.get("split_mode") not in ("auto_batch", "auto_panel"):
+                return
+            if config["split_mode"] == "auto_panel" and all("zones" in p for p in config["panels"].values()):
+                return
+            paths = json.loads(row[2])
+            modes = json.loads(row[3]) if row[3] else ["full"] * len(paths)
+            config = normalize_validation_config({**config, "split_mode": "auto_panel", "panels": {
+                path: {"group": Path(path).name} if config["split_mode"] == "auto_batch" else panel
+                for path, panel in config["panels"].items()}}, paths, modes)
+            for path, panel in config["panels"].items():
+                conn.execute(
+                    "UPDATE training_tile_pool SET dataset_role = ?, validation_group = ? "
+                    "WHERE job_id = ? AND panel_path = ? COLLATE NOCASE AND source = 'ok'",
+                    (panel["role"], panel["group"], job_id, path),
+                )
+            params["validation_config"] = config
+            conn.execute("UPDATE training_jobs SET training_params = ? WHERE job_id = ?",
+                         (json.dumps(params, ensure_ascii=False), job_id))
+            conn.commit()
+        finally:
+            conn.close()
+
     def update_validation_review(self, job_id, tile_ids, *, label=None, decision=None, allow_training_labels=False):
         """Freeze labels/decisions once the wizard leaves review (atomic SQL guard)."""
         if not tile_ids:

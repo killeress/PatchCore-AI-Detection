@@ -3605,6 +3605,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_api_logs(query)
             elif path == "/release-notes":
                 self._handle_release_notes_page(path)
+            elif path == "/help":
+                self._handle_help_entry()
+            elif path == "/help/sop":
+                self._handle_sop_page()
+            elif path == "/help/file":
+                self._handle_sop_file(query)
             elif path == "/debug":
                 self._handle_debug_page(path)
             elif path == "/training":
@@ -4384,6 +4390,86 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         close_list()
         return "\n".join(parts)
+
+    def _sop_settings(self):
+        server = self._capi_server_instance
+        config = (getattr(server, "server_config", {}) or {}).get("sop", {}) or {}
+        config_path = Path(getattr(server, "server_config_path", None) or __file__).resolve()
+        root = Path(config.get("published_dir") or "sop_published")
+        if not root.is_absolute():
+            root = config_path.parent / root
+        return config, root.resolve()
+
+    def _handle_help_entry(self):
+        config, _ = self._sop_settings()
+        center = str(config.get("center_url") or "").strip()
+        if not center:
+            center = "http://" + self._load_central_account_location()["ip"]
+        parsed = urllib.parse.urlsplit(center)
+        if (parsed.scheme not in ("http", "https") or not parsed.netloc
+                or parsed.username or parsed.password or parsed.query or parsed.fragment
+                or parsed.path not in ("", "/")
+                or any(char.isspace() for char in center)):
+            self._send_error(503, "SOP 中心網址設定錯誤，請聯絡管理人員。")
+            return
+        self._redirect(center.rstrip("/") + "/help/sop", headers={"Cache-Control": "no-store"})
+
+    def _resolve_sop_file(self, root, name):
+        # Only published PDFs within the configured directory can be served.
+        candidate = (root / name).resolve()
+        if (not candidate.is_relative_to(root) or candidate.suffix.lower() != ".pdf"
+                or not candidate.is_file()):
+            raise FileNotFoundError(name)
+        return candidate
+
+    def _handle_sop_page(self):
+        _, root = self._sop_settings()
+        documents = []
+        unavailable = False
+        try:
+            if not root.is_dir():
+                raise FileNotFoundError(root)
+            for entry in sorted(root.rglob("*")):
+                if entry.suffix.lower() != ".pdf":
+                    continue
+                relative = entry.relative_to(root)
+                try:
+                    source = self._resolve_sop_file(root, relative)
+                    stat = source.stat()
+                except (OSError, ValueError):
+                    continue
+                documents.append({
+                    "title": entry.stem,
+                    "category": str(relative.parent) if relative.parent != Path(".") else "操作 SOP",
+                    "updated": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                    "size": f"{stat.st_size / 1024 / 1024:.2f} MB",
+                    "url": "/help/file?" + urllib.parse.urlencode({"name": relative.as_posix()}),
+                })
+        except OSError:
+            logger.warning("SOP published directory unavailable: %s", root)
+            unavailable = True
+        rendered = self.jinja_env.get_template("help.html").render(
+            request_path="/help/sop", documents=documents, unavailable=unavailable,
+        )
+        self._send_response(503 if unavailable else 200, rendered, headers={"Cache-Control": "no-store"})
+
+    def _handle_sop_file(self, query):
+        _, root = self._sop_settings()
+        try:
+            source = self._resolve_sop_file(root, query.get("name", [""])[0])
+            content = source.read_bytes()
+        except (OSError, ValueError):
+            self._send_404()
+            return
+        disposition = "attachment" if query.get("download", [""])[0] == "1" else "inline"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Content-Disposition", disposition + "; filename*=UTF-8''" + urllib.parse.quote(source.name, safe=""))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(content)
 
     def _handle_release_notes_page(self, path: str):
         template = self.jinja_env.get_template("release_notes.html")
@@ -15696,7 +15782,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             from capi_training_validation import normalize_validation_config
             try:
                 training_params["validation_config"] = normalize_validation_config(
-                    training_params["validation_config"], clean_panel_paths,
+                    training_params["validation_config"], clean_panel_paths, panel_modes,
                 )
                 if (params.get("training_scope") or {}).get("mode") == "partial":
                     raise ValueError("獨立校正／驗收目前適用於完整新模型訓練")
@@ -16170,6 +16256,16 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         }
         self._send_json(resp, headers=no_cache_headers)
 
+    @staticmethod
+    def _prepare_panel_validation_review(db, job):
+        config = ((job.get("training_params") or {}).get("validation_config") or {}) if isinstance(job, dict) else {}
+        if (isinstance(job, dict) and job.get("state") == "review"
+                and (config.get("split_mode") == "auto_batch" or (config.get("split_mode") == "auto_panel"
+                     and any("zones" not in p for p in config["panels"].values())))):
+            db.migrate_panel_validation_review(job["job_id"])
+            return db.get_training_job(job["job_id"])
+        return job
+
     def _handle_train_new_tiles(self):
         """GET /api/train/new/tiles?job_id=X&lighting=Y[&score_from_bundle=N&sort_by=score_desc]"""
         from urllib.parse import parse_qs, urlparse
@@ -16182,19 +16278,28 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "job_id and lighting required"}, status=400)
             return
         db = self._capi_server_instance.database
+        job = self._prepare_panel_validation_review(db, db.get_training_job(job_id))
+        params = (job.get("training_params") or {}) if isinstance(job, dict) else {}
+        config = params.get("validation_config") or {}
         tiles = db.list_tile_pool(job_id, lighting=lighting)
-        job = db.get_training_job(job_id)
-        auto_review = isinstance(job, dict) and ((job.get("training_params") or {}).get("validation_config") or {}).get("split_mode") == "auto_batch"
+        from capi_training_validation import review_decision_labels
+        from capi_train_new import estimate_patchcore_feature_memory, PATCHCORE_FEATURE_LAYERS_DEFAULT
+        tiles = review_decision_labels(tiles, config)
+        auto_review = config.get("split_mode") in ("auto_batch", "auto_panel")
         for tile in tiles:
             tile["auto_review"] = bool(auto_review)
+            tile["decision_review"] = config.get("split_mode") == "auto_panel"
             tile["thumb_url"] = self._train_new_thumb_url(tile.get("thumb_path"))
             tile["image_url"] = self._train_new_thumb_url(tile.get("source_path"))
         if score_from:
             CAPIWebHandler._decorate_tiles_with_scores(tiles, db, score_from, sort_by)
-        payload = {"tiles": tiles}
+        payload = {"tiles": tiles, "training_memory": estimate_patchcore_feature_memory(1,
+            feature_layers=params.get("feature_layers", PATCHCORE_FEATURE_LAYERS_DEFAULT),
+            precision=params.get("precision", "float16"))}
         if auto_review:
-            panels = job["training_params"]["validation_config"]["panels"].values()
-            payload["auto_split"] = {role: sum(p["role"] == role for p in panels) for role in ("train", "calibration", "acceptance")}
+            panels = config["panels"].values()
+            payload["auto_split"] = {role: len({p["group"].casefold() for p in panels if p["role"] == role}) for role in ("train", "calibration", "acceptance")}
+            payload["auto_split"]["decision_review"] = config.get("split_mode") == "auto_panel"
         self._send_json(payload)
 
     def _handle_train_new_preprocess_pipeline_preview(self):
@@ -16685,7 +16790,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "job_id, tile_ids, validation_label required"}, status=400)
                 return
             db = self._capi_server_instance.database
-            job = db.get_training_job(job_id)
+            job = self._prepare_panel_validation_review(db, db.get_training_job(job_id))
+            if isinstance(job, dict) and ((job.get("training_params") or {}).get("validation_config") or {}).get("split_mode") == "auto_panel":
+                self._send_json({"error": "已改為保留＝OK、排除＝NG，請使用加入／排除"}, status=409)
+                return
             auto_review = isinstance(job, dict) and ((job.get("training_params") or {}).get("validation_config") or {}).get("split_mode") == "auto_batch"
             updated = db.update_validation_review(job_id, tile_ids, label=label,
                 **({"allow_training_labels": True} if auto_review else {}))
@@ -16700,7 +16808,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             return
 
         db = self._capi_server_instance.database
-        job = db.get_training_job(job_id)
+        job = self._prepare_panel_validation_review(db, db.get_training_job(job_id))
         if job and (job.get("training_params") or {}).get("validation_config"):
             updated = db.update_validation_review(job_id, tile_ids, decision=decision)
             if updated != len(set(tile_ids)):
@@ -16857,7 +16965,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"job state must be 'review', currently '{job['state']}'"}, status=409)
             return
 
-        if (job.get("training_params") or {}).get("validation_config"):
+        job = self._prepare_panel_validation_review(db, job)
+        if ((job.get("training_params") or {}).get("validation_config")
+                and job["training_params"]["validation_config"].get("split_mode") != "auto_panel"):
             auto_review = job["training_params"]["validation_config"].get("split_mode") == "auto_batch"
             pending = [t for t in db.list_tile_pool(job_id)
                        if (auto_review or t.get("dataset_role") in ("calibration", "acceptance"))

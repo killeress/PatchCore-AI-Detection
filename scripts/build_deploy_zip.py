@@ -73,6 +73,7 @@ CODE_FILES = [
     "start_server.py",
     "templates/base.html",
     "templates/dashboard.html",
+    "templates/dashboard_v3.html",
     "templates/debug_inference.html",
     "templates/_white_frame_result.html",
     "templates/_side_white_result.html",
@@ -85,6 +86,8 @@ CODE_FILES = [
     "templates/ric_report.html",
     "templates/training.html",
     "templates/release_notes.html",
+    "templates/help.html",
+    "docs/sop_center.zh-TW.md",
     "templates/models.html",
     "templates/settings.html",
     "templates/within_spec_detail.html",
@@ -163,6 +166,11 @@ CODEONLY_EXCLUDED_PREFIXES = (
 
 SERVER_CONFIG_PATCH = """# === 新機種 PatchCore 訓練 wizard 需要在 server_config.yaml 加入以下欄位 ===
 # 將此檔的內容合併進 production 既有的 server_config.yaml（不要整個覆蓋）
+
+# SOP 文件中心：留空沿用中央帳號中心 HTTP 80；發布資料夾僅需在中心建立。
+sop:
+  center_url: ""
+  published_dir: "sop_published"
 
 # 推論端 GPU VRAM 上限（讓訓練 subprocess 可同時跑而不互搶）
 # 16GB GPU 實測：5 個 model load 完即 ~4.2GB；推論 working set 再 ~1-2GB

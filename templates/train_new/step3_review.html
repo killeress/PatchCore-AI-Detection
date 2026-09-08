@@ -71,6 +71,12 @@
   </div>
 
   <div id="auto-split-summary" style="margin:12px 0;color:#a6adc8;"></div>
+  <div id="oom-warning" role="status" style="margin:12px 0;color:#f9e2af;white-space:pre-line;"></div>
+  <details style="margin:12px 0;color:#a6adc8;"><summary>各 PT 訓練張數與顯存估算</summary>
+    <div id="training-memory"></div>
+    <p>依實際分配給各 PT 的正常訓練切片計算；校正、驗收及 NG 不計入。超過 600 張是經驗提醒值，600 張以下仍可能 OOM。</p>
+    <p>估算為原始特徵與未清理時的合併大小，非總顯存峰值；尚未包含模型、批次運算、特徵清理與 coreset 暫存。</p>
+  </details>
   <div id="content-area"></div>
 
   <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;padding-top:12px;border-top:1px solid #45475a;">
@@ -196,6 +202,8 @@ const lightingLabels = {{ lighting_labels|tojson }};
 const trainingScope = {{ training_scope|tojson }};
 let _currentLighting = lightings[0] || 'G0F00000';
 let _tilesByLighting = {};  // {lighting: [tile, ...]}
+let _memoryByLighting = {};
+let _splitByLighting = {};
 let _filter = 'all';
 let _lastClickedId = null;
 let _clickTimer = null;
@@ -369,8 +377,10 @@ async function loadLightingWithOptionalScore(lighting, scoreFromBundle) {
     url += `&score_from_bundle=${scoreFromBundle}&sort_by=score_desc`;
   }
   const r = await fetch(url).then(r => r.json());
-  showAutoSplit(r.auto_split);
+  _memoryByLighting[lighting] = r.training_memory;
+  _splitByLighting[lighting] = r.auto_split;
   _tilesByLighting[lighting] = r.tiles || [];
+  if (lighting === _currentLighting) showAutoSplit();
   updateBadge(lighting);
 }
 
@@ -378,10 +388,16 @@ document.addEventListener('DOMContentLoaded', loadEligibleScoringBundles);
 
 function loadLighting(lighting) {
   return fetch(`/api/train/new/tiles?job_id=${encodeURIComponent(jobId)}&lighting=${lighting}`)
-    .then(r => r.json())
+    .then(async r => {
+      const data = await r.json();
+      if (!r.ok || data.error) throw new Error(data.error || `無法讀取 ${lighting} 的訓練張數`);
+      return data;
+    })
     .then(d => {
-      showAutoSplit(d.auto_split);
+      _memoryByLighting[lighting] = d.training_memory;
+      _splitByLighting[lighting] = d.auto_split;
       _tilesByLighting[lighting] = d.tiles || [];
+      if (lighting === _currentLighting) showAutoSplit();
       updateBadge(lighting);
     });
 }
@@ -407,7 +423,41 @@ function setFilter(filter) {
   else focusTile(_focusedTileId, { scroll: false });
 }
 
-function showAutoSplit(split) {
+function zoneSplitRows() {
+  const units = (trainingScope && trainingScope.selected_units) || [];
+  return ['inner', 'edge'].filter(zone => units.includes(`${_currentLighting}-${zone}`)).map(zone => {
+    const tiles = (_tilesByLighting[_currentLighting] || []).filter(t => t.zone === zone && t.source === 'ok');
+    const counts = {};
+    for (const role of ['train', 'calibration', 'acceptance']) {
+      const samples = tiles.filter(t => t.dataset_role === role && (role !== 'train' || t.decision === 'accept'));
+      counts[role] = {panels: new Set(samples.map(t => t.validation_group.toLowerCase())).size,
+        ok: samples.filter(t => t.decision === 'accept').length,
+        ng: samples.filter(t => t.decision === 'reject').length};
+    }
+    const missing = [];
+    if (!counts.train.ok) missing.push('缺訓練 OK');
+    for (const [role, label] of [['calibration', '校正'], ['acceptance', '驗收']]) {
+      if (!counts[role].panels) missing.push(`缺${label} PANEL`);
+      else {
+        if (!counts[role].ok) missing.push(`${label}缺 OK`);
+        if (!counts[role].ng) missing.push(`${label}缺 NG`);
+      }
+    }
+    return {zone, ...counts, missing};
+  });
+}
+
+function showAutoSplit() {
+  const split = _splitByLighting[_currentLighting];
+  if (split && split.decision_review) {
+    document.getElementById('auto-split-summary').innerHTML = '<p>保留＝OK，排除＝NG，不需額外標記。以下依目前光源的實際切片計算 PANEL ID 數；同一 ID 維持同一用途。</p>'
+      + '<table style="width:100%;text-align:left;"><thead><tr><th>區域</th><th>訓練</th><th>校正</th><th>驗收</th><th>資料狀況</th></tr></thead><tbody>'
+      + zoneSplitRows().map(row => `<tr><td>${row.zone.toUpperCase()}</td><td>${row.train.panels} 片／${row.train.ok} 張 OK</td>`
+        + ['calibration', 'acceptance'].map(role => `<td>${row[role].panels} 片（OK ${row[role].ok}／NG ${row[role].ng}）</td>`).join('')
+        + `<td style="color:${row.missing.length ? '#f9e2af' : '#a6adc8'};">${row.missing.join('、') || '已分配三組'}</td></tr>`).join('')
+      + '</tbody></table><p>校正／驗收資料不足時，仍可使用足夠的正常樣本訓練；結果以完成頁報告為準。</p>';
+    return;
+  }
   document.getElementById('auto-split-summary').textContent = !split ? '' : !split.acceptance
     ? '批次不足，本次只訓練正常樣本，尚無獨立校正／驗收。請標記 NG，再確認其餘為 OK。'
     : `系統已分配：訓練 ${split.train} 片、校正 ${split.calibration} 片、驗收 ${split.acceptance} 片。只需確認 OK／NG，不需調整用途。`;
@@ -462,12 +512,41 @@ async function labelValidationGroup(key) {
   }
 }
 
+function trainingMemoryRows() {
+  const units = (trainingScope && trainingScope.selected_units) || [];
+  return units.flatMap(unit => {
+    const zone = unit.split('-').pop();
+    const lighting = unit.slice(0, -(zone.length + 1));
+    const estimate = _memoryByLighting[lighting];
+    if (!estimate) return [];
+    const count = (_tilesByLighting[lighting] || []).filter(t => t.zone === zone && t.source === 'ok'
+      && t.decision === 'accept' && (!t.dataset_role || t.dataset_role === 'train')
+      && (t.decision_review || (t.auto_review ? t.validation_label === 'ok' : t.validation_label !== 'ng'))).length;
+    return [{unit, count, featureGiB: count * estimate.bytes_per_tile / 2**30,
+      stackGiB: count * estimate.bytes_per_tile * 2 / 2**30, warning: count > estimate.warning_tiles}];
+  });
+}
+
+function oomWarningText() {
+  const warnings = trainingMemoryRows().filter(row => row.warning);
+  return warnings.length ? '⚠ 以下 PT 超過 600 張訓練切片，可能發生顯存不足（OOM）：\n'
+    + warnings.map(row => `${row.unit}：${row.count} 張`).join('\n')
+    + '\n可減少選入的 PANEL 或調整訓練設定；此提醒不會阻止訓練。' : '';
+}
+
+function renderTrainingMemory() {
+  document.getElementById('oom-warning').textContent = oomWarningText();
+  document.getElementById('training-memory').innerHTML = '<table style="width:100%;text-align:left;"><thead><tr><th>PT</th><th>訓練張數</th><th>原始特徵</th><th>未清理時合併</th></tr></thead><tbody>'
+    + trainingMemoryRows().map(row => `<tr><td>${row.unit}</td><td>${row.count}${row.warning ? ' ⚠' : ''}</td><td>約 ${row.featureGiB.toFixed(2)} GiB</td><td>約 ${row.stackGiB.toFixed(2)} GiB</td></tr>`).join('') + '</tbody></table>';
+}
+
 function visibleTiles(list) {
   if (_filter === 'all') return list;
   return list.filter(t => t.decision === _filter);
 }
 
 function render() {
+  showAutoSplit();
   const tiles = _tilesByLighting[_currentLighting] || [];
   const groups = groupTiles(tiles);
   let html = '';
@@ -480,8 +559,8 @@ function render() {
                  : (key === 'inner_ng' || key === 'edge_ng' || key === 'shared_ng') ? 'ng'
                  : '';
     const title = {
-      review_inner: 'INNER · 先標記 NG，再確認其餘為 OK（用途由系統分配）',
-      review_edge: 'EDGE · 先標記 NG，再確認其餘為 OK（用途由系統分配）',
+      review_inner: 'INNER · 保留＝OK，排除＝NG',
+      review_edge: 'EDGE · 保留＝OK，排除＝NG',
       calibration_inner: '校正 · INNER（人工標記 OK／NG，用來找門檻）',
       calibration_edge: '校正 · EDGE（人工標記 OK／NG，用來找門檻）',
       acceptance_inner: '獨立驗收 · INNER（不參與訓練與找門檻）',
@@ -496,7 +575,7 @@ function render() {
       <span>${title}</span>
       <span class="grp-actions">
         <span style="color:#a6adc8;font-size:.78rem;">${accept}/${list.length} 加入</span>
-        ${key.startsWith('review_') || key.startsWith('calibration_') || key.startsWith('acceptance_') ? `<span>待標記 ${list.filter(t => t.decision === 'accept' && !t.validation_label).length}</span><button class="grp-btn" onclick="labelValidationGroup('${key}')">確認其餘為 OK</button>` : ''}
+        ${!list.some(t => t.decision_review) && (key.startsWith('review_') || key.startsWith('calibration_') || key.startsWith('acceptance_')) ? `<span>待標記 ${list.filter(t => t.decision === 'accept' && !t.validation_label).length}</span><button class="grp-btn" onclick="labelValidationGroup('${key}')">確認其餘為 OK</button>` : ''}
         <button class="grp-btn" onclick="setGroupDecision('${key}','accept')">全加入</button>
         <button class="grp-btn danger" onclick="setGroupDecision('${key}','reject')">全排除</button>
       </span>
@@ -512,7 +591,7 @@ function render() {
       const zoneLabel = t.source === 'ng' ? `NG${t.zone ? '·' + t.zone : ''}` : (t.zone || '');
       const label = `${_currentLighting} / ${zoneLabel} / #${t.id}`;
       const quartile = t.score_quartile || '';
-      const scoreLabel = t.auto_review || ['calibration', 'acceptance'].includes(t.dataset_role)
+      const scoreLabel = t.decision_review ? `<span class="score-badge">${t.decision === 'accept' ? 'OK' : 'NG'}</span>` : t.auto_review || ['calibration', 'acceptance'].includes(t.dataset_role)
         ? `<span class="score-badge">${t.validation_label ? t.validation_label.toUpperCase() : '待標記'}</span>`
         : (t.score != null) ? `<span class="score-badge">${t.score.toFixed(2)}</span>` : '';
       html += `<div class="tile ${tileCls}${focusCls}" data-id="${t.id}" data-score-quartile="${quartile}" title="單擊放大，雙擊加入/排除" style="background-image:url('${thumb}');" onclick="handleTileClick(this,event)" ondblclick="handleTileDoubleClick(this,event)" aria-label="${label}">${scoreLabel}</div>`;
@@ -521,6 +600,7 @@ function render() {
   }
   document.getElementById('content-area').innerHTML = html;
   updateBadge(_currentLighting);
+  renderTrainingMemory();
 }
 
 // ── 鍵盤導航 ─────────────────────────────────────────
@@ -605,7 +685,10 @@ function updateDecision(tileIds, decision, opts) {
   }).then(r => r.json()).then(d => {
     if (d.error) { capAlert(d.error, {type: 'error', title: '更新 tile 決策失敗'}); return; }
     for (const tile of _tilesByLighting[_currentLighting] || []) {
-      if (tileIds.includes(tile.id)) tile.decision = decision;
+      if (tileIds.includes(tile.id)) {
+        tile.decision = decision;
+        if (tile.decision_review) tile.validation_label = decision === 'accept' ? 'ok' : 'ng';
+      }
     }
     render();
     const postVisibleIds = visibleTileIds();
@@ -712,13 +795,14 @@ function modalShowTile(id) {
   document.getElementById('modal-img').src = src;
   document.getElementById('modal-title').textContent = `${lightingLabels[_currentLighting] || _currentLighting} / ${zone} / tile #${tile.id}`;
   const isValidation = tile.auto_review || ['calibration', 'acceptance'].includes(tile.dataset_role);
-  document.getElementById('modal-validation').style.display = isValidation ? '' : 'none';
-  if (isValidation) document.getElementById('modal-title').textContent += ` / 批次 ${tile.validation_group} / ${tile.validation_label || '待標記'}`;
+  document.getElementById('modal-validation').style.display = isValidation && !tile.decision_review ? '' : 'none';
+  if (isValidation) document.getElementById('modal-title').textContent += ` / ${tile.decision_review ? 'PANEL ID' : '批次'} ${tile.validation_group} / ${tile.validation_label || '待標記'}`;
 
   const dec = document.getElementById('modal-decision');
   dec.style.display = '';
   dec.className = 'modal-decision ' + tile.decision;
   dec.textContent = tile.decision === 'accept' ? '已加入' : '已排除';
+  if (tile.decision_review) dec.textContent += tile.decision === 'accept' ? '（OK）' : '（NG）';
   if (tile.auto_review && tile.dataset_role === 'train' && tile.validation_label === 'ng') {
     dec.textContent = 'NG：不加入訓練';
   }
@@ -894,6 +978,8 @@ async function startTraining() {
   button.disabled = true;
 
   try {
+    await Promise.all(lightings.map(loadLighting));
+    renderTrainingMemory();
     const selectedUnits = (trainingScope && trainingScope.selected_units) || [];
     const selectedLightingCount = new Set(
       selectedUnits.map(unit => String(unit).split('-').slice(0, -1).join('-'))
@@ -901,7 +987,7 @@ async function startTraining() {
     const ok = await capConfirm(
       (trainingScope && trainingScope.mode === 'partial'
         ? `系統只會訓練 selected PT：${selectedUnits.join(', ')}。\n其他 PT 不會重新訓練。`
-        : `系統將同時訓練 ${selectedLightingCount} 光源 × inner/edge 共 ${selectedUnits.length} 個 PatchCore 子模型。\n預計耗時 60–120 分鐘，期間可在 Step 5 觀察進度。`),
+        : `系統將依序訓練 ${selectedLightingCount} 光源 × inner/edge 共 ${selectedUnits.length} 個 PatchCore 子模型。\n預計耗時 60–120 分鐘，期間可在 Step 5 觀察進度。`) + (oomWarningText() ? '\n\n' + oomWarningText() : ''),
       {
         title: trainingScope && trainingScope.mode === 'partial' ? '開始局部重訓？' : `開始訓練 ${selectedUnits.length} 個模型？`,
         confirmText: '開始訓練',
@@ -1026,6 +1112,7 @@ document.addEventListener('keydown', (e) => {
 Promise.all(lightings.map(loadLighting))
   .then(() => {
     updateAllBadges();
+    renderTrainingMemory();
     if (lightings.length) switchLighting(lightings[0]);
   });
 </script>
