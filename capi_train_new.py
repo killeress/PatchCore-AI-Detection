@@ -71,6 +71,7 @@ SUPPORTED_TRAINING_UNITS = [
 ]
 
 MIN_TRAIN_TILES = 30
+OOM_WARNING_TILES = 600
 NG_TILES_PER_LIGHTING = 100
 TRAIN_ZERO_SCORE_EPSILON = 1e-6
 
@@ -392,6 +393,21 @@ def _patchcore_layers_for_mode(feature_layers: Optional[str]) -> Tuple[str, ...]
         raise ValueError(f"unsupported PatchCore feature_layers: {mode}") from exc
 
 
+def estimate_patchcore_feature_memory(tile_count, *, feature_layers=PATCHCORE_FEATURE_LAYERS_DEFAULT,
+                                     precision="float16", image_size=(512, 512)):
+    """Raw wide_resnet50_2 features, before cleaning/coreset; not total peak VRAM."""
+    layers = _patchcore_layers_for_mode(feature_layers)
+    channels = {"layer2": 512, "layer3": 1024}
+    stride = 8 if layers[0] == "layer2" else 16
+    grid = [(int(size) + stride - 1) // stride for size in image_size]
+    element_bytes = {"float16": 2, "float32": 4}[precision]
+    per_tile = grid[0] * grid[1] * sum(channels[layer] for layer in layers) * element_bytes
+    return {"tile_count": tile_count, "bytes_per_tile": per_tile,
+            "feature_bytes": tile_count * per_tile, "stack_bytes": 2 * tile_count * per_tile,
+            "warning_tiles": OOM_WARNING_TILES, "warning": tile_count > OOM_WARNING_TILES,
+            "feature_layers": feature_layers, "precision": precision, "image_size": list(image_size)}
+
+
 def apply_user_training_params(
     cfg: TrainingConfig,
     params: Optional[Dict],
@@ -455,7 +471,7 @@ def preprocess_panels_to_pool(
     """
     panel_modes = normalize_panel_modes(panel_modes, len(cfg.panel_paths))
     from capi_training_validation import normalize_validation_config, path_key
-    validation = normalize_validation_config(cfg.validation_config, cfg.panel_paths)
+    validation = normalize_validation_config(cfg.validation_config, cfg.panel_paths, panel_modes)
     target_lighting_set = set(target_lightings) if target_lightings is not None else None
     target_unit_set = set(target_units) if target_units is not None else None
 
@@ -2180,7 +2196,8 @@ def train_single_submodel(
 
     train_tiles = db.list_tile_pool(job_id, lighting=lighting, zone=zone,
                                     source="ok", decision="accept")
-    from capi_training_validation import training_tiles, validation_tiles, evaluate_model, freeze_inputs
+    from capi_training_validation import training_tiles, validation_tiles, evaluate_model, freeze_inputs, review_decision_labels
+    train_tiles = review_decision_labels(train_tiles, cfg.validation_config)
     train_tiles = training_tiles(train_tiles, require_confirmed=cfg.validation_config.get("split_mode") == "auto_batch")
     ng_all = db.list_tile_pool(job_id, lighting=lighting,
                                source="ng", decision="accept")
@@ -2198,10 +2215,11 @@ def train_single_submodel(
         ng_tiles = ng_for_zone
         ng_used = "zone"
 
-    held_out = validation_tiles(db, job_id, lighting, zone) if cfg.validation_config else []
+    held_out = validation_tiles(db, job_id, lighting, zone, cfg.validation_config) if cfg.validation_config else []
     calibration_ok = []
     if cfg.validation_config:
-        calibration = [t for t in held_out if t["dataset_role"] == "calibration" and t["decision"] == "accept"]
+        calibration = [t for t in held_out if t["dataset_role"] == "calibration"
+                       and (t["decision"] == "accept" or t.get("label_source") == "review_decision")]
         calibration_ok = [t for t in calibration if t.get("validation_label") == "ok"]
         ng_tiles = [t for t in calibration if t.get("validation_label") == "ng"]
         # A complete calibration pair supplies anomalib's normalization data.
@@ -2217,6 +2235,12 @@ def train_single_submodel(
         )
 
     used_tile_ids = sorted(int(t["id"]) for t in train_tiles)
+    memory_estimate = estimate_patchcore_feature_memory(len(train_tiles), feature_layers=cfg.feature_layers,
+        precision=cfg.precision, image_size=cfg.image_size)
+    log(f"{unit_label}: 訓練 {len(train_tiles)} 片，原始特徵約 {memory_estimate['feature_bytes'] / 2**30:.2f} GiB；"
+        f"未清理時合併特徵約 {memory_estimate['stack_bytes'] / 2**30:.2f} GiB（非總顯存峰值）")
+    if memory_estimate["warning"]:
+        log(f"⚠ {unit_label}: 超過 {OOM_WARNING_TILES} 片經驗提醒值，可能 OOM；請減少此 PT 的訓練資料")
     unit_start = time.monotonic()
 
     with gpu_ctx:
@@ -2285,6 +2309,7 @@ def train_single_submodel(
                 train_max, ng_scores, threshold, train_scores=train_scores,
             )
             metrics["train_count"] = len(train_tiles)
+            metrics["memory_estimate"] = memory_estimate
             metrics["ng_used"] = ng_used
             metrics["feature_pool_kernel_size"] = experiment_stats.get(
                 "feature_pool_kernel_size", cfg.feature_pool_kernel_size,
@@ -2519,7 +2544,8 @@ def run_training_pipeline(
 
         train_tiles = db.list_tile_pool(job_id, lighting=lighting, zone=zone,
                                         source="ok", decision="accept")
-        from capi_training_validation import training_tiles
+        from capi_training_validation import training_tiles, review_decision_labels
+        train_tiles = review_decision_labels(train_tiles, cfg.validation_config)
         train_tiles = training_tiles(train_tiles, require_confirmed=cfg.validation_config.get("split_mode") == "auto_batch")
         if len(train_tiles) < MIN_TRAIN_TILES:
             log(

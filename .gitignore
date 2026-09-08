@@ -85,6 +85,7 @@ docs/agent_adoption/
 docs/project_report_assets/
 
 # Training datasets and artifacts (large, local-only)
+sop_published/
 BGA_Train/
 dataset_v2/
 Sample/

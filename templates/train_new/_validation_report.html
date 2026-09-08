@@ -7,6 +7,7 @@
   {% for report in validation_reports %}
   <article style="border-top:1px solid #45475a;padding:16px 0;">
     <h3>{{ report.unit_label }} · 建議門檻驗收：{% if report.stale %}歷史報告（模型或設定已改變）{% else %}{{ status_labels.get(report.status, report.status) }}{% endif %}</h3>
+    {% if report.label_source == 'review_decision' %}<p>本次依 PANEL ID 分組；保留切片視為 OK，排除切片視為 NG。NG 結果代表對本次排除項目（含 MARK、貼紙等）的辨識能力。</p>{% endif %}
     {% for reason in report.reasons %}<p>{{ reason }}</p>{% endfor %}
     <p>目前門檻 {{ report.current_threshold|default('—') }} ／ 建議門檻 {{ report.suggested_threshold if report.suggested_threshold is not none else '—' }}</p>
     {% if report.current_threshold is defined and report.current_threshold not in [0.35, report.suggested_threshold] %}<p>目前門檻不在本次比較範圍，不能引用這份報告作為目前門檻的驗收結果。</p>{% endif %}
@@ -25,15 +26,15 @@
     {% endif %}
     {% if report.download_url %}<p><a href="{{ report.download_url }}" target="_blank" rel="noopener">完整報告與逐張分數 JSON</a></p>{% endif %}
     {% if report.acceptance_by_batch %}
-    <details><summary>各驗收批次表現</summary>
+    <details><summary>各驗收{{ ' PANEL ID ' if report.grouping == 'panel_id' else '批次' }}表現</summary>
       {% for batch, values in report.acceptance_by_batch.items() %}
-      <p>批次 {{ batch }}：OK {{ values.baseline.ok_count }}、NG {{ values.baseline.ng_count }}；原門檻誤判 {{ percentage(values.baseline.false_positive_rate) }}／漏檢 {{ percentage(values.baseline.miss_rate) }}{% if values.suggested %}；建議門檻誤判 {{ percentage(values.suggested.false_positive_rate) }}／漏檢 {{ percentage(values.suggested.miss_rate) }}{% endif %}</p>
+      <p>{{ 'PANEL ID' if report.grouping == 'panel_id' else '批次' }} {{ batch }}：OK {{ values.baseline.ok_count }}、NG {{ values.baseline.ng_count }}；原門檻誤判 {{ percentage(values.baseline.false_positive_rate) }}／漏檢 {{ percentage(values.baseline.miss_rate) }}{% if values.suggested %}；建議門檻誤判 {{ percentage(values.suggested.false_positive_rate) }}／漏檢 {{ percentage(values.suggested.miss_rate) }}{% endif %}</p>
       {% endfor %}
     </details>
     {% endif %}
     <details><summary>驗收錯判清單（原門檻或建議門檻，{{ report.errors|default([])|length }} 張）</summary>
       {% for sample in report.errors %}
-      <p><a href="{{ sample.url }}" target="_blank" rel="noopener">查看 #{{ sample.tile_id }} 切片</a> · 批次 {{ sample.group }} · 標籤 {{ sample.label|upper }} · 分數 {{ '%.6f'|format(sample.score) }} · 原門檻 {{ '錯判' if sample.baseline_wrong else '正確' }} · 建議門檻 {{ ('錯判' if sample.suggested_wrong else '正確') if report.suggested_threshold is not none else '無建議' }}</p>
+      <p><a href="{{ sample.url }}" target="_blank" rel="noopener">查看 #{{ sample.tile_id }} 切片</a> · {{ 'PANEL ID' if report.grouping == 'panel_id' else '批次' }} {{ sample.group }} · 標籤 {{ sample.label|upper }} · 分數 {{ '%.6f'|format(sample.score) }} · 原門檻 {{ '錯判' if sample.baseline_wrong else '正確' }} · 建議門檻 {{ ('錯判' if sample.suggested_wrong else '正確') if report.suggested_threshold is not none else '無建議' }}</p>
       {% endfor %}
     </details>
   </article>

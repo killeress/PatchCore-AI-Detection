@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}幫助 / SOP — {{ station_name }} AI{% endblock %}
+{% block content %}
+<div class="card">
+    <h2>幫助 / SOP</h2>
+    <p>集中發布的操作文件。文件更新後，重新整理即可查看最新內容。</p>
+    <p><a href="/help/sop">重新整理文件</a> ·
+        <a href="#" onclick="document.getElementById('about-modal').classList.remove('hidden'); return false;">關於檢測邏輯</a>
+    </p>
+    {% if unavailable %}
+    <p role="alert">文件資料夾尚未就緒或暫時無法存取，請聯絡 SOP 維護人員。</p>
+    {% elif not documents %}
+    <p>目前尚無已發布的 SOP。維護人員發布 PDF 後會顯示於此。</p>
+    {% else %}
+    <div style="overflow-x:auto;">
+        <table style="width:100%; text-align:left;">
+            <thead><tr><th>文件名稱</th><th>分類</th><th>更新時間</th><th>大小</th><th>操作</th></tr></thead>
+            <tbody>
+                {% for document in documents %}
+                <tr>
+                    <td>{{ document.title|e }}</td>
+                    <td>{{ document.category|e }}</td>
+                    <td>{{ document.updated|e }}</td>
+                    <td>{{ document.size|e }}</td>
+                    <td style="white-space:nowrap;">
+                        <a href="{{ document.url|e }}" target="_blank" rel="noopener">閱讀 PDF</a> ·
+                        <a href="{{ document.url|e }}&amp;download=1">下載</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

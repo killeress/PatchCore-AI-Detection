@@ -78,10 +78,10 @@
       </label>
       <button id="manual-scan-btn" type="button" onclick="loadManualPanels()" class="source-primary">掃描資料夾</button>
       <div id="manual-scan-status" class="manual-status"></div>
-      <label class="manual-confirm"><input id="manual-include-batches" type="checkbox" onchange="invalidateManualScan()">包含下一層批次資料夾（根目錄 / 批次 / panel），供跨批次校正與驗收</label>
+      <label class="manual-confirm"><input id="manual-include-batches" type="checkbox" onchange="invalidateManualScan()">包含下一層資料夾（根目錄 / 日期或批次 / panel）</label>
       <label class="manual-confirm">
         <input id="manual-confirm-normal" type="checkbox" onchange="updateNext()">
-        <span>我會在下一步確認圖片的 OK／NG；若關閉自動校正與驗收，所選資料須為正常訓練樣本</span>
+        <span>所選資料來自正常品；下一步排除不適合訓練的切片，其餘作為 OK</span>
       </label>
     </div>
   </div>
@@ -366,8 +366,8 @@
   <!-- padding-bottom 預留高度給 sticky 操作條，確保列表最後幾筆不會被遮住 -->
   <div style="margin-top:16px;padding:14px;background:#313244;border-radius:8px;">
     <label><input id="validation-auto" type="checkbox" {% if training_scope.mode != 'partial' %}checked{% else %}disabled{% endif %}>自動校正與驗收</label>
-    <p>只選一次資料，系統自動按批次保留校正與驗收樣本，不需指定用途。下一步只確認正常／缺陷；NG 不會加入訓練。</p>
-    <p>批次欄由資料夾帶入；請確認同一實際批次使用相同名稱。至少三組獨立批次才能分組，不足時仍可訓練，報告會標示資料不足。分組不保證各組都有 NG，缺少時不會標示合格。</p>
+    <p>只選一次資料，下一步沿用加入／排除：保留＝OK，排除＝NG，不需額外標記。NG 不加入正常訓練資料。</p>
+    <p>系統依 PANEL ID（Glass ID）及勾選的 INNER／EDGE 分配用途，同一 ID 不跨訓練、校正、驗收。每個區域至少需三個不同 ID 才能完整分組；下一步會分別顯示各區域的實際分配與缺少資料。</p>
   </div>
   <details style="margin-top:8px;padding:14px;background:#313244;border-radius:8px;">
     <summary>進階：驗收目標（可留白）</summary>
@@ -1166,9 +1166,6 @@ function renderPanels(panels, emptyMessage) {
     if (col.width) th.style.width = col.width;
     headRow.appendChild(th);
   });
-  const validationHead = document.createElement('th');
-  validationHead.textContent = '批次（自動帶入，可修正）';
-  headRow.appendChild(validationHead);
   thead.appendChild(headRow);
   table.appendChild(thead);
 
@@ -1221,17 +1218,7 @@ function renderPanels(panels, emptyMessage) {
     );
     const pathCell = appendTextCell(tr, panelPath || '-', '', 'path-cell');
     pathCell.title = panelPath || '-';
-    const validationCell = document.createElement('td');
-    validationCell.onclick = event => event.stopPropagation();
-    const batchInput = document.createElement('input');
-    batchInput.placeholder = '實際批次 ID';
-    batchInput.value = p.batch_id || panelPath.replace(/\\/g, '/').replace(/\/$/, '').split('/').slice(0, -1).join('/');
-    batchInput.style.width = '120px';
-    const saveValidation = () => _validationPanels.set(panelPath, {group: batchInput.value.trim()});
-    batchInput.oninput = saveValidation;
-    saveValidation();
-    validationCell.append(batchInput);
-    tr.appendChild(validationCell);
+    _validationPanels.set(panelPath, {group: String(p.glass_id || panelPath.replace(/\\/g, '/').replace(/\/$/, '').split('/').pop()).trim()});
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
@@ -1674,11 +1661,7 @@ function submitStart() {
   if (params) body.training_params = params;
   const validationPanels = Object.fromEntries(panelPaths.map(path => [path, _validationPanels.get(path)]));
   if (TRAINING_SCOPE.mode !== 'partial' && document.getElementById('validation-auto').checked) {
-    if (Object.values(validationPanels).some(item => !item || !item.group)) {
-      capAlert('使用独立驗收時，每個選取的 panel 都必須填寫實際批次 ID。', {type: 'error'});
-      return;
-    }
-    const validation = {split_mode: 'auto_batch', panels: validationPanels};
+    const validation = {split_mode: 'auto_panel', panels: validationPanels};
     for (const [id, key] of [['validation-max-fp', 'max_false_positive_rate'], ['validation-max-miss', 'max_miss_rate']]) {
       const input = document.getElementById(id);
       if (input.value !== '') {

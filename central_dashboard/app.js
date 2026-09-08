@@ -30,6 +30,8 @@
     async function initialize() {
         initializeTheme();
         const directFileMode = window.location.protocol === "file:";
+        const helpLink = document.getElementById("dashboard-help-link");
+        if (helpLink) helpLink.hidden = directFileMode;
         if (!directFileMode) {
             try {
                 const response = await fetch("/api/central-dashboard/config", {
