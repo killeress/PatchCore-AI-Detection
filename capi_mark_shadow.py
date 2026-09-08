@@ -26,7 +26,7 @@ logger = logging.getLogger("capi.mark_shadow")
 
 _MARK_CROP_ASPECT_RATIO = 2.0
 MARK_FORCED_CHAR_CONVERSIONS_PARAM = "mark_forced_char_conversions"
-DEFAULT_FORCED_CHAR_CONVERSIONS = (("U", "V"),)
+DEFAULT_FORCED_CHAR_CONVERSIONS = (("U", "V", "V"),)
 
 _CLIENT_LOCK = threading.Lock()
 _RULES_LOCK = threading.Lock()
@@ -50,7 +50,7 @@ def normalize_forced_char_conversions(value: Any) -> list[Dict[str, str]]:
     if value is None:
         value = [
             {"paddle": paddle, "dotmatrix": dotmatrix}
-            for paddle, dotmatrix in DEFAULT_FORCED_CHAR_CONVERSIONS
+            for paddle, dotmatrix, _output in DEFAULT_FORCED_CHAR_CONVERSIONS
         ]
     if not isinstance(value, (list, tuple)):
         raise ValueError("MARK 強制轉換規則格式錯誤")
@@ -64,17 +64,23 @@ def normalize_forced_char_conversions(value: Any) -> list[Dict[str, str]]:
             raise ValueError(f"第 {index} 筆 MARK 強制轉換規則格式錯誤")
         paddle = str(item.get("paddle") or "").strip().upper()
         dotmatrix = str(item.get("dotmatrix") or "").strip().upper()
+        output = str(item.get("output", dotmatrix)).strip().upper()
         if not re.fullmatch(r"[A-Z0-9]", paddle):
             raise ValueError(f"第 {index} 筆 Paddle 字元必須是單一英文或數字")
         if not re.fullmatch(r"[A-Z0-9]", dotmatrix):
             raise ValueError(f"第 {index} 筆 DotMatrixCV 字元必須是單一英文或數字")
-        if paddle == dotmatrix:
-            raise ValueError(f"第 {index} 筆規則的兩個字元不可相同")
+        if not re.fullmatch(r"[A-Z0-9]", output):
+            raise ValueError(f"第 {index} 筆採用字元必須是單一英文或數字")
+        if paddle == dotmatrix == output:
+            raise ValueError(f"第 {index} 筆規則的三個字元不可全部相同")
         pair = (paddle, dotmatrix)
         if pair in seen:
             raise ValueError(f"第 {index} 筆規則與前面重複")
         seen.add(pair)
-        normalized.append({"paddle": paddle, "dotmatrix": dotmatrix})
+        rule = {"paddle": paddle, "dotmatrix": dotmatrix}
+        if output != dotmatrix:
+            rule["output"] = output
+        normalized.append(rule)
     return normalized
 
 
@@ -83,7 +89,7 @@ def set_forced_char_conversions(value: Any) -> list[Dict[str, str]]:
     normalized = normalize_forced_char_conversions(value)
     with _RULES_LOCK:
         _FORCED_CHAR_CONVERSIONS = tuple(
-            (item["paddle"], item["dotmatrix"])
+            (item["paddle"], item["dotmatrix"], item.get("output", item["dotmatrix"]))
             for item in normalized
         )
     return normalized
@@ -93,20 +99,25 @@ def get_forced_char_conversions() -> list[Dict[str, str]]:
     with _RULES_LOCK:
         rules = tuple(_FORCED_CHAR_CONVERSIONS)
     return [
-        {"paddle": paddle, "dotmatrix": dotmatrix}
-        for paddle, dotmatrix in rules
+        {
+            "paddle": paddle,
+            "dotmatrix": dotmatrix,
+            **({"output": output} if output != dotmatrix else {}),
+        }
+        for paddle, dotmatrix, output in rules
     ]
 
 
 def _legacy_worker_needs_rule_compat(worker_version: Any) -> bool:
     match = re.match(r"(\d+)", str(worker_version or "").strip())
-    return match is None or int(match.group(1)) < 4
+    required_version = 5 if any("output" in rule for rule in get_forced_char_conversions()) else 4
+    return match is None or int(match.group(1)) < required_version
 
 
 def _apply_main_forced_char_conversions(
     paddle_text: Any,
     dotmatrix_text: Any,
-) -> tuple[str, tuple[int, ...], tuple[tuple[str, str], ...]]:
+) -> tuple[str, tuple[int, ...], tuple[tuple[str, str, str], ...]]:
     paddle = "".join(str(paddle_text or "").upper().split())
     dotmatrix = "".join(str(dotmatrix_text or "").upper().split())
     if not re.fullmatch(r"[A-Z0-9]{2}", paddle):
@@ -115,11 +126,11 @@ def _apply_main_forced_char_conversions(
         return paddle, (), ()
 
     configured = {
-        (rule["paddle"], rule["dotmatrix"])
+        (rule["paddle"], rule["dotmatrix"]): rule.get("output", rule["dotmatrix"])
         for rule in get_forced_char_conversions()
     }
     applied = tuple(
-        (index, paddle_char, dotmatrix_char)
+        (index, paddle_char, dotmatrix_char, configured[(paddle_char, dotmatrix_char)])
         for index, (paddle_char, dotmatrix_char) in enumerate(
             zip(paddle, dotmatrix)
         )
@@ -129,12 +140,12 @@ def _apply_main_forced_char_conversions(
         return paddle, (), ()
 
     corrected = list(paddle)
-    for index, _paddle_char, dotmatrix_char in applied:
-        corrected[index] = dotmatrix_char
+    for index, _paddle_char, _dotmatrix_char, output in applied:
+        corrected[index] = output
     return (
         "".join(corrected),
         tuple(item[0] for item in applied),
-        tuple((item[1], item[2]) for item in applied),
+        tuple((item[1], item[2], item[3]) for item in applied),
     )
 
 
@@ -566,8 +577,9 @@ def recognize_mark_online(
             if positions:
                 position_names = ",".join(str(index + 1) for index in positions)
                 rule_names = ",".join(
-                    f"{paddle}>{dotmatrix}"
-                    for paddle, dotmatrix in dict.fromkeys(applied_rules)
+                    (f"{paddle}>{dotmatrix}" if output == dotmatrix
+                     else f"{paddle}+{dotmatrix}>{output}")
+                    for paddle, dotmatrix, output in dict.fromkeys(applied_rules)
                 )
                 prior_reason = str(
                     result.get("adoption_reason") or "legacy_worker"

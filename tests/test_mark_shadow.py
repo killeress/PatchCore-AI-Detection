@@ -33,6 +33,7 @@ from mark_shadow.paddle_shadow_worker import (
     ShadowApplication,
     ShadowStore,
     normalize_mark_text,
+    normalize_forced_char_conversions as normalize_worker_conversions,
     prepare_paddle_image,
     rescue_paddle_u_with_dotmatrix_v,
 )
@@ -80,10 +81,12 @@ def test_build_mark_shadow_payload_keeps_full_mark_envelope_and_rotates_upright(
     ]
 
 
-def test_mark_payload_uses_runtime_forced_char_conversions():
-    set_forced_char_conversions([
-        {"paddle": "0", "dotmatrix": "O"},
-    ])
+@pytest.mark.parametrize("rules", [
+    [{"paddle": "0", "dotmatrix": "O"}],
+    [{"paddle": "0", "dotmatrix": "0", "output": "O"}],
+])
+def test_mark_payload_uses_runtime_forced_char_conversions(rules):
+    set_forced_char_conversions(rules)
     payload = build_mark_shadow_payload(
         np.zeros((20, 30), dtype=np.uint8),
         {
@@ -94,9 +97,7 @@ def test_mark_payload_uses_runtime_forced_char_conversions():
         "W0F00000_000000.tif",
     )
 
-    assert payload["forced_char_conversions"] == [
-        {"paddle": "0", "dotmatrix": "O"}
-    ]
+    assert payload["forced_char_conversions"] == rules
 
 
 def test_normalize_forced_char_conversions_rejects_invalid_or_duplicate_rules():
@@ -203,8 +204,50 @@ def test_user_defined_conflict_rules_replace_only_matching_positions():
         "00",
         "O0",
         [{"paddle": "0", "dotmatrix": "O"}],
-    ) == ("O0", (0,), (("0", "O"),))
+    ) == ("O0", (0,), (("0", "O", "O"),))
     assert apply_forced_char_conversions("UU", "VV", []) == ("UU", (), ())
+
+
+@pytest.mark.parametrize(
+    ("paddle", "dotmatrix", "expected", "positions"),
+    [
+        ("0S", "05", "OS", (0,)),
+        ("OS", "05", "OS", (0,)),
+        ("S0", "S0", "SO", (1,)),
+        ("00", "00", "OO", (0, 1)),
+        ("0S", "DS", "0S", ()),
+        ("DS", "0S", "DS", ()),
+        ("0S", "", "0S", ()),
+    ],
+)
+def test_explicit_output_converts_equal_inputs_and_preserves_unmatched_characters(
+    paddle, dotmatrix, expected, positions,
+):
+    rules = [
+        {"paddle": "0", "dotmatrix": "0", "output": "O"},
+        {"paddle": "O", "dotmatrix": "0", "output": "O"},
+    ]
+    assert set_forced_char_conversions(rules) == rules
+    assert capi_mark_shadow.get_forced_char_conversions() == rules
+    worker_result = apply_forced_char_conversions(paddle, dotmatrix, rules)
+    main_result = capi_mark_shadow._apply_main_forced_char_conversions(paddle, dotmatrix)
+    assert main_result == worker_result
+    assert worker_result[:2] == (expected, positions)
+
+
+@pytest.mark.parametrize("normalize", [normalize_forced_char_conversions, normalize_worker_conversions])
+@pytest.mark.parametrize("rules", [
+    [{"paddle": "0", "dotmatrix": "0", "output": "OO"}],
+    [{"paddle": "0", "dotmatrix": "0", "output": ""}],
+    [{"paddle": "0", "dotmatrix": "0", "output": "0"}],
+    [
+        {"paddle": "0", "dotmatrix": "0", "output": "O"},
+        {"paddle": "0", "dotmatrix": "0", "output": "D"},
+    ],
+])
+def test_explicit_output_rejects_invalid_and_conflicting_rules(normalize, rules):
+    with pytest.raises(ValueError):
+        normalize(rules)
 
 
 def test_mark_temporal_stabilizer_uses_recent_stream_and_rejects_isolated_values():
@@ -354,7 +397,7 @@ def test_paddle_recognizer_sends_three_channel_image_to_model():
     assert result["paddle_text"] == "EJ"
     assert result["paddle_confidence"] == pytest.approx(0.93)
     assert result["technique"] == "PaddleOCR"
-    assert result["worker_version"] == "4"
+    assert result["worker_version"] == "5"
     assert result["error"] == ""
 
 
@@ -397,7 +440,7 @@ def test_shadow_application_saves_comparison_and_disagreement_crop(tmp_path):
 
     assert result["agreed"] is False
     assert result["technique"] == "PaddleOCR"
-    assert result["worker_version"] == "4"
+    assert result["worker_version"] == "5"
     assert store.stats()["total"] == 1
     assert store.stats()["disagreed"] == 1
     assert len(list((tmp_path / "disagreements").rglob("*.png"))) == 1
@@ -459,6 +502,59 @@ def test_shadow_application_uses_uv_rescue_before_temporal_decision(tmp_path):
     assert disabled_result["paddle_text"] == "UU"
     assert disabled_result["final_text"] == "UU"
     assert disabled_result["adoption_reason"] == "warmup"
+
+
+@pytest.mark.parametrize("history_text", ["0S", "DS"])
+def test_explicit_output_overrides_history_and_survives_worker_restart(tmp_path, history_text):
+    class FakeRecognizer:
+        model_name = "fake"
+        text = history_text
+
+        def predict(self, image):
+            return {"paddle_text": self.text, "paddle_raw_text": self.text}
+
+    store = ShadowStore(tmp_path / "shadow.db", tmp_path / "disagreements")
+    recognizer = FakeRecognizer()
+    application = ShadowApplication(recognizer, store)
+    encoded, png = cv2.imencode(".png", np.full((12, 20), 180, dtype=np.uint8))
+    assert encoded
+    request_data = {
+        "source_image": "W0F00000_134318.tif",
+        "image_png_base64": base64.b64encode(png.tobytes()).decode("ascii"),
+        "current_text": history_text,
+        "stream_key": "CAPI13|MODEL-A|bottom_left|rot180",
+        "forced_char_conversions": [],
+    }
+    for _ in range(3):
+        old_result = application.infer(request_data)
+    assert old_result["final_text"] == history_text
+
+    request_data["current_text"] = "05"
+    request_data["forced_char_conversions"] = [
+        {"paddle": "0", "dotmatrix": "0", "output": "O"},
+        {"paddle": "O", "dotmatrix": "0", "output": "O"},
+    ]
+    for paddle_text in ("0S", "OS", "0S"):
+        recognizer.text = paddle_text
+        result = application.infer(request_data)
+        assert result["final_text"] == "OS"
+        assert result["paddle_text"] == paddle_text
+        assert result["paddle_raw_text"] == paddle_text
+        assert "forced_char_conversion[pos=1;rules=" in result["adoption_reason"]
+        with sqlite3.connect(store.db_path) as connection:
+            saved = connection.execute(
+                "SELECT paddle_text, final_text FROM mark_shadow_results WHERE id = ?",
+                (result["id"],),
+            ).fetchone()
+        assert saved == (paddle_text, "OS")
+    assert store.recent_paddle_texts(request_data["stream_key"])[-3:] == ["OS"] * 3
+
+    restarted = ShadowApplication(
+        recognizer, ShadowStore(store.db_path, tmp_path / "disagreements"),
+    )
+    assert restarted.infer(request_data)["final_text"] == "OS"
+    request_data["forced_char_conversions"] = []
+    assert restarted.infer(request_data)["final_text"] == "0S"
 
 
 def test_shadow_store_saves_agreed_crop_for_admin_comparison(tmp_path):
@@ -767,7 +863,12 @@ def _mark_rules_update_handler(*, admin=True):
     return handler, responses
 
 
-def test_admin_can_save_mark_forced_char_conversions(monkeypatch):
+@pytest.mark.parametrize(("rules", "expected"), [
+    ([{"paddle": "0", "dotmatrix": "o"}], [{"paddle": "0", "dotmatrix": "O"}]),
+    ([{"paddle": "0", "dotmatrix": "0", "output": "o"}],
+     [{"paddle": "0", "dotmatrix": "0", "output": "O"}]),
+])
+def test_admin_can_save_mark_forced_char_conversions(monkeypatch, rules, expected):
     handler, responses = _mark_rules_update_handler()
     applied = []
     monkeypatch.setattr(
@@ -777,7 +878,7 @@ def test_admin_can_save_mark_forced_char_conversions(monkeypatch):
     )
     body = json.dumps({
         "param_name": MARK_FORCED_CHAR_CONVERSIONS_PARAM,
-        "new_value": [{"paddle": "0", "dotmatrix": "o"}],
+        "new_value": rules,
         "reason": "新增 0/O 衝突規則",
     }).encode("utf-8")
     handler.headers = {"Content-Length": str(len(body))}
@@ -785,7 +886,6 @@ def test_admin_can_save_mark_forced_char_conversions(monkeypatch):
 
     handler._handle_api_settings_update()
 
-    expected = [{"paddle": "0", "dotmatrix": "O"}]
     assert responses[-1][0] == 200
     assert handler.db.updated == [(
         MARK_FORCED_CHAR_CONVERSIONS_PARAM,
@@ -1057,6 +1157,37 @@ def test_online_client_applies_admin_rule_for_v1_worker_and_persists(
         ).fetchone()
     assert saved == ("VV", result["adoption_reason"])
     assert capi_mark_shadow.consume_mark_shadow_request_results() == [701]
+
+
+@pytest.mark.parametrize("worker_version", ["1", "4"])
+@pytest.mark.parametrize("paddle_text", ["0S", "OS"])
+def test_online_client_applies_explicit_output_to_legacy_worker_response(
+    monkeypatch, worker_version, paddle_text,
+):
+    set_forced_char_conversions([
+        {"paddle": "0", "dotmatrix": "0", "output": "O"},
+        {"paddle": "O", "dotmatrix": "0", "output": "O"},
+    ])
+    client = SimpleNamespace(recognize=lambda *args: {
+        "success": True,
+        "paddle_text": paddle_text,
+        "final_text": "0S",
+        "worker_version": worker_version,
+    })
+    monkeypatch.setattr(capi_mark_shadow, "_CLIENT", client)
+    persisted = []
+    monkeypatch.setattr(capi_mark_shadow, "_persist_main_rule_compat_result", persisted.append)
+
+    result = recognize_mark_online(
+        np.zeros((20, 30), dtype=np.uint8),
+        {"found": True, "text": "05"},
+        Path("W0F00000_134318.tif"),
+    )
+
+    assert result["final_text"] == "OS"
+    assert result["paddle_text"] == paddle_text
+    assert f"rules={paddle_text[0]}+0>O;" in result["adoption_reason"]
+    assert persisted == [result]
 
 
 def test_online_client_trusts_v4_worker_temporal_result(monkeypatch):

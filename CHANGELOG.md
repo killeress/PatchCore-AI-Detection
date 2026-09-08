@@ -1,5 +1,13 @@
 # 更新紀錄
 
+## 2026-09-08 v3
+
+### [MARK PPOCR]指定強制轉換採用字元
+
+- 字元配對規則新增「採用字元」，支援 `Paddle 0 + DotMatrixCV 0 → O` 與 `Paddle O + DotMatrixCV 0 → O`；同一配對不可設定多個輸出。
+- 命中位置優先使用指定字元，避免歷史穩定值覆蓋；歷史投票依新規則重算，保留 Paddle 原始辨識與既有紀錄。
+- 舊規則未指定輸出時仍採用 DotMatrixCV 字元。此功能需同步更新主程式與 MARK worker v5；規則仍為所有機種、兩個位置共用。
+
 ## 2026-09-08 v1
 
 ### [QJPG Report]逐筆回報 PER_REGION REAL_NG

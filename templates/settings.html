@@ -2220,7 +2220,7 @@
         loading: false,
         savingRules: false,
         error: '',
-        forced_char_conversions: [{ paddle: 'U', dotmatrix: 'V' }],
+        forced_char_conversions: [{ paddle: 'U', dotmatrix: 'V', output: 'V' }],
     };
     let markLastResult = null;
     let markPreviewUrl = '';
@@ -2659,6 +2659,7 @@
                     ? data.forced_char_conversions.map(rule => ({
                         paddle: String(rule.paddle || '').toUpperCase(),
                         dotmatrix: String(rule.dotmatrix || '').toUpperCase(),
+                        output: String(rule.output ?? rule.dotmatrix ?? '').toUpperCase(),
                     }))
                     : markShadow.forced_char_conversions,
                 loading: false,
@@ -2684,21 +2685,20 @@
 
     function markConversionOptions(selected) {
         return MARK_CONVERSION_CHARS.map(char => `
-            <option value="${char}" ${char === selected ? 'selected' : ''}>${char}</option>
+            <option value="${char}" ${char === selected ? 'selected' : ''}>${char === '0' ? '0（數字零）' : char === 'O' ? 'O（英文）' : char}</option>
         `).join('');
     }
 
     function updateMarkForcedConversion(index, field, value) {
         const rule = (markShadow.forced_char_conversions || [])[index];
-        if (!rule || !['paddle', 'dotmatrix'].includes(field)) return;
+        if (!rule || !['paddle', 'dotmatrix', 'output'].includes(field)) return;
         rule[field] = String(value || '').trim().toUpperCase();
-        if (field === 'dotmatrix') renderSettings();
     }
 
     function addMarkForcedConversion() {
         markShadow.forced_char_conversions = [
             ...(markShadow.forced_char_conversions || []),
-            { paddle: 'U', dotmatrix: 'V' },
+            { paddle: 'U', dotmatrix: 'V', output: 'V' },
         ];
         renderSettings();
     }
@@ -2714,11 +2714,13 @@
         const rules = (markShadow.forced_char_conversions || []).map(rule => ({
             paddle: String(rule.paddle || '').trim().toUpperCase(),
             dotmatrix: String(rule.dotmatrix || '').trim().toUpperCase(),
+            output: String(rule.output ?? rule.dotmatrix ?? '').trim().toUpperCase(),
         }));
         const invalidIndex = rules.findIndex(rule =>
             !/^[A-Z0-9]$/.test(rule.paddle)
             || !/^[A-Z0-9]$/.test(rule.dotmatrix)
-            || rule.paddle === rule.dotmatrix
+            || !/^[A-Z0-9]$/.test(rule.output)
+            || (rule.paddle === rule.dotmatrix && rule.paddle === rule.output)
         );
         if (invalidIndex >= 0) {
             showToast(`❌ 第 ${invalidIndex + 1} 筆規則格式錯誤`, 'error');
@@ -2889,7 +2891,8 @@
                             <div style="flex:1;min-width:280px;">
                                 <div style="color:#e2e8f0;font-weight:700;">字元衝突強制轉換</div>
                                 <div class="auto-switch-muted" style="margin-top:5px;font-size:.76rem;line-height:1.6;">
-                                    所有機種共用。只有 Paddle 與 DotMatrixCV 在同一位置符合規則時，才強制採用 DotMatrixCV 字元；未符合時維持 PaddleOCR 結果。
+                                    所有機種、兩個字元位置共用。同一位置的 Paddle 與 DotMatrixCV 符合配對時，強制使用指定的「採用字元」，優先於歷史穩定值；兩邊相同也可轉換。未符合時維持原有辨識與穩定化流程。
+                                    例如要將 O／0 統一為英文 O，可新增「Paddle 0 ＋ DotMatrixCV 0 → O」及「Paddle O ＋ DotMatrixCV 0 → O」。
                                 </div>
                             </div>
                             <button class="account-btn" onclick="addMarkForcedConversion()" ${markShadow.savingRules ? 'disabled' : ''}>＋ 新增規則</button>
@@ -2901,14 +2904,17 @@
                             ${forcedRules.length ? forcedRules.map((rule, index) => `
                                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--border);border-radius:7px;background:rgba(15,23,42,.55);">
                                     <span class="auto-switch-muted">Paddle</span>
-                                    <select class="account-input" style="width:76px;" onchange="updateMarkForcedConversion(${index}, 'paddle', this.value)">
+                                    <select class="account-input" aria-label="Paddle 字元 ${index + 1}" style="width:116px;" onchange="updateMarkForcedConversion(${index}, 'paddle', this.value)">
                                         ${markConversionOptions(String(rule.paddle || '').toUpperCase())}
                                     </select>
                                     <span style="color:#64748b;">＋ DotMatrixCV</span>
-                                    <select class="account-input" style="width:76px;" onchange="updateMarkForcedConversion(${index}, 'dotmatrix', this.value)">
+                                    <select class="account-input" aria-label="DotMatrixCV 字元 ${index + 1}" style="width:116px;" onchange="updateMarkForcedConversion(${index}, 'dotmatrix', this.value)">
                                         ${markConversionOptions(String(rule.dotmatrix || '').toUpperCase())}
                                     </select>
-                                    <span style="color:#7dd3fc;font-weight:700;">→ 採用 ${escapeHtml(String(rule.dotmatrix || '').toUpperCase())}</span>
+                                    <span style="color:#7dd3fc;font-weight:700;">→ 採用字元</span>
+                                    <select class="account-input" aria-label="採用字元 ${index + 1}" style="width:116px;" onchange="updateMarkForcedConversion(${index}, 'output', this.value)">
+                                        ${markConversionOptions(String(rule.output ?? rule.dotmatrix ?? '').toUpperCase())}
+                                    </select>
                                     <button class="account-btn danger" style="margin-left:auto;" onclick="removeMarkForcedConversion(${index})" ${markShadow.savingRules ? 'disabled' : ''}>移除</button>
                                 </div>
                             `).join('') : `
