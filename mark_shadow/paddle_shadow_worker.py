@@ -23,11 +23,11 @@ import cv2
 import numpy as np
 
 
-VERSION = "4"
+VERSION = "5"
 TECHNIQUE = "PaddleOCR"
 LOGGER = logging.getLogger("mark_shadow.worker")
 VALID_MARK = re.compile(r"[A-Z0-9]{2}")
-DEFAULT_FORCED_CHAR_CONVERSIONS = (("U", "V"),)
+DEFAULT_FORCED_CHAR_CONVERSIONS = (("U", "V", "V"),)
 
 
 def installed_package_version(package_name: str) -> str:
@@ -42,7 +42,7 @@ def normalize_mark_text(value: Any) -> str:
     return text if VALID_MARK.fullmatch(text) else ""
 
 
-def normalize_forced_char_conversions(value: Any) -> tuple[tuple[str, str], ...]:
+def normalize_forced_char_conversions(value: Any) -> tuple[tuple[str, str, str], ...]:
     if value is None:
         return DEFAULT_FORCED_CHAR_CONVERSIONS
     if not isinstance(value, (list, tuple)) or len(value) > 100:
@@ -55,14 +55,17 @@ def normalize_forced_char_conversions(value: Any) -> tuple[tuple[str, str], ...]
             raise ValueError("invalid forced_char_conversions rule")
         paddle = str(item.get("paddle") or "").strip().upper()
         dotmatrix = str(item.get("dotmatrix") or "").strip().upper()
+        output = str(item.get("output", dotmatrix)).strip().upper()
         if not re.fullmatch(r"[A-Z0-9]", paddle):
             raise ValueError("invalid Paddle character conversion")
         if not re.fullmatch(r"[A-Z0-9]", dotmatrix):
             raise ValueError("invalid DotMatrix character conversion")
-        if paddle == dotmatrix or (paddle, dotmatrix) in seen:
+        if not re.fullmatch(r"[A-Z0-9]", output):
+            raise ValueError("invalid output character conversion")
+        if paddle == dotmatrix == output or (paddle, dotmatrix) in seen:
             raise ValueError("duplicate or ineffective character conversion")
         seen.add((paddle, dotmatrix))
-        normalized.append((paddle, dotmatrix))
+        normalized.append((paddle, dotmatrix, output))
     return tuple(normalized)
 
 
@@ -70,16 +73,19 @@ def apply_forced_char_conversions(
     paddle_text: Any,
     dotmatrix_text: Any,
     rules: Any = None,
-) -> tuple[str, tuple[int, ...], tuple[tuple[str, str], ...]]:
+) -> tuple[str, tuple[int, ...], tuple[tuple[str, str, str], ...]]:
     """Apply configured same-position Paddle/DotMatrix conflict conversions."""
     paddle = normalize_mark_text(paddle_text)
     dotmatrix = normalize_mark_text(dotmatrix_text)
     if not paddle or not dotmatrix:
         return paddle, (), ()
 
-    configured = set(normalize_forced_char_conversions(rules))
+    configured = {
+        (paddle, dotmatrix): output
+        for paddle, dotmatrix, output in normalize_forced_char_conversions(rules)
+    }
     applied = tuple(
-        (index, paddle_char, dotmatrix_char)
+        (index, paddle_char, dotmatrix_char, configured[(paddle_char, dotmatrix_char)])
         for index, (paddle_char, dotmatrix_char) in enumerate(
             zip(paddle, dotmatrix)
         )
@@ -90,11 +96,11 @@ def apply_forced_char_conversions(
         return paddle, (), ()
 
     corrected = list(paddle)
-    for index, _paddle_char, dotmatrix_char in applied:
-        corrected[index] = dotmatrix_char
+    for index, _paddle_char, _dotmatrix_char, output in applied:
+        corrected[index] = output
     applied_rules = tuple(
-        (paddle_char, dotmatrix_char)
-        for _, paddle_char, dotmatrix_char in applied
+        (paddle_char, dotmatrix_char, output)
+        for _, paddle_char, dotmatrix_char, output in applied
     )
     return "".join(corrected), rescued_positions, applied_rules
 
@@ -417,8 +423,8 @@ class ShadowStore:
                 (str(stream_key or ""), max(1, int(limit))),
             ).fetchall()
         rule_payload = [
-            {"paddle": paddle, "dotmatrix": dotmatrix}
-            for paddle, dotmatrix in rules
+            {"paddle": paddle, "dotmatrix": dotmatrix, "output": output}
+            for paddle, dotmatrix, output in rules
         ]
         return [
             apply_forced_char_conversions(
@@ -695,10 +701,16 @@ class ShadowApplication:
             if context_reason:
                 result["adoption_reason"] = context_reason
             if rescued_positions:
+                # A matched explicit conversion takes priority over temporal history.
+                final_chars = list(result["final_text"])
+                for index in rescued_positions:
+                    final_chars[index] = recognition_text[index]
+                result["final_text"] = "".join(final_chars)
                 positions = ",".join(str(index + 1) for index in rescued_positions)
                 rule_names = ",".join(
-                    f"{paddle}>{dotmatrix}"
-                    for paddle, dotmatrix in dict.fromkeys(applied_rules)
+                    (f"{paddle}>{dotmatrix}" if output == dotmatrix
+                     else f"{paddle}+{dotmatrix}>{output}")
+                    for paddle, dotmatrix, output in dict.fromkeys(applied_rules)
                 )
                 result["adoption_reason"] = (
                     f"forced_char_conversion[pos={positions};rules={rule_names}];"
