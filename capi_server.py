@@ -969,15 +969,18 @@ def _format_qjpg_product_defect_record(
     )
 
 
-def _tile_two_stage_real_feature_points(tile: TileInfo) -> List[Tuple[int, int]]:
-    """Return every two-stage REAL feature in full-image coordinates."""
+def _tile_real_defect_points(tile: TileInfo) -> List[Tuple[int, int]]:
+    """Return two-stage features or multiple REAL region peaks in image coordinates."""
     features = getattr(tile, "dust_two_stage_features", None)
+    two_stage = isinstance(features, (list, tuple)) and bool(features)
+    if not two_stage:
+        features = getattr(tile, "dust_region_details", None)
     if not isinstance(features, (list, tuple)):
         return []
 
-    tile_image = getattr(tile, "image", None)
-    source_h = int(tile_image.shape[0]) if getattr(tile_image, "ndim", 0) >= 2 else int(tile.height)
-    source_w = int(tile_image.shape[1]) if getattr(tile_image, "ndim", 0) >= 2 else int(tile.width)
+    source_image = getattr(tile, "image" if two_stage else "dust_heatmap_binary", None)
+    source_h = int(source_image.shape[0]) if getattr(source_image, "ndim", 0) >= 2 else int(tile.height)
+    source_w = int(source_image.shape[1]) if getattr(source_image, "ndim", 0) >= 2 else int(tile.width)
     source_h = max(1, source_h)
     source_w = max(1, source_w)
     tile_h = max(1, int(tile.height))
@@ -989,29 +992,33 @@ def _tile_two_stage_real_feature_points(tile: TileInfo) -> List[Tuple[int, int]]
             continue
         if "is_dust" not in feature or bool(feature.get("is_dust")):
             continue
-        abs_pos = feature.get("abs_pos")
-        if not isinstance(abs_pos, (list, tuple)) or len(abs_pos) < 2:
+        position = feature.get("abs_pos" if two_stage else "peak_yx")
+        if not isinstance(position, (list, tuple)) or len(position) < 2:
             continue
+        source_x, source_y = (position[0], position[1]) if two_stage else (position[1], position[0])
         try:
-            local_x = int(round(float(abs_pos[0]) * tile_w / source_w))
-            local_y = int(round(float(abs_pos[1]) * tile_h / source_h))
-            area = int(feature.get("area", 0))
+            local_x = int(round(float(source_x) * tile_w / source_w))
+            local_y = int(round(float(source_y) * tile_h / source_h))
+            rank = -int(feature.get("area", 0)) if two_stage else -float(feature.get("max_score", 0.0))
         except (TypeError, ValueError, OverflowError):
             continue
         local_x = max(0, min(tile_w - 1, local_x))
         local_y = max(0, min(tile_h - 1, local_y))
         ranked_points.append(
-            (-area, index, int(tile.x) + local_x, int(tile.y) + local_y)
+            (rank, index, int(tile.x) + local_x, int(tile.y) + local_y)
         )
 
     points = []
     seen = set()
-    for _negative_area, _index, image_x, image_y in sorted(ranked_points):
+    for _rank, _index, image_x, image_y in sorted(ranked_points):
         point = (image_x, image_y)
         if point in seen:
             continue
         seen.add(point)
         points.append(point)
+    if not two_stage and len(points) < 2:
+        # Keep the existing AOI representative-point selection for a single region.
+        return []
     return points
 
 
@@ -1052,7 +1059,7 @@ def _iter_qjpg_defect_records(
             real_feature_points = (
                 []
                 if getattr(tile, "is_bomb", False)
-                else _tile_two_stage_real_feature_points(tile)
+                else _tile_real_defect_points(tile)
             )
             if real_feature_points:
                 records.extend(

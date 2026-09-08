@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from capi_config import CAPIConfig
-from capi_inference import ImageResult, TileInfo
+from capi_inference import CAPIInferencer, ImageResult, TileInfo
 from capi_station_adapter import AAPIStationAdapter
 from capi_server import (
     build_dual_protocol_response,
@@ -208,6 +208,115 @@ def test_qjpg_response_reports_every_two_stage_real_feature_coordinate():
         "@QJPG-T863BF29AH44;OK;EJ;"
         "NGPCDK20076800540W0F00000"
         "PCDK20038400216W0F00000,"
+    )
+
+
+@pytest.mark.parametrize("real_region_count", [3, 4])
+@pytest.mark.parametrize("filtered_by", [
+    None,
+    "is_suspected_dust_or_scratch",
+    "is_in_exclude_zone",
+    "scratch_filtered",
+    "is_aoi_coord_below_threshold",
+])
+def test_qjpg_response_reports_every_per_region_real_peak(real_region_count, filtered_by):
+    result = _image_result("WGF50500_054624.tif", mark_text="AS")
+    tile = _tile(1, 600, 450)
+    tile.x = 200
+    tile.y = 250
+    tile.is_aoi_coord_tile = True
+    tile.aoi_product_x = 999
+    tile.aoi_product_y = 888
+    tile.anomaly_peak_source = "aoi_report_fallback"
+    # Region peaks use heatmap (row, column), which may differ from tile.image size.
+    anomaly_map = np.zeros((128, 256), dtype=np.float32)
+    for y, x, score in [(10, 50, 0.7), (30, 150, 0.9), (50, 200, 0.8)]:
+        anomaly_map[y, x] = score
+    if real_region_count == 4:
+        anomaly_map[70, 175] = 0.75
+    anomaly_map[90, 100] = 1.0
+    dust_mask = np.zeros_like(anomaly_map, dtype=np.uint8)
+    dust_mask[90, 100] = 255
+    inferencer = object.__new__(CAPIInferencer)
+    inferencer.config = CAPIConfig()
+    has_real, _peak, _iou, details, binary, _labels = inferencer.check_dust_per_region(
+        dust_mask, anomaly_map, top_percent=100.0,
+    )
+    assert has_real
+    assert sum(not detail["is_dust"] for detail in details) == real_region_count
+    tile.dust_region_details = details
+    tile.dust_heatmap_binary = binary
+    if filtered_by:
+        setattr(tile, filtered_by, True)
+    result.tiles = [tile]
+    result.anomaly_tiles = [(tile, 0.3568, anomaly_map)]
+
+    response = build_qjpg_response(
+        {"glass_id": "YQ712G007K54", "model_id": "GN140HCAAD70S"},
+        "NG", [result], CAPIConfig(),
+    )
+
+    records = ""
+    if filtered_by is None:
+        records = "PCDK20076800367WGF50500PCDK20096000540WGF50500"
+        if real_region_count == 4:
+            records += "PCDK20086400713WGF50500"
+        records += "PCDK20038400194WGF50500"
+    assert response == f"@QJPG-YQ712G007K54;OK;AS;NG{records},"
+
+
+def test_qjpg_per_region_keeps_single_region_aoi_fallback():
+    result = _image_result("WGF50500_054624.tif")
+    tile = _tile(1, 600, 450)
+    tile.is_aoi_coord_tile = True
+    tile.aoi_product_x = 15
+    tile.aoi_product_y = 1024
+    tile.anomaly_peak_source = "aoi_report_fallback"
+    tile.dust_region_details = [
+        {"peak_yx": (4, 0), "max_score": 0.9, "is_dust": False},
+    ]
+    tile.dust_heatmap_binary = np.zeros((512, 512), dtype=np.uint8)
+    result.anomaly_tiles = [(tile, 0.3568, None)]
+
+    assert build_qjpg_response({"glass_id": "G1"}, "NG", [result], CAPIConfig()) == (
+        "@QJPG-G1;OK;EJ;NGPCDK20001501024WGF50500,"
+    )
+
+
+@pytest.mark.parametrize("judgment", ["NG", "OK", "OK-i"])
+def test_qjpg_per_region_bomb_keeps_one_representative_coordinate(judgment):
+    result = _image_result("R0F00000_054628.tif")
+    tile = _tile(1, 600, 450)
+    tile.is_bomb = True
+    tile.dust_region_details = [
+        {"peak_yx": (100, 50), "max_score": 0.9, "is_dust": False},
+        {"peak_yx": (200, 300), "max_score": 0.8, "is_dust": False},
+    ]
+    tile.dust_heatmap_binary = np.zeros((512, 512), dtype=np.uint8)
+    result.anomaly_tiles = [(tile, 0.41, None)]
+
+    assert build_qjpg_response({"glass_id": "G1"}, judgment, [result], CAPIConfig()) == (
+        "@QJPG-G1;OK;EJ;NGPCDK30096000540R0F00000,"
+    )
+
+
+def test_qjpg_two_stage_features_take_precedence_over_per_region_peaks():
+    result = _image_result("WGF50500_054624.tif")
+    tile = _tile(1, 600, 450)
+    tile.x = 200
+    tile.y = 250
+    tile.dust_two_stage_features = [
+        {"abs_pos": (300, 200), "area": 30, "is_dust": False},
+    ]
+    tile.dust_region_details = [
+        {"peak_yx": (10, 50), "max_score": 0.9, "is_dust": False},
+        {"peak_yx": (50, 200), "max_score": 0.8, "is_dust": False},
+    ]
+    tile.dust_heatmap_binary = np.zeros((128, 256), dtype=np.uint8)
+    result.anomaly_tiles = [(tile, 0.3568, None)]
+
+    assert build_qjpg_response({"glass_id": "G1"}, "NG", [result], CAPIConfig()) == (
+        "@QJPG-G1;OK;EJ;NGPCDK20076800540WGF50500,"
     )
 
 
