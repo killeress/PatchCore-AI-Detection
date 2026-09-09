@@ -2627,7 +2627,8 @@ def test_handle_models_retrain_submodel_with_panels_rejects_bundle_level_overrid
     server.database.create_training_job.assert_not_called()
 
 
-def test_handle_train_new_start_persists_partial_training_scope():
+@pytest.mark.parametrize("auto_validation", [False, True])
+def test_handle_train_new_start_persists_partial_training_scope(auto_validation):
     from capi_web import CAPIWebHandler
 
     server = MagicMock()
@@ -2650,6 +2651,10 @@ def test_handle_train_new_start_persists_partial_training_scope():
             "selected_units": ["G0F00000-inner", "R0F00000-edge"],
         },
     }
+    if auto_validation:
+        payload["training_params"] = {"validation_config": {"split_mode": "auto_panel", "panels": {
+            path: {"group": Path(path).name} for path in payload["panel_paths"]
+        }}}
     body = json.dumps(payload).encode()
     h.headers.get = MagicMock(return_value=str(len(body)))
     h.rfile = io.BytesIO(body)
@@ -2668,6 +2673,10 @@ def test_handle_train_new_start_persists_partial_training_scope():
         "target_bundle_id": 7,
     }
     assert kwargs["panel_modes"] == ["full"] * 8
+    if auto_validation:
+        validation = kwargs["training_params"]["validation_config"]
+        assert validation["selected_zones"] == ["edge", "inner"]
+        assert sorted(p["role"] for p in validation["panels"].values()) == ["acceptance", "calibration"] + ["train"] * 6
 
 
 def test_handle_train_new_start_partial_rejects_bundle_level_override():
@@ -2806,7 +2815,8 @@ def test_handle_train_new_start_rejects_invalid_panel_modes(panel_modes, error_f
     server.database.create_training_job.assert_not_called()
 
 
-def test_handle_train_new_start_partial_edge_unit_accepts_edge_only_panels():
+@pytest.mark.parametrize("auto_validation", [False, True])
+def test_handle_train_new_start_partial_edge_unit_accepts_edge_only_panels(auto_validation):
     from capi_web import CAPIWebHandler
 
     server = MagicMock()
@@ -2830,6 +2840,12 @@ def test_handle_train_new_start_partial_edge_unit_accepts_edge_only_panels():
             "selected_units": ["G0F00000-edge"],
         },
     }
+    if auto_validation:
+        payload["panel_paths"] = [f"/p{i}" for i in range(6)]
+        payload["panel_modes"] = ["inner_only"] * 3 + ["edge_only"] * 3
+        payload["training_params"] = {"validation_config": {"split_mode": "auto_panel", "panels": {
+            path: {"group": Path(path).name} for path in payload["panel_paths"]
+        }}}
     body = json.dumps(payload).encode()
     h.headers.get = MagicMock(return_value=str(len(body)))
     h.rfile = io.BytesIO(body)
@@ -2841,7 +2857,12 @@ def test_handle_train_new_start_partial_edge_unit_accepts_edge_only_panels():
 
     assert h._sent_response[0]["status"] == 200
     kwargs = server.database.create_training_job.call_args.kwargs
-    assert kwargs["panel_modes"] == ["edge_only"]
+    assert kwargs["panel_modes"] == payload["panel_modes"]
+    if auto_validation:
+        cfg = kwargs["training_params"]["validation_config"]
+        assert cfg["selected_zones"] == ["edge"]
+        edge = [p for p in cfg["panels"].values() if "edge" in p["zones"]]
+        assert sorted(p["role"] for p in edge) == ["acceptance", "calibration", "train"]
 
 
 def test_handle_train_new_start_rejects_empty_panel_paths():

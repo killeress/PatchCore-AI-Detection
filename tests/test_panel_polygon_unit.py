@@ -345,6 +345,25 @@ def test_polyfit_polygon_rejects_non_linear_edge_samples():
     assert polygon is None
 
 
+def test_polyfit_polygon_allows_subpixel_residual_comparison_noise(monkeypatch):
+    import capi_preprocess
+
+    binary = np.zeros((1000, 1000), dtype=np.uint8)
+    binary[100:900, 100:900] = 255
+    real_percentile = np.percentile
+
+    def percentile_with_comparison_noise(values, q, *args, **kwargs):
+        if q == 95:
+            return 8.05
+        return real_percentile(values, q, *args, **kwargs)
+
+    monkeypatch.setattr(capi_preprocess.np, "percentile", percentile_with_comparison_noise)
+
+    polygon = _polyfit_polygon(binary, (100, 100, 900, 900), tile_size=256)
+
+    assert polygon is not None
+
+
 def test_detect_panel_boundary_half_scale_restores_full_resolution(monkeypatch):
     import capi_preprocess
 
@@ -463,6 +482,18 @@ def test_large_panel_raw_boundary_requires_large_frame_occupancy(monkeypatch):
         PreprocessConfig(),
     )
     assert large_occupancy is False
+
+    detected["bbox"] = (114, 174, 887, 825)
+    bbox, returned_polygon, large_occupancy = _detect_large_panel_raw_boundary(
+        image,
+        PreprocessConfig(
+            large_panel_min_width_ratio=0.75,
+            large_panel_min_height_ratio=0.60,
+        ),
+    )
+    assert large_occupancy is True
+    assert bbox == detected["bbox"]
+    np.testing.assert_array_equal(returned_polygon, polygon)
 
     detected["bbox"] = (50, 100, 950, 900)
     bbox, returned_polygon, large_occupancy = _detect_large_panel_raw_boundary(

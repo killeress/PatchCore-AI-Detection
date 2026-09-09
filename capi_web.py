@@ -14944,7 +14944,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         bundle_path = Path(job["output_bundle"])
         try:
-            manifest = json.loads((bundle_path / "manifest.json").read_text(encoding="utf-8"))
+            from capi_training_validation import run_manifest_path
+            snapshot = run_manifest_path(bundle_path, job_id)
+            manifest = json.loads((snapshot if snapshot.exists() else bundle_path / "manifest.json").read_text(encoding="utf-8"))
             thresholds = json.loads((bundle_path / "thresholds.json").read_text(encoding="utf-8"))
         except Exception as e:
             self._send_response(500, f"Failed to read manifest/thresholds: {str(e)}")
@@ -14973,14 +14975,25 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         def _grade_slug(g):
             return (g or "n/a").replace("/", "")
 
+        scope = job.get("training_scope") or {}
+        if scope.get("mode") == "partial":
+            selected = set(scope.get("selected_units") or [])
+            for key in ("unit_metrics", "tiles_per_unit", "model_files"):
+                manifest[key] = {u: value for u, value in (manifest.get(key) or {}).items() if u in selected}
         unit_metrics = manifest.get("unit_metrics", {}) or {}
         validation_reports = []
         for unit_label, metrics in unit_metrics.items():
             if not metrics.get("validation"):
                 continue
+            validation = metrics["validation"]
+            if validation.get("job_id") not in (None, job_id):
+                continue
+            if scope.get("mode") == "partial" and validation.get("job_id") != job_id:
+                continue
             try:
                 from capi_training_validation import load_report
-                report = load_report(bundle_path, unit_label)
+                relative = validation.get("report_path") or f"validation_reports/{unit_label}/report.json"
+                report = load_report(bundle_path, unit_label, relative)
                 lighting, zone = unit_label.rsplit("-", 1)
                 report["current_threshold"] = thresholds.get(lighting, {}).get(zone)
                 report["errors"] = []
@@ -14988,12 +15001,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 for sample in report["samples"]:
                     if sample["role"] != "acceptance":
                         continue
-                    baseline_wrong = (sample["score"] >= 0.35) != (sample["label"] == "ng")
+                    baseline_wrong = (sample["score"] >= report["baseline_threshold"]) != (sample["label"] == "ng")
                     suggested_wrong = suggested is not None and (sample["score"] >= suggested) != (sample["label"] == "ng")
                     if baseline_wrong or suggested_wrong:
                         report["errors"].append({**sample, "baseline_wrong": baseline_wrong, "suggested_wrong": suggested_wrong,
                             "url": "/api/train/new/bundle-asset/" + urllib.parse.quote(job_id, safe="") + "/" + urllib.parse.quote(sample["asset_path"], safe="/")})
-                report["download_url"] = "/api/train/new/bundle-asset/" + urllib.parse.quote(job_id, safe="") + "/validation_reports/" + urllib.parse.quote(unit_label, safe="") + "/report.json"
+                report["download_url"] = "/api/train/new/bundle-asset/" + urllib.parse.quote(job_id, safe="") + "/" + urllib.parse.quote(relative, safe="/")
             except (OSError, ValueError, KeyError) as exc:
                 report = {"unit_label": unit_label, "status": "insufficient", "stale": True, "reasons": [f"報告無法讀取：{exc}"], "baseline": {}, "suggested": None, "suggested_threshold": None}
             validation_reports.append(report)
@@ -15137,6 +15150,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             for unit_label, info in units
             if info.get("train_zero_score_warning")
         ]
+        active_bundle = (db.get_model_bundle(scope["target_bundle_id"]) or {}) if scope.get("mode") == "partial" else {}
         template = self.jinja_env.get_template("train_new/step5_done.html")
         html = template.render(
             request_path="/train/new/done",
@@ -15156,6 +15170,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             success_units=manifest.get("success_units") or len(units),
             zero_score_units=zero_score_units,
             validation_reports=validation_reports,
+            training_scope=scope,
+            validation_adoption_blocked=bool(active_bundle.get("is_active")),
         )
         self._send_response(200, html)
 
@@ -15778,17 +15794,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         if err:
             self._send_json({"error": err}, status=400)
             return
-        if (training_params or {}).get("validation_config"):
-            from capi_training_validation import normalize_validation_config
-            try:
-                training_params["validation_config"] = normalize_validation_config(
-                    training_params["validation_config"], clean_panel_paths, panel_modes,
-                )
-                if (params.get("training_scope") or {}).get("mode") == "partial":
-                    raise ValueError("獨立校正／驗收目前適用於完整新模型訓練")
-            except ValueError as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
         image_preprocess_pipeline, err = self._validate_image_preprocess_pipeline(
             params.get("image_preprocess_pipeline")
         )
@@ -15874,6 +15879,20 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 )
             }, status=400)
             return
+        if (training_params or {}).get("validation_config"):
+            from capi_training_validation import normalize_validation_config
+            try:
+                validation = dict(training_params["validation_config"])
+                if training_scope["mode"] == "partial":
+                    validation["selected_zones"] = sorted(required_zones)
+                else:
+                    validation.pop("selected_zones", None)
+                training_params["validation_config"] = normalize_validation_config(
+                    validation, clean_panel_paths, panel_modes,
+                )
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
         if training_scope["mode"] == "partial":
             locked_params = sorted(
                 set(training_params or {})
@@ -15921,6 +15940,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 preprocess_after_tiling = bool(
                     target_manifest.get("preprocess_after_tiling", False)
                 )
+                tile_stride = int(target_manifest.get("tile_stride") or 512)
                 from capi_grid_canonicalization import normalize_grid_canonicalization
                 grid_canonicalization = normalize_grid_canonicalization(
                     target_manifest.get("grid_canonicalization"),
@@ -16293,11 +16313,23 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             tile["image_url"] = self._train_new_thumb_url(tile.get("source_path"))
         if score_from:
             CAPIWebHandler._decorate_tiles_with_scores(tiles, db, score_from, sort_by)
+        inherited = {}
+        default_precision = "float16"
+        scope = (job.get("training_scope") or {}) if isinstance(job, dict) else {}
+        if scope.get("mode") == "partial":
+            from capi_model_registry import _read_manifest
+            bundle = db.get_model_bundle(scope["target_bundle_id"])
+            if not bundle:
+                self._send_json({"error": "目標模型已不存在，無法讀取重訓設定"}, status=409)
+                return
+            inherited = _read_manifest(Path(bundle["bundle_path"])).get("patchcore_params") or {}
+            default_precision = "float32"
         payload = {"tiles": tiles, "training_memory": estimate_patchcore_feature_memory(1,
-            feature_layers=params.get("feature_layers", PATCHCORE_FEATURE_LAYERS_DEFAULT),
-            precision=params.get("precision", "float16"))}
+            feature_layers=params.get("feature_layers", inherited.get("feature_layers", PATCHCORE_FEATURE_LAYERS_DEFAULT)),
+            precision=params.get("precision", inherited.get("precision", default_precision)),
+            image_size=tuple(inherited.get("image_size", (512, 512))))}
         if auto_review:
-            panels = config["panels"].values()
+            panels = [p for p in config["panels"].values() if p.get("zones") != []]
             payload["auto_split"] = {role: len({p["group"].casefold() for p in panels if p["role"] == role}) for role in ("train", "calibration", "acceptance")}
             payload["auto_split"]["decision_review"] = config.get("split_mode") == "auto_panel"
         self._send_json(payload)
@@ -17058,8 +17090,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _train_new_partial_training_worker(job_id, server_inst):
         """Train selected PTs for an existing bundle using the reviewed tile pool."""
         import traceback as _traceback
+        import tempfile
         from capi_train_new import TrainingConfig, apply_user_training_params, train_single_submodel, _auroc_grade
-        from capi_model_registry import append_submodel_history, _read_manifest, _write_manifest, invalidate_score_cache
+        from capi_model_registry import append_submodel_history, _read_manifest, _write_manifest, invalidate_score_cache, install_partial_training
+        from capi_training_validation import run_manifest_path, seal_reports, write_json, recipe_fingerprint
 
         db = server_inst.database
         runtime = CAPIWebHandler._get_job_runtime(job_id)
@@ -17070,6 +17104,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         def log(msg):
             CAPIWebHandler._append_train_new_log(job_id, msg)
 
+        candidate_context = None
         try:
             log("準備訓練資源：正在停止模型掃描並釋放 GPU")
             CAPIWebHandler._cancel_and_wait_scan_idle(timeout_s=15.0)
@@ -17090,6 +17125,18 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             bundle_dir = Path(bundle["bundle_path"])
             manifest = _read_manifest(bundle_dir)
             patchcore_params = manifest.get("patchcore_params") or {}
+            staging_root = bundle_dir.resolve().parent / ".partial_training"
+            staging_root.mkdir(parents=True, exist_ok=True)
+            candidate_context = tempfile.TemporaryDirectory(prefix="run-", dir=staging_root)
+            candidate_dir = Path(candidate_context.name)
+            shutil.copy2(bundle_dir / "machine_config.yaml", candidate_dir / "machine_config.yaml")
+            import yaml
+            recipe = yaml.safe_load((candidate_dir / "machine_config.yaml").read_text(encoding="utf-8")) or {}
+            baseline_thresholds = recipe.get("threshold_mapping") or {}
+            _write_manifest(candidate_dir, manifest)
+            original_job_id = manifest.get("trained_with_job_id") or bundle.get("job_id")
+            if original_job_id and not run_manifest_path(bundle_dir, original_job_id).exists():
+                write_json(run_manifest_path(candidate_dir, original_job_id), manifest)
             from capi_grid_canonicalization import normalize_grid_canonicalization
             grid_cfg = normalize_grid_canonicalization(
                 job.get("grid_canonicalization"),
@@ -17155,8 +17202,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     raise RuntimeError("training cancelled by user")
 
                 unit_label = f"{lighting}-{zone}"
-                output_pt = bundle_dir / f"{unit_label}.pt"
-                old_manifest = _read_manifest(bundle_dir)
+                output_pt = candidate_dir / f"{unit_label}.pt"
+                old_manifest = _read_manifest(candidate_dir)
                 old_unit_metrics = (old_manifest.get("unit_metrics") or {}).get(unit_label) or {}
                 old_history = (old_manifest.get("submodel_history") or {}).get(unit_label) or []
                 if old_history:
@@ -17167,6 +17214,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     old_tile_count = old_unit_metrics.get("train_count")
 
                 log(f"[{idx}/{total}] {unit_label}: 載 tile")
+                baseline = baseline_thresholds.get(lighting, {})
+                baseline = float(baseline.get(zone, 0.35) if isinstance(baseline, dict) else baseline)
                 result = train_single_submodel(
                     db=db,
                     job_id=job_id,
@@ -17178,6 +17227,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     log=log,
                     cancel_event=runtime["cancel_event"],
                     unit_prefix=f"[{idx}/{total}] ",
+                    baseline_threshold=baseline,
+                    fail_on_validation_error=True,
                 )
 
                 metrics = result["metrics"]
@@ -17201,8 +17252,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                     "feature_cleaning_mode": cfg.feature_cleaning_mode,
                     "feature_cleaning": metrics.get("feature_cleaning") or {},
                 }
-                append_submodel_history(bundle_dir, lighting, zone, entry)
-                refreshed_manifest = _read_manifest(bundle_dir)
+                append_submodel_history(candidate_dir, lighting, zone, entry)
+                refreshed_manifest = _read_manifest(candidate_dir)
                 refreshed_manifest.setdefault("unit_metrics", {})[unit_label] = metrics
                 refreshed_manifest.setdefault("tiles_per_unit", {})[unit_label] = {
                     "train": result["tile_count"],
@@ -17219,11 +17270,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 overall_auroc = round(sum(auroc_values) / len(auroc_values), 4) if auroc_values else None
                 refreshed_manifest["overall_auroc"] = overall_auroc
                 refreshed_manifest["overall_auroc_grade"] = _auroc_grade(overall_auroc)
-                _write_manifest(bundle_dir, refreshed_manifest)
-                cleared = invalidate_score_cache(
-                    db, scoring_bundle_id=bundle_id, lighting=lighting, zone=zone,
-                )
-                log(f"[{idx}/{total}] {unit_label}: 清除 {cleared} 筆 score cache")
+                _write_manifest(candidate_dir, refreshed_manifest)
 
                 summaries[unit_label] = {
                     "auroc_old": old_auroc,
@@ -17237,9 +17284,43 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 auroc_str = f", AUROC={new_auroc:.3f}({metrics.get('auroc_grade','')})" if new_auroc is not None else ""
                 log(
                     f"[{idx}/{total}] {unit_label}: ✓ done | {result['elapsed_seconds']}s, "
-                    f"threshold={result['threshold']:.4f}, size={result['size_bytes']/1e6:.1f}MB, "
+                    f"threshold={baseline:.4f}（沿用原門檻）, size={result['size_bytes']/1e6:.1f}MB, "
                     f"ng_caught={caught}/{ng_n}{auroc_str}"
                 )
+
+            selected_labels = [f"{lighting}-{zone}" for lighting, zone in selected_units]
+            run_manifest = dict(refreshed_manifest)
+            for key in ("unit_metrics", "tiles_per_unit", "model_files"):
+                run_manifest[key] = {unit: refreshed_manifest[key][unit] for unit in selected_labels}
+            run_manifest.update(
+                trained_with_job_id=job_id, trained_at=datetime.now().isoformat(timespec="seconds"),
+                panel_count=len(job.get("panel_paths") or []),
+                panel_glass_ids=[Path(p).name for p in job.get("panel_paths") or []],
+                success_units=len(selected_labels),
+            )
+            run_manifest["patchcore_params"] = {
+                **patchcore_params,
+                **{key: getattr(cfg, key) for key in (
+                    "batch_size", "image_size", "coreset_ratio", "max_epochs", "precision", "feature_layers",
+                )},
+            }
+            run_aurocs = [m["auroc"] for m in run_manifest["unit_metrics"].values() if m.get("auroc") is not None]
+            run_manifest["overall_auroc"] = round(sum(run_aurocs) / len(run_aurocs), 4) if run_aurocs else None
+            run_manifest["overall_auroc_grade"] = _auroc_grade(run_manifest["overall_auroc"])
+            if cfg.validation_config:
+                seal_reports(candidate_dir, run_manifest["unit_metrics"])
+            write_json(run_manifest_path(candidate_dir, job_id), run_manifest)
+            if runtime["cancel_event"].is_set():
+                raise RuntimeError("training cancelled by user")
+            with server_inst._gpu_lock:
+                if (_read_manifest(bundle_dir) != manifest or
+                        recipe_fingerprint(bundle_dir) != recipe_fingerprint(candidate_dir)):
+                    raise RuntimeError("原模型或前處理設定在重訓期間已變更，請重新建立局部重訓任務")
+                with install_partial_training(bundle_dir, candidate_dir):
+                    for lighting, zone in selected_units:
+                        cleared = invalidate_score_cache(db, scoring_bundle_id=bundle_id, lighting=lighting, zone=zone)
+                        log(f"{lighting}-{zone}: 清除 {cleared} 筆 score cache")
+                    db.update_training_job_state(job_id, "completed", output_bundle=str(bundle_dir))
 
             inferencer = server_inst.inferencers.get(job["machine_id"])
             if inferencer is None:
@@ -17253,7 +17334,6 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                         log(f"[v2] reload 失敗（不影響重訓結果）：{reload_err}")
                         logger.warning("reload_submodel raised: %s", reload_err, exc_info=True)
 
-            db.update_training_job_state(job_id, "completed", output_bundle=str(bundle_dir))
             log(f"✓ 局部重訓完成，bundle={bundle_dir}")
 
         except Exception as e:
@@ -17267,6 +17347,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             for line in _traceback.format_exc().rstrip().splitlines()[-8:]:
                 log(f"  {line}")
         finally:
+            if candidate_context is not None:
+                try:
+                    Path(candidate_context.name).resolve().relative_to(staging_root.resolve())
+                    candidate_context.cleanup()
+                except OSError:
+                    logger.warning("cannot remove partial training staging: %s", candidate_context.name, exc_info=True)
             try:
                 finished_job = db.get_training_job(job_id)
                 if finished_job and finished_job.get("state") == "failed":
@@ -17520,9 +17606,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 raise ValueError("請提供 JSON object")
             unit_label = body.get("unit_label", "")
             root = Path(job["output_bundle"]).resolve()
-            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            from capi_training_validation import run_manifest_path
+            snapshot = run_manifest_path(root, job_id)
+            manifest = json.loads((snapshot if snapshot.exists() else root / "manifest.json").read_text(encoding="utf-8"))
+            scope = job.get("training_scope") or {}
+            if scope.get("mode") == "partial" and unit_label not in (scope.get("selected_units") or []):
+                raise ValueError("此子模型不在本次局部重訓範圍")
             if unit_label not in manifest.get("unit_metrics", {}) or not manifest["unit_metrics"][unit_label].get("validation"):
                 raise ValueError("此子模型沒有獨立驗收報告")
+            validation = manifest["unit_metrics"][unit_label]["validation"]
+            if validation.get("job_id") not in (None, job_id) or (scope.get("mode") == "partial" and validation.get("job_id") != job_id):
+                raise ValueError("驗收報告不屬於本次訓練")
             bundle = next((b for b in db.list_model_bundles(job["machine_id"]) if Path(b["bundle_path"]).resolve() == root), None)
             if not bundle:
                 raise ValueError("模型尚未登錄")
@@ -17530,7 +17624,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             with CAPIWebHandler._train_slot["lock"]:
                 if CAPIWebHandler._train_slot.get("active_job_id"):
                     raise ValueError("訓練進行中，請待完成後採用門檻")
-                result = adopt_threshold(db, bundle["id"], unit_label)
+                result = adopt_threshold(db, bundle["id"], unit_label,
+                                         report_path=validation.get("report_path"), expected_job_id=validation.get("job_id"))
             self._send_json(result)
         except (ValueError, OSError, KeyError, TypeError) as exc:
             self._send_json({"error": str(exc)}, status=400)

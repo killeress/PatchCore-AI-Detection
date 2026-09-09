@@ -41,6 +41,7 @@ import logging
 import logging.handlers
 import argparse
 import signal
+import uuid
 import yaml
 import cv2
 import numpy as np
@@ -223,6 +224,29 @@ class InferenceLogCapture:
 # ── 日誌設定 ──────────────────────────────────────────
 
 logger = logging.getLogger("capi.server")
+
+
+def _send_response(client_socket, response, request_context, kind="result"):
+    """Log the send boundary; success means local socket acceptance, not client receipt."""
+    payload = (response + "\r\n").encode("utf-8")
+    logger.info(
+        "[TCP_SEND_BEGIN] %s kind=%s bytes=%s timeout=%s",
+        request_context, kind, len(payload), client_socket.gettimeout(),
+    )
+    started = time.monotonic()
+    try:
+        client_socket.sendall(payload)
+    except Exception as exc:
+        logger.error(
+            "[TCP_SEND_FAILED] %s kind=%s bytes=%s elapsed_ms=%.1f error=%s errno=%s detail=%s",
+            request_context, kind, len(payload), (time.monotonic() - started) * 1000,
+            type(exc).__name__, getattr(exc, "errno", None), exc, exc_info=True,
+        )
+        raise
+    logger.info(
+        "[TCP_SEND_OK] %s kind=%s bytes=%s elapsed_ms=%.1f",
+        request_context, kind, len(payload), (time.monotonic() - started) * 1000,
+    )
 
 
 def setup_logging(config: dict):
@@ -2738,14 +2762,23 @@ class CAPIServer:
         # idle timeout: 0 表示不超時，否則使用設定值 (建議 600 秒)
         idle_timeout = self.recv_timeout if self.recv_timeout > 0 else None
         client_socket.settimeout(idle_timeout)
+        connection_context = (
+            f"conn={uuid.uuid4().hex} local={client_socket.getsockname()} peer={client_addr}"
+        )
+        connected_at = time.monotonic()
+        logger.info("[TCP_OPEN] %s timeout=%s", connection_context, idle_timeout)
 
         machine_label = None  # 在解析到機台資訊後更新
         request_count = 0     # 此連線處理的請求數
+        request_no = 0
+        request_context = connection_context
+        close_reason = "handler_exit"
         pending_buffer = []   # 暫存尚未處理的請求佇列 (多筆 AOI@ 黏在一起時使用)
 
         try:
             # ── 長連線主迴圈 ──
             while True:
+                request_context = f"{connection_context} req={request_no + 1}"
                 request_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 request_data = None
                 parsed = None
@@ -2764,8 +2797,11 @@ class CAPIServer:
                     try:
                         # 接收資料
                         while True:
+                            logger.info("[TCP_RECV_WAIT] %s buffered_bytes=%s", request_context, len(raw_data))
                             chunk = client_socket.recv(self.recv_buffer_size)
                             if not chunk:
+                                close_reason = "peer_eof"
+                                logger.info("[TCP_RECV_EOF] %s buffered_bytes=%s", request_context, len(raw_data))
                                 # 客戶端主動斷開連線
                                 print(f"[HANDLER] Client disconnected: {client_addr}", flush=True)
                                 if request_count > 0:
@@ -2774,6 +2810,10 @@ class CAPIServer:
                                     logger.info(f"[{client_addr}] Client disconnected (no requests)")
                                 return  # 跳到 finally 清理
                             raw_data += chunk
+                            logger.info(
+                                "[TCP_RECV] %s bytes=%s buffered_bytes=%s",
+                                request_context, len(chunk), len(raw_data),
+                            )
                             print(f"[HANDLER] Received {len(raw_data)} bytes", flush=True)
                             # 檢查是否收到完整訊息 (以換行或 null 結尾)
                             if b"\n" in raw_data or b"\r" in raw_data or b"\x00" in raw_data:
@@ -2787,6 +2827,11 @@ class CAPIServer:
                                 pass
 
                     except (TimeoutError, socket.timeout):
+                        close_reason = "recv_timeout"
+                        logger.warning(
+                            "[TCP_RECV_TIMEOUT] %s timeout=%s buffered_bytes=%s",
+                            request_context, idle_timeout, len(raw_data),
+                        )
                         # idle timeout — 長時間未收到任何資料，清理死連線
                         if request_count > 0:
                             logger.info(f"[{client_addr}] Idle timeout after {request_count} request(s), closing")
@@ -2818,12 +2863,15 @@ class CAPIServer:
                                f"processing first, {len(remaining)} buffered")
                     request_data = first_request
 
-                logger.info(f"[{client_addr}] << {request_data}")
+                request_no += 1
+                logger.info(f"[{client_addr}] << {request_data} [{request_context}]")
 
                 inference_started = False  # 追蹤是否已遞增 active_inferences
                 try:
                     # 解析請求
                     parsed = parse_request(request_data)
+                    request_context += f" Glass={parsed['glass_id']} Machine={parsed['machine_no']}"
+                    logger.info("[TCP_REQUEST] %s", request_context)
                     request_config = self._ensure_auto_model_switch_for_request(parsed)
                     machine_label = f"{client_addr[0]} ({parsed['machine_no']})"
 
@@ -2848,7 +2896,7 @@ class CAPIServer:
                         ai_judgment = "ERR:HY"
                         response = build_dual_protocol_response(parsed, ai_judgment, [], request_config)
                         response_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                        logger.info(f"[{client_addr}] >> {_response_log_text(response)} (skipped)")
+                        logger.info(f"[{client_addr}] >> {_response_log_text(response)} (skipped) [{request_context}]")
                         with server_status.lock:
                             server_status.active_inferences = max(0, server_status.active_inferences - 1)
                             server_status.total_err += 1
@@ -2861,7 +2909,7 @@ class CAPIServer:
                                 "time": datetime.now().strftime("%H:%M:%S"),
                                 "duration": "0.00s"
                             }
-                        client_socket.sendall((response + "\r\n").encode("utf-8"))
+                        _send_response(client_socket, response, request_context, kind="hy")
                         request_count += 1
                         self._queue_save_results_async(
                             client_addr, parsed, [],
@@ -2897,7 +2945,7 @@ class CAPIServer:
                     response_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
                     dup_tag = " [DUPLICATE]" if is_duplicate else ""
-                    logger.info(f"[{client_addr}] >> {_response_log_text(response)} ({processing_seconds:.2f}s){dup_tag}")
+                    logger.info(f"[{client_addr}] >> {_response_log_text(response)} ({processing_seconds:.2f}s){dup_tag} [{request_context}]")
                     
                     # 更新全域狀態 - 判定結果與推論結束
                     j_simple = "OK" if ai_judgment in ("OK", "OK-i") else ("NG" if ai_judgment.startswith("NG") else "ERR")
@@ -2918,7 +2966,7 @@ class CAPIServer:
                         }
 
                     # 🚀 先發送回覆（不等 Heatmap 儲存）
-                    client_socket.sendall((response + "\r\n").encode("utf-8"))
+                    _send_response(client_socket, response, request_context)
                     request_count += 1
 
                     # 停止日誌擷取
@@ -2958,7 +3006,7 @@ class CAPIServer:
                     else:
                         response = build_dual_protocol_response(None, error_msg, [], None)
                     try:
-                        client_socket.sendall((response + "\r\n").encode("utf-8"))
+                        _send_response(client_socket, response, request_context, kind="protocol_error")
                     except Exception:
                         pass
                     self._save_error_record(
@@ -2987,8 +3035,9 @@ class CAPIServer:
                     else:
                         response = build_dual_protocol_response(None, error_msg, [], None)
                     try:
-                        client_socket.sendall((response + "\r\n").encode("utf-8"))
+                        _send_response(client_socket, response, request_context, kind="internal_error")
                     except Exception:
+                        close_reason = "error_response_send_failed"
                         return  # 發送失敗，連線已斷
                     self._save_error_record(
                         request_time,
@@ -3001,6 +3050,12 @@ class CAPIServer:
                     # 內部錯誤不斷線，繼續等待下一筆
 
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
+            close_reason = "socket_error"
+            logger.error(
+                "[TCP_SOCKET_ERROR] %s error=%s errno=%s detail=%s",
+                request_context, type(e).__name__, getattr(e, "errno", None), e,
+                exc_info=True,
+            )
             # 連線層級錯誤 — 客戶端強制斷開
             logger.info(f"[{client_addr}] Connection lost: {e}")
 
@@ -3020,6 +3075,11 @@ class CAPIServer:
                     server_status.connected_machines.remove(machine_label)
                     
             logger.info(f"[{client_addr}] Connection closed (handled {request_count} request(s))")
+            logger.info(
+                "[TCP_CLOSE] %s reason=%s requests_received=%s handled=%s duration_s=%.3f",
+                request_context, close_reason, request_no, request_count,
+                time.monotonic() - connected_at,
+            )
 
     def _load_within_spec_rules_for_inference(self, inferencer: Optional[CAPIInferencer]) -> Dict[str, Any]:
         rules = None

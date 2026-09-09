@@ -53,7 +53,7 @@ def assign_panel_roles(panels):
     for panel in panels.values():
         group = panel["group"].casefold()
         masks[group] = masks.get(group, 0) | sum(1 if z == "inner" else 2 for z in panel["zones"])
-    members = {mask: deque() for mask in (1, 2, 3)}  # INNER, EDGE, both
+    members = {mask: deque() for mask in (0, 1, 2, 3)}  # Outside scope, INNER, EDGE, both
     for group in sorted(masks, key=lambda g: hashlib.sha256(("validation-v1:" + g).encode()).hexdigest()):
         members[masks[group]].append(group)
     totals = {bit: sum(bool(mask & bit) for mask in masks.values()) for bit in (1, 2)}
@@ -102,11 +102,14 @@ def assign_panel_roles(panels):
 def normalize_validation_config(raw, panel_paths=None, panel_modes=None):
     if raw is None or raw == {}:
         return {}
-    if not isinstance(raw, dict) or set(raw) - {"panels", "max_false_positive_rate", "max_miss_rate", "split_mode"}:
+    if not isinstance(raw, dict) or set(raw) - {"panels", "max_false_positive_rate", "max_miss_rate", "split_mode", "selected_zones"}:
         raise ValueError("validation_config 格式錯誤")
     auto = raw.get("split_mode") in ("auto_batch", "auto_panel")
     if "split_mode" in raw and not auto:
         raise ValueError("不支援的資料分組方式")
+    selected_zones = raw.get("selected_zones", ["inner", "edge"])
+    if not isinstance(selected_zones, list) or not selected_zones or any(z not in ("inner", "edge") for z in selected_zones):
+        raise ValueError("重訓區域必須為 INNER／EDGE")
     panels = raw.get("panels")
     if not isinstance(panels, dict) or not panels:
         raise ValueError("請指定訓練、校正、驗收 panel 與批次")
@@ -139,9 +142,9 @@ def normalize_validation_config(raw, panel_paths=None, panel_modes=None):
         clean[key] = {"role": role, "group": group}
         if zone_aware:
             zones = zone_selection.get(key, item.get("zones", ["inner", "edge"]))
-            if not isinstance(zones, list) or not zones or any(z not in ("inner", "edge") for z in zones):
+            if not isinstance(zones, list) or (not zones and "selected_zones" not in raw) or any(z not in ("inner", "edge") for z in zones):
                 raise ValueError("PANEL 訓練區域必須為 INNER／EDGE")
-            clean[key]["zones"] = sorted(set(zones))
+            clean[key]["zones"] = sorted(set(zones) & set(selected_zones))
     if zone_aware:
         assign_panel_roles(clean)
     elif auto:
@@ -151,6 +154,8 @@ def normalize_validation_config(raw, panel_paths=None, panel_modes=None):
     if panel_paths is not None and set(clean) != {path_key(p) for p in panel_paths}:
         raise ValueError("驗收用途設定必須與選取的 panel 完全一致")
     result = {"panels": clean}
+    if "selected_zones" in raw:
+        result["selected_zones"] = sorted(set(selected_zones))
     if auto:
         result["split_mode"] = raw["split_mode"]
     for key in ("max_false_positive_rate", "max_miss_rate"):
@@ -210,19 +215,35 @@ def seal_reports(bundle_dir, unit_metrics):
             write_json(path, report)
 
 
-def load_report(bundle_dir, unit_label):
+def run_manifest_path(bundle_dir, job_id):
+    if not job_id or job_id in (".", "..") or any(c in job_id for c in "/\\:"):
+        raise ValueError("invalid job id")
+    return Path(bundle_dir) / "validation_reports" / job_id / "manifest.json"
+
+
+def load_report(bundle_dir, unit_label, report_path=None):
     # Unit comes from manifest/model mapping, never an arbitrary relative path.
     if not unit_label or any(c in unit_label for c in "/\\."):
         raise ValueError("invalid unit")
     bundle_dir = Path(bundle_dir)
-    report = json.loads((bundle_dir / "validation_reports" / unit_label / "report.json").read_text(encoding="utf-8"))
+    from capi_model_registry import _read_manifest
+    metrics = (_read_manifest(bundle_dir).get("unit_metrics") or {}).get(unit_label) or {}
+    current_path = (metrics.get("validation") or {}).get("report_path")
+    if report_path is None:
+        report_path = current_path or f"validation_reports/{unit_label}/report.json"
+    path = (bundle_dir / report_path).resolve()
+    path.relative_to((bundle_dir / "validation_reports").resolve())
+    report = json.loads(path.read_text(encoding="utf-8"))
+    if report["unit_label"] != unit_label:
+        raise ValueError("驗收報告與子模型不一致")
     model = bundle_dir / Path(report["model_file"]).name
-    report["stale"] = (sha256_file(model) != report["model_sha256"] or
-                       recipe_fingerprint(bundle_dir) != report.get("recipe_sha256"))
+    report["stale"] = (not model.is_file() or sha256_file(model) != report["model_sha256"] or
+                       recipe_fingerprint(bundle_dir) != report.get("recipe_sha256") or
+                       bool(current_path and (bundle_dir / current_path).resolve() != path))
     return report
 
 
-def adopt_threshold(db, bundle_id, unit_label):
+def adopt_threshold(db, bundle_id, unit_label, report_path=None, expected_job_id=None):
     from capi_model_registry import update_threshold
     bundle = db.get_model_bundle(bundle_id)
     if not bundle:
@@ -230,13 +251,17 @@ def adopt_threshold(db, bundle_id, unit_label):
     if bundle.get("is_active"):
         raise ValueError("此模型已啟用；請先停用，再採用建議門檻")
     root = Path(bundle["bundle_path"])
-    report = load_report(root, unit_label)
+    report = load_report(root, unit_label, report_path)
+    if expected_job_id is not None and report.get("job_id") != expected_job_id:
+        raise ValueError("驗收報告不屬於本次訓練")
     if report["stale"]:
         raise ValueError("模型或前處理設定已變更，此份報告僅供歷史參考")
     if report["suggested_threshold"] is None or report["status"] == "insufficient":
         raise ValueError("資料不足，沒有可採用的建議門檻")
     lighting, zone = unit_label.rsplit("-", 1)
-    audit_path = root / "validation_reports" / unit_label / "adoptions.json"
+    report_dir = ((root / report_path).parent if report_path else
+                  (run_manifest_path(root, report["job_id"]).parent if report.get("job_id") else root / "validation_reports") / unit_label)
+    audit_path = report_dir / "adoptions.json"
     audit = json.loads(audit_path.read_text(encoding="utf-8")) if audit_path.exists() else []
     import yaml
     config = yaml.safe_load((root / "machine_config.yaml").read_text(encoding="utf-8"))
@@ -277,13 +302,13 @@ def meets_targets(metrics, config):
     ) for key, metric in (("max_false_positive_rate", "false_positive_rate"), ("max_miss_rate", "miss_rate")))
 
 
-def suggest_threshold(calibration, config):
+def suggest_threshold(calibration, config, baseline_threshold=0.35):
     """Search deployable four-decimal thresholds using calibration data only."""
     ok = sorted(s["score"] for s in calibration if s["label"] == "ok")
     ng = sorted(s["score"] for s in calibration if s["label"] == "ng")
     if not ok or not ng:
         return None
-    candidates = {0.0, 0.35, 10.0}
+    candidates = {0.0, round(baseline_threshold, 4), 10.0}
     for score in ok + ng:
         tick = math.floor(score * 10000)
         candidates.update((max(0, tick) / 10000, min(100000, tick + 1) / 10000))
@@ -292,15 +317,15 @@ def suggest_threshold(calibration, config):
         fp = (len(ok) - bisect_left(ok, threshold)) / len(ok)
         miss = bisect_left(ng, threshold) / len(ng)
         feasible = meets_targets({"false_positive_rate": fp, "miss_rate": miss}, config)
-        ranked.append(((not feasible, fp + miss, miss, abs(threshold - 0.35), threshold), threshold))
+        ranked.append(((not feasible, fp + miss, miss, abs(threshold - baseline_threshold), threshold), threshold))
     return min(ranked)[1]
 
 
-def build_report(samples, config, *, complete=True, issues=None):
+def build_report(samples, config, *, complete=True, issues=None, baseline_threshold=0.35):
     calibration = [s for s in samples if s["role"] == "calibration"]
     acceptance = [s for s in samples if s["role"] == "acceptance"]
-    suggested = suggest_threshold(calibration, config) if complete else None
-    baseline = rates(acceptance, 0.35)
+    suggested = suggest_threshold(calibration, config, baseline_threshold) if complete else None
+    baseline = rates(acceptance, baseline_threshold)
     proposed = rates(acceptance, suggested) if suggested is not None else None
     calibrated = rates(calibration, suggested) if suggested is not None else None
     reasons = list(issues or [])
@@ -321,12 +346,12 @@ def build_report(samples, config, *, complete=True, issues=None):
     grouped = {}
     for group in sorted({s["group"] for s in acceptance}):
         items = [s for s in acceptance if s["group"] == group]
-        grouped[group] = {"baseline": rates(items, 0.35), "suggested": rates(items, suggested) if suggested is not None else None}
+        grouped[group] = {"baseline": rates(items, baseline_threshold), "suggested": rates(items, suggested) if suggested is not None else None}
     return {"schema_version": 1, "scope": "exported_model_tile_score_before_production_filters",
             "label_source": "review_decision" if config.get("split_mode") == "auto_panel" else "manual_label",
             "grouping": "panel_id" if config.get("split_mode") == "auto_panel" else "batch",
             "created_at": datetime.now(timezone.utc).isoformat(), "status": status, "reasons": reasons,
-            "baseline_threshold": 0.35, "suggested_threshold": suggested,
+            "baseline_threshold": baseline_threshold, "suggested_threshold": suggested,
             "selection_rule": "calibration_only: satisfy configured limits, then minimize FPR + miss rate",
             "targets": {k: config.get(k) for k in ("max_false_positive_rate", "max_miss_rate")},
             "calibration": calibrated, "baseline": baseline, "suggested": proposed,
@@ -338,9 +363,9 @@ def validation_tiles(db, job_id, lighting, zone, config=None):
             if t.get("dataset_role") in ("calibration", "acceptance")], config or {})
 
 
-def freeze_inputs(tiles, train_tiles, bundle_dir, unit_label):
+def freeze_inputs(tiles, train_tiles, bundle_dir, unit_label, job_id=None):
     """Persist labels, input hashes and evaluation images before model fitting."""
-    report_dir = Path(bundle_dir) / "validation_reports" / unit_label
+    report_dir = (run_manifest_path(bundle_dir, job_id).parent if job_id else Path(bundle_dir) / "validation_reports") / unit_label
     assets_dir = report_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     frozen, issues = [], []
@@ -377,14 +402,14 @@ def freeze_inputs(tiles, train_tiles, bundle_dir, unit_label):
     return frozen, issues
 
 
-def evaluate_model(model_path, tiles, train_tiles, config, bundle_dir, unit_label, log, cancel_event=None, frozen_inputs=None):
+def evaluate_model(model_path, tiles, train_tiles, config, bundle_dir, unit_label, log, cancel_event=None, frozen_inputs=None, *, baseline_threshold=0.35, job_id=None, fail_on_error=False):
     """Stream already-preprocessed tiles through one exported inferencer."""
     import cv2
     from anomalib.deploy import TorchInferencer
 
-    frozen, input_issues = frozen_inputs if frozen_inputs is not None else freeze_inputs(tiles, train_tiles, bundle_dir, unit_label)
+    frozen, input_issues = frozen_inputs if frozen_inputs is not None else freeze_inputs(tiles, train_tiles, bundle_dir, unit_label, job_id)
     issues = list(input_issues)
-    report_dir = Path(bundle_dir) / "validation_reports" / unit_label
+    report_dir = (run_manifest_path(bundle_dir, job_id).parent if job_id else Path(bundle_dir) / "validation_reports") / unit_label
     scores = []
     inferencer = TorchInferencer(path=str(model_path)) if frozen else None
     try:
@@ -401,14 +426,18 @@ def evaluate_model(model_path, tiles, train_tiles, config, bundle_dir, unit_labe
                     raise ValueError("模型分數無效或超出門檻可設定範圍")
                 scores.append({**item, "score": score})
             except Exception as exc:
+                if fail_on_error or "out of memory" in str(exc).lower():
+                    raise
                 issues.append(f"tile #{item['tile_id']} 推論失敗：{exc}")
             if (index + 1) % 100 == 0:
                 log(f"{unit_label}: 獨立校正／驗收 {index + 1}/{len(frozen)}")
     finally:
         del inferencer
-    report = build_report(scores, config, complete=not issues, issues=issues)
+    report = build_report(scores, config, complete=not issues, issues=issues, baseline_threshold=baseline_threshold)
     report.update(unit_label=unit_label, model_sha256=sha256_file(model_path),
                   model_file=Path(model_path).name, validation_config=config)
+    if job_id:
+        report["job_id"] = job_id
     write_json(report_dir / "report.json", report)
     return {"report_path": (report_dir / "report.json").relative_to(bundle_dir).as_posix(),
-            "status": report["status"], "suggested_threshold": report["suggested_threshold"]}
+            "status": report["status"], "suggested_threshold": report["suggested_threshold"], "job_id": job_id}

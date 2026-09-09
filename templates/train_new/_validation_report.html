@@ -10,18 +10,19 @@
     {% if report.label_source == 'review_decision' %}<p>本次依 PANEL ID 分組；保留切片視為 OK，排除切片視為 NG。NG 結果代表對本次排除項目（含 MARK、貼紙等）的辨識能力。</p>{% endif %}
     {% for reason in report.reasons %}<p>{{ reason }}</p>{% endfor %}
     <p>目前門檻 {{ report.current_threshold|default('—') }} ／ 建議門檻 {{ report.suggested_threshold if report.suggested_threshold is not none else '—' }}</p>
-    {% if report.current_threshold is defined and report.current_threshold not in [0.35, report.suggested_threshold] %}<p>目前門檻不在本次比較範圍，不能引用這份報告作為目前門檻的驗收結果。</p>{% endif %}
+    {% if report.current_threshold is defined and report.current_threshold not in [report.baseline_threshold, report.suggested_threshold] %}<p>目前門檻不在本次比較範圍，不能引用這份報告作為目前門檻的驗收結果。</p>{% endif %}
     {% if report.targets %}<p>目標：OK 誤判率 ≤ {{ percentage(report.targets.max_false_positive_rate) }}；NG 漏檢率 ≤ {{ percentage(report.targets.max_miss_rate) }}</p>{% endif %}
     <table style="width:100%;text-align:left;border-collapse:collapse;">
       <thead><tr><th>資料／門檻</th><th>OK 誤判 / OK 數</th><th>誤判率</th><th>NG 漏檢 / NG 數</th><th>漏檢率</th></tr></thead>
       <tbody>
-      {% for label, metrics in [('校正／建議門檻', report.calibration), ('驗收／原 0.35', report.baseline), ('驗收／建議門檻', report.suggested)] %}
+      {% for label, metrics in [('校正／建議門檻', report.calibration), ('驗收／原門檻 ' ~ report.baseline_threshold, report.baseline), ('驗收／建議門檻', report.suggested)] %}
       {% if metrics %}<tr><td>{{ label }}</td><td>{{ metrics.false_positives }} / {{ metrics.ok_count }}</td><td>{{ percentage(metrics.false_positive_rate) }}</td><td>{{ metrics.misses }} / {{ metrics.ng_count }}</td><td>{{ percentage(metrics.miss_rate) }}</td></tr>{% endif %}
       {% endfor %}
       </tbody>
     </table>
     {% if not report.stale and report.suggested_threshold is not none and report.status != 'insufficient' %}
       {% if report.current_threshold == report.suggested_threshold %}<p>目前已使用建議門檻。</p>
+      {% elif validation_adoption_blocked|default(false) %}<p>模型目前已啟用；停用後可採用建議門檻。</p>
       {% else %}<button type="button" onclick="adoptValidationThreshold(this)" data-unit="{{ report.unit_label }}">採用建議門檻（不啟用模型）</button>{% endif %}
     {% endif %}
     {% if report.download_url %}<p><a href="{{ report.download_url }}" target="_blank" rel="noopener">完整報告與逐張分數 JSON</a></p>{% endif %}
