@@ -348,6 +348,7 @@ def build_report(samples, config, *, complete=True, issues=None, baseline_thresh
         items = [s for s in acceptance if s["group"] == group]
         grouped[group] = {"baseline": rates(items, baseline_threshold), "suggested": rates(items, suggested) if suggested is not None else None}
     return {"schema_version": 1, "scope": "exported_model_tile_score_before_production_filters",
+            "automatic_ng_count": sum(1 for s in samples if s.get("auto_exclusion") and s.get("label") == "ng"),
             "label_source": "review_decision" if config.get("split_mode") == "auto_panel" else "manual_label",
             "grouping": "panel_id" if config.get("split_mode") == "auto_panel" else "batch",
             "created_at": datetime.now(timezone.utc).isoformat(), "status": status, "reasons": reasons,
@@ -394,11 +395,12 @@ def freeze_inputs(tiles, train_tiles, bundle_dir, unit_label, job_id=None):
             continue
         frozen.append({"tile_id": tile["id"], "role": role, "label": tile["validation_label"],
                        "label_source": tile.get("label_source", "manual_label"), "decision": tile.get("decision"),
+                       "auto_exclusion": tile.get("auto_exclusion"),
                        "group": tile["validation_group"], "panel_path": tile.get("panel_path"),
                        "source_path": str(source), "sha256": digest,
                        "asset_path": asset.relative_to(bundle_dir).as_posix()})
     write_json(report_dir / "inputs.json", {"training": train_inputs, "samples": frozen,
-               "decisions": [{k: t.get(k) for k in ("id", "panel_path", "dataset_role", "validation_group", "validation_label", "decision")} for t in tiles]})
+               "decisions": [{k: t.get(k) for k in ("id", "panel_path", "dataset_role", "validation_group", "validation_label", "decision", "auto_exclusion")} for t in tiles]})
     return frozen, issues
 
 

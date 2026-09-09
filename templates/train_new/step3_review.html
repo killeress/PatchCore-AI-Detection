@@ -71,6 +71,7 @@
   </div>
 
   <div id="auto-split-summary" style="margin:12px 0;color:#a6adc8;"></div>
+  {% include "train_new/_auto_exclude.html" %}
   <div id="oom-warning" role="status" style="margin:12px 0;color:#f9e2af;white-space:pre-line;"></div>
   <details style="margin:12px 0;color:#a6adc8;"><summary>各 PT 訓練張數與顯存估算</summary>
     <div id="training-memory"></div>
@@ -589,12 +590,13 @@ function render() {
       const focusCls = t.id === _focusedTileId ? ' focused' : '';
       const thumb = t.thumb_url || '';
       const zoneLabel = t.source === 'ng' ? `NG${t.zone ? '·' + t.zone : ''}` : (t.zone || '');
+      const reason = t.auto_exclusion ? (t.auto_exclusion.kind === 'region' ? '固定區域' : '局部黑點') : '';
       const label = `${_currentLighting} / ${zoneLabel} / #${t.id}`;
       const quartile = t.score_quartile || '';
       const scoreLabel = t.decision_review ? `<span class="score-badge">${t.decision === 'accept' ? 'OK' : 'NG'}</span>` : t.auto_review || ['calibration', 'acceptance'].includes(t.dataset_role)
         ? `<span class="score-badge">${t.validation_label ? t.validation_label.toUpperCase() : '待標記'}</span>`
         : (t.score != null) ? `<span class="score-badge">${t.score.toFixed(2)}</span>` : '';
-      html += `<div class="tile ${tileCls}${focusCls}" data-id="${t.id}" data-score-quartile="${quartile}" title="單擊放大，雙擊加入/排除" style="background-image:url('${thumb}');" onclick="handleTileClick(this,event)" ondblclick="handleTileDoubleClick(this,event)" aria-label="${label}">${scoreLabel}</div>`;
+      html += `<div class="tile ${tileCls}${focusCls}" data-id="${t.id}" data-score-quartile="${quartile}" title="${reason ? '規則：'+reason+'；' : ''}單擊放大，雙擊加入/排除" style="background-image:url('${thumb}');" onclick="handleTileClick(this,event)" ondblclick="handleTileDoubleClick(this,event)" aria-label="${label}">${scoreLabel}${reason ? `<span style="position:absolute;bottom:22px;left:2px;background:#313244;color:#f9e2af;font-size:10px;">${reason}</span>` : ''}</div>`;
     }
     html += '</div>';
   }
@@ -1063,7 +1065,7 @@ async function startTraining() {
 document.addEventListener('keydown', (e) => {
   // 文字輸入欄位優先（避免攔截）
   const t = e.target;
-  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.closest('#auto-exclude-panel') || t.isContentEditable)) return;
   // capModal 開著時讓 modal 自己處理 Esc/Enter，避免 Enter 在背景開 tile preview
   const capRoot = document.getElementById('cap-modal-root');
   if (capRoot && capRoot.getAttribute('aria-hidden') === 'false') return;

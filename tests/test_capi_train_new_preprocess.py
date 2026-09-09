@@ -87,6 +87,8 @@ def test_preprocess_panels_to_pool_writes_tiles(tmp_path):
     assert isinstance(first_tile["tile_y"], int)
     assert first_tile["tile_width"] == 256
     assert first_tile["tile_height"] == 256
+    assert len(first_tile["review_geometry"]["panel_bbox"]) == 4
+    assert Path(first_tile["review_geometry"]["preview_path"]).is_file()
 
 
 def test_preprocess_panels_to_pool_accepts_aapi_glass_prefixed_images(tmp_path):

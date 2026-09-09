@@ -4006,6 +4006,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 return
             elif path == "/api/train/new/tiles/decision":
                 self._handle_train_new_tiles_decision()
+            elif path == "/api/train/new/auto_exclude":
+                self._handle_train_new_auto_exclude()
                 return
             elif path.startswith("/api/train/new/cancel/"):
                 self._handle_train_new_cancel()
@@ -16227,6 +16229,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 **ng_kwargs,
             )
 
+            from capi_review_rules import apply_saved_rules
+            apply_saved_rules(db, job_id, log)
             db.update_training_job_state(job_id, "review")
             runtime["phase"] = "review"
             log("✓ 進入 review 階段")
@@ -16337,7 +16341,11 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         from capi_train_new import estimate_patchcore_feature_memory, PATCHCORE_FEATURE_LAYERS_DEFAULT
         tiles = review_decision_labels(tiles, config)
         auto_review = config.get("split_mode") in ("auto_batch", "auto_panel")
+        from capi_review_rules import geometry
         for tile in tiles:
+            tile["review_geometry"] = geometry(tile)
+            tile["panel_preview_url"] = self._train_new_thumb_url(tile["review_geometry"].get("preview_path"))
+            tile["auto_exclusion"] = json.loads(tile["auto_exclusion"]) if tile.get("auto_exclusion") else None
             tile["auto_review"] = bool(auto_review)
             tile["decision_review"] = config.get("split_mode") == "auto_panel"
             tile["thumb_url"] = self._train_new_thumb_url(tile.get("thumb_path"))
@@ -16364,6 +16372,34 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             payload["auto_split"] = {role: len({p["group"].casefold() for p in panels if p["role"] == role}) for role in ("train", "calibration", "acceptance")}
             payload["auto_split"]["decision_review"] = config.get("split_mode") == "auto_panel"
         self._send_json(payload)
+
+    def _handle_train_new_auto_exclude(self):
+        from capi_review_rules import apply_rules, normalize_rules
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            if not isinstance(body, dict):
+                raise ValueError("請提供排除設定")
+            if not isinstance(body.get("job_id"), str) or not isinstance(body.get("lighting"), str):
+                raise ValueError("請提供訓練任務與畫面")
+            db = self._capi_server_instance.database
+            job = db.get_training_job(body.get("job_id"))
+            if not job or job["state"] != "review":
+                self._send_json({"error": "僅能在切片審核階段使用"}, status=409)
+                return
+            lighting, zone = body.get("lighting"), body.get("zone")
+            scope = (job.get("training_scope") or {}).get("selected_units")
+            if zone not in ("inner", "edge") or (scope is not None and f"{lighting}-{zone}" not in scope):
+                raise ValueError("請選擇本次訓練的畫面與 INNER／EDGE")
+            if body.get("action") == "load":
+                rules = db.get_review_rules(job["machine_id"], lighting, zone)
+                self._send_json({"rules": normalize_rules(rules or {})})
+                return
+            if body.get("action") != "apply":
+                raise ValueError("操作無效")
+            summary = apply_rules(db, job, lighting, zone, body.get("rules"), save=True)
+            self._send_json(summary)
+        except (ValueError, TypeError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
 
     def _handle_train_new_preprocess_pipeline_preview(self):
         """POST /api/train/new/preprocess_pipeline_preview

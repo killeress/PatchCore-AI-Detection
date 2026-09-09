@@ -555,6 +555,24 @@ def preprocess_panels_to_pool(
                 continue
             if target_lighting_set is not None and lighting not in target_lighting_set:
                 continue
+            review_geometry = None
+            bbox = getattr(result, "foreground_bbox", None)
+            if bbox is not None:
+                # Keep the original panel coordinate frame for reusable review ROIs.
+                panel_image = cv2.imread(str(result.image_path), cv2.IMREAD_GRAYSCALE)
+                if panel_image is not None:
+                    x1, y1, x2, y2 = map(int, bbox)
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(panel_image.shape[1], x2), min(panel_image.shape[0], y2)
+                    if x2 > x1 and y2 > y1:
+                        cropped = panel_image[y1:y2, x1:x2]
+                        scale = min(1.0, 1200 / max(cropped.shape))
+                        preview = cv2.resize(cropped, (max(1, round((x2-x1)*scale)), max(1, round((y2-y1)*scale))))
+                        preview_path = thumb_dir / "thumb" / f"{job_id}_{idx}_{source_lighting}_panel.jpg"
+                        if cv2.imwrite(str(preview_path), preview):
+                            review_geometry = {"panel_bbox": [x1, y1, x2, y2],
+                                               "preview_path": str(preview_path.resolve())}
+                    del panel_image
             for tile in result.tiles:
                 if target_unit_set is not None and f"{lighting}-{tile.zone}" not in target_unit_set:
                     continue
@@ -581,6 +599,7 @@ def preprocess_panels_to_pool(
                     "lighting": lighting,
                     "zone": tile.zone,
                     "source": "ok",
+                    "review_geometry": review_geometry,
                     "dataset_role": panel_validation.get("role", "train"),
                     "validation_group": panel_validation.get("group", ""),
                     "source_path": str(tile_path.resolve()),
