@@ -334,3 +334,45 @@ AOI@... first
 現行順序是 AOI 第一行、QJPG 第二行。
 新線體若要接 QJPG，請確認 client 是讀第二行或依 prefix 掃描；如果只能讀第一行，我們需要調整 Server 回覆順序。
 ```
+
+## 12. TCP 收送與斷線日誌
+
+啟用檔案 logging 時，以下紀錄會寫入設定的 `server.log`（含輪替檔）；透過
+`start_server.sh` 啟動時，console 輸出也會寫入 `server_output_啟動日期.log`。
+每條連線有獨立的 `conn` 識別碼及 `local` / `peer` 位址；`req` 是該連線的請求序號，
+即使重送同一個 Glass ID 也能區分。解析成功後會加上 `Glass` 與 `Machine`。
+
+| 標記 | 意義 |
+|---|---|
+| `TCP_OPEN` | 連線處理開始，列出 socket timeout；`None` 表示未設定 timeout |
+| `TCP_RECV_WAIT` | 即將讀取 socket；`buffered_bytes` 是目前累積但尚未交付處理的資料量 |
+| `TCP_RECV` | Server 程式已讀到資料，列出本次與累積 bytes |
+| `TCP_REQUEST` | 請求已解析，能對照 Glass ID 與機台 |
+| `>>` | 回覆內容已產生，尚不能證明開始傳送 |
+| `TCP_SEND_BEGIN` | 即將呼叫 `sendall()`，列出 bytes、timeout 與回覆種類 `kind` |
+| `TCP_SEND_OK` | `sendall()` 正常返回，列出傳送耗時 `elapsed_ms` |
+| `TCP_SEND_FAILED` | 傳送報錯，列出耗時、例外類型、errno 與完整 Traceback |
+| `TCP_RECV_EOF` | Server 讀到 EOF，對端已結束傳送方向 |
+| `TCP_RECV_TIMEOUT` | 接收等待逾時；有累積資料時可能是訊息尚未完整 |
+| `TCP_SOCKET_ERROR` | 外層 socket 例外，例如接收時連線遭重設 |
+| `TCP_CLOSE` | Server 關閉此連線，列出原因、請求數、原有 handled 計數與連線存續秒數 |
+
+`kind` 區分一般結果 `result`、畫異 `hy`、協議錯誤 `protocol_error` 與內部錯誤
+`internal_error`。請求序號包含解析失敗的請求；接收等待期間的 `req` 指向下一筆候選請求，
+並不代表已收到該筆。`handled` 沿用既有計數，只計一般結果與 HY 成功傳送的筆數。
+
+`TCP_SEND_OK` 只證明資料已交給本機 socket，不證明對端 TCP 已確認或 client 應用程式
+已接收／解析。傳送失敗也可能已送出部分資料，`bytes` 是原定傳送量，不是成功送達量。
+斷線紀錄時間是 Server 偵測時間，不一定是實際故障開始時間；EOF 也可能只是 TCP 半關閉，
+不能據此判定整個 client 程式退出。這些 log 不新增 timeout、重試或主動斷線機制。
+
+若同一 `conn` / `req` 有 `TCP_SEND_BEGIN` 而未見 `TCP_SEND_OK` 或 `TCP_SEND_FAILED`，
+表示尚無傳送結束紀錄，應搭配程序執行緒與 TCP 狀態檢查；不能只靠缺少 log 判定責任端。
+若有 `>>` 卻沒有 `TCP_SEND_BEGIN`，應檢查回覆產生至傳送前的 Server 流程。
+
+現場可在 logs 目錄查詢（也需保留 client 同時間的收送紀錄）：
+
+```bash
+grep -nE 'TCP_(OPEN|RECV|REQUEST|SEND|SOCKET_ERROR|CLOSE)' server.log*
+grep -nF 'conn=實際識別碼' server.log*
+```

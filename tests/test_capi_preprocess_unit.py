@@ -18,6 +18,8 @@ def test_preprocess_config_defaults():
     assert cfg.edge_threshold_px == 768
     assert cfg.coverage_min == 0.3
     assert cfg.large_panel_raw_boundary_enabled is False
+    assert cfg.large_panel_min_width_ratio == 0.85
+    assert cfg.large_panel_min_height_ratio == 0.80
 
 
 def test_tile_result_zone_values():

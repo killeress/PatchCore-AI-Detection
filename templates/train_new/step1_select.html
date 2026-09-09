@@ -365,7 +365,7 @@
 
   <!-- padding-bottom 預留高度給 sticky 操作條，確保列表最後幾筆不會被遮住 -->
   <div style="margin-top:16px;padding:14px;background:#313244;border-radius:8px;">
-    <label><input id="validation-auto" type="checkbox" {% if training_scope.mode != 'partial' %}checked{% else %}disabled{% endif %}>自動校正與驗收</label>
+    <label><input id="validation-auto" type="checkbox" checked>自動校正與驗收</label>
     <p>只選一次資料，下一步沿用加入／排除：保留＝OK，排除＝NG，不需額外標記。NG 不加入正常訓練資料。</p>
     <p>系統依 PANEL ID（Glass ID）及勾選的 INNER／EDGE 分配用途，同一 ID 不跨訓練、校正、驗收。每個區域至少需三個不同 ID 才能完整分組；下一步會分別顯示各區域的實際分配與缺少資料。</p>
   </div>
@@ -1660,7 +1660,7 @@ function submitStart() {
     : {type: 'inference_records'};
   if (params) body.training_params = params;
   const validationPanels = Object.fromEntries(panelPaths.map(path => [path, _validationPanels.get(path)]));
-  if (TRAINING_SCOPE.mode !== 'partial' && document.getElementById('validation-auto').checked) {
+  if (document.getElementById('validation-auto').checked) {
     const validation = {split_mode: 'auto_panel', panels: validationPanels};
     for (const [id, key] of [['validation-max-fp', 'max_false_positive_rate'], ['validation-max-miss', 'max_miss_rate']]) {
       const input = document.getElementById(id);

@@ -9516,6 +9516,12 @@ class CAPIInferencer:
             large_panel_raw_boundary_enabled=(
                 self.station_adapter.profile in ("capi", "aapi")
             ),
+            large_panel_min_width_ratio=(
+                0.75 if self.station_adapter.profile == "capi" else 0.85
+            ),
+            large_panel_min_height_ratio=(
+                0.60 if self.station_adapter.profile == "capi" else 0.80
+            ),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
             product_resolution=product_resolution or self._product_resolution(),
             grid_canonicalization_enabled=getattr(

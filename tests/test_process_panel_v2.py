@@ -162,6 +162,8 @@ def test_process_panel_v2_ignores_client_product_resolution(tmp_path, monkeypatc
         captured["large_panel_raw_boundary_enabled"] = (
             pre_cfg.large_panel_raw_boundary_enabled
         )
+        captured["large_panel_min_width_ratio"] = pre_cfg.large_panel_min_width_ratio
+        captured["large_panel_min_height_ratio"] = pre_cfg.large_panel_min_height_ratio
         return {}
 
     monkeypatch.setattr("capi_preprocess.preprocess_panel_folder", fake_preprocess_panel_folder)
@@ -173,6 +175,8 @@ def test_process_panel_v2_ignores_client_product_resolution(tmp_path, monkeypatc
 
     assert captured["product_resolution"] == (1920, 1200)
     assert captured["large_panel_raw_boundary_enabled"] is True
+    assert captured["large_panel_min_width_ratio"] == 0.75
+    assert captured["large_panel_min_height_ratio"] == 0.60
 
 
 def test_process_panel_v2_enables_large_panel_raw_boundary_for_aapi(
@@ -189,6 +193,8 @@ def test_process_panel_v2_enables_large_panel_raw_boundary_for_aapi(
         captured["large_panel_raw_boundary_enabled"] = (
             pre_cfg.large_panel_raw_boundary_enabled
         )
+        captured["large_panel_min_width_ratio"] = pre_cfg.large_panel_min_width_ratio
+        captured["large_panel_min_height_ratio"] = pre_cfg.large_panel_min_height_ratio
         return {}
 
     monkeypatch.setattr("capi_preprocess.preprocess_panel_folder", fake_preprocess_panel_folder)
@@ -201,6 +207,8 @@ def test_process_panel_v2_enables_large_panel_raw_boundary_for_aapi(
     inferencer.process_panel(tmp_path)
 
     assert captured["large_panel_raw_boundary_enabled"] is True
+    assert captured["large_panel_min_width_ratio"] == 0.85
+    assert captured["large_panel_min_height_ratio"] == 0.80
 
 
 def test_grid_model_requires_matching_model_name_resolution(tmp_path, monkeypatch):

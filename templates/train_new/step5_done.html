@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}訓練完成 · {{ machine_id }}{% endblock %}
 {% block content %}
+{% set is_partial = training_scope is defined and training_scope.mode == 'partial' %}
 {% set grade_labels = {
   "excellent": "優秀",
   "good": "良好",
@@ -19,7 +20,7 @@
     <div class="d5-hero-tag">// 訓練報告 · Step 6 / 6</div>
     <h1 class="d5-hero-title">
       <span class="d5-hero-check">▰</span>
-      訓練完成
+      {{ '局部重訓完成' if is_partial else '訓練完成' }}
     </h1>
     <div class="d5-hero-machine">
       <span class="d5-meta-label">機種</span>
@@ -50,7 +51,7 @@
   <div class="d5-stats">
     {# AUROC 卡片：用顏色強烈表達 grade（excellent/good/fair/poor/fail） #}
     <div class="d5-stat d5-stat-hero d5-grade-{{ overall_auroc_grade_slug }}">
-      <div class="d5-stat-label">整體 AUROC</div>
+      <div class="d5-stat-label">{{ '本次重訓 AUROC' if is_partial else '整體 AUROC' }}</div>
       <div class="d5-stat-value">
         {% if overall_auroc is not none %}{{ "%.4f"|format(overall_auroc) }}{% else %}—{% endif %}
       </div>
@@ -69,7 +70,7 @@
       <div class="d5-stat-sub"><span class="d5-stat-hint">{{ units|length }} 個子模型累計耗時</span></div>
     </div>
     <div class="d5-stat">
-      <div class="d5-stat-label">模型包大小</div>
+      <div class="d5-stat-label">{{ '本次重訓 PT 大小' if is_partial else '模型包大小' }}</div>
       <div class="d5-stat-value">
         {{ "%.1f"|format(total_size_mb) }}<span class="d5-stat-unit">MB</span>
       </div>

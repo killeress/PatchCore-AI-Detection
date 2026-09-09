@@ -1,5 +1,6 @@
 """模型庫 CRUD：掃描/同步、列表、啟用/停用、刪除、ZIP 匯出。"""
 from __future__ import annotations
+from contextlib import contextmanager
 import io
 import json
 import logging
@@ -876,6 +877,47 @@ def append_submodel_history(
     _write_manifest(bundle_dir, manifest)
 
 
+@contextmanager
+def install_partial_training(bundle_dir: Path, candidate_dir: Path):
+    """Install prepared PTs/reports, restoring every replaced file on failure."""
+    import os
+    import tempfile
+
+    bundle_dir = bundle_dir.resolve()
+    candidate_dir = candidate_dir.resolve()
+    files = sorted(
+        (p.relative_to(candidate_dir) for p in candidate_dir.rglob("*")
+         if p.is_file() and p.relative_to(candidate_dir) != Path("machine_config.yaml")),
+        key=lambda p: (p == Path("manifest.json"), p.as_posix()),
+    )
+    # The worker stages beside the bundle so all replacements stay on one volume.
+    with tempfile.TemporaryDirectory(prefix="backup-", dir=candidate_dir.parent) as backup:
+        backup_dir = Path(backup)
+        for relative in files:
+            target = (bundle_dir / relative).resolve()
+            target.relative_to(bundle_dir)
+            if target.exists():
+                saved = backup_dir / relative
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, saved)
+        replaced = []
+        try:
+            for relative in files:
+                target = bundle_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(candidate_dir / relative, target)
+                replaced.append(relative)
+            yield
+        except Exception:
+            for relative in reversed(replaced):
+                saved = backup_dir / relative
+                if saved.exists():
+                    os.replace(saved, bundle_dir / relative)
+                else:
+                    (bundle_dir / relative).unlink()
+            raise
+
+
 def get_used_tile_ids(bundle_dir: Path, lighting: str, zone: str) -> Optional[set]:
     """讀 manifest 取得該 unit「上次訓練時使用的 tile_pool.id 集合」。
 
@@ -926,6 +968,7 @@ def get_pending_change_count(
         int(t["id"]) for t in db.list_tile_pool(
             job_id, lighting=lighting, zone=zone, source="ok", decision="accept",
         )
+        if t.get("dataset_role", "train") == "train"
     }
     last_used = get_used_tile_ids(bundle_dir, lighting, zone)
 

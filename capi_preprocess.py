@@ -152,6 +152,8 @@ class PreprocessConfig:
     grid_samples_per_cell: int = 3
     rotate_180: bool = False
     large_panel_raw_boundary_enabled: bool = False
+    large_panel_min_width_ratio: float = 0.85
+    large_panel_min_height_ratio: float = 0.80
     image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -214,9 +216,6 @@ BOUNDARY_DETECTION_SCALE = 0.5
 BOUNDARY_DOWNSCALE_MIN_SPAN_TILES = 4
 BOUNDARY_GAUSSIAN_KERNEL = (5, 5)
 BOUNDARY_GAUSSIAN_SIGMA = 1.0
-# Large panels must nearly fill the frame; smaller legacy panels stay below this gate.
-LARGE_PANEL_MIN_WIDTH_RATIO = 0.85
-LARGE_PANEL_MIN_HEIGHT_RATIO = 0.80
 LARGE_PANEL_SIDE_ENDPOINT_TRIM_RATIO = 0.15
 SKIP_EXACT = ("Optics.log",)
 
@@ -229,6 +228,7 @@ MIN_SAMPLES_PER_EDGE = 5
 EDGE_ENDPOINT_TRIM_RATIO = 0.05
 MAX_EDGE_RESIDUAL_P95_RATIO = 0.03
 MIN_EDGE_RESIDUAL_P95_PX = 8.0
+EDGE_RESIDUAL_COMPARISON_EPSILON_PX = 0.1
 SMALL_PRODUCT_MAX_RESOLUTION = (1366, 768)
 # Half-tile edge extension has IoU ~= 1/3 with the original edge row. If
 # polygon inward-shift makes it overlap more than this, it is not a new sample.
@@ -689,26 +689,32 @@ def _detect_large_panel_raw_boundary(
     x1, y1, x2, y2 = bbox
     width_ratio = max(0, x2 - x1) / float(max(1, img_w))
     height_ratio = max(0, y2 - y1) / float(max(1, img_h))
+    min_width_ratio = float(config.large_panel_min_width_ratio)
+    min_height_ratio = float(config.large_panel_min_height_ratio)
     if (
-        width_ratio < LARGE_PANEL_MIN_WIDTH_RATIO
-        or height_ratio < LARGE_PANEL_MIN_HEIGHT_RATIO
+        width_ratio < min_width_ratio
+        or height_ratio < min_height_ratio
     ):
         logger.info(
             "[boundary] source=%s large_panel_raw_boundary=no "
             "reason=small_occupancy "
-            "width_ratio=%.3f height_ratio=%.3f",
+            "width_ratio=%.3f(min=%.3f) height_ratio=%.3f(min=%.3f)",
             source_name or "-",
             width_ratio,
+            min_width_ratio,
             height_ratio,
+            min_height_ratio,
         )
         return bbox, polygon, False
 
     logger.info(
         "[boundary] source=%s large_panel_raw_boundary=yes "
-        "width_ratio=%.3f height_ratio=%.3f",
+        "width_ratio=%.3f(min=%.3f) height_ratio=%.3f(min=%.3f)",
         source_name or "-",
         width_ratio,
+        min_width_ratio,
         height_ratio,
+        min_height_ratio,
     )
     return bbox, polygon, True
 
@@ -801,12 +807,15 @@ def _polyfit_polygon(
             MIN_EDGE_RESIDUAL_P95_PX,
             float(tile_size) * MAX_EDGE_RESIDUAL_P95_RATIO,
         )
-        if residual_p95 > residual_limit:
+        residual_reject_limit = (
+            residual_limit + EDGE_RESIDUAL_COMPARISON_EPSILON_PX
+        )
+        if residual_p95 > residual_reject_limit:
             logger.warning(
                 "[boundary] reject non-linear %s edge: residual_p95=%.1fpx > %.1fpx (%d samples)",
                 "horizontal" if horizontal else "vertical",
                 residual_p95,
-                residual_limit,
+                residual_reject_limit,
                 len(arr),
             )
             return None

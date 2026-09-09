@@ -2167,6 +2167,8 @@ def train_single_submodel(
     log: Callable[[str], None] = print,
     cancel_event=None,
     unit_prefix: str = "",
+    baseline_threshold: float = DEFAULT_THRESHOLD,
+    fail_on_validation_error: bool = False,
 ) -> Dict:
     """訓練單一 (lighting, zone) unit。
 
@@ -2180,7 +2182,8 @@ def train_single_submodel(
       - elapsed_seconds: int
       - size_bytes: int (.pt 檔大小)
 
-    output_pt_path 會被原子覆蓋（同目錄 .pt.tmp → os.replace）。失敗時不動到原檔。
+    output_pt_path 會被原子覆蓋（同目錄 .pt.tmp → os.replace）。
+    局部重訓先輸出暫存目錄，校正／驗收完成後由呼叫端替換正式 PT。
     """
     from contextlib import nullcontext
     import os
@@ -2250,7 +2253,7 @@ def train_single_submodel(
             frozen_inputs = None
             if cfg.validation_config:
                 log(f"{unit_label}: 保存獨立校正／驗收資料快照")
-                frozen_inputs = freeze_inputs(held_out, train_tiles, output_pt_path.parent, unit_label)
+                frozen_inputs = freeze_inputs(held_out, train_tiles, output_pt_path.parent, unit_label, job_id)
                 snapshots = {s["tile_id"]: output_pt_path.parent / s["asset_path"] for s in frozen_inputs[0]}
                 calibration_ok = [{**t, "source_path": str(snapshots[t["id"]])} for t in calibration_ok if t["id"] in snapshots]
                 ng_tiles = [{**t, "source_path": str(snapshots[t["id"]])} for t in ng_tiles if t["id"] in snapshots]
@@ -2341,6 +2344,8 @@ def train_single_submodel(
                 metrics["validation"] = evaluate_model(
                     output_pt_path, held_out, train_tiles, cfg.validation_config,
                     output_pt_path.parent, unit_label, log, cancel_event, frozen_inputs,
+                    baseline_threshold=baseline_threshold, job_id=job_id,
+                    fail_on_error=fail_on_validation_error,
                 )
                 elapsed = time.monotonic() - unit_start
                 metrics["elapsed_seconds"] = int(elapsed)

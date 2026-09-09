@@ -254,7 +254,7 @@ def test_training_stages_only_training_and_calibration_never_acceptance(tmp_path
     monkeypatch.setattr(training, "_calibrate_from_model", lambda *a: (0.1, [0.1], [0.6]))
     staged = []
     def fit(staging, run_root, unit_label, cfg, **kwargs):
-        assert (tmp_path / "bundle" / "validation_reports" / unit_label / "inputs.json").exists()
+        assert (tmp_path / "bundle" / "validation_reports" / "j" / unit_label / "inputs.json").exists()
         train_files = list((staging / "train").iterdir())
         assert len(train_files) == 30
         assert all(p.read_bytes() == Path(rows[0]["source_path"]).read_bytes() for p in train_files)
@@ -270,7 +270,7 @@ def test_training_stages_only_training_and_calibration_never_acceptance(tmp_path
         output.write_bytes(b"model")
         return output
     evaluated = []
-    def evaluate(model, held_out, train, *args):
+    def evaluate(model, held_out, train, *args, **kwargs):
         assert {t["id"] for t in held_out} == {2, 3, 4, 5}
         assert len(train) == 30
         assert all(t["dataset_role"] == "train" for t in train)
