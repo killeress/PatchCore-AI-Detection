@@ -8217,10 +8217,13 @@ class CAPIInferencer:
                             anomaly_map=anomaly_map, product_resolution=product_resolution,
                             bomb_list=active_bombs,
                         )
-                        # AOI coord tile fallback: 若峰值未匹配，改用 tile 中心再試一次
-                        # AOI coord tile 本身就是以 AOI 座標為中心切塊，中心位置更可靠
+                        # AOI fallback 使用原始座標；向內平移後 tile 中心不再是 AOI 位置。
                         if not is_bomb and tile.is_aoi_coord_tile:
-                            tile_cx, tile_cy = tile.center
+                            tile_cx, tile_cy = (
+                                (tile.aoi_image_x, tile.aoi_image_y)
+                                if tile.aoi_image_x >= 0 and tile.aoi_image_y >= 0
+                                else tile.center
+                            )
                             is_bomb, bomb_code = self.check_bomb_match(
                                 img_prefix, tile_cx, tile_cy, result.raw_bounds,
                                 anomaly_map=anomaly_map, product_resolution=product_resolution,
@@ -8296,7 +8299,11 @@ class CAPIInferencer:
                             bomb_list=[bomb], skip_shape_check=True,
                         )
                         if not is_bomb and tile.is_aoi_coord_tile:
-                            tile_cx, tile_cy = tile.center
+                            tile_cx, tile_cy = (
+                                (tile.aoi_image_x, tile.aoi_image_y)
+                                if tile.aoi_image_x >= 0 and tile.aoi_image_y >= 0
+                                else tile.center
+                            )
                             is_bomb, bomb_code = self.check_bomb_match(
                                 img_prefix, tile_cx, tile_cy, result.raw_bounds,
                                 anomaly_map=anomaly_map, product_resolution=product_resolution,
@@ -9072,10 +9079,13 @@ class CAPIInferencer:
                         product_resolution=product_resolution,
                         bomb_list=active_bombs,
                     )
-                    # AOI coord tile fallback: 若 heatmap peak 偏到 tile 邊緣超出 tolerance，
-                    # 改用 tile.center 重試 — AOI tile 的中心就是機檢座標，可信度更高
+                    # AOI fallback 使用原始座標；向內平移後 tile 中心不再是 AOI 位置。
                     if not is_bomb and tile.is_aoi_coord_tile:
-                        tile_cx, tile_cy = tile.center
+                        tile_cx, tile_cy = (
+                            (tile.aoi_image_x, tile.aoi_image_y)
+                            if tile.aoi_image_x >= 0 and tile.aoi_image_y >= 0
+                            else tile.center
+                        )
                         is_bomb, bomb_code = self.check_bomb_match(
                             img_prefix, tile_cx, tile_cy, result.raw_bounds,
                             anomaly_map=anomaly_map,
@@ -9200,7 +9210,11 @@ class CAPIInferencer:
                         bomb_list=[bomb], skip_shape_check=True,
                     )
                     if not is_bomb and tile.is_aoi_coord_tile:
-                        tile_cx, tile_cy = tile.center
+                        tile_cx, tile_cy = (
+                            (tile.aoi_image_x, tile.aoi_image_y)
+                            if tile.aoi_image_x >= 0 and tile.aoi_image_y >= 0
+                            else tile.center
+                        )
                         is_bomb, bomb_code = self.check_bomb_match(
                             img_prefix, tile_cx, tile_cy, result.raw_bounds,
                             anomaly_map=anomaly_map, product_resolution=product_resolution,
