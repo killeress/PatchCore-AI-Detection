@@ -1120,6 +1120,11 @@ class CAPIDatabase:
             add_column_if_not_exists("training_tile_pool", "dataset_role", "TEXT NOT NULL DEFAULT 'train'")
             add_column_if_not_exists("training_tile_pool", "validation_label", "TEXT NOT NULL DEFAULT ''")
             add_column_if_not_exists("training_tile_pool", "validation_group", "TEXT NOT NULL DEFAULT ''")
+            add_column_if_not_exists("training_tile_pool", "review_geometry", "TEXT")
+            add_column_if_not_exists("training_tile_pool", "auto_exclusion", "TEXT")
+            conn.execute("""CREATE TABLE IF NOT EXISTS training_review_rules (
+                machine_id TEXT NOT NULL, lighting TEXT NOT NULL, zone TEXT NOT NULL,
+                rules TEXT NOT NULL, PRIMARY KEY(machine_id, lighting, zone))""")
             # 8 panel wizard：前 3 = full（收 inner+edge），後 5 = corners_only（只收 4 角給 edge 模型補強）
             add_column_if_not_exists("training_jobs", "panel_modes", "TEXT")
             # 6-step wizard：完整訓練或局部重訓 scope（mode / selected_units / target_bundle_id）
@@ -7040,18 +7045,52 @@ class CAPIDatabase:
                     """INSERT INTO training_tile_pool
                        (job_id, lighting, zone, source, source_path, thumb_path,
                         panel_path, tile_index, tile_x, tile_y, tile_width, tile_height,
-                        dataset_role, validation_label, validation_group)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        dataset_role, validation_label, validation_group, review_geometry)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (job_id, t["lighting"], t.get("zone"), t["source"],
                      t["source_path"], t.get("thumb_path"), t.get("panel_path"),
                      t.get("tile_index"), t.get("tile_x"), t.get("tile_y"),
                      t.get("tile_width"), t.get("tile_height"),
                      t.get("dataset_role", "train"), t.get("validation_label", ""),
-                     t.get("validation_group", "")),
+                     t.get("validation_group", ""), json.dumps(t.get("review_geometry"))),
                 )
                 ids.append(cur.lastrowid)
             conn.commit()
             return ids
+        finally:
+            conn.close()
+
+    def get_review_rules(self, machine_id, lighting, zone):
+        conn = self._get_conn()
+        try:
+            row = conn.execute("SELECT rules FROM training_review_rules WHERE machine_id=? AND lighting=? AND zone=?",
+                               (machine_id, lighting, zone)).fetchone()
+            return json.loads(row[0]) if row else None
+        finally:
+            conn.close()
+
+    def apply_review_exclusions(self, job_id, lighting, zone, rules, changes, *, save, expected_state):
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            job = conn.execute("SELECT machine_id, state FROM training_jobs WHERE job_id=?", (job_id,)).fetchone()
+            if not job or job["state"] != expected_state:
+                raise ValueError("資料已凍結，請重新整理")
+            updated = 0
+            for tile_id, evidence in changes:
+                cur = conn.execute("""UPDATE training_tile_pool SET decision='reject', auto_exclusion=?
+                    WHERE id=? AND job_id=? AND lighting=? AND zone=? AND source='ok'
+                      AND decision='accept' AND auto_exclusion IS NULL""",
+                    (evidence, tile_id, job_id, lighting, zone))
+                updated += cur.rowcount
+            if save:
+                conn.execute("INSERT OR REPLACE INTO training_review_rules VALUES (?,?,?,?)",
+                             (job["machine_id"], lighting, zone, json.dumps(rules)))
+            conn.commit()
+            return updated
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 

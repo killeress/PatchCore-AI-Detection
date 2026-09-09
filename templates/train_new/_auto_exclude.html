@@ -1,0 +1,158 @@
+<details id="auto-exclude-panel" style="background:#313244;color:#cdd6f4;padding:12px;margin:12px 0;border-radius:6px;">
+  <summary onclick="if (!this.parentElement.open) openAutoExclude()">影像規則自動排除（不需要模型）</summary>
+  <fieldset id="auto-exclude-controls" style="border:0;padding:12px 0;">
+    <label>設定 PT <select id="exclude-unit" onchange="loadExcludeRules()"></select></label>
+    <p>固定 MARK／貼紙：在下圖拖曳框選。碰到框選區域的整張切片會被排除；區域依 PANEL 邊界換算位置與尺寸，不校正旋轉。</p>
+    <label>查看 PANEL <select id="exclude-panel" onchange="loadExcludePreview()"></select></label>
+    <button type="button" class="batch-btn" onclick="excludeRules.regions.pop(); drawExcludePreview()">移除最後一個框</button>
+    <button type="button" class="batch-btn" onclick="excludeRules.regions=[]; drawExcludePreview()">清除框選</button>
+    <div><canvas id="exclude-canvas" style="max-width:100%;touch-action:none;cursor:crosshair;border:1px solid #45475a;"></canvas></div>
+    <p id="exclude-geometry-note"></p>
+    <label><input id="exclude-spots" type="checkbox">自動排除局部黑點／雜質</label>
+    <details><summary>黑點條件</summary>
+      <label>與周圍明暗差（1–255） <input id="exclude-contrast" type="number" min="1" max="255" value="25"></label>
+      <label>最小面積 <input id="exclude-min-area" type="number" min="1" max="4096" value="8"></label>
+      <label>最大面積 <input id="exclude-max-area" type="number" min="1" max="16384" value="800"></label>
+      <p>面積以實際訓練切片像素計算。使用局部 31×31 背景差異；正常邊緣、細長線與貼著切片邊界的黑區不自動當成黑點。低對比或大面積雜質仍需抽查。</p>
+    </details>
+    <p>設定按機種、畫面與 INNER／EDGE 保存，後續訓練自動沿用。前處理會影響黑點結果，變更後請抽查。自動排除沿用 NG 用途，但屬規則產生的標籤。</p>
+    <button type="button" class="batch-btn" onclick="applyAutoExclude()">儲存並套用到此 PT</button>
+    <p>套用後到「已排除」檢查，誤排可按「加入」恢復；已恢復的圖片不會再次自動排除。關閉規則不會恢復先前排除結果。</p>
+  </fieldset>
+  <div id="exclude-status" role="status"></div>
+</details>
+<script>
+let excludeRules = {regions: []};
+let excludeImage = null;
+let excludePanels = [];
+let excludeDrag = null;
+let excludeLoadVersion = 0;
+let excludePreviewVersion = 0;
+let excludeBusy = false;
+
+async function excludeRequest(body) {
+  const response = await fetch('/api/train/new/auto_exclude', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({job_id: jobId, ...body}),
+  });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error || '自動排除失敗');
+  return data;
+}
+function excludeUnit() {
+  const [lighting, zone] = document.getElementById('exclude-unit').value.split('-');
+  return {lighting, zone};
+}
+async function openAutoExclude() {
+  if (excludeBusy) return;
+  const select = document.getElementById('exclude-unit');
+  select.replaceChildren();
+  for (const unit of trainingScope.selected_units || []) {
+    const option = new Option(unit, unit);
+    select.add(option);
+    if (unit === `${_currentLighting}-inner`) option.selected = true;
+  }
+  await loadExcludeRules();
+}
+async function loadExcludeRules() {
+  const version = ++excludeLoadVersion;
+  const unit = excludeUnit();
+  const status = document.getElementById('exclude-status');
+  document.getElementById('auto-exclude-controls').disabled = true;
+  status.textContent = '讀取設定…';
+  try {
+    const data = await excludeRequest({action: 'load', ...unit});
+    await loadLighting(unit.lighting);
+    if (version !== excludeLoadVersion) return;
+    excludeRules = data.rules;
+    document.getElementById('exclude-spots').checked = excludeRules.dark_spots;
+    document.getElementById('exclude-contrast').value = excludeRules.contrast;
+    document.getElementById('exclude-min-area').value = excludeRules.min_area;
+    document.getElementById('exclude-max-area').value = excludeRules.max_area;
+    const seen = new Set();
+    excludePanels = (_tilesByLighting[unit.lighting] || []).filter(t => {
+      if (t.zone !== unit.zone || !t.panel_preview_url || seen.has(t.panel_path)) return false;
+      seen.add(t.panel_path); return true;
+    });
+    const select = document.getElementById('exclude-panel');
+    select.replaceChildren();
+    excludePanels.forEach((tile, i) => select.add(new Option(tile.panel_path.split(/[\\/]/).pop(), String(i))));
+    loadExcludePreview();
+    status.textContent = '';
+  } catch (error) { status.textContent = error.message; }
+  finally { if (version === excludeLoadVersion) document.getElementById('auto-exclude-controls').disabled = false; }
+}
+function loadExcludePreview() {
+  const version = ++excludePreviewVersion;
+  excludeImage = null;
+  drawExcludePreview();
+  const tile = excludePanels[Number(document.getElementById('exclude-panel').value)];
+  const note = document.getElementById('exclude-geometry-note');
+  note.textContent = tile ? '切換 PANEL 可查看同一組框選位置。' : '此舊任務沒有 PANEL 座標預覽；仍可使用黑點排除。固定區域需重新選圖產生切片。';
+  if (!tile) return;
+  const img = new Image();
+  img.onload = () => {
+    if (version !== excludePreviewVersion) return;
+    excludeImage = img;
+    const canvas = document.getElementById('exclude-canvas');
+    canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+    drawExcludePreview();
+  };
+  img.onerror = () => { if (version === excludePreviewVersion) note.textContent = 'PANEL 預覽讀取失敗，無法新增框選。'; };
+  img.src = tile.panel_preview_url;
+}
+function drawExcludePreview() {
+  const c = document.getElementById('exclude-canvas'), ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, c.width, c.height);
+  if (!excludeImage) return;
+  ctx.drawImage(excludeImage, 0, 0);
+  ctx.strokeStyle = '#ff526e'; ctx.fillStyle = 'rgba(255,40,70,.22)'; ctx.lineWidth = 3;
+  for (const [x,y,w,h] of excludeRules.regions) {
+    ctx.fillRect(x*c.width,y*c.height,w*c.width,h*c.height);
+    ctx.strokeRect(x*c.width,y*c.height,w*c.width,h*c.height);
+  }
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const c = document.getElementById('exclude-canvas');
+  const point = e => { const b = c.getBoundingClientRect(); return [Math.max(0,Math.min(1,(e.clientX-b.left)/b.width)), Math.max(0,Math.min(1,(e.clientY-b.top)/b.height))]; };
+  c.onpointerdown = e => {
+    if (!excludeImage || excludeBusy || document.getElementById('auto-exclude-controls').disabled) return;
+    excludeDrag = point(e); c.setPointerCapture(e.pointerId);
+  };
+  c.onpointermove = e => {
+    if (!excludeDrag) return;
+    drawExcludePreview(); const p = point(e);
+    c.getContext('2d').strokeRect(excludeDrag[0]*c.width,excludeDrag[1]*c.height,(p[0]-excludeDrag[0])*c.width,(p[1]-excludeDrag[1])*c.height);
+  };
+  c.onpointerup = e => {
+    if (!excludeDrag) return;
+    const p = point(e), a = excludeDrag; excludeDrag = null;
+    if (Math.abs(p[0]-a[0])*c.width >= 3 && Math.abs(p[1]-a[1])*c.height >= 3)
+      excludeRules.regions.push([Math.min(a[0],p[0]),Math.min(a[1],p[1]),Math.abs(p[0]-a[0]),Math.abs(p[1]-a[1])]);
+    drawExcludePreview();
+  };
+  c.onpointercancel = () => { excludeDrag = null; drawExcludePreview(); };
+});
+async function applyAutoExclude() {
+  if (excludeBusy) return;
+  excludeBusy = true;
+  const controls = document.getElementById('auto-exclude-controls');
+  const start = document.getElementById('start-training-btn');
+  const wasDisabled = start.disabled;
+  controls.disabled = true; start.disabled = true;
+  const status = document.getElementById('exclude-status');
+  status.textContent = '正在逐張分析此 PT，請稍候…';
+  try {
+    const unit = excludeUnit();
+    const rules = {...excludeRules, dark_spots: document.getElementById('exclude-spots').checked,
+      contrast: Number(document.getElementById('exclude-contrast').value),
+      min_area: Number(document.getElementById('exclude-min-area').value),
+      max_area: Number(document.getElementById('exclude-max-area').value)};
+    const data = await excludeRequest({action: 'apply', ...unit, rules});
+    await loadLighting(unit.lighting);
+    render();
+    status.textContent = `${unit.lighting}-${unit.zone}：已儲存，新增排除 ${data.excluded} 張。讀取失敗 ${data.read_errors} 張、缺少固定區域座標 ${data.missing_geometry} 張（保留原決策）。`;
+  } catch (error) { status.textContent = error.message; }
+  finally { controls.disabled = false; start.disabled = wasDisabled; excludeBusy = false; }
+}
+</script>
