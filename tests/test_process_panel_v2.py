@@ -1267,6 +1267,54 @@ def test_client_point_bomb_can_match_multiple_aoi_tiles_within_tolerance(tmp_pat
     assert near_tile.bomb_defect_code == "UNKNOWN"
 
 
+@pytest.mark.parametrize("shift", [(-76, 0), (76, 0), (0, -76), (0, 76)])
+@pytest.mark.parametrize("bomb_offset, expected", [(0, True), (30, False)])
+def test_point_bomb_matches_original_aoi_anchor_after_inward_shift(
+    tmp_path, shift, bomb_offset, expected,
+):
+    from capi_inference import CAPIInferencer, ImageResult, TileInfo
+
+    cfg = _make_config(tmp_path)
+    cfg.bomb_match_tolerance = 20
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+    resolution = (1920, 1200)
+    bounds = (336, 692, 5966, 4208)
+    anchor = (5787, 2772)
+    tile = TileInfo(
+        tile_id=4,
+        x=anchor[0] - 256 + shift[0],
+        y=anchor[1] - 256 + shift[1],
+        width=512, height=512,
+        image=np.zeros((512, 512), dtype=np.uint8),
+        zone="edge", is_aoi_coord_tile=True,
+        aoi_defect_code="BOMB_FORCE",
+        aoi_product_x=1857, aoi_product_y=710,
+        aoi_image_x=anchor[0], aoi_image_y=anchor[1],
+        aoi_tile_shift_dx=shift[0], aoi_tile_shift_dy=shift[1],
+    )
+    # Both the heatmap peak and shifted crop center miss the bomb tolerance.
+    anomaly_map = np.zeros((512, 512), dtype=np.float32)
+    anomaly_map[0, 0] = 0.526
+    result = ImageResult(
+        image_path=Path("R0F00000_092016.tif"),
+        image_size=(6576, 4384), otsu_bounds=bounds,
+        exclusion_regions=[], tiles=[tile], excluded_tile_count=0,
+        processed_tile_count=1, processing_time=0.0,
+        anomaly_tiles=[(tile, 0.526, anomaly_map)], raw_bounds=bounds,
+    )
+    bomb_info = {
+        "image_prefix": "R0F00000", "defect_type": "point",
+        "coordinates": [(1857 + bomb_offset, 710)],
+    }
+
+    inferencer._apply_bomb_postprocess([result], bomb_info, resolution)
+
+    assert tile.is_bomb is expected
+    if expected:
+        assert tile.bomb_defect_code == "UNKNOWN"
+
+
 def test_client_point_bomb_matches_aapi_glass_prefixed_filename(tmp_path):
     from capi_inference import CAPIInferencer, ImageResult, TileInfo
     from capi_station_adapter import AAPIStationAdapter
