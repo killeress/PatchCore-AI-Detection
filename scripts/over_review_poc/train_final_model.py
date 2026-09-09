@@ -108,12 +108,18 @@ def main(argv=None):
                 device, transform_id, args.batch_size)
 
     samples = load_samples(args.manifest)
-    is_true_ng = np.array([s.original_label == "true_ng" for s in samples])
+    is_true_ng = np.array([s.original_label in {
+        "true_ng", "true_black_spot", "true_white_spot", "misrescue_negative",
+    } for s in samples])
     y = np.array([1 if s.label == SCRATCH_BINARY else 0 for s in samples])
     logger.info("Label counts: scratch=%d | not_scratch=%d | true_ng=%d",
                 int(y.sum()), int(len(y) - y.sum()), int(is_true_ng.sum()))
     all_idx = np.arange(len(samples))
     proper_idx, calib_idx = _group_aware_split(all_idx, samples, args.calib_frac, args.seed)
+    if len(np.unique(y[proper_idx])) != 2:
+        raise ValueError("訓練集需要刮痕與非刮痕兩類資料；請沿用真 NG 資料或調整校準比例。")
+    if not is_true_ng[calib_idx].any():
+        raise ValueError("校準集沒有真 NG／黑點／白點／誤救樣本；請補足負樣本或調整切分。")
     logger.info("Total=%d | proper_train=%d | calibration=%d",
                 len(samples), len(proper_idx), len(calib_idx))
 
