@@ -186,6 +186,11 @@
         background: rgba(14, 165, 233, 0.12);
     }
 
+    .sample-classification-option.is-selected[data-value="scratch"] {
+        border-color: #22c55e;
+        background: rgba(34, 197, 94, 0.12);
+    }
+
     .sample-classification-option:disabled {
         opacity: 0.48;
         cursor: not-allowed;
@@ -953,6 +958,11 @@ function copyInferenceLog() {
                     <strong>🔵 無現象／AI 過檢</strong>
                     <span id="sampleClassificationPoolHint">加入重訓 Pool，作為 OK 重訓候選，之後仍需從 Pool 選入訓練。</span>
                 </button>
+                <button type="button" class="sample-classification-option"
+                        data-value="scratch" onclick="selectSampleClassification('scratch')">
+                    <strong>🟢 表面刮痕／可救回 OK</strong>
+                    <span>裁圖儲存至中心刮痕資料集，供刮痕分類器訓練。</span>
+                </button>
             </div>
         </div>
         <div id="sampleClassificationError"></div>
@@ -1009,6 +1019,15 @@ function openSampleClassification(button) {
     preview.src = '/api/ric/mes-review/crop?tile_result_id=' + sampleClassificationState.tileResultId;
     poolOption.disabled = !poolAllowed || poolLocked;
     ngOption.disabled = poolLocked;
+    var scratchOption = modal.querySelector('.sample-classification-option[data-value="scratch"]');
+    scratchOption.disabled = poolLocked || isBomb || isExcludeZone
+        || (current === 'ng' && ngSource !== 'inference_record');
+    if (current === 'scratch') {
+        ngOption.disabled = true;
+        poolOption.disabled = true;
+        document.getElementById('sampleClassificationError').textContent =
+            '如需改為其他類別，請先移除中心刮痕歸類。';
+    }
     removeButton.style.display = current === 'none' ? 'none' : '';
     removeButton.disabled = poolLocked || (current === 'ng' && ngSource !== 'inference_record');
     if (poolLocked) {

@@ -58,6 +58,7 @@ from capi_scratch_batch import (
 from capi_version import get_version_info, read_changelog
 from capi_image_naming import canonical_image_prefix, image_prefix_display_labels, source_image_prefix
 from capi_image_orientation import read_detection_image
+from capi_scratch_center import ScratchCenterMixin, SAMPLE_MANIFEST_LOCK
 from capi_mark_shadow import (
     MARK_FORCED_CHAR_CONVERSIONS_PARAM,
     get_forced_char_conversions,
@@ -3190,7 +3191,7 @@ _TRAIN_UNIT_STATUS_MAP = {
 }
 
 
-class CAPIWebHandler(BaseHTTPRequestHandler):
+class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
     """CAPI Web 請求處理器"""
 
     # 類別變數，由 create_web_server 設定
@@ -3627,6 +3628,10 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 self._handle_train_new_done_page()
             elif path == "/retrain":
                 self._handle_retrain_page()
+            elif path == "/scratch-center":
+                self._handle_scratch_center_entry()
+            elif path == "/scratch-management":
+                self._handle_scratch_management()
             elif path == "/api/retrain/status":
                 self._handle_retrain_status()
             elif path == "/api/train/new/panels":
@@ -3853,7 +3858,13 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         path = parsed.path
 
         try:
-            if path == "/api/debug/inference":
+            if path == "/api/scratch/samples":
+                self._handle_scratch_sample_receive()
+            elif path == "/api/scratch/model":
+                self._handle_scratch_model_receive()
+            elif path == "/api/scratch/distribute":
+                self._handle_scratch_distribute()
+            elif path == "/api/debug/inference":
                 self._handle_debug_inference_run()
             elif path == "/api/debug/mark-detection":
                 self._handle_debug_mark_detection()
@@ -7920,7 +7931,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 )
 
     def _handle_record_sample_classification(self, data: Optional[Dict] = None):
-        """POST: 將單一 AOI tile 互斥歸類為真 NG、過檢 Pool 或未歸類。"""
+        """POST: 將單一 AOI tile 互斥歸類為真 NG、過檢 Pool、刮痕或未歸類。"""
         if data is None:
             data = self._read_json_body()
         if data is None:
@@ -7934,9 +7945,9 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             )
             return
         classification = str(data.get("classification") or "").strip().lower()
-        if classification not in {"ng", "retrain_pool", "none"}:
+        if classification not in {"ng", "retrain_pool", "scratch", "none"}:
             self._send_json(
-                {"success": False, "error": "classification 必須是 ng、retrain_pool 或 none"},
+                {"success": False, "error": "classification 必須是 ng、retrain_pool、scratch 或 none"},
                 status=400,
             )
             return
@@ -7965,8 +7976,12 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             tile_result_id
         )
         existing_pool = self.db.get_over_retrain_pool_item_for_tile(tile_result_id)
+        existing_scratch = self.db.get_scratch_sample_classification(tile_result_id)
+        if existing_scratch and classification in {"ng", "retrain_pool"}:
+            self._send_json({"success": False, "error": "請先移除中心刮痕歸類，再歸類為其他樣本"}, status=409)
+            return
         if (
-            classification in {"ng", "none"}
+            classification in {"ng", "scratch", "none"}
             and existing_pool
             and existing_pool.get("added_to_job_id")
         ):
@@ -7977,7 +7992,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             }, status=409)
             return
         if (
-            classification in {"retrain_pool", "none"}
+            classification in {"retrain_pool", "scratch", "none"}
             and existing_ng
             and existing_ng.get("sample_source") != "inference_record"
         ):
@@ -7991,13 +8006,24 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         already_exists = bool(
             (classification == "ng" and existing_ng and not existing_pool)
             or (classification == "retrain_pool" and existing_pool and not existing_ng)
-            or (classification == "none" and not existing_ng and not existing_pool)
+            or (classification == "scratch" and existing_scratch and not existing_ng and not existing_pool)
+            or (classification == "none" and not existing_ng and not existing_pool and not existing_scratch)
         )
         saved_ng = existing_ng
         saved_pool = existing_pool
         prepared_pool = None
         try:
-            if classification == "ng":
+            if classification == "scratch":
+                if not already_exists:
+                    self._sync_record_scratch(record, candidate, existing_scratch)
+                if existing_ng:
+                    self._remove_record_ng_classification(existing_ng)
+                if existing_pool:
+                    self._remove_record_retrain_pool_classification(existing_pool)
+                saved_ng = None
+                saved_pool = None
+                message = "刮痕照片已儲存至中心資料集"
+            elif classification == "ng":
                 if not saved_ng:
                     sample = self._prepare_ng_validation_samples(
                         record,
@@ -8031,6 +8057,8 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
                 saved_ng = None
                 message = "此 AOI Tile 已在重訓 Pool 中" if already_exists else "已歸類為無現象過檢"
             else:
+                if existing_scratch:
+                    self._sync_record_scratch(record, candidate, existing_scratch, remove=True)
                 if existing_ng:
                     self._remove_record_ng_classification(existing_ng)
                 if existing_pool:
@@ -13801,14 +13829,17 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
     def _dataset_list_jobs(self) -> list:
         """回傳 base_dir 下所有 job 資料夾名稱（字串），依名稱降冪（最新在前）"""
         base = self._dataset_export_base_dir()
-        return [p.name for p in reversed(list_job_dirs(base))]
+        jobs = [p.name for p in reversed(list_job_dirs(base))]
+        if (base / "manifest.csv").is_file():
+            jobs.append("legacy_root")
+        return jobs
 
     def _dataset_resolve_job_dir(self, job_id: str) -> Optional[Path]:
         """驗證 job_id 字元集 + 必須存在 + 必須有 manifest.csv；無效回 None"""
         if not job_id or not self._JOB_ID_RE.match(job_id):
             return None
         base = self._dataset_export_base_dir()
-        cand = (base / job_id).resolve()
+        cand = base if job_id == "legacy_root" else (base / job_id).resolve()
         try:
             cand.relative_to(base)
         except ValueError:
@@ -14167,7 +14198,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         manifest_path = job_dir / "manifest.csv"
         state = self._dataset_export_state
-        with state["manifest_lock"]:
+        with state["manifest_lock"], SAMPLE_MANIFEST_LOCK:
             manifest = read_manifest(manifest_path)
             ok = delete_sample(job_dir, manifest, sample_id)
             if ok:
@@ -14197,7 +14228,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
         state = self._dataset_export_state
         deleted = []
         not_found = []
-        with state["manifest_lock"]:
+        with state["manifest_lock"], SAMPLE_MANIFEST_LOCK:
             manifest = read_manifest(manifest_path)
             for sid in sample_ids:
                 sid = (sid or "").strip()
@@ -14241,7 +14272,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
 
         manifest_path = job_dir / "manifest.csv"
         state = self._dataset_export_state
-        with state["manifest_lock"]:
+        with state["manifest_lock"], SAMPLE_MANIFEST_LOCK:
             manifest = read_manifest(manifest_path)
             try:
                 updated = relabel_sample(job_dir, manifest, sample_id, new_label)
@@ -15238,7 +15269,7 @@ class CAPIWebHandler(BaseHTTPRequestHandler):
             request_path="/retrain",
             current_bundle=current_bundle or "(未設定)",
             trained_at=trained_at,
-            default_manifest_base="/aidata/capi_ai/datasets/over_review/",
+            default_manifest_base=str(self._dataset_export_base_dir()),
             default_output_path=self._next_scratch_bundle_path(current_bundle),
             default_epochs=15,
             default_rank=16,

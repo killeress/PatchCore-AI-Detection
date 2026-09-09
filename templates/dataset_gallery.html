@@ -121,7 +121,7 @@
         </p>
       </div>
     </div>
-    <a href="/ric" class="text-slate-300 hover:text-white text-sm px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors">← 回 RIC 報表</a>
+    <a href="/scratch-center" class="text-slate-300 hover:text-white text-sm px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors">← 回刮痕資料中心</a>
   </div>
 
   <!-- Filters -->
@@ -231,6 +231,9 @@
           <span class="text-slate-500 font-mono ml-auto">score {{ '%.3f'|format(it.ai_score|float) }}</span>
         </div>
         <div class="text-slate-300 font-mono text-[11px] truncate" title="{{ it.sample_id }}">{{ it.sample_id }}</div>
+        {% if it.source_ip %}
+        <div class="text-slate-400 text-[11px] truncate">來源：{{ it.source_ip | e }} · {{ it.machine_no | default('') | e }}</div>
+        {% endif %}
         {% if it.over_review_note %}
         <div class="text-slate-400 text-[11px] line-clamp-2" title="{{ it.over_review_note }}">📝 {{ it.over_review_note }}</div>
         {% endif %}

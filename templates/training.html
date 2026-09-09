@@ -54,6 +54,13 @@
                   padding:9px 16px;border-radius:6px;text-decoration:none;font-weight:600;font-size:.92rem;">
           開始訓練 →
         </a>
+        {% if card.target_url == '/retrain' %}
+        <a href="/scratch-center"
+           style="margin-top:10px;display:inline-block;text-align:center;background:#1e1e2e;color:#89b4fa;
+                  border:1px solid #45475a;padding:9px 16px;border-radius:6px;text-decoration:none;font-weight:600;font-size:.92rem;">
+          刮痕資料中心 →
+        </a>
+        {% endif %}
       </div>
       {% endfor %}
     </div>
