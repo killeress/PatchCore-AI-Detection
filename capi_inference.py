@@ -3098,7 +3098,9 @@ class CAPIInferencer:
             ImageResult (與 v1 同格式)；若 model_mapping 缺對應 lighting 之 inner/edge
             或圖片載入/前處理失敗，回傳 None。
         """
-        from capi_preprocess import preprocess_panel_image, PreprocessConfig
+        from capi_preprocess import (
+            preprocess_panel_image, PreprocessConfig, panel_boundary_config_for_station,
+        )
 
         lighting = self._get_image_prefix(image_path.name)
         model_lighting = self._get_model_prefix(lighting)
@@ -3116,6 +3118,7 @@ class CAPIInferencer:
                 raise ValueError("機種產品解析度與 Pixel Grid 模型不一致")
 
         pre_cfg = PreprocessConfig(
+            **panel_boundary_config_for_station(self.station_adapter.profile),
             tile_size=self.config.tile_size,
             tile_stride=getattr(self.config, "tile_stride", self.config.tile_size),
             otsu_offset=otsu_offset_override if otsu_offset_override is not None else self.config.otsu_offset,
@@ -9358,7 +9361,10 @@ class CAPIInferencer:
         新架構 edge.pt 已專責 edge zone，故不再呼叫傳統 CV 邊緣檢測。
         """
         import time
-        from capi_preprocess import preprocess_panel_folder, PreprocessConfig
+        from capi_preprocess import (
+            preprocess_panel_folder, PreprocessConfig,
+            panel_boundary_config_for_station,
+        )
 
         panel_path = Path(panel_dir)
         t0 = time.time()
@@ -9527,18 +9533,7 @@ class CAPIInferencer:
                 or getattr(self.config, "grid_canonicalization_enabled", False)
             ),
             generate_grid_tiles=bool(self.config.grid_tiling_enabled),
-            large_panel_raw_boundary_enabled=(
-                self.station_adapter.profile in ("capi", "aapi")
-            ),
-            large_panel_min_width_ratio=(
-                0.75 if self.station_adapter.profile == "capi" else 0.85
-            ),
-            large_panel_min_height_ratio=(
-                0.60 if self.station_adapter.profile == "capi" else 0.80
-            ),
-            raw_boundary_max_edge_residual_p95_ratio=(
-                0.04 if self.station_adapter.profile == "capi" else 0.03
-            ),
+            **panel_boundary_config_for_station(self.station_adapter.profile),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
             product_resolution=product_resolution or self._product_resolution(),
             grid_canonicalization_enabled=getattr(

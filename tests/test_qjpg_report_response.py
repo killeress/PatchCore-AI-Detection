@@ -601,7 +601,7 @@ def test_image_abnormal_precheck_uses_latest_retake_image(monkeypatch):
 
     monkeypatch.setattr(Path, "stat", fake_stat)
     monkeypatch.setattr("capi_server.cv2.imread", fake_imread)
-    monkeypatch.setattr("capi_server.detect_panel_polygon", lambda image, cfg: (None, None))
+    monkeypatch.setattr("capi_server.detect_panel_geometry", lambda image, cfg: (None, None))
     cfg = CAPIConfig(
         image_abnormal_detection_enabled=True,
         image_abnormal_w0f00000_mean_lower=40,
@@ -631,7 +631,7 @@ def test_image_abnormal_precheck_uses_polygon_mean_for_judgment(monkeypatch):
         return (0, 0, 6, 6), polygon
 
     monkeypatch.setattr("capi_server.cv2.imread", fake_imread)
-    monkeypatch.setattr("capi_server.detect_panel_polygon", fake_detect_panel_polygon)
+    monkeypatch.setattr("capi_server.detect_panel_geometry", fake_detect_panel_polygon)
     cfg = CAPIConfig(
         image_abnormal_detection_enabled=True,
         image_abnormal_w0f00000_mean_lower=50,
@@ -699,7 +699,7 @@ def test_aapi_image_abnormal_keeps_w0f00010_and_wgf50500_independent(monkeypatch
         return np.full((4, 4), value, dtype=np.uint8)
 
     monkeypatch.setattr("capi_server.cv2.imread", fake_imread)
-    monkeypatch.setattr("capi_server.detect_panel_polygon", lambda image, cfg: (None, None))
+    monkeypatch.setattr("capi_server.detect_panel_geometry", lambda image, cfg: (None, None))
     cfg = CAPIConfig(
         image_abnormal_detection_enabled=True,
         image_abnormal_w0f00010_mean_lower=40,

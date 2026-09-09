@@ -2931,3 +2931,47 @@ def test_sample_ng_tiles_compat_supports_legacy_signature():
     assert result == {"sampled": 0}
     assert "preprocess_cfg" not in captured
     assert any("不支援 preprocess_cfg" in msg for msg in logs)
+
+
+@pytest.mark.parametrize("profile,width,height,residual", [
+    ("capi", 0.75, 0.60, 0.04),
+    ("aapi", 0.85, 0.80, 0.03),
+])
+def test_train_new_preprocess_worker_enables_station_raw_boundary(
+    tmp_path, monkeypatch, profile, width, height, residual,
+):
+    from capi_web import CAPIWebHandler
+    from capi_station_adapter import create_station_adapter
+    import capi_train_new
+
+    server = MagicMock()
+    server.station_adapter = create_station_adapter(profile)
+    monkeypatch.setattr(CAPIWebHandler, "_train_new_jobs", {})
+    monkeypatch.setattr(CAPIWebHandler, "_load_train_new_config", lambda _: {
+        "over_review_root": tmp_path,
+        "backbone_cache_dir": tmp_path,
+        "output_root": tmp_path,
+        "required_backbones": [],
+    })
+    captured = []
+
+    def stop_at_preprocess(**kwargs):
+        captured.append(kwargs["preprocess_cfg"])
+        raise RuntimeError("stop before training")
+
+    monkeypatch.setattr(capi_train_new, "preprocess_panels_to_pool", stop_at_preprocess)
+    CAPIWebHandler._train_new_preprocess_worker(
+        "boundary_test", "M", [str(tmp_path / "panel")], server,
+        grid_canonicalization={
+            "enabled": True, "product_resolution": [1920, 1080],
+            "samples_per_cell": 3,
+        },
+    )
+
+    assert len(captured) == 1
+    cfg = captured[0]
+    assert cfg.large_panel_raw_boundary_enabled is True
+    assert cfg.large_panel_min_width_ratio == width
+    assert cfg.large_panel_min_height_ratio == height
+    assert cfg.raw_boundary_max_edge_residual_p95_ratio == residual
+    assert cfg.grid_canonicalization_enabled is True
