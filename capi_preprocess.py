@@ -154,6 +154,7 @@ class PreprocessConfig:
     large_panel_raw_boundary_enabled: bool = False
     large_panel_min_width_ratio: float = 0.85
     large_panel_min_height_ratio: float = 0.80
+    raw_boundary_max_edge_residual_p95_ratio: float = 0.03
     image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -455,6 +456,7 @@ def detect_panel_polygon(
     *,
     side_endpoint_trim_ratio: float = EDGE_ENDPOINT_TRIM_RATIO,
     isolate_largest_contour: bool = False,
+    max_edge_residual_p95_ratio: float = MAX_EDGE_RESIDUAL_P95_RATIO,
 ) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[np.ndarray]]:
     """Otsu binarize → 最大連通輪廓 bbox → polyfit 4 角 polygon。
 
@@ -549,6 +551,7 @@ def detect_panel_polygon(
         stabilize_near_vertical_edges=_use_robust_panel_boundary(config),
         side_endpoint_trim_ratio=side_endpoint_trim_ratio,
         isolate_largest_contour=isolate_largest_contour,
+        max_edge_residual_p95_ratio=max_edge_residual_p95_ratio,
     )
     return bbox, polygon
 
@@ -612,6 +615,9 @@ def detect_panel_boundary(
         scaled_cfg,
         side_endpoint_trim_ratio=LARGE_PANEL_SIDE_ENDPOINT_TRIM_RATIO,
         isolate_largest_contour=isolate_largest_contour,
+        max_edge_residual_p95_ratio=(
+            config.raw_boundary_max_edge_residual_p95_ratio
+        ),
     )
     detect_ms = (time.perf_counter() - detect_started) * 1000.0
 
@@ -726,6 +732,7 @@ def _polyfit_polygon(
     stabilize_near_vertical_edges: bool = False,
     side_endpoint_trim_ratio: float = EDGE_ENDPOINT_TRIM_RATIO,
     isolate_largest_contour: bool = False,
+    max_edge_residual_p95_ratio: float = MAX_EDGE_RESIDUAL_P95_RATIO,
 ) -> Optional[np.ndarray]:
     """Fit four panel edges, optionally excluding disconnected foreground."""
     H, W = binary_mask.shape[:2]
@@ -805,7 +812,7 @@ def _polyfit_polygon(
         residual_p95 = float(np.percentile(residuals, 95))
         residual_limit = max(
             MIN_EDGE_RESIDUAL_P95_PX,
-            float(tile_size) * MAX_EDGE_RESIDUAL_P95_RATIO,
+            float(tile_size) * float(max_edge_residual_p95_ratio),
         )
         residual_reject_limit = (
             residual_limit + EDGE_RESIDUAL_COMPARISON_EPSILON_PX

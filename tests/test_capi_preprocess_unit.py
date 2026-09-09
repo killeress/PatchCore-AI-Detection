@@ -20,6 +20,7 @@ def test_preprocess_config_defaults():
     assert cfg.large_panel_raw_boundary_enabled is False
     assert cfg.large_panel_min_width_ratio == 0.85
     assert cfg.large_panel_min_height_ratio == 0.80
+    assert cfg.raw_boundary_max_edge_residual_p95_ratio == 0.03
 
 
 def test_tile_result_zone_values():

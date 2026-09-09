@@ -364,6 +364,37 @@ def test_polyfit_polygon_allows_subpixel_residual_comparison_noise(monkeypatch):
     assert polygon is not None
 
 
+def test_polyfit_polygon_uses_configured_residual_ratio(monkeypatch):
+    import capi_preprocess
+
+    binary = np.zeros((1000, 1000), dtype=np.uint8)
+    binary[100:900, 100:900] = 255
+    real_percentile = np.percentile
+
+    def percentile_at_capi_raw_limit(values, q, *args, **kwargs):
+        if q == 95:
+            return 9.9
+        return real_percentile(values, q, *args, **kwargs)
+
+    monkeypatch.setattr(capi_preprocess.np, "percentile", percentile_at_capi_raw_limit)
+
+    legacy_polygon = _polyfit_polygon(
+        binary,
+        (100, 100, 900, 900),
+        tile_size=256,
+        max_edge_residual_p95_ratio=0.03,
+    )
+    capi_raw_polygon = _polyfit_polygon(
+        binary,
+        (100, 100, 900, 900),
+        tile_size=256,
+        max_edge_residual_p95_ratio=0.04,
+    )
+
+    assert legacy_polygon is None
+    assert capi_raw_polygon is not None
+
+
 def test_detect_panel_boundary_half_scale_restores_full_resolution(monkeypatch):
     import capi_preprocess
 
@@ -380,12 +411,14 @@ def test_detect_panel_boundary_half_scale_restores_full_resolution(monkeypatch):
         *,
         side_endpoint_trim_ratio,
         isolate_largest_contour,
+        max_edge_residual_p95_ratio,
     ):
         captured["shape"] = boundary_image.shape
         captured["tile_size"] = config.tile_size
         captured["otsu_offset"] = config.otsu_offset
         captured["side_trim"] = side_endpoint_trim_ratio
         captured["isolate_largest_contour"] = isolate_largest_contour
+        captured["residual_ratio"] = max_edge_residual_p95_ratio
         return (50, 100, 1450, 1000), scaled_polygon
 
     monkeypatch.setattr(
@@ -401,6 +434,7 @@ def test_detect_panel_boundary_half_scale_restores_full_resolution(monkeypatch):
             tile_stride=512,
             otsu_offset=5,
             product_resolution=(1920, 1200),
+            raw_boundary_max_edge_residual_p95_ratio=0.04,
         ),
     )
 
@@ -410,6 +444,7 @@ def test_detect_panel_boundary_half_scale_restores_full_resolution(monkeypatch):
         "otsu_offset": 2,
         "side_trim": 0.15,
         "isolate_largest_contour": False,
+        "residual_ratio": 0.04,
     }
     assert bbox == (100, 200, 2900, 2000)
     np.testing.assert_array_equal(polygon, scaled_polygon * 2)
