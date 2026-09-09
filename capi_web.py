@@ -13829,12 +13829,22 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
     _JOB_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_]+$")
 
     def _dataset_list_jobs(self) -> list:
-        """回傳 base_dir 下所有 job 資料夾名稱（字串），依名稱降冪（最新在前）"""
+        """列出仍有有效樣本的批次；保留無法讀取的批次供頁面顯示錯誤。"""
         base = self._dataset_export_base_dir()
         jobs = [p.name for p in reversed(list_job_dirs(base))]
         if (base / "manifest.csv").is_file():
             jobs.append("legacy_root")
-        return jobs
+        visible = []
+        for job in jobs:
+            directory = base if job == "legacy_root" else base / job
+            try:
+                if not any(row.get("status") == "ok"
+                           for row in read_manifest(directory / "manifest.csv").values()):
+                    continue
+            except (OSError, ValueError, csv.Error):
+                logger.warning("Cannot inspect dataset batch %s", job, exc_info=True)
+            visible.append(job)
+        return visible
 
     def _dataset_resolve_job_dir(self, job_id: str) -> Optional[Path]:
         """驗證 job_id 字元集 + 必須存在 + 必須有 manifest.csv；無效回 None"""
@@ -13851,7 +13861,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         return cand
 
     def _handle_dataset_gallery_page(self, query: dict):
-        """GET /dataset_gallery — 樣本瀏覽頁（按 job 資料夾切換）"""
+        """GET /dataset_gallery — 預設跨批次瀏覽，依來源、類別與光源篩選。"""
         from capi_dataset_export import read_manifest
 
         def _q(key, default=None):
@@ -13861,9 +13871,14 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             return v if v is not None else default
 
         jobs = self._dataset_list_jobs()
-        current_job = _q("job", "") or (jobs[0] if jobs else "")
+        current_job = _q("job", "") or ""
         current_label = _q("label", "") or ""
         current_prefix = _q("prefix", "") or ""
+        if current_job and current_job not in jobs:
+            current_job = ""
+            current_label = ""
+            current_prefix = ""
+        current_source = _q("source", "") or ""
         try:
             page = max(1, int(_q("page", "1") or 1))
         except (TypeError, ValueError):
@@ -13879,41 +13894,44 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         manifest_error = ""
         label_counts: dict = {}
         prefixes_set: set = set()
-        job_dir = None
-
+        sources = {}
         if not jobs:
-            manifest_error = f"尚未有任何 export job 資料夾：{base_dir}"
-        elif not current_job:
-            manifest_error = "請選擇 job 資料夾"
-        else:
-            job_dir = self._dataset_resolve_job_dir(current_job)
+            manifest_error = f"尚未有任何有效樣本批次：{base_dir}"
+        for job in ([current_job] if current_job else jobs):
+            job_dir = self._dataset_resolve_job_dir(job)
             if job_dir is None:
-                manifest_error = f"指定的 job 不存在：{current_job}"
-            else:
-                try:
-                    manifest = read_manifest(job_dir / "manifest.csv")
-                except Exception as e:
-                    manifest_error = f"讀 manifest.csv 失敗：{e}"
-                    manifest = {}
-                for sid, row in manifest.items():
-                    if row.get("status") != "ok":
-                        continue
-                    label = row.get("label", "")
-                    prefix = row.get("prefix", "")
-                    label_counts[label] = label_counts.get(label, 0) + 1
-                    if prefix:
-                        prefixes_set.add(prefix)
-                    items_all.append(row)
-
-                def _match(r):
-                    if current_label and r.get("label") != current_label:
-                        return False
-                    if current_prefix and r.get("prefix") != current_prefix:
-                        return False
-                    return True
-
-                items_all = [r for r in items_all if _match(r)]
-                items_all.sort(key=lambda r: r.get("collected_at", ""), reverse=True)
+                continue
+            try:
+                manifest = read_manifest(job_dir / "manifest.csv")
+            except Exception as e:
+                manifest_error += f"讀取批次 {job} 失敗：{e}；"
+                continue
+            for row in manifest.values():
+                if row.get("status") != "ok":
+                    continue
+                source = row.get("source_ip") or row.get("machine_no") or "__legacy__"
+                machine = row.get("machine_no") or ""
+                sources.setdefault(source, set()).add(machine)
+                if current_source and source != current_source:
+                    continue
+                label = row.get("label", "")
+                prefix = row.get("prefix", "")
+                label_counts[label] = label_counts.get(label, 0) + 1
+                if prefix:
+                    prefixes_set.add(prefix)
+                if current_label and label != current_label:
+                    continue
+                if current_prefix and prefix != current_prefix:
+                    continue
+                row["job_id"] = job
+                row["ui_id"] = hashlib.sha256(json.dumps([job, row["sample_id"]]).encode()).hexdigest()
+                items_all.append(row)
+        source_options = {
+            source: ("舊資料／未記錄來源" if source == "__legacy__" else
+                     " · ".join([source, *sorted(machine for machine in machines if machine and machine != source)]))
+            for source, machines in sorted(sources.items())
+        }
+        items_all.sort(key=lambda r: (r.get("collected_at", ""), r["job_id"], r["sample_id"]), reverse=True)
 
         total_count = sum(label_counts.values())
         filtered_count = len(items_all)
@@ -13927,9 +13945,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         for it in page_items:
             crop_rel = it.get("crop_path", "")
             hm_rel = it.get("heatmap_path", "")
-            q = {"job": current_job, "path": crop_rel}
+            q = {"job": it["job_id"], "path": crop_rel}
             it["crop_url"] = "/api/dataset_export/file?" + _up.urlencode(q)
-            q_hm = {"job": current_job, "path": hm_rel}
+            q_hm = {"job": it["job_id"], "path": hm_rel}
             it["heatmap_url"] = "/api/dataset_export/file?" + _up.urlencode(q_hm)
 
         def _page_url(p):
@@ -13938,6 +13956,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 qs["job"] = current_job
             if current_label:
                 qs["label"] = current_label
+            if current_source:
+                qs["source"] = current_source
             if current_prefix:
                 qs["prefix"] = current_prefix
             return "/dataset_gallery?" + _up.urlencode(qs)
@@ -13960,6 +13980,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             prefixes=sorted(prefixes_set),
             current_label=current_label,
             current_prefix=current_prefix,
+            source_options=source_options,
+            current_source=current_source,
+            sample_refs={it["ui_id"]: {"job": it["job_id"], "sample_id": it["sample_id"]} for it in page_items},
             items=page_items,
             page=page,
             limit=limit,
@@ -14208,7 +14231,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         if not ok:
             self._send_json({"error": "sample_id not found"}, status=404)
             return
-        self._send_json({"ok": True, "sample_id": sample_id})
+        self._send_json({"ok": True, "sample_id": sample_id,
+                         "batch_empty": not any(row.get("status") == "ok" for row in manifest.values())})
 
     def _handle_dataset_sample_batch_delete(self):
         """POST /api/dataset_export/sample/batch_delete  body: {job, sample_ids: [...]}"""
@@ -14247,6 +14271,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             "deleted": deleted,
             "not_found": not_found,
             "deleted_count": len(deleted),
+            "batch_empty": not any(row.get("status") == "ok" for row in manifest.values()),
         })
 
     def _handle_dataset_sample_move(self):

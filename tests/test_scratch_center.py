@@ -265,9 +265,63 @@ def test_distribution_targets_registered_line_only(tmp_path, monkeypatch):
 def test_legacy_root_available_in_gallery(tmp_path):
     handler, _, _, _ = make_handler(tmp_path)
     root = handler._dataset_export_base_dir()
-    write_manifest(root / "manifest.csv", {})
+    write_manifest(root / "manifest.csv", {"old": {"sample_id": "old", "status": "ok"}})
     assert "legacy_root" in handler._dataset_list_jobs()
     assert handler._dataset_resolve_job_dir("legacy_root") == root
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_gallery_last_sample_delete_hides_batch(tmp_path, batch):
+    import threading
+    handler, _, _, responses = make_handler(tmp_path)
+    root = handler._dataset_export_base_dir()
+    data = payload()
+    center.store_sample(root, data, "10.174.1.20")
+    job = data["sample_id"].rsplit("_", 1)[0]
+    handler._dataset_export_state = {"manifest_lock": threading.Lock()}
+    handler._read_json_body = lambda: {"job": job, "sample_id": data["sample_id"],
+                                       "sample_ids": [data["sample_id"]]}
+    assert job in handler._dataset_list_jobs()
+    if batch:
+        handler._handle_dataset_sample_batch_delete()
+    else:
+        handler._handle_dataset_sample_delete()
+    assert responses[-1][0] == 200
+    assert responses[-1][1]["batch_empty"] is True
+    assert job not in handler._dataset_list_jobs()
+    assert (root / job / "manifest.csv").is_file()
+    center.store_sample(root, payload(2), "10.174.1.20")
+    assert job in handler._dataset_list_jobs()
+
+
+def test_gallery_hides_withdrawn_and_empty_legacy_batches(tmp_path):
+    handler, _, _, _ = make_handler(tmp_path)
+    root = handler._dataset_export_base_dir()
+    data = payload()
+    center.store_sample(root, data, "10.174.1.20")
+    center.store_sample(root, {"sample_id": data["sample_id"], "action": "remove"}, "10.174.1.20")
+    write_manifest(root / "manifest.csv", {})
+    assert handler._dataset_list_jobs() == []
+
+
+def test_gallery_stale_batch_selection_falls_back(tmp_path):
+    handler, _, _, _ = make_handler(tmp_path)
+    root = handler._dataset_export_base_dir()
+    write_manifest(root / "empty" / "manifest.csv", {})
+    write_manifest(root / "older" / "manifest.csv", {
+        "old": {"sample_id": "old", "status": "ok", "label": "true_ng", "prefix": "G0F"},
+    })
+    rendered = {}
+    def render(**kwargs):
+        rendered.update(kwargs)
+        return "page"
+    handler.jinja_env = SimpleNamespace(get_template=lambda name: SimpleNamespace(render=render))
+    handler._send_response = lambda *args: None
+    handler._handle_dataset_gallery_page({"job": ["empty"], "label": ["over_surface_scratch"]})
+    assert rendered["jobs"] == ["older"]
+    assert rendered["current_job"] == ""
+    assert rendered["current_label"] == ""
+    assert rendered["filtered_count"] == 1
 
 
 def test_activation_db_failure_rolls_back_both_settings(tmp_path):

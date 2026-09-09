@@ -127,13 +127,11 @@
   <!-- Filters -->
   <div class="flex flex-wrap items-end gap-3 mb-6 p-4 bg-slate-900/50 border border-slate-800 rounded-xl">
     <div>
-      <label class="block text-xs text-slate-400 mb-1">Job (匯出批次)</label>
-      <select id="filter-job" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 text-sm font-mono min-w-[200px]">
-        {% if not jobs %}
-        <option value="">（無 job）</option>
-        {% endif %}
-        {% for j in jobs %}
-        <option value="{{ j }}" {% if j == current_job %}selected{% endif %}>{{ j }}</option>
+      <label class="block text-xs text-slate-400 mb-1">來源線體</label>
+      <select id="filter-source" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 text-sm">
+        <option value="">全部來源</option>
+        {% for value, name in source_options.items() %}
+        <option value="{{ value | e }}" {% if value == current_source %}selected{% endif %}>{{ name | e }}</option>
         {% endfor %}
       </select>
     </div>
@@ -164,13 +162,22 @@
         <option value="200" {% if limit == 200 %}selected{% endif %}>200</option>
       </select>
     </div>
+    <details {% if current_job %}open{% endif %}><summary class="text-sm text-slate-400 cursor-pointer">進階篩選</summary>
+      <label class="block text-xs text-slate-400 mb-1">Job (匯出批次)</label>
+      <select id="filter-job" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 text-sm font-mono min-w-[200px]">
+        <option value="">全部批次</option>
+        {% for j in jobs %}
+        <option value="{{ j }}" {% if j == current_job %}selected{% endif %}>{{ j }}</option>
+        {% endfor %}
+      </select>
+    </details>
     <button id="btn-apply" class="px-4 py-2 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white rounded-lg text-sm font-semibold transition-all cursor-pointer">套用</button>
     <button id="btn-select-mode" type="button"
             class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-sm font-semibold transition-all cursor-pointer">
       多選模式
     </button>
     <div class="ml-auto text-slate-400 text-sm">
-      顯示 <span class="text-slate-100 font-mono">{{ start_idx + 1 }}–{{ end_idx }}</span> / <span class="text-slate-100 font-mono">{{ filtered_count }}</span>
+      顯示 <span class="text-slate-100 font-mono">{{ start_idx + 1 if filtered_count else 0 }}–{{ end_idx }}</span> / <span class="text-slate-100 font-mono">{{ filtered_count }}</span>
     </div>
   </div>
 
@@ -179,7 +186,7 @@
   <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-3">
     {% for it in items %}
     <div class="sample-card bg-slate-900 border border-slate-800 rounded-xl overflow-hidden hover:border-slate-600 transition-colors relative"
-         data-sample-id="{{ it.sample_id }}" data-label="{{ it.label }}">
+         data-sample-id="{{ it.ui_id }}" data-label="{{ it.label }}">
       <!-- Select checkbox (多選模式) -->
       <div class="select-check">
         <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -197,14 +204,14 @@
         </a>
         {% endif %}
         <button type="button" title="轉類別"
-                onclick="openMoveMenu(event, this, '{{ it.sample_id }}', '{{ it.label }}')"
+                onclick="openMoveMenu(event, this, '{{ it.ui_id }}', '{{ it.label }}')"
                 class="w-7 h-7 flex items-center justify-center bg-slate-800/80 hover:bg-blue-500/30 text-slate-200 rounded-md border border-slate-700 hover:border-blue-400 backdrop-blur-sm transition-colors cursor-pointer">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
           </svg>
         </button>
         <button type="button" title="刪除"
-                onclick="deleteSample('{{ it.sample_id }}')"
+                onclick="deleteSample('{{ it.ui_id }}')"
                 class="w-7 h-7 flex items-center justify-center bg-slate-800/80 hover:bg-red-500/30 text-slate-200 rounded-md border border-slate-700 hover:border-red-400 backdrop-blur-sm transition-colors cursor-pointer">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M8 7V5a2 2 0 012-2h4a2 2 0 012 2v2"/>
@@ -318,7 +325,7 @@
 // 由後端 capi_dataset_export.get_valid_labels() 與 LABEL_ZH 傳入
 const VALID_LABELS = {{ valid_labels|tojson }};
 const LABEL_ZH = {{ label_zh|tojson }};
-const CURRENT_JOB = {{ current_job|tojson }};
+const SAMPLE_REFS = {{ sample_refs|tojson }};
 
 (function(){
   const qs = (id) => document.getElementById(id);
@@ -326,10 +333,12 @@ const CURRENT_JOB = {{ current_job|tojson }};
   function buildUrl() {
     const params = new URLSearchParams();
     const job = qs("filter-job") ? qs("filter-job").value : "";
+    const source = qs("filter-source").value;
     const label = qs("filter-label").value;
     const prefix = qs("filter-prefix").value;
     const limit = qs("filter-limit").value;
     if (job) params.set("job", job);
+    if (source) params.set("source", source);
     if (label) params.set("label", label);
     if (prefix) params.set("prefix", prefix);
     if (limit) params.set("limit", limit);
@@ -338,7 +347,7 @@ const CURRENT_JOB = {{ current_job|tojson }};
   }
 
   qs("btn-apply").addEventListener("click", () => { window.location.href = buildUrl(); });
-  ["filter-job", "filter-label", "filter-prefix", "filter-limit"].forEach(id => {
+  ["filter-job", "filter-source", "filter-label", "filter-prefix", "filter-limit"].forEach(id => {
     const el = qs(id);
     if (el) el.addEventListener("change", () => { window.location.href = buildUrl(); });
   });
@@ -367,20 +376,21 @@ document.addEventListener("keydown", (e) => {
 
 // ---- Delete ----
 async function deleteSample(sampleId) {
-  if (!confirm(`確定刪除樣本？\n\n${sampleId}\n\n實體檔案 (crop + heatmap) 與 manifest row 都會移除，無法復原。`)) {
+  if (!confirm(`確定刪除樣本？\n\n${SAMPLE_REFS[sampleId].sample_id}\n\n實體檔案 (crop + heatmap) 與 manifest row 都會移除，無法復原。`)) {
     return;
   }
   try {
     const r = await fetch("/api/dataset_export/sample/delete", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({job: CURRENT_JOB, sample_id: sampleId}),
+      body: JSON.stringify(SAMPLE_REFS[sampleId]),
     });
     const data = await r.json();
     if (!r.ok) {
       alert("刪除失敗: " + (data.error || r.status));
       return;
     }
+    if (data.batch_empty) { window.location.replace('/dataset_gallery'); return; }
     removeCardFromDom(sampleId);
   } catch (e) {
     alert("網路錯誤: " + e);
@@ -436,7 +446,7 @@ async function moveSample(sampleId, newLabel) {
     const r = await fetch("/api/dataset_export/sample/move", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({job: CURRENT_JOB, sample_id: sampleId, new_label: newLabel}),
+      body: JSON.stringify({...SAMPLE_REFS[sampleId], new_label: newLabel}),
     });
     const data = await r.json();
     if (!r.ok) {
@@ -530,24 +540,33 @@ async function batchDelete() {
   document.getElementById("btn-batch-delete").disabled = true;
   document.getElementById("btn-batch-delete").textContent = "刪除中…";
   try {
-    const r = await fetch("/api/dataset_export/sample/batch_delete", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({job: CURRENT_JOB, sample_ids: ids}),
+    const groups = new Map();
+    ids.forEach(id => {
+      const ref = SAMPLE_REFS[id];
+      if (!groups.has(ref.job)) groups.set(ref.job, []);
+      groups.get(ref.job).push(id);
     });
-    const data = await r.json();
-    if (!r.ok) {
-      alert("批次刪除失敗: " + (data.error || r.status));
-      return;
+    let emptied = false;
+    for (const [job, groupIds] of groups) {
+      const r = await fetch("/api/dataset_export/sample/batch_delete", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({job, sample_ids: groupIds.map(id => SAMPLE_REFS[id].sample_id)}),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || r.status);
+      emptied = emptied || data.batch_empty;
+      const deleted = new Set(data.deleted || []);
+      groupIds.forEach(id => {
+        if (deleted.has(SAMPLE_REFS[id].sample_id)) {
+          selectedIds.delete(id);
+          removeCardFromDom(id);
+        }
+      });
+      if (data.not_found && data.not_found.length) {
+        alert(`${job}：${data.not_found.length} 張找不到，請重新整理。`);
+      }
     }
-    // 移除已刪除的卡片
-    (data.deleted || []).forEach(sid => {
-      selectedIds.delete(sid);
-      removeCardFromDom(sid);
-    });
-    if (data.not_found && data.not_found.length > 0) {
-      alert(`${data.deleted_count} 張刪除成功，${data.not_found.length} 張找不到。`);
-    }
+    if (emptied) { window.location.replace('/dataset_gallery'); return; }
     updateBatchCount();
   } catch (e) {
     alert("網路錯誤: " + e);
