@@ -27,7 +27,7 @@ from capi_image_naming import canonical_image_prefix
 from capi_image_orientation import read_detection_image
 from capi_preprocess import (
     PreprocessConfig, preprocess_panel_folder, PanelPreprocessResult,
-    classify_anchor_zone, detect_panel_polygon,
+    classify_anchor_zone, detect_panel_geometry,
     image_preprocess_pipeline_for_zone, map_product_coord_to_image,
     rect_polygon_from_bounds, resolve_aoi_inward_shift_axes,
     resolve_inward_polygon_tile,
@@ -1003,9 +1003,8 @@ def sample_ng_tiles(
                     log(f"  ⚠ {lighting}: 炸彈原圖讀取失敗 {raw_source_path}")
                     continue
 
-                # This is intentionally the same ordering as
-                # preprocess_panel_image / _create_aoi_centered_tiles_v2:
-                # global pipeline first, then boundary detection and crop.
+                # Keep the model-preprocessed image for crops; large-panel
+                # boundary detection uses the raw image, as in inference.
                 geometry_image = raw_image
                 if (
                     preprocess_cfg is not None
@@ -1025,8 +1024,10 @@ def sample_ng_tiles(
                 detected_polygon = None
                 if preprocess_cfg is not None:
                     try:
-                        detected_bounds, detected_polygon = detect_panel_polygon(
-                            geometry_image, preprocess_cfg,
+                        detected_bounds, detected_polygon = detect_panel_geometry(
+                            raw_image, preprocess_cfg,
+                            processed_image=geometry_image,
+                            source_name=raw_source_path.name,
                         )
                     except Exception as exc:
                         log(f"  ⚠ {lighting}: panel 邊界偵測失敗 {raw_source_path.name}: {exc}")

@@ -942,6 +942,35 @@ def get_used_tile_ids(bundle_dir: Path, lighting: str, zone: str) -> Optional[se
     return None
 
 
+def get_submodel_job_id(bundle: dict, lighting: str, zone: str) -> str:
+    """Resolve the latest unit's training data source."""
+    manifest = _read_manifest(Path(bundle["bundle_path"]))
+    history = (manifest.get("submodel_history") or {}).get(f"{lighting}-{zone}") or []
+    latest = history[-1] if history else {}
+    return (latest.get("job_id") or latest.get("trained_with_job_id")
+            or bundle.get("job_id") or "")
+
+
+def list_bundle_training_tiles(db, bundle: dict, **filters) -> list:
+    """Merge current unit sources without superseded training tiles."""
+    manifest = _read_manifest(Path(bundle["bundle_path"]))
+    original = bundle.get("job_id") or ""
+    sources = {}
+    for label, history in (manifest.get("submodel_history") or {}).items():
+        if history:
+            latest = history[-1]
+            sources[label] = (latest.get("job_id") or latest.get("trained_with_job_id")
+                              or original)
+    result = []
+    for job in sorted({original, *sources.values()} - {""}):
+        for tile in db.list_tile_pool(job, **filters):
+            lighting, zone = tile.get("lighting"), tile.get("zone")
+            zones = (zone,) if zone else ZONES
+            if any(sources.get(f"{lighting}-{z}", original) == job for z in zones):
+                result.append(tile)
+    return sorted(result, key=lambda tile: int(tile["id"]))
+
+
 def get_pending_change_count(
     db, bundle: dict, lighting: str, zone: str,
 ) -> int:
@@ -951,15 +980,8 @@ def get_pending_change_count(
     舊 bundle（manifest 沒記錄 used_tile_ids）退化策略：回傳目前 reject 的 tile 數。
     無 job_id（訓練資料已刪）回 0。
     """
-    job_id = bundle.get("job_id") or ""
+    job_id = get_submodel_job_id(bundle, lighting, zone)
     bundle_dir = Path(bundle["bundle_path"])
-    manifest = _read_manifest(bundle_dir)
-    unit_label = f"{lighting}-{zone}"
-    history = (manifest.get("submodel_history") or {}).get(unit_label) or []
-    if history:
-        history_job_id = history[-1].get("job_id") or history[-1].get("trained_with_job_id")
-        if history_job_id:
-            job_id = history_job_id
 
     if not job_id:
         return 0

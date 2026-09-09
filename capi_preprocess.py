@@ -162,6 +162,16 @@ class PreprocessConfig:
             self.outer_edge_extend = self.tile_size // 2
 
 
+def panel_boundary_config_for_station(profile: str) -> Dict[str, Any]:
+    """Shared raw-boundary settings for inference and training preprocessing."""
+    return {
+        "large_panel_raw_boundary_enabled": profile in ("capi", "aapi"),
+        "large_panel_min_width_ratio": 0.75 if profile == "capi" else 0.85,
+        "large_panel_min_height_ratio": 0.60 if profile == "capi" else 0.80,
+        "raw_boundary_max_edge_residual_p95_ratio": 0.04 if profile == "capi" else 0.03,
+    }
+
+
 def image_preprocess_pipeline_for_zone(
     config: PreprocessConfig,
     zone: Optional[str],
@@ -723,6 +733,27 @@ def _detect_large_panel_raw_boundary(
         min_height_ratio,
     )
     return bbox, polygon, True
+
+
+def detect_panel_geometry(
+    image: np.ndarray,
+    config: PreprocessConfig,
+    *,
+    processed_image: Optional[np.ndarray] = None,
+    source_name: str = "",
+) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[np.ndarray]]:
+    """Detect raw large-panel geometry, with the same single-image fallback as preprocessing."""
+    if config.large_panel_raw_boundary_enabled:
+        bbox, polygon, large_occupancy = _detect_large_panel_raw_boundary(
+            image, config, source_name=source_name,
+        )
+        if large_occupancy and bbox is not None and (
+            polygon is not None or not config.enable_panel_polygon
+        ):
+            return bbox, polygon
+    return detect_panel_polygon(
+        processed_image if processed_image is not None else image, config,
+    )
 
 
 def _polyfit_polygon(

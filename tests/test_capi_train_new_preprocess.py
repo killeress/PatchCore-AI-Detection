@@ -694,8 +694,8 @@ def test_sample_ng_tiles_uses_formal_polygon_mapping_and_inward_roi(tmp_path, mo
         dtype=np.float32,
     )
     monkeypatch.setattr(
-        "capi_train_new.detect_panel_polygon",
-        lambda _image, _config: ((100, 100, 900, 800), polygon),
+        "capi_train_new.detect_panel_geometry",
+        lambda _image, _config, **kwargs: ((100, 100, 900, 800), polygon),
     )
 
     class MockDB:

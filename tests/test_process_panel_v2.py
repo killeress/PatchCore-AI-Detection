@@ -1734,3 +1734,41 @@ def test_process_panel_v2_aoi_only_mode_preprocesses_reference_for_black_images(
 
     # W0F00000 should be in captured_files since it's the preferred reference image
     assert any("W0F00000" in f for f in captured_files), f"Expected W0F00000 in preprocessed files, got: {captured_files}"
+
+
+@pytest.mark.parametrize("profile,width,height,residual", [
+    ("capi", 0.75, 0.60, 0.04),
+    ("aapi", 0.85, 0.80, 0.03),
+])
+def test_debug_single_image_enables_station_raw_boundary(
+    tmp_path, monkeypatch, profile, width, height, residual,
+):
+    from types import SimpleNamespace
+    from capi_inference import CAPIInferencer
+    from capi_station_adapter import create_station_adapter
+
+    cfg = _make_config(tmp_path)
+    captured = []
+
+    def preprocess(_path, _lighting, pre_cfg):
+        captured.append(pre_cfg)
+        return SimpleNamespace(foreground_bbox=(0, 0, 0, 0))
+
+    monkeypatch.setattr("capi_preprocess.preprocess_panel_image", preprocess)
+    inferencer = CAPIInferencer(cfg)
+    inferencer.station_adapter = create_station_adapter(profile)
+    filename = (
+        "YQ60TE232C13G0F00000000001.tif"
+        if profile == "aapi" else "G0F00000_test.png"
+    )
+    inferencer.run_inference_v2_single_image(
+        tmp_path / filename, otsu_offset_override=9,
+    )
+
+    assert len(captured) == 1
+    pre_cfg = captured[0]
+    assert pre_cfg.large_panel_raw_boundary_enabled is True
+    assert pre_cfg.large_panel_min_width_ratio == width
+    assert pre_cfg.large_panel_min_height_ratio == height
+    assert pre_cfg.raw_boundary_max_edge_residual_p95_ratio == residual
+    assert pre_cfg.otsu_offset == 9

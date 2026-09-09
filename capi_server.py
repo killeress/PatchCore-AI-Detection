@@ -60,7 +60,10 @@ from capi_image_naming import (
     source_image_prefix,
 )
 from capi_inference import CAPIInferencer, ImageResult, TileInfo, resolve_product_resolution
-from capi_preprocess import BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_polygon
+from capi_preprocess import (
+    BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_geometry,
+    panel_boundary_config_for_station,
+)
 from capi_station_adapter import (
     create_station_adapter,
     resolve_station_profile_from_hostname,
@@ -621,6 +624,7 @@ def _image_abnormal_preprocess_config(
     config: CAPIConfig,
     product_resolution: Optional[Tuple[int, int]] = None,
     rotate_180: bool = False,
+    station_profile: str = "capi",
 ) -> PreprocessConfig:
     if product_resolution is None:
         product_resolution = resolve_product_resolution(
@@ -628,6 +632,7 @@ def _image_abnormal_preprocess_config(
             getattr(config, "model_resolution_map", None),
         )
     return PreprocessConfig(
+        **panel_boundary_config_for_station(station_profile),
         tile_size=int(getattr(config, "tile_size", 512)),
         tile_stride=int(getattr(config, "tile_stride", 512)),
         otsu_offset=int(getattr(config, "otsu_offset", 5)),
@@ -643,7 +648,7 @@ def _detect_image_abnormal_product_polygon(
     image: Any,
     pre_cfg: PreprocessConfig,
 ) -> Tuple[Optional[np.ndarray], str]:
-    bbox, polygon = detect_panel_polygon(image, pre_cfg)
+    bbox, polygon = detect_panel_geometry(image, pre_cfg)
     if polygon is not None:
         return np.asarray(polygon, dtype=np.float32), "polygon"
     rect_polygon = _rect_polygon_from_bbox(bbox)
@@ -743,6 +748,7 @@ def check_image_abnormal_precheck(
     image_prefix_resolver: Optional[Callable[[str], str]] = None,
     screen_alias_resolver: Optional[Callable[[str], str]] = None,
     boundary_reference_priority: Optional[Tuple[str, ...]] = None,
+    station_profile: str = "capi",
 ) -> Optional[Dict[str, Any]]:
     if not getattr(config, "image_abnormal_detection_enabled", False):
         return None
@@ -768,7 +774,9 @@ def check_image_abnormal_precheck(
         return None
 
     image_cache: Dict[str, Any] = {}
-    pre_cfg = _image_abnormal_preprocess_config(config, product_resolution, rotate_180)
+    pre_cfg = _image_abnormal_preprocess_config(
+        config, product_resolution, rotate_180, station_profile,
+    )
     screen_paths = _image_abnormal_screen_path_map(
         candidates,
         image_prefix_resolver=image_prefix_resolver,
@@ -3294,6 +3302,7 @@ class CAPIServer:
                 image_prefix_resolver=station_adapter.image_prefix,
                 screen_alias_resolver=station_adapter.model_prefix,
                 boundary_reference_priority=station_adapter.boundary_reference_priority,
+                station_profile=station_adapter.profile,
             )
             if image_abnormal:
                 screen = image_abnormal["screen"]

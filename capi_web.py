@@ -8860,6 +8860,23 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             logger.error(f"[DEBUG] Edge Inspect error: {e}", exc_info=True)
             self._send_json({"error": f"邊緣檢測失敗: {str(e)}"})
 
+    def _debug_panel_boundary(self, image, image_path):
+        from capi_preprocess import (
+            PreprocessConfig, detect_panel_geometry, panel_boundary_config_for_station,
+        )
+
+        cfg = self.inferencer.config
+        pre_cfg = PreprocessConfig(
+            **panel_boundary_config_for_station(
+                getattr(getattr(self.inferencer, "station_adapter", None), "profile", "capi")
+            ),
+            tile_size=cfg.tile_size,
+            otsu_offset=cfg.otsu_offset,
+            enable_panel_polygon=cfg.enable_panel_polygon,
+            product_resolution=tuple(self._debug_product_resolution(image_path)["product_resolution"]),
+        )
+        return detect_panel_geometry(image, pre_cfg, source_name=image_path.name)
+
     def _handle_api_debug_edge_inspect_corner(self):
         """API: 測試 AOI 座標角落邊緣檢測（CV 或 PatchCore 可切換）"""
         import cv2
@@ -8917,7 +8934,6 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             img_h, img_w = image.shape[:2]
 
             # Fast Otsu bounds (與 /api/debug/edge-inspect 一致)
-            # 同時回傳 closing mask 供 polygon 偵測使用
             def _fast_otsu_bounds(img: np.ndarray) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
                 if len(img.shape) == 3:
                     g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -8941,13 +8957,15 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     return (0, 0, img.shape[1], img.shape[0]), closing
                 return (int(x_min), int(y_min), int(x_max), int(y_max)), closing
 
-            otsu_bounds, otsu_closing = _fast_otsu_bounds(image)
+            otsu_bounds, _ = _fast_otsu_bounds(image)
 
-            # 用 inferencer 的 polygon 偵測 (對齊 production)，無 inferencer 時 fallback 為 None
+            # 與正式推論共用原圖抓邊；無 inferencer 時保留矩形 fallback。
             panel_polygon = None
             if self.inferencer is not None:
                 try:
-                    panel_polygon = self.inferencer._find_panel_polygon(otsu_closing, otsu_bounds)
+                    detected_bounds, panel_polygon = self._debug_panel_boundary(image, image_path)
+                    if detected_bounds is not None:
+                        otsu_bounds = detected_bounds
                 except Exception as poly_err:
                     logger.warning(f"[DEBUG corner] panel_polygon 偵測失敗，fallback 用矩形: {poly_err}")
 
@@ -9126,7 +9144,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
             panel_polygon = None
             try:
-                _, _, panel_polygon = self.inferencer.calculate_otsu_bounds(image)
+                _, panel_polygon = self._debug_panel_boundary(image, image_path)
             except Exception as poly_err:
                 logger.warning(f"[DEBUG corner PC] polygon 偵測失敗: {poly_err}")
 
@@ -9229,7 +9247,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
             panel_polygon = None
             try:
-                _, _, panel_polygon = self.inferencer.calculate_otsu_bounds(image)
+                _, panel_polygon = self._debug_panel_boundary(image, image_path)
             except Exception as poly_err:
                 logger.warning(f"[DEBUG corner Fusion] polygon 偵測失敗: {poly_err}")
 
@@ -9875,6 +9893,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         import cv2
         import numpy as np
         from capi_inference import TileInfo, score_normalization_diagnostic
+        from capi_preprocess import panel_boundary_config_for_station
 
         # 讀取 POST body
         content_length = int(self.headers.get('Content-Length', 0))
@@ -9991,6 +10010,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     return
                 from capi_preprocess import PreprocessConfig, preprocess_panel_image
                 grid_pre_cfg = PreprocessConfig(
+                    **panel_boundary_config_for_station(
+                        getattr(getattr(self.inferencer, "station_adapter", None), "profile", "capi")
+                    ),
                     tile_size=self.inferencer.config.tile_size,
                     tile_stride=getattr(
                         self.inferencer.config,
@@ -10109,10 +10131,13 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     return
 
                 from capi_preprocess import (
-                    classify_tile_zone, detect_panel_polygon, PreprocessConfig,
+                    classify_tile_zone, detect_panel_geometry, PreprocessConfig,
                     resolve_inward_polygon_tile,
                 )
                 pre_cfg = PreprocessConfig(
+                    **panel_boundary_config_for_station(
+                        getattr(getattr(self.inferencer, "station_adapter", None), "profile", "capi")
+                    ),
                     tile_size=self.inferencer.config.tile_size,
                     tile_stride=getattr(
                         self.inferencer.config,
@@ -10132,7 +10157,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 )
                 polygon = grid_polygon
                 if polygon is None:
-                    _, polygon = detect_panel_polygon(processed_panel_image, pre_cfg)
+                    _, polygon = detect_panel_geometry(
+                        image, pre_cfg, processed_image=processed_panel_image,
+                        source_name=image_path.name,
+                    )
                 if polygon is None and hasattr(self.inferencer, "_rect_polygon_from_bounds"):
                     polygon = self.inferencer._rect_polygon_from_bounds(raw_bounds)
                 panel_polygon = polygon
@@ -16138,7 +16166,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             TrainingConfig, apply_user_training_params,
             preprocess_panels_to_pool, sample_ng_tiles, NG_TILES_PER_LIGHTING,
         )
-        from capi_preprocess import PreprocessConfig
+        from capi_preprocess import PreprocessConfig, panel_boundary_config_for_station
 
         db = server_inst.database
         runtime = CAPIWebHandler._get_job_runtime(job_id)
@@ -16182,6 +16210,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             )
             apply_user_training_params(cfg, training_params, log_fn=log)
             pre_cfg = PreprocessConfig(
+                **panel_boundary_config_for_station(station_adapter.profile),
                 tile_stride=cfg.tile_stride,
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
                 image_preprocess_pipelines=cfg.image_preprocess_pipelines,
@@ -16550,12 +16579,16 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             }
 
             if preprocess_after_tiling:
-                from capi_preprocess import LIGHTING_PREFIXES, PreprocessConfig, preprocess_panel_image
+                from capi_preprocess import (
+                    LIGHTING_PREFIXES, PreprocessConfig, preprocess_panel_image,
+                    panel_boundary_config_for_station,
+                )
 
                 lighting = station_adapter.training_image_prefix(image_path.name)
                 if lighting not in LIGHTING_PREFIXES:
                     lighting = "STANDARD"
                 pre_cfg = PreprocessConfig(
+                    **panel_boundary_config_for_station(station_adapter.profile),
                     tile_stride=tile_stride,
                     image_preprocess_pipeline=preview_pipeline,
                     preprocess_after_tiling=True,
@@ -16620,12 +16653,16 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 }
             else:
                 if grid_canonicalization["enabled"]:
-                    from capi_preprocess import LIGHTING_PREFIXES, PreprocessConfig, preprocess_panel_image
+                    from capi_preprocess import (
+                        LIGHTING_PREFIXES, PreprocessConfig, preprocess_panel_image,
+                        panel_boundary_config_for_station,
+                    )
 
                     lighting = station_adapter.training_image_prefix(image_path.name)
                     if lighting not in LIGHTING_PREFIXES:
                         lighting = "STANDARD"
                     pre_cfg = PreprocessConfig(
+                        **panel_boundary_config_for_station(station_adapter.profile),
                         tile_stride=tile_stride,
                         image_preprocess_pipeline=pipeline,
                         cache_processed_image=True,
@@ -16703,7 +16740,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         """
         from urllib.parse import parse_qs, urlparse
         import cv2
-        from capi_preprocess import PreprocessConfig, filter_panel_lighting_files, preprocess_panel_folder
+        from capi_preprocess import (
+            PreprocessConfig, filter_panel_lighting_files, preprocess_panel_folder,
+            panel_boundary_config_for_station,
+        )
         station_adapter = self._train_new_station_adapter(
             self._capi_server_instance
         )
@@ -16728,6 +16768,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         )
 
         preprocess_cfg = PreprocessConfig(
+            **panel_boundary_config_for_station(station_adapter.profile),
             tile_stride=int(job.get("tile_stride") or 512),
             image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
             image_preprocess_pipelines=job.get("image_preprocess_pipelines") or {},
@@ -16818,7 +16859,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
         preview_dir = Path(".tmp/train_new_thumbs") / job_id / "preview"
         preview_dir.mkdir(parents=True, exist_ok=True)
-        preview_path = preview_dir / f"{lighting}_v13_{cache_key}.jpg"
+        preview_path = preview_dir / f"{lighting}_v14_{cache_key}.jpg"
         if preview_path.exists():
             self._send_binary(str(preview_path))
             return
@@ -18136,7 +18177,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         if not bundle:
             self._send_json({"error": "bundle not found"}, status=404)
             return
-        job_id = bundle.get("job_id") or ""
+        from capi_model_registry import get_submodel_job_id
+        job_id = get_submodel_job_id(bundle, lighting, zone)
         if not job_id:
             self._send_json({"error": "此 bundle 無關聯 job_id（訓練資料已刪），無法匯入 Pool"}, status=400)
             return
@@ -18864,7 +18906,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         if source == "ok" and zone:
             kwargs["zone"] = zone
 
-        all_tiles = db.list_tile_pool(job_id, **kwargs)
+        from capi_model_registry import list_bundle_training_tiles
+        all_tiles = list_bundle_training_tiles(db, bundle, **kwargs)
         # 加 score 並排序（在分頁前，確保排序後再取 page）
         if score_from:
             CAPIWebHandler._decorate_tiles_with_scores(all_tiles, db, score_from, sort_by)
@@ -18948,15 +18991,23 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             self._send_json({"error": "此 bundle 無關聯 job_id"}, status=400)
             return
 
-        # 只允許動 OK tile：用 source='ok' 撈一次當前 job 的所有 OK tile id 做白名單
-        ok_ids = {int(t["id"]) for t in db.list_tile_pool(job_id, source="ok")}
+        # 只允許修改各子模型目前來源的 OK tile，拒絕舊來源與 NG tile
+        from capi_model_registry import list_bundle_training_tiles
+        tiles = list_bundle_training_tiles(db, bundle, source="ok")
+        ok_ids = {int(t["id"]) for t in tiles}
         bad = [i for i in tile_ids if i not in ok_ids]
         if bad:
             self._send_json({"error": f"tile_ids 含非 OK tile（NG tile 不可動）: {bad[:5]}"},
                             status=400)
             return
 
-        db.update_tile_decisions(job_id, tile_ids, decision)
+        requested = set(tile_ids)
+        jobs = {}
+        for tile in tiles:
+            if int(tile["id"]) in requested:
+                jobs.setdefault(tile["job_id"], []).append(int(tile["id"]))
+        for source_job, ids in jobs.items():
+            db.update_tile_decisions(source_job, ids, decision)
         self._send_json({"ok": True, "updated": len(tile_ids)})
 
     def _handle_models_retrain_submodel_with_panels(self):
@@ -19155,7 +19206,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
     ):
         """背景 thread：重新選 panel 後，只訓練單一子模型並覆蓋原 .pt。"""
         import traceback
-        from capi_preprocess import PreprocessConfig
+        from capi_preprocess import PreprocessConfig, panel_boundary_config_for_station
         from capi_train_new import (
             TrainingConfig, apply_user_training_params,
             preprocess_panels_to_pool, sample_ng_tiles, train_single_submodel,
@@ -19262,6 +19313,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             thumb_root = Path(".tmp/train_new_thumbs") / job_id
             _log(f"前處理 selected panels（只保留 lighting={lighting}）")
             preprocess_cfg = PreprocessConfig(
+                **panel_boundary_config_for_station(
+                    CAPIWebHandler._train_new_station_adapter(server_inst).profile
+                ),
                 tile_stride=cfg.tile_stride,
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
                 image_preprocess_pipelines=cfg.image_preprocess_pipelines,
@@ -19545,7 +19599,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             bundle = db.get_model_bundle(bundle_id)
             if not bundle:
                 raise RuntimeError(f"bundle {bundle_id} 已不存在")
-            job_id = bundle["job_id"]
+            from capi_model_registry import get_submodel_job_id
+            job_id = get_submodel_job_id(bundle, lighting, zone)
+            source_job = db.get_training_job(job_id) or {}
             bundle_dir = Path(bundle["bundle_path"])
             machine_id = bundle["machine_id"]
             unit_label = f"{lighting}-{zone}"
@@ -19569,6 +19625,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             cfg = TrainingConfig(
                 machine_id=machine_id,
                 panel_paths=[],
+                validation_config=(source_job.get("training_params") or {}).get("validation_config") or {},
                 over_review_root=Path(".tmp/_unused"),
                 image_preprocess_pipeline=old_manifest.get("image_preprocess_pipeline") or [],
                 batch_size=patchcore_params.get("batch_size", 32),
@@ -19622,6 +19679,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 "auroc": new_auroc,
                 "used_tile_ids": result["used_tile_ids"],
                 "kind": "retrain",
+                "job_id": job_id,
+                "trained_with_job_id": job_id,
                 "ng_used": result["ng_used"],
                 "feature_pool_kernel_size": result["metrics"].get(
                     "feature_pool_kernel_size", cfg.feature_pool_kernel_size,
@@ -20135,9 +20194,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             self._send_json({"error": "此 bundle 無關聯 job_id（訓練資料已刪）"}, status=400)
             return
 
+        from capi_model_registry import get_submodel_job_id
+        job_id = get_submodel_job_id(bundle, lighting, zone)
+
         # 自掃 = 該 bundle 對「自己訓練資料」算分
         pool = db.list_tile_pool(
-            bundle["job_id"], lighting=lighting, zone=zone, source="ok",
+            job_id, lighting=lighting, zone=zone, source="ok",
         )
         if not pool:
             self._send_json({"state": "empty", "scanned": 0}); return
@@ -20153,7 +20215,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             kind="self",
             scoring_bundle_id=bundle_id,
             bundle_dir=Path(bundle["bundle_path"]),
-            tile_pool_job_id=bundle["job_id"],
+            tile_pool_job_id=job_id,
             lighting=lighting, zone=zone, tile_ids=tile_ids,
             server_inst=self._capi_server_instance,
         )
@@ -20455,5 +20517,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         server.shutdown()
         print("\nStopped.")
-
 
