@@ -9522,6 +9522,9 @@ class CAPIInferencer:
             large_panel_min_height_ratio=(
                 0.60 if self.station_adapter.profile == "capi" else 0.80
             ),
+            raw_boundary_max_edge_residual_p95_ratio=(
+                0.04 if self.station_adapter.profile == "capi" else 0.03
+            ),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
             product_resolution=product_resolution or self._product_resolution(),
             grid_canonicalization_enabled=getattr(
