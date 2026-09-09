@@ -966,12 +966,15 @@ def test_report_template_contains_manual_review_and_ng_database_ui():
 
 def test_record_detail_template_uses_single_sample_classification_action():
     template = Path("templates/record_detail.html").read_text(encoding="utf-8")
+    tile_template = Path("templates/_aoi_coord_result.html").read_text(encoding="utf-8")
 
     assert "樣本歸類" in template
     assert "有現象／真 NG" in template
     assert "無現象／AI 過檢" in template
     assert "/api/record/sample-classification" in template
-    assert "ng_validation_sample_id" in template
-    assert "retrain_pool_id" in template
+    assert "ng_validation_sample_id" in tile_template
+    assert "retrain_pool_id" in tile_template
+    assert "scratch_sample_id" in tile_template
+    assert 'data-value="scratch"' in template
     assert "addAoiTileToNgValidation" not in template
-    assert template.count('data-tile-result-id="{{ t.id }}"') == 1
+    assert tile_template.count('data-tile-result-id="{{ t.id }}"') == 1

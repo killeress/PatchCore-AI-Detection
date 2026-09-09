@@ -616,6 +616,14 @@ class CAPIDatabase:
                 CREATE INDEX IF NOT EXISTS idx_within_spec_log_inference
                     ON within_spec_review_log(inference_record_id);
 
+                -- 中心刮痕收件成功後的本機歸類憑據；保留來源以供重試與撤回。
+                CREATE TABLE IF NOT EXISTS scratch_sample_classifications (
+                    tile_result_id INTEGER PRIMARY KEY,
+                    sample_id TEXT NOT NULL,
+                    center_ip TEXT NOT NULL,
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+                );
+
                 -- Scratch 誤救標記 (以 tile 為單位，供 DINOv2 再訓練負樣本收集)
                 CREATE TABLE IF NOT EXISTS scratch_rescue_review (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2044,7 +2052,9 @@ class CAPIDatabase:
                               ,(SELECT p.added_to_job_id
                                   FROM over_retrain_pool p
                                  WHERE p.tile_result_id = t.id
-                                 LIMIT 1) AS retrain_pool_job_id
+                                 LIMIT 1) AS retrain_pool_job_id,
+                                (SELECT s.sample_id FROM scratch_sample_classifications s
+                                   WHERE s.tile_result_id = t.id) AS scratch_sample_id
                          FROM tile_results t
                        WHERE t.image_result_id = ?
                        ORDER BY 
@@ -4269,6 +4279,34 @@ class CAPIDatabase:
         )
         return rows[0] if rows else None
 
+    def get_scratch_sample_classification(self, tile_result_id: int) -> Optional[Dict]:
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM scratch_sample_classifications WHERE tile_result_id = ?",
+                (int(tile_result_id),),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def set_scratch_sample_classification(self, tile_result_id: int, sample_id: str = "", center_ip: str = ""):
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                if sample_id:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO scratch_sample_classifications "
+                        "(tile_result_id, sample_id, center_ip) VALUES (?, ?, ?)",
+                        (int(tile_result_id), sample_id, center_ip),
+                    )
+                else:
+                    conn.execute("DELETE FROM scratch_sample_classifications WHERE tile_result_id = ?",
+                                 (int(tile_result_id),))
+                conn.commit()
+            finally:
+                conn.close()
+
     def get_mes_comparison_reviews(
         self,
         inference_record_ids: Optional[List[int]] = None,
@@ -6373,6 +6411,36 @@ class CAPIDatabase:
             except Exception as e:
                 conn.rollback()
                 raise e
+            finally:
+                conn.close()
+
+    def activate_scratch_bundle(self, bundle_path: str, reason: str, changed_by: str = ""):
+        """Commit the bundle path, enabled flag and audit history as one transaction."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                for name, value, kind in (
+                    ("scratch_bundle_path", bundle_path, "str"),
+                    ("scratch_classifier_enabled", True, "bool"),
+                ):
+                    old = conn.execute("SELECT param_value FROM config_params WHERE param_name = ?",
+                                       (name,)).fetchone()
+                    encoded = json.dumps(value, ensure_ascii=False)
+                    conn.execute(
+                        "INSERT INTO config_params (param_name, param_value, param_type) VALUES (?, ?, ?) "
+                        "ON CONFLICT(param_name) DO UPDATE SET param_value=excluded.param_value, "
+                        "param_type=excluded.param_type, updated_at=datetime('now', 'localtime')",
+                        (name, encoded, kind),
+                    )
+                    conn.execute(
+                        "INSERT INTO config_change_history "
+                        "(param_name, old_value, new_value, change_reason, changed_by) VALUES (?, ?, ?, ?, ?)",
+                        (name, old["param_value"] if old else "", encoded, reason, changed_by[:64]),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
             finally:
                 conn.close()
 

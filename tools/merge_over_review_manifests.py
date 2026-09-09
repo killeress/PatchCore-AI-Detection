@@ -37,6 +37,8 @@ def discover_batches(base: Path, exclude: set[str]) -> list[str]:
         d.name for d in base.iterdir()
         if d.is_dir() and (d / "manifest.csv").exists() and d.name not in exclude
     )
+    if (base / "manifest.csv").is_file() and "." not in exclude:
+        batches.insert(0, ".")
     return batches
 
 

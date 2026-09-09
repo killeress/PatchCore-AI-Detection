@@ -79,6 +79,8 @@ MANIFEST_FIELDS = [
     "inference_timestamp", "status",
 ]
 
+SOURCE_MANIFEST_FIELDS = ["source_ip", "sample_source", "crop_sha256", "machine_id", "machine_no"]
+
 # Job 狀態常數
 JOB_STATE_IDLE = "idle"
 JOB_STATE_RUNNING = "running"
@@ -228,6 +230,9 @@ def write_manifest(
 ) -> None:
     """整批 rewrite manifest.csv（呼叫者須持有 job lock 保證單寫入者）"""
     fields = fieldnames if fieldnames is not None else MANIFEST_FIELDS
+    if fieldnames is None:
+        fields = [*fields, *(key for key in SOURCE_MANIFEST_FIELDS
+                            if any(key in row for row in rows.values()))]
     manifest_path = Path(manifest_path)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")

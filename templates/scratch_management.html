@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}刮痕資料中心{% endblock %}
+{% block content %}
+<div style="max-width:1000px;margin:24px auto;">
+  <h2>刮痕資料中心</h2>
+  <p>各線從推論紀錄歸類的刮痕集中於此；既有 RIC 資料繼續沿用。</p>
+  <div class="card" style="display:flex;gap:24px;flex-wrap:wrap;">
+    <a href="/dataset_gallery">① 瀏覽與整理資料集</a>
+    <a href="/retrain">② 訓練新版本</a>
+    <a href="/debug/scratch-batch">③ 批次驗證</a>
+    <a href="/central_dashboard/settings">管理收件／下發線體</a>
+  </div>
+  <p style="color:var(--muted);word-break:break-all;">資料儲存位置：{{ dataset_root | e }}</p>
+  <div class="card">
+    <h3>④ 下發刮痕分類器</h3>
+    <p>選擇已驗證的模型與線體。需登入管理員；線體須已安裝支援此功能的版本及 DINOv2 本地權重。</p>
+    <label for="scratch-bundle">模型版本</label>
+    <select id="scratch-bundle" style="width:100%;padding:10px;margin:8px 0 20px;">
+      {% for bundle in bundles %}<option value="{{ bundle | e }}">{{ bundle | e }}</option>{% endfor %}
+    </select>
+    {% if not bundles %}<p>尚未有可下發的刮痕模型，請先訓練。</p>{% endif %}
+    <div style="display:grid;gap:12px;">
+    {% for line in lines %}
+      <label><input type="checkbox" name="scratch-line" value="{{ line.id | e }}">
+        {{ line.factory | e }} {{ line.line | e }}（{{ line.pcName | default(line.id) | e }}） — {{ line.apiUrl | e }}</label>
+    {% else %}<p>尚未設定本廠區線體，請先到中控設定新增。</p>{% endfor %}
+    </div>
+    <button id="distribute" type="button" style="margin-top:20px;" onclick="distributeScratch()"
+            {% if not bundles %}disabled{% endif %}>下發並啟用所選版本</button>
+    <p>每台先驗證校驗碼與模型載入，再切換設定；失敗保留原版本。原模型檔保留，可再次下發舊版回滾。</p>
+    <pre id="distribution-result" style="white-space:pre-wrap;" role="status"></pre>
+  </div>
+</div>
+{% endblock %}
+{% block extra_js %}
+<script>
+async function distributeScratch() {
+  const selected = Array.from(document.querySelectorAll('input[name="scratch-line"]:checked'));
+  const output = document.getElementById('distribution-result');
+  const button = document.getElementById('distribute');
+  const bundle = document.getElementById('scratch-bundle').value;
+  if (!selected.length || !bundle) { output.textContent = '請選擇模型與至少一台線體。'; return; }
+  button.disabled = true;
+  output.textContent = '';
+  try {
+    for (const item of selected) {
+      const name = item.parentElement.textContent.trim();
+      output.textContent += name + '：傳送與驗證中…\n';
+      try {
+        const response = await fetch('/api/scratch/distribute', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({bundle, line_id: item.value})
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || '下發失敗');
+        output.textContent += '✓ ' + data.message + '\n  ' + data.bundle + '\n';
+      } catch (error) { output.textContent += '✗ ' + name + '：' + error.message + '\n'; }
+    }
+  } finally { button.disabled = false; }
+}
+</script>
+{% endblock %}

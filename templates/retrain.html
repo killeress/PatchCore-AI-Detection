@@ -5,8 +5,9 @@
 {% block content %}
 <div style="max-width:900px;margin:0 auto;padding:24px 16px;">
 
-  <div style="margin-bottom:14px;">
+  <div style="margin-bottom:14px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;">
     <a href="/training" style="color:#a6adc8;text-decoration:none;font-size:.9rem;">← 返回模型訓練</a>
+    <a href="/scratch-center" style="color:#89b4fa;text-decoration:none;font-size:.9rem;">刮痕資料中心 →</a>
   </div>
 
   <!-- Section 1: Current model info -->
@@ -171,9 +172,9 @@
       </table>
       <div style="margin-top:14px;padding:10px 14px;background:#1e1e2e;border-radius:6px;
                   border-left:3px solid #89b4fa;color:#a6adc8;font-size:.88rem;line-height:1.6;">
-        若要部署新模型，請前往
-        <a href="/settings" style="color:#89b4fa;text-decoration:none;font-weight:600;">設定頁面</a>
-        更新 <code style="background:#313244;padding:1px 5px;border-radius:3px;color:#cdd6f4;">scratch_bundle_path</code> 路徑後重啟服務。
+        請先完成批次驗證，再前往
+        <a href="/scratch-center" style="color:#89b4fa;text-decoration:none;font-weight:600;">刮痕資料中心</a>
+        選擇新版本及線體下發。
       </div>
     </div>
 
