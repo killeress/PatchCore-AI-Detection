@@ -125,6 +125,35 @@ def test_determine_label_unknown_category_raises():
         determine_label(ric="OK", over_category="not_a_real_category")
 
 
+@pytest.mark.parametrize("source,report,expected", [
+    ("W0F00000", "W0F00000", "W0F00000"),
+    ("U0F00000", "U0F00000", "U0F00000"),
+    ("Windows_BG", "Windows_BG", "STANDARD"),
+    ("STANDARD", "STANDARD", "STANDARD"),
+    ("W0F00010", "W0F00010", "W0F00010"),
+    ("WGF25250", "WGF25250", "WGF25250"),
+])
+def test_aapi_dataset_matches_ric_and_preserves_lighting(tmp_path, source, report, expected):
+    from capi_station_adapter import create_station_adapter
+
+    adapter = create_station_adapter("aapi")
+    detail = _make_record_detail()
+    detail["images"][0]["image_name"] = f"SAMPLE{source}082933.tif"
+    exporter = DatasetExporter(None, str(tmp_path), {}, station_adapter=adapter)
+    candidates = exporter._flatten_record_to_candidates(
+        detail, "true_ng", _make_accuracy_row(datastr=f"{report},NG;"),
+    )
+    assert len(candidates) == 2
+    assert {candidate.prefix for candidate in candidates} == {expected}
+
+    detail["images"][0]["image_name"] = "SAMPLEB0F00000082933.tif"
+    diagnostics = {}
+    assert exporter._flatten_record_to_candidates(
+        detail, "true_ng", _make_accuracy_row(datastr=""), diagnostics,
+    ) == []
+    assert diagnostics["images_b0f_skipped"] == 1
+
+
 def test_extract_prefix_with_timestamp():
     assert extract_prefix("G0F00000_114438.tif") == "G0F00000"
     assert extract_prefix("G0F00000083754.tif") == "G0F00000"

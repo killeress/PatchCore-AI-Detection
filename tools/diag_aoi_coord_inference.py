@@ -27,6 +27,7 @@ from capi_config import CAPIConfig
 from capi_inference import CAPIInferencer, AOIReportDefect, TileInfo, DEFAULT_PRODUCT_RESOLUTION
 from capi_edge_cv import EdgeDefect
 from capi_heatmap import HeatmapManager
+from capi_station_adapter import local_station_adapter
 
 
 def parse_coord_from_txt(txt_path: Path) -> Tuple[str, int, int]:
@@ -41,24 +42,21 @@ def parse_coord_from_txt(txt_path: Path) -> Tuple[str, int, int]:
     return m.group(1), int(m.group(2)), int(m.group(3))
 
 
-def find_image_for_prefix(image_dir: Path, prefix: str) -> Optional[Path]:
+def find_image_for_prefix(image_dir: Path, prefix: str, station_adapter=None) -> Optional[Path]:
     """在目錄中找到對應前綴的圖片"""
-    for ext in ['*.tif', '*.tiff', '*.bmp', '*.png', '*.jpg']:
-        for f in image_dir.glob(ext):
-            if f.name.startswith(prefix) and not f.name.startswith('PINIGBI') and not f.name.startswith('OMIT0000'):
-                return f
-    return None
+    adapter = station_adapter or local_station_adapter()
+    return adapter.find_lighting_image(image_dir, prefix)
 
 
-def find_omit_image(image_dir: Path) -> Optional[np.ndarray]:
+def find_omit_image(image_dir: Path, station_adapter=None) -> Optional[np.ndarray]:
     """自動搜尋 PINIGBI/OMIT0000 圖片"""
-    for pattern in ["PINIGBI*.*", "OMIT0000*.*"]:
-        matches = list(image_dir.glob(pattern))
-        if matches:
-            img = cv2.imread(str(matches[0]), cv2.IMREAD_UNCHANGED)
-            if img is not None:
-                print(f"✅ OMIT 圖片: {matches[0].name}")
-                return img
+    adapter = station_adapter or local_station_adapter()
+    omit_path = adapter.find_omit_image(image_dir)
+    if omit_path is not None:
+        img = cv2.imread(str(omit_path), cv2.IMREAD_UNCHANGED)
+        if img is not None:
+            print(f"✅ OMIT 圖片: {omit_path.name}")
+            return img
     return None
 
 
@@ -72,6 +70,7 @@ def run_aoi_coord_inference(
     heatmap_dir: str = "./test_heatmaps",
     config_overrides: dict = None,
     disable_edge: bool = False,
+    station_adapter=None,
 ):
     """
     以 AOI 機檢座標執行推論，與 Server process_panel 一致的完整 pipeline。
@@ -88,7 +87,7 @@ def run_aoi_coord_inference(
                 setattr(config, key, val)
                 print(f"  📝 Config override: {key} = {val}")
 
-    inferencer = CAPIInferencer(config)
+    inferencer = CAPIInferencer(config, station_adapter=station_adapter or local_station_adapter())
     heatmap_mgr = HeatmapManager(base_dir=heatmap_dir)
 
     # 關閉 CV Edge (與 production 一致，邊緣檢測由 DB 控制)
@@ -119,7 +118,7 @@ def run_aoi_coord_inference(
         # 找對應圖片
         tasks = []  # [(image_path, [(px, py, code), ...])]
         for prefix, coords in coord_map.items():
-            img_path = find_image_for_prefix(image_dir, prefix)
+            img_path = find_image_for_prefix(image_dir, prefix, inferencer.station_adapter)
             if img_path:
                 tasks.append((img_path, coords))
                 print(f"  🖼️ {prefix} → {img_path.name} ({len(coords)} 個座標)")
@@ -136,7 +135,7 @@ def run_aoi_coord_inference(
     # ----------------------------------------------------------------
     # OMIT 圖片
     # ----------------------------------------------------------------
-    omit_image = find_omit_image(image_dir)
+    omit_image = find_omit_image(image_dir, inferencer.station_adapter)
     omit_overexposed = False
     if omit_image is not None:
         is_oe, oe_mean, oe_ratio, oe_detail = inferencer.check_omit_overexposure(omit_image)
@@ -262,7 +261,7 @@ def run_aoi_coord_inference(
 
         # === Phase 2: GPU 推論 (與 server 一致) ===
         img_prefix = inferencer._get_image_prefix(img_path.name)
-        is_skip_file = config.should_skip_file(img_path.name)
+        is_skip_file = config.should_skip_file(img_path.name, inferencer.station_adapter)
 
         if is_skip_file:
             # B0F 等黑圖: 二值化亮點偵測

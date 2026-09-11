@@ -5,9 +5,11 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
+import pytest
 
 from capi_config import CAPIConfig
 from capi_inference import CAPIInferencer
+from capi_station_adapter import create_station_adapter
 
 
 class _DiagnosticInferencer:
@@ -26,7 +28,7 @@ class _DiagnosticInferencer:
             image_preprocess_pipelines={},
             preprocess_after_tiling=False,
             edge_margin_px=0,
-            should_skip_file=lambda _name: False,
+            should_skip_file=lambda _name, _adapter=None: False,
             dust_heatmap_top_percent=0.5,
             dust_heatmap_metric="coverage",
             dust_heatmap_iou_threshold=0.15,
@@ -122,14 +124,37 @@ class _DiagnosticInferencer:
         return np.zeros((64, 64, 3), dtype=np.uint8)
 
 
-def test_coord_debug_exposes_bubble_score_competition_in_chinese(tmp_path):
+@pytest.mark.parametrize(
+    ("profile", "image_name", "omit_name"),
+    [
+        ("capi", "W0F00000_sample.tif", "PINIGBI_sample.tif"),
+        ("capi", "W0F00000082933.tif", "OMIT0000082933.tif"),
+        (
+            "aapi",
+            "YQ41WF224B17W0F00000082933.tif",
+            "YQ41WF224B17PINIGBI0082933.tif",
+        ),
+        (
+            "aapi",
+            "SAMPLEW0F00000082933.tif",
+            "SAMPLEPINIGBI0082933.tif",
+        ),
+        ("aapi", "YQ41WF224B17W0F00000082933.tif", None),
+    ],
+)
+def test_coord_debug_uses_station_omit_for_dust_diagnostics(
+    tmp_path, monkeypatch, profile, image_name, omit_name
+):
     from capi_web import CAPIWebHandler
 
     image = np.full((128, 128), 90, dtype=np.uint8)
-    image_path = tmp_path / "W0F00000_sample.tif"
-    omit_path = tmp_path / "PINIGBI_sample.tif"
+    image_path = tmp_path / image_name
     assert cv2.imwrite(str(image_path), image)
-    assert cv2.imwrite(str(omit_path), image)
+    if omit_name:
+        omit_path = tmp_path / omit_name
+        assert cv2.imwrite(str(omit_path), image)
+        omit_path.with_suffix(".json").write_text("{}", encoding="utf-8")
+        omit_path.with_suffix(".png").mkdir()
 
     body = json.dumps({
         "image_path": str(image_path),
@@ -144,6 +169,7 @@ def test_coord_debug_exposes_bubble_score_competition_in_chinese(tmp_path):
 
     handler = CAPIWebHandler.__new__(CAPIWebHandler)
     handler.inferencer = _DiagnosticInferencer()
+    handler.inferencer.station_adapter = create_station_adapter(profile)
     handler.heatmap_manager = None
     handler.rfile = io.BytesIO(body)
     handler.headers = SimpleNamespace(
@@ -153,13 +179,28 @@ def test_coord_debug_exposes_bubble_score_competition_in_chinese(tmp_path):
     )
     sent = []
     handler._send_json = lambda payload, status=200: sent.append((payload, status))
-    CAPIWebHandler._debug_heatmap_dir = tmp_path / "debug"
+    monkeypatch.setattr(CAPIWebHandler, "_debug_heatmap_dir", tmp_path / "debug")
 
     handler._handle_debug_coord_inference()
 
     assert sent and sent[0][1] == 200
     response = sent[0][0]
+    assert response["success"] is True
     assert response["judgment"] == "NG"
+    if omit_name is None:
+        assert response["omit_url"] == ""
+        assert response["dust_analysis"]["available"] is False
+        assert response["dust_analysis"]["dust_filter_result"] == "NO_OMIT"
+        assert response["final_judgment"] == "NG"
+        return
+
+    assert response["dust_analysis"]["omit_name"] == omit_name
+    assert response["dust_analysis"]["available"] is True
+    omit_preview = tmp_path / "debug" / response["omit_url"].rsplit("/", 1)[-1]
+    assert np.array_equal(
+        cv2.imread(str(omit_preview)),
+        cv2.cvtColor(image[32:96, 32:96], cv2.COLOR_GRAY2BGR),
+    )
     assert response["final_judgment"] == "OK"
     assert response["dust_analysis"]["center_seed"]["enabled"] is False
     assert response["dust_analysis"]["regions"]

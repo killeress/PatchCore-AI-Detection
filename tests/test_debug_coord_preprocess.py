@@ -19,7 +19,7 @@ class _FakeInferencer:
             image_preprocess_pipeline=pipeline,
             preprocess_after_tiling=after_tiling,
             edge_margin_px=0,
-            should_skip_file=lambda _name: False,
+            should_skip_file=lambda _name, _adapter=None: False,
         )
         self._model_mapping = {}
         self.last_tile = None
