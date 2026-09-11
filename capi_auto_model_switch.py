@@ -17,11 +17,16 @@ def requested_series_prefix(model_id: str) -> str:
     return str(model_id or "").strip().upper()[:SERIES_PREFIX_LENGTH]
 
 
-def normalize_series_prefix(series_prefix: str) -> str:
+def normalize_series_prefix(series_prefix: str, match_mode: str = "prefix") -> str:
+    if match_mode not in ("prefix", "exact"):
+        raise ValueError("比對方式必須是 prefix（前綴）或 exact（完整機種名稱）")
     prefix = str(series_prefix or "").strip().upper()
     if prefix == DEFAULT_SERIES_PREFIX:
         return DEFAULT_SERIES_PREFIX
-    if len(prefix) != SERIES_PREFIX_LENGTH:
+    if match_mode == "exact":
+        if not prefix:
+            raise ValueError("完整機種名稱不可空白")
+    elif len(prefix) != SERIES_PREFIX_LENGTH:
         raise ValueError(f"系列名必須是機種前 {SERIES_PREFIX_LENGTH} 碼")
     return prefix
 
@@ -33,7 +38,7 @@ def bundle_label(bundle: Optional[Dict]) -> str:
 
 
 def select_target_bundle(db, requested_model_id: str) -> Dict:
-    """依 Client 機種選出目標 bundle。
+    """依完整機種、前 8 碼系列、預設模型的順序選出目標 bundle。
 
     回傳格式：
         {
@@ -59,7 +64,9 @@ def select_target_bundle(db, requested_model_id: str) -> Dict:
             "message": "Client 未提供機種 ID，略過自動切換",
         }
 
-    rule = db.get_auto_model_switch_rule_by_series(series)
+    rule = db.get_auto_model_switch_rule_by_series(raw_model_id.upper(), match_mode="exact")
+    if rule is None:
+        rule = db.get_auto_model_switch_rule_by_series(series)
     used_default = False
     if rule is None:
         rule = db.get_default_auto_model_switch_rule()
@@ -73,7 +80,7 @@ def select_target_bundle(db, requested_model_id: str) -> Dict:
             "bundle": None,
             "used_default": False,
             "reason": "not_configured",
-            "message": "尚未設定此系列與預設模型，略過自動切換",
+            "message": "尚未設定此機種、系列與預設模型，略過自動切換",
         }
 
     bundle = db.get_model_bundle(int(rule["bundle_id"]))
@@ -95,5 +102,9 @@ def select_target_bundle(db, requested_model_id: str) -> Dict:
         "bundle": bundle,
         "used_default": used_default,
         "reason": "fallback_default" if used_default else "matched",
-        "message": "使用預設模型" if used_default else "命中系列模型",
+        "message": (
+            "使用預設模型" if used_default else
+            "命中完整機種模型" if rule.get("match_mode") == "exact" else
+            "命中系列模型"
+        ),
     }
