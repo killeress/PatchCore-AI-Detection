@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import socket
 from typing import Dict, List, Optional, Tuple
 
 from capi_image_naming import (
@@ -77,6 +78,16 @@ class StationAdapter:
     def is_omit_image(self, image_name: str) -> bool:
         stem = Path(image_name).stem.upper()
         return stem.startswith("PINIGBI") or "OMIT0000" in stem
+
+    def find_omit_image(self, panel_dir: Path) -> Optional[Path]:
+        return _latest_matching_image(panel_dir, self.is_omit_image)
+
+    def find_lighting_image(self, panel_dir: Path, prefix: str) -> Optional[Path]:
+        model_prefix = self.training_image_prefix(prefix)
+        return _latest_matching_image(
+            panel_dir,
+            lambda name: self.training_image_prefix(name) == model_prefix,
+        )
 
     def is_white_frame_image(self, image_name: str) -> bool:
         return is_white_frame_image_name(image_name)
@@ -269,12 +280,21 @@ def create_station_adapter(profile: str) -> StationAdapter:
     raise ValueError(f"Unsupported station_profile: {profile!r}; expected 'capi' or 'aapi'")
 
 
+def local_station_adapter() -> StationAdapter:
+    """Use the same hostname selection as the server for standalone tools."""
+    import os
+
+    return create_station_adapter(resolve_station_profile_from_hostname(
+        socket.gethostname(), default_if_unknown="capi" if os.name == "nt" else None,
+    ))
+
+
 def _latest_matching_image(panel_dir: Path, predicate) -> Optional[Path]:
     candidates = [
         path
         for path in Path(panel_dir).iterdir()
         if path.is_file()
-        and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+        and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
         and predicate(path.name)
     ]
     if not candidates:

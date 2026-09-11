@@ -67,6 +67,7 @@ def export_misrescue_samples(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     rotate_180: bool = False,
+    station_adapter=None,
 ) -> dict:
     """執行一次增量匯出。回傳 summary dict。
 
@@ -153,7 +154,7 @@ def export_misrescue_samples(
             continue
 
         crop = crop_patchcore_tile(img, x, y, w, h)
-        prefix = extract_prefix(cand["image_name"])
+        prefix = extract_prefix(cand["image_name"], station_adapter)
         filename = build_sample_filename(
             glass_id=cand["glass_id"], image_name=cand["image_name"],
             sample_key=f"trid{cand['tile_result_id']}",

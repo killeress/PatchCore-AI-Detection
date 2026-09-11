@@ -47,7 +47,7 @@ from capi_dataset_export import (
     JOB_STATE_FAILED, JOB_STATE_CANCELLED,
     read_manifest, write_manifest, delete_sample, relabel_sample,
     get_valid_labels, LABEL_ZH, list_job_dirs,
-    parse_datastr_per_prefix, extract_prefix, resolve_source_path,
+    parse_datastr_per_prefix, resolve_source_path,
     crop_patchcore_tile,
 )
 from capi_scratch_batch import (
@@ -56,7 +56,7 @@ from capi_scratch_batch import (
     STATE_RUNNING as SCRATCH_STATE_RUNNING,
 )
 from capi_version import get_version_info, read_changelog
-from capi_image_naming import canonical_image_prefix, image_prefix_display_labels, source_image_prefix
+from capi_image_naming import image_prefix_display_labels
 from capi_image_orientation import read_detection_image
 from capi_scratch_center import ScratchCenterMixin, SAMPLE_MANIFEST_LOCK
 from capi_mark_shadow import (
@@ -65,13 +65,10 @@ from capi_mark_shadow import (
     normalize_forced_char_conversions,
     set_forced_char_conversions,
 )
-from capi_station_adapter import resolve_station_profile_from_hostname
+from capi_station_adapter import create_station_adapter, resolve_station_profile_from_hostname
 
 logger = logging.getLogger("capi.web")
 
-_MES_REVIEW_LIGHTINGS = {
-    "G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD",
-}
 _DEBUG_IMAGE_EXTENSIONS = {
     ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp",
 }
@@ -4535,7 +4532,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         if not detail:
             self._send_404(path)
             return
-        self._decorate_record_image_prefix_labels(detail)
+        self._decorate_record_image_prefix_labels(detail, self._station_adapter())
         self._decorate_record_preprocess_info(detail)
 
         template = self.jinja_env.get_template("record_detail.html")
@@ -4783,7 +4780,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         if not detail:
             self._send_404(path)
             return
-        self._decorate_record_image_prefix_labels(detail)
+        self._decorate_record_image_prefix_labels(detail, self._station_adapter())
         self._decorate_record_preprocess_info(detail)
 
         template = self.jinja_env.get_template("record_detail_v3.html")
@@ -4795,7 +4792,14 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         self._send_response(200, html)
 
     @staticmethod
-    def _decorate_record_image_prefix_labels(detail: dict) -> None:
+    def _decorate_record_image_prefix_labels(detail: dict, station_adapter=None) -> None:
+        if getattr(station_adapter, "profile", None) == "aapi":
+            detail["image_prefix_labels"] = {
+                station_adapter.training_image_prefix(image.get("image_name") or image.get("image_path") or ""):
+                station_adapter.image_prefix(image.get("image_name") or image.get("image_path") or "")
+                for image in detail.get("images") or []
+            }
+            return
         detail["image_prefix_labels"] = image_prefix_display_labels(
             image.get("image_name") or image.get("image_path") or ""
             for image in detail.get("images") or []
@@ -5475,6 +5479,21 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         config = getattr(getattr(self, "inferencer", None), "config", None)
         return bool(getattr(config, "inference_rotate_180_enabled", False))
 
+    def _station_adapter(self):
+        for owner in (self.inferencer, self._capi_server_instance):
+            adapter = getattr(owner, "station_adapter", None)
+            if getattr(adapter, "profile", None) in ("capi", "aapi"):
+                return adapter
+        return create_station_adapter(
+            self._mes_report_station_profile(self._capi_server_instance)
+        )
+
+    def _sample_lighting(self, image_name):
+        return self._station_adapter().training_image_prefix(image_name)
+
+    def _sample_lightings(self):
+        return self._station_adapter().training_prefixes
+
     def _read_inference_image(self, image_path: Path, flags: int):
         return read_detection_image(
             image_path,
@@ -6016,7 +6035,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 return
             p = Path(img_path)
             if p.is_dir():
-                resolved = self._resolve_debug_image_path(p)
+                resolved = self._resolve_debug_image_path(p, self._station_adapter())
                 if resolved is None:
                     message = f"no front image containing W0F00000 found in folder: {img_path}"
                     if resolve_only:
@@ -6062,12 +6081,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             self._send_error(500, str(e))
 
     @staticmethod
-    def _resolve_debug_image_path(path_value) -> Optional[Path]:
+    def _resolve_debug_image_path(path_value, station_adapter=None) -> Optional[Path]:
         """Resolve a panel folder to its newest front-facing W0F00000 image.
 
         A direct image path is returned unchanged.  Folder scanning is limited
         to the folder's immediate children and excludes side images whose names
-        start with S.
+        start with S under CAPI naming. AAPI glass IDs may start with S.
         """
         path = Path(str(path_value or "").strip())
         if path.is_file():
@@ -6075,14 +6094,19 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         if not path.is_dir():
             return None
 
+        adapter = station_adapter or create_station_adapter("capi")
         try:
             candidates = [
                 entry
                 for entry in path.iterdir()
                 if entry.is_file()
                 and entry.suffix.lower() in _DEBUG_IMAGE_EXTENSIONS
-                and "W0F00000" in entry.name.upper()
-                and not entry.name.upper().startswith("S")
+                and (
+                    adapter.image_prefix(entry.name) == "W0F00000"
+                    if adapter.profile == "aapi" else
+                    "W0F00000" in entry.name.upper()
+                    and not entry.name.upper().startswith("S")
+                )
             ]
         except OSError:
             return None
@@ -7371,6 +7395,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 start_date=start_date,
                 end_date=end_date,
                 rotate_180=self._inference_rotate_180_enabled(),
+                station_adapter=self._station_adapter(),
             )
             summary["success"] = True
             summary["base_dir"] = str(base_dir)
@@ -7641,8 +7666,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
         candidates = []
         for row in self.db.get_mes_review_aoi_candidates(record_id):
-            lighting = canonical_image_prefix(row.get("image_name") or "")
-            if lighting not in _MES_REVIEW_LIGHTINGS:
+            lighting = self._sample_lighting(row.get("image_name") or "")
+            if lighting not in self._sample_lightings():
                 continue
             source_path = self._mes_review_resolve_source(row.get("image_path") or "")
             item = dict(row)
@@ -7687,8 +7712,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             self._send_404()
             return
 
-        lighting = canonical_image_prefix(candidate.get("image_name") or "")
-        if lighting not in _MES_REVIEW_LIGHTINGS:
+        lighting = self._sample_lighting(candidate.get("image_name") or "")
+        if lighting not in self._sample_lightings():
             self._send_error(400, "此光源不納入 PatchCore NG 驗證庫")
             return
         source_path = self._mes_review_resolve_source(candidate.get("image_path") or "")
@@ -7725,8 +7750,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         image_cache: Dict[str, Any] = {}
         rows = []
         for candidate in candidates:
-            lighting = canonical_image_prefix(candidate.get("image_name") or "")
-            if lighting not in _MES_REVIEW_LIGHTINGS:
+            lighting = self._sample_lighting(candidate.get("image_name") or "")
+            if lighting not in self._sample_lightings():
                 raise ValueError(f"光源不納入 NG 驗證庫: {lighting}")
             if (
                 not allow_bomb
@@ -7825,8 +7850,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         if int(candidate.get("is_exclude_zone") or 0):
             raise ValueError("排除區 Tile 不能加入重訓 Pool")
 
-        lighting = canonical_image_prefix(candidate.get("image_name") or "")
-        if lighting not in _MES_REVIEW_LIGHTINGS:
+        lighting = self._sample_lighting(candidate.get("image_name") or "")
+        if lighting not in self._sample_lightings():
             raise ValueError(f"此光源不支援重訓 Pool: {lighting}")
         source_path = self._mes_review_resolve_source(candidate.get("image_path") or "")
         image = (
@@ -8156,7 +8181,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         candidates_by_id = {
             int(row["tile_result_id"]): row
             for row in all_candidates
-            if canonical_image_prefix(row.get("image_name") or "") in _MES_REVIEW_LIGHTINGS
+            if self._sample_lighting(row.get("image_name") or "") in self._sample_lightings()
         }
         missing_ids = [tile_id for tile_id in selected_tile_ids if tile_id not in candidates_by_id]
         if missing_ids:
@@ -8421,9 +8446,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
             if is_v2:
                 # 新架構：單圖 zone-aware 推論 (preprocess + per-tile inner/edge model 由 helper 內部處理)
-                lighting_map = self.inferencer.config.model_mapping.get(img_prefix, {})
+                model_prefix = self._station_adapter().model_prefix(img_prefix)
+                lighting_map = self.inferencer.config.model_mapping.get(model_prefix, {})
                 if not isinstance(lighting_map, dict) or "inner" not in lighting_map or "edge" not in lighting_map:
-                    self._send_json({"error": f"找不到 {image_path.name} 對應的模型 (新架構: model_mapping 缺 {img_prefix} 的 inner/edge)"})
+                    self._send_json({"error": f"找不到 {image_path.name} 對應的模型 (新架構: model_mapping 缺 {model_prefix} 的 inner/edge)"})
                     return
 
                 if hasattr(self, '_gpu_lock') and self._gpu_lock:
@@ -8450,7 +8476,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     self._send_json({"error": f"無法載入或預處理圖片: {image_path}"})
                     return
 
-                model_name = f"{img_prefix} (inner+edge)"
+                model_name = f"{model_prefix} (inner+edge)"
             else:
                 # 舊架構：單一 inferencer 路由 (preprocess + run_inference)
                 result = self.inferencer.preprocess_image(image_path, otsu_offset_override=otsu_offset_override)
@@ -8516,15 +8542,13 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             image_dir = image_path.parent
             
             # 先找是否有 OMIT 圖片 (Panel 級別共用)
-            omit_candidates = []
-            for pattern in ["PINIGBI*.*", "OMIT0000*.*"]:
-                omit_candidates.extend(list(image_dir.glob(pattern)))
+            omit_path = self._station_adapter().find_omit_image(image_dir)
             
             omit_full = None
-            if omit_candidates:
-                omit_full = self._read_inference_image(omit_candidates[0], cv2.IMREAD_UNCHANGED)
+            if omit_path is not None:
+                omit_full = self._read_inference_image(omit_path, cv2.IMREAD_UNCHANGED)
                 if omit_full is not None:
-                    logger.info(f"[DEBUG] Found OMIT image for dust check: {omit_candidates[0].name}")
+                    logger.info(f"[DEBUG] Found OMIT image for dust check: {omit_path.name}")
 
             for tile, score, anomaly_map in result.anomaly_tiles:
                 # 準備 TileInfo 擴充資訊 (灰塵檢查)
@@ -8669,7 +8693,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 "overview_url": overview_url,
                 "tiles": tiles_data,
                 "image_prefix": img_prefix,
-                "image_prefix_label": source_image_prefix(image_path.name),
+                "image_prefix_label": self._station_adapter().report_prefix(image_path.name),
                 "model_name": model_name,
             }
 
@@ -9229,15 +9253,14 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             if image.dtype == np.uint16:
                 image = (image / 256).astype(np.uint8)
 
-            # 自動找同目錄的 OMIT 圖（OMIT0000* 或 PINIGBI*）
+            # 依站別尋找同目錄的 OMIT 圖。
             omit_image = None
             try:
-                for f in image_path.parent.iterdir():
-                    if f.is_file() and (f.stem.startswith("PINIGBI") or "OMIT0000" in f.name):
-                        _omit_raw = self._read_inference_image(f, cv2.IMREAD_UNCHANGED)
-                        if _omit_raw is not None:
-                            omit_image = (_omit_raw / 256).astype(np.uint8) if _omit_raw.dtype == np.uint16 else _omit_raw
-                            break
+                omit_path = self._station_adapter().find_omit_image(image_path.parent)
+                if omit_path is not None:
+                    _omit_raw = self._read_inference_image(omit_path, cv2.IMREAD_UNCHANGED)
+                    if _omit_raw is not None:
+                        omit_image = (_omit_raw / 256).astype(np.uint8) if _omit_raw.dtype == np.uint16 else _omit_raw
             except Exception as omit_err:
                 logger.warning(f"[DEBUG Fusion] OMIT 自動偵測失敗: {omit_err}")
 
@@ -9984,8 +10007,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 getattr(self.inferencer.config, "preprocess_after_tiling", False)
             )
             is_skip_file = bool(
-                getattr(self.inferencer.config, "should_skip_file", lambda _name: False)(
-                    image_path.name
+                getattr(self.inferencer.config, "should_skip_file", lambda *args: False)(
+                    image_path.name, self._station_adapter()
                 )
             )
             processed_panel_image = image
@@ -10125,9 +10148,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             panel_polygon = None
 
             if is_v2:
-                lighting_map = self.inferencer.config.model_mapping.get(img_prefix, {})
+                model_prefix = self._station_adapter().model_prefix(img_prefix)
+                lighting_map = self.inferencer.config.model_mapping.get(model_prefix, {})
                 if not isinstance(lighting_map, dict) or "inner" not in lighting_map or "edge" not in lighting_map:
-                    self._send_json({"error": f"找不到 {image_path.name} 對應的模型 (新架構: model_mapping 缺 {img_prefix} 的 inner/edge)"})
+                    self._send_json({"error": f"找不到 {image_path.name} 對應的模型 (新架構: model_mapping 缺 {model_prefix} 的 inner/edge)"})
                     return
 
                 from capi_preprocess import (
@@ -10236,7 +10260,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
                 try:
                     target_inferencer = self.inferencer._get_model_for(
-                        self.inferencer.config.machine_id, img_prefix, zone,
+                        self.inferencer.config.machine_id, model_prefix, zone,
                     )
                 except Exception as exc:
                     self._send_json({"error": f"新架構模型載入失敗 ({img_prefix}/{zone}): {exc}"})
@@ -10246,7 +10270,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     self._send_json({"error": f"找不到 {image_path.name} ({img_prefix}/{zone}) 對應的模型"})
                     return
 
-                model_name = f"{img_prefix}/{zone}"
+                model_name = f"{model_prefix}/{zone}"
             else:
                 target_inferencer = self.inferencer._get_inferencer_for_prefix(img_prefix)
                 model_name = "預設模型"
@@ -10398,15 +10422,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             omit_full = None
             omit_crop = None
             image_dir = image_path.parent
-            omit_candidates = []
-            for pattern in ["PINIGBI*.*", "OMIT0000*.*"]:
-                omit_candidates.extend(
-                    candidate
-                    for candidate in image_dir.glob(pattern)
-                    if not candidate.name.startswith("S")
-                )
-            if omit_candidates:
-                omit_path = sorted(omit_candidates, key=lambda path: path.name)[0]
+            omit_path = self._station_adapter().find_omit_image(image_dir)
+            if omit_path is not None:
                 omit_name = omit_path.name
                 omit_full = self._read_inference_image(omit_path, cv2.IMREAD_UNCHANGED)
                 if omit_full is not None:
@@ -10837,7 +10854,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 "peak_diagnostic_url": peak_diagnostic_url,
                 "edge_light_leak_url": edge_light_leak_url,
                 "image_prefix": img_prefix,
-                "image_prefix_label": source_image_prefix(image_path.name),
+                "image_prefix_label": self._station_adapter().report_prefix(image_path.name),
                 "model_name": model_name,
                 "mark_exclusion": mark_exclusion,
                 "edge_margin_px": edge_margin_override if edge_margin_override is not None else self.inferencer.config.edge_margin_px,
@@ -10929,7 +10946,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             ref_image_name = None
             image_dir = image_path.parent
             _DARK_PREFIXES = ("B0F",)
-            is_dark = image_path.name.upper().startswith(_DARK_PREFIXES)
+            station_adapter = self._station_adapter()
+            is_dark = station_adapter.image_prefix(image_path.name).upper().startswith(_DARK_PREFIXES)
             if is_dark:
                 # 找同資料夾的白圖 (W0F00000_ 開頭優先，其次任何非 B0F/OMIT/PINIGBI 圖)
                 _IMG_EXTS = ('.bmp', '.tif', '.tiff', '.png', '.jpg', '.jpeg')
@@ -10938,7 +10956,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 for candidate in all_files:
                     if not candidate.is_file() or candidate.suffix.lower() not in _IMG_EXTS:
                         continue
-                    if candidate.name.upper().startswith("W0F00000"):
+                    if station_adapter.image_prefix(candidate.name) == "W0F00000":
                         try:
                             ref_img = self._read_inference_image(candidate, cv2.IMREAD_UNCHANGED)
                             if ref_img is not None:
@@ -10952,8 +10970,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     for candidate in all_files:
                         if not candidate.is_file() or candidate.suffix.lower() not in _IMG_EXTS:
                             continue
-                        cname = candidate.name.upper()
-                        if cname.startswith(_DARK_PREFIXES) or cname.startswith("OMIT0000") or cname.startswith("PINIGBI"):
+                        prefix = station_adapter.image_prefix(candidate.name)
+                        if prefix not in station_adapter.inference_prefixes:
                             continue
                         try:
                             ref_img = self._read_inference_image(candidate, cv2.IMREAD_UNCHANGED)
@@ -12351,7 +12369,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             allowed_suffixes = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
             if suffix not in allowed_suffixes:
                 raise ValueError("只接受 TIF、TIFF、PNG、JPG 或 BMP 圖片")
-            if not filename.upper().startswith("W0F0000"):
+            if not self._station_adapter().image_prefix(filename).upper().startswith("W0F0000"):
                 raise ValueError("MARK 校正只接受 W0F0000 畫面圖片")
 
             image = cv2.imdecode(
@@ -13714,6 +13732,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 path_mapping=path_mapping,
                 rotate_180=bool(
                     getattr(getattr(cls.inferencer, "config", None), "inference_rotate_180_enabled", False)
+                ),
+                station_adapter=(
+                    getattr(cls.inferencer, "station_adapter", None)
+                    or create_station_adapter(cls._mes_report_station_profile(server_inst))
                 ),
             )
             summary = exporter.run(
@@ -17958,6 +17980,11 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             return
 
         ok_prefixes = self._pool_ok_prefixes(record.get("datastr") or "")
+        if self._station_adapter().profile == "aapi":
+            ok_prefixes = {
+                self._station_adapter().model_prefix(prefix.upper())
+                for prefix in ok_prefixes
+            }
         if not ok_prefixes:
             self._send_json({"success": False, "error": "DATASTR 解析不到 OK 畫面，未自動加入"}, status=400)
             return
@@ -17979,7 +18006,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         skipped = []
         for image in detail.get("images", []):
             image_name = image.get("image_name") or Path(image.get("image_path") or "").name
-            screen_prefix = extract_prefix(image_name)
+            screen_prefix = self._sample_lighting(image_name)
             if screen_prefix not in ok_prefixes:
                 continue
             if int(image.get("is_bomb") or 0):

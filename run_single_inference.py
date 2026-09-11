@@ -16,20 +16,16 @@ import numpy as np
 from capi_config import CAPIConfig
 from capi_inference import CAPIInferencer
 from capi_heatmap import build_region_zoom_panels
+from capi_station_adapter import local_station_adapter
 
 
-def find_omit_image(image_path: Path) -> Path | None:
+def find_omit_image(image_path: Path, station_adapter=None) -> Path | None:
     """
     自動搜尋與推論圖片同目錄的 PINIGBI / OMIT0000 圖片
     支援帶空格和時間戳的檔名 (e.g. "PINIGBI _133222.tif")
     """
-    parent = image_path.parent
-    # 搜尋所有可能的灰塵檢查圖片
-    for pattern in ["PINIGBI*.*", "OMIT0000*.*"]:
-        matches = list(parent.glob(pattern))
-        if matches:
-            return matches[0]
-    return None
+    adapter = station_adapter or local_station_adapter()
+    return adapter.find_omit_image(image_path.parent)
 
 
 def generate_tile_combined_image(
@@ -246,6 +242,7 @@ def run_single_inference(
     image_path: str,
     config_path: str = "configs/capi_3f.yaml",
     omit_path: str = None,
+    station_adapter=None,
 ):
     """
     對單張圖片執行推論並輸出結果圖片（含灰塵比對）
@@ -271,7 +268,7 @@ def run_single_inference(
     # 2. 建立推論器 (會自動載入對應模型)
     print("🔄 正在載入模型...")
     start_time = time.time()
-    inferencer = CAPIInferencer(config)
+    inferencer = CAPIInferencer(config, station_adapter=station_adapter or local_station_adapter())
     load_time = time.time() - start_time
     print(f"✅ 模型載入完成 ({load_time:.2f}s)")
 
@@ -280,7 +277,7 @@ def run_single_inference(
     if omit_path:
         omit_file = Path(omit_path)
     else:
-        omit_file = find_omit_image(image_path)
+        omit_file = find_omit_image(image_path, inferencer.station_adapter)
     
     if omit_file and omit_file.exists():
         omit_image = inferencer._read_detection_image(omit_file)

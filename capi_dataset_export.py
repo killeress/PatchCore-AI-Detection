@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from capi_image_naming import canonical_image_prefix
+from capi_station_adapter import create_station_adapter
 from capi_image_orientation import read_detection_image
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ MANIFEST_FIELDS = [
     "inference_timestamp", "status",
 ]
 
-SOURCE_MANIFEST_FIELDS = ["source_ip", "sample_source", "crop_sha256", "machine_id", "machine_no"]
+SOURCE_MANIFEST_FIELDS = ["source_ip", "sample_source", "crop_sha256", "machine_id", "machine_no", "station_profile"]
 
 # Job 狀態常數
 JOB_STATE_IDLE = "idle"
@@ -155,18 +155,18 @@ def determine_label(ric: str, over_category: Optional[str]) -> Optional[str]:
     raise ValueError(f"Unknown RIC judgment: {ric}")
 
 
-def extract_prefix(image_name: str) -> str:
+def extract_prefix(image_name: str, station_adapter=None) -> str:
     """從原圖檔名抽出光源 prefix（去掉 timestamp 尾綴）。
 
-    Mirror of capi_inference.CAPIInferencer._get_image_prefix but stand-alone
-    so 本工具不需要 inferencer 實例就能分類樣本。
+    使用來源站別的模型光源對應，不需要載入 inferencer。
 
     Examples:
         G0F00000_114438.tif → G0F00000
         STANDARD.png → STANDARD
         WGF_0001_20260410.bmp → WGF_0001
     """
-    return canonical_image_prefix(image_name)
+    adapter = station_adapter or create_station_adapter("capi")
+    return adapter.training_image_prefix(image_name)
 
 
 def build_sample_id(glass_id: str, image_name: str, source_type: str,
@@ -610,11 +610,13 @@ class DatasetExporter:
         base_dir: str,
         path_mapping: Dict[str, str],
         rotate_180: bool = False,
+        station_adapter=None,
     ):
         self.db = db
         self.base_dir = Path(base_dir).resolve()
         self.path_mapping = path_mapping
         self.rotate_180 = bool(rotate_180)
+        self.station_adapter = station_adapter or create_station_adapter("capi")
 
     def collect_candidates(self, days: int, include_true_ng: bool) -> List[SampleCandidate]:
         """便利包裝：只回傳 candidates，忽略診斷統計。"""
@@ -756,19 +758,24 @@ class DatasetExporter:
         # 只在 true_ng 蒐集時才生效：panel 雖整體 NG，但某些光源 prefix 是 OK，
         # 那些 image 不該被當 NG 樣本蒐集。空 DATASTR → 不做此過濾 (回退舊行為)。
         ric_per_prefix = parse_datastr_per_prefix(row.get("datastr") or "")
+        if self.station_adapter.profile == "aapi":
+            ric_per_prefix = {
+                self.station_adapter.model_prefix(key.upper()): value
+                for key, value in ric_per_prefix.items()
+            }
 
         for img in detail.get("images") or []:
             if img.get("is_bomb"):
                 _bump("images_bomb_skipped")
                 continue
             image_name = img.get("image_name") or ""
+            prefix = extract_prefix(image_name, self.station_adapter)
             # 黑光源圖 (B0F) 無訓練價值，整張跳過
-            if image_name.startswith(BLACK_IMAGE_PREFIX):
+            if prefix.upper().startswith(BLACK_IMAGE_PREFIX):
                 _bump("images_b0f_skipped")
                 continue
             image_path = img.get("image_path") or ""
             image_result_id = img.get("id")
-            prefix = extract_prefix(image_name)
 
             # true_ng 樣本：只收 RIC 在 DATASTR 內亦判 NG 的 prefix
             if label == TRUE_NG_LABEL and ric_per_prefix:

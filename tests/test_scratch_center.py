@@ -27,6 +27,32 @@ def payload(tile_id=1):
             "metadata": {"glass_id": "PANEL", "image_name": "G0F00000_test.tif"}}
 
 
+@pytest.mark.parametrize("profile,image_name,expected", [
+    ("capi", "U0F00000_082933.tif", "STANDARD"),
+    ("aapi", "SAMPLEU0F00000082933.tif", "U0F00000"),
+    ("aapi", "SAMPLEWindows_BG082933.tif", "STANDARD"),
+    ("aapi", "SAMPLEW0F00010082933.tif", "W0F00010"),
+    ("aapi", "SAMPLEWGF25250082933.tif", "WGF25250"),
+])
+def test_center_uses_source_station_for_lighting(tmp_path, profile, image_name, expected):
+    data = payload()
+    data["metadata"].update(station_profile=profile, image_name=image_name)
+    center.store_sample(tmp_path, data, "10.174.1.20")
+    rows = read_manifest(next(tmp_path.glob("*/manifest.csv")))
+    row = rows[data["sample_id"]]
+    assert row["prefix"] == expected
+    assert row["station_profile"] == profile
+
+
+@pytest.mark.parametrize("lighting", ["B0F00000", "PINIGBI0", "White_Frame"])
+def test_center_rejects_aapi_non_training_images(tmp_path, lighting):
+    data = payload()
+    data["metadata"].update(station_profile="aapi", image_name=f"SAMPLE{lighting}082933.tif")
+    with pytest.raises(ValueError, match="光源不支援"):
+        center.store_sample(tmp_path, data, "10.174.1.20")
+    assert not list(tmp_path.glob("*/manifest.csv"))
+
+
 def test_collection_retries_merge_with_legacy_and_withdraw(tmp_path):
     data = payload()
     for _ in range(2):
@@ -132,6 +158,7 @@ def test_remote_ack_loss_retry_uses_same_source_identity(tmp_path, monkeypatch):
     handler._handle_record_sample_classification(data)
     assert responses[-1][0] == 200
     assert requests[0]["sample_id"] == requests[1]["sample_id"]
+    assert requests[0]["metadata"]["station_profile"] == "capi"
     assert merge(remote, set())["total_rows"] == 1
     assert not list((tmp_path / "dataset").glob("*/manifest.csv"))
 

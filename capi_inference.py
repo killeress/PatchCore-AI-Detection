@@ -1717,7 +1717,7 @@ class CAPIInferencer:
 
         img_h, img_w = raw_image.shape[:2]
 
-        is_skip_file = self.config.should_skip_file(image_path.name)
+        is_skip_file = self.config.should_skip_file(image_path.name, self.station_adapter)
         processed_image = raw_image
         preprocess_steps: List[Dict[str, Any]] = []
         preprocess_total_ms = 0.0
@@ -5493,7 +5493,7 @@ class CAPIInferencer:
         half = tile_size // 2
         patchcore_tiles = []
         edge_defects = []
-        is_skip_file = self.config.should_skip_file(result.image_path.name)
+        is_skip_file = self.config.should_skip_file(result.image_path.name, self.station_adapter)
 
         if result.raw_bounds is None:
             logger.warning("AOI Coord: raw_bounds 為 None，無法建立切塊")
@@ -6455,7 +6455,7 @@ class CAPIInferencer:
                 if image is None:
                     logger.warning(f"[v2] AOI Coord: 無法讀取圖片 {result.image_path}")
                     continue
-                is_skip_file = self.config.should_skip_file(result.image_path.name)
+                is_skip_file = self.config.should_skip_file(result.image_path.name, self.station_adapter)
                 aoi_tile_count += self._create_aoi_centered_tiles_v2(
                     image=image,
                     result=result,
@@ -7446,7 +7446,7 @@ class CAPIInferencer:
         
         if has_mark_zone and self.config.otsu_bottom_crop <= 0:
             # 只有在需要 MARK 排除且沒有底部裁切時才掃描
-            files_to_scan = [f for f in normal_files if not self.config.should_skip_file(f.name)]
+            files_to_scan = [f for f in normal_files if not self.config.should_skip_file(f.name, self.station_adapter)]
             for scan_path in files_to_scan:
                 try:
                     scan_img = self._read_detection_image(scan_path)
@@ -7526,8 +7526,8 @@ class CAPIInferencer:
             print("⚠️ 無法計算統一參考邊界，所有圖片將各自計算 OTSU (可能不一致)")
 
         # 過濾出需要處理的檔案
-        files_to_process = [f for f in normal_files if not self.config.should_skip_file(f.name)]
-        skipped = [f.name for f in normal_files if self.config.should_skip_file(f.name)]
+        files_to_process = [f for f in normal_files if not self.config.should_skip_file(f.name, self.station_adapter)]
+        skipped = [f.name for f in normal_files if self.config.should_skip_file(f.name, self.station_adapter)]
         if skipped:
             print(f"⏭️ 跳過檔案 (設定) ×{len(skipped)}: {', '.join(skipped)}")
         
@@ -7642,7 +7642,7 @@ class CAPIInferencer:
                     if report_prefix not in existing_prefixes:
                         matched_file = None
                         skipped_files = [f for f in image_files
-                                         if self.config.should_skip_file(f.name)
+                                         if self.config.should_skip_file(f.name, self.station_adapter)
                                          and not is_dust_check_image(f)]
                         for f in skipped_files:
                             if self._get_image_prefix(f.name) == report_prefix:
@@ -7703,7 +7703,7 @@ class CAPIInferencer:
             img_prefix = self._get_image_prefix(result.image_path.name)
 
             # === skip_files 圖片（如 B0F00000）：使用二值化偵測取代 PatchCore ===
-            if self.config.should_skip_file(result.image_path.name):
+            if self.config.should_skip_file(result.image_path.name, self.station_adapter):
                 print(f"💡 {result.image_path.name} (skip_file) → 使用二值化偵測亮點")
                 anomaly_tiles = []
                 for tile in result.tiles:
@@ -7757,7 +7757,7 @@ class CAPIInferencer:
             img_path = result.image_path
 
             # skip_files 圖片（如 B0F00000）不做 OMIT 灰塵比對
-            if self.config.should_skip_file(img_path.name):
+            if self.config.should_skip_file(img_path.name, self.station_adapter):
                 return result
 
             if result.anomaly_tiles and omit_image is not None and omit_overexposed:
@@ -8615,7 +8615,7 @@ class CAPIInferencer:
             return
 
         def _dust_check_one(result: ImageResult) -> None:
-            if self.config.should_skip_file(result.image_path.name):
+            if self.config.should_skip_file(result.image_path.name, self.station_adapter):
                 return
             if not result.anomaly_tiles:
                 return
@@ -9808,7 +9808,7 @@ class CAPIInferencer:
             t_infer_start = time.time()
             anomaly_tiles: List[Tuple[TileInfo, float, Optional[np.ndarray]]] = []
 
-            if entry.get("skip_file") or self.config.should_skip_file(result.image_path.name):
+            if entry.get("skip_file") or self.config.should_skip_file(result.image_path.name, self.station_adapter):
                 print(f"💡 {result.image_path.name} (skip_file) → 使用二值化偵測亮點")
                 for ti in result.tiles:
                     score, anomaly_map = self._detect_bright_spots(ti)

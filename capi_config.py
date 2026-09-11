@@ -1156,10 +1156,17 @@ class CAPIConfig:
         """取得已啟用的排除區域"""
         return [zone for zone in self.exclusion_zones if zone.enabled]
     
-    def should_skip_file(self, filename: str) -> bool:
+    def should_skip_file(self, filename: str, station_adapter=None) -> bool:
         """檢查是否應該跳過此檔案（使用前綴比對，支援帶時間戳的檔名）"""
         stem = Path(filename).stem  # 取得不含副檔名的名稱
-        image_prefix = canonical_image_prefix(filename)
+        image_prefix = (
+            station_adapter.image_prefix(filename)
+            if station_adapter is not None else canonical_image_prefix(filename)
+        )
+        model_prefix = (
+            station_adapter.model_prefix(image_prefix)
+            if station_adapter is not None else image_prefix
+        )
         
         # 側拍圖自動跳過 (e.g. ["SG0F00000", "SSTANDARD"] → SG0F00000_114438.tif 等)
         for prefix in self.side_shot_prefixes:
@@ -1170,6 +1177,7 @@ class CAPIConfig:
             # 支援前綴比對：skip_pattern "B0F00000" 可匹配 "B0F00000_031447.tif"
             if (
                 image_prefix == skip_pattern
+                or model_prefix == skip_pattern
                 or stem == skip_pattern
                 or stem.startswith(skip_pattern + "_")
                 or filename == skip_pattern

@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 
 from capi_dataset_export import MANIFEST_FIELDS, SOURCE_MANIFEST_FIELDS, crop_patchcore_tile, write_manifest
-from capi_image_naming import canonical_image_prefix
+from capi_station_adapter import create_station_adapter
 
 TRANSFER_HEADER = "X-CAPI-Scratch-Transfer"
 SAMPLE_LIMIT = 8 * 1024 * 1024
@@ -89,15 +89,17 @@ def store_sample(root: Path, payload: dict, source_ip: str) -> str:
             raise ValueError("無法解碼刮痕圖片")
         metadata = payload.get("metadata") or {}
         row = {key: str(metadata.get(key, ""))[:1024] for key in MANIFEST_FIELDS + SOURCE_MANIFEST_FIELDS}
-        prefix = canonical_image_prefix(row["image_name"])
-        if not re.fullmatch(r"[A-Za-z0-9_]+", prefix) or prefix.startswith("B0F"):
+        adapter = create_station_adapter(row.get("station_profile") or "capi")
+        prefix = adapter.training_image_prefix(row["image_name"])
+        if prefix not in adapter.training_prefixes:
             raise ValueError("此光源不支援刮痕樣本")
         crop_rel = f"over_surface_scratch/{prefix}/crop/{sample_id}.png"
         row.update(sample_id=sample_id, label="over_surface_scratch", prefix=prefix,
                    source_type="patchcore_tile", crop_path=crop_rel, heatmap_path="",
                    status="ok", collected_at=datetime.now().isoformat(),
                    over_review_category="surface_scratch", source_ip=source_ip,
-                   sample_source="inference_record", crop_sha256=payload["sha256"])
+                   sample_source="inference_record", crop_sha256=payload["sha256"],
+                   station_profile=adapter.profile)
         crop_path = job / crop_rel
         crop_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = crop_path.with_suffix(".tmp")
@@ -207,6 +209,7 @@ class ScratchCenterMixin:
                 "defect_x": candidate.get("aoi_image_x", ""), "defect_y": candidate.get("aoi_image_y", ""),
                 "inference_timestamp": record.get("request_time", ""),
                 "machine_id": record.get("model_id", ""), "machine_no": record.get("machine_no", ""),
+                "station_profile": self._station_adapter().profile,
                 "over_review_note": "推論紀錄人工歸類",
             })
         if self._scratch_is_center() and center == self._scratch_center_ip():

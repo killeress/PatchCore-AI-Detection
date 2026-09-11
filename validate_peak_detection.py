@@ -46,6 +46,7 @@ from typing import List, Tuple, Dict, Any, Optional
 import cv2
 import numpy as np
 
+from capi_station_adapter import local_station_adapter
 from capi_config import CAPIConfig
 from capi_heatmap_diagnostics import (
     local_dust_coverage as _diagnostic_local_dust_coverage,
@@ -201,34 +202,17 @@ def _build_visualization(pc_roi_img, omit_crop, anomaly_map, dust_mask, peaks, t
 # 找圖 / 找 OMIT
 # ============================================================
 
-def _find_image(panel_dir: Path, prefix_or_filename: str) -> Optional[Path]:
-    """支援『完整檔名』、『含副檔名』、『prefix only』"""
-    p = Path(prefix_or_filename)
-    direct = panel_dir / p
-    if direct.exists():
+def _find_image(panel_dir: Path, prefix_or_filename: str, station_adapter=None) -> Optional[Path]:
+    direct = panel_dir / prefix_or_filename
+    if direct.is_file():
         return direct
-    # 用 prefix 搜
-    matches = []
-    for ext in ("*.tif", "*.tiff", "*.bmp", "*.png", "*.jpg"):
-        for f in panel_dir.glob(ext):
-            if f.name.startswith("PINIGBI") or f.name.startswith("OMIT0000"):
-                continue
-            if f.name.startswith(prefix_or_filename):
-                matches.append(f)
-    if not matches:
-        return None
-    # 優先非 S 開頭（S 開頭通常是縮圖）
-    non_s = [f for f in matches if not f.name.startswith("S")]
-    return (non_s or matches)[0]
+    adapter = station_adapter or local_station_adapter()
+    return adapter.find_lighting_image(panel_dir, prefix_or_filename)
 
 
-def _find_omit(panel_dir: Path) -> Optional[Path]:
-    for pattern in ("PINIGBI*.*", "OMIT0000*.*"):
-        for f in panel_dir.glob(pattern):
-            if f.name.startswith("S"):  # 跳過 S 開頭
-                continue
-            return f
-    return None
+def _find_omit(panel_dir: Path, station_adapter=None) -> Optional[Path]:
+    adapter = station_adapter or local_station_adapter()
+    return adapter.find_omit_image(panel_dir)
 
 
 # ============================================================
@@ -470,13 +454,14 @@ def main():
     print("=" * 78)
 
     # 找圖
-    img_path = _find_image(panel_dir, args.image)
+    station_adapter = local_station_adapter()
+    img_path = _find_image(panel_dir, args.image, station_adapter)
     if img_path is None:
         print(f"❌ 找不到對應圖片: {args.image}")
         sys.exit(1)
     print(f"✅ 圖片: {img_path.name}")
 
-    omit_path = _find_omit(panel_dir)
+    omit_path = _find_omit(panel_dir, station_adapter)
     if omit_path:
         print(f"✅ OMIT: {omit_path.name}")
     else:
@@ -515,7 +500,7 @@ def main():
 
     print("🔄 初始化 inferencer (含模型載入)...")
     t0 = time.time()
-    inferencer = CAPIInferencer(config)
+    inferencer = CAPIInferencer(config, station_adapter=station_adapter)
     print(f"✅ Inferencer ready ({time.time()-t0:.1f}s)")
 
     # === 套 EdgeInspectionConfig (from DB)，跟 server 流程一致 ===

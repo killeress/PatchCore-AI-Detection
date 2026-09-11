@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import pytest
 
 from capi_scratch_export import export_misrescue_samples
 
@@ -12,9 +13,16 @@ class _FakeDB:
         return [self.candidate]
 
 
-def test_scratch_export_crops_from_rotated_inference_orientation(tmp_path):
+@pytest.mark.parametrize("profile,filename,expected_prefix", [
+    ("capi", "G0F00000.tif", "G0F00000"),
+    ("aapi", "SAMPLEU0F00000082933.tif", "U0F00000"),
+    ("aapi", "SAMPLEWindows_BG082933.tif", "STANDARD"),
+])
+def test_scratch_export_crops_from_rotated_inference_orientation(tmp_path, profile, filename, expected_prefix):
     """Scratch 誤救重裁切應沿用推論方向與座標。"""
-    source_path = tmp_path / "G0F00000.tif"
+    from capi_station_adapter import create_station_adapter
+
+    source_path = tmp_path / filename
     image = np.full((512, 1024, 3), 10, dtype=np.uint8)
     image[:, 512:] = 240
     assert cv2.imwrite(str(source_path), image)
@@ -40,11 +48,13 @@ def test_scratch_export_crops_from_rotated_inference_orientation(tmp_path):
         db,
         tmp_path / "out",
         rotate_180=True,
+        station_adapter=create_station_adapter(profile),
     )
     crops = list((tmp_path / "out").glob("*/misrescue_negative/*/crop/*.png"))
 
     assert summary["exported"] == 1
     assert len(crops) == 1
+    assert crops[0].parent.parent.name == expected_prefix
     crop = cv2.imread(str(crops[0]), cv2.IMREAD_UNCHANGED)
     assert crop is not None
     assert np.all(crop == 240)

@@ -558,8 +558,13 @@ def test_mark_calibration_tab_is_removed_from_settings_ui():
     assert "${renderMarkCalibrationPane()}" not in html
 
 
-def test_admin_correction_handler_runs_regression_and_auto_activates(tmp_path):
+@pytest.mark.parametrize("profile,filename", [
+    ("capi", "W0F00000_test.tif"),
+    ("aapi", "SAMPLEW0F00000082933.tif"),
+])
+def test_admin_correction_handler_runs_regression_and_auto_activates(tmp_path, profile, filename):
     from capi_web import CAPIWebHandler
+    from capi_station_adapter import create_station_adapter
 
     image = np.full((768, 1024), 160, dtype=np.uint8)
     _draw_mark(image, "EJ")
@@ -570,10 +575,11 @@ def test_admin_correction_handler_runs_regression_and_auto_activates(tmp_path):
     handler = object.__new__(CAPIWebHandler)
     handler.db = db
     handler.inferencer = SimpleNamespace(
+        station_adapter=create_station_adapter(profile),
         config=SimpleNamespace(inference_rotate_180_enabled=False)
     )
     handler._read_mark_correction_form = lambda: (
-        "W0F00000_test.tif",
+        filename,
         encoded.tobytes(),
         "A1",
         "現場人工確認",
@@ -597,7 +603,7 @@ def test_admin_correction_handler_runs_regression_and_auto_activates(tmp_path):
     assert db.list_mark_calibration_samples()[0]["created_by"] == "admin"
 
     handler._read_mark_correction_form = lambda: (
-        "W0F00000_test.tif",
+        filename,
         encoded.tobytes(),
         "A2",
         "更正先前人工答案",
