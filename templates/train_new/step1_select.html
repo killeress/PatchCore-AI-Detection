@@ -364,17 +364,6 @@
   </details>
 
   <!-- padding-bottom 預留高度給 sticky 操作條，確保列表最後幾筆不會被遮住 -->
-  <div style="margin-top:16px;padding:14px;background:#313244;border-radius:8px;">
-    <label><input id="validation-auto" type="checkbox" checked>自動校正與驗收</label>
-    <p>只選一次資料，下一步沿用加入／排除：保留＝OK，排除＝NG，不需額外標記。NG 不加入正常訓練資料。</p>
-    <p>系統依 PANEL ID（Glass ID）及勾選的 INNER／EDGE 分配用途，同一 ID 不跨訓練、校正、驗收。每個區域至少需三個不同 ID 才能完整分組；下一步會分別顯示各區域的實際分配與缺少資料。</p>
-  </div>
-  <details style="margin-top:8px;padding:14px;background:#313244;border-radius:8px;">
-    <summary>進階：驗收目標（可留白）</summary>
-    <label>可接受 OK 誤判率（%） <input id="validation-max-fp" type="number" min="0" max="100" step="any" placeholder="未設定" style="width:95px;"></label>
-    <label>可接受 NG 漏檢率（%） <input id="validation-max-miss" type="number" min="0" max="100" step="any" placeholder="未設定" style="width:95px;"></label>
-    <p>目標留白時只提供建議與實測結果，不標示合格。通過僅表示本次驗收樣本符合目標。</p>
-  </details>
   <div id="panel-list" style="margin-top:16px;padding-bottom:88px;"></div>
 
   <div class="step1-actionbar">
@@ -608,7 +597,6 @@ const TARGET_PREPROCESS_AFTER_TILING = {{ target_preprocess_after_tiling|default
 const TARGET_GRID_CANONICALIZATION = {{ target_grid_canonicalization|default({})|tojson }};
 const TARGET_FEATURE_CLEANING_BY_ZONE = {{ target_patchcore_params.get("feature_cleaning_by_zone", {})|tojson }};
 let _selected = new Set();
-let _validationPanels = new Map();
 let _selectedMachineId = '';
 let _selectedMachineKey = '';
 let _panelZoneModes = new Map();
@@ -1116,7 +1104,6 @@ function invalidateManualScan() {
 
 function renderPanels(panels, emptyMessage) {
   _selected = new Set();
-  _validationPanels = new Map();
   _selectedMachineId = '';
   _selectedMachineKey = '';
   _panelZoneModes = new Map();
@@ -1218,7 +1205,6 @@ function renderPanels(panels, emptyMessage) {
     );
     const pathCell = appendTextCell(tr, panelPath || '-', '', 'path-cell');
     pathCell.title = panelPath || '-';
-    _validationPanels.set(panelPath, {group: String(p.glass_id || panelPath.replace(/\\/g, '/').replace(/\/$/, '').split('/').pop()).trim()});
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
@@ -1659,18 +1645,6 @@ function submitStart() {
     ? {type: 'manual_folder', batch_root: _manualResolvedBatchRoot, confirmed_normal: true, include_batches: document.getElementById('manual-include-batches').checked}
     : {type: 'inference_records'};
   if (params) body.training_params = params;
-  const validationPanels = Object.fromEntries(panelPaths.map(path => [path, _validationPanels.get(path)]));
-  if (document.getElementById('validation-auto').checked) {
-    const validation = {split_mode: 'auto_panel', panels: validationPanels};
-    for (const [id, key] of [['validation-max-fp', 'max_false_positive_rate'], ['validation-max-miss', 'max_miss_rate']]) {
-      const input = document.getElementById(id);
-      if (input.value !== '') {
-        if (!input.checkValidity()) { input.reportValidity(); return; }
-        validation[key] = Number(input.value) / 100;
-      }
-    }
-    body.training_params = {...(body.training_params || {}), validation_config: validation};
-  }
   body.tile_stride = tileStride;
   body.image_preprocess_pipeline = pipeline;
   if (pipelines) body.image_preprocess_pipelines = pipelines;

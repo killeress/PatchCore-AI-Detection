@@ -2673,10 +2673,7 @@ def test_handle_train_new_start_persists_partial_training_scope(auto_validation)
         "target_bundle_id": 7,
     }
     assert kwargs["panel_modes"] == ["full"] * 8
-    if auto_validation:
-        validation = kwargs["training_params"]["validation_config"]
-        assert validation["selected_zones"] == ["edge", "inner"]
-        assert sorted(p["role"] for p in validation["panels"].values()) == ["acceptance", "calibration"] + ["train"] * 6
+    assert "validation_config" not in (kwargs["training_params"] or {})
 
 
 def test_handle_train_new_start_partial_rejects_bundle_level_override():
@@ -2778,14 +2775,8 @@ def test_handle_train_new_start_persists_per_panel_zone_modes(auto_validation):
     kwargs = server.database.create_training_job.call_args.kwargs
     assert kwargs["panel_paths"] == payload["panel_paths"]
     assert kwargs["panel_modes"] == payload["panel_modes"]
-    if auto_validation:
-        from capi_train_new import TrainingConfig, apply_user_training_params
-        panels = kwargs["training_params"]["validation_config"]["panels"].values()
-        for zone in ("inner", "edge"):
-            assert sorted(p["role"] for p in panels if zone in p["zones"]) == ["acceptance", "calibration", "train"]
-        cfg = TrainingConfig(machine_id="M", panel_paths=[Path(p) for p in payload["panel_paths"]], over_review_root=Path("unused"))
-        apply_user_training_params(cfg, kwargs["training_params"])
-        assert cfg.validation_config == kwargs["training_params"]["validation_config"]
+    assert "validation_config" not in (kwargs["training_params"] or {})
+
 
 
 @pytest.mark.parametrize(
@@ -2858,11 +2849,8 @@ def test_handle_train_new_start_partial_edge_unit_accepts_edge_only_panels(auto_
     assert h._sent_response[0]["status"] == 200
     kwargs = server.database.create_training_job.call_args.kwargs
     assert kwargs["panel_modes"] == payload["panel_modes"]
-    if auto_validation:
-        cfg = kwargs["training_params"]["validation_config"]
-        assert cfg["selected_zones"] == ["edge"]
-        edge = [p for p in cfg["panels"].values() if "edge" in p["zones"]]
-        assert sorted(p["role"] for p in edge) == ["acceptance", "calibration", "train"]
+    assert "validation_config" not in (kwargs["training_params"] or {})
+
 
 
 def test_handle_train_new_start_rejects_empty_panel_paths():

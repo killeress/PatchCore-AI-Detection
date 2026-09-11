@@ -754,8 +754,9 @@ def test_train_one_patchcore_cleans_selected_zone_before_export(
     assert stats["feature_cleaning"]["reason"] == "completed"
 
 
+@pytest.mark.parametrize("legacy_roles", [False, True])
 def test_train_single_submodel_does_not_load_rejected_tiles_for_context_cleaning(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, legacy_roles,
 ):
     from capi_train_new import TrainingConfig, train_single_submodel
 
@@ -779,6 +780,10 @@ def test_train_single_submodel_does_not_load_rejected_tiles_for_context_cleaning
             "tile_height": 8,
         })
     rejected_path = tmp_path / "tiles" / "rejected.png"
+    if legacy_roles:
+        for index, tile in enumerate(pool):
+            tile["dataset_role"] = ("train", "calibration", "acceptance")[index % 3]
+            tile["validation_label"] = "ok"
     rejected_path.write_bytes(b"tile")
     pool.append({
         "id": 999,

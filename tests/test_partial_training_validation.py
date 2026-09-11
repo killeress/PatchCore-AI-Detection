@@ -114,7 +114,7 @@ def partial_run(tmp_path, monkeypatch):
         env.calls.append(kw)
         assert file_contents(root) == env.before  # No earlier unit has been installed yet.
         assert kw["output_pt_path"].parent != root
-        assert kw["cfg"].validation_config["split_mode"] == "auto_panel"
+        assert kw["cfg"].validation_config == {}
         assert kw["cfg"].precision == "float32"
         assert kw["cfg"].image_size == (256, 256)
         assert kw["cfg"].tile_stride == 128
@@ -127,14 +127,8 @@ def partial_run(tmp_path, monkeypatch):
                 raise RuntimeError(env.failure + " failed")
             if env.failure == "cancel":
                 kw["cancel_event"].set()
-        scores = sample_scores() if not env.incomplete else []
-        report = build_report(scores, kw["cfg"].validation_config, baseline_threshold=kw["baseline_threshold"])
-        report.update(unit_label=unit, model_file=model.name, model_sha256=sha256_file(model), job_id=kw["job_id"])
-        relative = f"validation_reports/{kw['job_id']}/{unit}/report.json"
-        write_json(model.parent / relative, report)
-        return {"metrics": {"auroc": 0.9, "train_count": 30, "validation": {
-                    "report_path": relative, "status": report["status"], "job_id": kw["job_id"],
-                }}, "tile_count": 30, "ng_count": 1, "ng_used": "independent_calibration",
+        return {"metrics": {"auroc": 0.9, "train_count": 30},
+                "tile_count": 30, "ng_count": 0, "ng_used": "none",
                 "used_tile_ids": [1, 2], "size_bytes": model.stat().st_size, "threshold": 0.35, "elapsed_seconds": 1}
 
     monkeypatch.setattr(training, "train_single_submodel", train)
@@ -165,10 +159,9 @@ def test_partial_replaces_only_selected_pts_and_preserves_thresholds_and_history
         if relative not in {"manifest.json", *(f"{u}.pt" for u in env.units[:2])}:
             assert current[relative] == content
     for unit in env.units[:2]:
-        report = load_report(root, unit)
-        assert not report["stale"]
-        assert report["job_id"] == "partial-1"
-        assert report["baseline_threshold"] == (0.55 if unit.endswith("inner") else 0.75)
+        assert load_report(root, unit)["stale"]
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    assert all("validation" not in manifest["unit_metrics"][u] for u in env.units[:2])
     snapshot = json.loads(run_manifest_path(root, "partial-1").read_text(encoding="utf-8"))
     assert set(snapshot["unit_metrics"]) == set(env.units[:2])
     assert snapshot["patchcore_params"]["precision"] == "float32"
@@ -178,16 +171,11 @@ def test_partial_replaces_only_selected_pts_and_preserves_thresholds_and_history
     assert env.server.inferencers["M"].reload_submodel.call_count == 2
 
 
-@pytest.mark.parametrize("failure", ["training", "evaluation", "cancel", "seal", "install"])
+@pytest.mark.parametrize("failure", ["training", "cancel", "install"])
 def test_partial_failure_keeps_all_original_pts_and_reports(partial_run, monkeypatch, failure):
-    import capi_training_validation as validation
     import os
     env = partial_run
     env.failure = failure
-    if failure == "seal":
-        def fail_seal(*a):
-            raise OSError("report disk failure")
-        monkeypatch.setattr(validation, "seal_reports", fail_seal)
     if failure == "install":
         replace = os.replace
         failed = False
@@ -223,13 +211,15 @@ def test_post_install_failure_restores_original_files(partial_run, failure):
 
 @pytest.mark.parametrize("changed_file", ["manifest.json", "machine_config.yaml"])
 def test_partial_preserves_changes_made_to_target_during_training(partial_run, monkeypatch, changed_file):
-    import capi_training_validation as validation
+    import capi_train_new as training
     env = partial_run
-    seal = validation.seal_reports
+    train = training.train_single_submodel
     changed = None
-    def change_target_after_evaluation(*args):
+    def change_target_after_training(**kwargs):
         nonlocal changed
-        seal(*args)
+        result = train(**kwargs)
+        if len(env.calls) != 2:
+            return result
         path = env.root / changed_file
         if changed_file == "manifest.json":
             manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -240,7 +230,8 @@ def test_partial_preserves_changes_made_to_target_during_training(partial_run, m
             recipe["preprocess_after_tiling"] = True
             path.write_text(yaml.safe_dump(recipe), encoding="utf-8")
         changed = path.read_bytes()
-    monkeypatch.setattr(validation, "seal_reports", change_target_after_evaluation)
+        return result
+    monkeypatch.setattr(training, "train_single_submodel", change_target_after_training)
     assert env.run()["state"] == "failed"
     assert file_contents(env.root) == {**env.before, changed_file: changed}
     env.invalidation.assert_not_called()
@@ -277,51 +268,28 @@ def handler(server, path, payload=None):
     return h
 
 
-def test_partial_adoption_changes_only_requested_unit(partial_run):
+@pytest.mark.parametrize("unit", ["W0F00000-edge", "G0F00000-inner"])
+def test_partial_adoption_is_retired_without_changing_thresholds(partial_run, unit):
     env = partial_run
-    env.run()
-    h = handler(env.server, "/api/train/new/apply-validation/partial-1", {"unit_label": "W0F00000-edge"})
-    h._handle_train_new_apply_validation()
-    assert h.responses[0][0] == 200
-    values = yaml.safe_load((env.root / "machine_config.yaml").read_text())["threshold_mapping"]
-    assert values["W0F00000"]["inner"] == 0.55
-    assert values["W0F00000"]["edge"] == load_report(env.root, "W0F00000-edge")["suggested_threshold"]
-    assert values["G0F00000"]["inner"] == 0.35
-    assert not env.bundle["is_active"]
-    assert (env.root / "validation_reports/partial-1/W0F00000-edge/adoptions.json").exists()
-
-
-def test_partial_cannot_adopt_report_for_unselected_pt(partial_run):
-    env = partial_run
-    env.run()
-    h = handler(env.server, "/api/train/new/apply-validation/partial-1", {"unit_label": "G0F00000-inner"})
-    h._handle_train_new_apply_validation()
-    assert h.responses[0][0] == 400
-    assert "重訓範圍" in h.responses[0][1]["error"]
-
-
-def test_insufficient_data_still_trains_but_cannot_adopt_threshold(partial_run):
-    env = partial_run
-    env.incomplete = True
     assert env.run()["state"] == "completed"
-    assert load_report(env.root, env.units[0])["status"] == "insufficient"
-    h = handler(env.server, "/api/train/new/apply-validation/partial-1", {"unit_label": env.units[0]})
+    before = file_contents(env.root)
+    h = handler(env.server, "/api/train/new/apply-validation/partial-1", {"unit_label": unit})
     h._handle_train_new_apply_validation()
-    assert h.responses[0][0] == 400
-    assert "資料不足" in h.responses[0][1]["error"]
+    assert h.responses[0][0] == 410
+    assert file_contents(env.root) == before
 
 
 def test_repeated_partial_runs_keep_old_report_and_reject_old_adoption(partial_run, monkeypatch):
     env = partial_run
     env.run()
-    report_path = f"validation_reports/partial-1/{env.units[0]}/report.json"
+    report_path = f"validation_reports/{env.units[0]}/report.json"
     original = (env.root / report_path).read_bytes()
     assert env.run("partial-2")["state"] == "completed"
     assert (env.root / report_path).read_bytes() == original
     assert load_report(env.root, env.units[0], report_path)["stale"]
     h = handler(env.server, "/api/train/new/apply-validation/partial-1", {"unit_label": env.units[0]})
     h._handle_train_new_apply_validation()
-    assert h.responses[0][0] == 400
+    assert h.responses[0][0] == 410
     h = handler(env.server, "/train/new/done/partial-1")
     h.jinja_env = MagicMock()
     monkeypatch.setattr(CAPIWebHandler, "_train_new_lighting_labels", lambda *a: {})
@@ -330,12 +298,11 @@ def test_repeated_partial_runs_keep_old_report_and_reject_old_adoption(partial_r
     assert h.responses[0][0] == 200
     rendered = h.jinja_env.get_template.return_value.render.call_args.kwargs
     assert {unit for unit, _ in rendered["units"]} == set(env.units[:2])
-    assert all(r["job_id"] == "partial-1" and r["stale"] for r in rendered["validation_reports"])
-    edge = next(r for r in rendered["validation_reports"] if r["unit_label"].endswith("edge"))
-    assert edge["errors"][0]["label"] == "ng" and edge["errors"][0]["baseline_wrong"]
+    assert rendered["validation_reports"] == []
 
 
-def test_partial_pages_render_enabled_validation_and_frozen_threshold(partial_run, monkeypatch):
+
+def test_partial_pages_hide_retired_validation(partial_run, monkeypatch):
     import re
     import shutil
     import subprocess
@@ -351,8 +318,7 @@ def test_partial_pages_render_enabled_validation_and_frozen_threshold(partial_ru
     h._handle_train_new_select_page()
     assert h.responses[0][0] == 200
     html = h.responses[0][1]
-    checkbox = re.search(r'<input id="validation-auto"[^>]*>', html).group()
-    assert "checked" in checkbox and "disabled" not in checkbox
+    assert "validation-auto" not in html and "validation-max-fp" not in html
     node = shutil.which("node")
     if node:
         for attributes, script in re.findall(r"<script([^>]*)>(.*?)</script>", html, re.S):
@@ -368,8 +334,8 @@ def test_partial_pages_render_enabled_validation_and_frozen_threshold(partial_ru
     assert h.responses[0][0] == 200
     html = h.responses[0][1]
     assert "局部重訓完成" in html and "本次重訓 PT 大小" in html
-    assert "驗收／原門檻 0.75" in html
-    assert "停用後可採用建議門檻" in html
+    assert "驗收／原門檻" not in html
+    assert "停用後可採用建議門檻" not in html
     assert 'data-unit="W0F00000-edge"' not in html
 
 

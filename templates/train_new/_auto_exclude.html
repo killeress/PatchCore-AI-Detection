@@ -15,7 +15,7 @@
       <label>最大面積 <input id="exclude-max-area" type="number" min="1" max="16384" value="800"></label>
       <p>面積以實際訓練切片像素計算。使用局部 31×31 背景差異；正常邊緣、細長線與貼著切片邊界的黑區不自動當成黑點。低對比或大面積雜質仍需抽查。</p>
     </details>
-    <p>設定按機種、畫面與 INNER／EDGE 保存，後續訓練自動沿用。前處理會影響黑點結果，變更後請抽查。自動排除沿用 NG 用途，但屬規則產生的標籤。</p>
+    <p>設定按機種、畫面與 INNER／EDGE 保存，後續訓練自動沿用。前處理會影響黑點結果，變更後請抽查。排除的切片不參與訓練。</p>
     <button type="button" class="batch-btn" onclick="applyAutoExclude()">儲存並套用到此 PT</button>
     <p>套用後到「已排除」檢查，誤排可按「加入」恢復；已恢復的圖片不會再次自動排除。關閉規則不會恢復先前排除結果。</p>
   </fieldset>
