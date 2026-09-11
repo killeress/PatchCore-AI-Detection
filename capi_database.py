@@ -677,15 +677,17 @@ class CAPIDatabase:
                     notes             TEXT
                 );
 
-                -- Client 機種前 8 碼 → 模型 bundle 自動切換規則
+                -- Client 機種前 8 碼或完整名稱 → 模型 bundle 自動切換規則
                 CREATE TABLE IF NOT EXISTS auto_model_switch_rules (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                    series_prefix TEXT NOT NULL UNIQUE,
+                    series_prefix TEXT NOT NULL,
+                    match_mode    TEXT NOT NULL DEFAULT 'prefix',
                     bundle_id     INTEGER NOT NULL,
                     notes         TEXT DEFAULT '',
                     created_at    TEXT DEFAULT (datetime('now', 'localtime')),
                     updated_at    TEXT DEFAULT (datetime('now', 'localtime')),
-                    FOREIGN KEY (bundle_id) REFERENCES model_registry(id) ON DELETE CASCADE
+                    FOREIGN KEY (bundle_id) REFERENCES model_registry(id) ON DELETE CASCADE,
+                    UNIQUE(series_prefix, match_mode)
                 );
                 CREATE INDEX IF NOT EXISTS idx_auto_model_switch_rules_series
                     ON auto_model_switch_rules(series_prefix);
@@ -837,6 +839,36 @@ class CAPIDatabase:
                 columns = [row[1] for row in cursor.fetchall()]
                 if column not in columns:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {def_type}")
+
+            # 舊規則保留為前綴比對；唯一鍵改為名稱 + 比對方式。
+            rule_columns = {row[1] for row in conn.execute("PRAGMA table_info(auto_model_switch_rules)")}
+            if "match_mode" not in rule_columns:
+                conn.execute("SAVEPOINT migrate_auto_model_switch_rules")
+                try:
+                    conn.execute("""CREATE TABLE auto_model_switch_rules_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        series_prefix TEXT NOT NULL,
+                        match_mode TEXT NOT NULL DEFAULT 'prefix',
+                        bundle_id INTEGER NOT NULL,
+                        notes TEXT DEFAULT '',
+                        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                        updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+                        FOREIGN KEY (bundle_id) REFERENCES model_registry(id) ON DELETE CASCADE,
+                        UNIQUE(series_prefix, match_mode)
+                    )""")
+                    conn.execute("""INSERT INTO auto_model_switch_rules_new
+                        (id, series_prefix, match_mode, bundle_id, notes, created_at, updated_at)
+                        SELECT id, series_prefix, 'prefix', bundle_id, notes, created_at, updated_at
+                        FROM auto_model_switch_rules""")
+                    conn.execute("DROP TABLE auto_model_switch_rules")
+                    conn.execute("ALTER TABLE auto_model_switch_rules_new RENAME TO auto_model_switch_rules")
+                    conn.execute("""CREATE INDEX idx_auto_model_switch_rules_series
+                        ON auto_model_switch_rules(series_prefix)""")
+                    conn.execute("RELEASE SAVEPOINT migrate_auto_model_switch_rules")
+                except Exception:
+                    conn.execute("ROLLBACK TO SAVEPOINT migrate_auto_model_switch_rules")
+                    conn.execute("RELEASE SAVEPOINT migrate_auto_model_switch_rules")
+                    raise
 
             add_column_if_not_exists(
                 "central_dashboard_lines",
@@ -7531,18 +7563,20 @@ class CAPIDatabase:
                      FROM auto_model_switch_rules r
                      LEFT JOIN model_registry b ON b.id = r.bundle_id
                     ORDER BY CASE WHEN r.series_prefix = '__DEFAULT__' THEN 0 ELSE 1 END,
-                             r.series_prefix"""
+                             r.series_prefix, r.match_mode"""
             ).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
 
-    def get_auto_model_switch_rule_by_series(self, series_prefix: str) -> Optional[Dict]:
+    def get_auto_model_switch_rule_by_series(
+        self, series_prefix: str, match_mode: str = "prefix",
+    ) -> Optional[Dict]:
         conn = self._get_conn()
         try:
             row = conn.execute(
-                "SELECT * FROM auto_model_switch_rules WHERE series_prefix = ?",
-                (series_prefix,),
+                "SELECT * FROM auto_model_switch_rules WHERE series_prefix = ? AND match_mode = ?",
+                (series_prefix, match_mode),
             ).fetchone()
             return dict(row) if row else None
         finally:
@@ -7557,8 +7591,14 @@ class CAPIDatabase:
         bundle_id: int,
         notes: str = "",
         rule_id: int = None,
+        match_mode: str = "prefix",
     ) -> Dict:
         """新增或更新一筆自動切換規則。"""
+        from capi_auto_model_switch import DEFAULT_SERIES_PREFIX, normalize_series_prefix
+
+        series_prefix = normalize_series_prefix(series_prefix, match_mode)
+        if series_prefix == DEFAULT_SERIES_PREFIX:
+            match_mode = "prefix"
         with self._lock:
             conn = self._get_conn()
             try:
@@ -7573,17 +7613,17 @@ class CAPIDatabase:
                 if rule_id:
                     cur = conn.execute(
                         """UPDATE auto_model_switch_rules
-                              SET series_prefix = ?, bundle_id = ?, notes = ?, updated_at = ?
+                              SET series_prefix = ?, match_mode = ?, bundle_id = ?, notes = ?, updated_at = ?
                             WHERE id = ?""",
-                        (series_prefix, bundle_id, notes or "", now, rule_id),
+                        (series_prefix, match_mode, bundle_id, notes or "", now, rule_id),
                     )
                     if cur.rowcount == 0:
                         raise ValueError(f"auto_model_switch_rules id={rule_id} 不存在")
                     saved_id = rule_id
                 else:
                     existing = conn.execute(
-                        "SELECT id FROM auto_model_switch_rules WHERE series_prefix = ?",
-                        (series_prefix,),
+                        "SELECT id FROM auto_model_switch_rules WHERE series_prefix = ? AND match_mode = ?",
+                        (series_prefix, match_mode),
                     ).fetchone()
                     if existing:
                         saved_id = int(existing["id"])
@@ -7596,9 +7636,9 @@ class CAPIDatabase:
                     else:
                         cur = conn.execute(
                             """INSERT INTO auto_model_switch_rules
-                               (series_prefix, bundle_id, notes, created_at, updated_at)
-                               VALUES (?, ?, ?, ?, ?)""",
-                            (series_prefix, bundle_id, notes or "", now, now),
+                               (series_prefix, match_mode, bundle_id, notes, created_at, updated_at)
+                               VALUES (?, ?, ?, ?, ?, ?)""",
+                            (series_prefix, match_mode, bundle_id, notes or "", now, now),
                         )
                         saved_id = cur.lastrowid
 

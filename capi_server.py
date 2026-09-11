@@ -2156,7 +2156,7 @@ class CAPIServer:
             logger.warning("[AutoModelSwitch] Failed to write history: %s", e)
 
     def _ensure_auto_model_switch_for_request(self, parsed: Dict[str, Any]) -> "CAPIConfig":
-        """依 Client 機種前 8 碼，必要時切換成唯一 active bundle。"""
+        """依 Client 完整機種或前 8 碼規則，必要時切換成唯一 active bundle。"""
         with self._model_switch_lock:
             decision = select_target_bundle(self.db, parsed.get("model_id", ""))
             target_bundle = decision.get("bundle")
@@ -2181,11 +2181,7 @@ class CAPIServer:
                 return self.fallback_config
 
             action = "fallback_default" if decision.get("used_default") else "switched"
-            message_prefix = (
-                f"{decision.get('series_prefix', '')} 使用預設模型"
-                if decision.get("used_default")
-                else f"{decision.get('series_prefix', '')} 命中系列模型"
-            )
+            message_prefix = f"{decision.get('requested_model_id', '')} {decision.get('message', '')}"
 
             logger.info(
                 "[AutoModelSwitch] Switching active bundle: requested=%s series=%s current=%s target=%s",

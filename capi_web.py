@@ -13198,7 +13198,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
     def _handle_auto_model_switch_rule_upsert(self):
         """POST /api/auto-model-switch/rules/upsert"""
         try:
-            from capi_auto_model_switch import DEFAULT_SERIES_PREFIX, normalize_series_prefix
+            from capi_auto_model_switch import DEFAULT_SERIES_PREFIX
 
             payload = self._read_json_body()
             if payload is None:
@@ -13207,7 +13207,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             series_prefix = str(payload.get("series_prefix", "") or "").strip()
             if payload.get("is_default"):
                 series_prefix = DEFAULT_SERIES_PREFIX
-            series_prefix = normalize_series_prefix(series_prefix)
+            match_mode = payload.get("match_mode", "prefix")
             bundle_id = int(payload.get("bundle_id") or 0)
             notes = str(payload.get("notes", "") or "")
 
@@ -13217,6 +13217,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 bundle_id=bundle_id,
                 notes=notes,
                 rule_id=int(rule_id) if rule_id else None,
+                match_mode=match_mode,
             )
             rule["bundle_label"] = Path(str(rule.get("bundle_path", "") or "")).name
             self._send_json({"success": True, "rule": rule})

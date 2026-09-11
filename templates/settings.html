@@ -1442,7 +1442,7 @@
 
     .auto-switch-toolbar {
         display: grid;
-        grid-template-columns: 120px minmax(180px, 1fr) minmax(200px, 1fr) auto;
+        grid-template-columns: 190px 200px minmax(180px, 1fr) minmax(120px, 1fr) auto;
         gap: 8px;
         align-items: center;
         padding: 12px;
@@ -3123,13 +3123,34 @@
         }).join('');
     }
 
+    function renderAutoSwitchMatchOptions(mode = 'prefix') {
+        return `<option value="prefix"${mode === 'prefix' ? ' selected' : ''}>前綴比對（前 8 碼）</option>
+                <option value="exact"${mode === 'exact' ? ' selected' : ''}>完整機種名稱比對</option>`;
+    }
+
+    function updateAutoSwitchMatchInput(inputId, mode) {
+        const input = document.getElementById(inputId);
+        if (mode === 'exact') {
+            input.removeAttribute('maxlength');
+            input.placeholder = 'GN156HRAA2L0S';
+        } else {
+            input.setAttribute('maxlength', '8');
+            input.placeholder = 'GN156HRA';
+        }
+    }
+
     function renderAutoModelSwitchPane() {
         const defaultRule = autoSwitchRules.find(r => r.series_prefix === '__DEFAULT__') || {};
         const rules = autoSwitchRules.filter(r => r.series_prefix !== '__DEFAULT__');
         const ruleRows = rules.length ? rules.map(r => `
             <tr>
                 <td>
-                    <input id="auto-series-${r.id}" class="auto-switch-input" maxlength="8" value="${escapeAttr(r.series_prefix || '')}">
+                    <select id="auto-match-${r.id}" class="auto-switch-select" aria-label="比對方式" onchange="updateAutoSwitchMatchInput('auto-series-${r.id}', this.value)">
+                        ${renderAutoSwitchMatchOptions(r.match_mode || 'prefix')}
+                    </select>
+                </td>
+                <td>
+                    <input id="auto-series-${r.id}" class="auto-switch-input" aria-label="機種名稱或前綴" ${r.match_mode === 'exact' ? '' : 'maxlength="8"'} value="${escapeAttr(r.series_prefix || '')}">
                 </td>
                 <td>
                     <select id="auto-bundle-${r.id}" class="auto-switch-select">
@@ -3149,7 +3170,7 @@
                 </td>
             </tr>
         `).join('') : `
-            <tr><td colspan="6" class="auto-switch-muted">尚未設定系列對應</td></tr>
+            <tr><td colspan="7" class="auto-switch-muted">尚未設定機種對應</td></tr>
         `;
         const historyRows = autoSwitchHistory.length ? autoSwitchHistory.map(h => `
             <tr>
@@ -3174,11 +3195,28 @@
                         <span>自動切換模型</span>
                     </div>
                     <div class="auto-switch-layout">
+                        <div class="auto-switch-muted" style="padding:12px 12px 0;">
+                            比對順序：完整機種名稱 → 前綴（前 8 碼）→ 預設模型。比對時忽略大小寫及名稱前後空白。
+                            <details style="margin-top:8px;padding:10px 12px;border:1px solid rgba(56,189,248,.22);border-radius:8px;background:rgba(56,189,248,.05);">
+                                <summary style="cursor:pointer;color:#7dd3fc;font-weight:600;">規則說明與範例</summary>
+                                <div style="margin-top:10px;line-height:1.8;">
+                                    <ul style="margin:0;padding-left:20px;">
+                                        <li><strong>前綴比對：</strong>必須輸入機種名稱的前 8 碼。例如設定 <code>GN156HRA</code>，即可對應 <code>GN156HRAA2L0S</code>、<code>GN156HRAAPF0S</code> 等同系列機種。</li>
+                                        <li><strong>完整機種名稱比對：</strong>輸入完整名稱，只對應該機種。例如設定 <code>GN156HRAA2L0S</code>，不會命中 <code>GN156HRAAPF0S</code> 或 <code>GN156HRAA2L0S-X</code>。</li>
+                                        <li><strong>同時命中：</strong>完整機種規則優先。例如 <code>GN156HRA</code> 對應模型 A、<code>GN156HRAA2L0S</code> 對應模型 B，收到 <code>GN156HRAA2L0S</code> 時使用模型 B，其餘同系列機種使用模型 A。</li>
+                                        <li><strong>未命中：</strong>兩種規則都未命中時，使用已儲存的預設模型；若尚未設定預設模型，則略過自動切換。Client 未提供機種名稱時也會略過自動切換。</li>
+                                        <li><strong>設定與儲存：</strong>選擇比對方式、輸入機種名稱或前綴，再選擇模型並按「新增」；修改既有規則或預設模型後，請按該列「儲存」。儲存後會在後續收到 Client 機種時套用，備註不參與比對。</li>
+                                    </ul>
+                                    <div style="margin-top:8px;">既有規則維持前 8 碼比對。名稱相同但比對方式不同的規則可並存；再次新增相同比對方式與名稱，會更新原有規則。</div>
+                                </div>
+                            </details>
+                        </div>
                         <div class="auto-switch-table-wrap">
-                            <table class="auto-switch-table">
+                            <table class="auto-switch-table" style="min-width:1200px;">
                                 <thead>
                                     <tr>
-                                        <th style="width:140px;">系列名</th>
+                                        <th style="width:190px;">比對方式</th>
+                                        <th style="width:200px;">機種名稱／前綴</th>
                                         <th>模型</th>
                                         <th>備註</th>
                                         <th style="width:150px;">建立時間</th>
@@ -3189,6 +3227,7 @@
                                 <tbody>
                                     <tr>
                                         <td><span class="auto-switch-code">預設模型</span></td>
+                                        <td class="auto-switch-muted">未命中規則時使用</td>
                                         <td>
                                             <select id="auto-default-bundle" class="auto-switch-select">
                                                 ${renderAutoSwitchBundleOptions(defaultRule.bundle_id)}
@@ -3206,7 +3245,8 @@
                             </table>
                         </div>
                         <div class="auto-switch-toolbar">
-                            <input id="auto-new-series" class="auto-switch-input" maxlength="8" placeholder="GN156HRA">
+                            <select id="auto-new-match" class="auto-switch-select" aria-label="新增規則比對方式" onchange="updateAutoSwitchMatchInput('auto-new-series', this.value)">${renderAutoSwitchMatchOptions()}</select>
+                            <input id="auto-new-series" class="auto-switch-input" aria-label="新增機種名稱或前綴" maxlength="8" placeholder="GN156HRA">
                             <select id="auto-new-bundle" class="auto-switch-select">${renderAutoSwitchBundleOptions('')}</select>
                             <input id="auto-new-notes" class="auto-switch-input" placeholder="備註">
                             <button class="auto-switch-btn primary" onclick="addAutoSwitchRule()">新增</button>
@@ -3267,6 +3307,7 @@
         try {
             await saveAutoSwitchPayload({
                 id,
+                match_mode: document.getElementById(`auto-match-${id}`).value,
                 series_prefix: document.getElementById(`auto-series-${id}`).value,
                 bundle_id: document.getElementById(`auto-bundle-${id}`).value,
                 notes: document.getElementById(`auto-notes-${id}`).value
@@ -3280,6 +3321,7 @@
     async function addAutoSwitchRule() {
         try {
             await saveAutoSwitchPayload({
+                match_mode: document.getElementById('auto-new-match').value,
                 series_prefix: document.getElementById('auto-new-series').value,
                 bundle_id: document.getElementById('auto-new-bundle').value,
                 notes: document.getElementById('auto-new-notes').value

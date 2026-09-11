@@ -72,7 +72,7 @@ class TestTrainingSchema:
     def test_auto_model_switch_columns(self, tmp_path):
         db = _make_db(tmp_path)
         rule_cols = _col_names(db, "auto_model_switch_rules")
-        assert {"id", "series_prefix", "bundle_id", "notes",
+        assert {"id", "series_prefix", "match_mode", "bundle_id", "notes",
                 "created_at", "updated_at"}.issubset(rule_cols)
 
         history_cols = _col_names(db, "auto_model_switch_history")
