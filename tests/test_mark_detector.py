@@ -20,6 +20,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 _PATTERNS = {
     "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
     "B": ("01110", "11111", "11010", "11110", "11011", "11111", "11110"),
+    "C": ("01111", "10000", "10000", "10000", "10000", "10000", "01111"),
+    "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
     "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
     "F": ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
     "J": ("01111", "01111", "00110", "00110", "00110", "11110", "11100"),
@@ -76,6 +78,35 @@ def test_detect_panel_mark_top_right_bo_low_contrast():
     assert result["text"] == "BO"
     assert result["roi"] == "top_right"
     assert result["orientation"] == "normal"
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+def test_detect_panel_mark_connected_strokes(rotated):
+    image = np.full((2048, 3072), 160, dtype=np.uint8)
+    _draw_mark(image, "C4", 2400, 350, cell=6, radius=3, pixel_value=120)
+    image = cv2.GaussianBlur(image, (3, 3), 0)
+    if rotated:
+        image = cv2.rotate(image, cv2.ROTATE_180)
+
+    result = detect_panel_mark(image)
+
+    assert result["found"] is True
+    assert result["text"] == "C4"
+    assert result["roi"] == ("bottom_left" if rotated else "top_right")
+    assert result["orientation"] == ("rot180" if rotated else "normal")
+
+
+@pytest.mark.parametrize("shape", ["blank", "single_char", "blocks", "bars"])
+def test_detect_panel_mark_rejects_non_character_strokes(shape):
+    image = np.full((2048, 3072), 160, dtype=np.uint8)
+    if shape == "single_char":
+        _draw_mark(image, "C", 2400, 350, cell=6, radius=3)
+    elif shape in ("blocks", "bars"):
+        height = 36 if shape == "blocks" else 6
+        for x in (2400, 2438):
+            cv2.rectangle(image, (x, 350), (x + 24, 350 + height), 45, -1)
+
+    assert detect_panel_mark(image)["found"] is False
 
 
 def test_detect_panel_mark_bottom_left():
@@ -256,3 +287,34 @@ def test_detect_panel_mark_real_regressions(filename, expected_text, expected_ro
     assert result["text"] == expected_text
     assert result["roi"] == expected_roi
     assert result["orientation"] == expected_orientation
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_bbox"),
+    [
+        ("W0F00000_111818.tif", (4819, 1827, 137, 64)),
+        ("W0F00000_112413.tif", (4867, 1798, 140, 67)),
+    ],
+)
+@pytest.mark.parametrize("rotated", [False, True])
+def test_detect_panel_mark_capi10_connected_stroke_regressions(filename, expected_bbox, rotated):
+    image_path = _ROOT / "newmark" / filename
+    if not image_path.exists():
+        pytest.skip(f"real mark fixture not available: {image_path}")
+    image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+    assert image is not None
+    x, y, width, height = expected_bbox
+    if rotated:
+        x, y = image.shape[1] - x - width, image.shape[0] - y - height
+        image = cv2.rotate(image, cv2.ROTATE_180)
+
+    result = detect_panel_mark(image)
+
+    assert result["found"] is True
+    assert result["text"] == "C4"
+    assert result["roi"] == ("bottom_left" if rotated else "top_right")
+    assert result["orientation"] == ("rot180" if rotated else "normal")
+    bbox = result["bbox"]
+    # Retain both complete characters, without merging their separate underlines.
+    for key, expected in zip(("x", "y", "width", "height"), (x, y, width, height)):
+        assert bbox[key] == pytest.approx(expected, abs=5)
