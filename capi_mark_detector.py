@@ -88,6 +88,8 @@ _ROI_RATIOS = (
 # unrelated texture at the ROI's right edge cannot dominate global Otsu.
 _FALLBACK_ROI_RATIOS = (
     ("bottom_left", (0.01, 0.52, 0.28, 0.97)),
+    # Match top_right's height as well for faint strokes after 180-degree rotation.
+    ("bottom_left", (0.01, 0.55, 0.28, 0.97)),
 )
 
 # HM panels use a multi-character dot matrix near the panel's lower-right edge.
@@ -455,8 +457,10 @@ def _detect_roi(
     roi_name: str,
     profile_index: Dict[Tuple[int, str], Tuple[np.ndarray, ...]],
 ) -> Optional[Dict[str, Any]]:
-    filtered = _dot_mask(roi, min(full_width, full_height))
-    groups = _find_mark_groups(filtered, offset_x, offset_y, full_width, full_height)
+    filtered = _dot_mask(roi, min(full_width, full_height), allow_connected_chars=True)
+    groups = _find_mark_groups(
+        filtered, offset_x, offset_y, full_width, full_height, allow_connected_chars=True,
+    )
     if not groups:
         return None
     groups.extend(
@@ -467,6 +471,7 @@ def _detect_roi(
             offset_y,
             full_width,
             full_height,
+            allow_connected_chars=True,
         )
     )
 
@@ -493,7 +498,9 @@ def _detect_roi(
     return best
 
 
-def _dot_mask(roi: np.ndarray, scale_basis: int) -> np.ndarray:
+def _dot_mask(
+    roi: np.ndarray, scale_basis: int, *, allow_connected_chars: bool = False,
+) -> np.ndarray:
     sigma = max(17, int(round(scale_basis * 0.007)))
     background = cv2.GaussianBlur(roi, (0, 0), sigmaX=sigma, sigmaY=sigma)
     enhanced = cv2.subtract(background, roi)
@@ -508,7 +515,9 @@ def _dot_mask(roi: np.ndarray, scale_basis: int) -> np.ndarray:
 
     count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
     filtered = np.zeros_like(binary)
-    max_blob = max(24, int(round(scale_basis * 0.014)))
+    # CAPI printed strokes can join into a complete glyph instead of separate dots.
+    blob_ratio = 0.030 if allow_connected_chars else 0.014
+    max_blob = max(24, int(round(scale_basis * blob_ratio)))
     for idx in range(1, count):
         x, y, width, height, area = stats[idx]
         if 3 <= width <= max_blob and 3 <= height <= max_blob and 5 <= area <= max_blob * max_blob:
@@ -547,6 +556,8 @@ def _find_mark_groups(
     offset_y: int,
     full_width: int,
     full_height: int,
+    *,
+    allow_connected_chars: bool = False,
 ) -> List[Dict[str, Any]]:
     join = max(15, int(round(min(full_width, full_height) * 0.010)))
     dilated = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_RECT, (join, join)), iterations=1)
@@ -574,7 +585,9 @@ def _find_mark_groups(
 
         tight = mark_mask[tight_y1:tight_y2, tight_x1:tight_x2]
         comp_count = _count_small_components(tight)
-        if comp_count < 10:
+        if comp_count < 10 and not (
+            allow_connected_chars and comp_count >= 2 and _is_connected_char_pair(tight)
+        ):
             continue
 
         groups.append(
@@ -593,6 +606,27 @@ def _find_mark_groups(
     return groups
 
 
+def _is_connected_char_pair(mask: np.ndarray) -> bool:
+    """Require two aligned glyph shapes before accepting a low dot count."""
+    parts = _split_two_chars(mask)
+    if parts is None:
+        return False
+    boxes = [box for _, box in parts]
+    height = max(box["height"] for box in boxes)
+    if min(box["height"] for box in boxes) < height * 0.65:
+        return False
+    if abs(boxes[0]["y"] - boxes[1]["y"]) > height * 0.20:
+        return False
+    gap = boxes[1]["x"] - boxes[0]["x"] - boxes[0]["width"]
+    if not height * 0.10 <= gap <= height:
+        return False
+    return all(
+        0.30 <= box["width"] / box["height"] <= 1.20
+        and 0.10 <= np.count_nonzero(char_mask) / char_mask.size <= 0.80
+        for char_mask, box in parts
+    )
+
+
 def _refine_mark_groups(
     roi: np.ndarray,
     coarse_groups: List[Dict[str, Any]],
@@ -600,6 +634,8 @@ def _refine_mark_groups(
     offset_y: int,
     full_width: int,
     full_height: int,
+    *,
+    allow_connected_chars: bool = False,
 ) -> List[Dict[str, Any]]:
     """Re-threshold coarse candidates locally so the full dot matrix is retained."""
     refined: List[Dict[str, Any]] = []
@@ -620,13 +656,14 @@ def _refine_mark_groups(
         if local_roi.size == 0:
             continue
 
-        local_mask = _dot_mask(local_roi, scale_basis)
+        local_mask = _dot_mask(local_roi, scale_basis, allow_connected_chars=allow_connected_chars)
         local_groups = _find_mark_groups(
             local_mask,
             offset_x + x1,
             offset_y + y1,
             full_width,
             full_height,
+            allow_connected_chars=allow_connected_chars,
         )
         refined.extend(
             candidate
