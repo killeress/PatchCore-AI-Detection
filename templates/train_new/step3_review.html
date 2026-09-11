@@ -70,12 +70,11 @@
     </div>
   </div>
 
-  <div id="auto-split-summary" style="margin:12px 0;color:#a6adc8;"></div>
   {% include "train_new/_auto_exclude.html" %}
   <div id="oom-warning" role="status" style="margin:12px 0;color:#f9e2af;white-space:pre-line;"></div>
   <details style="margin:12px 0;color:#a6adc8;"><summary>各 PT 訓練張數與顯存估算</summary>
     <div id="training-memory"></div>
-    <p>依實際分配給各 PT 的正常訓練切片計算；校正、驗收及 NG 不計入。超過 600 張是經驗提醒值，600 張以下仍可能 OOM。</p>
+    <p>依各 PT 保留的正常訓練切片計算，排除的切片不計入。超過 600 張是經驗提醒值，600 張以下仍可能 OOM。</p>
     <p>估算為原始特徵與未清理時的合併大小，非總顯存峰值；尚未包含模型、批次運算、特徵清理與 coreset 暫存。</p>
   </details>
   <div id="content-area"></div>
@@ -95,11 +94,6 @@
       <div id="modal-title"></div>
       <div class="modal-actions">
         <span id="modal-decision" class="modal-decision" style="display:none;"></span>
-        <span id="modal-validation" style="display:none;">
-          <button onclick="labelValidation([_modalTileId], 'ok')">確認 OK</button>
-          <button onclick="labelValidation([_modalTileId], 'ng')">確認 NG</button>
-          <button onclick="labelValidation([_modalTileId], '')">清除標籤</button>
-        </span>
         <button onclick="modalReject()" id="modal-reject-btn" style="display:none;">排除 (Del)</button>
         <button onclick="modalAccept()" id="modal-accept-btn" style="display:none;">加入 (A)</button>
         <button onclick="closePreview()">關閉 (Esc)</button>
@@ -204,7 +198,6 @@ const trainingScope = {{ training_scope|tojson }};
 let _currentLighting = lightings[0] || 'G0F00000';
 let _tilesByLighting = {};  // {lighting: [tile, ...]}
 let _memoryByLighting = {};
-let _splitByLighting = {};
 let _filter = 'all';
 let _lastClickedId = null;
 let _clickTimer = null;
@@ -379,9 +372,7 @@ async function loadLightingWithOptionalScore(lighting, scoreFromBundle) {
   }
   const r = await fetch(url).then(r => r.json());
   _memoryByLighting[lighting] = r.training_memory;
-  _splitByLighting[lighting] = r.auto_split;
   _tilesByLighting[lighting] = r.tiles || [];
-  if (lighting === _currentLighting) showAutoSplit();
   updateBadge(lighting);
 }
 
@@ -396,9 +387,7 @@ function loadLighting(lighting) {
     })
     .then(d => {
       _memoryByLighting[lighting] = d.training_memory;
-      _splitByLighting[lighting] = d.auto_split;
       _tilesByLighting[lighting] = d.tiles || [];
-      if (lighting === _currentLighting) showAutoSplit();
       updateBadge(lighting);
     });
 }
@@ -424,93 +413,16 @@ function setFilter(filter) {
   else focusTile(_focusedTileId, { scroll: false });
 }
 
-function zoneSplitRows() {
-  const units = (trainingScope && trainingScope.selected_units) || [];
-  return ['inner', 'edge'].filter(zone => units.includes(`${_currentLighting}-${zone}`)).map(zone => {
-    const tiles = (_tilesByLighting[_currentLighting] || []).filter(t => t.zone === zone && t.source === 'ok');
-    const counts = {};
-    for (const role of ['train', 'calibration', 'acceptance']) {
-      const samples = tiles.filter(t => t.dataset_role === role && (role !== 'train' || t.decision === 'accept'));
-      counts[role] = {panels: new Set(samples.map(t => t.validation_group.toLowerCase())).size,
-        ok: samples.filter(t => t.decision === 'accept').length,
-        ng: samples.filter(t => t.decision === 'reject').length};
-    }
-    const missing = [];
-    if (!counts.train.ok) missing.push('缺訓練 OK');
-    for (const [role, label] of [['calibration', '校正'], ['acceptance', '驗收']]) {
-      if (!counts[role].panels) missing.push(`缺${label} PANEL`);
-      else {
-        if (!counts[role].ok) missing.push(`${label}缺 OK`);
-        if (!counts[role].ng) missing.push(`${label}缺 NG`);
-      }
-    }
-    return {zone, ...counts, missing};
-  });
-}
-
-function showAutoSplit() {
-  const split = _splitByLighting[_currentLighting];
-  if (split && split.decision_review) {
-    document.getElementById('auto-split-summary').innerHTML = '<p>保留＝OK，排除＝NG，不需額外標記。以下依目前光源的實際切片計算 PANEL ID 數；同一 ID 維持同一用途。</p>'
-      + '<table style="width:100%;text-align:left;"><thead><tr><th>區域</th><th>訓練</th><th>校正</th><th>驗收</th><th>資料狀況</th></tr></thead><tbody>'
-      + zoneSplitRows().map(row => `<tr><td>${row.zone.toUpperCase()}</td><td>${row.train.panels} 片／${row.train.ok} 張 OK</td>`
-        + ['calibration', 'acceptance'].map(role => `<td>${row[role].panels} 片（OK ${row[role].ok}／NG ${row[role].ng}）</td>`).join('')
-        + `<td style="color:${row.missing.length ? '#f9e2af' : '#a6adc8'};">${row.missing.join('、') || '已分配三組'}</td></tr>`).join('')
-      + '</tbody></table><p>校正／驗收資料不足時，仍可使用足夠的正常樣本訓練；結果以完成頁報告為準。</p>';
-    return;
-  }
-  document.getElementById('auto-split-summary').textContent = !split ? '' : !split.acceptance
-    ? '批次不足，本次只訓練正常樣本，尚無獨立校正／驗收。請標記 NG，再確認其餘為 OK。'
-    : `系統已分配：訓練 ${split.train} 片、校正 ${split.calibration} 片、驗收 ${split.acceptance} 片。只需確認 OK／NG，不需調整用途。`;
-}
-
 function groupTiles(tiles) {
-  if (tiles.some(t => t.auto_review)) {
-    return {
-      review_inner: tiles.filter(t => t.zone === 'inner'),
-      review_edge: tiles.filter(t => t.zone === 'edge'),
-    };
-  }
-  const heldOut = tiles.filter(t => ['calibration', 'acceptance'].includes(t.dataset_role));
-  tiles = tiles.filter(t => !t.dataset_role || t.dataset_role === 'train');
   // AOI 炸彈 NG 由後端依座標映射後的 crop 中心判定 inner/edge。
   // 未分類者（zone=null）兩 unit 都會收，所以獨立一組顯示。
   return {
-    calibration_inner: heldOut.filter(t => t.dataset_role === 'calibration' && t.zone === 'inner'),
-    calibration_edge: heldOut.filter(t => t.dataset_role === 'calibration' && t.zone === 'edge'),
-    acceptance_inner: heldOut.filter(t => t.dataset_role === 'acceptance' && t.zone === 'inner'),
-    acceptance_edge: heldOut.filter(t => t.dataset_role === 'acceptance' && t.zone === 'edge'),
     inner_ok: tiles.filter(t => t.zone === 'inner' && t.source === 'ok'),
     edge_ok:  tiles.filter(t => t.zone === 'edge'  && t.source === 'ok'),
     inner_ng: tiles.filter(t => t.zone === 'inner' && t.source === 'ng'),
     edge_ng:  tiles.filter(t => t.zone === 'edge'  && t.source === 'ng'),
     shared_ng: tiles.filter(t => (t.zone === null || t.zone === undefined) && t.source === 'ng'),
   };
-}
-
-async function labelValidation(ids, label) {
-  if (!ids.length) return;
-  try {
-    const response = await fetch('/api/train/new/tiles/decision', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({job_id: jobId, tile_ids: ids, validation_label: label}),
-    });
-    const data = await response.json();
-    if (!response.ok || data.error) throw new Error(data.error || '標記失敗');
-    for (const tiles of Object.values(_tilesByLighting)) {
-      for (const tile of tiles) if (ids.includes(tile.id)) tile.validation_label = label;
-    }
-    render();
-    if (_modalTileId !== null) modalShowTile(_modalTileId);
-  } catch (error) { capAlert(String(error), {type: 'error'}); }
-}
-
-async function labelValidationGroup(key) {
-  const tiles = groupTiles(_tilesByLighting[_currentLighting] || [])[key] || [];
-  const ids = tiles.filter(t => t.decision === 'accept' && !t.validation_label).map(t => t.id);
-  if (await capConfirm(`確認其餘 ${ids.length} 張未標記切片都是 OK？已標記的 NG 保留。`, {title: '人工確認 OK'})) {
-    await labelValidation(ids, 'ok');
-  }
 }
 
 function trainingMemoryRows() {
@@ -521,8 +433,7 @@ function trainingMemoryRows() {
     const estimate = _memoryByLighting[lighting];
     if (!estimate) return [];
     const count = (_tilesByLighting[lighting] || []).filter(t => t.zone === zone && t.source === 'ok'
-      && t.decision === 'accept' && (!t.dataset_role || t.dataset_role === 'train')
-      && (t.decision_review || (t.auto_review ? t.validation_label === 'ok' : t.validation_label !== 'ng'))).length;
+      && t.decision === 'accept').length;
     return [{unit, count, featureGiB: count * estimate.bytes_per_tile / 2**30,
       stackGiB: count * estimate.bytes_per_tile * 2 / 2**30, warning: count > estimate.warning_tiles}];
   });
@@ -547,7 +458,6 @@ function visibleTiles(list) {
 }
 
 function render() {
-  showAutoSplit();
   const tiles = _tilesByLighting[_currentLighting] || [];
   const groups = groupTiles(tiles);
   let html = '';
@@ -560,12 +470,6 @@ function render() {
                  : (key === 'inner_ng' || key === 'edge_ng' || key === 'shared_ng') ? 'ng'
                  : '';
     const title = {
-      review_inner: 'INNER · 保留＝OK，排除＝NG',
-      review_edge: 'EDGE · 保留＝OK，排除＝NG',
-      calibration_inner: '校正 · INNER（人工標記 OK／NG，用來找門檻）',
-      calibration_edge: '校正 · EDGE（人工標記 OK／NG，用來找門檻）',
-      acceptance_inner: '獨立驗收 · INNER（不參與訓練與找門檻）',
-      acceptance_edge: '獨立驗收 · EDGE（不參與訓練與找門檻）',
       inner_ok:  '內部 OK',
       edge_ok:   '邊緣 OK',
       inner_ng:  'NG · 內部（餵 inner unit）',
@@ -576,7 +480,6 @@ function render() {
       <span>${title}</span>
       <span class="grp-actions">
         <span style="color:#a6adc8;font-size:.78rem;">${accept}/${list.length} 加入</span>
-        ${!list.some(t => t.decision_review) && (key.startsWith('review_') || key.startsWith('calibration_') || key.startsWith('acceptance_')) ? `<span>待標記 ${list.filter(t => t.decision === 'accept' && !t.validation_label).length}</span><button class="grp-btn" onclick="labelValidationGroup('${key}')">確認其餘為 OK</button>` : ''}
         <button class="grp-btn" onclick="setGroupDecision('${key}','accept')">全加入</button>
         <button class="grp-btn danger" onclick="setGroupDecision('${key}','reject')">全排除</button>
       </span>
@@ -593,9 +496,7 @@ function render() {
       const reason = t.auto_exclusion ? (t.auto_exclusion.kind === 'region' ? '固定區域' : '局部黑點') : '';
       const label = `${_currentLighting} / ${zoneLabel} / #${t.id}`;
       const quartile = t.score_quartile || '';
-      const scoreLabel = t.decision_review ? `<span class="score-badge">${t.decision === 'accept' ? 'OK' : 'NG'}</span>` : t.auto_review || ['calibration', 'acceptance'].includes(t.dataset_role)
-        ? `<span class="score-badge">${t.validation_label ? t.validation_label.toUpperCase() : '待標記'}</span>`
-        : (t.score != null) ? `<span class="score-badge">${t.score.toFixed(2)}</span>` : '';
+      const scoreLabel = t.score != null ? `<span class="score-badge">${t.score.toFixed(2)}</span>` : '';
       html += `<div class="tile ${tileCls}${focusCls}" data-id="${t.id}" data-score-quartile="${quartile}" title="${reason ? '規則：'+reason+'；' : ''}單擊放大，雙擊加入/排除" style="background-image:url('${thumb}');" onclick="handleTileClick(this,event)" ondblclick="handleTileDoubleClick(this,event)" aria-label="${label}">${scoreLabel}${reason ? `<span style="position:absolute;bottom:22px;left:2px;background:#313244;color:#f9e2af;font-size:10px;">${reason}</span>` : ''}</div>`;
     }
     html += '</div>';
@@ -689,7 +590,6 @@ function updateDecision(tileIds, decision, opts) {
     for (const tile of _tilesByLighting[_currentLighting] || []) {
       if (tileIds.includes(tile.id)) {
         tile.decision = decision;
-        if (tile.decision_review) tile.validation_label = decision === 'accept' ? 'ok' : 'ng';
       }
     }
     render();
@@ -796,18 +696,10 @@ function modalShowTile(id) {
     : (tile.zone || '');
   document.getElementById('modal-img').src = src;
   document.getElementById('modal-title').textContent = `${lightingLabels[_currentLighting] || _currentLighting} / ${zone} / tile #${tile.id}`;
-  const isValidation = tile.auto_review || ['calibration', 'acceptance'].includes(tile.dataset_role);
-  document.getElementById('modal-validation').style.display = isValidation && !tile.decision_review ? '' : 'none';
-  if (isValidation) document.getElementById('modal-title').textContent += ` / ${tile.decision_review ? 'PANEL ID' : '批次'} ${tile.validation_group} / ${tile.validation_label || '待標記'}`;
-
   const dec = document.getElementById('modal-decision');
   dec.style.display = '';
   dec.className = 'modal-decision ' + tile.decision;
   dec.textContent = tile.decision === 'accept' ? '已加入' : '已排除';
-  if (tile.decision_review) dec.textContent += tile.decision === 'accept' ? '（OK）' : '（NG）';
-  if (tile.auto_review && tile.dataset_role === 'train' && tile.validation_label === 'ng') {
-    dec.textContent = 'NG：不加入訓練';
-  }
 
   document.getElementById('modal-reject-btn').style.display = '';
   document.getElementById('modal-accept-btn').style.display = '';
@@ -833,7 +725,6 @@ function openProcessPreview() {
 
 function openPreview(src, title) {
   if (!src) return;
-  document.getElementById('modal-validation').style.display = 'none';
   _modalTileId = null;
   document.getElementById('modal-img').src = src;
   document.getElementById('modal-title').textContent = title || '';

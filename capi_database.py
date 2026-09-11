@@ -7240,6 +7240,25 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def retire_training_validation(self, job_id):
+        """Return an editable wizard to train-only review, preserving include/exclude decisions."""
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT state, training_params FROM training_jobs WHERE job_id=?", (job_id,)).fetchone()
+            if not row or row["state"] != "review":
+                return False
+            params = json.loads(row["training_params"] or "{}")
+            params.pop("validation_config", None)
+            conn.execute("UPDATE training_jobs SET training_params=? WHERE job_id=?",
+                         (json.dumps(params, ensure_ascii=False), job_id))
+            conn.execute("""UPDATE training_tile_pool SET dataset_role='train',
+                validation_label='', validation_group='' WHERE job_id=?""", (job_id,))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
     def migrate_panel_validation_review(self, job_id):
         """Upgrade unfinished automatic reviews, preserving every include/exclude decision."""
         from capi_training_validation import normalize_validation_config

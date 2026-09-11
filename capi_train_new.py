@@ -428,8 +428,8 @@ def apply_user_training_params(
         if key == "feature_cleaning_by_zone":
             val = normalize_feature_cleaning_by_zone(val)
         if key == "validation_config":
-            from capi_training_validation import normalize_validation_config
-            val = normalize_validation_config(val, cfg.panel_paths)
+            # Compatibility with old saved jobs: the wizard no longer calibrates.
+            continue
         setattr(cfg, key, val)
     if log_fn is not None:
         log_fn(f"使用者覆寫訓練參數: {params}")
@@ -2221,7 +2221,8 @@ def train_single_submodel(
                                     source="ok", decision="accept")
     from capi_training_validation import training_tiles, validation_tiles, evaluate_model, freeze_inputs, review_decision_labels
     train_tiles = review_decision_labels(train_tiles, cfg.validation_config)
-    train_tiles = training_tiles(train_tiles, require_confirmed=cfg.validation_config.get("split_mode") == "auto_batch")
+    if cfg.validation_config:
+        train_tiles = training_tiles(train_tiles, require_confirmed=cfg.validation_config.get("split_mode") == "auto_batch")
     ng_all = db.list_tile_pool(job_id, lighting=lighting,
                                source="ng", decision="accept")
     ng_for_zone = [t for t in ng_all if t.get("zone") in (zone, None)]
@@ -2571,7 +2572,8 @@ def run_training_pipeline(
                                         source="ok", decision="accept")
         from capi_training_validation import training_tiles, review_decision_labels
         train_tiles = review_decision_labels(train_tiles, cfg.validation_config)
-        train_tiles = training_tiles(train_tiles, require_confirmed=cfg.validation_config.get("split_mode") == "auto_batch")
+        if cfg.validation_config:
+            train_tiles = training_tiles(train_tiles, require_confirmed=cfg.validation_config.get("split_mode") == "auto_batch")
         if len(train_tiles) < MIN_TRAIN_TILES:
             log(
                 f"[{idx}/{unit_total}] {unit_label}: 跳過：tile 不足 "

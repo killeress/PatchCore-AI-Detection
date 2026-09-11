@@ -196,7 +196,7 @@ def test_retrain_worker_keeps_partial_source(partial_source, monkeypatch):
     h._submodel_retrain_worker(13, "WGF50500", "inner")
     assert state["job"]["state"] == "completed"
     assert train.call_args.kwargs["job_id"] == "new"
-    assert train.call_args.kwargs["cfg"].validation_config == validation
+    assert train.call_args.kwargs["cfg"].validation_config == {}
     manifest = json.loads((Path(bundle["bundle_path"]) / "manifest.json").read_text())
     assert manifest["submodel_history"]["WGF50500-inner"][-1]["job_id"] == "new"
 

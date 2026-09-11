@@ -15634,11 +15634,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 continue
             val = raw[key]
             if key == "validation_config":
-                from capi_training_validation import normalize_validation_config
-                try:
-                    cleaned[key] = normalize_validation_config(val)
-                except ValueError as exc:
-                    return None, str(exc)
+                # Ignore payloads from browser pages opened before calibration was retired.
                 continue
             if key == "feature_cleaning_by_zone":
                 try:
@@ -15965,20 +15961,6 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 )
             }, status=400)
             return
-        if (training_params or {}).get("validation_config"):
-            from capi_training_validation import normalize_validation_config
-            try:
-                validation = dict(training_params["validation_config"])
-                if training_scope["mode"] == "partial":
-                    validation["selected_zones"] = sorted(required_zones)
-                else:
-                    validation.pop("selected_zones", None)
-                training_params["validation_config"] = normalize_validation_config(
-                    validation, clean_panel_paths, panel_modes,
-                )
-            except ValueError as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
         if training_scope["mode"] == "partial":
             locked_params = sorted(
                 set(training_params or {})
@@ -16368,10 +16350,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
     @staticmethod
     def _prepare_panel_validation_review(db, job):
         config = ((job.get("training_params") or {}).get("validation_config") or {}) if isinstance(job, dict) else {}
-        if (isinstance(job, dict) and job.get("state") == "review"
-                and (config.get("split_mode") == "auto_batch" or (config.get("split_mode") == "auto_panel"
-                     and any("zones" not in p for p in config["panels"].values())))):
-            db.migrate_panel_validation_review(job["job_id"])
+        if isinstance(job, dict) and job.get("state") == "review" and config:
+            db.retire_training_validation(job["job_id"])
             return db.get_training_job(job["job_id"])
         return job
 
@@ -16950,22 +16930,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         decision = body.get("decision")
 
         if "validation_label" in body:
-            label = body["validation_label"]
-            if not job_id or not isinstance(tile_ids, list) or not tile_ids or any(type(t) is not int or t <= 0 for t in tile_ids) or label not in ("", "ok", "ng"):
-                self._send_json({"error": "job_id, tile_ids, validation_label required"}, status=400)
-                return
-            db = self._capi_server_instance.database
-            job = self._prepare_panel_validation_review(db, db.get_training_job(job_id))
-            if isinstance(job, dict) and ((job.get("training_params") or {}).get("validation_config") or {}).get("split_mode") == "auto_panel":
-                self._send_json({"error": "已改為保留＝OK、排除＝NG，請使用加入／排除"}, status=409)
-                return
-            auto_review = isinstance(job, dict) and ((job.get("training_params") or {}).get("validation_config") or {}).get("split_mode") == "auto_batch"
-            updated = db.update_validation_review(job_id, tile_ids, label=label,
-                **({"allow_training_labels": True} if auto_review else {}))
-            if updated != len(set(tile_ids)):
-                self._send_json({"error": "僅能在審核階段標註此切片，請重新整理"}, status=409)
-                return
-            self._send_json({"ok": True, "updated": updated})
+            self._send_json({"error": "額外 OK／NG 標記已取消，請使用加入／排除"}, status=410)
             return
 
         if not job_id or not tile_ids or decision not in ("accept", "reject"):
@@ -17727,41 +17692,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         self._send_binary(str(target))
 
     def _handle_train_new_apply_validation(self):
-        job_id = self.path.rsplit("/", 1)[-1].split("?", 1)[0]
-        db = self._capi_server_instance.database
-        job = db.get_training_job(job_id)
-        if not job or job.get("state") != "completed" or not job.get("output_bundle"):
-            self._send_json({"error": "找不到已完成的訓練模型"}, status=409)
-            return
-        try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
-            if not isinstance(body, dict):
-                raise ValueError("請提供 JSON object")
-            unit_label = body.get("unit_label", "")
-            root = Path(job["output_bundle"]).resolve()
-            from capi_training_validation import run_manifest_path
-            snapshot = run_manifest_path(root, job_id)
-            manifest = json.loads((snapshot if snapshot.exists() else root / "manifest.json").read_text(encoding="utf-8"))
-            scope = job.get("training_scope") or {}
-            if scope.get("mode") == "partial" and unit_label not in (scope.get("selected_units") or []):
-                raise ValueError("此子模型不在本次局部重訓範圍")
-            if unit_label not in manifest.get("unit_metrics", {}) or not manifest["unit_metrics"][unit_label].get("validation"):
-                raise ValueError("此子模型沒有獨立驗收報告")
-            validation = manifest["unit_metrics"][unit_label]["validation"]
-            if validation.get("job_id") not in (None, job_id) or (scope.get("mode") == "partial" and validation.get("job_id") != job_id):
-                raise ValueError("驗收報告不屬於本次訓練")
-            bundle = next((b for b in db.list_model_bundles(job["machine_id"]) if Path(b["bundle_path"]).resolve() == root), None)
-            if not bundle:
-                raise ValueError("模型尚未登錄")
-            from capi_training_validation import adopt_threshold
-            with CAPIWebHandler._train_slot["lock"]:
-                if CAPIWebHandler._train_slot.get("active_job_id"):
-                    raise ValueError("訓練進行中，請待完成後採用門檻")
-                result = adopt_threshold(db, bundle["id"], unit_label,
-                                         report_path=validation.get("report_path"), expected_job_id=validation.get("job_id"))
-            self._send_json(result)
-        except (ValueError, OSError, KeyError, TypeError) as exc:
-            self._send_json({"error": str(exc)}, status=400)
+        self._send_json({"error": "自動校正與驗收功能已停用；請使用原有門檻設定"}, status=410)
 
     def _train_new_thumb_url(self, thumb_path: str) -> str:
         """Convert a stored thumbnail path to the confined thumbnail route."""
@@ -19625,7 +19556,6 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             cfg = TrainingConfig(
                 machine_id=machine_id,
                 panel_paths=[],
-                validation_config=(source_job.get("training_params") or {}).get("validation_config") or {},
                 over_review_root=Path(".tmp/_unused"),
                 image_preprocess_pipeline=old_manifest.get("image_preprocess_pipeline") or [],
                 batch_size=patchcore_params.get("batch_size", 32),
