@@ -1,5 +1,6 @@
 import logging
 import socket
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -131,3 +132,105 @@ def test_partial_receive_then_disconnect_or_timeout(tcp_server, caplog, end, tag
     assert f"reason={reason}" in messages(caplog, "[TCP_CLOSE]")[0]
     assert not messages(caplog, "[TCP_REQUEST]")
     client.sendall.assert_not_called()
+
+
+def test_fragmented_bomb_request_after_concatenated_request_is_not_processed_early(tcp_server):
+    previous = b"AOI@PREVIOUS;MODEL;CAPI39;1920,1200;NG;//images/PREVIOUS"
+    partial = b"AOI@T865QE48AJ55;MODEL;CAPI39;1920,1200;NG;WGF"
+    remainder = b"50500;(11/11;960/11);//images/T865QE48AJ55"
+    following = b"AOI@NEXT;MODEL;CAPI39;1920,1200;NG;//images/NEXT\r\n"
+    client = make_socket([previous + partial, remainder + following, b""])
+
+    tcp_server._handle_client(client, ("192.168.1.3", 56264))
+
+    processed = [call.args[0] for call in tcp_server._process_request.call_args_list]
+    assert [(p["glass_id"], p["image_dir"]) for p in processed] == [
+        ("PREVIOUS", "//images/PREVIOUS"),
+        ("T865QE48AJ55", "//images/T865QE48AJ55"),
+        ("NEXT", "//images/NEXT"),
+    ]
+    assert processed[1]["bomb_info"]["image_prefix"] == "WGF50500"
+    assert processed[1]["bomb_info"]["coordinates"] == [(11, 11), (960, 11)]
+    assert client.sendall.call_count == 3
+    assert tcp_server._queue_save_results_async.call_count == 3
+
+
+def test_legacy_request_waits_for_available_continuation_before_sending(tcp_server, monkeypatch, caplog):
+    partial = b"AOI@G1;MODEL;CAPI39;1920,1200;OK;//images/partial"
+    client = make_socket([partial, b"-path", b""])
+    ready = MagicMock(side_effect=[([client], [], []), ([], [], [])])
+    monkeypatch.setattr(capi_server.select, "select", ready)
+
+    tcp_server._handle_client(client, ("192.168.1.3", 56264))
+
+    assert tcp_server._process_request.call_args.args[0]["image_dir"] == "//images/partial-path"
+    assert "boundary=legacy_idle" in messages(caplog, "[TCP_FRAME]")[0]
+    assert ready.call_args.args[3] == 0.2
+    client.settimeout.assert_called_once_with(None)
+
+
+def test_legacy_request_can_finish_at_peer_eof(tcp_server, monkeypatch, caplog):
+    client = make_socket([b"AOI@G1;MODEL;CAPI39;1920,1200;OK;//images/G1", b""])
+    monkeypatch.setattr(capi_server.select, "select", lambda *args: ([client], [], []))
+    tcp_server._handle_client(client, ("192.168.1.3", 56264))
+    assert client.sendall.call_count == 1
+    assert "boundary=eof" in messages(caplog, "[TCP_FRAME]")[0]
+
+
+def test_residue_is_reported_and_next_request_is_still_processed(tcp_server, caplog):
+    client = make_socket([b"50500;old/pathAO", b"I@G1;MODEL;CAPI39;1920,1200;OK;//images/G1\n", b""])
+    tcp_server._handle_client(client, ("192.168.1.3", 56264))
+    tcp_server._save_error_record.assert_called_once()
+    assert "Invalid prefix" in caplog.text
+    assert tcp_server._process_request.call_args.args[0]["glass_id"] == "G1"
+    assert client.sendall.call_count == 2
+
+
+@pytest.mark.parametrize("ending", [b"", b"\n"])
+def test_oversized_unprocessed_frame_is_logged_and_connection_closed(tcp_server, caplog, monkeypatch, ending):
+    monkeypatch.setattr(capi_server, "_MAX_REQUEST_BUFFER_BYTES", 64)
+    client = make_socket([b"AOI@" + b"x" * 65 + ending])
+    tcp_server._handle_client(client, ("192.168.1.3", 56264))
+    assert messages(caplog, "[TCP_FRAME_LIMIT]")
+    assert "reason=frame_buffer_limit" in messages(caplog, "[TCP_CLOSE]")[0]
+    client.close.assert_called_once()
+    client.sendall.assert_not_called()
+
+
+def test_real_socket_fragmented_prefix_then_legacy_request_both_receive_replies(tcp_server):
+    server_socket, client = socket.socketpair()
+    errors = []
+
+    def handle():
+        try:
+            tcp_server._handle_client(server_socket, ("127.0.0.1", 56264))
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=handle, daemon=True)
+    worker.start()
+    try:
+        client.sendall(b"AOI@G1;MODEL;CAPI39;1920,1200;NG;WGF")
+        client.settimeout(0.35)  # Longer than the legacy quiet interval: WGF must still be held.
+        with pytest.raises(socket.timeout):
+            client.recv(4096)
+        client.sendall(
+            b"50500;(11/11;960/11);//images/G1\r\n"
+            b"AOI@G2;MODEL;CAPI39;1920,1200;OK;//images/G2"
+        )
+        client.settimeout(3)
+        response = b""
+        while response.count(b"\n") < 4:
+            chunk = client.recv(4096)
+            assert chunk, "server closed before both replies"
+            response += chunk
+        assert b"AOI@G1;" in response and b"AOI@G2;" in response
+        assert [c.args[0]["image_dir"] for c in tcp_server._process_request.call_args_list] == [
+            "//images/G1", "//images/G2",
+        ]
+    finally:
+        client.close()
+        worker.join(timeout=3)
+        server_socket.close()
+    assert not worker.is_alive()
+    assert not errors

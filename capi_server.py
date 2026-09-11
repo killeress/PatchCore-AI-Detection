@@ -31,6 +31,7 @@ _warnings.filterwarnings("ignore", message=r".*xFormers is not available.*")
 
 import sys
 import socket
+import select
 import threading
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
@@ -390,6 +391,52 @@ def _parse_bomb_coordinates(image_prefix: str, coords_raw: str) -> Optional[Dict
 _AOI_REPORT_PAYLOAD_START = re.compile(
     r"^[A-Za-z][A-Za-z0-9_]*,[A-Za-z0-9]+\("
 )
+
+_LEGACY_REQUEST_IDLE_SECONDS = 0.2
+_MAX_REQUEST_BUFFER_BYTES = 1024 * 1024
+
+
+def _legacy_request_ready(data: bytes) -> bool:
+    """Conservative syntax check for delimiter-free clients, not a message boundary."""
+    try:
+        text = data.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return False
+    if not text.startswith("AOI@"):
+        return False
+    fields = text[4:].split(";", 5)
+    if len(fields) < 6:
+        return False
+    tail = fields[5]
+    # Coordinates contain semicolons. Do not mistake an unfinished prefix/coordinate for a path.
+    bomb = re.match(r"^[^;]*;\([^)]*\);", tail)
+    if bomb:
+        tail = tail[bomb.end():]
+    image_dir, payload = _split_image_dir_and_aoi_report(tail.split(";"))
+    first_path_field = image_dir.lstrip(";").split(";", 1)[0]
+    if not first_path_field or first_path_field.startswith("(") or not re.search(r"[/\\]", first_path_field):
+        return False
+    if first_path_field.endswith(("/", "\\")):
+        return False
+    if payload:
+        return re.fullmatch(
+            r"(?:[A-Za-z][A-Za-z0-9_]*,[A-Za-z0-9]+\(\s*\d+\s*,\s*\d+\s*\)[ ,;\t]*)+",
+            payload,
+        ) is not None
+    # AAPI NG requires its appended AOI records; the path alone is not the full request.
+    return not (fields[2].upper().startswith("AAPI") and fields[4].upper() == "NG")
+
+
+def _extract_request_frame(data: bytes) -> Tuple[Optional[bytes], bytes, str]:
+    """Take one frame, keeping every byte after its delimiter or the next AOI@."""
+    data = data.lstrip(b"\r\n\x00 \t")
+    terminator = re.search(b"[\r\n\x00]", data)
+    next_start = data.find(b"AOI@", 4 if data.startswith(b"AOI@") else 0)
+    if next_start >= 0 and (terminator is None or next_start < terminator.start()):
+        return data[:next_start], data[next_start:], "next_aoi"
+    if terminator is not None:
+        return data[:terminator.start()], data[terminator.end():], "terminator"
+    return None, data, ""
 
 
 def _split_image_dir_and_aoi_report(fields: List[str]) -> Tuple[str, str]:
@@ -2781,7 +2828,8 @@ class CAPIServer:
         request_no = 0
         request_context = connection_context
         close_reason = "handler_exit"
-        pending_buffer = []   # 暫存尚未處理的請求佇列 (多筆 AOI@ 黏在一起時使用)
+        raw_data = b""  # 跨 recv 與請求保留尚未完成的 bytes，避免半筆資料被提前解析
+        peer_eof = False
 
         try:
             # ── 長連線主迴圈 ──
@@ -2791,85 +2839,65 @@ class CAPIServer:
                 request_data = None
                 parsed = None
                 request_config = None
-                raw_data = b""
                 mark_shadow_result_ids = []
                 from capi_mark_shadow import reset_mark_shadow_request_results
 
                 reset_mark_shadow_request_results()
 
-                # ── 優先從 pending_buffer 取出下一筆請求 ──
-                if pending_buffer:
-                    request_data = pending_buffer.pop(0)
-                    logger.debug(f"[{client_addr}] Processing buffered request ({len(pending_buffer)} remaining)")
-                else:
-                    try:
-                        # 接收資料
-                        while True:
-                            logger.info("[TCP_RECV_WAIT] %s buffered_bytes=%s", request_context, len(raw_data))
-                            chunk = client_socket.recv(self.recv_buffer_size)
-                            if not chunk:
-                                close_reason = "peer_eof"
-                                logger.info("[TCP_RECV_EOF] %s buffered_bytes=%s", request_context, len(raw_data))
-                                # 客戶端主動斷開連線
-                                print(f"[HANDLER] Client disconnected: {client_addr}", flush=True)
-                                if request_count > 0:
-                                    logger.info(f"[{client_addr}] Client disconnected after {request_count} request(s)")
-                                else:
-                                    logger.info(f"[{client_addr}] Client disconnected (no requests)")
-                                return  # 跳到 finally 清理
-                            raw_data += chunk
-                            logger.info(
-                                "[TCP_RECV] %s bytes=%s buffered_bytes=%s",
-                                request_context, len(chunk), len(raw_data),
-                            )
-                            print(f"[HANDLER] Received {len(raw_data)} bytes", flush=True)
-                            # 檢查是否收到完整訊息 (以換行或 null 結尾)
-                            if b"\n" in raw_data or b"\r" in raw_data or b"\x00" in raw_data:
+                try:
+                    while True:
+                        frame, raw_data, boundary = _extract_request_frame(raw_data)
+                        frame_bytes = len(raw_data) if frame is None else len(frame)
+                        if frame_bytes > _MAX_REQUEST_BUFFER_BYTES:
+                            close_reason = "frame_buffer_limit"
+                            logger.error("[TCP_FRAME_LIMIT] %s bytes=%s", request_context, frame_bytes)
+                            return
+                        if frame is not None:
+                            break
+                        if _legacy_request_ready(raw_data):
+                            # Legacy clients omit delimiters. Drain available bytes before a syntax-based fallback.
+                            # A quiet interval is only a compatibility heuristic, not proof of a complete message.
+                            if peer_eof or not select.select(
+                                [client_socket], [], [], _LEGACY_REQUEST_IDLE_SECONDS,
+                            )[0]:
+                                frame, raw_data = raw_data, b""
+                                boundary = "eof" if peer_eof else "legacy_idle"
                                 break
-                            # 如果資料包含完整的 AOI@ 格式 (不一定有結尾符)
-                            try:
-                                test_str = raw_data.decode("utf-8", errors="ignore").strip()
-                                if test_str.startswith("AOI@") and test_str.count(";") >= 5:
-                                    break
-                            except Exception:
-                                pass
-
-                    except (TimeoutError, socket.timeout):
-                        close_reason = "recv_timeout"
-                        logger.warning(
-                            "[TCP_RECV_TIMEOUT] %s timeout=%s buffered_bytes=%s",
-                            request_context, idle_timeout, len(raw_data),
+                        if peer_eof:
+                            if raw_data:
+                                logger.warning(
+                                    "[TCP_FRAME_INCOMPLETE] %s buffered_bytes=%s preview=%r",
+                                    request_context, len(raw_data), raw_data[:160],
+                                )
+                            return
+                        logger.info("[TCP_RECV_WAIT] %s buffered_bytes=%s", request_context, len(raw_data))
+                        chunk = client_socket.recv(self.recv_buffer_size)
+                        if not chunk:
+                            peer_eof = True
+                            close_reason = "peer_eof"
+                            logger.info("[TCP_RECV_EOF] %s buffered_bytes=%s", request_context, len(raw_data))
+                            logger.info(f"[{client_addr}] Client disconnected after {request_count} request(s)")
+                            continue
+                        raw_data += chunk
+                        logger.info(
+                            "[TCP_RECV] %s bytes=%s buffered_bytes=%s",
+                            request_context, len(chunk), len(raw_data),
                         )
-                        # idle timeout — 長時間未收到任何資料，清理死連線
-                        if request_count > 0:
-                            logger.info(f"[{client_addr}] Idle timeout after {request_count} request(s), closing")
-                        else:
-                            logger.debug(f"[{client_addr}] Idle timeout (no requests), closing")
-                        return  # 跳到 finally 清理
+                        print(f"[HANDLER] Received {len(raw_data)} bytes", flush=True)
+                except (TimeoutError, socket.timeout):
+                    close_reason = "recv_timeout"
+                    logger.warning(
+                        "[TCP_RECV_TIMEOUT] %s timeout=%s buffered_bytes=%s",
+                        request_context, idle_timeout, len(raw_data),
+                    )
+                    logger.info(f"[{client_addr}] Idle timeout after {request_count} request(s), closing")
+                    return
 
-                    if not raw_data:
-                        continue
-
-                    request_data = raw_data.decode("utf-8", errors="ignore").strip()
-                    # 去除 null 字元和控制字元
-                    request_data = request_data.replace("\x00", "").replace("\r", "").replace("\n", "")
-
-                # ── 拆分多筆 AOI@ 請求 ──
-                # 客戶端有時會一次送出多筆 AOI@ 請求黏在一起 (無分隔符)
-                # 例如: AOI@...第一筆...AOI@...第二筆...
-                # 需要按 "AOI@" 拆分，只處理第一筆，剩餘放入 pending_buffer
-                if request_data.count("AOI@") > 1:
-                    aoi_parts = request_data.split("AOI@")
-                    # aoi_parts[0] 應該是空字串 (因為字串以 AOI@ 開頭)
-                    # aoi_parts[1] 是第一筆請求內容
-                    # aoi_parts[2:] 是剩餘請求
-                    first_request = "AOI@" + aoi_parts[1]
-                    remaining = ["AOI@" + p for p in aoi_parts[2:] if p.strip()]
-                    if remaining:
-                        pending_buffer.extend(remaining)
-                    logger.info(f"[{client_addr}] Split {len(aoi_parts)-1} concatenated requests: "
-                               f"processing first, {len(remaining)} buffered")
-                    request_data = first_request
+                logger.info(
+                    "[TCP_FRAME] %s boundary=%s bytes=%s remaining_bytes=%s",
+                    request_context, boundary, len(frame), len(raw_data),
+                )
+                request_data = frame.decode("utf-8", errors="ignore").strip()
 
                 request_no += 1
                 logger.info(f"[{client_addr}] << {request_data} [{request_context}]")
