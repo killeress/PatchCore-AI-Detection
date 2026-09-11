@@ -44,10 +44,24 @@ AOI@玻璃ID;機種ID;機台編號;機檢判定;AI判定\r\n
 | 同時連線數           | `max_connections: 10`                                       |
 | 接收 buffer       | `recv_buffer_size: 4096` bytes                              |
 | 編碼              | 目前以 UTF-8 decode，錯誤字元忽略                                     |
-| 請求結尾            | 建議客戶端送 `\r\n`；Server 也能處理 `\n`、`\r`、`\0`，或欄位數已足夠的 `AOI@` 請求 |
+| 請求結尾            | 建議每筆送 `\r\n`；也支援 `\n`、`\r`、`\0`。無結束符請求使用下述相容判斷 |
 | 回覆結尾            | Server sendall 時補 `\r\n`                                    |
 
-Server 對黏包有基本保護: 如果同一段資料內出現多個 `AOI@`，會切成多筆請求，先處理第一筆，剩下放入 buffer。這是相容保護，不建議客戶端依賴黏包送法。
+Server 保留跨次接收的 bytes，依結束符或下一個 `AOI@` 取出一筆請求，剩餘資料繼續保留。
+不再把「以 `AOI@` 開頭且至少五個分號」當作收齊依據，也不會把黏包尾端的半筆請求直接放入處理佇列。
+`AOI@` 是保留的訊息起點，不應出現在欄位內容。
+
+舊 client 未附結束符時，Server 在已收到可辨識的圖片路徑、有炸彈欄位時括號已閉合、
+AAPI NG 已帶完整形狀的 AOI 座標串後，等待 0.2 秒無新資料才使用 `legacy_idle` 相容判斷。
+路徑須含 `/` 或 `\`，不能只收到 `WGF` 之類前綴；不要求路徑末段等於 Glass ID。
+EOF 時也可處理符合這些結構條件的最後一筆。
+這個等待間隔只屬於相容推測：可變長路徑或多筆 AOI 座標若在看似完整的位置分段、
+後續延遲超過 0.2 秒，仍可能提前處理。因此正式 client 應每筆加上 CRLF；
+相容模式無法代替明確的訊息邊界。此等待不修改既有 socket 收送 timeout。
+
+遇到非 `AOI@` 的殘段而後方出現新起點時，殘段會走既有協議錯誤回覆／存檔，
+後續新請求仍繼續處理。單筆或尚未切出的資料超過 1 MiB 時會記錄 `TCP_FRAME_LIMIT`
+並關閉連線，避免異常資料無限累積；client 需重建連線。
 
 ## 4. Request 格式
 
@@ -121,8 +135,8 @@ AOI@YQ52J5019D21;GN140BGAAN80S;AAPI09-12;1366,768;NG;W0F00000;(90/90;115/115;140
 
 ## 5. Server 處理流程
 
-1. 收到 TCP bytes，去除 `\r`、`\n`、`\0`。
-2. 以 `AOI@` 判斷 request 起點，解析欄位。
+1. 累積 TCP bytes，取出一筆具有明確邊界或符合舊格式相容判斷的請求，保留未處理尾段。
+2. 完整取出後才 decode UTF-8，依 `AOI@` 解析欄位；結束符不包含在該筆內容內。
 3. 依 `機種ID` 找到對應 model config；找不到時使用 active / fallback config。
 4. 依 `path_mapping` 把 Windows UNC 路徑轉成 server 可讀的路徑。
 5. AAPI NG 直接解析 Testing request 尾段的 AOI 座標。
@@ -347,6 +361,9 @@ AOI@... first
 | `TCP_OPEN` | 連線處理開始，列出 socket timeout；`None` 表示未設定 timeout |
 | `TCP_RECV_WAIT` | 即將讀取 socket；`buffered_bytes` 是目前累積但尚未交付處理的資料量 |
 | `TCP_RECV` | Server 程式已讀到資料，列出本次與累積 bytes |
+| `TCP_FRAME` | 取出一筆請求，記錄 `boundary=terminator/next_aoi/legacy_idle/eof`、bytes 與尚未處理的 remaining_bytes |
+| `TCP_FRAME_INCOMPLETE` | EOF 時尚有無法完整處理的尾段，保留前 160 bytes 的預覽供追查 |
+| `TCP_FRAME_LIMIT` | 單筆或尚未切出的資料超過 1 MiB，Server 主動關閉連線 |
 | `TCP_REQUEST` | 請求已解析，能對照 Glass ID 與機台 |
 | `>>` | 回覆內容已產生，尚不能證明開始傳送 |
 | `TCP_SEND_BEGIN` | 即將呼叫 `sendall()`，列出 bytes、timeout 與回覆種類 `kind` |
@@ -364,7 +381,8 @@ AOI@... first
 `TCP_SEND_OK` 只證明資料已交給本機 socket，不證明對端 TCP 已確認或 client 應用程式
 已接收／解析。傳送失敗也可能已送出部分資料，`bytes` 是原定傳送量，不是成功送達量。
 斷線紀錄時間是 Server 偵測時間，不一定是實際故障開始時間；EOF 也可能只是 TCP 半關閉，
-不能據此判定整個 client 程式退出。這些 log 不新增 timeout、重試或主動斷線機制。
+不能據此判定整個 client 程式退出。收送 log 不改變傳送 timeout 或重試行為；
+拆包的緩衝上限與相容等待規則見第 3 節。
 
 若同一 `conn` / `req` 有 `TCP_SEND_BEGIN` 而未見 `TCP_SEND_OK` 或 `TCP_SEND_FAILED`，
 表示尚無傳送結束紀錄，應搭配程序執行緒與 TCP 狀態檢查；不能只靠缺少 log 判定責任端。
@@ -373,6 +391,6 @@ AOI@... first
 現場可在 logs 目錄查詢（也需保留 client 同時間的收送紀錄）：
 
 ```bash
-grep -nE 'TCP_(OPEN|RECV|REQUEST|SEND|SOCKET_ERROR|CLOSE)' server.log*
+grep -nE 'TCP_(OPEN|RECV|FRAME|REQUEST|SEND|SOCKET_ERROR|CLOSE)' server.log*
 grep -nF 'conn=實際識別碼' server.log*
 ```
