@@ -729,6 +729,8 @@
                         continue;
                     }
                     if (state.watchModels.length >= 100) {
+                        watchInput.value = "";
+                        renderWatchChips();
                         setWatchMessage("關注機種最多 100 筆。", "error");
                         return;
                     }
