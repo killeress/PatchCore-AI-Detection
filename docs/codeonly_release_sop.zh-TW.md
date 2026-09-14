@@ -7,11 +7,13 @@
 Code-only ZIP 包含後端 Python、HTML template、啟動／更新腳本、版本資訊、manifest 與 checksum。它不包含：
 
 - `deployment/torch_hub_cache/` backbone cache
-- `static/` 與 `templates/imgs/` 靜態資源
+- `static/` 與 `templates/imgs/` 靜態資源（必要程式檔例外，見下方）
 - 模型權重、資料庫、heatmap、正式機設定與現場資料
 - `capi_mes_credentials.py` 等本機密碼檔
 
-若本次版本修改了上述排除內容，不可只交付 code-only ZIP，請交由開發負責人確認完整部署方式。
+code-only 額外包含 `static/js/inference-log.js` 與 `static/css/inference-log.css`，確保推論 Log 共用模板可在舊環境正常使用。必要靜態程式檔清單維護於打包器的 `CODEONLY_REQUIRED_STATIC_FILES`，ZIP 內也會記錄其校驗碼。
+
+若本次版本修改了上述排除內容且不在必要程式檔清單中，應先確認需加入的檔案或其他部署方式，避免遺漏必要資源。
 
 ## 環境需求
 
@@ -94,4 +96,4 @@ cd /root/Code/CAPI_AD
 - **Git working tree 不乾淨**：先確認修改內容並完成 commit，或依團隊流程 stash；不要用 `--allow-dirty` 製作正式包。
 - **required CODE_FILES missing**：通常是 clone 不完整、分支錯誤或打包清單未同步；先重新 pull，仍失敗就交由開發負責人處理。
 - **同版本 ZIP 已存在**：使用下一個版本號，或先將舊 ZIP 移到備份位置；不要直接覆寫已發布版本。
-- **本次有 static／圖片／backbone 變更**：停止 code-only 流程，改由開發負責人準備完整部署包。
+- **本次有 static／圖片／backbone 變更**：確認變更是否已列入必要程式檔清單；清單外的變更不會隨 code-only 發布，需另行安排部署。

@@ -180,6 +180,13 @@ CODEONLY_EXCLUDED_PREFIXES = (
     "static/",
 )
 
+# Small application assets required by the bundled inference-log template.
+# Keep these in subsequent code-only releases so older installations can upgrade.
+CODEONLY_REQUIRED_STATIC_FILES = {
+    "static/css/inference-log.css",
+    "static/js/inference-log.js",
+}
+
 SERVER_CONFIG_PATCH = """# === 新機種 PatchCore 訓練 wizard 需要在 server_config.yaml 加入以下欄位 ===
 # 將此檔的內容合併進 production 既有的 server_config.yaml（不要整個覆蓋）
 
@@ -323,7 +330,7 @@ CODEONLY_README_NOTE = """\
     sudo ./install_patch.sh /path/to/patchcore_ai_release_<version>_codeonly.zip
 - 只手動解壓並重啟主程式，不會更新 /aidata/capi_ai/mark_shadow/current 內的正式 worker
 - 不含 deployment/torch_hub_cache/（之前的部署包已含，production 機應已落地）
-- 不含 templates/imgs/ 與 static/（沿用 production 機已有的靜態資源）
+- 不含 templates/imgs/ 與一般 static/ 資源；僅額外包含下方列出的必要靜態程式檔，其餘沿用 production 現有資源
 - 解壓覆蓋既有檔即可，不會動到 backbone cache 目錄
 - 內含 MARK PaddleOCR worker 更新；使用 install_patch.sh 時，若現場已有 MARK worker，會自動備份、套用、重啟並檢查健康狀態
 - 不含 PaddleOCR runtime 與模型，沿用 /aidata/capi_ai/mark_shadow/current 既有安裝
@@ -469,7 +476,7 @@ def _is_patch_deploy_file(rel: str) -> bool:
 
 def _is_codeonly_excluded_file(rel: str) -> bool:
     rel = rel.replace("\\", "/")
-    return rel.startswith(CODEONLY_EXCLUDED_PREFIXES)
+    return rel.startswith(CODEONLY_EXCLUDED_PREFIXES) and rel not in CODEONLY_REQUIRED_STATIC_FILES
 
 
 def _release_files(
@@ -718,7 +725,7 @@ def main(argv=None) -> int:
         print("Mode: patch-only (--patch-only)")
     if args.no_backbone and not args.patch_only:
         print("Mode: code-only (--no-backbone)")
-        print("Excluded static directories: templates/imgs/, static/")
+        print("Excluded static directories: templates/imgs/, static/ (except required application assets)")
         if args.include_local_credentials:
             print("WARNING: including plaintext local MES credentials by explicit request")
         if excluded_asset_changes:
@@ -799,6 +806,9 @@ def main(argv=None) -> int:
         )
         if args.no_backbone and not args.patch_only:
             readme = readme + CODEONLY_README_NOTE
+            readme += "\nRequired static assets included:\n" + "".join(
+                f"- {rel}\n" for rel in sorted(CODEONLY_REQUIRED_STATIC_FILES)
+            )
             if args.include_local_credentials:
                 readme = readme + CODEONLY_CREDENTIALS_README_NOTE
             else:
