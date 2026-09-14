@@ -3927,6 +3927,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             elif path == "/api/central-dashboard/config":
                 if self._require_settings_user(api=True):
                     self._handle_api_central_dashboard_config_update()
+            elif path == "/api/central-dashboard/watch-models":
+                if self._require_settings_user(api=True):
+                    self._handle_api_central_dashboard_watch_models_update()
             elif path == "/api/central-dashboard/update/apply":
                 user = self._require_settings_user(api=True, admin=True)
                 if user:
@@ -5852,6 +5855,28 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             logger.error("Failed to update central dashboard config: %s", exc)
             self._send_json(
                 {"error": "無法儲存中控看板設定"},
+                status=500,
+            )
+
+    def _handle_api_central_dashboard_watch_models_update(self):
+        """整表更新重點機種關注清單；路由層已要求參數設定登入。"""
+        data = self._read_json_body()
+        if data is None:
+            return
+        try:
+            user = self._current_settings_user() or {}
+            models = data.get("watchModels") if isinstance(data, dict) else None
+            watch_models = self.db.save_central_dashboard_watch_models(
+                models,
+                changed_by=user.get("username", ""),
+            )
+            self._send_json({"success": True, "watchModels": watch_models})
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except Exception as exc:
+            logger.error("Failed to update watch models: %s", exc)
+            self._send_json(
+                {"error": "無法儲存關注機種清單"},
                 status=500,
             )
 
