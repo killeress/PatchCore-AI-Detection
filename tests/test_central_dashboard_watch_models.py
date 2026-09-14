@@ -59,7 +59,6 @@ def test_watch_models_save_replaces_previous_list(tmp_path):
         (["MODEL A"], "不可包含空白"),
         (["BAD\tCODE"], "不可包含空白"),
         (["X" * 51], "不可超過 50 字"),
-        ([f"M{i:03d}" for i in range(101)], "不可超過 100 筆"),
     ],
 )
 def test_watch_models_reject_invalid_values(tmp_path, models, message):
@@ -67,6 +66,14 @@ def test_watch_models_reject_invalid_values(tmp_path, models, message):
 
     with pytest.raises(ValueError, match=message):
         db.save_central_dashboard_watch_models(models)
+
+
+def test_watch_models_accepts_unbounded_list(tmp_path):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+    models = [f"M{i:05d}" for i in range(500)]
+
+    assert db.save_central_dashboard_watch_models(models) == models
+    assert db.get_central_dashboard_watch_models() == models
 
 
 def test_watch_models_not_a_list_rejected(tmp_path):
