@@ -829,6 +829,14 @@ class CAPIDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_central_dashboard_lines_order
                     ON central_dashboard_lines(sort_order, id);
+
+                -- 重點機種關注清單。看板依線體最近回報機種比對顯示提示。
+                CREATE TABLE IF NOT EXISTS central_dashboard_watch_models (
+                    model TEXT PRIMARY KEY,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    updated_by TEXT DEFAULT '',
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+                );
             """)
             
             # Migration for adding missing columns to existing database
@@ -6218,9 +6226,11 @@ class CAPIDatabase:
                     """SELECT * FROM central_dashboard_lines
                        ORDER BY sort_order, id"""
                 ).fetchall()
-                return self._central_dashboard_config_from_rows(
+                config = self._central_dashboard_config_from_rows(
                     settings_row, line_rows
                 )
+                config["watchModels"] = self._fetch_watch_models(conn)
+                return config
             except Exception:
                 conn.rollback()
                 raise
@@ -6304,9 +6314,104 @@ class CAPIDatabase:
                     """SELECT * FROM central_dashboard_lines
                        ORDER BY sort_order, id"""
                 ).fetchall()
-                return self._central_dashboard_config_from_rows(
+                config = self._central_dashboard_config_from_rows(
                     settings_row, line_rows
                 )
+                config["watchModels"] = self._fetch_watch_models(conn)
+                return config
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    # ── 重點機種關注清單 ─────────────────────────────────
+    _WATCH_MODEL_MAX_COUNT = 100
+    _WATCH_MODEL_MAX_LENGTH = 50
+
+    @staticmethod
+    def _normalize_watch_model_code(value: Any) -> str:
+        """trim + 全形轉半形 + 轉大寫；回傳規範化代號（可能為空字串）。"""
+        text = str(value or "").strip()
+        halfwidth = []
+        for char in text:
+            code = ord(char)
+            if code == 0x3000:
+                halfwidth.append(" ")
+            elif 0xFF01 <= code <= 0xFF5E:
+                halfwidth.append(chr(code - 0xFEE0))
+            else:
+                halfwidth.append(char)
+        return "".join(halfwidth).strip().upper()
+
+    @classmethod
+    def _normalize_watch_models(cls, models: Any) -> List[str]:
+        if not isinstance(models, list):
+            raise ValueError("關注機種清單必須是陣列")
+        if len(models) > cls._WATCH_MODEL_MAX_COUNT:
+            raise ValueError(
+                f"關注機種不可超過 {cls._WATCH_MODEL_MAX_COUNT} 筆"
+            )
+        normalized: List[str] = []
+        seen = set()
+        for index, raw in enumerate(models, start=1):
+            code = cls._normalize_watch_model_code(raw)
+            if not code:
+                raise ValueError(f"第 {index} 筆關注機種代號不可空白")
+            if len(code) > cls._WATCH_MODEL_MAX_LENGTH:
+                raise ValueError(
+                    f"第 {index} 筆關注機種代號不可超過 "
+                    f"{cls._WATCH_MODEL_MAX_LENGTH} 字"
+                )
+            if not code.isprintable() or any(ch.isspace() for ch in code):
+                raise ValueError(
+                    f"第 {index} 筆關注機種代號不可包含空白或控制字元"
+                )
+            if code in seen:
+                raise ValueError(f"關注機種代號重複：{code}")
+            seen.add(code)
+            normalized.append(code)
+        return normalized
+
+    @staticmethod
+    def _fetch_watch_models(conn: sqlite3.Connection) -> List[str]:
+        rows = conn.execute(
+            "SELECT model FROM central_dashboard_watch_models"
+            " ORDER BY sort_order, model"
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def get_central_dashboard_watch_models(self) -> List[str]:
+        """取得重點機種關注清單（規範化大寫代號）。"""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                return self._fetch_watch_models(conn)
+            finally:
+                conn.close()
+
+    def save_central_dashboard_watch_models(
+        self, models: Any, *, changed_by: str = ""
+    ) -> List[str]:
+        """以單一交易整表取代重點機種關注清單；與線體設定互不影響。"""
+        normalized = self._normalize_watch_models(models)
+        changed_by = str(changed_by or "").strip()[:64]
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("DELETE FROM central_dashboard_watch_models")
+                conn.executemany(
+                    """INSERT INTO central_dashboard_watch_models
+                       (model, sort_order, updated_by, updated_at)
+                       VALUES (?, ?, ?, ?)""",
+                    [
+                        (code, index, changed_by, now)
+                        for index, code in enumerate(normalized)
+                    ],
+                )
+                conn.commit()
+                return self._fetch_watch_models(conn)
             except Exception:
                 conn.rollback()
                 raise
