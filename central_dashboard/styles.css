@@ -628,9 +628,9 @@ main {
     align-items: center;
     padding: 3px 7px;
     margin-top: 4px;
-    color: #3d2b00;
-    background: #f6c945;
-    border: 1px solid #d9a400;
+    color: var(--amber);
+    background: rgba(182, 106, 0, 0.08);
+    border: 1px solid rgba(182, 106, 0, 0.25);
     border-radius: 999px;
     font-size: 0.64rem;
     font-weight: 900;
