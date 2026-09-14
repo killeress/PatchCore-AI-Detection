@@ -1,0 +1,35 @@
+{% if detail.inference_log %}
+<link rel="stylesheet" href="/static/css/inference-log.css">
+<section class="il card {{ 'il-light white-panel' if log_light else '' }}" aria-label="推論 Log">
+  <button type="button" class="il-toggle" aria-expanded="false" aria-controls="log-panel">› &nbsp; 推論 Log <small>（點擊展開）</small></button>
+  <div id="log-panel" hidden>
+    <div class="il-toolbar">
+      <div class="il-tabs" role="tablist" aria-label="紀錄檢視">
+        <button type="button" id="il-tab-summary" role="tab" aria-controls="il-summary" aria-selected="true" data-view="summary">中文摘要</button>
+        <button type="button" id="il-tab-details" role="tab" aria-controls="il-details" aria-selected="false" tabindex="-1" data-view="details">詳細紀錄</button>
+        <button type="button" id="il-tab-raw" role="tab" aria-controls="il-raw" aria-selected="false" tabindex="-1" data-view="raw">原始 Log</button>
+      </div>
+      <div class="il-actions">
+        <button type="button" data-action="copy">複製完整紀錄</button>
+        <button type="button" data-action="download">下載</button>
+        <button type="button" data-action="expand" aria-pressed="false">放大</button>
+      </div>
+    </div>
+    <div class="il-scroll">
+      <div id="il-summary" role="tabpanel" aria-labelledby="il-tab-summary"></div>
+      <div id="il-details" role="tabpanel" aria-labelledby="il-tab-details" hidden>
+        <div class="il-filters">
+          <input type="search" aria-label="搜尋紀錄或檔名" placeholder="搜尋中文、檔名或代號">
+          <select aria-label="紀錄類別"><option value="all">全部紀錄</option><option value="attention">提醒與警告</option><option value="error">錯誤</option></select>
+          <span class="il-count" aria-live="polite"></span>
+        </div>
+        <div class="il-events"></div>
+        <button type="button" class="il-more" hidden>載入更多紀錄</button>
+      </div>
+      <div id="il-raw" role="tabpanel" aria-labelledby="il-tab-raw" hidden><pre id="inference-log">{{ detail.inference_log | e }}</pre></div>
+    </div>
+    <span class="il-feedback" role="status"></span>
+  </div>
+</section>
+<script src="/static/js/inference-log.js"></script>
+{% endif %}
