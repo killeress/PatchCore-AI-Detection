@@ -6326,7 +6326,6 @@ class CAPIDatabase:
                 conn.close()
 
     # ── 重點機種關注清單 ─────────────────────────────────
-    _WATCH_MODEL_MAX_COUNT = 100
     _WATCH_MODEL_MAX_LENGTH = 50
 
     @staticmethod
@@ -6348,10 +6347,6 @@ class CAPIDatabase:
     def _normalize_watch_models(cls, models: Any) -> List[str]:
         if not isinstance(models, list):
             raise ValueError("關注機種清單必須是陣列")
-        if len(models) > cls._WATCH_MODEL_MAX_COUNT:
-            raise ValueError(
-                f"關注機種不可超過 {cls._WATCH_MODEL_MAX_COUNT} 筆"
-            )
         normalized: List[str] = []
         seen = set()
         for index, raw in enumerate(models, start=1):
