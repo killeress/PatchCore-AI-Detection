@@ -242,3 +242,26 @@ def test_frontend_watch_badge_wiring():
     assert ".overview-watch-badge," in styles_css
     assert "background: #f6c945;" in styles_css
     assert ".overview-watch-badge[hidden]," in styles_css
+
+
+def test_settings_page_has_watch_models_section():
+    root = Path(__file__).resolve().parent.parent
+    settings_html = (root / "central_dashboard" / "settings.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="watch-title"' in settings_html
+    assert "重點機種關注" in settings_html
+    assert 'id="watch-input"' in settings_html
+    assert 'id="watch-add"' in settings_html
+    assert 'id="watch-chips"' in settings_html
+    assert 'id="watch-message"' in settings_html
+    assert 'id="watch-save"' in settings_html
+    assert 'fetch("/api/central-dashboard/watch-models"' in settings_html
+    assert "function normalizeWatchModelCode(" in settings_html
+    assert "function addWatchModelsFromInput(" in settings_html
+    assert "function removeWatchModel(" in settings_html
+    assert "function renderWatchChips(" in settings_html
+    assert "function saveWatchModels(" in settings_html
+    assert "watchInput.value.split(/[\\s,;，、]+/)" in settings_html
+    assert "state.watchModels" in settings_html

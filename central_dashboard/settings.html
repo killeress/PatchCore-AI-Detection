@@ -279,6 +279,65 @@
             border-radius: 8px;
         }
 
+        .watch-input-row {
+            display: flex;
+            gap: 8px;
+        }
+
+        .watch-input-row input {
+            flex: 1;
+        }
+
+        .watch-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 12px;
+        }
+
+        .watch-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            background: #eef2f6;
+            border: 1px solid #c4cfda;
+            border-radius: 999px;
+            font-family: monospace;
+            font-size: 0.85rem;
+        }
+
+        .watch-chip button {
+            padding: 0 2px;
+            color: #666;
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+
+        .watch-chip button:hover {
+            color: #b00020;
+        }
+
+        .watch-empty {
+            color: #888;
+            font-size: 0.85rem;
+        }
+
+        .watch-message {
+            min-height: 1.2em;
+            font-size: 0.85rem;
+        }
+
+        .watch-message.error {
+            color: #b00020;
+        }
+
+        .watch-message.success {
+            color: #1a7f37;
+        }
+
         @media (max-width: 900px) {
             header {
                 align-items: flex-start;
@@ -339,6 +398,29 @@
             <div id="line-editors"></div>
         </section>
 
+        <section class="panel" aria-labelledby="watch-title">
+            <div class="panel-heading">
+                <div>
+                    <h2 id="watch-title">重點機種關注</h2>
+                    <p>線體最近回報的機種符合清單時，看板會在線體名稱旁顯示「★ 重點關注」。比對採完整代號、大小寫不敏感；儲存時自動去除前後空白、全形轉半形並轉大寫。此區塊獨立儲存，不影響上方線體設定。</p>
+                </div>
+            </div>
+            <div class="watch-input-row">
+                <input
+                    id="watch-input"
+                    maxlength="2000"
+                    placeholder="輸入機種代號；支援整批貼上（以空白、換行、逗號、分號分隔）"
+                    autocomplete="off"
+                >
+                <button id="watch-add" type="button">新增</button>
+            </div>
+            <div id="watch-chips" class="watch-chips" aria-live="polite"></div>
+            <p id="watch-message" class="watch-message" role="status"></p>
+            <div>
+                <button id="watch-save" class="primary" type="button">儲存關注清單</button>
+            </div>
+        </section>
+
         <section class="panel actions" aria-label="儲存操作">
             <p id="message" role="status">正在讀取設定…</p>
             <div>
@@ -352,7 +434,7 @@
         (function () {
             "use strict";
 
-            const state = { lines: [] };
+            const state = { lines: [], watchModels: [] };
             const editors = document.getElementById("line-editors");
             const saveButton = document.getElementById("save");
             const reloadButton = document.getElementById("reload");
@@ -360,6 +442,18 @@
             document.getElementById("add-line").addEventListener("click", addLine);
             saveButton.addEventListener("click", saveConfig);
             reloadButton.addEventListener("click", loadConfig);
+
+            const watchInput = document.getElementById("watch-input");
+            const watchAddButton = document.getElementById("watch-add");
+            const watchSaveButton = document.getElementById("watch-save");
+            watchAddButton.addEventListener("click", addWatchModelsFromInput);
+            watchSaveButton.addEventListener("click", saveWatchModels);
+            watchInput.addEventListener("keydown", (event) => {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    addWatchModelsFromInput();
+                }
+            });
             loadConfig();
 
             async function loadConfig() {
@@ -384,6 +478,9 @@
                         ? data.lines.map(toEditableLine)
                         : [];
                     renderLines();
+                    state.watchModels = normalizeWatchModelList(data.watchModels);
+                    renderWatchChips();
+                    setWatchMessage("");
                     setMessage(`已載入 ${state.lines.length} 筆線體設定。`, "success");
                 } catch (error) {
                     setMessage(`讀取失敗：${error.message || error}`, "error");
@@ -592,6 +689,148 @@
                     isProduction: line.isProduction === true,
                     productionDate: String(line.productionDate || "").trim()
                 };
+            }
+
+            function normalizeWatchModelCode(value) {
+                return String(value || "")
+                    .replace(/[！-～]/g, (char) =>
+                        String.fromCharCode(char.charCodeAt(0) - 0xfee0)
+                    )
+                    .replace(/　/g, " ")
+                    .trim()
+                    .toUpperCase();
+            }
+
+            function normalizeWatchModelList(value) {
+                if (!Array.isArray(value)) {
+                    return [];
+                }
+                const models = [];
+                for (const item of value) {
+                    const code = normalizeWatchModelCode(item);
+                    if (code && !models.includes(code)) {
+                        models.push(code);
+                    }
+                }
+                return models;
+            }
+
+            function addWatchModelsFromInput() {
+                const parts = watchInput.value.split(/[\s,;，、]+/);
+                const added = [];
+                const skipped = [];
+                for (const part of parts) {
+                    const code = normalizeWatchModelCode(part);
+                    if (!code) {
+                        continue;
+                    }
+                    if (state.watchModels.includes(code)) {
+                        skipped.push(code);
+                        continue;
+                    }
+                    if (state.watchModels.length >= 100) {
+                        setWatchMessage("關注機種最多 100 筆。", "error");
+                        return;
+                    }
+                    state.watchModels.push(code);
+                    added.push(code);
+                }
+                watchInput.value = "";
+                renderWatchChips();
+                if (added.length === 0 && skipped.length === 0) {
+                    setWatchMessage("請輸入機種代號。", "error");
+                    return;
+                }
+                if (skipped.length > 0) {
+                    setWatchMessage(
+                        `已新增 ${added.length} 筆；略過重複：${skipped.join("、")}。`,
+                        added.length > 0 ? "success" : "error"
+                    );
+                    return;
+                }
+                setWatchMessage(
+                    `已新增 ${added.length} 筆，記得儲存關注清單。`,
+                    "success"
+                );
+            }
+
+            function removeWatchModel(code) {
+                state.watchModels = state.watchModels.filter(
+                    (item) => item !== code
+                );
+                renderWatchChips();
+                setWatchMessage(`已移除 ${code}，記得儲存關注清單。`);
+            }
+
+            function renderWatchChips() {
+                const container = document.getElementById("watch-chips");
+                container.replaceChildren();
+                if (state.watchModels.length === 0) {
+                    const empty = document.createElement("span");
+                    empty.className = "watch-empty";
+                    empty.textContent = "尚未設定關注機種。";
+                    container.appendChild(empty);
+                    return;
+                }
+                for (const code of state.watchModels) {
+                    const chip = document.createElement("span");
+                    chip.className = "watch-chip";
+                    const label = document.createElement("span");
+                    label.textContent = code;
+                    const remove = document.createElement("button");
+                    remove.type = "button";
+                    remove.textContent = "✕";
+                    remove.setAttribute("aria-label", `移除 ${code}`);
+                    remove.addEventListener("click", () => removeWatchModel(code));
+                    chip.append(label, remove);
+                    container.appendChild(chip);
+                }
+            }
+
+            async function saveWatchModels() {
+                watchSaveButton.disabled = true;
+                setWatchMessage("正在儲存關注清單…");
+                try {
+                    const response = await fetch("/api/central-dashboard/watch-models", {
+                        method: "POST",
+                        headers: {
+                            "Accept": "application/json",
+                            "Content-Type": "application/json"
+                        },
+                        credentials: "same-origin",
+                        body: JSON.stringify({
+                            watchModels: state.watchModels
+                        })
+                    });
+                    const data = await response.json();
+                    if (response.status === 401) {
+                        window.location.href =
+                            "/settings/login?next=%2Fcentral_dashboard%2Fsettings";
+                        return;
+                    }
+                    if (!response.ok) {
+                        throw new Error(data.error || `HTTP ${response.status}`);
+                    }
+                    state.watchModels = normalizeWatchModelList(data.watchModels);
+                    renderWatchChips();
+                    setWatchMessage(
+                        `關注清單已儲存，共 ${state.watchModels.length} 筆。`,
+                        "success"
+                    );
+                } catch (error) {
+                    setWatchMessage(
+                        `儲存失敗：${error.message || error}`,
+                        "error"
+                    );
+                } finally {
+                    watchSaveButton.disabled = false;
+                }
+            }
+
+            function setWatchMessage(message, type) {
+                const element = document.getElementById("watch-message");
+                element.textContent = message;
+                element.className = `watch-message ${type || ""}`.trim();
             }
 
             async function saveConfig() {
