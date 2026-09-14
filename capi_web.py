@@ -4309,10 +4309,18 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             mime_type = "application/octet-stream"
         with open(path, "rb") as f:
             data = f.read()
+        # 程式碼類靜態檔（html/js/css）每次都要向伺服器確認，避免瀏覽器
+        # 長時間沿用舊版前端；圖片等大檔維持一天快取。
+        no_cache_suffixes = {".html", ".js", ".mjs", ".css"}
+        cache_control = (
+            "no-cache"
+            if path.suffix.lower() in no_cache_suffixes
+            else "max-age=86400"
+        )
         self.send_response(200)
         self.send_header("Content-Type", mime_type)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "max-age=86400")
+        self.send_header("Cache-Control", cache_control)
         self.end_headers()
         self.wfile.write(data)
 
