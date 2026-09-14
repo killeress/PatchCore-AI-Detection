@@ -240,7 +240,11 @@ def test_frontend_watch_badge_wiring():
     assert 'data-field="watch-badge" hidden>★ 重點關注</span>' in index_html
 
     assert ".overview-watch-badge," in styles_css
-    assert "background: #f6c945;" in styles_css
+    badge_css = styles_css.split(".overview-watch-badge,", 1)[1][:400]
+    assert "color: var(--amber);" in badge_css
+    assert "background: rgba(182, 106, 0, 0.08);" in badge_css
+    assert "border: 1px solid rgba(182, 106, 0, 0.25);" in badge_css
+    assert "#f6c945" not in badge_css
     assert ".overview-watch-badge[hidden]," in styles_css
 
 
@@ -265,3 +269,6 @@ def test_settings_page_has_watch_models_section():
     assert "function saveWatchModels(" in settings_html
     assert "watchInput.value.split(/[\\s,;，、]+/)" in settings_html
     assert "state.watchModels" in settings_html
+    assert settings_html.index('id="watch-title"') > settings_html.index(
+        'id="save"'
+    )
