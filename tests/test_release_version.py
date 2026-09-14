@@ -233,7 +233,10 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         }
         assert managed_assets <= names
         assert not any(name.startswith("templates/imgs/") for name in names)
-        assert not any(name.startswith("static/") for name in names)
+        assert {name for name in names if name.startswith("static/")} == {
+            "static/js/inference-log.js", "static/css/inference-log.css",
+        }
+        assert "templates/_inference_log.html" in names
 
         web_source = Path("capi_web.py").read_text(encoding="utf-8")
         direct_templates = set(re.findall(r'get_template\(\s*["\']([^"\']+)["\']', web_source))

@@ -7,7 +7,7 @@
 - 兩版推論記錄頁面共用中文摘要、詳細紀錄及原始 Log 頁籤，維持預設收合，展開內容最高 500px 並可放大檢視。
 - 整理規格判定明細、重複警告及階段耗時，提供搜尋與提醒／錯誤篩選；未知格式保留原文，不改變推論與判定邏輯。
 - 支援既有紀錄，使用前端固定規則解析常見英文訊息，保留完整原始紀錄的複製與下載功能。
-- 本版需使用完整部署包，包含新增的 static/js/inference-log.js、static/css/inference-log.css 與共用模板；不可僅使用排除 static 的 code-only 包。
+- code-only 包額外包含本次新增的 static/js/inference-log.js、static/css/inference-log.css 與共用模板；其餘靜態資源與 backbone 沿用既有部署，避免完整包過大。
 
 ## 2026-09-14 v2
 
