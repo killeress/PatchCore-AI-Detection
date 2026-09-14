@@ -93,6 +93,22 @@ def test_handler_correlates_repeated_glass_requests_and_eof(tcp_server, caplog, 
     client.settimeout.assert_called_once_with(None)
 
 
+def test_handler_queues_within_spec_visuals_only_after_result_was_sent(tcp_server):
+    request = b"AOI@G1;MODEL;CAPI39;1920,1200;NG;/images\r\n"
+    client = make_socket([request, b""])
+    info = {"detail": {}, "_visual_jobs": [{"pending": True}]}
+    tcp_server._process_request.return_value = ("NG", "[]", [], False, None, None, False, "", info)
+
+    def queue(*args, **kwargs):
+        client.sendall.assert_called_once()
+        assert args[15] is info
+        assert info["_visual_jobs"] == [{"pending": True}]
+
+    tcp_server._queue_save_results_async.side_effect = queue
+    tcp_server._handle_client(client, ("192.168.1.3", 20245))
+    tcp_server._queue_save_results_async.assert_called_once()
+
+
 @pytest.mark.parametrize("request_bytes,error,kind", [
     (b"bad request\n", None, "protocol_error"),
     (b"AOI@G1;MODEL;CAPI33;1920,1200;OK;/images\n", RuntimeError("inference failed"), "internal_error"),
