@@ -188,3 +188,29 @@ def test_filtered_config_api_keeps_watch_models(tmp_path):
 
     assert responses[-1][0] == 200
     assert responses[-1][1]["watchModels"] == ["MODEL_A"]
+
+
+def test_server_status_latest_event_carries_model_id():
+    from capi_server import ServerStatusTracker
+
+    tracker = ServerStatusTracker()
+    tracker.last_judgment_result = {
+        "glass_id": "G001",
+        "model_id": "GN140JPAA020S",
+        "machine_no": "AOI01",
+        "judgment": "OK",
+        "detail": "OK",
+        "time": "12:00:00",
+        "duration": "1.00s",
+    }
+
+    status = tracker.get_status()
+
+    assert status["latest_event"]["model_id"] == "GN140JPAA020S"
+
+
+def test_server_sets_model_id_on_both_judgment_paths():
+    root = Path(__file__).resolve().parent.parent
+    source = (root / "capi_server.py").read_text(encoding="utf-8")
+
+    assert source.count('"model_id": parsed["model_id"],') == 2
