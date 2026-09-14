@@ -156,6 +156,9 @@ class PreprocessConfig:
     large_panel_min_height_ratio: float = 0.80
     raw_boundary_max_edge_residual_p95_ratio: float = 0.03
     image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    aoi_only_fast_path_enabled: bool = False
+    # AOI-only folder recovery; preserve a successful legacy reference first.
+    recover_failed_raw_boundary: bool = False
 
     def __post_init__(self):
         if self.outer_edge_extend is None:
@@ -284,6 +287,12 @@ def _boundary_detection_gray(
         break
 
     try:
+        if getattr(config, "aoi_only_fast_path_enabled", False) and gray.dtype == np.uint8:
+            # This mapping depends only on pixel value. Evaluate the same method
+            # on all 256 values instead of computing unused full-image statistics.
+            ramp = np.arange(256, dtype=np.uint8).reshape(256, 1)
+            lut = apply_preprocess_method(ramp, "gray_band_shift", params)["image"]
+            return cv2.LUT(gray, lut)
         result = apply_preprocess_method(gray, "gray_band_shift", params)
         return result["image"]
     except Exception:
@@ -1363,16 +1372,46 @@ def _preprocess_panel_folder_legacy(
     if ref_lighting is None:
         return {}
 
-    ref_result = preprocess_panel_image(reference_files[ref_lighting], ref_lighting, config)
+    reuse_failed = (
+        getattr(config, "aoi_only_fast_path_enabled", False)
+        and not config.generate_grid_tiles
+        and not config.grid_canonicalization_enabled
+    )
+    failed_candidates = {}
+
+    def signature(path):
+        try:
+            stat = path.stat()
+            return stat.st_size, stat.st_mtime_ns
+        except OSError:
+            return None
+
+    def process_candidate(lighting):
+        path = reference_files[lighting]
+        stamp = signature(path) if reuse_failed else None
+        result = preprocess_panel_image(path, lighting, config)
+        if (
+            reuse_failed and stamp is not None and files.get(lighting) == path
+            and result.polygon_detection_failed
+        ):
+            failed_candidates[lighting] = (stamp, result)
+        return result
+
+    ref_result = process_candidate(ref_lighting)
     if ref_result.polygon_detection_failed:
         for cand in boundary_reference_priority:
             if cand == ref_lighting or cand not in reference_files:
                 continue
-            fallback_result = preprocess_panel_image(reference_files[cand], cand, config)
+            fallback_result = process_candidate(cand)
             if not fallback_result.polygon_detection_failed:
                 ref_lighting = cand
                 ref_result = fallback_result
                 break
+
+    # A successful reference changes subsequent calls' polygon/masks. Reuse is
+    # equivalent only when every candidate failed and reference_polygon is None.
+    if ref_result.panel_polygon is not None:
+        failed_candidates.clear()
 
     logger.info(
         "[boundary] reference=%s file=%s polygon=%s",
@@ -1388,6 +1427,11 @@ def _preprocess_panel_folder_legacy(
         results[ref_lighting] = ref_result
     for lighting, path in files.items():
         if lighting == ref_lighting:
+            continue
+        cached = failed_candidates.pop(lighting, None)
+        if cached is not None and cached[0] == signature(path):
+            results[lighting] = cached[1]
+            logger.info("[boundary] reuse failed candidate=%s file=%s", lighting, path.name)
             continue
         results[lighting] = preprocess_panel_image(
             path,
@@ -1464,12 +1508,45 @@ def preprocess_panel_folder(
                 "[boundary] large-panel raw boundary skipped; "
                 "using legacy flow for this panel"
             )
-            return _preprocess_panel_folder_legacy(
+            legacy_results = _preprocess_panel_folder_legacy(
                 files,
                 reference_files,
                 replace(config, large_panel_raw_boundary_enabled=False),
                 reference_priority,
             )
+            # Occupancy selects the usual processing path; it is not a measure
+            # of edge-fit quality. A padded camera frame can still contain a
+            # valid raw quadrilateral. Recover only after every legacy reference
+            # failed, so working lines retain their existing polygon and pixels.
+            if (
+                config.recover_failed_raw_boundary
+                and config.enable_panel_polygon
+                and not config.generate_grid_tiles
+                and not config.grid_canonicalization_enabled
+                and not _use_robust_panel_boundary(config)
+                and candidate_polygon is not None
+                and candidate_polygon.shape == (4, 2)
+                and np.isfinite(candidate_polygon).all()
+                and cv2.isContourConvex(candidate_polygon.astype(np.float32))
+                and legacy_results
+                and all(result.polygon_detection_failed for result in legacy_results.values())
+            ):
+                recovered = 0
+                for result in legacy_results.values():
+                    x1, y1, x2, y2 = result.foreground_bbox
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+                    result.panel_polygon = candidate_polygon.copy()
+                    result.polygon_detection_failed = False
+                    recovered += 1
+                if recovered:
+                    logger.info(
+                        "[boundary] raw recovery reference=%s file=%s "
+                        "reason=legacy_polygons_failed recovered=%d polygon=%s",
+                        cand, reference_files[cand].name, recovered,
+                        np.round(candidate_polygon, 1).tolist(),
+                    )
+            return legacy_results
         if (
             large_occupancy
             and candidate_bbox is not None

@@ -533,6 +533,8 @@ def test_v2_image_cache_preserves_six_screen_tiles_and_response(new_arch_inferen
     monkeypatch.setattr(cv2, "imread", read)
     def run(enabled):
         calls.clear()
+        # Replay the old preprocessing path as well as the old image reader.
+        monkeypatch.setattr("capi_inference.use_capi_aoi_fast_path", lambda *a: enabled)
         with panel_image_cache(enabled=enabled):
             results = inf._process_panel_v2(
                 tmp_path, product_resolution=(1920, 1200), aoi_report_override=report,
@@ -562,10 +564,18 @@ def test_v2_image_cache_preserves_six_screen_tiles_and_response(new_arch_inferen
     assert build_dual_protocol_response(parsed, "NG", before, inf.config) == build_dual_protocol_response(parsed, "NG", after, inf.config)
 
 
-def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path):
+@pytest.mark.parametrize("profile,grid,expected_fast", [
+    ("capi", False, True), ("capi", True, False),
+    ("aapi", False, False), ("aapi", True, False),
+])
+def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path, profile, grid, expected_fast):
     """新架構 _process_panel_v2 應呼叫 _apply_aoi_coord_inspection."""
     import cv2
     from capi_preprocess import PanelPreprocessResult
+    from capi_station_adapter import create_station_adapter
+
+    new_arch_inferencer.station_adapter = create_station_adapter(profile)
+    new_arch_inferencer.config.grid_tiling_enabled = grid
 
     panel_dir = tmp_path / "panel"
     panel_dir.mkdir()
@@ -591,7 +601,7 @@ def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path
         # _process_panel_v2 內部用 local import (`from capi_preprocess import ...`)，
         # 故 patch 目標是 capi_preprocess 模組而非 capi_inference。若 import 提升到
         # module-level，patch 路徑需改為 "capi_inference.preprocess_panel_folder"。
-    with patch("capi_preprocess.preprocess_panel_folder", return_value=fake_panel_results), \
+    with patch("capi_preprocess.preprocess_panel_folder", return_value=fake_panel_results) as mock_preprocess, \
          patch.object(new_arch_inferencer, "_load_omit_context",
                       return_value=(None, False, "", None)), \
          patch.object(new_arch_inferencer, "_apply_aoi_coord_inspection",
@@ -606,9 +616,12 @@ def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path
         new_arch_inferencer._process_panel_v2(
             panel_dir=panel_dir,
             product_resolution=(1920, 1080),
+            aoi_report_override={},
         )
 
     assert mock_helper.call_count == 1
+    assert mock_preprocess.call_args.args[1].aoi_only_fast_path_enabled is expected_fast
+    assert mock_preprocess.call_args.args[1].recover_failed_raw_boundary is expected_fast
     kwargs = mock_helper.call_args.kwargs
     assert kwargs["panel_dir"] == panel_dir
 
