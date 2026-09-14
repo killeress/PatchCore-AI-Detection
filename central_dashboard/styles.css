@@ -642,6 +642,10 @@ main {
     display: none;
 }
 
+.overview-line .overview-watch-badge {
+    margin-top: 0;
+}
+
 .overview-factory {
     min-width: 50px;
     padding: 4px 7px;
