@@ -3360,6 +3360,13 @@ class CAPIServer:
             enabled=use_capi_aoi_fast_path(inferencer.config, station_adapter.profile),
             panel=str(panel_dir),
         ):
+            logger.info(
+                "[inference-perf] revision=2 hostname=%s station=%s aoi_fast_path=%s source=%s",
+                getattr(self, "station_hostname", socket.gethostname()),
+                station_adapter.profile,
+                use_capi_aoi_fast_path(inferencer.config, station_adapter.profile),
+                Path(__file__).resolve(),
+            )
             try:
                 # 呼叫 process_panel 進行推論
                 panel_result = inferencer.process_panel(

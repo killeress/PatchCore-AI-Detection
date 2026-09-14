@@ -9538,6 +9538,12 @@ class CAPIInferencer:
             edge_threshold_px=self.config.edge_threshold_px,
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
             image_preprocess_pipelines=getattr(self.config, "image_preprocess_pipelines", {}),
+            aoi_only_fast_path_enabled=use_capi_aoi_fast_path(
+                self.config, self.station_adapter.profile,
+            ),
+            recover_failed_raw_boundary=use_capi_aoi_fast_path(
+                self.config, self.station_adapter.profile,
+            ),
             cache_processed_image=(
                 aoi_only_mode
                 or getattr(self.config, "grid_canonicalization_enabled", False)

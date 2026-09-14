@@ -30,6 +30,7 @@ def test_station_adapter_factory_rejects_unknown_profile():
         ("MOD2-AAPI-09", "aapi"),
         ("capi13", "capi"),
         ("MOD2-CAPI07", "capi"),
+        ("mod1capi39", "capi"),
         ("capihm", "capi"),
     ],
 )

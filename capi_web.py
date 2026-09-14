@@ -13415,6 +13415,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         """背景執行緒：重新推論並覆蓋紀錄"""
         import sys as _sys
         import time as _time
+        from contextlib import ExitStack, nullcontext
+        from capi_image_orientation import panel_image_cache, use_capi_aoi_fast_path
         from capi_server import (
             results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment,
             InferenceLogCapture, WITHIN_SPEC_LOGS_URL,
@@ -13434,6 +13436,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     else:
                         task["message"] = str(msg)
 
+        inference_scope = ExitStack()
         try:
             panel_dir = Path(detail["image_dir"])
             model_id = detail.get("model_id", "")
@@ -13515,21 +13518,20 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     exc_info=True,
                 )
 
-            if cls._gpu_lock:
-                with cls._gpu_lock:
-                    _update_status("正在推論中...")
-                    panel_result = inferencer.process_panel(
-                        panel_dir,
-                        progress_callback=_update_status,
-                        product_resolution=resolution,
-                        bomb_info=bomb_info,
-                        model_id=model_id,
-                        machine_no=detail.get("machine_no"),
-                        glass_id=detail.get("glass_id"),
-                        aoi_report_override=aoi_report_override,
-                        machine_judgment=detail.get("machine_judgment"),
-                    )
-            else:
+            fast_rerun = use_capi_aoi_fast_path(inferencer.config, station_adapter.profile)
+            if fast_rerun:
+                # Match the TCP request lifetime: within-spec shares the panel
+                # images and finishes before another inference starts reading.
+                if cls._gpu_lock:
+                    inference_scope.enter_context(cls._gpu_lock)
+                inference_scope.enter_context(panel_image_cache(enabled=True, panel=str(panel_dir)))
+                logger.info(
+                    "[inference-perf] revision=2 entry=rerun hostname=%s station=%s "
+                    "aoi_fast_path=True source=%s",
+                    getattr(server_inst, "station_hostname", socket.gethostname()),
+                    station_adapter.profile, Path(__file__).resolve(),
+                )
+            with (cls._gpu_lock if cls._gpu_lock and not fast_rerun else nullcontext()):
                 _update_status("正在推論中...")
                 panel_result = inferencer.process_panel(
                     panel_dir,
@@ -13666,6 +13668,13 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 if within_spec_info and within_spec_info.get("converted"):
                     ai_judgment = "OK-i"
 
+            inference_scope.close()
+            if within_spec_info:
+                visual_jobs = within_spec_info.pop("_visual_jobs", None)
+                if visual_jobs:
+                    _update_status("正在儲存規格內檢查圖...")
+                    _flush_within_spec_visual_jobs(visual_jobs)
+
             _update_status("正在儲存 heatmap...")
             heatmap_info = {}
             if cls.heatmap_manager:
@@ -13760,6 +13769,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             traceback.print_exc()
             with cls._rerun_lock:
                 cls._rerun_tasks[record_id] = {"status": "error", "message": f"推論失敗: {e}"}
+        finally:
+            inference_scope.close()
 
     # ==== Dataset Export Endpoints ====
 
