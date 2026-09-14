@@ -111,7 +111,7 @@ class ServerStatusTracker:
         self.total_ok = 0
         self.total_err = 0
         self.last_inference_time = None
-        self.last_judgment_result = None  # 最近一筆判定結果 {glass_id, ai_judgment, time, duration}
+        self.last_judgment_result = None  # 最近一筆判定結果 {glass_id, model_id, machine_no, ai_judgment, time, duration}
         
     def get_status(self):
         """取得即時狀態 JSON Object"""
@@ -2939,6 +2939,7 @@ class CAPIServer:
                             server_status.last_inference_time = response_time
                             server_status.last_judgment_result = {
                                 "glass_id": parsed["glass_id"],
+                                "model_id": parsed["model_id"],
                                 "machine_no": parsed["machine_no"],
                                 "judgment": "ERR",
                                 "detail": ai_judgment,
@@ -2994,6 +2995,7 @@ class CAPIServer:
                         
                         server_status.last_judgment_result = {
                             "glass_id": parsed["glass_id"],
+                            "model_id": parsed["model_id"],
                             "machine_no": parsed["machine_no"],
                             "judgment": j_simple,
                             "detail": ai_judgment if ai_judgment == "OK-i" or j_simple != "OK" else "OK",
