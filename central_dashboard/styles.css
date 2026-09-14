@@ -626,13 +626,13 @@ main {
 .line-watch-badge {
     display: inline-flex;
     align-items: center;
-    padding: 3px 7px;
+    padding: 4px 7px;
     margin-top: 4px;
     color: var(--amber);
-    background: rgba(182, 106, 0, 0.08);
-    border: 1px solid rgba(182, 106, 0, 0.25);
+    background: rgba(182, 106, 0, 0.09);
+    border: 1px solid rgba(182, 106, 0, 0.28);
     border-radius: 999px;
-    font-size: 0.64rem;
+    font-size: 0.65rem;
     font-weight: 900;
     white-space: nowrap;
 }

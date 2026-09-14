@@ -242,8 +242,9 @@ def test_frontend_watch_badge_wiring():
     assert ".overview-watch-badge," in styles_css
     badge_css = styles_css.split(".overview-watch-badge,", 1)[1][:400]
     assert "color: var(--amber);" in badge_css
-    assert "background: rgba(182, 106, 0, 0.08);" in badge_css
-    assert "border: 1px solid rgba(182, 106, 0, 0.25);" in badge_css
+    assert "background: rgba(182, 106, 0, 0.09);" in badge_css
+    assert "border: 1px solid rgba(182, 106, 0, 0.28);" in badge_css
+    assert "padding: 4px 7px;" in badge_css
     assert "#f6c945" not in badge_css
     assert ".overview-watch-badge[hidden]," in styles_css
 
