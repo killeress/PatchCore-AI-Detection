@@ -79,6 +79,7 @@ from capi_web import (
     _attach_no_detect_regions_to_within_spec_detail,
     _attach_runtime_dust_masks_to_within_spec_detail,
     _evaluate_within_spec_suggestion_detail,
+    _flush_within_spec_visual_jobs,
     _within_spec_auto_visual_output,
     _format_within_spec_panel_summary,
     _format_within_spec_inference_note,
@@ -3173,6 +3174,10 @@ class CAPIServer:
                 str(getattr(getattr(self, "heatmap_manager", None), "base_dir", "") or ""),
                 parsed.get("glass_id", ""),
             )
+            station = getattr(self, "station_adapter", None) or getattr(inferencer, "station_adapter", None)
+            deferred_visual_jobs = [] if use_capi_aoi_fast_path(
+                getattr(inferencer, "config", None), getattr(station, "profile", ""),
+            ) else None
             eval_result = _evaluate_within_spec_suggestion_detail(
                 detail,
                 self._load_within_spec_rules_for_inference(inferencer),
@@ -3180,6 +3185,7 @@ class CAPIServer:
                 visual_output_dir=visual_dir,
                 visual_url_prefix=visual_prefix,
                 rotate_180=bool(getattr(inferencer, "_rotate_detection_images_180", False)),
+                deferred_visual_jobs=deferred_visual_jobs,
             )
             suggestion = eval_result.get("suggestion")
             panel_totals = eval_result.get("panel_totals") or []
@@ -3211,6 +3217,11 @@ class CAPIServer:
                 "requires_all_panel_totals_within": True,
             }
 
+            logger.info(
+                "[within-spec] Glass=%s decision_ms=%.1f deferred_visuals=%d",
+                parsed.get("glass_id", ""), (time.time() - started) * 1000,
+                len(deferred_visual_jobs or []),
+            )
             return {
                 "suggestion": saved_suggestion,
                 "raw_suggestion": suggestion,
@@ -3219,6 +3230,7 @@ class CAPIServer:
                 "converted": converted,
                 "status": status,
                 "reason": reason,
+                "_visual_jobs": deferred_visual_jobs,
             }
         except Exception as e:
             logger.warning(
@@ -3496,6 +3508,11 @@ class CAPIServer:
         save_start = time.time()
         try:
             record_inferencer = None
+
+            if within_spec_info:
+                visual_jobs = within_spec_info.pop("_visual_jobs", None)
+                if visual_jobs:
+                    _flush_within_spec_visual_jobs(visual_jobs)
 
             # 儲存熱力圖
             heatmap_info = {}

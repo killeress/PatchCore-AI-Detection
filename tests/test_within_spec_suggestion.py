@@ -1,5 +1,7 @@
 import cv2
 import numpy as np
+import pytest
+import json
 from pathlib import Path
 
 from capi_web import (
@@ -13,6 +15,7 @@ from capi_web import (
     _format_within_spec_inference_note,
     _format_within_spec_panel_summary,
     _within_spec_auto_visual_output,
+    _flush_within_spec_visual_jobs,
 )
 
 
@@ -308,6 +311,90 @@ def test_within_spec_zero_white_dot_limit_means_not_allowed(tmp_path):
         and step["message"] == "略過點類規則：門檻或數量設定無效"
         for step in detail["steps"]
     )
+
+
+def _without_visual_metadata(value):
+    if isinstance(value, dict):
+        return {
+            key: _without_visual_metadata(item)
+            for key, item in value.items()
+            if key not in ("visuals", "visual", "captured_at")
+        }
+    if isinstance(value, list):
+        return [_without_visual_metadata(item) for item in value]
+    return value
+
+
+@pytest.mark.parametrize("method", ["background_diff", "hysteresis", "morph_hat", "adaptive_mean", "halo", "auto", "off"])
+@pytest.mark.parametrize("case", ["dots", "dust", "mark", "missed"])
+def test_deferred_visuals_preserve_decisions_and_pixels(tmp_path, monkeypatch, method, case):
+    import capi_web
+
+    path = tmp_path / "W0F00000.png"
+    image = np.full((96, 96, 3), 128, dtype=np.uint8)
+    if case != "missed":
+        cv2.circle(image, (32, 48), 3, (60, 60, 60), -1)
+        cv2.circle(image, (64, 48), 3, (210, 210, 210), -1)
+    assert cv2.imwrite(str(path), image)
+    detail = _detail(path)
+    if case == "dust":
+        detail["images"][0]["tiles"][0]["_runtime_dust_mask"] = np.ones((96, 96), np.uint8)
+    elif case == "mark":
+        detail["images"][0]["mark_bbox"] = "0,0,96,96"
+        detail["images"][0]["within_spec_no_detect"] = {"mark_padding_px": 0}
+    rules = _rules(white_enabled=True, segmentation_method=method)
+    expected = _evaluate_within_spec_suggestion_detail(
+        detail, rules, visual_output_dir=tmp_path / "before", visual_url_prefix="/before",
+    )
+    calls = []
+    original_detect = capi_web._detect_dot_components_auto
+
+    def detect(*args, **kwargs):
+        calls.append(kwargs)
+        return original_detect(*args, **kwargs)
+
+    monkeypatch.setattr(capi_web, "_detect_dot_components_auto", detect)
+    jobs = []
+    actual = _evaluate_within_spec_suggestion_detail(
+        detail, rules, visual_output_dir=tmp_path / "after", visual_url_prefix="/after",
+        deferred_visual_jobs=jobs,
+    )
+    assert _without_visual_metadata(actual) == _without_visual_metadata(expected)
+    json.dumps(actual)  # Raster data must stay outside persisted judgment detail.
+    assert not (tmp_path / "after").exists()
+    detection_count = len(calls)
+    if jobs:
+        assert actual["visuals"][0]["pending"] is True
+    _flush_within_spec_visual_jobs(jobs)
+    assert jobs == []
+    assert len(calls) == detection_count  # Saving must not repeat dot detection.
+    assert _without_visual_metadata(actual) == _without_visual_metadata(expected)
+    assert len(actual["visuals"]) == len(expected["visuals"])
+    for old, new in zip(expected["visuals"], actual["visuals"]):
+        assert {k: v for k, v in old.items() if k != "urls"} == {k: v for k, v in new.items() if k != "urls"}
+        assert old["urls"].keys() == new["urls"].keys()
+        for key in old["urls"]:
+            old_image = cv2.imread(str(tmp_path / "before" / Path(old["urls"][key]).name), cv2.IMREAD_UNCHANGED)
+            new_image = cv2.imread(str(tmp_path / "after" / Path(new["urls"][key]).name), cv2.IMREAD_UNCHANGED)
+            np.testing.assert_array_equal(new_image, old_image)
+
+
+def test_deferred_visual_failure_does_not_change_judgment(tmp_path, monkeypatch):
+    path = tmp_path / "W0F00000.png"
+    _write_black_dot_image(path, [(48, 48)])
+    jobs = []
+    result = _evaluate_within_spec_suggestion_detail(
+        _detail(path), _rules(), visual_output_dir=tmp_path / "visuals",
+        visual_url_prefix="/visuals", deferred_visual_jobs=jobs,
+    )
+    expected = _without_visual_metadata(result)
+    def fail(**kwargs):
+        raise OSError("disk unavailable")
+    monkeypatch.setattr("capi_web._save_within_spec_dot_visuals", fail)
+    _flush_within_spec_visual_jobs(jobs)
+    assert not jobs
+    assert _without_visual_metadata(result) == expected
+    assert result["visuals"][0] == {"error": "disk unavailable"}
 
 
 def test_within_spec_detail_saves_visuals_and_panel_totals(tmp_path):

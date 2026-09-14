@@ -2377,6 +2377,7 @@ def _save_within_spec_dot_visuals(
     image_name: str,
     tile_id: Any,
     crop_box: Tuple[int, int, int, int],
+    detected: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     if not output_dir or not url_prefix:
         return None
@@ -2389,25 +2390,26 @@ def _save_within_spec_dot_visuals(
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     prefix = f"within_spec_{safe_image}_tile{safe_tile}_{chosen['dot_type']}_{ts}"
 
-    detected = _detect_dot_components_auto(
-        processed_crop,
-        polarity=chosen["polarity"],
-        segmentation_method=str(dot_cfg.get("segmentation_method") or "background_diff"),
-        diff_threshold=_as_int(dot_cfg.get("diff_threshold"), 4),
-        background_kernel=_odd_kernel(_as_int(dot_cfg.get("background_kernel"), 33)),
-        min_area=max(1, _as_int(dot_cfg.get("min_area_px"), 2)),
-        max_area=max(0, _as_int(dot_cfg.get("max_area_px"), 50000)),
-        morph_open=max(0, _as_int(dot_cfg.get("morph_open"), 0)),
-        size_metric=str(dot_cfg.get("size_metric") or "bbox_diagonal"),
-        unit_per_px=max(0.0, _as_float(dot_cfg.get("unit_per_px"), DOT_RULER_MM_PER_PX)),
-        defect_threshold=chosen["threshold_mm"],
-        min_aspect_ratio=max(0.0, _as_float(dot_cfg.get("min_aspect_ratio"), 0.45)),
-        edge_margin=max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
-        **_dot_hysteresis_kwargs(dot_cfg),
-        include_visuals=True,
-    )
-    detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask)
-    detected = _remove_no_detect_overlap_candidates(detected, no_detect_mask)
+    if detected is None:
+        detected = _detect_dot_components_auto(
+            processed_crop,
+            polarity=chosen["polarity"],
+            segmentation_method=str(dot_cfg.get("segmentation_method") or "background_diff"),
+            diff_threshold=_as_int(dot_cfg.get("diff_threshold"), 4),
+            background_kernel=_odd_kernel(_as_int(dot_cfg.get("background_kernel"), 33)),
+            min_area=max(1, _as_int(dot_cfg.get("min_area_px"), 2)),
+            max_area=max(0, _as_int(dot_cfg.get("max_area_px"), 50000)),
+            morph_open=max(0, _as_int(dot_cfg.get("morph_open"), 0)),
+            size_metric=str(dot_cfg.get("size_metric") or "bbox_diagonal"),
+            unit_per_px=max(0.0, _as_float(dot_cfg.get("unit_per_px"), DOT_RULER_MM_PER_PX)),
+            defect_threshold=chosen["threshold_mm"],
+            min_aspect_ratio=max(0.0, _as_float(dot_cfg.get("min_aspect_ratio"), 0.45)),
+            edge_margin=max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
+            **_dot_hysteresis_kwargs(dot_cfg),
+            include_visuals=True,
+        )
+        detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask)
+        detected = _remove_no_detect_overlap_candidates(detected, no_detect_mask)
     dust_mask_color = None
     dust_overlay = None
     if runtime_dust_mask is not None:
@@ -2538,6 +2540,31 @@ def _save_within_spec_dot_visuals(
     }
 
 
+def _flush_within_spec_visual_jobs(jobs: List[Dict[str, Any]]) -> None:
+    """Finish optional pictures in the existing post-response save worker."""
+    started = time.perf_counter()
+    count = len(jobs)
+    try:
+        for job in jobs:
+            target = job["result"]
+            try:
+                visual = _save_within_spec_dot_visuals(**job["kwargs"])
+                target.clear()
+                target.update(visual or {})
+            except Exception as exc:
+                target.clear()
+                target["error"] = str(exc)
+                logger.warning("[within-spec] deferred visual failed: %s", exc, exc_info=True)
+            finally:
+                job.clear()
+    finally:
+        jobs.clear()
+        logger.info(
+            "[within-spec] visual_save count=%d elapsed_ms=%.1f",
+            count, (time.perf_counter() - started) * 1000,
+        )
+
+
 def _evaluate_within_spec_suggestion_detail(
     detail: Dict[str, Any],
     rules: Dict[str, Any],
@@ -2545,11 +2572,36 @@ def _evaluate_within_spec_suggestion_detail(
     visual_output_dir: Optional[Path] = None,
     visual_url_prefix: str = "",
     rotate_180: bool = False,
+    deferred_visual_jobs: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Evaluate within-spec suggestion on NG tiles only and collect traceable steps."""
     import cv2
 
     steps: List[Dict[str, Any]] = []
+    reuse_visual_detection = (
+        deferred_visual_jobs is not None and bool(visual_output_dir and visual_url_prefix)
+    )
+    deferred_bytes = 0
+
+    def save_visual(**kwargs):
+        nonlocal deferred_bytes
+        if not reuse_visual_detection:
+            return _save_within_spec_dot_visuals(**kwargs)
+        kwargs["detected"] = kwargs["chosen"]["_detected"]
+        kwargs["chosen"] = {k: v for k, v in kwargs["chosen"].items() if k != "_detected"}
+        arrays = [kwargs.get(k) for k in ("tile_crop", "processed_crop", "runtime_dust_mask", "no_detect_mask")]
+        arrays.extend(kwargs["detected"].values())
+        size = sum(value.nbytes for value in arrays if hasattr(value, "nbytes"))
+        # Bound queued raster memory; unusually large panels save overflow inline.
+        if deferred_bytes + size > 64 * 1024 * 1024:
+            return _save_within_spec_dot_visuals(**kwargs)
+        deferred_bytes += size
+        for key in ("tile_crop", "processed_crop", "runtime_dust_mask", "no_detect_mask"):
+            if kwargs.get(key) is not None:
+                kwargs[key] = kwargs[key].copy()
+        pending = {"pending": True}
+        deferred_visual_jobs.append({"kwargs": kwargs, "result": pending})
+        return pending
 
     def add_step(message: str, **data):
         if len(steps) < 1000:
@@ -2762,13 +2814,14 @@ def _evaluate_within_spec_suggestion_detail(
                     min_aspect_ratio=max(0.0, _as_float(dot_cfg.get("min_aspect_ratio"), 0.45)),
                     edge_margin=max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
                     **_dot_hysteresis_kwargs(dot_cfg),
-                    include_visuals=False,
+                    include_visuals=reuse_visual_detection,
                 )
                 detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask)
                 detected = _remove_no_detect_overlap_candidates(detected, no_detect_mask)
                 candidates = detected["candidates"]
                 max_size_mm = max((_as_float(c.get("size_mm"), 0.0) for c in candidates), default=0.0)
                 detections.append({
+                    "_detected": detected if reuse_visual_detection else None,
                     "dot_type": dot_type,
                     "polarity": polarity,
                     "label": label,
@@ -2914,7 +2967,7 @@ def _evaluate_within_spec_suggestion_detail(
                         filtered_count=no_detect_filtered,
                         detection=detection_summary,
                     )
-                    visual = _save_within_spec_dot_visuals(
+                    visual = save_visual(
                         tile_crop=tile_crop,
                         processed_crop=processed_crop,
                         chosen=chosen,
@@ -2955,7 +3008,7 @@ def _evaluate_within_spec_suggestion_detail(
                     aoi_product_y=missed_tile["aoi_product_y"],
                     detection=detection_summary,
                 )
-                visual = _save_within_spec_dot_visuals(
+                visual = save_visual(
                     tile_crop=tile_crop,
                     processed_crop=processed_crop,
                     chosen=chosen,
@@ -3009,7 +3062,7 @@ def _evaluate_within_spec_suggestion_detail(
                 "crop_box": crop_box,
             }
             state["tiles"].append(tile_detail)
-            visual = _save_within_spec_dot_visuals(
+            visual = save_visual(
                 tile_crop=tile_crop,
                 processed_crop=processed_crop,
                 chosen=chosen,
