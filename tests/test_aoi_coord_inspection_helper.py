@@ -492,6 +492,76 @@ def test_v1_process_panel_reuses_parsed_aoi_report(tmp_path):
     mock_create_tiles.assert_called_once()
 
 
+@pytest.mark.parametrize("rotate", [False, True])
+def test_v2_image_cache_preserves_six_screen_tiles_and_response(new_arch_inferencer, tmp_path, monkeypatch, record_property, rotate):
+    import cv2
+    from capi_image_orientation import panel_image_cache
+    from capi_server import aggregate_judgment, build_dual_protocol_response
+
+    inf = new_arch_inferencer
+    inf.config.grid_tiling_enabled = False
+    inf.config.inference_rotate_180_enabled = rotate
+    inf.config.enable_panel_polygon = True
+    prefixes = ["W0F00000", "STANDARD", "G0F00000", "R0F00000", "WGF50500"]
+    inf.config.model_mapping = {p: {"inner": "inner.pt", "edge": "edge.pt"} for p in prefixes}
+    inf.config.threshold_mapping = {p: {"inner": 0.4, "edge": 0.6} for p in prefixes}
+    report = {}
+    for i, prefix in enumerate(prefixes + ["B0F00000"]):
+        source = np.zeros((1536, 2048), np.uint8)
+        source[200:1300, 250:1750] = 130 + i * 10
+        source[500:508, 700:708] = 230
+        name = "U0F00000" if prefix == "STANDARD" else prefix
+        assert cv2.imwrite(str(tmp_path / f"{name}_001.tif"), source)
+        report[prefix] = [
+            AOIReportDefect("PCDK2", 20, 20, prefix),
+            AOIReportDefect("PCDK2", 960, 600, prefix),
+        ]
+    monkeypatch.setattr(inf, "_detect_panel_mark_binary_region", lambda *a, **k: (None, []))
+    monkeypatch.setattr(inf, "_load_omit_context", lambda *a, **k: (None, False, "", None))
+    monkeypatch.setattr(inf, "_get_model_for", lambda *a: object())
+    monkeypatch.setattr(inf, "predict_tile", lambda tile, **k: (0.8, np.zeros((512, 512), np.float32)))
+    for method in ("_apply_omit_dust_postprocess", "_apply_aoi_peak_postprocess", "_apply_bomb_postprocess",
+                   "_apply_exclude_zone_postprocess", "_apply_scratch_postprocess"):
+        monkeypatch.setattr(inf, method, lambda *a, **k: None)
+    calls = []
+    original_read = cv2.imread
+
+    def read(*args):
+        calls.append(args)
+        return original_read(*args)
+
+    monkeypatch.setattr(cv2, "imread", read)
+    def run(enabled):
+        calls.clear()
+        with panel_image_cache(enabled=enabled):
+            results = inf._process_panel_v2(
+                tmp_path, product_resolution=(1920, 1200), aoi_report_override=report,
+            )[0]
+        return results, len(calls)
+
+    before, before_reads = run(False)
+    after, after_reads = run(True)
+    record_property("reads_before", before_reads)
+    record_property("reads_after", after_reads)
+    assert len(before) == len(after) == 6
+    assert after_reads < before_reads
+    for old, new in zip(before, after):
+        assert old.raw_bounds == new.raw_bounds
+        assert old.otsu_bounds == new.otsu_bounds
+        np.testing.assert_array_equal(old.panel_polygon, new.panel_polygon)
+        assert len(old.tiles) == len(new.tiles) == 2
+        for old_tile, new_tile in zip(old.tiles, new.tiles):
+            for attr in ("x", "y", "width", "height", "zone", "aoi_product_x", "aoi_product_y",
+                         "aoi_image_x", "aoi_image_y", "score_threshold", "is_aoi_coord_below_threshold"):
+                assert getattr(old_tile, attr, None) == getattr(new_tile, attr, None)
+            np.testing.assert_array_equal(old_tile.image, new_tile.image)
+            np.testing.assert_array_equal(old_tile.original_image, new_tile.original_image)
+            np.testing.assert_array_equal(old_tile.mask, new_tile.mask)
+    assert aggregate_judgment(before) == aggregate_judgment(after)
+    parsed = {"glass_id": "G1", "model_id": "GN140JCAL070S", "machine_no": "CAPI39", "machine_judgment": "NG"}
+    assert build_dual_protocol_response(parsed, "NG", before, inf.config) == build_dual_protocol_response(parsed, "NG", after, inf.config)
+
+
 def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path):
     """新架構 _process_panel_v2 應呼叫 _apply_aoi_coord_inspection."""
     import cv2

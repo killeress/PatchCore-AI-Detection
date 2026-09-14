@@ -54,7 +54,9 @@ from typing import Callable, Dict, Optional, Tuple, List, Any
 sys.path.insert(0, str(Path(__file__).parent))
 
 from capi_config import CAPIConfig
-from capi_image_orientation import read_detection_image
+from capi_image_orientation import (
+    read_detection_image, panel_image_cache, use_capi_aoi_fast_path,
+)
 from capi_image_naming import (
     CANONICAL_IMAGE_PREFIXES,
     canonical_image_prefix,
@@ -3342,7 +3344,10 @@ class CAPIServer:
 
         # GPU 排隊 — 確保同一時刻只有一個推論任務使用 GPU
         # 注意：Heatmap 儲存已移至背景執行，GPU lock 只保護推論
-        with self._gpu_lock:
+        with self._gpu_lock, panel_image_cache(
+            enabled=use_capi_aoi_fast_path(inferencer.config, station_adapter.profile),
+            panel=str(panel_dir),
+        ):
             try:
                 # 呼叫 process_panel 進行推論
                 panel_result = inferencer.process_panel(
