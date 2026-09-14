@@ -88,3 +88,103 @@ def test_save_dashboard_config_does_not_touch_watch_models(tmp_path):
     assert db.get_central_dashboard_watch_models() == ["MODEL_A"]
     assert saved["watchModels"] == ["MODEL_A"]
     assert db.get_central_dashboard_config()["watchModels"] == ["MODEL_A"]
+
+
+def _make_json_handler(db, payload):
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = db
+    body = json.dumps(payload).encode("utf-8")
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+    handler._current_settings_user = lambda: {"username": "operator"}
+    responses = []
+    handler._send_json = lambda data, status=200, headers=None: responses.append(
+        (status, data)
+    )
+    return handler, responses
+
+
+def test_watch_models_api_saves_and_returns_list(tmp_path):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+    handler, responses = _make_json_handler(
+        db, {"watchModels": ["model_a", " MODEL_B "]}
+    )
+
+    handler._handle_api_central_dashboard_watch_models_update()
+
+    assert responses[-1][0] == 200
+    assert responses[-1][1] == {
+        "success": True,
+        "watchModels": ["MODEL_A", "MODEL_B"],
+    }
+
+
+def test_watch_models_api_rejects_invalid_payload(tmp_path):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+    handler, responses = _make_json_handler(
+        db, {"watchModels": ["MODEL_A", "MODEL_A"]}
+    )
+
+    handler._handle_api_central_dashboard_watch_models_update()
+
+    assert responses[-1][0] == 400
+    assert "重複" in responses[-1][1]["error"]
+
+
+def test_watch_models_route_requires_settings_login():
+    handler = CAPIWebHandler.__new__(CAPIWebHandler)
+    handler.path = "/api/central-dashboard/watch-models"
+    captured = {}
+
+    def require_user(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    handler._require_settings_user = require_user
+    handler._handle_api_central_dashboard_watch_models_update = (
+        lambda: (_ for _ in ()).throw(
+            AssertionError("unauthorized request must not update watch models")
+        )
+    )
+
+    handler.do_POST()
+
+    assert captured == {"api": True}
+
+
+def test_config_all_api_includes_watch_models(tmp_path):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+    db.save_central_dashboard_watch_models(["MODEL_A"])
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = db
+    responses = []
+    handler._send_json = lambda data, status=200, headers=None: responses.append(
+        (status, data)
+    )
+
+    handler._handle_api_central_dashboard_config_all()
+
+    assert responses[-1][0] == 200
+    assert responses[-1][1]["watchModels"] == ["MODEL_A"]
+
+
+def test_filtered_config_api_keeps_watch_models(tmp_path):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+    db.save_central_dashboard_watch_models(["MODEL_A"])
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = db
+    handler.connection = type(
+        "_Connection",
+        (),
+        {"getsockname": lambda self: ("10.174.99.10", 80)},
+    )()
+    handler.headers = {}
+    responses = []
+    handler._send_json = lambda data, status=200, headers=None: responses.append(
+        (status, data)
+    )
+
+    handler._handle_api_central_dashboard_config()
+
+    assert responses[-1][0] == 200
+    assert responses[-1][1]["watchModels"] == ["MODEL_A"]
