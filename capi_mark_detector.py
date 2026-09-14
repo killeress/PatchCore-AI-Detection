@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from capi_image_orientation import timed_inference_stage
 
 
 _GRID_ROWS = 7
@@ -248,21 +249,22 @@ def detect_panel_mark(
         ("primary", _ROI_RATIOS),
         ("fallback", _FALLBACK_ROI_RATIOS),
     ):
-        for roi_name, ratios in roi_ratios:
-            x1, y1, x2, y2 = _roi_from_ratios(width, height, ratios)
-            roi = gray[y1:y2, x1:x2]
-            candidate = _detect_roi(
-                roi,
-                x1,
-                y1,
-                width,
-                height,
-                roi_name,
-                profile_index,
-            )
-            if candidate is not None:
-                candidate["search_pass"] = search_pass
-                candidates.append(candidate)
+        with timed_inference_stage(f"mark_{search_pass}"):
+            for roi_name, ratios in roi_ratios:
+                x1, y1, x2, y2 = _roi_from_ratios(width, height, ratios)
+                roi = gray[y1:y2, x1:x2]
+                candidate = _detect_roi(
+                    roi,
+                    x1,
+                    y1,
+                    width,
+                    height,
+                    roi_name,
+                    profile_index,
+                )
+                if candidate is not None:
+                    candidate["search_pass"] = search_pass
+                    candidates.append(candidate)
         if candidates:
             break
 

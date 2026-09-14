@@ -42,7 +42,10 @@ import torch
 import logging
 import re
 from capi_image_naming import AOI_REPORT_PREFIXES, canonical_image_prefix
-from capi_image_orientation import read_detection_image
+from capi_image_orientation import (
+    read_detection_image, panel_image_cache, timed_inference_stage,
+    use_capi_aoi_fast_path,
+)
 from capi_station_adapter import StationAdapter, create_station_adapter
 
 # ── 舊版 anomalib 相容性修補 ─────────────────────────────
@@ -7320,18 +7323,22 @@ class CAPIInferencer:
                     f"model={expected_resolution[0]}x{expected_resolution[1]}"
                 )
             product_resolution = actual_resolution
-        panel_result = self._dispatch_process_panel(
-            panel_dir,
-            progress_callback=progress_callback,
-            cpu_workers=cpu_workers,
-            product_resolution=product_resolution,
-            bomb_info=bomb_info,
-            model_id=model_id,
-            machine_no=machine_no,
-            glass_id=glass_id,
-            aoi_report_override=aoi_report_override,
-            machine_judgment=machine_judgment,
-        )
+        with panel_image_cache(
+            enabled=use_capi_aoi_fast_path(self.config, self.station_adapter.profile),
+            panel=str(panel_dir),
+        ):
+            panel_result = self._dispatch_process_panel(
+                panel_dir,
+                progress_callback=progress_callback,
+                cpu_workers=cpu_workers,
+                product_resolution=product_resolution,
+                bomb_info=bomb_info,
+                model_id=model_id,
+                machine_no=machine_no,
+                glass_id=glass_id,
+                aoi_report_override=aoi_report_override,
+                machine_judgment=machine_judgment,
+            )
         if panel_result and panel_result[0]:
             for result in panel_result[0]:
                 result.report_image_prefix = self._get_report_prefix(result.image_path.name)
@@ -9368,12 +9375,14 @@ class CAPIInferencer:
 
         panel_path = Path(panel_dir)
         t0 = time.time()
-        image_files, is_duplicate = self._prepare_panel_image_files(panel_path)
-        panel_mark_detection, panel_mark_regions = self._detect_panel_mark_binary_region(
-            image_files,
-            machine_no=machine_no,
-            model_id=model_id,
-        )
+        with timed_inference_stage("image_list"):
+            image_files, is_duplicate = self._prepare_panel_image_files(panel_path)
+        with timed_inference_stage("mark_read_locate_recognize"):
+            panel_mark_detection, panel_mark_regions = self._detect_panel_mark_binary_region(
+                image_files,
+                machine_no=machine_no,
+                model_id=model_id,
+            )
 
         aoi_report: Optional[Dict[str, List['AOIReportDefect']]] = None
         aoi_report_for_inference: Dict[str, List['AOIReportDefect']] = {}
@@ -9472,8 +9481,9 @@ class CAPIInferencer:
                 aoi_report or {},
             )
 
-        omit_vis, omit_overexposed, omit_overexposure_info, omit_image = \
-            self._load_omit_context(panel_path, image_files=image_files)
+        with timed_inference_stage("omit_read_check"):
+            omit_vis, omit_overexposed, omit_overexposure_info, omit_image = \
+                self._load_omit_context(panel_path, image_files=image_files)
         if omit_image is not None:
             tag = "OVEREXPOSED" if omit_overexposed else "OK"
             print(f"[v2] OMIT {tag}: {omit_overexposure_info}")
@@ -9589,7 +9599,8 @@ class CAPIInferencer:
             # raw_bounds 必須是「物件原始邊界」（不含 otsu_offset 內推），用於
             # AOI 機檢座標 ↔ 圖片座標映射；對齊 v1 / DEBUG 路徑的 _find_raw_object_bounds
             # 語意。pre_result.foreground_bbox 已套 +/-offset，作為 otsu_bounds 用。
-            raw_bounds_unoffset, _ = self._find_raw_object_bounds(raw_img)
+            with timed_inference_stage(f"aoi_raw_bounds:{img_path.name}"):
+                raw_bounds_unoffset, _ = self._find_raw_object_bounds(raw_img)
             if raw_bounds_unoffset is None:
                 raw_bounds_unoffset = bbox
 
