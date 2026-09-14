@@ -214,3 +214,31 @@ def test_server_sets_model_id_on_both_judgment_paths():
     source = (root / "capi_server.py").read_text(encoding="utf-8")
 
     assert source.count('"model_id": parsed["model_id"],') == 2
+
+
+def test_frontend_watch_badge_wiring():
+    root = Path(__file__).resolve().parent.parent
+    app_js = (root / "central_dashboard" / "app.js").read_text(encoding="utf-8")
+    index_html = (root / "central_dashboard" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    styles_css = (root / "central_dashboard" / "styles.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "watchModels: normalizeWatchModels(raw.watchModels)" in app_js
+    assert "function normalizeWatchModels(value)" in app_js
+    assert "modelId: textValue(latestEvent.model_id)," in app_js
+    assert "function matchedWatchModel(state)" in app_js
+    assert 'state.status !== "online"' in app_js
+    assert "function updateWatchBadge(badge, state)" in app_js
+    assert 'watchBadge.textContent = "★ 重點關注";' in app_js
+    assert '[data-field="overview-watch"]' in app_js
+    assert '[data-field="watch-badge"]' in app_js
+    assert "正在生產關注機種：" in app_js
+
+    assert 'data-field="watch-badge" hidden>★ 重點關注</span>' in index_html
+
+    assert ".overview-watch-badge," in styles_css
+    assert "background: #f6c945;" in styles_css
+    assert ".overview-watch-badge[hidden]," in styles_css
