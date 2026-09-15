@@ -9546,8 +9546,13 @@ class CAPIInferencer:
             aoi_only_fast_path_enabled=use_capi_aoi_fast_path(
                 self.config, self.station_adapter.profile,
             ),
-            recover_failed_raw_boundary=use_capi_aoi_fast_path(
-                self.config, self.station_adapter.profile,
+            # Boundary recovery is also needed on padded AAPI frames, where
+            # raw edges pass validation but fail the large-panel occupancy gate.
+            # Keep it independent of the CAPI-only image I/O fast path.
+            recover_failed_raw_boundary=bool(
+                self.station_adapter.profile in ("capi", "aapi")
+                and self.config.aoi_coord_inspection_enabled
+                and not self.config.grid_tiling_enabled
             ),
             cache_processed_image=(
                 aoi_only_mode

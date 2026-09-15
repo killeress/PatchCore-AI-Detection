@@ -564,11 +564,12 @@ def test_v2_image_cache_preserves_six_screen_tiles_and_response(new_arch_inferen
     assert build_dual_protocol_response(parsed, "NG", before, inf.config) == build_dual_protocol_response(parsed, "NG", after, inf.config)
 
 
-@pytest.mark.parametrize("profile,grid,expected_fast", [
-    ("capi", False, True), ("capi", True, False),
-    ("aapi", False, False), ("aapi", True, False),
+@pytest.mark.parametrize("profile,grid,expected_fast,expected_recovery", [
+    ("capi", False, True, True), ("capi", True, False, False),
+    ("aapi", False, False, True), ("aapi", True, False, False),
 ])
-def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path, profile, grid, expected_fast):
+@pytest.mark.parametrize("aoi_enabled", [False, True])
+def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path, profile, grid, expected_fast, expected_recovery, aoi_enabled):
     """新架構 _process_panel_v2 應呼叫 _apply_aoi_coord_inspection."""
     import cv2
     from capi_preprocess import PanelPreprocessResult
@@ -576,6 +577,7 @@ def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path
 
     new_arch_inferencer.station_adapter = create_station_adapter(profile)
     new_arch_inferencer.config.grid_tiling_enabled = grid
+    new_arch_inferencer.config.aoi_coord_inspection_enabled = aoi_enabled
 
     panel_dir = tmp_path / "panel"
     panel_dir.mkdir()
@@ -620,8 +622,8 @@ def test_v2_process_panel_invokes_aoi_coord_helper(new_arch_inferencer, tmp_path
         )
 
     assert mock_helper.call_count == 1
-    assert mock_preprocess.call_args.args[1].aoi_only_fast_path_enabled is expected_fast
-    assert mock_preprocess.call_args.args[1].recover_failed_raw_boundary is expected_fast
+    assert mock_preprocess.call_args.args[1].aoi_only_fast_path_enabled is (expected_fast and aoi_enabled)
+    assert mock_preprocess.call_args.args[1].recover_failed_raw_boundary is (expected_recovery and aoi_enabled)
     kwargs = mock_helper.call_args.kwargs
     assert kwargs["panel_dir"] == panel_dir
 
