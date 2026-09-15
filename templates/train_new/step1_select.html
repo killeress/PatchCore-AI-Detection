@@ -145,6 +145,7 @@
       {% set inherited_keep_ratio = target_patchcore_params.get("feature_cleaning_keep_ratio", 0.99) %}
       {% set inherited_cleaning_center_size = target_patchcore_params.get("feature_cleaning_center_size", 512) %}
       {% set inherited_cleaning_zones = target_patchcore_params.get("feature_cleaning_by_zone", {}) %}
+      {% set softpatch = target_patchcore_params.get("softpatch_plus_config", {}) %}
       <label class="tp-field">
         <span class="tp-label">特徵清洗設定方式 <span class="tp-default">預設共用</span></span>
         <select id="tp-feature_cleaning_layout" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
@@ -157,10 +158,11 @@
         <span class="tp-label">特徵域清洗 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用原 bundle{% else %}預設關閉{% endif %}</span></span>
         <select id="tp-feature_cleaning_mode" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
           {% if training_scope.mode == 'partial' %}
-          <option value="{{ inherited_cleaning }}" selected>{% if inherited_cleaning == "off" %}關閉{% elif inherited_cleaning == "context_overlap_adaptive_v1" %}真實上下文＋重疊一致性清洗{% else %}舊版 KNN 百分位清洗{% endif %}（沿用原 bundle，不可修改）</option>
+          <option value="{{ inherited_cleaning }}" selected>{% if inherited_cleaning == "off" %}關閉{% elif inherited_cleaning == "softpatch_plus_v1" %}SoftPatch+（Tile 適配）{% elif inherited_cleaning == "context_overlap_adaptive_v1" %}真實上下文＋重疊一致性清洗{% else %}舊版 KNN 百分位清洗{% endif %}（沿用原 bundle，不可修改）</option>
           {% else %}
           <option value="off" selected>關閉（現有作法）</option>
           <option value="context_overlap_adaptive_v1">真實上下文＋重疊一致性（實驗，建議）</option>
+          <option value="softpatch_plus_v1">SoftPatch+（實驗：Tile 適配）</option>
           <option value="knn_cosine_q99_v1">舊版 KNN 百分位清洗</option>
           {% endif %}
         </select>
@@ -168,9 +170,14 @@
           {% if training_scope.mode == 'partial' %}
             局部重訓固定沿用原 bundle 設定
           {% else %}
-            新模式會用 Panel 實體座標比對重疊 Tile，只在多視角一致且超過自適應門檻時移除；結果可以是 0 個
+            重疊上下文模式採自適應門檻；SoftPatch+ 使用離群排名，可搭配推論權重與重疊保護
           {% endif %}
         </span>
+      </label>
+      <label class="tp-field fc-shared-field">
+        <span class="tp-label">清洗 K 值</span>
+        <input type="number" id="tp-feature_cleaning_k" min="1" max="200" step="1" value="{{ target_patchcore_params.get('feature_cleaning_k', 30) }}" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
+        <span class="tp-hint">SoftPatch+ 可比較 K=6／15／30；其餘設定固定以便對照</span>
       </label>
       <label class="tp-field fc-shared-field">
         <span class="tp-label">特徵清洗範圍 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用原 bundle{% else %}預設僅 inner{% endif %}</span></span>
@@ -189,7 +196,7 @@
         <input type="number" id="tp-feature_cleaning_keep_ratio" min="90" max="100" step="0.1"
                value="{% if training_scope.mode == 'partial' %}{{ (inherited_keep_ratio * 100)|round(1) }}{% else %}99{% endif %}"
                {% if training_scope.mode == 'partial' %}disabled{% endif %}>
-        <span class="tp-hint">新模式中此值是「最多可移除比例」：99% 代表最多約 1%，若沒有明顯離群可移除 0 個；舊版仍依比例固定截尾</span>
+        <span class="tp-hint">99% 代表最多約移除候選特徵的 1%。SoftPatch+ 可設 50%～100%，先從 99% 做對照；重疊保護可能降低實際移除量</span>
       </label>
       <div id="feature-cleaning-by-zone" class="fc-zone-grid">
         {% for zone in ["inner", "edge"] %}
@@ -205,6 +212,7 @@
               <select id="tp-feature_cleaning_{{ zone }}_mode" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
                 <option value="off" {% if zone_mode == "off" %}selected{% endif %}>關閉</option>
                 <option value="context_overlap_adaptive_v1" {% if zone_mode == "context_overlap_adaptive_v1" %}selected{% endif %}>真實上下文＋重疊一致性</option>
+                <option value="softpatch_plus_v1" {% if zone_mode == "softpatch_plus_v1" %}selected{% endif %}>SoftPatch+（Tile 適配）</option>
                 <option value="knn_cosine_q99_v1" {% if zone_mode == "knn_cosine_q99_v1" %}selected{% endif %}>舊版 KNN 百分位清洗</option>
               </select>
             </label>
@@ -221,6 +229,25 @@
           </section>
         {% endfor %}
       </div>
+      <section id="softpatch-settings" class="fc-zone-grid" style="display:none">
+        <div class="tp-hint">SoftPatch+ 設定（所有選用此模式的區域共用）。LOF／Gaussian 排名融合，使用單一記憶庫；開啟重疊保護時仍要求一致移除。此模式不使用 MAD 門檻，也不使用中央裁切。</div>
+        <div class="tp-field"><span class="tp-label"><label for="sp-discriminator">離群評分</label>
+          <button type="button" class="pp-help-icon" aria-label="LOF 說明"
+                  title="LOF（Local Outlier Factor，局部離群因子）&#10;比較一個特徵與附近 K 個鄰居的相對密度，判斷它是否特別孤立。&#10;原始 LOF 約等於 1：與鄰居相近；明顯大於 1：較可疑；小於 1：比鄰居密集。&#10;有機會保留少見但正常的紋理，減少誤刪；但正常樣本太少仍可能被誤判，相似缺陷聚成群也可能漏掉。&#10;LOF＋Gaussian 結合局部密度與整體分布，再以排名融合；報告顯示的融合排名不是原始 LOF 值。">?</button>
+        </span>
+          <select id="sp-discriminator"><option value="lof_gaussian" {% if softpatch.get('discriminator', 'lof_gaussian') == 'lof_gaussian' %}selected{% endif %}>LOF＋Gaussian（SoftPatch+）</option><option value="lof" {% if softpatch.get('discriminator') == 'lof' %}selected{% endif %}>僅 LOF（對照實驗）</option></select>
+        </div>
+        <label class="tp-field"><span class="tp-label">推論權重</span>
+          <select id="sp-soft_weight"><option value="true" {% if softpatch.get('soft_weight', true) %}selected{% endif %}>開啟</option><option value="false" {% if not softpatch.get('soft_weight', true) %}selected{% endif %}>關閉（只清洗）</option></select>
+        </label>
+        <label class="tp-field"><span class="tp-label">權重強度</span><input id="sp-weight_strength" type="number" min="0" max="4" step="0.1" value="{{ softpatch.get('weight_strength', 1.0) }}"><span class="tp-hint">預設 1；倍率為 1＋強度×離群排名，強度 0 等同無權重</span></label>
+        <label class="tp-field"><span class="tp-label">重疊／邊界保護</span>
+          <select id="sp-context_overlap"><option value="true" {% if softpatch.get('context_overlap', true) %}selected{% endif %}>開啟（建議）</option><option value="false" {% if not softpatch.get('context_overlap', true) %}selected{% endif %}>關閉（全部位置）</option></select>
+          <span class="tp-hint">受保護與重疊意見不一致的位置，推論權重維持 1</span>
+        </label>
+        <label class="tp-field"><span class="tp-label">評分特徵維度</span><input id="sp-projection_dim" type="number" min="8" max="128" step="1" value="{{ softpatch.get('projection_dim', 32) }}"><span class="tp-hint">只用於清洗評分；記憶庫保留原特徵</span></label>
+        <label class="tp-field"><span class="tp-label">參考特徵上限</span><input id="sp-reference_size" type="number" min="256" max="8192" step="1" value="{{ softpatch.get('reference_size', 2048) }}"><span class="tp-hint">越大越耗時；預設 2048</span></label>
+      </section>
       <label class="tp-field" id="feature-cleaning-center-field">
         <span class="tp-label">舊版清洗有效區域 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用中央 {{ inherited_cleaning_center_size }}×{{ inherited_cleaning_center_size }}{% else %}預設中央 384×384{% endif %}</span></span>
         <input type="number" id="tp-feature_cleaning_center_size" min="64" max="512" step="16"
@@ -434,6 +461,8 @@
   .tp-default { color:#7f849c;font-weight:400;font-size:.74rem; }
   .tp-hint { color:#a6adc8;font-size:.74rem;line-height:1.4; }
   .fc-zone-grid { display:none;grid-column:1/-1;grid-template-columns:repeat(2,minmax(240px,1fr));gap:12px; }
+  #softpatch-settings { padding-top:12px;border-top:1px solid #45475a; }
+  #softpatch-settings > .tp-hint { grid-column:1/-1; }
   .fc-zone-card { display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:10px;padding:12px;border:1px solid #45475a;border-radius:8px;background:#1e1e2e; }
   .fc-zone-title { grid-column:1/-1;font-weight:800;letter-spacing:.08em;color:#89b4fa; }
   .fc-zone-edge .fc-zone-title { color:#fab387; }
@@ -1375,8 +1404,8 @@ function syncFeatureCleaningLayout() {
     for (const zone of ['inner', 'edge']) {
       const enabled = sharedMode !== 'off' && (zone === 'inner' || sharedScope === 'inner_and_edge');
       document.getElementById(`tp-feature_cleaning_${zone}_mode`).value = enabled ? sharedMode : 'off';
-      document.getElementById(`tp-feature_cleaning_${zone}_k`).value = '30';
-      document.getElementById(`tp-feature_cleaning_${zone}_keep_ratio`).value = sharedRatio;
+      document.getElementById(`tp-feature_cleaning_${zone}_k`).value = document.getElementById('tp-feature_cleaning_k').value;
+      document.getElementById(`tp-feature_cleaning_${zone}_keep_ratio`).value = enabled ? sharedRatio : '99';
     }
     _zoneCleaningInitialized = true;
   }
@@ -1391,6 +1420,14 @@ function syncFeatureCleaningLayout() {
     ? ['inner', 'edge'].map(zone => document.getElementById(`tp-feature_cleaning_${zone}_mode`).value)
     : [document.getElementById('tp-feature_cleaning_mode').value];
   const usesLegacyCenter = activeModes.includes('knn_cosine_q99_v1');
+  const usesSoftPatch = activeModes.includes('softpatch_plus_v1');
+  const settings = document.getElementById('softpatch-settings');
+  settings.style.display = usesSoftPatch ? 'grid' : 'none';
+  settings.querySelectorAll('input,select').forEach(el => { el.disabled = !usesSoftPatch || partial; });
+  for (const zone of ['inner', 'edge', 'shared']) {
+    const prefix = zone === 'shared' ? 'tp-feature_cleaning_' : `tp-feature_cleaning_${zone}_`;
+    document.getElementById(prefix + 'keep_ratio').min = document.getElementById(prefix + 'mode').value === 'softpatch_plus_v1' ? '50' : '90';
+  }
   const centerField = document.getElementById('feature-cleaning-center-field');
   const centerInput = document.getElementById('tp-feature_cleaning_center_size');
   if (centerField) centerField.style.display = usesLegacyCenter ? '' : 'none';
@@ -1403,7 +1440,8 @@ const TRAIN_PARAM_KEYS = [
   {key: 'precision',     type: 'select', choices: ['float32','float16'], default: 'float16'},
   {key: 'feature_layers', type: 'select', choices: ['layer2_layer3','layer3'], default: 'layer2_layer3'},
   {key: 'feature_pool_kernel_size', type: 'select_int', choices: [1,3,5], default: 3},
-  {key: 'feature_cleaning_mode', type: 'select', choices: ['off','knn_cosine_q99_v1','context_overlap_adaptive_v1'], default: 'off'},
+  {key: 'feature_cleaning_mode', type: 'select', choices: ['off','knn_cosine_q99_v1','context_overlap_adaptive_v1','softpatch_plus_v1'], default: 'off'},
+  {key: 'feature_cleaning_k', type: 'int', min: 1, max: 200, default: 30},
   {key: 'feature_cleaning_scope', type: 'select', choices: ['inner_only','inner_and_edge'], default: 'inner_only'},
   {key: 'feature_cleaning_keep_ratio', type: 'percent_ratio', min: 90, max: 100, default: 0.99},
   {key: 'feature_cleaning_center_size', type: 'int', min: 64, max: 512, default: 384},
@@ -1431,17 +1469,18 @@ function collectTrainingParams() {
     if (!raw) continue;
     if (spec.type === 'percent_ratio') {
       const pct = parseFloat(raw);
-      if (!Number.isFinite(pct) || pct < spec.min || pct > spec.max) {
+      const minimum = Number(el.min) || spec.min;
+      if (!Number.isFinite(pct) || pct < minimum || pct > spec.max) {
         el.classList.add('invalid');
-        return {params: null, error: `${spec.key} 必須是 ${spec.min}% ~ ${spec.max}% 之間的數字`};
+        return {params: null, error: `${spec.key} 必須是 ${minimum}% ~ ${spec.max}% 之間的數字`};
       }
       const ratio = pct / 100;
       if (Math.abs(ratio - spec.default) < 1e-9) continue;
       params[spec.key] = ratio;
       continue;
     }
-    const num = spec.type === 'int' ? parseInt(raw, 10) : parseFloat(raw);
-    if (!Number.isFinite(num) || num < spec.min || num > spec.max) {
+    const num = Number(raw);
+    if (!Number.isFinite(num) || (spec.type === 'int' && !Number.isInteger(num)) || num < spec.min || num > spec.max) {
       el.classList.add('invalid');
       return {params: null, error: `${spec.key} 必須是 ${spec.min} ~ ${spec.max} 之間的${spec.type === 'int' ? '整數' : '數字'}`};
     }
@@ -1456,7 +1495,7 @@ function collectTrainingParams() {
       const k = Number(kEl.value);
       const ratioPct = Number(ratioEl.value);
       [modeEl, kEl, ratioEl].forEach(el => el.classList.remove('invalid'));
-      if (!['off', 'knn_cosine_q99_v1', 'context_overlap_adaptive_v1'].includes(modeEl.value)) {
+      if (!['off', 'knn_cosine_q99_v1', 'context_overlap_adaptive_v1', 'softpatch_plus_v1'].includes(modeEl.value)) {
         modeEl.classList.add('invalid');
         return {params: null, error: `${zone.toUpperCase()} 清洗模式無效`};
       }
@@ -1464,13 +1503,30 @@ function collectTrainingParams() {
         kEl.classList.add('invalid');
         return {params: null, error: `${zone.toUpperCase()} K 值必須是 1 ~ 200 的整數`};
       }
-      if (!Number.isFinite(ratioPct) || ratioPct < 90 || ratioPct > 100) {
+      const minimum = modeEl.value === 'softpatch_plus_v1' ? 50 : 90;
+      if (!Number.isFinite(ratioPct) || ratioPct < minimum || ratioPct > 100) {
         ratioEl.classList.add('invalid');
-        return {params: null, error: `${zone.toUpperCase()} 保留比例必須是 90% ~ 100%`};
+        return {params: null, error: `${zone.toUpperCase()} 保留比例必須是 ${minimum}% ~ 100%`};
       }
       byZone[zone] = {mode: modeEl.value, k, keep_ratio: ratioPct / 100};
     }
     params.feature_cleaning_by_zone = byZone;
+  }
+  if (!document.getElementById('sp-discriminator').disabled) {
+    const config = {
+      discriminator: document.getElementById('sp-discriminator').value,
+      soft_weight: document.getElementById('sp-soft_weight').value === 'true',
+      context_overlap: document.getElementById('sp-context_overlap').value === 'true',
+    };
+    for (const key of ['weight_strength', 'projection_dim', 'reference_size']) {
+      const el = document.getElementById('sp-' + key);
+      const value = Number(el.value);
+      if (!el.value.trim() || !Number.isFinite(value) || value < Number(el.min) || value > Number(el.max) || (key !== 'weight_strength' && !Number.isInteger(value))) {
+        return {params: null, error: `SoftPatch+ ${key} 必須介於 ${el.min}～${el.max}${key === 'weight_strength' ? '' : ' 的整數'}`};
+      }
+      config[key] = value;
+    }
+    params.softpatch_plus_config = config;
   }
   return {params: Object.keys(params).length ? params : null, error: null};
 }

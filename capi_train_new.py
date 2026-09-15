@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable, Iterable, Any
 import cv2
+from capi_softpatch_config import SOFTPATCH_MODE, cleaning_keep_ratio_min, normalize_softpatch_config
 
 from capi_image_naming import canonical_image_prefix
 from capi_image_orientation import read_detection_image
@@ -103,10 +104,12 @@ FEATURE_CLEANING_MODE_OFF = "off"
 # Stable recipe id for existing jobs/bundles; the actual keep ratio is stored separately.
 FEATURE_CLEANING_MODE_KNN_Q99 = "knn_cosine_q99_v1"
 FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE = "context_overlap_adaptive_v1"
+FEATURE_CLEANING_MODE_SOFTPATCH_PLUS = SOFTPATCH_MODE
 FEATURE_CLEANING_MODE_CHOICES = (
     FEATURE_CLEANING_MODE_OFF,
     FEATURE_CLEANING_MODE_KNN_Q99,
     FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE,
+    FEATURE_CLEANING_MODE_SOFTPATCH_PLUS,
 )
 FEATURE_CLEANING_K = 30
 FEATURE_CLEANING_K_MIN = 1
@@ -229,6 +232,8 @@ class TrainingConfig:
     feature_layers: str = PATCHCORE_FEATURE_LAYERS_DEFAULT
     feature_pool_kernel_size: int = PATCHCORE_FEATURE_POOL_KERNEL_DEFAULT
     feature_cleaning_mode: str = FEATURE_CLEANING_MODE_OFF
+    feature_cleaning_k: int = FEATURE_CLEANING_K
+    softpatch_plus_config: Dict[str, Any] = field(default_factory=dict)
     feature_cleaning_scope: str = FEATURE_CLEANING_SCOPE_INNER_ONLY
     feature_cleaning_keep_ratio: float = FEATURE_CLEANING_KEEP_RATIO_DEFAULT
     feature_cleaning_center_size: int = FEATURE_CLEANING_CENTER_SIZE_DEFAULT
@@ -261,9 +266,11 @@ USER_TRAINABLE_PARAM_SPECS: Dict[str, Dict] = {
     "feature_pool_kernel_size": {"type": int, "choices": list(PATCHCORE_FEATURE_POOL_KERNEL_CHOICES)},
     "feature_cleaning_mode": {"type": str, "choices": list(FEATURE_CLEANING_MODE_CHOICES)},
     "feature_cleaning_scope": {"type": str, "choices": list(FEATURE_CLEANING_SCOPE_CHOICES)},
+    "feature_cleaning_k": {"type": int, "min": FEATURE_CLEANING_K_MIN, "max": FEATURE_CLEANING_K_MAX},
+    "softpatch_plus_config": {"type": dict},
     "feature_cleaning_keep_ratio": {
         "type": float,
-        "min": FEATURE_CLEANING_KEEP_RATIO_MIN,
+        "min": 0.50,  # The mode-specific lower bound is validated after parsing.
         "max": FEATURE_CLEANING_KEEP_RATIO_MAX,
     },
     "feature_cleaning_center_size": {
@@ -332,10 +339,10 @@ def normalize_feature_cleaning_by_zone(raw: Any) -> Dict[str, Dict[str, Any]]:
             raise ValueError(
                 f"feature_cleaning_by_zone.{zone}.keep_ratio must be a number"
             ) from exc
-        if not FEATURE_CLEANING_KEEP_RATIO_MIN <= keep_ratio <= FEATURE_CLEANING_KEEP_RATIO_MAX:
+        if not cleaning_keep_ratio_min(mode) <= keep_ratio <= FEATURE_CLEANING_KEEP_RATIO_MAX:
             raise ValueError(
                 f"feature_cleaning_by_zone.{zone}.keep_ratio must be between "
-                f"{FEATURE_CLEANING_KEEP_RATIO_MIN} and {FEATURE_CLEANING_KEEP_RATIO_MAX}"
+                f"{cleaning_keep_ratio_min(mode)} and {FEATURE_CLEANING_KEEP_RATIO_MAX}"
             )
         normalized[zone] = {
             "mode": mode,
@@ -380,7 +387,7 @@ def feature_cleaning_config_for_zone(
     )
     return {
         "mode": cfg.feature_cleaning_mode if enabled else FEATURE_CLEANING_MODE_OFF,
-        "k": FEATURE_CLEANING_K,
+        "k": cfg.feature_cleaning_k,
         "keep_ratio": float(cfg.feature_cleaning_keep_ratio),
     }
 
@@ -427,6 +434,8 @@ def apply_user_training_params(
     for key, val in params.items():
         if key == "feature_cleaning_by_zone":
             val = normalize_feature_cleaning_by_zone(val)
+        if key == "softpatch_plus_config":
+            val = normalize_softpatch_config(val)
         if key == "validation_config":
             # Compatibility with old saved jobs: the wizard no longer calibrates.
             continue
@@ -1406,10 +1415,10 @@ def train_one_patchcore(
     if cleaning_scope not in FEATURE_CLEANING_SCOPE_CHOICES:
         raise ValueError(f"unsupported feature_cleaning_scope: {cleaning_scope}")
     cleaning_keep_ratio = float(cfg.feature_cleaning_keep_ratio)
-    if not FEATURE_CLEANING_KEEP_RATIO_MIN <= cleaning_keep_ratio <= FEATURE_CLEANING_KEEP_RATIO_MAX:
+    if not cleaning_keep_ratio_min(cleaning_mode) <= cleaning_keep_ratio <= FEATURE_CLEANING_KEEP_RATIO_MAX:
         raise ValueError(
             "feature_cleaning_keep_ratio must be between "
-            f"{FEATURE_CLEANING_KEEP_RATIO_MIN} and {FEATURE_CLEANING_KEEP_RATIO_MAX}"
+            f"{cleaning_keep_ratio_min(cleaning_mode)} and {FEATURE_CLEANING_KEEP_RATIO_MAX}"
         )
     cleaning_center_size = int(cfg.feature_cleaning_center_size)
     max_center_size = min(int(cfg.image_size[0]), int(cfg.image_size[1]))
@@ -1423,6 +1432,9 @@ def train_one_patchcore(
     zone_cleaning_mode = zone_cleaning["mode"]
     zone_cleaning_k = int(zone_cleaning["k"])
     zone_cleaning_keep_ratio = float(zone_cleaning["keep_ratio"])
+    if isinstance(zone_cleaning["k"], bool) or zone_cleaning_k != zone_cleaning["k"] or not 1 <= zone_cleaning_k <= 200:
+        raise ValueError("feature_cleaning_k must be an integer between 1 and 200")
+    softpatch_options = normalize_softpatch_config(cfg.softpatch_plus_config)
     per_zone_cleaning = bool(cfg.feature_cleaning_by_zone)
     cleaning_stats: Dict[str, Any] = {
         "mode": zone_cleaning_mode,
@@ -1439,12 +1451,20 @@ def train_one_patchcore(
     if zone_cleaning_mode in (
         FEATURE_CLEANING_MODE_KNN_Q99,
         FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE,
+        FEATURE_CLEANING_MODE_SOFTPATCH_PLUS,
     ):
         from capi_patchcore_feature_cleaning import FeatureDensityCleaningCallback
         context_adaptive = (
             zone_cleaning_mode == FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE
         )
-        cleaning_callback = FeatureDensityCleaningCallback(
+        callback_type = FeatureDensityCleaningCallback
+        callback_options = {}
+        if zone_cleaning_mode == FEATURE_CLEANING_MODE_SOFTPATCH_PLUS:
+            from capi_patchcore_softpatch import SoftPatchPlusCleaningCallback, enable_softpatch_model
+            enable_softpatch_model(model.model)
+            callback_type = SoftPatchPlusCleaningCallback
+            callback_options["options"] = softpatch_options
+        cleaning_callback = callback_type(
             k=zone_cleaning_k,
             keep_ratio=zone_cleaning_keep_ratio,
             center_size=None if context_adaptive else cleaning_center_size,
@@ -1458,6 +1478,7 @@ def train_one_patchcore(
                 else "quantile"
             ),
             adaptive_mad_z=FEATURE_CLEANING_ADAPTIVE_MAD_Z,
+            **callback_options,
         )
         callbacks = [cleaning_callback]
         cleaning_stats["reason"] = "pending"
@@ -1467,11 +1488,13 @@ def train_one_patchcore(
                 if context_adaptive
                 else f"center={cleaning_center_size}x{cleaning_center_size}"
             )
+            if zone_cleaning_mode == FEATURE_CLEANING_MODE_SOFTPATCH_PLUS:
+                cleaning_detail = f"SoftPatch+ {softpatch_options}"
             log(
                 f"{unit_label}: feature cleaning enabled "
                 f"(scope={'per_zone' if per_zone_cleaning else cleaning_scope}, "
                 f"mode={zone_cleaning_mode}, "
-                f"cosine k={zone_cleaning_k}, keep={zone_cleaning_keep_ratio:.1%}, "
+                f"k={zone_cleaning_k}, keep={zone_cleaning_keep_ratio:.1%}, "
                 f"{cleaning_detail})"
             )
     elif (
@@ -2418,6 +2441,8 @@ def train_single_submodel(
                     report_tmp = report_path.with_suffix(report_path.suffix + ".tmp")
                     report_payload = {
                         "schema_version": 2,
+                        "score_metric": metrics["feature_cleaning"].get("score_metric", "cosine_distance"),
+                        "softpatch_plus_config": metrics["feature_cleaning"].get("softpatch_plus_config"),
                         "unit_label": unit_label,
                         "k": metrics["feature_cleaning"].get("k"),
                         "keep_ratio": metrics["feature_cleaning"].get("keep_ratio"),
@@ -2691,7 +2716,8 @@ def run_training_pipeline(
             "feature_pool_kernel_size": cfg.feature_pool_kernel_size,
             "feature_cleaning_mode": cfg.feature_cleaning_mode,
             "feature_cleaning_scope": cfg.feature_cleaning_scope,
-            "feature_cleaning_k": FEATURE_CLEANING_K,
+            "feature_cleaning_k": cfg.feature_cleaning_k,
+            "softpatch_plus_config": normalize_softpatch_config(cfg.softpatch_plus_config),
             "feature_cleaning_keep_ratio": cfg.feature_cleaning_keep_ratio,
             "feature_cleaning_center_size": cfg.feature_cleaning_center_size,
             "feature_cleaning_seed": FEATURE_CLEANING_SEED,
