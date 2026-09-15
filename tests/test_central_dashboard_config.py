@@ -75,6 +75,7 @@ def test_central_dashboard_first_read_can_import_local_file_config(tmp_path):
                 "productionDate": "",
             }
         ],
+        "watchModels": [],
     }
 
     assert db.get_central_dashboard_config(initial) == initial
