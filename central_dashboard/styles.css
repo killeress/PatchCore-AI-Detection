@@ -627,7 +627,6 @@ main {
     display: inline-flex;
     align-items: center;
     padding: 4px 7px;
-    margin-top: 4px;
     color: var(--amber);
     background: rgba(182, 106, 0, 0.09);
     border: 1px solid rgba(182, 106, 0, 0.28);
@@ -642,8 +641,11 @@ main {
     display: none;
 }
 
-.overview-line .overview-watch-badge {
-    margin-top: 0;
+.line-title-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 .overview-factory {
