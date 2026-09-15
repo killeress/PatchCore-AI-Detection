@@ -21,15 +21,16 @@ def padded_panel(*, noisy_edge):
 
 
 @pytest.mark.parametrize("working_reference", [False, True])
-def test_padded_panel_recovers_only_after_all_legacy_references_fail(tmp_path, working_reference):
+@pytest.mark.parametrize("profile", ["capi", "aapi"])
+def test_padded_panel_recovers_only_after_all_legacy_references_fail(tmp_path, working_reference, profile):
     prefixes = ["W0F00000", "STANDARD", "G0F00000"]
     for prefix in prefixes:
         image = padded_panel(noisy_edge=not (working_reference and prefix == "STANDARD"))
         assert cv2.imwrite(str(tmp_path / f"{prefix}_001.png"), image)
     cfg = pre.PreprocessConfig(
         tile_size=256, generate_grid_tiles=False, cache_processed_image=True,
-        product_resolution=(1920, 1200), aoi_only_fast_path_enabled=True,
-        **pre.panel_boundary_config_for_station("capi"),
+        product_resolution=(1920, 1200), aoi_only_fast_path_enabled=profile == "capi",
+        **pre.panel_boundary_config_for_station(profile),
     )
     _bbox, raw_polygon, eligible = pre._detect_large_panel_raw_boundary(padded_panel(noisy_edge=True), cfg)
     assert raw_polygon is not None
