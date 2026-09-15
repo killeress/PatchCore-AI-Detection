@@ -1539,6 +1539,10 @@ def train_one_patchcore(
         })
     if log:
         log(f"{unit_label}: engine.fit 完成，開始 export")
+    model.model.training_provenance = {
+        "mode": zone_cleaning_mode,
+        "softpatch_plus_config": dict(softpatch_options) if zone_cleaning_mode == SOFTPATCH_MODE else {},
+    }
     engine.export(model=model, export_type=ExportType.TORCH)
 
     candidates = list(run_root.rglob("weights/torch/model.pt"))

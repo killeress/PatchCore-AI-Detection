@@ -47,6 +47,7 @@ from capi_image_orientation import (
     use_capi_aoi_fast_path,
 )
 from capi_station_adapter import StationAdapter, create_station_adapter
+from capi_model_provenance import snapshot_model_training, log_model_training
 
 # ── 舊版 anomalib 相容性修補 ─────────────────────────────
 # 修補 1: PrecisionType stub
@@ -710,6 +711,7 @@ class CAPIInferencer:
 
         # fp16 KNN 優化: 將 memory bank 轉為 fp16，並 patch euclidean_dist 使用 tensor core
         self._optimize_model_fp16(inferencer_obj)
+        inferencer_obj._capi_training_provenance = snapshot_model_training(inferencer_obj, model_path)
 
         self._log_cuda_memory(f"after-load model={model_path.name}")
 
@@ -3207,12 +3209,14 @@ class CAPIInferencer:
 
         t_infer_start = time.time()
         anomaly_tiles: List[Tuple[TileInfo, float, Optional[np.ndarray]]] = []
+        logged_models = set()
         for ti in tile_infos:
             zone = ti.zone if ti.zone in ("inner", "edge") else "inner"
             active_thr = inner_thr if zone == "inner" else edge_thr
             ti.score_threshold = active_thr
             try:
                 model = self._get_model_for(self.config.machine_id, lighting, zone)
+                log_model_training(model, lighting, zone, logged_models)
             except Exception as exc:
                 raise RuntimeError(
                     f"[v2-debug] {lighting}/{zone} 模型載入失敗: {exc}"
@@ -7733,6 +7737,7 @@ class CAPIInferencer:
             if target_inferencer is None:
                 print(f"⚠️ {result.image_path.name} 無可用模型，跳過推論")
                 continue
+            log_model_training(target_inferencer, img_prefix, "shared")
 
             # 模型路由 log (僅在多模型模式下顯示)
             if self._model_mapping:
@@ -9853,12 +9858,14 @@ class CAPIInferencer:
                 f"edge: {edge_path or '?'} (thr={edge_thr:.3f})"
             )
 
+            logged_models = set()
             for ti in result.tiles:
                 zone = zone_by_tile_id.get(ti.tile_id, "inner")
                 threshold = inner_thr if zone == "inner" else edge_thr
                 ti.score_threshold = threshold
                 try:
                     model = self._get_model_for(self.config.machine_id, model_lighting, zone)
+                    log_model_training(model, model_lighting, zone, logged_models)
                     score, anomaly_map = self.predict_tile(
                         ti,
                         inferencer=model,
