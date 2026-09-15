@@ -29,6 +29,14 @@ http://<中控主機>/central_dashboard/
 
 若不使用 CAPI Web Server，仍可將整個 `central_dashboard` 資料夾複製到中控 PC 並直接雙擊 `index.html`。此備援模式無法存取 SQLite 或設定頁，會改讀同資料夾內的 `config.js`。
 
+## 重點機種關注
+
+設定頁的「重點機種關注」區塊維護全中控共用的機種代號清單（完整比對、大小寫不敏感，儲存時自動去空白、全形轉半形並轉大寫，筆數不限）。線體最近一次回報的機種符合清單時，總覽表與設備卡片的線體名稱旁會顯示琥珀色「★ 重點關注」徽章，滑鼠移入可看到命中的機種代號。線體離線、服務未運行或無機種資料時不顯示。
+
+清單儲存於中控主機 SQLite 的 `central_dashboard_watch_models` 表，與線體設定分開儲存；看板頁面重新載入時套用最新清單，線體機種則隨更新週期自動刷新。
+
+此功能依賴各 CAPI PC 回報 `latest_event.model_id`；未更新到支援版本的線體不會顯示徽章。直接雙擊 `index.html` 的備援模式沒有 SQLite 與設定頁，不支援此功能（清單視為空）。
+
 ## API 與 CORS
 
 直接雙擊時，看板網址會是 `file:///.../index.html`，線體 API 則是：
@@ -71,7 +79,7 @@ Access-Control-Allow-Origin: *
 - `hardware.gpu`（型號、使用率、溫度、VRAM）
 - `hardware.memory`（RAM 使用量）
 - `hardware.disk`（資料庫所在磁碟空間）
-- `latest_event`
+- `latest_event`（含 `glass_id`、`model_id`、`machine_no`、`judgment`、`time`、`duration`；`model_id` 為最近一筆回報的機種代號，重啟服務後需下一筆投片才會出現）
 
 硬體資訊會在各 CAPI PC 端快取 30 秒。即使既有本機頁面更頻繁呼叫 `/api/status`，也不會每次都重新執行硬體查詢。GPU 資料由 NVIDIA 驅動的 `nvidia-smi` 提供；未安裝 NVIDIA 驅動或查詢失敗時，GPU/VRAM 欄位顯示 `—`，其他狀態仍可正常顯示。
 

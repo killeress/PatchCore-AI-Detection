@@ -103,8 +103,25 @@
             title: String(raw.title || "寧波廠區 CAPI AI 中控看板"),
             refreshIntervalSeconds,
             requestTimeoutSeconds,
-            lines: Array.isArray(raw.lines) ? raw.lines : []
+            lines: Array.isArray(raw.lines) ? raw.lines : [],
+            watchModels: normalizeWatchModels(raw.watchModels)
         };
+    }
+
+    function normalizeWatchModels(value) {
+        if (!Array.isArray(value)) {
+            return [];
+        }
+        const seen = new Set();
+        const models = [];
+        for (const item of value) {
+            const code = String(item || "").trim().toUpperCase();
+            if (code && !seen.has(code)) {
+                seen.add(code);
+                models.push(code);
+            }
+        }
+        return models;
     }
 
     function toPositiveInteger(value, fallback) {
@@ -228,6 +245,12 @@
             badge.title = "正式上線設備";
             lineIdentity.appendChild(badge);
         }
+        const watchBadge = document.createElement("span");
+        watchBadge.className = "overview-watch-badge";
+        watchBadge.dataset.field = "overview-watch";
+        watchBadge.textContent = "★ 重點關注";
+        watchBadge.hidden = true;
+        lineIdentity.appendChild(watchBadge);
         lineCell.appendChild(lineIdentity);
 
         const ipCell = document.createElement("td");
@@ -442,6 +465,7 @@
                 : [],
             latestEvent: {
                 glassId: textValue(latestEvent.glass_id),
+                modelId: textValue(latestEvent.model_id),
                 machineNo: textValue(latestEvent.machine_no),
                 judgment: textValue(latestEvent.judgment || latestEvent.detail),
                 time: textValue(latestEvent.time),
@@ -490,6 +514,32 @@
         return Number.isFinite(number) ? number : null;
     }
 
+    function matchedWatchModel(state) {
+        if (!state || state.status !== "online" || !state.data) {
+            return "";
+        }
+        const modelId = state.data.latestEvent.modelId;
+        if (!modelId) {
+            return "";
+        }
+        return config.watchModels.includes(modelId.toUpperCase())
+            ? modelId
+            : "";
+    }
+
+    function updateWatchBadge(badge, state) {
+        if (!badge) {
+            return;
+        }
+        const matched = matchedWatchModel(state);
+        badge.hidden = !matched;
+        if (matched) {
+            badge.title = `正在生產關注機種：${matched}`;
+        } else {
+            badge.removeAttribute("title");
+        }
+    }
+
     function renderLineCard(state) {
         const card = state.card;
         const data = state.data;
@@ -500,6 +550,7 @@
             : [];
         card.dataset.health = healthAlerts.length ? healthAlerts[0].severity : "normal";
         setField(card, "status", statusText(state.status));
+        updateWatchBadge(card.querySelector('[data-field="watch-badge"]'), state);
 
         const errorElement = card.querySelector('[data-field="error"]');
         errorElement.hidden = !state.error;
@@ -570,6 +621,7 @@
             return;
         }
         row.dataset.state = state.status;
+        updateWatchBadge(row.querySelector('[data-field="overview-watch"]'), state);
         const status = row.querySelector('[data-field="overview-status"]');
         setText(status, statusText(state.status));
         status.title = state.error || statusText(state.status);
