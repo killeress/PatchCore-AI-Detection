@@ -97,7 +97,9 @@ class FeatureDensityCleaningCallback(Callback):
 
     def _install_coreset_trace(self, pl_module: object) -> None:
         """Wrap PatchCore subsampling so selected rows retain source-cell lineage."""
-        if self._coreset_trace_installed or not self.trace_sources:
+        if self._coreset_trace_installed or not (
+            self.trace_sources or getattr(self, "requires_coreset_indices", False)
+        ):
             return
         inner_model = getattr(pl_module, "model", None)
         original = getattr(inner_model, "subsample_embedding", None)
@@ -121,10 +123,14 @@ class FeatureDensityCleaningCallback(Callback):
             selected = callback._select_coreset_indices(memory_bank, sampling_ratio)
             model.memory_bank = memory_bank[selected]
             callback.record_coreset_indices(selected)
+            callback._on_coreset_selected(model, selected)
             model.subsample_embedding = original
 
         inner_model.subsample_embedding = MethodType(_traced_subsample, inner_model)
         self._coreset_trace_installed = True
+
+    def _on_coreset_selected(self, model: object, selected: list[int]) -> None:
+        """Extension point for metadata aligned with the selected memory bank."""
 
     @staticmethod
     def _select_coreset_indices(
@@ -953,7 +959,7 @@ class FeatureDensityCleaningCallback(Callback):
             for start in range(0, count, self.query_chunk):
                 end = min(start + self.query_chunk, count)
                 query = embedding[start:end].detach().to(device=device, dtype=torch.float32)
-                query.div_(torch.linalg.vector_norm(query, dim=1, keepdim=True).clamp_min_(1e-12))
+                query = query / torch.linalg.vector_norm(query, dim=1, keepdim=True).clamp_min_(1e-12)
                 similarities = query @ reference.T
 
                 global_start = offset + start

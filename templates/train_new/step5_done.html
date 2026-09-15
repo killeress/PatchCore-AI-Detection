@@ -117,16 +117,23 @@
             {% if cleaning_zones %}
               {% for zone in ["inner", "edge"] %}
                 {% set cfg = cleaning_zones.get(zone, {}) %}
-                {{ zone|upper }}：{% if cfg.get("mode", "off") == "off" %}關閉{% elif cfg.get("mode") == "context_overlap_adaptive_v1" %}重疊上下文、k={{ cfg.get("k", 30) }}、最多移除 {{ ((1 - cfg.get("keep_ratio", 0.99)) * 100)|round(1) }}%{% else %}舊版 KNN、k={{ cfg.get("k", 30) }}、保留 {{ (cfg.get("keep_ratio", 0.99) * 100)|round(1) }}%{% endif %}{% if not loop.last %}<br>{% endif %}
+                {{ zone|upper }}：{% if cfg.get("mode", "off") == "off" %}關閉{% elif cfg.get("mode") == "softpatch_plus_v1" %}SoftPatch+（Tile 適配）、k={{ cfg.get("k", 30) }}、保留 {{ (cfg.get("keep_ratio", 0.99) * 100)|round(1) }}%{% elif cfg.get("mode") == "context_overlap_adaptive_v1" %}重疊上下文、k={{ cfg.get("k", 30) }}、最多移除 {{ ((1 - cfg.get("keep_ratio", 0.99)) * 100)|round(1) }}%{% else %}舊版 KNN、k={{ cfg.get("k", 30) }}、保留 {{ (cfg.get("keep_ratio", 0.99) * 100)|round(1) }}%{% endif %}{% if not loop.last %}<br>{% endif %}
               {% endfor %}
             {% elif patchcore_params.get("feature_cleaning_mode", "off") == "off" %}
               關閉
+            {% elif patchcore_params.get("feature_cleaning_mode") == "softpatch_plus_v1" %}
+              SoftPatch+（Tile 適配；{{ patchcore_params.get("feature_cleaning_scope", "inner_only") }}；k={{ patchcore_params.get("feature_cleaning_k", 30) }}；保留 {{ (patchcore_params.get("feature_cleaning_keep_ratio", 0.99) * 100)|round(1) }}%）
             {% elif patchcore_params.get("feature_cleaning_mode") == "context_overlap_adaptive_v1" %}
               重疊上下文＋自適應門檻（範圍={% if patchcore_params.get("feature_cleaning_scope", "inner_only") == "inner_and_edge" %}inner + edge{% else %}僅 inner{% endif %}、k={{ patchcore_params.get("feature_cleaning_k", 30) }}、最多移除 {{ ((1 - patchcore_params.get("feature_cleaning_keep_ratio", 0.99)) * 100)|round(1) }}%）
             {% else %}
               舊版 KNN 清洗（範圍={% if patchcore_params.get("feature_cleaning_scope", "inner_only") == "inner_and_edge" %}inner + edge{% else %}僅 inner{% endif %}、k={{ patchcore_params.get("feature_cleaning_k", 30) }}、保留 {{ (patchcore_params.get("feature_cleaning_keep_ratio", 0.99) * 100)|round(1) }}%）
             {% endif %}
           </dd>
+          {% if patchcore_params.get("feature_cleaning_mode") == "softpatch_plus_v1" or cleaning_zones.get("inner", {}).get("mode") == "softpatch_plus_v1" or cleaning_zones.get("edge", {}).get("mode") == "softpatch_plus_v1" %}
+          {% set sp = patchcore_params.get("softpatch_plus_config", {}) %}
+          <dt>SoftPatch+ 設定</dt>
+          <dd>{{ sp.get("discriminator", "lof_gaussian") }}；推論權重{{ "開" if sp.get("soft_weight", true) else "關" }}；強度={{ sp.get("weight_strength", 1) }}；重疊保護{{ "開" if sp.get("context_overlap", true) else "關" }}；評分維度={{ sp.get("projection_dim", 32) }}；參考上限={{ sp.get("reference_size", 2048) }}。單一記憶庫，原特徵維度不變。</dd>
+          {% endif %}
           <dt>清洗有效區域</dt>
           <dd>
             {% set modes = namespace(context=false, legacy=false) %}
@@ -236,7 +243,7 @@
               {% set fc = info.feature_cleaning %}
               {% if fc.get("applied") %}
                 <span title="{{ fc.get('total', 0) }} → {{ fc.get('kept', 0) }}；threshold={{ fc.get('threshold', '—') }}；raw={{ fc.get('raw_outlier_count', '—') }}；overlap groups={{ fc.get('context_overlap_groups', '—') }}">
-                  {% if fc.get("mode") == "context_overlap_adaptive_v1" %}重疊上下文 k={{ fc.get("k", "—") }}／最多移除 {{ "%.1f"|format((1 - fc.get("keep_ratio", 1)) * 100) }}%{% else %}k={{ fc.get("k", "—") }}／保留 {{ "%.1f"|format(fc.get("keep_ratio", 0) * 100) }}%{% endif %}<br>
+                  {% if fc.get("mode") == "softpatch_plus_v1" %}SoftPatch+ k={{ fc.get("k", "—") }}／保留 {{ "%.1f"|format(fc.get("keep_ratio", 0.99) * 100) }}%{% elif fc.get("mode") == "context_overlap_adaptive_v1" %}重疊上下文 k={{ fc.get("k", "—") }}／最多移除 {{ "%.1f"|format((1 - fc.get("keep_ratio", 1)) * 100) }}%{% else %}k={{ fc.get("k", "—") }}／保留 {{ "%.1f"|format(fc.get("keep_ratio", 0) * 100) }}%{% endif %}<br>
                   移除 {{ fc.get("removed", 0) }}（{{ "%.2f"|format(fc.get("removed_ratio", 0) * 100) }}%）
                 </span>
               {% elif fc.get("reason") == "edge_scope_excluded" %}
@@ -297,7 +304,7 @@
       {% if visuals %}
       {% set legacy_rejected = info.feature_cleaning.get("rejected_overlap_excluded", 0) %}
       <details class="d5-trace-unit">
-        <summary>{{ unit_label }} · {{ info.feature_cleaning.get("affected_tiles", visuals|length) }} 個 Tile 受影響 · 距離移除 {{ info.feature_cleaning.get("distance_removed", info.feature_cleaning.get("removed", 0)) }}{% if legacy_rejected %} · 歷史 Reject 排除 {{ legacy_rejected }}{% endif %} · Coreset {{ info.feature_cleaning.get("coreset_selected", 0) }}</summary>
+        <summary>{{ unit_label }} · {{ info.feature_cleaning.get("affected_tiles", visuals|length) }} 個 Tile 受影響 · 離群移除 {{ info.feature_cleaning.get("distance_removed", info.feature_cleaning.get("removed", 0)) }}{% if legacy_rejected %} · 歷史 Reject 排除 {{ legacy_rejected }}{% endif %} · Coreset {{ info.feature_cleaning.get("coreset_selected", 0) }}</summary>
         <div class="d5-trace-grid">
           {% for visual in visuals %}
           <figure class="d5-trace-card">
@@ -319,7 +326,7 @@
                      data-tile-height='{{ visual.tile_height|tojson }}'></canvas>
             <figcaption>
               {{ visual.source_name }}<br>
-              距離移除 {{ visual.distance_removed_count }}{% if visual.rejected_overlap_count %} · 歷史 Reject 排除 {{ visual.rejected_overlap_count }}{% endif %} · Protected {{ visual.protected_count }} · Coreset {{ visual.coreset_count }}
+              離群移除 {{ visual.distance_removed_count }}{% if visual.rejected_overlap_count %} · 歷史 Reject 排除 {{ visual.rejected_overlap_count }}{% endif %} · Protected {{ visual.protected_count }} · Coreset {{ visual.coreset_count }}
               {% if visual.rejected_neighbor_tile_ids %}<br>歷史 Rejected 鄰居：{{ visual.rejected_neighbor_tile_ids|join(", ") }}{% endif %}
             </figcaption>
             <div class="d5-trace-cell-detail">移動滑鼠到 feature 格點查看判定明細</div>
@@ -704,7 +711,7 @@
 document.addEventListener('DOMContentLoaded', () => {
   const reasonLabels = {
     0: '保留：距離正常 (kept_normal)',
-    1: '移除：距離超過門檻 (removed_distance_outlier)',
+    1: '移除：離群分數超過門檻 (removed_distance_outlier)',
     2: '保留：重疊視角票數不一致 (kept_overlap_disagreement)',
     3: '保留：Tile 邊界保護 (protected_tile_boundary)',
     4: '歷史排除：Rejected Tile 覆蓋 (excluded_by_rejected_overlap)',
@@ -786,7 +793,7 @@ document.addEventListener('DOMContentLoaded', () => {
       detail.innerHTML =
         `格點：row ${row}, col ${col}, index ${index}<br>` +
         `Panel 座標：${panelX == null ? '—' : `${panelX.toFixed(1)}, ${panelY.toFixed(1)}`}<br>` +
-        `距離／門檻：${distance == null ? '—' : Number(distance).toFixed(6)} / ${threshold == null ? '—' : Number(threshold).toFixed(6)}<br>` +
+        `離群分數／門檻：${distance == null ? '—' : Number(distance).toFixed(6)} / ${threshold == null ? '—' : Number(threshold).toFixed(6)}<br>` +
         `異常票：${voteText}（accepted 視角 ${overlapViews[index] || 0}${legacyRejectedText}）<br>` +
         `最終原因：${reasonLabels[reasons[index]] || 'unknown'}<br>` +
         `進入 coreset：${coreset.has(index) ? '是' : '否'}`;

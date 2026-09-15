@@ -3290,6 +3290,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
     PATCHCORE_BUNDLE_LOCKED_TRAINING_PARAMS = frozenset({
         "feature_pool_kernel_size",
         "feature_cleaning_mode",
+        "feature_cleaning_k",
+        "softpatch_plus_config",
         "feature_cleaning_scope",
         "feature_cleaning_keep_ratio",
         "feature_cleaning_center_size",
@@ -15739,6 +15741,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             USER_TRAINABLE_PARAM_SPECS,
             normalize_feature_cleaning_by_zone,
         )
+        from capi_softpatch_config import cleaning_keep_ratio_min, normalize_softpatch_config
         if raw is None:
             return None, None
         if not isinstance(raw, dict):
@@ -15762,6 +15765,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 except ValueError as exc:
                     return None, f"training_params.{exc}"
                 continue
+            if key == "softpatch_plus_config":
+                try:
+                    cleaned[key] = normalize_softpatch_config(val)
+                except ValueError as exc:
+                    return None, f"training_params.{exc}"
+                continue
             if "choices" in spec:
                 if val not in spec["choices"]:
                     return None, (
@@ -15773,18 +15782,24 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             try:
                 if isinstance(val, bool):
                     raise TypeError
+                if key == "feature_cleaning_k" and float(val) != int(val):
+                    raise TypeError
                 if spec["type"] is int:
                     val = int(val)
                 else:
                     val = float(val)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 return None, f"training_params.{key} must be {spec['type'].__name__}"
-            if val < spec["min"] or val > spec["max"]:
+            if not spec["min"] <= val <= spec["max"]:
                 return None, (
                     f"training_params.{key} out of range "
                     f"[{spec['min']}, {spec['max']}]"
                 )
             cleaned[key] = val
+        if "feature_cleaning_keep_ratio" in cleaned:
+            minimum = cleaning_keep_ratio_min(cleaned.get("feature_cleaning_mode", "off"))
+            if cleaned["feature_cleaning_keep_ratio"] < minimum:
+                return None, f"training_params.feature_cleaning_keep_ratio out of range [{minimum}, 1.0] for this mode"
         return (cleaned or None), None
 
     @staticmethod
@@ -17386,6 +17401,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 feature_layers=patchcore_params.get("feature_layers", "layer2_layer3"),
                 feature_pool_kernel_size=patchcore_params.get("feature_pool_kernel_size", 3),
                 feature_cleaning_mode=patchcore_params.get("feature_cleaning_mode", "off"),
+                feature_cleaning_k=patchcore_params.get("feature_cleaning_k", 30),
+                softpatch_plus_config=patchcore_params.get("softpatch_plus_config") or {},
                 feature_cleaning_scope=patchcore_params.get(
                     "feature_cleaning_scope", "inner_only",
                 ),
@@ -19347,6 +19364,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 feature_layers=patchcore_params.get("feature_layers", "layer2_layer3"),
                 feature_pool_kernel_size=patchcore_params.get("feature_pool_kernel_size", 3),
                 feature_cleaning_mode=patchcore_params.get("feature_cleaning_mode", "off"),
+                feature_cleaning_k=patchcore_params.get("feature_cleaning_k", 30),
+                softpatch_plus_config=patchcore_params.get("softpatch_plus_config") or {},
                 feature_cleaning_scope=patchcore_params.get(
                     "feature_cleaning_scope", "inner_only",
                 ),
@@ -19691,6 +19710,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 feature_layers=patchcore_params.get("feature_layers", "layer2_layer3"),
                 feature_pool_kernel_size=patchcore_params.get("feature_pool_kernel_size", 3),
                 feature_cleaning_mode=patchcore_params.get("feature_cleaning_mode", "off"),
+                feature_cleaning_k=patchcore_params.get("feature_cleaning_k", 30),
+                softpatch_plus_config=patchcore_params.get("softpatch_plus_config") or {},
                 feature_cleaning_scope=patchcore_params.get(
                     "feature_cleaning_scope", "inner_only",
                 ),

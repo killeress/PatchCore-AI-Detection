@@ -1043,6 +1043,9 @@ const PANEL_MODE_LABELS = {
 };
 
 function formatFeatureCleaning(pp) {
+  const softpatchMode = 'softpatch_plus_v1';
+  const sp = pp.softpatch_plus_config || {};
+  const softpatchText = `SoftPatch+（Tile 適配；${sp.discriminator || 'lof_gaussian'}；權重${sp.soft_weight === false ? '關' : '開'}，強度=${sp.weight_strength ?? 1}；重疊保護${sp.context_overlap === false ? '關' : '開'}；維度=${sp.projection_dim ?? 32}；參考上限=${sp.reference_size ?? 2048}）`;
   const contextMode = 'context_overlap_adaptive_v1';
   const legacyMode = 'knn_cosine_q99_v1';
   const centerSize = Number(pp.feature_cleaning_center_size);
@@ -1057,6 +1060,7 @@ function formatFeatureCleaning(pp) {
       const ratioText = Number.isFinite(ratio)
         ? `${Math.round(ratio * 10000) / 100}%`
         : '未記錄';
+      if (cfg.mode === softpatchMode) return `${zone}: ${softpatchText}，k=${cfg.k ?? 30}，保留 ${ratioText}`;
       if (cfg.mode === contextMode) {
         const maxRemoval = Number.isFinite(ratio)
           ? `${Math.round((1 - ratio) * 10000) / 100}%`
@@ -1085,6 +1089,7 @@ function formatFeatureCleaning(pp) {
   const ratioText = Number.isFinite(keepRatio)
     ? `保留 ${Math.round(keepRatio * 10000) / 100}%（移除約 ${Math.round((1 - keepRatio) * 10000) / 100}%）`
     : '保留比例未記錄';
+  if (pp.feature_cleaning_mode === softpatchMode) return `${softpatchText}；${scope}；k=${k}；${ratioText}`;
   if (pp.feature_cleaning_mode === contextMode) {
     const maxRemoval = Number.isFinite(keepRatio)
       ? `${Math.round((1 - keepRatio) * 10000) / 100}%`
