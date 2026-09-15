@@ -255,6 +255,7 @@
                {% if training_scope.mode == 'partial' %}disabled{% endif %}>
         <span class="tp-hint">只供舊版 KNN 模式使用；真實上下文模式會依重疊位置自動判斷，不使用中央 384</span>
       </label>
+      <div class="tile-settings-row">
       <label class="tp-field">
         <span class="tp-label">tile step <span class="tp-default">預設 256</span></span>
         <input type="number" id="tile-stride" min="64" max="512" step="64"
@@ -262,6 +263,19 @@
                {% if training_scope.mode == 'partial' %}disabled{% endif %}>
         <span class="tp-hint">512 為原本不重疊切法；256 會讓 512×512 tile 產生 50% overlap</span>
       </label>
+      <aside id="softpatch-parameter-help" aria-labelledby="softpatch-help-title" hidden>
+        <h3 id="softpatch-help-title">參數說明</h3>
+        <dl>
+          <div><dt>離群評分</dt><dd>LOF 看附近密度；＋Gaussian 加看整體分布，兩者可做對照。</dd></div>
+          <div><dt>權重／強度</dt><dd>放大匹配到可疑特徵的異常分數；強度 1 為 1～2 倍，0 等同關閉。可能減少漏檢，也增加誤報；關閉仍會清洗。</dd></div>
+          <div><dt>重疊／邊界保護</dt><dd>減少邊界誤刪；重疊視角須一致才移除，受保護位置不加權。</dd></div>
+          <div><dt>評分特徵維度</dt><dd>越小通常越快，但可能損失區分資訊；模型仍保存原始特徵。</dd></div>
+          <div><dt>參考特徵上限</dt><dd>越大可涵蓋更多樣本，也越耗時、耗記憶體；不是模型特徵庫大小。</dd></div>
+          <div><dt>tile step</dt><dd>越小，切片與重疊越多，訓練成本越高；256 為 50% 重疊。</dd></div>
+        </dl>
+        <p>清洗刪除量由「保留比例」控制；保護機制可能降低實際刪除量。</p>
+      </aside>
+      </div>
     </div>
   </details>
 
@@ -463,6 +477,19 @@
   .fc-zone-grid { display:none;grid-column:1/-1;grid-template-columns:repeat(2,minmax(240px,1fr));gap:12px; }
   #softpatch-settings { padding-top:12px;border-top:1px solid #45475a; }
   #softpatch-settings > .tp-hint { grid-column:1/-1; }
+  .tile-settings-row { grid-column:1/-1;display:grid;grid-template-columns:minmax(220px,1fr) minmax(0,2fr);gap:12px;align-items:start; }
+  #softpatch-parameter-help { padding:10px 12px;border:1px solid #45475a;border-radius:8px;background:#292c3e;color:#a6adc8;font-size:.74rem;line-height:1.5; }
+  #softpatch-parameter-help[hidden] { display:none; }
+  #softpatch-parameter-help h3 { margin:0 0 6px;color:#cdd6f4;font-size:.8rem; }
+  #softpatch-parameter-help dl { margin:0; }
+  #softpatch-parameter-help dl > div { display:grid;grid-template-columns:7.5rem minmax(0,1fr);gap:8px;margin-top:4px; }
+  #softpatch-parameter-help dt { color:#cdd6f4;font-weight:600; }
+  #softpatch-parameter-help dd { margin:0; }
+  #softpatch-parameter-help p { margin:8px 0 0;padding-top:6px;border-top:1px solid #45475a; }
+  @media (max-width:760px) {
+    .tile-settings-row { grid-template-columns:minmax(0,1fr); }
+    #softpatch-parameter-help dl > div { grid-template-columns:minmax(0,1fr);gap:1px;margin-top:7px; }
+  }
   .fc-zone-card { display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:10px;padding:12px;border:1px solid #45475a;border-radius:8px;background:#1e1e2e; }
   .fc-zone-title { grid-column:1/-1;font-weight:800;letter-spacing:.08em;color:#89b4fa; }
   .fc-zone-edge .fc-zone-title { color:#fab387; }
@@ -1423,6 +1450,7 @@ function syncFeatureCleaningLayout() {
   const usesSoftPatch = activeModes.includes('softpatch_plus_v1');
   const settings = document.getElementById('softpatch-settings');
   settings.style.display = usesSoftPatch ? 'grid' : 'none';
+  document.getElementById('softpatch-parameter-help').hidden = !usesSoftPatch;
   settings.querySelectorAll('input,select').forEach(el => { el.disabled = !usesSoftPatch || partial; });
   for (const zone of ['inner', 'edge', 'shared']) {
     const prefix = zone === 'shared' ? 'tp-feature_cleaning_' : `tp-feature_cleaning_${zone}_`;

@@ -60,6 +60,12 @@
 
 模型庫與訓練完成頁會顯示配方。清洗報告的 `score_metric=outlier_rank`，沿用 `distances` 陣列欄位保存排名分數，以相容既有可視化；數值不再代表 cosine 距離。
 
+## 推論紀錄辨識
+
+推論 Log → 中文摘要 →「本次使用模型」會依光源與 INNER／EDGE 列出清洗方式、LOF／LOF＋Gaussian、推論權重開關、強度、實際倍率範圍與模型路徑。原始 Log 使用 `[MODEL_TRAINING]` 保存當次資訊，快取模型亦會記錄。
+
+新訓練模型將配方嵌入模型；先前匯出的模型在載入時由同目錄 manifest 補讀配方，並以實際載入的模型類別辨識 SoftPatch+。更換檔案後仍使用舊快取時，紀錄保留舊載入資訊；重新載入後才更新。沒有配方的欄位顯示未記錄，不推定為清洗關閉。此功能僅適用更新後產生的推論紀錄，既有歷史 Log 無法回補。
+
 ## 對照實驗
 
 固定相同 Panel／前處理／coreset ratio／precision，比較：清洗關閉、現有重疊清洗、僅 LOF 無權重、LOF＋Gaussian 無權重、LOF＋Gaussian 有權重。

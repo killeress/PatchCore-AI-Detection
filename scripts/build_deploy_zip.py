@@ -51,6 +51,7 @@ CODE_FILES = [
     "mark_shadow/README_WORKER_HOTFIX.txt",
     "capi_mes_report.py",
     "capi_model_registry.py",
+    "capi_model_provenance.py",
     "capi_model_validation.py",
     "capi_preprocess.py",
     "capi_patchcore_feature_cleaning.py",

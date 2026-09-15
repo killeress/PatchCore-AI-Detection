@@ -271,6 +271,8 @@ def test_training_wiring_exports_weighted_model(tmp_path, monkeypatch):
     loaded = torch.load(path, weights_only=False)["model"]
     assert isinstance(loaded, SoftPatchPlusModel)
     assert loaded.softpatch_weights.shape == (3,)
+    assert loaded.training_provenance["mode"] == "softpatch_plus_v1"
+    assert loaded.training_provenance["softpatch_plus_config"]["soft_weight"] is True
     assert stats["feature_cleaning"]["mode"] == "softpatch_plus_v1"
     assert stats["feature_cleaning"]["k"] == 6
     assert stats["feature_cleaning"]["removed"] > 0
@@ -327,6 +329,8 @@ def test_real_backbone_coreset_torch_export_and_inferencer_reload(tmp_path, monk
     assert isinstance(inner, SoftPatchPlusModel)
     assert inner.memory_bank.dtype == torch.float16
     torch.testing.assert_close(inner.softpatch_weights, original_weights)
+    assert deployed._capi_training_provenance["mode"] == "softpatch_plus_v1"
+    assert deployed._capi_training_provenance["weight_max"] == pytest.approx(float(original_weights.max()))
 
     # Exercise the production uint8 tile entry point, precision hook and KNN.
     tile = np.random.default_rng(42).integers(0, 256, (64, 64, 3), dtype=np.uint8)
@@ -339,6 +343,7 @@ def test_real_backbone_coreset_torch_export_and_inferencer_reload(tmp_path, monk
     assert engine.reload_submodel("M", "G0F00000", "inner") is True
     updated = engine._get_model_for("M", "G0F00000", "inner")
     assert updated is not deployed
+    assert updated._capi_training_provenance["weight_max"] == pytest.approx(float(original_weights.max()) * 2)
     updated_score, updated_map = engine._predict_tile(updated, tile)
     torch.testing.assert_close(updated.model.model.softpatch_weights, original_weights * 2)
     assert updated_score == pytest.approx(score * 2, rel=1e-5)
