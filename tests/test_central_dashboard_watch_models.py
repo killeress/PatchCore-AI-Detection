@@ -245,6 +245,7 @@ def test_frontend_watch_badge_wiring():
     assert "正在生產關注機種：" in app_js
 
     assert 'data-field="watch-badge" hidden>★ 重點關注</span>' in index_html
+    assert 'class="line-title-row"' in index_html
 
     assert ".overview-watch-badge," in styles_css
     badge_css = styles_css.split(".overview-watch-badge,", 1)[1][:400]
@@ -253,7 +254,9 @@ def test_frontend_watch_badge_wiring():
     assert "border: 1px solid rgba(182, 106, 0, 0.28);" in badge_css
     assert "padding: 4px 7px;" in badge_css
     assert "#f6c945" not in badge_css
+    assert "margin-top" not in badge_css
     assert ".overview-watch-badge[hidden]," in styles_css
+    assert ".line-title-row {" in styles_css
 
 
 def test_settings_page_has_watch_models_section():
