@@ -4969,8 +4969,7 @@ class CAPIInferencer:
 
         # --- 左上: Heatmap Overlay ---
         if anomaly_map is not None:
-            from capi_heatmap import heatmap_to_uint8
-            norm = heatmap_to_uint8(anomaly_map)
+            norm = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             norm = cv2.resize(norm, (sz, sz))
             heatmap_color = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
             panel_tl = cv2.addWeighted(base, 0.5, heatmap_color, 0.5, 0)
@@ -5142,8 +5141,7 @@ class CAPIInferencer:
         hot_mask = cv2.dilate(hot_mask, kernel, iterations=2)
 
         # --- 左上: Heatmap + Hot Zone ---
-        from capi_heatmap import heatmap_to_uint8
-        norm = heatmap_to_uint8(anomaly_f)
+        norm = cv2.normalize(anomaly_f, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         norm_rsz = cv2.resize(norm, (sz, sz))
         hm_color = cv2.applyColorMap(norm_rsz, cv2.COLORMAP_JET)
         panel_tl = cv2.addWeighted(base_sm, 0.5, hm_color, 0.5, 0)

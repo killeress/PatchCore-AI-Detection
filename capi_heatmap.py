@@ -100,7 +100,11 @@ def render_pc_overlay(
         amap = cv2.resize(amap, (w, h))
     if fg_mask is not None:
         amap = amap * (fg_mask.astype(np.float32) / 255.0)
-    amap_u8 = heatmap_to_uint8(amap)
+    peak = float(np.max(amap)) if amap.size > 0 else 0.0
+    if peak > 1e-6:
+        amap_u8 = (amap / peak * 255.0).clip(0, 255).astype(np.uint8)
+    else:
+        amap_u8 = np.zeros((h, w), dtype=np.uint8)
     heatmap = cv2.applyColorMap(amap_u8, cv2.COLORMAP_JET)
     panel = cv2.addWeighted(roi_bgr, 0.5, heatmap, 0.5, 0)
     if fg_mask is not None:
@@ -550,9 +554,12 @@ class HeatmapManager:
         else:
             base = tile_image.copy()
 
-        # The model already supplies normalized values. Display clipping must
-        # not re-scale every tile or erase a constant positive map.
-        norm_map = heatmap_to_uint8(anomaly_map)
+        # 將 anomaly_map 正規化到 0-255（僅用於顯示）
+        if anomaly_map.max() > anomaly_map.min():
+            norm_map = ((anomaly_map - anomaly_map.min()) /
+                        (anomaly_map.max() - anomaly_map.min()) * 255).astype(np.uint8)
+        else:
+            norm_map = np.zeros_like(anomaly_map, dtype=np.uint8)
 
         # 調整大小匹配 tile
         if norm_map.shape != base.shape[:2]:
@@ -689,7 +696,7 @@ class HeatmapManager:
 
         # --- Panel 2: Heatmap Overlay ---
         if anomaly_map is not None:
-            norm_map = heatmap_to_uint8(anomaly_map)
+            norm_map = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             heatmap_color = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
             heatmap_color = cv2.resize(heatmap_color, (tile_size, tile_size))
             heatmap_panel = cv2.addWeighted(preprocessed, 0.5, heatmap_color, 0.5, 0)
