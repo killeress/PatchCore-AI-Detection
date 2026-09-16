@@ -6271,10 +6271,13 @@ class CAPIInferencer:
 
         return defects
 
-    @staticmethod
-    def _aoi_prefix_matches(report_prefix: str, target_prefix: str) -> bool:
+    def _aoi_prefix_matches(self, report_prefix: str, target_prefix: str) -> bool:
         if not report_prefix or not target_prefix:
             return False
+        # Compare internal lighting keys while preserving station-specific naming.
+        # CAPI U0F00000 is STANDARD; AAPI keeps these lightings distinct.
+        report_prefix = self._get_image_prefix(report_prefix)
+        target_prefix = self._get_image_prefix(target_prefix)
         return (
             report_prefix == target_prefix
             or report_prefix.startswith(target_prefix + "_")
@@ -7200,13 +7203,13 @@ class CAPIInferencer:
         target_type = bomb_info["defect_type"]
         
         for bomb in self.config.bomb_defects:
-            if (bomb.image_prefix == target_prefix and 
+            if (self._aoi_prefix_matches(bomb.image_prefix, target_prefix) and
                 bomb.defect_type == target_type):
                 return bomb.defect_code
         
         # 若只有 prefix 匹配 (不分 type)，也可以 fallback
         for bomb in self.config.bomb_defects:
-            if bomb.image_prefix == target_prefix:
+            if self._aoi_prefix_matches(bomb.image_prefix, target_prefix):
                 return bomb.defect_code
         
         return "UNKNOWN"
@@ -7244,8 +7247,7 @@ class CAPIInferencer:
     
         for bomb in bombs:
             # 比對前綴 (支援帶時間戳的檔名, e.g. "G0F00000" 匹配 "G0F00000_031447")
-            if not (image_prefix == bomb.image_prefix or 
-                    image_prefix.startswith(bomb.image_prefix + "_")):
+            if not self._aoi_prefix_matches(image_prefix, bomb.image_prefix):
                 continue
             
             if bomb.defect_type == "line" and len(bomb.coordinates) >= 2:
@@ -8250,8 +8252,7 @@ class CAPIInferencer:
                             aoi_matches_bomb = False
                             tolerance = self.config.bomb_match_tolerance
                             for bomb in active_bombs:
-                                if not (img_prefix == bomb.image_prefix or
-                                        img_prefix.startswith(bomb.image_prefix + "_")):
+                                if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                                     continue
                                 if bomb.defect_type == "point":
                                     for coord in bomb.coordinates:
@@ -8290,8 +8291,7 @@ class CAPIInferencer:
                     if not result.anomaly_tiles or result.raw_bounds is None:
                         continue
                     img_prefix = self._get_image_prefix(result.image_path.name)
-                    if not (img_prefix == bomb.image_prefix or
-                            img_prefix.startswith(bomb.image_prefix + "_")):
+                    if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                         continue
                     # 計算此 bomb line 已確認的 tile 數
                     confirmed = sum(
@@ -9036,8 +9036,7 @@ class CAPIInferencer:
             for bomb in active_bombs:
                 if bomb.defect_type != "point":
                     continue
-                if not (img_prefix == bomb.image_prefix or
-                        img_prefix.startswith(bomb.image_prefix + "_")):
+                if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                     continue
                 for coord in bomb.coordinates:
                     dx = abs(product_x - coord[0])
@@ -9113,8 +9112,7 @@ class CAPIInferencer:
                         aoi_matches_bomb = False
                         tolerance = self.config.bomb_match_tolerance
                         for bomb in active_bombs:
-                            if not (img_prefix == bomb.image_prefix or
-                                    img_prefix.startswith(bomb.image_prefix + "_")):
+                            if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                                 continue
                             if bomb.defect_type == "point":
                                 for coord in bomb.coordinates:
@@ -9203,8 +9201,7 @@ class CAPIInferencer:
                 if not result.anomaly_tiles or result.raw_bounds is None:
                     continue
                 img_prefix = self._get_image_prefix(result.image_path.name)
-                if not (img_prefix == bomb.image_prefix or
-                        img_prefix.startswith(bomb.image_prefix + "_")):
+                if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                     continue
                 confirmed = sum(
                     1 for t, _, _ in result.anomaly_tiles
@@ -10371,8 +10368,7 @@ class CAPIInferencer:
             active_bombs = self.config.bomb_defects
             
         for bomb in active_bombs:
-            if not (img_prefix == bomb.image_prefix or
-                    img_prefix.startswith(bomb.image_prefix + "_")):
+            if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                 continue
             
             if bomb.defect_type == "line" and len(bomb.coordinates) >= 2:
