@@ -16327,7 +16327,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             )
             apply_user_training_params(cfg, training_params, log_fn=log)
             pre_cfg = PreprocessConfig(
-                **panel_boundary_config_for_station(station_adapter.profile),
+                **panel_boundary_config_for_station(station_adapter.profile, for_training=True),
                 tile_stride=cfg.tile_stride,
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
                 image_preprocess_pipelines=cfg.image_preprocess_pipelines,
@@ -16703,7 +16703,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 if lighting not in LIGHTING_PREFIXES:
                     lighting = "STANDARD"
                 pre_cfg = PreprocessConfig(
-                    **panel_boundary_config_for_station(station_adapter.profile),
+                    **panel_boundary_config_for_station(station_adapter.profile, for_training=True),
                     tile_stride=tile_stride,
                     image_preprocess_pipeline=preview_pipeline,
                     preprocess_after_tiling=True,
@@ -16777,7 +16777,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     if lighting not in LIGHTING_PREFIXES:
                         lighting = "STANDARD"
                     pre_cfg = PreprocessConfig(
-                        **panel_boundary_config_for_station(station_adapter.profile),
+                        **panel_boundary_config_for_station(station_adapter.profile, for_training=True),
                         tile_stride=tile_stride,
                         image_preprocess_pipeline=pipeline,
                         cache_processed_image=True,
@@ -16883,7 +16883,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         )
 
         preprocess_cfg = PreprocessConfig(
-            **panel_boundary_config_for_station(station_adapter.profile),
+            **panel_boundary_config_for_station(station_adapter.profile, for_training=True),
             tile_stride=int(job.get("tile_stride") or 512),
             image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
             image_preprocess_pipelines=job.get("image_preprocess_pipelines") or {},
@@ -16955,7 +16955,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 return {"name": path.name, "mtime_ns": 0, "size": 0}
 
         cache_payload = {
-            "version": 13,
+            "version": 15,
             "lighting": lighting,
             "panel_dir": str(preview_panel_dir.resolve()),
             "files": {
@@ -16974,7 +16974,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
         preview_dir = Path(".tmp/train_new_thumbs") / job_id / "preview"
         preview_dir.mkdir(parents=True, exist_ok=True)
-        preview_path = preview_dir / f"{lighting}_v14_{cache_key}.jpg"
+        preview_path = preview_dir / f"{lighting}_v15_{cache_key}.jpg"
         if preview_path.exists():
             self._send_binary(str(preview_path))
             return
@@ -19389,7 +19389,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             _log(f"前處理 selected panels（只保留 lighting={lighting}）")
             preprocess_cfg = PreprocessConfig(
                 **panel_boundary_config_for_station(
-                    CAPIWebHandler._train_new_station_adapter(server_inst).profile
+                    CAPIWebHandler._train_new_station_adapter(server_inst).profile,
+                    for_training=True,
                 ),
                 tile_stride=cfg.tile_stride,
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
