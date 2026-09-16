@@ -199,3 +199,59 @@ def test_server_wiring_two_call_sites_and_backfill():
     assert src.count("track_client_model_switch(self.db, server_status.last_model_by_machine, server_status.lock, parsed)") == 2
     assert "server_status.last_model_by_machine.update(" in src
     assert "self.last_model_by_machine = {}" in src
+
+
+import capi_web
+
+
+def test_dashboard_alert_config_defaults():
+    cfg = capi_web._dashboard_alert_config(None)
+    assert cfg == {
+        "halt_window_minutes": 120,
+        "halt_max_panels": 20,
+        "model_switch_alert_minutes": 120,
+    }
+
+
+def test_dashboard_alert_config_override_and_garbage():
+    cfg = capi_web._dashboard_alert_config(
+        {"dashboard_alert": {"halt_max_panels": 30, "halt_window_minutes": "bad"}}
+    )
+    assert cfg["halt_max_panels"] == 30
+    assert cfg["halt_window_minutes"] == 120  # 異常值回退預設
+
+
+def test_line_activity_payload_halted_boundary(tmp_path):
+    db_path = tmp_path / "line.db"
+    db = CAPIDatabase(db_path)
+    cfg = capi_web._dashboard_alert_config(None)
+    _insert_records(db_path, 20)
+    payload = capi_web._build_line_activity_payload(db, cfg)
+    assert payload["is_halted"] is True
+    assert payload["panel_count"] == 20
+    assert payload["halt_threshold"] == 20
+    _insert_records(db_path, 1)
+    capi_web._line_activity_cache.clear()  # 繞過 30 秒快取
+    payload = capi_web._build_line_activity_payload(db, cfg)
+    assert payload["is_halted"] is False
+    assert payload["panel_count"] == 21
+
+
+def test_model_switch_alert_payload(tmp_path):
+    db = CAPIDatabase(tmp_path / "line.db")
+    cfg = capi_web._dashboard_alert_config(None)
+    payload = capi_web._build_model_switch_alert_payload(db, cfg)
+    assert payload["active"] is False
+    assert payload["events"] == []
+    db.record_model_switch_event("M1", "MODEL_A", "MODEL_B")
+    payload = capi_web._build_model_switch_alert_payload(db, cfg)
+    assert payload["active"] is True
+    assert payload["events"][0]["new_model"] == "MODEL_B"
+    assert payload["events"][0]["expires_at"]
+
+
+def test_api_status_handler_wires_new_blocks():
+    from pathlib import Path
+    src = (Path(__file__).parent.parent / "capi_web.py").read_text(encoding="utf-8")
+    assert 'status["line_activity"] = _build_line_activity_payload(' in src
+    assert 'status["model_switch_alert"] = _build_model_switch_alert_payload(' in src
