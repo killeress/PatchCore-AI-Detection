@@ -1,8 +1,6 @@
 """中控看板線體狀態：停線判斷與機種切換提醒的 DB 層測試。"""
 import sqlite3
 
-import pytest
-
 from capi_database import CAPIDatabase
 
 
@@ -192,11 +190,13 @@ def test_machines_tracked_independently(tmp_path):
     assert baseline == {"M1": "MODEL_A", "M2": "MODEL_B"}
 
 
-def test_server_wiring_two_call_sites_and_backfill():
-    """capi_server.py 兩條判定路徑都呼叫偵測；啟動時回填基線；tracker 有容器欄位。"""
+def test_server_wiring_all_judgment_paths_and_backfill():
+    """capi_server.py 全部判定路徑（HY 略過、正常推論、內部錯誤）都呼叫偵測；
+    啟動時回填基線；tracker 有容器欄位。
+    （ProtocolError 路徑為解析失敗、無 parsed 可用，故不呼叫。）"""
     from pathlib import Path
     src = (Path(__file__).parent.parent / "capi_server.py").read_text(encoding="utf-8")
-    assert src.count("track_client_model_switch(self.db, server_status.last_model_by_machine, server_status.lock, parsed)") == 2
+    assert src.count("track_client_model_switch(self.db, server_status.last_model_by_machine, server_status.lock, parsed)") == 3
     assert "server_status.last_model_by_machine.update(" in src
     assert "self.last_model_by_machine = {}" in src
 
@@ -270,6 +270,7 @@ def test_frontend_halted_state_wiring():
     assert '.line-card[data-state="halted"]::before' in styles
     assert 'tr[data-state="halted"]' in styles
     assert '[data-theme="dark"] [data-state="halted"]' in styles
+    assert 'tr[data-production="true"][data-state="halted"]' in styles
 
 
 def test_frontend_watch_badge_survives_halted():
