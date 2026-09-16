@@ -3354,6 +3354,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
     PATCHCORE_BUNDLE_LOCKED_TRAINING_PARAMS = frozenset({
         "feature_pool_kernel_size",
         "feature_cleaning_mode",
+        "feature_cleaning_k",
+        "softpatch_plus_config",
         "feature_cleaning_scope",
         "feature_cleaning_keep_ratio",
         "feature_cleaning_center_size",
@@ -8784,7 +8786,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     tile_img = tile.image.copy()
                     if len(tile_img.shape) == 2:
                         tile_img = cv2.cvtColor(tile_img, cv2.COLOR_GRAY2BGR)
-                    norm_map = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                    from capi_heatmap import heatmap_to_uint8
+                    norm_map = heatmap_to_uint8(anomaly_map)
                     heatmap_color = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
                     if heatmap_color.shape[:2] != tile_img.shape[:2]:
                         heatmap_color = cv2.resize(heatmap_color, (tile_img.shape[1], tile_img.shape[0]))
@@ -10527,7 +10530,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                         tile_image, anomaly_map, alpha=0.5
                     )
                 else:
-                    norm_map = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                    from capi_heatmap import heatmap_to_uint8
+                    norm_map = heatmap_to_uint8(anomaly_map)
                     heatmap_color = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
                     if heatmap_color.shape[:2] != crop_bgr.shape[:2]:
                         heatmap_color = cv2.resize(heatmap_color, (crop_bgr.shape[1], crop_bgr.shape[0]))
@@ -10802,9 +10806,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     )
 
                     # 產生可與表格排名對照的峰值圖；文字說明留在中文 UI。
-                    norm_map = cv2.normalize(
-                        anomaly_array, None, 0, 255, cv2.NORM_MINMAX
-                    ).astype(np.uint8)
+                    from capi_heatmap import heatmap_to_uint8
+                    norm_map = heatmap_to_uint8(anomaly_array)
                     peak_overlay = cv2.applyColorMap(
                         norm_map, cv2.COLORMAP_JET
                     )
@@ -10907,12 +10910,14 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             model_normalization_enabled = getattr(
                 tile_info, "model_normalization_enabled", None
             )
+            model_normalization_mode = getattr(tile_info, "model_normalization_mode", None)
             normalization_diag = score_normalization_diagnostic(
                 raw_model_score,
                 model_image_min,
                 model_image_max,
                 model_image_threshold,
                 normalization_enabled=model_normalization_enabled,
+                normalization_mode=model_normalization_mode,
             )
             score_breakdown = {
                 "raw_patchcore_score": round(
@@ -10935,6 +10940,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     if model_image_threshold is not None else None
                 ),
                 "model_normalization_enabled": model_normalization_enabled,
+                "model_normalization_mode": model_normalization_mode,
+                "model_pixel_max": _finite_tile_diag("model_pixel_max"),
                 "raw_anomaly_map_max": (
                     round(_finite_tile_diag("raw_anomaly_map_max"), 6)
                     if _finite_tile_diag("raw_anomaly_map_max") is not None else None
@@ -15812,6 +15819,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             USER_TRAINABLE_PARAM_SPECS,
             normalize_feature_cleaning_by_zone,
         )
+        from capi_softpatch_config import cleaning_keep_ratio_min, normalize_softpatch_config
         if raw is None:
             return None, None
         if not isinstance(raw, dict):
@@ -15835,6 +15843,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 except ValueError as exc:
                     return None, f"training_params.{exc}"
                 continue
+            if key == "softpatch_plus_config":
+                try:
+                    cleaned[key] = normalize_softpatch_config(val)
+                except ValueError as exc:
+                    return None, f"training_params.{exc}"
+                continue
             if "choices" in spec:
                 if val not in spec["choices"]:
                     return None, (
@@ -15846,18 +15860,24 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             try:
                 if isinstance(val, bool):
                     raise TypeError
+                if key == "feature_cleaning_k" and float(val) != int(val):
+                    raise TypeError
                 if spec["type"] is int:
                     val = int(val)
                 else:
                     val = float(val)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 return None, f"training_params.{key} must be {spec['type'].__name__}"
-            if val < spec["min"] or val > spec["max"]:
+            if not spec["min"] <= val <= spec["max"]:
                 return None, (
                     f"training_params.{key} out of range "
                     f"[{spec['min']}, {spec['max']}]"
                 )
             cleaned[key] = val
+        if "feature_cleaning_keep_ratio" in cleaned:
+            minimum = cleaning_keep_ratio_min(cleaned.get("feature_cleaning_mode", "off"))
+            if cleaned["feature_cleaning_keep_ratio"] < minimum:
+                return None, f"training_params.feature_cleaning_keep_ratio out of range [{minimum}, 1.0] for this mode"
         return (cleaned or None), None
 
     @staticmethod
@@ -16385,7 +16405,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             )
             apply_user_training_params(cfg, training_params, log_fn=log)
             pre_cfg = PreprocessConfig(
-                **panel_boundary_config_for_station(station_adapter.profile),
+                **panel_boundary_config_for_station(station_adapter.profile, for_training=True),
                 tile_stride=cfg.tile_stride,
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
                 image_preprocess_pipelines=cfg.image_preprocess_pipelines,
@@ -16761,7 +16781,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 if lighting not in LIGHTING_PREFIXES:
                     lighting = "STANDARD"
                 pre_cfg = PreprocessConfig(
-                    **panel_boundary_config_for_station(station_adapter.profile),
+                    **panel_boundary_config_for_station(station_adapter.profile, for_training=True),
                     tile_stride=tile_stride,
                     image_preprocess_pipeline=preview_pipeline,
                     preprocess_after_tiling=True,
@@ -16835,7 +16855,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     if lighting not in LIGHTING_PREFIXES:
                         lighting = "STANDARD"
                     pre_cfg = PreprocessConfig(
-                        **panel_boundary_config_for_station(station_adapter.profile),
+                        **panel_boundary_config_for_station(station_adapter.profile, for_training=True),
                         tile_stride=tile_stride,
                         image_preprocess_pipeline=pipeline,
                         cache_processed_image=True,
@@ -16941,7 +16961,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         )
 
         preprocess_cfg = PreprocessConfig(
-            **panel_boundary_config_for_station(station_adapter.profile),
+            **panel_boundary_config_for_station(station_adapter.profile, for_training=True),
             tile_stride=int(job.get("tile_stride") or 512),
             image_preprocess_pipeline=job.get("image_preprocess_pipeline") or [],
             image_preprocess_pipelines=job.get("image_preprocess_pipelines") or {},
@@ -17013,7 +17033,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 return {"name": path.name, "mtime_ns": 0, "size": 0}
 
         cache_payload = {
-            "version": 13,
+            "version": 15,
             "lighting": lighting,
             "panel_dir": str(preview_panel_dir.resolve()),
             "files": {
@@ -17032,7 +17052,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
         preview_dir = Path(".tmp/train_new_thumbs") / job_id / "preview"
         preview_dir.mkdir(parents=True, exist_ok=True)
-        preview_path = preview_dir / f"{lighting}_v14_{cache_key}.jpg"
+        preview_path = preview_dir / f"{lighting}_v15_{cache_key}.jpg"
         if preview_path.exists():
             self._send_binary(str(preview_path))
             return
@@ -17423,6 +17443,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             shutil.copy2(bundle_dir / "machine_config.yaml", candidate_dir / "machine_config.yaml")
             import yaml
             recipe = yaml.safe_load((candidate_dir / "machine_config.yaml").read_text(encoding="utf-8")) or {}
+            original_recipe_text = (candidate_dir / "machine_config.yaml").read_text(encoding="utf-8")
+            reset_score_thresholds = False
             baseline_thresholds = recipe.get("threshold_mapping") or {}
             _write_manifest(candidate_dir, manifest)
             original_job_id = manifest.get("trained_with_job_id") or bundle.get("job_id")
@@ -17459,6 +17481,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 feature_layers=patchcore_params.get("feature_layers", "layer2_layer3"),
                 feature_pool_kernel_size=patchcore_params.get("feature_pool_kernel_size", 3),
                 feature_cleaning_mode=patchcore_params.get("feature_cleaning_mode", "off"),
+                feature_cleaning_k=patchcore_params.get("feature_cleaning_k", 30),
+                softpatch_plus_config=patchcore_params.get("softpatch_plus_config") or {},
                 feature_cleaning_scope=patchcore_params.get(
                     "feature_cleaning_scope", "inner_only",
                 ),
@@ -17523,6 +17547,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 )
 
                 metrics = result["metrics"]
+                reset_score_thresholds |= bool(metrics.get("normalization_threshold_reset"))
                 metrics["used_tile_ids"] = result["used_tile_ids"]
                 new_auroc = metrics.get("auroc")
                 new_tile_count = result["tile_count"]
@@ -17573,9 +17598,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 caught = metrics.get("ng_caught_count", 0)
                 ng_n = metrics.get("ng_count", 0)
                 auroc_str = f", AUROC={new_auroc:.3f}({metrics.get('auroc_grade','')})" if new_auroc is not None else ""
+                threshold_reset = metrics.get("normalization_threshold_reset")
+                current_threshold = threshold_reset["current"] if threshold_reset else baseline
+                threshold_note = "新尺度門檻" if threshold_reset else "沿用原門檻"
                 log(
                     f"[{idx}/{total}] {unit_label}: ✓ done | {result['elapsed_seconds']}s, "
-                    f"threshold={baseline:.4f}（沿用原門檻）, size={result['size_bytes']/1e6:.1f}MB, "
+                    f"threshold={current_threshold:.4f}（{threshold_note}）, size={result['size_bytes']/1e6:.1f}MB, "
                     f"ng_caught={caught}/{ng_n}{auroc_str}"
                 )
 
@@ -17607,7 +17635,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 if (_read_manifest(bundle_dir) != manifest or
                         recipe_fingerprint(bundle_dir) != recipe_fingerprint(candidate_dir)):
                     raise RuntimeError("原模型或前處理設定在重訓期間已變更，請重新建立局部重訓任務")
-                with install_partial_training(bundle_dir, candidate_dir):
+                if reset_score_thresholds and (bundle_dir / "machine_config.yaml").read_text(encoding="utf-8") != original_recipe_text:
+                    raise RuntimeError("正規化尺度更新期間門檻已變更，請重新建立局部重訓任務")
+                with install_partial_training(bundle_dir, candidate_dir, include_recipe=reset_score_thresholds):
                     for lighting, zone in selected_units:
                         cleared = invalidate_score_cache(db, scoring_bundle_id=bundle_id, lighting=lighting, zone=zone)
                         log(f"{lighting}-{zone}: 清除 {cleared} 筆 score cache")
@@ -19420,6 +19450,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 feature_layers=patchcore_params.get("feature_layers", "layer2_layer3"),
                 feature_pool_kernel_size=patchcore_params.get("feature_pool_kernel_size", 3),
                 feature_cleaning_mode=patchcore_params.get("feature_cleaning_mode", "off"),
+                feature_cleaning_k=patchcore_params.get("feature_cleaning_k", 30),
+                softpatch_plus_config=patchcore_params.get("softpatch_plus_config") or {},
                 feature_cleaning_scope=patchcore_params.get(
                     "feature_cleaning_scope", "inner_only",
                 ),
@@ -19443,7 +19475,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             _log(f"前處理 selected panels（只保留 lighting={lighting}）")
             preprocess_cfg = PreprocessConfig(
                 **panel_boundary_config_for_station(
-                    CAPIWebHandler._train_new_station_adapter(server_inst).profile
+                    CAPIWebHandler._train_new_station_adapter(server_inst).profile,
+                    for_training=True,
                 ),
                 tile_stride=cfg.tile_stride,
                 image_preprocess_pipeline=cfg.image_preprocess_pipeline,
@@ -19764,6 +19797,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 feature_layers=patchcore_params.get("feature_layers", "layer2_layer3"),
                 feature_pool_kernel_size=patchcore_params.get("feature_pool_kernel_size", 3),
                 feature_cleaning_mode=patchcore_params.get("feature_cleaning_mode", "off"),
+                feature_cleaning_k=patchcore_params.get("feature_cleaning_k", 30),
+                softpatch_plus_config=patchcore_params.get("softpatch_plus_config") or {},
                 feature_cleaning_scope=patchcore_params.get(
                     "feature_cleaning_scope", "inner_only",
                 ),

@@ -83,9 +83,9 @@ flowchart LR
 
 1. **Step 1 選 panel**：`/api/train/new/panels` 從 `inference_records` 找指定 `model_id` 且 `machine_judgment='OK'` 的 panel，Wizard 要求選滿 3 片，每片皆收 inner + edge tile（含 edge 外推取樣）。
 2. **Step 2 前處理**：`/api/train/new/start` 建立 `training_jobs`，背景 thread 呼叫 `preprocess_panels_to_pool()`。每片 panel 會過濾出 `G0F00000`、`R0F00000`、`W0F00000`、`WGF50500`、`STANDARD` 五種 lighting，切成 OK tile 與縮圖後寫入 `training_tile_pool`。
-3. **NG 樣本補充**：`sample_ng_tiles()` 從 `over_review/*/true_ng/{lighting}/crop/` 每種 lighting 抽 NG tile，作為 threshold 校準與驗證用。
+3. **NG 樣本補充**：`sample_ng_tiles()` 從推論紀錄的 AOI 炸彈座標裁切 NG tile（優先重用 NG 驗證庫快取），只供模型匯出後評估抓取率與品質。正規化只使用 OK 圖；沒有獨立 OK 校準圖時，從 OK 圖保留 20% 校準，其餘建立記憶庫，不使用 Bomb 或合成 NG 決定尺度。
 4. **Step 3 tile review**：操作員可將不適合訓練的 tile 設成 `reject`；訓練只吃 `decision='accept'` 的 tile。
-5. **Step 4 訓練**：`run_training_pipeline()` 依 5 種 lighting 與 `inner/edge` 兩區建立 10 個訓練 unit。每個 unit 個別 staging、訓練 PatchCore、推論 OK/NG 樣本校準 threshold。
+5. **Step 4 訓練**：`run_training_pipeline()` 依 5 種 lighting 與 `inner/edge` 兩區建立 10 個訓練 unit。每個 unit 個別 staging、訓練 PatchCore；總分／熱圖各以 `原始距離 ÷ OK 校準最高值 × 0.5` 換算，不扣除低分分界、不截斷大於 1 的分數。新模型門檻為 0.5，模型匯出後再推論 OK/NG 評估品質。舊算法子模型重訓時，同步將該子模型門檻重設為 0.5。
 6. **Step 5 完成**：輸出 bundle，內容包含 10 個 `.pt`、`manifest.json`、`thresholds.json`、`machine_config.yaml`，並註冊到 `model_registry`。
 7. **模型庫管理**：`/models` 可檢視、啟用、停用、刪除、匯出 ZIP。啟用會把 bundle 內的 `machine_config.yaml` 加到 `server_config.yaml.model_configs`，重啟 server 後生效。
 

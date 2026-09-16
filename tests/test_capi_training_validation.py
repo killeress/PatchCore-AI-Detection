@@ -262,7 +262,10 @@ def test_training_stages_only_training_and_calibration_never_acceptance(tmp_path
             assert [p.read_bytes() for p in (staging / "test" / "normal").iterdir()] == [Path(rows[1]["source_path"]).read_bytes()]
             assert [p.read_bytes() for p in (staging / "test" / "anormal").iterdir()] == [Path(rows[2]["source_path"]).read_bytes()]
         else:
-            assert not (staging / "test" / "normal").exists()
+            # OK-only calibration remains usable without any NG class.
+            assert sorted(p.read_bytes() for p in (staging / "test" / "normal").iterdir()) == sorted(
+                Path(row["source_path"]).read_bytes() for row in rows[1:3]
+            )
             assert not list((staging / "test" / "anormal").iterdir())
         staged.append(True)
         run_root.mkdir(parents=True)
@@ -285,7 +288,7 @@ def test_training_stages_only_training_and_calibration_never_acceptance(tmp_path
     assert staged and evaluated
     assert result["tile_count"] == 30
     assert result["ng_count"] == (1 if complete_calibration else 0)
-    assert result["threshold"] == 0.35  # Adoption is a separate user action.
+    assert result["threshold"] == 0.5  # OK calibration maximum on the new scale.
 
 
 def test_manual_scan_can_select_separate_batches_without_flattening(tmp_path):

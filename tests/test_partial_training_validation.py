@@ -107,7 +107,8 @@ def partial_run(tmp_path, monkeypatch):
     invalidation = MagicMock(return_value=0)
     monkeypatch.setattr(registry, "invalidate_score_cache", invalidation)
     env = SimpleNamespace(root=root, db=db, server=server, jobs=jobs, bundle=bundle, units=units,
-                          failure=None, incomplete=False, invalidation=invalidation, calls=[])
+                          failure=None, incomplete=False, invalidation=invalidation, calls=[],
+                          score_migration=False)
 
     def train(**kw):
         unit = f"{kw['lighting']}-{kw['zone']}"
@@ -127,7 +128,14 @@ def partial_run(tmp_path, monkeypatch):
                 raise RuntimeError(env.failure + " failed")
             if env.failure == "cancel":
                 kw["cancel_event"].set()
-        return {"metrics": {"auroc": 0.9, "train_count": 30},
+        metrics = {"auroc": 0.9, "train_count": 30}
+        if env.score_migration:
+            from capi_normalization_config import OK_MAX_NORMALIZATION
+            metrics["normalization_mode"] = OK_MAX_NORMALIZATION
+            reset = registry.install_trained_submodel(model, model, metrics)
+            if reset:
+                metrics["normalization_threshold_reset"] = reset
+        return {"metrics": metrics,
                 "tile_count": 30, "ng_count": 0, "ng_used": "none",
                 "used_tile_ids": [1, 2], "size_bytes": model.stat().st_size, "threshold": 0.35, "elapsed_seconds": 1}
 
@@ -171,11 +179,25 @@ def test_partial_replaces_only_selected_pts_and_preserves_thresholds_and_history
     assert env.server.inferencers["M"].reload_submodel.call_count == 2
 
 
+def test_partial_new_score_scale_updates_selected_thresholds_together(partial_run):
+    env = partial_run
+    env.score_migration = True
+    assert env.run()["state"] == "completed"
+    expected = {"W0F00000": {"inner": .5, "edge": .5}, "G0F00000": {"inner": .35}}
+    recipe = yaml.safe_load((env.root / "machine_config.yaml").read_text(encoding="utf-8"))
+    assert recipe["threshold_mapping"] == expected
+    assert json.loads((env.root / "thresholds.json").read_text(encoding="utf-8")) == expected
+    assert (env.root / f"{env.units[-1]}.pt").read_bytes() == env.before[f"{env.units[-1]}.pt"]
+    assert env.server.inferencers["M"].reload_submodel.call_count == 2
+
+
 @pytest.mark.parametrize("failure", ["training", "cancel", "install"])
-def test_partial_failure_keeps_all_original_pts_and_reports(partial_run, monkeypatch, failure):
+@pytest.mark.parametrize("score_migration", [False, True])
+def test_partial_failure_keeps_all_original_pts_and_reports(partial_run, monkeypatch, failure, score_migration):
     import os
     env = partial_run
     env.failure = failure
+    env.score_migration = score_migration
     if failure == "install":
         replace = os.replace
         failed = False
@@ -193,8 +215,10 @@ def test_partial_failure_keeps_all_original_pts_and_reports(partial_run, monkeyp
 
 
 @pytest.mark.parametrize("failure", ["cache", "completion_record"])
-def test_post_install_failure_restores_original_files(partial_run, failure):
+@pytest.mark.parametrize("score_migration", [False, True])
+def test_post_install_failure_restores_original_files(partial_run, failure, score_migration):
     env = partial_run
+    env.score_migration = score_migration
     if failure == "cache":
         env.invalidation.side_effect = RuntimeError("cache database failure")
     else:
@@ -210,9 +234,11 @@ def test_post_install_failure_restores_original_files(partial_run, failure):
 
 
 @pytest.mark.parametrize("changed_file", ["manifest.json", "machine_config.yaml"])
-def test_partial_preserves_changes_made_to_target_during_training(partial_run, monkeypatch, changed_file):
+@pytest.mark.parametrize("score_migration", [False, True])
+def test_partial_preserves_changes_made_to_target_during_training(partial_run, monkeypatch, changed_file, score_migration):
     import capi_train_new as training
     env = partial_run
+    env.score_migration = score_migration
     train = training.train_single_submodel
     changed = None
     def change_target_after_training(**kwargs):

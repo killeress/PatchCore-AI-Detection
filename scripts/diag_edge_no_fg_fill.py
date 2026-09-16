@@ -25,10 +25,9 @@ from typing import Optional, Tuple, List, Dict
 import cv2
 import numpy as np
 
-ROOT = Path(r"C:/Users/rh.syu/Desktop/CAPI01_AD")
+ROOT = Path(__file__).resolve().parent.parent
 IMG_PATH = ROOT / "test_images" / "WGF50500_034149.tif"
 OUT_DIR = ROOT / "reports" / "no_fg_fill_vis"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- 參數 (對齊 EdgeInspectionConfig default / capi_3f.yaml) ---
 TILE_SIZE = 512
@@ -337,6 +336,7 @@ def make_six_panel(roi_gray: np.ndarray, fg_mask: np.ndarray,
 # ─── Main ──────────────────────────────────────
 
 def main():
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"Loading {IMG_PATH}")
     gray = load_image_8bit(IMG_PATH)
     H, W = gray.shape[:2]

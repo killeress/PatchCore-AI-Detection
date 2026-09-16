@@ -878,7 +878,7 @@ def append_submodel_history(
 
 
 @contextmanager
-def install_partial_training(bundle_dir: Path, candidate_dir: Path):
+def install_partial_training(bundle_dir: Path, candidate_dir: Path, *, include_recipe: bool = False):
     """Install prepared PTs/reports, restoring every replaced file on failure."""
     import os
     import tempfile
@@ -887,7 +887,7 @@ def install_partial_training(bundle_dir: Path, candidate_dir: Path):
     candidate_dir = candidate_dir.resolve()
     files = sorted(
         (p.relative_to(candidate_dir) for p in candidate_dir.rglob("*")
-         if p.is_file() and p.relative_to(candidate_dir) != Path("machine_config.yaml")),
+         if p.is_file() and (include_recipe or p.relative_to(candidate_dir) != Path("machine_config.yaml"))),
         key=lambda p: (p == Path("manifest.json"), p.as_posix()),
     )
     # The worker stages beside the bundle so all replacements stay on one volume.
@@ -916,6 +916,55 @@ def install_partial_training(bundle_dir: Path, candidate_dir: Path):
                 else:
                     (bundle_dir / relative).unlink()
             raise
+
+
+def install_trained_submodel(source: Path, target: Path, metrics: dict):
+    """Install a model and reset an incompatible legacy threshold together.
+
+    Existing models/settings are untouched until retraining succeeds. Repeated
+    training on the same score scale preserves the operator's threshold.
+    """
+    import os
+    import tempfile
+    from capi_normalization_config import OK_MAX_NORMALIZATION, OK_MAX_DEFAULT_THRESHOLD
+
+    source, target = Path(source), Path(target)
+    root = target.parent
+    root.mkdir(parents=True, exist_ok=True)
+    old = (_read_manifest(root).get("unit_metrics") or {}).get(target.stem) or {}
+    yaml_path = root / "machine_config.yaml"
+    reset = (metrics.get("normalization_mode") == OK_MAX_NORMALIZATION
+             and old.get("normalization_mode") != OK_MAX_NORMALIZATION
+             and yaml_path.is_file())
+    if not reset:
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        shutil.copy2(source, temporary)
+        os.replace(temporary, target)
+        return None
+
+    lighting, zone = target.stem.rsplit("-", 1)
+    config = _load_yaml(yaml_path)
+    mapping = config.get("threshold_mapping") or {}
+    previous = mapping[lighting][zone]
+    value = OK_MAX_DEFAULT_THRESHOLD
+    updated_yaml = _update_threshold_mapping_text(
+        yaml_path.read_text(encoding="utf-8"), lighting, zone, value,
+    )
+    thresholds_path = root / "thresholds.json"
+    thresholds = (json.loads(thresholds_path.read_text(encoding="utf-8"))
+                  if thresholds_path.is_file() else mapping)
+    thresholds.setdefault(lighting, {})[zone] = value
+    with tempfile.TemporaryDirectory(prefix=".score-scale-", dir=root.parent) as directory:
+        candidate = Path(directory).resolve()
+        candidate.relative_to(root.parent.resolve())
+        shutil.copy2(source, candidate / target.name)
+        (candidate / "machine_config.yaml").write_text(updated_yaml, encoding="utf-8")
+        (candidate / "thresholds.json").write_text(
+            json.dumps(thresholds, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        with install_partial_training(root, candidate, include_recipe=True):
+            pass
+    return {"previous": previous, "current": value}
 
 
 def get_used_tile_ids(bundle_dir: Path, lighting: str, zone: str) -> Optional[set]:
