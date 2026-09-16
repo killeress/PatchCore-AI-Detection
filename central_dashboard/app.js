@@ -245,16 +245,16 @@
             badge.title = "正式上線設備";
             lineIdentity.appendChild(badge);
         }
+        const switchBadges = document.createElement("span");
+        switchBadges.className = "overview-switch-badges";
+        switchBadges.dataset.field = "overview-switch-badges";
+        lineIdentity.appendChild(switchBadges);
         const watchBadge = document.createElement("span");
         watchBadge.className = "overview-watch-badge";
         watchBadge.dataset.field = "overview-watch";
         watchBadge.textContent = "★ 重點關注";
         watchBadge.hidden = true;
         lineIdentity.appendChild(watchBadge);
-        const switchBadges = document.createElement("span");
-        switchBadges.className = "overview-switch-badges";
-        switchBadges.dataset.field = "overview-switch-badges";
-        lineIdentity.appendChild(switchBadges);
         lineCell.appendChild(lineIdentity);
 
         const ipCell = document.createElement("td");
@@ -587,13 +587,6 @@
         }
     }
 
-    function formatSwitchBadgeText(event) {
-        const hhmm = event.switchedAt.length >= 16
-            ? event.switchedAt.slice(11, 16)
-            : event.switchedAt;
-        return `⚠ ${hhmm} 切換機種 ${event.previousModel || "?"}→${event.newModel}`;
-    }
-
     function updateSwitchBadges(container, state) {
         if (!container) {
             return;
@@ -602,13 +595,23 @@
         if (!state.data || state.status === "offline") {
             return;
         }
-        for (const event of state.data.modelSwitches) {
-            const badge = document.createElement("span");
-            badge.className = "line-switch-badge";
-            badge.textContent = formatSwitchBadgeText(event);
-            badge.title = `機台 ${event.machineNo || "未知"} 於 ${event.switchedAt} 由 ${event.previousModel || "未知"} 切換為 ${event.newModel}，提醒至 ${event.expiresAt}`;
-            container.appendChild(badge);
+        const events = state.data.modelSwitches;
+        if (!events.length) {
+            return;
         }
+        // 徽章只放四個字；切換時間、新舊機種、機台等詳情收進 tooltip
+        const badge = document.createElement("span");
+        badge.className = "line-switch-badge";
+        badge.textContent = events.length > 1 ? `機種切換×${events.length}` : "機種切換";
+        badge.title = events
+            .map((event) => {
+                const hhmm = event.switchedAt.length >= 16
+                    ? event.switchedAt.slice(11, 16)
+                    : event.switchedAt;
+                return `${hhmm} 機台 ${event.machineNo || "未知"}：${event.previousModel || "?"}→${event.newModel}（提醒至 ${event.expiresAt}）`;
+            })
+            .join("\n");
+        container.appendChild(badge);
     }
 
     function renderLineCard(state) {
@@ -621,19 +624,6 @@
             : [];
         card.dataset.health = healthAlerts.length ? healthAlerts[0].severity : "normal";
         setField(card, "status", statusText(state.status));
-        const statusPill = card.querySelector('[data-field="status"]');
-        if (
-            state.status === "halted" &&
-            data &&
-            data.lineActivity.available &&
-            data.lineActivity.windowMinutes !== null &&
-            data.lineActivity.panelCount !== null &&
-            data.lineActivity.haltThreshold !== null
-        ) {
-            statusPill.title = `最近 ${data.lineActivity.windowMinutes} 分鐘僅生產 ${data.lineActivity.panelCount} 片（≤ ${data.lineActivity.haltThreshold} 片視為停線）`;
-        } else {
-            statusPill.removeAttribute("title");
-        }
         updateWatchBadge(card.querySelector('[data-field="watch-badge"]'), state);
         updateSwitchBadges(card.querySelector('[data-field="switch-badges"]'), state);
 
