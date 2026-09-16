@@ -598,6 +598,15 @@ main {
     background: rgba(207, 63, 80, 0.065);
 }
 
+.overview-table tbody tr[data-state="halted"] {
+    background: rgba(182, 106, 0, 0.045);
+}
+
+.overview-table tbody tr[data-production="true"][data-state="halted"],
+.overview-table tbody tr[data-production="true"][data-state="halted"]:hover {
+    background: rgba(182, 106, 0, 0.085);
+}
+
 .overview-line {
     display: flex;
     align-items: center;
@@ -641,6 +650,26 @@ main {
     display: none;
 }
 
+.line-switch-badges,
+.overview-switch-badges {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.line-switch-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 7px;
+    color: var(--cyan);
+    background: rgba(0, 143, 186, 0.09);
+    border: 1px solid rgba(0, 143, 186, 0.28);
+    border-radius: 999px;
+    font-size: 0.65rem;
+    font-weight: 900;
+    white-space: nowrap;
+}
+
 .line-title-row {
     display: flex;
     align-items: center;
@@ -667,6 +696,15 @@ main {
     font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
     font-size: 0.84rem;
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+/* 當班投入數字對齊程式版本的字體（等寬、字重 800），大小維持 0.84rem */
+.overview-total {
+    color: var(--heading-soft);
+    font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+    font-size: 0.84rem;
+    font-weight: 800;
     font-variant-numeric: tabular-nums;
 }
 
@@ -1031,6 +1069,10 @@ main {
     background: var(--amber);
 }
 
+.line-card[data-state="halted"]::before {
+    background: var(--amber);
+}
+
 .line-card[data-state="offline"]::before {
     background: var(--red);
 }
@@ -1125,6 +1167,17 @@ main {
 [data-state="offline"] .status-pill::before {
     background: var(--red);
     box-shadow: 0 0 0 3px rgba(207, 63, 80, 0.12);
+}
+
+[data-state="halted"] .status-pill {
+    color: #945500;
+    background: #fff8ea;
+    border-color: #eed39e;
+}
+
+[data-state="halted"] .status-pill::before {
+    background: var(--amber);
+    box-shadow: 0 0 0 3px rgba(182, 106, 0, 0.12);
 }
 
 .line-links {
@@ -1402,6 +1455,10 @@ main {
     background: rgba(255, 180, 84, 0.11);
 }
 
+:root[data-theme="dark"] .overview-table tbody tr[data-production="true"][data-state="halted"] {
+    background: rgba(255, 180, 84, 0.11);
+}
+
 :root[data-theme="dark"] .overview-table tbody tr[data-production="true"][data-state="offline"],
 :root[data-theme="dark"] .overview-table tbody tr[data-production="true"][data-health="critical"] {
     background: rgba(255, 113, 131, 0.1);
@@ -1425,6 +1482,12 @@ main {
 }
 
 :root[data-theme="dark"] [data-state="warning"] .status-pill {
+    color: var(--amber);
+    background: #322515;
+    border-color: #68502d;
+}
+
+:root[data-theme="dark"] [data-state="halted"] .status-pill {
     color: var(--amber);
     background: #322515;
     border-color: #68502d;

@@ -245,6 +245,10 @@
             badge.title = "正式上線設備";
             lineIdentity.appendChild(badge);
         }
+        const switchBadges = document.createElement("span");
+        switchBadges.className = "overview-switch-badges";
+        switchBadges.dataset.field = "overview-switch-badges";
+        lineIdentity.appendChild(switchBadges);
         const watchBadge = document.createElement("span");
         watchBadge.className = "overview-watch-badge";
         watchBadge.dataset.field = "overview-watch";
@@ -293,6 +297,15 @@
         aiRate.dataset.field = "ai-rate";
         aiRate.textContent = "AI —";
         aiRateCell.appendChild(aiRate);
+
+        const totalCell = document.createElement("td");
+        totalCell.className = "overview-total-cell";
+        const total = document.createElement("span");
+        total.className = "overview-total";
+        total.dataset.field = "overview-total";
+        total.textContent = "—";
+        total.title = "當班投入 = OK + NG + ERR";
+        totalCell.appendChild(total);
 
         const activityCell = document.createElement("td");
         activityCell.className = "overview-activity-cell";
@@ -350,6 +363,7 @@
             aoiCell,
             aoiRateCell,
             aiRateCell,
+            totalCell,
             activityCell,
             alertCell,
             updateCell,
@@ -419,8 +433,20 @@
             }
 
             state.data = normalizeStatus(rawData);
-            state.status = state.data.running ? "online" : "warning";
-            state.error = state.data.running ? "" : "API 可連線，但服務回報未運行。";
+            if (!state.data.running) {
+                state.status = "warning";
+                state.error = "API 可連線，但服務回報未運行。";
+            } else if (
+                state.data.lineActivity.available &&
+                state.data.lineActivity.isHalted
+            ) {
+                // 停線：連線正常但最近窗口產量 ≤ 閾值（線體端算好）
+                state.status = "halted";
+                state.error = "";
+            } else {
+                state.status = "online";
+                state.error = "";
+            }
         } catch (error) {
             state.status = "offline";
             state.error = readableFetchError(error);
@@ -440,6 +466,8 @@
         const memory = asObject(hardware.memory || hardware.ram);
         const disk = asObject(hardware.disk);
         const update = asObject(raw.update);
+        const lineActivity = asObject(raw.line_activity);
+        const modelSwitchAlert = asObject(raw.model_switch_alert);
 
         return {
             running: server.running !== false,
@@ -489,7 +517,26 @@
                 ramUsedPercent: optionalNumber(memory.used_percent),
                 diskFreeGb: optionalNumber(disk.free_gb),
                 diskTotalGb: optionalNumber(disk.total_gb)
-            }
+            },
+            lineActivity: {
+                available: raw.line_activity !== undefined && raw.line_activity !== null,
+                windowMinutes: optionalNumber(lineActivity.window_minutes),
+                panelCount: optionalNumber(lineActivity.panel_count),
+                haltThreshold: optionalNumber(lineActivity.halt_threshold),
+                isHalted: lineActivity.is_halted === true
+            },
+            modelSwitches: (Array.isArray(modelSwitchAlert.events) ? modelSwitchAlert.events : [])
+                .map((event) => {
+                    const item = asObject(event);
+                    return {
+                        machineNo: textValue(item.machine_no),
+                        previousModel: textValue(item.previous_model),
+                        newModel: textValue(item.new_model),
+                        switchedAt: textValue(item.switched_at),
+                        expiresAt: textValue(item.expires_at)
+                    };
+                })
+                .filter((event) => event.newModel)
         };
     }
 
@@ -515,7 +562,7 @@
     }
 
     function matchedWatchModel(state) {
-        if (!state || state.status !== "online" || !state.data) {
+        if (!state || (state.status !== "online" && state.status !== "halted") || !state.data) {
             return "";
         }
         const modelId = state.data.latestEvent.modelId;
@@ -540,6 +587,33 @@
         }
     }
 
+    function updateSwitchBadges(container, state) {
+        if (!container) {
+            return;
+        }
+        container.replaceChildren();
+        if (!state.data || state.status === "offline") {
+            return;
+        }
+        const events = state.data.modelSwitches;
+        if (!events.length) {
+            return;
+        }
+        // 徽章只放四個字；切換時間、新舊機種、機台等詳情收進 tooltip
+        const badge = document.createElement("span");
+        badge.className = "line-switch-badge";
+        badge.textContent = events.length > 1 ? `機種切換×${events.length}` : "機種切換";
+        badge.title = events
+            .map((event) => {
+                const hhmm = event.switchedAt.length >= 16
+                    ? event.switchedAt.slice(11, 16)
+                    : event.switchedAt;
+                return `${hhmm} 機台 ${event.machineNo || "未知"}：${event.previousModel || "?"}→${event.newModel}（提醒至 ${event.expiresAt}）`;
+            })
+            .join("\n");
+        container.appendChild(badge);
+    }
+
     function renderLineCard(state) {
         const card = state.card;
         const data = state.data;
@@ -551,6 +625,7 @@
         card.dataset.health = healthAlerts.length ? healthAlerts[0].severity : "normal";
         setField(card, "status", statusText(state.status));
         updateWatchBadge(card.querySelector('[data-field="watch-badge"]'), state);
+        updateSwitchBadges(card.querySelector('[data-field="switch-badges"]'), state);
 
         const errorElement = card.querySelector('[data-field="error"]');
         errorElement.hidden = !state.error;
@@ -622,6 +697,7 @@
         }
         row.dataset.state = state.status;
         updateWatchBadge(row.querySelector('[data-field="overview-watch"]'), state);
+        updateSwitchBadges(row.querySelector('[data-field="overview-switch-badges"]'), state);
         const status = row.querySelector('[data-field="overview-status"]');
         setText(status, statusText(state.status));
         status.title = state.error || statusText(state.status);
@@ -652,6 +728,13 @@
         } else {
             renderOverviewRejectRate(row, "aoi-rate", "AOI", null, 0);
             renderOverviewRejectRate(row, "ai-rate", "AI", null, 0);
+        }
+
+        const totalEl = row.querySelector('[data-field="overview-total"]');
+        if (data && state.status !== "offline" && state.status !== "checking") {
+            setText(totalEl, formatNumber(data.total));
+        } else {
+            setText(totalEl, "—");
         }
 
         renderOverviewActivity(state);
@@ -848,6 +931,7 @@
         return {
             checking: "連線中",
             online: "正常",
+            halted: "停線",
             warning: "服務異常",
             offline: "離線"
         }[status] || "未知";

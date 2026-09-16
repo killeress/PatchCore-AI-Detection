@@ -544,6 +544,70 @@ def _get_cached_hardware_status(disk_path: Any) -> Dict[str, Any]:
         return status
 
 
+_LINE_ACTIVITY_CACHE_SECONDS = 5.0
+_line_activity_cache: Dict[str, Tuple[float, int]] = {}
+_line_activity_lock = threading.Lock()
+
+
+def _dashboard_alert_config(server_config: Any) -> Dict[str, int]:
+    """讀取 server_config 的 dashboard_alert 區段；缺省或異常值回退預設。"""
+    section: Dict[str, Any] = {}
+    if isinstance(server_config, dict):
+        raw = server_config.get("dashboard_alert", {})
+        if isinstance(raw, dict):
+            section = raw
+
+    def _int_or_default(name: str, default: int, floor: int) -> int:
+        try:
+            value = int(section.get(name, default))
+        except (TypeError, ValueError):
+            return default
+        return value if value >= floor else default
+
+    return {
+        "halt_window_minutes": _int_or_default("halt_window_minutes", 120, 1),
+        "halt_max_panels": _int_or_default("halt_max_panels", 20, 0),
+        "model_switch_alert_minutes": _int_or_default("model_switch_alert_minutes", 120, 1),
+    }
+
+
+def _get_cached_recent_request_count(db: Any, window_minutes: int) -> int:
+    """停線計數加 5 秒快取：避免多面看板輪詢直打線體 DB，又讓狀態變化近乎即時。"""
+    cache_key = f"{getattr(db, 'db_path', id(db))}:{int(window_minutes)}"
+    now = time.monotonic()
+    with _line_activity_lock:
+        cached = _line_activity_cache.get(cache_key)
+        if cached and now - cached[0] < _LINE_ACTIVITY_CACHE_SECONDS:
+            return cached[1]
+        count = db.get_recent_request_count(window_minutes)
+        _line_activity_cache[cache_key] = (now, count)
+        return count
+
+
+def _build_line_activity_payload(db: Any, alert_cfg: Dict[str, int]) -> Dict[str, Any]:
+    """停線判斷結果（線體端算好布林，前端不吃瀏覽器時鐘）。"""
+    window = alert_cfg["halt_window_minutes"]
+    threshold = alert_cfg["halt_max_panels"]
+    count = _get_cached_recent_request_count(db, window)
+    return {
+        "window_minutes": window,
+        "panel_count": count,
+        "halt_threshold": threshold,
+        "is_halted": count <= threshold,
+    }
+
+
+def _build_model_switch_alert_payload(db: Any, alert_cfg: Dict[str, int]) -> Dict[str, Any]:
+    """機種切換提醒：回傳仍在提醒期內的各機台最新切換事件（含到期時間）。"""
+    window = alert_cfg["model_switch_alert_minutes"]
+    events = db.get_active_model_switches(window)
+    return {
+        "active": bool(events),
+        "window_minutes": window,
+        "events": events,
+    }
+
+
 class _AppVersionProxy:
     def __getitem__(self, key: str) -> Any:
         return get_version_info().get(key, "")
@@ -5146,6 +5210,15 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 status["stats"]["avg_time"] = shift_stats.get("avg_time")
                 status["stats"]["overexposed_count"] = shift_stats.get("overexposed_count", 0) or 0
 
+                # 中控看板：停線判斷 + 機種切換提醒（線體端算好，舊版看板會忽略新欄位）
+                alert_cfg = _dashboard_alert_config(
+                    getattr(self._capi_server_instance, "server_config", None)
+                )
+                status["line_activity"] = _build_line_activity_payload(self.db, alert_cfg)
+                status["model_switch_alert"] = _build_model_switch_alert_payload(
+                    self.db, alert_cfg
+                )
+
                 # 取最近 1 筆 image_results (有熱力圖)
                 try:
                     import sqlite3 as _sqlite3
@@ -8713,7 +8786,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     tile_img = tile.image.copy()
                     if len(tile_img.shape) == 2:
                         tile_img = cv2.cvtColor(tile_img, cv2.COLOR_GRAY2BGR)
-                    norm_map = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                    from capi_heatmap import heatmap_to_uint8
+                    norm_map = heatmap_to_uint8(anomaly_map)
                     heatmap_color = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
                     if heatmap_color.shape[:2] != tile_img.shape[:2]:
                         heatmap_color = cv2.resize(heatmap_color, (tile_img.shape[1], tile_img.shape[0]))
@@ -10456,7 +10530,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                         tile_image, anomaly_map, alpha=0.5
                     )
                 else:
-                    norm_map = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                    from capi_heatmap import heatmap_to_uint8
+                    norm_map = heatmap_to_uint8(anomaly_map)
                     heatmap_color = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
                     if heatmap_color.shape[:2] != crop_bgr.shape[:2]:
                         heatmap_color = cv2.resize(heatmap_color, (crop_bgr.shape[1], crop_bgr.shape[0]))
@@ -10731,9 +10806,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     )
 
                     # 產生可與表格排名對照的峰值圖；文字說明留在中文 UI。
-                    norm_map = cv2.normalize(
-                        anomaly_array, None, 0, 255, cv2.NORM_MINMAX
-                    ).astype(np.uint8)
+                    from capi_heatmap import heatmap_to_uint8
+                    norm_map = heatmap_to_uint8(anomaly_array)
                     peak_overlay = cv2.applyColorMap(
                         norm_map, cv2.COLORMAP_JET
                     )
@@ -10836,12 +10910,14 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             model_normalization_enabled = getattr(
                 tile_info, "model_normalization_enabled", None
             )
+            model_normalization_mode = getattr(tile_info, "model_normalization_mode", None)
             normalization_diag = score_normalization_diagnostic(
                 raw_model_score,
                 model_image_min,
                 model_image_max,
                 model_image_threshold,
                 normalization_enabled=model_normalization_enabled,
+                normalization_mode=model_normalization_mode,
             )
             score_breakdown = {
                 "raw_patchcore_score": round(
@@ -10864,6 +10940,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     if model_image_threshold is not None else None
                 ),
                 "model_normalization_enabled": model_normalization_enabled,
+                "model_normalization_mode": model_normalization_mode,
+                "model_pixel_max": _finite_tile_diag("model_pixel_max"),
                 "raw_anomaly_map_max": (
                     round(_finite_tile_diag("raw_anomaly_map_max"), 6)
                     if _finite_tile_diag("raw_anomaly_map_max") is not None else None
@@ -17365,6 +17443,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             shutil.copy2(bundle_dir / "machine_config.yaml", candidate_dir / "machine_config.yaml")
             import yaml
             recipe = yaml.safe_load((candidate_dir / "machine_config.yaml").read_text(encoding="utf-8")) or {}
+            original_recipe_text = (candidate_dir / "machine_config.yaml").read_text(encoding="utf-8")
+            reset_score_thresholds = False
             baseline_thresholds = recipe.get("threshold_mapping") or {}
             _write_manifest(candidate_dir, manifest)
             original_job_id = manifest.get("trained_with_job_id") or bundle.get("job_id")
@@ -17467,6 +17547,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 )
 
                 metrics = result["metrics"]
+                reset_score_thresholds |= bool(metrics.get("normalization_threshold_reset"))
                 metrics["used_tile_ids"] = result["used_tile_ids"]
                 new_auroc = metrics.get("auroc")
                 new_tile_count = result["tile_count"]
@@ -17517,9 +17598,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 caught = metrics.get("ng_caught_count", 0)
                 ng_n = metrics.get("ng_count", 0)
                 auroc_str = f", AUROC={new_auroc:.3f}({metrics.get('auroc_grade','')})" if new_auroc is not None else ""
+                threshold_reset = metrics.get("normalization_threshold_reset")
+                current_threshold = threshold_reset["current"] if threshold_reset else baseline
+                threshold_note = "新尺度門檻" if threshold_reset else "沿用原門檻"
                 log(
                     f"[{idx}/{total}] {unit_label}: ✓ done | {result['elapsed_seconds']}s, "
-                    f"threshold={baseline:.4f}（沿用原門檻）, size={result['size_bytes']/1e6:.1f}MB, "
+                    f"threshold={current_threshold:.4f}（{threshold_note}）, size={result['size_bytes']/1e6:.1f}MB, "
                     f"ng_caught={caught}/{ng_n}{auroc_str}"
                 )
 
@@ -17551,7 +17635,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 if (_read_manifest(bundle_dir) != manifest or
                         recipe_fingerprint(bundle_dir) != recipe_fingerprint(candidate_dir)):
                     raise RuntimeError("原模型或前處理設定在重訓期間已變更，請重新建立局部重訓任務")
-                with install_partial_training(bundle_dir, candidate_dir):
+                if reset_score_thresholds and (bundle_dir / "machine_config.yaml").read_text(encoding="utf-8") != original_recipe_text:
+                    raise RuntimeError("正規化尺度更新期間門檻已變更，請重新建立局部重訓任務")
+                with install_partial_training(bundle_dir, candidate_dir, include_recipe=reset_score_thresholds):
                     for lighting, zone in selected_units:
                         cleared = invalidate_score_cache(db, scoring_bundle_id=bundle_id, lighting=lighting, zone=zone)
                         log(f"{lighting}-{zone}: 清除 {cleared} 筆 score cache")

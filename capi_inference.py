@@ -141,8 +141,19 @@ def score_normalization_diagnostic(
     image_max: Optional[float],
     image_threshold: Optional[float],
     normalization_enabled: Optional[bool] = None,
+    normalization_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Explain Anomalib's clamp-to-zero image-score normalization boundary."""
+    """Explain the score scale actually stored in this model."""
+    from capi_normalization_config import OK_MAX_NORMALIZATION
+    if normalization_mode == OK_MAX_NORMALIZATION and normalization_enabled is not False:
+        available = (raw_score is not None and np.isfinite(float(raw_score))
+                     and image_max is not None and np.isfinite(float(image_max))
+                     and float(image_max) > 0)
+        return {
+            "normalization_available": bool(available),
+            "normalization_zero_boundary": 0.0 if available else None,
+            "normalization_zero_clamped": False,
+        }
     if normalization_enabled is False:
         return {
             "normalization_available": False,
@@ -269,6 +280,8 @@ class TileInfo:
     model_image_max: Optional[float] = None # Anomalib image-score normalization 上界
     model_image_threshold: Optional[float] = None # Anomalib image-score normalization threshold
     model_normalization_enabled: Optional[bool] = None # 本次模型是否啟用 Anomalib normalization
+    model_normalization_mode: Optional[str] = None
+    model_pixel_max: Optional[float] = None
     raw_anomaly_map_max: Optional[float] = None # 未正規化 anomaly map 最高值
     normalized_anomaly_map_max: Optional[float] = None # 正規化 anomaly map 最高值
     pre_decay_map_max: float = 0.0          # mask/edge margin 前 anomaly_map max
@@ -2318,6 +2331,8 @@ class CAPIInferencer:
             "model_image_max": None,
             "model_image_threshold": None,
             "model_normalization_enabled": None,
+            "model_normalization_mode": None,
+            "model_pixel_max": None,
             "raw_anomaly_map_max": None,
             "normalized_anomaly_map_max": None,
         }
@@ -2325,9 +2340,13 @@ class CAPIInferencer:
         post_processor = getattr(outer_model, "post_processor", None)
         if post_processor is None:
             return diagnostics
+        from capi_normalization_config import LEGACY_NORMALIZATION
+        diagnostics["model_normalization_mode"] = getattr(
+            post_processor, "normalization_mode", LEGACY_NORMALIZATION,
+        )
 
         for field_name in (
-            "image_min", "image_max", "image_threshold",
+            "image_min", "image_max", "image_threshold", "pixel_max",
         ):
             diagnostics[f"model_{field_name}"] = self._prediction_value(
                 getattr(post_processor, field_name, None)
@@ -2568,6 +2587,8 @@ class CAPIInferencer:
         tile.model_image_max = None
         tile.model_image_threshold = None
         tile.model_normalization_enabled = None
+        tile.model_normalization_mode = None
+        tile.model_pixel_max = None
         tile.raw_anomaly_map_max = None
         tile.normalized_anomaly_map_max = None
 
@@ -2624,6 +2645,8 @@ class CAPIInferencer:
                 tile.model_normalization_enabled = diagnostics[
                     "model_normalization_enabled"
                 ]
+                tile.model_normalization_mode = diagnostics["model_normalization_mode"]
+                tile.model_pixel_max = diagnostics["model_pixel_max"]
                 tile.raw_anomaly_map_max = diagnostics["raw_anomaly_map_max"]
                 tile.normalized_anomaly_map_max = diagnostics["normalized_anomaly_map_max"]
 
@@ -4946,7 +4969,8 @@ class CAPIInferencer:
 
         # --- 左上: Heatmap Overlay ---
         if anomaly_map is not None:
-            norm = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            from capi_heatmap import heatmap_to_uint8
+            norm = heatmap_to_uint8(anomaly_map)
             norm = cv2.resize(norm, (sz, sz))
             heatmap_color = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
             panel_tl = cv2.addWeighted(base, 0.5, heatmap_color, 0.5, 0)
@@ -5118,7 +5142,8 @@ class CAPIInferencer:
         hot_mask = cv2.dilate(hot_mask, kernel, iterations=2)
 
         # --- 左上: Heatmap + Hot Zone ---
-        norm = cv2.normalize(anomaly_f, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        from capi_heatmap import heatmap_to_uint8
+        norm = heatmap_to_uint8(anomaly_f)
         norm_rsz = cv2.resize(norm, (sz, sz))
         hm_color = cv2.applyColorMap(norm_rsz, cv2.COLORMAP_JET)
         panel_tl = cv2.addWeighted(base_sm, 0.5, hm_color, 0.5, 0)
@@ -10005,6 +10030,21 @@ class CAPIInferencer:
 
         回 True 表示有被踢掉舊 cache；False 代表本來就沒載入過（也不需要 reload）。
         """
+        # A retrained model may use a new score scale. Refresh its threshold
+        # together with the model cache so a legacy value is never reused.
+        import yaml
+        mapping = getattr(getattr(self, "config", None), "model_mapping", {}) or {}
+        model_path = (mapping.get(lighting) or {}).get(zone)
+        if model_path:
+            model_path = Path(model_path)
+            if not model_path.is_absolute():
+                model_path = self.base_dir / model_path
+            recipe_path = model_path.parent / "machine_config.yaml"
+            if recipe_path.is_file():
+                recipe = yaml.safe_load(recipe_path.read_text(encoding="utf-8")) or {}
+                value = (recipe.get("threshold_mapping", {}).get(lighting) or {}).get(zone)
+                if value is not None:
+                    self.config.threshold_mapping.setdefault(lighting, {})[zone] = float(value)
         key = (machine_id, lighting, zone)
         if key in self._model_cache_v2:
             del self._model_cache_v2[key]

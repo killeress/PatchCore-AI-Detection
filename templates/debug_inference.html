@@ -4047,17 +4047,22 @@
                 : '');
         const normalizationAvailable = score.normalization_available === true;
         const normalizationClamped = score.normalization_zero_clamped === true;
+        const linearNormalization = score.model_normalization_mode === 'ok_max_linear_v1';
         const normalizationSummary = score.model_normalization_enabled === false
             ? '模型未啟用 Anomalib normalization，0 分不是由 clamp 造成。'
+            : linearNormalization && normalizationAvailable
+            ? '使用 OK 等比例換算，0.5 對應 OK 校準最高值；不扣除分界，也不截斷低分。'
             : normalizationAvailable
             ? (normalizationClamped
                 ? 'raw 距離落在正規化 0 分邊界以下，顯示 0 是 Anomalib clamp 結果，不代表模型沒有距離。'
                 : 'raw 距離沒有落在正規化 0 分邊界以下，0 分不是由此 clamp 造成。')
             : '本次 worker 沒有回傳未正規化模型距離或 image normalization 參數。';
         const normalizationRows = [
+            ['正規化方式', linearNormalization ? 'OK 等比例換算' : 'Anomalib 舊版換算'],
             ['模型 raw 距離（未正規化）', score.raw_model_score],
             ['image min', score.model_image_min],
             ['image max', score.model_image_max],
+            ['pixel max（熱圖尺度）', score.model_pixel_max],
             ['image threshold', score.model_image_threshold],
             ['Anomalib normalization enabled', score.model_normalization_enabled === true ? '是' : (score.model_normalization_enabled === false ? '否' : null)],
             ['正規化 0 分邊界', score.normalization_zero_boundary],
