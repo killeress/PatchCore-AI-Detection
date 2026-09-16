@@ -544,6 +544,70 @@ def _get_cached_hardware_status(disk_path: Any) -> Dict[str, Any]:
         return status
 
 
+_LINE_ACTIVITY_CACHE_SECONDS = 30.0
+_line_activity_cache: Dict[str, Tuple[float, int]] = {}
+_line_activity_lock = threading.Lock()
+
+
+def _dashboard_alert_config(server_config: Any) -> Dict[str, int]:
+    """讀取 server_config 的 dashboard_alert 區段；缺省或異常值回退預設。"""
+    section: Dict[str, Any] = {}
+    if isinstance(server_config, dict):
+        raw = server_config.get("dashboard_alert", {})
+        if isinstance(raw, dict):
+            section = raw
+
+    def _int_or_default(name: str, default: int, floor: int) -> int:
+        try:
+            value = int(section.get(name, default))
+        except (TypeError, ValueError):
+            return default
+        return value if value >= floor else default
+
+    return {
+        "halt_window_minutes": _int_or_default("halt_window_minutes", 120, 1),
+        "halt_max_panels": _int_or_default("halt_max_panels", 20, 0),
+        "model_switch_alert_minutes": _int_or_default("model_switch_alert_minutes", 120, 1),
+    }
+
+
+def _get_cached_recent_request_count(db: Any, window_minutes: int) -> int:
+    """停線計數加 30 秒快取，避免多面看板輪詢直打線體 DB。"""
+    cache_key = f"{getattr(db, 'db_path', id(db))}:{int(window_minutes)}"
+    now = time.monotonic()
+    with _line_activity_lock:
+        cached = _line_activity_cache.get(cache_key)
+        if cached and now - cached[0] < _LINE_ACTIVITY_CACHE_SECONDS:
+            return cached[1]
+        count = db.get_recent_request_count(window_minutes)
+        _line_activity_cache[cache_key] = (now, count)
+        return count
+
+
+def _build_line_activity_payload(db: Any, alert_cfg: Dict[str, int]) -> Dict[str, Any]:
+    """停線判斷結果（線體端算好布林，前端不吃瀏覽器時鐘）。"""
+    window = alert_cfg["halt_window_minutes"]
+    threshold = alert_cfg["halt_max_panels"]
+    count = _get_cached_recent_request_count(db, window)
+    return {
+        "window_minutes": window,
+        "panel_count": count,
+        "halt_threshold": threshold,
+        "is_halted": count <= threshold,
+    }
+
+
+def _build_model_switch_alert_payload(db: Any, alert_cfg: Dict[str, int]) -> Dict[str, Any]:
+    """機種切換提醒：回傳仍在提醒期內的各機台最新切換事件（含到期時間）。"""
+    window = alert_cfg["model_switch_alert_minutes"]
+    events = db.get_active_model_switches(window)
+    return {
+        "active": bool(events),
+        "window_minutes": window,
+        "events": events,
+    }
+
+
 class _AppVersionProxy:
     def __getitem__(self, key: str) -> Any:
         return get_version_info().get(key, "")
@@ -5143,6 +5207,15 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 status["stats"]["time_range"] = shift_stats.get("time_range", "")
                 status["stats"]["avg_time"] = shift_stats.get("avg_time")
                 status["stats"]["overexposed_count"] = shift_stats.get("overexposed_count", 0) or 0
+
+                # 中控看板：停線判斷 + 機種切換提醒（線體端算好，舊版看板會忽略新欄位）
+                alert_cfg = _dashboard_alert_config(
+                    getattr(self._capi_server_instance, "server_config", None)
+                )
+                status["line_activity"] = _build_line_activity_payload(self.db, alert_cfg)
+                status["model_switch_alert"] = _build_model_switch_alert_payload(
+                    self.db, alert_cfg
+                )
 
                 # 取最近 1 筆 image_results (有熱力圖)
                 try:
