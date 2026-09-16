@@ -839,6 +839,20 @@ class CAPIDatabase:
                     updated_by TEXT DEFAULT '',
                     updated_at TEXT DEFAULT (datetime('now', 'localtime'))
                 );
+
+                -- Client 機種切換事件。server 偵測到同一機台機種變更時寫入，
+                -- 中控看板依 switched_at 顯示限時提醒（重啟不丟）。
+                CREATE TABLE IF NOT EXISTS model_switch_events (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    machine_no     TEXT NOT NULL,
+                    previous_model TEXT NOT NULL,
+                    new_model      TEXT NOT NULL,
+                    switched_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_model_switch_events_machine
+                    ON model_switch_events(machine_no, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_model_switch_events_time
+                    ON model_switch_events(switched_at DESC);
             """)
             
             # Migration for adding missing columns to existing database
@@ -2238,6 +2252,84 @@ class CAPIDatabase:
             result["shift_name"] = shift_name
             result["time_range"] = time_range_label
             return result
+        finally:
+            conn.close()
+
+    def record_model_switch_event(
+        self, machine_no: str, previous_model: str, new_model: str
+    ) -> int:
+        """寫入一筆 client 機種切換事件，回傳 event id。"""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                cursor = conn.execute(
+                    """INSERT INTO model_switch_events
+                       (machine_no, previous_model, new_model)
+                       VALUES (?, ?, ?)""",
+                    (machine_no, previous_model, new_model),
+                )
+                conn.commit()
+                return int(cursor.lastrowid)
+            finally:
+                conn.close()
+
+    def get_active_model_switches(self, window_minutes: int) -> List[Dict]:
+        """各機台最新一筆切換事件，且仍落在最近 window_minutes 分鐘提醒期內。
+
+        每機台只取最新一筆 → 期內再次切換時自然以最新切換時間為準（重置語意）。
+        """
+        window = int(window_minutes)
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT m.machine_no, m.previous_model, m.new_model, m.switched_at,
+                          datetime(m.switched_at, ?) AS expires_at
+                   FROM model_switch_events m
+                   JOIN (
+                       SELECT machine_no, MAX(id) AS max_id
+                       FROM model_switch_events
+                       GROUP BY machine_no
+                   ) latest ON latest.max_id = m.id
+                   WHERE datetime(m.switched_at) >= datetime('now', 'localtime', ?)
+                   ORDER BY m.switched_at DESC""",
+                (f"+{window} minutes", f"-{window} minutes"),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_recent_request_count(self, window_minutes: int) -> int:
+        """最近 window_minutes 分鐘內的 request 筆數（含 OK/NG/ERR、不去重）。
+
+        滾動窗口與班別無關，跨班仍取完整窗口（停線判斷用）。
+        """
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                """SELECT COUNT(*) AS cnt
+                   FROM inference_records
+                   WHERE datetime(created_at) >= datetime('now', 'localtime', ?)""",
+                (f"-{int(window_minutes)} minutes",),
+            ).fetchone()
+            return int(row["cnt"]) if row else 0
+        finally:
+            conn.close()
+
+    def get_latest_models_by_machine(self) -> Dict[str, str]:
+        """各機台最新一筆 inference_records 的 model_id（server 啟動回填機種基線用）。"""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT r.machine_no, r.model_id
+                   FROM inference_records r
+                   JOIN (
+                       SELECT machine_no, MAX(id) AS max_id
+                       FROM inference_records
+                       WHERE machine_no != '' AND model_id != ''
+                       GROUP BY machine_no
+                   ) latest ON latest.max_id = r.id"""
+            ).fetchall()
+            return {row["machine_no"]: row["model_id"] for row in rows}
         finally:
             conn.close()
 
