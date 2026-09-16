@@ -157,7 +157,7 @@ class PreprocessConfig:
     raw_boundary_max_edge_residual_p95_ratio: float = 0.03
     image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     aoi_only_fast_path_enabled: bool = False
-    # AOI-only folder recovery; preserve a successful legacy reference first.
+    # Recover only after legacy detection fails, before producing final tiles.
     recover_failed_raw_boundary: bool = False
 
     def __post_init__(self):
@@ -165,14 +165,17 @@ class PreprocessConfig:
             self.outer_edge_extend = self.tile_size // 2
 
 
-def panel_boundary_config_for_station(profile: str) -> Dict[str, Any]:
+def panel_boundary_config_for_station(profile: str, *, for_training: bool = False) -> Dict[str, Any]:
     """Shared raw-boundary settings for inference and training preprocessing."""
-    return {
+    settings = {
         "large_panel_raw_boundary_enabled": profile in ("capi", "aapi"),
         "large_panel_min_width_ratio": 0.75 if profile == "capi" else 0.85,
         "large_panel_min_height_ratio": 0.60 if profile == "capi" else 0.80,
         "raw_boundary_max_edge_residual_p95_ratio": 0.04 if profile == "capi" else 0.03,
     }
+    if for_training:
+        settings["recover_failed_raw_boundary"] = profile in ("capi", "aapi")
+    return settings
 
 
 def image_preprocess_pipeline_for_zone(
@@ -744,6 +747,25 @@ def _detect_large_panel_raw_boundary(
     return bbox, polygon, True
 
 
+def _can_recover_raw_boundary(
+    config: PreprocessConfig,
+    polygon: Optional[np.ndarray],
+    bbox: Optional[Tuple[int, int, int, int]],
+) -> bool:
+    """Occupancy is not edge quality; only reuse a validated quadrilateral."""
+    return bool(
+        config.recover_failed_raw_boundary
+        and config.enable_panel_polygon
+        and not _use_robust_panel_boundary(config)
+        and bbox is not None
+        and bbox[2] > bbox[0] and bbox[3] > bbox[1]
+        and polygon is not None
+        and polygon.shape == (4, 2)
+        and np.isfinite(polygon).all()
+        and cv2.isContourConvex(polygon.astype(np.float32))
+    )
+
+
 def detect_panel_geometry(
     image: np.ndarray,
     config: PreprocessConfig,
@@ -752,6 +774,7 @@ def detect_panel_geometry(
     source_name: str = "",
 ) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[np.ndarray]]:
     """Detect raw large-panel geometry, with the same single-image fallback as preprocessing."""
+    recovery_polygon = None
     if config.large_panel_raw_boundary_enabled:
         bbox, polygon, large_occupancy = _detect_large_panel_raw_boundary(
             image, config, source_name=source_name,
@@ -760,9 +783,15 @@ def detect_panel_geometry(
             polygon is not None or not config.enable_panel_polygon
         ):
             return bbox, polygon
-    return detect_panel_polygon(
+        if large_occupancy is False:
+            recovery_polygon = polygon
+    bbox, polygon = detect_panel_polygon(
         processed_image if processed_image is not None else image, config,
     )
+    if polygon is None and _can_recover_raw_boundary(config, recovery_polygon, bbox):
+        polygon = recovery_polygon.copy()
+        logger.info("[boundary] raw recovery source=%s reason=legacy_polygon_failed", source_name or "-")
+    return bbox, polygon
 
 
 def _polyfit_polygon(
@@ -1185,6 +1214,7 @@ def preprocess_panel_image(
 
     bbox = None
     detected_polygon = None
+    recovery_polygon = None
     if getattr(config, "large_panel_raw_boundary_enabled", False):
         if reference_bbox is not None:
             bbox = reference_bbox
@@ -1204,6 +1234,8 @@ def preprocess_panel_image(
             if large_occupancy:
                 bbox = candidate_bbox
                 detected_polygon = candidate_polygon
+            elif large_occupancy is False:
+                recovery_polygon = candidate_polygon
 
         large_panel_raw_boundary_usable = bbox is not None and (
             reference_polygon is not None
@@ -1247,6 +1279,11 @@ def preprocess_panel_image(
             if reference_polygon is not None
             else detected_polygon
         )
+    # Single-image previews and NG geometry must recover before canonicalization
+    # or slicing. Folder processing selects its shared legacy reference first.
+    if polygon is None and _can_recover_raw_boundary(config, recovery_polygon, bbox):
+        polygon = recovery_polygon.copy()
+        logger.info("[boundary] raw recovery source=%s reason=legacy_polygon_failed", image_path.name)
     polygon_failed = config.enable_panel_polygon and polygon is None
 
     if bbox is None:
@@ -1519,25 +1556,27 @@ def preprocess_panel_folder(
             # valid raw quadrilateral. Recover only after every legacy reference
             # failed, so working lines retain their existing polygon and pixels.
             if (
-                config.recover_failed_raw_boundary
-                and config.enable_panel_polygon
-                and not config.generate_grid_tiles
-                and not config.grid_canonicalization_enabled
-                and not _use_robust_panel_boundary(config)
-                and candidate_polygon is not None
-                and candidate_polygon.shape == (4, 2)
-                and np.isfinite(candidate_polygon).all()
-                and cv2.isContourConvex(candidate_polygon.astype(np.float32))
+                _can_recover_raw_boundary(config, candidate_polygon, candidate_bbox)
                 and legacy_results
                 and all(result.polygon_detection_failed for result in legacy_results.values())
             ):
                 recovered = 0
-                for result in legacy_results.values():
+                for lighting, result in legacy_results.items():
                     x1, y1, x2, y2 = result.foreground_bbox
                     if x2 <= x1 or y2 <= y1:
                         continue
-                    result.panel_polygon = candidate_polygon.copy()
-                    result.polygon_detection_failed = False
+                    if config.generate_grid_tiles or config.grid_canonicalization_enabled:
+                        # Rebuild from the original image with the recovered
+                        # reference. Updating only metadata leaves stale tile
+                        # geometry, masks and canonicalized pixels in training.
+                        legacy_results[lighting] = preprocess_panel_image(
+                            files[lighting], lighting,
+                            replace(config, large_panel_raw_boundary_enabled=False),
+                            reference_polygon=candidate_polygon.copy(),
+                        )
+                    else:
+                        result.panel_polygon = candidate_polygon.copy()
+                        result.polygon_detection_failed = False
                     recovered += 1
                 if recovered:
                     logger.info(

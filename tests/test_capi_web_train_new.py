@@ -2228,6 +2228,16 @@ def test_handle_train_new_start_includes_present_aapi_reserved_models(tmp_path):
 
 def test_handle_train_new_preprocess_pipeline_preview_after_tiling_uses_tile(tmp_path, monkeypatch):
     from capi_web import CAPIWebHandler
+    import capi_preprocess
+
+    captured_configs = []
+    original_preprocess = capi_preprocess.preprocess_panel_image
+
+    def capture_preprocess(image_path, lighting, config, **kwargs):
+        captured_configs.append(config)
+        return original_preprocess(image_path, lighting, config, **kwargs)
+
+    monkeypatch.setattr(capi_preprocess, "preprocess_panel_image", capture_preprocess)
 
     panel_dir = tmp_path / "panel"
     panel_dir.mkdir()
@@ -2265,6 +2275,8 @@ def test_handle_train_new_preprocess_pipeline_preview_after_tiling_uses_tile(tmp
     assert resp["preview_size"] == [512, 512]
     assert resp["requested_zone"] == "edge"
     assert resp["tile_zone"] == "edge"
+    assert len(captured_configs) == 1
+    assert captured_configs[0].recover_failed_raw_boundary is True
     assert resp["pipeline"][0]["method"] == "bilateral"
     assert resp["steps"][0]["method"] == "bilateral"
     assert len(resp["tile_rect"]) == 4
@@ -2275,6 +2287,16 @@ def test_handle_train_new_preprocess_pipeline_preview_after_tiling_uses_tile(tmp
 
 
 def test_handle_train_new_preprocess_preview_cache_depends_on_source_mtime(tmp_path, monkeypatch):
+    import capi_preprocess
+
+    captured_configs = []
+    original_preprocess = capi_preprocess.preprocess_panel_folder
+
+    def capture_preprocess(folder, config, **kwargs):
+        captured_configs.append(config)
+        return original_preprocess(folder, config, **kwargs)
+
+    monkeypatch.setattr(capi_preprocess, "preprocess_panel_folder", capture_preprocess)
     panel_dir = tmp_path / "YQ42ZD001C16"
     panel_dir.mkdir()
     img = np.full((768, 1366), 18, dtype=np.uint8)
@@ -2318,6 +2340,9 @@ def test_handle_train_new_preprocess_preview_cache_depends_on_source_mtime(tmp_p
     make_handler()._handle_train_new_preprocess_preview()
 
     assert len(sent_paths) == 2
+    assert len(captured_configs) == 2
+    assert all(cfg.recover_failed_raw_boundary for cfg in captured_configs)
+    assert all("_v15_" in path.name for path in sent_paths)
     assert sent_paths[0].name != sent_paths[1].name
     assert sent_paths[0].exists()
     assert sent_paths[1].exists()
@@ -2963,3 +2988,4 @@ def test_train_new_preprocess_worker_enables_station_raw_boundary(
     assert cfg.large_panel_min_height_ratio == height
     assert cfg.raw_boundary_max_edge_residual_p95_ratio == residual
     assert cfg.grid_canonicalization_enabled is True
+    assert cfg.recover_failed_raw_boundary is True
