@@ -136,3 +136,66 @@ def test_latest_models_by_machine_for_startup_backfill(tmp_path):
     _insert_record(db_path, "G3", "MODEL_C", "M2", "OK", now)
     _insert_record(db_path, "G4", "", "M3", "OK", now)          # 空機種略過
     assert db.get_latest_models_by_machine() == {"M1": "MODEL_B", "M2": "MODEL_C"}
+
+
+import threading
+
+from capi_database import track_client_model_switch
+
+
+def _parsed(machine_no, model_id):
+    return {"machine_no": machine_no, "model_id": model_id}
+
+
+def test_first_report_only_sets_baseline(tmp_path):
+    db = CAPIDatabase(tmp_path / "line.db")
+    baseline, lock = {}, threading.Lock()
+    track_client_model_switch(db, baseline, lock, _parsed("M1", "MODEL_A"))
+    assert baseline == {"M1": "MODEL_A"}
+    assert db.get_active_model_switches(120) == []  # 首次回報不提醒
+
+
+def test_same_model_no_event(tmp_path):
+    db = CAPIDatabase(tmp_path / "line.db")
+    baseline, lock = {"M1": "MODEL_A"}, threading.Lock()
+    track_client_model_switch(db, baseline, lock, _parsed("M1", "MODEL_A"))
+    assert db.get_active_model_switches(120) == []
+
+
+def test_model_change_writes_event(tmp_path):
+    db = CAPIDatabase(tmp_path / "line.db")
+    baseline, lock = {"M1": "MODEL_A"}, threading.Lock()
+    track_client_model_switch(db, baseline, lock, _parsed("M1", "MODEL_B"))
+    events = db.get_active_model_switches(120)
+    assert len(events) == 1
+    assert events[0]["previous_model"] == "MODEL_A"
+    assert events[0]["new_model"] == "MODEL_B"
+    assert baseline["M1"] == "MODEL_B"  # 基線已推進
+
+
+def test_empty_model_or_machine_skipped(tmp_path):
+    db = CAPIDatabase(tmp_path / "line.db")
+    baseline, lock = {"M1": "MODEL_A"}, threading.Lock()
+    track_client_model_switch(db, baseline, lock, _parsed("M1", ""))
+    track_client_model_switch(db, baseline, lock, _parsed("", "MODEL_B"))
+    assert baseline == {"M1": "MODEL_A"}
+    assert db.get_active_model_switches(120) == []
+
+
+def test_machines_tracked_independently(tmp_path):
+    db = CAPIDatabase(tmp_path / "line.db")
+    baseline, lock = {"M1": "MODEL_A", "M2": "MODEL_A"}, threading.Lock()
+    track_client_model_switch(db, baseline, lock, _parsed("M2", "MODEL_B"))
+    events = db.get_active_model_switches(120)
+    assert len(events) == 1
+    assert events[0]["machine_no"] == "M2"
+    assert baseline == {"M1": "MODEL_A", "M2": "MODEL_B"}
+
+
+def test_server_wiring_two_call_sites_and_backfill():
+    """capi_server.py 兩條判定路徑都呼叫偵測；啟動時回填基線；tracker 有容器欄位。"""
+    from pathlib import Path
+    src = (Path(__file__).parent.parent / "capi_server.py").read_text(encoding="utf-8")
+    assert src.count("track_client_model_switch(self.db, server_status.last_model_by_machine, server_status.lock, parsed)") == 2
+    assert "server_status.last_model_by_machine.update(" in src
+    assert "self.last_model_by_machine = {}" in src

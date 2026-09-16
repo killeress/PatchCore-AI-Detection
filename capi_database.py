@@ -8028,6 +8028,32 @@ class CAPIDatabase:
             conn.close()
 
 
+def track_client_model_switch(db, baseline: dict, lock, parsed: dict) -> None:
+    """依機台追蹤 client 回報機種；偵測到切換時寫入 model_switch_events。
+
+    - 首次回報（無基線）只建基線，不產生提醒事件。
+    - 空機種或空機台略過（不建基線、不清基線）。
+    - baseline 由呼叫方持有（server_status.last_model_by_machine），
+      lock 用 server_status.lock；DB 寫入在鎖外進行，避免阻塞熱路徑。
+    """
+    machine_no = str(parsed.get("machine_no") or "").strip()
+    model_id = str(parsed.get("model_id") or "").strip()
+    if not machine_no or not model_id:
+        return
+    with lock:
+        previous = baseline.get(machine_no)
+        if previous == model_id:
+            return
+        baseline[machine_no] = model_id
+    if previous is None:
+        return  # 首次回報：只建基線
+    try:
+        db.record_model_switch_event(machine_no, previous, model_id)
+        logger.info("[ModelSwitch] %s 機種切換：%s → %s", machine_no, previous, model_id)
+    except Exception as e:
+        logger.warning("[ModelSwitch] 寫入機種切換事件失敗: %s", e)
+
+
 if __name__ == "__main__":
     import tempfile
     import os
