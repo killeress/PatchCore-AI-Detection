@@ -46,7 +46,7 @@ except Exception:
     HAS_SNS = False
 
 # ---------------- 設定 ----------------
-ROOT = Path(r"C:/Users/rh.syu/Desktop/CAPI01_AD")
+ROOT = Path(__file__).resolve().parent.parent
 FP_DIR = ROOT / "datasets/over_review/over_edge_false_positive/WGF50500/crop"
 POS_DIR = ROOT / "datasets/over_review/true_ng/WGF50500/crop"
 OUT_DIR = ROOT / "reports"
@@ -59,9 +59,6 @@ MEDIAN_KERNEL = 65       # clamp for 512x512 OK
 THRESHOLD = 5
 MIN_AREA = 60
 FG_BRIGHTNESS_THRESHOLD = 15
-
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-VIS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def clamp_median_kernel(k: int, max_dim: int) -> int:
@@ -263,6 +260,8 @@ def best_threshold_1d(df, col, higher_is_fp=True):
 
 
 def main():
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    VIS_DIR.mkdir(parents=True, exist_ok=True)
     rows = []
     rows.extend(collect(FP_DIR, "fp"))
     rows.extend(collect(POS_DIR, "pos"))
