@@ -269,6 +269,7 @@ def test_frontend_halted_state_wiring():
     assert '[data-state="halted"] .status-pill' in styles
     assert '.line-card[data-state="halted"]::before' in styles
     assert 'tr[data-state="halted"]' in styles
+    assert '[data-theme="dark"] [data-state="halted"]' in styles
 
 
 def test_frontend_watch_badge_survives_halted():
