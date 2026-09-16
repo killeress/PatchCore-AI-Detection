@@ -298,6 +298,15 @@
         aiRate.textContent = "AI —";
         aiRateCell.appendChild(aiRate);
 
+        const totalCell = document.createElement("td");
+        totalCell.className = "overview-total-cell";
+        const total = document.createElement("span");
+        total.className = "overview-total";
+        total.dataset.field = "overview-total";
+        total.textContent = "—";
+        total.title = "當班投入 = OK + NG + ERR";
+        totalCell.appendChild(total);
+
         const activityCell = document.createElement("td");
         activityCell.className = "overview-activity-cell";
         const activity = document.createElement("span");
@@ -354,6 +363,7 @@
             aoiCell,
             aoiRateCell,
             aiRateCell,
+            totalCell,
             activityCell,
             alertCell,
             updateCell,
@@ -728,6 +738,13 @@
         } else {
             renderOverviewRejectRate(row, "aoi-rate", "AOI", null, 0);
             renderOverviewRejectRate(row, "ai-rate", "AI", null, 0);
+        }
+
+        const totalEl = row.querySelector('[data-field="overview-total"]');
+        if (data && state.status !== "offline" && state.status !== "checking") {
+            setText(totalEl, formatNumber(data.total));
+        } else {
+            setText(totalEl, "—");
         }
 
         renderOverviewActivity(state);
