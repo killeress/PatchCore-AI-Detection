@@ -8786,8 +8786,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     tile_img = tile.image.copy()
                     if len(tile_img.shape) == 2:
                         tile_img = cv2.cvtColor(tile_img, cv2.COLOR_GRAY2BGR)
-                    from capi_heatmap import heatmap_to_uint8
-                    norm_map = heatmap_to_uint8(anomaly_map)
+                    norm_map = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
                     heatmap_color = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
                     if heatmap_color.shape[:2] != tile_img.shape[:2]:
                         heatmap_color = cv2.resize(heatmap_color, (tile_img.shape[1], tile_img.shape[0]))
@@ -10530,8 +10529,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                         tile_image, anomaly_map, alpha=0.5
                     )
                 else:
-                    from capi_heatmap import heatmap_to_uint8
-                    norm_map = heatmap_to_uint8(anomaly_map)
+                    norm_map = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
                     heatmap_color = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
                     if heatmap_color.shape[:2] != crop_bgr.shape[:2]:
                         heatmap_color = cv2.resize(heatmap_color, (crop_bgr.shape[1], crop_bgr.shape[0]))
@@ -10806,8 +10804,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     )
 
                     # 產生可與表格排名對照的峰值圖；文字說明留在中文 UI。
-                    from capi_heatmap import heatmap_to_uint8
-                    norm_map = heatmap_to_uint8(anomaly_array)
+                    norm_map = cv2.normalize(
+                        anomaly_array, None, 0, 255, cv2.NORM_MINMAX
+                    ).astype(np.uint8)
                     peak_overlay = cv2.applyColorMap(
                         norm_map, cv2.COLORMAP_JET
                     )
