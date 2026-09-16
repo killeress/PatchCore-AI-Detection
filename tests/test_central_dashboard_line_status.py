@@ -276,3 +276,18 @@ def test_frontend_watch_badge_survives_halted():
     from pathlib import Path
     app_js = (Path(__file__).parent.parent / "central_dashboard" / "app.js").read_text(encoding="utf-8")
     assert 'state.status !== "halted"' in app_js  # 停線仍保留重點關注徽章
+
+
+def test_frontend_model_switch_badge_wiring():
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    app_js = (root / "central_dashboard" / "app.js").read_text(encoding="utf-8")
+    index_html = (root / "central_dashboard" / "index.html").read_text(encoding="utf-8")
+    styles = (root / "central_dashboard" / "styles.css").read_text(encoding="utf-8")
+    assert "modelSwitches" in app_js
+    assert "updateSwitchBadges" in app_js
+    assert 'data-field="switch-badges"' in index_html
+    assert 'data-field="overview-switch-badges"' in app_js
+    assert ".line-switch-badge" in styles
+    # 徽章文字必須含「切換機種」與新舊機種
+    assert "切換機種" in app_js

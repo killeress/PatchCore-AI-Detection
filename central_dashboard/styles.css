@@ -650,6 +650,26 @@ main {
     display: none;
 }
 
+.line-switch-badges,
+.overview-switch-badges {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.line-switch-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 7px;
+    color: var(--amber);
+    background: rgba(182, 106, 0, 0.09);
+    border: 1px solid rgba(182, 106, 0, 0.28);
+    border-radius: 999px;
+    font-size: 0.65rem;
+    font-weight: 900;
+    white-space: nowrap;
+}
+
 .line-title-row {
     display: flex;
     align-items: center;
