@@ -419,8 +419,20 @@
             }
 
             state.data = normalizeStatus(rawData);
-            state.status = state.data.running ? "online" : "warning";
-            state.error = state.data.running ? "" : "API 可連線，但服務回報未運行。";
+            if (!state.data.running) {
+                state.status = "warning";
+                state.error = "API 可連線，但服務回報未運行。";
+            } else if (
+                state.data.lineActivity.available &&
+                state.data.lineActivity.isHalted
+            ) {
+                // 停線：連線正常但最近窗口產量 ≤ 閾值（線體端算好）
+                state.status = "halted";
+                state.error = "";
+            } else {
+                state.status = "online";
+                state.error = "";
+            }
         } catch (error) {
             state.status = "offline";
             state.error = readableFetchError(error);
@@ -440,6 +452,7 @@
         const memory = asObject(hardware.memory || hardware.ram);
         const disk = asObject(hardware.disk);
         const update = asObject(raw.update);
+        const lineActivity = asObject(raw.line_activity);
 
         return {
             running: server.running !== false,
@@ -489,6 +502,13 @@
                 ramUsedPercent: optionalNumber(memory.used_percent),
                 diskFreeGb: optionalNumber(disk.free_gb),
                 diskTotalGb: optionalNumber(disk.total_gb)
+            },
+            lineActivity: {
+                available: raw.line_activity !== undefined && raw.line_activity !== null,
+                windowMinutes: optionalNumber(lineActivity.window_minutes),
+                panelCount: optionalNumber(lineActivity.panel_count),
+                haltThreshold: optionalNumber(lineActivity.halt_threshold),
+                isHalted: lineActivity.is_halted === true
             }
         };
     }
@@ -515,7 +535,7 @@
     }
 
     function matchedWatchModel(state) {
-        if (!state || state.status !== "online" || !state.data) {
+        if (!state || (state.status !== "online" && state.status !== "halted") || !state.data) {
             return "";
         }
         const modelId = state.data.latestEvent.modelId;
@@ -550,6 +570,12 @@
             : [];
         card.dataset.health = healthAlerts.length ? healthAlerts[0].severity : "normal";
         setField(card, "status", statusText(state.status));
+        const statusPill = card.querySelector('[data-field="status"]');
+        if (state.status === "halted" && data && data.lineActivity.available) {
+            statusPill.title = `最近 ${data.lineActivity.windowMinutes} 分鐘僅生產 ${data.lineActivity.panelCount} 片（≤ ${data.lineActivity.haltThreshold} 片視為停線）`;
+        } else {
+            statusPill.removeAttribute("title");
+        }
         updateWatchBadge(card.querySelector('[data-field="watch-badge"]'), state);
 
         const errorElement = card.querySelector('[data-field="error"]');
@@ -848,6 +874,7 @@
         return {
             checking: "連線中",
             online: "正常",
+            halted: "停線",
             warning: "服務異常",
             offline: "離線"
         }[status] || "未知";

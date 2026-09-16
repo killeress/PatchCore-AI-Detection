@@ -255,3 +255,23 @@ def test_api_status_handler_wires_new_blocks():
     src = (Path(__file__).parent.parent / "capi_web.py").read_text(encoding="utf-8")
     assert 'status["line_activity"] = _build_line_activity_payload(' in src
     assert 'status["model_switch_alert"] = _build_model_switch_alert_payload(' in src
+
+
+def test_frontend_halted_state_wiring():
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    app_js = (root / "central_dashboard" / "app.js").read_text(encoding="utf-8")
+    styles = (root / "central_dashboard" / "styles.css").read_text(encoding="utf-8")
+    assert 'halted: "停線"' in app_js
+    assert "lineActivity" in app_js
+    assert 'state.status = "halted"' in app_js
+    assert "lineActivity.available" in app_js  # 舊版線體缺欄位時不判停線
+    assert '[data-state="halted"] .status-pill' in styles
+    assert '.line-card[data-state="halted"]::before' in styles
+    assert 'tr[data-state="halted"]' in styles
+
+
+def test_frontend_watch_badge_survives_halted():
+    from pathlib import Path
+    app_js = (Path(__file__).parent.parent / "central_dashboard" / "app.js").read_text(encoding="utf-8")
+    assert 'state.status !== "halted"' in app_js  # 停線仍保留重點關注徽章
