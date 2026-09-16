@@ -72,7 +72,7 @@ from capi_station_adapter import (
     resolve_station_profile_from_hostname,
 )
 from capi_white_frame import WhiteFrameInspection, inspect_white_frame_image
-from capi_database import CAPIDatabase
+from capi_database import CAPIDatabase, track_client_model_switch
 from capi_auto_model_switch import bundle_label, select_target_bundle
 from capi_heatmap import HeatmapManager
 from capi_web import (
@@ -115,6 +115,7 @@ class ServerStatusTracker:
         self.total_err = 0
         self.last_inference_time = None
         self.last_judgment_result = None  # 最近一筆判定結果 {glass_id, model_id, machine_no, ai_judgment, time, duration}
+        self.last_model_by_machine = {}  # machine_no → 最近回報機種（機種切換偵測基線）
         
     def get_status(self):
         """取得即時狀態 JSON Object"""
@@ -1876,6 +1877,14 @@ class CAPIServer:
         db_path = db_cfg.get("path", "/data/capi_ai/capi_results.db")
         self.db = CAPIDatabase(db_path)
         logger.info(f"Database: {db_path}")
+        # 啟動回填各機台機種基線：重啟後第一片才能正確判斷是否切換
+        try:
+            with server_status.lock:
+                server_status.last_model_by_machine.update(
+                    self.db.get_latest_models_by_machine()
+                )
+        except Exception as e:
+            logger.warning(f"[ModelSwitch] 啟動回填機種基線失敗: {e}")
         self._load_mark_forced_char_conversions()
         try:
             from capi_mark_detector import (
@@ -2945,6 +2954,7 @@ class CAPIServer:
                                 "time": datetime.now().strftime("%H:%M:%S"),
                                 "duration": "0.00s"
                             }
+                        track_client_model_switch(self.db, server_status.last_model_by_machine, server_status.lock, parsed)
                         _send_response(client_socket, response, request_context, kind="hy")
                         request_count += 1
                         self._queue_save_results_async(
@@ -3002,6 +3012,7 @@ class CAPIServer:
                             "duration": f"{processing_seconds:.2f}s"
                         }
 
+                    track_client_model_switch(self.db, server_status.last_model_by_machine, server_status.lock, parsed)
                     # 🚀 先發送回覆（不等 Heatmap 儲存）
                     _send_response(client_socket, response, request_context)
                     request_count += 1
